@@ -24,6 +24,8 @@ The flags, each read by exactly one place:
 - `foreground_only` — the conversation itself may call it, a sub-agent may
   not. Claude's hook refuses it when the hook input carries `agent_id`,
   without asking `permit`.
+- `owner_gated` — native permission delegates to the daemon Browser gate;
+  it never approves execution or grants an allowlist.
 - `desk_only` — usable only on a turn the owner typed at the HUD (WP-2's desk
   rule). Listed always and refused cleanly off the desk by the tool (D-4).
 """
@@ -47,6 +49,12 @@ class SessionTool:
     read_only: bool = False
     foreground_only: bool = False
     desk_only: bool = False
+    owner_gated: bool = False
+
+    def __post_init__(self):
+        if self.owner_gated and (self.read_only or self.foreground_only is not True
+                                 or self.desk_only is not True):
+            raise ValueError("an owner-gated action must be foreground-only, desk-only and not read-only")
 
 
 # Both owner-chat providers share the approved catalog.
@@ -59,6 +67,10 @@ for _name in ("terminal_read", "hud_browser_view"):
     SESSION_TOOLS[_name] = SessionTool(
         _name, providers=_CHAT_PROVIDERS, read_only=True, foreground_only=True, desk_only=True)
 
+SESSION_TOOLS["hud_browser_act"] = SessionTool(
+    "hud_browser_act", providers=_CHAT_PROVIDERS, foreground_only=True,
+    desk_only=True, owner_gated=True)
+
 
 def register(entry: SessionTool) -> SessionTool:
     """Offer `entry` to chat sessions. Primarily for isolated test probes."""
@@ -68,6 +80,11 @@ def register(entry: SessionTool) -> SessionTool:
     if bad:
         raise ValueError("session tools are for Claude and Codex chats only, not "
                          + ", ".join(sorted(bad)))
+    if entry.owner_gated:
+        from jarvis import tools
+        implementation = tools.REGISTRY.get(entry.name)
+        if implementation is None or implementation.dangerous:
+            raise ValueError("an owner-gated action needs a registered nondangerous implementation")
     SESSION_TOOLS[entry.name] = entry
     return entry
 
@@ -91,10 +108,13 @@ def for_provider(provider) -> list[SessionTool]:
     if not entries:
         return []
     from jarvis import tools
-    from .tools import terminal_read, hud_browser_view, schedules  # noqa: F401 — register implementations
+    from .tools import terminal_read, hud_browser_view, hud_browser_act, schedules  # noqa: F401 — register implementations
     offered = []
     for entry in sorted(entries, key=lambda e: e.name):
         if entry.name not in tools.REGISTRY:
+            continue
+        if entry.owner_gated and (entry.read_only or not entry.foreground_only
+                                  or not entry.desk_only or tools.REGISTRY[entry.name].dangerous):
             continue
         group = tools.group_of(entry.name)
         if group is not None and not group.is_available():

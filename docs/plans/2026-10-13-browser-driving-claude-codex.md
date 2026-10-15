@@ -1,6 +1,9 @@
 # Browser driving for Claude and Codex chats (BR-9d)
 
-**Status:** plan, 2026-10-13. Docs only.
+**Status:** original design snapshot, 2026-10-13. The implementation contract is
+now recorded in [Browser notes](../notes/browser.md#native-parent-browser-driving-br9d)
+and [measured native acceptance](2026-10-13-browser-native-offline-cli.md).
+The original observations and questions below remain historical evidence.
 
 It **depends on** `2026-10-13-browser-driving-release.md`, which makes the switch real. It builds on:
 - BR-6: `hud_browser_view` over the session MCP, PR #123;
@@ -29,7 +32,7 @@ It **depends on** `2026-10-13-browser-driving-release.md`, which makes the switc
 - **DD-2. Parent-only, desk-only**, exactly as in BR-6. Claude's hook refuses an `agent_id` call. Codex's native identity check refuses children, replays and stale turns.
 - **DD-3. Amendment 1 §B.7 stands.** An `owner_gated` session flag and a `jarvis-gated` permit layer; a Claude hook explicit allow under both profiles; Codex `approval_mode = "approve"` with truthful annotations; an always-ask rule naming the tool still asks first.
 
-## What the code does today (verified)
+## What the code did at the original review (historical snapshot)
 
 - **The catalog.** `session_tools.SESSION_TOOLS` offers `hud_browser_view` as `read_only`, `foreground_only` and `desk_only` (`session_tools.py:58-60`). `hud_browser_act` is not offered.
 - **Turn binding is fast-only.**

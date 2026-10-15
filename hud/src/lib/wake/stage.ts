@@ -188,7 +188,7 @@ export class WakeStage {
 
   /** The owner's sensitivity (Settings -> Voice). Takes effect on the next frame. */
   setSensitivity(s: Sensitivity) {
-    if (!(s in SENSITIVITY) || s === this.sensitivity) return;
+    if (!Object.hasOwn(SENSITIVITY, s) || s === this.sensitivity) return;
     this.sensitivity = s;
     if (this.state === "ready") this.sendConfig();
     this.publish();
@@ -213,7 +213,7 @@ export class WakeStage {
       this.sendConfig();
       this.publish();
     } else if (m.type === "failed") {
-      this.fail(m.code in WAKE_FAIL_TEXT ? m.code : "runtime");
+      this.fail(Object.hasOwn(WAKE_FAIL_TEXT, m.code) ? m.code : "runtime");
     } else if (m.type === "progress") {
       if (Number.isFinite(m.samples) && Number.isFinite(m.busyMs)) {
         this.processed = Math.max(this.processed, m.samples);

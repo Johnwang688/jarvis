@@ -13,7 +13,7 @@ const HIS: SelfFrame = { active: true, playing: true, self: true, reason: "echo"
 const OWNER: SelfFrame = { active: true, playing: true, self: false, reason: "unexplained" };
 const TAIL: SelfFrame = { active: true, playing: false, self: true, reason: "echo" };
 
-function mk(state: { suppressed?: boolean; muted?: boolean } = {}) {
+function mk(state: { suppressed?: boolean; muted?: boolean } = {}, samples?: Float32Array[]) {
   const listens: (ClaimSource | undefined)[] = [];
   const drops: { reason: DropReason; source: ClaimSource }[] = [];
   const ends: { truncated: boolean; chunks: number }[] = [];
@@ -21,14 +21,15 @@ function mk(state: { suppressed?: boolean; muted?: boolean } = {}) {
   const cap = new Capture({
     suppressed: () => !!state.suppressed, muted: () => !!state.muted, onLevel: () => {},
     onListening: (s) => listens.push(s), onIdle: () => {},
-    onChunk: () => {},
+    onChunk: (c) => { samples?.push(Float32Array.from(c.samples)); },
     onDrop: (reason, _ms, source) => drops.push({ reason, source }),
     onUtteranceEnd: (e) => ends.push({ truncated: e.truncated, chunks: e.chunks }),
   }, () => clock);
   const F = 512;
   const talk = (ms: number, self: SelfFrame | null, p = 0.95, amp = 0.05) => cap.feedMs(ms, amp, F, p, self);
+  const advance = (ms: number) => { clock += ms; };
   const quiet = (ms: number, self: SelfFrame | null = null) => cap.feedMs(ms, 0.0009, F, 0.02, self);
-  return { cap, listens, drops, ends, talk, quiet, tick: (ms: number) => (clock += ms) };
+  return { cap, listens, drops, ends, talk, quiet, tick: (ms: number) => (clock += ms), advance };
 }
 
 describe("self-voice frames never open an utterance", () => {
@@ -147,24 +148,6 @@ describe("while his voice is audible, only the owner's own act claims", () => {
     expect(m.ends[0].truncated).toBe(false);
   });
 
-  it("V11: a hit that the spotter reports after his voice has gone quiet, but within its lag of it, is still his word", () => {
-    const m = mk();
-    m.quiet(1500);
-    m.quiet(1500); // the gate says nothing is active now...
-    expect(m.cap.onWake(true)).toBe("ignored"); // ...but the caller saw him audible within the spotter's lag
-    expect(m.drops.some((d) => d.reason === "self_voice" && d.source === "wake")).toBe(true);
-    m.talk(800, null);
-    expect(m.listens).toEqual([]); // and it was not kept in reserve for the owner's next words
-  });
-
-  it("V11: the same late hit during an utterance the owner opened is honoured", () => {
-    const m = mk();
-    m.quiet(1500);
-    m.talk(800, OWNER);
-    expect(m.cap.onWake(true)).toBe("claimed");
-    expect(m.listens).toEqual(["wake"]);
-  });
-
   it("a wake hit with his voice not audible is exactly as before (armed, then claims the next utterance)", () => {
     const m = mk();
     m.quiet(1500);
@@ -192,6 +175,104 @@ describe("while his voice is audible, only the owner's own act claims", () => {
     m.cap.release();
     expect(m.listens).toEqual(["ptt"]);
     expect(m.ends).toHaveLength(1);
+  });
+});
+
+describe("a claim never carries his voice into the owner's message (M3)", () => {
+  const peak = (chunks: Float32Array[]) => Math.max(0, ...chunks.map((c) => c.reduce((m, v) => Math.max(m, Math.abs(v)), 0)));
+
+  it("a wake hit over an utterance the owner opened: the clip starts at the first frame the gate let through", () => {
+    const chunks: Float32Array[] = [];
+    const m = mk({}, chunks);
+    m.quiet(1500);
+    m.talk(1500, HIS, 0.95, 0.2);          // his voice, loud (the gate vetoes it)
+    m.talk(800, OWNER, 0.95, 0.05);        // the owner starts over him
+    expect(m.cap.onWake()).toBe("claimed");
+    m.talk(600, OWNER, 0.95, 0.05);
+    m.quiet(3000, OWNER);
+    expect(chunks.length).toBeGreaterThan(0);
+    expect(peak(chunks), "his 0.2-amplitude frames are in the clip").toBeLessThan(0.1);
+  });
+
+  it("without the clamp the pre-roll and the wake back-dating would have reached into his voice (the test bites)", () => {
+    const chunks: Float32Array[] = [];
+    const m = mk({}, chunks);
+    m.quiet(1500);
+    m.talk(1500, HIS, 0.95, 0.2);
+    m.talk(800, null, 0.95, 0.05);         // no gate: nothing clamps
+    m.cap.onWake();
+    m.talk(600, null, 0.95, 0.05);
+    m.quiet(3000, null);
+    expect(peak(chunks)).toBeGreaterThan(0.15);
+  });
+
+  it("the talk key while he is audible starts at the press, not 800 ms before", () => {
+    const chunks: Float32Array[] = [];
+    const m = mk({}, chunks);
+    m.quiet(1500);
+    m.talk(1500, HIS, 0.95, 0.2);
+    expect(m.cap.press()).toBe(true);
+    m.talk(1200, OWNER, 0.95, 0.05);
+    m.cap.release();
+    expect(peak(chunks)).toBeLessThan(0.1);
+  });
+});
+
+describe("a pause inside the owner's message does not cut off its beginning (M3 follow-up)", () => {
+  it.each([96, 200, 400])("'Jarvis' ... %i ms ... 'stop': the claim reaches back to 'Jarvis'", (gap) => {
+    const chunks: Float32Array[] = [];
+    const m = mk({}, chunks);
+    m.quiet(1500);
+    m.talk(1500, HIS, 0.95, 0.2);          // his voice
+    m.talk(600, OWNER, 0.95, 0.04);        // "Jarvis"
+    m.talk(gap, HIS, 0.95, 0.2);           // the comma: the gate hears only his echo
+    m.talk(500, OWNER, 0.95, 0.06);        // "stop"
+    expect(m.cap.vad.open).toBe(true);
+    expect(m.cap.onWake()).toBe("claimed");
+    m.quiet(3000, OWNER);
+    const all = chunks.reduce((n, c) => n + c.length, 0);
+    expect(all / 16, `${gap} ms gap`).toBeGreaterThanOrEqual(600 + gap + 500 - 60);          // the whole message, "Jarvis" included
+    expect(Math.abs(chunks[0][100]), "starts on the owner's first word, not on his voice").toBeLessThan(0.1);
+  });
+
+  it("a long quiet in his voice that ends the detector's utterance does end the run", () => {
+    const chunks: Float32Array[] = [];
+    const m = mk({}, chunks);
+    m.quiet(1500);
+    m.talk(600, OWNER, 0.95, 0.04);
+    m.talk(3000, HIS, 0.95, 0.2);          // the utterance closes (2.5 s pause)
+    expect(m.cap.vad.open).toBe(false);
+    m.talk(600, OWNER, 0.95, 0.06);
+    expect(m.cap.onWake()).toBe("claimed");
+    m.quiet(3000, OWNER);
+    const all = chunks.reduce((n, c) => n + c.length, 0);
+    expect(all / 16).toBeLessThan(1500);   // only the second message, not the first one nor his voice between
+  });
+});
+
+describe("a late wake hit after he stops is not kept in reserve (M4)", () => {
+  it("within 1.5 s of his voice it is ignored; later it is armed as before", () => {
+    const m = mk();
+    m.quiet(1500);
+    m.quiet(300, HIS);
+    m.advance(10);
+    m.quiet(1000);                          // his voice has gone from the gate's view (no longer active)
+    m.advance(900);
+    expect(m.cap.onWake(), "1.0 s after").toBe("ignored");
+    m.talk(800, null);                      // the owner's next words within the 1.2 s grace
+    expect(m.listens).toEqual([]);
+    m.advance(2000);
+    m.quiet(2500);
+    expect(m.cap.onWake(), "well after").toBe("armed");
+  });
+
+  it("but a hit that claims an utterance already open is still honoured just after he stops", () => {
+    const m = mk();
+    m.quiet(1500);
+    m.quiet(300, HIS);
+    m.talk(800, null);                      // the owner begins as he stops
+    expect(m.cap.vad.open).toBe(true);
+    expect(m.cap.onWake()).toBe("claimed");
   });
 });
 

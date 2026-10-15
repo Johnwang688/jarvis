@@ -75,8 +75,9 @@ describe("approvals: no hit reaches one", () => {
     expect(a).toBeGreaterThan(0);
     expect(b).toBeGreaterThan(a);
     const block = strip(appSource.slice(a, b)).replace(/\s+/g, " ");
-    expect(block).toContain("onWake: () => onWakeHit(speech.selfVoice.audibleWithin(WAKE_LAG_MS)),");
+    expect(block).toContain("onWake: () => onWakeHit(),");
     expect(block).toContain("if (hisOwnWord(speech.selfVoice.audibleWithin(WAKE_LAG_MS), ownerOverHim.within(WAKE_LAG_MS, performance.now()))) return;");
+    expect(block).toContain("if (crashedRef.current || isMuted(live.current.dictation)) return;");
     expect(block).toContain("commands.fromLocal(c, { card: live.current.approvals.length > 0 });");
     expect(block).not.toMatch(/api\.|\bdecide\b|resolveApproval|interrupt|send\(/);
   });

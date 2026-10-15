@@ -28,6 +28,9 @@ export class ThreadVoices {
   private listeners = new Set<() => void>();
   private _pool: readonly string[] = [];
   private _version = 0;
+  /** V12 (L3): told once per voice when the daemon says a chosen voice could pass for the enrolled owner. */
+  onWarning: ((message: string) => void) | null = null;
+  private warned = new Set<string>();
   private _mutedKey = "";
   private _muted: ReadonlySet<string> = new Set();
 
@@ -121,8 +124,12 @@ export class ThreadVoices {
   }
 
   /** A record from the daemon: our own call's answer, or another window's `thread_voice`. */
-  apply(record: { thread_id?: unknown; voice?: unknown; muted?: unknown } | undefined | null): void {
+  apply(record: { thread_id?: unknown; voice?: unknown; muted?: unknown; speaker_warning?: unknown } | undefined | null): void {
     if (!record || typeof record.thread_id !== "string") return;
+    if (typeof record.speaker_warning === "string" && record.speaker_warning && typeof record.voice === "string" && !this.warned.has(record.voice)) {
+      this.warned.add(record.voice);
+      try { this.onWarning?.(record.speaker_warning.slice(0, 400)); } catch { /* a notice never breaks speech */ }
+    }
     const voice = typeof record.voice === "string" && record.voice ? record.voice : null;
     const next = { voice, muted: record.muted === true };
     const old = this.map.get(record.thread_id);

@@ -38,7 +38,7 @@ describe("nothing that hears or acts on speech can reach an approval", () => {
     expect(touching).toEqual(["./index.ts"]);
     const index = strip(speechModules["./index.ts"]);
     const used = [...index.matchAll(/\bapi\.(\w+)/g)].map((m) => m[1]).sort();
-    expect(used).toEqual(["say", "speechSummary", "speechVoice", "speechVoices"]);
+    expect(used).toEqual(["say", "speechDuck", "speechSummary", "speechVoice", "speechVoices"]);   // speechDuck: V15, the Remote Browser lease (no approval route)
   });
 });
 
@@ -102,6 +102,22 @@ describe("in the window, placing a transcript calls no approval function", () =>
 
   it("and has no approval call", () => {
     expect(body).not.toMatch(/\bdecide\s*\(|resolveApproval|approval_drop|\/approv/);
+  });
+
+  it("the router is told whether a card is up, from the window's own approvals, and a stale clip from the clip itself", () => {
+    // Mutating either to a constant (a card is never up) would let a command through under a card.
+    expect(body).toContain("commands.fromTranscript(i.text, { card: live.current.approvals.length > 0, stale: i.late || i.retried })");
+  });
+
+  it("a wake hit is dropped while his sentence says his name, before the capture is asked to claim anything (L-b)", () => {
+    const hit = strip(appSource).match(/const onWakeHit = useCallback\(\(\) => \{([\s\S]*?)\}, \[capture/);
+    expect(hit).not.toBeNull();
+    const text = hit![1];
+    const own = text.indexOf("speech.controller.sayingOwnName()");
+    const claim = text.indexOf("capture.onWake()");
+    expect(own).toBeGreaterThan(-1);
+    expect(claim).toBeGreaterThan(own);
+    expect(text.slice(own, claim)).toMatch(/return;/);
   });
 
   it("a command's effects are the four controller calls, and 'stop' reaches no agent turn", () => {

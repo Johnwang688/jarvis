@@ -93,6 +93,8 @@ describe("the wake stage", () => {
     const n = r.w().sent.length;
     r.stage.setSensitivity("low");
     r.stage.setSensitivity("bogus" as never);
+    r.stage.setSensitivity("toString" as never);
+    r.stage.setSensitivity("constructor" as never);
     expect(r.w().sent.length).toBe(n);
   });
 
@@ -145,6 +147,9 @@ describe("when the wake word cannot run", () => {
     const r = rig(); r.stage.start();
     r.w().say({ type: "failed", code: "<script>" as never });
     expect(r.stage.status().code).toBe("runtime");
+    const r2 = rig(); r2.stage.start();
+    r2.w().say({ type: "failed", code: "toString" as never });
+    expect(r2.stage.status().code).toBe("runtime");
   });
 
   it("no Worker, a Worker that will not construct, and a script error each fail visibly", () => {

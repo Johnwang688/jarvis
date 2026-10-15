@@ -26,6 +26,10 @@ describe("the owner's wake-word choices", () => {
     expect(loadCardCommands(store({ "jarvis.wakeCardCommands": "maybe" }))).toBe(true);
   });
 
+  it("a stored name that is only an Object property (toString, constructor) is not a sensitivity", () => {
+    for (const bad of ["toString", "constructor", "__proto__", "hasOwnProperty"]) expect(loadSensitivity(store({ "jarvis.wakeSensitivity": bad }))).toBe("normal");
+  });
+
   it("storage that throws leaves the defaults and the window working", () => {
     expect(loadSensitivity(throwing)).toBe("normal");
     expect(loadCardCommands(throwing)).toBe(true);

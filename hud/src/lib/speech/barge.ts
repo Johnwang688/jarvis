@@ -58,6 +58,8 @@ export class BargeIn {
   /** The utterances holding him paused. Resumed when the last of them lets go. */
   private holders = new Set<number>();
   private timer: unknown = null;
+  /** A message went out from one of the holders: the message he was interrupted in is skipped when the last lets go. */
+  private sentAny = false;
   /** Set by V12 after enrollment: a verified owner voice may pause him too (Q7). */
   private verified = false;
 
@@ -102,16 +104,20 @@ export class BargeIn {
   /** The utterance `token` is over, however it ended. The last holder to let go resumes him. */
   end(outcome: BargeOutcome, token: number): void {
     if (!this.holders.delete(token)) return;
+    if (outcome === "sent") this.sentAny = true;
     if (this.holders.size > 0) return;
     this.disarm();
+    const skip = this.sentAny;
+    this.sentAny = false;
     // A command decides for itself (pause stays paused: the controller's own pause
     // cleared the barge-in's mark, so this resumes only what a skip or nothing left).
-    this.deps.speech.endBargeIn(outcome === "sent" ? { skip: true } : {});
+    this.deps.speech.endBargeIn(skip ? { skip: true } : {});
   }
 
   /** The window is going away, or the owner took over from the strip: forget every hold. */
   release(): void {
     this.holders.clear();
+    this.sentAny = false;
     this.disarm();
   }
 

@@ -2,7 +2,7 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { COMMAND_OF, COMMAND_PIECES, SENSITIVITY, WAKE_PIECES, parseTokens, specsFor } from "./keywords";
+import { WAKE_NAME, COMMAND_OF, COMMAND_PIECES, SENSITIVITY, WAKE_PIECES, parseTokens, specsFor } from "./keywords";
 import { MODEL_DIR } from "./testkit";
 
 const tokens = parseTokens(readFileSync(resolve(MODEL_DIR, "tokens.txt"), "utf8"));
@@ -43,6 +43,12 @@ describe("the keyword lists", () => {
     expect(specsFor(WAKE_PIECES, tokens, SENSITIVITY.normal.threshold)).toEqual([{ ids: SENTENCEPIECE_IDS.JARVIS, phrase: "JARVIS", boost: 1, threshold: 0.25 }]);
     expect([SENSITIVITY.high.threshold, SENSITIVITY.normal.threshold, SENSITIVITY.low.threshold]).toEqual([0.15, 0.25, 0.4]);
     expect(() => specsFor({ X: ["▁NOPE"] }, tokens, 0.25)).toThrow();
+  });
+
+  it("his own sentences are matched for the name as a whole word", () => {
+    expect(WAKE_NAME.test("Right away, Jarvis here.")).toBe(true);
+    expect(WAKE_NAME.test("JARVIS")).toBe(true);
+    expect(["Travis drove", "the jarvises", "jarvisian"].some((t) => WAKE_NAME.test(t))).toBe(false);
   });
 
   it("parses tokens.txt", () => {

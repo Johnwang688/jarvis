@@ -22,7 +22,7 @@ type Writer = Pick<Storage, "setItem">;
 export function loadSensitivity(storage?: Reader): Sensitivity {
   try {
     const v = (storage ?? window.localStorage).getItem(SENSITIVITY_KEY);
-    return v && v in SENSITIVITY ? (v as Sensitivity) : DEFAULT_SENSITIVITY;
+    return v && Object.hasOwn(SENSITIVITY, v) ? (v as Sensitivity) : DEFAULT_SENSITIVITY;
   } catch { return DEFAULT_SENSITIVITY; }
 }
 

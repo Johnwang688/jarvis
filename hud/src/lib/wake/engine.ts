@@ -49,6 +49,8 @@ const MAX_CACHED_CONTEXTS = 256;
 
 export class KwsEngine {
   private decoderCache = new Map<string, Float32Array>();
+  /** Prediction-network outputs kept, by context; cleared whole when a call would overflow it (a few hundred bytes each). */
+  cacheCap = MAX_CACHED_CONTEXTS;
   /** Encoder calls and the time they took, for the CPU line in Settings. */
   chunks = 0;
   encoderMs = 0;
@@ -123,18 +125,27 @@ export class KwsEngine {
   joint: Joint = async (contexts, frame) => {
     const n = contexts.length;
     const keys = contexts.map((c) => c.join(","));
+    // Room for this call's own contexts first: a clear() after they were looked up would drop what is about to be read.
+    const fresh = new Set(keys.filter((k) => !this.decoderCache.has(k)));
+    if (this.decoderCache.size + fresh.size > this.cacheCap) this.decoderCache.clear();
     const missing = [...new Set(keys.filter((k) => !this.decoderCache.has(k)))];
+    // This call's own copy of what it reads: nothing another call does to the cache can take it away mid-flight.
+    const have = new Map<string, Float32Array>();
+    for (const k of keys) { const v = this.decoderCache.get(k); if (v) have.set(k, v); }
     if (missing.length) {
       const y = new BigInt64Array(missing.length * KWS_CONTEXT);
       missing.forEach((k, i) => k.split(",").forEach((v, j) => { y[i * KWS_CONTEXT + j] = BigInt(v); }));
       const out = await this.dec.run({ y: new this.ort.Tensor("int64", y, [missing.length, KWS_CONTEXT]) });
       const d = out[this.dec.outputNames[0]].data as Float32Array;
-      if (this.decoderCache.size + missing.length > MAX_CACHED_CONTEXTS) this.decoderCache.clear();
-      missing.forEach((k, i) => this.decoderCache.set(k, d.slice(i * KWS_JOINER_DIM, (i + 1) * KWS_JOINER_DIM)));
+      missing.forEach((k, i) => {
+        const row = d.slice(i * KWS_JOINER_DIM, (i + 1) * KWS_JOINER_DIM);
+        have.set(k, row);
+        this.decoderCache.set(k, row);
+      });
     }
     const e = new Float32Array(n * KWS_JOINER_DIM);
     const d = new Float32Array(n * KWS_JOINER_DIM);
-    for (let i = 0; i < n; i++) { e.set(frame, i * KWS_JOINER_DIM); d.set(this.decoderCache.get(keys[i])!, i * KWS_JOINER_DIM); }
+    for (let i = 0; i < n; i++) { e.set(frame, i * KWS_JOINER_DIM); d.set(have.get(keys[i])!, i * KWS_JOINER_DIM); }
     const out = await this.join.run({
       encoder_out: new this.ort.Tensor("float32", e, [n, KWS_JOINER_DIM]),
       decoder_out: new this.ort.Tensor("float32", d, [n, KWS_JOINER_DIM]),

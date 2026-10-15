@@ -72,6 +72,21 @@ export const UNEXPLAINED_FACTOR = 2;
 export const UNEXPLAINED_FLOOR = 0.006;
 /** A frame that arrives later than this behind the filter's clock cannot be placed: fail closed. */
 export const LATE_MAX_MS = 1500;
+/**
+ * A push this long after the last one means frames were lost or stalled: the mic's sample count no longer
+ * tracks the clock. The clock mapping and the history are dropped, and while he is audible every frame is
+ * his voice for GAP_SETTLE_MS of wall time (fail closed).
+ */
+export const GAP_RESET_MS = 250;
+export const GAP_SETTLE_MS = 1000;
+/** A reply that starts this long after he last sounded is a new reply: the room may have changed (a device, the volume), so what was learned is confirmed again before it is trusted. */
+export const REPLY_GAP_MS = 3000;
+/** An excess over what the lock explains that follows the reference this closely, at any delay, is his voice. */
+export const GUARD_FRAMES = 20;
+export const GUARD_SCORE = 0.9;
+export const GUARD_MIN_EXCESS = 0.003;
+/** ...and the reference must have been audible this many of those frames at the delay. */
+export const GUARD_MIN_AUDIBLE = 6;
 /** The room's ring after his last sample. */
 export const ECHO_TAIL_MS = 160;
 /** How long a lock is trusted once he has gone quiet: an echo for a while, a dry one for less (headphones come and go). */
@@ -225,6 +240,16 @@ export class SelfVoiceGate {
   private enabledFlag = true;
   private brokenFlag = false;
   private frames = 0;
+  /** Samples of the mic seen so far: the mic's own clock. */
+  private samples = 0;
+  private lastPushAt = -Infinity;
+  private settleUntil = -Infinity;
+  /** The wall time of the last push before the gap that set `settleUntil`: his voice may have ended anywhere after it. */
+  private gapFrom = -Infinity;
+  /** The last wall time his voice was audible; a long silence makes the next reply a new one. */
+  private lastActiveAt = -Infinity;
+  /** The lock has been confirmed in this reply (or was learned in it). */
+  private confirmed = false;
   private offsets = new MinFilter();
   /** Newest first. */
   private xs: number[] = [];
@@ -239,6 +264,7 @@ export class SelfVoiceGate {
   /** The frame index until which the owner is taken to be still speaking. */
   private freeUntil = -1;
 
+  /** `supported`: the window can play through Web Audio, so the player can give a reference. */
   constructor(private readonly now: () => number = () => performance.now(), supported = true) {
     this.supportedFlag = supported;
     this.reference = {
@@ -247,20 +273,24 @@ export class SelfVoiceGate {
     };
   }
 
-  /** The player cannot give a reference (no Web Audio), or can again. */
-  setSupported(on: boolean): void {
-    this.supportedFlag = on;
-  }
-
   /** The owner's switch: off means the blanket hold. */
   setEnabled(on: boolean): void {
     this.enabledFlag = on;
+  }
+
+  /** What was learned of the room is not to be trusted (an audio device came or went). */
+  invalidate(): void {
+    this.lock = null;
+    this.confirmed = false;
+    this.dryRun = 0;
+    this.freeUntil = -1;
   }
 
   /** Forget a failure and what was learned of the room. */
   reset(): void {
     this.brokenFlag = false;
     this.lock = null;
+    this.confirmed = false;
     this.xs = [];
     this.dryRun = 0;
     this.freeUntil = -1;
@@ -309,7 +339,19 @@ export class SelfVoiceGate {
     const now = this.now();
     const idx = this.frames++;
     const frameMs = (frame.length * 1000) / CAP_RATE;
-    const sampleEnd = (idx + 1) * FRAME_MS;
+    // Frames that were lost or stalled break the link between the mic's sample count and the clock: start the
+    // mapping afresh, drop the history (it no longer lines up with the reference), and hold the mic closed
+    // while he is audible until things have settled.
+    if (now - this.lastPushAt > GAP_RESET_MS && this.lastPushAt > -Infinity) {
+      this.gapFrom = this.lastPushAt;
+      this.offsets.reset();
+      this.xs = [];
+      this.freeUntil = -1;
+      this.settleUntil = now + GAP_SETTLE_MS;
+    }
+    this.lastPushAt = now;
+    this.samples += frame.length;
+    const sampleEnd = (this.samples * 1000) / CAP_RATE;
     const off = this.offsets.add(now, now - sampleEnd);
     const tEnd = off + sampleEnd;
     let sum = 0;
@@ -317,22 +359,31 @@ export class SelfVoiceGate {
     const amp = Math.sqrt(sum / Math.max(1, frame.length));
     this.xs.unshift(amp);
     if (this.xs.length > LEARN_FRAMES) this.xs.length = LEARN_FRAMES;
-    this.timeline.prune(tEnd - LAG_MAX_MS - 4000);
+    this.timeline.prune(Math.min(tEnd, now) - LAG_MAX_MS - 4000);
 
     // His echo can still arrive for LAG_MAX_MS (and a tail) after his last sample, and not a moment longer.
-    const active = this.timeline.audibleBetween(tEnd - frameMs - LAG_MAX_MS - ECHO_TAIL_MS, tEnd);
+    // Judged up to the later of the frame's place on the clock and the clock itself: a frame that lags the
+    // clock (lost frames) must not let the reference "end" early.
+    // After a gap the queued frames (a stall delivers them in a burst) are placed at "now", but they were heard
+    // from `gapFrom` on: while the gap settles, look back to where the frames really were.
+    const hi = Math.max(tEnd, now);
+    const from = now < this.settleUntil ? Math.min(tEnd, this.gapFrom) : tEnd;
+    const active = this.timeline.audibleBetween(from - frameMs - LAG_MAX_MS - ECHO_TAIL_MS, hi);
     this.activeNow = active;
-    this.playingNow = this.timeline.audibleBetween(tEnd - frameMs, tEnd);
+    this.playingNow = this.timeline.audibleBetween(tEnd - frameMs, hi);
     if (!active) {
       // The room, alone: track its noise (falls fast, rises slowly); an old lock goes stale.
       this.noise += (amp - this.noise) * (amp < this.noise ? 0.3 : 0.003);
       this.noise = Math.max(this.noise, 0.0003);
       this.score = 0;
       const l = this.lock;
-      if (l && now - l.at > (l.kind === "echo" ? ECHO_LOCK_KEEP_MS : DRY_LOCK_KEEP_MS)) this.lock = null;
+      if (l && now - l.at > (l.kind === "echo" ? ECHO_LOCK_KEEP_MS : DRY_LOCK_KEEP_MS)) { this.lock = null; this.confirmed = false; }
       return CLEAR;
     }
-    if (now - tEnd > LATE_MAX_MS) return this.verdict(true, "unreliable");
+    // A new reply after a silence: the room may have changed since the lock was learned.
+    if (now - this.lastActiveAt > REPLY_GAP_MS) this.confirmed = false;
+    this.lastActiveAt = now;
+    if (now - tEnd > LATE_MAX_MS || now < this.settleUntil) return this.verdict(true, "unreliable");
 
     const n = this.xs.length;
     const lagCells = Math.round(LAG_MAX_MS / LAG_STEP_MS);
@@ -358,7 +409,7 @@ export class SelfVoiceGate {
 
     // ---- judge the frame -----------------------------------------------------
     const lock = this.lock;
-    if (!lock) return this.verdict(true, "calibrating");
+    if (!lock || !this.confirmed) return this.verdict(true, "calibrating");
     // What the lock predicts for frame j: the reference at the learned delay, give or take two cells (the delay
     // is only known to a cell, and the audio stack drifts), and with the room's tail: a syllable's end rings on.
     const predicted = (j: number) => {
@@ -374,13 +425,44 @@ export class SelfVoiceGate {
     };
     const unexplained = (j: number) => x[j] > UNEXPLAINED_FACTOR * predicted(j) + UNEXPLAINED_FLOOR;
     // The owner has just begun, or has been speaking: the newest two frames hold more than the echo.
-    if (n >= 2 && unexplained(0) && unexplained(1)) {
-      this.freeUntil = idx + OWNER_HANGOVER_FRAMES;
+    const begun = n >= 2 && unexplained(0) && unexplained(1);
+    if (begun || idx <= this.freeUntil) {
+      // ...unless what is left over after the lock's echo still follows the reference, at any delay: a volume
+      // turned up, a delay that moved, a room that changed. That is his voice, not the owner's.
+      if (this.excessFollowsReference(x, predicted, n, lagCells, refAt)) {
+        this.freeUntil = -1;
+        // Over a dry lock that is a room no longer dry (headphones out, speakers on): nothing is trusted until
+        // it has been learned again.
+        if (lock.kind === "dry") { this.lock = null; this.confirmed = false; this.dryRun = 0; return this.verdict(true, "calibrating"); }
+        return this.verdict(true, "echo");
+      }
+      if (begun) this.freeUntil = idx + OWNER_HANGOVER_FRAMES;
       return this.verdict(false, "unexplained");
     }
-    // Once he has begun, a syllable's gap does not hand the mic back to his own voice at once.
-    if (idx <= this.freeUntil) return this.verdict(false, "unexplained");
     return this.verdict(true, lock.kind);
+  }
+
+  /** Does the newest frames' excess over the lock's prediction follow the reference at some delay? */
+  private excessFollowsReference(x: Float64Array, predicted: (j: number) => number, n: number, lagCells: number, refAt: (j: number, l: number) => number): boolean {
+    const k = Math.min(n, GUARD_FRAMES);
+    const e = new Float64Array(k);
+    let sumE = 0;
+    for (let j = 0; j < k; j++) { e[j] = Math.max(0, x[j] - predicted(j)); sumE += e[j]; }
+    if (sumE < GUARD_MIN_EXCESS * GUARD_MIN_AUDIBLE) return false;
+    for (let l = 0; l <= lagCells; l++) {
+      let sumY = 0; let sumEY = 0; let sumYY = 0; let audible = 0;
+      for (let j = 0; j < k; j++) {
+        const v = refAt(j, l);
+        sumY += v; sumEY += e[j] * v; sumYY += v * v;
+        if (v > REF_AUDIBLE_AMP) audible++;
+      }
+      if (sumYY <= 1e-12 || audible < GUARD_MIN_AUDIBLE) continue;
+      const a = Math.min(MAX_GAIN, sumEY / sumYY);
+      let diff = 0;
+      for (let j = 0; j < k; j++) diff += Math.abs(e[j] - a * refAt(j, l));
+      if (1 - diff / (sumE + a * sumY) >= GUARD_SCORE) return true;
+    }
+    return false;
   }
 
   /** Update the lock from the learning window. */
@@ -413,31 +495,42 @@ export class SelfVoiceGate {
       if (s > best) { best = s; bestLag = l; bestGain = a; bestAudible = audible; }
     }
     this.score = Math.max(0, best);
-    // The lock already held, scored on this window: a rival must beat it, not merely reach LOCK_SCORE.
+    // The lock already held, scored on this window: a rival must beat it, not merely reach LOCK_SCORE. A lock
+    // from an earlier reply counts as held only once this reply has confirmed it.
     const held = this.lock && this.lock.kind === "echo" ? this.lock : null;
     let heldScore = -1;
     if (held) {
-      let sy = 0; let syy = 0; let sxy = 0;
-      for (let j = 0; j < n; j++) { const v = refAt(j, held.lag); sy += v; syy += v * v; sxy += x[j] * v; }
+      let sy = 0; let syy = 0; let sxy = 0; let audible = 0;
+      for (let j = 0; j < n; j++) { const v = refAt(j, held.lag); sy += v; syy += v * v; sxy += x[j] * v; if (v > REF_AUDIBLE_AMP) audible++; }
       if (syy > 1e-12 && sumX > 1e-9) {
         const a = Math.min(MAX_GAIN, sxy / syy);
         let diff = 0;
         for (let j = 0; j < n; j++) diff += Math.abs(x[j] - a * refAt(j, held.lag));
         heldScore = 1 - diff / (sumX + a * sy);
-        // Confirmed: the room is still the room, and its gain drifts with the volume.
-        if (heldScore >= LOCK_SCORE) { held.at = now; held.gain = held.gain * 0.8 + a * 0.2; }
+        // The room is the room, and its gain drifts with the volume: followed whenever the lock explains the window
+        // (a volume step between replies must not wait for a whole window of evidence to be confirmed).
+        if (heldScore >= LOCK_SCORE) held.gain = held.gain * 0.8 + a * 0.2;
+        // Confirmed (trusted in this reply) only on enough of his voice and enough of the room's answer.
+        if (heldScore >= LOCK_SCORE && audible >= LOCK_AUDIBLE_FRAMES && heard >= LOCK_HEARD_FRAMES) {
+          held.at = now;
+          this.confirmed = true;
+        }
       }
     }
-    if (best >= LOCK_SCORE && bestAudible >= LOCK_AUDIBLE_FRAMES && heard >= LOCK_HEARD_FRAMES && (!held || best > heldScore + 0.03)) {
+    const rival = !held || !this.confirmed || best > heldScore + 0.03;
+    if (best >= LOCK_SCORE && bestAudible >= LOCK_AUDIBLE_FRAMES && heard >= LOCK_HEARD_FRAMES && rival) {
       this.lock = { kind: "echo", lag: bestLag, gain: bestGain, at: now };
+      this.confirmed = true;
       this.dryRun = 0;
       return;
     }
     // Nothing correlated, and nothing there: he was loud for a good while and the mic never rose above the room.
     const dry = anyAudible >= LOCK_AUDIBLE_FRAMES && sumX / n < DRY_MEAN && maxX < DRY_MAX;
     this.dryRun = dry ? this.dryRun + 1 : 0;
-    if (dry && (!this.lock || this.lock.kind === "dry" ? this.dryRun >= DRY_RUN_FRAMES : this.dryRun >= DRY_REPLACES_ECHO_FRAMES)) {
+    const trusted = this.confirmed ? this.lock : null;
+    if (dry && (!trusted || trusted.kind === "dry" ? this.dryRun >= DRY_RUN_FRAMES : this.dryRun >= DRY_REPLACES_ECHO_FRAMES)) {
       this.lock = { kind: "dry", lag: 0, gain: 0, at: now };
+      this.confirmed = true;
     }
   }
 

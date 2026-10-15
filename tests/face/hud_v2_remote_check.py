@@ -25,13 +25,14 @@ class Remote:
         ws.on_message(lambda text:self.receive(sock,text))
         self.send(sock,{'t':'location','url':host.rows[tid]['url'],'title':'Remote fixture','security':'secure'})
     def send(self,sock,msg):sock['ws'].send(json.dumps(msg))
+    def frame(self,sock,width,height,pixels=None):
+        """A JPEG of `pixels` (default the viewport) showing a `width` × `height` viewport."""
+        from PIL import Image
+        out=io.BytesIO();Image.new('RGB',pixels or (width,height),(24,30,35)).save(out,'JPEG')
+        sock['frames']+=1;sock['ws'].send(struct.pack('!IHH',sock['frames'],width,height)+out.getvalue())
     def receive(self,sock,text):
         msg=json.loads(text);sock['messages'].append(msg)
-        if msg.get('t')=='resize':
-            from PIL import Image
-            width=msg['width'];height=msg['height'];out=io.BytesIO()
-            Image.new('RGB',(width,height),(24,30,35)).save(out,'JPEG')
-            sock['frames']+=1;sock['ws'].send(struct.pack('!IHH',sock['frames'],width,height)+out.getvalue())
+        if msg.get('t')=='resize':self.frame(sock,msg['width'],msg['height'])
         if msg.get('t')=='dialog':self.send(sock,{'t':'dialog_closed','id':msg['id']})
     def inputs(self):return [m for s in self.sockets for m in s['messages'] if m.get('t') in ('key','mouse','text','dialog','selection','focus','blur')]
 
@@ -76,6 +77,18 @@ def remote_checks(browser,mock,base,check,until,guard,init_script):
         canvas.click(position={'x':50,'y':50});page.keyboard.type('abc');page.keyboard.press('Control+p')
         until(lambda:any(m.get('e',{}).get('key')=='c' for m in first['messages']),timeout=3)
         check('BR3b: ordinary keys and Ctrl+P reach Remote',all(any(m.get('t')=='key' and m.get('e',{}).get('key')==k for m in first['messages']) for k in ['a','b','c','p']))
+        # A page the daemon fitted (host.py `_fit`): a frame of a viewport 1.6 × the
+        # canvas at the canvas's pixels is drawn at 1/1.6; a wheel notch is divided by that.
+        size=next(m for m in reversed(first['messages']) if m.get('t')=='resize')
+        remote.frame(first,round(size['width']*1.6),round(size['height']*1.6),(size['width'],size['height']))
+        # The socket's messages are delivered only inside Playwright calls: wait in one.
+        acked=lambda fid:page.wait_for_timeout(20) or any(m.get('t')=='ack' and m.get('id')==fid for m in first['messages'])
+        fid=first['frames'];until(lambda:acked(fid),timeout=3)
+        before=len(first['messages']);canvas.hover(position={'x':50,'y':50});page.mouse.wheel(0,100)
+        until(lambda:page.wait_for_timeout(20) or any(m.get('t')=='mouse' and m['e'].get('type')=='mouseWheel' for m in first['messages'][before:]),timeout=3)
+        wheel=next(m['e'] for m in first['messages'][before:] if m.get('t')=='mouse' and m['e'].get('type')=='mouseWheel')
+        check('Fit: a wheel notch on a fitted frame moves it as far on screen',abs(wheel['deltaY']-160)<1 and abs(wheel['x']-80)<1.5,str(wheel))
+        remote.frame(first,size['width'],size['height']);fid=first['frames'];until(lambda:acked(fid),timeout=3)
         before=len(remote.inputs());page.keyboard.press('Control+l')
         check('BR3b: Ctrl+L focuses this pane address without page shortcut',box.evaluate('e=>e===document.activeElement') and not any(m.get('e',{}).get('key')=='l' for m in remote.inputs()[before:]))
         chat=page.locator(_pane(1,'[data-testid="input"]'));chat.click();chat.fill('owner typing')

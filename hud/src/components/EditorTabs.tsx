@@ -1,7 +1,8 @@
-// A File pane's tab strip (ED-2, editor plan §2.3). A single click in the
-// tree opens a *preview* tab (italic), which the next single click replaces;
-// a double click on it — or an edit — pins it. Middle-click or × closes a
-// tab; closing the last tab on an unsaved edit asks first (FileTab).
+// A File pane's tab strip (ED-2, editor plan §2.3). A click in the tree opens
+// a normal (pinned) tab (2026-10-14, the owner's request). A *preview* tab
+// (italic; the next preview replaces it) can still come from a saved pane
+// spec; a double click on it — or an edit — pins it. Middle-click or × closes
+// a tab; closing the last tab on an unsaved edit asks first (FileTab).
 
 import type { Tabs } from "../lib/buffers";
 

@@ -18,6 +18,8 @@
 import type { KeywordSpec } from "./contextGraph";
 
 export const WAKE_PHRASE = "JARVIS";
+/** The wake word in text (V9 checks his own sentences for it, so a hit while he says it is not the owner's). */
+export const WAKE_NAME = /\bjarvis\b/i;
 
 export const WAKE_PIECES: Readonly<Record<string, readonly string[]>> = {
   JARVIS: ["▁JA", "R", "VI", "S"],

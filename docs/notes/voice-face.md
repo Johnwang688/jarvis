@@ -1490,13 +1490,16 @@ V5 (Silero VAD worker, the three timers) and V12 (speaker verification) stand on
   bundled by Vite as its own same-origin module via `?worker&url`, so the CSP's
   `script-src 'self'` covers it; no CDN). All the logic is `MicFramer`
   (`lib/resample.ts`): render quanta at the device rate -> **windowed-sinc**
-  resample (Kaiser beta 8.6, 90 % of the output Nyquist, about 80 dB stop band,
-  zero group delay, position counted rather than accumulated) -> mono ->
+  resample (Kaiser beta 8.6, 85 % of the output Nyquist, 3 dB down at 6.5 kHz, 9 dB at 7 kHz,
+  80+ dB beyond 8.5 kHz,
+  zero group delay, position counted rather than accumulated; since the review: 85 % of the
+  output Nyquist, 14 lobes) -> mono ->
   **512-sample frames at 16 kHz** posted to the main thread as transferred
   `Float32Array`s. They queue there if the main thread stalls instead of being
   dropped, which `ScriptProcessorNode` could not promise. The old boxcar
-  average let a 12 kHz tone through 30 dB down; the new one is 60 dB+ down
-  (`resample.test.ts`).
+  average let a 12 kHz tone through 30 dB down; the new one is 80+ dB down at 8.5 kHz,
+  the tone that would alias to 7.5 kHz (the first cut, at 90 % and 10 lobes, measured only
+  -29 dB there, which the review caught; `resample.test.ts` pins 8.5 and 9 kHz at -60 dB).
 - **Fallback, visibly.** No `audioWorklet` (insecure origin, old browser), no
   `AudioWorkletNode`, a module that fails to load, or a node that cannot be built:
   the *same* resampler runs behind a `ScriptProcessorNode`. `VoiceDiagnostics.path`
@@ -1590,7 +1593,7 @@ V5 (Silero VAD worker, the three timers) and V12 (speaker verification) stand on
   gone) is fixed when it is claimed, not when it ends: a chat switch halfway
   through a long dictation boxes it with "SPOKEN IN ANOTHER CHAT".
 
-Free checks: vitest 2315 tests / 145 files after merging V8 (2216 / 138 before; new: `resample.test.ts` 9,
+Free checks: vitest 2351 tests / 145 files after the delta-review fixes (2347 after the first review fixes, 2315 before them, 2216 / 138 before V8 was merged; first-cut new: `resample.test.ts` 9,
 `joinChunks.test.ts` 11, `recorder.test.ts` 9, `captureChunks.test.ts` 30,
 `micInput.test.ts` 5, `stt.test.ts` +17 for groups; `capture.test.ts`,
 `captureDiagnostics.test.ts` and `speech/suppress.test.ts` adapted to the new
@@ -1637,22 +1640,47 @@ Plan decision V-1, §3.2. Stacked on V4 (`claude/voice-v4`).
   `crypto.subtle`, with a pure-JS SHA-256 behind it for an insecure-origin window). A changed or
   truncated model never runs. `onnxruntime-web` is pinned exactly in `package.json` (1.30.0, the
   integrity V0 recorded); its 14.2 MB `.wasm` is a Vite `?url` asset like the tree-sitter grammars.
-  `dist` grows by about 16.5 MB (wasm 14.2, model 2.3) plus the worker chunk (224 KB).
+  `dist` grows by about 16.5 MB (wasm 14.2, model 2.3) plus the Silero worker chunk (78 KB).
+  Licences travel with the vendored files (`hud/vendor/silero-vad/LICENSE.txt`,
+  `hud/vendor/onnxruntime-web/LICENSE.txt`: the npm package ships none, the text is the
+  onnxruntime repository's MIT licence). `npm ci` now also installs `protobufjs`
+  (onnxruntime-web's dependency), which has a `postinstall` script; it only prints a warning when a
+  package.json asks for a different version scheme, and does nothing here.
 - **CSP.** Unchanged and sufficient: the worker is `worker-src 'self'`, the WebAssembly compiles under
   the existing `'wasm-unsafe-eval'`, the model and wasm are `connect-src 'self'` fetches. No
   `unsafe-eval`, no blob worker, no CDN. `hud_v2_vad_check.py` loads it with the violation watch on.
-- **Energy fallback, visibly.** Until the worker says `ready` (`status().loadMs`: fetch, checksum, compile, warm-up) frames are
-  delivered at once with `p = null` and judged by energy. It stays on energy when: this window
-  cannot start a Worker (`no_worker`), the worker or its script fails (`worker`), the model cannot
-  be fetched (`fetch`) or fails its checksum (`hash`), the runtime cannot start (`runtime`), loading
-  takes over 20 s (`timeout`), a verdict is over 500 ms late (`late`), or more than 16 frames
-  (0.5 s of audio) wait on the worker (`backlog`: the queue is bounded, never grows). A failure is
-  **sticky for the window** (no flapping between detectors mid-sentence); every frame is still
-  delivered, in order, exactly once. Settings -> Voice -> Diagnostics shows `Speech detector:
-  Silero VAD (ML) . 0.6 ms per 32 ms frame` or `energy fallback - <reason sentence>` with **Try the
-  Silero VAD again**; the reason comes from a closed set of sentences (`protocol.ts` `FAIL_TEXT`),
-  never an engine message, URL or path. Each diagnostics row records which detector judged it
-  (`row.detector`). `__hud.mic.detector()` / `retryDetector()` are the test hooks.
+- **Energy fallback, visibly.** Until the worker says `ready` (`status().loadMs`: fetch, checksum,
+  compile, warm-up) frames are delivered at once with `p = null` and judged by energy. It stays on
+  energy when: this window cannot start a Worker (`no_worker`), the worker or its script fails
+  (`worker`), the model cannot be fetched (`fetch`) or fails its checksum (`hash`), the runtime
+  cannot start (`runtime`), loading takes over 20 s (`timeout`), or the worker is genuinely too slow
+  (`late`, `backlog`; next bullet). Every frame is still delivered, in order, exactly once.
+  Settings -> Voice -> Diagnostics shows `Speech detector: Silero VAD (ML) . 0.6 ms per 32 ms
+  frame` or `energy fallback - <reason sentence>` with **Try the Silero VAD again**, and a "Detector
+  changes" log (when, to what, why: every switch, bounded to 20); the reason comes from a closed set
+  of sentences (`protocol.ts` `FAIL_TEXT`), never an engine message, URL or path. The statistics are
+  republished every 64 verdicts. Each diagnostics row records the detector that **judged the
+  utterance** (`Capture.judgedBy`, set when it opened or the key was pressed, carried on the chunk
+  and the drop), not the one live when the row was written. `__hud.mic.detector()` /
+  `retryDetector()` are the test hooks.
+- **A busy main thread is not a slow worker (review MED-1).** A 700 ms stall of the page's main
+  thread queues the microphone's frames and the worker's verdicts and delivers them in a burst; the
+  worker meanwhile spent about 1 ms a frame. So the stage judges the worker only by what the worker
+  can be blamed for: lateness is the worker's own receive-to-answer time (`total` on the verdict;
+  `LATE_RUN` = 8 in a row over `FRAME_DEADLINE_MS` = 500 ms fails `late`); frames past the queue bound
+  (`MAX_PENDING` = 16) are not posted but delivered as energy in order, no failure, and the worker
+  starts clean at its next frame; the oldest unanswered frame (`HEAD_WAIT_MS` = 750) and a full queue
+  (`STRAIN_MS` = 1500) are timed over responsive time only (pushes at most `RESPONSIVE_GAP_MS` =
+  100 ms apart); a gap of `SLEEP_GAP_MS` = 2 s between frames (sleep/resume) is a reset, not a
+  failure. Browser check: 700, 1500 and 700 ms busy loops leave Silero in place and scoring.
+- **Automatic retry.** `late`, `backlog`, `timeout` and `worker` retry by themselves after 30 s,
+  2 min, 10 min, at most 3 per mic session (the count resets after 5 healthy minutes), and only at a
+  quiet moment: no utterance open or recording, the mic not OFF, Settings closed (`canRetry`).
+  `hash`, `no_worker` and `runtime` never retry on their own (the same bytes would fail the same way,
+  and a later mic open does not either); `fetch` is tried once more at the next mic open. The page
+  returning to the foreground (`visibilitychange`) or a sleep-sized gap re-arms a timing failure at
+  once, free of the count. The owner's button always tries. App passes the stage a per-run token
+  (`start()` returns it, `stop(token)` ignores a stale one) and stops it when the mic fails to open.
 - **OFF scores nothing.** While the mic is OFF no frame is posted to the worker; the worker's state
   is reset when listening resumes. Frames still reach the capture (it tracks the room), in order.
 - **Seam for RNNoise (V14).** `StageOptions.denoise(frame)` is applied to the copy the worker scores,
@@ -1663,36 +1691,89 @@ Plan decision V-1, §3.2. Stacked on V4 (`claude/voice-v4`).
   2500 (the old `HANGOVER_MS` 1500 is now an alias of it, so the energy fallback ends a message at
   2.5 s too), `CONTINUE_MS` = 6000 with V3's chain cap (2 continuation claims, 20 s from the first
   message's end) unchanged. The message pause is tunable per window: Settings -> Voice -> "Pause
-  that ends a message" (1.5 / 2 / 2.5 / 3 / 4 s, `localStorage`, `Capture.setEndPause`, bounded to
-  1-6 s). **Consequence for tests and for use:** a message now goes out 2.5 s after the last word
+  that ends a message" (offers 1.5 / 2 / 2.5 / 3 / 4 s; `localStorage`; `Capture.setEndPause` accepts
+  1-6 s and takes effect at once, even mid-message). **Consequence for tests and for use:** a message now goes out 2.5 s after the last word
   (1.5 s before), the ring for an unclaimed utterance stays open that long, and every scripted
   suite that closed an utterance with a 1.5-2.2 s quiet feed needed 2.8 s (changed in
   `hud_v2_{check,layout,declutter,csp,steer,speech,multichat,voice_diagnostics,chunks}_check.py`).
+- **Weak level gate (stopgap until V12, the lead's decision).** The model calls any speech speech, so
+  room speech the energy test never opened (a distant TV, a conversation) would open follow-up and
+  continuation claims, which need no wake word. With the ML VAD only, those two claims need the
+  onset to have peaked at least `WEAK_CLAIM_GATE` = 1.4 x the energy threshold (0.0084 rms in a quiet
+  room, higher as the room's floor rises; `vad.peak` now starts from the loudest frame of the
+  run that opened the utterance). Wake and push-to-talk are not gated; the energy detector's claims
+  are untouched. A refused onset is an `unclaimed` drop and the follow-up window stays open. It is a
+  narrow gate: a TV above that level still claims; speaker verification (V12) is the real answer.
+  The gate is looked at again on every frame for `WEAK_CLAIM_WINDOW_MS` = 400 ms after the utterance
+  opened: a soft start that then rises is claimed, from the utterance's own start (the ring still holds
+  it), so nothing is lost; a rise after the window is not.
+- **First chunk at the first gap (plan §3.2's segment gap, the lead's decision).** The recorder
+  cuts the first chunk at the first quiet run of `CHUNK_GAP_MS` (700 ms) once `FIRST_CUT_SPEECH_MS` =
+  350 ms of speech has been heard (the pre-roll does not count), whatever its length, so the opening of
+  a long message is transcribing while the rest is said. Once per message; later chunks keep V4's
+  rule (open segment at least 8 s, then a 700 ms gap; 300 ms past 18 s; hard at 25 s). A final chunk
+  with no speech in it is never uploaded. Consequence: a message with a pause after its first
+  sentence is now two uploads (one message, one row, placed together).
+  The first cut is allowed only while `longEnough` holds (`recorder.cutOk`, set by the capture before
+  each frame): in energy mode an onset that has not cleared the minimum (350 ms of speech, peak 1.6 x
+  the threshold) never reaches transcription. Should a chunk ever have left and the close still say
+  `too_short`, the end carries `discard: true`; App calls `stt.cancelGroup(gid, "too_short")` (in-flight
+  uploads aborted, audio released, nothing placed, the group's one row settled as `too_short`) and
+  the capture does not report the drop a second time.
+- **A pause cut is not an echo (merge review).** App passed `submit` no `repeats`, so every pause cut
+  (200 ms of silent lead, `repeats: false`) defaulted to "may repeat words" and the join deleted a word
+  said on both sides ("it was very" + "very good indeed" -> "it was very good indeed"). App now builds
+  the options with `chunkSubmitOptions(chunk, gid)` (`stt.ts`), which carries `repeats`;
+  `chunkWire.test.ts` wires Capture to the assembler and checks both "very"s survive a pause cut, a
+  hard cut still joins on its repeated words, and App has exactly one `stt.submit`, through that function.
+- **One speech frame does not extend the pause.** In ML mode, inside an open utterance a speech
+  frame that is not preceded by another (a click, a cough, a TV burst) counts as quiet: the quiet run
+  resets only when a second frame in a row is speech. Onset detection (60 ms) is unchanged. (Found in
+  review as the likely cause of an intermittent "speech 7 s after the message ended is not claimed"
+  browser failure, which has not recurred.)
 - **Free checks.** `lib/listen/{sha256,pins,runner,stage}.test.ts` (checksum vectors against node's
-  on every length around the block boundaries; the vendored file, manifest, `models.json` and
-  `pins.ts` agree; the Silero loop with a fake runtime; the stage with a fake worker, including a
-  random-event property test that every frame comes out exactly once, in order), `captureV5.test.ts`
-  (22: the timers, a 2.4 s pause continues and a 2.6 s pause ends, continuation at 5 s and not at
-  7 s, in ML and energy modes; the probability not the loudness decides; self-voice, OFF and a card
-  with p = 0.99; the recorder cuts at the 700 ms gap the model calls quiet), `voiceTiming.test.ts`,
-  `voiceDiagnostics.test.ts` (+2).
+  on every length around the block boundaries; the vendored file, manifest, licences, `models.json`
+  and `pins.ts` agree; the Silero loop with a fake runtime; the stage with a fake worker: ordering,
+  the queue bound, worker-judged lateness, 700 / 1500 / 5000 ms main-thread stalls that must not
+  fail it, sleep gaps, every automatic-retry rule, and a random-event property test that every frame
+  comes out exactly once, in order), `captureV5.test.ts` (the timers; a 2.4 s pause continues and a
+  2.6 s pause ends, continuation at 5 s and not at 7 s, in ML and energy modes; the probability not
+  the loudness decides; the weak gate; self-voice, OFF and a card with p = 0.99; the first-gap cut),
+  `recorder.test.ts` (+4 for the first-gap cut), `voiceTiming.test.ts`, `voiceDiagnostics.test.ts`
+  (+2).
 - **Browser check.** `tests/face/hud_v2_vad_check.py` (real Chromium, real worker, mock daemon;
   fixtures are synthetic Kokoro clips in `tests/face/fixtures/voice_v5/`, never a voice of a person):
-  Silero loads under the CSP and scores in real time; the model served is the pinned file; speech
-  through Chrome's fake microphone: 2.4 s continues and 2.6 s ends, continuation claimed 5 s after a
-  message ended and not 7 s; loud white + pink noise opens nothing with a follow-up window held
-  open; six failure modes fall back visibly with dictation still working (model 404, one byte
-  changed, truncated, wasm 500, Worker construction refused, a worker answering 1.5 s late); Try again
-  restores Silero. `hud_v2_chunks_check.py` stays on the energy detector (its "speech" is two
-  oscillators, which Silero rightly does not call speech) by failing the model fetch for its contexts.
-- **Counts.** vitest 2385 tests / 151 files (2315 / 145 on V4 after V8: +70, six new files), `tsc` and
-  `vite build` clean. Browser checks on the built `hud/dist`: `hud_v2_vad_check` 67, `chunks` 58,
-  `stt` 28, `steer` 46, `ptt` 70, `voice_diagnostics` 17, `speech` 56, `multichat` 343, all pass;
-  `csp` 41 of 44, the three failures being the manifest/icon checks, which fail identically on V4's
-  own build in this headless-shell environment (`Page.getAppManifest` returns nothing). The full
-  `hud_v2_check` was not run.
-- **Mutations that fail on purpose** (source restored afterwards): no backlog bound (1 test); the
-  checksum not compared (3); the message pause back to 1.5 s (3); the probability ignored (8+).
+  Silero loads under the CSP and scores in real time; the model served is the pinned file; 700 /
+  1500 / 700 ms busy main-thread loops leave it in place; speech through Chrome's fake microphone:
+  a 2.2 s pause continues and a 2.8 s pause ends (the exact 2.4 / 2.6 s edges are in the vitest with
+  scripted probabilities: with real audio the model's ~100 ms onset lag put the edge within noise of
+  the 2.5 s timer, and an edge test there flaked once), the first chunk leaves at the first gap,
+  continuation claimed 5 s after a message ended and not 7 s; a 30 s dictation with 0.9 s breaths is
+  one message in four ordered chunks, placed as one; loud white + pink noise opens nothing with a
+  follow-up window held open; six failure modes fall back visibly with dictation still working and
+  the row saying energy judged it (model 404, one byte changed, truncated, wasm 500, Worker
+  construction refused, a worker answering 1.5 s late); the foreground re-arm restores Silero after the
+  late one; Try again restores Silero. `hud_v2_chunks_check.py` stays on the energy detector (its
+  "speech" is two oscillators, which Silero rightly does not call speech) by failing the model fetch
+  for its contexts.
+- **Counts.** vitest 2562 tests / 159 files (after merging V4, V13 and V15) (2315 / 145 on V4 after V8), `tsc` and `vite build`
+  clean. (`markdownMath.test.ts` has a 5 s wall budget that trips on a loaded machine and passes
+  alone.) Browser checks on the built `hud/dist` with `JARVIS_HUD_DEV=1` and the full Chromium:
+  `hud_v2_vad_check` 96, `chunks` 65, `stt` 28, `steer` 46, `ptt` 70, `voice_diagnostics` 17,
+  `speech` 56, `multichat` 343, `csp` 44 of 44, all pass. (Without `JARVIS_HUD_DEV=1` the CSP check's
+  mock serves from an install that is not there and its 3 manifest/icon checks fail, V4 too.) The full
+  `hud_v2_check` was not run here.
+- **Two older checks V5 changed on purpose.** `hud_v2_syntax_check` counts the `.wasm` names loaded beside
+  tree-sitter's; onnxruntime's (`ort-wasm-simd-threaded`) is now left out of that name set only (its
+  CSP / header loop still covers every `.wasm`). `hud_v2_autoopen_check`'s `_split` waited for
+  `mic.state().open` as "the microphone has bootstrapped", but that flag is the detector's "an
+  utterance is open", which Chrome's beeping fake device used to set through the energy VAD; Silero
+  rightly does not call a beep speech, so it stayed false (the old check fails deterministically on
+  the merged build, the new one passes in repeated runs). It now waits for the stream granted, a capture
+  path chosen and the detector settled (ready, or the energy fallback), and compares those too.
+- **Mutations that fail on purpose** (source restored afterwards): no queue bound; the checksum not
+  compared (also the browser fallback check); the message pause back to 1.5 s; the probability
+  ignored; stalls counted as worker time; no weak gate; no first-gap cut; no automatic retry; the first cut ignoring `cutOk`; no late claim; the spike rule off; the discard flag dropped.
 - **Not done / not claimed.** Windows Chrome and a physical microphone: unmeasured (CPU of the
   worker there is V0's headless-Linux 3.4% of a core, not re-measured; V0's 28-39 ms slow first frame is
   expected to fall in the worker's warm-up before `ready`, not measured separately). A real person's voice, a room, a TV, real
@@ -1702,6 +1783,386 @@ Plan decision V-1, §3.2. Stacked on V4 (`claude/voice-v4`).
   own: it passed with the clips trimmed to their first and last audible sample, so the silence
   between words is the gap; in a real room the pause the model sees starts a little after the last
   word. The hash proves the file is the pinned one, not that the pinned file is good for this room.
+**Review fixes (2026-10-14, the lead's Opus review of the first cut; the owner confirmed that
+a card or OFF cuts the recording):**
+- **H1, a cut-short message is late.** `closeGroup(gid, {late})`: App passes
+  `end.truncated || u.refused`, so a message cut by OFF, a card, a picker, Settings, a
+  crash or his own voice is placed `late` even though every chunk that left answered, and
+  AUTO boxes it (it used to be sent as if whole). `late` = a chunk failed **or** the message
+  was cut short.
+- **M1.** `onListening` is announced **before** the pre-roll is fed to the recorder: a long
+  pre-roll (27 s of room speech, then a wake word) cuts chunks while it is fed, and they
+  used to reach the consumer before it knew the message and were dropped silently.
+- **M2.** A tap on the talk key over a hands-free message is not "too short": the key
+  *adopts* the recording and release just finishes it. `claimSource` is reset after a key
+  ends, so the detector's later `unclaimed` row is no longer labelled `ptt`.
+- **M3, a stopgap until V12.** A message claimed by the follow-up window or as a
+  continuation (no wake word, no talk key) ends at **60 s** (`CLAIM_CAP_MS`), boxed (late), with the error line saying so (`onLimit(ms, claimCap)`). A wake claim and the
+  talk key keep the 15-minute ceiling; a key pressed over a hands-free message lifts the 60 s.
+- **M4.** `CaptureHooks.hardStop()` names a card, picker, Settings or crash on its own, so
+  `suppressed:speaking` / `no_chat` (reported first) cannot mask one: a held key over his voice
+  or a closed chat now stops when a card or Settings arrives, and the drop names the card.
+  App's `captureSuppression` lists the hard reasons first as well. `canUpload(explicit)` and
+  `onChunk` also refuse under a picker or Settings; the owner's own **Retry** (`explicit`) is
+  still allowed from Settings, which is where the Retry row lives.
+- **L1.** When the previous chunk heard only the start of a word ("transcrip") and the next
+  hears it whole, the fragment is dropped and the whole word kept (`overlapMerge`);
+  `MAX_OVERLAP_WORDS` is 4.
+- **L3.** A late message placed around a failed chunk carries `[…]` (`GAP_MARK`) where the
+  missing part belongs (first, middle or last); Retry's text still lands at the end.
+- **L4.** `onprocessorerror` hands the microphone to the ScriptProcessor and says so
+  (`onPathChange`); `addModule` times out after 8 s into the same fallback;
+  `Resampler.processShared` allocates nothing per call on the audio thread.
+- **L5.** `Capture.muteNow()` (App `setMode` OFF) ends a recording at once, not at the next
+  frame; `onUtteranceEnd` closes the group even if a status write throws; a pane left
+  saying LISTENING after a cut-short message now says TRANSCRIBING or nothing; the limit
+  messages say "Say Jarvis or hold the talk key" (speaking on would not be claimed).
+- **Soft cuts start the next chunk with 200 ms of digital silence** (`CHUNK_SOFT_OVERLAP_MS`),
+  so no first phoneme sits on a chunk edge; `chunk.repeats` is false for them, so the join does
+  not look for echoed words ("very | very" stays). (First tried as 200 ms of the quiet audio
+  before the cut; the delta review noted that "quiet" is only below the detector's threshold,
+  so a faint trailing word could be heard twice. Silence cannot echo, which is the safer pick.)
+- **The 60 s cap splits nothing (delta review).** A claim cut at the cap is announced
+  `truncated`, so it is placed late and boxed, and arms **no** continuation: a 91 s follow-up used
+  to be a 60 s piece sent and a 33 s continuation sent. A wake hit over a message the cap would
+  cut lifts the cap and makes it a wake claim, as the talk key does. The 15-minute ceiling still
+  sends as it stands.
+- **Gap marks once.** `[…]` is added only on a message's first placement; a retried chunk placed
+  alone adds none (chunks 2 and 4 failed, retry 2 gave "t2 […]" before).
+
+## 2026-10-13: V13 local speech-to-text with a cloud-fallback switch
+
+Plan §3.5 and §4 V13; Q6 answered (build local Parakeet with a switchable cloud
+fallback; one paid comparison on synthetic speech, at most $0.25; local becomes
+the default only if its WER is within 1 point of cloud). **Status: built and
+tested on fakes plus one real-model smoke run; the default stays `cloud`. The
+paid comparison ran on 2026-10-14 (receipt below) and the build is installed; no
+physical-microphone run yet.**
+
+- **Engine** (`jarvis/stt_local.py`). Parakeet-TDT-0.6B-v3 int8 through
+  `sherpa-onnx` (`OfflineRecognizer.from_transducer`, `nemo_transducer`, greedy),
+  inside the daemon. `sherpa_onnx` is imported only at first load, so the daemon
+  runs without it. Threads are pinned (`config.STT_LOCAL_THREADS`, default 2,
+  clamped 1..4; V0: more than 4 was 4-18x slower). Lazy load; a daemon
+  `threading.Timer` drops the model after `STT_LOCAL_IDLE_MIN` (default 10)
+  idle minutes (`Engine.reap`, never under a running decode). Decodes are
+  serialised on one lock; each request waits no longer than its own deadline,
+  and a caller that gave up marks its job cancelled so a job that never started
+  never runs (no stacking). The decode itself cannot be interrupted: an
+  abandoned one finishes in the background, a clip being capped at 90 s. A
+  failed load is not retried for 60 s. WAV (16-bit PCM, any rate/channels) only:
+  no media decoder runs on uploaded bytes, so Discord's Ogg would need a
+  decision before it opts in. Every `LocalSTTError` message is a fixed sentence
+  (no path, no library text).
+- **Policy** (`voice.stt_result`, `voice.stt` is its `.text`). Settings
+  (`jarvis/stt_settings.py`, `~/.config/jarvis/stt.json`, env
+  `JARVIS_STT_SETTINGS`): `backend` = `cloud`/`local`/`auto` and `cloud_fallback`
+  (bool, default on). Callers that do not pass `prefer_local` (Discord voice
+  notes, the face server) are unchanged: the cloud chain, whatever `backend`
+  says. The HUD's `/stt` opts in (`prefer_local=True`). With `local`/`auto`, local
+  decodes first; on failure or timeout the cloud answers with what is left of
+  the caller's budget, only if `cloud_fallback` is on. With a budget, local gets
+  at most `STT_LOCAL_BUDGET_SHARE` (0.45) of it while a fallback is allowed, and
+  all of it when not. `cloud_fallback` off forbids EVERY upload for every
+  caller: the cloud chain is never entered; a local failure is a visible 502
+  ("...cloud fallback is off, so nothing was uploaded"), and a path that would
+  need the cloud (backend `cloud`, or a caller that did not opt in) is
+  `STTBlocked`, a 409 the HUD does not retry. `auto` with no local engine goes
+  straight to the cloud without a complaint. The chosen backend and the reason
+  local did not serve are in the `/stt` reply (`backend`, `model`, `fallback`).
+- **Fail closed.** A missing `stt.json` is the defaults. One that exists but is
+  not JSON, not an object, a symlink, over 4 KB, or has a key of the wrong type
+  reads as `local` with no upload, and `/stt/settings` says so. A repair through
+  one switch keeps the other at its fail-closed value. `stt.json` is **protected
+  state** (`tools/files._protected_state_paths`): no agent write, grant or shell
+  command may change it, since flipping it could send the owner's voice to the
+  cloud and an upload cannot be undone. **Owner decision, 2026-10-14: keep it
+  protected** (plan §2, V-12a; the protected-state set, not the SELF_PROTECTED
+  source list). The shell detector and v2's layer 1 are pinned for it
+  (`tests/voice_stt_local_check.py`, `tests/v2/permissions_check.py`), and v2's
+  refusal says what the file is.
+- **Route.** `GET/POST /stt/settings`, owner-only on the HUD listener
+  (`{backend?, cloud_fallback?}`, validated before anything is written; a read
+  never loads the model). Settings -> Voice has a Speech-to-text section: the
+  three backends, the Cloud fallback switch, one sentence saying what happens to
+  the next clip, and the local engine's state (installed, loaded, threads, idle
+  unload, or how to install). The window keeps nothing: it shows the daemon's
+  answer after every change. Diagnostics rows say `· local`, `· cloud` or
+  `· cloud (local failed)` per clip (known values only, never daemon text).
+- **Real-model smoke** (`tests/voice_stt_local_real.py`, gated by
+  `JARVIS_STT_LOCAL_REAL=1`, V0 venv, 4G scope), one synthetic Kokoro clip:
+  WER 0, cold 2.7 s (load included), warm RTF 0.055, a 48 kHz stereo copy still
+  decodes, RSS 41 -> 1117 MB loaded -> **78 MB after unload** (`gc` plus
+  `malloc_trim`), reload on demand. Synthetic speech, one clip: it shows the
+  wiring works and that the 1.1 GB is returned, not accuracy.
+- **Deploy** (once, by the lead): install `sherpa-onnx` into the daemon venv
+  (the V0 probe venv has 1.13.8, which has a CPython 3.14 wheel), then
+  `python -m jarvis.stt_local fetch` (about 490 MB, SHA256-pinned, same digest as
+  `tests/voice_v0/models.json`, extracted with the `data` filter under member
+  and size caps into `~/.cache/jarvis-stt/parakeet-tdt-0.6b-v3-int8`; or point
+  `JARVIS_STT_LOCAL_MODEL` at an existing directory). Restart the daemon, then
+  Settings -> Voice shows "installed". Nothing changes until the owner picks
+  Local or Auto. The first load after each daemon start hashes about 640 MB of
+  model files (`verify_model`, once per file identity) on top of the 2-4 s load,
+  so the first clip after a start may miss its local share of the budget and
+  fall back to the cloud (or fail, with the fallback off).
+- **The default flip** is one line: `config.STT_BACKEND_DEFAULT = "cloud"`. Run
+  `tests/stt_compare_probe.py` first (header has the command; `--yes-spend`
+  required, `--dry-run` free, hard cap $0.24, estimate at 4x the listed price,
+  no key printed, no `.env` read); its output ends "local within 1 point of
+  cloud: YES/NO". Synthetic speech bounds the models from below and says nothing
+  about the owner's voice.
+
+Free checks: `tests/voice_stt_local_check.py` (settings, engine lazy load,
+threads, serialisation, deadline, abandoned jobs, idle unload, load-failure
+backoff, safe errors, audio handling, pin parity with V0's manifest, policy
+matrix incl. local-only never calling `llm.transcribe`, budget share, Discord/face
+unchanged), `tests/stt_compare_probe_check.py` (the probe's spend guards),
+`tests/v2/hud_backend_check.py` (`/stt` reply keys, 409, `/stt/settings`),
+`tests/v2/frame_check.py`, `hud/src/lib/sttSettings.test.ts`,
+`stt.test.ts`/`voiceDiagnostics.test.ts` (served-by), and
+`tests/face/hud_v2_stt_local_check.py` (real HUD, mock daemon, 17 checks).
+Mutations that each fail the Python suite: serialisation lock removed, idle
+reap that never unloads, a fallback-off path that still uploads, no budget share,
+a corrupt settings file that fails open, non-opt-in callers using local, the
+unpinned thread clamp, a cancelled job that still decodes after its load.
+Not done and not claimed: changing the default to local (the receipt does not
+support it), a run in the live daemon, a physical-microphone run, WAV-only means
+no Ogg/webm locally.
+
+### V13 review fixes (2026-10-14)
+
+- **The privacy promise is scoped to HUD dictation.** Chrome's wake recognizer
+  (`webkitSpeechRecognition`, App.tsx) streams the microphone to Google whatever
+  `stt.json` says, so with Cloud fallback OFF (or its state not yet known) it
+  never starts: wake-by-voice is off until V11's local wake detection, and the
+  talk key still works. Settings -> Voice says so ("Dictation audio never leaves
+  this computer. Wake word by voice is off until local wake detection lands; use
+  the talk key."), and with it ON it says the wake word uses Chrome's speech
+  recognition (Google). With local chosen and the fallback on, the summary says
+  Discord voice notes and the face server still use the cloud. The window's copy
+  of the settings (`hud/src/state/sttSettings.ts`) is shared by the panel and the
+  recognizer's gate. **Every window hears a change at once:** the daemon
+  publishes an `stt_settings` event on `/events` after each successful POST and
+  whenever a read finds the resolved value changed by itself (a hand edit, a
+  corrupt file; `stt_settings.watch`), and each window applies it, because a
+  recognizer in a second window would otherwise keep streaming to Google. The
+  backstops are a re-read when the window becomes visible (`visibilitychange`,
+  not focus), on every event-stream (re)connect, every 60 s, and every 15 s
+  while the value is unknown. `hud_v2_stt_local_check.py` asserts the recognizer
+  never starts after a reload with the fallback off, stops when it is switched
+  off, and starts when it is switched on again; `hud_v2_stt_wake_windows_check.py`
+  (two pages, one mock that fans events out) asserts the other window stops with
+  no focus change, and carries a control run with the event dropped in which the
+  other window keeps streaming.
+- `wav_samples` maps any exception from `wave`/numpy on hostile bytes to
+  `LocalSTTUnavailable` (a fuzzed header was a 500); a queued job now waits for
+  the engine in 50 ms slices and leaves the queue as soon as its caller has gone.
+- `fetch` caps the download (700 MB) while streaming, refuses to replace a
+  directory without the `.verified` marker, and records per-file hashes there;
+  `verify_model` re-checks them when the model loads (once per file identity:
+  path, inode, size, mtime, ctime). This guards against corruption, not
+  tampering: the marker lives in the same writable directory. A marker that is
+  there but unreadable, not JSON or without a `files` table refuses ("run the
+  fetch again") rather than being trusted. A model directory the owner supplies
+  has no marker and is trusted as it is: only the download is verified. The
+  check runs under the engine's lock and the directory is writable by anything
+  running as the owner, so it cannot be made to hang or exhaust memory: the
+  marker and every model file are opened `O_NOFOLLOW | O_NONBLOCK` and must be
+  regular files (a symlink, FIFO or device refuses at once), the marker is
+  read to at most 64 KB, and each model file to at most its size, which must
+  equal the size `fetch` recorded in `.verified` (`sizes`).
+- The compare probe charges its estimate for a failed request too. An invalid
+  `backend` reads "using local" (the fallback keeps its value); `auto` with
+  nothing installed and the fallback off says the engine is not installed, not
+  that cloud was switched off.
+
+### Paid comparison receipt (2026-10-14)
+
+The lead ran `tests/stt_compare_probe.py --yes-spend` from main f33c810 on 96
+synthetic Kokoro clips (1233 words). Local Parakeet-TDT-0.6B-v3 int8 WER was
+1.38%; cloud (`nvidia/parakeet-tdt-0.6b-v3` via OpenRouter) WER was 0.24%. The
+difference is +1.14 points, with a 95% bootstrap interval of +0.48 to +1.89. The
+Q6 condition ("local within 1 point of cloud") is NOT met, so
+`STT_BACKEND_DEFAULT` stays `"cloud"`; Local stays selectable in Settings -> Voice.
+Estimated spend was $0.0384 of the $0.24 cap. The estimate assumes 4x the listed
+price, so the real cost is lower. Typical local errors were word-ending slips
+such as "finis" for "finished" and "workets" for "worklets". The run used
+synthetic speech only, so it says nothing about the owner's voice. Deploy note:
+on 2026-10-14 the lead installed sherpa-onnx 1.13.8 into the daemon venv and
+fetched the pinned model to `~/.cache/jarvis-stt/parakeet-tdt-0.6b-v3-int8`
+(verified) with `python -m jarvis.stt_local fetch`.
+
+## V15: lowering the Remote Browser's sound while Jarvis speaks (2026-10-13)
+
+Q14 is answered (plan section 7): duck Remote tabs through WSLg. The daemon lowers the Remote
+Browser's own PulseAudio sink-inputs by about 15 dB while the HUD holds a short lease, and
+puts them back exactly. It never unmutes, never touches another app's stream, and does
+nothing for Direct frames (cross-origin iframes, not observable or controllable from here).
+Code: `jarvis/v2/speech_duck.py`, `BrowserSound.duck_owners()` (`browser/sound.py`),
+`hud/src/lib/speech/duck.ts`. Tests: `tests/v2/speech_duck_check.py` (58),
+`hud_backend_check` (route), `frame_check` (walk), `hud/src/lib/speech/duck.test.ts`,
+`tests/face/hud_v2_duck_check.py` (23). Committed and pushed on `claude/voice-v15`; not merged,
+built-and-installed or live-validated. **Physical audibility of the duck is UNMEASURED.**
+
+### Probe (2026-10-13, local only, no network)
+
+WSLg's server is PulseAudio 17 at `/mnt/wslg/PulseServer`, one sink `RDPSink`,
+`module-stream-restore` loaded. A throwaway `/opt/google/chrome/chrome --headless` with a
+temporary profile and `PULSE_SERVER` set (the way B-SOUND launches an audible instance)
+played a 1% sine from a `file://` page. Every process and stream I started was stopped; I
+changed the volume only of sink-inputs whose PID was in my own Chrome tree (and unmuted
+one of my own after muting it to test).
+
+- **Attribution works, by PID ancestry.** One sink-input appeared, `application.process.id`
+  = the Chrome *audio service* utility process (`--type=utility --utility-sub-type=
+  audio.mojom.AudioService`), a **direct child of the browser root** whose command line carries
+  `--user-data-dir`. `application.process.binary` was `chrome`, `application.name` "Google
+  Chrome". The existing `audio.OwnedChrome.chain(pid)` (executable, uid, start time, ancestry up
+  to the pinned root) therefore attributes it, and the root is found the way the mute finds
+  it (`chrome_pids(folder)`, exactly one pinned root).
+- **Name matching would be wrong, and the probe showed why.** During the probe a second,
+  unrelated sink-input from another agent's Playwright `chrome-headless-shell` (application
+  name "Chromium") was playing. It has its own PID and ancestry, so it is never ours; a
+  name-based rule would be one rename away from touching it. It was only read.
+- **Volume read and exact restore work.** `pactl --format=json list sink-inputs` gives
+  per-channel raw values (`volume.front-left.value`, 65536 = 100%). `pactl
+  set-sink-input-volume <id> <v1> <v2>` set an asymmetric (40000, 30000) pair, a duck pair and
+  the original pair again, each read back bit-exactly. Setting a volume on a muted stream left
+  `mute` untouched (the code never sends a mute command at all).
+- **Scale.** PulseAudio's raw volume is cubic in amplitude: pactl's `-15dB` is raw 36854
+  (56%), `18%` is -44.7 dB. The duck is `raw * 10**(-15/60)` per channel, which is a true
+  -15 dB and keeps the balance.
+- **`module-stream-restore` remembers pactl volumes (a finding that shaped the design).** After
+  I set a stream to 18% and killed its Chrome, the *next* Chrome stream (a new process, new
+  profile) was created at 18%. PulseAudio keys that memory by application name ("Google
+  Chrome"), and every `set-sink-input-volume` is saved. So a duck that is not restored, whether
+  the daemon is killed or the Chrome restarts mid-duck, would make the next Remote stream start
+  quiet with nobody having asked. Restoring writes the prior value, which is then what is
+  remembered (checked: a 100% restore made the next stream start at 100%).
+- **pactl latency is not constant.** Normally 0.00 s; for a few minutes, with several agents'
+  browsers running and load average 6, individual `list` and `set` calls took 6 to 15 s. Every
+  call is therefore bounded (2 s) and failure is non-fatal and retried; under such load the
+  duck is simply late, never stuck.
+
+**Live smoke of the finished code (same day, real pactl and real `/proc`, a throwaway
+headless Chrome with a temporary profile and a temporary journal):** the stream was attributed
+by `OwnedChrome.chain`, went 65536 -> 36854 per channel under a lease, the journal held
+prior/applied, `release()` restored 65536 exactly and deleted the journal, and a lease left to
+expire restored the same way. The one other app's stream present earlier was not touched.
+
+### What it does
+
+- **Route** `GET`/`POST /speech/duck` (owner-only, HUD listener, like `/speech/voices`);
+  body is exactly `{on: bool}` (unknown or missing key, or a non-boolean, is 400; a daemon that
+  is stopping answers 409). `on:true` grants or renews a **3 s lease**; `on:false` ends it.
+  The answer is `{on, ducked, lease_s}`: counts only, never PIDs or stream names.
+- **The HUD** (`DuckLease`, wired in `createSpeech`): the speech controller's `active` (playing,
+  buffering, or inside the 300 ms hangover) takes the lease at once and renews it every second;
+  pause, stop, end, the Settings switch going off, or `pagehide` end it. Requests never overlap and
+  an `off` cannot overtake an `on`; a failed request is dropped (the next renewal, or expiry,
+  covers it). Settings, Voice: **"Lower Browser sound while Jarvis speaks"**, in
+  `localStorage` (`jarvis.duckBrowser`), **on by default**; one choice for every window (a
+  `storage` listener applies another window's change). Only the window that holds the speech
+  lock ever has an active queue, so only it holds a lease. Each window sends its own random lease
+  token (`window`, 32 hex, optional in the route) and the daemon keeps one deadline per token
+  (at most 16), so one window's `off` or expiry cannot end another's lease; the duck lasts while
+  any lease lives.
+- **Whose streams.** A sink-input is lowered only if its PID descends from a Remote Chrome
+  named by `BrowserSound.duck_owners()`: an instance that launched audible
+  (`instance.audio.applied`), is not closing or Private, and for which the owner's request and
+  the master permission stand **now** (`preference(profile)`). Anything else (master OFF,
+  structurally muted launch, nothing requested, Browser not running) lists no owner and
+  causes **no pactl call at all**. It never starts the Browser. A stream with no process is
+  never ours; a stream whose chain does not reach the pinned root is never ours.
+- **Never the mute.** The runner (`speech_duck.pactl`) allows only the JSON listing and
+  `set-sink-input-volume <index> <1..8 raw values>`; mute, default devices and everything else
+  are refused before a process starts (tested). A muted stream is left entirely alone, and a
+  mute set during the duck survives the restore.
+- **Exact restore, owner wins.** Each held stream records its prior per-channel volume and the
+  value that was written. Restore (lease end, `off`, expiry, shutdown) writes the prior value back
+  **only if the stream still has the value we wrote**. If it does not (the owner moved the slider
+  in the Windows mixer, or anything else changed it) the stream is not touched again, now or at
+  restore, and is not re-ducked for the rest of that lease; the next lease ducks it afresh from
+  where the owner left it.
+- **A stream that appears mid-duck** is found on the next scan (every 0.5 s while a lease
+  lives) and ducked from its own volume, then restored to it. It can be audible at full volume
+  for up to one scan interval plus the pactl latency; that is the one unavoidable gap (no
+  subscription, to keep the B-SOUND "no leak-free claim" posture). A stream born carrying exactly
+  a duck level (the stream-restore case above) takes the prior of the duck that made that level,
+  not the level itself.
+- **Index reuse.** Before a write the listing is repeated and the stream must still have the same
+  PID and volume, and the chain is re-checked. The residual race (the server frees and reuses an
+  index between that check and the write) is the one B-SOUND documents for the mute; it cannot be
+  closed from pactl.
+
+### If the daemon dies mid-duck
+
+- **A closed or crashed HUD, a lost connection, or a daemon whose HUD stops renewing:** the lease
+  expires 3 s after the last renewal and the worker restores (nothing else is needed).
+- **Orderly daemon shutdown:** `Daemon.stop()` calls `speech_ducker.stop()` first (before Chrome
+  closes) and restores, bounded to about 6 s.
+- **`kill -9` of the daemon (or a pactl that never answers):** nothing can run. Each duck is
+  written to `~/.config/jarvis/speech_duck.json` (`config.SPEECH_DUCK_PATH`, 0600 via a random
+  `mkstemp` file and `os.replace`, at most 64 KB; active ducks are always kept and only the oldest
+  leftovers are cut at 16; deleted when everything is restored) *before* the volume is written. The next daemon start (`Ducker.recover()`, only for the owner's data folder) reads it;
+  while it holds an entry the idle worker polls every 3 s, and only when a Remote Chrome is
+  audible: a Remote stream that appears carrying exactly the recorded ducked value is set back to
+  the recorded prior value (also under a new lease). Whether a Chrome that outlives a
+  `kill -9`'d daemon keeps its stream ducked was not tested (its pipe to the daemon closes, so it
+  most likely exits); the journal covers both. **Remaining gap:** until a new Remote stream appears (the owner turns Browser
+  sound on again) the stored volume sits in PulseAudio's memory, and an entry older than 30 days is
+  forgotten; a corrupt or missing journal repairs nothing. The owner can always fix a stuck
+  volume in the Windows volume mixer, and nothing here changes the mute.
+- Chrome restarting mid-duck (B-SOUND's idle replacement, sound OFF then ON) is the same case: the
+  vanished stream becomes a journal entry and the new stream is repaired when it appears.
+
+### Review fixes (2026-10-14, PR #156 review at `7f908b11`)
+
+- **A forged journal can no longer raise a volume.** On load an entry must have `prior` at most
+  100% per channel, `applied` within 2 of the duck of `prior`, equal channel counts, and a finite
+  time that is not in the future (beyond 300 s of skew); otherwise it is dropped. Every volume
+  written is at most 100% per channel (the runner refuses more; a restore or repair writes
+  `min(prior, 100%)`), and a duck writes `min(duck of prior, the stream's current volume)`, so it
+  can only lower. The regression is the reviewer's repro (`prior` 262144), plus a mutant for each
+  guard. A stream the owner boosted past 100% is left alone (giving it back would need a write
+  above the norm).
+- **The journal is written through `tempfile.mkstemp`** (random name, `O_EXCL`, 0600) then
+  `os.replace`; a FIFO or hardlink at the old predictable name cannot block the worker (tested).
+- **Restore is bounded**: one overall deadline for `stop()` (6 s, worker join included) and each
+  call gets only the time left; the first pactl failure stops that round of writes, and the rest
+  stay held and journaled. A leftover in the journal covers what shutdown could not restore.
+- pactl runs through the same capped streaming runner as the mute (`audio.run_bounded`; the
+  mute's own allowlist and tests are unchanged).
+- Only the owner's daemon reads or writes the journal (`Daemon._duck_journal`, the same
+  `_owns_data` rule as the carrier sweep).
+- `duck_owners()` excludes any instance that is not `audio.synchronized(True)`: a mute attempt
+  pending or ever made on it (tainted) is not ours to lower.
+- **One continuous duck is capped at 10 minutes** (`MAX_LEASE_S`): the volumes are restored and
+  stay so for 5 s even while renewals continue, then a request starts a new period (a stuck
+  window renewing for ever is audible as a short gap every 10 minutes, not a permanent duck; a
+  genuine 10-minute read-aloud has the same gap). The idle leftover poll backs off 3 s -> 60 s
+  while Chrome plays with nothing to repair.
+
+- **One odd foreign stream cannot block a restore.** `parse()` fails the whole listing only on
+  structural problems (not a list, more than 256 rows, a row that is not an object, an index that
+  is not an integer or is repeated, a `mute` that is not a boolean). A row with a non-numeric
+  `application.process.id`, a volume above the read bound or a bad channel map is just dropped,
+  never written; a held stream that turns malformed is treated as gone and becomes a journal
+  leftover. **Residual:** a listing larger than `OUTPUT_CAP` (256 KB) or with more than 256
+  streams, or a repeated index, still fails the listing, so nothing is written and the duck
+  cannot be undone until pactl answers sanely again (the journal covers a restart).
+- `audio._run_bounded` is private and applies no allowlist; only `audio._pactl` and
+  `speech_duck.pactl` call it, each after its own allowlist. `stop()` is rechecked immediately
+  before a duck is written.
+
+### Not done, and not claimed
+
+No physical audibility, echo or latency measurement; the Windows-side mixer behaviour with the
+owner's volume sliders is inferred from the listing, not heard. The fallback ("hold speech while a
+tab plays") was **not** needed: attribution is possible. Direct frames are unchanged and there is
+no ducking hook for them. Browser audio as a mic echo source (voice plan 3.14) is still
+UNMEASURED and speaker verification covers it.
 
 ## V8: spoken summaries (2026-10-13)
 
@@ -1737,7 +2198,7 @@ V6 stopgap is gone.)
   one deadline. `JARVIS_CHAT_PROVIDER` is not applied to this call (`provider=""`).
 - **Request.** `scrub` + `strip_invisible` on the text, then `untrusted.fence`
   (fresh nonce per call, marker phrases neutralized) so a reply cannot close its
-  own fence; `cache=False`; `stream=False`, `max_retries=1`, `max_tokens=160`.
+  own fence; `cache=False`; `stream=False`, `max_retries=1`, `max_tokens=1024` (a ceiling; was 160, see the receipt), two tries per model.
   Output is cleaned with `voice.speakable`, bounded to 300 characters at a
   sentence. A request never exceeds `min(JARVIS_COMPACT_AT_TOKENS, 90k)`
   (estimated at 3 characters a token, less 1000): longer text is summarised in
@@ -1782,6 +2243,267 @@ Pending: `tests/speech_summary_probe.py --yes-spend` (24 synthetic replies, 800
 to 8000 characters, aborts before $0.09). Fill in date, model id, call count,
 total spend, tokens, p50/p95 here after the lead runs it.
 
+## V12: speaker enrollment, verification and Guest voice (2026-10-14)
+
+Plan §3.4, §3.4.1, §3.13; decisions V-2, V-5, V-12, V-14; answered Q7 and Q12. Stacked on V4
+(`Capture.hooks.onChunk` is the seam), merged with nothing else. Status: committed on
+`claude/voice-v12` and pushed; not merged, not installed, **not live-validated, and never run with
+a real person's voice**.
+
+**What it is.** `jarvis/speaker.py` (engine, store, enrollment, verification) and
+`jarvis/v2/speaker_routes.py` (owner-only routes). NeMo TitaNet-small through `sherpa-onnx`, the V0
+winner, lazily loaded, unloaded after `JARVIS_SPEAKER_IDLE_MIN` (5) idle minutes, one thread
+(`JARVIS_SPEAKER_THREADS`, 1..4). `sherpa_onnx` is imported only at first load (checked in a
+subprocess); the daemon runs without it and `status()` says what is missing. The engine, the idle
+reaper and `fetch` copy V13's `stt_local.py` pattern. Deploy: install `sherpa-onnx` in the daemon
+venv, then `python -m jarvis.speaker fetch` (40 MB, SHA256 pinned and asserted equal to V0's
+`models.json`). **Licence** (lead, 2026-10-14): fine. NGC's card says the model's licence is "covered by the NeMo
+Toolkit", which is Apache-2.0. Jarvis does not redistribute it: `python -m jarvis.speaker fetch`
+downloads the owner's copy from the upstream sherpa-onnx release, checked against a pinned SHA-256.
+
+**Verification (`/stt?verify=1`).** Before any transcription or upload. The order is pinned by tests:
+(1) Guest voice on: skipped, nothing embedded; (2) nothing enrolled (no `voiceprint.json`): skipped;
+(3) everything else fails closed: damaged, unsafe or other-model voiceprint (503), no engine (503),
+audio that is not 16-bit PCM WAV (415, no media decoder runs on uploaded bytes), a busy engine
+(503); too little speech to judge (under 350 ms, the HUD's own `too_short`) is **200 `{text: "",
+verify: "no_speech"}`** with nothing transcribed (L2), not a refusal; (4) the first 3 s of speech (leading silence skipped by a
+-55 dBFS / -14 dB-below-loud gate) are embedded and compared by cosine with the enrolled centroid;
+below the threshold is **422 `not the enrolled speaker`**, no score, no `transcribe`. A clip under
+1.2 s (a command) uses a threshold 0.08 lower (`JARVIS_SPEAKER_SHORT_RELAX`), but never below the
+closest built-in voice plus 0.02 (L1: the voiceprint stores `impostor_max`). Only the **first 3 s of
+speech of each chunk** are judged (L7): a long chunk is vouched for by its opening, so the daemon
+verifies every chunk, not only the first, and a stranger who joins in the middle of a chunk is not
+heard by the check. The reply carries `verify`.
+
+**Guest voice.** One file, `guest.json`, in the store, so it survives HUD reloads and daemon
+restarts and has no timer. It skips step (4) and nothing else: `speaker.py` knows nothing about the
+microphone, VAD, noise suppression, self-voice gating or approvals (a test greps for that), and the
+HUD's capture and approval modules cannot read the switch (`guestGate.test.ts` greps those too and
+whitelists every line of `App.tsx` that mentions it). An unreadable `guest.json` is "Guest off".
+Published as `speaker_guest {guest, enrolled, mode}` so every window shows **GUEST VOICE** on the orb
+line (every branch of `orbLine`) and on the speech strip, which now also shows for a guest with
+nothing playing (and in the folded rail as one button). The strip's button turns it off always
+(even under a card) and on only when a voice is enrolled and speech is playing; the switch in
+Settings turns it on anywhere. Delete resets it to off.
+
+**The store.** `config.SPEAKER_DIR` = `~/.local/share/jarvis/speaker/` (plan §3.4), mode 0700, owned
+by the owner, created 0700 and tightened if found wider; files 0600. Every file is opened relative to
+the folder's descriptor with `O_NOFOLLOW`, read only if a regular file (a FIFO holding good JSON is
+refused), at most 256 KB (readings 4 MB), and replaced atomically. Corrupt, FIFO, symlink, directory,
+oversize, 200 000-deep JSON, `1e999`, `NaN`, 5000-digit ints, wrong dimension, zero centroid,
+out-of-range threshold: all "damaged", all fail closed, none hangs (`voice_speaker_check.py`).
+Contents: `voiceprint.json` (centroid, threshold, model name, counts), `guest.json`, `readings/r-NNN.wav`
+(our own 16-bit mono re-encoding, never the uploaded bytes; Q12: kept so a model upgrade can
+re-derive the voiceprint; at most 6, each at most 30 s), `impostors.json` (cached embeddings of the
+built-in voices, per model). Delete removes the folder (symlinks inside are removed, never followed;
+a symlinked folder is unlinked, its target untouched). **`voiceprint.json` and `guest.json`
+are protected state (V-12b); `readings/` and `impostors.json` are not (V-12).** No route returns audio or an embedding; the status carries counts, the threshold and the
+last score only.
+
+**Enrollment (Settings → Voice → Your voice).** Three prompted readings (`POST /speaker/reading`,
+owner-only, audio allowed on the explicit set `hud_api.AUDIO_ROUTES`, size judged from the header
+before the read). The HUD records the mic's 16 kHz frames (`MicInput.addFrameListener`) with a live
+meter and the daemon's own quality limits (6 to 30 s, -40 to -6 dB, clipping, speech share); a bad
+take is not uploaded, and the daemon re-checks what it is sent. "Check my readings" runs `propose`:
+leave-one-reading-out genuine scores against the voiceprint of the others, and each built-in voice
+(Kokoro `a*`/`b*` and Pocket builtins, spoken locally by `voice._local_tts` / `pocket.synthesize`, never
+the cloud) against the voiceprint of all of them, shown as two histograms with the proposed threshold
+and the rates at it. Verification switches on only on Accept. A model change makes the voiceprint
+"stale" (verification blocked, Guest or Rebuild); Rebuild re-derives it from the kept readings.
+
+**Threshold: how it is chosen.** V0's equal-error threshold for TitaNet ranged 0.51 to 0.71 across
+conditions, so it is derived from the owner's enrollment, never hard-coded. Proposed = halfway
+between the closest built-in voice and the owner's weakest 10 % of windows, but never nearer the owner
+than 0.10 below that (a TV, a cold or another room scores the owner lower than a quiet enrollment),
+never inside the impostors (then closest + 0.02 and a warning), clamped to 0.30..0.90; with no
+built-in voice scored it is `min(0.60, p10 - 0.05)`. Tunable: Accept takes a number, `{threshold}`
+retunes, `JARVIS_SPEAKER_THRESHOLD` (default 0.60) only seeds the no-impostor case.
+
+**Measured through the real model** (`tests/voice_speaker_real.py`, V0 venv, V0's synthetic fixtures;
+`JARVIS_VOICE_V12_REAL=1`; **not** owner-vs-TV and easier than a person, see V0): owner = Kokoro
+`af_bella`, three readings of three joined clips, 15 held-out clips; the others are 38 more Kokoro
+and Pocket voices, one clip each standing in for the built-ins. Proposed threshold **0.794**
+(genuine min 0.874, p10 0.894, median 0.918; closest built-in `kokoro_af_heart` 0.72, next 0.44).
+Held-out owner 15/15 accepted (min 0.885); other voices 156/156 refused (highest 0.722);
+Jarvis's default voice `bm_george` 0/8 accepted; 1 s commands 7/8 accepted with the relaxed
+threshold; verification 32 to 40 ms p50 per clip, peak RSS 165 to 176 MB, model loaded once.
+Proposing against 39 voices took 1.7 to 2.2 s here because the fixtures stood in for TTS; with real
+Kokoro/Pocket synthesis the first proposal costs one sentence per voice (cached after), budgeted at
+150 s and 64 voices.
+
+**HUD.** Every chunk is sent with `verify=1` (`api.stt`). A 422 `not the enrolled speaker` is not a
+failure: no automatic retry, **the chunk's audio is dropped at once** (it may be someone else's: no
+Retry, no Play), the diagnostics row ends `not_owner` (or, for a message that went on, records
+"n parts not your voice"), and the orb says NOT YOUR VOICE. Like a failed chunk it leaves a hole, so
+the rest of that message is placed `late`: boxed for review, never auto-sent as if whole. The row also
+records what verification did (`voice matched`, `verification skipped (guest voice)`, `(no voice
+enrolled)`), never a score.
+
+**Tests (this PR).**
+- `tests/voice_speaker_check.py`: 74 (store 0700/0600, hostile files, a pipe holding good JSON,
+  delete, quality, hostile audio, propose/accept/rebuild, verification order, Guest, fail-closed
+  engine, lazy load and idle unload, pins, no network or approval import).
+- `tests/v2/speaker_check.py`: 22 over real loopback listeners (owner-only 403 from the API port,
+  a foreign Origin, no Origin, `null`; content types; `/stt?verify=1` with a recorder in place of the
+  cloud: a rejection never calls `transcribe`, Jarvis's own voices are rejected, Guest skips only the
+  check, survives a daemon restart, never touches a pending approval).
+- `frame_check` walks the new routes; `v2/permissions_check` 1618 (V-12b lines added); `hud_backend_check` 85/85, `voice_stt_check` 36 unchanged.
+- vitest 2383 tests / 149 files (was 2315 / 145): `speaker`, `enroll`, `SpeakerSettings`, `guestGate`,
+  and additions to `stt`, `dictation`, `SpeechStrip`; `tsc` and `vite build` clean.
+- Playwright `tests/face/hud_v2_speaker_check.py` 48 (real worklet, mock daemon): enrollment, a
+  refused voice uploads nothing (the mock counts only clips that passed), Guest through reload and a
+  bus event from another window, Jarvis speaking and a card still stop dictation with Guest on, no
+  approval request from speech. Also re-run: `hud_v2_stt_check` 28 (its query expectation gained
+  `verify=1`), `speech` 56, `chunks` 58, `ptt` 70, `steer` 46 (a teardown `BrokenPipeError` in the
+  mock after its last check), `voice_diagnostics` 17.
+- Review-round mutations that fail on purpose (each fails at least one test; source restored byte for byte): the `g10 - 0.10` margin removed; the no-impostor branch ignoring the readings or with another margin; the proposal floor lowered to 0.30; weak readings or an overlap needing no confirming; `accept` never asking to confirm; short clips relaxing below the closest voice; verification only when asked; `/stt` not watching the gate; `no_speech` transcribed; chat voices never warned; the voice warning never firing; the model hash unchecked; the two files unprotected; the HUD not reading the truth back after a surprise skip, never labelling OFF, labelling before the daemon answered, never sending Accept anyway.
+- Mutations that fail on purpose (source restored byte for byte): guest flag ignored (unit and routes);
+  a not-clean store treated as unenrolled (fail open); a rejection that still transcribes; store
+  created 0755 or never tightened; reader following symlinks; no regular-file check; damaged voiceprint
+  accepted; Delete leaving the readings; Guest not persisted; whole clip embedded, not 3 s; readings
+  alone switching verification on; HUD: not-owner as an ordinary failure, refused audio kept, the
+  rest of a message not made late, `verify=1` not sent, orb line ignoring Guest, strip hidden for a
+  guest, any truthy `guest` turning the label on, and **Guest also skipping the capture's suppression**
+  (fails `guestGate.test.ts` and the Playwright "his own voice still never opens an utterance" check).
+
+**Review round 1 (the lead, 2026-10-14; no HIGH).**
+- **V-12b: `voiceprint.json` and `guest.json` are protected state** (plan §2): `files._protected_state_paths`
+  adds the two files, so the v1 write tools, the shell detector and v2 layer 1 refuse them; their
+  folder is an ancestor, so a write grant on it is refused and `rm -rf` of it is asked, never
+  auto-run. v2's refusal says it is speaker verification and the owner's, in Settings > Voice.
+  The readings and `impostors.json` stay ordinary. Tests: `voice_speaker_check.py` (`Protected`: set
+  membership, shell verdicts never ALLOW, v2 refusal text, ancestor grants) and the lists in
+  `tests/v2/permissions_check.py` (1618 checks, the v1/v2/shell sets still equal).
+- **M1 verification is forced.** The daemon verifies every `/stt` whenever the store is not "none", on every
+  listener; `verify=1` is a no-op (anything else is still a 400). An unenrolled reply without `verify=1` is
+  unchanged (`{text}`), so older callers see nothing new.
+- **M2 threshold floor.** `choose_threshold` is pure and pinned case by case. A proposal is never below
+  0.50 (`SPEAKER_PROPOSAL_FLOOR`); readings whose weakest 10 % score under 0.60 against each other
+  (`SPEAKER_GENUINE_FLOOR`), overlap a built-in voice, or whose supported threshold fell under the floor,
+  set `confirm`: the daemon's `accept` refuses with "record the readings again" unless `anyway: true`
+  (the HUD shows the warning and "Accept anyway"). The no-impostor branch is held to the same floor. A
+  threshold the owner types may go down to 0.30, with a warning in the status and the section.
+- **M3 gate changes the routes did not see.** `/stt` and `GET /speaker` publish `speaker_guest
+  {guest, enrolled, mode}` whenever the observed mode differs from the last one published (the first look
+  publishes), so an edited `guest.json` or a deleted or damaged `voiceprint.json` reaches every window
+  on the next clip (tests do both). The HUD labels every state in which the check is not judging:
+  GUEST VOICE, **VOICE CHECK OFF (not enrolled)** and VOICE CHECK BLOCKED, on the orb line and the strip.
+  Deviation to confirm: the OFF label shows only once this window has seen a voice enrolled
+  (remembered in localStorage, cleared by the owner's own Delete), because an owner who never enrolled
+  would otherwise carry a permanent line under the orb; before the daemon has answered nothing is labelled.
+  A reply whose `verify` is `skipped_*` while the window believed the check was on is flagged ("thought it
+  was checking your voice"), the label updates at once, and the truth is read back.
+- **L1** short-clip floor (above) and the real-model run now also refuses 1 s clips of the other voices
+  (0/156). Price: the owner's 1 s commands fell from 7/8 to 4/8 accepted, because the closest built-in voice
+  here (`af_heart`, 0.72) lifts the short threshold to 0.74.
+- **L2** `no_speech` (above). **L3** choosing a voice (`POST /voice`, `POST /speech/voices`, assignment) scores
+  a built-in voice against the voiceprint, once per voice (cached), and the reply carries `speaker_warning` when
+  it is within 0.05 of refusal; not asked when nobody is enrolled or Guest is on. The HUD shows it on the
+  window's error line (once per voice per window).
+- **L4** the model is opened `O_NOFOLLOW`, must be a regular file of at most 64 MB, is hashed once per load,
+  and the bytes hashed are copied to a `memfd` that the loader reads, so neither a swap nor an in-place rewrite
+  after the check changes what is loaded; the download is capped at 64 MB.
+- **L5** `guestGate.test.ts` lost its trivial half (a store fed to a Capture that never read it). What remains is
+  the structural guard (no gate module can read the switch; every `App.tsx` line that touches it is on a closed
+  list) and the Playwright check that Jarvis speaking and a waiting card still stop dictation with Guest on.
+- **L6** the prompt/note race: the status is adopted before the note, and the check waits with `until`.
+- **L7** documented above.
+
+**Not done and not claimed.** Barge-in and reference-correlation self-voice gating (V9: before
+enrollment only "Jarvis"/Ctrl+D pause playback, Q7, is V9's); KWS (V11); any run with a real voice,
+a TV, a physical microphone, Windows Chrome or the live daemon; the manual gate "enroll, then the TV or
+another person says Jarvis, then Guest on" (plan §5 live check 6). `status()["last"]` shows the last
+score for tuning; there is no "test my voice" button. Embedding all chunks (not only chunk 0) means a
+noisy chunk of a long dictation can be refused and the message arrives boxed, not sent.
+
+**Merged with V13 and V4 (main 57be997).** In `/stt`, `speaker.verify()` (always, with `finally: watch`) and the
+`no_speech` early return come before V13's `voice.stt_result(..., prefer_local=True)`, and the reply is
+`{text, **served, **ids, **verdict}`, so a refusal or a silent clip reaches neither the local engine nor the cloud
+(`speaker_check` patches `stt_result` to raise). `files.py` and `permissions.py` protect both `stt.json` and the
+speaker files; `api.ts` carries `verify` through V13's `SttReply`; the assembler keeps V13's `partial` and `served`
+beside V12's `rejected`. Counts after the merge: `voice_speaker_check` 74, `v2/speaker_check` 23,
+`voice_stt_local_check` 55, `frame_check` 18, `hud_backend_check` 87, `v2/permissions_check` 1625; vitest 2451 in
+152 files; Playwright `speaker` 48, `stt` 28, `stt_local` 22, `chunks` 65.
+
+Run by the lead on **2026-10-14** from the main checkout
+(`tests/speech_summary_probe.py --yes-spend`), model
+`anthropic/claude-haiku-5.5`, 24 calls on synthetic replies of 723 to 8053
+characters, no real chat content. Numbers as relayed by the lead (the console
+output itself was not kept):
+
+| | |
+|---|---|
+| Calls | 24, of which **7 failed with 502** (29%) |
+| Total spend | $0.002314 (cap $0.10) |
+| Mean cost per call | $0.000136 |
+| Prompt tokens, mean | 902 |
+| Completion tokens, mean | 92 |
+| Latency | p50 1.46 s, p95 2.1 s |
+| Failed inputs (characters) | 786, 832, 1742, 1778, 3635, 3644, 8053 |
+
+Cost and latency are well inside the plan's estimate ($0.0003 a summary, a
+second or so). The failure rate is not acceptable: the owner would hear the
+truncated fallback about three times in ten.
+
+**Cause.** Not proven by the first run (the second run below confirmed it). The probe kept only "502" for the failed calls, and the
+route answers a fixed sentence, so the internal reason was lost. What the code
+shows: the inputs are not the cause (the seven are scattered across all four
+sizes and the first call of the run was one of them; `prepare()` leaves every
+probe text unchanged, so `scrub` and the fence are not involved), and there are
+only three ways `summarize` returns a 502: the call raises (a provider or
+network error, one attempt, no retry), the reply comes back with no text, or the
+text is empty after `clean()`. The bounds in `clean()` cannot empty a reply that
+has words, whatever its sentence ends (tested). The likeliest cause is the first
+two together: `max_tokens=160` was the *whole* budget, so a model that reasons
+before it answers could spend it on reasoning and return nothing (finish reason
+`length`), and a transient 429/5xx/529 was never tried again. A mean of 92
+completion tokens for replies of at most 300 characters (about 70 tokens) is
+consistent with some thinking being counted.
+
+**Fix (V8 fix, `claude/voice-v8-fix`).** `OUT_MAX_TOKENS` 160 -> 1024 (a ceiling;
+length is still the prompt's and `clean()`'s job); each model gets two tries
+inside the one 6 s deadline, the second for a transient HTTP error (anything but
+400/401/402/403/404/413/422) or an empty reply, with a retry that must leave
+0.3 s; content parts are read as text. Every failure now carries a **reason
+code and numbers only** (`SummaryError.reason`/`.detail`: `http_<status>`,
+`llm_error`, `empty_content`, `empty_after_clean`, `exception:<Class>`, `deadline`;
+finish reason, completion and reasoning tokens, whether a reasoning field was
+present, raw length), logged and printed by the probe, never sent to the HUD.
+Tests in `tests/v2/speech_summary_check.py` (`FailedSummaries`) reproduce each
+path with a fake reply, and two mutations (the old 160-token budget, a single
+attempt) fail them.
+
+**Still to do (done 2026-10-14, see the second run below).** A second probe
+(owner's OK; same cap) to confirm the failure rate and to read the reason codes
+from a real run. If `empty_content` shows `finish=length` with
+`reasoning_tokens` close to the budget, the cause was the budget; if `http_*`,
+the retry; if neither, the next step is turning reasoning off for this call.
+
+### Second probe receipt (owner-approved, same $0.10 cap)
+
+Run on **2026-10-14**, from main `3165b31`, after PR #164 was installed.
+
+| | |
+|---|---|
+| Model | `anthropic/claude-haiku-5.5` |
+| Calls | 24, **0 failed**, **0 retried** |
+| Total spend | $0.004219 (cap $0.10) |
+| Mean cost per call | $0.000176 |
+| Prompt tokens, mean | 956 |
+| Completion tokens, mean | 160 (one reply used 392) |
+| Latency | p50 1.57 s, p95 2.73 s, max 3.55 s |
+| Estimated costs | none |
+
+**Conclusion.** The old `max_tokens=160` budget was the cause. Replies needed up
+to 392 output tokens, and with 0 failures and 0 retries under the 1024 ceiling,
+the retry path was not what fixed it. The second run confirmed it. No failure
+reason code was produced, because nothing failed, so none is recorded here.
+
+**Cost note.** The mean cost per summary rose from $0.000136 to $0.000176
+because the replies are now complete. Both means cover successful calls only:
+the first run's $0.000136 is its $0.002314 total over the 17 calls that returned
+a summary, and this run's $0.000176 is over all 24.
+
 ## V9: self-voice gating, barge-in, spoken commands (2026-10-14)
 
 Plan decisions V-5, V-6, V-7 and §3.4, §3.10; owner's answers Q7, Q8, Q10, Q13. Stacked on V5
@@ -1821,7 +2543,7 @@ Plan decisions V-5, V-6, V-7 and §3.4, §3.10; owner's answers Q7, Q8, Q10, Q13
 - **Capture** (`onFrame(frame, p, self)`): a vetoed frame is not speech to the detector (Vad `veto`: no open, no hold,
   no floor update), is observed and reported as `self_voice`; the continuation window is closed while he is audible
   and the follow-up window when a new reply begins to sound (`playing` rising edge). A wake hit while he is audible
-  counts only against an utterance the owner opened (frames he vetoes never open one); otherwise it is ignored,
+  counts only against an utterance the owner opened (frames the gate vetoes do not open one, but a frame it misjudges can); otherwise it is ignored,
   reported (`self_voice`, source wake) and **not kept in reserve**. A wake hit under any suppression (the blanket
   hold, a card) is ignored too, so a reply saying "Jarvis" cannot pause itself. Claims are by name or key only.
 
@@ -1859,6 +2581,80 @@ and tail constants are unmeasured outside synthetic rooms); Silero in the new br
 under a card (V11); verified-owner barge-in (V12); speaker verification. The echo recorded into a claimed message's pre-roll while he was
 still speaking goes to STT with the owner's words (Chrome's echo canceller is the only help there). A Bluetooth/changing output delay
 beyond 640 ms is not learned (blanket hold applies until a lock forms).
+
+### V9 review round (Opus review of 0cdde33: M1-M4, L1-L5)
+
+The review found no path to an approval and no HIGH issue; it found fail-open windows in the gate. Changes:
+- **M1 lost frames.** Frames that never arrive left the mic's sample count behind the clock, so the reference "ended" early
+  (`!active` returned CLEAR before any lateness check; the review's probe let about 2 s of his voice through). Now `active` is judged up
+  to `max(tEnd, now)`; the clock mapping is rebuilt when a push comes more than `GAP_RESET_MS` (250 ms) after the last (history
+  dropped too), and for `GAP_SETTLE_MS` (1 s of wall time) every frame while he is audible is his voice; `sampleEnd` is counted from
+  the frames' own lengths. Tests: gaps of 0.8, 1.2, 2 and 4 s mid-reply and with a reply starting at once, and a burst after a stall:
+  0 frames let through (the 0.8 s case fails with the old `tEnd`-only window and no gap reset).
+- **M2 room changes.** A lock learned in an earlier reply is not trusted in a new one (a reply starting more than `REPLY_GAP_MS` = 3 s
+  after he last sounded) until this reply has confirmed it (echo: this window scores >= 0.9 with >= 12 audible and >= 12 heard frames;
+  dry: 16 dry frames again), so "calibrating" (his voice) covers the first second or so of a reply that follows a pause. Also: a
+  `devicechange` on `navigator.mediaDevices` drops the lock (`invalidate`), and whatever the owner's frames hold beyond the lock's
+  prediction is checked against the reference at every delay over the last 20 frames (`excessFollowsReference`; since the delta round: score >= 0.9, the reference audible in >= 6 of those frames): if it
+  follows, the frame is his, and a dry lock is dropped. Tests: headphones->speakers, delay 300->60, 60->450, 200->120 across a pause:
+  0 frames let through (fail with the reverification removed). **Measured limit:** the volume turned up 4x in the middle of a reply
+  lets about 11 frames (0.35 s) through before the guard's 20-frame window shows it follows the reference; the guard is the only help
+  for a change that happens mid-reply.
+  *Cost, said plainly:* the guard and the reverification make the gate block the owner when they cannot tell; a short window correlates
+  by chance too often (with 12 frames and 0.9 it blocked 75% of an owner's speech over a dry lock in the synthetic room), which is why
+  the window is 20 frames. Over headphones the owner's speech over him is released, but the first second of each reply that follows a
+  pause is closed to voice barge-in (the talk key is not).
+- **M3 his own name.** `SpeechController.sayingOwnName()` is true while a playing sentence matches the window's wake patterns and for
+  `NAME_GRACE_MS` (2 s) after; `onWakeHit` ignores a hit then (reported `self_voice`, source wake), even with an utterance open (a TV).
+  The pattern check fails closed if it throws. Also: while his voice is audible a claim starts no earlier than the first frame the gate
+  let through (`Capture.beginRecording`, covering the wake back-dating, the 800 ms pre-roll and the talk key); the clip carries none
+  of his words. Tests: capture clips with a 0.2-amplitude vetoed voice contain nothing above 0.1 (and the unclamped control does);
+  browser `gate_own_name` and `gate_wake_command` ("Jarvis stop" over him: obeyed, nothing sent, no interrupt).
+- **M4.** A wake hit within `SELF_ARM_GUARD_MS` (1.5 s) of his voice last being audible is ignored unless it claims an utterance
+  already open; it is not armed.
+- **L1** a static pin on `card: live.current.approvals.length > 0` at the router call (mutating it to `false` fails
+  `approvalIsolation.test.ts`). **L2** with two holders a send by either skips the interrupted message. **L3** a send skips only
+  what was sounding when he was held: another chat's awaited summary is not cancelled. **L4** `setSupported` removed; `supported`
+  comes from the window having Web Audio (`createSpeech`).
+- **L5, to check on the owner's PC.** On real hardware Chrome's echo canceller leaves a residual that may score below 0.9 against
+  the reference and exceed 0.004 above the room's noise, so the gate can stay in "learning" (every frame while he is audible is
+  his voice): then only Ctrl+D barges, which is the safe result. Settings -> Voice -> "Jarvis's own voice" shows learning / echo /
+  dry. Whether the gate ever locks on the owner's speakers, and the real delay, are unmeasured.
+
+Free checks after the round: vitest 2567 tests / 157 files (2584 after the delta round), `tsc`, `vite build`. Browser on the rebuilt `hud/dist`:
+`hud_v2_barge_check` 102 (adds `gate_own_name`, `gate_wake_command`), speech 56, multichat 343, steer 46, ptt 70.
+Mutations that fail on purpose (restored): `active` window back to `tEnd` with no gap reset (2 vitest); no reply reverification (4);
+no clip clamp (2); no arm guard (1); `card: false` in the router call (1); two-holder send lost / awaited summary cancelled (2).
+
+### V9 delta review of b9d5dfa (MED-1..3, L-a, L-b)
+
+- **MED-1 stall plus burst.** After a gap the queued frames were placed at "now", so a reply that ended inside the stall
+  looked finished and a 2 s stall let all 63 queued frames through. Now `gapFrom` (the last push before the gap) is kept, and
+  while the gap settles `active` looks back from `min(tEnd, gapFrom)`. Probes: stalls of 0.4, 1, 2 and 3 s with the reply
+  ending inside: 0 queued frames let through (the 2 s and 3 s cases fail without `gapFrom`).
+- **MED-2 volume step between replies under 3 s apart.** The held lock's gain drifts whenever the lock explains the window
+  (`heldScore >= LOCK_SCORE`); the audible/heard counts are required only to *confirm* it (set `confirmed`, `held.at`). With a
+  2 s pause a 4x-8x step lets 0 through (fails without the drift); with a 1 s pause x2 and a quieter room 0, x4 up to 3, x8 up
+  to 6 frames; with 0.25-0.5 s pauses up to ~11 frames per step (the guard needs a few frames of the new level).
+  `GUARD_SCORE` stays 0.9 (0.88 blocked 56% of an owner's speech over headphones in the synthetic room); the guard now needs the
+  reference audible in 6 frames, not half the window, so it can act sooner.
+- **MED-3 a comma between "Jarvis" and "stop".** A single frame judged his voice inside an open utterance reset the claim's
+  start, so the clip held only "stop" (not a command, so it was sent). `freeFrom` now resets only when he goes inactive or the
+  detector's utterance closes. Capture tests with 96, 200 and 400 ms gaps (fail with the old reset); browser: the upload covers
+  the whole owner audio and "Jarvis stop" is obeyed with nothing sent.
+- **L-a what is and is not claimed.** The gate fails closed for lost frames, stalls, a new reply after a pause (re-confirmed),
+  an exception, and an audio device change. It does **not** guarantee that his voice never opens the detector: a room change
+  with less than about 2.5 s of silence, a mid-reply volume step, or a delay that moves mid-reply can still open the VAD for up
+  to a few tenths of a second. What holds in those windows is that every route that turns an open utterance into a message is
+  closed to his voice: no follow-up or continuation window while he is audible, wake hits ignored while he says his name or
+  within 1.5 s after (unless they claim an utterance already open), claims start at the first frame the gate let through, and
+  an unclaimed utterance is dropped (`unclaimed`, with a diagnostics row). A TV that opens the VAD while a wake word is spoken
+  by the recognizer is the V12 (speaker verification) problem, not this gate's.
+- **L-b** a static pin: `onWakeHit` must call `sayingOwnName()` and return before `capture.onWake()`.
+
+After the delta round: vitest 2584 tests / 157 files; `hud_v2_barge_check` 115 (the `gate_wake_command` section now runs gaps of 0, 96, 200
+and 400 ms between "Jarvis" and "stop"), speech 56, multichat 343. Mutations that fail on purpose (restored): no `gapFrom` (2 vitest), gain drift only when
+confirmed (4), `freeFrom` reset on any self frame (3), the `sayingOwnName()` check removed from `onWakeHit` (1).
 
 ## V11: the local wake word, Chrome's cloud recognizer retired (2026-10-14)
 
@@ -1911,12 +2707,21 @@ but nobody has measured recall or false hits for any phrase but "Jarvis"; wake h
 wrong thing to switch on unasked. Regex-only avatars (no literal phrase) could never have been spotted. **Question for the owner.**
 
 **The wake path is V9's.** A hit is `WakeStage.onWake` -> `onWakeHit` -> `Capture.onWake`; the rules in the V9 section (suppression, the
-self-voice gate, "counts only against an utterance the owner opened", not held in reserve) are untouched. One addition, because this
-recognizer's lag is new: it reports a word 0.35 s (median) to 0.64 s (p95) after it, plus chunking (V0; here 0.54 s after an isolated
-"Jarvis"), so a hit can land after his voice has gone quiet. `Capture.onWake(heardHim)`: when `SelfVoiceGate.audibleWithin(WAKE_LAG_MS = 1 s)` says
-his sound played in the look-back, the hit is treated as his own word (dropped `self_voice`, source `wake`, not kept in reserve) unless the
-owner has an utterance open. After a reply the follow-up window covers an immediate answer, so a miss costs nothing in a conversation.
-A claimed utterance is back-dated 2 s as before (`WAKE_GRACE_MS` 1.2 s covers the lag).
+self-voice gate, "counts only against an utterance the owner opened", not held in reserve, and V9's review-round late-hit guard
+`SELF_ARM_GUARD_MS` = 1.5 s after his voice was last audible, plus `sayingOwnName()`) apply to local hits unchanged. This recognizer's lag is
+what that guard is for: it reports a word 0.35 s (median) to 0.64 s (p95) after it, plus chunking (V0; here 0.54 s after an isolated
+"Jarvis"). V11 first carried its own `Capture.onWake(heardHim)` for the same case; merging V9's guard made it redundant and it was dropped
+(`SelfVoiceGate.audibleWithin` stayed, for the command guard below). A claimed utterance is back-dated as before (`WAKE_GRACE_MS` 1.2 s covers the lag).
+
+**Merged onto V9's review round and V13 (2026-10-14).** V13 had gated Chrome's recognizer on its "Cloud fallback" switch and told the owner
+wake-by-voice was off "until local wake detection lands"; this is that, so the recognizer effect, `wakeRecognizerAllowed` and
+`hud_v2_stt_wake_windows_check.py` (whose whole subject was that gating) are gone, Settings -> Voice -> Speech-to-text now says the wake word is
+heard on this computer whatever is chosen (`wakeNote`), and `hud_v2_stt_local_check.py` asserts the recognizer is never constructed with the
+fallback on or off. V9's name check on his own sentences (`setNameMatcher`) now uses `WAKE_NAME` (/\bjarvis\b/i): "Jarvis" is the only wake word.
+Review LOWs fixed: the decoder-cache `clear()` ran after lookups and could drop a context used in the same call (cleared first, each call reads
+its own copy; unit test with a cap of 2, fails on the old order); the mic effect's catch stops the wake stage too; a command hit is refused from
+a crashed window or a muted mic; `Object.hasOwn` instead of `in` for sensitivity names and failure codes. Left as notes: the avatar picker still
+lists avatars' own wake phrases; the phase sensitivity of the model (a command over a live reply may need a second try); the daemon-side fallback.
 
 **Under a card (Q10): local playback commands, ON by default, switchable.** Keywords are the whole phrases "Jarvis pause|resume|skip|stop"
 (V-6: they start with Jarvis), not bare words: V0's bare-word recall was 38 to 69% and the phrases measure **29 of 32 (91%)** on the same

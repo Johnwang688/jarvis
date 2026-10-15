@@ -36,6 +36,58 @@ fake programs/devices and temporary configuration. No robot download or installe
 HUD/daemon restart is part of these receipts. The preserved flag inventory below
 is historical; the current fixed `--usb` exception above supersedes it.
 
+## Device programs and interop's cursor query (2026-10-14)
+
+On the owner's machine every `vexcom` started by the daemon (download, USB
+check, device reads) hung with no output until its timeout, while builds ran.
+Cause, reproduced with a replica of `create_program`'s spawn: under a PTY that
+has a size, WSL interop's Windows console first writes `ESC[6n` and waits for
+a cursor report; an unsized PTY never asks, so `vexcom --usb` run by hand
+answered in under a second. `ab84d58` answered the query for `vex-build`
+only. `terminals.STARTUP_REPLY_PROGRAMS` now lists every input-disabled VEX
+program (`vex-build`, `vex-download`, `vex-connection`, `vex-info`); the same
+one fixed `ESC[1;1R`, for the first exact query only, hidden from the ring.
+The brain terminal takes input and is not listed. The fake `vexcom` models
+the handshake with `STARTUP_DSR` beside it and exits 91 without the reply;
+`tests/v2/vex_output_check.py` (`DeviceStartup`, and the pinned set in
+`StartupProtocol`) fails against the build-only rule. After the reply the console wraps `--usb`'s
+JSON in its own sequences (`ESC[?9001h`, `ESC[?1004h`, an OSC 0 window title,
+`ESC[?25h`, the toggles off again after the first line), which the strict
+parse refused (review of #172, then seen live), so `usb_presence` removes
+escape sequences (`vex._ANSI`) from a strictly decoded snapshot and nothing
+else; the fake writes the same around its output and `UsbConsoleOutput`
+holds the live shape. With a plugged-in controller that snapshot is one
+`usb.vex` record (`0x2888`/`0x0503`, `"device":"ctrl"`) and parses to
+controller present.
+
+**First real download (2026-10-14, after #172 merged and daemon2 restarted).**
+The owner downloaded `matchload_Test` to slot 3 through the V5 controller on
+COM3 (the brain by radio): vexcom printed `Device: COM3`, `vexcom utility
+V1.0.2b2`, `download :` and `0....10....20....` to `100`, the HUD settled
+"✓ In slot 3", and the USB panel read Controller Connected, Brain
+Disconnected (the brain was not on USB). Owner-reported from the HUD.
+
+**Status colours and download progress (same day, owner's request).** The
+indicators read `Brain:` / `Controller:` (no "USB" prefix; the note under them
+still says USB presence only): green connected, red disconnected, plain
+unknown, a stale reading dimmed beside "(last confirmed)". The Download
+section shows a bar from `lib/vex.ts` `downloadProgress`, which reads only a
+line of numbers and dots (a number per 10%, a dot per 2%; the last such line
+wins) and is full once the record has succeeded. Checks: `lib/vex.test.ts`
+and `_feedback_checks` in `tests/face/hud_v2_vex_check.py` (labels, computed
+colours against `--green`/`--red`, the bar at 34%, 70%, 100%).
+
+**Card badges and a build-row Download (same day, owner's request).** The
+project card carries `● Brain ● Controller` (`UsbBadges`), the same reading
+and staleness as the device section (`useUsbReading`, one helper for both),
+with the full state in its label and title, shown only when the tooling is
+configured. The build row has a second Download (`vex-download-quick`, "Download
+to slot N") beside Clean. It is the same `DownloadButton` as the one under the
+pickers: the slot and name live in `BuildAndDownload` and both send them; out
+of the Tab order, no pointer focus, `isExplicitClick` only, and off under the
+same conditions. `_quick_download_checks` repeats the key, script, untrusted
+and later-click refusals for it.
+
 ## Original CLAUDE.md lines 2231–2491
 
 <!-- claude-source:002231-002491:begin -->

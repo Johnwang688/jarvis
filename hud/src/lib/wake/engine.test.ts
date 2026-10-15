@@ -141,3 +141,30 @@ describe("the pinned files", () => {
     expect(await outcome((f, b) => (f === "decoder" ? new Error("404") : b))).toBe("fetch");
   });
 });
+
+describe("the prediction-network cache", () => {
+  it("a tiny cap clears before a call, never from under it: contexts used in the same call survive", async () => {
+    const eng = await realEngine();
+    const calls: number[] = [];
+    const frame = new Float32Array(320);
+    const base = await eng.joint([[-1, 0]], frame); // fills one entry
+    eng.cacheCap = 2;
+    try {
+      // 3 contexts in one call with a cap of 2: the cache clears first, then all three are computed and used.
+      const rows = await eng.joint([[-1, 0], [0, 5], [5, 6]], frame);
+      calls.push(rows.length);
+      expect(rows.length).toBe(3);
+      for (const r of rows) expect(r.length).toBe(500);
+      // the first row is the same context as before the overflow, so the same answer
+      // (int8 matmuls round per batch, so "the same answer" is the same to within a fraction of a logit)
+      const close = (a: Float32Array, b: Float32Array) => Array.from(a.slice(0, 20)).every((v, i) => Math.abs(v - b[i]) < 0.5);
+      expect(close(rows[0], base[0])).toBe(true);
+      // and the next call, with entries that were just stored, still works
+      const again = await eng.joint([[5, 6], [-1, 0]], frame);
+      expect(again.length).toBe(2);
+      expect(close(again[1], base[0])).toBe(true);
+      expect(Array.from(again[0].slice(0, 5))).toEqual(Array.from(rows[2].slice(0, 5))); // a cached row is returned as stored
+    } finally { eng.cacheCap = 256; }
+    expect(calls).toEqual([3]);
+  }, 60_000);
+});
