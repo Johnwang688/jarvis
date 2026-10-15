@@ -1250,6 +1250,34 @@ The approval page's CSP changed the same day (no `'wasm-unsafe-eval'` on
 `/`; only a worker's fetch of its script carries it): see `editor.md`, "WebAssembly leaves the
 approval page".
 
+## Sidebar: five most recent chats per project (2026-10-15)
+
+Owner request: a project in the sidebar shows its **five most recently
+modified chats, newest first**, then a "Show N more" button (and "Show less"
+once open). The rule lives in `hud/src/lib/recentChats.ts`; `Sidebar.tsx` only
+draws it.
+
+- **Recently modified is `Thread.updated`**, the daemon's last-activity stamp
+  (set on each turn in `jarvis/v2/daemon.py`), not `created`. An unreadable
+  stamp sorts last and ties keep the daemon's order. The window already
+  re-reads `/threads` on `turn_started`/`turn_finished`, so the order follows a
+  finished turn. No daemon change.
+- **Never hidden, however old**, kept in their sorted place and not counted by
+  "Show N more": a chat open in any drawn pane (the selected one included),
+  the row being renamed, a running turn (`Thread.running`) and any non-idle
+  activity status (needs input, unread, failed, working), so an approval card's
+  dot, a blue unread and a red failure are never behind the button. A folded
+  project's dot still reads every chat, hidden ones included.
+- **State**: per project, in localStorage `jarvis.hud.sidebar.showmore`
+  (`{"<project id>": true}`), read and written inside try/catch and ignored
+  when malformed. The button is a real `<button>` with `aria-expanded` and the
+  count; a project with five or fewer chats has none.
+- Unchanged: archived chats (not in `/threads`), the Task list and a task's
+  own threads (they are not chats of the project), the chat panes.
+- Tests: `hud/src/lib/recentChats.test.ts` and
+  `tests/face/hud_v2_recent_chats_check.py` (8 chats: 5 newest-first, "Show 3
+  more", an old open chat kept, attention states kept, reload, keyboard).
+
 
 ## Tool-call labels and approval cards withhold typed credentials (2026-10-15)
 

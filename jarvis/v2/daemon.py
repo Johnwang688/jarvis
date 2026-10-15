@@ -1608,10 +1608,15 @@ class Daemon:
                 ledger = self.router.ledger
                 before = ledger.totals(provider=thread.provider.value)
                 old_quota = ledger.quota(thread.provider.value) if hasattr(ledger, "quota") else None
+                partial = getattr(ledger, "partial_turns", None)
+                old_partial = partial(provider=thread.provider.value) if partial else None
                 rows = len(ledger._rows)
                 ledger.on_event(record)
                 new_quota = ledger.quota(thread.provider.value) if hasattr(ledger, "quota") else None
+                # A stopped turn's usage event changes no total, only whether
+                # the totals are a lower bound: the HUD must hear of that too.
                 if (before != ledger.totals(provider=thread.provider.value) or old_quota != new_quota
+                        or (partial and old_partial != partial(provider=thread.provider.value))
                         or (event.kind == EventKind.ERROR and len(ledger._rows) != rows)):
                     self.bus.publish({"kind": "usage_updated", "data": {"provider": thread.provider.value}})
             self.bus.publish(record)

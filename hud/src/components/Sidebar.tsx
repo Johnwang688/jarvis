@@ -57,6 +57,7 @@ import type { PaneNo } from "../lib/workspace";
 import { shortId, threadTooltip } from "../lib/threadmodel";
 import { shortThreadId, threadLabel } from "../lib/threadTitle";
 import { projectNamesTaken, threadTitlesTaken } from "../lib/projects";
+import { loadShowMore, moreLabel, recentChats, saveShowMore } from "../lib/recentChats";
 import { InlineRename } from "./InlineRename";
 import { HoverTitle } from "./HoverTitle";
 import { CollapseButton } from "./Layout";
@@ -142,6 +143,14 @@ export const Sidebar = memo(function Sidebar(props: {
   const [pmenu, setPmenu] = useState<ProjectMenuAt | null>(null);
   const [renaming, setRenaming] = useState<{ kind: "project" | "thread"; id: string } | null>(null);
   const [note, setNote] = useState<{ text: string; error: boolean } | null>(null);
+  // Projects whose full chat list the owner asked for (remembered, not stored on the server).
+  const [showAll, setShowAll] = useState<Record<string, boolean>>(() => loadShowMore());
+  const toggleShowAll = (id: string) =>
+    setShowAll((m) => {
+      const next = { ...m, [id]: !m[id] };
+      saveShowMore(next);
+      return next;
+    });
   const pmenuFirst = useRef<HTMLButtonElement | null>(null);
   const pmenuOpener = useRef<HTMLElement | null>(null);
   const isOpen = (id: string) => expanded[id] ?? id === props.activeProjectId;
@@ -310,6 +319,15 @@ export const Sidebar = memo(function Sidebar(props: {
           const open = isOpen(p.id);
           const composing = props.composing.filter((c) => c.compose.projectId === p.id);
           const chats = props.threads.filter((t) => t.project_id === p.id && !t.task_id);
+          // Five most recent, newest first; the open, running and waiting ones are never hidden.
+          const recent = recentChats(chats, {
+            expanded: !!showAll[p.id],
+            kept: new Set([
+              ...props.open.map((o) => o.threadId),
+              ...(renaming?.kind === "thread" ? [renaming.id] : []),
+            ]),
+            status: (id) => activity.threads[id],
+          });
           const tasks = props.tasks.filter((t) => t.project_id === p.id);
           const target = over === p.id;
           // Folded, the project row carries the most urgent dot of its rows.
@@ -430,7 +448,7 @@ export const Sidebar = memo(function Sidebar(props: {
                       <span className="nm">{c.label}</span>
                     </div>
                   ))}
-                  {chats.map((t) => (
+                  {recent.shown.map((t) => (
                     <div
                       key={t.id}
                       className={
@@ -499,6 +517,18 @@ export const Sidebar = memo(function Sidebar(props: {
                       </button>
                     </div>
                   ))}
+                  {recent.more ? (
+                    <button
+                      type="button"
+                      className="tree-row indent-1 muted small morechats"
+                      data-testid={`more-chats-${p.id}`}
+                      aria-expanded={!!showAll[p.id]}
+                      onClick={() => toggleShowAll(p.id)}
+                    >
+                      <span className="tw">{showAll[p.id] ? "▴" : "▾"}</span>
+                      <span className="nm">{moreLabel(recent.hidden, !!showAll[p.id])}</span>
+                    </button>
+                  ) : null}
                   <div
                     className="tree-row indent-1 muted small"
                     data-testid={`new-task-${p.id}`}

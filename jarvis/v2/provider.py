@@ -79,10 +79,10 @@ class EventKind(str, Enum):
     TURN_FINISHED = "turn_finished"
     ERROR = "error"
     # A native sub-agent of the session (SV-1, 2026-10-15): Claude Code's
-    # Agent children. Kinds of their own, never the old kinds with a tag: a
-    # consumer that does not know them (Discord, the runner, titles, the
-    # ledger, the HUD's prose, voice) ignores them, so a child's words can
-    # never pass for the orchestrator's.
+    # Agent children, and Codex's child agents (SV-2). Kinds of their own,
+    # never the old kinds with a tag: a consumer that does not know them
+    # (Discord, the runner, titles, the ledger, the HUD's prose, voice)
+    # ignores them, so a child's words can never pass for the orchestrator's.
     SUBAGENT = "subagent"                       # lifecycle
     SUBAGENT_EVENT = "subagent_event"           # one thing a sub-agent said or did
 
@@ -102,6 +102,9 @@ class Event:
     #   reviewer_declined: {"tool", "args", "command": str|None, "reason": str}
     #   question: {"req_id", "text", "options": list[str]}
     #   usage: {"input", "output", "cached", "cost_usd": float|None, "provider_reported": dict}
+    #     (Codex also: "partial_turns": int, the session's turns that ended
+    #     interrupted or failed, whose usage may be under-reported; nonzero
+    #     makes its token counts a lower bound)
     #     (Claude also: "cost_total": float|None, the CLI's running total its
     #     `cost_usd` was measured against, which the daemon saves on the thread)
     #   turn_finished: {"stop": "end"|"max_turns"|"interrupted"|"error"}
@@ -110,8 +113,9 @@ class Event:
     #     "running"|"backgrounded"|"done"|"failed"|"stopped", "task_id",
     #     "parent_sid", "depth", "background", "name", "kind", "last_tool",
     #     "tokens", "tool_uses", "duration_ms", "stop_reason"} (keys present
-    #     when known). `sid` is "cl:<the spawning Agent call's id>". Never a
-    #     `usage`: a sub-agent's tokens ride here, outside the ledger.
+    #     when known). `sid` is "cl:<the spawning Agent call's id>" (Claude) or
+    #     "cx:<the child's threadId>" (Codex, SV-2). Never a `usage`: a
+    #     sub-agent's tokens ride here, outside the ledger.
     #   subagent_event: {"sid", "event": {"kind", "data"}}, the inner kind one
     #     of text, thinking, tool_started, tool_finished, reviewer_declined
     #     (each with the data above) or result {"text", "status"}: the CLI's

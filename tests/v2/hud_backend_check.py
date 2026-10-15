@@ -971,7 +971,8 @@ class Backend(unittest.TestCase):
             self.assertEqual(set(row), {"state", "reason", "today", "allowance", "quota"})
             self.assertEqual(row["state"], "available")
             self.assertIsNone(row["quota"])
-            self.assertEqual(set(row["today"]), {"work_tokens", "spend_usd", "equivalent_usd"})
+            self.assertEqual(set(row["today"]), {"work_tokens", "spend_usd", "equivalent_usd", "partial_turns"})
+            self.assertEqual(row["today"]["partial_turns"], 0)
         self.providers[P.CODEX].report = {"limitId": "codex", "primary": {"usedPercent": 42, "windowDurationMins": 300, "resetsAt": 1900000000},
                                          "secondary": {"usedPercent": 8, "windowDurationMins": 10080, "resetsAt": 1900001000}}
         thread = self.thread(P.CODEX)
@@ -1177,6 +1178,71 @@ class Backend(unittest.TestCase):
         self.request("GET", "/usage")
         self.refreshed()
         self.assertEqual(len(calls), 1)
+
+    def test_a_stopped_codex_chat_takes_the_next_message(self):
+        """The owner's Stop on a Codex chat, then another message, through
+        the real daemon and the real CodexProvider over pipes to the fake
+        app-server (`codex_provider_check.peer`, mode `stop_once`: Codex
+        0.161.0's answer to `turn/interrupt`). Until 2026-10-15 an
+        interrupted turn left the accounting "incomplete" for good: the next
+        message failed ("previous turn accounting incomplete"), the session
+        was dropped, and every resume after it was refused, a restart's
+        included — the chat was dead."""
+        import codex_provider_check as CP
+        from jarvis.v2.providers import codex, codex_config
+        brain = CP.Brain(self.root)
+        auth = self.root / "codex-owner"
+        (auth / "skills").mkdir(parents=True)
+        (auth / "auth.json").write_text("FAKE AUTH: never read")
+        for patcher in (patch.object(codex_config, "owner_home", return_value=auth),
+                        patch.object(codex, "RpcProcess", brain.rpc),
+                        patch.object(config, "CHAT_WORKTREES_DIR", self.root / "chat-worktrees"),
+                        patch.object(codex.CodexProvider, "_probe", return_value=("/fake/codex", "fake"))):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        def idle(thread):
+            # A dropped session is idle too: the bug dropped it.
+            eventually(lambda: getattr(self.daemon._sessions.get(thread.id), "worker", None) is None)
+
+        def said(thread):
+            records = [e for e in self.events_all() if e.get("thread_id") == thread.id]
+            return ([e["data"].get("message") for e in records if e["kind"] == "error"],
+                    [e["data"]["stop"] for e in records if e["kind"] == "turn_finished"])
+
+        for n, mode in enumerate(("stop_once", "stop_once_quiet"), 1):
+            brain.script["mode"] = mode
+            self.daemon.providers[P.CODEX] = codex.CodexProvider()
+            thread = self.thread(P.CODEX)
+            started = len(brain.calls("turn/start"))
+            self.request("POST", f"/threads/{thread.id}/send", {"text": "start"}, status=202)
+            brain.wait_call("turn/start", started + 1)
+            self.daemon.interrupt(thread.id)
+            idle(thread)
+            records = self.events_all()
+            # The stopped turn makes today's Codex count a lower bound, and
+            # the HUD hears so (2026-10-15 follow-up).
+            self.assertTrue(any(e["kind"] == "usage_updated" and e["data"]["provider"] == "codex"
+                                for e in records), mode)
+            self.assertEqual([e["data"]["partial_turns"] for e in records
+                              if e.get("thread_id") == thread.id and e["kind"] == "usage"][-1:], [1], mode)
+            self.assertEqual(self.request("GET", "/usage")["providers"]["codex"]["today"]["partial_turns"], n)
+            self.assertEqual([e["data"]["stop"] for e in records
+                              if e.get("thread_id") == thread.id and e["kind"] == "turn_finished"],
+                             ["interrupted"], mode)
+            logged = [json.loads(line) for line in
+                      self.stores.threads.path(thread.id).with_name("log.jsonl").read_text().splitlines()]
+            self.assertEqual([r["data"]["partial_turns"] for r in logged if r.get("kind") == "usage"][-1], 1)
+            self.request("POST", f"/threads/{thread.id}/send", {"text": "and now"}, status=202)
+            idle(thread)
+            self.assertEqual(said(thread), ([], ["end"]), mode)
+            self.assertIn(thread.id, self.daemon._sessions, "the session was not dropped")
+            self.assertEqual(len(brain.calls("turn/start")), started + 2, mode)
+            # And it resumes, as after a daemon restart.
+            self.daemon.close_thread(thread.id)
+            self.request("POST", f"/threads/{thread.id}/send", {"text": "after restart"}, status=202)
+            idle(thread)
+            self.assertEqual(said(thread), ([], ["end"]), mode)
+            self.daemon.close_thread(thread.id)
 
     def test_a_busy_codex_backs_off_briefly(self):
         from jarvis.v2.providers.codex import MetadataBusy
@@ -3006,13 +3072,15 @@ class CronChecks(unittest.TestCase):
 
     def test_codex_notification_adapter(self):
         report = {"primary": {"usedPercent": 25, "windowDurationMins": 300, "resetsAt": 1900000000}}
-        native = SimpleNamespace(brief=SimpleNamespace(model=None), accounting=SimpleNamespace(usage=lambda: Usage(10, 4, 2)))
+        native = SimpleNamespace(brief=SimpleNamespace(model=None), accounting=SimpleNamespace(usage=lambda: Usage(10, 4, 2),
+                                                                                       partial_turns=1))
         handle = SessionHandle("12345678", P.CODEX, "codex:fake", native)
         events = list(CodexProvider()._notification(handle, "account/rateLimits/updated", {"rateLimits": report}))
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0].kind, K.USAGE)
         self.assertEqual(events[0].data["provider_reported"]["rate_limits"], report)
         self.assertEqual(events[0].data["input"], 10)
+        self.assertEqual(events[0].data["partial_turns"], 1)
 
     def test_hud_cli(self):
         from jarvis.__main__ import cmd_hud

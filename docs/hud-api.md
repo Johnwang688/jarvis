@@ -282,8 +282,10 @@ every one of these routes asks (`kind`):
 - `GET /usage` → `{"providers": {"claude": {...}, "codex": {...}, "fast":
   {...}}}` where each is `{"state": "available"|"over_threshold"|"cooling"|
   "unavailable", "reason", "today": {"work_tokens", "spend_usd",
-  "equivalent_usd"}, "allowance": {...}, "quota": null | {"windows": [
-  {"name", "used_percent", "resets_at"}]}}`. `quota` is filled only from
+  "equivalent_usd", "partial_turns"}, "allowance": {...}, "quota": null | {"windows": [
+  {"name", "used_percent", "resets_at"}]}}`. `partial_turns` (2026-10-15)
+  is today's Codex turns that ended interrupted or failed. When it is
+  nonzero, `work_tokens` is a lower bound. It is 0 for other providers. `quota` is filled only from
   a provider's own report, never computed: Codex rate-limit updates
   (5h and weekly), and Claude's 5h and week windows from Claude Code's
   own usage endpoint when a subscription login is present. The login
@@ -3069,21 +3071,24 @@ for supported profiles and the offline acceptance limits.
 
 ## Native sub-agents (SV-1, 2026-10-15)
 
-A Claude chat's own Agent children (Claude Code 2.1.295; Codex's come with
-SV-2) are **not the orchestrator**. What a child says or does never becomes
+A chat's own native sub-agents — Claude Code's Agent children (2.1.295,
+SV-1) and Codex's child agents (0.161, SV-2) — are **not the orchestrator**. What a child says or does never becomes
 the thread's `text`, `tool_*` or `thinking`: not in the transcript route,
 the Discord mirror, a task's result, titles, the ledger or `/events`. It is
 kept apart, in the thread's own `subagents.jsonl`, and read only through the
 two routes below. Plan: `docs/plans/2026-10-13-subagent-view.md`; protocol:
 `docs/plans/2026-10-15-sv0-findings.md`; notes:
-`docs/notes/providers-runtime.md` ("Claude sub-agents are their own").
+`docs/notes/providers-runtime.md` ("Claude sub-agents are their own",
+"Codex sub-agents are their own").
 
-A child is a **sid**, `cl:<the spawning Agent call's id>` (`cx:` is reserved
-for Codex), matching `^(cl|cx):[A-Za-z0-9_-]{1,128}$`. The parent's Agent
+A child is a **sid**, `cl:<the spawning Agent call's id>` for Claude or
+`cx:<the child's threadId>` for Codex, matching
+`^(cl|cx):[A-Za-z0-9_-]{1,128}$`. The parent's Agent
 call stays an ordinary `tool_started`/`tool_finished` pair with that same
 `call_id`, so a row can sit where it was spawned. Its `tool_finished` is the
 spawn's receipt; for a background child ("Async agent launched
-successfully") it is **not** the child's end.
+successfully") it is **not** the child's end. A Codex spawn is no parent tool
+call: the row sits where its `subagent` `started` record is.
 
 **Status**: `running` (foreground, live), `backgrounded` (live and not
 waited for: Claude Code's default, so a child outlives the turn that spawned
@@ -3102,6 +3107,60 @@ decides an end. Jarvis infers one only when:
 /threads/{id}/interrupt` is Claude Code's interrupt, which stops every
 background agent of the session too, even between turns (SV-0 finding 6).
 There is no per-child Stop yet (SV-4).
+
+### Codex children (SV-2)
+
+What differs from Claude's, on the same record and routes:
+
+- **Identity.** A child is announced only by Codex's `subAgentActivity`
+  item (kind `started`) on the orchestrator's thread, or on its parent
+  child's for a grandchild (`depth` 2, `parent_sid`), never by
+  `thread/started` or `collabAgentToolCall`. A thread nobody announced is
+  dropped. `name` is the model-chosen `agentPath` (`/root/<task_name>`)
+  reduced to `[A-Za-z0-9_./-]`, at most 40 characters, as on its approval
+  cards. No `kind`, no `task_id`.
+- **Status** is the child's own turn's. `running` while live: Codex has no
+  foreground/background, every child may outlive the turn that spawned it,
+  and the turn's end never ends one (`background` is always false). Its
+  `turn/completed` gives `done`, `failed` (with Codex's reason as a
+  `result` entry) or `stopped`: `stop_reason` "the orchestrator stopped it"
+  (the model's own `interrupt_agent`), "its turn was interrupted" (a
+  `turn/interrupt` on its thread), or "Codex closed it" (`thread/closed`).
+  The orchestrator's `subAgentActivity` `completed` is not read: Codex sends
+  none for a failed or externally interrupted child. A finished child that
+  Codex gives another turn (`sendInput`, `followupTask`) is `running` again,
+  with a second `started`; only Codex's own `started` from the session that
+  ran it can do that, never a stale word (a Claude child is never revived). Jarvis ends one itself as for
+  Claude: the session gone (closed, archived, lost, a fatal error), or a
+  restart.
+- **The thread's Stop interrupts the orchestrator's turn only**; its children
+  run on (SV-0) and the chat continues (#200), so a child's later end lands
+  in its own record as usual, read by the next message. A model switch rides
+  the next `turn/start`, so it ends none either.
+- **Usage.** `tokens` is the child thread's own running total; `tool_uses`
+  counts its tool items, `last_tool` names the newest (`shell`,
+  `apply_patch`, an MCP tool), `duration_ms` is its last turn's. Never the
+  ledger, `thread.tokens` or the session's accounting: the orchestrator's
+  totals already exclude its children.
+- **Transcript.** `assistant`: a completed message, scrubbed as Claude's is.
+  `tool`: a command (`shell`, labelled from its command), a file change
+  (`apply_patch`, labelled from its paths, never its diff) or an MCP call
+  (by name; `hud_browser_act` is "Browser action"), folded with its outcome
+  (`denied` when it was declined). `result`: only for a failed child.
+  `declined`: a reviewer's denial (a task's `auto_review`), the tool's name.
+  Not kept: deltas, reasoning, plans, the child's own brief, its `wait`
+  calls.
+- **Between turns nobody reads the connection** (SV-6). A child that talks
+  after the orchestrator's turn is recorded when the next message is sent,
+  under that turn's `turn_id`.
+- **Approval cards** are SV-2a's: a child's command or file approval is
+  always an owner-asked widening naming it ("Codex sub-agent ‹name› (not the
+  orchestrator)"). The gate question carries `subagent` as that name, not
+  the sid.
+- **No per-child Stop** (SV-4). Codex's `turn/interrupt` on a child's thread
+  ends that child's turn (`stopped`), but a command it is running runs to its
+  end, and the orchestrator's model is not told (SV-0 finding 12). Whether
+  Stop is offered with that caveat is the owner's call.
 
 ### `GET /threads/{id}/subagents`
 
@@ -3154,7 +3213,11 @@ Owner-only, read-only, as above. `sid` may be percent-encoded (`cl%3A…`).
 ```
 
 - `assistant`: a text the child wrote (whole: the CLI streams no child
-  deltas), at most 4000 characters. Claude's credential scrub has run.
+  deltas), at most 4000 characters. Scrubbed by the record the same way for
+  both providers (`redact.scrub_text`): Jarvis's own credential values, the
+  known key shapes (`credential_patterns`), bearer tokens, JWTs and
+  jarvis-mcp tokens become `[redacted]`; a scrub that fails shows
+  `[withheld]`.
 - `tool`: one call, folded with its outcome: `running`, `ok`, `failed`,
   `denied` (Jarvis's gate or Claude's reviewer refused it), or `stopped`
   (no outcome came and the child has ended). `label` is the daemon's
@@ -3162,7 +3225,7 @@ Owner-only, read-only, as above. `sid` may be percent-encoded (`cl%3A…`).
   is always "Browser action". **Never `args` or a result summary.**
 - `result`: the CLI's closing word on the child (`task_notification.
   summary`): its final report when done, its description when stopped, the
-  error when failed. At most 4000 characters.
+  error when failed. At most 4000 characters, scrubbed as `assistant` is.
 - `declined`: `{"role": "declined", "name": "Bash", "seq", "at"}` — Claude's
   reviewer declined one of the child's calls (the call's own entry says
   `denied`). The tool's name only: never the command, its arguments or the
