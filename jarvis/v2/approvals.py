@@ -145,6 +145,10 @@ class ApprovalRequest:
     hud_only: bool = False
     browser: dict[str, Any] | None = field(default=None, repr=False)
     max_wait_s: float | None = None
+    # The native sub-agent whose call this is (SV-3): its sid, so the HUD can
+    # link the card to the child's row. Set by `permissions.build_permit`
+    # from a provider's `subagent_sid`; an id, never a word the model chose.
+    subagent: str = ""
     _hud_private: bool = field(default=False, init=False, repr=False)
 
     @property
@@ -169,6 +173,7 @@ class ApprovalRequest:
             "allowlistable": self.allowlistable, "timeout_s": self.timeout_s,
             "headline": self.headline,
             "discord_channel_id": self.discord_channel_id,
+            **({"subagent": self.subagent} if self.subagent else {}),
         }
 
     def owner_json(self) -> dict:
