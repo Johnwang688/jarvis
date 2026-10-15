@@ -235,12 +235,11 @@ SETTING_SOURCES = ["user", "project"]
 # reach an event. `secrets.scrub` covers the files Jarvis owns; the CLI's own
 # OAuth bundle (`~/.claude/.credentials.json`) is not one of them, and this
 # provider is the first thing in the codebase whose child process holds it.
-_TOKENISH = re.compile(r"\b(?:sk|oat|rt)[-_][A-Za-z0-9_\-]{12,}", re.IGNORECASE)
-_JWTISH = re.compile(r"\beyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]+")
-# A jarvis-mcp caller token (`callers.TOKEN_PREFIX`, plan 2026-10-10 §1.1):
-# the CLI's stderr could quote its MCP config back at us.
-_JMCPISH = re.compile(r"jmcp_[A-Za-z0-9_\-]{8,}")
-_REDACTED = "[redacted]"
+# The shapes live in `redact.py` (shared with the sub-agent record's scrub,
+# SV-2 review); a jarvis-mcp caller token is among them, since the CLI's
+# stderr could quote its MCP config back at us.
+from ..redact import JMCPISH as _JMCPISH, JWTISH as _JWTISH, REDACTED as _REDACTED, \
+    TOKENISH as _TOKENISH  # noqa: E402
 
 
 def _safe(text: Any) -> str:

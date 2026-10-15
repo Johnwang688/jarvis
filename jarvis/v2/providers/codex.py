@@ -62,6 +62,7 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass, field, replace
+import hashlib
 import json
 import logging
 import os
@@ -166,6 +167,68 @@ def _child_label(path) -> str:
 
 def _from_child(child: str | None) -> str:
     return f" (from Codex sub-agent ‹{child}›)" if child else ""
+
+
+# What a child says and does (SV-2, 2026-10-15; SV-0 findings 8, 12, 13). A
+# known child's notifications arrive under its own `threadId`; they are the
+# child's, never the orchestrator's: SUBAGENT (its lifecycle) and
+# SUBAGENT_EVENT (one thing it said or did), the kinds SV-1 made for Claude's,
+# recorded apart by the daemon (`subagents.py`). Its sid is "cx:<threadId>".
+# Its status is its own turn's: `turn/started` running, `turn/completed`
+# done/failed/stopped (the parent's `subAgentActivity` `completed` is absent
+# for a failed or externally interrupted child, so it is never read as the
+# end). Its tokens are its own thread's totals, never the session's
+# accounting. Its words are scrubbed by the record (`subagents.prepare`), as
+# Claude's are. Deltas, reasoning, plans and its own brief are not passed on;
+# a tool is its name and the arguments the daemon labels it from, then its
+# outcome — never a result. A child outlives the turn that spawned it, so
+# the turn's end never ends one; the daemon ends them with the session.
+CHILD_TEXT_CHARS = 4000      # a child's text or failure, as the record keeps it
+CHILD_CALL_LIMIT = 256       # a child's tool calls started and not yet finished
+_SID_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")
+_CHILD_END = {"completed": "done", "failed": "failed", "interrupted": "stopped"}
+_CHILD_TOOL_ITEMS = ("commandExecution", "fileChange", "mcpToolCall")
+
+
+def child_sid(thread_id) -> str:
+    """A Codex child's sid: "cx:" and its threadId. An id the pattern does not
+    fit is hashed, never dropped (the same rule as Claude's `cl:`)."""
+    text = str(thread_id or "")
+    if _SID_ID.fullmatch(text):
+        return "cx:" + text
+    return "cx:h" + hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()[:32]
+
+
+def _child_text(value) -> str:
+    """A child's words bound for its record, capped. They are scrubbed in one
+    place for both providers, `SubagentRecords.prepare` (`redact.scrub_text`),
+    before memory, the file or a route sees them; nothing else reads them."""
+    # Twice the record's cap: it scrubs before it cuts, so a credential is
+    # never halved here into a shape no layer knows.
+    return value[:CHILD_TEXT_CHARS * 2] if isinstance(value, str) else ""
+
+
+def _count(value) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) and 0 <= value < 1 << 53 else None
+
+
+@dataclass
+class _ChildView:
+    """One Codex child as its record sees it (SV-2)."""
+    sid: str
+    name: str
+    depth: int = 1
+    parent_sid: str | None = None
+    status: str = "running"
+    announced: bool = False
+    turn: str | None = None            # the child's own turn now running
+    tokens: int | None = None
+    tool_uses: int = 0
+    duration_ms: int | None = None
+    last_tool: str = ""
+    stop_reason: str | None = None
+    asked_to_stop: bool = False        # the orchestrator's interrupt_agent said so
+    calls: dict = field(default_factory=dict)  # its open tool calls, oldest first
 
 
 def _mcp_approval(params, depth: int = 0) -> bool:
@@ -537,6 +600,9 @@ class _Session:
     children: dict[str, str] = field(default_factory=dict)
     idle_children: set[str] = field(default_factory=set)
     child_items: dict[str, tuple[str, dict]] = field(default_factory=dict)
+    # What each known child's record is told (SV-2), by threadId: made and
+    # forgotten with its `children` entry, so it is bounded by CHILD_LIMIT.
+    child_views: dict[str, _ChildView] = field(default_factory=dict)
 
 
 class CodexProvider:
@@ -1104,6 +1170,16 @@ class CodexProvider:
                             s.items[item["id"]] = _remember(s.items.get(item["id"]), item)
                     early.append(msg)
                     continue
+                if (isinstance(params, dict) and isinstance(params.get("threadId"), str)
+                        and params["threadId"] != s.thread_id and params["threadId"] in s.child_views):
+                    # A known child's (SV-2): its own record, never the
+                    # orchestrator's turn, text, tools or accounting.
+                    yield from self._child_notification(h, method, params)
+                    continue
+                if isinstance(params, dict) and params.get("threadId") == s.thread_id:
+                    # The orchestrator spawning a child (SV-2), whatever turn
+                    # the item names: announced, then handled as before.
+                    yield from self._announce(h, method, params)
                 if params.get("threadId") not in (None, s.thread_id):
                     continue
                 tid = params.get("turnId", (params.get("turn") or {}).get("id"))
@@ -1441,14 +1517,28 @@ class CodexProvider:
                     # Forget the oldest child with no turn running; a busy
                     # one is never dropped, so with none the newcomer stays
                     # unknown and its requests fail closed.
-                    idle = next((c for c in s.children if c in s.idle_children), None)
+                    # Of those, one whose record has also ended first (SV-2):
+                    # its last turn's end has been handled, not just read.
+                    idle = next((c for c in s.children if c in s.idle_children
+                                 and getattr(s.child_views.get(c), "status", "done") != "running"),
+                                next((c for c in s.children if c in s.idle_children), None))
                     if idle is None:
                         return
                     del s.children[idle]
                     s.idle_children.discard(idle)
                     for iid in [i for i, (owner, _) in s.child_items.items() if owner == idle]:
                         del s.child_items[iid]
+                    with s.mutex:
+                        s.child_views.pop(idle, None)
                 s.children[agent] = _child_label(item.get("agentPath"))
+                # Its record (SV-2): announced when this message is handled,
+                # in wire order, which may be after the early queue.
+                parent = s.child_views.get(tid) if tid != s.thread_id else None
+                with s.mutex:
+                    s.child_views[agent] = _ChildView(
+                        sid=child_sid(agent), name=s.children[agent],
+                        depth=min(parent.depth + 1, 16) if parent is not None else 1,
+                        parent_sid=parent.sid if parent is not None else None)
             return
         if (tid != s.thread_id and tid in s.children
                 and item.get("type") in ("commandExecution", "fileChange")
@@ -1462,6 +1552,204 @@ class CodexProvider:
             s.child_items[item["id"]] = (tid, _remember(prev if owner == tid else None, kept))
             while len(s.child_items) > CHILD_ITEM_LIMIT:
                 s.child_items.pop(next(iter(s.child_items)))
+
+    # -- what a child says and does (SV-2) -------------------------------------
+
+    def _life(self, h, view: _ChildView, op: str) -> Event:
+        """A SUBAGENT lifecycle event for `view`: ids, status and counts, plus
+        its cleaned label as the name (the daemon cleans it again)."""
+        data = {"sid": view.sid, "op": op, "status": view.status, "depth": view.depth,
+                "background": False, "name": view.name, "tool_uses": view.tool_uses}
+        for key in ("parent_sid", "last_tool", "tokens", "duration_ms", "stop_reason"):
+            value = getattr(view, key)
+            if value not in (None, ""):
+                data[key] = value
+        return self._event(h, EventKind.SUBAGENT, **data)
+
+    def _inner(self, h, view: _ChildView, kind: str, **data) -> Event:
+        return self._event(h, EventKind.SUBAGENT_EVENT, sid=view.sid,
+                           event={"kind": kind, "data": data})
+
+    def _announce(self, h, method, p):
+        """A `subAgentActivity` item/started on this session's thread or a
+        known child's. `started` announces the child it names, once (its
+        registration is `_note_child`'s); `interrupted` is the spawner's
+        `interrupt_agent`, which says why the child's turn will end.
+        `completed` is not read: a child's end is its own turn's."""
+        s = h.native
+        item = p.get("item")
+        if (method != "item/started" or not isinstance(item, dict)
+                or item.get("type") != "subAgentActivity"):
+            return
+        agent = item.get("agentThreadId")
+        view = s.child_views.get(agent) if isinstance(agent, str) else None
+        if view is None:
+            return
+        if item.get("kind") == "started" and not view.announced:
+            view.announced = True
+            yield self._life(h, view, "started")
+        elif item.get("kind") == "interrupted":
+            view.asked_to_stop = True
+
+    @staticmethod
+    def _child_tool(item) -> tuple[str, dict]:
+        """A child's tool item as a name and the arguments its label is made
+        from: a command and its folder, a patch's paths (never its diff), an
+        MCP call's arguments (never `hud_browser_act`'s)."""
+        kind = item.get("type")
+        if kind == "commandExecution":
+            return "shell", {k: item[k] for k in ("command", "cwd") if isinstance(item.get(k), str)}
+        if kind == "fileChange":
+            return "apply_patch", {"paths": _change_paths(item.get("changes", []))[0][:20]}
+        server, tool = item.get("server"), item.get("tool")
+        server = server if isinstance(server, str) else ""
+        tool = tool if isinstance(tool, str) else ""
+        name = tool if server == "jarvis" else f"mcp__{server}__{tool}"
+        args = item.get("arguments")
+        private = server == "jarvis" and tool == "hud_browser_act"
+        return name[:256], (dict(args) if isinstance(args, dict) and not private else {})
+
+    @staticmethod
+    def _child_outcome(item) -> str:
+        status = item.get("status")
+        if status == "declined":
+            return "denied"
+        if item.get("type") == "commandExecution":
+            return "ok" if status == "completed" and item.get("exitCode") == 0 else "failed"
+        if item.get("type") == "mcpToolCall":
+            if status != "completed" or item.get("error") is not None:
+                return "failed"
+            result = item.get("result")
+            content = result.get("content") if isinstance(result, dict) else None
+            first = content[0] if isinstance(content, list) and content else None
+            text = first.get("text") if isinstance(first, dict) else None
+            if item.get("server") == "jarvis" and isinstance(text, str):
+                if text.startswith(("Refused", "The user declined")):
+                    return "denied"
+                if text.startswith(("Error:", "Stopped:")):
+                    return "failed"
+            return "ok"
+        return "ok" if status == "completed" else "failed"
+
+    def _child_notification(self, h, method, p):
+        """One notification from a known child's thread, as that child's
+        record: never the orchestrator's events, turn or accounting.
+        Anything not understood is dropped, never shown as the parent's."""
+        s = h.native
+        view = s.child_views.get(p["threadId"])
+        if view is None:
+            return
+        if not view.announced:
+            # Its announcement was not handled first (it never is otherwise,
+            # SV-0 finding 10): it is still a child, started here.
+            view.announced = True
+            yield self._life(h, view, "started")
+        if method == "turn/started":
+            turn = p.get("turn") if isinstance(p.get("turn"), dict) else {}
+            view.turn = turn.get("id") if isinstance(turn.get("id"), str) else None
+            if view.status != "running":
+                # A finished child given more to do (sendInput, followupTask):
+                # live again, on Codex's own word.
+                view.status, view.stop_reason, view.asked_to_stop = "running", None, False
+                yield self._life(h, view, "started")
+            return
+        if method == "turn/completed":
+            turn = p.get("turn") if isinstance(p.get("turn"), dict) else {}
+            ended = turn.get("id")
+            if view.status != "running" or (isinstance(ended, str) and view.turn not in (None, ended)):
+                return                      # said once; another turn's end is not this one's
+            view.status = _CHILD_END.get(turn.get("status"), "failed")
+            view.turn = None
+            view.duration_ms = _count(turn.get("durationMs")) if _count(turn.get("durationMs")) is not None \
+                else view.duration_ms
+            if view.status == "stopped":
+                view.stop_reason = ("the orchestrator stopped it" if view.asked_to_stop
+                                    else "its turn was interrupted")
+            yield self._life(h, view, "finished")
+            error = turn.get("error") if isinstance(turn.get("error"), dict) else {}
+            text = _child_text(error.get("message"))
+            if view.status == "failed" and text.strip():
+                # Codex's word on why (a failed child gets no parent-side
+                # notice at all, SV-0): the child's, never the orchestrator's.
+                yield self._inner(h, view, "result", text=text, status="failed")
+            return
+        if method == "thread/closed":
+            if view.status == "running":
+                view.status, view.stop_reason, view.turn = "stopped", "Codex closed it", None
+                yield self._life(h, view, "finished")
+            return
+        if method == "thread/tokenUsage/updated":
+            usage = p.get("tokenUsage") if isinstance(p.get("tokenUsage"), dict) else {}
+            total = usage.get("total") if isinstance(usage.get("total"), dict) else {}
+            tokens = _count(total.get("totalTokens"))
+            if tokens is not None and tokens != view.tokens:
+                view.tokens = tokens
+                yield self._life(h, view, "progress")
+            return
+        if method == "item/autoApprovalReview/completed":
+            review = p.get("review") if isinstance(p.get("review"), dict) else {}
+            if review.get("status") != "denied":
+                return
+            # The tool's name only: never its command, arguments or the
+            # reviewer's rationale (the hatch is the orchestrator's, SV-1).
+            action = p.get("action") if isinstance(p.get("action"), dict) else {}
+            kind = action.get("type")
+            if kind in ("command", "execve", "writeStdin"):
+                name = "shell"
+            elif kind == "applyPatch":
+                name = "apply_patch"
+            elif kind == "mcpToolCall":
+                name = action.get("toolName") if action.get("server") == "jarvis" else "mcp"
+            else:
+                owner, item = s.child_items.get(p.get("targetItemId"), (None, None)) \
+                    if isinstance(p.get("targetItemId"), str) else (None, None)
+                name = self._tool(item)[0] if owner == p["threadId"] and item else "unknown"
+            yield self._inner(h, view, "reviewer_declined", tool=name if isinstance(name, str) else "mcp")
+            return
+        if method not in ("item/started", "item/completed") or not isinstance(p.get("item"), dict):
+            return                          # deltas, plans, reasoning, status: not passed on
+        item = p["item"]
+        kind = item.get("type")
+        if kind == "subAgentActivity":
+            # A grandchild, announced on its parent child's thread.
+            yield from self._announce(h, method, p)
+            return
+        if kind == "agentMessage":
+            text = _child_text(item.get("text")) if method == "item/completed" else ""
+            if text.strip():
+                yield self._inner(h, view, "text", text=text)
+            return
+        call = item.get("id")
+        if kind not in _CHILD_TOOL_ITEMS or not isinstance(call, str) or not 0 < len(call) <= 128:
+            return
+        name, args = self._child_tool(item)
+        if method == "item/started":
+            if call in view.calls:
+                return
+            while len(view.calls) >= CHILD_CALL_LIMIT:
+                del view.calls[next(iter(view.calls))]     # the oldest open call
+            view.calls[call] = None
+            view.tool_uses += 1
+            view.last_tool = name
+            yield self._inner(h, view, "tool_started", call_id=call, name=name, args=args)
+            yield self._life(h, view, "progress")
+            return
+        if call not in view.calls:
+            return
+        view.calls.pop(call, None)
+        outcome = self._child_outcome(item)
+        yield self._inner(h, view, "tool_finished", call_id=call, name=name,
+                          ok=outcome == "ok", outcome=outcome)
+
+    def live_subagents(self, h: SessionHandle) -> set[str]:
+        """The sids of the children this session's Codex still runs, as far
+        as it has said. A model switch rides the next turn/start (no new
+        process), so it keeps them all; a closed session runs none."""
+        s = h.native
+        if s is None or s.closed.is_set():
+            return set()
+        with s.mutex:
+            return {v.sid for v in s.child_views.values() if v.announced and v.status == "running"}
 
     def _server_request(self, h, msg, request, child: str | None = None):
         """Answer one server request. `child` is the label of the known
