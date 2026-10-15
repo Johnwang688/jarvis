@@ -1101,11 +1101,13 @@ def _safe_command(command: str) -> str | None:
     """The command as the log keeps it: scrubbed of credential values and
     capped. Layer 1 already refuses a command that names a credential file;
     this is the second half of the same rule for one that merely carries a
-    value."""
+    value — a known one, a typed one (`MY_TOKEN=…`, `Authorization: …`,
+    `curl -u user:pass`: `redact_inline`) or a known shape. The log only:
+    what was judged and asked about is the command itself."""
     if not command:
         return None
     try:
-        scrubbed = v1_secrets.scrub(command)
+        scrubbed = v1_secrets.for_display(command)
     except Exception:
         scrubbed = "[unscrubbable command withheld]"
     return scrubbed[:2000]

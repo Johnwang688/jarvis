@@ -40,6 +40,7 @@ from typing import Callable
 from . import agent as agent_mod
 from . import config, goals, sessions, tools
 from .tools import goalctl
+from .tools.secrets import tool_args_for_display
 
 GOAL_SYSTEM = config.SYSTEM_PROMPT + (
     "\n\nYou are working a background goal for the owner while they are away "
@@ -458,10 +459,11 @@ class GoalRunner:
             self._check_live_spend(data)
         if kind == "tool_start":
             name, arguments = data
-            self._last_activity = f"{name} {str(arguments)[:80]}"
+            shown = tool_args_for_display(arguments)
+            self._last_activity = f"{name} {shown[:80]}"
             goal = self.current
             if goal is not None:
-                goal.journal("tool", name=name, args=str(arguments)[:200])
+                goal.journal("tool", name=name, args=shown[:200])
         elif kind == "interim_text" and isinstance(data, str) and data.strip():
             self._last_activity = data.strip()[:120]
         goal = self.current

@@ -92,6 +92,9 @@ def label(name, args, cwd) -> str:
                   for value in secrets._values_in(path)}
         for value in sorted(values, key=len, reverse=True):
             text = text.replace(value, secrets.REDACTED)
+    # A credential typed into the command (`MY_TOKEN=…`, `Authorization:
+    # Bearer …`, `curl -u user:pass`): the value goes, the name stays.
+    text = secrets.redact_inline(text)
     for _, pattern in PATTERNS:
         text = pattern.sub("[redacted]", text)
     return clean_line(text, 120)

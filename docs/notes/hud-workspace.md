@@ -1249,3 +1249,13 @@ bumps remain the guard for that.
 The approval page's CSP changed the same day (no `'wasm-unsafe-eval'` on
 `/`; only a worker's fetch of its script carries it): see `editor.md`, "WebAssembly leaves the
 approval page".
+
+
+## Tool-call labels withhold typed credentials (2026-10-15)
+
+A label now also withholds the value of a credential typed into the command
+(`MY_API_TOKEN=[redacted]`, `Authorization: Bearer [redacted]`,
+`curl -u user:[redacted]`, `--password=[redacted]`), keeping the name;
+expanding values (`$X`, `$(…)`) stay. The archived TC-1 paragraph above still
+lists `curl -u user:pass` as visible; it no longer is. Rule and paths:
+`safety-permissions.md`, "Credentials typed into a command".
