@@ -211,7 +211,8 @@ and never reach the bus (2026-10-08): the daemon logs them as
 broker alone.
 
 Since SV-1 (2026-10-15) a provider may also emit `subagent` (a native
-sub-agent's lifecycle: sid, op, status, usage) and `subagent_event` (one thing
+sub-agent's lifecycle: sid, op, status, usage; Claude's since SV-1, Codex's
+since SV-2) and `subagent_event` (one thing
 it said or did, wrapped: `{sid, event: {kind, data}}`). They are kinds of
 their own, never the kinds above with a tag, so a surface that does not know
 them ignores them and a child's words are never the orchestrator's. The
