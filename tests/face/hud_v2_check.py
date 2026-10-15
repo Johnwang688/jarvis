@@ -59,14 +59,14 @@ BASE = f"http://127.0.0.1:{PORT}"
 FAILURES: list[str] = []
 CHECKS = 0
 
-# A scripted SpeechRecognition, installed before the page's own script runs.
-# Chrome delivers a phrase as a *growing interim transcript* — one event per
-# revision — and then once more as the final result, which is precisely the
-# level-triggered shape the wake de-dup exists for.
+# A SpeechRecognition that counts its constructions, installed before the page's own script runs.
+# Since V11 the wake word is heard locally and the HUD never constructs one, so `__srConstructed`
+# stays 0 and nothing ever calls `__sr`; the class stays so any construction is counted, not a crash.
 FAKE_RECOGNIZER = """
 window.__wakeFires = 0;
+window.__srConstructed = 0;
 class FakeSR {
-  constructor() { this.onresult = null; this.onend = null; this.onstart = null;
+  constructor() { window.__srConstructed += 1; this.onresult = null; this.onend = null; this.onstart = null;
                   this.onerror = null; this.continuous = false; this.interimResults = false; }
   start() { window.__sr = this; if (this.onstart) this.onstart(); }
   stop() { if (this.onend) this.onend(); }
@@ -544,8 +544,8 @@ def dictation_checks(page, mock):
     check("OFF says the mic is muted rather than inviting speech",
           "MUTED" in page.locator('[data-testid="orb-status"]').inner_text(),
           page.locator('[data-testid="orb-status"]').inner_text())
-    check("OFF stops the wake recognizer outright",
-          page.evaluate("!window.__hudRecog"))
+    check("OFF stops the local wake word: it listens to and posts nothing",
+          not page.evaluate("window.__hud.mic.wakeRunning()"))
     check("and the level meter reads zero",
           float(page.locator('[data-testid="level"]').get_attribute("data-level") or 1) == 0.0)
 
@@ -609,8 +609,15 @@ def dictation_checks(page, mock):
 
 def wake_checks(page, mock):
     print("\nwake word")
-    # The real handler is what fires; count the claims the capture pipeline
-    # makes rather than the events the recognizer delivers.
+    # V11: the wake word is heard by a local keyword model (tests/face/hud_v2_wake_check.py proves the
+    # hearing). Here: Chrome's cloud recognizer is gone, and a wake hit reaches the capture once.
+    check("Chrome's speech recognizer is never constructed", page.evaluate("window.__srConstructed") == 0)
+    check("so no recognizer handle exists to stream the room anywhere",
+          page.evaluate("!window.__hudRecog && !window.__sr"))
+    eng = page.evaluate("window.__hud.mic.wakeEngine()")
+    check("the local wake word is loading, listening, or says why not (never absent)",
+          eng["state"] in ("loading", "ready", "failed") and (eng["state"] != "failed" or bool(eng["code"])), str(eng))
+    # The real handler is what fires; count the claims the capture pipeline makes.
     #
     # Harness note worth copying: an `evaluate` whose **last expression is a
     # function** is *called* by Playwright with its argument, so a script
@@ -621,29 +628,13 @@ def wake_checks(page, mock):
       window.__wakeClaims = [];
       const cap = window.__hud.capture;
       const orig = cap.onWake.bind(cap);
-      cap.onWake = () => { const r = orig(); window.__wakeClaims.push(r); return r; };
+      cap.onWake = (...a) => { const r = orig(...a); window.__wakeClaims.push(r); return r; };
       true;
     """)
-    # interim "jar", interim "jarvis", final "jarvis" — one phrase, three events
-    page.evaluate("window.__say(['jar'], 0)")
-    page.evaluate("window.__say(['jarvis'], 0)")
-    page.evaluate("window.__say(['jarvis'], 0)")
+    page.evaluate("window.__hud.mic.wake()")
     time.sleep(0.2)
-    fires = page.evaluate("window.__wakeClaims.length")
-    check("a wake hit fires once per phrase, not once per delivery", fires == 1, f"{fires} fires")
-
-    # Carrying on talking in the same segment does not re-fire.
-    page.evaluate("window.__say(['jarvis what is the weather today'], 0)")
-    page.evaluate("window.__say(['jarvis what is the weather today please'], 0)")
-    time.sleep(0.2)
-    check("carrying on talking does not re-fire",
-          page.evaluate("window.__wakeClaims.length") == 1)
-
-    # Ordinary speech in a new segment stays silent.
-    page.evaluate("window.__say(['jarvis', ' yahoo finance is up'], 1)")
-    time.sleep(0.2)
-    check("ordinary speech in a new segment stays silent",
-          page.evaluate("window.__wakeClaims.length") == 1)
+    check("a wake hit reaches the capture's wake path once", page.evaluate("window.__wakeClaims.length") == 1,
+          str(page.evaluate("window.__wakeClaims")))
     _ = mock
 
 

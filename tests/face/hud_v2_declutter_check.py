@@ -169,7 +169,8 @@ def _mode(page) -> str:
 
 
 def _recog(page) -> bool:
-    return bool(page.evaluate("!!window.__hudRecog"))
+    """Is the local wake word (V11) listening? (It was Chrome's recognizer before.)"""
+    return bool(page.evaluate("window.__hud.mic.wakeRunning()"))
 
 
 def _fold_left(page, until):
@@ -223,7 +224,7 @@ def _card_lever_checks(page, mock, check, until):
     _fold_left(page, until)
     cycle = page.locator('[data-testid="dictation-cycle"]')
     until(lambda: cycle.count() == 1, timeout=2)
-    check("setup: folded, OFF, the wake recognizer stopped", _mode(page) == "off" and not _recog(page))
+    check("setup: folded, OFF, the local wake word stopped", _mode(page) == "off" and not _recog(page))
 
     # F8 and F9 (M7): one click from OFF is REVIEW, never AUTO; the cycle goes round.
     seen = []

@@ -2872,3 +2872,128 @@ no clip clamp (2); no arm guard (1); `card: false` in the router call (1); two-h
 After the delta round: vitest 2584 tests / 157 files; `hud_v2_barge_check` 115 (the `gate_wake_command` section now runs gaps of 0, 96, 200
 and 400 ms between "Jarvis" and "stop"), speech 56, multichat 343. Mutations that fail on purpose (restored): no `gapFrom` (2 vitest), gain drift only when
 confirmed (4), `freeFrom` reset on any self frame (3), the `sayingOwnName()` check removed from `onWakeHit` (1).
+
+## V11: the local wake word, Chrome's cloud recognizer retired (2026-10-14)
+
+Plan §3.6, decisions V-6 and V-11, owner's answers Q10 and Q16. Stacked on V9 (`claude/voice-v9`). MEDIUM-HIGH risk (privacy, the
+wake path). Nothing here can answer an approval card, and no audio leaves the window for the wake word.
+
+**Where it runs: the browser, in a worker (V0's evidence allowed it).** V0 found sherpa-onnx 1.13.8 ships no browser KWS WASM and its
+npm Node build does not initialise in a worker, so the daemon route (frames streamed over an owner-only socket) was the stated
+fallback. It was not needed: the keyword model is a plain ONNX streaming zipformer2 transducer, and onnxruntime-web 1.30.0 (already
+pinned for Silero, V5) runs its int8 files unchanged (V0's Node probe had only proxied the cost). What sherpa's C++ adds around the
+network is small, so V11 ports it to TypeScript instead of building a WASM: the Kaldi fbank (`lib/wake/fbank.ts`), the keyword trie
+(`contextGraph.ts`), the modified beam search with the keyword boost, trailing-blank rule and mean-probability threshold
+(`decoder.ts`), and the streaming loop with its cache tensors and 1.5 s restart (`engine.ts`). The daemon route would have added a
+frame socket, an owner-only route and an always-on audio stream to the daemon; this adds nothing of the kind. A daemon-side fallback
+is not built.
+
+**Port fidelity.** Every clip of V0's synthetic KWS set plus every third dictation clip (328 clips, 11 minutes), through the TS engine and
+through sherpa-onnx's own `KeywordSpotter` (`tests/voice_v11/native_reference.py` writes `reference.json`; `parity.test.ts` compares),
+at thresholds 0.15 / 0.25 / 0.4 for both keyword sets: **1966 of 1968 results identical** (same clips fire, same keyword, hit within 0.35 s).
+The two differences are clips whose score sits on the threshold (float arithmetic differs in the last digits). The check is skipped
+unless `JARVIS_VOICE_V0=1` and the reference exists; `engine.test.ts` holds the committed subset (12 clips, `tests/face/fixtures/voice_v11/`).
+
+**Files.** `hud/src/lib/wake/`: `fbank.ts`, `contextGraph.ts`, `decoder.ts`, `engine.ts` (the runtime, behind a narrow `WakeOrt` so tests use a
+fake or the real model in Node), `keywords.ts` (the phrases as BPE pieces of the model's own tokenizer; no tokenizer ships), `pins.ts`,
+`protocol.ts`, `worker.ts`, `stage.ts` (main thread: `WakeStage`), `guard.ts`, `wakeSettings.ts`; `components/WakeWord.tsx` (Settings).
+**Model pinning**: the int8 encoder, decoder, joiner and tokens of `sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01` are vendored in
+`hud/vendor/kws-zipformer-gigaspeech-3.3M/` (5.25 MB, Apache-2.0, `manifest.json`, `LICENSE.txt`), built by Vite into `dist/assets/`
+(served from the HUD's origin). `lib/wake/pins.ts` carries each file's length and SHA-256; the worker checks **all four before building a
+session** (`verifiedFiles`), and a wrong one fails the lot with `hash` (missing: `fetch`). The manifest's archive digest is the one
+`tests/voice_v0/models.json` pins; `engine.test.ts` ties pins, manifest, vendored bytes and models.json together. **CSP**: unchanged and
+sufficient (worker `'self'`, `'wasm-unsafe-eval'`, files `connect-src 'self'`); the worker's only `fetch` is `URLS[file]`, its output is a
+closed set of messages (`ready`, `failed`, `hit`, `progress`), and `wakeIsolation.test.ts` pins both in source.
+
+**Chrome's recognizer: removed, not switched off (recommendation, implemented).** `webkitSpeechRecognition`, `WakeGate`, `compileWake` and
+`matchesWake` (`lib/wake.ts`) and the `wakePatterns` store field are gone; nothing in `hud/src` names a `SpeechRecognition` (a vitest
+scans for it) and `hud_v2_wake_check.py` counts constructions on a stubbed one (0). Why not an explicit off-by-default switch: its only
+use is streaming the room to Google, which is what this package removes; a switch invites a "temporary" fallback that stays; and the local
+model runs wherever the HUD does (WebAssembly is in every Chrome), so the failure it would cover is "this model will not load", which
+is shown instead (below). **For V13:** its "cloud fallback off disables the wake recognizer" gating has nothing left to gate; when V13 is
+merged onto this, take V11's deletion of the wake effect in `App.tsx`, and wake-by-voice works with the fallback off because nothing is
+uploaded. (v1's `jarvis/face/static/jarvis.html` keeps its own recognizer; it is not the HUD.)
+
+**Avatar wake phrases: dropped for voice; "Jarvis" wakes every avatar.** They were regexes matched on Chrome's interim transcripts of
+audio nobody had decided to upload. Without that transcript there is nothing to match, and running them on the *post-wake* transcript
+cannot wake anything (the audio is only uploaded once a wake or key claimed it). Q16 says the wake word is "Jarvis" only. What it
+costs: an avatar whose name is not Jarvis (Bibi's "big yahoo") no longer answers to its own phrase by voice; the avatar picker still
+lists those phrases (cosmetic; the Settings line says plainly that they are not listened for). The open-vocabulary model could spot a
+literal `wake` phrase (it needs only a BPE encoder of ~60 lines using `tokens.txt` ids as merge priority, checked against sentencepiece),
+but nobody has measured recall or false hits for any phrase but "Jarvis"; wake hits cancel and claim, so an unmeasured phrase is the
+wrong thing to switch on unasked. Regex-only avatars (no literal phrase) could never have been spotted. **Question for the owner.**
+
+**The wake path is V9's.** A hit is `WakeStage.onWake` -> `onWakeHit` -> `Capture.onWake`; the rules in the V9 section (suppression, the
+self-voice gate, "counts only against an utterance the owner opened", not held in reserve, and V9's review-round late-hit guard
+`SELF_ARM_GUARD_MS` = 1.5 s after his voice was last audible, plus `sayingOwnName()`) apply to local hits unchanged. This recognizer's lag is
+what that guard is for: it reports a word 0.35 s (median) to 0.64 s (p95) after it, plus chunking (V0; here 0.54 s after an isolated
+"Jarvis"). V11 first carried its own `Capture.onWake(heardHim)` for the same case; merging V9's guard made it redundant and it was dropped
+(`SelfVoiceGate.audibleWithin` stayed, for the command guard below). A claimed utterance is back-dated as before (`WAKE_GRACE_MS` 1.2 s covers the lag).
+
+**Merged onto V9's review round and V13 (2026-10-14).** V13 had gated Chrome's recognizer on its "Cloud fallback" switch and told the owner
+wake-by-voice was off "until local wake detection lands"; this is that, so the recognizer effect, `wakeRecognizerAllowed` and
+`hud_v2_stt_wake_windows_check.py` (whose whole subject was that gating) are gone, Settings -> Voice -> Speech-to-text now says the wake word is
+heard on this computer whatever is chosen (`wakeNote`), and `hud_v2_stt_local_check.py` asserts the recognizer is never constructed with the
+fallback on or off. V9's name check on his own sentences (`setNameMatcher`) now uses `WAKE_NAME` (/\bjarvis\b/i): "Jarvis" is the only wake word.
+Review LOWs fixed: the decoder-cache `clear()` ran after lookups and could drop a context used in the same call (cleared first, each call reads
+its own copy; unit test with a cap of 2, fails on the old order); the mic effect's catch stops the wake stage too; a command hit is refused from
+a crashed window or a muted mic; `Object.hasOwn` instead of `in` for sensitivity names and failure codes. `WakeStage.start()` now returns a run token and `stop(token)` ignores a stale one (like VadStage's), so a mic effect's stale `gone`/catch path cannot stop a newer run's worker; a retry keeps the live run's token. Left as notes: the avatar picker still
+lists avatars' own wake phrases; the phase sensitivity of the model (a command over a live reply may need a second try); the daemon-side fallback.
+
+**Under a card (Q10): local playback commands, ON by default, switchable.** Keywords are the whole phrases "Jarvis pause|resume|skip|stop"
+(V-6: they start with Jarvis), not bare words: V0's bare-word recall was 38 to 69% and the phrases measure **29 of 32 (91%)** on the same
+synthetic voices (pause 8/8, resume 7/8, skip 8/8, stop 6/8 at the default operating point), 0 false hits in ~11 minutes of dictation and
+sentences (small n: 8 voices, one take each). It is a second keyword set, run **only while a card is up and the owner's switch is on**; the
+stage's single worker swaps its stream (about half a second of context lost) and swaps back when the card goes. The hit goes to
+`CommandRouter.fromLocal` (V9's seam), whose `setLocalUnderCard` is now the owner's switch (Settings -> Voice, `jarvis.wakeCardCommands`,
+default on). Four calls on his voice (pause, resume, skip, stop); nothing uploads (the capture stays suppressed under a card), no approval
+route is reachable (`wakeIsolation.test.ts` pins it, with `approvalIsolation.test.ts`), "Jarvis approve" is not a keyword. **His own voice
+reading out "Jarvis, stop"** is not obeyed: `guard.ts` `hisOwnWord` sets a command aside when his voice was audible in the look-back unless the
+self-voice gate released owner speech over it (`OwnerMark`); before the gate has learned the room nothing the owner says over his first second
+can be a command. Over a live reply the phrases are recognised less well than clean (V0: 62% for a competing voice at 10 dB; with phase,
+this simulation: 50 to 100% per attempt, mostly 75%): the check allows four attempts and records which one worked (pause 1, resume 1, skip 2, stop 1).
+Without a card, commands still come from the transcript (V9), and "Jarvis stop the build" is still a message. Left for later (plan phase 2):
+acting on a hit within a second without a card.
+
+**Settings -> Voice -> Wake word.** A line naming the state: `on` (and the worker's own CPU), `loading`, `off while the microphone is
+muted`, or `unavailable -- <reason> ...` from a closed set of sentences (no URL, path or engine text) with **Try the wake word again**;
+**Sensitivity** High / Normal (default) / Low = threshold 0.15 / 0.25 / 0.4 at boost 1.0, V0's grid (stored in `localStorage`), applied by
+rebuilding the worker's keyword graph; the switch for commands under a card. **The visible fallback has no cloud behind it**: when the worker
+cannot start, the model file is missing or altered (hash/length), the runtime will not start, loading takes over 30 s, or the worker falls
+2 s of audio behind, the wake word is off and says why; the talk key and the orb still dictate. Failure is sticky until retried.
+The mic OFF mode, a crashed window and a Settings/card overlay post nothing and hear nothing as before (`active()`).
+
+**Measured (synthetic Kokoro speech only; headless Chromium 149 on a loaded WSL2 machine, V0's bench numbers are not re-claimed for Windows Chrome).**
+Recall at the default operating point (boost 1.0, 0.25): "Jarvis" **44 of 48 (92%)**, 45 of 48 at High, 36 of 48 (75%) at Low; false hits 0 in
+216 sentences and dictation clips (~11 min, "Travis", "jar", "cancer" among them). Hit lands a median 0.54 s after an isolated word.
+Load: 0.57 to 0.66 s in the browser (fetch, four checksums, three sessions, warm-up). CPU: the worker's own clock **2.9 to 3.5% of one
+core** (V0: 3.3% Node, 1.6% native); the whole-browser CPU over a 40 s window of the same speech was 29.1% against 21.5% with the wake
+word failed in one run and 25.3% against 21.2% in the final one (the machine was shared and loaded; treat 3 to 8% of a core as the range).
+Memory: 5.25 MB of model files plus three ORT sessions (not measured separately; V0: 250 to 330 MB under Node).
+
+**Free checks.** vitest **2628 tests passed, 6 skipped / 165 files** (V9: 2537 / 156; the 6 skipped are `parity.test.ts`, gated on V0's fixtures), `tsc`,
+`vite build`; new files `lib/wake/{contextGraph,decoder,fbank,keywords,stage,wakeSettings,engine,wakeIsolation,guard,parity}.test.ts`
+(the real model in Node with fixtures; a scripted network for the decoder; a fake worker for the stage), additions to
+`captureSelfVoice.test.ts` and `selfvoice.test.ts`; `lib/wake.test.ts` went with `lib/wake.ts`. **Browser:** `tests/face/hud_v2_wake_check.py`
+(sections mic_negative, mic_wake, cpu, own_voice, owner_wins, card, fallbacks, settings): real Chromium, the real worker and model under the CSP,
+Chrome's fake microphone fed synthetic Kokoro clips, the real Web Audio player and the barge check's acoustic simulator for his voice, the mock
+daemon, every request outside it refused and recorded.
+
+**Browser checks on the final build** (`hud/dist`, headless Chromium, mock daemon, one at a time): `hud_v2_wake_check` **88 of 88**; the existing
+voice suites `vad` 67/67 (see below), `chunks` 58/58, `stt` 28/28, `steer` 46/46, `speech` 56/56, `barge` 95/95, `csp` 44/44. The vad suite failed
+its "2.4 s pause continues" checks once (3 of 67, the model-url check being a test fix: it now filters Silero's file from the wake files that load
+beside it) and passed on the rerun of the same build; V5 recorded that margin as the model's own (2.4 s against a 2.5 s end pause), and that run
+shared the machine with other suites. The csp suite failed "a dictated clip reaches POST /stt" once and passed 44/44 on the rerun. I cannot rule out
+that the extra worker made the loaded machine slower in those two runs; neither failed again. The full `hud_v2_check` was not run.
+
+**Mutations that fail on purpose** (source restored afterwards): the SHA-256 not compared in `verifiedFiles` (1 vitest: accepted a flipped joiner byte; the
+browser `fallbacks` checks for `hash` would also fail); the self-voice rule removed from `Capture.onWake` (2 vitest; in the browser the diagnostics check
+"self_voice, source wake" failed, while claim and upload still held thanks to V9's other layers); the owner-over-him guard removed from the command handler
+(1 vitest static pin; in the browser "his own voice saying 'Jarvis, stop.' ... is not obeyed" failed: he went idle).
+
+**Not done / not claimed.** The owner's voice, room, distance and a real TV (V0's manual gate for KWS is still open); Windows Chrome and a
+physical microphone; "over" and "cancel" (V10's send words) as keywords -- the same worker can host them as another set (V0: OVER 68 to 75%,
+CANCEL 100% as bare words) wired to `Capture.endNow` once V10 lands, but V11 neither depends on V10's code nor does it; a literal avatar-phrase
+wake list; the daemon-side recognizer; acting on a hit without a card within a second (plan 3.6 phase 2); the full `hud_v2_check`
+(its `wake_checks` section was rewritten, the `__hudRecog` lines in `hud_v2_check`, `_layout_check` and `_declutter_check` now ask
+`__hud.mic.wakeRunning()`; those two were edited but not run).

@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import { parseSttSettings, sttSummary, wakeNote, STT_CHOICES } from "./sttSettings";
-import { wakeRecognizerAllowed } from "../state/sttSettings";
 
 const daemon = (over: Record<string, unknown> = {}, local: Record<string, unknown> = {}) => ({
   backend: "cloud", cloud_fallback: true, error: "", backends: ["cloud", "local", "auto"],
@@ -57,19 +56,13 @@ describe("sttSummary says what happens to the next dictation clip", () => {
   });
 });
 
-describe("the wake word is a separate path (Chrome's recognizer streams to Google)", () => {
+describe("the wake word is a separate path (heard locally since V11)", () => {
   const s = (over = {}) => parseSttSettings(daemon(over));
-  it("says plainly that it is off when the fallback is off", () => {
-    expect(wakeNote(s({ cloud_fallback: false }))).toBe("Wake word by voice is off until local wake detection lands; use the talk key.");
-  });
-  it("says it reaches Google when uploading is allowed, whatever backend is chosen", () => {
-    for (const backend of ["cloud", "local", "auto"]) expect(wakeNote(s({ backend }))).toMatch(/streams the microphone to Google/);
-  });
-  it("Chrome's recognizer may run only when uploading is allowed; unknown is closed", () => {
-    expect(wakeRecognizerAllowed(null)).toBe(false);
-    expect(wakeRecognizerAllowed(s({ cloud_fallback: false }))).toBe(false);
-    expect(wakeRecognizerAllowed(s({ backend: "local", cloud_fallback: false }))).toBe(false);
-    expect(wakeRecognizerAllowed(s({ cloud_fallback: true }))).toBe(true);
-    expect(wakeRecognizerAllowed(parseSttSettings("garbage"))).toBe(false);
+  it("says it is heard on this computer and sends nothing to Google, whatever is chosen", () => {
+    for (const over of [{ cloud_fallback: false }, { cloud_fallback: true }, { backend: "cloud" }, { backend: "local" }, { backend: "auto" }]) {
+      expect(wakeNote(s(over))).toMatch(/heard on this computer/);
+      expect(wakeNote(s(over))).toMatch(/nothing is sent to Google/);
+      expect(wakeNote(s(over))).not.toMatch(/streams the microphone/);
+    }
   });
 });
