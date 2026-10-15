@@ -6,11 +6,17 @@ export type VoiceOutcome = DropReason | "transcribing" | "review" | "handed_to_c
 export type MicCapability = "unknown" | "available" | "unavailable";
 /** How the microphone reaches the capture (V4): the AudioWorklet, or the older ScriptProcessor fallback. */
 export type CapturePathName = "unknown" | "worklet" | "script_processor";
+/** V5: which detector judged the frames: Silero (ML, in a worker) or the energy fallback. */
+export type DetectorKind = "energy" | "silero";
+export type DetectorPhase = "idle" | "loading" | "ready" | "failed";
+/** One switch of the speech detector (V5), kept in memory with the rows: when, to what, and why. */
+export interface DetectorChange { at: number; detector: DetectorKind; phase: DetectorPhase; note: string }
 /** What the daemon did about whose voice a clip was (V12): the score itself is never kept here. */
 export type VerifyResult = "matched" | "skipped_guest" | "skipped_unenrolled" | "no_speech";
 const verifyResults: VerifyResult[] = ["matched", "skipped_guest", "skipped_unenrolled", "no_speech"];
-export interface VoiceDiagnostic { id: number; at: number; ms: number; source: ClaimSource; detector: "energy"; outcome: VoiceOutcome; latencyMs?: number; /** V2: the clip is still held in memory for Play and Retry. */ kept?: boolean; /** V12: speaker verification's answer for the message. */ verify?: VerifyResult; /** V12: how many chunks of the message the daemon refused as not the owner's. */ rejected?: number; /** V13: which speech-to-text backend served the clip (known values only, never daemon text). */ backend?: SttBackend; /** V13: the clip was meant for the local engine and the cloud answered it. */ fellBack?: boolean; }
+export interface VoiceDiagnostic { id: number; at: number; ms: number; source: ClaimSource; detector: DetectorKind; outcome: VoiceOutcome; latencyMs?: number; /** V2: the clip is still held in memory for Play and Retry. */ kept?: boolean; /** V12: speaker verification's answer for the message. */ verify?: VerifyResult; /** V12: how many chunks of the message the daemon refused as not the owner's. */ rejected?: number; /** V13: which speech-to-text backend served the clip (known values only, never daemon text). */ backend?: SttBackend; /** V13: the clip was meant for the local engine and the cloud answered it. */ fellBack?: boolean; }
 export type SttBackend = "local" | "cloud";
+export interface VoiceDiagnostic { id: number; at: number; ms: number; source: ClaimSource; detector: DetectorKind; outcome: VoiceOutcome; latencyMs?: number; /** V2: the clip is still held in memory for Play and Retry. */ kept?: boolean; /** V13: which speech-to-text backend served the clip (known values only, never daemon text). */ backend?: SttBackend; /** V13: the clip was meant for the local engine and the cloud answered it. */ fellBack?: boolean; }
 export interface MicSettings { echoCancellation: boolean | "unknown"; noiseSuppression: boolean | "unknown"; autoGainControl: boolean | "unknown"; }
 const sources: ClaimSource[] = ["wake", "follow_up", "continuation", "ptt", "unclaimed"];
 const outcomes: VoiceOutcome[] = ["unclaimed", "too_short", "muted", "self_voice", "not_owner", "cancelled", "empty_transcript", "stt_failed", "transcribing", "review", "handed_to_chat", "unplaced", ...["card", "picker", "settings", "crash", "speaking", "no_chat"].map(x => `suppressed:${x}` as VoiceOutcome)];
@@ -37,7 +43,9 @@ export class VoiceDiagnostics {
   private next = 0;
   private listeners = new Set<() => void>();
   private rows: readonly VoiceDiagnostic[] = [];
-  private value = { rows: this.rows, mic: "unknown" as MicCapability, settings: normalizeMicSettings(null), path: "unknown" as CapturePathName, pathNote: "" };
+  private value = { rows: this.rows, mic: "unknown" as MicCapability, settings: normalizeMicSettings(null), path: "unknown" as CapturePathName, pathNote: "",
+    detector: "energy" as DetectorKind, detectorPhase: "idle" as DetectorPhase, detectorNote: "", detectorMs: 0,
+    detectorLog: [] as readonly DetectorChange[] };
   constructor(private now: () => number = () => performance.now()) {}
   subscribe = (fn: () => void) => { this.listeners.add(fn); return () => { this.listeners.delete(fn); }; };
   snapshot = () => this.value;
@@ -51,9 +59,23 @@ export class VoiceDiagnostics {
     this.value = { ...this.value, path: ["unknown", "worklet", "script_processor"].includes(path) ? path : "unknown", pathNote: String(note).slice(0, 200) };
     this.publish();
   }
-  add(ms: number, source: ClaimSource, outcome: VoiceOutcome): number {
+  /** Which detector is live and why it is the fallback when it is (V5). A sentence from a closed set, never engine text. */
+  detector(kind: DetectorKind, phase: DetectorPhase, note = "", frameMs = 0) {
+    const detector: DetectorKind = kind === "silero" ? "silero" : "energy";
+    const ph: DetectorPhase = ["idle", "loading", "ready", "failed"].includes(phase) ? phase : "idle";
+    const text = String(note).slice(0, 200);
+    const before = this.value;
+    let log = before.detectorLog;
+    // Every switch is written down; a statistics refresh (same detector, phase and words) is not a switch.
+    if (before.detector !== detector || before.detectorPhase !== ph || before.detectorNote !== text)
+      log = [...log, { at: bounded(this.now(), Number.MAX_SAFE_INTEGER), detector, phase: ph, note: text }].slice(-20);
+    this.value = { ...before, detector, detectorPhase: ph, detectorNote: text, detectorMs: bounded(frameMs * 100, 1_000_000) / 100, detectorLog: log };
+    this.publish();
+  }
+  /** `detector`: the one that judged the utterance (Capture knows; default: the one live now). */
+  add(ms: number, source: ClaimSource, outcome: VoiceOutcome, detector?: DetectorKind): number {
     const id = ++this.next;
-    this.rows = [...this.rows, { id, at: bounded(this.now(), Number.MAX_SAFE_INTEGER), ms: bounded(ms, 900_000), source: sources.includes(source) ? source : "unclaimed", detector: "energy" as const, outcome: outcomes.includes(outcome) ? outcome : "unclaimed" }].slice(-50);
+    this.rows = [...this.rows, { id, at: bounded(this.now(), Number.MAX_SAFE_INTEGER), ms: bounded(ms, 900_000), source: sources.includes(source) ? source : "unclaimed", detector: detector === "silero" || detector === "energy" ? detector : this.value.detector, outcome: outcomes.includes(outcome) ? outcome : "unclaimed" }].slice(-50);
     this.publish(); return id;
   }
   finish(id: number, outcome: VoiceOutcome, latencyMs: number) {

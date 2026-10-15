@@ -36,7 +36,7 @@
 // mic is OFF, the window crashed, a card is up) -- the same fail-closed rule as
 // the first attempt.
 
-import type { ClaimSource, VoiceDiagnostics } from "./voiceDiagnostics";
+import type { ClaimSource, DetectorKind, DropReason, VoiceDiagnostics } from "./voiceDiagnostics";
 import { dropLeadingOverlap, dropTrailingOverlap, overlapMerge } from "./joinChunks";
 
 /** Where a chunk of a late message is missing: its words are not here, and Retry adds them at the end. */
@@ -186,6 +186,15 @@ function describe(error: unknown, deadlineMs: number): string {
 
 class Cancelled extends Error {}
 
+/**
+ * What a recorded chunk tells `submit` about itself. `repeats` matters: a cut at a pause leads the
+ * next chunk with digital silence, not with words said twice, so the join must not look for an echo
+ * there ("it was very" + "very good indeed" keeps both "very"s). Left out, `submit` assumes a repeat.
+ */
+export function chunkSubmitOptions(chunk: { overlapMs: number; repeats: boolean; detector?: DetectorKind }, group: number) {
+  return { group, overlapMs: chunk.overlapMs, repeats: chunk.repeats, detector: chunk.detector };
+}
+
 export class SttAssembler<M = undefined> {
   private entries = new Map<number, Entry<M>>();
   private groups = new Map<number, Group<M>>();
@@ -330,7 +339,7 @@ export class SttAssembler<M = undefined> {
    * text also ends with, which the join then says once.
    * Returns its id, or null when the backlog is full (visible, never silent).
    */
-  submit(blob: Blob, ms: number, source: ClaimSource, meta: M, opts: { group?: number; overlapMs?: number; repeats?: boolean } = {}): number | null {
+  submit(blob: Blob, ms: number, source: ClaimSource, meta: M, opts: { group?: number; overlapMs?: number; repeats?: boolean; detector?: DetectorKind } = {}): number | null {
     let g = opts.group === undefined ? undefined : this.groups.get(opts.group);
     if (opts.group !== undefined && (!g || !g.open)) return null; // a closed message takes no more
     const overlapMs = Math.max(0, Math.min(ms, opts.overlapMs ?? 0));
@@ -343,8 +352,8 @@ export class SttAssembler<M = undefined> {
         // A chunk lost from the middle of a message: the rest must not go out as if it were all of it.
         g.hadFailure = true;
         if (g.diag) this.o.diagnostics.finish(g.diag, "stt_failed", this.now() - g.lastAt);
-        else g.diag = this.o.diagnostics.add(ms - overlapMs, source, "stt_failed");
-      } else this.o.diagnostics.add(ms, source, "stt_failed");
+        else g.diag = this.o.diagnostics.add(ms - overlapMs, source, "stt_failed", opts.detector);
+      } else this.o.diagnostics.add(ms, source, "stt_failed", opts.detector);
       return null;
     }
     const id = ++this.nextId;
@@ -356,7 +365,7 @@ export class SttAssembler<M = undefined> {
       this.groups.set(g.key, g);
     }
     if (!g.uid) g.uid = id;
-    if (!g.diag) g.diag = this.o.diagnostics.add(ms - overlapMs, source, "transcribing");
+    if (!g.diag) g.diag = this.o.diagnostics.add(ms - overlapMs, source, "transcribing", opts.detector);
     else this.o.diagnostics.extend(g.diag, ms - overlapMs);
     g.members.push(id);
     g.parts.set(id, { text: "", overlap: repeats });
@@ -514,6 +523,30 @@ export class SttAssembler<M = undefined> {
     this.emit(); this.settle(id);
     this.release();
     if (g) this.settleGroup(g);
+  }
+
+  /**
+   * The message turned out not to be one (V5: too short after a chunk had already left). Everything
+   * of it is dropped -- in-flight uploads aborted, kept audio released -- and nothing is placed.
+   * Its one diagnostics row is settled as `outcome`.
+   */
+  cancelGroup(gid: number, outcome: DropReason) {
+    const g = this.groups.get(gid);
+    if (!g) return;
+    g.open = false;
+    if (g.diag) this.o.diagnostics.finish(g.diag, outcome, this.now() - g.lastAt);
+    for (const id of [...g.members]) {
+      const e = this.entries.get(id);
+      if (!e) continue;
+      e.cancelled = true; e.ac?.abort(); e.cancel?.(); clearTimeout(e.retryTimer ?? undefined);
+      this.queue = this.queue.filter(q => q.e !== e);
+      this.drop(e);
+      this.settle(id);
+    }
+    this.emit();
+    this.release();
+    this.settleGroup(g);
+    if (!g.members.some(id => this.entries.has(id))) this.groups.delete(gid);
   }
 
   /**

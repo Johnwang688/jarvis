@@ -746,6 +746,31 @@ describe("chunked messages (V4)", () => {
   });
 });
 
+describe("cancelGroup (V5: a message that proved too short after a chunk left)", () => {
+  it("aborts what is in flight, releases the audio, places nothing, and settles the one row as the reason", async () => {
+    const h = harness();
+    const g = h.stt.beginGroup("follow_up", "meta");
+    h.stt.submit(h.clip(), 2000, "follow_up", "meta", { group: g });
+    h.stt.submit(h.clip(), 1500, "follow_up", "meta", { group: g });
+    await flush();
+    const diag = h.stt.snapshot().clips[0].diag;
+    h.stt.cancelGroup(g, "too_short");
+    h.stt.closeGroup(g);
+    expect(h.calls[0].signal.aborted).toBe(true);
+    h.calls[0].resolve("late words");                 // an answer that arrives anyway
+    await flush();
+    expect(h.texts()).toEqual([]);
+    expect(h.stt.snapshot().clips).toHaveLength(0);
+    expect(h.row(diag).outcome).toBe("too_short");
+    await h.stt.whenGroupSettled(g);                   // and anyone waiting is released
+    expect(h.diagnostics.snapshot().rows).toHaveLength(1);
+  });
+
+  it("an unknown group is nothing", () => {
+    const h = harness();
+    expect(() => h.stt.cancelGroup(99, "too_short")).not.toThrow();
+  });
+});
 
 // V12: a voice the daemon refused as not the owner's (HTTP 422) uploads nothing, keeps nothing and is never retried.
 describe("a clip refused as not the owner's voice (V12)", () => {

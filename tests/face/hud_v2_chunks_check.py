@@ -126,6 +126,11 @@ def main(argv=None):
                 ctx.route(re.compile(r"^https?://(?!(127\.0\.0\.1|localhost)[:/])"), refuse)
                 guard_live(ctx, failures.append)
                 watch_csp(ctx, failures.append)
+                # V5: this suite's "speech" is a pair of oscillators, which the Silero VAD
+                # (correctly) does not call speech. It exercises the capture, worklet and
+                # chunks on the energy detector, which the model failing to load selects,
+                # visibly. Silero on real speech is tests/face/hud_v2_vad_check.py.
+                ctx.route(re.compile(r"/assets/silero_vad[^/]*\.onnx$"), lambda route: route.fulfill(status=404, body="energy-only suite"))
                 ctx.add_init_script(FAKE_RECOGNIZER + init)
                 return ctx
 
@@ -311,7 +316,7 @@ def main(argv=None):
                 page.evaluate("window.__hud.mic.feedMs(2000, .0009)")
                 page.evaluate("window.__hud.capture.openFollowUp()")
                 page.evaluate(f"({WORDS})(36, 9, 900)")
-                page.evaluate("window.__hud.mic.feedMs(2200, .0005)")
+                page.evaluate("window.__hud.mic.feedMs(2800, .0005)")
                 check("a 36 s hands-free dictation is placed whole", waits(lambda: "omicron" in box() or len(stt.reqs) >= 2 and "zeta" in box()), box())
                 n = len(stt.reqs)
                 check("cut at its breaths into 2+ chunks, none repeating the one before", n >= 2 and len(rows()) == r0 + 1, str(stt.reqs))
@@ -413,7 +418,7 @@ def main(argv=None):
                 _dictation(page, "off")
                 n0 = len(stt.reqs)
                 pressed = page.evaluate("window.__hud.capture.press()")
-                page.evaluate(f"window.__hud.mic.feedMs(2000, .0009); window.__hud.capture.openFollowUp(); ({WORDS})(40, 9, 900); window.__hud.mic.feedMs(2200, .0005)")
+                page.evaluate(f"window.__hud.mic.feedMs(2000, .0009); window.__hud.capture.openFollowUp(); ({WORDS})(40, 9, 900); window.__hud.mic.feedMs(2800, .0005)")
                 page.wait_for_timeout(500)
                 check("mic OFF: the talk key claims nothing", pressed is False)
                 check("mic OFF: not one chunk is uploaded, however long it is spoken to", len(stt.reqs) == n0)
@@ -424,7 +429,7 @@ def main(argv=None):
                 n0, a0 = len(stt.reqs), len([c for c in mock.calls if c[0] == "POST" and c[1].startswith("/approvals/")])
                 _approval(mock, "v4cardA")
                 until(lambda: page.locator('[data-testid="approval-card"]').count() == 1, timeout=4)
-                page.evaluate(f"window.__hud.mic.feedMs(2000, .0009); window.__hud.capture.openFollowUp(); ({WORDS})(40, 9, 900); window.__hud.mic.feedMs(2200, .0005)")
+                page.evaluate(f"window.__hud.mic.feedMs(2000, .0009); window.__hud.capture.openFollowUp(); ({WORDS})(40, 9, 900); window.__hud.mic.feedMs(2800, .0005)")
                 page.keyboard.down("Control")
                 page.keyboard.down("d")
                 page.evaluate("window.__hud.mic.feedMs(30000, .06)")

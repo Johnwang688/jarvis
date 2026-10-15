@@ -2782,8 +2782,8 @@ def _crash_checks(page, mock, check, until):
         _crash(page, until)
         stt0, sends0 = len(mock.sent("POST", "/stt")), _sends(mock)
         page.evaluate("""() => { const m = window.__hud.mic; m.feedMs(1500, 0.001);
-          window.__hud.capture.openFollowUp(); m.feedMs(1600, 0.06); m.feedMs(2200, 0.0005);
-          window.__hud.mic.wake(); m.feedMs(1600, 0.06); m.feedMs(2200, 0.0005); }""")
+          window.__hud.capture.openFollowUp(); m.feedMs(1600, 0.06); m.feedMs(2800, 0.0005);
+          window.__hud.mic.wake(); m.feedMs(1600, 0.06); m.feedMs(2800, 0.0005); }""")
         time.sleep(0.8)
         check("after a crash, speech in the follow-up window or after a wake hit uploads nothing",
               len(mock.sent("POST", "/stt")) == stt0 and _sends(mock) == sends0,
@@ -2803,7 +2803,7 @@ def _crash_checks(page, mock, check, until):
         try:
             stt0, sends0 = len(mock.sent("POST", "/stt")), _sends(mock)
             page.evaluate("""() => { const m = window.__hud.mic; m.feedMs(2000, 0.001);
-              window.__hud.capture.openFollowUp(); m.feedMs(1600, 0.06); m.feedMs(2200, 0.0005); }""")
+              window.__hud.capture.openFollowUp(); m.feedMs(1600, 0.06); m.feedMs(2800, 0.0005); }""")
             until(lambda: len(mock.sent("POST", "/stt")) > stt0, timeout=4)
             check("setup: an utterance is being transcribed", len(mock.sent("POST", "/stt")) > stt0)
             _crash(page, until)

@@ -88,12 +88,15 @@ import { createSpeech, saveDuckBrowser, saveReadAloud } from "./lib/speech";
 import { VoiceChip } from "./components/VoiceChip";
 import { micSuppressedBySpeech, onMicModeChange, speakingThreads } from "./lib/speech/policy";
 import { Capture, type UtteranceChunk, type UtteranceEnd } from "./lib/capture";
-import { STT_MAX_IN_FLIGHT, SttAssembler, placementFor, type SttCapture, type SttPlaced } from "./lib/stt";
+import { STT_MAX_IN_FLIGHT, SttAssembler, chunkSubmitOptions, placementFor, type SttCapture, type SttPlaced } from "./lib/stt";
 import { startMicInput, type MicInput } from "./lib/micInput";
 import micWorkletUrl from "./lib/micWorklet.ts?worker&url";
 import { SttRetry } from "./components/SttRetry";
 import { VoiceDiagnostics, openMicrophone, type SuppressionReason, type DropReason } from "./lib/voiceDiagnostics";
 import { VoiceDiagnosticsPanel } from "./components/VoiceDiagnostics";
+import { EndPauseSetting } from "./components/EndPause";
+import { VadStage } from "./lib/listen/stage";
+import { loadEndPause, saveEndPause } from "./lib/voiceTiming";
 import { isMuted, loadMode, orbLine, outcomeFor, saveMode, type DictationMode } from "./lib/dictation";
 import { WakeGate, compileWake, matchesWake, WAKE_PATTERNS } from "./lib/wake";
 import type { Attachment, AvatarDesc, Schedule, Thread, VoiceEntry } from "./types";
@@ -665,8 +668,8 @@ export default function App() {
           crashedRef.current,
         suppressionReason: () => captureSuppression() ?? "speaking",
         hardStop: () => captureHardStop(),
-        onDrop: (reason, ms, source) => {
-          voiceDiagnostics.add(ms, source, reason);
+        onDrop: (reason, ms, source, detector) => {
+          voiceDiagnostics.add(ms, source, reason, detector);
           // A talk-key utterance that came to nothing: he carries on.
           if (source === "ptt") speech.controller.endBargeIn();
         },
@@ -828,7 +831,7 @@ export default function App() {
       const u = utterances.current.get(chunk.utterance);
       if (!u || u.refused) return;
       const at = live.current;
-      const refuse = (reason: DropReason) => { u.refused = true; voiceDiagnostics.add(chunk.ms, chunk.source, reason); };
+      const refuse = (reason: DropReason) => { u.refused = true; voiceDiagnostics.add(chunk.ms, chunk.source, reason, chunk.detector); };
       if (crashedRef.current) { refuse("suppressed:crash"); return; }
       // OFF never reaches here (Capture refuses to claim while muted), but the
       // mode is checked again rather than assumed: the fail-closed direction
@@ -839,7 +842,7 @@ export default function App() {
       if (settingsNow.current) { refuse("suppressed:settings"); return; }
       if (!Number.isFinite(chunk.ms) || chunk.ms <= 0) { refuse("too_short"); return; }
       if (u.gid === null) u.gid = stt.beginGroup(chunk.source, u.meta);
-      const id = stt.submit(chunk.wav, chunk.ms, chunk.source, u.meta, { group: u.gid, overlapMs: chunk.overlapMs });
+      const id = stt.submit(chunk.wav, chunk.ms, chunk.source, u.meta, chunkSubmitOptions(chunk, u.gid));
       if (id === null) {
         sttSay({ orb: "error", status: "STT BACKLOG", error: "Too many clips are waiting to be transcribed, so part of this message was not kept. Wait for them to finish." });
       }
@@ -871,6 +874,8 @@ export default function App() {
         }
       } catch { /* a status line cannot keep a message open */ }
       if (!u || u.gid === null) { refuse(); finish(); return; }
+      // Not a message after all (V5): a chunk left, then it proved too short. Nothing is placed.
+      if (end.discard) { stt.cancelGroup(u.gid, "too_short"); refuse(); finish(); return; }
       u.meta.continuation = end.continuation;
       // Cut short (OFF, a card, a crash) or partly refused: what is placed is not all
       // of what was said, so it is marked late and AUTO boxes it instead of sending it.
@@ -2917,6 +2922,26 @@ export default function App() {
 
   // ---- microphone ---------------------------------------------------------
 
+  // V5: the ML speech detector. Between the microphone and the capture; the OFF
+  // mode scores nothing (it has no frames posted while muted).
+  const vadStage = useMemo(() => new VadStage({
+    deliver: (frame, p) => capture.onFrame(frame, p),
+    active: () => !isMuted(live.current.dictation),
+    // An automatic restart of the worker waits for a quiet moment: nothing being
+    // said or recorded, and Settings (where the owner reads the detector) closed.
+    canRetry: () => !capture.vad.open && !capture.recording() && !settingsNow.current,
+    onStatus: (s) => voiceDiagnostics.detector(s.detector, s.state, s.note, s.frameMs),
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }), [capture, voiceDiagnostics]);
+  // Back in the foreground (or woken from sleep): the detector's timing history is stale, not failed.
+  useEffect(() => {
+    const visible = () => { if (document.visibilityState === "visible") vadStage.rearm(); };
+    document.addEventListener("visibilitychange", visible);
+    return () => document.removeEventListener("visibilitychange", visible);
+  }, [vadStage]);
+  const [endPause, setEndPause] = useState(() => loadEndPause());
+  useEffect(() => { capture.setEndPause(endPause); }, [capture, endPause]);
+
   // The live microphone input (V4): its frames are the seam V5's VAD worker and
   // V12's recorder read (`micInput.addFrameListener`).
   const micInput = useRef<MicInput | null>(null);
@@ -2924,6 +2949,8 @@ export default function App() {
     let input: MicInput | null = null;
     let stream: MediaStream | null = null;
     let gone = false;
+    // This run's token for the VAD stage: a stale run's cleanup cannot stop the live one.
+    let vadRun: number | null = null;
     (async () => {
       try {
         stream = await openMicrophone(constraints => navigator.mediaDevices.getUserMedia(constraints));
@@ -2933,19 +2960,25 @@ export default function App() {
         // An AudioWorklet resamples to 16 kHz mono in 512-sample frames (V4).
         // Without one the same resampler runs behind the old ScriptProcessor,
         // and the window says so rather than quietly capturing worse.
+        // The frames go through the VAD stage (V5): Silero scores each in a worker and
+        // the stage hands it on, in order, to the capture; until the worker is ready,
+        // or if it cannot run, the capture judges by energy and the diagnostics say so.
         const fellBack = (path: string, why: string) => {
           voiceDiagnostics.capturePath(path as "script_processor", why);
           dispatch({ type: "patch", patch: { error: `The microphone is using the older capture path: ${why}. Dictation works, but audio is read on the main thread and may drop frames when the window is busy.` } });
         };
+        if (gone) { stream.getTracks().forEach((t) => t.stop()); return; }
+        vadRun = vadStage.start();
         input = await startMicInput({
-          stream, onFrame: (frame) => capture.onFrame(frame), workletUrl: micWorkletUrl,
+          stream, onFrame: (frame) => vadStage.push(frame), workletUrl: micWorkletUrl,
           onPathChange: (path, why) => { if (!gone) fellBack(path, why); },
         });
-        if (gone) { input.stop(); return; }
+        if (gone) { input.stop(); vadStage.stop(vadRun); return; }
         micInput.current = input;
         voiceDiagnostics.capturePath(input.path, input.fallbackReason);
         if (input.path !== "worklet") fellBack(input.path, input.fallbackReason);
       } catch {
+        if (vadRun !== null) vadStage.stop(vadRun);
         voiceDiagnostics.microphone("unavailable");
         // A window without a mic grant still types; every other affordance
         // stays exactly as it was.
@@ -2956,8 +2989,9 @@ export default function App() {
       micInput.current = null;
       stream?.getTracks().forEach((t) => t.stop());
       input?.stop();
+      if (vadRun !== null) vadStage.stop(vadRun);
     };
-  }, [capture]);
+  }, [capture, vadStage]);
 
   // ---- files dropped on the window -----------------------------------------
 
@@ -3034,11 +3068,15 @@ export default function App() {
           .filter((id): id is string => !!id).map((id) => [id, speech.voices.info(id)])),
       }),
       mic: {
-        feedMs: (ms: number, amp: number, frame?: number) => capture.feedMs(ms, amp, frame),
+        feedMs: (ms: number, amp: number, frame?: number, prob?: number | null) => capture.feedMs(ms, amp, frame, prob),
         path: () => voiceDiagnostics.snapshot().path,
         // Frame listeners, as V5/V12 will register them: read-only audio, 512 samples at 16 kHz.
         listen: (fn: (frame: Float32Array) => void) => micInput.current?.addFrameListener(fn) ?? (() => {}),
         wake: () => onWakeHit(),
+        // The ML VAD stage (V5): what it is, and (for tests) a way to start it again.
+        detector: () => vadStage.status(),
+        retryDetector: () => vadStage.retry(),
+        endPause: () => capture.endPauseMs,
         state: () => ({
           open: capture.vad.open,
           thresh: capture.vad.thresh,
@@ -4156,7 +4194,7 @@ export default function App() {
               <DuckBrowserSetting on={duckBrowser}
                 onChange={(on) => { saveDuckBrowser(on); speech.duck.setEnabled(on); }} /><SttSettingsPanel blocked={blocked} />
                 <SpeakerSettings store={speaker} blocked={blocked}
-                  listen={(fn) => micInput.current?.addFrameListener(fn) ?? null} /><VoiceDiagnosticsPanel diagnostics={voiceDiagnostics} capture={capture} muted={isMuted(state.dictation)} stt={stt} /></>
+                  listen={(fn) => micInput.current?.addFrameListener(fn) ?? null} /><EndPauseSetting ms={endPause} onChange={(ms) => { saveEndPause(ms); setEndPause(loadEndPause()); }} /><VoiceDiagnosticsPanel diagnostics={voiceDiagnostics} capture={capture} muted={isMuted(state.dictation)} stt={stt} onRetryDetector={() => vadStage.retry()} /></>
             ) : null}
             {settingsSection === "Avatar" ? (
               <AvatarPicker embedded

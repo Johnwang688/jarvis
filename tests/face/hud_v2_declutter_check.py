@@ -493,7 +493,7 @@ def _folded_status_checks(page, mock, check, until):
     page.route("**/stt*", lambda r: r.fulfill(status=500, body='{"error": "stt is down"}',
                                                content_type="application/json"))
     try:
-        page.evaluate("() => { window.__hud.mic.feedMs(2200, 0.0005); return true; }")
+        page.evaluate("() => { window.__hud.mic.feedMs(2800, 0.0005); return true; }")
         # V2: a 5xx is retried once after 2 s before the failure is shown.
         ok, why = shown("STT FAILED · RETRY", timeout=10)
         check("review #29 F3: folded, the bar says STT FAILED · RETRY", ok, why)
@@ -776,7 +776,7 @@ def _orb_line_checks(page, mock, check, until):
     until(lambda: _orb_status(page).strip() == "LISTENING · SPEAK NOW", timeout=4)
     ok, why = _line_whole(page)
     check("review #29 F8: LISTENING · SPEAK NOW fits under the orb, not cut by a pixel", ok, why)
-    page.evaluate("() => { window.__hud.mic.feedMs(2200, 0.0005); return true; }")
+    page.evaluate("() => { window.__hud.mic.feedMs(2800, 0.0005); return true; }")
     until(lambda: page.locator(_pane(1, '[data-testid="input"]')).input_value() != "", timeout=5)
     page.locator(_pane(1, '[data-testid="input"]')).fill("")
     page.evaluate("window.__hud.capture.closeFollowUp()")

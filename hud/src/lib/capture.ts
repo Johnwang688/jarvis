@@ -27,16 +27,19 @@
 // pre-roll or as a wake hit's back-dating.
 
 import {
-  CONTINUE_CHAIN_MS, CONTINUE_MAX_CLAIMS, CONTINUE_MS, FOLLOWUP_MS, MIN_UTTER_MS, PREROLL_MS, Ring, Vad, WAKE_GRACE_MS,
+  CONTINUE_CHAIN_MS, CONTINUE_MAX_CLAIMS, CONTINUE_MS, END_PAUSE_MAX_MS, END_PAUSE_MIN_MS, END_PAUSE_MS, FOLLOWUP_MS,
+  MIN_UTTER_MS, PREROLL_MS, Ring, Vad, WAKE_GRACE_MS, WEAK_CLAIM_GATE, WEAK_CLAIM_WINDOW_MS,
   closeBounds, frameRms, longEnough, msToSamples, samplesToMs,
 } from "./vad";
 import { CLAIM_CAP_MS, UTTERANCE_LIMIT_MS, UtteranceRecorder, type RecordedChunk } from "./recorder";
 
-import type { ClaimSource, DropReason, SuppressionReason } from "./voiceDiagnostics";
+import type { ClaimSource, DetectorKind, DropReason, SuppressionReason } from "./voiceDiagnostics";
 
 /** One chunk of a claimed message, as it leaves for transcription. */
 export interface UtteranceChunk extends RecordedChunk {
   source: ClaimSource;
+  /** The detector that judged this message's frames (Silero or the energy fallback), for the diagnostics row. */
+  detector: DetectorKind;
 }
 
 /** A claimed message is over: sent whole, truncated, or never uploaded at all. */
@@ -51,13 +54,18 @@ export interface UtteranceEnd {
   continuation: number | null;
   /** It ended before the owner finished: the mic went OFF, a card or picker appeared, the window crashed. */
   truncated: boolean;
+  /**
+   * It turned out not to be a message (too short, a cough) after a chunk had already left: the
+   * consumer must cancel that chunk's group and place nothing. The drop is the consumer's to report.
+   */
+  discard?: boolean;
 }
 
 export interface CaptureHooks {
   /** Suppressed whenever the detector would be listening to him, not the owner. */
   suppressed: () => boolean;
   suppressionReason?: () => SuppressionReason;
-  onDrop?: (reason: DropReason, ms: number, source: ClaimSource) => void;
+  onDrop?: (reason: DropReason, ms: number, source: ClaimSource, detector: DetectorKind) => void;
   /** OFF: nothing is claimed and nothing is uploaded. */
   muted: () => boolean;
   onLevel: (level: number) => void;
@@ -129,32 +137,46 @@ export class Capture {
   micFloorSample = 0;
   private followUpTimer: any = null;
   private claimSource: ClaimSource = "unclaimed";
+  /** The detector that judged the utterance now in progress (or the last one): Silero while the model was scoring its frames. */
+  judgedBy: DetectorKind = "energy";
   // Observation only: the real VAD deliberately resets while suppressed.
   private blockedVad = new Vad();
   private blockedReason: DropReason | null = null;
   private blockedAlreadyReported = false;
   private wasBlocked = false;
 
-  private drop(reason: DropReason, ms: number, source = this.claimSource) {
-    try { this.hooks.onDrop?.(reason, ms, source); } catch { /* diagnostics cannot change capture */ }
+  private drop(reason: DropReason, ms: number, source = this.claimSource, detector = this.judgedBy) {
+    try { this.hooks.onDrop?.(reason, ms, source, detector); } catch { /* diagnostics cannot change capture */ }
   }
 
-  private observeBlocked(rms: number, n: number, reason: DropReason | null) {
+  private observeBlocked(rms: number, n: number, reason: DropReason | null, prob?: number | null) {
     if (!reason) {
       if (this.blockedVad.open && !this.blockedAlreadyReported && this.blockedReason)
-        this.drop(this.blockedReason, samplesToMs(this.blockedVad.voiced), "unclaimed");
+        this.drop(this.blockedReason, samplesToMs(this.blockedVad.voiced), "unclaimed", this.blockedVad.ml ? "silero" : "energy");
       this.blockedVad.reset(); this.blockedReason = null; this.blockedAlreadyReported = false;
       return;
     }
-    const event = this.blockedVad.feed(rms, n, this.ring.written);
+    const event = this.blockedVad.feed(rms, n, this.ring.written, prob);
     if (event === "open") this.blockedReason = reason;
     if (event === "close" || event === "cap") {
-      if (!this.blockedAlreadyReported) this.drop(this.blockedReason ?? reason, samplesToMs(this.blockedVad.voiced), "unclaimed");
+      if (!this.blockedAlreadyReported) this.drop(this.blockedReason ?? reason, samplesToMs(this.blockedVad.voiced), "unclaimed", this.blockedVad.ml ? "silero" : "energy");
       this.blockedReason = null; this.blockedAlreadyReported = false;
     }
   }
 
   constructor(private hooks: CaptureHooks, private now: () => number = () => performance.now()) {}
+
+  /** The quiet run that ends a message (V5, plan §3.2: about 2.5 s, tunable). */
+  get endPauseMs() {
+    return this.vad.endPauseMs;
+  }
+
+  /** Tune the message pause; held to END_PAUSE_MIN_MS..END_PAUSE_MAX_MS, anything else keeps the default. */
+  setEndPause(ms: number) {
+    const v = Number.isFinite(ms) ? Math.round(Math.max(END_PAUSE_MIN_MS, Math.min(END_PAUSE_MAX_MS, ms))) : END_PAUSE_MS;
+    this.vad.endPauseMs = v;
+    this.blockedVad.endPauseMs = v;
+  }
 
   conversing() {
     return this.now() < this.followUpUntil;
@@ -227,9 +249,10 @@ export class Capture {
   private beginRecording(from: number, announce: (id: number) => void): number {
     const id = ++this.utterances;
     const source = () => this.claimSource;
+    const detector = this.judgedBy;
     const capped = this.claimSource === "follow_up" || this.claimSource === "continuation";
     const rec = new UtteranceRecorder(id, (chunk) => {
-      try { this.hooks.onChunk({ ...chunk, source: source() }); } catch { /* a consumer cannot break the audio path */ }
+      try { this.hooks.onChunk({ ...chunk, source: source(), detector }); } catch { /* a consumer cannot break the audio path */ }
     }, capped ? CLAIM_CAP_MS : UTTERANCE_LIMIT_MS);
     this.rec = rec;
     announce(id);
@@ -238,10 +261,11 @@ export class Capture {
     return id;
   }
 
-  private announceEnd(rec: UtteranceRecorder, summary: { chunks: number; ms: number }, continuation: number | null, truncated: boolean) {
+  private announceEnd(rec: UtteranceRecorder, summary: { chunks: number; ms: number }, continuation: number | null, truncated: boolean, discard = false) {
     try {
       this.hooks.onUtteranceEnd({
         utterance: rec.id, source: this.claimSource, ms: summary.ms, chunks: summary.chunks, continuation, truncated,
+        ...(discard ? { discard: true } : {}),
       });
     } catch { /* ditto */ }
   }
@@ -251,12 +275,12 @@ export class Capture {
    * card appeared, the window crashed, or the speech was too short to be a
    * turn. Chunks that already left stay out (they were captured while allowed).
    */
-  private stopRecording(truncated: boolean): { chunks: number; droppedMs: number } | null {
+  private stopRecording(truncated: boolean, discard = false): { chunks: number; droppedMs: number } | null {
     const rec = this.rec;
     if (!rec) return null;
     this.rec = null;
     const summary = rec.abort();
-    this.announceEnd(rec, summary, null, truncated);
+    this.announceEnd(rec, summary, null, truncated, discard);
     return summary;
   }
 
@@ -307,7 +331,13 @@ export class Capture {
     this.closeContinuation();
   }
 
-  onFrame(frame: Float32Array) {
+  /**
+   * One 16 kHz frame. `prob` is the ML VAD's speech probability for it when the
+   * detector stage has one (V5); without it the frame is judged by energy, as
+   * before. Either way the frame is ring-pushed, level-metered and recorded the
+   * same, and every rule below (OFF, suppression, claims, drops) is unchanged.
+   */
+  onFrame(frame: Float32Array, prob?: number | null) {
     this.ring.push(frame);
     const rms = frameRms(frame);
     const muted = this.hooks.muted();
@@ -336,7 +366,7 @@ export class Capture {
     if (reason && !this.wasBlocked) this.blockedVad.floor = this.vad.floor;
     this.wasBlocked = reason !== null;
     if (this.ptt) this.blockedAlreadyReported = true;
-    this.observeBlocked(rms, frame.length, reason);
+    this.observeBlocked(rms, frame.length, reason, prob);
     // A recording in progress stops uploading the moment the detector may not
     // listen: nothing under a card, a picker or Settings, nothing while OFF,
     // nothing from a crashed window. The talk key is the owner's own word, so
@@ -353,16 +383,23 @@ export class Capture {
         this.segClaimed = false;
       }
       const had = this.rec;
-      this.vad.feed(rms, frame.length, this.ring.written);
-      if (had && this.rec === had && had.push(frame, this.vad.loud)) this.hitLimit();
+      this.vad.feed(rms, frame.length, this.ring.written, prob);
+      if (had && this.rec === had && this.pushFrame(had, frame)) this.hitLimit();
       return;
     }
     const had = this.rec;
-    const event = this.vad.feed(rms, frame.length, this.ring.written);
+    const event = this.vad.feed(rms, frame.length, this.ring.written, prob);
     // A recording that began before this frame takes it; one that begins on
     // this frame (the "open" event below) already has it, from the ring.
-    if (had && this.rec === had && had.push(frame, this.vad.loud)) { this.hitLimit(); return; }
+    if (had && this.rec === had && this.pushFrame(had, frame)) { this.hitLimit(); return; }
     if (event) this.onVadEvent(event);
+    else this.lateClaim();
+  }
+
+  /** One frame into the recording, telling it whether what it holds is a message yet (its first-gap cut asks). */
+  private pushFrame(rec: UtteranceRecorder, frame: Float32Array): boolean {
+    rec.cutOk = longEnough(this.vad);
+    return rec.push(frame, this.vad.loud);
   }
 
   private truncate(reason: DropReason) {
@@ -381,18 +418,10 @@ export class Capture {
     // claims a second utterance beside it nor ends it at a pause.
     if (this.ptt) { this.segClaimed = false; return; }
     if (event === "open") {
-      const continuing = this.continuing();
-      this.claimSource = this.conversing() ? "follow_up" : this.now() - this.wakeHitAt < WAKE_GRACE_MS ? "wake"
-        : continuing ? "continuation" : "unclaimed";
-      this.segClaimed = this.conversing() || this.now() - this.wakeHitAt < WAKE_GRACE_MS || continuing;
-      if (this.claimSource === "continuation") this.chainClaims++;
-      if (this.segClaimed) {
-        // Saying his name claims exactly one utterance.
-        this.wakeHitAt = -1e9;
-        const tag = this.claimSource === "follow_up" ? this.followUpTag : null;
-        this.closeFollowUp();
-        this.beginRecording(this.vad.openedAt, (id) => this.hooks.onListening(this.claimSource, tag, id));
-      }
+      // The detector that opened it is the one that judged it.
+      this.judgedBy = this.vad.ml ? "silero" : "energy";
+      this.gateUntil = this.ring.written + msToSamples(WEAK_CLAIM_WINDOW_MS);
+      this.tryClaim();
       return;
     }
     const { to } = closeBounds(this.vad, this.ring.written, event);
@@ -400,9 +429,12 @@ export class Capture {
     this.segClaimed = false;
     if (!claimed) { this.drop("unclaimed", samplesToMs(this.vad.voiced)); return; }
     if (!longEnough(this.vad)) {
-      this.drop("too_short", samplesToMs(this.vad.voiced));
+      // (The first chunk is only cut early once the audio is long enough, so a chunk having left
+      // already is rare; if it did, the consumer cancels its group and reports the drop itself.)
+      const left = this.rec?.chunks ?? 0;
+      if (left === 0) this.drop("too_short", samplesToMs(this.vad.voiced));
       this.vad.voiced = 0;
-      this.stopRecording(false);
+      this.stopRecording(false, left > 0);
       // He was addressed; give the owner the window back -- but only if a wake
       // word or the follow-up window did the addressing. A too-short
       // continuation (a cough, a TV's click) just drops: reopening follow-up
@@ -413,6 +445,41 @@ export class Capture {
     }
     // The utterance ended a hangover ago: drop the silence that proved it.
     this.finishRecording(Math.max(0, this.ring.written - to));
+  }
+
+  /** Until when (ring clock) an unclaimed open utterance may still pass the weak gate. */
+  private gateUntil = -1;
+
+  /**
+   * Decide whether the utterance that just opened is claimed. V5 stopgap (until V12): with the ML
+   * VAD a follow-up or continuation claim needs the onset to have risen WEAK_CLAIM_GATE x above the
+   * energy threshold, so steady room speech the model calls speech does not claim without the wake
+   * word. A soft onset is not condemned for good: the gate is looked at again on each frame for the
+   * first WEAK_CLAIM_WINDOW_MS (`lateClaim`), and the recording starts at the utterance's own start,
+   * which the ring still holds.
+   */
+  private tryClaim() {
+    const weak = this.vad.ml && this.vad.peak < this.vad.thresh * WEAK_CLAIM_GATE;
+    const continuing = this.continuing() && !weak;
+    const following = this.conversing() && !weak;
+    const woken = this.now() - this.wakeHitAt < WAKE_GRACE_MS;
+    this.claimSource = following ? "follow_up" : woken ? "wake" : continuing ? "continuation" : "unclaimed";
+    this.segClaimed = following || woken || continuing;
+    if (this.claimSource === "continuation") this.chainClaims++;
+    if (this.segClaimed) {
+      // Saying his name claims exactly one utterance.
+      this.wakeHitAt = -1e9;
+      const tag = this.claimSource === "follow_up" ? this.followUpTag : null;
+      this.closeFollowUp();
+      this.beginRecording(this.vad.openedAt, (id) => this.hooks.onListening(this.claimSource, tag, id));
+    }
+  }
+
+  /** An open, unclaimed ML utterance whose onset was too soft: claim it if it has risen since, within the window. */
+  private lateClaim() {
+    if (!this.vad.open || this.segClaimed || this.ptt || !this.vad.ml || this.ring.written > this.gateUntil) return;
+    if (this.vad.peak < this.vad.thresh * WEAK_CLAIM_GATE) return;
+    this.tryClaim();
   }
 
   // ---- wake ---------------------------------------------------------------
@@ -456,6 +523,7 @@ export class Capture {
     if (this.hooks.muted()) return false; // muting takes away recording
     if (this.ptt) return false;
     this.claimSource = "ptt";
+    this.judgedBy = this.vad.ml ? "silero" : "energy";
     const at = this.ring.written;
     this.ptt = { from: Math.max(0, at - msToSamples(PREROLL_MS)), at, adopted: this.rec !== null };
     this.segClaimed = false;
@@ -509,7 +577,7 @@ export class Capture {
   }
 
   /** Test hook: script a room through the real detector, no microphone. */
-  feedMs(ms: number, amplitude: number, frameSamples = 1024) {
+  feedMs(ms: number, amplitude: number, frameSamples = 1024, prob?: number | null) {
     const total = msToSamples(ms);
     let done = 0;
     while (done < total) {
@@ -517,7 +585,7 @@ export class Capture {
       const frame = new Float32Array(n);
       // A frame of N samples at a constant amplitude has exactly that RMS.
       frame.fill(amplitude);
-      this.onFrame(frame);
+      this.onFrame(frame, prob);
       done += n;
     }
   }

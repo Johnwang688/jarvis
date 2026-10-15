@@ -66,6 +66,30 @@ describe("V2 retained-clip bookkeeping", () => {
   });
 });
 
+describe("the detector line (V5)", () => {
+  it("starts as the energy detector, names Silero when it is live, and stamps each row with the detector that judged it", async () => {
+    const { VoiceDiagnostics } = await import("./voiceDiagnostics");
+    const d = new VoiceDiagnostics(() => 5);
+    expect(d.snapshot()).toMatchObject({ detector: "energy", detectorPhase: "idle" });
+    const a = d.add(1000, "wake", "unclaimed");
+    d.detector("silero", "ready", "Silero VAD, running in a worker", 0.62);
+    expect(d.snapshot()).toMatchObject({ detector: "silero", detectorPhase: "ready", detectorMs: 0.62 });
+    const b = d.add(1000, "wake", "unclaimed");
+    d.detector("energy", "failed", "the VAD answered too late");
+    const c = d.add(1000, "wake", "unclaimed");
+    const rows = d.snapshot().rows;
+    expect([a, b, c].map((id) => rows.find((r) => r.id === id)!.detector)).toEqual(["energy", "silero", "energy"]);
+    expect(d.snapshot().detectorNote).toBe("the VAD answered too late");
+  });
+  it("bounds what it will show", async () => {
+    const { VoiceDiagnostics } = await import("./voiceDiagnostics");
+    const d = new VoiceDiagnostics();
+    d.detector("bogus" as never, "weird" as never, "x".repeat(900), Infinity);
+    expect(d.snapshot()).toMatchObject({ detector: "energy", detectorPhase: "idle", detectorMs: 0 });
+    expect(d.snapshot().detectorNote.length).toBe(200);
+  });
+});
+
 describe("V13 served-by metadata", () => {
   it("keeps only the two known backends and clears them when the row is retried", () => {
     const d = new VoiceDiagnostics(() => 1);
