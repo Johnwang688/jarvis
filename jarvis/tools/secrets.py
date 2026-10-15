@@ -1196,7 +1196,8 @@ _VAR_AT_COMMAND = re.compile(
     r"then|do|else|!|nice)[ \t]+)*[\"']?\$(?![Ee][Nn][Vv]:)")
 # The ones the line names, when it also writes a file or starts a program
 # that could read one back as code.
-_RUN_LATER = re.compile(r">|(?<![\w.-])tee(?![\w-])|(?:^|[\s;&|(`])\.?\.?/[^\s;&|]")
+_RUN_LATER = re.compile(r">|(?<![\w.-])tee(?![\w-])"
+                        r"|(?:^|[;&|(\n`{]|\$\()[ \t]*(?:(?:sudo|env|exec|nohup|time|command)[ \t]+)*\.{0,2}/[^\s;&|]")
 
 
 def _runs_code(text: str) -> bool:

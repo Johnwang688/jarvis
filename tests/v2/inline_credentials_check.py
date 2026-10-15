@@ -408,6 +408,8 @@ STILL_REDACTED = [
     ("export MY_TOKEN=plainvalue1 && curl -H \"Authorization: Bearer $MY_TOKEN\" https://example.invalid",
      f"export MY_TOKEN={R} && curl -H \"Authorization: Bearer $MY_TOKEN\" https://example.invalid"),
     ("env MY_SECRET=plainsecretvalue sudo ./run", f"env MY_SECRET={R} sudo ./run"),
+    ("export MY_TOKEN=plainvalue1 && curl -H \"Authorization: Bearer $MY_TOKEN\" -o /tmp/out https://x",
+     f"export MY_TOKEN={R} && curl -H \"Authorization: Bearer $MY_TOKEN\" -o /tmp/out https://x"),
 ]
 
 CHEAP_CATCHES = [
@@ -549,6 +551,8 @@ NEVER_HIDDEN = [
     ("X_TOKEN='rmrf'; parallel ::: \"$X_TOKEN\"", True, "rmrf"),
     ("X_TOKEN='rmrf'; find /tmp -exec $X_TOKEN {} +", True, "rmrf"),
     ("X_TOKEN='rmrf'; . ./env.sh", True, "rmrf"),
+    ("X_TOKEN='rmrf'; printf %s \"$X_TOKEN\" | tee a.sh; ./a.sh", True, "rmrf"),
+    ("X_TOKEN='rmrf'; echo \"$X_TOKEN\" > a.sh; /tmp/a.sh", True, "rmrf"),
     ("alias X_TOKEN='rmrf'; X_TOKEN", True, "rmrf"),
     ("$env:X_TOKEN='rmrf'; & $env:X_TOKEN", True, "rmrf"),
     ("$env:X_TOKEN='rmrf'; Start-Process $env:X_TOKEN", True, "rmrf"),
