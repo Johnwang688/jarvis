@@ -375,3 +375,51 @@ likely to bite:
   treats as a fatal identity mismatch today. Child
   `turn/interrupt` ends only that child's turn and does not kill its running
   command; parent token totals exclude children.
+
+## A Codex rename's destination is judged (2026-10-15)
+
+Until this fix, `codex.py`'s `_tool` built an `apply_patch` call's `paths`
+from `changes[].path` alone, and `permissions.file_targets` never reads
+`changes`. Codex 0.161's `FileUpdateChange.kind` is `add`, `delete` or
+`{type: update, move_path}` (generate-ts v2 schema; `move_path` is its only
+destination field). So a patch renaming `notes.txt` to `.env`, or into the
+gate's own state, showed layer 1 only `notes.txt`. In an owner chat the card
+named only the source. In a task (`auto_review`, AUTO profile), the session's
+own file approval was **accepted with no human**: the probe with a deny-all
+asker on `main` replied `accept`.
+
+Now `_change_paths` lists every path a change writes, the `move_path`
+destination included. Layer 1 judges them all and the card shows them all. A
+file approval is **declined unasked**, with a non-fatal notice, when any of
+these holds:
+
+- `changes` is not a list;
+- a change has no path;
+- a change's `kind` is not an object of type `add`, `delete` or `update`;
+- a `move_path` is not a string or rides a kind other than `update`;
+- the kind carries a field the schema does not have (it might be another
+  destination).
+
+The legacy v1 `applyPatchApproval` request, whose `FileChange` also has
+`move_path`, is not handled at all: it is refused as an unsupported method,
+as before.
+
+Claude has no analogous gap. Its file tools (Write, Edit, MultiEdit,
+NotebookEdit) name one `file_path`/`notebook_path`, and it has no rename
+tool. A shell `mv`/`cp`/`git mv` onto `.env` or the allowlist is refused by
+`denied_command` (checked in-process).
+
+**Still open:** a session file approval whose `fileChange` item was never
+seen has no paths to judge. In a task it is accepted with no human (probe:
+deny-all asker gives `accept`). Whether Codex always sends `item/started`
+before `item/fileChange/requestApproval` is unrecorded; the SV-0 command
+fixtures do show item before approval.
+
+Checks: `tests/v2/codex_provider_check.py`:
+- `test_file_rename_destination_is_judged_by_layer_1` covers `.env`, a
+  relative `.env.local` and the allowlist, each in a chat and in a task, plus
+  a benign rename that shows both paths;
+- `test_file_change_kind_that_cannot_be_read_is_declined` covers nine shapes.
+
+Both fail on `main` (15 failures), and 5 of 5 mutants are killed. The fake
+peer's file items now carry the `kind` the schema requires.
