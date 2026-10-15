@@ -89,3 +89,31 @@ describe("the detector line (V5)", () => {
     expect(d.snapshot().detectorNote.length).toBe(200);
   });
 });
+
+describe("V13 served-by metadata", () => {
+  it("keeps only the two known backends and clears them when the row is retried", () => {
+    const d = new VoiceDiagnostics(() => 1);
+    const id = d.add(1000, "ptt", "transcribing");
+    d.served(id, "quantum"); d.served(id, { toString: () => "local" } as any); d.served(999, "local");
+    expect(d.snapshot().rows[0].backend).toBeUndefined();
+    d.served(id, "cloud", true);
+    expect(d.snapshot().rows[0]).toMatchObject({ backend: "cloud", fellBack: true });
+    d.finish(id, "stt_failed", 10);
+    d.reopen(id);
+    expect(d.snapshot().rows[0].backend).toBeUndefined();
+  });
+
+  it("a message served by several chunks never hides the cloud: it sticks, and so does a fallback", () => {
+    const d = new VoiceDiagnostics(() => 1);
+    const id = d.add(1000, "ptt", "transcribing");
+    d.served(id, "cloud", true);
+    d.served(id, "local", false);                       // a later chunk was local
+    expect(d.snapshot().rows[0]).toMatchObject({ backend: "cloud", fellBack: true });
+    const other = d.add(1000, "ptt", "transcribing");
+    d.served(other, "local"); d.served(other, "cloud", false); d.served(other, "local");
+    expect(d.snapshot().rows[1]).toMatchObject({ backend: "cloud", fellBack: false });
+    const plain = d.add(1000, "ptt", "transcribing");
+    d.served(plain, "local"); d.served(plain, "local");
+    expect(d.snapshot().rows[2]).toMatchObject({ backend: "local", fellBack: false });
+  });
+});

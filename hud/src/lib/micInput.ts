@@ -29,7 +29,16 @@ export interface MicOptions {
   /** The bundled worklet module's URL. */
   workletUrl: string;
   createContext?: () => AudioContext;
+  /** The live path changed after start (the worklet's processor failed and the fallback took over). */
+  onPathChange?: (path: CapturePath, reason: string) => void;
+  /** How long to wait for the worklet module before using the fallback. */
+  moduleTimeoutMs?: number;
 }
+
+export const MODULE_TIMEOUT_MS = 8000;
+
+const reasonOf = (what: string, error: unknown) =>
+  `${what} (${error instanceof Error && error.name ? error.name : "error"})`;
 
 export async function startMicInput(o: MicOptions): Promise<MicInput> {
   const ctx = o.createContext ? o.createContext() : new AudioContext();
@@ -45,40 +54,60 @@ export async function startMicInput(o: MicOptions): Promise<MicInput> {
   quiet.connect(ctx.destination);
 
   let node: AudioNode | null = null;
-  let reason = "";
-  const hasWorklet = !!(ctx as any).audioWorklet && typeof (globalThis as any).AudioWorkletNode === "function";
-  if (!hasWorklet) reason = "AudioWorklet is not available in this window";
-  else {
-    try {
-      await ctx.audioWorklet.addModule(o.workletUrl);
-      const worklet = new AudioWorkletNode(ctx, MIC_PROCESSOR, { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1] });
-      worklet.port.onmessage = (e: MessageEvent) => { if (e.data instanceof Float32Array) deliver(e.data); };
-      source.connect(worklet);
-      worklet.connect(quiet);
-      node = worklet;
-    } catch (error: unknown) {
-      reason = `the AudioWorklet module did not load (${error instanceof Error && error.name ? error.name : "error"})`;
-      node = null;
-    }
-  }
-  let path: CapturePath = "worklet";
-  if (!node) {
-    path = "script_processor";
+  const useScriptProcessor = () => {
     const framer = new MicFramer(ctx.sampleRate, deliver);
     const sp = ctx.createScriptProcessor(2048, 1, 1);
     sp.onaudioprocess = (e) => framer.pushMono(Float32Array.from(e.inputBuffer.getChannelData(0)));
     source.connect(sp);
     sp.connect(quiet);
     node = sp;
+  };
+  let reason = "";
+  const hasWorklet = !!(ctx as any).audioWorklet && typeof (globalThis as any).AudioWorkletNode === "function";
+  if (!hasWorklet) reason = "AudioWorklet is not available in this window";
+  else {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      // A module that never answers must not leave the window without a microphone.
+      await Promise.race([
+        ctx.audioWorklet.addModule(o.workletUrl),
+        new Promise<never>((_, reject) => { timer = setTimeout(() => reject(Object.assign(new Error("timeout"), { name: "TimeoutError" })), o.moduleTimeoutMs ?? MODULE_TIMEOUT_MS); }),
+      ]);
+      clearTimeout(timer);
+      const worklet = new AudioWorkletNode(ctx, MIC_PROCESSOR, { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1] });
+      worklet.port.onmessage = (e: MessageEvent) => { if (e.data instanceof Float32Array) deliver(e.data); };
+      // The processor threw: the worklet is dead and frames have stopped. Take the
+      // same microphone over with the fallback, and say so.
+      worklet.onprocessorerror = () => {
+        if (node !== worklet) return;
+        try { source.disconnect(worklet); } catch { /* already gone */ }
+        try { worklet.disconnect(); } catch { /* ditto */ }
+        useScriptProcessor();
+        input.path = "script_processor";
+        input.fallbackReason = "the AudioWorklet processor failed while running";
+        try { o.onPathChange?.("script_processor", input.fallbackReason); } catch { /* an observer */ }
+      };
+      source.connect(worklet);
+      worklet.connect(quiet);
+      node = worklet;
+    } catch (error: unknown) {
+      clearTimeout(timer);
+      reason = reasonOf("the AudioWorklet module did not load", error);
+      node = null;
+    }
   }
-  return {
-    path, sampleRate: ctx.sampleRate, fallbackReason: reason,
+  const viaWorklet = node !== null;
+  if (!viaWorklet) useScriptProcessor();
+  const input: MicInput = {
+    path: viaWorklet ? "worklet" : "script_processor",
+    sampleRate: ctx.sampleRate, fallbackReason: reason,
     addFrameListener: (fn) => { listeners.add(fn); return () => { listeners.delete(fn); }; },
     stop: () => {
       try { source.disconnect(); } catch { /* already gone */ }
-      try { node?.disconnect(); } catch { /* ditto */ }
+      try { (node as AudioNode | null)?.disconnect(); } catch { /* ditto */ }
       o.stream.getTracks().forEach((t) => t.stop());
       ctx.close().catch(() => {});
     },
   };
+  return input;
 }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { dropLeadingOverlap, dropTrailingOverlap, joinChunks, overlapWords } from "./joinChunks";
+import { MAX_OVERLAP_WORDS, dropLeadingOverlap, dropTrailingOverlap, joinChunks, overlapMerge, overlapWords } from "./joinChunks";
 
 describe("overlapWords", () => {
   it("finds the longest run that ends one text and begins the next", () => {
@@ -33,6 +33,30 @@ describe("dropping an overlap", () => {
   });
   it("leaves unrelated text whole", () => {
     expect(dropLeadingOverlap("hello there", "something else")).toBe("something else");
+  });
+});
+
+describe("a word the cut fell in (the previous chunk heard only its start)", () => {
+  it("keeps the whole word and drops the fragment", () => {
+    expect(joinChunks([
+      { text: "we sent it to the transcrip", overlaps: false },
+      { text: "transcription service for the rest", overlaps: true },
+    ])).toBe("we sent it to the transcription service for the rest");
+    expect(overlapMerge("we sent it to the transcrip", "transcription service")).toEqual({ dropBefore: 1, dropAfter: 0 });
+  });
+  it("in a longer run, drops the fragment and the words the run shares from the earlier text", () => {
+    expect(joinChunks([
+      { text: "one two three fox jump", overlaps: false },
+      { text: "fox jumps over it", overlaps: true },
+    ])).toBe("one two three fox jumps over it");
+  });
+  it("still drops the later text's head when it is the later chunk that heard only the end", () => {
+    expect(overlapMerge("the quick brown fox jumps", "umps over the lazy dog")).toEqual({ dropBefore: 0, dropAfter: 1 });
+  });
+  it("looks for at most four words, so a spoken repetition further in is not an echo", () => {
+    expect(MAX_OVERLAP_WORDS).toBe(4);
+    expect(overlapWords("a b c d e f g", "d e f g h i")).toBe(4);
+    expect(overlapWords("one two three four five six", "two three four five six seven")).toBe(0);
   });
 });
 

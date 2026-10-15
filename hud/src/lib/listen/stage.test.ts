@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { FRAME_DEADLINE_MS, LOAD_DEADLINE_MS, MAX_PENDING, VadStage, type DetectorStatus, type WorkerLike } from "./stage";
+import {
+  FRAME_DEADLINE_MS, HEALTHY_RESET_MS, HEAD_WAIT_MS, LATE_RUN, LOAD_DEADLINE_MS, MAX_AUTO_RETRIES, MAX_PENDING, RETRY_DELAYS_MS,
+  SLEEP_GAP_MS, STRAIN_MS, VadStage, type DetectorStatus, type WorkerLike,
+} from "./stage";
 import type { FromWorker, ToWorker } from "./protocol";
 
 class FakeWorker implements WorkerLike {
@@ -16,7 +19,7 @@ class FakeWorker implements WorkerLike {
 
 const frame = (v: number) => new Float32Array(512).fill(v);
 
-function rig(opts: { active?: () => boolean; denoise?: (f: Float32Array) => Float32Array; throwOnCreate?: boolean } = {}) {
+function rig(opts: { active?: () => boolean; canRetry?: () => boolean; denoise?: (f: Float32Array) => Float32Array; throwOnCreate?: boolean } = {}) {
   let clock = 1000;
   const out: { v: number; p: number | null }[] = [];
   const statuses: DetectorStatus[] = [];
@@ -29,6 +32,7 @@ function rig(opts: { active?: () => boolean; denoise?: (f: Float32Array) => Floa
     },
     now: () => clock,
     active: opts.active,
+    canRetry: opts.canRetry,
     denoise: opts.denoise,
     onStatus: (s) => statuses.push(s),
   });
@@ -174,42 +178,6 @@ describe("falls back to energy, visibly, and never drops a frame", () => {
     expect(r.out).toEqual([{ v: 1, p: null }]);
   });
 
-  it("a worker that falls behind: the queue is bounded, then energy takes over, in order", () => {
-    const r = rig();
-    ready(r);
-    for (let i = 1; i <= MAX_PENDING; i++) r.stage.push(frame(i));
-    expect(r.stage.status().state).toBe("ready");
-    expect(r.out).toEqual([]);
-    expect(r.w().frames()).toHaveLength(MAX_PENDING);
-    r.stage.push(frame(MAX_PENDING + 1)); // one more than the bound
-    expect(r.stage.status()).toMatchObject({ detector: "energy", state: "failed", code: "backlog" });
-    expect(r.out.map((x) => x.v)).toEqual(Array.from({ length: MAX_PENDING + 1 }, (_, i) => i + 1));
-    expect(r.out.every((x) => x.p === null)).toBe(true);
-    expect(r.w().terminated).toBe(true);
-    r.stage.push(frame(99)); // and from now on, straight through
-    expect(r.out.at(-1)).toEqual({ v: 99, p: null });
-  });
-
-  it("a worker that answers late: the oldest unanswered frame has a deadline", () => {
-    const r = rig();
-    ready(r);
-    r.stage.push(frame(1));
-    r.tick(FRAME_DEADLINE_MS + 1);
-    r.stage.push(frame(2));
-    expect(r.stage.status()).toMatchObject({ detector: "energy", code: "late" });
-    expect(r.out.map((x) => x.p)).toEqual([null, null]);
-  });
-
-  it("a verdict that arrives past its deadline is used for that frame, then the stage falls back", () => {
-    const r = rig();
-    ready(r);
-    r.stage.push(frame(1)); r.stage.push(frame(2));
-    r.tick(FRAME_DEADLINE_MS + 1);
-    r.w().say({ type: "prob", seq: 1, p: 0.9, ms: 1 });
-    expect(r.out).toEqual([{ v: 1, p: 0.9 }, { v: 2, p: null }]);
-    expect(r.stage.status().code).toBe("late");
-  });
-
   it("a slow but timely worker does not fall back", () => {
     const r = rig();
     ready(r);
@@ -259,6 +227,285 @@ describe("falls back to energy, visibly, and never drops a frame", () => {
       r.w().say({ type: "failed", code: "backlog" });
       expect(r.out.map((o) => o.v)).toEqual(Array.from({ length: n }, (_, i) => i + 1));
     }
+  });
+});
+
+/** Push `n` frames 32 ms apart (the microphone's own rhythm), answering each at once unless told not to. */
+function stream(r: ReturnType<typeof rig>, n: number, answer = true, start = 1000) {
+  for (let i = 0; i < n; i++) {
+    r.tick(32);
+    r.stage.push(frame(start + i));
+    if (answer) { const f = r.w().frames().at(-1)!; r.w().say({ type: "prob", seq: f.seq, p: 0.5, ms: 1 + (i % 5) * 0.2, total: 1 }); }
+  }
+}
+
+/** Let `ms` go by the way real time does: frames keep arriving (a second apart is plenty), so no gap reads as a sleep. */
+function wait(r: ReturnType<typeof rig>, ms: number) {
+  for (let left = ms; left > 0; left -= 1000) { r.tick(Math.min(1000, left)); r.stage.push(frame(7777)); }
+}
+
+describe("a worker that is genuinely too slow", () => {
+  it("the queue is bounded: past MAX_PENDING frames are delivered as energy, in order, without failing", () => {
+    const r = rig();
+    ready(r);
+    for (let i = 1; i <= MAX_PENDING + 3; i++) r.stage.push(frame(i));
+    expect(r.stage.status().state).toBe("ready");
+    expect(r.w().frames()).toHaveLength(MAX_PENDING); // the 3 beyond the bound were not posted
+    expect(r.out).toEqual([]);                        // and wait behind the unanswered head
+    for (const f of r.w().frames()) r.w().say({ type: "prob", seq: f.seq, p: 0.7, ms: 1, total: 1 });
+    expect(r.out.map((o) => o.v)).toEqual(Array.from({ length: MAX_PENDING + 3 }, (_, i) => i + 1));
+    expect(r.out.slice(0, MAX_PENDING).every((o) => o.p === 0.7)).toBe(true);
+    expect(r.out.slice(MAX_PENDING).every((o) => o.p === null)).toBe(true);
+    r.stage.push(frame(99)); // the worker missed audio: it starts clean at the next frame it is given
+    expect(r.w().posted.map((m) => m.type).slice(-2)).toEqual(["reset", "frame"]);
+  });
+
+  it("a verdict that never comes: the oldest frame's wait, counted over responsive time, fails it", () => {
+    const r = rig();
+    ready(r);
+    let n = 0;
+    while (r.stage.status().state === "ready" && n < 100) { r.tick(32); r.stage.push(frame(++n)); }
+    expect(r.stage.status()).toMatchObject({ detector: "energy", code: "late" });
+    expect(n * 32).toBeGreaterThan(HEAD_WAIT_MS);
+    expect(n * 32).toBeLessThan(HEAD_WAIT_MS + 200);
+    expect(r.out.map((o) => o.v)).toEqual(Array.from({ length: n }, (_, i) => i + 1));
+    expect(r.out.every((o) => o.p === null)).toBe(true);
+    expect(r.w().terminated).toBe(true);
+  });
+
+  it("verdicts that keep taking too long in the worker itself: LATE_RUN in a row fail it, fewer do not", () => {
+    const r = rig();
+    ready(r);
+    for (let i = 1; i < LATE_RUN; i++) { r.tick(32); r.stage.push(frame(i)); r.w().say({ type: "prob", seq: i, p: 0.5, ms: 5, total: FRAME_DEADLINE_MS + 1 }); }
+    expect(r.stage.status().state).toBe("ready");
+    r.tick(32); r.stage.push(frame(50)); r.w().say({ type: "prob", seq: LATE_RUN, p: 0.5, ms: 5, total: 3 }); // one good one resets the run
+    for (let i = 1; i <= LATE_RUN; i++) { r.tick(32); r.stage.push(frame(60 + i)); r.w().say({ type: "prob", seq: LATE_RUN + i, p: 0.5, ms: 5, total: FRAME_DEADLINE_MS + 1 }); }
+    expect(r.stage.status()).toMatchObject({ state: "failed", code: "late" });
+  });
+
+  it("answering on time but never catching up: a full queue for STRAIN_MS fails it as a backlog", () => {
+    const r = rig();
+    ready(r);
+    // The worker answers the oldest posted frame every 20th push: the head keeps changing
+    // (never 750 ms old) but the queue stays full.
+    let n = 0, answered = 0;
+    while (r.stage.status().state === "ready" && n < 400) {
+      r.tick(32); r.stage.push(frame(++n));
+      if (n % 20 === 0) {
+        answered = r.w().frames().map((x) => x.seq).find((q) => q > answered) ?? answered;
+        r.w().say({ type: "prob", seq: answered, p: 0.5, ms: 1, total: 1 });
+      }
+    }
+    expect(r.stage.status()).toMatchObject({ state: "failed", code: "backlog" });
+    expect(n * 32).toBeGreaterThan(STRAIN_MS);
+  });
+});
+
+describe("a busy main thread is not a slow worker (MED-1)", () => {
+  for (const stall of [700, 1500, 5000]) {
+    it(`a ${stall} ms stall: the frames and the verdicts arrive in a burst, Silero stays`, () => {
+      const r = rig();
+      ready(r);
+      stream(r, 20);                                  // healthy
+      r.tick(32); r.stage.push(frame(4000));          // a frame goes out, its verdict is on the way...
+      r.tick(32); r.stage.push(frame(4001));
+      r.tick(stall);                                  // ...and the main thread is blocked
+      const burst = Math.floor(stall / 32) + 1;       // the microphone's frames arrive together
+      for (let i = 0; i < burst; i++) r.stage.push(frame(5000 + i));
+      for (const f of r.w().frames()) if (f.seq >= 21) r.w().say({ type: "prob", seq: f.seq, p: 0.8, ms: 1, total: 1 });
+      expect(r.stage.status().state).toBe("ready");
+      expect(r.out.map((o) => o.v).slice(-burst)).toEqual(Array.from({ length: burst }, (_, i) => 5000 + i));
+      stream(r, 10, true, 9000);                      // and carries on scoring afterwards
+      expect(r.out.slice(-10).every((o) => o.p === 0.5)).toBe(true);
+    });
+  }
+
+  it("a stall does not age the oldest frame: the worker answered at once, the main thread read it late", () => {
+    const r = rig();
+    ready(r);
+    r.tick(32); r.stage.push(frame(1));
+    r.tick(32); r.stage.push(frame(2));               // the oldest frame is being watched
+    r.tick(3000);                                     // blocked before the verdict could be read
+    r.stage.push(frame(3));
+    r.w().say({ type: "prob", seq: 1, p: 0.6, ms: 1, total: 1 });
+    r.w().say({ type: "prob", seq: 2, p: 0.6, ms: 1, total: 1 });
+    r.w().say({ type: "prob", seq: 3, p: 0.6, ms: 1, total: 1 });
+    expect(r.stage.status().state).toBe("ready");
+    expect(r.out.map((o) => o.p)).toEqual([0.6, 0.6, 0.6]);
+  });
+
+  it("repeated stalls with a worker that answers each time do not add up to a failure", () => {
+    const r = rig();
+    ready(r);
+    for (let k = 0; k < 10; k++) { stream(r, 5); r.tick(900); stream(r, 1); }
+    expect(r.stage.status().state).toBe("ready");
+  });
+});
+
+describe("a long gap between frames is a reset, not a failure (sleep and resume)", () => {
+  it("working: forgets the timing history and starts the worker clean", () => {
+    const r = rig();
+    ready(r);
+    stream(r, 5);
+    r.tick(SLEEP_GAP_MS + 10);
+    r.stage.push(frame(1));
+    expect(r.stage.status().state).toBe("ready");
+    expect(r.w().posted.map((m) => m.type).slice(-2)).toEqual(["reset", "frame"]);
+  });
+
+  it("failed for a timing reason: tries again at once, without spending an automatic retry", () => {
+    const r = rig();
+    ready(r);
+    r.stage.push(frame(0));
+    r.w().say({ type: "failed", code: "worker" as never });
+    expect(r.stage.status().state).toBe("failed");
+    r.tick(SLEEP_GAP_MS + 10);
+    r.stage.push(frame(1));
+    expect(r.workers).toHaveLength(2);
+    expect(r.stage.status().state).toBe("loading");
+    r.w().say({ type: "failed", code: "worker" as never });
+    wait(r, RETRY_DELAYS_MS[0] + 1); // the first automatic retry is still whole
+    expect(r.workers).toHaveLength(3);
+  });
+
+  it("rearm() (the page is visible again) does the same, and never revives a permanent failure", () => {
+    const r = rig();
+    r.stage.start(); r.w().say({ type: "failed", code: "hash" });
+    r.stage.rearm();
+    expect(r.workers).toHaveLength(1);
+    const q = rig();
+    ready(q);
+    q.w().say({ type: "failed", code: "backlog" });
+    q.stage.rearm();
+    expect(q.workers).toHaveLength(2);
+  });
+});
+
+describe("automatic retries", () => {
+  const failWith = (r: ReturnType<typeof rig>, code: string) => { r.w().say({ type: "failed", code: code as never }); };
+
+  it("transient failures retry after 30 s, 2 min, 10 min, then stop; the owner's button still works", () => {
+    expect([...RETRY_DELAYS_MS]).toEqual([30_000, 120_000, 600_000]);
+    expect(MAX_AUTO_RETRIES).toBe(3);
+    const r = rig();
+    ready(r);
+    failWith(r, "late");
+    expect(r.stage.status().retrying).toBe(true);
+    expect(r.stage.status().note).toMatch(/trying again/);
+    wait(r, RETRY_DELAYS_MS[0] - 1000);
+    expect(r.workers).toHaveLength(1);                 // too early
+    wait(r, 1100);
+    expect(r.workers).toHaveLength(2);                 // 30 s
+    failWith(r, "backlog");
+    wait(r, RETRY_DELAYS_MS[1] - 1000);
+    expect(r.workers).toHaveLength(2);
+    wait(r, 1100);
+    expect(r.workers).toHaveLength(3);                 // 2 min
+    failWith(r, "timeout");
+    wait(r, RETRY_DELAYS_MS[2] + 1);
+    expect(r.workers).toHaveLength(4);                 // 10 min
+    failWith(r, "worker");
+    expect(r.stage.status().retrying).toBe(false);
+    wait(r, 3_600_000);
+    expect(r.workers).toHaveLength(4);                 // no fourth
+    r.stage.retry();
+    expect(r.workers).toHaveLength(5);                 // the button always tries
+  });
+
+  it("only at a quiet moment: nothing open or recording, the mic not OFF, Settings closed", () => {
+    let quiet = false, on = true;
+    const r = rig({ canRetry: () => quiet, active: () => on });
+    ready(r);
+    failWith(r, "late");
+    wait(r, RETRY_DELAYS_MS[0] + 1);
+    expect(r.workers).toHaveLength(1);                 // an utterance is open / Settings is up
+    quiet = true; on = false;
+    r.stage.push(frame(2));
+    expect(r.workers).toHaveLength(1);                 // OFF
+    on = true;
+    r.stage.push(frame(3));
+    expect(r.workers).toHaveLength(2);
+  });
+
+  it("never for hash, no_worker or runtime; fetch gets one more try when the mic is next opened", () => {
+    for (const code of ["hash", "runtime"]) {
+      const r = rig();
+      r.stage.start(); failWith(r, code);
+      wait(r, 3_600_000);
+      expect(r.workers, code).toHaveLength(1);
+      expect(r.stage.status().retrying).toBe(false);
+      r.stage.stop();
+      r.stage.start();                                   // the next mic open: still no
+      expect(r.workers, code).toHaveLength(1);
+      expect(r.stage.status()).toMatchObject({ state: "failed", code });
+      r.stage.retry();                                   // the button
+      expect(r.workers, code).toHaveLength(2);
+    }
+    const n = rig({ throwOnCreate: true });
+    n.stage.start();
+    wait(n, 3_600_000);
+    expect(n.stage.status().code).toBe("worker");        // (a throwing constructor is "worker"; "no_worker" below)
+    const f = rig();
+    f.stage.start(); failWith(f, "fetch");
+    wait(f, 3_600_000);
+    expect(f.workers).toHaveLength(1);                   // not on its own
+    f.stage.stop(); f.stage.start();
+    expect(f.workers).toHaveLength(2);                   // at the next mic open
+  });
+
+  it("the count resets after HEALTHY_RESET_MS of Silero working", () => {
+    const r = rig();
+    ready(r);
+    failWith(r, "late");
+    wait(r, RETRY_DELAYS_MS[0] + 1);   // retry 1
+    r.w().say({ type: "ready", loadMs: 1 });
+    wait(r, HEALTHY_RESET_MS + 1000); stream(r, 2);             // five healthy minutes
+    failWith(r, "late");
+    wait(r, RETRY_DELAYS_MS[0] + 1);
+    expect(r.workers).toHaveLength(3);                          // the first delay again, not the 2 min one
+  });
+
+  it("every switch is reported to the observer (diagnostics log them)", () => {
+    const r = rig();
+    ready(r);
+    failWith(r, "late");
+    wait(r, RETRY_DELAYS_MS[0] + 1);
+    r.w().say({ type: "ready", loadMs: 1 });
+    expect(r.statuses.map((s) => `${s.detector}:${s.state}`)).toEqual([
+      "energy:loading", "silero:ready", "energy:failed", "energy:loading", "silero:ready",
+    ]);
+  });
+});
+
+describe("the other details", () => {
+  it("statistics are republished every so often, not at every verdict", () => {
+    const r = rig();
+    ready(r);
+    const before = r.statuses.length;
+    stream(r, 200);
+    const after = r.statuses.length - before;
+    expect(after).toBeGreaterThanOrEqual(3);
+    expect(after).toBeLessThanOrEqual(5);
+    expect(r.statuses.at(-1)!.frameMs).toBeCloseTo(1.4, 0);
+  });
+
+  it("an object-prototype name is not a failure code", () => {
+    for (const code of ["toString", "constructor", "__proto__"]) {
+      const r = rig();
+      r.stage.start();
+      r.w().say({ type: "failed", code: code as never });
+      expect(r.stage.status().code).toBe("runtime");
+    }
+  });
+
+  it("a stale run's token cannot stop the live stage", () => {
+    const r = rig();
+    const old = r.stage.start();
+    const live = r.stage.start();
+    r.stage.stop(old);
+    expect(r.stage.status().state).toBe("loading");
+    r.stage.stop(live);
+    expect(r.stage.status().state).toBe("idle");
   });
 });
 

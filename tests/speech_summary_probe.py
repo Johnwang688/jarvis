@@ -115,8 +115,10 @@ def main() -> int:
         try:
             out = S.summarize(text, deadline_s=20.0)
         except S.SummaryError as exc:
-            print(f"{i:2d}  {len(text):5d} chars  FAILED {exc.status} {exc.message}")
-            rows.append({"chars": len(text), "failed": exc.status})
+            # The reason code and numbers only (HTTP status, finish reason, token counts): never text.
+            print(f"{i:2d}  {len(text):5d} chars  FAILED {exc.status} {exc.message} "
+                  f"[reason={exc.reason or '-'} {json.dumps(exc.detail, sort_keys=True)}]")
+            rows.append({"chars": len(text), "failed": exc.status, "reason": exc.reason, "detail": exc.detail})
             continue
         cost = out.cost_usd
         estimated = False
@@ -126,13 +128,16 @@ def main() -> int:
         spent += cost
         rows.append({"chars": len(text), "model": out.model, "prompt_tokens": out.prompt_tokens,
                      "completion_tokens": out.completion_tokens, "cost_usd": cost, "estimated": estimated,
-                     "seconds": round(out.seconds, 3), "summary_chars": len(out.text)})
+                     "seconds": round(out.seconds, 3), "summary_chars": len(out.text),
+                     "calls": out.calls, "retries": out.retries})
         print(f"{i:2d}  {len(text):5d} chars  {out.prompt_tokens:5d} in  {out.completion_tokens:4d} out  "
-              f"${cost:.6f}{'~' if estimated else ' '} {out.seconds:5.2f}s  -> {out.text[:90]}")
+              f"${cost:.6f}{'~' if estimated else ' '} {out.seconds:5.2f}s  "
+              f"{'retried ' + str(out.retries) + 'x  ' if out.retries else ''}-> {out.text[:90]}")
 
     done = [r for r in rows if "failed" not in r]
     if not done:
         print("no successful calls")
+        print(json.dumps([{k: r[k] for k in ("chars", "reason", "detail")} for r in rows], indent=2))
         return 1
     secs = [r["seconds"] for r in done]
     total = sum(r["cost_usd"] for r in done)
@@ -144,6 +149,9 @@ def main() -> int:
         "completion_tokens_mean": round(statistics.mean(r["completion_tokens"] for r in done)),
         "p50_s": round(pct(secs, 0.5), 2), "p95_s": round(pct(secs, 0.95), 2),
         "max_s": max(secs), "any_cost_estimated": any(r["estimated"] for r in done),
+        "retried_calls": sum(1 for r in done if r["retries"]),
+        "failure_reasons": {k: sum(1 for r in rows if r.get("reason") == k)
+                            for k in sorted({r["reason"] for r in rows if "failed" in r})},
     }
     print("\n" + json.dumps(summary, indent=2))
     if args.out:

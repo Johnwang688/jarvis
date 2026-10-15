@@ -7,7 +7,9 @@ What it proves, in a real Chromium against the mock daemon:
     served is the pinned file, and Settings -> Voice names the detector in use;
   - synthetic Kokoro speech played through Chrome's fake microphone
     (`--use-file-for-fake-audio-capture`, never a real voice) is detected by Silero:
-      a 2.4 s pause continues the message and a 2.6 s pause ends it;
+      a 2.2 s pause continues the message and a 2.8 s pause ends it (the exact 2.4 s / 2.6 s
+      edges are scripted in hud/src/lib/captureV5.test.ts: the model's own onset lag of
+      about 100 ms puts a real-audio edge test within noise of the 2.5 s timer);
       speech 5 s after a message went out is claimed as its continuation, 7 s is not;
   - a noise-only recording (white + pink, loud) opens no utterance;
   - the worker failing to load (model missing, model altered, runtime blocked,
@@ -20,7 +22,7 @@ fixtures are synthetic (tests/face/fixtures/voice_v5), no external request, no l
 daemon port. Run alone, optionally for some sections:
     python tests/face/hud_v2_vad_check.py [section,section]
 under a temporary HOME, dummy keys, the worktree PYTHONPATH and a 3G/0swap scope.
-Needs hud/dist built; sections: silero_loads, pauses, continuation, noise, fallbacks.
+Needs hud/dist built; sections: silero_loads, stalls, pauses, continuation, long_dictation, noise, fallbacks.
 """
 from __future__ import annotations
 
@@ -110,15 +112,17 @@ def scenario(tmp: Path, name: str, *parts) -> Path:
 class Stt:
     """A scripted `/stt`: records each upload, answers with fixed words."""
 
-    def __init__(self):
+    def __init__(self, numbered=False):
         self.reqs: list[dict] = []
+        self.numbered = numbered   # answer "part N" (N = the chunk's place in its message)
 
     def handle(self, route):
         q = {k: v[0] for k, v in parse_qs(urlsplit(route.request.url).query).items()}
         body = route.request.post_data_buffer or b""
         self.reqs.append({"seq": int(q["seq"]), "utt": int(q["utterance_id"]),
                           "ms": max(0, len(body) - 44) / 2 / RATE * 1000})
-        route.fulfill(content_type="application/json", body=json.dumps({"text": "synthetic words"}))
+        text = f"part{int(q['seq']) - int(q['utterance_id']) + 1}" if self.numbered else "synthetic words"
+        route.fulfill(content_type="application/json", body=json.dumps({"text": text}))
 
 
 # Claim the first utterance the detector opens, the way a wake hit does (test hook), so the
@@ -249,6 +253,26 @@ def main(argv=None):
                 ctx.close(); browser.close()
 
             # ---------------------------------------------------------------
+            # a busy main thread is not a slow worker
+            # ---------------------------------------------------------------
+            def stalls():
+                browser = launch(scenario(tmp, "quiet2", ("gap", 40)))
+                ctx = new_context(browser)
+                page = open_page(ctx, wait_detector="ready")
+                for ms in (700, 1500, 700):
+                    before = detector(page)["scored"]
+                    frames_before = page.evaluate("window.__hud.mic.state().written")
+                    page.evaluate("(ms) => { const t = performance.now(); while (performance.now() - t < ms); }", ms)
+                    page.wait_for_timeout(2500)
+                    st = detector(page)
+                    check(f"a {ms} ms busy main thread: Silero is still the detector", st["detector"] == "silero" and st["state"] == "ready", str(st))
+                    check(f"a {ms} ms busy main thread: it keeps scoring afterwards", st["scored"] > before + 40, f"{before} -> {st['scored']}")
+                    check(f"a {ms} ms busy main thread: no audio was lost",
+                          page.evaluate("window.__hud.mic.state().written") - frames_before > 16000 * (2.5 + ms / 1000) * 0.9)
+                check("the stalls cost the worker nothing: still about a millisecond a frame", detector(page)["frameMs"] < 16, str(detector(page)))
+                ctx.close(); browser.close()
+
+            # ---------------------------------------------------------------
             # 2.4 s continues, 2.6 s ends
             # ---------------------------------------------------------------
             def run_speech(name, parts, wait_rows, settle_s=8):
@@ -269,15 +293,17 @@ def main(argv=None):
                 return ctx, browser, page, stt, rows, det
 
             def pauses():
-                for gap, ends in ((2.4, False), (2.6, True)):
+                for gap, ends in ((2.2, False), (2.8, True)):
                     ctx, browser, page, stt, rows, det = run_speech(f"pause{int(gap * 10)}", [("b", 0), ("gap", gap), ("b", 0), ("gap", 6)], 1 if not ends else 2)
                     tag = f"a {gap:.1f} s pause"
                     check(f"{tag}: Silero was judging the whole time", det["detector"] == "silero" and det["scored"] > 500, str(det))
                     utts = {r["utt"] for r in stt.reqs}
                     if not ends:
-                        check(f"{tag} continues: one message, uploaded once (both sentences)", len(utts) == 1 and len(stt.reqs) == 1, str(stt.reqs))
-                        check(f"{tag} continues: the upload holds both sentences and the pause between them",
-                              len(stt.reqs) == 1 and 10000 < stt.reqs[0]["ms"] < 13000, str(stt.reqs))
+                        check(f"{tag} continues: one message (one utterance id, one diagnostics row below)", len(utts) == 1, str(stt.reqs))
+                        check(f"{tag} continues: the opening is cut at its first 700 ms gap and transcribes while the rest is said (2 chunks)",
+                              len(stt.reqs) == 2 and stt.reqs[0]["ms"] < 6000, str(stt.reqs))
+                        check(f"{tag} continues: between them they hold both sentences and the pause",
+                              9500 < sum(r["ms"] for r in stt.reqs) < 13000, str(stt.reqs))
                         check(f"{tag} continues: one diagnostics row", len(rows) == 1 and rows[0]["source"] == "wake" and rows[0]["detector"] == "silero", str(rows))
                     else:
                         check(f"{tag} ends the message: two messages, the second a continuation", len(utts) == 2
@@ -305,6 +331,34 @@ def main(argv=None):
                         check(f"{tag}: it is dropped as unclaimed, nothing uploaded for it",
                               any(r["outcome"] == "unclaimed" for r in rows) and len({r['utt'] for r in stt.reqs}) == 1, f"{rows} {stt.reqs}")
                     ctx.close(); browser.close()
+
+            # ---------------------------------------------------------------
+            # a long dictation through Silero, chunked
+            # ---------------------------------------------------------------
+            def long_dictation():
+                parts = [("a", 0), ("gap", 0.9), ("b", 0), ("gap", 0.9), ("a", 0), ("gap", 0.9), ("b", 0), ("gap", 0.9), ("a", 0), ("gap", 0.9), ("b", 0), ("gap", 6)]
+                browser = launch(scenario(tmp, "long", *parts))
+                ctx = new_context(browser)
+                page = open_page(ctx, wait_detector="ready")
+                stt = Stt(numbered=True)
+                page.route("**/stt*", stt.handle)
+                page.evaluate(CLAIM_FIRST)
+                try:
+                    page.wait_for_function("() => document.querySelector('[data-testid=\"input\"]').value.includes('part3')", timeout=75000)
+                except Exception:
+                    pass
+                page.wait_for_timeout(1500)
+                box = page.locator('[data-testid="input"]').first.input_value().strip()
+                rows = page.evaluate("window.__hud.voiceDiagnostics().rows")
+                total = sum(r["ms"] for r in stt.reqs)
+                check("a 30 s dictation with 0.9 s breaths is one message in several chunks", len({r["utt"] for r in stt.reqs}) == 1 and len(stt.reqs) >= 3, str(stt.reqs))
+                check("the first chunk left early (under 8 s: only the first gap rule cuts there), the others at 8 s or more",
+                      stt.reqs and stt.reqs[0]["ms"] < 8000 and all(r["ms"] > 8000 for r in stt.reqs[1:-1]), str(stt.reqs))
+                check("their audio adds up to the dictation, nothing repeated at pause cuts", 28000 < total < 36000, f"{total:.0f} ms")
+                expect = " ".join(f"part{i + 1}" for i in range(len(stt.reqs)))
+                check("the words come back as one message, in order, in the box", box == expect, f"{box!r} vs {expect!r}")
+                check("one row, judged by Silero", len(rows) == 1 and rows[0]["detector"] == "silero" and rows[0]["source"] == "wake", str(rows))
+                ctx.close(); browser.close()
 
             # ---------------------------------------------------------------
             # noise only
@@ -342,8 +396,9 @@ def main(argv=None):
                      None, "window.Worker = class { constructor() { throw new Error('blocked at http://private.example/w.js'); } };"),
                     ("the worker answers far too slowly", None,
                      None, """(() => { const W = window.Worker;
+                        window.__slowVad = 1500;
                         window.Worker = class extends W { postMessage(m, t) {
-                          if (m && m.type === 'frame') setTimeout(() => super.postMessage(m, t), 1500); else super.postMessage(m, t); } }; })();"""),
+                          if (m && m.type === 'frame' && window.__slowVad) setTimeout(() => super.postMessage(m, t), window.__slowVad); else super.postMessage(m, t); } }; })();"""),
                 ]
                 good = (REPO / "hud" / "vendor" / "silero-vad" / "silero_vad_v5.1.2.onnx").read_bytes()
                 for name, code, router, extra in variants:
@@ -369,11 +424,13 @@ def main(argv=None):
                         check(f"{name}: falls back to energy with reason '{code}'", st["detector"] == "energy" and st["code"] == code, str(st))
                     else:
                         # Frames reach the worker (listen is the stage's neighbour); give the deadline time to pass.
-                        check(f"{name}: falls back to energy ('late' or 'backlog')", st["detector"] == "energy" and st["code"] in ("late", "backlog"), str(st))
+                        check(f"{name}: falls back to energy ('late')", st["detector"] == "energy" and st["code"] == "late", str(st))
                     open_settings(page, "Voice")
                     shown = page.locator('[data-testid="voice-detector"]').inner_text()
                     check(f"{name}: Settings -> Voice says so, in words", "energy fallback" in shown and len(shown) > 40 and "Silero VAD (ML)" not in shown, shown)
                     check(f"{name}: and offers to try again", page.locator('[data-testid="voice-detector-retry"]').count() == 1)
+                    log = page.locator('[data-testid="voice-detector-log"]').text_content() if page.locator('[data-testid="voice-detector-log"]').count() else ""
+                    check(f"{name}: and the switch is in the detector log", "failed" in log.lower() or "energy" in log, log[:200])
                     snap = json.dumps(page.evaluate("window.__hud.voiceDiagnostics()")) + shown
                     check(f"{name}: with no URL, path or engine text in it", "private.example" not in snap and "silero_vad" not in snap and ".wasm" not in snap and "http" not in snap, snap[:200])
                     page.locator('[data-testid="settings-close"]').click()
@@ -385,7 +442,14 @@ def main(argv=None):
                     page.evaluate("window.__hud.mic.feedMs(2000, .0009); window.__hud.capture.press(); window.__hud.mic.feedMs(1500, .06); window.__hud.capture.release()")
                     page.wait_for_function("() => document.querySelector('[data-testid=\"input\"]').value.includes('synthetic words')")
                     check(f"{name}: dictation still works on the energy detector", len(stt.reqs) == 1)
+                    rows = page.evaluate("window.__hud.voiceDiagnostics().rows")
+                    check(f"{name}: and its row says the energy detector judged it", rows and rows[-1]["detector"] == "energy", str(rows[-1:]))
                     page.locator('[data-testid="input"]').first.fill("")
+                    if code is None:
+                        # The page coming back to the foreground re-arms a detector that failed for timing.
+                        page.evaluate("window.__slowVad = 0; document.dispatchEvent(new Event('visibilitychange'))")
+                        page.wait_for_function("() => window.__hud.mic.detector().state === 'ready'", timeout=30000)
+                        check(f"{name}: the page returning to the foreground tries again at once, and Silero is back", detector(page)["detector"] == "silero")
                     ctx.close()
 
                 # Try again restores Silero once the cause is gone.
@@ -405,8 +469,10 @@ def main(argv=None):
                 browser.close()
 
             run(silero_loads)
+            run(stalls)
             run(pauses)
             run(continuation)
+            run(long_dictation)
             run(noise_only)
             run(fallbacks)
     finally:

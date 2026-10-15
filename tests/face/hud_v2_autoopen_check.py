@@ -122,11 +122,18 @@ def _split(browser, context, page, mock, f, check, until, guard, init):
     inp.fill("keep typing")
     inp.focus()
     # The microphone opens asynchronously during normal boot even without a
-    # dev-server event. Measure ownership only after that bootstrap completes.
+    # dev-server event. Measure ownership only after that bootstrap completes:
+    # the stream is granted, a capture path is chosen, and the speech detector has
+    # settled (Silero ready, or the energy fallback for a stated reason -- V5).
+    # (`mic.state().open` is the detector's "an utterance is open" flag, not the
+    # microphone: Chrome's fake device beeps opened the energy VAD, and Silero rightly
+    # does not call a beep speech, so it can no longer stand for "bootstrapped".)
     check("microphone bootstrap completes before the split baseline",
-          bool(until(lambda: page.evaluate("window.__hud.mic.state().open"))))
+          bool(until(lambda: page.evaluate(
+              "window.__hud.voiceDiagnostics().mic === 'available' && window.__hud.mic.path() !== 'unknown'"
+              " && ['ready', 'failed'].includes(window.__hud.mic.detector().state)"))))
     before = browser_calls(mock)
-    selection = page.evaluate("({focused: window.__hud.workspace().ws.focused, selected: window.__hud.state().selectedChat, micOpen: window.__hud.mic.state().open, micClaimed: window.__hud.mic.state().claimed})")
+    selection = page.evaluate("({focused: window.__hud.workspace().ws.focused, selected: window.__hud.state().selectedChat, micOpen: window.__hud.mic.state().open, micClaimed: window.__hud.mic.state().claimed, micGranted: window.__hud.voiceDiagnostics().mic, micPath: window.__hud.mic.path(), micDetector: window.__hud.mic.detector().detector})")
     entry = f.add(mock.dev_port, path="/?secret=gone#gone")
     until(lambda: len(tabs(page)) == 1)
     rows = tabs(page)
@@ -134,7 +141,7 @@ def _split(browser, context, page, mock, f, check, until, guard, init):
     check("automatic URL drops query/fragment and carries immutable source", bool(rows) and rows[0]["url"] == f"http://localhost:{mock.dev_port}/"
           and rows[0].get("source") == {"kind": "dev_server", "entryId": entry.id}, str(rows))
     check("automatic frame keeps own-origin permission off", page.locator(FRAME).get_attribute("sandbox") == "allow-scripts allow-forms")
-    after_selection = page.evaluate("({focused: window.__hud.workspace().ws.focused, selected: window.__hud.state().selectedChat, micOpen: window.__hud.mic.state().open, micClaimed: window.__hud.mic.state().claimed})")
+    after_selection = page.evaluate("({focused: window.__hud.workspace().ws.focused, selected: window.__hud.state().selectedChat, micOpen: window.__hud.mic.state().open, micClaimed: window.__hud.mic.state().claimed, micGranted: window.__hud.voiceDiagnostics().mic, micPath: window.__hud.mic.path(), micDetector: window.__hud.mic.detector().detector})")
     check("split retains workspace focus, selected chat and mic",
           selection == after_selection, str({"before": selection, "after": after_selection}))
     page.keyboard.type(" still here")

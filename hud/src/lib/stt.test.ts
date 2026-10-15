@@ -1,14 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  SttAssembler, STT_MAX_CLIPS, STT_RETRY_DELAY_MS, placementFor, retryable, sttDeadlineMs,
+  NOT_OWNER_MESSAGE, SttAssembler, STT_MAX_CLIPS, STT_RETRY_DELAY_MS, isNotOwner, placementFor, retryable, sttDeadlineMs,
   type SttEvent, type SttPlaced,
 } from "./stt";
 import { VoiceDiagnostics } from "./voiceDiagnostics";
 
-type Call = { blob: Blob; signal: AbortSignal; utteranceId: number; seq: number; budgetMs: number;
+type Call = { blob: Blob; signal: AbortSignal; utteranceId: number; seq: number; budgetMs: number; verified: (kind: string) => void;
   resolve: (t: string) => void; reject: (e: unknown) => void };
 
-function harness(over: { canUpload?: () => boolean; maxInFlight?: number } = {}) {
+function harness(over: { canUpload?: (explicit: boolean) => boolean; maxInFlight?: number } = {}) {
   const calls: Call[] = [];
   const placed: SttPlaced<string>[][] = [];
   const events: SttEvent[] = [];
@@ -527,7 +527,7 @@ describe("chunked messages (V4)", () => {
 
     it("is kept and retryable while the others are placed in order, marked late so AUTO will not send half a message", async () => {
       const { h, ids } = await threeWithMiddleFailed();
-      expect(h.texts()).toEqual(["alpha beta gamma delta epsilon zeta"]);
+      expect(h.texts()).toEqual(["alpha beta gamma […] delta epsilon zeta"]);   // a mark where the missing part belongs
       expect(h.placed[0][0]).toMatchObject({ late: true, retried: false, parts: 2 });
       expect(h.stt.clip(ids[1])).not.toBeNull();
       expect(h.stt.snapshot().clips).toHaveLength(1);
@@ -541,7 +541,7 @@ describe("chunked messages (V4)", () => {
       expect(h.diagnostics.snapshot().rows[0].outcome).toBe("transcribing");
       h.calls[3].resolve("gamma and delta");              // overlaps both neighbours
       await flush();
-      expect(h.texts()).toEqual(["alpha beta gamma delta epsilon zeta", "and"]);
+      expect(h.texts()).toEqual(["alpha beta gamma […] delta epsilon zeta", "and"]);
       expect(h.placed[1][0]).toMatchObject({ late: true, retried: true, parts: 1 });
       expect(h.stt.snapshot().clips).toEqual([]);
     });
@@ -634,6 +634,96 @@ describe("chunked messages (V4)", () => {
     expect(h.texts()[0].split(" ")).toHaveLength(STT_MAX_CLIPS + 10);
   });
 
+  it("a message closed `late` is placed late even if every chunk answered (it was cut short)", async () => {
+    const h = harness();
+    const g = open(h);
+    sub(h, g);
+    h.calls[0].resolve("what was said");
+    h.stt.closeGroup(g, { late: true });
+    await flush();
+    expect(h.placed[0][0]).toMatchObject({ text: "what was said", late: true });
+    const k = harness();
+    const g2 = open(k);
+    sub(k, g2);
+    k.calls[0].resolve("whole");
+    k.stt.closeGroup(g2);
+    await flush();
+    expect(k.placed[0][0].late).toBe(false);
+  });
+
+  it("marks where a failed chunk belongs: first, middle and last, once each", async () => {
+    const run = async (fail: boolean[]) => {
+      const h = harness();
+      const g = open(h);
+      fail.forEach(() => sub(h, g));
+      for (let i = 0; i < fail.length; i++) {
+        if (fail[i]) h.calls[i].reject(Object.assign(new Error("x"), { status: 400 }));
+        else h.calls[i].resolve(`t${i}`);
+      }
+      h.stt.closeGroup(g);
+      await flush();
+      return h.texts()[0];
+    };
+    expect(await run([true, false, false])).toBe("[…] t1 t2");
+    expect(await run([false, true, true, false])).toBe("t0 […] t3");
+    expect(await run([false, false, true])).toBe("t0 t1 […]");
+    expect(await run([true, true])).toBeUndefined();            // nothing was heard: no message of marks
+  });
+
+  it("marks the gaps once: a retried chunk placed alone adds none (chunks 2 and 4 failed, retry 2)", async () => {
+    const h = harness();
+    const g = open(h);
+    const ids = [sub(h, g), sub(h, g), sub(h, g), sub(h, g)];
+    h.calls[0].resolve("t1"); h.calls[2].resolve("t3");
+    h.calls[1].reject(Object.assign(new Error("x"), { status: 400 }));
+    h.calls[3].reject(Object.assign(new Error("x"), { status: 400 }));
+    h.stt.closeGroup(g);
+    await flush();
+    expect(h.texts()).toEqual(["t1 […] t3 […]"]);
+    h.stt.retry(ids[1]);
+    h.calls[4].resolve("t2");
+    await flush();
+    expect(h.texts()).toEqual(["t1 […] t3 […]", "t2"]);          // not "t2 […]": chunk 4's gap was marked already
+  });
+
+  it("a cut at a pause is not de-duplicated even when the chunks share an edge word (repeats: false)", async () => {
+    const h = harness();
+    const g = open(h);
+    h.stt.submit(h.clip(), 8000, "ptt", "meta", { group: g });
+    h.stt.submit(h.clip(), 8200, "ptt", "meta", { group: g, overlapMs: 200, repeats: false });
+    h.calls[0].resolve("this is very");
+    h.calls[1].resolve("very good");
+    h.stt.closeGroup(g);
+    await flush();
+    expect(h.texts()).toEqual(["this is very very good"]);
+    expect(h.stt.snapshot().clips).toEqual([]);
+  });
+
+  it("joins a fragment the cut left to the whole word the next chunk heard", async () => {
+    const h = harness();
+    const g = open(h);
+    sub(h, g, 0); sub(h, g, 500);
+    h.calls[0].resolve("sent to the transcrip");
+    h.calls[1].resolve("transcription service");
+    h.stt.closeGroup(g);
+    await flush();
+    expect(h.texts()).toEqual(["sent to the transcription service"]);
+  });
+
+  it("asks whether an upload is allowed with `explicit` only for the owner's Retry", async () => {
+    const seen: boolean[] = [];
+    let allow = true;
+    const h = harness({ canUpload: (explicit: boolean) => { seen.push(explicit); return allow || explicit; } });
+    const id = h.stt.submit(h.clip(), 1000, "ptt", "x")!;
+    h.calls[0].reject(Object.assign(new Error("x"), { status: 400 }));
+    await flush();
+    allow = false;                                         // Settings is open: nothing uploads on its own ...
+    expect(h.stt.retry(id)).toBe(true);                    // ... but the owner's Retry from there is fine
+    expect(h.calls).toHaveLength(2);
+    expect(seen.at(-1)).toBe(true);
+    expect(seen[0]).toBe(false);                           // the first upload was not an explicit Retry
+  });
+
   it("cannot submit to a message that has ended", () => {
     const h = harness();
     const g = open(h);
@@ -653,5 +743,213 @@ describe("chunked messages (V4)", () => {
     expect(h.texts()).toEqual(["rest"]);
     expect(h.stt.clip(b)).toBeNull();
     expect(h.diagnostics.snapshot().rows[0].outcome).not.toBe("cancelled");
+  });
+});
+
+describe("cancelGroup (V5: a message that proved too short after a chunk left)", () => {
+  it("aborts what is in flight, releases the audio, places nothing, and settles the one row as the reason", async () => {
+    const h = harness();
+    const g = h.stt.beginGroup("follow_up", "meta");
+    h.stt.submit(h.clip(), 2000, "follow_up", "meta", { group: g });
+    h.stt.submit(h.clip(), 1500, "follow_up", "meta", { group: g });
+    await flush();
+    const diag = h.stt.snapshot().clips[0].diag;
+    h.stt.cancelGroup(g, "too_short");
+    h.stt.closeGroup(g);
+    expect(h.calls[0].signal.aborted).toBe(true);
+    h.calls[0].resolve("late words");                 // an answer that arrives anyway
+    await flush();
+    expect(h.texts()).toEqual([]);
+    expect(h.stt.snapshot().clips).toHaveLength(0);
+    expect(h.row(diag).outcome).toBe("too_short");
+    await h.stt.whenGroupSettled(g);                   // and anyone waiting is released
+    expect(h.diagnostics.snapshot().rows).toHaveLength(1);
+  });
+
+  it("an unknown group is nothing", () => {
+    const h = harness();
+    expect(() => h.stt.cancelGroup(99, "too_short")).not.toThrow();
+  });
+});
+
+// V12: a voice the daemon refused as not the owner's (HTTP 422) uploads nothing, keeps nothing and is never retried.
+describe("a clip refused as not the owner's voice (V12)", () => {
+  const notOwner = () => Object.assign(new Error(NOT_OWNER_MESSAGE), { status: 422 });
+  const sub = (h: ReturnType<typeof harness>, g: number, ms = 8000) => h.stt.submit(h.clip(), ms, "wake", "meta", { group: g })!;
+
+  it("recognises only the daemon's refusal", () => {
+    expect(isNotOwner(notOwner())).toBe(true);
+    expect(isNotOwner(Object.assign(new Error("something else"), { status: 422 }))).toBe(false);
+    expect(isNotOwner(Object.assign(new Error(NOT_OWNER_MESSAGE), { status: 502 }))).toBe(false);
+    expect(isNotOwner(null)).toBe(false);
+    expect(isNotOwner("not the enrolled speaker")).toBe(false);
+    expect(retryable(notOwner())).toBe(false);
+  });
+
+  it("is never retried, never kept for Retry, and ends the message as not_owner", async () => {
+    const h = harness();
+    const id = h.stt.submit(h.clip(), 3000, "wake", "m")!;
+    h.calls[0].reject(notOwner());
+    await flush();
+    await vi.advanceTimersByTimeAsync(STT_RETRY_DELAY_MS * 3);
+    expect(h.calls).toHaveLength(1);                           // no automatic retry
+    expect(h.stt.clip(id)).toBeNull();                         // the audio is gone
+    expect(h.stt.snapshot().clips).toEqual([]);                // so there is nothing to Retry or Play
+    expect(h.stt.retry(id)).toBe(false);
+    expect(h.events).toEqual([{ kind: "busy", pending: 1 }, { kind: "rejected", parts: 1 }]);
+    expect(h.texts()).toEqual([]);                             // nothing placed
+    const rows = h.diagnostics.snapshot().rows;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ outcome: "not_owner", rejected: 1 });
+    expect(rows[0].kept).toBeFalsy();
+    await h.stt.whenSettled(id);                               // and its fate is known: barge-in does not wait on it
+  });
+
+  it("another 422 is an ordinary failure with Retry", async () => {
+    const h = harness();
+    h.stt.submit(h.clip(), 3000, "wake", "m");
+    h.calls[0].reject(Object.assign(new Error("unprocessable"), { status: 422 }));
+    await flush();
+    expect(h.events.some(e => e.kind === "failed")).toBe(true);
+    expect(h.stt.snapshot().clips[0].state).toBe("failed");
+  });
+
+  it("a message whose every chunk is refused is over: not_owner, nothing placed, settled", async () => {
+    const h = harness();
+    const g = h.stt.beginGroup("wake", "m");
+    sub(h, g); sub(h, g);
+    h.calls[0].reject(notOwner()); h.calls[1].reject(notOwner());
+    await flush();
+    h.stt.closeGroup(g);
+    await h.stt.whenGroupSettled(g);
+    expect(h.texts()).toEqual([]);
+    expect(h.diagnostics.snapshot().rows[0]).toMatchObject({ outcome: "not_owner", rejected: 2 });
+    expect(h.stt.snapshot().clips).toEqual([]);
+  });
+
+  it("a refused chunk leaves a hole: the rest is placed late, for review, and its audio is gone", async () => {
+    const h = harness();
+    const g = h.stt.beginGroup("wake", "m");
+    sub(h, g); sub(h, g); sub(h, g);
+    h.calls[0].resolve("send the report");
+    h.calls[1].reject(notOwner());
+    h.calls[2].resolve("to the team");
+    await flush();
+    h.stt.closeGroup(g);
+    await flush();
+    expect(h.texts()).toEqual(["send the report to the team"]);
+    expect(h.placed[0][0]).toMatchObject({ late: true, parts: 2 });       // boxed for review, never sent as the whole message
+    expect(h.placed[0][0].meta).toBe("m");
+    expect(h.stt.snapshot().clips).toEqual([]);                           // the refused chunk's audio is not kept
+    expect(h.diagnostics.snapshot().rows[0].rejected).toBe(1);
+    expect(h.diagnostics.snapshot().rows[0].outcome).toBe("transcribing"); // the placer settles it with the real outcome
+  });
+
+  it("the refused chunk does not hold up the others while the message is still being spoken", async () => {
+    const h = harness();
+    const g = h.stt.beginGroup("wake", "m");
+    sub(h, g); sub(h, g);
+    h.calls[0].reject(notOwner());
+    await flush();
+    expect(h.texts()).toEqual([]);                      // still open: nothing is placed early
+    h.calls[1].resolve("hello");
+    await flush();
+    h.stt.closeGroup(g);
+    await flush();
+    expect(h.texts()).toEqual(["hello"]);
+    expect(h.placed[0][0].late).toBe(true);
+  });
+
+  it("a chunk waiting for a slot is still refused one by one, and the queue moves on", async () => {
+    const h = harness({ maxInFlight: 1 });
+    const g = h.stt.beginGroup("wake", "m");
+    sub(h, g); sub(h, g);
+    expect(h.calls).toHaveLength(1);
+    h.calls[0].reject(notOwner());
+    await flush();
+    expect(h.calls).toHaveLength(2);
+    h.calls[1].resolve("ok");
+    await flush();
+    h.stt.closeGroup(g);
+    await flush();
+    expect(h.texts()).toEqual(["ok"]);
+  });
+
+  it("what the daemon did about verification reaches the diagnostics row, not a score", async () => {
+    const h = harness();
+    h.stt.submit(h.clip(), 3000, "wake", "m");
+    h.calls[0].verified("skipped_guest");
+    h.calls[0].resolve("hi");
+    await flush();
+    expect(h.diagnostics.snapshot().rows[0].verify).toBe("skipped_guest");
+    h.diagnostics.verified(1, "matched");
+    expect(h.diagnostics.snapshot().rows[0].verify).toBe("matched");
+    h.diagnostics.verified(1, "a score of 0.93");
+    expect(h.diagnostics.snapshot().rows[0].verify).toBe("matched");     // anything else is ignored
+  });
+});
+
+describe("V13: which backend served the clip", () => {
+  const reply = (backend: unknown, fellBack?: boolean) => ({ text: "hello", backend, fellBack });
+  function withReplies() {
+    const diagnostics = new VoiceDiagnostics(() => 0);
+    const placed: string[] = [];
+    let next: ReturnType<typeof reply> | string = reply("local");
+    const stt = new SttAssembler<string>({
+      transcribe: async () => next,
+      place: b => { placed.push(...b.map(p => p.text)); },
+      diagnostics, now: () => Date.now(),
+    });
+    return { stt, diagnostics, placed, set: (r: typeof next) => { next = r; } };
+  }
+  it("records the backend on the diagnostics row, and the text still lands", async () => {
+    const h = withReplies();
+    h.stt.submit(new Blob([new Uint8Array(10)]), 1000, "ptt", "auto");
+    await vi.advanceTimersByTimeAsync(0);
+    await h.stt.settled();
+    expect(h.placed).toEqual(["hello"]);
+    expect(h.diagnostics.snapshot().rows[0]).toMatchObject({ backend: "local", fellBack: false });
+  });
+  it("marks a clip the cloud answered because local failed", async () => {
+    const h = withReplies();
+    h.set(reply("cloud", true));
+    h.stt.submit(new Blob([new Uint8Array(10)]), 1000, "ptt", "auto");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.diagnostics.snapshot().rows[0]).toMatchObject({ backend: "cloud", fellBack: true });
+  });
+  it("a plain string reply still works, and an unknown backend is ignored", async () => {
+    const h = withReplies();
+    h.set("hi there");
+    h.stt.submit(new Blob([new Uint8Array(10)]), 1000, "ptt", "auto");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.placed).toEqual(["hi there"]);
+    expect(h.diagnostics.snapshot().rows[0].backend).toBeUndefined();
+    h.set(reply("<script>", true));
+    h.stt.submit(new Blob([new Uint8Array(10)]), 1000, "ptt", "auto");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.diagnostics.snapshot().rows[1].backend).toBeUndefined();
+    expect(JSON.stringify(h.diagnostics.snapshot())).not.toContain("script");
+  });
+  it("a two-chunk message answered by the cloud (fallback) and then locally still shows the cloud was used", async () => {
+    const h = withReplies();
+    const g = h.stt.beginGroup("ptt", "auto");
+    const replies = [reply("cloud", true), reply("local", false)];
+    let n = 0;
+    (h.stt as any).o.transcribe = async () => replies[n++];
+    h.stt.submit(new Blob([new Uint8Array(10)]), 8000, "ptt", "auto", { group: g });
+    h.stt.submit(new Blob([new Uint8Array(10)]), 8000, "ptt", "auto", { group: g });
+    await vi.advanceTimersByTimeAsync(0);
+    h.stt.closeGroup(g);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.diagnostics.snapshot().rows).toHaveLength(1);
+    expect(h.diagnostics.snapshot().rows[0]).toMatchObject({ backend: "cloud", fellBack: true });
+  });
+
+  it("an empty transcript still says who heard it", async () => {
+    const h = withReplies();
+    h.set({ text: "  ", backend: "local", fellBack: false });
+    h.stt.submit(new Blob([new Uint8Array(10)]), 1000, "ptt", "auto");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.diagnostics.snapshot().rows[0]).toMatchObject({ outcome: "empty_transcript", backend: "local" });
   });
 });
