@@ -553,6 +553,8 @@ export interface Mark {
   state: MarkState;
   /** What a screen reader hears, and the mark's tooltip: "Build: failed (2 errors)". */
   text: string;
+  /** Why a ✓ is stale, in the words the status line shows beside it: "edited since", "from an older build". */
+  detail?: string;
 }
 
 /** The daemon's `SOURCE_SUFFIXES` and makefile names (`vex.is_source`): an edit to one makes a build stale. */
@@ -595,8 +597,12 @@ export function buildMark(kind: "clean" | "build" | "rebuild", o: {
   }
   const ended = at(r.ended);
   if (kind !== "clean" && Number.isFinite(ended)) {
-    if (o.editedAt !== null && o.editedAt > ended) return { state: "stale", text: `${name}: succeeded, edited since` };
-    if (o.cleanedAt !== null && o.cleanedAt > ended) return { state: "stale", text: `${name}: succeeded, cleaned since` };
+    if (o.editedAt !== null && o.editedAt > ended) {
+      return { state: "stale", text: `${name}: succeeded, edited since`, detail: "edited since" };
+    }
+    if (o.cleanedAt !== null && o.cleanedAt > ended) {
+      return { state: "stale", text: `${name}: succeeded, cleaned since`, detail: "cleaned since" };
+    }
   }
   return { state: "ok", text: `${name}: succeeded` };
 }
@@ -617,9 +623,95 @@ export function downloadMark(o: {
   if (!d.ok) return { state: "failed", text: d.stopped ? `Download: stopped, slot ${d.slot} may be incomplete`
     : "Download: failed" };
   if (o.endedAt !== null && o.builtAt !== null && o.builtAt > o.endedAt) {
-    return { state: "stale", text: `Download: in slot ${d.slot}, from an older build` };
+    return { state: "stale", text: `Download: in slot ${d.slot}, from an older build`, detail: "from an older build" };
   }
   return { state: "ok", text: `Download: in slot ${d.slot}` };
+}
+
+/** The steps that carry a mark: the action bar's four buttons. */
+export type ActionKind = "clean" | "build" | "rebuild" | "download";
+
+/** What `actionState` reads of a project's run in this window (state/vex.ts `ProjectRun`). */
+export interface ActionRun {
+  build: BuildView | null;
+  results: Partial<Record<"clean" | "build" | "rebuild", BuildView>>;
+  startingBuild: { action: "clean" | "build" | "rebuild" } | null;
+  stoppedBuild: string | null;
+  editedAt: number | null;
+  busy: "build" | "download" | null;
+  download: { ended: string | null } | null;
+  downloaded: { slot: number; ok: boolean | null; stopped?: boolean } | null;
+}
+
+const okAt = (r: BuildView | undefined): number => (r?.state === "succeeded" ? at(r.ended) : NaN);
+
+/**
+ * One step's state (plan §3.1, VX-UI-2), from its project's run alone:
+ * idle, busy, ok, failed, stale or unknown, with words. `following` is
+ * whether this window still follows a running build (`vex.monitoringBuild`);
+ * a running record no one follows is **unknown**, never a spinner. Stale is
+ * advisory (a source saved through the editor, or a clean, after Build's ✓; a
+ * later build after Download's ✓) and disables nothing: the daemon's
+ * freshness rule alone decides a download. **Never amber** — no state means
+ * "held by a card"; only the status line says that.
+ */
+export function actionState(kind: ActionKind, run: ActionRun, following: boolean): Mark {
+  if (kind === "download") {
+    const built = Math.max(-Infinity, ...[okAt(run.results.build), okAt(run.results.rebuild)].filter(Number.isFinite));
+    const ended = at(run.download?.ended);
+    return downloadMark({
+      busy: run.busy === "download", downloaded: run.downloaded,
+      endedAt: Number.isFinite(ended) ? ended : null, builtAt: Number.isFinite(built) ? built : null,
+    });
+  }
+  const record = run.results[kind] ?? null;
+  const cleaned = okAt(run.results.clean);
+  return buildMark(kind, {
+    record, starting: run.startingBuild?.action === kind, following,
+    stopped: !!run.stoppedBuild && record?.id === run.stoppedBuild,
+    editedAt: run.editedAt, cleanedAt: Number.isFinite(cleaned) ? cleaned : null,
+  });
+}
+
+/**
+ * An output tab's badge (plan §2.5), the same state as its step's mark: the
+ * Build tab follows the latest clean, build or rebuild (whichever it shows),
+ * the Download tab the Download step. Its words follow the tab's name: "Build,
+ * failed (1 error)", "Build, clean: succeeded", "Download, nothing yet".
+ */
+export function tabBadge(tab: "build" | "download", run: ActionRun, following: boolean): Mark {
+  const shown = run.startingBuild?.action ?? run.build?.action;
+  const kind: ActionKind | null = tab === "download" ? "download"
+    : shown === "clean" || shown === "build" || shown === "rebuild" ? shown : null;
+  if (!kind) return { state: "idle", text: "nothing yet" };
+  const m = actionState(kind, run, following);
+  if (m.state === "idle") return { state: "idle", text: "nothing yet" };
+  const rest = m.text.replace(/^[A-Za-z]+: /, "");
+  return { ...m, text: kind === tab ? rest : `${kind}: ${rest}` };
+}
+
+/**
+ * The Device tab's badge (plan §2.5): the worst confirmed USB state, and **?
+ * when the reading is stale or unknown** (paused, old, erroring: what was last
+ * confirmed may no longer hold). USB presence is not readiness: nothing reads
+ * this to disable anything.
+ */
+export function deviceBadge(c: { brain: boolean | null; controller: boolean | null } | null, stale: boolean): Mark {
+  if (!c || (c.brain == null && c.controller == null)) return { state: "unknown", text: "USB unknown" };
+  if (stale) return { state: "unknown", text: "USB reading stale, last confirmed shown in the tab" };
+  if (c.brain === false && c.controller === false) return { state: "failed", text: "nothing on USB" };
+  return { state: "ok", text: "USB device present" };
+}
+
+/**
+ * The status line's words for stale marks (mockup state 6: "Build: ✓ edited
+ * since"): each stale step once, in the action bar's order. A dimmed ✓ alone
+ * would say it in colour; this says it in words where the owner looks.
+ */
+export function staleNotes(marks: { kind: ActionKind; mark: Mark }[]): { kind: ActionKind; name: string; detail: string }[] {
+  const NAME: Record<ActionKind, string> = { clean: "Clean", build: "Build", rebuild: "Rebuild", download: "Download" };
+  return marks.filter((m) => m.mark.state === "stale")
+    .map((m) => ({ kind: m.kind, name: NAME[m.kind], detail: m.mark.detail ?? "stale" }));
 }
 
 /** The glyph a mark draws beside its words (never colour alone). */
@@ -653,7 +745,8 @@ export function nextTab(tabs: readonly OutputTab[], current: OutputTab, key: str
 
 /** Every control's hover help (permanent: owner decision 7, 2026-10-15), and the `?` list's sentences. */
 export type HelpId = "clean" | "build" | "rebuild" | "download" | "stop" | "slot" | "more" | "usb" | "help"
-  | "tab-build" | "tab-download" | "tab-brain" | "tab-device" | "fold" | "max" | "connect" | "disconnect";
+  | "tab-build" | "tab-download" | "tab-brain" | "tab-device" | "fold" | "max" | "connect" | "disconnect"
+  | "terminal" | "recheck" | "usb-refresh";
 
 export function helpText(id: HelpId, slot: number): string {
   switch (id) {
@@ -683,6 +776,11 @@ export function helpText(id: HelpId, slot: number): string {
       + "a Download pauses it and you click Connect again after. It never opens by itself.";
     case "disconnect": return "Closes the link and frees the robot's port. The program on the brain keeps running; "
       + "Connect opens the link again.";
+    case "terminal": return "Opens this action's program terminal in the bottom panel: its full output. It runs nothing.";
+    case "recheck": return "Asks Jarvis once more how this action ended, after status checks stopped. It never starts or "
+      + "resends anything.";
+    case "usb-refresh": return "Checks once now whether a brain or controller is plugged in by USB (vexcom --usb). It "
+      + "writes nothing to the robot.";
   }
 }
 

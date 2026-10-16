@@ -46,14 +46,14 @@
 //   - With no `vex.json`, the view says the one command to run instead of
 //     the action bar.
 
-import { useEffect, useId, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useId, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { vex } from "../state/vex";
 import { TerminalView, terminals, useTerminals } from "./Terminal";
 import {
-  OUTPUT_TABS, SETUP_COMMAND, SLOTS, brainView, buildLine, buildMark, chainLine, chainSteps, defaultName, downloadButtonLabel,
-  downloadLabel, downloadMark, downloadProgress, errorTarget, errorWhere, helpText, isExplicitClick, isTrustedPress,
-  markGlyph, nameRefusal, nextTab, outputTabFor, setupNote, type BrainView, type BuildError, type Detection, type HelpId,
-  type Mark, type OutputTab,
+  OUTPUT_TABS, SETUP_COMMAND, SLOTS, actionState, brainView, buildLine, chainLine, chainSteps, defaultName, deviceBadge,
+  downloadButtonLabel, downloadLabel, downloadProgress, errorTarget, errorWhere, helpText, isExplicitClick, isTrustedPress,
+  markGlyph, nameRefusal, nextTab, outputTabFor, setupNote, staleNotes, tabBadge, type ActionKind, type BrainView,
+  type BuildError, type Detection, type HelpId, type Mark, type OutputTab,
 } from "../lib/vex";
 import type { PaneNo } from "../lib/workspace";
 
@@ -212,11 +212,14 @@ function Body(props: {
   }, [help]);
 
   const view = (inner: ReactNode) => (
-    <div className={"scroll vexview" + (blocked ? " held" : "") + (ui.max && !ui.folded ? " outmax" : "")}
-         data-testid={`vex-view-${pane}`} data-project={pid}>
-      <Notices blocked={blocked} />
-      {inner}
-    </div>
+    <HelpMode.Provider value={help && !blocked}>
+      <div className={"scroll vexview" + (blocked ? " held" : "") + (ui.max && !ui.folded ? " outmax" : "")
+                      + (help && !blocked ? " helpmode" : "")}
+           data-testid={`vex-view-${pane}`} data-project={pid}>
+        <Notices blocked={blocked} />
+        {inner}
+      </div>
+    </HelpMode.Provider>
   );
   if (d.pros) {
     return view(<>
@@ -280,13 +283,14 @@ function Body(props: {
  * click's focus does not), and the control names it with
  * `aria-describedby` (passed to the child as `id`). Not under a card.
  */
-function Tip(props: { id: string; text: string; children: ReactNode; end?: boolean }) {
+function Tip(props: { id: string; text: string; children: ReactNode; end?: boolean; help?: HelpId }) {
   // A press hides it until the pointer leaves, so the help never sits over
   // the status line the click just changed.
   const [pressed, setPressed] = useState(false);
   return (
     <span className={"vextipwrap" + (props.end ? " end" : "") + (pressed ? " pressed" : "")}
           onPointerDown={() => setPressed(true)} onPointerLeave={() => setPressed(false)}>
+      <HelpNum id={props.help ?? props.id.replace(/^vex-\d+-tip-/, "") as HelpId} />
       {props.children}
       <span className="vextip" role="tooltip" id={props.id} data-testid={props.id.replace(/^vex-\d+-/, "vex-")}>
         {props.text}
@@ -302,12 +306,32 @@ const HELP_ORDER: { id: HelpId; label: string }[] = [
   { id: "tab-download", label: "Download tab" }, { id: "tab-brain", label: "Brain tab" },
   { id: "connect", label: "Connect (Brain tab)" }, { id: "disconnect", label: "Disconnect (Brain tab)" },
   { id: "tab-device", label: "Device tab" }, { id: "fold", label: "▾" }, { id: "max", label: "⤢" },
+  { id: "terminal", label: "Show terminal" }, { id: "recheck", label: "Check status" },
+  { id: "usb-refresh", label: "Refresh USB status (Device tab)" },
 ];
+
+/** Help mode (`?`) is on, and no card holds the window: each control shows its number in the list. */
+const HelpMode = createContext(false);
+
+/**
+ * In help mode, a control's number in the `?` list (plan §2.6, mockup state
+ * 1): the list says what each number does, so no callout covers another.
+ * Decorative only (`aria-hidden`, never focusable): the control's own
+ * `aria-describedby` already carries its sentence.
+ */
+function HelpNum(props: { id: HelpId }) {
+  const on = useContext(HelpMode);
+  const n = HELP_ORDER.findIndex((h) => h.id === props.id) + 1;
+  if (!on || !n) return null;
+  return <span className="vexhelpnum" aria-hidden="true" data-testid={`vex-helpnum-${props.id}`}>{n}</span>;
+}
 
 function HelpList(props: { slot: number }) {
   return (
     <ol className="vexhelplist" data-testid="vex-help-list" aria-label="What each control does">
-      {HELP_ORDER.map((h) => <li key={h.id} data-help={h.id}><b>{h.label}</b>: {helpText(h.id, props.slot)}</li>)}
+      {HELP_ORDER.map((h, i) => (
+        <li key={h.id} data-help={h.id} data-n={i + 1}><b>{h.label}</b>: {helpText(h.id, props.slot)}</li>
+      ))}
     </ol>
   );
 }
@@ -432,23 +456,9 @@ function ActionBar(props: {
   // One chain per window: no second download while one runs, for any project.
   const other = vex.chain && vex.chain.projectId !== pid ? vex.chain : null;
   const downloadOff = blocked || !configured || !d.builds || !!run.busy || !!nameRefusal(name) || !!vex.chain;
-  const starting = run.startingBuild?.action;
   const following = vex.monitoringBuild(pid);
-  const cleanedAt = Date.parse(run.results.clean?.state === "succeeded" ? run.results.clean.ended ?? "" : "");
-  const mark = (kind: "clean" | "build" | "rebuild") => buildMark(kind, {
-    record: run.results[kind] ?? null, starting: starting === kind, following,
-    stopped: !!run.stoppedBuild && run.results[kind]?.id === run.stoppedBuild,
-    editedAt: run.editedAt, cleanedAt: Number.isFinite(cleanedAt) ? cleanedAt : null,
-  });
-  const builtAt = Math.max(...(["build", "rebuild"] as const).map((k) => {
-    const r = run.results[k];
-    return r?.state === "succeeded" ? Date.parse(r.ended ?? "") : NaN;
-  }).filter(Number.isFinite), -Infinity);
-  const dlEnded = Date.parse(run.download?.ended ?? "");
-  const dmark = downloadMark({
-    busy: run.busy === "download", downloaded: run.downloaded,
-    endedAt: Number.isFinite(dlEnded) ? dlEnded : null, builtAt: Number.isFinite(builtAt) ? builtAt : null,
-  });
+  const mark = (kind: ActionKind) => actionState(kind, run, following);
+  const dmark = mark("download");
   const noBuild = "A Python project has nothing to build.";
   const step = (kind: "clean" | "build" | "rebuild", text: string) => (
     <span className="vexstep">
@@ -610,8 +620,11 @@ function StatusLine(props: { pane: number; pid: string | null; d: Detection | nu
         </span>
         <span className="vexel" data-testid="vex-build-elapsed" aria-hidden="true">{elapsedText(started, now)}</span>
         {run.build?.state === "running" && !following ? (
-          <button type="button" className="quiet" data-testid="vex-build-recheck" disabled={blocked}
-                  onClick={() => void vex.refreshBuild(pid)}>Check status</button>
+          <Tip id={`vex-${props.pane}-tip-recheck`} text={helpText("recheck", 1)}>
+            <button type="button" className="quiet" data-testid="vex-build-recheck" disabled={blocked}
+                    aria-describedby={`vex-${props.pane}-tip-recheck`}
+                    onClick={() => void vex.refreshBuild(pid)}>Check status</button>
+          </Tip>
         ) : null}
       </>;
     } else if (run.note) {
@@ -630,6 +643,11 @@ function StatusLine(props: { pane: number; pid: string | null; d: Detection | nu
       body = <span className="muted" data-testid="vex-status-idle">Ready. Edit, then Clean › Build › Download.</span>;
     }
   }
+  // Stale ✓s said in words beside the result (advisory; never while something runs).
+  const stale = run && pid && props.d && !c && !building
+    ? staleNotes((["build", "rebuild", "download"] as const).map((kind) => ({
+      kind, mark: actionState(kind, run, vex.monitoringBuild(pid)) })))
+    : [];
   const stoppable = vex.stoppable(pid);
   if (!body && !stoppable && !blocked) return null;
   const tipId = `vex-${props.pane}-tip-stop`;
@@ -639,6 +657,15 @@ function StatusLine(props: { pane: number; pid: string | null; d: Detection | nu
       <span className="vexstatus-text" role="status" aria-live="polite">
         {blocked ? <span className="vexheld" data-testid="vex-held">Held: an approval card is up.</span> : null}
         {body}
+        {stale.length ? (
+          <span className="vexstalenote muted small" data-testid="vex-stale-note">
+            {stale.map((n) => (
+              <span key={n.kind} data-kind={n.kind}>
+                {n.name}: <span className="vexstaleglyph" aria-hidden="true">✓</span> {n.detail}
+              </span>
+            ))}
+          </span>
+        ) : null}
         {pid && props.d ? <UsbHint /> : null}
       </span>
       {stoppable ? (
@@ -752,24 +779,10 @@ function Output(props: {
   const run = vex.run(pid);
   const usb = useUsbReading(blocked || !props.configured || !!vex.chain);
   const brain = useBrain(pane, blocked, props.configured);
-  const badge = (tab: OutputTab): Mark => {
-    if (tab === "build") {
-      const b = run.build;
-      if (run.startingBuild || b?.state === "running") return { state: "busy", text: "running" };
-      if (!b) return { state: "idle", text: "nothing yet" };
-      if (b.state === "succeeded") return { state: "ok", text: "succeeded" };
-      return { state: "failed", text: run.stoppedBuild === b.id ? "stopped" : "failed" };
-    }
-    if (tab === "download") {
-      const m = downloadMark({ busy: run.busy === "download", downloaded: run.downloaded, endedAt: null, builtAt: null });
-      return { state: m.state, text: m.state === "idle" ? "nothing yet" : m.text.replace(/^Download: /, "") };
-    }
-    if (tab === "brain") return brain.view.badge;
-    const c = usb.c;
-    if (!c || (c.brain == null && c.controller == null)) return { state: "unknown", text: "USB unknown" };
-    const worst = c.brain === false && c.controller === false ? "failed" : "ok";
-    return { state: usb.stale ? "stale" : worst, text: worst === "failed" ? "nothing on USB" : "USB device present" };
-  };
+  // The same state as each step's mark (lib/vex.ts `tabBadge`); the Device tab's is ? while its reading is stale.
+  const badge = (tab: OutputTab): Mark => tab === "brain" ? brain.view.badge
+    : tab === "device" ? deviceBadge(usb.c ?? null, usb.stale)
+      : tabBadge(tab, run, vex.monitoringBuild(pid));
   const panelId = `vex-${pane}-outpanel`;
   return (
     <div className={"vexout" + (ui.folded ? " folded" : "")} data-testid="vex-output">
@@ -793,6 +806,7 @@ function Output(props: {
                         setUi({ tab: to });
                         tabRefs.current[to]?.focus();
                       }}>
+                <HelpNum id={`tab-${tab}` as HelpId} />
                 {TAB_NAME[tab]}
                 <span className={"vexbadgemark " + b.state} data-testid={`vex-out-badge-${tab}`} aria-hidden="true">
                   {b.state === "busy" ? <span className="vexspinner" />
@@ -823,18 +837,18 @@ function Output(props: {
         <div className="vexopanel" role="tabpanel" id={panelId} aria-labelledby={`vex-${pane}-tab-${ui.tab}`}
              data-testid="vex-out-panel" data-tab={props.help ? "help" : ui.tab}>
           {props.help ? <HelpList slot={props.slot} />
-            : ui.tab === "build" ? <BuildTab d={props.d} pid={pid} blocked={blocked} />
-              : ui.tab === "download" ? <DownloadTab d={props.d} pid={pid} blocked={blocked} name={props.name} />
+            : ui.tab === "build" ? <BuildTab pane={pane} d={props.d} pid={pid} blocked={blocked} />
+              : ui.tab === "download" ? <DownloadTab pane={pane} d={props.d} pid={pid} blocked={blocked} name={props.name} />
                 : ui.tab === "brain" ? <BrainTab pane={pane} drawn={props.drawn} blocked={blocked} brain={brain}
                                                  tip={tip} slot={props.slot} />
-                  : <DeviceTab blocked={blocked} configured={props.configured} />}
+                  : <DeviceTab pane={pane} blocked={blocked} configured={props.configured} />}
         </div>
       )}
     </div>
   );
 }
 
-function BuildTab(props: { d: Detection; pid: string; blocked: boolean }) {
+function BuildTab(props: { pane: number; d: Detection; pid: string; blocked: boolean }) {
   const run = vex.run(props.pid);
   const active = !!run.startingBuild || run.build?.state === "running";
   const build = run.startingBuild ? null : run.build;
@@ -844,8 +858,11 @@ function BuildTab(props: { d: Detection; pid: string; blocked: boolean }) {
       <span>{build ? `make · ${build.action}${build.exit_code !== null ? ` · exit ${build.exit_code}` : ""}` : "make"}</span>
       <span className="vexobar-r">
         {build?.terminal_id ? (
-          <button type="button" className="quiet" data-testid="vex-build-output-btn" disabled={props.blocked}
-                  onClick={() => void terminals.showProgram(build.terminal_id!)}>Show terminal</button>
+          <Tip id={`vex-${props.pane}-tip-terminal`} text={helpText("terminal", 1)} end>
+            <button type="button" className="quiet" data-testid="vex-build-output-btn" disabled={props.blocked}
+                    aria-describedby={`vex-${props.pane}-tip-terminal`}
+                    onClick={() => void terminals.showProgram(build.terminal_id!)}>Show terminal</button>
+          </Tip>
         ) : null}
       </span>
     </div>
@@ -861,7 +878,7 @@ function BuildTab(props: { d: Detection; pid: string; blocked: boolean }) {
   </>;
 }
 
-function DownloadTab(props: { d: Detection; pid: string; blocked: boolean; name: string }) {
+function DownloadTab(props: { pane: number; d: Detection; pid: string; blocked: boolean; name: string }) {
   const { pid, blocked } = props;
   const run = vex.run(pid);
   const active = run.busy === "download";
@@ -893,10 +910,20 @@ function DownloadTab(props: { d: Detection; pid: string; blocked: boolean; name:
         </span>
       ) : null}
       <span className="vexobar-r">
-        {run.download?.terminal_id && !run.downloaded?.stopped ? <button type="button" className="quiet" disabled={blocked}
-          data-testid="vex-download-output-btn" onClick={() => void terminals.showProgram(run.download!.terminal_id!)}>Show terminal</button> : null}
-        {run.download && run.download.state === "running" && !active ? <button type="button" className="quiet"
-          disabled={blocked} data-testid="vex-download-recheck" onClick={() => void vex.refreshDownload(pid)}>Check status</button> : null}
+        {run.download?.terminal_id && !run.downloaded?.stopped ? (
+          <Tip id={`vex-${props.pane}-tip-terminal`} text={helpText("terminal", 1)} end>
+            <button type="button" className="quiet" disabled={blocked} data-testid="vex-download-output-btn"
+                    aria-describedby={`vex-${props.pane}-tip-terminal`}
+                    onClick={() => void terminals.showProgram(run.download!.terminal_id!)}>Show terminal</button>
+          </Tip>
+        ) : null}
+        {run.download && run.download.state === "running" && !active ? (
+          <Tip id={`vex-${props.pane}-tip-recheck-download`} text={helpText("recheck", 1)} help="recheck" end>
+            <button type="button" className="quiet" disabled={blocked} data-testid="vex-download-recheck"
+                    aria-describedby={`vex-${props.pane}-tip-recheck-download`}
+                    onClick={() => void vex.refreshDownload(pid)}>Check status</button>
+          </Tip>
+        ) : null}
       </span>
     </div>
     {run.download?.output ? <TextOutput output={run.download.output} download />
@@ -1028,10 +1055,10 @@ function BrainTab(props: { pane: number; drawn: boolean; blocked: boolean; brain
   </div>;
 }
 
-function DeviceTab(props: { blocked: boolean; configured: boolean }) {
+function DeviceTab(props: { pane: number; blocked: boolean; configured: boolean }) {
   const off = props.blocked || !props.configured || !!vex.chain;
   return <div className="vexobody vexdev" data-testid="vex-device">
-    <ConnectionStatus blocked={off} />
+    <ConnectionStatus pane={props.pane} blocked={off} />
     {vex.info ? (
       <div className="small" data-testid="vex-info-what" data-read={vex.info.read}>
         {vex.info.read === "programs" ? "Programs on the brain" : "Device info"}
@@ -1093,7 +1120,7 @@ function UsbBadges(props: { off: boolean }) {
   </span>;
 }
 
-function ConnectionStatus(props: {blocked: boolean}) {
+function ConnectionStatus(props: { pane: number; blocked: boolean }) {
   const { c, paused, stale, label, tone } = useUsbReading(props.blocked);
   return <div data-testid="vex-connection" className="vexconn">
     <div className="small" data-testid="vex-tooling">Tooling: {vex.status?.configured ? "Configured" : "Not configured"}
@@ -1101,8 +1128,11 @@ function ConnectionStatus(props: {blocked: boolean}) {
     <div className="vexrow" role="status">
       <span data-testid="vex-usb-brain" className={tone(c?.brain)}>Brain: {label(c?.brain)}{stale && c?.brain != null ? " (last confirmed)" : ""}</span>
       <span data-testid="vex-usb-controller" className={tone(c?.controller)}>Controller: {label(c?.controller)}{stale && c?.controller != null ? " (last confirmed)" : ""}</span>
-      <button type="button" className="quiet" disabled={props.blocked} data-testid="vex-connection-refresh"
-        onClick={() => void vex.refreshConnection()}>Refresh USB status</button>
+      <Tip id={`vex-${props.pane}-tip-usb-refresh`} text={helpText("usb-refresh", 1)}>
+        <button type="button" className="quiet" disabled={props.blocked} data-testid="vex-connection-refresh"
+                aria-describedby={`vex-${props.pane}-tip-usb-refresh`}
+                onClick={() => void vex.refreshConnection()}>Refresh USB status</button>
+      </Tip>
     </div>
     <div className="muted small" data-testid="vex-connection-note">{paused ? "USB checks paused; showing last confirmed state." : stale && c?.state === "ready" ? "USB reading is stale; awaiting a fresh check." : vex.connectionError || c?.message || "USB devices have not been checked."}
       {c?.checked_at ? ` Last confirmed: ${new Date(c.checked_at).toLocaleTimeString()}.` : ""}</div>

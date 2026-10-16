@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  BUILD_FIRST_CODE, brainView, type BrainInput, DOWNLOAD_NAME, DeviceLedger, OUTPUT_TABS, SETUP_COMMAND, buildLine, buildMark, chainLine,
+  BUILD_FIRST_CODE, actionState, type ActionRun, deviceBadge, staleNotes, tabBadge, brainView, type BrainInput, DOWNLOAD_NAME, DeviceLedger, OUTPUT_TABS, SETUP_COMMAND, buildLine, buildMark, chainLine,
   chainStepOf, chainSteps, chainStoppable, downloadButtonLabel, downloadMark, helpText, isSourcePath, isTrustedPress,
   markGlyph, nextTab, outputTabFor, stillStale, stoppedDownloadNote,
   defaultName, downloadLabel, downloadProgress, errorTarget, isExplicitClick, nameRefusal, needsBuildFirst, offersVex, parseBuild, parseDetection, parseDeviceRecord, parseLastBuilds,
@@ -163,7 +163,7 @@ describe("state marks (VX-UI-2)", () => {
 
   it("stale after an edit or a clean (advisory), never for Clean itself", () => {
     expect(buildMark("build", { ...base, record: build(), editedAt: ended + 1 })).toEqual(
-      { state: "stale", text: "Build: succeeded, edited since" });
+      { state: "stale", text: "Build: succeeded, edited since", detail: "edited since" });
     expect(buildMark("build", { ...base, record: build(), editedAt: ended - 1 }).state).toBe("ok");
     expect(buildMark("rebuild", { ...base, record: build({ action: "rebuild" }), cleanedAt: ended + 5 }).text)
       .toBe("Rebuild: succeeded, cleaned since");
@@ -195,6 +195,107 @@ describe("state marks (VX-UI-2)", () => {
   });
 });
 
+describe("actionState: one step's state from its run (VX-UI-2, plan §3.1)", () => {
+  const T0 = "2026-10-11T12:00:00+00:00";
+  const t = (s: number) => new Date(Date.parse(T0) + s * 1000).toISOString();
+  const run = (over: Partial<ActionRun> = {}): ActionRun => ({
+    build: null, results: {}, startingBuild: null, stoppedBuild: null, editedAt: null, busy: null, download: null,
+    downloaded: null, ...over,
+  });
+  const ok = (action: "clean" | "build" | "rebuild", end: number, id = `0000000${end}`.slice(-8)) =>
+    build({ id, action, state: "succeeded", started: t(end - 5), ended: t(end) });
+
+  it("every state: idle, busy, ok, failed, stale, unknown — each with words", () => {
+    expect(actionState("build", run(), true)).toEqual({ state: "idle", text: "Build: not run in this window" });
+    expect(actionState("clean", run({ startingBuild: { action: "clean" } }), true).state).toBe("busy");
+    expect(actionState("build", run({ startingBuild: { action: "clean" } }), true).state).toBe("idle");
+    const b = ok("build", 10);
+    expect(actionState("build", run({ results: { build: b } }), true)).toEqual({ state: "ok", text: "Build: succeeded" });
+    const failed = build({ state: "failed", errors: [err()] });
+    expect(actionState("build", run({ results: { build: failed } }), true).text).toBe("Build: failed (1 error)");
+    expect(actionState("build", run({ results: { build: failed }, stoppedBuild: failed.id }), true).text).toBe("Build: stopped");
+    expect(actionState("build", run({ results: { build: b }, editedAt: Date.parse(t(20)) }), true))
+      .toEqual({ state: "stale", text: "Build: succeeded, edited since", detail: "edited since" });
+    const running = build({ state: "running", ended: null });
+    expect(actionState("build", run({ results: { build: running } }), true).state).toBe("busy");
+    expect(actionState("build", run({ results: { build: running } }), false))
+      .toEqual({ state: "unknown", text: "Build: outcome unknown, check status" });
+  });
+
+  it("a later clean makes Build and Rebuild stale, never Clean itself", () => {
+    const r = run({ results: { build: ok("build", 10), rebuild: ok("rebuild", 12), clean: ok("clean", 30) } });
+    expect(actionState("build", r, true).detail).toBe("cleaned since");
+    expect(actionState("rebuild", r, true).state).toBe("stale");
+    expect(actionState("clean", r, true).state).toBe("ok");
+    // A clean before the build: nothing stale.
+    expect(actionState("build", run({ results: { build: ok("build", 40), clean: ok("clean", 30) } }), true).state).toBe("ok");
+  });
+
+  it("Download: in the slot, stale once a later build or rebuild succeeds (never a failed one), unknown when lost", () => {
+    const dl = { download: { ended: t(50) }, downloaded: { slot: 3, ok: true } };
+    expect(actionState("download", run({ ...dl, results: { build: ok("build", 40) } }), true))
+      .toEqual({ state: "ok", text: "Download: in slot 3" });
+    expect(actionState("download", run({ ...dl, results: { build: ok("build", 60) } }), true))
+      .toEqual({ state: "stale", text: "Download: in slot 3, from an older build", detail: "from an older build" });
+    expect(actionState("download", run({ ...dl, results: { build: ok("build", 40), rebuild: ok("rebuild", 70) } }), true)
+      .state).toBe("stale");
+    expect(actionState("download", run({ ...dl, results: { build: build({ state: "failed", ended: t(90) }) } }), true)
+      .state).toBe("ok");
+    expect(actionState("download", run({ busy: "download" }), true).state).toBe("busy");
+    expect(actionState("download", run({ downloaded: { slot: 3, ok: null } }), true).state).toBe("unknown");
+    expect(actionState("download", run({ downloaded: { slot: 2, ok: false, stopped: true } }), true).text)
+      .toBe("Download: stopped, slot 2 may be incomplete");
+    // An edited source alone never makes a download stale (only a later build does).
+    expect(actionState("download", run({ ...dl, editedAt: Date.parse(t(99)) }), true).state).toBe("ok");
+  });
+
+  it("no state is amber's: every result is one of the six, and held is never one of them", () => {
+    const seen = new Set<string>();
+    const rs: ActionRun[] = [run(), run({ busy: "download" }), run({ downloaded: { slot: 1, ok: null } }),
+      run({ results: { build: ok("build", 10) }, editedAt: Date.parse(t(20)) })];
+    for (const r of rs) for (const k of ["clean", "build", "rebuild", "download"] as const) seen.add(actionState(k, r, true).state);
+    for (const s of seen) expect(["idle", "busy", "ok", "failed", "stale", "unknown"]).toContain(s);
+    expect(seen.has("held" as never)).toBe(false);
+  });
+
+  it("the Build tab's badge is its latest action's state; the Download tab's is Download's", () => {
+    expect(tabBadge("build", run(), true)).toEqual({ state: "idle", text: "nothing yet" });
+    const failed = build({ state: "failed", errors: [err(), err({ severity: "warning" })] });
+    expect(tabBadge("build", run({ build: failed, results: { build: failed } }), true))
+      .toEqual({ state: "failed", text: "failed (1 error)" });
+    const clean = ok("clean", 10);
+    expect(tabBadge("build", run({ build: clean, results: { clean } }), true)).toEqual({ state: "ok", text: "clean: succeeded" });
+    const b = ok("build", 10);
+    expect(tabBadge("build", run({ build: b, results: { build: b }, editedAt: Date.parse(t(20)) }), true).state).toBe("stale");
+    const running = build({ state: "running", ended: null });
+    expect(tabBadge("build", run({ build: running, results: { build: running } }), false).state)
+      .toBe("unknown");  // never a spinner no one follows
+    expect(tabBadge("build", run({ startingBuild: { action: "rebuild" } }), true))
+      .toEqual({ state: "busy", text: "rebuild: running" });
+    expect(tabBadge("download", run(), true)).toEqual({ state: "idle", text: "nothing yet" });
+    expect(tabBadge("download", run({ download: { ended: t(5) }, downloaded: { slot: 3, ok: true },
+      results: { build: ok("build", 9) } }), true)).toMatchObject({ state: "stale", text: "in slot 3, from an older build" });
+  });
+
+  it("the Device tab's badge: worst confirmed USB state, ? when stale or unknown", () => {
+    expect(deviceBadge(null, false).state).toBe("unknown");
+    expect(deviceBadge({ brain: null, controller: null }, false).state).toBe("unknown");
+    expect(deviceBadge({ brain: true, controller: false }, false)).toEqual({ state: "ok", text: "USB device present" });
+    expect(deviceBadge({ brain: false, controller: false }, false)).toEqual({ state: "failed", text: "nothing on USB" });
+    expect(deviceBadge({ brain: true, controller: true }, true).state).toBe("unknown");
+    expect(deviceBadge({ brain: false, controller: false }, true).state).toBe("unknown");
+  });
+
+  it("the status line says each stale ✓ in words, in the action bar's order", () => {
+    const m = (state: "ok" | "stale", detail?: string) => ({ state, text: "", ...(detail ? { detail } : {}) });
+    expect(staleNotes([{ kind: "build", mark: m("stale", "edited since") }, { kind: "rebuild", mark: m("ok") },
+      { kind: "download", mark: m("stale", "from an older build") }])).toEqual([
+      { kind: "build", name: "Build", detail: "edited since" },
+      { kind: "download", name: "Download", detail: "from an older build" }]);
+    expect(staleNotes([{ kind: "build", mark: m("ok") }])).toEqual([]);
+  });
+});
+
 describe("output tabs", () => {
   it("an action selects its tab", () => {
     expect(outputTabFor("clean")).toBe("build");
@@ -214,6 +315,12 @@ describe("output tabs", () => {
     expect(nextTab(OUTPUT_TABS, "download", "Home")).toBe("build");
     expect(nextTab(OUTPUT_TABS, "download", "End")).toBe("device");
     expect(nextTab(OUTPUT_TABS, "download", "Enter")).toBeNull();
+  });
+
+  it("the output toolbars' controls say what they do, and that they send nothing (VX-UI-3)", () => {
+    expect(helpText("terminal", 1)).toMatch(/full output\. It runs nothing/);
+    expect(helpText("recheck", 1)).toMatch(/never starts or resends anything/);
+    expect(helpText("usb-refresh", 1)).toMatch(/writes nothing to the robot/);
   });
 
   it("the Brain tab says it connects only on a click (owner's answer to §0.1 item 5)", () => {

@@ -1825,6 +1825,12 @@ HUD's side of the routes above (`hud/src/api.ts`, `lib/vex.ts`,
   `DELETE /terminals/{id}`. One place at a time: a terminal pane showing it
   wins, then the first VEX pane whose Brain tab shows it; the panel's tab says
   "in the VEX view, pane N" (`data-place="vex-N"`). No new route.
+- State marks and help (VX-UI-2 and VX-UI-3, 2026-10-15/16) add **no route
+  and no request**. The step marks, tab badges, stale words, hover help and
+  `?` list are computed in the window from the build, download and USB
+  records above (`lib/vex.ts` `actionState`, `tabBadge`, `deviceBadge`,
+  `staleNotes`, `helpText`). There is no Run route: VX-UI-5 is dropped, and
+  V-3 stands (see the decisions file, 2026-10-15).
 - Test hooks (read-only): `window.__hudVex` (`blocked`, `cards`, `chain()`, `run(id)`, `brain()`),
   `window.__hudTerminals.shownIn(id)` (`pane-N`, `vex-N` or null),
   and `__hud.monacoEditors()` rows gain `line` and `column` (where the cursor
