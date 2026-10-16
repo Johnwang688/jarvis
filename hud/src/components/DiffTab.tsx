@@ -3,6 +3,7 @@ import { api } from "../api";
 import type { Diff } from "../types";
 import { churn, statusLabel, summaryLine } from "../lib/difflist";
 import { DiffEditor } from "./Editor";
+import { QuickReviewButton, QuickReviewPanel, useQuickReview } from "./DiffReview";
 
 /**
  * A task's changed files and one file's two sides. In a narrow split pane
@@ -22,6 +23,10 @@ export function DiffTab(props: {
   const [sides, setSides] = useState<{ before: string; after: string } | null>(null);
   const [err, setErr] = useState("");
   const [listOpen, setListOpen] = useState(false);
+  // A Quick review finding's line, revealed on the new side once its file is
+  // open (`n` makes a second click on the same line count).
+  const [reveal, setReveal] = useState<{ file: string; line: number; n: number } | null>(null);
+  const review = useQuickReview(props.taskId);
   // The file the pane had open, read when the diff arrives.
   const seed = useRef(props.filePath ?? "");
   seed.current = props.filePath ?? "";
@@ -31,6 +36,7 @@ export function DiffTab(props: {
     setSel("");
     setSides(null);
     setErr("");
+    setReveal(null);
     if (!props.taskId) return;
     api.diff(props.taskId).then((d) => {
       setDiff(d);
@@ -51,6 +57,12 @@ export function DiffTab(props: {
   if (!diff) return <div className="pad muted">…</div>;
 
   const showList = !props.narrow || listOpen || !sel;
+  const open = (file: string, line: number | null) => {
+    setSel(file);
+    setListOpen(false);
+    props.onSelect?.(file);
+    setReveal(line ? { file, line, n: (reveal?.n ?? 0) + 1 } : null);
+  };
   return (
     <div className="split">
       <div className="filetree" data-testid="difflist" style={showList ? undefined : { display: "none" }}>
@@ -65,6 +77,7 @@ export function DiffTab(props: {
             onClick={() => {
               setSel(f.path);
               setListOpen(false);
+              setReveal(null);
               props.onSelect?.(f.path);
             }}
           >
@@ -91,9 +104,16 @@ export function DiffTab(props: {
           <span className="muted small">
             {diff.base} … {diff.head}
           </span>
+          <QuickReviewButton review={review} />
         </div>
+        <QuickReviewPanel review={review} paths={diff.files.map((f) => f.path)} onOpen={open} />
         {sel && sides ? (
-          <DiffEditor path={sel} before={sides.before} after={sides.after} />
+          <DiffEditor
+            path={sel}
+            before={sides.before}
+            after={sides.after}
+            reveal={reveal && reveal.file === sel ? reveal : null}
+          />
         ) : (
           <div className="pad muted">Pick a changed file.</div>
         )}

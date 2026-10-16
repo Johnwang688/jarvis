@@ -220,6 +220,28 @@ every one of these routes asks (`kind`):
   with `"truncated": true`.
 - `GET /tasks/{id}/diff/file?path=<rel>` → `{"before", "after"}` for the
   Monaco diff editor.
+- **Quick review** (2026-10-15; `jarvis/v2/diff_review.py`, plan
+  `docs/plans/2026-10-15-diff-quick-review.md`). Owner-only (`owner_only`
+  first, before the task is looked up or a body read), so the API listener,
+  MCP and Discord can neither start nor read one; nothing is published on
+  the bus.
+  - `POST /tasks/{id}/diff/review` with `{}` → 202 `{"review", "outdated":
+    false}`: starts one review of exactly this task's diff (the files `GET
+    /tasks/{id}/diff` lists, scrubbed, capped at 150 KB; files over the cap
+    are named in `scope.skipped`). 409 while one runs, or when nothing in the
+    diff can be reviewed.
+  - `GET /tasks/{id}/diff/review` → `{"review": record | null, "outdated":
+    bool}`. A finished review whose diff has changed since is not served
+    (`outdated: true`). The record: `{"task_id", "state":
+    "running"|"done"|"failed"|"cancelled", "started", "finished", "trying",
+    "harness": "claude"|"codex"|"v1"|null, "model", "label", "fallbacks":
+    [{"harness", "name", "reason", "tried"}], "summary", "findings":
+    [{"severity": "bug"|"risk"|"nit", "file", "line": int|null, "why",
+    "in_diff"}], "scope": {"files_total", "files_reviewed", "skipped",
+    "bytes", "cap"}, "error", "cost": {"usd", "tokens"}}`. Every string is
+    plain one-line text; the HUD renders it as text.
+  - `POST /tasks/{id}/diff/review/cancel` with `{}` → 200, the record; 409
+    when none runs.
 
 ## The workshop origin (`WORKSHOP_PORT`)
 

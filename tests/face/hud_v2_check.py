@@ -3374,6 +3374,16 @@ def main():
             finally:
                 buttons_mock.stop()
 
+            # The Diff tab's Quick review (2026-10-15): its button, running
+            # state, findings panel and a finding opening its file:line.
+            from tests.face.hud_v2_quick_review_check import quick_review_checks
+            review_mock = MockDaemon(0).start()
+            try:
+                quick_review_checks(browser, review_mock, f"http://127.0.0.1:{review_mock.port}", check,
+                                    until, guard, PLAIN_RECOGNIZER)
+            finally:
+                review_mock.stop()
+
             from tests.face.hud_v2_settings_check import settings_page_checks
             settings_page_mock = MockDaemon(0).start()
             try:

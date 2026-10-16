@@ -303,6 +303,50 @@ export interface Diff {
   truncated?: boolean;
 }
 
+/** One finding of a Quick review (docs/plans/2026-10-15-diff-quick-review.md, D2/D5):
+ *  plain one-line text the daemon has already cleaned. `in_diff` says whether
+ *  `file` is one of the diff's files, so the panel can open it. */
+export interface ReviewFinding {
+  severity: "bug" | "risk" | "nit";
+  file: string;
+  line: number | null;
+  why: string;
+  in_diff: boolean;
+}
+
+/** Why a harness was passed over: skipped on its usage reading or its
+ *  health (`tried: false`), or tried and failed. */
+export interface ReviewFallback {
+  harness: "claude" | "codex" | "v1";
+  name: string;
+  reason: string;
+  tried: boolean;
+}
+
+/** `GET /tasks/{id}/diff/review`'s record (owner-only). */
+export interface DiffReview {
+  task_id: string;
+  state: "running" | "done" | "failed" | "cancelled";
+  started: string;
+  finished: string | null;
+  trying: "claude" | "codex" | "v1" | null;
+  harness: "claude" | "codex" | "v1" | null;
+  model: string | null;
+  label: string | null;
+  fallbacks: ReviewFallback[];
+  summary: string;
+  findings: ReviewFinding[];
+  scope: { files_total: number; files_reviewed: number; skipped: string[]; bytes: number; cap: number };
+  error: string | null;
+  cost: { usd: number; tokens: number };
+}
+
+export interface DiffReviewView {
+  review: DiffReview | null;
+  /** A finished review whose diff has changed since: not served. */
+  outdated: boolean;
+}
+
 export interface ProviderUsage {
   state: "available" | "over_threshold" | "cooling" | "unavailable";
   reason: string;

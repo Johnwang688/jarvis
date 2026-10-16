@@ -147,7 +147,9 @@ toolbar). It is a plain `button`, so it takes PR #210's 4px
   the harness it is trying.
 - Its hover help says what it does: a quick, read-only review that catches
   small bugs, not a full one.
-- Severity colours are Graphite's: bug red, risk amber, nit muted.
+- Severity colours keep Graphite's meanings single: bug red (an error),
+  risk steel (`--badge-win`; amber means "pending" and is not used), nit
+  muted.
 
 ## Files
 
