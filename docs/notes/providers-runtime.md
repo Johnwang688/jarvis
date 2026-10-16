@@ -1442,7 +1442,9 @@ Nothing on these paths answers a question by itself.
   message resumes). The drain empties the queue between cards.
 - A message `_translate` cannot read between turns is held for the next
   turn, which meets it as before SV-6 (a turn that cannot read a message
-  fails), and the drain reads on (review of #234).
+  fails), and the drain reads on (review of #234). While it waits there,
+  later child messages can overtake it, and CLI-turn offers stop, so a CLI
+  turn that starts then is read under the old attribution rules.
 - The Claude approval card's label can say "unnamed" when the hook beats the
   provider's read of `task_started`. That was so before, and it is likelier
   now that the buffer is read concurrently. It is a label only: the decision
