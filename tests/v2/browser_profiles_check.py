@@ -9,7 +9,9 @@ import asyncio
 import json
 import os
 from pathlib import Path
+import ssl
 import stat
+import subprocess
 import sys
 import tempfile
 import threading
@@ -17,10 +19,11 @@ import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch, AsyncMock, Mock
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from jarvis import config, llm
-from jarvis.v2.browser import host as H, profiles as P
+from jarvis.v2.browser import gate as G, host as H, profiles as P
 from tests.v2 import owner_browser_check as O
 
 
@@ -336,6 +339,60 @@ class Lifecycle(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(H.PROFILE_IDLE_S,300)
 
 
+class FakeGaia:
+    """A local TLS stand-in for `accounts.google.com`: the gate's resolver
+    answers the suite's public address for that one name and the connector
+    carries port 443 to this server, so Chrome's own sign-in tab lands on
+    the real URL and nothing leaves loopback. Chrome is told to ignore
+    certificate errors only in the suite that uses it."""
+
+    def __init__(self, root: Path):
+        cert, key = root / "gaia-cert.pem", root / "gaia-key.pem"
+        subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", str(key),
+                        "-out", str(cert), "-days", "1", "-subj", "/CN=accounts.google.com",
+                        "-addext", "subjectAltName=DNS:accounts.google.com"],
+                       check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        hits = self.hits = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                hits.append(self.path)
+                body = f"<!doctype html><title>{O.MARK} gaia</title><p>fixture sign-in".encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(cert, key)
+        self.server.socket = context.wrap_socket(self.server.socket, server_side=True)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def patches(self, host):
+        port = self.server.server_address[1]
+        resolve, connect = host._gate._resolver, host._gate._connector
+
+        def resolver(name, p):
+            return [O.PUB] if name == "accounts.google.com" else resolve(name, p)
+
+        async def connector(address, p):
+            if address == O.PUB and p == 443:
+                return await G.default_connect("127.0.0.1", port)
+            return await connect(address, p)
+        args = H.launch_args
+        return [patch.object(host._gate, "_resolver", resolver),
+                patch.object(host._gate, "_connector", connector),
+                patch.object(H, "launch_args", lambda *a, **k: args(*a, **k) + ["--ignore-certificate-errors"])]
+
+    def close(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+
 class Real(O.OwnerBrowser):
     @classmethod
     def setUpClass(cls):
@@ -462,6 +519,89 @@ class Real(O.OwnerBrowser):
         try:self.run_on(page.goto(H.SIGNIN_URL,wait_until="commit"))
         except H.BrowserRefused:pass
         self.assertTrue(self.wait(lambda:page.url=="about:blank",5))
+
+    def test_06d_signin_route_beside_an_open_tab_is_never_replaced(self):
+        # The live shape (2026-10-15): the profile's Chrome already holds an
+        # owner tab, so the sign-in page is a new page and its own
+        # about:blank lands first. The route must still end on Chrome's page.
+        first=self.open()
+        guarded=self.host._guarded;mark=len(self.logs)
+        row=self.owner("POST",f"/browser/profiles/{self.main}/signin",{})
+        page=self.page(row["tab_id"])
+        self.assertTrue(self.wait(lambda:page.url=="chrome://settings/people",5))
+        self.run_on(page.wait_for_load_state("load"))
+        self.assertEqual(self.run_on(page.title()),"Settings - You and Google")
+        self.assertTrue(self.host._tabs[row["tab_id"]].signin)
+        self.assertEqual(self.host._guarded,guarded)
+        self.assertFalse([l for l in self.logs[mark:] if "landing guard replaced" in l])
+        self.owner("DELETE",f"/browser/tabs/{first['tab_id']}")   # the suite's RSS bound
+        # Any other settings page, even one the people page links to, is not
+        # part of the capability: replaced, and the capability ends.
+        self.run_on(page.get_by_text("Customize profile",exact=True).first.click(timeout=5000))
+        self.assertTrue(self.wait(lambda:page.url=="about:blank",5))
+        self.assertFalse(self.host._tabs[row["tab_id"]].signin)
+        self.assertEqual(self.host._guarded,guarded+1)
+
+    def test_06e_chromes_own_signin_tab_opens_beside_the_signin_tab(self):
+        gaia=FakeGaia(Path(self.tmp.name));self.addCleanup(gaia.close)
+        self.host._ensure_started()           # the gate exists once the host runs
+        for p in gaia.patches(self.host):p.start();self.addCleanup(p.stop)
+        sent=[];send=H.TabStream.send
+        def record(stream,message,**kw):
+            sent.append((stream,message));return send(stream,message,**kw)
+        guard=patch.object(H.TabStream,"send",record);guard.start();self.addCleanup(guard.stop)
+        ordinary=self.open()
+        row=self.owner("POST",f"/browser/profiles/{self.main}/signin",{})
+        signin=self.host._tabs[row["tab_id"]];page=signin.page
+        self.assertTrue(self.wait(lambda:page.url=="chrome://settings/people",5))
+        self.run_on(page.wait_for_load_state("load"))
+        # Jarvis's own tab is never taken for Chrome's, even on that origin.
+        own=self.owner("POST","/browser/tabs",{"profile":self.main,"url":"https://accounts.google.com/own"})
+        self.assertTrue(self.wait(lambda:"/own" in gaia.hits,5))
+        self.assertIsNone(self.host._tabs[own["tab_id"]].opener)
+        self.owner("DELETE",f"/browser/tabs/{own['tab_id']}")
+        # Nor is a page's own pop-up, even one opening Google's origin.
+        other=self.page(ordinary["tab_id"])
+        self.run_on(other.set_content('<a id=x target=_blank rel=noopener href="https://accounts.google.com/popup">x</a>'))
+        before=set(self.host._tabs)
+        self.run_on(other.click("#x"))
+        self.assertTrue(self.wait(lambda:len(set(self.host._tabs)-before)==1,5))
+        stray=self.host._tabs[next(iter(set(self.host._tabs)-before))]
+        self.assertTrue(self.wait(lambda:"/popup" in gaia.hits and stray.page.url.startswith("https://accounts.google.com/popup"),5))
+        # It stays its opener's pop-up (Chrome names an opener even for
+        # rel=noopener), and the sign-in tab's window is never told of it.
+        self.assertTrue(self.wait(lambda:stray.opener==ordinary["tab_id"],5))
+        self.assertFalse([m for _,m in sent if m.get("tab_id")==stray.id and _ is not self.host._tabs[ordinary["tab_id"]].stream])
+        self.owner("DELETE",f"/browser/tabs/{stray.id}")
+        self.owner("DELETE",f"/browser/tabs/{ordinary['tab_id']}")   # the suite's RSS bound
+        # A page Chrome opens by itself (no opener, not Jarvis's) elsewhere
+        # stays unshown: only Google's sign-in origin is taken for Chrome's.
+        cdp=self.run_on(page.context.new_cdp_session(page))
+        before=set(self.host._tabs)
+        self.run_on(cdp.send("Target.createTarget",{"url":f"http://pub.test:{self.fx}/{O.MARK}/page"}))
+        self.assertTrue(self.wait(lambda:len(set(self.host._tabs)-before)==1,5))
+        loose=self.host._tabs[next(iter(set(self.host._tabs)-before))]
+        self.assertTrue(self.wait(lambda:loose.page.url.startswith("http://pub.test") and not loose.unsolicited,5))
+        self.assertIsNone(loose.opener)
+        self.assertFalse([m for _,m in sent if m.get("tab_id")==loose.id])
+        self.owner("DELETE",f"/browser/tabs/{loose.id}")
+        self.run_on(cdp.detach())
+        # Chrome's own "Sign in to Chrome" opens Google's page with no opener.
+        before=set(self.host._tabs)
+        self.run_on(page.get_by_role("button",name="Sign in to Chrome").first.click(timeout=5000))
+        self.assertTrue(self.wait(lambda:len(set(self.host._tabs)-before)==1,5))
+        tab=self.host._tabs[next(iter(set(self.host._tabs)-before))]
+        self.assertTrue(self.wait(lambda:tab.opener==signin.id,5))
+        self.assertTrue(tab.page.url.startswith("https://accounts.google.com/signin/chrome/sync?"),tab.page.url)
+        self.assertIn((signin.stream,{"t":"popup","tab_id":tab.id}),sent)
+        rows={r["tab_id"]:r for r in self.owner("GET","/browser/tabs")}
+        self.assertEqual(rows[tab.id]["opener"],signin.id)
+        self.assertEqual(set(rows),{signin.id,tab.id})
+        self.assertFalse(tab.signin)          # Google's page holds no internal capability
+        self.assertEqual(page.url,"chrome://settings/people")
+        try:self.run_on(tab.page.goto("chrome://settings/people",wait_until="commit"))
+        except Exception:pass
+        self.assertTrue(self.wait(lambda:tab.page.url=="about:blank",5))
 
     def test_06c_page_navigation_revokes_without_creating_a_lease(self):
         row=self.open();page=self.page(row["tab_id"])

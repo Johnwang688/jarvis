@@ -1938,3 +1938,42 @@ recorded, a keyring attached by default to the real bus, Private given the
 bus or the keyring flag, the after-launch check removed, status reporting a
 constant, the bus socket check removed, and a probe that asks for more than
 `Locked`. `hud/src/components/BrowserProfile.test.ts` covers the Manage line.
+
+## Chrome's own sign-in tab joins the sign-in pane (2026-10-15)
+
+Owner report: "Sign in to Chrome" ended on the "does not open this kind of
+address" page. The owner route was not the cause. A real-Chrome 155 run with
+an owner tab already open, and one through the installed HUD build against a
+real daemon, both ended on `chrome://settings/people` with no landing-guard
+replacement (`browser_profiles_check` 06d). In the live log the sign-in tab
+attached at 20:02:38 and the five replacements came 11–27 s later with no new
+attach. So the replaced pages were in tabs already shown. That matches
+navigation inside the settings page or Back. Measured: the people page's
+"Customize profile", "Google services" and "Import bookmarks and settings"
+go to `chrome://settings/manageProfile`, `/googleServices` and `/importData`.
+Each is replaced and ends the capability. That is BD-5's exact rule, kept.
+None of those pages belongs to sign-in.
+
+What was broken: the page's own blue **Sign in to Chrome** button opens
+`https://accounts.google.com/signin/chrome/sync?ssp=1&continue=https://www.google.com/&flow=history_opt_in&theme=mn`
+in a **new tab with no opener**. Chrome opens it, not the page, so
+`_link_opener` found no parent. The HUD was never told, and the owner saw
+nothing happen. No other chrome:// page is visited on this path. Now a tab
+Chrome opened by itself becomes the sign-in tab's pop-up. Its window is told
+(`{t:"popup"}`) and the HUD adopts it beside that tab. Three conditions apply:
+Jarvis did not open it, it has no opener, and its first real landing is on
+exactly `https://accounts.google.com`. Jarvis's own tabs clear the mark before
+navigating. A page's own pop-up keeps its opener, even on that origin.
+Other opener-less pages stay unshown, as before. The Google tab is
+judged like any page and holds no internal capability. Its chrome:// landings
+are still replaced. Test 06e uses a local TLS stand-in for `accounts.google.com`
+behind the suite's gate; nothing leaves loopback. Through the HUD, the Google
+tab opened as the pane's active tab.
+
+**Not verified** (no Google contact in tests): what comes after Google's
+page. `navigator.webdriver` is true, and Google may refuse the login as an
+unsafe browser. After a login, Chrome's sync/history confirmation is browser
+UI (a dialog), which a headless screencast does not draw. If Chrome then sends
+the Google tab to a chrome:// page, it is replaced with the explanation. In
+this fresh profile the people page offers "Sign in to Chrome", not "Turn on
+sync…". That button appears only with an account, which needs Google.
