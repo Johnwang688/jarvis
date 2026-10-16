@@ -2371,6 +2371,10 @@ MERGE_GATE_ASK = (
     ("PAGER='git push origin main x' git push -u origin feature", _PUSH_UNSURE),
     ("PAGER='git -c a=b fetch origin main' git -c a=b fetch origin main && git push -u origin feature",
      _PUSH_UNSURE),
+    # The same with nothing that runs text (MED-B blanks nothing beside
+    # PAGER=…): the first place is blanked, the other copy is still read.
+    ("echo 'git -c user.name=x fetch origin main' >> notes.txt; git -c user.name=x fetch origin main"
+     " && git push -u origin feature", _PUSH_UNSURE),
     ("git -c core.sshCommand='sh -c \"git push origin main\"' push origin feature", _PUSH_UNSURE),
     ("git rebase --exec 'echo main; git push' HEAD~1", _PUSH_UNSURE),
     ("CI=1 git fetch --upload-pack='git-upload-pack' origin main && git push -u origin feature", _PUSH_UNSURE),
