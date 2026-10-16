@@ -280,8 +280,9 @@ export type KeyRoute =
   | { kind: "paste" }
   /**
    * A lone modifier (its state rides on the next key or pointer event), or
-   * mid-composition, a dead key or an unidentified key: nothing is sent (IME
-   * is a follow-up).
+   * mid-composition, an IME's key (keyCode 229, whatever its `key`), a dead
+   * key or an unidentified key: nothing is sent. What the IME or dead key
+   * types reaches the page as text (lib/remoteime.ts), so its keys never do.
    */
   | { kind: "drop" }
   /** Sent to the page; the pane prevents its default. Copy and cut also ask for the selection. */
@@ -307,7 +308,7 @@ export function routeKeyDown(e: KeyEventLike, blocked: boolean): KeyRoute {
   if (blocked) return { kind: "held" };
   if (!browserTakesKey(e)) return { kind: "hud" };
   if (isModifierKey(e.key)) return { kind: "drop" };
-  if (e.isComposing || e.key === "Process" || e.key === "Dead" || e.key === "Unidentified" || !e.key) {
+  if (e.isComposing || e.keyCode === 229 || e.key === "Process" || e.key === "Dead" || e.key === "Unidentified" || !e.key) {
     return { kind: "drop" };
   }
   const action = paneKeyAction(e);
