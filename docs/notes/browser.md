@@ -2180,3 +2180,93 @@ UI (a dialog), which a headless screencast does not draw. If Chrome then sends
 the Google tab to a chrome:// page, it is replaced with the explanation. In
 this fresh profile the people page offers "Sign in to Chrome", not "Turn on
 sync…". That button appears only with an account, which needs Google.
+
+## Owner pickers for native select, date and colour controls (B-PICKERS, 2026-10-16)
+
+Design, measurements and the datalist assessment:
+[the B-PICKERS plan](../plans/2026-10-16-browser-pickers.md); wire contract in
+`docs/hud-api.md` ("owner pickers"). Chrome 155's screencast never draws a
+`<select>`, date, time, datetime-local, month, week or colour popup, and the
+popup still takes the keyboard (ArrowDown reaches no page listener; Enter
+commits). `jarvis/v2/browser/pickers.py` offers the owner a HUD overlay instead.
+
+- **Detection is the owner's own click on that element.** Only `_deliver` (the
+  owner's ticketed socket) calls the module. Before an owner left press is sent
+  it is pinned by CDP hit test (`Page.getLayoutMetrics` + `DOM.getNodeForLocation`,
+  which takes document coordinates: measured; two calls, p50 about 3 ms, p95
+  about 4 ms per press); after that press's own release is answered (never a
+  let-go), a script-free `DOM.describeNode` drops anything but a select or an
+  input whose `type` attribute is a picker kind (p50 1.2 ms on a text field),
+  then the pinned `backendNodeId` is resolved in a `jarvis-pickers` isolated world of its
+  own frame and must be connected, in that frame's current document
+  (`ownerDocument === document`), a picker kind and `:open`. CDP has no popup
+  event (measured). A `base-select` select is skipped (Chrome draws that picker
+  in the page). An agent's click, direct CDP input, a page's `showPicker()` on
+  another element, a list box and a date field's text segments offer nothing.
+- **The native popup is closed** with a trusted `rawKeyDown` Escape and no
+  key-up while `:open` is true (Chrome hands an open popup every key; the page
+  sees no event, focus and value stay). A date-like popup still loading its own
+  page ignores one, so it is asked again up to 12 times, 25 ms apart, until
+  `:open` reads false; otherwise nothing is offered.
+- **Reading** is one fixed isolated-world function: option DOM index, label,
+  disabled (with a disabled optgroup), group; `hidden` options left out;
+  date-like value/min/max/step/required; colour value. `DOM.getBoxModel` gives
+  the rectangle. Labels are cleaned (`approvals.clean_line`) and capped at 80,
+  at most 500 options and 60,000 bytes of JSON (`total` says how many exist).
+  Option values stay in the daemon. Nothing on the bus or in a log.
+- **Applying** (`{t:"pick"}`) is queued owner input: ordered, dropped under a
+  card, a takeover stamp. On the Browser's thread the binding is re-checked
+  (tab, page, page identity, main document generation, instance, attachment,
+  hold count, approval epoch, no dialog/chooser/auth, visible), then the same
+  node in the same frame: connected, same document, same kind, enabled, not
+  read-only, option count and the chosen option's value and label unchanged,
+  a date-like value valid for a detached same-type input with the control's
+  `min`/`max`/`step`. Assignment, `input` and `change` are three separately
+  awaited, re-checked calls; a handler that replaces the control or changes its
+  value stops `change`; the same value dispatches nothing. **The events are
+  untrusted** (no trusted CDP path picks an exact option or date: measured).
+- **Closing**: a main-frame navigation (same-document too), tab close, attach or
+  detach, resize, hidden, a card (`held`), a dialog or file chooser, a new owner
+  press (`cancelled`), a new picker (`replaced`); `pick_cancel` from the window.
+- **The HUD** (`lib/remotepicker.ts`, `components/RemotePicker.tsx`,
+  RemoteView): shown only as the answer to this window's own left press in the
+  same stream generation within 5 s, once; drawn only while connected, live and
+  unblocked (no card, global hold, auth, dialog, chooser or Downloads), closed
+  the moment any of them appears. **It never calls `focus()`**: keys typed in
+  the Remote proxy are routed to it (arrows skip disabled options, Home/End,
+  Page Up/Down, type-ahead, Enter, Escape; the HUD's own shortcuts keep theirs;
+  the rest swallowed, as the native popup would); options keep focus where it
+  is; the HUD's own date and colour inputs take focus only from the owner's
+  click, and Set/Cancel return it to the proxy. A press or wheel on the page
+  cancels it and is consumed whole (with its context menu). Graphite styling,
+  page text as React text only.
+
+**Datalist**: assessed, not built. Chrome 155 headless shows no datalist
+suggestions at all (no `:open`; ArrowDown and Enter leave the typed text), so
+nothing invisible captures keys. Offering suggestions needs a non-modal design
+(keys keep going to the page while suggestions refilter), not this overlay.
+
+**Limits**: cross-site (out-of-process) iframes are not covered (the hit test
+stops at the `<iframe>`; the invisible popup behaves as before); keyboard-opened
+pickers (Space, Alt+Down, F4) are not covered; the events are untrusted; a page
+that closes its own popup between the `:open` check and the Escape receives the
+Escape key-down; the rectangle is read once (a page that scrolls itself leaves
+the overlay where the control was; a wheel or resize closes it). `pickers.py`
+is not SELF_PROTECTED (an owner call, like `owner_tools.py`).
+
+Receipts: `tests/v2/browser_pickers_check.py` (3 pure, 17 real Chrome 155
+through the production ticket and socket, and an agent's real
+`hud_browser_act` click on a select through BR9b's fixture; summed Chrome RSS
+about 1.33 GiB); `lib/remotepicker.test.ts` and
+`components/RemoteViewPicker.test.ts` (22 vitest);
+`tests/face/hud_v2_pickers_check.py` (29 checks over the mock HUD, real
+Chromium). Sixteen guard removals, each applied in place and restored, fail
+their named checks: the identity check (a detached twin applied), applying to
+the frame's focused element instead of the pinned node, the option count, the
+option value/label, a card not closing the picker, `change` after a handler
+changed the value, no closing Escape, an agent's click probed (the BR9b
+fixture), any open picker in the frame offered instead of the pressed element;
+in the HUD the overlay focusing itself, no gesture needed, drawn under a card,
+keys leaking to the page (vitest), and focus, card and gesture again in the face
+check. The script is `~/.cache/jarvis-lead/pickers-mutants/mutants.py` (not in
+the repository).

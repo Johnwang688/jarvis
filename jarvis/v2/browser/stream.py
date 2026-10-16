@@ -299,6 +299,18 @@ def parse(raw: bytes) -> Msg:
         except OwnerBad as exc:
             raise Bad(str(exc)) from None
         return Msg(t, **{key: value for key, value in fields.items() if key != "t"})
+    if t in ("pick", "pick_cancel"):
+        # B-PICKERS: the owner's choice in a picker overlay is queued input
+        # (its order, the hold and the takeover stamp), its cancel is not.
+        from .pickers import parse_message as picker_message, PickerBad, PICK_METHOD
+        try:
+            fields = picker_message(m)
+        except PickerBad as exc:
+            raise Bad(str(exc)) from None
+        fields.pop("t")
+        if t == "pick":
+            return Msg(t, PICK_METHOD, fields)
+        return Msg(t, **fields)
     if t == "key":
         _fields(m, ("e",), ("e",))
         return Msg(t, "Input.dispatchKeyEvent", _key(m["e"]))
