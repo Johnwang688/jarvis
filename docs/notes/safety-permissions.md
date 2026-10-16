@@ -2322,13 +2322,16 @@ the default branch, a branch deletion, a force push.
   directory, a symlinked HEAD, an object-name HEAD as detached, anything else
   unknown); GraphQL `enqueuePullRequest`, `deleteRef`, `updateRef(s)` and
   `createCommitOnBranch` count; config is parsed once per judgement.
-- **Delta review of #208** (decision M-16): `git checkout main --` is a
-  switch; the backstop is set off by any `git -c`/`--config-env`, any `git
-  config` write, any upper-case assignment word and the options that hand
-  git a program (`--upload-pack`, `--receive-pack`, `--exec`, `clone -u`,
-  `grep -O`), and wherever it runs it leaves out the values of data options
-  (`git commit -m`, `gh pr create --body`, `gh api -f body=`) spelled right
-  after their option; `branchName: $b` in GraphQL is read from `-f b=…` or
+- **Delta review of #208 and #222's review** (decision M-16): `git
+  checkout main --` is a switch; the backstop is set off by any `git
+  -c`/`--config-env`, any `git config` write, any upper-case variable set on
+  the line (`NAME=`, `read`, `printf -v`, `export NAME`), a write to git's
+  config, HEAD or hooks (which also makes any later push ask), and the
+  options that hand git a program; it does not read the arguments of
+  programs the walk judged by structure (a git subcommand's refs and
+  message, `gh pr create --base main`, `gh api`), blanked where that program
+  stands, unless a program on the line runs text the walk cannot read (`|
+  sh`, `eval "$(…)"`); `branchName: $b` in GraphQL is read from `-f b=…` or
   asks. Always running the backstop was measured and declined: it asks for
   ordinary lines that mention `main` beside a push.
 - **Frozen** (owner, 2026-10-15): `jarvis/v2/merge_gate.py` and

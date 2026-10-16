@@ -2360,6 +2360,35 @@ MERGE_GATE_ASK = (
     # A config write makes a later unknown subcommand a possible new alias,
     # with nothing on the line for the backstop to read.
     ("git config alias.ship '!./ship.sh'; git ship", _PUSH_UNSURE),
+    # #222's review. MED-1: a judged program's arguments are blanked where
+    # it stands, never the same words elsewhere; `-c` values, assignment
+    # values and the arguments of a subcommand handed a program stay.
+    ("PAGER='git push origin main x' git push -u origin feature", _PUSH_UNSURE),
+    ("PAGER='git -c a=b fetch origin main' git -c a=b fetch origin main && git push -u origin feature",
+     _PUSH_UNSURE),
+    ("git -c core.sshCommand='sh -c \"git push origin main\"' push origin feature", _PUSH_UNSURE),
+    ("git rebase --exec 'echo main; git push' HEAD~1", _PUSH_UNSURE),
+    ("CI=1 git fetch --upload-pack='git-upload-pack' origin main && git push -u origin feature", _PUSH_UNSURE),
+    # MED-2: git's config, HEAD and hooks written on the line.
+    ("echo '[core] pager = gh pr merge 1' >> .git/config; git log", _PR_UNSURE),
+    ("echo '[core] pager = gh pr merge 1' >> ~/.gitconfig; git log", _PR_UNSURE),
+    ("printf '[core]\\n\\tpager = gh pr merge 1\\n' | tee -a .git/config; git log", _PR_UNSURE),
+    ("cp evil.cfg .git/config && git push origin feature", _PUSH_UNSURE),
+    ("ln -sf /tmp/hook .git/hooks/pre-push && git push origin feature", _PUSH_UNSURE),
+    ("sed -i 's/x/y/' .git/config && git push origin feature", _PUSH_UNSURE),
+    ("echo 'ref: refs/heads/main' > .git/HEAD && git push", _PUSH_UNSURE),
+    # Variables set without `NAME=`.
+    ("read -r PAGER <<< 'gh pr merge 1'; git log", _PR_UNSURE),
+    ("printf -v PAGER %s 'gh pr merge 1'; git log", _PR_UNSURE),
+    ("mapfile -t L <<< 'gh pr merge 1'; git log", _PR_UNSURE),
+    ("export PAGER; echo 'gh pr merge 1' > /dev/null; git log", _PR_UNSURE),
+    # LOW: stored text a program on the line may run is not blanked.
+    ("git commit -m 'gh pr merge 1' && git log -1 --format=%s | sh", _PR_UNSURE),
+    ("git commit -m 'gh pr merge 1' && eval \"$(git log -1 --format=%s)\"", _PR_UNSURE),
+    ("git commit -m 'gh pr merge 1' && bash -c \"$(git log -1 --format=%s)\"", _PR_UNSURE),
+    ("git commit -m 'gh pr merge 1' && git log -1 --format=%s | ssh host", _PR_UNSURE),
+    # LOW: HOME and XDG_CONFIG_HOME move the owner's git config.
+    ("HOME=/tmp/h git push", _PUSH_UNSURE), ("XDG_CONFIG_HOME=/tmp/x git push", _PUSH_UNSURE),
     # Blanking a data option's value is anchored to its option: the same
     # text fed to a shell elsewhere on the line is still read.
     ("echo 'gh pr merge 1' | sh; git commit -m 'gh pr merge 1'", _PR_UNSURE),
@@ -2423,6 +2452,24 @@ MERGE_GATE_ORDINARY = (
     "git config user.name x && git commit -m 'gh pr merge later'",
     "git fetch --upload-pack=git-upload-pack origin", "git grep -n 'gh pr merge'",
     _GQL_COMMIT + " -f b=topic",
+    # #222's review, MED-1: the arguments of programs judged by structure
+    # are not read by the backstop.
+    "git -c user.name=x -c user.email=y commit -m x && git push -u origin feature"
+    " && gh pr create --base main --fill",
+    "LANG=C git fetch origin main && git push -u origin feature",
+    "git -c user.name=x fetch origin main && git push -u origin feature",
+    "CI=1 npm test && git log origin/main..HEAD && git push -u origin feature",
+    "git -c user.name=x push origin main:topic",
+    "git fetch origin main && git rebase origin/main && git push -u origin feature",
+    "GIT_PAGER=cat git log origin/main..HEAD && git push -u origin feature",
+    "git rebase main && git push origin topic", "CI=1 make && git branch -d old && git push -u origin feature",
+    "/bin/bash -lc 'git -c user.name=x fetch origin main && git push -u origin feature"
+    " && gh pr create --base main --fill'",
+    "git push -u origin \"$(git branch --show-current)\" && LANG=C gh pr create --base main --fill",
+    "CI=1 gh issue create --title 'push to main is slow' -b x && git push -u origin feature",
+    "CI=1 gh api repos/o/r/issues/5/comments -f body='push to main later' && git push -u origin feature",
+    "CI=1 git checkout -b feature main && git push -u origin feature",
+    "cat .git/config && git push origin feature", "cp .git/config /tmp/backup && git push origin feature",
 )
 
 
@@ -2792,14 +2839,35 @@ def merge_gate_checks():
             ("; ".join(f"git x{i}" for i in range(2000)), many_aliases),
             ("git checkout a && " * 500 + "git push", topic),
             ("curl " + "pulls/" * 40000 + "x", topic),
-            # Data values left out of the backstop: past DATA_CAP none are,
-            # so this many is one pass; at the cap, one blanking each.
-            ("make; git commit " + " ".join(f"-m 'gh pr merge {i}'" for i in range(20000)), topic),
-            ("make; git commit " + " ".join(f"-m m{i}" for i in range(getattr(merge_gate, "DATA_CAP", 64)))
-             + " x" * 100000, topic),
+            # Arguments blanked by position (MED-1 of #222's review): a
+            # program with more words than MASK_ARGS_CAP is not, and past
+            # MASK_CAP programs none is; at the caps, one search each.
+            ("make; git commit " + " ".join(f"-m 'gh pr merge {i}'" for i in range(2000)), topic),
+            ("make; " + "; ".join(f"git log m{i}" for i in range(3000)) + "; echo" + " x" * 100000, topic),
+            ("make; " + "; ".join(f"git log m{i}" for i in range(getattr(merge_gate, "MASK_CAP", 64)))
+             + "; echo" + " x" * 100000, topic),
+            ("make; git log " + " ".join(f"m{i}" for i in range(getattr(merge_gate, "MASK_ARGS_CAP", 256) - 1))
+             + "; echo" + " x" * 100000, topic),
             (_GQL_COMMIT.replace("branchName:$b", "branchName:$b " * 30000)
              + " -f b=topic" * 3000, topic),
         )
+        # Past the caps nothing is blanked, so the backstop reads every word
+        # (it may ask, never the other way).
+        cap, args_cap = getattr(merge_gate, "MASK_CAP", 64), getattr(merge_gate, "MASK_ARGS_CAP", 256)
+
+        def programs(n):            # n + 2 masked programs
+            return ("CI=1 " + "; ".join(f"git log m{i}" for i in range(n))
+                    + "; git log origin/main..HEAD && git push -u origin feature")
+
+        def words(n):               # one program of n + 3 words
+            return ("CI=1 git log origin/main " + " ".join(f"m{i}" for i in range(n))
+                    + " && git push -u origin feature")
+        for over, under, why in ((programs(cap - 1), programs(cap - 2), "MASK_CAP programs"),
+                                 (words(args_cap - 2), words(args_cap - 3), "MASK_ARGS_CAP words")):
+            hit = merge_gate.judge(over, str(topic))
+            eq(hit.rule if hit else None, "git-push-unsure", f"past {why}: nothing is blanked")
+            hit = merge_gate.judge(under, str(topic))
+            eq(hit.rule if hit else None, None, f"at {why}: blanked as usual")
         for line, cwd in adversarial:
             spent: list = []
 
