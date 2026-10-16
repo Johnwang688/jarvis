@@ -412,6 +412,62 @@ class InChromium(Base):
                 self.assertEqual(got[name], {"error": "TypeError"}, str(got[name])[:300])
         self.assertEqual((len(heard), said, muted), (1, ["hello"], [False]), "a foreign page reached the voice")
 
+    def test_the_huds_model_and_avatar_pickers_pass_the_gate(self):
+        """#227 review: `POST /model`, `POST /models` and `POST /avatar` are owner-only. The
+        HUD's pickers, as Chromium sends them from its own page, still pass, and its reads of
+        the roster and avatars are untouched; a page on another port changes nothing."""
+        from jarvis import avatars, models
+        calls = []
+        roster = {"current": "test/model", "models": ["test/model"]}
+        fakes = [patch.object(models, "select", lambda m: calls.append(("select", m))),
+                 patch.object(models, "add", lambda m: calls.append(("add", m))),
+                 patch.object(models, "remove", lambda m: calls.append(("remove", m))),
+                 patch.object(models, "set_effort", lambda m, e: calls.append(("effort", m, e))),
+                 patch.object(models, "describe", lambda: roster),
+                 patch.object(avatars, "set_active", lambda slug: calls.append(("avatar", slug)) or
+                              SimpleNamespace(describe=lambda: {"slug": slug}))]
+        for fake in fakes:
+            fake.start()
+            self.addCleanup(fake.stop)
+        script = """async () => {
+          const out = {};
+          const ask = async (name, path, init) => {
+            try { const r = await fetch(path, init); out[name] = {status: r.status, body: await r.text()}; }
+            catch (e) { out[name] = {error: e.name}; }
+          };
+          const json = (b) => ({method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(b)});
+          await ask('add', BASE + '/models', json({add: 'test/model'}));
+          await ask('select', BASE + '/model', json({model: 'test/model'}));
+          await ask('effort', BASE + '/models', json({model: 'test/model', effort: 'high'}));
+          await ask('remove', BASE + '/models', json({remove: 'test/model'}));
+          await ask('avatar', BASE + '/avatar', json({slug: 'jarvis'}));
+          await ask('roster', BASE + '/models');
+          return out;
+        }"""
+        self.page.goto(f"http://127.0.0.1:{self.face}/status")
+        got = self.page.evaluate(script.replace("BASE", "''"))
+        for name in ("add", "select", "effort", "remove", "avatar", "roster"):
+            with self.subTest(name=name):
+                self.assertEqual(got[name].get("status"), 200, str(got[name])[:300])
+        self.assertEqual(json.loads(got["avatar"]["body"]), {"slug": "jarvis"})
+        self.assertEqual(self.requests_to("/models", "POST")[-1].get("origin"), f"http://127.0.0.1:{self.face}")
+        expected = [("add", "test/model"), ("select", "test/model"), ("effort", "test/model", "high"),
+                    ("remove", "test/model"), ("avatar", "jarvis")]
+        self.assertEqual(calls, expected)
+
+        other = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Page)
+        other.daemon_threads = True
+        self.assertNotIn(other.server_address[1], LIVE_PORTS)
+        threading.Thread(target=other.serve_forever, daemon=True).start()
+        self.addCleanup(other.server_close)
+        self.addCleanup(other.shutdown)
+        self.page.goto(f"http://127.0.0.1:{other.server_address[1]}/")
+        got = self.page.evaluate(script.replace("BASE", repr(f"http://127.0.0.1:{self.face}")))
+        for name in ("add", "select", "effort", "remove", "avatar"):
+            with self.subTest(other=name):
+                self.assertEqual(got[name], {"error": "TypeError"}, str(got[name])[:300])
+        self.assertEqual(calls, expected, "a foreign page reached a picker")
+
     def test_a_page_on_another_port_cannot_read_the_listing(self):
         other = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Page)
         other.daemon_threads = True

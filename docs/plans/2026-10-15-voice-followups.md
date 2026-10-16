@@ -27,7 +27,7 @@ EER, and they need the owner at the mic.
 | V2 | The STT error line can keep a stale "Not retried" after a later success. | V2 review |
 | V2 | The wording of the oversize-clip message. | V2 review |
 | V2 | No test covers `place()` throwing. | V2 review |
-| V2 | **Fixed 2026-10-16.** `/stt` and `/say` had no `owner_only` check. Both are now owner-only, along with `GET /voices`, `POST /voice` and `POST /mute`, which had the same gap. See "The voice pickers are the owner's" in the voice-face notes. | V2 review |
+| V2 | **Fixed 2026-10-16.** `/stt` and `/say` had no `owner_only` check. Both are now owner-only, along with `GET /voices`, `POST /voice` and `POST /mute`, which had the same gap. PR #227's review added `POST /model`, `POST /models` and `POST /avatar`. See "The voice pickers are the owner's" in the voice-face notes. | V2 review |
 | V6 | Diffs without a header are still read aloud. | V6 review |
 | V6 | Barge-in with nothing playing pauses nothing. | V6 review |
 | V6 | Buffering counts as active during a synthesis hang. | V6 review |

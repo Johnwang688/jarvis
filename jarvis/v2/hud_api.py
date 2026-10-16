@@ -1617,6 +1617,11 @@ def speech_summary(handler, daemon):
 # synthesize speech or change the owner's voice. No tool, bridge or Discord path
 # calls these over HTTP; they reach `voice` in process.
 OWNER_VOICE_PICKERS = frozenset({"stt", "say", "voice", "voices", "mute"})
+# The pickers whose writes are the owner's and whose reads stay open (#227 review):
+# `POST /model` and `POST /models` rewrite the protected `models.json` (an API-listener
+# client could add `evil/model` and select it), `POST /avatar` the avatar state.
+# `GET /models`, `/models/catalog`, `/avatars` and `/avatar.svg` answer any listener.
+OWNER_PICKER_WRITES = frozenset({"model", "models", "avatar"})
 
 
 def pickers(handler, daemon, parts, query):
@@ -1625,7 +1630,7 @@ def pickers(handler, daemon, parts, query):
     from .daemon import _object
     from .projects import owner_only
     name = "/".join(parts)
-    if name in OWNER_VOICE_PICKERS:
+    if name in OWNER_VOICE_PICKERS or (name in OWNER_PICKER_WRITES and handler.command != "GET"):
         owner_only(handler, daemon)
     if handler.command == "GET":
         if name == "avatars":

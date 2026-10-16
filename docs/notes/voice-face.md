@@ -3015,8 +3015,12 @@ the query, the body or any audio work. The set is:
 - `POST /mute`, v1's spoken-reply flag.
 
 These had the same gap; the other voice routes (`/stt/settings`, `/speaker*`, `/speech/summary`,
-`/speech/voices`, `/speech/duck`) were already owner-only. The model and avatar pickers (`/model`,
-`/models`, `/avatar`, `/avatars`, `/avatar.svg`) are not voice and are unchanged here.
+`/speech/voices`, `/speech/duck`) were already owner-only. PR #227's review made the model and avatar
+writes owner-only on the same branch (`hud_api.OWNER_PICKER_WRITES`: `POST /model`, `POST /models`,
+`POST /avatar`). It showed the API listener, with no Origin, adding `evil/model` and selecting it, which
+rewrote the protected `models.json`. Their reads (`GET /models`, `/models/catalog`, `/avatars`,
+`/avatar.svg`) stay open. On `/stt` the gate also runs before the media-type check. A stranger's
+non-audio upload is a 403, not 400 `expected audio/*`.
 
 **Callers checked.** Every caller is the HUD page on its own listener: `api.stt` (dictation, push-to-talk,
 the wake word's claimed utterances, all through `App.tsx`'s `transcribe`), `api.say` (the speech
@@ -3040,7 +3044,21 @@ headless Chromium against a real daemon on ephemeral ports. From the HUD's own p
 are 200. `GET /voices` arrives with no Origin and `Sec-Fetch-Site: same-origin`. The same requests from a
 page on another port all fail and reach no fake.
 
-**Mutants.** `tests/v2/voice_owner_mutants.py` runs 8 mutants: each route dropped from the set (5), the
-gate removed, the body read before the gate, and reads left open. All 8 are killed by that test. The
+`test_model_and_avatar_writes_are_the_owners_alone` runs the same refusal matrix on the three writes:
+`add`, `remove`, `{model, effort}`, select and avatar. Their fakes are never called, `models.json` is
+unchanged, and an oversize body is a 403. The reads still answer the API listener, and the HUD's pickers
+still work from its origin. `owner_read_check.py`'s `test_the_huds_model_and_avatar_pickers_pass_the_gate`
+shows the same pickers working in real Chromium.
+
+**Mutants.** `tests/v2/voice_owner_mutants.py` runs 13 mutants against both tests:
+- each voice route dropped from the set (5);
+- the gate removed;
+- the body read before the gate;
+- voice reads left open;
+- each write dropped from `OWNER_PICKER_WRITES` (3);
+- the writes not gated at all;
+- the review's mutant, the `/stt` mime check moved above the gate, which survived before the NIT test.
+
+All 13 are killed. The
 browser voice suites (`tests/face/hud_v2_*`) run against the mock daemon, so they never reach this
 route code and were not rerun.
