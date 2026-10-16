@@ -1209,7 +1209,17 @@ git-credential-manager, browser profiles) and the registry hive
 (`NTUSER.DAT*`) are denied; Documents, Desktop and a repo stay readable, and
 a session folder inside a closed one is closed around. A literal path that
 holds glob syntax (`*?[]{}`, e.g. the hive's `NTUSER.DAT{guid}…` logs) is
-never written as a deny: Codex would read it as a glob. On top, by name: the credential folders,
+never written as a deny: Codex would read it as a glob. Loose key and token
+files are closed as a class, by name only (`codex_config.key_like`): at the
+top of the home and of each Windows profile, `*.pem|key|p12|pfx|ppk|jks`,
+`*credential*`, `service-account*.json`, `*-key(s).json`, `id_*`, `*token*`,
+`*secret*`; at the top of each `~/projects/*` repository, the session folder
+and Jarvis's checkout, the narrow first half (design tokens stay). Names
+with example/sample/template and `.pub` keys are not secrets. The gate's
+shared name helper (`tools.secrets.is_protected`) flags none of these and
+also decides v1's file refusals and output scrubbing, where `*token*` would
+refuse ordinary source files, so the patterns live in codex_config. A key
+file deeper in a repository is not covered. On top, by name: the credential folders,
 `KNOWN_CREDENTIALS` (`.gitconfig`, `.npmrc`, `.docker`, `.kube`,
 `.config/gcloud`, `.local/share/uv/credentials`, `.cargo/credentials*` …),
 V2_DATA_DIR (the private Codex homes and their jarvis-mcp tokens),

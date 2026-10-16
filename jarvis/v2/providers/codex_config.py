@@ -453,7 +453,7 @@ def _closed_denies(needed: list[Path]) -> list[Path]:
     out: list[Path] = []
 
     def close(base: Path, folder: Path, keep: tuple[str, ...], dots_only: bool,
-              spec: dict, extra=None, strict: bool = True) -> None:
+              spec: dict, extra=None, strict: bool = True, keys: bool = False) -> None:
         try:
             with os.scandir(folder) as entries:
                 listed = []
@@ -469,7 +469,8 @@ def _closed_denies(needed: list[Path]) -> list[Path]:
                 return
             raise BriefRefused("An owner dot-folder cannot be listed for its denies") from exc
         for entry in sorted(listed, key=lambda e: e.name):
-            if dots_only and not entry.name.startswith(".") and not (extra and extra(entry.name)):
+            if (dots_only and not entry.name.startswith(".") and not (extra and extra(entry.name))
+                    and not (keys and key_like(entry.name, broad=True) and _is_file(entry))):
                 continue
             path = Path(entry.path)
             rel = path.relative_to(base).as_posix()
@@ -486,9 +487,66 @@ def _closed_denies(needed: list[Path]) -> list[Path]:
             out.append(target)
 
     home = _resolved(Path.home())
-    close(home, home, CLOSED_KEEP[""], True, CLOSED_KEEP)
+    close(home, home, CLOSED_KEEP[""], True, CLOSED_KEEP, keys=True)
     for profile in windows_profiles():
-        close(profile, profile, (), True, {}, extra=_windows_extra, strict=False)
+        close(profile, profile, (), True, {}, extra=_windows_extra, strict=False, keys=True)
+    return out
+
+
+# Key and token files by name (decision on #224's residual: close the class,
+# not one name). The gate's shared name helper (`tools.secrets.is_protected`
+# / `is_credential`) knows only `.env*` and Jarvis's own bundles, and it
+# also decides what v1's file tools refuse to read or write and what output
+# is scrubbed, in 14 modules: widening it to `*token*` or `*credentials*`
+# would refuse ordinary source files (`tokenizer.py`, `credentials_form.tsx`)
+# everywhere. So these patterns live here and deny only *files* at the top
+# of the places where loose keys are kept. `broad` (the top of the owner's
+# home and of each Windows profile) adds `*token*`, `*secret*` and `id_*`;
+# the top of a repository (each `~/projects/*`, the session folder, Jarvis's
+# checkout) gets the narrow set, so design tokens or an `id_map.py` stay.
+# A name holding `example`, `sample` or `template`, or a `.pub` key, is not
+# a secret. By name only: nothing is opened.
+_KEY_NARROW = re.compile(
+    r".*\.(?:pem|key|p12|pfx|ppk|jks|keystore|p8)|.*credential.*|service[-_ ]?account.*\.json"
+    r"|.*[-_]key\.json|.*[-_]keys\.json", re.IGNORECASE | re.DOTALL)
+_KEY_BROAD = re.compile(r"id_[a-z0-9_]+|.*token.*|.*secret.*|.*\.(?:kdbx|gpg|asc)",
+                        re.IGNORECASE | re.DOTALL)
+_KEY_NOT = re.compile(r".*(?:example|sample|template).*|.*\.pub", re.IGNORECASE | re.DOTALL)
+
+
+def key_like(name: str, *, broad: bool) -> bool:
+    if _KEY_NOT.fullmatch(name):
+        return False
+    return bool(_KEY_NARROW.fullmatch(name) or (broad and _KEY_BROAD.fullmatch(name)))
+
+
+def _is_file(entry) -> bool:
+    try:
+        return entry.is_file(follow_symlinks=True)
+    except OSError:
+        return False
+
+
+def _root_key_files(brief: Brief | None) -> list[Path]:
+    """Key files at the top of each repository: `~/projects/*`, the session
+    folder and Jarvis's checkout. Listed, never opened; a folder that cannot
+    be listed is skipped."""
+    bases: list[Path] = []
+    projects = Path.home() / "projects"
+    try:
+        with os.scandir(projects) as entries:
+            bases += [Path(e.path) for e in entries if e.is_dir(follow_symlinks=False)]
+    except OSError:
+        pass
+    bases += [Path(config.REPO_ROOT)] + ([Path(brief.cwd)] if brief is not None else [])
+    out: list[Path] = []
+    for base in dict.fromkeys(bases):
+        try:
+            with os.scandir(base) as entries:
+                out += [Path(e.path) for e in entries
+                        if key_like(e.name, broad=False) and _is_file(e)]
+        except OSError:
+            continue
     return out
 
 
@@ -508,6 +566,7 @@ def deny_paths(brief: Brief | None = None, home: Path | None = None) -> list[Pat
         needed += [_resolved(brief.cwd), *(_resolved(p) for p in git_roots(brief))]
     found = [*config.credential_dirs(), *_codex_home_entries(), owner / ".claude",
              *(owner / name for name in KNOWN_CREDENTIALS), *_closed_denies(needed),
+             *_root_key_files(brief),
              config.V2_DATA_DIR, config.SESSIONS_DIR, config.SPILL_DIR, config.SPEAKER_DIR,
              *sorted(protected_paths())]
     resolved: list[Path] = []

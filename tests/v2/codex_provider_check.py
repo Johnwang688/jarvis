@@ -1012,6 +1012,7 @@ class Checks(unittest.TestCase):
               ".cache/huggingface/token", ".bash_history", ".some-new-tool/secret",
               ".config/new-tool/token", ".local/share/new-tool/token", ".local/state/x",
               ".vault-token",       # a store no list names: only the closure hides it
+              ".boto",              # gsutil's credentials file: no list or key pattern names it
               ".npm/_logs/debug-0.log",
               ".local/share/uv/credentials/credentials.toml", ".local/share/jarvis/hud/x")
     OPEN = (".cargo/bin/cargo", ".cargo/registry/index/x", ".local/bin/uv",
@@ -1148,6 +1149,46 @@ class Checks(unittest.TestCase):
             with patch.dict(os.environ, {"JARVIS_WINDOWS_USERS": str(missing)}):
                 self.assertEqual(codex_config.windows_profiles(), [])
                 codex_config.filesystem(self.chat())
+
+    # Decision on #224's residual: loose key and token files are closed as a
+    # class, by name only (`codex_config.key_like`), not one by one.
+    HOME_KEYS = ("gha-deployer-key.json", "server.pem", "tls.key", "cert.p12", "cert.pfx",
+                 "id_ed25519", "aws-credentials", "github-token.txt", "service-account.json",
+                 "service-account-prod.json", "prod-key.json", "vault-secret.txt")
+    HOME_PLAIN = ("id_ed25519.pub", "credentials.example.json", "notes.txt", "README.md")
+    ROOT_KEYS = ("server.pem", "service-account.json", "deploy-key.json", "credentials.json")
+    ROOT_PLAIN = ("tokens.json", "id_map.py", "tokenizer.py", "credentials.example.json", "README.md")
+
+    def test_loose_key_files_are_closed_as_a_class(self):
+        from jarvis.tools import secrets
+        home = self.closed_home()
+        users, profile, _locked = self.windows_root()
+        repo = home / "projects" / "app"
+        for folder, names in ((home, self.HOME_KEYS + self.HOME_PLAIN), (profile, self.HOME_KEYS + self.HOME_PLAIN),
+                              (repo, self.ROOT_KEYS + self.ROOT_PLAIN)):
+            for name in names:
+                (folder / name).write_text("fixture")
+        (repo / "src").mkdir(exist_ok=True)
+        (repo / "src" / "deep.pem").write_text("fixture")
+        # The gate's shared helper flags none of them: why the patterns are local.
+        self.assertFalse(any(secrets.is_protected(n) for n in self.HOME_KEYS))
+        with self.home_patches(home), patch.dict(os.environ, {"JARVIS_WINDOWS_USERS": str(users)}):
+            fs = codex_config.filesystem(replace(self.chat(), cwd=str(repo)))
+            for folder in (home, profile):
+                for name in self.HOME_KEYS:
+                    with self.subTest(folder=folder.name, key=name):
+                        self.assertEqual(fs.get(str(folder / name)), "deny")
+                for name in self.HOME_PLAIN:
+                    with self.subTest(folder=folder.name, plain=name):
+                        self.assertFalse(self.blocked(fs, folder / name))
+            for name in self.ROOT_KEYS:
+                with self.subTest(root_key=name):
+                    self.assertEqual(fs.get(str(repo / name)), "deny")
+            for name in self.ROOT_PLAIN:
+                with self.subTest(root_plain=name):
+                    self.assertFalse(self.blocked(fs, repo / name))
+            self.assertFalse(self.blocked(fs, repo / "src" / "deep.pem"), "top level only (residual)")
+            self.assertFalse(self.blocked(fs, repo), "the session folder itself stays")
 
     def test_a_path_with_glob_syntax_is_never_a_literal_deny(self):
         users, profile, _locked = self.windows_root()

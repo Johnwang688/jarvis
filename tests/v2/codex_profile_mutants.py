@@ -33,6 +33,7 @@ ONLY = pc("test_only_accept_or_decline_is_ever_sent")
 NET = pc("test_a_network_approval_asks_the_owner_every_time_with_no_always")
 CLOSED = pc("test_owner_dot_folders_are_closed_by_default")
 WIN = pc("test_windows_profiles_are_closed_too")
+KEYS = pc("test_loose_key_files_are_closed_as_a_class")
 CHURN = pc("test_owner_home_churn_after_prepare_never_refuses_the_session")
 MIRROR = pc("test_a_session_inside_a_denied_folder_or_a_writable_mirror_is_refused")
 
@@ -101,9 +102,8 @@ MUTANTS = [
     ("no .env globs", CFG,
      '    table.update((glob, "deny") for glob in globs)\n', "", PROFILE),
     ("dot-files not closed, only dot-folders", CFG,
-     '            if dots_only and not entry.name.startswith(".") and not (extra and extra(entry.name)):',
-     '            if (dots_only and not entry.name.startswith(".") and not (extra and extra(entry.name)))'
-     ' or not entry.is_dir():', CLOSED),
+     '            if (dots_only and not entry.name.startswith(".") and not (extra and extra(entry.name))',
+     '            if (not entry.is_dir() and not (keys and key_like(entry.name, broad=True))) or (dots_only and not entry.name.startswith(".") and not (extra and extra(entry.name))', CLOSED),
     ("V2_DATA_DIR readable", CFG,
      "             config.V2_DATA_DIR, config.SESSIONS_DIR,", "             config.SESSIONS_DIR,", PROFILE),
     ("commands keep the denied private HOME", CFG,
@@ -158,12 +158,11 @@ MUTANTS = [
      '    return folded == "appdata" or folded.startswith("ntuser")',
      '    return folded.startswith("ntuser")', WIN),
     ("a profile's dot-entries readable", CFG,
-     '            if dots_only and not entry.name.startswith(".") and not (extra and extra(entry.name)):',
-     '            if dots_only and not (extra and extra(entry.name)) and (extra or not entry.name.startswith(".")):',
-     WIN),
+     '            if (dots_only and not entry.name.startswith(".") and not (extra and extra(entry.name))',
+     '            if (dots_only and not (extra and extra(entry.name)) and (extra or not entry.name.startswith("."))', WIN),
     ("an unlistable profile refuses the session", CFG,
-     "        close(profile, profile, (), True, {}, extra=_windows_extra, strict=False)",
-     "        close(profile, profile, (), True, {}, extra=_windows_extra, strict=True)", WIN),
+     '        close(profile, profile, (), True, {}, extra=_windows_extra, strict=False, keys=True)',
+     '        close(profile, profile, (), True, {}, extra=_windows_extra, strict=True, keys=True)', WIN),
     ("a repo inside AppData denied, not closed around", CFG,
      "                if entry.is_dir(follow_symlinks=False) and any(path in n.parents for n in needed):",
      "                if False:", WIN),
@@ -171,6 +170,20 @@ MUTANTS = [
      "os.path.lexists(path) and not _GLOB_SYNTAX.search(str(path)):", "os.path.lexists(path):",
      pc("test_a_path_with_glob_syntax_is_never_a_literal_deny")),
     ("npm's debug logs readable", CFG, '    ".npm": ("_cacache", "_npx"),\n', "", CLOSED),
+    # Decision on #224's residual: loose key files as a class.
+    ("loose key files at the top of a home readable", CFG,
+     "                    and not (keys and key_like(entry.name, broad=True) and _is_file(entry))):",
+     "                    and not False):", KEYS),
+    ("key files at a repository's top readable", CFG,
+     "             *_root_key_files(brief),\n", "", KEYS),
+    ("the narrow key patterns gone", CFG,
+     "    return bool(_KEY_NARROW.fullmatch(name) or (broad and _KEY_BROAD.fullmatch(name)))",
+     "    return bool(broad and _KEY_BROAD.fullmatch(name))", KEYS),
+    ("the broad set applied at repository tops", CFG,
+     "                        if key_like(e.name, broad=False) and _is_file(e)]",
+     "                        if key_like(e.name, broad=True) and _is_file(e)]", KEYS),
+    ("examples and public keys treated as secrets", CFG,
+     "    if _KEY_NOT.fullmatch(name):\n        return False\n", "", KEYS),
     ("the feature pin moved without the probe", CFG,
      'FEATURE_VERIFIED = "0.161.0"', 'FEATURE_VERIFIED = "0.162.0"',
      pc("test_the_feature_is_pinned_to_the_verified_codex")),

@@ -107,11 +107,12 @@ STORES = (".docker/config.json", ".local/share/keyrings/login.keyring",
           ".supabase/access-token", ".agents/token", ".config/gcloud/credentials.db", ".npmrc",
           ".pypirc", ".kube/config", ".cargo/credentials.toml", ".cargo/credentials",
           ".cache/huggingface/token", ".bash_history", ".local/share/uv/credentials/credentials.toml",
-          ".brand-new-tool/token", ".config/brand-new-tool/token")
+          ".brand-new-tool/token", ".config/brand-new-tool/token",
+          "gha-deployer-key.json", "server.pem")     # loose key files, closed as a class
 # A fake Windows profile (a mounted /mnt/c/Users/<user>): closed the same way.
 WINDOWS = (".git-credentials", ".ssh/id_ed25519", ".docker/config.json", ".npmrc",
            "AppData/Roaming/GitHub CLI/hosts.yml", "AppData/Local/GitCredentialManager/store",
-           "NTUSER.DAT")
+           "NTUSER.DAT", "gha-deployer-key.json")
 # What toolchains may reach by absolute path or symlink: stays readable.
 TOOLCHAIN = (".local/bin/tool", ".cargo/bin/tool", ".rustup/toolchains/x/bin/tool",
              ".local/share/uv/python/x/bin/python3", ".npm/_cacache/index", ".cache/uv/x")
