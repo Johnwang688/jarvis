@@ -1041,8 +1041,9 @@ and its locally measured `chrome://settings/people` redirect in that tab; leavin
 ends the capability. Generic navigation still refuses internal URLs. A temporary
 profile with blocked external network rendered and captured the settings page.
 Actual Google login, sync, saved credentials and keyring behavior are **not
-verified** (manual M4/M4b/M12). `browser.sync` says `password_store: basic` with
-`source: launch_argument`; it reports the explicit flag, not inspected secrets.
+verified** (manual M4/M4b/M12). `browser.sync` now reports the store each
+running Chrome was launched with and the keyring's state; see *Password store:
+the owner's keyring* below. It never inspects secrets.
 `navigator.webdriver` remained true in the real local fixture.
 
 The profile regression suite uses one real Chrome at a time and checks summed
@@ -1196,7 +1197,7 @@ One ordered publisher uses the shared live SSE window identity for front reports
 
 Each visible active Remote stream consumes a fresh ticket and owns its decode/input generation. Hidden, covered and disconnected streams close while retained handles stay. Approval and annotation blocking stop all page input, clipboard cuts, paste/IME and file/dialog actions without interrupting incoming frames. Unsolicited selection cannot write the local clipboard; cut follows a successful owner clipboard write only. Page dialogs are plain text and never autofocus. Uploads send selected project/path references, and downloads save only on an owner gesture; interrupted late responses cannot create a local save.
 
-Profile controls expose creation, rename, Chrome sign-in, confirmed clearing and deletion through the owner routes. The HUD states Chrome's basic password store and possible sync limitations. This package does not enable agent driving or prove a real account sign-in. BR4 adds capture/annotation controls separately; its identity getter uses the exact current host receipt, not stream pixels.
+Profile controls expose creation, rename, Chrome sign-in, confirmed clearing and deletion through the owner routes. The HUD states Chrome's basic password store and possible sync limitations (since 2026-10-15 it states the store actually in effect: *Password store: the owner's keyring*). This package does not enable agent driving or prove a real account sign-in. BR4 adds capture/annotation controls separately; its identity getter uses the exact current host receipt, not stream pixels.
 
 ## BR7 Windows fonts (2026-10-13)
 
@@ -1805,3 +1806,135 @@ Receipts: `remote.test.ts` (FramePipe, 53 tests), the Browser suites
 Remote, all passing. The raw runs are not kept; the script reproduces them
 (`--ack draw` emulates the old ack; `--quality` and `--chrome-flag` were the
 knobs for the rest).
+
+## Password store: the owner's keyring (B-LOGIN, M12, 2026-10-15)
+
+The owner asked for synced Google passwords to stop sitting under Chrome's
+`basic` store, whose key is public. `jarvis/v2/browser/password_store.py`
+chooses each launch's `--password-store`; the lead decided the rules.
+
+- **Private** stays `basic` and never gets the session bus.
+- **A named profile** gets `--password-store=gnome-libsecret` and the daemon's
+  `DBUS_SESSION_BUS_ADDRESS` only when the keyring is **unlocked**. The
+  address must be `unix:path=` naming a socket directly in `/run/user/<uid>/`,
+  owned by us, in a 0700 folder we own. The state is read before the launch
+  and again after it, because Chrome falls back to `basic` silently when it
+  cannot reach its key. A keyring that locked during the launch closes that
+  Chrome and refuses. With the bus, `HardwareMediaKeyHandling` joins the one
+  `--disable-features` switch, so Chrome publishes no MPRIS players.
+- **locked**, **no_keyring** (the Secret Service answers, but has no default
+  collection) or **error** (an answer the probe does not recognise) refuse the
+  launch with 409: "Unlock the keyring in Windows Terminal (not a Jarvis
+  terminal): <command>". Jarvis never prompts, never unlocks, never downgrades.
+- **unavailable** (no Secret Service, no usable bus) launches `basic`, and
+  `/status` and the HUD say "Unprotected (basic store)" with the install hint.
+- **Sticky**: a keyring launch writes `"password_store": "keyring"` into that
+  profile's `profiles.json` row *before* Chrome starts. Such a profile is never
+  launched with `basic` again; its newer data would be unreadable there.
+  A daemon older than this change reads a sticky row as malformed
+  (`profiles.json is unreadable`), so rolling back means removing the key.
+- **Owner override**: `"password_store": "basic"` in `browser.json` (only that
+  exact word; hand-edited, no route writes it) launches `basic` without asking
+  the bus, loudly unprotected, except for a sticky profile.
+
+The probe is one `gdbus call` of `Properties.Get` for `Locked` on
+`/org/freedesktop/secrets/aliases/default`, with a four-variable environment
+and a timeout. It never searches items, opens a session or reads a secret.
+`/status` reads a cached state at most every 5 s from a background thread,
+so it never blocks. **A `Keyring()` is detached**: it reports `unavailable`,
+runs nothing and gives Chrome no bus. Only daemon2's `main()` attaches it, as
+it attaches `browser.json`, so no test or embedded daemon reaches the owner's
+keyring.
+
+`/status` → `browser.sync`: `password_store` is the store of the running named
+instances (`gnome-libsecret`, `basic`, `mixed`, or null with none running).
+Each instance row carries its own `password_store` too. Also reported:
+`requested` (`keyring` or `basic`), `keyring` (`unavailable`, `no_keyring`,
+`locked`, `unlocked`, `error`, or `unknown` before the first read),
+`next_launch` (`gnome-libsecret`, `basic` or `refused`), `unprotected` and
+`hint`. The HUD's profile **Manage** panel shows that line, red when the
+store is unprotected or a launch would be refused.
+
+**What it protects, stated plainly.** The keyring protects passwords *at
+rest*: WSL shut down, the files read from Windows, a backup, a copied profile
+folder. **It does not protect against a program running as the owner while
+the keyring is unlocked**, which Chrome needs: gnome-keyring has no
+per-application rule, so such a program can ask the Secret Service for
+Chrome's key. That makes the read a distinct D-Bus request instead of a file
+read. **Follow-up, not in this change:** a gate rule that asks or denies
+agent commands reaching the Secret Service (`secret-tool lookup` is already
+refused as a credential read; `busctl`/`gdbus`/`dbus-send` calls to
+`org.freedesktop.secrets` are not). A same-user program could also claim
+`org.freedesktop.secrets` itself while gnome-keyring is not running; that is
+the same same-user boundary.
+
+**Live check, 2026-10-15** (after the owner installed gnome-keyring 50 and
+unlocked it; temporary BROWSER_DIR, a throwaway profile, a test cookie, no
+secret read; `busctl` confirmed the keyring still unlocked afterward):
+
+- **Production path, real bus.** Chrome 155 ran with
+  `--password-store=gnome-libsecret` and the bus in its environment. A
+  `Chrome Safe Storage` item appeared in the `login` collection (found by
+  `SearchItems` on `application=chrome`, then reading its label). The test
+  cookie was stored as `v11`. The `profiles.json` row turned sticky. `/status`
+  said `gnome-libsecret`, `unlocked`, not unprotected. `Local State` → `os_crypt`
+  held only a `portal` key. The item was deleted afterward, and none had existed
+  before the run.
+- **Unreachable bus** (a bogus `unix:path=` in `/run/user/<uid>/`): the sticky
+  profile was refused with 409 and the unlock command, and no Chrome started.
+  A new, non-sticky profile opened with `--password-store=basic`, no bus, a
+  `v10` cookie and `/status` `unprotected: true` with the install hint.
+- **Chrome's own fallback, measured.** A raw Chrome given
+  `--password-store=gnome-libsecret` with the unreachable bus started in 0.3 s
+  without hanging, and wrote the cookie as `v10`. That is the silent downgrade,
+  which is why Jarvis checks the keyring before and after each launch.
+- The real Secret Service answers a missing collection with
+  `org.freedesktop.DBus.Error.UnknownMethod` ("Object does not exist at
+  path"), which the probe reads as `no_keyring`. The locked path is
+  covered by fakes only; the owner's keyring was not locked.
+
+**Migration (`v10`/`v11`): new writes are measured above; whether old `v10` data stays readable is still for M12.** Chrome on Linux tags
+`basic` data `v10` (a hard-coded key) and keyring data `v11`. After the
+switch, existing `v10` passwords and cookies stay readable but are **not
+re-encrypted**: they remain on disk under the public key. Only new writes are
+`v11`. The reverse (keyring to basic) is what loses data, which is why
+profiles are sticky. Advice given to the owner: hold password sync until
+the keyring is live; if passwords already synced under `basic`, delete
+that profile from the HUD, then delete the trashed copy, create a new one
+and sign in again so everything lands as `v11`.
+
+**Owner acceptance steps** (not done; they need the packages and the owner):
+
+1. Install: `sudo apt install --no-install-recommends gnome-keyring libsecret-1-0`
+   (about 30 packages via gcr4/GTK4). Side effects: `pinentry` (auto) moves
+   to `pinentry-gnome3` (`sudo update-alternatives --set pinentry
+   /usr/bin/pinentry-curses` reverts it). gcr4 may add a `gcr-ssh-agent`
+   socket: check `SSH_AUTH_SOCK` in a new shell, and
+   `systemctl --user mask --now gcr-ssh-agent.socket` if it changed.
+2. Create and unlock the login keyring once per WSL boot, in **Windows
+   Terminal, not a Jarvis terminal** (a HUD terminal is a Jarvis PTY):
+   `read -rsp 'Keyring password: ' KP; echo; printf '%s' "$KP" | gnome-keyring-daemon --unlock >/dev/null; unset KP`.
+   The first run creates the keyring with that password. Use a new password,
+   not the Google one. If a running daemon ignores `--unlock`, use
+   `--replace --unlock` then `gnome-keyring-daemon --start --components=secrets`.
+3. Check: `busctl --user get-property org.freedesktop.secrets
+   /org/freedesktop/secrets/aliases/default org.freedesktop.Secret.Collection Locked`
+   prints `b false`; the same with `Label` prints `s "Login"`;
+   `ls -l ~/.local/share/keyrings` shows `login.keyring`.
+4. After merge: `jarvis hud install`, restart daemon2, then check
+   `/status` → `browser.sync` shows `keyring: unlocked` and, with a named
+   profile open, `password_store: gnome-libsecret`.
+5. M12, left for the owner: with the keyring locked (`gdbus call --session
+   --dest org.freedesktop.secrets --object-path /org/freedesktop/secrets
+   --method org.freedesktop.Secret.Service.Lock "['/org/freedesktop/secrets/aliases/default']"`),
+   a named profile is refused, not downgraded. Then unlock it again (step 2).
+   Also left: an existing `v10` password stays readable after the switch.
+
+Tests: `tests/v2/browser_password_store_check.py` (fake `gdbus` runner,
+temporary runtime folder with an unlistened socket, fake Playwright; the real
+`subprocess.run` is patched to fail). Eleven mutants are each killed: a
+locked or unrecognised state downgraded to basic, sticky ignored or never
+recorded, a keyring attached by default to the real bus, Private given the
+bus or the keyring flag, the after-launch check removed, status reporting a
+constant, the bus socket check removed, and a probe that asks for more than
+`Locked`. `hud/src/components/BrowserProfile.test.ts` covers the Manage line.
