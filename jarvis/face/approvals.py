@@ -70,6 +70,14 @@ class Pending:
 
 
 def _for_display(args: dict[str, Any]) -> dict[str, str]:
+    # Typed credentials withheld (owner, 2026-10-15), nothing that runs: the
+    # card, the decision list and the announcement all read this. The
+    # request keeps the arguments as typed for the gate.
+    try:
+        from ..tools.secrets import redact_value
+        args = redact_value(args)
+    except Exception:  # noqa: BLE001 — a card never hides code; shown as typed
+        pass
     shown = {}
     for key, value in args.items():
         text = value if isinstance(value, str) else str(value)
