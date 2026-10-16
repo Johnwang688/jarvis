@@ -179,6 +179,23 @@ def peer(script_path, log_path, thread_name):
                 for out in (script["replays"][count - 1] if "replays" in script else script["replay"]):
                     out = json.loads(json.dumps(out).replace("$THREAD", native).replace("$TURN", turn)
                                      .replace("$CWD", os.getcwd()))
+                    if "$WAIT" in out and "answers" in out:
+                        # Several of the provider's requests, all read before
+                        # any is answered, then answered in order (review of
+                        # #216's delta: two Stops on their way at once).
+                        got = []
+                        while len(got) < len(out["answers"]):
+                            line = sys.stdin.readline()
+                            if not line:
+                                return
+                            request = json.loads(line)
+                            log(request)
+                            if request.get("method") == out["$WAIT"]:
+                                got.append(request)
+                        for request, answer in zip(got, out["answers"]):
+                            emit({"id": request["id"], "error": answer} if answer
+                                 else {"id": request["id"], "result": {}})
+                        continue
                     if "$WAIT" in out:
                         # Where the recorder sent a request itself (SV-4: the
                         # child's `turn/interrupt`): wait for the provider's,

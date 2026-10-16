@@ -15,6 +15,7 @@ import { subagents } from "../state/subagents";
 import { InputBar } from "./InputBar";
 import { MAIN_STOP_CLAUDE_HELP, STOP_HELP } from "../lib/subagents";
 import type { ChatMessage, Thread } from "../types";
+import themeCss from "../theme.css?raw";
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
 const at = (s: number) => new Date(Date.parse("2026-10-15T10:00:00Z") + s * 1000).toISOString();
@@ -199,6 +200,24 @@ describe("the owner's Stop on a row (SV-4)", () => {
       expect(posts).toEqual([]);
       act(() => subagents.setBlocked(false));
       expect(stopOf(host, "cl:toolu_a")!.disabled).toBe(false);
+    } finally { done(); }
+  });
+
+  it("a \"stopping…\" Stop under an approval card keeps its dashed amber look", async () => {
+    serveStop([listRow("cl:toolu_a", { stoppable: true })]);
+    const { host, done } = await mount("st3b", spawn(["toolu_a"]));
+    try {
+      trust.force = true;
+      await act(async () => { stopOf(host, "cl:toolu_a")!.click(); await new Promise((r) => setTimeout(r, 0)); });
+      act(() => subagents.setBlocked(true));
+      const button = stopOf(host, "cl:toolu_a")!;
+      expect([button.disabled, button.className, button.textContent]).toEqual([true, "sa-stop stopping", "stopping…"]);
+      // `button:disabled` fades every disabled button; this one is not faded (review of #216's delta, NIT-4).
+      const rule = themeCss.match(/\.sa-stop\.stopping:disabled\s*\{([^}]*)\}/);
+      expect(rule?.[1]).toMatch(/opacity:\s*1\s*;/);
+      const stopping = themeCss.match(/\.sa-stop\.stopping\s*\{([^}]*)\}/)![1];
+      expect(stopping).toMatch(/border-style:\s*dashed/);
+      expect(stopping).toContain("var(--amber)");
     } finally { done(); }
   });
 

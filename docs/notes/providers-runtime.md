@@ -1124,3 +1124,22 @@ record refuses to begin a Stop (`"closed"`) and writes nothing from
 `stop_failed`/`stop_sent` once `close()` ran. The 2.1.295 floor still allows
 Stop when the CLI's version is unknown (documented; the lead raised it with
 the owner). 23 tests now; six more mutants, all killed.
+
+**Delta review of #216 (2026-10-15).** A refusal takes the owner's mark
+off only when it is the last word: Claude counts the owner's Stops still on
+their way (`_Child.owner_stops`) and notes one the CLI took
+(`owner_stop_taken`); `_stop_settled` clears `owner_stop` for a refusal only
+when neither holds. A refusal that arrives after our 10 s timeout counts too
+(`_late_stop` is handed the child). In time or late, one rule settles each
+answer (`_stop_outcome`): none is taken; the SDK's own "Control request
+timeout" is unknown (the CLI may still act, so the mark stays); a refusal
+or an undelivered request is refused. Codex keys `child_stops` by `(sid, turn)` and
+clears the mark on a refused `turn/interrupt` only when no other Stop of
+that turn is outstanding and none was taken, so two Stops, the first refused
+and the second taken (either order), still end "stopped by the owner"; an
+answer for an earlier turn settles nothing on the next. A
+snapshot's `stop_error` is cleaned and capped as a live line's is. The HUD
+lays the 409's reason on a row whose `refused` the bus said first, and a
+"stopping…" Stop under an approval card keeps its dashed amber look (no
+`button:disabled` fade). 32 tests now; twelve more mutants (two in the
+HUD), all killed.

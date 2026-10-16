@@ -285,6 +285,18 @@ describe("the window's sub-agent store", () => {
       void s.stop("t1", "cx:b");
       expect(posts.length).toBe(3);
     });
+
+    it("the 409's reason lands even when the bus said \"refused\" first", async () => {
+      const { s, posts } = await ready([listRow("cl:a", { stoppable: true })]);
+      void s.stop("t1", "cl:a");
+      s.heard("t1", rec("cl:a", { stop: "refused" }));      // the bus: the state, never the reason
+      expect([s.row("t1", "cl:a")!.stop, s.row("t1", "cl:a")!.stop_error]).toEqual(["refused", undefined]);
+      posts[0].reject(Object.assign(new Error("The CLI refused the stop: No task found."),
+        { status: 409, body: { refused: true } }));
+      await settle();
+      expect([s.row("t1", "cl:a")!.stop, s.row("t1", "cl:a")!.stop_error]).toEqual(["refused", "No task found."]);
+      expect(s.stopUi("t1", "cl:a")).toEqual({ pending: false, error: "" });
+    });
   });
 });
 
