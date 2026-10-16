@@ -2294,7 +2294,7 @@ Receipts: `tests/v2/browser_pickers_check.py` (3 pure, 23 real Chrome 155
 through the production ticket and socket, and an agent's real
 `hud_browser_act` click on a select through BR9b's fixture; summed Chrome RSS
 about 1.33 GiB); `lib/remotepicker.test.ts` and
-`components/RemoteViewPicker.test.ts` (27 vitest);
+`components/RemoteViewPicker.test.ts` (26 vitest);
 `tests/face/hud_v2_pickers_check.py` (29 checks over the mock HUD, real
 Chromium). Twenty-seven guard removals, each applied in place and restored,
 fail their named checks (two IME defence-in-depth mutants, above, survive by
