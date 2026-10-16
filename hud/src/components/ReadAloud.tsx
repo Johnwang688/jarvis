@@ -47,3 +47,26 @@ export function DuckBrowserSetting(props: { on: boolean; onChange: (on: boolean)
     </section>
   );
 }
+
+// Settings -> Voice: say when a sub-agent finishes or fails (SV-5). A convenience kept in this
+// window (localStorage), on by default. Only a count and a status are ever said.
+export function SubagentNoticesSetting(props: { on: boolean; onChange: (on: boolean) => void }) {
+  return (
+    <section className="read-aloud" data-testid="subagent-notices" aria-label="Sub-agent notices">
+      <h3>Sub-agent notices</h3>
+      <label>
+        <input
+          type="checkbox"
+          data-testid="subagent-notices-toggle"
+          checked={props.on}
+          onChange={(e) => props.onChange(e.target.checked)}
+        />{" "}
+        Say when a sub-agent finishes or fails
+      </label>
+      <p>
+        One short sentence for the chats that are read aloud, such as &ldquo;Two sub-agents finished.&rdquo;
+        Never a sub-agent&apos;s name or words, and nothing when you stopped it yourself. Read-aloud must be on.
+      </p>
+    </section>
+  );
+}

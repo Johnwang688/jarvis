@@ -232,6 +232,7 @@ So separation fixes today's transcript, Discord and task-report misattribution, 
   - Finishes within 3 s coalesce ("3 sub-agents finished, 1 failed").
   - Names are capped at 40 characters and pass the speakable filter.
 - **When:** SV-5, after voice V7.
+- **As built (SV-5, 2026-10-16):** `hud/src/lib/speech/notices.ts`; counts only ("Two sub-agents finished, one failed."), no name. See `docs/notes/voice-face.md`, "Sub-agent notices".
 
 ### D8. Edge cases
 

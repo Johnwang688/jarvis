@@ -42,7 +42,7 @@ interface Msg {
   ended: boolean;
   /** The last message of a finished turn: a reply, never an update. */
   final: boolean;
-  /** A "Skipping N updates" marker: never collapsed itself. */
+  /** A "Skipping N updates" marker or a sub-agent notice: never collapsed, never a thread's reply. */
   note: boolean;
 }
 
@@ -67,7 +67,7 @@ export class Floor {
     this.latest = Math.max(this.latest, item.id);
     let m = this.msgs.get(item.messageKey);
     if (!m) {
-      m = { key: item.messageKey, thread: item.thread, rank: item.id, born: item.id, ended: false, final: false, note: item.kind === "note" };
+      m = { key: item.messageKey, thread: item.thread, rank: item.id, born: item.id, ended: false, final: false, note: item.kind === "note" || item.kind === "notice" };
       this.msgs.set(item.messageKey, m);
     } else {
       if (m.rank === null) m.rank = item.id;

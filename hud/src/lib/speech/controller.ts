@@ -29,6 +29,13 @@
 //     While a summary is awaited speech counts as active (`SpeechView.active`:
 //     the detector stays held off, `onIdle` waits) and a barge-in holds the
 //     delivery until it ends.
+//   - Native sub-agents are silent (SV-5): their prose is `subagent_event`,
+//     which no case below reads. The bus's `subagent` record is read by
+//     `notices.ts` for a status and a count only, and what it makes is one
+//     short sentence of Jarvis's own ("Two sub-agents finished."), queued as
+//     a `notice` through the same checks as a reply: the thread must be read
+//     (`speaks`), a send or Stop since drops it, a barge-in holds it, and it
+//     waits while the owner is talking. Never posted anywhere.
 //   - Nothing here can reach an approval: no import, no route, no event it
 //     answers. Speech is output only (decision V-6).
 //
@@ -36,7 +43,8 @@
 // player, synthesizer and speaker gate are injected.
 
 import { Floor } from "./floor";
-import { SpeechQueue, type Clock, type Player, type QueueView, type SpeechItem } from "./queue";
+import { SubagentNotices } from "./notices";
+import { SpeechQueue, type Clock, type ItemKind, type Player, type QueueView, type SpeechItem } from "./queue";
 import { ProseStream, type SpokenChunk } from "./stream";
 import { SUMMARY_DEADLINE_MS, needsSummary, spokenText, summaryChunk, truncatedProse, type Summarize } from "./summary";
 
@@ -68,6 +76,8 @@ export interface ControllerDeps {
   voiceFor?: (thread: string) => string | null | Promise<string | null>;
   /** A spoken summary of a long message (`POST /speech/summary`). Absent: a long message is read truncated. */
   summarize?: Summarize;
+  /** The owner is talking (a barge-in holds, a recording is under way): a sub-agent notice waits. Absent: never. */
+  ownerBusy?: () => boolean;
 }
 
 /** A wake hit this soon after a sentence that said his name ended may still be his own voice (recognizer lag, the room's tail). */
@@ -139,6 +149,10 @@ export class SpeechController {
   private nameUntil = -Infinity;
   /** The message a barge-in interrupted: what a send skips (V-7), not whatever is next in line by then. */
   private bargedMessage: { thread: string; messageKey: string } | null = null;
+  /** SV-5: "Two sub-agents finished." and the like, from the bus's `subagent` records. */
+  private readonly notices: SubagentNotices;
+  private noticeN = 0;
+  private ownerBusy: (() => boolean) | null = null;
 
   constructor(private readonly deps: ControllerDeps) {
     this.queue = new SpeechQueue({
@@ -158,6 +172,12 @@ export class SpeechController {
         return speak(typeof asked === "string" ? asked : item.voice);
       },
       onChange: () => { this.settle(); this.notify(); },
+    });
+    this.notices = new SubagentNotices({
+      clock: deps.clock,
+      canSpeak: (thread) => this.speaks(thread),
+      busy: () => (this.ownerBusy ?? this.deps.ownerBusy)?.() ?? false,
+      speak: (thread, text) => this.speakNotice(thread, text),
     });
     this.wasSpeaker = deps.gate.isSpeaker();
     this.unsubs.push(deps.gate.subscribe(() => this.gateChanged()));
@@ -276,6 +296,27 @@ export class SpeechController {
     this.notify();
   }
 
+  /** The sub-agent notices' own switch (Settings -> Voice): off, none is queued, and one waiting is dropped. */
+  setNotices(on: boolean): void {
+    if (this.notices.isEnabled() === on) return;
+    this.notices.setEnabled(on);
+    this.notify();
+  }
+
+  /** The window's word that the owner is talking (a barge-in holds, a recording is under way): a notice waits. */
+  setOwnerBusy(fn: (() => boolean) | null): void {
+    this.ownerBusy = fn;
+  }
+
+  noticesOn(): boolean {
+    return this.notices.isEnabled();
+  }
+
+  /** Sub-agent endings waiting to be said in `thread` (for checks). */
+  noticesWaiting(thread: string): { done: number; failed: number } {
+    return this.notices.waiting(thread);
+  }
+
   /** The threads to read now (every one shown in a chat pane); any thread that left has its speech dropped. */
   setSpeakers(threads: ReadonlySet<string>): void {
     this.speakers = threads;
@@ -291,11 +332,12 @@ export class SpeechController {
   }
 
   private prune(): void {
-    const known = new Set<string>([...this.open.keys(), ...this.lanes.keys(), ...this.queue.items().map((i) => i.thread)]);
+    const known = new Set<string>([...this.open.keys(), ...this.lanes.keys(), ...this.queue.items().map((i) => i.thread), ...this.notices.threads()]);
     for (const thread of known) if (!this.speaks(thread)) this.leave(thread);
   }
 
   private leave(thread: string): void {
+    this.notices.cancel(thread);
     this.endOpen(thread);
     this.open.delete(thread);
     this.cancel(thread);
@@ -321,6 +363,7 @@ export class SpeechController {
   }
 
   private clearAll(): void {
+    this.notices.cancel();
     this.open.clear();
     this.cancel();
     this.release();
@@ -347,6 +390,12 @@ export class SpeechController {
       this.messageSent(thread);
       return;
     }
+    // SV-5: a sub-agent ended. Heard even for a thread not read now (the owner's
+    // Stop on a child must silence its ending later); said only if it is read then.
+    if (kind === "subagent") {
+      this.notices.heard(thread, e.data ?? e);
+      return;
+    }
     if (!this.speaks(thread)) {
       if (this.open.has(thread)) this.open.delete(thread);
       return;
@@ -371,7 +420,7 @@ export class SpeechController {
         // is the reply, which a backlog never collapses -- once it is queued: a
         // reply out for its summary is not in the queue yet, so this waits in
         // the thread's lane behind it.
-        if (data.stop === "interrupted") { this.cancel(thread); this.queue.dropThread(thread, "stale"); }
+        if (data.stop === "interrupted") { this.notices.cancel(thread); this.cancel(thread); this.queue.dropThread(thread, "stale"); }
         else {
           const epoch = this.epoch(thread);
           this.sequence(thread, () => { if (epoch === this.epoch(thread)) this.queue.turnEnded(thread); });
@@ -384,6 +433,7 @@ export class SpeechController {
 
   /** A message went to the thread, by any means: the reply being read is stale. */
   messageSent(thread: string): void {
+    this.notices.cancel(thread);
     const mid = this.open.get(thread);
     if (mid?.stream.open) this.hush(mid);   // a message in progress; a finished one has nothing left to silence
     this.endOpen(thread);
@@ -450,7 +500,7 @@ export class SpeechController {
    * been silenced since the message closed (`epoch`). A barge-in that began
    * while a summary was awaited holds the delivery until it ends.
    */
-  private deliver(thread: string, key: string, chunks: readonly SpokenChunk[], epoch: number): void {
+  private deliver(thread: string, key: string, chunks: readonly { text: string; kind: ItemKind }[], epoch: number): void {
     if (this.holdDelivery) { this.deferred.push(() => this.deliver(thread, key, chunks, epoch)); return; }
     if (epoch !== this.epoch(thread) || !this.speaks(thread)) return;
     // The voice known now rides on the item; the queue asks `voiceFor` again when it synthesizes (V7).
@@ -461,6 +511,18 @@ export class SpeechController {
     });
     // The whole message is queued at once: no more chunks are coming, so it frees the floor when spoken.
     this.queue.endMessage(key);
+  }
+
+  /**
+   * A sub-agent notice (SV-5): one sentence of Jarvis's own, queued like a reply
+   * (in the thread's order, under its epoch, held by a barge-in) but as its own
+   * message of kind `notice`, which the floor never collapses and never takes
+   * for the turn's reply.
+   */
+  private speakNotice(thread: string, text: string): void {
+    const key = `${thread}:notice:${++this.noticeN}`;
+    const epoch = this.epoch(thread);
+    this.sequence(thread, () => this.deliver(thread, key, [{ text, kind: "notice" }], epoch));
   }
 
   /** The deliveries a barge-in held: made now (each still checks its epoch). */
@@ -632,6 +694,7 @@ export class SpeechController {
 
   /** Stop speaking and clear the queue; messages still arriving stay quiet until they end. */
   stop(): void {
+    this.notices.cancel();
     this.bargePaused = false;
     for (const s of this.open.values()) if (s.stream.open) this.hush(s);
     this.cancel();
@@ -647,6 +710,7 @@ export class SpeechController {
     if (this.hang !== null) this.deps.clock.clearTimeout(this.hang);
     this.hang = null;
     this.idleListeners.clear();
+    this.notices.dispose();
     this.clearAll();
     this.listeners.clear();
   }

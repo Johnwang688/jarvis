@@ -2997,3 +2997,58 @@ CANCEL 100% as bare words) wired to `Capture.endNow` once V10 lands, but V11 nei
 wake list; the daemon-side recognizer; acting on a hit without a card within a second (plan 3.6 phase 2); the full `hud_v2_check`
 (its `wake_checks` section was rewritten, the `__hudRecog` lines in `hud_v2_check`, `_layout_check` and `_declutter_check` now ask
 `__hud.mic.wakeRunning()`; those two were edited but not run).
+
+## Sub-agent notices (SV-5, 2026-10-16)
+
+Plan: `docs/plans/2026-10-13-subagent-view.md` (D7, SV-5; the owner's decisions of 2026-10-15). Built on V7's shared queue
+(`hud/src/lib/speech/`), no daemon change and no provider hook.
+
+**What is said, and when.** One sentence of Jarvis's own, from the bus's `subagent` record (`subagents.py#bus`) alone: ids, a
+status, times and counts, never a name. The first `finished` record with status `done` or `failed` opens a **3 s window**
+(`NOTICE_WINDOW_MS`, fixed, not sliding); every ending of the same chat inside it joins one sentence, spoken when it closes:
+
+| endings in the window | said |
+|---|---|
+| 1 done | "A sub-agent finished." |
+| 1 failed | "A sub-agent failed." |
+| 2 done | "Two sub-agents finished." |
+| 2 done, 1 failed | "Two sub-agents finished, one failed." |
+
+Numbers are words to ten, digits above. It is queued as its own message of kind `notice` in the chat's voice, local TTS only, no
+summary request. The floor treats a notice like the "Skipping N updates" marker: never collapsed as backlog and never taken for
+the turn's reply. An ending after the window is a new sentence.
+
+**Never read:** a child's prose (`subagent_event` is neither `text` nor `text_delta`, and the controller has no case for it), its
+name, kind, brief, last tool or stop reason. `notices.ts` reads `sid`, `op`, `status` and `stop` of a record and nothing else; a test
+pins that by source and with hostile records. The plan also allowed the child's name ("<name> finished"). It is left out: the bus
+carries no name (the owner's routes do), and the owner's rule is that a child's text is never read aloud.
+
+**Silent by rule:**
+- status `stopped` (the owner's Stop on one child, the main Stop, a session that ended): never announced (open question 5);
+- a child whose record said `stop: "stopping"` or `"unconfirmed"` (the owner pressed Stop) however it then ends, because a killed
+  child can be reported as failed. A CLI `refused` clears that, since the child was not stopped;
+- a child already announced (a repeat `finished`, or a `progress` record carrying `done`); a child that runs again (Codex) and
+  ends again is announced again; a Claude child ended by an inferred stop and later finished by the CLI is announced;
+- a chat not read now (no chat pane, muted, read-aloud off, another window holds the speech lock), checked again when the window
+  closes, and a send to the chat, Stop, an interrupted turn or the chat leaving its pane drops a notice not yet queued;
+- while the owner is talking (a barge-in holds, or a message is being recorded) the notice waits, asked again every 500 ms and
+  dropped as stale after 20 s; a barge-in that paused a reply holds a queued notice behind it like any item.
+
+**Not posted anywhere.** `subagent` and `subagent_event` are outside the Discord mirror's `KINDS` and `TURN_KINDS`
+(`subagent_routes_check.py`, `Notices`). Turns the CLI starts itself after a background child finishes (SV-6) are neither posted
+nor spoken, by the owner's decision; nothing here touches the provider reader.
+
+**Settings -> Voice -> Sub-agent notices** ("Say when a sub-agent finishes or fails"): per window (`jarvis.subagentNotices` in
+localStorage), on by default, off drops what waits. Read-aloud must also be on.
+
+**Tests.** vitest `notices.test.ts` (22), `noticesController.test.ts` (16), `SubagentNoticesSetting.test.ts`; `Notices` in
+`subagent_routes_check.py` (bus contract and Discord); `hud_v2_speech_check.py` section "sub-agent notices" in a real browser
+(window, coalescing, silence for child prose, owner Stop and a child asked to stop, the switch, a send). Mutants (each fails
+a test): no coalescing, a name added to the sentence, `stopped` spoken, the owner-stop memory dropped, no repeat guard, `op` not
+checked, busy ignored, no busy give-up, a 1 s window, `canSpeak` ignored, cancel a no-op, switch ignored, failed counted as done,
+a refused Stop staying silent, a send / Stop / interrupt not dropping a notice, a child's inner event read as prose, the prune that
+misses a waiting notice, kind `verbatim`, the floor not exempting `notice`. One controller mutant (`canSpeak: () => true`) is
+equivalent: `deliver` checks the same rule again.
+
+**Not done / not claimed.** A physical speaker or Windows audio; a live Claude or Codex child ending in the owner's HUD; the type
+label ("reviewer") — the bus has none.

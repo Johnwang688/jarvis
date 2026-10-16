@@ -818,5 +818,57 @@ class PermitLabel(Daemonised):
         self.assertNotIn("\n", origin)
 
 
+class Notices(Record):
+    """SV-5: the HUD says only that a child finished or failed (hud/src/lib/
+    speech/notices.ts). It reads `sid`, `op`, `status` and `stop` of the bus
+    record; these are the daemon's half of that contract, and the rule that
+    nothing is posted to Discord."""
+
+    def records(self):
+        return [r for r in self.bus() if r.get("kind") == "subagent"]
+
+    def test_an_ending_is_a_finished_record_with_a_status_and_no_words(self):
+        words = {"name": "NOTICE-NAME-7", "kind": "NOTICE-KIND-7", "last_tool": "NOTICE-TOOL-7",
+                 "stop_reason": "NOTICE-REASON-7"}
+        self.put(subagent("cl:toolu_ok", **words))
+        self.put(subagent("cl:toolu_bad", **words))
+        self.bus()
+        self.put(Event(K.SUBAGENT, "t", {"sid": "cl:toolu_ok", "op": "finished", "status": "done", **words}))
+        self.put(Event(K.SUBAGENT, "t", {"sid": "cl:toolu_bad", "op": "finished", "status": "failed", **words}))
+        got = self.records()
+        self.assertEqual([(r["data"]["sid"], r["data"]["op"], r["data"]["status"]) for r in got],
+                         [("cl:toolu_ok", "finished", "done"), ("cl:toolu_bad", "finished", "failed")])
+        for record in got:
+            self.assertLessEqual(set(record["data"]), BUS_KEYS | {"declined", "stop", "stop_requested_at"})
+        self.assertNotIn("NOTICE-", json.dumps(got), "no name, kind, tool or reason on the bus")
+
+    def test_the_owners_stop_is_on_the_bus_before_the_end_and_the_end_is_stopped(self):
+        self.put(subagent("cl:toolu_s", task_id="task_1"))
+        self.bus()
+        outcome, _token = self.daemon.subagents.begin_stop(self.chat, "cl:toolu_s", "key")
+        self.assertEqual(outcome, "started")
+        asked = self.records()
+        self.assertEqual([(r["data"]["status"], r["data"].get("stop")) for r in asked],
+                         [("running", "stopping")])
+        self.put(Event(K.SUBAGENT, "t", {"sid": "cl:toolu_s", "op": "finished", "status": "stopped",
+                                         "stop_reason": "stopped by the owner"}))
+        ended = self.records()
+        self.assertEqual([(r["data"]["op"], r["data"]["status"], "stop" in r["data"]) for r in ended],
+                         [("finished", "stopped", False)])
+        self.assertNotIn("stopped by the owner", json.dumps(ended), "the reason is the owner's routes' alone")
+
+    def test_the_discord_mirror_hears_no_sub_agent_record(self):
+        from jarvis.v2.discord.mirror import KINDS, TURN_KINDS
+        for kind in ("subagent", "subagent_event"):
+            self.assertNotIn(kind, KINDS)
+            self.assertNotIn(kind, TURN_KINDS)
+        # The mirror's own subscription filter, on the real bus.
+        heard = self.daemon.bus.subscribe(lambda r: r.get("kind") in KINDS)
+        self.put(subagent("cl:toolu_d"))
+        self.put(inner("text", sid="cl:toolu_d", text="a child's words"))
+        self.put(Event(K.SUBAGENT, "t", {"sid": "cl:toolu_d", "op": "finished", "status": "done"}))
+        self.assertTrue(heard.empty(), "nothing a child does is offered to Discord")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)
