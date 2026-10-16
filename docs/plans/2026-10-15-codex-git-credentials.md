@@ -138,7 +138,7 @@ the legacy `sandbox` field still reads `workspaceWrite`.
 
 So in profile mode, `require_escalated` widens writes but **keeps the
 network off and keeps deny-read**. That is good for credentials and bad for
-"escalated commands have network". Phase 2 has to settle it (§5).
+"escalated commands have network". Settled in §5.1: a different per-command route (`with_additional_permissions`) does grant network.
 
 ### 2.4 Local git inside the sandbox works today
 
@@ -330,7 +330,7 @@ calls chat_git_fetch(worktree)             --> fetch origin into the mirror (cre
      updates call chat_git_fetch, then `git fetch <mirror>`. Do not request
      escalation for git push or gh."
 7. **`jarvis/v2/providers/codex.py` / `permissions.py` layer 1 (owner
-   decision CG-1, recommended yes).** For a Codex chat widening whose line
+   decision CG-1: yes).** For a Codex chat widening whose line
    runs `gh`, or `git push|fetch|pull|ls-remote` against a non-local remote,
    **decline unasked** with the pointer text from 6. These calls cannot
    succeed (no login), and the card would only cost the owner a click.
@@ -448,7 +448,7 @@ the network.
   `/mnt/c/dev/override-jarvis` with push and a draft PR only. Record the
   receipts in the work checkpoint, not as an inference from unit tests.
 
-## 5. Phase 2: close the sandbox read gap (separate PR, needs an owner call)
+## 5. Phase 2: close the sandbox read gap (separate PR)
 
 Move Codex chats from `sandbox_mode = "workspace-write"` to a Jarvis
 permission profile:
@@ -472,26 +472,162 @@ The filesystem table needs these entries:
 `sandbox_mode` to `default_permissions` and `activePermissionProfile`. The
 same must hold for tasks, since their sandboxes read the same files.
 
-**The owner's call (CG-2).** In profile mode, an approved `require_escalated`
-command **keeps the network off and the deny-reads** (§2.3).
+### 5.1 CG-2 probe result (2026-10-15): **yes**, one approval can grant network to one command
 
-- **(i)** Accept it. Escalated commands lose network; git and gh go
-  through the phase-1 tools, which do not need it. `npm install`, `pip` and
-  `curl` in a Codex chat would then fail even when approved.
-- **(ii)** Before deciding, measure whether an approval carrying
-  `additionalPermissions.network` (Codex's `with_additional_permissions`) or
-  a profile `[permissions.<id>.network]` table can grant network to one
-  approved command only. Jarvis already shows such grants on the widening
-  card and asks every time. Use the offline harness from §2 with a scripted
-  model; it is free.
+The owner asked for the probe first. It ran offline, the same way as §2:
+the real `codex app-server` 0.161.0 in profile mode, a scripted local
+model, a loopback-only `unshare -Urn` namespace, a memory cap, and opens
+only (no reads). The deny entries covered `~/.config/gh`, `~/.gitconfig`,
+the repo `.env` and `~/.codex/auth.json`. Every route asked for:
 
-The plan recommends (ii) first, then (i) if no per-command grant exists.
-Either way, phase 2 is what makes CG-0's "Codex never holds the token" true.
+| Route | Approval the client saw | Approved command: network | Denied paths | Writes outside roots | Next plain command |
+|---|---|---|---|---|---|
+| `require_escalated`, `accept` | `availableDecisions: [accept, acceptWithExecpolicyAmendment, cancel]` | blocked | denied | **allowed** | blocked |
+| `require_escalated`, `acceptForSession` | same | blocked | denied | allowed | blocked |
+| `require_escalated` + `prefix_rule`, `acceptWithExecpolicyAmendment ["python3"]` | same | blocked | denied | allowed | blocked; a later identical escalated command ran **unasked**, sandboxed, writes refused |
+| `require_escalated`, `applyNetworkPolicyAmendment {host: 127.0.0.1, allow}` (not offered) | same | blocked | denied | n/a | n/a |
+| **`with_additional_permissions` + `additional_permissions: {network: {enabled: true}}`** (feature `exec_permission_approvals`), `accept` | `additionalPermissions: {network: {enabled: true}, fileSystem: null}`, `availableDecisions: [accept, cancel]` | **connected** | **denied** | refused | **blocked** |
+| same, `decline` | same | did not run ("rejected by user") | n/a | n/a | n/a |
+| `with_additional_permissions` asking `file_system.read: [~/.config/gh]`, `accept` | `additionalPermissions.fileSystem.entries: [{path, access: read}]` | blocked | **still denied (deny wins over a read grant)** | refused | n/a |
+| `request_permissions` tool (feature `request_permissions_tool`), granted `{network: {enabled: true}}`, `scope: "turn"` | `item/permissions/requestApproval` | connected | denied | refused | **connected (every later command in the turn)** |
+| a second profile for approved commands | n/a: `[permissions.<id>]` has only `description`, `extends`, `workspace_roots`, `filesystem`, `network` (0.161 `PermissionProfileToml`). There is no per-command profile selector. | | | | |
+| profile `[permissions.jarvis.network] enabled = true` (control) | none | connected | denied | refused | connected (every command) |
 
-Note `~/.codex/auth.json`: the app-server process itself is not sandboxed
-and reads it through the `auth.json` symlink in the private home. Only
-commands are denied, so denying it in the profile is safe. Verify that in
-the same probe.
+**Answer: yes.** Turn on Codex's `exec_permission_approvals` feature and
+have the model ask with `sandbox_permissions: "with_additional_permissions"`
+plus `additional_permissions: {network: {enabled: true}}`. One owner
+`accept` then gives that one command network:
+
+- it runs inside the same bwrap/seccomp sandbox (`Seccomp: 2`);
+- the deny-reads still hold, and an approval asking to read a denied path
+  does not lift the deny;
+- writes stay confined;
+- the next command has no network.
+
+`require_escalated` cannot do this in profile mode: the network stays off
+(it only widens writes). The execpolicy and network-policy amendments and
+`acceptForSession` do not grant network either. `request_permissions`
+grants network for the rest of the turn, not one command, so it is not the
+route.
+
+Also measured with `codex sandbox -P` on the same profile shape: a
+`"<root>" = "write"` entry makes that root writable and other paths stay
+refused, and a glob deny works.
+`glob_scan_max_depth = 4` with `"<cwd>/**/.env*" = "deny"` denied `.env.local`
+and `sub/.env` while `ok.txt` stayed readable. Linux expands globs when a
+command starts, so a `.env` created mid-session is covered from the next
+command on.
+
+### 5.2 What phase 2 adopts (build-ready)
+
+**Config** (`codex_config.config_text`, chats and tasks; replaces
+`sandbox_mode` and `[sandbox_workspace_write]`; the two cannot both be set):
+
+```toml
+default_permissions = "jarvis-chat"
+[features]
+exec_permission_approvals = true
+# request_permissions_tool stays off (default): it grants turn-wide
+[permissions.jarvis-chat]
+extends = ":workspace"
+[permissions.jarvis-chat.filesystem]
+glob_scan_max_depth = 4
+"<each git_roots() entry>" = "write"
+"<each config.credential_dirs() entry>" = "deny"
+"~/.codex" = "deny"            # absolute paths; commands only, the app-server is unsandboxed
+"~/.claude" = "deny"
+"~/.gitconfig" = "deny"
+"<config.V2_DATA_DIR>" = "deny"
+"<SESSIONS_DIR>" = "deny"
+"<each protected_paths() entry>" = "deny"
+"<brief.cwd>/**/.env*" = "deny"
+[permissions.jarvis-chat.network]
+enabled = false
+```
+
+Paths are absolute, resolved and must not be symlinks (the `_plain_path`
+rule). `V2_DATA_DIR` holds the private Codex homes, so the deny also hides
+each thread's `config.toml` (it may carry a jarvis-mcp token) from commands.
+
+**Start-up checks** (`codex.py`, replacing the `sandbox_mode` and
+`writable_roots` checks). Reading `config/read` returns all of this
+(measured):
+
+- `default_permissions == "jarvis-chat"`;
+- `sandbox_mode is None`;
+- `features.exec_permission_approvals is True`;
+- the `permissions["jarvis-chat"]` filesystem map equals what was written
+  (every deny present);
+- `network.enabled is False`.
+
+The `thread/start`/`resume` receipt must carry
+`activePermissionProfile == {"id": "jarvis-chat", "extends": ":workspace"}`,
+and its legacy `sandbox.networkAccess` must be false. Anything else is
+`BriefRefused`. `permissionProfile/list` lists the profile too.
+
+**Thread params:** drop `"sandbox": "workspace-write"` from
+`thread/start`/`thread/resume`; the profile is selected by
+`default_permissions`. Verify once in the build that `thread/resume`
+needs no sandbox field.
+
+**Approval handling** (`codex.py` `_widening`, layer 1 in `permissions.py`).
+The request shape (verified):
+
+```json
+{"method": "item/commandExecution/requestApproval",
+ "params": {"kind": "command", "itemId": "…", "command": "/bin/bash -lc '…'", "cwd": "…",
+            "reason": "…", "additionalPermissions": {"network": {"enabled": true}, "fileSystem": null},
+            "proposedExecpolicyAmendment": ["…"], "availableDecisions": ["accept", "cancel"]}}
+```
+
+The reply is `{"decision": "accept"}` or `{"decision": "decline"}`. Jarvis
+already describes `additionalPermissions` on the widening card ("network
+on") and asks every time with no Always. Keep that. Also:
+
+- a filesystem grant inside `additionalPermissions` is judged by layer 1 as
+  today;
+- deny wins anyway, as measured;
+- `require_escalated` still arrives as a plain command approval and stays a
+  widening ask. In profile mode it widens writes, not network or reads.
+- never send `acceptWithExecpolicyAmendment` (it silently pre-approves
+  later commands, as measured) or `acceptForSession`;
+- keep answering `item/permissions/requestApproval` with an empty grant.
+
+**Model guidance** (`git_note` / developer instructions): "The network is
+off in the sandbox. For a command that needs the internet (npm install,
+pip, curl), set `sandbox_permissions` to `with_additional_permissions` with
+`additional_permissions: {network: {enabled: true}}`; the owner approves
+each one. Do not use `require_escalated` for network. For git push and pull
+requests, use the Jarvis tools."
+
+**Risks to record:**
+
+- `exec_permission_approvals` is marked "under development" in 0.161's
+  `codex features list`. Pin it with `CODEX_VERIFIED` and re-run this
+  probe on every Codex upgrade. A newer Codex that drops the feature fails
+  the start-up check (refused, never silently opened).
+- An approved network command runs with the owner's uid inside bwrap. It
+  can reach the internet but not the denied files, so a `curl` cannot ship
+  the token, because the token is unreadable to it.
+
+**Tests and mutants** (`tests/v2/codex_provider_check.py`, fake server):
+
+- the config text carries every deny;
+- each start-up check refuses when tampered (a missing deny,
+  `sandbox_mode` set, feature off, network on, wrong `activePermissionProfile`);
+- an `additionalPermissions.network` approval asks with "network on" and
+  no Always;
+- `acceptWithExecpolicyAmendment` and `acceptForSession` are never sent.
+  Mutants: drop one deny entry, accept a receipt without the profile, send
+  `acceptForSession`.
+- Free live receipt, offline: re-run this harness (it lives in the lead's
+  scratch; the method is `tests/v2/fixtures/subagents/record_codex.py`
+  with a `with_additional_permissions` step). Consider committing it as
+  `tests/v2/fixtures/cg2_probe.py`.
+
+Phase 2 is what makes CG-0's "Codex never holds the token" true. With it,
+the §2.1 table becomes "denied" for every listed path, approved commands
+included.
 
 ## 6. WSL `/mnt/c` repositories
 
@@ -541,9 +677,13 @@ repository's config and hooks is attacker-controlled data for this design:
 - **CG-0** (owner, 2026-10-15): login stays inside Jarvis; Jarvis runs push
   and gh after the owner's yes; merges and closes via merge_gate. Recorded
   above.
-- **CG-1** (open, recommended yes): decline escalated `git push` and `gh`
-  from Codex chats unasked, with a pointer to the tools.
-- **CG-2** (open): phase 2 sandbox read denial. Measure the per-command
-  network grant first, then choose (i) or (ii) (§5).
-- **CG-3** (open): add `jarvis/v2/chat_git.py` to SELF_PROTECTED (as with
-  merge_gate, M-15). Recommended yes: it is the credential path.
+- **CG-1** (owner: **yes**, 2026-10-15): decline escalated `git push` and
+  `gh` from Codex chats unasked, with a pointer to the tools (§4.2 item 7).
+- **CG-2** (owner: probe first, 2026-10-15): probed. One approval *can*
+  grant network to one command in profile mode, through
+  `exec_permission_approvals` + `with_additional_permissions` (§5.1).
+  Phase 2 adopts it (§5.2), so approved commands keep network and the read
+  gap closes.
+- **CG-3** (owner: **no**, 2026-10-15): `jarvis/v2/chat_git.py` is **not**
+  added to SELF_PROTECTED. The edits to `permissions.py` (already
+  SELF_PROTECTED, M-15) still need saying in the PR.
