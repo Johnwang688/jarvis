@@ -102,6 +102,9 @@ class Event:
     #   reviewer_declined: {"tool", "args", "command": str|None, "reason": str}
     #   question: {"req_id", "text", "options": list[str]}
     #   usage: {"input", "output", "cached", "cost_usd": float|None, "provider_reported": dict}
+    #     (Codex also: "partial_turns": int, the session's turns that ended
+    #     interrupted or failed, whose usage may be under-reported; nonzero
+    #     makes its token counts a lower bound)
     #     (Claude also: "cost_total": float|None, the CLI's running total its
     #     `cost_usd` was measured against, which the daemon saves on the thread)
     #   turn_finished: {"stop": "end"|"max_turns"|"interrupted"|"error"}
@@ -194,6 +197,21 @@ class UserMessage:
 # input's `cwd`, the folder its shell is in, where `merge_gate` reads the
 # current branch of a push with no refspec. Only to a callback that takes it.
 PermissionCallback = Callable[[str, dict, Brief], Decision]   # (tool_name, args, brief)
+
+
+def takes_keyword(callback: Any, name: str) -> bool:
+    """Whether `callback` takes the keyword `name` (or any keyword). A
+    provider hands a permission callback an optional keyword (`subagent`,
+    `subagent_sid`, `shell_cwd`, `tool_use_id`) only when it does: one that does not would raise, and a
+    raise denies — such metadata must never change an answer."""
+    import inspect
+    try:
+        params = inspect.signature(callback).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any(p.kind is p.VAR_KEYWORD
+               or (p.name == name and p.kind in (p.KEYWORD_ONLY, p.POSITIONAL_OR_KEYWORD))
+               for p in params)
 
 
 class Provider(Protocol):

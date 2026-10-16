@@ -274,7 +274,9 @@ def peer(script_path, log_path, thread_name):
                 event("thread/tokenUsage/updated", tokenUsage={"total": {k: v * 2 for k, v in UNIT.items()}, "last": UNIT})
             if mode == "duplicate_usage":
                 event("thread/tokenUsage/updated", tokenUsage={"total": raw, "last": UNIT})
-            finish("paused" if mode == "odd_status" else "completed")   # `odd_status`: no such TurnStatus
+            # `odd_status`: a TurnStatus that is not an ending (`inProgress`)
+            # or one 0.161.0 does not define (`paused`).
+            finish(script.get("odd_status", "paused") if mode == "odd_status" else "completed")
             continue
         elif method == "turn/steer":
             # The 0.153.4/0.161.0 shape: {threadId, input, expectedTurnId} ->
@@ -819,6 +821,7 @@ class Checks(unittest.TestCase):
         self.assertEqual(len(reports), 1)
         self.assertEqual(reports[0].kind, K.USAGE)
         self.assertEqual(reports[0].data["provider_reported"]["rate_limits"]["primary"]["usedPercent"], 42)
+        self.assertEqual(reports[0].data["partial_turns"], 0)
         self.assertEqual(events[-1].data["stop"], "end")
         self.assertEqual(self.provider.usage(h).work_tokens, 80)
 
@@ -1003,7 +1006,7 @@ class Checks(unittest.TestCase):
         self.assertEqual(events[8].data["plan"], [{"step": "write", "status": "completed"}])
         self.assertEqual(events[9].data["reason"], "declined")
         self.assertEqual(events[-2].data, {"input": 100, "output": 20, "cached": 40, "cost_usd": None,
-                                         "provider_reported": {"total": UNIT, "last": UNIT}})
+                                         "provider_reported": {"total": UNIT, "last": UNIT}, "partial_turns": 0})
         self.assertEqual(events[-1].data, {"stop": "end"})
         self.assertEqual(self.provider.usage(h).work_tokens, 80)
 
@@ -1713,6 +1716,12 @@ class Checks(unittest.TestCase):
                     and m["params"]["item"].get("kind") == "started"
                     and m["params"]["item"].get("agentPath") == path)
 
+    @staticmethod
+    def sid_of(h, path):
+        """The sid of the known child whose label is `path` (SV-3: a child's
+        approval names its sid, not its label)."""
+        return "cx:" + next(tid for tid, label in h.native.children.items() if label == path)
+
     def answer_to(self, h, rid=0):
         replies = [m for m in h.native.rpc.replies if m["id"] == rid]
         self.assertEqual(len(replies), 1, replies)
@@ -1749,7 +1758,13 @@ class Checks(unittest.TestCase):
                     self.assert_parent_went_on(h, events)
                     self.assertEqual(self.answer_to(h)["result"], {"decision": want})
                     asked = next(e.data for e in events if e.kind == K.APPROVAL_REQUESTED)
-                    self.assertEqual(asked["subagent"], self.ASKER)
+                    # The child's sid (the owner's SV-3 decision), never its label.
+                    self.assertEqual(asked["subagent"], self.sid_of(h, self.ASKER))
+                    self.assertRegex(asked["subagent"], r"^cx:[A-Za-z0-9_-]{1,128}$")
+                    if isinstance(asker, RecordingAsker):
+                        # The owner's card carries it too, for the HUD's link.
+                        self.assertEqual(asker.seen[-1].subagent, asked["subagent"])
+                        self.assertEqual(asker.seen[-1].to_json()["subagent"], asked["subagent"])
                     self.assertEqual(asked["command"], "/bin/bash -lc 'touch /sv0-outside-workspace'")
                     resolved = next(e.data for e in events if e.kind == K.APPROVAL_RESOLVED)
                     self.assertEqual(resolved["decision"], "allow" if want == "accept" else "deny")
@@ -1871,7 +1886,9 @@ class Checks(unittest.TestCase):
                 shown = asker.seen[-1]
                 self.assertEqual(shown.args["paths"], [str(self.work / "notes.txt"), "/sv0-outside/notes.txt"])
                 asked = next(e.data for e in events if e.kind == K.APPROVAL_REQUESTED)
-                self.assertEqual(asked.get("subagent"), child)
+                self.assertEqual(asked.get("subagent"), self.sid_of(h, child) if child else None)
+                self.assertEqual(shown.subagent, self.sid_of(h, child) if child else "")
+                self.assertEqual("subagent" in shown.to_json(), bool(child))
                 if child:
                     self.assertIn(f"Codex sub-agent ‹{child}› (not the orchestrator)", shown.headline)
 
@@ -2122,6 +2139,8 @@ print(json.dumps(out))
         self.assertEqual(self.answer_to(h)["result"], {"decision": "accept"})
         asked = next(e.data for e in events if e.kind == K.APPROVAL_REQUESTED)
         self.assertNotIn("subagent", asked)
+        self.assertEqual(asker.seen[-1].subagent, "")
+        self.assertNotIn("subagent", asker.seen[-1].to_json())
         self.assertTrue(asker.seen[-1].headline.startswith("SANDBOX WIDENING: Codex chat requests"),
                         asker.seen[-1].headline)
         # Another turn's request from the session's own thread is still fatal.
@@ -2130,6 +2149,25 @@ print(json.dumps(out))
         self.assertIn("error", self.answer_to(h))
         self.assertEqual(calls, [])
         self.assertTrue(events[-1].data.get("fatal"))
+
+    def test_child_sid_reaches_only_a_callback_that_takes_it(self):
+        """SV-3: the sid is handed only to a permit that takes `subagent_sid`.
+        One that does not is called exactly as before (a raise would deny),
+        so the sid never changes an answer."""
+        seen = []
+
+        def narrow(tool, args, brief, *, widening=None, grants=(), also_commands=()):
+            seen.append(widening)
+            return Decision.ALLOW
+        h, events = self.replay("approval_accept", narrow)
+        self.assert_parent_went_on(h, events)
+        self.assertEqual(self.answer_to(h)["result"], {"decision": "accept"})
+        self.assertEqual(len(seen), 1)
+        self.assertIn(self.ASKER, seen[0])
+        permit, calls = self.counting()
+        h, events = self.replay("approval_accept", permit)
+        self.assertEqual(self.answer_to(h)["result"], {"decision": "accept"})
+        self.assertEqual(calls[-1][1]["subagent_sid"], self.sid_of(h, self.ASKER))
 
     def test_grandchild_request_is_known_through_its_parent_child(self):
         from jarvis.v2.permissions import deny_all
@@ -2153,7 +2191,8 @@ print(json.dumps(out))
         h, events = self.replay("nested", self.real_permit(deny_all("nobody")), edit=ask_from_grandchild)
         self.assertEqual(self.answer_to(h)["result"], {"decision": "decline"})
         self.assertEqual(events[-1].data, {"stop": "end"})
-        self.assertEqual(next(e.data for e in events if e.kind == K.APPROVAL_REQUESTED)["subagent"], inner)
+        self.assertEqual(next(e.data for e in events if e.kind == K.APPROVAL_REQUESTED)["subagent"],
+                         self.sid_of(h, inner))
         # Announced on a thread nobody announced: unknown, and still fatal.
         h, events = self.replay("nested", self.real_permit(deny_all("nobody")), edit=nameless_outer)
         self.assertIn("error", self.answer_to(h))
@@ -2180,7 +2219,9 @@ print(json.dumps(out))
                     return msgs
                 h, events = self.replay("approval", self.real_permit(asker), edit=rename)
                 self.assert_parent_went_on(h, events)
-                self.assertEqual(next(e.data for e in events if e.kind == K.APPROVAL_REQUESTED)["subagent"], shown)
+                self.assertEqual(next(e.data for e in events if e.kind == K.APPROVAL_REQUESTED)["subagent"],
+                                 self.sid_of(h, shown))
+                self.assertEqual(asker.seen[-1].subagent, self.sid_of(h, shown))
                 headline = asker.seen[-1].headline
                 self.assertIn(f"Codex sub-agent ‹{shown}› (not the orchestrator) asks to run beyond its sandbox",
                               headline)
@@ -2310,7 +2351,7 @@ print(json.dumps(out))
         self.assertEqual(events2[-1].data, {"stop": "end"})
         self.assertEqual(self.answer_to(h)["result"], {"decision": "decline"})
         self.assertEqual(next(e.data for e in events2 if e.kind == K.APPROVAL_REQUESTED)["subagent"],
-                         "/root/sv0_asker")
+                         self.sid_of(h, "/root/sv0_asker"))
 
     def test_a_request_is_never_answered_twice(self):
         """A failure after the reply went out (the peer died mid-approval)
@@ -2692,10 +2733,19 @@ print(json.dumps(out))
             stream = self.provider.send(h, UserMessage("Go"))
             self.assertEqual(next(stream).kind, K.TURN_STARTED)
             self.provider.interrupt(h)
-            self.assertEqual(list(stream)[-1].data, {"stop": "interrupted"}, mode)
+            stopped = list(stream)
+            self.assertEqual(stopped[-1].data, {"stop": "interrupted"}, mode)
+            # The ledger hears of it at once, with the totals already reported.
+            usage = [e.data for e in stopped if e.kind == K.USAGE]
+            self.assertEqual(usage[-1], dict(input=100 * (units - 1), output=20 * (units - 1),
+                                             cached=40 * (units - 1), cost_usd=None,
+                                             provider_reported={}, partial_turns=1), mode)
+            self.assertTrue(all(u["partial_turns"] == 0 for u in usage[:-1]), (mode, usage))
+            self.assertIs(stopped[-2], [e for e in stopped if e.kind == K.USAGE][-1], mode)
             saved = self.saved_usage(h)
             self.assertEqual((saved["complete"], saved["turns"], saved["partial_turns"]), (True, 1, 1), mode)
             events = self.send(h)
+            self.assertTrue(all(e.data["partial_turns"] == 1 for e in events if e.kind == K.USAGE), mode)
             self.assertFalse([e for e in events if e.kind == K.ERROR], (mode, events))
             self.assertEqual(events[-1].data, {"stop": "end"}, mode)
             self.assertFalse(h.native.closed.is_set())
@@ -2717,7 +2767,9 @@ print(json.dumps(out))
         """A capacity failure ends `failed`, and its cooldown is what the next
         send on that session meets: "model cooling", not a fatal error."""
         h = self.start("capacity")
-        self.assertEqual(self.send(h)[-1].data, {"stop": "error"})
+        failed = self.send(h)
+        self.assertEqual(failed[-1].data, {"stop": "error"})
+        self.assertEqual([e.data["partial_turns"] for e in failed if e.kind == K.USAGE], [1])
         self.assertEqual(self.saved_usage(h)["partial_turns"], 1)
         events = self.send(h)
         self.assertEqual(events[0].data["message"], "Codex model cooling")
@@ -2740,13 +2792,16 @@ print(json.dumps(out))
         thread = replace(self.thread, id="abandoned", provider_session_id=h.provider_session_id)
         with self.assertRaisesRegex(RpcError, "resume accounting"):
             self.provider.resume(thread, self.brief, lambda *_: Decision.ALLOW)
-        h = self.start("odd_status", thread=replace(self.thread, id="odd"))
-        self.assertEqual(self.send(h)[-1].data, {"stop": "error"})
-        self.assertFalse(self.saved_usage(h)["complete"])
-        events = self.send(h)
-        self.assertTrue(events[-1].data["fatal"])
-        self.assertIn("previous turn accounting incomplete", events[-1].data["message"])
-        self.assertEqual(len(self.brain.calls("turn/start")), 2)
+        for n, status in enumerate(("inProgress", "paused"), 1):
+            self.brain.script["odd_status"] = status
+            h = self.start("odd_status", thread=replace(self.thread, id=f"odd-{status}"))
+            self.assertEqual(self.send(h)[-1].data, {"stop": "error"}, status)
+            self.assertFalse(self.saved_usage(h)["complete"], status)
+            self.assertEqual(self.saved_usage(h)["partial_turns"], 0, status)
+            events = self.send(h)
+            self.assertTrue(events[-1].data["fatal"], status)
+            self.assertIn("previous turn accounting incomplete", events[-1].data["message"])
+            self.assertEqual(len(self.brain.calls("turn/start")), 1 + n, status)
 
     def test_a_saved_partial_turn_count_is_checked(self):
         from jarvis.v2.providers.codex_usage import Accounting

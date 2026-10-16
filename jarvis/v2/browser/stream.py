@@ -16,7 +16,8 @@ binary message behind an 8-byte header — the frame's id (uint32), then the
 viewport it shows in CSS px, width and height (uint16 each), all big-endian.
 **Latest only, one in flight**: a frame goes out only when the window has
 acked the last one (`{t:"ack", id}` reads "up to here", as BR-2's
-`FramePipe` acks the newest frame it handled); what arrives meanwhile waits
+`FramePipe` acks the newest frame it took, when its decode starts: the next
+frame crosses while that one decodes, B-PERF); what arrives meanwhile waits
 in a single slot, each newer frame replacing it. A slow window shows the
 newest picture and never builds a backlog: the socket's queue holds at most
 one frame. A tab no window streams sends nothing.

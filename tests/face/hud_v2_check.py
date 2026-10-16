@@ -62,7 +62,7 @@ CHECKS = 0
 # A SpeechRecognition that counts its constructions, installed before the page's own script runs.
 # Since V11 the wake word is heard locally and the HUD never constructs one, so `__srConstructed`
 # stays 0 and nothing ever calls `__sr`; the class stays so any construction is counted, not a crash.
-FAKE_RECOGNIZER = """
+PLAIN_RECOGNIZER = """
 window.__wakeFires = 0;
 window.__srConstructed = 0;
 class FakeSR {
@@ -80,6 +80,20 @@ window.__say = (segments, resultIndex) => {
   window.__sr.onresult({ resultIndex: resultIndex || 0, results });
 };
 """
+
+# The sidebar shows a project's five most recent chats (2026-10-15). Most suites find a chat row by
+# its testid in a project that holds more than five, so they start with every project's full list
+# asked for, as an owner who pressed "Show more" would have. Only when nothing is stored: the
+# recent-chats suite runs on PLAIN_RECOGNIZER and so sees the real default.
+SHOW_ALL_CHATS = """
+try {
+  if (localStorage.getItem('jarvis.hud.sidebar.showmore') === null) {
+    localStorage.setItem('jarvis.hud.sidebar.showmore',
+      JSON.stringify({ p1: true, p2: true, p3: true, p4: true, p7: true, p9: true }));
+  }
+} catch (e) {}
+"""
+FAKE_RECOGNIZER = PLAIN_RECOGNIZER + SHOW_ALL_CHATS
 
 
 def check(name: str, ok: bool, detail: str = ""):
@@ -1971,6 +1985,27 @@ def quota_checks(page, mock):
           "high" in (page.locator('[data-testid="quota-bar-codex-weekly"] .qfill')
                      .get_attribute("class") or ""))
 
+    # A stopped or failed Codex turn (2026-10-15): Jarvis's own token count
+    # may be low, and the panel says so without a figure of its own.
+    partial = page.locator('[data-testid="usage-codex-partial"]')
+    check("no stopped turn, no qualifier", partial.count() == 0)
+    mock.world["usage"]["providers"]["codex"]["today"]["partial_turns"] = 2
+    mock.emit("usage_updated", {"provider": "codex"})
+    until(lambda: partial.count() == 1)
+    shown = partial.count() == 1
+    check("a stopped turn says the token count may be low",
+          shown and "may be low" in partial.inner_text()
+          and "2 stopped or failed turns" in (partial.get_attribute("title") or ""),
+          f"{partial.inner_text()!r} {partial.get_attribute('title')!r}" if shown else "not shown")
+    check("and still draws no ledger figure on the rail",
+          "220" not in page.locator('[data-testid="usage"]').inner_text())
+    check("while Codex's own weekly meter is unchanged",
+          page.locator('[data-testid="quota-bar-codex-weekly"]').get_attribute("data-percent") == "95")
+    mock.world["usage"]["providers"]["codex"]["today"]["partial_turns"] = 0
+    mock.emit("usage_updated", {"provider": "codex"})
+    until(lambda: partial.count() == 0)
+    check("and the qualifier goes once the day's count is zero", partial.count() == 0)
+
 
     page.locator('[data-testid="settings-close"]').click()
 
@@ -3110,6 +3145,27 @@ def main():
             finally:
                 toolcalls_mock.stop()
 
+            # A chat's native sub-agents (SV-3): rows, the read-only pane and
+            # the card's link — a context and a mock of their own (it splits,
+            # reloads and drops the event stream).
+            from tests.face.hud_v2_subagents_check import subagents_checks
+            subagents_mock = MockDaemon(0).start()
+            try:
+                subagents_checks(browser, subagents_mock, f"http://127.0.0.1:{subagents_mock.port}", check, until,
+                                 guard, FAKE_RECOGNIZER)
+            finally:
+                subagents_mock.stop()
+
+            # The sidebar's five most recent chats per project (2026-10-15): a
+            # context and a mock of their own — it opens threads and reloads.
+            from tests.face.hud_v2_recent_chats_check import recent_chats_checks
+            recent_mock = MockDaemon(0).start()
+            try:
+                recent_chats_checks(browser, recent_mock, f"http://127.0.0.1:{recent_mock.port}", check, until,
+                                    guard, PLAIN_RECOGNIZER)
+            finally:
+                recent_mock.stop()
+
             from tests.face.hud_v2_math_check import math_checks
             math_mock = MockDaemon(0).start()
             try:
@@ -3307,6 +3363,16 @@ def main():
                             guard, FAKE_RECOGNIZER)
             finally:
                 boot_mock.stop()
+
+            # Button shape and the binary click sparkle (2026-10-15): a context
+            # and a mock of their own — its clicks, reloads and stored switch.
+            from tests.face.hud_v2_buttons_check import buttons_checks
+            buttons_mock = MockDaemon(0).start()
+            try:
+                buttons_checks(browser, buttons_mock, f"http://127.0.0.1:{buttons_mock.port}", check, until,
+                               guard, PLAIN_RECOGNIZER)
+            finally:
+                buttons_mock.stop()
 
             from tests.face.hud_v2_settings_check import settings_page_checks
             settings_page_mock = MockDaemon(0).start()

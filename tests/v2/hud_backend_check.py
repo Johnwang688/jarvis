@@ -971,7 +971,8 @@ class Backend(unittest.TestCase):
             self.assertEqual(set(row), {"state", "reason", "today", "allowance", "quota"})
             self.assertEqual(row["state"], "available")
             self.assertIsNone(row["quota"])
-            self.assertEqual(set(row["today"]), {"work_tokens", "spend_usd", "equivalent_usd"})
+            self.assertEqual(set(row["today"]), {"work_tokens", "spend_usd", "equivalent_usd", "partial_turns"})
+            self.assertEqual(row["today"]["partial_turns"], 0)
         self.providers[P.CODEX].report = {"limitId": "codex", "primary": {"usedPercent": 42, "windowDurationMins": 300, "resetsAt": 1900000000},
                                          "secondary": {"usedPercent": 8, "windowDurationMins": 10080, "resetsAt": 1900001000}}
         thread = self.thread(P.CODEX)
@@ -1208,7 +1209,7 @@ class Backend(unittest.TestCase):
             return ([e["data"].get("message") for e in records if e["kind"] == "error"],
                     [e["data"]["stop"] for e in records if e["kind"] == "turn_finished"])
 
-        for mode in ("stop_once", "stop_once_quiet"):
+        for n, mode in enumerate(("stop_once", "stop_once_quiet"), 1):
             brain.script["mode"] = mode
             self.daemon.providers[P.CODEX] = codex.CodexProvider()
             thread = self.thread(P.CODEX)
@@ -1217,7 +1218,20 @@ class Backend(unittest.TestCase):
             brain.wait_call("turn/start", started + 1)
             self.daemon.interrupt(thread.id)
             idle(thread)
-            self.assertEqual(said(thread), ([], ["interrupted"]), mode)
+            records = self.events_all()
+            # The stopped turn makes today's Codex count a lower bound, and
+            # the HUD hears so (2026-10-15 follow-up).
+            self.assertTrue(any(e["kind"] == "usage_updated" and e["data"]["provider"] == "codex"
+                                for e in records), mode)
+            self.assertEqual([e["data"]["partial_turns"] for e in records
+                              if e.get("thread_id") == thread.id and e["kind"] == "usage"][-1:], [1], mode)
+            self.assertEqual(self.request("GET", "/usage")["providers"]["codex"]["today"]["partial_turns"], n)
+            self.assertEqual([e["data"]["stop"] for e in records
+                              if e.get("thread_id") == thread.id and e["kind"] == "turn_finished"],
+                             ["interrupted"], mode)
+            logged = [json.loads(line) for line in
+                      self.stores.threads.path(thread.id).with_name("log.jsonl").read_text().splitlines()]
+            self.assertEqual([r["data"]["partial_turns"] for r in logged if r.get("kind") == "usage"][-1], 1)
             self.request("POST", f"/threads/{thread.id}/send", {"text": "and now"}, status=202)
             idle(thread)
             self.assertEqual(said(thread), ([], ["end"]), mode)
@@ -3058,13 +3072,15 @@ class CronChecks(unittest.TestCase):
 
     def test_codex_notification_adapter(self):
         report = {"primary": {"usedPercent": 25, "windowDurationMins": 300, "resetsAt": 1900000000}}
-        native = SimpleNamespace(brief=SimpleNamespace(model=None), accounting=SimpleNamespace(usage=lambda: Usage(10, 4, 2)))
+        native = SimpleNamespace(brief=SimpleNamespace(model=None), accounting=SimpleNamespace(usage=lambda: Usage(10, 4, 2),
+                                                                                       partial_turns=1))
         handle = SessionHandle("12345678", P.CODEX, "codex:fake", native)
         events = list(CodexProvider()._notification(handle, "account/rateLimits/updated", {"rateLimits": report}))
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0].kind, K.USAGE)
         self.assertEqual(events[0].data["provider_reported"]["rate_limits"], report)
         self.assertEqual(events[0].data["input"], 10)
+        self.assertEqual(events[0].data["partial_turns"], 1)
 
     def test_hud_cli(self):
         from jarvis.__main__ import cmd_hud

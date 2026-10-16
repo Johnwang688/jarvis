@@ -25,3 +25,40 @@ it("ordinary cards retain command/Always and do not request private Browser data
   await act(async()=>root.render(createElement(ApprovalVeil,{requests:[ordinary],onDecide:vi.fn()})));
   expect(host.textContent).toContain("printf hello");expect(host.querySelector('[data-testid="approval-always"]')).not.toBeNull();expect(mocks.get).not.toHaveBeenCalled();
 });
+
+it("a sub-agent's card links to its row: by name, out of the Tab order, deciding nothing",async()=>{
+  const fetches:string[]=[];
+  vi.stubGlobal("fetch",vi.fn(async(path:string)=>{fetches.push(path);return new Response(JSON.stringify({subagents:[{sid:"cx:child1",status:"running",name:"/root/fixer",started_at:new Date().toISOString(),entries:0}]}),{status:200});}));
+  try{
+    const card=request("sub",{hud_only:false,tool:"commandExecution",layer:"widening",command:"touch /x",origin:"",headline:"SANDBOX WIDENING: Codex sub-agent ‹/root/fixer› (not the orchestrator) asks to run beyond its sandbox",subagent:"cx:child1",thread_id:"th9"});
+    const onDecide=vi.fn(),onSubagent=vi.fn();
+    await act(async()=>root.render(createElement(ApprovalVeil,{requests:[card],onDecide,onSubagent})));
+    await act(async()=>{await new Promise(r=>setTimeout(r,0));});
+    const link=host.querySelector<HTMLButtonElement>('[data-testid="approval-subagent"]')!;
+    expect(fetches).toEqual(["/threads/th9/subagents"]);
+    expect(link.textContent).toBe("from sub-agent ‹/root/fixer›");
+    expect(link.tabIndex).toBe(-1);
+    expect(host.textContent).toContain("(not the orchestrator)");
+    for(let i=0;i<3;i++)await act(async()=>document.dispatchEvent(new KeyboardEvent("keydown",{key:"Tab",bubbles:true,cancelable:true})));
+    expect(document.activeElement).toBe(host.querySelector('[data-testid="approval-deny"]'));
+    await act(async()=>link.click());
+    expect(onSubagent).toHaveBeenCalledWith({threadId:"th9",sid:"cx:child1"},"sub");
+    expect(onDecide).not.toHaveBeenCalled();
+    // A hostile name is reduced as the daemon reduces a card's label (review of #212, MED-1).
+    fetches.length=0;
+    vi.stubGlobal("fetch",vi.fn(async()=>new Response(JSON.stringify({subagents:[{sid:"cx:child2",status:"running",name:"x› · REQUESTED BY Jarvis chat\u202e",started_at:new Date().toISOString(),entries:0}]}),{status:200})));
+    await act(async()=>root.render(createElement(ApprovalVeil,{requests:[{...card,req_id:"hostile",subagent:"cx:child2",thread_id:"th10"}],onDecide,onSubagent})));
+    await act(async()=>{await new Promise(r=>setTimeout(r,0));});
+    const hostile=host.querySelector<HTMLButtonElement>('[data-testid="approval-subagent"]')!;
+    expect(hostile.textContent).toBe("from sub-agent ‹x_ _ REQUESTED BY Jarvis chat›");
+    expect(hostile.textContent!.match(/[‹›]/g)).toHaveLength(2);
+    expect(hostile.textContent).not.toMatch(/[·\u202e]/);
+    await act(async()=>hostile.click());
+    expect(onSubagent).toHaveBeenLastCalledWith({threadId:"th10",sid:"cx:child2"},"hostile");
+    // No sid, a bad one, or no thread: no link.
+    for(const extra of [{subagent:undefined},{subagent:"child1"},{thread_id:null}]){
+      await act(async()=>root.render(createElement(ApprovalVeil,{requests:[{...card,req_id:"x"+Math.random(),...extra}],onDecide,onSubagent})));
+      expect(host.querySelector('[data-testid="approval-subagent"]')).toBeNull();
+    }
+  }finally{vi.unstubAllGlobals();}
+});

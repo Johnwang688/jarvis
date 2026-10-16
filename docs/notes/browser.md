@@ -1669,3 +1669,139 @@ the owner's typed external address opens in Remote: `DirectTab.ownerGo`
 marks the address `opening` until its own submit settles and shows
 "Opening…" instead; a failed submit shows its own error as before, and only
 the submit that set the mark clears it.
+
+## Remote input to picture, stage by stage (B-PERF, 2026-10-15)
+
+The owner found PR #186 "noticeably better, usable" with some delay left.
+**`scripts/browser_measure.py`** (manual, never in a suite) measures the
+whole path: a port-0 daemon with its real Browser built as
+`browser_routes_check.BrowserStream` builds it (temp HOME, fixture pages on
+an ephemeral loopback port, the gate resolving nothing), and a headless
+Playwright Chromium at DPR 1.5 playing the HUD: a page the daemon's own HUD
+listener serves from a temp `HUD_DIST`, running the pane's real
+`FramePipe`, `decodeFrame` and `paintFrame` (`remote.ts`; extracted from
+RemoteView for this, unchanged in behaviour). Each stage is clocked: HUD
+send → daemon reader → pump → CDP answered → page handler → Chrome's frame
+timestamp → daemon `_frame` → offered → sent after the window's ack →
+written → HUD receive → decode → draw → ack. The fixture pages draw a 16-bit
+counter of handled events as blocks (the scroll page draws each row's
+number), and the HUD reads it from each frame after acking it, so "the first
+frame that shows the input" is read from the picture, never guessed from
+timing. End to end is HUD clock only; the stage split lines up three
+real-time clocks on one machine (offsets by round trip: under 0.7 ms).
+
+Conditions: Chrome 155 headless (chrome://gpu: compositing, raster and
+canvas "Software only"), RASTER_SCALE 1.5, quality 70; the HUD stand-in has
+no GPU either; 24-core WSL2, load average 3–9 from other work. A typical
+pane, 1200 × 800 CSS (1800 × 1200 frame pixels, ~430 KB), and a full-screen
+4K pane at 150%, 2540 × 1340 (3810 × 2010, ~1.5 MB). Typing: a key every
+125 ms into a page of text (and every 400 ms); hover: moves at 160 Hz over a
+9000-cell grid with `:hover` styles; wheel: a 96 px notch every 250 ms;
+scroll: 24 px at 120 Hz. p50/p95 ms, before this change (ack after draw):
+
+| stage | typing pane | typing 4K | hover pane | hover 4K | wheel pane | wheel 4K |
+|---|---|---|---|---|---|---|
+| **send → frame drawn** | **44/47** | **161/181** | **90/106** | **292/384** | **53/66** | **124/147** |
+| send → daemon | 0/0 | 0/2 | 5/17 | 19/44 | 0/0 | 0/1 |
+| queued behind input | 0/0 | 0/0 | 3/8 | 6/14 | 0/0 | 0/0 |
+| CDP answer | 2/3 | 2/11 | 17/23 | 47/61 | 2/3 | 2/3 |
+| handler → Chrome frame | 13/14 | 44/52 | 32/36 | 94/142 | † | † |
+| frame → daemon (encode + base64 transport) | 17/18 | 64/73 | 17/20 | 62/86 | 20/23 | 47/56 |
+| waiting for the window's ack | 0/0 | 0/0 | 0/2 | 15/46 | 0/0 | 0/0 |
+| socket write + to the HUD | 2/3 | 7/10 | 2/6 | 17/22 | 3/4 | 5/7 |
+| HUD decode (createImageBitmap) | 10/10 | 40/52 | 11/13 | 37/48 | 12/16 | 30/37 |
+| draw | 0/0 | 0/0 | 0/0 | 0/0 | 0/0 | 0/0 |
+
+† A wheel scrolls on the compositor before the page's (passive) handler
+runs, so that split is negative; the wheel's handler waits for the frame
+(18 ms pane, 43 ms 4K). Base64 decode and the daemon's two frame copies
+are under 2 ms; scroll streams ran 54 fps (pane) and 19 fps (4K).
+
+**Where it goes**: the picture costs what its pixels cost, three times, all
+in software: Chrome's frame (the next BeginFrame, raster, software
+composite, readback: 13 ms pane, 44 ms 4K), the JPEG encode and its base64
+through CDP (17 / 64 ms; a 2 MB string takes 38–41 ms through Playwright,
+30 ms over a raw CDP pipe, so the transport is about 60% of it and Node
+about a quarter of that), and the HUD's decode (10 / 40 ms). A pane at
+4K is 3.5× the pixels and 3.5× the time. A move waits for Chrome's next
+frame before the pump sends the next (the CDP answer, 17 ms), which
+`TabStream` already merges behind (PR #186).
+
+**Changed: the HUD acks a frame when its decode starts** (`FramePipe`; it
+acked after the draw). The daemon's next frame now crosses the socket while
+this one decodes. Bounds kept: the daemon still sends one frame per ack
+(one in flight, FRAME_MAX_BYTES, nothing to hidden tabs, all unchanged),
+and the HUD holds one frame decoding and one waiting, the waiting one
+replaced by newer arrivals and acked only when its own decode starts. A
+continuous stream at 4K no longer waits for the ack (p50 15–20 → 0 ms):
+hover 4K 292/384 → 259/286 in the paired run; three interleaved repeats,
+draw 294, 308, 328 against decode 283, 277 (one more repeat ran during a
+load spike, 449, and is not counted). Scroll 19.0, 18.2, 16.7 fps → 20.0,
+19.8, 20.0 at 4K, and 51.8, 52.3, 50.2 → 54.7, 53.4, 53.4 at the pane.
+Single inputs (typing, wheel notches) never waited for an ack and are
+unchanged within noise (typing pane 43–49 both ways). The decode stage reads
+longer at 4K (37 → 43 ms) because a receive now overlaps it on the same
+CPUs. `remote.test.ts` pins the ack at decode start and the one-decoding,
+one-waiting bound; three of its tests fail against the old ack.
+
+**Tried and rejected, measured:**
+
+- *Adaptive JPEG quality* (50 while the owner's input moves the page, 70
+  again after 150 ms quiet). Chrome 155 refuses a second
+  `Page.startScreencast` ("Screencast is already active"), so each switch
+  is a stop and a start, and a start draws one frame of its own. Switching
+  before the input that starts a burst delayed that input's own frame:
+  typing every 400 ms, pane 44 → 74 ms (149 in a second run), wheel notches
+  53 → 72–80 ms. Switching after a burst's first frame instead: wheel pane
+  49 → 68, slow typing 4K 144 → 197; only steady typing at the pane gained
+  (44 → 40). Quality 50 throughout cuts a frame's bytes by 23%, but two
+  repeats at 4K under load showed no latency gain (hover 315, 341 at 70
+  against 333, 326 at 50). A `Page.captureScreenshot` at rest as the sharp
+  frame does not work either: it makes Chrome emit a screencast frame of its
+  own about 50 ms later, which would replace it. Quality stays 70.
+- *Ack on receipt*: as fast as decode-start, but frames the HUD never
+  draws still cross the socket; decode-start leaves them in the daemon's
+  one waiting slot.
+- *Decode*: `colorSpaceConversion`/`premultiplyAlpha: "none"` is slower
+  (23.5 vs 16 ms pane, 65 vs 45 ms 4K); dropping `bytes.slice()` changes
+  nothing measurable; `ImageDecoder` (12.4 / 48 against 11.8 / 38 ms) and
+  `<img>.decode()` (29 / 88 against 16 / 45 ms) are slower than
+  `createImageBitmap`.
+- *Chrome flags* (security flags untouched): `--num-raster-threads=8`
+  is worse (hover 4K 348 → 550 ms); `--enable-gpu-rasterization` does
+  nothing without a GPU; `--disable-frame-rate-limit` is worse (typing pane
+  45 → 56 ms, scroll pane 52 → 27 fps), and so is `--disable-gpu-vsync`
+  (typing pane 45 → 54 ms).
+- *Playwright's pipe reader* joins 32 KiB chunks one by one; a linear reader
+  measured the same (2 MB: 40–42 against 38–41 ms). Talking to Chrome
+  without Playwright saves about a quarter of the transport, but Playwright
+  holds the only debugging pipe, and a debugging port would let any local
+  process drive the owner's Browser.
+- `everyNthFrame` is already 1.
+
+**What would cut it further** (owner decisions, not done): fewer pixels
+while the page moves (frames at 1× during input would divide 4K's encode,
+transport and decode by 2.25, at the cost of a soft picture while typing,
+which is what the owner reported before PR #186); a video stream (tab
+capture and WebRTC: inter-frame coding, hardware decode in the HUD) instead
+of a JPEG per frame; a GPU for Chrome, which headless WSL2 does not give.
+
+**Measuring it on Windows (the missing M2 number).** Serve the fixture in
+WSL, `python3 -m http.server 8765 --bind 127.0.0.1 --directory
+scripts/browser_measure`, and type `http://localhost:8765/flip.html` into a
+Remote pane (each key press flips the whole page's colour; no caret).
+Open DevTools on the HUD window (Ctrl+Shift+I), paste
+`scripts/browser_measure/owner_snippet.js`, click into the pane and press
+about 100 keys, two or three a second, then run `__remoteLatency()`. It
+reports key (the OS event's timestamp) → frame drawn, and → the HUD's next
+frame, p50/p95; the display adds a refresh or two (6–12 ms at 160 Hz). It
+only listens, and a reload removes it (checked on a scripted page: 10 of
+10 keys matched to their frames).
+
+Receipts: `remote.test.ts` (FramePipe, 53 tests), the Browser suites
+(`browser_routes_check` 36, `browser_fit_check` 5,
+`browser_input_merge_check` 12, `hud_browser_view_check` 33,
+`browser_capture_chrome_check` 5) and the HUD face suites that drive
+Remote, all passing. The raw runs are not kept; the script reproduces them
+(`--ack draw` emulates the old ack; `--quality` and `--chrome-flag` were the
+knobs for the rest).

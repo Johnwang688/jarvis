@@ -79,10 +79,13 @@ from typing import Callable, Iterable
 
 from jarvis import config, permissions as v1_permissions, protected_state, rules
 from jarvis.tools import files as v1_files, secrets as v1_secrets
-from .approvals import ApprovalRequest, DenyAll, clean_line, label, v1_request
+from .approvals import (ApprovalRequest, DenyAll, V2_COMMAND_TOOLS, clean_line, command_text,
+                        is_command_tool, is_unknown_command_tool, label,
+                        unreadable_command, v1_request)
 from .model import PermissionProfile, Project, Role, Task, utcnow
 from .provider import Brief, Decision, PermissionCallback
 from . import merge_gate, session_tools
+from .subagents import valid_sid as _valid_sid
 
 LOG = logging.getLogger(__name__)
 
@@ -104,12 +107,13 @@ L_JARVIS_TOOL = "jarvis-tool"
 L_JARVIS_DELEGATE = "jarvis-session-delegate"
 L_JARVIS_GATED = "jarvis-gated"
 
-# Tools that carry a shell command line, per provider.
-COMMAND_TOOLS = frozenset({
-    "Bash", "BashOutput",       # Claude
-    "shell", "local_shell",     # Codex
-    "run_command", "run_readonly",   # fast path / jarvis-mcp
-})
+# Real shells, per provider (`approvals`' one list, Claude's Monitor
+# included). Layers 1 and 2 judge more: `is_command_tool` also counts any
+# tool whose arguments carry a `command`/`cmd`/`script` line (fail closed,
+# 2026-10-15), except the CODE_TOOLS (Workflow's JavaScript). Layer 4 trusts
+# only these: an unknown command-bearing tool never reaches the allowlist or
+# rules' static ALLOW, and its cards offer no Always (#211 review, F1).
+COMMAND_TOOLS = V2_COMMAND_TOOLS
 
 # Tools that write a file. The argument holding the target differs per
 # provider, so every plausible spelling is read rather than one guessed key:
@@ -221,7 +225,17 @@ def log_decision(record: ApprovalRecord, path: Path | None = None) -> None:
     target = Path(path) if path is not None else Path(config.V2_DATA_DIR) / "decisions.jsonl"
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
-        line = json.dumps(record.to_json(), allow_nan=False) + "\n"
+        data = record.to_json()
+        for key in ("reason", "command"):
+            # A reason can quote the command (a rule's match, a reviewer's
+            # words); a command a caller did not pass through `_safe_command`
+            # is kept as that keeps it (idempotent when it did).
+            if data.get(key):
+                try:
+                    data[key] = v1_secrets.redact_command(str(data[key]))[:2000]
+                except Exception:
+                    data[key] = f"[unscrubbable {key} withheld]"
+        line = json.dumps(data, allow_nan=False) + "\n"
         with _log_lock:
             with open(target, "a", encoding="utf-8") as handle:
                 handle.write(line)
@@ -497,15 +511,9 @@ def denied_grant(target: str, access: str = "write",
 
 
 def _command_of(args: dict) -> str:
-    """The command line in a tool's arguments, whatever the provider calls it."""
-    for key in ("command", "cmd", "script"):
-        value = args.get(key)
-        if isinstance(value, str):
-            return value
-        if isinstance(value, (list, tuple)) and all(isinstance(v, str) for v in value):
-            # Codex hands an argv array; join it so the rules see one line.
-            return " ".join(value)
-    return ""
+    """The command line in a tool's arguments, whatever the provider calls it
+    (`approvals.command_text`: one reading for the permit and the allowlist)."""
+    return command_text(args)
 
 
 def denied_command(command: str, cwd: str | None = None) -> str | None:
@@ -785,7 +793,7 @@ def _rule_matches(rule, tool: str, segments: list[tuple[str, list[str], list[str
 def always_ask_match(tool: str, args: dict, brief: Brief | None = None,
                      project: Project | None = None) -> tuple[str, str] | None:
     """(rule id, reason) if this call is on the always-ask list, else None."""
-    command = _command_of(args) if tool in COMMAND_TOOLS else ""
+    command = _command_of(args) if is_command_tool(tool, args) else ""
     segments: list[tuple[str, list[str], list[str]]] = []
     for segment in rules.segments(command) if command.strip() else []:
         tokens = _tokens_of(segment)
@@ -878,8 +886,8 @@ def build_permit(ctx: PermitContext, asker, *, clock=None) -> PermissionCallback
     def permit(tool: str, args: dict, brief: Brief | None = None, *,
                widening: str | None = None, grants: Iterable[tuple[str, str]] = (),
                also_commands: Iterable[str] = (), dangerous_tool: bool = False,
-               subagent: str | None = None, shell_cwd: str | None = None,
-               tool_use_id: str | None = None) -> Decision:
+               subagent: str | None = None, subagent_sid: str | None = None,
+               shell_cwd: str | None = None, tool_use_id: str | None = None) -> Decision:
         """`widening` is set only by a provider whose approval would widen
         its own sandbox if accepted (Codex: extra permissions, network, a
         grant root, terminal input). Such a call is asked of a human every
@@ -906,6 +914,12 @@ def build_permit(ctx: PermitContext, asker, *, clock=None) -> PermissionCallback
         without it, so a child is never answered more loosely (or more
         strictly) than its orchestrator would be.
 
+        `subagent_sid` is the same child's sid (`cl:…`/`cx:…`, SV-3), set by
+        Claude beside `subagent` and by Codex for its children's widenings
+        (whose headline already names them). It rides on the owner's card
+        only, so the HUD can link the card to the child's row; like the
+        label it decides nothing, and a value that is not a sid is dropped.
+
         `shell_cwd` is set only by a provider that knows the folder its
         shell is in (Claude's hook input `cwd`): where `merge_gate` reads
         the current branch for a push with no refspec. Never from `args`,
@@ -916,10 +930,12 @@ def build_permit(ctx: PermitContext, asker, *, clock=None) -> PermissionCallback
         `permit.recall`, so the re-ask is answered without a second card."""
         brief = brief if brief is not None else ctx.brief
         who = subagent_origin(ctx, subagent) if subagent is not None else None
+        # Exactly a sid (`subagents.SID`), else nothing.
+        sid = subagent_sid if _valid_sid(subagent_sid) else ""
         args = dict(args or {})
         also_commands = tuple(also_commands)   # read twice: layer 1 and the owner-only check
         profile = brief.profile if brief is not None else PermissionProfile.AUTO
-        command = _command_of(args) if tool in COMMAND_TOOLS else ""
+        command = _command_of(args) if is_command_tool(tool, args) else ""
         # Where the command will run: the brief's folder, never the daemon's
         # own cwd, or a relative `models.json` names the wrong file.
         cwd = (brief.cwd or None) if brief is not None else None
@@ -939,7 +955,12 @@ def build_permit(ctx: PermitContext, asker, *, clock=None) -> PermissionCallback
             return decision
 
         # --- layer 1: never approvable, never asked of anyone --------------
-        if tool in COMMAND_TOOLS and command.strip():
+        if unreadable_command(tool, args) == "deny":
+            # A shell whose command key holds no text: nothing to judge, so
+            # nothing runs (#211 review, F3).
+            return finish(Decision.DENY, L_DENY,
+                          f"{tool} carries no command text to judge; refused")
+        if command.strip():
             refusal = denied_command(command, cwd)
             if refusal:
                 return finish(Decision.DENY, L_DENY, refusal)
@@ -998,7 +1019,8 @@ def build_permit(ctx: PermitContext, asker, *, clock=None) -> PermissionCallback
             headline = (f"{owner_only.headline} · {widening}" if owner_only is not None
                         else widening)
             decision = owner_said(_ask(asker, ctx, tool, args, command, reason, L_WIDENING,
-                                       allowlistable=False, headline=headline, origin=who))
+                                       allowlistable=False, headline=headline, origin=who,
+                                       subagent=sid))
             return finish(decision, L_WIDENING, reason)
 
         # --- a dangerous Jarvis tool from a chat's jarvis-mcp: the owner ----
@@ -1020,7 +1042,8 @@ def build_permit(ctx: PermitContext, asker, *, clock=None) -> PermissionCallback
                       + (f" (also always-ask rule {match[0]})" if match else ""))
             decision = owner_said(_ask(asker, ctx, tool, args, command, reason, L_HUMAN,
                                        allowlistable=False, origin=who,
-                                       headline=owner_only.headline if owner_only is not None else ""))
+                                       headline=owner_only.headline if owner_only is not None else "",
+                                       subagent=sid))
             return finish(decision, L_HUMAN, reason)
 
         # A native hook's exact offered Jarvis call delegates to this
@@ -1044,13 +1067,18 @@ def build_permit(ctx: PermitContext, asker, *, clock=None) -> PermissionCallback
         if owner_only is not None:
             reason = f"always-ask rule {owner_only.label}: {owner_only.reason}"
             decision = owner_said(_ask(asker, ctx, tool, args, command, reason, L_ALWAYS_ASK,
-                                       allowlistable=False, headline=owner_only.headline, origin=who))
+                                       allowlistable=False, headline=owner_only.headline, origin=who,
+                                       subagent=sid))
             return finish(decision, L_ALWAYS_ASK, reason)
         match = always_ask_match(tool, args, brief, ctx.project)
         if match is None and delegated is not None:
             alias = (session_tools.CLAUDE_PREFIX + delegated.name
                      if ctx.provider == "codex" else delegated.name)
             match = always_ask_match(alias, args, brief, ctx.project)
+        if match is None and unreadable_command(tool, args) == "ask":
+            # An unknown tool's command key holds something that is not text:
+            # it cannot be judged, so the owner is asked (#211 review, F3).
+            match = ("command-unreadable", f"{tool}'s command is not text and cannot be judged")
         if match is None and command.strip():
             # A line that might write the gate's own state but is not provably
             # a write (layer 1 took those): a copy into the gate's folder, a
@@ -1095,7 +1123,8 @@ def build_permit(ctx: PermitContext, asker, *, clock=None) -> PermissionCallback
                 # or owner text leave through the generic approval surface.
                 decision = _ask_owner_delegation(asker, ctx, delegated.name, origin=who)
                 return finish(decision, L_ALWAYS_ASK, "owner rule for Browser delegation")
-            decision = owner_said(_ask(asker, ctx, tool, args, command, reason, L_ALWAYS_ASK, origin=who))
+            decision = owner_said(_ask(asker, ctx, tool, args, command, reason, L_ALWAYS_ASK,
+                                       origin=who, subagent=sid))
             return finish(decision, L_ALWAYS_ASK, reason)
 
         # --- jarvis-tool: a read-only Jarvis session tool --------------------
@@ -1117,7 +1146,10 @@ def build_permit(ctx: PermitContext, asker, *, clock=None) -> PermissionCallback
         # Layer 3 (the CLI reviewer) is not evaluated here; see the module
         # docstring for what an ALLOW out of this callback does and does not
         # mean.
-        if getattr(asker, "human_backed", False):
+        # A command-bearing tool that is not a known shell (`mcp__x__exec`)
+        # is judged at layers 1 and 2 but never answered here: no allowlist
+        # entry and no rules ALLOW (#211 review, F1).
+        if getattr(asker, "human_backed", False) and not is_unknown_command_tool(tool, args):
             if v1_permissions.allows(*v1_request(tool, args), cwd=cwd):
                 return finish(Decision.ALLOW, L_JARVIS_ALLOW,
                               "covered by the owner's persistent allowlist")
@@ -1133,7 +1165,8 @@ def build_permit(ctx: PermitContext, asker, *, clock=None) -> PermissionCallback
                           "already allowlisted")
         if profile == PermissionProfile.ASK:
             reason = "ask profile: every gated call reaches the owner"
-            decision = owner_said(_ask(asker, ctx, tool, args, command, reason, L_HUMAN, origin=who))
+            decision = owner_said(_ask(asker, ctx, tool, args, command, reason, L_HUMAN,
+                                       origin=who, subagent=sid))
             return finish(decision, L_HUMAN, reason)
         return finish(Decision.ALLOW, L_REVIEWER,
                       "no opinion; the provider's own reviewer decides")
@@ -1145,7 +1178,7 @@ def build_permit(ctx: PermitContext, asker, *, clock=None) -> PermissionCallback
         tool_use_id, tool and arguments, once, within the TTL). Logged."""
         if not memo.recall(tool_use_id, tool, args):
             return False
-        command = _command_of(dict(args or {})) if tool in COMMAND_TOOLS else ""
+        command = _command_of(dict(args or {})) if is_command_tool(tool, args) else ""
         log_decision(ApprovalRecord(
             tool=tool, args_digest=_digest(dict(args or {})), layer=L_OWNER_YES, decision="allow",
             reason="the owner's yes to this exact call, asked again by the CLI",
@@ -1207,12 +1240,15 @@ def _ask_owner_delegation(asker, ctx: PermitContext, tool: str, *,
 
 def _ask(asker, ctx: PermitContext, tool: str, args: dict, command: str,
          reason: str, layer: str, *, allowlistable: bool = True,
-         headline: str = "", origin: str | None = None) -> Decision:
+         headline: str = "", origin: str | None = None, subagent: str = "") -> Decision:
+    if is_unknown_command_tool(tool, args):
+        allowlistable = False       # no stem and no whole-tool entry (#211 review, F1)
     request = ApprovalRequest(
         tool=tool, args=args, command=command or None, reason=reason, layer=layer,
         thread_id=ctx.thread_id, task_id=ctx.task_id,
         provider=ctx.provider or None, origin=origin if origin is not None else ctx.origin(),
-        allowlistable=allowlistable, headline=clean_line(headline, 420) if headline else "")
+        allowlistable=allowlistable, headline=clean_line(headline, 420) if headline else "",
+        subagent=subagent)
     try:
         return Decision(asker.ask(request))
     except Exception:       # an asker that raises has not approved anything
@@ -1224,11 +1260,13 @@ def _safe_command(command: str) -> str | None:
     """The command as the log keeps it: scrubbed of credential values and
     capped. Layer 1 already refuses a command that names a credential file;
     this is the second half of the same rule for one that merely carries a
-    value."""
+    value — a known one, a typed one (`MY_TOKEN=…`, `Authorization: …`,
+    `curl -u user:pass`: `redact_command`) or a known shape. The log only:
+    what was judged and asked about is the command itself."""
     if not command:
         return None
     try:
-        scrubbed = v1_secrets.scrub(command)
+        scrubbed = v1_secrets.redact_command(command)
     except Exception:
         scrubbed = "[unscrubbable command withheld]"
     return scrubbed[:2000]

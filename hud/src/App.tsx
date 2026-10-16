@@ -33,6 +33,9 @@ import {
 import { Sidebar } from "./components/Sidebar";
 import { toolGroups } from "./state/toolGroups";
 import { ChatTab } from "./components/ChatTab";
+import { SubagentPane } from "./components/SubagentPane";
+import { subagents } from "./state/subagents";
+import { sameRef, type SubagentRef } from "./lib/subagents";
 import { InputBar, MAX_FILES, toAttachment } from "./components/InputBar";
 import { TaskView } from "./components/TaskView";
 import { FileTab, type FileAsk } from "./components/FileTab";
@@ -133,7 +136,7 @@ import { inMonaco, maxWidth } from "./lib/layout";
 import { chordSecond } from "./lib/editorkeys";
 import {
   PANE_NOS, SHAPES, allocate, closePane as closePaneOf, copySpec, inWorkspace, orderOf, show as showOf, slotOf, splitTitle,
-  type PaneNo, type PaneSpec, type View,
+  subagentSpec, type PaneNo, type PaneSpec, type View,
 } from "./lib/workspace";
 import { ActivitySync, clearsOnRead } from "./lib/activity";
 import {
@@ -175,7 +178,11 @@ const BUFFER_POLL_MS = 2000;
 // the save path stays reachable.
 buffers.configure({
   read: (projectId, path) => api.readFile(projectId, path),
-  write: (projectId, body, signal) => api.writeFile(projectId, body, signal),
+  // A saved source file makes the VEX view's last build "edited since" (advisory, VX-UI-2).
+  write: (projectId, body, signal) => api.writeFile(projectId, body, signal).then((r) => {
+    vex.edited(projectId, body.path);
+    return r;
+  }),
   stat: (projectId, paths) => api.statFiles(projectId, paths),
   makeModel: (text, abs, kind) => makeModel(text, abs, kind).catch(() => new PlainModel(text)),
   now: () => Date.now(),
@@ -1807,6 +1814,13 @@ export default function App() {
           // in the VEX view (state/vex.ts).
           vex.heardDevice(data);
           break;
+        case "subagent":
+          // A chat's native sub-agent changed (SV-3): ids, a status, times and
+          // counts only. Its row moves at once; its words are the owner
+          // routes' (state/subagents.ts). Never the chat's ops, status line or
+          // orb, never spoken, never posted: sub-agents are silent.
+          if (tid) subagents.heard(tid, data);
+          break;
         default:
           break;
       }
@@ -1814,6 +1828,9 @@ export default function App() {
       // Reconnected: a `turn_finished` published in the gap is gone.
       void reconcileBusy();
       void refreshThreads();
+      // So is a sub-agent's word: rows and panes read theirs again (a
+      // restart's children come back stopped).
+      subagents.reconnect();
     });
     return stop;
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -2319,6 +2336,117 @@ export default function App() {
     return id;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [releasePane, chatPatch]);
+
+  // ---- native sub-agents (SV-3) --------------------------------------------
+
+  /** The sub-agent pane opened (or reused) last: where a child goes when no split fits. */
+  const lastSubPane = useRef<PaneNo | null>(null);
+  /**
+   * A row's click (or Enter), a card's link, a nested row in a pane: the
+   * child's live transcript in a read-only pane (plan §D5 "Opening"). The
+   * pane already showing it gets focus; else a split beside the chat that
+   * spawned it (the focused pane when no pane shows that chat); else the
+   * last sub-agent pane shows it instead; else the window says there is no
+   * room. Never a chat pane taken over, never under a card.
+   */
+  const openSubagent = useCallback((ref: SubagentRef) => {
+    if (blockedNow.current || crashedRef.current) return;
+    const lay = layoutNow.current;
+    const drawnSub = (n: PaneNo | null): n is PaneNo => n !== null && lay.fit.panes.includes(n)
+      && lay.ws.panes[n - 1].view === "subagent";
+    const showing = lay.fit.panes.find((n) => drawnSub(n) && sameRef(lay.ws.panes[n - 1].subagent, ref));
+    if (showing !== undefined) {
+      lay.focus(showing);
+      focusPaneElement(showing);
+      return;
+    }
+    const chatPane = lay.fit.panes.find((n) => lay.ws.panes[n - 1].view === "chat"
+      && shownThread(live.current.chats[n], pendingThread.current[n]) === ref.threadId);
+    const source = chatPane ?? (lay.fit.panes.includes(lay.ws.focused) ? lay.ws.focused : lay.fit.panes[0]);
+    const dirty = dirtyIds();
+    if (source !== undefined && lay.splitVerdict(dirty).ok) {
+      const id = allocate(lay.ws, dirty, holdingIds());
+      if (id !== null) {
+        if (lay.ws.kept.includes(id)) releasePane(id, { keep: true });
+        lay.split(source, id, subagentSpec(ref));
+        lastSubPane.current = id;
+        focusPaneElement(id);
+        return;
+      }
+    }
+    const reuse = [lastSubPane.current, ...lay.fit.panes].find(drawnSub);
+    if (reuse !== undefined) {
+      lay.setSubagent(reuse, ref);
+      lastSubPane.current = reuse;
+      focusPaneElement(reuse);
+      return;
+    }
+    dispatch({ type: "notice", text: "No room for another pane: close one or use ⊞" });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [releasePane, dispatch]);
+  useEffect(() => {
+    subagents.setOpener(openSubagent);
+    return () => subagents.setOpener(null);
+  }, [openSubagent]);
+
+  /** The drawn chat pane showing `threadId`, if any. */
+  const chatPaneOf = (threadId: string): PaneNo | undefined => {
+    const lay = layoutNow.current;
+    return lay.fit.panes.find((n) => lay.ws.panes[n - 1].view === "chat"
+      && shownThread(live.current.chats[n], pendingThread.current[n]) === threadId);
+  };
+  /** A child's row in its chat, scrolled to (and, when nothing is in the way, focused). */
+  const showRow = (ref: SubagentRef, focus: boolean): boolean => {
+    const pane = chatPaneOf(ref.threadId);
+    if (pane === undefined) return false;
+    const row = document.querySelector<HTMLElement>(
+      `[data-testid="pane-${pane}"] [data-testid="subagent-row"][data-sid="${CSS.escape(ref.sid)}"]`);
+    if (!row) return false;
+    row.scrollIntoView({ block: "nearest" });
+    row.classList.remove("sa-flash");
+    void row.offsetWidth;
+    row.classList.add("sa-flash");
+    if (focus) row.querySelector<HTMLElement>("button")?.focus({ preventScroll: true });
+    return true;
+  };
+  /**
+   * A card's "from sub-agent ‹name›" (SV-3). Under the card nothing behind
+   * it can take focus or change (it is inert), so the row is only scrolled
+   * to and marked now. It is bound to that card (`reqId`): only when that
+   * card leaves because this window answered it (`decide`), and no other
+   * card is up, does the child's pane get focus if one shows it, else its
+   * row, else its pane opens. A card that timed out or was withdrawn, or
+   * another card on top, drops it (review of #212, LOW-1).
+   */
+  const revealAfterCard = useRef<{ ref: SubagentRef; reqId: string; decided: boolean } | null>(null);
+  const revealSubagent = useCallback((ref: SubagentRef, reqId: string) => {
+    revealAfterCard.current = { ref, reqId, decided: false };
+    showRow(ref, false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  useEffect(() => {
+    const pend = revealAfterCard.current;
+    if (!pend) return;
+    const approvals = state.approvals;
+    // Still up: wait. (Cards queue oldest first and only the top one has a
+    // link to click, so no other card can come on top of it.)
+    if (approvals.some((r) => r.req_id === pend.reqId)) return;
+    revealAfterCard.current = null;
+    // Gone: only if this window answered it…
+    if (!pend.decided) return;
+    const ref = pend.ref;
+    // …after the veil's own focus restore (its layout effect's cleanup), and
+    // only with no other card up then: one queued behind it drops it.
+    requestAnimationFrame(() => {
+      if (blockedNow.current) return;
+      const lay = layoutNow.current;
+      const showing = lay.fit.panes.find((n) => lay.ws.panes[n - 1].view === "subagent"
+        && sameRef(lay.ws.panes[n - 1].subagent, ref));
+      if (showing !== undefined) { lay.focus(showing); focusPaneElement(showing); return; }
+      if (!showRow(ref, true)) openSubagent(ref);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.approvals]);
 
   // ---- claimed local-server placement ------------------------------------
   const devSourceAt = (pane: PaneNo): DevSource | undefined => {
@@ -3296,6 +3424,8 @@ export default function App() {
       // The thinking lines' one clock (WP-H): how many drawn lines tick, and
       // whether its interval runs at all. Read-only.
       toolGroups: () => toolGroups.keys(),
+      // Native sub-agents as this window holds them (SV-3): ids, statuses and counts, never a word.
+      subagents: () => subagents.snapshot(),
       thinkingClock: () => ({ subscribers: thinkingClock.subscribers(), running: thinkingClock.running() }),
       // A split the owner did not click (WP-G2's `{focus: false}`, for the
       // browser's dev-server pane): the id it took, or null when refused.
@@ -3326,6 +3456,8 @@ export default function App() {
   };
 
   const decide = async (reqId: string, allow: boolean, always = false) => {
+    // This window answered it: a sub-agent link clicked on it may act (SV-3).
+    if (revealAfterCard.current?.reqId === reqId) revealAfterCard.current.decided = true;
     const current = live.current.approvals.find(r => r.req_id === reqId);
     if (current?.hud_only && (always || (allow && live.current.approvals[0]?.req_id !== reqId))) return;
     if (current?.hud_only) always = false;
@@ -3773,6 +3905,29 @@ export default function App() {
           />
         );
       }
+      case "subagent": {
+        if (!spec.subagent) return null;
+        const ref = spec.subagent;
+        const thread = threadOf(ref.threadId);
+        const chatPane = chatPaneOf(ref.threadId);
+        return (
+          <SubagentPane
+            key={`${ref.threadId}|${ref.sid}`}
+            sub={ref}
+            drawn={info.drawn}
+            threadTitle={thread ? threadLabel(thread).text : ""}
+            onShowInChat={chatPane === undefined ? null : () => {
+              if (blockedNow.current) return;
+              const lay = layoutNow.current;
+              const pane = chatPaneOf(ref.threadId);
+              if (pane === undefined) return;
+              lay.focus(pane);
+              if (!showRow(ref, true)) focusPaneElement(pane);
+            }}
+            onClose={() => closePane(n)}
+          />
+        );
+      }
       case "vex": {
         // Its pinned project (pinned when the pane switched to it), else the chat's.
         const pid = stripProject(state, spec, n);
@@ -3953,7 +4108,7 @@ export default function App() {
             // Off while a download's chain runs (review M1): the chain never
             // goes on to a robot this pane no longer shows.
             disabled={blocked || !!vex.chain}
-            title={vex.chain ? "A download is running: wait for it, or Cancel it, first"
+            title={vex.chain ? "A download is running: wait for it, or Stop it, first"
               : "The VEX project this pane builds and downloads"}
             onChange={(e) => e.target.value && view.pin(n, e.target.value)}
           >
@@ -4084,6 +4239,10 @@ export default function App() {
         return `in: ${projectName(paneProject(spec, info.pane))}`;
       case "vex":
         return `VEX · ${projectName(stripProject(state, spec, info.pane))}`;
+      case "subagent": {
+        const row = spec.subagent ? subagents.row(spec.subagent.threadId, spec.subagent.sid) : undefined;
+        return `Sub-agent · ${row?.name || "unnamed"}`;
+      }
       case "browser":
         return spec.browserUrl || "";
       default:
@@ -4428,7 +4587,7 @@ export default function App() {
           it; below the authorization veil, and gone the moment a card is known.
           Automation never mounts it unless its own suite opts in. */}
       {!navigator.webdriver || window.__hudBootForce === true ? <BootOverlay cardUp={blocked} /> : null}
-      <ApprovalVeil requests={state.approvals} onDecide={decide} />
+      <ApprovalVeil requests={state.approvals} onDecide={decide} onSubagent={revealSubagent} />
 
       {/* A picker or dialog that throws is closed, and the window carries on
           (components/Boundary.tsx). */}

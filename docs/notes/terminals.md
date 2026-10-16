@@ -290,3 +290,17 @@ daemon publishes `terminal_readable` with exactly `{terminal_id, readable, at}`
 (an id, a boolean and a time: never output), so another HUD window's switch
 catches up (PR #187). The daemon's flag stays the only truth, nothing reads
 that record, and the HUD applies it to its display only.
+
+## Current: a VEX pane's Brain tab is a place (2026-10-15, VX-UI-4a)
+
+Besides the panel and a terminal pane (`place`), a terminal can be drawn in a
+VEX pane's Brain tab: the `vex-<pane>` place (`TermManager.vexPlace`,
+`holdInVex`, `shownIn`), used only for the brain terminal. It is still one
+session and one place at a time (W-1): a terminal pane holding it wins, then
+the first VEX pane whose Brain tab holds it, then the panel. The panel's tab
+says "in the VEX view, pane N" (`data-place="vex-N"`), and the panel and
+`visible()` treat it as drawn. `adoptProgram` claims a program terminal for
+this window without opening the panel. `TermSession.printed` is true once
+xterm's buffer holds visible text, never for control sequences alone. Nothing
+about the session, the socket, input, the "Jarvis can read" switch or
+`terminal_read` changed. Details are in `docs/notes/vex.md`, "Brain tab, VX-UI-4a".
