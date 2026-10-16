@@ -289,6 +289,31 @@ class ForegroundBridge(F.DaemonHarness):
         def read(*args):self.native.native.turn_id='successor';return ToolRead('t','fixture',text='PRIVATE_MARKER',lines=1)
         with patch.object(self.TR,'read_for_tool',side_effect=read):got=self.terminal(context())
         self.assertTrue(got['isError']);self.assertNotIn('PRIVATE_MARKER',got['text'])
+    def test_chat_git_tools_are_codex_foreground_only_at_the_bridge(self):
+        """CG-0: the git tools reach the gate only from the exact foreground
+        Codex turn; a sub-agent's or a stale call is refused before the
+        owner is asked, and the owner's gate is the dangerous-tool one."""
+        from jarvis.v2.tools import chat_git_tools  # noqa: F401 — registers the tools
+        # The module setup empties the catalog; put back exactly the production flags.
+        self.stack.enter_context(patch.dict(session_tools.SESSION_TOOLS, {
+            n:session_tools.SessionTool(n,providers=frozenset({'codex'}),foreground_only=True)
+            for n in session_tools.CHAT_GIT_TOOLS}))
+        calls=[]
+        def permit(*a,**kw):calls.append((a,kw));return D.DENY
+        self.d._sessions[self.thread.id].permit=permit
+        def push(ctx):
+            return F.http(self.d.port,'POST','/mcp/call',token=self.token,body={'name':'chat_git_push','arguments':{'worktree':'/nonexistent'},'codex_context':ctx})[1]
+        for ctx in (None,context(thread_id='child'),context(subagent=True)):
+            body=push(ctx)
+            self.assertTrue(body['isError']);self.assertIn('foreground chat turn',body['text'])
+        self.assertEqual(calls,[])
+        body=push(context())
+        self.assertTrue(body['isError']);self.assertTrue(body['text'].startswith('The user declined'))
+        self.assertEqual(len(calls),1);self.assertIs(calls[0][1].get('dangerous_tool'),True)
+        self.assertEqual(calls[0][0][0],'chat_git_push')
+        listed=F.http(self.d.port,'GET','/mcp/tools',token=self.token)[1]
+        names={t['name'] for t in listed['tools']} if isinstance(listed,dict) else {t['name'] for t in listed}
+        self.assertTrue({'chat_git_push','chat_pr_create','chat_pr_merge','chat_pr_close','chat_git_fetch'}<=names)
     def test_child_nonforeground_tool_stays_available(self):
         _,body=F.http(self.d.port,'POST','/mcp/call',token=self.token,body={'name':F.READ,'arguments':{'note':'child'},'codex_context':context(thread_id='child',subagent=True)})
         self.assertIn('PROBE-MARKER child',body['text'])

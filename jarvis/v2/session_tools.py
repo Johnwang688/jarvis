@@ -71,6 +71,17 @@ SESSION_TOOLS["hud_browser_act"] = SessionTool(
     "hud_browser_act", providers=_CHAT_PROVIDERS, foreground_only=True,
     desk_only=True, owner_gated=True)
 
+# Push and pull requests for Codex chats (owner decision CG-0, 2026-10-15;
+# `chat_git.py`): Codex has no GitHub login, so the daemon runs git and gh
+# after the owner's yes. Codex only (Claude pushes natively with the owner's
+# own login), foreground only (a sub-agent cannot push), not desk-only (the
+# owner's card decides, from any surface). External MCP never gets them.
+_CODEX_ONLY = frozenset({ProviderName.CODEX.value})
+CHAT_GIT_TOOLS = ("chat_git_push", "chat_pr_create", "chat_pr_merge", "chat_pr_close",
+                  "chat_git_fetch")
+for _name in CHAT_GIT_TOOLS:
+    SESSION_TOOLS[_name] = SessionTool(_name, providers=_CODEX_ONLY, foreground_only=True)
+
 
 def register(entry: SessionTool) -> SessionTool:
     """Offer `entry` to chat sessions. Primarily for isolated test probes."""
@@ -108,7 +119,7 @@ def for_provider(provider) -> list[SessionTool]:
     if not entries:
         return []
     from jarvis import tools
-    from .tools import terminal_read, hud_browser_view, hud_browser_act, schedules  # noqa: F401 — register implementations
+    from .tools import terminal_read, hud_browser_view, hud_browser_act, schedules, chat_git_tools  # noqa: F401 — register implementations
     offered = []
     for entry in sorted(entries, key=lambda e: e.name):
         if entry.name not in tools.REGISTRY:

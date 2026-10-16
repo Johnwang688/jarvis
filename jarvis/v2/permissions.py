@@ -34,7 +34,12 @@ command/file approval this way. Task approvals retain `auto_review`. Neither
 may let the AUTO "provider reviewer decides" fallback silently grant a widening.
 A **dangerous Jarvis tool** the jarvis-mcp bridge runs for a chat
 (`permit(..., dangerous_tool=True)`) is handled the same way, for the same
-reason: the owner, every time, no Always.
+reason: the owner, every time, no Always. A Codex chat's git tools
+(`chat_git`, owner decision CG-0) are judged by the exact line the daemon
+will run (`chat_git.gate_line`), so merge_gate's headline reaches the card;
+a target that cannot be read is refused unasked, and the ALLOW is bound to
+that line (`chat_git.grant`). A Codex chat's escalated raw network git or gh
+is declined unasked with a pointer to those tools (CG-1).
 
 Between layers 2 and 4 sits **`jarvis-tool`** (2026-10-10, plan §4.1): a
 read-only Jarvis session tool (`session_tools`, `mcp__jarvis__<tool>`) in an
@@ -84,7 +89,7 @@ from .approvals import (ApprovalRequest, DenyAll, V2_COMMAND_TOOLS, clean_line, 
                         unreadable_command, v1_request)
 from .model import PermissionProfile, Project, Role, Task, utcnow
 from .provider import Brief, Decision, PermissionCallback
-from . import merge_gate, session_tools
+from . import chat_git, merge_gate, session_tools
 from .subagents import valid_sid as _valid_sid
 
 LOG = logging.getLogger(__name__)
@@ -106,6 +111,9 @@ OWNER_YES_CAP = 256
 L_JARVIS_TOOL = "jarvis-tool"
 L_JARVIS_DELEGATE = "jarvis-session-delegate"
 L_JARVIS_GATED = "jarvis-gated"
+# CG-1 (owner, 2026-10-15): a Codex chat's escalated raw network git or gh,
+# declined unasked and pointed at the Jarvis git tools (`chat_git`).
+L_CHAT_GIT = "chat-git"
 
 # Real shells, per provider (`approvals`' one list, Claude's Monitor
 # included). Layers 1 and 2 judge more: `is_command_tool` also counts any
@@ -939,6 +947,9 @@ def build_permit(ctx: PermitContext, asker, *, clock=None) -> PermissionCallback
         # Where the command will run: the brief's folder, never the daemon's
         # own cwd, or a relative `models.json` names the wrong file.
         cwd = (brief.cwd or None) if brief is not None else None
+        # A Codex chat's git tool (CG-0, `chat_git`): the exact command the
+        # daemon will run, read from the repository below, never from `args`.
+        chat: chat_git.Plan | None = None
 
         def owner_said(decision: Decision) -> Decision:
             """A human's answer to a card: a yes is held for the re-ask."""
@@ -950,8 +961,12 @@ def build_permit(ctx: PermitContext, asker, *, clock=None) -> PermissionCallback
             log_decision(ApprovalRecord(
                 tool=tool, args_digest=_digest(args), layer=layer,
                 decision=decision.value, reason=reason,
-                command=_safe_command(command), thread_id=ctx.thread_id,
-                task_id=ctx.task_id, provider=ctx.provider or None))
+                command=_safe_command(command or (chat.line if chat is not None else "")),
+                thread_id=ctx.thread_id, task_id=ctx.task_id, provider=ctx.provider or None))
+            if (decision is Decision.ALLOW and chat is not None and not widening
+                    and (dangerous_tool if tool in chat_git.DANGEROUS else True)):
+                # The tool runs only the plan this ALLOW was for (`chat_git.take`).
+                chat_git.grant(chat)
             return decision
 
         # --- layer 1: never approvable, never asked of anyone --------------
@@ -993,12 +1008,29 @@ def build_permit(ctx: PermitContext, asker, *, clock=None) -> PermissionCallback
                 return finish(Decision.DENY, L_DENY, "; ".join(unchecked) + "; refused")
             widening = widening + " · " + "; ".join(unchecked)
 
+        # --- a Codex chat's git tool: read the target, or refuse ------------
+        # `chat_git.plan` reads the worktree's branch and origin from files,
+        # checks the pin and refuses a detached HEAD or a protected branch.
+        # Whatever it cannot read is refused unasked (unknown fails closed).
+        if ctx.provider == "codex" and tool in chat_git.TOOLS:
+            try:
+                chat = chat_git.plan(tool, args, cwd or "")
+            except chat_git.Refused as exc:
+                return finish(Decision.DENY, L_DENY, f"{tool}: {exc}")
+            except Exception:   # noqa: BLE001 — a reader that fails has not cleared it
+                LOG.exception("chat_git plan failed; refusing")
+                return finish(Decision.DENY, L_DENY, f"{tool}: the repository could not be read")
+
         # --- owner-only repository operations (2026-10-15) -----------------
         # Merging or closing a pull request, a push to the default branch, a
         # branch deletion, a force push: asked at layer 2 below in every
         # profile, never offered an Always, never the allowlist's or the
         # reviewer's; a widening or a dangerous tool carries its headline.
-        owner_only = _owner_only(tool, command, also_commands, args, ctx,
+        # A Codex git tool is judged by the line the daemon will run, where
+        # it runs (`chat_git.gate_line`).
+        owner_only = _owner_only(tool, chat.line if chat is not None else command,
+                                 also_commands, args, ctx,
+                                 chat.where if chat is not None else
                                  shell_cwd if isinstance(shell_cwd, str) else None, cwd)
 
         # --- sandbox widening: a human, every time ------------------------
@@ -1009,6 +1041,14 @@ def build_permit(ctx: PermitContext, asker, *, clock=None) -> PermissionCallback
         # strip that. So this asks whatever the profile, and an
         # ALWAYS is never offered: a standing yes to a widening is a wider box.
         if widening:
+            # CG-1 (owner, 2026-10-15): a Codex chat has no GitHub login, so
+            # an escalated raw push/fetch/pull/ls-remote to a remote, or any
+            # gh, could only fail. Declined before any card — a merge or a
+            # close spelled this way included — and pointed at the tools.
+            if (ctx.provider == "codex" and brief is not None and brief.role == Role.CHAT
+                    and brief.task_id is None
+                    and any(chat_git.raw_remote(line) for line in (command, *also_commands))):
+                return finish(Decision.DENY, L_CHAT_GIT, chat_git.POINTER)
             if profile == PermissionProfile.STRICT:
                 return finish(Decision.DENY, L_WIDENING,
                               f"strict profile refuses a sandbox widening: {widening}")
@@ -1040,9 +1080,12 @@ def build_permit(ctx: PermitContext, asker, *, clock=None) -> PermissionCallback
                 match = (owner_only.label, owner_only.reason)
             reason = ("a dangerous Jarvis tool: the owner decides every call"
                       + (f" (also always-ask rule {match[0]})" if match else ""))
-            decision = owner_said(_ask(asker, ctx, tool, args, command, reason, L_HUMAN,
-                                       allowlistable=False, origin=who,
-                                       headline=owner_only.headline if owner_only is not None else "",
+            headline = " · ".join(part for part in (
+                owner_only.headline if owner_only is not None else "",
+                chat.headline if chat is not None else "") if part)
+            decision = owner_said(_ask(asker, ctx, tool, args,
+                                       chat.line if chat is not None else command, reason, L_HUMAN,
+                                       allowlistable=False, origin=who, headline=headline,
                                        subagent=sid))
             return finish(decision, L_HUMAN, reason)
 
@@ -1066,7 +1109,8 @@ def build_permit(ctx: PermitContext, asker, *, clock=None) -> PermissionCallback
         # --- layer 2: the owner is asked whatever the reviewer thought -----
         if owner_only is not None:
             reason = f"always-ask rule {owner_only.label}: {owner_only.reason}"
-            decision = owner_said(_ask(asker, ctx, tool, args, command, reason, L_ALWAYS_ASK,
+            decision = owner_said(_ask(asker, ctx, tool, args,
+                                       chat.line if chat is not None else command, reason, L_ALWAYS_ASK,
                                        allowlistable=False, headline=owner_only.headline, origin=who,
                                        subagent=sid))
             return finish(decision, L_ALWAYS_ASK, reason)

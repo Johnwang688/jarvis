@@ -85,9 +85,9 @@ the point of the project, not an accident.
 
 ## Working on v2
 
-Read [the design](docs/jarvis-v2-design.md) for `jarvis/v2/` changes. Jarvis owns
-the control plane; Claude/Codex supply the brains; v1 remains the fast path.
-Keep the design's settled decisions.
+Codex chats hold no GitHub login (CG-0): push/PRs use Codex-only `chat_git`
+tools, each asked; escalated push/gh is declined (supersedes the note
+above; [plan](docs/plans/2026-10-15-codex-git-credentials.md)).
 
 Claude's `PreToolUse` hook is its gate; its SDK sandbox does not confine on
 this WSL2. Preserve native CLI resolution/version floors and startup/resume

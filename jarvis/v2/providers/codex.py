@@ -40,6 +40,13 @@ warning. What keeps a newer version from loosening the gate is narrower than
   callback does not prove execution stays sandboxed. Ordinary sandboxed
   work runs without callbacks. Tasks retain `auto_review` and its existing
   fallback for plain approvals (design R8);
+- every session runs in Jarvis's permission profile (CG phase 2,
+  `codex_config.config_text`): credential reads denied for every command,
+  the network off but for one owner-approved `with_additional_permissions`
+  command at a time. `config/read` and the start/resume receipt are checked
+  against it (`codex_config.check_effective`/`check_receipt`) and anything
+  else refuses the session; an approval is answered only `accept` or
+  `decline` (`APPROVAL_DECISIONS`), never a session or execpolicy accept;
 - a non-null approval field outside the verified schema
   (`_KNOWN_APPROVAL_FIELDS`) counts as a widening — it may be a new grant —
   so a human is asked, shown it, and offered no Always;
@@ -572,6 +579,19 @@ def _widening(p: dict, cwd: str) -> tuple[list[str], list[tuple[str, str]], str 
     return parts, grants, None
 
 
+# The only answers an approval ever gets (CG phase 2, §5.2). Never
+# `acceptForSession`, nor `acceptWithExecpolicyAmendment`: measured on 0.161,
+# the amendment makes a later identical command run without asking anyone,
+# and a session accept would stand in for the owner's next yes. One owner yes
+# is one command: a `with_additional_permissions` network grant lasts for that
+# command only (measured), so the next one asks again.
+APPROVAL_DECISIONS = ("accept", "decline")
+
+
+def _decision(allow: bool) -> dict:
+    return {"decision": APPROVAL_DECISIONS[0] if allow else APPROVAL_DECISIONS[1]}
+
+
 def _same_command(a: str, b: str) -> bool:
     return " ".join(a.split()) == " ".join(b.split())
 
@@ -969,17 +989,16 @@ class CodexProvider:
                 codex_config.validate_mcp(brief, effective)
                 reviewer = codex_config.approvals_reviewer(brief)
                 required = {"forced_login_method": "chatgpt", "model_provider": "openai",
-                            "sandbox_mode": "workspace-write", "approval_policy": "on-request",
-                            "approvals_reviewer": reviewer}
+                            "approval_policy": "on-request", "approvals_reviewer": reviewer}
                 if any(effective.get(k) != v for k, v in required.items()):
                     raise BriefRefused("Codex effective config changed authentication or permissions")
-                workspace = effective.get("sandbox_workspace_write") or {}
-                if workspace.get("network_access", False) is not False:
-                    raise BriefRefused("Codex effective config enabled sandbox networking")
-                expected_roots = codex_config.git_roots(brief)
-                if workspace.get("writable_roots", []) != expected_roots:
-                    raise BriefRefused("Codex effective config changed writable roots")
-                params = {"cwd": brief.cwd, "modelProvider": "openai", "sandbox": "workspace-write",
+                # The permission profile (CG phase 2): reads of credentials
+                # denied, network off, per-command network approvals on.
+                codex_config.check_effective(brief, effective, home)
+                # No `sandbox` field: it would select a legacy mode over the
+                # profile `default_permissions` names (verified on 0.161 for
+                # start and resume).
+                params = {"cwd": brief.cwd, "modelProvider": "openai",
                           "approvalPolicy": "on-request", "approvalsReviewer": reviewer,
                           # baseInstructions replaces the native prompt. The additive
                           # developer field preserves it, AGENTS.md and skill loading.
@@ -1009,11 +1028,9 @@ class CodexProvider:
                         or (brief.effort and result.get("reasoningEffort") != brief.effort)
                         or result.get("modelProvider", "openai") != "openai"
                         or result.get("approvalPolicy") != "on-request"
-                        or result.get("approvalsReviewer") != reviewer
-                        or result.get("sandbox", {}).get("type") != "workspaceWrite"
-                        or result.get("sandbox", {}).get("writableRoots", []) != expected_roots
-                        or result.get("sandbox", {}).get("networkAccess", False) is not False):
+                        or result.get("approvalsReviewer") != reviewer):
                     raise BriefRefused("Codex did not honor the requested model, effort or sandbox")
+                codex_config.check_receipt(brief, result, home)
                 if not resume:
                     accounting = Accounting(home / "usage.json", returned_id, False)
                 accounting.save()
@@ -1816,6 +1833,8 @@ class CodexProvider:
             return
         if method == "item/permissions/requestApproval":
             # An empty grant: a permissions expansion is never approved here.
+            # Its tool (`request_permissions_tool`) is off and checked off at
+            # start-up: it grants for the rest of the turn, not one command.
             self._reply(s, request, {"permissions": {}, "scope": "turn"})
             return
         if method in ("item/commandExecution/requestApproval", "item/fileChange/requestApproval"):
@@ -1823,14 +1842,14 @@ class CodexProvider:
             if problem:
                 # Fail closed on a shape we cannot read: decline, and never
                 # put a half-understood request in front of the owner.
-                self._reply(s, request, {"decision": "decline"})
+                self._reply(s, request, _decision(False))
                 yield self._event(h, EventKind.ERROR, fatal=False,
                                   message=f"Codex approval request declined: {problem}{note}")
                 return
             cwd = p.get("cwd") if isinstance(p.get("cwd"), str) and p["cwd"] else s.brief.cwd
             parts, grants, refusal = _widening(p, cwd)
             if refusal:
-                self._reply(s, request, {"decision": "decline"})
+                self._reply(s, request, _decision(False))
                 yield self._event(h, EventKind.ERROR, fatal=False,
                                   message=f"Codex approval request declined: {refusal}{note}")
                 return
@@ -1844,7 +1863,7 @@ class CodexProvider:
                 # would judge the wrong command or files.
                 owner_tid, item = s.child_items.get(p["itemId"], (None, {}))
                 if owner_tid != p.get("threadId") or not isinstance(item, dict) or not item:
-                    self._reply(s, request, {"decision": "decline"})
+                    self._reply(s, request, _decision(False))
                     yield self._event(h, EventKind.ERROR, fatal=False,
                                       message=f"Codex approval request declined: its item was not seen{note}")
                     return
@@ -1852,7 +1871,7 @@ class CodexProvider:
                 # An approval naming an item of the other kind would be
                 # judged as that item (a command as a patch, or a patch as a
                 # command): never, for the session or a child.
-                self._reply(s, request, {"decision": "decline"})
+                self._reply(s, request, _decision(False))
                 yield self._event(h, EventKind.ERROR, fatal=False,
                                   message=f"Codex approval request declined: its item is not a {want}{note}")
                 return
@@ -1872,7 +1891,7 @@ class CodexProvider:
                 why = ("its item was not seen" if not item else unreadable
                        or (None if paths else "its item names no file"))
                 if why:
-                    self._reply(s, request, {"decision": "decline"})
+                    self._reply(s, request, _decision(False))
                     yield self._event(h, EventKind.ERROR, fatal=False,
                                       message=f"Codex approval request declined: {why}{note}")
                     return
@@ -1904,7 +1923,7 @@ class CodexProvider:
                     also.append(item_command)
                     parts.append(f"command {args['command']} (in running {item_command})")
             if declined:
-                self._reply(s, request, {"decision": "decline"})
+                self._reply(s, request, _decision(False))
                 yield self._event(h, EventKind.ERROR, fatal=False,
                                   message=f"Codex approval request declined: {declined}{note}")
                 return
@@ -1958,8 +1977,17 @@ class CodexProvider:
                 if s.closed.is_set() or s.cancelled.is_set() or s.rpc.failed.is_set():
                     decision = Decision.DENY
                 s.pending.pop(req_id, None)
-            self._reply(s, request, {"decision": "accept" if decision == Decision.ALLOW else "decline"})
+            self._reply(s, request, _decision(decision == Decision.ALLOW))
             yield self._event(h, EventKind.APPROVAL_RESOLVED, req_id=req_id, decision=decision.value)
+            if (decision == Decision.DENY and shell and line
+                    and codex_config.approvals_reviewer(s.brief) == "user"):
+                # CG-1: the permit declined an escalated raw push or gh
+                # unasked. The decline carries no text to the model, which
+                # has the same pointer in its git note; the owner sees it here.
+                from .. import chat_git
+                if any(chat_git.raw_remote(c) for c in (args.get("command"), *also)):
+                    yield self._event(h, EventKind.ERROR, fatal=False,
+                                      message=f"Codex approval request declined: {chat_git.POINTER}{note}")
             if s.rpc.failed.is_set():
                 raise RpcError("Codex transport failed during approval")
             return

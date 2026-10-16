@@ -2893,6 +2893,137 @@ COMMAND_TOOL_DENY = (
 )
 
 
+def chat_git_checks():
+    """A Codex chat's git tools at the permit (CG-0): the four that publish or
+    change a pull request are the owner's every time with no Always; merges
+    and closes carry merge_gate's headline; the card's command is
+    `chat_git.gate_line`; an unreadable target is refused unasked; strict
+    refuses; CG-1 declines a raw escalated push or gh before any card."""
+    from jarvis.v2 import chat_git
+    from jarvis.v2.model import PermissionProfile as P, Role
+    from jarvis.v2.permissions import L_CHAT_GIT, PermitContext, build_permit, deny_all
+    from jarvis.v2.provider import Brief, Decision
+    origin = '[remote "origin"]\n\turl = https://github.com/owner/repo.git\n'
+    with Sandbox() as box:
+        repo = _fake_repo(box.root, "cg-repo", "topic", config=origin)
+        common = repo / ".git"
+        chat_git.pin(common, "owner/repo")
+
+        def permit_for(profile, asker, folder=repo, provider="codex"):
+            brief = Brief(role=Role.CHAT, cwd=str(folder), profile=profile,
+                          mcp_servers={"jarvis": {"command": "relay"}})
+            return build_permit(PermitContext("cg000000", brief, provider=provider), asker)
+
+        target = chat_git.read_target(str(repo), str(repo))
+        cases = (("chat_pr_merge", {"worktree": str(repo), "number": 12}, "merges a pull request",
+                  "gh pr merge 12 --repo owner/repo --squash"),
+                 ("chat_pr_close", {"worktree": str(repo), "number": 12}, "closes a pull request",
+                  "gh pr close 12 --repo owner/repo"),
+                 ("chat_git_push", {"worktree": str(repo)}, "Codex wants to push topic to owner/repo",
+                  "git push https://github.com/owner/repo.git refs/heads/topic:refs/heads/topic"),
+                 ("chat_pr_create", {"worktree": str(repo), "title": "T"},
+                  "Codex wants to open a pull request from topic on owner/repo",
+                  "git push https://github.com/owner/repo.git refs/heads/topic:refs/heads/topic && "
+                  "gh pr create --repo owner/repo --head topic --title T --body-file -"))
+        for tool, args, words, line in cases:
+            eq(chat_git.gate_line(tool, chat_git.normalize(tool, args), target), line,
+               f"{tool}: gate_line is the exact command")
+            for profile in (P.STRICT, P.ASK, P.AUTO):
+                for kind in ("yes", "no", "deny-all"):
+                    tag = f"[{tool}/{profile.value}/{kind}]"
+                    asker = (Asker(Decision.ALLOW) if kind == "yes" else
+                             Asker(Decision.DENY) if kind == "no" else deny_all())
+                    decision = permit_for(profile, asker)(tool, dict(args), None, dangerous_tool=True)
+                    want = Decision.ALLOW if kind == "yes" and profile != P.STRICT else Decision.DENY
+                    eq(decision, want, f"{tag}: decided by the owner (strict refuses)")
+                    if profile == P.STRICT:
+                        eq(getattr(asker, "seen", []), [], f"{tag}: strict asks nobody")
+                        continue
+                    if kind == "deny-all":
+                        continue
+                    eq(len(asker.seen), 1, f"{tag}: asked once")
+                    if asker.seen:
+                        card = asker.seen[0]
+                        ok(card.headline.startswith(words), f"{tag}: the card leads with {words!r} "
+                                                            f"({card.headline!r})")
+                        eq(card.command, line, f"{tag}: the card's command is gate_line")
+                        eq(card.allowlistable, False, f"{tag}: no Always")
+                    eq(box.decisions[-1]["command"], line, f"{tag}: logged with the line")
+            # The provider's own delegation (no dangerous_tool) never carries
+            # the owner's yes: it delegates, and grants nothing.
+            asker = Asker(Decision.ALLOW)
+            permit = permit_for(P.AUTO, asker)
+
+            def delegated():
+                permit(tool, dict(args), None)
+                return chat_git.take(tool, dict(args))
+            import contextvars
+            eq(contextvars.Context().run(delegated), None, f"{tool}: a delegation grants nothing")
+            eq(asker.seen, [], f"{tool}: and asks nobody")
+            # Off the session server (no delegation), a merge or close is still
+            # merge_gate's at layer 2, showing the line, and grants nothing.
+            asker = Asker(Decision.ALLOW)
+            bare = Brief(role=Role.CHAT, cwd=str(repo), profile=P.AUTO)
+            permit = build_permit(PermitContext("cg000000", bare, provider="codex"), asker)
+            eq(contextvars.Context().run(delegated), None, f"{tool}: off the server, no grant")
+            if tool in ("chat_pr_merge", "chat_pr_close"):
+                eq([r.command for r in asker.seen], [line], f"{tool}: layer 2 shows the line")
+
+        # Unreadable or invalid targets: refused unasked, in every profile.
+        bad_origin = _fake_repo(box.root, "cg-gitlab", "topic",
+                                config='[remote "origin"]\n\turl = https://gitlab.com/o/r.git\n')
+        no_origin = _fake_repo(box.root, "cg-none", "topic")
+        detached = _fake_repo(box.root, "cg-detached", "topic", config=origin)
+        (detached / ".git" / "HEAD").write_text("a" * 40 + "\n")
+        on_main = _fake_repo(box.root, "cg-main", "main", config=origin)
+        for label, folder, args in (
+                ("a missing worktree", repo, {"worktree": str(box.root / "nowhere")}),
+                ("a relative worktree", repo, {"worktree": "cg-repo"}),
+                ("a non-GitHub origin", bad_origin, {"worktree": str(bad_origin)}),
+                ("no origin", no_origin, {"worktree": str(no_origin)}),
+                ("a detached HEAD", detached, {"worktree": str(detached)}),
+                ("main", on_main, {"worktree": str(on_main)}),
+                ("an unknown argument", repo, {"worktree": str(repo), "force": True})):
+            for profile in (P.ASK, P.AUTO):
+                asker = Asker(Decision.ALLOW)
+                decision = permit_for(profile, asker, folder)("chat_git_push", dict(args), None,
+                                                              dangerous_tool=True)
+                eq(decision, Decision.DENY, f"[{label}/{profile.value}] refused")
+                eq(asker.seen, [], f"[{label}/{profile.value}] unasked")
+                eq(box.decisions[-1]["layer"], "deny", f"[{label}/{profile.value}] at layer 1")
+        asker = Asker(Decision.ALLOW)
+        eq(permit_for(P.AUTO, asker, bad_origin)("chat_pr_merge", {"worktree": str(bad_origin),
+                                                                   "number": 1}, None,
+                                                 dangerous_tool=True),
+           Decision.DENY, "a merge on an unreadable target is refused")
+        eq(asker.seen, [], "unasked")
+
+        # CG-1: a Codex chat's escalated raw push or gh, a merge included, is
+        # declined before any card, in every profile; a task's is not.
+        widening = "Codex chat requests execution beyond its ordinary sandbox; owner approval required"
+        for command in ("gh pr merge 5 --squash", "bash -lc 'gh pr close 5'", "git push origin topic",
+                        "git fetch origin", "gh pr create --fill"):
+            for profile in (P.ASK, P.AUTO):
+                asker = Asker(Decision.ALLOW)
+                decision = permit_for(profile, asker)("shell", {"command": command}, None,
+                                                      widening=widening)
+                eq(decision, Decision.DENY, f"[CG-1/{profile.value}] {command!r} declined")
+                eq(asker.seen, [], f"[CG-1/{profile.value}] {command!r} unasked")
+                eq((box.decisions[-1]["layer"], box.decisions[-1]["reason"]),
+                   (L_CHAT_GIT, chat_git.POINTER), f"[CG-1] {command!r}: the pointer is the reason")
+            from jarvis.v2.provider import Brief as _Brief
+            task = _Brief(role=Role.CHAT, cwd=str(repo), profile=P.AUTO, task_id="t1")
+            asker = Asker(Decision.ALLOW)
+            build_permit(PermitContext("cg000000", task, provider="codex"), asker)(
+                "shell", {"command": command}, None, widening=widening)
+            eq(len(asker.seen), 1, f"[CG-1] a task's {command!r} keeps its widening card")
+            asker = Asker(Decision.ALLOW)
+            build_permit(PermitContext("cg000000", Brief(role=Role.CHAT, cwd=str(repo)),
+                                       provider="claude"), asker)(
+                "Bash", {"command": command}, None, widening=widening)
+            eq(len(asker.seen), 1, f"[CG-1] Codex only: Claude's {command!r} is unchanged")
+
+
 def command_tool_checks():
     """Claude's Monitor runs a shell command but was not a command tool, so
     layer 1 never read it: `cat .env` and a daemon kill reached the reviewer
@@ -3103,7 +3234,7 @@ def main():
                     review_48_round2_checks, review_48_delta_checks, runner_checks,
                     third_delta_75_checks, daemon_checks,
                     auto_quiet_checks, hatch_checks, discord_checks, merge_gate_checks,
-                    command_tool_checks, secret_service_checks):
+                    chat_git_checks, command_tool_checks, secret_service_checks):
         if ONLY and section.__name__ not in ONLY:
             continue
         print(f"-- {section.__name__}")
