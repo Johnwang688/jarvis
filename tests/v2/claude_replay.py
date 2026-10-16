@@ -47,6 +47,7 @@ class ReplayClient:
         self.queries: list = []
         self.echo_uids: list[str] = []
         self.echoed = 0
+        self.queried = 0
         self.hooks: list[tuple] = []        # (tool_name, agent_id, hook result)
         self.interrupts = 0
         ReplayClient.instances.append(self)
@@ -74,6 +75,15 @@ class ReplayClient:
             r = self.rows[self.pos]
             self.pos += 1
             data = r["data"]
+            if r["src"] == "harness" and data.get("action") == "query":
+                # A recorded query of the recorder's: nothing after it can
+                # come before the provider has sent its own (a real CLI cannot
+                # echo a message it was not given). Only a reader that reads
+                # between sends (SV-6) ever reaches one early.
+                self.queried += 1
+                while len(self.queries) < self.queried:
+                    await asyncio.sleep(0.01)
+                continue
             if r["src"] == "hook":
                 if data.get("hook_event_name") != "PreToolUse":
                     continue

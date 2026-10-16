@@ -5,6 +5,7 @@ Threads save their Brief beside thread.json so resuming never invents a policy.
 """
 from __future__ import annotations
 
+import contextlib
 from collections import deque
 from dataclasses import dataclass, field, fields, replace
 import errno
@@ -107,6 +108,17 @@ QUEUE_FULL = ("Three messages are already waiting on this turn; send this one ag
 # words stay as they were everywhere they are shown; only the model sees this.
 INTERRUPTED_NOTE = ("[The owner interrupted your previous turn to send this message. "
                     "Whatever that turn was doing stopped where it was.]\n")
+# Between turns (SV-6, docs/plans/2026-10-13-subagent-view.md "SV-6 design").
+# A provider with `watch(h)` is read between turns by a watcher thread per
+# session: a sub-agent's progress and end go to its record at once, and a turn
+# the CLI starts by itself (Claude, when a background task finishes) becomes a
+# turn of the thread (`_begin_cli`), opened by a `cli_turn` line. Every record
+# of that turn carries `self_started: true`, and the Discord mirror, speech
+# and the task runner leave such a turn alone (the owner's decision,
+# 2026-10-15). WATCH_JOIN_S bounds the wait for a watcher when its session
+# ends.
+CLI_TURN_TEXT = "A background task finished, and Claude Code carries on by itself."
+WATCH_JOIN_S = 2.0
 
 
 class DaemonError(RuntimeError):
@@ -279,6 +291,14 @@ class _Session:
     # Which session ran a native sub-agent (SV-1, subagents.py): when this
     # one ends, so do its children's CLI, and the record says so.
     subagent_key: str = field(default_factory=lambda: uuid.uuid4().hex)
+    # Between turns (SV-6): the thread reading the provider's `watch`, and
+    # whether the running turn is one the CLI started by itself (`_begin_cli`).
+    watcher: threading.Thread | None = field(default=None, repr=False)
+    self_started: bool = False
+    # The watcher has passed on the provider's word that the CLI started a
+    # turn (after every event it read before it), so a turn that ends may
+    # take it up in that order (`_maybe_cli`).
+    cli_offered: bool = False
 
 
 class Daemon:
@@ -778,6 +798,7 @@ class Daemon:
                     saved.pop("origin_tag", None)
                     _write_bytes(path, json.dumps(saved, allow_nan=False).encode())
                 self.stores.threads.save(thread)
+            self._start_watcher(session)
             return session
         except BaseException:
             # A session that never opened keeps no token (plan §1.4).
@@ -1126,8 +1147,13 @@ class Daemon:
         session = self._live_session(thread_id)
         with self._lock:
             self._sendable(session)
-            if session.worker is not None or self._queues.get(thread_id):
-                raise DaemonError("a turn is already running on this thread")
+            if (session.worker is not None or self._queues.get(thread_id)
+                    or self._maybe_cli(session, eager=True)):
+                # A turn the CLI started by itself (SV-6) runs first: the
+                # caller retries on "already running", as for any turn, and
+                # the task runner waits that one out for longer (it says so).
+                own = " (the CLI's own)" if session.self_started else ""
+                raise DaemonError("a turn is already running on this thread" + own)
             return self._begin(session, message, data)
 
     def deliver(self, thread_id: str, message: UserMessage) -> dict:
@@ -1153,6 +1179,11 @@ class Daemon:
             self._sendable(session)
             waiting = self._queues.setdefault(thread_id, deque())
             if session.worker is None and not waiting:
+                if self._maybe_cli(session, eager=True):
+                    # The CLI started a turn by itself and it runs first, in
+                    # the CLI's own order (SV-6); this message waits for it.
+                    item = self._enqueue(session, waiting, message, data)
+                    return self._queued_reply(session, item)
                 return {"status": "started", "turn_id": self._begin(session, message, data)}
             from . import thread_model
             if not thread_model.is_chat(session.thread):
@@ -1373,6 +1404,143 @@ class Daemon:
         self._dev_hook("turn_started", thread_id, session.thread.provider)
         return turn_id
 
+    # -- between turns (SV-6) -------------------------------------------------
+
+    def _start_watcher(self, session) -> None:
+        """Read the provider's `watch` for this session on a thread of its
+        own, for the session's life. A provider without one is read only by
+        its turns, as before."""
+        watch = getattr(session.provider, "watch", None)
+        if not callable(watch) or session.handle is None:
+            return
+        watcher = threading.Thread(target=self._watch, args=(session, watch),
+                                   name=f"jarvis-watch-{session.thread.id}", daemon=True)
+        session.watcher = watcher
+        watcher.start()
+
+    def _watch(self, session, watch) -> None:
+        """The watcher: every event the provider reads between turns, in
+        order, until the session closes (the provider's iterator ends)."""
+        try:
+            for event in watch(session.handle):
+                try:
+                    self._idle_event(session, event)
+                except Exception:  # noqa: BLE001 — one bad event never ends the watch
+                    LOG.exception("Cannot record an event read between turns on %s",
+                                  session.thread.id)
+        except Exception:  # noqa: BLE001
+            LOG.exception("The between-turn reader of %s failed", session.thread.id)
+
+    def _idle_event(self, session, event) -> None:
+        """One event a provider read between turns (SV-6).
+
+        - A sub-agent's: its record, as in a turn (`_record_subagent`).
+        - The CLI started a turn by itself: taken up as a turn of the thread
+          now, or when the running one ends (`_maybe_cli`).
+        - A gate question: logged with no turn, for the audit trail. The
+          decision was `permit`'s — the thread's own asker — and nothing here
+          answers or changes it.
+        - An error: a `notice` line in the chat; a fatal one also drops the
+          session (the provider closed it), so the next message resumes it."""
+        if event.thread_id != session.thread.id:
+            LOG.warning("A between-turn event for another thread was dropped")
+            return
+        kind = event.kind
+        if kind in (EventKind.SUBAGENT, EventKind.SUBAGENT_EVENT):
+            self._record_subagent(session, event)
+        elif kind == EventKind.TURN_STARTED and (event.data or {}).get("self_started"):
+            with self._lock:
+                session.cli_offered = True
+                self._maybe_cli(session)
+        elif kind in GATE_KINDS:
+            self._record(session, event, idle=True)
+        elif kind == EventKind.ERROR:
+            self._idle_error(session, event)
+
+    def _idle_error(self, session, event) -> None:
+        from .approvals import clean_line
+        from .redact import scrub_text
+        data = event.data or {}
+        fatal = data.get("fatal") is True
+        try:
+            text = clean_line(scrub_text(str(data.get("message") or "")), 300)
+        except Exception:  # noqa: BLE001 — a scrub that fails shows nothing of it
+            text = "[withheld]"
+        with self._lock:
+            if session.retired or session.closing or self._sessions.get(session.thread.id) is not session:
+                return
+        # A `notice` line (the owner's, never the model's), with no turn.
+        self._record(session, Event(EventKind.NOTICE, session.thread.id,
+                                    {"text": f"Between turns: {text}", "fatal": fatal}), idle=True)
+        if not fatal:
+            return
+        lost = False
+        with self._lock:
+            if session.retired or session.closing or self._sessions.get(session.thread.id) is not session:
+                return
+            if session.worker is None:
+                # The provider closed the session: dropped, so the next
+                # message resumes it (a running turn finds out for itself).
+                session.lost = lost = True
+                self._retire_drive(session)
+                self._sessions.pop(session.thread.id, None)
+        if lost:
+            self._cleanup(session)
+
+    def _maybe_cli(self, session, *, eager=False) -> bool:
+        """Under the lock: start the turn the CLI began by itself, if the
+        provider holds one and nothing else runs. -> whether it started.
+
+        Taken up once the watcher has passed the provider's word on
+        (`cli_offered`), so a sub-agent's end read before it is recorded
+        first. `eager` (an owner message arriving, a queue about to run)
+        asks the provider directly: the CLI runs its own turn first anyway,
+        and the message then waits for it rather than reading it."""
+        thread_id = session.thread.id
+        if (self._stopping or session.closing or session.retired or session.lost
+                or session.handle is None or session.worker is not None
+                or self._sessions.get(thread_id) is not session or thread_id in self._interrupting
+                or not (eager or session.cli_offered)):
+            return False
+        pending = getattr(session.provider, "cli_turn_pending", None)
+        try:
+            ready = callable(pending) and pending(session.handle) is True
+        except Exception:  # noqa: BLE001 — a provider that cannot say has none
+            ready = False
+        if not ready:
+            session.cli_offered = False         # a send read it first: nothing waits
+            return False
+        self._begin_cli(session)
+        return True
+
+    def _begin_cli(self, session) -> None:
+        """Under the lock: a turn the CLI started by itself (SV-6), as a turn
+        of the thread: a fresh `turn_id`, a `cli_turn` line where the owner's
+        message would be, and the ordinary turn worker reading the provider's
+        `adopt`. Every record it makes is `self_started`, so Discord, speech
+        and the task runner leave it alone. Owner messages wait for it."""
+        thread_id = session.thread.id
+        session.cancelled.clear()
+        session.owner_stopped = False
+        session.steered = []
+        session.questions.clear()
+        session.turn_id = uuid.uuid4().hex
+        session.self_started = True
+        session.cli_offered = False
+        self._retire_drive(session)
+        record = {"kind": "cli_turn", "at": utcnow(), "turn_id": session.turn_id,
+                  "thread_id": thread_id, "project_id": session.thread.project_id,
+                  "self_started": True, "event_id": uuid.uuid4().hex,
+                  "data": {"text": CLI_TURN_TEXT}}
+        self.stores.threads._append(thread_id, "log.jsonl", record)
+        self.bus.publish(dict(record))
+        worker = threading.Thread(target=self._turn, args=(session, None),
+                                  name=f"jarvis-cli-turn-{thread_id}", daemon=True)
+        session.worker = worker
+        session.running_since = utcnow()
+        worker.start()
+        self._dev_hook("turn_started", thread_id, session.thread.provider)
+
     def _waiting_on_owner(self, session) -> bool:
         """Is the running turn blocked on the owner — a broker approval or a
         provider question? Then a message waits rather than steers."""
@@ -1472,6 +1640,8 @@ class Daemon:
             except DaemonError as exc:
                 self._drop_waiting(session.thread, str(exc))
                 return
+            if self._maybe_cli(session, eager=True):
+                return      # the CLI's own turn first; its end drains the queue
             item = waiting.popleft()
             self._begin(session, item.message, item.data, queued=item)
 
@@ -1543,7 +1713,12 @@ class Daemon:
         return {"ok": True, "req_id": req_id,
                 "decision": Decision(decision).value, "allowlisted": entry}
 
-    def _record(self, session, event):
+    def _record(self, session, event, *, idle=False):
+        """One provider event into the thread's log, the ledger and the bus.
+        `idle`: read between turns (SV-6) — it belongs to no turn, so its
+        record carries no `turn_id` (a reader would otherwise take it for the
+        last, finished turn's). A turn the CLI started by itself marks every
+        record `self_started`."""
         if event.kind in (EventKind.SUBAGENT, EventKind.SUBAGENT_EVENT):
             self._record_subagent(session, event)
             return
@@ -1589,8 +1764,11 @@ class Daemon:
                         thread.provider_cost_total = running
                 thread.updated = utcnow()
                 self.stores.threads.save(thread)
-            record = {**to_json(event), "project_id": thread.project_id, "turn_id": session.turn_id,
+            record = {**to_json(event), "project_id": thread.project_id,
+                      "turn_id": None if idle else session.turn_id,
                       "at": utcnow(), "event_id": uuid.uuid4().hex}
+            if session.self_started and not idle:
+                record["self_started"] = True
             data=record.get("data") or {}
             if data.get("name") in ("hud_browser_act", "mcp__jarvis__hud_browser_act"):
                 if event.kind==EventKind.TOOL_STARTED:
@@ -1716,6 +1894,9 @@ class Daemon:
                 session.desk.images(slot, turn_id, capable)
 
     def _turn(self, session, message):
+        """A turn's worker. `message` None is a turn the CLI started by
+        itself (SV-6, `_begin_cli`): read through the provider's `adopt`,
+        with no model switch and no desk; everything else is the same."""
         # Wait for _begin to finish the start hook before this turn can end.
         with self._lock:
             terminal = None
@@ -1732,27 +1913,38 @@ class Daemon:
         try:
             if session.cancelled.is_set():
                 return
-            self._apply_choice(session)
-            self._desk_images(session, worker, turn_id, desk_slot)
+            if message is not None:
+                self._apply_choice(session)
+                self._desk_images(session, worker, turn_id, desk_slot)
+                source = session.provider.send(session.handle, message)
+            else:
+                source = session.provider.adopt(session.handle)
             cancel_forwarded = False
-            for event in session.provider.send(session.handle, message):
-                if event.thread_id != session.thread.id:
-                    raise ValueError("provider event belongs to another thread")
-                # Providers may clear an old stop flag when send begins. Repeat
-                # cancellation after their first yield to close that start race.
-                if session.cancelled.is_set() and not cancel_forwarded:
-                    session.provider.interrupt(session.handle)
-                    cancel_forwarded = True
-                if event.kind == EventKind.TURN_FINISHED:
-                    terminal = event
-                    break
-                if event.kind == EventKind.ERROR:
-                    with self._lock:
-                        if session.drive_turn is drive_turn:
-                            self._retire_drive(session)
-                self._record(session, event)
-                failed |= event.kind == EventKind.ERROR
-                fatal |= event.kind == EventKind.ERROR and bool((event.data or {}).get("fatal"))
+            # Closed the moment the loop ends (a break, a raise), never left
+            # suspended until this worker returns: the provider's `finally`
+            # releases its turn slot, its reader and its steer waiters, and a
+            # queued turn `_drain` starts from below must find them free
+            # (review of #234, HIGH-1).
+            with (contextlib.closing(source) if callable(getattr(source, "close", None))
+                  else contextlib.nullcontext()):
+                for event in source:
+                    if event.thread_id != session.thread.id:
+                        raise ValueError("provider event belongs to another thread")
+                    # Providers may clear an old stop flag when send begins. Repeat
+                    # cancellation after their first yield to close that start race.
+                    if session.cancelled.is_set() and not cancel_forwarded:
+                        session.provider.interrupt(session.handle)
+                        cancel_forwarded = True
+                    if event.kind == EventKind.TURN_FINISHED:
+                        terminal = event
+                        break
+                    if event.kind == EventKind.ERROR:
+                        with self._lock:
+                            if session.drive_turn is drive_turn:
+                                self._retire_drive(session)
+                    self._record(session, event)
+                    failed |= event.kind == EventKind.ERROR
+                    fatal |= event.kind == EventKind.ERROR and bool((event.data or {}).get("fatal"))
         except Exception as exc:
             failed = True
             try:
@@ -1800,6 +1992,7 @@ class Daemon:
                 with self._lock:
                     session.worker = None
                     session.running_since = None
+                    session.self_started = False
                     session.questions.clear()
                     if leftover:
                         if session.owner_stopped:
@@ -1827,6 +2020,11 @@ class Daemon:
                     if session.lost and self._sessions.get(session.thread.id) is session:
                         # The provider closed it; the next send resumes afresh.
                         self._sessions.pop(session.thread.id, None)
+                    # A turn the CLI started by itself while this one ran goes
+                    # next, before the owner's waiting messages: the CLI runs
+                    # it first anyway (SV-6). Its own end drains the queue.
+                    if self._maybe_cli(session):
+                        drain = False
                 if session.lost:
                     self._cleanup(session)
                 if drain and not session.retired:
@@ -2024,6 +2222,13 @@ class Daemon:
                 operation(session.handle)
             except Exception:
                 LOG.exception("Provider cleanup failed for %s", session.thread.id)
+        # The provider's close ends its `watch` (SV-6): the watcher goes with
+        # the session, bounded, never waited on by itself.
+        watcher = session.watcher
+        if watcher is not None and watcher is not threading.current_thread():
+            watcher.join(WATCH_JOIN_S)
+            if watcher.is_alive():
+                LOG.warning("The between-turn reader of %s is still running", session.thread.id)
         try:
             self.subagents.end_session(session.thread, session.subagent_key)
         except Exception:

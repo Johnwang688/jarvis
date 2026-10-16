@@ -54,6 +54,8 @@ export interface SpeechEventLike {
   data?: { text?: string; stop?: string; [key: string]: unknown } | undefined;
   text?: string;
   stop?: string;
+  /** A record of a turn the CLI started by itself (SV-6): never spoken (owner, 2026-10-15). */
+  self_started?: boolean;
 }
 
 export interface SpeakerGateLike {
@@ -405,6 +407,11 @@ export class SpeechController {
     }
     // The owner's main Stop: the children it hit end however the CLI reports them, and none is announced.
     if (kind === "turn_finished" && (e.data ?? e).stop === "interrupted") this.notices.interrupted(thread);
+    // A turn the CLI started by itself after a background sub-agent finished
+    // is not read aloud (owner, 2026-10-15; SV-6): none of its records is
+    // spoken or ends anything being read. Its Stop still silences the
+    // children it hit (above); the sub-agents' own notices are not its records.
+    if (e.self_started === true) return;
     if (!this.speaks(thread)) {
       if (this.open.has(thread)) this.open.delete(thread);
       return;

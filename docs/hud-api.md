@@ -3221,9 +3221,11 @@ What differs from Claude's, on the same record and routes:
   Codex 0.161 sends none to the app-server client (no prompt on the
   `subAgentActivity` item, no user message on the child's thread; SV-0's
   recordings), so the transcript route has no `brief` for a `cx:` child.
-- **Between turns nobody reads the connection** (SV-6). A child that talks
-  after the orchestrator's turn is recorded when the next message is sent,
-  under that turn's `turn_id`.
+- **Between turns the connection is read too** (SV-6, since 2026-10-16). A
+  child that talks after the orchestrator's turn is recorded as it talks,
+  under the last turn's `turn_id`; its approval asks the owner as in a turn.
+  (Before SV-6 nobody read between turns, and the next message's turn
+  recorded it.)
 - **Approval cards** are SV-2a's: a child's command or file approval is
   always an owner-asked widening naming it ("Codex sub-agent ‹name› (not the
   orchestrator)"). Since SV-3 (owner, 2026-10-15) the gate question and the
@@ -3416,10 +3418,10 @@ give `status: "stopped"`, `stop_reason: "stopped by the owner"` and clear
 `stop`. Nothing infers an end from a stop. If the CLI has said nothing after
 15 s (`subagents.STOP_CONFIRM_S`), the record says `"stop": "unconfirmed"`
 — honestly: the request went out, the child may still be running — and the
-owner may press Stop again (it is sent again). Between turns nobody reads
-the CLI (SV-6), so a child stopped then is usually confirmed only when the
-next message's turn reads the CLI's answer. A restart reads a live child
-back stopped, with no mark.
+owner may press Stop again (it is sent again). Between turns the CLI is
+read too (SV-6), so a child stopped then is confirmed when the CLI answers,
+not at the next message. A restart reads a live child back stopped, with no
+mark.
 
 **What the list offers.** Each live row of `GET /threads/{id}/subagents` (and
 the transcript's `subagent`) carries `"stoppable": true`, or `false` with
@@ -3453,8 +3455,8 @@ wants more asks the owner routes. (The one place a child's name reaches
 `/events` is the broker's own `approval_requested` record for a card a
 child's call raised: its `origin`, below, carries the cleaned name, as a
 task's card carries the task's.) `turn_id` is the turn being read when it arrived — for a background
-child talking between turns, the next turn's (SV-6). Discord, the runner,
-titles and the voice queue ignore the kind.
+child talking between turns, the last turn's (SV-6; before it, the next
+turn's). Discord, the runner, titles and the voice queue ignore the kind.
 
 An approval card raised by a child's call is decided exactly as the
 orchestrator's would be (every layer, the same answer). Only its `origin`
@@ -3504,3 +3506,52 @@ separately awaited steps; the events are untrusted (`isTrusted: false`).
 Nothing is offered or applied while the tab has a dialog, file chooser or auth
 prompt, or its window is not showing it. The first `pick` for an id takes the
 picker; a second one does nothing. A message is never sent past 60,000 bytes.
+
+## Between turns, and the CLI's own turns (SV-6, 2026-10-16)
+
+Plan: `docs/plans/2026-10-13-subagent-view.md` ("SV-6 design"); notes:
+`docs/notes/providers-runtime.md` ("Between turns (SV-6)").
+
+While no turn runs, Jarvis keeps reading a Claude or Codex chat's CLI. A
+native sub-agent's progress and end reach its record and `/events` as they
+happen. Its approval raises the owner's card as in a turn.
+
+**A turn the CLI starts by itself.** Claude Code starts an orchestrator turn
+by itself when a background task finishes (a sub-agent, a background
+command). That turn is now a turn of the thread, with a `turn_id` of its
+own. It opens with a `cli_turn` record where an owner message would be:
+
+```json
+{"kind": "cli_turn", "turn_id": "…", "thread_id": "…", "self_started": true,
+ "data": {"text": "A background task finished, and Claude Code carries on by itself."}}
+```
+
+Then it has the usual `turn_started`, `text_delta`, `text`, `tool_*`,
+`usage` and `turn_finished` records. **Every record of that turn carries
+`"self_started": true`** at the top level, in the log and on `/events`.
+
+- The HUD shows it like any turn. `GET /threads/{id}/transcript` returns the
+  `cli_turn` line as a `system` message, then the turn's words.
+- The Discord mirror posts nothing of it, and the HUD's read-aloud speaks
+  none of it (the owner's decision, 2026-10-15). A sub-agent's own spoken
+  notice (SV-5) is not that turn's record and is still said; Stop on that
+  turn silences the children it hit, as for any turn. The task runner never
+  takes its words for a task turn's reply.
+- An owner message sent while it runs waits for it (`"status": "queued"`).
+  Claude refuses a steer into it. `POST /threads/{id}/send` from the task
+  runner answers "a turn is already running on this thread (the CLI's own)",
+  and the runner waits that turn out.
+- Stop (`POST /threads/{id}/interrupt`, with its `turn_id`) stops it like
+  any turn.
+- Its usage is counted once, under its own `turn_id`. Before SV-6 it was
+  added to the next owner message's turn.
+
+Codex starts no turn by itself (SV-0).
+
+**Between-turn notices.** A provider's error read between turns (a Codex
+child's request that was refused, say) is a `notice` line,
+`{"kind": "notice", "turn_id": null, "data": {"text": "Between turns: …", "fatal": false}}`.
+The transcript route returns it as a `system` message. A fatal one means
+the provider closed the session, and the next message resumes it. A gate question asked between turns is logged
+(`gate_requested`/`gate_resolved`) with no `turn_id`.
+

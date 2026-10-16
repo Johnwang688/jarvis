@@ -352,6 +352,112 @@ These answer the open questions below where they overlap, and the SV-0 findings
 - **Codex child approval cards carry the child's sid** (as Claude's do), so the
   HUD can link a card to its row; added with SV-3.
 
+## SV-6 design: the between-turn reader (2026-10-16)
+
+Built on SV-0 findings 6 and 8–13, the providers-runtime notes "What SV-6 must
+do for Claude's injected turns", and the owner's 2026-10-15 decisions above.
+
+**Who reads, when.** Every live Claude or Codex session has exactly one reader
+of its stream at any moment:
+
+- during a send, the send (as today);
+- between sends, an **idle reader**, started when a turn ends and only when the
+  daemon watches the session (`provider.watch(h)`, below). A session nobody
+  watches reads only during sends, as before.
+
+**Hand-off.**
+
+- *Claude.* The send, the idle reader and an adopted CLI turn are all
+  coroutines on the session's own event loop, and they share one lock-step
+  `_Pump`. A turn's coroutine first **parks** the idle reader: it cancels the
+  idle task and awaits its end, before it writes its query or reads anything.
+  The idle reader's only suspension point that touches the stream is
+  `pump.next()`, which is cancel-safe: the pump's outstanding request stays
+  for whoever asks next, and an item is never half-taken. Between two awaits
+  everything is atomic on one loop, so no message is read twice or lost. The
+  turn's own `finally`, on the loop, starts the idle reader again.
+- *Codex.* The idle reader is the daemon's watcher thread inside
+  `CodexProvider.watch`. One condition variable decides who reads the
+  transport: the idle drain takes it per message and gives it up between
+  messages; `send` raises "a send is waiting", waits until the drain lets go,
+  and then holds it to the turn's end. A child's approval card that the drain
+  is waiting on holds the reader, so a send waits for that card (the owner can
+  see it; a Stop ends the wait).
+
+**What the idle reader does with each message.**
+
+- *Claude, with a watcher:*
+  - a sub-agent's message (`parent_tool_use_id`) or a `task_*` system message
+    is translated (the same `_translate` as in a turn) and handed to the
+    watcher at once;
+  - a main-thread system message (`init`, `status`, …) is read for its side
+    effects (the session id) and kept only if something is already held;
+  - a CLI turn nobody sent — an untagged stream event or assistant message,
+    a replayed user message with a non-human `origin`, or a result with one —
+    is **offered**: it and every main-thread message after it are **held** in
+    order, and the watcher hears "the CLI started a turn" once;
+  - the echo of a late steer, or anything else main-thread, is held for the
+    next send, whose `_read` judges it by today's rules (leftover, stopped,
+    injected);
+  - the end of the stream or an SDK error is held for the next send, which
+    reports it exactly as today.
+
+  Held messages live on the session (`session.held`), are read before the
+  pump by every reader, and are bounded: past `HELD_LIMIT` a held stream
+  event (a delta) is dropped; whole messages, results and `task_*` never are.
+  With no watcher, everything is held (today's attribution, with the buffer
+  drained).
+- *Codex:* a known child's notification goes through the same
+  `_child_notification`; a `subAgentActivity` on the session's thread through
+  `_announce`; anything else on the session's thread is dropped, as the next
+  turn's filters drop it today. A known child's server request (approval,
+  `currentTime/read`, MCP elicitation, question) is answered exactly as in a
+  turn (`_server_request`). The session's own request between turns is
+  refused, not fatal; an unknown thread's stays a fatal identity mismatch. An
+  owner Stop on a child (`_child_stop_answered`) and a stale steer's answer
+  are read as in a turn.
+
+**The CLI's own turn (Claude only; Codex starts none, SV-0).** The daemon
+adopts an offered turn as a turn of the thread:
+
+- `Daemon._begin_cli` (under the daemon lock, only with no turn running and
+  `provider.cli_turn_pending(h)` true) mints a `turn_id`, logs and publishes a
+  `cli_turn` system line ("A background sub-agent finished, and Claude Code
+  carries on."), and starts the ordinary turn worker on
+  `provider.adopt(h)` instead of `send`. `adopt` reads the held CLI turn to
+  its result: text, tools, gate questions, usage and `turn_finished`, under
+  that `turn_id`, through the same `_record`.
+- Every record of that turn carries `self_started: true`. The Discord mirror
+  posts nothing for such a turn (owner decision); the HUD's speech
+  controller ignores its records (owner decision); the task runner does not
+  read its text as its own turn's reply. The HUD shows it like any turn.
+- While it runs, an owner message queues (Claude refuses a steer into a CLI
+  turn), and Stop interrupts it as any turn. When it ends, a further offered
+  turn is adopted before the queue drains, in the CLI's own order.
+- Usage: its `result` is translated once, by `adopt`, so its tokens and cost
+  go to the ledger once, under its own turn, and no longer into the next
+  owner turn.
+- An offer the daemon does not take in time (an owner send started first)
+  stays held, and that send reads it under today's `injected` rules: the
+  fallback, never a loss.
+
+**Approvals between turns** go to the session's own `permit`, the thread's
+broker asker, exactly as in a turn. Nothing here answers one. The provider's
+gate events between turns (not in an adopted turn) are logged with no
+`turn_id`, so no reader takes them for a finished turn's.
+
+**Lifecycle.** `close` (close, archive, loss, shutdown) parks the idle reader
+before it stops the pump and the loop, and ends the watcher's iterator. A
+Claude model switch parks it, drops what the old CLI's stream held, and the
+next turn's end starts it on the new client. A resume is a new session with
+its own watcher. A watcher thread ends with its session; `_cleanup` joins it,
+bounded.
+
+**Not covered.** A message the owner sends in the instant the CLI starts its
+own turn may still be read by today's fallback. A CLI turn that overflows the
+context is not compacted (the next owner turn is). Codex's 4096-message queue
+can still overflow while the owner decides on a child's card.
+
 ## Open questions for the owner
 
 1. **Inline rows or a strip under the transcript?** Recommend **inline at the spawn point**, collapsing above six. The row sits beside the words that launched it, and history reads the same.

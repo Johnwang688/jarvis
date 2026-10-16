@@ -2257,7 +2257,7 @@ def route(handler, daemon, parts, query):
                     messages.append(tools[index])
                     continue
                 kind = row.get("kind")
-                if kind not in (None, "text", "user", "model_set", "notice"):
+                if kind not in (None, "text", "user", "model_set", "notice", "cli_turn"):
                     continue
                 data = row.get("data", row)
                 text = data.get("text")
@@ -2265,8 +2265,10 @@ def route(handler, daemon, parts, query):
                     # A `/skill` turn shows as the owner typed it (S1).
                     text = f"/skill {data['skill']} {text}".rstrip()
                 if isinstance(text, str):
+                    # A turn the CLI started by itself opens with a `cli_turn`
+                    # line (SV-6): a system line, like a model change.
                     role = ("assistant" if kind == "text" else "user" if kind == "user"
-                            else "system" if kind in ("model_set", "notice")
+                            else "system" if kind in ("model_set", "notice", "cli_turn")
                             else row.get("role", "assistant"))
                     message = dict(role=role, text=text, at=row.get("at", row.get("t")))
                     # Opt-in clients reconcile an optimistic initial send by

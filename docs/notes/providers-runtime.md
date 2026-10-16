@@ -1317,3 +1317,166 @@ an ordinary (non-dot) folder is readable (the model's note says so). Tests:
 `tests/v2/codex_provider_check.py` (the profile checks),
 `tests/v2/codex_profile_probe_check.py` (the real app-server, skipped without
 the CLI) and `tests/v2/codex_profile_mutants.py`.
+
+## Between turns (SV-6, 2026-10-16)
+
+Plan: `docs/plans/2026-10-13-subagent-view.md`, "SV-6 design". API:
+`docs/hud-api.md`, "Between turns, and the CLI's own turns". This
+supersedes three earlier statements in these notes: "Between turns nobody
+reads the connection" (SV-2), "What SV-6 must do for Claude's injected turns"
+(SV-1), and SV-4's "between turns nobody reads the stream".
+
+**Who reads.** A provider with `watch(h)` is read between turns while the
+daemon watches the session. `Daemon._open` starts one watcher thread per
+session (`_start_watcher`, `_watch`), and it ends when the provider closes the
+session. A session nobody watches (the Diff tab's quick review, a provider-level test) is
+read only by its turns, as before. Each session has exactly one reader of
+its stream at a time:
+
+- **Claude.** The send, the idle reader (`_idle`) and an adopted CLI turn
+  are coroutines on the session's own loop. A turn parks the idle reader
+  (`_take_stream`: cancel it, then await its end) before it writes or reads
+  anything, and starts it again when it ends (`_give_stream`). The idle
+  reader waits only in `_Pump.next`. That wait is cancel-safe: the pump's
+  request stays standing for the next reader. Each message is routed
+  (`_route_idle`) with no await, so a park never lands half-way through one.
+  The pump stays lock-step: one message per request.
+- **Codex.** The watcher thread itself drains the transport inside
+  `CodexProvider.watch`. A condition variable (`reader_cv`, `reader`,
+  `send_waiting`) gives the transport to the drain for one message at a time,
+  and to a send for its whole turn. A send waits while the drain holds it;
+  the drain holds it through a child's card, so a send waits for that card.
+  Stop or a close ends the wait.
+
+**Routing (Claude, `_route_idle`).**
+
+- A sub-agent's message or a `task_*` message is translated now and handed
+  to the watcher. The child's row moves while the chat is idle, and a
+  `stop_task` between turns is confirmed at once.
+- A main-thread `init` or `status` message is read for the session id only.
+- A CLI turn nobody sent is **offered**. That is an untagged stream event or
+  assistant message, a replayed user message with a non-human `origin`, or
+  such a result, and it counts only on a CLI known to echo. It is held, and
+  the watcher hears TURN_STARTED `{self_started: origin}` once.
+- Anything else main-thread is **held** for the next turn, which judges it
+  by `_read`'s old rules. That covers a late steer's echo (interrupted at
+  once if its turn was stopped) and a stray result.
+- The end of the stream, or an SDK error, is held for the next turn. That
+  turn reports it exactly as before: the dead CLI's error is fatal and the
+  next message resumes.
+
+Held messages live on `session.held`. Every reader reads them first, through
+`_next`. They are bounded: past `HELD_LIMIT` (4096), a held stream event is
+dropped, and a whole message never is. With no watcher everything is held,
+which is the old attribution with the buffer drained.
+
+**The CLI's own turn.** `Daemon._maybe_cli` adopts an offered turn under
+the daemon lock, only when no turn runs and the provider's
+`cli_turn_pending(h)` is true:
+
+- A turn that ends takes it up once the watcher has passed the offer on
+  (`cli_offered`), so a sub-agent's end read first is recorded first.
+- An owner message (`deliver`), a runner's `send` and a queue about to run
+  ask the provider eagerly. The CLI runs its own turn first, and the message
+  waits for it instead of reading it.
+- `_begin_cli` logs and publishes a `cli_turn` line (`CLI_TURN_TEXT`). It
+  then runs the ordinary `_turn` worker over `provider.adopt(h)`, which reads
+  the held turn to its result.
+- `_record` marks every record of that turn `self_started: true`. The
+  Discord mirror skips such rows, the HUD's speech controller ignores such
+  events (the owner's decision, 2026-10-15) except that its Stop still
+  silences the children it hit (SV-5's rule; a child's own `subagent` notice
+  is not the turn's record and is still said), and the task runner's
+  subscription (`runner._for_turn`) leaves them out. `Daemon.send` says
+  "(the CLI's own)", and the runner waits such a turn out up to its turn
+  timeout instead of `SEND_TIMEOUT`.
+- Its `result` is translated once, by `adopt`. So its usage and cost reach
+  the ledger once, under its own `turn_id`, and not the next owner turn's.
+
+**Between-turn events in the daemon** (`_idle_event`):
+
+- A sub-agent event goes to `_record_subagent`, under the last turn's
+  `turn_id`.
+- A gate question is logged as `gate_requested`/`gate_resolved` with no
+  `turn_id`. A stale one would make the Discord mirror wait forever for that
+  finished turn's end.
+- An error becomes a `notice` line (`EventKind.NOTICE`) with no `turn_id`.
+  A fatal one also drops the session (the provider closed it), and the next
+  message resumes.
+
+**Approvals.** A Claude hook between turns runs `_decide` against the
+session's own `permit`, which is the thread's broker asker, exactly as in a
+turn. A Codex child's request between turns goes through the same
+`_server_request`, so it is always a widening that asks the owner, with no
+Always. The session's own request with no turn is refused (not fatal), and
+an unknown thread's request is the fatal identity mismatch it is in a turn.
+Nothing on these paths answers a question by itself.
+
+**Lifecycle.**
+
+- `ClaudeProvider.close` marks the session closed, ends the watcher's feed
+  under the lock `watch` registers under, then parks the idle reader before
+  it stops the pump and the loop.
+- `set_model` parks the idle reader and drops what the old CLI's stream
+  held, including an unadopted offer. The next turn's end starts the reader
+  on the new client.
+- Codex `close` wakes the condition variable, so the drain ends within one
+  poll.
+- `_cleanup` joins the watcher (`WATCH_JOIN_S`, 2 s) unless it is the
+  watcher itself. A resume is a new session with its own watcher.
+
+**Residuals.**
+
+- In the instant an owner's send starts, the CLI may start its own turn
+  too. That turn is then read by `_read`'s injected rule inside the owner's
+  turn (the old attribution, nothing lost).
+- A CLI turn that overflows the context is not compacted; the next owner
+  turn is.
+- Codex's 4096-message queue can still overflow while the owner decides on
+  a child's card (SV-2a's MED-2). Between turns that card can wait longer,
+  because nobody may be at the HUD: the drain holds the transport until the
+  broker answers, which bounds it by the card's own timeout (120 s on the
+  HUD, 600 s for a Discord DM, `approvals.LOCAL_TIMEOUT_S`/`REMOTE_TIMEOUT_S`;
+  then it declines). Busy children can fill the queue in that time; the
+  transport then fails closed (declined, the session closes, the next
+  message resumes). The drain empties the queue between cards.
+- A message `_translate` cannot read between turns is held for the next
+  turn, which meets it as before SV-6 (a turn that cannot read a message
+  fails), and the drain reads on (review of #234). While it waits there,
+  later child messages can overtake it, and CLI-turn offers stop, so a CLI
+  turn that starts then is read under the old attribution rules.
+- The Claude approval card's label can say "unnamed" when the hook beats the
+  provider's read of `task_started`. That was so before, and it is likelier
+  now that the buffer is read concurrently. It is a label only: the decision
+  is the same.
+
+**Review of #234.** HIGH-1: `Daemon._turn` held the provider's generator in a
+local until the worker returned, so its `finally` (which frees the turn slot,
+Codex's reader and steer waiters) ran after `_drain` had already started the
+next, queued turn — refused "already running" under load, and
+`steer_check`'s undelivered-steer test failed. The loop now runs under
+`contextlib.closing(source)`. A turn marks itself the reader before it parks
+the idle reader, and only that turn gives the stream back.
+
+**Checks** (free, offline): `tests/v2/idle_reader_check.py`, 41 tests. They
+cover the SV-0 recordings through the real providers (`one_default`,
+`parallel_default`, `stop_bg`, Codex `no_wait`), an SDK-shaped client with
+the SDK's 100-message buffer (which reproduces the 2026-10-12 stall
+unwatched and shows it gone watched), real daemons, the Discord harness and
+the runner. The speech skip is in `hud/src/lib/speech/controller.test.ts`.
+`tests/v2/idle_reader_mutants.py` kills all 27 of its mutants (each in a
+temp copy; the review of #234 added the generator left suspended, the
+orchestrator's own between-turn approval reaching `permit`, a stopped or
+failed CLI turn's end posted, the daemon answering a between-turn approval,
+an unroutable message stopping the drain, and a non-reader giving the stream
+back): the hand-off race, a double read, auto-approve
+(Claude and Codex), a Codex send beside the drain, Discord posting, unmarked
+records, a leaked reader or watcher, a switch on the old client, no idle
+reading (the stall), no offer, the idle reader reporting a dead CLI itself,
+an owner message overtaking the CLI's turn, the queue first, a gate record
+with a turn, a fatal error keeping the session, the runner reading or giving
+up on a CLI turn, no Codex drain, and an unknown thread let through. The
+speech mutant is killed by vitest. One candidate is equivalent and is not
+counted: `_park` without awaiting the cancelled task, because on one loop
+the cancel lands before the idle reader can run again.
+
