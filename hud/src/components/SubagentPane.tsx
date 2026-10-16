@@ -3,8 +3,9 @@
 // the child's texts, its tool calls by label and outcome (never arguments
 // or results), the CLI's closing word, a reviewer's decline by the tool's
 // name — and, at the top and collapsed, the brief the orchestrator gave it
-// (owner, 2026-10-15). No input box and no Stop (SV-4): steering stays with
-// the orchestrator. It follows the bottom only when the reader is there.
+// (owner, 2026-10-15). The header carries the owner's Stop for a live child
+// (SV-4, `SubagentStop`, the row's own control). No input box: steering
+// stays with the orchestrator. It follows the bottom only when the reader is there.
 //
 // A child's prose is untrusted data: Markdown's own sanitising, text nodes
 // everywhere else, and the brief as plain text.
@@ -17,7 +18,7 @@ import {
 import { noPointerFocus } from "../lib/talkkey";
 import { useAnchors, usePane, useRow, useWatch } from "../state/subagents";
 import { Markdown } from "./Markdown";
-import { SubagentRows } from "./SubagentRow";
+import { SubagentRows, SubagentStop } from "./SubagentRow";
 import { ToolGroupRow } from "./ToolGroupRow";
 
 const FAILED: Record<string, string> = {
@@ -54,8 +55,8 @@ function Item({ item, threadId, sid, drawn }: { item: PaneItem; threadId: string
   }
 }
 
-function Header({ row, live, drawn, threadTitle, onShowInChat }: {
-  row: Subagent; live: boolean; drawn: boolean; threadTitle: string; onShowInChat: (() => void) | null;
+function Header({ row, live, drawn, threadId, threadTitle, onShowInChat }: {
+  row: Subagent; live: boolean; drawn: boolean; threadId: string; threadTitle: string; onShowInChat: (() => void) | null;
 }) {
   const [now, setNow] = useState(Date.now);
   useEffect(() => {
@@ -80,6 +81,7 @@ function Header({ row, live, drawn, threadTitle, onShowInChat }: {
       {row.tokens !== undefined ? <span className="sa-count">{tokensText(row.tokens)}</span> : null}
       {row.declined ? <span className="sa-count">{row.declined} declined</span> : null}
       <span className="sa-of muted" title={threadTitle}>of {threadTitle || "its chat"}</span>
+      <SubagentStop threadId={threadId} row={row} />
       <button type="button" className="quiet" data-testid="sa-show-in-chat" disabled={!onShowInChat}
               onMouseDown={noPointerFocus}
               title={onShowInChat ? "Show this sub-agent's row in its chat" : "Its chat is not open in a pane"}
@@ -150,7 +152,7 @@ export const SubagentPane = memo(function SubagentPane(props: {
   }
   return (
     <div className="tabbody sa-pane" data-testid="sa-pane" data-sid={sid}>
-      {row ? <Header row={row} live={isLive(row.status)} drawn={props.drawn} threadTitle={props.threadTitle}
+      {row ? <Header row={row} live={isLive(row.status)} drawn={props.drawn} threadId={threadId} threadTitle={props.threadTitle}
                      onShowInChat={props.onShowInChat} /> : null}
       {pane.data ? <Brief text={pane.data.brief} provider={providerOf(sid)} /> : null}
       <div className="scroll chatlog" ref={logRef} data-testid="sa-log" onScroll={(e) => {

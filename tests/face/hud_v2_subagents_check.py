@@ -19,7 +19,14 @@ enforcing the owner-only rule on both sub-agent routes. What it pins:
      row and, once the card is answered, focuses the pane or the row;
   6. more than six rows at a spot collapse into one line;
   7. a reconnect reads everything again (a restart's children come back
-     stopped); a reload restores the pane; a gone record says so and closes.
+     stopped); a reload restores the pane; a gone record says so and closes;
+  8. the owner's Stop on one child (SV-4): beside a live row and in its
+     pane's header; a script's click sends nothing, the owner's click, Enter
+     or Space sends one request and shows "stopping…" until the CLI's end;
+     Codex's hover help states its caveat; "Can't stop" says why; a refusal
+     shows the daemon's sentence; under a card it is disabled and a click
+     sends nothing; the thread's own Stop on a Claude chat says it also
+     stops background sub-agents (Codex's does not).
 
 Run: PLAYWRIGHT_BROWSERS_PATH=… PYTHONPATH=. .venv/bin/python tests/face/hud_v2_subagents_check.py
 """
@@ -505,6 +512,168 @@ def subagents_checks(browser, mock, base, check, until, guard, init_script):
         until(lambda: sub_panes().count() == 0)
         check("…and Close closes its pane", sub_panes().count() == 0)
         s["fail"] = {}
+
+        # 8. The owner's Stop on one child (SV-4).
+        seed(mock)
+        s["lists"]["c1"][0]["stoppable"] = True                          # alpha: running, Claude
+        s["lists"]["x1"][0]["stoppable"] = True                          # the Codex fixer
+        s["lists"]["c1"].append(row("cl:toolu_delta", name="Delta helper", started_at=at(3), stoppable=True))
+        s["lists"]["c1"].append(row(
+            "cl:toolu_cant", name="Cannot stop", started_at=at(4), stoppable=False,
+            stop_unavailable="Claude Code has not given this sub-agent a task id, so it can be stopped only "
+                             "by stopping the whole turn."))
+        s["transcripts"]["c1|cl:toolu_delta"] = {"subagent": s["lists"]["c1"][3], "truncated": False, "messages": [
+            {"role": "assistant", "text": "delta working", "seq": 1, "at": at(5)}]}
+        s["stops"], s["stop_answer"] = [], {}
+        _fresh(page, mock, until, TWO)
+        open_thread(1, "c1")
+        open_thread(2, "x1")
+        until(lambda: rows(1).count() == 4 and rows(2).count() == 1)
+        stop_of = lambda sid: page.locator(f'[data-testid="subagent-row"][data-sid="{sid}"] [data-testid="subagent-stop"]')
+        until(lambda: stop_of("cl:toolu_alpha").count() == 1)
+        check("a live child offers Stop beside its row (never inside its open button); an ended one does not",
+              stop_of("cl:toolu_alpha").count() == 1 and stop_of("cl:toolu_beta").count() == 0
+              and page.locator('.sa-open [data-testid="subagent-stop"]').count() == 0
+              and stop_of("cl:toolu_alpha").inner_text() == "Stop")
+        cant = page.locator('[data-testid="subagent-row"][data-sid="cl:toolu_cant"] [data-testid="subagent-cant-stop"]')
+        check("a child its CLI cannot stop alone says Can't stop, with why on hover",
+              cant.count() == 1 and cant.inner_text() == "Can't stop" and "whole turn" in cant.get_attribute("title")
+              and stop_of("cl:toolu_cant").count() == 0)
+        why = cant.get_attribute("aria-describedby") or ""
+        check("…and why is reachable by keyboard and screen reader: focusable, described by its reason",
+              cant.get_attribute("tabindex") == "0" and why != ""
+              and "whole turn" in page.evaluate("id => document.getElementById(id)?.textContent || ''", why))
+        codex_help = stop_of("cx:019a-fixer").get_attribute("title") or ""
+        check("Codex's Stop states its caveat on hover",
+              "A command it is already running may still finish" in codex_help
+              and "the orchestrator's model is not told" in codex_help, codex_help)
+        check("Claude's Stop says the turn and the other sub-agents go on",
+              "other sub-agents go on" in (stop_of("cl:toolu_alpha").get_attribute("title") or ""))
+        page.screenshot(path=str(SHOTS / "sv4-rows.png"))
+        for headers in ({}, {"Origin": "http://evil.example"}, {"Origin": "null"},
+                        {"Sec-Fetch-Site": "same-origin"}):
+            req = urllib.request.Request(f"{base}/threads/c1/subagents/cl:toolu_delta/stop", data=b"{}",
+                                         method="POST", headers={"Content-Type": "application/json", **headers})
+            try:
+                urllib.request.urlopen(req, timeout=3)
+                code = 200
+            except urllib.error.HTTPError as e:
+                code = e.code
+            check(f"the mock's Stop route refuses a non-owner POST {headers or '(bare)'}", code == 403)
+        check("…and nothing refused got through", s["stops"] == [])
+        s["refused"] = 0
+        page.evaluate("""() => {
+            const b = document.querySelector('[data-sid="cl:toolu_alpha"] [data-testid="subagent-stop"]');
+            b.click();
+            b.dispatchEvent(new MouseEvent('click', {bubbles: true, button: 0, detail: 1}));
+            b.focus();
+            b.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', bubbles: true}));
+        }""")
+        time.sleep(0.3)
+        check("a script's click or dispatched event sends no Stop", s["stops"] == [], str(s["stops"]))
+        stop_of("cl:toolu_alpha").click()
+        until(lambda: len(s["stops"]) == 1)
+        until(lambda: stop_of("cl:toolu_alpha").inner_text() == "stopping…")
+        alpha_stop = stop_of("cl:toolu_alpha")
+        check("the owner's click sends one Stop (and opens nothing); the row says stopping…, still running, "
+              "until the CLI confirms",
+              s["stops"] == [("c1", "cl:toolu_alpha")] and alpha_stop.is_disabled() and sub_panes().count() == 0
+              and rows(1).first.get_attribute("data-status") == "running"
+              and alpha_stop.evaluate("e => getComputedStyle(e).color") == "rgb(251, 191, 36)")
+        alpha_stop.dblclick(force=True)
+        time.sleep(0.3)
+        check("pressing it again while stopping sends nothing more", len(s["stops"]) == 1)
+        page.screenshot(path=str(SHOTS / "sv4-stopping.png"))
+        alpha = s["lists"]["c1"][0]
+        alpha.pop("stop", None)
+        alpha.update(status="stopped", stop_reason="stopped by the owner", ended_at=at(60))
+        emit("c1", "cl:toolu_alpha", op="finished", status="stopped", ended_at=at(60))
+        until(lambda: rows(1).first.get_attribute("data-status") == "stopped")
+        until(lambda: (rows(1).first.locator(".sa-status").get_attribute("title") or "") == "stopped by the owner")
+        check("the CLI's own end clears it: no Stop, 'stopped by the owner' on the status, the sibling still live",
+              stop_of("cl:toolu_alpha").count() == 0
+              and page.locator('[data-sid="cl:toolu_delta"]').get_attribute("data-status") == "running")
+        stop_of("cx:019a-fixer").focus()
+        page.keyboard.press("Enter")
+        until(lambda: len(s["stops"]) == 2)
+        check("Enter on a focused Stop is the owner's press (Codex)", s["stops"][-1] == ("x1", "cx:019a-fixer"))
+        until(lambda: stop_of("cx:019a-fixer").inner_text() == "stopping…")
+        time.sleep(0.2)
+        check("…and focus stays on the button while it says stopping… (aria-disabled, not disabled)",
+              page.evaluate("document.activeElement?.dataset?.testid === 'subagent-stop' && "
+                            "document.activeElement.closest('[data-sid]').dataset.sid === 'cx:019a-fixer'")
+              and stop_of("cx:019a-fixer").get_attribute("aria-disabled") == "true")
+        page.keyboard.press("Enter")
+        time.sleep(0.2)
+        check("Enter again while stopping sends nothing more", len(s["stops"]) == 2)
+
+        # Under a card: disabled, and a click on it sends nothing.
+        mock.emit("approval_requested", {
+            "req_id": "sv4card", "code": "SV41", "tool": "Bash", "command": "make", "args": {}, "reason": "asks",
+            "layer": "human", "origin": "", "thread_id": "c1", "timeout_s": 120})
+        card = page.locator('[data-testid="approval-card"]')
+        until(lambda: card.count() == 1)
+        delta = stop_of("cl:toolu_delta")
+        until(lambda: delta.is_disabled())
+        box = delta.bounding_box()
+        page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+        reached = False
+        for _ in range(6):
+            page.keyboard.press("Tab")
+            reached |= page.evaluate("document.activeElement?.dataset?.testid === 'subagent-stop'")
+        time.sleep(0.3)
+        check("under an approval card Stop is disabled, out of reach of Tab, and a click sends nothing",
+              delta.is_disabled() and not reached and len(s["stops"]) == 2 and card.count() == 1)
+        page.screenshot(path=str(SHOTS / "sv4-card.png"))
+        page.locator('[data-testid="approval-deny"]').click()
+        until(lambda: card.count() == 0)
+        until(lambda: not delta.is_disabled())
+        refusal = "Claude Code can stop this sub-agent only by stopping the whole turn."
+        s["stop_answer"]["cl:toolu_delta"] = (409, {"error": refusal, "supported": False, "reason": refusal})
+        delta.focus()
+        page.keyboard.press("Space")
+        err = page.locator('[data-testid="subagent-row"][data-sid="cl:toolu_delta"] [data-testid="subagent-stop-error"]')
+        until(lambda: err.count() == 1)
+        check("Space is the owner's press too; a refusal shows the daemon's sentence and leaves Stop offered",
+              len(s["stops"]) == 3 and err.inner_text() == refusal and delta.inner_text() == "Stop")
+        del s["stop_answer"]["cl:toolu_delta"]
+        # The CLI's own refusal (review of #216): a note with its reason, and no Stop again.
+        s["lists"]["c1"].append(row("cl:toolu_eps", name="Eps helper", started_at=at(6), stoppable=True))
+        emit("c1", "cl:toolu_eps", op="started", started_at=at(6))
+        until(lambda: stop_of("cl:toolu_eps").count() == 1)
+        s["stop_answer"]["cl:toolu_eps"] = (409, {"error": "The CLI refused the stop: No task found with ID: t9.",
+                                                  "refused": True})
+        stop_of("cl:toolu_eps").click()
+        note = page.locator('[data-testid="subagent-row"][data-sid="cl:toolu_eps"] [data-testid="subagent-stop-refused"]')
+        until(lambda: note.count() == 1)
+        check("the CLI's refusal shows 'Stop refused' with its reason, and offers no Stop again",
+              stop_of("cl:toolu_eps").count() == 0 and note.inner_text() == "Stop refused"
+              and "No task found" in (note.get_attribute("title") or "") and note.get_attribute("tabindex") == "0")
+        del s["stop_answer"]["cl:toolu_eps"]
+
+        # In the pane's header.
+        page.locator('[data-sid="cl:toolu_delta"] .sa-open').click()
+        head = page.locator('[data-testid="sa-pane"][data-sid="cl:toolu_delta"] [data-testid="sa-head"]')
+        until(lambda: head.count() == 1 and head.locator('[data-testid="subagent-stop"]').count() == 1)
+        head.locator('[data-testid="subagent-stop"]').click()
+        until(lambda: len(s["stops"]) == 4)
+        until(lambda: head.locator('[data-testid="subagent-stop"]').inner_text() == "stopping…")
+        check("the pane's header has the same Stop: one request, stopping… in the header and the row",
+              s["stops"][-1] == ("c1", "cl:toolu_delta") and delta.inner_text() == "stopping…")
+        page.screenshot(path=str(SHOTS / "sv4-pane.png"))
+
+        # The thread's own Stop: on a Claude chat it says it also stops background sub-agents.
+        for n in (1, 2):
+            _box(page, n).fill(f"sv4 run {n}")
+            _box(page, n).press("Enter")
+        main_stop = lambda n: page.locator(_pane(n, '[data-testid="stop"]'))
+        until(lambda: main_stop(1).count() == 1 and main_stop(2).count() == 1)
+        claude_help, codex_help = main_stop(1).get_attribute("title"), main_stop(2).get_attribute("title")
+        check("the thread's Stop on a Claude chat says it also stops background sub-agents; Codex's does not",
+              "also stops the chat's background sub-agents" in claude_help
+              and "sub-agents" not in codex_help, f"{claude_help!r} / {codex_help!r}")
+        for tid in ("c1", "x1"):
+            mock.emit("turn_finished", {"stop": "end"}, thread_id=tid)
         check("the HUD's reads were never refused by the owner gate", s["refused"] == 0)
         check("no page errors", not errors, "; ".join(errors[:3]))
     finally:

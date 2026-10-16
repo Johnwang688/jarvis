@@ -113,6 +113,37 @@ class DaemonError(RuntimeError):
     """Lifecycle conflict (HTTP 409)."""
 
 
+# The owner's Stop on one native sub-agent (SV-4): its refusals, one sentence each.
+SUBAGENT_NO_SESSION = "This chat's session is not open, so nothing it ran is still running."
+SUBAGENT_STOP_UNSUPPORTED = "This chat's provider cannot stop one sub-agent by itself."
+
+
+class SubagentStopRefused(DaemonError):
+    """The owner's Stop on a sub-agent was not sent (409): `stale` when it is
+    no longer running, `supported` False when its CLI cannot stop it alone,
+    `unconfirmed` when it went out but the CLI did not say it took it,
+    `refused` when the CLI answered it with a refusal of its own."""
+
+    def __init__(self, message: str, *, stale: bool = False, supported: bool = True,
+                 unconfirmed: bool = False, refused: bool = False):
+        super().__init__(message)
+        self.stale, self.supported, self.unconfirmed = stale, supported, unconfirmed
+        self.refused = refused
+
+    def body(self) -> dict:
+        out: dict = {"error": str(self)}
+        if self.stale:
+            out["stale"] = True
+        if not self.supported:
+            out["supported"] = False
+            out["reason"] = str(self)
+        if self.unconfirmed:
+            out["unconfirmed"] = True
+        if self.refused:
+            out["refused"] = True
+        return out
+
+
 class _StopPending(DaemonError):
     """A provider is still receiving the stop for this thread."""
 
@@ -1851,6 +1882,114 @@ class Daemon:
             self._drain(thread_id)
         return {"ok": True}
 
+    # -- the owner's Stop on one native sub-agent (SV-4) ----------------------
+
+    def _subagent_session(self, thread_id):
+        """(provider, handle, key) of the thread's open session, or None."""
+        with self._lock:
+            session = self._sessions.get(thread_id)
+            if (session is None or session.handle is None or session.closing
+                    or session.retired):
+                return None
+            return session.provider, session.handle, session.subagent_key
+
+    def subagent_stop_offers(self, thread_id, rows):
+        """The list route's rows, each live one saying whether the owner's
+        Stop can be sent to it now (`stoppable`) and, when not, why
+        (`stop_unavailable`, one plain sentence). Asks the provider, which
+        sends nothing; outside the daemon's lock."""
+        from .approvals import clean_line
+        from .subagents import LIVE
+        live = self._subagent_session(thread_id)
+        for row in rows:
+            if row.get("status") not in LIVE:
+                continue
+            reason = None
+            if live is None:
+                reason = SUBAGENT_NO_SESSION
+            else:
+                provider, handle, key = live
+                check = getattr(provider, "subagent_stop_refusal", None)
+                if not callable(check) or not callable(getattr(provider, "stop_subagent", None)):
+                    reason = SUBAGENT_STOP_UNSUPPORTED
+                elif row.get("_key") is not None and row.get("_key") != key:
+                    reason = SUBAGENT_NO_SESSION
+                else:
+                    try:
+                        reason = check(handle, row["sid"])
+                    except Exception:  # noqa: BLE001 — a check that fails offers nothing
+                        reason = SUBAGENT_STOP_UNSUPPORTED
+            row["stoppable"] = reason is None
+            if reason is not None:
+                row["stop_unavailable"] = clean_line(str(reason), 160)
+        for row in rows:
+            row.pop("_key", None)
+        return rows
+
+    def stop_subagent(self, thread_id, sid):
+        """The owner's Stop on one native sub-agent (SV-4; the owner's
+        2026-10-15 decisions). Only the HUD's owner route calls this: never
+        the API listener, session MCP, Discord or the CLI.
+
+        Asks the provider to stop that child alone (Claude `stop_task`, Codex
+        `turn/interrupt` on the child's own thread) — never the thread's turn
+        — and marks it "stopping" until the CLI's own word ends it.
+        Idempotent: a Stop already on its way sends nothing more. Raises
+        `SubagentStopRefused` (409, a plain sentence) when nothing can be
+        sent, LookupError for an unknown child."""
+        from .approvals import clean_line
+        from .provider import SubagentNotLive, SubagentStopDeclined, SubagentStopUnsupported
+        thread = self.require(self.stores.threads, thread_id)
+        live = self._subagent_session(thread.id)
+        if live is None:
+            raise SubagentStopRefused(SUBAGENT_NO_SESSION, stale=True)
+        provider, handle, key = live
+        stopper = getattr(provider, "stop_subagent", None)
+        outcome, token = self.subagents.begin_stop(thread, sid, key)
+        if outcome == "unknown":
+            raise LookupError("no such sub-agent on this thread")
+        if outcome == "closed":
+            raise SubagentStopRefused("Jarvis is stopping, so nothing more is sent to the CLI.", stale=True)
+        if outcome in ("ended", "elsewhere"):
+            raise SubagentStopRefused(
+                "This sub-agent has already ended." if outcome == "ended" else SUBAGENT_NO_SESSION,
+                stale=True)
+        if outcome == "stopping":
+            return {"ok": True, "stop": "stopping", "already": True}
+        try:
+            if not callable(stopper):
+                raise SubagentStopUnsupported(SUBAGENT_STOP_UNSUPPORTED)
+            stopper(handle, sid)
+        except SubagentStopUnsupported as exc:
+            self.subagents.stop_failed(thread, sid, token, unconfirmed=False)
+            raise SubagentStopRefused(clean_line(str(exc), 200) or SUBAGENT_STOP_UNSUPPORTED,
+                                      supported=False) from None
+        except SubagentStopDeclined as exc:
+            # The CLI's own answer: it got the request and turned it down.
+            # Not "unconfirmed" — pressing Stop again would only be refused again.
+            from .redact import scrub_text
+            try:
+                # As a child's words are (`subagents._words`): Jarvis's own
+                # credential values, the known key shapes, tokens.
+                reason = clean_line(scrub_text(str(exc)[:2000]), 120) or "no reason given"
+            except Exception:  # noqa: BLE001 — an unscrubbable reason is not shown
+                reason = "no reason given"
+            self.subagents.stop_failed(thread, sid, token, refused=reason)
+            raise SubagentStopRefused(f"The CLI refused the stop: {reason.rstrip('.')}.",
+                                      refused=True) from None
+        except SubagentNotLive as exc:
+            self.subagents.stop_failed(thread, sid, token, unconfirmed=False)
+            raise SubagentStopRefused(clean_line(str(exc), 200) or "This sub-agent has already ended.",
+                                      stale=True) from None
+        except Exception as exc:  # noqa: BLE001 — the CLI may still act on it: said so
+            LOG.warning("Stopping sub-agent %s on %s: %s", sid, thread.id, type(exc).__name__)
+            self.subagents.stop_failed(thread, sid, token, unconfirmed=True)
+            raise SubagentStopRefused(
+                "The stop was sent, but the CLI did not confirm it took it; the sub-agent "
+                "may still stop. Press Stop again to retry.", unconfirmed=True) from None
+        self.subagents.stop_sent(thread, sid, token)
+        return {"ok": True, "stop": "stopping"}
+
     def answer(self, thread_id, req_id, decision):
         session = self._session(thread_id)
         session.provider.answer(session.handle, req_id, decision)
@@ -1969,6 +2108,7 @@ class Daemon:
             for session in sessions:
                 session.retired = True
             self._sessions.clear()
+        self.subagents.close()
         self.terminals.finish_all(max(deadline, time.monotonic() + 0.2))
         self.devservers.stop()
         self.vex.stop()

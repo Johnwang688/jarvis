@@ -3121,7 +3121,8 @@ SV-1) and Codex's child agents (0.161, SV-2) — are **not the orchestrator**. W
 the thread's `text`, `tool_*` or `thinking`: not in the transcript route,
 the Discord mirror, a task's result, titles, the ledger or `/events`. It is
 kept apart, in the thread's own `subagents.jsonl`, and read only through the
-two routes below. Plan: `docs/plans/2026-10-13-subagent-view.md`; protocol:
+two routes below; since SV-4 the owner can also stop one child (the third
+route below). Plan: `docs/plans/2026-10-13-subagent-view.md`; protocol:
 `docs/plans/2026-10-15-sv0-findings.md`; notes:
 `docs/notes/providers-runtime.md` ("Claude sub-agents are their own",
 "Codex sub-agents are their own").
@@ -3151,7 +3152,9 @@ decides an end. Jarvis infers one only when:
 **The thread's Stop also kills background children.** `POST
 /threads/{id}/interrupt` is Claude Code's interrupt, which stops every
 background agent of the session too, even between turns (SV-0 finding 6).
-There is no per-child Stop yet (SV-4).
+The owner kept that (2026-10-15), and on a Claude chat the HUD's Stop says
+so in its hover help. To stop one child alone, use `POST
+/threads/{id}/subagents/{sid}/stop` (SV-4, below).
 
 ### Codex children (SV-2)
 
@@ -3206,10 +3209,11 @@ What differs from Claude's, on the same record and routes:
   owner's card carry the child's **sid** as `subagent`, as Claude's do (see
   "On `/events`" below); the name stays in the headline. Nothing decides on
   it.
-- **No per-child Stop** (SV-4). Codex's `turn/interrupt` on a child's thread
-  ends that child's turn (`stopped`), but a command it is running runs to its
-  end, and the orchestrator's model is not told (SV-0 finding 12). Whether
-  Stop is offered with that caveat is the owner's call.
+- **Per-child Stop, with its caveat** (SV-4; the owner's 2026-10-15
+  decision). Codex's `turn/interrupt` on a child's own thread and turn ends
+  that child's turn (`stopped`, `stop_reason` "stopped by the owner"), but a
+  command it is running runs to its end, and the orchestrator's model is not
+  told (SV-0 finding 12). The HUD's Stop says exactly that on hover.
 
 ### `GET /threads/{id}/subagents`
 
@@ -3231,7 +3235,9 @@ exist). Read-only: any other method is 405. No query.
 
 Oldest first. Optional keys (`task_id`, `parent_sid`, `ended_at`,
 `stop_reason`, `tokens`, `tool_uses`, `duration_ms`, `last_tool`) are left
-out when unknown. `name` (the Agent
+out when unknown. A live row also says whether the owner's Stop can be sent
+to it (`stoppable`, with `stop_unavailable` when not) and, while one is
+pending, `stop` and `stop_requested_at` (SV-4, below). `name` (the Agent
 call's `description`), `kind` (`subagent_type`) and `last_tool` are
 model-chosen: scrubbed of credential values, one line, at most 40
 characters — render as text. `depth`/`parent_sid`: Claude Code 2.1.295 lets a
@@ -3312,17 +3318,114 @@ line per child of what memory holds, at most about 1 MiB, so the file stays
 bounded and a cold read, which takes at most its last 4 MiB, rebuilds all
 of memory.
 
+### `POST /threads/{id}/subagents/{sid}/stop` (SV-4)
+
+The owner's Stop on one live child, from the HUD: a row's or a sub-agent
+pane's Stop button. Body `{}` (any key is 400); no query. **Owner-only**,
+checked before the thread is looked up, the sid read or the body read: the
+API listener, a bare request, a cross-site or `Origin: null` request and
+the workshop's Origin are 403, also for a thread that does not exist; the
+workshop listener serves no daemon route. No agent reaches it: it is not on
+the API listener every tool's HTTP client uses, and no session MCP tool,
+Discord verb, CLI command or other route calls `Daemon.stop_subagent`
+(`tests/v2/subagent_stop_check.py`). Any other method is 405; a sid that
+does not match the pattern is 400; an unknown thread or sid is 404.
+
+What it does, by provider (`provider.stop_subagent`):
+
+- **Claude**: the SDK's `ClaudeSDKClient.stop_task(task_id)` for that child
+  — never `interrupt()`. SV-0 (findings 2, 7) showed on CLI 2.1.295 that it
+  stops exactly that child, foreground or background: `task_updated`
+  `killed`, then `task_notification` `stopped`; the orchestrator's turn and
+  every sibling go on. Offered only with a `task_id` and with
+  `CLAUDE_STOP_VERIFIED` (`"2.1.295"`, the owner's 2026-10-15 decision on
+  that offline evidence; a floor, as `CLAUDE_VERIFIED` is: a CLI Jarvis has
+  read to be older is refused; one whose version Jarvis has not read yet is
+  allowed). The CLI must take the request within 10 s
+  (`STOP_CONTROL_TIMEOUT_S`); past that the route stops waiting but does not
+  cancel the request, so the SDK's own 60 s control timeout (or the CLI's
+  late answer) clears the SDK's private pending-response entry as the SDK
+  means to. The CLI's own refusal (an error control response, such as "no
+  such task") is its answer, not a lost one: see `refused` below.
+- **Codex**: `turn/interrupt {threadId: <the child's>, turnId: <its running
+  turn>}` — never the orchestrator's — written under the lock its answer is
+  read under, so even an error answer is never the orchestrator's turn
+  failing. Ends the child's turn only (see "Codex children").
+
+```json
+{"ok": true, "stop": "stopping"}
+{"ok": true, "stop": "stopping", "already": true}
+```
+
+**Idempotent**: while a Stop is on its way (`stop: "stopping"`), pressing it
+again sends nothing and answers `already`. **409, one plain sentence in
+`error`**, when the Stop did not go through. For `stale` and
+`supported: false` nothing was sent and the child's record is left as it
+was; `unconfirmed` and `refused` set the record's `stop` as they say:
+
+- `{"error": "This sub-agent has already ended.", "stale": true}` — ended,
+  run by a session that is gone, or the chat's session is not open
+  ("This chat's session is not open, so nothing it ran is still running.");
+- `{"error": "<why>", "supported": false, "reason": "<why>"}` — its CLI
+  cannot stop it alone (e.g. "Claude Code can stop this sub-agent only by
+  stopping the whole turn.");
+- `{"error": "The stop was sent, but the CLI did not confirm it took it; the
+  sub-agent may still stop. Press Stop again to retry.", "unconfirmed":
+  true}` — the request went out but the CLI did not answer it; the record
+  says `stop: "unconfirmed"`, and Stop may be pressed again;
+- `{"error": "The CLI refused the stop: <its reason>.", "refused": true}` —
+  the CLI answered with a refusal of its own (Claude's error control
+  response). The reason is scrubbed (`redact.scrub_text`) and cut to one
+  line of at most 120 characters. The record says `stop: "refused"` and
+  keeps the reason as `stop_error` on the owner's list and transcript rows
+  only (never the bus); the HUD shows "Stop refused" with it and offers no
+  Stop again, since it would only be refused again;
+- `{"error": "Jarvis is stopping, so nothing more is sent to the CLI.",
+  "stale": true}` — the daemon is shutting down.
+
+**The record says "stopping" until the CLI's own word.** From the moment the
+daemon hands the request to the provider, the list row, the transcript's
+`subagent` and the bus record carry `"stop": "stopping"` and
+`"stop_requested_at"`; the status stays live. (A Codex refusal arrives
+later, on the transport, and is only logged: the child's own `turn/completed`
+then says why it ended, never "stopped by the owner", and with no end the
+record turns "unconfirmed".) Only the CLI ends it: Claude's
+`killed`/`stopped`, the Codex child's `turn/completed` `interrupted`, which
+give `status: "stopped"`, `stop_reason: "stopped by the owner"` and clear
+`stop`. Nothing infers an end from a stop. If the CLI has said nothing after
+15 s (`subagents.STOP_CONFIRM_S`), the record says `"stop": "unconfirmed"`
+— honestly: the request went out, the child may still be running — and the
+owner may press Stop again (it is sent again). Between turns nobody reads
+the CLI (SV-6), so a child stopped then is usually confirmed only when the
+next message's turn reads the CLI's answer. A restart reads a live child
+back stopped, with no mark.
+
+**What the list offers.** Each live row of `GET /threads/{id}/subagents` (and
+the transcript's `subagent`) carries `"stoppable": true`, or `false` with
+`"stop_unavailable"`: one plain sentence (at most 160 characters) saying
+why — the session is not open, it ran under a session that is gone, the
+provider cannot stop one child, Claude Code has given it no task id, or its
+Codex child is running no turn. The provider is asked (`subagent_stop_refusal`),
+which sends nothing. An ended row carries neither.
+
+**Silent.** A Stop is never spoken or posted: nothing goes to the voice
+queue or Discord, and the "<name> stopped" line is not spoken (the owner
+did it; open question 5). It never answers a card; a card a stopped child
+raised resolves as the CLI resolves it.
+
 ### On `/events`
 
 ```json
 {"kind": "subagent", "thread_id": "…", "project_id": "…", "turn_id": "…", "at": "…",
  "data": {"sid": "cl:…", "op": "started|progress|finished", "status": "…",
           "depth": 1, "background": true, "started_at": "…", "entries": 2,
-          "task_id": "…", "parent_sid": "cl:…", "ended_at": "…"}}
+          "task_id": "…", "parent_sid": "cl:…", "ended_at": "…",
+          "stop": "stopping|unconfirmed|refused", "stop_requested_at": "…"}}
 ```
 
 One per change (a start, a progress tick, a new or finished transcript
-entry, an end; `declined` when not 0). **Ids, a status, times and counts
+entry, an end, the owner's Stop asked for or unconfirmed; `declined` when
+not 0; `stop`/`stop_requested_at` while a Stop is pending, SV-4). **Ids, a status, times and counts
 only**: never a name, a word a child wrote or a tool's arguments, since
 `/events` is open to any local client on the API listener. A client that
 wants more asks the owner routes. (The one place a child's name reaches

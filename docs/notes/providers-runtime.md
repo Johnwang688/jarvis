@@ -1025,3 +1025,102 @@ Ten mutants are killed:
   matching the pattern on `ApprovalRequest.subagent`, in the public JSON only
   when set. No layer reads it: `subagent_routes_check` runs every profile ×
   asker × case with and without it and compares the answers.
+
+## The owner stops one native sub-agent (SV-4, 2026-10-15)
+
+Plan: `docs/plans/2026-10-13-subagent-view.md` (SV-4, D4 "Stop"); protocol:
+`docs/plans/2026-10-15-sv0-findings.md` (verdicts 2, 7, 12); API:
+`docs/hud-api.md` "`POST /threads/{id}/subagents/{sid}/stop`".
+
+**Decisions used** (the owner's, 2026-10-15, plan "Decisions recorded
+(owner, 2026-10-15, after SV-0/SV-1/SV-2)" and open questions 4, 5):
+
+- Claude per-child Stop is enabled on SV-0's offline evidence for CLI
+  2.1.295 (`CLAUDE_STOP_VERIFIED`); no live run was required first.
+- Codex per-child Stop is offered, with its caveat shown: it ends the child's
+  turn; a command it is already running may still finish; the
+  orchestrator's model is not told.
+- The thread's own Stop keeps killing Claude's background sub-agents, and
+  the HUD says so on that button.
+- One click, with "stopping…" until the CLI confirms (Q4); "<name> stopped"
+  is never spoken (Q5): nothing about a Stop is spoken or posted.
+
+**Providers** (optional `subagent_stop_refusal(h, sid)` and
+`stop_subagent(h, sid)`, `provider.py`; `SubagentNotLive`,
+`SubagentStopUnsupported`, each raised before anything is sent):
+
+- **Claude** (`claude.py`): `client.stop_task(task_id)` on the session's
+  loop — never `interrupt()`. It needs the child live in this session, a
+  `task_id` (from `task_started`) and `CLAUDE_STOP_VERIFIED`; a CLI version
+  Jarvis has already read below it is refused (`_known_cli_version` reads
+  the cache only: a route never spawns `claude --version`). The child is
+  marked `owner_stop`, so the CLI's later `killed`/`stopped` gives
+  `stop_reason` "stopped by the owner". `STOP_CONTROL_TIMEOUT_S` (10 s)
+  bounds the wait for the CLI to take the request: between turns nobody
+  reads the stream (SV-6), and a full SDK buffer could hold back its answer;
+  past it the future is cancelled and `TimeoutError` raised (the CLI may
+  still act on it). Pinned on the real provider with SV-0's
+  `stop_fg_parallel` replayed through a client that waits, where the recorder
+  called `stop_task`, for the provider to call it with the recorded task id:
+  the stopped child ends "stopped by the owner", its sibling finishes `done`,
+  the turn ends `end`, and `interrupt()` is never called. `stop_bg` pins the
+  between-turns case: `stop_task` goes out at once, the child stays live, and
+  the next send's reading confirms it.
+- **Codex** (`codex.py`): `turn/interrupt {threadId: child, turnId: its
+  running turn}` (`_ChildView.turn`), sent under `s.mutex` and registered in
+  `s.child_stops` (at most `CHILD_STOPS`, 64) under that same lock, as a
+  steer is, so the answer cannot be read before it is known. The turn loop's
+  response branch takes it (`_child_stop_answered`) before "Codex control
+  request failed": an error answer is logged, never fatal. The child's own
+  `turn/completed` `interrupted` then gives "stopped by the owner" (the
+  orchestrator's `interrupt_agent` still gives "the orchestrator stopped it",
+  an outside `turn/interrupt` "its turn was interrupted"). Pinned over real
+  pipes on SV-0's `child_interrupt` recording, with the recorder's own
+  `turn/interrupt` replaced by a wait for the provider's (the peer's
+  `$WAIT`; one aimed at the parent ends the parent's turn `interrupted`).
+
+**The daemon** (`Daemon.stop_subagent`, `subagent_stop_offers`;
+`SubagentRecords.begin_stop`/`stop_sent`/`stop_failed`). The route is
+`owner_only` before anything else (`hud_api.subagent_route`). The session
+must be open and the child live under its `subagent_key`; the record is
+marked `stop: "stopping"` (written and published) **before** the provider is
+asked, so a second press finds it and sends nothing. A refusal clears the
+mark; a transport failure or timeout leaves `stop: "unconfirmed"`. After a
+send, a timer (`STOP_CONFIRM_S`, 15 s, one per child, tokened so a late
+timer never touches a newer Stop, cancelled when the CLI's word lands and at
+`Daemon.stop`) turns a still-pending mark into "unconfirmed". The mark lives
+only while the child is live: any end, a Codex revival, a restart's
+read-back and a snapshot restore all clear it, and `prepare` never lets a
+provider event set it. The list and transcript routes ask the provider
+whether Stop can be sent now (`stoppable`, or `stop_unavailable` with the
+sentence); the child's key rides `list(keys=True)` as `_key`, which never
+leaves the daemon.
+
+**Not reachable by agents.** Like every owner route: refused on the API
+listener, the workshop and any foreign or opaque Origin; no session MCP
+tool, Discord verb or CLI command calls `Daemon.stop_subagent`
+(`subagent_stop_check.Reach` greps `jarvis/` for callers: only
+`hud_api.py`).
+
+Checks (free, offline): `tests/v2/subagent_stop_check.py` (19 tests:
+Claude replay, Codex pipes, route, record, reach), `codex_provider_check.py`
+(the peer's `$WAIT`). See the HUD half in `docs/notes/hud-workspace.md`.
+
+**Review of #216 (2026-10-15).** The CLI's explicit refusal of a Claude stop
+(the SDK raises a bare `Exception` carrying the error control response) is
+`SubagentStopDeclined`: the route's 409 says "The CLI refused the stop: …"
+(scrubbed by `redact.scrub_text`, one line, 120 characters) with `refused`,
+and the record says `stop: "refused"` with the reason as `stop_error` (owner
+routes only) — not "unconfirmed", and no "Stop again". The SDK's own control
+timeout ("Control request timeout: …") is not a refusal. On our 10 s
+timeout the request is left to finish rather than cancelled: cancelling skips
+the SDK's own `pending_control_responses` cleanup (private state, not touched
+from here); its 60 s timeout or the late answer clears it, and the late
+outcome is logged. Codex: a refused `turn/interrupt` takes `owner_stop` off
+the child under `s.mutex`, and every read and reset of `owner_stop` is now
+under that lock too, so a later `interrupt_agent` says "the orchestrator
+stopped it". Claude's `owner_stop` is likewise set under `session.mutex`. The
+record refuses to begin a Stop (`"closed"`) and writes nothing from
+`stop_failed`/`stop_sent` once `close()` ran. The 2.1.295 floor still allows
+Stop when the CLI's version is unknown (documented; the lead raised it with
+the owner). 23 tests now; six more mutants, all killed.

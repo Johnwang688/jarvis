@@ -179,6 +179,26 @@ def peer(script_path, log_path, thread_name):
                 for out in (script["replays"][count - 1] if "replays" in script else script["replay"]):
                     out = json.loads(json.dumps(out).replace("$THREAD", native).replace("$TURN", turn)
                                      .replace("$CWD", os.getcwd()))
+                    if "$WAIT" in out:
+                        # Where the recorder sent a request itself (SV-4: the
+                        # child's `turn/interrupt`): wait for the provider's,
+                        # and answer it. One aimed at another thread is the
+                        # orchestrator's: its turn ends interrupted, as Codex's would.
+                        while True:
+                            line = sys.stdin.readline()
+                            if not line:
+                                return
+                            got = json.loads(line)
+                            log(got)
+                            if got.get("method") == out["$WAIT"]:
+                                break
+                        if (got.get("params") or {}).get("threadId") != out["thread"]:
+                            emit({"id": got["id"], "result": {}})
+                            finish("interrupted")
+                            break
+                        emit({"id": got["id"], "error": out["error"]} if "error" in out
+                             else {"id": got["id"], "result": {}})
+                        continue
                     if out.get("id") == "$START":
                         out["id"] = m["id"]
                     emit(out)
