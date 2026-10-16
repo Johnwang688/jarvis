@@ -3479,4 +3479,7 @@ A pick is applied only to the element the picker was opened for: the same
 `backendNodeId` in the same frame's current document, still connected, the
 same kind, enabled; for a select the same option count and the chosen
 option's value and label. The assignment, `input` and `change` are three
-separately re-checked steps; the events are untrusted (`isTrusted: false`).
+separately awaited steps; the events are untrusted (`isTrusted: false`).
+Nothing is offered or applied while the tab has a dialog, file chooser or auth
+prompt, or its window is not showing it. The first `pick` for an id takes the
+picker; a second one does nothing. A message is never sent past 60,000 bytes.

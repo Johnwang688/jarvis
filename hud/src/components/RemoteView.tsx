@@ -59,6 +59,9 @@ export function RemoteView(props:RemoteViewProps) {
   const pickDismiss=useRef(false),pickMenuSuppressed=useRef(false);
   const pickTyped=useRef({text:"",at:0});
   const pickApplied=useRef<string|null>(null);
+  // What blocks a picker, as the socket says it (render state lags a message).
+  const pickerLiveRef=useRef(false);
+  const pageDialogs=useRef(new Set<string>()),pageChooser=useRef<string|null>(null);
   const canInput=()=>!authCurrent.current&&latest.current.live&&!latest.current.blocked&&!latest.current.inputHeld?.()&&connectedInstance.current===latest.current.instanceGeneration&&socket.current?.readyState===WebSocket.OPEN;
   const send=(body:object,inputMessage=false)=>{
     const ws=socket.current;
@@ -157,6 +160,7 @@ export function RemoteView(props:RemoteViewProps) {
     const lease=driving.attach(props.tabId);driveLease.current=lease;
     const controller=new AbortController();
     owner.reset();setConnected(false);setError("");setDialogs([]);setAuth(null);authCurrent.current=null;setChooser(null);setSecurity("unknown");
+    pageDialogs.current=new Set();pageChooser.current=null;
     pickerRef.current=null;setPicker(null);pickGesture.current.clear();pickApplied.current=null;pickDismiss.current=false;
     keys.current=new HeldKeys();buttons.current=new HeldButtons();clipboard.current=null;composing.current=false;inputEpoch.current++;
     const current=()=>!gone&&generation.current===gen&&latest.current.tabId===props.tabId&&latest.current.instanceGeneration===props.instanceGeneration;
@@ -192,7 +196,11 @@ export function RemoteView(props:RemoteViewProps) {
             const offered=parsePicker(msg);
             if(!offered)return;
             const asked=pickGesture.current.accept(gen,performance.now());
-            if(!asked||!canInput()){send({t:"pick_cancel",id:offered.id});return;}
+            // Never behind a dialog, a file chooser, an auth prompt, Downloads
+            // or a card, and never kept to show once they are gone.
+            if(!asked||!canInput()||!pickerLiveRef.current||pageDialogs.current.size||pageChooser.current){
+              send({t:"pick_cancel",id:offered.id});return;
+            }
             owner.reset();
             pickerRef.current=offered;setPicker(offered);pickTyped.current={text:"",at:0};
             setPickHighlight(offered.kind==="select"?initialHighlight(offered):-1);
@@ -237,10 +245,11 @@ export function RemoteView(props:RemoteViewProps) {
             latest.current.onLocation(msg.url,cleanTitle(msg.title));setSecurity(["secure","insecure","broken"].includes(msg.security)?msg.security:"unknown");
           } else if(msg.t==="dialog"&&/^[0-9a-f]{8}$/.test(msg.id)) {
             const d={id:msg.id,kind:["alert","confirm","prompt","beforeunload"].includes(msg.kind)?msg.kind:"alert",message:cleanTitle(msg.message,4000),default:cleanTitle(msg.default,4000)};
+            pageDialogs.current.add(d.id);
             owner.reset();setDialogs(old=>[...old.filter(x=>x.id!==d.id),d].slice(-8));
-          } else if(msg.t==="dialog_closed")setDialogs(old=>old.filter(d=>d.id!==msg.id));
-          else if(msg.t==="filechooser"&&/^[0-9a-f]{8}$/.test(msg.id)){owner.reset();setChooser({id:msg.id,multiple:msg.multiple===true});}
-          else if(msg.t==="filechooser_closed")setChooser(old=>old?.id===msg.id?null:old);
+          } else if(msg.t==="dialog_closed"){pageDialogs.current.delete(msg.id);setDialogs(old=>old.filter(d=>d.id!==msg.id));}
+          else if(msg.t==="filechooser"&&/^[0-9a-f]{8}$/.test(msg.id)){pageChooser.current=msg.id;owner.reset();setChooser({id:msg.id,multiple:msg.multiple===true});}
+          else if(msg.t==="filechooser_closed"){if(pageChooser.current===msg.id)pageChooser.current=null;setChooser(old=>old?.id===msg.id?null:old);}
           else if(msg.t==="popup"&&typeof msg.tab_id==="string")latest.current.onPopup(msg.tab_id);
           else if(msg.t==="selection"){
             const request=clipboard.current;
@@ -278,6 +287,7 @@ export function RemoteView(props:RemoteViewProps) {
   // Never under a card, an auth prompt, a dialog, a chooser or Downloads, and
   // never in a pane that is not live: any of them closes the picker at once.
   const pickerLive=connected&&props.live&&!props.blocked&&!props.inputHeld?.()&&!auth&&!dialogs.length&&!chooser&&!downloads;
+  pickerLiveRef.current=pickerLive;
   useLayoutEffect(()=>{if(!pickerLive){pickGesture.current.clear();closePicker(true);}},[pickerLive]);
   const point=(event:{clientX:number;clientY:number})=>clientToPage({x:event.clientX,y:event.clientY},canvas.current?.getBoundingClientRect()??{left:0,top:0},latest.current.zoom,geometry.current.place,geometry.current.view);
   const mouse=(kind:"down"|"up"|"move",event:React.MouseEvent)=>{
@@ -368,7 +378,7 @@ export function RemoteView(props:RemoteViewProps) {
         onKeyUp={e=>{const event=keys.current.released(e.nativeEvent,!canInput());if(event){e.preventDefault();send({t:"key",e:event},true);}}}
         onPaste={e=>{e.preventDefault();e.stopPropagation();if(canInput())void paste(e.clipboardData.getData("text/plain"));}}
         onCompositionStart={()=>{composing.current=!!canInput();}}
-        onCompositionEnd={e=>{if(composing.current&&canInput())void paste(e.data);composing.current=false;e.currentTarget.value="";}}
+        onCompositionEnd={e=>{if(composing.current&&canInput()&&!pickerRef.current)void paste(e.data);composing.current=false;e.currentTarget.value="";}}
         onInput={e=>{if(!composing.current)e.currentTarget.value="";}} />
       {picker&&pickerLive?<RemotePicker picker={picker} anchor={pageToCanvas(picker.rect,geometry.current.place)}
         bounds={{width:surface.current?.clientWidth??0,height:surface.current?.clientHeight??0}}

@@ -191,3 +191,28 @@ own page ignores the first Escape, so the closing Escape is retried while
 `:open` stays true (12 times, 25 ms apart). Evidence and mutants are in
 `docs/notes/browser.md` ("Owner pickers for native select, date and colour
 controls").
+
+## Review of PR #232 (2026-10-16)
+
+CHANGES NEEDED, fixed on the branch:
+
+- **MED 1:** a select whose `mousedown` opened a file chooser was offered a
+  picker and applied once the chooser closed (reproduced in real Chrome 155).
+  The probe and the final check under the lock now require no dialog, file
+  chooser or auth prompt and a window showing the tab. The HUD refuses a
+  picker unless it could draw one, with dialogs and the chooser tracked as the
+  socket reports them.
+- **LOW 2:** a group's label is now charged against the 60,000-byte cap when it
+  is first used, only used groups are sent, and a message over the cap is
+  never offered. The message is built before the closing Escape, so a failed
+  or invalid read leaves the native popup alone.
+- **LOW 3 and LOW 4:** new tests cover a card raised during the pin and a
+  second `pick` with the same id.
+- **LOW 5:** the frame's `loaderId` is recorded at the probe and compared at
+  apply.
+- **NITs:** the object-group release is bounded at 1 s, a let-go clears the
+  pin, and an IME commit is guarded while the picker is open. NIT 7 (one
+  isolated world per probe) was skipped, as asked.
+
+Mutant results are in `docs/notes/browser.md`.
+

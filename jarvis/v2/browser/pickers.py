@@ -50,6 +50,7 @@ PIN_WAIT_S = 1.0                    # the hit test before a press, at most
 PROBE_WAIT_S = 2.0                  # the probe after a release, at most
 CLOSE_TRIES = 12                    # Escapes for a native popup still loading its page
 CLOSE_RETRY_S = 0.025
+RELEASE_WAIT_S = 1.0                # a hung renderer never wedges the tab's input task
 APPLY_WAIT_S = 2.0                  # each step of an apply, at most
 ID = re.compile(r"[0-9a-f]{8}")
 _VALUE_CHARS = re.compile(r"[0-9A-Za-z:.#\-]*")
@@ -223,6 +224,7 @@ class Picker:
     frame_id: str
     node: int
     kind: str
+    loader: str = ""                    # the frame's document when the picker was offered
     count: int = 0
     options: dict = field(default_factory=dict)  # index -> (value, raw label, label length)
 
@@ -319,6 +321,14 @@ class Pickers:
             return None
         return Pin(frame_id, node, document, attachment, hold)
 
+    def _attention_free(self, tab) -> bool:
+        """No dialog, file chooser or auth prompt holds the tab, and its
+        window shows it: nothing may be offered or applied behind them."""
+        stream, auth = tab.stream, getattr(self.host, "_auth", None)
+        return (not tab.dialogs and tab.chooser is None
+                and not (auth is not None and auth.blocked(tab))
+                and stream is not None and stream.visible and stream.attached() is not None)
+
     def _pin_current(self, tab, pin: Pin) -> bool:
         stream = tab.stream
         return (stream is not None and tab.document_generation == pin.document
@@ -347,7 +357,8 @@ class Pickers:
 
     async def _release_objects(self, cdp) -> None:
         try:
-            await cdp.send("Runtime.releaseObjectGroup", {"objectGroup": OBJECT_GROUP})
+            await asyncio.wait_for(cdp.send("Runtime.releaseObjectGroup", {"objectGroup": OBJECT_GROUP}),
+                                   RELEASE_WAIT_S)
         except Exception:  # noqa: BLE001 - a context that went with its document
             pass
 
@@ -368,7 +379,7 @@ class Pickers:
 
     async def _open_picker(self, tab, cdp, pin: Pin, current, used: list) -> None:
         def still():
-            return self._pin_current(tab, pin) and current()
+            return self._pin_current(tab, pin) and self._attention_free(tab) and current()
         # A cheap first look (no script): only a select or an input can be one.
         # (`type` reflects to its attribute, so an input's attribute decides).
         node = ((await cdp.send("DOM.describeNode", {"backendNodeId": pin.node})) or {}).get("node") or {}
@@ -382,6 +393,9 @@ class Pickers:
             return
         if not still():
             return
+        loader = _loader(await cdp.send("Page.getFrameTree"), pin.frame_id)
+        if loader is None or not still():
+            return
         object_id = await self._resolve(cdp, pin.frame_id, pin.node, used)
         if not still():
             return
@@ -392,8 +406,16 @@ class Pickers:
             return
         if read.get("inPage") is True:
             return                      # `base-select`: Chrome draws this picker in the page
-        if not still():
+        # Measured and built before anything is sent: a read that cannot be
+        # offered leaves the native popup as it was.
+        box = await cdp.send("DOM.getBoxModel", {"backendNodeId": pin.node})
+        rect = _rect(((box or {}).get("model") or {}).get("border"))
+        if rect is None or _loader(await cdp.send("Page.getFrameTree"), pin.frame_id) != loader or not still():
             return
+        picker, message = self._build(tab, pin, read, rect)
+        if picker is None:
+            return
+        picker.loader = loader
         # The popup is up and takes the keyboard: a trusted Escape key-down
         # closes it with no page event (measured, Chrome 155). While a popup
         # is open Chrome hands it every key, but a date-like popup that is
@@ -409,13 +431,6 @@ class Pickers:
                 return
             await asyncio.sleep(CLOSE_RETRY_S)
         else:
-            return
-        box = await cdp.send("DOM.getBoxModel", {"backendNodeId": pin.node})
-        rect = _rect(((box or {}).get("model") or {}).get("border"))
-        if rect is None or not still():
-            return
-        picker, message = self._build(tab, pin, read, rect)
-        if picker is None:
             return
         old = None
         with self._lock:
@@ -457,10 +472,11 @@ class Pickers:
             return None, None
         picker.count = count
         group_labels = [label(g[0]) if isinstance(g, list) and g else "" for g in groups[:OPTIONS_MAX]]
-        items, used = [], set()
-        # The exact encoding the socket sends (`json.dumps`, ASCII-escaped);
-        # the counters at their widest.
-        size = len(json.dumps({**message, "items": [], "groups": group_labels, "selected": INDEX_MAX,
+        items, used, sent_groups, group_at = [], set(), [], {}
+        # The exact encoding the socket sends (`json.dumps`, ASCII-escaped),
+        # the counters at their widest; a group's label is charged when an
+        # item kept first uses it, and only used groups are sent.
+        size = len(json.dumps({**message, "items": [], "groups": [], "selected": INDEX_MAX,
                                "total": count, "shown": INDEX_MAX}))
         for row in options:
             if not (isinstance(row, list) and len(row) == 6 and type(row[0]) is int
@@ -468,20 +484,29 @@ class Pickers:
                     and isinstance(row[1], str) and type(row[2]) is int):
                 return None, None
             index, raw, length, value, disabled, g = row
+            g = g if type(g) is int and 0 <= g < len(group_labels) else -1
+            new_group = g >= 0 and g not in group_at
             item = {"i": index, "label": label(raw), "disabled": disabled is not False or value is None,
-                    "g": g if type(g) is int and 0 <= g < len(group_labels) else -1}
+                    "g": group_at.get(g, len(sent_groups)) if g >= 0 else -1}
             cost = len(json.dumps(item)) + 2       # and its ", "
+            if new_group:
+                cost += len(json.dumps(group_labels[g])) + 2
             if size + cost > MESSAGE_MAX:
                 break
             size += cost
+            if new_group:
+                group_at[g] = len(sent_groups)
+                sent_groups.append(group_labels[g])
             used.add(index)
             items.append(item)
             if not item["disabled"]:
                 picker.options[index] = (value, raw, length)
         selected = read.get("selected")
-        message.update(items=items, groups=group_labels,
+        message.update(items=items, groups=sent_groups,
                        selected=selected if type(selected) is int and selected in used else -1,
                        total=count, shown=len(items))
+        if len(json.dumps(message)) > MESSAGE_MAX:
+            return None, None           # never offered past the cap (the HUD would drop it)
         return picker, message
 
     # -- applying the owner's choice ----------------------------------------------------------
@@ -523,8 +548,16 @@ class Pickers:
                 return "refused"
             argument = {"value": value}
             expected = value
+        # The frame's document must be the one the picker was offered for: a
+        # backendNodeId from before a cross-process commit could name another
+        # node in the new document.
+        async def same_loader():
+            tree = await asyncio.wait_for(cdp.send("Page.getFrameTree"), APPLY_WAIT_S)
+            return _loader(tree, p.frame_id) == p.loader
+        if not await same_loader():
+            return "changed"
         object_id = await asyncio.wait_for(self._resolve(cdp, p.frame_id, p.node), APPLY_WAIT_S)
-        if not still():
+        if not still() or not await same_loader() or not still():
             return "changed"
         outcome = await asyncio.wait_for(self._call(cdp, object_id, SET_FN, p.kind, argument), APPLY_WAIT_S)
         if outcome == "same":
@@ -542,6 +575,25 @@ class Pickers:
                 return "changed"
         return "applied"
 
+
+
+def _loader(tree, frame_id: str) -> str | None:
+    """The `loaderId` of `frame_id` in a `Page.getFrameTree` answer."""
+    stack = [(tree or {}).get("frameTree")]
+    seen = 0
+    while stack and seen < 4096:
+        node = stack.pop()
+        seen += 1
+        if not isinstance(node, dict):
+            continue
+        frame = node.get("frame") or {}
+        if frame.get("id") == frame_id:
+            loader = frame.get("loaderId")
+            return loader if isinstance(loader, str) and loader else None
+        children = node.get("childFrames")
+        if isinstance(children, list):
+            stack.extend(children)
+    return None
 
 
 def _rect(quad) -> dict | None:

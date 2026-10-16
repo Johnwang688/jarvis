@@ -2773,6 +2773,7 @@ class BrowserHost:
             if tab.pressed[button] != tab.stream.hold_count or params["x"] < 0 or params["y"] < 0:
                 del tab.pressed[button]
                 params = self._let_go(params)
+                tab.picker_pin = None       # a let-go is never that press's release
         # Record before yielding: a card may arrive during Chrome's handler.
         if key and params["type"] in ("keyDown", "rawKeyDown"):
             tab.keys_pressed[code] = hold_count

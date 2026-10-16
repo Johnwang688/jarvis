@@ -142,6 +142,12 @@ it("is never drawn under a card or in a pane that is not live, and a card closes
   await render({ blocked: false });
   await message({ ...SELECT, id: "55556666" });
   expect(overlay()).toBeNull();
+  // A press made before a card does not count after it.
+  await click();
+  await render({ blocked: true });
+  await render({ blocked: false });
+  await message({ ...SELECT, id: "66667777" });
+  expect(overlay()).toBeNull();
   await click(); await message({ ...SELECT, id: "77778888" });
   expect(overlay()).not.toBeNull();
   await render({ live: false });
@@ -190,4 +196,43 @@ it("colour: Set sends the HUD input's value", async () => {
   expect(overlay()!.querySelector('[data-testid="remote-picker-clear"]')).toBeNull();
   await act(async () => overlay()!.querySelector<HTMLButtonElement>('[data-testid="remote-picker-set"]')!.click());
   expect(socket().sent).toEqual([{ t: "pick", id: "abababab", value: "#336699" }]);
+});
+
+it("a picker arriving behind a dialog or a file chooser is refused, and never shown once they close", async () => {
+  await message({ t: "dialog", id: "1234abcd", kind: "alert", message: "hi", default: "" });
+  await click();
+  await message({ ...SELECT, id: "0a0a0a0a" });
+  expect(overlay()).toBeNull();
+  expect(socket().sent).toContainEqual({ t: "pick_cancel", id: "0a0a0a0a" });
+  await message({ t: "dialog_closed", id: "1234abcd" });
+  expect(overlay()).toBeNull();
+  // The same within one task: the dialog and the picker before React renders.
+  await click();
+  await act(async () => {
+    socket().message({ t: "dialog", id: "5678abcd", kind: "alert", message: "hi", default: "" });
+    socket().message({ ...SELECT, id: "0b0b0b0b" });
+  });
+  await message({ t: "dialog_closed", id: "5678abcd" });
+  expect(overlay()).toBeNull();
+  await click();
+  await act(async () => {
+    socket().message({ t: "filechooser", id: "9999aaaa", multiple: false });
+    socket().message({ ...SELECT, id: "0c0c0c0c" });
+  });
+  expect(overlay()).toBeNull();
+  await message({ t: "filechooser_closed", id: "9999aaaa", files: 0 });
+  expect(overlay()).toBeNull();
+  expect(socket().sent.filter(m => m.t === "pick_cancel").map(m => m.id)).toEqual(expect.arrayContaining(["0b0b0b0b", "0c0c0c0c"]));
+  // Once clear, the owner's next press works again.
+  await click(); await message({ ...SELECT, id: "0d0d0d0d" });
+  expect(overlay()).not.toBeNull();
+});
+
+it("an IME commit while the picker is open never reaches the page", async () => {
+  await click(); await message(SELECT); socket().sent = [];
+  await act(async () => {
+    proxy().dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+    proxy().dispatchEvent(new CompositionEvent("compositionend", { bubbles: true, data: "漢字" }));
+  });
+  expect(socket().sent.filter(m => m.t === "text")).toEqual([]);
 });

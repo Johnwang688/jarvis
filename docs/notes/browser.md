@@ -2199,10 +2199,18 @@ commits). `jarvis/v2/browser/pickers.py` offers the owner a HUD overlay instead.
   input whose `type` attribute is a picker kind (p50 1.2 ms on a text field),
   then the pinned `backendNodeId` is resolved in a `jarvis-pickers` isolated world of its
   own frame and must be connected, in that frame's current document
-  (`ownerDocument === document`), a picker kind and `:open`. CDP has no popup
-  event (measured). A `base-select` select is skipped (Chrome draws that picker
+  (`ownerDocument === document`), a picker kind and `:open`. Throughout the
+  probe, up to the moment the picker is recorded under the lock, nothing may
+  hold the tab's attention: no dialog, file chooser or auth prompt, and its
+  window attached and showing it (review of PR #232, MED 1: a select whose
+  `mousedown` opened a file chooser was offered, then applied once the chooser
+  closed). CDP has no popup event (measured). A `base-select` select is skipped (Chrome draws that picker
   in the page). An agent's click, direct CDP input, a page's `showPicker()` on
   another element, a list box and a date field's text segments offer nothing.
+- **Read, measured and built before anything is sent**: the frame's `loaderId`
+  (`Page.getFrameTree`) before the node is resolved and again after the read,
+  the rectangle, and the whole message. A read that cannot be offered leaves
+  the native popup as it was.
 - **The native popup is closed** with a trusted `rawKeyDown` Escape and no
   key-up while `:open` is true (Chrome hands an open popup every key; the page
   sees no event, focus and value stay). A date-like popup still loading its own
@@ -2212,18 +2220,26 @@ commits). `jarvis/v2/browser/pickers.py` offers the owner a HUD overlay instead.
   disabled (with a disabled optgroup), group; `hidden` options left out;
   date-like value/min/max/step/required; colour value. `DOM.getBoxModel` gives
   the rectangle. Labels are cleaned (`approvals.clean_line`) and capped at 80,
-  at most 500 options and 60,000 bytes of JSON (`total` says how many exist).
+  at most 500 options and 60,000 bytes of JSON, the exact encoding sent, with
+  a group's label charged when a kept item first uses it and only used groups
+  sent; a message past the cap is never offered (`total` says how many exist;
+  review LOW 2 measured 234,894 bytes from 500 single-option groups before).
   Option values stay in the daemon. Nothing on the bus or in a log.
 - **Applying** (`{t:"pick"}`) is queued owner input: ordered, dropped under a
   card, a takeover stamp. On the Browser's thread the binding is re-checked
   (tab, page, page identity, main document generation, instance, attachment,
-  hold count, approval epoch, no dialog/chooser/auth, visible), then the same
-  node in the same frame: connected, same document, same kind, enabled, not
+  hold count, approval epoch, no dialog/chooser/auth, visible), the frame's
+  `loaderId` is still the one it was offered under (before the node is resolved
+  and after: a `backendNodeId` from before a cross-process commit could name
+  another node in the new document), then the same node in the same frame: connected, same document, same kind, enabled, not
   read-only, option count and the chosen option's value and label unchanged,
   a date-like value valid for a detached same-type input with the control's
-  `min`/`max`/`step`. Assignment, `input` and `change` are three separately
-  awaited, re-checked calls; a handler that replaces the control or changes its
-  value stops `change`; the same value dispatches nothing. **The events are
+  `min`/`max`/`step`. One apply per picker: the first `pick` takes it, a second
+  with the same id does nothing. Assignment, `input` and `change` are three
+  separately awaited calls; a handler that replaces the control or changes its
+  value stops `change` (both tested); the same value dispatches nothing. The
+  binding and loader re-checks between those steps are defence in depth, not
+  each pinned by its own test. **The events are
   untrusted** (no trusted CDP path picks an exact option or date: measured).
 - **Closing**: a main-frame navigation (same-document too), tab close, attach or
   detach, resize, hidden, a card (`held`), a dialog or file chooser, a new owner
@@ -2232,7 +2248,10 @@ commits). `jarvis/v2/browser/pickers.py` offers the owner a HUD overlay instead.
   RemoteView): shown only as the answer to this window's own left press in the
   same stream generation within 5 s, once; drawn only while connected, live and
   unblocked (no card, global hold, auth, dialog, chooser or Downloads), closed
-  the moment any of them appears. **It never calls `focus()`**: keys typed in
+  the moment any of them appears. A picker that arrives while any of them is up
+  is refused (`pick_cancel`), never kept to show once it goes: dialogs and the
+  chooser are tracked as the socket reports them, ahead of React's render. A
+  press made before a card does not count after it. **It never calls `focus()`**: keys typed in
   the Remote proxy are routed to it (arrows skip disabled options, Home/End,
   Page Up/Down, type-ahead, Enter, Escape; the HUD's own shortcuts keep theirs;
   the rest swallowed, as the native popup would); options keep focus where it
@@ -2246,7 +2265,15 @@ suggestions at all (no `:open`; ArrowDown and Enter leave the typed text), so
 nothing invisible captures keys. Offering suggestions needs a non-modal design
 (keys keep going to the page while suggestions refilter), not this overlay.
 
-**Limits**: cross-site (out-of-process) iframes are not covered (the hit test
+**Also from the review**: the press is never sent when a card is raised while
+its pin is awaited (the hold is asked again after the pin); a let-go release
+drops the pin; the object-group release after a probe waits at most 1 s, so a
+hung renderer cannot wedge the tab's input task; an IME commit while the picker
+is open never reaches the page (B-IME, PR #233, rewrites composition handling;
+whichever merges second keeps this guard).
+
+**Limits**: the `loaderId` check closes the gap between a cross-process commit
+and `framenavigated` by reasoning, not by a test that produces one; cross-site (out-of-process) iframes are not covered (the hit test
 stops at the `<iframe>`; the invisible popup behaves as before); keyboard-opened
 pickers (Space, Alt+Down, F4) are not covered; the events are untrusted; a page
 that closes its own popup between the `:open` check and the Escape receives the
@@ -2254,14 +2281,20 @@ Escape key-down; the rectangle is read once (a page that scrolls itself leaves
 the overlay where the control was; a wheel or resize closes it). `pickers.py`
 is not SELF_PROTECTED (an owner call, like `owner_tools.py`).
 
-Receipts: `tests/v2/browser_pickers_check.py` (3 pure, 17 real Chrome 155
+Receipts: `tests/v2/browser_pickers_check.py` (3 pure, 23 real Chrome 155
 through the production ticket and socket, and an agent's real
 `hud_browser_act` click on a select through BR9b's fixture; summed Chrome RSS
 about 1.33 GiB); `lib/remotepicker.test.ts` and
-`components/RemoteViewPicker.test.ts` (22 vitest);
+`components/RemoteViewPicker.test.ts` (24 vitest);
 `tests/face/hud_v2_pickers_check.py` (29 checks over the mock HUD, real
-Chromium). Sixteen guard removals, each applied in place and restored, fail
-their named checks: the identity check (a detached twin applied), applying to
+Chromium). Twenty-six guard removals, each applied in place and restored, fail
+their named checks. The review's: the probe not checking dialogs, the file
+chooser or either (the reviewed code: the real chooser page is offered a
+picker), group labels not charged (nothing offered) and neither charged nor
+capped (a 131,377-byte message), the hold not asked after the pin (the press
+reached the page), no one-apply-per-picker (re-applied), the HUD accepting a
+picker behind a dialog or chooser, its gesture surviving a card, and an IME
+commit reaching the page. The first round's: the identity check (a detached twin applied), applying to
 the frame's focused element instead of the pinned node, the option count, the
 option value/label, a card not closing the picker, `change` after a handler
 changed the value, no closing Escape, an agent's click probed (the BR9b

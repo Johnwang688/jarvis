@@ -17,6 +17,7 @@ a picker. Nothing on the bus or in the log carries a label.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 import sys
@@ -65,9 +66,12 @@ PICKERS = f"""<!doctype html><title>pickers</title>
 <select id=other class=f style="top:410px"><option value=1>One<option value=2>Two</select>
 <button id=opener class=f style="top:460px">open another</button>
 <select id=multi class=f multiple style="top:510px;height:60px"><option>m1<option>m2</select>
+<select id=chsel class=f style="top:575px;left:300px"><option value=x>X<option value=y>Y</select>
+<input id=file type=file style="position:absolute;left:600px;top:575px;width:100px">
 <iframe id=fr style="position:absolute;left:300px;top:10px;width:300px;height:120px;border:0"
  srcdoc="{FRAME_DOC}"></iframe>
 <script>
+document.getElementById('chsel').addEventListener('mousedown', () => document.getElementById('file').click());
 document.getElementById('opener').addEventListener('click', () => document.getElementById('other').showPicker());
 </script>
 """ + LOG
@@ -77,11 +81,14 @@ LONG = "<!doctype html><select id=s style='position:absolute;left:10px;top:10px;
 
 B.PAGES["/pickers"] = PICKERS
 B.PAGES["/pickers-long"] = LONG
+GROUPS = "<!doctype html><select id=s style='position:absolute;left:10px;top:10px;width:220px;height:30px'>" + "".join(
+    f"<optgroup label='{'\u6f22' * 80}{i}'><option value=v{i}>{'\u5b57' * 80}{i}</optgroup>" for i in range(500)) + "</select>"
+B.PAGES["/pickers-groups"] = GROUPS
 B.PAGES["/pickers-next"] = "<!doctype html><title>next</title><p>next page</p>"
 
 POINTS = {"s": (100, 25), "date": (222, 75), "time": (222, 125), "dtl": (222, 175), "month": (222, 225),
           "week": (222, 275), "color": (100, 325), "text": (100, 375), "other": (100, 425),
-          "opener": (100, 475), "multi": (100, 530), "fs": (410, 45)}
+          "opener": (100, 475), "multi": (100, 530), "fs": (410, 45), "chsel": (400, 590)}
 
 
 class Pure(unittest.TestCase):
@@ -459,6 +466,133 @@ class PickersChrome(B.BrowserStream):
         self.assertEqual(self.closed(p["id"])["reason"], "applied")
         self.w.send({"t": "pick_cancel", "id": p["id"]})
 
+    # -- 7: review of PR #232 ---------------------------------------------------------------------------
+
+    def test_16_no_picker_behind_a_file_chooser(self):
+        """MED 1: a page that opens a file chooser from the select's own
+        mousedown. The select's popup opens too; nothing is offered, and
+        nothing can be applied once the chooser is gone."""
+        before = len(self.pickers())
+        self.click("chsel")
+        chooser = self.w.wait_for("filechooser")
+        self.w.drain(0.5)
+        self.assertEqual(len(self.pickers()), before, "no picker behind a file chooser")
+        self.assertIsNone(self.host._pickers.current(self.tab))
+        self.owner("POST", f"/browser/tabs/{self.tid}/files", {"chooser": chooser["id"], "files": []})
+        self.w.drain(0.3)
+        self.assertEqual(len(self.pickers()), before)
+        self.assertIsNone(self.host._pickers.current(self.tab))
+        if self.is_open("chsel"):
+            self.run_on(self.tab.cdp.send("Input.dispatchKeyEvent", dict(PK.ESCAPE)))
+        self.assertEqual(self.js(self.tid, "document.getElementById('chsel').value"), "x")
+
+    def _inject_after_read(self, attention):
+        """Patch the read so `attention(tab)` runs after it (a dialog or an
+        auth prompt arriving while the probe is under way)."""
+        original = PK.Pickers._call
+
+        async def call(this, cdp, object_id, fn, *args):
+            value = await original(this, cdp, object_id, fn, *args)
+            if fn is PK.READ_FN:
+                attention(self.tab)
+            return value
+        return original, call
+
+    def test_17_no_picker_when_a_dialog_arrives_during_the_probe(self):
+        original, call = self._inject_after_read(lambda tab: tab.dialogs.__setitem__("fake0001", object()))
+        PK.Pickers._call = call
+        try:
+            before = len(self.pickers())
+            self.click("s")
+            self.w.drain(0.4)
+            self.assertEqual(len(self.pickers()), before, "no picker while a dialog is open")
+            self.assertIsNone(self.host._pickers.current(self.tab))
+            self.assertTrue(self.is_open("s"), "the native popup was left alone")
+        finally:
+            PK.Pickers._call = original
+            self.run_on(self._clear_dialog())
+        self.run_on(self.tab.cdp.send("Input.dispatchKeyEvent", dict(PK.ESCAPE)))
+        self.wait(lambda: not self.is_open("s"), what="cleanup Escape")
+
+    async def _clear_dialog(self):
+        self.tab.dialogs.pop("fake0001", None)
+
+    def test_18_a_failed_build_leaves_the_native_popup_alone(self):
+        original = PK.Pickers._build
+        PK.Pickers._build = lambda this, *args: (None, None)
+        try:
+            before = len(self.pickers())
+            self.click("s")
+            self.w.drain(0.4)
+            self.assertEqual(len(self.pickers()), before)
+            self.assertTrue(self.is_open("s"), "nothing was sent to the native popup")
+        finally:
+            PK.Pickers._build = original
+        self.run_on(self.tab.cdp.send("Input.dispatchKeyEvent", dict(PK.ESCAPE)))
+        self.wait(lambda: not self.is_open("s"), what="cleanup Escape")
+
+    def test_19_many_groups_stay_within_the_cap(self):
+        """LOW 2: 500 single-option optgroups with 80-character CJK labels."""
+        self.load("/pickers-groups")
+        p = self.open_picker("s")
+        size = len(json.dumps(p))
+        self.assertLessEqual(size, PK.MESSAGE_MAX)
+        used = sorted({i["g"] for i in p["items"] if i["g"] >= 0})
+        self.assertEqual(used, list(range(len(p["groups"]))), "only the groups the items use are sent")
+        self.assertLess(p["shown"], 500)
+        self.w.send({"t": "pick_cancel", "id": p["id"]})
+        self.load()
+
+    def test_20_a_card_raised_during_the_pin_stops_the_press(self):
+        """LOW 3: the hold is asked again after the pin's await."""
+        original = PK.Pickers.pin
+        raised = {}
+
+        async def pin(this, tab, cdp, params):
+            found = await original(this, tab, cdp, params)
+            request = B.ApprovalRequest(tool="Bash", args={"command": "true"}, command="true")
+            raised["request"] = request
+            import threading
+            threading.Thread(target=self.daemon.approvals.ask, args=(request,), daemon=True).start()
+            for _ in range(200):
+                if self.daemon.approvals.pending():
+                    break
+                await asyncio.sleep(0.01)
+            return found
+        self.ev()
+        PK.Pickers.pin = pin
+        try:
+            x, y = POINTS["s"]
+            self.w.send(B.mouse("mousePressed", x, y))
+            self.wait(lambda: "request" in raised and self.daemon.approvals.pending(), what="the card")
+            self.w.drain(0.3)
+        finally:
+            PK.Pickers.pin = original
+            try:
+                self.daemon.approvals.resolve(raised["request"].req_id, "deny")
+            except (KeyError, ValueError):
+                pass
+        self.w.send(B.mouse("mouseReleased", x, y))
+        self.w.settled()
+        self.assertNotIn("mousedown", [e[0] for e in self.ev()], "the press never reached the page")
+        self.assertFalse(self.is_open("s"))
+        self.assertIsNone(self.host._pickers.current(self.tab))
+
+    def test_21_a_second_pick_with_the_same_id_does_nothing(self):
+        """LOW 4: one apply per picker."""
+        p = self.open_picker("s")
+        self.w.send({"t": "pick", "id": p["id"], "index": 1})
+        self.assertEqual(self.closed(p["id"])["reason"], "applied")
+        self.js(self.tid, "document.getElementById('s').value = 'a'")
+        self.ev()
+        closes = len([m for m in self.w.messages if m.get("t") == "picker_closed" and m.get("id") == p["id"]])
+        self.w.send({"t": "pick", "id": p["id"], "index": 1})
+        self.w.settled()
+        self.w.drain(0.3)
+        self.assertEqual(self.js(self.tid, "document.getElementById('s').value"), "a")
+        self.assertEqual([e for e in self.ev() if e[0] in ("input", "change")], [])
+        self.assertEqual(len([m for m in self.w.messages if m.get("t") == "picker_closed" and m.get("id") == p["id"]]), closes)
+
     def test_15_nothing_on_the_bus_or_in_the_log(self):
         # What the pin costs an owner's press (two CDP calls before it is sent).
         # and what the probe after its release costs where nothing opened.
@@ -511,12 +645,32 @@ def agent_suite():
         def test_agent_click_on_a_select_offers_no_picker(self):
             self.html("""<select aria-label='Choice' style='position:absolute;left:10px;top:10px;width:200px;height:30px'>
               <option>A</option><option>B</option></select>""")
-            before = self.host._pickers.offered
-            result = self.act("click", "Choice")
-            self.assertEqual(result.outcome, "acted", result)
-            time.sleep(0.3)
-            self.assertEqual(self.host._pickers.offered, before)
-            self.assertIsNone(self.host._pickers.current(self.tab))
+            # An owner window shows the tab (a stand-in socket), so nothing but
+            # the path itself keeps the agent's click from offering a picker.
+            class Window:
+                def __init__(self):
+                    self.sent, self.closed = [], __import__("threading").Event()
+
+                def send_text(self, text):
+                    self.sent.append(text)
+
+                def send_binary(self, data):
+                    pass
+            window, stream = Window(), self.tab.stream
+            with stream._lock:
+                stream._sock, stream.visible = window, True
+            try:
+                before = self.host._pickers.offered
+                result = self.act("click", "Choice")
+                self.assertEqual(result.outcome, "acted", result)
+                time.sleep(0.3)
+                self.assertEqual(self.host._pickers.offered, before)
+                self.assertIsNone(self.host._pickers.current(self.tab))
+                self.assertFalse(any('"picker"' in text for text in window.sent))
+            finally:
+                with stream._lock:
+                    if stream._sock is window:
+                        stream._sock = None
     return unittest.TestSuite([AgentClick("test_agent_click_on_a_select_offers_no_picker")])
 
 
