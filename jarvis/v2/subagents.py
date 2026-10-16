@@ -34,9 +34,9 @@ own end arrives (Claude's `killed`/`stopped`, the Codex child's `turn/
 completed` `interrupted`), which clears it. Nothing here infers an end from a
 stop: if the CLI has said nothing after `STOP_CONFIRM_S`, the record says
 `stop: "unconfirmed"` — the request went out and the child may still be
-running — and the owner may press Stop again. Between turns nobody reads the
-CLI (SV-6), so a child stopped then is confirmed only by the next message's
-reading. If the CLI answers the request with a refusal of its own ("no
+running — and the owner may press Stop again. Between turns the CLI is read
+too (SV-6), so a child stopped then is confirmed when the CLI answers. If the
+CLI answers the request with a refusal of its own ("no
 such task"), the record says `stop: "refused"`, and the CLI's reason
 (scrubbed, one line) goes to the owner's routes only, as `stop_error`. Ids,
 a state and a time: the bus may carry it, never the reason.

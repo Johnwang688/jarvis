@@ -124,9 +124,12 @@ class ProseIsolation(unittest.TestCase):
         self.assertIn({"kind": "text", "data": {"text": "SV0 child alpha: finished."}}, inner)
 
     def test_known_gap_an_injected_turns_words_land_in_the_next_send(self):
-        # SV-6's problem, pinned so it is changed on purpose: the CLI's own
-        # turn for a finished background child (origin task-notification) is
-        # read by the next send and its words handed out as that turn's.
+        # SV-6's problem, pinned so it is changed on purpose: with nobody
+        # watching the session (no daemon; SV-6's fallback, and the daemon's
+        # when an owner message beats the adoption), the CLI's own turn for a
+        # finished background child (origin task-notification) is read by
+        # the next send and its words handed out as that turn's. Watched, it
+        # is a turn of its own: tests/v2/idle_reader_check.py.
         got, *_ = R.run("one_default", 2)
         self.assertEqual([e.data["text"] for e in got[1] if e.kind == K.TEXT],
                          ["SV0 parent: one_default step 2 done."])

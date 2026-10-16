@@ -112,6 +112,19 @@ def _bullets(items) -> str:
     return "\n".join(f"- {item}" for item in items) or "- (none stated)"
 
 
+# Said by `Daemon.send` while a turn the CLI started by itself runs (SV-6).
+CLI_TURN_RUNNING = "the CLI's own"
+
+
+def _for_turn(record: dict, thread_id: str) -> bool:
+    """A bus record `_run_turn` reads: its thread's, not a delta, and not of a
+    turn the CLI started by itself (SV-6) — that turn's words are never this
+    turn's reply — or the daemon's shutdown."""
+    return ((record.get("thread_id") == thread_id and record.get("kind") != "text_delta"
+             and not record.get("self_started"))
+            or record.get("kind") == "shutdown")
+
+
 class TaskRunner(TaskControl):
     """Implements `control.TaskControl`. Constructed with the daemon it drives."""
 
@@ -654,10 +667,7 @@ class TaskRunner(TaskControl):
     def _run_turn(self, run: _Run, thread_id: str, text: str, *, origin: str = "owner") -> TurnResult:
         task = self._require(run.task_id)
         is_orchestrator = thread_id == self._thread_for(task, Role.ORCHESTRATOR)
-        subscription = self.bus.subscribe(
-            lambda record, wanted=thread_id: (record.get("thread_id") == wanted
-                                              and record.get("kind") != "text_delta")
-            or record.get("kind") == "shutdown")
+        subscription = self.bus.subscribe(lambda record, wanted=thread_id: _for_turn(record, wanted))
         result = TurnResult()
         pieces: list[str] = []
         forwarded = False
@@ -731,13 +741,22 @@ class TaskRunner(TaskControl):
 
     def _send(self, thread_id: str, message: UserMessage) -> str:
         """The escape hatch (§6.1) sends its `owner-ran` result on the worker's own
-        thread, so a relay can legitimately arrive while someone else's turn runs."""
-        deadline = time.monotonic() + SEND_TIMEOUT
+        thread, so a relay can legitimately arrive while someone else's turn runs.
+        A turn the CLI started by itself on the thread (SV-6: a background
+        agent finished) is waited out for as long as a turn may run, not
+        SEND_TIMEOUT: the CLI would run it first anyway."""
+        began = time.monotonic()
+        deadline = began + SEND_TIMEOUT
         while True:
             try:
                 return self.daemon.send(thread_id, message)
             except DaemonError as exc:
-                if "already running" not in str(exc) or time.monotonic() >= deadline:
+                if "already running" not in str(exc):
+                    raise
+                if CLI_TURN_RUNNING in str(exc):
+                    deadline = max(deadline, min(time.monotonic() + SEND_TIMEOUT,
+                                                 began + self.turn_timeout))
+                if time.monotonic() >= deadline:
                     raise
                 time.sleep(0.02)
 

@@ -1744,6 +1744,10 @@ export default function App() {
           }
           break;
         }
+        case "cli_turn":
+        case "cli_note":
+          // A turn the CLI started by itself, and a notice read between turns
+          // (SV-6): system lines, as a model change is.
         case "model_set":
           // Every model and effort change is a line in the chat (A7).
           if (tid) for (const n of mine) dispatch({ type: "message", pane: n, message: { role: "system", text: data.text || "", at: e.at, turn_id: e.turn_id } });

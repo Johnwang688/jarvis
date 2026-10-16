@@ -912,7 +912,10 @@ class ChatMirror:
                 cursor += 1
                 continue
             turn = row.get("turn_id")
-            if not turn or kind not in TURN_KINDS:
+            if not turn or kind not in TURN_KINDS or row.get("self_started"):
+                # A turn the CLI started by itself after a background
+                # sub-agent finished (SV-6) is never posted: the owner's
+                # decision, 2026-10-15. Each of its records is passed over.
                 posts.append(_Post(chat_id, target, action="marker", through=cursor + 1))
                 cursor += 1
                 continue

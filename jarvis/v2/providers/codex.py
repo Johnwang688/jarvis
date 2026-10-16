@@ -130,6 +130,13 @@ _open_homes: set[Path] = set()
 # private config, so none should arrive; if one does — an elicitation, or a
 # `requestUserInput` marked as an MCP tool approval — it is declined with a
 # non-fatal ERROR, never a QUESTION for the owner, never an accept.
+# Between turns (SV-6, 2026-10-16): while the daemon watches a session
+# (`watch`), the transport is read between sends too, so a child's progress,
+# its end and its approvals reach the owner while the chat is idle, and the
+# RPC queue does not fill with child traffic. One reader at a time: the idle
+# drain takes the transport per message (polling every IDLE_POLL_S) and gives
+# it up between messages; a send waits for it, then holds it to its end.
+IDLE_POLL_S = 0.1
 MCP_ELICITATION = "mcpServer/elicitation/request"
 MCP_DECLINED = ("Codex asked to approve a Jarvis tool call; declined "
                 "(Jarvis decides its own tools)")
@@ -642,6 +649,14 @@ class _Session:
     # Owner notes about the session's profile (`codex_config.session_notes`),
     # said once, as the first turn starts.
     notices: list = field(default_factory=list)
+    # Who reads the transport now (SV-6): None, "send" or "idle", decided
+    # under `reader_cv`; `send_waiting` counts sends waiting for the idle
+    # drain to let go (it then takes nothing new). `watching` is whether the
+    # daemon's watcher runs.
+    reader_cv: threading.Condition = field(default_factory=threading.Condition)
+    reader: str | None = None
+    send_waiting: int = 0
+    watching: bool = False
 
 
 class CodexProvider:
@@ -1090,8 +1105,25 @@ class CodexProvider:
         s = h.native
         if not s.sending.acquire(blocking=False):
             raise ValueError("Codex session already has an active send")
-        acquired, submitted, completed = False, False, False
+        acquired, submitted, completed, reading = False, False, False, False
         try:
+            # The transport's one reader (SV-6): the idle drain lets go between
+            # messages; a child's card it is waiting on holds it, and this
+            # send waits for that card. A Stop ends the wait.
+            with s.reader_cv:
+                s.send_waiting += 1
+                try:
+                    while s.reader is not None and not s.closed.is_set() and not s.cancelled.is_set():
+                        s.reader_cv.wait(0.05)
+                    if s.reader is None and not s.closed.is_set() and not s.cancelled.is_set():
+                        s.reader, reading = "send", True
+                finally:
+                    s.send_waiting -= 1
+            if s.closed.is_set():
+                raise RpcError("Codex session is closed")
+            if not reading:
+                yield self._event(h, EventKind.TURN_FINISHED, stop="interrupted")
+                return
             while not acquired:
                 if s.closed.is_set():
                     raise RpcError("Codex session is closed")
@@ -1341,6 +1373,10 @@ class CodexProvider:
             s.cancelled.clear()
             if acquired:
                 _auth_lock.release()
+            if reading:
+                with s.reader_cv:
+                    s.reader = None
+                    s.reader_cv.notify_all()
             s.sending.release()
 
     def _tool(self, item):
@@ -1826,6 +1862,148 @@ class CodexProvider:
         with s.mutex:
             return {v.sid for v in s.child_views.values() if v.announced and v.status == "running"}
 
+    # -- between turns (SV-6) ----------------------------------------------------
+
+    def watch(self, h: SessionHandle) -> Iterator[Event]:
+        """The daemon's feed for this session between sends (SV-6), for as
+        long as it lives. It is also the reader: while no send holds the
+        transport it reads it, one message at a time, and yields what a
+        known child says and does (SUBAGENT, SUBAGENT_EVENT), the gate
+        questions a child's approval asks (APPROVAL_REQUESTED/RESOLVED, for
+        the log), a non-fatal ERROR notice, or a fatal ERROR when the session
+        had to close (an unknown thread's request, as in a turn). Codex
+        starts no turn of its own (SV-0), so there is nothing to adopt. Ends
+        when the session closes, or when the transport fails between turns
+        (left for the next send to report, as before)."""
+        s = h.native
+        if s is None:
+            return
+        with s.mutex:
+            if s.closed.is_set():
+                return
+            if s.watching:
+                raise ValueError("this Codex session is already watched")
+            s.watching = True
+        try:
+            while not s.closed.is_set():
+                with s.reader_cv:
+                    while s.reader is not None or s.send_waiting:
+                        if s.closed.is_set():
+                            return
+                        s.reader_cv.wait(0.2)
+                    s.reader = "idle"
+                try:
+                    out, more = self._idle_once(h)
+                finally:
+                    with s.reader_cv:
+                        s.reader = None
+                        s.reader_cv.notify_all()
+                yield from out
+                if not more:
+                    return
+        finally:
+            with s.mutex:
+                s.watching = False
+
+    def _idle_once(self, h) -> tuple[list[Event], bool]:
+        """Read and route one message between sends, holding the transport.
+        -> (the events it made, whether to read on)."""
+        s = h.native
+        if s.closed.is_set():
+            return [], False
+        try:
+            msg = s.rpc.next_message(timeout=IDLE_POLL_S)
+        except RpcTimeout:
+            return [], True
+        except (RpcError, OSError) as exc:
+            # The transport failed while no turn ran: left as it is, so the
+            # next send reports it exactly as before (its `failed` flag stays).
+            if not s.closed.is_set():
+                LOG.warning("Codex %s: the transport failed between turns (%s); the next "
+                            "message reports it", h.thread_id, type(exc).__name__)
+            return [], False
+        try:
+            if "method" in msg and "id" not in msg:
+                # As a send does: learnt off the wire, before any filter.
+                self._note_child(s, msg["method"], msg.get("params"))
+            return list(self._idle_message(h, msg)), True
+        except (RpcError, OSError, KeyError, TypeError, ValueError, AttributeError) as exc:
+            self.close(h)
+            return [self._event(h, EventKind.ERROR, message=str(exc), fatal=True)], False
+
+    def _idle_message(self, h, msg):
+        """One message with no send running. A known child's notification is
+        its record's (`_child_notification`), as in a turn; a child's spawn on
+        this session's thread is announced (`_announce`); anything else on
+        this session's thread belongs to no turn and is dropped, as the next
+        send's filters drop it. Answers to the owner's Stop on a child and to
+        a late steer are read as in a turn."""
+        s = h.native
+        if "method" not in msg:
+            if self._steer_answered(s, msg) or self._child_stop_answered(s, msg):
+                return
+            if "error" in msg:
+                LOG.warning("Codex %s: an error answer read between turns was ignored", h.thread_id)
+            return
+        method, params = msg["method"], msg.get("params", {})
+        if "id" in msg:
+            yield from self._idle_request(h, msg)
+            return
+        if not isinstance(params, dict):
+            return
+        tid = params.get("threadId")
+        if isinstance(tid, str) and tid != s.thread_id and tid in s.child_views:
+            yield from self._child_notification(h, method, params)
+            return
+        if tid == s.thread_id:
+            yield from self._announce(h, method, params)
+            if method == "turn/started":
+                LOG.warning("Codex %s: the orchestrator's thread started a turn with no send; "
+                            "its events are not shown", h.thread_id)
+
+    def _idle_request(self, h, msg):
+        """A server request with no send running. A known child's is answered
+        exactly as in a turn (`_server_request`: its approval goes to this
+        session's `permit`, the thread's own asker, and nothing else answers
+        it). The orchestrator's own thread has no turn to ask in: refused, not
+        fatal. Any other thread's is the fatal identity mismatch it is in a
+        turn."""
+        s = h.native
+        method, params = msg["method"], msg.get("params", {})
+        if not isinstance(params, dict):
+            s.rpc.reply(msg["id"], error={"code": -32602, "message": "Malformed request params"})
+            raise RpcError("Codex server request params are not an object")
+        child = self._child(s, params)
+        if method == "currentTime/read":
+            if params.get("threadId") != s.thread_id and child is None:
+                s.rpc.reply(msg["id"], error={"code": -32602, "message": "Request identity mismatch"})
+                raise RpcError("Codex server request identity mismatch")
+            s.rpc.reply(msg["id"], {"currentTimeAt": int(time.time())})
+            return
+        if method == MCP_ELICITATION:
+            if params.get("threadId") not in (None, s.thread_id) and child is None:
+                s.rpc.reply(msg["id"], error={"code": -32602, "message": "Request identity mismatch"})
+                raise RpcError("Codex server request identity mismatch")
+            s.rpc.reply(msg["id"], {"action": "decline", "content": None})
+            yield self._event(h, EventKind.ERROR, fatal=False, message=MCP_DECLINED + _from_child(child))
+            return
+        if child is None:
+            if params.get("threadId") != s.thread_id:
+                s.rpc.reply(msg["id"], error={"code": -32602, "message": "Request identity mismatch"})
+                raise RpcError("Codex server request identity mismatch")
+            s.rpc.reply(msg["id"], error={"code": -32603, "message": "No turn is running"})
+            yield self._event(h, EventKind.ERROR, fatal=False,
+                              message=f"Codex asked something with no turn running; refused: "
+                                      f"{str(method)[:80]}")
+            return
+        pending_request = _Request()
+        try:
+            yield from self._server_request(h, msg, pending_request, child=child)
+        except BaseException:
+            if not pending_request.replied:
+                self._refuse(s, msg["id"])
+            raise
+
     def _server_request(self, h, msg, request, child: str | None = None):
         """Answer one server request. `child` is the label of the known
         sub-agent that sent it (SV-2a), or None for this session's own."""
@@ -2285,6 +2463,8 @@ class CodexProvider:
                 return
             s.closed.set()
             s.pending.clear()
+        with s.reader_cv:
+            s.reader_cv.notify_all()    # a watcher or a waiting send sees the close now (SV-6)
         s.rpc.close()
         if s.brief.mcp_servers:
             # A jarvis server's env holds the session's caller token (plan

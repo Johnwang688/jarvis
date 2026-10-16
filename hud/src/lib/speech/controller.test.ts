@@ -123,6 +123,32 @@ describe("who is read", () => {
   });
 });
 
+describe("a turn the CLI started by itself is never spoken (SV-6, owner 2026-10-15)", () => {
+  const cli = (kind: string, data: Record<string, unknown> = {}) =>
+    c.event({ kind, thread_id: T, data, self_started: true });
+
+  it("its words, deltas and end say nothing", async () => {
+    cli("turn_started");
+    for (let i = 0; i < REPLY.length; i += 9) cli("text_delta", { text: REPLY.slice(i, i + 9) });
+    cli("text", { text: REPLY });
+    cli("turn_finished", { stop: "end" });
+    await clock.advance(60_000);
+    expect(player.started).toEqual([]);
+    expect(say.calls).toEqual([]);
+  });
+
+  it("does not cut short the owner's reply being read, even when it is stopped", async () => {
+    stream(REPLY);
+    settle(REPLY);
+    await clock.advance(400);
+    cli("text", { text: "The background agent finished; nothing else to do." });
+    cli("turn_finished", { stop: "interrupted" });
+    finish();
+    await clock.advance(60_000);
+    expect(player.started.join(" ")).toBe(REPLY);
+  });
+});
+
 describe("stale speech", () => {
   it("a message sent to the thread drops what was queued and stops what is playing", async () => {
     stream(REPLY);

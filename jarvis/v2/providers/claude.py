@@ -217,12 +217,30 @@ CHILD_LIVE = ("running", "backgrounded")
 # version; the owner enabled it on that evidence. Empty turns per-child Stop
 # off. A floor, like CLAUDE_VERIFIED: a newer CLI keeps it, a CLI Jarvis has
 # seen to be older does not. STOP_CONTROL_TIMEOUT_S bounds the wait for the
-# CLI to take the request (between turns nobody reads its stream, SV-6, and a
-# full buffer could hold the answer back); the stop itself is confirmed only
-# by the CLI's own `killed`/`stopped`.
+# CLI to take the request (a full SDK buffer could hold the answer back; SV-6
+# drains it between turns only for a watched session); the stop itself is
+# confirmed only by the CLI's own `killed`/`stopped`.
 CLAUDE_STOP_VERIFIED = "2.1.295"
 STOP_CONTROL_TIMEOUT_S = 10.0
 OWNER_STOPPED = "stopped by the owner"
+
+# --- between turns (SV-6, 2026-10-16) ----------------------------------------
+# Between sends an idle reader keeps reading the CLI's stream, but only for a
+# session the daemon watches (`watch`): a sub-agent's messages and the task
+# messages go to the watcher at once; a CLI turn nobody sent (a finished
+# background agent's notice, SV-0 finding 6) is *offered* to the daemon, which
+# adopts it as a turn of its own (`adopt`); anything else main-thread is held,
+# in order, for the next reader (`session.held`), which judges it by `_read`'s
+# rules as before. The design: docs/plans/2026-10-13-subagent-view.md, "SV-6
+# design". Every reader runs on the session's own loop and a turn parks the
+# idle reader before it reads, so the stream has one reader at a time.
+# HELD_LIMIT bounds what is held: past it a held stream event (a delta) is
+# dropped; a whole message, a result or a task message never is.
+HELD_LIMIT = 4096
+# How long an adopted CLI turn waits for the session's turn slot, and how long
+# a switch or a close waits for the idle reader to stop.
+ADOPT_WAIT_S = 10.0
+PARK_TIMEOUT_S = 10.0
 
 # The exact text the CLI puts in a tool result when the auto-mode classifier
 # refuses a call — §6.1's `reviewer_declined` trigger. Verified 2026-09-15
@@ -836,6 +854,18 @@ class _Session:
     tasks: dict = field(default_factory=dict)
     child_tools: OrderedDict = field(default_factory=OrderedDict)
     child_denied: OrderedDict = field(default_factory=OrderedDict)
+    # Between turns (SV-6). `watch` is the daemon's feed while it watches
+    # this session (`ClaudeProvider.watch`), else None. `idle` is the idle
+    # reader's task and `reading` whether a turn holds the stream (both
+    # touched only on the session's loop). `held` is what a reader read and
+    # left, in order, for the next one; `offer` is the origin of a CLI turn
+    # the idle reader holds for the daemon to adopt, or None.
+    watch: Any = None
+    idle: Any = None
+    reading: bool = False
+    held: deque = field(default_factory=deque)
+    offer: str | None = None
+    held_dropped: int = 0
 
     def emit(self, kind: EventKind, **data: Any) -> None:
         """Put an event on the turn's queue. Silent outside a turn by design.
@@ -844,10 +874,17 @@ class _Session:
         stopped, or nothing runs but a background sub-agent, whose hook can
         fire between turns (SV-0 finding 6). Dropping is right, blocking is
         not: the gate still asks `permit`, and the broker's card is its own.
+        A gate question asked between turns goes to the daemon's watcher when
+        it watches (SV-6), for the audit log only: nothing reads it as an
+        answer, and the decision is `permit`'s alone.
         """
         events = self.events
         if events is not None:
             events.put(Event(kind, self.thread_id, data))
+            return
+        watch = self.watch
+        if watch is not None and kind in (EventKind.APPROVAL_REQUESTED, EventKind.APPROVAL_RESOLVED):
+            watch.put(Event(kind, self.thread_id, data))
 
 
 # --- the provider -----------------------------------------------------------
@@ -1355,6 +1392,11 @@ class ClaudeProvider:
 
         async def turn() -> None:
             try:
+                # The idle reader stops before anything is written or read
+                # (SV-6): from here this turn is the stream's one reader, and
+                # whatever the idle reader held it reads first.
+                await self._take_stream(session)
+                session.offer = None
                 await session.client.query(_prompt(message, prompt_uid, later=behind))
                 held, full, resend = await self._read(session, events, prompt_uid)
                 if full:
@@ -1374,6 +1416,7 @@ class ClaudeProvider:
             finally:
                 with session.mutex:
                     session.accepting = False
+                self._give_stream(session)
                 # The generator must never hang, whatever happened above.
                 events.put(done)
 
@@ -1496,7 +1539,9 @@ class ClaudeProvider:
 
         Reads go through the session's pump, one message per request, never
         cancelled mid-read: a hold that ends leaves its read outstanding for
-        the next turn, and nothing the CLI said is ever lost.
+        the next turn, and nothing the CLI said is ever lost. What the idle
+        reader held between turns (SV-6) is read first, in order, and judged
+        by these same rules.
         """
         loop = asyncio.get_running_loop()
         generation = session.generation
@@ -1519,9 +1564,8 @@ class ClaudeProvider:
                 timeout = max(0.0, min(hold_quiet, hold_began + STEER_HOLD_MAX_S) - loop.time())
             elif candidate_until is not None:
                 timeout = max(0.0, candidate_until - loop.time())
-            pump = self._pump(session)
             try:
-                item = await pump.next(timeout)
+                item = await self._next(session, timeout)
             except asyncio.TimeoutError:
                 if hold_began is None and candidate is not None:
                     # The message's own start never showed: the CLI did not
@@ -1755,7 +1799,7 @@ class ClaudeProvider:
                         await session.client.interrupt()
                     break
                 try:
-                    item = await self._pump(session).next(min(left, INTERRUPT_POLL_S))
+                    item = await self._next(session, min(left, INTERRUPT_POLL_S))
                 except asyncio.TimeoutError:
                     continue
                 if item is _END:
@@ -1790,6 +1834,291 @@ class ClaudeProvider:
         if session.interrupted:
             with contextlib.suppress(Exception):
                 await session.client.interrupt()
+
+    # -- between turns (SV-6) -------------------------------------------------
+
+    async def _next(self, session: _Session, timeout: float | None) -> Any:
+        """The next message for the reader that holds the stream now: what an
+        earlier reader held, first and in order, then the stream itself."""
+        try:
+            return session.held.popleft()
+        except IndexError:          # nothing held (or a close just cleared it)
+            return await self._pump(session).next(timeout)
+
+    async def _park(self, session: _Session) -> None:
+        """Stop the idle reader (on the loop) and wait until it has. Its one
+        wait on the stream is `_Pump.next`, which leaves its request standing
+        when cancelled, and it routes each message without awaiting anything,
+        so a message is never half-taken: nothing is read twice or lost."""
+        task, session.idle = session.idle, None
+        if task is not None and task is not asyncio.current_task():
+            task.cancel()
+            await asyncio.wait({task})
+
+    async def _take_stream(self, session: _Session) -> None:
+        """A turn takes the stream: the idle reader is parked before the turn
+        writes or reads anything, and stays parked until `_give_stream`."""
+        await self._park(session)
+        session.reading = True
+
+    def _give_stream(self, session: _Session) -> None:
+        """A turn is done with the stream (on the loop): the idle reader takes
+        it again, if the daemon watches this session."""
+        session.reading = False
+        self._start_idle(session)
+
+    def _start_idle(self, session: _Session) -> None:
+        """Start the idle reader (on the loop), unless a turn holds the
+        stream, one already runs, nobody watches or the session closed."""
+        if (session.closed or session.watch is None or session.reading
+                or (session.idle is not None and not session.idle.done())):
+            return
+        session.idle = asyncio.ensure_future(self._idle(session))
+
+    async def _idle(self, session: _Session) -> None:
+        """The between-turn reader (SV-6). First what a turn left held, judged
+        again, then the stream, one message at a time, each routed by
+        `_route_idle`. It never makes a pump: a stream that ended, or a client
+        a switch replaced, waits for the next turn, which reports it as
+        before."""
+        try:
+            left, session.held = list(session.held), deque()
+            for index, item in enumerate(left):
+                if not self._route_idle(session, item):
+                    session.held.extend(left[index + 1:])
+                    return
+            pump = session.pump
+            while (not session.closed and pump is not None and pump is session.pump
+                   and not pump.ended and pump.client is session.client):
+                item = await pump.next(None)
+                if not self._route_idle(session, item):
+                    return
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 — the next turn reads on, as before SV-6
+            LOG.exception("claude %s: the idle reader failed; the next turn reads on",
+                          session.thread_id)
+
+    def _route_idle(self, session: _Session, item: Any) -> bool:
+        """One message read between turns, routed without awaiting anything.
+        -> False when reading stops: the stream ended or raised, which is held
+        for the next turn to report exactly as it did before SV-6.
+
+        - Nobody watches: everything is held (the next send attributes it as
+          before; the buffer is drained all the same).
+        - A sub-agent's message or a task message: translated and handed to
+          the watcher now — the child's row moves while the chat is idle.
+        - Behind something already held: held, in order.
+        - A main-thread system message (`init`, `status`): read for the
+          session id, nothing more.
+        - A CLI turn nobody sent: offered to the daemon (`adopt`), and held.
+        - Anything else (a late steer's echo, a stray result): held for the
+          next send's `_read`, whose rules judge it as before."""
+        if item is _END or isinstance(item, _Raised):
+            if isinstance(item, _Raised):
+                LOG.warning("claude %s: the CLI's stream failed between turns (%s); the next "
+                            "message reports it", session.thread_id, type(item.exc).__name__)
+            else:
+                LOG.info("claude %s: the CLI's stream ended between turns", session.thread_id)
+            session.held.append(item)
+            return False
+        watch = session.watch
+        if watch is None:
+            self._hold(session, item)
+            return True
+        if _subagent_message(item):
+            for event in self._translate(session, item):
+                watch.put(event)
+            return True
+        if session.held:
+            self._hold(session, item)
+            return True
+        if isinstance(item, SystemMessage):
+            self._translate(session, item)
+            return True
+        origin = self._cli_turn(session, item)
+        self._hold(session, item)
+        if origin is not None:
+            session.offer = origin
+            watch.put(Event(EventKind.TURN_STARTED, session.thread_id, {"self_started": origin}))
+            return True
+        uid = str(item.uuid).lower() if isinstance(item, SdkUserMessage) and item.uuid else None
+        with session.mutex:
+            stopped = uid is not None and uid in session.stopped
+        if stopped:
+            # A steer of a turn the owner stopped, run late by the CLI: stop
+            # means stop, now rather than at the next send (whose `_read`
+            # still drops its words).
+            asyncio.ensure_future(self._stop_quietly(session))
+        return True
+
+    @staticmethod
+    def _cli_turn(session: _Session, item: Any) -> str | None:
+        """The origin of a CLI turn nobody sent that `item` opens, or None.
+        Only on a CLI known to echo the messages that start our turns: without
+        that, a late steer's turn could not be told from one."""
+        if not session.prompt_echo:
+            return None
+        if isinstance(item, SdkUserMessage):
+            uid = str(item.uuid).lower() if item.uuid else None
+            with session.mutex:
+                if uid is not None and uid in session.steering:
+                    return None
+            return _injected(getattr(item, "origin", None))
+        if isinstance(item, (StreamEvent, AssistantMessage)):
+            return "background"
+        if isinstance(item, ResultMessage):
+            return _injected(getattr(item, "origin", None))
+        return None
+
+    @staticmethod
+    def _hold(session: _Session, item: Any) -> None:
+        """Hold one message for the next reader. Past HELD_LIMIT a stream
+        event (a live delta) is dropped; a whole message never is."""
+        if len(session.held) >= HELD_LIMIT and isinstance(item, StreamEvent):
+            session.held_dropped += 1
+            if session.held_dropped == 1:
+                LOG.warning("claude %s: %d messages held between turns; dropping live deltas",
+                            session.thread_id, len(session.held))
+            return
+        session.held.append(item)
+
+    @staticmethod
+    async def _stop_quietly(session: _Session) -> None:
+        with contextlib.suppress(Exception):
+            await session.client.interrupt()
+
+    def watch(self, h: SessionHandle) -> Iterator[Event]:
+        """The daemon's feed for this session between turns (SV-6), for as
+        long as it lives: a sub-agent's SUBAGENT and SUBAGENT_EVENT; a gate
+        question asked between turns (APPROVAL_REQUESTED/RESOLVED, for the
+        log); and TURN_STARTED `{self_started: origin}` when the CLI starts a
+        turn nobody sent, which the daemon may take up with `adopt`. Ends when
+        the session closes. One watcher per session. While it watches, the
+        session's stream is read between turns too, so the SDK's buffer never
+        fills and a hook is never left unanswered (the 2026-10-12 stall)."""
+        session = h.native
+        if session is None:
+            return
+        feed: queue.Queue = queue.Queue()
+        with session.mutex:
+            if session.closed:
+                return
+            if session.watch is not None:
+                raise ValueError("this Claude session is already watched")
+            session.watch = feed
+        # A turn that ended before the watcher came started no idle reader:
+        # one starts now, on the loop, where a turn's start and end are
+        # decided, so never beside a turn that reads.
+        with contextlib.suppress(RuntimeError):
+            session.loop.call_soon_threadsafe(self._start_idle, session)
+        try:
+            while True:
+                try:
+                    item = feed.get(timeout=1.0)
+                except queue.Empty:
+                    if session.closed:
+                        return
+                    continue
+                if item is _CLOSED:
+                    return
+                yield item
+        finally:
+            with session.mutex:
+                if session.watch is feed:
+                    session.watch = None
+
+    def cli_turn_pending(self, h: SessionHandle) -> bool:
+        """Whether the idle reader holds a CLI turn nobody sent, for `adopt`.
+        Reads one field; never blocks (the daemon asks under its lock)."""
+        session = h.native
+        return session is not None and not session.closed and session.offer is not None
+
+    def adopt(self, h: SessionHandle) -> Iterator[Event]:
+        """Read the CLI turn the idle reader offered, as a turn of the thread
+        (SV-6): TURN_STARTED `{self_started: origin}`, then its words, tools,
+        gate questions and usage, then its TURN_FINISHED — the events a send
+        yields, with no message of ours. Yields nothing when no turn is
+        offered by the time it holds the stream (a send read it first). A
+        steer is refused while it runs, so an owner message waits for it."""
+        session = h.native
+        if session is None or session.closed:
+            return
+        if not session.sending.acquire(timeout=ADOPT_WAIT_S):
+            return
+        try:
+            yield from self._run_cli(h, session)
+        finally:
+            session.events = None
+            with session.mutex:
+                session.accepting = False
+            session.sending.release()
+
+    def _run_cli(self, h: SessionHandle, session: _Session) -> Iterator[Event]:
+        events: queue.Queue = queue.Queue()
+        session.events = events
+        done = object()
+
+        async def turn() -> None:
+            try:
+                await self._take_stream(session)
+                origin, session.offer = session.offer, None
+                if origin is None or session.closed:
+                    return
+                session.interrupted = False
+                session.tools_seen.clear()
+                session.denied_tools.clear()
+                session.denial_without_id = False
+                events.put(Event(EventKind.TURN_STARTED, session.thread_id, {"self_started": origin}))
+                held = await self._read_cli(session, events)
+                for event in self._end_foreground(session):
+                    events.put(event)
+                if held is not None:
+                    events.put(held)
+            except BaseException as exc:  # noqa: BLE001 — reported, never swallowed
+                events.put(Event(EventKind.ERROR, session.thread_id,
+                                 {"message": _fatal_message(session, exc), "fatal": True}))
+            finally:
+                self._give_stream(session)
+                events.put(done)
+
+        future = asyncio.run_coroutine_threadsafe(turn(), session.loop)
+        finished = False
+        try:
+            while True:
+                item = events.get()
+                if item is done:
+                    break
+                if item.kind in (EventKind.TURN_FINISHED, EventKind.ERROR):
+                    finished = True
+                yield item
+        finally:
+            if not finished and not future.done():
+                self.interrupt(h)
+            future.cancel()
+
+    async def _read_cli(self, session: _Session, events: queue.Queue) -> Event | None:
+        """Read one CLI turn nobody sent, held messages first, to its result.
+        -> its TURN_FINISHED, or None when the stream ended first (a dead CLI:
+        the next message reports it, as a send would). Nothing here waits on
+        a message of ours, and nothing is sent again."""
+        while True:
+            item = await self._next(session, None)
+            if item is _END:
+                session.pump = None
+                return None
+            if isinstance(item, _Raised):
+                session.pump = None
+                raise item.exc
+            if isinstance(item, SdkUserMessage) and item.uuid and not item.parent_tool_use_id:
+                uid = str(item.uuid).lower()
+                with session.mutex:
+                    # A steer the CLI folded into its own turn has been seen.
+                    session.steering.pop(uid, None)
+                    session.stopped.discard(uid)
+            finished = self._take(session, events, item)
+            if finished is not None:
+                return finished
 
     def _pump(self, session: _Session) -> "_Pump":
         """The session's reader of its client's stream (on the session's loop)."""
@@ -2265,6 +2594,13 @@ class ClaudeProvider:
             # CLI process still held: a steer queued there dies with it, and
             # so does every sub-agent it ran (SV-1): stopped here, so a dead
             # child holds no CHILD_LIMIT slot (`live_subagents` tells the daemon).
+            # The idle reader stops first (SV-6), and what it held of the old
+            # CLI's stream — a turn it offered included — goes with that CLI;
+            # the next turn's end starts it again on the new client.
+            with contextlib.suppress(Exception):
+                _await(session.loop, self._park(session), PARK_TIMEOUT_S)
+            session.held.clear()
+            session.offer = None
             self._stop_pump(session)
             with session.mutex:
                 session.steering.clear()
@@ -2414,8 +2750,13 @@ class ClaudeProvider:
         session = h.native
         if session is None or session.closed:
             return
-        session.closed = True
         with session.mutex:
+            session.closed = True
+            # The watcher's feed ends (SV-6): set under the lock `watch`
+            # registers under, so a watcher is either told or never starts.
+            feed = session.watch
+            if feed is not None:
+                feed.put(_CLOSED)
             for pending in session.pending.values():
                 if not pending.ready.is_set():
                     pending.value = Decision.DENY
@@ -2423,6 +2764,12 @@ class ClaudeProvider:
             session.pending.clear()
             session.steering.clear()
             session.stopped.clear()
+        # The idle reader stops before its pump and its loop do, so no task
+        # is left pending on a loop that is about to stop.
+        with contextlib.suppress(Exception):
+            _await(session.loop, self._park(session), PARK_TIMEOUT_S)
+        session.held.clear()
+        session.offer = None
         self._stop_pump(session)
         try:
             _await(session.loop, session.client.disconnect(), CONTROL_TIMEOUT_S)
@@ -2671,6 +3018,17 @@ class _Raised:
 
 
 _END = object()   # the client's stream ended
+_CLOSED = object()   # the session closed: the watcher's feed ends (SV-6)
+
+
+def _subagent_message(item: Any) -> bool:
+    """A sub-agent's message (tagged with `parent_tool_use_id`) or a task
+    message (`task_*`): what the idle reader hands the watcher at once."""
+    if isinstance(item, (AssistantMessage, SdkUserMessage, StreamEvent)):
+        return bool(getattr(item, "parent_tool_use_id", None))
+    if isinstance(item, SystemMessage):
+        return str(getattr(item, "subtype", "") or "").startswith("task_")
+    return False
 
 
 class _Pump:

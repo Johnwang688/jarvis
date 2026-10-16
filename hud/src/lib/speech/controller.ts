@@ -54,6 +54,8 @@ export interface SpeechEventLike {
   data?: { text?: string; stop?: string; [key: string]: unknown } | undefined;
   text?: string;
   stop?: string;
+  /** A record of a turn the CLI started by itself (SV-6): never spoken (owner, 2026-10-15). */
+  self_started?: boolean;
 }
 
 export interface SpeakerGateLike {
@@ -392,6 +394,10 @@ export class SpeechController {
     }
     const thread = e.thread_id;
     if (!thread || !kind) return;
+    // A turn the CLI started by itself after a background sub-agent finished
+    // is not read aloud (owner, 2026-10-15; SV-6): none of its records count,
+    // its end included, so what is being read for the owner's turn goes on.
+    if (e.self_started === true) return;
     // A message to the thread, by any means: the reply being read is stale.
     if (kind === "user_message") {
       this.messageSent(thread);

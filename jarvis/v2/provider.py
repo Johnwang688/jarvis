@@ -289,6 +289,28 @@ class Provider(Protocol):
     #     `SubagentStopUnsupported` without sending anything. Called from a
     #     thread other than the one draining `send()`."""
     #
+    # Optional (SV-6, 2026-10-16): reading between turns. A provider without
+    # `watch` is read only by its turns.
+    #
+    # def watch(self, h: SessionHandle) -> Iterator[Event]:
+    #     """For the session's life, what the provider reads while no turn
+    #     runs: SUBAGENT/SUBAGENT_EVENT; APPROVAL_REQUESTED/RESOLVED of a gate
+    #     question asked between turns (logged with no turn; the decision is
+    #     `permit`'s); ERROR (a fatal one: the provider closed the session);
+    #     and TURN_STARTED `{"self_started": origin}` when the CLI started a
+    #     turn by itself. Ends when the session closes. One watcher per
+    #     session, on a thread of the daemon's; never two readers of the
+    #     stream at once."""
+    #
+    # def cli_turn_pending(self, h: SessionHandle) -> bool:
+    #     """Whether a turn the CLI started by itself waits to be adopted.
+    #     Cheap, non-blocking: the daemon asks under its lock."""
+    #
+    # def adopt(self, h: SessionHandle) -> Iterator[Event]:
+    #     """That turn, read as a send's would be (TURN_STARTED, ..., USAGE,
+    #     TURN_FINISHED), with no message of ours. Yields nothing when none
+    #     waits. Called only when no send runs."""
+    #
     # def undelivered(self, h: SessionHandle) -> list[UserMessage]:
     #     """Steered messages the provider took but that never reached the
     #     model before its turn ended (the fast path's final answer came

@@ -196,7 +196,8 @@ class ClaudeStop(unittest.TestCase):
         run.provider.stop_subagent(run.handle, child)
         self.assertEqual(run.client.stopped, ["a218409de06f88bc5"])
         self.assertEqual(run.client.interrupts, 0)
-        # Nobody reads between turns (SV-6): still live until the CLI's word is read.
+        # Unwatched, nobody reads between turns: still live until the CLI's
+        # word is read. (Watched, SV-6 reads it at once: idle_reader_check.)
         self.assertIn(child, run.provider.live_subagents(run.handle))
         second = run.send("two")
         ended = [d for d in life(second, child) if d["op"] == "finished"]
