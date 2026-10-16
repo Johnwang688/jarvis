@@ -211,7 +211,12 @@ export class TermSession {
   }, { onOverflow: (dropped) => this.overflowed(dropped) });
   /** Output skipped because it came faster than xterm could draw it (bytes; the notice). */
   skipped = 0;
-  /** Any output has arrived in this window (replayed or live): the Brain tab's "nothing printed yet". */
+  /**
+   * The terminal shows visible text (replayed or live): the Brain tab's
+   * "nothing printed yet". Read from xterm's buffer once a frame has been
+   * drawn, so control sequences alone — WSL interop's `ESC[6n` with vexcom
+   * hung behind it (hardware check H4) — never count as output.
+   */
   printed = false;
   /** The current socket's generation (OutputPipe). */
   private gen = 0;
@@ -637,11 +642,13 @@ export class TermSession {
   private onMessage(ws: WebSocket, gen: number, ev: MessageEvent) {
     if (ws !== this.ws || gen !== this.gen) return;
     if (typeof ev.data !== "string") {
-      const bytes = new Uint8Array(ev.data as ArrayBuffer);
-      this.out.data(gen, bytes);
-      if (!this.printed && bytes.length > 0) {
-        this.printed = true;
-        this.mgr.changed();
+      this.out.data(gen, new Uint8Array(ev.data as ArrayBuffer));
+      if (!this.printed) {
+        this.out.then(gen, () => {
+          if (this.printed || !this.bufferText().trim()) return;
+          this.printed = true;
+          this.mgr.changed();
+        });
       }
       return;
     }
@@ -1415,10 +1422,11 @@ export class TermManager {
   }
 
   /**
-   * A program terminal the daemon just started for this window's own click,
-   * to be drawn where the click was (VX-UI-4a: the brain terminal in the VEX
-   * pane's Brain tab): listed now and held as this window's (`claim`), and
-   * nothing opened for it — not the panel. False when it is not listed (or a
+   * A program terminal the daemon just started for this window's own click
+   * (VX-UI-4a: the brain terminal): listed now and held as this window's
+   * (`claim`), and nothing opened for it — not the panel. Where it is drawn is
+   * the caller's: the Brain tab whose Connect was pressed takes its
+   * `vex-<pane>` place first (`holdInVex`). False when it is not listed (or a
    * card is up).
    */
   async adoptProgram(id: string): Promise<boolean> {

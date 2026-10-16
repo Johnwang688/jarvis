@@ -960,6 +960,11 @@ function BrainTab(props: { pane: number; drawn: boolean; blocked: boolean; brain
     terminals.holdInVex(pane, tid);
     return () => terminals.holdInVex(pane, null);
   }, [want, tid, pane]);
+  // Whether this tab is still drawn when its Connect's answer comes: only then does it take the place first.
+  const live = useRef(false);
+  live.current = props.drawn;
+  useEffect(() => () => { live.current = false; }, []);
+  const s = tid ? mgr.sessions.get(tid) : undefined;
   const connectHelp = view.connect.off ? `${view.connect.off} ${helpText("connect", props.slot)}` : helpText("connect", props.slot);
   return <div className="vexbrain" data-testid="vex-brain-tab" data-state={view.state}>
     <div className="vexobar">
@@ -978,11 +983,17 @@ function BrainTab(props: { pane: number; drawn: boolean; blocked: boolean; brain
                       // The owner's own press only: a pointer, or Enter/Space on it — never a script's click.
                       if (!isTrustedPress({ isTrusted: e.nativeEvent.isTrusted, button: e.button })) return;
                       if (blocked) return;
-                      void vex.connectBrain();
+                      // The pane whose Connect was pressed shows it, before any other Brain tab can.
+                      void vex.connectBrain((id) => { if (live.current) terminals.holdInVex(pane, id); });
                     }}>
               Connect
             </button>
           </Tip>
+        ) : null}
+        {view.reconnect && s ? (
+          <button type="button" className="quiet" data-testid="vex-brain-reconnect" disabled={blocked}
+                  title="Attach to the brain terminal again; the link itself is not reopened"
+                  onClick={() => s.retry()}>Reconnect</button>
         ) : null}
         {view.disconnect.shown ? (
           <Tip id={tip("disconnect")} text={helpText("disconnect", props.slot)} end>
@@ -1004,8 +1015,8 @@ function BrainTab(props: { pane: number; drawn: boolean; blocked: boolean; brain
       {view.text}
       {view.state === "connected" && silent ? (
         <span data-testid="vex-brain-silent">
-          {" "}Nothing printed yet: output appears here as the program prints. Not yet checked on the real robot:
-          whether this link starts through WSL (hardware check H4). If nothing ever appears, Disconnect, then Connect.
+          {" "}Nothing printed yet: output appears here as the program prints. If nothing ever appears, the link
+          may not have started: whether it starts through WSL is not yet checked on the real robot (hardware check H4).
         </span>
       ) : null}
     </div>

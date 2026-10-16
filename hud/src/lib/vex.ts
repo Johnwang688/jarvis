@@ -696,7 +696,8 @@ export function helpText(id: HelpId, slot: number): string {
  * window) is only shown, never opened.
  */
 export type BrainState =
-  | "unconfigured" | "off" | "connecting" | "connected" | "paused" | "ended" | "error" | "elsewhere";
+  | "unconfigured" | "off" | "connecting" | "connected" | "paused" | "ended" | "error" | "elsewhere" | "taken"
+  | "lost";
 
 export interface BrainInput {
   configured: boolean;
@@ -733,11 +734,18 @@ export interface BrainView {
   disconnect: { shown: boolean; close: boolean };
   /** The terminal view is drawn in the tab. */
   terminal: boolean;
+  /**
+   * Offered instead of Connect when this window's socket gave up (`lost`):
+   * attach again (`TermSession.retry`). The link itself may still be open, so
+   * nothing is asked of the device.
+   */
+  reconnect: boolean;
   /** The tab's badge. */
   badge: { state: MarkState; text: string };
 }
 
-const BRAIN_GONE = new Set(["ended", "lost", "closed"]);
+/** The terminal itself is gone: Jarvis restarted (`ended`) or it was closed. */
+const BRAIN_GONE = new Set(["ended", "closed"]);
 
 export function brainView(i: BrainInput): BrainView {
   const offWhy = !i.configured ? "VEX is not set up yet: run jarvis vex setup."
@@ -752,6 +760,7 @@ export function brainView(i: BrainInput): BrainView {
     connect: o.connect ?? { shown: false, off: "" },
     disconnect: o.disconnect ?? { shown: false, close: false },
     terminal: o.terminal ?? false,
+    reconnect: o.reconnect ?? false,
     badge: o.badge ?? { state: "idle", text: "not connected" },
   });
   const connect = { shown: true, off: offWhy };
@@ -772,7 +781,7 @@ export function brainView(i: BrainInput): BrainView {
       const why = i.session === "exited"
         ? `The link ended (vexcom exited${i.exitCode !== null ? ` with code ${i.exitCode}` : ""}). `
           + "Its last output is below. Connect opens a new link."
-        : "The link was lost (Jarvis restarted, or it was closed). Connect opens a new link.";
+        : "The link is gone (Jarvis restarted, or it was closed). Connect opens a new link.";
       return view("ended", why, { connect, disconnect: { shown: true, close: true }, terminal: true,
         badge: { state: "failed", text: "ended" } });
     }
@@ -780,6 +789,26 @@ export function brainView(i: BrainInput): BrainView {
       const where = i.shownIn.kind === "pane" ? `pane ${i.shownIn.slot}` : `the VEX view in pane ${i.shownIn.slot}`;
       return view("elsewhere", `The brain terminal is shown in ${where}.`, {
         disconnect: { shown: true, close: false }, badge: { state: "ok", text: `live, shown in ${where}` } });
+    }
+    // Another window's say, or this window's socket: each in its own words, never a spinner that never ends.
+    const live = { disconnect: { shown: true, close: false }, terminal: true };
+    if (i.session === "taken") {
+      return view("taken", "Taken by another window: it shows the brain terminal now. Take it back (below) asks "
+        + "for it again.", { ...live, badge: { state: "ok", text: "live, taken by another window" } });
+    }
+    if (i.session === "refused") {
+      return view("taken", "The window showing the brain terminal kept it. Ask again (below) asks once more.",
+        { ...live, badge: { state: "ok", text: "live, kept by another window" } });
+    }
+    if (i.session === "waiting") {
+      return view("connecting", "Asking the window that shows the brain terminal to let it go…",
+        { ...live, badge: { state: "busy", text: "asking another window" } });
+    }
+    if (i.session === "lost") {
+      // Its retries ran out; the link may still be open, so Disconnect (never "Close") names what it does.
+      return view("lost", "The connection to the brain terminal was lost; the link itself may still be open. "
+        + "Reconnect attaches again; Disconnect closes the link.",
+      { ...live, reconnect: true, badge: { state: "unknown", text: "connection lost" } });
     }
     if (i.shownIn?.kind === "window") {
       return view("elsewhere", "The brain terminal is shown in another window. Show it here asks that window first.",

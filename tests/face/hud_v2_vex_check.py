@@ -844,7 +844,12 @@ def _brain_checks(page, mock, check, until, fake):
     check("Connect again opens a new link", bool(until(lambda: len(_posted_since(mock, base, "/vex/brain")) == asked + 1,
                                                        timeout=4))
           and bool(until(lambda: mock_vex.state(mock)["brain"] not in (None, brain), timeout=4)))
+    old = brain
     brain = mock_vex.state(mock)["brain"]
+    check("LOW-2: the ended link is cleared away (closed, its panel tab gone)",
+          bool(until(lambda: any(c[0] == "DELETE" and c[1] == f"/terminals/{old}" for c in mock.calls[base:])
+                     and old not in page.evaluate("window.__hudTerminals.ids()")
+                     and not any(r["id"] == old for r in mock.world["terminals"]), timeout=4)))
     until(lambda: _brain_state(page) == "connected", timeout=6)
 
     # A download pauses it — only once its build has succeeded — and never reopens it.
@@ -890,14 +895,49 @@ def _brain_checks(page, mock, check, until, fake):
     ebase = len(mock.calls)
     check("elsewhere setup: both views draw", _ready(page, until)
           and bool(until(lambda: page.locator(_view(3, _tid("vex-card"))).count() > 0, timeout=5)))
-    brain = _connect(page, mock, until, 2)
+    # MED-1, the H4 case: all the ring holds is interop's cursor query, vexcom hung behind it.
+    nxt = f"{0xb0000000 + mock.__dict__.get('terminal_seq', 0) + 1:08x}"
+    fake.ring[nxt] = bytearray(b"\x1b[6n")
+    # LOW-1: both Brain tabs open; Connect is pressed in pane 3, the later pane — it shows it, not pane 2.
+    _tab(page, "brain", 2)
+    brain = _connect(page, mock, until, 3)
+    check("LOW-1: the pane whose Connect was pressed shows it, though another Brain tab was open first",
+          brain == nxt and page.evaluate(f"window.__hudTerminals.shownIn('{brain}')") == "vex-3"
+          and _brain_state(page, 2) == "elsewhere")
+    check("focus is not moved into the terminal by Connect", page.evaluate(
+        "() => !(document.activeElement && document.activeElement.closest('.termhost, .xterm'))"))
+    _tab(page, "build", 3)
+    check("once pane 3 shows another tab, pane 2's open Brain tab draws the same session",
+          bool(until(lambda: page.evaluate(f"window.__hudTerminals.shownIn('{brain}')") == "vex-2", timeout=4))
+          and _socks(fake, brain) == 1)
     silent = page.locator(_brain(page, 2, _tid("vex-brain-silent")))
-    check("connected with nothing printed yet: says so honestly, naming the unrun hardware check (H4)",
+    check("MED-1: a ring of only ESC[6n is not output: it says nothing printed yet, naming H4",
           bool(until(lambda: _brain_state(page, 2) == "connected" and silent.count() == 1, timeout=4))
-          and "H4" in silent.inner_text() and "Nothing printed yet" in silent.inner_text())
+          and "H4" in silent.inner_text() and "Nothing printed yet" in silent.inner_text()
+          and "may not have started" in silent.inner_text() and "Disconnect" not in silent.inner_text())
+    time.sleep(0.5)
+    check("and it stays said (no frame of control bytes counts)", silent.count() == 1)
+    fake.output(brain, b"\x1b[?25l\x1b[2J")
+    time.sleep(0.5)
+    check("nor does a live frame of control sequences alone", silent.count() == 1)
     fake.output(brain, b"$BEGIN,odom,x\r\n")
     check("and stops saying it once the program prints",
           bool(until(lambda: silent.count() == 0, timeout=4)))
+    # MED-2: another window takes it — said as taken, with the strip's Take it back, never a spinner.
+    held = fake.holders.pop(brain)                       # as the daemon does when another window takes it
+    fake._send(held, {"type": "taken"})
+    fake._close(held, 1000, "taken by another window")
+    fake.flush()
+    check("MED-2: taken by another window is said so, with Take it back, never 'connecting'",
+          bool(until(lambda: _brain_state(page, 2) == "taken", timeout=4))
+          and "Taken by another window" in page.locator(_brain(page, 2, _tid("vex-brain-text"))).inner_text()
+          and page.locator(_brain(page, 2, _tid("term-take-back"))).count() == 1
+          and page.locator(_view(2, _tid("vex-out-tab-brain"))).get_attribute("data-state") != "busy")
+    page.locator(_brain(page, 2, _tid("term-take-back"))).click()
+    check("and Take it back attaches it here again, asking the daemon for no new link",
+          bool(until(lambda: _brain_state(page, 2) == "connected", timeout=6))
+          and len(_posted_since(mock, ebase, "/vex/brain")) == 1,
+          f"{_brain_state(page, 2)} {page.evaluate(f'window.__hudTerminals.state(\'{brain}\')')}")
     _tab(page, "brain", 3)
     check("another VEX pane's Brain tab says the terminal is shown in pane 2, and draws it nowhere",
           bool(until(lambda: _brain_state(page, 3) == "elsewhere", timeout=4))

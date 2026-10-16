@@ -643,6 +643,40 @@ describe("Download feedback uses actual action receipts", () => {
 });
 
 describe("the Brain tab's Connect and Disconnect (VX-UI-4a)", () => {
+  it("the pressing tab takes the place before the store names the terminal (review LOW-1)", async () => {
+    const store = new VexStore();
+    const seen: (string | null)[] = [];
+    // The daemon's vex_device record makes a status read while Connect's answer is on its way.
+    vi.spyOn(api, "vexBrain").mockImplementationOnce(async () => {
+      h.brain = "c0000002";
+      await store.refreshStatus();
+      return { terminal_id: "c0000002", started: true };
+    });
+    await store.connectBrain((id) => seen.push(id, store.brainTerminal));
+    expect(seen).toEqual(["c0000002", null]);
+    expect(store.brainTerminal).toBe("c0000002");
+  });
+
+  it("Connect from an ended link clears the old one away, never a live one (review LOW-2)", async () => {
+    const store = new VexStore();
+    const gone = vi.spyOn(terminals, "gone");
+    const row = vi.spyOn(terminals, "row");
+    store.brainTerminal = "c0000001";
+    row.mockReturnValue({ exited: true, exit_code: 3 } as any);
+    await store.connectBrain();
+    await vi.waitFor(() => expect(gone).toHaveBeenCalledWith("c0000001"));
+    expect(h.closed).toContain("c0000001");
+    expect(store.brainTerminal).toBe("c0000002");
+    // The same live link coming back (started: false) is never closed.
+    gone.mockClear();
+    h.closed.length = 0;
+    row.mockReturnValue({ exited: false } as any);
+    vi.spyOn(api, "vexBrain").mockResolvedValueOnce({ terminal_id: "c0000002", started: false });
+    await store.connectBrain();
+    expect(gone).not.toHaveBeenCalled();
+    expect(h.closed).toEqual([]);
+  });
+
   it("Connect asks the daemon once, holds the terminal as this window's, and never opens the panel", async () => {
     const store = new VexStore();
     const adopt = vi.spyOn(terminals, "adoptProgram");

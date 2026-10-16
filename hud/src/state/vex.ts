@@ -304,7 +304,9 @@ export class VexStore {
         this.statusError = s ? "" : "the daemon answered without a VEX status";
         // A link the daemon holds open (a reload, another window's Connect) is
         // shown, never opened: nothing here asks for one.
-        if (s?.brain && !this.brainGone.has(s.brain)) this.brainTerminal = s.brain;
+        // While this window's Connect is on its way it names the terminal itself, after the
+        // pressing tab has taken its place (review LOW-1): a status read never names it first.
+        if (s?.brain && !this.brainGone.has(s.brain) && !this.brainBusy) this.brainTerminal = s.brain;
         this.changed();
       },
       (e: any) => {
@@ -771,21 +773,27 @@ export class VexStore {
    * after a crash, during a download chain and while a device read is on its
    * way; the daemon's one-device reservation decides the rest. The terminal is
    * held as this window's and drawn in the Brain tab (`vex-<pane>`), never
-   * the panel opened for it.
+   * the panel opened for it: `place` lets the tab whose Connect was pressed
+   * take it first, before any other VEX pane's Brain tab sees it. A previous
+   * link whose program had ended is cleared away (its panel tab too).
    */
-  async connectBrain(): Promise<void> {
+  async connectBrain(place?: (terminalId: string) => void): Promise<void> {
     if (!this.mayAct() || this.brainBusy || this.chain || this.infoBusy) return;
     this.brainBusy = true;
     this.brainNote = "";
     this.brainClosed = "";
     this.changed();
     this.ledger.expect("brain", Date.now());
+    const old = this.brainTerminal;
     try {
       const r = await api.vexBrain();
       if (!r?.started) this.ledger.withdraw("brain");
       if (isVexId(r?.terminal_id)) {
-        this.brainTerminal = r.terminal_id;
-        await terminals.adoptProgram(r.terminal_id);
+        const id = r.terminal_id;
+        await terminals.adoptProgram(id);
+        place?.(id);
+        this.brainTerminal = id;
+        if (old && old !== id && this.ended(old)) void this.clearBrain(old);
       }
     } catch (e: any) {
       this.ledger.withdraw("brain");
@@ -795,6 +803,23 @@ export class VexStore {
       void this.refreshStatus();
       this.changed();
     }
+  }
+
+  /** Whether a brain terminal's program has ended (exited, or the terminal is gone): nothing live to close. */
+  private ended(id: string): boolean {
+    const st = terminals.sessions.get(id)?.state;
+    return st === "exited" || st === "ended" || st === "closed" || !!terminals.row(id)?.exited;
+  }
+
+  /** An ended brain terminal cleared away: closed (its program already ended) and gone from the panel. */
+  private async clearBrain(id: string): Promise<void> {
+    try {
+      await api.closeTerminal(id);
+    } catch {
+      /* already gone (the daemon replaces the last brain terminal itself) */
+    }
+    terminals.gone(id);
+    this.brainGone.add(id);
   }
 
   /**

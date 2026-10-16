@@ -479,7 +479,7 @@ describe("brainView: the Brain tab's states (VX-UI-4a; owner decision 5)", () =>
     expect(exited.disconnect).toEqual({ shown: true, close: true });
     expect(exited.terminal).toBe(true);                      // its last output stays readable
     expect(exited.badge.state).toBe("failed");
-    for (const session of ["ended", "lost", "closed"]) expect(v({ terminal: "c0000001", session }).state).toBe("ended");
+    for (const session of ["ended", "closed"]) expect(v({ terminal: "c0000001", session }).state).toBe("ended");
   });
 
   it("error: the daemon's refusal in its own words, and Connect again", () => {
@@ -503,8 +503,37 @@ describe("brainView: the Brain tab's states (VX-UI-4a; owner decision 5)", () =>
     expect(away.text).toMatch(/another window/);
   });
 
+  it("taken or kept by another window: its own words, drawn (the strip's Take it back / Ask again), never a spinner", () => {
+    const taken = v({ terminal: "c0000001", session: "taken" });
+    expect(taken.state).toBe("taken");
+    expect(taken.text).toMatch(/Taken by another window/);
+    expect(taken.text).toMatch(/Take it back/);
+    expect(taken.terminal).toBe(true);
+    expect(taken.badge.state).not.toBe("busy");
+    expect(taken.connect.shown).toBe(false);
+    const kept = v({ terminal: "c0000001", session: "refused" });
+    expect(kept.state).toBe("taken");
+    expect(kept.text).toMatch(/kept it/);
+    expect(kept.badge.state).not.toBe("busy");
+    const waiting = v({ terminal: "c0000001", session: "waiting" });
+    expect(waiting.text).toMatch(/Asking the window/);
+  });
+
+  it("lost: this window's socket gave up, the link may be open — Reconnect, and Disconnect (never Close)", () => {
+    const lost = v({ terminal: "c0000001", session: "lost" });
+    expect(lost.state).toBe("lost");
+    expect(lost.reconnect).toBe(true);
+    expect(lost.connect.shown).toBe(false);
+    expect(lost.disconnect).toEqual({ shown: true, close: false });
+    expect(lost.text).toMatch(/may still be open/);
+    for (const session of ["attached", "exited", "taken", null]) {
+      expect(v({ terminal: "c0000001", session }).reconnect).toBe(false);
+    }
+  });
+
   it("no state ever offers Connect as on while a terminal is open, a chain runs or a card is up", () => {
-    const sessions = [null, "idle", "connecting", "attached", "waiting", "exited", "ended", "lost"];
+    const sessions = [null, "idle", "connecting", "attached", "waiting", "taken", "refused", "exited", "ended", "lost",
+      "closed"];
     for (const session of sessions) {
       for (const chain of [null, { paused: false }, { paused: true }]) {
         for (const blocked of [false, true]) {
@@ -514,7 +543,7 @@ describe("brainView: the Brain tab's states (VX-UI-4a; owner decision 5)", () =>
             if (on) {
               expect(blocked).toBe(false);
               expect(chain).toBeNull();
-              expect(!terminal || ["exited", "ended", "lost"].includes(session ?? "")).toBe(true);
+              expect(!terminal || ["exited", "ended", "closed"].includes(session ?? "")).toBe(true);
             }
           }
         }

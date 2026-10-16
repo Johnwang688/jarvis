@@ -478,7 +478,11 @@ window's Connect) is shown, never opened. Connect is off, with the reason in
 its hover help, under a card, after a crash, during any download chain and
 while a device read is on its way; the daemon's one-device reservation stays
 the authority. Connect claims the terminal for this window
-(`terminals.adoptProgram`) and never opens the panel. **Disconnect** (also a
+(`terminals.adoptProgram`) and never opens the panel; the Brain tab whose
+Connect was pressed takes the `vex-<pane>` place first (a status read while
+Connect is on its way never names the terminal, so another open Brain tab
+cannot take it; review LOW-1). Connect from an ended link clears the old
+exited terminal away, its panel tab too (LOW-2). **Disconnect** (also a
 trusted press) is `DELETE /terminals/{id}`; it frees the port, and the program
 on the brain keeps running.
 
@@ -492,19 +496,28 @@ status line, `vex-brain-closed`, as status, not alert) and offers Connect.
 from a status read made before the daemon let go of it (`brainGone`).
 
 States (`lib/vex.ts` `brainView`, pure): not set up; not connected; connecting
-(the request, then the attach); connected (live; "Nothing printed yet" while
-the session has received no output, naming H4 below); paused; ended (vexcom
-exited, with its code and last output, or the link was lost: Connect again,
-Close); refused (the daemon's sentence, Connect again); shown elsewhere. The
-tab's badge: ● live, ◌ paused, ✗ ended or refused, spinner connecting; never
-amber.
+(the request, then the attach, or asking another window); connected (live;
+"Nothing printed yet" until xterm's buffer holds visible text, so a ring of
+control sequences alone, such as interop's `ESC[6n` with vexcom hung behind
+it, still says it and names H4 without promising a fix; review MED-1);
+paused; ended (vexcom exited, with its code and last output, or the terminal
+is gone: Connect again, Close); taken or kept by another window (its own
+words, with the terminal's Take it back or Ask again, never a spinner; MED-2);
+connection lost (this window's socket retries ran out while the link may be
+open: Reconnect re-attaches, and Disconnect is named Disconnect, never Close;
+MED-2); refused (the daemon's sentence, Connect again); shown elsewhere. The
+tab's badge: ● live, ◌ paused or lost, ✗ ended or refused, spinner
+connecting; never amber.
 
 **HARDWARE-UNVERIFIED**: H1–H4 (plan §12) are unrun. In particular H4,
 whether the brain terminal starts at all under WSL interop's `ESC[6n` cursor
 query: `vex-brain` is deliberately not in `STARTUP_REPLY_PROGRAMS` (it takes
 input), so its query is answered only by an attached, replayed xterm. Drawing
 it in the pane attaches the xterm as soon as Connect returns, which narrows but
-does not close the race in §5.4. If H4 shows the hang, VX-UI-4b (a daemon
+does not close the race in §5.4. It stays open in particular when the owner
+switches to another output tab (or the pane is hidden) before the terminal view
+mounts: nothing is attached when the query arrives, so it lands in the ring and
+is replayed later, where xterm's answer is dropped by design. If H4 shows the hang, VX-UI-4b (a daemon
 reply for `vex-brain`'s first exact query) is the fix; this package does not
 build it.
 
@@ -518,6 +531,9 @@ with or without a card, a late status read), `components/Terminal.test.ts`
 mutations each failed their checks: Connect called when the tab is shown, the
 old reopen after a download, Connect without the trusted-press test, Connect
 enabled under a card, Connect enabled during a chain, the panel ignoring the
-`vex-<pane>` place, and Disconnect without the trusted-press test. Before
+`vex-<pane>` place, and Disconnect without the trusted-press test. The review
+round's five did too: any frame counted as printed (MED-1), `taken` falling
+through to connecting (MED-2), no place callback and a status read naming the
+terminal mid-Connect (LOW-1), and no clearing of the ended link (LOW-2). Before
 this package the new vitests fail (22) and the face sections stop at the
 missing Connect.
