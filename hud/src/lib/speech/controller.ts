@@ -43,7 +43,7 @@
 // player, synthesizer and speaker gate are injected.
 
 import { Floor } from "./floor";
-import { SubagentNotices } from "./notices";
+import { NOTICE_STALE_MS, SubagentNotices } from "./notices";
 import { SpeechQueue, type Clock, type ItemKind, type Player, type QueueView, type SpeechItem } from "./queue";
 import { ProseStream, type SpokenChunk } from "./stream";
 import { SUMMARY_DEADLINE_MS, needsSummary, spokenText, summaryChunk, truncatedProse, type Summarize } from "./summary";
@@ -152,6 +152,8 @@ export class SpeechController {
   /** SV-5: "Two sub-agents finished." and the like, from the bus's `subagent` records. */
   private readonly notices: SubagentNotices;
   private noticeN = 0;
+  /** Notices handed to the queue and not yet stale, with the timer that drops one that never began to sound. */
+  private noticeLive = new Map<string, unknown>();
   private ownerBusy: (() => boolean) | null = null;
 
   constructor(private readonly deps: ControllerDeps) {
@@ -303,6 +305,11 @@ export class SpeechController {
     this.notify();
   }
 
+  /** The chat's children, freshly listed (first watched, reconnected): a `stop` this window missed is learned here. */
+  noticeSeed(thread: string, rows: readonly unknown[]): void {
+    this.notices.seed(thread, rows);
+  }
+
   /** The window's word that the owner is talking (a barge-in holds, a recording is under way): a notice waits. */
   setOwnerBusy(fn: (() => boolean) | null): void {
     this.ownerBusy = fn;
@@ -396,6 +403,8 @@ export class SpeechController {
       this.notices.heard(thread, e.data ?? e);
       return;
     }
+    // The owner's main Stop: the children it hit end however the CLI reports them, and none is announced.
+    if (kind === "turn_finished" && (e.data ?? e).stop === "interrupted") this.notices.interrupted(thread);
     if (!this.speaks(thread)) {
       if (this.open.has(thread)) this.open.delete(thread);
       return;
@@ -501,6 +510,7 @@ export class SpeechController {
    * while a summary was awaited holds the delivery until it ends.
    */
   private deliver(thread: string, key: string, chunks: readonly { text: string; kind: ItemKind }[], epoch: number): void {
+    if (chunks[0]?.kind === "notice" && !this.noticeLive.has(key)) return;   // went stale while held
     if (this.holdDelivery) { this.deferred.push(() => this.deliver(thread, key, chunks, epoch)); return; }
     if (epoch !== this.epoch(thread) || !this.speaks(thread)) return;
     // The voice known now rides on the item; the queue asks `voiceFor` again when it synthesizes (V7).
@@ -522,6 +532,11 @@ export class SpeechController {
   private speakNotice(thread: string, text: string): void {
     const key = `${thread}:notice:${++this.noticeN}`;
     const epoch = this.epoch(thread);
+    // Not begun within NOTICE_STALE_MS (held behind a long reply, a barge-in, a pause): the owner has moved on.
+    this.noticeLive.set(key, this.deps.clock.setTimeout(() => {
+      this.noticeLive.delete(key);
+      this.queue.dropUnstarted(key, "stale");
+    }, NOTICE_STALE_MS));
     this.sequence(thread, () => this.deliver(thread, key, [{ text, kind: "notice" }], epoch));
   }
 
@@ -711,6 +726,8 @@ export class SpeechController {
     this.hang = null;
     this.idleListeners.clear();
     this.notices.dispose();
+    for (const h of this.noticeLive.values()) this.deps.clock.clearTimeout(h);
+    this.noticeLive.clear();
     this.clearAll();
     this.listeners.clear();
   }

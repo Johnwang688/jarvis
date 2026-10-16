@@ -237,6 +237,12 @@ export class SpeechQueue {
     return { thread, messageKey };
   }
 
+  /** Drop one named message's items that have not begun to sound (a notice grown stale); a playing one is spared. */
+  dropUnstarted(messageKey: string, mark: ItemMark = "stale"): void {
+    this.finishWhere((i) => i.messageKey === messageKey && i.state !== "playing", "dropped", mark);
+    this.pump();
+  }
+
   /** Skip one thread's current message (else its first queued one): the chip's "skip this chat". */
   skipThread(thread: string): { thread: string; messageKey: string } | null {
     const playing = this.current?.slot.item;

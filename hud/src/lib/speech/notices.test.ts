@@ -137,6 +137,64 @@ describe("what is never said", () => {
     expect(said.map((s) => s.text)).toEqual(["A sub-agent finished.", "Two sub-agents finished."]);
   });
 
+  it("the owner's main Stop: a child live in that chat then reported failed (an unknown end) stays silent", async () => {
+    n.heard(T, rec("cx:a", "running", "started"));
+    n.heard(T, rec("cx:b", "backgrounded", "progress"));
+    n.heard("t2", rec("cx:c", "running", "started"));
+    n.interrupted(T);
+    n.heard(T, rec("cx:a", "failed"));
+    n.heard(T, rec("cx:b", "done"));
+    await clock.advance(60_000);
+    expect(said).toEqual([]);
+    // Another chat's child, and a child that was not live when the Stop came, are ordinary.
+    n.heard("t2", rec("cx:c", "failed"));
+    n.heard(T, rec("cx:late", "done"));
+    await clock.advance(NOTICE_WINDOW_MS);
+    expect(said).toEqual([{ thread: "t2", text: "A sub-agent failed." }, { thread: T, text: "A sub-agent finished." }]);
+  });
+
+  it("a child the main Stop hit and that runs again (a new turn) is announced when it ends", async () => {
+    n.heard(T, rec("cx:a", "running", "started"));
+    n.interrupted(T);
+    n.heard(T, rec("cx:a", "running", "progress"));          // a late tick does not undo the Stop
+    n.heard(T, rec("cx:a", "failed"));
+    await clock.advance(NOTICE_WINDOW_MS);
+    expect(said).toEqual([]);
+    n.heard(T, rec("cx:a", "running", "started"));
+    n.heard(T, rec("cx:a", "done"));
+    await clock.advance(NOTICE_WINDOW_MS);
+    expect(said.map((x) => x.text)).toEqual(["A sub-agent finished."]);
+  });
+
+  it("a child the main Stop hit that is started again before it ends is announced when it does", async () => {
+    n.heard(T, rec("cx:a", "running", "started"));
+    n.interrupted(T);
+    n.heard(T, rec("cx:a", "running", "started"));
+    n.heard(T, rec("cx:a", "done"));
+    await clock.advance(NOTICE_WINDOW_MS);
+    expect(said.map((x) => x.text)).toEqual(["A sub-agent finished."]);
+  });
+
+  it("a fresh list teaches what this window missed: a child asked to stop stays silent, a refused one does not", async () => {
+    n.seed(T, [
+      { sid: "cl:a", status: "running", stop: "stopping" },
+      { sid: "cl:b", status: "backgrounded", stop: "unconfirmed" },
+      { sid: "cl:c", status: "running", stop: "refused" },
+      { sid: "cl:d", status: "running" },
+      { sid: "cl:e", status: "done", stop: "stopping" },
+      null, "x", { sid: "bad", status: "running", stop: "stopping" },
+    ]);
+    for (const sid of ["cl:a", "cl:b", "cl:c", "cl:d", "cl:e"]) n.heard(T, rec(sid, "failed"));
+    await clock.advance(NOTICE_WINDOW_MS);
+    expect(said.map((x) => x.text)).toEqual(["Three sub-agents failed."]);   // c, d and e (e was done in the list, not live)
+    // and the list knows who is live, so a later main Stop reaches them
+    n.seed(T, [{ sid: "cl:f", status: "running" }]);
+    n.interrupted(T);
+    n.heard(T, rec("cl:f", "failed"));
+    await clock.advance(NOTICE_WINDOW_MS);
+    expect(said.length).toBe(1);
+  });
+
   it("anything that is not a bus record of a known child and status", async () => {
     for (const bad of [null, undefined, "done", 7, [], {}, rec("toolu_a", "done"), rec("cl:a b", "done"), rec("cl:a", "weird"), rec("cl:a", "")]) n.heard(T, bad);
     await clock.advance(60_000);
@@ -161,6 +219,7 @@ describe("what is never said", () => {
       expect(code, field).not.toMatch(new RegExp(`\\brec\\.${field}\\b|\\["${field}"\\]|data\\.${field}\\b`));
     }
     expect([...new Set([...code.matchAll(/\brec\.(\w+)/g)].map((m) => m[1]))].sort()).toEqual(["op", "sid", "status", "stop"]);
+    expect([...new Set([...code.matchAll(/\br\.(\w+)/g)].map((m) => m[1]))].sort()).toEqual(["sid", "status", "stop"]);
   });
 
   it("the file imports only the clock's type: no route, no Discord, no audio", () => {

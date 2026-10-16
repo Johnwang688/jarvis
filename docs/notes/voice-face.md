@@ -3027,12 +3027,22 @@ carries no name (the owner's routes do), and the owner's rule is that a child's 
 - status `stopped` (the owner's Stop on one child, the main Stop, a session that ended): never announced (open question 5);
 - a child whose record said `stop: "stopping"` or `"unconfirmed"` (the owner pressed Stop) however it then ends, because a killed
   child can be reported as failed. A CLI `refused` clears that, since the child was not stopped;
+- a child live when the owner pressed the main Stop (an `interrupted` `turn_finished`), however the CLI then reports it (an unknown
+  end can come back `failed`); announced again only if it is started again before it ends;
 - a child already announced (a repeat `finished`, or a `progress` record carrying `done`); a child that runs again (Codex) and
   ends again is announced again; a Claude child ended by an inferred stop and later finished by the CLI is announced;
 - a chat not read now (no chat pane, muted, read-aloud off, another window holds the speech lock), checked again when the window
   closes, and a send to the chat, Stop, an interrupted turn or the chat leaving its pane drops a notice not yet queued;
 - while the owner is talking (a barge-in holds, or a message is being recorded) the notice waits, asked again every 500 ms and
   dropped as stale after 20 s; a barge-in that paused a reply holds a queued notice behind it like any item.
+
+**A notice that has not begun to sound within 30 s of being handed to the queue** (`NOTICE_STALE_MS`: held behind a long reply, a
+pause, a barge-in) is dropped, and one still held back at that point is never queued.
+
+**A window that missed the `stopping` record** (it reconnected, or was not watching the chat) learns it from the list route:
+`state/subagents.ts` tells a listener after every list read (first watched, each reconnect), and rows that are live with `stop:
+"stopping" | "unconfirmed"` are remembered as asked. Known gap: the main Stop cannot be rebuilt that way, so a window that
+reconnects between a main Stop and the child's end can announce a child reported `failed`.
 
 **Not posted anywhere.** `subagent` and `subagent_event` are outside the Discord mirror's `KINDS` and `TURN_KINDS`
 (`subagent_routes_check.py`, `Notices`). Turns the CLI starts itself after a background child finishes (SV-6) are neither posted
@@ -3041,7 +3051,7 @@ nor spoken, by the owner's decision; nothing here touches the provider reader.
 **Settings -> Voice -> Sub-agent notices** ("Say when a sub-agent finishes or fails"): per window (`jarvis.subagentNotices` in
 localStorage), on by default, off drops what waits. Read-aloud must also be on.
 
-**Tests.** vitest `notices.test.ts` (22), `noticesController.test.ts` (16), `SubagentNoticesSetting.test.ts`; `Notices` in
+**Tests.** vitest `notices.test.ts` (26), `noticesController.test.ts` (22), `SubagentNoticesSetting.test.ts`; `Notices` in
 `subagent_routes_check.py` (bus contract and Discord); `hud_v2_speech_check.py` section "sub-agent notices" in a real browser
 (window, coalescing, silence for child prose, owner Stop and a child asked to stop, the switch, a send). Mutants (each fails
 a test): no coalescing, a name added to the sentence, `stopped` spoken, the owner-stop memory dropped, no repeat guard, `op` not

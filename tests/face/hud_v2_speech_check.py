@@ -296,6 +296,12 @@ def main() -> int:
             check("a notice is a message of its own kind in the queue",
                   speech(page)["past"][-1]["kind"] == "notice")
             check("and no summary was asked of the model for it", len(mock.sent("POST", "/speech/summary")) == m_sum)
+            n = len(said(mock))
+            life("cx:main_stop", "running", op="started")
+            mock.emit("turn_finished", {"stop": "interrupted"}, thread_id="t1")
+            life("cx:main_stop", "failed")
+            page.wait_for_timeout(3800)
+            check("after the owner's main Stop, a child reported failed is not announced", len(said(mock)) == n)
             H.open_settings(page, "Voice")
             page.locator('[data-testid="subagent-notices-toggle"]').uncheck()
             page.locator('[data-testid="settings-close"]').click()

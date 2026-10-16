@@ -38,6 +38,8 @@ export const NOTICE_WINDOW_MS = 3000;
 export const BUSY_RETRY_MS = 500;
 /** …and give up (the notice is stale) after this long. */
 export const BUSY_MAX_MS = 20_000;
+/** A notice queued and not begun this long after is stale (the owner has moved on) and is dropped. */
+export const NOTICE_STALE_MS = 30_000;
 /** Per kind of memory: sids announced, sids the owner asked to stop. */
 export const SEEN_CAP = 256;
 
@@ -82,6 +84,10 @@ export class SubagentNotices {
   private announced = new Set<string>();
   /** `thread|sid` the owner asked to stop and has not been heard live without it. */
   private asked = new Set<string>();
+  /** `thread|sid` heard live and not yet ended: what the owner's main Stop is about. */
+  private live = new Set<string>();
+  /** `thread|sid` the owner's main Stop interrupted: silent until it is started again. */
+  private interruptedSet = new Set<string>();
 
   constructor(private readonly deps: NoticeDeps) {}
 
@@ -108,6 +114,9 @@ export class SubagentNotices {
       case "running":
       case "backgrounded":
         this.announced.delete(key);
+        this.remember(this.live, key);
+        // A child started again (Codex gives an ended one another turn) is no longer the one the main Stop hit.
+        if (rec.op === "started") this.interruptedSet.delete(key);
         if (rec.stop === "stopping" || rec.stop === "unconfirmed") this.remember(this.asked, key);
         else this.asked.delete(key);
         return;
@@ -117,13 +126,43 @@ export class SubagentNotices {
         // record about an ended child is not a second ending.
         if (rec.op !== "finished" || this.announced.has(key)) return;
         this.remember(this.announced, key);
+        this.live.delete(key);
         if (this.asked.has(key)) { this.asked.delete(key); return; }
+        if (this.interruptedSet.has(key)) { this.interruptedSet.delete(key); return; }
         this.add(thread, rec.status);
         return;
       }
       default:
         // stopped (or anything unknown): never spoken.
+        if (rec.status === "stopped") this.live.delete(key);
         return;
+    }
+  }
+
+  /**
+   * The owner's main Stop interrupted `thread`'s turn: every child heard live
+   * there is one the owner stopped, however the CLI then reports its end (an
+   * unknown end can come back as `failed`). Silent until it starts again.
+   */
+  interrupted(thread: string): void {
+    const prefix = `${thread}|`;
+    for (const key of this.live) if (key.startsWith(prefix)) this.remember(this.interruptedSet, key);
+  }
+
+  /**
+   * A fresh read of the chat's children (the owner's list route, on first
+   * watching and on every reconnect): a window that missed the `stopping`
+   * record learns it here. Reads `sid`, `status` and `stop` of each row.
+   */
+  seed(thread: string, rows: readonly unknown[]): void {
+    for (const row of rows) {
+      if (!row || typeof row !== "object") continue;
+      const r = row as { sid?: unknown; status?: unknown; stop?: unknown };
+      if (typeof r.sid !== "string" || !SID.test(r.sid)) continue;
+      if (r.status !== "running" && r.status !== "backgrounded") continue;
+      const key = `${thread}|${r.sid}`;
+      this.remember(this.live, key);
+      if (r.stop === "stopping" || r.stop === "unconfirmed") this.remember(this.asked, key);
     }
   }
 
@@ -151,6 +190,8 @@ export class SubagentNotices {
     this.cancel();
     this.announced.clear();
     this.asked.clear();
+    this.live.clear();
+    this.interruptedSet.clear();
   }
 
   private remember(set: Set<string>, key: string): void {

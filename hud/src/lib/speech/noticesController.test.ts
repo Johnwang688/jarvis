@@ -5,7 +5,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import source from "./controller.ts?raw";
 import { SpeechController } from "./controller";
-import { NOTICE_WINDOW_MS } from "./notices";
+import { NOTICE_STALE_MS, NOTICE_WINDOW_MS } from "./notices";
 import { Floor, BACKLOG_MS, estimateMs } from "./floor";
 import { SpeechQueue } from "./queue";
 import { FakeClock, FakeGate, FakePlayer, FakeSay, FakeSynth } from "./testkit";
@@ -117,6 +117,60 @@ describe("whose and when", () => {
     expect(c.noticesWaiting(T)).toEqual({ done: 0, failed: 0 });
   });
 
+  it("the main Stop: a child live then is silent when it later ends failed, even for a chat not read at the time", async () => {
+    bus("cx:a", "running", {}, T, "started");
+    c.event({ kind: "turn_finished", thread_id: T, data: { stop: "interrupted" } });
+    bus("cx:a", "failed");
+    c.setSpeakers(new Set());
+    bus("cx:b", "running", {}, T, "started");
+    c.event({ kind: "turn_finished", thread_id: T, data: { stop: "interrupted" } });
+    c.setSpeakers(new Set([T]));
+    bus("cx:b", "failed");
+    await clock.advance(60_000);
+    expect(player.started).toEqual([]);
+    // an ordinary turn end does not silence a child that runs on
+    bus("cx:c", "backgrounded", {}, T, "started");
+    c.event({ kind: "turn_finished", thread_id: T, data: { stop: "end" } });
+    bus("cx:c", "done");
+    await clock.advance(NOTICE_WINDOW_MS + 3000);
+    expect(player.started).toEqual(["A sub-agent finished."]);
+  });
+
+  it("a fresh list of the chat's children teaches it a Stop it missed", async () => {
+    c.noticeSeed(T, [{ sid: "cl:a", status: "running", stop: "stopping" }]);
+    bus("cl:a", "failed");
+    await clock.advance(60_000);
+    expect(player.started).toEqual([]);
+  });
+
+  it("a notice that has not begun to sound within 30 s of being queued is dropped, not said late", async () => {
+    c.event({ kind: "text", thread_id: T, data: { text: REPLY } });
+    await clock.advance(400);
+    c.pause();                                   // the owner paused a reply: nothing sounds, and what is queued waits
+    bus("cl:a", "done");
+    await clock.advance(NOTICE_WINDOW_MS + 100);
+    expect(c.items().live.map((i) => i.kind).filter((k) => k === "notice")).toEqual(["notice"]);
+    await clock.advance(NOTICE_STALE_MS - 1000);
+    expect(c.items().live.some((i) => i.kind === "notice")).toBe(true);       // not yet stale
+    await clock.advance(1500);
+    expect(c.items().live.some((i) => i.kind === "notice")).toBe(false);
+    expect(c.items().past.find((i) => i.kind === "notice")).toMatchObject({ state: "dropped", mark: "stale" });
+    const before = player.started.length;
+    c.resume();
+    await clock.advance(60_000);
+    expect(player.started.slice(before)).not.toContain("A sub-agent finished.");
+    expect(NOTICE_STALE_MS).toBe(30_000);
+  });
+
+  it("a notice held back (a barge-in on a summary, say) that goes stale is never queued; one sounding is spared", async () => {
+    bus("cl:a", "done");
+    await clock.advance(NOTICE_WINDOW_MS + 200);   // queued, synthesizing
+    await clock.advance(300);
+    expect(player.started).toEqual(["A sub-agent finished."]);
+    await clock.advance(NOTICE_STALE_MS + 5000);   // its timer fires after it played: nothing to drop
+    expect(c.items().past.at(-1)).toMatchObject({ kind: "notice", state: "done" });
+  });
+
   it("an owner's Stop heard while the chat is not read still silences that child's end once it is", async () => {
     c.setSpeakers(new Set());
     bus("cl:a", "running", { stop: "stopping" }, T, "progress");
@@ -203,6 +257,33 @@ describe("whose and when", () => {
     c.setOwnerBusy(null);
     await clock.advance(2000);
     expect(player.started).toEqual(["A sub-agent finished."]);
+  });
+});
+
+describe("a notice gone stale", () => {
+  it("one held back by a barge-in past the bound is never queued when it is let go", async () => {
+    const hung = new Promise<string>(() => {});
+    const held = new SpeechController({ say: say.fn, player, clock, gate, summarize: () => hung });
+    held.setSpeakers(new Set([T]));
+    const long = Array.from({ length: 12 }, (_, i) => `This is sentence number ${i} of a long reply, and it says one more thing.`).join(" ");
+    held.event({ kind: "text", thread_id: T, data: { text: long } });     // a summary is awaited, nothing sounds
+    expect(held.bargeIn()).toBe(true);                                    // so the barge-in holds deliveries
+    held.event({ kind: "subagent", thread_id: T, data: { sid: "cl:a", op: "finished", status: "done" } });
+    await clock.advance(NOTICE_WINDOW_MS + 8000);                         // the summary gives up; the notice is held
+    await clock.advance(NOTICE_STALE_MS);
+    held.endBargeIn();
+    await clock.advance(60_000);
+    expect(player.started).not.toContain("A sub-agent finished.");
+    expect(held.items().past.concat(held.items().live).some((i) => i.kind === "notice")).toBe(false);
+  });
+
+  it("a notice that is already sounding is spared by the drop", async () => {
+    const q = new SpeechQueue({ synth: new FakeSynth(clock).fn, player, clock, floor: new Floor(clock) });
+    q.enqueue({ thread: T, messageKey: "t:notice:1", seq: 0, text: "x".repeat(2000), kind: "notice" });
+    await clock.advance(500);
+    expect(q.items()[0].state).toBe("playing");
+    q.dropUnstarted("t:notice:1");
+    expect(q.items().map((i) => i.state)).toEqual(["playing"]);
   });
 });
 

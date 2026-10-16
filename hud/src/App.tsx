@@ -637,6 +637,11 @@ export default function App() {
     recording: () => !!captureRef.current && (captureRef.current.recording() || captureRef.current.ptt !== null),
   }), [speech]);
   useEffect(() => () => barge.release(), [barge]);
+  // SV-5: a reconnect's fresh list tells the notices which children the owner had asked to stop.
+  useEffect(() => {
+    subagents.setListed((threadId, rows) => speech.controller.noticeSeed(threadId, rows));
+    return () => subagents.setListed(null);
+  }, [speech]);
   // SV-5: a sub-agent notice waits while the owner talks (a barge-in holds, or a message is being recorded).
   useEffect(() => {
     speech.controller.setOwnerBusy(() => barge.held()
