@@ -434,17 +434,32 @@ def _pattern_leaves_one(value: str, root: Path) -> bool:
 # A Grep over a folder reads every file ripgrep selects there, and Jarvis
 # never sees the results (no scrub on that side). So a Grep is refused when
 # its search root holds a credential file it could select (review L2 of
-# #219): a `.env` the repository does not ignore, a key file. A `glob` that
-# no credential file there matches lets it through; a negated glob (`!x`)
-# selects everything else, so it never does. The walk is bounded, and past
-# the bound the search is refused: a guard that cannot tell refuses.
+# #219): a `.env*`, a key file, anything `secrets.is_credential` names. The
+# walk does NOT read `.gitignore` (ripgrep does, but the guard does not lean
+# on it): an ignored `.env` counts too. Only `.git` is skipped. A `glob` that
+# no credential file there matches lets the search through, judged the way
+# ripgrep reads a glob (gitignore-style, `_glob_selects`); a negated glob
+# (`!x`) selects everything else, so it never does. The walk is bounded, and
+# past the bound the search is refused: a guard that cannot tell refuses.
+#
+# A glob that cannot select a credential name is let through without the
+# walk (review L-b), so a Grep in a large repository stays usable: one whose
+# every brace variant ends in `*.<ext>` for a source-code extension below.
+# The stated limit: such a glob could still select a file literally named
+# `.env.<ext>` (`.env.py`) — the `.env*` rule makes that a credential name —
+# which the guard does not look for.
 GREP_SCAN_ENTRIES = 20_000
 GREP_SCAN_SECONDS = 1.0
+_SOURCE_EXTENSIONS = frozenset({
+    "py", "pyi", "ts", "tsx", "js", "jsx", "mjs", "cjs", "go", "rs", "java", "kt", "kts",
+    "c", "h", "cc", "cpp", "cxx", "hpp", "hh", "cs", "rb", "php", "swift", "m", "mm",
+    "scala", "lua", "dart", "vue", "svelte", "css", "scss", "html", "sql", "sh", "bash",
+    "zig", "ex", "exs", "erl", "hs", "ml", "r", "jl", "md", "rst"})
 
 
 def _credential_files(base: Path) -> list[Path] | None:
-    """Credential files at or under `base` (outside `.git`), or None when the
-    walk ran past its bound."""
+    """Credential files at or under `base` (outside `.git`; `.gitignore` is
+    not read), or None when the walk ran past its bound."""
     from jarvis.tools.secrets import is_credential
     if not base.is_dir():
         return [base] if is_credential(base) else []
@@ -461,9 +476,70 @@ def _credential_files(base: Path) -> list[Path] | None:
     return found
 
 
-def _grep_reaches_credentials(args: dict, root: Path) -> bool:
+def _glob_forms(glob: str) -> set[str]:
+    """One ripgrep glob as `fnmatch` patterns that together match at least
+    what it does (gitignore-style: a glob with no `/` matches the name at any
+    depth; `**` is any depth, zero folders included; a trailing `/` or `/**`
+    is everything under it). Over-matching is safe here: it only refuses.
+    Two forms are added: the glob without a leading `**/`, and with a
+    `/**/` taken as `/` (zero folders)."""
+    text = glob.strip().replace("\\", "/")
+    if text.startswith("/"):
+        text = text[1:]
+    if text.endswith("/"):
+        text += "**"
+    forms, pending = set(), [text]
+    while pending:
+        form = pending.pop()
+        if form in forms:
+            continue
+        forms.add(form)
+        if form.startswith("**/"):
+            pending.append(form[3:])
+        if "/**/" in form:
+            pending.append(form.replace("/**/", "/", 1))
+        # `**` needs no form of its own: `fnmatch` reads it as `*`, which
+        # crosses `/`, so a trailing `/**` already takes everything under.
+    return forms
+
+
+def _glob_selects(glob: str, rel: str) -> bool:
+    """Whether ripgrep's `-g glob` could select the file at `rel` (relative
+    to the search root). Each form is tried against the path, its name and
+    every tail of the path, with `fnmatch`, whose `*` also crosses `/` and
+    matches a leading dot. So `*`, `**` and `**/*` (which reduces to `*`)
+    select every file at any depth, dotfiles included."""
     import fnmatch
+    parts = [p for p in rel.split("/") if p]
+    tails = ["/".join(parts[i:]) for i in range(len(parts))] or [rel]
+    for form in _glob_forms(glob):
+        if any(fnmatch.fnmatchcase(tail, form) or fnmatch.fnmatch(tail, form) for tail in tails):
+            return True
+    return False
+
+
+def _glob_skips_credentials(variants: list[str]) -> bool:
+    """Whether every variant is `[path/]*.<source extension>`, which selects
+    no credential name but `.env.<ext>` (the stated limit above)."""
+    for variant in variants:
+        name = variant.strip().replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
+        if not name.startswith("*.") or any(c in name[2:] for c in "*?[]{}"):
+            return False
+        if name[2:].lower() not in _SOURCE_EXTENSIONS:
+            return False
+    return bool(variants)
+
+
+def _grep_reaches_credentials(args: dict, root: Path) -> bool:
     from jarvis.protected_state import _brace_expand
+    glob = args.get("glob")
+    variants = None
+    if isinstance(glob, str) and glob.strip():
+        variants = _brace_expand(glob.strip())
+        if variants is None or any(v.strip().startswith("!") for v in variants):
+            return True
+        if _glob_skips_credentials(variants):
+            return False                    # no walk: a source-code glob (L-b)
     value = args.get("path")
     base = root
     if isinstance(value, str) and value.strip():
@@ -474,18 +550,12 @@ def _grep_reaches_credentials(args: dict, root: Path) -> bool:
         return True
     if not found:
         return False
-    glob = args.get("glob")
-    if not isinstance(glob, str) or not glob.strip():
-        return True
-    variants = _brace_expand(glob.strip())
-    if variants is None or any(v.startswith("!") for v in variants):
+    if variants is None:
         return True
     for path in found:
         rel = path.relative_to(base).as_posix() if path != base else path.name
-        for variant in variants:
-            if fnmatch.fnmatch(path.name, variant) or fnmatch.fnmatch(rel, variant) \
-                    or fnmatch.fnmatch(rel, variant.lstrip("*/")):
-                return True
+        if any(_glob_selects(variant, rel) for variant in variants):
+            return True
     return False
 
 

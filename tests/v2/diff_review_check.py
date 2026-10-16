@@ -538,6 +538,84 @@ class Parsing(unittest.TestCase):
         self.assertLessEqual(max(len(f["why"]) for f in result["findings"]), R.WHY_CAP)
 
 
+class GrepScope(unittest.TestCase):
+    """A Claude Grep that could read a credential file is refused, its glob
+    read the way ripgrep reads one (#219 delta review, L-a and L-b)."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name).resolve()
+        (self.root / "sub").mkdir()
+        (self.root / "sub" / "x.py").write_text("x = 1\n")
+        (self.root / "app.py").write_text("y = 2\n")
+
+    def reaches(self, **args):
+        return R._grep_reaches_credentials(dict(pattern="TOKEN", **args), self.root)
+
+    def test_every_glob_that_selects_a_credential_file_is_refused(self):
+        globs = ("**/*", "**/*.production", "**/.env*", "*", "**", "{*.py,**/*}", ".env*")
+        for where in ("root", "sub"):
+            for name in (".env", ".env.production"):
+                with self.subTest(where=where, name=name):
+                    folder = self.root if where == "root" else self.root / "sub"
+                    secret = folder / name
+                    secret.write_text("TOKEN=x\n")
+                    try:
+                        for glob in globs:
+                            if glob == "**/*.production" and name == ".env":
+                                self.assertFalse(self.reaches(glob=glob), "it cannot select .env")
+                                continue
+                            self.assertTrue(self.reaches(glob=glob), glob)
+                            if where == "sub":
+                                self.assertTrue(self.reaches(path="sub", glob=glob), glob)
+                        if where == "sub":
+                            self.assertTrue(self.reaches(glob="sub/**"))
+                            self.assertTrue(self.reaches(glob="sub/**/.env*"), "zero folders")
+                        self.assertTrue(self.reaches())
+                        self.assertTrue(self.reaches(glob="!*.py"))
+                    finally:
+                        secret.unlink()
+        # With no credential file anywhere, the same globs pass.
+        for glob in ("**/*", "sub/**", "*"):
+            self.assertFalse(self.reaches(glob=glob), glob)
+
+    def test_a_glob_ripgrep_would_not_apply_there_is_not_refused(self):
+        (self.root / ".env").write_text("TOKEN=x\n")
+        self.assertFalse(self.reaches(glob="sub/**"))
+        self.assertFalse(self.reaches(glob="src/*.cfg"))
+        self.assertFalse(self.reaches(path="sub"))
+
+    def test_a_source_code_glob_needs_no_walk(self):
+        with patch.object(R, "_credential_files", side_effect=AssertionError("walked")):
+            for glob in ("*.py", "**/*.ts", "src/**/*.{py,ts}", "*.PY"):
+                self.assertFalse(self.reaches(glob=glob), glob)
+        walked = []
+        with patch.object(R, "_credential_files", side_effect=lambda base: walked.append(base) or []):
+            for glob in ("*.json", "*.p?", "*.py*", "**/*", "*.production", "{*.py,*.env}"):
+                self.reaches(glob=glob)
+        self.assertEqual(len(walked), 6, "anything else is walked")
+
+    def test_the_walk_is_bounded(self):
+        self.assertEqual((R.GREP_SCAN_ENTRIES, R.GREP_SCAN_SECONDS), (20_000, 1.0))
+        for i in range(10):
+            (self.root / f"f{i}.txt").write_text("x\n")
+        self.assertFalse(self.reaches())
+        with patch.object(R, "GREP_SCAN_ENTRIES", 5):
+            self.assertIsNone(R._credential_files(self.root))
+            self.assertTrue(self.reaches(), "past the bound, refused")
+        clock = iter([0.0] + [5.0] * 100)
+        with patch.object(R.time, "monotonic", lambda: next(clock)):
+            self.assertIsNone(R._credential_files(self.root), "past the time bound, refused")
+
+    def test_through_the_permit(self):
+        (self.root / "sub" / ".env.production").write_text("TOKEN=x\n")
+        ctx = PermitContext("t", Brief(Role.REVIEWER, str(self.root)), "claude")
+        permit = R.read_only_permit(ctx, self.root)
+        self.assertEqual(permit("Grep", {"pattern": "TOKEN", "path": "sub", "glob": "**/*"}), Decision.DENY)
+        self.assertEqual(permit("Grep", {"pattern": "TOKEN", "path": "sub", "glob": "*.py"}), Decision.ALLOW)
+
+
 class ClaudeReadOnly(Base):
     """The real `ClaudeProvider` over a scripted client: the SDK options and
     every hook answer, write and shell attempts included."""

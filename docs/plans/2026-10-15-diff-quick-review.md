@@ -194,9 +194,26 @@ toolbar). It is a plain `button`, so it takes PR #210's 4px
     a call but not change its arguments. Jarvis also never sees Claude's
     tool results, so nothing can be scrubbed afterwards. The prompt tells
     the reviewer to Grep a folder or pass a glob such as `*.py`.
-  - **Cost:** a Grep of the whole worktree is refused while an un-ignored or
-    ignored `.env` sits in it. A gitignored `.env` is refused too, because
-    the guard does not assume ripgrep's ignore rules.
+  - **Cost:** a Grep of the whole worktree with no glob, or with a glob that
+    could select a credential name, is refused while any `.env` sits in it.
+    A gitignored `.env` counts too: the walk does not read `.gitignore`, so
+    the guard does not depend on ripgrep's ignore rules.
+  - **Delta review (L-a, L-b).** Globs are now read the way ripgrep reads
+    them (gitignore-style):
+    - A glob with no `/` matches the name at any depth.
+    - A leading `**/` is also tried bare.
+    - A `/**/` also matches zero folders.
+    - `*`, `**` and `**/*` select every file, dotfiles included.
+
+    So `**/*`, `**/*.production`, `**/.env*` and `sub/**` are refused when a
+    root or `sub` `.env*` exists.
+
+    A glob whose every variant is `*.<source extension>` (`*.py`, `*.ts`,
+    `src/**/*.{py,ts}`) skips the walk, so a Grep in a large repository stays
+    usable. The stated limit: such a glob could still select a file literally
+    named `.env.py`, which the guard does not look for.
+
+    The walk bound (20,000 entries, 1 s) is pinned by a test.
 - **L3. Only Luna's Codex limits count.** The Codex reading is the
   account's default `codex` limit, plus any limit whose id or name names
   the review's model (`gpt6luna`, compared without punctuation). Another
