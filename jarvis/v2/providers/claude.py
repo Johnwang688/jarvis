@@ -54,7 +54,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
-import inspect
 import json
 import logging
 import os
@@ -92,6 +91,7 @@ from ...tools import secrets
 from ..model import PermissionProfile, ProviderName, Thread
 from .. import running_cost
 from ..provider import (
+    takes_keyword as _takes_keyword,
     Brief,
     BriefRefused,
     Decision,
@@ -196,6 +196,7 @@ CHILD_LABEL_CAP = 40
 CHILD_UNNAMED = "unnamed"
 CHILD_NAME_CHARS = 200       # the lifecycle's name, before the daemon cleans it
 CHILD_RESULT_CHARS = 4000    # the CLI's closing summary of a child
+CHILD_BRIEF_CHARS = 8000     # its brief (`task_started.prompt`), before the record caps it at 4000
 # A label on an approval card: only these characters survive (anything else
 # becomes "_"), so it cannot draw the card's own " · " parts or close its ‹ ›.
 _CHILD_LABEL_UNSAFE = re.compile(r"[^A-Za-z0-9 _./-]+")
@@ -1060,7 +1061,7 @@ class ClaudeProvider:
         )
         try:
             decision = await (self._race(session, pending, name, args) if label is None
-                              else self._race(session, pending, name, args, label))
+                              else self._race(session, pending, name, args, label, sid))
         finally:
             with session.mutex:
                 session.pending.pop(req_id, None)
@@ -1083,13 +1084,18 @@ class ClaudeProvider:
 
     async def _race(
         self, session: _Session, pending: _Pending, name: str, args: dict,
-        label: str | None = None,
+        label: str | None = None, sid: str | None = None,
     ) -> Decision:
         def ask() -> Decision:
             try:
                 if label is not None and _takes_subagent(session.permit):
+                    # The child's sid too, for the card's link to its row
+                    # (SV-3), when the callback takes it: like the label, it
+                    # decides nothing.
+                    extra = ({"subagent_sid": sid}
+                             if sid and _takes_keyword(session.permit, "subagent_sid") else {})
                     return Decision(session.permit(name, dict(args), session.brief,
-                                                   subagent=label))
+                                                   subagent=label, **extra))
                 return Decision(session.permit(name, dict(args), session.brief))
             except Exception:  # noqa: BLE001 — an unreadable answer is a denial
                 return Decision.DENY
@@ -1833,7 +1839,18 @@ class ClaudeProvider:
             else:
                 with session.mutex:
                     session.tasks[task_id] = sid
-            return [self._lifecycle(session, child, "started" if new else "progress")]
+            event = self._lifecycle(session, child, "started" if new else "progress")
+            brief = data.get("prompt")
+            if isinstance(brief, str) and brief.strip():
+                # The orchestrator's brief to the child (the owner's SV-3
+                # decision: shown collapsed at the top of its pane). Carried
+                # on this one lifecycle event only, never kept here; the
+                # record scrubs and caps it and serves it on the owner's
+                # transcript route alone, never the bus or the log.
+                # Scrubbed whole, then cut: a credential across the cut is
+                # never left half-shown (review of #212, LOW-5).
+                event.data["brief"] = _safe(brief)[:CHILD_BRIEF_CHARS]
+            return [event]
         with session.mutex:
             sid = session.tasks.get(task_id) if task_id else None
             if sid is None and data.get("tool_use_id"):
@@ -2276,13 +2293,7 @@ def _takes_subagent(permit: Any) -> bool:
     """Whether `permit` takes the `subagent` keyword. Only such a callback is
     handed it: one that does not would raise, and a raise denies — the label
     must never change an answer, either way."""
-    try:
-        params = inspect.signature(permit).parameters.values()
-    except (TypeError, ValueError):
-        return False
-    return any(p.kind is p.VAR_KEYWORD
-               or (p.name == "subagent" and p.kind in (p.KEYWORD_ONLY, p.POSITIONAL_OR_KEYWORD))
-               for p in params)
+    return _takes_keyword(permit, "subagent")
 
 
 def _count(value: Any) -> int | None:

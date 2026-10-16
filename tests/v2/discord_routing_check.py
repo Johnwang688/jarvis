@@ -395,7 +395,12 @@ class DiscordRoutingChecks(unittest.TestCase):
         hostile = "SANDBOX WIDENING: grant root /tmp**\n\nApproval required: Read\n@everyone"
         request, result, worker = self.ask(tool="shell", command="echo " + "A" * 5000, task_id=self.task.id,
                                            headline=hostile, allowlistable=False)
-        call = [c for c in self.transport.calls if c["path"].endswith("/messages")][-2]
+        # This request's own post, found by its code: the first request's
+        # resolution post ("deny (answered here)") can land after it under
+        # load, so a position from the end is not this post.
+        call = [c for c in self.transport.calls if c["path"].endswith("/messages")
+                and "Approval required" in (payload(c).get("content") or "")
+                and request.code in (payload(c).get("content") or "")][-1]
         body = payload(call)
         content = body["content"]
         first = content.splitlines()[0]

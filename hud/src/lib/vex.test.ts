@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  BUILD_FIRST_CODE, DOWNLOAD_NAME, DeviceLedger, OUTPUT_TABS, SETUP_COMMAND, buildLine, buildMark, chainLine,
+  BUILD_FIRST_CODE, brainView, type BrainInput, DOWNLOAD_NAME, DeviceLedger, OUTPUT_TABS, SETUP_COMMAND, buildLine, buildMark, chainLine,
   chainStepOf, chainSteps, chainStoppable, downloadButtonLabel, downloadMark, helpText, isSourcePath, isTrustedPress,
   markGlyph, nextTab, outputTabFor, stillStale, stoppedDownloadNote,
   defaultName, downloadLabel, downloadProgress, errorTarget, isExplicitClick, nameRefusal, needsBuildFirst, offersVex, parseBuild, parseDetection, parseDeviceRecord, parseLastBuilds,
@@ -402,6 +402,152 @@ describe("download progress reads vexcom's own progress line", () => {
   it("reads only a line of numbers and dots, never other text", () => {
     for (const text of ["", "Downloading User Program", "slot 3: 90%", "error 100", "100", "0....10 done", "1.0.2", "192.168.1.1"]) {
       expect(downloadProgress(text)).toBeNull();
+    }
+  });
+});
+
+describe("brainView: the Brain tab's states (VX-UI-4a; owner decision 5)", () => {
+  const base: BrainInput = {
+    configured: true, blocked: false, chain: null, terminal: null, asking: false, session: null, exitCode: null,
+    shownIn: null, error: "", closed: "", device: null, reading: false,
+  };
+  const v = (o: Partial<BrainInput> = {}) => brainView({ ...base, ...o });
+
+  it("not connected: Connect offered and on, nothing drawn, and it says it never connects by itself", () => {
+    const b = v();
+    expect(b.state).toBe("off");
+    expect(b.connect).toEqual({ shown: true, off: "" });
+    expect(b.terminal).toBe(false);
+    expect(b.disconnect.shown).toBe(false);
+    expect(b.text).toMatch(/never connects by itself/);
+    expect(b.badge.state).toBe("idle");
+  });
+
+  it("Connect is off, with the reason, under a card, during a chain, a device read or a download", () => {
+    expect(v({ blocked: true }).connect.off).toMatch(/approval card/);
+    expect(v({ chain: { paused: false } }).connect.off).toMatch(/download holds the robot's port/);
+    expect(v({ reading: true }).connect.off).toMatch(/device read/);
+    expect(v({ device: "info" }).connect.off).toMatch(/device read/);
+    expect(v({ device: "download" }).connect.off).toMatch(/download holds/);
+    expect(v({ configured: false }).state).toBe("unconfigured");
+    expect(v({ configured: false }).connect.off).toMatch(/jarvis vex setup/);
+    // A USB check is not refused here: the daemon waits for it (bounded) before the brain's reservation.
+    expect(v({ device: "connection" }).connect.off).toBe("");
+  });
+
+  it("connecting: the request on its way, then the session attaching", () => {
+    expect(v({ asking: true }).state).toBe("connecting");
+    expect(v({ asking: true }).connect.shown).toBe(false);
+    const attaching = v({ terminal: "c0000001", session: "connecting" });
+    expect(attaching.state).toBe("connecting");
+    expect(attaching.terminal).toBe(true);
+    expect(attaching.disconnect).toEqual({ shown: true, close: false });
+    expect(v({ terminal: "c0000001", session: null }).state).toBe("connecting");
+  });
+
+  it("connected: live output drawn, Disconnect offered, no Connect", () => {
+    const b = v({ terminal: "c0000001", session: "attached" });
+    expect(b.state).toBe("connected");
+    expect(b.terminal).toBe(true);
+    expect(b.connect.shown).toBe(false);
+    expect(b.disconnect).toEqual({ shown: true, close: false });
+    expect(b.badge).toEqual({ state: "ok", text: "live" });
+  });
+
+  it("paused: a download closed it; Connect shown but off, and it says it never reopens by itself", () => {
+    const b = v({ chain: { paused: true } });
+    expect(b.state).toBe("paused");
+    expect(b.connect.shown).toBe(true);
+    expect(b.connect.off).not.toBe("");
+    expect(b.text).toMatch(/Paused for the download/);
+    expect(b.text).toMatch(/never reopens by itself/);
+    expect(b.badge.state).toBe("unknown");                  // never amber, never green
+  });
+
+  it("after a download: off again, saying why, with Connect on", () => {
+    const b = v({ closed: "The brain terminal was closed for the download. Click Connect in the Brain tab to open it again." });
+    expect(b.state).toBe("off");
+    expect(b.text).toMatch(/closed for the download/);
+    expect(b.connect).toEqual({ shown: true, off: "" });
+  });
+
+  it("ended: the program exited (its code said), or the link was lost; Connect again and Close", () => {
+    const exited = v({ terminal: "c0000001", session: "exited", exitCode: 3 });
+    expect(exited.state).toBe("ended");
+    expect(exited.text).toMatch(/exited with code 3/);
+    expect(exited.connect.shown).toBe(true);
+    expect(exited.disconnect).toEqual({ shown: true, close: true });
+    expect(exited.terminal).toBe(true);                      // its last output stays readable
+    expect(exited.badge.state).toBe("failed");
+    for (const session of ["ended", "closed"]) expect(v({ terminal: "c0000001", session }).state).toBe("ended");
+  });
+
+  it("error: the daemon's refusal in its own words, and Connect again", () => {
+    const b = v({ error: "The brain terminal is using the brain's port; close it first. One device action at a time." });
+    expect(b.state).toBe("error");
+    expect(b.text).toMatch(/^The brain terminal is using/);
+    expect(b.connect).toEqual({ shown: true, off: "" });
+  });
+
+  it("shown elsewhere: a pane or another VEX view says where, drawn nowhere here; another window is drawn (its Show it here)", () => {
+    const pane = v({ terminal: "c0000001", session: "attached", shownIn: { kind: "pane", slot: 3 } });
+    expect(pane.state).toBe("elsewhere");
+    expect(pane.text).toMatch(/shown in pane 3/);
+    expect(pane.terminal).toBe(false);
+    const other = v({ terminal: "c0000001", session: "attached", shownIn: { kind: "vex", slot: 1 } });
+    expect(other.text).toMatch(/VEX view in pane 1/);
+    expect(other.terminal).toBe(false);
+    const away = v({ terminal: "c0000001", session: "idle", shownIn: { kind: "window" } });
+    expect(away.state).toBe("elsewhere");
+    expect(away.terminal).toBe(true);
+    expect(away.text).toMatch(/another window/);
+  });
+
+  it("taken or kept by another window: its own words, drawn (the strip's Take it back / Ask again), never a spinner", () => {
+    const taken = v({ terminal: "c0000001", session: "taken" });
+    expect(taken.state).toBe("taken");
+    expect(taken.text).toMatch(/Taken by another window/);
+    expect(taken.text).toMatch(/Take it back/);
+    expect(taken.terminal).toBe(true);
+    expect(taken.badge.state).not.toBe("busy");
+    expect(taken.connect.shown).toBe(false);
+    const kept = v({ terminal: "c0000001", session: "refused" });
+    expect(kept.state).toBe("taken");
+    expect(kept.text).toMatch(/kept it/);
+    expect(kept.badge.state).not.toBe("busy");
+    const waiting = v({ terminal: "c0000001", session: "waiting" });
+    expect(waiting.text).toMatch(/Asking the window/);
+  });
+
+  it("lost: this window's socket gave up, the link may be open — Reconnect, and Disconnect (never Close)", () => {
+    const lost = v({ terminal: "c0000001", session: "lost" });
+    expect(lost.state).toBe("lost");
+    expect(lost.reconnect).toBe(true);
+    expect(lost.connect.shown).toBe(false);
+    expect(lost.disconnect).toEqual({ shown: true, close: false });
+    expect(lost.text).toMatch(/may still be open/);
+    for (const session of ["attached", "exited", "taken", null]) {
+      expect(v({ terminal: "c0000001", session }).reconnect).toBe(false);
+    }
+  });
+
+  it("no state ever offers Connect as on while a terminal is open, a chain runs or a card is up", () => {
+    const sessions = [null, "idle", "connecting", "attached", "waiting", "taken", "refused", "exited", "ended", "lost",
+      "closed"];
+    for (const session of sessions) {
+      for (const chain of [null, { paused: false }, { paused: true }]) {
+        for (const blocked of [false, true]) {
+          for (const terminal of [null, "c0000001"]) {
+            const b = v({ session: terminal ? session : null, chain, blocked, terminal });
+            const on = b.connect.shown && !b.connect.off;
+            if (on) {
+              expect(blocked).toBe(false);
+              expect(chain).toBeNull();
+              expect(!terminal || ["exited", "ended", "closed"].includes(session ?? "")).toBe(true);
+            }
+          }
+        }
+      }
     }
   });
 });

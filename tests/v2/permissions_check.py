@@ -24,6 +24,8 @@ import time
 from jarvis import config, permissions as v1_permissions, rules
 
 CHECKS = 0
+# `python permissions_check.py command_tool_checks` runs only the named sections.
+ONLY = frozenset(a for a in __import__("sys").argv[1:] if a.endswith("_checks"))
 FAILURES: list[str] = []
 
 
@@ -2034,6 +2036,219 @@ def discord_checks():
         ok(not config.ALLOWLIST_PATH.exists(), "checking allowlistability writes nothing")
 
 
+# --------------------------------------------------------------------------
+# command-bearing tools (2026-10-15): Claude's Monitor, and any tool whose
+# arguments carry a command line, are judged as commands — fail closed.
+
+COMMAND_TOOL_DENY = (
+    "cat .env", "grep KEY .env.local", "sudo rm -rf /", "pkill -f daemon2",
+    "systemctl --user restart jarvis-daemon2", "cat ~/.config/jarvis/google_token.json",
+    "tail -f .env.production",
+)
+
+
+def command_tool_checks():
+    """Claude's Monitor runs a shell command but was not a command tool, so
+    layer 1 never read it: `cat .env` and a daemon kill reached the reviewer
+    under AUTO. Now Monitor, PowerShell and any tool whose arguments carry a
+    `command`/`cmd`/`script` line are judged at every layer."""
+    from jarvis.v2 import approvals
+    from jarvis.v2.approvals import PendingApprovals, v1_request
+    # Read lazily, so the rest of this section runs (and fails) against main.
+    is_command_tool = getattr(approvals, "is_command_tool", lambda tool, args: None)
+    from jarvis.v2.model import PermissionProfile as P
+    from jarvis.v2.permissions import build_permit, deny_all
+    from jarvis.v2.provider import Decision
+
+    with Sandbox() as box:
+        shapes = (("Monitor", "command"), ("PowerShell", "command"), ("FutureShell", "command"),
+                  ("mcp__some__exec", "cmd"), ("SomeRunner", "script"))
+        # Layer 1, unasked, in every profile and for every asker.
+        for profile in (P.AUTO, P.ASK, P.STRICT):
+            for tool, key in shapes:
+                for line in COMMAND_TOOL_DENY:
+                    for asker in (Asker(Decision.ALLOW), deny_all()):
+                        brief = brief_for(profile)
+                        permit = build_permit(context(brief), asker)
+                        tag = f"[{profile.value}] {tool} {key}={line!r}"
+                        eq(permit(tool, {key: line, "description": "watch"}, brief), Decision.DENY,
+                           f"{tag} is refused")
+                        eq(box.decisions[-1]["layer"], "deny", f"{tag} at layer 1")
+                        if isinstance(asker, Asker):
+                            eq(asker.seen, [], f"{tag} is never asked")
+        # Argv arrays and a second command key are read too.
+        brief = brief_for(P.AUTO)
+        permit = build_permit(context(brief), Asker(Decision.ALLOW))
+        for args in ({"command": ["cat", ".env"]}, {"command": "", "cmd": "cat .env"},
+                     {"command": "ls", "script": "cat .env"}, {"cmd": ["bash", "-lc", "cat .env"]}):
+            eq(permit("FutureShell", args, brief), Decision.DENY, f"FutureShell {args} is refused")
+        # Layer 2 reads it: an always-ask rule asks through Monitor.
+        for line, rule in (("git push --force origin topic", "git-push-force"),
+                           ("npx prisma migrate deploy", "db-migrate-deploy"),
+                           ("vercel --prod", "vercel-prod")):
+            asker = Asker(Decision.DENY)
+            permit = build_permit(context(brief), asker)
+            eq(permit("Monitor", {"command": line}, brief), Decision.DENY, f"Monitor {line!r}: the no holds")
+            eq(len(asker.seen), 1, f"Monitor {line!r} is put to the owner")
+            ok(rule in box.decisions[-1]["reason"], f"Monitor {line!r} names {rule}")
+            eq(asker.seen[0].command if asker.seen else None, line, "the whole command travels")
+        # After #208, a merge through Monitor asks like one through Bash.
+        try:
+            from jarvis.v2 import merge_gate  # noqa: F401
+        except ImportError:
+            merge_gate = None
+        if merge_gate is not None:
+            asker = Asker(Decision.DENY)
+            permit = build_permit(context(brief), asker)
+            eq(permit("Monitor", {"command": "gh pr merge 1"}, brief), Decision.DENY,
+               "Monitor gh pr merge: asked and refused")
+            eq(len(asker.seen), 1, "Monitor gh pr merge reaches the owner")
+        # Ordinary Monitor use is unchanged in kind: judged, then the reviewer.
+        asker = Asker(Decision.ALLOW)
+        permit = build_permit(context(brief), asker)
+        eq(permit("Monitor", {"command": "tail -f build.log | grep --line-buffered ERROR"}, brief),
+           Decision.ALLOW, "an ordinary Monitor runs")
+        eq(asker.seen, [], "unasked under AUTO")
+        # Not every argument is a command: no command key, an empty one or a
+        # non-text one is not a line.
+        for tool, args in (("WebFetch", {"url": "https://example.com", "prompt": "cat .env"}),
+                           ("Agent", {"prompt": "run cat .env"}), ("FutureTool", {"command": ""}),
+                           ("FutureTool", {"command": {"op": "cat .env"}}), ("FutureTool", {"command": 5})):
+            eq(is_command_tool(tool, args), False, f"{tool} {args} is not a command tool")
+        for tool in ("Bash", "BashOutput", "Monitor", "PowerShell", "shell", "local_shell",
+                     "exec_command", "run_command", "run_readonly"):
+            ok(is_command_tool(tool, {}), f"{tool} is a command tool by name")
+        # The allowlist: a Monitor yes is a stem entry, never `{"tool": "Monitor"}`,
+        # and an old whole-tool entry does not wave a Monitor line through.
+        eq(v1_request("Monitor", {"command": "npm test", "description": "x"}),
+           ("run_command", {"command": "npm test"}), "Monitor maps to run_command")
+        eq(v1_request("FutureShell", {"cmd": ["npm", "test"]}),
+           ("FutureShell", {"cmd": ["npm", "test"]}),
+           "an unknown command-bearing tool is not a shell to the allowlist (#211 review, F1)")
+        config.ALLOWLIST_PATH.write_text(json.dumps([{"tool": "Monitor"}, {"tool": "FutureShell"}]))
+        human = build_permit(context(brief), Asker(Decision.ALLOW))
+        for tool in ("Monitor", "FutureShell"):
+            human(tool, {"command": "rm -rf build"}, brief)
+            ok(box.decisions[-1]["layer"] != "jarvis-allow",
+               f"a whole-tool {tool} entry is not a yes to `rm -rf build`")
+        config.ALLOWLIST_PATH.unlink()
+        ask = brief_for(P.ASK)
+        broker = PendingApprovals(on_request=lambda r: None)
+        answers = []
+        worker = threading.Thread(target=lambda: answers.append(build_permit(context(ask), broker)(
+            "Monitor", {"command": "docker compose logs -f"}, ask)))
+        worker.start()
+        deadline = time.monotonic() + 5
+        while not broker.pending() and time.monotonic() < deadline:
+            time.sleep(0.005)
+        if broker.pending():
+            broker.resolve(broker.pending()[0].req_id, Decision.ALLOW, always=True)
+        worker.join(5)
+        eq(answers, [Decision.ALLOW], "the Monitor card was answered")
+        entries = json.loads(config.ALLOWLIST_PATH.read_text()) if config.ALLOWLIST_PATH.exists() else []
+        ok({"tool": "Monitor"} not in entries and any(e.get("tool") == "run_command" for e in entries),
+           f"an Always on Monitor mints a stem entry ({entries})")
+
+        # --- #211 review, F1: judged is not trusted. An unknown command-bearing
+        # tool gets layers 1 and 2, never the allowlist, rules' ALLOW or an
+        # Always: main's decision or a stricter one, in every profile.
+        config.ALLOWLIST_PATH.write_text(json.dumps(
+            [{"tool": "run_command", "prefix": p} for p in ("npm", "git", "cat")]
+            + [{"tool": t} for t in ("mcp__remote__exec", "mcp__ops__deploy")]))
+        for profile in (P.STRICT, P.ASK, P.AUTO):
+            brief = brief_for(profile)
+            tag = f"[{profile.value}]"
+            asker = Asker(Decision.ALLOW)
+            permit = build_permit(context(brief), asker)
+            eq(permit("mcp__remote__exec", {"command": "cat", "args": [".env"]}, brief), Decision.DENY,
+               f"{tag} an argv beside the command is judged with it: `cat .env` is refused")
+            eq(box.decisions[-1]["layer"], "deny", f"{tag} at layer 1")
+            decision = permit("mcp__remote__exec", {"command": "npm", "args": ["publish"]}, brief)
+            ok(box.decisions[-1]["layer"] != "jarvis-allow",
+               f"{tag} no allowlist entry or rules ALLOW answers an unknown command tool")
+            eq(decision, {P.STRICT: Decision.DENY, P.ASK: Decision.ALLOW, P.AUTO: Decision.ALLOW}[profile],
+               f"{tag} npm publish: strict refuses, ask asks, auto is the reviewer's (as on main)")
+            eq(len(asker.seen), 1 if profile is P.ASK else 0, f"{tag} asked only under ASK")
+            before = len(asker.seen)
+            permit("mcp__remote__exec", {"command": "git", "args": ["push", "--force", "origin", "x"]}, brief)
+            eq(len(asker.seen), before + 1, f"{tag} a force push through argv is always-ask")
+            eq(box.decisions[-1]["layer"], "always-ask", f"{tag} at layer 2")
+            for request in asker.seen:
+                eq(request.allowlistable, False, f"{tag} an unknown command tool's card offers no Always")
+        # An Always on an unknown command tool writes nothing.
+        config.ALLOWLIST_PATH.unlink()
+        broker = PendingApprovals(on_request=lambda r: None)
+        answers = []
+        ask = brief_for(P.ASK)
+        worker = threading.Thread(target=lambda: answers.append(build_permit(context(ask), broker)(
+            "mcp__ops__deploy", {"command": "npm run deploy"}, ask)))
+        worker.start()
+        deadline = time.monotonic() + 5
+        while not broker.pending() and time.monotonic() < deadline:
+            time.sleep(0.005)
+        if broker.pending():
+            broker.resolve(broker.pending()[0].req_id, Decision.ALLOW, always=True)
+        worker.join(5)
+        eq(answers, [Decision.ALLOW], "the deploy card was answered once")
+        ok(not config.ALLOWLIST_PATH.exists() or json.loads(config.ALLOWLIST_PATH.read_text()) == [],
+           "an Always on an unknown command tool writes no entry (no npm stem for Bash)")
+        # And the broker itself refuses, even for a request marked allowlistable.
+        from jarvis.v2.approvals import ApprovalRequest
+        broker = PendingApprovals(on_request=lambda r: None)
+        request = ApprovalRequest(tool="mcp__ops__deploy", args={"command": "npm run deploy"},
+                                  command="npm run deploy", allowlistable=True)
+        worker = threading.Thread(target=lambda: broker.ask(request))
+        worker.start()
+        deadline = time.monotonic() + 5
+        while not broker.pending() and time.monotonic() < deadline:
+            time.sleep(0.005)
+        if broker.pending():
+            broker.resolve(broker.pending()[0].req_id, Decision.ALLOW, always=True)
+        worker.join(5)
+        ok(not config.ALLOWLIST_PATH.exists() or json.loads(config.ALLOWLIST_PATH.read_text()) == [],
+           "the broker mints nothing for an unknown command tool, whatever the request says")
+
+        # --- F2: Workflow's script is JavaScript: main's decisions exactly.
+        CODE_TOOLS = getattr(approvals, "CODE_TOOLS", frozenset())   # lazily: runs against main
+        for tool in ("Workflow", "AppifactRepl", "REPL"):
+            ok(tool in CODE_TOOLS, f"{tool} is a code tool, not a shell")
+        script = {"script": "const x = 'see .env docs'; await agent('rm -rf / is not run here')"}
+        eq(is_command_tool("Workflow", script), False, "Workflow is never read as a shell line")
+        eq(v1_request("Workflow", script), ("Workflow", script), "Workflow allowlists as a whole tool, as on main")
+        for profile, want, layer in ((P.AUTO, Decision.ALLOW, "reviewer"), (P.STRICT, Decision.DENY, "human")):
+            brief = brief_for(profile)
+            eq(build_permit(context(brief), Asker(Decision.ALLOW))("Workflow", script, brief), want,
+               f"[{profile.value}] a Workflow script mentioning .env is not refused at layer 1")
+            eq(box.decisions[-1]["layer"], layer, f"[{profile.value}] Workflow answered where main answers it")
+        config.ALLOWLIST_PATH.write_text(json.dumps([{"tool": "Workflow"}]))
+        strict = brief_for(P.STRICT)
+        eq(build_permit(context(strict), Asker(Decision.ALLOW))("Workflow", script, strict), Decision.ALLOW,
+           "a whole-tool Workflow entry still covers its scripts, as on main")
+        config.ALLOWLIST_PATH.unlink()
+
+        # --- F3: a shell with no command text is refused; an unknown tool's
+        # non-text command is asked.
+        brief = brief_for(P.AUTO)
+        for tool, args in (("Bash", {"command": ""}), ("Bash", {"command": {"x": 1}}),
+                           ("Monitor", {"command": 5}), ("shell", {"command": []}),
+                           ("run_command", {"command": None}), ("PowerShell", {"command": "  "})):
+            asker = Asker(Decision.ALLOW)
+            eq(build_permit(context(brief), asker)(tool, args, brief), Decision.DENY,
+               f"{tool} {args}: nothing to judge, refused")
+            eq((box.decisions[-1]["layer"], asker.seen), ("deny", []), f"{tool} {args}: at layer 1, unasked")
+        for args in ({"command": {"op": "deploy"}}, {"command": 5}, {"cmd": ["npm", 3]}):
+            asker = Asker(Decision.DENY)
+            eq(build_permit(context(brief), asker)("mcp__x__run", args, brief), Decision.DENY,
+               f"mcp__x__run {args}: asked, and the no holds")
+            eq(len(asker.seen), 1, f"mcp__x__run {args}: put to the owner under AUTO")
+            ok("command-unreadable" in box.decisions[-1]["reason"], f"mcp__x__run {args}: says why")
+        eq(build_permit(context(brief), deny_all())("mcp__x__run", {"command": {"op": 1}}, brief),
+           Decision.DENY, "with nobody to ask, an unreadable command is refused")
+        asker = Asker(Decision.ALLOW)
+        build_permit(context(brief), asker)("BashOutput", {"bash_id": "b1"}, brief)
+        eq(asker.seen, [], "BashOutput with no command key is unchanged")
+
+
 def main():
     for section in (matrix_checks, always_ask_checks, file_deny_checks,
                     human_backed_checks, log_checks, approvals_checks, hud_build_deny_checks,
@@ -2041,7 +2256,9 @@ def main():
                     installed_hud_deny_checks, daemon_and_rebuild_ops_checks, review_48_checks,
                     review_48_round2_checks, review_48_delta_checks, runner_checks,
                     third_delta_75_checks, daemon_checks,
-                    auto_quiet_checks, hatch_checks, discord_checks):
+                    auto_quiet_checks, hatch_checks, discord_checks, command_tool_checks):
+        if ONLY and section.__name__ not in ONLY:
+            continue
         print(f"-- {section.__name__}")
         section()
     print()

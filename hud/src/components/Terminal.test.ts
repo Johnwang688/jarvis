@@ -76,3 +76,62 @@ describe("the \"Jarvis can read\" switch across windows (terminal_readable)", ()
     expect(mgr.rows.map((r) => r.id)).toEqual(["a0000002"]);   // no row is made up from an event
   });
 });
+
+describe("the VEX pane's Brain tab as a place (VX-UI-4a, `vex-<pane>`)", () => {
+  const brain = parseRow({ id: "c0000002", title: "vex brain", program: "vex-brain", input: true })!;
+  const shell = parseRow({ id: "a0000003", title: "zsh" })!;
+
+  it("a Brain tab holds it: visible, not the panel's tab, and shown in the VEX pane", () => {
+    const mgr = new TermManager();
+    mgr.rows = [brain, shell];
+    mgr.prefs = { active: null, specs: {} };
+    expect(mgr.panelActive()).toBe("c0000002");
+    mgr.holdInVex(2, "c0000002");
+    expect(mgr.shownIn("c0000002")).toEqual({ kind: "vex", pane: 2 });
+    expect(mgr.visible("c0000002")).toBe(true);
+    expect(mgr.panelActive()).toBe("a0000003");             // the panel picks one it can draw
+    mgr.holdInVex(2, null);
+    expect(mgr.shownIn("c0000002")).toBeNull();
+    expect(mgr.visible("c0000002")).toBe(false);
+  });
+
+  it("one place at a time: a terminal pane wins, and a second VEX pane never takes it", () => {
+    const mgr = new TermManager();
+    mgr.rows = [brain];
+    mgr.holdInVex(2, "c0000002");
+    mgr.holdInVex(3, "c0000002");
+    expect(mgr.shownIn("c0000002")).toEqual({ kind: "vex", pane: 2 });
+    mgr.place = new Map([["c0000002", 4]]);
+    expect(mgr.shownIn("c0000002")).toEqual({ kind: "pane", pane: 4 });
+    mgr.holdInVex(2, null);
+    mgr.holdInVex(3, "c0000002");                             // held by a terminal pane: refused
+    expect(mgr.vexPlace.has("c0000002")).toBe(false);
+  });
+
+  it("a pane's hold is its own: releasing one pane never drops another's, and gone() forgets it", () => {
+    const mgr = new TermManager();
+    mgr.rows = [brain, shell];
+    mgr.holdInVex(2, "c0000002");
+    mgr.holdInVex(3, null);
+    expect(mgr.vexPlace.get("c0000002")).toBe(2);
+    const changed = vi.spyOn(mgr, "changed");
+    mgr.holdInVex(2, "c0000002");                             // already so: nothing to redraw
+    expect(changed).not.toHaveBeenCalled();
+    mgr.gone("c0000002");
+    expect(mgr.vexPlace.size).toBe(0);
+  });
+
+  it("adoptProgram holds the new program as this window's and opens nothing (not the panel)", async () => {
+    const mgr = new TermManager();
+    vi.spyOn(api, "terminals").mockResolvedValue([brain]);
+    const open = vi.fn();
+    mgr.showPanel = open;
+    expect(await mgr.adoptProgram("c0000002")).toBe(true);
+    expect(mgr.claimed.has("c0000002")).toBe(true);
+    expect(open).not.toHaveBeenCalled();
+    expect(mgr.prefs.active).not.toBe("c0000002");
+    mgr.setBlocked(true);
+    expect(await mgr.adoptProgram("c0000002")).toBe(false);   // never under a card
+    expect(await new TermManager().adoptProgram("../etc")).toBe(false);
+  });
+});

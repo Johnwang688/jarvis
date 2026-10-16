@@ -1006,3 +1006,22 @@ Ten mutants are killed:
 - the mark not restored on reload;
 - three in `quota.ts`;
 - the panel's qualifier not drawn (face check).
+
+## Sub-agents for the HUD view: the brief and the card's sid (SV-3, 2026-10-15)
+
+- **Claude's brief**: `_task` puts `task_started.prompt` (through `_safe`,
+  at most `CHILD_BRIEF_CHARS`) on that one `subagent` lifecycle event as
+  `brief`. `subagents.py` keeps it on the child (scrubbed, 4000 characters,
+  16 KiB JSON, snapshotted) and serves it only on the owner's transcript
+  route — never `summary()` (the list), `bus()`, the thread's log or a log
+  line. **Codex sends no brief** to the app-server client (SV-0's recordings:
+  no prompt on `subAgentActivity`, no user message on the child's thread), so
+  none is kept for a `cx:` child.
+- **The card's sid**: both providers pass the asking child's sid to the
+  permit callback as `subagent_sid`, only when the callback takes it (Claude
+  beside `subagent=<label>`; Codex on its children's widenings, whose
+  headline already names them), and the logged gate question's `subagent`
+  is now the sid for Codex too (it was the label). `build_permit` puts a sid
+  matching the pattern on `ApprovalRequest.subagent`, in the public JSON only
+  when set. No layer reads it: `subagent_routes_check` runs every profile ×
+  asker × case with and without it and compares the answers.

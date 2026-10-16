@@ -79,7 +79,7 @@ from jarvis import config
 from jarvis.v2.model import ProviderName, Thread
 from jarvis.v2.provider import (Brief, BriefRefused, Decision, Event, EventKind,
                                PermissionCallback, SessionHandle, SteerRefused, Usage,
-                               UserMessage)
+                               UserMessage, takes_keyword as _takes_keyword)
 from ..approvals import clean_line
 from . import codex_cli, codex_config
 from .codex_rpc import RpcCancelled, RpcError, RpcProcess, RpcTimeout
@@ -1884,14 +1884,21 @@ class CodexProvider:
                 if req_id in s.pending:
                     raise RpcError("Duplicate Codex request id")
                 s.pending[req_id] = pending
+            # A child's approval names its sid (the owner's SV-3 decision,
+            # as Claude's do): on the logged gate question and, when the
+            # callback takes it, on the owner's card, so the HUD can link
+            # the card to the child's row. It decides nothing.
+            sid = child_sid(p.get("threadId")) if child is not None else None
             yield self._event(h, EventKind.APPROVAL_REQUESTED, req_id=req_id, tool=name, args=args,
-                              command=args.get("command"), **({"subagent": child} if child else {}))
+                              command=args.get("command"), **({"subagent": sid} if sid else {}))
             try:
                 # Deliberately on the send caller's thread: broker context survives.
                 # A widening goes as a keyword the model cannot reach; a
                 # callback that does not take it raises, and that denies.
+                extra = ({"subagent_sid": sid}
+                         if sid and line and _takes_keyword(s.permit, "subagent_sid") else {})
                 decision = (s.permit(name, args, s.brief, widening=line, grants=tuple(grants),
-                                     also_commands=tuple(also)) if line
+                                     also_commands=tuple(also), **extra) if line
                             else s.permit(name, args, s.brief))
                 decision = Decision(decision)
             except Exception:

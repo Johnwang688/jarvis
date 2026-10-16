@@ -40,8 +40,11 @@ that outlives its turn) until the CLI says otherwise. An ended Codex child is
 live again only on its provider's own `started` from the session that ran it
 (a child given another turn); any other live word after an end is stale.
 
-A child's words (`text`, `result`) are scrubbed here, the same way for both
-providers (`redact.scrub_text`), before memory, the file or a route sees them. Jarvis ends one itself
+A child's words (`text`, `result`) and its brief (SV-3: Claude's
+`task_started.prompt`; Codex sends none) are scrubbed here, the same way for
+both providers (`redact.scrub_text`), before memory, the file or a route sees
+them. The brief is served only by the owner's transcript route, never the
+list, the bus or the thread's log. Jarvis ends one itself
 only when the session that ran it is gone (`end_session`: closed, lost,
 reconnected for a model switch) or, read back from disk, when no session with
 its key is live — a restart, after which the CLI that ran it is gone too.
@@ -74,6 +77,11 @@ LOAD_BYTES = 4 << 20                 # a cold read takes at most the file's last
 THREAD_BYTES = LOAD_BYTES // 4       # one thread's entries in memory (and so in a snapshot)
 FILE_CAP = LOAD_BYTES                # past this the file is rewritten as a snapshot
 ENTRY_OVERHEAD = 64                  # an entry's later fields (outcome, finished_at)
+# A child's brief (SV-3, the owner's decision: shown collapsed at the top of
+# its pane): `TEXT_CAP` characters, scrubbed as its words are, and at most
+# `BRIEF_BYTES` of JSON, so `CHILD_LIMIT` briefs are at most 1 MiB beside the
+# entries' `THREAD_BYTES` and a snapshot still fits a cold read.
+BRIEF_BYTES = 16 << 10
 NAME_CAP = 40
 REASON_CAP = 80
 SID = re.compile(r"(?:cl|cx):[A-Za-z0-9_-]{1,128}")
@@ -86,7 +94,7 @@ GONE = "the session that ran it ended"
 _BROWSER_ACT = ("hud_browser_act", "mcp__jarvis__hud_browser_act")
 _CHILD_FIELDS = ("key", "turn_id", "status", "task_id", "parent_sid", "depth", "background",
                  "name", "kind", "last_tool", "tokens", "tool_uses", "duration_ms",
-                 "stop_reason", "started_at", "ended_at", "total", "declined")
+                 "stop_reason", "started_at", "ended_at", "total", "declined", "brief")
 
 
 def valid_sid(value: Any) -> bool:
@@ -126,6 +134,18 @@ def _words(text: str) -> str:
         return "[withheld]"
 
 
+def _brief(value: Any) -> str:
+    """The orchestrator's brief to a child, for its record: scrubbed and
+    capped as a child's words are (`_words`), then held to `BRIEF_BYTES` of
+    JSON. Empty for anything that is not text."""
+    if not isinstance(value, str) or not value.strip():
+        return ""
+    text = _words(value)
+    while text and len(json.dumps(text, ensure_ascii=False).encode()) > BRIEF_BYTES:
+        text = text[:len(text) * 9 // 10]
+    return text
+
+
 def _public(entry: dict) -> dict:
     return {k: v for k, v in entry.items() if not k.startswith("_")}
 
@@ -152,6 +172,7 @@ class _Child:
     entries: deque = field(default_factory=deque)
     total: int = 0                     # entries ever made (the deque keeps the last)
     declined: int = 0                  # calls a reviewer declined
+    brief: str = ""                    # the orchestrator's brief to it (SV-3): the transcript route's alone
     calls: dict = field(default_factory=dict)   # call_id -> its entry, while kept
 
     def summary(self) -> dict:
@@ -231,6 +252,11 @@ class SubagentRecords:
                    "stop_reason": _clean(data.get("stop_reason"), REASON_CAP) or None}
             for key in ("tokens", "tool_uses", "duration_ms"):
                 out[key] = _count(data.get(key))
+            brief = _brief(data.get("brief"))
+            if brief:
+                # The owner's to read in the pane (SV-3): kept in memory and
+                # the thread's own file, never in `bus()` or `summary()`.
+                out["brief"] = brief
             return {"kind": "subagent", "sid": sid, "data": out}
         if event.kind != EventKind.SUBAGENT_EVENT:
             return None
@@ -350,8 +376,8 @@ class SubagentRecords:
             for key in ("task_id", "parent_sid", "tokens", "tool_uses", "duration_ms"):
                 if data.get(key) is not None:
                     setattr(child, key, data[key])
-            for key in ("name", "kind", "last_tool"):
-                if data.get(key):
+            for key in ("name", "kind", "last_tool", "brief"):
+                if data.get(key) and isinstance(data[key], str):
                     setattr(child, key, data[key])
             if data.get("depth"):
                 child.depth = data["depth"]
@@ -435,6 +461,8 @@ class SubagentRecords:
                 setattr(child, name, data[name])
         if child.status not in STATUSES:
             child.status = "stopped"
+        if not isinstance(child.brief, str):
+            child.brief = ""
         state.children[sid] = child
         for entry in data.get("entries") or ():
             if isinstance(entry, dict):
@@ -566,5 +594,7 @@ class SubagentRecords:
                 first = messages[0]["seq"] if messages else child.total + 1
                 found = {"subagent": child.summary(), "messages": messages,
                          "truncated": first > 1}
+                if child.brief:
+                    found["brief"] = child.brief
         self._flush()
         return found
