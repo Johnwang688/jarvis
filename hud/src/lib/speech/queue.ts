@@ -25,8 +25,8 @@
 
 import type { Floor } from "./floor";
 
-/** `note`: the queue's own "Skipping N updates" marker. */
-export type ItemKind = "verbatim" | "summary" | "fallback" | "note";
+/** `note`: the queue's own "Skipping N updates" marker. `notice`: Jarvis's own one-line notice of a sub-agent's end (SV-5). */
+export type ItemKind = "verbatim" | "summary" | "fallback" | "note" | "notice";
 export type ItemState = "pending" | "synthesizing" | "ready" | "playing" | "done" | "skipped" | "dropped";
 /** Why an item was skipped or dropped, for diagnostics and the strip's mark. */
 export type ItemMark = "tts_failed" | "tts_timeout" | "play_failed" | "skipped" | "stopped" | "thread_left" | "stale" | "collapsed";
@@ -235,6 +235,12 @@ export class SpeechQueue {
     this.finishWhere((i) => i.thread === thread && i.messageKey === messageKey, "skipped", "skipped");
     this.pump();
     return { thread, messageKey };
+  }
+
+  /** Drop one named message's items that have not begun to sound (a notice grown stale); a playing one is spared. */
+  dropUnstarted(messageKey: string, mark: ItemMark = "stale"): void {
+    this.finishWhere((i) => i.messageKey === messageKey && i.state !== "playing", "dropped", mark);
+    this.pump();
   }
 
   /** Skip one thread's current message (else its first queued one): the chip's "skip this chat". */

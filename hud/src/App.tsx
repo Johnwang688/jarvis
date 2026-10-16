@@ -83,11 +83,11 @@ import { Orb } from "./components/Orb";
 import { SpeechStrip, stripShown } from "./components/SpeechStrip";
 import { SpeakerSettings } from "./components/SpeakerSettings";
 import { SpeakerStore, speakerLabel } from "./lib/speaker";
-import { DuckBrowserSetting, ReadAloudSetting } from "./components/ReadAloud";
+import { DuckBrowserSetting, ReadAloudSetting, SubagentNoticesSetting } from "./components/ReadAloud";
 import { SttSettingsPanel } from "./components/SttSettings";
 import { sttSettingsStore, STT_BACKSTOP_MS, STT_UNKNOWN_RETRY_MS } from "./state/sttSettings";
 import { parseSttSettings } from "./lib/sttSettings";
-import { createSpeech, realClock, saveDuckBrowser, saveReadAloud, saveSelfVoiceGate } from "./lib/speech";
+import { createSpeech, realClock, saveDuckBrowser, saveReadAloud, saveSelfVoiceGate, saveSubagentNotices } from "./lib/speech";
 import { BargeIn } from "./lib/speech/barge";
 import { CommandRouter } from "./lib/speech/commands";
 import { SelfVoiceSetting } from "./components/SelfVoice";
@@ -590,6 +590,7 @@ export default function App() {
   const duckBrowser = useSyncExternalStore(
     useCallback((cb: () => void) => speech.duck.subscribe(cb), [speech]), () => speech.duck.isEnabled());
   const speechSubscribe = useCallback((cb: () => void) => speech.controller.subscribe(cb), [speech]);
+  const subagentNotices = useSyncExternalStore(speechSubscribe, () => speech.controller.noticesOn());
   const speechView = useSyncExternalStore(speechSubscribe, () => speech.controller.view());
   // Speaker verification (V12): the daemon decides whose voice a clip is; this window shows the
   // GUEST VOICE label and the switch, and learns of a change in another window from the bus.
@@ -636,6 +637,17 @@ export default function App() {
     recording: () => !!captureRef.current && (captureRef.current.recording() || captureRef.current.ptt !== null),
   }), [speech]);
   useEffect(() => () => barge.release(), [barge]);
+  // SV-5: a reconnect's fresh list tells the notices which children the owner had asked to stop.
+  useEffect(() => {
+    subagents.setListed((threadId, rows) => speech.controller.noticeSeed(threadId, rows));
+    return () => subagents.setListed(null);
+  }, [speech]);
+  // SV-5: a sub-agent notice waits while the owner talks (a barge-in holds, or a message is being recorded).
+  useEffect(() => {
+    speech.controller.setOwnerBusy(() => barge.held()
+      || (!!captureRef.current && (captureRef.current.recording() || captureRef.current.ptt !== null)));
+    return () => speech.controller.setOwnerBusy(null);
+  }, [speech, barge]);
   // His own sentences are checked for the wake word "Jarvis" (V9; V11: the only phrase the local recognizer hears).
   useEffect(() => {
     speech.controller.setNameMatcher((text) => WAKE_NAME.test(text));
@@ -1826,7 +1838,9 @@ export default function App() {
           // A chat's native sub-agent changed (SV-3): ids, a status, times and
           // counts only. Its row moves at once; its words are the owner
           // routes' (state/subagents.ts). Never the chat's ops, status line or
-          // orb, never spoken, never posted: sub-agents are silent.
+          // orb, never posted, and a child's words are never spoken. The speech
+          // controller hears the same record (above) for the one notice it may
+          // make: a status and a count (lib/speech/notices.ts).
           if (tid) subagents.heard(tid, data);
           break;
         default:
@@ -4558,6 +4572,8 @@ export default function App() {
                 onClose={closeSettings}
               /><ReadAloudSetting on={speechView.enabled}
                 onChange={(on) => { saveReadAloud(on); speech.controller.setEnabled(on); }} />
+              <SubagentNoticesSetting on={subagentNotices}
+                onChange={(on) => { saveSubagentNotices(on); speech.controller.setNotices(on); }} />
               <DuckBrowserSetting on={duckBrowser}
                 onChange={(on) => { saveDuckBrowser(on); speech.duck.setEnabled(on); }} /><SttSettingsPanel blocked={blocked} />
                 <SpeakerSettings store={speaker} blocked={blocked}

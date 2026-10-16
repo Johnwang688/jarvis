@@ -70,6 +70,25 @@ export function saveDuckBrowser(on: boolean, storage?: Pick<Storage, "setItem">)
   }
 }
 
+const NOTICES_KEY = "jarvis.subagentNotices";
+
+/** "Say when a sub-agent finishes or fails" (SV-5): a per-window convenience in localStorage, default on. */
+export function loadSubagentNotices(storage?: Pick<Storage, "getItem">): boolean {
+  try {
+    return (storage ?? window.localStorage).getItem(NOTICES_KEY) !== "off";
+  } catch {
+    return true;
+  }
+}
+
+export function saveSubagentNotices(on: boolean, storage?: Pick<Storage, "setItem">): void {
+  try {
+    (storage ?? window.localStorage).setItem(NOTICES_KEY, on ? "on" : "off");
+  } catch {
+    /* a window with storage blocked still works, it just forgets */
+  }
+}
+
 /** 32 lowercase hex characters, the daemon's lease token for one window. */
 export function newWindowToken(): string {
   const bytes = new Uint8Array(16);
@@ -127,6 +146,7 @@ export function createSpeech(): Speech {
   });
   void voices.load();
   controller.setEnabled(loadReadAloud());
+  controller.setNotices(loadSubagentNotices());
   const unbind = bindFocus(gate, window, () => document.hasFocus());
   // This window's own lease token: another window's `off` cannot end it, nor this one's end theirs.
   const lease = newWindowToken();
