@@ -2577,7 +2577,9 @@ judged alone, its word and arguments read in every spelling
   search` prints secrets), store and clear. **Python's `keyring` CLI**
   (review of #218, MED 2: `uv run --with keyring python3 -m keyring get S U`
   was ALLOW): `keyring get|set|del` with `keyring` as the program, and any
-  Python run with `-m keyring` (`-mkeyring`, `-Im keyring`, `keyring.cli`).
+  Python run with `-m keyring` (`-mkeyring`, `-Im keyring`, `keyring.cli`),
+  through runpy too (`-m runpy keyring`, `-mrunpy keyring.cli`; delta review
+  of #218, LOW 1: the vex reading's `_module_run`, shared).
   The bare word is not refused (`pip install keyring`, `echo keyring get`).
 - **A caller whose own words name the Secret Service**: a D-Bus client
   (`busctl`, `gdbus`, `dbus-send`, `dbus-monitor`, `qdbus*`), an interpreter
@@ -2592,6 +2594,30 @@ judged alone, its word and arguments read in every spelling
   elsewhere on the line does not count: `grep org.gnome.keyring x | sh -c
   'wc -l'` is not refused, while `bash -c "grep org.gnome.keyring x"` is (its
   script names one; the accepted cost).
+- **An interpreter whose inline source starts a secret reader**
+  (`rules._runs_reader_inline`; delta review of #218, LOW 2, narrowed by
+  #220's review, M1). Only the inline source of a non-shell interpreter is
+  read: `python -c`, `perl -e/-E`, `ruby -e`, `node -e/-p/--eval/--print`,
+  `php -r`, `deno eval`, `bun -e/--eval`. A shell's `-c` string is walked as
+  a line already, and positional arguments are data. In that source only a
+  reader in **program position** counts: the first word of the first string
+  handed to a process-starting call (`system`, `exec*`, `popen*`, `spawn*`,
+  `run`, `call`, `check_output`, `capture2`, `shell_exec`, `Deno.Command`, Bun's
+  `` $`…` ``), or, in Perl, Ruby and PHP, of a shell-out literal (backticks,
+  `qx(…)`, `%x(…)`). So `os.system('secret-tool …')`, `subprocess.run(['secret-tool',
+  …])`, `perl -e 'system("secret-tool …")'` and `node -e "execSync('secret-tool
+  …')"` are refused. Not refused (pinned): Codex's escalation shape `/bin/bash
+  -lc 'gh pr create … --body "… secret-tool …"'` and `/bin/bash -lc 'git
+  commit -m "rules: secret-tool"'`, `python3 -m pytest -k secret-tool`,
+  `python3 scripts/check.py secret-tool`, an in-process gate probe
+  (`python3 -c "print(rules.decide('secret-tool lookup a b'))"`, through `uv
+  run` or `timeout` too), `perl -pi -e 's/secret-tool/x/' file`, `which
+  secret-tool`. A call through a variable (`os.system(cmd)`) is not seen.
+  Probing this rule in process needs a probe file (`python3 probe.py`):
+  a `python3 -c` whose source holds `os.system('secret-tool…')` is itself
+  DENY. Its patterns are atomic where whitespace runs meet (#220 delta
+  review: `\s*\(?\s*` took 54 s on 60k spaces), pinned with a deadline by
+  `rules_check secret_service_cost_checks`.
 - **A session-bus monitor**, judged per program: `dbus-monitor` unless
   `--system` (and no `--session`/`--address`), `gdbus monitor` unless
   `--system`/`-y`, `busctl monitor|capture` with `--user`, an address, a
@@ -2602,10 +2628,13 @@ judged alone, its word and arguments read in every spelling
 
 A line too complex for the walk (its caps) is read the first version's
 stricter way over its whole text (a reader's name anywhere, or a name and a
-caller anywhere).
+caller anywhere). Pinned: lines past the caps (`env ` three thousand times,
+then `secret-tool …`) are DENY, and the check proves the walk gave up on
+them first.
 
 **Not refused** (pinned): names in text (`grep`, `rg`, `echo`, commit
-messages, `gh pr create`/`comment` bodies), `busctl --user list`, `busctl
+messages and `gh pr create`/`comment` bodies, directly or in Codex's `bash
+-lc '…'` shape, except a Secret Service *name* in a shell string, above), `busctl --user list`, `busctl
 monitor` (the system bus), `dbus-monitor --system`, other services' calls
 (Notifications, MPRIS), `systemctl --user status gnome-keyring-daemon`,
 `ls ~/.local/share/keyrings`, `pip install keyring`, `keyring
@@ -2613,7 +2642,9 @@ monitor` (the system bus), `dbus-monitor --system`, other services' calls
 
 **Limit, stated plainly: an accident guard, not a wall.** A script file that
 talks D-Bus (`python3 tool.py`), a unique name with a computed object path,
-or a program that is only an expansion is not seen. The real boundary is the
+or a program that is only an expansion is not seen. Nor is a recipe make
+reads from standard input (`… | make -f /dev/stdin`, a here-document to
+`make -f -`): its commands are not walked. A known gap, not fixed. The real boundary is the
 same-user one in the Browser notes (*Password store: the owner's keyring*).
 The terminal_read guard's older `secret-tool lookup` refusal is unchanged.
 

@@ -611,6 +611,10 @@ class SubagentRecords:
             child.stop = child.stop_at = None
         if child.stop != "refused" or not isinstance(child.stop_error, str):
             child.stop_error = None
+        else:
+            # The same cleaning as a live line's (`_apply`): a hand-edited or
+            # older file is read no more trustingly (review of #216's delta, NIT-3).
+            child.stop_error = clean_line(child.stop_error, STOP_ERROR_CAP) or None
         state.children[sid] = child
         for entry in data.get("entries") or ():
             if isinstance(entry, dict):

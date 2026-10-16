@@ -302,17 +302,159 @@ class ClaudeStop(unittest.TestCase):
             with self.assertRaises(Exception) as caught:
                 run.provider.stop_subagent(run.handle, self.SLEEPER)
             self.assertNotIsInstance(caught.exception, SubagentStopDeclined)
+        # The CLI may still act on it: the mark stays, as for one that times out late (#220 review, L2).
+        self.assertTrue(run.handle.native.children[self.SLEEPER].owner_stop)
         run.provider.stop_subagent(run.handle, self.SLEEPER)
         self.assertTrue(done.wait(30))
+
+    def test_a_late_refusal_takes_the_owners_mark_off(self):
+        """Review of #216's delta, LOW 1: the CLI refuses after the route's
+        timeout. The child's later end is not "stopped by the owner"."""
+        run = ClaudeRun("stop_fg_parallel")
+        self.addCleanup(run.close)
+        out, done = run.send_async()
+        wait_for(lambda: R.ReplayClient.instances and run.client.at_gate.is_set(), what="the stop gate")
+        refused = threading.Event()
+
+        async def late_refusal(task_id):
+            await asyncio.sleep(0.4)
+            refused.set()
+            raise Exception(f"No task found with ID: {task_id}")    # the CLI's word, late
+        with patch.object(run.client, "stop_task", late_refusal), \
+                patch.object(claude, "STOP_CONTROL_TIMEOUT_S", 0.1):
+            with self.assertRaises(TimeoutError):
+                run.provider.stop_subagent(run.handle, self.SLEEPER)
+        child = run.handle.native.children[self.SLEEPER]
+        self.assertTrue(child.owner_stop, "the mark came off before the CLI answered")
+        wait_for(lambda: refused.is_set() and not child.owner_stop, what="the late refusal to clear the mark")
+        self.assertTrue(done.wait(30), "the turn never finished")
+        ended = [d for d in life(out, self.SLEEPER) if d["op"] == "finished"]
+        self.assertEqual([d["status"] for d in ended], ["stopped"])
+        self.assertNotEqual(ended[0].get("stop_reason"), OWNER)
+
+    def test_a_late_refusal_after_a_taken_stop_leaves_the_mark(self):
+        """A first Stop timed out, a second taken at once: the first one's
+        late refusal does not undo the second."""
+        run = ClaudeRun("stop_fg_parallel")
+        self.addCleanup(run.close)
+        out, done = run.send_async()
+        wait_for(lambda: R.ReplayClient.instances and run.client.at_gate.is_set(), what="the stop gate")
+        refused = threading.Event()
+
+        async def late_refusal(task_id):
+            await asyncio.sleep(0.4)
+            refused.set()
+            raise Exception(f"No task found with ID: {task_id}")
+
+        async def taken(task_id):
+            return None                         # taken; the CLI's word comes with the gate
+        with patch.object(run.client, "stop_task", late_refusal), \
+                patch.object(claude, "STOP_CONTROL_TIMEOUT_S", 0.1):
+            with self.assertRaises(TimeoutError):
+                run.provider.stop_subagent(run.handle, self.SLEEPER)
+        with patch.object(run.client, "stop_task", taken):
+            run.provider.stop_subagent(run.handle, self.SLEEPER)
+        self.assertTrue(refused.wait(5))
+        self.assertTrue(done.wait(30), "the turn never finished")
+        ended = [d for d in life(out, self.SLEEPER) if d["op"] == "finished"]
+        self.assertEqual([(d["status"], d.get("stop_reason")) for d in ended], [("stopped", OWNER)])
+
+    def test_an_undelivered_stop_takes_the_mark_off_in_time_and_late(self):
+        """#220 delta review, L2: a transport error (the request never
+        reached the CLI) settles as refused by the one rule
+        (`_stop_outcome`), whether it comes in time or after our timeout."""
+        run = ClaudeRun("stop_fg_parallel")
+        self.addCleanup(run.close)
+        out, done = run.send_async()
+        wait_for(lambda: R.ReplayClient.instances and run.client.at_gate.is_set(), what="the stop gate")
+        child = run.handle.native.children[self.SLEEPER]
+
+        async def lost(task_id):
+            raise ConnectionError("the CLI's pipe closed")
+        with patch.object(run.client, "stop_task", lost):
+            with self.assertRaises(ConnectionError):
+                run.provider.stop_subagent(run.handle, self.SLEEPER)
+        self.assertFalse(child.owner_stop, "an undelivered Stop in time left the mark")
+        failed = threading.Event()
+
+        async def lost_late(task_id):
+            await asyncio.sleep(0.3)
+            failed.set()
+            raise ConnectionError("the CLI's pipe closed")
+        with patch.object(run.client, "stop_task", lost_late), \
+                patch.object(claude, "STOP_CONTROL_TIMEOUT_S", 0.1):
+            with self.assertRaises(TimeoutError):
+                run.provider.stop_subagent(run.handle, self.SLEEPER)
+        self.assertTrue(child.owner_stop)
+        wait_for(lambda: failed.is_set() and not child.owner_stop,
+                 what="the late transport error to take the mark off")
+        self.assertEqual((child.owner_stops, child.owner_stop_taken), (0, False))
+        self.assertTrue(done.wait(30), "the turn never finished")
+        ended = [d for d in life(out, self.SLEEPER) if d["op"] == "finished"]
+        self.assertNotEqual(ended[0].get("stop_reason"), OWNER)
+
+    def test_a_late_sdk_timeout_keeps_the_owners_mark(self):
+        """The SDK's own "Control request timeout" is not the CLI's refusal:
+        the CLI may still act on the request, so the mark stays."""
+        run = ClaudeRun("stop_fg_parallel")
+        self.addCleanup(run.close)
+        out, done = run.send_async()
+        wait_for(lambda: R.ReplayClient.instances and run.client.at_gate.is_set(), what="the stop gate")
+        answered = threading.Event()
+        real = run.client.stop_task
+
+        async def lost(task_id):
+            await asyncio.sleep(0.3)
+            await real(task_id)                 # the CLI acted on it after all
+            answered.set()
+            raise Exception("Control request timeout: stop_task")
+        with patch.object(run.client, "stop_task", lost), \
+                patch.object(claude, "STOP_CONTROL_TIMEOUT_S", 0.1):
+            with self.assertRaises(TimeoutError):
+                run.provider.stop_subagent(run.handle, self.SLEEPER)
+        self.assertTrue(answered.wait(5))
+        self.assertTrue(done.wait(30), "the turn never finished")
+        ended = [d for d in life(out, self.SLEEPER) if d["op"] == "finished"]
+        self.assertEqual([(d["status"], d.get("stop_reason")) for d in ended], [("stopped", OWNER)])
+
+    def test_a_refusal_keeps_the_mark_while_another_stop_is_on_its_way(self):
+        """A first Stop timed out and still on its way, a second refused at
+        once: the first, taken late, still makes the end the owner's."""
+        run = ClaudeRun("stop_fg_parallel")
+        self.addCleanup(run.close)
+        out, done = run.send_async()
+        wait_for(lambda: R.ReplayClient.instances and run.client.at_gate.is_set(), what="the stop gate")
+        real = run.client.stop_task
+
+        async def slow(task_id):
+            await asyncio.sleep(0.5)
+            await real(task_id)
+
+        async def refuse(task_id):
+            raise Exception(f"No task found with ID: {task_id}")
+        with patch.object(run.client, "stop_task", slow), \
+                patch.object(claude, "STOP_CONTROL_TIMEOUT_S", 0.1):
+            with self.assertRaises(TimeoutError):
+                run.provider.stop_subagent(run.handle, self.SLEEPER)
+        with patch.object(run.client, "stop_task", refuse):
+            with self.assertRaises(SubagentStopDeclined):
+                run.provider.stop_subagent(run.handle, self.SLEEPER)
+        self.assertTrue(run.handle.native.children[self.SLEEPER].owner_stop,
+                        "a refusal took off the mark of a Stop still on its way")
+        self.assertTrue(done.wait(30), "the turn never finished")
+        ended = [d for d in life(out, self.SLEEPER) if d["op"] == "finished"]
+        self.assertEqual([(d["status"], d.get("stop_reason")) for d in ended], [("stopped", OWNER)])
 
 
 # --- Codex, through the real provider over real pipes ----------------------------
 
 
-def codex_script(error=None):
+def codex_script(error=None, answers=None):
     """SV-0's `child_interrupt` parent turn, with the recorder's own
     `turn/interrupt` replaced by a wait for the provider's (the peer answers
-    it; aimed at the parent, the parent's turn ends interrupted)."""
+    it; aimed at the parent, the parent's turn ends interrupted). `answers`:
+    that many of the provider's, all read before any is answered, each with
+    its error (None: taken)."""
     rows = [json.loads(line) for line in (P.FIXTURES / "child_interrupt.jsonl").read_text().splitlines()]
     start = next(r["data"] for r in rows if r["src"] == "rpc_out" and r["data"].get("method") == "turn/start")
     thread = start["params"]["threadId"]
@@ -325,6 +467,8 @@ def codex_script(error=None):
                     "turn": asked["params"]["turnId"]}
             if error:
                 wait["error"] = error
+            if answers is not None:
+                wait["answers"] = list(answers)
             msgs.append(wait)
             continue
         if r["src"] != "rpc_in":
@@ -416,6 +560,66 @@ class CodexStop(unittest.TestCase):
         ended = [e.data for e in out if e.kind == K.SUBAGENT and e.data["sid"] == self.sid
                  and e.data["op"] == "finished"]
         self.assertEqual([d.get("stop_reason") for d in ended], ["its turn was interrupted"])
+
+    def test_a_refused_stop_leaves_the_mark_of_one_still_on_its_way(self):
+        """Review of #216's delta, LOW 2: two Stops on their way, the first
+        refused and the second taken. The child's end is the owner's."""
+        self.two_stops([{"code": -32600, "message": "busy"}, None])
+
+    def test_a_refusal_after_a_taken_stop_leaves_the_mark(self):
+        """The same two answers the other way round: the taken one first."""
+        self.two_stops([None, {"code": -32600, "message": "busy"}])
+
+    def two_stops(self, answers):
+        script, asked = codex_script(answers=answers)
+        self.child, self.sid = asked["threadId"], "cx:" + asked["threadId"]
+        self.brain.script.update(mode="replay", replay=script)
+        h = self.provider.start(Thread("sv4", "p", Role.CHAT, PN.CODEX),
+                                Brief(Role.CHAT, str(self.work), model="fake-model", effort="high"),
+                                lambda *a, **k: Decision.DENY)
+        self.addCleanup(self.provider.close, h)
+        out, seen, done = [], threading.Event(), threading.Event()
+
+        def consume():
+            try:
+                for event in self.provider.send(h, UserMessage("go")):
+                    out.append(event)
+                    if (event.kind == K.SUBAGENT_EVENT and event.data["sid"] == self.sid
+                            and event.data["event"]["kind"] == "tool_started"):
+                        seen.set()
+            finally:
+                done.set()
+        threading.Thread(target=consume, daemon=True).start()
+        self.assertTrue(seen.wait(20), "the child's command never started")
+        self.provider.stop_subagent(h, self.sid)
+        self.provider.stop_subagent(h, self.sid)
+        if not done.wait(30):
+            self.provider.close(h)
+            self.fail("the parent's turn never finished")
+        self.assertEqual(len(self.brain.calls("turn/interrupt")), 2)
+        self.assertFalse([e for e in out if e.kind == K.ERROR and e.data.get("fatal")])
+        ended = [e.data for e in out if e.kind == K.SUBAGENT and e.data["sid"] == self.sid
+                 and e.data["op"] == "finished"]
+        self.assertEqual([(d["status"], d.get("stop_reason")) for d in ended], [("stopped", OWNER)])
+
+    def test_an_answer_for_an_earlier_turn_never_touches_the_next(self):
+        """#220 review, L1: `child_stops` is keyed by (sid, turn). A Stop of
+        turn T1 answered after T2 began (and was Stopped) settles nothing
+        on T2: a late refusal leaves T2's mark, a late take does not count
+        as T2's."""
+        def session(*pending):
+            view = codex._ChildView(sid="cx:c", name="c", turn="T2", owner_stop=True)
+            return SimpleNamespace(mutex=threading.Lock(), child_views={"c": view},
+                                   child_stops={rid: ("cx:c", turn) for rid, turn in pending}), view
+        refused = {"code": -32600, "message": "no active turn"}
+        s, view = session((1, "T1"), (2, "T2"))
+        self.assertTrue(codex.CodexProvider._child_stop_answered(s, {"id": 1, "error": refused}))
+        self.assertTrue(view.owner_stop, "T1's late refusal took T2's mark off")
+        s, view = session((1, "T1"), (2, "T2"))
+        codex.CodexProvider._child_stop_answered(s, {"id": 1, "result": {}})
+        self.assertFalse(view.owner_stop_taken, "T1's late take counted as T2's")
+        codex.CodexProvider._child_stop_answered(s, {"id": 2, "error": refused})
+        self.assertFalse(view.owner_stop, "T2's own refusal left the mark")
 
     def test_refusals_send_nothing(self):
         script, asked = codex_script()
@@ -764,6 +968,27 @@ class Record(unittest.TestCase):
             rec.stop_sent(thread, "cl:a", token)
             self.assertEqual(((base / "t" / S.FILE).stat().st_size, len(published)), (size, sent))
             self.assertNotIn("stop", rec.list("t")[1])
+
+    def test_a_snapshot_refusal_is_cleaned_as_a_live_one_is(self):
+        """Review of #216's delta, NIT-3: a snapshot line's `stop_error`
+        (an older or hand-edited file) is one cleaned, capped line, as
+        `_apply` makes a live line's."""
+        with tempfile.TemporaryDirectory() as root:
+            base = Path(root)
+            stores = SimpleNamespace(threads=SimpleNamespace(
+                path=lambda tid: base / tid / "log.jsonl", get=lambda tid: None))
+            (base / "t").mkdir()
+            raw = "No task\nfound\u202e `x` " + "y" * 400
+            line = {"kind": "snapshot", "sid": "cl:a", "at": "2026-10-15T10:00:00+00:00", "data": {
+                "sid": "cl:a", "status": "running", "key": "k1", "stop": "refused", "stop_error": raw}}
+            (base / "t" / S.FILE).write_text(json.dumps(line) + "\n")
+            rec = S.SubagentRecords(stores, lambda record: None, lambda tid: "k1")
+            row = rec.list("t")[0]
+            self.assertEqual(row["stop"], "refused")
+            self.assertEqual(row["stop_error"], S.clean_line(raw, S.STOP_ERROR_CAP))
+            self.assertLessEqual(len(row["stop_error"]), S.STOP_ERROR_CAP)
+            self.assertNotRegex(row["stop_error"], "[\n\u202e`]")
+            rec.close()
 
     def test_a_provider_event_cannot_set_the_mark(self):
         prepared = S.SubagentRecords.prepare(Event(K.SUBAGENT, "t", {
