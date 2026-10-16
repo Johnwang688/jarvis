@@ -61,6 +61,10 @@ try:  # the VEX routes (VX-1's contract, VX-2's view); builds and downloads are 
     from tests.face import hud_v2_mock_vex as mock_vex
 except ImportError:
     import hud_v2_mock_vex as mock_vex  # type: ignore[no-redef]
+try:  # a chat's native sub-agents (SV-1's owner routes, SV-3's view)
+    from tests.face import hud_v2_mock_subagents as mock_subagents
+except ImportError:
+    import hud_v2_mock_subagents as mock_subagents  # type: ignore[no-redef]
 
 # A hostile avatar, checked for what it does rather than what it says: the art
 # is drawn in the window that gates approvals, so an `onload` in it must never
@@ -780,6 +784,8 @@ class MockDaemon:
                     from jarvis.v2 import hud_api
                     return hud_api.hud_files(self, path.strip("/").split("/"))
                 w = mock.world
+                if mock_subagents.handle(self, mock, "GET", path):
+                    return
                 if mock_vex.handle(self, mock, "GET", path, {}):
                     return
                 if mock_projects.handle(self, mock, "GET", path, {}):
@@ -1016,6 +1022,8 @@ class MockDaemon:
                 url = urlparse(self.path)
                 path = url.path
                 w = mock.world
+                if mock_subagents.handle(self, mock, "POST", path):   # owner, then 405
+                    return
                 parts = [p for p in path.split("/") if p]
                 if len(parts) == 3 and parts[0] == "projects" and parts[2] in ("search", "fs"):
                     # Find in files and the explorer's operations (ED-7). The

@@ -12,13 +12,16 @@
 // scroller and above the input bar. It is outside `[data-testid=log]`, so what
 // the log says is the conversation and nothing else.
 
-import { memo, useEffect, useRef, useState } from "react";
+import { Fragment, memo, useEffect, useMemo, useRef, useState } from "react";
 import type { ChatMessage, Thread } from "../types";
 import { chatPlace } from "../lib/discord";
 import { ToolGroupRow } from "./ToolGroupRow";
 import { Markdown } from "./Markdown";
 import { ThinkingRow } from "./MiniOrb";
 import type { ThinkingLine } from "../lib/thinking";
+import { childrenOf, placeRows, placeableOf } from "../lib/subagents";
+import { useAnchors, useWatch } from "../state/subagents";
+import { SubagentRows } from "./SubagentRow";
 
 /** What became of a message sent while a turn ran (2026-10-08). */
 const MARKS: Record<string, string> = {
@@ -93,6 +96,17 @@ export const ChatTab = memo(function ChatTab(props: {
   const logRef = useRef<HTMLDivElement>(null);
   const follows = useRef(true);
   const shown = useRef(props.thread?.id);
+  // The chat's own native sub-agents (SV-3): one row each, where it was
+  // spawned — the parent's Agent call (Claude) or the time of its start
+  // (Codex). Only the top level here; a nested one is in its parent's pane.
+  const tid = props.thread?.id ?? null;
+  useWatch(tid);
+  const anchors = useAnchors(tid);
+  const placed = useMemo(
+    () => (tid && anchors.length ? placeRows(props.messages.map(placeableOf), childrenOf(anchors, null)) : null),
+    [tid, anchors, props.messages],
+  );
+  const drawn = props.drawn !== false;
   // Markdown fills each new body in a passive effect; follow after those
   // child effects, when the transcript has its final height.
   useEffect(() => {
@@ -100,7 +114,7 @@ export const ChatTab = memo(function ChatTab(props: {
     if (!el) return;
     if (shown.current !== props.thread?.id) { follows.current = true; shown.current = props.thread?.id; }
     if (follows.current) el.scrollTop = el.scrollHeight;
-  }, [props.messages, props.draft, props.thread?.id]);
+  }, [props.messages, props.draft, props.thread?.id, placed]);
 
   const place = chatPlace(props.thread);
   return (
@@ -119,11 +133,19 @@ export const ChatTab = memo(function ChatTab(props: {
         const el = e.currentTarget;
         follows.current = el.scrollHeight - el.clientHeight - el.scrollTop <= 24;
       }}>
-        {props.messages.map((m, i) => m.calls ? (
-          <ToolGroupRow key={`tool:${m.turn_id}|${m.calls[0].call_id}`} group={m}
-            threadId={props.thread?.id ?? ""} using={!!props.busy && i === props.messages.length - 1 && m.turn_id === props.toolTurnId}
-            drawn={props.drawn !== false} />
-        ) : <MessageRow key={`msg:${i}`} msg={m} onCancel={props.onCancelTask} />)}
+        {tid && placed?.get(-1) ? <SubagentRows threadId={tid} rows={placed.get(-1)!} drawn={drawn} /> : null}
+        {props.messages.map((m, i) => {
+          const rows = tid ? placed?.get(i) : undefined;
+          const body = m.calls ? (
+            <ToolGroupRow group={m}
+              threadId={props.thread?.id ?? ""} using={!!props.busy && i === props.messages.length - 1 && m.turn_id === props.toolTurnId}
+              drawn={drawn} />
+          ) : <MessageRow msg={m} onCancel={props.onCancelTask} />;
+          return <Fragment key={m.calls ? `tool:${m.turn_id}|${m.calls[0].call_id}` : `msg:${i}`}>
+            {body}
+            {rows ? <SubagentRows threadId={tid!} rows={rows} drawn={drawn} /> : null}
+          </Fragment>;
+        })}
         {props.draft ? (
           <div className="msg assistant draft" data-testid="draft">
             <div className="who">JARVIS</div>

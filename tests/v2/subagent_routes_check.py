@@ -327,6 +327,73 @@ class Record(Base):
             self.assertNotIn(secret, kept)
             self.assertNotIn(secret, json.dumps(self.bus()))
 
+    def test_the_brief_is_the_owner_transcripts_alone(self):
+        """SV-3: a child's brief is kept (scrubbed, at most 4000 characters)
+        and served only by the owner's transcript route: never the list, the
+        bus, the thread's log or the daemon's own log lines."""
+        brief = "BRIEF-WORDS-7 " + FAKE_SECRET + " " + "y" * 9000
+        with self.assertLogs("jarvis", level="DEBUG") as logs:
+            logging_probe = __import__("logging").getLogger("jarvis.v2.subagents")
+            logging_probe.debug("probe")
+            self.put(subagent(name="briefed", brief=brief))
+            self.put(inner("text", text="child words"))
+            self.put(subagent(op="finished", status="done"))
+        got = self.owner("GET", self.sub("/cl:toolu_a/transcript"))
+        self.assertTrue(got["brief"].startswith("BRIEF-WORDS-7 "))
+        self.assertNotIn(FAKE_SECRET, got["brief"])
+        self.assertIn("[redacted]", got["brief"])
+        self.assertEqual(len(got["brief"]), S.TEXT_CAP)
+        listed = self.owner("GET", self.sub())
+        self.assertNotIn("BRIEF-WORDS-7", json.dumps(listed))
+        self.assertNotIn("brief", listed["subagents"][0])
+        self.assertNotIn("BRIEF-WORDS-7", json.dumps(self.bus()))
+        self.assertNotIn("BRIEF-WORDS-7", json.dumps(self.log()))
+        self.assertNotIn("BRIEF-WORDS-7", "\n".join(logs.output))
+        # Kept apart, in the thread's own 0600 file, and read back cold.
+        kept = self.daemon.stores.threads.path(self.chat.id).with_name(S.FILE).read_text()
+        self.assertIn("BRIEF-WORDS-7", kept)
+        self.assertNotIn(FAKE_SECRET, kept)
+        self.daemon.subagents._threads.clear()
+        self.assertTrue(self.owner("GET", self.sub("/cl:toolu_a/transcript"))["brief"].startswith("BRIEF-WORDS-7"))
+        # A later word without one keeps it; a child with none has none.
+        self.put(subagent(sid="cl:toolu_b", name="plain"))
+        self.assertNotIn("brief", self.owner("GET", self.sub("/cl:toolu_b/transcript")))
+
+    def test_the_brief_through_the_daemon_reaches_neither_the_log_nor_the_bus(self):
+        """The same, on the daemon's own path (`_record`, a provider's turn),
+        not the record alone."""
+        brief = "DAEMON-BRIEF-9 " + FAKE_SECRET
+        self.provider.turns = [[
+            Event(K.SUBAGENT, self.chat.id, {"sid": "cl:toolu_d", "op": "started", "status": "running",
+                                             "name": "via daemon", "brief": brief}),
+            Event(K.SUBAGENT_EVENT, self.chat.id, {"sid": "cl:toolu_d", "event": {
+                "kind": "text", "data": {"text": "child said"}}}),
+            Event(K.TURN_FINISHED, self.chat.id, {"stop": "end"})]]
+        with self.assertLogs("jarvis", level="DEBUG") as logs:
+            __import__("logging").getLogger("jarvis.v2.subagents").debug("probe")
+            self.daemon.send(self.chat.id, R.UserMessage(text="go"))
+            self.idle()
+        got = self.owner("GET", self.sub("/cl:toolu_d/transcript"))
+        self.assertTrue(got["brief"].startswith("DAEMON-BRIEF-9 "))
+        self.assertNotIn(FAKE_SECRET, got["brief"])
+        self.assertNotIn("DAEMON-BRIEF-9", json.dumps(self.log()))
+        self.assertNotIn("DAEMON-BRIEF-9", json.dumps(self.bus()))
+        self.assertNotIn("DAEMON-BRIEF-9", "\n".join(logs.output))
+        self.assertNotIn("DAEMON-BRIEF-9", json.dumps(self.owner("GET", self.sub())))
+
+    def test_a_brief_survives_compaction_and_is_held_to_its_bytes(self):
+        wide = "\u0001" * 5000                 # each escapes to six bytes of JSON
+        self.put(subagent(brief=wide))
+        state = self.daemon.subagents._threads[self.chat.id]
+        child = state.children["cl:toolu_a"]
+        self.assertLessEqual(len(json.dumps(child.brief, ensure_ascii=False).encode()), S.BRIEF_BYTES)
+        self.assertEqual(S.BRIEF_BYTES, 16 << 10)
+        path = self.daemon.stores.threads.path(self.chat.id).with_name(S.FILE)
+        with self.daemon.subagents._lock:
+            self.daemon.subagents._compact(path, state)
+        self.daemon.subagents._threads.clear()
+        self.assertEqual(self.owner("GET", self.sub("/cl:toolu_a/transcript"))["brief"], child.brief)
+
     def test_lifecycle_text_is_scrubbed_and_one_line(self):
         self.put(subagent(name=f"line one\nline two {FAKE_SECRET} " + "x" * 80, kind="general‮purpose",
                           last_tool="Bash\r\nX"))
@@ -693,6 +760,42 @@ class PermitLabel(Daemonised):
                                     self.assertEqual(b.origin, "Claude sub-agent ‹SV0 alpha probe› "
                                                                "(not the orchestrator)")
         self.assertTrue(logged)
+
+    def test_the_sid_rides_the_card_and_never_changes_the_answer(self):
+        """SV-3: `subagent_sid` reaches the owner's card (and its public
+        JSON) for the HUD's link to the row, exactly a sid or nothing, and
+        every layer answers as it does without it."""
+        from jarvis.v2 import permissions as P
+        from jarvis.v2.provider import Brief, Decision
+        from jarvis.v2.model import PermissionProfile as PP
+        with patch.object(P, "log_decision", lambda *_a: None):
+            for profile in (PP.AUTO, PP.ASK, PP.STRICT):
+                for asker in (self.Asker(Decision.ALLOW), self.Asker(Decision.DENY),
+                              self.Asker(Decision.ALLOW, human_backed=False)):
+                    brief = Brief(role=Role.CHAT, cwd=str(self.home), profile=profile,
+                                  always_ask=["Bash", "WebFetch"])
+                    for provider, sid in (("claude", "cl:toolu_sv0_alpha"), ("codex", "cx:01a140c9-d332")):
+                        ctx = P.PermitContext(thread_id="t", brief=brief, provider=provider)
+                        permit = P.build_permit(ctx, asker)
+                        for tool, args, kw in self.cases():
+                            with self.subTest(profile=profile, provider=provider, tool=tool, kw=kw,
+                                              human=asker.human_backed, answer=asker.answer):
+                                asker.seen.clear()
+                                plain = permit(tool, dict(args), brief, subagent="n", **kw)
+                                before = list(asker.seen)
+                                asker.seen.clear()
+                                linked = permit(tool, dict(args), brief, subagent="n", subagent_sid=sid, **kw)
+                                self.assertEqual(linked, plain)
+                                self.assertEqual(len(asker.seen), len(before))
+                                for card in asker.seen:
+                                    self.assertEqual(card.subagent, sid)
+                                    self.assertEqual(card.to_json()["subagent"], sid)
+                                for card in before:
+                                    self.assertNotIn("subagent", card.to_json())
+                        asker.seen.clear()
+                        for bad in ("toolu_x", "cl:", "xx:abc", "cl:a b", "cl:" + "a" * 129, 7):
+                            permit("Bash", {"command": "ls"}, brief, subagent="n", subagent_sid=bad)
+                        self.assertTrue(all(card.subagent == "" for card in asker.seen))
 
     def test_a_tasks_card_keeps_its_attribution_and_the_label_is_cleaned(self):
         from jarvis.v2 import permissions as P
