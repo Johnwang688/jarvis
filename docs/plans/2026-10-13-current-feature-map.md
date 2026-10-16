@@ -1,6 +1,6 @@
 # Jarvis current feature map and team ownership
 
-Updated 2026-10-16 (America/Chicago, main `e181beb`). This is the shared coordination map for the
+Updated 2026-10-16 (America/Chicago, main `d80507c`). This is the shared coordination map for the
 2026-10-12 checkpoint, the five plans merged in [PR #125](https://github.com/Johnwang688/jarvis/pull/125),
 and John's subsequent VEX, LaTeX and Browser-controls requests. It is a working
 registry: update the relevant row when claiming, handing off, opening a PR,
@@ -37,7 +37,7 @@ pop-up adoption ([#217](https://github.com/Johnwang688/jarvis/pull/217)); the Di
 ([#223](https://github.com/Johnwang688/jarvis/pull/223)) and the closed Codex sandbox read gap ([#224](https://github.com/Johnwang688/jarvis/pull/224)); the VEX view redesign
 ([#209](https://github.com/Johnwang688/jarvis/pull/209), [#213](https://github.com/Johnwang688/jarvis/pull/213)). Smaller merges: Codex Stop keeps the chat ([#200](https://github.com/Johnwang688/jarvis/pull/200)), Codex partial
 turns disclosed in usage ([#207](https://github.com/Johnwang688/jarvis/pull/207)), five recent chats per project in the sidebar ([#206](https://github.com/Johnwang688/jarvis/pull/206)), and
-the fast path's desk-turn edits and commands (F-1..F-7, [#182](https://github.com/Johnwang688/jarvis/pull/182)). Later merges [#227](https://github.com/Johnwang688/jarvis/pull/227) to [#235](https://github.com/Johnwang688/jarvis/pull/235), except open [#230](https://github.com/Johnwang688/jarvis/pull/230), are INSTALLED per the lead's 2026-10-16 deploys: owner-only voice routes ([#227](https://github.com/Johnwang688/jarvis/pull/227)), SV-5 ([#228](https://github.com/Johnwang688/jarvis/pull/228)), VEX view finish ([#229](https://github.com/Johnwang688/jarvis/pull/229)), Codex profile leftovers ([#231](https://github.com/Johnwang688/jarvis/pull/231)), B-PICKERS ([#232](https://github.com/Johnwang688/jarvis/pull/232)), B-IME ([#233](https://github.com/Johnwang688/jarvis/pull/233), follow-up [#235](https://github.com/Johnwang688/jarvis/pull/235)) and SV-6 ([#234](https://github.com/Johnwang688/jarvis/pull/234)).
+the fast path's desk-turn edits and commands (F-1..F-7, [#182](https://github.com/Johnwang688/jarvis/pull/182)). Later merges [#227](https://github.com/Johnwang688/jarvis/pull/227) to [#235](https://github.com/Johnwang688/jarvis/pull/235) are INSTALLED per the lead's 2026-10-16 deploys: owner-only voice routes ([#227](https://github.com/Johnwang688/jarvis/pull/227)), SV-5 ([#228](https://github.com/Johnwang688/jarvis/pull/228)), VEX view finish ([#229](https://github.com/Johnwang688/jarvis/pull/229)), Codex profile leftovers ([#231](https://github.com/Johnwang688/jarvis/pull/231)), gate and Codex git leftovers ([#230](https://github.com/Johnwang688/jarvis/pull/230)), B-PICKERS ([#232](https://github.com/Johnwang688/jarvis/pull/232)), B-IME ([#233](https://github.com/Johnwang688/jarvis/pull/233), follow-up [#235](https://github.com/Johnwang688/jarvis/pull/235)) and SV-6 ([#234](https://github.com/Johnwang688/jarvis/pull/234)).
 
 ## How teams coordinate
 
@@ -322,7 +322,7 @@ apart from the coalesced finish/failure notices (SV-5, installed in [#228](https
 | Sidebar | [#206](https://github.com/Johnwang688/jarvis/pull/206) each project shows its five most recent chats | **INSTALLED** (lead deploy log 2026-10-15/16). |
 | Voice routes | [#227](https://github.com/Johnwang688/jarvis/pull/227) `/stt`, `/say`, `/voices`, `/voice` and `/mute` are owner-only; the check runs before the query, body or audio work. | **INSTALLED** (lead's 2026-10-16 deploy). The model and avatar pickers were not changed. |
 | Codex profiles | [#231](https://github.com/Johnwang688/jarvis/pull/231) follow-ups to [#224](https://github.com/Johnwang688/jarvis/pull/224): `/mnt/c` walk deadline with a chat notice, symlinked profile folders, glob-syntax names, repo-top credential files. | **INSTALLED** (lead's 2026-10-16 deploy). Stores created mid-session stay readable until the next session start. |
-| Gate and Codex leftovers | [#230](https://github.com/Johnwang688/jarvis/pull/230) review leftovers of [#223](https://github.com/Johnwang688/jarvis/pull/223) and [#225](https://github.com/Johnwang688/jarvis/pull/225) (chat git and merge gate) and a `rules_check` path flake. | **PR OPEN — #230, in review.** It edits SELF_PROTECTED files. |
+| Gate and Codex leftovers | [#230](https://github.com/Johnwang688/jarvis/pull/230) review leftovers of [#223](https://github.com/Johnwang688/jarvis/pull/223) and [#225](https://github.com/Johnwang688/jarvis/pull/225) (chat git and merge gate) and a `rules_check` path flake. | **INSTALLED — [#230](https://github.com/Johnwang688/jarvis/pull/230), merged 2026-10-16.** It edits SELF_PROTECTED files (`merge_gate.py`, `permissions.py`, `bridge.py`, `tools/__init__.py`); independent review passed. |
 
 ## Original checkpoint and requested fixes already landed
 
@@ -374,7 +374,7 @@ unclaimed packages or coordinate a handoff with the named lead.
 
 Open items, in this order:
 
-1. **#230, in review:** PR OPEN — [#230](https://github.com/Johnwang688/jarvis/pull/230), in review. The lead flips it after merge.
+1. **#230 test gaps (LOW/NIT, from its review):** pin that `tools.Refusal` is falsy; that `permissions` `_LAST_VERDICT` is per-context; the Browser-delegation ask marking `asked`; and a desk_only stale-turn test for `bridge._delegated`. Nothing is unsafe today.
 2. **B-DIRECT-CAPTURE:** READY and unclaimed. Before a Direct capture path is enabled, it needs an actual Windows app-mode `getDisplayMedia`/CropTarget prompt and pixel evidence.
 3. **B-PREVIEW:** blocked on a Chrome capability. Chrome 155 screencast metadata cannot prove matching-frame identity, so "Preview unavailable" stays.
 4. **B-PERF Chrome tile-size sweep:** run only when the machine is idle.
