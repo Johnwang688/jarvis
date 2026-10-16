@@ -41,12 +41,23 @@ runner from rules' one table — `uv run`, `npx`, `env`, `xargs`, `bash -lc`):
   current branch.
 * An earlier program on the same line that moves HEAD (`git checkout main
   && … && git push`, `git branch -m`, `git symbolic-ref HEAD`, `gh pr
-  checkout`) or writes git config: a later plain or HEAD push is judged by
+  checkout`, `git rebase UPSTREAM BRANCH`) or writes git config: a later plain or HEAD push is judged by
   where HEAD went, or asks when that cannot be told.
 * The raw-line backstop: where the line runs a program that may run text it
-  is handed (a shell, `eval`, an interpreter, `ssh`, `curl`, a git exec
-  setting, a program this reader does not know), any spelling of the
-  operations anywhere on the line asks. A line of only git, gh and data
+  is handed (a shell, `eval`, an interpreter, `ssh`, `curl`, a program this
+  reader does not know; in git any `-c`/`--config-env`, a `git config`
+  write, an option that hands git a program such as `--upload-pack`,
+  `--receive-pack`, `--exec`, `clone -u`, `grep -O`; an upper-case
+  variable set by `NAME=…`, `read`, `printf -v` or `export NAME`; a write to
+  git's config, HEAD or hooks), any spelling of the operations anywhere on
+  the line asks. It does not read the arguments of programs the walk
+  judged by structure — a git subcommand's refspecs, revisions and message,
+  `gh pr create --base main --body …`, `gh api`'s — blanked where that
+  program stands; `-c` values, assignments and exec options stay, and with
+  a program on the line that runs text the walk cannot read (`| sh`,
+  `eval "$(…)"`), or a setting that may hand git's output to one (a pager
+  or editor other than `cat`/`less`, any `-c`, `git config` write or
+  variable outside a short benign list), nothing is blanked. A line of only git, gh and data
   programs is read by its structure alone, so a commit message or PR body
   that mentions a merge asks nothing.
 
@@ -136,7 +147,10 @@ _GIT_NOT_PUSH = frozenset({
 _DIR_OPTION = re.compile(r"^(--chdir|--directory|--dir|--cwd|--working-directory|--prefix|--cd)(=|$)")
 _SHORT_DIR = ("-C", "-D")
 _INTERPRETERS = re.compile(r"(python|pypy)[0-9.]*|node|nodejs|deno|bun|perl|ruby|php|osascript|pwsh|powershell")
-_GIT_ENV = re.compile(r"(?<![A-Za-z0-9_])GIT_(DIR|WORK_TREE|COMMON_DIR|CONFIG[A-Z_]*|NAMESPACE)\s*=")
+# Variables that move the repository or the config git reads (HOME and
+# XDG_CONFIG_HOME move the owner's git config; LOW of the delta review).
+_GIT_ENV = re.compile(r"(?<![A-Za-z0-9_])(GIT_(DIR|WORK_TREE|COMMON_DIR|CONFIG[A-Z_]*|NAMESPACE)"
+                      r"|HOME|XDG_CONFIG_HOME)\s*=")
 _CURRENT_BRANCH = re.compile(
     r"^\$\(\s*git\s+(branch\s+--show-current|rev-parse\s+--abbrev-ref\s+HEAD|"
     r"symbolic-ref\s+--short\s+(-q\s+)?HEAD)\s*\)$")
@@ -157,15 +171,98 @@ _DATA_STEMS = frozenset({
     "pushd", "popd", "export", "jq", "cut", "tr", "diff", "basename", "dirname", "realpath",
     "sleep", "which", "type", "read", "set", "unset", "local", "declare", ":", "wait", "cp", "mv",
 })
-# git settings and variables that make git run a program (review M-2 of #208).
-_GIT_EXEC_KEYS = ("core.sshcommand", "core.pager", "core.editor", "core.fsmonitor",
-                  "core.hookspath", "credential.helper", "diff.external", "sequence.editor",
-                  "pager.", "alias.", "gpg.program", "uploadpack.", "receivepack.", "protocol.",
-                  "remote.", "url.", "filter.", "merge.", "difftool.", "mergetool.")
-_GIT_EXEC_ENV = re.compile(r"(?<![A-Za-z0-9_])GIT_(SSH|SSH_COMMAND|EDITOR|PAGER|EXTERNAL_DIFF|"
-                           r"SEQUENCE_EDITOR|ASKPASS|PROXY_COMMAND|EXEC_PATH|CONFIG_PARAMETERS)\s*=")
+# Any upper-case assignment word on the line — a prefix (`PAGER=… git log`),
+# `env EDITOR=…`, `export VISUAL=…`, `GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=…`:
+# the variables git, less, ssh and editors read to run a program are upper
+# case, and the list of them is open (MED-2 of #208's follow-up review; it
+# replaces review M-2's list, GIT_SSH_COMMAND, GIT_PAGER, GIT_EDITOR, …). A
+# lower-case `x=…` runs only through `$x`, which is an executor itself.
+_ENV_ASSIGNMENT = re.compile(r"(?<![^\s;&|(){}`'\"!])[A-Z_][A-Z0-9_]*(\[[^\]]*\])?\+?=")
 _GIT_EXEC_SUBS = frozenset({"difftool", "mergetool", "filter-branch", "filter-repo", "bisect",
                             "rebase", "submodule", "daemon", "send-email"})
+# Options that hand a git subcommand a program to run (MED-2 of the
+# follow-up): long ones also in git's abbreviations, short ones in a cluster.
+_GIT_EXEC_OPTS = {
+    "fetch": ("upload-pack",), "pull": ("upload-pack",), "ls-remote": ("upload-pack",),
+    "clone": ("upload-pack",), "fetch-pack": ("upload-pack", "exec"),
+    "push": ("receive-pack", "exec"), "send-pack": ("receive-pack", "exec"),
+    "archive": ("exec",), "grep": ("open-files-in-pager",),
+}
+_GIT_EXEC_SHORT = {"clone": "u", "ls-remote": "u", "grep": "O"}
+# What the raw-line backstop does not read (MED-2 of the follow-up, and
+# MED-1 of its review): the arguments of programs the walk already judged
+# by structure, blanked where that program stands on the line — a git
+# subcommand's refspecs, revisions, paths and messages (not git's own
+# options before it, `-c`, which stay), a `gh pr`/`gh issue` verb's
+# arguments (`--base main`, `--body …`) and `gh api`'s (judged above). A
+# subcommand handed a program by an option keeps its arguments.
+_MASK_SUBS = frozenset({
+    "push", "fetch", "pull", "rebase", "log", "diff", "merge-base", "checkout", "switch",
+    "branch", "show", "status", "add", "commit", "merge", "reset", "restore", "tag",
+    "rev-parse", "rev-list", "cherry-pick", "stash", "ls-remote", "shortlog", "describe",
+})
+_GH_ISSUE_MASKED = frozenset({"create", "new", "edit", "comment", "view", "list", "ls", "status"})
+MASK_CAP = 64           # programs whose arguments are blanked; past it, none are
+MASK_ARGS_CAP = 256     # a program with more words is not blanked
+# Programs that run text the walk cannot read — a shell fed standard input
+# or a file, `eval`, an interpreter, `source`, `xargs`, `ssh`, a program
+# read from input or an expansion (`bash -c "$(…)"` walks to one, `$(_)`;
+# a literal `-c` line is walked like the rest): with one on the line
+# nothing is blanked, since a stored message may be what it runs
+# (`git commit -m '…' && git log -1 --format=%s | sh`; LOW of the review).
+_RUNS_TEXT = frozenset({"eval", "source", ".", "xargs", "ssh", "cmd", "cmd.exe", "wsl", "wsl.exe",
+                        "parallel", "watch", "script", "expect"})
+# Git's config, a repository's config, HEAD and hooks, written on the line by
+# a redirect or a copying program (MED-2 of the review): the backstop reads
+# the line, and what a push does cannot be told.
+_GIT_CONFIG_PATH = re.compile(
+    r"(?:^|[/=])(?:\.git/?|\.git/(?:config(?:\.worktree)?|HEAD|hooks(?:/.*)?|"
+    r"worktrees/[^/]+/(?:HEAD|config\.worktree))|\.?gitconfig|git/config)$")
+_IN_PLACE = frozenset({"sed", "gsed", "perl"})
+_REDIRECT_TARGET = re.compile(r"(?:&>>?|>>?|>\|)\s*['\"]?([^\s;&|<>()'\"]+)")
+_VAR_BUILTINS = frozenset({"export", "declare", "typeset", "local", "readonly"})
+# Settings on the line that cannot make git (or gh) hand its own output — a
+# commit message, a `--format` value — to a program (MED-B of #222's delta
+# review: `git -c core.pager=sh log --format='gh pr merge 1'` ran it). Any
+# other `-c`, `git config` write, config file write or variable makes the
+# line one that runs text, and nothing on it is blanked.
+_SAFE_CONFIG = re.compile(
+    r"(user|color|advice|init|safe|i18n|column|status|rerere)\.[^=]*"
+    r"|core\.(quotepath|autocrlf|filemode|safecrlf|ignorecase|precomposeunicode|longpaths|eol|abbrev)"
+    r"|push\.(default|autosetupremote|followtags)|pull\.(rebase|ff)|fetch\.(prune|prunetags)"
+    r"|(commit|tag)\.gpgsign|rebase\.(autosquash|autostash|updaterefs)|merge\.(ff|conflictstyle)"
+    r"|diff\.(algorithm|renames|colormoved|noprefix|mnemonicprefix)|branch\.autosetup\w*", re.I)
+_PAGER_KEYS = re.compile(r"core\.pager|pager\.[^=]+", re.I)
+_PAGER_ENV = frozenset({"PAGER", "GIT_PAGER", "GH_PAGER", "MANPAGER"})
+_BENIGN_PAGER = re.compile(r"\s*((cat|less|more|most)(\s+-[A-Za-z]+)*|false|true|no|off|yes|on|0|1)?\s*")
+_SAFE_ENV = re.compile(
+    r"LANG|LANGUAGE|LC_\w+|TZ|CI|TERM|COLUMNS|LINES|NO_COLOR|FORCE_COLOR|CLICOLOR\w*|DEBUG|NODE_ENV"
+    r"|RUST_LOG|RUST_BACKTRACE|PYTHONUNBUFFERED|PYTHONDONTWRITEBYTECODE"
+    r"|GIT_(AUTHOR|COMMITTER)_(NAME|EMAIL|DATE)|GIT_TERMINAL_PROMPT|GIT_OPTIONAL_LOCKS|GIT_TRACE\w*"
+    r"|GH_REPO|GH_HOST|GH_PROMPT_DISABLED|GH_NO_UPDATE_NOTIFIER")
+_ASSIGNED = re.compile(r"(?<![^\s;&|(){}`'\"!])([A-Z_][A-Z0-9_]*)(?:\[[^\]]*\])?\+?="
+                       r"('[^']*'|\"(?:[^\"\\]|\\.)*\"|[^\s;&|]*)")
+
+
+def _benign_setting(key: str, value: str) -> bool:
+    """A git setting that cannot hand git's output or a file to a program:
+    one of `_SAFE_CONFIG`, a pager that only pages (`cat`, `less -R`), or a
+    git alias (its expansion, a `!` line too, is walked like the rest)."""
+    if _SAFE_CONFIG.fullmatch(key):
+        return True
+    if _PAGER_KEYS.fullmatch(key):
+        return bool(_BENIGN_PAGER.fullmatch(value))
+    return key.lower().startswith("alias.")
+
+
+def _benign_env(name: str, value: str) -> bool:
+    if _SAFE_ENV.fullmatch(name):
+        return True
+    if name in _PAGER_ENV:
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+            value = value[1:-1]
+        return bool(_BENIGN_PAGER.fullmatch(value))
+    return False
 _TEXT_PUSH_WHAT = (
     (re.compile(r"\b(main|master)\b"), PUSH_PROTECTED),
     (re.compile(r"--force|(?<![\w-])-f\b|\+\w"), PUSH_FORCE),
@@ -400,6 +497,9 @@ class _Line:
         self.dirs = [base] if base is not None else UNKNOWN
         if _GIT_ENV.search(command):
             self.dirs = UNKNOWN
+        # A git config, HEAD or hook file written by a redirect on the line.
+        self.config_file = any(_GIT_CONFIG_PATH.search(m.group(1))
+                               for m in _REDIRECT_TARGET.finditer(command))
         # The walk sees every `$(…)` emptied to `$(_)`; a refspec that is one
         # counts as the current branch only when every substitution on the
         # line reads the current branch (`$(git branch --show-current)`).
@@ -417,11 +517,20 @@ class _Line:
         # may be (`_REPO_HEAD` among them when the move may not have
         # happened), or UNKNOWN. `config_changed`: a `git config` write.
         self.heads = None
-        self.config_changed = False
         # A `;`, `||` or newline lets the line go on after a failed switch.
         self.lenient = bool(re.search(r";|\|\||\n", command))
         self._config_cache: dict = {}
-        self.executor = bool(_GIT_EXEC_ENV.search(command))
+        self.config_changed = False
+        self.executor = bool(_ENV_ASSIGNMENT.search(command))
+        if self.config_file:
+            self.executor = self.config_changed = True
+        # A variable that may hand git's output to a program (MED-B).
+        unsafe_env = self.config_file or any(
+            not _benign_env(m.group(1), m.group(2)) for m in _ASSIGNED.finditer(command))
+        # (program, argument indexes) the backstop does not read (`_masked`),
+        # and whether a program on the line runs text it cannot read.
+        self.masks: list = []
+        self.runs_text = unsafe_env
 
     def config(self, repos) -> list:
         """The git config entries for these repositories, each file parsed
@@ -588,8 +697,16 @@ def _git(line: _Line, args: list, prog, depth: int = 0, *, sure: bool = True) ->
                 overrides.append(str(value))
                 if _wild(value):
                     overrides.append("*")
-                if str(value).lower().startswith(_GIT_EXEC_KEYS):
-                    line.executor = True
+                # Any setting: the keys that run a program are an open list
+                # (core.askPass, diff.<driver>.textconv, trailer.*.command, …;
+                # MED-2 of the follow-up review).
+                line.executor = True
+                key, _, setting = str(value).partition("=")
+                if _wild(value) or not _benign_setting(key, setting):
+                    line.runs_text = True       # it may run git's output (MED-B)
+            elif text == "--config-env":
+                overrides.append("*")
+                line.executor = line.runs_text = True
             elif text in _GIT_DIR_OPTS:
                 dirs = UNKNOWN
             i += 2
@@ -600,7 +717,7 @@ def _git(line: _Line, args: list, prog, depth: int = 0, *, sure: bool = True) ->
                 dirs = UNKNOWN
             elif name == "--config-env":
                 overrides.append("*")
-                line.executor = True
+                line.executor = line.runs_text = True
             i += 1
             continue
         if text.startswith("-"):
@@ -617,8 +734,12 @@ def _git(line: _Line, args: list, prog, depth: int = 0, *, sure: bool = True) ->
             _push(line, rest, prog, dirs, overrides, unsure_verb=True)
         return
     name = str(sub)
-    if name in _GIT_EXEC_SUBS:
+    runs = _runs_program(name, rest)
+    if name in _GIT_EXEC_SUBS or runs:
         line.executor = True            # it may run a program it is handed
+    if (sure and depth == 0 and name in _MASK_SUBS and not runs
+            and not (name == "rebase" and any(_rebase_runs(str(w)) for w in rest))):
+        _mask(line, prog, range(i + 1, len(args)))
     if name == "push":
         _push(line, rest, prog, dirs, overrides)
         return
@@ -645,8 +766,96 @@ def _git(line: _Line, args: list, prog, depth: int = 0, *, sure: bool = True) ->
             _git(line, words + rest, prog, depth + 1)
 
 
+def _runs_program(name: str, rest: list) -> bool:
+    """Whether `git NAME REST` is handed a program to run by an option
+    (`fetch --upload-pack=…`, `push --receive-pack=…`, `clone -u …`,
+    `grep -O…`, `archive --exec=…`)."""
+    longs = _GIT_EXEC_OPTS.get(name, ())
+    short = _GIT_EXEC_SHORT.get(name)
+    for word in rest:
+        text = str(word)
+        if text == "--":
+            break
+        if text.startswith("--"):
+            option = text[2:].split("=", 1)[0]
+            if any(_is_long(option, full) for full in longs):
+                return True
+        elif short and text.startswith("-") and short in text[1:]:
+            return True
+    return False
+
+
+def _rebase_runs(word: str) -> bool:
+    """A `git rebase` option that runs a line or an editor (`-x`, `--exec`,
+    `-i`, `--interactive`, in a cluster or abbreviated): its arguments stay."""
+    if word.startswith("--"):
+        option = word[2:].split("=", 1)[0]
+        return _is_long(option, "exec") or _is_long(option, "interactive")
+    return word.startswith("-") and any(c in "xi" for c in word[1:2] + word[1:].split("=")[0])
+
+
+def _mask(line: _Line, prog, indexes) -> None:
+    """The backstop does not read these arguments of `prog` (`_MASK_SUBS`)."""
+    indexes = frozenset(indexes)
+    if indexes:
+        line.masks.append((prog, indexes))
+
+
+def _spellings(text: str) -> list[str]:
+    """How the line may spell a word the walk read as `text`: bare, in
+    single or double quotes, or `key=` then a quoted value."""
+    out = []
+    if text and not any(c in text for c in " \t\n'\"\\;&|<>()`$"):
+        out.append(text)
+    if "'" not in text:
+        out.append(f"'{text}'")
+    if not any(c in text for c in "\"\\$`"):
+        out.append(f'"{text}"')
+    key, eq, value = text.partition("=")
+    if eq and key and not any(c in key for c in " '\"\\$`"):
+        if "'" not in value:
+            out.append(f"{key}='{value}'")
+        if not any(c in value for c in "\"\\$`"):
+            out.append(f'{key}="{value}"')
+    return out
+
+
+def _masked(command: str, masks: list) -> str:
+    """The line with the masked arguments blanked by position: each
+    program is found as the line spells it, every word in order (the
+    first such place), and only the masked words of that place are
+    blanked. A program spelled any other way keeps its words (they may
+    ask); past `MASK_CAP` programs nothing is blanked."""
+    seen = list(dict.fromkeys((str(prog.word), tuple(str(a) for a in prog.args), indexes)
+                              for prog, indexes in masks))
+    if not seen or len(seen) > MASK_CAP:
+        return command
+    for word, args, indexes in seen:
+        words = (word,) + args
+        if len(words) > MASK_ARGS_CAP:
+            continue
+        parts = []
+        for k, text in enumerate(words):
+            options = _spellings(text)
+            if not options:
+                break
+            alternation = "|".join(re.escape(o) for o in sorted(options, key=len, reverse=True))
+            parts.append(f"({alternation})" if k - 1 in indexes else f"(?:{alternation})")
+        else:
+            match = re.search(r"(?<![\w./-])" + r"(?:\s|\\\n)+".join(parts), command)
+            if match is None:
+                continue
+            spans = [match.span(g) for g in range(1, (match.lastindex or 0) + 1)]
+            for start, end in reversed(spans):
+                command = command[:start] + " " * (end - start) + command[end:]
+    return command
+
+
 _GIT_RUNS_SHELL = frozenset({"submodule", "rebase", "bisect"})
-_GIT_MOVES_HEAD = frozenset({"checkout", "switch", "branch", "symbolic-ref", "config"})
+_GIT_MOVES_HEAD = frozenset({"checkout", "switch", "branch", "symbolic-ref", "config", "rebase"})
+# `git rebase` options that take the next word (MED-A of #222's delta review).
+_REBASE_VALUES = frozenset({"--onto", "-s", "--strategy", "-X", "--strategy-option", "-x", "--exec",
+                            "-C"})
 _CONFIG_READS = frozenset({"--get", "--get-all", "--get-regexp", "--get-urlmatch", "--list", "-l",
                            "--get-color", "--get-colorbool"})
 
@@ -670,6 +879,39 @@ def _git_moves_head(line: _Line, name: str, rest: list, dirs, replace) -> None:
                   or (not reads and len(positionals) >= 2))
         if writes:
             line.config_changed = True
+            # It may set a program to run (`core.pager`, `core.sshCommand`,
+            # `core.editor` …) for a later git on the line (MED-2 of the
+            # follow-up review): the backstop reads the line, and blanks
+            # nothing unless the setting is benign (MED-B).
+            line.executor = True
+            scoped = [w for w in words if w not in ("--global", "--local", "--worktree", "--system")]
+            if not (len(scoped) == 2 and not wild and not scoped[0].startswith("-")
+                    and _benign_setting(scoped[0], scoped[1])):
+                line.runs_text = True
+        return
+    if name == "rebase":
+        # `git rebase [--onto N] [UPSTREAM [BRANCH]]` (or `--root [BRANCH]`)
+        # switches to BRANCH first (MED-A of #222's delta review): the last
+        # operand when there are two, the one after `--root`.
+        operands, k = [], 0
+        while k < len(rest):
+            word = words[k]
+            if word == "--":
+                operands += rest[k + 1:]
+                break
+            if word in _REBASE_VALUES:
+                k += 2
+                continue
+            if not word.startswith("-"):
+                operands.append(rest[k])
+            k += 1
+        root = "--root" in words
+        if len(operands) >= (1 if root else 2):
+            target = operands[-1]
+            if _wild(target, replace):
+                line.switch(UNKNOWN)
+            else:
+                line.switch([_branch_name(str(target)) or str(target)])
         return
     if name == "symbolic-ref":
         positionals = [w for w in rest if not str(w).startswith("-")]
@@ -701,7 +943,14 @@ def _git_moves_head(line: _Line, name: str, rest: list, dirs, replace) -> None:
         return
     # checkout / switch
     if name == "checkout" and "--" in words:
-        return                                  # paths: HEAD stays
+        # `git checkout [REV] -- PATHS` restores paths and HEAD stays; a
+        # trailing `--` with nothing after it only says the word before it
+        # is a revision (`git checkout main --` switches; MED-1 of the
+        # follow-up review).
+        cut = words.index("--")
+        if cut + 1 < len(words):
+            return
+        rest, words = rest[:cut], words[:cut]
     new = None
     positionals: list = []
     detach = False
@@ -856,6 +1105,10 @@ def _push(line: _Line, args: list, prog, dirs, overrides: list[str], *,
         line.hit(PUSH_FORCE, "a force push destroys commits that are already on the remote")
     if delete:
         line.hit(PUSH_DELETE, "a deleted branch takes its pull request's head with it")
+    if line.config_file:
+        line.hit(PUSH_UNSURE, "a git config, HEAD or hook file written on the line changes "
+                 "what the push does")
+        return
     if any(v == "*" or v.lower().startswith(("remote.", "push.", "branch."))
            for v in overrides):
         line.hit(PUSH_UNSURE, "a git config override on the line changes what the push writes")
@@ -1013,12 +1266,22 @@ def _gh(line: _Line, args: list, prog, *, sure: bool = True) -> None:
             line.hit(PR_CLOSE, "a close ends the pull request")
         elif verb == "checkout":
             line.switch(UNKNOWN)        # HEAD is now the PR's branch, by its name
+        if verb not in (None, "merge", "close") and sure:
+            # Its arguments are read: `--base main`, a body naming a merge.
+            at = next(a for a, w in positionals[1:] if str(w) == verb)
+            _mask(line, prog, range(at + 1, len(args)))
+        return
+    if name == "issue":
+        if len(positionals) > 1 and str(positionals[1][1]) in _GH_ISSUE_MASKED and sure:
+            _mask(line, prog, range(positionals[1][0] + 1, len(args)))
         return
     if name == "co":
         line.switch(UNKNOWN)            # the stock alias for `gh pr checkout`
         return
     if name == "api":
         _gh_api(line, args[first_at + 1:], replace)
+        if sure:
+            _mask(line, prog, range(first_at + 1, len(args)))   # gh runs none of it
         return
     if name in ("extension", "extensions", "ext"):
         if any(str(w) == "exec" for _a, w in positionals[1:2]):
@@ -1050,7 +1313,48 @@ def _gh(line: _Line, args: list, prog, *, sure: bool = True) -> None:
 # `[\s\S]*` on both sides was quadratic, review M-6 of #208).
 _GRAPHQL_MERGES = ("mergepullrequest", "enablepullrequestautomerge", "mergebranch",
                    "enqueuepullrequest")
-_GRAPHQL_BRANCH = re.compile(r'branchname\W{0,6}([\w./-]+)')
+# `branchName: "main"`, or a variable, `branchName: $b` (MED-3 of the
+# follow-up review: `\W` took the `$` and the name was read as a branch).
+_GRAPHQL_BRANCH = re.compile(r'branchname[^\w$]{0,6}(\$?)([\w./-]+)')
+
+
+def _graphql_branches(line: _Line, low: str, fields: list, has_input: bool,
+                      shell_query: bool, replace) -> None:
+    """`createCommitOnBranch`: asked when a branch it names is protected,
+    when it names none, or when a `$variable` names it whose value is not
+    given literally by `-f`/`-F` (from `--input`, a file, an expansion — or a
+    query the shell expands, where `$b` is the shell's)."""
+    given: dict[str, list] = {}
+    for field in fields:
+        key, eq, _value = str(field).partition("=")
+        if eq:
+            given.setdefault(key.lower(), []).append(field)
+    found = False
+    judged: set = set()                 # each name once: linear in the query
+    for match in _GRAPHQL_BRANCH.finditer(low):
+        found = True
+        variable, name = match.group(1), match.group(2)
+        if (variable, name) in judged:
+            continue
+        judged.add((variable, name))
+        if not variable:
+            if _protected(name, set()):
+                line.hit(PUSH_PROTECTED, "a GraphQL commit onto the default branch", name)
+            continue
+        values = given.get(name, [])
+        if shell_query or has_input or not values:
+            line.hit(PUSH_UNSURE, "a GraphQL commit onto a branch whose variable cannot be read")
+            continue
+        for field in values:
+            value = str(field).partition("=")[2]
+            if _wild(field, replace) or value.startswith("@") or "{" in value:
+                line.hit(PUSH_UNSURE, "a GraphQL commit onto a branch whose variable cannot be read")
+            elif _protected(_branch_name(value) or value, set()):
+                line.hit(PUSH_PROTECTED, "a GraphQL commit onto the default branch",
+                         _branch_name(value) or value)
+    if not found:
+        line.hit(PUSH_PROTECTED, "a GraphQL commit onto a branch it does not name",
+                 "the default branch")
 
 
 def _gh_api(line: _Line, args: list, replace: str | None) -> None:
@@ -1118,13 +1422,11 @@ def _gh_api(line: _Line, args: list, replace: str | None) -> None:
                 line.hit(PUSH_FORCE, "a GraphQL ref update with force")
             line.hit(PUSH_UNSURE, "a GraphQL mutation that moves a ref, which may be the default branch")
             named = True
-        if "createcommitonbranch" in low:
-            branch = _GRAPHQL_BRANCH.search(low)
-            if branch is None or _protected(branch.group(1), set()):
-                line.hit(PUSH_PROTECTED, "a GraphQL commit onto a branch it does not name, or the "
-                         "default branch", branch.group(1) if branch else "the default branch")
-            named = True
         queries = [f for f in fields if str(f).startswith("query=")]
+        if "createcommitonbranch" in low:
+            _graphql_branches(line, low, fields, has_input,
+                              any(_wild(q, replace) for q in queries), replace)
+            named = True
         unread = has_input or not queries or any(
             str(q).startswith("query=@") or _wild(q, replace) for q in queries)
         if unread and not named:
@@ -1188,9 +1490,11 @@ def _programs(line: _Line, walk, depth: int) -> None:
     for prog in walk.progs:
         if not prog.word:
             line.executor = True        # a program read from input
+            line.runs_text = True
             continue                    # (the vex reading asks it too)
         stem, could = _stem_could_be(prog.word, _NAMES)
         args = list(prog.args)
+        _writes_and_text(line, stem, prog, args)
         if stem is None or (stem not in _DATA_STEMS and stem not in _NAMES
                             and stem not in rules._WRAPPER_OPTS and stem not in rules._RUNNER_SPECS):
             # A program that may run text it is handed (a shell, eval, an
@@ -1207,6 +1511,8 @@ def _programs(line: _Line, walk, depth: int) -> None:
         if stem == "git":
             _git(line, args, prog, depth)
         elif stem == "git-push":
+            if _runs_program("push", args):
+                line.executor = True
             _push(line, args, prog, line.dirs, [])
         elif stem == "gh":
             _gh(line, args, prog)
@@ -1224,6 +1530,49 @@ def _programs(line: _Line, walk, depth: int) -> None:
     if interpreter:
         for body in walk.bodies:
             _text(line, body, inline=True)
+
+
+def _writes_and_text(line: _Line, stem, prog, args: list) -> None:
+    """What a program does to the backstop besides running: runs text the
+    walk cannot read (`_RUNS_TEXT`), writes git's config, HEAD or hooks
+    (`_GIT_CONFIG_PATH`), or sets a variable without `NAME=` (`read`,
+    `printf -v`, `mapfile`, `export NAME`) — MED-2 and LOW of the review."""
+    if stem is None or stem in _RUNS_TEXT or _INTERPRETERS.fullmatch(stem):
+        line.runs_text = True
+    elif stem in rules._SHELL_STEMS and not rules._shell_command([prog.word, *args])[0]:
+        line.runs_text = True           # a script from input or a file; a `-c` line is walked
+    if stem is None:
+        return
+    if any(_GIT_CONFIG_PATH.search(str(t)) for t in _written(stem, args)):
+        line.config_file = line.executor = line.config_changed = line.runs_text = True
+    if stem in ("read", "mapfile", "readarray") or (stem == "printf" and any(
+            str(a).startswith("-v") for a in args)):
+        line.executor = line.runs_text = True      # a variable of any value
+    elif stem in _VAR_BUILTINS and any(re.fullmatch(r"[A-Z_][A-Z0-9_]*", str(a)) for a in args):
+        line.executor = True
+        if any(re.fullmatch(r"[A-Z_][A-Z0-9_]*", str(a)) and not _SAFE_ENV.fullmatch(str(a))
+               for a in args):
+            line.runs_text = True
+
+
+def _written(stem: str, args: list) -> list:
+    """The files a writing program writes: `tee`'s and `truncate`'s
+    operands, the last operand (or `-t DIR`) of `cp`/`mv`/`ln`/`install`/
+    `rsync`, `dd of=`, every operand of `sed -i`/`perl -i`."""
+    words = [str(a) for a in args]
+    operands = [w for w in words if not w.startswith("-")]
+    if stem in ("tee", "truncate"):
+        return operands
+    if stem == "dd":
+        return [w[3:] for w in words if w.startswith("of=")]
+    if stem in ("cp", "mv", "ln", "install", "rsync"):
+        targets = [w.split("=", 1)[1] for w in words if w.startswith("--target-directory=")]
+        targets += [words[k + 1] for k, w in enumerate(words[:-1]) if w == "-t"]
+        return targets + operands[-1:]
+    if stem in _IN_PLACE and any(w.startswith("--in-place") or re.fullmatch(r"-[a-zA-Z]*i.*", w)
+                                 for w in words):
+        return operands
+    return []
 
 
 def _dir_options(line: _Line, stem: str, args: list) -> None:
@@ -1298,8 +1647,11 @@ def judge(command: str, cwd=None) -> Hit | None:
         # API, a git exec setting — any spelling of the operations anywhere
         # on it asks, saying it may. A line of only git, gh and data
         # programs (a commit message or PR body that mentions a merge) is
-        # read by structure alone.
-        _text(line, command)
+        # read by structure alone. The arguments of programs the walk
+        # judged by structure (`git push origin main:topic`, `gh pr create
+        # --base main --body …`) are blanked where they stand, unless a
+        # program on the line runs text it cannot read (`_masked`).
+        _text(line, command if line.runs_text else _masked(command, line.masks))
     if not line.hits:
         return None
     words = []

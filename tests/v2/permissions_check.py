@@ -1829,6 +1829,9 @@ def third_delta_75_checks():
             eq(always_ask_match("Bash", {"command": line}, brief), None, f"{line!r} asks nothing new")
 
 
+POLL_DEADLINE_S = 30.0     # an active wait's bound, never its expected time
+
+
 def daemon_checks():
     from jarvis.v2 import daemon as daemon_mod
     from jarvis.v2.model import PermissionProfile as P, ProviderName, Role
@@ -1854,7 +1857,9 @@ def daemon_checks():
 
             # A DENY never reaches /approvals.
             daemon.send(thread.id, UserMessage("run:sudo rm -rf /"))
-            deadline = time.monotonic() + 3
+            # Each wait polls the real state and ends as soon as it holds; the
+            # deadline only bounds a hang (a 5 s one missed under a loaded box).
+            deadline = time.monotonic() + POLL_DEADLINE_S
             while not provider.calls and time.monotonic() < deadline:
                 time.sleep(0.005)
             eq(provider.calls[-1][1], Decision.DENY, "the hook's DENY came back")
@@ -1868,7 +1873,7 @@ def daemon_checks():
             worker = threading.Thread(
                 target=lambda: daemon.send(thread.id, UserMessage("run:git push origin main")))
             worker.start()
-            deadline = time.monotonic() + 5
+            deadline = time.monotonic() + POLL_DEADLINE_S
             queued = []
             while time.monotonic() < deadline:
                 status, queued = http_json(daemon.port, "GET", "/approvals")
@@ -1883,7 +1888,7 @@ def daemon_checks():
             status, body = hud_json(daemon, "POST", "/approvals/" + queued[0]["req_id"],
                                     {"decision": "allow"})
             eq(status, 200, "POST /approvals from the HUD window answers it")
-            deadline = time.monotonic() + 5
+            deadline = time.monotonic() + POLL_DEADLINE_S
             while len(provider.calls) < 2 and time.monotonic() < deadline:
                 time.sleep(0.005)
             eq(provider.calls[-1], ("git push origin main", Decision.ALLOW),
@@ -2210,6 +2215,12 @@ _FORCE = ("git-push-force", "force-pushes")
 _PR_UNSURE = ("pr-merge-unsure", "may merge or close a pull request")
 _PUSH_UNSURE = ("git-push-unsure", "may push to main")
 
+# createCommitOnBranch with its branch in a GraphQL variable (MED-3 of the
+# follow-up review of #208).
+_GQL_COMMIT = ("gh api graphql -f query='mutation($b:String!){createCommitOnBranch(input:{branch:"
+               "{repositoryNameWithOwner:\"o/r\",branchName:$b},message:{headline:\"x\"},"
+               "expectedHeadOid:\"y\"}){commit{oid}}}'")
+
 MERGE_GATE_ASK = (
     ("gh pr merge 5 --squash", _MERGE), ("gh pr merge --auto --squash 5", _MERGE),
     ("gh pr merge --admin --merge 5", _MERGE), ("gh pr merge", _MERGE),
@@ -2320,6 +2331,108 @@ MERGE_GATE_ASK = (
     ("gh api -X PATCH repos/o/r/./pulls/5 -f state=closed", _CLOSE),
     ("git -c remote.origin.push=HEAD:main push", _PUSH_UNSURE),
     ("GIT_DIR=/elsewhere/.git git push", _PUSH_UNSURE),
+    # The follow-up review of #208. MED-1: a trailing `--` names no paths.
+    ("git checkout main -- && git push", _MAIN),
+    # MED-2: git exec settings outside any fixed list — a same-line config
+    # write, any `-c`, any upper-case assignment, options that run a program.
+    ("git config core.pager 'gh pr merge 1'; git log", _PR_UNSURE),
+    ("git config core.sshCommand 'sh -c \"gh pr merge 1\"'; git push origin feature", _PR_UNSURE),
+    ("git config --global core.editor 'gh pr merge 1' && git commit", _PR_UNSURE),
+    ("git -c core.askPass='gh pr merge 1' fetch", _PR_UNSURE),
+    ("git -c core.gitProxy='gh pr merge 1' fetch", _PR_UNSURE),
+    ("git -c core.alternateRefsCommand='gh pr merge 1' fetch", _PR_UNSURE),
+    ("git -c diff.x.textconv='gh pr merge 1' diff", _PR_UNSURE),
+    ("git -c credential.https://github.com.helper='!gh pr merge 1' fetch", _PR_UNSURE),
+    ("git -c trailer.x.command='gh pr merge 1' interpret-trailers", _PR_UNSURE),
+    ("git -c interactive.diffFilter='gh pr merge 1' add -p", _PR_UNSURE),
+    ("git -c browser.x.cmd='gh pr merge 1' web--browse", _PR_UNSURE),
+    ("git --config-env remote.origin.push=SPEC push", _PUSH_UNSURE),
+    ("GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.pager GIT_CONFIG_VALUE_0='gh pr merge 1' git log", _PR_UNSURE),
+    ("PAGER='gh pr merge 1' git log", _PR_UNSURE), ("EDITOR='gh pr merge 1' git commit", _PR_UNSURE),
+    ("VISUAL='gh pr merge 1' git commit", _PR_UNSURE), ("SSH_ASKPASS='gh pr merge 1' git fetch", _PR_UNSURE),
+    ("LESSOPEN='|gh pr merge 1 %s' git log", _PR_UNSURE), ("export PAGER='gh pr merge 1'; git log", _PR_UNSURE),
+    ("env PAGER='gh pr merge 1' git log", _PR_UNSURE),
+    ("git fetch --upload-pack='gh pr merge 1' origin", _PR_UNSURE),
+    ("git pull --upload='gh pr merge 1' origin", _PR_UNSURE),
+    ("git ls-remote --upload-pack='gh pr merge 1' origin", _PR_UNSURE),
+    ("git clone -u 'gh pr merge 1' https://github.com/o/r", _PR_UNSURE),
+    ("git push --receive-pack='gh pr merge 1' origin feature", _PR_UNSURE),
+    ("git push --exec='gh pr merge 1' origin feature", _PR_UNSURE),
+    ("git-push --exec='gh pr merge 1' origin feature", _PR_UNSURE),
+    ("git grep -O'gh pr merge 1' x", _PR_UNSURE), ("git grep --open-files-in-pager='gh pr merge 1' x", _PR_UNSURE),
+    ("git archive --remote=origin --exec='gh pr merge 1' HEAD", _PR_UNSURE),
+    ("git fetch --upload-pack='git push origin main' origin", _PUSH_UNSURE),
+    # A config write makes a later unknown subcommand a possible new alias,
+    # with nothing on the line for the backstop to read.
+    ("git config alias.ship '!./ship.sh'; git ship", _PUSH_UNSURE),
+    # #222's review. MED-1: a judged program's arguments are blanked where
+    # it stands, never the same words elsewhere; `-c` values, assignment
+    # values and the arguments of a subcommand handed a program stay.
+    ("PAGER='git push origin main x' git push -u origin feature", _PUSH_UNSURE),
+    ("PAGER='git -c a=b fetch origin main' git -c a=b fetch origin main && git push -u origin feature",
+     _PUSH_UNSURE),
+    # The same with nothing that runs text (MED-B blanks nothing beside
+    # PAGER=…): the first place is blanked, the other copy is still read.
+    ("echo 'git -c user.name=x fetch origin main' >> notes.txt; git -c user.name=x fetch origin main"
+     " && git push -u origin feature", _PUSH_UNSURE),
+    ("git -c core.sshCommand='sh -c \"git push origin main\"' push origin feature", _PUSH_UNSURE),
+    ("git rebase --exec 'echo main; git push' HEAD~1", _PUSH_UNSURE),
+    ("CI=1 git fetch --upload-pack='git-upload-pack' origin main && git push -u origin feature", _PUSH_UNSURE),
+    # MED-2: git's config, HEAD and hooks written on the line.
+    ("echo '[core] pager = gh pr merge 1' >> .git/config; git log", _PR_UNSURE),
+    ("echo '[core] pager = gh pr merge 1' >> ~/.gitconfig; git log", _PR_UNSURE),
+    ("printf '[core]\\n\\tpager = gh pr merge 1\\n' | tee -a .git/config; git log", _PR_UNSURE),
+    ("cp evil.cfg .git/config && git push origin feature", _PUSH_UNSURE),
+    ("ln -sf /tmp/hook .git/hooks/pre-push && git push origin feature", _PUSH_UNSURE),
+    ("sed -i 's/x/y/' .git/config && git push origin feature", _PUSH_UNSURE),
+    ("echo 'ref: refs/heads/main' > .git/HEAD && git push", _PUSH_UNSURE),
+    # Variables set without `NAME=`.
+    ("read -r PAGER <<< 'gh pr merge 1'; git log", _PR_UNSURE),
+    ("printf -v PAGER %s 'gh pr merge 1'; git log", _PR_UNSURE),
+    ("mapfile -t L <<< 'gh pr merge 1'; git log", _PR_UNSURE),
+    ("export PAGER; echo 'gh pr merge 1' > /dev/null; git log", _PR_UNSURE),
+    # LOW: stored text a program on the line may run is not blanked.
+    ("git commit -m 'gh pr merge 1' && git log -1 --format=%s | sh", _PR_UNSURE),
+    ("git commit -m 'gh pr merge 1' && eval \"$(git log -1 --format=%s)\"", _PR_UNSURE),
+    ("git commit -m 'gh pr merge 1' && bash -c \"$(git log -1 --format=%s)\"", _PR_UNSURE),
+    ("git commit -m 'gh pr merge 1' && git log -1 --format=%s | ssh host", _PR_UNSURE),
+    # LOW: HOME and XDG_CONFIG_HOME move the owner's git config.
+    ("HOME=/tmp/h git push", _PUSH_UNSURE), ("XDG_CONFIG_HOME=/tmp/x git push", _PUSH_UNSURE),
+    # #222's delta review. MED-A: a rebase with a branch operand switches
+    # to it first.
+    ("git rebase origin/feature main && git push", _MAIN),
+    ("git rebase --onto x y main && git push origin HEAD", _MAIN),
+    ("git rebase origin/main main; git push origin HEAD", _MAIN),
+    ("git rebase --root main && git push", _MAIN),
+    ("git rebase -s ours origin/x \"$B\" && git push", _PUSH_UNSURE),
+    # MED-B: a pager, editor or other setting that may hand git's output to a
+    # program: nothing on the line is blanked.
+    ("git -c core.pager=sh log -1 --format='gh pr merge 1'", _PR_UNSURE),
+    ("git -c pager.log=sh log -1 --format='gh pr merge 1'", _PR_UNSURE),
+    ("GIT_PAGER=sh git log -1 --format='gh pr merge 1'", _PR_UNSURE),
+    ("PAGER=sh git log -1 --format='gh pr merge 1'", _PR_UNSURE),
+    ("git -c core.pager=sh show -s --format='gh pr merge 1' HEAD", _PR_UNSURE),
+    ("git -c core.pager=sh diff --no-index --output-indicator-new='gh pr merge 1' a b", _PR_UNSURE),
+    ("git commit -m 'gh pr merge 1' && git -c core.pager=sh log -1 --format=%s", _PR_UNSURE),
+    ("git config core.pager sh; git log -1 --format='gh pr merge 1'", _PR_UNSURE),
+    ("GIT_EDITOR=sh git commit -e -m 'gh pr merge 1'", _PR_UNSURE),
+    ("export GIT_PAGER; git log -1 --format='gh pr merge 1'", _PR_UNSURE),
+    ("git -c alias.l='!sh' l -1 --format='gh pr merge 1'", _PR_UNSURE),
+    ("git --config-env=core.pager=P log -1 --format='gh pr merge 1'", _PR_UNSURE),
+    ("git --config-env core.pager=P log -1 --format='gh pr merge 1'", _PR_UNSURE),
+    # Blanking a data option's value is anchored to its option: the same
+    # text fed to a shell elsewhere on the line is still read.
+    ("echo 'gh pr merge 1' | sh; git commit -m 'gh pr merge 1'", _PR_UNSURE),
+    # MED-3: `branchName: $b` read from `-f b=…`, or unsure.
+    (_GQL_COMMIT + " -f b=main", _MAIN), (_GQL_COMMIT + " -F b=refs/heads/main", _MAIN),
+    (_GQL_COMMIT + " -F b=@branch.txt", _PUSH_UNSURE), (_GQL_COMMIT, _PUSH_UNSURE),
+    (_GQL_COMMIT + " -f b=topic --input vars.json", _PUSH_UNSURE),
+    # Every createCommitOnBranch is read, not the first.
+    ("gh api graphql -f query='mutation{a:createCommitOnBranch(input:{branch:{branchName:\"topic\"}})"
+     "{commit{oid}} b:createCommitOnBranch(input:{branch:{branchName:\"main\"}}){commit{oid}}}'", _MAIN),
+    # In double quotes `$b` is the shell's, whatever `-f b=` says.
+    ("gh api graphql -f query=\"mutation{createCommitOnBranch(input:{branch:{branchName:$b}})"
+     "{commit{oid}}}\" -f b=topic", _PUSH_UNSURE),
 )
 
 MERGE_GATE_ORDINARY = (
@@ -2355,6 +2468,49 @@ MERGE_GATE_ORDINARY = (
     "npm test && git push -u origin topic", "gh api 'repos/{owner}/{repo}/pulls/5'",
     "gh api graphql -f query='mutation{createCommitOnBranch(input:{branch:{branchName:\"topic\"}}){commit{oid}}}'",
     "python3 -c \"import subprocess; subprocess.run('git push'.split())\"",
+    # The follow-up review of #208: a checkout with paths after `--`; data
+    # options' values left out of the backstop wherever it runs; any `-c`, a
+    # config write or an exec option that spells nothing; `$b` given literally.
+    "git checkout topic -- && git push", "git checkout main -- README.md && git push",
+    "git -c user.name=x commit -m 'gh pr merge later'",
+    "GIT_AUTHOR_NAME=x git commit -m 'gh pr merge later' && git push",
+    "make && git commit -am 'then gh pr merge 5' && git push",
+    "make && git commit --message='close the pr merge gap'", "make && git commit --mess='gh pr merge, later'",
+    "make && git commit -m \"gh pr merge later\"",
+    "make && gh pr create --title 'gh pr merge plan' --body 'then gh pr merge 5'",
+    "make && gh pr comment 5 -b 'will gh pr merge after'", "make && gh issue create -t 'gh pr close flake' -b x",
+    "uv run pytest && gh api repos/o/r/issues/5/comments -f body='gh pr merge after CI'",
+    "git config user.name x && git commit -m 'gh pr merge later'",
+    "git fetch --upload-pack=git-upload-pack origin", "git grep -n 'gh pr merge'",
+    _GQL_COMMIT + " -f b=topic",
+    # #222's review, MED-1: the arguments of programs judged by structure
+    # are not read by the backstop.
+    "git -c user.name=x -c user.email=y commit -m x && git push -u origin feature"
+    " && gh pr create --base main --fill",
+    "LANG=C git fetch origin main && git push -u origin feature",
+    "git -c user.name=x fetch origin main && git push -u origin feature",
+    "CI=1 npm test && git log origin/main..HEAD && git push -u origin feature",
+    "git -c user.name=x push origin main:topic",
+    "git fetch origin main && git rebase origin/main && git push -u origin feature",
+    "GIT_PAGER=cat git log origin/main..HEAD && git push -u origin feature",
+    "git rebase main && git push origin topic", "CI=1 make && git branch -d old && git push -u origin feature",
+    "/bin/bash -lc 'git -c user.name=x fetch origin main && git push -u origin feature"
+    " && gh pr create --base main --fill'",
+    "git push -u origin \"$(git branch --show-current)\" && LANG=C gh pr create --base main --fill",
+    "CI=1 gh issue create --title 'push to main is slow' -b x && git push -u origin feature",
+    "CI=1 gh api repos/o/r/issues/5/comments -f body='push to main later' && git push -u origin feature",
+    "CI=1 git checkout -b feature main && git push -u origin feature",
+    "cat .git/config && git push origin feature", "cp .git/config /tmp/backup && git push origin feature",
+    # #222's delta review: a rebase with one operand stays where it is, one
+    # onto a feature branch switches there; a pager that only pages and the
+    # settings and variables that cannot run git's output still blank.
+    "git rebase main && git push", "git rebase origin/main feature && git push -u origin feature",
+    "git rebase --onto origin/feature main && git push",
+    "git -c core.pager='less -R' log origin/main..HEAD && git push -u origin feature",
+    "git -c core.pager=cat log origin/main..HEAD && git push -u origin feature",
+    "NODE_ENV=test npm test && git push -u origin feature && gh pr create --base main --fill",
+    "git config --global user.name x && git commit -m 'gh pr merge later'",
+    "git -c color.ui=never -c alias.st=status log origin/main..HEAD && git push -u origin feature",
 )
 
 
@@ -2724,7 +2880,35 @@ def merge_gate_checks():
             ("; ".join(f"git x{i}" for i in range(2000)), many_aliases),
             ("git checkout a && " * 500 + "git push", topic),
             ("curl " + "pulls/" * 40000 + "x", topic),
+            # Arguments blanked by position (MED-1 of #222's review): a
+            # program with more words than MASK_ARGS_CAP is not, and past
+            # MASK_CAP programs none is; at the caps, one search each.
+            ("make; git commit " + " ".join(f"-m 'gh pr merge {i}'" for i in range(2000)), topic),
+            ("make; " + "; ".join(f"git log m{i}" for i in range(3000)) + "; echo" + " x" * 100000, topic),
+            ("make; " + "; ".join(f"git log m{i}" for i in range(getattr(merge_gate, "MASK_CAP", 64)))
+             + "; echo" + " x" * 100000, topic),
+            ("make; git log " + " ".join(f"m{i}" for i in range(getattr(merge_gate, "MASK_ARGS_CAP", 256) - 1))
+             + "; echo" + " x" * 100000, topic),
+            (_GQL_COMMIT.replace("branchName:$b", "branchName:$b " * 30000)
+             + " -f b=topic" * 3000, topic),
         )
+        # Past the caps nothing is blanked, so the backstop reads every word
+        # (it may ask, never the other way).
+        cap, args_cap = getattr(merge_gate, "MASK_CAP", 64), getattr(merge_gate, "MASK_ARGS_CAP", 256)
+
+        def programs(n):            # n + 2 masked programs
+            return ("CI=1 " + "; ".join(f"git log m{i}" for i in range(n))
+                    + "; git log origin/main..HEAD && git push -u origin feature")
+
+        def words(n):               # one program of n + 3 words
+            return ("CI=1 git log origin/main " + " ".join(f"m{i}" for i in range(n))
+                    + " && git push -u origin feature")
+        for over, under, why in ((programs(cap - 1), programs(cap - 2), "MASK_CAP programs"),
+                                 (words(args_cap - 2), words(args_cap - 3), "MASK_ARGS_CAP words")):
+            hit = merge_gate.judge(over, str(topic))
+            eq(hit.rule if hit else None, "git-push-unsure", f"past {why}: nothing is blanked")
+            hit = merge_gate.judge(under, str(topic))
+            eq(hit.rule if hit else None, None, f"at {why}: blanked as usual")
         for line, cwd in adversarial:
             spent: list = []
 

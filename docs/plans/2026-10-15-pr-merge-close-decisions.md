@@ -108,12 +108,17 @@ networking is off by design.
   know, a function, a variable, a git exec setting (`core.sshCommand`, pager,
   editor, `credential.helper`, `diff.external`, …, or `GIT_SSH_COMMAND`/
   `GIT_EDITOR`/`GIT_PAGER`), `git difftool`, `filter-branch`, `rebase`,
-  `bisect` — any spelling of a merge, a close or a push to main anywhere on
-  the line asks, saying it may. A line of only git, gh and data programs (a
-  commit message or PR body that mentions a merge) is read by structure.
+  `bisect` (widened by M-16) — any spelling of a merge, a close or a push to
+  main anywhere on the line asks, saying it may. A line of only git, gh and
+  data programs (a commit message or PR body that mentions a merge) is read by
+  structure.
 - **M-13. GraphQL** also asks for `enqueuePullRequest` (merge queue),
   `deleteRef`, `updateRef`/`updateRefs` (forced or not: one may move main)
   and `createCommitOnBranch` unless it names a non-default branch.
+  `branchName: $b` is read from a literal `-f`/`-F b=…`; a variable given
+  no literal value (`@file`, `--input`, an expansion, a query in double
+  quotes where `$b` is the shell's) asks "may push to main". Every
+  `branchName` in the query is read.
 - **M-14. One card under Claude.** A human's yes is held by the call's
   `tool_use_id` for 120 s, and if the CLI asks `can_use_tool` about the same
   call (same id, tool and identical input, once) it is answered from that
@@ -122,6 +127,48 @@ networking is off by design.
   the classifier runs after the owner's yes (the hook returns `{}`) and can
   still deny, but cannot put a second Jarvis card in front of the owner. No
   blanket explicit allow was added.
+- **M-16. The backstop is set off by any git exec setting, and does not
+  read what the walk judged** (the delta review of #208, MED-2, and #222's
+  review, MED-1). Its scope stays per program: always reading the raw line
+  asked for ordinary lines (`git diff main...HEAD && git push -u origin
+  HEAD`, `grep -n 'gh pr merge' merge_gate.py`). What sets it off is not a
+  fixed list: any `git -c` or `--config-env`, any `git config` write, any
+  upper-case variable set on the line (`PAGER=`, `GIT_CONFIG_COUNT=`, by
+  prefix, `env` or `export`, or by `read`, `printf -v`, `mapfile`, `export
+  NAME`), a write to git's config, HEAD or hooks (a redirect, `tee`, `cp`,
+  `mv`, `ln`, `install`, `rsync`, `dd of=`, `sed -i` into `.git/config`,
+  `.git/HEAD`, `.git/hooks/…`, `~/.gitconfig`, `git/config`,
+  `/etc/gitconfig` — which also makes any later push ask "may push to
+  main"), and the options that hand git a program (`--upload-pack`,
+  `clone`/`ls-remote -u`, `push --receive-pack`/`--exec`, `grep -O`,
+  `archive --exec`). Where it runs, it does not read the arguments of the
+  programs the walk judged by structure: everything after a git
+  subcommand that only reads or writes refs, paths and messages (`push`,
+  `fetch`, `pull`, `rebase` without `-x`/`-i`, `log`, `diff`, `merge-base`,
+  `checkout`, `commit`, …), a `gh pr`/`gh issue` verb's arguments (`--base
+  main`, `--body …`) and `gh api`'s. They are blanked where the line spells
+  that program, word by word (the first such place; at most 64 programs of
+  at most 256 words), so `git -c user.name=x push origin main:topic` and
+  `LANG=C git fetch origin main && git push -u origin feature` ask nothing.
+  git's own options before the subcommand (`-c` values), assignments, exec
+  options' values and the arguments of a subcommand handed a program stay.
+  With a program on the line that runs text the walk cannot read — a shell
+  fed standard input, a file or a non-literal `-c`, `eval`, an interpreter,
+  `source`, `xargs`, `ssh` — nothing is blanked, so a stored message cannot
+  be laundered (`git commit -m '…' && git log -1 --format=%s | sh`).
+  Nor is anything blanked where a setting on the line may hand git's own
+  output to a program (#222's delta review, MED-B: `git -c core.pager=sh log
+  --format='gh pr merge 1'`): any `-c`, `--config-env`, `git config` write
+  or config file write, and any variable set on the line, except a short
+  benign list — `user.*`, `color.*`, `push.default` and similar keys, a pager
+  that only pages (`cat`, `less -R`), a git alias (its expansion is walked),
+  and `LANG`, `CI`, `NODE_ENV`, `GIT_AUTHOR_*` and similar names. `git
+  rebase UPSTREAM BRANCH`, `--onto N UPSTREAM BRANCH` and `--root BRANCH`
+  switch to BRANCH first, so a later plain or HEAD push is judged there
+  (MED-A); `git rebase main` alone stays put.
+  `HOME=` and `XDG_CONFIG_HOME=` on the line make a bare push's config
+  unknown. `git checkout main -- && git push` switches to main (MED-1 of
+  #208's delta review): only words after `--` are paths.
 
 ## Known gaps (accident guard, not an adversarial boundary)
 
@@ -130,7 +177,17 @@ call, an alias in a repository whose folder cannot be told, git config
 `include` files, git hooks (a `pre-push` hook, `core.hooksPath` set outside
 the line) that run on a push, a program the walk does not know that spells
 nothing on the line, and `gh issue close` on a pull request's number are not
-read.
+read. Nor are (the delta review of #208): a git exec setting written by an
+earlier call (`git config core.pager …` or a write to `.git/config` on one
+call, `git log` on the next — the backstop reads one line); `--exec-path`
+and `GIT_EXEC_PATH`, which make git run the programs in a folder, not text
+on the line (`GIT_EXEC_PATH=` still sets the backstop off); other git and
+GitHub front ends — `git-town`, `hub`, `lab` — which are programs this
+reader does not know, so they ask only when the line spells an operation;
+and a git config or hook file written through a path the line does not
+spell (`cp x "$D"`, a script). A judged program spelled any way but word by
+word (a here-document in `--body "$(cat <<EOF …)"`, a value split across
+quotes) keeps its arguments in the backstop's text and may ask.
 
 ## For the owner
 
