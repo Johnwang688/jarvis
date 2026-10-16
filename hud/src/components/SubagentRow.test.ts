@@ -173,7 +173,9 @@ describe("the owner's Stop on a row (SV-4)", () => {
       expect(posts).toEqual(["/threads/st2/subagents/cl%3Atoolu_a/stop"]);
       const button = stopOf(host, "cl:toolu_a")!;
       expect(button.textContent).toBe("stopping…");
-      expect(button.disabled).toBe(true);
+      // aria-disabled, not disabled: a keyboard press keeps its focus (review of #216).
+      expect(button.getAttribute("aria-disabled")).toBe("true");
+      expect(button.disabled).toBe(false);
       expect(button.dataset.state).toBe("stopping");
       await act(async () => { button.click(); });
       expect(posts.length).toBe(1);
@@ -209,6 +211,9 @@ describe("the owner's Stop on a row (SV-4)", () => {
       const cant = host.querySelector<HTMLElement>('[data-sid="cl:toolu_a"] [data-testid="subagent-cant-stop"]')!;
       expect(cant.textContent).toBe("Can't stop");
       expect(cant.title).toContain("whole turn");
+      // Reachable by keyboard and screen reader: focusable, described by its reason.
+      expect(cant.tabIndex).toBe(0);
+      expect(document.getElementById(cant.getAttribute("aria-describedby")!)!.textContent).toContain("whole turn");
       trust.force = true;
       await act(async () => { stopOf(host, "cl:toolu_b")!.click(); await new Promise((r) => setTimeout(r, 0)); });
       expect(host.querySelector('[data-sid="cl:toolu_b"] [data-testid="subagent-stop-error"]')!.textContent)
@@ -231,5 +236,48 @@ describe("the thread's own Stop (SV-4)", () => {
       expect(host.querySelector<HTMLButtonElement>('[data-testid="stop"]')!.title)
         .toBe("Stop the running turn. Anything queued behind it comes back to this box.");
     } finally { act(() => root.unmount()); host.remove(); }
+  });
+});
+
+describe("review of #216", () => {
+  function serveStop(rows: unknown[], answer: [number, unknown]) {
+    const posts: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (path: string, init?: RequestInit) => {
+      if (init?.method === "POST") { posts.push(path); return new Response(JSON.stringify(answer[1]), { status: answer[0] }); }
+      return new Response(JSON.stringify({ subagents: rows }), { status: 200 });
+    }));
+    return posts;
+  }
+  afterEach(() => { trust.force = false; });
+
+  it("a keyboard press keeps focus on the button while it says stopping…", async () => {
+    serveStop([listRow("cl:toolu_k", { stoppable: true })], [200, { ok: true, stop: "stopping" }]);
+    const { host, done } = await mount("rv1", spawn(["toolu_k"]));
+    try {
+      const button = host.querySelector<HTMLButtonElement>('[data-sid="cl:toolu_k"] [data-testid="subagent-stop"]')!;
+      button.focus();
+      trust.force = true;
+      await act(async () => { button.click(); await new Promise((r) => setTimeout(r, 0)); });
+      const now = host.querySelector<HTMLButtonElement>('[data-sid="cl:toolu_k"] [data-testid="subagent-stop"]')!;
+      expect(now.textContent).toBe("stopping…");
+      expect(document.activeElement).toBe(now);
+    } finally { done(); }
+  });
+
+  it("the CLI's refusal is a note, its reason reachable, and no Stop again", async () => {
+    const posts = serveStop([listRow("cl:toolu_r", { stoppable: true })],
+      [409, { error: "The CLI refused the stop: No task found with ID: ta.", refused: true }]);
+    const { host, done } = await mount("rv2", spawn(["toolu_r"]));
+    try {
+      trust.force = true;
+      const button = host.querySelector<HTMLButtonElement>('[data-sid="cl:toolu_r"] [data-testid="subagent-stop"]')!;
+      await act(async () => { button.click(); await new Promise((r) => setTimeout(r, 0)); });
+      expect(posts.length).toBe(1);
+      expect(host.querySelector('[data-sid="cl:toolu_r"] [data-testid="subagent-stop"]')).toBeNull();
+      const note = host.querySelector<HTMLElement>('[data-sid="cl:toolu_r"] [data-testid="subagent-stop-refused"]')!;
+      expect(note.textContent).toBe("Stop refused");
+      expect(note.tabIndex).toBe(0);
+      expect(document.getElementById(note.getAttribute("aria-describedby")!)!.textContent).toContain("No task found");
+    } finally { done(); }
   });
 });

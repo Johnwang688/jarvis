@@ -3318,8 +3318,13 @@ What it does, by provider (`provider.stop_subagent`):
   every sibling go on. Offered only with a `task_id` and with
   `CLAUDE_STOP_VERIFIED` (`"2.1.295"`, the owner's 2026-10-15 decision on
   that offline evidence; a floor, as `CLAUDE_VERIFIED` is: a CLI Jarvis has
-  read to be older is refused). The CLI must take the request within 10 s
-  (`STOP_CONTROL_TIMEOUT_S`).
+  read to be older is refused; one whose version Jarvis has not read yet is
+  allowed). The CLI must take the request within 10 s
+  (`STOP_CONTROL_TIMEOUT_S`); past that the route stops waiting but does not
+  cancel the request, so the SDK's own 60 s control timeout (or the CLI's
+  late answer) clears the SDK's private pending-response entry as the SDK
+  means to. The CLI's own refusal (an error control response, such as "no
+  such task") is its answer, not a lost one: see `refused` below.
 - **Codex**: `turn/interrupt {threadId: <the child's>, turnId: <its running
   turn>}` — never the orchestrator's — written under the lock its answer is
   read under, so even an error answer is never the orchestrator's turn
@@ -3332,8 +3337,9 @@ What it does, by provider (`provider.stop_subagent`):
 
 **Idempotent**: while a Stop is on its way (`stop: "stopping"`), pressing it
 again sends nothing and answers `already`. **409, one plain sentence in
-`error`**, when nothing could be sent, and the child's record is left as it
-was:
+`error`**, when the Stop did not go through. For `stale` and
+`supported: false` nothing was sent and the child's record is left as it
+was; `unconfirmed` and `refused` set the record's `stop` as they say:
 
 - `{"error": "This sub-agent has already ended.", "stale": true}` — ended,
   run by a session that is gone, or the chat's session is not open
@@ -3344,12 +3350,24 @@ was:
 - `{"error": "The stop was sent, but the CLI did not confirm it took it; the
   sub-agent may still stop. Press Stop again to retry.", "unconfirmed":
   true}` — the request went out but the CLI did not answer it; the record
-  says `stop: "unconfirmed"`.
+  says `stop: "unconfirmed"`, and Stop may be pressed again;
+- `{"error": "The CLI refused the stop: <its reason>.", "refused": true}` —
+  the CLI answered with a refusal of its own (Claude's error control
+  response). The reason is scrubbed (`redact.scrub_text`) and cut to one
+  line of at most 120 characters. The record says `stop: "refused"` and
+  keeps the reason as `stop_error` on the owner's list and transcript rows
+  only (never the bus); the HUD shows "Stop refused" with it and offers no
+  Stop again, since it would only be refused again;
+- `{"error": "Jarvis is stopping, so nothing more is sent to the CLI.",
+  "stale": true}` — the daemon is shutting down.
 
 **The record says "stopping" until the CLI's own word.** From the moment the
 daemon hands the request to the provider, the list row, the transcript's
 `subagent` and the bus record carry `"stop": "stopping"` and
-`"stop_requested_at"`; the status stays live. Only the CLI ends it: Claude's
+`"stop_requested_at"`; the status stays live. (A Codex refusal arrives
+later, on the transport, and is only logged: the child's own `turn/completed`
+then says why it ended, never "stopped by the owner", and with no end the
+record turns "unconfirmed".) Only the CLI ends it: Claude's
 `killed`/`stopped`, the Codex child's `turn/completed` `interrupted`, which
 give `status: "stopped"`, `stop_reason: "stopped by the owner"` and clear
 `stop`. Nothing infers an end from a stop. If the CLI has said nothing after
@@ -3380,7 +3398,7 @@ raised resolves as the CLI resolves it.
  "data": {"sid": "cl:…", "op": "started|progress|finished", "status": "…",
           "depth": 1, "background": true, "started_at": "…", "entries": 2,
           "task_id": "…", "parent_sid": "cl:…", "ended_at": "…",
-          "stop": "stopping|unconfirmed", "stop_requested_at": "…"}}
+          "stop": "stopping|unconfirmed|refused", "stop_requested_at": "…"}}
 ```
 
 One per change (a start, a progress tick, a new or finished transcript

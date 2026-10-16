@@ -54,6 +54,13 @@ class SubagentStopUnsupported(Exception):
     one plain sentence for the owner. Nothing was sent to the CLI."""
 
 
+class SubagentStopDeclined(Exception):
+    """The CLI answered the owner's Stop with a refusal of its own (an error
+    control response, such as "no such task") (SV-4). The request reached
+    it and was turned down: nothing will stop the child, so this is neither
+    "not live" nor an unconfirmed send. The message is the CLI's reason."""
+
+
 class SubagentNotLive(Exception):
     """The sub-agent named is not one this session still runs (SV-4): unknown
     to it, already ended, or the session is closed. Nothing was sent."""

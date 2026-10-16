@@ -539,6 +539,10 @@ def subagents_checks(browser, mock, base, check, until, guard, init_script):
         check("a child its CLI cannot stop alone says Can't stop, with why on hover",
               cant.count() == 1 and cant.inner_text() == "Can't stop" and "whole turn" in cant.get_attribute("title")
               and stop_of("cl:toolu_cant").count() == 0)
+        why = cant.get_attribute("aria-describedby") or ""
+        check("…and why is reachable by keyboard and screen reader: focusable, described by its reason",
+              cant.get_attribute("tabindex") == "0" and why != ""
+              and "whole turn" in page.evaluate("id => document.getElementById(id)?.textContent || ''", why))
         codex_help = stop_of("cx:019a-fixer").get_attribute("title") or ""
         check("Codex's Stop states its caveat on hover",
               "A command it is already running may still finish" in codex_help
@@ -594,6 +598,14 @@ def subagents_checks(browser, mock, base, check, until, guard, init_script):
         until(lambda: len(s["stops"]) == 2)
         check("Enter on a focused Stop is the owner's press (Codex)", s["stops"][-1] == ("x1", "cx:019a-fixer"))
         until(lambda: stop_of("cx:019a-fixer").inner_text() == "stopping…")
+        time.sleep(0.2)
+        check("…and focus stays on the button while it says stopping… (aria-disabled, not disabled)",
+              page.evaluate("document.activeElement?.dataset?.testid === 'subagent-stop' && "
+                            "document.activeElement.closest('[data-sid]').dataset.sid === 'cx:019a-fixer'")
+              and stop_of("cx:019a-fixer").get_attribute("aria-disabled") == "true")
+        page.keyboard.press("Enter")
+        time.sleep(0.2)
+        check("Enter again while stopping sends nothing more", len(s["stops"]) == 2)
 
         # Under a card: disabled, and a click on it sends nothing.
         mock.emit("approval_requested", {
@@ -625,6 +637,19 @@ def subagents_checks(browser, mock, base, check, until, guard, init_script):
         check("Space is the owner's press too; a refusal shows the daemon's sentence and leaves Stop offered",
               len(s["stops"]) == 3 and err.inner_text() == refusal and delta.inner_text() == "Stop")
         del s["stop_answer"]["cl:toolu_delta"]
+        # The CLI's own refusal (review of #216): a note with its reason, and no Stop again.
+        s["lists"]["c1"].append(row("cl:toolu_eps", name="Eps helper", started_at=at(6), stoppable=True))
+        emit("c1", "cl:toolu_eps", op="started", started_at=at(6))
+        until(lambda: stop_of("cl:toolu_eps").count() == 1)
+        s["stop_answer"]["cl:toolu_eps"] = (409, {"error": "The CLI refused the stop: No task found with ID: t9.",
+                                                  "refused": True})
+        stop_of("cl:toolu_eps").click()
+        note = page.locator('[data-testid="subagent-row"][data-sid="cl:toolu_eps"] [data-testid="subagent-stop-refused"]')
+        until(lambda: note.count() == 1)
+        check("the CLI's refusal shows 'Stop refused' with its reason, and offers no Stop again",
+              stop_of("cl:toolu_eps").count() == 0 and note.inner_text() == "Stop refused"
+              and "No task found" in (note.get_attribute("title") or "") and note.get_attribute("tabindex") == "0")
+        del s["stop_answer"]["cl:toolu_eps"]
 
         # In the pane's header.
         page.locator('[data-sid="cl:toolu_delta"] .sa-open').click()

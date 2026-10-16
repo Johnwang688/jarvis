@@ -59,8 +59,10 @@ export interface Subagent {
   duration_ms?: number;
   last_tool?: string;
   declined?: number;
-  /** The owner's Stop (SV-4): on its way to the CLI, or sent and not confirmed. Only while live. */
+  /** The owner's Stop (SV-4): on its way to the CLI, sent and not confirmed, or refused by the CLI. Only while live. */
   stop?: StopState;
+  /** The CLI's reason for refusing it (the owner's list route only, never the bus). */
+  stop_error?: string;
   stop_requested_at?: string;
   /** The list route's word (SV-4): whether Stop can be sent to this live child now… */
   stoppable?: boolean;
@@ -68,7 +70,7 @@ export interface Subagent {
   stop_unavailable?: string;
 }
 
-export type StopState = "stopping" | "unconfirmed";
+export type StopState = "stopping" | "unconfirmed" | "refused";
 
 /** What one bus `subagent` record may say: ids, a status, times and counts. */
 export interface SubBus {
@@ -100,7 +102,8 @@ const when = (v: unknown): string | undefined =>
 const anId = (v: unknown): string | undefined =>
   typeof v === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(v) ? v : undefined;
 const status = (v: unknown): SubStatus | null => (SUB_STATUSES as readonly unknown[]).includes(v) ? v as SubStatus : null;
-const stopState = (v: unknown): StopState | undefined => (v === "stopping" || v === "unconfirmed" ? v : undefined);
+const stopState = (v: unknown): StopState | undefined =>
+  (v === "stopping" || v === "unconfirmed" || v === "refused" ? v : undefined);
 
 /** One line of model-chosen text, as the window shows it: cleaned, capped by characters. */
 export function line(v: unknown, cap: number): string {
@@ -139,6 +142,8 @@ export function cleanRow(raw: unknown): Subagent | null {
       row.stop = stop;
       const asked = when(raw.stop_requested_at);
       if (asked) row.stop_requested_at = asked;
+      const why = stop === "refused" ? line(raw.stop_error, STOP_WHY_CAP) : "";
+      if (why) row.stop_error = why;
     }
     if (typeof raw.stoppable === "boolean") row.stoppable = raw.stoppable;
     const why = line(raw.stop_unavailable, STOP_WHY_CAP);
@@ -233,12 +238,15 @@ export function applyBus(rows: Subagent[], rec: SubBus): Subagent[] {
   } else if (rec.ended_at) next.ended_at = rec.ended_at;
   // The owner's Stop is the daemon's state after this change: said, or not.
   if (rec.stop && isLive(rec.status)) {
+    // The bus carries no words: a refusal's reason stays from the list read.
+    if (rec.stop !== "refused" || was.stop !== "refused") delete next.stop_error;
     next.stop = rec.stop;
     if (rec.stop_requested_at) next.stop_requested_at = rec.stop_requested_at;
     else delete next.stop_requested_at;
   } else {
     delete next.stop;
     delete next.stop_requested_at;
+    delete next.stop_error;
   }
   if (!isLive(rec.status)) {
     delete next.stoppable;
@@ -326,6 +334,8 @@ export const STOP_HELP: Readonly<Record<SubProvider, string>> = {
   codex: "Stop this sub-agent: it ends its turn. A command it is already running may still finish, "
     + "and the orchestrator's model is not told.",
 };
+/** The CLI answered the Stop with a refusal of its own: pressing again would be refused again. */
+export const STOP_REFUSED_HELP = "The CLI refused to stop this sub-agent.";
 /** Sent, and the CLI has said nothing within the daemon's bound (`subagents.STOP_CONFIRM_S`). */
 export const STOP_UNCONFIRMED_HELP = "Stop was sent, but the CLI has not confirmed it; this sub-agent may "
   + "still be running. Between messages Jarvis does not read the CLI, so its answer may come only with "
@@ -337,6 +347,7 @@ export const MAIN_STOP_CLAUDE_HELP = "Stop the running turn. This also stops the
 export type StopView =
   | { kind: "none" }
   | { kind: "cant"; title: string }
+  | { kind: "refused"; title: string }
   | { kind: "stopping"; title: string }
   | { kind: "button"; label: string; title: string; unconfirmed: boolean };
 
@@ -351,6 +362,9 @@ export function stopView(row: Subagent, pending: boolean): StopView {
   if (!isLive(row.status)) return { kind: "none" };
   if (pending || row.stop === "stopping") {
     return { kind: "stopping", title: "Stopping: waiting for the CLI to confirm." };
+  }
+  if (row.stop === "refused") {
+    return { kind: "refused", title: row.stop_error ? `The CLI refused the stop: ${row.stop_error}` : STOP_REFUSED_HELP };
   }
   if (row.stoppable === true) {
     const unconfirmed = row.stop === "unconfirmed";

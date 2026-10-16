@@ -1668,7 +1668,8 @@ class CodexProvider:
                 # A finished child given more to do (sendInput, followupTask):
                 # live again, on Codex's own word.
                 view.status, view.stop_reason, view.asked_to_stop = "running", None, False
-                view.owner_stop = False
+                with s.mutex:       # `stop_subagent` and `_child_stop_answered` write it under it
+                    view.owner_stop = False
                 yield self._life(h, view, "started")
             return
         if method == "turn/completed":
@@ -1680,11 +1681,12 @@ class CodexProvider:
             view.turn = None
             view.duration_ms = _count(turn.get("durationMs")) if _count(turn.get("durationMs")) is not None \
                 else view.duration_ms
+            with s.mutex:       # `stop_subagent` and `_child_stop_answered` write it under it
+                owner, view.owner_stop = view.owner_stop, False
             if view.status == "stopped":
-                view.stop_reason = (OWNER_STOPPED if view.owner_stop
+                view.stop_reason = (OWNER_STOPPED if owner
                                     else "the orchestrator stopped it" if view.asked_to_stop
                                     else "its turn was interrupted")
-            view.owner_stop = False
             yield self._life(h, view, "finished")
             error = turn.get("error") if isinstance(turn.get("error"), dict) else {}
             text = _child_text(error.get("message"))
@@ -2157,10 +2159,16 @@ class CodexProvider:
     @staticmethod
     def _child_stop_answered(s: _Session, msg: dict) -> bool:
         """True when `msg` answers the owner's Stop on a child (SV-4). A
-        refusal is logged, never fatal: the record says the stop was not
-        confirmed when the child's turn does not end."""
+        refusal is logged, never fatal, and takes the owner's mark off the
+        child: if its turn ends later for another reason (the orchestrator's
+        `interrupt_agent`), that reason is said, not "stopped by the owner".
+        The record says the stop was not confirmed when the turn does not end."""
         with s.mutex:
             sid = s.child_stops.pop(msg.get("id"), None)
+            if sid is not None and "error" in msg:
+                for view in s.child_views.values():
+                    if view.sid == sid:
+                        view.owner_stop = False
         if sid is None:
             return False
         if "error" in msg:

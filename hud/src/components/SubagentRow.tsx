@@ -10,7 +10,7 @@
 // again by lib/subagents and rendered as text nodes only. More than six rows
 // at one spot collapse into one line, "Sub-agents · 8 (5 running)".
 
-import { memo, useEffect, useState } from "react";
+import { memo, useEffect, useId, useState } from "react";
 import {
   COLLAPSE_OVER, PROVIDER_WORD, blockTitle, displayName, elapsedOf, isLive, isOwnersPress, providerOf, statusMark,
   stopView, tokensText, toolsText, type Subagent,
@@ -32,25 +32,39 @@ import { subagents, useBlockOpen, useRow, useRows, useStopBlocked, useStopUi } f
 export function SubagentStop({ threadId, row }: { threadId: string; row: Subagent }) {
   const ui = useStopUi(threadId, row.sid);
   const blocked = useStopBlocked();
+  const noteId = useId();
   const view = stopView(row, ui.pending);
   if (view.kind === "none") return null;
   const error = ui.error ? (
     <span className="sa-stop-error" data-testid="subagent-stop-error" role="status">{ui.error}</span>
   ) : null;
-  if (view.kind === "cant") {
-    return <span className="sa-cant" data-testid="subagent-cant-stop" title={view.title}>Can't stop</span>;
+  if (view.kind === "cant" || view.kind === "refused") {
+    // Why there is no Stop, reachable by keyboard and screen reader too:
+    // a focusable note described by its reason (and the reason as the hover).
+    const cant = view.kind === "cant";
+    return (
+      <>
+        <span className="sa-cant" data-testid={cant ? "subagent-cant-stop" : "subagent-stop-refused"}
+              title={view.title} tabIndex={0} aria-describedby={noteId}>
+          {cant ? "Can't stop" : "Stop refused"}
+        </span>
+        <span id={noteId} className="sa-sr" data-testid="subagent-stop-why">{view.title}</span>
+      </>
+    );
   }
   const stopping = view.kind === "stopping";
   return (
     <>
+      {/* "stopping…" is aria-disabled, not disabled: a keyboard press keeps
+          its focus on the button rather than dropping it to the page. */}
       <button type="button" className={"sa-stop" + (stopping ? " stopping" : "")} data-testid="subagent-stop"
               data-state={stopping ? "stopping" : view.unconfirmed ? "unconfirmed" : "ready"}
               aria-label={`Stop sub-agent ${displayName(row)}`} title={view.title}
-              disabled={blocked || stopping} onMouseDown={noPointerFocus}
+              disabled={blocked} aria-disabled={stopping || undefined} onMouseDown={noPointerFocus}
               onClick={(e) => {
                 // The owner's own press only: a pointer, or Enter/Space on it — never a script's click.
                 if (!isOwnersPress({ isTrusted: e.nativeEvent.isTrusted, button: e.button })) return;
-                if (subagents.isBlocked()) return;
+                if (stopping || subagents.isBlocked()) return;
                 void subagents.stop(threadId, row.sid);
               }}>
         {stopping ? "stopping…" : view.label}

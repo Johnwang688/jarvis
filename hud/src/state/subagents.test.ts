@@ -276,6 +276,14 @@ describe("the window's sub-agent store", () => {
       expect(s.row("t1", "cx:b")!.stop).toBe("unconfirmed");
       void s.stop("t1", "cx:b");                    // unconfirmed: Stop may be pressed again
       expect(posts.length).toBe(3);
+      posts[2].reject(Object.assign(new Error("The CLI refused the stop: No task found."),
+        { status: 409, body: { refused: true } }));
+      await settle();
+      // The CLI said no: a mark with its reason, no error line, and no Stop again (review of #216).
+      expect([s.row("t1", "cx:b")!.stop, s.row("t1", "cx:b")!.stop_error]).toEqual(["refused", "No task found."]);
+      expect(s.stopUi("t1", "cx:b")).toEqual({ pending: false, error: "" });
+      void s.stop("t1", "cx:b");
+      expect(posts.length).toBe(3);
     });
   });
 });

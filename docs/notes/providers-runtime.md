@@ -1105,3 +1105,22 @@ tool, Discord verb or CLI command calls `Daemon.stop_subagent`
 Checks (free, offline): `tests/v2/subagent_stop_check.py` (19 tests:
 Claude replay, Codex pipes, route, record, reach), `codex_provider_check.py`
 (the peer's `$WAIT`). See the HUD half in `docs/notes/hud-workspace.md`.
+
+**Review of #216 (2026-10-15).** The CLI's explicit refusal of a Claude stop
+(the SDK raises a bare `Exception` carrying the error control response) is
+`SubagentStopDeclined`: the route's 409 says "The CLI refused the stop: …"
+(scrubbed by `redact.scrub_text`, one line, 120 characters) with `refused`,
+and the record says `stop: "refused"` with the reason as `stop_error` (owner
+routes only) — not "unconfirmed", and no "Stop again". The SDK's own control
+timeout ("Control request timeout: …") is not a refusal. On our 10 s
+timeout the request is left to finish rather than cancelled: cancelling skips
+the SDK's own `pending_control_responses` cleanup (private state, not touched
+from here); its 60 s timeout or the late answer clears it, and the late
+outcome is logged. Codex: a refused `turn/interrupt` takes `owner_stop` off
+the child under `s.mutex`, and every read and reset of `owner_stop` is now
+under that lock too, so a later `interrupt_agent` says "the orchestrator
+stopped it". Claude's `owner_stop` is likewise set under `session.mutex`. The
+record refuses to begin a Stop (`"closed"`) and writes nothing from
+`stop_failed`/`stop_sent` once `close()` ran. The 2.1.295 floor still allows
+Stop when the CLI's version is unknown (documented; the lead raised it with
+the owner). 23 tests now; six more mutants, all killed.

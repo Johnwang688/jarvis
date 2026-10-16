@@ -45,7 +45,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from editor_files_check import Daemonised  # noqa: E402
+from editor_files_check import Daemonised, FAKE_SECRET  # noqa: E402
 import claude_replay as R  # noqa: E402
 import codex_provider_check as P  # noqa: E402
 from jarvis import config  # noqa: E402
@@ -59,6 +59,10 @@ try:  # absent before SV-4: the checks that need them fail, by name
     from jarvis.v2.provider import SubagentNotLive, SubagentStopUnsupported  # noqa: E402
 except ImportError:  # pragma: no cover
     SubagentNotLive = SubagentStopUnsupported = type("Missing", (Exception,), {})
+try:  # added in the review of #216
+    from jarvis.v2.provider import SubagentStopDeclined  # noqa: E402
+except ImportError:  # pragma: no cover
+    SubagentStopDeclined = type("Missing", (Exception,), {})
 
 OWNER = "stopped by the owner"
 REPO = Path(__file__).resolve().parents[2]
@@ -254,6 +258,53 @@ class ClaudeStop(unittest.TestCase):
         run.provider.stop_subagent(run.handle, self.SLEEPER)
         self.assertTrue(done.wait(30))
 
+    def test_a_timed_out_request_is_left_to_the_sdks_own_cleanup(self):
+        """Review of #216: cancelling the request on our timeout would skip
+        the SDK's own cleanup of its private `pending_control_responses`; it
+        is left to finish instead."""
+        run = ClaudeRun("stop_fg_parallel")
+        self.addCleanup(run.close)
+        out, done = run.send_async()
+        wait_for(lambda: R.ReplayClient.instances and run.client.at_gate.is_set(), what="the stop gate")
+        finished = threading.Event()
+        real = run.client.stop_task
+
+        async def slow(task_id):
+            await asyncio.sleep(0.5)
+            finished.set()
+            await real(task_id)
+        with patch.object(run.client, "stop_task", slow), \
+                patch.object(claude, "STOP_CONTROL_TIMEOUT_S", 0.1):
+            with self.assertRaises(TimeoutError):
+                run.provider.stop_subagent(run.handle, self.SLEEPER)
+        self.assertTrue(finished.wait(5), "the request was cancelled rather than left to finish")
+        self.assertTrue(done.wait(30))
+        ended = [d for d in life(out, self.SLEEPER) if d["op"] == "finished"]
+        self.assertEqual([(d["status"], d.get("stop_reason")) for d in ended], [("stopped", OWNER)])
+
+    def test_the_clis_refusal_is_its_own_answer(self):
+        run = ClaudeRun("stop_fg_parallel")
+        self.addCleanup(run.close)
+        out, done = run.send_async()
+        wait_for(lambda: R.ReplayClient.instances and run.client.at_gate.is_set(), what="the stop gate")
+
+        async def refuse(task_id):
+            raise Exception(f"No task found with ID: {task_id}")    # the SDK's error control response
+        with patch.object(run.client, "stop_task", refuse):
+            with self.assertRaises(SubagentStopDeclined) as caught:
+                run.provider.stop_subagent(run.handle, self.SLEEPER)
+        self.assertIn("No task found", str(caught.exception))
+        self.assertFalse(run.handle.native.children[self.SLEEPER].owner_stop)
+
+        async def lost(task_id):
+            raise Exception("Control request timeout: stop_task")    # the SDK's own timeout: not a refusal
+        with patch.object(run.client, "stop_task", lost):
+            with self.assertRaises(Exception) as caught:
+                run.provider.stop_subagent(run.handle, self.SLEEPER)
+            self.assertNotIsInstance(caught.exception, SubagentStopDeclined)
+        run.provider.stop_subagent(run.handle, self.SLEEPER)
+        self.assertTrue(done.wait(30))
+
 
 # --- Codex, through the real provider over real pipes ----------------------------
 
@@ -361,6 +412,10 @@ class CodexStop(unittest.TestCase):
         self.assertFalse([e for e in out if e.kind == K.ERROR and e.data.get("fatal")],
                          "Codex refusing the child's stop ended the orchestrator's turn")
         self.assertEqual([e.data.get("stop") for e in out if e.kind == K.TURN_FINISHED], ["end"])
+        # Refused, so the child's later end is not the owner's (review of #216).
+        ended = [e.data for e in out if e.kind == K.SUBAGENT and e.data["sid"] == self.sid
+                 and e.data["op"] == "finished"]
+        self.assertEqual([d.get("stop_reason") for d in ended], ["its turn was interrupted"])
 
     def test_refusals_send_nothing(self):
         script, asked = codex_script()
@@ -439,6 +494,8 @@ class Stoppable:
             raise SubagentNotLive("This sub-agent is not running in this chat's session.")
         if self.mode == "timeout":
             raise TimeoutError("Claude Code did not answer the stop within 10 s")
+        if self.mode == "declined":
+            raise SubagentStopDeclined(f"No task found with ID: ta\nkey {FAKE_SECRET} " + "x" * 400)
 
 
 class Route(Daemonised):
@@ -570,6 +627,31 @@ class Route(Daemonised):
         self.assertEqual(self.owner("POST", self.path(), {})["stop"], "stopping")
         self.assertEqual(self.provider.calls, ["cl:toolu_a"] * 4)
 
+    def test_the_clis_refusal_is_its_own_409_and_mark(self):
+        """Review of #216: the CLI's explicit refusal is neither "unconfirmed"
+        nor offered again as if it timed out."""
+        self.begin()
+        self.bus()
+        self.provider.mode = "declined"
+        payload = self.refused()
+        self.assertTrue(payload.get("refused"))
+        self.assertNotIn("unconfirmed", payload)
+        self.assertTrue(payload["error"].startswith("The CLI refused the stop: No task found with ID: ta"), payload)
+        self.assertNotIn(FAKE_SECRET, json.dumps(payload))
+        self.assertNotIn("\n", payload["error"])
+        self.assertLessEqual(len(payload["error"]), 160)
+        row = self.rows()["cl:toolu_a"]
+        self.assertEqual(row["stop"], "refused")
+        self.assertIn("No task found", row["stop_error"])
+        self.assertNotIn(FAKE_SECRET, json.dumps(row))
+        records = [r for r in self.bus() if r.get("kind") == "subagent"]
+        self.assertTrue(any(r["data"].get("stop") == "refused" for r in records))
+        self.assertNotIn("No task found", json.dumps(records))       # the reason never rides the bus
+        for r in records:
+            self.assertLessEqual(set(r["data"]), S_BUS_KEYS, r)
+        self.provider.go.set()
+        self.idle()
+
     def test_without_a_provider_stop_or_a_session(self):
         self.begin()
         del Stoppable.stop_subagent           # restored below
@@ -631,7 +713,7 @@ class Route(Daemonised):
 
 _stop_subagent = Stoppable.stop_subagent
 S_BUS_KEYS = {"sid", "op", "status", "depth", "background", "started_at", "entries",
-              "task_id", "parent_sid", "ended_at", "declined", "stop", "stop_requested_at"}
+              "task_id", "parent_sid", "ended_at", "declined", "stop", "stop_requested_at"}  # never stop_error
 
 
 class Record(unittest.TestCase):
@@ -657,6 +739,31 @@ class Record(unittest.TestCase):
             self.assertNotIn("stop", row)
             self.assertEqual(again.begin_stop(thread, "cl:a", None)[0], "ended")
             self.assertEqual(again.begin_stop(thread, "cl:zz", None)[0], "unknown")
+
+    def test_nothing_is_asked_or_written_once_closed(self):
+        """Review of #216: after `close()` (the daemon stopping) no Stop is
+        begun and a late provider answer writes nothing."""
+        with tempfile.TemporaryDirectory() as root:
+            base = Path(root)
+            stores = SimpleNamespace(threads=SimpleNamespace(
+                path=lambda tid: base / tid / "log.jsonl", get=lambda tid: None))
+            (base / "t").mkdir()
+            thread = SimpleNamespace(id="t")
+            published = []
+            rec = S.SubagentRecords(stores, published.append, lambda tid: "k1")
+            for sid in ("cl:a", "cl:b"):
+                rec.record(thread, None, "k1", S.SubagentRecords.prepare(Event(K.SUBAGENT, "t", {
+                    "sid": sid, "op": "started", "status": "running"}), None))
+            outcome, token = rec.begin_stop(thread, "cl:a", "k1")
+            self.assertEqual(outcome, "started")
+            rec.close()
+            size, sent = (base / "t" / S.FILE).stat().st_size, len(published)
+            self.assertEqual(rec.begin_stop(thread, "cl:b", "k1")[0], "closed")
+            rec.stop_failed(thread, "cl:a", token, refused="late")
+            rec.stop_failed(thread, "cl:a", token, unconfirmed=True)
+            rec.stop_sent(thread, "cl:a", token)
+            self.assertEqual(((base / "t" / S.FILE).stat().st_size, len(published)), (size, sent))
+            self.assertNotIn("stop", rec.list("t")[1])
 
     def test_a_provider_event_cannot_set_the_mark(self):
         prepared = S.SubagentRecords.prepare(Event(K.SUBAGENT, "t", {

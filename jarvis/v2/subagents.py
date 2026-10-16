@@ -36,7 +36,10 @@ stop: if the CLI has said nothing after `STOP_CONFIRM_S`, the record says
 `stop: "unconfirmed"` — the request went out and the child may still be
 running — and the owner may press Stop again. Between turns nobody reads the
 CLI (SV-6), so a child stopped then is confirmed only by the next message's
-reading. Ids, a state and a time: the bus may carry it.
+reading. If the CLI answers the request with a refusal of its own ("no
+such task"), the record says `stop: "refused"`, and the CLI's reason
+(scrubbed, one line) goes to the owner's routes only, as `stop_error`. Ids,
+a state and a time: the bus may carry it, never the reason.
 
 A tool entry carries its label (computed by the daemon outside its lock, as
 for the parent's calls) and outcome, never its arguments or result summary
@@ -98,7 +101,8 @@ REASON_CAP = 80
 SID = re.compile(r"(?:cl|cx):[A-Za-z0-9_-]{1,128}")
 _ID = re.compile(r"[A-Za-z0-9_-]{1,128}")
 STATUSES = ("running", "backgrounded", "done", "failed", "stopped")
-STOP_STATES = ("stopping", "unconfirmed")
+STOP_STATES = ("stopping", "unconfirmed", "refused")
+STOP_ERROR_CAP = 160
 STOP_CONFIRM_S = 15.0                # the CLI's word on an owner's Stop, before "unconfirmed"
 LIVE = ("running", "backgrounded")
 OPS = ("started", "progress", "finished")
@@ -108,7 +112,7 @@ _BROWSER_ACT = ("hud_browser_act", "mcp__jarvis__hud_browser_act")
 _CHILD_FIELDS = ("key", "turn_id", "status", "task_id", "parent_sid", "depth", "background",
                  "name", "kind", "last_tool", "tokens", "tool_uses", "duration_ms",
                  "stop_reason", "started_at", "ended_at", "total", "declined", "brief",
-                 "stop", "stop_at")
+                 "stop", "stop_at", "stop_error")
 
 
 def valid_sid(value: Any) -> bool:
@@ -189,6 +193,7 @@ class _Child:
     brief: str = ""                    # the orchestrator's brief to it (SV-3): the transcript route's alone
     stop: str | None = None            # the owner's Stop (SV-4): "stopping" | "unconfirmed", while live
     stop_at: str | None = None         # when that Stop was asked for
+    stop_error: str | None = None      # the CLI's refusal of it: the owner's routes alone, never the bus
     calls: dict = field(default_factory=dict)   # call_id -> its entry, while kept
 
     def summary(self) -> dict:
@@ -206,6 +211,8 @@ class _Child:
         if self.declined:
             out["declined"] = self.declined
         self._stop_fields(out)
+        if out.get("stop") == "refused" and self.stop_error:
+            out["stop_error"] = self.stop_error
         return out
 
     def _stop_fields(self, out: dict) -> None:
@@ -363,12 +370,15 @@ class SubagentRecords:
         """Mark child `sid` "stopping" before its provider is asked, so a
         second press is not a second request. -> (outcome, token): outcome is
         "started" (go on and ask the provider), "stopping" (already on its
-        way: nothing to do), "unknown", "ended", or "elsewhere" (it ran under
-        another session than `key`, now gone)."""
+        way: nothing to do), "unknown", "ended", "elsewhere" (it ran under
+        another session than `key`, now gone) or "closed" (the record is
+        closed: the daemon is stopping)."""
         token = 0
         with self._lock:
             child = self._state(thread.id).children.get(sid)
-            if child is None:
+            if self._closed:
+                outcome = "closed"         # the daemon is stopping: nothing more is asked
+            elif child is None:
                 outcome = "unknown"
             elif child.status not in LIVE:
                 outcome = "ended"
@@ -398,18 +408,24 @@ class SubagentRecords:
             self._stops[(thread.id, sid)] = (token, timer)
             timer.start()
 
-    def stop_failed(self, thread, sid: str, token: int, *, unconfirmed: bool) -> None:
-        """The provider refused (nothing was sent: the mark goes) or could
-        not say whether the CLI took it (`unconfirmed`)."""
+    def stop_failed(self, thread, sid: str, token: int, *, unconfirmed: bool = False,
+                    refused: str | None = None) -> None:
+        """The provider did not send it (the mark goes), could not say
+        whether the CLI took it (`unconfirmed`), or the CLI refused it
+        (`refused`: its reason, kept for the owner's routes). Nothing is
+        written once the record is closed."""
         with self._lock:
             held = self._stops.get((thread.id, sid))
-            if held is None or held[0] != token:
+            if self._closed or held is None or held[0] != token:
                 return
             self._cancel_timer(thread.id, sid)
             child = self._state(thread.id).children.get(sid)
             if child is not None and child.status in LIVE and child.stop == "stopping":
-                self._keep(thread.id, None, child.key,
-                           self._stop_line(sid, "unconfirmed" if unconfirmed else None))
+                stop = "refused" if refused is not None else "unconfirmed" if unconfirmed else None
+                line = self._stop_line(sid, stop)
+                if refused is not None:
+                    line["data"]["stop_error"] = clean_line(refused, STOP_ERROR_CAP) or "no reason given"
+                self._keep(thread.id, None, child.key, line)
         self._flush()
 
     def _unconfirmed(self, thread_id: str, sid: str, token: int) -> None:
@@ -523,9 +539,12 @@ class SubagentRecords:
                 if stop == "stopping" or stop is None:
                     child.stop_at = at if stop else None
                 child.stop = stop
+                error = data.get("stop_error")
+                child.stop_error = (clean_line(error, STOP_ERROR_CAP) or None) \
+                    if stop == "refused" and isinstance(error, str) else None
             if child.status not in LIVE or (child.status in LIVE and not was_live):
                 # Ended (or live again, a Codex child's new turn): no Stop is pending.
-                child.stop = child.stop_at = None
+                child.stop = child.stop_at = child.stop_error = None
             return child, op
         entry = dict(data)
         if entry.get("role") == "tool_finished":
@@ -590,6 +609,8 @@ class SubagentRecords:
             child.brief = ""
         if child.stop not in STOP_STATES or child.status not in LIVE:
             child.stop = child.stop_at = None
+        if child.stop != "refused" or not isinstance(child.stop_error, str):
+            child.stop_error = None
         state.children[sid] = child
         for entry in data.get("entries") or ():
             if isinstance(entry, dict):

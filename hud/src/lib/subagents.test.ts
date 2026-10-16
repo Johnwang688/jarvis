@@ -256,6 +256,9 @@ describe("the owner's Stop on one child (SV-4)", () => {
     expect(cleanRow({ ...row("cl:d"), stop: "maybe", stoppable: "yes" })!.stop).toBeUndefined();
     expect(cleanBus({ ...bus("cl:a"), stop: "unconfirmed" })!.stop).toBe("unconfirmed");
     expect(cleanBus({ ...bus("cl:a"), status: "done", stop: "stopping" })!.stop).toBeUndefined();
+    const refused = cleanRow({ ...row("cl:e"), stop: "refused", stop_error: "No task\nfound" })!;
+    expect([refused.stop, refused.stop_error]).toEqual(["refused", "No task found"]);
+    expect(cleanRow({ ...row("cl:f"), stop: "stopping", stop_error: "x" })!.stop_error).toBeUndefined();
   });
 
   it("the bus sets and clears the mark; an end clears it and the offer", () => {
@@ -278,6 +281,10 @@ describe("the owner's Stop on one child (SV-4)", () => {
     expect(stopView(row("cl:a", { stoppable: false, stop_unavailable: "Why not." }), false))
       .toEqual({ kind: "cant", title: "Why not." });
     expect(stopView(row("cl:a", { status: "done", stoppable: true }), false).kind).toBe("none");
+    // The CLI refused it: a note with its reason, never "Stop again" (review of #216).
+    expect(stopView(row("cl:a", { stoppable: true, stop: "refused", stop_error: "No task found." }), false))
+      .toEqual({ kind: "refused", title: "The CLI refused the stop: No task found." });
+    expect(stopView(row("cl:a", { stoppable: true, stop: "refused" }), false).kind).toBe("refused");
     expect(stopView(row("cl:a"), false).kind).toBe("none");     // an older daemon offers nothing
     const codex = stopView(row("cx:t", { stoppable: true }), false);
     expect(codex.kind === "button" && codex.title).toBe(STOP_HELP.codex);

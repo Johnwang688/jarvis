@@ -28,7 +28,7 @@
 import { useEffect, useSyncExternalStore } from "react";
 import {
   applyBus, cleanBus, cleanList, cleanTranscript, foldList, isLive, stopView,
-  type SubBus, type Subagent, type SubagentRef, type SubTranscript,
+  type StopState, type SubBus, type Subagent, type SubagentRef, type SubTranscript,
 } from "../lib/subagents";
 
 export const THREAD_CAP = 32;
@@ -236,10 +236,11 @@ export function createSubagentStore(fetchers: Fetchers) {
   }
 
   /** Lay the daemon's word on a live row at once (the bus says it too). */
-  function markRow(threadId: string, sid: string, stop: "stopping" | "unconfirmed") {
+  function markRow(threadId: string, sid: string, stop: StopState, why = "") {
     const t = threads.get(threadId);
     if (!t) return;
-    const rows = t.rows.map((r) => (r.sid === sid && isLive(r.status) && r.stop !== stop ? { ...r, stop } : r));
+    const rows = t.rows.map((r) => (r.sid === sid && isLive(r.status) && r.stop !== stop
+      ? { ...r, stop, ...(why ? { stop_error: why } : {}) } : r));
     if (rows.some((r, i) => r !== t.rows[i])) setRows(threadId, t, rows);
   }
 
@@ -263,10 +264,16 @@ export function createSubagentStore(fetchers: Fetchers) {
         setStop(threadId, sid, NO_STOP);
       } catch (e) {
         const body = e && typeof e === "object" ? (e as { body?: unknown }).body : null;
-        const unconfirmed = !!body && typeof body === "object" && (body as { unconfirmed?: unknown }).unconfirmed === true;
-        if (unconfirmed) markRow(threadId, sid, "unconfirmed");
+        const flag = (key: string) => !!body && typeof body === "object" && (body as Record<string, unknown>)[key] === true;
         const message = e instanceof Error && e.message ? e.message : "Could not stop this sub-agent.";
-        setStop(threadId, sid, { pending: false, error: message.slice(0, 200) });
+        if (flag("refused")) {
+          // The CLI said no: the row says so (its reason on the note), and offers no Stop again.
+          markRow(threadId, sid, "refused", message.replace(/^The CLI refused the stop: /, "").slice(0, 160));
+          setStop(threadId, sid, NO_STOP);
+        } else {
+          if (flag("unconfirmed")) markRow(threadId, sid, "unconfirmed");
+          setStop(threadId, sid, { pending: false, error: message.slice(0, 200) });
+        }
       }
       schedule(threadId, SOON_MS);
     },

@@ -1445,3 +1445,11 @@ and 5 (never spoken).
   enforces `owner_only` too); screenshots go to `SV3_SHOTS`.
 - **Deploying is the owner's step**: `jarvis restart` for the daemon half,
   then `jarvis hud rebuild` and reload the window.
+
+**Review of #216 (2026-10-15).** "stopping…" is `aria-disabled` with a guard,
+not `disabled`, so a keyboard press keeps focus on the button (only an
+approval card still sets `disabled`). "Can't stop" and the new "Stop
+refused" (the CLI's own refusal, its reason from the owner's list) are
+focusable notes (`tabIndex` 0) described by their reason (`aria-describedby`
+to a visually hidden span, `.sa-sr`), so the reason is reachable without a
+mouse; a refused child offers no Stop again. Face check: 74 checks.

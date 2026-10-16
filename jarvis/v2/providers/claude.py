@@ -103,6 +103,7 @@ from ..provider import (
     SessionLost,
     SteerRefused,
     SubagentNotLive,
+    SubagentStopDeclined,
     SubagentStopUnsupported,
     Usage,
     UserMessage,
@@ -532,6 +533,19 @@ def parse_version(text: str | None) -> tuple[int, int, int] | None:
     """`"2.1.295"` -> (2, 1, 295). None for anything that is not a version."""
     match = _VERSION.match((text or "").strip())
     return tuple(int(part) for part in match.groups()) if match else None  # type: ignore[return-value]
+
+
+def _late_stop(thread_id: str, sid: str, done: Any) -> None:
+    """The late outcome of a Stop whose answer the route stopped waiting for."""
+    try:
+        error = done.exception()
+    except BaseException:  # noqa: BLE001 — cancelled with the loop
+        return
+    if error is None:
+        LOG.info("claude %s: the CLI took the stop of %s late", thread_id, sid)
+    else:
+        LOG.warning("claude %s: the stop of %s ended without an answer (%s)",
+                    thread_id, sid, type(error).__name__)
 
 
 def _known_cli_version() -> tuple[int, int, int] | None:
@@ -2221,22 +2235,35 @@ class ClaudeProvider:
         (SV-0 finding 2). Returns once the CLI took the request; the child's
         end is the CLI's own later `killed`/`stopped`, read like any other and
         then said as "stopped by the owner". Raises `SubagentNotLive` or
-        `SubagentStopUnsupported` before anything is sent; a request the CLI
-        did not answer within STOP_CONTROL_TIMEOUT_S raises TimeoutError
-        (it may still act on it)."""
+        `SubagentStopUnsupported` before anything is sent; the CLI's own
+        refusal (an error control response) raises `SubagentStopDeclined`
+        with its reason; a request the CLI did not answer within
+        STOP_CONTROL_TIMEOUT_S raises TimeoutError (it may still act on it).
+
+        On that timeout the request is **not** cancelled: cancelling the
+        coroutine would skip the SDK's own cleanup and leave its private
+        `pending_control_responses` entry behind. It is left to finish, so
+        the SDK's own 60 s control timeout (or the CLI's late answer) removes
+        that entry the way the SDK means it to; the late outcome is logged."""
         session, child = self._stoppable(h, sid)
         task_id = child.task_id
-        child.owner_stop = True
+        with session.mutex:
+            child.owner_stop = True
         future = asyncio.run_coroutine_threadsafe(session.client.stop_task(task_id), session.loop)
         try:
             future.result(STOP_CONTROL_TIMEOUT_S)
         except concurrent.futures.TimeoutError:
-            future.cancel()
+            future.add_done_callback(lambda done, sid=sid: _late_stop(session.thread_id, sid, done))
             raise TimeoutError(f"Claude Code did not answer the stop within "
                                f"{int(STOP_CONTROL_TIMEOUT_S)} s") from None
-        except BaseException:
+        except BaseException as exc:
             # Refused or not delivered: whatever stops it later is not this.
-            child.owner_stop = False
+            with session.mutex:
+                child.owner_stop = False
+            if type(exc) is Exception and not str(exc).startswith("Control request timeout"):
+                # The SDK raises a bare Exception carrying the CLI's error
+                # control response (`_internal/query.py`): the CLI's refusal.
+                raise SubagentStopDeclined(_safe(str(exc))[:160] or "no reason given") from None
             raise
 
     def interrupt(self, h: SessionHandle) -> None:

@@ -121,12 +121,14 @@ SUBAGENT_STOP_UNSUPPORTED = "This chat's provider cannot stop one sub-agent by i
 class SubagentStopRefused(DaemonError):
     """The owner's Stop on a sub-agent was not sent (409): `stale` when it is
     no longer running, `supported` False when its CLI cannot stop it alone,
-    `unconfirmed` when it went out but the CLI did not say it took it."""
+    `unconfirmed` when it went out but the CLI did not say it took it,
+    `refused` when the CLI answered it with a refusal of its own."""
 
     def __init__(self, message: str, *, stale: bool = False, supported: bool = True,
-                 unconfirmed: bool = False):
+                 unconfirmed: bool = False, refused: bool = False):
         super().__init__(message)
         self.stale, self.supported, self.unconfirmed = stale, supported, unconfirmed
+        self.refused = refused
 
     def body(self) -> dict:
         out: dict = {"error": str(self)}
@@ -137,6 +139,8 @@ class SubagentStopRefused(DaemonError):
             out["reason"] = str(self)
         if self.unconfirmed:
             out["unconfirmed"] = True
+        if self.refused:
+            out["refused"] = True
         return out
 
 
@@ -1930,7 +1934,7 @@ class Daemon:
         `SubagentStopRefused` (409, a plain sentence) when nothing can be
         sent, LookupError for an unknown child."""
         from .approvals import clean_line
-        from .provider import SubagentNotLive, SubagentStopUnsupported
+        from .provider import SubagentNotLive, SubagentStopDeclined, SubagentStopUnsupported
         thread = self.require(self.stores.threads, thread_id)
         live = self._subagent_session(thread.id)
         if live is None:
@@ -1940,6 +1944,8 @@ class Daemon:
         outcome, token = self.subagents.begin_stop(thread, sid, key)
         if outcome == "unknown":
             raise LookupError("no such sub-agent on this thread")
+        if outcome == "closed":
+            raise SubagentStopRefused("Jarvis is stopping, so nothing more is sent to the CLI.", stale=True)
         if outcome in ("ended", "elsewhere"):
             raise SubagentStopRefused(
                 "This sub-agent has already ended." if outcome == "ended" else SUBAGENT_NO_SESSION,
@@ -1954,6 +1960,19 @@ class Daemon:
             self.subagents.stop_failed(thread, sid, token, unconfirmed=False)
             raise SubagentStopRefused(clean_line(str(exc), 200) or SUBAGENT_STOP_UNSUPPORTED,
                                       supported=False) from None
+        except SubagentStopDeclined as exc:
+            # The CLI's own answer: it got the request and turned it down.
+            # Not "unconfirmed" — pressing Stop again would only be refused again.
+            from .redact import scrub_text
+            try:
+                # As a child's words are (`subagents._words`): Jarvis's own
+                # credential values, the known key shapes, tokens.
+                reason = clean_line(scrub_text(str(exc)[:2000]), 120) or "no reason given"
+            except Exception:  # noqa: BLE001 — an unscrubbable reason is not shown
+                reason = "no reason given"
+            self.subagents.stop_failed(thread, sid, token, refused=reason)
+            raise SubagentStopRefused(f"The CLI refused the stop: {reason.rstrip('.')}.",
+                                      refused=True) from None
         except SubagentNotLive as exc:
             self.subagents.stop_failed(thread, sid, token, unconfirmed=False)
             raise SubagentStopRefused(clean_line(str(exc), 200) or "This sub-agent has already ended.",

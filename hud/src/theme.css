@@ -472,9 +472,13 @@ button.tree-row.morechats:focus-visible { box-shadow: inset 0 0 0 1px var(--acce
 }
 .sa-stop:hover:not(:disabled) { color: var(--text); border-color: var(--red); background: var(--red-soft); }
 .sa-stop:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }
-.sa-stop.stopping:disabled { opacity: 1; color: var(--amber); border-color: var(--amber-line); border-style: dashed; }
+.sa-stop.stopping { color: var(--amber); border-color: var(--amber-line); border-style: dashed; cursor: default; }
+.sa-stop.stopping:hover { color: var(--amber); background: transparent; border-color: var(--amber-line); }
 .sa-stop[data-state="unconfirmed"] { color: var(--amber); border-color: var(--amber-line); }
 .sa-cant { flex: 0 0 auto; padding: 3px 0; color: var(--text-muted); font: 11px var(--mono); cursor: help; }
+.sa-cant:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }
+/* Read by a screen reader (the note's description), not drawn. */
+.sa-sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 .sa-stop-error { flex: 0 1 auto; min-width: 0; padding: 3px 0; color: var(--red); font: 11px var(--mono); white-space: normal; }
 .sa-pane { display: flex; flex-direction: column; min-height: 0; }
 .sa-head {
