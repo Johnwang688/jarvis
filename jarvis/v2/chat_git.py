@@ -737,13 +737,16 @@ def _fetch(mirror: Path, target: Target) -> str:
 
 _NET_GIT = frozenset({"push", "fetch", "pull", "ls-remote"})
 _LOCAL = re.compile(r"(/|\./|\.\./|~|file:)")
+_EXPANDS = frozenset("$`*?[{")          # what makes a remote word unsure (`_unsure`)
 
 
 def raw_remote(command) -> bool:
     """True when the line surely runs `gh`, or git push/fetch/pull/ls-remote
-    against a remote that is not a local path. Unsure (an expansion where the
-    program or remote stands, a line too complex to walk) is False: the
-    normal widening ask, never a silent decline."""
+    against a remote that is not a local path. Unsure is False: the normal
+    widening ask, never a silent decline — an expansion or a glob where the
+    program or remote stands (`$G push`, `git push "$R" main`), a program a
+    wrapper may not run at all (`nice --bogus gh …`, where `--bogus` may take
+    `gh` as its value: `prog.certain` False), a line too complex to walk."""
     if not isinstance(command, str) or not command.strip():
         return False
     from . import merge_gate
@@ -767,21 +770,38 @@ def _remote_prog(prog, merge_gate) -> bool:
     if stem == "gh":
         return True
     if stem == "git-push":
-        return _remote_arg([str(a) for a in prog.args])
+        return _remote_arg(list(prog.args))
     if stem != "git":
         return False
-    args = [str(a) for a in prog.args]
+    args = list(prog.args)
     i = 0
-    while i < len(args) and args[i].startswith("-"):
-        i += 2 if args[i] in merge_gate._GIT_GLOBAL_VALUES else 1
-    if i >= len(args) or args[i] not in _NET_GIT:
+    while i < len(args) and str(args[i]).startswith("-"):
+        i += 2 if str(args[i]) in merge_gate._GIT_GLOBAL_VALUES else 1
+    if i >= len(args) or str(args[i]) not in _NET_GIT:
         return False
     return _remote_arg(args[i + 1:])
 
 
-def _remote_arg(rest: list[str]) -> bool:
-    remote = next((a for a in rest if a != "--" and not a.startswith("-")), None)
-    return remote is None or not _LOCAL.match(remote)
+def _remote_arg(rest: list) -> bool:
+    """Whether the remote the words name is surely not a local path: none
+    named (the configured remote), or a literal that is not one. A remote
+    only known when the line runs (`"$R"`, `$(…)`, a glob) is unsure."""
+    remote = next((a for a in rest if str(a) != "--" and not str(a).startswith("-")), None)
+    if remote is None:
+        return True
+    if _unsure(remote):
+        return False
+    return not _LOCAL.match(str(remote))
+
+
+def _unsure(word) -> bool:
+    """A word bash will expand or glob (`rules._Word`'s active characters;
+    any such character in a word read without that mask)."""
+    text = str(word)
+    active = getattr(word, "active", None)
+    if active is None or len(active) != len(text):
+        return any(c in _EXPANDS for c in text)
+    return any(on and c in _EXPANDS for c, on in zip(text, active))
 
 
 __all__ = ["DANGEROUS", "POINTER", "Plan", "Refused", "TOOLS", "Target", "execute", "gate_line",

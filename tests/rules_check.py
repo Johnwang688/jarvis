@@ -2643,10 +2643,43 @@ def review_48_delta_checks() -> None:
     an allowlist entry for every stem on it (`permissions.allows`), and put
     to the owner through real `dispatch` (not run on a no); `REVIEW_48_DELTA_DENY` is DENY
     everywhere, never run or asked; `REVIEW_48_DELTA_ORDINARY` is never DENY."""
-    from jarvis import config, permissions
+    from jarvis import config
     from jarvis import protected_state as S
 
     stems = _OWNER_OPS_STEMS + ("lsof", "fuser", "ps", "grep", "awk", "cat", "cut", "ss", "netstat")
+    # From any checkout, none of these is refused for its cost, and none
+    # hangs the permit: the guard itself, wherever the tests run.
+    import time
+    for command in (*REVIEW_48_DELTA_MAIN, *REVIEW_48_DELTA_ASK):
+        start = time.perf_counter()
+        assert S.owner_op(command) is None, f"refused, not asked: {command!r}"
+        assert rules.decide(command).decision != rules.DENY, command
+        assert time.perf_counter() - start < 2.0, f"matched without bound: {command!r}"
+    # The verdicts below are the owner's checkout's. Which patterns can be
+    # set aside cheaply, and what matching the rest costs, depend on the
+    # daemon's own command line, which starts with REPO_ROOT
+    # (`_daemon_command_lines`): a checkout whose path holds an `x`, or is
+    # long enough, turns `.*.*.*.*x` from "cannot match" into "too costly to
+    # judge" (ASK) — the guard working, not failing. So the daemon's command
+    # line is pinned to a path of the owner's checkout's shape, as review 2's
+    # budget check does; the budgets (`_REGEX_BUDGET`, `_LINE_REGEX_BUDGET`)
+    # are untouched.
+    saved_root = config.REPO_ROOT
+    config.REPO_ROOT = Path("/home/u/projects/Jarvis")
+    try:
+        _review_48_delta_verdicts(stems)
+    finally:
+        config.REPO_ROOT = saved_root
+    print(f"ok  delta review of #48: {len(REVIEW_48_DELTA_MAIN)} costly patterns keep main's verdict, "
+          f"{len(REVIEW_48_DELTA_ASK)} too complex to judge are asked (never covered, never DENY), "
+          f"{len(REVIEW_48_DELTA_DENY)} /proc and socket sources refused, "
+          f"{len(REVIEW_48_DELTA_ORDINARY)} ordinary lines untouched")
+
+
+def _review_48_delta_verdicts(stems) -> None:
+    from jarvis import config, permissions
+    from jarvis import protected_state as S
+
     with gate_home():
         config.ALLOWLIST_PATH.write_text(json.dumps(
             [{"tool": "run_command", "prefix": stem} for stem in stems]))
@@ -2690,10 +2723,6 @@ def review_48_delta_checks() -> None:
                         *REVIEW_48_DELTA_ORDINARY):
             assert S.owner_reading(command) == S.owner_reading(command, prefilter=False), command
         assert config.ALLOWLIST_PATH.read_text() == before
-    print(f"ok  delta review of #48: {len(REVIEW_48_DELTA_MAIN)} costly patterns keep main's verdict, "
-          f"{len(REVIEW_48_DELTA_ASK)} too complex to judge are asked (never covered, never DENY), "
-          f"{len(REVIEW_48_DELTA_DENY)} /proc and socket sources refused, "
-          f"{len(REVIEW_48_DELTA_ORDINARY)} ordinary lines untouched")
 
 
 def _redos_patterns() -> list[str]:

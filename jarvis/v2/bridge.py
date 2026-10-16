@@ -187,26 +187,67 @@ def route(handler, daemon, parts, query):
                      request_alive=_request_alive(handler.connection))
 
 
+def _unasked_refusal():
+    """`tools.Refusal` for the permit call just made when it was a DENY put
+    to nobody (`permissions.last_verdict`): the model reads why — a chat git
+    tool's `Refused` text, the strict profile — never "the user declined",
+    which is kept for the owner's no (#223's review, LOW 1). False otherwise."""
+    from jarvis import tools
+    from .permissions import last_verdict
+    from .provider import Decision
+    verdict = last_verdict()
+    if (verdict is not None and verdict.decision is Decision.DENY and not verdict.asked
+            and verdict.reason):
+        return tools.Refusal(verdict.reason)
+    return False
+
+
 def _approver(session, current):
     """The session's own gate for a dangerous tool: its permit, asked with
     `dangerous_tool=True` — the owner decides every call. A permit that cannot
-    take the keyword, that raises, or that answers anything but ALLOW, denies.
+    take the keyword, that raises, or that answers anything but ALLOW, denies;
+    a DENY nobody was asked about carries its reason (`_unasked_refusal`).
     Deliberately not `jarvis_human_backed`: no rules ALLOW stands in for it."""
+    from .permissions import last_verdict
     from .provider import Decision
     permit = getattr(session, "permit", None)
 
-    def approve(entry, arguments) -> bool:
+    def approve(entry, arguments):
         if permit is None or not current():
             return False
+        last_verdict()      # nothing from an earlier call is read as this one's
         try:
             decision = Decision(permit(entry.name, dict(arguments), None, dangerous_tool=True))
         except Exception:  # noqa: BLE001 — an unreadable answer is a denial
             return False
+        if decision is not Decision.ALLOW:
+            return _unasked_refusal()
         # The broker wait may outlive this turn or this exact session. Check
         # under the daemon lock again before dispatch can enter the tool.
-        return decision is Decision.ALLOW and current()
+        return current()
 
     return approve
+
+
+def _delegated(permit, name: str, arguments: dict, current):
+    """A Codex chat's nondangerous Jarvis tool: the session's exact permit
+    must ALLOW it first. None when it may run, else the refusal (the
+    permit's reason when it refused unasked, `_unasked_refusal`)."""
+    from jarvis import tools
+    from .permissions import last_verdict
+    from .provider import Decision
+    last_verdict()
+    try:
+        allowed = (current() and permit is not None
+                   and Decision(permit(name, dict(arguments), None)) is Decision.ALLOW)
+    except Exception:  # a missing or malformed permit never delegates
+        allowed = False
+    if allowed and current():
+        return None
+    refusal = _unasked_refusal() if not allowed else False
+    if isinstance(refusal, tools.Refusal):        # falsy, as an approver's no is
+        return tools.ToolResult(refusal.text)
+    return tools.ToolResult("Refused: this chat did not permit the Jarvis tool call.")
 
 
 def call(daemon, session, caller, name: str, arguments: dict, *, codex_context=None, request_alive=None) -> dict:
@@ -296,15 +337,9 @@ def call(daemon, session, caller, name: str, arguments: dict, *, codex_context=N
         # still need the exact session permit (STRICT/named always-ask).
         # Dangerous entries take dispatch's existing single owner gate.
         if caller.provider == "codex" and not tools.REGISTRY[name].dangerous:
-            from .provider import Decision
-            permit = getattr(session, "permit", None)
-            try:
-                allowed = (current() and permit is not None
-                           and Decision(permit(name, dict(arguments), None)) is Decision.ALLOW)
-            except Exception:  # a missing or malformed permit never delegates
-                allowed = False
-            if not allowed or not current():
-                return tools.ToolResult("Refused: this chat did not permit the Jarvis tool call.")
+            refused = _delegated(getattr(session, "permit", None), name, arguments, current)
+            if refused is not None:
+                return refused
         if not current() and not entry.desk_only:
             return tools.ToolResult("Refused: this chat turn is no longer current.")
         return tools.dispatch(name, json.dumps(arguments), approve=approve)

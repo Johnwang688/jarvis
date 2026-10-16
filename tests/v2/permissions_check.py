@@ -2423,10 +2423,30 @@ MERGE_GATE_ASK = (
     # MED-C of #222's last review: where the line runs text only refs are
     # blanked — a brace word a shell expands to a command is not one.
     ("git commit -m '{gh,pr,merge,1}' && git log -1 --format=%s | bash", _PR_UNSURE),
+    # The same brace word as an operand, not an option's value (which stays
+    # anyway since #225's LOW 1): only `_REF_WORD` keeps it visible.
+    ("git show '{gh,pr,merge,1}' | bash", _PR_UNSURE),
+    ("git add -- '{gh,pr,merge,1}' && git log -1 --format=%s | bash", _PR_UNSURE),
     ("PAGER=sh git log -1 --format=gh\\ pr\\ merge\\ 1", _PR_UNSURE),
     # Blanking a data option's value is anchored to its option: the same
     # text fed to a shell elsewhere on the line is still read.
     ("echo 'gh pr merge 1' | sh; git commit -m 'gh pr merge 1'", _PR_UNSURE),
+    # LOW 1 of #225's review: an output or message option's value in its own
+    # word stays where the line runs text, however ref-like (each was
+    # blanked, and the line None, on e181beb).
+    ("git commit -m mergePullRequest && git log -1 --format=%s | sh", _PR_UNSURE),
+    ("git commit --message mergePullRequest && git log -1 --format=%s | sh", _PR_UNSURE),
+    ("git commit -F pulls/5/merge && git log -1 --format=%s | sh", _PR_UNSURE),
+    ("git log -1 --format pulls/5/merge | sh", _PR_UNSURE),
+    ("git log -1 --pretty mergePullRequest | sh", _PR_UNSURE),
+    ("gh pr comment 5 --body mergePullRequest | sh", _PR_UNSURE),
+    ("gh pr comment 5 -b pulls/5/merge | sh", _PR_UNSURE),
+    ("gh pr create --title closePullRequest --fill | sh", _PR_UNSURE),
+    ("gh pr view 5 -q mergePullRequest | sh", _PR_UNSURE),
+    ("gh pr view 5 --jq mergePullRequest | sh", _PR_UNSURE),
+    ("gh pr view 5 --template mergePullRequest | sh", _PR_UNSURE),
+    ("gh pr view 5 -t mergePullRequest | sh", _PR_UNSURE),
+    ("gh api repos/o/r/pulls -F mergePullRequest | sh", _PR_UNSURE),
     # MED-3: `branchName: $b` read from `-f b=…`, or unsure.
     (_GQL_COMMIT + " -f b=main", _MAIN), (_GQL_COMMIT + " -F b=refs/heads/main", _MAIN),
     (_GQL_COMMIT + " -F b=@branch.txt", _PUSH_UNSURE), (_GQL_COMMIT, _PUSH_UNSURE),
@@ -2527,6 +2547,10 @@ MERGE_GATE_ORDINARY = (
     "PYTHONPATH=. python3 -m pytest && git push -u origin feature && gh pr create --base main",
     "PYTHONPATH=. python3 -m pytest && git push -u origin feature && gh pr create --base=main --fill",
     "FOO=1 make && git push -u origin feature && gh pr create -Bmain --fill",
+    # LOW 1 of #225's review: only an output or message option's value stays
+    # in its own word, by program: git's `-b`/`-t` name a ref, still blanked.
+    "PATH=/x:$PATH git checkout -b main && git push -u origin feature",
+    "PATH=/x:$PATH git checkout -t main && git push -u origin feature",
 )
 
 
