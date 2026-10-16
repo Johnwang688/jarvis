@@ -424,7 +424,8 @@ def names_vexcom(command: str) -> bool:
 #   `lssecret`, whatever the subcommand (they look up, search — `secret-tool
 #   search` prints secrets — store and clear); Python's `keyring` CLI with
 #   `get`, `set` or `del`; and any Python run with `-m keyring` (review of
-#   #218, MED 2: `uv run --with keyring python3 -m keyring get S U` was ALLOW);
+#   #218, MED 2: `uv run --with keyring python3 -m keyring get S U` was ALLOW),
+#   through runpy too (`-m runpy keyring`, the vex reading's `_module_run`);
 # - **a caller whose own arguments name the Secret Service**: a D-Bus client
 #   (`busctl`, `gdbus`, `dbus-send`, `qdbus*`, `dbus-monitor`), an
 #   interpreter or a shell, as the program of the segment, whose words (a
@@ -432,7 +433,9 @@ def names_vexcom(command: str) -> bool:
 #   (`org.freedesktop.secrets`, `org.freedesktop.Secret.*`,
 #   `/org/freedesktop/secrets/…`), the portal's `org.freedesktop.portal.Secret`
 #   or its backend `org.freedesktop.impl.portal.Secret`, gnome-keyring's own
-#   `org.gnome.keyring` or KWallet's `org.kde.kwalletd*`. A shell elsewhere on
+#   `org.gnome.keyring` or KWallet's `org.kde.kwalletd*`, or name a secret
+#   reader (`os.system('secret-tool …')`, `execSync(…)`; delta review of
+#   #218, LOW 2). A shell elsewhere on
 #   the line does not count: `grep org.gnome.keyring x | sh -c 'wc -l'` is
 #   not a call;
 # - **a session-bus monitor** (`_bus_monitor`): `dbus-monitor` unless
@@ -458,6 +461,7 @@ SECRET_SERVICE_DENIED = (
 _SECRET_READER_STEMS = frozenset({"secret-tool", "kwallet-query", "lssecret"})
 _SECRET_READERS = re.compile(r"(?<![\w.-])(?:secret-tool|kwallet-query|lssecret)(?![\w.-])")
 _KEYRING_VERBS = frozenset({"get", "set", "del"})
+_KEYRING_MODULE = re.compile(r"keyring(?:\.[\w.]*)?", re.IGNORECASE)
 _SECRET_SERVICE_NAMES = ("org.freedesktop.secret", "org/freedesktop/secret",
                          "org.freedesktop.portal.secret", "org.freedesktop.impl.portal.secret",
                          "org.gnome.keyring", "org/gnome/keyring", "org.kde.kwalletd",
@@ -483,24 +487,23 @@ def _is_caller(stem: str) -> bool:
             or bool(_SCRIPT_CALLER.fullmatch(stem)))
 
 
-def _names_service(text: str) -> bool:
-    return any(name in v.casefold() for v in _spellings(text) for name in _SECRET_SERVICE_NAMES)
+def _names_service_or_reader(text: str) -> bool:
+    """A caller's words name the Secret Service or a secret reader
+    (`os.system('secret-tool …')`, `execSync('secret-tool …')`; review of
+    #218's delta, LOW 2)."""
+    for v in _spellings(text):
+        folded = v.casefold()
+        if any(name in folded for name in _SECRET_SERVICE_NAMES) or _SECRET_READERS.search(folded):
+            return True
+    return False
 
 
 def _runs_keyring_module(args: list[str]) -> bool:
-    """`-m keyring` (or `keyring.cli`), `-mkeyring`, or `-m` ending a flag
-    cluster (`-Im keyring`)."""
-    for i, arg in enumerate(args):
-        if arg.startswith("-m") and len(arg) > 2 and not arg.startswith("--"):
-            module = arg[2:]
-        elif arg.startswith("-") and not arg.startswith("--") and arg.endswith("m"):
-            module = args[i + 1] if i + 1 < len(args) else ""
-        else:
-            continue
-        module = module.casefold()
-        if module == "keyring" or module.startswith("keyring."):
-            return True
-    return False
+    """`-m keyring` (or `keyring.cli`), `-mkeyring`, `-m` ending a flag
+    cluster (`-Im keyring`), or through runpy (`-m runpy keyring`; review of
+    #218's delta, LOW 1): the vex reading's `_module_run`, with keyring's
+    module, any case."""
+    return _module_run(args, _KEYRING_MODULE)
 
 
 def _bus_monitor(stem: str, args: list[str], assigned: bool) -> str | None:
@@ -544,7 +547,7 @@ def _program_verdict(word: str, args: list[str], assigned: bool) -> str | None:
         monitor = _bus_monitor(stem, words, assigned)
         if monitor:
             return monitor
-        if _is_caller(stem) and words and _names_service(" ".join(words)):
+        if _is_caller(stem) and words and _names_service_or_reader(" ".join(words)):
             return SECRET_SERVICE_DENIED
     return None
 
@@ -3700,19 +3703,21 @@ def _unquoted(word: str) -> str:
     return " ".join(str(w) for w in _shell_words(word))
 
 
-def _module_run(args) -> bool:
-    """`-m jarvis.v2.vex` in any spelling a Python takes (`-m X`, `-Im X`,
-    `-mX`), or `-m runpy jarvis.v2.vex`."""
+def _module_run(args, module: re.Pattern = _VEX_MODULE) -> bool:
+    """`-m jarvis.v2.vex` (or `module`: the Secret Service reading passes
+    keyring's) in any spelling a Python takes (`-m X`, `-Im X`, `-mX`), or
+    `-m runpy X` (`-mrunpy X` too)."""
     for i, token in enumerate(args):
         before = args[i - 1] if i else ""
-        if _VEX_MODULE.fullmatch(token) and (
+        if module.fullmatch(token) and (
                 before == "runpy" or before == "--module"
+                or re.fullmatch(r"-[A-Za-z]*mrunpy", before)
                 or (before.startswith("-") and not before.startswith("--") and before.endswith("m"))):
             return True
-        if token.startswith("--module=") and _VEX_MODULE.fullmatch(token.split("=", 1)[1]):
+        if token.startswith("--module=") and module.fullmatch(token.split("=", 1)[1]):
             return True
         glued = re.fullmatch(r"-[A-Za-z]*m(.+)", token)
-        if glued and _VEX_MODULE.fullmatch(glued.group(1)):
+        if glued and module.fullmatch(glued.group(1)):
             return True
     return False
 

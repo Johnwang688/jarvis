@@ -2577,7 +2577,9 @@ judged alone, its word and arguments read in every spelling
   search` prints secrets), store and clear. **Python's `keyring` CLI**
   (review of #218, MED 2: `uv run --with keyring python3 -m keyring get S U`
   was ALLOW): `keyring get|set|del` with `keyring` as the program, and any
-  Python run with `-m keyring` (`-mkeyring`, `-Im keyring`, `keyring.cli`).
+  Python run with `-m keyring` (`-mkeyring`, `-Im keyring`, `keyring.cli`),
+  through runpy too (`-m runpy keyring`, `-mrunpy keyring.cli`; delta review
+  of #218, LOW 1: the vex reading's `_module_run`, shared).
   The bare word is not refused (`pip install keyring`, `echo keyring get`).
 - **A caller whose own words name the Secret Service**: a D-Bus client
   (`busctl`, `gdbus`, `dbus-send`, `dbus-monitor`, `qdbus*`), an interpreter
@@ -2586,12 +2588,17 @@ judged alone, its word and arguments read in every spelling
   interfaces, `/org/freedesktop/secrets/…` paths, the portal's
   `org.freedesktop.portal.Secret` or its backend
   `org.freedesktop.impl.portal.Secret`, gnome-keyring's `org.gnome.keyring`
-  or KWallet's `org.kde.kwalletd*`. So `busctl --user call :1.42
+  or KWallet's `org.kde.kwalletd*`, **or name a secret reader** (delta
+  review of #218, LOW 2: `python3 -c "os.system('secret-tool lookup a b')"`,
+  `subprocess.run([…'secret-tool'…])`, `perl -e`, `ruby -e` and `node -e
+  "execSync('secret-tool …')"` were only asked). So `busctl --user call :1.42
   /org/freedesktop/secrets/collection/…`, `uv run gdbus …`, `bash -c '…'`
   and `python3 -c '… "org.freedesktop.secrets" …'` are refused. A shell
   elsewhere on the line does not count: `grep org.gnome.keyring x | sh -c
   'wc -l'` is not refused, while `bash -c "grep org.gnome.keyring x"` is (its
-  script names one; the accepted cost).
+  script names one; the accepted cost, which now covers a reader's name in
+  a shell string too: `bash -c "grep -n secret-tool x"`). `which
+  secret-tool`, `command -v secret-tool` and a commit message stay ordinary.
 - **A session-bus monitor**, judged per program: `dbus-monitor` unless
   `--system` (and no `--session`/`--address`), `gdbus monitor` unless
   `--system`/`-y`, `busctl monitor|capture` with `--user`, an address, a
@@ -2602,7 +2609,9 @@ judged alone, its word and arguments read in every spelling
 
 A line too complex for the walk (its caps) is read the first version's
 stricter way over its whole text (a reader's name anywhere, or a name and a
-caller anywhere).
+caller anywhere). Pinned: lines past the caps (`env ` three thousand times,
+then `secret-tool …`) are DENY, and the check proves the walk gave up on
+them first.
 
 **Not refused** (pinned): names in text (`grep`, `rg`, `echo`, commit
 messages, `gh pr create`/`comment` bodies), `busctl --user list`, `busctl
@@ -2613,7 +2622,9 @@ monitor` (the system bus), `dbus-monitor --system`, other services' calls
 
 **Limit, stated plainly: an accident guard, not a wall.** A script file that
 talks D-Bus (`python3 tool.py`), a unique name with a computed object path,
-or a program that is only an expansion is not seen. The real boundary is the
+or a program that is only an expansion is not seen. Nor is a recipe make
+reads from standard input (`… | make -f /dev/stdin`, a here-document to
+`make -f -`): its commands are not walked. A known gap, not fixed. The real boundary is the
 same-user one in the Browser notes (*Password store: the owner's keyring*).
 The terminal_read guard's older `secret-tool lookup` refusal is unchanged.
 

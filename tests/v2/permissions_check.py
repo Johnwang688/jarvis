@@ -1399,6 +1399,14 @@ SECRET_SERVICE_V2_DENY = (
     "eval 'secret-tool lookup a b'", "sh -c \"dbus-monitor\" > log",
     "${X:-secret-tool} lookup a b", "\"secret\"-tool lookup a b",
     "bash -c \"grep org.gnome.keyring x\"",
+    # runpy, and a caller whose words name a reader (review of #218's delta, LOW 1 and 2)
+    "python3 -m runpy keyring get s u", "python3 -m runpy keyring.cli get s u",
+    "python3 -mrunpy keyring get a b", "uv run python3 -m runpy keyring del a b",
+    "python3 -c \"import os; os.system('secret-tool lookup a b')\"",
+    "python3 -c \"import subprocess; subprocess.run(['secret-tool', 'lookup', 'a', 'b'])\"",
+    "perl -e 'system(\"secret-tool lookup a b\")'", "ruby -e 'system(\"secret-tool lookup a b\")'",
+    "node -e \"require('child_process').execSync('secret-tool lookup a b')\"",
+    "python3 -c 'import os; os.system(\"kwallet-query -r x y\")'",
     # a bus-address assignment voids the --system exemption (NIT 2)
     "DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/user/1000/bus dbus-monitor --system",
     "env DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/user/1000/bus busctl monitor",
@@ -1429,6 +1437,9 @@ SECRET_SERVICE_V2_ORDINARY = (
     "uv pip install secretstorage", "grep -rn dbus-monitor docs",
     # a monitor is judged per program: words elsewhere on the line do not make one
     "busctl --user list; echo capture", "busctl --user status | grep monitor",
+    # a reader named only in text, or the reader looked up, not run
+    "which secret-tool", "command -v secret-tool", "echo secret-tool lookup a b",
+    "python3 -m runpy pytest", "python3 tests/secret-tool_check.py",
 )
 
 

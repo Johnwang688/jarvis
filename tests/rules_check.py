@@ -1085,6 +1085,14 @@ SECRET_SERVICE_DENY = (
     "eval 'secret-tool lookup a b'", "sh -c \"dbus-monitor\" > log",
     "${X:-secret-tool} lookup a b", "\"secret\"-tool lookup a b",
     "bash -c \"grep org.gnome.keyring x\"",
+    # runpy, and a caller whose words name a reader (review of #218's delta, LOW 1 and 2)
+    "python3 -m runpy keyring get s u", "python3 -m runpy keyring.cli get s u",
+    "python3 -mrunpy keyring get a b", "uv run python3 -m runpy keyring del a b",
+    "python3 -c \"import os; os.system('secret-tool lookup a b')\"",
+    "python3 -c \"import subprocess; subprocess.run(['secret-tool', 'lookup', 'a', 'b'])\"",
+    "perl -e 'system(\"secret-tool lookup a b\")'", "ruby -e 'system(\"secret-tool lookup a b\")'",
+    "node -e \"require('child_process').execSync('secret-tool lookup a b')\"",
+    "python3 -c 'import os; os.system(\"kwallet-query -r x y\")'",
     # a bus-address assignment voids the --system exemption (NIT 2)
     "DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/user/1000/bus dbus-monitor --system",
     "env DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/user/1000/bus busctl monitor",
@@ -1115,6 +1123,9 @@ SECRET_SERVICE_ORDINARY = (
     "uv pip install secretstorage", "grep -rn dbus-monitor docs",
     # a monitor is judged per program: words elsewhere on the line do not make one
     "busctl --user list; echo capture", "busctl --user status | grep monitor",
+    # a reader named only in text, or the reader looked up, not run
+    "which secret-tool", "command -v secret-tool", "echo secret-tool lookup a b",
+    "python3 -m runpy pytest", "python3 tests/secret-tool_check.py",
 )
 
 
@@ -1131,6 +1142,21 @@ def secret_service_checks() -> None:
     for command in SECRET_SERVICE_ORDINARY:
         verdict = rules.decide(command)
         assert verdict.decision != rules.DENY, f"{command!r} must not be refused: {verdict}"
+    # A line past the walk's caps falls back to the stricter whole-text
+    # reading (review of #218's delta, LOW 4): the walk really gives up on
+    # these, and the line is still refused, not asked.
+    for command in ("env " * 3000 + "secret-tool lookup a b",
+                    "nohup " * 5000 + "busctl --user call org.freedesktop.secrets / x y",
+                    "env " * 3000 + "python3 -c \"import os; os.system('lssecret')\""):
+        walk = rules._Walk()
+        try:
+            walk.line(command, True, 0)
+            raise AssertionError(f"the walk judged a line past its caps: {command[-60:]!r}")
+        except rules.TooComplex:
+            pass
+        assert rules.secret_service_reading(command) == rules.SECRET_SERVICE_DENIED, command[-60:]
+        verdict = rules.decide(command)
+        assert verdict.decision == rules.DENY, f"{command[-60:]!r}: {verdict}"
     # Through v1's real dispatch, with an approver that says yes and an
     # allowlist entry for every stem on the lines: nothing runs, nobody is asked.
     asked: list[str] = []
@@ -1155,7 +1181,8 @@ def secret_service_checks() -> None:
     from jarvis import config
     config.ALLOWLIST_PATH.unlink()
     print(f"ok  secret service: {len(SECRET_SERVICE_DENY)} calls refused unasked even when "
-          f"allowlisted; {len(SECRET_SERVICE_ORDINARY)} ordinary lines not refused")
+          f"allowlisted, 3 more past the walk's caps by the whole-text reading; "
+          f"{len(SECRET_SERVICE_ORDINARY)} ordinary lines not refused")
 
 
 def background_agents_never_auto_approve_checks() -> None:
