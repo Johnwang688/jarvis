@@ -639,6 +639,9 @@ class _Session:
     # The owner's Stop requests on children (SV-4): request id -> sid, oldest
     # first, so their answers are known for what they are (CHILD_STOPS).
     child_stops: dict = field(default_factory=dict)
+    # Owner notes about the session's profile (`codex_config.session_notes`),
+    # said once, as the first turn starts.
+    notices: list = field(default_factory=list)
 
 
 class CodexProvider:
@@ -1035,7 +1038,8 @@ class CodexProvider:
                     accounting = Accounting(home / "usage.json", returned_id, False)
                 accounting.save()
                 return SessionHandle(thread.id, self.name, "codex:" + returned_id,
-                                     _Session(rpc, brief, permit, home, returned_id, accounting))
+                                     _Session(rpc, brief, permit, home, returned_id, accounting,
+                                              notices=list(codex_config.session_notes(home))))
             except BaseException:
                 rpc.close()
                 if brief.mcp_servers:
@@ -1053,6 +1057,13 @@ class CodexProvider:
 
     def _event(self, h, kind, **data):
         return Event(kind, h.thread_id, data)
+
+    def _turn_started(self, h, s):
+        """TURN_STARTED, then the session's owner notes, once per session."""
+        yield self._event(h, EventKind.TURN_STARTED)
+        notices, s.notices = s.notices, []
+        for text in notices:
+            yield self._event(h, EventKind.NOTICE, text=text)
 
     def _cooldown(self, model, *, failed=False, success=False):
         """Shared durable model backoff; the ledger can consume retry_at from ERROR."""
@@ -1151,7 +1162,7 @@ class CodexProvider:
                             self.interrupt(h)
                         if not started:
                             started = True
-                            yield self._event(h, EventKind.TURN_STARTED)
+                            yield from self._turn_started(h, s)
                     elif self._steer_answered(s, msg):
                         pass    # a steer's answer, refused or not: never the turn's failure
                     elif self._child_stop_answered(s, msg):
@@ -1190,7 +1201,7 @@ class CodexProvider:
                         s.rpc.reply(msg["id"], {"action": "decline", "content": None})
                         if not started:
                             started = True
-                            yield self._event(h, EventKind.TURN_STARTED)
+                            yield from self._turn_started(h, s)
                         yield self._event(h, EventKind.ERROR, fatal=False, message=MCP_DECLINED + _from_child(child))
                         continue
                     if child is None:
@@ -1204,7 +1215,7 @@ class CodexProvider:
                     # A child's turnId is its own: it never becomes s.turn_id.
                     if not started:
                         started = True
-                        yield self._event(h, EventKind.TURN_STARTED)
+                        yield from self._turn_started(h, s)
                     pending_request = _Request()
                     try:
                         yield from self._server_request(h, msg, pending_request, child=child)

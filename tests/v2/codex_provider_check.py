@@ -1154,10 +1154,17 @@ class Checks(unittest.TestCase):
     # class, by name only (`codex_config.key_like`), not one by one.
     HOME_KEYS = ("gha-deployer-key.json", "server.pem", "tls.key", "cert.p12", "cert.pfx",
                  "id_ed25519", "aws-credentials", "github-token.txt", "service-account.json",
-                 "service-account-prod.json", "prod-key.json", "vault-secret.txt")
+                 "service-account-prod.json", "prod-key.json", "vault-secret.txt",
+                 "credentials.py")      # the home's top keeps the broad `*credential*`
     HOME_PLAIN = ("id_ed25519.pub", "credentials.example.json", "notes.txt", "README.md")
-    ROOT_KEYS = ("server.pem", "service-account.json", "deploy-key.json", "credentials.json")
-    ROOT_PLAIN = ("tokens.json", "id_map.py", "tokenizer.py", "credentials.example.json", "README.md")
+    # At a repository's top `*credential*` is a data or key-like file only
+    # (no extension, or CREDENTIAL_DATA); source files stay readable.
+    ROOT_KEYS = ("server.pem", "service-account.json", "deploy-key.json", "credentials.json",
+                 "credentials", ".credentials", "aws-credentials.yaml", "Credentials.TOML",
+                 "db-credentials.env", "credentials.yml", "credentials.ini", "credentials.txt",
+                 "credentials.xml", "credentials.csv")
+    ROOT_PLAIN = ("tokens.json", "id_map.py", "tokenizer.py", "credentials.example.json", "README.md",
+                  "credentials.py", "credential_form.tsx", "credentials_test.go")
 
     def test_loose_key_files_are_closed_as_a_class(self):
         from jarvis.tools import secrets
@@ -1199,6 +1206,241 @@ class Checks(unittest.TestCase):
         self.assertEqual(fs.get(str(profile / "NTUSER.DAT")), "deny")
         self.assertFalse(any(v == "deny" and "{" in k for k, v in fs.items()))
         self.assertNotIn(str(profile / ".odd[1]"), fs)
+
+    # Review of #224's leftovers: listing /mnt/c has a deadline. A fake,
+    # blocking `windows_profiles` stands for a hung 9p mount.
+    def hang_windows(self):
+        release, entered = threading.Event(), threading.Event()
+        real = codex_config.windows_profiles
+
+        def hung():
+            entered.set()
+            release.wait(30)
+            return real()
+
+        def cleanup():
+            release.set()
+            stuck = codex_config._windows_blocked
+            if stuck is not None:
+                stuck.join(10)
+            codex_config._windows_blocked = None
+            codex_config._windows_warned = False
+
+        self.addCleanup(cleanup)
+        return hung, release, entered
+
+    def bounded(self, fn, limit=10.0):
+        """`fn()` on a thread with an active deadline: a hang fails the test
+        rather than stalling it. Returns the value and the wall time."""
+        box = {}
+
+        def run():
+            try:
+                box["value"] = fn()
+            except BaseException as exc:  # noqa: BLE001 (re-raised below)
+                box["error"] = exc
+
+        worker = threading.Thread(target=run, daemon=True)
+        began = time.monotonic()
+        worker.start()
+        worker.join(limit)
+        self.assertFalse(worker.is_alive(), "the call hung past its deadline")
+        if "error" in box:
+            raise box["error"]
+        return box.get("value"), time.monotonic() - began
+
+    def test_a_hung_windows_listing_is_skipped_within_its_deadline(self):
+        users, profile, _locked = self.windows_root()
+        hung, release, entered = self.hang_windows()
+        home = self.root / "data" / "codex" / "win-hang"
+        home.mkdir(parents=True)
+        secret = profile / ".ssh" / "id_ed25519"
+        with patch.dict(os.environ, {"JARVIS_WINDOWS_USERS": str(users)}), \
+                patch.object(codex_config, "WINDOWS_DEADLINE_S", 0.3), \
+                patch.object(codex_config, "windows_profiles", hung), \
+                self.assertLogs(codex_config.LOG, "WARNING") as logs:
+            _, took = self.bounded(lambda: codex_config.config_text(self.chat(), home))
+            self.assertTrue(entered.is_set())
+            self.assertGreaterEqual(took, 0.3)
+            self.assertLess(took, 3.0, "bounded by the deadline, not by the mount")
+            fs = codex_config.written(home)
+            self.assertFalse(self.blocked(fs, secret), "skipped, as for a drive not mounted")
+            self.assertFalse(any(str(users) in k for k in fs))
+            notes = codex_config.session_notes(home)
+            self.assertEqual(len(notes), 1)
+            self.assertIn("not closed for this session", notes[0])
+            for leak in (str(users), "someone", "Users", ".ssh"):
+                self.assertNotIn(leak, notes[0], "the note never shows a path")
+            # Still blocked: the next start skips at once, leaving no new thread.
+            threads = threading.active_count()
+            _, took = self.bounded(lambda: codex_config.config_text(self.chat(), home))
+            self.assertLess(took, 0.25)
+            self.assertEqual(threading.active_count(), threads)
+            self.assertEqual(len(codex_config.session_notes(home)), 1)
+            # The mount answers again: the next start closes the profiles.
+            release.set()
+            codex_config._windows_blocked.join(10)
+            self.bounded(lambda: codex_config.config_text(self.chat(), home))
+            self.assertTrue(self.blocked(codex_config.written(home), secret))
+            self.assertEqual(codex_config.session_notes(home), ())
+        self.assertEqual(len(logs.records), 1, "logged once per stall")
+        self.assertFalse(any(str(users) in line or "someone" in line for line in logs.output))
+
+    def test_a_slow_mount_is_logged_once_per_stall(self):
+        # Each start times out, and each listing ends before the next start:
+        # one warning for the stall; a listing that answers in time ends it.
+        users, profile, _locked = self.windows_root()
+        _hung, release, _entered = self.hang_windows()     # its cleanup resets the state
+        release.set()
+        real, slow = codex_config.windows_profiles, [True]
+
+        def sometimes_slow():
+            if slow[0]:
+                time.sleep(0.4)
+            return real()
+
+        def start():
+            self.bounded(lambda: codex_config.filesystem(self.chat()))
+            stuck = codex_config._windows_blocked
+            if stuck is not None:
+                stuck.join(10)
+
+        with patch.dict(os.environ, {"JARVIS_WINDOWS_USERS": str(users)}), \
+                patch.object(codex_config, "WINDOWS_DEADLINE_S", 0.1), \
+                patch.object(codex_config, "windows_profiles", sometimes_slow), \
+                self.assertLogs(codex_config.LOG, "WARNING") as logs:
+            start()
+            start()
+            self.assertEqual(len(logs.records), 1, "one stall, one line")
+            slow[0] = False
+            start()
+            slow[0] = True
+            start()
+        self.assertEqual(len(logs.records), 2, "a new stall after a good listing is logged again")
+
+    def test_a_windows_listing_error_still_refuses_the_session(self):
+        # The worker hands its errors back: a BriefRefused in the walk (too
+        # many entries, an unresolvable path) is never turned into a skip.
+        def refused():
+            raise BriefRefused("Too many entries to close the owner's dot-folders")
+
+        with patch.object(codex_config, "windows_profiles", refused):
+            with self.assertRaises(BriefRefused):
+                self.bounded(lambda: codex_config.filesystem(self.chat()))
+
+    def test_a_skipped_windows_closure_is_told_to_the_owner_once(self):
+        users, _profile, _locked = self.windows_root()
+        hung, release, _entered = self.hang_windows()
+        with patch.dict(os.environ, {"JARVIS_WINDOWS_USERS": str(users)}), \
+                patch.object(codex_config, "WINDOWS_DEADLINE_S", 0.2), \
+                patch.object(codex_config, "windows_profiles", hung), \
+                self.assertLogs(codex_config.LOG, "WARNING"):
+            h = self.start(brief=self.chat())
+        events = self.send(h)
+        self.assertEqual([e.kind for e in events[:2]], [K.TURN_STARTED, K.NOTICE])
+        self.assertEqual(set(events[1].data), {"text"})
+        self.assertEqual(events[1].data["text"], codex_config.session_notes(h.native.home)[0])
+        self.assertEqual(events[-1].kind, K.TURN_FINISHED)
+        self.assertNotIn(K.NOTICE, [e.kind for e in self.send(h)], "said once per session")
+        # A start whose listing answered says nothing.
+        release.set()
+        codex_config._windows_blocked.join(10)
+        quiet = self.start(thread=Thread("test-2", "p", Role.CHAT, ProviderName.CODEX), brief=self.chat())
+        self.assertNotIn(K.NOTICE, [e.kind for e in self.send(quiet)])
+
+    def test_symlinked_windows_profiles_are_followed_inside_the_root(self):
+        users, profile, locked = self.windows_root()
+        moved = users / "Public" / "stash" / "moved"    # reached only through a link
+        for rel in (".ssh/id_ed25519", "AppData/Roaming/GitHub CLI/hosts.yml", "Documents/n.txt"):
+            (moved / rel).parent.mkdir(parents=True, exist_ok=True)
+            (moved / rel).write_text("fixture")
+        far = self.root / "other-drive" / "Users" / "far"
+        (far / ".ssh").mkdir(parents=True)
+        (far / ".ssh" / "id_ed25519").write_text("fixture")
+        (users / "linked").symlink_to(moved, target_is_directory=True)
+        (users / "alias").symlink_to(profile, target_is_directory=True)
+        (users / "far").symlink_to(far, target_is_directory=True)
+        (users / "loop").symlink_to(users / "loop")
+        (users / "ping").symlink_to(users / "pong")
+        (users / "pong").symlink_to(users / "ping")
+        (users / "dangling").symlink_to(users / "gone")
+        (users / "up").symlink_to(users, target_is_directory=True)
+        (users / "file").symlink_to(profile / "Documents" / "notes.txt")
+        (users / "def").symlink_to(users / "Default", target_is_directory=True)
+        with patch.dict(os.environ, {"JARVIS_WINDOWS_USERS": str(users)}):
+            found, _ = self.bounded(codex_config.windows_profiles)
+            self.assertEqual(found, sorted([locked, profile, moved.resolve()]))
+            fs, _ = self.bounded(lambda: codex_config.filesystem(self.chat()))
+            for path in (moved / ".ssh" / "id_ed25519", users / "linked" / ".ssh" / "id_ed25519",
+                         moved / "AppData" / "Roaming" / "GitHub CLI" / "hosts.yml"):
+                with self.subTest(denied=path):
+                    self.assertTrue(self.blocked(fs, path))
+            self.assertFalse(self.blocked(fs, moved / "Documents" / "n.txt"))
+            self.assertFalse(self.blocked(fs, far / ".ssh" / "id_ed25519"),
+                             "a link out of the Users root is not a profile of this drive")
+            self.assertFalse(self.blocked(fs, users / "Default" / ".shared"))
+            denied = [Path(k) for k, v in fs.items() if v == "deny" and "*" not in k]
+            self.assertFalse(any(o in d.parents for d in denied for o in denied), "no nested denies")
+            self.assertFalse(any(Path(k).is_symlink() for k in map(str, denied)), "no symlink denies")
+            self.assertEqual(self.walk_reach(fs), [])
+
+    def test_a_glob_named_entry_denies_its_folder_when_nothing_there_is_needed(self):
+        home = self.closed_home()
+        for rel in (".config/tool[1]/token", ".config/odd{x}.json", ".cache/weird*/token",
+                    "top[1].pem", ".local/share/new?/token"):
+            (home / rel).parent.mkdir(parents=True, exist_ok=True)
+            (home / rel).write_text("fixture")
+        brief = replace(self.chat(), cwd=str(home / "projects" / "app"))
+
+        def literal(fs):
+            return [k for k, v in fs.items() if v == "deny" and not k.endswith(codex_config.ENV_GLOB)]
+
+        with self.home_patches(home):
+            config.CHAT_WORKTREES_DIR.mkdir(parents=True)
+            fs = codex_config.filesystem(brief)
+            self.assertEqual(fs.get(str(home / ".config")), "deny", "every entry was denied anyway")
+            self.assertTrue(self.blocked(fs, home / ".config" / "tool[1]" / "token"))
+            self.assertTrue(self.blocked(fs, home / ".config" / "gh" / "hosts.yml"))
+            self.assertFalse([k for k in literal(fs) if codex_config._GLOB_SYNTAX.search(k)])
+            # Residuals: a top, or a folder with kept entries, cannot be denied whole.
+            for rel in (".cache/weird*/token", "top[1].pem", ".local/share/new?/token"):
+                with self.subTest(residual=rel):
+                    self.assertFalse(self.blocked(fs, home / rel))
+            for rel in (".cache/uv/x", ".local/share/uv/python/cpython/bin/python3", "projects/app/main.py"):
+                with self.subTest(open=rel):
+                    self.assertFalse(self.blocked(fs, home / rel))
+            self.assertTrue(self.blocked(fs, home / ".local/share/new-tool/token"))
+            denied = [Path(k) for k in literal(fs)]
+            self.assertFalse(any(o in d.parents for d in denied for o in denied), "no nested denies")
+            self.assertEqual(self.walk_reach(fs), [])
+        # A folder that holds a path the session needs is closed around it, never denied whole.
+        wt = home / ".config" / "wt"
+        wt.mkdir()
+        with self.home_patches(home), patch.object(config, "CHAT_WORKTREES_DIR", wt):
+            fs = codex_config.filesystem(brief)
+            self.assertNotIn(str(home / ".config"), fs)
+            self.assertFalse(self.blocked(fs, wt))
+            self.assertTrue(self.blocked(fs, home / ".config" / "gh" / "hosts.yml"))
+            self.assertFalse(self.blocked(fs, home / ".config" / "tool[1]" / "token"), "a residual here")
+            self.assertFalse([k for k in literal(fs) if codex_config._GLOB_SYNTAX.search(k)])
+
+    def test_env_denies_never_name_a_path_holding_glob_syntax(self):
+        home = self.closed_home()
+        vault = home / "work" / "proj" / "vault"
+        vault.mkdir(parents=True)
+        for rel in ("work/proj/.env", "work/proj/.env{x}", "work/proj/.env[1]",
+                    "projects/odd[1]/.env", "projects/odd[1]/sub/.env"):
+            (home / rel).parent.mkdir(parents=True, exist_ok=True)
+            (home / rel).write_text("fixture")
+        with self.home_patches(home), \
+                patch.object(config, "credential_dirs", return_value=(*config.credential_dirs(), str(vault))):
+            config.CHAT_WORKTREES_DIR.mkdir(parents=True)
+            fs = codex_config.filesystem(replace(self.chat(), cwd=str(home / "projects" / "odd[1]")))
+        self.assertEqual(fs.get(str(home / "work" / "proj" / ".env")), "deny")
+        self.assertFalse([k for k in fs if "odd[1]" in k], "a base holding glob syntax gets no glob")
+        self.assertFalse([k for k, v in fs.items() if v == "deny" and not k.endswith(codex_config.ENV_GLOB)
+                          and codex_config._GLOB_SYNTAX.search(k)])
+        self.assertEqual(self.walk_reach(fs), [])
 
     def test_owner_home_churn_after_prepare_never_refuses_the_session(self):
         # Review of #224 (MED): the check compares Codex's readback with the

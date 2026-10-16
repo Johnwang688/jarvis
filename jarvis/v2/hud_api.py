@@ -2237,7 +2237,7 @@ def route(handler, daemon, parts, query):
                     messages.append(tools[index])
                     continue
                 kind = row.get("kind")
-                if kind not in (None, "text", "user", "model_set"):
+                if kind not in (None, "text", "user", "model_set", "notice"):
                     continue
                 data = row.get("data", row)
                 text = data.get("text")
@@ -2246,7 +2246,8 @@ def route(handler, daemon, parts, query):
                     text = f"/skill {data['skill']} {text}".rstrip()
                 if isinstance(text, str):
                     role = ("assistant" if kind == "text" else "user" if kind == "user"
-                            else "system" if kind == "model_set" else row.get("role", "assistant"))
+                            else "system" if kind in ("model_set", "notice")
+                            else row.get("role", "assistant"))
                     message = dict(role=role, text=text, at=row.get("at", row.get("t")))
                     # Opt-in clients reconcile an optimistic initial send by
                     # its acknowledged turn. Legacy response bytes stay fixed.

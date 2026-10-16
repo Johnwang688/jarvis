@@ -1736,6 +1736,11 @@ export default function App() {
           // Every model and effort change is a line in the chat (A7).
           if (tid) for (const n of mine) dispatch({ type: "message", pane: n, message: { role: "system", text: data.text || "", at: e.at, turn_id: e.turn_id } });
           break;
+        case "notice":
+          // A provider's line about the session itself (2026-10-16: Codex's
+          // Windows closure skipped), never the model's words.
+          if (tid && data.text) for (const n of mine) dispatch({ type: "message", pane: n, message: { role: "system", text: data.text, at: e.at, turn_id: e.turn_id } });
+          break;
         case "discord_status":
           // The event says something changed; the route says what, filtered.
           api.discord().then((discord) => dispatch({ type: "patch", patch: { discord } })).catch(() => {});
