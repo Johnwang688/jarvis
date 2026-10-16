@@ -539,7 +539,21 @@ def _cli_refusal(exc: BaseException) -> bool:
     """The SDK raises a bare Exception carrying the CLI's error control
     response (`_internal/query.py`): the CLI's refusal. Its own "Control
     request timeout" is not one (the CLI may still act on the request)."""
-    return type(exc) is Exception and not str(exc).startswith("Control request timeout")
+    return type(exc) is Exception and not _sdk_timeout(exc)
+
+
+def _sdk_timeout(exc: BaseException) -> bool:
+    return type(exc) is Exception and str(exc).startswith("Control request timeout")
+
+
+def _stop_outcome(exc: BaseException | None) -> str:
+    """How one Stop's answer settles the owner's mark, in time or late alike:
+    none is `taken`; the SDK's own control timeout is `unknown` (the CLI may
+    still act on it); anything else, the CLI's refusal or a request that was
+    not delivered, is `refused`."""
+    if exc is None:
+        return "taken"
+    return "unknown" if _sdk_timeout(exc) else "refused"
 
 
 def _stop_settled(session: Any, child: Any, outcome: str) -> None:
@@ -557,18 +571,17 @@ def _stop_settled(session: Any, child: Any, outcome: str) -> None:
 
 
 def _late_stop(session: Any, child: Any, sid: str, done: Any) -> None:
-    """The late outcome of a Stop whose answer the route stopped waiting for.
-    A late refusal takes the owner's mark off the child, as one in time does."""
+    """The late outcome of a Stop whose answer the route stopped waiting for,
+    settled by the same rule as one in time (`_stop_outcome`)."""
     try:
         error = done.exception()
     except BaseException:  # noqa: BLE001 — cancelled with the loop
         _stop_settled(session, child, "unknown")
         return
+    _stop_settled(session, child, _stop_outcome(error))
     if error is None:
-        _stop_settled(session, child, "taken")
         LOG.info("claude %s: the CLI took the stop of %s late", session.thread_id, sid)
     else:
-        _stop_settled(session, child, "refused" if _cli_refusal(error) else "unknown")
         LOG.warning("claude %s: the stop of %s ended without an answer (%s)",
                     session.thread_id, sid, type(error).__name__)
 
@@ -2301,7 +2314,15 @@ class ClaudeProvider:
         coroutine would skip the SDK's own cleanup and leave its private
         `pending_control_responses` entry behind. It is left to finish, so
         the SDK's own 60 s control timeout (or the CLI's late answer) removes
-        that entry the way the SDK means it to; the late outcome is logged."""
+        that entry the way the SDK means it to; the late outcome is logged.
+
+        The owner's mark (`owner_stop`, which makes the child's end "stopped
+        by the owner") is set before the request goes. Each answer, in time
+        or late (`_late_stop`), settles it by one rule (`_stop_outcome`,
+        `_stop_settled`): taken keeps it; the SDK's own control timeout keeps
+        it (the CLI may still act); a refusal or an undelivered request takes
+        it off, unless another Stop of the child is still on its way or was
+        taken."""
         session, child = self._stoppable(h, sid)
         task_id = child.task_id
         with session.mutex:
@@ -2318,7 +2339,7 @@ class ClaudeProvider:
         except BaseException as exc:
             # Refused or not delivered: whatever stops it later is not this
             # (unless another Stop of it is still on its way, or was taken).
-            _stop_settled(session, child, "refused")
+            _stop_settled(session, child, _stop_outcome(exc))
             if _cli_refusal(exc):
                 raise SubagentStopDeclined(_safe(str(exc))[:160] or "no reason given") from None
             raise

@@ -1407,6 +1407,16 @@ SECRET_SERVICE_V2_DENY = (
     "perl -e 'system(\"secret-tool lookup a b\")'", "ruby -e 'system(\"secret-tool lookup a b\")'",
     "node -e \"require('child_process').execSync('secret-tool lookup a b')\"",
     "python3 -c 'import os; os.system(\"kwallet-query -r x y\")'",
+    # program position in other inline sources (#220 review, M1) and keyring.cli-x (N1)
+    "python3 -Ic \"import subprocess; subprocess.Popen(['/usr/bin/secret-tool', 'lookup'])\"",
+    "ruby -e 'puts `secret-tool lookup a b`'", "perl -e 'print qx(secret-tool lookup a b)'",
+    "node --eval \"require('child_process').spawnSync('secret-tool', ['lookup'])\"",
+    "deno eval \"new Deno.Command('secret-tool').outputSync()\"",
+    "bun -e \"Bun.spawnSync(['secret-tool', 'lookup'])\"", "php -r \"system('secret-tool lookup a b');\"",
+    "uv run python3 -c \"import os; os.system('secret-tool lookup a b')\"",
+    "ruby -e 'require \"open3\"; Open3.capture2(\"secret-tool lookup a b\")'",
+    "python3 -c \"import os; os.execvp('lssecret', ['lssecret'])\"", "perl -we 'system \"secret-tool\", \"lookup\"'",
+    "python3 -m keyring.cli-x get a b",
     # a bus-address assignment voids the --system exemption (NIT 2)
     "DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/user/1000/bus dbus-monitor --system",
     "env DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/user/1000/bus busctl monitor",
@@ -1440,6 +1450,21 @@ SECRET_SERVICE_V2_ORDINARY = (
     # a reader named only in text, or the reader looked up, not run
     "which secret-tool", "command -v secret-tool", "echo secret-tool lookup a b",
     "python3 -m runpy pytest", "python3 tests/secret-tool_check.py",
+    # a reader named in text a caller only carries (#220 review, M1): Codex's
+    # escalation shapes, test selectors, script arguments, in-process gate probes
+    "/bin/bash -lc 'gh pr create --title x --body \"refuses secret-tool lookup a b\"'",
+    "/bin/bash -lc 'gh pr create --title \"Secret Service\" --body \"python3 -c os.system(secret-tool) is refused\"'",
+    "/bin/bash -lc 'git commit -m \"rules: secret-tool\"'", "/bin/bash -lc 'rg -n secret-tool jarvis'",
+    "/bin/bash -lc 'gh pr comment 220 --body \"perl -e system(secret-tool) is DENY\"'",
+    "python3 -m pytest -k secret-tool", "python3 scripts/check.py secret-tool",
+    "node scripts/x.js --grep secret-tool",
+    "python3 -c \"from jarvis import rules; print(rules.decide('secret-tool lookup a b'))\"",
+    "uv run python3 -c \"from jarvis import rules; print(rules.decide('secret-tool lookup a b'))\"",
+    "timeout 60 python3 -c \"from jarvis import rules; print(rules.decide('secret-tool lookup a b'))\"",
+    "perl -pi -e 's/secret-tool/x/' docs/a.md", "sh -c 'git log --grep secret-tool'",
+    "bash scripts/x.sh secret-tool", "python3 -c \"import shutil; print(shutil.which('secret-tool'))\"",
+    "node -e \"console.log('secret-tool lookup')\"",
+    "python3 scripts/find.py \"os.system('secret-tool\"", "node scripts/x.js \"execSync('secret-tool\"",
 )
 
 

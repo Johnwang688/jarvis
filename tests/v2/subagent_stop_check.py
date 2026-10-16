@@ -302,6 +302,8 @@ class ClaudeStop(unittest.TestCase):
             with self.assertRaises(Exception) as caught:
                 run.provider.stop_subagent(run.handle, self.SLEEPER)
             self.assertNotIsInstance(caught.exception, SubagentStopDeclined)
+        # The CLI may still act on it: the mark stays, as for one that times out late (#220 review, L2).
+        self.assertTrue(run.handle.native.children[self.SLEEPER].owner_stop)
         run.provider.stop_subagent(run.handle, self.SLEEPER)
         self.assertTrue(done.wait(30))
 
@@ -565,6 +567,25 @@ class CodexStop(unittest.TestCase):
         ended = [e.data for e in out if e.kind == K.SUBAGENT and e.data["sid"] == self.sid
                  and e.data["op"] == "finished"]
         self.assertEqual([(d["status"], d.get("stop_reason")) for d in ended], [("stopped", OWNER)])
+
+    def test_an_answer_for_an_earlier_turn_never_touches_the_next(self):
+        """#220 review, L1: `child_stops` is keyed by (sid, turn). A Stop of
+        turn T1 answered after T2 began (and was Stopped) settles nothing
+        on T2: a late refusal leaves T2's mark, a late take does not count
+        as T2's."""
+        def session(*pending):
+            view = codex._ChildView(sid="cx:c", name="c", turn="T2", owner_stop=True)
+            return SimpleNamespace(mutex=threading.Lock(), child_views={"c": view},
+                                   child_stops={rid: ("cx:c", turn) for rid, turn in pending}), view
+        refused = {"code": -32600, "message": "no active turn"}
+        s, view = session((1, "T1"), (2, "T2"))
+        self.assertTrue(codex.CodexProvider._child_stop_answered(s, {"id": 1, "error": refused}))
+        self.assertTrue(view.owner_stop, "T1's late refusal took T2's mark off")
+        s, view = session((1, "T1"), (2, "T2"))
+        codex.CodexProvider._child_stop_answered(s, {"id": 1, "result": {}})
+        self.assertFalse(view.owner_stop_taken, "T1's late take counted as T2's")
+        codex.CodexProvider._child_stop_answered(s, {"id": 2, "error": refused})
+        self.assertFalse(view.owner_stop, "T2's own refusal left the mark")
 
     def test_refusals_send_nothing(self):
         script, asked = codex_script()

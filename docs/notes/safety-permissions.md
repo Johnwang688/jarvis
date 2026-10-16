@@ -2588,17 +2588,31 @@ judged alone, its word and arguments read in every spelling
   interfaces, `/org/freedesktop/secrets/…` paths, the portal's
   `org.freedesktop.portal.Secret` or its backend
   `org.freedesktop.impl.portal.Secret`, gnome-keyring's `org.gnome.keyring`
-  or KWallet's `org.kde.kwalletd*`, **or name a secret reader** (delta
-  review of #218, LOW 2: `python3 -c "os.system('secret-tool lookup a b')"`,
-  `subprocess.run([…'secret-tool'…])`, `perl -e`, `ruby -e` and `node -e
-  "execSync('secret-tool …')"` were only asked). So `busctl --user call :1.42
+  or KWallet's `org.kde.kwalletd*`. So `busctl --user call :1.42
   /org/freedesktop/secrets/collection/…`, `uv run gdbus …`, `bash -c '…'`
   and `python3 -c '… "org.freedesktop.secrets" …'` are refused. A shell
   elsewhere on the line does not count: `grep org.gnome.keyring x | sh -c
   'wc -l'` is not refused, while `bash -c "grep org.gnome.keyring x"` is (its
-  script names one; the accepted cost, which now covers a reader's name in
-  a shell string too: `bash -c "grep -n secret-tool x"`). `which
-  secret-tool`, `command -v secret-tool` and a commit message stay ordinary.
+  script names one; the accepted cost).
+- **An interpreter whose inline source starts a secret reader**
+  (`rules._runs_reader_inline`; delta review of #218, LOW 2, narrowed by
+  #220's review, M1). Only the inline source of a non-shell interpreter is
+  read: `python -c`, `perl -e/-E`, `ruby -e`, `node -e/-p/--eval/--print`,
+  `php -r`, `deno eval`, `bun -e/--eval`. A shell's `-c` string is walked as
+  a line already, and positional arguments are data. In that source only a
+  reader in **program position** counts: the first word of the first string
+  handed to a process-starting call (`system`, `exec*`, `popen*`, `spawn*`,
+  `run`, `call`, `check_output`, `capture2`, `shell_exec`, `Deno.Command`, Bun's
+  `` $`…` ``), or, in Perl, Ruby and PHP, of a shell-out literal (backticks,
+  `qx(…)`, `%x(…)`). So `os.system('secret-tool …')`, `subprocess.run(['secret-tool',
+  …])`, `perl -e 'system("secret-tool …")'` and `node -e "execSync('secret-tool
+  …')"` are refused. Not refused (pinned): Codex's escalation shape `/bin/bash
+  -lc 'gh pr create … --body "… secret-tool …"'` and `/bin/bash -lc 'git
+  commit -m "rules: secret-tool"'`, `python3 -m pytest -k secret-tool`,
+  `python3 scripts/check.py secret-tool`, an in-process gate probe
+  (`python3 -c "print(rules.decide('secret-tool lookup a b'))"`, through `uv
+  run` or `timeout` too), `perl -pi -e 's/secret-tool/x/' file`, `which
+  secret-tool`. A call through a variable (`os.system(cmd)`) is not seen.
 - **A session-bus monitor**, judged per program: `dbus-monitor` unless
   `--system` (and no `--session`/`--address`), `gdbus monitor` unless
   `--system`/`-y`, `busctl monitor|capture` with `--user`, an address, a
@@ -2614,7 +2628,8 @@ then `secret-tool …`) are DENY, and the check proves the walk gave up on
 them first.
 
 **Not refused** (pinned): names in text (`grep`, `rg`, `echo`, commit
-messages, `gh pr create`/`comment` bodies), `busctl --user list`, `busctl
+messages and `gh pr create`/`comment` bodies, directly or in Codex's `bash
+-lc '…'` shape, except a Secret Service *name* in a shell string, above), `busctl --user list`, `busctl
 monitor` (the system bus), `dbus-monitor --system`, other services' calls
 (Notifications, MPRIS), `systemctl --user status gnome-keyring-daemon`,
 `ls ~/.local/share/keyrings`, `pip install keyring`, `keyring
