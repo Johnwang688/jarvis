@@ -134,7 +134,7 @@ LAUNCH_TIMEOUT_S = 30.0
 # not only on its 30-second timer, so the probe's row is on disk in well
 # under a second (measured on Chrome 155: 0.02 s basic, 0.09 s keyring).
 # Both are expired again straight after the read.
-STORE_PROBE_URL = "https://password-store.jarvis.invalid/"
+STORE_PROBE_URL = f"https://{_stores.PROBE_HOST}/"
 STORE_FILL_URL = "https://flush.password-store.jarvis.invalid/"
 STORE_FILL_NAME = "jarvis-flush"
 STORE_FLUSH_SETS = 300
@@ -1414,9 +1414,10 @@ class BrowserHost:
             observed = running.get(identity)
             if observed is not None:
                 exposed = observed != _stores.KEYRING_STORE
-                hint = ((_stores.UNPROTECTED_HINT if requested != _stores.REQUEST_BASIC
-                         else "Unprotected (basic store): browser.json asks for it")
-                        if exposed else None)
+                hint = (None if not exposed
+                        else _stores.UNVERIFIED_HINT if observed == _stores.UNVERIFIED
+                        else _stores.UNPROTECTED_HINT if requested != _stores.REQUEST_BASIC
+                        else "Unprotected (basic store): browser.json asks for it")
             else:
                 exposed = launch == _stores.BASIC
                 hint = launch_hint
@@ -1426,6 +1427,8 @@ class BrowserHost:
                        or (not stores and next_launch == _stores.BASIC))
         if next_launch in (_stores.REFUSED, _stores.CHECKING):
             hint = next_hint
+        elif _stores.UNVERIFIED in stores:
+            hint = _stores.UNVERIFIED_HINT
         elif unprotected and requested == _stores.REQUEST_BASIC:
             hint = "Unprotected (basic store): browser.json asks for it"
         elif unprotected:

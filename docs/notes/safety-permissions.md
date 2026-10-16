@@ -2561,36 +2561,55 @@ key or any other saved secret. An agent shell line that calls it is
 `rules.decide`), never put to the owner and never covered by an allowlist
 entry: approving a command is not consent to what it reads, as with `.env`.
 
-**The rule** (`rules.secret_service_reading`, read on the whole raw line
-before it is split, in every spelling `rules._spellings` gives — the vex
-reading's quote, escape, `$'…'`, `${X:-…}` and brace normalisation, now one
-shared helper — case-folded):
+**The rule** (`rules.secret_service_reading`). **Per program, in command
+position** (review of #218, LOW 3: the first version read the whole line and
+refused `git commit -m 'add secret-tool rule'`, a `gh pr create` body and
+`grep -n secret-tool`, which would have blocked Jarvis chats working on
+Jarvis). Every program the line runs is found by the vex reading's walk
+(`rules._Walk`: each segment, wrappers and runners from the one table,
+`bash -c`/`sh -c` strings, `eval`, `find -exec`, substitutions), and each is
+judged alone, its word and arguments read in every spelling
+`rules._spellings` gives (the vex reading's quote, escape, `$'…'`,
+`${X:-…}` and brace normalisation, one shared helper), case-folded:
 
-- **A dedicated secret reader anywhere on the line**: `secret-tool`,
-  `kwallet-query`, `lssecret` (word-bounded: `libsecret-tools` is not one),
-  whatever the subcommand — they look up, search (`secret-tool search`
-  prints secrets), store and clear. Mentions are refused too (vexcom's
-  trade).
-- **A line that names the Secret Service and holds a program that could call
-  it.** Names: `org.freedesktop.secrets`, the `org.freedesktop.Secret.*`
+- **A secret reader as the program**: `secret-tool`, `kwallet-query`,
+  `lssecret`, whatever the subcommand — they look up, search (`secret-tool
+  search` prints secrets), store and clear. **Python's `keyring` CLI**
+  (review of #218, MED 2: `uv run --with keyring python3 -m keyring get S U`
+  was ALLOW): `keyring get|set|del` with `keyring` as the program, and any
+  Python run with `-m keyring` (`-mkeyring`, `-Im keyring`, `keyring.cli`).
+  The bare word is not refused (`pip install keyring`, `echo keyring get`).
+- **A caller whose own words name the Secret Service**: a D-Bus client
+  (`busctl`, `gdbus`, `dbus-send`, `dbus-monitor`, `qdbus*`), an interpreter
+  or a shell as the program of a segment, whose arguments (a `-c` script
+  included) name `org.freedesktop.secrets`, the `org.freedesktop.Secret.*`
   interfaces, `/org/freedesktop/secrets/…` paths, the portal's
-  `org.freedesktop.portal.Secret`, gnome-keyring's `org.gnome.keyring` and
-  KWallet's `org.kde.kwalletd*`. Callers: a D-Bus client (`busctl`, `gdbus`,
-  `dbus-send`, `dbus-monitor`, `qdbus*`), an interpreter or a shell, by any
-  path. So `busctl --user call :1.42 /org/freedesktop/secrets/collection/…`
-  (a unique name with the path), `uv run gdbus …`, `bash -c '…'` and
-  `python3 -c '… "org.freedesktop.secrets" …'` are refused, while a line
-  that only mentions a name (`grep -rn org.freedesktop.secrets`, `echo`, a
-  commit message) is not.
-- **A session-bus monitor**: `dbus-monitor` unless `--system` (and no
-  `--session`/`--address`), `gdbus monitor` unless `--system`/`-y`,
-  `busctl monitor|capture` with `--user`, an address, a machine or a host.
-  The bus carries the key from the keyring to Chrome. A line that names
-  `dbus-monitor` without `--system` is refused even as a mention.
+  `org.freedesktop.portal.Secret` or its backend
+  `org.freedesktop.impl.portal.Secret`, gnome-keyring's `org.gnome.keyring`
+  or KWallet's `org.kde.kwalletd*`. So `busctl --user call :1.42
+  /org/freedesktop/secrets/collection/…`, `uv run gdbus …`, `bash -c '…'`
+  and `python3 -c '… "org.freedesktop.secrets" …'` are refused. A shell
+  elsewhere on the line does not count: `grep org.gnome.keyring x | sh -c
+  'wc -l'` is not refused, while `bash -c "grep org.gnome.keyring x"` is (its
+  script names one; the accepted cost).
+- **A session-bus monitor**, judged per program: `dbus-monitor` unless
+  `--system` (and no `--session`/`--address`), `gdbus monitor` unless
+  `--system`/`-y`, `busctl monitor|capture` with `--user`, an address, a
+  machine or a host. The bus carries the key from the keyring to Chrome. A
+  line that assigns `DBUS_SYSTEM_BUS_ADDRESS=` or `DBUS_SESSION_BUS_ADDRESS=`
+  gets no `--system` exemption (the "system" bus may then be the session's).
+  `echo monitor; gdbus introspect …` is not a monitor.
 
-**Not refused** (pinned): `busctl --user list`, `busctl monitor` (the system
-bus), `dbus-monitor --system`, other services' calls (Notifications, MPRIS),
-`systemctl --user status gnome-keyring-daemon`, `ls ~/.local/share/keyrings`.
+A line too complex for the walk (its caps) is read the first version's
+stricter way over its whole text (a reader's name anywhere, or a name and a
+caller anywhere).
+
+**Not refused** (pinned): names in text (`grep`, `rg`, `echo`, commit
+messages, `gh pr create`/`comment` bodies), `busctl --user list`, `busctl
+monitor` (the system bus), `dbus-monitor --system`, other services' calls
+(Notifications, MPRIS), `systemctl --user status gnome-keyring-daemon`,
+`ls ~/.local/share/keyrings`, `pip install keyring`, `keyring
+--list-backends`.
 
 **Limit, stated plainly: an accident guard, not a wall.** A script file that
 talks D-Bus (`python3 tool.py`), a unique name with a computed object path,
@@ -2602,8 +2621,8 @@ The terminal_read guard's older `secret-tool lookup` refusal is unchanged.
 `permissions.py` and `merge_gate.py`; neither of those changed. Flagged for
 the owner's review in the PR.
 
-Pinned by `tests/rules_check.py secret_service_checks` (43 refused lines,
-through v1's real dispatch with an allowlist entry for every stem and a
-yes-saying human-backed approver: nothing ran, nobody was asked; 14 ordinary
-lines) and `tests/v2/permissions_check.py secret_service_checks` (the same
+Pinned by `tests/rules_check.py secret_service_checks` (every refused
+line, a sample through v1's real dispatch with an allowlist entry for every
+stem and a yes-saying human-backed approver: nothing ran, nobody was asked;
+every ordinary line not refused) and `tests/v2/permissions_check.py secret_service_checks` (the same
 lines at layer 1 under AUTO and STRICT, never asked, v1 parity).

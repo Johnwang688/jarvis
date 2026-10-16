@@ -283,7 +283,8 @@ class Sticky(unittest.TestCase):
             self.store.mark_keyring("p-00000000")
 
 
-def write_cookie(folder, name, encrypted, *, value="PLAINTEXT-NEVER-READ"):
+def write_cookie(folder, name, encrypted, *, value="PLAINTEXT-NEVER-READ",
+                 host="password-store.jarvis.invalid"):
     """One row of a Chrome-shaped Cookies table."""
     db = Path(folder) / "Default" / "Cookies"
     db.parent.mkdir(parents=True, exist_ok=True)
@@ -292,7 +293,7 @@ def write_cookie(folder, name, encrypted, *, value="PLAINTEXT-NEVER-READ"):
         con.execute("CREATE TABLE IF NOT EXISTS cookies (creation_utc INTEGER, host_key TEXT, "
                     "name TEXT, value TEXT, encrypted_value BLOB)")
         con.execute("INSERT INTO cookies VALUES (0, ?, ?, ?, ?)",
-                    ("password-store.jarvis.invalid", name, value, encrypted))
+                    (host, name, value, encrypted))
         con.commit()
     finally:
         con.close()
@@ -341,6 +342,9 @@ class Observe(unittest.TestCase):
         self.assertIsNone(S.observed_store(self.folder, "x"))            # no database yet
         write_cookie(self.folder, "other", b"v11zzz")
         self.assertIsNone(S.observed_store(self.folder, "x"))            # no row yet
+        # The probe's name on any other host is not the probe (NIT 1).
+        write_cookie(self.folder, "x", b"v11zzz", host="example.com")
+        self.assertIsNone(S.observed_store(self.folder, "x"))
         for name, enc, want in (("a", b"v11abc", S.KEYRING_STORE), ("b", b"v10abc", S.BASIC),
                                 ("c", b"v12abc", S.UNVERIFIED), ("d", b"", S.UNVERIFIED),
                                 ("e", b"v1", S.UNVERIFIED)):
@@ -365,6 +369,7 @@ class Observe(unittest.TestCase):
         self.assertTrue(kw.get("uri"))
         self.assertEqual(len(statements), 1)
         self.assertIn("substr(encrypted_value, 1, 3)", statements[0])
+        self.assertIn("host_key = 'password-store.jarvis.invalid' AND name = 'probe'", statements[0])
         self.assertNotRegex(statements[0].replace("encrypted_value", ""), r"\bvalue\b")
 
     def test_a_linked_or_odd_database_is_unverified(self):
@@ -524,6 +529,7 @@ class Launch(unittest.IsolatedAsyncioTestCase):
                     self.keyring(S.UNLOCKED, S.UNLOCKED)
                     self.chrome = chrome
                     await self.refused(self.main, S.UNVERIFIED_MESSAGE)
+                    self.assertIn("possibly after a Chrome update", S.UNVERIFIED_MESSAGE)
                     self.assertTrue(self.contexts[-1].closed)
         self.assertTrue(self.sticky())
 
@@ -563,6 +569,11 @@ class Launch(unittest.IsolatedAsyncioTestCase):
         self.publish(instance)
         sync = self.host.password_store_status()
         self.assertEqual((sync["password_store"], sync["unprotected"]), (S.UNVERIFIED, True))
+        # Not an install problem (NIT 3): the hint says the store was not confirmed.
+        for hint in (sync["hint"], sync["profiles"][self.main]["hint"]):
+            self.assertEqual(hint, S.UNVERIFIED_HINT)
+            self.assertIn("possibly after a Chrome update", hint)
+            self.assertNotIn("Install", hint)
 
     async def test_a_sticky_profile_never_opens_with_basic(self):
         self.host._profiles.mark_keyring(self.main)
@@ -579,6 +590,8 @@ class Launch(unittest.IsolatedAsyncioTestCase):
         self.host._profiles.mark_keyring(self.main)
         self.strip_row()
         self.assertFalse(self.row_sticky())
+        # /status reads the marker too (review of #218, LOW 2).
+        self.assertTrue(self.host.password_store_status()["profiles"][self.main]["sticky"])
         self.keyring(S.UNAVAILABLE)
         await self.refused(self.main, S.STICKY_UNAVAILABLE_MESSAGE)
         self.basic()

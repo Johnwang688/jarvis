@@ -1868,7 +1868,7 @@ random name, value `1`, on `password-store.jarvis.invalid`, a name that never
 resolves) and reads back **only the first three bytes** of that row's
 `encrypted_value` from the profile's `Default/Cookies` database, opened
 read-only and immutable (`password_store.observed_store`; the database must
-be a plain file, not a link). `v11` is the keyring's key, `v10` the basic
+be a plain file, not a link; the row is matched by `host_key` and name). `v11` is the keyring's key, `v10` the basic
 store's; anything else, or no row within 5 s, is `unverified`. Then the probe
 is expired again. Never a value, never another row.
 
@@ -1887,15 +1887,22 @@ is expired again. Never a value, never another row.
   (keyring). Both are expired straight after the read; a session cookie
   would never be written at all. This leans on two Chrome internals, the
   512-change batch and a database that is not in WAL mode (an immutable read
-  does not see a WAL file). If a later Chrome changes either, the probe reads
-  nothing in time: `unverified`, and keyring launches are refused with that
-  message, never downgraded. Re-measure on a Chrome update.
+  does not see a WAL file). **A Chrome update that moves Cookies to WAL or
+  changes the commit batch makes every keyring launch `unverified`**: every
+  sticky profile is then refused (Private and non-sticky basic launches still
+  open) until this code is updated. The 409 and the HUD say "Jarvis couldn't
+  confirm Chrome's password store (possibly after a Chrome update)", never
+  the install hint. Re-measure on a Chrome update.
 - **On a mismatch.** A keyring launch is always sticky by then (it was
   recorded before Chrome started), so it is closed, its processes stopped,
   and the launch refused with 409: "The keyring locked while Chrome was
   starting" when the keyring now reads locked, "Chrome started without the
-  keyring (it wrote with the basic store)" for `v10`, "Chrome's password
-  store could not be confirmed" for `unverified`. A basic launch (no
+  keyring (it wrote with the basic store)" for `v10`, "Jarvis couldn't
+  confirm Chrome's password store (possibly after a Chrome update)" for
+  `unverified`. **The check comes after Chrome started**: a keyring Chrome
+  that silently fell back runs with `basic` for about 1–10 s (its start, the
+  probe, the close) until it is refused and closed, and anything it writes in
+  that window (its own startup writes; no page is loaded yet) is `v10`. A basic launch (no
   keyring, or the owner's override) is reported as observed, always
   unprotected. Private is not observed: it is `basic` by its flag and has no
   bus.
@@ -1936,9 +1943,10 @@ per-application rule, so such a program can ask the Secret Service for
 Chrome's key. That makes the read a distinct D-Bus request instead of a file
 read. **Agents' shell calls to it are refused at the gate** (follow-up,
 2026-10-15; `rules.secret_service_reading`, the safety notes' *Agent calls
-to the Secret Service*): `secret-tool` and its kin anywhere on a line, a
-D-Bus client, interpreter or shell on a line that names the Secret Service,
-and a session-bus monitor are DENY in v1's gate and v2's layer 1 alike. That
+to the Secret Service*): `secret-tool` and its kin or Python's `keyring` CLI
+as a program, a D-Bus client, interpreter or shell whose own arguments name
+the Secret Service, and a session-bus monitor are DENY in v1's gate and v2's
+layer 1 alike; a line that only mentions one is not. That
 is an accident guard, not a wall: a script file that talks D-Bus, or a call
 by unique name with a computed path, is not seen. A same-user program could
 also claim `org.freedesktop.secrets` itself while gnome-keyring is not
@@ -2075,16 +2083,22 @@ temporary Cookies database with the prefix a real one would (or the one a
 test makes it fall back to), `observed_store` against real SQLite (a
 traced connection: one statement, `substr(encrypted_value, 1, 3)`, read-only
 and immutable), marker and rollback cases, per-profile status, and a guard
-that fails the run on an error in the status refresh thread. 24 mutants are
+that fails the run on an error in the status refresh thread. 37 mutants are
 each killed (`~/.cache/jarvis-lead/kr-followup/mutants.py`): the observation
 ignored, status reporting the requested store, a mismatched Chrome left open,
-no flush filler, the probe never expired, the whole encrypted value read,
-the marker ignored, never written, or dropped by "Sign out of everything", a
-sticky profile's missing record not written back, `unknown` shown as refused
-(daemon and HUD, per profile and global), the per-profile `browser.json`
-reason lost, the probe runner bound at import, the gate rule removed (v1 and
-v2 layer 1), monitors, secret readers or spelling normalisation dropped,
-names refused without a caller, the Manage panel's interval or focus refresh
+no flush filler, the probe never expired, the whole encrypted value read, the
+probe row not matched by host, the marker ignored (at launch or in
+`/status`), never written, or dropped by "Sign out of everything", a sticky
+profile's missing record not written back, `unknown` shown as refused (daemon
+and HUD, per profile and global), `unverified` given the install hint, the
+per-profile `browser.json` reason lost, the probe runner bound at import; for
+the gate: the rule removed (v1 and v2 layer 1), the whole-text reading
+instead of command position, a caller that need not be the segment's
+program, a reader matched as a word anywhere, readers, the `keyring` CLI or
+`-m keyring` not refused, `keyring` refused as a bare word, monitors not
+refused or judged on the whole line, a bus-address assignment keeping the
+`--system` exemption, program-word or service-name spellings not normalised,
+the impl portal dropped; and the Manage panel's interval or focus refresh
 removed, and its per-profile state ignored.
 
 ## Chrome's own sign-in tab joins the sign-in pane (2026-10-15)

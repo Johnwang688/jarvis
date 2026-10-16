@@ -1387,6 +1387,23 @@ SECRET_SERVICE_V2_DENY = (
     "nohup dbus-monitor --session > /tmp/bus.log &", "uv run dbus-monitor",
     "busctl --user monitor", "busctl monitor --user", "busctl --user capture > bus.pcap",
     "gdbus monitor --session --dest :1.5", "gdbus monitor -e -d org.freedesktop.Notifications",
+    # Python's keyring CLI (review of #218, MED 2) and the impl portal
+    "uv run --with keyring python3 -m keyring get svc user", "python3 -m keyring get svc user",
+    "python3 -mkeyring get a b", "python3 -Im keyring set a b", "python -m keyring.cli del a b",
+    "keyring get svc user", "uvx keyring get a b", "pipx run keyring del a b",
+    "/home/x/.venv/bin/keyring set a b",
+    "gdbus call --session --dest org.freedesktop.impl.portal.Secret --object-path "
+    "/org/freedesktop/portal/desktop --method x.y",
+    # in command position however it is reached
+    "find . -name x -exec secret-tool lookup a b \\;", "x=$(secret-tool lookup a b)",
+    "eval 'secret-tool lookup a b'", "sh -c \"dbus-monitor\" > log",
+    "${X:-secret-tool} lookup a b", "\"secret\"-tool lookup a b",
+    "bash -c \"grep org.gnome.keyring x\"",
+    # a bus-address assignment voids the --system exemption (NIT 2)
+    "DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/user/1000/bus dbus-monitor --system",
+    "env DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/user/1000/bus busctl monitor",
+    "export DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/user/1000/bus; gdbus monitor --system --dest x",
+    "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus gdbus monitor -y --dest x",
 )
 SECRET_SERVICE_V2_ORDINARY = (
     "busctl --user list", "busctl monitor", "busctl --system monitor", "dbus-monitor --system",
@@ -1399,6 +1416,19 @@ SECRET_SERVICE_V2_ORDINARY = (
     "echo org.freedesktop.Secret.Service", "apt-cache policy libsecret-tools",
     "systemctl --user status gnome-keyring-daemon", "ls -l ~/.local/share/keyrings",
     "python3 tests/v2/browser_password_store_check.py",
+    # names only in text, never a call (review of #218, LOW 3)
+    "git commit -m 'add secret-tool rule'", "git commit -m 'deny secret-tool, kwallet-query, lssecret'",
+    "git commit -m \"gdbus call --dest org.freedesktop.secrets; dbus-monitor\"",
+    "gh pr create --title 'Secret Service rule' --body 'refuses secret-tool lookup, "
+    "busctl --user call org.freedesktop.secrets and dbus-monitor'",
+    "gh pr comment 218 --body 'python3 -m keyring get is refused now'",
+    "grep -n secret-tool jarvis/rules.py", "rg -n 'kwallet-query|lssecret' docs",
+    "grep org.gnome.keyring x | sh -c 'wc -l'",
+    "echo monitor; gdbus introspect --session --dest org.freedesktop.Notifications --object-path /",
+    "echo keyring get a b", "pip install keyring", "keyring --list-backends",
+    "uv pip install secretstorage", "grep -rn dbus-monitor docs",
+    # a monitor is judged per program: words elsewhere on the line do not make one
+    "busctl --user list; echo capture", "busctl --user status | grep monitor",
 )
 
 

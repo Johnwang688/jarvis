@@ -409,64 +409,151 @@ def names_vexcom(command: str) -> bool:
 # no per-application rule: any program running as the owner may ask the
 # Secret Service for that key, or for any other saved secret. So an agent's
 # shell line that **calls** it is DENY, never put to the owner — approving a
-# command is not consent to what it reads, as with `.env`:
+# command is not consent to what it reads, as with `.env`.
 #
-# - a dedicated secret reader anywhere on the line (`secret-tool`,
-#   `kwallet-query`, `lssecret`), whatever its subcommand: they look up,
-#   search (`secret-tool search` prints secrets), store and clear;
-# - a line that names the Secret Service — its bus name, interfaces or object
-#   paths (`org.freedesktop.secrets`, `org.freedesktop.Secret.*`,
-#   `/org/freedesktop/secrets/…`), the portal's `org.freedesktop.portal.Secret`,
-#   gnome-keyring's own `org.gnome.keyring` or KWallet's `org.kde.kwalletd*`
-#   — **and** a program that could call it: a D-Bus client (`busctl`,
-#   `gdbus`, `dbus-send`, `qdbus*`, `dbus-monitor`), an interpreter or a
-#   shell. A line that only mentions a name (`grep`, `echo`, a commit message)
-#   is not refused for it.
+# **Judged per program, in command position** (review of #218, LOW 3: a
+# whole-line reading refused `git commit -m 'add secret-tool rule'`, a PR
+# body or a `grep` that only named one). Every program the line runs is
+# found by the vex reading's walk (`_Walk`: every segment, wrappers and
+# runners from the one table, `bash -c`/`sh -c` strings, `eval`, `find
+# -exec`, substitutions), and each is judged alone, its word and arguments
+# read in every spelling `_spellings` gives (quotes, escapes, `$'…'`,
+# `${X:-…}`, braces), case-folded:
 #
-# Both are read in every spelling `_spellings` gives (quotes, escapes,
-# `$'…'`, `${X:-…}`, braces), case-folded, on the whole raw line before it
-# is split, so a wrapper, a runner, `sh -c '…'` or a substitution cannot carry
-# one past. A **session-bus monitor** (`dbus-monitor` unless `--system`,
-# `busctl monitor|capture --user`, `gdbus monitor` unless `--system`) is
-# DENY too, read the same way (`_bus_monitor`): it would read a key in the
-# reply that carries it to Chrome. v1's gate and v2's layer 1 both start from `decide`, so the
-# two agree.
+# - **a secret reader as the program**: `secret-tool`, `kwallet-query`,
+#   `lssecret`, whatever the subcommand (they look up, search — `secret-tool
+#   search` prints secrets — store and clear); Python's `keyring` CLI with
+#   `get`, `set` or `del`; and any Python run with `-m keyring` (review of
+#   #218, MED 2: `uv run --with keyring python3 -m keyring get S U` was ALLOW);
+# - **a caller whose own arguments name the Secret Service**: a D-Bus client
+#   (`busctl`, `gdbus`, `dbus-send`, `qdbus*`, `dbus-monitor`), an
+#   interpreter or a shell, as the program of the segment, whose words (a
+#   `-c` script included) name its bus name, interfaces or object paths
+#   (`org.freedesktop.secrets`, `org.freedesktop.Secret.*`,
+#   `/org/freedesktop/secrets/…`), the portal's `org.freedesktop.portal.Secret`
+#   or its backend `org.freedesktop.impl.portal.Secret`, gnome-keyring's own
+#   `org.gnome.keyring` or KWallet's `org.kde.kwalletd*`. A shell elsewhere on
+#   the line does not count: `grep org.gnome.keyring x | sh -c 'wc -l'` is
+#   not a call;
+# - **a session-bus monitor** (`_bus_monitor`): `dbus-monitor` unless
+#   `--system`, `gdbus monitor` unless `--system`/`-y`, `busctl
+#   monitor|capture` with `--user`, an address, a machine or a host. It
+#   would read the key in the reply that carries it to Chrome. A line that
+#   assigns `DBUS_SYSTEM_BUS_ADDRESS=` or `DBUS_SESSION_BUS_ADDRESS=` gets no
+#   `--system` exemption (the "system" bus may then be the session's).
+#
+# A line too complex for the walk (its caps, `_TooComplex`) is read the old,
+# stricter way over its whole text (`_secret_service_text`). v1's gate and
+# v2's layer 1 both start from `decide`, so the two agree.
 #
 # **An accident guard, not a wall** (the script review's standing): a call
-# by a bus *unique name* with a computed object path, or a script file that
-# talks D-Bus, is not seen. The same-user boundary in the Browser notes
-# (*Password store*) is the honest limit.
+# by a bus *unique name* with a computed object path, a program word that is
+# only an expansion, or a script file that talks D-Bus is not seen. The
+# same-user boundary in the Browser notes (*Password store*) is the honest
+# limit.
 SECRET_SERVICE_DENIED = (
     "it calls the Secret Service (the owner's keyring), where Chrome's password key and the "
     "owner's other saved secrets live; approving a command is not consent to what it reads, "
     "so no agent command reaches it")
+_SECRET_READER_STEMS = frozenset({"secret-tool", "kwallet-query", "lssecret"})
 _SECRET_READERS = re.compile(r"(?<![\w.-])(?:secret-tool|kwallet-query|lssecret)(?![\w.-])")
+_KEYRING_VERBS = frozenset({"get", "set", "del"})
 _SECRET_SERVICE_NAMES = ("org.freedesktop.secret", "org/freedesktop/secret",
-                         "org.freedesktop.portal.secret", "org.gnome.keyring",
-                         "org/gnome/keyring", "org.kde.kwalletd", "org/modules/kwalletd")
+                         "org.freedesktop.portal.secret", "org.freedesktop.impl.portal.secret",
+                         "org.gnome.keyring", "org/gnome/keyring", "org.kde.kwalletd",
+                         "org/modules/kwalletd")
 _BUS_CALLERS = frozenset({"busctl", "gdbus", "dbus-send", "dbus-monitor", "qdbus", "qdbus6",
                           "qdbus-qt5", "qdbus-qt6", "dbus"})
+_SCRIPT_CALLER = re.compile(r"python[0-9.]*|pypy[0-9.]*|perl[0-9.]*|ruby[0-9.]*|node[0-9]*")
 _CALLER_WORD = re.compile(r"[^\s;&|<>()=`'\"]+")
+_BUS_ASSIGNMENT = re.compile(r"dbus_(?:system|session)_bus_address\s*=")
+# Cheap first look on the whole line's spellings: none of these, nothing to walk.
+_SECRET_HINTS = ("secret", "keyring", "kwallet", "monitor", "capture")
 
 
-def _could_call_bus(variant: str) -> bool:
-    """Whether a word of `variant` is a program that could make a D-Bus
-    call: a D-Bus client, an interpreter or a shell (any path, any version
-    suffix on python)."""
-    for match in _CALLER_WORD.finditer(variant):
-        base = re.split(r"[\\/]", match.group())[-1].casefold()
-        if base.endswith(".exe"):
-            base = base[:-4]
-        if (base in _BUS_CALLERS or base in _INTERPRETERS or base in SHELLS
-                or re.fullmatch(r"python[0-9.]*|pypy[0-9.]*|perl[0-9.]*|ruby[0-9.]*|node[0-9]*", base)):
+def _program_stem(word: str) -> str:
+    base = re.split(r"[\\/]", word)[-1].casefold()
+    return base[:-4] if base.endswith(".exe") else base
+
+
+def _is_caller(stem: str) -> bool:
+    """A program that could make a D-Bus call: a D-Bus client, an
+    interpreter or a shell (any version suffix on the script runtimes)."""
+    return (stem in _BUS_CALLERS or stem in _INTERPRETERS or stem in SHELLS
+            or bool(_SCRIPT_CALLER.fullmatch(stem)))
+
+
+def _names_service(text: str) -> bool:
+    return any(name in v.casefold() for v in _spellings(text) for name in _SECRET_SERVICE_NAMES)
+
+
+def _runs_keyring_module(args: list[str]) -> bool:
+    """`-m keyring` (or `keyring.cli`), `-mkeyring`, or `-m` ending a flag
+    cluster (`-Im keyring`)."""
+    for i, arg in enumerate(args):
+        if arg.startswith("-m") and len(arg) > 2 and not arg.startswith("--"):
+            module = arg[2:]
+        elif arg.startswith("-") and not arg.startswith("--") and arg.endswith("m"):
+            module = args[i + 1] if i + 1 < len(args) else ""
+        else:
+            continue
+        module = module.casefold()
+        if module == "keyring" or module.startswith("keyring."):
             return True
     return False
 
 
+def _bus_monitor(stem: str, args: list[str], assigned: bool) -> str | None:
+    """Why this program watches the session bus (DENY), or None: the bus
+    carries the keyring's secrets to the programs that ask. `dbus-monitor`
+    watches the session bus unless told `--system`; `gdbus monitor` unless
+    `--system`/`-y`; `busctl monitor|capture` watches the system bus unless
+    told `--user`, an address, a machine or a host. `assigned`: the line
+    sets a `DBUS_*_BUS_ADDRESS`, so `--system` is no exemption."""
+    if stem == "dbus-monitor":
+        if (not assigned and "--system" in args
+                and not any(a == "--session" or a.startswith("--address") for a in args)):
+            return None
+    elif stem == "gdbus":
+        if args[:1] != ["monitor"] or (not assigned and ("--system" in args or "-y" in args)):
+            return None
+    elif stem == "busctl":
+        if not any(a in ("monitor", "capture") for a in args):
+            return None
+        if not assigned and not any(
+                a == "--user" or a.split("=", 1)[0] in ("--address", "--machine", "--host")
+                or (a.startswith(("-M", "-H")) and not a.startswith("--")) for a in args):
+            return None
+    else:
+        return None
+    return (f"{stem} would watch the session bus, which carries the keyring's secrets (Chrome's "
+            "password key among them) to the programs that ask; no agent command watches it")
+
+
+def _program_verdict(word: str, args: list[str], assigned: bool) -> str | None:
+    """One program the line runs, judged alone (note above)."""
+    words = [str(a) for a in args]
+    for spelled in _spellings(str(word)):
+        stem = _program_stem(spelled)
+        if stem in _SECRET_READER_STEMS:
+            return SECRET_SERVICE_DENIED
+        if stem == "keyring" and any(a in _KEYRING_VERBS for a in words):
+            return SECRET_SERVICE_DENIED
+        if _PYTHON.fullmatch(stem) and _runs_keyring_module(words):
+            return SECRET_SERVICE_DENIED
+        monitor = _bus_monitor(stem, words, assigned)
+        if monitor:
+            return monitor
+        if _is_caller(stem) and words and _names_service(" ".join(words)):
+            return SECRET_SERVICE_DENIED
+    return None
+
+
 def secret_service_reading(command: str) -> str | None:
-    """SECRET_SERVICE_DENIED (or the monitor's reason) if this line calls the
-    Secret Service or watches the session bus (note above), else None. Pure
-    text work; nothing runs. Short lines are cached, as the vex reading's are."""
+    """SECRET_SERVICE_DENIED (or the monitor's reason) if a program this line
+    runs calls the Secret Service or watches the session bus (note above),
+    else None. Pure text work; nothing runs. Short lines are cached, as the
+    vex reading's are."""
     command = command or ""
     if len(command) <= 16384:
         return _secret_service_cached(command)
@@ -482,42 +569,36 @@ def _secret_service_uncached(command: str) -> str | None:
     text = join_continuations(command)
     if not text.strip():
         return None
+    spelled = [v.casefold() for v in _spellings(text)]
+    if not any(hint in v for v in spelled for hint in _SECRET_HINTS):
+        return None
+    assigned = any(_BUS_ASSIGNMENT.search(v) for v in spelled)
+    for variant in _program_variants(text):
+        walk = _Walk()
+        try:
+            walk.line(variant, True, 0)
+        except _TooComplex:
+            return _secret_service_text(text)
+        for prog in walk.progs:
+            if not prog.word:
+                continue
+            why = _program_verdict(prog.word, list(prog.args), assigned)
+            if why:
+                return why
+    return None
+
+
+def _secret_service_text(text: str) -> str | None:
+    """The stricter whole-text reading, for a line too complex to walk: a
+    reader's name anywhere, or a service name and a caller anywhere."""
     for variant in _spellings(text):
         folded = variant.casefold()
         if _SECRET_READERS.search(folded):
             return SECRET_SERVICE_DENIED
-        if any(name in folded for name in _SECRET_SERVICE_NAMES) and _could_call_bus(variant):
+        if (any(name in folded for name in _SECRET_SERVICE_NAMES)
+                and any(_is_caller(_program_stem(w)) for w in _CALLER_WORD.findall(variant))):
             return SECRET_SERVICE_DENIED
-        monitor = _bus_monitor(_CALLER_WORD.findall(variant))
-        if monitor:
-            return monitor
     return None
-
-
-def _bus_monitor(words: list[str]) -> str | None:
-    """Why a line with these words watches the session bus (DENY), or None:
-    the bus carries the keyring's secrets to the programs that ask. Read on
-    the whole line, as the names are: `dbus-monitor` watches the session bus
-    unless told `--system` (and no `--session` or `--address`); `gdbus
-    monitor` unless told `--system`/`-y`; `busctl monitor|capture` watches
-    the system bus unless told `--user`, an address, a machine or a host."""
-    bases = [re.split(r"[\\/]", w)[-1] for w in words]
-    stem = None
-    if "dbus-monitor" in bases:
-        if not ("--system" in words and not any(w == "--session" or w.startswith("--address")
-                                                for w in words)):
-            stem = "dbus-monitor"
-    if stem is None and "gdbus" in bases and "monitor" in words:
-        if "--system" not in words and "-y" not in words:
-            stem = "gdbus"
-    if stem is None and "busctl" in bases and any(w in ("monitor", "capture") for w in words):
-        if any(w == "--user" or w.split("=", 1)[0] in ("--address", "--machine", "--host")
-               or (w.startswith(("-M", "-H")) and not w.startswith("--")) for w in words):
-            stem = "busctl"
-    if stem is None:
-        return None
-    return (f"{stem} would watch the session bus, which carries the keyring's secrets (Chrome's "
-            "password key among them) to the programs that ask; no agent command watches it")
 
 
 VEXCOM_DENIED = ("it names vexcom, VEX's tool for downloading to and talking to the robot; "

@@ -121,9 +121,13 @@ FELL_BACK_MESSAGE = (
     "this profile's passwords stay in the keyring. Check that it is unlocked, in Windows "
     "Terminal (not a Jarvis terminal): " + UNLOCK_COMMAND)
 UNVERIFIED_MESSAGE = (
-    "Chrome's password store could not be confirmed, so it was closed; this profile's "
-    "passwords stay in the keyring. Try again; if it repeats, see the Browser notes "
+    "Jarvis couldn't confirm Chrome's password store (possibly after a Chrome update), so "
+    "Chrome was closed; this profile's passwords stay in the keyring. See the Browser notes "
     "(Password store).")
+# A running basic launch whose store could not be read (review of #218, NIT 3):
+# not an install problem, so not the install hint.
+UNVERIFIED_HINT = ("Jarvis couldn't confirm Chrome's password store (possibly after a Chrome "
+                   "update); treat this profile's saved passwords as unprotected.")
 UNPROTECTED_HINT = ("Unprotected (basic store): saved passwords use a public key. Install "
                     "the keyring: " + INSTALL_COMMAND + " — then unlock it: " + UNLOCK_COMMAND)
 
@@ -132,6 +136,8 @@ GDBUS = Path("/usr/bin/gdbus")
 # key that wrote it: `v10` the basic store's, `v11` the keyring's.
 PREFIXES = {b"v10": BASIC, b"v11": KEYRING_STORE}
 COOKIES_DB = Path("Default") / "Cookies"
+# The probe cookie's host (`host.STORE_PROBE_URL`): a name that never resolves.
+PROBE_HOST = "password-store.jarvis.invalid"
 PROBE_TIMEOUT_S = 3
 STATUS_TTL_S = 5.0
 _SECRETS = "org.freedesktop.secrets"
@@ -286,7 +292,8 @@ def observed_store(folder: Path, name: str) -> str | None:
         con = sqlite3.connect(uri, uri=True, timeout=0)
         try:
             row = con.execute("SELECT substr(encrypted_value, 1, 3) FROM cookies "
-                              "WHERE name = ? LIMIT 1", (name,)).fetchone()
+                              "WHERE host_key = ? AND name = ? LIMIT 1",
+                              (PROBE_HOST, name)).fetchone()
         finally:
             con.close()
     except sqlite3.Error:
