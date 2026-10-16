@@ -228,11 +228,43 @@ it("a picker arriving behind a dialog or a file chooser is refused, and never sh
   expect(overlay()).not.toBeNull();
 });
 
-it("an IME commit while the picker is open never reaches the page", async () => {
+it("an IME composition committed while the picker is open never reaches the page or the picker", async () => {
   await click(); await message(SELECT); socket().sent = [];
+  const before = overlay()!.querySelector('[aria-selected="true"]')!.getAttribute("data-index");
   await act(async () => {
     proxy().dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
-    proxy().dispatchEvent(new CompositionEvent("compositionend", { bubbles: true, data: "漢字" }));
+    proxy().dispatchEvent(new CompositionEvent("compositionupdate", { bubbles: true, data: "c" }));
   });
+  // IME keydowns, each its own task: keyCode 229 with a letter key, composing or not.
+  await act(async () => { proxy().dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, cancelable: true, key: "c", code: "KeyC", keyCode: 229, isComposing: true } as KeyboardEventInit)); });
+  await act(async () => { proxy().dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, cancelable: true, key: "c", code: "KeyC", keyCode: 229 } as KeyboardEventInit)); });
+  await act(async () => {
+    proxy().dispatchEvent(new CompositionEvent("compositionend", { bubbles: true, data: "漢字" }));
+    proxy().dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: "字" }));
+  });
+  await act(async () => { await new Promise(r => setTimeout(r, 80)); });
+  expect(before).toBe("0");
+  expect(overlay()!.querySelector('[aria-selected="true"]')!.getAttribute("data-index")).toBe("0");
+  await key("ArrowDown");
+  expect(socket().sent.filter(m => m.t === "text" || m.t === "key")).toEqual([]);
+  expect(overlay()!.querySelector('[aria-selected="true"]')!.getAttribute("data-index")).toBe("2");
+});
+
+it("a composition the picker interrupted never commits after the picker closes", async () => {
+  await act(async () => { proxy().focus(); proxy().dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true })); });
+  await click(); await message(SELECT);
+  await message({ t: "picker_closed", id: SELECT.id, reason: "changed" });
+  expect(overlay()).toBeNull();
+  socket().sent = [];
+  await act(async () => { proxy().dispatchEvent(new CompositionEvent("compositionend", { bubbles: true, data: "ni" })); });
+  await act(async () => { await new Promise(r => setTimeout(r, 80)); });
+  expect(socket().sent.filter(m => m.t === "text")).toEqual([]);
+});
+
+it("a composition begun before the picker opened is cancelled by it", async () => {
+  await act(async () => { proxy().focus(); proxy().dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true })); });
+  await click(); await message(SELECT); socket().sent = [];
+  await act(async () => { proxy().dispatchEvent(new CompositionEvent("compositionend", { bubbles: true, data: "ni" })); });
+  await act(async () => { await new Promise(r => setTimeout(r, 80)); });
   expect(socket().sent.filter(m => m.t === "text")).toEqual([]);
 });

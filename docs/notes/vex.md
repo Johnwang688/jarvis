@@ -537,3 +537,183 @@ through to connecting (MED-2), no place callback and a status read naming the
 terminal mid-Connect (LOW-1), and no clearing of the ended link (LOW-2). Before
 this package the new vitests fail (22) and the face sections stop at the
 missing Connect.
+
+## The VEX view as built: VX-UI-1 to VX-UI-4a, with VX-UI-2/3 finished (2026-10-16)
+
+Plan: [`docs/plans/2026-10-15-vex-ui-redesign.md`](../plans/2026-10-15-vex-ui-redesign.md),
+whose §0.1 (the owner's decisions) overrides the rest of it. This section
+describes the whole view as it stands. The two sections above have the
+details and receipts for each package.
+
+**Top to bottom**, in one pane (`VexView.tsx`):
+
+1. **Unclaimed device notices.** Red, above everything, never folded.
+2. **Header.** The project name, the language (the SDK version is in its
+   title), the slot chip `Slot N · name ▾`, the Brain and Controller USB dots,
+   and `?`. The slot chip's popover holds the slot select, the name box and
+   the warning "Download to slot N: replaces whatever is in slot N on the
+   brain". The USB dots are a button that opens the Device tab. They probe
+   nothing.
+3. **Action bar.** `Clean › Build, Rebuild › Download to slot N`, plus ⋯
+   (Read device info, List programs). All of them are visible (decision 3).
+   Each step has a state mark at its top-right corner. There is **no Run
+   button** (decision 1; VX-UI-5 is dropped and V-3 stands). The setup box
+   replaces the bar while `vex.json` is missing.
+4. **Status line** (`vex-status`, never folded). It shows, in order of
+   priority:
+   - the running chain, step by step, with progress, in every VEX view;
+   - the running build;
+   - the last result in words;
+   - "Ready".
+
+   Any stale ✓ is also said here in words, for example "Build: ✓ edited
+   since". **Stop** sits at the end of the line while this project has
+   something running (decision 6). Under an approval card the line says
+   **Held** in `--amber`, which is amber's only use in the view. Refusals
+   appear on alert rows under the line.
+5. **Errors list.** It appears only after a build with errors. More than five
+   rows collapse behind "Show all".
+6. **Output area** with **Build / Download / Brain / Device** tabs. It is a
+   real tablist, foldable (▾) and able to fill the pane (⤢), and each tab has
+   a badge. The output and the log stay visible: the area fills the pane and
+   is never hidden behind a `<details>`. The Brain tab draws the brain
+   terminal itself (VX-UI-4a) and connects only on Connect (decision 5).
+
+**State marks (VX-UI-2, finished here).**
+
+- `lib/vex.ts` `actionState(kind, run, following)` is the one pure function.
+  It turns a project's run in this window into a state for Clean, Build,
+  Rebuild or Download: idle, busy, ok, failed, stale or unknown, always with
+  words (`text`).
+  - A stale state also carries a `detail`: "edited since", "cleaned since"
+    or "from an older build".
+  - The action bar's marks and the Build and Download tab badges all read it
+    (`tabBadge`), so a step and its tab never disagree. The Build tab follows
+    whichever of clean, build or rebuild it shows. When the daemon forgot the
+    current build (a 404 clears `build`), the tab follows the latest record
+    kept for a step, so it says ? as that step's mark does (review LOW).
+  - A running record that this window no longer follows is **unknown (?)**,
+    never a spinner. Before this package the Build tab's badge showed a
+    spinner there while the step's mark said unknown.
+- **Stale is advisory.** Build or Rebuild goes stale after a source is saved
+  through the editor's write path (`vex.edited`), or after a later clean.
+  Download goes stale when a build or rebuild succeeds after it. A source edit
+  alone does not make Download stale. Stale disables nothing: the daemon's
+  `_fresh` and `build_first` alone decide whether a download may go.
+- **The status line says stale ✓s in words** (`staleNotes`,
+  `vex-stale-note`), as in mockup state 6. A dimmed ✓ alone would say it only
+  in colour, and the words are no longer only in a hover title.
+  - Only the **latest successful** of Build and Rebuild is said, then
+    Download. An older one superseded by a later build keeps its dimmed mark
+    but no words (review LOW).
+  - Nothing is said while a chain or a build runs; the line says that
+    instead, and the words come back when it ends.
+- **The Device tab's badge** (`deviceBadge`) shows the worst confirmed USB
+  state: a green dot when a device is present, a red dot when nothing is on
+  USB. It shows **? when the reading is stale or unknown** (paused, older than
+  12 s, or erroring), as plan §2.5 asks. Before this package a stale reading
+  was a dimmed dot. USB presence still disables nothing.
+- **Amber is never a result.** `lib/vexTheme.test.ts` reads `theme.css` and
+  allows `--amber` in exactly two VEX rules: `.vexheld` and
+  `.vexstatus.held`. The face check also asserts that no mark, badge or stale
+  note is amber, under a card included. Under a card the marks keep their own
+  state.
+
+**Help (VX-UI-3, finished here).**
+
+- Every control keeps a **permanent** hover help (decision 7). There is no
+  first-use count and nothing in `localStorage`. The help shows after a short
+  hover or on `:focus-visible`, is hidden while the control is pressed and
+  under a card, and is named by `aria-describedby`.
+- The output toolbars' controls now have help too:
+  - Show terminal: "… It runs nothing."
+  - Check status, which differs by button (review LOW):
+    - the build's asks again and follows the build to its end;
+    - the download's asks once how it ended;
+    - neither starts or resends anything.
+  - Refresh USB status: it returns Jarvis's latest check, which runs at most
+    every 5 seconds, so the reading may be up to 5 s old (older after
+    errors). "It writes nothing to the robot."
+- **Refresh USB status moved to the Device tab's toolbar** (`vexcom --usb`,
+  beside the other tabs' Show terminal). Inside the scrolling body, its help
+  was cut off (review MED). The face check now asserts that each tip it shows
+  fits inside every clipping ancestor and the window; `is_visible` cannot see
+  clipping.
+- **`?` help mode** lists every sentence in the output area. Each visible
+  control now also shows **its number in that list** (mockup state 1; plan
+  §2.6), so no callout covers another. `?` itself is numbered and listed
+  too.
+  - The numbers are `aria-hidden`, never focusable and take no pointer
+    events.
+  - A step's number sits at its bottom-left corner, because the mark holds the
+    top-right and a top-left number would cover the previous step's mark. A
+    tab's number, and ⤢'s and ▾'s, sit just above them.
+  - Turning help mode on moves no focus. Escape or `?` closes it.
+  - A card closes it and removes the numbers. It stays off after the card
+    until `?` is pressed again.
+
+**Routes.** None changed in VX-UI-2, VX-UI-3 or this section. Marks, badges
+and help are computed in the window from the records the view already reads.
+
+**Pending.**
+
+- **VX-UI-4b**, the brain terminal's startup reply and `--quiet`, is not
+  built. It waits on hardware check **H4**: whether the brain terminal starts
+  under WSL interop's `ESC[6n` query. If it hangs, a daemon reply for
+  `vex-brain`'s first exact query is the fix, with an independent review of
+  the terminal boundary. H0–H4 and H9–H10 remain the owner's hardware session.
+- Real VEX behaviour stays **UNRUN**: no tool, device or COM port was used.
+
+Checks (fakes only; nothing installed, no live daemon, port or device):
+
+- `lib/vex.test.ts`, under "actionState":
+  - every state, stale after an edit or a clean;
+  - Download stale only after a later *successful* build, unknown when its
+    outcome was lost;
+  - the tab badges, the Device badge's ? when stale, and the stale words.
+- `lib/vexTheme.test.ts`: the amber rule and each state's colour.
+- `tests/face/hud_v2_vex_check.py`:
+  - the new `_marks_checks` (Download ✓ → stale after a later build, in words
+    on the step, its tab and the status line; nothing disabled; nothing amber,
+    a card included);
+  - in `_build_checks`, the "edited since" words and the stale tab badge;
+    the words giving way while a Clean runs and coming back after it; and a
+    fresh ✓ after the edit with no words;
+  - in `_feedback_checks`, the Device badge: a green dot, then ? when stale,
+    then a red dot after two confirmed disconnects;
+  - in `_help_checks`:
+    - the help numbers (they match the list, sit on their own control, are
+      decoration only and move no focus);
+    - the toolbar help, and no tip cut off by a scroll box or the window;
+    - a card closing help mode.
+- The mock's `finish_build` and `build_auto` take an `ended`, so a build can
+  end after a download.
+
+Receipts for this section (fakes only):
+
+- `hud_v2_vex_check` 299/299, and
+  `hud_v2_vex_new_check` 66/66.
+- The vex vitests: 73 across `lib/vex.test.ts` and `lib/vexTheme.test.ts`.
+  The full vitest run passed 3186; it failed only
+  `RemoteView.test.ts` "draws and ACKs only the current socket generation",
+  which fails the same way on a clean origin/main (e181beb).
+- `tsc --noEmit` is clean, and `tests/v2/vex_check.py` passes.
+- Fourteen mutations each failed their checks. Nine came first:
+  - in vitest:
+    - the Build tab's badge ignoring whether the build is followed;
+    - the Device badge without ? when stale;
+    - a stale mark in amber;
+    - no stale words;
+    - Download's staleness ignoring a later rebuild;
+    - the Download tab reading Build's state;
+  - in the face check:
+    - no help numbers;
+    - the status line without its stale words;
+    - the Device tab badge ignoring a stale reading.
+
+  Then the review round's five:
+  - the Refresh toolbar back inside the scrolling body (face: clipped tip);
+  - the Build tab ignoring the kept records after a 404 (vitest);
+  - every stale build and rebuild said, superseded ones included (vitest);
+  - stale words while something runs, once in `staleNotes` (vitest) and once
+    in the view's call (face, with a Clean running).

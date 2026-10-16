@@ -13,6 +13,8 @@ import { BrowserFiles } from "./BrowserFiles";
 import { BrowserAuth } from "./BrowserAuth";
 import { parseBrowserAuth, type BrowserAuth as AuthChallenge } from "../lib/browserauth";
 import { DriveStatus } from "./DriveStatus";
+import { RemoteIme } from "../lib/remoteime";
+import { toCss } from "../lib/layout";
 import { driving, useDriving } from "../state/driving";
 import type { DriveLease } from "../lib/drivestate";
 
@@ -39,7 +41,8 @@ export function RemoteView(props:RemoteViewProps) {
   const keys=useRef(new HeldKeys());const buttons=useRef(new HeldButtons());
   const geometry=useRef({css:{width:1,height:1},view:{width:1,height:1},place:{x:0,y:0,scale:1}});
   const clipboard=useRef<{gen:number;cut:CdpKeyEvent|null;cancelled:boolean;received?:boolean}|null>(null);
-  const composing=useRef(false);
+  // B-IME: the owner composes in the proxy; only a commit reaches the page (lib/remoteime.ts).
+  const ime=useRef<RemoteIme|null>(null);
   const [retry,setRetry]=useState(0);
   const [connected,setConnected]=useState(false);
   const [error,setError]=useState("");
@@ -120,6 +123,11 @@ export function RemoteView(props:RemoteViewProps) {
     }
     if(at>=0)setPickHighlight(at);
   };
+  if(!ime.current)ime.current=new RemoteIme({
+    canInput:()=>canInput()&&!pickerRef.current,epoch:()=>inputEpoch.current,send:text=>{void paste(text);},
+    clear:()=>{if(input.current)input.current.value="";},
+    showing:on=>{if(input.current){if(on)input.current.dataset.composing="";else delete input.current.dataset.composing;}},
+  });
   const release=()=>{
     const held=!canInput();
     for(const event of keys.current.releaseAll(held))send({t:"key",e:event},true);
@@ -152,7 +160,7 @@ export function RemoteView(props:RemoteViewProps) {
     if(props.blocked && clipboard.current)clipboard.current.cancelled=true;
     if(!props.blocked)release();
     // A composition/paste interrupted by approval is never committed later.
-    if(props.blocked)composing.current=false;
+    if(props.blocked)ime.current?.interrupt();
   },[props.blocked]);
   useEffect(()=>{
     if(!props.live)return;
@@ -162,7 +170,7 @@ export function RemoteView(props:RemoteViewProps) {
     owner.reset();setConnected(false);setError("");setDialogs([]);setAuth(null);authCurrent.current=null;setChooser(null);setSecurity("unknown");
     pageDialogs.current=new Set();pageChooser.current=null;
     pickerRef.current=null;setPicker(null);pickGesture.current.clear();pickApplied.current=null;pickDismiss.current=false;
-    keys.current=new HeldKeys();buttons.current=new HeldButtons();clipboard.current=null;composing.current=false;inputEpoch.current++;
+    keys.current=new HeldKeys();buttons.current=new HeldButtons();clipboard.current=null;inputEpoch.current++;ime.current?.interrupt();
     const current=()=>!gone&&generation.current===gen&&latest.current.tabId===props.tabId&&latest.current.instanceGeneration===props.instanceGeneration;
     const pipe=new FramePipe<ImageBitmap>(decodeFrame,
       (bitmap,meta:FrameMeta)=>{
@@ -202,6 +210,7 @@ export function RemoteView(props:RemoteViewProps) {
               send({t:"pick_cancel",id:offered.id});return;
             }
             owner.reset();
+            ime.current?.interrupt();
             pickerRef.current=offered;setPicker(offered);pickTyped.current={text:"",at:0};
             setPickHighlight(offered.kind==="select"?initialHighlight(offered):-1);
             setPickValue(offered.kind==="select"?"":offered.value);
@@ -220,9 +229,8 @@ export function RemoteView(props:RemoteViewProps) {
             owner.receive(msg);
             if(ownerReset(msg)){
               pickerRef.current=null;setPicker(null);
-              inputEpoch.current++;composing.current=false;
+              inputEpoch.current++;ime.current?.interrupt();
               keys.current=new HeldKeys();buttons.current=new HeldButtons();
-              if(input.current)input.current.value="";
               if(clipboard.current)clipboard.current.cancelled=true;
             }
           }
@@ -233,8 +241,7 @@ export function RemoteView(props:RemoteViewProps) {
               owner.reset();pickerRef.current=null;setPicker(null);
               authCurrent.current=frame.auth;setAuth(frame.auth);inputEpoch.current++;
               if(clipboard.current)clipboard.current.cancelled=true;
-              composing.current=false;keys.current=new HeldKeys();buttons.current=new HeldButtons();
-              if(input.current)input.current.value="";
+              ime.current?.interrupt();keys.current=new HeldKeys();buttons.current=new HeldButtons();
             }else{
               setAuth(old=>old?.id===frame.id?null:old);
               if(authCurrent.current?.id===frame.id)authCurrent.current=null;
@@ -267,20 +274,24 @@ export function RemoteView(props:RemoteViewProps) {
           } else if(msg.t==="ping")send({t:"pong"});
           else if(["error","input_dropped","popup_refused","closed","held","taken"].includes(msg.t)){owner.reset();pickerRef.current=null;setPicker(null);setError(cleanTitle(msg.reason??msg.error??"The Browser is unavailable.",300));}
         };
-        ws.onclose=()=>{if(current()){owner.reset();pickerRef.current=null;setPicker(null);if(lease)driving.detach(lease);socket.current=null;setConnected(false);setAuth(null);authCurrent.current=null;setError("The Browser disconnected. Choose Retry to reconnect.");if(clipboard.current)clipboard.current.cancelled=true;}};
+        ws.onclose=()=>{if(current()){owner.reset();pickerRef.current=null;setPicker(null);ime.current?.interrupt();if(lease)driving.detach(lease);socket.current=null;setConnected(false);setAuth(null);authCurrent.current=null;setError("The Browser disconnected. Choose Retry to reconnect.");if(clipboard.current)clipboard.current.cancelled=true;}};
         ws.onerror=()=>{if(current())setError("The Browser connection failed. Choose Retry.");};
       }catch(e){if(current())setError(cleanTitle(e instanceof Error?e.message:"The Browser could not connect.",300));}
     };
     void connect();
     const observer=new ResizeObserver(resize);if(surface.current)observer.observe(surface.current);
-    const blur=()=>{owner.reset();if(clipboard.current)clipboard.current.cancelled=true;release();};
-    window.addEventListener("blur",blur);
+    const blur=()=>{owner.reset();if(clipboard.current)clipboard.current.cancelled=true;ime.current?.interrupt();release();};
+    // Any press while a composition is open or its commit waits: Chrome commits
+    // the raw text before a press or a focus change reaches anything (remoteime.ts).
+    const press=()=>{const m=ime.current;if(m&&(m.composing||m.waiting))m.interrupt();};
+    window.addEventListener("blur",blur);window.addEventListener("pointerdown",press,true);window.addEventListener("mousedown",press,true);
     return()=>{
       owner.reset();pickerRef.current=null;pickGesture.current.clear();gone=true;generation.current++;authCurrent.current=null;if(lease)driving.detach(lease);if(driveLease.current===lease)driveLease.current=null;controller.abort();pipe.clear();observer.disconnect();window.removeEventListener("blur",blur);
+      window.removeEventListener("pointerdown",press,true);window.removeEventListener("mousedown",press,true);ime.current?.interrupt();
       if(clipboard.current)clipboard.current.cancelled=true;
       if(socket.current===ws)socket.current=null;
       if(ws){ws.onmessage=null;ws.onopen=null;ws.onclose=null;ws.onerror=null;ws.close();}
-      keys.current=new HeldKeys();buttons.current=new HeldButtons();composing.current=false;
+      keys.current=new HeldKeys();buttons.current=new HeldButtons();
     };
   },[props.tabId,props.live,props.instanceGeneration,retry]);
   useLayoutEffect(()=>resize(),[props.zoom]);
@@ -297,6 +308,14 @@ export function RemoteView(props:RemoteViewProps) {
     if(pickDismiss.current){event.preventDefault();if(kind==="up")pickDismiss.current=false;return;}
     if(kind==="down")pickMenuSuppressed.current=false;
     if(owner.consumesMouse(event)){event.preventDefault();return;}
+    if(kind==="down"&&canInput()){
+      // The IME's candidate window and the composition box open where the owner last pressed.
+      const box=surface.current?.getBoundingClientRect(),proxy=input.current;
+      if(box&&proxy){
+        proxy.style.setProperty("--ime-x",`${toCss(event.clientX-box.left,latest.current.zoom)}px`);
+        proxy.style.setProperty("--ime-y",`${toCss(event.clientY-box.top,latest.current.zoom)}px`);
+      }
+    }
     if(kind==="move")owner.move(point(event));
     if(kind==="up"&&!canInput())return;
     const route=routeMouse(kind,event,point(event),!canInput());
@@ -310,6 +329,7 @@ export function RemoteView(props:RemoteViewProps) {
     }
   };
   const paste=async(text:string)=>{
+    ime.current?.flush();
     const gen=generation.current;const inputGen=inputEpoch.current;
     for(const msg of pasteMessages(text)) {
       if(gen!==generation.current||inputGen!==inputEpoch.current||!canInput())break;
@@ -345,13 +365,16 @@ export function RemoteView(props:RemoteViewProps) {
       onWheel={e=>{if(owner.menu)return;if(pickerRef.current){e.preventDefault();closePicker(true);return;}if(!canInput())return;const at=point(e);if(!at.inside)return;const event=cdpWheel(e,at,props.zoom,geometry.current.view.height,geometry.current.place.scale);if(event){e.preventDefault();send({t:"mouse",e:event},true);}}}>
       <canvas ref={canvas} role="img" aria-label="Remote page image" />
       <textarea ref={input} className="remoteinput" data-remote-input data-testid="remote-input" aria-label="Type into the Remote page" spellCheck={false} autoComplete="off"
-        disabled={!connected||props.blocked||!!auth} onBlur={()=>{release();send({t:"blur"},true);}}
+        disabled={!connected||props.blocked||!!auth} onBlur={()=>{ime.current?.interrupt();release();send({t:"blur"},true);}}
         onFocus={()=>{if(canInput())send({t:"focus"},true);}}
         onKeyDown={e=>{
+          ime.current?.flush();
           if(pickerRef.current){
             // The open picker takes the keys, as the native popup would; the
-            // HUD's own shortcuts and an approval's Escape keep theirs.
+            // HUD's own shortcuts and an approval's Escape keep theirs. An
+            // IME's own keys (composing, keyCode 229) are never the picker's.
             if(document.getElementById("authveil"))return;
+            if(e.nativeEvent.isComposing||e.nativeEvent.keyCode===229)return;
             const route=routeKeyDown(e.nativeEvent,!canInput());
             if(route.kind==="hud")return;
             e.preventDefault();e.stopPropagation();
@@ -367,6 +390,7 @@ export function RemoteView(props:RemoteViewProps) {
           if(route.kind!=="drop")e.preventDefault();
           if(route.kind==="pane"){release();latest.current.onAction(route.action);}
           if(route.kind==="forward"){
+            ime.current?.forwarded();
             if(route.clip){
               if(clipboard.current)return;
               clipboard.current={gen:generation.current,cut:route.clip==="cut"?route.event:null,cancelled:false};
@@ -377,9 +401,10 @@ export function RemoteView(props:RemoteViewProps) {
         }}
         onKeyUp={e=>{const event=keys.current.released(e.nativeEvent,!canInput());if(event){e.preventDefault();send({t:"key",e:event},true);}}}
         onPaste={e=>{e.preventDefault();e.stopPropagation();if(canInput())void paste(e.clipboardData.getData("text/plain"));}}
-        onCompositionStart={()=>{composing.current=!!canInput();}}
-        onCompositionEnd={e=>{if(composing.current&&canInput()&&!pickerRef.current)void paste(e.data);composing.current=false;e.currentTarget.value="";}}
-        onInput={e=>{if(!composing.current)e.currentTarget.value="";}} />
+        onCompositionStart={()=>ime.current?.start()}
+        onCompositionUpdate={()=>ime.current?.update()}
+        onCompositionEnd={e=>ime.current?.end(e.data)}
+        onInput={e=>{const n=e.nativeEvent as InputEvent;if(ime.current?.input(n.inputType??"",n.data??null,!!n.isComposing)??true)e.currentTarget.value="";}} />
       {picker&&pickerLive?<RemotePicker picker={picker} anchor={pageToCanvas(picker.rect,geometry.current.place)}
         bounds={{width:surface.current?.clientWidth??0,height:surface.current?.clientHeight??0}}
         highlight={pickHighlight} value={pickValue} blocked={!canInput()}

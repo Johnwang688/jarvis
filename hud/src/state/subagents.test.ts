@@ -41,6 +41,22 @@ describe("the window's sub-agent store", () => {
     stop(); again();
   });
 
+  it("tells the listener each list read, with the cleaned rows (SV-5 learns a Stop it missed)", async () => {
+    const m = manual();
+    const s = createSubagentStore(m.fetchers);
+    const seen: [string, string[]][] = [];
+    s.setListed((threadId, rows) => seen.push([threadId, rows.map((r) => `${r.sid}:${r.status}:${r.stop ?? ""}`)]));
+    s.watch("t1");
+    m.lists[0].resolve({ subagents: [listRow("cl:a", { stop: "stopping" }), listRow("cl:b", { status: "done" })] });
+    await settle();
+    expect(seen).toEqual([["t1", ["cl:a:running:stopping", "cl:b:done:"]]]);
+    s.setListed(() => { throw new Error("a listener never breaks the store"); });
+    s.reconnect();
+    m.lists[1].resolve({ subagents: [] });
+    await settle();
+    expect(s.rows("t1")).toEqual([]);
+  });
+
   it("records heard during a read are laid over it; a stale one never takes a row back", async () => {
     const m = manual();
     const s = createSubagentStore(m.fetchers);

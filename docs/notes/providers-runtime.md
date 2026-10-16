@@ -1203,18 +1203,30 @@ registry) and git all work (cargo is not installed here). Non-dot HOME
 folders (projects) stay readable. The Windows profiles WSL mounts
 (`codex_config.windows_profiles`: each real folder under `/mnt/c/Users`,
 not Public/Default/All Users, found by listing, skipped when not mounted
-or not listable; `JARVIS_WINDOWS_USERS` moves the root) are closed the same
+or not listable; `JARVIS_WINDOWS_USERS` moves the root; a symlinked profile
+folder is followed when it resolves, loop-free, to a real folder inside the
+root, and skipped when it leads out of it) are closed the same
 way: every dot-entry, `AppData` as a whole (the GitHub CLI's hosts.yml,
 git-credential-manager, browser profiles) and the registry hive
 (`NTUSER.DAT*`) are denied; Documents, Desktop and a repo stay readable, and
 a session folder inside a closed one is closed around. A literal path that
 holds glob syntax (`*?[]{}`, e.g. the hive's `NTUSER.DAT{guid}…` logs) is
-never written as a deny: Codex would read it as a glob. Loose key and token
+never written as a deny: Codex would read it as a glob. Where every entry of
+its folder is denied anyway (a folder closed in turn with nothing kept, such
+as `~/.config`) and the folder holds nothing the session needs, the folder is
+denied whole instead; elsewhere the entry stays readable (residuals below).
+Escaping is not used even where a glob could express the name: 0.161 matches
+a glob's name at every depth to 4 below its literal base, scans that at each
+command start, and fails every command when a match lies inside a denied
+folder, so a pattern at a home's or profile's top is unsafe. Loose key and token
 files are closed as a class, by name only (`codex_config.key_like`): at the
 top of the home and of each Windows profile, `*.pem|key|p12|pfx|ppk|jks`,
 `*credential*`, `service-account*.json`, `*-key(s).json`, `id_*`, `*token*`,
 `*secret*`; at the top of each `~/projects/*` repository, the session folder
-and Jarvis's checkout, the narrow first half (design tokens stay). Names
+and Jarvis's checkout, the narrow first half (design tokens stay), with
+`*credential*` there only for data or key-like files (no extension, or
+`json|yaml|yml|toml|ini|env|txt|xml|csv`: `codex_config.CREDENTIAL_DATA`), so
+`credentials.py` and `credential_form.tsx` stay readable. Names
 with example/sample/template and `.pub` keys are not secrets. The gate's
 shared name helper (`tools.secrets.is_protected`) flags none of these and
 also decides v1's file refusals and output scrubbing, where `*token*` would
@@ -1230,7 +1242,18 @@ worktrees, split around denied folders. The table is computed once, when the
 config is written (`codex_config.written`), and the start-up check compares
 Codex's readback with it, never with a rescan (a `-wal` file appearing in
 `~/.codex` must not refuse a healthy chat). A command start costs about
-0.18 s with the real table (0.04 s bare). `thread/start` and
+0.18 s with the real table (0.04 s bare). Writing the table at a session
+start took 0.27 s warm (median, names only, 2026-10-16; 1.15 s before the
+nested-deny pruning was made linear), of which the Windows profiles are
+about 0.1 s warm; a cold drive took about 2.6 s. Listing `/mnt/c` has a
+deadline (`codex_config.WINDOWS_DEADLINE_S`, 5 s, on a worker thread): on a
+timeout the Windows closure is skipped for that session, as for a drive not
+mounted, a warning is logged once per stall (no paths), and the chat gets one
+system line (`EventKind.NOTICE`, logged and shown in the HUD and the
+transcript) saying the profiles were not closed. While that listing is still
+blocked, later starts skip at once instead of waiting again. The listing is
+not cached between sessions: warm it is cheap, and a cache would keep a store
+made in a profile readable for one more session. `thread/start` and
 `thread/resume` send no `sandbox` field. `codex_config.check_effective` reads
 `config/read` (profile name, no legacy mode, the feature on and the turn-wide
 one off, the exact filesystem map, network off, the command HOME) and
@@ -1267,14 +1290,30 @@ relied on:
   files are denied by name);
 - a deny for a path whose parent is missing makes an accepted
   `require_escalated` command fail (`~/.cargo/credentials` without
-  `~/.cargo`), so only existing paths are denied.
+  `~/.cargo`), and one for a missing path whose parent exists makes such a
+  command create an empty placeholder there on the host for its life (an
+  empty `~/.netrc`, seen by a watcher, removed afterwards; plain commands see
+  nothing), so only existing paths are denied.
 
 Residuals: an accepted `require_escalated` command cannot read the skills
 folder (its sandbox drops that write entry, measured); a `.env` that is a symlink, or a folder named `.env`, is not
 covered by the glob; `.env.example` files are hidden too (a glob only
-denies); a credential store, dot-folder or `~/.codex` entry created after a
-session starts is covered from the next start; a secret in an ordinary
-(non-dot) folder is readable (the model's note says so). Tests:
+denies); **a credential store, dot-folder, key file or `~/.codex` entry
+created after a session starts stays readable to that session's commands
+until the next session start** (only paths that exist are denied: denying a
+named store before it exists is not safe, since for an accepted
+`require_escalated` command bwrap makes an empty placeholder at the missing
+path on the host for the command's life, measured 2026-10-16); a file or
+folder whose path holds glob syntax (`*?[]{}`) is never denied by name, and is
+readable unless a denied folder holds it: at the top of the home or a Windows
+profile, in a folder with kept entries (`~/.cache`, `~/.local/share` ...), in
+`~/.codex`, at a repository's top, and a `.env*` file named that way in a
+folder split around a denied one; a session folder (or other `.env*` base)
+whose path holds glob syntax gets no `.env*` glob of its own (a parent
+base's glob may still reach it); a symlinked Windows profile that leads out
+of the Users root is not closed; when the `/mnt/c` listing times out, the
+Windows profiles are open for that session (the chat is told); a secret in
+an ordinary (non-dot) folder is readable (the model's note says so). Tests:
 `tests/v2/codex_provider_check.py` (the profile checks),
 `tests/v2/codex_profile_probe_check.py` (the real app-server, skipped without
 the CLI) and `tests/v2/codex_profile_mutants.py`.

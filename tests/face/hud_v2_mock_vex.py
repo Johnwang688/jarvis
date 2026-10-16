@@ -6,7 +6,7 @@ the brain terminal are **rows** in the mock's terminal list (`program`
 `"vex-build"`, `"vex-download"`, `"vex-brain"`), whose output the test's fake
 PTY plays (`tests/face/hud_v2_terminal_check.FakePty`); the build's record
 moves to its end when the test says so (`finish_build`) or, with
-`vex["build_auto"]` set, on its second read.
+`vex["build_auto"]` set, on its second read (its `ended`, if given, is the record's end).
 
 The world's `vex` section (`state(mock)`):
   - `status`: what `GET /vex/status` says (device and brain are computed from
@@ -135,14 +135,15 @@ def _device(mock) -> tuple[str | None, str | None]:
     return ("brain" if brain else None), brain
 
 
-def finish_build(mock, build_id: str, state_: str = "succeeded", errors=None, exit_code=None):
-    """The build's program ended: its record and its row say so."""
+def finish_build(mock, build_id: str, state_: str = "succeeded", errors=None, exit_code=None,
+                 ended: str = "2026-10-11T12:00:09+00:00"):
+    """The build's program ended: its record and its row say so (`ended`: when, for the marks' order)."""
     v = state(mock)
     rec = v["builds"][build_id]
     rec["state"] = state_
     rec["exit_code"] = (0 if state_ == "succeeded" else 2) if exit_code is None else exit_code
     rec["errors"] = list(errors or [])
-    rec["ended"] = "2026-10-11T12:00:09+00:00"
+    rec["ended"] = ended
     if state_ == "succeeded" and rec["action"] != "clean":
         rec["bin"] = {"path": "build/override.bin", "size": 56288, "mtime": "2026-10-11T12:00:09+00:00"}
         v["bin_fresh"] = not v.get("stays_stale") and (
@@ -500,7 +501,8 @@ def handle(h, mock, method: str, path: str, body) -> bool:
         rec["_reads"] += 1
         auto = v.get("build_auto")
         if auto and rec["state"] == "running" and rec["_reads"] >= 2:
-            finish_build(mock, rec["id"], auto.get("state", "succeeded"), auto.get("errors"))
+            finish_build(mock, rec["id"], auto.get("state", "succeeded"), auto.get("errors"),
+                         ended=auto.get("ended", "2026-10-11T12:00:09+00:00"))
         h._json({k: val for k, val in rec.items() if not k.startswith("_")})
         return True
     if parts == ["vex", "brain"] and method == "POST":

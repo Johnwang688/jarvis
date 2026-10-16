@@ -91,3 +91,11 @@ plan disagree, this file wins.**
   none of the 14 that install here (fsevents, macOS-only, is a 15th) is needed for the HUD build. If a dependency ever genuinely needs one, report which and why;
   do not turn scripts back on globally. Details in `docs/notes/hud-workspace.md`, "`jarvis hud rebuild` runs no install
   scripts".
+- **V-3 stands: no Run button (the owner's decision, 2026-10-15).** The VEX view redesign
+  (`docs/plans/2026-10-15-vex-ui-redesign.md` §0.1 item 1) asked whether to revise V-3 for a separate Run button.
+  The owner declined: programs are started from the robot. Package VX-UI-5 (Run, `vexcom --slot N --run`, and a
+  brain-side `vexcom --stop`) is **dropped**. Neither flag is in any argv table, route, tool or HUD control. A
+  download never appends `--run`. The view's **Stop** (§0.1 item 6) only cancels Jarvis's own running clean, build or
+  download by closing that action's program terminal; it sends nothing to the brain. Reopening Run needs a new owner
+  decision, plus the plan's licence gate (H0) and hardware checks H5–H8. Details in `docs/notes/vex.md`, "The VEX view
+  as built".

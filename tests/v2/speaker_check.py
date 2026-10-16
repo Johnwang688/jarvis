@@ -295,10 +295,11 @@ class Routes(unittest.TestCase):
                 self.stt(clip(OWNER, 3), status=400, query=q)
         self.assertEqual(self.cloud, [])
         # M1 (the lead's decision): `verify` is optional and a no-op. Leave it out and an enrolled store still
-        # judges the clip, on every listener: there is no route around the check.
+        # judges the clip: there is no route around the check. The API listener is refused before either
+        # (owner-only since the voice follow-ups' V2 row).
         self.enroll()
         self.stt(clip(FRIEND, 3), status=422, query="")
-        self.request("POST", "/stt", raw=clip(FRIEND, 3), status=422, headers=WAV)            # the API listener
+        self.request("POST", "/stt", raw=clip(FRIEND, 3), status=403, headers=WAV)            # the API listener
         self.assertEqual(self.cloud, [])
         body = self.stt(clip(OWNER, 3, seed=61), query="")
         self.assertEqual(body, {"text": "dictated words", "verify": "matched"})
@@ -421,9 +422,11 @@ class Routes(unittest.TestCase):
         self.assertNotIn(str(self.root), text)
 
     def test_the_only_listener_that_verifies_is_the_one_asked(self):
-        """`verify=1` works from any listener (agents' tools do not need it); enrollment is the owner's."""
+        """`/stt` and enrollment are both the owner's (voice follow-ups, V2 row): the API listener is
+        refused before the clip is judged, and nothing reaches the cloud."""
         self.enroll()
-        self.request("POST", "/stt?verify=1", raw=clip(FRIEND, 3), status=422, headers=WAV)
+        self.request("POST", "/stt?verify=1", raw=clip(FRIEND, 3), status=403, headers=WAV)
+        self.assertEqual(self.cloud, [])
         self.request("POST", "/speaker/reading", raw=clip(OWNER, 10.5), status=403, headers=WAV)
 
 

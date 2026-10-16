@@ -166,9 +166,9 @@ def _latest_build(mock) -> str | None:
     return list(builds)[-1] if builds else None
 
 
-def _finish(mock, fake, build_id: str, state_: str = "succeeded", errors=None):
+def _finish(mock, fake, build_id: str, state_: str = "succeeded", errors=None, ended: str | None = None):
     """The build's program ends: its record says so, and its terminal prints and exits, as make would."""
-    mock_vex.finish_build(mock, build_id, state_, errors)
+    mock_vex.finish_build(mock, build_id, state_, errors, **({"ended": ended} if ended else {}))
     rec = mock_vex.state(mock)["builds"][build_id]
     tid = rec["terminal_id"]
     lines = "".join(f"{e['file']}:{e['line']}:{e['col']}: {e['severity']}: {e['message']}\r\n" for e in errors or [])
@@ -214,6 +214,28 @@ def _described(page, sel: str) -> str:
     return page.locator(sel).evaluate(
         "e => (e.getAttribute('aria-describedby') || '').split(' ').map(i => document.getElementById(i))"
         ".filter(Boolean).map(x => x.textContent).join(' ')")
+
+
+def _tip_clipped(tip) -> str:
+    """Where a shown tooltip is cut off: by a clipping ancestor (overflow other than visible) or the window.
+    `is_visible` cannot see this: a tooltip half outside a scroll box is visible and unreadable."""
+    return tip.evaluate("""t => {
+      const r = t.getBoundingClientRect(), out = [];
+      if (r.width === 0 || r.height === 0) return 'not drawn';
+      for (let e = t.parentElement; e; e = e.parentElement) {
+        const cs = getComputedStyle(e);
+        if (cs.overflowX === 'visible' && cs.overflowY === 'visible') continue;
+        const b = e.getBoundingClientRect();
+        const inner = { left: b.left + e.clientLeft, top: b.top + e.clientTop };
+        inner.right = inner.left + e.clientWidth; inner.bottom = inner.top + e.clientHeight;
+        if (r.left < inner.left - 0.5 || r.top < inner.top - 0.5 || r.right > inner.right + 0.5
+            || r.bottom > inner.bottom + 0.5)
+          out.push((e.dataset.testid || e.className || e.tagName) + ' ' + JSON.stringify([r.left, r.top, r.right, r.bottom].map(Math.round))
+                   + ' outside ' + JSON.stringify([inner.left, inner.top, inner.right, inner.bottom].map(Math.round)));
+      }
+      if (r.left < 0 || r.top < 0 || r.right > innerWidth || r.bottom > innerHeight) out.push('window');
+      return out.join('; ');
+    }""")
 
 
 def _radii(page, sel: str) -> list:
@@ -364,7 +386,7 @@ def _build_checks(page, mock, check, until, fake):
           mark.get_attribute("data-state") == "failed" and mark.inner_text() == "✗"
           and mark.evaluate("e => getComputedStyle(e).color") == _css(page, "--red")
           and mark.get_attribute("aria-label") == "Build: failed (1 error)"
-          and page.locator(_view(V, _tid("vex-out-tab-build"))).get_attribute("aria-label") == "Build, failed")
+          and page.locator(_view(V, _tid("vex-out-tab-build"))).get_attribute("aria-label") == "Build, failed (1 error)")
     check("amber is never a result: no mark is amber",
           _css(page, "--amber") not in page.locator(_view(V, "[data-testid^=vex-mark-]")).evaluate_all(
               "els => els.map(e => getComputedStyle(e).color)"))
@@ -416,6 +438,35 @@ def _build_checks(page, mock, check, until, fake):
     check("stale disables nothing: Download and Build stay on",
           page.locator(_view(V, _tid("vex-download-btn"))).is_enabled()
           and page.locator(_view(V, _tid("vex-build-btn"))).is_enabled())
+    note = page.locator(_view(V, _tid("vex-stale-note")))
+    check("the status line says it in words beside the result: \"Build: ✓ edited since\" (VX-UI-2)",
+          note.count() == 1 and note.locator("[data-kind]").evaluate_all("els => els.map(e => e.dataset.kind)") == ["build"]
+          and note.inner_text().strip() == "Build: ✓ edited since"
+          and "✓ Built" in page.locator(_view(V, _tid("vex-build-state"))).inner_text(),
+          note.inner_text() if note.count() else "")
+    check("and the Build tab's badge is the same dimmed ✓, said in words",
+          page.locator(_view(V, _tid("vex-out-tab-build"))).get_attribute("data-state") == "stale"
+          and page.locator(_view(V, _tid("vex-out-badge-build"))).inner_text() == "✓"
+          and page.locator(_view(V, _tid("vex-out-tab-build"))).get_attribute("aria-label")
+          == "Build, succeeded, edited since")
+    _shot(page, "20-stale-mark")
+    # A Clean running beside the stale ✓: the line says the clean, not the stale words (review LOW).
+    n = len(mock_vex.state(mock)["builds"])
+    page.locator(_view(V, _tid("vex-clean-btn"))).click()
+    check("while something runs the stale words give way to it (review LOW)",
+          bool(until(lambda: page.locator(_view(V, _tid("vex-status"))).get_attribute("data-state") == "busy", timeout=4))
+          and mark.get_attribute("data-state") == "stale" and note.count() == 0)
+    until(lambda: len(mock_vex.state(mock)["builds"]) == n + 1, timeout=4)
+    _finish(mock, fake, _latest_build(mock), "succeeded")
+    check("and come back once it ends", bool(until(lambda: note.count() == 1, timeout=5))
+          and "Build: ✓" in note.inner_text())
+    page.locator(_view(V, _tid("vex-build-btn"))).click()
+    until(lambda: len(mock_vex.state(mock)["builds"]) == n + 2, timeout=4)
+    from datetime import datetime, timedelta, timezone
+    _finish(mock, fake, _latest_build(mock), "succeeded",
+            ended=(datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat())
+    check("and a fresh ✓ after the edit is not stale: no words",
+          bool(until(lambda: mark.get_attribute("data-state") == "ok", timeout=5)) and note.count() == 0)
 
 
 def _clean_output_checks(page, mock, check, until, fake):
@@ -1437,6 +1488,11 @@ def _feedback_checks(page, mock, check, until, fake):
           and page.get_by_test_id("vex-badge-controller").get_attribute("aria-label") == "Controller: Disconnected")
     check("the header's dots match the Device tab's colours", color("vex-badge-brain") == css("--green")
           and color("vex-badge-controller") == css("--red"))
+    dev_tab = page.get_by_test_id("vex-out-tab-device")
+    dev_badge = page.get_by_test_id("vex-out-badge-device")
+    check("the Device tab's badge: a device present is a green dot (VX-UI-2)",
+          dev_tab.get_attribute("data-state") == "ok" and dev_badge.inner_text() == "●"
+          and dev_badge.evaluate("e => getComputedStyle(e).color") == css("--green"))
     check("the connection log is visible in the Device tab (no <details> to open), with timestamps",
           page.get_by_test_id("vex-connection-log").is_visible()
           and page.get_by_test_id("vex-connection-log").locator("time").count() == 2
@@ -1446,11 +1502,18 @@ def _feedback_checks(page, mock, check, until, fake):
     check("the header says a stale reading is the last confirmed one too",
           page.get_by_test_id("vex-badge-brain").get_attribute("aria-label") == "Brain: Connected (last confirmed)"
           and "stale" in (page.get_by_test_id("vex-badge-brain").get_attribute("class") or ""))
+    check("a stale reading makes the Device tab's badge ? (unknown), never a guess",
+          bool(until(lambda: dev_tab.get_attribute("data-state") == "unknown", timeout=3))
+          and dev_badge.inner_text() == "?" and "stale" in (dev_tab.get_attribute("aria-label") or ""))
     check("USB errors preserve last confirmed hardware state", "Connected (last confirmed)" in page.get_by_test_id("vex-usb-brain").inner_text()
           and "Unsupported" in page.get_by_test_id("vex-connection-note").inner_text())
     v["connection"].update(state="ready", brain=False, checked_at=at,
         events=[*v["connection"]["events"], {"device": "brain", "connected": False, "at": at}])
     assert until(lambda: page.get_by_test_id("vex-usb-brain").inner_text() == "Brain: Disconnected")
+    check("two confirmed disconnects make the Device tab's badge a red dot, said in words",
+          bool(until(lambda: dev_tab.get_attribute("data-state") == "failed", timeout=3))
+          and dev_badge.inner_text() == "●" and dev_badge.evaluate("e => getComputedStyle(e).color") == css("--red")
+          and dev_tab.get_attribute("aria-label") == "Device, nothing on USB")
     check("and the header follows a confirmed disconnect", color("vex-badge-brain") == css("--red")
           and page.get_by_test_id("vex-badge-brain").get_attribute("aria-label") == "Brain: Disconnected")
     check("confirmed disconnect has a timestamped log entry", page.get_by_test_id("vex-connection-log").locator("time").count() == 3)
@@ -1658,6 +1721,64 @@ def _tabs_checks(page, mock, check, until, fake):
           page.locator(_view(V, _tid("vex-out-panel"))).get_attribute("data-tab") == "download")
 
 
+def _marks_checks(page, mock, check, until, fake):
+    """VX-UI-2 (plan §3.1): Download's ✓ goes stale after a later build, said in words, disabling nothing."""
+    _reset(page, mock, until)
+    check("marks setup: the view draws", _ready(page, until))
+    _shot(page, "00-idle")
+    _auto(mock)
+    dmark = page.locator(_view(V, _tid("vex-mark-download")))
+    dtab = page.locator(_view(V, _tid("vex-out-tab-download")))
+    check("before anything runs, Download has no mark and its tab says nothing yet",
+          dmark.get_attribute("data-state") == "idle" and dmark.is_hidden()
+          and dtab.get_attribute("aria-label") == "Download, nothing yet")
+    page.locator(_view(V, _tid("vex-download-btn"))).click()
+    check("a finished download is ✓ in green, in words, on the step and its tab",
+          bool(until(lambda: dmark.get_attribute("data-state") == "ok", timeout=10))
+          and dmark.inner_text() == "✓" and dmark.evaluate("e => getComputedStyle(e).color") == _css(page, "--green")
+          and dmark.get_attribute("aria-label") == "Download: in slot 1"
+          and dtab.get_attribute("data-state") == "ok" and dtab.get_attribute("aria-label") == "Download, in slot 1",
+          dmark.get_attribute("aria-label") or "")
+    check("nothing is stale yet", page.locator(_view(V, _tid("vex-stale-note"))).count() == 0)
+    # A later build (its end after the download's): the program on the brain is from an older build.
+    mock_vex.state(mock)["build_auto"] = {"state": "succeeded", "ended": "2026-10-14T09:00:00+00:00"}
+    n = len(mock_vex.state(mock)["builds"])
+    page.locator(_view(V, _tid("vex-build-btn"))).click()
+    until(lambda: len(mock_vex.state(mock)["builds"]) == n + 1, timeout=4)
+    check("a later build makes Download's ✓ stale: dimmed, and said in words",
+          bool(until(lambda: dmark.get_attribute("data-state") == "stale", timeout=6))
+          and dmark.inner_text() == "✓" and dmark.evaluate("e => getComputedStyle(e).opacity") == "0.6"
+          and dmark.get_attribute("aria-label") == "Download: in slot 1, from an older build",
+          dmark.get_attribute("aria-label") or "")
+    note = page.locator(_view(V, _tid("vex-stale-note")))
+    check("the status line says \"Download: ✓ from an older build\", beside the build's ✓",
+          bool(until(lambda: note.count() == 1, timeout=3))
+          and note.inner_text().strip() == "Download: ✓ from an older build"
+          and page.locator(_view(V, _tid("vex-mark-build"))).get_attribute("data-state") == "ok",
+          note.inner_text() if note.count() else "")
+    check("the Download tab's badge is the same stale ✓",
+          dtab.get_attribute("data-state") == "stale" and page.locator(_view(V, _tid("vex-out-badge-download"))).inner_text() == "✓")
+    check("stale is advisory: Download and every step stay on",
+          all(page.locator(_view(V, _tid(t))).is_enabled()
+              for t in ("vex-download-btn", "vex-clean-btn", "vex-build-btn", "vex-rebuild-btn")))
+    check("no mark, badge or note is amber",
+          _css(page, "--amber") not in page.locator(_view(V, "[data-testid^=vex-mark-], .vexbadgemark, .vexstalenote, "
+                                                          ".vexstaleglyph")).evaluate_all(
+              "els => els.map(e => getComputedStyle(e).color)"))
+    _shot(page, "21-download-stale")
+    # Under a card the marks keep their state; only the status line's Held is amber.
+    _approval(mock, "vexmarks1")
+    until(lambda: page.locator(_tid("approval-card")).count() > 0, timeout=4)
+    time.sleep(0.3)
+    check("under a card the marks keep their own state and colours (Held is the status line's)",
+          dmark.get_attribute("data-state") == "stale"
+          and page.locator(_view(V, _tid("vex-status"))).get_attribute("data-state") == "held"
+          and _css(page, "--amber") not in page.locator(_view(V, "[data-testid^=vex-mark-]")).evaluate_all(
+              "els => els.map(e => getComputedStyle(e).color)"))
+    page.keyboard.press("Escape")
+    until(lambda: page.locator(_tid("approval-card")).count() == 0, timeout=4)
+
+
 def _help_checks(page, mock, check, until, fake):
     """Hover help is permanent (owner decision 7); `?` lists every control."""
     _reset(page, mock, until)
@@ -1667,15 +1788,18 @@ def _help_checks(page, mock, check, until, fake):
             "vex-more": "vexcom --programs", "vex-usb-open": "USB presence only", "vex-help-toggle": "Lists what each",
             "vex-out-fold": "Folds the output", "vex-out-max": "whole pane",
             "vex-out-tab-brain": "connects only when you click"}
-    shown = {}
+    shown, clipped = {}, {}
     for tid, text in want.items():
         el = page.locator(_view(V, _tid(tid)))
         tip_id = el.get_attribute("aria-describedby")
         tip = page.locator(f"[id='{tip_id}']")
         el.hover()
         shown[tid] = bool(until(lambda: tip.is_visible(), timeout=2)) and text in tip.inner_text()
+        if shown[tid] and _tip_clipped(tip):
+            clipped[tid] = _tip_clipped(tip)
         page.mouse.move(2, 2)
     check("every control shows its hover help, named by aria-describedby", all(shown.values()), str(shown))
+    check("and none is cut off by a scroll box or the window", not clipped, str(clipped))
     btn = page.locator(_view(V, _tid("vex-build-btn")))
     tip = page.locator(f"[id='{btn.get_attribute('aria-describedby')}']")
     seen = []
@@ -1718,10 +1842,61 @@ def _help_checks(page, mock, check, until, fake):
           toggle.get_attribute("aria-pressed") == "true" and lst.count() == 1
           and lst.locator("li").count() >= 12 and "Mouse click only" in lst.inner_text()
           and "never stops the program on the brain" in lst.inner_text())
+    # Each visible control carries its number in the list (plan §2.6, mockup state 1).
+    nums = page.locator(_view(V, ".vexhelpnum"))
+    order = lst.locator("li").evaluate_all("els => els.map(e => e.dataset.help)")
+    shown_nums = nums.evaluate_all("els => els.map(e => [e.dataset.testid.replace('vex-helpnum-', ''), e.textContent])")
+    check("in help mode each control shows its number in the list, and the numbers match the list's",
+          len(shown_nums) >= 12 and all(order.index(h) + 1 == int(n) for h, n in shown_nums)
+          and {"clean", "build", "rebuild", "download", "slot", "more", "usb", "help", "tab-build", "tab-brain", "fold",
+               "max"} <= {h for h, _ in shown_nums}, str(shown_nums))
+    check("the numbers sit on their own control (Clean's 1 inside Clean's wrapper)",
+          page.locator(_view(V, _tid("vex-helpnum-clean"))).evaluate(
+              "e => !!e.parentElement.querySelector('[data-testid=vex-clean-btn]')")
+          and page.locator(_view(V, _tid("vex-helpnum-clean"))).inner_text() == "1")
+    check("they are decoration: aria-hidden, never focusable, no pointer target",
+          all(nums.evaluate_all("els => els.map(e => e.getAttribute('aria-hidden') === 'true' && e.tabIndex < 0"
+                                " && getComputedStyle(e).pointerEvents === 'none')")))
+    check("help mode moves no focus by itself", page.evaluate(
+        "document.activeElement && document.activeElement.getAttribute('data-testid')") == "vex-help-toggle")
     _shot(page, "01-help-mode")
     page.keyboard.press("Escape")
     check("Escape leaves help mode", bool(until(lambda: lst.count() == 0, timeout=2))
+          and toggle.get_attribute("aria-pressed") == "false" and nums.count() == 0)
+    # The output toolbars' controls keep their help too.
+    term = page.locator(_view(V, _tid("vex-build-output-btn")))
+    ttip = page.locator(f"[id='{term.get_attribute('aria-describedby')}']")
+    term.hover()
+    check("Show terminal says it opens the full output and runs nothing, uncut",
+          bool(until(lambda: ttip.is_visible(), timeout=2)) and "It runs nothing" in ttip.inner_text()
+          and not _tip_clipped(ttip), _tip_clipped(ttip) if ttip.is_visible() else "")
+    page.mouse.move(2, 2)
+    _tab(page, "device")
+    ref = page.locator(_view(V, _tid("vex-connection-refresh")))
+    rtip2 = page.locator(f"[id='{ref.get_attribute('aria-describedby')}']")
+    ref.hover(force=True)
+    check("Refresh USB status says its reading may be 5 s old and it writes nothing to the robot, uncut (review MED)",
+          bool(until(lambda: rtip2.is_visible(), timeout=2)) and "writes nothing to the robot" in rtip2.inner_text()
+          and "up to 5 s old" in rtip2.inner_text() and not _tip_clipped(rtip2),
+          _tip_clipped(rtip2) if rtip2.is_visible() else "")
+    page.mouse.move(2, 2)
+    _tab(page, "build")
+    # Under a card: help mode closes, its numbers go, ? is off, and no hover help shows.
+    toggle.click()
+    until(lambda: lst.count() == 1, timeout=2)
+    _approval(mock, "vexhelp1")
+    until(lambda: page.locator(_tid("approval-card")).count() > 0, timeout=4)
+    time.sleep(0.3)
+    check("a card closes help mode: no list, no numbers, ? off",
+          bool(until(lambda: lst.count() == 0, timeout=2)) and nums.count() == 0 and toggle.is_disabled()
           and toggle.get_attribute("aria-pressed") == "false")
+    page.locator(_view(V, _tid("vex-download-btn"))).hover(force=True)
+    time.sleep(0.7)
+    check("and no hover help shows under it", page.locator(_view(V, _tid("vex-tip-download"))).is_hidden())
+    page.keyboard.press("Escape")
+    until(lambda: page.locator(_tid("approval-card")).count() == 0, timeout=4)
+    check("answered, help mode stays off until ? is pressed again",
+          bool(until(lambda: toggle.is_enabled(), timeout=3)) and lst.count() == 0)
     _slot_open(page)
     _shot(page, "12-slot-popover")
     _slot_close(page)
@@ -1732,7 +1907,7 @@ SECTIONS = (
     _chain_checks, _card_checks, _brain_checks, _info_checks, _notice_checks, _one_chain_checks,
     _header_rebuild_checks, _still_stale_checks, _answer_card_checks, _passing_card_checks, _first_click_checks,
     _detect_again_checks, _lone_pane_checks, _gone_project_checks, _ed7_beside_checks, _stop_checks, _tabs_checks,
-    _help_checks)
+    _marks_checks, _help_checks)
 
 
 def vex_checks(browser, mock, base, check, until, guard, init_script):

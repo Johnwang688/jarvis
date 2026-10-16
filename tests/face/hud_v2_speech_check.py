@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -262,6 +263,59 @@ def main() -> int:
             H.open_settings(page, "Voice")
             page.locator('[data-testid="read-aloud-toggle"]').check()
             page.locator('[data-testid="settings-close"]').click()
+
+            m_sum = len(mock.sent("POST", "/speech/summary"))
+            print("\nsub-agent notices (SV-5): a status and a count, never a child's words")
+
+            def life(sid, status, op="finished", thread="t1", **extra):
+                mock.emit("subagent", {"sid": sid, "op": op, "status": status, "depth": 1, "background": False,
+                                       "started_at": "2026-10-16T10:00:00Z", "entries": 2, **extra}, thread_id=thread)
+
+            n = len(said(mock))
+            mock.emit("subagent_event", {"sid": "cl:toolu_n1", "event": {"kind": "text", "data": {
+                "text": "NOTICE-CHILD-PROSE a child says this at some length, so it would be read."}}}, thread_id="t1")
+            life("cl:toolu_n9", "stopped", stop_reason="stopped by the owner")
+            life("cl:toolu_n8", "running", op="progress", stop="stopping")
+            life("cl:toolu_n8", "failed")
+            page.wait_for_timeout(3800)
+            check("a child's own words, an owner's stop and a child the owner asked to stop are silent",
+                  len(said(mock)) == n, str(said(mock)[n:]))
+            life("cl:toolu_n1", "done", name="NOTICE-NAME", kind="reviewer", last_tool="Bash", stop_reason="NOTICE-REASON")
+            t0 = time.monotonic()
+            life("cl:toolu_n2", "done")
+            life("cx:n3", "failed")
+            page.wait_for_timeout(1500)
+            check("nothing is said inside the 3 s window", len(said(mock)) == n, str(said(mock)[n:]))
+            check("then one coalesced sentence is asked of /say",
+                  bool(until(lambda: len(said(mock)) > n, timeout=6)) and time.monotonic() - t0 >= 2.5, str(said(mock)[n:]))
+            until(lambda: speech(page)["view"]["state"] == "idle", timeout=8)
+            check("it counts and names no one: a status and a number",
+                  said(mock)[n:] == ["Two sub-agents finished, one failed."], str(said(mock)[n:]))
+            check("local only, in the chat's voice",
+                  mock.sent("POST", "/say")[-1].get("local_only") is True and bool(mock.sent("POST", "/say")[-1].get("voice")))
+            check("a notice is a message of its own kind in the queue",
+                  speech(page)["past"][-1]["kind"] == "notice")
+            check("and no summary was asked of the model for it", len(mock.sent("POST", "/speech/summary")) == m_sum)
+            n = len(said(mock))
+            life("cx:main_stop", "running", op="started")
+            mock.emit("turn_finished", {"stop": "interrupted"}, thread_id="t1")
+            life("cx:main_stop", "failed")
+            page.wait_for_timeout(3800)
+            check("after the owner's main Stop, a child reported failed is not announced", len(said(mock)) == n)
+            H.open_settings(page, "Voice")
+            page.locator('[data-testid="subagent-notices-toggle"]').uncheck()
+            page.locator('[data-testid="settings-close"]').click()
+            n = len(said(mock))
+            life("cl:toolu_n4", "done")
+            page.wait_for_timeout(3800)
+            check("with the sub-agent switch off nothing is said", len(said(mock)) == n)
+            H.open_settings(page, "Voice")
+            page.locator('[data-testid="subagent-notices-toggle"]').check()
+            page.locator('[data-testid="settings-close"]').click()
+            life("cl:toolu_n5", "failed")
+            mock.emit("user_message", {"via": "hud"}, thread_id="t1")
+            page.wait_for_timeout(3800)
+            check("a message to the chat drops a notice not yet said", len(said(mock)) == n)
 
             print("\none speaking window")
             page2 = ctx.new_page()

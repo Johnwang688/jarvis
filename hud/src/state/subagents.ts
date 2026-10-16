@@ -96,6 +96,7 @@ export function createSubagentStore(fetchers: Fetchers) {
   let blocked = false;
   let tick = 0;
   let opener: ((ref: SubagentRef) => void) | null = null;
+  let listed: ((threadId: string, rows: readonly Subagent[]) => void) | null = null;
 
   const notify = (key: string) => { for (const fn of [...(listeners.get(key) ?? [])]) fn(); };
   const subscribe = (key: string, fn: () => void) => {
@@ -164,6 +165,8 @@ export function createSubagentStore(fetchers: Fetchers) {
       const replay = t.replay;
       t.replay = [];
       setRows(threadId, t, foldList(list, replay));
+      // SV-5: whoever speaks learns what this window may have missed (a Stop asked while it was away).
+      try { listed?.(threadId, list); } catch { /* a listener never breaks the store */ }
     } catch (e) {
       if (threads.get(threadId) !== t) return;
       t.failed = failure(e);
@@ -382,6 +385,8 @@ export function createSubagentStore(fetchers: Fetchers) {
       }
       notify("b:" + key);
     },
+    /** Told each list read (first watched, every reconnect): `(threadId, rows)`. One listener (SV-5's notices). */
+    setListed(fn: ((threadId: string, rows: readonly Subagent[]) => void) | null) { listed = fn; },
     /** The window's way to open a child's pane (App sets it; rows, cards and panes call it). */
     setOpener(fn: ((ref: SubagentRef) => void) | null) { opener = fn; },
     open(ref: SubagentRef) { opener?.(ref); },
