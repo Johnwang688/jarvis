@@ -1,0 +1,21 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Jarvis input-to-picture fixture</title>
+<!-- B-PERF owner recipe (docs/notes/browser.md, "Remote input to picture"):
+     every key press flips the whole page between two colours and bumps the
+     counter, so each press changes the picture exactly once. No text field,
+     so no caret blinks a frame of its own. -->
+<style>
+  html, body { margin: 0; height: 100%; font: 48px/1 system-ui, sans-serif; }
+  body { display: flex; align-items: center; justify-content: center; background: #f4f4f4; color: #111; }
+  body.on { background: #111; color: #f4f4f4; }
+</style>
+<body><span id="n">press keys</span>
+<script>
+  let n = 0;
+  addEventListener("keydown", (e) => {
+    if (e.repeat) return;
+    document.body.classList.toggle("on");
+    document.getElementById("n").textContent = String(++n);
+  });
+</script>

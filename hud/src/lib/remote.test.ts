@@ -579,6 +579,59 @@ describe("FramePipe", () => {
     expect(s.disposed).toEqual(["f1", "f2"]);
   });
 
+  // B-PERF: the daemon's next frame crosses the socket while this one decodes.
+  it("acks a frame when its decode starts, before it is drawn", async () => {
+    const s = stage();
+    const g = s.pipe.next();
+    s.pipe.frame(g, s.frame(1));
+    expect(s.pending.length).toBe(1);
+    expect(s.acked).toEqual([[g, 1]]);
+    expect(s.drawn).toEqual([]);
+    await s.finish("f1");
+    expect(s.drawn).toEqual(["f1"]);
+    expect(s.acked).toEqual([[g, 1]]);
+  });
+
+  // The bound that replaces "acked after the draw": however fast frames come,
+  // one decodes and one waits, and the waiting one is not acked until its
+  // own decode starts, so the daemon (one frame in flight) sends nothing more.
+  it("holds one frame decoding and one waiting, acking the waiting one only when it starts", async () => {
+    const s = stage();
+    const g = s.pipe.next();
+    s.pipe.frame(g, s.frame(1));
+    for (let id = 2; id <= 6; id++) s.pipe.frame(g, s.frame(id));
+    expect(s.pending.length).toBe(1);
+    expect(s.acked).toEqual([[g, 1]]);
+    await s.finish("f1");
+    expect(s.pending.map((p) => p.data[0])).toEqual([6]);
+    expect(s.acked).toEqual([[g, 1], [g, 6]]);
+    await s.finish("f6");
+    expect(s.drawn).toEqual(["f1", "f6"]);
+    expect(s.acked).toEqual([[g, 1], [g, 6]]);
+    expect(s.pipe.stats).toEqual({ drawn: 2, skipped: 4 });
+  });
+
+  it("an ack that throws never stalls it", async () => {
+    let first = true;
+    const drawn: string[] = [];
+    const pending: ((b: string) => void)[] = [];
+    const pipe = new FramePipe<string>(
+      () => new Promise<string>((ok) => pending.push(ok)),
+      (bitmap) => drawn.push(bitmap),
+      () => {
+        if (first) { first = false; throw new Error("socket gone"); }
+      },
+    );
+    const g = pipe.next();
+    pipe.frame(g, { id: 1, data: new Uint8Array([1]), meta: { width: 1, height: 1 } });
+    pending.shift()!("f1");
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+    pipe.frame(g, { id: 2, data: new Uint8Array([2]), meta: { width: 1, height: 1 } });
+    pending.shift()!("f2");
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+    expect(drawn).toEqual(["f1", "f2"]);
+  });
+
   it("keeps only the newest frame waiting behind a decode", async () => {
     const s = stage();
     const g = s.pipe.next();
@@ -594,10 +647,10 @@ describe("FramePipe", () => {
   });
 
   // The plan's mutation: a frame from an older socket drawn.
-  it("never draws or acks a frame from an older socket, even one still decoding", async () => {
+  it("never draws a frame from an older socket, even one still decoding, nor acks one after the reattach", async () => {
     const s = stage();
     const g1 = s.pipe.next();
-    s.pipe.frame(g1, s.frame(1));
+    s.pipe.frame(g1, s.frame(1));                   // acked on its own socket as its decode starts
     s.pipe.frame(g1, s.frame(2));                   // waiting behind the decode
     const g2 = s.pipe.next();                       // the socket dropped; a new one attached
     s.pipe.frame(g1, s.frame(3));                   // late, from the old socket
@@ -605,11 +658,11 @@ describe("FramePipe", () => {
     await s.finish("old");                          // the old decode finishes after the reattach
     expect(s.drawn).toEqual([]);
     expect(s.disposed).toEqual(["old"]);
-    expect(s.acked).toEqual([]);
+    expect(s.acked).toEqual([[g1, 1], [g2, 10]]);     // the new socket's frame, as its decode starts
     expect(s.pending.map((p) => p.data[0])).toEqual([10]);
     await s.finish("new");
     expect(s.drawn).toEqual(["new"]);
-    expect(s.acked).toEqual([[g2, 10]]);
+    expect(s.acked).toEqual([[g1, 1], [g2, 10]]);
   });
 
   it("a failed decode or a throwing draw never stalls it", async () => {

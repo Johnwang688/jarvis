@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { browserApi } from "../api";
 import { FramePipe, FRAME_MAX_BYTES, HeldKeys, HeldButtons, routeKeyDown, routeMouse,
-  pasteMessages, clientToPage, cdpWheel, viewportFor, backingSize, placeFrame, frameDest,
+  pasteMessages, clientToPage, cdpWheel, viewportFor, placeFrame, decodeFrame, paintFrame,
   cleanTitle, type FrameMeta, type CdpKeyEvent, type PaneAction } from "../lib/remote";
 import { RemoteFind, RemoteContextMenu } from "./RemoteOwnerTools";
 import { useRemoteOwnerTools } from "./useRemoteOwnerTools";
@@ -107,19 +107,13 @@ export function RemoteView(props:RemoteViewProps) {
     owner.reset();setConnected(false);setError("");setDialogs([]);setAuth(null);authCurrent.current=null;setChooser(null);setSecurity("unknown");
     keys.current=new HeldKeys();buttons.current=new HeldButtons();clipboard.current=null;composing.current=false;inputEpoch.current++;
     const current=()=>!gone&&generation.current===gen&&latest.current.tabId===props.tabId&&latest.current.instanceGeneration===props.instanceGeneration;
-    const pipe=new FramePipe<ImageBitmap>(
-      bytes=>createImageBitmap(new Blob([bytes.slice().buffer],{type:"image/jpeg"})),
+    const pipe=new FramePipe<ImageBitmap>(decodeFrame,
       (bitmap,meta:FrameMeta)=>{
         if(!current()||!latest.current.live||!canvas.current)return;
-        const {css}=geometry.current;const size=backingSize(css,latest.current.zoom,devicePixelRatio);
-        const target=canvas.current;
-        if(target.width!==size.width)target.width=size.width;
-        if(target.height!==size.height)target.height=size.height;
-        const place=placeFrame(css,meta);geometry.current={css,view:meta,place};
-        const d=frameDest(place,meta,latest.current.zoom,devicePixelRatio);
-        const ctx=target.getContext("2d");if(!ctx)return;
-        ctx.clearRect(0,0,target.width,target.height);ctx.drawImage(bitmap,d.x,d.y,d.width,d.height);
-        target.dataset.frame="ready";
+        const {css}=geometry.current;const target=canvas.current;
+        const painted=paintFrame(target,bitmap,meta,css,latest.current.zoom,devicePixelRatio);
+        geometry.current={css,view:meta,place:painted.place};
+        if(painted.drawn)target.dataset.frame="ready";
       },(_,id)=>{if(current())send({t:"ack",id});},bitmap=>bitmap.close());
     const pipeGen=pipe.next();
     const connect=async()=>{
