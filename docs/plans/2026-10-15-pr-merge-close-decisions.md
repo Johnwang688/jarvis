@@ -47,55 +47,93 @@ networking is off by design.
   leads with the operation: "merges a pull request · Codex chat requests
   execution beyond its ordinary sandbox; owner approval required".
 
+## Owner's answers (2026-10-15)
+
+- **M-6. `gh pr reopen` does not ask** — the owner: "non-destructive". It
+  neither lands code nor ends a review; it undoes a close.
+- **M-15. The gate is SELF_PROTECTED.** `jarvis/v2/merge_gate.py` and
+  `jarvis/v2/permissions.py` join `jarvis/tools/files.py`'s SELF_PROTECTED,
+  on the same footing as `rules.py` and `bridge.py`: no agent write tool
+  (write_file, edit_file, a protected-state write) may change them.
+  Consequence: the HUD editor serves them read-only (its `safety` row), so
+  the owner cannot edit, rename or delete them from the HUD either; changes
+  go through a worktree and a pull request.
+- **M-7. Codex keeps asking for a push and a PR.** Its sandbox networking
+  stays off, so `git push` and `gh pr create` from a Codex chat still ask as
+  sandbox widenings (CLAUDE.md: sandbox widening needs a human, never
+  Always). Unchanged by this work.
+
 ## Lead's defaults (not asked; open to amendment)
 
-- **M-6. `gh pr reopen` does not ask.** It neither lands code nor ends a
-  review; it undoes a close, which is what the owner wants to control. Adding
-  it is one line in `merge_gate._gh` if the owner wants it.
-- **M-7. Codex's push still asks as a sandbox widening** (networking off),
-  unchanged. Matching Claude there would mean turning sandbox networking on
-  for chats, which is a separate owner decision (CLAUDE.md: sandbox
-  widening needs a human, never Always).
 - **M-8. Where it cannot tell, it asks** with "may merge or close a pull
   request" or "may push to main (what it pushes cannot be told from the
   command)": a refspec, endpoint, method or `gh` verb that is an expansion
-  (`git push origin "$BRANCH"`), input appended by `xargs`, a `gh` command
-  that is neither built in nor the stock `co` alias (an alias or an
-  extension), an unreadable GraphQL query (`-F query=@file`, `--input`), a
-  `git -c remote.*/push.*/branch.*/alias.*` override, `GIT_DIR`/
-  `GIT_WORK_TREE` on the line, a `cd` it cannot follow, and a line too
-  complex to walk. `git push -u origin "$(git branch --show-current)"` counts
-  as the current branch.
-- **M-9. A push with no refspec is judged where it runs.** The current
-  branch is read from the repository's `.git` (git is never run): in the
-  shell's own folder (Claude's hook input `cwd`, Codex's item `cwd`; never a
-  `cwd` the model writes into the arguments), else the brief's, then each
-  `cd` on the line (a `cd` into an existing folder on a line with no subshell
-  is where what follows runs), `git -C`, and a wrapper's folder option
-  (`env -C`, `--directory`, kept beside the shell's folder). It asks only
-  when that branch is protected, or, under `push.default=upstream`, when its
-  upstream is. This closes the WP5 "bare push" gap without asking about every
-  push.
-- **M-10. Git aliases are followed** from `-c alias.*` on the line and from
+  (`git push origin "$BRANCH"`) or a brace expansion (`{main,}`, `{a..c}`),
+  input appended by `xargs`, a `gh` command that is neither built in nor the
+  stock `co` alias (an alias or an extension) and `gh extension exec`, an
+  unreadable GraphQL query (`-F query=@file`, `--input`) or issue edit, a
+  `git -c remote.*/push.*/branch.*` override, `GIT_DIR`/`GIT_WORK_TREE` on
+  the line, a `cd` it cannot follow, a `.git` git would not read as a git
+  directory or a HEAD that is neither a `ref:` nor an object name, and a line
+  too complex to walk. `git push -u origin "$(git branch --show-current)"`
+  counts as the current branch.
+- **M-9. A push with no refspec, or of `HEAD`, is judged where it runs.**
+  The current branch is read from the repository's `.git` (git is never run;
+  a symlinked HEAD is read as old gits wrote it): in the shell's own folder
+  (Claude's hook input `cwd`, Codex's item `cwd`; never a `cwd` the model
+  writes into the arguments), else the brief's, then each `cd` on the line (a
+  `cd` into an existing folder on a line with no subshell is where what
+  follows runs), `git -C`, and a wrapper's folder option (`env -C`,
+  `--directory`, kept beside the shell's folder). It asks only when that
+  branch is protected, or, under `push.default=upstream`, when its upstream
+  is; `push.default=matching` asks. Config is read in git's order and the
+  last value wins, comments cut.
+- **M-10. An earlier program on the same line counts** (review H-1). A
+  `git checkout`/`switch` of a branch (not of a file), `git branch -m/-M`,
+  `git symbolic-ref HEAD …`, `gh pr checkout` moves HEAD: a later plain or
+  HEAD push is judged by the branch it moved to (with `;`, `||` or a newline
+  the line may go on after a failed switch, so the old branch counts too),
+  and asks "may push to main" when that cannot be told (`git checkout -`, a
+  PR's branch). A `git config` write or `git branch -u` makes a later plain
+  push, and a later unknown git subcommand (a new alias), ask.
+- **M-11. Git aliases are followed** from `-c alias.*` on the line and from
   the repository's and the owner's git config (`!` aliases are judged as
   lines); `git submodule foreach`, `git rebase -x` and `git bisect run`
   lines are judged; inline interpreter code (`python -c`, `node -e`, a
-  here-document fed to one) is read as text for the same operations.
+  here-document fed to one) is read as text, and a bare push there is a push
+  of the current branch.
+- **M-12. The raw-line backstop** (review M-2). Where the line runs a program
+  that may run text it is handed — a shell or `eval`, an interpreter, `ssh`,
+  `xargs`, `cmd.exe`/`wsl.exe`, `curl`/`wget`, a program this reader does not
+  know, a function, a variable, a git exec setting (`core.sshCommand`, pager,
+  editor, `credential.helper`, `diff.external`, …, or `GIT_SSH_COMMAND`/
+  `GIT_EDITOR`/`GIT_PAGER`), `git difftool`, `filter-branch`, `rebase`,
+  `bisect` — any spelling of a merge, a close or a push to main anywhere on
+  the line asks, saying it may. A line of only git, gh and data programs (a
+  commit message or PR body that mentions a merge) is read by structure.
+- **M-13. GraphQL** also asks for `enqueuePullRequest` (merge queue),
+  `deleteRef`, `updateRef`/`updateRefs` (forced or not: one may move main)
+  and `createCommitOnBranch` unless it names a non-default branch.
+- **M-14. One card under Claude.** A human's yes is held by the call's
+  `tool_use_id` for 120 s, and if the CLI asks `can_use_tool` about the same
+  call (same id, tool and identical input, once) it is answered from that
+  yes. Jarvis registers `can_use_tool` only off AUTO, and under AUTO the CLI
+  consulted it for nothing (design R2), so under AUTO this is inert: there
+  the classifier runs after the owner's yes (the hook returns `{}`) and can
+  still deny, but cannot put a second Jarvis card in front of the owner. No
+  blanket explicit allow was added.
 
 ## Known gaps (accident guard, not an adversarial boundary)
 
-A script file (`./ship.sh`, `python merge.py`), an alias in a repository
-whose folder cannot be told, git config `include` files, a program the walk
-does not know, `curl` to the GitHub API, and `gh issue close` on a pull
-request's number are not read. Under Claude AUTO, the owner's yes at layer 2
-returns `{}` from the hook as every layer-2 yes does, so Claude Code's
-classifier still runs after it; if the classifier also asks, the owner may
-see a second card for the same merge.
+A script file (`./ship.sh`, `python merge.py`) or one written on an earlier
+call, an alias in a repository whose folder cannot be told, git config
+`include` files, git hooks (a `pre-push` hook, `core.hooksPath` set outside
+the line) that run on a push, a program the walk does not know that spells
+nothing on the line, and `gh issue close` on a pull request's number are not
+read.
 
 ## For the owner
 
-1. Should `gh pr reopen` ask too (M-6)?
-2. Should Codex chats get sandbox networking for `git push`/`gh pr create`,
-   so they match Claude's auto mode (M-7)? Today they ask as widenings.
-3. Should an owner yes at this gate return an explicit allow from Claude's
-   hook under AUTO, so the classifier cannot ask a second time?
+1. Under Claude AUTO the classifier can still deny a command after the
+   owner's yes (M-14). Should an owner yes at this gate return an explicit
+   allow from the hook instead? The review advised against a blanket one.

@@ -2122,6 +2122,45 @@ MERGE_GATE_ASK = (
     ("git rebase -x 'gh pr merge 5' HEAD~1", _MERGE),
     ("$GH pr merge 5", _MERGE), ("\"$HOME/bin/gh\" pr close 5", _CLOSE),
     ("git push origin \"$BRANCH\"", _PUSH_UNSURE), ("echo main | xargs git push origin", _PUSH_UNSURE),
+    # H-1 of #208's review: an earlier program on the line moves HEAD or
+    # rewrites config, so a later plain or HEAD push is not the repo's branch.
+    ("git checkout main && git merge topic && git push", _MAIN),
+    ("git switch main && git pull && git push -u origin HEAD", _MAIN),
+    ("git checkout main; git push origin HEAD", _MAIN), ("git branch -m topic main; git push", _MAIN),
+    ("git symbolic-ref HEAD refs/heads/main; git push", _MAIN),
+    ("git checkout -t origin/main && git push", _MAIN),
+    ("git config push.default matching; git push", _PUSH_UNSURE),
+    ("git config --global alias.p push; git p origin main", _PUSH_UNSURE),
+    ("gh pr checkout 5 && git push", _PUSH_UNSURE), ("git checkout - && git push", _PUSH_UNSURE),
+    ("git checkout \"$B\" && git push", _PUSH_UNSURE),
+    # M-1: brace expansion is not literal.
+    ("git push origin {main,}", _PUSH_UNSURE), ("git push origin {a..c}", _PUSH_UNSURE),
+    ("gh pr {merge,} 1", _PR_UNSURE),
+    # M-2: the raw-line backstop where a program may run text it is handed.
+    ("echo 'gh pr merge 1' | sh", _PR_UNSURE), ("bash <(echo gh pr merge 1)", _PR_UNSURE),
+    ("eval \"$(echo gh pr merge 1)\"", _PR_UNSURE), ("sh <<< 'gh pr merge 1'", _MERGE),
+    ("x='gh pr merge 1'; $x", _PR_UNSURE), ("f(){ gh pr merge 1; }; f", _PR_UNSURE),
+    ("echo 'gh pr merge 1' > m.sh && bash m.sh", _PR_UNSURE), ("cmd.exe /c gh pr merge 1", _PR_UNSURE),
+    ("wsl.exe gh pr merge 1", _PR_UNSURE), ("ssh host gh pr merge 1", _PR_UNSURE),
+    ("parallel gh pr merge ::: 1", _PR_UNSURE), ("gh extension exec merger 1", _PR_UNSURE),
+    ("echo pr merge 1 | xargs gh", _PR_UNSURE),
+    ("git -c core.sshCommand='sh -c \"gh pr merge 1\"' fetch", _PR_UNSURE),
+    ("GIT_SSH_COMMAND='gh pr merge 1' git fetch", _PR_UNSURE),
+    ("git difftool -x 'gh pr merge 1' HEAD~1", _PR_UNSURE),
+    ("git filter-branch --tree-filter 'gh pr merge 1' HEAD", _PR_UNSURE),
+    ("curl -X PUT -H 'Accept: application/json' https://api.github.com/repos/o/r/pulls/5/merge", _PR_UNSURE),
+    ("wget --method=PUT https://api.github.com/repos/o/r/pulls/5/merge", _PR_UNSURE),
+    ("echo 'git push origin main' | sh", _PUSH_UNSURE),
+    # M-5: more GraphQL.
+    ("gh api graphql -f query='mutation{enqueuePullRequest(input:{pullRequestId:\"x\"}){clientMutationId}}'", _MERGE),
+    ("gh api graphql -f query='mutation{deleteRef(input:{refId:\"x\"}){clientMutationId}}'", _DELETE),
+    ("gh api graphql -f query='mutation{updateRef(input:{refId:\"x\",oid:\"y\",force:true}){clientMutationId}}'", _FORCE),
+    ("gh api graphql -f query='mutation{updateRefs(input:{}){clientMutationId}}'", _PUSH_UNSURE),
+    ("gh api graphql -f query='mutation{createCommitOnBranch(input:{branch:{branchName:\"main\"}}){commit{oid}}}'", _MAIN),
+    # LOWs: an issue edit it cannot read; endpoint spellings GitHub routes.
+    ("gh api -X PATCH repos/o/r/issues/5 --input body.json", _PR_UNSURE),
+    ("gh api -X PUT repos/o/r/pulls/5/%6Derge", _MERGE), ("gh api -X PUT repos/o/r/x/../pulls/5/merge", _MERGE),
+    ("gh api -X PATCH repos/o/r/./pulls/5 -f state=closed", _CLOSE),
     ("git -c remote.origin.push=HEAD:main push", _PUSH_UNSURE),
     ("GIT_DIR=/elsewhere/.git git push", _PUSH_UNSURE),
 )
@@ -2149,6 +2188,16 @@ MERGE_GATE_ORDINARY = (
     "uv run git push origin topic", "bash -c 'git push -u origin topic'",
     "cd sub && git push -u origin HEAD", "npx vite", "$EDITOR notes.txt", "\"$PYTHON\" script.py",
     "python3 -c \"print('hello')\"",
+    # The other half of H-1, M-1 and M-2: a new branch, a file restore, a
+    # config read, and a commit message or PR body that mentions a merge.
+    "git checkout -b feature && git push -u origin HEAD", "git checkout -- README.md && git push",
+    "git switch -c topic2 && git push -u origin topic2", "git checkout topic && git push",
+    "git config --get user.name && git push", "git config user.name && git push",
+    "git commit -m 'gh pr merge later' && git push",
+    "gh pr create --body \"$(cat <<'EOF'\nthen gh pr merge 5\nEOF\n)\"",
+    "npm test && git push -u origin topic", "gh api 'repos/{owner}/{repo}/pulls/5'",
+    "gh api graphql -f query='mutation{createCommitOnBranch(input:{branch:{branchName:\"topic\"}}){commit{oid}}}'",
+    "python3 -c \"import subprocess; subprocess.run('git push'.split())\"",
 )
 
 
@@ -2168,6 +2217,8 @@ def _fake_repo(root: Path, name: str, branch: str, *, remote_head: str | None = 
         gitdir = common = folder / ".git"
         gitdir.mkdir()
     (gitdir / "HEAD").write_text(f"ref: refs/heads/{branch}\n")
+    (common / "objects").mkdir(parents=True, exist_ok=True)     # git's own test of a git dir
+    (common / "refs" / "heads").mkdir(parents=True, exist_ok=True)
     if remote_head:
         (common / "refs" / "remotes" / "origin").mkdir(parents=True, exist_ok=True)
         (common / "refs" / "remotes" / "origin" / "HEAD").write_text(
@@ -2193,9 +2244,15 @@ def merge_gate_checks():
     from jarvis.v2.permissions import deny_all
     from jarvis.v2.provider import Decision
 
+    # Both modules are frozen against agents' writes (the owner's decision,
+    # 2026-10-15), as rules.py and bridge.py are.
+    from jarvis.tools.files import SELF_PROTECTED
+    for rel in ("jarvis/v2/permissions.py", "jarvis/v2/merge_gate.py"):
+        ok(rel in SELF_PROTECTED, f"{rel} is SELF_PROTECTED")
     with Sandbox() as box:
         topic = _fake_repo(box.root, "topic-repo", "topic")
         main = _fake_repo(box.root, "main-repo", "main")
+        (main / "README.md").write_text("x\n")
         tools = {"claude": "Bash", "codex": "shell"}
 
         # 1. the matrix: asked in every profile, a no or no human denies.
@@ -2331,6 +2388,19 @@ def merge_gate_checks():
         linked = _fake_repo(box.root, "linked", "main", worktree=True)
         # The remote HEAD lives in the common dir a linked worktree points at.
         linked_trunk = _fake_repo(box.root, "linked-trunk", "trunk", remote_head="trunk", worktree=True)
+        # M-4 of #208's review: `.git` read as git reads it.
+        symlinked = _fake_repo(box.root, "symlinked-head", "topic")
+        (symlinked / ".git" / "HEAD").unlink()
+        (symlinked / ".git" / "HEAD").symlink_to("refs/heads/main")
+        detached = _fake_repo(box.root, "detached", "topic")
+        (detached / ".git" / "HEAD").write_text("0123456789abcdef0123456789abcdef01234567\n")
+        garbled = _fake_repo(box.root, "garbled", "topic")
+        (garbled / ".git" / "HEAD").write_text("ref: refs/tags/v1\n")
+        hollow = box.root / "hollow"
+        (hollow / ".git").mkdir(parents=True)
+        (hollow / ".git" / "HEAD").write_text("ref: refs/heads/topic\n")       # no objects/, refs/
+        commented = _fake_repo(box.root, "commented", "topic", config=(
+            "[push]\n\tdefault = simple ; a comment\n[push]\n\tdefault = matching # last wins\n"))
         where = (
             ("git push", main, "pushes to main"), ("git push", topic, None),
             ("git push -u origin HEAD", main, "pushes to main"), ("git push origin @", main, "pushes to main"),
@@ -2346,7 +2416,12 @@ def merge_gate_checks():
             # leaves the line where it was.
             (f"cd {topic} && git push -u origin HEAD", main, None), (f"cd {topic}; git push", main, None),
             (f"(cd {topic} && git push -u origin HEAD); git push", main, "pushes to main"),
-            (f"cd {box.root}/no-such && git push", main, "pushes to main"),
+            # (asked either way: "pushes to main", or "may push to main" when
+            # a stray `.git` above the missing folder cannot be read as git's)
+            (f"cd {box.root}/no-such && git push", main, "to main"),
+            # A missing folder inside a feature repository: the `cd` fails and
+            # the line stays in main, so it asks.
+            (f"cd {topic}/no-such; git push", main, "pushes to main"),
             (f"cd {box.root} && cd main-repo && git push", topic, "pushes to main"),
             (f"git -C {main} push", topic, "pushes to main"), (f"env -C {main} git push", topic, "pushes to main"),
             (f"uv run --directory {main} git push", topic, "pushes to main"),
@@ -2355,6 +2430,20 @@ def merge_gate_checks():
             ("git -C \"$WT\" push", topic, "may push to main"), ("git push", None, "may push to main"),
             ("git push -u origin \"$(git branch --show-current)\"", main, "pushes to main"),
             ("git push -u origin \"$(git branch --show-current)\"", topic, None),
+            ("git push", symlinked, "pushes to main"), ("git push", detached, None),
+            # H-1's edges: with `;` the line goes on after a failed switch, so
+            # the branch it was on counts; `&&` does not go on.
+            ("git checkout topic; git push", main, "pushes to main"), ("git checkout topic && git push", main, None),
+            ("git branch -m main topic2 && git push", main, None),
+            ("git checkout README.md && git push", main, "pushes to main"),
+            ("cat branches.txt | xargs git push origin", topic, "may push to main"),
+            ("git -c remote.origin.mirror=true push", topic, "may push to main"),
+            ("".join(f"true {i}; " for i in range(5000)) + "gh pr merge 5", topic, "may merge or close"),
+            ("git push", garbled, "may push to main"), ("git push", hollow, "may push to main"),
+            ("git push", commented, "pushes to every matching branch"),
+            # M-3: a bare push in inline code is a push of the current branch.
+            ("python3 -c \"import subprocess; subprocess.run('git push'.split())\"", main, "pushes to main"),
+            ("python3 -c \"import subprocess; subprocess.run('git push'.split())\"", topic, None),
         )
         for command, cwd, words in where:
             hit = merge_gate.judge(command, str(cwd) if cwd else None)
@@ -2394,6 +2483,73 @@ def merge_gate_checks():
             ok(spent < 3.0, f"judged in {spent:.2f}s CPU: {line[:40]!r}…")
         ok(merge_gate.judge("eval " * 40 + "gh pr merge 5", str(topic)) is not None,
            "a line nested past the walk's depth still asks")
+        # 7. One card (review of #208): a human's yes is held by tool_use_id
+        #    for the CLI's re-ask of the same call — same id, tool and
+        #    arguments, once, within the TTL — and nothing else is.
+        from jarvis.v2.permissions import OWNER_YES_TTL_S, PermitContext, build_permit
+        now = [1000.0]
+        brief = brief_for(P.AUTO, cwd=topic)
+        merge5 = {"command": "gh pr merge 5"}
+
+        def fresh(asker):
+            return build_permit(PermitContext(thread_id="mg000000", brief=brief, provider="claude"),
+                                asker, clock=lambda: now[0])
+        permit = fresh(Asker(Decision.ALLOW))
+        permit("Bash", merge5, brief, tool_use_id="tu-1")
+        ok(permit.recall("tu-1", "Bash", dict(merge5)), "the re-ask of the approved call is answered")
+        eq(box.decisions[-1]["layer"], "owner-yes-reused", "and logged as the owner's reused yes")
+        ok(not permit.recall("tu-1", "Bash", dict(merge5)), "once only")
+        permit("Bash", merge5, brief, tool_use_id="tu-2")
+        ok(not permit.recall("tu-2", "Bash", {"command": "gh pr merge 6"}), "not for other arguments")
+        permit("Bash", merge5, brief, tool_use_id="tu-3")
+        ok(not permit.recall("tu-3", "Monitor", dict(merge5)), "not for another tool")
+        ok(not permit.recall("tu-9", "Bash", dict(merge5)), "not for another tool_use_id")
+        permit("Bash", merge5, brief, tool_use_id="tu-4")
+        now[0] += OWNER_YES_TTL_S + 1
+        ok(not permit.recall("tu-4", "Bash", dict(merge5)), "not after the TTL")
+        for asker in (Asker(Decision.DENY), deny_all()):
+            permit = fresh(asker)
+            permit("Bash", merge5, brief, tool_use_id="tu-5")
+            ok(not permit.recall("tu-5", "Bash", dict(merge5)), f"a no ({type(asker).__name__}) is not held")
+        permit = fresh(Asker(Decision.ALLOW))
+        permit("Bash", {"command": "npm test"}, brief, tool_use_id="tu-6")
+        eq(box.decisions[-1]["layer"], "jarvis-allow", "precondition: an allow nobody was asked about")
+        ok(not permit.recall("tu-6", "Bash", {"command": "npm test"}), "only a human's yes is held")
+        permit("Bash", {"command": "rm -rf build"}, brief, tool_use_id="tu-7")
+        ok(not permit.recall("tu-7", "Bash", {"command": "rm -rf build"}),
+           "nor a reviewer's turn under AUTO")
+
+        # M-6: adversarial sizes, under an active deadline (a hang fails here
+        # instead of stalling the suite): GraphQL text that made the old
+        # two-sided regex quadratic, a deep brace word, a config file of
+        # aliases read for many unknown subcommands, a long chain of moves.
+        hit = merge_gate.judge("sh <<< 'gh pr merge 1'", str(topic))
+        eq(hit.headline if hit else None, "merges a pull request",
+           "the backstop does not repeat what the structure named")
+        hit = merge_gate.judge("gh api -X PATCH repos/o/r/pulls/5/x/.. -f state=closed", str(topic))
+        eq(hit.rule if hit else None, "gh-pr-close", "an endpoint's `..` is resolved as a router would")
+        many_aliases = _fake_repo(box.root, "aliases", "topic", config="[alias]\n" + "".join(
+            f"\ta{i} = log -{i}\n" for i in range(3000)))
+        adversarial = (
+            ("gh api graphql -f query='" + "updatepullrequest " * 30000 + "'", topic),
+            ("gh api graphql -f query='" + "closed " * 30000 + "updatepullrequest'", topic),
+            ("git push origin " + "{" * 50000 + "main" + "}" * 50000, topic),
+            ("; ".join(f"git x{i}" for i in range(2000)), many_aliases),
+            ("git checkout a && " * 500 + "git push", topic),
+            ("curl " + "pulls/" * 40000 + "x", topic),
+        )
+        for line, cwd in adversarial:
+            spent: list = []
+
+            def run(line=line, cwd=cwd):
+                started = time.thread_time()
+                merge_gate.judge(line, str(cwd))
+                spent.append(time.thread_time() - started)
+            worker = threading.Thread(target=run, daemon=True)
+            worker.start()
+            worker.join(20)
+            ok(not worker.is_alive(), f"judged before the deadline: {line[:40]!r}…")
+            ok(spent and spent[0] < 3.0, f"judged in {spent[0] if spent else '∞'}s CPU: {line[:40]!r}…")
 
 
 def main():

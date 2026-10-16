@@ -32,6 +32,10 @@ def guard_checks() -> None:
     # The editor's git and navigation routes too (the owner's answer, 2026-10-12).
     assert "jarvis/v2/editor_git.py" in SELF_PROTECTED
     assert "jarvis/v2/editor_nav.py" in SELF_PROTECTED
+    # The v2 permit and the owner-only repository gate (the owner's
+    # decision, 2026-10-15).
+    assert "jarvis/v2/permissions.py" in SELF_PROTECTED
+    assert "jarvis/v2/merge_gate.py" in SELF_PROTECTED
     for rel in sorted(SELF_PROTECTED):
         out = tools.dispatch(
             "write_file",

@@ -91,6 +91,11 @@ L_DENY, L_ALWAYS_ASK, L_REVIEWER, L_JARVIS_ALLOW, L_HUMAN = (
     "deny", "always-ask", "reviewer", "jarvis-allow", "human")
 # A provider-reported sandbox widening (see `build_permit`'s `widening`).
 L_WIDENING = "sandbox-widening"
+# The owner's yes to one exact call, reused when the CLI asks again about the
+# same tool_use_id (Claude AUTO: the classifier's own ask after layer 2).
+L_OWNER_YES = "owner-yes-reused"
+OWNER_YES_TTL_S = 120.0
+OWNER_YES_CAP = 256
 # A read-only Jarvis session tool a Claude chat calls through jarvis-mcp
 # (`session_tools`, plan 2026-10-10 §4.1): ALLOWed without asking anyone,
 # because the daemon judges each call itself (the turn, the guard). Not a
@@ -834,14 +839,47 @@ def subagent_origin(ctx: PermitContext, subagent: str) -> str:
     return f"{who} in {task}" if task else who
 
 
-def build_permit(ctx: PermitContext, asker) -> PermissionCallback:
+class _OwnerYes:
+    """The owner's yes to one call, held briefly by its `tool_use_id` (review
+    of #208: under Claude AUTO a layer-2 yes returns `{}`, the CLI's
+    classifier still runs, and if it asks too the owner saw a second card).
+    `recall` answers that re-ask only for the same tool_use_id, the same tool
+    and identical arguments, once, within `OWNER_YES_TTL_S`; the classifier
+    can still deny. Nothing else is ever answered from here."""
+
+    def __init__(self, clock=None):
+        import time as _time
+        self._clock = clock or _time.monotonic
+        self._lock = threading.Lock()
+        self._held: dict[str, tuple[str, str, float]] = {}
+
+    def remember(self, tool_use_id: str, tool: str, args: dict) -> None:
+        with self._lock:
+            now = self._clock()
+            self._held = {k: v for k, v in self._held.items() if now - v[2] < OWNER_YES_TTL_S}
+            while len(self._held) >= OWNER_YES_CAP:
+                self._held.pop(next(iter(self._held)))
+            self._held[tool_use_id] = (tool, _digest(args), now)
+
+    def recall(self, tool_use_id: str, tool: str, args: dict) -> bool:
+        with self._lock:
+            held = self._held.pop(tool_use_id, None)
+        if held is None:
+            return False
+        held_tool, digest, at = held
+        return (held_tool == tool and digest == _digest(dict(args or {}))
+                and 0 <= self._clock() - at < OWNER_YES_TTL_S)
+
+
+def build_permit(ctx: PermitContext, asker, *, clock=None) -> PermissionCallback:
     """The §6 callback for one thread. `asker` is a `PendingApprovals` or a
     `DenyAll`; its `human_backed` flag is what layer 4 turns on."""
 
     def permit(tool: str, args: dict, brief: Brief | None = None, *,
                widening: str | None = None, grants: Iterable[tuple[str, str]] = (),
                also_commands: Iterable[str] = (), dangerous_tool: bool = False,
-               subagent: str | None = None, shell_cwd: str | None = None) -> Decision:
+               subagent: str | None = None, shell_cwd: str | None = None,
+               tool_use_id: str | None = None) -> Decision:
         """`widening` is set only by a provider whose approval would widen
         its own sandbox if accepted (Codex: extra permissions, network, a
         grant root, terminal input). Such a call is asked of a human every
@@ -871,7 +909,11 @@ def build_permit(ctx: PermitContext, asker) -> PermissionCallback:
         `shell_cwd` is set only by a provider that knows the folder its
         shell is in (Claude's hook input `cwd`): where `merge_gate` reads
         the current branch for a push with no refspec. Never from `args`,
-        which the model writes; Codex's item reports its own `cwd`."""
+        which the model writes; Codex's item reports its own `cwd`.
+
+        `tool_use_id` is set only by a provider whose CLI may ask about the
+        same call again (Claude): a human's yes here is then held for
+        `permit.recall`, so the re-ask is answered without a second card."""
         brief = brief if brief is not None else ctx.brief
         who = subagent_origin(ctx, subagent) if subagent is not None else None
         args = dict(args or {})
@@ -881,6 +923,12 @@ def build_permit(ctx: PermitContext, asker) -> PermissionCallback:
         # Where the command will run: the brief's folder, never the daemon's
         # own cwd, or a relative `models.json` names the wrong file.
         cwd = (brief.cwd or None) if brief is not None else None
+
+        def owner_said(decision: Decision) -> Decision:
+            """A human's answer to a card: a yes is held for the re-ask."""
+            if decision is Decision.ALLOW and isinstance(tool_use_id, str) and tool_use_id:
+                memo.remember(tool_use_id, tool, args)
+            return decision
 
         def finish(decision: Decision, layer: str, reason: str) -> Decision:
             log_decision(ApprovalRecord(
@@ -949,8 +997,8 @@ def build_permit(ctx: PermitContext, asker) -> PermissionCallback:
             reason = widening + (f" (also always-ask rule {match[0]})" if match else "")
             headline = (f"{owner_only.headline} · {widening}" if owner_only is not None
                         else widening)
-            decision = _ask(asker, ctx, tool, args, command, reason, L_WIDENING,
-                            allowlistable=False, headline=headline, origin=who)
+            decision = owner_said(_ask(asker, ctx, tool, args, command, reason, L_WIDENING,
+                                       allowlistable=False, headline=headline, origin=who))
             return finish(decision, L_WIDENING, reason)
 
         # --- a dangerous Jarvis tool from a chat's jarvis-mcp: the owner ----
@@ -970,9 +1018,9 @@ def build_permit(ctx: PermitContext, asker) -> PermissionCallback:
                 match = (owner_only.label, owner_only.reason)
             reason = ("a dangerous Jarvis tool: the owner decides every call"
                       + (f" (also always-ask rule {match[0]})" if match else ""))
-            decision = _ask(asker, ctx, tool, args, command, reason, L_HUMAN,
-                            allowlistable=False, origin=who,
-                            headline=owner_only.headline if owner_only is not None else "")
+            decision = owner_said(_ask(asker, ctx, tool, args, command, reason, L_HUMAN,
+                                       allowlistable=False, origin=who,
+                                       headline=owner_only.headline if owner_only is not None else ""))
             return finish(decision, L_HUMAN, reason)
 
         # A native hook's exact offered Jarvis call delegates to this
@@ -995,8 +1043,8 @@ def build_permit(ctx: PermitContext, asker) -> PermissionCallback:
         # --- layer 2: the owner is asked whatever the reviewer thought -----
         if owner_only is not None:
             reason = f"always-ask rule {owner_only.label}: {owner_only.reason}"
-            decision = _ask(asker, ctx, tool, args, command, reason, L_ALWAYS_ASK,
-                            allowlistable=False, headline=owner_only.headline, origin=who)
+            decision = owner_said(_ask(asker, ctx, tool, args, command, reason, L_ALWAYS_ASK,
+                                       allowlistable=False, headline=owner_only.headline, origin=who))
             return finish(decision, L_ALWAYS_ASK, reason)
         match = always_ask_match(tool, args, brief, ctx.project)
         if match is None and delegated is not None:
@@ -1047,7 +1095,7 @@ def build_permit(ctx: PermitContext, asker) -> PermissionCallback:
                 # or owner text leave through the generic approval surface.
                 decision = _ask_owner_delegation(asker, ctx, delegated.name, origin=who)
                 return finish(decision, L_ALWAYS_ASK, "owner rule for Browser delegation")
-            decision = _ask(asker, ctx, tool, args, command, reason, L_ALWAYS_ASK, origin=who)
+            decision = owner_said(_ask(asker, ctx, tool, args, command, reason, L_ALWAYS_ASK, origin=who))
             return finish(decision, L_ALWAYS_ASK, reason)
 
         # --- jarvis-tool: a read-only Jarvis session tool --------------------
@@ -1085,11 +1133,27 @@ def build_permit(ctx: PermitContext, asker) -> PermissionCallback:
                           "already allowlisted")
         if profile == PermissionProfile.ASK:
             reason = "ask profile: every gated call reaches the owner"
-            decision = _ask(asker, ctx, tool, args, command, reason, L_HUMAN, origin=who)
+            decision = owner_said(_ask(asker, ctx, tool, args, command, reason, L_HUMAN, origin=who))
             return finish(decision, L_HUMAN, reason)
         return finish(Decision.ALLOW, L_REVIEWER,
                       "no opinion; the provider's own reviewer decides")
 
+    memo = _OwnerYes(clock)
+
+    def recall(tool_use_id: str, tool: str, args: dict) -> bool:
+        """Whether the owner already said yes to exactly this call (same
+        tool_use_id, tool and arguments, once, within the TTL). Logged."""
+        if not memo.recall(tool_use_id, tool, args):
+            return False
+        command = _command_of(dict(args or {})) if tool in COMMAND_TOOLS else ""
+        log_decision(ApprovalRecord(
+            tool=tool, args_digest=_digest(dict(args or {})), layer=L_OWNER_YES, decision="allow",
+            reason="the owner's yes to this exact call, asked again by the CLI",
+            command=_safe_command(command), thread_id=ctx.thread_id, task_id=ctx.task_id,
+            provider=ctx.provider or None))
+        return True
+
+    permit.recall = recall
     return permit
 
 
@@ -1098,8 +1162,8 @@ def _owner_only(tool: str, command: str, also_commands, args: dict, ctx: PermitC
     """`merge_gate.judge` over the command and any command riding with it,
     run where it runs: Claude's shell folder, Codex's item `cwd`, else the
     brief's. A reader that fails asks, saying so."""
-    if tool not in COMMAND_TOOLS:
-        return None
+    # Whatever command the permit read (`command` is empty for a tool it
+    # does not read as one; #211 widens that to any command-bearing tool).
     where = shell_cwd
     if where is None and ctx.provider == "codex":
         reported = args.get("cwd")

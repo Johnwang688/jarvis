@@ -37,7 +37,18 @@ runner from rules' one table — `uv run`, `npx`, `env`, `xargs`, `bash -lc`):
   shell's own folder, then each `cd`, `git -C`, `env -C`, `--directory` on
   the line) and asks only when it is a protected branch.
 * Inline interpreter code (`python -c`, `node -e`, a here-document fed to
-  one) that spells any of the above.
+  one) that spells any of the above; a bare push there is a push of the
+  current branch.
+* An earlier program on the same line that moves HEAD (`git checkout main
+  && … && git push`, `git branch -m`, `git symbolic-ref HEAD`, `gh pr
+  checkout`) or writes git config: a later plain or HEAD push is judged by
+  where HEAD went, or asks when that cannot be told.
+* The raw-line backstop: where the line runs a program that may run text it
+  is handed (a shell, `eval`, an interpreter, `ssh`, `curl`, a git exec
+  setting, a program this reader does not know), any spelling of the
+  operations anywhere on the line asks. A line of only git, gh and data
+  programs is read by its structure alone, so a commit message or PR body
+  that mentions a merge asks nothing.
 
 Where it cannot tell — a branch, method, endpoint or verb that is an
 expansion, a folder it cannot follow, a git config override on the line, a
@@ -51,7 +62,9 @@ from dataclasses import dataclass
 from fnmatch import fnmatch
 import os
 from pathlib import Path
+import posixpath
 import re
+import urllib.parse
 
 from jarvis import rules
 
@@ -131,10 +144,28 @@ _CURRENT_BRANCH = re.compile(
 _TEXT_RULES = (
     (re.compile(r"\bpr\b\W{0,8}\bmerge\b", re.I), PR_MERGE),
     (re.compile(r"\bpr\b\W{0,8}\bclose\b", re.I), PR_CLOSE),
-    (re.compile(r"mergepullrequest|enablepullrequestautomerge|pulls/[^\s'\"]*/merge", re.I), PR_MERGE),
+    (re.compile(r"mergepullrequest|enablepullrequestautomerge|enqueuepullrequest|"
+                r"pulls/[^\s'\"/]+/merge", re.I), PR_MERGE),
     (re.compile(r"closepullrequest", re.I), PR_CLOSE),
 )
 _TEXT_PUSH = re.compile(r"\bpush\b", re.I)
+_TEXT_GIT_PUSH = re.compile(r"\bgit\b\W{1,6}push\b", re.I)
+# Programs that only print, test or file data: never a runner of text.
+_DATA_STEMS = frozenset({
+    "cat", "echo", "printf", "true", "false", "test", "[", "[[", "grep", "egrep", "fgrep", "rg",
+    "head", "tail", "wc", "sort", "uniq", "ls", "pwd", "date", "tee", "mkdir", "touch", "cd",
+    "pushd", "popd", "export", "jq", "cut", "tr", "diff", "basename", "dirname", "realpath",
+    "sleep", "which", "type", "read", "set", "unset", "local", "declare", ":", "wait", "cp", "mv",
+})
+# git settings and variables that make git run a program (review M-2 of #208).
+_GIT_EXEC_KEYS = ("core.sshcommand", "core.pager", "core.editor", "core.fsmonitor",
+                  "core.hookspath", "credential.helper", "diff.external", "sequence.editor",
+                  "pager.", "alias.", "gpg.program", "uploadpack.", "receivepack.", "protocol.",
+                  "remote.", "url.", "filter.", "merge.", "difftool.", "mergetool.")
+_GIT_EXEC_ENV = re.compile(r"(?<![A-Za-z0-9_])GIT_(SSH|SSH_COMMAND|EDITOR|PAGER|EXTERNAL_DIFF|"
+                           r"SEQUENCE_EDITOR|ASKPASS|PROXY_COMMAND|EXEC_PATH|CONFIG_PARAMETERS)\s*=")
+_GIT_EXEC_SUBS = frozenset({"difftool", "mergetool", "filter-branch", "filter-repo", "bisect",
+                            "rebase", "submodule", "daemon", "send-email"})
 _TEXT_PUSH_WHAT = (
     (re.compile(r"\b(main|master)\b"), PUSH_PROTECTED),
     (re.compile(r"--force|(?<![\w-])-f\b|\+\w"), PUSH_FORCE),
@@ -169,6 +200,7 @@ class _Unknown:
 
 
 UNKNOWN = _Unknown()
+_REPO_HEAD = _Unknown()      # "HEAD as the repository has it", in `_Line.heads`
 
 
 # --- reading the repository, never running git --------------------------------
@@ -182,9 +214,29 @@ def _read(path: Path, cap: int = CONFIG_CAP) -> str | None:
         return None
 
 
+_HEX_HEAD = re.compile(r"[0-9a-f]{40}([0-9a-f]{24})?")
+
+
+def _is_git_dir(gitdir: Path) -> bool:
+    """git's own test (`is_git_directory`): a HEAD, and `objects/` and
+    `refs/` here or in the common dir a linked worktree's `commondir` names."""
+    try:
+        if not os.path.lexists(gitdir / "HEAD"):    # a symlinked HEAD may name an unborn ref
+            return False
+        common = gitdir
+        pointer = _read(gitdir / "commondir", 4096)
+        if pointer and pointer.strip():
+            common = (gitdir / pointer.strip()).resolve()
+        return (common / "objects").is_dir() and (common / "refs").is_dir()
+    except OSError:
+        return False
+
+
 def _git_dirs(start: Path):
     """(git dir, common dir) of the repository holding `start`; None when it
-    is in none (a push there fails); UNKNOWN when it cannot be read."""
+    is in none (a push there fails); UNKNOWN when what is there cannot be
+    read as git would read it (a `.git` that is not a git directory, a
+    gitdir file pointing nowhere valid)."""
     folder = start
     for _ in range(256):
         dotgit = folder / ".git"
@@ -204,6 +256,8 @@ def _git_dirs(start: Path):
                 continue
         except OSError:
             return UNKNOWN
+        if not _is_git_dir(gitdir):
+            return UNKNOWN
         common = gitdir
         pointer = _read(gitdir / "commondir", 4096)
         if pointer and pointer.strip():
@@ -213,12 +267,25 @@ def _git_dirs(start: Path):
 
 
 def _head_branch(gitdir: Path):
-    """The branch HEAD names, None when detached, UNKNOWN when unreadable."""
-    text = _read(gitdir / "HEAD", 4096)
+    """The branch HEAD names (a `ref:` line, or a symlink as old gits wrote
+    it), None when detached (a hex object name), UNKNOWN otherwise."""
+    head = gitdir / "HEAD"
+    try:
+        if head.is_symlink():
+            target = os.readlink(head)
+            match = re.fullmatch(r"(?:.*/)?refs/heads/(\S+)", target)
+            return match.group(1) if match else UNKNOWN
+    except OSError:
+        return UNKNOWN
+    text = _read(head, 4096)
     if text is None:
         return UNKNOWN
-    match = re.match(r"\s*ref:\s*refs/heads/(\S+)\s*$", text)
-    return match.group(1) if match else None
+    match = re.fullmatch(r"ref:\s*refs/heads/(\S+)\s*", text)
+    if match:
+        return match.group(1)
+    if _HEX_HEAD.fullmatch(text.strip()):
+        return None
+    return UNKNOWN
 
 
 def _remote_heads(common: Path) -> set[str]:
@@ -238,26 +305,49 @@ def _remote_heads(common: Path) -> set[str]:
 
 
 def _config_files(dirs) -> list[Path]:
-    files: list[Path] = []
+    """In git's order, lowest precedence first: system, XDG, global, then
+    each repository's own config and its worktree config. Last wins."""
+    home = Path(os.environ.get("HOME") or "~").expanduser()
+    xdg = os.environ.get("XDG_CONFIG_HOME") or str(home / ".config")
+    files = [Path("/etc/gitconfig"), Path(xdg) / "git" / "config", home / ".gitconfig"]
     if isinstance(dirs, list):
         for gitdir, common in dirs:
             files += [common / "config", gitdir / "config.worktree"]
-    home = Path(os.environ.get("HOME") or "~").expanduser()
-    xdg = os.environ.get("XDG_CONFIG_HOME") or str(home / ".config")
-    files += [home / ".gitconfig", Path(xdg) / "git" / "config", Path("/etc/gitconfig")]
     return files
 
 
-def _config_entries(files: list[Path]) -> list[tuple[str, str, str]]:
-    """(section, subsection, key=value) triples, best effort: git's own
-    syntax without includes. Sections and keys are lowercased."""
+def _strip_comment(text: str) -> str:
+    """A value with its `#`/`;` comment cut, outside double quotes."""
+    out, quoted, i = [], False, 0
+    while i < len(text):
+        ch = text[i]
+        if ch == "\\" and i + 1 < len(text):
+            out.append(text[i:i + 2])
+            i += 2
+            continue
+        if ch == '"':
+            quoted = not quoted
+        elif ch in "#;" and not quoted:
+            break
+        out.append(ch)
+        i += 1
+    return "".join(out).strip()
+
+
+def _config_entries(files: list[Path], cache: dict | None = None) -> list[tuple[str, str, str]]:
+    """(section, subsection, key=value) triples in precedence order (read the
+    last match), best effort: git's own syntax without includes. Sections
+    and keys are lowercased; comments are cut. Each file is parsed once per
+    judgement (`cache`)."""
     out: list[tuple[str, str, str]] = []
     for path in files:
-        text = _read(path)
-        if not text:
+        if cache is not None and path in cache:
+            out += cache[path]
             continue
+        entries: list[tuple[str, str, str]] = []
+        text = _read(path)
         section, sub = "", ""
-        for raw in text.splitlines():
+        for raw in (text or "").splitlines():
             line = raw.strip()
             if not line or line[0] in "#;":
                 continue
@@ -269,16 +359,28 @@ def _config_entries(files: list[Path]) -> list[tuple[str, str, str]]:
                 else:
                     section, _, sub = name.partition(".")
                     section = section.lower()
-                rest = line[header.end():].strip()
-                if not rest:
+                line = _strip_comment(line[header.end():])
+                if not line:
                     continue
-                line = rest
             key, eq, value = line.partition("=")
-            value = value.strip() if eq else "true"
+            value = _strip_comment(value) if eq else "true"
             if len(value) >= 2 and value[0] == value[-1] == '"':
                 value = value[1:-1]
-            out.append((section, sub, f"{key.strip().lower()}={value}"))
+            entries.append((section, sub, f"{key.strip().lower()}={value}"))
+        if cache is not None:
+            cache[path] = entries
+        out += entries
     return out
+
+
+def _last(entries, section: str, key: str, sub: str | None = None) -> str | None:
+    """The value git uses: the last one."""
+    found = None
+    for sec, subsection, pair in entries:
+        name, _, value = pair.partition("=")
+        if sec == section and name == key and (sub is None or subsection == sub):
+            found = value
+    return found
 
 
 # --- the line ---------------------------------------------------------------
@@ -310,6 +412,31 @@ class _Line:
         # An unquoted-looking `(` that is not `$(`, `<(` or `>(`: a subshell
         # or a group whose `cd` may not outlast it.
         self.subshell = bool(re.search(r"(?<![$<>])\(", command))
+        # What an earlier program on the line did to the push that follows:
+        # `heads` None = HEAD as the repository has it; else the branches it
+        # may be (`_REPO_HEAD` among them when the move may not have
+        # happened), or UNKNOWN. `config_changed`: a `git config` write.
+        self.heads = None
+        self.config_changed = False
+        # A `;`, `||` or newline lets the line go on after a failed switch.
+        self.lenient = bool(re.search(r";|\|\||\n", command))
+        self._config_cache: dict = {}
+        self.executor = bool(_GIT_EXEC_ENV.search(command))
+
+    def config(self, repos) -> list:
+        """The git config entries for these repositories, each file parsed
+        once per judgement."""
+        return _config_entries(_config_files(repos), self._config_cache)
+
+    def switch(self, names) -> None:
+        """An earlier program moves HEAD: to `names` (literal branches) or
+        somewhere that cannot be told (UNKNOWN)."""
+        if names is UNKNOWN or self.heads is UNKNOWN:
+            self.heads = UNKNOWN
+            return
+        before = self.heads if self.heads is not None else [_REPO_HEAD]
+        kept = before if (self.lenient or self.subshell) else []
+        self.heads = list(dict.fromkeys(kept + list(names)))
 
     # what was found
     def hit(self, rule: str, why: str = "", branch: str | None = None) -> None:
@@ -363,14 +490,35 @@ class _Line:
 
 def _wild(word, replace: str | None = None) -> bool:
     """Whether bash (or xargs/find) would change this word before the
-    program saw it: an active expansion or glob, or the replace string."""
+    program saw it: an active expansion or glob, a brace expansion (`{a,b}`,
+    `{a..b}`: `git push origin {main,}` pushes main), or the replace string.
+    A brace with neither (`{owner}` in a `gh api` path) is literal."""
     text = str(word)
     if replace and replace in text:
         return True
     mask = getattr(word, "active", None)
     if mask is None:
-        return any(c in text for c in "$`*?[")
-    return any(on and c in "$`*?[" for c, on in zip(text, mask))
+        mask = (True,) * len(text)
+    if any(on and c in "$`*?[" for c, on in zip(text, mask)):
+        return True
+    return _brace_expands(text, mask)
+
+
+def _brace_expands(text: str, mask) -> bool:
+    """An active `{…}` holding a `,` or a `..` range at its own level. One
+    pass, a stack of open braces: linear in the word."""
+    stack: list[bool] = []
+    for i, (ch, on) in enumerate(zip(text, mask)):
+        if not on:
+            continue
+        if ch == "{":
+            stack.append(False)
+        elif ch == "}" and stack:
+            if stack.pop():
+                return True
+        elif stack and (ch == "," or (ch == "." and i and text[i - 1] == "." and mask[i - 1])):
+            stack[-1] = True
+    return False
 
 
 def _stem_could_be(word, names: tuple[str, ...]) -> tuple[str | None, bool]:
@@ -440,6 +588,8 @@ def _git(line: _Line, args: list, prog, depth: int = 0, *, sure: bool = True) ->
                 overrides.append(str(value))
                 if _wild(value):
                     overrides.append("*")
+                if str(value).lower().startswith(_GIT_EXEC_KEYS):
+                    line.executor = True
             elif text in _GIT_DIR_OPTS:
                 dirs = UNKNOWN
             i += 2
@@ -450,6 +600,7 @@ def _git(line: _Line, args: list, prog, depth: int = 0, *, sure: bool = True) ->
                 dirs = UNKNOWN
             elif name == "--config-env":
                 overrides.append("*")
+                line.executor = True
             i += 1
             continue
         if text.startswith("-"):
@@ -466,11 +617,15 @@ def _git(line: _Line, args: list, prog, depth: int = 0, *, sure: bool = True) ->
             _push(line, rest, prog, dirs, overrides, unsure_verb=True)
         return
     name = str(sub)
+    if name in _GIT_EXEC_SUBS:
+        line.executor = True            # it may run a program it is handed
     if name == "push":
         _push(line, rest, prog, dirs, overrides)
         return
     if not sure or depth >= ALIAS_DEPTH:
         return
+    if name in _GIT_MOVES_HEAD:
+        _git_moves_head(line, name, rest, dirs, prog.replace)
     if name in _GIT_RUNS_SHELL:
         # Subcommands that hand a shell a line: `submodule foreach CMD`,
         # `rebase -x CMD`, `bisect run CMD`.
@@ -491,6 +646,110 @@ def _git(line: _Line, args: list, prog, depth: int = 0, *, sure: bool = True) ->
 
 
 _GIT_RUNS_SHELL = frozenset({"submodule", "rebase", "bisect"})
+_GIT_MOVES_HEAD = frozenset({"checkout", "switch", "branch", "symbolic-ref", "config"})
+_CONFIG_READS = frozenset({"--get", "--get-all", "--get-regexp", "--get-urlmatch", "--list", "-l",
+                           "--get-color", "--get-colorbool"})
+
+
+def _git_moves_head(line: _Line, name: str, rest: list, dirs, replace) -> None:
+    """A git program earlier on the line that moves HEAD or rewrites config
+    (H-1 of #208's review): what a later push with no refspec, or of HEAD,
+    pushes is no longer the repository's current branch."""
+    words = [str(w) for w in rest]
+    wild = any(_wild(w, replace) for w in rest)
+    if name == "config":
+        # A read leaves config as it was; anything else may write it (an
+        # editor too). Then a plain push, or an alias, cannot be told.
+        positionals = [w for w in words if not w.startswith("-")]
+        verb = positionals[:1]
+        reads = any(w in _CONFIG_READS for w in words) or verb in (["get"], ["list"])
+        writes = (wild or any(w in ("-e", "--edit") for w in words)
+                  or any(w.startswith(("--unset", "--add", "--replace", "--rename", "--remove"))
+                         for w in words)
+                  or verb in (["set"], ["unset"], ["edit"], ["rename-section"], ["remove-section"])
+                  or (not reads and len(positionals) >= 2))
+        if writes:
+            line.config_changed = True
+        return
+    if name == "symbolic-ref":
+        positionals = [w for w in rest if not str(w).startswith("-")]
+        if len(positionals) >= 2 and str(positionals[0]) == "HEAD":
+            target = positionals[1]
+            if _wild(target, replace):
+                line.switch(UNKNOWN)
+            else:
+                branch = _branch_name(str(target))
+                line.switch([branch] if branch else UNKNOWN)
+        return
+    if name == "branch":
+        if any(w in ("-u", "--unset-upstream") or w.startswith(("--set-upstream", "--track"))
+               for w in words):
+            line.config_changed = True          # an upstream, for push.default=upstream
+        renames = [w for w in words if w in ("-m", "-M", "-c", "-C", "--move", "--copy")
+                   or re.fullmatch(r"-[a-zA-Z]*[mMcC][a-zA-Z]*", w)]
+        if renames:
+            positionals = [w for w in rest if not str(w).startswith("-")]
+            if wild or not positionals:
+                line.switch(UNKNOWN)
+                return
+            new = str(positionals[-1])
+            moving = any(re.search(r"[mM]", w) or w == "--move" for w in renames)
+            if moving:
+                line.switch([new])
+            elif _protected(new, set()):
+                line.switch([_REPO_HEAD, new])  # a copy onto a protected name
+        return
+    # checkout / switch
+    if name == "checkout" and "--" in words:
+        return                                  # paths: HEAD stays
+    new = None
+    positionals: list = []
+    detach = False
+    k = 0
+    while k < len(rest):
+        word = words[k]
+        if word in ("-b", "-B", "-c", "-C", "--orphan"):
+            new = rest[k + 1] if k + 1 < len(rest) else None
+            k += 2
+            continue
+        if word.startswith(("--orphan=", "--create=", "--force-create=")):
+            new = word.split("=", 1)[1]
+        elif word in ("-", "@{-1}") or word.startswith("@{-"):
+            line.switch(UNKNOWN)
+            return
+        elif word in ("--detach", "-d"):
+            detach = True
+        elif not word.startswith("-"):
+            positionals.append(rest[k])
+        k += 1
+    if new is not None:
+        line.switch(UNKNOWN if _wild(new, replace) else [str(new)])
+        return
+    if detach or not positionals:
+        if detach:
+            line.switch([])                     # detached: a HEAD push fails
+        return
+    target = positionals[0]
+    if _wild(target, replace):
+        line.switch(UNKNOWN)
+        return
+    text = str(target)
+    if name == "checkout":
+        # `git checkout FILE` restores a file and leaves HEAD: a name that is
+        # a path where the line runs is read as one; anything else as a branch.
+        if len(positionals) > 1 or _is_path(line, dirs, text):
+            return
+    if "--track" in words or "-t" in words:
+        text = text.split("/", 1)[1] if "/" in text else text
+    line.switch([_branch_name(text) or text])
+
+
+def _is_path(line: _Line, dirs, text: str) -> bool:
+    if text in (".", "..") or text.startswith(("./", "../", "/")):
+        return True
+    if dirs is UNKNOWN or not isinstance(dirs, list):
+        return False
+    return any((Path(d) / text).exists() for d in dirs)
 
 
 def _git_shell_text(line: _Line, name: str, rest: list, depth: int) -> None:
@@ -538,12 +797,11 @@ def _git_alias(line: _Line, name: str, dirs, overrides: list[str]):
     # repository-local alias there is a known gap, not an ask on every
     # `cd "$X" && git ls-tree`.
     repos = line.repos(dirs)
-    entries = _config_entries(_config_files(repos))
-    for section, _sub, pair in entries:
-        key, _, value = pair.partition("=")
-        if section == "alias" and key == wanted:
-            return value
-    return ""
+    value = _last(line.config(repos), "alias", wanted)
+    if value is not None:
+        return value
+    # An earlier `git config` on this line may have just made it one.
+    return UNKNOWN if line.config_changed else ""
 
 
 def _push(line: _Line, args: list, prog, dirs, overrides: list[str], *,
@@ -662,13 +920,15 @@ def _push(line: _Line, args: list, prog, dirs, overrides: list[str], *,
         # A push with no refspec: the config decides what it writes
         # (`remote.<r>.push`, `.mirror`, `push.default`), else the current
         # branch to its own name.
-        entries = _config_entries(_config_files(repos)) if repos is not UNKNOWN else []
+        if line.config_changed:
+            line.hit(PUSH_UNSURE, "an earlier `git config` on the line changes what a plain push writes")
+            return
+        entries = line.config(repos) if repos is not UNKNOWN else []
         if any(section == "remote" and pair.partition("=")[0] in ("push", "mirror")
                for section, _sub, pair in entries):
             line.hit(PUSH_UNSURE, "the repository's config sets what a plain push writes")
             return
-        mode = next((pair.partition("=")[2].lower() for section, _sub, pair in entries
-                     if section == "push" and pair.partition("=")[0] == "default"), "simple")
+        mode = (_last(entries, "push", "default") or "simple").lower()
         if mode == "matching":
             line.hit(PUSH_PROTECTED, "push.default=matching pushes every branch the remote has",
                      "every matching branch")
@@ -679,25 +939,36 @@ def _push(line: _Line, args: list, prog, dirs, overrides: list[str], *,
 
 def _current(line: _Line, repos, defaults: set[str], upstream_entries=None) -> None:
     """A push of the current branch: asked when it is a protected one (or,
-    under push.default=upstream, when its upstream is)."""
-    if repos is UNKNOWN:
-        line.hit(PUSH_UNSURE, "the branch it pushes depends on a folder that cannot be told")
+    under push.default=upstream, when its upstream is). An earlier program
+    on the line that moves HEAD (`git checkout main && … && git push`) sets
+    which branch that is (`_Line.switch`)."""
+    heads = line.heads
+    if heads is UNKNOWN:
+        line.hit(PUSH_UNSURE, "an earlier command on the line moves HEAD somewhere that cannot be told")
         return
-    for gitdir, _common in repos:
-        branch = _head_branch(gitdir)
-        if branch is UNKNOWN:
-            line.hit(PUSH_UNSURE, "the current branch cannot be read")
+    branches: list = []
+    for name in (heads if heads is not None else [_REPO_HEAD]):
+        if name is not _REPO_HEAD:
+            branches.append(name)
             continue
-        if branch and _protected(branch, defaults):
-            line.hit(PUSH_PROTECTED, "the current branch is the default branch", branch)
-        if branch and upstream_entries:
-            for section, sub, pair in upstream_entries:
-                key, _, value = pair.partition("=")
-                if section == "branch" and sub == branch and key == "merge":
-                    target = _branch_name(value.strip())
-                    if target and _protected(target, defaults):
-                        line.hit(PUSH_PROTECTED, "push.default=upstream pushes to the branch's "
-                                 "upstream, the default branch", target)
+        if repos is UNKNOWN:
+            line.hit(PUSH_UNSURE, "the branch it pushes depends on a folder that cannot be told")
+            return
+        for gitdir, _common in repos:
+            branch = _head_branch(gitdir)
+            if branch is UNKNOWN:
+                line.hit(PUSH_UNSURE, "the current branch cannot be read")
+            elif branch:
+                branches.append(branch)
+    for branch in branches:
+        if _protected(branch, defaults):
+            line.hit(PUSH_PROTECTED, "the branch it pushes is the default branch", branch)
+        if upstream_entries:
+            merge = _last(upstream_entries, "branch", "merge", sub=branch)
+            target = _branch_name(merge.strip()) if merge else None
+            if target and _protected(target, defaults):
+                line.hit(PUSH_PROTECTED, "push.default=upstream pushes to the branch's "
+                         "upstream, the default branch", target)
 
 
 # --- gh --------------------------------------------------------------------
@@ -740,9 +1011,19 @@ def _gh(line: _Line, args: list, prog, *, sure: bool = True) -> None:
             line.hit(PR_MERGE, "a merge lands the pull request on its base branch")
         elif verb == "close":
             line.hit(PR_CLOSE, "a close ends the pull request")
+        elif verb == "checkout":
+            line.switch(UNKNOWN)        # HEAD is now the PR's branch, by its name
+        return
+    if name == "co":
+        line.switch(UNKNOWN)            # the stock alias for `gh pr checkout`
         return
     if name == "api":
         _gh_api(line, args[first_at + 1:], replace)
+        return
+    if name in ("extension", "extensions", "ext"):
+        if any(str(w) == "exec" for _a, w in positionals[1:2]):
+            line.executor = True
+            line.hit(UNSURE, "`gh extension exec` runs an extension, which may merge or close")
         return
     if name == "repo":
         words = [str(w) for w in args[first_at + 1:]]
@@ -765,9 +1046,11 @@ def _gh(line: _Line, args: list, prog, *, sure: bool = True) -> None:
         line.hit(UNSURE, f"`gh {name[:40]}` is an alias or an extension, which may merge or close")
 
 
-_GRAPHQL_MERGE = re.compile(r"mergepullrequest|enablepullrequestautomerge|mergebranch", re.I)
-_GRAPHQL_CLOSE = re.compile(r"closepullrequest", re.I)
-_GRAPHQL_UPDATE_CLOSED = re.compile(r"updatepullrequest[\s\S]*closed|closed[\s\S]*updatepullrequest", re.I)
+# GraphQL mutations, matched as lowercased substrings (linear; a regex with
+# `[\s\S]*` on both sides was quadratic, review M-6 of #208).
+_GRAPHQL_MERGES = ("mergepullrequest", "enablepullrequestautomerge", "mergebranch",
+                   "enqueuepullrequest")
+_GRAPHQL_BRANCH = re.compile(r'branchname\W{0,6}([\w./-]+)')
 
 
 def _gh_api(line: _Line, args: list, replace: str | None) -> None:
@@ -814,16 +1097,32 @@ def _gh_api(line: _Line, args: list, replace: str | None) -> None:
         if write:
             line.hit(UNSURE, "`gh api` writes to an endpoint that cannot be told")
         return
-    path = str(endpoint).strip()
-    path = re.sub(r"^https?://[^/]+/", "", path).split("?", 1)[0].strip("/").lower()
+    path = _api_path(str(endpoint))
     text = " ".join(str(f) for f in fields) + " " + " ".join(str(a) for a in args)
+    low = text.lower()
+    unreadable_fields = has_input or any(
+        _wild(f, replace) or "=@" in str(f) for f in fields)
     if path == "graphql":
         named = False
-        if _GRAPHQL_MERGE.search(text):
+        if any(m in low for m in _GRAPHQL_MERGES):
             line.hit(PR_MERGE, "a GraphQL mutation that merges")
             named = True
-        if _GRAPHQL_CLOSE.search(text) or _GRAPHQL_UPDATE_CLOSED.search(text):
+        if "closepullrequest" in low or ("updatepullrequest" in low and "closed" in low):
             line.hit(PR_CLOSE, "a GraphQL mutation that closes a pull request")
+            named = True
+        if "deleteref" in low:
+            line.hit(PUSH_DELETE, "a GraphQL mutation that deletes a ref")
+            named = True
+        if "updateref" in low:          # updateRef, updateRefs
+            if "force" in low:
+                line.hit(PUSH_FORCE, "a GraphQL ref update with force")
+            line.hit(PUSH_UNSURE, "a GraphQL mutation that moves a ref, which may be the default branch")
+            named = True
+        if "createcommitonbranch" in low:
+            branch = _GRAPHQL_BRANCH.search(low)
+            if branch is None or _protected(branch.group(1), set()):
+                line.hit(PUSH_PROTECTED, "a GraphQL commit onto a branch it does not name, or the "
+                         "default branch", branch.group(1) if branch else "the default branch")
             named = True
         queries = [f for f in fields if str(f).startswith("query=")]
         unread = has_input or not queries or any(
@@ -837,12 +1136,14 @@ def _gh_api(line: _Line, args: list, replace: str | None) -> None:
         line.hit(PR_MERGE, "`gh api` merges through the REST API")
     elif re.search(r"(^|/)pulls/[^/]+$", path):
         line.hit(PR_CLOSE, "`gh api` edits a pull request, which can close it")
-    elif re.search(r"(^|/)issues/[^/]+$", path) and re.search(r"closed", text, re.I):
+    elif re.search(r"(^|/)issues/[^/]+$", path) and "closed" in low:
         line.hit(PR_CLOSE, "`gh api` closes an issue or a pull request")
+    elif re.search(r"(^|/)issues/[^/]+$", path) and unreadable_fields:
+        line.hit(UNSURE, "`gh api` edits an issue or a pull request with fields it cannot read")
     elif re.search(r"(^|/)git/refs(/|$)", path):
         if method == "DELETE":
             line.hit(PUSH_DELETE, "`gh api` deletes a ref")
-        elif re.search(r"force\s*=\s*true", text, re.I):
+        elif re.search(r"force\s*=\s*true", low):
             line.hit(PUSH_FORCE, "`gh api` force-updates a ref")
         ref = re.sub(r"^.*?git/refs/", "", path)
         branch = _branch_name("refs/" + ref) if ref else None
@@ -853,6 +1154,15 @@ def _gh_api(line: _Line, args: list, replace: str | None) -> None:
         if not branches or any(_wild(b, replace) or _protected(b, set()) for b in branches):
             line.hit(PUSH_PROTECTED, "`gh api` commits a file to the default branch",
                      branches[0] if branches else "the default branch")
+
+
+def _api_path(endpoint: str) -> str:
+    """An endpoint as GitHub routes it: host dropped, query cut,
+    percent-decoded, `./` and `..` resolved, lowercased."""
+    path = re.sub(r"^https?://[^/]+/", "", endpoint.strip()).split("?", 1)[0].split("#", 1)[0]
+    path = urllib.parse.unquote(path)
+    path = posixpath.normpath("/" + path)
+    return path.strip("/").lower()
 
 
 # --- the walk ----------------------------------------------------------------
@@ -877,9 +1187,16 @@ def _programs(line: _Line, walk, depth: int) -> None:
     interpreter = False
     for prog in walk.progs:
         if not prog.word:
-            continue                    # read from input: the vex reading asks it
+            line.executor = True        # a program read from input
+            continue                    # (the vex reading asks it too)
         stem, could = _stem_could_be(prog.word, _NAMES)
         args = list(prog.args)
+        if stem is None or (stem not in _DATA_STEMS and stem not in _NAMES
+                            and stem not in rules._WRAPPER_OPTS and stem not in rules._RUNNER_SPECS):
+            # A program that may run text it is handed (a shell, eval, an
+            # interpreter, ssh, curl, one this reader does not know): the
+            # raw-line backstop applies (`judge`).
+            line.executor = True
         if stem in ("cd", "pushd"):
             if any(str(a) == "-" or str(a).startswith("+") for a in args):
                 line.move(None)         # `cd -`, `pushd +1`: a folder from the stack
@@ -901,10 +1218,12 @@ def _programs(line: _Line, walk, depth: int) -> None:
             _dir_options(line, stem, args)
             if _INTERPRETERS.fullmatch(stem):
                 interpreter = True
-                _text(line, " ".join(str(a) for a in args))
+                _text(line, " ".join(str(a) for a in args), inline=True)
+            if stem == "xargs":
+                line.executor = True
     if interpreter:
         for body in walk.bodies:
-            _text(line, body)
+            _text(line, body, inline=True)
 
 
 def _dir_options(line: _Line, stem: str, args: list) -> None:
@@ -924,15 +1243,40 @@ def _dir_options(line: _Line, stem: str, args: list) -> None:
             line.move(text[2:], union=True)
 
 
-def _text(line: _Line, text: str) -> None:
-    """Inline code read as text: a backstop, not a parse."""
+def _text(line: _Line, text: str, *, inline: bool = False) -> bool:
+    """Text read for the operations, a backstop and not a parse: inline
+    interpreter code (`inline`), or the whole raw line (`judge`). A push
+    named with no branch, force or deletion in inline code is a push of the
+    current branch (review M-3 of #208). True when anything matched."""
+    found = False
+    pr_known = any(h in (PR_MERGE, PR_CLOSE, UNSURE) for h in line.hits)
+    push_known = any(h in (PUSH_PROTECTED, PUSH_FORCE, PUSH_DELETE, PUSH_UNSURE) for h in line.hits)
     for pattern, rule in _TEXT_RULES:
+        if not inline and pr_known:
+            break                       # the structure already named it
         if pattern.search(text):
-            line.hit(rule, "inline code spells it")
-    if _TEXT_PUSH.search(text):
-        for pattern, rule in _TEXT_PUSH_WHAT:
-            if pattern.search(text):
-                line.hit(rule, "inline code spells it", "main" if rule == PUSH_PROTECTED else None)
+            line.hit(rule if inline else UNSURE, "inline code spells it" if inline
+                     else "the line spells it where a program may run it")
+            found = True
+    if _TEXT_PUSH.search(text) and (inline or not push_known):
+        what = [rule for pattern, rule in _TEXT_PUSH_WHAT if pattern.search(text)]
+        for rule in what:
+            line.hit(rule if inline else PUSH_UNSURE, "inline code spells it" if inline
+                     else "the line spells a push where a program may run it",
+                     "main" if rule == PUSH_PROTECTED and inline else None)
+        if inline and not what and _TEXT_GIT_PUSH.search(text):
+            repos = line.repos()
+            _current(line, repos, _defaults(repos))
+        found = found or bool(what)
+    return found
+
+
+def _defaults(repos) -> set[str]:
+    out: set[str] = set()
+    if isinstance(repos, list):
+        for _gitdir, common in repos:
+            out |= _remote_heads(common)
+    return out
 
 
 def judge(command: str, cwd=None) -> Hit | None:
@@ -947,6 +1291,15 @@ def judge(command: str, cwd=None) -> Hit | None:
         command = command.replace("\x00", " ")
     line = _Line(command, cwd)
     _line_into(line, command)
+    if line.executor:
+        # The backstop (review M-2 of #208): where the line runs a program
+        # that may run text it is handed — `echo '…' | sh`, `bash <(…)`,
+        # `eval "$(…)"`, `x='…'; $x`, `ssh host …`, `cmd.exe /c`, curl to the
+        # API, a git exec setting — any spelling of the operations anywhere
+        # on it asks, saying it may. A line of only git, gh and data
+        # programs (a commit message or PR body that mentions a merge) is
+        # read by structure alone.
+        _text(line, command)
     if not line.hits:
         return None
     words = []

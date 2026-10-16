@@ -2310,8 +2310,27 @@ the default branch, a branch deletion, a force push.
   `codex_provider_check.py` (`test_owner_only_merge_card_says_what_it_does`),
   `claude_provider_check.py` (the hook's `cwd`), and the mutants in
   `tests/v2/merge_gate_mutants.py`, each of which must fail a check.
-- **Open.** An accident guard, not an adversarial boundary: script files,
-  an alias in a folder that cannot be told, `include`d git config, `curl` to
-  the API and `gh issue close` on a pull request are not read (decisions,
-  "Known gaps"). Under Claude AUTO the owner's yes still returns `{}`, so the
-  classifier runs after it and may ask again.
+- **Boundary review of #208** (decisions M-10..M-14): an earlier program on
+  the line that moves HEAD (`git checkout main && … && git push`) or writes
+  git config is read before a plain or HEAD push; brace expansions are not
+  literal; where the line runs a program that may run text it is handed (a
+  shell, `eval`, `ssh`, `curl`, a git exec setting …) any spelling of the
+  operations anywhere on it asks; `.git` is read as git reads it (a valid git
+  directory, a symlinked HEAD, an object-name HEAD as detached, anything else
+  unknown); GraphQL `enqueuePullRequest`, `deleteRef`, `updateRef(s)` and
+  `createCommitOnBranch` count; config is parsed once per judgement.
+- **Frozen** (owner, 2026-10-15): `jarvis/v2/merge_gate.py` and
+  `jarvis/v2/permissions.py` are SELF_PROTECTED, so no agent write changes
+  them and the HUD editor serves them read-only (the owner cannot edit,
+  rename or delete them there). `gh pr reopen` does not ask (owner:
+  "non-destructive").
+- **One card.** A human's yes is held by `tool_use_id` for 120 s and answers
+  the CLI's `can_use_tool` re-ask of the identical call once
+  (`permit.recall`). Jarvis registers `can_use_tool` only off AUTO, so under
+  AUTO it is inert; there the classifier runs after the owner's yes and can
+  still deny.
+- **Open.** An accident guard, not an adversarial boundary: script files
+  (or one written on an earlier call), an alias in a folder that cannot be
+  told, `include`d git config, git hooks (`pre-push`, `core.hooksPath` set
+  outside the line) and `gh issue close` on a pull request are not read
+  (decisions, "Known gaps").
