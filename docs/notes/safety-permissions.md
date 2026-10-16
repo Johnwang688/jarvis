@@ -2613,6 +2613,11 @@ judged alone, its word and arguments read in every spelling
   (`python3 -c "print(rules.decide('secret-tool lookup a b'))"`, through `uv
   run` or `timeout` too), `perl -pi -e 's/secret-tool/x/' file`, `which
   secret-tool`. A call through a variable (`os.system(cmd)`) is not seen.
+  Probing this rule in process needs a probe file (`python3 probe.py`):
+  a `python3 -c` whose source holds `os.system('secret-tool…')` is itself
+  DENY. Its patterns are atomic where whitespace runs meet (#220 delta
+  review: `\s*\(?\s*` took 54 s on 60k spaces), pinned with a deadline by
+  `rules_check secret_service_cost_checks`.
 - **A session-bus monitor**, judged per program: `dbus-monitor` unless
   `--system` (and no `--session`/`--address`), `gdbus monitor` unless
   `--system`/`-y`, `busctl monitor|capture` with `--user`, an address, a

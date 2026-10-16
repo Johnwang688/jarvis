@@ -519,12 +519,16 @@ _INLINE_BASES = (("python", re.compile(r"(?:python|pypy)[0-9.]*")), ("perl", re.
                  ("php", re.compile(r"php[0-9.]*")), ("bun", re.compile(r"bun")),
                  ("deno", re.compile(r"deno")))
 _READER_WORD = r"(?:[\w.~/-]*/)?(?:secret-tool|kwallet-query|lssecret)(?![\w.-])"
+# Atomic and possessive where whitespace runs meet (#220 delta review, M1):
+# `\s*\(?\s*` backtracked quadratically, 54 s for 60k spaces in `decide`.
+# The reader's path stays `[…]*/` (each candidate start is delimited by a
+# quote or a backtick, so it stays linear; pinned by `rules_check`).
 _STARTS_PROCESS = re.compile(
-    r"(?:\b(?:system|exec\w*|popen\w*|spawn\w*|run|call|check_call|check_output|getoutput"
-    r"|getstatusoutput|capture[23]\w*|pipeline\w*|shell_exec|passthru|proc_open|command)"
-    r"\s*\(?\s*(?:[\[{]\s*)?(?:[rbuf]{1,2})?[\"'`]\s*"
-    r"|\$\s*`\s*)" + _READER_WORD)
-_SHELL_OUT = re.compile(r"(?:`\s*|\bqx\s*[({\[<'\"/|!#]\s*|%x\s*[({\[<'\"/|!]\s*)" + _READER_WORD)
+    r"(?:\b(?:system|exec\w*+|popen\w*+|spawn\w*+|run|call|check_call|check_output|getoutput"
+    r"|getstatusoutput|capture[23]\w*+|pipeline\w*+|shell_exec|passthru|proc_open|command)"
+    r"(?>\s*\(?\s*)(?:[\[{]\s*+)?(?:[rbuf]{1,2})?[\"'`]\s*+"
+    r"|\$\s*+`\s*+)" + _READER_WORD)
+_SHELL_OUT = re.compile(r"(?:`\s*+|\bqx\s*+[({\[<'\"/|!#]\s*+|%x\s*+[({\[<'\"/|!]\s*+)" + _READER_WORD)
 
 
 def _inline_base(stem: str) -> str | None:

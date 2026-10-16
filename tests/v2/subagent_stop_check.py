@@ -359,6 +359,40 @@ class ClaudeStop(unittest.TestCase):
         ended = [d for d in life(out, self.SLEEPER) if d["op"] == "finished"]
         self.assertEqual([(d["status"], d.get("stop_reason")) for d in ended], [("stopped", OWNER)])
 
+    def test_an_undelivered_stop_takes_the_mark_off_in_time_and_late(self):
+        """#220 delta review, L2: a transport error (the request never
+        reached the CLI) settles as refused by the one rule
+        (`_stop_outcome`), whether it comes in time or after our timeout."""
+        run = ClaudeRun("stop_fg_parallel")
+        self.addCleanup(run.close)
+        out, done = run.send_async()
+        wait_for(lambda: R.ReplayClient.instances and run.client.at_gate.is_set(), what="the stop gate")
+        child = run.handle.native.children[self.SLEEPER]
+
+        async def lost(task_id):
+            raise ConnectionError("the CLI's pipe closed")
+        with patch.object(run.client, "stop_task", lost):
+            with self.assertRaises(ConnectionError):
+                run.provider.stop_subagent(run.handle, self.SLEEPER)
+        self.assertFalse(child.owner_stop, "an undelivered Stop in time left the mark")
+        failed = threading.Event()
+
+        async def lost_late(task_id):
+            await asyncio.sleep(0.3)
+            failed.set()
+            raise ConnectionError("the CLI's pipe closed")
+        with patch.object(run.client, "stop_task", lost_late), \
+                patch.object(claude, "STOP_CONTROL_TIMEOUT_S", 0.1):
+            with self.assertRaises(TimeoutError):
+                run.provider.stop_subagent(run.handle, self.SLEEPER)
+        self.assertTrue(child.owner_stop)
+        wait_for(lambda: failed.is_set() and not child.owner_stop,
+                 what="the late transport error to take the mark off")
+        self.assertEqual((child.owner_stops, child.owner_stop_taken), (0, False))
+        self.assertTrue(done.wait(30), "the turn never finished")
+        ended = [d for d in life(out, self.SLEEPER) if d["op"] == "finished"]
+        self.assertNotEqual(ended[0].get("stop_reason"), OWNER)
+
     def test_a_late_sdk_timeout_keeps_the_owners_mark(self):
         """The SDK's own "Control request timeout" is not the CLI's refusal:
         the CLI may still act on the request, so the mark stays."""

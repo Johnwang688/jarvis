@@ -1417,6 +1417,8 @@ SECRET_SERVICE_V2_DENY = (
     "ruby -e 'require \"open3\"; Open3.capture2(\"secret-tool lookup a b\")'",
     "python3 -c \"import os; os.execvp('lssecret', ['lssecret'])\"", "perl -we 'system \"secret-tool\", \"lookup\"'",
     "python3 -m keyring.cli-x get a b",
+    "python3 -X dev -c \"import os; os.system('secret-tool lookup a b')\"",
+    "python3 -W ignore -c \"import os; os.system('secret-tool lookup a b')\"",
     # a bus-address assignment voids the --system exemption (NIT 2)
     "DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/user/1000/bus dbus-monitor --system",
     "env DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/user/1000/bus busctl monitor",

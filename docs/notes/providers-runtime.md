@@ -1141,5 +1141,5 @@ answer for an earlier turn settles nothing on the next. A
 snapshot's `stop_error` is cleaned and capped as a live line's is. The HUD
 lays the 409's reason on a row whose `refused` the bus said first, and a
 "stopping…" Stop under an approval card keeps its dashed amber look (no
-`button:disabled` fade). 31 tests now; eleven more mutants (two in the
+`button:disabled` fade). 32 tests now; twelve more mutants (two in the
 HUD), all killed.
