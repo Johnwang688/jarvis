@@ -24,6 +24,9 @@ TOOLS = "jarvis/v2/tools/chat_git_tools.py"
 PERMIT = "jarvis/v2/permissions.py"
 SESSION = "jarvis/v2/session_tools.py"
 CODEX_CONFIG = "jarvis/v2/providers/codex_config.py"
+CODEX_PROVIDER = "jarvis/v2/providers/codex.py"
+BRIDGE = "jarvis/v2/bridge.py"
+DISPATCH = "jarvis/tools/__init__.py"
 
 
 def cg(*sections):
@@ -115,7 +118,7 @@ MUTANTS = [
     ("CG-1 off", PERMIT,
      "                return finish(Decision.DENY, L_CHAT_GIT, chat_git.POINTER)", "                pass", PERMS),
     ("CG-1 declines a local-path fetch too", CHAT,
-     "    return remote is None or not _LOCAL.match(remote)", "    return True", cg("unit_checks")),
+     "    return not _LOCAL.match(str(remote))", "    return True", cg("unit_checks")),
     ("identity values not validated", CODEX_CONFIG,
      "    if not value or len(value) > IDENTITY_CAP or not value.isprintable():", "    if not value:", CODEX),
     ("the chat git tools join the whole registry", TOOLS,
@@ -124,6 +127,45 @@ MUTANTS = [
      "_CODEX_ONLY = frozenset({ProviderName.CODEX.value})", "_CODEX_ONLY = _CHAT_PROVIDERS",
      cg("session_tool_checks")),
     ("a sub-agent depth allowed", CHAT, "    if runtime.depth() != 0:", "    if False:", cg("push_checks")),
+    # #223's review, LOW 1: a refusal nobody was asked about is not "declined".
+    ("LOW 1: the bridge drops the unasked reason", BRIDGE,
+     "        return tools.Refusal(verdict.reason)\n    return False",
+     "        return False\n    return False", cg("refusal_checks")),
+    ("LOW 1: dispatch reads a Refusal as the owner's no", DISPATCH,
+     "        if isinstance(answer, Refusal):", "        if False:", cg("refusal_checks")),
+    ("LOW 1: a nondangerous tool's unasked reason dropped", BRIDGE,
+     "    if isinstance(refusal, tools.Refusal):", "    if False:", cg("refusal_checks")),
+    ("LOW 1: the owner's no not marked asked", PERMIT,
+     "            asked[0] = True\n            if decision is Decision.ALLOW",
+     "            if decision is Decision.ALLOW", cg("push_checks")),
+    ("LOW 1: an asked DENY read as unasked", BRIDGE,
+     "verdict.decision is Decision.DENY and not verdict.asked", "verdict.decision is Decision.DENY",
+     cg("push_checks")),
+    # LOW 2: a line CG-1 cannot be sure of takes the ordinary ask.
+    ("LOW 2: an expanded remote declined", CHAT,
+     "    if _unsure(remote):\n        return False", "    if False:\n        return False",
+     cg("unit_checks")),
+    ("LOW 2: a program a wrapper may not run read as sure", CHAT,
+     "                if prog.word and prog.certain and _remote_prog(prog, merge_gate):",
+     "                if prog.word and _remote_prog(prog, merge_gate):", cg("unit_checks")),
+    # LOW 3: gh's login and target variables; the default branch read fails closed.
+    ("LOW 3: GH_TOKEN reaches gh", CHAT,
+     '"GH_CONFIG_DIR", "SSL_CERT_FILE", "SSL_CERT_DIR")',
+     '"GH_CONFIG_DIR", "SSL_CERT_FILE", "SSL_CERT_DIR", "GH_TOKEN")', cg("guard_checks")),
+    ("LOW 3: GH_REPO reaches gh", CHAT,
+     '"GH_CONFIG_DIR", "SSL_CERT_FILE", "SSL_CERT_DIR")',
+     '"GH_CONFIG_DIR", "SSL_CERT_FILE", "SSL_CERT_DIR", "GH_REPO")', cg("guard_checks")),
+    ("LOW 3: an unreadable default read as none (fails open)", CHAT,
+     "    if code != 0:\n        return False, None", "    if code != 0:\n        return True, None",
+     cg("guard_checks")),
+    ("LOW 3: the push ignores an unreadable default", CHAT,
+     "    if not read:\n", "    if False:\n", cg("guard_checks")),
+    # NIT 5: the HUD pointer is CG-1's alone.
+    ("NIT 5: the pointer fires for any denied network line", CODEX_PROVIDER,
+     "and verdict.decision is Decision.DENY and verdict.layer == L_CHAT_GIT):",
+     "and verdict.decision is Decision.DENY and verdict.layer in (L_CHAT_GIT, \"deny\")):",
+     ["tests/v2/codex_provider_check.py",
+      "Checks.test_cg1_raw_network_git_and_gh_are_declined_with_the_pointer"]),
 ]
 
 

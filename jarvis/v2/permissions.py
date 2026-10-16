@@ -71,6 +71,7 @@ the native equivalent removed from the toolset) consumes the same list.
 """
 from __future__ import annotations
 
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from fnmatch import fnmatch
 import hashlib
@@ -114,6 +115,31 @@ L_JARVIS_GATED = "jarvis-gated"
 # CG-1 (owner, 2026-10-15): a Codex chat's escalated raw network git or gh,
 # declined unasked and pointed at the Jarvis git tools (`chat_git`).
 L_CHAT_GIT = "chat-git"
+
+
+@dataclass(frozen=True)
+class PermitVerdict:
+    """One permit call's answer, as `finish` logged it (`last_verdict`)."""
+    decision: Decision
+    layer: str
+    reason: str
+    asked: bool             # the call was put to the asker (a card or a DM)
+
+
+_LAST_VERDICT: ContextVar[PermitVerdict | None] = ContextVar("jarvis_v2_permit_verdict",
+                                                             default=None)
+
+
+def last_verdict() -> PermitVerdict | None:
+    """The answer of the last permit call made in this context, once
+    (reading clears it). A DENY with `asked` False was refused before anyone
+    was asked — layer 1, a chat git tool's `Refused` (CG-0), CG-1, the strict
+    profile — and `reason` says why: what the model is told in place of "the
+    user declined" (#223's review, LOW 1). It decides nothing."""
+    verdict = _LAST_VERDICT.get()
+    _LAST_VERDICT.set(None)
+    return verdict
+
 
 # Real shells, per provider (`approvals`' one list, Claude's Monitor
 # included). Layers 1 and 2 judge more: `is_command_tool` also counts any
@@ -950,14 +976,19 @@ def build_permit(ctx: PermitContext, asker, *, clock=None) -> PermissionCallback
         # A Codex chat's git tool (CG-0, `chat_git`): the exact command the
         # daemon will run, read from the repository below, never from `args`.
         chat: chat_git.Plan | None = None
+        # Whether this call was put to the asker (`last_verdict`).
+        asked = [False]
+        _LAST_VERDICT.set(None)
 
         def owner_said(decision: Decision) -> Decision:
             """A human's answer to a card: a yes is held for the re-ask."""
+            asked[0] = True
             if decision is Decision.ALLOW and isinstance(tool_use_id, str) and tool_use_id:
                 memo.remember(tool_use_id, tool, args)
             return decision
 
         def finish(decision: Decision, layer: str, reason: str) -> Decision:
+            _LAST_VERDICT.set(PermitVerdict(decision, layer, reason, asked[0]))
             log_decision(ApprovalRecord(
                 tool=tool, args_digest=_digest(args), layer=layer,
                 decision=decision.value, reason=reason,
@@ -1165,6 +1196,7 @@ def build_permit(ctx: PermitContext, asker, *, clock=None) -> PermissionCallback
             if delegated is not None and delegated.owner_gated:
                 # Rule matching sees the original arguments, but no page facts
                 # or owner text leave through the generic approval surface.
+                asked[0] = True
                 decision = _ask_owner_delegation(asker, ctx, delegated.name, origin=who)
                 return finish(decision, L_ALWAYS_ASK, "owner rule for Browser delegation")
             decision = owner_said(_ask(asker, ctx, tool, args, command, reason, L_ALWAYS_ASK,
@@ -1321,8 +1353,8 @@ def deny_all(reason: str = "nobody is watching this thread") -> DenyAll:
 
 
 __all__ = [
-    "ApprovalRecord", "PermitContext", "always_ask_for", "always_ask_match",
+    "ApprovalRecord", "PermitContext", "PermitVerdict", "always_ask_for", "always_ask_match",
     "build_permit", "denied_command", "denied_file", "denied_grant", "denied_read", "deny_all",
-    "file_targets",
+    "file_targets", "last_verdict",
     "log_decision", "protected_paths", "COMMAND_TOOLS", "FILE_TOOLS", "READ_TOOLS",
 ]

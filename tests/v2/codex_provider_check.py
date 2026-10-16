@@ -2076,6 +2076,23 @@ class Checks(unittest.TestCase):
                 _, _, reply = self.scripted(CMD, {"itemId": "c", "command": command},
                                             self.real_permit(deny_all("nobody")), brief=self.chat())
                 self.assertEqual(reply["result"], {"decision": "decline"})
+        # #223's review, NIT 5: the pointer is CG-1's alone. A network line
+        # an earlier rule refused for another reason (layer 1: a credential
+        # file read) is declined without it.
+        for command in ("git push origin topic && cat .env",
+                        "gh pr view 3 && cat .env.production"):
+            with self.subTest(layer1=command):
+                self.assertTrue(chat_git.raw_remote(command), "the line is a raw network one")
+                asker = RecordingAsker(Decision.ALLOW)
+                _, events, reply = self.scripted(CMD, {"itemId": "c", "command": command},
+                                                 self.real_permit(asker), brief=self.chat())
+                self.assertEqual(reply["result"], {"decision": "decline"})
+                self.assertEqual(asker.seen, [])
+                log = [_json.loads(line) for line in
+                       (config.V2_DATA_DIR / "decisions.jsonl").read_text().splitlines()]
+                self.assertEqual(log[-1]["layer"], "deny")
+                self.assertFalse(any(e.kind == K.ERROR and chat_git.POINTER in e.data.get("message", "")
+                                     for e in events), "no CG-1 pointer for a layer-1 refusal")
 
     def test_clean_env_is_exact_plus_the_owners_identity(self):
         """Codex's environment gains only GIT_AUTHOR_*/GIT_COMMITTER_* (CG-0):

@@ -1173,6 +1173,18 @@ note says the same and the owner sees the pointer in the HUD. Tests:
 `tests/v2/chat_git_check.py` (incl. the malicious repo-config suite with
 positive controls) and `tests/v2/chat_git_mutants.py`.
 
+Review leftovers of #223 (2026-10-16): a tool call the permit refuses before
+any card (no pin, origin changed, protected branch, detached HEAD, strict)
+reaches the model as `Refused: <reason> (the user was not asked).` —
+`permissions.last_verdict` records whether the call was put to the asker, the
+bridge's approver hands `dispatch` a falsy `tools.Refusal`, and "The user
+declined" is kept for a no from whoever was asked. CG-1 declines only a line
+it is sure of: a remote only known at run time (`git push "$R" main`, `$(…)`,
+a glob) or a program a wrapper may not run (`nice --bogus gh …`,
+`prog.certain` False) takes the ordinary widening ask. The HUD pointer fires
+only when the permit's verdict was CG-1's (layer `chat-git`), not for a
+network line layer 1 refused for another reason.
+
 ## Codex permission profile (2026-10-16, CG phase 2)
 
 Plan §5. Codex sessions (chats and tasks) no longer use

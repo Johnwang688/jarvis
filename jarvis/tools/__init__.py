@@ -52,6 +52,26 @@ class ToolResult:
         return self.text
 
 
+class Refusal:
+    """An approver's no that nobody was asked about: falsy, like False, and
+    carrying the reason `dispatch` tells the model in place of "the user
+    declined" (#223's review, LOW 1: a Codex chat git call its permit
+    refused unasked read as the owner's no). Only an approver returns one."""
+
+    __slots__ = ("reason",)
+
+    def __init__(self, reason: str):
+        self.reason = str(reason)
+
+    def __bool__(self) -> bool:
+        return False
+
+    @property
+    def text(self) -> str:
+        """What the model reads."""
+        return f"Refused: {self.reason} (the user was not asked)."
+
+
 @dataclass
 class Tool:
     name: str
@@ -523,7 +543,11 @@ def _dispatch(
         # A background workflow's deny-all approver must keep denying: nobody
         # is watching it, which is the entire reason it has one.
         auto = verdict.decision == "allow" and getattr(approve, "jarvis_human_backed", False)
-        if not auto and not approve(entry, arguments):
+        answer = True if auto else approve(entry, arguments)
+        if isinstance(answer, Refusal):
+            # Refused before anyone was asked: the reason, never "declined".
+            return ToolResult(answer.text)
+        if not answer:
             return ToolResult("The user declined to run this. Ask what they would like instead.")
 
     try:

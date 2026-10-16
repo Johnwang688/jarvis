@@ -354,6 +354,17 @@ MUTANTS = [
     ('R3-MED-C: every option value read as a ref', GATE,
      '    return bool(match and _REF_WORD.fullmatch(match.group("ref")))',
      '    return True', PERMS_CHECK),
+    # LOW 1 of #225's review: a separate-word output or message value stays.
+    ('R4-LOW-1: a separate-word option value blanked when ref-like', GATE,
+     '_ref_only(str(prog.args[k])) and not _option_value(prog, k)))',
+     '_ref_only(str(prog.args[k]))))', PERMS_CHECK),
+    ('R4-LOW-1: the value words not read by program (git takes gh\'s -b, -t)', GATE,
+     '    return k > 0 and str(prog.args[k - 1]) in _VALUE_WORDS.get(stem, ())',
+     '    return k > 0 and str(prog.args[k - 1]) in _VALUE_WORDS["git"] | _VALUE_WORDS["gh"]',
+     PERMS_CHECK),
+    ('R4-LOW-1: gh\'s value words dropped', GATE,
+     '    "gh": frozenset({"--body", "-b", "--title", "-t", "-F", "-q", "--jq", "--template"}),',
+     '    "gh": frozenset(),', PERMS_CHECK),
     # MED-3: `branchName: $b`.
     ("F-MED-3: `$` swallowed before the branch name", GATE,
      "_GRAPHQL_BRANCH = re.compile(r'branchname[^\\w$]{0,6}(\\$?)([\\w./-]+)')",

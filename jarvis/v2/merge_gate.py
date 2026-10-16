@@ -59,9 +59,9 @@ runner from rules' one table — `uv run`, `npx`, `env`, `xargs`, `bash -lc`):
   editor other than `cat`/`less`, any `-c`, `git config` write or variable
   outside a short benign list), only the refs among them are blanked
   (`origin/main..HEAD`, `--base main`), never a value git or gh could print
-  or run (`--format=…`, `-m '…'`, `--body …`). A line of only git, gh and
-  data programs is read by its structure alone, so a commit message or PR
-  body that mentions a merge asks nothing.
+  or run, glued or in its own word (`--format=…`, `-m '…'`, `--body …`). A
+  line of only git, gh and data programs is read by its structure alone, so
+  a commit message or PR body that mentions a merge asks nothing.
 
 Where it cannot tell — a branch, method, endpoint or verb that is an
 expansion, a folder it cannot follow, a git config override on the line, a
@@ -830,6 +830,14 @@ def _spellings(text: str) -> list[str]:
 # a pager or a program — `--format=…`, `-m '…'`, `--body …`, `-q …` — stays.
 _REF_WORD = re.compile(r"[A-Za-z0-9_./@^~:+*{}-]+")
 _REF_OPTION = re.compile(r"(--(base|head|repo|onto|set-upstream-to)=|-[BHR])(?P<ref>.+)")
+# The options whose value git or gh could print or run, by program: a value
+# in its own word (`--format X`, `-m X`, `--body X`, `-q X`) stays where the
+# line runs text, however ref-like it looks, as the glued form (`--format=X`)
+# does (LOW 1 of #225's review).
+_VALUE_WORDS = {
+    "git": frozenset({"--format", "--pretty", "-m", "--message", "-F", "--file"}),
+    "gh": frozenset({"--body", "-b", "--title", "-t", "-F", "-q", "--jq", "--template"}),
+}
 
 
 def _ref_only(text: str) -> bool:
@@ -841,15 +849,25 @@ def _ref_only(text: str) -> bool:
     return bool(match and _REF_WORD.fullmatch(match.group("ref")))
 
 
+def _option_value(prog, k: int) -> bool:
+    """Whether `prog.args[k]` is the separate-word value of an option whose
+    value git or gh could print or run (`_VALUE_WORDS`)."""
+    stem = posixpath.basename(str(prog.word)).lower()
+    stem = stem[:-4] if stem.endswith(".exe") else stem
+    return k > 0 and str(prog.args[k - 1]) in _VALUE_WORDS.get(stem, ())
+
+
 def _masked(command: str, masks: list, refs_only: bool = False) -> str:
     """The line with the masked arguments blanked by position: each
     program is found as the line spells it, every word in order (the
     first such place), and only the masked words of that place are
-    blanked — with `refs_only`, only those that are refs (`_ref_only`).
+    blanked — with `refs_only`, only those that are refs (`_ref_only`)
+    and not an option's value git or gh could print or run (`_option_value`).
     A program spelled any other way keeps its words (they may ask); past
     `MASK_CAP` programs nothing is blanked."""
     if refs_only:
-        masks = [(prog, frozenset(k for k in indexes if _ref_only(str(prog.args[k]))))
+        masks = [(prog, frozenset(k for k in indexes
+                                  if _ref_only(str(prog.args[k])) and not _option_value(prog, k)))
                  for prog, indexes in masks]
     seen = list(dict.fromkeys((str(prog.word), tuple(str(a) for a in prog.args), indexes)
                               for prog, indexes in masks if indexes))
