@@ -31,14 +31,15 @@ TAMPER = pc("test_each_start_up_check_refuses_when_tampered")
 NEST = pc("test_denies_never_nest_and_globs_never_reach_into_a_denied_folder")
 ONLY = pc("test_only_accept_or_decline_is_ever_sent")
 NET = pc("test_a_network_approval_asks_the_owner_every_time_with_no_always")
+CLOSED = pc("test_owner_dot_folders_are_closed_by_default")
+CHURN = pc("test_owner_home_churn_after_prepare_never_refuses_the_session")
 MIRROR = pc("test_a_session_inside_a_denied_folder_or_a_writable_mirror_is_refused")
 
 # (name, file, old, new, check)
 MUTANTS = [
     # The plan's (§5.2) and the brief's named ones.
-    ("drop one deny entry (~/.claude)", CFG,
-     "    found = [*config.credential_dirs(), *_codex_home_entries(), home / \".claude\",",
-     "    found = [*config.credential_dirs(), *_codex_home_entries(),", PROFILE),
+    # (Dropping one dot-entry from the explicit lists is masked by the
+    # default-closed home; the closure's own mutants below hold that.)
     ("drop the credential folders", CFG,
      "    found = [*config.credential_dirs(), *_codex_home_entries(),",
      "    found = [*_codex_home_entries(),", PROFILE),
@@ -63,7 +64,7 @@ MUTANTS = [
      '    if (not isinstance(network, dict) or network.get("enabled") is not False',
      '    if (not isinstance(network, dict)', TAMPER),
     ("filesystem entries not compared", CFG,
-     '    if profile.get("filesystem") != filesystem(brief, home):', "    if False:", TAMPER),
+     '    if profile.get("filesystem") != expected:', "    if False:", TAMPER),
     ("legacy sandbox mode accepted", CFG,
      '    if effective.get("sandbox_mode") is not None or effective.get("sandbox_workspace_write") is not None:',
      "    if False:", TAMPER),
@@ -88,19 +89,20 @@ MUTANTS = [
      "        if not blocked:\n            out.append(f\"{base}/{ENV_GLOB}\")",
      "        if True:\n            out.append(f\"{base}/{ENV_GLOB}\")", NEST),
     ("~/.codex denied whole (its own binary with it)", CFG,
-     "*_codex_home_entries(), home", "*_codex_homes(), home", NEST),
+     "*_codex_home_entries(), owner", "*_codex_homes(), owner", NEST),
     ("the binary check off", CFG,
-     "    if any(d == path or d in path.parents for d in (deny_paths() if denies is None else denies)):",
+     "    if any(d == path or d in path.parents for d in denies):",
      "    if False:", NEST),
     ("symlinked credential folders denied as links", CFG,
      "        return Path(path).expanduser().resolve()", "        return Path(path).expanduser()",
      pc("test_symlinked_credential_folders_are_denied_where_they_lead")),
     # Further guards.
     ("no .env globs", CFG,
-     '    table.update((glob, "deny") for glob in env_globs(brief, denies))\n', "", PROFILE),
-    ("~/.gitconfig readable", CFG,
-     'HOME_SECRETS = (".gitconfig", ".git-credentials", ".netrc")',
-     'HOME_SECRETS = (".git-credentials", ".netrc")', PROFILE),
+     '    table.update((glob, "deny") for glob in globs)\n', "", PROFILE),
+    ("dot-files not closed, only dot-folders", CFG,
+     "            if dots_only and not entry.name.startswith(\".\"):\n                continue",
+     "            if (dots_only and not entry.name.startswith(\".\")) or not entry.is_dir():\n"
+     "                continue", CLOSED),
     ("V2_DATA_DIR readable", CFG,
      "             config.V2_DATA_DIR, config.SESSIONS_DIR,", "             config.SESSIONS_DIR,", PROFILE),
     ("commands keep the denied private HOME", CFG,
@@ -126,6 +128,27 @@ MUTANTS = [
      "            if entry.is_symlink() and wanted.get(entry.name) != Path(os.readlink(entry.path)):",
      "            if entry.is_symlink() and entry.name not in wanted:",
      pc("test_session_skills_replace_the_old_whole_folder_link")),
+    # Review of #224: default-closed dot-folders (HIGH), the written table (MED).
+    ("dot-folders not closed", CFG, "            out.append(target)\n", "            pass\n", CLOSED),
+    ("kept folders not closed in turn", CFG,
+     "                if rel in CLOSED_KEEP and entry.is_dir(follow_symlinks=False):\n"
+     "                    close(path, CLOSED_KEEP[rel], False)",
+     "                if False:\n                    close(path, CLOSED_KEEP[rel], False)", CLOSED),
+    ("a needed path's folder denied", CFG,
+     "            if any(n == path or n == target or path in n.parents or target in n.parents\n"
+     "                   for n in needed):",
+     "            if False:", CLOSED),
+    ("uv's credentials readable", CFG,
+     '".local/share/com.vercel.cli", ".local/share/uv/credentials",',
+     '".local/share/com.vercel.cli",', PROFILE),
+    ("missing paths denied too", CFG,
+     "        if path not in resolved and os.path.lexists(path):", "        if path not in resolved:",
+     CLOSED),
+    ("a blocked base's own .env files not denied", CFG,
+     "                        files.append(Path(entry.path))", "                        pass", CLOSED),
+    ("the start-up check rescans", CFG,
+     "    expected = written(home) if home is not None else filesystem(brief, None)",
+     "    expected = filesystem(brief, home)", CHURN),
     ("the feature pin moved without the probe", CFG,
      'FEATURE_VERIFIED = "0.161.0"', 'FEATURE_VERIFIED = "0.162.0"',
      pc("test_the_feature_is_pinned_to_the_verified_codex")),

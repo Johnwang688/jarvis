@@ -1186,12 +1186,32 @@ set through `shell_environment_policy.set`; npm needs a writable cache) and
 the session's `$CODEX_HOME/skills` (now a real folder of per-skill links,
 remade each start, since Codex lists skill paths there and the model reads
 them with shell commands);
-"deny" for the credential folders, `~/.claude`, every entry of `~/.codex`
-but `packages` and `skills`, `~/.gitconfig`, `~/.git-credentials`, `~/.netrc`,
+"deny", **default-closed** for the owner's dot-folders (review of #224:
+the first build's blocklist missed `~/.docker`, the keyrings, vercel's
+login, `~/.claude.json`, `~/.azure`, `~/.supabase`, `~/.agents`): every
+entry of HOME starting with "." and every entry of `~/.config`,
+`~/.local/share`, `~/.local`, `~/.cache` and `~/.cargo` is denied except
+`codex_config.CLOSED_KEEP` (`.cache/{uv,pip,pnpm,node-gyp,ms-playwright}`,
+`.npm`, `.nvm`, `.local/{bin,lib}`, `.local/share/{uv,pnpm}`, `.rustup`,
+`.cargo/{bin,registry,git}`, `.pyenv`, `.bun`, `.deno`, and `.codex`'s
+`packages` and `skills`). A folder that holds a path the session needs (its
+folder, the chat worktrees, the mirrors) is closed around it instead.
+Commands run with HOME = `sandbox-home`, so toolchains read their own
+config there; measured with an approved command under the real profile:
+node, Jarvis's venv, `uv venv` + `uv pip install`, `npm install` (local
+registry) and git all work (cargo is not installed here). Non-dot HOME
+folders (projects) stay readable. On top, by name: the credential folders,
+`KNOWN_CREDENTIALS` (`.gitconfig`, `.npmrc`, `.docker`, `.kube`,
+`.config/gcloud`, `.local/share/uv/credentials`, `.cargo/credentials*` …),
 V2_DATA_DIR (the private Codex homes and their jarvis-mcp tokens),
-SESSIONS_DIR, SPILL_DIR, SPEAKER_DIR and the gate's protected files; and
-case-insensitive `.env*` glob denies (depth 4) under the owner's home, the
-session folder, Jarvis's checkout and the chat worktrees. `thread/start` and
+SESSIONS_DIR, SPILL_DIR, SPEAKER_DIR and the gate's protected files. Only
+paths that exist are denied. `.env*` files: case-insensitive globs (depth 4)
+under the owner's home, the session folder, Jarvis's checkout and the chat
+worktrees, split around denied folders. The table is computed once, when the
+config is written (`codex_config.written`), and the start-up check compares
+Codex's readback with it, never with a rescan (a `-wal` file appearing in
+`~/.codex` must not refuse a healthy chat). A command start costs about
+0.18 s with the real table (0.04 s bare). `thread/start` and
 `thread/resume` send no `sandbox` field. `codex_config.check_effective` reads
 `config/read` (profile name, no legacy mode, the feature on and the turn-wide
 one off, the exact filesystem map, network off, the command HOME) and
@@ -1222,14 +1242,20 @@ relied on:
 - `~/.codex` cannot be denied whole: the binary lives in
   `~/.codex/packages` and re-executes itself as its sandbox helper;
 - a glob matches regular files only, to 4 components below its literal base,
-  expanded at each command start; a glob ending in `*` reaches into
-  sub-folders, so none is used for `~/.codex`.
+  expanded at each command start, and every glob reaches that deep, `**` or
+  not (`B/[.]env*` denied `B/x/y/.envrc`), so none is used for `~/.codex`,
+  and a base with a denied folder in reach gets no glob (its own `.env*`
+  files are denied by name);
+- a deny for a path whose parent is missing makes an accepted
+  `require_escalated` command fail (`~/.cargo/credentials` without
+  `~/.cargo`), so only existing paths are denied.
 
 Residuals: an accepted `require_escalated` command cannot read the skills
 folder (its sandbox drops that write entry, measured); a `.env` that is a symlink, or a folder named `.env`, is not
 covered by the glob; `.env.example` files are hidden too (a glob only
-denies); entries added to `~/.codex` and folders added beside a denied one
-after a session starts are covered from the next start. Tests:
+denies); a credential store, dot-folder or `~/.codex` entry created after a
+session starts is covered from the next start; a secret in an ordinary
+(non-dot) folder is readable (the model's note says so). Tests:
 `tests/v2/codex_provider_check.py` (the profile checks),
 `tests/v2/codex_profile_probe_check.py` (the real app-server, skipped without
 the CLI) and `tests/v2/codex_profile_mutants.py`.

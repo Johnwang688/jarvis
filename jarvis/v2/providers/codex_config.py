@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 import stat
 import tempfile
+import threading
 
 from jarvis import config
 from jarvis.v2.model import PermissionProfile, Role
@@ -177,8 +178,11 @@ NETWORK_NOTE = ("For a command that needs the internet (npm install, pip, curl),
                 "`sandbox_permissions` to `with_additional_permissions` with "
                 "`additional_permissions: {network: {enabled: true}}`; the owner approves each "
                 "one, and only that command gets the network. Do not use `require_escalated` "
-                "for network. Credential files (logins, keys, `.env` files) are unreadable in "
-                "the sandbox, approved commands included; do not ask to read them.")
+                "for network. Known credential stores (the owner's dot-folders such as ~/.ssh, "
+                "~/.config and ~/.docker, logins, keys, `.env` files) are unreadable in the "
+                "sandbox, approved commands included; do not ask to read them. That is not a "
+                "promise about every file: a secret kept in an ordinary project folder is "
+                "readable, so do not go looking for one.")
 
 def validate(brief: Brief) -> None:
     if brief.profile != PermissionProfile.AUTO:
@@ -274,8 +278,6 @@ GLOB_DEPTH = 4
 # `.env.example` files from commands: a glob takes only "deny".
 ENV_NAME = "[.][eE][nN][vV]*"
 ENV_GLOB = "**/" + ENV_NAME
-# Credential files in the owner's home outside the credential folders.
-HOME_SECRETS = (".gitconfig", ".git-credentials", ".netrc")
 # The feature this rests on, verified at codex_cli.CODEX_VERIFIED
 # (tests pin the two together: re-run tests/v2/fixtures/cg2_probe.py before
 # moving either).
@@ -340,31 +342,123 @@ def _codex_home_entries() -> list[Path]:
     return found
 
 
-def check_binary(binary: str, denies: list[Path] | None = None) -> None:
+def check_binary(binary: str, denies: list[Path]) -> None:
     """The Codex binary re-executes itself inside its own sandbox, so it must
     not lie in a denied folder (every command would fail)."""
     path = _resolved(binary)
-    if any(d == path or d in path.parents for d in (deny_paths() if denies is None else denies)):
+    if any(d == path or d in path.parents for d in denies):
         raise BriefRefused("The Codex binary lies inside a folder its sandbox denies")
 
 
-def deny_paths() -> list[Path]:
+# --- default-closed dotfiles (review of #224, HIGH) ---------------------------
+#
+# A list of known credential stores is never complete (docker, keyrings,
+# vercel, ~/.claude.json, cloud CLIs ... each keeps its own). So the owner's
+# dot-folders are closed by default: every entry of HOME whose name starts
+# with "." is denied, and every entry of the folders below, except what a
+# toolchain may need to read. Commands run with HOME = `sandbox_home`, so
+# npm, pip/uv, cargo and node read their own config and caches there, not in
+# the owner's home; what stays open here is only what an absolute path or a
+# symlink may reach (a venv's interpreter under ~/.local/share/uv, binaries
+# under ~/.local/bin, ~/.cargo/bin, toolchains under ~/.rustup, ~/.nvm ...).
+# Folders not starting with "." in HOME (projects) stay readable.
+#
+# folder (relative to HOME) -> the entries left readable. A kept entry that
+# is itself a key here is closed in turn. HOME ("") judges dot-entries only.
+CLOSED_KEEP: dict[str, tuple[str, ...]] = {
+    "": (".cache", ".npm", ".nvm", ".local", ".config", ".rustup", ".cargo", ".pyenv",
+         ".bun", ".deno", ".codex"),
+    ".local": ("bin", "lib", "share"),
+    ".local/share": ("uv", "pnpm", "jarvis"),
+    ".local/share/jarvis": (),
+    ".config": (),
+    ".cache": ("uv", "pip", "pnpm", "node-gyp", "ms-playwright"),
+    ".cargo": ("bin", "registry", "git"),
+}
+# `.codex` is kept here and closed by `_codex_home_entries` (it also covers
+# a CODEX_HOME elsewhere). Credential stores inside a kept folder, and the
+# well-known ones, denied by name whether or not they exist (a backstop the
+# closure makes redundant where it applies; harmless when absent):
+KNOWN_CREDENTIALS = (
+    ".gitconfig", ".git-credentials", ".netrc", ".npmrc", ".pypirc", ".claude.json",
+    ".docker", ".kube", ".azure", ".aws", ".supabase", ".agents", ".gnupg", ".ssh",
+    ".config/gcloud", ".config/gh", ".config/jarvis", ".config/uv",
+    ".local/share/keyrings", ".local/share/com.vercel.cli", ".local/share/uv/credentials",
+    ".cargo/credentials", ".cargo/credentials.toml", ".cache/huggingface",
+    ".bash_history", ".python_history",
+)
+HOME_SECRETS = KNOWN_CREDENTIALS     # the name the first phase-2 build used
+
+
+def _closed_denies(needed: list[Path]) -> list[Path]:
+    """The default-closed denies under the owner's home. An entry that is,
+    or holds, a path the session needs (`needed`: its folder, the chat
+    worktrees, the mirrors) is never denied: one that holds one is closed in
+    turn around it."""
+    home = _resolved(Path.home())
+    budget = [GLOB_LIST_CAP]
+    out: list[Path] = []
+
+    def close(folder: Path, keep: tuple[str, ...], dots_only: bool) -> None:
+        try:
+            with os.scandir(folder) as entries:
+                listed = []
+                for entry in entries:
+                    budget[0] -= 1
+                    if budget[0] < 0:
+                        raise BriefRefused("Too many entries to close the owner's dot-folders")
+                    listed.append(entry)
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            raise BriefRefused("An owner dot-folder cannot be listed for its denies") from exc
+        for entry in sorted(listed, key=lambda e: e.name):
+            if dots_only and not entry.name.startswith("."):
+                continue
+            path = Path(entry.path)
+            rel = path.relative_to(home).as_posix()
+            if entry.name in keep:
+                if rel in CLOSED_KEEP and entry.is_dir(follow_symlinks=False):
+                    close(path, CLOSED_KEEP[rel], False)
+                continue
+            target = _resolved(path)
+            if any(n == path or n == target or path in n.parents or target in n.parents
+                   for n in needed):
+                if entry.is_dir(follow_symlinks=False) and any(path in n.parents for n in needed):
+                    close(path, CLOSED_KEEP.get(rel, ()), False)
+                continue
+            out.append(target)
+
+    close(home, CLOSED_KEEP[""], True)
+    return out
+
+
+def deny_paths(brief: Brief | None = None, home: Path | None = None) -> list[Path]:
     """Every folder and file a Codex command may never read, resolved (a
     symlinked one is denied where it leads; through the link it is then
     unreadable too), with entries inside another entry dropped: bwrap fails
     every command (and Codex every thread start) on a deny nested in a denied
-    folder, which it makes an empty read-only tmpfs (measured on 0.161)."""
+    folder, which it makes an empty read-only tmpfs (measured on 0.161).
+    `brief` names what must stay reachable (the session folder, its write
+    roots); without it, only the chat worktrees and the mirrors."""
     from jarvis.v2.permissions import protected_paths
 
-    home = Path.home()
-    found = [*config.credential_dirs(), *_codex_home_entries(), home / ".claude",
-             *(home / name for name in HOME_SECRETS),
+    owner = Path.home()
+    needed = [_resolved(config.CHAT_WORKTREES_DIR), _resolved(config.chat_git_mirrors_dir())]
+    if brief is not None:
+        needed += [_resolved(brief.cwd), *(_resolved(p) for p in git_roots(brief))]
+    found = [*config.credential_dirs(), *_codex_home_entries(), owner / ".claude",
+             *(owner / name for name in KNOWN_CREDENTIALS), *_closed_denies(needed),
              config.V2_DATA_DIR, config.SESSIONS_DIR, config.SPILL_DIR, config.SPEAKER_DIR,
              *sorted(protected_paths())]
     resolved: list[Path] = []
     for item in found:
         path = _resolved(item)
-        if path not in resolved:
+        # Only what exists: a deny for a path whose parent is missing makes
+        # bwrap fail an accepted `require_escalated` command (measured:
+        # ~/.cargo/credentials with no ~/.cargo). A store made later is
+        # covered from the next session start.
+        if path not in resolved and os.path.lexists(path):
             resolved.append(path)
     return [p for p in resolved if not any(other in p.parents for other in resolved)]
 
@@ -386,18 +480,22 @@ def env_glob_bases(brief: Brief) -> list[Path]:
     return out
 
 
-def env_globs(brief: Brief, denies: list[Path]) -> list[str]:
+def env_globs(brief: Brief, denies: list[Path]) -> tuple[list[str], list[Path]]:
     """The `.env*` deny globs. A glob match inside a denied folder makes
     bwrap fail every command (measured), and Codex expands the globs as the
     owner, so no glob may reach into one: a glob reaches files at most
     GLOB_DEPTH components below its literal base (measured: 4 matched, 5 did
-    not). Where a denied folder lies within reach, the base gets a glob for
-    its own files and each of its sub-folders is treated the same way,
-    skipping the denied ones; such a split is listed when the config is
-    written, so a folder made beside a denied one later is covered from the
-    next session start."""
+    not). Every glob reaches that deep, `**` or not: 0.161 matches a
+    `<base>/<name pattern>` against names at any depth up to it (measured:
+    `B/[.]env*` denied `B/x/y/.envrc`). Where a denied folder lies within
+    reach, the base gets no glob: each `.env*` file directly in it is denied
+    by name, and each of its sub-folders is treated the same way, skipping
+    the denied ones. Such a split is listed when the config is written, so a
+    file or folder made beside a denied one later is covered from the next
+    session start. Returns the globs, then the files denied by name."""
     budget = [GLOB_LIST_CAP]
     out: list[str] = []
+    files: list[Path] = []
 
     def walk(base: Path) -> None:
         blocked = [d for d in denies if base in d.parents
@@ -405,7 +503,6 @@ def env_globs(brief: Brief, denies: list[Path]) -> list[str]:
         if not blocked:
             out.append(f"{base}/{ENV_GLOB}")
             return
-        out.append(f"{base}/{ENV_NAME}")
         try:
             with os.scandir(base) as entries:
                 children = []
@@ -415,6 +512,9 @@ def env_globs(brief: Brief, denies: list[Path]) -> list[str]:
                         raise BriefRefused("Too many folders to place the Codex .env denies around")
                     if entry.is_dir(follow_symlinks=False):
                         children.append(Path(entry.path))
+                    elif (entry.is_file(follow_symlinks=False)
+                          and entry.name[:4].casefold() == ".env"):
+                        files.append(Path(entry.path))
         except OSError as exc:
             raise BriefRefused("A folder for the Codex .env denies cannot be listed") from exc
         for child in sorted(children):
@@ -425,7 +525,7 @@ def env_globs(brief: Brief, denies: list[Path]) -> list[str]:
         if any(d == base or d in base.parents for d in denies):
             continue        # denied whole already
         walk(base)
-    return list(dict.fromkeys(out))
+    return list(dict.fromkeys(out)), [f for f in dict.fromkeys(files) if f not in denies]
 
 
 def write_paths(brief: Brief, home: Path | None) -> list[str]:
@@ -443,7 +543,7 @@ def filesystem(brief: Brief, home: Path | None = None) -> dict:
     the glob depth, the write roots (git metadata and worktree root for an
     owner chat; the commands' HOME), every deny, then the `.env*` globs."""
     writes = write_paths(brief, home)
-    denies = deny_paths()
+    denies = deny_paths(brief, home)
     cwd = _resolved(brief.cwd)
     mirrors = _resolved(config.chat_git_mirrors_dir())
     # A deny inside the session's folder is the point; one at or above it
@@ -462,13 +562,38 @@ def filesystem(brief: Brief, home: Path | None = None) -> dict:
     table: dict = {"glob_scan_max_depth": GLOB_DEPTH}
     table.update((root, "write") for root in writes)
     table.update((str(path), "deny") for path in denies)
-    table.update((glob, "deny") for glob in env_globs(brief, denies))
+    globs, env_files = env_globs(brief, denies)
+    table.update((str(path), "deny") for path in env_files)
+    table.update((glob, "deny") for glob in globs)
     return table
+
+
+# The filesystem table written for each private home (review of #224, MED):
+# the start-up check compares Codex's readback with what was written, never
+# with a rescan — `~/.codex` and the owner's home change between the two (a
+# sqlite `-wal` file appears), and a rescan would refuse a healthy session.
+_WRITTEN: dict[Path, dict] = {}
+_written_lock = threading.Lock()
+
+
+def written(home: Path) -> dict | None:
+    with _written_lock:
+        table = _WRITTEN.get(Path(home).resolve())
+    return dict(table) if table is not None else None
+
+
+def _denied(table: dict) -> list[Path]:
+    return [Path(k) for k, v in table.items() if v == "deny" and "*" not in k]
 
 
 def config_text(brief: Brief, home: Path | None = None) -> str:
     """A session's private config. `home` is its private Codex home: given,
-    the commands get `sandbox_home(home)` as HOME (prepare passes it)."""
+    the commands get `sandbox_home(home)` as HOME (prepare passes it), and
+    the filesystem table is recorded for the start-up check (`written`)."""
+    table = filesystem(brief, home)
+    if home is not None:
+        with _written_lock:
+            _WRITTEN[Path(home).resolve()] = dict(table)
     values = dict(model_provider="openai", forced_login_method="chatgpt",
                   cli_auth_credentials_store="file", default_permissions=PROFILE,
                   approval_policy="on-request", approvals_reviewer=approvals_reviewer(brief),
@@ -485,7 +610,7 @@ def config_text(brief: Brief, home: Path | None = None) -> str:
     lines += [f"[projects.{_value(str(Path(brief.cwd).resolve()))}]", 'trust_level = "trusted"']
     lines += [f"[permissions.{PROFILE}]", f"extends = {_value(PROFILE_EXTENDS)}",
               f"[permissions.{PROFILE}.filesystem]"]
-    lines += [f"{_value(k)} = {_value(v)}" for k, v in filesystem(brief, home).items()]
+    lines += [f"{_value(k)} = {_value(v)}" for k, v in table.items()]
     lines += [f"[permissions.{PROFILE}.network]", "enabled = false"]
     for name, server in brief.mcp_servers.items():
         lines.append(f"[mcp_servers.{_value(name)}]")
@@ -516,7 +641,10 @@ def check_effective(brief: Brief, effective: dict, home: Path | None) -> None:
         _refuse("the profile is missing")
     if profile.get("extends") != PROFILE_EXTENDS or profile.get("workspace_roots") not in (None, []):
         _refuse("the profile's base changed")
-    if profile.get("filesystem") != filesystem(brief, home):
+    expected = written(home) if home is not None else filesystem(brief, None)
+    if expected is None:
+        _refuse("no profile was written for this session")
+    if profile.get("filesystem") != expected:
         _refuse("the filesystem entries changed")
     network = profile.get("network")
     if (not isinstance(network, dict) or network.get("enabled") is not False
@@ -529,6 +657,13 @@ def check_effective(brief: Brief, effective: dict, home: Path | None) -> None:
         _refuse("the command environment changed")
 
 
+def _writes(brief: Brief, home: Path | None) -> list[str]:
+    table = written(home) if home is not None else None
+    if table is None:
+        return write_paths(brief, home)
+    return [k for k, v in table.items() if v == "write"]
+
+
 def check_receipt(brief: Brief, result: dict, home: Path | None) -> None:
     """The `thread/start`/`thread/resume` receipt: the profile is active,
     and its legacy projection has the network off and only our write roots."""
@@ -538,7 +673,7 @@ def check_receipt(brief: Brief, result: dict, home: Path | None) -> None:
     if (not isinstance(legacy, dict) or legacy.get("type") != "workspaceWrite"
             or legacy.get("networkAccess", True) is not False
             or not isinstance(legacy.get("writableRoots"), list)
-            or sorted(legacy["writableRoots"]) != sorted(write_paths(brief, home))):
+            or sorted(legacy["writableRoots"]) != sorted(_writes(brief, home))):
         _refuse("the thread's sandbox")
 
 
@@ -728,8 +863,6 @@ def _prepare_home(name: str, text, binary: str | None, *, skills: bool = True,
         binary, reason = resolve()
         if binary is None:
             raise BriefRefused(reason)
-    if sandbox:
-        check_binary(binary)
     root = Path(config.V2_DATA_DIR) / "codex"
     home = root / name
     for directory in (root, home, home / "tmp", *((sandbox_home(home),) if sandbox else ())):
@@ -753,6 +886,8 @@ def _prepare_home(name: str, text, binary: str | None, *, skills: bool = True,
     elif link_skills and not skills.exists() and not skills.is_symlink() and (auth_home / "skills").is_dir():
         skills.symlink_to(auth_home / "skills", target_is_directory=True)
     atomically_write(home / "config.toml", text(home) if callable(text) else text)
+    if sandbox:
+        check_binary(binary, _denied(written(home) or {}))
     return [str(Path(binary).resolve()), "app-server", "--strict-config", "--stdio"], clean_env(home), home
 
 

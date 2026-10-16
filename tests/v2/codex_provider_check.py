@@ -859,6 +859,19 @@ class Checks(unittest.TestCase):
     def test_profile_denies_every_credential_path(self):
         from jarvis.v2.permissions import protected_paths
         gitdir = self.repo()
+        home = self.closed_home()
+        for rel in (".gitconfig", ".git-credentials", ".netrc", ".codex/config.toml",
+                    ".codex/history.jsonl", ".local/share/jarvis/sessions/s", ".local/share/jarvis/spill/s"):
+            (home / rel).parent.mkdir(parents=True, exist_ok=True)
+            (home / rel).write_text("fixture")
+        # V2_DATA_DIR and a credential folder outside the home, so their own
+        # denies (not the default-closed home) are what hides them.
+        self.stack.enter_context(self.home_patches(home, data_inside=False))
+        outside = self.root / "outside-creds"
+        outside.mkdir()
+        self.stack.enter_context(patch.object(config, "V2_CREDENTIAL_DIRS",
+                                              (*config.V2_CREDENTIAL_DIRS, str(outside))))
+        self.auth = home / ".codex"
         h = self.start(brief=self.chat())
         cfg, profile = self.profile_of(h)
         fs = profile["filesystem"]
@@ -870,14 +883,17 @@ class Checks(unittest.TestCase):
         self.assertEqual(profile["extends"], ":workspace")
         self.assertEqual(profile["network"], {"enabled": False})
         self.assertEqual(fs["glob_scan_max_depth"], 4)
-        home = Path.home()
         must = [*(Path(p).expanduser().resolve() for p in config.credential_dirs()),
                 home / ".codex" / "auth.json", home / ".codex" / "sessions", home / ".claude",
                 home / ".gitconfig", home / ".git-credentials", home / ".netrc",
                 self.auth / "auth.json", self.auth / "config.toml", self.auth / "history.jsonl",
-                config.V2_DATA_DIR, config.SESSIONS_DIR, config.SPILL_DIR, *protected_paths()]
+                config.V2_DATA_DIR, config.SESSIONS_DIR, config.SPILL_DIR, *protected_paths(),
+                *(home / rel for rel in self.STORES)]
         denied = [Path(k) for k, v in fs.items() if v == "deny" and "*" not in k]
-        for path in must:
+        self.assertGreater(len([p for p in must if os.path.lexists(p)]), 30)
+        # Only existing paths are denied (a missing parent breaks escalated
+        # commands, measured); a missing one cannot be read either.
+        for path in (p for p in must if os.path.lexists(p)):
             path = Path(path).resolve()
             with self.subTest(deny=path):
                 self.assertTrue(any(d == path or d in path.parents for d in denied), path)
@@ -909,7 +925,7 @@ class Checks(unittest.TestCase):
         holding its own binary, and a project with a .env."""
         home = self.root / "h"
         for rel in (".ssh/id", ".config/jarvis/allowlist.json", ".config/gh/hosts.yml",
-                    ".config/other/x", ".codex/auth.json", ".codex/state_5.sqlite",
+                    ".config/other/x", ".codex/auth.json", ".codex/config.toml", ".codex/state_5.sqlite",
                     ".codex/sessions/s.jsonl", ".codex/packages/bin/codex", ".codex/skills/s/SKILL.md",
                     ".claude/.credentials.json", "projects/app/.env", ".local/share/jarvis/hud/x"):
             (home / rel).parent.mkdir(parents=True, exist_ok=True)
@@ -924,8 +940,9 @@ class Checks(unittest.TestCase):
         for key, value in fs.items():
             if value != "deny" or "*" not in key:
                 continue
+            # Every glob reaches GLOB_DEPTH, `**` or not (measured on 0.161).
             base = Path(key.split("/**/")[0]) if "/**/" in key else Path(key).parent
-            depth = codex_config.GLOB_DEPTH if "/**/" in key else 1
+            depth = codex_config.GLOB_DEPTH
             bad += [(key, d) for d in denied if base in d.parents
                     and len(d.relative_to(base).parts) <= depth - 1]
         return bad
@@ -957,12 +974,12 @@ class Checks(unittest.TestCase):
                 self.assertNotIn(str(path), fs)
             # The home's other projects still lose their .env files.
             self.assertEqual(fs.get(f"{home}/projects/**/[.][eE][nN][vV]*"), "deny")
-            self.assertEqual(fs.get(f"{home}/.config/other/**/[.][eE][nN][vV]*"), "deny")
-            self.assertEqual(fs.get(f"{home}/[.][eE][nN][vV]*"), "deny")
+            self.assertEqual(fs.get(str(home / ".config" / "other")), "deny", "closed by default")
+            self.assertNotIn(f"{home}/[.][eE][nN][vV]*", fs, "no glob over a base with a denied folder")
             # A Codex binary inside a denied folder would fail every command.
-            codex_config.check_binary(str(codex / "packages" / "bin" / "codex"))
+            codex_config.check_binary(str(codex / "packages" / "bin" / "codex"), denied)
             with self.assertRaises(BriefRefused):
-                codex_config.check_binary(str(home / ".ssh" / "codex"))
+                codex_config.check_binary(str(home / ".ssh" / "codex"), denied)
 
     def test_session_skills_replace_the_old_whole_folder_link(self):
         for name in ("alpha", "beta", ".hidden"):
@@ -983,6 +1000,112 @@ class Checks(unittest.TestCase):
         self.assertEqual(sorted(p.name for p in skills.iterdir()), ["alpha"])
         self.assertEqual((skills / "alpha").resolve(), self.auth / "skills" / "alpha")
         self.assertFalse((self.auth / "skills" / ".system").exists())
+
+    # Review of #224 (HIGH): a blocklist missed live credential stores, so
+    # the owner's dot-folders are closed by default (CLOSED_KEEP).
+    STORES = (".docker/config.json", ".local/share/keyrings/login.keyring",
+              ".local/share/com.vercel.cli/auth.json", ".claude.json", ".azure/msal.json",
+              ".supabase/access-token", ".agents/token", ".config/gcloud/credentials.db",
+              ".npmrc", ".pypirc", ".kube/config", ".cargo/credentials.toml", ".cargo/credentials",
+              ".cache/huggingface/token", ".bash_history", ".some-new-tool/secret",
+              ".config/new-tool/token", ".local/share/new-tool/token", ".local/state/x",
+              ".vault-token",       # a store no list names: only the closure hides it
+              ".local/share/uv/credentials/credentials.toml", ".local/share/jarvis/hud/x")
+    OPEN = (".cargo/bin/cargo", ".cargo/registry/index/x", ".local/bin/uv",
+            ".local/share/uv/python/cpython/bin/python3", ".rustup/toolchains/x", ".npm/_cacache/x",
+            ".nvm/versions/x", ".cache/uv/x", ".cache/ms-playwright/x", "projects/app/main.py",
+            "notes/plain.txt")
+
+    def closed_home(self):
+        home = self.fake_home()
+        for rel in self.STORES + self.OPEN:
+            (home / rel).parent.mkdir(parents=True, exist_ok=True)
+            (home / rel).write_text("fixture")
+        return home
+
+    def home_patches(self, home, data_inside=True):
+        stack = ExitStack()
+        stack.enter_context(patch.dict(os.environ, {"HOME": str(home)}))
+        stack.enter_context(patch.object(codex_config, "owner_home", return_value=home / ".codex"))
+        share = home / ".local/share/jarvis"
+        for name, value in (("ALLOWLIST_PATH", home / ".config/jarvis/allowlist.json"),
+                            ("SESSIONS_DIR", share / "sessions"), ("SPILL_DIR", share / "spill"),
+                            ("SPEAKER_DIR", share / "speaker"), ("BROWSER_DIR", share / "browser"),
+                            ("V2_DATA_DIR", share / "v2"), ("CHAT_WORKTREES_DIR", share / "chat-worktrees")):
+            if data_inside or name not in ("V2_DATA_DIR", "CHAT_WORKTREES_DIR"):
+                stack.enter_context(patch.object(config, name, value))
+        return stack
+
+    def blocked(self, fs, path):
+        denied = [Path(k) for k, v in fs.items() if v == "deny" and "*" not in k]
+        path = Path(path).resolve()
+        return any(d == path or d in path.parents for d in denied)
+
+    def test_owner_dot_folders_are_closed_by_default(self):
+        home = self.closed_home()
+        (home / ".link-to-docker").symlink_to(home / ".docker", target_is_directory=True)
+        with self.home_patches(home):
+            config.CHAT_WORKTREES_DIR.mkdir(parents=True)
+            brief = replace(self.chat(), cwd=str(home / "projects" / "app"))
+            fs = codex_config.filesystem(brief)
+            mirrors = config.chat_git_mirrors_dir()
+            for rel in self.STORES:
+                with self.subTest(store=rel):
+                    self.assertTrue(self.blocked(fs, home / rel), rel)
+            for rel in self.OPEN:
+                with self.subTest(open=rel):
+                    self.assertFalse(self.blocked(fs, home / rel), rel)
+            for path in (config.CHAT_WORKTREES_DIR, mirrors, home / ".codex" / "packages",
+                         home / ".codex" / "skills", home / "projects" / "app"):
+                with self.subTest(needed=path):
+                    self.assertFalse(self.blocked(fs, path), path)
+            self.assertEqual(self.walk_reach(fs), [])
+            denied = [Path(k) for k, v in fs.items() if v == "deny" and "*" not in k]
+            self.assertFalse(any(o in d.parents for d in denied for o in denied), "no nested denies")
+            self.assertFalse(any(Path(k).is_symlink() for k in map(str, denied)), "no symlink denies")
+            self.assertTrue(all(os.path.lexists(d) for d in denied),
+                            "only existing paths (a missing parent breaks escalated commands)")
+            # A denied folder inside an ordinary project: no glob reaches into
+            # it, and the project's own .env is denied by name instead.
+            vault = home / "work" / "proj" / "vault"
+            vault.mkdir(parents=True)
+            (vault.parent / ".env").write_text("fixture")
+            dirs = (*config.credential_dirs(), str(vault))
+            with patch.object(config, "credential_dirs", return_value=dirs):
+                fs = codex_config.filesystem(brief)
+            self.assertEqual(self.walk_reach(fs), [])
+            self.assertTrue(self.blocked(fs, vault))
+            self.assertEqual(fs.get(str(vault.parent / ".env")), "deny")
+            # A session opened inside a dot-folder keeps its folder and loses its siblings.
+            inside = home / ".cache" / "lead" / "wt"
+            inside.mkdir(parents=True)
+            (home / ".cache" / "lead" / "other").mkdir()
+            fs = codex_config.filesystem(replace(self.chat(), cwd=str(inside)))
+            self.assertFalse(self.blocked(fs, inside))
+            self.assertTrue(self.blocked(fs, home / ".cache" / "lead" / "other"))
+
+    def test_owner_home_churn_after_prepare_never_refuses_the_session(self):
+        # Review of #224 (MED): the check compares Codex's readback with the
+        # table written at prepare, never with a rescan; a `-wal` file or a
+        # new dot-folder between the two must not refuse a healthy chat.
+        home = self.closed_home()
+        real = codex_config.prepare
+
+        def prepare_then_churn(*args, **kwargs):
+            out = real(*args, **kwargs)
+            (home / ".codex" / "state_5.sqlite-wal").write_text("fixture")
+            (home / ".brand-new-tool").mkdir()
+            (home / ".config" / "another").mkdir()
+            return out
+
+        with self.home_patches(home), patch.object(codex_config, "prepare", prepare_then_churn):
+            h = self.start(brief=replace(self.chat(), cwd=str(home / "projects" / "app")))
+            self.assertEqual(self.send(h)[-1].kind, K.TURN_FINISHED)
+            written = codex_config.written(h.native.home)
+            self.assertNotIn(str(home / ".brand-new-tool"), written)
+            self.assertIn(str(home / ".brand-new-tool"),
+                          codex_config.filesystem(replace(self.chat(), cwd=str(home / "projects" / "app"))),
+                          "a rescan differs: the next start covers the new folder")
 
     def test_tasks_get_the_profile_too(self):
         h = self.start()
@@ -1036,8 +1159,10 @@ class Checks(unittest.TestCase):
     def test_each_start_up_check_refuses_when_tampered(self):
         self.repo()
         brief = self.chat()
+        config.V2_DATA_DIR.mkdir(parents=True, exist_ok=True)
         probe = codex_config.filesystem(brief)
-        deny_key = next(k for k, v in probe.items() if v == "deny" and k.endswith("/.config/gh"))
+        deny_key = str(config.V2_DATA_DIR.resolve())
+        self.assertEqual(probe[deny_key], "deny")
         def fs_change(change):
             return lambda profile: profile.update(filesystem=change(profile["filesystem"]))
 

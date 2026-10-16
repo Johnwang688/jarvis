@@ -100,6 +100,17 @@ def inside(label: str, port: int, spec_path: str) -> None:
 # --- outside: the harness ----------------------------------------------------------
 
 FAKE = "FAKE-CG2-NOT-A-SECRET\n"
+# Credential stores a blocklist missed (review of #224): the default-closed
+# dot-folders must hide each, approved network commands included.
+STORES = (".docker/config.json", ".local/share/keyrings/login.keyring",
+          ".local/share/com.vercel.cli/auth.json", ".claude.json", ".azure/msal_token_cache.json",
+          ".supabase/access-token", ".agents/token", ".config/gcloud/credentials.db", ".npmrc",
+          ".pypirc", ".kube/config", ".cargo/credentials.toml", ".cargo/credentials",
+          ".cache/huggingface/token", ".bash_history", ".local/share/uv/credentials/credentials.toml",
+          ".brand-new-tool/token", ".config/brand-new-tool/token")
+# What toolchains may reach by absolute path or symlink: stays readable.
+TOOLCHAIN = (".local/bin/tool", ".cargo/bin/tool", ".rustup/toolchains/x/bin/tool",
+             ".local/share/uv/python/x/bin/python3", ".npm/_cacache/index", ".cache/uv/x")
 
 
 def isolated() -> None:
@@ -124,7 +135,7 @@ def setup(real_home: bool) -> tuple[Path, dict]:
                     ".codex/skills/demo/SKILL.md", ".codex/packages/README",
                     ".config/jarvis/allowlist.json", ".local/share/jarvis/sessions/s.json",
                     ".local/share/jarvis/browser/profiles.json", "projects/jarvis/.env",
-                    "projects/jarvis/README.md"):
+                    "projects/jarvis/README.md", *STORES, *TOOLCHAIN):
             path = home / rel
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(FAKE)
@@ -203,22 +214,30 @@ def main(argv: list[str]) -> int:
         h = Path.home()
         denied = [h / ".config/gh/hosts.yml", h / ".gitconfig", h / "projects/Jarvis/.env",
                   h / ".codex/auth.json", h / ".claude/.credentials.json", h / ".ssh", h / ".aws",
-                  h / ".config/jarvis", Path(config.SESSIONS_DIR), Path(config.BROWSER_DIR)]
-        denied = [p for p in denied if p.exists()]
+                  h / ".config/jarvis", Path(config.SESSIONS_DIR), Path(config.BROWSER_DIR),
+                  *(h / rel for rel in STORES),
+                  # the parents of stores whose file names differ here
+                  h / ".docker", h / ".local/share/keyrings", h / ".local/share/com.vercel.cli",
+                  h / ".azure", h / ".supabase", h / ".agents", h / ".cache/huggingface",
+                  h / ".config/gcloud", h / ".kube"]
+        denied = [p for p in dict.fromkeys(denied) if p.exists() or p.is_symlink()]
     else:
         h = home_dir
         denied = [h / ".config/gh/hosts.yml", h / ".gitconfig", h / ".git-credentials",
                   h / ".codex/auth.json", h / ".claude/.credentials.json", h / ".ssh/id_fixture",
                   h / ".aws/credentials", h / ".aws-real/credentials", h / ".config/jarvis/allowlist.json",
                   Path(config.SESSIONS_DIR) / "s.json", Path(config.BROWSER_DIR) / "profiles.json",
-                  h / "projects/jarvis/.env"]
+                  h / "projects/jarvis/.env", *(h / rel for rel in STORES)]
     denied += [project / "sub" / ".env.local", home / "config.toml", Path(config.V2_DATA_DIR) / "store.db"]
     if real_home:
         denied.append(project / ".env")
     readable = [str(project / "ok.txt")]
     if not real_home:
         readable += [str(codex_config.session_skills(home) / "demo" / "SKILL.md"),
-                     str(codex_config.owner_home() / "packages" / "README")]
+                     str(codex_config.owner_home() / "packages" / "README"),
+                     *(str(home_dir / rel) for rel in TOOLCHAIN)]
+    else:
+        readable += [str(p) for p in (Path.home() / ".local/bin", Path(rc.CODEX)) if p.exists()]
     spec = {"denied": [str(p) for p in denied], "readable": readable,
             "readable_globs": [str(codex_config.session_skills(home) / ".system" / "*" / "SKILL.md")],
             "writable": [str(project), str(config.CHAT_WORKTREES_DIR), str(codex_config.sandbox_home(home)),
@@ -229,8 +248,13 @@ def main(argv: list[str]) -> int:
     spec_path.write_text(json.dumps(spec))
     port = model.server.server_port
 
+    # The probe runs from a copy: the checkout may lie in a folder the
+    # profile hides (a lead worktree under ~/.cache, closed by default).
+    inside_copy = temp / "cg2_inside.py"
+    shutil.copyfile(HERE, inside_copy)
+
     def cmd(label, cid, **extra):
-        call = {"cmd": f"python3 -I {HERE} --inside {label} {port} {spec_path}", **extra}
+        call = {"cmd": f"python3 -I {inside_copy} --inside {label} {port} {spec_path}", **extra}
         code = ("const t = ALL_TOOLS.find(t => /(^|__)(exec_command|shell|shell_command)$/.test(t.name));"
                 " if (!t) throw new Error('no_shell_tool');"
                 f" text(JSON.stringify(await tools[t.name]({json.dumps(call)})));")
@@ -302,7 +326,11 @@ def main(argv: list[str]) -> int:
             d = row["data"]
             if row["src"] == "rpc_in" and d.get("method") == "item/completed" and \
                     d["params"]["item"].get("type") == "commandExecution":
-                for line in (d["params"]["item"].get("aggregatedOutput") or "").splitlines():
+                text = d["params"]["item"].get("aggregatedOutput") or ""
+                if "PROBE " not in text:
+                    print("COMMAND WITHOUT PROBE OUTPUT", d["params"]["item"].get("status"),
+                          d["params"]["item"].get("exitCode"), text[:400].replace(str(temp), "<T>"))
+                for line in text.splitlines():
                     if line.startswith("PROBE "):
                         got = json.loads(line[6:])
                         probes[got["label"]] = got
