@@ -2369,4 +2369,33 @@ not automated; the owner's live checklist is in the PR. A click into the page
 mid-composition discards the composition, where Chrome itself would commit
 the raw text. The candidate window follows the last press, not the page's
 real caret (a daemon caret report would be a follow-up). Composition text is
-never logged.
+never logged. A click away also drops what is still composing even when it is
+real final text: a Korean syllable not yet closed, or Japanese with live
+conversion before Enter. The stale guard can discard one legitimate
+emoji-panel insertion, the first after a card, reconnect or navigation
+interrupted a composition, if no key or composition came between. `end()`
+sends any earlier waiting commit before holding the new one, so a commit is
+never silently lost.
+
+**Owner live checklist** (Windows, installed HUD, a Remote pane with a text
+field):
+
+1. Microsoft Pinyin: `nihao` shows the box where you clicked and the
+   candidates beside it; Space or 1 puts 你好 in the page once; a full-width
+   comma (，) appears once.
+2. Microsoft IME (Japanese): `nihon`, Space, Enter gives 日本 once; kana
+   committed without converting appear once.
+3. Win+. emoji panel: the emoji appears once; again right after a letter.
+4. Esc: `nihao` then Esc until the box is gone puts nothing in the page; the
+   next letter appears once.
+5. Mid-composition (`nihao`, not committed): clicking a chat pane, Ctrl+Alt+1
+   and clicking back into the page each put nothing in the page; a new word
+   then commits once with no leftover pinyin.
+6. Microsoft Pinyin in **English mode** on a key-driven page (j/k shortcuts, a
+   web terminal): some IMEs send keyCode 229 for every key, which is now
+   dropped, so those keys could arrive only as text and the page's shortcuts
+   would not fire.
+7. Pick a candidate **with the mouse** in the IME's candidate window. If that
+   blurs the HUD, a mouse-picked candidate is cancelled instead of committed.
+8. Optional: a dead key (´ then e gives é once); an approval card arriving
+   mid-composition puts nothing in the page.

@@ -129,3 +129,18 @@ describe("a composition cancelled under the IME", () => {
     expect(state.sent).toEqual(["😀"]);
   });
 });
+
+describe("a commit ending while an earlier one still waits", () => {
+  // Unreachable through start() (which flushes first); pinned so a missed
+  // compositionstart can never silently lose the earlier commit.
+  it("sends the earlier one first, then the later, never losing either", () => {
+    const { state, ime } = harness();
+    ime.start(); ime.end("三");
+    const raw = ime as unknown as { active: boolean; session: number | null };
+    raw.active = true; raw.session = 1;          // a composition whose start Chrome never reported
+    ime.end("四");
+    expect(state.sent).toEqual(["三"]);
+    vi.runAllTimers();
+    expect(state.sent).toEqual(["三", "四"]);
+  });
+});
