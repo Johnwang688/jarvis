@@ -2201,6 +2201,9 @@ MERGE_GATE_ASK = (
     ("git grep -O'gh pr merge 1' x", _PR_UNSURE), ("git grep --open-files-in-pager='gh pr merge 1' x", _PR_UNSURE),
     ("git archive --remote=origin --exec='gh pr merge 1' HEAD", _PR_UNSURE),
     ("git fetch --upload-pack='git push origin main' origin", _PUSH_UNSURE),
+    # A config write makes a later unknown subcommand a possible new alias,
+    # with nothing on the line for the backstop to read.
+    ("git config alias.ship '!./ship.sh'; git ship", _PUSH_UNSURE),
     # Blanking a data option's value is anchored to its option: the same
     # text fed to a shell elsewhere on the line is still read.
     ("echo 'gh pr merge 1' | sh; git commit -m 'gh pr merge 1'", _PR_UNSURE),

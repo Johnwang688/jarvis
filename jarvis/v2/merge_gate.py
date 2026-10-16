@@ -163,15 +163,13 @@ _DATA_STEMS = frozenset({
     "pushd", "popd", "export", "jq", "cut", "tr", "diff", "basename", "dirname", "realpath",
     "sleep", "which", "type", "read", "set", "unset", "local", "declare", ":", "wait", "cp", "mv",
 })
-# Variables that make git run a program (review M-2 of #208).
-_GIT_EXEC_ENV = re.compile(r"(?<![A-Za-z0-9_])GIT_(SSH|SSH_COMMAND|EDITOR|PAGER|EXTERNAL_DIFF|"
-                           r"SEQUENCE_EDITOR|ASKPASS|PROXY_COMMAND|EXEC_PATH|CONFIG_PARAMETERS)\s*=")
 # Any upper-case assignment word on the line — a prefix (`PAGER=… git log`),
 # `env EDITOR=…`, `export VISUAL=…`, `GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=…`:
 # the variables git, less, ssh and editors read to run a program are upper
-# case, and the list of them is open (MED-2 of #208's follow-up review). A
+# case, and the list of them is open (MED-2 of #208's follow-up review; it
+# replaces review M-2's list, GIT_SSH_COMMAND, GIT_PAGER, GIT_EDITOR, …). A
 # lower-case `x=…` runs only through `$x`, which is an executor itself.
-_ENV_ASSIGNMENT = re.compile(r"(?<![^\s;&|(){}`'\"])[A-Z_][A-Z0-9_]*(\[[^\]]*\])?\+?=")
+_ENV_ASSIGNMENT = re.compile(r"(?<![^\s;&|(){}`'\"!])[A-Z_][A-Z0-9_]*(\[[^\]]*\])?\+?=")
 _GIT_EXEC_SUBS = frozenset({"difftool", "mergetool", "filter-branch", "filter-repo", "bisect",
                             "rebase", "submodule", "daemon", "send-email"})
 # Options that hand a git subcommand a program to run (MED-2 of the
@@ -446,9 +444,7 @@ class _Line:
         # A `;`, `||` or newline lets the line go on after a failed switch.
         self.lenient = bool(re.search(r";|\|\||\n", command))
         self._config_cache: dict = {}
-        self.executor = bool(_GIT_EXEC_ENV.search(command))
-        if _ENV_ASSIGNMENT.search(command):
-            self.executor = True
+        self.executor = bool(_ENV_ASSIGNMENT.search(command))
         # (option as written, its value) of data options (`git commit -m`,
         # `gh pr create --body`): the backstop reads the line without them.
         self.data: list[tuple[str, str]] = []
