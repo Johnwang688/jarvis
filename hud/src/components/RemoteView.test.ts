@@ -44,6 +44,13 @@ it("never opens a hidden stream and discards a late ticket",async()=>{
   await render({live:true});expect(mocks.write).toHaveBeenCalledTimes(1);
   await render({live:false});await act(async()=>ticket.resolve({ticket:"late"}));expect(Socket.instances).toHaveLength(0);
 });
+it("a frame waiting behind an old decode is neither ACKed nor drawn after a reattach",async()=>{
+  await ready();const d=deferred<any>();mocks.decode.mockReturnValueOnce(d.promise);
+  await frame(binary(1));await frame(binary(2));
+  await render({live:false});await render({live:true});await act(async()=>socket().open());const second=socket();second.sent=[];
+  await act(async()=>d.resolve({close:vi.fn()}));await act(async()=>{await new Promise(r=>setTimeout(r,0));});
+  expect(second.sent.filter(x=>x.t==="ack")).toEqual([]);expect(mocks.draw).not.toHaveBeenCalled();
+});
 it("draws and ACKs only the current socket generation, disposing stale bitmaps",async()=>{
   // B-PERF (#214): a frame is ACKed when its decode starts, on the socket it
   // came from while that socket is current, so the daemon's next frame
@@ -211,6 +218,17 @@ describe("IME composition",()=>{
   it("text inserted with no composition (the emoji panel) is sent once and cleared",async()=>{
     await ready();input().value="😀";await typed("insertText","😀");
     expect(texts()).toEqual(["😀"]);expect(input().value).toBe("");
+  });
+  it("an auth prompt mid-composition cancels it",async()=>{
+    await ready();input().value="ni";await comp("compositionstart");expect(input().hasAttribute("data-composing")).toBe(true);
+    await frame({t:"auth",id:"b".repeat(32),origin:"https://example.test",realm:"synthetic realm",scheme:"basic",expires_in:60});
+    expect(host.querySelector('[data-testid="browser-auth"]')).not.toBeNull();
+    expect(input().value).toBe("");expect(input().hasAttribute("data-composing")).toBe(false);
+  });
+  it("a socket close mid-composition cancels it",async()=>{
+    await ready();input().value="ni";await comp("compositionstart");expect(input().hasAttribute("data-composing")).toBe(true);
+    await act(async()=>socket().onclose?.());
+    expect(input().value).toBe("");expect(input().hasAttribute("data-composing")).toBe(false);
   });
   it("a card, a hold, a navigation or a reconnect mid-composition commits nothing later",async()=>{
     await ready();input().value="ka";await comp("compositionstart");await render({blocked:true});

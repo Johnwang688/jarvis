@@ -104,7 +104,7 @@ export class RemoteIme {
     this.sink.showing?.(false);
     this.sink.clear();
     if (epoch === null || !data || !this.valid(epoch)) return;
-    this.drop();
+    this.flush(); // an earlier commit still waiting goes first, never lost
     const pending = { text: data, epoch, timer: null as unknown };
     pending.timer = this.timer(() => {
       if (this.pending === pending) this.flush();
