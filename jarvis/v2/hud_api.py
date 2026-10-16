@@ -931,14 +931,21 @@ def _diff_paths(root, ancestor):
     return rows
 
 
-def diff(daemon, task, name=None):
-    root, base, ancestor, head, project = _diff_context(daemon, task)
-    rows = _diff_paths(root, ancestor)
+def _diff_allowed(project, root):
+    """The Diff's one path rule: inside the project, and not protected (a
+    credential or env file included), else 403."""
     def allowed(path):
         raw, actual = scope(project, path, root=root)
         if protected(raw, actual):
             fail(403, "protected file")
         return actual
+    return allowed
+
+
+def diff(daemon, task, name=None):
+    root, base, ancestor, head, project = _diff_context(daemon, task)
+    rows = _diff_paths(root, ancestor)
+    allowed = _diff_allowed(project, root)
     if name is not None:
         actual = allowed(name)
         raw, _ = scope(project, name, root=root)
@@ -959,6 +966,26 @@ def diff(daemon, task, name=None):
             if not exists:
                 fail(404, "file not found in diff")
         return {"before": _scrub_source(before), "after": _scrub_source(after)}
+    base, head, files, patches = _diff_parts(daemon, task, context=(root, base, ancestor, head, project),
+                                              rows=rows, allowed=allowed)
+    encoded = _scrub_source("".join(patches)).encode()
+    result = dict(base=base, head=head, files=files, patch=encoded[:PATCH_CAP].decode("utf-8", errors="ignore"))
+    if len(encoded) > PATCH_CAP:
+        result["truncated"] = True
+    return result
+
+
+def _diff_parts(daemon, task, *, context=None, rows=None, allowed=None):
+    """`(base, head, files, patches)`: the task's diff file by file, each
+    patch raw (unscrubbed; a caller scrubs what it sends anywhere). What the
+    Diff tab shows and what the quick review reads (`diff_review`) are both
+    built here, so a review sees exactly the files the tab lists — protected
+    and credential files, and paths that leave the project, skipped."""
+    root, base, ancestor, head, project = context or _diff_context(daemon, task)
+    if rows is None:
+        rows = _diff_paths(root, ancestor)
+    if allowed is None:
+        allowed = _diff_allowed(project, root)
     files, patches = [], []
     for status, old, path in rows:
         try:
@@ -988,11 +1015,7 @@ def diff(daemon, task, name=None):
             patch = "".join(difflib.unified_diff([], lines, fromfile="/dev/null", tofile=f"b/{path}"))
         files.append(dict(path=path, status=status, additions=additions, deletions=deletions))
         patches.append(patch)
-    encoded = _scrub_source("".join(patches)).encode()
-    result = dict(base=base, head=head, files=files, patch=encoded[:PATCH_CAP].decode("utf-8", errors="ignore"))
-    if len(encoded) > PATCH_CAP:
-        result["truncated"] = True
-    return result
+    return base, head, files, patches
 
 
 # -- framing (WP-E, HUD workspace plan §2.5 item 3) --------------------------------
@@ -2228,6 +2251,14 @@ def route(handler, daemon, parts, query):
                             message["mark"] = "steering"
                     messages.append(message)
             return 200, {"messages": messages}
+    # The Diff tab's Quick review (2026-10-15, `diff_review.py`): the owner's
+    # alone, checked before the task is looked up or a body is read, so no
+    # agent, MCP caller or Discord command can start, cancel or read one.
+    if len(parts) in (4, 5) and parts[0] == "tasks" and parts[2:4] == ["diff", "review"]:
+        from .projects import owner_only
+        owner_only(handler, daemon)
+        from . import diff_review
+        return diff_review.route(handler, daemon, parts, query)
     if len(parts) in (3, 4) and parts[0] == "tasks" and method == "GET":
         task = daemon.require(stores.tasks, parts[1])
         if parts[2:] == ["journal"]:

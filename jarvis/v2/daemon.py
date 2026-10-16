@@ -288,6 +288,10 @@ class Daemon:
         # never by `start()`, so no test or embedded daemon calls a model.
         # Stopped here by `stop()`.
         self.titles = None
+        # The Diff tab's quick reviews (diff_review.py): made by the first
+        # owner request for one (`diff_review.for_daemon`), never at start-up,
+        # so nothing calls a model until the owner clicks. Cancelled by `stop()`.
+        self.diff_reviews = None
         self._lock = threading.RLock()
         self._worktree_lock = threading.Lock()
         self._sessions: dict[str, _Session] = {}
@@ -1920,6 +1924,9 @@ class Daemon:
         titles = self.titles
         if titles is not None:
             titles.stop()                       # its Codex session ends with the metadata cancel
+        reviews = getattr(self, "diff_reviews", None)
+        if reviews is not None:
+            reviews.stop()                      # quick reviews (diff_review.py): cancelled, none starts
         deadline = time.monotonic() + STOP_TIMEOUT
         with self._lock:
             if self._stopping:
