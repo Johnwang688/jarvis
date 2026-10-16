@@ -2450,6 +2450,29 @@ class Backend(unittest.TestCase):
         self.send_and_settle(tid, "four")
         self.assertEqual([how for how, _ in fake.opened], ["start", "resume"])
 
+    def test_a_provider_notice_is_a_system_line_never_a_failure(self):
+        """2026-10-16: Codex says once that its Windows closure was skipped
+        (`EventKind.NOTICE`). The daemon logs and publishes it as it does any
+        event; the transcript shows it as a system line; the turn ends well."""
+        class Noting(ModelFake):
+            def send(self, handle, message):
+                yield Event(K.TURN_STARTED, handle.thread_id, {})
+                yield Event(K.NOTICE, handle.thread_id, {"text": "The closure was skipped."})
+                yield from Fake.send(self, handle, message)
+        self.daemon.providers[P.CODEX] = Noting(P.CODEX)
+        tid = self.chat("codex")["id"]
+        self.send_and_settle(tid)
+        rows = self.stores.threads.read_log(tid)
+        notes = [r for r in rows if r.get("kind") == "notice"]
+        self.assertEqual([r["data"] for r in notes], [{"text": "The closure was skipped."}])
+        self.assertFalse([r for r in rows if r.get("kind") == "error"])
+        self.assertEqual([r["data"]["stop"] for r in rows if r.get("kind") == "turn_finished"], ["end"])
+        self.assertIn("notice", [e["kind"] for e in self.events_all()])
+        for query in ("", "?tools=1"):
+            transcript = self.request("GET", f"/threads/{tid}/transcript{query}")["messages"]
+            self.assertIn(("system", "The closure was skipped."),
+                          [(m["role"], m["text"]) for m in transcript])
+
     def test_bugbot2_a_provider_that_closed_its_session_is_reopened(self):
         """No fatal flag, but the native handle says closed: also dropped."""
         class Closing(ModelFake):
