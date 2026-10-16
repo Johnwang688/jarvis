@@ -757,6 +757,21 @@ class V1ReadOnly(Base):
         self.assertIn("return range(n - 1)", results["c6"], "relative paths are the worktree's")
         self.assertIn("app.py", results["c7"])
 
+    def test_the_approver_refuses_even_a_shell_the_toolset_let_through(self):
+        # Two layers: were the toolset ever widened by mistake, the deny-all
+        # approver still runs nothing dangerous.
+        from jarvis.agent import Agent
+        self.reviews.agent_factory = lambda **kw: Agent(**{**kw, "tool_names": kw["tool_names"] + ["run_command"]})
+        outside = self.root / "approved-by-mistake.txt"
+        with self.chat(reply(calls=[("run_command", {"command": f"touch {outside}", "reason": "check"})])):
+            job = self.job()
+            self.reviews._work(job)
+        self.assertFalse(outside.exists())
+        result = next(m.get("content") for m in self.requests[1]["messages"] if m.get("role") == "tool")
+        self.assertNotIn("not available to this agent", result)
+        self.assertNotIn("missing required", result)
+        self.assertEqual(job.record["harness"], "v1")
+
     def test_spend_reaches_the_ledger(self):
         from jarvis.v2.router import daemon_router
         with self.chat(reply(FENCED)):
