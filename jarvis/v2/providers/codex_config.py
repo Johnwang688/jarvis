@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from pathlib import Path
 import re
@@ -14,6 +15,7 @@ from jarvis.v2.model import PermissionProfile, Role
 from jarvis.v2.provider import Brief, BriefRefused
 
 _GITFILE_CAP = 4096
+LOG = logging.getLogger(__name__)
 
 
 def _plain_path(path: Path) -> Path:
@@ -265,7 +267,10 @@ def validate_mcp(brief: Brief, effective: dict) -> None:
 #   live outside V2_DATA_DIR (`config.chat_git_mirrors_dir`);
 # - a deny entry naming a symlink makes bwrap fail every command, so deny
 #   entries are resolved first (the owner's ~/.aws is a link into /mnt/c);
-# - a deny entry for a missing path is harmless;
+# - a deny entry for a missing path hides nothing and fails nothing for a
+#   plain command, but an accepted `require_escalated` one gets an empty
+#   placeholder made at that path on the host for its life (measured
+#   2026-10-16), so only existing paths are denied (`deny_paths`);
 # - a glob deny matches regular files only, to `glob_scan_max_depth`, and is
 #   expanded at each command's start: a `.env` made mid-session is covered
 #   from the next command; a `.env` that is a symlink, or a folder named
@@ -309,7 +314,7 @@ def _resolved(path) -> Path:
 # (packages/standalone/...) and re-executes itself as its own sandbox helper,
 # so a deny makes every thread start fail (measured on 0.161). Every entry in
 # it but these is denied as it is found when the config is written, and the
-# private ones below whether or not they exist yet. (Not by a glob: a glob
+# private ones below by name (each only once it exists). (Not by a glob: a glob
 # ending in `*` reaches into sub-folders, and a match inside a denied folder
 # fails every command, measured.)
 CODEX_HOME_KEEP = ("packages", "skills")
@@ -397,8 +402,8 @@ CLOSED_KEEP: dict[str, tuple[str, ...]] = {
 }
 # `.codex` is kept here and closed by `_codex_home_entries` (it also covers
 # a CODEX_HOME elsewhere). Credential stores inside a kept folder, and the
-# well-known ones, denied by name whether or not they exist (a backstop the
-# closure makes redundant where it applies; harmless when absent):
+# well-known ones, denied by name once they exist (a backstop the
+# closure makes redundant where it applies; left out while absent):
 KNOWN_CREDENTIALS = (
     ".gitconfig", ".git-credentials", ".netrc", ".npmrc", ".pypirc", ".claude.json",
     ".docker", ".kube", ".azure", ".aws", ".supabase", ".agents", ".gnupg", ".ssh",
@@ -431,19 +436,103 @@ def _windows_extra(name: str) -> bool:
 _GLOB_SYNTAX = re.compile(r"[*?\[\]{}]")
 
 
+def _profile_target(link: Path, root: Path) -> Path | None:
+    """A symlinked profile folder (a moved or junctioned profile): its
+    target, if that is a real folder strictly inside the Users root `root`
+    (resolved). `resolve(strict=True)` refuses a loop and a dangling link;
+    a target outside the root (another drive, the WSL home, `/`) is not a
+    profile of this drive and is skipped, as is the root itself."""
+    try:
+        target = link.resolve(strict=True)
+        if (root not in target.parents or not target.is_dir()
+                or target.name.casefold() in WINDOWS_NOT_PROFILES):
+            return None
+    except (OSError, RuntimeError):
+        return None
+    return target
+
+
 def windows_profiles() -> list[Path]:
     root = Path(os.environ.get("JARVIS_WINDOWS_USERS") or WINDOWS_USERS)
     try:
+        real_root = root.resolve(strict=True)
         with os.scandir(root) as entries:
-            found = [Path(e.path) for e in entries
-                     if e.name.casefold() not in WINDOWS_NOT_PROFILES
-                     and e.is_dir(follow_symlinks=False)]
-    except OSError:
+            listed = [(Path(e.path), e.is_dir(follow_symlinks=False), e.is_symlink())
+                      for e in entries if e.name.casefold() not in WINDOWS_NOT_PROFILES]
+    except (OSError, RuntimeError):
         return []           # not mounted, not present, or not ours to list
+    found = [path for path, real, _link in listed if real]
+    seen = {real_root / path.name for path in found}
+    for path, _real, link in listed:
+        target = _profile_target(path, real_root) if link else None
+        if target is not None and target not in seen:
+            seen.add(target)
+            found.append(target)
     return sorted(found)
 
 
-def _closed_denies(needed: list[Path]) -> list[Path]:
+# Listing the Windows profiles has a deadline (review of #224's leftovers):
+# `/mnt/c` is a 9p mount, and a slow or hung one must not hold every Codex
+# session start. On a timeout the Windows closure is skipped for that
+# session, as for a drive that is not mounted, and the session is told
+# (`session_notes`). The listing runs on a worker thread; one that outlives
+# its deadline is left to finish (a thread blocked in the kernel cannot be
+# stopped), and while it is still blocked, later starts skip at once rather
+# than each waiting out the deadline and leaving another thread behind.
+# Measured on this machine (warm, names only): the Windows part of the walk
+# 0.06 s; the whole deny table 0.4 s. A cold drive took about 2.6 s.
+# Not cached between sessions: a warm walk is already cheap, and a cache
+# would leave a store made in a profile readable for one more session.
+WINDOWS_DEADLINE_S = 5.0
+WINDOWS_SKIPPED = ("The Windows user profiles WSL mounts were not closed for this session: "
+                   "listing them took longer than {seconds:g} s. Their dot-folders, AppData "
+                   "and key files are readable to this session's commands. The next session "
+                   "start tries again.")
+_windows_guard = threading.Lock()
+_windows_blocked: threading.Thread | None = None
+_windows_warned = False
+_skipped = threading.local()
+
+
+def _windows_denies(close, needed: list[Path]) -> list[Path] | None:
+    """`close` run over each Windows profile within WINDOWS_DEADLINE_S, the
+    existing denies it found, already resolved (so nothing after the deadline
+    touches the drive); None when the listing was skipped."""
+    global _windows_blocked, _windows_warned
+    with _windows_guard:
+        if _windows_blocked is not None and _windows_blocked.is_alive():
+            return None     # still blocked from an earlier start
+        _windows_blocked = None
+    box: dict = {}
+
+    def walk() -> None:
+        try:
+            out: list[Path] = []
+            for profile in windows_profiles():
+                close(profile, profile, (), True, {}, out, extra=_windows_extra, strict=False, keys=True)
+            box["out"] = [p for p in out if os.path.lexists(p)]
+        except BaseException as exc:    # handed to the caller below
+            box["error"] = exc
+
+    worker = threading.Thread(target=walk, name="codex-windows-profiles", daemon=True)
+    worker.start()
+    worker.join(WINDOWS_DEADLINE_S)
+    if worker.is_alive():
+        with _windows_guard:
+            _windows_blocked = worker
+            first, _windows_warned = not _windows_warned, True
+        if first:   # once per stall; paths and names are never logged
+            LOG.warning("Codex: listing the Windows profiles took over %g s; "
+                        "their closure is skipped until it answers", WINDOWS_DEADLINE_S)
+        return None
+    with _windows_guard:
+        _windows_warned = False
+    if "error" in box:
+        raise box["error"]
+    return box["out"]
+
+
+def _closed_denies(needed: list[Path]) -> tuple[list[Path], list[Path] | None]:
     """The default-closed denies: under the owner's home (CLOSED_KEEP), and
     in each Windows profile (`windows_profiles`). An entry that is, or holds,
     a path the session needs (`needed`: its folder, the chat worktrees, the
@@ -453,7 +542,8 @@ def _closed_denies(needed: list[Path]) -> list[Path]:
     out: list[Path] = []
 
     def close(base: Path, folder: Path, keep: tuple[str, ...], dots_only: bool,
-              spec: dict, extra=None, strict: bool = True, keys: bool = False) -> None:
+              spec: dict, out: list[Path], extra=None, strict: bool = True, keys: bool = False,
+              whole: bool = False) -> None:
         try:
             with os.scandir(folder) as entries:
                 listed = []
@@ -468,6 +558,7 @@ def _closed_denies(needed: list[Path]) -> list[Path]:
             if not strict:
                 return
             raise BriefRefused("An owner dot-folder cannot be listed for its denies") from exc
+        mine: list[Path] = []
         for entry in sorted(listed, key=lambda e: e.name):
             if (dots_only and not entry.name.startswith(".") and not (extra and extra(entry.name))
                     and not (keys and key_like(entry.name, broad=True) and _is_file(entry))):
@@ -476,21 +567,32 @@ def _closed_denies(needed: list[Path]) -> list[Path]:
             rel = path.relative_to(base).as_posix()
             if entry.name in keep:
                 if rel in spec and entry.is_dir(follow_symlinks=False):
-                    close(base, path, spec[rel], False, spec, strict=strict)
+                    close(base, path, spec[rel], False, spec, out, strict=strict,
+                          whole=not spec[rel])
                 continue
             target = _resolved(path)
             if any(n == path or n == target or path in n.parents or target in n.parents
                    for n in needed):
                 if entry.is_dir(follow_symlinks=False) and any(path in n.parents for n in needed):
-                    close(base, path, spec.get(rel, ()), False, spec, strict=strict)
+                    close(base, path, spec.get(rel, ()), False, spec, out, strict=strict)
                 continue
-            out.append(target)
+            mine.append(target)
+        # A literal deny cannot name a path holding glob syntax (Codex reads
+        # it as a glob; `deny_paths` leaves it out). A folder whose every
+        # entry is denied anyway (`whole`: one closed in turn with nothing
+        # kept, e.g. ~/.config) is denied whole instead, unless it holds a
+        # path the session needs. Elsewhere (the top of a home or profile, a
+        # folder with kept entries) such an entry stays readable: a residual.
+        if whole and any(_GLOB_SYNTAX.search(str(p)) for p in mine):
+            real = _resolved(folder)
+            if (not _GLOB_SYNTAX.search(str(real))
+                    and not any(real in n.parents or folder in n.parents for n in needed)):
+                mine = [real]
+        out.extend(mine)
 
     home = _resolved(Path.home())
-    close(home, home, CLOSED_KEEP[""], True, CLOSED_KEEP, keys=True)
-    for profile in windows_profiles():
-        close(profile, profile, (), True, {}, extra=_windows_extra, strict=False, keys=True)
-    return out
+    close(home, home, CLOSED_KEEP[""], True, CLOSED_KEEP, out, keys=True)
+    return out, _windows_denies(close, needed)
 
 
 # Key and token files by name (decision on #224's residual: close the class,
@@ -506,18 +608,27 @@ def _closed_denies(needed: list[Path]) -> list[Path]:
 # checkout) gets the narrow set, so design tokens or an `id_map.py` stay.
 # A name holding `example`, `sample` or `template`, or a `.pub` key, is not
 # a secret. By name only: nothing is opened.
+# `*credential*` is broad at a home's top and, at a repository's top, only a
+# data or key-like file: no extension, or one of CREDENTIAL_DATA (so
+# `credentials.json` and `aws-credentials` are denied there, and source such
+# as `credentials.py` or `credential_form.tsx` stays readable).
 _KEY_NARROW = re.compile(
-    r".*\.(?:pem|key|p12|pfx|ppk|jks|keystore|p8)|.*credential.*|service[-_ ]?account.*\.json"
+    r".*\.(?:pem|key|p12|pfx|ppk|jks|keystore|p8)|service[-_ ]?account.*\.json"
     r"|.*[-_]key\.json|.*[-_]keys\.json", re.IGNORECASE | re.DOTALL)
 _KEY_BROAD = re.compile(r"id_[a-z0-9_]+|.*token.*|.*secret.*|.*\.(?:kdbx|gpg|asc)",
                         re.IGNORECASE | re.DOTALL)
 _KEY_NOT = re.compile(r".*(?:example|sample|template).*|.*\.pub", re.IGNORECASE | re.DOTALL)
+CREDENTIAL_DATA = ("", "json", "yaml", "yml", "toml", "ini", "env", "txt", "xml", "csv")
 
 
 def key_like(name: str, *, broad: bool) -> bool:
     if _KEY_NOT.fullmatch(name):
         return False
-    return bool(_KEY_NARROW.fullmatch(name) or (broad and _KEY_BROAD.fullmatch(name)))
+    if _KEY_NARROW.fullmatch(name) or (broad and _KEY_BROAD.fullmatch(name)):
+        return True
+    if "credential" not in name.casefold():
+        return False
+    return broad or os.path.splitext(name)[1][1:].casefold() in CREDENTIAL_DATA
 
 
 def _is_file(entry) -> bool:
@@ -564,24 +675,39 @@ def deny_paths(brief: Brief | None = None, home: Path | None = None) -> list[Pat
     needed = [_resolved(config.CHAT_WORKTREES_DIR), _resolved(config.chat_git_mirrors_dir())]
     if brief is not None:
         needed += [_resolved(brief.cwd), *(_resolved(p) for p in git_roots(brief))]
+    closed, windows = _closed_denies(needed)
+    _skipped.windows = windows is None
     found = [*config.credential_dirs(), *_codex_home_entries(), owner / ".claude",
-             *(owner / name for name in KNOWN_CREDENTIALS), *_closed_denies(needed),
-             *_root_key_files(brief),
+             *(owner / name for name in KNOWN_CREDENTIALS), *closed, *_root_key_files(brief),
              config.V2_DATA_DIR, config.SESSIONS_DIR, config.SPILL_DIR, config.SPEAKER_DIR,
              *sorted(protected_paths())]
-    resolved: list[Path] = []
+    resolved: dict[Path, None] = {}
     for item in found:
         path = _resolved(item)
-        # Only what exists: a deny for a path whose parent is missing makes
-        # bwrap fail an accepted `require_escalated` command (measured:
-        # ~/.cargo/credentials with no ~/.cargo). A store made later is
-        # covered from the next session start.
-        # A literal path holding glob syntax would be read as a glob (and
-        # expanded by a deep scan at every command): left out. The registry
-        # hive's transaction logs (`NTUSER.DAT{guid}...`) are the case seen.
-        if path not in resolved and os.path.lexists(path) and not _GLOB_SYNTAX.search(str(path)):
-            resolved.append(path)
-    return [p for p in resolved if not any(other in p.parents for other in resolved)]
+        # Only what exists, so a store made after the session starts stays
+        # readable to its commands until the next session start. Denying a
+        # named store before it exists is not safe (measured on 0.161,
+        # 2026-10-16): for an accepted `require_escalated` command bwrap
+        # makes an empty placeholder at the missing path *on the host* for
+        # the command's life (an empty ~/.netrc, or a file where gh would
+        # make ~/.config/gh), and fails the command when the parent is
+        # missing too (~/.cargo/credentials with no ~/.cargo).
+        if os.path.lexists(path):
+            resolved[path] = None
+    # The Windows part is resolved and checked on its own thread, within its
+    # deadline: nothing here touches the drive again.
+    for path in windows or ():
+        resolved[path] = None
+    # A literal path holding glob syntax would be read as a glob (and
+    # expanded by a deep scan at every command): left out. The registry
+    # hive's transaction logs (`NTUSER.DAT{guid}...`) are the case seen.
+    kept = {p: None for p in resolved if not _GLOB_SYNTAX.search(str(p))}
+    return [p for p in kept if not any(parent in kept for parent in p.parents)]
+
+
+def skipped_windows() -> bool:
+    """Whether this thread's last `deny_paths` skipped the Windows closure."""
+    return getattr(_skipped, "windows", False)
 
 
 # Bounds the folders listed to route the `.env*` globs around denied ones.
@@ -619,6 +745,10 @@ def env_globs(brief: Brief, denies: list[Path]) -> tuple[list[str], list[Path]]:
     files: list[Path] = []
 
     def walk(base: Path) -> None:
+        if _GLOB_SYNTAX.search(str(base)):
+            # A base holding glob syntax would be read as a pattern: its own
+            # `.env*` files cannot be named, as a glob or literally (residual).
+            return
         blocked = [d for d in denies if base in d.parents
                    and len(d.relative_to(base).parts) <= GLOB_DEPTH - 1]
         if not blocked:
@@ -634,7 +764,8 @@ def env_globs(brief: Brief, denies: list[Path]) -> tuple[list[str], list[Path]]:
                     if entry.is_dir(follow_symlinks=False):
                         children.append(Path(entry.path))
                     elif (entry.is_file(follow_symlinks=False)
-                          and entry.name[:4].casefold() == ".env"):
+                          and entry.name[:4].casefold() == ".env"
+                          and not _GLOB_SYNTAX.search(entry.name)):
                         files.append(Path(entry.path))
         except OSError as exc:
             raise BriefRefused("A folder for the Codex .env denies cannot be listed") from exc
@@ -694,6 +825,9 @@ def filesystem(brief: Brief, home: Path | None = None) -> dict:
 # with a rescan — `~/.codex` and the owner's home change between the two (a
 # sqlite `-wal` file appears), and a rescan would refuse a healthy session.
 _WRITTEN: dict[Path, dict] = {}
+# What the owner is told about the table written for each private home
+# (`session_notes`): fixed sentences, never a path or a file name.
+_NOTES: dict[Path, tuple[str, ...]] = {}
 _written_lock = threading.Lock()
 
 
@@ -701,6 +835,13 @@ def written(home: Path) -> dict | None:
     with _written_lock:
         table = _WRITTEN.get(Path(home).resolve())
     return dict(table) if table is not None else None
+
+
+def session_notes(home: Path) -> tuple[str, ...]:
+    """Owner-facing notes on the profile written for `home`: today only that
+    the Windows closure was skipped (`WINDOWS_SKIPPED`)."""
+    with _written_lock:
+        return _NOTES.get(Path(home).resolve(), ())
 
 
 def _denied(table: dict) -> list[Path]:
@@ -713,8 +854,10 @@ def config_text(brief: Brief, home: Path | None = None) -> str:
     the filesystem table is recorded for the start-up check (`written`)."""
     table = filesystem(brief, home)
     if home is not None:
+        notes = (WINDOWS_SKIPPED.format(seconds=WINDOWS_DEADLINE_S),) if skipped_windows() else ()
         with _written_lock:
             _WRITTEN[Path(home).resolve()] = dict(table)
+            _NOTES[Path(home).resolve()] = notes
     values = dict(model_provider="openai", forced_login_method="chatgpt",
                   cli_auth_credentials_store="file", default_permissions=PROFILE,
                   approval_policy="on-request", approvals_reviewer=approvals_reviewer(brief),

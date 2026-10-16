@@ -104,6 +104,10 @@ class EventKind(str, Enum):
     # ignores them, so a child's words can never pass for the orchestrator's.
     SUBAGENT = "subagent"                       # lifecycle
     SUBAGENT_EVENT = "subagent_event"           # one thing a sub-agent said or did
+    # A line for the owner about the session itself, not from the model
+    # (2026-10-16: Codex's Windows closure skipped). Shown as a system line;
+    # consumers that do not know it ignore it, and the model never sees it.
+    NOTICE = "notice"
 
 
 @dataclass
@@ -128,6 +132,7 @@ class Event:
     #     `cost_usd` was measured against, which the daemon saves on the thread)
     #   turn_finished: {"stop": "end"|"max_turns"|"interrupted"|"error"}
     #   error: {"message": str, "fatal": bool}
+    #   notice: {"text": str}, a fixed sentence (never a path or file name)
     #   subagent: {"sid", "op": "started"|"progress"|"finished", "status":
     #     "running"|"backgrounded"|"done"|"failed"|"stopped", "task_id",
     #     "parent_sid", "depth", "background", "name", "kind", "last_tool",

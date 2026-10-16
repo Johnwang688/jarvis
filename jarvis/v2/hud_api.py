@@ -1474,7 +1474,8 @@ SAY_MAX_CHARS = 2000
 
 
 def say(handler, body):
-    """`POST /say`: one chunk of speech as audio (V6).
+    """`POST /say`: one chunk of speech as audio (V6). Owner-only, checked by
+    `pickers` before the body is read (`OWNER_VOICE_PICKERS`).
 
     `voice`, when named, must be a voice `catalog()` lists: an unknown name
     used to fail inside Kokoro and then reach the cloud carrying that name.
@@ -1607,11 +1608,30 @@ def speech_summary(handler, daemon):
     return 200, {"summary": result.text}
 
 
+# The pickers that are the owner's voice: dictation (`/stt`, the microphone's
+# audio to a model), speech (`/say`, synthesis on this machine or a paid cloud
+# voice), the voice picker (`/voices` lists the owner's clone store, `/voice`
+# chooses) and v1's mute flag (`/mute`). Owner-only on every method, checked
+# before the query, the body or any audio is touched (voice follow-ups, V2 row):
+# until 2026-10-16 any loopback client on the API listener could upload audio,
+# synthesize speech or change the owner's voice. No tool, bridge or Discord path
+# calls these over HTTP; they reach `voice` in process.
+OWNER_VOICE_PICKERS = frozenset({"stt", "say", "voice", "voices", "mute"})
+# The pickers whose writes are the owner's and whose reads stay open (#227 review):
+# `POST /model` and `POST /models` rewrite the protected `models.json` (an API-listener
+# client could add `evil/model` and select it), `POST /avatar` the avatar state.
+# `GET /models`, `/models/catalog`, `/avatars` and `/avatar.svg` answer any listener.
+OWNER_PICKER_WRITES = frozenset({"model", "models", "avatar"})
+
+
 def pickers(handler, daemon, parts, query):
     from jarvis import avatars, llm, models, voice
     from jarvis.tools import voicectl
     from .daemon import _object
+    from .projects import owner_only
     name = "/".join(parts)
+    if name in OWNER_VOICE_PICKERS or (name in OWNER_PICKER_WRITES and handler.command != "GET"):
+        owner_only(handler, daemon)
     if handler.command == "GET":
         if name == "avatars":
             return 200, {"current": avatars.active().slug, "avatars": [a.describe() for a in avatars.available()]}
@@ -2237,7 +2257,7 @@ def route(handler, daemon, parts, query):
                     messages.append(tools[index])
                     continue
                 kind = row.get("kind")
-                if kind not in (None, "text", "user", "model_set"):
+                if kind not in (None, "text", "user", "model_set", "notice"):
                     continue
                 data = row.get("data", row)
                 text = data.get("text")
@@ -2246,7 +2266,8 @@ def route(handler, daemon, parts, query):
                     text = f"/skill {data['skill']} {text}".rstrip()
                 if isinstance(text, str):
                     role = ("assistant" if kind == "text" else "user" if kind == "user"
-                            else "system" if kind == "model_set" else row.get("role", "assistant"))
+                            else "system" if kind in ("model_set", "notice")
+                            else row.get("role", "assistant"))
                     message = dict(role=role, text=text, at=row.get("at", row.get("t")))
                     # Opt-in clients reconcile an optimistic initial send by
                     # its acknowledged turn. Legacy response bytes stay fixed.

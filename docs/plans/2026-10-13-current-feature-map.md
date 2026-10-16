@@ -1,6 +1,6 @@
 # Jarvis current feature map and team ownership
 
-Updated 2026-10-15 (America/Chicago). This is the shared coordination map for the
+Updated 2026-10-16 (America/Chicago, main `e181beb`). This is the shared coordination map for the
 2026-10-12 checkpoint, the five plans merged in [PR #125](https://github.com/Johnwang688/jarvis/pull/125),
 and John's subsequent VEX, LaTeX and Browser-controls requests. It is a working
 registry: update the relevant row when claiming, handing off, opening a PR,
@@ -24,8 +24,20 @@ the HTTP-auth navigate-away fix ([#190](https://github.com/Johnwang688/jarvis/pu
 the HUD hardening decisions ([#191](https://github.com/Johnwang688/jarvis/pull/191)) and two
 archived-notes payload restores ([#185](https://github.com/Johnwang688/jarvis/pull/185),
 [#189](https://github.com/Johnwang688/jarvis/pull/189)). The Claude lead team started SV-0 and
-two editor items on 2026-10-15 (rows below). The Browser freeze still holds: only
-Browser bug fixes ship.
+two editor items on 2026-10-15; all three have since landed (rows below). The owner lifted
+the Browser feature freeze on 2026-10-16, when agent slots freed up.
+
+**2026-10-15/16 landings (merged to main; #193 to #225 are INSTALLED per the lead deploy log 2026-10-15/16: every deploy installs the whole of main, with `jarvis hud install` where the HUD changed, then a daemon2 restart, and the live build and daemon run e181beb):** native sub-agent view SV-0 to SV-4 ([#193](https://github.com/Johnwang688/jarvis/pull/193), [#198](https://github.com/Johnwang688/jarvis/pull/198), [#199](https://github.com/Johnwang688/jarvis/pull/199)
+with [#195](https://github.com/Johnwang688/jarvis/pull/195), [#212](https://github.com/Johnwang688/jarvis/pull/212), [#216](https://github.com/Johnwang688/jarvis/pull/216)); editor ruler marks and tab icons ([#194](https://github.com/Johnwang688/jarvis/pull/194));
+secrets redaction in cards and logs ([#205](https://github.com/Johnwang688/jarvis/pull/205)); the owner-only merge/close gate ([#208](https://github.com/Johnwang688/jarvis/pull/208)) and its
+follow-ups ([#222](https://github.com/Johnwang688/jarvis/pull/222), [#225](https://github.com/Johnwang688/jarvis/pull/225)); Monitor judged as a command tool ([#211](https://github.com/Johnwang688/jarvis/pull/211)); the keyring rule and
+Stop-label leftovers ([#220](https://github.com/Johnwang688/jarvis/pull/220)); rounded-rectangle buttons with the binary click sparkle ([#210](https://github.com/Johnwang688/jarvis/pull/210));
+Browser input-to-picture ack ([#214](https://github.com/Johnwang688/jarvis/pull/214)), keyring password store ([#215](https://github.com/Johnwang688/jarvis/pull/215), [#218](https://github.com/Johnwang688/jarvis/pull/218)) and sign-in
+pop-up adoption ([#217](https://github.com/Johnwang688/jarvis/pull/217)); the Diff tab's Quick review ([#219](https://github.com/Johnwang688/jarvis/pull/219)); Codex chat git tools
+([#223](https://github.com/Johnwang688/jarvis/pull/223)) and the closed Codex sandbox read gap ([#224](https://github.com/Johnwang688/jarvis/pull/224)); the VEX view redesign
+([#209](https://github.com/Johnwang688/jarvis/pull/209), [#213](https://github.com/Johnwang688/jarvis/pull/213)). Smaller merges: Codex Stop keeps the chat ([#200](https://github.com/Johnwang688/jarvis/pull/200)), Codex partial
+turns disclosed in usage ([#207](https://github.com/Johnwang688/jarvis/pull/207)), five recent chats per project in the sidebar ([#206](https://github.com/Johnwang688/jarvis/pull/206)), and
+the fast path's desk-turn edits and commands (F-1..F-7, [#182](https://github.com/Johnwang688/jarvis/pull/182)).
 
 ## How teams coordinate
 
@@ -202,9 +214,11 @@ acceptance remains separately identified, never inferred from synthetic tests.
 
 ## Browser and native-agent packages — active and available
 
-**Owner decision, 2026-10-14:** no further Browser feature work ships until the
-Browser bugs the owner reported are fixed. The six unbuilt Browser rows below are
-QUEUED, not available to claim. Bug fixes in progress:
+**Owner decision, 2026-10-14, lifted 2026-10-16:** Browser feature work was frozen
+until the Browser bugs the owner reported were fixed. Those fixes are installed (first
+table), and the owner lifted the freeze on 2026-10-16 now that agent slots are free:
+the remaining unbuilt rows below are READY to claim, except B-PREVIEW, which is blocked on a
+Chrome capability. Bug fixes:
 
 | ID | Bug | Status |
 |---|---|---|
@@ -216,12 +230,12 @@ QUEUED, not available to claim. Bug fixes in progress:
 | B-NATIVE (BR-9d, BD-a/b/c) | Claude and Codex parent chats drive through the same Browser gate | **INSTALLED — [#149](https://github.com/Johnwang688/jarvis/pull/149); Codex lead / `browser_native`; verified release above** | Reviewed head `20eb04bf` merged at `11b7db8c`; original reservation complete. Actual CLI + real HUD guarded action/resume passed for Claude ASK/AUTO and Codex AUTO; Codex ASK is unsupported by production policy. Both CLIs passed 115-second scripted private-card transport, actual sensitive HUD cards, pane Stop/Resume and production Chat Stop via `Daemon.interrupt` while real CDP typing settled. Codex Chat Stop requires a fresh chat; same-chat continuation remains refused. Actual Codex child host denial passed; Claude 2.1.295 child catalog omission plus separate Driving-ON hook guard/mutant are distinct evidence, with literal live child Act-hook observation UNRUN. Eleven current-main regression suites and the separate corrected dispatch audit passed; original failures retained. Subscription/account authentication, paid-model judgment and physical-device acceptance remain UNRUN. [Native plan](2026-10-13-browser-driving-claude-codex.md). |
 | B-AUTH (BR-7) | HTTP Basic/Digest owner challenge form over the existing authenticated tab socket | **INSTALLED — [#150](https://github.com/Johnwang688/jarvis/pull/150); Codex lead / `browser_auth`; verified build above** | Exact reviewed head `70460c2` merged at `3b1205ae`. First protected navigation, delayed reply/original expiry, Digest, stale identity, restore, privacy and cleanup passed focused checks; 62 auth/Sound checks, nine native cases, 14 actual HUD assertions and five guard mutants passed. Combined release correction gates passed as described above. Same-origin iframe prompts measured; first protected popup required explicit Reload, and separate OOPIF prompt delivery was absent in the bounded probe. Protected Sound restoration remains fail-closed with Retry. No real-account acceptance claim. |
 | B-FIND (BR-7) | Find-in-page, bounded owner context menu, finite cursor shapes | **INSTALLED — [#151](https://github.com/Johnwang688/jarvis/pull/151); Codex lead / `browser_find`; verified build above** | Exact reviewed head `5e638ea` merged at `dd210803` after #150. Fixed top-document search, five owner menu actions, finite cursors and exact document/socket/hold guards passed independent review. Final focused evidence: 70 backend checks, 19 real driving cases, real Chrome owner tools, 22 actual owner HUD assertions and seven intended guard mutants; all 14 combined correction suites passed. Navigation discards stale document input without adding an approval hold. Native layout preemption remains unproven; native picker/IME expansion excluded. |
-| B-PICKERS (BR-7/M9) | Owner select/date/color fallback; assess datalist separately | **QUEUED — owner 2026-10-14: no new Browser features until the reported Browser bugs are fixed.** Was: VERIFY — unclaimed | Chrome 155 select/date/color popups were absent from screencast; datalist opening was not proven. Refine and review exact-element fallback design before implementation. Preserve input/change revalidation, bounds, focus, native-control privacy and stale-element refusal. Shared host/RemoteView integration waits for active Browser packages. |
-| B-IME (BR-7) | Finish real owner IME/composition acceptance | **QUEUED — owner 2026-10-14: no new Browser features until the reported Browser bugs are fixed.** Was: VERIFY — unclaimed | Composition transport exists in Remote UI; do not rebuild it blindly. Audit existing coverage, then validate real Windows composition and cancellation across holds/reconnects. Implement only demonstrated gaps. |
-| B-DIRECT-CAPTURE (BR-4/M6) | Direct iframe capture in installed app mode | **QUEUED — owner 2026-10-14: no new Browser features until the reported Browser bugs are fixed.** Was: VERIFY — unclaimed | Remote capture/annotation is installed. Direct currently offers explicit “Open in Remote” fallback. Requires actual Windows app-mode getDisplayMedia/CropTarget prompt and pixel evidence before enabling a Direct capture path. |
-| B-PREVIEW (BR-9b/9c) | Proven approval crop / target outline | **QUEUED — owner 2026-10-14: no new Browser features until the reported Browser bugs are fixed.** Was: DEFERRED — capability blocked | Current Chrome 155 screencast metadata cannot prove matching-frame identity. Keep “Preview unavailable” and no outline until a reviewed capability proof exists; synthetic crop tests are insufficient. |
-| B-LOGIN (M4/M4b/M12) | Real site sign-in, Chrome sync entry and password-store behavior | **QUEUED — owner 2026-10-14: no new Browser features until the reported Browser bugs are fixed.** Was: VERIFY — owner-assisted, unclaimed | Profile/sign-in UI is installed. Real Google/Cloudflare/GitHub acceptance, sync and usable keyring are not established. Do not read real credentials or weaken automation/sandbox policy to make a test pass. |
-| B-PERF (M1/M2/M5/M7/M8) | Browser performance and platform acceptance record | **IN REVIEW (input-to-picture part, 2026-10-15)** — per-stage pipeline measured with `scripts/browser_measure.py`; the HUD acks a frame when its decode starts; adaptive quality and the other candidates measured and rejected (browser.md, "Remote input to picture, stage by stage"). Was: QUEUED (owner 2026-10-14) | Still missing: the owner's real Windows input-to-picture p50/p95 (recipe in that section: `flip.html` + `owner_snippet.js`). Reconcile frame/CPU/profile-memory, Local Network Access and sandbox receipts against current source; do not label all five measurements unimplemented or all passed. |
+| B-PICKERS (BR-7/M9) | Owner select/date/color fallback; assess datalist separately | **READY — unclaimed; freeze lifted by the owner 2026-10-16, unbuilt.** Was QUEUED (freeze, 2026-10-14) and before that VERIFY — unclaimed | Chrome 155 select/date/color popups were absent from screencast; datalist opening was not proven. Refine and review exact-element fallback design before implementation. Preserve input/change revalidation, bounds, focus, native-control privacy and stale-element refusal. Shared host/RemoteView integration waits for active Browser packages. |
+| B-IME (BR-7) | Finish real owner IME/composition acceptance | **READY — unclaimed; freeze lifted by the owner 2026-10-16, unbuilt.** Was QUEUED (freeze, 2026-10-14) and before that VERIFY — unclaimed | Composition transport exists in Remote UI; do not rebuild it blindly. Audit existing coverage, then validate real Windows composition and cancellation across holds/reconnects. Implement only demonstrated gaps. |
+| B-DIRECT-CAPTURE (BR-4/M6) | Direct iframe capture in installed app mode | **READY — unclaimed; freeze lifted by the owner 2026-10-16, unbuilt.** Was QUEUED (freeze, 2026-10-14) and before that VERIFY — unclaimed | Remote capture/annotation is installed. Direct currently offers explicit “Open in Remote” fallback. Requires actual Windows app-mode getDisplayMedia/CropTarget prompt and pixel evidence before enabling a Direct capture path. |
+| B-PREVIEW (BR-9b/9c) | Proven approval crop / target outline | **DEFERRED — blocked on a Chrome capability** (freeze lifted 2026-10-16, but nothing is buildable until the proof exists), unbuilt. Was QUEUED (freeze, 2026-10-14) and before that DEFERRED | Current Chrome 155 screencast metadata cannot prove matching-frame identity. Keep “Preview unavailable” and no outline until a reviewed capability proof exists; synthetic crop tests are insufficient. |
+| B-LOGIN (M4/M4b/M12) | Real site sign-in, Chrome sync entry and password-store behavior | **INSTALLED — [#215](https://github.com/Johnwang688/jarvis/pull/215) (keyring password store), [#218](https://github.com/Johnwang688/jarvis/pull/218) (observed-store follow-up), [#217](https://github.com/Johnwang688/jarvis/pull/217) (sign-in pop-up adoption); Claude lead; lead deploy log 2026-10-15/16.** Built. Owner-assisted check pending: a real Google sign-in on a keyring profile. Was QUEUED (freeze) | Named profiles keep Chrome's password and cookie key in the owner's keyring (`gnome-libsecret`) instead of the public `basic` store; a locked or missing keyring refuses the launch with an unlock hint, and a profile that has used the keyring is never quietly downgraded (sticky marker). [#218](https://github.com/Johnwang688/jarvis/pull/218) observes which store Chrome actually used (a probe cookie's `v11`/`v10` prefix) and adds the Secret Service gate rule in `rules.py`. [#217](https://github.com/Johnwang688/jarvis/pull/217) adopts Chrome's own `accounts.google.com` sign-in tab beside the sign-in tab. All fakes and isolated real-Chrome checks; **no real Google, Cloudflare or GitHub sign-in has been done.** Do not read real credentials or weaken automation/sandbox policy to make a test pass. The keyring protects passwords at rest, not against a program running as the owner while the keyring is unlocked. Details in `docs/notes/browser.md`. |
+| B-PERF (M1/M2/M5/M7/M8) | Browser performance and platform acceptance record | **INSTALLED (input-to-picture part) — [#214](https://github.com/Johnwang688/jarvis/pull/214), merged 2026-10-16; Claude lead.** The rest is measurement and owner decisions; a Chrome tile-size sweep remains. Was QUEUED (freeze) | Per-stage pipeline measured with `scripts/browser_measure.py`; the HUD acks a frame when its decode starts. A 20-agent latency search found no further change worth more than about 1 ms; adaptive quality and the other candidates were measured and rejected (browser.md, "Remote input to picture, stage by stage"). **Remaining:** a Chrome tile-size measurement sweep. **Bigger levers are owner decisions, not built:** 1x frames while the pointer moves, a video stream, a GPU for Chrome. Still missing: the owner's real Windows input-to-picture p50/p95 (recipe in that section: `flip.html` + `owner_snippet.js`). Reconcile frame/CPU/profile-memory, Local Network Access and sandbox receipts against current source; do not label all five measurements unimplemented or all passed. |
 
 Saved local handoff material (ask the current lead for a repository-visible PR or
 plan copy before relying on it on another machine): `br7-followups-plan.md`,
@@ -259,24 +273,53 @@ V-1…V-14. [Full voice plan](2026-10-13-voice-rework.md).
 
 [Full subagent plan](2026-10-13-subagent-view.md). This is visibility and stop-one
 for native Claude/Codex children, not a second task scheduler. Children stay silent
-apart from queued finish/failure notices. Existing child-tool restrictions remain.
+apart from queued finish/failure notices (SV-5, not built). Existing child-tool restrictions remain.
 
 | ID | Feature | Status / owner | Dependencies / acceptance |
 |---|---|---|---|
-| SV-0 | Capture actual native Claude/Codex child protocol and lifecycle fixtures | **TAKEN — Claude lead team, started 2026-10-15** | Synthetic one/parallel/background/nested/interrupted children; Claude stop_task, Codex experimental schema and child notifications/interrupt/token totals. Sanitized fixture recordings, no invented event shapes. Coordinate native processes and test slots. |
-| SV-1 | Claude child tagging/events, daemon record/routes/runner and API docs | **WAIT — unclaimed** | SV-0 Claude evidence. Keep child prose out of parent/Discord answer and preserve approval identity. |
-| SV-2 | Codex child set/routing, spawn events and non-fatal child approval handling | **WAIT — unclaimed** | SV-0 Codex + SV-1. High-overlap with B-NATIVE provider identity filters; agree shared hunks. If CLI lacks child notifications, explicitly narrow support. |
-| SV-3 | HUD child store, inline spawn rows and read-only transcript pane | **WAIT — unclaimed** | SV-1 merged event/route shapes; includes workspace migration, reducer, mock and browser checks. |
-| SV-4 | Stop one child via owner route and button | **WAIT — unclaimed** | SV-1 + SV-3 + actual L-C3/L-X3 stop-one proof; parent and siblings must survive. |
-| SV-5 | Coalesced child finished/failed speech notices | **WAIT — unclaimed** | SV-1 + V7; no reading child prose aloud or speaking owner-initiated Stop. |
-| SV-6 | Read child activity between orchestrator turns | **DEFERRED — decision after SV-0** | SV-1/2 and evidence background work needs it (L-C7/Q6). High-risk reader lifecycle change; do not silently absorb into SV-1. |
+| SV-0 | Capture actual native Claude/Codex child protocol and lifecycle fixtures | **INSTALLED — [#193](https://github.com/Johnwang688/jarvis/pull/193), merged 2026-10-15; Claude lead team; lead deploy log 2026-10-15/16** | Recorded sanitized fixtures for one/parallel/background/nested/interrupted children; Claude stop_task, Codex experimental schema and child notifications/interrupt/token totals. Findings in [2026-10-15-sv0-findings.md](2026-10-15-sv0-findings.md). |
+| SV-1 | Claude child tagging/events, daemon record/routes/runner and API docs | **INSTALLED — [#198](https://github.com/Johnwang688/jarvis/pull/198), merged 2026-10-15; Claude lead team; lead deploy log 2026-10-15/16** | Provider tagging, daemon record and owner routes. Child prose stays out of the parent/Discord answer; approval identity preserved. |
+| SV-2 | Codex child set/routing, spawn events and non-fatal child approval handling | **INSTALLED — [#199](https://github.com/Johnwang688/jarvis/pull/199), merged 2026-10-15; Claude lead team; lead deploy log 2026-10-15/16** (with [#195](https://github.com/Johnwang688/jarvis/pull/195), a known sub-agent's server request no longer kills the orchestrator's turn, and [#200](https://github.com/Johnwang688/jarvis/pull/200), a Codex Stop no longer ends the chat) | Codex children are their own records; child approvals are judged, never fatal to the parent. |
+| SV-3 | HUD child store, inline spawn rows and read-only transcript pane | **INSTALLED — [#212](https://github.com/Johnwang688/jarvis/pull/212), merged 2026-10-15; Claude lead team; lead deploy log 2026-10-15/16** | Child store outside React, inline spawn rows, read-only sub-agent pane and card-to-row link. Nothing spoken or posted to Discord. |
+| SV-4 | Stop one child via owner route and button | **INSTALLED — [#216](https://github.com/Johnwang688/jarvis/pull/216), merged 2026-10-16; Claude lead team; lead deploy log 2026-10-15/16** (leftovers in [#220](https://github.com/Johnwang688/jarvis/pull/220)) | Owner-only `POST /threads/{id}/subagents/{sid}/stop` and a Stop button per live row and pane header. Claude per-child Stop rests on SV-0's offline evidence for CLI 2.1.295; Codex per-child Stop is offered with its caveat shown. Silent: nothing about a Stop is spoken or posted. |
+| SV-5 | Coalesced child finished/failed speech notices | **NOT BUILT — unclaimed (READY)** | SV-1 and V7 are merged. No reading child prose aloud or speaking owner-initiated Stop. Queued in "Next up" below. |
+| SV-6 | Read child activity between orchestrator turns | **NOT BUILT — unclaimed** | SV-1/2 are merged. The owner (2026-10-15) chose to wait for it rather than mitigate the background-agent stall; turns the CLI starts by itself after a background sub-agent finishes stay unposted and unspoken. High-risk reader lifecycle change; do not silently absorb into another row. Queued in "Next up" below. |
 
-## HUD editor polish — started 2026-10-15
+## HUD editor polish — installed 2026-10-15
 
 | ID | Feature | Status / owner | Definition of done |
 |---|---|---|---|
-| ED-MARKS | Git marks (added, modified, deleted) in the editor's overview ruler | **TAKEN — Claude lead team, started 2026-10-15; being built now.** | Scope and acceptance are set by the lead team's PR; this row records the claim only. The accepted limit on owner global git filters in editor status (HUD-FOLLOWUPS below) is unchanged. |
-| ED-ICONS | File-type icons on editor tabs | **TAKEN — Claude lead team, started 2026-10-15.** | Scope and acceptance are set by the lead team's PR; this row records the claim only. Owner decisions on editor and tab dimensions and input behavior still apply. |
+| ED-MARKS | Git marks (added, modified, deleted) in the editor's overview ruler | **INSTALLED — [#194](https://github.com/Johnwang688/jarvis/pull/194), merged 2026-10-15; Claude lead team; owner-confirmed 2026-10-15; lead deploy log 2026-10-15/16** | The accepted limit on owner global git filters in editor status (HUD-FOLLOWUPS below) is unchanged. |
+| ED-ICONS | File-type icons on editor tabs | **INSTALLED — [#194](https://github.com/Johnwang688/jarvis/pull/194), merged 2026-10-15; Claude lead team; owner-confirmed 2026-10-15; lead deploy log 2026-10-15/16** | Same PR as ED-MARKS. Owner decisions on editor and tab dimensions and input behavior still apply. |
+
+## VEX view redesign — 2026-10-15/16
+
+[Plan](2026-10-15-vex-ui-redesign.md), [mockup](2026-10-15-vex-ui-mockup.html), owner decisions of
+2026-10-15 in the plan's section 0.1. Fakes only; real VEX tools, robot Download and the hardware checks H1 to H10 are UNRUN.
+
+| ID | Feature | Status / owner | Dependencies / definition of done |
+|---|---|---|---|
+| VX-UI-1 | Layout shell: header with slot chip, Clean/Build/Rebuild/Download bar, status line with Stop, tabbed output | **INSTALLED — [#209](https://github.com/Johnwang688/jarvis/pull/209), merged 2026-10-15; Claude lead team; lead deploy log 2026-10-15/16** | One Download button ("Download to slot N") that chains clean, build and download; Stop closes the running action's own terminal (a trusted press only). No Run button: the owner starts programs from the robot. |
+| VX-UI-2 | State marks on steps and tab badges | **DONE inside [#209](https://github.com/Johnwang688/jarvis/pull/209), INSTALLED (lead deploy log 2026-10-15/16)** (its title: "layout shell with state marks and help") | Idle/running/done/failed/stale/unknown marks with glyph and label, stale advisory only. No separate PR. |
+| VX-UI-3 | First-use help | **DONE inside [#209](https://github.com/Johnwang688/jarvis/pull/209), INSTALLED (lead deploy log 2026-10-15/16), in the owner's simplified form** | Permanent hover help plus a `?` list; the plan's first-use counts were dropped by the owner. No separate PR. |
+| VX-UI-4a | Brain tab: the brain terminal in the VEX pane, Connect only on a trusted press | **INSTALLED — [#213](https://github.com/Johnwang688/jarvis/pull/213), merged 2026-10-16; Claude lead team; lead deploy log 2026-10-15/16** | Details in `docs/notes/vex.md`, "Brain tab, VX-UI-4a". |
+| VX-UI-4b | Brain startup reply and optional `--quiet` | **GATED — on hardware check H4** | Built only if H4 shows the brain terminal hangs on its first cursor query. |
+| VX-UI-5 | Run / Stop | **DROPPED** (owner, 2026-10-15: no Run button) | Stop is VX-UI-1's cancel of a running Clean/Build/Download. |
+| VX-UI-6 | Docs | **IN PROGRESS** | `docs/notes/vex.md`, `docs/hud-api.md` and the decisions file (V-3 amendment). |
+| H1 to H10 | Hardware checks | **VERIFY / owner-assisted — UNRUN** | Include H9/H10 (what a Stop mid-download leaves on the brain and COM3). Open firmware decision: braking during a blocking whenWithin after a chained move. |
+
+## 2026-10-16 additions outside the checkpoint rows
+
+| Area | Completed scope / evidence | Remaining qualification |
+|---|---|---|
+| Buttons | [#210](https://github.com/Johnwang688/jarvis/pull/210) 4px rectangle buttons and a binary click sparkle | **INSTALLED** (lead deploy log 2026-10-15/16); no outstanding row. |
+| Secrets display | [#205](https://github.com/Johnwang688/jarvis/pull/205) typed credentials are redacted in labels, approval cards and logs; the gate judges the raw text and what runs is never hidden | **INSTALLED** (lead deploy log 2026-10-15/16); no outstanding row. |
+| Gate: merge/close | [#208](https://github.com/Johnwang688/jarvis/pull/208) merging or closing a pull request always asks the owner; [#222](https://github.com/Johnwang688/jarvis/pull/222) and [#225](https://github.com/Johnwang688/jarvis/pull/225) close its delta-review findings (trailing `--`, open-ended git exec settings, GraphQL `$b`, blanked refs) | **INSTALLED** (lead deploy log 2026-10-15/16). `merge_gate.py` and `rules.py` are SELF_PROTECTED; the owner reviews those hunks. |
+| Gate: commands | [#211](https://github.com/Johnwang688/jarvis/pull/211) Monitor and any command-bearing tool are judged as a command; [#220](https://github.com/Johnwang688/jarvis/pull/220) the Secret Service rule and SV-4 Stop-label leftovers | **INSTALLED** (lead deploy log 2026-10-15/16). |
+| Diff tab | [#219](https://github.com/Johnwang688/jarvis/pull/219) one-click Quick review (Claude Haiku, then Codex Luna, then v1 Haiku; read-only; a harness at 75% or more of any quota window is skipped) | **INSTALLED** (lead deploy log 2026-10-15/16). Owner-assisted: the first real press has not been made. Every test used fakes. |
+| Codex chat git | [#223](https://github.com/Johnwang688/jarvis/pull/223) Codex chats push, open and merge or close pull requests through Jarvis, which keeps the GitHub login (CG-0, CG-1); [#224](https://github.com/Johnwang688/jarvis/pull/224) the Codex sandbox read gap is closed with default-closed HOME dot entries, the Windows profiles and key-like files (CG phase 2). [Plan](2026-10-15-codex-git-credentials.md) | **INSTALLED** (lead deploy log 2026-10-15/16), daemon restarted. Live check is GIT-LIVE. `permissions.py` and `session_tools.py` hunks await the owner's SELF_PROTECTED review. |
+| Codex turns | [#200](https://github.com/Johnwang688/jarvis/pull/200) a Stop no longer ends the chat; [#207](https://github.com/Johnwang688/jarvis/pull/207) partial turns disclosed in usage, ledger and HUD | **INSTALLED** (lead deploy log 2026-10-15/16). |
+| Sidebar | [#206](https://github.com/Johnwang688/jarvis/pull/206) each project shows its five most recent chats | **INSTALLED** (lead deploy log 2026-10-15/16). |
 
 ## Original checkpoint and requested fixes already landed
 
@@ -286,7 +329,7 @@ PR #125 itself adds plans, not the features those plans describe.
 
 | Area | Completed scope / evidence | Remaining qualification |
 |---|---|---|
-| Chat Git/worktrees | [#88](https://github.com/Johnwang688/jarvis/pull/88) sandbox roots; [#92](https://github.com/Johnwang688/jarvis/pull/92) owner approval routing | Final-policy positive real push→PR acceptance still needs a dedicated receipt; denial/resume and local commit were verified. Old pre-routing probes are not that receipt. |
+| Chat Git/worktrees | [#88](https://github.com/Johnwang688/jarvis/pull/88) sandbox roots; [#92](https://github.com/Johnwang688/jarvis/pull/92) owner approval routing | Superseded for Codex chats by [#223](https://github.com/Johnwang688/jarvis/pull/223) and [#224](https://github.com/Johnwang688/jarvis/pull/224) (see Codex chat git below). Final-policy positive real push→PR acceptance is GIT-LIVE; denial/resume and local commit were verified. Old pre-routing probes are not that receipt. |
 | Models/caching | [#86](https://github.com/Johnwang688/jarvis/pull/86) Haiku default,90k compaction, stable text/image cache boundaries | Browser classifier fix is separate B-CLASSIFIER; do not change the owner's selected model. |
 | Guide/history | [#96](https://github.com/Johnwang688/jarvis/pull/96), [#99](https://github.com/Johnwang688/jarvis/pull/99) lossless notes extraction and guide limits | Preserve archived source blocks; current notes belong outside them. |
 | Chat tool calls/titles | TC-1 #84, [#93](https://github.com/Johnwang688/jarvis/pull/93) TC-2; [#87](https://github.com/Johnwang688/jarvis/pull/87) one-line title/hover | No outstanding implementation from the checkpoint. |
@@ -307,24 +350,33 @@ PR #125 itself adds plans, not the features those plans describe.
 | ID | Scope | Status / next step |
 |---|---|---|
 | QA-LOAD | Load-sensitive tests and reliable sweep reporting | **INSTALLED — [#188](https://github.com/Johnwang688/jarvis/pull/188), merged 2026-10-15; Claude lead, `claude/qa-load`.** | `tests/loadclock.py` judges load-sensitive bounds at idle speed; the `rules`, VEX, terminal and devurl bounds use it, and the runner collision test is fixed. Honest limit: under load a bound can be about 30% looser than at idle, so a machine under load can pass a regression that an idle machine would fail. An idle judge is exact. A failing bound is still a failure; none was removed. Per-suite output and real exit codes stay required. The navigate-away auth race it found shipped separately as #190. |
-| GIT-LIVE | Positive end-to-end native Git flow under the final approval policy | **VERIFY — unclaimed.** Local worktree/edit/commit and denied/resumed pushes were checked. Use a disposable authorized repo/branch and actual owner approval for the final positive flow; do not reuse old fixture-helper evidence as native proof. |
-| HUD-FOLLOWUPS | Reconcile the checkpoint's old `hud-open-followups` list | **DONE — audited 2026-10-14; [#187](https://github.com/Johnwang688/jarvis/pull/187) merged 2026-10-15.** The "Jarvis can read" switch now follows other windows and an answered task question clears at once. | The old accepted-at-merge list is closed by evidence. Remaining small item: git marks in the editor overview ruler (ED-MARKS above, being built). **Accepted limits, not tasks:** `terminal_guard` over-refuses a command with `> `; the AST walker has an `importlib` blind spot; the fence tier is keyed on `fetch_page`/`web_search`; a leftover `.tmp` can remain after a hard crash; `/mnt/c` delete by path; owner global git filters apply to editor status; the Browser gate is shared across profiles (Browser frozen). |
+| GIT-LIVE | Positive end-to-end native Git flow under the final approval policy | **VERIFY / owner-assisted — the owner's live check of [#223](https://github.com/Johnwang688/jarvis/pull/223) and [#224](https://github.com/Johnwang688/jarvis/pull/224).** Both are merged; neither has a live Codex receipt. Check, with a disposable authorized repo and branch and a real owner approval: a Codex chat's `chat_git_push` / `chat_pr_create` card and result, and that a plain sandboxed command still cannot open the gh token, `.env`, `~/.codex/auth.json`, `~/.claude/.credentials.json` or the credential folders. Local worktree/edit/commit and denied/resumed pushes were checked earlier; do not reuse old fixture-helper evidence as native proof. |
+| HUD-FOLLOWUPS | Reconcile the checkpoint's old `hud-open-followups` list | **DONE — audited 2026-10-14; [#187](https://github.com/Johnwang688/jarvis/pull/187) merged 2026-10-15.** The "Jarvis can read" switch now follows other windows and an answered task question clears at once. | The old accepted-at-merge list is closed by evidence. Git marks in the editor overview ruler shipped as ED-MARKS above. **Accepted limits, not tasks:** `terminal_guard` over-refuses a command with `> `; the AST walker has an `importlib` blind spot; the fence tier is keyed on `fetch_page`/`web_search`; a leftover `.tmp` can remain after a hard crash; `/mnt/c` delete by path; owner global git filters apply to editor status; the Browser gate is shared across profiles (Browser frozen). |
 | NOTES-CHECK | `slim_claude --check` failing on the archived notes | **INSTALLED — [#185](https://github.com/Johnwang688/jarvis/pull/185) (`editor.md`) and [#189](https://github.com/Johnwang688/jarvis/pull/189) (`terminals.md`), merged 2026-10-15; docs and tooling only.** | Each restored the archived `claude-source` payload byte for byte and moved the current text outside it (the terminals readable-switch note moved out of the archive). `python scripts/slim_claude.py --check` passes again. |
 | HUD-HARDENING | Owner hardening decisions of 2026-10-15 | **INSTALLED — [#191](https://github.com/Johnwang688/jarvis/pull/191), merged 2026-10-15.** | The approval page's CSP has no `'wasm-unsafe-eval'`. Only a `Sec-Fetch-Dest: worker` fetch of a `.js` directly under `/assets/` gets it, and those responses send `Vary: Sec-Fetch-Dest`; a path-only grant was rejected in review because a same-origin popup gained a realm that could compile WebAssembly. The three WebAssembly users (syntax, VAD, wake word) run in module workers. `jarvis hud rebuild` runs `npm ci --ignore-scripts`; this closes only the install-time route. Decisions in [the editor decisions](2026-10-09-hud-editor-decisions.md) under "Added 2026-10-15"; worker invariant in `docs/notes/editor.md`. |
 | VEX-DOWNLOAD | Match Download output/completion to Build/Clean; visible brain/controller connectivity and timestamped connection history | **INSTALLED — [#158](https://github.com/Johnwang688/jarvis/pull/158); Codex lead / `browser_auth`; verified build above.** Branch `codex/vex-download-device-status`, runtime `70dfd6c`, [contract/verified gates](2026-10-13-vex-download-device-status.md). Stable actual-PTY Download output/final records; shared source-verified USB-only Brain/Controller checks with unknown/busy/stale preservation and bounded timestamped history. PASS: 38 focused Python, 50 targeted HUD units, production build, 49 selected actual-HUD checks, 9 feedback/narrow checks and 7 Build/Clean output regressions. Merged at `f26848d1` and installed by the normal guarded rebuild/restart above. Real VEX tools/devices and robot Download acceptance **UNRUN**; no radio-link or extension-host health claim. |
-| VEX-UI | Broad VEX view redesign | **DEFERRED.** The urgent Clean/Build fix is installed. The narrow bug request does not itself expand into a full redesign or authorize real robot operations. |
+| VEX-UI | VEX view redesign ([plan](2026-10-15-vex-ui-redesign.md), [mockup](2026-10-15-vex-ui-mockup.html)) | **IN PROGRESS — VX-UI-1 ([#209](https://github.com/Johnwang688/jarvis/pull/209)) and VX-UI-4a ([#213](https://github.com/Johnwang688/jarvis/pull/213)) merged; see the VEX view redesign table below.** The urgent Clean/Build fix ([#158](https://github.com/Johnwang688/jarvis/pull/158)) is installed. Does not authorize real robot operations. |
 | PLATFORM | Physical Browser sound, real Windows mic/AEC, real account sign-in, VEX download | **VERIFY / owner-assisted.** Synthetic/unit/native-shell success must not be reported as these real-world acceptances. |
 
 Starting points for another team: **GIT-LIVE** (needs a disposable repo and the
-owner), or the unclaimed items in the voice follow-ups. SV-0 is taken and
-QA-LOAD is installed. B-NATIVE, B-AUTH and B-FIND are installed; their
-implementation reservations are complete. Choose other unclaimed packages or
-coordinate a handoff with the named lead.
+owner), the unbuilt Browser rows (the freeze is lifted), SV-5/SV-6, or the unclaimed
+items in the voice follow-ups. SV-0 to SV-4 and QA-LOAD are merged. B-NATIVE, B-AUTH
+and B-FIND are installed; their implementation reservations are complete. Choose other
+unclaimed packages or coordinate a handoff with the named lead.
 
 **Remaining:** voice follow-ups are listed in
 [2026-10-15-voice-followups.md](2026-10-15-voice-followups.md). The one that touches a
 boundary is the `/stt` and `/say` routes, which have no `owner_only` check; the gap is
 older than V2 and is not closed by any merged package.
+
+## Next up (2026-10-16)
+
+In this order:
+
+1. **Small leftovers and the VEX UI** (in progress now): VX-UI-6 docs; VX-UI-4b waits on hardware check H4.
+2. **The Browser queue and SV-5/SV-6**: B-PICKERS, B-IME and B-DIRECT-CAPTURE are READY; B-PREVIEW stays blocked on a Chrome capability; the B-PERF tile-size sweep; SV-5 (spoken child notices) and SV-6 (between-turn drain), neither built.
+3. **Voice follow-ups**: [2026-10-15-voice-followups.md](2026-10-15-voice-followups.md), including the `/stt` and `/say` `owner_only` gap.
+4. **Owner-assisted checks**: the Codex live checks for [#223](https://github.com/Johnwang688/jarvis/pull/223) and [#224](https://github.com/Johnwang688/jarvis/pull/224) (GIT-LIVE); the Quick review first press ([#219](https://github.com/Johnwang688/jarvis/pull/219)); Chrome sign-in on a keyring profile (B-LOGIN); VEX hardware H1 to H10; and the firmware decision on braking during a blocking whenWithin after a chained move.
 
 ## Shared test, review and release contract
 
@@ -358,7 +410,9 @@ older than V2 and is not closed by any merged package.
 - [Browser plan](2026-10-10-hud-browser-plan.md), [decisions](2026-10-10-hud-browser-decisions.md),
   [amendment 1](2026-10-11-hud-browser-plan-amendment-1.md), [amendment 2](2026-10-12-hud-browser-plan-amendment-2.md).
 - [Driving release](2026-10-13-browser-driving-release.md), [native driving](2026-10-13-browser-driving-claude-codex.md),
-  [sound](2026-10-13-browser-sound.md), [voice](2026-10-13-voice-rework.md), [subagent view](2026-10-13-subagent-view.md).
+  [sound](2026-10-13-browser-sound.md), [voice](2026-10-13-voice-rework.md), [subagent view](2026-10-13-subagent-view.md),
+  [VEX redesign](2026-10-15-vex-ui-redesign.md), [Codex git credentials](2026-10-15-codex-git-credentials.md),
+  [Diff quick review](2026-10-15-diff-quick-review.md), [PR merge/close decisions](2026-10-15-pr-merge-close-decisions.md).
 - [Current Browser notes](../notes/browser.md), [control-plane notes](../notes/control-plane.md),
   [voice notes](../notes/voice-face.md), [HUD API](../hud-api.md), [working guide](../../CLAUDE.md).
 - Historical owner-local checkpoint: `/home/johnw/projects/Jarvis/docs/plans/2026-10-12-checkpoint.md`.
