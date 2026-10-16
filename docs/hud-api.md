@@ -1763,9 +1763,11 @@ HUD's side of the routes above (`hud/src/api.ts`, `lib/vex.ts`,
   the makefile does not list) runs one `rebuild` and sends again; a second
   `build_first` stops the chain with the daemon's sentence. Only once the
   build has succeeded, while the brain terminal holds the port, it is closed
-  (`DELETE /terminals/{id}`) and opened again afterwards (`POST /vex/brain`)
-  — never after a chain a card, a crash or the owner's Stop dropped, nor after
-  a card that came and went while the download ran. **Stop** (owner decision
+  (`DELETE /terminals/{id}`) and — since VX-UI-4a (2026-10-15) — **never
+  opened again by the chain**: the Brain tab says it was closed for the
+  download and offers Connect (owner decision 5: the link opens only on the
+  owner's Connect). Before VX-UI-4a a chain no card, crash or Stop dropped
+  reopened it (`POST /vex/brain`). **Stop** (owner decision
   6; a trusted pointer or key press, never a script's click; a view's Stop
   acts on its own project only, and Clean/Build/Rebuild are off while any
   chain runs) closes the running clean's, build's **or download's** program terminal (`DELETE
@@ -1790,7 +1792,19 @@ HUD's side of the routes above (`hud/src/api.ts`, `lib/vex.ts`,
 - SSE `vex_device`: matched against the device actions this window started
   (recorded before each request; 30 s); one it did not start is said in the
   VEX view.
-- Test hooks (read-only): `window.__hudVex` (`blocked`, `cards`, `chain()`, `run(id)`),
+- Brain tab (VX-UI-4a, 2026-10-15): the brain terminal drawn in the VEX pane
+  (a terminal view whose `data-where` is `vex-<pane>`), the same session,
+  "Jarvis can read" switch and input/Ctrl-C rules as in the panel. **Connect**
+  is the only caller of `POST /vex/brain` `{}` (a trusted pointer or
+  Enter/Space press; never a script's click; off under a card, during a
+  download chain and while a device read is on its way): showing the tab, a
+  reload or the end of a download asks for nothing. A link the daemon already
+  holds (`/vex/status` `brain`) is shown, never opened. **Disconnect** is
+  `DELETE /terminals/{id}`. One place at a time: a terminal pane showing it
+  wins, then the first VEX pane whose Brain tab shows it; the panel's tab says
+  "in the VEX view, pane N" (`data-place="vex-N"`). No new route.
+- Test hooks (read-only): `window.__hudVex` (`blocked`, `cards`, `chain()`, `run(id)`, `brain()`),
+  `window.__hudTerminals.shownIn(id)` (`pane-N`, `vex-N` or null),
   and `__hud.monacoEditors()` rows gain `line` and `column` (where the cursor
   is).
 
