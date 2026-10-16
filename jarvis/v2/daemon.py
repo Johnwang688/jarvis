@@ -26,7 +26,7 @@ from urllib.parse import parse_qs, urlsplit
 import uuid
 
 from jarvis import config
-from .approvals import ApprovalRequest, PendingApprovals
+from .approvals import ApprovalRequest, PendingApprovals, card_text
 from .bus import EventBus
 from .control import ControlError
 from .permissions import PermitContext, build_permit
@@ -53,6 +53,42 @@ STOP_TIMEOUT = 2.0
 # `permit` allowed it: the auto-mode flashing and the Discord DM spam
 # (2026-10-08). They stay in the thread log under these names and never reach
 # the bus.
+# The fields of an event's data that hold a command or a tool's arguments:
+# what `log.jsonl` keeps with typed credentials withheld (owner, 2026-10-15).
+LOGGED_REDACTED = ("args", "command", "cmd", "reason", "headline")
+
+
+def _log_fields(data) -> dict:
+    """`LOGGED_REDACTED` fields of an event's data through
+    `secrets.redact_value`, computed outside the daemon's lock (it reads
+    credential files). A redaction that fails withholds the field."""
+    out = {}
+    if not isinstance(data, dict):
+        return out
+    from jarvis.tools import secrets as v1_secrets
+    for key in LOGGED_REDACTED:
+        if key in data:
+            try:
+                out[key] = v1_secrets.redact_value(data[key])
+            except Exception:  # noqa: BLE001
+                out[key] = "[withheld: could not be judged]"
+    return out
+
+
+def _logged(record: dict, original, fields: dict) -> dict:
+    """The record as `log.jsonl` keeps it: each field still holding the
+    event's own value replaced by its redacted copy (a field the daemon
+    already replaced, a Browser action's empty args, stays)."""
+    data = record.get("data")
+    if not fields or not isinstance(data, dict) or not isinstance(original, dict):
+        return record
+    kept = dict(data)
+    for key, value in fields.items():
+        if key in kept and kept[key] == original.get(key):
+            kept[key] = value
+    return {**record, "data": kept}
+
+
 GATE_KINDS = {EventKind.APPROVAL_REQUESTED: "gate_requested",
               EventKind.APPROVAL_RESOLVED: "gate_resolved"}
 _TASK_VERBS = ("start", "steer", "cancel", "resume", "answer")
@@ -1459,7 +1495,7 @@ class Daemon:
         self.bus.publish({"kind": "approval_resolved",
                           "thread_id": request.thread_id,
                           "data": {"req_id": request.req_id, "code": request.code,
-                                   "tool": request.tool, "command": request.command,
+                                   "tool": request.tool, "command": card_text(request.command),
                                    "origin": request.origin,
                                    "decision": getattr(decision, "value", str(decision)),
                                    "resolution": resolution}})
@@ -1477,6 +1513,7 @@ class Daemon:
             self._record_subagent(session, event)
             return
         # Scrub reads credential files: never do this while holding _lock.
+        log_fields = _log_fields(event.data)
         tool_label = None
         if event.kind == EventKind.TOOL_STARTED:
             from .tool_calls import label
@@ -1555,12 +1592,16 @@ class Daemon:
             if event.kind in GATE_KINDS:
                 # Logged for the audit trail, never published: see GATE_KINDS.
                 record["kind"] = GATE_KINDS[event.kind]
-                self.stores.threads._append(thread.id, "log.jsonl", record)
+                self.stores.threads._append(thread.id, "log.jsonl", _logged(record, event.data, log_fields))
                 return
             if event.kind != EventKind.TEXT_DELTA:
                 # WP1 log() accepts text only; preserve full structured events
                 # through its serialized append primitive, in the same log.
-                self.stores.threads._append(thread.id, "log.jsonl", record)
+                # The log keeps credentials typed into a command withheld
+                # (owner, 2026-10-15); the bus keeps the event as it came,
+                # for the in-process consumers that act on it (the hatch
+                # runs a declined command from it).
+                self.stores.threads._append(thread.id, "log.jsonl", _logged(record, event.data, log_fields))
             if event.kind in (EventKind.USAGE, EventKind.ERROR):
                 # Durable and synchronous, including chat. The stable id makes
                 # the runner's subsequent ledger delivery idempotent.

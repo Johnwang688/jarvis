@@ -37,6 +37,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from . import config, runtime, tools
+from .tools.secrets import tool_args_for_display
 
 MAX_CONCURRENT = 3
 MAX_LOG_LINES = 400
@@ -167,7 +168,7 @@ def start(
     def on_event(kind: str, data) -> None:
         if kind == "tool_start":
             tool_name, raw = data
-            tsk.add_log(f"→ {tool_name}({str(raw)[:120]})")
+            tsk.add_log(f"→ {tool_name}({tool_args_for_display(raw)[:120]})")
         elif kind == "interim_text" and data:
             tsk.add_log(f"note: {str(data)[:200]}")
 

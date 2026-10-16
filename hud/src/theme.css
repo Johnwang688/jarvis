@@ -68,6 +68,10 @@
   --veil: rgba(0, 0, 0, 0.62);
   --shadow-pop: 0 8px 28px rgba(0, 0, 0, 0.55);
   --radius: 6px;
+  /* Every button: a crisp rectangle with slightly softened corners (owner, 2026-10-15). One
+     token, so no button drifts back to a pill. Only Send, Stop and Steer stay circles; chips that
+     hold a control use it too, and pure status badges (.badge, .phase, .edlock) keep their shape. */
+  --radius-btn: 4px;
   --mono: ui-monospace, "Cascadia Mono", Consolas, monospace;
 
   /* The HUD's own zoom (lib/layout.ts), set by the window. Viewport units
@@ -97,7 +101,7 @@ button {
   color: var(--text);
   background: var(--bg-2);
   border: 1px solid var(--border-strong);
-  border-radius: var(--radius);
+  border-radius: var(--radius-btn);
   padding: 5px 10px;
   cursor: pointer;
 }
@@ -188,7 +192,7 @@ h2.bar {
   display: inline-flex; align-items: center; justify-content: center;
   width: 22px; height: 22px; margin: 0; padding: 0; flex: 0 0 22px;
   font-size: 15px; line-height: 1; color: var(--text-muted);
-  background: transparent; border-color: transparent; border-radius: 4px;
+  background: transparent; border-color: transparent; border-radius: var(--radius-btn);
 }
 .barrow #newproject:hover:not(:disabled) { background: var(--bg-3); color: var(--text); }
 
@@ -431,6 +435,51 @@ button.tree-row.morechats:focus-visible { box-shadow: inset 0 0 0 1px var(--acce
 .tc-status, .tc-time { flex: 0 0 auto; font-variant-numeric: tabular-nums; }
 .tc-status.running { color: var(--amber); }
 
+/* ---- native sub-agents (SV-3) ---- */
+/* A row where the chat spawned it; a status is always a word: amber live
+   (as a running call), green done, red failed, muted stopped. */
+/* The rows at one spot are one block, indented as a tool group is. */
+.subagent-rows {
+  margin: 0 20px; min-width: 0; display: flex; flex-direction: column; gap: 2px;
+  font: 11px var(--mono); color: var(--text-muted);
+}
+.subagent-row { min-width: 0; }
+.subagent-row .sa-open, .sa-toggle {
+  display: flex; align-items: center; gap: 2px 8px; width: 100%; min-width: 0; white-space: nowrap;
+  border: 0; background: transparent; padding: 3px 0; text-align: left; color: inherit; font: inherit;
+}
+/* A narrow pane wraps the numbers under the name rather than squeezing the name away. */
+.subagent-row .sa-open { flex-wrap: wrap; }
+.subagent-row .sa-open:hover:not(:disabled) { color: var(--text-2); background: transparent; }
+.subagent-row .sa-open:focus-visible, .sa-toggle:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }
+.sa-mark { color: var(--text-muted); flex: 0 0 auto; }
+/* Name, then status, never split: the name gives way (ellipsis), the status word does not. */
+.sa-first { display: flex; align-items: center; gap: 8px; min-width: 0; max-width: 100%; flex: 0 1 auto; }
+.sa-name { color: var(--text-2); min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; flex: 0 1 auto; }
+.sa-kind, .sa-tool { min-width: 0; overflow: hidden; text-overflow: ellipsis; flex: 0 1 auto; }
+.sa-status, .sa-time, .sa-count { flex: 0 0 auto; font-variant-numeric: tabular-nums; }
+.sa-status.live { color: var(--amber); }
+.sa-status.done { color: var(--green); }
+.sa-status.failed { color: var(--red); }
+.sa-status.stopped { color: var(--text-muted); }
+.sa-list { max-height: 300px; overflow: auto; }
+.sa-list { display: flex; flex-direction: column; gap: 2px; padding-left: 12px; }
+.subagent-row.sa-flash { outline: 1px solid var(--accent-line); outline-offset: 2px; border-radius: 3px; }
+.sa-pane { display: flex; flex-direction: column; min-height: 0; }
+.sa-head {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 8px 20px;
+  border-bottom: 1px solid var(--border); font: 11px var(--mono); color: var(--text-muted);
+}
+.sa-head .sa-of { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1 1 80px; }
+.sa-brief { padding: 6px 20px 0; font: 11px var(--mono); color: var(--text-muted); }
+.sa-brief-text {
+  margin: 4px 0 6px; padding: 8px 10px; max-height: 240px; overflow: auto; white-space: pre-wrap;
+  border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-inset); color: var(--text-2);
+  font: 12px var(--mono);
+}
+.sa-cardlink { margin: -4px 0 8px; }
+.sa-cardlink button.quiet { padding: 0; font: 10px var(--mono); letter-spacing: 0.04em; color: var(--text-2); }
+
 
 /* ---- input bar ---- */
 :is(#inputbar, .inputbar) {
@@ -451,7 +500,7 @@ button.tree-row.morechats:focus-visible { box-shadow: inset 0 0 0 1px var(--acce
 :is(#chips, .chips) { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
 .chip {
   font: 10px var(--mono); color: var(--text-2);
-  background: var(--bg-2); border: 1px solid var(--border-strong); border-radius: 10px;
+  background: var(--bg-2); border: 1px solid var(--border-strong); border-radius: var(--radius-btn);
   padding: 2px 8px; display: flex; gap: 6px; align-items: center;
 }
 .chip b { cursor: pointer; color: var(--text-muted); font-weight: 400; }
@@ -471,11 +520,14 @@ button.tree-row.morechats:focus-visible { box-shadow: inset 0 0 0 1px var(--acce
 /* Attach (a paperclip) and Send (an arrow in a circle): round icon buttons the
    height of one line of the box, pinned to its bottom edge as it grows. */
 .iconbtn {
-  flex: 0 0 auto; width: 36px; height: 36px; padding: 0; border-radius: 50%;
+  flex: 0 0 auto; width: 36px; height: 36px; padding: 0; border-radius: var(--radius-btn);
   display: inline-flex; align-items: center; justify-content: center; cursor: pointer;
   color: var(--text-2); background: var(--bg-2); border: 1px solid var(--border-strong);
 }
 .iconbtn:hover:not(:disabled) { background: var(--bg-3); color: var(--text); }
+/* The owner's one exception to the rectangle (2026-10-15): Send, Stop and Steer (Steer is
+   .send.steer) stay true circles. */
+.iconbtn.send, .iconbtn.stop { border-radius: 50%; }
 label.iconbtn.attach { background: transparent; border-color: transparent; }
 label.iconbtn.attach:hover { background: var(--bg-3); border-color: var(--border-strong); }
 .iconbtn.send { background: var(--accent); border-color: var(--accent); color: #0f0f0e; }
@@ -495,8 +547,8 @@ label.iconbtn.attach:hover { background: var(--bg-3); border-color: var(--border
   padding: 4px 6px; border-radius: 0; margin-left: -1px;
   font: 10px var(--mono); letter-spacing: 0.06em; text-transform: uppercase;
 }
-:is(#dictation, .dictation) button:first-child { border-radius: var(--radius) 0 0 var(--radius); margin-left: 0; }
-:is(#dictation, .dictation) button:last-child { border-radius: 0 var(--radius) var(--radius) 0; }
+:is(#dictation, .dictation) button:first-child { border-radius: var(--radius-btn) 0 0 var(--radius-btn); margin-left: 0; }
+:is(#dictation, .dictation) button:last-child { border-radius: 0 var(--radius-btn) var(--radius-btn) 0; }
 :is(#dictation, .dictation) button.on { position: relative; z-index: 1; }
 :is(#dictation, .dictation) button.on.off { background: var(--red-soft); border-color: var(--red-line); color: var(--red); }
 
@@ -555,10 +607,10 @@ label.iconbtn.attach:hover { background: var(--bg-3); border-color: var(--border
 #speechstrip button {
   padding: 2px 0; width: 36px; border-radius: 0; margin-left: -1px; font: 11px var(--mono);
 }
-#speechstrip button:first-child { border-radius: var(--radius) 0 0 var(--radius); margin-left: 0; }
-#speechstrip button:last-child { border-radius: 0 var(--radius) var(--radius) 0; }
+#speechstrip button:first-child { border-radius: var(--radius-btn) 0 0 var(--radius-btn); margin-left: 0; }
+#speechstrip button:last-child { border-radius: 0 var(--radius-btn) var(--radius-btn) 0; }
 #speechstrip.compact { position: fixed; left: 2px; bottom: 72px; width: 32px; display: block; z-index: 40; }
-#speechstrip.compact button { width: 32px; height: 20px; padding: 0; border-radius: var(--radius); margin: 0; }
+#speechstrip.compact button { width: 32px; height: 20px; padding: 0; border-radius: var(--radius-btn); margin: 0; }
 #shell.speech-on #sidebar { padding-bottom: 224px; }
 #shell.mic-tight.speech-on #sidebar { padding-bottom: 180px; }
 
@@ -780,7 +832,7 @@ label.iconbtn.attach:hover { background: var(--bg-3); border-color: var(--border
 .toolbar.warn { flex-wrap: wrap; }
 .chip.edlock, .chip.edro {
   font: 10.5px var(--mono); color: var(--text-2); border: 1px solid var(--border-strong);
-  border-radius: 10px; padding: 1px 8px; white-space: nowrap; flex: 0 0 auto;
+  border-radius: 10px; padding: 1px 8px; white-space: nowrap; flex: 0 0 auto;  /* a status badge, not a control: stays a pill */
 }
 .edbody { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
 .edbody.mdsplit { flex-direction: row; }
@@ -800,7 +852,7 @@ label.iconbtn.attach:hover { background: var(--bg-3); border-color: var(--border
 }
 .sidetabs button {
   font: 600 9.5px var(--mono); letter-spacing: 0.05em; text-transform: uppercase;
-  padding: 2px 7px; border: none; background: none; color: var(--text-muted); border-radius: 4px;
+  padding: 2px 7px; border: none; background: none; color: var(--text-muted); border-radius: var(--radius-btn);
 }
 .sidetabs button.on { color: var(--text); box-shadow: inset 0 -2px var(--accent); }
 .sidetabs button:hover:not(:disabled) { color: var(--text); background: var(--hover); }
@@ -1054,7 +1106,7 @@ details.decisions[open] summary { color: var(--text); margin-bottom: 8px; }
 .tree-row.droptarget { outline: 1px dashed var(--accent-line); outline-offset: -1px; background: var(--accent-soft); }
 .tree-row .menu {
   margin-left: auto; flex: 0 0 auto; font: 11px var(--mono); color: var(--text-muted);
-  padding: 0 4px; border: none; background: none; border-radius: 3px;
+  padding: 0 4px; border: none; background: none; border-radius: var(--radius-btn);
 }
 .tree-row:hover .menu { color: var(--text); }
 .tree-row .menu:hover:not(:disabled) { background: var(--bg-3); }
@@ -1103,7 +1155,7 @@ details.decisions[open] summary { color: var(--text); margin-bottom: 8px; }
 }
 .mpop .mlist { display: flex; flex-direction: column; }
 .mpop button.mopt {
-  text-align: left; background: transparent; border: 1px solid transparent; border-radius: 4px;
+  text-align: left; background: transparent; border: 1px solid transparent; border-radius: var(--radius-btn);
   padding: 5px 8px; font: 12px var(--mono); color: var(--text-2);
 }
 .mpop button.mopt:hover:not(:disabled) { background: var(--hover); color: var(--text); }
@@ -1214,7 +1266,7 @@ button.collapse {
   display: inline-flex; align-items: center; justify-content: center;
   width: 24px; height: 24px; padding: 0; flex: 0 0 24px;
   font: 13px var(--mono); line-height: 1; color: var(--text-muted);
-  background: transparent; border-color: transparent; border-radius: 4px;
+  background: transparent; border-color: transparent; border-radius: var(--radius-btn);
 }
 button.collapse:hover:not(:disabled) { background: var(--bg-3); color: var(--text); }
 .sidetop button.collapse { height: 32px; }
@@ -1224,8 +1276,8 @@ button.collapse:hover:not(:disabled) { background: var(--bg-3); color: var(--tex
   padding: 0 6px; height: 22px; min-width: 22px; border-radius: 0; margin-left: -1px;
   font: 10px var(--mono); color: var(--text-2); background: var(--bg-2);
 }
-.zoomctl button:first-child { border-radius: var(--radius) 0 0 var(--radius); margin-left: 0; }
-.zoomctl button:last-child { border-radius: 0 var(--radius) var(--radius) 0; }
+.zoomctl button:first-child { border-radius: var(--radius-btn) 0 0 var(--radius-btn); margin-left: 0; }
+.zoomctl button:last-child { border-radius: 0 var(--radius-btn) var(--radius-btn) 0; }
 .zoomctl button.pct { min-width: 42px; color: var(--text); }
 
 /* The draggable edge: a 7px hit area over the 1px rule, taking no room. */
@@ -1255,7 +1307,7 @@ body.resizing iframe { pointer-events: none; }
 .rail .railbtn {
   width: 26px; height: 26px; padding: 0; display: inline-flex; align-items: center; justify-content: center;
   font: 13px var(--mono); line-height: 1; color: var(--text-muted);
-  background: transparent; border-color: transparent; border-radius: 4px;
+  background: transparent; border-color: transparent; border-radius: var(--radius-btn);
 }
 .rail .railbtn:hover:not(:disabled) { background: var(--bg-3); color: var(--text); }
 .rail .railbtn.plus {
@@ -1263,7 +1315,7 @@ body.resizing iframe { pointer-events: none; }
   border-color: var(--border-strong); background: var(--bg-2);
 }
 .rail .railmark {
-  width: 22px; height: 22px; padding: 0; border-radius: 11px;
+  width: 22px; height: 22px; padding: 0; border-radius: var(--radius-btn);
   font: 600 10px var(--mono); display: inline-flex; align-items: center; justify-content: center;
 }
 .rail .railmark.amber { color: var(--amber); background: var(--amber-soft); border-color: var(--amber-line); }
@@ -1289,7 +1341,7 @@ body.resizing iframe { pointer-events: none; }
 button.tb-icon {
   position: relative; width: 26px; height: 22px; padding: 0;
   display: inline-flex; align-items: center; justify-content: center;
-  color: var(--text-muted); background: transparent; border-color: transparent; border-radius: 4px;
+  color: var(--text-muted); background: transparent; border-color: transparent; border-radius: var(--radius-btn);
 }
 button.tb-icon:hover:not(:disabled) { color: var(--text); background: var(--bg-3); }
 button.tb-icon[aria-expanded="true"] { color: var(--text); background: var(--bg-3); }
@@ -1421,9 +1473,9 @@ button.tb-icon[data-auto="true"] svg rect { stroke-dasharray: 2 1.4; }
   flex: 1 1 auto; min-width: 0; display: flex; align-items: center; gap: 2px;
   overflow-x: auto; overflow-y: hidden; scrollbar-width: none;
 }
-.paneltab { flex: 0 0 auto; display: inline-flex; align-items: center; border-radius: 4px; }
+.paneltab { flex: 0 0 auto; display: inline-flex; align-items: center; border-radius: var(--radius-btn); }
 .paneltab > button[role="tab"] {
-  display: inline-flex; align-items: center; gap: 6px; border: none; border-radius: 4px 0 0 4px;
+  display: inline-flex; align-items: center; gap: 6px; border: none; border-radius: var(--radius-btn) 0 0 var(--radius-btn);
   background: none; padding: 3px 4px 3px 8px; font-size: 11px; color: var(--text-muted);
 }
 .paneltab > button[role="tab"]:hover:not(:disabled) { background: var(--hover); color: var(--text); }
@@ -1433,7 +1485,7 @@ button.tb-icon[data-auto="true"] svg rect { stroke-dasharray: 2 1.4; }
 .paneltab-where { font: 10px var(--mono); color: var(--text-muted); }
 .paneltab-x {
   border: none; background: none; padding: 0 6px; height: 20px; font-size: 12px; line-height: 1;
-  color: var(--text-muted); border-radius: 0 4px 4px 0;
+  color: var(--text-muted); border-radius: 0 var(--radius-btn) var(--radius-btn) 0;
 }
 .paneltab-x:hover:not(:disabled) { background: var(--hover); color: var(--text); }
 .panelbody.termpanel { display: flex; flex-direction: column; overflow: hidden; }
@@ -1521,7 +1573,7 @@ button.termread { flex: 0 0 auto; padding: 1px 8px; font-size: 11px; white-space
 .vexhead { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
 .vexhead-right { margin-left: auto; display: inline-flex; align-items: center; gap: 8px; }
 .vexchipwrap { position: relative; display: inline-flex; }
-button.vexchip { border-radius: 999px; padding: 3px 10px; color: var(--text-2); }
+button.vexchip { border-radius: var(--radius-btn); padding: 3px 10px; color: var(--text-2); }
 button.vexchip b { color: var(--text); font-weight: 600; }
 button.vexchip.bad { border-color: var(--red-line); color: var(--red); }
 .vexpop {
@@ -1534,7 +1586,7 @@ button.vexchip.bad { border-color: var(--red-line); color: var(--red); }
 .vexwarn { color: var(--text-2); line-height: 1.4; }
 button.vexusbbtn { background: none; border: 1px solid transparent; padding: 2px 6px; }
 button.vexusbbtn:hover:not(:disabled) { background: var(--hover); border-color: var(--border); }
-button.vexhelp { width: 22px; height: 22px; padding: 0; border-radius: 50%; font-size: 11px; color: var(--text-muted); background: none; }
+button.vexhelp { width: 22px; height: 22px; padding: 0; border-radius: var(--radius-btn); font-size: 11px; color: var(--text-muted); background: none; }
 button.vexhelp.on { color: var(--text); background: var(--accent-soft); border-color: var(--accent-line); }
 
 .vexactions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 6px; }
@@ -1587,7 +1639,7 @@ button.vexhelp.on { color: var(--text); background: var(--accent-soft); border-c
 .vexheld { color: var(--amber); }
 .vexchain { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; color: var(--text); }
 .vexsteps { display: inline-flex; gap: 4px; list-style: none; margin: 0; padding: 0; font-size: 11px; }
-.vexsteps li { padding: 1px 6px; border: 1px solid var(--border); border-radius: 999px; color: var(--text-muted); }
+.vexsteps li { padding: 1px 6px; border: 1px solid var(--border); border-radius: var(--radius-btn); color: var(--text-muted); }
 .vexsteps li[data-state="busy"] { color: var(--accent); border-color: var(--accent-line); }
 .vexsteps li[data-state="done"] { color: var(--green); }
 .vexel { color: var(--text-muted); font: 11px var(--mono); }
@@ -1610,7 +1662,7 @@ button.vexhelp.on { color: var(--text); background: var(--accent-soft); border-c
 .vexerrors:not(.all) > li:nth-child(n + 6) { display: none; }
 .vexerr {
   display: flex; gap: 8px; align-items: baseline; width: 100%; text-align: left; padding: 3px 6px;
-  font: 12px var(--mono); background: transparent; border: 1px solid transparent; border-radius: 4px; color: var(--text);
+  font: 12px var(--mono); background: transparent; border: 1px solid transparent; border-radius: var(--radius-btn); color: var(--text);
 }
 button.vexerr:hover:not(:disabled) { background: var(--hover); border-color: var(--border); cursor: pointer; }
 .vexerr.outside { color: var(--text-muted); }
@@ -1644,6 +1696,16 @@ button.vextab:hover:not(:disabled) { background: var(--hover); color: var(--text
 .vexobody { padding: 8px 10px; }
 .vexoutput { flex: 1 1 auto; margin: 0; padding: 8px 10px; min-height: 60px; overflow: auto; font: 12px/1.5 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text-2); }
 .vexdev { display: flex; flex-direction: column; gap: 7px; overflow: auto; font-size: 12px; }
+/* The Brain tab (VX-UI-4a): the brain terminal itself, filling the output body. */
+.vexbrain { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+.vexbrain-state { font: 11px var(--mono); color: var(--text-muted); }
+.vexbrain-state.ok { color: var(--green); }
+.vexbrain-state.busy { color: var(--accent); }
+.vexbrain-state.failed { color: var(--red); }
+.vexbrain-text { padding: 6px 10px; line-height: 1.45; }
+.vexbrain-text.err { color: var(--red); }
+.vexbrain-term { flex: 1 1 auto; min-height: 180px; display: flex; flex-direction: column; border-top: 1px solid var(--border); }
+button.vexconnect { padding: 2px 10px; }
 .vexconn { display: flex; flex-direction: column; gap: 5px; }
 .vexh5 { font-size: 10px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-muted); margin-top: 4px; }
 .vexlog { list-style: none; margin: 0; padding: 4px 0 0; border-top: 1px solid var(--border); font: 11px var(--mono); color: var(--text-2); display: flex; flex-direction: column; gap: 2px; }
@@ -1870,13 +1932,35 @@ button.vextab:hover:not(:disabled) { background: var(--hover); color: var(--text
 
 /* V10: Undo after a cancel word, and the send/cancel word lists in Settings -> Voice. */
 .voice-undo { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 0 0 6px; padding: 4px 8px; border: 1px solid var(--border); border-left: 2px solid var(--accent); border-radius: 6px; background: var(--bg-2); font-size: 11px; color: var(--text-muted); }
-.voice-undo button { font: inherit; font-weight: 600; color: var(--accent); background: transparent; border: 1px solid var(--accent); border-radius: 4px; padding: 1px 8px; cursor: pointer; }
+.voice-undo button { font: inherit; font-weight: 600; color: var(--accent); background: transparent; border: 1px solid var(--accent); border-radius: var(--radius-btn); padding: 1px 8px; cursor: pointer; }
 .voice-words { margin-top: 20px; border-top: 1px solid var(--border); padding-top: 12px; }
 .voice-words h3 { font-size: 12px; }
 .voice-words p { color: var(--text-muted); font-size: 11px; }
 .voice-words-list { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 6px 0; }
-.voice-words-chip { display: inline-flex; align-items: center; gap: 4px; padding: 1px 4px 1px 8px; border: 1px solid var(--border); border-radius: 10px; font: 12px var(--mono); }
+.voice-words-chip { display: inline-flex; align-items: center; gap: 4px; padding: 1px 4px 1px 8px; border: 1px solid var(--border); border-radius: var(--radius-btn); font: 12px var(--mono); }
 .voice-words-chip button { border: 0; background: transparent; color: var(--text-muted); cursor: pointer; padding: 0 4px; }
 .voice-words-add { display: flex; gap: 6px; align-items: center; }
 .voice-words-add input { width: 9em; }
 .voice-words-error { color: var(--red); font-size: 11px; min-height: 1em; }
+
+/* ---- binary click sparkle (lib/sparkle.ts, owner 2026-10-15) ----
+   A fixed overlay outside #root: it never takes a pointer event, focus or any
+   layout, and sits above the approval veil (z-index 100) so a burst from AUTHORIZE
+   is seen. The glyphs are tiny, monospace, glacier-cyan and gone in 0.5 s. */
+#sparkle-layer {
+  position: fixed; inset: 0; z-index: 2147483000; pointer-events: none; overflow: hidden;
+  contain: layout paint style;
+}
+#sparkle-layer .sparkle-bit {
+  position: absolute; pointer-events: none; user-select: none;
+  font: 600 10px/1 var(--mono); color: var(--accent); opacity: 0;
+  text-shadow: 0 0 4px var(--accent-soft);
+  transform: translate(-50%, -50%);
+  animation: sparkle-burst 500ms cubic-bezier(0.2, 0.7, 0.3, 1) forwards;
+}
+@keyframes sparkle-burst {
+  0% { opacity: 0; transform: translate(-50%, -50%) scale(0.7); }
+  15% { opacity: 0.9; }
+  100% { opacity: 0; transform: translate(calc(-50% + var(--dx, 0px)), calc(-50% + var(--dy, 0px))) scale(1); }
+}
+@media (prefers-reduced-motion: reduce) { #sparkle-layer { display: none; } }

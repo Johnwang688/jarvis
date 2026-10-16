@@ -54,6 +54,7 @@ vi.mock("../api", () => ({
 vi.mock("../components/Terminal", () => ({
   terminals: {
     showProgram: async () => {},
+    adoptProgram: async () => true,
     gone: () => {},
     refresh: async () => {},
     row: () => ({ exited: true, exit_code: 0 }),
@@ -236,7 +237,11 @@ describe("one click is clean, build, download (owner decision 3, 2026-10-15)", (
     h.download = async () => ({ terminal_id: "b0000004" });
     await store.download("p3", 3, "override", "override");
     expect(h.order).toEqual(["clean", "build", "close c0000001", "download"]);
-    await vi.waitFor(() => expect(h.brainOpened).toBe(1));
+    // Never opened again by itself (VX-UI-4a, owner decision 5): the Brain tab offers Connect.
+    await new Promise((r) => setTimeout(r, 50));
+    expect(h.brainOpened).toBe(0);
+    expect(store.brainTerminal).toBeNull();
+    expect(store.brainClosed).toMatch(/closed for the download\. Click Connect/);
   });
 });
 
@@ -305,15 +310,24 @@ describe("what stopped a chain is what it says (delta review NIT)", () => {
     await store.download("p3", 1, "override", "override");
     expect(h.downloads).toHaveLength(1);               // already on its way: it goes
     expect(h.brainOpened).toBe(0);
-    expect(store.brainNote).toMatch(/closed for the download/);
+    expect(store.brainClosed).toMatch(/closed for the download/);
   });
 
-  it("with no card, the brain terminal is opened again after the download", async () => {
+  it("with no card, the brain terminal is still not opened again after the download (VX-UI-4a)", async () => {
+    vi.useFakeTimers();
     const store = new VexStore();
     h.brain = "c0000001";
+    await store.refreshStatus();
+    expect(store.brainTerminal).toBe("c0000001");           // a link the daemon holds is shown, never opened
     h.download = async () => ({ terminal_id: "b0000004" });
-    await store.download("p3", 1, "override", "override");
-    await vi.waitFor(() => expect(h.brainOpened).toBe(1));
+    const work = store.download("p3", 1, "override", "override");
+    await vi.advanceTimersByTimeAsync(10_000);
+    await work;
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(h.brainOpened).toBe(0);
+    expect(store.brainTerminal).toBeNull();
+    expect(store.brainClosed).toMatch(/never reopens by itself/);
+    expect(store.brainNote).toBe("");                        // not an error: nothing failed
   });
 
   it("a card is a card", async () => {
@@ -433,7 +447,7 @@ describe("Stop stops the running VEX action (owner decision 6, 2026-10-15)", () 
     // A stopped chain never opens the brain terminal again by itself (L6).
     await vi.advanceTimersByTimeAsync(5000);
     expect(h.brainOpened).toBe(0);
-    expect(store.brainNote).toMatch(/not opened again, since the download was stopped/);
+    expect(store.brainClosed).toMatch(/not opened again, since the download was stopped/);
     expect(h.downloads).toHaveLength(1);                 // and nothing is retried
   });
 
@@ -625,5 +639,97 @@ describe("Download feedback uses actual action receipts", () => {
     store.setBlocked(true);
     await store.refreshConnection();
     expect(probe).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("the Brain tab's Connect and Disconnect (VX-UI-4a)", () => {
+  it("the pressing tab takes the place before the store names the terminal (review LOW-1)", async () => {
+    const store = new VexStore();
+    const seen: (string | null)[] = [];
+    // The daemon's vex_device record makes a status read while Connect's answer is on its way.
+    vi.spyOn(api, "vexBrain").mockImplementationOnce(async () => {
+      h.brain = "c0000002";
+      await store.refreshStatus();
+      return { terminal_id: "c0000002", started: true };
+    });
+    await store.connectBrain((id) => seen.push(id, store.brainTerminal));
+    expect(seen).toEqual(["c0000002", null]);
+    expect(store.brainTerminal).toBe("c0000002");
+  });
+
+  it("Connect from an ended link clears the old one away, never a live one (review LOW-2)", async () => {
+    const store = new VexStore();
+    const gone = vi.spyOn(terminals, "gone");
+    const row = vi.spyOn(terminals, "row");
+    store.brainTerminal = "c0000001";
+    row.mockReturnValue({ exited: true, exit_code: 3 } as any);
+    await store.connectBrain();
+    await vi.waitFor(() => expect(gone).toHaveBeenCalledWith("c0000001"));
+    expect(h.closed).toContain("c0000001");
+    expect(store.brainTerminal).toBe("c0000002");
+    // The same live link coming back (started: false) is never closed.
+    gone.mockClear();
+    h.closed.length = 0;
+    row.mockReturnValue({ exited: false } as any);
+    vi.spyOn(api, "vexBrain").mockResolvedValueOnce({ terminal_id: "c0000002", started: false });
+    await store.connectBrain();
+    expect(gone).not.toHaveBeenCalled();
+    expect(h.closed).toEqual([]);
+  });
+
+  it("Connect asks the daemon once, holds the terminal as this window's, and never opens the panel", async () => {
+    const store = new VexStore();
+    const adopt = vi.spyOn(terminals, "adoptProgram");
+    const show = vi.spyOn(terminals, "showProgram");
+    await store.connectBrain();
+    expect(h.brainOpened).toBe(1);
+    expect(adopt).toHaveBeenCalledWith("c0000002");
+    expect(show).not.toHaveBeenCalled();
+    expect(store.brainTerminal).toBe("c0000002");
+    expect(store.brainBusy).toBe(false);
+  });
+
+  it("refused under a card, after a crash, during a chain and while a device read is on its way", async () => {
+    const store = new VexStore();
+    store.setBlocked(true);
+    await store.connectBrain();
+    store.setBlocked(false);
+    store.infoBusy = "system";
+    await store.connectBrain();
+    store.infoBusy = null;
+    store.chain = { seq: 1, projectId: "p3", label: "", slot: 1, phase: "build", cancelled: false,
+      buildTerminal: null, downloadTerminal: null, done: [], brainPaused: false };
+    await store.connectBrain();
+    store.chain = null;
+    store.crash();
+    await store.connectBrain();
+    expect(h.brainOpened).toBe(0);
+  });
+
+  it("a refusal is said in the daemon's words and leaves nothing to show", async () => {
+    const store = new VexStore();
+    vi.spyOn(api, "vexBrain").mockRejectedValueOnce(
+      Object.assign(new Error("A download is running. One device action at a time."), { status: 409 }));
+    await store.connectBrain();
+    expect(store.brainNote).toBe("A download is running. One device action at a time.");
+    expect(store.brainTerminal).toBeNull();
+  });
+
+  it("Disconnect closes the terminal (frees the port); a late status read never brings it back", async () => {
+    const store = new VexStore();
+    await store.connectBrain();
+    const gone = vi.spyOn(terminals, "gone");
+    const late = vi.spyOn(api, "vexStatus").mockResolvedValueOnce({ configured: true, hint: null, vexcom_version: null,
+      extension_version: null, sdks: null, templates: false, project_folder: null, device: "brain", brain: "c0000002" });
+    await store.disconnectBrain();
+    expect(h.closed).toEqual(["c0000002"]);
+    expect(gone).toHaveBeenCalledWith("c0000002");
+    expect(store.brainTerminal).toBeNull();
+    await vi.waitFor(() => expect(late).toHaveBeenCalled());
+    expect(store.brainTerminal).toBeNull();                    // the daemon had not let go yet: still gone here
+    store.setBlocked(true);
+    store.brainTerminal = "c0000003";
+    await store.disconnectBrain();
+    expect(h.closed).toEqual(["c0000002"]);                    // nothing under a card
   });
 });

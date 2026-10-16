@@ -627,7 +627,7 @@ export function markGlyph(state: MarkState): string {
   return state === "ok" || state === "stale" ? "✓" : state === "failed" ? "✗" : state === "unknown" ? "?" : "";
 }
 
-/** The output area's tabs (plan §2.5). The Brain tab is the placeholder VX-UI-4a fills. */
+/** The output area's tabs (plan §2.5). The Brain tab holds the brain terminal (VX-UI-4a, `brainView`). */
 export type OutputTab = "build" | "download" | "brain" | "device";
 export const OUTPUT_TABS: readonly OutputTab[] = ["build", "download", "brain", "device"];
 
@@ -653,7 +653,7 @@ export function nextTab(tabs: readonly OutputTab[], current: OutputTab, key: str
 
 /** Every control's hover help (permanent: owner decision 7, 2026-10-15), and the `?` list's sentences. */
 export type HelpId = "clean" | "build" | "rebuild" | "download" | "stop" | "slot" | "more" | "usb" | "help"
-  | "tab-build" | "tab-download" | "tab-brain" | "tab-device" | "fold" | "max";
+  | "tab-build" | "tab-download" | "tab-brain" | "tab-device" | "fold" | "max" | "connect" | "disconnect";
 
 export function helpText(id: HelpId, slot: number): string {
   switch (id) {
@@ -673,10 +673,158 @@ export function helpText(id: HelpId, slot: number): string {
     case "help": return "Lists what each control does. Escape or ? again closes it.";
     case "tab-build": return "The latest clean or build's output, live.";
     case "tab-download": return "The latest download's output and progress, live.";
-    case "tab-brain": return "What the program on the brain prints (printf / print). It connects only when you click "
-      + "to open it, never by itself.";
+    case "tab-brain": return "What the program on the brain prints (printf / print), live; what you type goes to it. "
+      + "It connects only when you click Connect, never by itself.";
     case "tab-device": return "USB status, its connection log, and what the device reads answered.";
     case "fold": return "Folds the output away (the tabs and their marks stay).";
     case "max": return "Gives the output the whole pane; again to restore.";
+    case "connect": return "Opens the link to the program on the brain (vexcom --user, through the controller or "
+      + "USB): what it prints shows here, and what you type goes to it. It holds the robot's port while open, so "
+      + "a Download pauses it and you click Connect again after. It never opens by itself.";
+    case "disconnect": return "Closes the link and frees the robot's port. The program on the brain keeps running; "
+      + "Connect opens the link again.";
   }
+}
+
+/**
+ * The Brain tab (VX-UI-4a, plan §5.5): the brain terminal — the same `vexcom
+ * --user` session, "Jarvis can read" switch and Ctrl-C rule as anywhere —
+ * drawn in the VEX pane. **It connects only on the owner's Connect** (owner
+ * decision 5, 2026-10-15): never when the tab is shown, never on a reload,
+ * never after a download (the download closes it; the tab then offers
+ * Connect again). A link the daemon already holds open (a reload, another
+ * window) is only shown, never opened.
+ */
+export type BrainState =
+  | "unconfigured" | "off" | "connecting" | "connected" | "paused" | "ended" | "error" | "elsewhere" | "taken"
+  | "lost";
+
+export interface BrainInput {
+  configured: boolean;
+  blocked: boolean;
+  /** A download chain runs (any project); `paused`: it closed the brain terminal for the download. */
+  chain: { paused: boolean } | null;
+  /** The brain terminal this window shows, while it exists (listed, or its session ended here). */
+  terminal: string | null;
+  /** Connect's request is on its way. */
+  asking: boolean;
+  /** The terminal session's state in this window, if it has one (components/Terminal.tsx `SessionState`). */
+  session: string | null;
+  /** Its exit code, once its program ended. */
+  exitCode: number | null;
+  /** Shown somewhere else: a terminal pane, another VEX pane's Brain tab, or another window. */
+  shownIn: { kind: "pane" | "vex"; slot: number } | { kind: "window" } | null;
+  /** The daemon's refusal of the last Connect, in its words. */
+  error: string;
+  /** Why a download closed it and it was not opened again. */
+  closed: string;
+  /** The device action holding the port now (`/vex/status` `device`). */
+  device: string | null;
+  /** A device read (⋯) on its way from this window. */
+  reading: boolean;
+}
+
+export interface BrainView {
+  state: BrainState;
+  /** What the tab says, in words (never colour alone). */
+  text: string;
+  /** Connect is offered; `off` says why it is disabled ("" when it is not). */
+  connect: { shown: boolean; off: string };
+  /** Disconnect is offered (`close`: the program already ended, so it only clears the terminal away). */
+  disconnect: { shown: boolean; close: boolean };
+  /** The terminal view is drawn in the tab. */
+  terminal: boolean;
+  /**
+   * Offered instead of Connect when this window's socket gave up (`lost`):
+   * attach again (`TermSession.retry`). The link itself may still be open, so
+   * nothing is asked of the device.
+   */
+  reconnect: boolean;
+  /** The tab's badge. */
+  badge: { state: MarkState; text: string };
+}
+
+/** The terminal itself is gone: Jarvis restarted (`ended`) or it was closed. */
+const BRAIN_GONE = new Set(["ended", "closed"]);
+
+export function brainView(i: BrainInput): BrainView {
+  const offWhy = !i.configured ? "VEX is not set up yet: run jarvis vex setup."
+    : i.blocked ? "Off under an approval card."
+      : i.chain ? "A download holds the robot's port; Connect again once it ends."
+        : i.asking ? "Connecting…"
+          : i.reading || i.device === "info" ? "A device read holds the robot's port; Connect once it ends."
+            : i.device === "download" ? "A download holds the robot's port; Connect once it ends."
+              : "";
+  const view = (state: BrainState, text: string, o: Partial<Omit<BrainView, "state" | "text">> = {}): BrainView => ({
+    state, text,
+    connect: o.connect ?? { shown: false, off: "" },
+    disconnect: o.disconnect ?? { shown: false, close: false },
+    terminal: o.terminal ?? false,
+    reconnect: o.reconnect ?? false,
+    badge: o.badge ?? { state: "idle", text: "not connected" },
+  });
+  const connect = { shown: true, off: offWhy };
+  if (!i.configured) {
+    return view("unconfigured", "VEX is not set up yet: run jarvis vex setup, then Connect.", { connect });
+  }
+  if (i.chain?.paused) {
+    return view("paused", "Paused for the download: it needs the robot's port. When the download ends, click "
+      + "Connect to open the link again (it never reopens by itself).",
+    { connect, badge: { state: "unknown", text: "paused for the download" } });
+  }
+  if (i.asking && !i.terminal) {
+    return view("connecting", "Opening the link to the brain…", { badge: { state: "busy", text: "connecting" } });
+  }
+  if (i.terminal) {
+    const gone = i.session !== null && BRAIN_GONE.has(i.session);
+    if (i.session === "exited" || gone) {
+      const why = i.session === "exited"
+        ? `The link ended (vexcom exited${i.exitCode !== null ? ` with code ${i.exitCode}` : ""}). `
+          + "Its last output is below. Connect opens a new link."
+        : "The link is gone (Jarvis restarted, or it was closed). Connect opens a new link.";
+      return view("ended", why, { connect, disconnect: { shown: true, close: true }, terminal: true,
+        badge: { state: "failed", text: "ended" } });
+    }
+    if (i.shownIn && i.shownIn.kind !== "window") {
+      const where = i.shownIn.kind === "pane" ? `pane ${i.shownIn.slot}` : `the VEX view in pane ${i.shownIn.slot}`;
+      return view("elsewhere", `The brain terminal is shown in ${where}.`, {
+        disconnect: { shown: true, close: false }, badge: { state: "ok", text: `live, shown in ${where}` } });
+    }
+    // Another window's say, or this window's socket: each in its own words, never a spinner that never ends.
+    const live = { disconnect: { shown: true, close: false }, terminal: true };
+    if (i.session === "taken") {
+      return view("taken", "Taken by another window: it shows the brain terminal now. Take it back (below) asks "
+        + "for it again.", { ...live, badge: { state: "ok", text: "live, taken by another window" } });
+    }
+    if (i.session === "refused") {
+      return view("taken", "The window showing the brain terminal kept it. Ask again (below) asks once more.",
+        { ...live, badge: { state: "ok", text: "live, kept by another window" } });
+    }
+    if (i.session === "waiting") {
+      return view("connecting", "Asking the window that shows the brain terminal to let it go…",
+        { ...live, badge: { state: "busy", text: "asking another window" } });
+    }
+    if (i.session === "lost") {
+      // Its retries ran out; the link may still be open, so Disconnect (never "Close") names what it does.
+      return view("lost", "The connection to the brain terminal was lost; the link itself may still be open. "
+        + "Reconnect attaches again; Disconnect closes the link.",
+      { ...live, reconnect: true, badge: { state: "unknown", text: "connection lost" } });
+    }
+    if (i.shownIn?.kind === "window") {
+      return view("elsewhere", "The brain terminal is shown in another window. Show it here asks that window first.",
+        { disconnect: { shown: true, close: false }, terminal: true,
+          badge: { state: "ok", text: "live, in another window" } });
+    }
+    if (i.session !== "attached") {
+      return view("connecting", "Connecting to the brain terminal…", { disconnect: { shown: true, close: false },
+        terminal: true, badge: { state: "busy", text: "connecting" } });
+    }
+    return view("connected", "Live: what the program prints. Typing goes to the program; Ctrl-C too.",
+      { disconnect: { shown: true, close: false }, terminal: true, badge: { state: "ok", text: "live" } });
+  }
+  if (i.error) {
+    return view("error", i.error, { connect, badge: { state: "failed", text: "could not connect" } });
+  }
+  return view("off", i.closed || "Not connected. Connect opens the link to the program on the brain: what it "
+    + "prints shows here. It never connects by itself.", { connect });
 }
