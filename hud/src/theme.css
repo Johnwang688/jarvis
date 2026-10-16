@@ -1983,3 +1983,44 @@ button.vexconnect { padding: 2px 10px; }
   100% { opacity: 0; transform: translate(calc(-50% + var(--dx, 0px)), calc(-50% + var(--dy, 0px))) scale(1); }
 }
 @media (prefers-reduced-motion: reduce) { #sparkle-layer { display: none; } }
+
+/* The Diff tab's Quick review (2026-10-15, docs/plans/2026-10-15-diff-quick-review.md D8).
+   The button is a plain toolbar button: PR #210's --radius-btn rectangle. The severities keep
+   Graphite's meanings single: bug is red (an error), risk is steel (--badge-win: amber means
+   "pending" and is not used), nit is muted. */
+.toolbar .qr-btn { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.toolbar .qr-btn.running { border-color: var(--accent-line); color: var(--text); }
+.toolbar .qr-btn .vexspinner { margin-right: 0; }
+.qr-btn .qr-who { font: 11px var(--mono); color: var(--accent); }
+.qr-btn .qr-cancel { color: var(--text-2); }
+.qreview {
+  flex: 0 0 auto; max-height: 38%; overflow: auto; border-bottom: 1px solid var(--border);
+  background: var(--bg-1); padding: 6px 10px; font-size: 12px;
+}
+.qreview .qr-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+/* Wraps rather than cuts: the fallback reasons are the point of the line. */
+.qreview .qr-label { font: 11px var(--mono); color: var(--text-2); min-width: 0; flex: 1 1 auto;
+  overflow-wrap: anywhere; }
+.qreview .qr-meta { font: 11px var(--mono); color: var(--text-muted); white-space: nowrap; flex: 0 0 auto; }
+.qreview .qr-fold { flex: 0 0 auto; padding: 1px 7px; font-size: 11px; }
+.qreview .qr-summary { color: var(--text); margin-top: 4px; }
+.qreview .qr-scope { color: var(--text-2); margin-top: 4px; }
+.qreview .qr-error { color: var(--red); margin-top: 4px; }
+.qreview[data-state="failed"] .qr-label { color: var(--red); }
+.qreview .qr-list { display: flex; flex-direction: column; gap: 1px; margin-top: 6px; }
+.qreview .qr-item {
+  display: flex; align-items: baseline; gap: 8px; width: 100%; text-align: left; min-width: 0;
+  background: transparent; border: 1px solid transparent; padding: 3px 6px; color: var(--text);
+}
+.qreview button.qr-item:hover:not(:disabled) { background: var(--hover); border-color: var(--border); }
+.qreview .qr-item.off { color: var(--text-2); cursor: default; }
+.qreview .qr-sev {
+  flex: 0 0 34px; font: 600 9.5px var(--mono); letter-spacing: 0.05em; text-transform: uppercase;
+  color: var(--text-muted);
+}
+.qreview .qr-sev.bug { color: var(--red); }
+.qreview .qr-sev.risk { color: var(--badge-win); }
+.qreview .qr-loc { flex: 0 1 auto; font: 11px var(--mono); color: var(--accent); white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis; max-width: 40%; }
+.qreview .qr-item.off .qr-loc { color: var(--text-muted); }
+.qreview .qr-why { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }

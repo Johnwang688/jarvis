@@ -1134,3 +1134,65 @@ close` in that order). `hud_v2_editor_marks_check` (57 checks) compares each
 tab's icon glyph and colour to its tree row's, and measures 16px, order and
 centring at a narrow window and at 100%, 160% and 200% zoom, with a long name
 that ellipsizes.
+
+## Quick review in the Diff tab (2026-10-15)
+
+Owner request: a one-click quick agent review of the task diff the Diff tab
+shows. It catches small bugs. A full review is still a full agent, started the
+normal way. Plan and lead decisions D1–D8:
+`docs/plans/2026-10-15-diff-quick-review.md`. Contract: `docs/hud-api.md`
+(Quick review). Branch `claude/diff-quick-review`. Not merged, not installed,
+and not live-validated: every test uses fakes.
+
+- **Backend.** `jarvis/v2/diff_review.py` holds the routes behind
+  `owner_only`, mounted in `hud_api.route`.
+  - Input comes from `hud_api._diff_parts`, which `diff()` also uses. The
+    review therefore never sees a file the tab withholds.
+  - Input is scrubbed and capped at 150 KB. Files over the cap are named.
+- **Harness order** (the owner's): Claude on `claude-haiku-5-5`, then Codex
+  on `gpt-6-luna`, then v1 on `anthropic/claude-haiku-5.5`. The model names
+  are in `config.DIFF_REVIEW_*`.
+  - A harness is skipped when any window of `HUDLedger.quota` is ≥ 75%. An
+    unknown reading, or a window past its reset, is tried.
+  - A failure falls through to the next harness, with its reason recorded
+    for the panel's header line.
+- **Read-only.** Each harness is confined its own way:
+  - Claude holds only Read, Grep and Glob, with the PreToolUse gate under
+    `read_only_permit`. That permit refuses other tools, paths outside the
+    worktree and any widening. Inside it, the §6 permit runs with a deny-all
+    asker, so credential reads are refused at layer 1.
+  - Codex runs `one_shot`: tool-less, read-only, network off. On Codex the
+    reviewer sees only the diff. This deviates from the brief; see plan D3.
+  - v1 is an `Agent` holding only `read_file`, `list_dir`, `find_files` and
+    `grep_files`, with a deny-all approver. Its reads are confined to the
+    worktree before dispatch.
+  - Review fixes (#219):
+    - The Claude session is **isolated**. It reads no settings file, so no
+      worktree hooks; it loads no CLAUDE.md; and Jarvis's `.env` keys are
+      blanked in its environment.
+    - A Claude `Grep` that could select a credential file is refused.
+    - A Codex turn is capped at 60 s and Cancel releases the login lock.
+    - Only Luna's Codex limits count toward the threshold.
+    - The plan's "Review fixes" section has the details.
+  - Nobody is ever asked anything.
+- **`CodexProvider.one_shot(on_usage=)`** passes the turn's token counts to
+  its caller. It decides nothing, and a raise in it is swallowed.
+- **Results** are saved under `V2_DATA_DIR/diff_reviews/<task>.json` (0600)
+  with a fingerprint of the reviewed diff. A changed diff gets `outdated:
+  true` instead of a stale result.
+  - A review publishes nothing on the bus: no voice, Discord or
+    notification. The HUD polls every 1.5 s while one runs.
+  - Usage goes to the ledger under the task's id. Claude's is equivalent
+    dollars, Codex's is a token delta, and v1's is OpenRouter `spend_usd`.
+- **HUD.** `components/DiffReview.tsx` holds the button and the panel, and
+  `lib/diffreview.ts` its sentences.
+  - The button is a plain toolbar `button` with the 4px `--radius-btn`.
+    While a review runs it shows the spinner, the harness and Cancel.
+  - Findings render as React text. One in the diff opens its file through
+    `DiffEditor`'s `reveal`, which puts the new side's cursor on the line.
+  - Severity colours: bug red, risk steel (`--badge-win`, never amber), nit
+    muted.
+- **Tests.** Python: `tests/v2/diff_review_check.py`. Browser:
+  `tests/face/hud_v2_quick_review_check.py`, also in `hud_v2_check`.
+  Vitest: `DiffReview.test.ts`, `DiffTabReview.test.ts` and
+  `lib/diffreview.test.ts`.

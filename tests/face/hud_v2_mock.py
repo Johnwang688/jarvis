@@ -226,6 +226,10 @@ def _world() -> dict:
                         "after": "def add(a, b):\n    return a + b\n\n\ndef multiply(a, b):\n    return a * b\n"},
             "test_calc.py": {"before": "", "after": "import unittest\n"},
         },
+        # The Diff tab's Quick review (2026-10-15): what `GET .../diff/review`
+        # answers; a start makes it a running record and a cancel a cancelled
+        # one. A test rewrites it to stage any state.
+        "diff_review": {"review": None, "outdated": False},
         "approvals": [],
         # The sidebar dots (2026-10-08): what `GET /activity` answers. A seen
         # call sets the row idle and says so on SSE, as the daemon does.
@@ -1010,6 +1014,8 @@ class MockDaemon:
                         return self._json([])
                     if verb == "diff":
                         return self._json(w["diff"])
+                if len(parts) == 4 and parts[0] == "tasks" and parts[2:] == ["diff", "review"]:
+                    return self._json(w["diff_review"])
                 if len(parts) == 4 and parts[0] == "tasks" and parts[2:] == ["diff", "file"]:
                     rel = q.get("path", [""])[0]
                     rec = w["diff_files"].get(rel)
@@ -1025,6 +1031,24 @@ class MockDaemon:
                 if mock_subagents.handle(self, mock, "POST", path):   # owner, then 405
                     return
                 parts = [p for p in path.split("/") if p]
+                if len(parts) in (4, 5) and parts[0] == "tasks" and parts[2:4] == ["diff", "review"]:
+                    body = self._body()
+                    self._record("POST", path, body)
+                    review = w["diff_review"].get("review")
+                    if len(parts) == 5:
+                        if not review or review.get("state") != "running":
+                            return self._err(409, "no quick review is running for this task")
+                        review.update(state="cancelled", error="cancelled", trying=None)
+                        return self._json(w["diff_review"])
+                    if review and review.get("state") == "running":
+                        return self._err(409, "a quick review is already running for this task")
+                    w["diff_review"] = {"outdated": False, "review": {
+                        "task_id": parts[1], "state": "running", "started": "", "finished": None,
+                        "trying": "claude", "harness": None, "model": None, "label": None,
+                        "fallbacks": [], "summary": "", "findings": [], "error": None,
+                        "scope": {"files_total": 2, "files_reviewed": 2, "skipped": [], "bytes": 1, "cap": 150000},
+                        "cost": {"usd": 0.0, "tokens": 0}}}
+                    return self._json(w["diff_review"], 202)
                 if len(parts) == 3 and parts[0] == "projects" and parts[2] in ("search", "fs"):
                     # Find in files and the explorer's operations (ED-7). The
                     # real refusals are the daemon's (tests/v2/editor_nav_check.py);
