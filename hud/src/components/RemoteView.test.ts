@@ -45,11 +45,19 @@ it("never opens a hidden stream and discards a late ticket",async()=>{
   await render({live:false});await act(async()=>ticket.resolve({ticket:"late"}));expect(Socket.instances).toHaveLength(0);
 });
 it("draws and ACKs only the current socket generation, disposing stale bitmaps",async()=>{
+  // B-PERF (#214): a frame is ACKed when its decode starts, on the socket it
+  // came from while that socket is current, so the daemon's next frame
+  // crosses during the decode. A decode that finishes after a reattach is
+  // never drawn and never ACKs anything on either socket.
   await ready();const decode=deferred<any>();const close=vi.fn();mocks.decode.mockReturnValueOnce(decode.promise);
-  await frame(binary(1));const first=socket();await render({live:false});expect(first.closed).toBe(true);
-  await render({live:true});await act(async()=>socket().open());await act(async()=>decode.resolve({close}));
-  expect(mocks.draw).not.toHaveBeenCalled();expect(close).toHaveBeenCalledOnce();expect(first.sent.some(x=>x.t==="ack")).toBe(false);
-  await frame(binary(2));expect(mocks.draw).toHaveBeenCalledOnce();expect(socket().sent).toContainEqual({t:"ack",id:2});
+  await frame(binary(1));const first=socket();
+  expect(first.sent).toEqual([{t:"ack",id:1}]);expect(mocks.draw).not.toHaveBeenCalled();
+  await render({live:false});expect(first.closed).toBe(true);
+  await render({live:true});await act(async()=>socket().open());const second=socket();second.sent=[];
+  await act(async()=>decode.resolve({close}));
+  expect(mocks.draw).not.toHaveBeenCalled();expect(close).toHaveBeenCalledOnce();
+  expect(first.sent).toEqual([{t:"ack",id:1}]);expect(second.sent.some(x=>x.t==="ack")).toBe(false);
+  await frame(binary(2));expect(mocks.draw).toHaveBeenCalledOnce();expect(second.sent).toEqual([{t:"ack",id:2}]);
 });
 it("forwards ordinary typing but holds keys, IME, paste and dialog answers under a card",async()=>{
   await ready();await key("a");expect(socket().sent).toContainEqual(expect.objectContaining({t:"key",e:expect.objectContaining({key:"a"})}));
