@@ -76,7 +76,8 @@ from typing import Callable, Iterable
 from jarvis import config, permissions as v1_permissions, protected_state, rules
 from jarvis.tools import files as v1_files, secrets as v1_secrets
 from .approvals import (ApprovalRequest, DenyAll, V2_COMMAND_TOOLS, clean_line, command_text,
-                        is_command_tool, label, v1_request)
+                        is_command_tool, is_unknown_command_tool, label,
+                        unreadable_command, v1_request)
 from .model import PermissionProfile, Project, Role, Task, utcnow
 from .provider import Brief, Decision, PermissionCallback
 from . import session_tools
@@ -96,10 +97,12 @@ L_JARVIS_TOOL = "jarvis-tool"
 L_JARVIS_DELEGATE = "jarvis-session-delegate"
 L_JARVIS_GATED = "jarvis-gated"
 
-# Tools that carry a shell command line, per provider (`approvals`' one
-# list, Claude's Monitor included). Membership is not the test: every check
-# here asks `is_command_tool`, which also counts any tool whose arguments
-# carry a `command`/`cmd`/`script` line (fail closed, 2026-10-15).
+# Real shells, per provider (`approvals`' one list, Claude's Monitor
+# included). Layers 1 and 2 judge more: `is_command_tool` also counts any
+# tool whose arguments carry a `command`/`cmd`/`script` line (fail closed,
+# 2026-10-15), except the CODE_TOOLS (Workflow's JavaScript). Layer 4 trusts
+# only these: an unknown command-bearing tool never reaches the allowlist or
+# rules' static ALLOW, and its cards offer no Always (#211 review, F1).
 COMMAND_TOOLS = V2_COMMAND_TOOLS
 
 # Tools that write a file. The argument holding the target differs per
@@ -873,6 +876,11 @@ def build_permit(ctx: PermitContext, asker) -> PermissionCallback:
             return decision
 
         # --- layer 1: never approvable, never asked of anyone --------------
+        if unreadable_command(tool, args) == "deny":
+            # A shell whose command key holds no text: nothing to judge, so
+            # nothing runs (#211 review, F3).
+            return finish(Decision.DENY, L_DENY,
+                          f"{tool} carries no command text to judge; refused")
         if command.strip():
             refusal = denied_command(command, cwd)
             if refusal:
@@ -965,6 +973,10 @@ def build_permit(ctx: PermitContext, asker) -> PermissionCallback:
             alias = (session_tools.CLAUDE_PREFIX + delegated.name
                      if ctx.provider == "codex" else delegated.name)
             match = always_ask_match(alias, args, brief, ctx.project)
+        if match is None and unreadable_command(tool, args) == "ask":
+            # An unknown tool's command key holds something that is not text:
+            # it cannot be judged, so the owner is asked (#211 review, F3).
+            match = ("command-unreadable", f"{tool}'s command is not text and cannot be judged")
         if match is None and command.strip():
             # A line that might write the gate's own state but is not provably
             # a write (layer 1 took those): a copy into the gate's folder, a
@@ -1031,7 +1043,10 @@ def build_permit(ctx: PermitContext, asker) -> PermissionCallback:
         # Layer 3 (the CLI reviewer) is not evaluated here; see the module
         # docstring for what an ALLOW out of this callback does and does not
         # mean.
-        if getattr(asker, "human_backed", False):
+        # A command-bearing tool that is not a known shell (`mcp__x__exec`)
+        # is judged at layers 1 and 2 but never answered here: no allowlist
+        # entry and no rules ALLOW (#211 review, F1).
+        if getattr(asker, "human_backed", False) and not is_unknown_command_tool(tool, args):
             if v1_permissions.allows(*v1_request(tool, args), cwd=cwd):
                 return finish(Decision.ALLOW, L_JARVIS_ALLOW,
                               "covered by the owner's persistent allowlist")
@@ -1079,6 +1094,8 @@ def _ask_owner_delegation(asker, ctx: PermitContext, tool: str, *,
 def _ask(asker, ctx: PermitContext, tool: str, args: dict, command: str,
          reason: str, layer: str, *, allowlistable: bool = True,
          headline: str = "", origin: str | None = None) -> Decision:
+    if is_unknown_command_tool(tool, args):
+        allowlistable = False       # no stem and no whole-tool entry (#211 review, F1)
     request = ApprovalRequest(
         tool=tool, args=args, command=command or None, reason=reason, layer=layer,
         thread_id=ctx.thread_id, task_id=ctx.task_id,
