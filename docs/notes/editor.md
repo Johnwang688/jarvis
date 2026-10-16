@@ -1164,7 +1164,16 @@ and not live-validated: every test uses fakes.
   - Codex runs `one_shot`: tool-less, read-only, network off. On Codex the
     reviewer sees only the diff. This deviates from the brief; see plan D3.
   - v1 is an `Agent` holding only `read_file`, `list_dir`, `find_files` and
-    `grep_files`, with a deny-all approver.
+    `grep_files`, with a deny-all approver. Its reads are confined to the
+    worktree before dispatch.
+  - Review fixes (#219):
+    - The Claude session is **isolated**. It reads no settings file, so no
+      worktree hooks; it loads no CLAUDE.md; and Jarvis's `.env` keys are
+      blanked in its environment.
+    - A Claude `Grep` that could select a credential file is refused.
+    - A Codex turn is capped at 60 s and Cancel releases the login lock.
+    - Only Luna's Codex limits count toward the threshold.
+    - The plan's "Review fixes" section has the details.
   - Nobody is ever asked anything.
 - **`CodexProvider.one_shot(on_usage=)`** passes the turn's token counts to
   its caller. It decides nothing, and a raise in it is swallowed.

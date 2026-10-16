@@ -772,7 +772,7 @@ class CodexProvider:
 
     def one_shot(self, text: str, *, model: str, effort: str | None = None,
                  instructions: str = "", deadline_s: float = ONE_SHOT_DEADLINE_S,
-                 on_usage=None) -> str:
+                 on_usage=None, cancel: threading.Event | None = None) -> str:
         """One tool-less model turn on a short-lived app-server, for the chat
         titler (titles.py): `text` in, the final agent message out.
 
@@ -802,8 +802,19 @@ class CodexProvider:
         `on_usage`, when given, is called with each `thread/tokenUsage/
         updated` payload of the turn (the Diff tab's quick review records it
         in the ledger, 2026-10-15). It decides nothing, and an exception it
-        raises is swallowed: accounting never ends a turn."""
-        stop = self._metadata_stop
+        raises is swallowed: accounting never ends a turn.
+
+        `cancel`, when given, is OR-ed into the transport's stop: setting it
+        ends the session at the next poll and releases `_auth_lock`, as the
+        daemon's shutdown does (the quick review's Cancel, review M1 of #219)."""
+        metadata_stop = self._metadata_stop
+
+        class _Either:
+            @staticmethod
+            def is_set() -> bool:
+                return metadata_stop.is_set() or (cancel is not None and cancel.is_set())
+
+        stop = _Either
         if stop.is_set():
             raise RpcCancelled("Codex one-shot cancelled (shutting down)")
         if _auth_lock.locked():

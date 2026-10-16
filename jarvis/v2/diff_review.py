@@ -31,6 +31,7 @@ The short version of what this module holds to:
 """
 from __future__ import annotations
 
+import contextlib
 import contextvars
 import copy
 from dataclasses import dataclass, field
@@ -66,6 +67,8 @@ THRESHOLD = 75.0
 # before the review moves on to the next harness.
 CODEX_BUSY_WAIT_S = 20.0
 CODEX_BUSY_POLL_S = 1.0
+# The longest one Codex review turn may hold Codex's login lock.
+CODEX_DEADLINE_S = 60.0
 # After a cancel or the budget, how long the worker gets to wind down before
 # the record is closed without it (its late answer is then discarded).
 WIND_DOWN_S = 5.0
@@ -187,7 +190,9 @@ findings is a fine answer: {{"summary": "...", "findings": []}}.
 
 TOOLS_TEXT = {
     "claude": ("You may read files in this repository for context with Read, Grep and "
-               "Glob. You cannot change anything, and must not try."),
+               "Glob. Grep a specific folder or file, or pass a glob such as *.py: a search "
+               "that could read a credential file is refused. You cannot change anything, "
+               "and must not try."),
     "codex": ("Review from the diff alone: you have no tools and cannot read other "
               "files."),
     "v1": ("You may read files in this repository for context with read_file, "
@@ -323,10 +328,53 @@ def over_threshold(quota, now: float | None = None) -> str | None:
     return ", ".join(hits) or None
 
 
+def _squash(text) -> str:
+    return "".join(ch for ch in str(text or "").lower() if ch.isalnum())
+
+
+def codex_quota(ledger, model: str):
+    """The Codex windows that bind `model`: the account's default limit
+    (`codex`) and any limit whose id or name names the model; never another
+    model's limit (review L3 of #219). `HUDLedger.quota`'s shape, or None."""
+    reports = getattr(ledger, "rate_limits", None)
+    if not isinstance(reports, dict):
+        return None
+    lock = getattr(ledger, "_lock", None)
+    with (lock if lock is not None else contextlib.nullcontext()):
+        items = copy.deepcopy(reports)
+    wanted = _squash(model)
+    windows = []
+    for limit_id, report in items.items():
+        if not isinstance(report, dict):
+            continue
+        if limit_id != "codex" and wanted not in _squash(limit_id) + _squash(report.get("limitName")):
+            continue
+        for key in ("primary", "secondary"):
+            window = report.get(key)
+            if not isinstance(window, dict):
+                continue
+            used = window.get("usedPercent")
+            if isinstance(used, bool) or not isinstance(used, (int, float)) or not math.isfinite(used) \
+                    or used < 0:
+                continue
+            label = {300: "5h", 10080: "weekly"}.get(window.get("windowDurationMins"), key)
+            if limit_id != "codex":
+                label = f"{report.get('limitName') or limit_id}: {label}"
+            windows.append({"name": label, "used_percent": used, "resets_at": window.get("resetsAt")})
+    return {"windows": windows} if windows else None
+
+
 def default_quota(daemon, provider: str):
-    """What the HUD's usage column reads (`HUDLedger.quota`), or None."""
+    """What the HUD's usage column reads (`HUDLedger.quota`), or None. For
+    Codex, only the limits that apply to the review's model (`codex_quota`)."""
     from .router import daemon_router
     ledger = daemon_router(daemon).ledger
+    if provider == "codex":
+        try:
+            return codex_quota(ledger, config.DIFF_REVIEW_CODEX_MODEL)
+        except Exception as exc:  # noqa: BLE001 — unknown is "try it"
+            LOG.info("quick review: codex quota unreadable (%s)", type(exc).__name__)
+            return None
     read = getattr(ledger, "quota", None)
     if not callable(read):
         return None
@@ -357,7 +405,19 @@ _GLOB_CHARS = frozenset("*?[{")
 def _pattern_leaves(value: str, root: Path) -> bool:
     """Whether a Glob pattern (or Grep's file glob) can match outside `root`:
     a `..` segment anywhere, or an absolute (or `~`) pattern whose fixed
-    leading folders are not inside it."""
+    leading folders are not inside it. Brace lists are expanded first, as
+    the shell would (`protected_state._brace_expand`), and one too large to
+    expand counts as leaving."""
+    from jarvis.protected_state import _brace_expand
+    variants = _brace_expand(value.strip())
+    if variants is None:
+        return True
+    if len(variants) > 1 or variants[0] != value.strip():
+        return any(_pattern_leaves_one(v, root) for v in variants)
+    return _pattern_leaves_one(value, root)
+
+
+def _pattern_leaves_one(value: str, root: Path) -> bool:
     text = value.strip().replace("\\", "/")
     if ".." in text.split("/"):
         return True
@@ -369,6 +429,64 @@ def _pattern_leaves(value: str, root: Path) -> bool:
             break
         fixed.append(part)
     return not _inside("/".join(fixed) or "/", root)
+
+
+# A Grep over a folder reads every file ripgrep selects there, and Jarvis
+# never sees the results (no scrub on that side). So a Grep is refused when
+# its search root holds a credential file it could select (review L2 of
+# #219): a `.env` the repository does not ignore, a key file. A `glob` that
+# no credential file there matches lets it through; a negated glob (`!x`)
+# selects everything else, so it never does. The walk is bounded, and past
+# the bound the search is refused: a guard that cannot tell refuses.
+GREP_SCAN_ENTRIES = 20_000
+GREP_SCAN_SECONDS = 1.0
+
+
+def _credential_files(base: Path) -> list[Path] | None:
+    """Credential files at or under `base` (outside `.git`), or None when the
+    walk ran past its bound."""
+    from jarvis.tools.secrets import is_credential
+    if not base.is_dir():
+        return [base] if is_credential(base) else []
+    found, seen, start = [], 0, time.monotonic()
+    for folder, dirs, files in os.walk(base):
+        dirs[:] = [d for d in dirs if d != ".git"]
+        for name in files + dirs:
+            seen += 1
+            if seen > GREP_SCAN_ENTRIES or time.monotonic() - start > GREP_SCAN_SECONDS:
+                return None
+            path = Path(folder) / name
+            if is_credential(path):
+                found.append(path)
+    return found
+
+
+def _grep_reaches_credentials(args: dict, root: Path) -> bool:
+    import fnmatch
+    from jarvis.protected_state import _brace_expand
+    value = args.get("path")
+    base = root
+    if isinstance(value, str) and value.strip():
+        base = Path(os.path.expanduser(value))
+        base = (base if base.is_absolute() else root / base).resolve()
+    found = _credential_files(base)
+    if found is None:
+        return True
+    if not found:
+        return False
+    glob = args.get("glob")
+    if not isinstance(glob, str) or not glob.strip():
+        return True
+    variants = _brace_expand(glob.strip())
+    if variants is None or any(v.startswith("!") for v in variants):
+        return True
+    for path in found:
+        rel = path.relative_to(base).as_posix() if path != base else path.name
+        for variant in variants:
+            if fnmatch.fnmatch(path.name, variant) or fnmatch.fnmatch(rel, variant) \
+                    or fnmatch.fnmatch(rel, variant.lstrip("*/")):
+                return True
+    return False
 
 
 def read_only_permit(ctx, root, tools=CLAUDE_TOOLS):
@@ -414,10 +532,59 @@ def read_only_permit(ctx, root, tools=CLAUDE_TOOLS):
             value = args.get(key)
             if value is not None and (not isinstance(value, str) or _pattern_leaves(value, root)):
                 return refuse(tool, args, "a quick review reads only the task's worktree")
+        if tool == "Grep" and _grep_reaches_credentials(args, root):
+            return refuse(tool, args, "a Grep whose files include a credential file")
         decision = inner(tool, args, brief)
         return Decision.ALLOW if decision is Decision.ALLOW else Decision.DENY
 
     return permit
+
+
+# v1's read tools and the arguments that name what they read (L1 of #219).
+_V1_PATH_ARGS = {"read_file": ("path",), "list_dir": ("path",), "find_files": ("path",),
+                 "grep_files": ("path",)}
+_V1_PATTERN_ARGS = {"find_files": ("pattern",), "grep_files": ("glob",)}
+
+
+def v1_leaves(name: str, raw_arguments, root) -> bool:
+    """Whether a v1 read call would read outside the worktree `root`: a path
+    argument that resolves outside it, or a file pattern that can match
+    outside it. Arguments that cannot be read are left to dispatch, which
+    refuses them."""
+    if name not in _V1_PATH_ARGS:
+        return False
+    try:
+        args = json.loads(raw_arguments) if isinstance(raw_arguments, str) else dict(raw_arguments or {})
+    except (TypeError, ValueError):
+        return False
+    if not isinstance(args, dict):
+        return False
+    root = Path(root).resolve()
+    for key in _V1_PATH_ARGS[name]:
+        value = args.get(key)
+        if value is not None and (not isinstance(value, str) or not _inside(value, root)):
+            return True
+    for key in _V1_PATTERN_ARGS.get(name, ()):
+        value = args.get(key)
+        if value is not None and (not isinstance(value, str) or _pattern_leaves(value, root)):
+            return True
+    return False
+
+
+def _confined_agent(*, root, **kwargs):
+    """A v1 `Agent` whose read tools stay inside the worktree. The global v1
+    tools are untouched: the check is this agent's, before dispatch."""
+    from jarvis import tools as registry
+    from jarvis.agent import Agent, _call_args, _call_name
+
+    class Confined(Agent):
+        def _dispatch_one(self, call):
+            if v1_leaves(_call_name(call), _call_args(call), root):
+                return registry.ToolResult(
+                    "Refused: a quick review reads only the task's worktree. Use a path inside it.")
+            return super()._dispatch_one(call)
+
+    return Confined(**kwargs)
 
 
 def _deny_v1(*_args, **_kwargs) -> bool:
@@ -710,8 +877,15 @@ class DiffReviews:
         permit = read_only_permit(PermitContext(thread.id, brief, "claude", project, task),
                                   job.item.root)
         from .provider import BriefRefused
+        from .provider import takes_keyword
+        if not takes_keyword(provider.start, "isolated"):
+            raise Unavailable("this Claude provider cannot start an isolated session")
         try:
-            handle = provider.start(thread, brief, permit)
+            # Isolated (review H1 of #219): no settings file — the worktree's
+            # `.claude/settings.json` could hold hooks that would run
+            # unsandboxed — no CLAUDE.md, and an environment without Jarvis's
+            # keys (`providers/claude.py`, ISOLATED_SETTING_SOURCES).
+            handle = provider.start(thread, brief, permit, isolated=True)
         except BriefRefused as exc:
             raise Failed(str(exc))
         texts, error = [], None
@@ -764,23 +938,30 @@ class DiffReviews:
         text = prompt(job.item, "codex")
         reports: list = []
         busy_until = self.clock() + self.busy_wait_s
-        while True:
-            remaining = self._remaining(job)
-            try:
-                answer = provider.one_shot(text, model=model, effort=codex_effort(entry),
-                                           instructions=CODEX_INSTRUCTIONS, deadline_s=remaining,
-                                           on_usage=reports.append)
-                break
-            except MetadataBusy:
-                if self.clock() >= busy_until:
-                    raise Failed("busy: another Codex turn is running")
-                job.cancel.wait(CODEX_BUSY_POLL_S)
-            except BriefRefused as exc:
-                raise Unavailable(str(exc))
-            except Exception as exc:  # noqa: BLE001
-                raise Failed("rate limited" if _rate_limited(str(exc)) else
-                             f"error ({type(exc).__name__})")
-        self._codex_usage(job, reports)
+        try:
+            while True:
+                # At most CODEX_DEADLINE_S, and Cancel or the budget ends it at
+                # the transport's next poll: the turn holds `_auth_lock`, which
+                # every Codex chat and task turn, the titler and the quota
+                # refresh wait on (review M1 of #219).
+                remaining = min(self._remaining(job), CODEX_DEADLINE_S)
+                try:
+                    answer = provider.one_shot(text, model=model, effort=codex_effort(entry),
+                                               instructions=CODEX_INSTRUCTIONS, deadline_s=remaining,
+                                               on_usage=reports.append, cancel=job.cancel)
+                    break
+                except MetadataBusy:
+                    if self.clock() >= busy_until:
+                        raise Failed("busy: another Codex turn is running")
+                    job.cancel.wait(CODEX_BUSY_POLL_S)
+                except BriefRefused as exc:
+                    raise Unavailable(str(exc))
+                except Exception as exc:  # noqa: BLE001
+                    raise Failed("rate limited" if _rate_limited(str(exc)) else
+                                 f"error ({type(exc).__name__})")
+        finally:
+            # A turn that failed or was cancelled still used tokens (M2).
+            self._codex_usage(job, reports)
         if job.cancel.is_set():
             raise Cancelled()
         result = parse(answer, job.item.paths)
@@ -812,11 +993,9 @@ class DiffReviews:
         if not model or models.cn_hosted(model):
             raise Unavailable("no permitted OpenRouter model (routing policy)")
         self._remaining(job)
-        factory = self.agent_factory
-        if factory is None:
-            from jarvis.agent import Agent as factory
+        factory = self.agent_factory or _confined_agent
         stop = threading.Event()
-        agent = factory(model=model, system=V1_SYSTEM, tool_names=list(V1_TOOLS),
+        agent = factory(root=job.item.root, model=model, system=V1_SYSTEM, tool_names=list(V1_TOOLS),
                         max_steps=V1_MAX_STEPS, approve=_deny_v1,
                         should_stop=lambda: stop.is_set() or job.cancel.is_set(), session=None)
         job.interrupt = stop.set

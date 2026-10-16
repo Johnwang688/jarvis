@@ -8,6 +8,13 @@ import {
 /** How often a running review is read again. The review publishes nothing on
  *  the bus (D2: never spoken, never on Discord), so the panel polls. */
 export const POLL_MS = 1500;
+/** A failed read is retried, each wait twice the last, up to this. */
+export const POLL_MAX_MS = 15000;
+
+/** The wait before the next read after `misses` failed reads in a row. */
+export function pollDelay(misses: number): number {
+  return Math.min(POLL_MS * 2 ** Math.max(0, misses), POLL_MAX_MS);
+}
 
 export interface QuickReview {
   view: DiffReviewView | null;
@@ -23,17 +30,24 @@ export function useQuickReview(taskId: string | null): QuickReview {
   const [view, setView] = useState<DiffReviewView | null>(null);
   const [error, setError] = useState("");
   const [pending, setPending] = useState(false);
+  // Failed reads in a row while a review runs: polling backs off and goes
+  // on, never stops (review L4 of #219).
+  const [misses, setMisses] = useState(0);
   const current = useRef(taskId);
   current.current = taskId;
 
   const take = useCallback((id: string, next: DiffReviewView) => {
-    if (current.current === id) setView(next);
+    if (current.current === id) {
+      setView(next);
+      setMisses(0);
+    }
   }, []);
 
   useEffect(() => {
     setView(null);
     setError("");
     setPending(false);
+    setMisses(0);
     if (!taskId) return;
     api.diffReview(taskId).then((v) => take(taskId, v)).catch(() => {});
   }, [taskId, take]);
@@ -42,10 +56,17 @@ export function useQuickReview(taskId: string | null): QuickReview {
   useEffect(() => {
     if (!taskId || !running) return;
     const timer = setTimeout(() => {
-      api.diffReview(taskId).then((v) => take(taskId, v)).catch((e) => setError(e.message));
-    }, POLL_MS);
+      api.diffReview(taskId).then((v) => {
+        take(taskId, v);
+        if (current.current === taskId) setError("");
+      }).catch((e) => {
+        if (current.current !== taskId) return;
+        setError(`${e.message} — retrying`);
+        setMisses((n) => n + 1);
+      });
+    }, pollDelay(misses));
     return () => clearTimeout(timer);
-  }, [taskId, running, view, take]);
+  }, [taskId, running, view, misses, take]);
 
   const press = useCallback(() => {
     if (!taskId || pending) return;

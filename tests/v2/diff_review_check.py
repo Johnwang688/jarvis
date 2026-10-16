@@ -54,12 +54,15 @@ def peer(script_path, log_path):
         elif method == "turn/start":
             emit({"id": m["id"], "result": {"turn": {"id": turn, "status": "inProgress"}}})
             ident = {"threadId": native, "turnId": turn}
+            if script.get("mode") == "stall":
+                continue
             emit({"method": "thread/tokenUsage/updated", "params": {**ident, "tokenUsage": {
                 "total": {"inputTokens": 900, "outputTokens": 70, "cachedInputTokens": 100},
                 "last": {"inputTokens": 900, "outputTokens": 70, "cachedInputTokens": 100}}}})
             emit({"method": "item/completed", "params": {**ident, "item": {
                 "type": "agentMessage", "id": "a", "text": script["answer"]}}})
-            emit({"method": "turn/completed", "params": {**ident, "turn": {"id": turn, "status": "completed"}}})
+            status = "failed" if script.get("mode") == "failed" else "completed"
+            emit({"method": "turn/completed", "params": {**ident, "turn": {"id": turn, "status": status}}})
             continue
         else:
             result = {}
@@ -433,6 +436,19 @@ class Selection(Base):
         self.assertIsNone(R.over_threshold({"windows": [{"name": "w", "used_percent": 80,
                                                          "resets_at": int((now - 60) * 1000)}]}, now))
 
+    def test_only_the_review_models_codex_limits_count(self):
+        from jarvis.v2.router import daemon_router
+        ledger = daemon_router(self.daemon).ledger
+        ledger.rate_limits.clear()
+        ledger.rate_limits["codex"] = {"primary": {"usedPercent": 10, "windowDurationMins": 300}}
+        ledger.rate_limits["codex_gpt_6_sol"] = {"limitName": "GPT-6 Sol",
+                                                 "primary": {"usedPercent": 99, "windowDurationMins": 300}}
+        self.assertIsNone(R.over_threshold(R.default_quota(self.daemon, "codex")),
+                          "another model's limit does not skip Luna")
+        ledger.rate_limits["codex_luna"] = {"limitName": "GPT-6 Luna",
+                                            "secondary": {"usedPercent": 80, "windowDurationMins": 10080}}
+        self.assertEqual(R.over_threshold(R.default_quota(self.daemon, "codex")), "GPT-6 Luna: weekly at 80%")
+
     def test_the_default_reading_is_the_hud_ledgers(self):
         from jarvis.v2.router import daemon_router
         ledger = daemon_router(self.daemon).ledger
@@ -542,6 +558,8 @@ class ClaudeReadOnly(Base):
         self.daemon.providers[P.CLAUDE] = Healthy()
         self.reviews.runners["claude"] = self.reviews.run_claude
         (self.wt / ".env").write_text("TOKEN=never-read\n")
+        (self.wt / "sub").mkdir()
+        (self.wt / "sub" / "x.py").write_text("x = 1\n")
 
     def run_script(self, *hooks):
         script = [CP.Hook(name, args, f"call-{i}") for i, (name, args) in enumerate(hooks)]
@@ -552,6 +570,43 @@ class ClaudeReadOnly(Base):
             self.reviews._work(job)
             client = CP.FakeClient.instances[0]
         return job, client
+
+    def test_an_isolated_session_reads_no_settings_and_no_jarvis_keys(self):
+        with patch.dict("os.environ", {"OPENROUTER_API_KEY": "sk-or-fake-key", "ANTHROPIC_API_KEY": "sk-ant-fake",
+                                       "DISCORD_TOKEN": "fake", "LC_ALL": "C.UTF-8"}):
+            job, client = self.run_script()
+        options = client.options
+        self.assertEqual(options.setting_sources, [], "no project or user settings file, no hooks")
+        env = options.env
+        for key in ("OPENROUTER_API_KEY", "ANTHROPIC_API_KEY", "DISCORD_TOKEN"):
+            self.assertEqual(env.get(key), "", key)
+        self.assertEqual(env.get("CLAUDE_CODE_DISABLE_CLAUDE_MDS"), "1")
+        for key in ("HOME", "PATH", "LC_ALL"):
+            self.assertNotIn(key, env, f"{key} is inherited as it is")
+        self.assertEqual(job.record["state"], "done")
+
+    def test_every_other_claude_session_is_unchanged(self):
+        with CP.fake([CP.result_message()]):
+            provider = claude.ClaudeProvider()
+            handle = provider.start(CP.thread(), CP.brief(), CP.allow)
+            options = CP.FakeClient.instances[0].options
+            provider.close(handle)
+        self.assertEqual(options.setting_sources, ["user", "project"])
+        self.assertFalse(options.env)
+
+    def test_a_provider_that_cannot_isolate_is_not_used(self):
+        class Plain:
+            def health(self):
+                return True, "ok"
+
+            def start(self, thread, brief, permit):
+                raise AssertionError("never started")
+
+        self.daemon.providers[P.CLAUDE] = Plain()
+        job = self.job()
+        self.reviews._work(job)
+        self.assertEqual(job.record["fallbacks"][0]["reason"],
+                         "this Claude provider cannot start an isolated session")
 
     def test_options_hold_only_the_read_tools_and_the_gate(self):
         job, client = self.run_script()
@@ -587,11 +642,18 @@ class ClaudeReadOnly(Base):
             ("Glob", {"pattern": "/etc/*"}),
             ("Grep", {"pattern": "TOKEN", "glob": "**/.env*"}),
             ("Grep", {"pattern": "x", "path": "/"}),
+            ("Grep", {"pattern": "TOKEN"}),                      # the worktree root holds .env
+            ("Grep", {"pattern": "TOKEN", "path": str(self.wt)}),
+            ("Grep", {"pattern": "TOKEN", "glob": "!*.py"}),
+            ("Grep", {"pattern": "TOKEN", "glob": "{*.py,.env}"}),
+            ("Glob", {"pattern": "{src,../..}/**"}),
         ]
         allowed = [
             ("Read", {"file_path": inside}),
             ("Read", {"file_path": "app.py"}),
             ("Glob", {"pattern": "**/*.py"}),
+            ("Glob", {"pattern": "{src,lib}/*.py"}),
+            ("Grep", {"pattern": "x", "path": "sub"}),
             ("Glob", {"pattern": str(self.wt) + "/**/*.py"}),
             ("Grep", {"pattern": "range\\(", "path": str(self.wt), "glob": "*.py"}),
         ]
@@ -655,7 +717,7 @@ class CodexReadOnly(Base):
 
     def rpc(self, argv, **kwargs):
         script = self.root / "script.json"
-        script.write_text(json.dumps({"answer": FENCED}))
+        script.write_text(json.dumps(getattr(self, "script", {"answer": FENCED})))
         return RpcProcess([sys.executable, "-B", "-u", str(Path(__file__).resolve()), "--peer",
                            str(script), str(self.log)], **kwargs)
 
@@ -684,6 +746,52 @@ class CodexReadOnly(Base):
             self.reviews._work(job)
         self.assertEqual(job.record["fallbacks"][1]["reason"], "busy: another Codex turn is running")
         self.assertEqual(job.record["harness"], "v1")
+
+    def test_cancel_releases_the_login_lock_at_once(self):
+        self.script = {"answer": FENCED, "mode": "stall"}
+        self.reviews.runners["claude"] = self.stub("claude", "failed")
+        job = self.job()
+        worker = threading.Thread(target=self.reviews._work, args=(job,), daemon=True)
+        worker.start()
+        deadline = time.monotonic() + 10
+        while not self.log.exists() or "turn/start" not in self.log.read_text():
+            self.assertLess(time.monotonic(), deadline, "the turn never started")
+            time.sleep(0.02)
+        self.assertTrue(codex._auth_lock.locked())
+        began = time.monotonic()
+        self.reviews._stop_job(job)
+        worker.join(5)
+        self.assertFalse(worker.is_alive())
+        self.assertFalse(codex._auth_lock.locked())
+        self.assertLess(time.monotonic() - began, 3.0)
+        self.assertEqual(self.calls, ["claude"], "a cancel does not fall through to v1")
+
+    def test_the_deadline_is_capped(self):
+        seen = {}
+        provider = self.daemon.providers[P.CODEX]
+        original = provider.one_shot
+
+        def spy(*a, **kw):
+            seen["deadline_s"] = kw["deadline_s"]
+            return original(*a, **kw)
+
+        provider.one_shot = spy
+        self.reviews.runners["claude"] = self.stub("claude", "failed")
+        job = self.job()
+        job.deadline = self.reviews.clock() + 180          # the whole budget left
+        self.reviews._work(job)
+        self.assertLessEqual(seen["deadline_s"], R.CODEX_DEADLINE_S)
+        self.assertEqual(R.CODEX_DEADLINE_S, 60.0)
+
+    def test_a_failed_turns_usage_is_still_recorded(self):
+        from jarvis.v2.router import daemon_router
+        self.script = {"answer": FENCED, "mode": "failed"}
+        self.reviews.runners["claude"] = self.stub("claude", "failed")
+        job = self.job()
+        self.reviews._work(job)
+        self.assertTrue(job.record["fallbacks"][1]["tried"])
+        rows = [r for r in daemon_router(self.daemon).ledger._rows if r.get("task_id") == self.task.id]
+        self.assertEqual([(r["provider"], r["work_tokens"]) for r in rows], [("codex", 870)])
 
     def test_a_model_the_account_lacks_is_not_tried(self):
         from jarvis.v2 import router
@@ -761,7 +869,7 @@ class V1ReadOnly(Base):
         # Two layers: were the toolset ever widened by mistake, the deny-all
         # approver still runs nothing dangerous.
         from jarvis.agent import Agent
-        self.reviews.agent_factory = lambda **kw: Agent(**{**kw, "tool_names": kw["tool_names"] + ["run_command"]})
+        self.reviews.agent_factory = lambda root, **kw: Agent(**{**kw, "tool_names": kw["tool_names"] + ["run_command"]})
         outside = self.root / "approved-by-mistake.txt"
         with self.chat(reply(calls=[("run_command", {"command": f"touch {outside}", "reason": "check"})])):
             job = self.job()
@@ -770,6 +878,27 @@ class V1ReadOnly(Base):
         result = next(m.get("content") for m in self.requests[1]["messages"] if m.get("role") == "tool")
         self.assertNotIn("not available to this agent", result)
         self.assertNotIn("missing required", result)
+        self.assertEqual(job.record["harness"], "v1")
+
+    def test_reads_stay_inside_the_worktree(self):
+        (self.root / "outside.txt").write_text("OUTSIDE-SECRET\n")
+        attempts = [("read_file", {"path": str(self.root / "outside.txt")}),
+                    ("read_file", {"path": "../outside.txt"}),
+                    ("list_dir", {"path": "/"}),
+                    ("find_files", {"pattern": "../*"}),
+                    ("find_files", {"pattern": "*", "path": str(self.root)}),
+                    ("grep_files", {"pattern": "OUTSIDE", "path": str(self.root)}),
+                    ("grep_files", {"pattern": "x", "glob": "{a,../..}/*"}),
+                    ("read_file", {"path": "app.py"})]
+        with self.chat(reply(calls=attempts)):
+            job = self.job()
+            self.reviews._work(job)
+        results = {m.get("tool_call_id"): m.get("content") for m in self.requests[1]["messages"]
+                   if m.get("role") == "tool"}
+        for i in range(7):
+            self.assertIn("reads only the task's worktree", results[f"c{i}"], attempts[i])
+        self.assertNotIn("OUTSIDE-SECRET", json.dumps(self.requests[1]["messages"]))
+        self.assertIn("return range(n - 1)", results["c7"])
         self.assertEqual(job.record["harness"], "v1")
 
     def test_spend_reaches_the_ledger(self):

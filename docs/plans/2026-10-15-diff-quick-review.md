@@ -83,9 +83,10 @@ card. Per harness:
   is a boundary"). It never holds `run_command`, `run_readonly`, a write, the
   browser or a fetch. Its approver is deny-all (`lambda *_: False`). The
   agent's working folder is the worktree (`runtime.bind(workdir=…)`), and
-  v1's own credential and credential-folder refusals apply to every read. A
-  v1 read can still name an absolute path outside the worktree. That is v1's
-  read rule everywhere, and the credential refusals hold there too.
+  v1's own credential and credential-folder refusals apply to every read.
+  The review's agent also refuses, before dispatch, any read whose path or
+  file pattern leaves the worktree (`_confined_agent`, review L1). The global
+  v1 tools are unchanged.
 
 **D4 Usage thresholds.** The selection uses the readings the HUD's usage
 column already shows (`HUDLedger.quota`): Claude's `five_hour` and
@@ -122,8 +123,10 @@ The panel renders them as plain React text: no Markdown, no HTML, no links.
   Cancel.
 - The whole review has a 180 s budget across all harnesses.
 - Cancel and timeout interrupt a Claude turn and stop a v1 loop at its next
-  step. A Codex one-shot cannot be cancelled from outside, so it ends at its
-  own deadline, and its answer is discarded.
+  step. A Codex one-shot ends at the transport's next poll: its `cancel`
+  event is OR-ed into the transport's stop. It is also capped at 60 s,
+  because it holds Codex's login lock, which every Codex turn, the titler
+  and the quota refresh wait on (review M1).
 - Usage is recorded in the ledger as other turns' is. Claude results go in as
   per-result USAGE (equivalent dollars), Codex token counts as a delta row,
   and v1 OpenRouter spend as `spend_usd` under `fast`. All carry the task id.
@@ -150,6 +153,58 @@ toolbar). It is a plain `button`, so it takes PR #210's 4px
 - Severity colours keep Graphite's meanings single: bug red (an error),
   risk steel (`--badge-win`; amber means "pending" and is not used), nit
   muted.
+
+## Review fixes (#219 review, 2026-10-15)
+
+- **H1. The Claude reviewer is isolated.** `ClaudeProvider.start(...,
+  isolated=True)` is set only by this module; every other session is
+  unchanged. An isolated session works as follows:
+  - **Settings.** It runs with `setting_sources=[]`, so it reads no user,
+    project or local `settings.json`. Hooks, `env`, `apiKeyHelper` and
+    `enabledPlugins` from the worktree are therefore never read.
+  - **CLAUDE.md.** It loads no CLAUDE.md. CLI 2.1.295 gates CLAUDE.md
+    discovery on the same setting sources, and
+    `CLAUDE_CODE_DISABLE_CLAUDE_MDS=1` turns it off as well.
+  - **Login.** The OAuth credentials file is not a setting source, so the
+    login still works. The empty list was chosen over `["user"]`, which
+    would bring back the user's own hooks and plugins.
+  - **Environment.** The SDK can only add to the inherited environment, so
+    every variable outside a small keep-list is set to `""`. Jarvis's
+    `.env` keys (`OPENROUTER_API_KEY` and the like) and `ANTHROPIC_*` are
+    blanked this way. The keep-list is `PATH`, `HOME`, user and locale,
+    `TMPDIR`, `CLAUDE_CONFIG_DIR`, the proxy and CA variables, `LC_*`,
+    `XDG_*` and `WSL*`.
+  - **Limit.** The CLI authenticates with the subscription login only. An
+    owner who used `ANTHROPIC_API_KEY` instead would get a failed Claude
+    review that falls through to Codex.
+- **M1.** `one_shot(cancel=)` and the 60 s cap, as in D6 above.
+- **M2.** Codex usage is recorded in a `finally`, so a failed or cancelled
+  turn's tokens still reach the ledger.
+- **L1.** v1 reads are confined to the worktree, as in D3 above.
+- **L2. A Claude `Grep` that could read a credential file is refused.**
+  - The rule applies when the search root holds a credential file (a `.env`,
+    a key file, anything `secrets.is_credential` names) and no `glob` keeps
+    it out.
+  - A negated glob (`!x`) never counts as keeping it out, since it selects
+    everything else.
+  - Brace lists are expanded first.
+  - The walk skips `.git`. It is bounded to 20,000 entries and 1 s, and a
+    walk that hits the bound is refused.
+  - **Why refuse rather than rewrite the input:** the hook can allow or deny
+    a call but not change its arguments. Jarvis also never sees Claude's
+    tool results, so nothing can be scrubbed afterwards. The prompt tells
+    the reviewer to Grep a folder or pass a glob such as `*.py`.
+  - **Cost:** a Grep of the whole worktree is refused while an un-ignored or
+    ignored `.env` sits in it. A gitignored `.env` is refused too, because
+    the guard does not assume ripgrep's ignore rules.
+- **L3. Only Luna's Codex limits count.** The Codex reading is the
+  account's default `codex` limit, plus any limit whose id or name names
+  the review's model (`gpt6luna`, compared without punctuation). Another
+  model's limit never skips Luna.
+- **L4.** A failed poll no longer stops polling. It retries with backoff:
+  1.5 s, doubling, up to 15 s. The panel says it is retrying.
+- **NIT.** Brace lists in a Glob pattern are expanded before the `..` and
+  absolute-path checks. One too large to expand is refused.
 
 ## Files
 

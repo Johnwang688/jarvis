@@ -14,11 +14,18 @@ const world = vi.hoisted(() => ({
   startView: null as any,
   cancelView: null as any,
   startError: null as any,
+  failReads: 0,                // the next N reads throw
+  reads: 0,
 }));
 
 vi.mock("../api", () => ({
   api: {
     diffReview: async () => {
+      world.reads += 1;
+      if (world.failReads > 0) {
+        world.failReads -= 1;
+        throw new Error("HTTP 502");
+      }
       const v = world.views.length > 1 ? world.views.shift() : world.views[0];
       return JSON.parse(JSON.stringify(v));
     },
@@ -34,7 +41,7 @@ vi.mock("../api", () => ({
   },
 }));
 
-import { POLL_MS, QuickReviewButton, QuickReviewPanel, useQuickReview } from "./DiffReview";
+import { POLL_MAX_MS, POLL_MS, QuickReviewButton, QuickReviewPanel, pollDelay, useQuickReview } from "./DiffReview";
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -83,6 +90,8 @@ beforeEach(() => {
   world.startView = running();
   world.cancelView = running();
   world.startError = null;
+  world.failReads = 0;
+  world.reads = 0;
   opened.length = 0;
 });
 afterEach(() => {
@@ -190,6 +199,32 @@ describe("the Quick review button", () => {
     expect(opened).toEqual([["app.py", null]]);
     act(() => (host.querySelector(".qr-fold") as HTMLButtonElement).click());
     expect(host.querySelector('[data-testid="qr-finding"]')).toBeNull();
+  });
+
+  it("a failed poll backs off and keeps polling until the result", async () => {
+    vi.useFakeTimers();
+    world.views = [running()];
+    mount();
+    await flush();
+    world.failReads = 2;
+    world.views = [{ review: record({ findings: [] }), outdated: false }];
+    await act(async () => { vi.advanceTimersByTime(POLL_MS); });
+    await flush();
+    expect(world.reads).toBe(2);
+    expect(panel()!.textContent).toContain("HTTP 502 — retrying");
+    // The second wait is twice the first; nothing is read before it.
+    await act(async () => { vi.advanceTimersByTime(POLL_MS * 2 - 10); });
+    expect(world.reads).toBe(2);
+    await act(async () => { vi.advanceTimersByTime(10); });
+    await flush();
+    expect(world.reads).toBe(3);
+    await act(async () => { vi.advanceTimersByTime(POLL_MS * 4); });
+    await flush();
+    expect(world.reads).toBe(4);
+    expect(panel()!.dataset.state).toBe("done");
+    expect(panel()!.textContent).not.toContain("retrying");
+    expect(pollDelay(0)).toBe(POLL_MS);
+    expect(pollDelay(20)).toBe(POLL_MAX_MS);
   });
 
   it("no task, no request", async () => {

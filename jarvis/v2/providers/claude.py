@@ -250,6 +250,37 @@ EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
 # project's conventions without anything being logged.
 SETTING_SOURCES = ["user", "project"]
 
+# An **isolated** session (`start(..., isolated=True)`; only the Diff tab's
+# quick review asks for one, 2026-10-15, review H1 of #219) reads no settings
+# file at all: `--setting-sources=` empty, so no project or user
+# `settings.json` (their hooks, which would run unsandboxed before any reply,
+# `env`, `apiKeyHelper`, `enabledPlugins`), no CLAUDE.md as instructions — the
+# CLI gates CLAUDE.md discovery on the same sources (2.1.295), and
+# CLAUDE_CODE_DISABLE_CLAUDE_MDS=1 says so twice. The login is the OAuth
+# credentials file, which is not a setting source. Its environment is the
+# daemon's with every variable not in ISOLATED_ENV_KEEP (or a prefix in
+# ISOLATED_ENV_KEEP_PREFIXES) blanked: the SDK can only add to the inherited
+# environment, never remove from it, so each is set to "" — Jarvis's `.env`
+# keys (OPENROUTER_API_KEY and the like) and ANTHROPIC_* included, so the CLI
+# authenticates with the subscription login only.
+ISOLATED_SETTING_SOURCES: list[str] = []
+ISOLATED_ENV_KEEP = frozenset({
+    "PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LANGUAGE", "TERM", "TZ", "TMPDIR",
+    "TMP", "TEMP", "PWD", "CLAUDE_CONFIG_DIR", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY",
+    "http_proxy", "https_proxy", "no_proxy", "SSL_CERT_FILE", "SSL_CERT_DIR",
+    "NODE_EXTRA_CA_CERTS"})
+ISOLATED_ENV_KEEP_PREFIXES = ("LC_", "XDG_", "WSL")
+
+
+def isolated_env(environ=None) -> dict[str, str]:
+    """The `env` an isolated session's CLI gets on top of the daemon's: every
+    variable outside the keep list blanked, and CLAUDE.md discovery off."""
+    environ = os.environ if environ is None else environ
+    env = {key: "" for key in environ
+           if key not in ISOLATED_ENV_KEEP and not key.startswith(ISOLATED_ENV_KEEP_PREFIXES)}
+    env["CLAUDE_CODE_DISABLE_CLAUDE_MDS"] = "1"
+    return env
+
 # Anything that looks like a bearer credential, redacted before a string can
 # reach an event. `secrets.scrub` covers the files Jarvis owns; the CLI's own
 # OAuth bundle (`~/.claude/.credentials.json`) is not one of them, and this
@@ -750,6 +781,9 @@ class _Session:
     # The private file the brief's MCP servers are carried in (plan
     # 2026-10-10 §1.3), or None when the brief has none.
     mcp_config: Path | None = None
+    # No settings file, no CLAUDE.md, a scrubbed environment (`start(...,
+    # isolated=True)`, the quick review's). Kept across a model switch.
+    isolated: bool = False
     # Native sub-agents (SV-1). They outlive turns (background is the CLI's
     # default), so none of this is cleared when a turn starts: `children` by
     # sid, oldest first; `tasks` maps a task id (= a hook's `agent_id`) to its
@@ -830,8 +864,12 @@ class ClaudeProvider:
 
     # -- lifecycle
 
-    def start(self, thread: Thread, brief: Brief, permit: PermissionCallback) -> SessionHandle:
-        return self._open(thread, brief, permit, resume=False)
+    def start(self, thread: Thread, brief: Brief, permit: PermissionCallback, *,
+              isolated: bool = False) -> SessionHandle:
+        """`isolated`: no settings file, no CLAUDE.md, a scrubbed environment
+        (see ISOLATED_SETTING_SOURCES). Only the Diff tab's quick review sets
+        it; every other session is unchanged."""
+        return self._open(thread, brief, permit, resume=False, isolated=isolated)
 
     def resume(self, thread: Thread, brief: Brief, permit: PermissionCallback) -> SessionHandle:
         if not thread.provider_session_id:
@@ -839,7 +877,8 @@ class ClaudeProvider:
         return self._open(thread, brief, permit, resume=True)
 
     def _open(
-        self, thread: Thread, brief: Brief, permit: PermissionCallback, *, resume: bool
+        self, thread: Thread, brief: Brief, permit: PermissionCallback, *, resume: bool,
+        isolated: bool = False,
     ) -> SessionHandle:
         session_id = thread.provider_session_id if resume else str(uuid.uuid4())
         loop = asyncio.new_event_loop()
@@ -858,6 +897,7 @@ class ClaudeProvider:
             resumable=resume,
             cost_seen=(running_cost.figure(getattr(thread, "provider_cost_total", None))
                        if resume else 0.0),
+            isolated=isolated is True,
         )
         try:
             if brief.mcp_servers:
@@ -906,7 +946,7 @@ class ClaudeProvider:
                 "preset": "claude_code",
                 **({"append": brief.system_append} if brief.system_append else {}),
             },
-            "setting_sources": list(SETTING_SOURCES),
+            "setting_sources": list(ISOLATED_SETTING_SOURCES if session.isolated else SETTING_SOURCES),
             "permission_mode": "auto" if auto else "default",
             "include_partial_messages": True,
             "strict_mcp_config": True,
@@ -934,8 +974,10 @@ class ClaudeProvider:
             "extra_args": {"replay-user-messages": None},
         }
         cli_path = resolve_cli()
+        if session.isolated:
+            kwargs["env"] = isolated_env()
         if brief.origin_tag is not None:
-            kwargs["env"] = {"JARVIS_ORIGIN_TAG": brief.origin_tag}
+            kwargs["env"] = {**kwargs.get("env", {}), "JARVIS_ORIGIN_TAG": brief.origin_tag}
         if cli_path is not None:
             # The owner's own install, never the SDK's bundled copy, which
             # lags it and refuses newer models. None leaves the SDK to its
