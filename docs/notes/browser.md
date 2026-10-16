@@ -1938,3 +1938,83 @@ recorded, a keyring attached by default to the real bus, Private given the
 bus or the keyring flag, the after-launch check removed, status reporting a
 constant, the bus socket check removed, and a probe that asks for more than
 `Locked`. `hud/src/components/BrowserProfile.test.ts` covers the Manage line.
+
+## Chrome's own sign-in tab joins the sign-in pane (2026-10-15)
+
+Owner report: "Sign in to Chrome" ended on the "does not open this kind of
+address" page. The owner route was not the cause. A real-Chrome 155 run with
+an owner tab already open, and one through the installed HUD build against a
+real daemon, both ended on `chrome://settings/people` with no landing-guard
+replacement (`browser_profiles_check` 06d). In the live log the sign-in tab
+attached at 20:02:38 and the five replacements came 11–27 s later with no new
+attach. So the replaced pages were in tabs already shown. That matches
+navigation inside the settings page or Back. Measured: the people page's
+"Customize profile", "Google services" and "Import bookmarks and settings"
+go to `chrome://settings/manageProfile`, `/googleServices` and `/importData`.
+Each is replaced and ends the capability. That is BD-5's exact rule, kept.
+None of those pages belongs to sign-in.
+
+What was broken: the page's own blue **Sign in to Chrome** button opens
+`https://accounts.google.com/signin/chrome/sync?ssp=1&continue=https://www.google.com/&flow=history_opt_in&theme=mn`
+in a **new tab with no opener**. Chrome sends `X-Chrome-ID-Consistency-Request`
+with it. Real Gaia answers that request with a 302 to
+`/v3/signin/identifier?…&flowName=GlifDesktopChromeSync`, and answers 404
+without the header (PR #217 delta review). Chrome opens the tab, not the
+page, so
+`_link_opener` found no parent. The HUD was never told, and the owner saw
+nothing happen. No other chrome:// page is visited on this path.
+
+Now that tab becomes the sign-in tab's pop-up: its window gets
+`{t:"popup"}` and the HUD adopts it. "No opener" alone is not "Chrome opened
+it". The PR #217 review measured that Ctrl-, Shift- and middle-clicks on a
+link give no opener, real or scripted (even `dispatchEvent` with no input).
+None of them fires CDP `Page.windowOpen`, which fires only for `target=_blank`
+and `window.open`, and those have an opener. So every condition below is
+required (`_link_signin`, `_signin_popup`):
+
+- **Jarvis did not open it.** `_adopt(own=)` is set at construction, before
+  its first landing; the context's page event counts `instance.opening`.
+- **No opener** (Playwright's `opener()`), and no opener named meanwhile.
+- **Its request was exactly `https://accounts.google.com/signin/chrome/sync`**
+  (scheme, netloc and path; any query), checked before Gaia's redirect.
+  Measured on Chrome 155: the redirect leaves one history entry, whose
+  `userTypedURL` is the requested address and whose `url` is the identifier
+  page. Playwright's context `request` events never saw that request, so the
+  check reads the history entry.
+- **Its first landing is Google's sign-in origin exactly** (`https`,
+  `accounts.google.com`, no port, no userinfo), and the entry's `url` is still
+  on that origin. The other allowed landing is Chrome's error page:
+  `chrome-error://chromewebdata/` when Google cannot be reached. There the
+  entry's `url` is the failed request itself. That tab is shown too, so the
+  owner sees Chrome's error page rather than nothing.
+- **Its only history entry carries Chrome's own transition.** That is
+  `auto_bookmark`, measured on Chrome 155. A page's open of the same
+  address, in any of the shapes above, is `link`, and no page can make a
+  browser-UI transition. This is the structural check, in place of
+  `windowOpen`.
+- **The owner pressed in that sign-in tab within `SIGNIN_ADOPT_S` (15 s).**
+  The press is stamped in `_deliver`, which only the owner's stream reaches;
+  driving sends its own input. Only `mousePressed` and `keyDown`/`rawKeyDown`
+  count. A hover, a wheel, a release or a key-up does not.
+- **At most once per sign-in tab** (`signin_adopted`), and only while its
+  capability lasts.
+
+The Google tab is judged like any page and holds no internal capability;
+its chrome:// landings are still replaced. Any other tab with no opener
+stays unshown, as before. `browser_profiles_check` covers this:
+`SigninAdoption` tests each condition on doubles; 06e is the real flow with
+a local TLS stand-in for `accounts.google.com` behind the suite's gate. That
+stand-in 302s Chrome's request as Gaia does. 06e also covers a second attempt
+and Jarvis's own tab at the address. 06f is the forgery shapes after an owner
+press. 06g covers input that is not a press, a stale press, and a capability
+that ended before Google's page landed. 06h is Google unreachable, showing
+Chrome's error page beside the sign-in tab. Nothing leaves loopback. Through the HUD, the
+Google tab opened as the pane's active tab.
+
+**Not verified** (no Google contact in tests): what comes after Google's
+page. `navigator.webdriver` is true, and Google may refuse the login as an
+unsafe browser. After a login, Chrome's sync/history confirmation is browser
+UI (a dialog), which a headless screencast does not draw. If Chrome then sends
+the Google tab to a chrome:// page, it is replaced with the explanation. In
+this fresh profile the people page offers "Sign in to Chrome", not "Turn on
+sync…". That button appears only with an account, which needs Google.

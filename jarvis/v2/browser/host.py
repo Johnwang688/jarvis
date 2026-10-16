@@ -103,6 +103,7 @@ from concurrent.futures import TimeoutError as FuturesTimeout
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlsplit
 from xml.sax.saxutils import escape as xml_escape
 
 from jarvis import config
@@ -133,6 +134,28 @@ PROFILE_INSTANCES_MAX = 3
 PROFILE_IDLE_S = 300.0
 SIGNIN_URL = "chrome://settings/syncSetup"
 SIGNIN_PAGES = frozenset((SIGNIN_URL, "chrome://settings/people"))
+# Chrome's own "Sign in to Chrome" (on the people page) opens Google's
+# sign-in in a new tab with no opener: it requests
+# `https://accounts.google.com/signin/chrome/sync?ssp=1&continue=…` with
+# Chrome's `X-Chrome-ID-Consistency-Request` header, which Google answers
+# with a 302 to `/v3/signin/identifier?…&flowName=GlifDesktopChromeSync`
+# (PR #217 delta review). Measured, Chrome 155: the tab's one history entry
+# has transition `auto_bookmark` and the requested address as its
+# `userTypedURL`; when Google cannot be reached, the entry's `url` is that
+# address and the tab shows Chrome's error page. A page can request the same
+# address with no opener too (a Ctrl-, Shift- or middle-click, real or
+# synthetic, which fires no `Page.windowOpen`), but only as a `link`
+# transition: no page can make a browser-UI one. So a tab is shown beside
+# the owner's sign-in tab only when Jarvis did not open it, it has no
+# opener, Chrome's own transition requested exactly SIGNIN_GAIA, it lands
+# first on Google's sign-in origin or Chrome's error page, the owner pressed
+# in that sign-in tab within SIGNIN_ADOPT_S, and that sign-in tab has adopted
+# none yet. It is judged like every page and holds no internal capability.
+SIGNIN_GAIA = ("https", "accounts.google.com", "/signin/chrome/sync")   # scheme, netloc, path
+SIGNIN_ORIGIN = ("https", "accounts.google.com")                        # where Google may redirect it
+SIGNIN_ERROR = "chrome-error://chromewebdata/"
+SIGNIN_TRANSITION = "auto_bookmark"
+SIGNIN_ADOPT_S = 15.0
 PROFILES_CAP = 64 * 1024
 TITLE_CAP = 120
 URL_CAP = 2048
@@ -622,6 +645,7 @@ class _Instance:
     restore_allocation: bool = False
     refused_pages: list = field(default_factory=list)
     popup_cleanup: list = field(default_factory=list)
+    opening: int = 0                    # pages `_open_page_locked` is creating now
     # The store this launch used (`password_store.py`): what `/status` says.
     password_store: str = "basic"
 
@@ -659,6 +683,9 @@ class _Tab:
     loopback_port: int | None = None
     pending_port: int | None = None
     signin: bool = False
+    unsolicited: bool = False            # not opened by Jarvis; judged once, at its first landing
+    signin_press: float | None = None    # loop time of the owner's last press in a sign-in tab
+    signin_adopted: bool = False         # this sign-in tab has shown Chrome's Google tab
     page_identity: int = 0              # host-issued lifetime, never a Python address
     document_generation: int = 0        # includes same-URL/same-document navigation
     pane_ready: bool = False             # false until the landing guard accepts it
@@ -1272,7 +1299,9 @@ class BrowserHost:
                              audio=InstanceAudio(launch_audio.applied),
                              password_store=choice.store)
         instance.audio.on_settled(self._sound.wake)
-        context.on("page", lambda page: self._adopt(instance, page, None))
+        # A page Jarvis is creating (`_open_page_locked`) arrives here first,
+        # while `opening` counts it; Chrome's own and pages' pop-ups do not.
+        context.on("page", lambda page: self._adopt(instance, page, None, own=instance.opening > 0))
         LOG.info("Browser started a Chrome (%s)", "private" if private else "profile")
         return instance
 
@@ -1377,7 +1406,8 @@ class BrowserHost:
         # Only structurally quiet launch mode permits allocation after OFF.
         return instance.audio.applied and not self._sound.preference(instance.profile)[0]
 
-    def _adopt(self, instance: _Instance, page, ctx: str | None, *, logical_id=None, restart_token=None):
+    def _adopt(self, instance: _Instance, page, ctx: str | None, *, logical_id=None, restart_token=None,
+               own: bool = False):
         """Register a page as a tab (a page we opened, or a pop-up), with the
         landing guard, its stream and the page's own requests (dialogs, file
         choosers, downloads). **The cap is 12 tabs in all** (decision B-13:
@@ -1447,6 +1477,9 @@ class BrowserHost:
         self._next_page_identity += 1
         tab = _Tab(id=tab_id, profile=instance.profile, ctx=ctx, page=page,
                    page_identity=self._next_page_identity,
+                   # Jarvis's own pages (`own`, restored ones, Private) never;
+                   # read once, at the first real landing (`_link_signin`).
+                   unsolicited=not own and ctx is None and logical_id is None,
                    stream=TabStream(tab_id, held=self.input_held, wake=lambda: self._wake(tab),
                                     blocked=lambda: bool(tab.dialogs) or self._auth.blocked(tab)),
                    cdp_lock=asyncio.Lock(), cast_lock=asyncio.Lock(), wakeup=asyncio.Event())
@@ -1653,6 +1686,9 @@ class BrowserHost:
         internal = tab.signin and url in SIGNIN_PAGES
         if not internal:
             tab.signin = False
+        first = tab.unsolicited and url != "about:blank"
+        if first:
+            tab.unsolicited = False
         try:
             if not internal:
                 policy.judge_url(url, refused=self.refused_ports(), landed=True)
@@ -1662,6 +1698,8 @@ class BrowserHost:
             LOG.info("Browser landing guard replaced a page (%s)", refusal.reason)
             asyncio.ensure_future(self._quietly(self._replace(tab, tab.document_generation)))
             return
+        if first:
+            self._link_signin(tab, url)
         # A new page has no chooser open any more.
         if tab.chooser is not None:
             tab.chooser = None
@@ -1675,6 +1713,85 @@ class BrowserHost:
         self._activity_changed()
         self._located(tab, url=url)
         self._publish_pane_tabs()  # _located may return early for a same-URL reload
+
+    @staticmethod
+    def _signin_address(url) -> bool:
+        """Exactly Chrome's sign-in request to Google (`SIGNIN_GAIA`)."""
+        try:
+            parts = urlsplit(url)
+            return (parts.scheme, parts.netloc, parts.path) == SIGNIN_GAIA
+        except (TypeError, ValueError, AttributeError):
+            return False
+
+    @staticmethod
+    def _signin_landing(url) -> bool:
+        """Where that request may first land: Google's sign-in origin
+        exactly (no port, no userinfo), or Chrome's error page."""
+        if url == SIGNIN_ERROR:
+            return True
+        try:
+            parts = urlsplit(url)
+            return (parts.scheme, parts.netloc) == SIGNIN_ORIGIN
+        except (TypeError, ValueError, AttributeError):
+            return False
+
+    def _signin_parent(self, tab: _Tab) -> _Tab | None:
+        """The sign-in tab of `tab`'s profile that may show Chrome's Google
+        tab now: its capability live, the owner's press in it recent, and
+        nothing adopted yet. The newest press wins."""
+        now = asyncio.get_running_loop().time()
+        ready = [t for t in self._tabs.values()
+                 if t is not tab and t.profile == tab.profile and t.ctx is None and t.signin
+                 and not t.signin_adopted and t.signin_press is not None
+                 and 0 <= now - t.signin_press <= SIGNIN_ADOPT_S]
+        return max(ready, key=lambda t: t.signin_press) if ready else None
+
+    def _link_signin(self, tab: _Tab, url: str) -> None:
+        """At an unsolicited tab's first real landing: Chrome's own sign-in
+        tab (`SIGNIN_GAIA`) opens beside the owner's sign-in tab, as a
+        pop-up would. Anything else stays as it was (unshown)."""
+        if self._signin_landing(url) and self._signin_parent(tab) is not None:
+            asyncio.ensure_future(self._quietly(self._signin_popup(tab, url)))
+
+    async def _signin_popup(self, tab: _Tab, url: str) -> None:
+        page, generation = tab.page, tab.document_generation
+        try:
+            if await asyncio.wait_for(page.opener(), CLOSE_TIMEOUT_S) is not None:
+                return
+            cdp = await page.context.new_cdp_session(page)
+            try:
+                history = await asyncio.wait_for(cdp.send("Page.getNavigationHistory"), CLOSE_TIMEOUT_S)
+            finally:
+                await self._quietly(cdp.detach())
+            entries = history.get("entries") or []
+            # Chrome opened it, and from its own UI: one entry, Chrome's
+            # transition (a page's open is a `link`), and exactly Chrome's
+            # sign-in request — before Google's redirect (`userTypedURL`), or
+            # the failed address itself under Chrome's error page.
+            if len(entries) != 1 or entries[0].get("transitionType") != SIGNIN_TRANSITION:
+                return
+            entry = entries[0]
+            if url == SIGNIN_ERROR:
+                requested = entry.get("url")
+            else:
+                # Google's own page may rewrite its address (same document)
+                # before this is read: the origin is what must still hold.
+                requested = entry.get("userTypedURL") or entry.get("url")
+                if entry.get("url") == SIGNIN_ERROR or not self._signin_landing(entry.get("url")):
+                    return
+            if not self._signin_address(requested):
+                return
+        except Exception:  # noqa: BLE001 - unknown: left unshown
+            return
+        if (self._stopped or self._tabs.get(tab.id) is not tab or tab.opener
+                or tab.document_generation != generation):
+            return
+        parent = self._signin_parent(tab)
+        if parent is None:
+            return
+        parent.signin_adopted = True
+        tab.opener = parent.id
+        parent.stream.send({"t": "popup", "tab_id": tab.id})
 
     def _located(self, tab: _Tab, *, url: str | None = None, title: str | None = None,
                  force: bool = False) -> None:
@@ -1788,8 +1905,15 @@ class BrowserHost:
         else:
             spare = [p for p in instance.context.pages
                      if not any(t.page is p for t in self._tabs.values())]
-            page = spare[0] if spare else await instance.context.new_page()
-            tab = self._adopt(instance, page, None)
+            if spare:
+                page = spare[0]
+            else:
+                instance.opening += 1
+                try:
+                    page = await instance.context.new_page()
+                finally:
+                    instance.opening -= 1
+            tab = self._adopt(instance, page, None, own=True)
         if tab is None:
             raise BrowserRefused(409, f"the Browser already has {cap} tabs open; close one first")
         row = {"tab_id": tab.id, "profile": tab.profile, "ctx": tab.ctx, "loaded": True}
@@ -2559,9 +2683,15 @@ class BrowserHost:
         # Timeout leaves the call alive, but no later input may follow it
         # until Chrome answers. Input arriving meanwhile is dropped.
         auth_epoch = self._auth.input_epoch(tab)
+        press = (mouse and params["type"] == "mousePressed") or (key and params["type"] in ("keyDown", "rawKeyDown"))
         async def send_current_auth():
             if (same_document() and not self.input_held()
                     and self._auth.input_current(tab, auth_epoch)):
+                if press and tab.signin:
+                    # The owner's own press in a sign-in tab (only the owner's
+                    # stream reaches `_deliver`; driving sends its own): what
+                    # lets Chrome's Google tab open beside it (`_link_signin`).
+                    tab.signin_press = asyncio.get_running_loop().time()
                 await cdp.send(method, params)
         task = asyncio.ensure_future(self._activity_run(tab, send_current_auth))
         tab.input_task = task
