@@ -1292,12 +1292,17 @@ deployed; branch `claude/buttons-sparkle`.
   the plain buttons were 6px (`--radius`), a few icon buttons 4px, the sidebar
   `⋯` 3px; they are now all 4px. Colour, border, size, padding, hover, disabled,
   `.on`, focus ring and Tab order are unchanged.
-- **Left as they were, deliberately:** the true circles `.iconbtn` (Attach, Send,
-  Stop) and `.railmark` (the folded rail's approval/error marks); non-button
-  chips and badges (`.chip`, `.phase`, `.badge`, `.termbadge`, `.tb-badge`,
-  `.discord-link .pill`, `.voice-words-chip`: spans, 10px/3px); inputs, selects,
-  cards, menus and the approval card (6px `--radius`, not buttons); flush tab
-  strips and menu rows (0).
+- **Amended the same day (owner review of PR #210): every pill is a rectangle
+  except Send, Stop and Steer.** Those three (`.iconbtn.send`, which Steer
+  shares as `.send.steer`, and `.iconbtn.stop`) stay true circles and nothing
+  else does. Converted to `--radius-btn`: Attach, the folded rail's
+  `.railmark`, the VEX help `?`, every `.chip` (the input bar's project
+  selector and model chip, the pane pin chip, attachment chips), `button.vexchip`
+  (the slot chip), the `.vexsteps li` step chips and `.voice-words-chip`.
+  Left as they were: non-clickable status badges (`.badge`, `.phase`, `.termbadge`,
+  `.tb-badge`, `.chip.edlock`/`.edro`, `.discord-link .pill`, `.vexmark`), status
+  dots, the slider knob, inputs/selects/cards/menus/the approval card (6px,
+  not buttons) and flush tab strips and menu rows (0).
 - **Binary click sparkle** (`hud/src/lib/sparkle.ts`, installed from `main.tsx`).
   One capture-phase `click` listener on the document; for a click on a
   `button`/`[role=button]` (not disabled) it draws 5–7 glacier-cyan monospace `1`

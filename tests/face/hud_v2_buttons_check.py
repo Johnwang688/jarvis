@@ -15,18 +15,18 @@ REPO = Path(__file__).resolve().parents[2]
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
-from tests.face.hud_v2_check import open_settings
+from tests.face.hud_v2_check import expand, open_settings
 from tests.face.hud_v2_layout_check import _approval, _boot, _set_storage
 
 PAGE = '[data-testid="settings-page"]'
 BITS = ".sparkle-bit"
 KEY = "jarvis.hud.sparkle"
 
-# True circles that stay round on purpose: Attach/Send/Stop and the folded rail's marks.
-CIRCLES = ".iconbtn, .railmark"
+# The only circles left (owner 2026-10-15): Send, Stop and Steer (Steer is .send.steer).
+CIRCLES = ".iconbtn.send, .iconbtn.stop"
 
-# Every <button>/[role=button]/[role=tab] with its top-left computed radius, as pixels.
-RADII = """(skip) => [...document.querySelectorAll('button, [role=button], [role=tab]')]
+# Every button-like thing (buttons, tabs, Attach, chips that hold a control, VEX step chips) with its top-left computed radius, as pixels.
+RADII = """(skip) => [...document.querySelectorAll('button, [role=button], [role=tab], label.iconbtn, .chip:not(.edlock):not(.edro), .vexsteps li, .voice-words-chip')]
   .filter(el => !el.matches(skip) && el.getBoundingClientRect().width > 0)
   .map(el => {
     const cs = getComputedStyle(el);
@@ -90,8 +90,26 @@ def shape_checks(page, mock, check, until):
     }"""))
     check("Send stays a true circle", page.locator('[data-testid="send"]').first.evaluate(
         "e => getComputedStyle(e).borderTopLeftRadius") == "50%")
-    check("a chip that is not a button keeps its shape", page.evaluate(
-        "parseFloat(getComputedStyle(document.querySelector('.chip.projchip')).borderTopLeftRadius)") == 10)
+    check("Attach is a 4px rectangle now", _radius(page, ".iconbtn.attach") == 4)
+    check("the input bar's project selector chip and model chip are 4px rectangles, not pills",
+          page.evaluate("[...document.querySelectorAll('.chip.projchip')].map(e => parseFloat(getComputedStyle(e).borderTopLeftRadius))")
+          not in ([], None) and all(r == 4 for r in page.evaluate(
+              "[...document.querySelectorAll('.chip.projchip')].map(e => parseFloat(getComputedStyle(e).borderTopLeftRadius))")))
+    check("a status badge that is not a control keeps its shape (.badge 3px)", page.evaluate(
+        "[...document.querySelectorAll('.badge')].every(e => parseFloat(getComputedStyle(e).borderTopLeftRadius) === 3)"))
+    # A running turn shows Stop and Steer beside Send: all three stay circles.
+    expand(page, "p1", "thread-t1")
+    page.locator('[data-testid="thread-t1"]').click()
+    until(lambda: page.evaluate("window.__hud.state().threadId") == "t1")
+    mock.emit("turn_started", {}, thread_id="t1")
+    until(lambda: page.locator('[data-testid="stop"]').count() > 0)
+    round_ = page.evaluate("""() => ['stop', 'send'].map(t => { const e = document.querySelector(`[data-testid="${t}"]`);
+      return [t, e && e.className, e && getComputedStyle(e).borderTopLeftRadius]; })""")
+    check("Stop and Steer (the running turn's Send) stay true circles",
+          round_[0][2] == "50%" and round_[1][2] == "50%" and "steer" in round_[1][1], str(round_))
+    sweep("running")
+    mock.emit("turn_finished", {}, thread_id="t1")
+    until(lambda: not page.evaluate("window.__hud.state().busy"))
 
     page.locator('[data-testid="titlebar-settings"]').click()
     page.wait_for_selector(PAGE)
