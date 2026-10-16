@@ -166,9 +166,9 @@ def _latest_build(mock) -> str | None:
     return list(builds)[-1] if builds else None
 
 
-def _finish(mock, fake, build_id: str, state_: str = "succeeded", errors=None):
+def _finish(mock, fake, build_id: str, state_: str = "succeeded", errors=None, ended: str | None = None):
     """The build's program ends: its record says so, and its terminal prints and exits, as make would."""
-    mock_vex.finish_build(mock, build_id, state_, errors)
+    mock_vex.finish_build(mock, build_id, state_, errors, **({"ended": ended} if ended else {}))
     rec = mock_vex.state(mock)["builds"][build_id]
     tid = rec["terminal_id"]
     lines = "".join(f"{e['file']}:{e['line']}:{e['col']}: {e['severity']}: {e['message']}\r\n" for e in errors or [])
@@ -214,6 +214,28 @@ def _described(page, sel: str) -> str:
     return page.locator(sel).evaluate(
         "e => (e.getAttribute('aria-describedby') || '').split(' ').map(i => document.getElementById(i))"
         ".filter(Boolean).map(x => x.textContent).join(' ')")
+
+
+def _tip_clipped(tip) -> str:
+    """Where a shown tooltip is cut off: by a clipping ancestor (overflow other than visible) or the window.
+    `is_visible` cannot see this: a tooltip half outside a scroll box is visible and unreadable."""
+    return tip.evaluate("""t => {
+      const r = t.getBoundingClientRect(), out = [];
+      if (r.width === 0 || r.height === 0) return 'not drawn';
+      for (let e = t.parentElement; e; e = e.parentElement) {
+        const cs = getComputedStyle(e);
+        if (cs.overflowX === 'visible' && cs.overflowY === 'visible') continue;
+        const b = e.getBoundingClientRect();
+        const inner = { left: b.left + e.clientLeft, top: b.top + e.clientTop };
+        inner.right = inner.left + e.clientWidth; inner.bottom = inner.top + e.clientHeight;
+        if (r.left < inner.left - 0.5 || r.top < inner.top - 0.5 || r.right > inner.right + 0.5
+            || r.bottom > inner.bottom + 0.5)
+          out.push((e.dataset.testid || e.className || e.tagName) + ' ' + JSON.stringify([r.left, r.top, r.right, r.bottom].map(Math.round))
+                   + ' outside ' + JSON.stringify([inner.left, inner.top, inner.right, inner.bottom].map(Math.round)));
+      }
+      if (r.left < 0 || r.top < 0 || r.right > innerWidth || r.bottom > innerHeight) out.push('window');
+      return out.join('; ');
+    }""")
 
 
 def _radii(page, sel: str) -> list:
@@ -428,6 +450,23 @@ def _build_checks(page, mock, check, until, fake):
           and page.locator(_view(V, _tid("vex-out-tab-build"))).get_attribute("aria-label")
           == "Build, succeeded, edited since")
     _shot(page, "20-stale-mark")
+    # A Clean running beside the stale ✓: the line says the clean, not the stale words (review LOW).
+    n = len(mock_vex.state(mock)["builds"])
+    page.locator(_view(V, _tid("vex-clean-btn"))).click()
+    check("while something runs the stale words give way to it (review LOW)",
+          bool(until(lambda: page.locator(_view(V, _tid("vex-status"))).get_attribute("data-state") == "busy", timeout=4))
+          and mark.get_attribute("data-state") == "stale" and note.count() == 0)
+    until(lambda: len(mock_vex.state(mock)["builds"]) == n + 1, timeout=4)
+    _finish(mock, fake, _latest_build(mock), "succeeded")
+    check("and come back once it ends", bool(until(lambda: note.count() == 1, timeout=5))
+          and "Build: ✓" in note.inner_text())
+    page.locator(_view(V, _tid("vex-build-btn"))).click()
+    until(lambda: len(mock_vex.state(mock)["builds"]) == n + 2, timeout=4)
+    from datetime import datetime, timedelta, timezone
+    _finish(mock, fake, _latest_build(mock), "succeeded",
+            ended=(datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat())
+    check("and a fresh ✓ after the edit is not stale: no words",
+          bool(until(lambda: mark.get_attribute("data-state") == "ok", timeout=5)) and note.count() == 0)
 
 
 def _clean_output_checks(page, mock, check, until, fake):
@@ -1749,15 +1788,18 @@ def _help_checks(page, mock, check, until, fake):
             "vex-more": "vexcom --programs", "vex-usb-open": "USB presence only", "vex-help-toggle": "Lists what each",
             "vex-out-fold": "Folds the output", "vex-out-max": "whole pane",
             "vex-out-tab-brain": "connects only when you click"}
-    shown = {}
+    shown, clipped = {}, {}
     for tid, text in want.items():
         el = page.locator(_view(V, _tid(tid)))
         tip_id = el.get_attribute("aria-describedby")
         tip = page.locator(f"[id='{tip_id}']")
         el.hover()
         shown[tid] = bool(until(lambda: tip.is_visible(), timeout=2)) and text in tip.inner_text()
+        if shown[tid] and _tip_clipped(tip):
+            clipped[tid] = _tip_clipped(tip)
         page.mouse.move(2, 2)
     check("every control shows its hover help, named by aria-describedby", all(shown.values()), str(shown))
+    check("and none is cut off by a scroll box or the window", not clipped, str(clipped))
     btn = page.locator(_view(V, _tid("vex-build-btn")))
     tip = page.locator(f"[id='{btn.get_attribute('aria-describedby')}']")
     seen = []
@@ -1806,7 +1848,7 @@ def _help_checks(page, mock, check, until, fake):
     shown_nums = nums.evaluate_all("els => els.map(e => [e.dataset.testid.replace('vex-helpnum-', ''), e.textContent])")
     check("in help mode each control shows its number in the list, and the numbers match the list's",
           len(shown_nums) >= 12 and all(order.index(h) + 1 == int(n) for h, n in shown_nums)
-          and {"clean", "build", "rebuild", "download", "slot", "more", "usb", "tab-build", "tab-brain", "fold",
+          and {"clean", "build", "rebuild", "download", "slot", "more", "usb", "help", "tab-build", "tab-brain", "fold",
                "max"} <= {h for h, _ in shown_nums}, str(shown_nums))
     check("the numbers sit on their own control (Clean's 1 inside Clean's wrapper)",
           page.locator(_view(V, _tid("vex-helpnum-clean"))).evaluate(
@@ -1825,15 +1867,18 @@ def _help_checks(page, mock, check, until, fake):
     term = page.locator(_view(V, _tid("vex-build-output-btn")))
     ttip = page.locator(f"[id='{term.get_attribute('aria-describedby')}']")
     term.hover()
-    check("Show terminal says it opens the full output and runs nothing",
-          bool(until(lambda: ttip.is_visible(), timeout=2)) and "It runs nothing" in ttip.inner_text())
+    check("Show terminal says it opens the full output and runs nothing, uncut",
+          bool(until(lambda: ttip.is_visible(), timeout=2)) and "It runs nothing" in ttip.inner_text()
+          and not _tip_clipped(ttip), _tip_clipped(ttip) if ttip.is_visible() else "")
     page.mouse.move(2, 2)
     _tab(page, "device")
     ref = page.locator(_view(V, _tid("vex-connection-refresh")))
     rtip2 = page.locator(f"[id='{ref.get_attribute('aria-describedby')}']")
     ref.hover(force=True)
-    check("Refresh USB status says it writes nothing to the robot",
-          bool(until(lambda: rtip2.is_visible(), timeout=2)) and "writes nothing to the robot" in rtip2.inner_text())
+    check("Refresh USB status says its reading may be 5 s old and it writes nothing to the robot, uncut (review MED)",
+          bool(until(lambda: rtip2.is_visible(), timeout=2)) and "writes nothing to the robot" in rtip2.inner_text()
+          and "up to 5 s old" in rtip2.inner_text() and not _tip_clipped(rtip2),
+          _tip_clipped(rtip2) if rtip2.is_visible() else "")
     page.mouse.move(2, 2)
     _tab(page, "build")
     # Under a card: help mode closes, its numbers go, ? is off, and no hover help shows.

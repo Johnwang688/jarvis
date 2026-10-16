@@ -680,7 +680,9 @@ export function actionState(kind: ActionKind, run: ActionRun, following: boolean
  * failed (1 error)", "Build, clean: succeeded", "Download, nothing yet".
  */
 export function tabBadge(tab: "build" | "download", run: ActionRun, following: boolean): Mark {
-  const shown = run.startingBuild?.action ?? run.build?.action;
+  // With no current record (the daemon forgot it: a 404 clears `build`), the latest one kept for a step,
+  // so the tab says what that step's mark says (review LOW).
+  const shown = run.startingBuild?.action ?? run.build?.action ?? latestResult(run)?.action;
   const kind: ActionKind | null = tab === "download" ? "download"
     : shown === "clean" || shown === "build" || shown === "rebuild" ? shown : null;
   if (!kind) return { state: "idle", text: "nothing yet" };
@@ -703,14 +705,33 @@ export function deviceBadge(c: { brain: boolean | null; controller: boolean | nu
   return { state: "ok", text: "USB device present" };
 }
 
+/** The latest of a run's kept clean, build and rebuild records (by start). */
+function latestResult(run: ActionRun): BuildView | null {
+  let best: BuildView | null = null;
+  for (const r of [run.results.clean, run.results.build, run.results.rebuild]) {
+    if (r && (!best || at(r.started) > at(best.started))) best = r;
+  }
+  return best;
+}
+
 /**
  * The status line's words for stale marks (mockup state 6: "Build: ✓ edited
- * since"): each stale step once, in the action bar's order. A dimmed ✓ alone
- * would say it in colour; this says it in words where the owner looks.
+ * since"). A dimmed ✓ alone would say it in colour; this says it in words
+ * where the owner looks. Only the **latest successful** of Build and Rebuild
+ * is said (an older one was superseded by it, so its staleness is not news;
+ * review LOW), then Download. Nothing while something runs (`active`: a
+ * chain or a build), when the line says that instead.
  */
-export function staleNotes(marks: { kind: ActionKind; mark: Mark }[]): { kind: ActionKind; name: string; detail: string }[] {
+export function staleNotes(run: ActionRun, following: boolean, active: boolean)
+  : { kind: ActionKind; name: string; detail: string }[] {
+  if (active) return [];
   const NAME: Record<ActionKind, string> = { clean: "Clean", build: "Build", rebuild: "Rebuild", download: "Download" };
-  return marks.filter((m) => m.mark.state === "stale")
+  const b = okAt(run.results.build), rb = okAt(run.results.rebuild);
+  const built: ActionKind | null = !Number.isFinite(rb) ? (Number.isFinite(b) ? "build" : null)
+    : !Number.isFinite(b) || rb > b ? "rebuild" : "build";
+  const kinds: ActionKind[] = built ? [built, "download"] : ["download"];
+  return kinds.map((kind) => ({ kind, mark: actionState(kind, run, following) }))
+    .filter((m) => m.mark.state === "stale")
     .map((m) => ({ kind: m.kind, name: NAME[m.kind], detail: m.mark.detail ?? "stale" }));
 }
 
@@ -746,7 +767,7 @@ export function nextTab(tabs: readonly OutputTab[], current: OutputTab, key: str
 /** Every control's hover help (permanent: owner decision 7, 2026-10-15), and the `?` list's sentences. */
 export type HelpId = "clean" | "build" | "rebuild" | "download" | "stop" | "slot" | "more" | "usb" | "help"
   | "tab-build" | "tab-download" | "tab-brain" | "tab-device" | "fold" | "max" | "connect" | "disconnect"
-  | "terminal" | "recheck" | "usb-refresh";
+  | "terminal" | "recheck-build" | "recheck-download" | "usb-refresh";
 
 export function helpText(id: HelpId, slot: number): string {
   switch (id) {
@@ -777,10 +798,13 @@ export function helpText(id: HelpId, slot: number): string {
     case "disconnect": return "Closes the link and frees the robot's port. The program on the brain keeps running; "
       + "Connect opens the link again.";
     case "terminal": return "Opens this action's program terminal in the bottom panel: its full output. It runs nothing.";
-    case "recheck": return "Asks Jarvis once more how this action ended, after status checks stopped. It never starts or "
-      + "resends anything.";
-    case "usb-refresh": return "Checks once now whether a brain or controller is plugged in by USB (vexcom --usb). It "
-      + "writes nothing to the robot.";
+    case "recheck-build": return "Status checks for this build stopped. This asks Jarvis again and follows the build to "
+      + "its end. It never starts or resends anything.";
+    case "recheck-download": return "Status checks for this download stopped. This asks Jarvis once how it ended. It "
+      + "never resends the download.";
+    case "usb-refresh": return "Asks now for Jarvis's latest USB presence check (vexcom --usb). It runs at most every 5 "
+      + "seconds, so the reading may be up to 5 s old, or older after errors (the tab says when it was last "
+      + "confirmed). It writes nothing to the robot.";
   }
 }
 

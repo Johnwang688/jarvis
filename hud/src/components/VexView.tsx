@@ -302,11 +302,13 @@ function Tip(props: { id: string; text: string; children: ReactNode; end?: boole
 const HELP_ORDER: { id: HelpId; label: string }[] = [
   { id: "clean", label: "Clean" }, { id: "build", label: "Build" }, { id: "rebuild", label: "Rebuild" },
   { id: "download", label: "Download" }, { id: "stop", label: "Stop" }, { id: "slot", label: "Slot and name" },
-  { id: "more", label: "⋯" }, { id: "usb", label: "Brain · Controller" }, { id: "tab-build", label: "Build tab" },
+  { id: "more", label: "⋯" }, { id: "usb", label: "Brain · Controller" }, { id: "help", label: "?" },
+  { id: "tab-build", label: "Build tab" },
   { id: "tab-download", label: "Download tab" }, { id: "tab-brain", label: "Brain tab" },
   { id: "connect", label: "Connect (Brain tab)" }, { id: "disconnect", label: "Disconnect (Brain tab)" },
   { id: "tab-device", label: "Device tab" }, { id: "fold", label: "▾" }, { id: "max", label: "⤢" },
-  { id: "terminal", label: "Show terminal" }, { id: "recheck", label: "Check status" },
+  { id: "terminal", label: "Show terminal" }, { id: "recheck-build", label: "Check status (build)" },
+  { id: "recheck-download", label: "Check status (download)" },
   { id: "usb-refresh", label: "Refresh USB status (Device tab)" },
 ];
 
@@ -620,9 +622,9 @@ function StatusLine(props: { pane: number; pid: string | null; d: Detection | nu
         </span>
         <span className="vexel" data-testid="vex-build-elapsed" aria-hidden="true">{elapsedText(started, now)}</span>
         {run.build?.state === "running" && !following ? (
-          <Tip id={`vex-${props.pane}-tip-recheck`} text={helpText("recheck", 1)}>
+          <Tip id={`vex-${props.pane}-tip-recheck-build`} text={helpText("recheck-build", 1)}>
             <button type="button" className="quiet" data-testid="vex-build-recheck" disabled={blocked}
-                    aria-describedby={`vex-${props.pane}-tip-recheck`}
+                    aria-describedby={`vex-${props.pane}-tip-recheck-build`}
                     onClick={() => void vex.refreshBuild(pid)}>Check status</button>
           </Tip>
         ) : null}
@@ -644,10 +646,7 @@ function StatusLine(props: { pane: number; pid: string | null; d: Detection | nu
     }
   }
   // Stale ✓s said in words beside the result (advisory; never while something runs).
-  const stale = run && pid && props.d && !c && !building
-    ? staleNotes((["build", "rebuild", "download"] as const).map((kind) => ({
-      kind, mark: actionState(kind, run, vex.monitoringBuild(pid)) })))
-    : [];
+  const stale = run && pid && props.d ? staleNotes(run, vex.monitoringBuild(pid), !!c || building) : [];
   const stoppable = vex.stoppable(pid);
   if (!body && !stoppable && !blocked) return null;
   const tipId = `vex-${props.pane}-tip-stop`;
@@ -918,7 +917,7 @@ function DownloadTab(props: { pane: number; d: Detection; pid: string; blocked: 
           </Tip>
         ) : null}
         {run.download && run.download.state === "running" && !active ? (
-          <Tip id={`vex-${props.pane}-tip-recheck-download`} text={helpText("recheck", 1)} help="recheck" end>
+          <Tip id={`vex-${props.pane}-tip-recheck-download`} text={helpText("recheck-download", 1)} end>
             <button type="button" className="quiet" disabled={blocked} data-testid="vex-download-recheck"
                     aria-describedby={`vex-${props.pane}-tip-recheck-download`}
                     onClick={() => void vex.refreshDownload(pid)}>Check status</button>
@@ -1057,8 +1056,21 @@ function BrainTab(props: { pane: number; drawn: boolean; blocked: boolean; brain
 
 function DeviceTab(props: { pane: number; blocked: boolean; configured: boolean }) {
   const off = props.blocked || !props.configured || !!vex.chain;
-  return <div className="vexobody vexdev" data-testid="vex-device">
-    <ConnectionStatus pane={props.pane} blocked={off} />
+  // Refresh sits in the tab's toolbar, like Show terminal in the others: outside the scrolling body, so its
+  // hover help is never cut off by it (review MED).
+  return <>
+    <div className="vexobar">
+      <span>vexcom --usb</span>
+      <span className="vexobar-r">
+        <Tip id={`vex-${props.pane}-tip-usb-refresh`} text={helpText("usb-refresh", 1)} end>
+          <button type="button" className="quiet" disabled={off} data-testid="vex-connection-refresh"
+                  aria-describedby={`vex-${props.pane}-tip-usb-refresh`}
+                  onClick={() => void vex.refreshConnection()}>Refresh USB status</button>
+        </Tip>
+      </span>
+    </div>
+    <div className="vexobody vexdev" data-testid="vex-device">
+    <ConnectionStatus blocked={off} />
     {vex.info ? (
       <div className="small" data-testid="vex-info-what" data-read={vex.info.read}>
         {vex.info.read === "programs" ? "Programs on the brain" : "Device info"}
@@ -1066,7 +1078,8 @@ function DeviceTab(props: { pane: number; blocked: boolean; configured: boolean 
       </div>
     ) : <div className="muted small">Read device info and List programs are in ⋯.</div>}
     {vex.info ? <pre className="vexinfo" data-testid="vex-info-text">{vex.info.text}</pre> : null}
-  </div>;
+    </div>
+  </>;
 }
 
 function TextOutput(props: { output: string; download?: boolean }) {
@@ -1120,7 +1133,7 @@ function UsbBadges(props: { off: boolean }) {
   </span>;
 }
 
-function ConnectionStatus(props: { pane: number; blocked: boolean }) {
+function ConnectionStatus(props: { blocked: boolean }) {
   const { c, paused, stale, label, tone } = useUsbReading(props.blocked);
   return <div data-testid="vex-connection" className="vexconn">
     <div className="small" data-testid="vex-tooling">Tooling: {vex.status?.configured ? "Configured" : "Not configured"}
@@ -1128,11 +1141,6 @@ function ConnectionStatus(props: { pane: number; blocked: boolean }) {
     <div className="vexrow" role="status">
       <span data-testid="vex-usb-brain" className={tone(c?.brain)}>Brain: {label(c?.brain)}{stale && c?.brain != null ? " (last confirmed)" : ""}</span>
       <span data-testid="vex-usb-controller" className={tone(c?.controller)}>Controller: {label(c?.controller)}{stale && c?.controller != null ? " (last confirmed)" : ""}</span>
-      <Tip id={`vex-${props.pane}-tip-usb-refresh`} text={helpText("usb-refresh", 1)}>
-        <button type="button" className="quiet" disabled={props.blocked} data-testid="vex-connection-refresh"
-                aria-describedby={`vex-${props.pane}-tip-usb-refresh`}
-                onClick={() => void vex.refreshConnection()}>Refresh USB status</button>
-      </Tip>
     </div>
     <div className="muted small" data-testid="vex-connection-note">{paused ? "USB checks paused; showing last confirmed state." : stale && c?.state === "ready" ? "USB reading is stale; awaiting a fresh check." : vex.connectionError || c?.message || "USB devices have not been checked."}
       {c?.checked_at ? ` Last confirmed: ${new Date(c.checked_at).toLocaleTimeString()}.` : ""}</div>

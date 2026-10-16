@@ -589,7 +589,9 @@ details and receipts for each package.
     or "from an older build".
   - The action bar's marks and the Build and Download tab badges all read it
     (`tabBadge`), so a step and its tab never disagree. The Build tab follows
-    whichever of clean, build or rebuild it shows.
+    whichever of clean, build or rebuild it shows. When the daemon forgot the
+    current build (a 404 clears `build`), the tab follows the latest record
+    kept for a step, so it says ? as that step's mark does (review LOW).
   - A running record that this window no longer follows is **unknown (?)**,
     never a spinner. Before this package the Build tab's badge showed a
     spinner there while the step's mark said unknown.
@@ -598,9 +600,14 @@ details and receipts for each package.
   Download goes stale when a build or rebuild succeeds after it. A source edit
   alone does not make Download stale. Stale disables nothing: the daemon's
   `_fresh` and `build_first` alone decide whether a download may go.
-- **The status line says each stale ✓ in words** (`staleNotes`,
+- **The status line says stale ✓s in words** (`staleNotes`,
   `vex-stale-note`), as in mockup state 6. A dimmed ✓ alone would say it only
   in colour, and the words are no longer only in a hover title.
+  - Only the **latest successful** of Build and Rebuild is said, then
+    Download. An older one superseded by a later build keeps its dimmed mark
+    but no words (review LOW).
+  - Nothing is said while a chain or a build runs; the line says that
+    instead, and the words come back when it ends.
 - **The Device tab's badge** (`deviceBadge`) shows the worst confirmed USB
   state: a green dot when a device is present, a red dot when nothing is on
   USB. It shows **? when the reading is stale or unknown** (paused, older than
@@ -620,11 +627,22 @@ details and receipts for each package.
   under a card, and is named by `aria-describedby`.
 - The output toolbars' controls now have help too:
   - Show terminal: "… It runs nothing."
-  - Check status: "… It never starts or resends anything."
-  - Refresh USB status: "… It writes nothing to the robot."
+  - Check status, which differs by button (review LOW):
+    - the build's asks again and follows the build to its end;
+    - the download's asks once how it ended;
+    - neither starts or resends anything.
+  - Refresh USB status: it returns Jarvis's latest check, which runs at most
+    every 5 seconds, so the reading may be up to 5 s old (older after
+    errors). "It writes nothing to the robot."
+- **Refresh USB status moved to the Device tab's toolbar** (`vexcom --usb`,
+  beside the other tabs' Show terminal). Inside the scrolling body, its help
+  was cut off (review MED). The face check now asserts that each tip it shows
+  fits inside every clipping ancestor and the window; `is_visible` cannot see
+  clipping.
 - **`?` help mode** lists every sentence in the output area. Each visible
   control now also shows **its number in that list** (mockup state 1; plan
-  §2.6), so no callout covers another.
+  §2.6), so no callout covers another. `?` itself is numbered and listed
+  too.
   - The numbers are `aria-hidden`, never focusable and take no pointer
     events.
   - A step's number sits at its bottom-left corner, because the mark holds the
@@ -659,29 +677,43 @@ Checks (fakes only; nothing installed, no live daemon, port or device):
     on the step, its tab and the status line; nothing disabled; nothing amber,
     a card included);
   - in `_build_checks`, the "edited since" words and the stale tab badge;
+    the words giving way while a Clean runs and coming back after it; and a
+    fresh ✓ after the edit with no words;
   - in `_feedback_checks`, the Device badge: a green dot, then ? when stale,
     then a red dot after two confirmed disconnects;
-  - in `_help_checks`, the help numbers (they match the list, sit on their
-    own control, are decoration only and move no focus), the toolbar help,
-    and a card closing help mode.
+  - in `_help_checks`:
+    - the help numbers (they match the list, sit on their own control, are
+      decoration only and move no focus);
+    - the toolbar help, and no tip cut off by a scroll box or the window;
+    - a card closing help mode.
 - The mock's `finish_build` and `build_auto` take an `ended`, so a build can
   end after a download.
 
 Receipts for this section (fakes only):
 
-- `hud_v2_vex_check` 295/295, and
+- `hud_v2_vex_check` 299/299, and
   `hud_v2_vex_new_check` 66/66.
-- The vex vitests: 70 across `lib/vex.test.ts` and `lib/vexTheme.test.ts`.
-  The full vitest run passed 3183; it failed only
+- The vex vitests: 73 across `lib/vex.test.ts` and `lib/vexTheme.test.ts`.
+  The full vitest run passed 3186; it failed only
   `RemoteView.test.ts` "draws and ACKs only the current socket generation",
   which fails the same way on a clean origin/main (e181beb).
 - `tsc --noEmit` is clean, and `tests/v2/vex_check.py` passes.
-- Nine mutations each failed their checks:
-  - the Build tab's badge ignoring whether the build is followed;
-  - the Device badge without ? when stale (in vitest and in the face check);
-  - a stale mark in amber;
-  - no stale words;
-  - Download's staleness ignoring a later rebuild;
-  - the Download tab reading Build's state;
-  - no help numbers;
-  - the status line without its stale words.
+- Fourteen mutations each failed their checks. Nine came first:
+  - in vitest:
+    - the Build tab's badge ignoring whether the build is followed;
+    - the Device badge without ? when stale;
+    - a stale mark in amber;
+    - no stale words;
+    - Download's staleness ignoring a later rebuild;
+    - the Download tab reading Build's state;
+  - in the face check:
+    - no help numbers;
+    - the status line without its stale words;
+    - the Device tab badge ignoring a stale reading.
+
+  Then the review round's five:
+  - the Refresh toolbar back inside the scrolling body (face: clipped tip);
+  - the Build tab ignoring the kept records after a 404 (vitest);
+  - every stale build and rebuild said, superseded ones included (vitest);
+  - stale words while something runs, once in `staleNotes` (vitest) and once
+    in the view's call (face, with a Clean running).

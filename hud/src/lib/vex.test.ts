@@ -286,13 +286,50 @@ describe("actionState: one step's state from its run (VX-UI-2, plan §3.1)", () 
     expect(deviceBadge({ brain: false, controller: false }, true).state).toBe("unknown");
   });
 
-  it("the status line says each stale ✓ in words, in the action bar's order", () => {
-    const m = (state: "ok" | "stale", detail?: string) => ({ state, text: "", ...(detail ? { detail } : {}) });
-    expect(staleNotes([{ kind: "build", mark: m("stale", "edited since") }, { kind: "rebuild", mark: m("ok") },
-      { kind: "download", mark: m("stale", "from an older build") }])).toEqual([
+  it("the status line says each stale ✓ in words: the latest successful build or rebuild, then Download", () => {
+    const edited = Date.parse(t(100));
+    const r = run({ results: { build: ok("build", 60) }, download: { ended: t(50) }, downloaded: { slot: 3, ok: true },
+      editedAt: edited });
+    expect(staleNotes(r, true, false)).toEqual([
       { kind: "build", name: "Build", detail: "edited since" },
       { kind: "download", name: "Download", detail: "from an older build" }]);
-    expect(staleNotes([{ kind: "build", mark: m("ok") }])).toEqual([]);
+    expect(staleNotes(run({ results: { build: ok("build", 60) } }), true, false)).toEqual([]);
+    expect(staleNotes(run(), true, false)).toEqual([]);
+  });
+
+  it("a superseded build or rebuild says nothing: only the latest successful one can be stale in words (review LOW)", () => {
+    // Build, then Rebuild, then an edit: both marks are stale, but only Rebuild (the latest) is said.
+    const both = run({ results: { build: ok("build", 10), rebuild: ok("rebuild", 20) }, editedAt: Date.parse(t(30)) });
+    expect(actionState("build", both, true).state).toBe("stale");
+    expect(staleNotes(both, true, false).map((n) => n.kind)).toEqual(["rebuild"]);
+    // Then a Build after the edit: the old Rebuild stays stale as a mark, but its words go.
+    const again = run({ results: { build: ok("build", 40), rebuild: ok("rebuild", 20) }, editedAt: Date.parse(t(30)) });
+    expect(actionState("rebuild", again, true).state).toBe("stale");
+    expect(staleNotes(again, true, false)).toEqual([]);
+    // A rebuild alone counts as the latest build.
+    expect(staleNotes(run({ results: { rebuild: ok("rebuild", 20) }, editedAt: Date.parse(t(30)) }), true, false)
+      .map((n) => n.kind)).toEqual(["rebuild"]);
+    // A failed later build is not "the latest successful": the earlier ✓ is the one said.
+    const failedLater = run({ results: { build: build({ state: "failed", started: t(40), ended: t(45) }),
+      rebuild: ok("rebuild", 20) }, editedAt: Date.parse(t(30)) });
+    expect(staleNotes(failedLater, true, false).map((n) => n.kind)).toEqual(["rebuild"]);
+  });
+
+  it("stale words never show while something runs (a chain or a build: the line says that)", () => {
+    const r = run({ results: { build: ok("build", 60) }, editedAt: Date.parse(t(100)) });
+    expect(staleNotes(r, true, false)).toHaveLength(1);
+    expect(staleNotes(r, true, true)).toEqual([]);
+  });
+
+  it("a build the daemon forgot (404: `build` cleared) is ? on its tab as on its step (review LOW)", () => {
+    const running = build({ state: "running", ended: null });
+    const forgot = run({ build: null, results: { build: running } });
+    expect(actionState("build", forgot, false).state).toBe("unknown");
+    expect(tabBadge("build", forgot, false)).toEqual({ state: "unknown", text: "outcome unknown, check status" });
+    // The tab follows the latest kept record, whichever step it was.
+    const clean = build({ id: "0c1e2a3d", action: "clean", state: "succeeded", started: t(80), ended: t(81) });
+    expect(tabBadge("build", run({ build: null, results: { build: running, clean } }), false))
+      .toEqual({ state: "ok", text: "clean: succeeded" });
   });
 });
 
@@ -319,7 +356,9 @@ describe("output tabs", () => {
 
   it("the output toolbars' controls say what they do, and that they send nothing (VX-UI-3)", () => {
     expect(helpText("terminal", 1)).toMatch(/full output\. It runs nothing/);
-    expect(helpText("recheck", 1)).toMatch(/never starts or resends anything/);
+    expect(helpText("recheck-build", 1)).toMatch(/follows the build to its end\. It never starts or resends anything/);
+    expect(helpText("recheck-download", 1)).toMatch(/asks Jarvis once how it ended\. It never resends the download/);
+    expect(helpText("usb-refresh", 1)).toMatch(/may be up to 5 s old/);
     expect(helpText("usb-refresh", 1)).toMatch(/writes nothing to the robot/);
   });
 
