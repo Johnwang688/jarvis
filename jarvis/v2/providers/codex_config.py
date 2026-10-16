@@ -153,7 +153,8 @@ def git_roots(brief: Brief) -> list[str]:
 
 
 def git_note(brief: Brief) -> str:
-    """Truthful guidance; network escalation still goes through Jarvis."""
+    """Truthful guidance: local git in the sandbox, the network through
+    Jarvis's git tools (owner decision CG-0), never an escalated push or gh."""
     roots = git_roots(brief)
     if not roots:
         return ""
@@ -162,10 +163,13 @@ def git_note(brief: Brief) -> str:
                 if len(roots) > 1 else "No writable repository git metadata was found. ")
     return ("Git in this session: " + metadata
             + f"Make new git worktrees under {where}/<unique-name>. "
-            "The project checkout is shared; use a separate worktree for real edits. "
-            "The network is off inside the sandbox. Request escalated permissions for "
-            "git push and gh; Jarvis judges the request, and sandbox widening "
-            "requires the owner's approval.")
+            "The project checkout is shared; use a separate worktree for real edits, and "
+            "commit before long pauses. "
+            "The network is off inside the sandbox and this session has no GitHub login. "
+            "To push, open, merge or close a pull request, call the Jarvis tools "
+            "chat_git_push / chat_pr_create / chat_pr_merge / chat_pr_close; each asks the "
+            "owner. For remote updates call chat_git_fetch, then `git fetch <mirror>`. "
+            "Do not request escalation for git push or gh.")
 
 def validate(brief: Brief) -> None:
     if brief.profile != PermissionProfile.AUTO:
@@ -325,11 +329,63 @@ def owner_home() -> Path:
     return Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))).resolve()
 
 
+# The owner's git identity, read once (`git_identity`). Not a secret.
+IDENTITY_CAP = 200
+_IDENTITY: dict[str, str] | None = None
+_IDENTITY_KEYS = (("user.name", ("GIT_AUTHOR_NAME", "GIT_COMMITTER_NAME")),
+                  ("user.email", ("GIT_AUTHOR_EMAIL", "GIT_COMMITTER_EMAIL")))
+
+
+def _global_value(key: str) -> str | None:
+    """One value from the owner's global git config, or None. One printable
+    line of at most IDENTITY_CAP characters; anything else is left out."""
+    import subprocess
+    from jarvis import gitops
+    env = {"HOME": os.environ.get("HOME", ""), "PATH": "/usr/bin:/bin", "LANG": "C.UTF-8",
+           "GIT_CONFIG_NOSYSTEM": "1"}
+    if os.environ.get("XDG_CONFIG_HOME"):
+        env["XDG_CONFIG_HOME"] = os.environ["XDG_CONFIG_HOME"]
+    try:
+        proc = subprocess.run([gitops.git_binary(), "config", "--global", "--no-includes", "--get", key],
+                              cwd="/", env=env, stdin=subprocess.DEVNULL, capture_output=True,
+                              timeout=10)
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    try:
+        value = proc.stdout.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    value = value[:-1] if value.endswith("\n") else value
+    if not value or len(value) > IDENTITY_CAP or not value.isprintable():
+        return None
+    return value
+
+
+def git_identity() -> dict[str, str]:
+    """GIT_AUTHOR_*/GIT_COMMITTER_* from the owner's global user.name and
+    user.email (§4.6 of the 2026-10-15 git credentials plan): Codex's private
+    HOME hides ~/.gitconfig, so commits would otherwise get a guessed name."""
+    global _IDENTITY
+    if _IDENTITY is None:
+        found: dict[str, str] = {}
+        for key, names in _IDENTITY_KEYS:
+            value = _global_value(key)
+            if value is not None:
+                found.update(dict.fromkeys(names, value))
+        _IDENTITY = found
+    return dict(_IDENTITY)
+
+
 def clean_env(home: Path, auth_home: Path | None = None) -> dict[str, str]:
     # Explicit allowlist; never forward daemon API keys, proxy variables or hooks.
+    # Only the owner's git identity is added (CG-0): never PATH changes,
+    # GIT_CONFIG_* or GH_* — Codex holds no login, no helper and no token path.
     env = {"HOME": str(home), "CODEX_HOME": str(auth_home or home),
            "PATH": "/usr/local/bin:/usr/bin:/bin", "LANG": "C.UTF-8",
            "TZ": "America/Chicago", "TMPDIR": str(home / "tmp")}
+    env.update(git_identity())
     return env
 
 

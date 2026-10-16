@@ -1143,3 +1143,32 @@ lays the 409's reason on a row whose `refused` the bus said first, and a
 "stopping…" Stop under an approval card keeps its dashed amber look (no
 `button:disabled` fade). 32 tests now; twelve more mutants (two in the
 HUD), all killed.
+
+## Codex chat git tools (2026-10-15, CG-0/CG-1)
+
+Measured offline for [the plan](../plans/2026-10-15-codex-git-credentials.md)
+(§2): a Codex app-server's commands inherit `clean_env` (private HOME,
+`/usr/local/bin:/usr/bin:/bin`), so neither `gh` nor the owner's gh credential
+helper is reachable and an approved escalated `git push`/`gh` exits 128.
+Escalated commands do run unsandboxed with the network on; plain ones have no
+network. Plain sandboxed commands can still *open* `~/.config/gh/hosts.yml`,
+`.env`, `~/.codex/auth.json` and Claude's credentials (workspace-write has no
+read roots) — the CG-2 gap, owned by phase 2 of the plan.
+
+Phase 1 (`jarvis/v2/chat_git.py`, `jarvis/v2/tools/chat_git_tools.py`): Codex
+owner chats get `chat_git_push`, `chat_pr_create`, `chat_pr_merge`,
+`chat_pr_close` (dangerous: the owner every time, no Always; merges and closes
+carry merge_gate's headline) and `chat_git_fetch`, foreground only. The
+permit reads the worktree's branch and origin from files, refuses what it
+cannot read, and binds its ALLOW to the exact `gate_line`; the tool refuses if
+the repository no longer matches. The daemon copies the branch into a private
+bare mirror (`V2_DATA_DIR/chat-git/<key>`) with no credential in the
+environment, then pushes from the mirror to the pinned `github.com` origin
+with only gh's credential helper; gh runs with `--repo` in the mirror.
+Codex's environment gains only `GIT_AUTHOR_*`/`GIT_COMMITTER_*`. An escalated
+raw push/fetch/pull/ls-remote to a remote, or any `gh`, from a Codex chat is
+declined unasked (CG-1); the decline carries no text to the model, so the git
+note says the same and the owner sees the pointer in the HUD. Tests:
+`tests/v2/chat_git_check.py` (incl. the malicious repo-config suite with
+positive controls) and `tests/v2/chat_git_mutants.py`. Phase 2 must keep
+the mirror folder readable to Codex when it denies `V2_DATA_DIR`.
