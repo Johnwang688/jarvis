@@ -78,6 +78,41 @@ def fixture_turn(name):
     return json.loads(re.sub(r"<TMP>/work-[A-Za-z0-9_]+", "$CWD", text))
 
 
+def read_back(settings):
+    """What 0.161's `config/read` returns for a written config (measured,
+    tests/v2/fixtures/cg2_probe.py): the profile's absent keys as null, the
+    legacy sandbox keys null, the features map with defaults beside ours."""
+    out = {"sandbox_mode": None, "sandbox_workspace_write": None, **settings}
+    out["features"] = {"network_proxy": None, "memories": False, "tool_suggest": True,
+                       **settings.get("features", {})}
+    policy = settings.get("shell_environment_policy", {})
+    out["shell_environment_policy"] = {"inherit": None, "ignore_default_excludes": None, "exclude": None,
+                                       "set": None, "include_only": None, "filters": None,
+                                       "experimental_use_profile": None, **policy}
+    out["permissions"] = {
+        name: {"description": None, "workspace_roots": None, **profile,
+               "network": {"proxy_url": None, "domains": None, "mode": None, "mitm": None,
+                           **profile.get("network", {})}}
+        for name, profile in settings.get("permissions", {}).items()}
+    return out
+
+
+def legacy_sandbox(settings):
+    """The receipt's legacy `sandbox` for the active profile (0.161: its
+    write entries, sorted, as writableRoots)."""
+    profile = settings.get("permissions", {}).get(settings.get("default_permissions"), {})
+    writes = sorted(k for k, v in profile.get("filesystem", {}).items() if v == "write")
+    return {"type": "workspaceWrite", "writableRoots": writes,
+            "networkAccess": profile.get("network", {}).get("enabled", False),
+            "excludeTmpdirEnvVar": False, "excludeSlashTmp": False}
+
+
+def active_profile(settings):
+    name = settings.get("default_permissions")
+    profile = settings.get("permissions", {}).get(name)
+    return {"id": name, "extends": profile.get("extends")} if profile else None
+
+
 def peer(script_path, log_path, thread_name):
     """The child Brain knows only protocol JSON and temporary fixture paths."""
     script = json.loads(Path(script_path).read_text())
@@ -152,7 +187,7 @@ def peer(script_path, log_path, thread_name):
                 continue
             result = script.get("rate_limits", {"rateLimits": None, "rateLimitsByLimitId": {}})
         elif method == "config/read":
-            result = {"config": {**settings, **script.get("config_override", {})}}
+            result = {"config": {**read_back(settings), **script.get("config_override", {})}}
         elif method in ("thread/start", "thread/resume"):
             if method == "thread/resume":
                 native = p["threadId"]
@@ -164,8 +199,8 @@ def peer(script_path, log_path, thread_name):
                       "reasoningEffort": settings.get("model_reasoning_effort"),
                       "approvalPolicy": "on-request",
                       "approvalsReviewer": script.get("reviewer", p.get("approvalsReviewer")),
-                      "sandbox": script.get("sandbox", {"type": "workspaceWrite", "networkAccess": False,
-                                                       "writableRoots": settings.get("sandbox_workspace_write", {}).get("writable_roots", [])})}
+                      "sandbox": script.get("sandbox", legacy_sandbox(settings))}
+            result["activePermissionProfile"] = script.get("profile", active_profile(settings))
         elif method == "turn/start":
             if mode == "start_stall":
                 continue
@@ -444,6 +479,8 @@ class Checks(unittest.TestCase):
         self.brain = Brain(self.root)
         self.stack.enter_context(patch.object(config, "V2_DATA_DIR", self.root / "data"))
         self.stack.enter_context(patch.object(config, "CHAT_WORKTREES_DIR", self.root / "chat-worktrees"))
+        # Hermetic: no test lists the real /mnt/c/Users.
+        self.stack.enter_context(patch.dict(os.environ, {"JARVIS_WINDOWS_USERS": str(self.root / "no-mnt-c" / "Users")}))
         self.stack.enter_context(patch.object(codex_config, "owner_home", return_value=self.auth))
         self.stack.enter_context(patch.object(codex, "RpcProcess", self.brain.rpc))
         self.stack.enter_context(patch.object(codex.CodexProvider, "_probe", return_value=("/fake/codex", "fake")))
@@ -469,6 +506,7 @@ class Checks(unittest.TestCase):
         return list(self.provider.send(h, UserMessage("Go")))
 
     def test_config_and_shapes(self):
+        (self.auth / "skills" / "demo").mkdir()
         brief = replace(self.brief, mcp_servers={"jarvis.local": {"command": "python", "args": ["-m", "jarvis.mcp"], "env": {"MODE": "test"}},
                                                 "remote": {"url": "https://example.invalid/mcp", "enabled": True}})
         with patch.dict(os.environ, {"OPENROUTER_API_KEY": "secret", "OPENAI_API_KEY": "secret", "DISCORD_TOKEN": "secret", "CUSTOM_SECRET": "secret"}):
@@ -476,14 +514,19 @@ class Checks(unittest.TestCase):
         home = h.native.home
         cfg = tomllib.loads((home / "config.toml").read_text())
         self.assertEqual(cfg["mcp_servers"], brief.mcp_servers)
-        for key, value in {"model": "fake-model", "model_reasoning_effort": "high", "sandbox_mode": "workspace-write",
+        for key, value in {"model": "fake-model", "model_reasoning_effort": "high", "default_permissions": "jarvis-chat",
                            "approval_policy": "on-request", "approvals_reviewer": "auto_review", "web_search": "live"}.items():
             self.assertEqual(cfg[key], value)
-        self.assertNotIn("features", cfg)
+        self.assertNotIn("sandbox_mode", cfg)
+        self.assertEqual(cfg["features"], {"exec_permission_approvals": True})
         self.assertNotIn("project_doc_max_bytes", cfg)
         self.assertEqual(cfg["projects"][str(self.work)]["trust_level"], "trusted")
         self.assertEqual((home / "auth.json").resolve(), self.auth / "auth.json")
-        self.assertEqual((home / "skills").resolve(), self.auth / "skills")
+        # A real folder (mounted back writable inside the denied home, so the
+        # model can read its skills), one link per installed skill.
+        self.assertFalse((home / "skills").is_symlink())
+        self.assertEqual((home / "skills" / "demo").resolve(), self.auth / "skills" / "demo")
+        self.assertEqual((home / "skills").stat().st_mode & 0o777, 0o700)
         self.assertEqual(home.stat().st_mode & 0o777, 0o700)
         self.assertEqual((home / "config.toml").stat().st_mode & 0o777, 0o600)
         self.assertFalse(any("KEY" in k or "SECRET" in k or "TOKEN" in k for k in h.native.rpc.env))
@@ -559,16 +602,22 @@ class Checks(unittest.TestCase):
         gitdir = self.repo()
         h = self.start(brief=self.chat())
         cfg = tomllib.loads((h.native.home / "config.toml").read_text())
-        self.assertEqual(cfg["sandbox_workspace_write"],
-                         {"writable_roots": [str(gitdir), str(config.CHAT_WORKTREES_DIR)],
-                          "network_access": False})
+        profile = cfg["permissions"]["jarvis-chat"]
+        self.assertEqual([k for k, v in profile["filesystem"].items() if v == "write"],
+                         [str(gitdir), str(config.CHAT_WORKTREES_DIR),
+                          str(codex_config.sandbox_home(h.native.home)),
+                          str(codex_config.session_skills(h.native.home))])
+        self.assertEqual(profile["network"], {"enabled": False})
+        self.assertNotIn("sandbox_workspace_write", cfg)
         self.assertEqual(config.CHAT_WORKTREES_DIR.stat().st_mode & 0o777, 0o700)
         params = self.brain.calls("thread/start")[0]["params"]
         self.assertEqual(params["developerInstructions"],
                          self.brief.system_append + "\n\n" + codex_config.git_note(self.chat()))
         self.assertIn("shared", params["developerInstructions"])
         for words in ("no GitHub login", "chat_git_push / chat_pr_create / chat_pr_merge / chat_pr_close",
-                      "chat_git_fetch", "Do not request escalation for git push or gh"):
+                      "chat_git_fetch", "Do not request escalation for git push or gh",
+                      "`with_additional_permissions`", "`additional_permissions: {network: {enabled: true}}`",
+                      "Do not use `require_escalated` for network"):
             self.assertIn(words, params["developerInstructions"])
         self.assertNotIn("escalated permissions", params["developerInstructions"])
 
@@ -751,8 +800,12 @@ class Checks(unittest.TestCase):
         codex_config.strip_mcp_servers(h.native.home / "config.toml")
         cfg = tomllib.loads((h.native.home / "config.toml").read_text())
         self.assertNotIn("mcp_servers", cfg)
-        self.assertFalse(cfg["sandbox_workspace_write"]["network_access"])
-        self.assertEqual(cfg["sandbox_workspace_write"]["writable_roots"], [str(root)])
+        profile = cfg["permissions"]["jarvis-chat"]
+        self.assertEqual(profile["network"], {"enabled": False})
+        self.assertEqual([k for k, v in profile["filesystem"].items() if v == "write"],
+                         [str(root), str(codex_config.sandbox_home(h.native.home)),
+                          str(codex_config.session_skills(h.native.home))])
+        self.assertEqual(cfg["default_permissions"], "jarvis-chat")
 
     def test_changed_effective_network_roots_or_returned_network_are_refused(self):
         for script in (
@@ -794,6 +847,566 @@ class Checks(unittest.TestCase):
         self.brain.script["sandbox"] = {"type": "workspaceWrite", "networkAccess": False}
         with self.assertRaises(BriefRefused):
             self.start(brief=self.chat())
+
+    # -- CG phase 2 (2026-10-16): the permission profile -------------------
+    # Plan 2026-10-15 §5. A plain sandboxed command could read the gh token,
+    # .env, ~/.codex/auth.json and ~/.claude/.credentials.json without any
+    # callback; the profile denies those reads, and network comes one owner-
+    # approved command at a time (`with_additional_permissions`).
+
+    def profile_of(self, h):
+        cfg = tomllib.loads((h.native.home / "config.toml").read_text())
+        return cfg, cfg["permissions"][codex_config.PROFILE]
+
+    def test_profile_denies_every_credential_path(self):
+        from jarvis.v2.permissions import protected_paths
+        gitdir = self.repo()
+        home = self.closed_home()
+        for rel in (".gitconfig", ".git-credentials", ".netrc", ".codex/config.toml",
+                    ".codex/history.jsonl", ".local/share/jarvis/sessions/s", ".local/share/jarvis/spill/s"):
+            (home / rel).parent.mkdir(parents=True, exist_ok=True)
+            (home / rel).write_text("fixture")
+        # V2_DATA_DIR and a credential folder outside the home, so their own
+        # denies (not the default-closed home) are what hides them.
+        self.stack.enter_context(self.home_patches(home, data_inside=False))
+        outside = self.root / "outside-creds"
+        outside.mkdir()
+        self.stack.enter_context(patch.object(config, "V2_CREDENTIAL_DIRS",
+                                              (*config.V2_CREDENTIAL_DIRS, str(outside))))
+        self.auth = home / ".codex"
+        h = self.start(brief=self.chat())
+        cfg, profile = self.profile_of(h)
+        fs = profile["filesystem"]
+        self.assertEqual(cfg["default_permissions"], "jarvis-chat")
+        self.assertNotIn("sandbox_mode", cfg)
+        self.assertNotIn("sandbox_workspace_write", cfg)
+        self.assertEqual(cfg["features"], {"exec_permission_approvals": True},
+                         "request_permissions_tool stays off (turn-wide grants)")
+        self.assertEqual(profile["extends"], ":workspace")
+        self.assertEqual(profile["network"], {"enabled": False})
+        self.assertEqual(fs["glob_scan_max_depth"], 4)
+        must = [*(Path(p).expanduser().resolve() for p in config.credential_dirs()),
+                home / ".codex" / "auth.json", home / ".codex" / "sessions", home / ".claude",
+                home / ".gitconfig", home / ".git-credentials", home / ".netrc",
+                self.auth / "auth.json", self.auth / "config.toml", self.auth / "history.jsonl",
+                config.V2_DATA_DIR, config.SESSIONS_DIR, config.SPILL_DIR, *protected_paths(),
+                *(home / rel for rel in self.STORES)]
+        denied = [Path(k) for k, v in fs.items() if v == "deny" and "*" not in k]
+        self.assertGreater(len([p for p in must if os.path.lexists(p)]), 30)
+        # Only existing paths are denied (a missing parent breaks escalated
+        # commands, measured); a missing one cannot be read either.
+        for path in (p for p in must if os.path.lexists(p)):
+            path = Path(path).resolve()
+            with self.subTest(deny=path):
+                self.assertTrue(any(d == path or d in path.parents for d in denied), path)
+        # The Codex binary and the skills stay readable (§ CODEX_HOME_KEEP).
+        self.assertNotIn(str(self.auth / "skills"), fs)
+        self.assertFalse(any(d == self.auth for d in denied))
+        for base in (self.work, config.CHAT_WORKTREES_DIR):
+            with self.subTest(glob=base):
+                self.assertEqual(fs.get(f"{Path(base).resolve()}/**/[.][eE][nN][vV]*"), "deny")
+        writes = [k for k, v in fs.items() if v == "write"]
+        sandbox = codex_config.sandbox_home(h.native.home)
+        self.assertEqual(writes, [str(gitdir), str(config.CHAT_WORKTREES_DIR), str(sandbox),
+                                  str(codex_config.session_skills(h.native.home))])
+        self.assertEqual(set(fs.values()), {4, "write", "deny"}, "no read grants")
+        # The commands' HOME: writable, private, inside the denied home.
+        self.assertEqual(cfg["shell_environment_policy"], {"inherit": "all", "set": {"HOME": str(sandbox)}})
+        self.assertEqual(sandbox.stat().st_mode & 0o777, 0o700)
+        self.assertEqual(sandbox.parent, h.native.home)
+        # The mirrors stay readable: no deny at or above them, never writable.
+        mirrors = config.chat_git_mirrors_dir().resolve()
+        for key, value in fs.items():
+            if value == "deny" and "*" not in key:
+                self.assertFalse(Path(key) == mirrors or Path(key) in mirrors.parents, key)
+        self.assertFalse(any(Path(w) == mirrors or Path(w) in mirrors.parents
+                             or mirrors in Path(w).parents for w in writes))
+
+    def fake_home(self):
+        """A home shaped like the owner's: credential folders, a Codex home
+        holding its own binary, and a project with a .env."""
+        home = self.root / "h"
+        for rel in (".ssh/id", ".config/jarvis/allowlist.json", ".config/gh/hosts.yml",
+                    ".config/other/x", ".codex/auth.json", ".codex/config.toml", ".codex/state_5.sqlite",
+                    ".codex/sessions/s.jsonl", ".codex/packages/bin/codex", ".codex/skills/s/SKILL.md",
+                    ".claude/.credentials.json", "projects/app/.env", ".local/share/jarvis/hud/x"):
+            (home / rel).parent.mkdir(parents=True, exist_ok=True)
+            (home / rel).write_text("fixture")
+        return home
+
+    def walk_reach(self, fs):
+        """(glob, denied folder) pairs where the glob could match a file in
+        the folder: bwrap then fails every command (measured)."""
+        denied = [Path(k) for k, v in fs.items() if v == "deny" and "*" not in k]
+        bad = []
+        for key, value in fs.items():
+            if value != "deny" or "*" not in key:
+                continue
+            # Every glob reaches GLOB_DEPTH, `**` or not (measured on 0.161).
+            base = Path(key.split("/**/")[0]) if "/**/" in key else Path(key).parent
+            depth = codex_config.GLOB_DEPTH
+            bad += [(key, d) for d in denied if base in d.parents
+                    and len(d.relative_to(base).parts) <= depth - 1]
+        return bad
+
+    def test_denies_never_nest_and_globs_never_reach_into_a_denied_folder(self):
+        # 0.161 makes a denied folder an empty read-only tmpfs; a deny or a
+        # glob match inside one fails every command and every thread start.
+        home = self.fake_home()
+        with patch.dict(os.environ, {"HOME": str(home)}), \
+                patch.object(codex_config, "owner_home", return_value=home / ".codex"), \
+                patch.object(config, "ALLOWLIST_PATH", home / ".config" / "jarvis" / "allowlist.json"), \
+                patch.object(config, "SESSIONS_DIR", home / ".local/share/jarvis/sessions"), \
+                patch.object(config, "SPILL_DIR", home / ".local/share/jarvis/spill"), \
+                patch.object(config, "SPEAKER_DIR", home / ".local/share/jarvis/speaker"), \
+                patch.object(config, "BROWSER_DIR", home / ".local/share/jarvis/browser"), \
+                patch.object(config, "V2_DATA_DIR", home / ".local/share/jarvis/v2"), \
+                patch.object(config, "CHAT_WORKTREES_DIR", home / ".local/share/jarvis/chat-worktrees"):
+            brief = replace(self.chat(), cwd=str(home / "projects" / "app"))
+            fs = codex_config.filesystem(brief)
+            denied = [Path(k) for k, v in fs.items() if v == "deny" and "*" not in k]
+            for d in denied:
+                self.assertFalse(any(o in d.parents for o in denied), f"{d} nests in another deny")
+            self.assertEqual(self.walk_reach(fs), [])
+            codex = home / ".codex"
+            for path in (codex / "auth.json", codex / "state_5.sqlite", codex / "sessions",
+                         codex / "config.toml", home / ".ssh", home / ".config" / "jarvis"):
+                self.assertEqual(fs.get(str(path)), "deny", path)
+            for path in (codex, codex / "packages", codex / "skills", home / ".config"):
+                self.assertNotIn(str(path), fs)
+            # The home's other projects still lose their .env files.
+            self.assertEqual(fs.get(f"{home}/projects/**/[.][eE][nN][vV]*"), "deny")
+            self.assertEqual(fs.get(str(home / ".config" / "other")), "deny", "closed by default")
+            self.assertNotIn(f"{home}/[.][eE][nN][vV]*", fs, "no glob over a base with a denied folder")
+            # A Codex binary inside a denied folder would fail every command.
+            codex_config.check_binary(str(codex / "packages" / "bin" / "codex"), denied)
+            with self.assertRaises(BriefRefused):
+                codex_config.check_binary(str(home / ".ssh" / "codex"), denied)
+
+    def test_session_skills_replace_the_old_whole_folder_link(self):
+        for name in ("alpha", "beta", ".hidden"):
+            (self.auth / "skills" / name).mkdir()
+        home = codex_config._home_of("skills-migrate")
+        home.mkdir(parents=True)
+        (home / "skills").symlink_to(self.auth / "skills", target_is_directory=True)
+        codex_config.prepare("skills-migrate", self.chat(), "/fake/codex")
+        skills = home / "skills"
+        self.assertFalse(skills.is_symlink(), "the old link to the owner's folder is gone")
+        self.assertEqual(sorted(p.name for p in skills.iterdir()), ["alpha", "beta"])
+        self.assertTrue(all((skills / n).is_symlink() for n in ("alpha", "beta")))
+        # A removed skill's link goes; a planted link is replaced on the next start.
+        (self.auth / "skills" / "beta").rmdir()
+        (skills / "alpha").unlink()
+        (skills / "alpha").symlink_to(self.root, target_is_directory=True)
+        codex_config.prepare("skills-migrate", self.chat(), "/fake/codex")
+        self.assertEqual(sorted(p.name for p in skills.iterdir()), ["alpha"])
+        self.assertEqual((skills / "alpha").resolve(), self.auth / "skills" / "alpha")
+        self.assertFalse((self.auth / "skills" / ".system").exists())
+
+    # Review of #224 (HIGH): a blocklist missed live credential stores, so
+    # the owner's dot-folders are closed by default (CLOSED_KEEP).
+    STORES = (".docker/config.json", ".local/share/keyrings/login.keyring",
+              ".local/share/com.vercel.cli/auth.json", ".claude.json", ".azure/msal.json",
+              ".supabase/access-token", ".agents/token", ".config/gcloud/credentials.db",
+              ".npmrc", ".pypirc", ".kube/config", ".cargo/credentials.toml", ".cargo/credentials",
+              ".cache/huggingface/token", ".bash_history", ".some-new-tool/secret",
+              ".config/new-tool/token", ".local/share/new-tool/token", ".local/state/x",
+              ".vault-token",       # a store no list names: only the closure hides it
+              ".boto",              # gsutil's credentials file: no list or key pattern names it
+              ".npm/_logs/debug-0.log",
+              ".local/share/uv/credentials/credentials.toml", ".local/share/jarvis/hud/x")
+    OPEN = (".cargo/bin/cargo", ".cargo/registry/index/x", ".local/bin/uv",
+            ".local/share/uv/python/cpython/bin/python3", ".rustup/toolchains/x", ".npm/_cacache/x",
+            ".nvm/versions/x", ".cache/uv/x", ".cache/ms-playwright/x", "projects/app/main.py",
+            "notes/plain.txt")
+
+    def closed_home(self):
+        home = self.fake_home()
+        for rel in self.STORES + self.OPEN:
+            (home / rel).parent.mkdir(parents=True, exist_ok=True)
+            (home / rel).write_text("fixture")
+        return home
+
+    def home_patches(self, home, data_inside=True):
+        stack = ExitStack()
+        stack.enter_context(patch.dict(os.environ, {"HOME": str(home)}))
+        stack.enter_context(patch.object(codex_config, "owner_home", return_value=home / ".codex"))
+        share = home / ".local/share/jarvis"
+        for name, value in (("ALLOWLIST_PATH", home / ".config/jarvis/allowlist.json"),
+                            ("SESSIONS_DIR", share / "sessions"), ("SPILL_DIR", share / "spill"),
+                            ("SPEAKER_DIR", share / "speaker"), ("BROWSER_DIR", share / "browser"),
+                            ("V2_DATA_DIR", share / "v2"), ("CHAT_WORKTREES_DIR", share / "chat-worktrees")):
+            if data_inside or name not in ("V2_DATA_DIR", "CHAT_WORKTREES_DIR"):
+                stack.enter_context(patch.object(config, name, value))
+        return stack
+
+    def blocked(self, fs, path):
+        denied = [Path(k) for k, v in fs.items() if v == "deny" and "*" not in k]
+        path = Path(path).resolve()
+        return any(d == path or d in path.parents for d in denied)
+
+    def test_owner_dot_folders_are_closed_by_default(self):
+        home = self.closed_home()
+        (home / ".link-to-docker").symlink_to(home / ".docker", target_is_directory=True)
+        with self.home_patches(home):
+            config.CHAT_WORKTREES_DIR.mkdir(parents=True)
+            brief = replace(self.chat(), cwd=str(home / "projects" / "app"))
+            fs = codex_config.filesystem(brief)
+            mirrors = config.chat_git_mirrors_dir()
+            for rel in self.STORES:
+                with self.subTest(store=rel):
+                    self.assertTrue(self.blocked(fs, home / rel), rel)
+            for rel in self.OPEN:
+                with self.subTest(open=rel):
+                    self.assertFalse(self.blocked(fs, home / rel), rel)
+            for path in (config.CHAT_WORKTREES_DIR, mirrors, home / ".codex" / "packages",
+                         home / ".codex" / "skills", home / "projects" / "app"):
+                with self.subTest(needed=path):
+                    self.assertFalse(self.blocked(fs, path), path)
+            self.assertEqual(self.walk_reach(fs), [])
+            denied = [Path(k) for k, v in fs.items() if v == "deny" and "*" not in k]
+            self.assertFalse(any(o in d.parents for d in denied for o in denied), "no nested denies")
+            self.assertFalse(any(Path(k).is_symlink() for k in map(str, denied)), "no symlink denies")
+            self.assertTrue(all(os.path.lexists(d) for d in denied),
+                            "only existing paths (a missing parent breaks escalated commands)")
+            # A denied folder inside an ordinary project: no glob reaches into
+            # it, and the project's own .env is denied by name instead.
+            vault = home / "work" / "proj" / "vault"
+            vault.mkdir(parents=True)
+            (vault.parent / ".env").write_text("fixture")
+            dirs = (*config.credential_dirs(), str(vault))
+            with patch.object(config, "credential_dirs", return_value=dirs):
+                fs = codex_config.filesystem(brief)
+            self.assertEqual(self.walk_reach(fs), [])
+            self.assertTrue(self.blocked(fs, vault))
+            self.assertEqual(fs.get(str(vault.parent / ".env")), "deny")
+            # A session opened inside a dot-folder keeps its folder and loses its siblings.
+            inside = home / ".cache" / "lead" / "wt"
+            inside.mkdir(parents=True)
+            (home / ".cache" / "lead" / "other").mkdir()
+            fs = codex_config.filesystem(replace(self.chat(), cwd=str(inside)))
+            self.assertFalse(self.blocked(fs, inside))
+            self.assertTrue(self.blocked(fs, home / ".cache" / "lead" / "other"))
+
+    # Review of #224 (delta): the Windows profiles WSL mounts are closed the
+    # same way. A fake `/mnt/c/Users` only; nothing real is listed.
+    WIN_DENIED = (".git-credentials", ".ssh/id_ed25519", ".aws/credentials", ".azure/token",
+                  ".docker/config.json", ".config/gh/hosts.yml", ".npmrc", ".brand-new/token",
+                  "AppData/Roaming/GitHub CLI/hosts.yml", "AppData/Local/GitCredentialManager/store",
+                  "AppData/Local/Google/Chrome/User Data/Default/Login Data", "NTUSER.DAT",
+                  "ntuser.dat.LOG1")
+    WIN_OPEN = ("Documents/notes.txt", "Desktop/x.txt", "src/repo/main.py")
+
+    def windows_root(self):
+        users = self.root / "mnt-c" / "Users"
+        profile = users / "someone"
+        for rel in self.WIN_DENIED + self.WIN_OPEN:
+            (profile / rel).parent.mkdir(parents=True, exist_ok=True)
+            (profile / rel).write_text("fixture")
+        for other in ("Public", "Default", "All Users"):
+            (users / other / ".shared").mkdir(parents=True)
+        # A legacy junction (WSL shows it as a link) into AppData.
+        (profile / "Application Data").symlink_to(profile / "AppData" / "Roaming", target_is_directory=True)
+        locked = users / "locked-profile"
+        (locked / ".ssh").mkdir(parents=True)
+        return users, profile, locked
+
+    def test_windows_profiles_are_closed_too(self):
+        users, profile, locked = self.windows_root()
+        locked.chmod(0)
+        self.addCleanup(locked.chmod, 0o755)
+        with patch.dict(os.environ, {"JARVIS_WINDOWS_USERS": str(users)}):
+            self.assertEqual(codex_config.windows_profiles(), sorted([locked, profile]))
+            fs = codex_config.filesystem(self.chat())
+            for rel in self.WIN_DENIED + ("Application Data/GitHub CLI/hosts.yml",):
+                with self.subTest(denied=rel):
+                    self.assertTrue(self.blocked(fs, profile / rel), rel)
+            for rel in self.WIN_OPEN:
+                with self.subTest(open=rel):
+                    self.assertFalse(self.blocked(fs, profile / rel), rel)
+            self.assertEqual(fs.get(str(profile / "AppData")), "deny", "AppData as a whole")
+            for other in ("Public", "Default", "All Users"):
+                self.assertFalse(self.blocked(fs, users / other / ".shared"), other)
+            denied = [Path(k) for k, v in fs.items() if v == "deny" and "*" not in k]
+            self.assertFalse(any(o in d.parents for d in denied for o in denied), "no nested denies")
+            self.assertEqual(self.walk_reach(fs), [])
+            # A repo on the mounted drive, outside any profile, opens as before;
+            # one inside a profile's dot-folder or AppData is closed around.
+            drive_repo = self.root / "mnt-c" / "dev" / "override"
+            drive_repo.mkdir(parents=True)
+            fs = codex_config.filesystem(replace(self.chat(), cwd=str(drive_repo)))
+            self.assertFalse(self.blocked(fs, drive_repo))
+            self.assertEqual(fs.get(f"{drive_repo}/**/[.][eE][nN][vV]*"), "deny")
+            inner = profile / "AppData" / "Local" / "proj"
+            inner.mkdir(parents=True)
+            fs = codex_config.filesystem(replace(self.chat(), cwd=str(inner)))
+            self.assertFalse(self.blocked(fs, inner))
+            self.assertNotIn(str(profile / "AppData"), fs)
+            self.assertTrue(self.blocked(fs, profile / "AppData/Roaming/GitHub CLI/hosts.yml"))
+            self.assertTrue(self.blocked(fs, profile / "AppData/Local/GitCredentialManager/store"))
+        # Not mounted, or not present: skipped, never a refusal.
+        for missing in (self.root / "nothing" / "Users", self.root / "mnt-c" / "Users" / "someone" / "Documents" / "notes.txt"):
+            with patch.dict(os.environ, {"JARVIS_WINDOWS_USERS": str(missing)}):
+                self.assertEqual(codex_config.windows_profiles(), [])
+                codex_config.filesystem(self.chat())
+
+    # Decision on #224's residual: loose key and token files are closed as a
+    # class, by name only (`codex_config.key_like`), not one by one.
+    HOME_KEYS = ("gha-deployer-key.json", "server.pem", "tls.key", "cert.p12", "cert.pfx",
+                 "id_ed25519", "aws-credentials", "github-token.txt", "service-account.json",
+                 "service-account-prod.json", "prod-key.json", "vault-secret.txt")
+    HOME_PLAIN = ("id_ed25519.pub", "credentials.example.json", "notes.txt", "README.md")
+    ROOT_KEYS = ("server.pem", "service-account.json", "deploy-key.json", "credentials.json")
+    ROOT_PLAIN = ("tokens.json", "id_map.py", "tokenizer.py", "credentials.example.json", "README.md")
+
+    def test_loose_key_files_are_closed_as_a_class(self):
+        from jarvis.tools import secrets
+        home = self.closed_home()
+        users, profile, _locked = self.windows_root()
+        repo = home / "projects" / "app"
+        for folder, names in ((home, self.HOME_KEYS + self.HOME_PLAIN), (profile, self.HOME_KEYS + self.HOME_PLAIN),
+                              (repo, self.ROOT_KEYS + self.ROOT_PLAIN)):
+            for name in names:
+                (folder / name).write_text("fixture")
+        (repo / "src").mkdir(exist_ok=True)
+        (repo / "src" / "deep.pem").write_text("fixture")
+        # The gate's shared helper flags none of them: why the patterns are local.
+        self.assertFalse(any(secrets.is_protected(n) for n in self.HOME_KEYS))
+        with self.home_patches(home), patch.dict(os.environ, {"JARVIS_WINDOWS_USERS": str(users)}):
+            fs = codex_config.filesystem(replace(self.chat(), cwd=str(repo)))
+            for folder in (home, profile):
+                for name in self.HOME_KEYS:
+                    with self.subTest(folder=folder.name, key=name):
+                        self.assertEqual(fs.get(str(folder / name)), "deny")
+                for name in self.HOME_PLAIN:
+                    with self.subTest(folder=folder.name, plain=name):
+                        self.assertFalse(self.blocked(fs, folder / name))
+            for name in self.ROOT_KEYS:
+                with self.subTest(root_key=name):
+                    self.assertEqual(fs.get(str(repo / name)), "deny")
+            for name in self.ROOT_PLAIN:
+                with self.subTest(root_plain=name):
+                    self.assertFalse(self.blocked(fs, repo / name))
+            self.assertFalse(self.blocked(fs, repo / "src" / "deep.pem"), "top level only (residual)")
+            self.assertFalse(self.blocked(fs, repo), "the session folder itself stays")
+
+    def test_a_path_with_glob_syntax_is_never_a_literal_deny(self):
+        users, profile, _locked = self.windows_root()
+        (profile / "NTUSER.DAT{207e}.TM.blf").write_text("fixture")
+        (profile / ".odd[1]").mkdir()
+        with patch.dict(os.environ, {"JARVIS_WINDOWS_USERS": str(users)}):
+            fs = codex_config.filesystem(self.chat())
+        self.assertEqual(fs.get(str(profile / "NTUSER.DAT")), "deny")
+        self.assertFalse(any(v == "deny" and "{" in k for k, v in fs.items()))
+        self.assertNotIn(str(profile / ".odd[1]"), fs)
+
+    def test_owner_home_churn_after_prepare_never_refuses_the_session(self):
+        # Review of #224 (MED): the check compares Codex's readback with the
+        # table written at prepare, never with a rescan; a `-wal` file or a
+        # new dot-folder between the two must not refuse a healthy chat.
+        home = self.closed_home()
+        real = codex_config.prepare
+
+        def prepare_then_churn(*args, **kwargs):
+            out = real(*args, **kwargs)
+            (home / ".codex" / "state_5.sqlite-wal").write_text("fixture")
+            (home / ".brand-new-tool").mkdir()
+            (home / ".config" / "another").mkdir()
+            return out
+
+        with self.home_patches(home), patch.object(codex_config, "prepare", prepare_then_churn):
+            h = self.start(brief=replace(self.chat(), cwd=str(home / "projects" / "app")))
+            self.assertEqual(self.send(h)[-1].kind, K.TURN_FINISHED)
+            written = codex_config.written(h.native.home)
+            self.assertNotIn(str(home / ".brand-new-tool"), written)
+            self.assertIn(str(home / ".brand-new-tool"),
+                          codex_config.filesystem(replace(self.chat(), cwd=str(home / "projects" / "app"))),
+                          "a rescan differs: the next start covers the new folder")
+
+    def test_tasks_get_the_profile_too(self):
+        h = self.start()
+        cfg, profile = self.profile_of(h)
+        self.assertEqual(cfg["default_permissions"], "jarvis-chat")
+        self.assertEqual([k for k, v in profile["filesystem"].items() if v == "write"],
+                         [str(codex_config.sandbox_home(h.native.home)),
+                          str(codex_config.session_skills(h.native.home))])
+        self.assertEqual(profile["filesystem"][str(config.V2_DATA_DIR.resolve())], "deny")
+
+    def test_symlinked_credential_folders_are_denied_where_they_lead(self):
+        # A deny naming a symlink makes bwrap fail every command (measured):
+        # the owner's ~/.aws is a link into /mnt/c.
+        target = self.root / "aws-real"
+        target.mkdir()
+        link = self.root / "aws-link"
+        link.symlink_to(target, target_is_directory=True)
+        with patch.object(config, "credential_dirs", return_value=(str(link),)):
+            fs = codex_config.filesystem(self.chat())
+        self.assertEqual(fs.get(str(target)), "deny")
+        self.assertNotIn(str(link), fs)
+
+    def test_a_session_inside_a_denied_folder_or_a_writable_mirror_is_refused(self):
+        inside = config.V2_DATA_DIR / "somewhere"
+        inside.mkdir(parents=True)
+        with self.assertRaises(BriefRefused):
+            codex_config.filesystem(replace(self.chat(), cwd=str(inside)))
+        config.CHAT_WORKTREES_DIR.mkdir()
+        with patch.dict(os.environ, {"JARVIS_CHAT_GIT_MIRRORS": str(config.CHAT_WORKTREES_DIR / "m")}):
+            with self.assertRaises(BriefRefused):
+                codex_config.filesystem(self.chat())
+            with self.assertRaises(BriefRefused):
+                self.start(brief=self.chat())
+        # The default sits beside V2_DATA_DIR, outside every deny.
+        self.assertEqual(config.chat_git_mirrors_dir(), config.V2_DATA_DIR.parent / "chat-git-mirrors")
+
+    def test_thread_start_and_resume_send_no_sandbox_mode(self):
+        for brief in (self.chat(), self.brief):
+            thread = replace(self.thread, id=f"nosandbox-{len(self.brain.rpcs)}", role=brief.role)
+            h = self.start(thread=thread, brief=brief)
+            self.provider.close(h)
+            thread.provider_session_id = h.provider_session_id
+            resumed = self.provider.resume(thread, brief, lambda *a, **k: Decision.DENY)
+            self.handles.append(resumed)
+            self.provider.close(resumed)
+        for method in ("thread/start", "thread/resume"):
+            for call in self.brain.calls(method):
+                self.assertNotIn("sandbox", call["params"], method)
+                self.assertNotIn("sandboxPolicy", call["params"], method)
+
+    def test_each_start_up_check_refuses_when_tampered(self):
+        self.repo()
+        brief = self.chat()
+        config.V2_DATA_DIR.mkdir(parents=True, exist_ok=True)
+        probe = codex_config.filesystem(brief)
+        deny_key = str(config.V2_DATA_DIR.resolve())
+        self.assertEqual(probe[deny_key], "deny")
+        def fs_change(change):
+            return lambda profile: profile.update(filesystem=change(profile["filesystem"]))
+
+        def net_change(**values):
+            return lambda profile: profile["network"].update(values)
+
+        effective = {
+            "missing deny": fs_change(lambda fs: {k: v for k, v in fs.items() if k != deny_key}),
+            "a read grant": fs_change(lambda fs: {**fs, "/": "read"}),
+            "another write": fs_change(lambda fs: {**fs, "/tmp/elsewhere": "write"}),
+            "shallower glob": fs_change(lambda fs: {**fs, "glob_scan_max_depth": 1}),
+            "profile network on": net_change(enabled=True),
+            "profile network unset": net_change(enabled=None),
+            "a proxy domain": net_change(domains={"example.com": "allow"}),
+            "another base": lambda profile: profile.update(extends=":danger-full-access"),
+        }
+        overrides = [(label, None) for label in effective] + [
+            ("sandbox_mode set", {"sandbox_mode": "workspace-write"}),
+            ("legacy table", {"sandbox_workspace_write": {"network_access": False}}),
+            ("danger mode", {"sandbox_mode": "danger-full-access"}),
+            ("feature off", {"features": {"exec_permission_approvals": False}}),
+            ("feature missing", {"features": {}}),
+            ("turn-wide grants on", {"features": {"exec_permission_approvals": True,
+                                                  "request_permissions_tool": True}}),
+            ("another profile", {"default_permissions": ":workspace"}),
+            ("no profile", {"default_permissions": None}),
+            ("command env", {"shell_environment_policy": {"inherit": "all", "set": None}}),
+        ]
+        receipts = [
+            ("no active profile", {"profile": None}),
+            ("other profile", {"profile": {"id": ":workspace", "extends": None}}),
+            ("other base", {"profile": {"id": "jarvis-chat", "extends": ":danger-full-access"}}),
+            ("receipt network on", "network"),
+            ("receipt extra root", {"sandbox": {"type": "workspaceWrite", "networkAccess": False,
+                                                "writableRoots": ["/"]}}),
+            ("receipt full access", {"sandbox": {"type": "dangerFullAccess"}}),
+        ]
+        for label, override in overrides + receipts:
+            for resume in (False, True):
+                with self.subTest(label, resume=resume):
+                    self.brain.script.clear()
+                    thread = replace(self.thread, id=f"tamper-{len(self.brain.rpcs)}", role=Role.CHAT)
+                    if resume:
+                        h = self.start(thread=thread, brief=brief)
+                        self.provider.close(h)
+                        thread.provider_session_id = h.provider_session_id
+                    if label in effective:
+                        settings = codex_config.config_text(brief, codex_config._home_of(thread.id))
+                        parsed = read_back(tomllib.loads(settings))
+                        effective[label](parsed["permissions"]["jarvis-chat"])
+                        self.brain.script["config_override"] = {"permissions": parsed["permissions"]}
+                    elif label in dict(overrides):
+                        self.brain.script["config_override"] = override
+                    elif override == "network":
+                        # Everything right but the network: only that refuses.
+                        roots = codex_config.write_paths(brief, codex_config._home_of(thread.id).resolve())
+                        self.brain.script["sandbox"] = {"type": "workspaceWrite", "networkAccess": True,
+                                                        "writableRoots": roots}
+                    else:
+                        self.brain.script.update(override)
+                    before = len(self.brain.rpcs)
+                    operation = self.provider.resume if resume else self.provider.start
+                    with self.assertRaises(BriefRefused) as caught:
+                        operation(thread, brief, lambda *a, **k: Decision.ALLOW)
+                    self.assertIn("Codex", str(caught.exception))
+                    self.assertEqual(len(self.brain.rpcs), before + 1)
+                    self.assertIsNotNone(self.brain.rpcs[-1].process.poll(), "the app-server is closed")
+        self.brain.script.clear()
+        # And untampered, both open.
+        thread = replace(self.thread, id="untampered", role=Role.CHAT)
+        h = self.start(thread=thread, brief=brief)
+        self.provider.close(h)
+
+    def test_the_feature_is_pinned_to_the_verified_codex(self):
+        # Moving CODEX_VERIFIED means re-running tests/v2/fixtures/cg2_probe.py
+        # (exec_permission_approvals is "under development" in 0.161).
+        self.assertEqual(codex_config.FEATURE_VERIFIED, codex_cli.CODEX_VERIFIED)
+        self.assertEqual(codex_config.FEATURE, "exec_permission_approvals")
+
+    # The 0.161 shape of a `with_additional_permissions` network request
+    # (recorded by tests/v2/fixtures/cg2_probe.py).
+    NETWORK_APPROVAL = {"kind": "command", "itemId": "c", "command": "/bin/bash -lc 'npm install'",
+                        "reason": "needs the registry",
+                        "additionalPermissions": {"network": {"enabled": True}, "fileSystem": None},
+                        "proposedExecpolicyAmendment": ["npm", "install"],
+                        "availableDecisions": ["accept", "cancel"]}
+
+    def test_a_network_approval_asks_the_owner_every_time_with_no_always(self):
+        asker = RecordingAsker(Decision.ALLOW)
+        permit = self.real_permit(asker)
+        for n in (1, 2):
+            _, events, reply = self.scripted(CMD, dict(self.NETWORK_APPROVAL), permit, brief=self.chat())
+            self.assertEqual(reply["result"], {"decision": "accept"})
+            self.assertEqual(len(asker.seen), n, "one owner yes is one command; the next asks again")
+            card = asker.seen[-1]
+            self.assertFalse(card.allowlistable)
+            self.assertIn("network on", card.headline)
+        asker = RecordingAsker(Decision.DENY)
+        _, _, reply = self.scripted(CMD, dict(self.NETWORK_APPROVAL), self.real_permit(asker), brief=self.chat())
+        self.assertEqual(reply["result"], {"decision": "decline"})
+        # A filesystem grant riding the same request is judged by layer 1.
+        both = {**self.NETWORK_APPROVAL, "additionalPermissions": {
+            "network": {"enabled": True}, "fileSystem": {"read": [str(self.root / "creds" / ".ssh")]}}}
+        asker = RecordingAsker(Decision.ALLOW)
+        _, _, reply = self.scripted(CMD, both, self.real_permit(asker), brief=self.chat())
+        self.assertEqual(reply["result"], {"decision": "decline"})
+        self.assertEqual(asker.seen, [], "a credential read is refused before any card")
+
+    def test_only_accept_or_decline_is_ever_sent(self):
+        # Never acceptWithExecpolicyAmendment (measured: later identical
+        # commands then run unasked) nor acceptForSession, even when offered.
+        offered = {**self.NETWORK_APPROVAL, "availableDecisions": [
+            "accept", "acceptForSession", {"acceptWithExecpolicyAmendment": {"execpolicy_amendment": ["npm"]}},
+            {"applyNetworkPolicyAmendment": {"network_policy_amendment": {"host": "*", "action": "allow"}}},
+            "decline", "cancel"]}
+        sent = []
+        for decision in (Decision.ALLOW, Decision.DENY):
+            for brief in (self.chat(), self.brief):
+                for params in (offered, {"itemId": "c", "command": "echo ok",
+                                         "proposedExecpolicyAmendment": ["echo"]}):
+                    _, _, reply = self.scripted(CMD, dict(params), lambda *a, **k: decision, brief=brief)
+                    sent.append(reply["result"])
+        self.assertTrue(sent)
+        for result in sent:
+            self.assertEqual(set(result), {"decision"}, result)
+            self.assertIn(result["decision"], ("accept", "decline"), result)
+        self.assertEqual(codex.APPROVAL_DECISIONS, ("accept", "decline"))
+        self.assertIn({"decision": "accept"}, sent)
 
     def test_example_env_names_do_not_block_a_later_chat(self):
         root = config.CHAT_WORKTREES_DIR

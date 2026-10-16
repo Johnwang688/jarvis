@@ -411,6 +411,20 @@ CHAT_WORKTREES_DIR = Path(
 V2_DATA_DIR = Path(
     os.environ.get("JARVIS_V2_DATA", Path.home() / ".local" / "share" / "jarvis" / "v2")
 )
+
+
+def chat_git_mirrors_dir() -> Path:
+    """Where `v2/chat_git.py` keeps its bare mirrors (CG phase 2,
+    2026-10-16). A Codex chat runs `git fetch <mirror>` in its sandbox, which
+    denies reads of all of V2_DATA_DIR (it holds the private Codex homes and
+    their jarvis-mcp tokens), and a "read" entry cannot reopen a folder under
+    a denied one (measured on 0.161), so the mirrors sit beside V2_DATA_DIR:
+    readable, never writable, by a chat's commands. Read at call time, so a
+    test that repoints V2_DATA_DIR moves the mirrors with it.
+    `JARVIS_CHAT_GIT_MIRRORS` overrides; empty means unset."""
+    override = os.environ.get("JARVIS_CHAT_GIT_MIRRORS")
+    return Path(override) if override else Path(V2_DATA_DIR).parent / "chat-git-mirrors"
+
 # The last model catalog the signed-in Codex account offered (v2
 # `router.set_codex_models`, saved atomically on every good refresh, loaded by
 # daemon2's `main()` through `v2/codex_catalog.py`), so a restart — or a
