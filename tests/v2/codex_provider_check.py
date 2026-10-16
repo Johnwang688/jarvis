@@ -550,7 +550,10 @@ class Checks(unittest.TestCase):
         self.assertEqual(params["developerInstructions"],
                          self.brief.system_append + "\n\n" + codex_config.git_note(self.chat()))
         self.assertIn("shared", params["developerInstructions"])
-        self.assertIn("escalated permissions", params["developerInstructions"])
+        for words in ("no GitHub login", "chat_git_push / chat_pr_create / chat_pr_merge / chat_pr_close",
+                      "chat_git_fetch", "Do not request escalation for git push or gh"):
+            self.assertIn(words, params["developerInstructions"])
+        self.assertNotIn("escalated permissions", params["developerInstructions"])
 
     def test_chat_linked_worktree_and_nested_cwd_include_common_dir(self):
         common = self.repo()
@@ -1365,40 +1368,118 @@ class Checks(unittest.TestCase):
                 self.assertEqual(reply["result"], {"decision": "decline"})
 
     def test_owner_only_merge_card_says_what_it_does(self):
-        """Owner decision 2026-10-15: a Codex merge or close reaches the owner
-        with a card that leads with it, not only "sandbox widening" — as a
-        chat's widening, or as a task's plain approval at layer 2 — with no
-        Always, and declined with no human. A branch push is unchanged: a
-        chat's still asks as a widening; a task's is still the reviewer's."""
-        from jarvis.v2.permissions import L_ALWAYS_ASK, L_WIDENING, deny_all
+        """Owner decision 2026-10-15: a Codex task's merge or close reaches
+        the owner with a card that leads with it, at layer 2, with no Always,
+        and declined with no human. A chat's escalated merge, close or push
+        has no GitHub login to run with: CG-1 declines it unasked and points
+        Codex at the Jarvis git tools (a merge spelled that way included,
+        never asked first). A task's branch push is still the reviewer's."""
+        from jarvis.v2 import chat_git
+        from jarvis.v2.permissions import L_ALWAYS_ASK, deny_all
         cases = (("/bin/bash -lc 'gh pr merge 5 --squash'", "merges a pull request"),
                  ("/bin/bash -lc 'gh pr close 5'", "closes a pull request"),
                  ("/bin/bash -lc 'git push origin HEAD:main'", "pushes to main"),
                  ("/bin/bash -lc 'git push --force origin topic'", "force-pushes"))
         for command, words in cases:
-            for brief, layer in ((self.chat(), L_WIDENING), (self.brief, L_ALWAYS_ASK)):
-                with self.subTest(command=command, role=brief.role):
-                    params = {"itemId": "c", "command": command}
-                    asker = RecordingAsker(Decision.ALLOW)
-                    _, _, reply = self.scripted(CMD, params, self.real_permit(asker), brief=brief)
-                    self.assertEqual(reply["result"], {"decision": "accept"})
-                    self.assertEqual(len(asker.seen), 1)
-                    self.assertTrue(asker.seen[0].headline.startswith(words), asker.seen[0].headline)
-                    self.assertEqual(asker.seen[0].layer, layer)
-                    self.assertFalse(asker.seen[0].allowlistable)
-                    _, _, reply = self.scripted(CMD, params, self.real_permit(deny_all("nobody")),
-                                                brief=brief)
-                    self.assertEqual(reply["result"], {"decision": "decline"})
+            params = {"itemId": "c", "command": command}
+            with self.subTest(command=command, role="task"):
+                asker = RecordingAsker(Decision.ALLOW)
+                _, _, reply = self.scripted(CMD, params, self.real_permit(asker), brief=self.brief)
+                self.assertEqual(reply["result"], {"decision": "accept"})
+                self.assertEqual(len(asker.seen), 1)
+                self.assertTrue(asker.seen[0].headline.startswith(words), asker.seen[0].headline)
+                self.assertEqual(asker.seen[0].layer, L_ALWAYS_ASK)
+                self.assertFalse(asker.seen[0].allowlistable)
+                _, _, reply = self.scripted(CMD, params, self.real_permit(deny_all("nobody")),
+                                            brief=self.brief)
+                self.assertEqual(reply["result"], {"decision": "decline"})
+            with self.subTest(command=command, role="chat"):
+                asker = RecordingAsker(Decision.ALLOW)
+                _, events, reply = self.scripted(CMD, params, self.real_permit(asker), brief=self.chat())
+                self.assertEqual(reply["result"], {"decision": "decline"})
+                self.assertEqual(asker.seen, [], "declined unasked, never a card first")
+                self.assertTrue(any(e.kind == K.ERROR and chat_git.POINTER in e.data["message"]
+                                    for e in events), "the owner sees the pointer")
         push = {"itemId": "c", "command": "/bin/bash -lc 'git push -u origin topic'"}
         asker = RecordingAsker(Decision.ALLOW)
-        self.scripted(CMD, push, self.real_permit(asker), brief=self.chat())
-        self.assertEqual(len(asker.seen), 1)
-        self.assertNotIn("pushes to", asker.seen[0].headline)
-        self.assertIn("owner approval required", asker.seen[0].headline)
+        _, _, reply = self.scripted(CMD, push, self.real_permit(asker), brief=self.chat())
+        self.assertEqual(reply["result"], {"decision": "decline"})
+        self.assertEqual(asker.seen, [])
         asker = RecordingAsker(Decision.ALLOW)
         _, _, reply = self.scripted(CMD, push, self.real_permit(asker), brief=self.brief)
         self.assertEqual(reply["result"], {"decision": "accept"})
         self.assertEqual(asker.seen, [])
+
+    def test_cg1_raw_network_git_and_gh_are_declined_with_the_pointer(self):
+        """CG-1 (owner, 2026-10-15): a Codex chat's escalated gh, or git
+        push/fetch/pull/ls-remote to a remote, cannot succeed without a login.
+        Declined unasked, logged at the chat-git layer, the pointer shown;
+        a line it cannot be sure of still takes the ordinary widening ask."""
+        import json as _json
+        from jarvis.v2 import chat_git
+        from jarvis.v2.permissions import L_CHAT_GIT, L_WIDENING, deny_all
+        for command in ("git push -u origin topic", "/bin/bash -lc 'gh pr create --fill'",
+                        "gh pr merge 3 --squash", "git fetch origin", "git pull --rebase",
+                        "git ls-remote origin", "env GH_PAGER=cat gh api user",
+                        "cd sub && git -C . push", "npm test && git push"):
+            with self.subTest(command=command):
+                asker = RecordingAsker(Decision.ALLOW)
+                _, events, reply = self.scripted(CMD, {"itemId": "c", "command": command},
+                                                 self.real_permit(asker), brief=self.chat())
+                self.assertEqual(reply["result"], {"decision": "decline"})
+                self.assertEqual(asker.seen, [])
+                self.assertTrue(any(e.kind == K.ERROR and chat_git.POINTER in e.data["message"]
+                                    for e in events))
+                log = [_json.loads(line) for line in
+                       (config.V2_DATA_DIR / "decisions.jsonl").read_text().splitlines()]
+                self.assertEqual((log[-1]["layer"], log[-1]["reason"]), (L_CHAT_GIT, chat_git.POINTER))
+        for command in ("$GIT push origin topic", "git fetch /srv/mirror.git x", "git status",
+                        "docker build ."):
+            with self.subTest(unsure=command):
+                asker = RecordingAsker(Decision.ALLOW)
+                _, events, reply = self.scripted(CMD, {"itemId": "c", "command": command},
+                                                 self.real_permit(asker), brief=self.chat())
+                self.assertEqual(reply["result"], {"decision": "accept"})
+                self.assertEqual(len(asker.seen), 1, "the ordinary widening card")
+                self.assertEqual(asker.seen[0].layer, L_WIDENING)
+                self.assertFalse(any(e.kind == K.ERROR for e in events))
+                _, _, reply = self.scripted(CMD, {"itemId": "c", "command": command},
+                                            self.real_permit(deny_all("nobody")), brief=self.chat())
+                self.assertEqual(reply["result"], {"decision": "decline"})
+
+    def test_clean_env_is_exact_plus_the_owners_identity(self):
+        """Codex's environment gains only GIT_AUTHOR_*/GIT_COMMITTER_* (CG-0):
+        never a PATH change, GIT_CONFIG_* or GH_* — no login, helper or token
+        path. An identity value that is not one printable line is dropped."""
+        base = {"HOME", "CODEX_HOME", "PATH", "LANG", "TZ", "TMPDIR"}
+        ident = {"GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"}
+        home = self.root / "ownerhome"
+        home.mkdir()
+        leaky = {"HOME": str(home), "GH_CONFIG_DIR": str(home / "gh"), "GH_TOKEN": "x",
+                 "GIT_CONFIG_GLOBAL": str(home / ".gitconfig"), "GITHUB_TOKEN": "x",
+                 "PATH": f"{home}/.local/bin:/usr/bin:/bin", "XDG_CONFIG_HOME": str(home / "xdg")}
+        cases = (('[user]\n\tname = Owner Name\n\temail = owner@example.invalid\n',
+                  {"GIT_AUTHOR_NAME": "Owner Name", "GIT_COMMITTER_NAME": "Owner Name",
+                   "GIT_AUTHOR_EMAIL": "owner@example.invalid",
+                   "GIT_COMMITTER_EMAIL": "owner@example.invalid"}),
+                 ('[user]\n\tname = "Two\\nLines"\n\temail = owner@example.invalid\n',
+                  {"GIT_AUTHOR_EMAIL": "owner@example.invalid",
+                   "GIT_COMMITTER_EMAIL": "owner@example.invalid"}),
+                 ('[user]\n\tname = "Tab\\there"\n\temail = "' + "x" * 250 + '"\n', {}),
+                 ("", {}))
+        for text, want in cases:
+            with self.subTest(config=text[:40]):
+                (home / ".gitconfig").write_text(text)
+                codex_config._IDENTITY = None
+                try:
+                    with patch.dict(os.environ, leaky):
+                        env = codex_config.clean_env(self.root / "h")
+                finally:
+                    codex_config._IDENTITY = None
+                self.assertEqual(set(env), base | set(want))
+                self.assertEqual({k: env[k] for k in ident if k in env}, want)
+                self.assertEqual(env["PATH"], "/usr/local/bin:/usr/bin:/bin")
+                self.assertFalse(any(k.startswith(("GH_", "GIT_CONFIG", "GITHUB")) for k in env))
 
     def test_chat_explicit_network_and_unknown_grants_still_require_owner(self):
         for extra in ({"networkApprovalContext": {"host": "example.invalid", "protocol": "https"}},

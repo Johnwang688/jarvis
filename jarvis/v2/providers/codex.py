@@ -1935,6 +1935,15 @@ class CodexProvider:
                 s.pending.pop(req_id, None)
             self._reply(s, request, {"decision": "accept" if decision == Decision.ALLOW else "decline"})
             yield self._event(h, EventKind.APPROVAL_RESOLVED, req_id=req_id, decision=decision.value)
+            if (decision == Decision.DENY and shell and line
+                    and codex_config.approvals_reviewer(s.brief) == "user"):
+                # CG-1: the permit declined an escalated raw push or gh
+                # unasked. The decline carries no text to the model, which
+                # has the same pointer in its git note; the owner sees it here.
+                from .. import chat_git
+                if any(chat_git.raw_remote(c) for c in (args.get("command"), *also)):
+                    yield self._event(h, EventKind.ERROR, fatal=False,
+                                      message=f"Codex approval request declined: {chat_git.POINTER}{note}")
             if s.rpc.failed.is_set():
                 raise RpcError("Codex transport failed during approval")
             return
