@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 
 from . import agent as agent_mod
 from . import config
+from .tools.secrets import tool_args_for_display
 
 MAX_CONCURRENT = 3
 MAX_LOG_LINES = 400
@@ -125,7 +126,7 @@ def start(task: str, name: str = "", model: str | None = None) -> Workflow:
     def on_event(kind: str, data) -> None:
         if kind == "tool_start":
             tool_name, raw = data
-            wf.add_log(f"→ {tool_name}({str(raw)[:120]})")
+            wf.add_log(f"→ {tool_name}({tool_args_for_display(raw)[:120]})")
         elif kind == "interim_text" and data:
             wf.add_log(f"note: {str(data)[:200]}")
 

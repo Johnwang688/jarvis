@@ -71,6 +71,34 @@ def clean_line(text, cap: int = 120) -> str:
     return line if len(line) <= cap else line[:max(1, cap - 1)].rstrip() + "…"
 
 
+def card_text(value):
+    """A card's command, reason or headline as shown and published: typed
+    credentials withheld (`secrets.redact_command`; the owner's decision,
+    2026-10-15), never a summary, and nothing withheld that runs. The
+    request itself keeps the command as typed — that is what is judged and
+    what an "Always" is minted from. A redaction that fails shows the text
+    as it is: a card that hid code would be worse than one that shows a
+    secret."""
+    if not isinstance(value, str) or not value:
+        return value
+    try:
+        from jarvis.tools import secrets as _v1_secrets
+        return _v1_secrets.redact_command(value)
+    except Exception:  # noqa: BLE001
+        LOG.warning("approval card redaction failed; shown as typed")
+        return value
+
+
+def card_args(args):
+    """A card's arguments, each string as `card_text`; structure kept."""
+    try:
+        from jarvis.tools import secrets as _v1_secrets
+        return _v1_secrets.redact_value(args)
+    except Exception:  # noqa: BLE001
+        LOG.warning("approval card redaction failed; shown as typed")
+        return args
+
+
 def label(origin_id: str, name: str = "") -> str:
     """The attribution string, sanitized as v1 `tasks._label` does.
 
@@ -116,7 +144,8 @@ def v1_request(tool: str, args: dict) -> tuple[str, dict]:
 
 @dataclass
 class ApprovalRequest:
-    """One question for the owner. `command` is the entire command, never a summary."""
+    """One question for the owner. `command` is the entire command, never a
+    summary, as typed; `to_json` is what a card shows (`card_text`)."""
     tool: str
     args: dict[str, Any] = field(default_factory=dict)
     command: str | None = None
@@ -150,6 +179,16 @@ class ApprovalRequest:
     # from a provider's `subagent_sid`; an id, never a word the model chose.
     subagent: str = ""
     _hud_private: bool = field(default=False, init=False, repr=False)
+    _card: dict | None = field(default=None, init=False, repr=False, compare=False)
+
+    def card(self) -> dict:
+        """The redacted projection a card shows (`card_text`/`card_args`),
+        computed once per request: every publish and `GET /approvals`
+        reuses it."""
+        if self._card is None:
+            self._card = {"args": card_args(self.args), "command": card_text(self.command),
+                          "reason": card_text(self.reason), "headline": card_text(self.headline)}
+        return self._card
 
     @property
     def private(self) -> bool:
@@ -166,12 +205,13 @@ class ApprovalRequest:
             }
         return {
             "req_id": self.req_id, "code": self.code, "tool": self.tool,
-            "args": self.args, "command": self.command, "reason": self.reason,
+            "args": self.card()["args"], "command": self.card()["command"],
+            "reason": self.card()["reason"],
             "layer": self.layer, "thread_id": self.thread_id,
             "task_id": self.task_id, "provider": self.provider,
             "origin": self.origin, "asked_at": self.asked_at,
             "allowlistable": self.allowlistable, "timeout_s": self.timeout_s,
-            "headline": self.headline,
+            "headline": self.card()["headline"],
             "discord_channel_id": self.discord_channel_id,
             **({"subagent": self.subagent} if self.subagent else {}),
         }
@@ -180,9 +220,7 @@ class ApprovalRequest:
         """Private detail projection; call only behind the owner HUD boundary."""
         if not self.private:
             return self.to_json()
-        return {**self.to_json(), "args": self.args, "command": self.command,
-                "reason": self.reason, "headline": self.headline,
-                "browser": self.browser}
+        return {**self.to_json(), **self.card(), "browser": self.browser}
 
 
 @dataclass

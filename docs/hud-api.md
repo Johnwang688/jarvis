@@ -2745,7 +2745,15 @@ their positions and fields. With `tools=1`, TC-2 additionally returns their
   `credential_patterns.PATTERNS`. URLs in any field lose userinfo, query and
   fragment, keeping scheme, host, port and path, before cleaning to 120
   characters. A value split by shell quoting can still appear in a label;
-  labels do not parse or evaluate shell commands. Also still visible: a password with a bare `/` in a URL, and scheme-less `user:pass@host` or `curl -u user:pass`. Only the first 4,096 characters are judged, so every pass stays linear (a 1 MB argument takes a millisecond). The env values come from the thread's folder and its parents up to home. A label exception silently
+  labels do not parse or evaluate shell commands. A credential typed into the
+  line loses its value and keeps its name (`secrets.redact_inline`, 2026-10-15):
+  `MY_API_TOKEN=[redacted]`, `--password=[redacted]`, `Authorization: Bearer
+  [redacted]`, `curl -u user:[redacted]`; the rule is in
+  `docs/notes/safety-permissions.md`. An approval's `command`, `args`,
+  `reason` and `headline` (`GET /approvals`, `approval_requested`,
+  `approval_resolved`) are redacted the same way, never a value the line may
+  run (`[shown: this value may be run]`); the request behind them keeps the
+  command as typed. Also still visible: a password with a bare `/` in a URL, and scheme-less `user:pass@host` outside curl's `-u`. Only the first 4,096 characters are judged, so every pass stays linear (a 1 MB argument takes a millisecond). The env values come from the thread's folder and its parents up to home. A label exception silently
   falls back to `clean_line(name, 40)`. The entry's `name` is also cleaned to 40
   characters.
 - Missing labels on pre-feature starts are computed outside the lock only
