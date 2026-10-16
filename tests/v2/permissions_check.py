@@ -1829,6 +1829,9 @@ def third_delta_75_checks():
             eq(always_ask_match("Bash", {"command": line}, brief), None, f"{line!r} asks nothing new")
 
 
+POLL_DEADLINE_S = 30.0     # an active wait's bound, never its expected time
+
+
 def daemon_checks():
     from jarvis.v2 import daemon as daemon_mod
     from jarvis.v2.model import PermissionProfile as P, ProviderName, Role
@@ -1854,7 +1857,9 @@ def daemon_checks():
 
             # A DENY never reaches /approvals.
             daemon.send(thread.id, UserMessage("run:sudo rm -rf /"))
-            deadline = time.monotonic() + 3
+            # Each wait polls the real state and ends as soon as it holds; the
+            # deadline only bounds a hang (a 5 s one missed under a loaded box).
+            deadline = time.monotonic() + POLL_DEADLINE_S
             while not provider.calls and time.monotonic() < deadline:
                 time.sleep(0.005)
             eq(provider.calls[-1][1], Decision.DENY, "the hook's DENY came back")
@@ -1868,7 +1873,7 @@ def daemon_checks():
             worker = threading.Thread(
                 target=lambda: daemon.send(thread.id, UserMessage("run:git push origin main")))
             worker.start()
-            deadline = time.monotonic() + 5
+            deadline = time.monotonic() + POLL_DEADLINE_S
             queued = []
             while time.monotonic() < deadline:
                 status, queued = http_json(daemon.port, "GET", "/approvals")
@@ -1883,7 +1888,7 @@ def daemon_checks():
             status, body = hud_json(daemon, "POST", "/approvals/" + queued[0]["req_id"],
                                     {"decision": "allow"})
             eq(status, 200, "POST /approvals from the HUD window answers it")
-            deadline = time.monotonic() + 5
+            deadline = time.monotonic() + POLL_DEADLINE_S
             while len(provider.calls) < 2 and time.monotonic() < deadline:
                 time.sleep(0.005)
             eq(provider.calls[-1], ("git push origin main", Decision.ALLOW),
@@ -2389,6 +2394,28 @@ MERGE_GATE_ASK = (
     ("git commit -m 'gh pr merge 1' && git log -1 --format=%s | ssh host", _PR_UNSURE),
     # LOW: HOME and XDG_CONFIG_HOME move the owner's git config.
     ("HOME=/tmp/h git push", _PUSH_UNSURE), ("XDG_CONFIG_HOME=/tmp/x git push", _PUSH_UNSURE),
+    # #222's delta review. MED-A: a rebase with a branch operand switches
+    # to it first.
+    ("git rebase origin/feature main && git push", _MAIN),
+    ("git rebase --onto x y main && git push origin HEAD", _MAIN),
+    ("git rebase origin/main main; git push origin HEAD", _MAIN),
+    ("git rebase --root main && git push", _MAIN),
+    ("git rebase -s ours origin/x \"$B\" && git push", _PUSH_UNSURE),
+    # MED-B: a pager, editor or other setting that may hand git's output to a
+    # program: nothing on the line is blanked.
+    ("git -c core.pager=sh log -1 --format='gh pr merge 1'", _PR_UNSURE),
+    ("git -c pager.log=sh log -1 --format='gh pr merge 1'", _PR_UNSURE),
+    ("GIT_PAGER=sh git log -1 --format='gh pr merge 1'", _PR_UNSURE),
+    ("PAGER=sh git log -1 --format='gh pr merge 1'", _PR_UNSURE),
+    ("git -c core.pager=sh show -s --format='gh pr merge 1' HEAD", _PR_UNSURE),
+    ("git -c core.pager=sh diff --no-index --output-indicator-new='gh pr merge 1' a b", _PR_UNSURE),
+    ("git commit -m 'gh pr merge 1' && git -c core.pager=sh log -1 --format=%s", _PR_UNSURE),
+    ("git config core.pager sh; git log -1 --format='gh pr merge 1'", _PR_UNSURE),
+    ("GIT_EDITOR=sh git commit -e -m 'gh pr merge 1'", _PR_UNSURE),
+    ("export GIT_PAGER; git log -1 --format='gh pr merge 1'", _PR_UNSURE),
+    ("git -c alias.l='!sh' l -1 --format='gh pr merge 1'", _PR_UNSURE),
+    ("git --config-env=core.pager=P log -1 --format='gh pr merge 1'", _PR_UNSURE),
+    ("git --config-env core.pager=P log -1 --format='gh pr merge 1'", _PR_UNSURE),
     # Blanking a data option's value is anchored to its option: the same
     # text fed to a shell elsewhere on the line is still read.
     ("echo 'gh pr merge 1' | sh; git commit -m 'gh pr merge 1'", _PR_UNSURE),
@@ -2470,6 +2497,16 @@ MERGE_GATE_ORDINARY = (
     "CI=1 gh api repos/o/r/issues/5/comments -f body='push to main later' && git push -u origin feature",
     "CI=1 git checkout -b feature main && git push -u origin feature",
     "cat .git/config && git push origin feature", "cp .git/config /tmp/backup && git push origin feature",
+    # #222's delta review: a rebase with one operand stays where it is, one
+    # onto a feature branch switches there; a pager that only pages and the
+    # settings and variables that cannot run git's output still blank.
+    "git rebase main && git push", "git rebase origin/main feature && git push -u origin feature",
+    "git rebase --onto origin/feature main && git push",
+    "git -c core.pager='less -R' log origin/main..HEAD && git push -u origin feature",
+    "git -c core.pager=cat log origin/main..HEAD && git push -u origin feature",
+    "NODE_ENV=test npm test && git push -u origin feature && gh pr create --base main --fill",
+    "git config --global user.name x && git commit -m 'gh pr merge later'",
+    "git -c color.ui=never -c alias.st=status log origin/main..HEAD && git push -u origin feature",
 )
 
 

@@ -2331,8 +2331,10 @@ the default branch, a branch deletion, a force push.
   programs the walk judged by structure (a git subcommand's refs and
   message, `gh pr create --base main`, `gh api`), blanked where that program
   stands, unless a program on the line runs text the walk cannot read (`|
-  sh`, `eval "$(…)"`); `branchName: $b` in GraphQL is read from `-f b=…` or
-  asks. Always running the backstop was measured and declined: it asks for
+  sh`, `eval "$(…)"`) or a setting may hand git's output to one (a shell
+  pager or editor; any `-c`, config write or variable outside a benign
+  list); `git rebase UPSTREAM BRANCH` moves HEAD to BRANCH; `branchName: $b`
+  in GraphQL is read from `-f b=…` or asks. Always running the backstop was measured and declined: it asks for
   ordinary lines that mention `main` beside a push.
 - **Frozen** (owner, 2026-10-15): `jarvis/v2/merge_gate.py` and
   `jarvis/v2/permissions.py` are SELF_PROTECTED, so no agent write changes

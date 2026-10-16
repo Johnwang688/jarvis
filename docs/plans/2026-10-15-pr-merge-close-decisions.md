@@ -156,6 +156,16 @@ networking is off by design.
   fed standard input, a file or a non-literal `-c`, `eval`, an interpreter,
   `source`, `xargs`, `ssh` — nothing is blanked, so a stored message cannot
   be laundered (`git commit -m '…' && git log -1 --format=%s | sh`).
+  Nor is anything blanked where a setting on the line may hand git's own
+  output to a program (#222's delta review, MED-B: `git -c core.pager=sh log
+  --format='gh pr merge 1'`): any `-c`, `--config-env`, `git config` write
+  or config file write, and any variable set on the line, except a short
+  benign list — `user.*`, `color.*`, `push.default` and similar keys, a pager
+  that only pages (`cat`, `less -R`), a git alias (its expansion is walked),
+  and `LANG`, `CI`, `NODE_ENV`, `GIT_AUTHOR_*` and similar names. `git
+  rebase UPSTREAM BRANCH`, `--onto N UPSTREAM BRANCH` and `--root BRANCH`
+  switch to BRANCH first, so a later plain or HEAD push is judged there
+  (MED-A); `git rebase main` alone stays put.
   `HOME=` and `XDG_CONFIG_HOME=` on the line make a bare push's config
   unknown. `git checkout main -- && git push` switches to main (MED-1 of
   #208's delta review): only words after `--` are paths.
