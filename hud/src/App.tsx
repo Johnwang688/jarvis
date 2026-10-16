@@ -35,7 +35,7 @@ import { toolGroups } from "./state/toolGroups";
 import { ChatTab } from "./components/ChatTab";
 import { SubagentPane } from "./components/SubagentPane";
 import { subagents } from "./state/subagents";
-import { sameRef, type SubagentRef } from "./lib/subagents";
+import { MAIN_STOP_CLAUDE_HELP, sameRef, type SubagentRef } from "./lib/subagents";
 import { InputBar, MAX_FILES, toAttachment } from "./components/InputBar";
 import { TaskView } from "./components/TaskView";
 import { FileTab, type FileAsk } from "./components/FileTab";
@@ -248,6 +248,9 @@ export default function App() {
   // lib/workspace.ts. Every layout key is inert while an authorization card
   // is up (as PTT is), and every layout button is disabled.
   const blocked = state.approvals.length > 0;
+  // A sub-agent's Stop (SV-4) is disabled and sends nothing under a card:
+  // set before paint, so no frame offers it under one.
+  useLayoutEffect(() => { subagents.setBlocked(blocked); }, [blocked]);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsSection, setSettingsSection] = useState(loadSettingsSection);
   const settingsNow = useRef(settingsOpen);
@@ -3849,6 +3852,9 @@ export default function App() {
           // but it can be stopped: the stop waits for the acknowledgement
           // (`sendStops`).
           stoppable={runningHere(chat) || (chat.busy && !!chat.compose?.sending)}
+          // Claude Code's interrupt also ends the chat's background
+          // sub-agents (SV-0 finding 6); the owner kept it, and the button says so.
+          stopHint={thread?.provider === "claude" ? MAIN_STOP_CLAUDE_HELP : undefined}
           onStop={() => stopTurn(n)}
           restore={chat.restore}
           onRestoreTaken={(nonce) => dispatch({ type: "given_back", pane: n, nonce })}

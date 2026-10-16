@@ -1380,3 +1380,54 @@ No Stop (SV-4) and no between-turn drain (SV-6) here.
   on the bus, are #205's to redact.
 - **Deploying is the owner's step**: `jarvis restart` for the daemon half,
   then `jarvis hud rebuild` and reload the window.
+
+## Native sub-agents: the owner's Stop on one child (SV-4, 2026-10-15)
+
+API: `docs/hud-api.md` "`POST /threads/{id}/subagents/{sid}/stop`"; daemon
+and providers: `docs/notes/providers-runtime.md` "The owner stops one native
+sub-agent". Decisions used: the owner's of 2026-10-15 (Claude per-child Stop
+enabled on SV-0's evidence; Codex's offered with its caveat shown; the
+thread's Stop keeps killing Claude's background sub-agents and says so) and
+the plan's open questions 4 (one click, "stopping…" until the CLI confirms)
+and 5 (never spoken).
+
+- **Where.** A live row gets a Stop button beside its open button — a
+  sibling, never nested in it (`SubagentStop`, `components/SubagentRow.tsx`) —
+  and the sub-agent pane's header the same control. A row whose CLI cannot
+  stop it alone shows a muted "Can't stop" with the daemon's sentence as its
+  title; an ended row, or a daemon that does not say (`stoppable` absent),
+  shows nothing.
+- **Only the owner's press.** `isOwnersPress` is `vex.isTrustedPress`, the VEX
+  Stop's rule: a trusted pointer click with the primary button, or Enter or
+  Space on the focused button. A script's `el.click()` or a dispatched event
+  sends nothing (vitest with a stand-in for trust; the face check with real
+  trusted and untrusted presses). `noPointerFocus`, like the row.
+- **One click.** The store's `stop` sends one `POST` and shows "stopping…"
+  (disabled, Graphite amber, dashed) from the click; a second press, a
+  double click, or a row the daemon already marks "stopping" sends nothing.
+  The daemon's `stop` on the list and the bus then holds it until the CLI's
+  own end clears it (status `stopped`, title "stopped by the owner").
+  Unconfirmed after 15 s: "Stop again" in amber, with hover help saying the
+  CLI has not confirmed and why (between messages Jarvis does not read it).
+  A 409's sentence is shown beside the button in red.
+- **Hover help.** Claude: "Stop this sub-agent. The orchestrator's turn and
+  its other sub-agents go on." Codex: "…it ends its turn. A command it is
+  already running may still finish, and the orchestrator's model is not
+  told." The thread's own Stop on a Claude chat: "Stop the running turn. This
+  also stops the chat's background sub-agents. …" (`InputBar` `stopHint`,
+  `MAIN_STOP_CLAUDE_HELP`); on Codex it is unchanged, since Codex's turn
+  Stop leaves children running.
+- **Under a card** every sub-agent Stop is disabled (`setBlocked`, set by App
+  in a layout effect from `state.approvals`, so no frame offers it under
+  one) and the store refuses to send even if a press got through; the area
+  is inert besides.
+- **Silent.** Stop never opens a pane, speaks, or posts.
+- **Tests:** `lib/subagents.test.ts` (fields, fold-equals-live now with the
+  mark, `stopView`, the caveat texts, the trust rule),
+  `state/subagents.test.ts` (one request, refusals, unconfirmed, nothing
+  under a card), `components/SubagentRow.test.ts` (placement, hover help,
+  untrusted click, stopping…, card, refusal, the thread Stop's hint);
+  `tests/face/hud_v2_subagents_check.py` section 8 (the mock's Stop route
+  enforces `owner_only` too); screenshots go to `SV3_SHOTS`.
+- **Deploying is the owner's step**: `jarvis restart` for the daemon half,
+  then `jarvis hud rebuild` and reload the window.

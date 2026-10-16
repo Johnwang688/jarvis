@@ -112,6 +112,8 @@ export function InputBar(props: {
    * box is the way to stop it.
    */
   stoppable?: boolean;
+  /** The Stop button's hover help, when it does more than stop the turn (a Claude chat's background sub-agents, SV-4). */
+  stopHint?: string;
   onStop?: () => void;
   /** Words and files handed back (a failed send, a dropped message): put back
    * in the box ahead of anything typed since, each exactly once. */
@@ -361,7 +363,7 @@ export function InputBar(props: {
             className="iconbtn stop"
             data-testid="stop"
             aria-label="Stop"
-            title="Stop the running turn. Anything queued behind it comes back to this box."
+            title={props.stopHint ?? "Stop the running turn. Anything queued behind it comes back to this box."}
             onClick={() => props.onStop?.()}
           >
             <StopIcon />

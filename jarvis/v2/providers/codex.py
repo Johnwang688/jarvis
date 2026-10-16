@@ -78,6 +78,7 @@ from typing import Iterator
 from jarvis import config
 from jarvis.v2.model import ProviderName, Thread
 from jarvis.v2.provider import (Brief, BriefRefused, Decision, Event, EventKind,
+                               SubagentNotLive,
                                PermissionCallback, SessionHandle, SteerRefused, Usage,
                                UserMessage, takes_keyword as _takes_keyword)
 from ..approvals import clean_line
@@ -188,6 +189,16 @@ CHILD_CALL_LIMIT = 256       # a child's tool calls started and not yet finished
 _SID_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")
 _CHILD_END = {"completed": "done", "failed": "failed", "interrupted": "stopped"}
 _CHILD_TOOL_ITEMS = ("commandExecution", "fileChange", "mcpToolCall")
+# The owner's Stop on one child (SV-4, the owner's 2026-10-15 decision: offered
+# with its caveat shown). `turn/interrupt` on the child's own thread and turn
+# ends that child's turn and nothing else (SV-0 finding 12), but a command it
+# is already running runs to its end, and the orchestrator's model is not
+# told. Its `turn/completed` `interrupted` then says "stopped by the owner".
+# The request's answer is read by whichever turn reads the transport; its id
+# is remembered (at most CHILD_STOPS) so an error answer is never taken as
+# the orchestrator's turn failing.
+OWNER_STOPPED = "stopped by the owner"
+CHILD_STOPS = 64
 
 
 def child_sid(thread_id) -> str:
@@ -228,6 +239,7 @@ class _ChildView:
     last_tool: str = ""
     stop_reason: str | None = None
     asked_to_stop: bool = False        # the orchestrator's interrupt_agent said so
+    owner_stop: bool = False           # the owner's Stop asked Codex to end its turn (SV-4)
     calls: dict = field(default_factory=dict)  # its open tool calls, oldest first
 
 
@@ -603,6 +615,9 @@ class _Session:
     # What each known child's record is told (SV-2), by threadId: made and
     # forgotten with its `children` entry, so it is bounded by CHILD_LIMIT.
     child_views: dict[str, _ChildView] = field(default_factory=dict)
+    # The owner's Stop requests on children (SV-4): request id -> sid, oldest
+    # first, so their answers are known for what they are (CHILD_STOPS).
+    child_stops: dict = field(default_factory=dict)
 
 
 class CodexProvider:
@@ -1098,6 +1113,8 @@ class CodexProvider:
                             yield self._event(h, EventKind.TURN_STARTED)
                     elif self._steer_answered(s, msg):
                         pass    # a steer's answer, refused or not: never the turn's failure
+                    elif self._child_stop_answered(s, msg):
+                        pass    # the owner's Stop on a child (SV-4): never the turn's failure
                     elif "error" in msg:
                         raise RpcError("Codex control request failed")
                     continue
@@ -1651,6 +1668,7 @@ class CodexProvider:
                 # A finished child given more to do (sendInput, followupTask):
                 # live again, on Codex's own word.
                 view.status, view.stop_reason, view.asked_to_stop = "running", None, False
+                view.owner_stop = False
                 yield self._life(h, view, "started")
             return
         if method == "turn/completed":
@@ -1663,8 +1681,10 @@ class CodexProvider:
             view.duration_ms = _count(turn.get("durationMs")) if _count(turn.get("durationMs")) is not None \
                 else view.duration_ms
             if view.status == "stopped":
-                view.stop_reason = ("the orchestrator stopped it" if view.asked_to_stop
+                view.stop_reason = (OWNER_STOPPED if view.owner_stop
+                                    else "the orchestrator stopped it" if view.asked_to_stop
                                     else "its turn was interrupted")
+            view.owner_stop = False
             yield self._life(h, view, "finished")
             error = turn.get("error") if isinstance(turn.get("error"), dict) else {}
             text = _child_text(error.get("message"))
@@ -2089,6 +2109,62 @@ class CodexProvider:
                 LOG.warning("Codex refused the late-answered steer %s (%s); the message "
                             "did not reach the turn", rid, waiter.reason)
         waiter.ready.set()
+        return True
+
+    def subagent_stop_refusal(self, h: SessionHandle, sid: str) -> str | None:
+        """Why the owner's Stop cannot be sent to child `sid` now, in one
+        plain sentence, or None when it can (SV-4). Sends nothing."""
+        try:
+            self._stoppable(h, sid)
+        except SubagentNotLive as exc:
+            return str(exc)
+        return None
+
+    @staticmethod
+    def _stoppable(h: SessionHandle, sid: str) -> tuple[str, str]:
+        """(child threadId, its running turn id), or SubagentNotLive."""
+        s = h.native
+        if s is None or s.closed.is_set():
+            raise SubagentNotLive("This chat's Codex session is closed, so it runs no sub-agent.")
+        with s.mutex:
+            for tid, view in s.child_views.items():
+                if view.sid == sid:
+                    if view.announced and view.status == "running" and isinstance(view.turn, str) and view.turn:
+                        return tid, view.turn
+                    break
+        raise SubagentNotLive("This sub-agent is not running a turn in this chat's session.")
+
+    def stop_subagent(self, h: SessionHandle, sid: str) -> None:
+        """The owner's Stop on one child (SV-4): `turn/interrupt` on the
+        child's own thread and turn — never the orchestrator's, whose turn
+        goes on. Written under the lock its answer is read under, as a steer
+        is, so the answer is never mistaken for the turn's failure. Ends the
+        child's turn only: a command it is running may still finish, and the
+        orchestrator's model is not told (SV-0 finding 12; the HUD says so).
+        Raises SubagentNotLive without sending anything."""
+        s = h.native
+        tid, turn = self._stoppable(h, sid)
+        with s.mutex:
+            view = s.child_views.get(tid)
+            if view is None or view.turn != turn or view.status != "running":
+                raise SubagentNotLive("This sub-agent is not running a turn in this chat's session.")
+            rid = s.rpc.send("turn/interrupt", {"threadId": tid, "turnId": turn})
+            view.owner_stop = True
+            s.child_stops[rid] = sid
+            while len(s.child_stops) > CHILD_STOPS:
+                s.child_stops.pop(next(iter(s.child_stops)))
+
+    @staticmethod
+    def _child_stop_answered(s: _Session, msg: dict) -> bool:
+        """True when `msg` answers the owner's Stop on a child (SV-4). A
+        refusal is logged, never fatal: the record says the stop was not
+        confirmed when the child's turn does not end."""
+        with s.mutex:
+            sid = s.child_stops.pop(msg.get("id"), None)
+        if sid is None:
+            return False
+        if "error" in msg:
+            LOG.warning("Codex refused the owner's stop of sub-agent %s", sid)
         return True
 
     def interrupt(self, h: SessionHandle) -> None:

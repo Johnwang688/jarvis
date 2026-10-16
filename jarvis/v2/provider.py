@@ -47,6 +47,18 @@ class SteerRefused(Exception):
         self.before_write = before_write is True
 
 
+class SubagentStopUnsupported(Exception):
+    """The provider cannot stop this one native sub-agent by itself (SV-4).
+
+    Raised by the optional `stop_subagent()` (see `Provider`); the message is
+    one plain sentence for the owner. Nothing was sent to the CLI."""
+
+
+class SubagentNotLive(Exception):
+    """The sub-agent named is not one this session still runs (SV-4): unknown
+    to it, already ended, or the session is closed. Nothing was sent."""
+
+
 @dataclass
 class Brief:
     role: Role
@@ -245,6 +257,22 @@ class Provider(Protocol):
     #     as Browser owner context. True or legacy None confirms delivery.
     #     Called from a thread
     #     other than the one draining `send()`."""
+    #
+    # Optional (SV-4, 2026-10-15): the owner's Stop on one native sub-agent.
+    # A provider without them offers no per-child Stop.
+    #
+    # def subagent_stop_refusal(self, h: SessionHandle, sid: str) -> str | None:
+    #     """None when `stop_subagent(h, sid)` would be sent now; otherwise one
+    #     plain sentence saying why not. Cheap, sends nothing."""
+    #
+    # def stop_subagent(self, h: SessionHandle, sid: str) -> None:
+    #     """Ask the CLI to stop that one child, and nothing else: never the
+    #     orchestrator's turn, never a sibling. Returns once the request is
+    #     written (and, where the CLI answers control requests, answered); the
+    #     child's end arrives later as its own SUBAGENT `finished`, with
+    #     `stop_reason` "stopped by the owner". Raises `SubagentNotLive` or
+    #     `SubagentStopUnsupported` without sending anything. Called from a
+    #     thread other than the one draining `send()`."""
     #
     # def undelivered(self, h: SessionHandle) -> list[UserMessage]:
     #     """Steered messages the provider took but that never reached the

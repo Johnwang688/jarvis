@@ -3,7 +3,8 @@
 // Graphite: amber live, green done, red failed, muted stopped), the last
 // tool, how long it ran, its tool uses, tokens and declined calls. The row
 // is one button: Enter, Space or a click opens the child's live transcript
-// in a read-only pane. No Stop here (SV-4).
+// in a read-only pane. Beside it, for a live child, the owner's Stop (SV-4,
+// `SubagentStop`): a sibling button, never nested in the row's.
 //
 // Every word on it is text the model chose (name, kind, last tool), cleaned
 // again by lib/subagents and rendered as text nodes only. More than six rows
@@ -11,11 +12,53 @@
 
 import { memo, useEffect, useState } from "react";
 import {
-  COLLAPSE_OVER, PROVIDER_WORD, blockTitle, displayName, elapsedOf, isLive, providerOf, statusMark,
-  tokensText, toolsText, type Subagent,
+  COLLAPSE_OVER, PROVIDER_WORD, blockTitle, displayName, elapsedOf, isLive, isOwnersPress, providerOf, statusMark,
+  stopView, tokensText, toolsText, type Subagent,
 } from "../lib/subagents";
 import { noPointerFocus } from "../lib/talkkey";
-import { subagents, useBlockOpen, useRow, useRows } from "../state/subagents";
+import { subagents, useBlockOpen, useRow, useRows, useStopBlocked, useStopUi } from "../state/subagents";
+
+/**
+ * The owner's Stop on one live child (SV-4; the owner's decisions of
+ * 2026-10-15): one press, then "stopping…" until the CLI's own end. Only a
+ * trusted press counts — a pointer click with the primary button, or Enter
+ * or Space on the focused button (the VEX and turn Stop rule) — never a
+ * script's click. Disabled, and inert, under an approval card. Its hover
+ * help says what it does: for Codex, that a command the child is already
+ * running may still finish and the orchestrator's model is not told. A
+ * child the CLI cannot stop alone shows "Can't stop" with the reason.
+ * Nothing is spoken or posted.
+ */
+export function SubagentStop({ threadId, row }: { threadId: string; row: Subagent }) {
+  const ui = useStopUi(threadId, row.sid);
+  const blocked = useStopBlocked();
+  const view = stopView(row, ui.pending);
+  if (view.kind === "none") return null;
+  const error = ui.error ? (
+    <span className="sa-stop-error" data-testid="subagent-stop-error" role="status">{ui.error}</span>
+  ) : null;
+  if (view.kind === "cant") {
+    return <span className="sa-cant" data-testid="subagent-cant-stop" title={view.title}>Can't stop</span>;
+  }
+  const stopping = view.kind === "stopping";
+  return (
+    <>
+      <button type="button" className={"sa-stop" + (stopping ? " stopping" : "")} data-testid="subagent-stop"
+              data-state={stopping ? "stopping" : view.unconfirmed ? "unconfirmed" : "ready"}
+              aria-label={`Stop sub-agent ${displayName(row)}`} title={view.title}
+              disabled={blocked || stopping} onMouseDown={noPointerFocus}
+              onClick={(e) => {
+                // The owner's own press only: a pointer, or Enter/Space on it — never a script's click.
+                if (!isOwnersPress({ isTrusted: e.nativeEvent.isTrusted, button: e.button })) return;
+                if (subagents.isBlocked()) return;
+                void subagents.stop(threadId, row.sid);
+              }}>
+        {stopping ? "stopping…" : view.label}
+      </button>
+      {stopping ? null : error}
+    </>
+  );
+}
 
 function Elapsed({ row, drawn }: { row: Subagent; drawn: boolean }) {
   const [now, setNow] = useState(Date.now);
@@ -58,6 +101,7 @@ export const SubagentRow = memo(function SubagentRow({ threadId, sid, drawn }: {
         {row.tokens !== undefined ? <span className="sa-count">{tokensText(row.tokens)}</span> : null}
         {row.declined ? <span className="sa-count">{row.declined} declined</span> : null}
       </button>
+      <SubagentStop threadId={threadId} row={row} />
     </div>
   );
 });

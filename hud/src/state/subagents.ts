@@ -17,10 +17,17 @@
 // Bounded: `CHILD_CAP` children per thread (lib/subagents), `THREAD_CAP`
 // threads (the least recently used unwatched one goes), `REPLAY_CAP` records
 // waiting on a read. Nothing here is stored: a reload reads it all again.
+//
+// The owner's Stop on one child (SV-4) goes through `stop`: one request per
+// press, none while one is on its way or the row already says "stopping",
+// none under an approval card (`setBlocked`, which App keeps in step with
+// the cards), and none for a row that offers no Stop. What the row shows
+// after that is the daemon's word (`stop` on the list and the bus) until the
+// CLI's own end; a refusal's sentence is kept beside the button.
 
 import { useEffect, useSyncExternalStore } from "react";
 import {
-  applyBus, cleanBus, cleanList, cleanTranscript, foldList,
+  applyBus, cleanBus, cleanList, cleanTranscript, foldList, isLive, stopView,
   type SubBus, type Subagent, type SubagentRef, type SubTranscript,
 } from "../lib/subagents";
 
@@ -42,7 +49,13 @@ const failure = (e: unknown): Failure => {
 export interface Fetchers {
   list: (threadId: string) => Promise<unknown>;
   transcript: (threadId: string, sid: string) => Promise<unknown>;
+  /** `POST /threads/{id}/subagents/{sid}/stop` (SV-4): rejects with `{status, message, body}`. */
+  stop?: (threadId: string, sid: string) => Promise<unknown>;
 }
+
+/** A Stop press's own state: the request on its way, or the daemon's refusal in one sentence. */
+export interface StopUi { pending: boolean; error: string }
+const NO_STOP: StopUi = { pending: false, error: "" };
 
 interface Thread {
   rows: Subagent[];
@@ -79,6 +92,8 @@ export function createSubagentStore(fetchers: Fetchers) {
   const paneViews = new Map<string, PaneView>();
   const listeners = new Map<string, Set<() => void>>();
   const blocks = new Map<string, true>();
+  const stops = new Map<string, StopUi>();
+  let blocked = false;
   let tick = 0;
   let opener: ((ref: SubagentRef) => void) | null = null;
 
@@ -212,8 +227,57 @@ export function createSubagentStore(fetchers: Fetchers) {
     p.timer = setTimeout(() => { p.timer = null; void loadPane(threadId, sid); }, ms);
   }
 
+  function setStop(threadId: string, sid: string, ui: StopUi) {
+    const key = paneKey(threadId, sid);
+    if (!ui.pending && !ui.error) stops.delete(key);
+    else stops.set(key, ui);
+    if (stops.size > 256) stops.delete(stops.keys().next().value!);
+    notify("s:" + key);
+  }
+
+  /** Lay the daemon's word on a live row at once (the bus says it too). */
+  function markRow(threadId: string, sid: string, stop: "stopping" | "unconfirmed") {
+    const t = threads.get(threadId);
+    if (!t) return;
+    const rows = t.rows.map((r) => (r.sid === sid && isLive(r.status) && r.stop !== stop ? { ...r, stop } : r));
+    if (rows.some((r, i) => r !== t.rows[i])) setRows(threadId, t, rows);
+  }
+
   return {
     subscribe,
+    /**
+     * The owner's Stop on one child (SV-4). Sends nothing under a card,
+     * while a press is on its way, or for a row whose Stop is not offered
+     * (ended, "stopping…", "Can't stop"). The caller has already checked
+     * that the press was the owner's own (`isOwnersPress`).
+     */
+    async stop(threadId: string, sid: string): Promise<void> {
+      if (blocked || !fetchers.stop) return;
+      if (stops.get(paneKey(threadId, sid))?.pending) return;
+      const row = threads.get(threadId)?.rows.find((r) => r.sid === sid);
+      if (!row || stopView(row, false).kind !== "button") return;
+      setStop(threadId, sid, { pending: true, error: "" });
+      try {
+        await fetchers.stop(threadId, sid);
+        markRow(threadId, sid, "stopping");
+        setStop(threadId, sid, NO_STOP);
+      } catch (e) {
+        const body = e && typeof e === "object" ? (e as { body?: unknown }).body : null;
+        const unconfirmed = !!body && typeof body === "object" && (body as { unconfirmed?: unknown }).unconfirmed === true;
+        if (unconfirmed) markRow(threadId, sid, "unconfirmed");
+        const message = e instanceof Error && e.message ? e.message : "Could not stop this sub-agent.";
+        setStop(threadId, sid, { pending: false, error: message.slice(0, 200) });
+      }
+      schedule(threadId, SOON_MS);
+    },
+    stopUi: (threadId: string, sid: string): StopUi => stops.get(paneKey(threadId, sid)) ?? NO_STOP,
+    /** An approval card is up: every sub-agent Stop is disabled and sends nothing (App keeps this in step). */
+    setBlocked(value: boolean) {
+      if (blocked === value) return;
+      blocked = value;
+      notify("blocked");
+    },
+    isBlocked: () => blocked,
     /** Hold `threadId`'s children while something shows them; read them the first time. */
     watch(threadId: string): () => void {
       const t = held(threadId);
@@ -323,24 +387,28 @@ export function createSubagentStore(fetchers: Fetchers) {
 
 export type SubagentStore = ReturnType<typeof createSubagentStore>;
 
-async function getJson(path: string): Promise<unknown> {
-  const res = await fetch(path);
+async function getJson(path: string, init?: RequestInit): Promise<unknown> {
+  const res = await fetch(path, init);
   const text = await res.text();
   let body: unknown = null;
   try { body = text ? JSON.parse(text) : null; } catch { body = null; }
   if (!res.ok) {
     const message = body && typeof body === "object" && typeof (body as { error?: unknown }).error === "string"
       ? (body as { error: string }).error : `HTTP ${res.status}`;
-    throw Object.assign(new Error(message), { status: res.status });
+    throw Object.assign(new Error(message), { status: res.status, body });
   }
   return body;
 }
 
-/** The window's store, on the owner's two read-only routes. */
+/** The window's store, on the owner's routes: the two reads and Stop (SV-4). */
 export const subagents = createSubagentStore({
   list: (threadId) => getJson(`/threads/${encodeURIComponent(threadId)}/subagents`),
   transcript: (threadId, sid) =>
     getJson(`/threads/${encodeURIComponent(threadId)}/subagents/${encodeURIComponent(sid)}/transcript`),
+  stop: (threadId, sid) =>
+    getJson(`/threads/${encodeURIComponent(threadId)}/subagents/${encodeURIComponent(sid)}/stop`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+    }),
 });
 
 // ---- hooks ------------------------------------------------------------------
@@ -381,6 +449,16 @@ export function usePane(threadId: string, sid: string, store: SubagentStore = su
     (fn) => store.subscribe(`x:${threadId}|${sid}`, fn),
     () => store.pane(threadId, sid),
   );
+}
+
+/** A child's Stop press: on its way, or refused (the daemon's sentence). */
+export function useStopUi(threadId: string, sid: string, store: SubagentStore = subagents): StopUi {
+  return useSyncExternalStore((fn) => store.subscribe(`s:${threadId}|${sid}`, fn), () => store.stopUi(threadId, sid));
+}
+
+/** Whether an approval card is up (every sub-agent Stop disabled). */
+export function useStopBlocked(store: SubagentStore = subagents): boolean {
+  return useSyncExternalStore((fn) => store.subscribe("blocked", fn), () => store.isBlocked());
 }
 
 export function useBlockOpen(key: string, store: SubagentStore = subagents): boolean {

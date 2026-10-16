@@ -1,13 +1,19 @@
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 const counts = vi.hoisted(() => ({ rows: 0 }));
+// jsdom cannot make a trusted event: `trust.force` stands in for the owner's
+// own press, so the rest of the Stop path runs as it would (SV-4).
+const trust = vi.hoisted(() => ({ force: false }));
 vi.mock("../lib/subagents", async (importOriginal) => {
   const real = await importOriginal<typeof import("../lib/subagents")>();
   // statusMark runs once per row drawn: it counts the rows' renders.
-  return { ...real, statusMark: (...args: Parameters<typeof real.statusMark>) => { counts.rows++; return real.statusMark(...args); } };
+  return { ...real, statusMark: (...args: Parameters<typeof real.statusMark>) => { counts.rows++; return real.statusMark(...args); },
+    isOwnersPress: (e: { isTrusted: boolean; button: number }) => trust.force || real.isOwnersPress(e) };
 });
 import { ChatTab } from "./ChatTab";
 import { subagents } from "../state/subagents";
+import { InputBar } from "./InputBar";
+import { MAIN_STOP_CLAUDE_HELP, STOP_HELP } from "../lib/subagents";
 import type { ChatMessage, Thread } from "../types";
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -118,4 +124,112 @@ it("a nested child is not drawn in the parent's transcript", async () => {
     expect(Array.from(host.querySelectorAll<HTMLElement>('[data-testid="subagent-row"]')).map((r) => r.dataset.sid))
       .toEqual(["cl:toolu_a"]);
   } finally { done(); }
+});
+
+describe("the owner's Stop on a row (SV-4)", () => {
+  /** The list says `rows`; a POST to a child's stop is answered `answer` (status, body), and recorded. */
+  function serveStop(rows: unknown[], answer: [number, unknown] = [200, { ok: true, stop: "stopping" }]) {
+    const posts: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (path: string, init?: RequestInit) => {
+      if (init?.method === "POST") {
+        posts.push(path);
+        return new Response(JSON.stringify(answer[1]), { status: answer[0] });
+      }
+      return new Response(JSON.stringify({ subagents: rows }), { status: 200 });
+    }));
+    return posts;
+  }
+  const stopOf = (host: HTMLElement, sid: string) =>
+    host.querySelector<HTMLElement>(`[data-sid="${sid}"]`)!.querySelector<HTMLButtonElement>('[data-testid="subagent-stop"]');
+  afterEach(() => { trust.force = false; subagents.setBlocked(false); });
+
+  it("a live row offers Stop beside its open button, with the provider's hover help", async () => {
+    serveStop([listRow("cl:toolu_a", { stoppable: true }), listRow("cx:thr", { stoppable: true, started_at: at(3) }),
+      listRow("cl:toolu_b", { status: "done", stoppable: true })]);
+    const { host, done } = await mount("st1", spawn(["toolu_a", "toolu_b"]));
+    try {
+      const claude = stopOf(host, "cl:toolu_a")!;
+      expect(claude.textContent).toBe("Stop");
+      expect(claude.title).toBe(STOP_HELP.claude);
+      expect(claude.getAttribute("aria-label")).toBe("Stop sub-agent <b>cl:toolu_a</b>");
+      expect(claude.closest(".sa-open")).toBeNull();               // a sibling, never nested
+      const codex = stopOf(host, "cx:thr")!;
+      expect(codex.title).toContain("A command it is already running may still finish");
+      expect(codex.title).toContain("the orchestrator's model is not told");
+      expect(stopOf(host, "cl:toolu_b")).toBeNull();              // ended: no Stop
+    } finally { done(); }
+  });
+
+  it("a script's click sends nothing; the owner's press sends one request and shows stopping…", async () => {
+    const posts = serveStop([listRow("cl:toolu_a", { stoppable: true })]);
+    const opened: unknown[] = [];
+    subagents.setOpener((ref) => opened.push(ref));
+    const { host, done } = await mount("st2", spawn(["toolu_a"]));
+    try {
+      await act(async () => { stopOf(host, "cl:toolu_a")!.click(); });       // untrusted
+      expect(posts).toEqual([]);
+      trust.force = true;
+      await act(async () => { stopOf(host, "cl:toolu_a")!.click(); await new Promise((r) => setTimeout(r, 0)); });
+      expect(posts).toEqual(["/threads/st2/subagents/cl%3Atoolu_a/stop"]);
+      const button = stopOf(host, "cl:toolu_a")!;
+      expect(button.textContent).toBe("stopping…");
+      expect(button.disabled).toBe(true);
+      expect(button.dataset.state).toBe("stopping");
+      await act(async () => { button.click(); });
+      expect(posts.length).toBe(1);
+      expect(opened).toEqual([]);                                  // Stop never opens the pane
+      act(() => subagents.heard("st2", { sid: "cl:toolu_a", op: "finished", status: "stopped", depth: 1,
+        background: false, started_at: at(1), entries: 1, ended_at: at(9) }));
+      expect(stopOf(host, "cl:toolu_a")).toBeNull();
+    } finally { done(); subagents.setOpener(null); }
+  });
+
+  it("under an approval card Stop is disabled and even the owner's press sends nothing", async () => {
+    const posts = serveStop([listRow("cl:toolu_a", { stoppable: true })]);
+    const { host, done } = await mount("st3", spawn(["toolu_a"]));
+    try {
+      act(() => subagents.setBlocked(true));
+      const button = stopOf(host, "cl:toolu_a")!;
+      expect(button.disabled).toBe(true);
+      trust.force = true;
+      button.disabled = false;                                     // even if it were pressed
+      await act(async () => { button.click(); });
+      expect(posts).toEqual([]);
+      act(() => subagents.setBlocked(false));
+      expect(stopOf(host, "cl:toolu_a")!.disabled).toBe(false);
+    } finally { done(); }
+  });
+
+  it("can't stop says why; a refusal shows the daemon's sentence", async () => {
+    serveStop([listRow("cl:toolu_a", { stoppable: false, stop_unavailable: "Claude Code can stop this sub-agent only by stopping the whole turn." }),
+      listRow("cl:toolu_b", { stoppable: true })],
+    [409, { error: "This sub-agent has already ended.", stale: true }]);
+    const { host, done } = await mount("st4", spawn(["toolu_a", "toolu_b"]));
+    try {
+      const cant = host.querySelector<HTMLElement>('[data-sid="cl:toolu_a"] [data-testid="subagent-cant-stop"]')!;
+      expect(cant.textContent).toBe("Can't stop");
+      expect(cant.title).toContain("whole turn");
+      trust.force = true;
+      await act(async () => { stopOf(host, "cl:toolu_b")!.click(); await new Promise((r) => setTimeout(r, 0)); });
+      expect(host.querySelector('[data-sid="cl:toolu_b"] [data-testid="subagent-stop-error"]')!.textContent)
+        .toBe("This sub-agent has already ended.");
+    } finally { done(); }
+  });
+});
+
+describe("the thread's own Stop (SV-4)", () => {
+  it("on a Claude chat its hover help says it also stops background sub-agents", () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    try {
+      act(() => root.render(createElement(InputBar, { pendingTranscript: "", onSend: () => {}, onTranscriptTaken: () => {},
+        running: true, stoppable: true, stopHint: MAIN_STOP_CLAUDE_HELP, onStop: () => {} })));
+      expect(host.querySelector<HTMLButtonElement>('[data-testid="stop"]')!.title).toBe(MAIN_STOP_CLAUDE_HELP);
+      act(() => root.render(createElement(InputBar, { pendingTranscript: "", onSend: () => {}, onTranscriptTaken: () => {},
+        running: true, stoppable: true, onStop: () => {} })));
+      expect(host.querySelector<HTMLButtonElement>('[data-testid="stop"]')!.title)
+        .toBe("Stop the running turn. Anything queued behind it comes back to this box.");
+    } finally { act(() => root.unmount()); host.remove(); }
+  });
 });

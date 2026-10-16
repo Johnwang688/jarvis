@@ -439,7 +439,9 @@ button.tree-row.morechats:focus-visible { box-shadow: inset 0 0 0 1px var(--acce
   margin: 0 20px; min-width: 0; display: flex; flex-direction: column; gap: 2px;
   font: 11px var(--mono); color: var(--text-muted);
 }
-.subagent-row { min-width: 0; }
+/* The row's open button and, for a live child, its Stop (SV-4) side by side. */
+.subagent-row { min-width: 0; display: flex; align-items: flex-start; gap: 2px 8px; }
+.subagent-row .sa-open { flex: 1 1 auto; }
 .subagent-row .sa-open, .sa-toggle {
   display: flex; align-items: center; gap: 2px 8px; width: 100%; min-width: 0; white-space: nowrap;
   border: 0; background: transparent; padding: 3px 0; text-align: left; color: inherit; font: inherit;
@@ -461,6 +463,19 @@ button.tree-row.morechats:focus-visible { box-shadow: inset 0 0 0 1px var(--acce
 .sa-list { max-height: 300px; overflow: auto; }
 .sa-list { display: flex; flex-direction: column; gap: 2px; padding-left: 12px; }
 .subagent-row.sa-flash { outline: 1px solid var(--accent-line); outline-offset: 2px; border-radius: 3px; }
+/* The owner's Stop on one child (SV-4): a small text button; "stopping…" is
+   pending (Graphite's amber, dashed, disabled) until the CLI confirms; "Stop
+   again" after an unconfirmed stop is amber too; a refusal in red beside it. */
+.sa-stop {
+  flex: 0 0 auto; padding: 1px 8px; margin: 1px 0; font: 11px var(--mono); line-height: 16px;
+  color: var(--text-2); background: transparent; border: 1px solid var(--border-strong);
+}
+.sa-stop:hover:not(:disabled) { color: var(--text); border-color: var(--red); background: var(--red-soft); }
+.sa-stop:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }
+.sa-stop.stopping:disabled { opacity: 1; color: var(--amber); border-color: var(--amber-line); border-style: dashed; }
+.sa-stop[data-state="unconfirmed"] { color: var(--amber); border-color: var(--amber-line); }
+.sa-cant { flex: 0 0 auto; padding: 3px 0; color: var(--text-muted); font: 11px var(--mono); cursor: help; }
+.sa-stop-error { flex: 0 1 auto; min-width: 0; padding: 3px 0; color: var(--red); font: 11px var(--mono); white-space: normal; }
 .sa-pane { display: flex; flex-direction: column; min-height: 0; }
 .sa-head {
   display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 8px 20px;

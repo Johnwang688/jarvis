@@ -52,6 +52,7 @@ for the daemon to save. Tokens need none of this: `usage` is per turn.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import contextlib
 import hashlib
 import json
@@ -101,6 +102,8 @@ from ..provider import (
     SessionHandle,
     SessionLost,
     SteerRefused,
+    SubagentNotLive,
+    SubagentStopUnsupported,
     Usage,
     UserMessage,
 )
@@ -205,6 +208,20 @@ _SID_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")
 _CHILD_TERMINAL = {"completed": "done", "failed": "failed", "killed": "stopped",
                    "stopped": "stopped"}
 CHILD_LIVE = ("running", "backgrounded")
+
+# The owner's Stop on one child (SV-4, 2026-10-15). `stop_task(task_id)` was
+# shown offline to stop exactly one agent, foreground or background, with the
+# orchestrator's turn and a sibling going on (SV-0 findings 2 and 7:
+# `task_updated` `killed`, then `task_notification` `stopped`), on this CLI
+# version; the owner enabled it on that evidence. Empty turns per-child Stop
+# off. A floor, like CLAUDE_VERIFIED: a newer CLI keeps it, a CLI Jarvis has
+# seen to be older does not. STOP_CONTROL_TIMEOUT_S bounds the wait for the
+# CLI to take the request (between turns nobody reads its stream, SV-6, and a
+# full buffer could hold the answer back); the stop itself is confirmed only
+# by the CLI's own `killed`/`stopped`.
+CLAUDE_STOP_VERIFIED = "2.1.295"
+STOP_CONTROL_TIMEOUT_S = 10.0
+OWNER_STOPPED = "stopped by the owner"
 
 # The exact text the CLI puts in a tool result when the auto-mode classifier
 # refuses a call — §6.1's `reviewer_declined` trigger. Verified 2026-09-15
@@ -517,6 +534,18 @@ def parse_version(text: str | None) -> tuple[int, int, int] | None:
     return tuple(int(part) for part in match.groups()) if match else None  # type: ignore[return-value]
 
 
+def _known_cli_version() -> tuple[int, int, int] | None:
+    """The version of the CLI in use, if Jarvis has already read it (no
+    process is spawned here: a route asks this). None when unknown."""
+    with _cli_lock:
+        resolved = _cli_resolved
+        path = resolved[0] if resolved else None
+        found = _cli_versions.get(os.path.realpath(path)) if path else None
+    if path is None and resolved is not None:
+        found = bundled_version()
+    return parse_version(found) if found else None
+
+
 def _version_problem(found: str) -> str | None:
     """Why this CLI version is not acceptable, or None if it is.
 
@@ -650,6 +679,8 @@ class _Child:
     # A status Jarvis inferred (a foreground child still live when its turn
     # ended), which the CLI's own word, arriving later, replaces.
     inferred: bool = False
+    # The owner asked the CLI to stop it (SV-4): its `stopped` then says so.
+    owner_stop: bool = False
 
 
 @dataclass
@@ -1918,6 +1949,8 @@ class ClaudeProvider:
             return []
         child.status, child.inferred = status, inferred
         child.stop_reason = reason if inferred else None
+        if status == "stopped" and child.owner_stop and not inferred:
+            child.stop_reason = OWNER_STOPPED
         return [self._lifecycle(session, child, "finished")]
 
     def _end_foreground(self, session: _Session) -> list[Event]:
@@ -2149,6 +2182,62 @@ class ClaudeProvider:
             return set()
         with session.mutex:
             return {sid for sid, child in session.children.items() if child.status in CHILD_LIVE}
+
+    def subagent_stop_refusal(self, h: SessionHandle, sid: str) -> str | None:
+        """Why the owner's Stop cannot be sent to child `sid` now, in one
+        plain sentence, or None when it can (SV-4). Sends nothing."""
+        try:
+            self._stoppable(h, sid)
+        except (SubagentNotLive, SubagentStopUnsupported) as exc:
+            return str(exc)
+        return None
+
+    def _stoppable(self, h: SessionHandle, sid: str) -> tuple[_Session, _Child]:
+        session = h.native
+        if session is None or session.closed:
+            raise SubagentNotLive("This chat's Claude session is closed, so it runs no sub-agent.")
+        with session.mutex:
+            child = session.children.get(sid)
+            if child is None or child.status not in CHILD_LIVE:
+                raise SubagentNotLive("This sub-agent is not running in this chat's session.")
+            task_id = child.task_id
+        if not CLAUDE_STOP_VERIFIED:
+            raise SubagentStopUnsupported(
+                "Claude Code can stop this sub-agent only by stopping the whole turn.")
+        if not task_id:
+            raise SubagentStopUnsupported(
+                "Claude Code has not given this sub-agent a task id, so it can be stopped "
+                "only by stopping the whole turn.")
+        known = _known_cli_version()
+        if known is not None and known < parse_version(CLAUDE_STOP_VERIFIED):
+            raise SubagentStopUnsupported(
+                f"This Claude Code is older than {CLAUDE_STOP_VERIFIED}, where stopping one "
+                "sub-agent was verified; stop the whole turn instead.")
+        return session, child
+
+    def stop_subagent(self, h: SessionHandle, sid: str) -> None:
+        """The owner's Stop on one child (SV-4): `stop_task(task_id)`, never
+        `interrupt()`, so the orchestrator's turn and every sibling go on
+        (SV-0 finding 2). Returns once the CLI took the request; the child's
+        end is the CLI's own later `killed`/`stopped`, read like any other and
+        then said as "stopped by the owner". Raises `SubagentNotLive` or
+        `SubagentStopUnsupported` before anything is sent; a request the CLI
+        did not answer within STOP_CONTROL_TIMEOUT_S raises TimeoutError
+        (it may still act on it)."""
+        session, child = self._stoppable(h, sid)
+        task_id = child.task_id
+        child.owner_stop = True
+        future = asyncio.run_coroutine_threadsafe(session.client.stop_task(task_id), session.loop)
+        try:
+            future.result(STOP_CONTROL_TIMEOUT_S)
+        except concurrent.futures.TimeoutError:
+            future.cancel()
+            raise TimeoutError(f"Claude Code did not answer the stop within "
+                               f"{int(STOP_CONTROL_TIMEOUT_S)} s") from None
+        except BaseException:
+            # Refused or not delivered: whatever stops it later is not this.
+            child.owner_stop = False
+            raise
 
     def interrupt(self, h: SessionHandle) -> None:
         session = h.native

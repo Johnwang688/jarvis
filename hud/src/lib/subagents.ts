@@ -21,6 +21,7 @@
 import type { ChatMessage, ToolCall } from "../types";
 import { outcome, toolLabel } from "./toolCalls";
 import { elapsed, toolName } from "./thinking";
+import { isTrustedPress } from "./vex";
 
 export type SubStatus = "running" | "backgrounded" | "done" | "failed" | "stopped";
 export const SUB_STATUSES: readonly SubStatus[] = ["running", "backgrounded", "done", "failed", "stopped"];
@@ -33,6 +34,7 @@ export const COLLAPSE_OVER = 6;
 export const TEXT_CAP = 4000;
 const NAME_CAP = 40;
 const REASON_CAP = 80;
+const STOP_WHY_CAP = 160;
 
 export type SubProvider = "claude" | "codex";
 
@@ -57,7 +59,16 @@ export interface Subagent {
   duration_ms?: number;
   last_tool?: string;
   declined?: number;
+  /** The owner's Stop (SV-4): on its way to the CLI, or sent and not confirmed. Only while live. */
+  stop?: StopState;
+  stop_requested_at?: string;
+  /** The list route's word (SV-4): whether Stop can be sent to this live child now… */
+  stoppable?: boolean;
+  /** …and, when it cannot, why (one plain sentence). */
+  stop_unavailable?: string;
 }
+
+export type StopState = "stopping" | "unconfirmed";
 
 /** What one bus `subagent` record may say: ids, a status, times and counts. */
 export interface SubBus {
@@ -72,6 +83,8 @@ export interface SubBus {
   parent_sid?: string;
   ended_at?: string;
   declined?: number;
+  stop?: StopState;
+  stop_requested_at?: string;
 }
 
 export const validSid = (v: unknown): v is string => typeof v === "string" && SID.test(v);
@@ -87,6 +100,7 @@ const when = (v: unknown): string | undefined =>
 const anId = (v: unknown): string | undefined =>
   typeof v === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(v) ? v : undefined;
 const status = (v: unknown): SubStatus | null => (SUB_STATUSES as readonly unknown[]).includes(v) ? v as SubStatus : null;
+const stopState = (v: unknown): StopState | undefined => (v === "stopping" || v === "unconfirmed" ? v : undefined);
 
 /** One line of model-chosen text, as the window shows it: cleaned, capped by characters. */
 export function line(v: unknown, cap: number): string {
@@ -119,6 +133,17 @@ export function cleanRow(raw: unknown): Subagent | null {
   }
   const tool = line(raw.last_tool, NAME_CAP);
   if (tool) row.last_tool = tool;
+  if (isLive(s)) {
+    const stop = stopState(raw.stop);
+    if (stop) {
+      row.stop = stop;
+      const asked = when(raw.stop_requested_at);
+      if (asked) row.stop_requested_at = asked;
+    }
+    if (typeof raw.stoppable === "boolean") row.stoppable = raw.stoppable;
+    const why = line(raw.stop_unavailable, STOP_WHY_CAP);
+    if (raw.stoppable === false && why) row.stop_unavailable = why;
+  }
   return row;
 }
 
@@ -139,6 +164,12 @@ export function cleanBus(raw: unknown): SubBus | null {
   if (ended) rec.ended_at = ended;
   const declined = count(raw.declined);
   if (declined !== undefined) rec.declined = declined;
+  const stop = stopState(raw.stop);
+  if (stop && isLive(s)) {
+    rec.stop = stop;
+    const asked = when(raw.stop_requested_at);
+    if (asked) rec.stop_requested_at = asked;
+  }
   return rec;
 }
 
@@ -182,6 +213,8 @@ export function applyBus(rows: Subagent[], rec: SubBus): Subagent[] {
       ...(rec.task_id ? { task_id: rec.task_id } : {}), ...(rec.parent_sid ? { parent_sid: rec.parent_sid } : {}),
       ...(rec.ended_at && !isLive(rec.status) ? { ended_at: rec.ended_at } : {}),
       ...(rec.declined ? { declined: rec.declined } : {}),
+      ...(rec.stop ? { stop: rec.stop } : {}),
+      ...(rec.stop && rec.stop_requested_at ? { stop_requested_at: rec.stop_requested_at } : {}),
     };
     return bound([...rows, row]);
   }
@@ -198,6 +231,19 @@ export function applyBus(rows: Subagent[], rec: SubBus): Subagent[] {
     delete next.ended_at;
     delete next.stop_reason;
   } else if (rec.ended_at) next.ended_at = rec.ended_at;
+  // The owner's Stop is the daemon's state after this change: said, or not.
+  if (rec.stop && isLive(rec.status)) {
+    next.stop = rec.stop;
+    if (rec.stop_requested_at) next.stop_requested_at = rec.stop_requested_at;
+    else delete next.stop_requested_at;
+  } else {
+    delete next.stop;
+    delete next.stop_requested_at;
+  }
+  if (!isLive(rec.status)) {
+    delete next.stoppable;
+    delete next.stop_unavailable;
+  }
   const same = (Object.keys(next) as (keyof Subagent)[]).every((k) => next[k] === was[k])
     && Object.keys(next).length === Object.keys(was).length;
   return same ? rows : rows.map((r, i) => (i === at ? next : r));
@@ -266,6 +312,62 @@ export function blockTitle(rows: readonly Pick<Subagent, "status">[]): string {
   const live = rows.filter((r) => isLive(r.status)).length;
   return `Sub-agents · ${rows.length}` + (live ? ` (${live} running)` : "");
 }
+
+// ---- the owner's Stop (SV-4) --------------------------------------------------
+
+/**
+ * What the Stop button's hover help says, by provider (the owner's decisions
+ * of 2026-10-15). Codex's states its caveat: `turn/interrupt` on the child's
+ * thread ends its turn, but a command it is already running runs on, and the
+ * orchestrator's model is not told (SV-0 finding 12).
+ */
+export const STOP_HELP: Readonly<Record<SubProvider, string>> = {
+  claude: "Stop this sub-agent. The orchestrator's turn and its other sub-agents go on.",
+  codex: "Stop this sub-agent: it ends its turn. A command it is already running may still finish, "
+    + "and the orchestrator's model is not told.",
+};
+/** Sent, and the CLI has said nothing within the daemon's bound (`subagents.STOP_CONFIRM_S`). */
+export const STOP_UNCONFIRMED_HELP = "Stop was sent, but the CLI has not confirmed it; this sub-agent may "
+  + "still be running. Between messages Jarvis does not read the CLI, so its answer may come only with "
+  + "your next message. Press to send Stop again.";
+/** The thread's own Stop on a Claude chat: Claude Code's interrupt also ends its background sub-agents (SV-0 finding 6; kept, owner 2026-10-15). */
+export const MAIN_STOP_CLAUDE_HELP = "Stop the running turn. This also stops the chat's background "
+  + "sub-agents. Anything queued behind it comes back to this box.";
+
+export type StopView =
+  | { kind: "none" }
+  | { kind: "cant"; title: string }
+  | { kind: "stopping"; title: string }
+  | { kind: "button"; label: string; title: string; unconfirmed: boolean };
+
+/**
+ * The Stop control a row or pane header draws: none for an ended child or
+ * a daemon that does not say; "Can't stop" (its reason as the title) when
+ * the CLI cannot stop it alone; "stopping…" from the click (`pending`) until
+ * the CLI's own end; else the button — "Stop again" once a Stop went
+ * unconfirmed.
+ */
+export function stopView(row: Subagent, pending: boolean): StopView {
+  if (!isLive(row.status)) return { kind: "none" };
+  if (pending || row.stop === "stopping") {
+    return { kind: "stopping", title: "Stopping: waiting for the CLI to confirm." };
+  }
+  if (row.stoppable === true) {
+    const unconfirmed = row.stop === "unconfirmed";
+    return { kind: "button", label: unconfirmed ? "Stop again" : "Stop", unconfirmed,
+      title: unconfirmed ? STOP_UNCONFIRMED_HELP : STOP_HELP[providerOf(row.sid)] };
+  }
+  if (row.stoppable === false) return { kind: "cant", title: row.stop_unavailable || "This sub-agent cannot be stopped by itself." };
+  return { kind: "none" };
+}
+
+/**
+ * Whether a press on a sub-agent's Stop is the owner's own (SV-4): the VEX
+ * Stop's rule, the same function — a trusted pointer click with the primary
+ * button, or Enter/Space on the focused button; never a script's
+ * `el.click()` or a dispatched event.
+ */
+export const isOwnersPress = isTrustedPress;
 
 // ---- where rows sit ---------------------------------------------------------
 

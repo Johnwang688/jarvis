@@ -24,8 +24,19 @@ this module is where they land instead of the thread's `log.jsonl`:
 - **the bus**: one `subagent` record per change, with ids, a status, times
   and counts, never a word a child wrote or a name the model chose
   (`/events` is open to any local client on the API listener).
-- **routes** (`hud_api`): the owner's alone, `GET /threads/{id}/subagents`
-  and `GET /threads/{id}/subagents/{sid}/transcript`.
+- **routes** (`hud_api`): the owner's alone, `GET /threads/{id}/subagents`,
+  `GET /threads/{id}/subagents/{sid}/transcript` and (SV-4) `POST
+  /threads/{id}/subagents/{sid}/stop`.
+
+**The owner's Stop on one child (SV-4).** The record says `stop: "stopping"`
+from the moment the daemon hands the request to the provider until the CLI's
+own end arrives (Claude's `killed`/`stopped`, the Codex child's `turn/
+completed` `interrupted`), which clears it. Nothing here infers an end from a
+stop: if the CLI has said nothing after `STOP_CONFIRM_S`, the record says
+`stop: "unconfirmed"` — the request went out and the child may still be
+running — and the owner may press Stop again. Between turns nobody reads the
+CLI (SV-6), so a child stopped then is confirmed only by the next message's
+reading. Ids, a state and a time: the bus may carry it.
 
 A tool entry carries its label (computed by the daemon outside its lock, as
 for the parent's calls) and outcome, never its arguments or result summary
@@ -87,6 +98,8 @@ REASON_CAP = 80
 SID = re.compile(r"(?:cl|cx):[A-Za-z0-9_-]{1,128}")
 _ID = re.compile(r"[A-Za-z0-9_-]{1,128}")
 STATUSES = ("running", "backgrounded", "done", "failed", "stopped")
+STOP_STATES = ("stopping", "unconfirmed")
+STOP_CONFIRM_S = 15.0                # the CLI's word on an owner's Stop, before "unconfirmed"
 LIVE = ("running", "backgrounded")
 OPS = ("started", "progress", "finished")
 OUTCOMES = ("ok", "failed", "denied")
@@ -94,7 +107,8 @@ GONE = "the session that ran it ended"
 _BROWSER_ACT = ("hud_browser_act", "mcp__jarvis__hud_browser_act")
 _CHILD_FIELDS = ("key", "turn_id", "status", "task_id", "parent_sid", "depth", "background",
                  "name", "kind", "last_tool", "tokens", "tool_uses", "duration_ms",
-                 "stop_reason", "started_at", "ended_at", "total", "declined", "brief")
+                 "stop_reason", "started_at", "ended_at", "total", "declined", "brief",
+                 "stop", "stop_at")
 
 
 def valid_sid(value: Any) -> bool:
@@ -173,6 +187,8 @@ class _Child:
     total: int = 0                     # entries ever made (the deque keeps the last)
     declined: int = 0                  # calls a reviewer declined
     brief: str = ""                    # the orchestrator's brief to it (SV-3): the transcript route's alone
+    stop: str | None = None            # the owner's Stop (SV-4): "stopping" | "unconfirmed", while live
+    stop_at: str | None = None         # when that Stop was asked for
     calls: dict = field(default_factory=dict)   # call_id -> its entry, while kept
 
     def summary(self) -> dict:
@@ -189,7 +205,14 @@ class _Child:
             out["last_tool"] = self.last_tool
         if self.declined:
             out["declined"] = self.declined
+        self._stop_fields(out)
         return out
+
+    def _stop_fields(self, out: dict) -> None:
+        if self.stop in STOP_STATES and self.status in LIVE:
+            out["stop"] = self.stop
+            if self.stop_at:
+                out["stop_requested_at"] = self.stop_at
 
     def bus(self, op: str) -> dict:
         """What the bus may carry: ids, status, times, counts. No words."""
@@ -202,6 +225,7 @@ class _Child:
                 out[key] = value
         if self.declined:
             out["declined"] = self.declined
+        self._stop_fields(out)
         return out
 
 
@@ -225,6 +249,11 @@ class SubagentRecords:
         self._lock = threading.RLock()
         self._threads: OrderedDict[str, _Thread] = OrderedDict()
         self._outbox: list[tuple[str, dict]] = []   # bus records, sent outside the lock
+        # The owner's Stops awaiting the CLI's word (SV-4): (thread, sid) ->
+        # (token, timer). The token tells a late timer from the current one.
+        self._stops: dict[tuple[str, str], tuple[int, threading.Timer]] = {}
+        self._stop_seq = 0
+        self._closed = False
 
     # -- writing ---------------------------------------------------------------
 
@@ -328,6 +357,89 @@ class SubagentRecords:
                     "stop_reason": clean_line(reason, REASON_CAP)}})
         self._flush()
 
+    # -- the owner's Stop (SV-4) -------------------------------------------------
+
+    def begin_stop(self, thread, sid: str, key: str | None) -> tuple[str, int]:
+        """Mark child `sid` "stopping" before its provider is asked, so a
+        second press is not a second request. -> (outcome, token): outcome is
+        "started" (go on and ask the provider), "stopping" (already on its
+        way: nothing to do), "unknown", "ended", or "elsewhere" (it ran under
+        another session than `key`, now gone)."""
+        token = 0
+        with self._lock:
+            child = self._state(thread.id).children.get(sid)
+            if child is None:
+                outcome = "unknown"
+            elif child.status not in LIVE:
+                outcome = "ended"
+            elif key is None or child.key != key:
+                outcome = "elsewhere"
+            elif child.stop == "stopping":
+                outcome = "stopping"
+            else:
+                self._stop_seq += 1
+                token = self._stop_seq
+                self._cancel_timer(thread.id, sid)
+                self._stops[(thread.id, sid)] = (token, None)
+                self._keep(thread.id, None, child.key, self._stop_line(sid, "stopping"))
+                outcome = "started"
+        self._flush()
+        return outcome, token
+
+    def stop_sent(self, thread, sid: str, token: int) -> None:
+        """The provider took the request: wait `STOP_CONFIRM_S` for the
+        CLI's word, then say "unconfirmed" if none came."""
+        with self._lock:
+            held = self._stops.get((thread.id, sid))
+            if self._closed or held is None or held[0] != token:
+                return
+            timer = threading.Timer(STOP_CONFIRM_S, self._unconfirmed, (thread.id, sid, token))
+            timer.daemon = True
+            self._stops[(thread.id, sid)] = (token, timer)
+            timer.start()
+
+    def stop_failed(self, thread, sid: str, token: int, *, unconfirmed: bool) -> None:
+        """The provider refused (nothing was sent: the mark goes) or could
+        not say whether the CLI took it (`unconfirmed`)."""
+        with self._lock:
+            held = self._stops.get((thread.id, sid))
+            if held is None or held[0] != token:
+                return
+            self._cancel_timer(thread.id, sid)
+            child = self._state(thread.id).children.get(sid)
+            if child is not None and child.status in LIVE and child.stop == "stopping":
+                self._keep(thread.id, None, child.key,
+                           self._stop_line(sid, "unconfirmed" if unconfirmed else None))
+        self._flush()
+
+    def _unconfirmed(self, thread_id: str, sid: str, token: int) -> None:
+        with self._lock:
+            held = self._stops.get((thread_id, sid))
+            if self._closed or held is None or held[0] != token:
+                return
+            del self._stops[(thread_id, sid)]
+            state = self._threads.get(thread_id)
+            child = state.children.get(sid) if state is not None else None
+            if child is not None and child.status in LIVE and child.stop == "stopping":
+                self._keep(thread_id, None, child.key, self._stop_line(sid, "unconfirmed"))
+        self._flush()
+
+    def _cancel_timer(self, thread_id: str, sid: str) -> None:
+        held = self._stops.pop((thread_id, sid), None)
+        if held is not None and held[1] is not None:
+            held[1].cancel()
+
+    @staticmethod
+    def _stop_line(sid: str, stop: str | None) -> dict:
+        return {"kind": "subagent", "sid": sid, "data": {"sid": sid, "op": "progress", "stop": stop}}
+
+    def close(self) -> None:
+        """The daemon is stopping: no Stop timer outlives it."""
+        with self._lock:
+            self._closed = True
+            for thread_id, sid in list(self._stops):
+                self._cancel_timer(thread_id, sid)
+
     def _keep(self, thread_id: str, turn_id, key, prepared: dict) -> None:
         """Under `_lock`: apply, write, and queue the bus record."""
         line = {**prepared, "turn_id": turn_id, "key": key, "at": utcnow()}
@@ -335,6 +447,10 @@ class SubagentRecords:
         child, op = self._apply(state, line)
         if child is None:
             return
+        if child.stop != "stopping" and (thread_id, child.sid) in self._stops \
+                and self._stops[(thread_id, child.sid)][1] is not None:
+            # The CLI's word came (or the child ended): no timer is needed.
+            self._cancel_timer(thread_id, child.sid)
         self._write(thread_id, state, line)
         self._outbox.append((thread_id, {"turn_id": turn_id, "at": line["at"],
                                          "data": child.bus(op)}))
@@ -401,6 +517,15 @@ class SubagentRecords:
             if op == "finished" and child.status not in LIVE:
                 child.ended_at = at
                 child.stop_reason = data.get("stop_reason")
+            if "stop" in data:
+                # Only the record's own lines carry it (`prepare` never does).
+                stop = data.get("stop") if data.get("stop") in STOP_STATES else None
+                if stop == "stopping" or stop is None:
+                    child.stop_at = at if stop else None
+                child.stop = stop
+            if child.status not in LIVE or (child.status in LIVE and not was_live):
+                # Ended (or live again, a Codex child's new turn): no Stop is pending.
+                child.stop = child.stop_at = None
             return child, op
         entry = dict(data)
         if entry.get("role") == "tool_finished":
@@ -463,6 +588,8 @@ class SubagentRecords:
             child.status = "stopped"
         if not isinstance(child.brief, str):
             child.brief = ""
+        if child.stop not in STOP_STATES or child.status not in LIVE:
+            child.stop = child.stop_at = None
         state.children[sid] = child
         for entry in data.get("entries") or ():
             if isinstance(entry, dict):
@@ -571,13 +698,17 @@ class SubagentRecords:
                 out.append(item)
         return out
 
-    def list(self, thread_id: str) -> list[dict]:
+    def list(self, thread_id: str, *, keys: bool = False) -> list[dict]:
+        """The thread's children, oldest first. `keys`: each row also says,
+        as `_key`, which session ran it (for the daemon, never a route)."""
         with self._lock:
-            out = [child.summary() for child in self._state(thread_id).children.values()]
+            out = [{**child.summary(), "_key": child.key} if keys else child.summary()
+                   for child in self._state(thread_id).children.values()]
         self._flush()
         return out
 
-    def transcript(self, thread_id: str, sid: str, limit: int = ENTRY_LIMIT) -> dict | None:
+    def transcript(self, thread_id: str, sid: str, limit: int = ENTRY_LIMIT, *,
+                   keys: bool = False) -> dict | None:
         with self._lock:
             child = self._state(thread_id).children.get(sid)
             found = None
@@ -592,7 +723,8 @@ class SubagentRecords:
                         message["outcome"] = "stopped"
                     messages.append(message)
                 first = messages[0]["seq"] if messages else child.total + 1
-                found = {"subagent": child.summary(), "messages": messages,
+                summary = {**child.summary(), "_key": child.key} if keys else child.summary()
+                found = {"subagent": summary, "messages": messages,
                          "truncated": first > 1}
                 if child.brief:
                     found["brief"] = child.brief
