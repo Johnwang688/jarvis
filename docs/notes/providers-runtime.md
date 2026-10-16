@@ -1200,7 +1200,16 @@ Commands run with HOME = `sandbox-home`, so toolchains read their own
 config there; measured with an approved command under the real profile:
 node, Jarvis's venv, `uv venv` + `uv pip install`, `npm install` (local
 registry) and git all work (cargo is not installed here). Non-dot HOME
-folders (projects) stay readable. On top, by name: the credential folders,
+folders (projects) stay readable. The Windows profiles WSL mounts
+(`codex_config.windows_profiles`: each real folder under `/mnt/c/Users`,
+not Public/Default/All Users, found by listing, skipped when not mounted
+or not listable; `JARVIS_WINDOWS_USERS` moves the root) are closed the same
+way: every dot-entry, `AppData` as a whole (the GitHub CLI's hosts.yml,
+git-credential-manager, browser profiles) and the registry hive
+(`NTUSER.DAT*`) are denied; Documents, Desktop and a repo stay readable, and
+a session folder inside a closed one is closed around. A literal path that
+holds glob syntax (`*?[]{}`, e.g. the hive's `NTUSER.DAT{guid}…` logs) is
+never written as a deny: Codex would read it as a glob. On top, by name: the credential folders,
 `KNOWN_CREDENTIALS` (`.gitconfig`, `.npmrc`, `.docker`, `.kube`,
 `.config/gcloud`, `.local/share/uv/credentials`, `.cargo/credentials*` …),
 V2_DATA_DIR (the private Codex homes and their jarvis-mcp tokens),

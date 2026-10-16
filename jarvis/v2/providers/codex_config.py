@@ -365,6 +365,25 @@ def check_binary(binary: str, denies: list[Path]) -> None:
 #
 # folder (relative to HOME) -> the entries left readable. A kept entry that
 # is itself a key here is closed in turn. HOME ("") judges dot-entries only.
+# Each kept entry, from the tool's documented storage (none holds a login):
+# - .cache/uv, .cache/pip, .cache/pnpm: download and build caches; uv keeps
+#   credentials in ~/.local/share/uv/credentials (denied by name), pip in
+#   ~/.config/pip, ~/.netrc or a keyring (closed), pnpm in .npmrc (denied);
+# - .cache/node-gyp, .cache/ms-playwright: Node headers, browser builds;
+# - .npm/_cacache, .npm/_npx: npm's content cache; npm's auth is in .npmrc,
+#   and its debug logs (.npm/_logs) are closed;
+# - .nvm, .pyenv, .rustup: installed Node, Python and Rust toolchains;
+# - .cargo/bin, .cargo/registry, .cargo/git: binaries, the registry index
+#   and crate sources, and git dependencies' checkouts; cargo's tokens are in
+#   .cargo/credentials(.toml), closed and denied by name;
+# - .bun, .deno: runtimes and install caches; bun reads auth from bunfig.toml
+#   or .npmrc in the project, deno from DENO_AUTH_TOKENS (environment);
+# - .local/bin, .local/lib: installed programs and user site-packages;
+# - .local/share/uv, .local/share/pnpm: uv's Pythons and tools, pnpm's store;
+# - .codex/packages, .codex/skills: the Codex binary and the skills.
+# Uncertain, named: a script the owner put in ~/.local/bin, or a private git
+# dependency under ~/.cargo/git, could hold a secret of its own; neither is a
+# tool's credential store.
 CLOSED_KEEP: dict[str, tuple[str, ...]] = {
     "": (".cache", ".npm", ".nvm", ".local", ".config", ".rustup", ".cargo", ".pyenv",
          ".bun", ".deno", ".codex"),
@@ -374,6 +393,7 @@ CLOSED_KEEP: dict[str, tuple[str, ...]] = {
     ".config": (),
     ".cache": ("uv", "pip", "pnpm", "node-gyp", "ms-playwright"),
     ".cargo": ("bin", "registry", "git"),
+    ".npm": ("_cacache", "_npx"),
 }
 # `.codex` is kept here and closed by `_codex_home_entries` (it also covers
 # a CODEX_HOME elsewhere). Credential stores inside a kept folder, and the
@@ -387,19 +407,53 @@ KNOWN_CREDENTIALS = (
     ".cargo/credentials", ".cargo/credentials.toml", ".cache/huggingface",
     ".bash_history", ".python_history",
 )
-HOME_SECRETS = KNOWN_CREDENTIALS     # the name the first phase-2 build used
+
+
+# The Windows user profiles WSL mounts (review of #224): the same
+# default-closed rule. Every dot-entry of a profile is denied (.ssh, .aws,
+# .git-credentials, .docker, .config, .npmrc ...), and so are `AppData` as a
+# whole (the GitHub CLI's hosts.yml, git-credential-manager's store, every
+# browser profile) and the registry hive (`NTUSER.DAT*`). Its other folders
+# (Documents, Desktop, a repo) stay readable, as HOME's do. Found by listing
+# `<root>/Users`, never by name; a drive not mounted, or a profile that
+# cannot be listed (then no command of ours can list it either), is skipped.
+# `JARVIS_WINDOWS_USERS` moves the root (tests); empty means the default.
+WINDOWS_USERS = "/mnt/c/Users"
+# Not profiles: shared or template folders, and the legacy junctions.
+WINDOWS_NOT_PROFILES = ("all users", "default", "default user", "public")
+
+
+def _windows_extra(name: str) -> bool:
+    folded = name.casefold()
+    return folded == "appdata" or folded.startswith("ntuser")
+
+
+_GLOB_SYNTAX = re.compile(r"[*?\[\]{}]")
+
+
+def windows_profiles() -> list[Path]:
+    root = Path(os.environ.get("JARVIS_WINDOWS_USERS") or WINDOWS_USERS)
+    try:
+        with os.scandir(root) as entries:
+            found = [Path(e.path) for e in entries
+                     if e.name.casefold() not in WINDOWS_NOT_PROFILES
+                     and e.is_dir(follow_symlinks=False)]
+    except OSError:
+        return []           # not mounted, not present, or not ours to list
+    return sorted(found)
 
 
 def _closed_denies(needed: list[Path]) -> list[Path]:
-    """The default-closed denies under the owner's home. An entry that is,
-    or holds, a path the session needs (`needed`: its folder, the chat
-    worktrees, the mirrors) is never denied: one that holds one is closed in
-    turn around it."""
-    home = _resolved(Path.home())
+    """The default-closed denies: under the owner's home (CLOSED_KEEP), and
+    in each Windows profile (`windows_profiles`). An entry that is, or holds,
+    a path the session needs (`needed`: its folder, the chat worktrees, the
+    mirrors) is never denied: one that holds one is closed in turn around
+    it."""
     budget = [GLOB_LIST_CAP]
     out: list[Path] = []
 
-    def close(folder: Path, keep: tuple[str, ...], dots_only: bool) -> None:
+    def close(base: Path, folder: Path, keep: tuple[str, ...], dots_only: bool,
+              spec: dict, extra=None, strict: bool = True) -> None:
         try:
             with os.scandir(folder) as entries:
                 listed = []
@@ -411,25 +465,30 @@ def _closed_denies(needed: list[Path]) -> list[Path]:
         except FileNotFoundError:
             return
         except OSError as exc:
+            if not strict:
+                return
             raise BriefRefused("An owner dot-folder cannot be listed for its denies") from exc
         for entry in sorted(listed, key=lambda e: e.name):
-            if dots_only and not entry.name.startswith("."):
+            if dots_only and not entry.name.startswith(".") and not (extra and extra(entry.name)):
                 continue
             path = Path(entry.path)
-            rel = path.relative_to(home).as_posix()
+            rel = path.relative_to(base).as_posix()
             if entry.name in keep:
-                if rel in CLOSED_KEEP and entry.is_dir(follow_symlinks=False):
-                    close(path, CLOSED_KEEP[rel], False)
+                if rel in spec and entry.is_dir(follow_symlinks=False):
+                    close(base, path, spec[rel], False, spec, strict=strict)
                 continue
             target = _resolved(path)
             if any(n == path or n == target or path in n.parents or target in n.parents
                    for n in needed):
                 if entry.is_dir(follow_symlinks=False) and any(path in n.parents for n in needed):
-                    close(path, CLOSED_KEEP.get(rel, ()), False)
+                    close(base, path, spec.get(rel, ()), False, spec, strict=strict)
                 continue
             out.append(target)
 
-    close(home, CLOSED_KEEP[""], True)
+    home = _resolved(Path.home())
+    close(home, home, CLOSED_KEEP[""], True, CLOSED_KEEP)
+    for profile in windows_profiles():
+        close(profile, profile, (), True, {}, extra=_windows_extra, strict=False)
     return out
 
 
@@ -458,7 +517,10 @@ def deny_paths(brief: Brief | None = None, home: Path | None = None) -> list[Pat
         # bwrap fail an accepted `require_escalated` command (measured:
         # ~/.cargo/credentials with no ~/.cargo). A store made later is
         # covered from the next session start.
-        if path not in resolved and os.path.lexists(path):
+        # A literal path holding glob syntax would be read as a glob (and
+        # expanded by a deep scan at every command): left out. The registry
+        # hive's transaction logs (`NTUSER.DAT{guid}...`) are the case seen.
+        if path not in resolved and os.path.lexists(path) and not _GLOB_SYNTAX.search(str(path)):
             resolved.append(path)
     return [p for p in resolved if not any(other in p.parents for other in resolved)]
 

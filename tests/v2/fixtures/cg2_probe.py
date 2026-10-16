@@ -108,6 +108,10 @@ STORES = (".docker/config.json", ".local/share/keyrings/login.keyring",
           ".pypirc", ".kube/config", ".cargo/credentials.toml", ".cargo/credentials",
           ".cache/huggingface/token", ".bash_history", ".local/share/uv/credentials/credentials.toml",
           ".brand-new-tool/token", ".config/brand-new-tool/token")
+# A fake Windows profile (a mounted /mnt/c/Users/<user>): closed the same way.
+WINDOWS = (".git-credentials", ".ssh/id_ed25519", ".docker/config.json", ".npmrc",
+           "AppData/Roaming/GitHub CLI/hosts.yml", "AppData/Local/GitCredentialManager/store",
+           "NTUSER.DAT")
 # What toolchains may reach by absolute path or symlink: stays readable.
 TOOLCHAIN = (".local/bin/tool", ".cargo/bin/tool", ".rustup/toolchains/x/bin/tool",
              ".local/share/uv/python/x/bin/python3", ".npm/_cacache/index", ".cache/uv/x")
@@ -144,6 +148,14 @@ def setup(real_home: bool) -> tuple[Path, dict]:
         env["CODEX_HOME"] = str(home / ".codex")
     for key in ("JARVIS_SESSIONS", "JARVIS_SPILL", "JARVIS_BROWSER_DIR", "JARVIS_SPEAKER_DIR", "CODEX_HOME"):
         os.environ.pop(key, None)
+    # Never the real /mnt/c here: a fake profile (hermetic), or none.
+    users = temp / "mnt-c" / "Users"
+    if not real_home:
+        for rel in (*WINDOWS, "Documents/notes.txt"):
+            path = users / "someone" / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(FAKE)
+    os.environ["JARVIS_WINDOWS_USERS"] = str(users)
     os.environ.update(env)
     return temp, env
 
@@ -227,7 +239,8 @@ def main(argv: list[str]) -> int:
                   h / ".codex/auth.json", h / ".claude/.credentials.json", h / ".ssh/id_fixture",
                   h / ".aws/credentials", h / ".aws-real/credentials", h / ".config/jarvis/allowlist.json",
                   Path(config.SESSIONS_DIR) / "s.json", Path(config.BROWSER_DIR) / "profiles.json",
-                  h / "projects/jarvis/.env", *(h / rel for rel in STORES)]
+                  h / "projects/jarvis/.env", *(h / rel for rel in STORES),
+                  *(temp / "mnt-c" / "Users" / "someone" / rel for rel in WINDOWS)]
     denied += [project / "sub" / ".env.local", home / "config.toml", Path(config.V2_DATA_DIR) / "store.db"]
     if real_home:
         denied.append(project / ".env")
@@ -235,7 +248,8 @@ def main(argv: list[str]) -> int:
     if not real_home:
         readable += [str(codex_config.session_skills(home) / "demo" / "SKILL.md"),
                      str(codex_config.owner_home() / "packages" / "README"),
-                     *(str(home_dir / rel) for rel in TOOLCHAIN)]
+                     *(str(home_dir / rel) for rel in TOOLCHAIN),
+                     str(temp / "mnt-c" / "Users" / "someone" / "Documents" / "notes.txt")]
     else:
         readable += [str(p) for p in (Path.home() / ".local/bin", Path(rc.CODEX)) if p.exists()]
     spec = {"denied": [str(p) for p in denied], "readable": readable,

@@ -32,6 +32,7 @@ NEST = pc("test_denies_never_nest_and_globs_never_reach_into_a_denied_folder")
 ONLY = pc("test_only_accept_or_decline_is_ever_sent")
 NET = pc("test_a_network_approval_asks_the_owner_every_time_with_no_always")
 CLOSED = pc("test_owner_dot_folders_are_closed_by_default")
+WIN = pc("test_windows_profiles_are_closed_too")
 CHURN = pc("test_owner_home_churn_after_prepare_never_refuses_the_session")
 MIRROR = pc("test_a_session_inside_a_denied_folder_or_a_writable_mirror_is_refused")
 
@@ -100,9 +101,9 @@ MUTANTS = [
     ("no .env globs", CFG,
      '    table.update((glob, "deny") for glob in globs)\n', "", PROFILE),
     ("dot-files not closed, only dot-folders", CFG,
-     "            if dots_only and not entry.name.startswith(\".\"):\n                continue",
-     "            if (dots_only and not entry.name.startswith(\".\")) or not entry.is_dir():\n"
-     "                continue", CLOSED),
+     '            if dots_only and not entry.name.startswith(".") and not (extra and extra(entry.name)):',
+     '            if (dots_only and not entry.name.startswith(".") and not (extra and extra(entry.name)))'
+     ' or not entry.is_dir():', CLOSED),
     ("V2_DATA_DIR readable", CFG,
      "             config.V2_DATA_DIR, config.SESSIONS_DIR,", "             config.SESSIONS_DIR,", PROFILE),
     ("commands keep the denied private HOME", CFG,
@@ -131,9 +132,10 @@ MUTANTS = [
     # Review of #224: default-closed dot-folders (HIGH), the written table (MED).
     ("dot-folders not closed", CFG, "            out.append(target)\n", "            pass\n", CLOSED),
     ("kept folders not closed in turn", CFG,
-     "                if rel in CLOSED_KEEP and entry.is_dir(follow_symlinks=False):\n"
-     "                    close(path, CLOSED_KEEP[rel], False)",
-     "                if False:\n                    close(path, CLOSED_KEEP[rel], False)", CLOSED),
+     "                if rel in spec and entry.is_dir(follow_symlinks=False):\n"
+     "                    close(base, path, spec[rel], False, spec, strict=strict)",
+     "                if False:\n                    close(base, path, spec[rel], False, spec, strict=strict)",
+     CLOSED),
     ("a needed path's folder denied", CFG,
      "            if any(n == path or n == target or path in n.parents or target in n.parents\n"
      "                   for n in needed):",
@@ -142,13 +144,33 @@ MUTANTS = [
      '".local/share/com.vercel.cli", ".local/share/uv/credentials",',
      '".local/share/com.vercel.cli",', PROFILE),
     ("missing paths denied too", CFG,
-     "        if path not in resolved and os.path.lexists(path):", "        if path not in resolved:",
-     CLOSED),
+     "        if path not in resolved and os.path.lexists(path) and not _GLOB_SYNTAX.search(str(path)):",
+     "        if path not in resolved and not _GLOB_SYNTAX.search(str(path)):", CLOSED),
     ("a blocked base's own .env files not denied", CFG,
      "                        files.append(Path(entry.path))", "                        pass", CLOSED),
     ("the start-up check rescans", CFG,
      "    expected = written(home) if home is not None else filesystem(brief, None)",
      "    expected = filesystem(brief, home)", CHURN),
+    # Review of #224 (delta): Windows profiles.
+    ("Windows profiles not closed", CFG,
+     "    for profile in windows_profiles():", "    for profile in []:", WIN),
+    ("AppData readable", CFG,
+     '    return folded == "appdata" or folded.startswith("ntuser")',
+     '    return folded.startswith("ntuser")', WIN),
+    ("a profile's dot-entries readable", CFG,
+     '            if dots_only and not entry.name.startswith(".") and not (extra and extra(entry.name)):',
+     '            if dots_only and not (extra and extra(entry.name)) and (extra or not entry.name.startswith(".")):',
+     WIN),
+    ("an unlistable profile refuses the session", CFG,
+     "        close(profile, profile, (), True, {}, extra=_windows_extra, strict=False)",
+     "        close(profile, profile, (), True, {}, extra=_windows_extra, strict=True)", WIN),
+    ("a repo inside AppData denied, not closed around", CFG,
+     "                if entry.is_dir(follow_symlinks=False) and any(path in n.parents for n in needed):",
+     "                if False:", WIN),
+    ("literal denies with glob syntax kept", CFG,
+     "os.path.lexists(path) and not _GLOB_SYNTAX.search(str(path)):", "os.path.lexists(path):",
+     pc("test_a_path_with_glob_syntax_is_never_a_literal_deny")),
+    ("npm's debug logs readable", CFG, '    ".npm": ("_cacache", "_npx"),\n', "", CLOSED),
     ("the feature pin moved without the probe", CFG,
      'FEATURE_VERIFIED = "0.161.0"', 'FEATURE_VERIFIED = "0.162.0"',
      pc("test_the_feature_is_pinned_to_the_verified_codex")),

@@ -479,6 +479,8 @@ class Checks(unittest.TestCase):
         self.brain = Brain(self.root)
         self.stack.enter_context(patch.object(config, "V2_DATA_DIR", self.root / "data"))
         self.stack.enter_context(patch.object(config, "CHAT_WORKTREES_DIR", self.root / "chat-worktrees"))
+        # Hermetic: no test lists the real /mnt/c/Users.
+        self.stack.enter_context(patch.dict(os.environ, {"JARVIS_WINDOWS_USERS": str(self.root / "no-mnt-c" / "Users")}))
         self.stack.enter_context(patch.object(codex_config, "owner_home", return_value=self.auth))
         self.stack.enter_context(patch.object(codex, "RpcProcess", self.brain.rpc))
         self.stack.enter_context(patch.object(codex.CodexProvider, "_probe", return_value=("/fake/codex", "fake")))
@@ -1010,6 +1012,7 @@ class Checks(unittest.TestCase):
               ".cache/huggingface/token", ".bash_history", ".some-new-tool/secret",
               ".config/new-tool/token", ".local/share/new-tool/token", ".local/state/x",
               ".vault-token",       # a store no list names: only the closure hides it
+              ".npm/_logs/debug-0.log",
               ".local/share/uv/credentials/credentials.toml", ".local/share/jarvis/hud/x")
     OPEN = (".cargo/bin/cargo", ".cargo/registry/index/x", ".local/bin/uv",
             ".local/share/uv/python/cpython/bin/python3", ".rustup/toolchains/x", ".npm/_cacache/x",
@@ -1083,6 +1086,78 @@ class Checks(unittest.TestCase):
             fs = codex_config.filesystem(replace(self.chat(), cwd=str(inside)))
             self.assertFalse(self.blocked(fs, inside))
             self.assertTrue(self.blocked(fs, home / ".cache" / "lead" / "other"))
+
+    # Review of #224 (delta): the Windows profiles WSL mounts are closed the
+    # same way. A fake `/mnt/c/Users` only; nothing real is listed.
+    WIN_DENIED = (".git-credentials", ".ssh/id_ed25519", ".aws/credentials", ".azure/token",
+                  ".docker/config.json", ".config/gh/hosts.yml", ".npmrc", ".brand-new/token",
+                  "AppData/Roaming/GitHub CLI/hosts.yml", "AppData/Local/GitCredentialManager/store",
+                  "AppData/Local/Google/Chrome/User Data/Default/Login Data", "NTUSER.DAT",
+                  "ntuser.dat.LOG1")
+    WIN_OPEN = ("Documents/notes.txt", "Desktop/x.txt", "src/repo/main.py")
+
+    def windows_root(self):
+        users = self.root / "mnt-c" / "Users"
+        profile = users / "someone"
+        for rel in self.WIN_DENIED + self.WIN_OPEN:
+            (profile / rel).parent.mkdir(parents=True, exist_ok=True)
+            (profile / rel).write_text("fixture")
+        for other in ("Public", "Default", "All Users"):
+            (users / other / ".shared").mkdir(parents=True)
+        # A legacy junction (WSL shows it as a link) into AppData.
+        (profile / "Application Data").symlink_to(profile / "AppData" / "Roaming", target_is_directory=True)
+        locked = users / "locked-profile"
+        (locked / ".ssh").mkdir(parents=True)
+        return users, profile, locked
+
+    def test_windows_profiles_are_closed_too(self):
+        users, profile, locked = self.windows_root()
+        locked.chmod(0)
+        self.addCleanup(locked.chmod, 0o755)
+        with patch.dict(os.environ, {"JARVIS_WINDOWS_USERS": str(users)}):
+            self.assertEqual(codex_config.windows_profiles(), sorted([locked, profile]))
+            fs = codex_config.filesystem(self.chat())
+            for rel in self.WIN_DENIED + ("Application Data/GitHub CLI/hosts.yml",):
+                with self.subTest(denied=rel):
+                    self.assertTrue(self.blocked(fs, profile / rel), rel)
+            for rel in self.WIN_OPEN:
+                with self.subTest(open=rel):
+                    self.assertFalse(self.blocked(fs, profile / rel), rel)
+            self.assertEqual(fs.get(str(profile / "AppData")), "deny", "AppData as a whole")
+            for other in ("Public", "Default", "All Users"):
+                self.assertFalse(self.blocked(fs, users / other / ".shared"), other)
+            denied = [Path(k) for k, v in fs.items() if v == "deny" and "*" not in k]
+            self.assertFalse(any(o in d.parents for d in denied for o in denied), "no nested denies")
+            self.assertEqual(self.walk_reach(fs), [])
+            # A repo on the mounted drive, outside any profile, opens as before;
+            # one inside a profile's dot-folder or AppData is closed around.
+            drive_repo = self.root / "mnt-c" / "dev" / "override"
+            drive_repo.mkdir(parents=True)
+            fs = codex_config.filesystem(replace(self.chat(), cwd=str(drive_repo)))
+            self.assertFalse(self.blocked(fs, drive_repo))
+            self.assertEqual(fs.get(f"{drive_repo}/**/[.][eE][nN][vV]*"), "deny")
+            inner = profile / "AppData" / "Local" / "proj"
+            inner.mkdir(parents=True)
+            fs = codex_config.filesystem(replace(self.chat(), cwd=str(inner)))
+            self.assertFalse(self.blocked(fs, inner))
+            self.assertNotIn(str(profile / "AppData"), fs)
+            self.assertTrue(self.blocked(fs, profile / "AppData/Roaming/GitHub CLI/hosts.yml"))
+            self.assertTrue(self.blocked(fs, profile / "AppData/Local/GitCredentialManager/store"))
+        # Not mounted, or not present: skipped, never a refusal.
+        for missing in (self.root / "nothing" / "Users", self.root / "mnt-c" / "Users" / "someone" / "Documents" / "notes.txt"):
+            with patch.dict(os.environ, {"JARVIS_WINDOWS_USERS": str(missing)}):
+                self.assertEqual(codex_config.windows_profiles(), [])
+                codex_config.filesystem(self.chat())
+
+    def test_a_path_with_glob_syntax_is_never_a_literal_deny(self):
+        users, profile, _locked = self.windows_root()
+        (profile / "NTUSER.DAT{207e}.TM.blf").write_text("fixture")
+        (profile / ".odd[1]").mkdir()
+        with patch.dict(os.environ, {"JARVIS_WINDOWS_USERS": str(users)}):
+            fs = codex_config.filesystem(self.chat())
+        self.assertEqual(fs.get(str(profile / "NTUSER.DAT")), "deny")
+        self.assertFalse(any(v == "deny" and "{" in k for k, v in fs.items()))
+        self.assertNotIn(str(profile / ".odd[1]"), fs)
 
     def test_owner_home_churn_after_prepare_never_refuses_the_session(self):
         # Review of #224 (MED): the check compares Codex's readback with the
