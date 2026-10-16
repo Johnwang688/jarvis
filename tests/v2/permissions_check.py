@@ -2420,6 +2420,10 @@ MERGE_GATE_ASK = (
     ("git -c alias.l='!sh' l -1 --format='gh pr merge 1'", _PR_UNSURE),
     ("git --config-env=core.pager=P log -1 --format='gh pr merge 1'", _PR_UNSURE),
     ("git --config-env core.pager=P log -1 --format='gh pr merge 1'", _PR_UNSURE),
+    # MED-C of #222's last review: where the line runs text only refs are
+    # blanked — a brace word a shell expands to a command is not one.
+    ("git commit -m '{gh,pr,merge,1}' && git log -1 --format=%s | bash", _PR_UNSURE),
+    ("PAGER=sh git log -1 --format=gh\\ pr\\ merge\\ 1", _PR_UNSURE),
     # Blanking a data option's value is anchored to its option: the same
     # text fed to a shell elsewhere on the line is still read.
     ("echo 'gh pr merge 1' | sh; git commit -m 'gh pr merge 1'", _PR_UNSURE),
@@ -2511,6 +2515,18 @@ MERGE_GATE_ORDINARY = (
     "NODE_ENV=test npm test && git push -u origin feature && gh pr create --base main --fill",
     "git config --global user.name x && git commit -m 'gh pr merge later'",
     "git -c color.ui=never -c alias.st=status log origin/main..HEAD && git push -u origin feature",
+    # MED-C of #222's last review: a variable outside the benign list (or an
+    # interpreter) on the line still lets the refs of judged programs be
+    # blanked; only values git or gh could print or run are read.
+    "VIRTUAL_ENV=/v/env python -m pytest && git push -u origin feature && gh pr create -B main",
+    "NODE_OPTIONS=--max-old-space-size=4096 npm run build && git push -u origin feature"
+    " && gh pr create --base main",
+    "PATH=/x:$PATH git push -u origin feature && gh pr create --base main",
+    "DOCKER_HOST=x git push origin feature && gh pr create --base main",
+    "FOO=1 git log origin/main..HEAD && git push -u origin feature",
+    "PYTHONPATH=. python3 -m pytest && git push -u origin feature && gh pr create --base main",
+    "PYTHONPATH=. python3 -m pytest && git push -u origin feature && gh pr create --base=main --fill",
+    "FOO=1 make && git push -u origin feature && gh pr create -Bmain --fill",
 )
 
 
