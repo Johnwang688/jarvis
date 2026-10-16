@@ -44,9 +44,15 @@ runner from rules' one table — `uv run`, `npx`, `env`, `xargs`, `bash -lc`):
   checkout`) or writes git config: a later plain or HEAD push is judged by
   where HEAD went, or asks when that cannot be told.
 * The raw-line backstop: where the line runs a program that may run text it
-  is handed (a shell, `eval`, an interpreter, `ssh`, `curl`, a git exec
-  setting, a program this reader does not know), any spelling of the
-  operations anywhere on the line asks. A line of only git, gh and data
+  is handed (a shell, `eval`, an interpreter, `ssh`, `curl`, a program this
+  reader does not know; and in git any `-c`/`--config-env`, a `git config`
+  write, an upper-case assignment word such as `PAGER=…` or
+  `GIT_CONFIG_COUNT=…`, an option that hands git a program such as
+  `--upload-pack`, `--receive-pack`, `--exec`, `clone -u`, `grep -O`), any
+  spelling of the operations anywhere on the line asks. The values of data
+  options — `git commit -m/-F`, `gh pr|issue create|edit|comment --title/
+  --body`, `gh api -f body=/title=` — are left out of that text where the
+  line spells them after their option. A line of only git, gh and data
   programs is read by its structure alone, so a commit message or PR body
   that mentions a merge asks nothing.
 
@@ -157,15 +163,34 @@ _DATA_STEMS = frozenset({
     "pushd", "popd", "export", "jq", "cut", "tr", "diff", "basename", "dirname", "realpath",
     "sleep", "which", "type", "read", "set", "unset", "local", "declare", ":", "wait", "cp", "mv",
 })
-# git settings and variables that make git run a program (review M-2 of #208).
-_GIT_EXEC_KEYS = ("core.sshcommand", "core.pager", "core.editor", "core.fsmonitor",
-                  "core.hookspath", "credential.helper", "diff.external", "sequence.editor",
-                  "pager.", "alias.", "gpg.program", "uploadpack.", "receivepack.", "protocol.",
-                  "remote.", "url.", "filter.", "merge.", "difftool.", "mergetool.")
+# Variables that make git run a program (review M-2 of #208).
 _GIT_EXEC_ENV = re.compile(r"(?<![A-Za-z0-9_])GIT_(SSH|SSH_COMMAND|EDITOR|PAGER|EXTERNAL_DIFF|"
                            r"SEQUENCE_EDITOR|ASKPASS|PROXY_COMMAND|EXEC_PATH|CONFIG_PARAMETERS)\s*=")
+# Any upper-case assignment word on the line — a prefix (`PAGER=… git log`),
+# `env EDITOR=…`, `export VISUAL=…`, `GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=…`:
+# the variables git, less, ssh and editors read to run a program are upper
+# case, and the list of them is open (MED-2 of #208's follow-up review). A
+# lower-case `x=…` runs only through `$x`, which is an executor itself.
+_ENV_ASSIGNMENT = re.compile(r"(?<![^\s;&|(){}`'\"])[A-Z_][A-Z0-9_]*(\[[^\]]*\])?\+?=")
 _GIT_EXEC_SUBS = frozenset({"difftool", "mergetool", "filter-branch", "filter-repo", "bisect",
                             "rebase", "submodule", "daemon", "send-email"})
+# Options that hand a git subcommand a program to run (MED-2 of the
+# follow-up): long ones also in git's abbreviations, short ones in a cluster.
+_GIT_EXEC_OPTS = {
+    "fetch": ("upload-pack",), "pull": ("upload-pack",), "ls-remote": ("upload-pack",),
+    "clone": ("upload-pack",), "fetch-pack": ("upload-pack", "exec"),
+    "push": ("receive-pack", "exec"), "send-pack": ("receive-pack", "exec"),
+    "archive": ("exec",), "grep": ("open-files-in-pager",),
+}
+_GIT_EXEC_SHORT = {"clone": "u", "ls-remote": "u", "grep": "O"}
+# Options whose value is only data — a commit message, a PR's title or body —
+# and is left out of the text the raw-line backstop reads (MED-2 of the
+# follow-up): (short letters, long names, whether git's abbreviations count).
+_COMMIT_DATA = ("mF", ("message", "file"), True)
+_GH_DATA = ("tb", ("title", "body"), False)
+_GH_DATA_VERBS = frozenset({"create", "new", "edit", "comment", "review"})
+_GH_API_DATA_KEYS = frozenset({"body", "title"})
+DATA_CAP = 64           # data values left out of the backstop's text; past it, none are
 _TEXT_PUSH_WHAT = (
     (re.compile(r"\b(main|master)\b"), PUSH_PROTECTED),
     (re.compile(r"--force|(?<![\w-])-f\b|\+\w"), PUSH_FORCE),
@@ -422,6 +447,11 @@ class _Line:
         self.lenient = bool(re.search(r";|\|\||\n", command))
         self._config_cache: dict = {}
         self.executor = bool(_GIT_EXEC_ENV.search(command))
+        if _ENV_ASSIGNMENT.search(command):
+            self.executor = True
+        # (option as written, its value) of data options (`git commit -m`,
+        # `gh pr create --body`): the backstop reads the line without them.
+        self.data: list[tuple[str, str]] = []
 
     def config(self, repos) -> list:
         """The git config entries for these repositories, each file parsed
@@ -588,8 +618,13 @@ def _git(line: _Line, args: list, prog, depth: int = 0, *, sure: bool = True) ->
                 overrides.append(str(value))
                 if _wild(value):
                     overrides.append("*")
-                if str(value).lower().startswith(_GIT_EXEC_KEYS):
-                    line.executor = True
+                # Any setting: the keys that run a program are an open list
+                # (core.askPass, diff.<driver>.textconv, trailer.*.command, …;
+                # MED-2 of the follow-up review).
+                line.executor = True
+            elif text == "--config-env":
+                overrides.append("*")
+                line.executor = True
             elif text in _GIT_DIR_OPTS:
                 dirs = UNKNOWN
             i += 2
@@ -617,8 +652,10 @@ def _git(line: _Line, args: list, prog, depth: int = 0, *, sure: bool = True) ->
             _push(line, rest, prog, dirs, overrides, unsure_verb=True)
         return
     name = str(sub)
-    if name in _GIT_EXEC_SUBS:
+    if name in _GIT_EXEC_SUBS or _runs_program(name, rest):
         line.executor = True            # it may run a program it is handed
+    if name == "commit":
+        _note_data(line, rest, *_COMMIT_DATA)
     if name == "push":
         _push(line, rest, prog, dirs, overrides)
         return
@@ -643,6 +680,86 @@ def _git(line: _Line, args: list, prog, depth: int = 0, *, sure: bool = True) ->
         else:
             words = rules._shell_words(expansion)
             _git(line, words + rest, prog, depth + 1)
+
+
+def _runs_program(name: str, rest: list) -> bool:
+    """Whether `git NAME REST` is handed a program to run by an option
+    (`fetch --upload-pack=…`, `push --receive-pack=…`, `clone -u …`,
+    `grep -O…`, `archive --exec=…`)."""
+    longs = _GIT_EXEC_OPTS.get(name, ())
+    short = _GIT_EXEC_SHORT.get(name)
+    for word in rest:
+        text = str(word)
+        if text == "--":
+            break
+        if text.startswith("--"):
+            option = text[2:].split("=", 1)[0]
+            if any(_is_long(option, full) for full in longs):
+                return True
+        elif short and text.startswith("-") and short in text[1:]:
+            return True
+    return False
+
+
+def _note_data(line: _Line, rest: list, shorts: str, longs: tuple, abbreviations: bool) -> None:
+    """Record the values of data options in `rest` (`-m MSG`, `-mMSG`,
+    `-am MSG`, `--message=MSG`, `--body MSG`): text a program only stores,
+    which the raw-line backstop leaves out (`_without_data`)."""
+    k = 0
+    while k < len(rest):
+        text = str(rest[k])
+        k += 1
+        if text == "--":
+            break
+        if text.startswith("--"):
+            option, eq, value = text[2:].partition("=")
+            if option and any(_is_long(option, full) if abbreviations else option == full
+                              for full in longs):
+                if eq:
+                    line.data.append(("--" + option, value))
+                elif k < len(rest):
+                    line.data.append((text, str(rest[k])))
+                    k += 1
+        elif text.startswith("-") and len(text) > 1:
+            at = next((j for j, ch in enumerate(text[1:], 1) if ch in shorts), None)
+            if at is None:
+                continue
+            if at + 1 < len(text):
+                line.data.append((text[:at + 1], text[at + 1:]))
+            elif k < len(rest):
+                line.data.append((text, str(rest[k])))
+                k += 1
+
+
+def _without_data(command: str, data: list) -> str:
+    """The line with each data option's value blanked where the line spells
+    it right after its option (`-m 'gh pr merge later'`), so a commit
+    message or a PR body mentioning a merge does not trip the backstop. A
+    value spelled any other way stays (it may ask); past `DATA_CAP` values
+    nothing is blanked."""
+    spans = list(dict.fromkeys(data))
+    if not spans or len(spans) > DATA_CAP:
+        return command
+    for option, value in spans:
+        if not value:
+            continue
+        spellings = [value]
+        quotable = not any(c in value for c in "\"\\$`")
+        if "'" not in value:
+            spellings.append(f"'{value}'")
+        if quotable:
+            spellings.append(f'"{value}"')
+        key, eq, rest = value.partition("=")
+        if eq:
+            if "'" not in rest:
+                spellings.append(f"{key}='{rest}'")
+            if quotable:
+                spellings.append(f'{key}="{rest}"')
+        pattern = re.compile(r"(?<![\w-])" + re.escape(option) + r"(?:\s+|=)?(?:"
+                             + "|".join(re.escape(s) for s in sorted(spellings, key=len, reverse=True))
+                             + ")")
+        command = pattern.sub(" ", command)
+    return command
 
 
 _GIT_RUNS_SHELL = frozenset({"submodule", "rebase", "bisect"})
@@ -670,6 +787,10 @@ def _git_moves_head(line: _Line, name: str, rest: list, dirs, replace) -> None:
                   or (not reads and len(positionals) >= 2))
         if writes:
             line.config_changed = True
+            # It may set a program to run (`core.pager`, `core.sshCommand`,
+            # `core.editor` …) for a later git on the line (MED-2 of the
+            # follow-up review): the backstop reads the line.
+            line.executor = True
         return
     if name == "symbolic-ref":
         positionals = [w for w in rest if not str(w).startswith("-")]
@@ -701,7 +822,14 @@ def _git_moves_head(line: _Line, name: str, rest: list, dirs, replace) -> None:
         return
     # checkout / switch
     if name == "checkout" and "--" in words:
-        return                                  # paths: HEAD stays
+        # `git checkout [REV] -- PATHS` restores paths and HEAD stays; a
+        # trailing `--` with nothing after it only says the word before it
+        # is a revision (`git checkout main --` switches; MED-1 of the
+        # follow-up review).
+        cut = words.index("--")
+        if cut + 1 < len(words):
+            return
+        rest, words = rest[:cut], words[:cut]
     new = None
     positionals: list = []
     detach = False
@@ -1013,6 +1141,13 @@ def _gh(line: _Line, args: list, prog, *, sure: bool = True) -> None:
             line.hit(PR_CLOSE, "a close ends the pull request")
         elif verb == "checkout":
             line.switch(UNKNOWN)        # HEAD is now the PR's branch, by its name
+        elif verb in _GH_DATA_VERBS:
+            _note_data(line, args[first_at + 1:], *_GH_DATA)
+        return
+    if name == "issue":
+        verb = next((str(w) for _a, w in positionals[1:2]), None)
+        if verb in _GH_DATA_VERBS:
+            _note_data(line, args[first_at + 1:], *_GH_DATA)
         return
     if name == "co":
         line.switch(UNKNOWN)            # the stock alias for `gh pr checkout`
@@ -1050,7 +1185,48 @@ def _gh(line: _Line, args: list, prog, *, sure: bool = True) -> None:
 # `[\s\S]*` on both sides was quadratic, review M-6 of #208).
 _GRAPHQL_MERGES = ("mergepullrequest", "enablepullrequestautomerge", "mergebranch",
                    "enqueuepullrequest")
-_GRAPHQL_BRANCH = re.compile(r'branchname\W{0,6}([\w./-]+)')
+# `branchName: "main"`, or a variable, `branchName: $b` (MED-3 of the
+# follow-up review: `\W` took the `$` and the name was read as a branch).
+_GRAPHQL_BRANCH = re.compile(r'branchname[^\w$]{0,6}(\$?)([\w./-]+)')
+
+
+def _graphql_branches(line: _Line, low: str, fields: list, has_input: bool,
+                      shell_query: bool, replace) -> None:
+    """`createCommitOnBranch`: asked when a branch it names is protected,
+    when it names none, or when a `$variable` names it whose value is not
+    given literally by `-f`/`-F` (from `--input`, a file, an expansion — or a
+    query the shell expands, where `$b` is the shell's)."""
+    given: dict[str, list] = {}
+    for field in fields:
+        key, eq, _value = str(field).partition("=")
+        if eq:
+            given.setdefault(key.lower(), []).append(field)
+    found = False
+    judged: set = set()                 # each name once: linear in the query
+    for match in _GRAPHQL_BRANCH.finditer(low):
+        found = True
+        variable, name = match.group(1), match.group(2)
+        if (variable, name) in judged:
+            continue
+        judged.add((variable, name))
+        if not variable:
+            if _protected(name, set()):
+                line.hit(PUSH_PROTECTED, "a GraphQL commit onto the default branch", name)
+            continue
+        values = given.get(name, [])
+        if shell_query or has_input or not values:
+            line.hit(PUSH_UNSURE, "a GraphQL commit onto a branch whose variable cannot be read")
+            continue
+        for field in values:
+            value = str(field).partition("=")[2]
+            if _wild(field, replace) or value.startswith("@") or "{" in value:
+                line.hit(PUSH_UNSURE, "a GraphQL commit onto a branch whose variable cannot be read")
+            elif _protected(_branch_name(value) or value, set()):
+                line.hit(PUSH_PROTECTED, "a GraphQL commit onto the default branch",
+                         _branch_name(value) or value)
+    if not found:
+        line.hit(PUSH_PROTECTED, "a GraphQL commit onto a branch it does not name",
+                 "the default branch")
 
 
 def _gh_api(line: _Line, args: list, replace: str | None) -> None:
@@ -1064,15 +1240,16 @@ def _gh_api(line: _Line, args: list, replace: str | None) -> None:
         text = str(token)
         i += 1
         kind = value = None
+        option = text
         if text in _GH_API_VALUES:
             kind = _GH_API_VALUES[text]
             value = args[i] if i < len(args) else ""
             i += 1
         elif text.startswith("--") and "=" in text:
             name, _, rest = text.partition("=")
-            kind, value = _GH_API_VALUES.get(name), rest
+            kind, value, option = _GH_API_VALUES.get(name), rest, name
         elif len(text) > 2 and text[:2] in ("-X", "-f", "-F", "-H", "-q", "-t", "-p"):
-            kind, value = _GH_API_VALUES[text[:2]], text[2:]
+            kind, value, option = _GH_API_VALUES[text[:2]], text[2:], text[:2]
         elif text.startswith("-"):
             continue
         elif endpoint is None:
@@ -1082,6 +1259,8 @@ def _gh_api(line: _Line, args: list, replace: str | None) -> None:
             method = value
         elif kind == "field":
             fields.append(value)
+            if str(value).partition("=")[0] in _GH_API_DATA_KEYS:
+                line.data.append((option, str(value)))      # `-f body=…`: data
         elif kind == "input":
             has_input = True
     if endpoint is None:
@@ -1118,13 +1297,11 @@ def _gh_api(line: _Line, args: list, replace: str | None) -> None:
                 line.hit(PUSH_FORCE, "a GraphQL ref update with force")
             line.hit(PUSH_UNSURE, "a GraphQL mutation that moves a ref, which may be the default branch")
             named = True
-        if "createcommitonbranch" in low:
-            branch = _GRAPHQL_BRANCH.search(low)
-            if branch is None or _protected(branch.group(1), set()):
-                line.hit(PUSH_PROTECTED, "a GraphQL commit onto a branch it does not name, or the "
-                         "default branch", branch.group(1) if branch else "the default branch")
-            named = True
         queries = [f for f in fields if str(f).startswith("query=")]
+        if "createcommitonbranch" in low:
+            _graphql_branches(line, low, fields, has_input,
+                              any(_wild(q, replace) for q in queries), replace)
+            named = True
         unread = has_input or not queries or any(
             str(q).startswith("query=@") or _wild(q, replace) for q in queries)
         if unread and not named:
@@ -1207,6 +1384,8 @@ def _programs(line: _Line, walk, depth: int) -> None:
         if stem == "git":
             _git(line, args, prog, depth)
         elif stem == "git-push":
+            if _runs_program("push", args):
+                line.executor = True
             _push(line, args, prog, line.dirs, [])
         elif stem == "gh":
             _gh(line, args, prog)
@@ -1298,8 +1477,10 @@ def judge(command: str, cwd=None) -> Hit | None:
         # API, a git exec setting — any spelling of the operations anywhere
         # on it asks, saying it may. A line of only git, gh and data
         # programs (a commit message or PR body that mentions a merge) is
-        # read by structure alone.
-        _text(line, command)
+        # read by structure alone, and the values of data options (`git
+        # commit -m`, `gh pr create --body`, `gh api -f body=`) are left out
+        # of the text wherever the backstop runs (MED-2 of the follow-up).
+        _text(line, _without_data(command, line.data))
     if not line.hits:
         return None
     words = []

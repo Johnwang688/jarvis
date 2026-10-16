@@ -108,12 +108,17 @@ networking is off by design.
   know, a function, a variable, a git exec setting (`core.sshCommand`, pager,
   editor, `credential.helper`, `diff.external`, …, or `GIT_SSH_COMMAND`/
   `GIT_EDITOR`/`GIT_PAGER`), `git difftool`, `filter-branch`, `rebase`,
-  `bisect` — any spelling of a merge, a close or a push to main anywhere on
-  the line asks, saying it may. A line of only git, gh and data programs (a
-  commit message or PR body that mentions a merge) is read by structure.
+  `bisect` (widened by M-16) — any spelling of a merge, a close or a push to
+  main anywhere on the line asks, saying it may. A line of only git, gh and
+  data programs (a commit message or PR body that mentions a merge) is read by
+  structure.
 - **M-13. GraphQL** also asks for `enqueuePullRequest` (merge queue),
   `deleteRef`, `updateRef`/`updateRefs` (forced or not: one may move main)
   and `createCommitOnBranch` unless it names a non-default branch.
+  `branchName: $b` is read from a literal `-f`/`-F b=…`; a variable given
+  no literal value (`@file`, `--input`, an expansion, a query in double
+  quotes where `$b` is the shell's) asks "may push to main". Every
+  `branchName` in the query is read.
 - **M-14. One card under Claude.** A human's yes is held by the call's
   `tool_use_id` for 120 s, and if the CLI asks `can_use_tool` about the same
   call (same id, tool and identical input, once) it is answered from that
@@ -122,6 +127,26 @@ networking is off by design.
   the classifier runs after the owner's yes (the hook returns `{}`) and can
   still deny, but cannot put a second Jarvis card in front of the owner. No
   blanket explicit allow was added.
+- **M-16. The backstop is set off by any git exec setting** (the delta
+  review of #208, MED-2). Its scope stays per program, because always
+  reading the raw line asks for ordinary lines — `git diff main...HEAD &&
+  git push -u origin HEAD`, `git branch -d old && git push origin topic`,
+  `grep -n 'gh pr merge' merge_gate.py` — that no data-option stripping
+  can tell from a push to main. What sets it off is no longer a fixed list:
+  any `git -c` or `--config-env`, any `git config` write, any upper-case
+  assignment word on the line (`PAGER=`, `EDITOR=`, `VISUAL=`,
+  `SSH_ASKPASS=`, `LESSOPEN=`, `GIT_CONFIG_COUNT=`/`KEY_n`/`VALUE_n`, by
+  prefix, `env` or `export`), and the options that hand git a program
+  (`fetch`/`pull`/`ls-remote`/`clone --upload-pack`, `clone`/`ls-remote
+  -u`, `push --receive-pack`/`--exec`, `grep -O`/`--open-files-in-pager`,
+  `archive --exec`). The reviewer's other half is taken too: wherever the
+  backstop runs, the values of data options — `git commit -m`/`--message`/
+  `-F`, `gh pr|issue create|edit|comment|review --title`/`--body`/`-t`/`-b`,
+  `gh api -f body=`/`title=` — are left out of its text where the line
+  spells them right after their option (at most 64 values; past that none
+  are), so `make && gh pr create --body '…gh pr merge…'` asks nothing.
+  `git checkout main -- && git push` switches to main (MED-1): only words
+  after `--` are paths.
 
 ## Known gaps (accident guard, not an adversarial boundary)
 
@@ -130,7 +155,16 @@ call, an alias in a repository whose folder cannot be told, git config
 `include` files, git hooks (a `pre-push` hook, `core.hooksPath` set outside
 the line) that run on a push, a program the walk does not know that spells
 nothing on the line, and `gh issue close` on a pull request's number are not
-read.
+read. Nor are (the delta review of #208): a git exec setting written by an
+earlier call (`git config core.pager …` on one call, `git log` on the next —
+the backstop reads one line); `--exec-path` and `GIT_EXEC_PATH`, which make
+git run the programs in a folder, not text on the line (`GIT_EXEC_PATH=`
+still sets the backstop off); and other git and GitHub front ends —
+`git-town`, `hub`, `lab` — which are programs this reader does not know, so
+they ask only when the line spells an operation. A commit message or PR body
+spelled any way but right after its option (a here-document in `"$(cat
+<<EOF …)"`, a value split across quotes) stays in the backstop's text and may
+ask.
 
 ## For the owner
 

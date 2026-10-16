@@ -2054,6 +2054,12 @@ _FORCE = ("git-push-force", "force-pushes")
 _PR_UNSURE = ("pr-merge-unsure", "may merge or close a pull request")
 _PUSH_UNSURE = ("git-push-unsure", "may push to main")
 
+# createCommitOnBranch with its branch in a GraphQL variable (MED-3 of the
+# follow-up review of #208).
+_GQL_COMMIT = ("gh api graphql -f query='mutation($b:String!){createCommitOnBranch(input:{branch:"
+               "{repositoryNameWithOwner:\"o/r\",branchName:$b},message:{headline:\"x\"},"
+               "expectedHeadOid:\"y\"}){commit{oid}}}'")
+
 MERGE_GATE_ASK = (
     ("gh pr merge 5 --squash", _MERGE), ("gh pr merge --auto --squash 5", _MERGE),
     ("gh pr merge --admin --merge 5", _MERGE), ("gh pr merge", _MERGE),
@@ -2164,6 +2170,50 @@ MERGE_GATE_ASK = (
     ("gh api -X PATCH repos/o/r/./pulls/5 -f state=closed", _CLOSE),
     ("git -c remote.origin.push=HEAD:main push", _PUSH_UNSURE),
     ("GIT_DIR=/elsewhere/.git git push", _PUSH_UNSURE),
+    # The follow-up review of #208. MED-1: a trailing `--` names no paths.
+    ("git checkout main -- && git push", _MAIN),
+    # MED-2: git exec settings outside any fixed list — a same-line config
+    # write, any `-c`, any upper-case assignment, options that run a program.
+    ("git config core.pager 'gh pr merge 1'; git log", _PR_UNSURE),
+    ("git config core.sshCommand 'sh -c \"gh pr merge 1\"'; git push origin feature", _PR_UNSURE),
+    ("git config --global core.editor 'gh pr merge 1' && git commit", _PR_UNSURE),
+    ("git -c core.askPass='gh pr merge 1' fetch", _PR_UNSURE),
+    ("git -c core.gitProxy='gh pr merge 1' fetch", _PR_UNSURE),
+    ("git -c core.alternateRefsCommand='gh pr merge 1' fetch", _PR_UNSURE),
+    ("git -c diff.x.textconv='gh pr merge 1' diff", _PR_UNSURE),
+    ("git -c credential.https://github.com.helper='!gh pr merge 1' fetch", _PR_UNSURE),
+    ("git -c trailer.x.command='gh pr merge 1' interpret-trailers", _PR_UNSURE),
+    ("git -c interactive.diffFilter='gh pr merge 1' add -p", _PR_UNSURE),
+    ("git -c browser.x.cmd='gh pr merge 1' web--browse", _PR_UNSURE),
+    ("git --config-env remote.origin.push=SPEC push", _PUSH_UNSURE),
+    ("GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.pager GIT_CONFIG_VALUE_0='gh pr merge 1' git log", _PR_UNSURE),
+    ("PAGER='gh pr merge 1' git log", _PR_UNSURE), ("EDITOR='gh pr merge 1' git commit", _PR_UNSURE),
+    ("VISUAL='gh pr merge 1' git commit", _PR_UNSURE), ("SSH_ASKPASS='gh pr merge 1' git fetch", _PR_UNSURE),
+    ("LESSOPEN='|gh pr merge 1 %s' git log", _PR_UNSURE), ("export PAGER='gh pr merge 1'; git log", _PR_UNSURE),
+    ("env PAGER='gh pr merge 1' git log", _PR_UNSURE),
+    ("git fetch --upload-pack='gh pr merge 1' origin", _PR_UNSURE),
+    ("git pull --upload='gh pr merge 1' origin", _PR_UNSURE),
+    ("git ls-remote --upload-pack='gh pr merge 1' origin", _PR_UNSURE),
+    ("git clone -u 'gh pr merge 1' https://github.com/o/r", _PR_UNSURE),
+    ("git push --receive-pack='gh pr merge 1' origin feature", _PR_UNSURE),
+    ("git push --exec='gh pr merge 1' origin feature", _PR_UNSURE),
+    ("git-push --exec='gh pr merge 1' origin feature", _PR_UNSURE),
+    ("git grep -O'gh pr merge 1' x", _PR_UNSURE), ("git grep --open-files-in-pager='gh pr merge 1' x", _PR_UNSURE),
+    ("git archive --remote=origin --exec='gh pr merge 1' HEAD", _PR_UNSURE),
+    ("git fetch --upload-pack='git push origin main' origin", _PUSH_UNSURE),
+    # Blanking a data option's value is anchored to its option: the same
+    # text fed to a shell elsewhere on the line is still read.
+    ("echo 'gh pr merge 1' | sh; git commit -m 'gh pr merge 1'", _PR_UNSURE),
+    # MED-3: `branchName: $b` read from `-f b=…`, or unsure.
+    (_GQL_COMMIT + " -f b=main", _MAIN), (_GQL_COMMIT + " -F b=refs/heads/main", _MAIN),
+    (_GQL_COMMIT + " -F b=@branch.txt", _PUSH_UNSURE), (_GQL_COMMIT, _PUSH_UNSURE),
+    (_GQL_COMMIT + " -f b=topic --input vars.json", _PUSH_UNSURE),
+    # Every createCommitOnBranch is read, not the first.
+    ("gh api graphql -f query='mutation{a:createCommitOnBranch(input:{branch:{branchName:\"topic\"}})"
+     "{commit{oid}} b:createCommitOnBranch(input:{branch:{branchName:\"main\"}}){commit{oid}}}'", _MAIN),
+    # In double quotes `$b` is the shell's, whatever `-f b=` says.
+    ("gh api graphql -f query=\"mutation{createCommitOnBranch(input:{branch:{branchName:$b}})"
+     "{commit{oid}}}\" -f b=topic", _PUSH_UNSURE),
 )
 
 MERGE_GATE_ORDINARY = (
@@ -2199,6 +2249,21 @@ MERGE_GATE_ORDINARY = (
     "npm test && git push -u origin topic", "gh api 'repos/{owner}/{repo}/pulls/5'",
     "gh api graphql -f query='mutation{createCommitOnBranch(input:{branch:{branchName:\"topic\"}}){commit{oid}}}'",
     "python3 -c \"import subprocess; subprocess.run('git push'.split())\"",
+    # The follow-up review of #208: a checkout with paths after `--`; data
+    # options' values left out of the backstop wherever it runs; any `-c`, a
+    # config write or an exec option that spells nothing; `$b` given literally.
+    "git checkout topic -- && git push", "git checkout main -- README.md && git push",
+    "git -c user.name=x commit -m 'gh pr merge later'",
+    "GIT_AUTHOR_NAME=x git commit -m 'gh pr merge later' && git push",
+    "make && git commit -am 'then gh pr merge 5' && git push",
+    "make && git commit --message='close the pr merge gap'", "make && git commit --mess='gh pr merge, later'",
+    "make && git commit -m \"gh pr merge later\"",
+    "make && gh pr create --title 'gh pr merge plan' --body 'then gh pr merge 5'",
+    "make && gh pr comment 5 -b 'will gh pr merge after'", "make && gh issue create -t 'gh pr close flake' -b x",
+    "uv run pytest && gh api repos/o/r/issues/5/comments -f body='gh pr merge after CI'",
+    "git config user.name x && git commit -m 'gh pr merge later'",
+    "git fetch --upload-pack=git-upload-pack origin", "git grep -n 'gh pr merge'",
+    _GQL_COMMIT + " -f b=topic",
 )
 
 
@@ -2568,6 +2633,13 @@ def merge_gate_checks():
             ("; ".join(f"git x{i}" for i in range(2000)), many_aliases),
             ("git checkout a && " * 500 + "git push", topic),
             ("curl " + "pulls/" * 40000 + "x", topic),
+            # Data values left out of the backstop: past DATA_CAP none are,
+            # so this many is one pass; at the cap, one blanking each.
+            ("make; git commit " + " ".join(f"-m 'gh pr merge {i}'" for i in range(20000)), topic),
+            ("make; git commit " + " ".join(f"-m m{i}" for i in range(getattr(merge_gate, "DATA_CAP", 64)))
+             + " x" * 100000, topic),
+            (_GQL_COMMIT.replace("branchName:$b", "branchName:$b " * 30000)
+             + " -f b=topic" * 3000, topic),
         )
         for line, cwd in adversarial:
             spent: list = []
