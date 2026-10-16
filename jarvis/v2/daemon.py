@@ -1439,8 +1439,8 @@ class Daemon:
         - A gate question: logged with no turn, for the audit trail. The
           decision was `permit`'s — the thread's own asker — and nothing here
           answers or changes it.
-        - An error: a line in the chat; a fatal one also drops the session
-          (the provider closed it), so the next message resumes it."""
+        - An error: a `notice` line in the chat; a fatal one also drops the
+          session (the provider closed it), so the next message resumes it."""
         if event.thread_id != session.thread.id:
             LOG.warning("A between-turn event for another thread was dropped")
             return
@@ -1465,12 +1465,19 @@ class Daemon:
             text = clean_line(scrub_text(str(data.get("message") or "")), 300)
         except Exception:  # noqa: BLE001 — a scrub that fails shows nothing of it
             text = "[withheld]"
+        with self._lock:
+            if session.retired or session.closing or self._sessions.get(session.thread.id) is not session:
+                return
+        # A `notice` line (the owner's, never the model's), with no turn.
+        self._record(session, Event(EventKind.NOTICE, session.thread.id,
+                                    {"text": f"Between turns: {text}", "fatal": fatal}), idle=True)
+        if not fatal:
+            return
         lost = False
         with self._lock:
             if session.retired or session.closing or self._sessions.get(session.thread.id) is not session:
                 return
-            self._system_line(session.thread, "cli_note", f"Between turns: {text}", {"fatal": fatal})
-            if fatal and session.worker is None:
+            if session.worker is None:
                 # The provider closed the session: dropped, so the next
                 # message resumes it (a running turn finds out for itself).
                 session.lost = lost = True

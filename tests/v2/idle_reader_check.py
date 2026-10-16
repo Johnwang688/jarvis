@@ -1020,11 +1020,11 @@ class DaemonWatch(Daemonised):
 
     def test_errors_between_turns_are_lines_and_a_fatal_one_drops_the_session(self):
         self.feed.put(Event(K.ERROR, self.chat, {"message": "a child's question was refused", "fatal": False}))
-        wait_for(lambda: any(r.get("kind") == "cli_note" for r in self.log()), what="the note")
+        wait_for(lambda: any(r.get("kind") == "notice" for r in self.log()), what="the note")
         self.assertIsNotNone(self.session())
         self.feed.put(Event(K.ERROR, self.chat, {"message": "identity mismatch", "fatal": True}))
         wait_for(lambda: self.session() is None, what="the session to drop")
-        notes = [r for r in self.log() if r.get("kind") == "cli_note"]
+        notes = [r for r in self.log() if r.get("kind") == "notice"]
         self.assertEqual([(r["data"]["fatal"], r.get("turn_id")) for r in notes], [(False, None), (True, None)])
         self.assertEqual(self.provider.closed, [self.chat])
         self.daemon.send(self.chat, UserMessage(text="again"))

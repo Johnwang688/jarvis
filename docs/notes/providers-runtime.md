@@ -1384,7 +1384,9 @@ the daemon lock, only when no turn runs and the provider's
   the held turn to its result.
 - `_record` marks every record of that turn `self_started: true`. The
   Discord mirror skips such rows, the HUD's speech controller ignores such
-  events (the owner's decision, 2026-10-15), and the task runner's
+  events (the owner's decision, 2026-10-15) except that its Stop still
+  silences the children it hit (SV-5's rule; a child's own `subagent` notice
+  is not the turn's record and is still said), and the task runner's
   subscription (`runner._for_turn`) leaves them out. `Daemon.send` says
   "(the CLI's own)", and the runner waits such a turn out up to its turn
   timeout instead of `SEND_TIMEOUT`.
@@ -1398,8 +1400,9 @@ the daemon lock, only when no turn runs and the provider's
 - A gate question is logged as `gate_requested`/`gate_resolved` with no
   `turn_id`. A stale one would make the Discord mirror wait forever for that
   finished turn's end.
-- An error becomes a `cli_note` line with no `turn_id`. A fatal one also
-  drops the session (the provider closed it), and the next message resumes.
+- An error becomes a `notice` line (`EventKind.NOTICE`) with no `turn_id`.
+  A fatal one also drops the session (the provider closed it), and the next
+  message resumes.
 
 **Approvals.** A Claude hook between turns runs `_decide` against the
 session's own `permit`, which is the thread's broker asker, exactly as in a

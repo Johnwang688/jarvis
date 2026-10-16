@@ -3500,8 +3500,10 @@ Then it has the usual `turn_started`, `text_delta`, `text`, `tool_*`,
 - The HUD shows it like any turn. `GET /threads/{id}/transcript` returns the
   `cli_turn` line as a `system` message, then the turn's words.
 - The Discord mirror posts nothing of it, and the HUD's read-aloud speaks
-  none of it (the owner's decision, 2026-10-15). The task runner never takes
-  its words for a task turn's reply.
+  none of it (the owner's decision, 2026-10-15). A sub-agent's own spoken
+  notice (SV-5) is not that turn's record and is still said; Stop on that
+  turn silences the children it hit, as for any turn. The task runner never
+  takes its words for a task turn's reply.
 - An owner message sent while it runs waits for it (`"status": "queued"`).
   Claude refuses a steer into it. `POST /threads/{id}/send` from the task
   runner answers "a turn is already running on this thread (the CLI's own)",
@@ -3513,11 +3515,10 @@ Then it has the usual `turn_started`, `text_delta`, `text`, `tool_*`,
 
 Codex starts no turn by itself (SV-0).
 
-**Between-turn notices.** A provider's notice read between turns (a Codex
-child's request that was refused, say) is a `cli_note` line,
-`{"kind": "cli_note", "data": {"text": "Between turns: …", "fatal": false}}`,
-with no `turn_id`. The transcript route returns it as a `system` message. A
-fatal one means the provider closed the session, and the next message
-resumes it. A gate question asked between turns is logged
+**Between-turn notices.** A provider's error read between turns (a Codex
+child's request that was refused, say) is a `notice` line,
+`{"kind": "notice", "turn_id": null, "data": {"text": "Between turns: …", "fatal": false}}`.
+The transcript route returns it as a `system` message. A fatal one means
+the provider closed the session, and the next message resumes it. A gate question asked between turns is logged
 (`gate_requested`/`gate_resolved`) with no `turn_id`.
 

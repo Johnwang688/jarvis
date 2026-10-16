@@ -147,6 +147,26 @@ describe("a turn the CLI started by itself is never spoken (SV-6, owner 2026-10-
     await clock.advance(60_000);
     expect(player.started.join(" ")).toBe(REPLY);
   });
+
+  const child = (sid: string, status: string, op = "finished") =>
+    c.event({ kind: "subagent", thread_id: T, data: { sid, op, status, depth: 1, background: true, started_at: "2026-10-16T10:00:00Z", entries: 1 } });
+
+  it("a finished child's notice is still said while the CLI's own turn runs (SV-5)", async () => {
+    child("cl:a", "done");
+    cli("turn_started");
+    cli("text", { text: "The background check passed, so I will carry on." });
+    cli("turn_finished", { stop: "end" });
+    await clock.advance(60_000);
+    expect(player.started).toEqual(["A sub-agent finished."]);
+  });
+
+  it("Stop on the CLI's own turn still silences the children it hit (SV-5's rule)", async () => {
+    child("cl:b", "backgrounded", "started");
+    cli("turn_finished", { stop: "interrupted" });
+    child("cl:b", "failed");
+    await clock.advance(60_000);
+    expect(player.started).toEqual([]);
+  });
 });
 
 describe("stale speech", () => {

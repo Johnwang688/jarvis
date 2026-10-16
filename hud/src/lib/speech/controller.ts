@@ -394,10 +394,6 @@ export class SpeechController {
     }
     const thread = e.thread_id;
     if (!thread || !kind) return;
-    // A turn the CLI started by itself after a background sub-agent finished
-    // is not read aloud (owner, 2026-10-15; SV-6): none of its records count,
-    // its end included, so what is being read for the owner's turn goes on.
-    if (e.self_started === true) return;
     // A message to the thread, by any means: the reply being read is stale.
     if (kind === "user_message") {
       this.messageSent(thread);
@@ -411,6 +407,11 @@ export class SpeechController {
     }
     // The owner's main Stop: the children it hit end however the CLI reports them, and none is announced.
     if (kind === "turn_finished" && (e.data ?? e).stop === "interrupted") this.notices.interrupted(thread);
+    // A turn the CLI started by itself after a background sub-agent finished
+    // is not read aloud (owner, 2026-10-15; SV-6): none of its records is
+    // spoken or ends anything being read. Its Stop still silences the
+    // children it hit (above); the sub-agents' own notices are not its records.
+    if (e.self_started === true) return;
     if (!this.speaks(thread)) {
       if (this.open.has(thread)) this.open.delete(thread);
       return;
