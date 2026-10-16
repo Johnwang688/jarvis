@@ -3471,3 +3471,36 @@ child's row (the name from the list route, reduced on the card by the same
 label (`subagent_sid`, only to a callback that takes the keyword); it is an
 id matching the sid pattern or nothing, never a word the model chose, and
 no layer reads it. A private (Browser) card's projection leaves it out.
+
+## Additions 2026-10-16: owner pickers for native select, date and colour controls (B-PICKERS)
+
+Chrome's screencast never draws a `<select>`, date, time, datetime-local,
+month, week or colour popup. Design and measurements:
+`docs/plans/2026-10-16-browser-pickers.md`. Owner-only, on the existing
+ticketed tab socket; no route, no bus record, no log line with page text, and
+no agent or MCP path.
+
+**Daemon → window:**
+
+| Message | Meaning |
+|---|---|
+| `{t:"picker", id, kind:"select", rect, items, groups, selected, total, shown}` | the owner's own left click opened this select's native popup, which the daemon closed. `rect` `{x, y, width, height}` is the control's border box in page CSS px (iframe offsets included). `items` `[{i, label, disabled, g}]`: the option's DOM index, its label (cleaned to one line of 80), disabled (itself or its optgroup), and an index into `groups` (optgroup labels, cleaned) or -1; `hidden` options are left out. `selected` is the selected index or -1; at most 500 items and 60,000 bytes, `total` counts every option. Option values never leave the daemon |
+| `{t:"picker", id, kind, rect, value, min, max, step, required}` | the same for `date`, `time`, `datetime-local`, `month` and `week`; each value is the kind's grammar or `""` |
+| `{t:"picker", id, kind:"color", rect, value}` | the same for a colour input (`#rrggbb`) |
+| `{t:"picker_closed", id, reason}` | `applied`, `refused` (the control would not take the value, or a disabled or hidden option), `changed` (the element, its options, the document, the attachment or the hold changed: nothing was set), `held` (a card), `cancelled` (the owner pressed elsewhere), `replaced`, `closed` (the tab closed) |
+
+**Window → daemon:**
+
+| Message | Meaning |
+|---|---|
+| `{t:"pick", id, index}` / `{t:"pick", id, value}` | the owner's choice: an option's DOM index (0–65535) or a value (≤ 64 characters of `[0-9A-Za-z:.#-]`, judged against the kind's grammar on the Browser's thread). Queued as owner input: ordered with the rest, dropped under a card, a takeover stamp |
+| `{t:"pick_cancel", id}` | the owner closed the overlay; no reply, no page IO |
+
+A pick is applied only to the element the picker was opened for: the same
+`backendNodeId` in the same frame's current document, still connected, the
+same kind, enabled; for a select the same option count and the chosen
+option's value and label. The assignment, `input` and `change` are three
+separately awaited steps; the events are untrusted (`isTrusted: false`).
+Nothing is offered or applied while the tab has a dialog, file chooser or auth
+prompt, or its window is not showing it. The first `pick` for an id takes the
+picker; a second one does nothing. A message is never sent past 60,000 bytes.

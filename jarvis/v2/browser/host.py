@@ -113,6 +113,7 @@ from . import password_store as _stores
 from . import policy
 from .profiles import STICKY_KEY, STICKY_VALUE, ProfileStore, marker_present
 from .gate import Gate
+from .pickers import PICK_METHOD
 from .settings import BrowserSettings
 from .stream import (MAX_DEVICE_PIXELS, TICKET_TTL_S, VIEW_MAX, TabStream, Tickets,
                      serve as _serve_stream)
@@ -706,6 +707,7 @@ class _Tab:
     retired: bool = False                # stops ticket minting before same-ID detach
     loading: bool = False                # main-frame request has not finished loading
     activity_holds: dict = field(default_factory=dict)
+    picker_pin: object = None            # B-PICKERS: the element under the owner's left press
 
 
 class BrowserHost:
@@ -752,6 +754,8 @@ class BrowserHost:
         self._auth.navigation_timeout = NAV_TIMEOUT_S
         from .owner_tools import OwnerTools
         self._owner_tools = OwnerTools(self)
+        from .pickers import Pickers
+        self._pickers = Pickers(self)
         self._next_instance_generation = 0
         self._instances: dict[str, _Instance] = {}
         self._closing_instances: dict[str, _Instance] = {}
@@ -1619,6 +1623,8 @@ class BrowserHost:
             if self._tabs.get(tab.id) is tab:
                 self.tickets.revoke(tab.id)
         self._owner_tools.invalidate(tab, closed=True)
+        self._pickers.invalidate(tab, "closed")
+        tab.picker_pin = None
         self._auth.release(tab)
         tab.loopback_port = tab.pending_port = None
         self._sync_ports(tab)
@@ -1733,6 +1739,8 @@ class BrowserHost:
         # Invalidate before judging/publishing the new URL. Playwright emits
         # framenavigated for same-document changes and same-URL reloads too.
         self._owner_tools.invalidate(tab)
+        self._pickers.invalidate(tab, "changed")
+        tab.picker_pin = None
         if tab.stream is not None:
             # The new document cannot receive a queued old-document release,
             # and the owner gate must not retain old depressed bookkeeping.
@@ -2279,6 +2287,7 @@ class BrowserHost:
                     tab.stream.hold_through()
                 self._auth.invalidate(tab)
                 self._owner_tools.invalidate(tab)
+                self._pickers.invalidate(tab, "held")
         elif isinstance(record, dict) and record.get("kind") == "approval_resolved":
             async def refresh_auth():
                 for tab in list(self._tabs.values()):
@@ -2361,6 +2370,7 @@ class BrowserHost:
 
         def attached():
             self._owner_tools.invalidate(tab, attachment=True)
+            self._pickers.invalidate(tab, "changed")
             LOG.info("browser tab %s attached", tab.id)
             self._attached_event(tab.id)
             self._submit(self._on_attached(tab))
@@ -2368,6 +2378,7 @@ class BrowserHost:
         def detached():
             if tab.stream.attached() is None:
                 self._owner_tools.invalidate(tab, attachment=True)
+            self._pickers.invalidate(tab, "changed")
             self._submit(self._on_detached(tab))
 
         _serve_stream(tab.stream, sock, tab_row=row, on_attached=attached,
@@ -2384,6 +2395,8 @@ class BrowserHost:
         t = msg.t
         if t in ("find", "find_cancel", "cursor", "cursor_cancel"):
             self._owner_tools.receive(tab, sock, {"t": t, **msg.fields})
+        elif t == "pick_cancel":
+            self._pickers.cancel(tab, sock, msg.fields["id"])
         elif t == "auth":
             if self.input_held():
                 stream.hold_through()
@@ -2403,6 +2416,7 @@ class BrowserHost:
             stream.ack(sock, msg.fields["id"])
         elif t == "resize":
             self._owner_tools.invalidate(tab)
+            self._pickers.invalidate(tab, "changed")
             stream.viewport = (msg.fields["width"], msg.fields["height"], msg.fields["scale"])
             self._submit(self._set_viewport(tab))
         elif t == "visible":
@@ -2410,6 +2424,7 @@ class BrowserHost:
                 self._submit(self._sync_screencast(tab))
             if not msg.fields["visible"]:
                 self._owner_tools.invalidate(tab)
+                self._pickers.invalidate(tab, "changed")
                 self._auth.invalidate(tab)
             async def refresh_auth():
                 self._auth.refresh(tab)
@@ -2758,6 +2773,7 @@ class BrowserHost:
             if tab.pressed[button] != tab.stream.hold_count or params["x"] < 0 or params["y"] < 0:
                 del tab.pressed[button]
                 params = self._let_go(params)
+                tab.picker_pin = None       # a let-go is never that press's release
         # Record before yielding: a card may arrive during Chrome's handler.
         if key and params["type"] in ("keyDown", "rawKeyDown"):
             tab.keys_pressed[code] = hold_count
@@ -2770,15 +2786,40 @@ class BrowserHost:
         # until Chrome answers. Input arriving meanwhile is dropped.
         auth_epoch = self._auth.input_epoch(tab)
         press = (mouse and params["type"] == "mousePressed") or (key and params["type"] in ("keyDown", "rawKeyDown"))
+        def current():
+            return (same_document() and not self.input_held()
+                    and self._auth.input_current(tab, auth_epoch))
+        left = mouse and params.get("button") == "left"
         async def send_current_auth():
-            if (same_document() and not self.input_held()
-                    and self._auth.input_current(tab, auth_epoch)):
+            if current():
+                if method == PICK_METHOD:
+                    # B-PICKERS: the owner's choice, queued as owner input.
+                    await self._pickers.apply(tab, cdp, params, current)
+                    return
                 if press and tab.signin:
                     # The owner's own press in a sign-in tab (only the owner's
                     # stream reaches `_deliver`; driving sends its own): what
                     # lets Chrome's Google tab open beside it (`_link_signin`).
                     tab.signin_press = asyncio.get_running_loop().time()
+                pin = None
+                if left and params["type"] == "mousePressed":
+                    # B-PICKERS: the element under the owner's own press,
+                    # pinned before the press can change the page. Any open
+                    # picker is the owner's to leave: a press elsewhere ends it.
+                    self._pickers.invalidate(tab, "cancelled")
+                    tab.picker_pin = None
+                    pin = await self._pickers.pin(tab, cdp, params)
+                    if not current():
+                        return
                 await cdp.send(method, params)
+                if left and params["type"] == "mousePressed":
+                    tab.picker_pin = pin
+                elif left and params["type"] == "mouseReleased":
+                    pin, tab.picker_pin = tab.picker_pin, None
+                    if pin is not None:
+                        # Only after this release, of that press, was answered:
+                        # did that exact element open a native picker?
+                        await self._pickers.opened(tab, cdp, pin, current)
         task = asyncio.ensure_future(self._activity_run(tab, send_current_auth))
         tab.input_task = task
         task.add_done_callback(lambda t: t.cancelled() or t.exception())
@@ -2821,6 +2862,7 @@ class BrowserHost:
             self._attention_cleanup.refuse(tab, "dialog", dialog)
             return
         tab.dialogs[dialog_id] = dialog
+        self._pickers.invalidate(tab, "changed")
         kind = dialog.type if dialog.type in DIALOG_KINDS else "alert"
         tab.stream.remember(f"dialog:{dialog_id}", {
             "t": "dialog", "id": dialog_id, "kind": kind,
@@ -2876,6 +2918,7 @@ class BrowserHost:
             return
         chooser_id = secrets.token_hex(4)
         tab.chooser = (chooser_id, chooser, asyncio.get_running_loop().time())
+        self._pickers.invalidate(tab, "changed")
         old = tab.timers.pop("chooser", None)
         if old is not None:
             old.cancel()

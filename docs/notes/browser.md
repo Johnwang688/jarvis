@@ -2181,6 +2181,140 @@ the Google tab to a chrome:// page, it is replaced with the explanation. In
 this fresh profile the people page offers "Sign in to Chrome", not "Turn on
 sync…". That button appears only with an account, which needs Google.
 
+## Owner pickers for native select, date and colour controls (B-PICKERS, 2026-10-16)
+
+Design, measurements and the datalist assessment:
+[the B-PICKERS plan](../plans/2026-10-16-browser-pickers.md); wire contract in
+`docs/hud-api.md` ("owner pickers"). Chrome 155's screencast never draws a
+`<select>`, date, time, datetime-local, month, week or colour popup, and the
+popup still takes the keyboard (ArrowDown reaches no page listener; Enter
+commits). `jarvis/v2/browser/pickers.py` offers the owner a HUD overlay instead.
+
+- **Detection is the owner's own click on that element.** Only `_deliver` (the
+  owner's ticketed socket) calls the module. Before an owner left press is sent
+  it is pinned by CDP hit test (`Page.getLayoutMetrics` + `DOM.getNodeForLocation`,
+  which takes document coordinates: measured; two calls, p50 about 3 ms, p95
+  about 4 ms per press); after that press's own release is answered (never a
+  let-go), a script-free `DOM.describeNode` drops anything but a select or an
+  input whose `type` attribute is a picker kind (p50 1.2 ms on a text field),
+  then the pinned `backendNodeId` is resolved in a `jarvis-pickers` isolated world of its
+  own frame and must be connected, in that frame's current document
+  (`ownerDocument === document`), a picker kind and `:open`. Throughout the
+  probe, up to the moment the picker is recorded under the lock, nothing may
+  hold the tab's attention: no dialog, file chooser or auth prompt, and its
+  window attached and showing it (review of PR #232, MED 1: a select whose
+  `mousedown` opened a file chooser was offered, then applied once the chooser
+  closed). CDP has no popup event (measured). A `base-select` select is skipped (Chrome draws that picker
+  in the page). An agent's click, direct CDP input, a page's `showPicker()` on
+  another element, a list box and a date field's text segments offer nothing.
+- **Read, measured and built before anything is sent**: the frame's `loaderId`
+  (`Page.getFrameTree`) before the node is resolved and again after the read,
+  the rectangle, and the whole message. A read that cannot be offered leaves
+  the native popup as it was.
+- **The native popup is closed** with a trusted `rawKeyDown` Escape and no
+  key-up while `:open` is true (Chrome hands an open popup every key; the page
+  sees no event, focus and value stay). A date-like popup still loading its own
+  page ignores one, so it is asked again up to 12 times, 25 ms apart, until
+  `:open` reads false; otherwise nothing is offered.
+- **Reading** is one fixed isolated-world function: option DOM index, label,
+  disabled (with a disabled optgroup), group; `hidden` options left out;
+  date-like value/min/max/step/required; colour value. `DOM.getBoxModel` gives
+  the rectangle. Labels are cleaned (`approvals.clean_line`) and capped at 80,
+  at most 500 options and 60,000 bytes of JSON, the exact encoding sent, with
+  a group's label charged when a kept item first uses it and only used groups
+  sent; a message past the cap is never offered (`total` says how many exist;
+  review LOW 2 measured 234,894 bytes from 500 single-option groups before).
+  Option values stay in the daemon. Nothing on the bus or in a log.
+- **Applying** (`{t:"pick"}`) is queued owner input: ordered, dropped under a
+  card, a takeover stamp. On the Browser's thread the binding is re-checked
+  (tab, page, page identity, main document generation, instance, attachment,
+  hold count, approval epoch, no dialog/chooser/auth, visible), the frame's
+  `loaderId` is still the one it was offered under (before the node is resolved
+  and after: a `backendNodeId` from before a cross-process commit could name
+  another node in the new document), then the same node in the same frame: connected, same document, same kind, enabled, not
+  read-only, option count and the chosen option's value and label unchanged,
+  a date-like value valid for a detached same-type input with the control's
+  `min`/`max`/`step`. One apply per picker: the first `pick` takes it, a second
+  with the same id does nothing. Assignment, `input` and `change` are three
+  separately awaited calls; a handler that replaces the control or changes its
+  value stops `change` (both tested); the same value dispatches nothing. The
+  binding and loader re-checks between those steps are defence in depth, not
+  each pinned by its own test. **The events are
+  untrusted** (no trusted CDP path picks an exact option or date: measured).
+- **Closing**: a main-frame navigation (same-document too), tab close, attach or
+  detach, resize, hidden, a card (`held`), a dialog or file chooser, a new owner
+  press (`cancelled`), a new picker (`replaced`); `pick_cancel` from the window.
+- **The HUD** (`lib/remotepicker.ts`, `components/RemotePicker.tsx`,
+  RemoteView): shown only as the answer to this window's own left press in the
+  same stream generation within 5 s, once; drawn only while connected, live and
+  unblocked (no card, global hold, auth, dialog, chooser or Downloads), closed
+  the moment any of them appears. A picker that arrives while any of them is up
+  is refused (`pick_cancel`), never kept to show once it goes: dialogs and the
+  chooser are tracked as the socket reports them, ahead of React's render. A
+  press made before a card does not count after it. **It never calls `focus()`**: keys typed in
+  the Remote proxy are routed to it (arrows skip disabled options, Home/End,
+  Page Up/Down, type-ahead, Enter, Escape; the HUD's own shortcuts keep theirs;
+  the rest swallowed, as the native popup would); options keep focus where it
+  is; the HUD's own date and colour inputs take focus only from the owner's
+  click, and Set/Cancel return it to the proxy. A press or wheel on the page
+  cancels it and is consumed whole (with its context menu). Graphite styling,
+  page text as React text only.
+
+**Datalist**: assessed, not built. Chrome 155 headless shows no datalist
+suggestions at all (no `:open`; ArrowDown and Enter leave the typed text), so
+nothing invisible captures keys. Offering suggestions needs a non-modal design
+(keys keep going to the page while suggestions refilter), not this overlay.
+
+**Also from the review**: the press is never sent when a card is raised while
+its pin is awaited (the hold is asked again after the pin); a let-go release
+drops the pin; the object-group release after a probe waits at most 1 s, so a
+hung renderer cannot wedge the tab's input task; an IME commit while the picker
+is open never reaches the page. After B-IME (#233) the picker and `RemoteIme`
+share the proxy: a pending commit is flushed before the picker's key branch,
+the branch ignores composing and keyCode 229 keys (an IME's, never type-ahead),
+an open picker counts as no input for `RemoteIme`'s sink (`canInput`), so a
+composition committed while the overlay is open is never sent, and a picker
+that opens interrupts any composition. Tested: a composition and its 229 keys
+while the picker is open reach neither the page nor the type-ahead (mutants:
+the sink check, the 229 guard). The interrupt on open is defence in depth: the
+owner's own press already interrupts a composition before any picker arrives,
+and the flush can find nothing while a picker is open (both mutants survive,
+as expected).
+
+**Limits**: the `loaderId` check closes the gap between a cross-process commit
+and `framenavigated` by reasoning, not by a test that produces one; cross-site (out-of-process) iframes are not covered (the hit test
+stops at the `<iframe>`; the invisible popup behaves as before); keyboard-opened
+pickers (Space, Alt+Down, F4) are not covered; the events are untrusted; a page
+that closes its own popup between the `:open` check and the Escape receives the
+Escape key-down; the rectangle is read once (a page that scrolls itself leaves
+the overlay where the control was; a wheel or resize closes it). `pickers.py`
+is not SELF_PROTECTED (an owner call, like `owner_tools.py`).
+
+Receipts: `tests/v2/browser_pickers_check.py` (3 pure, 23 real Chrome 155
+through the production ticket and socket, and an agent's real
+`hud_browser_act` click on a select through BR9b's fixture; summed Chrome RSS
+about 1.33 GiB); `lib/remotepicker.test.ts` and
+`components/RemoteViewPicker.test.ts` (26 vitest);
+`tests/face/hud_v2_pickers_check.py` (29 checks over the mock HUD, real
+Chromium). Twenty-seven guard removals, each applied in place and restored,
+fail their named checks (two IME defence-in-depth mutants, above, survive by
+design). The review's: the probe not checking dialogs, the file
+chooser or either (the reviewed code: the real chooser page is offered a
+picker), group labels not charged (nothing offered) and neither charged nor
+capped (a 131,377-byte message), the hold not asked after the pin (the press
+reached the page), no one-apply-per-picker (re-applied), the HUD accepting a
+picker behind a dialog or chooser, its gesture surviving a card, and, after
+the B-IME merge, `RemoteIme` sending while a picker is open and IME keys fed to
+the type-ahead. The first round's: the identity check (a detached twin applied), applying to
+the frame's focused element instead of the pinned node, the option count, the
+option value/label, a card not closing the picker, `change` after a handler
+changed the value, no closing Escape, an agent's click probed (the BR9b
+fixture), any open picker in the frame offered instead of the pressed element;
+in the HUD the overlay focusing itself, no gesture needed, drawn under a card,
+keys leaking to the page (vitest), and focus, card and gesture again in the face
+check. The script is `~/.cache/jarvis-lead/pickers-mutants/mutants.py` (not in
+the repository).
+
 ## IME composition in a Remote pane (B-IME, BR-7, 2026-10-16)
 
 **The owner composes in the pane's own input proxy, never in the page**
