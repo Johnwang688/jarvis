@@ -2549,3 +2549,61 @@ Files changed under SELF_PROTECTED, for the owner's review:
 `jarvis/tools/secrets.py` (new functions only; nothing existing changed)
 and `jarvis/face/approvals.py` (the card's display copy). Both only
 withhold more from a display, and never from a judge.
+
+## Agent calls to the Secret Service are refused (2026-10-15)
+
+Follow-up to PR #215, which keeps the HUD Browser's Chrome password key in
+the owner's login keyring. While the keyring is unlocked, gnome-keyring has
+no per-application rule: any program running as the owner can ask the
+Secret Service (`org.freedesktop.secrets` on the session bus) for Chrome's
+key or any other saved secret. An agent shell line that calls it is
+**DENY**, in v1's gate and v2's layer 1 alike (both start from
+`rules.decide`), never put to the owner and never covered by an allowlist
+entry: approving a command is not consent to what it reads, as with `.env`.
+
+**The rule** (`rules.secret_service_reading`, read on the whole raw line
+before it is split, in every spelling `rules._spellings` gives — the vex
+reading's quote, escape, `$'…'`, `${X:-…}` and brace normalisation, now one
+shared helper — case-folded):
+
+- **A dedicated secret reader anywhere on the line**: `secret-tool`,
+  `kwallet-query`, `lssecret` (word-bounded: `libsecret-tools` is not one),
+  whatever the subcommand — they look up, search (`secret-tool search`
+  prints secrets), store and clear. Mentions are refused too (vexcom's
+  trade).
+- **A line that names the Secret Service and holds a program that could call
+  it.** Names: `org.freedesktop.secrets`, the `org.freedesktop.Secret.*`
+  interfaces, `/org/freedesktop/secrets/…` paths, the portal's
+  `org.freedesktop.portal.Secret`, gnome-keyring's `org.gnome.keyring` and
+  KWallet's `org.kde.kwalletd*`. Callers: a D-Bus client (`busctl`, `gdbus`,
+  `dbus-send`, `dbus-monitor`, `qdbus*`), an interpreter or a shell, by any
+  path. So `busctl --user call :1.42 /org/freedesktop/secrets/collection/…`
+  (a unique name with the path), `uv run gdbus …`, `bash -c '…'` and
+  `python3 -c '… "org.freedesktop.secrets" …'` are refused, while a line
+  that only mentions a name (`grep -rn org.freedesktop.secrets`, `echo`, a
+  commit message) is not.
+- **A session-bus monitor**: `dbus-monitor` unless `--system` (and no
+  `--session`/`--address`), `gdbus monitor` unless `--system`/`-y`,
+  `busctl monitor|capture` with `--user`, an address, a machine or a host.
+  The bus carries the key from the keyring to Chrome. A line that names
+  `dbus-monitor` without `--system` is refused even as a mention.
+
+**Not refused** (pinned): `busctl --user list`, `busctl monitor` (the system
+bus), `dbus-monitor --system`, other services' calls (Notifications, MPRIS),
+`systemctl --user status gnome-keyring-daemon`, `ls ~/.local/share/keyrings`.
+
+**Limit, stated plainly: an accident guard, not a wall.** A script file that
+talks D-Bus (`python3 tool.py`), a unique name with a computed object path,
+or a program that is only an expansion is not seen. The real boundary is the
+same-user one in the Browser notes (*Password store: the owner's keyring*).
+The terminal_read guard's older `secret-tool lookup` refusal is unchanged.
+
+**Where it lives.** `jarvis/rules.py`, which is SELF_PROTECTED like
+`permissions.py` and `merge_gate.py`; neither of those changed. Flagged for
+the owner's review in the PR.
+
+Pinned by `tests/rules_check.py secret_service_checks` (43 refused lines,
+through v1's real dispatch with an allowlist entry for every stem and a
+yes-saying human-backed approver: nothing ran, nobody was asked; 14 ordinary
+lines) and `tests/v2/permissions_check.py secret_service_checks` (the same
+lines at layer 1 under AUTO and STRICT, never asked, v1 parity).

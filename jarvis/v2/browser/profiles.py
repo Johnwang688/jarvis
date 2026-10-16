@@ -2,8 +2,14 @@
 
 A row may carry `"password_store": "keyring"`: that profile's Chrome has
 been launched with the owner's keyring, and is never launched with the basic
-store again (`password_store.py`). Once set it is never cleared; deleting
-the profile removes it with the row.
+store again (`password_store.py`). The same fact is kept a second time in
+`MARKER`, a file inside the profile's own folder (`profiles/<id>/`), because
+`profiles.json` alone is not enough: a daemon older than #215 cannot read a
+row that carries the key, so rolling one back means stripping it. **Sticky
+is the row flag or the marker**; clearing either alone does not un-stick a
+profile, and `mark_keyring` writes back whichever is missing. Once set,
+neither is ever cleared by Jarvis: "Sign out of everything" wipes the folder
+and writes the marker again, and only deleting the profile removes both.
 
 One store per host serializes atomic metadata updates. Chrome lifetimes and
 filesystem removal belong to the host, which excludes new opens while deleting.
@@ -27,6 +33,33 @@ MAX_PROFILES = 8
 MAX_BYTES = 64 * 1024
 _KEYS = frozenset({"id", "label", "created"})
 STICKY_KEY, STICKY_VALUE = "password_store", "keyring"
+# The marker inside `profiles/<id>/` (module note). Its presence is what
+# counts; any entry by that name, or one that cannot be read, is sticky.
+MARKER = ".jarvis-password-store"
+MARKER_TEXT = b"keyring\n"
+
+
+def profile_folder(identity: str) -> Path:
+    return config.BROWSER_DIR / "profiles" / identity
+
+
+def marker_present(identity: str) -> bool:
+    """Whether the profile's folder holds the keyring marker. Fails closed:
+    anything at that name (a file, a link, a folder) or an error other than
+    "not there" reads as present."""
+    try:
+        os.lstat(profile_folder(identity) / MARKER)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    return True
+
+
+def _write_marker(identity: str) -> None:
+    from .host import _write_private, secure_dir
+    folder = secure_dir(profile_folder(identity))
+    _write_private(folder / MARKER, MARKER_TEXT)
 
 
 def _refuse(status: int, sentence: str):
@@ -166,16 +199,27 @@ class ProfileStore:
             self._write(rows)
             return dict(row)
 
+    def sticky(self, value) -> bool:
+        """The row flag or the marker (module note)."""
+        identity = profile_id(value)
+        row = self.require(identity)
+        return row.get(STICKY_KEY) == STICKY_VALUE or marker_present(identity)
+
     def mark_keyring(self, value) -> dict:
-        """Record that this profile's Chrome uses the keyring, for good.
-        `BrowserRefused` when it cannot be saved: the caller then does not
-        launch."""
+        """Record that this profile's Chrome uses the keyring, for good: the
+        marker first, then the row, each only when missing. `BrowserRefused`
+        when either cannot be saved: the caller then does not launch."""
         identity = profile_id(value)
         with self._lock:
             rows = self._read()
             row = next((r for r in rows if r["id"] == identity), None)
             if row is None:
                 _refuse(404, "no such profile")
+            if not marker_present(identity):
+                try:
+                    _write_marker(identity)
+                except OSError:
+                    _refuse(409, "the profile's keyring marker could not be saved")
             if row.get(STICKY_KEY) != STICKY_VALUE:
                 row[STICKY_KEY] = STICKY_VALUE
                 self._write(rows)

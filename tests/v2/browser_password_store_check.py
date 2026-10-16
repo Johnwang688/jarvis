@@ -2,8 +2,13 @@
 
 Fakes only: a fake `gdbus` runner, a temporary BROWSER_DIR and settings file,
 a temporary "runtime dir" with a socket nobody listens on, and a fake
-Playwright. Never the real session bus, never a real keyring, never a secret.
-Run in a 3G/0swap systemd scope like the other Browser suites.
+Playwright whose Chrome writes the probe cookie's row into a temporary
+Cookies database with the prefix a real Chrome would (`v11` with the keyring
+flag, `v10` without, or whatever a test makes it fall back to). Never the
+real session bus, never a real keyring, never a secret. `subprocess.run` is
+patched to fail for the whole run, and the probe looks it up at each call, so
+that guard is real (NIT 2 of the follow-up review). Run in a 3G/0swap systemd
+scope like the other Browser suites.
 """
 from __future__ import annotations
 
@@ -12,9 +17,12 @@ import json
 import os
 from pathlib import Path
 import socket
+import sqlite3
+import stat
 import subprocess
 import sys
 import tempfile
+import threading
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -26,6 +34,20 @@ from jarvis.v2.browser.audio import LaunchAudio
 from jarvis.v2.browser.settings import BrowserSettings
 
 EXISTING = Path(sys.executable)   # stands in for /usr/bin/gdbus: it only has to exist
+
+# A probe that fails on the status refresh thread fails the run too.
+THREAD_ERRORS = []
+
+
+def setUpModule():
+    real = threading.excepthook
+    threading.excepthook = lambda args: (THREAD_ERRORS.append(repr(args.exc_value)), real(args))
+    unittest.addModuleCleanup(setattr, threading, "excepthook", real)
+
+
+def tearDownModule():
+    if THREAD_ERRORS:
+        raise AssertionError(f"errors on a background thread: {THREAD_ERRORS}")
 
 
 def reply(state):
@@ -261,16 +283,112 @@ class Sticky(unittest.TestCase):
             self.store.mark_keyring("p-00000000")
 
 
+def write_cookie(folder, name, encrypted, *, value="PLAINTEXT-NEVER-READ"):
+    """One row of a Chrome-shaped Cookies table."""
+    db = Path(folder) / "Default" / "Cookies"
+    db.parent.mkdir(parents=True, exist_ok=True)
+    con = sqlite3.connect(db)
+    try:
+        con.execute("CREATE TABLE IF NOT EXISTS cookies (creation_utc INTEGER, host_key TEXT, "
+                    "name TEXT, value TEXT, encrypted_value BLOB)")
+        con.execute("INSERT INTO cookies VALUES (0, ?, ?, ?, ?)",
+                    ("password-store.jarvis.invalid", name, value, encrypted))
+        con.commit()
+    finally:
+        con.close()
+
+
 class _Context:
-    def __init__(self):
+    """A fake persistent context. `chrome` says what its Chrome encrypts the
+    probe cookie with: "follow" (the flag it was given: `v11` for
+    gnome-libsecret, `v10` for basic), a prefix (bytes: it fell back), None
+    (the row never reaches the disk) or an exception to raise."""
+    def __init__(self, folder, args, chrome="follow"):
         self.browser = SimpleNamespace(version="155.0")
         self.closed = False
+        self.folder = Path(folder)
+        self.args = args
+        self.chrome = chrome
+        self.cookie_calls = []
 
     def on(self, *a):
         pass
 
+    async def add_cookies(self, cookies):
+        self.cookie_calls.append(cookies)
+        if isinstance(self.chrome, BaseException):
+            raise self.chrome
+        probe = cookies[0]
+        if probe["expires"] == 1 or self.chrome is None:
+            return
+        if self.chrome == "follow":
+            prefix = b"v11" if "--password-store=gnome-libsecret" in self.args else b"v10"
+        else:
+            prefix = self.chrome
+        write_cookie(self.folder, probe["name"], prefix + b"\x00ciphertext-never-read")
+
     async def close(self):
         self.closed = True
+
+
+class Observe(unittest.TestCase):
+    """`observed_store`: three bytes of one row, nothing else."""
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory(prefix="keyring-observe-"); self.addCleanup(tmp.cleanup)
+        self.folder = Path(tmp.name)
+
+    def test_prefixes(self):
+        self.assertIsNone(S.observed_store(self.folder, "x"))            # no database yet
+        write_cookie(self.folder, "other", b"v11zzz")
+        self.assertIsNone(S.observed_store(self.folder, "x"))            # no row yet
+        for name, enc, want in (("a", b"v11abc", S.KEYRING_STORE), ("b", b"v10abc", S.BASIC),
+                                ("c", b"v12abc", S.UNVERIFIED), ("d", b"", S.UNVERIFIED),
+                                ("e", b"v1", S.UNVERIFIED)):
+            write_cookie(self.folder, name, enc)
+            with self.subTest(name=name):
+                self.assertEqual(S.observed_store(self.folder, name), want)
+
+    def test_reads_only_three_bytes_of_one_row(self):
+        write_cookie(self.folder, "probe", b"v11" + b"K" * 64, value="PLAINTEXT-NEVER-READ")
+        seen = []
+        real = sqlite3.connect
+
+        def traced(*a, **kw):
+            seen.append((a, kw))
+            con = real(*a, **kw)
+            con.set_trace_callback(lambda sql: seen.append(sql))
+            return con
+        with patch.object(S.sqlite3, "connect", traced):
+            self.assertEqual(S.observed_store(self.folder, "probe"), S.KEYRING_STORE)
+        (args, kw), statements = seen[0], [x for x in seen[1:] if isinstance(x, str)]
+        self.assertTrue(args[0].startswith("file:") and args[0].endswith("?mode=ro&immutable=1"))
+        self.assertTrue(kw.get("uri"))
+        self.assertEqual(len(statements), 1)
+        self.assertIn("substr(encrypted_value, 1, 3)", statements[0])
+        self.assertNotRegex(statements[0].replace("encrypted_value", ""), r"\bvalue\b")
+
+    def test_a_linked_or_odd_database_is_unverified(self):
+        other = self.folder / "elsewhere"
+        write_cookie(other, "probe", b"v11abc")
+        (self.folder / "Default").mkdir()
+        (self.folder / "Default" / "Cookies").symlink_to(other / "Default" / "Cookies")
+        self.assertEqual(S.observed_store(self.folder, "probe"), S.UNVERIFIED)
+        (self.folder / "Default" / "Cookies").unlink()
+        (self.folder / "Default" / "Cookies").mkdir()
+        self.assertEqual(S.observed_store(self.folder, "probe"), S.UNVERIFIED)
+
+    def test_a_garbled_database_reads_again(self):
+        (self.folder / "Default").mkdir()
+        (self.folder / "Default" / "Cookies").write_bytes(b"not sqlite at all" * 100)
+        self.assertIsNone(S.observed_store(self.folder, "probe"))
+
+    def test_flush_constants(self):
+        # The probe (one add), the filler's first add and a delete and an add
+        # for each later set: at least 512 pending operations, Chrome's commit
+        # batch, whatever was pending before.
+        self.assertGreaterEqual(2 + 2 * (H.STORE_FLUSH_SETS - 1), 512)
+        for url in (H.STORE_PROBE_URL, H.STORE_FILL_URL):
+            self.assertTrue(url.startswith("https://") and url.rstrip("/").endswith(".invalid"))
 
 
 class Launch(unittest.IsolatedAsyncioTestCase):
@@ -285,13 +403,17 @@ class Launch(unittest.IsolatedAsyncioTestCase):
                                            wake=lambda *a: None, instance_status=lambda i: None)
         self.launches = []
         self.contexts = []
+        self.chrome = "follow"
 
         async def launch_persistent_context(folder, **kw):
             self.launches.append(kw)
-            self.contexts.append(_Context())
+            self.contexts.append(_Context(folder, kw["args"], self.chrome))
             return self.contexts[-1]
         self.host._pw = SimpleNamespace(chromium=SimpleNamespace(launch_persistent_context=launch_persistent_context))
         self.rt = Runtime(self)
+        self.stopped = []
+        guard = patch.object(H, "stop_pids", side_effect=lambda folder, *a, **k: self.stopped.append(folder) or 0)
+        guard.start(); self.addCleanup(guard.stop)
         # Any probe that reaches the real subprocess.run fails the test.
         guard = patch.object(subprocess, "run", side_effect=AssertionError("real gdbus run"))
         guard.start(); self.addCleanup(guard.stop)
@@ -306,11 +428,28 @@ class Launch(unittest.IsolatedAsyncioTestCase):
     def basic(self, value="basic"):
         self.settings_path.write_text(json.dumps({"password_store": value}))
 
-    def sticky(self):
-        return self.host._profiles.require(self.main).get("password_store") == "keyring"
+    def row_sticky(self, profile=None):
+        return self.host._profiles.require(profile or self.main).get("password_store") == "keyring"
+
+    def marker(self, profile=None):
+        return P.profile_folder(profile or self.main) / P.MARKER
+
+    def sticky(self, profile=None):
+        return self.row_sticky(profile) and self.marker(profile).is_file()
+
+    def strip_row(self, profile=None):
+        path = config.BROWSER_DIR / "profiles.json"
+        rows = json.loads(path.read_text())
+        for row in rows:
+            row.pop("password_store", None)
+        path.write_text(json.dumps(rows))
 
     def flags(self, n=-1):
         return self.launches[n]["args"], self.launches[n]["env"]
+
+    def publish(self, instance):
+        self.host._instances[instance.profile] = instance
+        self.host._publish_snapshot()
 
     async def refused(self, profile, message):
         with self.assertRaises(H.BrowserRefused) as caught:
@@ -318,7 +457,7 @@ class Launch(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((caught.exception.status, str(caught.exception)), (409, message))
 
     async def test_unlocked_launch_uses_the_keyring_with_the_bus_and_turns_sticky(self):
-        self.keyring(S.UNLOCKED, S.UNLOCKED)
+        self.keyring(S.UNLOCKED)
         instance = await self.host._launch(self.main)
         args, env = self.flags()
         self.assertIn("--password-store=gnome-libsecret", args)
@@ -328,12 +467,65 @@ class Launch(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(env["DBUS_SESSION_BUS_ADDRESS"], self.rt.address)
         self.assertEqual(instance.password_store, S.KEYRING_STORE)
         self.assertTrue(self.sticky())
-        self.assertEqual(len(self.run.calls), 2)          # before and after
-        self.host._instances[self.main] = instance
-        self.host._publish_snapshot()
+        self.assertEqual(stat.S_IMODE(self.marker().stat().st_mode), 0o600)
+        self.assertEqual(self.marker().read_bytes(), P.MARKER_TEXT)
+        self.assertEqual(len(self.run.calls), 1)          # before; after is the observation
+        self.publish(instance)
         self.run.states.append(S.UNLOCKED)
         sync = self.host.password_store_status()
-        self.assertEqual((sync["password_store"], sync["unprotected"], sync["hint"]), (S.KEYRING_STORE, False, None))
+        self.assertEqual((sync["password_store"], sync["unprotected"], sync["hint"], sync["source"]),
+                         (S.KEYRING_STORE, False, None, "observed"))
+        self.assertEqual(sync["profiles"][self.main]["store"], S.KEYRING_STORE)
+        self.assertTrue(sync["profiles"][self.main]["sticky"])
+        self.assertFalse(sync["profiles"][self.main]["unprotected"])
+
+    async def test_the_probe_cookie_is_fresh_flushed_and_expired_again(self):
+        self.keyring(S.UNLOCKED, S.UNLOCKED)
+        await self.host._launch(self.main)
+        first = self.contexts[-1].cookie_calls
+        self.assertEqual(len(first), 2)
+        probe, fill = first[0][0], first[0][1:]
+        self.assertTrue(probe["name"].startswith("jarvis-store-") and len(probe["name"]) == 25)
+        self.assertEqual((probe["url"], probe["value"]), (H.STORE_PROBE_URL, "1"))
+        self.assertGreater(probe["expires"], 0)
+        self.assertEqual(len(fill), H.STORE_FLUSH_SETS)
+        self.assertEqual({c["name"] for c in fill}, {H.STORE_FILL_NAME})
+        self.assertEqual({c["url"] for c in fill}, {H.STORE_FILL_URL})
+        self.assertEqual(len({c["value"] for c in fill}), H.STORE_FLUSH_SETS)   # each one a change
+        expired = first[1]
+        self.assertEqual([(c["name"], c["url"], c["expires"]) for c in expired],
+                         [(probe["name"], H.STORE_PROBE_URL, 1), (H.STORE_FILL_NAME, H.STORE_FILL_URL, 1)])
+        await self.host._launch(self.main)
+        self.assertNotEqual(self.contexts[-1].cookie_calls[0][0]["name"], probe["name"])
+
+    async def test_a_keyring_launch_that_chrome_wrote_with_basic_is_closed_and_refused(self):
+        # MED 1: the keyring reads unlocked before and after, yet this Chrome
+        # fell back (its own D-Bus call failed, a portal path …).
+        self.keyring(S.UNLOCKED, S.UNLOCKED)
+        self.chrome = b"v10"
+        await self.refused(self.main, S.FELL_BACK_MESSAGE)
+        self.assertEqual(len(self.launches), 1)
+        self.assertTrue(self.contexts[0].closed)
+        self.assertIn(P.profile_folder(self.main), self.stopped)
+        self.assertTrue(self.sticky())
+        self.assertNotIn(self.main, self.host._instances)
+
+    async def test_a_keyring_that_locked_during_the_launch_says_so(self):
+        self.keyring(S.UNLOCKED, S.LOCKED)
+        self.chrome = b"v10"                       # measured: a locked collection gives v10
+        await self.refused(self.main, S.CHANGED_MESSAGE)
+        self.assertTrue(self.contexts[0].closed)
+        self.assertTrue(self.sticky())
+
+    async def test_an_unconfirmed_store_is_refused_for_a_keyring_launch(self):
+        with patch.object(H, "STORE_OBSERVE_S", 0.2):
+            for chrome in (None, b"v12", RuntimeError("cdp gone")):
+                with self.subTest(chrome=chrome):
+                    self.keyring(S.UNLOCKED, S.UNLOCKED)
+                    self.chrome = chrome
+                    await self.refused(self.main, S.UNVERIFIED_MESSAGE)
+                    self.assertTrue(self.contexts[-1].closed)
+        self.assertTrue(self.sticky())
 
     async def test_locked_no_keyring_and_unknown_answers_refuse_without_launching(self):
         for state in (S.LOCKED, S.NO_KEYRING, S.ERROR):
@@ -341,10 +533,11 @@ class Launch(unittest.IsolatedAsyncioTestCase):
                 self.keyring(state)
                 await self.refused(self.main, S.UNLOCK_MESSAGE)
                 self.assertEqual(self.launches, [])
-                self.assertFalse(self.sticky())
+                self.assertFalse(self.row_sticky())
+                self.assertFalse(self.marker().exists())
 
     async def test_unavailable_launches_basic_loudly_without_the_bus(self):
-        self.keyring(S.UNAVAILABLE, S.UNAVAILABLE)
+        self.keyring(S.UNAVAILABLE)
         with patch.dict(os.environ, {"DBUS_SESSION_BUS_ADDRESS": self.rt.address}):
             instance = await self.host._launch(self.main)
         args, env = self.flags()
@@ -352,13 +545,24 @@ class Launch(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("DBUS_SESSION_BUS_ADDRESS", env)
         self.assertNotIn("HardwareMediaKeyHandling", " ".join(args))
         self.assertEqual(instance.password_store, S.BASIC)
-        self.assertFalse(self.sticky())
-        self.host._instances[self.main] = instance
-        self.host._publish_snapshot()
+        self.assertFalse(self.row_sticky())
+        self.assertFalse(self.marker().exists())
+        self.publish(instance)
         sync = self.host.password_store_status()
         self.assertEqual((sync["password_store"], sync["unprotected"]), (S.BASIC, True))
         self.assertIn(S.INSTALL_COMMAND, sync["hint"])
         self.assertTrue(sync["hint"].startswith("Unprotected (basic store)"))
+        self.assertTrue(sync["profiles"][self.main]["unprotected"])
+
+    async def test_a_basic_launch_reports_what_was_observed(self):
+        self.keyring(S.UNAVAILABLE)
+        with patch.object(H, "STORE_OBSERVE_S", 0.2):
+            self.chrome = None
+            instance = await self.host._launch(self.main)
+        self.assertEqual(instance.password_store, S.UNVERIFIED)
+        self.publish(instance)
+        sync = self.host.password_store_status()
+        self.assertEqual((sync["password_store"], sync["unprotected"]), (S.UNVERIFIED, True))
 
     async def test_a_sticky_profile_never_opens_with_basic(self):
         self.host._profiles.mark_keyring(self.main)
@@ -370,6 +574,53 @@ class Launch(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.launches, [])
         self.assertEqual(self.run.calls, [])
 
+    async def test_the_marker_alone_keeps_a_profile_sticky_and_restores_the_row(self):
+        # MED 2: a rollback (or anything else) stripped the row's flag.
+        self.host._profiles.mark_keyring(self.main)
+        self.strip_row()
+        self.assertFalse(self.row_sticky())
+        self.keyring(S.UNAVAILABLE)
+        await self.refused(self.main, S.STICKY_UNAVAILABLE_MESSAGE)
+        self.basic()
+        self.keyring()
+        await self.refused(self.main, S.STICKY_BASIC_MESSAGE)
+        self.settings_path.unlink()
+        self.keyring(S.UNLOCKED)
+        instance = await self.host._launch(self.main)
+        self.assertEqual(instance.password_store, S.KEYRING_STORE)
+        self.assertTrue(self.row_sticky())                     # written back
+
+    async def test_the_row_alone_keeps_a_profile_sticky_and_restores_the_marker(self):
+        self.host._profiles.mark_keyring(self.main)
+        self.marker().unlink()
+        self.keyring(S.UNAVAILABLE)
+        await self.refused(self.main, S.STICKY_UNAVAILABLE_MESSAGE)
+        self.keyring(S.UNLOCKED)
+        await self.host._launch(self.main)
+        self.assertTrue(self.marker().is_file())               # written back
+
+    async def test_anything_at_the_marker_name_is_sticky(self):
+        folder = H.secure_dir(P.profile_folder(self.main))
+        for make in (lambda m: m.mkdir(), lambda m: m.symlink_to("/nonexistent")):
+            with self.subTest(make=make):
+                make(self.marker())
+                self.assertTrue(self.host._profiles.sticky(self.main))
+                self.keyring(S.UNAVAILABLE)
+                await self.refused(self.main, S.STICKY_UNAVAILABLE_MESSAGE)
+                (self.marker().rmdir if self.marker().is_dir() and not self.marker().is_symlink()
+                 else self.marker().unlink)()
+        self.assertTrue(folder.is_dir())
+
+    async def test_sign_out_of_everything_keeps_the_profile_sticky(self):
+        self.host._profiles.mark_keyring(self.main)
+        (P.profile_folder(self.main) / "Cookies").write_text("old")
+        self.host.forget(self.main)
+        self.assertFalse((P.profile_folder(self.main) / "Cookies").exists())
+        self.assertTrue(self.sticky())
+        self.host.delete_profile(self.main)
+        self.assertFalse(P.profile_folder(self.main).exists())
+        self.assertNotIn(self.main, [r["id"] for r in self.host._profiles.list()])
+
     async def test_owner_basic_override_is_honoured_loudly_and_never_probes(self):
         self.basic()
         self.keyring()
@@ -378,21 +629,14 @@ class Launch(unittest.IsolatedAsyncioTestCase):
         self.assertIn("--password-store=basic", args)
         self.assertNotIn("DBUS_SESSION_BUS_ADDRESS", env)
         self.assertEqual(self.run.calls, [])
-        self.host._instances[self.main] = instance
-        self.host._publish_snapshot()
-        self.run.states.append(S.UNLOCKED)
+        self.assertEqual(instance.password_store, S.BASIC)
+        self.publish(instance)
+        self.run.states.append(S.UNLOCKED)     # /status refreshes the cached state behind
         sync = self.host.password_store_status()
         self.assertEqual((sync["requested"], sync["password_store"], sync["unprotected"]), ("basic", S.BASIC, True))
         self.assertIn("browser.json", sync["hint"])
 
-    async def test_keyring_locked_during_launch_closes_chrome_and_stays_sticky(self):
-        self.keyring(S.UNLOCKED, S.LOCKED)
-        await self.refused(self.main, S.CHANGED_MESSAGE)
-        self.assertEqual(len(self.launches), 1)
-        self.assertTrue(self.contexts[0].closed)
-        self.assertTrue(self.sticky())
-
-    async def test_private_is_basic_without_the_bus_or_a_probe(self):
+    async def test_private_is_basic_without_the_bus_a_probe_or_a_cookie(self):
         self.keyring()
         instance = await self.host._launch(H.PRIVATE)
         args, env = self.flags()
@@ -400,6 +644,7 @@ class Launch(unittest.IsolatedAsyncioTestCase):
         self.assertIn("--disable-sync", args)
         self.assertNotIn("DBUS_SESSION_BUS_ADDRESS", env)
         self.assertEqual(self.run.calls, [])
+        self.assertEqual(self.contexts[-1].cookie_calls, [])
         self.assertEqual(instance.password_store, S.BASIC)
 
     async def test_a_detached_host_never_hands_chrome_the_real_bus(self):
@@ -408,7 +653,7 @@ class Launch(unittest.IsolatedAsyncioTestCase):
         args, env = self.flags()
         self.assertIn("--password-store=basic", args)
         self.assertNotIn("DBUS_SESSION_BUS_ADDRESS", env)
-        self.assertFalse(self.sticky())
+        self.assertFalse(self.row_sticky())
         sync = self.host.password_store_status()
         self.assertEqual((sync["keyring"], sync["next_launch"], sync["unprotected"]), (S.UNAVAILABLE, S.BASIC, True))
 
@@ -419,6 +664,56 @@ class Launch(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((sync["password_store"], sync["next_launch"], sync["hint"]),
                          (None, "refused", S.UNLOCK_MESSAGE))
         self.assertFalse(sync["unprotected"])
+        self.assertEqual(sync["profiles"][self.main]["next_launch"], "refused")
+
+    async def test_unknown_is_checking_not_refused(self):
+        # LOW 4: a cached `unknown` (nothing read yet) said "refused" and
+        # showed the red unlock message even when the keyring was unlocked.
+        self.keyring(S.UNLOCKED)
+        with patch.object(threading.Thread, "start", lambda self: None):   # no refresh behind
+            sync = self.host.password_store_status()
+        self.assertEqual(sync["keyring"], S.UNKNOWN)
+        self.assertEqual((sync["next_launch"], sync["hint"], sync["unprotected"]), ("checking", None, False))
+        self.assertEqual(sync["profiles"][self.main]["next_launch"], "checking")
+        self.assertIsNone(sync["profiles"][self.main]["hint"])
+        # The owner's basic is known without the keyring: never "checking".
+        self.basic()
+        sync = self.host.password_store_status()
+        self.assertEqual(sync["next_launch"], S.BASIC)
+
+    async def test_per_profile_status_names_the_browser_json_override(self):
+        # NIT 1: a sticky profile under browser.json's basic is refused for
+        # browser.json, not the keyring; another profile is just basic.
+        other = self.host._profiles.create("Other")["id"]
+        self.host._profiles.mark_keyring(self.main)
+        self.basic()
+        self.keyring(S.UNLOCKED)
+        self.host.keyring.state()
+        sync = self.host.password_store_status()
+        mine, theirs = sync["profiles"][self.main], sync["profiles"][other]
+        self.assertEqual((mine["next_launch"], mine["hint"], mine["sticky"]), ("refused", S.STICKY_BASIC_MESSAGE, True))
+        self.assertIn("browser.json", mine["hint"])
+        self.assertEqual((theirs["next_launch"], theirs["sticky"], theirs["unprotected"]), (S.BASIC, False, True))
+        self.assertIn("browser.json", theirs["hint"])
+        self.assertNotIn("Unlock", theirs["hint"])
+
+
+class Guard(unittest.TestCase):
+    """NIT 2: the default runner is `subprocess.run` as it is at the call,
+    so the suite's patch really guards a default `Keyring()` and `probe()`."""
+    def test_default_runner_is_resolved_at_call_time(self):
+        rt = Runtime(self)
+        with patch.object(subprocess, "run", side_effect=AssertionError("real gdbus run")):
+            k = S.Keyring(gdbus=EXISTING)
+            k.attach({"DBUS_SESSION_BUS_ADDRESS": rt.address}, runtime=rt.dir)
+            with self.assertRaises(AssertionError):
+                k.state()
+            with self.assertRaises(AssertionError):
+                S.probe(rt.address, gdbus=EXISTING)
+        seen = []
+        with patch.object(subprocess, "run", side_effect=lambda *a, **kw: seen.append(a) or reply(S.LOCKED)):
+            self.assertEqual(S.probe(rt.address, gdbus=EXISTING), S.LOCKED)
+        self.assertEqual(len(seen), 1)
 
 
 class LaunchArgs(unittest.TestCase):

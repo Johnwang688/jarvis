@@ -1032,6 +1032,102 @@ def dispatch_checks() -> None:
     print("ok  dispatch: deny never runs and never asks; allow runs unasked; ask still gates")
 
 
+SECRET_SERVICE_DENY = (
+    # the dedicated readers, any subcommand, any spelling
+    "secret-tool lookup application chrome", "secret-tool search --all xdg:schema x",
+    "secret-tool store --label=x a b", "secret-tool clear application chrome",
+    "/usr/bin/secret-tool lookup a b", "sec''ret-tool lookup a b", "s\\ecret-tool lookup a b",
+    "uv run secret-tool lookup a b", "env -i secret-tool lookup a b", "nohup secret-tool lookup a b &",
+    "echo x | xargs secret-tool lookup application", "kwallet-query -r chrome kdewallet",
+    # D-Bus clients that name the Secret Service, its interfaces or paths
+    "busctl --user call org.freedesktop.secrets /org/freedesktop/secrets "
+    "org.freedesktop.Secret.Service SearchItems 'a{ss}' 1 application chrome",
+    "busctl --user get-property org.freedesktop.secrets /org/freedesktop/secrets/aliases/default "
+    "org.freedesktop.Secret.Collection Locked",
+    "gdbus call --session --dest org.freedesktop.secrets --object-path /org/freedesktop/secrets "
+    "--method org.freedesktop.Secret.Service.Unlock \"['/org/freedesktop/secrets/aliases/default']\"",
+    "dbus-send --session --print-reply --dest=org.freedesktop.secrets /org/freedesktop/secrets "
+    "org.freedesktop.Secret.Service.OpenSession string:plain variant:string:",
+    "gdbus call --session --dest 'org.freedesktop.'\"secrets\" --object-path / --method x.y",
+    "gdbus call -e -d $'org.freedesktop.\\x73ecrets' -o / -m x.y",
+    "gdbus call -e -d org.freedesktop.${X:-secrets} -o / -m x.y",
+    "gdbus call -e -d ORG.FREEDESKTOP.SECRETS -o / -m x.y",
+    "busctl --user call :1.42 /org/freedesktop/secrets/collection/login/1 org.freedesktop.Secret.Item "
+    "GetSecret o /",
+    "busctl --user introspect org.freedesktop.secrets /org/freedesktop/secrets",
+    "qdbus org.freedesktop.secrets /org/freedesktop/secrets",
+    "busctl --user call org.freedesktop.portal.Desktop /org/freedesktop/portal/desktop "
+    "org.freedesktop.portal.Secret RetrieveSecret h 3",
+    "gdbus call --session --dest org.gnome.keyring --object-path /org/gnome/keyring/daemon --method x.y",
+    "busctl --user call org.kde.kwalletd6 /modules/kwalletd6 org.kde.KWallet open sxs kdewallet 0 x",
+    # behind a wrapper, a runner, a shell string or an interpreter
+    "env DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus busctl --user tree org.freedesktop.secrets",
+    "uv run gdbus call --session --dest org.freedesktop.secrets --object-path / --method x.y",
+    "bash -c 'gdbus call --session --dest org.freedesktop.secrets --object-path / --method x.y'",
+    "sh -c \"busctl --user call org.freedesktop.secrets / x y\" > out.txt",
+    "python3 -c 'import dbus; dbus.SessionBus().get_object(\"org.freedesktop.secrets\", \"/\")'",
+    "node -e 'require(\"dbus-next\").sessionBus().getProxyObject(\"org.freedesktop.secrets\", \"/\")'",
+    "ls; gdbus call --session --dest org.freedesktop.secrets --object-path / --method x.y",
+    # session-bus monitors (they would see the key on its way to Chrome)
+    "dbus-monitor", "dbus-monitor --session", "dbus-monitor --address unix:path=/run/user/1000/bus",
+    "nohup dbus-monitor --session > /tmp/bus.log &", "uv run dbus-monitor",
+    "busctl --user monitor", "busctl monitor --user", "busctl --user capture > bus.pcap",
+    "gdbus monitor --session --dest :1.5", "gdbus monitor -e -d org.freedesktop.Notifications",
+)
+SECRET_SERVICE_ORDINARY = (
+    "busctl --user list", "busctl monitor", "busctl --system monitor", "dbus-monitor --system",
+    "gdbus monitor --system --dest org.freedesktop.login1",
+    "gdbus call --session --dest org.freedesktop.Notifications --object-path "
+    "/org/freedesktop/Notifications --method org.freedesktop.Notifications.GetServerInformation",
+    "busctl --user call org.mpris.MediaPlayer2.spotify /org/mpris/MediaPlayer2 "
+    "org.mpris.MediaPlayer2.Player PlayPause",
+    "grep -rn org.freedesktop.secrets jarvis/", "git commit -m 'probe org.freedesktop.secrets Locked'",
+    "echo org.freedesktop.Secret.Service", "apt-cache policy libsecret-tools",
+    "systemctl --user status gnome-keyring-daemon", "ls -l ~/.local/share/keyrings",
+    "python3 tests/v2/browser_password_store_check.py",
+)
+
+
+def secret_service_checks() -> None:
+    """Agent shell calls to the Secret Service (the owner's keyring, where
+    the Browser's Chrome keeps its password key) are DENY — never put to the
+    owner, never covered by an allowlist entry, never run (B-LOGIN follow-up,
+    2026-10-15). Mentions and other D-Bus calls are not refused for it."""
+    from jarvis import permissions
+    for command in SECRET_SERVICE_DENY:
+        verdict = rules.decide(command)
+        assert verdict.decision == rules.DENY, f"{command!r}: {verdict}"
+        assert "Secret Service" in verdict.reason or "session bus" in verdict.reason, verdict.reason
+    for command in SECRET_SERVICE_ORDINARY:
+        verdict = rules.decide(command)
+        assert verdict.decision != rules.DENY, f"{command!r} must not be refused: {verdict}"
+    # Through v1's real dispatch, with an approver that says yes and an
+    # allowlist entry for every stem on the lines: nothing runs, nobody is asked.
+    asked: list[str] = []
+
+    def approver(tool, args):
+        asked.append(args.get("command", ""))
+        return True
+    approver.jarvis_human_backed = True
+    for stem in ("busctl", "gdbus", "dbus-send", "secret-tool", "dbus-monitor", "python3", "uv"):
+        permissions.add_allow("run_command", {"command": stem + " x"})
+    gated = permissions.gate(approver)
+    with recorded() as ran:
+        for command in SECRET_SERVICE_DENY[:12] + SECRET_SERVICE_DENY[-10:]:
+            out = tools.dispatch("run_command", json.dumps({"command": command, "reason": "x"}),
+                                 approve=gated)
+            assert "Refused" in out.text, (command, out.text)
+        assert not ran, f"a Secret Service call ran: {ran}"
+        assert not asked, f"a Secret Service call was put to the owner: {asked}"
+        out = tools.dispatch("run_command", json.dumps({"command": "busctl --user list", "reason": "x"}),
+                             approve=gated)
+        assert ran == ["busctl --user list"], ran
+    from jarvis import config
+    config.ALLOWLIST_PATH.unlink()
+    print(f"ok  secret service: {len(SECRET_SERVICE_DENY)} calls refused unasked even when "
+          f"allowlisted; {len(SECRET_SERVICE_ORDINARY)} ordinary lines not refused")
+
+
 def background_agents_never_auto_approve_checks() -> None:
     """The regression this nearly shipped with.
 
@@ -3625,6 +3721,7 @@ def main() -> int:
     run_readonly_narrowing_checks()
     write_in_disguise_checks()
     dispatch_checks()
+    secret_service_checks()
     background_agents_never_auto_approve_checks()
     secrets_still_win_checks()
     fetch_execute_detection_checks()
