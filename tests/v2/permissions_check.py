@@ -2423,6 +2423,10 @@ MERGE_GATE_ASK = (
     # MED-C of #222's last review: where the line runs text only refs are
     # blanked — a brace word a shell expands to a command is not one.
     ("git commit -m '{gh,pr,merge,1}' && git log -1 --format=%s | bash", _PR_UNSURE),
+    # The same brace word as an operand, not an option's value (which stays
+    # anyway since #225's LOW 1): only `_REF_WORD` keeps it visible.
+    ("git show '{gh,pr,merge,1}' | bash", _PR_UNSURE),
+    ("git add -- '{gh,pr,merge,1}' && git log -1 --format=%s | bash", _PR_UNSURE),
     ("PAGER=sh git log -1 --format=gh\\ pr\\ merge\\ 1", _PR_UNSURE),
     # Blanking a data option's value is anchored to its option: the same
     # text fed to a shell elsewhere on the line is still read.
