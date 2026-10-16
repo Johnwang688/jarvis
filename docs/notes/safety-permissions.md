@@ -2269,6 +2269,68 @@ Files changed under SELF_PROTECTED, for the owner's review: `jarvis/tools/__init
 `jarvis/protected_state.py` (default `cwd`). Each change only places a path,
 adds an ask or withholds more.
 
+<<<<<<< HEAD
+## Command-bearing tools are command tools (2026-10-15)
+
+Found in the boundary review of PR #208: Claude's `Monitor` tool runs a shell
+command (its stdout lines are events) but was not in the permit's
+`COMMAND_TOOLS`, so the permit read no command from it. Under AUTO,
+`Monitor {command: "cat .env"}` and a daemon kill reached the provider's
+reviewer at layer 5, past layer 1's credential, owner-op and daemon-kill
+DENY. An Always on a Monitor card minted `{"tool": "Monitor"}`, a whole-tool
+grant over every later Monitor command.
+
+- **Judged: fail closed (layers 1 and 2).** `approvals.is_command_tool(tool,
+  args)` decides what the never-approvable rules, the secrets layer,
+  protected state and the always-ask rules read as a command: a known shell
+  (`approvals.V2_COMMAND_TOOLS`: Bash, BashOutput, Monitor, PowerShell;
+  Codex's shell, local_shell, exec_command; run_command, run_readonly), **or
+  any tool whose arguments carry a command line** under `command`, `cmd` or
+  `script` (text or an argv array). A tool a newer CLI adds is judged from
+  its first call. More than one such key is judged as every one of them, and
+  an argv list beside the command (`{"command": "cat", "args": [".env"]}`)
+  is judged with it.
+- **Trusted: real shells only (layer 4; #211 review, F1).** Only the known
+  shells map to v1's `run_command` (`v1_request`) and reach the allowlist's
+  stems and rules' static ALLOW. An unknown command-bearing tool
+  (`mcp__remote__exec`) never does: no stem entry, no whole-tool entry, no
+  rules ALLOW, and its cards offer no Always (one sent anyway writes
+  nothing). It falls through to layer 5 as on main, so its answer is main's
+  or stricter. An Always on a Monitor card mints a stem entry. **Whole-tool
+  entries stop matching** for every command-bearing tool: an existing
+  `{"tool": "Monitor"}` or `{"tool": "mcp__remote__exec"}` no longer answers
+  anything.
+- **No command text (F3).** A known shell whose command key is present but
+  holds no text (empty, `null`, a number, an object) is refused at layer 1:
+  there is nothing to judge. An unknown tool whose command key holds a value
+  that is not text is asked at layer 2 (`command-unreadable`); with nobody to
+  ask it is refused.
+- **Code tools keep main's treatment (F2; lead's decision, the owner may
+  revisit).** Claude's `Workflow` runs a JavaScript `script`, as may
+  `AppifactRepl` and `REPL` (`approvals.CODE_TOOLS`). They are never read as
+  a shell line and are allowlisted as a whole tool, exactly as before this
+  change, so a script that mentions `.env` is not refused and a
+  `{"tool": "Workflow"}` entry still covers its scripts.
+- **Codex.** Its command approvals are always named `shell` by the provider
+  (`CodexProvider._tool`), so nothing new reached it this way; its
+  `exec_command` name is listed for completeness.
+- **Exposure.** Jarvis does not remove Monitor. Chat and implementer briefs
+  pass `tools=None` (the CLI's full native set) and only the orchestrator,
+  reviewer and researcher roles name their tools. The recorded 2.1.295 SDK
+  catalog (`tests/v2/fixtures/subagents/claude/catalog.json`) lists the
+  tools sent in each first request and does not list Monitor, because the
+  CLI offers it as a **deferred tool**: named in the session and loaded
+  through ToolSearch when the model asks for it, not sent up front. So a
+  Jarvis session can reach it.
+- **Limit.** A PowerShell line is judged by the POSIX shell rules; its own
+  syntax (backtick escapes, its quoting, `-EncodedCommand`) is not modelled,
+  so layer 1 can miss a PowerShell spelling of a refused command.
+- **Pinned by** `tests/v2/permissions_check.py command_tool_checks` and the
+  mutants in `tests/v2/command_tool_mutants.py`.
+=======
+
+**Monitor and `exec_command` are trusted shells (lead decision, accepted on review of #211).** They get Bash's treatment at layer 4: under ASK and STRICT a Monitor command an allowlist stem or the rules' static ALLOW covers (e.g. `ls`, an allowlisted `npm …`) runs without a card, where main asked (ASK) or refused (STRICT). This is the one place the PR is not "main or stricter"; it matches Bash because Monitor runs a real shell. `exec_command` is not reachable today (Codex names its approvals `shell`).
+
 ## Credentials typed into a command are withheld from displays, cards and logs (2026-10-15)
 
 Current rule, beside the preserved notes above. **The owner's decision of
@@ -2420,3 +2482,4 @@ Files changed under SELF_PROTECTED, for the owner's review:
 `jarvis/tools/secrets.py` (new functions only; nothing existing changed)
 and `jarvis/face/approvals.py` (the card's display copy). Both only
 withhold more from a display, and never from a judge.
+>>>>>>> origin/main
