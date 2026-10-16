@@ -53,13 +53,15 @@ runner from rules' one table — `uv run`, `npx`, `env`, `xargs`, `bash -lc`):
   the line asks. It does not read the arguments of programs the walk
   judged by structure — a git subcommand's refspecs, revisions and message,
   `gh pr create --base main --body …`, `gh api`'s — blanked where that
-  program stands; `-c` values, assignments and exec options stay, and with
-  a program on the line that runs text the walk cannot read (`| sh`,
-  `eval "$(…)"`), or a setting that may hand git's output to one (a pager
-  or editor other than `cat`/`less`, any `-c`, `git config` write or
-  variable outside a short benign list), nothing is blanked. A line of only git, gh and data
-  programs is read by its structure alone, so a commit message or PR body
-  that mentions a merge asks nothing.
+  program stands; `-c` values, assignments and exec options stay. With a
+  program on the line that runs text the walk cannot read (`| sh`, `eval
+  "$(…)"`), or a setting that may hand git's output to one (a pager or
+  editor other than `cat`/`less`, any `-c`, `git config` write or variable
+  outside a short benign list), only the refs among them are blanked
+  (`origin/main..HEAD`, `--base main`), never a value git or gh could print
+  or run (`--format=…`, `-m '…'`, `--body …`). A line of only git, gh and
+  data programs is read by its structure alone, so a commit message or PR
+  body that mentions a merge asks nothing.
 
 Where it cannot tell — a branch, method, endpoint or verb that is an
 expansion, a folder it cannot follow, a git config override on the line, a
@@ -207,8 +209,8 @@ MASK_ARGS_CAP = 256     # a program with more words is not blanked
 # Programs that run text the walk cannot read — a shell fed standard input
 # or a file, `eval`, an interpreter, `source`, `xargs`, `ssh`, a program
 # read from input or an expansion (`bash -c "$(…)"` walks to one, `$(_)`;
-# a literal `-c` line is walked like the rest): with one on the line
-# nothing is blanked, since a stored message may be what it runs
+# a literal `-c` line is walked like the rest): with one on the line only
+# refs are blanked (`_ref_only`), since a stored message may be what it runs
 # (`git commit -m '…' && git log -1 --format=%s | sh`; LOW of the review).
 _RUNS_TEXT = frozenset({"eval", "source", ".", "xargs", "ssh", "cmd", "cmd.exe", "wsl", "wsl.exe",
                         "parallel", "watch", "script", "expect"})
@@ -225,7 +227,7 @@ _VAR_BUILTINS = frozenset({"export", "declare", "typeset", "local", "readonly"})
 # commit message, a `--format` value — to a program (MED-B of #222's delta
 # review: `git -c core.pager=sh log --format='gh pr merge 1'` ran it). Any
 # other `-c`, `git config` write, config file write or variable makes the
-# line one that runs text, and nothing on it is blanked.
+# line one that runs text, where only refs are blanked (`_ref_only`).
 _SAFE_CONFIG = re.compile(
     r"(user|color|advice|init|safe|i18n|column|status|rerere)\.[^=]*"
     r"|core\.(quotepath|autocrlf|filemode|safecrlf|ignorecase|precomposeunicode|longpaths|eol|abbrev)"
@@ -820,14 +822,37 @@ def _spellings(text: str) -> list[str]:
     return out
 
 
-def _masked(command: str, masks: list) -> str:
+# A word that can only be a ref, a revision, a refspec or a path
+# (`origin/main..HEAD`, `HEAD@{1}`, `+main:topic`, `src/x.py`): no space,
+# quote, `$`, `,` or shell punctuation, so no shell that is handed it can
+# read a command in it. On a line that runs text (`runs_text`), only these
+# are blanked (MED-C of #222's last review): a value git or gh could hand to
+# a pager or a program — `--format=…`, `-m '…'`, `--body …`, `-q …` — stays.
+_REF_WORD = re.compile(r"[A-Za-z0-9_./@^~:+*{}-]+")
+_REF_OPTION = re.compile(r"(--(base|head|repo|onto|set-upstream-to)=|-[BHR])(?P<ref>.+)")
+
+
+def _ref_only(text: str) -> bool:
+    """Whether a masked word stays blanked where the line runs text: a
+    ref-like operand, or a ref given to `--base=`/`--head=`/`-B…` and kin."""
+    if not text.startswith("-"):
+        return bool(_REF_WORD.fullmatch(text))
+    match = _REF_OPTION.fullmatch(text)
+    return bool(match and _REF_WORD.fullmatch(match.group("ref")))
+
+
+def _masked(command: str, masks: list, refs_only: bool = False) -> str:
     """The line with the masked arguments blanked by position: each
     program is found as the line spells it, every word in order (the
     first such place), and only the masked words of that place are
-    blanked. A program spelled any other way keeps its words (they may
-    ask); past `MASK_CAP` programs nothing is blanked."""
+    blanked — with `refs_only`, only those that are refs (`_ref_only`).
+    A program spelled any other way keeps its words (they may ask); past
+    `MASK_CAP` programs nothing is blanked."""
+    if refs_only:
+        masks = [(prog, frozenset(k for k in indexes if _ref_only(str(prog.args[k]))))
+                 for prog, indexes in masks]
     seen = list(dict.fromkeys((str(prog.word), tuple(str(a) for a in prog.args), indexes)
-                              for prog, indexes in masks))
+                              for prog, indexes in masks if indexes))
     if not seen or len(seen) > MASK_CAP:
         return command
     for word, args, indexes in seen:
@@ -1651,7 +1676,7 @@ def judge(command: str, cwd=None) -> Hit | None:
         # judged by structure (`git push origin main:topic`, `gh pr create
         # --base main --body …`) are blanked where they stand, unless a
         # program on the line runs text it cannot read (`_masked`).
-        _text(line, command if line.runs_text else _masked(command, line.masks))
+        _text(line, _masked(command, line.masks, refs_only=line.runs_text))
     if not line.hits:
         return None
     words = []

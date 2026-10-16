@@ -154,15 +154,24 @@ networking is off by design.
   options' values and the arguments of a subcommand handed a program stay.
   With a program on the line that runs text the walk cannot read — a shell
   fed standard input, a file or a non-literal `-c`, `eval`, an interpreter,
-  `source`, `xargs`, `ssh` — nothing is blanked, so a stored message cannot
-  be laundered (`git commit -m '…' && git log -1 --format=%s | sh`).
-  Nor is anything blanked where a setting on the line may hand git's own
-  output to a program (#222's delta review, MED-B: `git -c core.pager=sh log
+  `source`, `xargs`, `ssh` — only refs are blanked, so a stored message
+  cannot be laundered (`git commit -m '…' && git log -1 --format=%s | sh`).
+  The same holds where a setting on the line may hand git's own output to a
+  program (#222's delta review, MED-B: `git -c core.pager=sh log
   --format='gh pr merge 1'`): any `-c`, `--config-env`, `git config` write
   or config file write, and any variable set on the line, except a short
   benign list — `user.*`, `color.*`, `push.default` and similar keys, a pager
   that only pages (`cat`, `less -R`), a git alias (its expansion is walked),
-  and `LANG`, `CI`, `NODE_ENV`, `GIT_AUTHOR_*` and similar names. `git
+  and `LANG`, `CI`, `NODE_ENV`, `GIT_AUTHOR_*` and similar names. A ref is
+  a word with no space, quote, `$`, `,` or shell punctuation
+  (`origin/main..HEAD`, `HEAD@{1}`, `+main:topic`), or one given to
+  `--base=`/`--head=`/`--repo=`/`--onto=`/`-B`/`-H`/`-R`: no shell handed
+  it can read a command in it. A value git or gh could print or run —
+  `--format=…`, `--pretty`, `--output-indicator-*`, `-m '…'`, `--body …`,
+  `-q …` — stays, so `VIRTUAL_ENV=/v python -m pytest && git push -u origin
+  feature && gh pr create -B main` asks nothing while every MED-B line asks
+  (#222's last review, MED-C, which the first fail-closed form, blanking
+  nothing, had broken). `git
   rebase UPSTREAM BRANCH`, `--onto N UPSTREAM BRANCH` and `--root BRANCH`
   switch to BRANCH first, so a later plain or HEAD push is judged there
   (MED-A); `git rebase main` alone stays put.
@@ -187,7 +196,12 @@ reader does not know, so they ask only when the line spells an operation;
 and a git config or hook file written through a path the line does not
 spell (`cp x "$D"`, a script). A judged program spelled any way but word by
 word (a here-document in `--body "$(cat <<EOF …)"`, a value split across
-quotes) keeps its arguments in the backstop's text and may ask.
+quotes) keeps its arguments in the backstop's text and may ask. Nor (#222's
+last review) does `git rebase U @{u}` or `@{-1}`, a revision expression
+that names a branch only once git resolves it (asked for checkout, read as
+a literal operand for rebase); and a pager that only pages (`less`, `more`)
+runs code when `LESSOPEN`, `LESS` or `MORE` was set by an earlier call — the
+same class as a `.gitconfig` planted by one.
 
 ## For the owner
 
