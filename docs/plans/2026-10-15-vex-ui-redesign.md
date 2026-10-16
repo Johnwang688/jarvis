@@ -427,8 +427,11 @@ machine:
   - Switching to another output tab keeps the session attached and hidden; the
     ring keeps everything. Only Disconnect closes it.
 - **Connect / Disconnect** sit in the Brain tab toolbar.
-  - Connect is `vex.openBrain()`, unchanged: off under a card or a chain, and
-    one device action at a time.
+  - Connect is the same `POST /vex/brain` (unchanged route). As built
+    (VX-UI-4a) it is `vex.connectBrain()`, which replaced `openBrain()`: a
+    trusted press only, off under a card, during a chain and during a device
+    read, one device action at a time, and the terminal is claimed for the
+    pressing Brain tab without opening the panel.
   - Disconnect closes the program terminal (`DELETE /terminals/{id}`, as the
     chain's pause does).
   - Recommendation (**Q5**): the tab does **not** auto-connect when selected.
@@ -437,6 +440,10 @@ machine:
   Brain tab badge says `paused` and the body says "Paused for the download;
   reconnects after". When a dropped chain leaves it closed, it says so, as
   today.
+  - **As built (VX-UI-4a, 2026-10-15, the lead's direction):** no chain
+    reconnects it. After any download the tab says it was closed for the
+    download and offers Connect, so the link opens only on the owner's
+    Connect (decision 5). See `docs/notes/vex.md`, "Brain tab, VX-UI-4a".
 - **Later, out of scope here.** A "Save CSV block" helper for the owner's
   `$BEGIN…$END` telemetry blocks, mirroring `serial-monitor.ps1 -Csv`.
 

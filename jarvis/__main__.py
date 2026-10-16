@@ -8,6 +8,7 @@ import sys
 import threading
 
 from rich.console import Console
+from rich.markup import escape
 from rich.table import Table
 
 from . import agent as agent_mod
@@ -16,6 +17,7 @@ from . import cadbench as cadbench_mod
 from . import bench as bench_mod
 from . import config, permissions, sessions, tools
 from . import vocabbench as vocab_mod
+from .tools.secrets import tool_args_for_display
 
 console = Console()
 
@@ -111,7 +113,8 @@ def _make_agent(model: str | None, session: sessions.Session | None = None) -> a
     def on_event(kind: str, data) -> None:
         if kind == "tool_start":
             name, raw = data
-            console.print(f"[dim]  → {name}({raw[:120]})[/dim]")
+            # Escaped: a withheld value reads `[redacted]`, which is markup.
+            console.print(f"[dim]  → {escape(name)}({escape(tool_args_for_display(raw)[:120])})[/dim]")
         elif kind == "context" and data.saved > 500:
             bits = []
             if data.images_evicted:

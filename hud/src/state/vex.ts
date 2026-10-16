@@ -22,7 +22,9 @@
 // **The chain is clean → build → download** (the owner's decision 3 on the
 // 2026-10-15 redesign): a failed clean or build stops it before anything
 // reaches the robot, and the brain terminal is let go of the port only once
-// the build has succeeded. **Stop stops whatever is running** (decision 6): a
+// the build has succeeded. **It is never opened again by the chain** (VX-UI-4a,
+// owner decision 5: the brain's link opens only on the owner's Connect): the
+// Brain tab says it was closed for the download and offers Connect. **Stop stops whatever is running** (decision 6): a
 // clean or build (its program terminal closed, as × does), and a download
 // already being sent (its vexcom closed the same way; the view then says the
 // slot may hold an incomplete program). Stop is never `vexcom --stop`: it
@@ -49,7 +51,7 @@ const DOWNLOAD_WAIT_MAX_MS = 4 * 60_000;
 /** A project's detection older than this is asked again (on focus, and by App's timer). */
 export const DETECT_STALE_MS = 30_000;
 
-/** Said when a download closed the brain terminal and it was not opened again. */
+/** Said when a download closed the brain terminal: it is never opened again by itself (owner decision 5). */
 const BRAIN_CLOSED = "The brain terminal was closed for the download";
 
 export interface ProjectRun {
@@ -86,6 +88,8 @@ export interface Chain extends ChainView {
   /** The download's program terminal once it is known: what Stop closes then. */
   downloadTerminal: string | null;
   done: ChainStep[];
+  /** The chain closed the brain terminal for the download (the Brain tab says "paused"). */
+  brainPaused: boolean;
 }
 
 export interface DeviceNotice {
@@ -134,8 +138,21 @@ export class VexStore {
   /** The device read on its way, if any (one at a time: the daemon's device reservation). */
   infoBusy: DeviceRead | null = null;
   infoNote = "";
+  /** Connect's request is on its way. */
   brainBusy = false;
+  /** The daemon's refusal of the last Connect or Disconnect, in its words. */
   brainNote = "";
+  /**
+   * The brain terminal the Brain tab shows (VX-UI-4a): the one Connect opened,
+   * or the one `/vex/status` names (a link already open, after a reload). Kept
+   * after its program ends, so the tab shows how it ended; let go of when it is
+   * disconnected or a download closes it.
+   */
+  brainTerminal: string | null = null;
+  /** A download closed the brain terminal and it was not opened again: why, and Connect. */
+  brainClosed = "";
+  /** Brain terminals this window closed: a status read from before the daemon let go of one never brings it back. */
+  private brainGone = new Set<string>();
   notices: DeviceNotice[] = [];
   blocked = false;
   /** Every card that goes up counts: a chain step after a card came drops. */
@@ -285,6 +302,11 @@ export class VexStore {
       (s) => {
         this.status = s;
         this.statusError = s ? "" : "the daemon answered without a VEX status";
+        // A link the daemon holds open (a reload, another window's Connect) is
+        // shown, never opened: nothing here asks for one.
+        // While this window's Connect is on its way it names the terminal itself, after the
+        // pressing tab has taken its place (review LOW-1): a status read never names it first.
+        if (s?.brain && !this.brainGone.has(s.brain) && !this.brainBusy) this.brainTerminal = s.brain;
         this.changed();
       },
       (e: any) => {
@@ -485,7 +507,7 @@ export class VexStore {
     if (r.busy) return;
     const chain: Chain = {
       seq: ++this.chainSeq, projectId, label, slot, phase: "start", cancelled: false, buildTerminal: null,
-      downloadTerminal: null, done: [],
+      downloadTerminal: null, done: [], brainPaused: false,
     };
     this.chain = chain;
     const cards = this.cards;
@@ -554,9 +576,9 @@ export class VexStore {
       if (!holds()) return dropped("before it downloaded");
       const brain = this.status?.brain;
       if (brain) {
-        // The brain terminal holds the brain's port: paused for the download,
-        // opened again afterwards (plan §4.3 item 11) — only now that the
-        // build has succeeded, so its output runs on while the project builds.
+        // The brain terminal holds the brain's port: closed for the download —
+        // only now that the build has succeeded, so its output runs on while
+        // the project builds — and never opened again by the chain (VX-UI-4a).
         phase("pause");
         try {
           await api.closeTerminal(brain);
@@ -567,7 +589,12 @@ export class VexStore {
           }
         }
         terminals.gone(brain);
+        this.brainGone.add(brain);
         paused = true;
+        chain.brainPaused = true;
+        if (this.brainTerminal === brain) this.brainTerminal = null;
+        this.brainClosed = "";
+        this.changed();
         // The daemon frees the port once the program's end has been read:
         // asked again for a moment rather than once.
         for (let i = 0; i < 15; i++) {
@@ -621,16 +648,13 @@ export class VexStore {
       if (this.chain === chain) this.chain = null;
       this.patchRun(projectId, { busy: null });
       if (paused) {
-        if (droppedBy) {
-          // A dropped or stopped chain never opens the brain terminal by itself (L6).
-          this.brainNote = `${BRAIN_CLOSED} and not opened again, since ${droppedBy}. `
-            + "Click \u201cOpen the brain terminal\u201d when you want it.";
-          this.changed();
-        } else {
-          // The card count from the click: a card that came and went while
-          // the download ran still keeps the brain terminal closed (NIT).
-          void this.resumeBrain(cards);
-        }
+        // Never opened again by itself (VX-UI-4a, owner decision 5: the link
+        // opens only on the owner's Connect). A dropped or stopped chain says
+        // why it stopped (L6); either way the Brain tab offers Connect.
+        this.brainClosed = droppedBy
+          ? `${BRAIN_CLOSED} and not opened again, since ${droppedBy}. Click Connect in the Brain tab when you want it.`
+          : `${BRAIN_CLOSED}. Click Connect in the Brain tab to open it again; it never reopens by itself.`;
+        this.changed();
       }
     }
   }
@@ -742,36 +766,35 @@ export class VexStore {
   // -- the brain terminal and device info ---------------------------------------
 
   /**
-   * The brain terminal again after a download paused it — never behind a
-   * card. The download's program may have ended a moment before the daemon
-   * frees the device, so a "one device action at a time" is asked again.
+   * **Connect** (VX-UI-4a): the brain terminal, `POST /vex/brain` (exactly
+   * `vexcom --user`, unchanged). **Only the Brain tab's Connect calls this, on
+   * the owner's trusted press** (`isTrustedPress`) — never a tab being shown,
+   * a reload or the end of a download (owner decision 5). Off under a card,
+   * after a crash, during a download chain and while a device read is on its
+   * way; the daemon's one-device reservation decides the rest. The terminal is
+   * held as this window's and drawn in the Brain tab (`vex-<pane>`), never
+   * the panel opened for it: `place` lets the tab whose Connect was pressed
+   * take it first, before any other VEX pane's Brain tab sees it. A previous
+   * link whose program had ended is cleared away (its panel tab too).
    */
-  private async resumeBrain(cards: number): Promise<void> {
-    const closed = `${BRAIN_CLOSED} and could not be opened again by itself. `
-      + "Click \u201cOpen the brain terminal\u201d when you want it.";
-    for (let i = 0; i < 10; i++) {
-      if (!this.mayAct() || this.cards !== cards) break;
-      await this.refreshStatus();
-      if (!this.status?.device) {
-        await this.openBrain();
-        if (!this.brainNote) return;
-      }
-      await sleep(300);
-    }
-    this.brainNote = closed;
-    this.changed();
-  }
-
-  async openBrain(): Promise<void> {
-    if (!this.mayAct() || this.brainBusy || this.chain) return;
+  async connectBrain(place?: (terminalId: string) => void): Promise<void> {
+    if (!this.mayAct() || this.brainBusy || this.chain || this.infoBusy) return;
     this.brainBusy = true;
     this.brainNote = "";
+    this.brainClosed = "";
     this.changed();
     this.ledger.expect("brain", Date.now());
+    const old = this.brainTerminal;
     try {
       const r = await api.vexBrain();
       if (!r?.started) this.ledger.withdraw("brain");
-      if (isVexId(r?.terminal_id)) await terminals.showProgram(r.terminal_id);
+      if (isVexId(r?.terminal_id)) {
+        const id = r.terminal_id;
+        await terminals.adoptProgram(id);
+        place?.(id);
+        this.brainTerminal = id;
+        if (old && old !== id && this.ended(old)) void this.clearBrain(old);
+      }
     } catch (e: any) {
       this.ledger.withdraw("brain");
       this.brainNote = e?.message || "the brain terminal could not be opened";
@@ -780,6 +803,49 @@ export class VexStore {
       void this.refreshStatus();
       this.changed();
     }
+  }
+
+  /** Whether a brain terminal's program has ended (exited, or the terminal is gone): nothing live to close. */
+  private ended(id: string): boolean {
+    const st = terminals.sessions.get(id)?.state;
+    return st === "exited" || st === "ended" || st === "closed" || !!terminals.row(id)?.exited;
+  }
+
+  /** An ended brain terminal cleared away: closed (its program already ended) and gone from the panel. */
+  private async clearBrain(id: string): Promise<void> {
+    try {
+      await api.closeTerminal(id);
+    } catch {
+      /* already gone (the daemon replaces the last brain terminal itself) */
+    }
+    terminals.gone(id);
+    this.brainGone.add(id);
+  }
+
+  /**
+   * **Disconnect**: the brain terminal closed (`DELETE /terminals/{id}`, as a
+   * download's pause and × do), which ends `vexcom --user` and frees the port.
+   * The program on the brain keeps running. Off under a card and after a crash.
+   */
+  async disconnectBrain(): Promise<void> {
+    if (!this.mayAct()) return;
+    const id = this.brainTerminal ?? this.status?.brain ?? null;
+    if (!id) return;
+    this.brainNote = "";
+    try {
+      await api.closeTerminal(id);
+    } catch (e: any) {
+      if (e?.status !== 404) {
+        this.brainNote = e?.message || "the brain terminal could not be closed";
+        this.changed();
+        return;
+      }
+    }
+    terminals.gone(id);
+    this.brainGone.add(id);
+    if (this.brainTerminal === id) this.brainTerminal = null;
+    this.changed();
+    void this.refreshStatus();
   }
 
   /** System info (`vexcom --json`) or the programs on the brain (`vexcom --programs`). */
@@ -828,7 +894,9 @@ if (typeof window !== "undefined") {
     blocked: () => vex.blocked,
     cards: () => vex.cards,
     chain: () => (vex.chain ? { projectId: vex.chain.projectId, phase: vex.chain.phase, slot: vex.chain.slot,
-                                cancelled: vex.chain.cancelled, done: [...vex.chain.done] } : null),
+                                cancelled: vex.chain.cancelled, done: [...vex.chain.done],
+                                brainPaused: vex.chain.brainPaused } : null),
+    brain: () => ({ terminal: vex.brainTerminal, busy: vex.brainBusy, note: vex.brainNote, closed: vex.brainClosed }),
     run: (projectId: string) => {
       const r = vex.run(projectId);
       return { busy: r.busy, note: r.note, build: r.build ? r.build.state : null, downloaded: r.downloaded };

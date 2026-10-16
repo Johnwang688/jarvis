@@ -454,3 +454,86 @@ LOW-2, NIT-2, LOW-4, and Escape closing ⋯ when every item is off). Receipts
 after the review round: `hud_v2_vex_check` 231/231, `hud_v2_vex_new_check`
 66/66, vex vitests 47 + 33 (full vitest 3031 passed, 6 skipped),
 `tests/v2/vex_check.py` 148. Real VEX behaviour stays **UNRUN**.
+
+## Brain tab, VX-UI-4a (2026-10-15)
+
+Plan §5.5 and §0.1 item 5. The Brain tab draws **the brain terminal itself**
+in the VEX pane: the same `vexcom --user` program terminal (`POST /vex/brain`
+unchanged, no daemon change), the same `TerminalView` with its "Jarvis can
+read" switch, input path, Ctrl-C and `terminal_read` rules, at a new place,
+`vex-<pane>` (`TermManager.vexPlace`, `holdInVex`, `shownIn`). One place at a
+time (W-1): a terminal pane showing it wins, then the first VEX pane whose
+Brain tab shows it; the panel's tab says "in the VEX view, pane N" and its body
+"shown in the VEX view … Go there"; another VEX pane's Brain tab, or one whose
+terminal a terminal pane holds, says where it is with Go there. Another window
+showing it is the terminal's own "in another window · Show it here". Switching
+to another output tab keeps the session attached (its ring keeps the output).
+
+**It connects only on Connect** (owner decision 5): a trusted press —
+pointer, or Enter/Space on the focused button (`isTrustedPress`, Stop's rule;
+in the Tab order); a script's `.click()` or a dispatched event does nothing.
+Showing the tab, a reload and the end of a download ask for nothing. A link
+the daemon already holds (`/vex/status` `brain`, after a reload or another
+window's Connect) is shown, never opened. Connect is off, with the reason in
+its hover help, under a card, after a crash, during any download chain and
+while a device read is on its way; the daemon's one-device reservation stays
+the authority. Connect claims the terminal for this window
+(`terminals.adoptProgram`) and never opens the panel; the Brain tab whose
+Connect was pressed takes the `vex-<pane>` place first (a status read while
+Connect is on its way never names the terminal, so another open Brain tab
+cannot take it; review LOW-1). Connect from an ended link clears the old
+exited terminal away, its panel tab too (LOW-2). **Disconnect** (also a
+trusted press) is `DELETE /terminals/{id}`; it frees the port, and the program
+on the brain keeps running.
+
+**A download never reopens it** (the lead's direction for this package,
+extending L6; it supersedes VX-2's "reopen the brain terminal" step and the
+plan's "reconnects after"). The chain still closes it only once the build has
+succeeded; while the download runs the tab says "Paused for the download" with
+Connect off; afterwards it says it was closed for the download (also under the
+status line, `vex-brain-closed`, as status, not alert) and offers Connect.
+`resumeBrain` is gone. A brain terminal this window closed is never taken back
+from a status read made before the daemon let go of it (`brainGone`).
+
+States (`lib/vex.ts` `brainView`, pure): not set up; not connected; connecting
+(the request, then the attach, or asking another window); connected (live;
+"Nothing printed yet" until xterm's buffer holds visible text, so a ring of
+control sequences alone, such as interop's `ESC[6n` with vexcom hung behind
+it, still says it and names H4 without promising a fix; review MED-1);
+paused; ended (vexcom exited, with its code and last output, or the terminal
+is gone: Connect again, Close); taken or kept by another window (its own
+words, with the terminal's Take it back or Ask again, never a spinner; MED-2);
+connection lost (this window's socket retries ran out while the link may be
+open: Reconnect re-attaches, and Disconnect is named Disconnect, never Close;
+MED-2); refused (the daemon's sentence, Connect again); shown elsewhere. The
+tab's badge: ● live, ◌ paused or lost, ✗ ended or refused, spinner
+connecting; never amber.
+
+**HARDWARE-UNVERIFIED**: H1–H4 (plan §12) are unrun. In particular H4,
+whether the brain terminal starts at all under WSL interop's `ESC[6n` cursor
+query: `vex-brain` is deliberately not in `STARTUP_REPLY_PROGRAMS` (it takes
+input), so its query is answered only by an attached, replayed xterm. Drawing
+it in the pane attaches the xterm as soon as Connect returns, which narrows but
+does not close the race in §5.4. It stays open in particular when the owner
+switches to another output tab (or the pane is hidden) before the terminal view
+mounts: nothing is attached when the query arrives, so it lands in the ring and
+is replayed later, where xterm's answer is dropped by design. If H4 shows the hang, VX-UI-4b (a daemon
+reply for `vex-brain`'s first exact query) is the fix; this package does not
+build it.
+
+Checks (fakes only; nothing installed, no live daemon, port or device):
+`lib/vex.test.ts` (`brainView`: every state, Connect's reasons, and no state
+offering an enabled Connect with a terminal open, a chain or a card),
+`state/vex.test.ts` (Connect/Disconnect guards, no reopen after a download
+with or without a card, a late status read), `components/Terminal.test.ts`
+(the `vex-<pane>` place, `adoptProgram`), and `_brain_checks` in
+`tests/face/hud_v2_vex_check.py` (the mock's `brain_refuse` lever). Seven
+mutations each failed their checks: Connect called when the tab is shown, the
+old reopen after a download, Connect without the trusted-press test, Connect
+enabled under a card, Connect enabled during a chain, the panel ignoring the
+`vex-<pane>` place, and Disconnect without the trusted-press test. The review
+round's five did too: any frame counted as printed (MED-1), `taken` falling
+through to connecting (MED-2), no place callback and a status read naming the
+terminal mid-Connect (LOW-1), and no clearing of the ended link (LOW-2). Before
+this package the new vitests fail (22) and the face sections stop at the
+missing Connect.

@@ -434,7 +434,7 @@ def _agent_event(kind: str, data) -> None:
         return
     if kind == "tool_start":
         name, raw = data
-        broadcast("tool", {"name": name, "args": str(raw)[:100]})
+        broadcast("tool", {"name": name, "args": secrets_mod.tool_args_for_display(raw)[:100]})
     elif kind == "tool_end":
         # Without this the window has no idea a tool finished, and sits on
         # "RUNNING · X" through the model call that follows it.
