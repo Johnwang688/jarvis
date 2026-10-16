@@ -1382,7 +1382,10 @@ def strip_url_credentials(text: str, *, query: bool = False) -> str:
         if mask is None:
             mask = _Mask(text)
         if broken:
-            if "$" not in url and "`" not in url and mask.safe(base, base + len(url), value=False):
+            # A malformed URL is withheld whole only as a value would be
+            # (second delta review of #205): `http://u:p@[a]/{x,y}` keeps
+            # its brace expansion, and its userinfo, in sight.
+            if "$" not in url and "`" not in url and mask.safe(base, base + len(url)):
                 out.append(text[last:base] + "[redacted]")
                 last = match.end()
             continue

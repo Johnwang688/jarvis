@@ -541,6 +541,10 @@ NEVER_HIDDEN = [
     ("echo `echo #'` ; API_KEY='x;rm -rf ~' ok", False),
     ("rm -rf API_KEY=abcd{,/../../..}", False, "{,/../../..}"),
     ("API_KEY=abcd* ls", False, "abcd*"),
+    # Second delta review: a malformed URL was withheld whole past the
+    # character rule, hiding a brace expansion.
+    ("ls http://u:p@[a]/{x,y}", False, "{x,y}"),
+    ("ls http://u:p@[a]/*", False, "[a]/*"),
     # Rule 3 additions.
     ("X_TOKEN='rmrf~'; trap \"$X_TOKEN\" EXIT", True, "rmrf~"),
     ("X_TOKEN='rmrf'; watch \"$X_TOKEN\"", True, "rmrf"),
