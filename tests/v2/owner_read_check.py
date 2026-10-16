@@ -355,6 +355,63 @@ class InChromium(Base):
         # Past the owner gate (a 403 would say it refused), refused as a bad body.
         self.assertEqual(got["status"], 400, got["body"][:200])
 
+    def test_the_huds_own_voice_requests_pass_the_gate(self):
+        """Voice follow-ups, V2 row: `/stt`, `/say`, `/voices`, `/voice` and `/mute` are owner-only.
+        The HUD's real requests, as Chromium sends them from its own page, still pass; the same
+        requests from a page on another port reach no voice at all."""
+        from jarvis import speaker, voice
+        from jarvis.tools import voicectl
+        listed = [{"name": "test", "backend": "fake", "kind": "builtin"}]
+        heard, said, muted = [], [], []
+        fakes = [patch.object(voice, "stt_result", lambda data, **kw: heard.append(data) or
+                              voice.SttResult("dictated", "cloud", "m/x")),
+                 patch.object(speaker, "verify", lambda data, mime: "skipped_unenrolled"),
+                 patch.object(voice, "tts", lambda text, **kw: said.append(text) or b"RIFFsaid"),
+                 patch.object(voice, "catalog", lambda: listed),
+                 patch.object(voice, "_known", lambda name: True),
+                 patch.object(voicectl, "set_muted", lambda on: muted.append(on))]
+        for fake in fakes:
+            fake.start()
+            self.addCleanup(fake.stop)
+        script = """async () => {
+          const out = {};
+          const ask = async (name, path, init) => {
+            try { const r = await fetch(path, init); out[name] = {status: r.status, body: await r.text()}; }
+            catch (e) { out[name] = {error: e.name}; }
+          };
+          const json = (b) => ({method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(b)});
+          await ask('voices', BASE + '/voices');
+          await ask('say', BASE + '/say', json({text: 'hello', local_only: true}));
+          await ask('voice', BASE + '/voice', json({voice: 'test'}));
+          await ask('mute', BASE + '/mute', json({muted: false}));
+          await ask('stt', BASE + '/stt?seq=1', {method: 'POST', headers: {'Content-Type': 'audio/wav'},
+                                                  body: new Blob([new Uint8Array([82, 73, 70, 70, 1, 2])])});
+          return out;
+        }"""
+        self.page.goto(f"http://127.0.0.1:{self.face}/status")
+        got = self.page.evaluate(script.replace("BASE", "''"))
+        for name in ("voices", "say", "voice", "mute", "stt"):
+            with self.subTest(name=name):
+                self.assertEqual(got[name].get("status"), 200, str(got[name])[:300])
+        self.assertEqual(json.loads(got["voices"]["body"])["voices"], listed)
+        self.assertEqual(json.loads(got["stt"]["body"])["text"], "dictated")
+        self.assertNotIn("origin", self.requests_to("/voices")[-1], "the HUD's read carried no Origin")
+        self.assertEqual(self.requests_to("/voices")[-1].get("sec-fetch-site"), "same-origin")
+        self.assertEqual((len(heard), said, muted), (1, ["hello"], [False]))
+
+        other = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Page)
+        other.daemon_threads = True
+        self.assertNotIn(other.server_address[1], LIVE_PORTS)
+        threading.Thread(target=other.serve_forever, daemon=True).start()
+        self.addCleanup(other.server_close)
+        self.addCleanup(other.shutdown)
+        self.page.goto(f"http://127.0.0.1:{other.server_address[1]}/")
+        got = self.page.evaluate(script.replace("BASE", repr(f"http://127.0.0.1:{self.face}")))
+        for name in ("voices", "say", "voice", "mute", "stt"):
+            with self.subTest(other=name):
+                self.assertEqual(got[name], {"error": "TypeError"}, str(got[name])[:300])
+        self.assertEqual((len(heard), said, muted), (1, ["hello"], [False]), "a foreign page reached the voice")
+
     def test_a_page_on_another_port_cannot_read_the_listing(self):
         other = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Page)
         other.daemon_threads = True

@@ -1474,7 +1474,8 @@ SAY_MAX_CHARS = 2000
 
 
 def say(handler, body):
-    """`POST /say`: one chunk of speech as audio (V6).
+    """`POST /say`: one chunk of speech as audio (V6). Owner-only, checked by
+    `pickers` before the body is read (`OWNER_VOICE_PICKERS`).
 
     `voice`, when named, must be a voice `catalog()` lists: an unknown name
     used to fail inside Kokoro and then reach the cloud carrying that name.
@@ -1607,11 +1608,25 @@ def speech_summary(handler, daemon):
     return 200, {"summary": result.text}
 
 
+# The pickers that are the owner's voice: dictation (`/stt`, the microphone's
+# audio to a model), speech (`/say`, synthesis on this machine or a paid cloud
+# voice), the voice picker (`/voices` lists the owner's clone store, `/voice`
+# chooses) and v1's mute flag (`/mute`). Owner-only on every method, checked
+# before the query, the body or any audio is touched (voice follow-ups, V2 row):
+# until 2026-10-16 any loopback client on the API listener could upload audio,
+# synthesize speech or change the owner's voice. No tool, bridge or Discord path
+# calls these over HTTP; they reach `voice` in process.
+OWNER_VOICE_PICKERS = frozenset({"stt", "say", "voice", "voices", "mute"})
+
+
 def pickers(handler, daemon, parts, query):
     from jarvis import avatars, llm, models, voice
     from jarvis.tools import voicectl
     from .daemon import _object
+    from .projects import owner_only
     name = "/".join(parts)
+    if name in OWNER_VOICE_PICKERS:
+        owner_only(handler, daemon)
     if handler.command == "GET":
         if name == "avatars":
             return 200, {"current": avatars.active().slug, "avatars": [a.describe() for a in avatars.available()]}
