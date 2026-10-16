@@ -1,5 +1,10 @@
 """Private profile metadata; labels never name paths (BR-1c).
 
+A row may carry `"password_store": "keyring"`: that profile's Chrome has
+been launched with the owner's keyring, and is never launched with the basic
+store again (`password_store.py`). Once set it is never cleared; deleting
+the profile removes it with the row.
+
 One store per host serializes atomic metadata updates. Chrome lifetimes and
 filesystem removal belong to the host, which excludes new opens while deleting.
 """
@@ -20,6 +25,8 @@ from jarvis import config, untrusted
 PROFILE_ID = re.compile(r"p-[0-9a-f]{8}")
 MAX_PROFILES = 8
 MAX_BYTES = 64 * 1024
+_KEYS = frozenset({"id", "label", "created"})
+STICKY_KEY, STICKY_VALUE = "password_store", "keyring"
 
 
 def _refuse(status: int, sentence: str):
@@ -90,7 +97,9 @@ class ProfileStore:
                 raise ValueError()
             ids, labels = set(), set()
             for row in rows:
-                if not isinstance(row, dict) or set(row) != {"id", "label", "created"}:
+                if not isinstance(row, dict) or set(row) - {STICKY_KEY} != _KEYS:
+                    raise ValueError()
+                if STICKY_KEY in row and row[STICKY_KEY] != STICKY_VALUE:
                     raise ValueError()
                 if not isinstance(row["id"], str) or not PROFILE_ID.fullmatch(row["id"]):
                     raise ValueError()
@@ -155,6 +164,21 @@ class ProfileStore:
                 _refuse(409, "a profile with that label already exists")
             row["label"] = name
             self._write(rows)
+            return dict(row)
+
+    def mark_keyring(self, value) -> dict:
+        """Record that this profile's Chrome uses the keyring, for good.
+        `BrowserRefused` when it cannot be saved: the caller then does not
+        launch."""
+        identity = profile_id(value)
+        with self._lock:
+            rows = self._read()
+            row = next((r for r in rows if r["id"] == identity), None)
+            if row is None:
+                _refuse(404, "no such profile")
+            if row.get(STICKY_KEY) != STICKY_VALUE:
+                row[STICKY_KEY] = STICKY_VALUE
+                self._write(rows)
             return dict(row)
 
     def delete(self, value) -> None:

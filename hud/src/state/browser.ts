@@ -11,7 +11,7 @@ import { browserSettings } from "./browserSettings";
 import { WINDOW_ID } from "../lib/windowId";
 import { useDaemonPorts } from "./daemonPorts";
 
-export interface BrowserProfile { id:string; label:string; created:string }
+export interface BrowserProfile { id:string; label:string; created:string; password_store?:"keyring" }
 export interface RemoteRow { tab_id:string; profile:string; ctx:string|null; url?:string; title?:string; opener?:string|null; loaded?:boolean; auth_pending?:boolean; error?:string }
 export interface BrowserRuntime { busy?:boolean; error?:string; viewed?:{at:string;refused:boolean} }
 const tabKey = (pane:PaneNo,id:string) => `${pane}:${id}`;
@@ -104,7 +104,7 @@ export function useBrowser(view:LayoutControl, covered:boolean, blocked:boolean)
     const seq=++refreshNumber.current;
     try {
       const rows=await browserApi.get<BrowserProfile[]>("/profiles");
-      if(mounted.current && seq===refreshNumber.current) setProfiles(rows.filter(p=>/^p-[0-9a-f]{8}$/.test(p.id)).map(p=>({...p,label:cleanTitle(p.label,32)})));
+      if(mounted.current && seq===refreshNumber.current) setProfiles(rows.filter(p=>/^p-[0-9a-f]{8}$/.test(p.id)).map(p=>({id:p.id,created:p.created,label:cleanTitle(p.label,32),...(p.password_store==="keyring"?{password_store:"keyring" as const}:{})})));
     } catch(e) {if(mounted.current && seq===refreshNumber.current)setError(message(e));}
   },[]);
   const onEvent=useCallback((event:{kind:string;data?:any})=>{

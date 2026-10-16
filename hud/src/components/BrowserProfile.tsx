@@ -1,16 +1,40 @@
 import { noPointerFocus } from "../lib/talkkey";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { browserApi } from "../api";
 import { cleanTitle } from "../lib/remote";
 import type { PaneNo } from "../lib/workspace";
 import type { BrowserControl, BrowserProfile as Profile } from "../state/browser";
+/** `/status` → `browser.sync` (password_store.py): the store in effect, never a secret. */
+export interface PasswordSync { password_store:string|null; requested:string; keyring:string; next_launch:string; unprotected:boolean; hint:string|null }
+const syncOf=(raw:unknown):PasswordSync|null=>{
+  const s=(raw as {sync?:unknown}|null)?.sync as Record<string,unknown>|undefined;
+  if(!s||typeof s!=="object"||typeof s.unprotected!=="boolean"||typeof s.next_launch!=="string")return null;
+  return {password_store:typeof s.password_store==="string"?s.password_store:null,requested:String(s.requested??""),keyring:String(s.keyring??""),
+    next_launch:s.next_launch,unprotected:s.unprotected,hint:typeof s.hint==="string"?s.hint.slice(0,400):null};
+};
+/** What the Manage panel says about saved passwords. Unprotected and refused are loud. */
+export function passwordLine(sync:PasswordSync|null, row:Profile|undefined):{text:string;loud:boolean} {
+  if(!sync)return {text:"Password store: checking…",loud:false};
+  const sticky=row?.password_store==="keyring";
+  if(sync.next_launch==="refused")return {text:sync.hint??"The keyring is locked.",loud:true};
+  if(sticky&&sync.next_launch!=="gnome-libsecret")return {text:"This profile’s passwords are in the keyring, which is not available. "+(sync.hint??""),loud:true};
+  if(sync.unprotected||sync.next_launch==="basic")return {text:sync.hint??"Unprotected (basic store): saved passwords use a public key.",loud:true};
+  return {text:"Passwords are encrypted with your keyring (gnome-libsecret)"+(sticky?"; this profile never uses the basic store.":"."),loud:false};
+}
 export function BrowserProfile(props:{pane:PaneNo;control:BrowserControl;selected:string|null;see:boolean;blocked:boolean;privateEnded?:boolean;statusTarget?:HTMLElement|null}) {
   const [manage,setManage]=useState(false);const [label,setLabel]=useState("");
   const [pending,setPending]=useState(false);const [error,setError]=useState("");
   const [confirm,setConfirm]=useState<"delete"|"forget"|null>(null);
   const latest=useRef(props);latest.current=props;
   const row=props.control.profiles.find(p=>p.id===props.selected);
+  const [sync,setSync]=useState<PasswordSync|null>(null);
+  useEffect(()=>{
+    if(!manage)return;let live=true;
+    void browserApi.get<unknown>("").then(raw=>{if(live)setSync(syncOf(raw));}).catch(()=>{if(live)setSync(null);});
+    return()=>{live=false;};
+  },[manage,error]);
+  const passwords=passwordLine(sync,row);
   const run=async(job:()=>Promise<unknown>)=>{
     if(latest.current.blocked||pending)return;setPending(true);setError("");
     try {await job();}catch(e){setError(cleanTitle(e instanceof Error?e.message:"That profile could not be changed.",300));}
@@ -39,7 +63,8 @@ export function BrowserProfile(props:{pane:PaneNo;control:BrowserControl;selecte
     {props.selected==="private"?<p className="small muted">Private · Remote only · This pane has a separate temporary session.</p>:null}
     {props.privateEnded&&props.selected==="private"?<button disabled={disabled} onClick={()=>void run(()=>props.control.profile(props.pane,"private"))}>Start a new Private session</button>:null}
     {manage?<div className="browserprofilemanage pad" data-testid="browser-profile-manage">
-      <p className="small muted">Remote uses this profile. Direct uses this window’s browser session. Chrome sync sign-in may be unavailable on this installation; passwords use Chrome’s basic store.</p>
+      <p className="small muted">Remote uses this profile. Direct uses this window’s browser session. Chrome sync sign-in may be unavailable on this installation.</p>
+      <p className={passwords.loud?"err":"small muted"} data-testid="browser-password-store" style={{whiteSpace:"pre-wrap",userSelect:"text"}}>{passwords.text}</p>
       <label>Profile name <input value={label} maxLength={32} disabled={disabled} onChange={e=>setLabel(e.target.value)} onKeyDown={e=>e.stopPropagation()} /></label>
       <div className="row">
         <button disabled={disabled||!label.trim()||props.control.profiles.length>=8} onClick={()=>void run(async()=>{const p=await browserApi.write<Profile>("/profiles",{label:label.trim().normalize("NFC")});await props.control.refresh();if(!latest.current.blocked)await props.control.profile(props.pane,p.id);})}>New profile</button>

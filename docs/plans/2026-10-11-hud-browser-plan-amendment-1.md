@@ -439,6 +439,7 @@ That is about **250–350 MB before any tab**, then 50–300 MB per tab. The wor
 - **Mitigations:**
   - `BROWSER_DIR` is a credential dir (§C), so a v2 worker's command naming it is always-asked, and a Codex grant touching it is denied. That is a guard, not a boundary.
   - A keyring would encrypt the passwords with a key that isn't public. That means gnome-keyring plus libsecret and `--password-store=gnome-libsecret`, unlocked at login. In WSL that takes an apt install and an unlock step, so it is offered as an option (M12) rather than required.
+  - **Update 2026-10-15 (owner request, lead's decisions):** the keyring is now the default for named profiles (`jarvis/v2/browser/password_store.py`). An unlocked keyring gives `--password-store=gnome-libsecret` and the session bus. A locked keyring, or one with no default collection, refuses the launch and names the owner's unlock command. No Secret Service at all means `basic`, reported loudly as unprotected. A profile once launched with the keyring never opens with `basic` again. `"password_store": "basic"` in `browser.json` is the owner's explicit opt-out. Private stays `basic` with no bus. The keyring protects the passwords at rest, but not against a program running as the owner while it is unlocked. Install, unlock, migration (`v10`/`v11`) and acceptance steps are in `docs/notes/browser.md`, *Password store: the owner's keyring*.
 **Website logins to Google: M4** (§I). If Google refuses an automated Chrome, the docs say to use Google in your own Chrome. We do not add stealth patches.
 
 ---
