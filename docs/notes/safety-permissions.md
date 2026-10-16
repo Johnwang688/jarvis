@@ -2269,7 +2269,75 @@ Files changed under SELF_PROTECTED, for the owner's review: `jarvis/tools/__init
 `jarvis/protected_state.py` (default `cwd`). Each change only places a path,
 adds an ask or withholds more.
 
-<<<<<<< HEAD
+## Pull-request merges and closes are the owner's (2026-10-15)
+
+Current rule, beside the preserved notes above (decisions M-1..M-10,
+`docs/plans/2026-10-15-pr-merge-close-decisions.md`). The owner, after
+GIT-LIVE: Jarvis chats match Claude Code's auto mode, so pushing a branch and
+opening a pull request proceed unasked, and **merging or closing a pull request
+always needs the owner's yes**, as do the pushes that amount to one: a push to
+the default branch, a branch deletion, a force push.
+
+- **Where it is checked.** `jarvis/v2/merge_gate.py`, asked by
+  `permissions.build_permit` for every command tool at layer 2 (whatever
+  `approvals.is_command_tool` reads as one: Bash, Monitor, Codex's shell and
+  any tool carrying a command line; see the next section), before the
+  always-ask list: code, not an entry in `always-ask.json`, so no file,
+  project or brief can remove it. In every profile, for Claude and Codex,
+  chats and tasks: a human-backed asker is asked; deny-all, strict without a
+  human, a timeout or no surface declines. The allowlist (layer 4), rules'
+  ALLOW and the provider's reviewer (layer 5) never answer it. The card is
+  `allowlistable=False` (no Always; one sent anyway mints nothing) and
+  leads with a plain headline: "merges a pull request", "closes a pull
+  request", "pushes to main", "deletes a branch", "force-pushes", or "may …"
+  when it cannot tell.
+- **Codex.** A Codex owner chat's command approval is still a sandbox
+  widening (networking is off by design) and is asked as one, strict refusing
+  it as before; the headline now leads with the operation, then the widening.
+  A Codex task's plain approval reaches layer 2 like Claude's. A Codex push
+  of a branch still asks as a widening, unchanged.
+- **What it reads.** Every program the line runs, through `rules._Walk`
+  (segments, `bash -lc`, `eval`, substitutions, `find -exec`, and every
+  wrapper and runner from rules' one table), `gh pr merge|close`, `gh api`
+  writes and GraphQL mutations that merge or close, `git push` destinations,
+  deletions and forces in every refspec and option spelling, git aliases,
+  and inline interpreter code as text. A push with no refspec is judged by
+  the current branch where it runs: Claude's hook input `cwd` (the
+  `shell_cwd` keyword, which the model cannot reach), Codex's item `cwd`,
+  else the brief's, then each `cd`, `git -C` and wrapper folder option on
+  the line. `.git` is read; git is never run.
+- **Pinned by** `tests/v2/permissions_check.py merge_gate_checks` (the
+  profile × provider × asker × command matrix, Monitor and unknown
+  command-bearing tools, a sub-agent's card, the must-not-ask set, no
+  Always, no allowlist, no always-ask list, where a push runs, cost),
+  `codex_provider_check.py` (`test_owner_only_merge_card_says_what_it_does`),
+  `claude_provider_check.py` (the hook's `cwd`), and the mutants in
+  `tests/v2/merge_gate_mutants.py`, each of which must fail a check.
+- **Boundary review of #208** (decisions M-10..M-14): an earlier program on
+  the line that moves HEAD (`git checkout main && … && git push`) or writes
+  git config is read before a plain or HEAD push; brace expansions are not
+  literal; where the line runs a program that may run text it is handed (a
+  shell, `eval`, `ssh`, `curl`, a git exec setting …) any spelling of the
+  operations anywhere on it asks; `.git` is read as git reads it (a valid git
+  directory, a symlinked HEAD, an object-name HEAD as detached, anything else
+  unknown); GraphQL `enqueuePullRequest`, `deleteRef`, `updateRef(s)` and
+  `createCommitOnBranch` count; config is parsed once per judgement.
+- **Frozen** (owner, 2026-10-15): `jarvis/v2/merge_gate.py` and
+  `jarvis/v2/permissions.py` are SELF_PROTECTED, so no agent write changes
+  them and the HUD editor serves them read-only (the owner cannot edit,
+  rename or delete them there). `gh pr reopen` does not ask (owner:
+  "non-destructive").
+- **One card.** A human's yes is held by `tool_use_id` for 120 s and answers
+  the CLI's `can_use_tool` re-ask of the identical call once
+  (`permit.recall`). Jarvis registers `can_use_tool` only off AUTO, so under
+  AUTO it is inert; there the classifier runs after the owner's yes and can
+  still deny.
+- **Open.** An accident guard, not an adversarial boundary: script files
+  (or one written on an earlier call), an alias in a folder that cannot be
+  told, `include`d git config, git hooks (`pre-push`, `core.hooksPath` set
+  outside the line) and `gh issue close` on a pull request are not read
+  (decisions, "Known gaps").
+
 ## Command-bearing tools are command tools (2026-10-15)
 
 Found in the boundary review of PR #208: Claude's `Monitor` tool runs a shell
@@ -2327,7 +2395,6 @@ grant over every later Monitor command.
   so layer 1 can miss a PowerShell spelling of a refused command.
 - **Pinned by** `tests/v2/permissions_check.py command_tool_checks` and the
   mutants in `tests/v2/command_tool_mutants.py`.
-=======
 
 **Monitor and `exec_command` are trusted shells (lead decision, accepted on review of #211).** They get Bash's treatment at layer 4: under ASK and STRICT a Monitor command an allowlist stem or the rules' static ALLOW covers (e.g. `ls`, an allowlisted `npm …`) runs without a card, where main asked (ASK) or refused (STRICT). This is the one place the PR is not "main or stricter"; it matches Bash because Monitor runs a real shell. `exec_command` is not reachable today (Codex names its approvals `shell`).
 
@@ -2482,4 +2549,3 @@ Files changed under SELF_PROTECTED, for the owner's review:
 `jarvis/tools/secrets.py` (new functions only; nothing existing changed)
 and `jarvis/face/approvals.py` (the card's display copy). Both only
 withhold more from a display, and never from a judge.
->>>>>>> origin/main

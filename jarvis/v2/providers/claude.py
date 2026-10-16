@@ -972,7 +972,12 @@ class ClaudeProvider:
                         "permissionDecisionReason": HOOK_REFUSAL_PREFIX + OFF}}
             # A sub-agent's call is decided exactly as the orchestrator's
             # would be; the card only says whose it is (SV-1).
-            decision = await self._decide(session, name, args, agent_id=agent_id)
+            # The hook input's `cwd` is the shell's folder, from the CLI and
+            # not the model: where a push with no refspec is judged.
+            shell_cwd = data.get("cwd") if isinstance(data.get("cwd"), str) else None
+            decision = await self._decide(session, name, args, agent_id=agent_id,
+                                          shell_cwd=shell_cwd,
+                                          tool_use_id=tool_use_id if isinstance(tool_use_id, str) else None)
             if decision is Decision.ALLOW and jarvis is not None:
                 # Explicit under both profiles (D-5): under ASK it pre-empts the
                 # CLI's own prompt, under AUTO it skips the classifier, whose
@@ -1016,6 +1021,19 @@ class ClaudeProvider:
         async def can_use_tool(tool_name, input_data, context):  # noqa: ANN001
             args = dict(input_data) if isinstance(input_data, dict) else {}
             agent_id = getattr(context, "agent_id", None)
+            # The CLI asking again about a call the owner just approved on a
+            # card (Claude AUTO: the hook's `{}` lets the classifier run, and
+            # it may ask too): answered from that yes, never a second card —
+            # only for the same tool_use_id, tool and identical arguments,
+            # once and briefly (`permissions._OwnerYes`).
+            tool_use_id = getattr(context, "tool_use_id", None)
+            recall = getattr(session.permit, "recall", None)
+            if isinstance(tool_use_id, str) and tool_use_id and callable(recall):
+                try:
+                    if recall(tool_use_id, str(tool_name or ""), dict(args)) is True:
+                        return PermissionResultAllow()
+                except Exception:  # noqa: BLE001 — a failing recall decides nothing
+                    pass
             decision = await self._decide(session, str(tool_name or ""), args, agent_id=agent_id)
             if decision is Decision.ALLOW:
                 return PermissionResultAllow()
@@ -1025,7 +1043,8 @@ class ClaudeProvider:
         return can_use_tool
 
     async def _decide(self, session: _Session, name: str, args: dict, *,
-                      agent_id: Any = None) -> Decision:
+                      agent_id: Any = None, shell_cwd: str | None = None,
+                      tool_use_id: str | None = None) -> Decision:
         """Ask `permit`, announcing the question so a stalled turn is visible.
 
         A call from a sub-agent (`agent_id`, from the hook input or the
@@ -1060,8 +1079,10 @@ class ClaudeProvider:
             **({"subagent": sid} if sid else {}),
         )
         try:
-            decision = await (self._race(session, pending, name, args) if label is None
-                              else self._race(session, pending, name, args, label, sid))
+            extra = {k: v for k, v in (("shell_cwd", shell_cwd), ("tool_use_id", tool_use_id))
+                     if v is not None}
+            decision = await (self._race(session, pending, name, args, **extra) if label is None
+                              else self._race(session, pending, name, args, label, sid, **extra))
         finally:
             with session.mutex:
                 session.pending.pop(req_id, None)
@@ -1085,18 +1106,25 @@ class ClaudeProvider:
     async def _race(
         self, session: _Session, pending: _Pending, name: str, args: dict,
         label: str | None = None, sid: str | None = None,
+        shell_cwd: str | None = None, tool_use_id: str | None = None,
     ) -> Decision:
         def ask() -> Decision:
             try:
+                # Each keyword only to a callback that takes it: one that does
+                # not would raise, and a raise denies.
+                extra: dict = {}
                 if label is not None and _takes_subagent(session.permit):
+                    extra["subagent"] = label
                     # The child's sid too, for the card's link to its row
                     # (SV-3), when the callback takes it: like the label, it
                     # decides nothing.
-                    extra = ({"subagent_sid": sid}
-                             if sid and _takes_keyword(session.permit, "subagent_sid") else {})
-                    return Decision(session.permit(name, dict(args), session.brief,
-                                                   subagent=label, **extra))
-                return Decision(session.permit(name, dict(args), session.brief))
+                    if sid and _takes_keyword(session.permit, "subagent_sid"):
+                        extra["subagent_sid"] = sid
+                if shell_cwd is not None and _takes_keyword(session.permit, "shell_cwd"):
+                    extra["shell_cwd"] = shell_cwd
+                if tool_use_id is not None and _takes_keyword(session.permit, "tool_use_id"):
+                    extra["tool_use_id"] = tool_use_id
+                return Decision(session.permit(name, dict(args), session.brief, **extra))
             except Exception:  # noqa: BLE001 — an unreadable answer is a denial
                 return Decision.DENY
 

@@ -96,18 +96,21 @@ def eq(got, want, label: str) -> None:
 class Hook:
     """A scripted point where the CLI would call the PreToolUse hook."""
 
-    def __init__(self, tool_name: str, tool_input: dict, tool_use_id: str = "call-1"):
+    def __init__(self, tool_name: str, tool_input: dict, tool_use_id: str = "call-1",
+                 extra: dict | None = None):
         self.tool_name = tool_name
         self.tool_input = tool_input
         self.tool_use_id = tool_use_id
+        self.extra = dict(extra or {})      # more hook-input fields (the CLI's `cwd`)
 
 
 class Permission:
     """A scripted point where the CLI would call `can_use_tool`."""
 
-    def __init__(self, tool_name: str, tool_input: dict):
+    def __init__(self, tool_name: str, tool_input: dict, tool_use_id: str | None = None):
         self.tool_name = tool_name
         self.tool_input = tool_input
+        self.tool_use_id = tool_use_id       # the context's, as the SDK passes it
 
 
 class Raise:
@@ -173,6 +176,7 @@ class FakeClient:
                     "tool_name": item.tool_name,
                     "tool_input": item.tool_input,
                     "tool_use_id": item.tool_use_id,
+                    **item.extra,
                 }
                 self.hook_results.append(
                     await matcher.hooks[0](data, item.tool_use_id, {"signal": None})
@@ -181,7 +185,9 @@ class FakeClient:
             if isinstance(item, Permission):
                 self.permission_results.append(
                     await self.options.can_use_tool(
-                        item.tool_name, item.tool_input, {"signal": None}
+                        item.tool_name, item.tool_input,
+                        {"signal": None} if item.tool_use_id is None else
+                        SimpleNamespace(signal=None, tool_use_id=item.tool_use_id, agent_id=None),
                     )
                 )
                 continue
@@ -1123,6 +1129,85 @@ def hook_checks() -> None:
         drain(provider, handle)
         out = FakeClient.instances[0].hook_results[0]["hookSpecificOutput"]
         eq(out["permissionDecision"], "deny", "an unreachable broker denies, as everywhere")
+        provider.close(handle)
+
+
+def hook_cwd_checks() -> None:
+    """The hook input's `cwd` (the CLI's shell folder) reaches a permit that
+    takes `shell_cwd` — where merge_gate reads the current branch — and is
+    never handed to one that does not (that would raise, and a raise denies).
+    A `cwd` the model writes into the tool input stays in `args`."""
+    print("\n-- the hook's cwd reaches permit as shell_cwd (owner-only pushes, 2026-10-15)")
+    provider = claude.ClaudeProvider()
+    seen: list = []
+
+    def permit(name, args, b, *, shell_cwd=None):
+        seen.append((name, dict(args), shell_cwd))
+        return Decision.ALLOW
+
+    script = [Hook("Bash", {"command": "git push"}, "c1", extra={"cwd": "/work/main-checkout"}),
+              Hook("Bash", {"command": "git push", "cwd": "/model/said"}, "c2"),
+              result_message()]
+    with fake(script):
+        handle = provider.start(thread(), brief(), permit)
+        drain(provider, handle)
+        eq(seen[0][2], "/work/main-checkout", "the CLI's cwd arrives as shell_cwd")
+        eq(seen[1][2], None, "a model-written cwd is not the shell's folder")
+        eq(seen[1][1].get("cwd"), "/model/said", "it stays an argument, judged as one")
+        provider.close(handle)
+
+    plain: list = []
+
+    def old_permit(name, args, b):
+        plain.append(name)
+        return Decision.ALLOW
+
+    with fake([Hook("Bash", {"command": "ls"}, "c3", extra={"cwd": "/work"}), result_message()]):
+        handle = provider.start(thread(), brief(), old_permit)
+        drain(provider, handle)
+        client = FakeClient.instances[0]
+        eq(plain, ["Bash"], "a permit without the keyword is still asked")
+        eq(client.hook_results[0], {}, "and its ALLOW stands (no TypeError denial)")
+        provider.close(handle)
+
+
+def owner_yes_reuse_checks() -> None:
+    """Review of #208: when the CLI asks `can_use_tool` about a call the
+    owner just approved on a card, it is answered from that yes
+    (`permit.recall`) for the same tool_use_id and identical input only — one
+    card — and anything else is decided again. Jarvis registers
+    `can_use_tool` only off AUTO (R2: under AUTO the CLI consults it for
+    nothing), so this runs under ASK; under AUTO it is inert by design."""
+    print("\n-- can_use_tool reuses the owner's yes for the same tool_use_id only")
+    provider = claude.ClaudeProvider()
+    calls: list = []
+    held: dict = {}
+
+    def permit(name, args, b, *, tool_use_id=None):
+        calls.append((name, dict(args), tool_use_id))
+        if tool_use_id:
+            held[tool_use_id] = (name, json.dumps(args, sort_keys=True))
+        return Decision.ALLOW
+
+    def recall(tool_use_id, name, args):
+        return held.pop(tool_use_id, None) == (name, json.dumps(args, sort_keys=True))
+
+    permit.recall = recall
+    merge = {"command": "gh pr merge 5"}
+    script = [Hook("Bash", merge, "tu-1"), Permission("Bash", merge, "tu-1"),
+              Hook("Bash", merge, "tu-2"), Permission("Bash", {"command": "gh pr merge 6"}, "tu-2"),
+              Permission("Bash", merge, "tu-1"), Permission("Bash", merge), result_message()]
+    with fake(script):
+        handle = provider.start(thread(), brief(profile=PermissionProfile.ASK), permit)
+        drain(provider, handle)
+        client = FakeClient.instances[0]
+        eq([c[2] for c in calls[:1]], ["tu-1"], "the hook hands permit its tool_use_id")
+        eq(type(client.permission_results[0]).__name__, "PermissionResultAllow",
+           "the classifier's re-ask of the same call is answered from the owner's yes")
+        eq(len([c for c in calls if c[1] == merge]), 2 + 2,
+           "only the re-ask was not asked again: hooks tu-1 and tu-2, then the spent tu-1 and the id-less ask")
+        eq([c[1] for c in calls if c[1] != merge], [{"command": "gh pr merge 6"}],
+           "different input under the same id is decided again")
         provider.close(handle)
 
 
@@ -3045,6 +3130,8 @@ def main() -> int:
     options_checks()
     sequence_checks()
     hook_checks()
+    hook_cwd_checks()
+    owner_yes_reuse_checks()
     env_hook_checks()
     answer_checks()
     daemon_answer_route_checks()

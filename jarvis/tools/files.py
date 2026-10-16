@@ -108,6 +108,13 @@ SELF_PROTECTED = frozenset(
         # may reveal or touch. The owner's answer, 2026-10-12.
         "jarvis/v2/editor_git.py",
         "jarvis/v2/editor_nav.py",
+        # The v2 permit's five layers and the owner-only repository gate
+        # (merging or closing a pull request, a push to main, a branch
+        # deletion, a force push). The owner's decision, 2026-10-15: an agent
+        # that could edit them could answer for the owner. Read-only in the
+        # HUD editor too, so the owner changes them in a worktree, not there.
+        "jarvis/v2/permissions.py",
+        "jarvis/v2/merge_gate.py",
     }
 )
 
