@@ -2146,16 +2146,20 @@ class CodexProvider:
             sid = child_sid(p.get("threadId")) if child is not None else None
             yield self._event(h, EventKind.APPROVAL_REQUESTED, req_id=req_id, tool=name, args=args,
                               command=args.get("command"), **({"subagent": sid} if sid else {}))
+            from ..permissions import L_CHAT_GIT, last_verdict
+            verdict = None
             try:
                 # Deliberately on the send caller's thread: broker context survives.
                 # A widening goes as a keyword the model cannot reach; a
                 # callback that does not take it raises, and that denies.
                 extra = ({"subagent_sid": sid}
                          if sid and line and _takes_keyword(s.permit, "subagent_sid") else {})
+                last_verdict()          # only this call's verdict is read below
                 decision = (s.permit(name, args, s.brief, widening=line, grants=tuple(grants),
                                      also_commands=tuple(also), **extra) if line
                             else s.permit(name, args, s.brief))
                 decision = Decision(decision)
+                verdict = last_verdict()
             except Exception:
                 decision = Decision.DENY
             with s.mutex:
@@ -2168,15 +2172,16 @@ class CodexProvider:
                 s.pending.pop(req_id, None)
             self._reply(s, request, _decision(decision == Decision.ALLOW))
             yield self._event(h, EventKind.APPROVAL_RESOLVED, req_id=req_id, decision=decision.value)
-            if (decision == Decision.DENY and shell and line
-                    and codex_config.approvals_reviewer(s.brief) == "user"):
+            if (decision == Decision.DENY and verdict is not None
+                    and verdict.decision is Decision.DENY and verdict.layer == L_CHAT_GIT):
                 # CG-1: the permit declined an escalated raw push or gh
                 # unasked. The decline carries no text to the model, which
-                # has the same pointer in its git note; the owner sees it here.
+                # has the same pointer in its git note; the owner sees it here
+                # — only for CG-1's decline, never a line an earlier rule
+                # refused for another reason (#223's review, NIT 5).
                 from .. import chat_git
-                if any(chat_git.raw_remote(c) for c in (args.get("command"), *also)):
-                    yield self._event(h, EventKind.ERROR, fatal=False,
-                                      message=f"Codex approval request declined: {chat_git.POINTER}{note}")
+                yield self._event(h, EventKind.ERROR, fatal=False,
+                                  message=f"Codex approval request declined: {chat_git.POINTER}{note}")
             if s.rpc.failed.is_set():
                 raise RpcError("Codex transport failed during approval")
             return

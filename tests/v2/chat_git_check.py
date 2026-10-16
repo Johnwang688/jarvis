@@ -214,18 +214,13 @@ def permit_for(cwd, asker, profile=None):
 
 def call(tool, args, cwd, *, asker=None, profile=None, permit=None):
     """One call the way the bridge makes it (`bridge.call`): a fresh Context,
-    the session's offered names bound, the session's permit as approver
-    (`dangerous_tool=True`), a nondangerous tool's permit asked first."""
-    from jarvis.v2.provider import Decision
+    the session's offered names bound, the bridge's own approver over the
+    session's permit (`dangerous_tool=True`), a nondangerous tool's permit
+    asked first (`bridge._delegated`)."""
+    from jarvis.v2 import bridge
     asker = asker if asker is not None else Asker()
     permit = permit or permit_for(cwd, asker, profile)
-
-    def approve(entry, arguments):
-        try:
-            return Decision(permit(entry.name, dict(arguments), None,
-                                   dangerous_tool=True)) is Decision.ALLOW
-        except Exception:
-            return False
+    approve = bridge._approver(SimpleNamespace(permit=permit), lambda: True)
 
     def run():
         from jarvis.v2 import chat_git
@@ -233,8 +228,9 @@ def call(tool, args, cwd, *, asker=None, profile=None, permit=None):
                      caller={"thread_id": "cg000000", "project_id": "p", "provider": "codex",
                              "turn_id": "t1"})
         if not tools.REGISTRY[tool].dangerous:
-            if Decision(permit(tool, dict(args), None)) is not Decision.ALLOW:
-                return "Refused: this chat did not permit the Jarvis tool call."
+            refused = bridge._delegated(permit, tool, args, lambda: True)
+            if refused is not None:
+                return refused.text
         return tools.dispatch(tool, json.dumps(args), approve=approve).text
 
     return contextvars.Context().run(run), asker
@@ -302,11 +298,24 @@ def unit_checks():
                     "gh pr create --fill", "gh pr merge 3 --squash", "gh api user",
                     "/usr/bin/gh repo view", "bash -lc 'gh pr view'", "env A=1 git fetch",
                     "git pull --rebase", "git ls-remote origin", "git-push origin x",
-                    "cd /x && git fetch origin", "git fetch https://github.com/o/r.git"):
+                    "cd /x && git fetch origin", "git fetch https://github.com/o/r.git",
+                    # Sure, though an expansion stands elsewhere on the line.
+                    "git push origin \"$BRANCH\"", "git -C \"$D\" push origin topic",
+                    "git push '$R' main", "nice -n 5 gh pr list", "timeout 5 git push origin x",
+                    "git push -u origin x"):
         ok(chat_git.raw_remote(command), f"raw_remote reads {command!r} as network git or gh")
     for command in ("git status", "git commit -m 'gh push'", "git fetch /local/mirror x",
                     "git fetch ./mirror", "git fetch file:///tmp/m", "echo gh", "npm test",
-                    "$G push", "git log", "", None):
+                    "$G push", "git log", "", None,
+                    # Unsure (#223's review, LOW 2): a remote only known when
+                    # the line runs, and a program a wrapper may not run (an
+                    # option it does not know may take the program as its
+                    # value: `prog.certain`), take the ordinary widening ask.
+                    "git push \"$R\" main", "git fetch \"$MIRROR\"", "git push $R",
+                    "git fetch ${MIRROR:-/srv/m}", "git pull \"$(cat remote.txt)\" main",
+                    "git ls-remote `cat remote.txt`", "git fetch mirror*", "git-push \"$R\" x",
+                    "nice --bogus gh pr list", "env --bogus gh api user",
+                    "timeout --foo 5 git push origin x", "nohup --bogus git fetch origin"):
         ok(not chat_git.raw_remote(command), f"raw_remote leaves {command!r} alone")
 
 
@@ -397,11 +406,15 @@ def push_checks():
         box.git("add", "third.txt", cwd=p.wt)
         box.git("commit", "-qm", "third", cwd=p.wt)
         before = box.remote_ref(p.remote, "topic")
-        for label, asker, profile in (("no", Asker(Decision.DENY), None),
-                                      ("deny-all", deny_all("nobody"), None),
-                                      ("strict", Asker(), PermissionProfile.STRICT)):
+        # Only a no from whoever was asked reads as "declined"; strict asks
+        # nobody, so the model is told the refusal itself (#223's review, LOW 1).
+        for label, asker, profile, want in (
+                ("no", Asker(Decision.DENY), None, "The user declined"),
+                ("deny-all", deny_all("nobody"), None, "The user declined"),
+                ("strict", Asker(), PermissionProfile.STRICT,
+                 "Refused: strict profile refuses a dangerous Jarvis tool (the user was not asked).")):
             text, _ = call("chat_git_push", args, p.proj, asker=asker, profile=profile)
-            ok(text.startswith("The user declined"), f"[{label}] declined ({text[:80]!r})")
+            ok(text.startswith(want), f"[{label}] {want!r} ({text[:120]!r})")
             eq(box.remote_ref(p.remote, "topic"), before, f"[{label}] nothing pushed")
         eq(asker.seen if isinstance(asker, Asker) else [], [], "strict asks nobody")
 
@@ -488,11 +501,15 @@ def refusal_checks():
         def refused(tool, a, words, label, cwd=None):
             box.clear_gh()
             text, asker = call(tool, a, cwd or p.proj)
-            ok(text.startswith("The user declined"), f"{label}: refused ({text[:100]!r})")
             eq(asker.seen, [], f"{label}: unasked")
             record = box.decisions[-1] if box.decisions else {}
             eq(record.get("layer"), "deny", f"{label}: at layer 1")
             ok(words in record.get("reason", ""), f"{label}: says {words!r} ({record.get('reason')!r})")
+            # The model is told the refusal, never that the owner declined a
+            # card nobody saw (#223's review, LOW 1).
+            eq(text, f"Refused: {record.get('reason')} (the user was not asked).",
+               f"{label}: the model reads the real refusal")
+            ok(words in text and "declined" not in text, f"{label}: not 'declined' ({text[:120]!r})")
             eq(box.gh_log(), [], f"{label}: gh never ran")
 
         (gitdir / "HEAD").write_text(sha + "\n")
@@ -581,7 +598,8 @@ def refusal_checks():
             refused(tool, a, "origin changed", f"{tool} after an origin change")
         box.clear_gh()
         text, asker = call("chat_git_fetch", args, p.proj)
-        ok(text.startswith("Refused"), f"fetch after an origin change is refused ({text[:80]!r})")
+        ok(text.startswith("Refused: chat_git_fetch: origin changed since it was pinned"),
+           f"fetch after an origin change is refused, saying why ({text[:80]!r})")
         eq(box.gh_log(), [], "fetch: gh never ran")
         box.git("remote", "set-url", "origin", "https://github.com/owner/beta.git", cwd=p.proj)
         # And a pin cannot be overwritten in code either.
@@ -595,7 +613,8 @@ def refusal_checks():
                         ("chat_pr_close", {"worktree": str(other.wt), "number": 1})):
             refused(tool, a, "no pinned", f"{tool} with no pin", cwd=other.proj)
         text, _ = call("chat_git_fetch", {"worktree": str(other.wt)}, other.proj)
-        ok(text.startswith("Refused"), f"fetch with no pin is refused ({text[:80]!r})")
+        ok(text.startswith("Refused: chat_git_fetch: this repository has no pinned GitHub origin"),
+           f"fetch with no pin is refused, saying why ({text[:80]!r})")
 
 
 def gh_checks():
@@ -888,6 +907,72 @@ def malicious_checks():
              control=lambda p: controls["status"](p, "x-core.fsmonitor"))
 
 
+def guard_checks():
+    """#223's review, LOW 3: two guards no check held. gh's login and target
+    variables never reach the daemon's gh or git from its own environment
+    (`_OWNER_ENV_KEYS`), and a remote default branch that cannot be read
+    refuses the push (`_remote_default` fails closed)."""
+    from jarvis.v2 import chat_git
+    leaked = ("GH_TOKEN", "GH_REPO", "GH_HOST", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN",
+              "GITHUB_ENTERPRISE_TOKEN")
+    for key in leaked:
+        ok(key not in chat_git._OWNER_ENV_KEYS, f"{key} is not one of the owner env keys")
+    with Box() as box:
+        p = box.project("zeta")
+        args = {"worktree": str(p.wt)}
+        saved = {k: os.environ.get(k) for k in leaked}
+        os.environ.update({k: f"FAKE-{k}" for k in leaked})
+        try:
+            env = chat_git._owner_env()
+            eq(sorted(k for k in leaked if k in env), [], "the owner env carries none of them")
+            text, _ = call("chat_git_push", args, p.proj)
+            ok(text.startswith("Pushed"), f"pushed ({text[:120]!r})")
+            box.clear_gh()
+            text, _ = call("chat_pr_close", {**args, "number": 4}, p.proj)
+            ok("succeeded" in text, f"closed ({text[:120]!r})")
+            runs = box.gh_log()
+            ok(runs, "gh ran")
+            for run in runs:
+                eq(sorted(k for k in leaked if k in run["env"]), [],
+                   f"gh {' '.join(run['argv'][:2])} sees none of them")
+        finally:
+            for key, value in saved.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
+        # The remote's HEAD is `topic` — a default branch outside merge_gate's
+        # list — and reading it fails: the push is refused, nothing lands.
+        (p.wt / "next.txt").write_text("next\n")
+        box.git("add", "next.txt", cwd=p.wt)
+        box.git("commit", "-qm", "next", cwd=p.wt)
+        box.git("--git-dir", str(p.remote), "symbolic-ref", "HEAD", "refs/heads/topic", cwd=box.root)
+        before = box.remote_ref(p.remote, "topic")
+        real = chat_git.run_git
+        seen = []
+
+        def failing(argv, **kw):
+            if "ls-remote" in argv:
+                seen.append(list(argv))
+                return 128, "", "fatal: unable to access the remote"
+            return real(argv, **kw)
+        chat_git.run_git = failing
+        try:
+            text, _ = call("chat_git_push", args, p.proj)
+        finally:
+            chat_git.run_git = real
+        ok(seen, "the default branch was asked for")
+        ok(text.startswith("Error: the remote's default branch could not be read"),
+           f"an unreadable default refuses the push ({text[:120]!r})")
+        eq(box.remote_ref(p.remote, "topic"), before, "and nothing was pushed to the default branch")
+        # The control: readable, the same default is refused as protected.
+        text, _ = call("chat_git_push", args, p.proj)
+        ok(text.startswith("Refused: topic is a protected or default branch"),
+           f"readable, it is refused as the default ({text[:120]!r})")
+        eq(box.remote_ref(p.remote, "topic"), before, "still nothing pushed")
+
+
 def identity_checks():
     """The owner's identity reaches Codex's environment, and nothing else does."""
     from jarvis.v2.providers import codex_config
@@ -943,7 +1028,7 @@ def mirror_root_checks():
 
 
 SECTIONS = (unit_checks, mirror_root_checks, session_tool_checks, push_checks, refusal_checks, gh_checks,
-            env_checks, malicious_checks, identity_checks)
+            env_checks, guard_checks, malicious_checks, identity_checks)
 
 
 def main():

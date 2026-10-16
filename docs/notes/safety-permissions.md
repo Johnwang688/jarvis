@@ -2334,7 +2334,8 @@ the default branch, a branch deletion, a force push.
   sh`, `eval "$(…)"`) or a setting may hand git's output to one (a shell
   pager or editor; any `-c`, config write or variable outside a benign
   list), only refs are blanked, never a value git or gh could print or run
-  (`--format`, `-m`, `--body`); `git rebase UPSTREAM BRANCH` moves HEAD to
+  (`--format`, `-m`, `--body`), glued or in its own word (#225's review,
+  LOW 1: `-m X` with a ref-like `X` was blanked); `git rebase UPSTREAM BRANCH` moves HEAD to
   BRANCH; `branchName: $b`
   in GraphQL is read from `-f b=…` or asks. Always running the backstop was measured and declined: it asks for
   ordinary lines that mention `main` beside a push.
