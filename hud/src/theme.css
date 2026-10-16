@@ -1864,7 +1864,9 @@ button.vexconnect { padding: 2px 10px; }
 .remotestatus { display:flex; align-items:center; justify-content:space-between; gap:8px; padding:3px 8px; }
 .remotesurface { position: relative; flex: 1 1 0; min-height: 40px; min-width: 0; overflow: hidden; touch-action: none; }
 .remotesurface canvas { position:absolute; inset:0; width:100%; height:100%; }
-.remoteinput { position:absolute; left:0; bottom:0; width:1px; height:1px; min-width:0; min-height:0; padding:0; border:0; opacity:.01; resize:none; }
+.remoteinput { position:absolute; left:clamp(0px, var(--ime-x, 0px), calc(100% - 1px)); top:clamp(0px, var(--ime-y, 100%), calc(100% - 1px)); width:1px; height:1px; min-width:0; min-height:0; padding:0; border:0; opacity:.01; resize:none; pointer-events:none; }
+/* B-IME: while the owner composes, the proxy shows what is being composed where they last pressed; the IME's candidate window opens beside it. */
+.remoteinput[data-composing] { z-index:2; left:clamp(0px, var(--ime-x, 0px), calc(100% - min(24em, 100%))); top:clamp(0px, var(--ime-y, 100%), calc(100% - 2em)); width:min(24em, 100%); height:2em; padding:2px 6px; border:1px solid var(--accent); border-radius:3px; background:var(--bg-2); color:var(--text); font:13px var(--mono); line-height:1.4; opacity:1; overflow:hidden; white-space:nowrap; }
 .remotesurface:focus-within { outline:1px solid var(--accent); outline-offset:-1px; }
 .browserquestion { flex:0 0 auto; max-height:180px; overflow:auto; border:1px solid var(--border); background:var(--bg-2); }
 .browserquestion p { white-space:pre-wrap; overflow-wrap:anywhere; }

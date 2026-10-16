@@ -2180,3 +2180,59 @@ UI (a dialog), which a headless screencast does not draw. If Chrome then sends
 the Google tab to a chrome:// page, it is replaced with the explanation. In
 this fresh profile the people page offers "Sign in to Chrome", not "Turn on
 sync…". That button appears only with an account, which needs Google.
+
+## IME composition in a Remote pane (B-IME, BR-7, 2026-10-16)
+
+**The owner composes in the pane's own input proxy, never in the page**
+(`hud/src/lib/remoteime.ts`, wired in `RemoteView.tsx`). The operating
+system's IME runs against the proxy textarea; the page receives only
+committed text, as `{t:"text"}` → `Input.insertText` (the existing paste
+path, chunked, epoch-checked, a takeover like any owner input). No
+`Input.imeSetComposition` is ever sent: the page never sees half-typed pinyin
+or kana, and no remote composition state exists for a lost socket, a card or
+a navigation to strand or commit later. While composing, the proxy is drawn
+as a small box (`.remoteinput[data-composing]`) at the owner's last press in
+the pane, so the owner sees the composition and the IME's candidate window
+opens near the field they clicked, not at the pane's corner. It never takes
+focus; `pointer-events: none` keeps it from intercepting a press.
+
+Measured on Chrome 155 (CDP-driven, both ends real) and what the HUD does:
+
+- A commit ends with `compositionend` carrying the text; Escape ends it with
+  `""`, and nothing is sent.
+- **A focus change mid-composition commits the raw text**: `compositionend`
+  (`ni`) fires before the proxy's `blur`, in the same task. Chrome on Windows
+  also commits on any mouse press before the press reaches the page. So a
+  commit waits `COMMIT_HOLD_MS` (40 ms) and is dropped by a blur or any
+  pointer press (a window capture listener); the next owner keystroke, paste
+  or insertion sends it first, so order is kept.
+- Emptying the proxy mid-composition ends Blink's composition without a
+  `compositionend`; that is how an interruption cancels. Whether the
+  system IME is told cannot be seen here, so after such a cancel the first
+  plain `insertText` before a new composition or a forwarded key is dropped
+  as the IME's late commit (`stale`).
+- Text inserted with no composition (the Windows emoji panel, an IME's
+  direct punctuation, a key whose keydown was not forwarded) arrives as an
+  `input` of type `insertText` and is sent once. It used to be discarded.
+- Any keydown with keyCode 229 is dropped whatever its `key` (some IMEs
+  report the letter on the first key, before `compositionstart`), as are
+  `isComposing`, `Process`, `Dead` and `Unidentified` keys.
+
+Interruptions that send nothing and empty the proxy: blur, a pointer press,
+an approval card, an options hold seen mid-composition (or a composition
+begun under one), a reconnect or socket loss, `owner_reset` (any main-frame
+navigation, same-document ones included) and an auth prompt. Pane-switch
+keys are already ignored mid-composition (`Layout.tsx`).
+
+Checks: `hud/src/lib/remoteime.test.ts` (the state machine, fake timers),
+`RemoteView.test.ts` "IME composition" (jsdom wiring), and
+`tests/face/hud_v2_remote_ime_check.py`: the built HUD in headless Chrome 155
+with composition driven by CDP on the HUD page, each `key`/`text` message
+parsed by `stream.parse` and applied by CDP to an isolated page holding an
+`<input>` and a `contenteditable`. Twelve mutants each fail at least one of
+them. **Limits**: real Windows IMEs (pinyin, Japanese, the emoji panel) were
+not automated; the owner's live checklist is in the PR. A click into the page
+mid-composition discards the composition, where Chrome itself would commit
+the raw text. The candidate window follows the last press, not the page's
+real caret (a daemon caret report would be a follow-up). Composition text is
+never logged.

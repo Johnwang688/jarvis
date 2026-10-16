@@ -168,3 +168,62 @@ it("an options hold blocks input synchronously before its blocked render while f
   await frame(binary(1));expect(mocks.draw).toHaveBeenCalledOnce();
   expect(socket().sent).toContainEqual({t:"ack",id:1});
 });
+
+// B-IME: composition happens in the proxy; only a commit reaches the page (lib/remoteime.ts).
+const comp=async(type:string,data="")=>{await act(async()=>{input().dispatchEvent(new CompositionEvent(type,{bubbles:true,data}));});};
+const typed=async(inputType:string,data:string|null,isComposing=false)=>{await act(async()=>{input().dispatchEvent(new InputEvent("input",{bubbles:true,inputType,data,isComposing}));});};
+const hold=async()=>{await act(async()=>{await new Promise(r=>setTimeout(r,80));});};
+const texts=()=>socket().sent.filter(x=>x.t==="text").map(x=>x.text);
+describe("IME composition",()=>{
+  it("commits once as text, never as keys, and shows the box only while composing",async()=>{
+    await ready();await key("Process",{keyCode:229});await comp("compositionstart");
+    expect(input().hasAttribute("data-composing")).toBe(true);
+    await key("n",{keyCode:229,isComposing:true});await comp("compositionupdate","ni");await typed("insertCompositionText","ni",true);
+    await comp("compositionend","你好");expect(input().hasAttribute("data-composing")).toBe(false);
+    await hold();expect(texts()).toEqual(["你好"]);expect(socket().sent.filter(x=>x.t==="key")).toEqual([]);
+    await hold();expect(texts()).toEqual(["你好"]);
+  });
+  it("Escape cancels with nothing sent",async()=>{
+    await ready();await comp("compositionstart");await comp("compositionupdate","ni");await comp("compositionend","");await hold();
+    expect(socket().sent.filter(x=>x.t==="text"||x.t==="key")).toEqual([]);
+  });
+  it("a blur right after Chrome's commit-on-blur drops the raw text",async()=>{
+    await ready();await act(async()=>input().focus());socket().sent=[];
+    await comp("compositionstart");await comp("compositionupdate","ni");
+    await act(async()=>{input().dispatchEvent(new CompositionEvent("compositionend",{bubbles:true,data:"ni"}));input().blur();});
+    await hold();expect(texts()).toEqual([]);expect(socket().sent).toContainEqual({t:"blur"});
+  });
+  it("a pointer press anywhere drops a waiting commit and cancels an open composition",async()=>{
+    await ready();await comp("compositionstart");await comp("compositionend","ni");
+    await act(async()=>{document.body.dispatchEvent(new MouseEvent("mousedown",{bubbles:true}));});await hold();
+    expect(texts()).toEqual([]);
+    input().value="ni";await comp("compositionstart");
+    await act(async()=>{host.querySelector('[data-testid="remote-surface"]')!.dispatchEvent(new MouseEvent("mousedown",{bubbles:true,button:0,clientX:30,clientY:40}));});
+    expect(input().value).toBe("");expect(input().hasAttribute("data-composing")).toBe(false);
+    await comp("compositionend","ni");await hold();expect(texts()).toEqual([]);
+    expect(input().style.getPropertyValue("--ime-x")).toBe("30px");expect(input().style.getPropertyValue("--ime-y")).toBe("40px");
+  });
+  it("the next key sends a waiting commit first, in order",async()=>{
+    await ready();await comp("compositionstart");await comp("compositionend","日本");await key("a");
+    expect(socket().sent.filter(x=>x.t==="text"||x.t==="key").map(x=>x.t==="text"?x.text:x.e.key)).toEqual(["日本","a"]);
+    await hold();expect(texts()).toEqual(["日本"]);
+  });
+  it("text inserted with no composition (the emoji panel) is sent once and cleared",async()=>{
+    await ready();input().value="😀";await typed("insertText","😀");
+    expect(texts()).toEqual(["😀"]);expect(input().value).toBe("");
+  });
+  it("a card, a hold, a navigation or a reconnect mid-composition commits nothing later",async()=>{
+    await ready();input().value="ka";await comp("compositionstart");await render({blocked:true});
+    expect(input().value).toBe("");expect(input().hasAttribute("data-composing")).toBe(false);await render({blocked:false});
+    await comp("compositionend","card");await hold();expect(texts()).toEqual([]);
+    let held=false;await render({inputHeld:()=>held});
+    await comp("compositionstart");held=true;await comp("compositionupdate","ni");held=false;await comp("compositionend","hold");await hold();
+    expect(texts()).toEqual([]);
+    input().value="ni";await comp("compositionstart");await frame({t:"owner_reset"});expect(input().value).toBe("");
+    await comp("compositionend","navigated");await hold();expect(texts()).toEqual([]);
+    await comp("compositionstart");await comp("compositionend","waiting");await frame({t:"owner_reset"});await hold();expect(texts()).toEqual([]);
+    await comp("compositionstart");const first=socket();await render({live:false});await render({live:true});await act(async()=>socket().open());
+    await comp("compositionend","reconnected");await hold();
+    expect(first.sent.concat(socket().sent).filter(x=>x.t==="text")).toEqual([]);
+  });
+});
