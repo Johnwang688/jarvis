@@ -135,17 +135,25 @@ PROFILE_IDLE_S = 300.0
 SIGNIN_URL = "chrome://settings/syncSetup"
 SIGNIN_PAGES = frozenset((SIGNIN_URL, "chrome://settings/people"))
 # Chrome's own "Sign in to Chrome" (on the people page) opens Google's
-# sign-in in a new tab with no opener (measured, Chrome 155:
-# `https://accounts.google.com/signin/chrome/sync?ssp=1&continue=…`, its one
-# history entry's transition `auto_bookmark`). A page can open that address
-# with no opener too (a Ctrl-, Shift- or middle-click, real or synthetic,
-# which fires no `Page.windowOpen`), but only as a `link` transition: no page
-# can make a browser-UI one. So a tab is shown beside the owner's sign-in tab
-# only when Jarvis did not open it, it has no opener, it lands first on
-# exactly this path with Chrome's own transition, the owner pressed in that
-# sign-in tab within SIGNIN_ADOPT_S, and that sign-in tab has adopted none
-# yet. It is judged like every page and holds no internal capability.
+# sign-in in a new tab with no opener: it requests
+# `https://accounts.google.com/signin/chrome/sync?ssp=1&continue=…` with
+# Chrome's `X-Chrome-ID-Consistency-Request` header, which Google answers
+# with a 302 to `/v3/signin/identifier?…&flowName=GlifDesktopChromeSync`
+# (PR #217 delta review). Measured, Chrome 155: the tab's one history entry
+# has transition `auto_bookmark` and the requested address as its
+# `userTypedURL`; when Google cannot be reached, the entry's `url` is that
+# address and the tab shows Chrome's error page. A page can request the same
+# address with no opener too (a Ctrl-, Shift- or middle-click, real or
+# synthetic, which fires no `Page.windowOpen`), but only as a `link`
+# transition: no page can make a browser-UI one. So a tab is shown beside
+# the owner's sign-in tab only when Jarvis did not open it, it has no
+# opener, Chrome's own transition requested exactly SIGNIN_GAIA, it lands
+# first on Google's sign-in origin or Chrome's error page, the owner pressed
+# in that sign-in tab within SIGNIN_ADOPT_S, and that sign-in tab has adopted
+# none yet. It is judged like every page and holds no internal capability.
 SIGNIN_GAIA = ("https", "accounts.google.com", "/signin/chrome/sync")   # scheme, netloc, path
+SIGNIN_ORIGIN = ("https", "accounts.google.com")                        # where Google may redirect it
+SIGNIN_ERROR = "chrome-error://chromewebdata/"
 SIGNIN_TRANSITION = "auto_bookmark"
 SIGNIN_ADOPT_S = 15.0
 PROFILES_CAP = 64 * 1024
@@ -1707,12 +1715,24 @@ class BrowserHost:
         self._publish_pane_tabs()  # _located may return early for a same-URL reload
 
     @staticmethod
-    def _signin_address(url: str) -> bool:
-        """Exactly Chrome's sign-in page on Google (`SIGNIN_GAIA`)."""
+    def _signin_address(url) -> bool:
+        """Exactly Chrome's sign-in request to Google (`SIGNIN_GAIA`)."""
         try:
             parts = urlsplit(url)
             return (parts.scheme, parts.netloc, parts.path) == SIGNIN_GAIA
-        except ValueError:
+        except (TypeError, ValueError, AttributeError):
+            return False
+
+    @staticmethod
+    def _signin_landing(url) -> bool:
+        """Where that request may first land: Google's sign-in origin
+        exactly (no port, no userinfo), or Chrome's error page."""
+        if url == SIGNIN_ERROR:
+            return True
+        try:
+            parts = urlsplit(url)
+            return (parts.scheme, parts.netloc) == SIGNIN_ORIGIN
+        except (TypeError, ValueError, AttributeError):
             return False
 
     def _signin_parent(self, tab: _Tab) -> _Tab | None:
@@ -1730,7 +1750,7 @@ class BrowserHost:
         """At an unsolicited tab's first real landing: Chrome's own sign-in
         tab (`SIGNIN_GAIA`) opens beside the owner's sign-in tab, as a
         pop-up would. Anything else stays as it was (unshown)."""
-        if self._signin_address(url) and self._signin_parent(tab) is not None:
+        if self._signin_landing(url) and self._signin_parent(tab) is not None:
             asyncio.ensure_future(self._quietly(self._signin_popup(tab, url)))
 
     async def _signin_popup(self, tab: _Tab, url: str) -> None:
@@ -1744,10 +1764,22 @@ class BrowserHost:
             finally:
                 await self._quietly(cdp.detach())
             entries = history.get("entries") or []
-            # Chrome opened it, and from its own UI: one entry, the landing
-            # judged, and Chrome's transition (a page's open is a `link`).
-            if (len(entries) != 1 or entries[0].get("url") != url
-                    or entries[0].get("transitionType") != SIGNIN_TRANSITION):
+            # Chrome opened it, and from its own UI: one entry, Chrome's
+            # transition (a page's open is a `link`), and exactly Chrome's
+            # sign-in request — before Google's redirect (`userTypedURL`), or
+            # the failed address itself under Chrome's error page.
+            if len(entries) != 1 or entries[0].get("transitionType") != SIGNIN_TRANSITION:
+                return
+            entry = entries[0]
+            if url == SIGNIN_ERROR:
+                requested = entry.get("url")
+            else:
+                # Google's own page may rewrite its address (same document)
+                # before this is read: the origin is what must still hold.
+                requested = entry.get("userTypedURL") or entry.get("url")
+                if entry.get("url") == SIGNIN_ERROR or not self._signin_landing(entry.get("url")):
+                    return
+            if not self._signin_address(requested):
                 return
         except Exception:  # noqa: BLE001 - unknown: left unshown
             return

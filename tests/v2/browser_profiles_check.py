@@ -348,11 +348,14 @@ class SigninAdoption(unittest.IsolatedAsyncioTestCase):
         guard.start();self.addCleanup(guard.stop)
         self.host=H.BrowserHost()
         self.url="https://accounts.google.com/signin/chrome/sync?ssp=1&continue=https%3A%2F%2Fwww.google.com%2F"
+        # Google's 302 for Chrome's request (FakeGaia does the same).
+        self.landed="https://accounts.google.com/v3/signin/identifier?ssp=1&flowName=GlifDesktopChromeSync"
 
     def tab(self,tid,*,opener=None,entries=None,**fields):
         sent=[]
         cdp=SimpleNamespace(send=AsyncMock(return_value={"currentIndex":0,"entries":entries if entries is not None
-                            else [{"url":self.url,"transitionType":"auto_bookmark"}]}),detach=AsyncMock())
+                            else [{"url":self.landed,"userTypedURL":self.url,"transitionType":"auto_bookmark"}]}),
+                            detach=AsyncMock())
         page=SimpleNamespace(opener=AsyncMock(return_value=opener))
         page.context=SimpleNamespace(new_cdp_session=AsyncMock(return_value=cdp))
         tab=H._Tab(id=tid,profile="p-11111111",ctx=None,page=page,
@@ -365,8 +368,8 @@ class SigninAdoption(unittest.IsolatedAsyncioTestCase):
         fields=dict(signin=True,signin_press=now);fields.update(parent)
         return self.tab("aaaaaaaa",**fields),self.tab("bbbbbbbb",unsolicited=True)
 
-    async def popup(self,signin,tab):
-        await self.host._signin_popup(tab,self.url)
+    async def popup(self,signin,tab,landed=None):
+        await self.host._signin_popup(tab,landed or self.landed)
         return tab.opener==signin.id and signin.sent==[{"t":"popup","tab_id":tab.id}]
 
     async def test_all_conditions_adopt_once(self):
@@ -374,15 +377,33 @@ class SigninAdoption(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await self.popup(signin,tab))
         self.assertTrue(signin.signin_adopted)
         again=self.tab("cccccccc",unsolicited=True)
-        await self.host._signin_popup(again,self.url)
+        await self.host._signin_popup(again,self.landed)
         self.assertIsNone(again.opener)
+
+    async def test_unredirected_and_unreachable_requests_adopt(self):
+        for name,landed,entry in (
+                ("no redirect",self.url,{"url":self.url,"userTypedURL":"","transitionType":"auto_bookmark"}),
+                ("Google unreachable",H.SIGNIN_ERROR,{"url":self.url,"userTypedURL":"","transitionType":"auto_bookmark"})):
+            with self.subTest(name):
+                self.host._tabs.clear()
+                signin,_=self.pair();tab=self.tab("bbbbbbbb",unsolicited=True,entries=[entry])
+                self.assertTrue(await self.popup(signin,tab,landed))
 
     async def test_each_condition_is_required(self):
         now=asyncio.get_running_loop().time()
         cases={"a page's pop-up (opener)":({},dict(opener=object())),
                "a page's open (link transition)":({},dict(entries=[{"url":self.url,"transitionType":"link"}])),
                "more history":({},dict(entries=[{"url":self.url,"transitionType":"auto_bookmark"}]*2)),
-               "another address":({},dict(entries=[{"url":self.url+"&x","transitionType":"auto_bookmark"}])),
+               "another request":({},dict(entries=[{"url":self.landed,"transitionType":"auto_bookmark",
+                    "userTypedURL":"https://accounts.google.com/o/oauth2/auth?client_id=x"}])),
+               "a request on a look-alike host":({},dict(entries=[{"url":self.landed,"transitionType":"auto_bookmark",
+                    "userTypedURL":self.url.replace("google.com","google.com.evil")}])),
+               "redirected off Google's origin":({},dict(entries=[{"url":"https://evil.test/signin",
+                    "userTypedURL":self.url,"transitionType":"auto_bookmark"}])),
+               "redirected to another port":({},dict(entries=[{"url":self.landed.replace(".com/",".com:444/"),
+                    "userTypedURL":self.url,"transitionType":"auto_bookmark"}])),
+               "a page's open behind the error page":({},dict(entries=[{"url":"https://accounts.google.com/o/oauth2/auth",
+                    "userTypedURL":"","transitionType":"auto_bookmark"}],landed=H.SIGNIN_ERROR)),
                "the capability ended":(dict(signin=False),{}),
                "no owner press":(dict(signin_press=None),{}),
                "a stale press":(dict(signin_press=now-H.SIGNIN_ADOPT_S-1),{}),
@@ -394,8 +415,9 @@ class SigninAdoption(unittest.IsolatedAsyncioTestCase):
                 fields=dict(signin=True,signin_press=now);fields.update(parent)
                 profile=fields.pop("profile","p-11111111")
                 signin=self.tab("aaaaaaaa",**fields);signin.profile=profile
+                child=dict(child);landed=child.pop("landed",None)
                 tab=self.tab("bbbbbbbb",unsolicited=True,**child)
-                self.assertFalse(await self.popup(signin,tab))
+                self.assertFalse(await self.popup(signin,tab,landed))
                 self.assertIsNone(tab.opener);self.assertEqual(signin.sent,[])
 
     async def test_an_opener_named_meanwhile_wins(self):
@@ -418,6 +440,15 @@ class SigninAdoption(unittest.IsolatedAsyncioTestCase):
                     "chrome://settings/people","not a url"):
             with self.subTest(url=url):self.assertFalse(H.BrowserHost._signin_address(url))
 
+    def test_landing_on_googles_origin_or_the_error_page_only(self):
+        for url in (self.landed,self.url,"https://accounts.google.com/",H.SIGNIN_ERROR):
+            with self.subTest(url=url):self.assertTrue(H.BrowserHost._signin_landing(url))
+        for url in ("https://accounts.google.com.evil/","https://evil.accounts.google.com/",
+                    "https://accounts.google.com:444/","https://x@accounts.google.com/",
+                    "http://accounts.google.com/","chrome-error://other/","chrome://settings/people",
+                    "about:blank",None):
+            with self.subTest(url=url):self.assertFalse(H.BrowserHost._signin_landing(url))
+
 
 class FakeGaia:
     """A local TLS stand-in for `accounts.google.com`: the gate's resolver
@@ -433,13 +464,31 @@ class FakeGaia:
                         "-addext", "subjectAltName=DNS:accounts.google.com"],
                        check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         hits = self.hits = []
+        self.headers = []
         gaia = self
         self.delay = 0.0
 
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self):
                 hits.append(self.path)
+                gaia.headers.append(dict(self.headers))
                 time.sleep(gaia.delay)
+                path, _, query = self.path.partition("?")
+                if path == "/signin/chrome/sync":
+                    # As accounts.google.com answers it (PR #217 delta review):
+                    # with Chrome's account-consistency header, a 302 to the
+                    # identifier page; without it, nothing.
+                    if "X-Chrome-ID-Consistency-Request" not in self.headers:
+                        self.send_response(404)
+                        self.send_header("Content-Length", "0")
+                        self.end_headers()
+                        return
+                    self.send_response(302)
+                    self.send_header("Location", "/v3/signin/identifier?" + query
+                                     + "&flowName=GlifDesktopChromeSync")
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
                 body = f"<!doctype html><title>{O.MARK} gaia</title><p>fixture sign-in".encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html")
@@ -632,11 +681,14 @@ class Real(O.OwnerBrowser):
         gaia=FakeGaia(Path(self.tmp.name));self.addCleanup(gaia.close)
         self.host._ensure_started()           # the gate exists once the host runs
         for p in gaia.patches(self.host):p.start();self.addCleanup(p.stop)
+        self.record()
+        return gaia
+
+    def record(self):
         self.sent=[];send=H.TabStream.send
         def record(stream,message,**kw):
             self.sent.append((stream,message));return send(stream,message,**kw)
         guard=patch.object(H.TabStream,"send",record);guard.start();self.addCleanup(guard.stop)
-        return gaia
 
     def signin_tab(self):
         row=self.owner("POST",f"/browser/profiles/{self.main}/signin",{})
@@ -681,8 +733,12 @@ class Real(O.OwnerBrowser):
         tab=self.new_tab(lambda:self.owner_click(signin,self.chrome_button(signin)))
         self.assertTrue(self.wait(lambda:tab.opener==signin.id,5))
         self.assertIn(tab.id,offered)
-        self.assertTrue(tab.page.url.startswith("https://accounts.google.com/signin/chrome/sync?ssp=1&"),tab.page.url)
-        self.assertTrue(any(path.startswith("/signin/chrome/sync?") for path in gaia.hits))
+        # Chrome's request, with its account-consistency header, and
+        # Google's 302 (as FakeGaia answers it) to the identifier page.
+        self.assertTrue(tab.page.url.startswith("https://accounts.google.com/v3/signin/identifier?ssp=1&"),tab.page.url)
+        self.assertIn("flowName=GlifDesktopChromeSync",tab.page.url)
+        first=next(n for n,path in enumerate(gaia.hits) if path.startswith("/signin/chrome/sync?"))
+        self.assertIn("X-Chrome-ID-Consistency-Request",gaia.headers[first])
         self.assertIn((signin.stream,{"t":"popup","tab_id":tab.id}),self.sent)
         self.assertEqual({r["tab_id"]:r["opener"] for r in self.owner("GET","/browser/tabs")},
                          {signin.id:None,tab.id:signin.id})
@@ -728,8 +784,24 @@ class Real(O.OwnerBrowser):
         self.assertFalse(signin.signin_adopted)
         self.owner("DELETE",f"/browser/tabs/{next(t.id for t in self.host._tabs.values() if t.page is other)}")
 
+    def deliver(self,tab,method,params):
+        self.run_on(self.host._deliver(tab,method,{"modifiers":0,**params}))
+
     def test_06g_only_soon_after_the_owners_press_and_while_signin_lasts(self):
         gaia=self.gaia();signin=self.signin_tab()
+        # Only a press opens the window: a hover, a wheel or a key's release
+        # by the owner does not.
+        key={"code":"ShiftLeft","key":"Shift","windowsVirtualKeyCode":16}
+        self.deliver(signin,"Input.dispatchMouseEvent",{"type":"mouseMoved","x":20,"y":20,"button":"none","buttons":0})
+        self.deliver(signin,"Input.dispatchMouseEvent",{"type":"mouseWheel","x":20,"y":20,"deltaX":0,"deltaY":40})
+        self.deliver(signin,"Input.dispatchKeyEvent",{"type":"keyUp",**key})
+        self.deliver(signin,"Input.dispatchMouseEvent",{"type":"mouseReleased","x":20,"y":20,"button":"left","buttons":0,"clickCount":1})
+        self.assertIsNone(signin.signin_press)
+        self.unshown(self.new_tab(lambda:self.run_on(self.chrome_button(signin).click())),"no press, only input")
+        self.deliver(signin,"Input.dispatchKeyEvent",{"type":"rawKeyDown",**key})
+        self.assertIsNotNone(signin.signin_press)
+        self.deliver(signin,"Input.dispatchKeyEvent",{"type":"keyUp",**key})
+        signin.signin_press=None
         # Chrome's own tab without a recent owner press (pressed long ago,
         # or a driven click) stays unshown.
         with patch.object(H,"SIGNIN_ADOPT_S",0.3):
@@ -745,6 +817,16 @@ class Real(O.OwnerBrowser):
         self.assertFalse(signin.signin)
         self.assertTrue(self.wait(lambda:tab.page.url.startswith("https://accounts.google.com/"),6),tab.page.url)
         self.unshown(tab,"an ended capability")
+
+    def test_06h_google_unreachable_shows_chromes_error_page_beside_signin(self):
+        self.record()                         # no FakeGaia: the suite's gate reaches no Google
+        signin=self.signin_tab()
+        tab=self.new_tab(lambda:self.owner_click(signin,self.chrome_button(signin)),
+                         landed=lambda t:t.page.url==H.SIGNIN_ERROR)
+        self.assertTrue(self.wait(lambda:tab.opener==signin.id,5))
+        self.assertIn((signin.stream,{"t":"popup","tab_id":tab.id}),self.sent)
+        self.assertEqual(self.run_on(tab.page.title()),"accounts.google.com")
+        self.owner("DELETE",f"/browser/tabs/{tab.id}")   # the suite's RSS bound
 
     def test_06c_page_navigation_revokes_without_creating_a_lease(self):
         row=self.open();page=self.page(row["tab_id"])
