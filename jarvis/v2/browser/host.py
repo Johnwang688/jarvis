@@ -103,6 +103,7 @@ from concurrent.futures import TimeoutError as FuturesTimeout
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlsplit
 from xml.sax.saxutils import escape as xml_escape
 
 from jarvis import config
@@ -110,7 +111,7 @@ from jarvis import config
 from . import files as _files
 from . import password_store as _stores
 from . import policy
-from .profiles import STICKY_KEY, STICKY_VALUE, ProfileStore
+from .profiles import STICKY_KEY, STICKY_VALUE, ProfileStore, marker_present
 from .gate import Gate
 from .settings import BrowserSettings
 from .stream import (MAX_DEVICE_PIXELS, TICKET_TTL_S, VIEW_MAX, TabStream, Tickets,
@@ -126,6 +127,18 @@ CHROME_PATH = Path("/opt/google/chrome/chrome")
 
 CALL_TIMEOUT_S = 30.0
 LAUNCH_TIMEOUT_S = 30.0
+# The password-store observation (`password_store.py`, follow-up of #215):
+# one probe cookie on a name that never resolves, then the same filler cookie
+# set FLUSH_SETS times. Chrome's cookie database commits a batch at once
+# when 512 operations are pending (each replacement is a delete and an add),
+# not only on its 30-second timer, so the probe's row is on disk in well
+# under a second (measured on Chrome 155: 0.02 s basic, 0.09 s keyring).
+# Both are expired again straight after the read.
+STORE_PROBE_URL = f"https://{_stores.PROBE_HOST}/"
+STORE_FILL_URL = "https://flush.password-store.jarvis.invalid/"
+STORE_FILL_NAME = "jarvis-flush"
+STORE_FLUSH_SETS = 300
+STORE_OBSERVE_S = 5.0
 NAV_TIMEOUT_S = 20.0
 CLOSE_TIMEOUT_S = 5.0
 STOP_TIMEOUT_S = 10.0
@@ -133,6 +146,28 @@ PROFILE_INSTANCES_MAX = 3
 PROFILE_IDLE_S = 300.0
 SIGNIN_URL = "chrome://settings/syncSetup"
 SIGNIN_PAGES = frozenset((SIGNIN_URL, "chrome://settings/people"))
+# Chrome's own "Sign in to Chrome" (on the people page) opens Google's
+# sign-in in a new tab with no opener: it requests
+# `https://accounts.google.com/signin/chrome/sync?ssp=1&continue=…` with
+# Chrome's `X-Chrome-ID-Consistency-Request` header, which Google answers
+# with a 302 to `/v3/signin/identifier?…&flowName=GlifDesktopChromeSync`
+# (PR #217 delta review). Measured, Chrome 155: the tab's one history entry
+# has transition `auto_bookmark` and the requested address as its
+# `userTypedURL`; when Google cannot be reached, the entry's `url` is that
+# address and the tab shows Chrome's error page. A page can request the same
+# address with no opener too (a Ctrl-, Shift- or middle-click, real or
+# synthetic, which fires no `Page.windowOpen`), but only as a `link`
+# transition: no page can make a browser-UI one. So a tab is shown beside
+# the owner's sign-in tab only when Jarvis did not open it, it has no
+# opener, Chrome's own transition requested exactly SIGNIN_GAIA, it lands
+# first on Google's sign-in origin or Chrome's error page, the owner pressed
+# in that sign-in tab within SIGNIN_ADOPT_S, and that sign-in tab has adopted
+# none yet. It is judged like every page and holds no internal capability.
+SIGNIN_GAIA = ("https", "accounts.google.com", "/signin/chrome/sync")   # scheme, netloc, path
+SIGNIN_ORIGIN = ("https", "accounts.google.com")                        # where Google may redirect it
+SIGNIN_ERROR = "chrome-error://chromewebdata/"
+SIGNIN_TRANSITION = "auto_bookmark"
+SIGNIN_ADOPT_S = 15.0
 PROFILES_CAP = 64 * 1024
 TITLE_CAP = 120
 URL_CAP = 2048
@@ -622,7 +657,10 @@ class _Instance:
     restore_allocation: bool = False
     refused_pages: list = field(default_factory=list)
     popup_cleanup: list = field(default_factory=list)
-    # The store this launch used (`password_store.py`): what `/status` says.
+    opening: int = 0                    # pages `_open_page_locked` is creating now
+    # The store this Chrome was observed to encrypt with (`gnome-libsecret`,
+    # `basic` or `unverified`; Private is `basic` by its flag and no bus):
+    # what `/status` says (`password_store.py`).
     password_store: str = "basic"
 
 
@@ -659,6 +697,9 @@ class _Tab:
     loopback_port: int | None = None
     pending_port: int | None = None
     signin: bool = False
+    unsolicited: bool = False            # not opened by Jarvis; judged once, at its first landing
+    signin_press: float | None = None    # loop time of the owner's last press in a sign-in tab
+    signin_adopted: bool = False         # this sign-in tab has shown Chrome's Google tab
     page_identity: int = 0              # host-issued lifetime, never a Python address
     document_generation: int = 0        # includes same-URL/same-document navigation
     pane_ready: bool = False             # false until the landing guard accepts it
@@ -1251,41 +1292,82 @@ class BrowserHost:
             if private:
                 _remove_tree(folder)
             raise BrowserRefused(409, "Chrome could not start") from None
-        if choice.store == _stores.KEYRING_STORE:
-            # Chrome falls back to basic silently when it cannot reach its key:
-            # a keyring that locked during the launch closes it again.
-            after = await loop.run_in_executor(None, self.keyring.state)
-            if after != _stores.UNLOCKED:
-                LOG.warning("Browser keyring was %s after a launch; Chrome closed", after)
+        # What Chrome actually encrypts with, observed (`password_store.py`):
+        # Chrome falls back to basic silently when it cannot reach its key.
+        observed = _stores.BASIC
+        if not private:
+            observed = await self._observe_store(context, folder)
+            if choice.store == _stores.KEYRING_STORE and observed != _stores.KEYRING_STORE:
+                after = await loop.run_in_executor(None, self.keyring.state)
+                LOG.warning("Browser profile Chrome did not use the keyring (observed %s, "
+                            "keyring %s); Chrome closed", observed, after)
                 try:
                     await asyncio.wait_for(context.close(), CLOSE_TIMEOUT_S)
                 except Exception:  # noqa: BLE001 - the PIDs are stopped next either way
                     pass
                 await loop.run_in_executor(None, stop_pids, folder)
-                raise BrowserRefused(409, _stores.CHANGED_MESSAGE)
-        else:
-            LOG.info("Browser profile Chrome uses the basic password store (unprotected)")
+                raise BrowserRefused(409, _stores.CHANGED_MESSAGE if after != _stores.UNLOCKED
+                                     else _stores.FELL_BACK_MESSAGE if observed == _stores.BASIC
+                                     else _stores.UNVERIFIED_MESSAGE)
+        if observed != _stores.KEYRING_STORE:
+            LOG.info("Browser %s Chrome uses the basic password store (unprotected; observed %s)",
+                     "private" if private else "profile", observed)
         self.timings["launch_s"] = round(time.monotonic() - started, 3)
         browser = context.browser
         instance = _Instance(profile=profile, folder=folder, context=context, browser=browser,
                              version=getattr(browser, "version", "") or "",
                              audio=InstanceAudio(launch_audio.applied),
-                             password_store=choice.store)
+                             password_store=observed)
         instance.audio.on_settled(self._sound.wake)
-        context.on("page", lambda page: self._adopt(instance, page, None))
+        # A page Jarvis is creating (`_open_page_locked`) arrives here first,
+        # while `opening` counts it; Chrome's own and pages' pop-ups do not.
+        context.on("page", lambda page: self._adopt(instance, page, None, own=instance.opening > 0))
         LOG.info("Browser started a Chrome (%s)", "private" if private else "profile")
         return instance
+
+    async def _observe_store(self, context, folder: Path) -> str:
+        """The store this Chrome encrypts with: `gnome-libsecret`, `basic` or
+        `unverified` (`password_store.observed_store`). A probe cookie with a
+        fresh random name on a name that never resolves, forced to disk by
+        the filler (STORE_FLUSH_SETS), read back as a three-byte prefix, then
+        expired again. Never raises: any failure is `unverified`."""
+        loop = asyncio.get_running_loop()
+        name = "jarvis-store-" + secrets.token_hex(6)
+        expires = time.time() + 600
+        probe = {"name": name, "value": "1", "url": STORE_PROBE_URL, "expires": expires}
+        fill = {"name": STORE_FILL_NAME, "url": STORE_FILL_URL, "expires": expires}
+        observed = None
+        try:
+            deadline = loop.time() + STORE_OBSERVE_S
+            await asyncio.wait_for(context.add_cookies(
+                [probe] + [{**fill, "value": str(i)} for i in range(STORE_FLUSH_SETS)]),
+                STORE_OBSERVE_S)
+            while True:
+                observed = await loop.run_in_executor(None, _stores.observed_store, folder, name)
+                if observed is not None or loop.time() >= deadline:
+                    break
+                await asyncio.sleep(0.05)
+        except Exception as exc:  # noqa: BLE001 - unverified is the answer
+            LOG.warning("Browser password store not observed (%s)", type(exc).__name__)
+        finally:
+            try:
+                await asyncio.wait_for(context.add_cookies(
+                    [{**probe, "value": "", "expires": 1}, {**fill, "value": "", "expires": 1}]),
+                    CLOSE_TIMEOUT_S)
+            except Exception:  # noqa: BLE001 - expired in ten minutes either way
+                pass
+        return observed or _stores.UNVERIFIED
 
     def _store_choice(self, profile: str) -> "_stores.Choice":
         """The password store for this launch, or `BrowserRefused` (409) with
         the owner's next step (`password_store.py`). A keyring launch is
         recorded as sticky *before* Chrome starts: a Chrome that wrote
-        keyring-encrypted data must never be reopened with basic."""
+        keyring-encrypted data must never be reopened with basic. A sticky
+        profile gets its missing record (row or marker) written back."""
         if profile == PRIVATE:
             return _stores.choose(private=True, requested=_stores.REQUEST_BASIC,
                                   sticky=False, state=_stores.UNAVAILABLE, bus=None)
-        row = self._profiles.require(profile)
-        sticky = row.get(STICKY_KEY) == STICKY_VALUE
+        sticky = self._profiles.sticky(profile)
         requested = self._settings.password_store()
         state = self.keyring.state() if requested == _stores.REQUEST_KEYRING else _stores.UNKNOWN
         choice = _stores.choose(private=False, requested=requested, sticky=sticky,
@@ -1294,36 +1376,59 @@ class BrowserHost:
             LOG.warning("Browser profile launch refused: password store %s, keyring %s",
                         requested, state)
             raise BrowserRefused(409, choice.refused)
-        if choice.store == _stores.KEYRING_STORE and not sticky:
+        if choice.store == _stores.KEYRING_STORE or sticky:
             self._profiles.mark_keyring(profile)
         return choice
 
     def password_store_status(self) -> dict:
-        """`/status` → `browser.sync`: the store each running Chrome uses,
-        not the flag alone (M12). No secret, label or path."""
+        """`/status` → `browser.sync`: the store each running Chrome was
+        *observed* to use (M12; follow-up of #215), what each named profile's
+        next launch would do, and why. No secret, label or path."""
         with self._lock:
             instances = list(self._snapshot.get("instances") or [])
         requested = self._settings.password_store()
         state = self.keyring.cached_state()
-        stores = {row.get("password_store") for row in instances if row.get("profile") != PRIVATE}
+        bus = self.keyring.bus()
+        running = {row.get("profile"): row.get("password_store") for row in instances
+                   if row.get("profile") != PRIVATE}
+        stores = set(running.values())
         if not stores:
             in_effect = None
         elif len(stores) == 1:
-            in_effect = stores.pop()
+            in_effect = next(iter(stores))
         else:
             in_effect = "mixed"
-        # What the next named launch would do, so the HUD can say it before one.
-        if requested == _stores.REQUEST_BASIC:
-            next_launch = _stores.BASIC
-        elif state == _stores.UNLOCKED and self.keyring.bus() is not None:
-            next_launch = _stores.KEYRING_STORE
-        elif state == _stores.UNAVAILABLE:
-            next_launch = _stores.BASIC
-        else:
-            next_launch = "refused"
-        unprotected = in_effect in (_stores.BASIC, "mixed") or (in_effect is None and next_launch == _stores.BASIC)
-        if next_launch == "refused":
-            hint = _stores.UNLOCK_MESSAGE
+        # What the next launch of a new (not sticky) profile would do.
+        next_launch, next_hint = _stores.next_launch(requested=requested, sticky=False,
+                                                     state=state, bus=bus)
+        profiles = {}
+        try:
+            rows = self._profiles.list()
+        except BrowserRefused:
+            rows = []
+        for row in rows:
+            identity = row["id"]
+            sticky = row.get(STICKY_KEY) == STICKY_VALUE or marker_present(identity)
+            launch, launch_hint = _stores.next_launch(requested=requested, sticky=sticky,
+                                                      state=state, bus=bus)
+            observed = running.get(identity)
+            if observed is not None:
+                exposed = observed != _stores.KEYRING_STORE
+                hint = (None if not exposed
+                        else _stores.UNVERIFIED_HINT if observed == _stores.UNVERIFIED
+                        else _stores.UNPROTECTED_HINT if requested != _stores.REQUEST_BASIC
+                        else "Unprotected (basic store): browser.json asks for it")
+            else:
+                exposed = launch == _stores.BASIC
+                hint = launch_hint
+            profiles[identity] = {"store": observed, "sticky": sticky, "next_launch": launch,
+                                  "unprotected": exposed, "hint": hint}
+        unprotected = (any(store != _stores.KEYRING_STORE for store in stores)
+                       or (not stores and next_launch == _stores.BASIC))
+        if next_launch in (_stores.REFUSED, _stores.CHECKING):
+            hint = next_hint
+        elif _stores.UNVERIFIED in stores:
+            hint = _stores.UNVERIFIED_HINT
         elif unprotected and requested == _stores.REQUEST_BASIC:
             hint = "Unprotected (basic store): browser.json asks for it"
         elif unprotected:
@@ -1332,7 +1437,7 @@ class BrowserHost:
             hint = None
         return {"password_store": in_effect, "requested": requested, "keyring": state,
                 "next_launch": next_launch, "unprotected": unprotected, "hint": hint,
-                "source": "launch_argument"}
+                "source": "observed", "profiles": profiles}
 
     async def _close_instance(self, profile: str, *, preserve_activity: bool = False) -> None:
         instance = self._instances.pop(profile, None) or self._closing_instances.get(profile)
@@ -1377,7 +1482,8 @@ class BrowserHost:
         # Only structurally quiet launch mode permits allocation after OFF.
         return instance.audio.applied and not self._sound.preference(instance.profile)[0]
 
-    def _adopt(self, instance: _Instance, page, ctx: str | None, *, logical_id=None, restart_token=None):
+    def _adopt(self, instance: _Instance, page, ctx: str | None, *, logical_id=None, restart_token=None,
+               own: bool = False):
         """Register a page as a tab (a page we opened, or a pop-up), with the
         landing guard, its stream and the page's own requests (dialogs, file
         choosers, downloads). **The cap is 12 tabs in all** (decision B-13:
@@ -1447,6 +1553,9 @@ class BrowserHost:
         self._next_page_identity += 1
         tab = _Tab(id=tab_id, profile=instance.profile, ctx=ctx, page=page,
                    page_identity=self._next_page_identity,
+                   # Jarvis's own pages (`own`, restored ones, Private) never;
+                   # read once, at the first real landing (`_link_signin`).
+                   unsolicited=not own and ctx is None and logical_id is None,
                    stream=TabStream(tab_id, held=self.input_held, wake=lambda: self._wake(tab),
                                     blocked=lambda: bool(tab.dialogs) or self._auth.blocked(tab)),
                    cdp_lock=asyncio.Lock(), cast_lock=asyncio.Lock(), wakeup=asyncio.Event())
@@ -1653,6 +1762,9 @@ class BrowserHost:
         internal = tab.signin and url in SIGNIN_PAGES
         if not internal:
             tab.signin = False
+        first = tab.unsolicited and url != "about:blank"
+        if first:
+            tab.unsolicited = False
         try:
             if not internal:
                 policy.judge_url(url, refused=self.refused_ports(), landed=True)
@@ -1662,6 +1774,8 @@ class BrowserHost:
             LOG.info("Browser landing guard replaced a page (%s)", refusal.reason)
             asyncio.ensure_future(self._quietly(self._replace(tab, tab.document_generation)))
             return
+        if first:
+            self._link_signin(tab, url)
         # A new page has no chooser open any more.
         if tab.chooser is not None:
             tab.chooser = None
@@ -1675,6 +1789,85 @@ class BrowserHost:
         self._activity_changed()
         self._located(tab, url=url)
         self._publish_pane_tabs()  # _located may return early for a same-URL reload
+
+    @staticmethod
+    def _signin_address(url) -> bool:
+        """Exactly Chrome's sign-in request to Google (`SIGNIN_GAIA`)."""
+        try:
+            parts = urlsplit(url)
+            return (parts.scheme, parts.netloc, parts.path) == SIGNIN_GAIA
+        except (TypeError, ValueError, AttributeError):
+            return False
+
+    @staticmethod
+    def _signin_landing(url) -> bool:
+        """Where that request may first land: Google's sign-in origin
+        exactly (no port, no userinfo), or Chrome's error page."""
+        if url == SIGNIN_ERROR:
+            return True
+        try:
+            parts = urlsplit(url)
+            return (parts.scheme, parts.netloc) == SIGNIN_ORIGIN
+        except (TypeError, ValueError, AttributeError):
+            return False
+
+    def _signin_parent(self, tab: _Tab) -> _Tab | None:
+        """The sign-in tab of `tab`'s profile that may show Chrome's Google
+        tab now: its capability live, the owner's press in it recent, and
+        nothing adopted yet. The newest press wins."""
+        now = asyncio.get_running_loop().time()
+        ready = [t for t in self._tabs.values()
+                 if t is not tab and t.profile == tab.profile and t.ctx is None and t.signin
+                 and not t.signin_adopted and t.signin_press is not None
+                 and 0 <= now - t.signin_press <= SIGNIN_ADOPT_S]
+        return max(ready, key=lambda t: t.signin_press) if ready else None
+
+    def _link_signin(self, tab: _Tab, url: str) -> None:
+        """At an unsolicited tab's first real landing: Chrome's own sign-in
+        tab (`SIGNIN_GAIA`) opens beside the owner's sign-in tab, as a
+        pop-up would. Anything else stays as it was (unshown)."""
+        if self._signin_landing(url) and self._signin_parent(tab) is not None:
+            asyncio.ensure_future(self._quietly(self._signin_popup(tab, url)))
+
+    async def _signin_popup(self, tab: _Tab, url: str) -> None:
+        page, generation = tab.page, tab.document_generation
+        try:
+            if await asyncio.wait_for(page.opener(), CLOSE_TIMEOUT_S) is not None:
+                return
+            cdp = await page.context.new_cdp_session(page)
+            try:
+                history = await asyncio.wait_for(cdp.send("Page.getNavigationHistory"), CLOSE_TIMEOUT_S)
+            finally:
+                await self._quietly(cdp.detach())
+            entries = history.get("entries") or []
+            # Chrome opened it, and from its own UI: one entry, Chrome's
+            # transition (a page's open is a `link`), and exactly Chrome's
+            # sign-in request — before Google's redirect (`userTypedURL`), or
+            # the failed address itself under Chrome's error page.
+            if len(entries) != 1 or entries[0].get("transitionType") != SIGNIN_TRANSITION:
+                return
+            entry = entries[0]
+            if url == SIGNIN_ERROR:
+                requested = entry.get("url")
+            else:
+                # Google's own page may rewrite its address (same document)
+                # before this is read: the origin is what must still hold.
+                requested = entry.get("userTypedURL") or entry.get("url")
+                if entry.get("url") == SIGNIN_ERROR or not self._signin_landing(entry.get("url")):
+                    return
+            if not self._signin_address(requested):
+                return
+        except Exception:  # noqa: BLE001 - unknown: left unshown
+            return
+        if (self._stopped or self._tabs.get(tab.id) is not tab or tab.opener
+                or tab.document_generation != generation):
+            return
+        parent = self._signin_parent(tab)
+        if parent is None:
+            return
+        parent.signin_adopted = True
+        tab.opener = parent.id
+        parent.stream.send({"t": "popup", "tab_id": tab.id})
 
     def _located(self, tab: _Tab, *, url: str | None = None, title: str | None = None,
                  force: bool = False) -> None:
@@ -1788,8 +1981,15 @@ class BrowserHost:
         else:
             spare = [p for p in instance.context.pages
                      if not any(t.page is p for t in self._tabs.values())]
-            page = spare[0] if spare else await instance.context.new_page()
-            tab = self._adopt(instance, page, None)
+            if spare:
+                page = spare[0]
+            else:
+                instance.opening += 1
+                try:
+                    page = await instance.context.new_page()
+                finally:
+                    instance.opening -= 1
+            tab = self._adopt(instance, page, None, own=True)
         if tab is None:
             raise BrowserRefused(409, f"the Browser already has {cap} tabs open; close one first")
         row = {"tab_id": tab.id, "profile": tab.profile, "ctx": tab.ctx, "loaded": True}
@@ -1981,12 +2181,21 @@ class BrowserHost:
             if self._running():
                 self._call(self._manage_profile_async(profile, delete), CLOSE_TIMEOUT_S + 30)
             else:
+                sticky = self._profiles.sticky(profile)
                 self._wipe_profile(profile)
                 if delete:
                     self._profiles.delete(profile)
                 else:
-                    secure_dir(config.BROWSER_DIR / "profiles" / profile)
+                    self._recreate_profile(profile, sticky)
         return {"profile": profile, "deleted" if delete else "forgotten": True}
+
+    def _recreate_profile(self, profile: str, sticky: bool) -> None:
+        """After "Sign out of everything": an empty folder, and a sticky
+        profile's marker written again — the wipe removed it, and the
+        profile stays sticky (`profiles.py`)."""
+        secure_dir(config.BROWSER_DIR / "profiles" / profile)
+        if sticky:
+            self._profiles.mark_keyring(profile)
 
     @_profile_activity
     async def _manage_profile_async(self, profile: str, delete: bool) -> None:
@@ -1997,6 +2206,7 @@ class BrowserHost:
             # A prior close may have timed out waiting for an executor copy.
             # Its task remains tracked: never wipe until the writer stopped.
             await self._settle_downloads(profile)
+            sticky = self._profiles.sticky(profile)
             # Cancellation cannot stop a filesystem worker. Keep the lifecycle
             # lock until its wipe and metadata commit finish, including when a
             # caller timed out, so a queued open cannot race the old worker.
@@ -2013,7 +2223,7 @@ class BrowserHost:
             if delete:
                 self._profiles.delete(profile)
             else:
-                secure_dir(config.BROWSER_DIR / "profiles" / profile)
+                self._recreate_profile(profile, sticky)
             if cancelled:
                 raise asyncio.CancelledError()
 
@@ -2559,9 +2769,15 @@ class BrowserHost:
         # Timeout leaves the call alive, but no later input may follow it
         # until Chrome answers. Input arriving meanwhile is dropped.
         auth_epoch = self._auth.input_epoch(tab)
+        press = (mouse and params["type"] == "mousePressed") or (key and params["type"] in ("keyDown", "rawKeyDown"))
         async def send_current_auth():
             if (same_document() and not self.input_held()
                     and self._auth.input_current(tab, auth_epoch)):
+                if press and tab.signin:
+                    # The owner's own press in a sign-in tab (only the owner's
+                    # stream reaches `_deliver`; driving sends its own): what
+                    # lets Chrome's Google tab open beside it (`_link_signin`).
+                    tab.signin_press = asyncio.get_running_loop().time()
                 await cdp.send(method, params)
         task = asyncio.ensure_future(self._activity_run(tab, send_current_auth))
         tab.input_task = task

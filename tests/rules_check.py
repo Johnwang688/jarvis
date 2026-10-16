@@ -1032,6 +1032,224 @@ def dispatch_checks() -> None:
     print("ok  dispatch: deny never runs and never asks; allow runs unasked; ask still gates")
 
 
+SECRET_SERVICE_DENY = (
+    # the dedicated readers, any subcommand, any spelling
+    "secret-tool lookup application chrome", "secret-tool search --all xdg:schema x",
+    "secret-tool store --label=x a b", "secret-tool clear application chrome",
+    "/usr/bin/secret-tool lookup a b", "sec''ret-tool lookup a b", "s\\ecret-tool lookup a b",
+    "uv run secret-tool lookup a b", "env -i secret-tool lookup a b", "nohup secret-tool lookup a b &",
+    "echo x | xargs secret-tool lookup application", "kwallet-query -r chrome kdewallet",
+    # D-Bus clients that name the Secret Service, its interfaces or paths
+    "busctl --user call org.freedesktop.secrets /org/freedesktop/secrets "
+    "org.freedesktop.Secret.Service SearchItems 'a{ss}' 1 application chrome",
+    "busctl --user get-property org.freedesktop.secrets /org/freedesktop/secrets/aliases/default "
+    "org.freedesktop.Secret.Collection Locked",
+    "gdbus call --session --dest org.freedesktop.secrets --object-path /org/freedesktop/secrets "
+    "--method org.freedesktop.Secret.Service.Unlock \"['/org/freedesktop/secrets/aliases/default']\"",
+    "dbus-send --session --print-reply --dest=org.freedesktop.secrets /org/freedesktop/secrets "
+    "org.freedesktop.Secret.Service.OpenSession string:plain variant:string:",
+    "gdbus call --session --dest 'org.freedesktop.'\"secrets\" --object-path / --method x.y",
+    "gdbus call -e -d $'org.freedesktop.\\x73ecrets' -o / -m x.y",
+    "gdbus call -e -d org.freedesktop.${X:-secrets} -o / -m x.y",
+    "gdbus call -e -d ORG.FREEDESKTOP.SECRETS -o / -m x.y",
+    "busctl --user call :1.42 /org/freedesktop/secrets/collection/login/1 org.freedesktop.Secret.Item "
+    "GetSecret o /",
+    "busctl --user introspect org.freedesktop.secrets /org/freedesktop/secrets",
+    "qdbus org.freedesktop.secrets /org/freedesktop/secrets",
+    "busctl --user call org.freedesktop.portal.Desktop /org/freedesktop/portal/desktop "
+    "org.freedesktop.portal.Secret RetrieveSecret h 3",
+    "gdbus call --session --dest org.gnome.keyring --object-path /org/gnome/keyring/daemon --method x.y",
+    "busctl --user call org.kde.kwalletd6 /modules/kwalletd6 org.kde.KWallet open sxs kdewallet 0 x",
+    # behind a wrapper, a runner, a shell string or an interpreter
+    "env DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus busctl --user tree org.freedesktop.secrets",
+    "uv run gdbus call --session --dest org.freedesktop.secrets --object-path / --method x.y",
+    "bash -c 'gdbus call --session --dest org.freedesktop.secrets --object-path / --method x.y'",
+    "sh -c \"busctl --user call org.freedesktop.secrets / x y\" > out.txt",
+    "python3 -c 'import dbus; dbus.SessionBus().get_object(\"org.freedesktop.secrets\", \"/\")'",
+    "node -e 'require(\"dbus-next\").sessionBus().getProxyObject(\"org.freedesktop.secrets\", \"/\")'",
+    "ls; gdbus call --session --dest org.freedesktop.secrets --object-path / --method x.y",
+    # session-bus monitors (they would see the key on its way to Chrome)
+    "dbus-monitor", "dbus-monitor --session", "dbus-monitor --address unix:path=/run/user/1000/bus",
+    "nohup dbus-monitor --session > /tmp/bus.log &", "uv run dbus-monitor",
+    "busctl --user monitor", "busctl monitor --user", "busctl --user capture > bus.pcap",
+    "gdbus monitor --session --dest :1.5", "gdbus monitor -e -d org.freedesktop.Notifications",
+    # Python's keyring CLI (review of #218, MED 2) and the impl portal
+    "uv run --with keyring python3 -m keyring get svc user", "python3 -m keyring get svc user",
+    "python3 -mkeyring get a b", "python3 -Im keyring set a b", "python -m keyring.cli del a b",
+    "keyring get svc user", "uvx keyring get a b", "pipx run keyring del a b",
+    "/home/x/.venv/bin/keyring set a b",
+    "gdbus call --session --dest org.freedesktop.impl.portal.Secret --object-path "
+    "/org/freedesktop/portal/desktop --method x.y",
+    # in command position however it is reached
+    "find . -name x -exec secret-tool lookup a b \\;", "x=$(secret-tool lookup a b)",
+    "eval 'secret-tool lookup a b'", "sh -c \"dbus-monitor\" > log",
+    "${X:-secret-tool} lookup a b", "\"secret\"-tool lookup a b",
+    "bash -c \"grep org.gnome.keyring x\"",
+    # runpy, and a caller whose words name a reader (review of #218's delta, LOW 1 and 2)
+    "python3 -m runpy keyring get s u", "python3 -m runpy keyring.cli get s u",
+    "python3 -mrunpy keyring get a b", "uv run python3 -m runpy keyring del a b",
+    "python3 -c \"import os; os.system('secret-tool lookup a b')\"",
+    "python3 -c \"import subprocess; subprocess.run(['secret-tool', 'lookup', 'a', 'b'])\"",
+    "perl -e 'system(\"secret-tool lookup a b\")'", "ruby -e 'system(\"secret-tool lookup a b\")'",
+    "node -e \"require('child_process').execSync('secret-tool lookup a b')\"",
+    "python3 -c 'import os; os.system(\"kwallet-query -r x y\")'",
+    # program position in other inline sources (#220 review, M1) and keyring.cli-x (N1)
+    "python3 -Ic \"import subprocess; subprocess.Popen(['/usr/bin/secret-tool', 'lookup'])\"",
+    "ruby -e 'puts `secret-tool lookup a b`'", "perl -e 'print qx(secret-tool lookup a b)'",
+    "node --eval \"require('child_process').spawnSync('secret-tool', ['lookup'])\"",
+    "deno eval \"new Deno.Command('secret-tool').outputSync()\"",
+    "bun -e \"Bun.spawnSync(['secret-tool', 'lookup'])\"", "php -r \"system('secret-tool lookup a b');\"",
+    "uv run python3 -c \"import os; os.system('secret-tool lookup a b')\"",
+    "ruby -e 'require \"open3\"; Open3.capture2(\"secret-tool lookup a b\")'",
+    "python3 -c \"import os; os.execvp('lssecret', ['lssecret'])\"", "perl -we 'system \"secret-tool\", \"lookup\"'",
+    "python3 -m keyring.cli-x get a b",
+    "python3 -X dev -c \"import os; os.system('secret-tool lookup a b')\"",
+    "python3 -W ignore -c \"import os; os.system('secret-tool lookup a b')\"",
+    # a bus-address assignment voids the --system exemption (NIT 2)
+    "DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/user/1000/bus dbus-monitor --system",
+    "env DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/user/1000/bus busctl monitor",
+    "export DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/user/1000/bus; gdbus monitor --system --dest x",
+    "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus gdbus monitor -y --dest x",
+)
+SECRET_SERVICE_ORDINARY = (
+    "busctl --user list", "busctl monitor", "busctl --system monitor", "dbus-monitor --system",
+    "gdbus monitor --system --dest org.freedesktop.login1",
+    "gdbus call --session --dest org.freedesktop.Notifications --object-path "
+    "/org/freedesktop/Notifications --method org.freedesktop.Notifications.GetServerInformation",
+    "busctl --user call org.mpris.MediaPlayer2.spotify /org/mpris/MediaPlayer2 "
+    "org.mpris.MediaPlayer2.Player PlayPause",
+    "grep -rn org.freedesktop.secrets jarvis/", "git commit -m 'probe org.freedesktop.secrets Locked'",
+    "echo org.freedesktop.Secret.Service", "apt-cache policy libsecret-tools",
+    "systemctl --user status gnome-keyring-daemon", "ls -l ~/.local/share/keyrings",
+    "python3 tests/v2/browser_password_store_check.py",
+    # names only in text, never a call (review of #218, LOW 3)
+    "git commit -m 'add secret-tool rule'", "git commit -m 'deny secret-tool, kwallet-query, lssecret'",
+    "git commit -m \"gdbus call --dest org.freedesktop.secrets; dbus-monitor\"",
+    "gh pr create --title 'Secret Service rule' --body 'refuses secret-tool lookup, "
+    "busctl --user call org.freedesktop.secrets and dbus-monitor'",
+    "gh pr comment 218 --body 'python3 -m keyring get is refused now'",
+    "grep -n secret-tool jarvis/rules.py", "rg -n 'kwallet-query|lssecret' docs",
+    "grep org.gnome.keyring x | sh -c 'wc -l'",
+    "echo monitor; gdbus introspect --session --dest org.freedesktop.Notifications --object-path /",
+    "echo keyring get a b", "pip install keyring", "keyring --list-backends",
+    "uv pip install secretstorage", "grep -rn dbus-monitor docs",
+    # a monitor is judged per program: words elsewhere on the line do not make one
+    "busctl --user list; echo capture", "busctl --user status | grep monitor",
+    # a reader named only in text, or the reader looked up, not run
+    "which secret-tool", "command -v secret-tool", "echo secret-tool lookup a b",
+    "python3 -m runpy pytest", "python3 tests/secret-tool_check.py",
+    # a reader named in text a caller only carries (#220 review, M1): Codex's
+    # escalation shapes, test selectors, script arguments, in-process gate probes
+    "/bin/bash -lc 'gh pr create --title x --body \"refuses secret-tool lookup a b\"'",
+    "/bin/bash -lc 'gh pr create --title \"Secret Service\" --body \"python3 -c os.system(secret-tool) is refused\"'",
+    "/bin/bash -lc 'git commit -m \"rules: secret-tool\"'", "/bin/bash -lc 'rg -n secret-tool jarvis'",
+    "/bin/bash -lc 'gh pr comment 220 --body \"perl -e system(secret-tool) is DENY\"'",
+    "python3 -m pytest -k secret-tool", "python3 scripts/check.py secret-tool",
+    "node scripts/x.js --grep secret-tool",
+    "python3 -c \"from jarvis import rules; print(rules.decide('secret-tool lookup a b'))\"",
+    "uv run python3 -c \"from jarvis import rules; print(rules.decide('secret-tool lookup a b'))\"",
+    "timeout 60 python3 -c \"from jarvis import rules; print(rules.decide('secret-tool lookup a b'))\"",
+    "perl -pi -e 's/secret-tool/x/' docs/a.md", "sh -c 'git log --grep secret-tool'",
+    "bash scripts/x.sh secret-tool", "python3 -c \"import shutil; print(shutil.which('secret-tool'))\"",
+    "node -e \"console.log('secret-tool lookup')\"",
+    "python3 scripts/find.py \"os.system('secret-tool\"", "node scripts/x.js \"execSync('secret-tool\"",
+)
+
+
+def secret_service_checks() -> None:
+    """Agent shell calls to the Secret Service (the owner's keyring, where
+    the Browser's Chrome keeps its password key) are DENY — never put to the
+    owner, never covered by an allowlist entry, never run (B-LOGIN follow-up,
+    2026-10-15). Mentions and other D-Bus calls are not refused for it."""
+    from jarvis import permissions
+    for command in SECRET_SERVICE_DENY:
+        verdict = rules.decide(command)
+        assert verdict.decision == rules.DENY, f"{command!r}: {verdict}"
+        assert "Secret Service" in verdict.reason or "session bus" in verdict.reason, verdict.reason
+    for command in SECRET_SERVICE_ORDINARY:
+        verdict = rules.decide(command)
+        assert verdict.decision != rules.DENY, f"{command!r} must not be refused: {verdict}"
+    # A line past the walk's caps falls back to the stricter whole-text
+    # reading (review of #218's delta, LOW 4): the walk really gives up on
+    # these, and the line is still refused, not asked.
+    for command in ("env " * 3000 + "secret-tool lookup a b",
+                    "nohup " * 5000 + "busctl --user call org.freedesktop.secrets / x y",
+                    "env " * 3000 + "python3 -c \"import os; os.system('lssecret')\""):
+        walk = rules._Walk()
+        try:
+            walk.line(command, True, 0)
+            raise AssertionError(f"the walk judged a line past its caps: {command[-60:]!r}")
+        except rules.TooComplex:
+            pass
+        assert rules.secret_service_reading(command) == rules.SECRET_SERVICE_DENIED, command[-60:]
+        verdict = rules.decide(command)
+        assert verdict.decision == rules.DENY, f"{command[-60:]!r}: {verdict}"
+    # Through v1's real dispatch, with an approver that says yes and an
+    # allowlist entry for every stem on the lines: nothing runs, nobody is asked.
+    asked: list[str] = []
+
+    def approver(tool, args):
+        asked.append(args.get("command", ""))
+        return True
+    approver.jarvis_human_backed = True
+    for stem in ("busctl", "gdbus", "dbus-send", "secret-tool", "dbus-monitor", "python3", "uv"):
+        permissions.add_allow("run_command", {"command": stem + " x"})
+    gated = permissions.gate(approver)
+    with recorded() as ran:
+        for command in SECRET_SERVICE_DENY[:12] + SECRET_SERVICE_DENY[-10:]:
+            out = tools.dispatch("run_command", json.dumps({"command": command, "reason": "x"}),
+                                 approve=gated)
+            assert "Refused" in out.text, (command, out.text)
+        assert not ran, f"a Secret Service call ran: {ran}"
+        assert not asked, f"a Secret Service call was put to the owner: {asked}"
+        out = tools.dispatch("run_command", json.dumps({"command": "busctl --user list", "reason": "x"}),
+                             approve=gated)
+        assert ran == ["busctl --user list"], ran
+    from jarvis import config
+    config.ALLOWLIST_PATH.unlink()
+    print(f"ok  secret service: {len(SECRET_SERVICE_DENY)} calls refused unasked even when "
+          f"allowlisted, 3 more past the walk's caps by the whole-text reading; "
+          f"{len(SECRET_SERVICE_ORDINARY)} ordinary lines not refused")
+
+
+SECRET_COST_DEADLINE_S = 20.0     # the whole child, imports included; 0.1 s each at idle speed
+SECRET_COST_LINES = (
+    "python3 -c 'system" + " " * 60000 + "x' secret",
+    "python3 -c 'run(" + " " * 60000 + "x' secret",
+    "python3 -c 'spawn" + " " * 30000 + "(" + " " * 30000 + "x' secret",
+    "perl -e 'qx" + " " * 60000 + "x' secret", "ruby -e '`" + " " * 60000 + "x' secret",
+    "node -e 'Bun.$" + " " * 60000 + "x' secret",
+    "python3 -c \"system('" + "a/" * 30000 + "x\" secret",
+)
+
+
+def secret_service_cost_checks() -> None:
+    """The inline-source reader's patterns stay linear on long whitespace
+    runs (#220 delta review, M1: `\\s*\\(?\\s*` backtracked quadratically,
+    54 s for 60k spaces in `decide`; past HOOK_TIMEOUT_S the Claude hook
+    is skipped). Judged in a child with an active deadline: a hang is
+    killed, not waited out."""
+    import subprocess
+    import time
+    script = ("import json, sys\nfrom jarvis import rules\n"
+              "for line in json.load(sys.stdin):\n"
+              "    print(rules.decide(line).decision, flush=True)\n")
+    started = time.monotonic()
+    try:
+        out = subprocess.run([sys.executable, "-c", script], input=json.dumps(SECRET_COST_LINES),
+                             capture_output=True, text=True, timeout=SECRET_COST_DEADLINE_S,
+                             cwd=str(Path(__file__).resolve().parents[1]))
+    except subprocess.TimeoutExpired as exc:
+        raise AssertionError(f"the Secret Service reading took over {SECRET_COST_DEADLINE_S:.0f} s "
+                             f"on {len(SECRET_COST_LINES)} long lines (judged: {exc.stdout!r})") from None
+    assert out.returncode == 0, out.stderr[-2000:]
+    verdicts = out.stdout.split()
+    assert len(verdicts) == len(SECRET_COST_LINES) and rules.DENY not in verdicts, verdicts
+    print(f"ok  secret service cost: {len(SECRET_COST_LINES)} lines of 60k spaces or path segments "
+          f"judged in {time.monotonic() - started:.1f} s (deadline {SECRET_COST_DEADLINE_S:.0f} s, "
+          "killed past it)")
+
+
 def background_agents_never_auto_approve_checks() -> None:
     """The regression this nearly shipped with.
 
@@ -3625,6 +3843,8 @@ def main() -> int:
     run_readonly_narrowing_checks()
     write_in_disguise_checks()
     dispatch_checks()
+    secret_service_checks()
+    secret_service_cost_checks()
     background_agents_never_auto_approve_checks()
     secrets_still_win_checks()
     fetch_execute_detection_checks()

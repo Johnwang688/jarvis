@@ -33,6 +33,7 @@ import { attachVim, type VimHandle } from "../state/vim";
 import { gitGutter } from "../state/gitGutter";
 import { gutterDecorations, rulerColors, type RulerColors } from "../lib/linediff";
 import { cssPalette } from "../lib/editorTheme";
+import { revealIn } from "../lib/diffreview";
 
 /**
  * Every File pane's live editor (ED-7): the palette lists the actions of the
@@ -447,9 +448,19 @@ export function CompareEditor(props: { model: TextModel; disk: string; path: str
   return <div className="editorhost" data-testid="editor-compare" data-readonly={String(props.readOnly || locked)} ref={host} />;
 }
 
-export function DiffEditor(props: { path: string; before: string; after: string }) {
+export function DiffEditor(props: {
+  path: string;
+  before: string;
+  after: string;
+  /** Reveal this line of the new side; `n` changes for each request, so the
+   *  same line can be asked for again. */
+  reveal?: { line: number; n: number } | null;
+}) {
   const host = useRef<HTMLDivElement>(null);
   const [failed, setFailed] = useState(false);
+  const editor = useRef<any>(null);
+  const reveal = useRef(props.reveal);
+  reveal.current = props.reveal;
 
   useEffect(() => {
     let dead = false;
@@ -481,10 +492,13 @@ export function DiffEditor(props: { path: string; before: string; after: string 
         // threw `no diff result available` against the models disposed here.
         vm = ed.createViewModel({ original, modified });
         ed.setModel(vm);
+        editor.current = ed;
+        revealIn(ed, reveal.current?.line);
       })
       .catch(() => setFailed(true));
     return () => {
       dead = true;
+      editor.current = null;
       unsettings();
       // The view model first (its dispose cancels a diff in flight), then the
       // editor, so nothing still shows or computes against the models it lets
@@ -497,6 +511,10 @@ export function DiffEditor(props: { path: string; before: string; after: string 
       modified?.dispose();
     };
   }, [props.path, props.before, props.after]);
+
+  useEffect(() => {
+    revealIn(editor.current, props.reveal?.line);
+  }, [props.reveal?.n]);
 
   if (failed) {
     return (

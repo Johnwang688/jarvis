@@ -334,6 +334,23 @@ def _encoded_powershell(text: str) -> list[str]:
     return found
 
 
+def _spellings(text: str) -> set[str]:
+    """The text and the spellings of it that the quote, escape and expansion
+    tricks above leave a shell reading the same: NFKC, ANSI-C `$'…'`
+    decoded, `${X:-word}` read as its word, empty expansions cut, quotes and
+    escapes removed, braces and brackets removed. Pure text work. What
+    `vexcom_reading` and `secret_service_reading` look for a name in."""
+    import unicodedata
+    variants = {text, unicodedata.normalize("NFKC", text)}
+    variants |= {_ansi_c_decoded(v) for v in list(variants)}
+    variants |= {_DEFAULT_EXPANSIONS.sub(r"\1", v) for v in list(variants)}
+    for v in list(variants):
+        cut = _EMPTY_EXPANSIONS.sub("", v)
+        variants |= {cut, _SPLITTERS.sub("", v), _SPLITTERS.sub("", cut)}
+    variants |= {_BRACES.sub("", v) for v in list(variants)}
+    return variants
+
+
 def vexcom_reading(command: str, _depth: int = 0, *, shell: bool = True) -> str | None:
     """NAMES if this text names VEX's device tool in any spelling the note
     above lists, COMPLEX if a glob in it is past the caps (or there are too
@@ -343,17 +360,10 @@ def vexcom_reading(command: str, _depth: int = 0, *, shell: bool = True) -> str 
     here-document's body set aside — bash never globs one — keeping only the
     `$(…)` an unquoted body would run; the name itself is looked for
     everywhere."""
-    import unicodedata
     text = join_continuations(command or "")
     if not text.strip():
         return None
-    variants = {text, unicodedata.normalize("NFKC", text)}
-    variants |= {_ansi_c_decoded(v) for v in list(variants)}
-    variants |= {_DEFAULT_EXPANSIONS.sub(r"\1", v) for v in list(variants)}
-    for v in list(variants):
-        cut = _EMPTY_EXPANSIONS.sub("", v)
-        variants |= {cut, _SPLITTERS.sub("", v), _SPLITTERS.sub("", cut)}
-    variants |= {_BRACES.sub("", v) for v in list(variants)}
+    variants = _spellings(text)
     for v in variants:
         if _VEXCOM in v.casefold():
             return NAMES
@@ -366,13 +376,7 @@ def vexcom_reading(command: str, _depth: int = 0, *, shell: bool = True) -> str 
             # Where a body ends cannot be told: no glob word can be said to
             # be data or a command, so none is judged; the line is asked.
             complex_, globbed = True, ""
-        variants = {globbed, unicodedata.normalize("NFKC", globbed)}
-        variants |= {_ansi_c_decoded(v) for v in list(variants)}
-        variants |= {_DEFAULT_EXPANSIONS.sub(r"\1", v) for v in list(variants)}
-        for v in list(variants):
-            cut = _EMPTY_EXPANSIONS.sub("", v)
-            variants |= {cut, _SPLITTERS.sub("", v), _SPLITTERS.sub("", cut)}
-        variants |= {_BRACES.sub("", v) for v in list(variants)}
+        variants = _spellings(globbed)
     for v in variants:
         for word in _WORD_SPLIT.split(v):
             if word in judged or not any(c in word for c in "*?["):
@@ -396,6 +400,305 @@ def vexcom_reading(command: str, _depth: int = 0, *, shell: bool = True) -> str 
 def names_vexcom(command: str) -> bool:
     """True if this command line names VEX's device tool (`vexcom_reading`)."""
     return vexcom_reading(command) == NAMES
+
+
+# --- deny: agent calls to the Secret Service (B-LOGIN follow-up, 2026-10-15) --
+#
+# The HUD Browser keeps Chrome's password key in the owner's login keyring
+# (`v2/browser/password_store.py`). While it is unlocked, gnome-keyring has
+# no per-application rule: any program running as the owner may ask the
+# Secret Service for that key, or for any other saved secret. So an agent's
+# shell line that **calls** it is DENY, never put to the owner — approving a
+# command is not consent to what it reads, as with `.env`.
+#
+# **Judged per program, in command position** (review of #218, LOW 3: a
+# whole-line reading refused `git commit -m 'add secret-tool rule'`, a PR
+# body or a `grep` that only named one). Every program the line runs is
+# found by the vex reading's walk (`_Walk`: every segment, wrappers and
+# runners from the one table, `bash -c`/`sh -c` strings, `eval`, `find
+# -exec`, substitutions), and each is judged alone, its word and arguments
+# read in every spelling `_spellings` gives (quotes, escapes, `$'…'`,
+# `${X:-…}`, braces), case-folded:
+#
+# - **a secret reader as the program**: `secret-tool`, `kwallet-query`,
+#   `lssecret`, whatever the subcommand (they look up, search — `secret-tool
+#   search` prints secrets — store and clear); Python's `keyring` CLI with
+#   `get`, `set` or `del`; and any Python run with `-m keyring` (review of
+#   #218, MED 2: `uv run --with keyring python3 -m keyring get S U` was ALLOW),
+#   through runpy too (`-m runpy keyring`, the vex reading's `_module_run`);
+# - **a caller whose own arguments name the Secret Service**: a D-Bus client
+#   (`busctl`, `gdbus`, `dbus-send`, `qdbus*`, `dbus-monitor`), an
+#   interpreter or a shell, as the program of the segment, whose words (a
+#   `-c` script included) name its bus name, interfaces or object paths
+#   (`org.freedesktop.secrets`, `org.freedesktop.Secret.*`,
+#   `/org/freedesktop/secrets/…`), the portal's `org.freedesktop.portal.Secret`
+#   or its backend `org.freedesktop.impl.portal.Secret`, gnome-keyring's own
+#   `org.gnome.keyring` or KWallet's `org.kde.kwalletd*`; or a non-shell
+#   interpreter whose inline source starts a secret reader
+#   (`os.system('secret-tool …')`, `execSync(…)`; `_runs_reader_inline`).
+#   A shell elsewhere on
+#   the line does not count: `grep org.gnome.keyring x | sh -c 'wc -l'` is
+#   not a call;
+# - **a session-bus monitor** (`_bus_monitor`): `dbus-monitor` unless
+#   `--system`, `gdbus monitor` unless `--system`/`-y`, `busctl
+#   monitor|capture` with `--user`, an address, a machine or a host. It
+#   would read the key in the reply that carries it to Chrome. A line that
+#   assigns `DBUS_SYSTEM_BUS_ADDRESS=` or `DBUS_SESSION_BUS_ADDRESS=` gets no
+#   `--system` exemption (the "system" bus may then be the session's).
+#
+# A line too complex for the walk (its caps, `_TooComplex`) is read the old,
+# stricter way over its whole text (`_secret_service_text`). v1's gate and
+# v2's layer 1 both start from `decide`, so the two agree.
+#
+# **An accident guard, not a wall** (the script review's standing): a call
+# by a bus *unique name* with a computed object path, a program word that is
+# only an expansion, or a script file that talks D-Bus is not seen. The
+# same-user boundary in the Browser notes (*Password store*) is the honest
+# limit.
+SECRET_SERVICE_DENIED = (
+    "it calls the Secret Service (the owner's keyring), where Chrome's password key and the "
+    "owner's other saved secrets live; approving a command is not consent to what it reads, "
+    "so no agent command reaches it")
+_SECRET_READER_STEMS = frozenset({"secret-tool", "kwallet-query", "lssecret"})
+_SECRET_READERS = re.compile(r"(?<![\w.-])(?:secret-tool|kwallet-query|lssecret)(?![\w.-])")
+_KEYRING_VERBS = frozenset({"get", "set", "del"})
+_KEYRING_MODULE = re.compile(r"keyring(?:\..*)?", re.IGNORECASE | re.DOTALL)
+_SECRET_SERVICE_NAMES = ("org.freedesktop.secret", "org/freedesktop/secret",
+                         "org.freedesktop.portal.secret", "org.freedesktop.impl.portal.secret",
+                         "org.gnome.keyring", "org/gnome/keyring", "org.kde.kwalletd",
+                         "org/modules/kwalletd")
+_BUS_CALLERS = frozenset({"busctl", "gdbus", "dbus-send", "dbus-monitor", "qdbus", "qdbus6",
+                          "qdbus-qt5", "qdbus-qt6", "dbus"})
+_SCRIPT_CALLER = re.compile(r"python[0-9.]*|pypy[0-9.]*|perl[0-9.]*|ruby[0-9.]*|node[0-9]*")
+_CALLER_WORD = re.compile(r"[^\s;&|<>()=`'\"]+")
+_BUS_ASSIGNMENT = re.compile(r"dbus_(?:system|session)_bus_address\s*=")
+# Cheap first look on the whole line's spellings: none of these, nothing to walk.
+_SECRET_HINTS = ("secret", "keyring", "kwallet", "monitor", "capture")
+
+
+def _program_stem(word: str) -> str:
+    base = re.split(r"[\\/]", word)[-1].casefold()
+    return base[:-4] if base.endswith(".exe") else base
+
+
+def _is_caller(stem: str) -> bool:
+    """A program that could make a D-Bus call: a D-Bus client, an
+    interpreter or a shell (any version suffix on the script runtimes)."""
+    return (stem in _BUS_CALLERS or stem in _INTERPRETERS or stem in SHELLS
+            or bool(_SCRIPT_CALLER.fullmatch(stem)))
+
+
+def _names_service(text: str) -> bool:
+    return any(name in v.casefold() for v in _spellings(text) for name in _SECRET_SERVICE_NAMES)
+
+
+# A secret reader run from an interpreter's inline source (delta review of
+# #218, LOW 2, narrowed by #220's review, M1). Only the inline source of a
+# non-shell interpreter is read (a shell's `-c` string is walked as a line
+# already; positional arguments are data: `pytest -k secret-tool`), and only
+# a reader in **program position** there counts: the first word of the first
+# string handed to a process-starting call (`os.system('secret-tool …')`,
+# `subprocess.run(['secret-tool', …])`, `execSync`, `spawn`, `Deno.Command`,
+# Ruby's `Open3.capture2`, PHP's `shell_exec`), or of a shell-out literal
+# (backticks, `qx(…)`, `%x(…)`, Bun's `$\``). So a gate probe
+# (`python3 -c "print(rules.decide('secret-tool lookup a b'))"`) and a
+# `perl -pi -e 's/secret-tool/x/'` edit are not calls.
+_INLINE_SOURCE = {
+    # base: (inline letters, letters taking a value (the cluster's rest or
+    # the next word), letters taking only the cluster's rest, letters that
+    # end the options (a module or a script follows), long inline options)
+    "python": ("c", "WXQ", "", "m", ()),
+    "perl": ("eE", "", "IMmixlC0dDV", "", ()),
+    "ruby": ("e", "rICEF", "x0iKT", "", ()),
+    "node": ("ep", "rC", "", "", ("eval", "print")),
+    "bun": ("ep", "r", "", "", ("eval", "print")),
+    "php": ("r", "dcz", "", "f", ()),
+}
+_INLINE_BASES = (("python", re.compile(r"(?:python|pypy)[0-9.]*")), ("perl", re.compile(r"perl[0-9.]*")),
+                 ("ruby", re.compile(r"ruby[0-9.]*")), ("node", re.compile(r"node[0-9]*|nodejs")),
+                 ("php", re.compile(r"php[0-9.]*")), ("bun", re.compile(r"bun")),
+                 ("deno", re.compile(r"deno")))
+_READER_WORD = r"(?:[\w.~/-]*/)?(?:secret-tool|kwallet-query|lssecret)(?![\w.-])"
+# Atomic and possessive where whitespace runs meet (#220 delta review, M1):
+# `\s*\(?\s*` backtracked quadratically, 54 s for 60k spaces in `decide`.
+# The reader's path stays `[…]*/` (each candidate start is delimited by a
+# quote or a backtick, so it stays linear; pinned by `rules_check`).
+_STARTS_PROCESS = re.compile(
+    r"(?:\b(?:system|exec\w*+|popen\w*+|spawn\w*+|run|call|check_call|check_output|getoutput"
+    r"|getstatusoutput|capture[23]\w*+|pipeline\w*+|shell_exec|passthru|proc_open|command)"
+    r"(?>\s*\(?\s*)(?:[\[{]\s*+)?(?:[rbuf]{1,2})?[\"'`]\s*+"
+    r"|\$\s*+`\s*+)" + _READER_WORD)
+_SHELL_OUT = re.compile(r"(?:`\s*+|\bqx\s*+[({\[<'\"/|!#]\s*+|%x\s*+[({\[<'\"/|!]\s*+)" + _READER_WORD)
+
+
+def _inline_base(stem: str) -> str | None:
+    return next((base for base, pattern in _INLINE_BASES if pattern.fullmatch(stem)), None)
+
+
+def _inline_sources(base: str, args: list[str]) -> list[str]:
+    """The inline source this interpreter was handed (`-c`, `-e`, `--eval=`,
+    `deno eval …`), read up to its script or the end of its options."""
+    if base == "deno":
+        positional = [a for a in args if not a.startswith("-")]
+        return positional[1:2] if positional[:1] == ["eval"] else []
+    inline, value, glued, stop, longs = _INLINE_SOURCE[base]
+    out, i = [], 0
+    while i < len(args):
+        token = args[i]
+        i += 1
+        if token in ("--", "-"):
+            break
+        if token.startswith("--"):
+            name, eq, rest = token[2:].partition("=")
+            if name in longs:
+                if eq:
+                    out.append(rest)
+                elif i < len(args):
+                    out.append(args[i])
+                    i += 1
+            continue
+        if not token.startswith("-"):
+            break                               # the script: what follows is its argv
+        for k, letter in enumerate(token[1:], 1):
+            rest = token[k + 1:]
+            if letter in inline:
+                if rest:
+                    out.append(rest)
+                elif i < len(args):
+                    out.append(args[i])
+                    i += 1
+                break
+            if letter in stop:
+                return out
+            if letter in value:
+                i += 0 if rest else 1
+                break
+            if letter in glued:
+                break
+    return out
+
+
+def _runs_reader_inline(stem: str, args: list[str]) -> bool:
+    """A non-shell interpreter whose inline source starts a secret reader
+    (note above)."""
+    base = _inline_base(stem)
+    if base is None:
+        return False
+    shell_out = base in ("perl", "ruby", "php")
+    for source in _inline_sources(base, args):
+        for v in _spellings(source):
+            folded = v.casefold()
+            if _STARTS_PROCESS.search(folded) or (shell_out and _SHELL_OUT.search(folded)):
+                return True
+    return False
+
+
+def _runs_keyring_module(args: list[str]) -> bool:
+    """`-m keyring` (or `keyring.cli`), `-mkeyring`, `-m` ending a flag
+    cluster (`-Im keyring`), or through runpy (`-m runpy keyring`; review of
+    #218's delta, LOW 1): the vex reading's `_module_run`, with keyring's
+    module, any case."""
+    return _module_run(args, _KEYRING_MODULE)
+
+
+def _bus_monitor(stem: str, args: list[str], assigned: bool) -> str | None:
+    """Why this program watches the session bus (DENY), or None: the bus
+    carries the keyring's secrets to the programs that ask. `dbus-monitor`
+    watches the session bus unless told `--system`; `gdbus monitor` unless
+    `--system`/`-y`; `busctl monitor|capture` watches the system bus unless
+    told `--user`, an address, a machine or a host. `assigned`: the line
+    sets a `DBUS_*_BUS_ADDRESS`, so `--system` is no exemption."""
+    if stem == "dbus-monitor":
+        if (not assigned and "--system" in args
+                and not any(a == "--session" or a.startswith("--address") for a in args)):
+            return None
+    elif stem == "gdbus":
+        if args[:1] != ["monitor"] or (not assigned and ("--system" in args or "-y" in args)):
+            return None
+    elif stem == "busctl":
+        if not any(a in ("monitor", "capture") for a in args):
+            return None
+        if not assigned and not any(
+                a == "--user" or a.split("=", 1)[0] in ("--address", "--machine", "--host")
+                or (a.startswith(("-M", "-H")) and not a.startswith("--")) for a in args):
+            return None
+    else:
+        return None
+    return (f"{stem} would watch the session bus, which carries the keyring's secrets (Chrome's "
+            "password key among them) to the programs that ask; no agent command watches it")
+
+
+def _program_verdict(word: str, args: list[str], assigned: bool) -> str | None:
+    """One program the line runs, judged alone (note above)."""
+    words = [str(a) for a in args]
+    for spelled in _spellings(str(word)):
+        stem = _program_stem(spelled)
+        if stem in _SECRET_READER_STEMS:
+            return SECRET_SERVICE_DENIED
+        if stem == "keyring" and any(a in _KEYRING_VERBS for a in words):
+            return SECRET_SERVICE_DENIED
+        if _PYTHON.fullmatch(stem) and _runs_keyring_module(words):
+            return SECRET_SERVICE_DENIED
+        monitor = _bus_monitor(stem, words, assigned)
+        if monitor:
+            return monitor
+        if _is_caller(stem) and words and _names_service(" ".join(words)):
+            return SECRET_SERVICE_DENIED
+        if words and _runs_reader_inline(stem, words):
+            return SECRET_SERVICE_DENIED
+    return None
+
+
+def secret_service_reading(command: str) -> str | None:
+    """SECRET_SERVICE_DENIED (or the monitor's reason) if a program this line
+    runs calls the Secret Service or watches the session bus (note above),
+    else None. Pure text work; nothing runs. Short lines are cached, as the
+    vex reading's are."""
+    command = command or ""
+    if len(command) <= 16384:
+        return _secret_service_cached(command)
+    return _secret_service_uncached(command)
+
+
+@functools.lru_cache(maxsize=256)
+def _secret_service_cached(command: str) -> str | None:
+    return _secret_service_uncached(command)
+
+
+def _secret_service_uncached(command: str) -> str | None:
+    text = join_continuations(command)
+    if not text.strip():
+        return None
+    spelled = [v.casefold() for v in _spellings(text)]
+    if not any(hint in v for v in spelled for hint in _SECRET_HINTS):
+        return None
+    assigned = any(_BUS_ASSIGNMENT.search(v) for v in spelled)
+    for variant in _program_variants(text):
+        walk = _Walk()
+        try:
+            walk.line(variant, True, 0)
+        except _TooComplex:
+            return _secret_service_text(text)
+        for prog in walk.progs:
+            if not prog.word:
+                continue
+            why = _program_verdict(prog.word, list(prog.args), assigned)
+            if why:
+                return why
+    return None
+
+
+def _secret_service_text(text: str) -> str | None:
+    """The stricter whole-text reading, for a line too complex to walk: a
+    reader's name anywhere, or a service name and a caller anywhere."""
+    for variant in _spellings(text):
+        folded = variant.casefold()
+        if _SECRET_READERS.search(folded):
+            return SECRET_SERVICE_DENIED
+        if (any(name in folded for name in _SECRET_SERVICE_NAMES)
+                and any(_is_caller(_program_stem(w)) for w in _CALLER_WORD.findall(variant))):
+            return SECRET_SERVICE_DENIED
+    return None
 
 
 VEXCOM_DENIED = ("it names vexcom, VEX's tool for downloading to and talking to the robot; "
@@ -3497,19 +3800,21 @@ def _unquoted(word: str) -> str:
     return " ".join(str(w) for w in _shell_words(word))
 
 
-def _module_run(args) -> bool:
-    """`-m jarvis.v2.vex` in any spelling a Python takes (`-m X`, `-Im X`,
-    `-mX`), or `-m runpy jarvis.v2.vex`."""
+def _module_run(args, module: re.Pattern = _VEX_MODULE) -> bool:
+    """`-m jarvis.v2.vex` (or `module`: the Secret Service reading passes
+    keyring's) in any spelling a Python takes (`-m X`, `-Im X`, `-mX`), or
+    `-m runpy X` (`-mrunpy X` too)."""
     for i, token in enumerate(args):
         before = args[i - 1] if i else ""
-        if _VEX_MODULE.fullmatch(token) and (
+        if module.fullmatch(token) and (
                 before == "runpy" or before == "--module"
+                or re.fullmatch(r"-[A-Za-z]*mrunpy", before)
                 or (before.startswith("-") and not before.startswith("--") and before.endswith("m"))):
             return True
-        if token.startswith("--module=") and _VEX_MODULE.fullmatch(token.split("=", 1)[1]):
+        if token.startswith("--module=") and module.fullmatch(token.split("=", 1)[1]):
             return True
         glued = re.fullmatch(r"-[A-Za-z]*m(.+)", token)
-        if glued and _VEX_MODULE.fullmatch(glued.group(1)):
+        if glued and module.fullmatch(glued.group(1)):
             return True
     return False
 
@@ -4186,6 +4491,11 @@ def _decide(command: str) -> Verdict:
     vex = _vex_line(raw)
     if vex.deny:
         return Verdict(DENY, vex.deny)
+    # The Secret Service (the owner's keyring) likewise, on the raw line:
+    # `secret_service_reading`.
+    secret = secret_service_reading(raw)
+    if secret:
+        return Verdict(DENY, secret)
     if "\x00" in raw:
         # No shell can be handed a NUL byte (the line could not run as
         # written), and the readers that resolve paths raise on one: too

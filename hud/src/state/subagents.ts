@@ -235,11 +235,15 @@ export function createSubagentStore(fetchers: Fetchers) {
     notify("s:" + key);
   }
 
-  /** Lay the daemon's word on a live row at once (the bus says it too). */
+  /**
+   * Lay the daemon's word on a live row at once (the bus says it too). The
+   * bus carries the state, never the reason: when its `refused` came first,
+   * the 409's reason is still laid on the row (review of #216's delta, NIT-2).
+   */
   function markRow(threadId: string, sid: string, stop: StopState, why = "") {
     const t = threads.get(threadId);
     if (!t) return;
-    const rows = t.rows.map((r) => (r.sid === sid && isLive(r.status) && r.stop !== stop
+    const rows = t.rows.map((r) => (r.sid === sid && isLive(r.status) && (r.stop !== stop || (why && r.stop_error !== why))
       ? { ...r, stop, ...(why ? { stop_error: why } : {}) } : r));
     if (rows.some((r, i) => r !== t.rows[i])) setRows(threadId, t, rows);
   }

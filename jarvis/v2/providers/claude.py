@@ -250,6 +250,37 @@ EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
 # project's conventions without anything being logged.
 SETTING_SOURCES = ["user", "project"]
 
+# An **isolated** session (`start(..., isolated=True)`; only the Diff tab's
+# quick review asks for one, 2026-10-15, review H1 of #219) reads no settings
+# file at all: `--setting-sources=` empty, so no project or user
+# `settings.json` (their hooks, which would run unsandboxed before any reply,
+# `env`, `apiKeyHelper`, `enabledPlugins`), no CLAUDE.md as instructions — the
+# CLI gates CLAUDE.md discovery on the same sources (2.1.295), and
+# CLAUDE_CODE_DISABLE_CLAUDE_MDS=1 says so twice. The login is the OAuth
+# credentials file, which is not a setting source. Its environment is the
+# daemon's with every variable not in ISOLATED_ENV_KEEP (or a prefix in
+# ISOLATED_ENV_KEEP_PREFIXES) blanked: the SDK can only add to the inherited
+# environment, never remove from it, so each is set to "" — Jarvis's `.env`
+# keys (OPENROUTER_API_KEY and the like) and ANTHROPIC_* included, so the CLI
+# authenticates with the subscription login only.
+ISOLATED_SETTING_SOURCES: list[str] = []
+ISOLATED_ENV_KEEP = frozenset({
+    "PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LANGUAGE", "TERM", "TZ", "TMPDIR",
+    "TMP", "TEMP", "PWD", "CLAUDE_CONFIG_DIR", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY",
+    "http_proxy", "https_proxy", "no_proxy", "SSL_CERT_FILE", "SSL_CERT_DIR",
+    "NODE_EXTRA_CA_CERTS"})
+ISOLATED_ENV_KEEP_PREFIXES = ("LC_", "XDG_", "WSL")
+
+
+def isolated_env(environ=None) -> dict[str, str]:
+    """The `env` an isolated session's CLI gets on top of the daemon's: every
+    variable outside the keep list blanked, and CLAUDE.md discovery off."""
+    environ = os.environ if environ is None else environ
+    env = {key: "" for key in environ
+           if key not in ISOLATED_ENV_KEEP and not key.startswith(ISOLATED_ENV_KEEP_PREFIXES)}
+    env["CLAUDE_CODE_DISABLE_CLAUDE_MDS"] = "1"
+    return env
+
 # Anything that looks like a bearer credential, redacted before a string can
 # reach an event. `secrets.scrub` covers the files Jarvis owns; the CLI's own
 # OAuth bundle (`~/.claude/.credentials.json`) is not one of them, and this
@@ -535,17 +566,55 @@ def parse_version(text: str | None) -> tuple[int, int, int] | None:
     return tuple(int(part) for part in match.groups()) if match else None  # type: ignore[return-value]
 
 
-def _late_stop(thread_id: str, sid: str, done: Any) -> None:
-    """The late outcome of a Stop whose answer the route stopped waiting for."""
+def _cli_refusal(exc: BaseException) -> bool:
+    """The SDK raises a bare Exception carrying the CLI's error control
+    response (`_internal/query.py`): the CLI's refusal. Its own "Control
+    request timeout" is not one (the CLI may still act on the request)."""
+    return type(exc) is Exception and not _sdk_timeout(exc)
+
+
+def _sdk_timeout(exc: BaseException) -> bool:
+    return type(exc) is Exception and str(exc).startswith("Control request timeout")
+
+
+def _stop_outcome(exc: BaseException | None) -> str:
+    """How one Stop's answer settles the owner's mark, in time or late alike:
+    none is `taken`; the SDK's own control timeout is `unknown` (the CLI may
+    still act on it); anything else, the CLI's refusal or a request that was
+    not delivered, is `refused`."""
+    if exc is None:
+        return "taken"
+    return "unknown" if _sdk_timeout(exc) else "refused"
+
+
+def _stop_settled(session: Any, child: Any, outcome: str) -> None:
+    """One owner Stop on `child` has its answer (`taken`, `refused` or
+    `unknown`). The owner's mark comes off only when this one was refused,
+    no other Stop of it is still on its way and none was taken: whatever
+    ends the child later is then not the owner's doing (review of #216's
+    delta, LOW 1)."""
+    with session.mutex:
+        child.owner_stops = max(0, child.owner_stops - 1)
+        if outcome == "taken":
+            child.owner_stop_taken = True
+        elif outcome == "refused" and not child.owner_stops and not child.owner_stop_taken:
+            child.owner_stop = False
+
+
+def _late_stop(session: Any, child: Any, sid: str, done: Any) -> None:
+    """The late outcome of a Stop whose answer the route stopped waiting for,
+    settled by the same rule as one in time (`_stop_outcome`)."""
     try:
         error = done.exception()
     except BaseException:  # noqa: BLE001 — cancelled with the loop
+        _stop_settled(session, child, "unknown")
         return
+    _stop_settled(session, child, _stop_outcome(error))
     if error is None:
-        LOG.info("claude %s: the CLI took the stop of %s late", thread_id, sid)
+        LOG.info("claude %s: the CLI took the stop of %s late", session.thread_id, sid)
     else:
         LOG.warning("claude %s: the stop of %s ended without an answer (%s)",
-                    thread_id, sid, type(error).__name__)
+                    session.thread_id, sid, type(error).__name__)
 
 
 def _known_cli_version() -> tuple[int, int, int] | None:
@@ -695,6 +764,10 @@ class _Child:
     inferred: bool = False
     # The owner asked the CLI to stop it (SV-4): its `stopped` then says so.
     owner_stop: bool = False
+    # The owner's Stops still on their way, and whether the CLI took one:
+    # a refusal clears `owner_stop` only when neither (`_stop_settled`).
+    owner_stops: int = 0
+    owner_stop_taken: bool = False
 
 
 @dataclass
@@ -750,6 +823,9 @@ class _Session:
     # The private file the brief's MCP servers are carried in (plan
     # 2026-10-10 §1.3), or None when the brief has none.
     mcp_config: Path | None = None
+    # No settings file, no CLAUDE.md, a scrubbed environment (`start(...,
+    # isolated=True)`, the quick review's). Kept across a model switch.
+    isolated: bool = False
     # Native sub-agents (SV-1). They outlive turns (background is the CLI's
     # default), so none of this is cleared when a turn starts: `children` by
     # sid, oldest first; `tasks` maps a task id (= a hook's `agent_id`) to its
@@ -830,8 +906,12 @@ class ClaudeProvider:
 
     # -- lifecycle
 
-    def start(self, thread: Thread, brief: Brief, permit: PermissionCallback) -> SessionHandle:
-        return self._open(thread, brief, permit, resume=False)
+    def start(self, thread: Thread, brief: Brief, permit: PermissionCallback, *,
+              isolated: bool = False) -> SessionHandle:
+        """`isolated`: no settings file, no CLAUDE.md, a scrubbed environment
+        (see ISOLATED_SETTING_SOURCES). Only the Diff tab's quick review sets
+        it; every other session is unchanged."""
+        return self._open(thread, brief, permit, resume=False, isolated=isolated)
 
     def resume(self, thread: Thread, brief: Brief, permit: PermissionCallback) -> SessionHandle:
         if not thread.provider_session_id:
@@ -839,7 +919,8 @@ class ClaudeProvider:
         return self._open(thread, brief, permit, resume=True)
 
     def _open(
-        self, thread: Thread, brief: Brief, permit: PermissionCallback, *, resume: bool
+        self, thread: Thread, brief: Brief, permit: PermissionCallback, *, resume: bool,
+        isolated: bool = False,
     ) -> SessionHandle:
         session_id = thread.provider_session_id if resume else str(uuid.uuid4())
         loop = asyncio.new_event_loop()
@@ -858,6 +939,7 @@ class ClaudeProvider:
             resumable=resume,
             cost_seen=(running_cost.figure(getattr(thread, "provider_cost_total", None))
                        if resume else 0.0),
+            isolated=isolated is True,
         )
         try:
             if brief.mcp_servers:
@@ -906,7 +988,7 @@ class ClaudeProvider:
                 "preset": "claude_code",
                 **({"append": brief.system_append} if brief.system_append else {}),
             },
-            "setting_sources": list(SETTING_SOURCES),
+            "setting_sources": list(ISOLATED_SETTING_SOURCES if session.isolated else SETTING_SOURCES),
             "permission_mode": "auto" if auto else "default",
             "include_partial_messages": True,
             "strict_mcp_config": True,
@@ -934,8 +1016,10 @@ class ClaudeProvider:
             "extra_args": {"replay-user-messages": None},
         }
         cli_path = resolve_cli()
+        if session.isolated:
+            kwargs["env"] = isolated_env()
         if brief.origin_tag is not None:
-            kwargs["env"] = {"JARVIS_ORIGIN_TAG": brief.origin_tag}
+            kwargs["env"] = {**kwargs.get("env", {}), "JARVIS_ORIGIN_TAG": brief.origin_tag}
         if cli_path is not None:
             # The owner's own install, never the SDK's bundled copy, which
             # lags it and refuses newer models. None leaves the SDK to its
@@ -2272,27 +2356,36 @@ class ClaudeProvider:
         coroutine would skip the SDK's own cleanup and leave its private
         `pending_control_responses` entry behind. It is left to finish, so
         the SDK's own 60 s control timeout (or the CLI's late answer) removes
-        that entry the way the SDK means it to; the late outcome is logged."""
+        that entry the way the SDK means it to; the late outcome is logged.
+
+        The owner's mark (`owner_stop`, which makes the child's end "stopped
+        by the owner") is set before the request goes. Each answer, in time
+        or late (`_late_stop`), settles it by one rule (`_stop_outcome`,
+        `_stop_settled`): taken keeps it; the SDK's own control timeout keeps
+        it (the CLI may still act); a refusal or an undelivered request takes
+        it off, unless another Stop of the child is still on its way or was
+        taken."""
         session, child = self._stoppable(h, sid)
         task_id = child.task_id
         with session.mutex:
             child.owner_stop = True
+            child.owner_stops += 1
         future = asyncio.run_coroutine_threadsafe(session.client.stop_task(task_id), session.loop)
         try:
             future.result(STOP_CONTROL_TIMEOUT_S)
         except concurrent.futures.TimeoutError:
-            future.add_done_callback(lambda done, sid=sid: _late_stop(session.thread_id, sid, done))
+            future.add_done_callback(
+                lambda done, child=child, sid=sid: _late_stop(session, child, sid, done))
             raise TimeoutError(f"Claude Code did not answer the stop within "
                                f"{int(STOP_CONTROL_TIMEOUT_S)} s") from None
         except BaseException as exc:
-            # Refused or not delivered: whatever stops it later is not this.
-            with session.mutex:
-                child.owner_stop = False
-            if type(exc) is Exception and not str(exc).startswith("Control request timeout"):
-                # The SDK raises a bare Exception carrying the CLI's error
-                # control response (`_internal/query.py`): the CLI's refusal.
+            # Refused or not delivered: whatever stops it later is not this
+            # (unless another Stop of it is still on its way, or was taken).
+            _stop_settled(session, child, _stop_outcome(exc))
+            if _cli_refusal(exc):
                 raise SubagentStopDeclined(_safe(str(exc))[:160] or "no reason given") from None
             raise
+        _stop_settled(session, child, "taken")
 
     def interrupt(self, h: SessionHandle) -> None:
         session = h.native

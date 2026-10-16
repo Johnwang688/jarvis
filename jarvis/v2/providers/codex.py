@@ -240,6 +240,7 @@ class _ChildView:
     stop_reason: str | None = None
     asked_to_stop: bool = False        # the orchestrator's interrupt_agent said so
     owner_stop: bool = False           # the owner's Stop asked Codex to end its turn (SV-4)
+    owner_stop_taken: bool = False     # Codex took one of the owner's Stops of this turn
     calls: dict = field(default_factory=dict)  # its open tool calls, oldest first
 
 
@@ -771,7 +772,8 @@ class CodexProvider:
         return rate_limits
 
     def one_shot(self, text: str, *, model: str, effort: str | None = None,
-                 instructions: str = "", deadline_s: float = ONE_SHOT_DEADLINE_S) -> str:
+                 instructions: str = "", deadline_s: float = ONE_SHOT_DEADLINE_S,
+                 on_usage=None, cancel: threading.Event | None = None) -> str:
         """One tool-less model turn on a short-lived app-server, for the chat
         titler (titles.py): `text` in, the final agent message out.
 
@@ -796,8 +798,24 @@ class CodexProvider:
         **The limit, stated** (review of PR #62, L2): `environments: []` has
         not been verified against a live ChatGPT-auth turn. If such a turn
         ignores it, a read-only command can run before the turn is refused;
-        its output is discarded."""
-        stop = self._metadata_stop
+        its output is discarded.
+
+        `on_usage`, when given, is called with each `thread/tokenUsage/
+        updated` payload of the turn (the Diff tab's quick review records it
+        in the ledger, 2026-10-15). It decides nothing, and an exception it
+        raises is swallowed: accounting never ends a turn.
+
+        `cancel`, when given, is OR-ed into the transport's stop: setting it
+        ends the session at the next poll and releases `_auth_lock`, as the
+        daemon's shutdown does (the quick review's Cancel, review M1 of #219)."""
+        metadata_stop = self._metadata_stop
+
+        class _Either:
+            @staticmethod
+            def is_set() -> bool:
+                return metadata_stop.is_set() or (cancel is not None and cancel.is_set())
+
+        stop = _Either
         if stop.is_set():
             raise RpcCancelled("Codex one-shot cancelled (shutting down)")
         if _auth_lock.locked():
@@ -847,7 +865,7 @@ class CodexProvider:
                 if effort:
                     turn["effort"] = effort
                 request = rpc.send("turn/start", turn, deadline=deadline)
-                return self._one_shot_reply(rpc, native, request, deadline)
+                return self._one_shot_reply(rpc, native, request, deadline, on_usage)
             finally:
                 if rpc is not None:
                     rpc.close()
@@ -857,7 +875,7 @@ class CodexProvider:
             _auth_lock.release()
 
     @staticmethod
-    def _one_shot_reply(rpc, native: str, request, deadline: float) -> str:
+    def _one_shot_reply(rpc, native: str, request, deadline: float, on_usage=None) -> str:
         """Read one turn to its end: the final agent message, or an error."""
         text, turn_id = None, None
         while True:
@@ -884,6 +902,12 @@ class CodexProvider:
             if method == "account/updated" and params.get("authMode") not in (None, "chatgpt"):
                 raise RpcError("Codex changed away from ChatGPT authentication")
             if params.get("threadId") not in (None, native):
+                continue
+            if method == "thread/tokenUsage/updated" and on_usage is not None:
+                try:
+                    on_usage(params.get("tokenUsage"))
+                except Exception:  # noqa: BLE001 — accounting never ends a turn
+                    LOG.warning("Codex one-shot usage callback failed")
                 continue
             # Any sign of a tool ends the turn with an error and **nothing
             # from it is used** — not even agent text that came before (the
@@ -1669,7 +1693,7 @@ class CodexProvider:
                 # live again, on Codex's own word.
                 view.status, view.stop_reason, view.asked_to_stop = "running", None, False
                 with s.mutex:       # `stop_subagent` and `_child_stop_answered` write it under it
-                    view.owner_stop = False
+                    view.owner_stop = view.owner_stop_taken = False
                 yield self._life(h, view, "started")
             return
         if method == "turn/completed":
@@ -1683,6 +1707,7 @@ class CodexProvider:
                 else view.duration_ms
             with s.mutex:       # `stop_subagent` and `_child_stop_answered` write it under it
                 owner, view.owner_stop = view.owner_stop, False
+                view.owner_stop_taken = False
             if view.status == "stopped":
                 view.stop_reason = (OWNER_STOPPED if owner
                                     else "the orchestrator stopped it" if view.asked_to_stop
@@ -2152,7 +2177,7 @@ class CodexProvider:
                 raise SubagentNotLive("This sub-agent is not running a turn in this chat's session.")
             rid = s.rpc.send("turn/interrupt", {"threadId": tid, "turnId": turn})
             view.owner_stop = True
-            s.child_stops[rid] = sid
+            s.child_stops[rid] = (sid, turn)
             while len(s.child_stops) > CHILD_STOPS:
                 s.child_stops.pop(next(iter(s.child_stops)))
 
@@ -2162,13 +2187,20 @@ class CodexProvider:
         refusal is logged, never fatal, and takes the owner's mark off the
         child: if its turn ends later for another reason (the orchestrator's
         `interrupt_agent`), that reason is said, not "stopped by the owner".
-        The record says the stop was not confirmed when the turn does not end."""
+        The record says the stop was not confirmed when the turn does not end.
+        The mark comes off only when no other Stop of that turn is still on
+        its way and none was taken (review of #216's delta, LOW 2: a first
+        Stop refused, a second taken, is still the owner's)."""
         with s.mutex:
-            sid = s.child_stops.pop(msg.get("id"), None)
-            if sid is not None and "error" in msg:
-                for view in s.child_views.values():
-                    if view.sid == sid:
-                        view.owner_stop = False
+            entry = s.child_stops.pop(msg.get("id"), None)
+            sid, turn = entry if entry is not None else (None, None)
+            for view in s.child_views.values() if sid is not None else ():
+                if view.sid != sid or view.turn != turn:
+                    continue                # another child, or a turn already over
+                if "error" not in msg:
+                    view.owner_stop_taken = True
+                elif not view.owner_stop_taken and (sid, turn) not in s.child_stops.values():
+                    view.owner_stop = False
         if sid is None:
             return False
         if "error" in msg:

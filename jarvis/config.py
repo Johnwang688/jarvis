@@ -438,6 +438,15 @@ CODEX_STRICT = os.environ.get("JARVIS_CODEX_STRICT", "") == "1"
 # whatever the default openrouter model is".
 TITLE_CODEX_MODEL = os.environ.get("JARVIS_TITLE_CODEX_MODEL", "gpt-6-luna").strip()
 
+# The Diff tab's Quick review (v2 `diff_review.py`, 2026-10-15), in the
+# owner's fallback order: Claude Code on Haiku 5.5 unless Claude's usage is
+# at 75% or more, else Codex on GPT-6 Luna under the same rule, else the v1
+# loop on Haiku 5.5 through OpenRouter.
+DIFF_REVIEW_CLAUDE_MODEL = os.environ.get("JARVIS_DIFF_REVIEW_CLAUDE_MODEL", "claude-haiku-5-5").strip()
+DIFF_REVIEW_CODEX_MODEL = os.environ.get("JARVIS_DIFF_REVIEW_CODEX_MODEL", "gpt-6-luna").strip()
+DIFF_REVIEW_OPENROUTER_MODEL = os.environ.get("JARVIS_DIFF_REVIEW_OPENROUTER_MODEL",
+                                              "anthropic/claude-haiku-5.5").strip()
+
 # Which `claude` binary the v2 Claude provider drives (`providers/claude.py`,
 # `resolve_cli`). Empty means "find it": the first real `claude` on PATH that is
 # not a Windows shim under /mnt/, then ~/.local/bin/claude, and only then the

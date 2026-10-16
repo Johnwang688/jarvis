@@ -2558,3 +2558,111 @@ Files changed under SELF_PROTECTED, for the owner's review:
 `jarvis/tools/secrets.py` (new functions only; nothing existing changed)
 and `jarvis/face/approvals.py` (the card's display copy). Both only
 withhold more from a display, and never from a judge.
+
+## Agent calls to the Secret Service are refused (2026-10-15)
+
+Follow-up to PR #215, which keeps the HUD Browser's Chrome password key in
+the owner's login keyring. While the keyring is unlocked, gnome-keyring has
+no per-application rule: any program running as the owner can ask the
+Secret Service (`org.freedesktop.secrets` on the session bus) for Chrome's
+key or any other saved secret. An agent shell line that calls it is
+**DENY**, in v1's gate and v2's layer 1 alike (both start from
+`rules.decide`), never put to the owner and never covered by an allowlist
+entry: approving a command is not consent to what it reads, as with `.env`.
+
+**The rule** (`rules.secret_service_reading`). **Per program, in command
+position** (review of #218, LOW 3: the first version read the whole line and
+refused `git commit -m 'add secret-tool rule'`, a `gh pr create` body and
+`grep -n secret-tool`, which would have blocked Jarvis chats working on
+Jarvis). Every program the line runs is found by the vex reading's walk
+(`rules._Walk`: each segment, wrappers and runners from the one table,
+`bash -c`/`sh -c` strings, `eval`, `find -exec`, substitutions), and each is
+judged alone, its word and arguments read in every spelling
+`rules._spellings` gives (the vex reading's quote, escape, `$'…'`,
+`${X:-…}` and brace normalisation, one shared helper), case-folded:
+
+- **A secret reader as the program**: `secret-tool`, `kwallet-query`,
+  `lssecret`, whatever the subcommand — they look up, search (`secret-tool
+  search` prints secrets), store and clear. **Python's `keyring` CLI**
+  (review of #218, MED 2: `uv run --with keyring python3 -m keyring get S U`
+  was ALLOW): `keyring get|set|del` with `keyring` as the program, and any
+  Python run with `-m keyring` (`-mkeyring`, `-Im keyring`, `keyring.cli`),
+  through runpy too (`-m runpy keyring`, `-mrunpy keyring.cli`; delta review
+  of #218, LOW 1: the vex reading's `_module_run`, shared).
+  The bare word is not refused (`pip install keyring`, `echo keyring get`).
+- **A caller whose own words name the Secret Service**: a D-Bus client
+  (`busctl`, `gdbus`, `dbus-send`, `dbus-monitor`, `qdbus*`), an interpreter
+  or a shell as the program of a segment, whose arguments (a `-c` script
+  included) name `org.freedesktop.secrets`, the `org.freedesktop.Secret.*`
+  interfaces, `/org/freedesktop/secrets/…` paths, the portal's
+  `org.freedesktop.portal.Secret` or its backend
+  `org.freedesktop.impl.portal.Secret`, gnome-keyring's `org.gnome.keyring`
+  or KWallet's `org.kde.kwalletd*`. So `busctl --user call :1.42
+  /org/freedesktop/secrets/collection/…`, `uv run gdbus …`, `bash -c '…'`
+  and `python3 -c '… "org.freedesktop.secrets" …'` are refused. A shell
+  elsewhere on the line does not count: `grep org.gnome.keyring x | sh -c
+  'wc -l'` is not refused, while `bash -c "grep org.gnome.keyring x"` is (its
+  script names one; the accepted cost).
+- **An interpreter whose inline source starts a secret reader**
+  (`rules._runs_reader_inline`; delta review of #218, LOW 2, narrowed by
+  #220's review, M1). Only the inline source of a non-shell interpreter is
+  read: `python -c`, `perl -e/-E`, `ruby -e`, `node -e/-p/--eval/--print`,
+  `php -r`, `deno eval`, `bun -e/--eval`. A shell's `-c` string is walked as
+  a line already, and positional arguments are data. In that source only a
+  reader in **program position** counts: the first word of the first string
+  handed to a process-starting call (`system`, `exec*`, `popen*`, `spawn*`,
+  `run`, `call`, `check_output`, `capture2`, `shell_exec`, `Deno.Command`, Bun's
+  `` $`…` ``), or, in Perl, Ruby and PHP, of a shell-out literal (backticks,
+  `qx(…)`, `%x(…)`). So `os.system('secret-tool …')`, `subprocess.run(['secret-tool',
+  …])`, `perl -e 'system("secret-tool …")'` and `node -e "execSync('secret-tool
+  …')"` are refused. Not refused (pinned): Codex's escalation shape `/bin/bash
+  -lc 'gh pr create … --body "… secret-tool …"'` and `/bin/bash -lc 'git
+  commit -m "rules: secret-tool"'`, `python3 -m pytest -k secret-tool`,
+  `python3 scripts/check.py secret-tool`, an in-process gate probe
+  (`python3 -c "print(rules.decide('secret-tool lookup a b'))"`, through `uv
+  run` or `timeout` too), `perl -pi -e 's/secret-tool/x/' file`, `which
+  secret-tool`. A call through a variable (`os.system(cmd)`) is not seen.
+  Probing this rule in process needs a probe file (`python3 probe.py`):
+  a `python3 -c` whose source holds `os.system('secret-tool…')` is itself
+  DENY. Its patterns are atomic where whitespace runs meet (#220 delta
+  review: `\s*\(?\s*` took 54 s on 60k spaces), pinned with a deadline by
+  `rules_check secret_service_cost_checks`.
+- **A session-bus monitor**, judged per program: `dbus-monitor` unless
+  `--system` (and no `--session`/`--address`), `gdbus monitor` unless
+  `--system`/`-y`, `busctl monitor|capture` with `--user`, an address, a
+  machine or a host. The bus carries the key from the keyring to Chrome. A
+  line that assigns `DBUS_SYSTEM_BUS_ADDRESS=` or `DBUS_SESSION_BUS_ADDRESS=`
+  gets no `--system` exemption (the "system" bus may then be the session's).
+  `echo monitor; gdbus introspect …` is not a monitor.
+
+A line too complex for the walk (its caps) is read the first version's
+stricter way over its whole text (a reader's name anywhere, or a name and a
+caller anywhere). Pinned: lines past the caps (`env ` three thousand times,
+then `secret-tool …`) are DENY, and the check proves the walk gave up on
+them first.
+
+**Not refused** (pinned): names in text (`grep`, `rg`, `echo`, commit
+messages and `gh pr create`/`comment` bodies, directly or in Codex's `bash
+-lc '…'` shape, except a Secret Service *name* in a shell string, above), `busctl --user list`, `busctl
+monitor` (the system bus), `dbus-monitor --system`, other services' calls
+(Notifications, MPRIS), `systemctl --user status gnome-keyring-daemon`,
+`ls ~/.local/share/keyrings`, `pip install keyring`, `keyring
+--list-backends`.
+
+**Limit, stated plainly: an accident guard, not a wall.** A script file that
+talks D-Bus (`python3 tool.py`), a unique name with a computed object path,
+or a program that is only an expansion is not seen. Nor is a recipe make
+reads from standard input (`… | make -f /dev/stdin`, a here-document to
+`make -f -`): its commands are not walked. A known gap, not fixed. The real boundary is the
+same-user one in the Browser notes (*Password store: the owner's keyring*).
+The terminal_read guard's older `secret-tool lookup` refusal is unchanged.
+
+**Where it lives.** `jarvis/rules.py`, which is SELF_PROTECTED like
+`permissions.py` and `merge_gate.py`; neither of those changed. Flagged for
+the owner's review in the PR.
+
+Pinned by `tests/rules_check.py secret_service_checks` (every refused
+line, a sample through v1's real dispatch with an allowlist entry for every
+stem and a yes-saying human-backed approver: nothing ran, nobody was asked;
+every ordinary line not refused) and `tests/v2/permissions_check.py secret_service_checks` (the same
+lines at layer 1 under AUTO and STRICT, never asked, v1 parity).

@@ -122,7 +122,7 @@ def handle(h, mock, method, path, body):
                 elif parts[3]=="activate":out={"tab_id":tid}
                 else:raise PaneRefused(404,"no such Browser route")
             elif path=="/browser/downloads":out={"downloads":mock.world.get("browser_downloads",[]),"in_progress":0}
-            elif path=="/browser":out={"profiles":host.profiles,"sync":{"password_store":None,"requested":"keyring","keyring":"unavailable","next_launch":"basic","unprotected":True,"hint":"Unprotected (basic store): saved passwords use a public key.","source":"launch_argument"}}
+            elif path=="/browser":out={"profiles":host.profiles,"sync":{"password_store":None,"requested":"keyring","keyring":"unavailable","next_launch":"basic","unprotected":True,"hint":"Unprotected (basic store): saved passwords use a public key.","source":"observed","profiles":{}}}
             else:raise PaneRefused(404,"no such Browser route")
         h._json(out,201 if method=="POST" and path in ("/browser/tabs","/browser/profiles") else 200)
     except (PaneRefused, URLRefused) as exc: h._err(getattr(exc,"status",400),str(exc))

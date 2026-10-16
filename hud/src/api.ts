@@ -235,6 +235,13 @@ export const api = {
     req<{ before: string; after: string }>(
       `/tasks/${taskId}/diff/file?path=${encodeURIComponent(path)}`,
     ),
+  /** The Diff tab's Quick review (owner-only): read, start, cancel. */
+  diffReview: (taskId: string) =>
+    req<import("./types").DiffReviewView>(`/tasks/${taskId}/diff/review`),
+  startDiffReview: (taskId: string) =>
+    req<import("./types").DiffReviewView>(`/tasks/${taskId}/diff/review`, json({})),
+  cancelDiffReview: (taskId: string) =>
+    req<import("./types").DiffReviewView>(`/tasks/${taskId}/diff/review/cancel`, json({})),
 
   // --- approvals ----------------------------------------------------------
   approvals: () => req<ApprovalRequest[]>("/approvals"),

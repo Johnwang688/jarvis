@@ -5,23 +5,49 @@ import { browserApi } from "../api";
 import { cleanTitle } from "../lib/remote";
 import type { PaneNo } from "../lib/workspace";
 import type { BrowserControl, BrowserProfile as Profile } from "../state/browser";
-/** `/status` → `browser.sync` (password_store.py): the store in effect, never a secret. */
-export interface PasswordSync { password_store:string|null; requested:string; keyring:string; next_launch:string; unprotected:boolean; hint:string|null }
+/** `/status` → `browser.sync` (password_store.py): the store each running Chrome was observed to use, never a secret. */
+export interface ProfileSync { store:string|null; sticky:boolean; next_launch:string; unprotected:boolean; hint:string|null }
+export interface PasswordSync { password_store:string|null; requested:string; keyring:string; next_launch:string; unprotected:boolean; hint:string|null; profiles?:Record<string,ProfileSync> }
+const text=(v:unknown)=>typeof v==="string"?v.slice(0,400):null;
+const profileOf=(raw:unknown):ProfileSync|null=>{
+  const p=raw as Record<string,unknown>|null;
+  if(!p||typeof p!=="object"||typeof p.next_launch!=="string"||typeof p.unprotected!=="boolean"||typeof p.sticky!=="boolean")return null;
+  return {store:text(p.store),sticky:p.sticky,next_launch:p.next_launch,unprotected:p.unprotected,hint:text(p.hint)};
+};
 const syncOf=(raw:unknown):PasswordSync|null=>{
   const s=(raw as {sync?:unknown}|null)?.sync as Record<string,unknown>|undefined;
   if(!s||typeof s!=="object"||typeof s.unprotected!=="boolean"||typeof s.next_launch!=="string")return null;
-  return {password_store:typeof s.password_store==="string"?s.password_store:null,requested:String(s.requested??""),keyring:String(s.keyring??""),
-    next_launch:s.next_launch,unprotected:s.unprotected,hint:typeof s.hint==="string"?s.hint.slice(0,400):null};
+  const profiles:Record<string,ProfileSync>={};
+  if(s.profiles&&typeof s.profiles==="object")for(const [id,row] of Object.entries(s.profiles as Record<string,unknown>)){const p=profileOf(row);if(p&&/^p-[0-9a-f]{8}$/.test(id))profiles[id]=p;}
+  return {password_store:text(s.password_store),requested:String(s.requested??""),keyring:String(s.keyring??""),
+    next_launch:s.next_launch,unprotected:s.unprotected,hint:text(s.hint),profiles};
 };
-/** What the Manage panel says about saved passwords. Unprotected and refused are loud. */
+const CHECKING={text:"Password store: checking…",loud:false};
+const UNPROTECTED="Unprotected (basic store): saved passwords use a public key.";
+/** What the Manage panel says about saved passwords. Unprotected and refused are loud.
+ * The selected profile's own state when `/status` has it (what its running Chrome was
+ * observed to use, else what its next launch would do); the global line otherwise. */
 export function passwordLine(sync:PasswordSync|null, row:Profile|undefined):{text:string;loud:boolean} {
-  if(!sync)return {text:"Password store: checking…",loud:false};
+  if(!sync)return CHECKING;
+  const mine=row?sync.profiles?.[row.id]:undefined;
+  if(mine){
+    const never=mine.sticky?"; this profile never uses the basic store.":".";
+    if(mine.store==="gnome-libsecret")return {text:"Passwords are encrypted with your keyring (gnome-libsecret, checked)"+never,loud:false};
+    if(mine.store)return {text:mine.hint??UNPROTECTED,loud:true};
+    if(mine.next_launch==="checking")return CHECKING;
+    if(mine.next_launch==="refused")return {text:mine.hint??"The keyring is locked.",loud:true};
+    if(mine.next_launch==="basic"||mine.unprotected)return {text:mine.hint??UNPROTECTED,loud:true};
+    return {text:"Passwords are encrypted with your keyring (gnome-libsecret)"+never,loud:false};
+  }
   const sticky=row?.password_store==="keyring";
+  if(sync.next_launch==="checking")return CHECKING;
   if(sync.next_launch==="refused")return {text:sync.hint??"The keyring is locked.",loud:true};
   if(sticky&&sync.next_launch!=="gnome-libsecret")return {text:"This profile’s passwords are in the keyring, which is not available. "+(sync.hint??""),loud:true};
-  if(sync.unprotected||sync.next_launch==="basic")return {text:sync.hint??"Unprotected (basic store): saved passwords use a public key.",loud:true};
+  if(sync.unprotected||sync.next_launch==="basic")return {text:sync.hint??UNPROTECTED,loud:true};
   return {text:"Passwords are encrypted with your keyring (gnome-libsecret)"+(sticky?"; this profile never uses the basic store.":"."),loud:false};
 }
+/** How often the open Manage panel reads `/status` again (LOW 4): an unlock in another window shows within seconds. */
+export const PASSWORD_REFRESH_MS=3000;
 export function BrowserProfile(props:{pane:PaneNo;control:BrowserControl;selected:string|null;see:boolean;blocked:boolean;privateEnded?:boolean;statusTarget?:HTMLElement|null}) {
   const [manage,setManage]=useState(false);const [label,setLabel]=useState("");
   const [pending,setPending]=useState(false);const [error,setError]=useState("");
@@ -30,9 +56,13 @@ export function BrowserProfile(props:{pane:PaneNo;control:BrowserControl;selecte
   const row=props.control.profiles.find(p=>p.id===props.selected);
   const [sync,setSync]=useState<PasswordSync|null>(null);
   useEffect(()=>{
-    if(!manage)return;let live=true;
-    void browserApi.get<unknown>("").then(raw=>{if(live)setSync(syncOf(raw));}).catch(()=>{if(live)setSync(null);});
-    return()=>{live=false;};
+    if(!manage)return;let live=true;let seq=0;
+    const read=()=>{const n=++seq;void browserApi.get<unknown>("").then(raw=>{if(live&&n===seq)setSync(syncOf(raw));}).catch(()=>{if(live&&n===seq)setSync(null);});};
+    read();
+    // While open: again on a short interval and when the window regains focus.
+    const timer=window.setInterval(read,PASSWORD_REFRESH_MS);
+    window.addEventListener("focus",read);
+    return()=>{live=false;window.clearInterval(timer);window.removeEventListener("focus",read);};
   },[manage,error]);
   const passwords=passwordLine(sync,row);
   const run=async(job:()=>Promise<unknown>)=>{
