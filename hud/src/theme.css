@@ -435,6 +435,51 @@ button.tree-row.morechats:focus-visible { box-shadow: inset 0 0 0 1px var(--acce
 .tc-status, .tc-time { flex: 0 0 auto; font-variant-numeric: tabular-nums; }
 .tc-status.running { color: var(--amber); }
 
+/* ---- native sub-agents (SV-3) ---- */
+/* A row where the chat spawned it; a status is always a word: amber live
+   (as a running call), green done, red failed, muted stopped. */
+/* The rows at one spot are one block, indented as a tool group is. */
+.subagent-rows {
+  margin: 0 20px; min-width: 0; display: flex; flex-direction: column; gap: 2px;
+  font: 11px var(--mono); color: var(--text-muted);
+}
+.subagent-row { min-width: 0; }
+.subagent-row .sa-open, .sa-toggle {
+  display: flex; align-items: center; gap: 2px 8px; width: 100%; min-width: 0; white-space: nowrap;
+  border: 0; background: transparent; padding: 3px 0; text-align: left; color: inherit; font: inherit;
+}
+/* A narrow pane wraps the numbers under the name rather than squeezing the name away. */
+.subagent-row .sa-open { flex-wrap: wrap; }
+.subagent-row .sa-open:hover:not(:disabled) { color: var(--text-2); background: transparent; }
+.subagent-row .sa-open:focus-visible, .sa-toggle:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }
+.sa-mark { color: var(--text-muted); flex: 0 0 auto; }
+/* Name, then status, never split: the name gives way (ellipsis), the status word does not. */
+.sa-first { display: flex; align-items: center; gap: 8px; min-width: 0; max-width: 100%; flex: 0 1 auto; }
+.sa-name { color: var(--text-2); min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; flex: 0 1 auto; }
+.sa-kind, .sa-tool { min-width: 0; overflow: hidden; text-overflow: ellipsis; flex: 0 1 auto; }
+.sa-status, .sa-time, .sa-count { flex: 0 0 auto; font-variant-numeric: tabular-nums; }
+.sa-status.live { color: var(--amber); }
+.sa-status.done { color: var(--green); }
+.sa-status.failed { color: var(--red); }
+.sa-status.stopped { color: var(--text-muted); }
+.sa-list { max-height: 300px; overflow: auto; }
+.sa-list { display: flex; flex-direction: column; gap: 2px; padding-left: 12px; }
+.subagent-row.sa-flash { outline: 1px solid var(--accent-line); outline-offset: 2px; border-radius: 3px; }
+.sa-pane { display: flex; flex-direction: column; min-height: 0; }
+.sa-head {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 8px 20px;
+  border-bottom: 1px solid var(--border); font: 11px var(--mono); color: var(--text-muted);
+}
+.sa-head .sa-of { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1 1 80px; }
+.sa-brief { padding: 6px 20px 0; font: 11px var(--mono); color: var(--text-muted); }
+.sa-brief-text {
+  margin: 4px 0 6px; padding: 8px 10px; max-height: 240px; overflow: auto; white-space: pre-wrap;
+  border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-inset); color: var(--text-2);
+  font: 12px var(--mono);
+}
+.sa-cardlink { margin: -4px 0 8px; }
+.sa-cardlink button.quiet { padding: 0; font: 10px var(--mono); letter-spacing: 0.04em; color: var(--text-2); }
+
 
 /* ---- input bar ---- */
 :is(#inputbar, .inputbar) {
@@ -1513,24 +1558,105 @@ button.termread { flex: 0 0 auto; padding: 1px 8px; font-size: 11px; white-space
   background: var(--accent); pointer-events: none;
 }
 
-/* The VEX view (VX-2): a project card, Build with its errors list, Download,
-   the brain terminal and device info. Red only for errors and a failed step. */
-.vexview { padding: 10px 12px; display: flex; flex-direction: column; gap: 10px; }
-.vexcard { background: var(--bg-2); border: 1px solid var(--border); border-radius: var(--radius); padding: 8px 10px; }
+/* The VEX view (VX-2; redesigned 2026-10-15, VX-UI-1..3): a one-line header,
+   the action bar with a state mark per step, one status line, the errors
+   list, and an output area with tabs. Graphite only: --accent running and
+   selected, --green done, --red error, --amber only "held by an approval
+   card" (the status line), dimmed for stale. Never colour alone: each mark
+   has a glyph and words. */
+.vexview { padding: 10px 12px; display: flex; flex-direction: column; gap: 9px; }
 .vexname { font-weight: 600; font-size: 14px; }
-.vexfacts { margin-top: 2px; }
-.vexsec { display: flex; flex-direction: column; gap: 6px; }
-.vexsec h4 { margin: 0; font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-muted); }
 .vexrow { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.vexhead { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
+.vexhead-right { margin-left: auto; display: inline-flex; align-items: center; gap: 8px; }
+.vexchipwrap { position: relative; display: inline-flex; }
+button.vexchip { border-radius: 999px; padding: 3px 10px; color: var(--text-2); }
+button.vexchip b { color: var(--text); font-weight: 600; }
+button.vexchip.bad { border-color: var(--red-line); color: var(--red); }
+.vexpop {
+  position: absolute; z-index: 6; left: 0; top: calc(100% + 6px); width: 260px; max-width: calc(100vw / var(--ui-zoom, 1) - 32px);
+  display: flex; flex-direction: column; gap: 8px; padding: 10px; background: var(--bg-2);
+  border: 1px solid var(--border-strong); border-radius: var(--radius); box-shadow: var(--shadow-pop);
+}
+.vexpop label { display: flex; align-items: center; gap: 8px; color: var(--text-2); }
+.vexpop input { flex: 1; min-width: 0; }
+.vexwarn { color: var(--text-2); line-height: 1.4; }
+button.vexusbbtn { background: none; border: 1px solid transparent; padding: 2px 6px; }
+button.vexusbbtn:hover:not(:disabled) { background: var(--hover); border-color: var(--border); }
+button.vexhelp { width: 22px; height: 22px; padding: 0; border-radius: 50%; font-size: 11px; color: var(--text-muted); background: none; }
+button.vexhelp.on { color: var(--text); background: var(--accent-soft); border-color: var(--accent-line); }
+
+.vexactions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 6px; }
+.vexsep { color: var(--text-muted); font-size: 12px; }
+.vexstep { position: relative; display: inline-flex; }
+.vexmore { position: relative; display: inline-flex; margin-left: auto; }
+.vexmenu {
+  position: absolute; z-index: 6; right: 0; top: calc(100% + 6px); min-width: 220px; display: flex; flex-direction: column;
+  padding: 4px; background: var(--bg-2); border: 1px solid var(--border-strong); border-radius: var(--radius); box-shadow: var(--shadow-pop);
+}
+.vexmenu button { background: none; border: none; text-align: left; padding: 6px 8px; }
+.vexmenu button:focus-visible, .vexmenu button:hover:not(:disabled) { background: var(--bg-3); }
+/* A step's mark: a sibling of its button, so a disabled button's 0.4 never dims the result. */
+.vexmark {
+  position: absolute; top: -7px; right: -7px; width: 16px; height: 16px; border-radius: 50%; display: grid; place-items: center;
+  font-size: 10px; font-weight: 700; line-height: 1; background: var(--bg-1); border: 1px solid currentColor; pointer-events: auto;
+}
+.vexmark.idle { display: none; }
+.vexmark.busy, .vexbadgemark.busy { color: var(--accent); }
+.vexmark.ok, .vexbadgemark.ok { color: var(--green); }
+.vexmark.failed, .vexbadgemark.failed { color: var(--red); }
+.vexmark.stale, .vexbadgemark.stale { color: var(--green); opacity: 0.6; }
+.vexmark.unknown, .vexbadgemark.unknown { color: var(--text-muted); }
+.vexmark.unknown { border-style: dashed; }
+.vexmark .vexspinner { width: 8px; height: 8px; margin: 0; border-width: 1.5px; }
+
+/* Permanent hover help (owner decision 7): on hover and keyboard focus; never under a card. */
+.vextipwrap { position: relative; display: inline-flex; }
+.vextipwrap > button:disabled { pointer-events: none; }
+.vextip {
+  display: none; position: absolute; z-index: 7; left: 0; top: calc(100% + 8px); width: max-content; max-width: 240px;
+  padding: 7px 9px; background: var(--bg-3); border: 1px solid var(--border-strong); border-radius: var(--radius);
+  box-shadow: var(--shadow-pop); color: var(--text); font-size: 12px; font-weight: 400; line-height: 1.45;
+  text-align: left; white-space: normal; letter-spacing: normal; text-transform: none; pointer-events: none;
+}
+.vextipwrap.end > .vextip { left: auto; right: 0; }
+.vextipwrap:hover > .vextip, .vextab:hover > .vextip { display: block; animation: vextipin 0s 0.45s both; }
+.vextipwrap:has(:focus-visible) > .vextip, .vextab:focus-visible > .vextip { display: block; }
+@keyframes vextipin { from { visibility: hidden; } to { visibility: visible; } }
+.vextipwrap.pressed > .vextip, .vexview.held .vextip { display: none !important; }
+
+.vexstatus {
+  display: flex; align-items: center; gap: 8px; min-height: 32px; padding: 4px 6px 4px 10px; background: var(--bg-2);
+  border: 1px solid var(--border); border-radius: var(--radius); font-size: 12px;
+}
+.vexstatus.busy { border-color: var(--accent-line); }
+.vexstatus.failed { border-color: var(--red-line); }
+.vexstatus.held { border-color: var(--amber); }
+.vexstatus-text { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; flex: 1 1 auto; min-width: 0; }
+.vexheld { color: var(--amber); }
+.vexchain { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; color: var(--text); }
+.vexsteps { display: inline-flex; gap: 4px; list-style: none; margin: 0; padding: 0; font-size: 11px; }
+.vexsteps li { padding: 1px 6px; border: 1px solid var(--border); border-radius: 999px; color: var(--text-muted); }
+.vexsteps li[data-state="busy"] { color: var(--accent); border-color: var(--accent-line); }
+.vexsteps li[data-state="done"] { color: var(--green); }
+.vexel { color: var(--text-muted); font: 11px var(--mono); }
+.vexusbhint { display: inline-flex; gap: 4px; align-items: center; }
+.vexstatus .vextipwrap { flex: none; }
 .vexstate { font: 12px var(--mono); color: var(--text-2); }
 .vexstate.ok { color: var(--green); }
 .vexstate.bad { color: var(--red); }
 .vexstate.busy { color: var(--accent); }
-.vexspinner { display: inline-block; width: 10px; height: 10px; margin-right: 6px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: vexspin 1s linear infinite; vertical-align: -2px; }
+.vexnote { font-size: 12px; color: var(--text-2); }
+.vexnote.ok { color: var(--green); }
+.vexnote.bad { color: var(--red); }
+.vexalerts { display: flex; flex-direction: column; gap: 2px; }
+.vexspinner { display: inline-block; width: 10px; height: 10px; margin-right: 2px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: vexspin 1s linear infinite; vertical-align: -2px; box-sizing: border-box; }
 @keyframes vexspin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .vexspinner { animation: none; } }
-.vexoutput { margin: 0; padding: 8px 10px; min-height: 60px; max-height: calc(220px / var(--ui-zoom, 1)); overflow: auto; background: var(--bg-2); border: 1px solid var(--border); border-radius: var(--radius); font: 12px/1.5 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
-.vexerrors { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; max-height: calc(40vh / var(--ui-zoom, 1)); overflow-y: auto; }
+
+.vexerrorswrap { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; }
+.vexerrors { list-style: none; margin: 0; padding: 0; width: 100%; display: flex; flex-direction: column; gap: 2px; max-height: calc(40vh / var(--ui-zoom, 1)); overflow-y: auto; }
+.vexerrors:not(.all) > li:nth-child(n + 6) { display: none; }
 .vexerr {
   display: flex; gap: 8px; align-items: baseline; width: 100%; text-align: left; padding: 3px 6px;
   font: 12px var(--mono); background: transparent; border: 1px solid transparent; border-radius: var(--radius-btn); color: var(--text);
@@ -1542,24 +1668,59 @@ button.vexerr:hover:not(:disabled) { background: var(--hover); border-color: var
 .vexsev.warning { color: var(--text-2); }
 .vexwhere { flex: none; color: var(--syn-type); }
 .vexmsg { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.vexdownload { align-self: flex-start; }
 .vexsetup { background: var(--bg-2); border: 1px solid var(--accent-line); border-radius: var(--radius); padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; }
 .vexcmd { font: 13px var(--mono); background: var(--bg-inset); padding: 4px 8px; border-radius: 4px; align-self: flex-start; user-select: all; }
-.vexnote { font-size: 12px; color: var(--text-2); }
-.vexnote.ok { color: var(--green); }
-.vexnote.bad { color: var(--red); }
-.vexchain { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; background: var(--bg-2); border: 1px solid var(--accent-line); border-radius: var(--radius); padding: 6px 10px; color: var(--text); }
-.vexinfo { font: 12px var(--mono); background: var(--bg-inset); padding: 6px 8px; border-radius: 4px; white-space: pre-wrap; margin: 0; max-height: calc(30vh / var(--ui-zoom, 1)); overflow: auto; }
+
+/* The output area: tabs and one body, flex: 1 (no 220 px cap), folded or filling the pane. */
+.vexout { flex: 1 1 auto; min-height: 150px; display: flex; flex-direction: column; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-inset); }
+.vexout.folded { flex: none; min-height: 0; }
+.vexview.outmax > .vexhead, .vexview.outmax > .vexactions, .vexview.outmax > .vexerrorswrap { display: none; }
+.vexotabs { display: flex; align-items: stretch; background: var(--bg-1); border-bottom: 1px solid var(--border); border-radius: var(--radius) var(--radius) 0 0; }
+.vexout.folded .vexotabs { border-bottom: none; border-radius: var(--radius); }
+.vextablist { display: flex; flex-wrap: wrap; min-width: 0; }
+button.vextab {
+  position: relative; display: inline-flex; align-items: center; gap: 6px; padding: 6px 10px; font-size: 11px; color: var(--text-muted);
+  background: none; border: none; border-bottom: 2px solid transparent; border-radius: 0;
+}
+button.vextab.on { color: var(--text); border-bottom-color: var(--accent); }
+button.vextab:hover:not(:disabled) { background: var(--hover); color: var(--text); }
+.vexbadgemark { font-size: 11px; font-weight: 700; min-width: 8px; }
+.vexbadgemark .vexspinner { width: 9px; height: 9px; margin: 0; }
+.vexotools { margin-left: auto; display: inline-flex; align-items: center; padding-right: 2px; }
+.vexopanel { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+.vexobar { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; padding: 4px 10px; min-height: 28px; border-bottom: 1px solid var(--border); background: var(--bg-1); font-size: 11px; color: var(--text-muted); }
+.vexobar-r { margin-left: auto; display: inline-flex; gap: 2px; }
+.vexobody { padding: 8px 10px; }
+.vexoutput { flex: 1 1 auto; margin: 0; padding: 8px 10px; min-height: 60px; overflow: auto; font: 12px/1.5 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text-2); }
+.vexdev { display: flex; flex-direction: column; gap: 7px; overflow: auto; font-size: 12px; }
+/* The Brain tab (VX-UI-4a): the brain terminal itself, filling the output body. */
+.vexbrain { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+.vexbrain-state { font: 11px var(--mono); color: var(--text-muted); }
+.vexbrain-state.ok { color: var(--green); }
+.vexbrain-state.busy { color: var(--accent); }
+.vexbrain-state.failed { color: var(--red); }
+.vexbrain-text { padding: 6px 10px; line-height: 1.45; }
+.vexbrain-text.err { color: var(--red); }
+.vexbrain-term { flex: 1 1 auto; min-height: 180px; display: flex; flex-direction: column; border-top: 1px solid var(--border); }
+button.vexconnect { padding: 2px 10px; }
+.vexconn { display: flex; flex-direction: column; gap: 5px; }
+.vexh5 { font-size: 10px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-muted); margin-top: 4px; }
+.vexlog { list-style: none; margin: 0; padding: 4px 0 0; border-top: 1px solid var(--border); font: 11px var(--mono); color: var(--text-2); display: flex; flex-direction: column; gap: 2px; }
+.vexlog time { color: var(--text-muted); }
+.vexlog .ok { color: var(--green); }
+.vexlog .err { color: var(--red); font: inherit; }
+.vexhelplist { margin: 0; padding: 10px 14px 10px 30px; font-size: 12px; line-height: 1.45; color: var(--text-2); display: flex; flex-direction: column; gap: 5px; overflow: auto; }
+.vexhelplist b { color: var(--text); font-weight: 600; }
+.vexinfo { font: 12px var(--mono); background: var(--bg-2); padding: 6px 8px; border-radius: 4px; white-space: pre-wrap; margin: 0; max-height: calc(30vh / var(--ui-zoom, 1)); overflow: auto; }
 .small.ok { color: var(--green); }
 .vexusb.ok { color: var(--green); }
 .vexusb.bad { color: var(--red); }
 .vexusb.stale { opacity: 0.6; }
-.vexcardtop { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 6px 12px; }
-.vexbadges { display: flex; gap: 10px; align-items: center; font-size: 12px; }
+.vexbadges { display: inline-flex; gap: 10px; align-items: center; font-size: 12px; }
 .vexbadge { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
 .vexdot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; flex: none; }
 .vexbadge.muted .vexdot { background: transparent; border: 1px solid currentColor; box-sizing: border-box; }
-.vexprogress { display: flex; align-items: center; gap: 8px; max-width: 360px; }
+.vexprogress { display: inline-flex; align-items: center; gap: 8px; flex: 0 1 220px; min-width: 100px; }
 .vexprogress-track { flex: 1 1 auto; height: 7px; overflow: hidden; background: var(--bg-inset); border: 1px solid var(--border); border-radius: 3px; }
 .vexprogress-fill { display: block; height: 100%; background: var(--accent); transition: width 0.3s linear; }
 .vexprogress-fill.ok { background: var(--green); }

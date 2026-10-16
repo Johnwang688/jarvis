@@ -42,11 +42,20 @@ The owner approved the layout ("your redesign layout is good") and answered §13
 4. **Simulator: the existing Browser (Direct tab beside the VEX pane), no VEX
    tab.** The simulator inherits every Browser feature as the Browser grows; no
    VEX-specific copy of those features.
-5. Brain tab connection: pending the owner's answer to the clarified question
-   (connect on an explicit click vs. whenever the tab is shown).
+5. **The Brain tab connects only when the owner clicks Connect** — never
+   automatically when the tab is shown (owner's answer, 2026-10-15; Q5's
+   recommendation). VX-UI-1's placeholder Brain tab says so and keeps today's
+   "Open the brain terminal" click (it opens in the bottom panel until
+   VX-UI-4a).
 6. **Stop cancels whatever VEX action is running** — pressing it during a
    download stops the download (likewise a running clean or build). It is not
    a "stop the program on the brain" control (no `vexcom --stop`).
+   Implementation (lead's default, VX-UI-1, #209): Stop takes a trusted mouse
+   click **or a trusted Enter/Space** on the focused button (it is in the Tab
+   order, since stopping is the safe direction); a script's `.click()` or a
+   dispatched event does nothing. A view's Stop acts on its own project only,
+   never another project's chain. What the slot holds after a mid-download
+   Stop is unknown (H9, H10 below), and the view says so.
 7. **Hover help never retires.** Every control keeps its hover explanation
    permanently (for refreshers months later, and for a teammate using the PC);
    the `?` mode stays too. The first-use counts in §2.6 / VX-UI-3 are dropped.
@@ -418,8 +427,11 @@ machine:
   - Switching to another output tab keeps the session attached and hidden; the
     ring keeps everything. Only Disconnect closes it.
 - **Connect / Disconnect** sit in the Brain tab toolbar.
-  - Connect is `vex.openBrain()`, unchanged: off under a card or a chain, and
-    one device action at a time.
+  - Connect is the same `POST /vex/brain` (unchanged route). As built
+    (VX-UI-4a) it is `vex.connectBrain()`, which replaced `openBrain()`: a
+    trusted press only, off under a card, during a chain and during a device
+    read, one device action at a time, and the terminal is claimed for the
+    pressing Brain tab without opening the panel.
   - Disconnect closes the program terminal (`DELETE /terminals/{id}`, as the
     chain's pause does).
   - Recommendation (**Q5**): the tab does **not** auto-connect when selected.
@@ -428,6 +440,10 @@ machine:
   Brain tab badge says `paused` and the body says "Paused for the download;
   reconnects after". When a dropped chain leaves it closed, it says so, as
   today.
+  - **As built (VX-UI-4a, 2026-10-15, the lead's direction):** no chain
+    reconnects it. After any download the tab says it was closed for the
+    download and offers Connect, so the link opens only on the owner's
+    Connect (decision 5). See `docs/notes/vex.md`, "Brain tab, VX-UI-4a".
 - **Later, out of scope here.** A "Save CSV block" helper for the owner's
   `$BEGIN…$END` telemetry blocks, mirroring `serial-monitor.ps1 -Csv`.
 
@@ -671,6 +687,8 @@ stays **UNRUN** until the owner's hardware session.
 | H6 | `--stop` stops it, over radio and on USB | 5 |
 | H7 | Exit codes/output: success, empty slot, no device | 5 |
 | H8 | Whether `--json`/`--programs` say which program is running | 5 (state text) |
+| H9 | Stop mid-download: does closing the download's terminal (SIGHUP, then SIGKILL of the WSL interop process) also end `vexcom.exe` on Windows, and is COM3 free for the next device action? | **Before relying on a mid-download Stop** (VX-UI-1) |
+| H10 | Stop mid-download: what the slot then holds (incomplete program, the previous one, nothing), whether the brain shows or runs it, and whether the brain or controller needs a power cycle before the next download | **Before relying on a mid-download Stop** (VX-UI-1) |
 
 ## 13. Open questions for the owner
 

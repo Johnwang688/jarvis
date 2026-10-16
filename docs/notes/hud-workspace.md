@@ -1319,3 +1319,106 @@ deployed; branch `claude/buttons-sparkle`.
   Another window's change arrives by the `storage` event.
 - Tests: `hud/src/lib/sparkle.test.ts`, `hud/src/components/SparkleSetting.test.ts`
   and `tests/face/hud_v2_buttons_check.py` (also part of `hud_v2_check.py`).
+
+## Native sub-agents: rows, the read-only pane and the card's link (SV-3, 2026-10-15)
+
+Plan: `docs/plans/2026-10-13-subagent-view.md` (§D5, the owner's decisions of
+2026-10-13 and 2026-10-15); API: `docs/hud-api.md` "Native sub-agents".
+No Stop (SV-4) and no between-turn drain (SV-6) here.
+
+- **Store** (`hud/src/state/subagents.ts`, outside React like
+  `state/toolGroups.ts`). It holds a thread's children only while something
+  shows them (a chat pane, a sub-agent pane, a card): read from the owner's
+  `GET /threads/{id}/subagents` when first watched and on every SSE
+  reconnect, and moved in between by the bus's `subagent` records (ids,
+  status, times, counts). Since the bus carries no words, the list is read
+  again behind it: 250 ms after a new child or an end, at most every 1.5 s for
+  progress. Records heard while a read is on its way are laid over it
+  (`lib/subagents.ts` `foldList`); a stale one (fewer `entries`, or a live word
+  for an ended child that is not Codex's own `started`) never takes a row
+  back. A record for a thread nothing shows any more is not applied and
+  schedules nothing; the thread is read whole when shown again. A
+  fold-equals-live property test covers 1,000 random runs. Bounds: 64
+  children per thread (the daemon's), 32 threads (least recently used
+  unwatched out), 256 records waiting on a read (past that, read again).
+  Nothing is stored; a reload reads it all again.
+- **Rows** (`components/SubagentRow.tsx`) sit where the child was spawned:
+  a Claude child right after the transcript entry holding its Agent call
+  (its sid is that call's id), a Codex child by its start time (Codex's
+  spawn is no parent call), at the end when nothing is timed. The parent
+  shows the top level; a nested child (`parent_sid`) is drawn only in its
+  parent's pane. A row is one button (`aria-label` "Open sub-agent ‹name› in a
+  pane", Enter/Space native, `noPointerFocus`): ◇ name · provider badge ·
+  kind · status word · last tool · elapsed · tools · tokens · declined. Status
+  colours are Graphite's: amber running/backgrounded, `--green` done, red
+  failed, muted stopped (its reason as the title). More than six rows at one
+  spot collapse into "Sub-agents · 8 (5 running)", a disclosure button.
+  One `useSyncExternalStore` per row, so a progress tick redraws that row
+  only; the transcript's placement changes only when a child comes or goes.
+  Names, kinds and labels are model-chosen: re-cleaned (`toolLabel`, 40
+  characters) and drawn as text. Under a card everything is inert, rows
+  included.
+- **The view** is `View` `"subagent"` with `PaneSpec.subagent = {threadId,
+  sid}` (stored in `jarvis.hud.workspace`; never a word). It is never offered
+  by the strip: only a pane showing it keeps its button. `parsePane` turns a
+  bad reference into the pane's default view, `setView` refuses to switch to
+  it without one and drops the reference when leaving, and a split copied
+  from it is a new chat. **Opening** (App `openSubagent`): focus the pane
+  already showing the sid; else split beside the chat pane showing the
+  thread (else the focused pane); else show it in the last sub-agent pane;
+  else the notice "No room for another pane: close one or use ⊞". Never a
+  chat pane taken over, never under a card.
+- **The pane** (`components/SubagentPane.tsx`) is the transcript route as
+  served, read again behind each record about that child (250 ms after a
+  start or an end, at most every 1.5 s for progress): header (name,
+  provider, kind, status and reason, elapsed, tools, tokens, declined, "of
+  ‹chat›", "Show in chat"), the **brief collapsed** ("Brief" disclosure,
+  plain text; "Codex does not send a sub-agent's brief." for a Codex child),
+  then texts (Markdown, sanitised; format characters such as bidi overrides
+  and zero-widths are stripped from texts and the brief, lines kept), tool calls as `ToolGroupRow` groups
+  (label and outcome only), the closing result and reviewer declines. No
+  input box. It follows the bottom only when the reader is there. A 404 says
+  "This sub-agent's record is gone." with Close; a 400 "Update Jarvis to see
+  sub-agents."
+- **The card's link.** A card a child's call raised carries its sid
+  (`subagent`; Codex's since this package, the owner's 2026-10-15 decision).
+  The card shows "from sub-agent ‹name›" under REQUESTED BY, the name
+  reduced by the daemon's card-label rule (`lib/subagents.ts` `cardLabel`,
+  as `child_label`/`subagent_origin`: runs outside `[A-Za-z0-9 _./-]` become
+  "_", at most 40 characters), so a name cannot draw ‹ ›, · or a line of its
+  own on the authorization surface; with
+  "(not the orchestrator)" unchanged in the origin or headline. The link is
+  out of the Tab order and never takes focus from a pointer, like AUTHORIZE,
+  and decides nothing. Behind a card nothing can take focus, so a click only
+  scrolls to and marks the row (`.sa-flash`). The click is bound to that
+  card's `req_id`: only when that card leaves because this window answered it
+  and no other card is up does the child's pane get focus if one shows it,
+  else its row, else its pane opens. A timeout, a withdrawal or another card
+  on top drops it.
+- **Rows wrap, the status does not.** In a narrow pane a row wraps its
+  badge, kind, tool and numbers onto a second line; the name and the status
+  word right after it stay together on the first (the name gives way with an
+  ellipsis).
+- **Silent.** A `subagent` record never touches the chat's ops, status line,
+  orb, speech or Discord. The bus record is handled by its thread id only.
+- **Daemon side, for the brief and the card** (see `docs/hud-api.md`):
+  Claude's `task_started.prompt` rides that one lifecycle event to
+  `subagents.py`, which scrubs (`redact.scrub_text`) and caps it (4000
+  characters, 16 KiB JSON) and serves it on the transcript route only.
+  `permissions.build_permit` takes `subagent_sid` and puts a valid sid on the
+  card (`ApprovalRequest.subagent`); providers pass it only to a callback
+  that takes the keyword.
+- **Tests:** `hud/src/lib/subagents.test.ts`, `state/subagents.test.ts`,
+  `components/SubagentRow.test.ts`, `Approvals.test.ts` and
+  `lib/workspace.test.ts` (vitest); `tests/face/hud_v2_subagents_check.py`
+  (its own mock, owner-only routes enforced by `hud_v2_mock_subagents.py`;
+  also a section of `hud_v2_check.py`); `tests/v2/subagent_routes_check.py`,
+  `claude_subagents_check.py` and `codex_provider_check.py` for the brief and
+  the card's sid.
+- **Follow-up once PR #205 merges:** its inline-credential log redaction
+  should also be applied to the child's brief and texts on their way into
+  `subagents.jsonl` and the transcript route (today `redact.scrub_text`). The
+  parent's Agent-call arguments, which carry the same brief in `log.jsonl` and
+  on the bus, are #205's to redact.
+- **Deploying is the owner's step**: `jarvis restart` for the daemon half,
+  then `jarvis hud rebuild` and reload the window.

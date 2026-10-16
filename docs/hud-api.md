@@ -282,8 +282,10 @@ every one of these routes asks (`kind`):
 - `GET /usage` → `{"providers": {"claude": {...}, "codex": {...}, "fast":
   {...}}}` where each is `{"state": "available"|"over_threshold"|"cooling"|
   "unavailable", "reason", "today": {"work_tokens", "spend_usd",
-  "equivalent_usd"}, "allowance": {...}, "quota": null | {"windows": [
-  {"name", "used_percent", "resets_at"}]}}`. `quota` is filled only from
+  "equivalent_usd", "partial_turns"}, "allowance": {...}, "quota": null | {"windows": [
+  {"name", "used_percent", "resets_at"}]}}`. `partial_turns` (2026-10-15)
+  is today's Codex turns that ended interrupted or failed. When it is
+  nonzero, `work_tokens` is a lower bound. It is 0 for other providers. `quota` is filled only from
   a provider's own report, never computed: Codex rate-limit updates
   (5h and weekly), and Claude's 5h and week windows from Claude Code's
   own usage endpoint when a subscription login is present. The login
@@ -1753,18 +1755,29 @@ HUD's side of the routes above (`hud/src/api.ts`, `lib/vex.ts`,
 - Download: `POST …/vex/download {slot, name}` **only from the Download
   button, on a trusted pointer click whose `detail` is exactly 1** (a double
   click is one download). **One chain per window**: no second download, for
-  any project, while one runs. A 409 with `code: "build_first"` starts a
-  build and, when it succeeds and no approval card has come up since the
-  click (nor while the 409 was on its way), sends the download again; if that
-  is `build_first` again (make found nothing to do, a header it does not list
-  changed), one `rebuild` and the download again; a third `build_first`
-  stops the chain with the daemon's sentence. While the brain terminal holds
-  the port it is closed first (`DELETE /terminals/{id}`) and opened again
-  afterwards (`POST /vex/brain`) — never after a chain a card, a crash or the
-  owner's Cancel dropped, nor after a card that came and went while the
-  download ran. **Cancel** (until the download is sent) closes the
-  build's program terminal (`DELETE /terminals/{id}`, which ends the build)
-  and sends nothing. The returned `download_id` is polled every 0.6 seconds;
+  any project, while one runs. Since the 2026-10-15 redesign (owner decision
+  3) **one click is `clean`, then `build`, then the download**: a failed clean
+  or build stops the chain before anything is sent, and an approval card that
+  comes up at any step (or comes and goes) drops the rest. A 409 with `code:
+  "build_first"` after that build (a source edited while it ran, or a header
+  the makefile does not list) runs one `rebuild` and sends again; a second
+  `build_first` stops the chain with the daemon's sentence. Only once the
+  build has succeeded, while the brain terminal holds the port, it is closed
+  (`DELETE /terminals/{id}`) and — since VX-UI-4a (2026-10-15) — **never
+  opened again by the chain**: the Brain tab says it was closed for the
+  download and offers Connect (owner decision 5: the link opens only on the
+  owner's Connect). Before VX-UI-4a a chain no card, crash or Stop dropped
+  reopened it (`POST /vex/brain`). **Stop** (owner decision
+  6; a trusted pointer or key press, never a script's click; a view's Stop
+  acts on its own project only, and Clean/Build/Rebuild are off while any
+  chain runs) closes the running clean's, build's **or download's** program terminal (`DELETE
+  /terminals/{id}`; one pressed while the download request is on its way
+  closes vexcom as soon as its terminal is known). The daemon's exit hook
+  settles the record (`failed`, exit 129 after the close's SIGHUP); the view
+  then says "Download stopped: slot N may hold an incomplete program, the
+  previous one, or nothing" — unless the record shows the download finished
+  first. Stop sends nothing to the brain (there is no `vexcom --stop` route).
+  The returned `download_id` is polled every 0.6 seconds;
   Download immediately shows elapsed progress, its program terminal and a
   bounded inline output tail, then retains the actual final outcome/output.
   Failed reads retry visibly for at most four minutes. Check status can recover
@@ -1779,7 +1792,19 @@ HUD's side of the routes above (`hud/src/api.ts`, `lib/vex.ts`,
 - SSE `vex_device`: matched against the device actions this window started
   (recorded before each request; 30 s); one it did not start is said in the
   VEX view.
-- Test hooks (read-only): `window.__hudVex` (`blocked`, `cards`, `chain()`, `run(id)`),
+- Brain tab (VX-UI-4a, 2026-10-15): the brain terminal drawn in the VEX pane
+  (a terminal view whose `data-where` is `vex-<pane>`), the same session,
+  "Jarvis can read" switch and input/Ctrl-C rules as in the panel. **Connect**
+  is the only caller of `POST /vex/brain` `{}` (a trusted pointer or
+  Enter/Space press; never a script's click; off under a card, during a
+  download chain and while a device read is on its way): showing the tab, a
+  reload or the end of a download asks for nothing. A link the daemon already
+  holds (`/vex/status` `brain`) is shown, never opened. **Disconnect** is
+  `DELETE /terminals/{id}`. One place at a time: a terminal pane showing it
+  wins, then the first VEX pane whose Brain tab shows it; the panel's tab says
+  "in the VEX view, pane N" (`data-place="vex-N"`). No new route.
+- Test hooks (read-only): `window.__hudVex` (`blocked`, `cards`, `chain()`, `run(id)`, `brain()`),
+  `window.__hudTerminals.shownIn(id)` (`pane-N`, `vex-N` or null),
   and `__hud.monacoEditors()` rows gain `line` and `column` (where the cursor
   is).
 
@@ -3138,15 +3163,19 @@ What differs from Claude's, on the same record and routes:
   (by name; `hud_browser_act` is "Browser action"), folded with its outcome
   (`denied` when it was declined). `result`: only for a failed child.
   `declined`: a reviewer's denial (a task's `auto_review`), the tool's name.
-  Not kept: deltas, reasoning, plans, the child's own brief, its `wait`
-  calls.
+  Not kept: deltas, reasoning, plans, its `wait` calls — and no brief:
+  Codex 0.161 sends none to the app-server client (no prompt on the
+  `subAgentActivity` item, no user message on the child's thread; SV-0's
+  recordings), so the transcript route has no `brief` for a `cx:` child.
 - **Between turns nobody reads the connection** (SV-6). A child that talks
   after the orchestrator's turn is recorded when the next message is sent,
   under that turn's `turn_id`.
 - **Approval cards** are SV-2a's: a child's command or file approval is
   always an owner-asked widening naming it ("Codex sub-agent ‹name› (not the
-  orchestrator)"). The gate question carries `subagent` as that name, not
-  the sid.
+  orchestrator)"). Since SV-3 (owner, 2026-10-15) the gate question and the
+  owner's card carry the child's **sid** as `subagent`, as Claude's do (see
+  "On `/events`" below); the name stays in the headline. Nothing decides on
+  it.
 - **No per-child Stop** (SV-4). Codex's `turn/interrupt` on a child's thread
   ends that child's turn (`stopped`), but a command it is running runs to its
   end, and the orchestrator's model is not told (SV-0 finding 12). Whether
@@ -3199,8 +3228,18 @@ Owner-only, read-only, as above. `sid` may be percent-encoded (`cl%3A…`).
     "outcome": "ok", "seq": 1, "at": "…", "finished_at": "…"},
    {"role": "assistant", "text": "…", "seq": 2, "at": "…"},
    {"role": "result", "text": "…", "status": "done", "seq": 3, "at": "…"}],
- "truncated": false}
+ "truncated": false,
+ "brief": "…"}
 ```
+
+- `brief` (SV-3; present only when one was recorded): the orchestrator's
+  brief to the child — Claude's `task_started.prompt` — shown collapsed at
+  the top of the HUD's pane (owner, 2026-10-15). At most 4000 characters
+  and 16 KiB of JSON, scrubbed as `assistant` is. It is served **here
+  only**: never in the list route, the bus record, the thread's log or a log
+  line (`tests/v2/subagent_routes_check.py`). Codex sends none (see "Codex
+  children"). The parent's own Agent call still carries the same words in
+  its arguments, as any parent call's arguments are carried today.
 
 - `assistant`: a text the child wrote (whole: the CLI streams no child
   deltas), at most 4000 characters. Scrubbed by the record the same way for
@@ -3268,3 +3307,13 @@ orchestrator's would be (every layer, the same answer). Only its `origin`
 changes: "Claude sub-agent ‹name› (not the orchestrator)" (the name reduced
 to `[A-Za-z0-9 _./-]`, at most 40 characters), then " in task …" for a
 task's. The HUD shows it as "REQUESTED BY …", Discord as "Origin: …".
+
+**The card names the child's sid (SV-3).** A card a native sub-agent's call
+raised carries `"subagent": "<sid>"` in its public JSON (the bus's
+`approval_requested`, `GET /approvals`), for Claude's and Codex's children
+alike, so the HUD can draw "from sub-agent ‹name›" on it as a link to the
+child's row (the name from the list route, reduced on the card by the same
+`[A-Za-z0-9 _./-]` rule, at most 40 characters). The provider hands the sid to the permit callback beside the
+label (`subagent_sid`, only to a callback that takes the keyword); it is an
+id matching the sid pattern or nothing, never a word the model chose, and
+no layer reads it. A private (Browser) card's projection leaves it out.

@@ -42,16 +42,20 @@ import { MAIN_MIN, fitLayout, type Fitted, type PaneLayout, type Side } from "./
 import { originOf, storableKeepOrigin } from "./browser";
 import { parseTabs, sameTabs, type Tabs } from "./buffers";
 import { cleanTitle } from "./remote";
+import { parseRef, type SubagentRef } from "./subagents";
 
 export const WORKSPACE_KEY = "jarvis.hud.workspace";
 
-export type View = "chat" | "task" | "file" | "diff" | "browser" | "terminal" | "vex";
+export type View = "chat" | "task" | "file" | "diff" | "browser" | "terminal" | "vex" | "subagent";
 /** What a pane offers. The terminal view (WP-D) shows one of the owner's
  * terminals, chosen per pane (`terminalId`); one terminal is drawn in one
  * place at a time (lib/terminal.ts, `placeTerminals`). The VEX view (VX-2)
  * is offered in the strip only when the pane's project is a VEX project
- * (lib/vex.ts `offersVex`); it shows its pinned project. */
-export const PANE_VIEWS: readonly View[] = ["chat", "task", "file", "diff", "browser", "terminal", "vex"];
+ * (lib/vex.ts `offersVex`); it shows its pinned project. The sub-agent view
+ * (SV-3) is never offered: a pane shows it only when a sub-agent's row or
+ * card opened it there (`PaneSpec.subagent`), and keeps its button while it
+ * does, so the owner can see where they are. */
+export const PANE_VIEWS: readonly View[] = ["chat", "task", "file", "diff", "browser", "terminal", "vex", "subagent"];
 
 /**
  * What the owner reads for each view: the strip's buttons, its compact
@@ -62,6 +66,7 @@ export const PANE_VIEWS: readonly View[] = ["chat", "task", "file", "diff", "bro
  */
 export const VIEW_LABEL: Readonly<Record<View, string>> = {
   chat: "chat", task: "task", file: "editor", diff: "diff", browser: "browser", terminal: "terminal", vex: "vex",
+  subagent: "sub-agent",
 };
 
 export type Preset =
@@ -206,6 +211,12 @@ export interface PaneSpec {
    * load — unsaved text is never stored.
    */
   editors?: Tabs;
+  /**
+   * The sub-agent view (SV-3): which child of which chat it shows — ids
+   * only, never its words, which the pane reads again from the owner's
+   * route. Only with `view: "subagent"`; a bad value shows the default view.
+   */
+  subagent?: SubagentRef;
 }
 
 /**
@@ -394,6 +405,11 @@ function parsePane(raw: unknown, n: PaneNo): PaneSpec {
     ? parseTabs(v.editors) ?? (spec.filePath && spec.view === "file" ? parseTabs({ paths: [spec.filePath] }) : null)
     : null;
   if (tabs) spec.editors = tabs;
+  if (spec.view === "subagent") {
+    const ref = parseRef(v.subagent);
+    if (ref) spec.subagent = ref;
+    else spec.view = DEFAULT_VIEWS[n];
+  }
   return spec;
 }
 
@@ -545,8 +561,31 @@ export function focusPane(ws: Workspace, pane: PaneNo): Workspace {
  */
 export function setView(ws: Workspace, pane: PaneNo, view: View): Workspace {
   if (!isView(view)) return ws;
-  const panes = ws.panes.map((p, i) => (i === pane - 1 ? { ...p, view } : p)) as Panes;
+  const cur = ws.panes[pane - 1];
+  // A sub-agent pane is opened by its row (`setSubagent`), never by a view
+  // switch that has no sub-agent to show; leaving the view drops which one.
+  if (view === "subagent" && !cur.subagent) return ws;
+  const panes = ws.panes.map((p, i) => {
+    if (i !== pane - 1) return p;
+    const next: PaneSpec = { ...p, view };
+    if (view !== "subagent") delete next.subagent;
+    return next;
+  }) as Panes;
   return { ...ws, panes, focused: pane };
+}
+
+/** Pane `pane` shows sub-agent `ref` (SV-3): a pane already showing one shows this one instead, focused. */
+export function setSubagent(ws: Workspace, pane: PaneNo, ref: SubagentRef): Workspace {
+  const clean = parseRef(ref);
+  if (!clean || !isPaneNo(pane)) return ws;
+  const panes = ws.panes.map((p, i) => (i === pane - 1
+    ? { view: "subagent" as View, projectId: null, terminalId: null, subagent: clean } : p)) as Panes;
+  return { ...ws, panes, focused: pane };
+}
+
+/** The spec a split opens for sub-agent `ref`. */
+export function subagentSpec(ref: SubagentRef): PaneSpec {
+  return { view: "subagent", projectId: null, terminalId: null, subagent: { threadId: ref.threadId, sid: ref.sid } };
 }
 
 /**
@@ -1015,6 +1054,10 @@ export function copySpec(spec: PaneSpec): PaneSpec {
       break;
     case "task":
       out.view = "diff";
+      break;
+    case "subagent":
+      // One sub-agent per pane: a copy is a new chat, as a chat's copy is.
+      out.view = "chat";
       break;
     default:
       break;

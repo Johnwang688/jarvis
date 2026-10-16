@@ -79,7 +79,7 @@ from jarvis import config
 from jarvis.v2.model import ProviderName, Thread
 from jarvis.v2.provider import (Brief, BriefRefused, Decision, Event, EventKind,
                                PermissionCallback, SessionHandle, SteerRefused, Usage,
-                               UserMessage)
+                               UserMessage, takes_keyword as _takes_keyword)
 from ..approvals import clean_line
 from . import codex_cli, codex_config
 from .codex_rpc import RpcCancelled, RpcError, RpcProcess, RpcTimeout
@@ -1197,7 +1197,8 @@ class CodexProvider:
                     saw_usage |= any(params["tokenUsage"]["total"].values())
                     u = s.accounting.usage()
                     yield self._event(h, EventKind.USAGE, input=u.input_tokens, output=u.output_tokens,
-                                      cached=u.cached_tokens, cost_usd=None, provider_reported=params["tokenUsage"])
+                                      cached=u.cached_tokens, cost_usd=None, provider_reported=params["tokenUsage"],
+                                      partial_turns=s.accounting.partial_turns)
                 elif method == "turn/completed":
                     status = params["turn"]["status"]
                     err = params["turn"].get("error") or {}
@@ -1226,6 +1227,15 @@ class CodexProvider:
                         s.accounting.partial_turns += 1
                     s.accounting.save()
                     completed = True
+                    if status in ("interrupted", "failed"):
+                        # Said at once, not on the next usage report (which
+                        # may never come): the ledger and the HUD show these
+                        # totals as a lower bound. No new numbers: the totals
+                        # are the ones already reported.
+                        u = s.accounting.usage()
+                        yield self._event(h, EventKind.USAGE, input=u.input_tokens, output=u.output_tokens,
+                                          cached=u.cached_tokens, cost_usd=None, provider_reported={},
+                                          partial_turns=s.accounting.partial_turns)
                     yield from self._mcp_unfinished(h)
                     yield self._event(h, EventKind.TURN_FINISHED,
                                       stop={"completed": "end", "interrupted": "interrupted"}.get(status, "error"))
@@ -1284,7 +1294,8 @@ class CodexProvider:
             u = s.accounting.usage()
             yield self._event(h, EventKind.USAGE, input=u.input_tokens, output=u.output_tokens,
                               cached=u.cached_tokens, cost_usd=None,
-                              provider_reported={"rate_limits": p["rateLimits"]})
+                              provider_reported={"rate_limits": p["rateLimits"]},
+                              partial_turns=s.accounting.partial_turns)
         elif method == "item/agentMessage/delta":
             yield self._event(h, EventKind.TEXT_DELTA, text=p["delta"])
         elif method in ("item/reasoning/summaryTextDelta", "item/reasoning/textDelta"):
@@ -1873,14 +1884,21 @@ class CodexProvider:
                 if req_id in s.pending:
                     raise RpcError("Duplicate Codex request id")
                 s.pending[req_id] = pending
+            # A child's approval names its sid (the owner's SV-3 decision,
+            # as Claude's do): on the logged gate question and, when the
+            # callback takes it, on the owner's card, so the HUD can link
+            # the card to the child's row. It decides nothing.
+            sid = child_sid(p.get("threadId")) if child is not None else None
             yield self._event(h, EventKind.APPROVAL_REQUESTED, req_id=req_id, tool=name, args=args,
-                              command=args.get("command"), **({"subagent": child} if child else {}))
+                              command=args.get("command"), **({"subagent": sid} if sid else {}))
             try:
                 # Deliberately on the send caller's thread: broker context survives.
                 # A widening goes as a keyword the model cannot reach; a
                 # callback that does not take it raises, and that denies.
+                extra = ({"subagent_sid": sid}
+                         if sid and line and _takes_keyword(s.permit, "subagent_sid") else {})
                 decision = (s.permit(name, args, s.brief, widening=line, grants=tuple(grants),
-                                     also_commands=tuple(also)) if line
+                                     also_commands=tuple(also), **extra) if line
                             else s.permit(name, args, s.brief))
                 decision = Decision(decision)
             except Exception:

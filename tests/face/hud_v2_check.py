@@ -1985,6 +1985,27 @@ def quota_checks(page, mock):
           "high" in (page.locator('[data-testid="quota-bar-codex-weekly"] .qfill')
                      .get_attribute("class") or ""))
 
+    # A stopped or failed Codex turn (2026-10-15): Jarvis's own token count
+    # may be low, and the panel says so without a figure of its own.
+    partial = page.locator('[data-testid="usage-codex-partial"]')
+    check("no stopped turn, no qualifier", partial.count() == 0)
+    mock.world["usage"]["providers"]["codex"]["today"]["partial_turns"] = 2
+    mock.emit("usage_updated", {"provider": "codex"})
+    until(lambda: partial.count() == 1)
+    shown = partial.count() == 1
+    check("a stopped turn says the token count may be low",
+          shown and "may be low" in partial.inner_text()
+          and "2 stopped or failed turns" in (partial.get_attribute("title") or ""),
+          f"{partial.inner_text()!r} {partial.get_attribute('title')!r}" if shown else "not shown")
+    check("and still draws no ledger figure on the rail",
+          "220" not in page.locator('[data-testid="usage"]').inner_text())
+    check("while Codex's own weekly meter is unchanged",
+          page.locator('[data-testid="quota-bar-codex-weekly"]').get_attribute("data-percent") == "95")
+    mock.world["usage"]["providers"]["codex"]["today"]["partial_turns"] = 0
+    mock.emit("usage_updated", {"provider": "codex"})
+    until(lambda: partial.count() == 0)
+    check("and the qualifier goes once the day's count is zero", partial.count() == 0)
+
 
     page.locator('[data-testid="settings-close"]').click()
 
@@ -3123,6 +3144,17 @@ def main():
                                  guard, FAKE_RECOGNIZER)
             finally:
                 toolcalls_mock.stop()
+
+            # A chat's native sub-agents (SV-3): rows, the read-only pane and
+            # the card's link — a context and a mock of their own (it splits,
+            # reloads and drops the event stream).
+            from tests.face.hud_v2_subagents_check import subagents_checks
+            subagents_mock = MockDaemon(0).start()
+            try:
+                subagents_checks(browser, subagents_mock, f"http://127.0.0.1:{subagents_mock.port}", check, until,
+                                 guard, FAKE_RECOGNIZER)
+            finally:
+                subagents_mock.stop()
 
             # The sidebar's five most recent chats per project (2026-10-15): a
             # context and a mock of their own — it opens threads and reloads.
