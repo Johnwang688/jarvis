@@ -169,7 +169,16 @@ def git_note(brief: Brief) -> str:
             "To push, open, merge or close a pull request, call the Jarvis tools "
             "chat_git_push / chat_pr_create / chat_pr_merge / chat_pr_close; each asks the "
             "owner. For remote updates call chat_git_fetch, then `git fetch <mirror>`. "
-            "Do not request escalation for git push or gh.")
+            "Do not request escalation for git push or gh. " + NETWORK_NOTE)
+
+
+# Model guidance for the per-command network route (plan §5.2, CG-2).
+NETWORK_NOTE = ("For a command that needs the internet (npm install, pip, curl), set "
+                "`sandbox_permissions` to `with_additional_permissions` with "
+                "`additional_permissions: {network: {enabled: true}}`; the owner approves each "
+                "one, and only that command gets the network. Do not use `require_escalated` "
+                "for network. Credential files (logins, keys, `.env` files) are unreadable in "
+                "the sandbox, approved commands included; do not ask to read them.")
 
 def validate(brief: Brief) -> None:
     if brief.profile != PermissionProfile.AUTO:
@@ -238,9 +247,230 @@ def validate_mcp(brief: Brief, effective: dict) -> None:
         raise BriefRefused("Codex effective config changed the Jarvis MCP delegation")
 
 
-def config_text(brief: Brief) -> str:
+# --- the permission profile (plan 2026-10-15 §5, CG phase 2) -----------------
+#
+# `sandbox_mode = "workspace-write"` confined writes and the network but not
+# reads: a plain sandboxed command could `cat ~/.config/gh/hosts.yml` without
+# any callback reaching Jarvis (§2.1). Codex 0.161's named permission
+# profiles deny reads under bwrap, and with `exec_permission_approvals` one
+# owner `accept` of a `with_additional_permissions` network request gives that
+# one command the network while every deny still holds (§5.1, measured).
+# Measured on 0.161 and relied on here:
+# - a "write" entry under a denied folder is mounted back (writable); a
+#   "read" entry under one is not (it stays hidden), so the chat-git mirrors
+#   live outside V2_DATA_DIR (`config.chat_git_mirrors_dir`);
+# - a deny entry naming a symlink makes bwrap fail every command, so deny
+#   entries are resolved first (the owner's ~/.aws is a link into /mnt/c);
+# - a deny entry for a missing path is harmless;
+# - a glob deny matches regular files only, to `glob_scan_max_depth`, and is
+#   expanded at each command's start: a `.env` made mid-session is covered
+#   from the next command; a `.env` that is a symlink, or a folder named
+#   `.env`, is not (its target is covered only inside a denied folder);
+# - `$TMPDIR` stays writable under the denied private home (`:workspace`).
+PROFILE = "jarvis-chat"
+PROFILE_EXTENDS = ":workspace"
+GLOB_DEPTH = 4
+# Case-insensitive, as the gate's env-name rule is. It also hides
+# `.env.example` files from commands: a glob takes only "deny".
+ENV_NAME = "[.][eE][nN][vV]*"
+ENV_GLOB = "**/" + ENV_NAME
+# Credential files in the owner's home outside the credential folders.
+HOME_SECRETS = (".gitconfig", ".git-credentials", ".netrc")
+# The feature this rests on, verified at codex_cli.CODEX_VERIFIED
+# (tests pin the two together: re-run tests/v2/fixtures/cg2_probe.py before
+# moving either).
+FEATURE = "exec_permission_approvals"
+FEATURE_VERIFIED = "0.161.0"
+# Turn-wide grants (§5.1): must stay off; its requests get an empty grant.
+TURN_WIDE_FEATURE = "request_permissions_tool"
+
+
+def sandbox_home(home: Path) -> Path:
+    """HOME for the session's commands (`shell_environment_policy.set`): the
+    private home is denied (it holds config.toml and its token), and npm and
+    friends need a writable HOME for their caches (measured: an approved
+    `npm install` failed on `mkdir ~/.npm` without one)."""
+    try:
+        return _plain_path(Path(home) / "sandbox-home")
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise BriefRefused("The Codex private home must be a plain absolute path") from exc
+
+
+def _resolved(path) -> Path:
+    try:
+        return Path(path).expanduser().resolve()
+    except (OSError, RuntimeError) as exc:
+        raise BriefRefused("A Codex sandbox deny path cannot be resolved") from exc
+
+
+# ~/.codex cannot be denied whole: the Codex binary lives there
+# (packages/standalone/...) and re-executes itself as its own sandbox helper,
+# so a deny makes every thread start fail (measured on 0.161). Every entry in
+# it but these is denied as it is found when the config is written, and the
+# private ones below whether or not they exist yet. (Not by a glob: a glob
+# ending in `*` reaches into sub-folders, and a match inside a denied folder
+# fails every command, measured.)
+CODEX_HOME_KEEP = ("packages", "skills")
+CODEX_HOME_PRIVATE = ("auth.json", ".credentials.json", "config.toml", "history.jsonl",
+                      "session_index.jsonl", "plugins",
+                      "sessions", "archived_sessions", "log", "logs", "memories",
+                      "shell_snapshots", "app-server-control", "app-server-daemon")
+
+
+def _codex_homes() -> list[Path]:
+    out: list[Path] = []
+    for item in (owner_home(), Path.home() / ".codex"):
+        path = _resolved(item)
+        if path not in out:
+            out.append(path)
+    return out
+
+
+def _codex_home_entries() -> list[Path]:
+    found: list[Path] = []
+    for codex_home in _codex_homes():
+        found += [codex_home / name for name in CODEX_HOME_PRIVATE]
+        try:
+            with os.scandir(codex_home) as entries:
+                found += [Path(e.path) for e in entries if e.name not in CODEX_HOME_KEEP]
+        except (FileNotFoundError, NotADirectoryError):
+            pass
+        except OSError as exc:
+            raise BriefRefused("The Codex home cannot be listed for its denies") from exc
+    return found
+
+
+def check_binary(binary: str, denies: list[Path] | None = None) -> None:
+    """The Codex binary re-executes itself inside its own sandbox, so it must
+    not lie in a denied folder (every command would fail)."""
+    path = _resolved(binary)
+    if any(d == path or d in path.parents for d in (deny_paths() if denies is None else denies)):
+        raise BriefRefused("The Codex binary lies inside a folder its sandbox denies")
+
+
+def deny_paths() -> list[Path]:
+    """Every folder and file a Codex command may never read, resolved (a
+    symlinked one is denied where it leads; through the link it is then
+    unreadable too), with entries inside another entry dropped: bwrap fails
+    every command (and Codex every thread start) on a deny nested in a denied
+    folder, which it makes an empty read-only tmpfs (measured on 0.161)."""
+    from jarvis.v2.permissions import protected_paths
+
+    home = Path.home()
+    found = [*config.credential_dirs(), *_codex_home_entries(), home / ".claude",
+             *(home / name for name in HOME_SECRETS),
+             config.V2_DATA_DIR, config.SESSIONS_DIR, config.SPILL_DIR, config.SPEAKER_DIR,
+             *sorted(protected_paths())]
+    resolved: list[Path] = []
+    for item in found:
+        path = _resolved(item)
+        if path not in resolved:
+            resolved.append(path)
+    return [p for p in resolved if not any(other in p.parents for other in resolved)]
+
+
+# Bounds the folders listed to route the `.env*` globs around denied ones.
+GLOB_LIST_CAP = 4000
+
+
+def env_glob_bases(brief: Brief) -> list[Path]:
+    """Where `.env*` files are denied: the owner's home (other projects keep
+    their own `.env` files there), the session's folder (which may lie
+    outside it, e.g. under /mnt/c), Jarvis's own checkout and the chat
+    worktrees."""
+    out: list[Path] = []
+    for item in (Path.home(), brief.cwd, config.REPO_ROOT, config.CHAT_WORKTREES_DIR):
+        path = _resolved(item)
+        if path not in out and path != Path("/"):
+            out.append(path)
+    return out
+
+
+def env_globs(brief: Brief, denies: list[Path]) -> list[str]:
+    """The `.env*` deny globs. A glob match inside a denied folder makes
+    bwrap fail every command (measured), and Codex expands the globs as the
+    owner, so no glob may reach into one: a glob reaches files at most
+    GLOB_DEPTH components below its literal base (measured: 4 matched, 5 did
+    not). Where a denied folder lies within reach, the base gets a glob for
+    its own files and each of its sub-folders is treated the same way,
+    skipping the denied ones; such a split is listed when the config is
+    written, so a folder made beside a denied one later is covered from the
+    next session start."""
+    budget = [GLOB_LIST_CAP]
+    out: list[str] = []
+
+    def walk(base: Path) -> None:
+        blocked = [d for d in denies if base in d.parents
+                   and len(d.relative_to(base).parts) <= GLOB_DEPTH - 1]
+        if not blocked:
+            out.append(f"{base}/{ENV_GLOB}")
+            return
+        out.append(f"{base}/{ENV_NAME}")
+        try:
+            with os.scandir(base) as entries:
+                children = []
+                for entry in entries:
+                    budget[0] -= 1
+                    if budget[0] < 0:
+                        raise BriefRefused("Too many folders to place the Codex .env denies around")
+                    if entry.is_dir(follow_symlinks=False):
+                        children.append(Path(entry.path))
+        except OSError as exc:
+            raise BriefRefused("A folder for the Codex .env denies cannot be listed") from exc
+        for child in sorted(children):
+            if child not in denies:
+                walk(child)
+
+    for base in env_glob_bases(brief):
+        if any(d == base or d in base.parents for d in denies):
+            continue        # denied whole already
+        walk(base)
+    return list(dict.fromkeys(out))
+
+
+def write_paths(brief: Brief, home: Path | None) -> list[str]:
+    """The profile's "write" entries: an owner chat's git metadata and
+    worktree root, then (given the private home) the commands' HOME and the
+    session's skills folder, the two mounted back inside the denied home."""
+    roots = git_roots(brief)
+    if home is not None:
+        roots = roots + [str(sandbox_home(home)), str(session_skills(home))]
+    return roots
+
+
+def filesystem(brief: Brief, home: Path | None = None) -> dict:
+    """`[permissions.jarvis-chat.filesystem]`, in the order it is written:
+    the glob depth, the write roots (git metadata and worktree root for an
+    owner chat; the commands' HOME), every deny, then the `.env*` globs."""
+    writes = write_paths(brief, home)
+    denies = deny_paths()
+    cwd = _resolved(brief.cwd)
+    mirrors = _resolved(config.chat_git_mirrors_dir())
+    # A deny inside the session's folder is the point; one at or above it
+    # would leave the session unable to read its own files.
+    if any(deny == cwd or deny in cwd.parents for deny in denies):
+        raise BriefRefused("The Codex session folder lies inside a folder its sandbox denies")
+    own = {sandbox_home(home), session_skills(home)} if home is not None else set()
+    for write in map(Path, writes):
+        if _overlaps(write, mirrors):
+            # The daemon pushes from the mirrors with the owner's login.
+            raise BriefRefused("A Codex sandbox write root overlaps the chat git mirrors")
+        # The commands' HOME and skills are the write roots inside a deny
+        # (V2_DATA_DIR): mounted back on their own, nothing beside them.
+        if write not in own and any(_overlaps(write, deny) for deny in denies):
+            raise BriefRefused("A Codex sandbox write root overlaps a denied folder")
+    table: dict = {"glob_scan_max_depth": GLOB_DEPTH}
+    table.update((root, "write") for root in writes)
+    table.update((str(path), "deny") for path in denies)
+    table.update((glob, "deny") for glob in env_globs(brief, denies))
+    return table
+
+
+def config_text(brief: Brief, home: Path | None = None) -> str:
+    """A session's private config. `home` is its private Codex home: given,
+    the commands get `sandbox_home(home)` as HOME (prepare passes it)."""
     values = dict(model_provider="openai", forced_login_method="chatgpt",
-                  cli_auth_credentials_store="file", sandbox_mode="workspace-write",
+                  cli_auth_credentials_store="file", default_permissions=PROFILE,
                   approval_policy="on-request", approvals_reviewer=approvals_reviewer(brief),
                   web_search="live", check_for_update_on_startup=False)
     if brief.model is not None:
@@ -248,16 +478,68 @@ def config_text(brief: Brief) -> str:
     if brief.effort is not None:
         values["model_reasoning_effort"] = brief.effort
     lines = [f"{k} = {_value(v)}" for k, v in values.items()]
-    lines += ["[shell_environment_policy]", 'inherit = "all"',
-              f"[projects.{_value(str(Path(brief.cwd).resolve()))}]", 'trust_level = "trusted"']
-    roots = git_roots(brief)
-    if roots:
-        lines += ["[sandbox_workspace_write]", f"writable_roots = {_value(roots)}",
-                  "network_access = false"]
+    lines += ["[features]", f"{FEATURE} = true"]
+    lines += ["[shell_environment_policy]", 'inherit = "all"']
+    if home is not None:
+        lines.append(f"set = {_value({'HOME': str(sandbox_home(home))})}")
+    lines += [f"[projects.{_value(str(Path(brief.cwd).resolve()))}]", 'trust_level = "trusted"']
+    lines += [f"[permissions.{PROFILE}]", f"extends = {_value(PROFILE_EXTENDS)}",
+              f"[permissions.{PROFILE}.filesystem]"]
+    lines += [f"{_value(k)} = {_value(v)}" for k, v in filesystem(brief, home).items()]
+    lines += [f"[permissions.{PROFILE}.network]", "enabled = false"]
     for name, server in brief.mcp_servers.items():
         lines.append(f"[mcp_servers.{_value(name)}]")
         lines.extend(f"{_value(k)} = {_value(v)}" for k, v in server.items())
     return "\n".join(lines) + "\n"
+
+
+def _refuse(what: str) -> None:
+    raise BriefRefused(f"Codex permission profile not applied: {what}")
+
+
+def check_effective(brief: Brief, effective: dict, home: Path | None) -> None:
+    """`config/read`'s word that the profile is what was written (§5.2).
+    Anything else refuses the session: a Codex that dropped the feature, a
+    project config that changed the profile, a legacy sandbox mode."""
+    if effective.get("default_permissions") != PROFILE:
+        _refuse("default_permissions")
+    if effective.get("sandbox_mode") is not None or effective.get("sandbox_workspace_write") is not None:
+        _refuse("a legacy sandbox mode is set")
+    features = effective.get("features")
+    if not isinstance(features, dict) or features.get(FEATURE) is not True:
+        _refuse(f"feature {FEATURE} is not on")
+    if features.get(TURN_WIDE_FEATURE) not in (None, False):
+        _refuse(f"feature {TURN_WIDE_FEATURE} is on")
+    profiles = effective.get("permissions")
+    profile = profiles.get(PROFILE) if isinstance(profiles, dict) else None
+    if not isinstance(profile, dict):
+        _refuse("the profile is missing")
+    if profile.get("extends") != PROFILE_EXTENDS or profile.get("workspace_roots") not in (None, []):
+        _refuse("the profile's base changed")
+    if profile.get("filesystem") != filesystem(brief, home):
+        _refuse("the filesystem entries changed")
+    network = profile.get("network")
+    if (not isinstance(network, dict) or network.get("enabled") is not False
+            or any(v not in (None, False) for k, v in network.items() if k != "enabled")):
+        _refuse("the profile's network changed")
+    policy = effective.get("shell_environment_policy")
+    want = {"HOME": str(sandbox_home(home))} if home is not None else None
+    if (not isinstance(policy, dict) or policy.get("inherit") != "all"
+            or (policy.get("set") or None) != want):
+        _refuse("the command environment changed")
+
+
+def check_receipt(brief: Brief, result: dict, home: Path | None) -> None:
+    """The `thread/start`/`thread/resume` receipt: the profile is active,
+    and its legacy projection has the network off and only our write roots."""
+    if result.get("activePermissionProfile") != {"id": PROFILE, "extends": PROFILE_EXTENDS}:
+        _refuse("the thread's active permission profile")
+    legacy = result.get("sandbox")
+    if (not isinstance(legacy, dict) or legacy.get("type") != "workspaceWrite"
+            or legacy.get("networkAccess", True) is not False
+            or not isinstance(legacy.get("writableRoots"), list)
+            or sorted(legacy["writableRoots"]) != sorted(write_paths(brief, home))):
+        _refuse("the thread's sandbox")
 
 
 def _mcp_header(line: str) -> bool:
@@ -389,10 +671,53 @@ def clean_env(home: Path, auth_home: Path | None = None) -> dict[str, str]:
     return env
 
 
-def _prepare_home(name: str, text: str, binary: str | None, *,
-                  skills: bool = True) -> tuple[list[str], dict[str, str], Path]:
+def _session_skills(folder: Path, owner_skills: Path) -> None:
+    """A session's `$CODEX_HOME/skills`, as a real folder: Codex lists skill
+    paths under it (its bundled `.system` skills are installed there) and the
+    model reads them with shell commands, but the private home is denied to
+    commands and only a "write" entry is mounted back under a denied folder
+    (measured), so this folder is one (`write_paths`). It holds one link per
+    skill the owner installed, made fresh each start: a model that edits its
+    own copy changes only its own session, and the links' targets stay as
+    writable as they were (not at all, outside a write root). It used to be a
+    link to the owner's whole folder; that link is replaced."""
+    if folder.is_symlink():
+        folder.unlink()
+    folder.mkdir(mode=0o700, exist_ok=True)
+    folder.chmod(0o700)
+    wanted = {}
+    if owner_skills.is_dir():
+        with os.scandir(owner_skills) as entries:
+            wanted = {e.name: Path(e.path) for e in entries
+                      if not e.name.startswith(".") and e.is_dir(follow_symlinks=True)}
+    with os.scandir(folder) as entries:
+        for entry in entries:
+            if entry.is_symlink() and wanted.get(entry.name) != Path(os.readlink(entry.path)):
+                os.unlink(entry.path)
+    for name, target in wanted.items():
+        link = folder / name
+        if not link.is_symlink() and not link.exists():
+            link.symlink_to(target, target_is_directory=True)
+
+
+def session_skills(home: Path) -> Path:
+    try:
+        return _plain_path(Path(home) / "skills")
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise BriefRefused("The Codex private home must be a plain absolute path") from exc
+
+
+def _home_of(name: str) -> Path:
     if not re.fullmatch(r"[A-Za-z0-9_-]+", name):
         raise BriefRefused("Invalid Codex private thread directory id")
+    return Path(config.V2_DATA_DIR) / "codex" / name
+
+
+def _prepare_home(name: str, text, binary: str | None, *, skills: bool = True,
+                  sandbox: bool = False) -> tuple[list[str], dict[str, str], Path]:
+    """`text` is the config, or a function of the home that returns it.
+    `sandbox` also makes the commands' HOME (`sandbox_home`)."""
+    _home_of(name)
     auth_home = owner_home()
     auth = auth_home / "auth.json"
     if not auth.is_file():
@@ -403,9 +728,11 @@ def _prepare_home(name: str, text: str, binary: str | None, *,
         binary, reason = resolve()
         if binary is None:
             raise BriefRefused(reason)
+    if sandbox:
+        check_binary(binary)
     root = Path(config.V2_DATA_DIR) / "codex"
     home = root / name
-    for directory in (root, home, home / "tmp"):
+    for directory in (root, home, home / "tmp", *((sandbox_home(home),) if sandbox else ())):
         if directory.is_symlink():
             raise BriefRefused("Codex private directory must not be a symlink")
         directory.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -421,9 +748,11 @@ def _prepare_home(name: str, text: str, binary: str | None, *,
     # Preserve installed skills without importing personal config or plugins.
     link_skills = skills
     skills = home / "skills"
-    if link_skills and not skills.exists() and not skills.is_symlink() and (auth_home / "skills").is_dir():
+    if sandbox:
+        _session_skills(skills, auth_home / "skills")
+    elif link_skills and not skills.exists() and not skills.is_symlink() and (auth_home / "skills").is_dir():
         skills.symlink_to(auth_home / "skills", target_is_directory=True)
-    atomically_write(home / "config.toml", text)
+    atomically_write(home / "config.toml", text(home) if callable(text) else text)
     return [str(Path(binary).resolve()), "app-server", "--strict-config", "--stdio"], clean_env(home), home
 
 
@@ -457,7 +786,7 @@ def prepare(thread_id: str, brief: Brief, binary: str | None = None) -> tuple[li
             os.fchmod(fd, 0o700)
         finally:
             os.close(fd)
-    return _prepare_home(thread_id, config_text(brief), binary)
+    return _prepare_home(thread_id, lambda home: config_text(brief, home), binary, sandbox=True)
 
 
 def prepare_metadata(binary: str | None = None) -> tuple[list[str], dict[str, str], Path]:

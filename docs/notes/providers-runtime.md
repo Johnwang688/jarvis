@@ -1162,7 +1162,8 @@ carry merge_gate's headline) and `chat_git_fetch`, foreground only. The
 permit reads the worktree's branch and origin from files, refuses what it
 cannot read, and binds its ALLOW to the exact `gate_line`; the tool refuses if
 the repository no longer matches. The daemon copies the branch into a private
-bare mirror (`V2_DATA_DIR/chat-git/<key>`) with no credential in the
+bare mirror (`config.chat_git_mirrors_dir()/<key>`, beside V2_DATA_DIR since
+phase 2) with no credential in the
 environment, then pushes from the mirror to the pinned `github.com` origin
 with only gh's credential helper; gh runs with `--repo` in the mirror.
 Codex's environment gains only `GIT_AUTHOR_*`/`GIT_COMMITTER_*`. An escalated
@@ -1170,5 +1171,65 @@ raw push/fetch/pull/ls-remote to a remote, or any `gh`, from a Codex chat is
 declined unasked (CG-1); the decline carries no text to the model, so the git
 note says the same and the owner sees the pointer in the HUD. Tests:
 `tests/v2/chat_git_check.py` (incl. the malicious repo-config suite with
-positive controls) and `tests/v2/chat_git_mutants.py`. Phase 2 must keep
-the mirror folder readable to Codex when it denies `V2_DATA_DIR`.
+positive controls) and `tests/v2/chat_git_mutants.py`.
+
+## Codex permission profile (2026-10-16, CG phase 2)
+
+Plan §5. Codex sessions (chats and tasks) no longer use
+`sandbox_mode = "workspace-write"`, which confined writes and the network but
+not reads. `codex_config.config_text` writes `default_permissions =
+"jarvis-chat"` (`extends = ":workspace"`, network off), turns on
+`[features] exec_permission_approvals` and leaves `request_permissions_tool`
+off. Its filesystem table: "write" for the chat's validated git metadata,
+the chat worktree root, the commands' own HOME (`<private home>/sandbox-home`,
+set through `shell_environment_policy.set`; npm needs a writable cache) and
+the session's `$CODEX_HOME/skills` (now a real folder of per-skill links,
+remade each start, since Codex lists skill paths there and the model reads
+them with shell commands);
+"deny" for the credential folders, `~/.claude`, every entry of `~/.codex`
+but `packages` and `skills`, `~/.gitconfig`, `~/.git-credentials`, `~/.netrc`,
+V2_DATA_DIR (the private Codex homes and their jarvis-mcp tokens),
+SESSIONS_DIR, SPILL_DIR, SPEAKER_DIR and the gate's protected files; and
+case-insensitive `.env*` glob denies (depth 4) under the owner's home, the
+session folder, Jarvis's checkout and the chat worktrees. `thread/start` and
+`thread/resume` send no `sandbox` field. `codex_config.check_effective` reads
+`config/read` (profile name, no legacy mode, the feature on and the turn-wide
+one off, the exact filesystem map, network off, the command HOME) and
+`check_receipt` the start/resume receipt (`activePermissionProfile`, legacy
+`networkAccess` false, the write roots); anything else is `BriefRefused`.
+Approvals are answered only `accept` or `decline` (`codex.APPROVAL_DECISIONS`),
+never `acceptForSession` or `acceptWithExecpolicyAmendment`.
+
+Measured on 0.161 (offline, `tests/v2/fixtures/cg2_probe.py`, a scripted
+local model inside `unshare -Urn`; opens were open-and-close only), and
+relied on:
+
+- one owner `accept` of a `with_additional_permissions` network request
+  gives that one command the network, still under bwrap/seccomp, with every
+  deny holding and writes confined; the next command has none;
+  `require_escalated` gets no network in profile mode;
+- a "write" entry under a denied folder is mounted back; a "read" entry is
+  not. So the chat-git mirrors moved out of V2_DATA_DIR to
+  `chat_git_mirrors_dir()` (default `~/.local/share/jarvis/chat-git-mirrors`,
+  `JARVIS_CHAT_GIT_MIRRORS`), readable to Codex's `git fetch <mirror>`; a
+  mirrors folder inside a write root or V2_DATA_DIR is refused. pins.json
+  stays in V2_DATA_DIR (hidden);
+- a deny nested in a denied folder, or a glob match inside one, makes bwrap
+  fail every command and every thread start, so nested denies are pruned and
+  the `.env*` globs are split around denied folders
+  (`codex_config.env_globs`); a deny naming a symlink also fails everything,
+  so deny paths are resolved (the owner's `~/.aws` links into /mnt/c);
+- `~/.codex` cannot be denied whole: the binary lives in
+  `~/.codex/packages` and re-executes itself as its sandbox helper;
+- a glob matches regular files only, to 4 components below its literal base,
+  expanded at each command start; a glob ending in `*` reaches into
+  sub-folders, so none is used for `~/.codex`.
+
+Residuals: an accepted `require_escalated` command cannot read the skills
+folder (its sandbox drops that write entry, measured); a `.env` that is a symlink, or a folder named `.env`, is not
+covered by the glob; `.env.example` files are hidden too (a glob only
+denies); entries added to `~/.codex` and folders added beside a denied one
+after a session starts are covered from the next start. Tests:
+`tests/v2/codex_provider_check.py` (the profile checks),
+`tests/v2/codex_profile_probe_check.py` (the real app-server, skipped without
+the CLI) and `tests/v2/codex_profile_mutants.py`.

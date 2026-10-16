@@ -21,7 +21,9 @@ daemon run git or gh with the owner's credentials:
    in `V2_DATA_DIR/chat-git/pins.json`. A changed origin is refused.
 3. **A local fetch with no credentials** (`_local_fetch`): the branch is
    copied from the Codex repository into a daemon-owned bare mirror
-   (`V2_DATA_DIR/chat-git/<key>`, 0700). This is the only step that touches
+   (`config.chat_git_mirrors_dir()/<key>`, 0700: beside V2_DATA_DIR, which a
+   Codex sandbox cannot read, so the chat's own `git fetch <mirror>` can;
+   phase 2, 2026-10-16). This is the only step that touches
    a repository Codex can configure, so it runs with an empty HOME, no
    global or system config, no credential variable, and gitops' hardening.
 4. **The network step runs in the mirror** (`run_git`, `run_gh`): the push
@@ -242,10 +244,36 @@ def _lock(key: str) -> threading.Lock:
         return _locks.setdefault(key, threading.Lock())
 
 
+def mirrors_root() -> Path:
+    """The mirrors' folder (`config.chat_git_mirrors_dir`), 0700. A Codex
+    chat's commands read a mirror (`git fetch <mirror>`) but must never write
+    one — the daemon pushes from it with the owner's login — so it is refused
+    inside a folder a chat may write (CHAT_WORKTREES_DIR) and inside
+    V2_DATA_DIR, which the chat's sandbox cannot read
+    (`codex_config.filesystem` refuses a write root over it too)."""
+    path = Path(config.chat_git_mirrors_dir()).expanduser()
+    if not path.is_absolute():
+        raise Refused("the mirror folder must be an absolute path")
+    for folder in (path, *path.parents):
+        if folder.is_symlink():
+            raise Refused("the mirror folder must not be a symlink")
+    path = path.resolve()
+    for other in (Path(config.CHAT_WORKTREES_DIR), Path(config.V2_DATA_DIR)):
+        try:
+            other = other.expanduser().resolve()
+        except (OSError, RuntimeError):
+            raise Refused("the mirror folder cannot be checked") from None
+        if path == other or other in path.parents or path in other.parents:
+            raise Refused(f"the mirror folder must be apart from {other}")
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path.chmod(0o700)
+    return path
+
+
 def mirror_dir(common: Path) -> Path:
     """The daemon's bare mirror for the repository whose common dir is
     `common`: made on first use, 0700, refused if it is a symlink."""
-    path = root() / project_key(common)
+    path = mirrors_root() / project_key(common)
     if path.is_symlink() or (path.exists() and not path.is_dir()):
         raise Refused("the mirror must be a plain folder")
     if not (path / "HEAD").is_file():
@@ -757,5 +785,5 @@ def _remote_arg(rest: list[str]) -> bool:
 
 
 __all__ = ["DANGEROUS", "POINTER", "Plan", "Refused", "TOOLS", "Target", "execute", "gate_line",
-           "github_repo", "grant", "judge_push", "mirror_dir", "pin", "pinned", "plan",
+           "github_repo", "grant", "judge_push", "mirror_dir", "mirrors_root", "pin", "pinned", "plan",
            "raw_remote", "read_target", "run_gh", "run_git", "take", "valid_branch"]

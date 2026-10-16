@@ -1,6 +1,8 @@
 # Codex chats: git, push and pull requests without the GitHub login — plan (2026-10-15)
 
-Status: plan only, nothing built. Decision recorded below (CG-0). Read with
+Status: phase 1 built (PR #223); phase 2 built 2026-10-16 (branch
+`claude/codex-read-gap`; `docs/notes/providers-runtime.md` "Codex permission
+profile" has what the build measured beyond §5.1). Decision recorded below (CG-0). Read with
 `docs/plans/2026-10-15-pr-merge-close-decisions.md` (merge_gate, M-1..M-15)
 and CLAUDE.md "Chat git worktrees".
 

@@ -369,7 +369,11 @@ def push_checks():
         eq((root / "pins.json").stat().st_mode & 0o777, 0o600, "pins.json is 0600")
         mirror = chat_git.mirror_dir(p.common)
         eq(mirror.stat().st_mode & 0o777, 0o700, "the mirror is 0700")
-        ok(mirror.parent == root, "the mirror lives under V2_DATA_DIR/chat-git")
+        ok(mirror.parent == config.chat_git_mirrors_dir().resolve(),
+           "the mirror lives in chat_git_mirrors_dir")
+        ok(not mirror.is_relative_to(config.V2_DATA_DIR.resolve()),
+           "outside V2_DATA_DIR, which a Codex sandbox cannot read (CG phase 2)")
+        eq(mirror.parent.stat().st_mode & 0o777, 0o700, "the mirrors folder is 0700")
         ok("credential" not in (mirror / "config").read_text(), "the mirror stores no helper")
         ok(not any("FAKE-NOT-A-TOKEN" in f.read_text(errors="replace")
                    for f in mirror.rglob("*") if f.is_file()), "nor any token")
@@ -900,7 +904,45 @@ def identity_checks():
             codex_config._IDENTITY = None
 
 
-SECTIONS = (unit_checks, session_tool_checks, push_checks, refusal_checks, gh_checks,
+def mirror_root_checks():
+    """The mirrors sit beside V2_DATA_DIR (CG phase 2): a Codex sandbox reads
+    them (`git fetch <mirror>`) but V2_DATA_DIR is denied to it, and a
+    folder a chat may write can never hold them (the daemon pushes from
+    there with the owner's login)."""
+    from jarvis.v2 import chat_git
+    with Box() as box:
+        eq(config.chat_git_mirrors_dir(), config.V2_DATA_DIR.parent / "chat-git-mirrors",
+           "the default sits beside V2_DATA_DIR")
+        root = chat_git.mirrors_root()
+        eq(root.stat().st_mode & 0o777, 0o700, "made 0700")
+        for label, where in (("inside the chat worktrees", config.CHAT_WORKTREES_DIR / "m"),
+                             ("the chat worktrees", config.CHAT_WORKTREES_DIR),
+                             ("above the chat worktrees", config.CHAT_WORKTREES_DIR.parent),
+                             ("inside V2_DATA_DIR", config.V2_DATA_DIR / "m"),
+                             ("relative", Path("mirrors"))):
+            os.environ["JARVIS_CHAT_GIT_MIRRORS"] = str(where)
+            try:
+                chat_git.mirrors_root()
+                ok(False, f"{label}: refused")
+            except chat_git.Refused:
+                ok(True, f"{label}: refused")
+            finally:
+                os.environ.pop("JARVIS_CHAT_GIT_MIRRORS", None)
+        real = box.root / "real-mirrors"
+        real.mkdir()
+        link = box.root / "linked-mirrors"
+        link.symlink_to(real, target_is_directory=True)
+        os.environ["JARVIS_CHAT_GIT_MIRRORS"] = str(link / "m")
+        try:
+            chat_git.mirrors_root()
+            ok(False, "a symlinked mirrors folder: refused")
+        except chat_git.Refused:
+            ok(True, "a symlinked mirrors folder: refused")
+        finally:
+            os.environ.pop("JARVIS_CHAT_GIT_MIRRORS", None)
+
+
+SECTIONS = (unit_checks, mirror_root_checks, session_tool_checks, push_checks, refusal_checks, gh_checks,
             env_checks, malicious_checks, identity_checks)
 
 
