@@ -1042,8 +1042,8 @@ ends the capability. Generic navigation still refuses internal URLs. A temporary
 profile with blocked external network rendered and captured the settings page.
 Actual Google login, sync, saved credentials and keyring behavior are **not
 verified** (manual M4/M4b/M12). `browser.sync` now reports the store each
-running Chrome was launched with and the keyring's state; see *Password store:
-the owner's keyring* below. It never inspects secrets.
+running Chrome was observed to encrypt with and the keyring's state; see
+*Password store: the owner's keyring* below. It never inspects secrets.
 `navigator.webdriver` remained true in the real local fixture.
 
 The profile regression suite uses one real Chrome at a time and checks summed
@@ -1817,22 +1817,28 @@ chooses each launch's `--password-store`; the lead decided the rules.
 - **A named profile** gets `--password-store=gnome-libsecret` and the daemon's
   `DBUS_SESSION_BUS_ADDRESS` only when the keyring is **unlocked**. The
   address must be `unix:path=` naming a socket directly in `/run/user/<uid>/`,
-  owned by us, in a 0700 folder we own. The state is read before the launch
-  and again after it, because Chrome falls back to `basic` silently when it
-  cannot reach its key. A keyring that locked during the launch closes that
-  Chrome and refuses. With the bus, `HardwareMediaKeyHandling` joins the one
-  `--disable-features` switch, so Chrome publishes no MPRIS players.
+  owned by us, in a 0700 folder we own. The state is read before the launch;
+  after it, **the store Chrome actually used is observed** (below), because
+  Chrome falls back to `basic` silently when it cannot reach its key. A
+  keyring launch that Chrome did not honour closes that Chrome and refuses.
+  With the bus, `HardwareMediaKeyHandling` joins the one `--disable-features`
+  switch, so Chrome publishes no MPRIS players.
 - **locked**, **no_keyring** (the Secret Service answers, but has no default
   collection) or **error** (an answer the probe does not recognise) refuse the
   launch with 409: "Unlock the keyring in Windows Terminal (not a Jarvis
   terminal): <command>". Jarvis never prompts, never unlocks, never downgrades.
 - **unavailable** (no Secret Service, no usable bus) launches `basic`, and
   `/status` and the HUD say "Unprotected (basic store)" with the install hint.
-- **Sticky**: a keyring launch writes `"password_store": "keyring"` into that
-  profile's `profiles.json` row *before* Chrome starts. Such a profile is never
-  launched with `basic` again; its newer data would be unreadable there.
-  A daemon older than this change reads a sticky row as malformed
-  (`profiles.json is unreadable`), so rolling back means removing the key.
+- **Sticky**: a keyring launch records it twice *before* Chrome starts: a
+  marker file, `profiles/<id>/.jarvis-password-store` (0600, inside the
+  profile's own folder), then `"password_store": "keyring"` in that
+  profile's `profiles.json` row. **Sticky is the row flag or the marker**
+  (anything at the marker's name, or a name that cannot be read, counts);
+  clearing either alone does not un-stick the profile, and its next launch
+  writes the missing one back. Such a profile is never launched with `basic`
+  again; its newer data would be unreadable there. "Sign out of everything"
+  wipes the folder and writes the marker again; only deleting the profile
+  removes both.
 - **Owner override**: `"password_store": "basic"` in `browser.json` (only that
   exact word; hand-edited, no route writes it) launches `basic` without asking
   the bus, loudly unprotected, except for a sticky profile.
@@ -1844,16 +1850,90 @@ and a timeout. It never searches items, opens a session or reads a secret.
 so it never blocks. **A `Keyring()` is detached**: it reports `unavailable`,
 runs nothing and gives Chrome no bus. Only daemon2's `main()` attaches it, as
 it attaches `browser.json`, so no test or embedded daemon reaches the owner's
-keyring.
+keyring. The probe's runner is `subprocess.run` looked up at each call, so
+the suite's patch of it guards every probe (it used to be bound at import).
 
-`/status` → `browser.sync`: `password_store` is the store of the running named
-instances (`gnome-libsecret`, `basic`, `mixed`, or null with none running).
+**`unavailable` effectively never happens on this machine.** The probe names
+`org.freedesktop.secrets`, so the session bus **starts gnome-keyring for it**
+(D-Bus activation) when it is not running. After every WSL boot that daemon
+starts **locked**: the probe reads `locked`, and every named profile is
+refused with the unlock command until the owner unlocks the keyring in
+Windows Terminal. Private still opens. `unavailable` (basic, loudly) is only
+seen without gnome-keyring installed or without a usable session bus.
+
+**The observation (follow-up review of #215, MED 1).** The keyring reading
+`unlocked` proves the keyring was unlocked, not that Chrome used it. So after
+each named launch the daemon has Chrome write one probe cookie (a fresh
+random name, value `1`, on `password-store.jarvis.invalid`, a name that never
+resolves) and reads back **only the first three bytes** of that row's
+`encrypted_value` from the profile's `Default/Cookies` database, opened
+read-only and immutable (`password_store.observed_store`; the database must
+be a plain file, not a link; the row is matched by `host_key` and name). `v11` is the keyring's key, `v10` the basic
+store's; anything else, or no row within 5 s, is `unverified`. Then the probe
+is expired again. Never a value, never another row.
+
+- **Why a cookie, measured on Chrome 155.** `Local State` → `os_crypt` holds
+  only the portal provider's `prev_init_success`, nothing about the key
+  Chrome encrypts with. Chrome's `OSCrypt.*` histograms (over CDP's
+  `Browser.getHistogram`) say whether `FreedesktopSecretKeyProvider`
+  initialised, but they are an indirect statistic and were not yet recorded
+  when the first CDP call arrived. The cookie's prefix is what Chrome
+  actually wrote with.
+- **How the row reaches the disk at once.** Chrome commits cookie changes on
+  a 30 s timer (measured: 30.06 s for one cookie) or as soon as 512 changes
+  are pending. So the probe is followed by one filler cookie set 300 times
+  with different values (each replacement is a delete and an add: 600
+  changes), and the probe's row is on disk in 0.02 s (basic) to 0.09 s
+  (keyring). Both are expired straight after the read; a session cookie
+  would never be written at all. This leans on two Chrome internals, the
+  512-change batch and a database that is not in WAL mode (an immutable read
+  does not see a WAL file). **A Chrome update that moves Cookies to WAL or
+  changes the commit batch makes every keyring launch `unverified`**: every
+  sticky profile is then refused (Private and non-sticky basic launches still
+  open) until this code is updated. The 409 and the HUD say "Jarvis couldn't
+  confirm Chrome's password store (possibly after a Chrome update)", never
+  the install hint. Re-measure on a Chrome update.
+- **On a mismatch.** A keyring launch is always sticky by then (it was
+  recorded before Chrome started), so it is closed, its processes stopped,
+  and the launch refused with 409: "The keyring locked while Chrome was
+  starting" when the keyring now reads locked, "Chrome started without the
+  keyring (it wrote with the basic store)" for `v10`, "Jarvis couldn't
+  confirm Chrome's password store (possibly after a Chrome update)" for
+  `unverified`. **The check comes after Chrome started**: a keyring Chrome
+  that silently fell back runs with `basic` for about 1–10 s (its start, the
+  probe, the close) until it is refused and closed, and anything it writes in
+  that window (its own startup writes; no page is loaded yet) is `v10`. A basic launch (no
+  keyring, or the owner's override) is reported as observed, always
+  unprotected. Private is not observed: it is `basic` by its flag and has no
+  bus.
+- **`libsecret-1.so.0` is not a launch requirement.** The review asked for
+  it, on the premise that Chrome falls back when it cannot load it. Chrome
+  155 does not load it at all: the binary names no `libsecret-1.so`
+  (its dlopen list has `libdbus-1.so.3`, linked directly), its keyring
+  provider is `components/os_crypt/async/browser/freedesktop_secret_key_provider.cc`,
+  which speaks the Secret Service over D-Bus itself (`OpenSession`,
+  `GetSecrets`), and in the live run below the keyring Chrome's process had
+  `libdbus-1` mapped and no `libsecret`. A requirement for it would refuse
+  launches for a library nothing uses; the observation catches any fallback
+  whatever its cause.
+
+`/status` → `browser.sync`: `password_store` is the store the running named
+instances were **observed** to use (`gnome-libsecret`, `basic`,
+`unverified`, `mixed`, or null with none running), `source: "observed"`.
 Each instance row carries its own `password_store` too. Also reported:
 `requested` (`keyring` or `basic`), `keyring` (`unavailable`, `no_keyring`,
 `locked`, `unlocked`, `error`, or `unknown` before the first read),
-`next_launch` (`gnome-libsecret`, `basic` or `refused`), `unprotected` and
-`hint`. The HUD's profile **Manage** panel shows that line, red when the
-store is unprotected or a launch would be refused.
+`next_launch` for a new profile (`gnome-libsecret`, `basic`, `refused`, or
+`checking` while the state is `unknown` — never `refused` for that), and
+`unprotected` and `hint`. **`profiles`** gives each named profile's own
+state: `store` (observed, or null when not running), `sticky`,
+`next_launch`, `unprotected` and `hint`, so a sticky profile under
+`browser.json`'s `basic` says to remove that override, not to unlock the
+keyring. The HUD's profile **Manage** panel shows the selected profile's
+line (the global one when `/status` has none), red when the store is
+unprotected or a launch would be refused, and reads `/status` again every
+3 s while it is open and when the window regains focus, so an unlock in
+Windows Terminal shows within seconds.
 
 **What it protects, stated plainly.** The keyring protects passwords *at
 rest*: WSL shut down, the files read from Windows, a backup, a copied profile
@@ -1861,12 +1941,16 @@ folder. **It does not protect against a program running as the owner while
 the keyring is unlocked**, which Chrome needs: gnome-keyring has no
 per-application rule, so such a program can ask the Secret Service for
 Chrome's key. That makes the read a distinct D-Bus request instead of a file
-read. **Follow-up, not in this change:** a gate rule that asks or denies
-agent commands reaching the Secret Service (`secret-tool lookup` is already
-refused as a credential read; `busctl`/`gdbus`/`dbus-send` calls to
-`org.freedesktop.secrets` are not). A same-user program could also claim
-`org.freedesktop.secrets` itself while gnome-keyring is not running; that is
-the same same-user boundary.
+read. **Agents' shell calls to it are refused at the gate** (follow-up,
+2026-10-15; `rules.secret_service_reading`, the safety notes' *Agent calls
+to the Secret Service*): `secret-tool` and its kin or Python's `keyring` CLI
+as a program, a D-Bus client, interpreter or shell whose own arguments name
+the Secret Service, and a session-bus monitor are DENY in v1's gate and v2's
+layer 1 alike; a line that only mentions one is not. That
+is an accident guard, not a wall: a script file that talks D-Bus, or a call
+by unique name with a computed path, is not seen. A same-user program could
+also claim `org.freedesktop.secrets` itself while gnome-keyring is not
+running; that is the same same-user boundary.
 
 **Live check, 2026-10-15** (after the owner installed gnome-keyring 50 and
 unlocked it; temporary BROWSER_DIR, a throwaway profile, a test cookie, no
@@ -1893,6 +1977,35 @@ secret read; `busctl` confirmed the keyring still unlocked afterward):
   path"), which the probe reads as `no_keyring`. The locked path is
   covered by fakes only; the owner's keyring was not locked.
 
+**Live check of the follow-up, 2026-10-15** (Chrome 155.0.8059.39; the
+owner's keyring held no Chrome item before or after and stayed unlocked,
+checked by `SearchItems` and `Locked` only). The keyring Chrome used was a
+**throwaway Secret Service**: a private `dbus-daemon` with no service
+activation and a `gnome-keyring-daemon` whose HOME, XDG folders and runtime
+folder were all temporary, unlocked with a throwaway password, deleted
+afterward. Nothing ran against the owner's bus or keyring.
+
+- **Raw Chrome, observation alone.** Unlocked: the probe read `v11` in
+  0.09 s and Chrome created its `Chrome Safe Storage` item in the throwaway
+  keyring. Then that collection was locked: Chrome started in 0.16 s,
+  prompted nothing, `OSCrypt.FreedesktopSecretKeyProvider.InitStatus` was
+  10 and `OSCrypt.EncryptorKeyCount.Available` 1, and the probe read **`v10`**
+  — a locked keyring is a silent downgrade too. An unreachable bus: `v10`,
+  `InitStatus` 6. One probe cookie without the filler reached the disk after
+  30.06 s; with it, 0.02 s.
+- **The real `BrowserHost`, temporary BROWSER_DIR.** Unlocked: Main opened
+  with `--password-store=gnome-libsecret`, observed `gnome-libsecret`, the
+  marker and the row written, `/status` `source: "observed"`, the profile's
+  `store: gnome-libsecret`, `sticky: true`; the Chrome process had
+  `libdbus-1` mapped and no `libsecret`. Locked: Main was refused before
+  Chrome started (the pre-check). With the pre-check made to read
+  `unlocked` (as if the lock came during the launch, or Chrome's own call
+  failed), Chrome fell back, the observation read `basic`, and the launch was
+  refused with "Chrome started without the keyring", no Chrome left
+  running; a new profile went the same way and stayed sticky. With the real
+  after-launch read also locked, the message was "The keyring locked while
+  Chrome was starting".
+
 **Migration (`v10`/`v11`): new writes are measured above; whether old `v10` data stays readable is still for M12.** Chrome on Linux tags
 `basic` data `v10` (a hard-coded key) and keyring data `v11`. After the
 switch, existing `v10` passwords and cookies stay readable but are **not
@@ -1912,7 +2025,10 @@ and sign in again so everything lands as `v11`.
    socket: check `SSH_AUTH_SOCK` in a new shell, and
    `systemctl --user mask --now gcr-ssh-agent.socket` if it changed.
 2. Create and unlock the login keyring once per WSL boot, in **Windows
-   Terminal, not a Jarvis terminal** (a HUD terminal is a Jarvis PTY):
+   Terminal, not a Jarvis terminal** (a HUD terminal is a Jarvis PTY). Until
+   then every named profile is refused with this command (the keyring is
+   started locked by the Browser's own probe; see *`unavailable` effectively
+   never happens*), and Private still opens:
    `read -rsp 'Keyring password: ' KP; echo; printf '%s' "$KP" | gnome-keyring-daemon --unlock >/dev/null; unset KP`.
    The first run creates the keyring with that password. Use a new password,
    not the Google one. If a running daemon ignores `--unlock`, use
@@ -1930,6 +2046,30 @@ and sign in again so everything lands as `v11`.
    a named profile is refused, not downgraded. Then unlock it again (step 2).
    Also left: an existing `v10` password stays readable after the switch.
 
+**Rolling back.** A daemon older than #215 cannot read a `profiles.json`
+row that carries `"password_store"` ("profiles.json is unreadable") and
+opens every profile with `basic`. To roll back that far, delete that key from
+each row by hand: the marker in each profile's folder survives, so when this
+version returns those profiles are still sticky (refused, never downgraded)
+and their rows are written back at their next launch. **Do not open a
+sticky profile under the older daemon**: it would look signed out (its `v11`
+data unreadable) and write new data under the public key. A #215 daemon
+reads the row flag but not the marker, so rolling back only to #215 needs
+nothing removed; leave the row flags.
+
+**`profiles.json` is not protected state** (decided in the follow-up). It
+already lives in the Browser's folder, a credential folder
+(`config.credential_dirs()`): v1's file tools refuse it for reads and writes,
+v2's file tools and grants refuse it, and a v2 shell write under it is
+always-ask (`credentials-path`). Protected state is for files that grant or
+withdraw permissions; the sticky flag grants nothing. Joining that set
+would also make the file **readable** to v1's `read_file`, since the
+credential-folder judge exempts the gate's own state files by their exact
+path (`files.credential_folder_judge`). And the marker, which now carries
+stickiness alone, sits in a per-profile folder no fixed list can name. An
+agent that can write in the Browser's folder can already destroy far more
+than the flag; stickiness now needs both records cleared.
+
 Tests: `tests/v2/browser_password_store_check.py` (fake `gdbus` runner,
 temporary runtime folder with an unlistened socket, fake Playwright; the real
 `subprocess.run` is patched to fail). Eleven mutants are each killed: a
@@ -1938,6 +2078,28 @@ recorded, a keyring attached by default to the real bus, Private given the
 bus or the keyring flag, the after-launch check removed, status reporting a
 constant, the bus socket check removed, and a probe that asks for more than
 `Locked`. `hud/src/components/BrowserProfile.test.ts` covers the Manage line.
+**The follow-up** adds a fake Chrome that writes the probe's row into a
+temporary Cookies database with the prefix a real one would (or the one a
+test makes it fall back to), `observed_store` against real SQLite (a
+traced connection: one statement, `substr(encrypted_value, 1, 3)`, read-only
+and immutable), marker and rollback cases, per-profile status, and a guard
+that fails the run on an error in the status refresh thread. 37 mutants are
+each killed (`~/.cache/jarvis-lead/kr-followup/mutants.py`): the observation
+ignored, status reporting the requested store, a mismatched Chrome left open,
+no flush filler, the probe never expired, the whole encrypted value read, the
+probe row not matched by host, the marker ignored (at launch or in
+`/status`), never written, or dropped by "Sign out of everything", a sticky
+profile's missing record not written back, `unknown` shown as refused (daemon
+and HUD, per profile and global), `unverified` given the install hint, the
+per-profile `browser.json` reason lost, the probe runner bound at import; for
+the gate: the rule removed (v1 and v2 layer 1), the whole-text reading
+instead of command position, a caller that need not be the segment's
+program, a reader matched as a word anywhere, readers, the `keyring` CLI or
+`-m keyring` not refused, `keyring` refused as a bare word, monitors not
+refused or judged on the whole line, a bus-address assignment keeping the
+`--system` exemption, program-word or service-name spellings not normalised,
+the impl portal dropped; and the Manage panel's interval or focus refresh
+removed, and its per-profile state ignored.
 
 ## Chrome's own sign-in tab joins the sign-in pane (2026-10-15)
 
