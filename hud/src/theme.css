@@ -478,6 +478,9 @@ button.tree-row.morechats:focus-visible { box-shadow: inset 0 0 0 1px var(--acce
 .sa-stop:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }
 .sa-stop.stopping { color: var(--amber); border-color: var(--amber-line); border-style: dashed; cursor: default; }
 .sa-stop.stopping:hover { color: var(--amber); background: transparent; border-color: var(--amber-line); }
+/* Under an approval card every Stop is disabled; "stopping…" keeps its dashed
+   amber look rather than fading with the other disabled buttons. */
+.sa-stop.stopping:disabled { opacity: 1; }
 .sa-stop[data-state="unconfirmed"] { color: var(--amber); border-color: var(--amber-line); }
 .sa-cant { flex: 0 0 auto; padding: 3px 0; color: var(--text-muted); font: 11px var(--mono); cursor: help; }
 .sa-cant:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }

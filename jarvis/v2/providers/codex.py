@@ -240,6 +240,7 @@ class _ChildView:
     stop_reason: str | None = None
     asked_to_stop: bool = False        # the orchestrator's interrupt_agent said so
     owner_stop: bool = False           # the owner's Stop asked Codex to end its turn (SV-4)
+    owner_stop_taken: bool = False     # Codex took one of the owner's Stops of this turn
     calls: dict = field(default_factory=dict)  # its open tool calls, oldest first
 
 
@@ -1669,7 +1670,7 @@ class CodexProvider:
                 # live again, on Codex's own word.
                 view.status, view.stop_reason, view.asked_to_stop = "running", None, False
                 with s.mutex:       # `stop_subagent` and `_child_stop_answered` write it under it
-                    view.owner_stop = False
+                    view.owner_stop = view.owner_stop_taken = False
                 yield self._life(h, view, "started")
             return
         if method == "turn/completed":
@@ -1683,6 +1684,7 @@ class CodexProvider:
                 else view.duration_ms
             with s.mutex:       # `stop_subagent` and `_child_stop_answered` write it under it
                 owner, view.owner_stop = view.owner_stop, False
+                view.owner_stop_taken = False
             if view.status == "stopped":
                 view.stop_reason = (OWNER_STOPPED if owner
                                     else "the orchestrator stopped it" if view.asked_to_stop
@@ -2152,7 +2154,7 @@ class CodexProvider:
                 raise SubagentNotLive("This sub-agent is not running a turn in this chat's session.")
             rid = s.rpc.send("turn/interrupt", {"threadId": tid, "turnId": turn})
             view.owner_stop = True
-            s.child_stops[rid] = sid
+            s.child_stops[rid] = (sid, turn)
             while len(s.child_stops) > CHILD_STOPS:
                 s.child_stops.pop(next(iter(s.child_stops)))
 
@@ -2162,13 +2164,20 @@ class CodexProvider:
         refusal is logged, never fatal, and takes the owner's mark off the
         child: if its turn ends later for another reason (the orchestrator's
         `interrupt_agent`), that reason is said, not "stopped by the owner".
-        The record says the stop was not confirmed when the turn does not end."""
+        The record says the stop was not confirmed when the turn does not end.
+        The mark comes off only when no other Stop of that turn is still on
+        its way and none was taken (review of #216's delta, LOW 2: a first
+        Stop refused, a second taken, is still the owner's)."""
         with s.mutex:
-            sid = s.child_stops.pop(msg.get("id"), None)
-            if sid is not None and "error" in msg:
-                for view in s.child_views.values():
-                    if view.sid == sid:
-                        view.owner_stop = False
+            entry = s.child_stops.pop(msg.get("id"), None)
+            sid, turn = entry if entry is not None else (None, None)
+            for view in s.child_views.values() if sid is not None else ():
+                if view.sid != sid or view.turn != turn:
+                    continue                # another child, or a turn already over
+                if "error" not in msg:
+                    view.owner_stop_taken = True
+                elif not view.owner_stop_taken and (sid, turn) not in s.child_stops.values():
+                    view.owner_stop = False
         if sid is None:
             return False
         if "error" in msg:

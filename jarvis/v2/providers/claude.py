@@ -535,17 +535,42 @@ def parse_version(text: str | None) -> tuple[int, int, int] | None:
     return tuple(int(part) for part in match.groups()) if match else None  # type: ignore[return-value]
 
 
-def _late_stop(thread_id: str, sid: str, done: Any) -> None:
-    """The late outcome of a Stop whose answer the route stopped waiting for."""
+def _cli_refusal(exc: BaseException) -> bool:
+    """The SDK raises a bare Exception carrying the CLI's error control
+    response (`_internal/query.py`): the CLI's refusal. Its own "Control
+    request timeout" is not one (the CLI may still act on the request)."""
+    return type(exc) is Exception and not str(exc).startswith("Control request timeout")
+
+
+def _stop_settled(session: Any, child: Any, outcome: str) -> None:
+    """One owner Stop on `child` has its answer (`taken`, `refused` or
+    `unknown`). The owner's mark comes off only when this one was refused,
+    no other Stop of it is still on its way and none was taken: whatever
+    ends the child later is then not the owner's doing (review of #216's
+    delta, LOW 1)."""
+    with session.mutex:
+        child.owner_stops = max(0, child.owner_stops - 1)
+        if outcome == "taken":
+            child.owner_stop_taken = True
+        elif outcome == "refused" and not child.owner_stops and not child.owner_stop_taken:
+            child.owner_stop = False
+
+
+def _late_stop(session: Any, child: Any, sid: str, done: Any) -> None:
+    """The late outcome of a Stop whose answer the route stopped waiting for.
+    A late refusal takes the owner's mark off the child, as one in time does."""
     try:
         error = done.exception()
     except BaseException:  # noqa: BLE001 — cancelled with the loop
+        _stop_settled(session, child, "unknown")
         return
     if error is None:
-        LOG.info("claude %s: the CLI took the stop of %s late", thread_id, sid)
+        _stop_settled(session, child, "taken")
+        LOG.info("claude %s: the CLI took the stop of %s late", session.thread_id, sid)
     else:
+        _stop_settled(session, child, "refused" if _cli_refusal(error) else "unknown")
         LOG.warning("claude %s: the stop of %s ended without an answer (%s)",
-                    thread_id, sid, type(error).__name__)
+                    session.thread_id, sid, type(error).__name__)
 
 
 def _known_cli_version() -> tuple[int, int, int] | None:
@@ -695,6 +720,10 @@ class _Child:
     inferred: bool = False
     # The owner asked the CLI to stop it (SV-4): its `stopped` then says so.
     owner_stop: bool = False
+    # The owner's Stops still on their way, and whether the CLI took one:
+    # a refusal clears `owner_stop` only when neither (`_stop_settled`).
+    owner_stops: int = 0
+    owner_stop_taken: bool = False
 
 
 @dataclass
@@ -2277,22 +2306,23 @@ class ClaudeProvider:
         task_id = child.task_id
         with session.mutex:
             child.owner_stop = True
+            child.owner_stops += 1
         future = asyncio.run_coroutine_threadsafe(session.client.stop_task(task_id), session.loop)
         try:
             future.result(STOP_CONTROL_TIMEOUT_S)
         except concurrent.futures.TimeoutError:
-            future.add_done_callback(lambda done, sid=sid: _late_stop(session.thread_id, sid, done))
+            future.add_done_callback(
+                lambda done, child=child, sid=sid: _late_stop(session, child, sid, done))
             raise TimeoutError(f"Claude Code did not answer the stop within "
                                f"{int(STOP_CONTROL_TIMEOUT_S)} s") from None
         except BaseException as exc:
-            # Refused or not delivered: whatever stops it later is not this.
-            with session.mutex:
-                child.owner_stop = False
-            if type(exc) is Exception and not str(exc).startswith("Control request timeout"):
-                # The SDK raises a bare Exception carrying the CLI's error
-                # control response (`_internal/query.py`): the CLI's refusal.
+            # Refused or not delivered: whatever stops it later is not this
+            # (unless another Stop of it is still on its way, or was taken).
+            _stop_settled(session, child, "refused")
+            if _cli_refusal(exc):
                 raise SubagentStopDeclined(_safe(str(exc))[:160] or "no reason given") from None
             raise
+        _stop_settled(session, child, "taken")
 
     def interrupt(self, h: SessionHandle) -> None:
         session = h.native
