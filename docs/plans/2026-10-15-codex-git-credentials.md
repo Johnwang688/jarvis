@@ -1,6 +1,6 @@
 # Codex chats: git, push and pull requests without the GitHub login — plan (2026-10-15)
 
-Status: phase 1 built (PR #223); phase 2 built 2026-10-16 (branch
+Status: phase 1 merged ([#223](https://github.com/Johnwang688/jarvis/pull/223)), its leftovers in [#230](https://github.com/Johnwang688/jarvis/pull/230) merged 2026-10-16; phase 2 merged 2026-10-16 ([#224](https://github.com/Johnwang688/jarvis/pull/224), leftovers [#231](https://github.com/Johnwang688/jarvis/pull/231), merged 2026-10-16; branch
 `claude/codex-read-gap`; `docs/notes/providers-runtime.md` "Codex permission
 profile" has what the build measured beyond §5.1). Decision recorded below (CG-0). Read with
 `docs/plans/2026-10-15-pr-merge-close-decisions.md` (merge_gate, M-1..M-15)
@@ -365,7 +365,7 @@ calls chat_git_fetch(worktree)             --> fetch origin into the mirror (cre
   another host.
 - Tool output is redacted and capped. A failure prints git's stderr, never
   the environment.
-- **Open until phase 2:** the sandbox can still read `~/.config/gh/hosts.yml`
+- **Closed in phase 2 ([#224](https://github.com/Johnwang688/jarvis/pull/224), merged 2026-10-16):** until then the sandbox could read `~/.config/gh/hosts.yml`
   unasked (§2.1).
 
 ### 4.4 What the owner sees

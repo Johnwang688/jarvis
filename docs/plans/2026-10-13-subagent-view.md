@@ -232,7 +232,7 @@ So separation fixes today's transcript, Discord and task-report misattribution, 
   - Finishes within 3 s coalesce ("3 sub-agents finished, 1 failed").
   - Names are capped at 40 characters and pass the speakable filter.
 - **When:** SV-5, after voice V7.
-- **As built (SV-5, 2026-10-16):** `hud/src/lib/speech/notices.ts`; counts only ("Two sub-agents finished, one failed."), no name. See `docs/notes/voice-face.md`, "Sub-agent notices".
+- **As built (SV-5, 2026-10-16, [#228](https://github.com/Johnwang688/jarvis/pull/228), merged 2026-10-16):** `hud/src/lib/speech/notices.ts`; counts only ("Two sub-agents finished, one failed."), no name. See `docs/notes/voice-face.md`, "Sub-agent notices".
 
 ### D8. Edge cases
 
@@ -341,7 +341,7 @@ These answer the open questions below where they overlap, and the SV-0 findings
   scrubbed, at most 4,000 characters).
 - **No interim mitigation for the background-agent stall.** Wait for SV-6, which
   drains the stream between turns and records an injected CLI turn as its own
-  system-originated turn.
+  system-originated turn. Now built in [#234](https://github.com/Johnwang688/jarvis/pull/234), merged 2026-10-16.
 - **Turns the CLI starts by itself after a background sub-agent finishes are
   neither posted to Discord nor spoken.** Sub-agents are spawned to do a task
   and go away; their completion turns stay quiet (SV-4 voice rule extended).
@@ -353,6 +353,8 @@ These answer the open questions below where they overlap, and the SV-0 findings
   HUD can link a card to its row; added with SV-3.
 
 ## SV-6 design: the between-turn reader (2026-10-16)
+
+- **As built (SV-6, 2026-10-16, [#234](https://github.com/Johnwang688/jarvis/pull/234), merged 2026-10-16):** read native sub-agent activity between orchestrator turns.
 
 Built on SV-0 findings 6 and 8–13, the providers-runtime notes "What SV-6 must
 do for Claude's injected turns", and the owner's 2026-10-15 decisions above.
