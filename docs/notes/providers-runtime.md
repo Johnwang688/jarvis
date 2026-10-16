@@ -1433,20 +1433,41 @@ Nothing on these paths answers a question by itself.
 - A CLI turn that overflows the context is not compacted; the next owner
   turn is.
 - Codex's 4096-message queue can still overflow while the owner decides on
-  a child's card (SV-2a's MED-2). The drain empties the queue between cards.
+  a child's card (SV-2a's MED-2). Between turns that card can wait longer,
+  because nobody may be at the HUD: the drain holds the transport until the
+  broker answers, which bounds it by the card's own timeout (120 s on the
+  HUD, 600 s for a Discord DM, `approvals.LOCAL_TIMEOUT_S`/`REMOTE_TIMEOUT_S`;
+  then it declines). Busy children can fill the queue in that time; the
+  transport then fails closed (declined, the session closes, the next
+  message resumes). The drain empties the queue between cards.
+- A message `_translate` cannot read between turns is held for the next
+  turn, which meets it as before SV-6 (a turn that cannot read a message
+  fails), and the drain reads on (review of #234).
 - The Claude approval card's label can say "unnamed" when the hook beats the
   provider's read of `task_started`. That was so before, and it is likelier
   now that the buffer is read concurrently. It is a label only: the decision
   is the same.
 
-**Checks** (free, offline): `tests/v2/idle_reader_check.py`, 35 tests. They
+**Review of #234.** HIGH-1: `Daemon._turn` held the provider's generator in a
+local until the worker returned, so its `finally` (which frees the turn slot,
+Codex's reader and steer waiters) ran after `_drain` had already started the
+next, queued turn — refused "already running" under load, and
+`steer_check`'s undelivered-steer test failed. The loop now runs under
+`contextlib.closing(source)`. A turn marks itself the reader before it parks
+the idle reader, and only that turn gives the stream back.
+
+**Checks** (free, offline): `tests/v2/idle_reader_check.py`, 41 tests. They
 cover the SV-0 recordings through the real providers (`one_default`,
 `parallel_default`, `stop_bg`, Codex `no_wait`), an SDK-shaped client with
 the SDK's 100-message buffer (which reproduces the 2026-10-12 stall
 unwatched and shows it gone watched), real daemons, the Discord harness and
 the runner. The speech skip is in `hud/src/lib/speech/controller.test.ts`.
-`tests/v2/idle_reader_mutants.py` kills all 21 of its mutants (each in a
-temp copy): the hand-off race, a double read, auto-approve
+`tests/v2/idle_reader_mutants.py` kills all 27 of its mutants (each in a
+temp copy; the review of #234 added the generator left suspended, the
+orchestrator's own between-turn approval reaching `permit`, a stopped or
+failed CLI turn's end posted, the daemon answering a between-turn approval,
+an unroutable message stopping the drain, and a non-reader giving the stream
+back): the hand-off race, a double read, auto-approve
 (Claude and Codex), a Codex send beside the drain, Discord posting, unmarked
 records, a leaked reader or watcher, a switch on the old client, no idle
 reading (the stall), no offer, the idle reader reporting a dead CLI itself,

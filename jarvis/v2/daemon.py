@@ -5,6 +5,7 @@ Threads save their Brief beside thread.json so resuming never invents a policy.
 """
 from __future__ import annotations
 
+import contextlib
 from collections import deque
 from dataclasses import dataclass, field, fields, replace
 import errno
@@ -1919,24 +1920,31 @@ class Daemon:
             else:
                 source = session.provider.adopt(session.handle)
             cancel_forwarded = False
-            for event in source:
-                if event.thread_id != session.thread.id:
-                    raise ValueError("provider event belongs to another thread")
-                # Providers may clear an old stop flag when send begins. Repeat
-                # cancellation after their first yield to close that start race.
-                if session.cancelled.is_set() and not cancel_forwarded:
-                    session.provider.interrupt(session.handle)
-                    cancel_forwarded = True
-                if event.kind == EventKind.TURN_FINISHED:
-                    terminal = event
-                    break
-                if event.kind == EventKind.ERROR:
-                    with self._lock:
-                        if session.drive_turn is drive_turn:
-                            self._retire_drive(session)
-                self._record(session, event)
-                failed |= event.kind == EventKind.ERROR
-                fatal |= event.kind == EventKind.ERROR and bool((event.data or {}).get("fatal"))
+            # Closed the moment the loop ends (a break, a raise), never left
+            # suspended until this worker returns: the provider's `finally`
+            # releases its turn slot, its reader and its steer waiters, and a
+            # queued turn `_drain` starts from below must find them free
+            # (review of #234, HIGH-1).
+            with (contextlib.closing(source) if callable(getattr(source, "close", None))
+                  else contextlib.nullcontext()):
+                for event in source:
+                    if event.thread_id != session.thread.id:
+                        raise ValueError("provider event belongs to another thread")
+                    # Providers may clear an old stop flag when send begins. Repeat
+                    # cancellation after their first yield to close that start race.
+                    if session.cancelled.is_set() and not cancel_forwarded:
+                        session.provider.interrupt(session.handle)
+                        cancel_forwarded = True
+                    if event.kind == EventKind.TURN_FINISHED:
+                        terminal = event
+                        break
+                    if event.kind == EventKind.ERROR:
+                        with self._lock:
+                            if session.drive_turn is drive_turn:
+                                self._retire_drive(session)
+                    self._record(session, event)
+                    failed |= event.kind == EventKind.ERROR
+                    fatal |= event.kind == EventKind.ERROR and bool((event.data or {}).get("fatal"))
         except Exception as exc:
             failed = True
             try:

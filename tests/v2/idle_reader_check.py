@@ -634,6 +634,46 @@ class ClaudeScripted(unittest.TestCase):
                 self.assertEqual(texts(second), ["two"])
                 self.assertEqual([e.kind for e in second if e.kind == K.TURN_FINISHED], [K.TURN_FINISHED])
 
+    def test_a_message_that_cannot_be_routed_is_held_and_reading_goes_on(self):
+        # Review of #234, LOW 4: `_translate` raising on one message between
+        # turns must neither drop it nor stop the drain (the stall).
+        bad = assistant("BAD shape", parent="toolu_c1")
+        flood = [assistant(f"c{i}", parent="toolu_c1") for i in range(150)]
+        script = turn(0, "one") + CHILD + [bad] + flood + [
+            Hook("Bash", {"command": "echo after"}, "toolu_c1_bash", agent_id="t-c1")]
+        real = claude.ClaudeProvider._child
+
+        def child(provider, session, msg, parent_id):
+            if any(getattr(b, "text", "") == "BAD shape" for b in getattr(msg, "content", []) or []):
+                raise KeyError("a shape the provider cannot read")
+            return real(provider, session, msg, parent_id)
+        with patch.object(claude.ClaudeProvider, "_child", child):
+            run = Scripted(self, script)
+            run.send("one")
+            wait_for(lambda: run.client.hooks, what="the hook after the bad message")
+            run.feed.wait(lambda ev: "c149" in child_texts(ev), what="the chatter after it")
+            self.assertEqual(child_texts(run.feed.events), [f"c{i}" for i in range(150)])
+            self.assertIn(bad, list(run.session.held))
+            self.assertFalse(run.session.idle.done(), "the idle reader stopped")
+
+    def test_only_the_reader_gives_the_stream_back(self):
+        # Review of #234, NIT: a turn that does not hold the stream (one whose
+        # take was cancelled) cannot hand it to an idle reader while another
+        # turn reads.
+        run = Scripted(self, turn(0, "one"))
+        run.send("one")
+
+        async def probe():
+            holder = asyncio.ensure_future(asyncio.sleep(10))
+            await run.provider._park(run.session)
+            run.session.reading = holder                 # another turn reads
+            run.provider._give_stream(run.session)       # from a task that does not
+            held = run.session.reading is holder and run.session.idle is None
+            holder.cancel()
+            run.session.reading = None
+            return held
+        self.assertTrue(asyncio.run_coroutine_threadsafe(probe(), run.session.loop).result(5))
+
     def test_close_while_idle_leaves_no_reader_and_ends_the_watch(self):
         hold = threading.Event()
         run = Scripted(self, turn(0, "one") + [Gate(hold)])
@@ -811,6 +851,23 @@ class DaemonClaude(Daemonised):
         self.assertTrue(any(r.get("kind") == "queued_dropped" for r in log))
 
     def test_a_queued_owner_message_runs_after_the_clis_turn(self):
+        self.queued_after_cli_turn()
+
+    def test_the_queued_turn_runs_while_the_cli_turns_worker_lingers(self):
+        # Review of #234, HIGH-1: the worker that ran the CLI's turn starts the
+        # queued owner turn (`_drain`) before it returns. The provider's
+        # generator must be closed by then — its `finally` frees the turn
+        # slot — or the owner's turn is refused "already running". A delay
+        # after `_drain` makes that ordering certain.
+        drain = D.Daemon._drain
+
+        def lingering(daemon, thread_id):
+            drain(daemon, thread_id)
+            time.sleep(0.3)
+        with patch.object(D.Daemon, "_drain", lingering):
+            self.queued_after_cli_turn()
+
+    def queued_after_cli_turn(self):
         rows = R.rows("one_default")
         at = next(i for i, r in enumerate(rows) if r["src"] == "cli" and r["data"].get("type") == "assistant"
                   and "step 2" in json.dumps(r["data"]))
@@ -835,6 +892,8 @@ class DaemonClaude(Daemonised):
         answer = next(r for r in log if r.get("kind") == "text" and r["data"]["text"] == "owner answer 2")
         self.assertEqual(answer["turn_id"], queued["queued_turn_id"])
         self.assertFalse(answer.get("self_started"))
+        errors = [r["data"]["message"] for r in log if r.get("kind") == "error"]
+        self.assertEqual(errors, [], "the queued owner turn was refused")
 
     def test_close_resume_and_shutdown_end_the_watcher(self):
         chat = self.chat("one_default")
@@ -854,6 +913,39 @@ class DaemonClaude(Daemonised):
         self.daemon.stop()
         resumed.watcher.join(3)
         self.assertFalse(resumed.watcher.is_alive(), "shutdown left a watcher running")
+
+
+class DaemonGate(Daemonised):
+    """Review of #234, LOW 3: through a real daemon and the real Claude
+    provider, a hook between turns is decided by the thread's `permit` and
+    by nothing else — the daemon's watcher never answers one."""
+
+    def test_a_between_turn_hook_is_decided_by_permit_alone(self):
+        asked = []
+
+        def slow_allow(*a, **k):
+            asked.append(a[0])
+            time.sleep(0.4)              # an answer from anywhere else would come first
+            return Decision.ALLOW
+        self.daemon.permit_factory = lambda thread_id, brief: slow_allow
+        script = turn(0, "one") + CHILD + [Drained(),
+                                           Hook("Bash", {"command": "echo between"}, "toolu_c1_bash",
+                                                agent_id="t-c1")]
+        BufferedClient.instances = []
+        stack = ExitStack()
+        self.addCleanup(stack.close)
+        stack.enter_context(patch.object(claude, "_client_factory", lambda options: BufferedClient(options, script)))
+        stack.enter_context(patch.object(claude, "resolve_cli", lambda: None))
+        self.daemon.providers[PN.CLAUDE] = claude.ClaudeProvider()
+        chat = self.daemon.open_thread(self.project.id, Role.CHAT, PN.CLAUDE, {}).id
+        self.daemon.send(chat, UserMessage(text="one"))
+        client = wait_for(lambda: BufferedClient.instances and BufferedClient.instances[-1].hooks
+                          and BufferedClient.instances[-1], what="the between-turn hook")
+        self.assertEqual(asked, ["Bash"])
+        self.assertNotEqual(client.hooks[0].get("hookSpecificOutput", {}).get("permissionDecision"), "deny")
+        rows = wait_for(lambda: [r for r in self.daemon.stores.threads.read_log(chat)
+                                 if r.get("kind") == "gate_resolved"], what="the gate record")
+        self.assertEqual([(r["data"]["decision"], r.get("turn_id")) for r in rows], [("allow", None)])
 
 
 # --- the daemon's side, with a provider that watches ----------------------------------
@@ -1088,6 +1180,7 @@ class SelfStarting(DM.Scripted):
         super().__init__()
         self.feeds = []
         self.offer = None
+        self.cli_stop = "end"
 
     def start(self, thread, brief, permit):
         handle = super().start(thread, brief, permit)
@@ -1116,7 +1209,9 @@ class SelfStarting(DM.Scripted):
         yield Event(K.TEXT, handle.thread_id, {"text": "SELF-STARTED words nobody asked for"})
         yield Event(K.TOOL_STARTED, handle.thread_id, {"call_id": "c", "name": "Bash", "args": {}})
         yield Event(K.TOOL_FINISHED, handle.thread_id, {"call_id": "c", "name": "Bash", "ok": True, "summary": ""})
-        yield Event(K.TURN_FINISHED, handle.thread_id, {"stop": "end"})
+        if self.cli_stop == "error":
+            yield Event(K.ERROR, handle.thread_id, {"message": "SELF-STARTED failure", "fatal": False})
+        yield Event(K.TURN_FINISHED, handle.thread_id, {"stop": self.cli_stop})
 
     def close(self, handle):
         handle.native.feed.put(None)
@@ -1129,6 +1224,19 @@ class MirrorSkips(DM.Harness):
         SelfStarting.__init__(self.provider)
 
     def test_discord_posts_nothing_of_a_cli_turn_and_keeps_mirroring(self):
+        self.cli_turn_is_silent("end")
+
+    def test_discord_posts_nothing_of_a_stopped_or_failed_cli_turn(self):
+        # Review of #234, LOW 2: its end is skipped too, or the footer alone
+        # would post "· interrupted" / "· turn failed".
+        for stop in ("interrupted", "error"):
+            with self.subTest(stop=stop):
+                self.cli_turn_is_silent(stop)
+
+    def cli_turn_is_silent(self, stop):
+        self.provider.cli_stop = stop
+        with self.transport.lock:
+            before = len(self.transport.calls)
         chat = self.open_chat()
         self.hud_send(chat, "hello")
         self.idle(chat.id)
@@ -1141,9 +1249,12 @@ class MirrorSkips(DM.Harness):
         self.hud_send(chat, "again")
         self.idle(chat.id)
         self.settled(chat.id)
-        posted = json.dumps([c for c in self.transport.calls])
+        with self.transport.lock:
+            posted = json.dumps(self.transport.calls[before:])
         self.assertNotIn("SELF-STARTED", posted)
         self.assertNotIn("Bash", posted, "a CLI turn's tool reached a footer")
+        self.assertNotIn("interrupted", posted)
+        self.assertNotIn("turn failed", posted)
         self.assertEqual(posted.count("the answer"), 2, "the owner's replies around it were not both posted")
         self.assertEqual(self.spoken, [])
 
@@ -1291,6 +1402,33 @@ class CodexIdle(unittest.TestCase):
         run.provider.stop_subagent(run.handle, sid)
         run.feed.wait(lambda ev: ends(ev, sid), what="the stopped child")
         self.assertEqual(ends(run.feed.events, sid), [("stopped", OWNER)])
+
+    def test_the_orchestrators_own_approval_with_no_turn_is_refused_and_never_asked(self):
+        # Review of #234, LOW 1: the session's own thread has no turn between
+        # sends; its approval is refused (-32603), never put to `permit`, and
+        # the session goes on.
+        calls = []
+
+        def permit(*a, **k):
+            calls.append(a)
+            return Decision.ALLOW
+        own = [{"method": "item/started", "params": {"threadId": "$THREAD", "turnId": "$TURN", "item": {
+                    "id": "cmd-own", "type": "commandExecution", "command": "echo own", "cwd": "$CWD",
+                    "status": "inProgress"}}},
+               {"id": "ap-own", "method": "item/commandExecution/requestApproval", "params": {
+                   "threadId": "$THREAD", "turnId": "$TURN", "itemId": "cmd-own", "command": "echo own",
+                   "cwd": "$CWD"}}]
+        run = CodexRun(self, [self.between(own), short_turn("no_wait")], permit=permit)
+        run.send("one")
+        run.feed.wait(lambda ev: any(e.kind == K.ERROR for e in ev), what="the refusal notice")
+        replies = [r for r in run.brain.rpcs[-1].replies if r["id"] == "ap-own"]
+        self.assertEqual([r.get("error", {}).get("code") for r in replies], [-32603])
+        self.assertEqual(calls, [], "the orchestrator's own between-turn approval reached permit")
+        self.assertEqual(run.feed.of(K.APPROVAL_REQUESTED), [])
+        self.assertFalse([e for e in run.feed.of(K.ERROR) if e.data.get("fatal")])
+        self.assertFalse(run.handle.native.closed.is_set())
+        second = run.send("two")
+        self.assertEqual(second[-1].kind, K.TURN_FINISHED)
 
     def test_an_unknown_threads_request_between_turns_is_fatal_as_in_a_turn(self):
         stray = [{"id": "stray", "method": "item/commandExecution/requestApproval", "params": {

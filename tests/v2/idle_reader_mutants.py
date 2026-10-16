@@ -25,8 +25,8 @@ RUNNER = "jarvis/v2/runner.py"
 
 MUTANTS = [
     ("hand-off race: a turn does not park the idle reader", C,
-     "        await self._park(session)\n        session.reading = True",
-     "        session.reading = True",
+     "        session.reading = asyncio.current_task()\n        await self._park(session)",
+     "        session.reading = asyncio.current_task()",
      ["tests/v2/idle_reader_check.py", "ClaudeScripted.test_one_reader_at_a_time_whenever_the_owner_sends"]),
     # Not a mutant: `_park` without awaiting the cancelled task is
     # equivalent on one event loop (the idle reader routes each message with
@@ -118,6 +118,34 @@ MUTANTS = [
      "            if params.get(\"threadId\") != s.thread_id:\n                s.rpc.reply(msg[\"id\"], error={\"code\": -32602, \"message\": \"Request identity mismatch\"})\n                raise RpcError(\"Codex server request identity mismatch\")\n            s.rpc.reply(msg[\"id\"], error={\"code\": -32603, \"message\": \"No turn is running\"})",
      "            s.rpc.reply(msg[\"id\"], error={\"code\": -32603, \"message\": \"No turn is running\"})",
      ["tests/v2/idle_reader_check.py", "CodexIdle.test_an_unknown_threads_request_between_turns_is_fatal_as_in_a_turn"]),
+    # Review of #234.
+    ("HIGH-1: the provider's generator is left suspended until the worker returns", DMN,
+     "            with (contextlib.closing(source) if callable(getattr(source, \"close\", None))\n                  else contextlib.nullcontext()):",
+     "            with contextlib.nullcontext():",
+     ["tests/v2/idle_reader_check.py",
+      "DaemonClaude.test_the_queued_turn_runs_while_the_cli_turns_worker_lingers"]),
+    ("R2: the orchestrator's own between-turn approval reaches permit", X,
+     "            s.rpc.reply(msg[\"id\"], error={\"code\": -32603, \"message\": \"No turn is running\"})",
+     "            yield from self._server_request(h, msg, _Request(), child=None)\n            return",
+     ["tests/v2/idle_reader_check.py",
+      "CodexIdle.test_the_orchestrators_own_approval_with_no_turn_is_refused_and_never_asked"]),
+    ("R5: Discord posts a stopped or failed CLI turn's end", MIR,
+     "            if not turn or kind not in TURN_KINDS or row.get(\"self_started\"):",
+     "            if not turn or kind not in TURN_KINDS or (row.get(\"self_started\") and kind != \"turn_finished\"):",
+     ["tests/v2/idle_reader_check.py", "MirrorSkips.test_discord_posts_nothing_of_a_stopped_or_failed_cli_turn"]),
+    ("R6: the daemon answers a between-turn approval itself (deny)", DMN,
+     "        elif kind in GATE_KINDS:\n            self._record(session, event, idle=True)",
+     "        elif kind in GATE_KINDS:\n            if kind == EventKind.APPROVAL_REQUESTED:\n                session.provider.answer(session.handle, event.data[\"req_id\"], Decision.DENY)\n            self._record(session, event, idle=True)",
+     ["tests/v2/idle_reader_check.py", "DaemonGate"]),
+    ("LOW 4: a message that cannot be routed stops the idle reader", C,
+     "        try:\n            return self._route_idle(session, item)\n        except Exception:  # noqa: BLE001",
+     "        try:\n            return self._route_idle(session, item)\n        except ZeroDivisionError:  # noqa: BLE001",
+     ["tests/v2/idle_reader_check.py",
+      "ClaudeScripted.test_a_message_that_cannot_be_routed_is_held_and_reading_goes_on"]),
+    ("NIT: a turn gives the stream back that it does not hold", C,
+     "        if session.reading is not asyncio.current_task():\n            return\n        session.reading = None",
+     "        session.reading = None",
+     ["tests/v2/idle_reader_check.py", "ClaudeScripted.test_only_the_reader_gives_the_stream_back"]),
 ]
 
 

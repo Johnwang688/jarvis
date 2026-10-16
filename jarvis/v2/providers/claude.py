@@ -856,13 +856,13 @@ class _Session:
     child_denied: OrderedDict = field(default_factory=OrderedDict)
     # Between turns (SV-6). `watch` is the daemon's feed while it watches
     # this session (`ClaudeProvider.watch`), else None. `idle` is the idle
-    # reader's task and `reading` whether a turn holds the stream (both
-    # touched only on the session's loop). `held` is what a reader read and
+    # reader's task and `reading` the turn's task that holds the stream, or
+    # None (both touched only on the session's loop). `held` is what a reader read and
     # left, in order, for the next one; `offer` is the origin of a CLI turn
     # the idle reader holds for the daemon to adopt, or None.
     watch: Any = None
     idle: Any = None
-    reading: bool = False
+    reading: Any = None
     held: deque = field(default_factory=deque)
     offer: str | None = None
     held_dropped: int = 0
@@ -1856,15 +1856,20 @@ class ClaudeProvider:
             await asyncio.wait({task})
 
     async def _take_stream(self, session: _Session) -> None:
-        """A turn takes the stream: the idle reader is parked before the turn
-        writes or reads anything, and stays parked until `_give_stream`."""
+        """A turn takes the stream: marked as the reader first, so nothing
+        starts an idle reader while it parks the one running, and the idle
+        reader is parked before the turn writes or reads anything. It stays
+        parked until `_give_stream`."""
+        session.reading = asyncio.current_task()
         await self._park(session)
-        session.reading = True
 
     def _give_stream(self, session: _Session) -> None:
         """A turn is done with the stream (on the loop): the idle reader takes
-        it again, if the daemon watches this session."""
-        session.reading = False
+        it again, if the daemon watches this session. Only the turn that holds
+        the stream gives it back."""
+        if session.reading is not asyncio.current_task():
+            return
+        session.reading = None
         self._start_idle(session)
 
     def _start_idle(self, session: _Session) -> None:
@@ -1884,20 +1889,34 @@ class ClaudeProvider:
         try:
             left, session.held = list(session.held), deque()
             for index, item in enumerate(left):
-                if not self._route_idle(session, item):
+                if not self._route_one(session, item):
                     session.held.extend(left[index + 1:])
                     return
             pump = session.pump
             while (not session.closed and pump is not None and pump is session.pump
                    and not pump.ended and pump.client is session.client):
                 item = await pump.next(None)
-                if not self._route_idle(session, item):
+                if not self._route_one(session, item):
                     return
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001 — the next turn reads on, as before SV-6
             LOG.exception("claude %s: the idle reader failed; the next turn reads on",
                           session.thread_id)
+
+    def _route_one(self, session: _Session, item: Any) -> bool:
+        """`_route_idle`, but a message it cannot route (a shape `_translate`
+        raises on) is held for the next turn — which meets it as it did before
+        SV-6 — and reading goes on: one bad message neither drops data nor
+        stops the drain (review of #234, LOW 4)."""
+        try:
+            return self._route_idle(session, item)
+        except Exception:  # noqa: BLE001
+            LOG.exception("claude %s: a message read between turns could not be routed; "
+                          "held for the next turn", session.thread_id)
+            if not (session.held and session.held[-1] is item):
+                session.held.append(item)
+            return True
 
     def _route_idle(self, session: _Session, item: Any) -> bool:
         """One message read between turns, routed without awaiting anything.
