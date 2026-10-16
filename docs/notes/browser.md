@@ -1958,17 +1958,41 @@ What was broken: the page's own blue **Sign in to Chrome** button opens
 `https://accounts.google.com/signin/chrome/sync?ssp=1&continue=https://www.google.com/&flow=history_opt_in&theme=mn`
 in a **new tab with no opener**. Chrome opens it, not the page, so
 `_link_opener` found no parent. The HUD was never told, and the owner saw
-nothing happen. No other chrome:// page is visited on this path. Now a tab
-Chrome opened by itself becomes the sign-in tab's pop-up. Its window is told
-(`{t:"popup"}`) and the HUD adopts it beside that tab. Three conditions apply:
-Jarvis did not open it, it has no opener, and its first real landing is on
-exactly `https://accounts.google.com`. Jarvis's own tabs clear the mark before
-navigating. A page's own pop-up keeps its opener, even on that origin.
-Other opener-less pages stay unshown, as before. The Google tab is
-judged like any page and holds no internal capability. Its chrome:// landings
-are still replaced. Test 06e uses a local TLS stand-in for `accounts.google.com`
-behind the suite's gate; nothing leaves loopback. Through the HUD, the Google
-tab opened as the pane's active tab.
+nothing happen. No other chrome:// page is visited on this path.
+
+Now that tab becomes the sign-in tab's pop-up: its window gets
+`{t:"popup"}` and the HUD adopts it. "No opener" alone is not "Chrome opened
+it". The PR #217 review measured that Ctrl-, Shift- and middle-clicks on a
+link give no opener, real or scripted (even `dispatchEvent` with no input).
+None of them fires CDP `Page.windowOpen`, which fires only for `target=_blank`
+and `window.open`, and those have an opener. So every condition below is
+required (`_link_signin`, `_signin_popup`):
+
+- **Jarvis did not open it.** `_adopt(own=)` is set at construction, before
+  its first landing; the context's page event counts `instance.opening`.
+- **No opener** (Playwright's `opener()`), and no opener named meanwhile.
+- **Its first landing is exactly `https://accounts.google.com/signin/chrome/sync`**
+  (scheme, netloc and path; any query).
+- **Its only history entry carries Chrome's own transition.** That is
+  `auto_bookmark`, measured on Chrome 155. A page's open of the same
+  address, in any of the shapes above, is `link`, and no page can make a
+  browser-UI transition. This is the structural check, in place of
+  `windowOpen`.
+- **The owner pressed in that sign-in tab within `SIGNIN_ADOPT_S` (15 s).**
+  The press is stamped in `_deliver`, which only the owner's stream reaches;
+  driving sends its own input.
+- **At most once per sign-in tab** (`signin_adopted`), and only while its
+  capability lasts.
+
+The Google tab is judged like any page and holds no internal capability;
+its chrome:// landings are still replaced. Any other tab with no opener
+stays unshown, as before. `browser_profiles_check` covers this:
+`SigninAdoption` tests each condition on doubles; 06e is the real flow with
+a local TLS stand-in for `accounts.google.com` behind the suite's gate, plus
+a second attempt and Jarvis's own tab at the address; 06f is the forgery
+shapes after an owner press; 06g is a stale press and a capability that ended
+before Google's page landed. Nothing leaves loopback. Through the HUD, the
+Google tab opened as the pane's active tab.
 
 **Not verified** (no Google contact in tests): what comes after Google's
 page. `navigator.webdriver` is true, and Google may refuse the login as an
