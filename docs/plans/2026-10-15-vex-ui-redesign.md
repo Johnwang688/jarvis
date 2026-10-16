@@ -675,7 +675,7 @@ VX-UI-1 to VX-UI-3 and 4a can land with fakes alone. Real-device behaviour
 stays **UNRUN** until the owner's hardware session.
 
 **Status (2026-10-16).** Built: VX-UI-1 (#209), VX-UI-4a (#213), and the
-rest of VX-UI-2 and VX-UI-3 with VX-UI-6's docs (branch `claude/vex-ui-finish`;
+rest of VX-UI-2 and VX-UI-3 with VX-UI-6's docs ([#229](https://github.com/Johnwang688/jarvis/pull/229), merged 2026-10-16; branch `claude/vex-ui-finish`;
 `docs/notes/vex.md`, "The VEX view as built"). Dropped: VX-UI-5 (§0.1 item
 1). Pending: VX-UI-4b, which waits on hardware check H4.
 

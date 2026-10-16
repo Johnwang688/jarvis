@@ -181,7 +181,7 @@ modal picker here. It needs its own design.
   `DOM.describeNode` (p50 1.2 ms) unless the element is a select or a picker
   input.
 
-## Built (2026-10-16, branch `claude/b-pickers`)
+## Built (2026-10-16, branch `claude/b-pickers`, [#232](https://github.com/Johnwang688/jarvis/pull/232), merged 2026-10-16)
 
 `jarvis/v2/browser/pickers.py` and its hooks in `host.py` (`_deliver` and the
 lifecycle invalidations) and `stream.py` (`pick`, `pick_cancel`);
