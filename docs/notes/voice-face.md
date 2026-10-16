@@ -2397,7 +2397,8 @@ V6 stopgap is gone.)
 
 - **Route.** `POST /speech/summary {thread_id, text}` -> `{summary}`
   (`jarvis/v2/speech_summary.py`, `hud_api.speech_summary`). Unlike `/say` and
-  `/stt` (which have no owner check; tracked as a follow-up, unchanged here),
+  `/stt` at the time (they had no owner check until the 2026-10-16 follow-up,
+  "The voice pickers are the owner's" at the end of these notes),
   it is **owner-only** (`projects.owner_only`, before the body is read): it is
   a paid model call. Then: body capped at 1 MiB (413), `text` over 300,000
   characters refused (400) before any cleaning, at most 4 in flight (429, a
@@ -2592,7 +2593,8 @@ enrolled)`), never a score.
   membership, shell verdicts never ALLOW, v2 refusal text, ancestor grants) and the lists in
   `tests/v2/permissions_check.py` (1618 checks, the v1/v2/shell sets still equal).
 - **M1 verification is forced.** The daemon verifies every `/stt` whenever the store is not "none", on every
-  listener; `verify=1` is a no-op (anything else is still a 400). An unenrolled reply without `verify=1` is
+  listener (since 2026-10-16 `/stt` answers only the HUD's own requests, so the API listener is a 403 before
+  verification); `verify=1` is a no-op (anything else is still a 400). An unenrolled reply without `verify=1` is
   unchanged (`{text}`), so older callers see nothing new.
 - **M2 threshold floor.** `choose_threshold` is pure and pinned case by case. A proposal is never below
   0.50 (`SPEAKER_PROPOSAL_FLOOR`); readings whose weakest 10 % score under 0.60 against each other
@@ -2997,3 +2999,66 @@ CANCEL 100% as bare words) wired to `Capture.endNow` once V10 lands, but V11 nei
 wake list; the daemon-side recognizer; acting on a hit without a card within a second (plan 3.6 phase 2); the full `hud_v2_check`
 (its `wake_checks` section was rewritten, the `__hudRecog` lines in `hud_v2_check`, `_layout_check` and `_declutter_check` now ask
 `__hud.mic.wakeRunning()`; those two were edited but not run).
+
+## 2026-10-16: the voice pickers are the owner's (V2 follow-up)
+
+The V2 review's last open item ([follow-ups](../plans/2026-10-15-voice-followups.md)): `/stt` and `/say`
+had no owner check, so any loopback client on the API listener (every tool's HTTP client) could upload
+audio to a speech model, which is paid when it goes to the cloud, or synthesize speech. Fixed in
+`hud_api.pickers`: the names in `hud_api.OWNER_VOICE_PICKERS` call `projects.owner_only` first, before
+the query, the body or any audio work. The set is:
+
+- `POST /stt`, dictation (the microphone's audio to a model; speaker verification runs after the gate);
+- `POST /say`, one chunk of speech;
+- `GET /voices`, which lists the owner's clone and mix store (`pocket.custom_voices()`) and the mute flag;
+- `POST /voice`, which chooses Jarvis's voice;
+- `POST /mute`, v1's spoken-reply flag.
+
+These had the same gap; the other voice routes (`/stt/settings`, `/speaker*`, `/speech/summary`,
+`/speech/voices`, `/speech/duck`) were already owner-only. PR #227's review made the model and avatar
+writes owner-only on the same branch (`hud_api.OWNER_PICKER_WRITES`: `POST /model`, `POST /models`,
+`POST /avatar`). It showed the API listener, with no Origin, adding `evil/model` and selecting it, which
+rewrote the protected `models.json`. Their reads (`GET /models`, `/models/catalog`, `/avatars`,
+`/avatar.svg`) stay open. On `/stt` the gate also runs before the media-type check. A stranger's
+non-audio upload is a 403, not 400 `expected audio/*`.
+
+**Callers checked.** Every caller is the HUD page on its own listener: `api.stt` (dictation, push-to-talk,
+the wake word's claimed utterances, all through `App.tsx`'s `transcribe`), `api.say` (the speech
+controller), `api.voices`, `api.setVoice` and `api.mute`, all as main-thread `fetch`es. A POST carries the
+HUD's Origin. A `GET /voices` with no Origin carries `Sec-Fetch-Site: same-origin`. The wake and listen
+workers fetch only their model files. No tool, MCP route, bridge or Discord path calls these over HTTP:
+Discord voice notes and the v1 face server call `voice.stt`/`voice.tts` in process, and the v1 face
+server's own `/say`, `/voice` and `/mute` live on its own server, not this daemon.
+
+**Tests.** `tests/v2/hud_backend_check.py`, `test_voice_pickers_are_the_owners_alone`. Each route,
+`/stt` with and without `verify=1`, is refused on the API listener (its own Origin, none, or a
+same-origin mark) and on the workshop listener (404, pages only). On the HUD listener it is refused for a
+foreign Origin, `Origin: null`, and a write with no Origin. A read with no Origin is refused unless the
+browser marked it same-origin. A 49 MiB `Content-Length` is a 403, never a 413, and a bad `/stt` query is
+a 403, never a 400. The fakes for `stt_result`, `tts`, `catalog`, `set_voice`, `set_muted` and
+`speaker.verify` are never called, and no voice or mute event is published. The HUD's own requests still
+succeed, `localhost` included. `test_voice_picker_set_is_pinned` pins the set. The older backend tests now
+ask as the owner. In `speaker_check.py`, `/stt` from the API listener is a 403, where it was a 422.
+`tests/v2/owner_read_check.py`, `InChromium.test_the_huds_own_voice_requests_pass_the_gate`, uses real
+headless Chromium against a real daemon on ephemeral ports. From the HUD's own page, all five requests
+are 200. `GET /voices` arrives with no Origin and `Sec-Fetch-Site: same-origin`. The same requests from a
+page on another port all fail and reach no fake.
+
+`test_model_and_avatar_writes_are_the_owners_alone` runs the same refusal matrix on the three writes:
+`add`, `remove`, `{model, effort}`, select and avatar. Their fakes are never called, `models.json` is
+unchanged, and an oversize body is a 403. The reads still answer the API listener, and the HUD's pickers
+still work from its origin. `owner_read_check.py`'s `test_the_huds_model_and_avatar_pickers_pass_the_gate`
+shows the same pickers working in real Chromium.
+
+**Mutants.** `tests/v2/voice_owner_mutants.py` runs 13 mutants against both tests:
+- each voice route dropped from the set (5);
+- the gate removed;
+- the body read before the gate;
+- voice reads left open;
+- each write dropped from `OWNER_PICKER_WRITES` (3);
+- the writes not gated at all;
+- the review's mutant, the `/stt` mime check moved above the gate, which survived before the NIT test.
+
+All 13 are killed. The
+browser voice suites (`tests/face/hud_v2_*`) run against the mock daemon, so they never reach this
+route code and were not rerun.

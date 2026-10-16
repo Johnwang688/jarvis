@@ -521,11 +521,11 @@ class Backend(unittest.TestCase):
 
     # -- B1: project channels -------------------------------------------------
 
-    def owner(self, method, path, body=None, status=200):
+    def owner(self, method, path, body=None, status=200, *, headers=None, raw=None):
         """The HUD's own request: its listener and its Origin."""
         port = self.daemon.face_port
-        return self.request(method, path, body, status, port=port,
-                            headers={"Origin": f"http://127.0.0.1:{port}"})
+        return self.request(method, path, body, status, port=port, raw=raw,
+                            headers={"Origin": f"http://127.0.0.1:{port}", **(headers or {})})
 
     def discord_linker(self):
         from tests.v2.discord_linker_check import (ARCHIVE, CATEGORY, GUILD, TOKEN, UNGROUPED,
@@ -659,7 +659,7 @@ class Backend(unittest.TestCase):
         self.request("GET", "/projects/deadbeef/tree", status=404)
         self.request("GET", "/projects/bad/tree", status=400)
         self.request("GET", "/nothing", status=404)
-        self.request("POST", "/say", raw=b"", headers={"Content-Length": str(49 * 1024 * 1024)}, status=413)
+        self.owner("POST", "/say", raw=b"", headers={"Content-Length": str(49 * 1024 * 1024)}, status=413)
 
     def test_tree_depth_scope_and_platform(self):
         (self.project_root / "nested").mkdir()
@@ -1737,116 +1737,116 @@ class Backend(unittest.TestCase):
             w.setnchannels(1), w.setsampwidth(2), w.setframerate(16000), w.writeframes(b"\x01\x00" * 16000)
         wav = buf.getvalue()
         with patch.object(llm, "transcribe", side_effect=AssertionError("audio left the machine")) as cloud:
-            body = self.request("POST", "/stt?seq=4&budget_ms=15000", raw=wav, headers={"Content-Type": "audio/wav"})
+            body = self.owner("POST", "/stt?seq=4&budget_ms=15000", raw=wav, headers={"Content-Type": "audio/wav"})
             self.assertEqual((body["text"], body["backend"], body["seq"]), ("dictated locally", "local", 4))
             self.assertFalse(cloud.called)
             # A local failure with the fallback off is a visible 502, still nothing uploaded.
             stt_local.set_engine(stt_local.Engine(lambda threads: (_ for _ in ()).throw(RuntimeError("x")), schedule=False))
-            body = self.request("POST", "/stt", raw=wav, headers={"Content-Type": "audio/wav"}, status=502)
+            body = self.owner("POST", "/stt", raw=wav, headers={"Content-Type": "audio/wav"}, status=502)
             self.assertIn("nothing was uploaded", body["error"])
             self.assertFalse(cloud.called)
             # Cloud switched off and local not selected: 409, nothing uploaded.
             self.owner("POST", "/stt/settings", {"backend": "cloud"})
-            self.request("POST", "/stt", raw=wav, headers={"Content-Type": "audio/wav"}, status=409)
+            self.owner("POST", "/stt", raw=wav, headers={"Content-Type": "audio/wav"}, status=409)
             self.assertFalse(cloud.called)
 
     def test_speech_pickers_and_fast_model_only(self):
         with patch.object(voice, "stt_result", return_value=voice.SttResult("dictated", "cloud", "m/x")) as stt:
-            self.assertEqual(self.request("POST", "/stt", raw=b"RIFFaudio", headers={"Content-Type": "audio/wav"}),
+            self.assertEqual(self.owner("POST", "/stt", raw=b"RIFFaudio", headers={"Content-Type": "audio/wav"}),
                              {"text": "dictated", "backend": "cloud", "model": "m/x"})
             # V2: dictation is bounded tighter than llm.transcribe's 60 s x 3.
             stt.assert_called_once_with(b"RIFFaudio", mime="audio/wav", timeout=20.0, max_retries=2, budget=None,
                                         prefer_local=True)
             # V2: the clip's ids are echoed so a delayed reply can be placed in order.
-            self.assertEqual(self.request("POST", "/stt?utterance_id=7&seq=12", raw=b"RIFFaudio", headers={"Content-Type": "audio/wav"}),
+            self.assertEqual(self.owner("POST", "/stt?utterance_id=7&seq=12", raw=b"RIFFaudio", headers={"Content-Type": "audio/wav"}),
                              {"text": "dictated", "backend": "cloud", "model": "m/x", "utterance_id": 7, "seq": 12})
             # MED-2: the client's deadline reaches the model chain, clamped, never echoed.
             stt.reset_mock()
-            self.assertEqual(self.request("POST", "/stt?seq=3&budget_ms=15000", raw=b"RIFFaudio", headers={"Content-Type": "audio/wav"}),
+            self.assertEqual(self.owner("POST", "/stt?seq=3&budget_ms=15000", raw=b"RIFFaudio", headers={"Content-Type": "audio/wav"}),
                              {"text": "dictated", "backend": "cloud", "model": "m/x", "seq": 3})
             self.assertEqual(stt.call_args.kwargs["budget"], 15.0)
-            self.request("POST", "/stt?budget_ms=1", raw=b"RIFFaudio", headers={"Content-Type": "audio/wav"})
+            self.owner("POST", "/stt?budget_ms=1", raw=b"RIFFaudio", headers={"Content-Type": "audio/wav"})
             self.assertEqual(stt.call_args.kwargs["budget"], 1.0)
-            self.request("POST", "/stt?budget_ms=99999999", raw=b"RIFFaudio", headers={"Content-Type": "audio/wav"})
+            self.owner("POST", "/stt?budget_ms=99999999", raw=b"RIFFaudio", headers={"Content-Type": "audio/wav"})
             self.assertEqual(stt.call_args.kwargs["budget"], 600.0)
-            self.request("POST", "/stt", raw=b"RIFFaudio", headers={"Content-Type": "audio/wav"})
+            self.owner("POST", "/stt", raw=b"RIFFaudio", headers={"Content-Type": "audio/wav"})
             self.assertIsNone(stt.call_args.kwargs["budget"])
             for bad in ("budget_ms=-5", "budget_ms=abc", "budget_ms=1.5", "budget_ms="):
                 calls = stt.call_count
-                self.request("POST", "/stt?" + bad, raw=b"RIFFaudio", headers={"Content-Type": "audio/wav"}, status=400)
+                self.owner("POST", "/stt?" + bad, raw=b"RIFFaudio", headers={"Content-Type": "audio/wav"}, status=400)
                 self.assertEqual(stt.call_count, calls)
             for bad in ("seq=-1", "seq=x", "seq=1.5", "utterance_id=", "seq=" + "9" * 40, "other=1", "seq=1&seq=2"):
                 calls = stt.call_count
-                self.request("POST", "/stt?" + bad, raw=b"RIFFaudio", headers={"Content-Type": "audio/wav"}, status=400)
+                self.owner("POST", "/stt?" + bad, raw=b"RIFFaudio", headers={"Content-Type": "audio/wav"}, status=400)
                 self.assertEqual(stt.call_count, calls, f"{bad}: a refused request must not call the provider")
-            self.request("POST", "/stt", raw=b"text", headers={"Content-Type": "text/plain"}, status=400)
-            self.request("POST", "/stt", raw=b"", headers={"Content-Type": "audio/webm"}, status=400)
+            self.owner("POST", "/stt", raw=b"text", headers={"Content-Type": "text/plain"}, status=400)
+            self.owner("POST", "/stt", raw=b"", headers={"Content-Type": "audio/webm"}, status=400)
         # A provider outage is a sentence for the HUD (502 naming each model
         # and its status), never a traceback; a raw LLMError's body is not
         # reflected, because it can quote anything the provider sent back.
         down = voice.STTUnavailable("speech-to-text unavailable: a/one (HTTP 404), b/two (HTTP 503)")
         with patch.object(voice, "stt_result", side_effect=down):
-            body = self.request("POST", "/stt", raw=b"RIFFaudio",
+            body = self.owner("POST", "/stt", raw=b"RIFFaudio",
                                 headers={"Content-Type": "audio/wav"}, status=502)
             self.assertEqual(body["error"], str(down))
         from jarvis import llm
         with patch.object(voice, "stt_result", side_effect=llm.LLMError("HTTP 500: never-expose-this")):
-            body = self.request("POST", "/stt", raw=b"RIFFaudio",
+            body = self.owner("POST", "/stt", raw=b"RIFFaudio",
                                 headers={"Content-Type": "audio/wav"}, status=502)
             self.assertEqual(body["error"], "speech-to-text failed (LLMError)")
         # V13: the clip says which backend served it, and why local did not.
         local = voice.SttResult("heard here", "local", "parakeet (local)")
         with patch.object(voice, "stt_result", return_value=local):
-            self.assertEqual(self.request("POST", "/stt?seq=1", raw=b"RIFFaudio", headers={"Content-Type": "audio/wav"}),
+            self.assertEqual(self.owner("POST", "/stt?seq=1", raw=b"RIFFaudio", headers={"Content-Type": "audio/wav"}),
                              {"text": "heard here", "backend": "local", "model": "parakeet (local)", "seq": 1})
         slow = voice.SttResult("from cloud", "cloud", "m/x", "local speech-to-text ran out of time")
         with patch.object(voice, "stt_result", return_value=slow):
-            self.assertEqual(self.request("POST", "/stt", raw=b"RIFFaudio", headers={"Content-Type": "audio/wav"})["fallback"],
+            self.assertEqual(self.owner("POST", "/stt", raw=b"RIFFaudio", headers={"Content-Type": "audio/wav"})["fallback"],
                              "local speech-to-text ran out of time")
         # The owner's own switch is a 409, not an outage: a retry cannot fix it.
         off = voice.STTBlocked("cloud speech-to-text is switched off in Settings > Voice")
         with patch.object(voice, "stt_result", side_effect=off):
-            body = self.request("POST", "/stt", raw=b"RIFFaudio", headers={"Content-Type": "audio/wav"}, status=409)
+            body = self.owner("POST", "/stt", raw=b"RIFFaudio", headers={"Content-Type": "audio/wav"}, status=409)
             self.assertEqual(body["error"], str(off))
         listed = [{"name": "test", "backend": "fake", "kind": "builtin"}]
         for audio, mime in ((b"RIFFwav", "audio/wav"), (b"MP3data", "audio/mpeg")):
             with patch.object(voice, "tts", return_value=audio) as tts, \
                     patch.object(voice, "catalog", return_value=listed):
-                self.assertEqual(self.request("POST", "/say", {"text": "x" * 2500, "voice": "test"}), audio)
+                self.assertEqual(self.owner("POST", "/say", {"text": "x" * 2500, "voice": "test"}), audio)
                 self.assertEqual(self.headers["Content-Type"], mime)
                 self.assertEqual(len(tts.call_args.args[0]), 2000)
                 self.assertTrue(self.headers["X-Speech-Ms"].isdigit())
-        self.request("POST", "/say", {}, status=400)
+        self.owner("POST", "/say", {}, status=400)
         av = self.request("GET", "/avatars")
         self.assertIn("avatars", av)
-        self.request("POST", "/avatar", {"slug": "missing"}, status=404)
-        self.assertEqual(self.request("POST", "/avatar", {"slug": "jarvis"})["slug"], "jarvis")
+        self.owner("POST", "/avatar", {"slug": "missing"}, status=404)
+        self.assertEqual(self.owner("POST", "/avatar", {"slug": "jarvis"})["slug"], "jarvis")
         with patch.object(avatars, "svg", return_value='<svg xmlns="http://www.w3.org/2000/svg"/>'):
             self.assertIn(b"<svg", self.request("GET", "/avatar.svg"))
             self.assertIn("default-src 'none'", self.headers["Content-Security-Policy"])
         self.request("GET", "/avatar.svg?slug=missing", status=404)
         with patch.object(voice, "catalog", return_value=[{"name": "test", "backend": "fake", "kind": "builtin"}]), patch.object(voice, "_known", return_value=True):
-            self.assertEqual(self.request("GET", "/voices")["voices"][0]["name"], "test")
-            self.assertEqual(self.request("POST", "/voice", {"voice": "test"}), {"voice": "test"})
-            self.request("POST", "/voice", {"voice": ""})
+            self.assertEqual(self.owner("GET", "/voices")["voices"][0]["name"], "test")
+            self.assertEqual(self.owner("POST", "/voice", {"voice": "test"}), {"voice": "test"})
+            self.owner("POST", "/voice", {"voice": ""})
         with patch.object(voice, "_known", return_value=False):
-            self.request("POST", "/voice", {"voice": "missing"}, status=404)
-        self.assertTrue(self.request("POST", "/mute", {"muted": True})["muted"])
-        self.request("POST", "/mute", {"muted": False})
+            self.owner("POST", "/voice", {"voice": "missing"}, status=404)
+        self.assertTrue(self.owner("POST", "/mute", {"muted": True})["muted"])
+        self.owner("POST", "/mute", {"muted": False})
         route_before = self.request("GET", "/route")
         thread = self.thread(P.CODEX)
         pinned = self.daemon._sessions[thread.id].brief
         self.assertIn("models", self.request("GET", "/models"))
         self.assertEqual(self.request("GET", "/models/catalog")["models"][0]["id"], "test/model")
-        self.request("POST", "/models", {"add": "test/model"})
-        selected = self.request("POST", "/model", {"model": "test/model"})
+        self.owner("POST", "/models", {"add": "test/model"})
+        selected = self.owner("POST", "/model", {"model": "test/model"})
         self.assertEqual(selected["current"], "test/model")
         self.assertEqual(models.tier("orchestrator"), "test/model")
         self.assertEqual(self.daemon._sessions[thread.id].brief, pinned)
         self.assertEqual(self.request("GET", "/route")["table"], route_before["table"])
-        self.request("POST", "/model", {"model": "missing"}, status=404)
-        self.request("POST", "/models", {"add": "test/model", "remove": "test/model"}, status=400)
-        self.request("POST", "/models", {"remove": "test/model"})
+        self.owner("POST", "/model", {"model": "missing"}, status=404)
+        self.owner("POST", "/models", {"add": "test/model", "remove": "test/model"}, status=400)
+        self.owner("POST", "/models", {"remove": "test/model"})
         self.assertNotEqual(models.selected(), "test/model")
         kinds = {e["kind"] for e in self.events_all()}
         self.assertTrue({"voice", "avatar", "model", "mute"} <= kinds)
@@ -1863,30 +1863,183 @@ class Backend(unittest.TestCase):
                 patch.object(llm, "speech", side_effect=cloud) as speech, \
                 patch.object(voice, "_local_tts", return_value=b"RIFFlocal") as local:
             # An unknown name is refused before any backend sees it.
-            self.request("POST", "/say", {"text": "hi", "voice": "nope"}, status=400)
-            self.request("POST", "/say", {"text": "hi", "voice": 7}, status=400)
-            self.request("POST", "/say", {"text": "hi", "local_only": "yes"}, status=400)
-            self.request("POST", "/say", {"text": "hi", "bogus": 1}, status=400)
+            self.owner("POST", "/say", {"text": "hi", "voice": "nope"}, status=400)
+            self.owner("POST", "/say", {"text": "hi", "voice": 7}, status=400)
+            self.owner("POST", "/say", {"text": "hi", "local_only": "yes"}, status=400)
+            self.owner("POST", "/say", {"text": "hi", "bogus": 1}, status=400)
             local.assert_not_called()
             speech.assert_not_called()
             # A listed voice, local only: synthesized here.
-            self.assertEqual(self.request("POST", "/say", {"text": "hi", "voice": "bm_test", "local_only": True}),
+            self.assertEqual(self.owner("POST", "/say", {"text": "hi", "voice": "bm_test", "local_only": True}),
                              b"RIFFlocal")
             self.assertEqual(local.call_args.args[1], "bm_test")
             # The local backend failing: 503, and the cloud is still untouched.
             local.side_effect = RuntimeError("kokoro is missing")
-            body = self.request("POST", "/say", {"text": "hi", "voice": "bm_test", "local_only": True}, status=503)
+            body = self.owner("POST", "/say", {"text": "hi", "voice": "bm_test", "local_only": True}, status=503)
             self.assertNotIn("kokoro", body["error"])
             speech.assert_not_called()
             # A cloud-configured backend is refused the same way, not used.
             with patch.object(config, "TTS_BACKEND", "cloud"):
-                self.request("POST", "/say", {"text": "hi", "local_only": True}, status=503)
+                self.owner("POST", "/say", {"text": "hi", "local_only": True}, status=503)
             speech.assert_not_called()
             # Without local_only the old fallback chain is unchanged.
             speech.side_effect = None
             speech.return_value = b"MP3cloud"
-            self.assertEqual(self.request("POST", "/say", {"text": "hi", "voice": "bm_test"}), b"MP3cloud")
+            self.assertEqual(self.owner("POST", "/say", {"text": "hi", "voice": "bm_test"}), b"MP3cloud")
             speech.assert_called_once()
+
+    def test_voice_picker_set_is_pinned(self):
+        """The owner-only pickers, by name (the behaviour is the two tests after this one; the
+        mutants in `tests/v2/voice_owner_mutants.py` run those, not this pin)."""
+        self.assertEqual(H.OWNER_VOICE_PICKERS, frozenset({"stt", "say", "voice", "voices", "mute"}))
+        self.assertEqual(H.OWNER_PICKER_WRITES, frozenset({"model", "models", "avatar"}))
+
+    def test_voice_pickers_are_the_owners_alone(self):
+        """Voice follow-ups, V2 row: `/stt`, `/say`, `/voices`, `/voice` and `/mute` are owner-only,
+        checked before the query, the body or any audio work. Refused on the API listener (every
+        tool's client), the workshop listener, a foreign Origin, `Origin: null` and a write with no
+        Origin; the HUD's own requests still work."""
+        from jarvis import speaker
+        wav = {"Content-Type": "audio/wav"}
+        asks = [("POST", "/stt", None, b"RIFFaudio", wav), ("POST", "/stt?verify=1&seq=2", None, b"RIFFaudio", wav),
+                ("POST", "/say", {"text": "hi"}, None, None), ("POST", "/say", {"text": "hi", "local_only": True}, None, None),
+                ("GET", "/voices", None, None, None), ("POST", "/voice", {"voice": "test"}, None, None),
+                ("POST", "/mute", {"muted": True}, None, None)]
+        api, hud, shop = self.daemon.port, self.daemon.face_port, self.daemon.workshop_port
+
+        def boom(*a, **kw):
+            raise AssertionError("a refused request reached the voice")
+
+        with patch.object(voice, "stt_result", side_effect=boom) as stt, \
+                patch.object(voice, "tts", side_effect=boom) as tts, \
+                patch.object(voice, "catalog", side_effect=boom) as catalog, \
+                patch.object(voice, "set_voice", side_effect=boom) as set_voice, \
+                patch.object(voicectl, "set_muted", side_effect=boom) as set_muted, \
+                patch.object(speaker, "verify", side_effect=boom) as verify:
+            for method, path, body, raw, headers in asks:
+                with self.subTest(method=method, path=path):
+                    h = headers or {}
+                    # The API listener: with its own (matching) Origin, with none, and a GET marked same-origin.
+                    self.request(method, path, body, 403, raw=raw, headers={"Origin": f"http://127.0.0.1:{api}", **h})
+                    self.request(method, path, body, 403, raw=raw, headers=h)
+                    self.request(method, path, body, 403, raw=raw, headers={"Sec-Fetch-Site": "same-origin", **h})
+                    # The workshop (preview) listener serves pages only, never a voice route.
+                    self.request(method, path, body, 404, raw=raw, port=shop, headers=h)
+                    self.request(method, path, body, 404, raw=raw, port=shop,
+                                 headers={"Origin": f"http://127.0.0.1:{shop}", **h})
+                    # The HUD listener: a foreign Origin, an opaque one, and no Origin at all.
+                    for origin in ("http://evil.example", f"http://localhost:{shop}", "null"):
+                        self.request(method, path, body, 403, raw=raw, port=hud, headers={"Origin": origin, **h})
+                    if method == "POST":
+                        self.request(method, path, body, 403, raw=raw, port=hud, headers=h)
+                        self.request(method, path, body, 403, raw=raw, port=hud,
+                                     headers={"Sec-Fetch-Site": "same-origin", **h})
+                    else:
+                        # A read with no Origin is the owner's only when the browser marked it same-origin.
+                        for site in (None, "same-site", "cross-site", "none"):
+                            self.request(method, path, body, 403, raw=raw, port=hud,
+                                         headers={**({"Sec-Fetch-Site": site} if site else {}), **h})
+            # Checked first: a body too big to read is refused for who sent it (403), never measured
+            # (413), and a bad query is never parsed (403, not 400).
+            for path, h in (("/stt", wav), ("/say", {}), ("/voice", {}), ("/mute", {})):
+                with self.subTest(oversize=path):
+                    self.request("POST", path, raw=b"", status=403,
+                                 headers={"Content-Length": str(49 * 1024 * 1024), **h})
+            self.request("POST", "/stt?seq=-1&bogus=2", raw=b"RIFFaudio", headers=wav, status=403)
+            self.request("POST", "/stt?seq=-1&bogus=2", raw=b"RIFFaudio", port=hud,
+                         headers={"Origin": "null", **wav}, status=403)
+            # And the media type is never judged for a stranger: a non-audio upload is a 403, not
+            # `expected audio/*` (400) -- the gate runs before the mime check (#227 review, NIT).
+            for h in ({"Content-Type": "text/plain"}, {"Content-Type": "application/json"}, {}):
+                with self.subTest(mime=h):
+                    self.request("POST", "/stt", raw=b"hello", headers=h, status=403)
+                    self.request("POST", "/stt", raw=b"hello", port=hud, headers=h, status=403)
+                    self.request("POST", "/stt", raw=b"hello", port=hud,
+                                 headers={"Sec-Fetch-Site": "same-origin", **h}, status=403)
+            for fake in (stt, tts, catalog, set_voice, set_muted, verify):
+                fake.assert_not_called()
+        self.assertFalse({"voice", "mute"} & {e["kind"] for e in self.events_all()})
+
+        # The HUD's own requests still work: its listener and its Origin (a GET with no Origin
+        # but the browser's same-origin mark, as Chromium sends it, included).
+        listed = [{"name": "test", "backend": "fake", "kind": "builtin"}]
+        with patch.object(voice, "stt_result", return_value=voice.SttResult("dictated", "cloud", "m/x")), \
+                patch.object(speaker, "verify", return_value="skipped_unenrolled"), \
+                patch.object(voice, "tts", return_value=b"RIFFsaid"), \
+                patch.object(voice, "catalog", return_value=listed), \
+                patch.object(voice, "_known", return_value=True):
+            self.assertEqual(self.owner("POST", "/stt?seq=2", raw=b"RIFFaudio", headers=wav)["text"], "dictated")
+            self.assertEqual(self.owner("POST", "/say", {"text": "hi"}), b"RIFFsaid")
+            self.assertEqual(self.owner("GET", "/voices")["voices"], listed)
+            self.assertEqual(self.request("GET", "/voices", port=hud,
+                                          headers={"Sec-Fetch-Site": "same-origin"})["voices"], listed)
+            self.assertEqual(self.owner("POST", "/voice", {"voice": "test"}), {"voice": "test"})
+            self.owner("POST", "/voice", {"voice": ""})
+            self.assertTrue(self.owner("POST", "/mute", {"muted": True})["muted"])
+            self.assertFalse(self.owner("POST", "/mute", {"muted": False})["muted"])
+            # `localhost` is the HUD too.
+            self.request("POST", "/say", {"text": "hi"}, port=hud,
+                         headers={"Host": f"localhost:{hud}", "Origin": f"http://localhost:{hud}"})
+
+    def test_model_and_avatar_writes_are_the_owners_alone(self):
+        """#227 review: `POST /model`, `POST /models` (the protected `models.json`: an API-listener
+        client could add `evil/model` and select it) and `POST /avatar` are owner-only, checked
+        before the body is read. Their reads (`GET /models`, `/models/catalog`, `/avatars`,
+        `/avatar.svg`) answer any listener, and the HUD's model and avatar pickers still work."""
+        api, hud, shop = self.daemon.port, self.daemon.face_port, self.daemon.workshop_port
+        saved = Path(config.MODELS_PATH)
+        before = saved.read_bytes() if saved.exists() else None
+        asks = [("/models", {"add": "evil/model"}), ("/models", {"remove": "test/model"}),
+                ("/models", {"model": "test/model", "effort": "high"}), ("/model", {"model": "evil/model"}),
+                ("/model", {"model": "test/model"}), ("/avatar", {"slug": "jarvis"})]
+
+        def boom(*a, **kw):
+            raise AssertionError("a refused request reached the picker")
+
+        with patch.object(models, "select", side_effect=boom) as select, \
+                patch.object(models, "add", side_effect=boom) as add, \
+                patch.object(models, "remove", side_effect=boom) as remove, \
+                patch.object(models, "set_effort", side_effect=boom) as effort, \
+                patch.object(avatars, "set_active", side_effect=boom) as set_active:
+            for path, body in asks:
+                with self.subTest(path=path, body=body):
+                    self.request("POST", path, body, 403, headers={"Origin": f"http://127.0.0.1:{api}"})
+                    self.request("POST", path, body, 403)
+                    self.request("POST", path, body, 403, headers={"Sec-Fetch-Site": "same-origin"})
+                    self.request("POST", path, body, 404, port=shop)
+                    for origin in ("http://evil.example", f"http://localhost:{shop}", "null"):
+                        self.request("POST", path, body, 403, port=hud, headers={"Origin": origin})
+                    self.request("POST", path, body, 403, port=hud)
+                    self.request("POST", path, body, 403, port=hud, headers={"Sec-Fetch-Site": "same-origin"})
+            for path in ("/model", "/models", "/avatar"):
+                with self.subTest(oversize=path):
+                    self.request("POST", path, raw=b"", status=403,
+                                 headers={"Content-Length": str(49 * 1024 * 1024), "Content-Type": "application/json"})
+                    # A body the route would refuse is still refused for who sent it first.
+                    self.request("POST", path, {"bogus": 1}, 403)
+            for fake in (select, add, remove, effort, set_active):
+                fake.assert_not_called()
+        self.assertEqual(saved.read_bytes() if saved.exists() else None, before, "models.json was rewritten")
+        self.assertNotIn("evil/model", self.owner("GET", "/models")["models"])
+        self.assertFalse({"model", "avatar"} & {e["kind"] for e in self.events_all()})
+
+        # The reads stay open on the API listener.
+        self.assertIn("models", self.request("GET", "/models"))
+        self.assertEqual(self.request("GET", "/models/catalog")["models"][0]["id"], "test/model")
+        self.assertIn("avatars", self.request("GET", "/avatars"))
+        with patch.object(avatars, "svg", return_value='<svg xmlns="http://www.w3.org/2000/svg"/>'):
+            self.assertIn(b"<svg", self.request("GET", "/avatar.svg"))
+
+        # The HUD's pickers, from its own origin: add, select, set effort, unpin; choose an avatar.
+        self.owner("POST", "/models", {"add": "test/model"})
+        self.assertEqual(self.owner("POST", "/model", {"model": "test/model"})["current"], "test/model")
+        self.owner("POST", "/models", {"model": "test/model", "effort": ""})
+        self.assertEqual(models.selected(), "test/model")
+        self.request("POST", "/models", {"add": "test/thinker"}, port=hud,
+                     headers={"Host": f"localhost:{hud}", "Origin": f"http://localhost:{hud}"})
+        self.owner("POST", "/models", {"remove": "test/thinker"})
+        self.assertEqual(self.owner("POST", "/avatar", {"slug": "jarvis"})["slug"], "jarvis")
+        self.assertTrue({"model", "avatar"} <= {e["kind"] for e in self.events_all()})
 
     def test_speech_summary_route(self):
         """V8: `/speech/summary` is the owner's, answers a spoken summary, validates its body and never leaks a provider's text."""
@@ -1946,10 +2099,10 @@ class Backend(unittest.TestCase):
     def test_mic_off_no_longer_mutes_voice_out(self):
         """V6: the HUD stops posting `/mute` for the mic's OFF; `voice_out` reports the flag."""
         voicectl.set_muted(False)
-        self.assertTrue(self.request("GET", "/voices")["voice_out"])
-        self.request("POST", "/mute", {"muted": True})
+        self.assertTrue(self.owner("GET", "/voices")["voice_out"])
+        self.owner("POST", "/mute", {"muted": True})
         try:
-            self.assertFalse(self.request("GET", "/voices")["voice_out"])
+            self.assertFalse(self.owner("GET", "/voices")["voice_out"])
         finally:
             voicectl.set_muted(False)
         hud = Path(__file__).resolve().parents[2] / "hud" / "src"
@@ -2144,19 +2297,20 @@ class Backend(unittest.TestCase):
         """A6: the HUD sent {id}, {name} and {mute}; the daemon read model,
         voice and muted, so every click reset the setting it meant to change.
         A wrong key is now refused by name rather than read as 'absent'."""
-        self.request("POST", "/models", {"add": "test/model"})
-        self.request("POST", "/model", {"model": "test/model"})
+        self.owner("POST", "/models", {"add": "test/model"})
+        self.owner("POST", "/model", {"model": "test/model"})
         self.assertEqual(models.selected(), "test/model")
         for path, body in (("/model", {"id": "test/model"}), ("/model", {"id": "test/model", "effort": "high"}),
                            ("/voice", {"name": ""}), ("/mute", {"mute": True}),
                            ("/mute", {"muted": "yes"}), ("/models", {"id": "test/model"})):
-            error = self.request("POST", path, body, status=400)["error"]
+            # Every picker write is the owner's (V2 row; #227 review for the model pickers).
+            error = self.owner("POST", path, body, status=400)["error"]
             self.assertTrue("unknown fields" in error or "missing fields" in error or "boolean" in error, error)
         # None of those refusals moved the selection back to the default.
         self.assertEqual(models.selected(), "test/model")
         self.assertFalse(voicectl.is_muted())
         # Effort goes to /models {model, effort}, and does not move the selection.
-        self.request("POST", "/models", {"model": "test/model", "effort": ""})
+        self.owner("POST", "/models", {"model": "test/model", "effort": ""})
         self.assertEqual(models.selected(), "test/model")
 
     def test_the_hud_unpins_any_model_and_chooses_the_default(self):
@@ -2165,42 +2319,42 @@ class Backend(unittest.TestCase):
         choice is now *the* default, any model unpins, and every refusal is a
         sentence the picker can show — never "request failed (…)"."""
         default = config.TIERS["orchestrator"]
-        self.request("POST", "/models", {"add": "test/model"})
+        self.owner("POST", "/models", {"add": "test/model"})
         self.events_all()
         # The env model while nothing is chosen is what a default thread runs.
-        error = self.request("POST", "/models", {"remove": default}, status=409)["error"]
+        error = self.owner("POST", "/models", {"remove": default}, status=409)["error"]
         self.assertIn("choose another default first", error)
         self.assertIn(default, models.roster().models)
         # Set as default: the global pick, which the fast chips name as default.
-        body = self.request("POST", "/model", {"model": "test/model"})
+        body = self.owner("POST", "/model", {"model": "test/model"})
         self.assertEqual((body["current"], body["default_source"]), ("test/model", "hud"))
         self.assertEqual(self.request("GET", "/thread-models")["providers"]["fast"]["default"], "test/model")
         # Now the env model unpins like any other, and stays unpinned on reload.
-        body = self.request("POST", "/models", {"remove": default})
+        body = self.owner("POST", "/models", {"remove": default})
         self.assertEqual([m["id"] for m in body["models"]], ["test/model"])
         self.assertEqual(models.roster().models, ["test/model"])
         self.assertEqual([m["id"] for m in self.request("GET", "/models")["models"]], ["test/model"])
         # The roster is never empty.
-        self.assertIn("only model", self.request(
+        self.assertIn("only model", self.owner(
             "POST", "/models", {"remove": "test/model"}, status=409)["error"])
         # Reset to config default: the env model is listed and answers again.
-        body = self.request("POST", "/model", {"model": ""})
+        body = self.owner("POST", "/model", {"model": ""})
         self.assertEqual((body["current"], body["default_source"]), (default, "config"))
         self.assertIn(default, [m["id"] for m in body["models"]])
         self.assertEqual(self.request("GET", "/thread-models")["providers"]["fast"]["default"], default)
         # The other refusals carry their reasons too.
-        self.assertIn("not on the roster", self.request(
+        self.assertIn("not on the roster", self.owner(
             "POST", "/models", {"remove": "nope/missing"}, status=404)["error"])
-        self.assertIn("tool calling", self.request(
+        self.assertIn("tool calling", self.owner(
             "POST", "/models", {"add": "nope/missing"}, status=400)["error"])
         # An effort riding an add or a remove is refused, never dropped.
-        self.assertIn("effort goes with", self.request(
+        self.assertIn("effort goes with", self.owner(
             "POST", "/models", {"add": "test/thinker", "effort": "low"}, status=400)["error"])
-        self.request("POST", "/models", {"remove": "test/model", "effort": "low"}, status=400)
+        self.owner("POST", "/models", {"remove": "test/model", "effort": "low"}, status=400)
         self.assertNotIn("test/thinker", models.roster().models)
         # 404 is "not on the roster" only: a real bug's KeyError is not one.
         with patch.object(models, "remove", side_effect=KeyError("boom")):
-            self.request("POST", "/models", {"remove": "test/model"}, status=400)
+            self.owner("POST", "/models", {"remove": "test/model"}, status=400)
         # One `model` broadcast per change, none for a refusal.
         kinds = [e["kind"] for e in self.events_all()]
         self.assertEqual(kinds.count("model"), 3, kinds)
@@ -2345,7 +2499,7 @@ class Backend(unittest.TestCase):
         # Read-only until restored, the rule rename and move already follow.
         from jarvis.v2 import projects
         self.model_fakes()
-        self.request("POST", "/models", {"add": "test/thinker"})
+        self.owner("POST", "/models", {"add": "test/thinker"})
         tid = self.chat()["id"]
         projects.archive_thread(self.daemon, tid)
         self.events_all()
@@ -2428,7 +2582,7 @@ class Backend(unittest.TestCase):
 
     def test_open_thread_checks_the_model_before_anything_exists(self):
         fakes = self.model_fakes()
-        self.request("POST", "/models", {"add": "test/thinker"})
+        self.owner("POST", "/models", {"add": "test/thinker"})
         body = self.chat(model="test/thinker", effort="low")
         self.assertEqual((body["model"], body["effort"]), ("test/thinker", "low"))
         self.assertEqual((fakes[P.FAST].opened[-1][1].model, fakes[P.FAST].opened[-1][1].effort),
@@ -2438,7 +2592,7 @@ class Backend(unittest.TestCase):
                               ({"model": "test/thinker", "effort": "max"}, "does not offer 'max'"),
                               ({"model": "test/thinker", "effort": "turbo"}, "not a reasoning effort")):
             self.assertIn(reason, self.chat(status=400, **brief)["error"])
-        self.request("POST", "/models", {"remove": "test/thinker"})
+        self.owner("POST", "/models", {"remove": "test/thinker"})
         self.assertIn("not on your model roster", self.chat(status=400, model="test/thinker")["error"])
         self.assertEqual(len(self.stores.threads.list()), before, "a refused model leaves no thread behind")
         self.assertIn("not a Claude model", self.chat("claude", status=400, model="test/thinker")["error"])
@@ -2593,7 +2747,7 @@ class Backend(unittest.TestCase):
 
     def test_patch_model_applies_from_the_next_message_and_never_touches_the_brief(self):
         fakes = self.model_fakes()
-        self.request("POST", "/models", {"add": "test/thinker"})
+        self.owner("POST", "/models", {"add": "test/thinker"})
         thread = self.chat()
         tid = thread["id"]
         saved = self.brief_bytes(tid)
@@ -2648,11 +2802,11 @@ class Backend(unittest.TestCase):
 
     def test_a_default_thread_follows_a_global_change_between_turns(self):
         fakes = self.model_fakes()
-        self.request("POST", "/models", {"add": "test/thinker"})
+        self.owner("POST", "/models", {"add": "test/thinker"})
         tid = self.chat()["id"]
         self.send_and_settle(tid)
         self.assertEqual(fakes[P.FAST].changes, [])
-        self.request("POST", "/model", {"model": "test/thinker"})   # the global picker
+        self.owner("POST", "/model", {"model": "test/thinker"})   # the global picker
         self.send_and_settle(tid)
         self.assertEqual(fakes[P.FAST].changes, [("test/thinker", "high")],
                          "an open default thread must pick up the global choice at its next turn")
@@ -2669,8 +2823,8 @@ class Backend(unittest.TestCase):
         default and dropped for one with no reasoning control. Only an
         explicit model pins."""
         fakes = self.model_fakes()
-        self.request("POST", "/models", {"add": "test/thinker"})
-        self.request("POST", "/models", {"add": "test/model"})
+        self.owner("POST", "/models", {"add": "test/thinker"})
+        self.owner("POST", "/models", {"add": "test/model"})
         tid = self.chat()["id"]
         saved = self.brief_bytes(tid)
         first = models.tier("orchestrator")       # not in the fixture: its ladder is unknown
@@ -2689,7 +2843,7 @@ class Backend(unittest.TestCase):
         self.assertEqual(fakes[P.FAST].changes, [(first, "max")])
         # The global default moves to a model whose ladder stops at high: the
         # thread follows it, and the stored effort is clamped down to it.
-        self.request("POST", "/model", {"model": "test/thinker"})
+        self.owner("POST", "/model", {"model": "test/thinker"})
         self.send_and_settle(tid)
         self.assertEqual(fakes[P.FAST].changes[-1], ("test/thinker", "high"))
         self.assertEqual((self.stores.threads.get(tid).model, self.stores.threads.get(tid).effort),
@@ -2702,13 +2856,13 @@ class Backend(unittest.TestCase):
         self.send_and_settle(tid)
         self.assertEqual(fakes[P.FAST].changes[-1], ("test/thinker", "low"))
         # A default with no reasoning control gets no effort at all.
-        self.request("POST", "/model", {"model": "test/model"})
+        self.owner("POST", "/model", {"model": "test/model"})
         self.send_and_settle(tid)
         self.assertEqual(fakes[P.FAST].changes[-1], ("test/model", None))
         self.assertIn("no reasoning effort", self.request(
             "PATCH", f"/threads/{tid}", {"effort": "low"}, status=400)["error"])
         # Back to a default with a ladder: the stored effort applies again.
-        self.request("POST", "/model", {"model": "test/thinker"})
+        self.owner("POST", "/model", {"model": "test/thinker"})
         self.send_and_settle(tid)
         self.assertEqual(fakes[P.FAST].changes[-1], ("test/thinker", "low"))
         lines = [m["text"] for m in self.request("GET", f"/threads/{tid}/transcript")["messages"]
@@ -2721,7 +2875,7 @@ class Backend(unittest.TestCase):
         # Only an explicit model pins; it starts on its own default effort.
         body = self.request("PATCH", f"/threads/{tid}", {"model": "test/thinker"})
         self.assertEqual((body["model"], body["effort"]), ("test/thinker", None))
-        self.request("POST", "/model", {"model": "test/model"})
+        self.owner("POST", "/model", {"model": "test/model"})
         self.send_and_settle(tid)
         self.assertEqual(fakes[P.FAST].changes[-1], ("test/thinker", "high"), "a pin ignores the default")
         # Back to the default clears the effort as well as the pin.
@@ -2732,16 +2886,16 @@ class Backend(unittest.TestCase):
 
     def test_an_effort_without_a_model_opens_a_thread_that_follows_the_default(self):
         fakes = self.model_fakes()
-        self.request("POST", "/models", {"add": "test/thinker"})
-        self.request("POST", "/model", {"model": "test/thinker"})
+        self.owner("POST", "/models", {"add": "test/thinker"})
+        self.owner("POST", "/model", {"model": "test/thinker"})
         body = self.chat(effort="low")
         self.assertEqual((body["model"], body["effort"]), (None, "low"))
         _, brief = fakes[P.FAST].opened[-1]
         self.assertEqual((brief.model, brief.effort), ("test/thinker", "low"),
                          "the provider starts on the default, at the chosen effort")
         tid = body["id"]
-        self.request("POST", "/models", {"add": "test/model"})
-        self.request("POST", "/model", {"model": "test/model"})
+        self.owner("POST", "/models", {"add": "test/model"})
+        self.owner("POST", "/model", {"model": "test/model"})
         self.send_and_settle(tid)
         self.assertEqual(fakes[P.FAST].changes, [("test/model", None)])
         # Claude: an effort alone keeps the thread on Opus, the default.
@@ -2752,13 +2906,13 @@ class Backend(unittest.TestCase):
 
     def test_a_pin_survives_a_global_change_and_a_resume(self):
         fakes = self.model_fakes()
-        self.request("POST", "/models", {"add": "test/thinker"})
+        self.owner("POST", "/models", {"add": "test/thinker"})
         tid = self.chat()["id"]
         saved = self.brief_bytes(tid)
         self.request("PATCH", f"/threads/{tid}", {"model": "test/thinker", "effort": "medium"})
-        self.request("POST", "/models", {"add": "test/model"})
-        self.request("POST", "/model", {"model": "test/model"})
-        self.request("POST", "/models", {"remove": "test/thinker"})       # A3: stays pinned
+        self.owner("POST", "/models", {"add": "test/model"})
+        self.owner("POST", "/model", {"model": "test/model"})
+        self.owner("POST", "/models", {"remove": "test/thinker"})       # A3: stays pinned
         self.daemon.close_thread(tid)
         self.send_and_settle(tid)
         mode, brief = fakes[P.FAST].opened[-1]
@@ -2924,7 +3078,7 @@ class Backend(unittest.TestCase):
 
     def test_patch_mid_turn_lands_on_the_next_turn(self):
         fakes = self.model_fakes()
-        self.request("POST", "/models", {"add": "test/thinker"})
+        self.owner("POST", "/models", {"add": "test/thinker"})
         tid = self.chat()["id"]
         fakes[P.FAST].hold = threading.Event()
         self.request("POST", f"/threads/{tid}/send", {"text": "long"}, status=202)
@@ -2977,11 +3131,11 @@ class Backend(unittest.TestCase):
     def test_a_default_that_moves_under_a_provider_that_cannot_switch_pins_the_thread(self):
         fast = Fake(P.FAST)                     # no set_model at all
         self.daemon.providers[P.FAST] = fast
-        self.request("POST", "/models", {"add": "test/thinker"})
+        self.owner("POST", "/models", {"add": "test/thinker"})
         tid = self.chat()["id"]
         self.send_and_settle(tid)
         was = models.tier("orchestrator")
-        self.request("POST", "/model", {"model": "test/thinker"})   # the global picker moves
+        self.owner("POST", "/model", {"model": "test/thinker"})   # the global picker moves
         self.send_and_settle(tid, "after the move")
         self.assertEqual(fast.messages[-1].text, "after the move", "the message still goes")
         stored = self.stores.threads.get(tid)

@@ -78,9 +78,21 @@ HUD's CSP and installed build" below), or from `hud/dist` itself only under
 `JARVIS_HUD_DEV=1`. With nothing installed, `GET /` is a 503 page naming
 `jarvis hud install`. `GET /avatar.svg`, `GET /avatars`, `GET /voices`, `GET /models`,
 `GET /models/catalog`, `POST /avatar`, `POST /voice`, `POST /model`,
-`POST /mute`, `POST /say` — **v1 semantics and shapes** (`jarvis/face/
-server.py`), re-homed; `POST /model` sets the **fast path's** global
-default only.
+`POST /models`, `POST /mute`, `POST /say` — **v1 semantics and shapes**
+(`jarvis/face/server.py`), re-homed; `POST /model` sets the **fast path's**
+global default only.
+
+**Owner-only (2026-10-16, the voice follow-ups' V2 row and PR #227's review).**
+These are owner-only on every method: `GET /voices` (it lists the owner's
+clone store), `POST /voice`, `POST /mute`, `POST /say` and `POST /stt`
+(`hud_api.OWNER_VOICE_PICKERS`). These writes are owner-only too:
+`POST /model`, `POST /models` and `POST /avatar`
+(`hud_api.OWNER_PICKER_WRITES`; `/model` and `/models` rewrite the protected
+`models.json`). Each is `projects.owner_only`: the HUD listener and the HUD's own
+page. It runs first, before the query, the body or (for `/stt`) the media type.
+Anything else is a **403**: another listener, a foreign Origin, `Origin: null`,
+or a write with no Origin. `GET /models`, `GET /models/catalog`,
+`GET /avatars` and `GET /avatar.svg` still answer any listener.
 
 The control bodies, exactly (2026-10-06, decisions A6 — the HUD sent `{id}`,
 `{name}` and `{mute}` for weeks and every click reset the setting it meant to
@@ -342,8 +354,10 @@ every one of these routes asks (`kind`):
 
 ## Speech
 
-- `POST /stt` body `audio/*` (WAV or webm) → `{"text"}` via `voice.stt`,
-  which tries `STT_MODEL` then `STT_FALLBACK_MODELS`. When every model fails
+- `POST /stt` body `audio/*` (WAV or webm) → `{"text"}` via `voice.stt`.
+  **Owner-only** (2026-10-16): the HUD listener and the HUD's own page. Every other caller
+  gets a 403 before the query, the media type or the body is read. Then `voice.stt`
+  tries `STT_MODEL` then `STT_FALLBACK_MODELS`. When every model fails
   it is a **502** whose `error` names each model and its HTTP status (never a
   response body), and the HUD shows that sentence. V13: the reply is
   `{"text", "backend": "local"|"cloud", "model", "fallback"?}` (`fallback` is why
@@ -352,7 +366,7 @@ every one of these routes asks (`kind`):
   `cloud_fallback` off nothing is uploaded: a local failure is a **502** and a
   path that would need the cloud is a **409** (`STTBlocked`, not retried). V12:
   whose voice the clip is (`jarvis/speaker.py`, local only) is asked FIRST, on every
-  request and every listener, **before any transcription, local or cloud, or upload**;
+  request past the owner gate, **before any transcription, local or cloud, or upload**;
   `verify=1` is accepted and does nothing more (anything else for `verify` is a 400).
   Nobody enrolled, or Guest voice on, skips it, and the reply adds `"verify":
   "matched" | "skipped_guest" | "skipped_unenrolled" | "no_speech"` (the last: under
@@ -386,7 +400,8 @@ every one of these routes asks (`kind`):
   allowed on an explicit set of routes (`hud_api.AUDIO_ROUTES`: `/stt`,
   `/speaker/reading`), never a prefix.
 - `POST /say` `{text, voice?, instructions?, local_only?}` → audio bytes
-  (`RIFF` or MP3; the client sniffs), `X-Speech-Ms` = synthesis time. Unknown
+  (`RIFF` or MP3; the client sniffs), `X-Speech-Ms` = synthesis time.
+  **Owner-only** (2026-10-16), checked before the body is read. Unknown
   keys are a 400. A `voice` must be one `GET /voices` lists, else **400**.
   `local_only: true` (read-aloud sends it) never calls the cloud voice: a local
   failure, or a cloud-configured backend, is a **503** and the HUD skips the
