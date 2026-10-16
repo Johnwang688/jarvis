@@ -216,6 +216,11 @@ def _described(page, sel: str) -> str:
         ".filter(Boolean).map(x => x.textContent).join(' ')")
 
 
+def _radii(page, sel: str) -> list:
+    return page.locator(sel).evaluate_all(
+        "els => els.map(e => parseFloat(getComputedStyle(e).borderTopLeftRadius))")
+
+
 def _css(page, name: str) -> str:
     return page.evaluate(f"() => {{ const e = document.createElement('span'); e.style.color = 'var({name})';"
                          " document.body.append(e); const c = getComputedStyle(e).color; e.remove(); return c; }")
@@ -565,6 +570,8 @@ def _chain_checks(page, mock, check, until, fake):
     check("the status line lists the steps: Clean running, Build and Download to come",
           bool(until(lambda: steps.evaluate_all("els => els.map(e => e.dataset.state)") == ["busy", "todo", "todo"],
                      timeout=4)), str(steps.evaluate_all("els => els.map(e => e.dataset.state)")))
+    check("the step chips are 4px rectangles too, not pills", _radii(page, _view(V, _tid("vex-chain-steps")) + " li") == [4.0] * 3,
+          str(_radii(page, _view(V, _tid("vex-chain-steps")) + " li")))
     _finish(mock, fake, _latest_build(mock), "succeeded")
     until(lambda: len(_posted_since(mock, base, "/projects/p3/vex/build")) == 2, timeout=6)
     check("then Clean ✓ and Build running",
@@ -608,6 +615,9 @@ def _chain_checks(page, mock, check, until, fake):
 def _card_checks(page, mock, check, until, fake):
     _reset(page, mock, until)
     check("setup: the view draws", _ready(page, until))
+    pills = {t: _radii(page, _view(V, _tid(t))) for t in ("vex-slot-chip", "vex-help-toggle", "vex-build-btn", "vex-more")}
+    check("the slot chip, help toggle, Build and ⋯ are 4px rectangles (owner 2026-10-15: no pills)",
+          all(r == [4.0] for r in pills.values()), str(pills))
     page.locator(_view(V, _tid("vex-build-btn"))).click()
     until(lambda: _latest_build(mock), timeout=4)
     _finish(mock, fake, _latest_build(mock), "failed", ERRORS)

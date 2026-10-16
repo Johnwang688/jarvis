@@ -3364,6 +3364,16 @@ def main():
             finally:
                 boot_mock.stop()
 
+            # Button shape and the binary click sparkle (2026-10-15): a context
+            # and a mock of their own — its clicks, reloads and stored switch.
+            from tests.face.hud_v2_buttons_check import buttons_checks
+            buttons_mock = MockDaemon(0).start()
+            try:
+                buttons_checks(browser, buttons_mock, f"http://127.0.0.1:{buttons_mock.port}", check, until,
+                               guard, PLAIN_RECOGNIZER)
+            finally:
+                buttons_mock.stop()
+
             from tests.face.hud_v2_settings_check import settings_page_checks
             settings_page_mock = MockDaemon(0).start()
             try:
