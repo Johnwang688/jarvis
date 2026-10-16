@@ -1876,23 +1876,38 @@ def _reporter_status(reporter) -> dict | None:
 
 
 def subagent_route(handler, daemon, parts, query):
-    """`GET /threads/{id}/subagents` and `GET /threads/{id}/subagents/{sid}/
-    transcript[?limit=N]` (SV-1). A sub-agent's words are not the
-    orchestrator's reply, so they are kept apart from the thread's log and
-    served only here: to the owner, from the HUD (`owner_only`, before the
-    thread is looked up), never to the API listener every tool's HTTP client
-    uses. A transcript names each tool call's label and outcome, never its
-    arguments or result."""
-    from .daemon import _object
+    """`GET /threads/{id}/subagents`, `GET /threads/{id}/subagents/{sid}/
+    transcript[?limit=N]` (SV-1) and `POST /threads/{id}/subagents/{sid}/stop`
+    (SV-4). A sub-agent's words are not the orchestrator's reply, so they are
+    kept apart from the thread's log and served only here: to the owner, from
+    the HUD (`owner_only`, before the thread is looked up or a body read),
+    never to the API listener every tool's HTTP client uses. A transcript
+    names each tool call's label and outcome, never its arguments or result.
+    Stop is the owner's alone, like the reads: no agent, session MCP tool,
+    Discord verb or CLI command reaches it (`Daemon.stop_subagent`)."""
+    from .daemon import SubagentStopRefused, _object
     from .projects import owner_only
     from .subagents import ENTRY_LIMIT, valid_sid
     owner_only(handler, daemon)
+    if len(parts) == 5 and parts[4] == "stop":
+        if handler.command != "POST":
+            fail(405, "a sub-agent is stopped with POST")
+        _object(query, ())
+        sid = unquote(parts[3])
+        if not valid_sid(sid):
+            fail(400, "not a sub-agent id")
+        _object(handler._body(), ())
+        try:
+            return 200, daemon.stop_subagent(parts[1], sid)
+        except SubagentStopRefused as exc:
+            return 409, exc.body()
     if handler.command != "GET":
         fail(405, "sub-agents are read-only here")
     thread = daemon.require(daemon.stores.threads, parts[1])
     if len(parts) == 3:
         _object(query, ())
-        return 200, {"subagents": daemon.subagents.list(thread.id)}
+        rows = daemon.subagents.list(thread.id, keys=True)
+        return 200, {"subagents": daemon.subagent_stop_offers(thread.id, rows)}
     if len(parts) == 5 and parts[4] == "transcript":
         _object(query, ("limit",))
         sid = unquote(parts[3])
@@ -1903,9 +1918,10 @@ def subagent_route(handler, daemon, parts, query):
             if not re.fullmatch(r"[0-9]{1,4}", query["limit"]) or not 1 <= int(query["limit"]) <= ENTRY_LIMIT:
                 fail(400, f"limit must be 1 to {ENTRY_LIMIT}")
             limit = int(query["limit"])
-        found = daemon.subagents.transcript(thread.id, sid, limit)
+        found = daemon.subagents.transcript(thread.id, sid, limit, keys=True)
         if found is None:
             fail(404, "no such sub-agent on this thread")
+        daemon.subagent_stop_offers(thread.id, [found["subagent"]])
         return 200, found
     fail(404, "not found")
 

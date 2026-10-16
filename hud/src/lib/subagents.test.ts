@@ -1,6 +1,7 @@
 import {
-  CHILD_CAP, COLLAPSE_OVER, applyBus, cardLabel, blockTitle, bound, childrenOf, cleanBus, cleanList, cleanRow, cleanTranscript,
-  elapsedOf, foldList, parseRef, placeRows, placeableItem, placeableOf, statusMark, tokensText, toolsText,
+  CHILD_CAP, COLLAPSE_OVER, MAIN_STOP_CLAUDE_HELP, STOP_HELP, STOP_UNCONFIRMED_HELP, applyBus, cardLabel, blockTitle,
+  bound, childrenOf, cleanBus, cleanList, cleanRow, cleanTranscript, elapsedOf, foldList, isOwnersPress, parseRef,
+  placeRows, placeableItem, placeableOf, statusMark, stopView, tokensText, toolsText,
   type SubBus, type SubStatus, type Subagent,
 } from "./subagents";
 import type { ChatMessage } from "../types";
@@ -138,18 +139,23 @@ describe("the bus and the list, folded", () => {
         if (!was) { next = row(sid, { name: `n-${sid}`, started_at: at(i) }); op = "started"; }
         else if (rand(4) === 0 && was.status !== "done" && was.status !== "failed" && was.status !== "stopped") {
           next = { ...was, status: (["done", "failed", "stopped"] as const)[rand(3)], ended_at: at(i) }; op = "finished";
+          delete next.stop;                     // an end clears the owner's Stop (SV-4)
         } else if (rand(6) === 0 && sid.startsWith("cx:") && !["running", "backgrounded"].includes(was.status)) {
           next = { ...was, status: "running" }; delete next.ended_at; op = "started";
         } else if (["running", "backgrounded"].includes(was.status)) {
           next = { ...was, entries: was.entries + rand(3), status: rand(5) ? was.status : "backgrounded" };
+          // The owner's Stop (SV-4): asked, unconfirmed, or none, as the daemon says it.
+          const stop = ([undefined, "stopping", "unconfirmed", was.stop] as const)[rand(997) % 4];  // not rand(4): this LCG's low bits cycle
+          if (stop) next.stop = stop; else delete next.stop;
         } else next = { ...was, entries: was.entries + 1 };
         daemon.set(sid, next);
         records.push({ sid, op, status: next.status, depth: 1, background: false, started_at: next.started_at,
-          entries: next.entries, ...(next.ended_at ? { ended_at: next.ended_at } : {}) });
+          entries: next.entries, ...(next.ended_at ? { ended_at: next.ended_at } : {}),
+          ...(next.stop ? { stop: next.stop } : {}) });
         snapshots.push([...daemon.values()].map((r) => ({ ...r })));
       }
-      const want = [...daemon.values()].map((r) => [r.sid, r.status, r.entries, r.ended_at ?? null]);
-      const key = (rows: Subagent[]) => rows.map((r) => [r.sid, r.status, r.entries, r.ended_at ?? null]);
+      const want = [...daemon.values()].map((r) => [r.sid, r.status, r.entries, r.ended_at ?? null, r.stop ?? null]);
+      const key = (rows: Subagent[]) => rows.map((r) => [r.sid, r.status, r.entries, r.ended_at ?? null, r.stop ?? null]);
       let live: Subagent[] = [];
       for (const rec of records) live = applyBus(live, rec);
       expect(key(live)).toEqual(want);
@@ -236,5 +242,65 @@ describe("a child's transcript", () => {
     expect(parseRef({ threadId: "t1", sid: "cl:a", extra: 1 })).toEqual({ threadId: "t1", sid: "cl:a" });
     for (const bad of [null, {}, { threadId: "t1" }, { threadId: "t 1", sid: "cl:a" }, { threadId: "t1", sid: "a" },
       { threadId: "x".repeat(201), sid: "cl:a" }]) expect(parseRef(bad)).toBeNull();
+  });
+});
+
+describe("the owner's Stop on one child (SV-4)", () => {
+  it("the list's offer and the daemon's mark are read only for a live child", () => {
+    const live = cleanRow({ ...row("cx:a"), stoppable: true, stop: "stopping", stop_requested_at: at(3) })!;
+    expect([live.stoppable, live.stop, live.stop_requested_at]).toEqual([true, "stopping", at(3)]);
+    const cant = cleanRow({ ...row("cl:b"), stoppable: false, stop_unavailable: "Claude Code <b>cannot</b>.\nreally" })!;
+    expect([cant.stoppable, cant.stop_unavailable]).toEqual([false, "Claude Code <b>cannot</b>. really"]);
+    const ended = cleanRow({ ...row("cl:c"), status: "stopped", stoppable: true, stop: "stopping" })!;
+    expect([ended.stoppable, ended.stop]).toEqual([undefined, undefined]);
+    expect(cleanRow({ ...row("cl:d"), stop: "maybe", stoppable: "yes" })!.stop).toBeUndefined();
+    expect(cleanBus({ ...bus("cl:a"), stop: "unconfirmed" })!.stop).toBe("unconfirmed");
+    expect(cleanBus({ ...bus("cl:a"), status: "done", stop: "stopping" })!.stop).toBeUndefined();
+    const refused = cleanRow({ ...row("cl:e"), stop: "refused", stop_error: "No task\nfound" })!;
+    expect([refused.stop, refused.stop_error]).toEqual(["refused", "No task found"]);
+    expect(cleanRow({ ...row("cl:f"), stop: "stopping", stop_error: "x" })!.stop_error).toBeUndefined();
+  });
+
+  it("the bus sets and clears the mark; an end clears it and the offer", () => {
+    let rows = [row("cl:a", { stoppable: true })];
+    rows = applyBus(rows, bus("cl:a", { stop: "stopping", stop_requested_at: at(2) }));
+    expect([rows[0].stop, rows[0].stop_requested_at, rows[0].stoppable]).toEqual(["stopping", at(2), true]);
+    rows = applyBus(rows, bus("cl:a", { stop: "unconfirmed", stop_requested_at: at(2) }));
+    expect(rows[0].stop).toBe("unconfirmed");
+    rows = applyBus(rows, bus("cl:a", { status: "stopped", op: "finished", ended_at: at(5) }));
+    expect([rows[0].stop, rows[0].stoppable]).toEqual([undefined, undefined]);
+  });
+
+  it("what the control shows: Stop, stopping…, Stop again, Can't stop, or nothing", () => {
+    expect(stopView(row("cl:a", { stoppable: true }), false))
+      .toEqual({ kind: "button", label: "Stop", unconfirmed: false, title: STOP_HELP.claude });
+    expect(stopView(row("cl:a", { stoppable: true }), true).kind).toBe("stopping");
+    expect(stopView(row("cl:a", { stoppable: true, stop: "stopping" }), false).kind).toBe("stopping");
+    expect(stopView(row("cl:a", { stoppable: true, stop: "unconfirmed" }), false))
+      .toEqual({ kind: "button", label: "Stop again", unconfirmed: true, title: STOP_UNCONFIRMED_HELP });
+    expect(stopView(row("cl:a", { stoppable: false, stop_unavailable: "Why not." }), false))
+      .toEqual({ kind: "cant", title: "Why not." });
+    expect(stopView(row("cl:a", { status: "done", stoppable: true }), false).kind).toBe("none");
+    // The CLI refused it: a note with its reason, never "Stop again" (review of #216).
+    expect(stopView(row("cl:a", { stoppable: true, stop: "refused", stop_error: "No task found." }), false))
+      .toEqual({ kind: "refused", title: "The CLI refused the stop: No task found." });
+    expect(stopView(row("cl:a", { stoppable: true, stop: "refused" }), false).kind).toBe("refused");
+    expect(stopView(row("cl:a"), false).kind).toBe("none");     // an older daemon offers nothing
+    const codex = stopView(row("cx:t", { stoppable: true }), false);
+    expect(codex.kind === "button" && codex.title).toBe(STOP_HELP.codex);
+  });
+
+  it("Codex's Stop states its caveat; the thread's Stop on Claude says it ends background sub-agents", () => {
+    expect(STOP_HELP.codex).toContain("A command it is already running may still finish");
+    expect(STOP_HELP.codex).toContain("the orchestrator's model is not told");
+    expect(STOP_HELP.claude).toContain("other sub-agents go on");
+    expect(MAIN_STOP_CLAUDE_HELP).toContain("also stops the chat's background sub-agents");
+  });
+
+  it("only the owner's own press counts: trusted, primary button", () => {
+    expect(isOwnersPress({ isTrusted: true, button: 0 })).toBe(true);
+    expect(isOwnersPress({ isTrusted: false, button: 0 })).toBe(false);
+    expect(isOwnersPress({ isTrusted: true, button: 1 })).toBe(false);
+    expect(isOwnersPress({ isTrusted: true, button: 2 })).toBe(false);
   });
 });

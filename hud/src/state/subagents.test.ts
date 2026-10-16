@@ -213,4 +213,78 @@ describe("the window's sub-agent store", () => {
     await settle();
     expect(JSON.stringify(s.snapshot())).not.toMatch(/SECRET/);
   });
+
+  describe("the owner's Stop (SV-4)", () => {
+    /** A store whose list says `rows`, and whose Stop requests wait for the test. */
+    async function ready(rows: unknown[]) {
+      const m = manual();
+      const posts: { threadId: string; sid: string; resolve: (v: unknown) => void; reject: (e: unknown) => void }[] = [];
+      const s = createSubagentStore({ ...m.fetchers,
+        stop: (threadId, sid) => new Promise((resolve, reject) => posts.push({ threadId, sid, resolve, reject })) });
+      s.watch("t1");
+      m.lists[0].resolve({ subagents: rows });
+      await settle();
+      return { s, posts };
+    }
+
+    it("one press is one request; \"stopping…\" from the press until the daemon's word", async () => {
+      const { s, posts } = await ready([listRow("cl:a", { stoppable: true })]);
+      void s.stop("t1", "cl:a");
+      void s.stop("t1", "cl:a");                    // pressed again while on its way
+      expect(posts.map((p) => p.sid)).toEqual(["cl:a"]);
+      expect(s.stopUi("t1", "cl:a").pending).toBe(true);
+      posts[0].resolve({ ok: true, stop: "stopping" });
+      await settle();
+      expect(s.stopUi("t1", "cl:a")).toEqual({ pending: false, error: "" });
+      expect(s.row("t1", "cl:a")!.stop).toBe("stopping");
+      void s.stop("t1", "cl:a");                    // the row says stopping: nothing more
+      expect(posts.length).toBe(1);
+      s.heard("t1", rec("cl:a", { op: "finished", status: "stopped", ended_at: at(5) }));
+      expect(s.row("t1", "cl:a")!.stop).toBeUndefined();
+      void s.stop("t1", "cl:a");                    // ended: nothing
+      expect(posts.length).toBe(1);
+    });
+
+    it("nothing is sent under a card, for a row that offers no Stop, or with no route", async () => {
+      const { s, posts } = await ready([listRow("cl:a", { stoppable: true }),
+        listRow("cl:b", { stoppable: false, stop_unavailable: "Not by itself." }), listRow("cl:c")]);
+      s.setBlocked(true);
+      expect(s.isBlocked()).toBe(true);
+      void s.stop("t1", "cl:a");
+      s.setBlocked(false);
+      void s.stop("t1", "cl:b");
+      void s.stop("t1", "cl:c");
+      void s.stop("t1", "cl:nobody");
+      expect(posts).toEqual([]);
+      const bare = createSubagentStore(manual().fetchers);
+      await bare.stop("t1", "cl:a");                 // a store with no Stop route
+    });
+
+    it("a refusal keeps the daemon's sentence; an unconfirmed one marks the row", async () => {
+      const { s, posts } = await ready([listRow("cl:a", { stoppable: true }), listRow("cx:b", { stoppable: true })]);
+      void s.stop("t1", "cl:a");
+      posts[0].reject(Object.assign(new Error("Claude Code can stop this sub-agent only by stopping the whole turn."),
+        { status: 409, body: { supported: false } }));
+      await settle();
+      expect(s.stopUi("t1", "cl:a")).toEqual({ pending: false,
+        error: "Claude Code can stop this sub-agent only by stopping the whole turn." });
+      expect(s.row("t1", "cl:a")!.stop).toBeUndefined();
+      void s.stop("t1", "cx:b");
+      posts[1].reject(Object.assign(new Error("The stop was sent, but the CLI did not confirm it took it."),
+        { status: 409, body: { unconfirmed: true } }));
+      await settle();
+      expect(s.row("t1", "cx:b")!.stop).toBe("unconfirmed");
+      void s.stop("t1", "cx:b");                    // unconfirmed: Stop may be pressed again
+      expect(posts.length).toBe(3);
+      posts[2].reject(Object.assign(new Error("The CLI refused the stop: No task found."),
+        { status: 409, body: { refused: true } }));
+      await settle();
+      // The CLI said no: a mark with its reason, no error line, and no Stop again (review of #216).
+      expect([s.row("t1", "cx:b")!.stop, s.row("t1", "cx:b")!.stop_error]).toEqual(["refused", "No task found."]);
+      expect(s.stopUi("t1", "cx:b")).toEqual({ pending: false, error: "" });
+      void s.stop("t1", "cx:b");
+      expect(posts.length).toBe(3);
+    });
+  });
 });
+
