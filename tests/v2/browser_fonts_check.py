@@ -122,6 +122,8 @@ class Launch(unittest.IsolatedAsyncioTestCase):
             host = H.BrowserHost(); host._gate = SimpleNamespace(port=9)
             host._pw = SimpleNamespace(chromium=SimpleNamespace(launch_persistent_context=launch))
             with patch.object(config, "BROWSER_DIR", root), patch.object(H, "_WINDOWS_FONTS", windows), patch.object(H, "stop_pids", return_value=0):
+                # _launch reads the profile's password-store row (password_store.py).
+                host._profiles._write([{"id": "p-12345678", "label": "Main", "created": "2026-10-15T00:00:00+00:00"}])
                 for profile in ("p-12345678", H.PRIVATE):
                     instance = await host._launch(profile)
                     kwargs = launch.call_args.kwargs

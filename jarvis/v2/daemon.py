@@ -2909,6 +2909,13 @@ def main() -> int:
         daemon.browser_settings.attach(config.BROWSER_SETTINGS_PATH)
     except Exception as exc:     # noqa: BLE001
         LOG.warning("browser settings not attached (%s); using the defaults", type(exc).__name__)
+    # The owner's keyring (`browser/password_store.py`): the daemon's own
+    # session bus, attached here for the same reason — no embedded or test
+    # daemon ever reads the owner's keyring state or hands Chrome the bus.
+    try:
+        daemon.browser.keyring.attach()
+    except Exception as exc:     # noqa: BLE001
+        LOG.warning("browser keyring not attached (%s); the basic store is used", type(exc).__name__)
     hatch = EscapeHatch(daemon, daemon.approvals)
     discord = None
     daemon.runner = TaskRunner(daemon, daemon.router)

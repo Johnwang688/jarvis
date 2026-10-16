@@ -24,6 +24,12 @@ owner's switches for the HUD's Browser, each a boolean:
 - **`sound`** (BR-10): master permission for owner speaker buttons, **allowed** by default.
   Each instance still starts muted; explicit memory-only owner gestures enable it.
 
+- **`password_store`** (B-LOGIN, M12): not a switch but one word. Only the
+  exact string `"basic"` asks for Chrome's basic store on purpose (loudly
+  unprotected; never for a profile already in the keyring). Anything else —
+  missing, malformed, an unreadable file — asks for the keyring
+  (`password_store.py`). Hand-edited only: no route writes it.
+
 A missing file or omitted key reads as the default. Sound master permission
 fails closed for unreadable/malformed files and non-boolean values; repairing
 such a file through another setting keeps sound off. Other switches retain
@@ -128,6 +134,11 @@ def _values(raw: dict) -> dict[str, bool]:
             for key, default in DEFAULTS.items()}
 
 
+def _store(raw: dict | None) -> str:
+    """`password_store` as asked: `basic` only for that exact word."""
+    return "basic" if isinstance(raw, dict) and raw.get("password_store") == "basic" else "keyring"
+
+
 def _write(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     tmp = path.with_name(f".{path.name}.{secrets.token_hex(4)}.tmp")
@@ -156,6 +167,7 @@ class BrowserSettings:
         self._clock = clock
         self._path: Path | None = None
         self._values = dict(DEFAULTS)
+        self._store = "keyring"
         self._stamp = _UNKNOWN
         self._checked = float("-inf")
         if path is not None:
@@ -170,6 +182,7 @@ class BrowserSettings:
         with self._lock:
             self._path = Path(path).expanduser()
             self._values = dict(DEFAULTS)
+            self._store = "keyring"
             self._stamp = _UNKNOWN
             self._refresh()
 
@@ -182,6 +195,7 @@ class BrowserSettings:
         self._stamp = stamp
         raw = _read(self._path) if stamp is not None and stamp is not _UNREADABLE else None
         self._values = _values(raw or {})
+        self._store = _store(raw)
         if stamp is not None and raw is None:
             self._values.update({key: False for key in FAIL_CLOSED_KEYS})
 
@@ -199,6 +213,13 @@ class BrowserSettings:
     def auto_open(self) -> bool:
         """"Open dev servers automatically" (BR-8a), for the terminals."""
         return self.value("auto_open")
+
+    def password_store(self) -> str:
+        """`keyring` or `basic`: the store the owner asks for (module note)."""
+        with self._lock:
+            if self._path is not None:
+                self._refresh()
+            return self._store
 
     def snapshot(self) -> dict[str, bool]:
         with self._lock:
@@ -227,6 +248,7 @@ class BrowserSettings:
             payload.update(changes)
             _write(self._path, payload)
             self._values = _values(payload)
+            self._store = _store(payload)
             self._stamp = _stamp(self._path)
             self._checked = self._clock()
             return dict(self._values)

@@ -18,7 +18,7 @@ refusal ever contains one.
     POST   /browser/tabs/<id>/navigate       {url}  (the URL judge first)
     POST   /browser/tabs/<id>/history        {action: back | forward | reload}
     POST   /browser/profiles/<id>/forget     {}  ("Sign out of everything")
-    GET    /browser/profiles                 [{id, label, created}]
+    GET    /browser/profiles                 [{id, label, created, password_store?: "keyring"}]
     POST   /browser/profiles                 {label} -> 201 profile row
     PATCH  /browser/profiles/<id>            {label} -> profile row
     DELETE /browser/profiles/<id>            closes and deletes only this profile

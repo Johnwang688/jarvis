@@ -105,6 +105,8 @@ class Sound(unittest.IsolatedAsyncioTestCase):
             context=SimpleNamespace(browser=SimpleNamespace(version="synthetic"),on=Mock())
             launch=AsyncMock(return_value=context);host._pw=SimpleNamespace(chromium=SimpleNamespace(launch_persistent_context=launch))
             with patch.object(config,"BROWSER_DIR",Path(td)),patch.object(H,"stop_pids",return_value=0),patch.object(H,"font_environment",return_value={"FONTCONFIG_FILE":"synthetic","PULSE_SERVER":"ambient"}):
+                # _launch reads the profile's password-store row (password_store.py).
+                host._profiles._write([{"id":self.profile,"label":"Main","created":"2026-10-15T00:00:00+00:00"}])
                 instance=await host._launch(self.profile)
             kwargs=launch.call_args.kwargs
             self.assertFalse(instance.audio.applied);self.assertIn("--mute-audio",kwargs["args"])

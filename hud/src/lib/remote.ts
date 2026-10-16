@@ -658,6 +658,31 @@ export function frameDest(place: Placement, view: Size, zoomPct: number, dpr: nu
   };
 }
 
+/** A frame's JPEG as a bitmap (the Remote pane's `FramePipe` decode). */
+export function decodeFrame(bytes: Uint8Array): Promise<ImageBitmap> {
+  return createImageBitmap(new Blob([bytes.slice().buffer], { type: "image/jpeg" }));
+}
+
+/**
+ * Draw a decoded frame showing viewport `meta` into `target`, a canvas of CSS
+ * size `css`: its backing store sized to the device pixels, the frame placed
+ * by `placeFrame`. Returns the placement, and whether anything was drawn.
+ */
+export function paintFrame(
+  target: HTMLCanvasElement, bitmap: CanvasImageSource, meta: Size, css: Size, zoomPct: number, dpr: number,
+): { place: Placement; drawn: boolean } {
+  const size = backingSize(css, zoomPct, dpr);
+  if (target.width !== size.width) target.width = size.width;
+  if (target.height !== size.height) target.height = size.height;
+  const place = placeFrame(css, meta);
+  const d = frameDest(place, meta, zoomPct, dpr);
+  const ctx = target.getContext("2d");
+  if (!ctx) return { place, drawn: false };
+  ctx.clearRect(0, 0, target.width, target.height);
+  ctx.drawImage(bitmap, d.x, d.y, d.width, d.height);
+  return { place, drawn: true };
+}
+
 /** A page point, and whether the pointer was over the frame at all. */
 export interface PagePoint {
   x: number;
@@ -793,11 +818,14 @@ export const FRAME_MAX_BYTES = 8 * 1024 * 1024;
  *     when it finishes — a reattached pane must not flash the old page;
  *   - while one frame decodes, a newer arrival replaces any frame waiting
  *     behind it: a slow window shows the newest picture, never a backlog;
- *   - each frame drawn — or one that failed to decode — is acked on its own
- *     generation (the daemon sends the next frame only after an ack); one
- *     from an older generation is never acked, and **neither is one replaced
- *     while another decoded**: an ack names the newest frame handled, so the
- *     daemon must read it as "up to here", never wait on each id it sent;
+ *   - each frame is acked on its own generation **when its decode starts**
+ *     (B-PERF, 2026-10-15; it was after the draw), so the daemon's next frame
+ *     crosses the socket while this one decodes instead of after it: at most
+ *     one frame decoding and one waiting here, and the daemon still sends
+ *     the next only after an ack. One from an older generation is never
+ *     acked, and **neither is one replaced while another decoded**: an ack
+ *     names the newest frame taken, so the daemon must read it as "up to
+ *     here", never wait on each id it sent;
  *   - a decode or a draw that throws never stalls it, and every bitmap is
  *     disposed, drawn or not.
  */
@@ -850,6 +878,11 @@ export class FramePipe<B> {
       this.waiting = null;
       if (gen !== this.current) continue;
       this.busy = true;
+      try {
+        this.ack(gen, frame.id);
+      } catch {
+        /* an ack that throws never stalls the pipe */
+      }
       let bitmap: B | null = null;
       try {
         bitmap = await this.decode(frame.data);
@@ -857,7 +890,7 @@ export class FramePipe<B> {
         bitmap = null;
       }
       try {
-        // An older socket's frame, finished after a reattach: never drawn, never acked.
+        // An older socket's frame, finished after a reattach: never drawn.
         if (gen !== this.current) continue;
         if (bitmap !== null) {
           try {
@@ -867,7 +900,6 @@ export class FramePipe<B> {
             /* a draw that throws loses that frame, never the pipe */
           }
         }
-        this.ack(gen, frame.id);
       } finally {
         if (bitmap !== null) {
           try {

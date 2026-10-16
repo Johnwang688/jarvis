@@ -60,7 +60,9 @@ filtered from the daemon's — `HOME` is `BROWSER_DIR/home` (inside the throwawa
 Chrome writes outside its profile (its NSS store, the font cache) stays in
 the credential folder. A private `FONTCONFIG_FILE` adds reachable Windows fonts
 while retaining the distro defaults; no `JARVIS_*`, no API key, no display, no
-`PULSE_SERVER`, no D-Bus. (The Playwright driver, a separate node process,
+`PULSE_SERVER`. No D-Bus either, except one thing: a named profile launched
+with the owner's unlocked keyring gets the daemon's validated session bus
+address, which `--password-store=gnome-libsecret` needs (`password_store.py`). (The Playwright driver, a separate node process,
 inherits the daemon's environment as v1's does; no page can reach it.)
 
 **The landing guard** (plan §4 layer 3): on every main-frame
@@ -106,8 +108,9 @@ from xml.sax.saxutils import escape as xml_escape
 from jarvis import config
 
 from . import files as _files
+from . import password_store as _stores
 from . import policy
-from .profiles import ProfileStore
+from .profiles import STICKY_KEY, STICKY_VALUE, ProfileStore
 from .gate import Gate
 from .settings import BrowserSettings
 from .stream import (MAX_DEVICE_PIXELS, TICKET_TTL_S, VIEW_MAX, TabStream, Tickets,
@@ -216,9 +219,14 @@ def _profile_activity(method):
     return run
 
 
-def launch_args(user_data_dir: Path, gate_port: int, *, private: bool) -> list[str]:
+def launch_args(user_data_dir: Path, gate_port: int, *, private: bool,
+                password_store: str = _stores.BASIC) -> list[str]:
     """Chrome's whole command line after the binary (Playwright adds nothing:
-    `ignore_default_args=True`)."""
+    `ignore_default_args=True`). `password_store` is `basic` or
+    `gnome-libsecret`; Private is always `basic`."""
+    if password_store not in (_stores.BASIC, _stores.KEYRING_STORE):
+        raise ValueError("password_store must be basic or gnome-libsecret")
+    keyring = password_store == _stores.KEYRING_STORE and not private
     args = [
         "--headless",
         "--remote-debugging-pipe",
@@ -243,15 +251,17 @@ def launch_args(user_data_dir: Path, gate_port: int, *, private: bool) -> list[s
         # are gathered here) joins the mDNS group on every interface as soon
         # as a page makes an RTCPeerConnection. One `--disable-features`:
         # Chrome keeps only the last of a repeated switch.
+        # With the session bus (the keyring), Chrome would also offer its
+        # media sessions on it as MPRIS players: HardwareMediaKeyHandling off.
         "--disable-features=MediaRouter,DialMediaRouteProvider,CastMediaRouteProvider,"
-        "WebRtcHideLocalIpsWithMdns",
+        "WebRtcHideLocalIpsWithMdns" + (",HardwareMediaKeyHandling" if keyring else ""),
         "--disable-extensions",
         "--deny-permission-prompts",
         "--mute-audio",
         "--no-first-run",
         "--no-default-browser-check",
         "--disable-search-engine-choice-screen",
-        "--password-store=basic",
+        f"--password-store={_stores.KEYRING_STORE if keyring else _stores.BASIC}",
         # The screencast draws at the browser's own scale, never the
         # emulated one (`setDeviceMetricsOverride` changes the page's
         # devicePixelRatio, not the frames: measured, Chrome 155), so the
@@ -612,6 +622,8 @@ class _Instance:
     restore_allocation: bool = False
     refused_pages: list = field(default_factory=list)
     popup_cleanup: list = field(default_factory=list)
+    # The store this launch used (`password_store.py`): what `/status` says.
+    password_store: str = "basic"
 
 
 @dataclass
@@ -679,6 +691,9 @@ class BrowserHost:
         # the only loopback ports the gate admits while their owner tabs remain.
         self._port_owners: dict[int, set[str]] = {}
         self._profiles = ProfileStore()
+        # The owner's keyring: detached (basic, no bus, nothing run) until
+        # daemon2's `main()` attaches it, so no test touches the real one.
+        self.keyring = _stores.Keyring()
         self._started = False
         self._stopped = False
         self._thread: threading.Thread | None = None
@@ -1209,13 +1224,18 @@ class BrowserHost:
         home = secure_dir((folder if private else root) / "home")
         artifacts = secure_dir((folder if private else root) / "artifacts")
         loop = asyncio.get_running_loop()
+        choice = await loop.run_in_executor(None, self._store_choice, profile)
         # A Chrome a crashed daemon left on this profile would hold its lock.
         if await loop.run_in_executor(None, stop_pids, folder):
             LOG.warning("Stopped a leftover Chrome on a Browser profile")
         self._launched.add(folder)
         started = time.monotonic()
-        launch_audio = self._sound.launch(launch_args(folder, self._gate.port, private=private),
-                                          font_environment(home), profile=profile, restart_token=restart_token)
+        env = font_environment(home)
+        if choice.bus is not None:
+            env["DBUS_SESSION_BUS_ADDRESS"] = choice.bus
+        launch_audio = self._sound.launch(
+            launch_args(folder, self._gate.port, private=private, password_store=choice.store),
+            env, profile=profile, restart_token=restart_token)
         try:
             context = await self._pw.chromium.launch_persistent_context(
                 str(folder), channel="chrome", headless=True, ignore_default_args=True,
@@ -1231,15 +1251,88 @@ class BrowserHost:
             if private:
                 _remove_tree(folder)
             raise BrowserRefused(409, "Chrome could not start") from None
+        if choice.store == _stores.KEYRING_STORE:
+            # Chrome falls back to basic silently when it cannot reach its key:
+            # a keyring that locked during the launch closes it again.
+            after = await loop.run_in_executor(None, self.keyring.state)
+            if after != _stores.UNLOCKED:
+                LOG.warning("Browser keyring was %s after a launch; Chrome closed", after)
+                try:
+                    await asyncio.wait_for(context.close(), CLOSE_TIMEOUT_S)
+                except Exception:  # noqa: BLE001 - the PIDs are stopped next either way
+                    pass
+                await loop.run_in_executor(None, stop_pids, folder)
+                raise BrowserRefused(409, _stores.CHANGED_MESSAGE)
+        else:
+            LOG.info("Browser profile Chrome uses the basic password store (unprotected)")
         self.timings["launch_s"] = round(time.monotonic() - started, 3)
         browser = context.browser
         instance = _Instance(profile=profile, folder=folder, context=context, browser=browser,
                              version=getattr(browser, "version", "") or "",
-                             audio=InstanceAudio(launch_audio.applied))
+                             audio=InstanceAudio(launch_audio.applied),
+                             password_store=choice.store)
         instance.audio.on_settled(self._sound.wake)
         context.on("page", lambda page: self._adopt(instance, page, None))
         LOG.info("Browser started a Chrome (%s)", "private" if private else "profile")
         return instance
+
+    def _store_choice(self, profile: str) -> "_stores.Choice":
+        """The password store for this launch, or `BrowserRefused` (409) with
+        the owner's next step (`password_store.py`). A keyring launch is
+        recorded as sticky *before* Chrome starts: a Chrome that wrote
+        keyring-encrypted data must never be reopened with basic."""
+        if profile == PRIVATE:
+            return _stores.choose(private=True, requested=_stores.REQUEST_BASIC,
+                                  sticky=False, state=_stores.UNAVAILABLE, bus=None)
+        row = self._profiles.require(profile)
+        sticky = row.get(STICKY_KEY) == STICKY_VALUE
+        requested = self._settings.password_store()
+        state = self.keyring.state() if requested == _stores.REQUEST_KEYRING else _stores.UNKNOWN
+        choice = _stores.choose(private=False, requested=requested, sticky=sticky,
+                                state=state, bus=self.keyring.bus())
+        if choice.refused is not None:
+            LOG.warning("Browser profile launch refused: password store %s, keyring %s",
+                        requested, state)
+            raise BrowserRefused(409, choice.refused)
+        if choice.store == _stores.KEYRING_STORE and not sticky:
+            self._profiles.mark_keyring(profile)
+        return choice
+
+    def password_store_status(self) -> dict:
+        """`/status` → `browser.sync`: the store each running Chrome uses,
+        not the flag alone (M12). No secret, label or path."""
+        with self._lock:
+            instances = list(self._snapshot.get("instances") or [])
+        requested = self._settings.password_store()
+        state = self.keyring.cached_state()
+        stores = {row.get("password_store") for row in instances if row.get("profile") != PRIVATE}
+        if not stores:
+            in_effect = None
+        elif len(stores) == 1:
+            in_effect = stores.pop()
+        else:
+            in_effect = "mixed"
+        # What the next named launch would do, so the HUD can say it before one.
+        if requested == _stores.REQUEST_BASIC:
+            next_launch = _stores.BASIC
+        elif state == _stores.UNLOCKED and self.keyring.bus() is not None:
+            next_launch = _stores.KEYRING_STORE
+        elif state == _stores.UNAVAILABLE:
+            next_launch = _stores.BASIC
+        else:
+            next_launch = "refused"
+        unprotected = in_effect in (_stores.BASIC, "mixed") or (in_effect is None and next_launch == _stores.BASIC)
+        if next_launch == "refused":
+            hint = _stores.UNLOCK_MESSAGE
+        elif unprotected and requested == _stores.REQUEST_BASIC:
+            hint = "Unprotected (basic store): browser.json asks for it"
+        elif unprotected:
+            hint = _stores.UNPROTECTED_HINT
+        else:
+            hint = None
+        return {"password_store": in_effect, "requested": requested, "keyring": state,
+                "next_launch": next_launch, "unprotected": unprotected, "hint": hint,
+                "source": "launch_argument"}
 
     async def _close_instance(self, profile: str, *, preserve_activity: bool = False) -> None:
         instance = self._instances.pop(profile, None) or self._closing_instances.get(profile)
@@ -2775,7 +2868,7 @@ class BrowserHost:
         self._publish_pane_tabs()
         instances = [{"profile": p, "tabs": sum(t.profile == p for t in self._tabs.values()),
                       "contexts": len(i.private_contexts) if p == PRIVATE else None,
-                      "sound": self._sound.instance_status(i)}
+                      "sound": self._sound.instance_status(i), "password_store": i.password_store}
                      for p, i in self._instances.items()]
         versions = sorted({i.version for i in self._instances.values() if i.version})
         with self._lock:
@@ -2801,7 +2894,7 @@ class BrowserHost:
                 "tabs": snapshot["tabs"], "tab_cap": max(1, config.BROWSER_TAB_CAP),
                 "lan": settings["lan"], "local_servers": settings["local_servers"],
                 "profile_cap": 8, "instance_cap": PROFILE_INSTANCES_MAX,
-                "sync": {"password_store": "basic", "source": "launch_argument"},
+                "sync": self.password_store_status(),
                 # How many loopback ports the owner opened — never which.
                 "loopback_opened": opened, "landing_guard": guarded, "gate": gate,
                 # BR-1b: counts only — windows streaming a tab, downloads under

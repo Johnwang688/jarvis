@@ -34,6 +34,7 @@ import logging
 import math
 import re
 import secrets as _secrets
+import shlex
 import threading
 import time
 from typing import Any, Callable
@@ -113,8 +114,102 @@ def label(origin_id: str, name: str = "") -> str:
     return f'task {origin_id} "{clean}"' if clean else f"task {origin_id}"
 
 
-# v2 command tools, by the name each provider uses. See `v1_request`.
-_V2_COMMAND_TOOLS = ("Bash", "BashOutput", "shell", "local_shell", "run_command")
+# v2 command tools, by the name each provider uses: real shells. See
+# `v1_request` and `is_command_tool`. Claude's `Monitor` runs a shell command
+# too (a watch whose stdout lines are events) and `PowerShell` is its Windows
+# shell; both were missing until 2026-10-15, so a Monitor `cat .env` reached
+# the reviewer with layer 1 never reading it. Only these map to v1's
+# `run_command` for the allowlist and rules' static ALLOW (layer 4).
+V2_COMMAND_TOOLS = frozenset({
+    "Bash", "BashOutput", "Monitor", "PowerShell",     # Claude
+    "shell", "local_shell", "exec_command",             # Codex
+    "run_command", "run_readonly",                      # fast path / jarvis-mcp
+})
+_V2_COMMAND_TOOLS = V2_COMMAND_TOOLS
+# Tools whose `script` is code in another language, not a shell line (Claude's
+# Workflow runs JavaScript). They keep main's treatment exactly: never read
+# as a shell line, allowlisted as a whole tool (lead's decision on #211's
+# review, F2; the owner may revisit).
+CODE_TOOLS = frozenset({"Workflow", "AppifactRepl", "REPL"})
+# The argument keys a command line travels in, whatever the tool, and the
+# keys an unknown tool may carry its argv in beside it.
+COMMAND_KEYS = ("command", "cmd", "script")
+_ARGV_KEYS = ("args", "argv", "arguments")
+
+
+def _command_value(value) -> str | None:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (list, tuple)) and value and all(isinstance(v, str) for v in value):
+        return " ".join(value)       # Codex hands an argv array
+    return None
+
+
+def is_command_tool(tool: str, args: dict | None) -> bool:
+    """Whether this call is *judged* as a shell command at layers 1 and 2
+    (2026-10-15, fail closed): a known command tool, or **any** tool whose
+    arguments carry a command line under a command key — a tool a newer CLI
+    adds (Monitor was one) is judged from its first call. Not CODE_TOOLS.
+    Being judged is not being trusted: only `is_shell_tool` reaches the
+    allowlist and rules' static ALLOW."""
+    if tool in CODE_TOOLS:
+        return False
+    if tool in V2_COMMAND_TOOLS:
+        return True
+    if not isinstance(args, dict):
+        return False
+    for key in COMMAND_KEYS:
+        text = _command_value(args.get(key))
+        if text is not None and text.strip():
+            return True
+    return False
+
+
+def is_shell_tool(tool: str) -> bool:
+    """A real shell, by name: the only tools whose line the allowlist's stems
+    and rules' static ALLOW may answer for (#211 review, F1)."""
+    return tool in V2_COMMAND_TOOLS
+
+
+def is_unknown_command_tool(tool: str, args: dict | None) -> bool:
+    """A command-bearing tool that is not a known shell (`mcp__x__exec`):
+    judged at layers 1 and 2, never allowlisted, never Always."""
+    return is_command_tool(tool, args) and not is_shell_tool(tool)
+
+
+def unreadable_command(tool: str, args: dict | None) -> str | None:
+    """#211 review, F3: "deny" when a known shell's command key is present
+    but holds no text (empty, or a value that is not text); "ask" when an
+    unknown tool's command key holds a value that is not text; else None."""
+    if tool in CODE_TOOLS or not isinstance(args, dict):
+        return None
+    present = [key for key in COMMAND_KEYS if key in args]
+    if not present:
+        return None
+    if tool in V2_COMMAND_TOOLS:
+        return "deny" if not command_text(args).strip() else None
+    if any(args[key] is not None and _command_value(args[key]) is None for key in present):
+        return "ask"
+    return None
+
+
+def command_text(args: dict | None) -> str:
+    """The command line in a tool's arguments, whatever the provider calls
+    it. More than one command key with text (only an unknown tool could send
+    that) is every one of them, one per line, so none goes unjudged; an
+    argv list beside a command (`{"command": "cat", "args": [".env"]}`) is
+    judged with it."""
+    if not isinstance(args, dict):
+        return ""
+    texts = [text for key in COMMAND_KEYS
+             if (text := _command_value(args.get(key))) is not None and text.strip()]
+    if len(texts) == 1:
+        for key in _ARGV_KEYS:
+            argv = args.get(key)
+            if isinstance(argv, (list, tuple)) and argv and all(isinstance(a, str) for a in argv):
+                texts[0] = texts[0] + " " + shlex.join(argv)
+                break
+    return "\n".join(dict.fromkeys(texts))
 
 
 def v1_request(tool: str, args: dict) -> tuple[str, dict]:
@@ -134,12 +229,15 @@ def v1_request(tool: str, args: dict) -> tuple[str, dict]:
     The command is normalised too, because Codex hands an argv array where
     Claude hands a string and v1 reads `args["command"]` as text.
     """
-    if tool not in _V2_COMMAND_TOOLS:
+    if not is_shell_tool(tool):
+        # Not a shell: as on main, the whole tool. An unknown command-bearing
+        # tool never reaches the allowlist (permit layer 4 skips it) and its
+        # cards are never allowlistable, so no entry is read or written for
+        # it here (#211 review, F1).
         return tool, dict(args)
-    value = args.get("command", args.get("cmd", args.get("script", "")))
-    if isinstance(value, (list, tuple)):
-        value = " ".join(str(part) for part in value)
-    return "run_command", {"command": str(value or "")}
+    # A real shell (Monitor included) mints a stem entry, never a whole-tool
+    # `{"tool": "Monitor"}` grant over every later command.
+    return "run_command", {"command": command_text(args)}
 
 
 @dataclass
@@ -381,7 +479,8 @@ class PendingApprovals:
             item.resolution = decision.value
             entry = None
             if always and decision is Decision.ALLOW:
-                if item.hud_only or not item.request.allowlistable:
+                if (item.hud_only or not item.request.allowlistable
+                        or is_unknown_command_tool(item.request.tool, item.request.args)):
                     item.resolution = "allow (no standing rule from this path)"
                 else:
                     try:
