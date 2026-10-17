@@ -1,10 +1,10 @@
 # Owner live checks for the 2026-10-15/16 merges
 
-Every check that only you can do on your Windows PC or the installed HUD, in one place. Each step says what should happen; if it does not, note what you saw and tell the lead.
+Every check that only you can do on your Windows PC or the installed HUD, in one place. **Everything below is already deployed** (the lead installed the HUD and restarted the daemon after each merge on 2026-10-16), so just press Ctrl+R in the HUD before you start. Each step says what should happen; if it does not, note what you saw and tell the lead.
 
 ## Codex chat git tools and permissions ([#223](https://github.com/Johnwang688/jarvis/pull/223), [#224](https://github.com/Johnwang688/jarvis/pull/224))
 
-Before you start, after these merge: run `jarvis hud install`, then `systemctl --user restart jarvis-daemon2`, then press Ctrl+R in the HUD.
+Already deployed; press Ctrl+R in the HUD before you start.
 
 **Part A: Codex permissions (#224)**
 
@@ -33,7 +33,7 @@ Use a scratch repo you make yourself.
 
 ## Keyring passwords and Chrome sign-in ([#215](https://github.com/Johnwang688/jarvis/pull/215), [#217](https://github.com/Johnwang688/jarvis/pull/217))
 
-Same restart as above after merge. Then check `/status`, `browser.sync`.
+Already deployed. Check `/status`, `browser.sync`.
 
 **Part A: keyring (#215)**
 
@@ -90,7 +90,7 @@ Use a page with a text box, such as a search field, in a Remote pane on the inst
 
 ## Sub-agent activity between turns ([#234](https://github.com/Johnwang688/jarvis/pull/234), SV-6)
 
-Deploy first: `jarvis restart` for the daemon, and `jarvis hud install` or rebuild for the speech and system-line change.
+Already deployed (daemon restarted and HUD installed 2026-10-16); press Ctrl+R.
 
 1. **Claude Code 2.1.295, background agent:** ask the orchestrator for a background Agent. Expect: its row turns done while the chat is idle. A line "A background task finished, and Claude Code carries on by itself." appears, followed by the CLI's own reply as its own turn. Nothing from that turn is posted to Discord or spoken.
 2. **Long background flood** (L-C7, `background_flood`): run it while a second agent is working. Expect: the second agent's hook is not stalled.
@@ -102,7 +102,7 @@ Deploy first: `jarvis restart` for the daemon, and `jarvis hud install` or rebui
 
 The PR body has no live-check section. Its own owner steps and expected results are:
 
-1. Deploy: `jarvis hud rebuild` and reload the HUD (the PR says this is the owner's step).
+1. Already deployed; press Ctrl+R in the HUD.
 2. Settings, Voice, "Sub-agent notices": check it exists for each window. Expect: on by default.
 3. When a native sub-agent finishes, expect one short spoken sentence, "A sub-agent finished." or "A sub-agent failed.", with no name and no reading of the child's text. Two endings close together become one sentence, such as "Two sub-agents finished, one failed."
 4. Stop one child yourself. Expect: no sentence.
@@ -110,5 +110,9 @@ The PR body has no live-check section. Its own owner steps and expected results 
 
 ## Also waiting on the owner
 
-- **Firmware decision:** should a chained move brake when a blocking `whenWithin` comes before a non-`moveTo` step? The firmware does not brake today.
+- **Firmware brake, robot test** ([Johnwang688/87867D-override#10](https://github.com/Johnwang688/87867D-override/pull/10), open; merges only after this test). You decided 2026-10-16 that a chained move brakes before a drive or turn with a blocking `whenWithin` armed, and that the next drive keeps the chained motion's target heading. None of the current autons reach this case, so use the PR's test routine:
+  1. Put the branch in its own folder (your `C:\dev\override-jarvis` has uncommitted edits): from that checkout run `git fetch origin && git worktree add ../override-brake origin/claude/brake-armed-whenwithin`, open `C:\dev\override-brake` in VS Code, and make sure `main.cpp` selects the test routine before downloading.
+  2. A chained turn or drive, then `whenWithin(0, true, …)`, then a `drive`. Expect: the robot stops, waits for the mechanism, then drives.
+  3. `turnTo(-45, 800, 2.0, 100, 30, 15)`, then a blocking `whenWithin`, then a `drive`. Expect: after stopping, the drive steers back toward -45° rather than driving off at the angle the turn stopped short.
+  4. The same with the blocking flag off. Expect: no stop.
 - **Credential file:** move `gha-deployer-key.json` out of the top level of `C:\Users\johnw` (suggested, not done).

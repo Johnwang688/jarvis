@@ -2365,7 +2365,7 @@ with composition driven by CDP on the HUD page, each `key`/`text` message
 parsed by `stream.parse` and applied by CDP to an isolated page holding an
 `<input>` and a `contenteditable`. Twelve mutants each fail at least one of
 them. **Limits**: real Windows IMEs (pinyin, Japanese, the emoji panel) were
-not automated; the owner's live checklist is in the PR. A click into the page
+not automated; the owner's live checklist is below (and in the owner live-check list, `docs/plans/2026-10-16-owner-live-checks.md`). A click into the page
 mid-composition discards the composition, where Chrome itself would commit
 the raw text. The candidate window follows the last press, not the page's
 real caret (a daemon caret report would be a follow-up). Composition text is
