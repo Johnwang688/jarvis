@@ -380,7 +380,7 @@ Open items, in this order:
 4. **B-PERF Chrome tile-size sweep:** run only when the machine is idle.
 5. **VX-UI-4b:** gated on hardware check H4.
 6. **Voice follow-ups:** [2026-10-15-voice-followups.md](2026-10-15-voice-followups.md).
-7. **Owner live checks:** [2026-10-16-owner-live-checks.md](2026-10-16-owner-live-checks.md), a new file another agent is writing. The pending checks for [#232](https://github.com/Johnwang688/jarvis/pull/232) (B-PICKERS), [#233](https://github.com/Johnwang688/jarvis/pull/233) and [#235](https://github.com/Johnwang688/jarvis/pull/235) (B-IME) and [#234](https://github.com/Johnwang688/jarvis/pull/234) (SV-6) are also in their rows above. The older owner-assisted items still stand: GIT-LIVE, B-LOGIN, the Quick review first press, H1 to H10 and the braking firmware decision.
+7. **Owner live checks:** [2026-10-16-owner-live-checks.md](2026-10-16-owner-live-checks.md). The pending checks for [#232](https://github.com/Johnwang688/jarvis/pull/232) (B-PICKERS), [#233](https://github.com/Johnwang688/jarvis/pull/233) and [#235](https://github.com/Johnwang688/jarvis/pull/235) (B-IME) and [#234](https://github.com/Johnwang688/jarvis/pull/234) (SV-6) are also in their rows above. The older owner-assisted items still stand: GIT-LIVE, B-LOGIN, the Quick review first press, and H1 to H10. The braking firmware decision is made (brake, keep the target heading); it is built as [Johnwang688/87867D-override#10](https://github.com/Johnwang688/87867D-override/pull/10), reviewed, and waits on the owner's robot test before it merges.
 
 ## Shared test, review and release contract
 
