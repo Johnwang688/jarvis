@@ -28,7 +28,9 @@ The world's `vex` section (`state(mock)`):
     `download_live`: with it, the download's terminal row stays running too
     (vexcom still writing), so a `DELETE /terminals/{id}` — the HUD's Stop —
     lands on a live program and settles the record as the daemon's exit hook
-    does (`terminal_closing`);
+    does (`terminal_closing`); `end_download` ends one as its exit would. The
+    device is `"download"` while any download record runs, as the daemon's
+    reservation is (2026-10-17);
   - `brain_refuse`: a sentence the next `POST /vex/brain` answers 409 with
     (once), as the daemon's one-device reservation does;
   - `info` / `info_refuse`: what a device read answers (`text` and
@@ -130,7 +132,9 @@ def _device(mock) -> tuple[str | None, str | None]:
     if brain is None:
         v["brain"] = None
     running = next((r for r in rows if r.get("program") == "vex-download" and not r["exited"]), None)
-    if running:
+    # As the daemon's reservation: the device is the download's until its
+    # record ends (`vex.py` frees it in the same step), whatever its row says.
+    if running or any(rec["state"] == "running" for rec in v["download_records"].values()):
         return "download", None
     return ("brain" if brain else None), brain
 
@@ -151,6 +155,18 @@ def finish_build(mock, build_id: str, state_: str = "succeeded", errors=None, ex
     for r in _rows(mock):
         if r["id"] == rec["terminal_id"]:
             r["exited"], r["exit_code"] = True, rec["exit_code"]
+
+
+def end_download(mock, download_id: str, exit_code: int = 0) -> None:
+    """The download's vexcom ended (its exit hook): the record says how, its row
+    has exited, and the device is free — one step, as the daemon's."""
+    rec = state(mock)["download_records"][download_id]
+    rec.update(state="succeeded" if exit_code == 0 else "failed", exit_code=exit_code,
+               output="Finished" if exit_code == 0 else f"ERROR: exit {exit_code}",
+               ended="2026-10-17T20:22:20+00:00")
+    for r in _rows(mock):
+        if r["id"] == rec["terminal_id"]:
+            r["exited"], r["exit_code"] = True, exit_code
 
 
 def terminal_closing(mock, path: str) -> None:

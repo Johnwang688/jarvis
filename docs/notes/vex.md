@@ -717,3 +717,103 @@ Receipts for this section (fakes only):
   - every stale build and rebuild said, superseded ones included (vitest);
   - stale words while something runs, once in `staleNotes` (vitest) and once
     in the view's call (face, with a Clean running).
+
+## Connect stayed off after a download ended (2026-10-17)
+
+**What the owner saw, live.** A download to slot 1 finished. The view said
+"Downloaded to slot 1. Start it on the brain or the controller." and the
+Build ✓ and Download ✓ tabs were green. The Brain tab said the terminal "was
+closed for the download. Click Connect…", but **Connect stayed greyed out**.
+Its tip said "A download holds the robot's port; Connect once it ends." That
+is the non-chain `device === "download"` branch of `brainView`
+(`hud/src/lib/vex.ts`): the window's `/vex/status` still said `download`.
+
+**Cause: the window's copy of the status, not the daemon.** The journal for
+that evening shows the daemon freed the device after every download. The
+info read at 20:21:16 came after the exit-4 download at 20:17:30. The brain
+terminal at 20:26:25 opened without a refusal after the successful download
+at 20:22:20. A reload, or focusing the window again, always cleared it,
+because the view reads the status when it mounts and on focus. The stale read
+came from `heardDevice` (`hud/src/state/vex.ts`): the bus's
+`vex_device {action: "download"}` record, published at the download's start
+(`vex.py` `_announce`), had the window read `/vex/status` while the daemon
+held the device. Nothing read it again when the download ended. There is no
+bus record for an end, the chain's `finally` read nothing, and the status is
+otherwise read only on mount, focus or the owner's refresh. Every exit
+behaved the same way: success, failure, an instant exit or Stop. A device read
+(⋯) had the same flaw with `"info"`.
+
+**The fix:**
+
+- **The daemon.** A download's exit hook now frees the device in the same
+  locked step that settles its record (`release(locked=True)` in
+  `Vex.download`'s `ended`). Before, the record said it had ended one lock
+  section before the device was freed. A `/vex/status` read in between, just
+  after the HUD saw the record end, could still say `download`. The
+  `release()` in the `finally` still runs if the settle raised, and it does
+  nothing once the device is free.
+- **The HUD store:**
+  - The download chain's `finally` reads the status again, however the chain
+    ended.
+  - `refreshDownload` reads it again when it first sees a record end. This
+    covers the chain's own follow and a later Check status.
+  - `readInfo` reads it again once its read has answered.
+  - `refreshStatus` keeps only the newest read's answer (`statusSeq`). Without
+    that, the bus's earlier read could answer last and bring `download` back.
+- **The view.** While the status says `download` or `info` and no chain of
+  this window's runs, `VexView` reads it again every `DEVICE_POLL_MS`
+  (2 s, only while the window is visible). This is for another window's
+  download, whose end no chain here sees and no bus record announces.
+
+The rules are unchanged: one device action at a time; a download only on the
+owner's click; Connect off while a download really runs (the daemon still
+says `download` then); the brain terminal never reopens by itself
+(VX-UI-4a). Every addition only reads `/vex/status`.
+
+Checks (fakes only; no vexcom, port or live daemon):
+
+- `tests/v2/vex_check.py` `DownloadEnd`:
+  - success, exit 4, an instant exit 6 and Stop (a `DELETE` of the
+    download's terminal), plus nine ends in a row;
+  - `Vex._lock` is wrapped so that every time it is let go, no record this
+    test started says it ended while the device is still the download's;
+  - the fake vexcom takes `DOWNLOAD_EXIT` beside it, for the exit code.
+- `hud/src/state/vex.test.ts`, "Connect is offered once a download ends":
+  - the four exits, and the brain closed for the download;
+  - a forgotten record (404);
+  - a later Check status;
+  - out-of-order status answers;
+  - a device read.
+- `tests/face/hud_v2_vex_check.py` `_download_end_checks`:
+  - the four exits, in the real Brain tab;
+  - a reload, which always showed Connect free;
+  - another window's download, with the owner's exact sentence until it ends.
+- The mock now holds the device as `download` while any download record runs,
+  as the daemon does, and `end_download` ends one. With that,
+  `_brain_checks`' "offers Connect again" check also reproduced the bug.
+
+Receipts:
+
+- **Before the fix:**
+  - all five `DownloadEnd` tests failed;
+  - 9 of the new vitests failed;
+  - six face checks failed against the origin/main bundle, the four exits,
+    another window's download and `_brain_checks`' check, each with the
+    owner's sentence.
+  - The plain HTTP "status at once" assertion alone did not catch the daemon
+    race; only the watched lock did.
+- **After the fix:**
+  - `hud_v2_vex_check` 326/326 and `hud_v2_vex_new_check` 66/66;
+  - all 48 store vitests pass;
+  - `vex_feedback_check` and `vex_output_check` pass;
+  - `vex_check` 152 of 153 pass. It fails only
+    `HereDocuments.test_the_body_backstop_is_judged_fast`, a wall-clock
+    bound that fails the same way on a clean origin/main.
+- **Mutants**, each failing its check:
+  - no newest-read guard;
+  - no refresh at the chain's end (the 404 case);
+  - no refresh when a read sees the end (Check status);
+  - neither refresh (seven vitests);
+  - no refresh after a device read;
+  - no poll in the view (face: another window's download);
+  - the daemon's settle and release split again (`DownloadEnd`).

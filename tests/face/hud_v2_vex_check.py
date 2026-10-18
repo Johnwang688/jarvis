@@ -1650,6 +1650,112 @@ def _stop_checks(page, mock, check, until, fake):
     _finish(mock, fake, _latest_build(mock), "succeeded")
 
 
+def _status_reads(mock, since: int) -> int:
+    return len([c for c in mock.calls[since:] if c[0] == "GET" and c[1] == "/vex/status"])
+
+
+def _connect_off(page) -> str:
+    """Why the Brain tab's Connect is off ("" when it is enabled)."""
+    btn = page.locator(_brain(page, V, _tid("vex-brain-connect")))
+    if btn.count() != 1:
+        return "no Connect"
+    return _described(page, _brain(page, V, _tid("vex-brain-connect"))) if btn.is_disabled() else ""
+
+
+def _download_end_checks(page, mock, check, until, fake):
+    """The owner, live, 2026-10-17: a download ended ("Downloaded to slot 1"),
+    but the Brain tab's Connect stayed off — "A download holds the robot's
+    port; Connect once it ends." The bus's `vex_device` record at the
+    download's start had the window read `/vex/status` while the daemon held
+    the device, and nothing read it again at the end. However a download ends
+    — success, a failure (exit 4), an instant exit (6) or Stop — Connect is
+    offered without a reload, and never pressed for the owner (VX-UI-4a)."""
+    for label, code, how in (("succeeded", 0, "end"), ("failed (exit 4)", 4, "end"),
+                             ("an instant exit 6", 6, "instant"), ("stopped", 129, "stop")):
+        _reset(page, mock, until)
+        check(f"download end, {label}: setup: the view draws", _ready(page, until))
+        v = mock_vex.state(mock)
+        v["download_auto"] = False
+        v["download_live"] = how == "stop"
+        _auto(mock)
+        _tab(page, "brain")
+        base = len(mock.calls)
+        page.locator(_view(V, _tid("vex-download-btn"))).click()
+        assert until(lambda: _sent_downloads(mock) and v["download_records"], timeout=10), "the download did not start"
+        rid = next(iter(v["download_records"]))
+        sent_at = max(i for i, c in enumerate(mock.calls) if c[0] == "POST" and c[1] == "/projects/p3/vex/download")
+        # The bus's record answered by a status read while the daemon holds the device.
+        check(f"download end, {label}: the bus's record has the window read the status while the download holds the port",
+              bool(until(lambda: _status_reads(mock, sent_at) >= 1, timeout=4)))
+        _tab(page, "brain")                              # the chain shows the Download tab
+        if how == "instant":
+            mock_vex.end_download(mock, rid, code)       # ended a moment after that read
+        else:
+            check(f"download end, {label}: while it really runs, Connect is off with the reason",
+                  bool(until(lambda: "download holds the robot's port" in _connect_off(page), timeout=4)))
+            if how == "stop":
+                stop = page.locator(_view(V, _tid("vex-stop")))
+                stop.focus()
+                page.keyboard.press("Enter")
+                assert until(lambda: v["download_records"][rid]["state"] != "running", timeout=4), "Stop ended nothing"
+            else:
+                mock_vex.end_download(mock, rid, code)
+        assert until(lambda: page.evaluate("window.__hudVex.chain()") is None, timeout=8), "the chain did not end"
+        _tab(page, "brain")
+        note = page.locator(_view(V, _tid("vex-note")))
+        said = {"end": "Downloaded to slot 1" if code == 0 else f"Download failed (exit {code})",
+                "instant": f"Download failed (exit {code})", "stop": "Download stopped"}[how]
+        check(f"download end, {label}: the status line says how it ended",
+              bool(until(lambda: note.count() and said in note.inner_text(), timeout=4)),
+              note.inner_text() if note.count() else "")
+        check(f"download end, {label}: Connect is enabled without a reload or a focus",
+              bool(until(lambda: _connect_off(page) == "", timeout=3)), _connect_off(page))
+        check(f"download end, {label}: and nothing opened the brain terminal or resent the download",
+              not _posted_since(mock, base, "/vex/brain") and len(_sent_downloads(mock)) == 1)
+        if how == "end" and code == 0:
+            _shot(page, "30-brain-after-download-ends")
+    # A reload always showed it free: the daemon held nothing (the bug was the window's read).
+    _reset(page, mock, until)
+    _ready(page, until)
+    _tab(page, "brain")
+    v = mock_vex.state(mock)
+    v["download_auto"] = False
+    _auto(mock)
+    page.locator(_view(V, _tid("vex-download-btn"))).click()
+    assert until(lambda: v["download_records"], timeout=10), "the download did not start"
+    rid = next(iter(v["download_records"]))
+    mock_vex.end_download(mock, rid, 0)
+    until(lambda: page.evaluate("window.__hudVex.chain()") is None, timeout=8)
+    page.reload()
+    page.wait_for_selector('[data-testid="sidebar"]', state="attached")
+    _ready(page, until)
+    _tab(page, "brain")
+    check("download end: a reload shows Connect enabled (the daemon's status was free all along)",
+          bool(until(lambda: _connect_off(page) == "", timeout=4)), _connect_off(page))
+
+    # Another window's download: no chain here sees it end, and no bus record says so.
+    _reset(page, mock, until)
+    _ready(page, until)
+    _tab(page, "brain")
+    v = mock_vex.state(mock)
+    v["download_auto"] = False
+    obase = len(mock.calls)
+    import urllib.request
+    req = urllib.request.Request(f"http://127.0.0.1:{mock.port}/projects/p3/vex/download",
+                                 data=json.dumps({"slot": 1, "name": "auton"}).encode(), method="POST",
+                                 headers={"Content-Type": "application/json", "Origin": f"http://127.0.0.1:{mock.port}"})
+    rid = json.loads(urllib.request.urlopen(req, timeout=5).read())["download_id"]
+    check("another window's download: Connect is off here with the owner's exact words",
+          bool(until(lambda: _connect_off(page).startswith(
+              "A download holds the robot's port; Connect once it ends."), timeout=4)),
+          _connect_off(page))
+    mock_vex.end_download(mock, rid, 0)
+    check("another window's download: once it ends, Connect is enabled here without a focus or a reload",
+          bool(until(lambda: _connect_off(page) == "", timeout=5)), _connect_off(page))
+    check("another window's download: nothing here opened the brain terminal",
+          not _posted_since(mock, obase, "/vex/brain"))
+
+
 def _tabs_checks(page, mock, check, until, fake):
     """The output area (plan §2.5): an action selects its tab, background events never do."""
     _reset(page, mock, until)
@@ -1907,7 +2013,7 @@ SECTIONS = (
     _chain_checks, _card_checks, _brain_checks, _info_checks, _notice_checks, _one_chain_checks,
     _header_rebuild_checks, _still_stale_checks, _answer_card_checks, _passing_card_checks, _first_click_checks,
     _detect_again_checks, _lone_pane_checks, _gone_project_checks, _ed7_beside_checks, _stop_checks, _tabs_checks,
-    _marks_checks, _help_checks)
+    _marks_checks, _help_checks, _download_end_checks)
 
 
 def vex_checks(browser, mock, base, check, until, guard, init_script):
