@@ -68,14 +68,18 @@ class StartupProtocol(unittest.TestCase):
                  ("vex-other", True, b"\x1b[6n"),
                  (None, True, b"\x1b[6n"),
                  (None, False, b"\x1b[6n")]
+        # Each case one byte per read and as one read: a rule that answered
+        # the query anywhere in the first read (`query in initial`) passes the
+        # first and fails the second (review LOW of #240).
         for program, input_ok, data in cases:
-            with self.subTest(program=program, input_ok=input_ok, data=data):
-                term = self.terminal(program=program, input_ok=input_ok)
-                with patch.object(term, "queue_input") as input_:
-                    for byte in data:
-                        term._output(bytes([byte]))
-                    input_.assert_not_called()
-                self.assertEqual(term.history().data, data)
+            for split in ("bytes", "whole"):
+                with self.subTest(program=program, input_ok=input_ok, data=data, split=split):
+                    term = self.terminal(program=program, input_ok=input_ok)
+                    with patch.object(term, "queue_input") as input_:
+                        for chunk in ([bytes([b]) for b in data] if split == "bytes" else [data]):
+                            term._output(chunk)
+                        input_.assert_not_called()
+                    self.assertEqual(term.history().data, data)
 
     def test_every_input_disabled_vex_program_is_answered(self):
         # The download, USB check and device read hung on the live machine
@@ -407,6 +411,13 @@ class BrainPort(DaemonBase):
         with self.daemon.vex.connection.lock:
             self.daemon.vex.connection.value.update(controller=controller, brain=brain)
 
+    def change(self, device, connected, at):
+        """A confirmed USB change, as `Connection.run` records one."""
+        with self.daemon.vex.connection.lock:
+            value = self.daemon.vex.connection.value
+            value[device] = connected
+            value["events"].append({"device": device, "connected": connected, "at": at})
+
     def download(self, wait_state="succeeded"):
         self.build()
         sent = self.owner("POST", f"/projects/{self.project.id}/vex/download",
@@ -428,6 +439,42 @@ class BrainPort(DaemonBase):
         self.assertEqual(self.brain_args(), (["--quiet", "--user"], None), "no download yet")
         self.download()
         self.assertEqual(self.brain_args(), (["--quiet", "--user", "COM7"], "COM7"))
+        # The owner's Disconnect (a close, exit 129) is no failure: still COM7.
+        self.assertEqual(self.brain_args(), (["--quiet", "--user", "COM7"], "COM7"))
+
+    def test_a_usb_change_since_the_download_forgets_the_port(self):
+        # Review LOW of #240: the controller moved sockets (COM7 → COM8).
+        self.change("controller", True, "2026-10-17T10:00:00+00:00")
+        self.reading(True, False)
+        self.download()
+        self.assertEqual(self.brain_args()[1], "COM7")
+        self.change("controller", False, "2026-10-17T10:01:00+00:00")
+        self.assertEqual(self.brain_args(), (["--quiet", "--user"], None))
+        self.change("controller", True, "2026-10-17T10:01:10+00:00")
+        self.assertEqual(self.brain_args(), (["--quiet", "--user"], None),
+                         "the same reading again is not the same socket")
+        self.download()
+        self.assertEqual(self.brain_args()[1], "COM7", "a new download teaches it again")
+
+    def test_the_first_reading_after_the_download_forgets_it_too(self):
+        self.download()
+        self.change("controller", True, "2026-10-17T10:00:00+00:00")
+        self.reading(True, False)
+        self.assertEqual(self.brain_args(), (["--quiet", "--user"], None))
+
+    def test_a_brain_terminal_that_fails_by_itself_with_the_port_forgets_it(self):
+        self.reading(True, False)
+        self.download()
+        (self.world.vexcom_dir / "PORT_BUSY").write_text("")
+        before = len(self.world.calls("vexcom"))
+        answer = self.owner("POST", "/vex/brain")
+        term = self.daemon.terminals.get(answer["terminal_id"])
+        eventually(lambda: term.exited, timeout=4, what="vexcom exit")
+        self.assertEqual((answer["port"], term.exit_code), ("COM7", 3))
+        self.assertEqual(self.world.calls("vexcom")[before]["argv"], ["--quiet", "--user", "COM7"])
+        eventually(lambda: self.owner("GET", "/vex/status")["device"] is None, what="freed")
+        (self.world.vexcom_dir / "PORT_BUSY").unlink()
+        self.assertEqual(self.brain_args(), (["--quiet", "--user"], None))
 
     def test_a_brain_on_usb_or_an_unknown_reading_lets_vexcom_pick(self):
         self.download()

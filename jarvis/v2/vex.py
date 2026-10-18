@@ -1508,8 +1508,11 @@ class Vex:
         self._held: set[BuildLock] = set()
         self._stopped = False
         # The port the last successful download said it used (`download_port`),
-        # for the brain terminal (`_brain_port`). Memory only: a restart forgets it.
-        self._download_port: str | None = None
+        # for the brain terminal (`_brain_port`), with the USB reading's last
+        # confirmed change at that moment (`_usb_mark`). Memory only: a restart
+        # forgets it, and so does any later USB change or a brain terminal
+        # that fails by itself with it (review LOW of #240).
+        self._download_port: tuple[str, tuple | None] | None = None
         # The last brain terminal's diagnostic (`brain_record`): its argv's
         # flags and port, its first bytes, the startup reply, its exit. Memory only.
         self._brain_terminal = None
@@ -1894,8 +1897,9 @@ class Vex:
             except Exception:
                 output = "Output preview unavailable; check the terminal."
             if port is not None:
+                mark = self._usb_mark()
                 with self._lock:
-                    self._download_port = port
+                    self._download_port = (port, mark)
             try:
                 with self._lock:
                     record.terminal_id = terminal.id
@@ -2010,14 +2014,29 @@ class Vex:
         controller, which has no user port of its own (plan §5.2, offset
         83443); a brain on USB has one, and vexcom's own pick is kept. So: the
         port the last successful download said it used, and only while the
-        last confirmed USB reading is a controller and no brain."""
+        last confirmed USB reading is a controller and no brain. A port is
+        forgotten once the USB reading has changed since that download (a
+        controller unplugged and moved to another socket, COM7 → COM8, is two
+        changes; so is the first reading after it), and when a brain terminal
+        given it ends by itself with an error (`brain`)."""
+        mark = self._usb_mark()
         with self._lock:
-            port = self._download_port
-        if port is None:
+            known = self._download_port
+            if known is not None and known[1] != mark:
+                self._download_port = known = None
+        if known is None:
             return None
         with self.connection.lock:
             reading = (self.connection.value["controller"], self.connection.value["brain"])
-        return port if reading == (True, False) else None
+        return known[0] if reading == (True, False) else None
+
+    def _usb_mark(self) -> tuple | None:
+        """The USB reading's last confirmed change (`Connection`'s events: the
+        device, connected and when), or None before any: what changes when
+        the reading does."""
+        with self.connection.lock:
+            events = self.connection.value["events"]
+            return tuple(sorted(events[-1].items())) if events else None
 
     def brain_record(self) -> dict:
         """The last brain terminal's diagnostic, for the owner (`GET
@@ -2059,6 +2078,12 @@ class Vex:
             release()
             reading = self._brain_reading(terminal)
             with self._lock:
+                # vexcom failed by itself with the remembered port (gone, busy,
+                # not the controller's): forget it, so the next Connect lets
+                # vexcom pick. The owner's Disconnect (a close) is not a failure.
+                if (port is not None and terminal.exit_code not in (0, None) and not terminal.closing
+                        and self._download_port is not None and self._download_port[0] == port):
+                    self._download_port = None
                 finished.update(reading, ended=_utcnow())
                 if self._brain_terminal is terminal and self._brain_record is not None:
                     self._brain_record.update(finished)
