@@ -32,7 +32,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import logging
 import math
-import re
 import secrets as _secrets
 import shlex
 import threading
@@ -104,11 +103,13 @@ def label(origin_id: str, name: str = "") -> str:
     """The attribution string, sanitized as v1 `tasks._label` does.
 
     `name` is model-chosen text that lands verbatim on an authorization
-    surface, so it must not be able to fake a second line or break a DM's
-    formatting: collapse whitespace, strip backticks, cap the length.
+    surface, so it must not be able to fake a second line, reorder or hide
+    text (bidi overrides, zero-width characters) or break a DM's formatting.
+    `clean_line` does all of that: whitespace and unseen characters collapse,
+    backticks go, and the result is capped at 60 with "…".
     """
-    clean = re.sub(r"\s+", " ", str(name).replace("`", "")).strip()[:60]
-    origin_id = re.sub(r"\s+", " ", str(origin_id).replace("`", "")).strip()[:60]
+    clean = clean_line(name, cap=60)
+    origin_id = clean_line(origin_id, cap=60)
     if not origin_id:
         return f'"{clean}"' if clean else ""
     return f'task {origin_id} "{clean}"' if clean else f"task {origin_id}"
