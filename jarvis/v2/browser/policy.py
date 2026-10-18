@@ -155,7 +155,7 @@ def judge_url(url, *, refused: frozenset[int] = frozenset(), landed: bool = Fals
     port = port or (443 if parts.scheme.lower() == "https" else 80)
     # BR-0's own test first (every loopback spelling, every control port),
     # then this daemon's reported ports under the same spellings.
-    if config.is_face_origin(text) or (port in refused and config._names_this_machine(host)):
+    if config.is_face_origin(text) or (port in refused and config.claims_this_machine(host)):
         _refuse(JARVIS_PORT, JARVIS_PORT_SENTENCE)
     return text
 
