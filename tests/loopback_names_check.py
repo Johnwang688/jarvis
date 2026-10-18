@@ -1,22 +1,27 @@
 """SEC-1 acceptance tests: a *name* whose first label is `127` is a DNS name.
 
-Task card: `docs/plans/2026-10-18-security-fix-specs.md`, section SEC-1.
-Only *literal* addresses in 127.0.0.0/8 count as this machine. A name such
-as `127.rebind.example` or `127.0.0.1.nip.io` is resolved like any other
-and refused when it answers with loopback or a private address. Literal
-spellings (`127.1`, `0x7f000001`, `2130706433`, `::ffff:127.0.0.1`,
-`localhost.`) stay owner-local with no DNS lookup.
+Task card: `docs/plans/2026-10-18-security-fix-specs.md`, section SEC-1,
+as amended by the lead on 2026-10-18 (**tighten-only**: no URL refused
+today may become allowed). Only the canonical literals in 127.0.0.0/8
+(what `ipaddress.ip_address` parses), `LOCAL_HOSTS` and `*.localhost` skip
+the LAN lookup. A name such as `127.rebind.example` or `127.0.0.1.nip.io`
+is resolved like any other and refused when it answers with loopback or a
+private address. The other spellings (`127.1`, `0x7f000001`, `2130706433`,
+`::ffff:127.0.0.1`, `localhost.`) go to `getaddrinfo` as most do today,
+and are refused when they resolve to loopback. `is_face_origin` keeps
+refusing everything it refuses today, `127.<name>` on a control port
+included.
 
 Cases (each prints its own name, `ok`/`FAIL`):
 
 1.  `is_loopback` over literals, `*.localhost` and the `127.`-prefixed names.
 2.  `is_lan_host("127.rebind.example")` resolves, and refuses private and
     loopback answers.
-3.  `is_lan_host` on literal spellings: False, with no lookup.
+3.  `is_lan_host`: non-canonical spellings are looked up and refused; the
+    canonical ones are False with no lookup.
 4.  `web._refusal` and a `fetch_page` redirect hop to `127.rebind.example`.
 5.  `127.rebind.example:8402` (resolving to 127.0.0.1) is still refused by
-    `web._refusal` and by v1's `*` policy, though `is_face_origin` no longer
-    claims it (the card's behaviour change).
+    `web._refusal`, by v1's `*` policy and by `is_face_origin` itself.
 6.  v1's `*` allowlist refuses `127.rebind.example`.
 7.  The v2 gate: `tests/v2/loopback_names_gate_check.py` (run by case 8 too).
 8.  The neighbouring suites still pass (subprocesses; `--skip-suites` skips
@@ -24,6 +29,11 @@ Cases (each prints its own name, `ok`/`FAIL`):
     do not point HOME at a temporary directory for this file, or Playwright
     cannot find its Chromium and `tests/browser/policy_check.py` fails
     (each suite makes its own temporary state).
+10. No loosening: over every host spelling above, on no port, 3000, a
+    control port and 8403, and with names answering loopback or a LAN
+    address, every URL that `web._refusal` and v1's `*` allowlist refuse on
+    main (a fixed table, recorded from main) is still refused; and the
+    owner's canonical loopback spellings and a public name are still allowed.
 
 Hermetic: `socket.getaddrinfo` is replaced for every case, and `httpx.get`
 is replaced wherever `fetch_page` could reach the network. Nothing touches
@@ -133,7 +143,7 @@ def case1_is_loopback() -> None:
                      "0.0.0.0", ""):
             got = _safe(config.is_loopback, host)
             check(f"case1_is_loopback_true[{host!r}]", got is True, f"got {got!r}")
-        for host in ("127.rebind.example", "127.0.0.1.nip.io", "127."):
+        for host in ("127.rebind.example", "127.0.0.1.nip.io", "127.", "127.1"):
             got = _safe(config.is_loopback, host)
             check(f"case1_is_loopback_false[{host!r}]", got is False, f"got {got!r}")
     check("case1_is_loopback_never_resolves", fake.calls == [], f"getaddrinfo({fake.calls})")
@@ -158,10 +168,19 @@ def case2_is_lan_host_resolves_127_names() -> None:
 
 # -- case 3 -----------------------------------------------------------------------------
 
-def case3_literal_spellings_stay_local_without_dns() -> None:
-    # The resolver answers loopback for anything (what libc does for these),
-    # so a version that looks them up calls them LAN and fails both halves.
+def case3_literal_spellings() -> None:
+    # Tighten-only (lead's amendment): the early "this machine, not LAN"
+    # return stays on the narrowed `is_loopback`. The non-canonical spellings
+    # go to the resolver, as all but `127.1` do on main, and are refused when
+    # it answers loopback (it does here, as libc does for these).
     for host in ("127.1", "0x7f000001", "2130706433", "::ffff:127.0.0.1", "localhost."):
+        with dns(default=["127.0.0.1"]) as fake:
+            got = _safe(config.is_lan_host, host)
+        check(f"case3_is_lan_host_refused[{host!r}]", got is True, f"got {got!r}")
+        check(f"case3_is_lan_host_looked_up[{host!r}]", host in fake.calls,
+              f"getaddrinfo calls: {fake.calls}")
+    # The owner's canonical spellings: not LAN, and no lookup.
+    for host in ("127.0.0.1", "[::1]", "localhost", "foo.localhost"):
         with dns(default=["127.0.0.1"]) as fake:
             got = _safe(config.is_lan_host, host)
         check(f"case3_is_lan_host_false[{host!r}]", got is False, f"got {got!r}")
@@ -228,11 +247,15 @@ def case5_control_port_by_127_name_still_refused() -> None:
         allowed = _safe(BrowserPolicy().allows, url)
         check("case5_v1_default_policy_127_rebind_control_port_refused", allowed is False,
               f"got {allowed!r}")
-        # The card's behaviour change: the name is no longer a spelling of
-        # this machine, so the control-port test does not claim it (the LAN
-        # check above is what refuses it now).
-        face = _safe(config.is_face_origin, url)
-        check("case5_is_face_origin_127_rebind_is_false", face is False, f"got {face!r}")
+        # Tighten-only: `is_face_origin` refuses what it refuses on main,
+        # a host whose first label is `127` on a control port included.
+        for host in ("127.rebind.example", "127.0.0.1.nip.io"):
+            face = _safe(config.is_face_origin, f"http://{host}:{config.FACE_PORT}/")
+            check(f"case5_is_face_origin_control_port_true[{host}]", face is True,
+                  f"got {face!r}")
+        # Not a control port: not this check's job (is_lan_host refuses it).
+        face = _safe(config.is_face_origin, "http://127.rebind.example:3000/")
+        check("case5_is_face_origin_127_rebind_port_3000_false", face is False, f"got {face!r}")
     # Unchanged: every literal spelling on a control port is still the
     # control plane, with no lookup.
     with dns(default=["127.0.0.1"]) as fake:
@@ -262,6 +285,66 @@ def case6_v1_star_allowlist_refuses_127_names() -> None:
         check("case6_v1_star_policy_public_name_allowed", got is True, f"got {got!r}")
         got = _safe(BrowserPolicy().allows, "http://127.0.0.1:8000/")
         check("case6_v1_default_policy_127_0_0_1_dev_port_allowed", got is True, f"got {got!r}")
+
+
+# -- case 10 ----------------------------------------------------------------------------
+
+# Every host spelling the cases above use, and the ports each is tried on.
+# FACE is the face's port (a control port); 8403 is the workshop's (v1 open).
+CASE10_HOSTS = ("127.rebind.example", "127.0.0.1.nip.io", "127.", "127.1", "0x7f000001",
+                "2130706433", "[::ffff:127.0.0.1]", "localhost.", "127.0.0.1", "127.5.6.7",
+                "[::1]", "localhost", "foo.localhost", "0.0.0.0", "public.example",
+                "192.168.1.10")
+CASE10_PORTS = ("", ":3000", ":FACE", ":8403")
+
+# Recorded on main (2478b6e) with the fake DNS below, for both answers the
+# `127.` names are given: the URLs `web._refusal` refuses (and v1's `*`
+# allowlist refuses exactly the same set). A fixed table, so the comparison
+# never imports the old code. Each must still be refused after SEC-1.
+REFUSED_ON_MAIN = frozenset(
+    {f"http://{h}:FACE/" for h in (
+        "127.rebind.example", "127.0.0.1.nip.io", "127.1", "0x7f000001", "2130706433",
+        "[::ffff:127.0.0.1]", "localhost.", "127.0.0.1", "127.5.6.7", "[::1]", "localhost",
+        "foo.localhost", "0.0.0.0", "192.168.1.10")}
+    | {f"http://{h}{p}/" for h in ("0x7f000001", "2130706433", "[::ffff:127.0.0.1]",
+                                    "localhost.", "192.168.1.10")
+       for p in ("", ":3000", ":8403")}
+)
+
+# Allowed on main and by the amended design: the owner's canonical loopback
+# spellings off the control ports, and a public name on any port. Guards
+# against over-tightening (sending every host to the resolver).
+STILL_ALLOWED = frozenset(
+    {f"http://{h}{p}/" for h in ("127.0.0.1", "127.5.6.7", "[::1]", "localhost",
+                                  "foo.localhost", "0.0.0.0")
+     for p in ("", ":3000", ":8403")}
+    | {f"http://public.example{p}/" for p in CASE10_PORTS}
+)
+
+
+def case10_no_loosening() -> None:
+    face = f":{config.FACE_PORT}"
+    for answer in ("127.0.0.1", "192.168.1.10"):
+        table = {"127.rebind.example": [answer], "127.0.0.1.nip.io": [answer],
+                 "public.example": ["93.184.216.34"], "192.168.1.10": ["192.168.1.10"]}
+        # Anything else (the numeric spellings, `localhost.`, `127.`) answers
+        # loopback, as libc does for the numeric ones.
+        with dns(table, default=["127.0.0.1"]), no_fetch():
+            for host in CASE10_HOSTS:
+                for port in CASE10_PORTS:
+                    key = f"http://{host}{port}/"
+                    url = key.replace(":FACE", face)
+                    refusal = _safe(web._refusal, url)
+                    allowed = _safe(BrowserPolicy(allowed_hosts=["*"]).allows, url)
+                    if key in REFUSED_ON_MAIN:
+                        check(f"case10_still_refused[{key} dns->{answer}]",
+                              refusal is not None and not str(refusal).startswith("raised")
+                              and allowed is False,
+                              f"_refusal={refusal!r} v1_star_allows={allowed!r}")
+                    elif key in STILL_ALLOWED:
+                        check(f"case10_still_allowed[{key} dns->{answer}]",
+                              refusal is None and allowed is True,
+                              f"_refusal={refusal!r} v1_star_allows={allowed!r}")
 
 
 # -- cases 7 and 8 ------------------------------------------------------------------------
@@ -309,10 +392,11 @@ def main(argv: list[str]) -> int:
     only_suites = "--only-suites" in argv
     if not only_suites:
         for case in (case1_is_loopback, case2_is_lan_host_resolves_127_names,
-                     case3_literal_spellings_stay_local_without_dns,
+                     case3_literal_spellings,
                      case4_fetch_page_refuses_127_name_to_lan,
                      case5_control_port_by_127_name_still_refused,
-                     case6_v1_star_allowlist_refuses_127_names):
+                     case6_v1_star_allowlist_refuses_127_names,
+                     case10_no_loosening):
             try:
                 case()
             except Exception as exc:  # noqa: BLE001

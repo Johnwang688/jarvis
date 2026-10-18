@@ -1,12 +1,13 @@
 """SEC-1 case 7: the v2 Browser gate refuses `127.<name>` on Jarvis's ports.
 
-Task card: `docs/plans/2026-10-18-security-fix-specs.md`, section SEC-1.
-After SEC-1, `config.is_face_origin("http://127.rebind.example:<control>/")`
-is False: the name is no longer a spelling of this machine, so the v2 URL
-judge (`policy.judge_url`) may let it through. The SOCKS gate is the
-boundary, and it must still refuse the connection: Jarvis's ports are
-refused on every address, and a name that resolves to loopback is DNS
-rebinding whatever the port.
+Task card: `docs/plans/2026-10-18-security-fix-specs.md`, section SEC-1,
+with the lead's tighten-only amendment (2026-10-18): no URL refused today
+may become allowed. After SEC-1 `127.rebind.example` is no longer a
+spelling of this machine. The SOCKS gate is the boundary, and it must still
+refuse the connection: Jarvis's ports are refused on every address, and a
+name that resolves to loopback is DNS rebinding whatever the port. The URL
+judge must keep refusing such a name on every refused port too (7g), and
+the name must no longer count as the owner opening a local server (7d).
 
 Reuses `browser_gate_check.Base`: the real gate on an ephemeral loopback
 port, an injected resolver (no DNS) and connector (never beyond loopback),
@@ -75,9 +76,9 @@ class LoopbackNamesAtTheGate(Base):
             self.assertIn(name, self.resolver.calls, "the gate resolves a 127.<name>")
 
     def test_case7c_judged_url_then_gate_refuses_end_to_end(self):
-        # Whatever the URL judge says about the typed address (after SEC-1 it
-        # no longer calls it Jarvis's port), what Chrome would then send the
-        # gate is refused, and no control stand-in is reached.
+        # Whatever the URL judge says about the typed address, what Chrome
+        # would then send the gate is refused, and no control stand-in is
+        # reached (the gate does not lean on the judge).
         for label, listener in self.stand_ins.items():
             url = f"http://127.rebind.example:{listener.port}/"
             refused = P.refused_ports(hud_port=self.stand_ins["hud"].port,
@@ -93,6 +94,22 @@ class LoopbackNamesAtTheGate(Base):
                                  G.REP_NOT_ALLOWED)
         time.sleep(0.2)
         self.assertEqual(self.jarvis_accepts(), {})
+
+
+    def test_case7g_url_judge_still_refuses_127_names_on_every_refused_port(self):
+        # Tighten-only: on main the judge refuses `127.<name>` on every port in
+        # `refused` (BR-0's control ports and this daemon's reported HUD, API
+        # and workshop ports), not only on `config.control_ports()`.
+        refused = P.refused_ports(hud_port=self.stand_ins["hud"].port,
+                                  api_port=self.stand_ins["api"].port,
+                                  workshop_port=self.workshop.port)
+        self.assertIn(P.DEFAULT_WORKSHOP_PORT, refused)
+        for port in sorted(refused):
+            for name in NAMES_127:
+                with self.subTest(name=name, port=port):
+                    with self.assertRaises(P.URLRefused) as raised:
+                        P.judge_url(f"http://{name}:{port}/", refused=refused)
+                    self.assertEqual(raised.exception.reason, P.JARVIS_PORT)
 
 
 class LoopbackNamesOwnerOpening(unittest.TestCase):
