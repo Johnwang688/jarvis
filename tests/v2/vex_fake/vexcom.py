@@ -12,7 +12,8 @@ environment *names* to `calls.jsonl` beside itself, then:
   shape (`$RUN`, then a `$POSE,…` line every 20 ms) as a program would;
 * `--write`: a download — prints the port and banner a real one prints,
   then progress, waits while `HOLD` exists beside it (so a test can hold a
-  download open), prints `Finished` (exits 5 early with `FAIL_DOWNLOAD`);
+  download open), prints `Finished` (exits 5 early with `FAIL_DOWNLOAD`;
+  with `DOWNLOAD_EXIT` beside it, an error and exits with the code it holds);
 * `--json` (exactly; vexcom's "system info in json format"): one line of
   JSON with markup in a string and an escape written as `\\u001b`;
 * `--programs` (exactly; "shows programs"): a text list with markup and a raw
@@ -94,8 +95,10 @@ if "--write" in args:
     until = time.monotonic() + 30
     while (HERE / "HOLD").exists() and time.monotonic() < until:
         time.sleep(0.05)
-    print("Finished", flush=True)
-    sys.exit(0)
+    exit_file = HERE / "DOWNLOAD_EXIT"
+    code = int(exit_file.read_text() or 0) if exit_file.is_file() else 0
+    print("Finished" if code == 0 else f"ERROR: exit {code}", flush=True)
+    sys.exit(code)
 if args == ["--usb"]:
     while (HERE / "HOLD_USB").exists():
         time.sleep(0.05)

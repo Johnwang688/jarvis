@@ -50,6 +50,13 @@ const BUILD_POLL_MAX_MS = 6 * 60_000;
 const DOWNLOAD_WAIT_MAX_MS = 4 * 60_000;
 /** A project's detection older than this is asked again (on focus, and by App's timer). */
 export const DETECT_STALE_MS = 30_000;
+/**
+ * While `/vex/status` says a download or a device read holds the port and no
+ * chain of this window's is running, it is asked again this often: another
+ * window's download ends with no bus record, and this window's Connect must
+ * not wait for a focus or a reload to be offered (2026-10-17).
+ */
+export const DEVICE_POLL_MS = 2000;
 
 /** Said when a download closed the brain terminal: it is never opened again by itself (owner decision 5). */
 const BRAIN_CLOSED = "The brain terminal was closed for the download";
@@ -130,6 +137,7 @@ function saveLast(v: Record<string, string>) {
 export class VexStore {
   status: VexStatus | null = null;
   statusError = "";
+  private statusSeq = 0;
   connection: ConnectionView | null = null;
   connectionError = "";
   private connectionPending = false;
@@ -297,9 +305,17 @@ export class VexStore {
     }
   }
 
+  /**
+   * Ask `/vex/status` again. Only the newest read's answer is kept: one
+   * asked before a download ended (the bus's `vex_device` at its start) can
+   * answer after one asked once it had ended, and would bring back "download"
+   * — Connect off for a port nothing holds (the owner, live, 2026-10-17).
+   */
   refreshStatus(): Promise<void> {
+    const seq = ++this.statusSeq;
     return api.vexStatus().then(
       (s) => {
+        if (seq !== this.statusSeq) return;
         this.status = s;
         this.statusError = s ? "" : "the daemon answered without a VEX status";
         // A link the daemon holds open (a reload, another window's Connect) is
@@ -310,6 +326,7 @@ export class VexStore {
         this.changed();
       },
       (e: any) => {
+        if (seq !== this.statusSeq) return;
         this.statusError = e?.message || "the VEX status could not be read";
         this.changed();
       },
@@ -461,7 +478,12 @@ export class VexStore {
       // must not regress it to running or replace its final output/outcome.
       if (current.state !== "running") return current;
       this.patchRun(projectId, {download: d, downloadNote: ""});
-      if (d.state !== "running") this.downloadEnded(projectId, d.slot, d);
+      if (d.state !== "running") {
+        this.downloadEnded(projectId, d.slot, d);
+        // The daemon freed the device with the record's end: said now, not on
+        // the next focus or reload (a later Check status too).
+        void this.refreshStatus();
+      }
       return d;
     } catch (e: any) {
       if (this.crashed || this.run(projectId).download?.id !== id) return null;
@@ -656,6 +678,11 @@ export class VexStore {
           : `${BRAIN_CLOSED}. Click Connect in the Brain tab to open it again; it never reopens by itself.`;
         this.changed();
       }
+      // However the chain ended (a download's success, failure, instant exit
+      // or Stop; a refusal; a drop), the port is asked about again: the last
+      // read may be the bus's at the download's start, which said "download"
+      // (the owner, live, 2026-10-17). A read, never a Connect (VX-UI-4a).
+      await this.refreshStatus();
     }
   }
 
@@ -865,6 +892,9 @@ export class VexStore {
     } finally {
       this.infoBusy = null;
       this.changed();
+      // The daemon answers a read only after freeing the device; the bus's
+      // record at its start left the status saying "info".
+      void this.refreshStatus();
     }
   }
 

@@ -10,6 +10,8 @@ const h = vi.hoisted(() => ({
   builds: [] as { pid: string; action: string }[],
   download: null as null | ((pid: string) => Promise<{ terminal_id: string }>),
   brain: null as string | null,
+  /** The daemon's device reservation as `/vex/status` says it (`device`). */
+  device: null as string | null,
   brainOpened: 0,
   closed: [] as string[],
   buildState: null as null | ((id: string) => any),
@@ -19,7 +21,7 @@ const h = vi.hoisted(() => ({
 vi.mock("../api", () => ({
   api: {
     vexStatus: async () => ({ configured: true, hint: null, vexcom_version: null, extension_version: null,
-                              sdks: null, templates: false, device: null, brain: h.brain }),
+                              sdks: null, templates: false, device: h.device, brain: h.brain }),
     vexDownload: (pid: string, body: { slot: number; name: string }) => {
       h.downloads.push({ pid, ...body });
       h.order.push("download");
@@ -49,6 +51,11 @@ vi.mock("../api", () => ({
       return { terminal_id: "c0000002", started: true };
     },
     vexProject: async () => ({}),
+    // The daemon answers a device read only once it has freed the device.
+    vexInfo: async (read: string) => {
+      h.device = null;
+      return { text: "{}", exit_code: 0, read };
+    },
   },
 }));
 vi.mock("../components/Terminal", () => ({
@@ -63,6 +70,7 @@ vi.mock("../components/Terminal", () => ({
 }));
 
 import { VexStore } from "./vex";
+import { brainView, type DownloadView } from "../lib/vex";
 import { api } from "../api";
 import { terminals } from "../components/Terminal";
 
@@ -76,6 +84,7 @@ beforeEach(() => {
   h.builds.length = 0;
   h.download = null;
   h.brain = null;
+  h.device = null;
   h.brainOpened = 0;
   h.closed.length = 0;
   h.buildState = null;
@@ -731,5 +740,166 @@ describe("the Brain tab's Connect and Disconnect (VX-UI-4a)", () => {
     store.brainTerminal = "c0000003";
     await store.disconnectBrain();
     expect(h.closed).toEqual(["c0000002"]);                    // nothing under a card
+  });
+});
+
+describe("Connect is offered once a download ends, without a reload (the owner, live, 2026-10-17)", () => {
+  // The bug: the bus's `vex_device` record at a download's start made the
+  // window read `/vex/status` while the daemon held the device ("download"),
+  // and nothing read it again when the download ended — so the Brain tab's
+  // Connect stayed off: "A download holds the robot's port; Connect once it ends."
+  const off = (store: VexStore) => brainView({
+    configured: true, blocked: false, chain: store.chain ? { paused: store.chain.brainPaused } : null,
+    terminal: null, asking: store.brainBusy, session: null, exitCode: null, shownIn: null,
+    error: store.brainNote, closed: store.brainClosed, device: store.status?.device ?? null, reading: !!store.infoBusy,
+  }).connect.off;
+
+  /**
+   * One chain against the fake daemon: the device is the download's from its
+   * request until its record ends (one step on the daemon), and the bus's
+   * record arrives while the request is on its way. `settleAt`: the record
+   * read that sees the end (1: an instant exit). `stop`: the owner's Stop ends it.
+   */
+  async function chain(end: { state: DownloadView["state"]; exit_code: number }, o: { settleAt?: number; stop?: boolean; brain?: boolean } = {}) {
+    vi.useFakeTimers();
+    const store = new VexStore();
+    if (o.brain) {
+      h.brain = "c0000001";
+      await store.refreshStatus();
+    }
+    const rec: DownloadView = { id: "b0000001", project_id: "p3", slot: 1, state: "running", terminal_id: "b0000001",
+      exit_code: null, output: "", started: "", ended: null };
+    const settle = () => {
+      Object.assign(rec, end, { ended: "x" });
+      h.device = null;                                   // with the record's end (vex.py `ended`)
+    };
+    h.download = async () => {
+      h.device = "download";
+      store.heardDevice({ action: "download", at: "2026-10-17T20:22:11" });
+      return { terminal_id: "b0000001" };
+    };
+    let reads = 0;
+    vi.spyOn(api, "vexDownloadState").mockImplementation(async () => {
+      reads += 1;
+      if (o.stop ? h.closed.includes("b0000001") : reads >= (o.settleAt ?? 3)) settle();
+      return { ...rec };
+    });
+    const said = vi.spyOn(api, "vexStatus");
+    const work = store.download("p3", 1, "auton", "override");
+    if ((o.settleAt ?? 3) > 1) {
+      await vi.waitFor(() => expect(store.run("p3").download?.state).toBe("running"));
+      // While it really runs: the daemon says "download" and Connect is off.
+      expect(store.status?.device).toBe("download");
+      expect(off(store)).toMatch(/download holds the robot's port/);
+    }
+    if (o.stop) store.stop("p3");
+    await vi.advanceTimersByTimeAsync(5000);
+    await work;
+    // The bug's premise, whatever the exit: a status read said "download".
+    const answers = await Promise.all(said.mock.results.map((r) => r.value));
+    expect(answers.some((a: any) => a?.device === "download")).toBe(true);
+    return store;
+  }
+
+  const offered = (store: VexStore) => {
+    expect(store.chain).toBeNull();
+    expect(store.status?.device).toBeNull();
+    expect(off(store)).toBe("");
+    expect(h.brainOpened).toBe(0);                          // offered, never opened (VX-UI-4a)
+    expect(h.downloads).toHaveLength(1);                    // and nothing resent
+  };
+
+  it("after a download that succeeded", async () => {
+    const store = await chain({ state: "succeeded", exit_code: 0 });
+    expect(store.run("p3").note).toBe("Downloaded to slot 1. Start it on the brain or the controller.");
+    offered(store);
+  });
+
+  it("after a download that failed (exit 4)", async () => {
+    const store = await chain({ state: "failed", exit_code: 4 });
+    expect(store.run("p3").note).toMatch(/^Download failed \(exit 4\)/);
+    offered(store);
+  });
+
+  it("after an instant exit 6 (the port held elsewhere), ended at its first read", async () => {
+    const store = await chain({ state: "failed", exit_code: 6 }, { settleAt: 1 });
+    expect(store.run("p3").note).toMatch(/^Download failed \(exit 6\)/);
+    offered(store);
+  });
+
+  it("after the owner's Stop", async () => {
+    const store = await chain({ state: "failed", exit_code: 129 }, { stop: true });
+    expect(store.run("p3").downloaded).toMatchObject({ ok: false, stopped: true });
+    offered(store);
+  });
+
+  it("after a download that closed the brain terminal: Connect is offered, the terminal never reopened", async () => {
+    const store = await chain({ state: "succeeded", exit_code: 0 }, { brain: true });
+    expect(store.brainClosed).toMatch(/closed for the download\. Click Connect/);
+    offered(store);
+  });
+
+  it("when the record is gone (a restart): the chain's end still reads the status again", async () => {
+    vi.useFakeTimers();
+    const store = new VexStore();
+    h.download = async () => {
+      h.device = "download";
+      store.heardDevice({ action: "download", at: "x" });
+      return { terminal_id: "b0000001" };
+    };
+    vi.spyOn(api, "vexDownloadState").mockImplementation(async () => {
+      h.device = null;
+      throw Object.assign(new Error("download record not found"), { status: 404 });
+    });
+    const work = store.download("p3", 1, "auton", "override");
+    await vi.advanceTimersByTimeAsync(5000);
+    await work;
+    expect(store.run("p3").note).toMatch(/outcome unknown/);
+    offered(store);
+  });
+
+  it("a later Check status that reads the end reads the status too", async () => {
+    vi.useFakeTimers();
+    const store = new VexStore();
+    const rec: DownloadView = { id: "b0000001", project_id: "p3", slot: 1, state: "running", terminal_id: "b0000001",
+      exit_code: null, output: "", started: "", ended: null };
+    h.download = async () => ({ terminal_id: "b0000001" });
+    const state = vi.spyOn(api, "vexDownloadState").mockImplementation(async () => ({ ...rec }));
+    const work = store.download("p3", 1, "auton", "override");
+    h.device = "download";
+    await vi.advanceTimersByTimeAsync(4 * 60_000 + 1000);   // the follow gives up while it still runs
+    await work;
+    expect(store.status?.device).toBe("download");
+    h.device = null;
+    state.mockImplementation(async () => ({ ...rec, state: "succeeded", exit_code: 0, ended: "x" }));
+    await store.refreshDownload("p3");
+    await vi.waitFor(() => expect(store.status?.device).toBeNull());
+    expect(off(store)).toBe("");
+  });
+
+  it("a status read asked before the end, answering after one asked after it, never brings back \"download\"", async () => {
+    const store = new VexStore();
+    const answers: ((s: any) => void)[] = [];
+    vi.spyOn(api, "vexStatus").mockImplementation(() => new Promise((r) => answers.push(r)));
+    const said = (device: string | null) => ({ configured: true, hint: null, vexcom_version: null, extension_version: null,
+      sdks: null, templates: false, project_folder: null, device, brain: null });
+    const early = store.refreshStatus();                   // the bus's read, at the download's start
+    const late = store.refreshStatus();                    // the read once it had ended
+    answers[1](said(null));
+    await late;
+    answers[0](said("download"));
+    await early;
+    expect(store.status?.device).toBeNull();
+    expect(off(store)).toBe("");
+  });
+
+  it("a device read's end reads the status again (the same stale \"info\")", async () => {
+    const store = new VexStore();
+    h.device = "info";
+    await store.refreshStatus();
+    expect(off(store)).toMatch(/device read holds the robot's port/);
+    await store.readInfo("system");
+    await vi.waitFor(() => expect(store.status?.device).toBeNull());
+    expect(off(store)).toBe("");
   });
 });

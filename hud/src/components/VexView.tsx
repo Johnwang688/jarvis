@@ -47,7 +47,7 @@
 //     the action bar.
 
 import { createContext, useContext, useEffect, useId, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
-import { vex } from "../state/vex";
+import { DEVICE_POLL_MS, vex } from "../state/vex";
 import { TerminalView, terminals, useTerminals } from "./Terminal";
 import {
   OUTPUT_TABS, SETUP_COMMAND, SLOTS, actionState, brainView, buildLine, chainLine, chainSteps, defaultName, deviceBadge,
@@ -133,6 +133,18 @@ export function VexView(props: {
     }, 4000);
     return () => clearInterval(t);
   }, [unconfigured]);
+  // A download or device read the daemon says holds the port, with no chain
+  // of this window's to see it end (another window's, or a read of status
+  // that raced the end): asked again until it says the port is free, so
+  // Connect is offered without a focus or a reload (2026-10-17). A read only.
+  const held = !vex.chain && (vex.status?.device === "download" || vex.status?.device === "info");
+  useEffect(() => {
+    if (!held) return;
+    const t = setInterval(() => {
+      if (document.visibilityState === "visible") void vex.refreshStatus();
+    }, DEVICE_POLL_MS);
+    return () => clearInterval(t);
+  }, [held]);
 
   useEffect(() => {
     if (props.drawn === false || blocked) return;

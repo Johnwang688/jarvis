@@ -1440,6 +1440,111 @@ class Device(DaemonBase):
                          [], "a device-info read leaves no terminal behind")
 
 
+class _WatchedLock:
+    """`Vex._lock`, watched (the HUD's stale Connect, 2026-10-17): each time it
+    is let go, a download record this test started must not say it ended while
+    the device is still the download's. Any `/vex/status` read could take the
+    lock at exactly that moment, and it would say "download" for a download
+    whose record the HUD has already seen end."""
+
+    def __init__(self, host):
+        self.inner = threading.Lock()
+        self.host = host
+        self.before: set = set()
+        self.seen: list = []
+
+    def acquire(self, blocking=True, timeout=-1):
+        return self.inner.acquire(blocking, timeout)
+
+    def release(self):
+        new = [r for k, r in self.host._downloads.items() if k not in self.before]
+        device = self.host._device
+        if new and new[-1].state != "running" and device and device["kind"] == "download":
+            self.seen.append(new[-1].state)
+        self.inner.release()
+
+    def locked(self):
+        return self.inner.locked()
+
+    __enter__ = acquire
+
+    def __exit__(self, *exc):
+        self.release()
+
+
+class DownloadEnd(DaemonBase):
+    """However a download ends — success, a failure (exit 4), an instant exit
+    (6: the port held elsewhere) or the owner's Stop — the device is free the
+    moment its record says it ended (the owner, live, 2026-10-17: Connect stayed
+    off, "A download holds the robot's port")."""
+
+    def setUp(self):
+        super().setUp()
+        self.build()
+        host = self.daemon.vex
+        self.watch = _WatchedLock(host)
+        host._lock = self.watch
+        host._device_idle = threading.Condition(self.watch)
+
+    def download(self):
+        self.watch.before = set(self.daemon.vex._downloads)
+        return self.request("POST", f"/projects/{self.project.id}/vex/download",
+                            {"slot": 1, "name": "auton"}, status=202)[1]
+
+    def settled(self, download_id):
+        return eventually(lambda: (lambda d: d if d["state"] != "running" else None)(
+            self.owner("GET", f"/vex/downloads/{download_id}")), what="the download record")
+
+    def check_free(self, sent, state, code):
+        record = self.settled(sent["download_id"])
+        status = self.owner("GET", "/vex/status")        # at once: never "eventually"
+        self.assertEqual((record["state"], record["exit_code"]), (state, code))
+        self.assertIsNone(status["device"], "the record ended; the device must be free with it")
+        self.assertEqual(self.watch.seen, [], "a record said it ended while the device was still held")
+        self.ended(sent["terminal_id"])
+        self.owner("DELETE", f"/terminals/{self.owner('POST', '/vex/brain')['terminal_id']}")
+        eventually(lambda: self.owner("GET", "/vex/status")["device"] is None, what="brain closed")
+
+    def test_success(self):
+        self.check_free(self.download(), "succeeded", 0)
+
+    def test_failure_exit_4(self):
+        (self.world.vexcom_dir / "DOWNLOAD_EXIT").write_text("4")
+        self.check_free(self.download(), "failed", 4)
+
+    def test_instant_exit_6(self):
+        # vexcom answers at once (the VS Code extension holds the port): the
+        # exit can land before the download's own request has answered.
+        (self.world.vexcom_dir / "DOWNLOAD_EXIT").write_text("6")
+        self.check_free(self.download(), "failed", 6)
+
+    def test_stopped(self):
+        hold = self.world.vexcom_dir / "HOLD"
+        hold.write_text("")
+        self.addCleanup(lambda: hold.unlink(missing_ok=True))
+        sent = self.download()
+        eventually(lambda: self.world.calls("vexcom"), what="download started")
+        self.assertEqual(self.owner("GET", "/vex/status")["device"], "download",
+                         "Connect stays off while a download really runs")
+        self.request("POST", "/vex/brain", {}, status=409)
+        self.owner("DELETE", f"/terminals/{sent['terminal_id']}")     # the HUD's Stop
+        record = self.settled(sent["download_id"])
+        self.assertIsNone(self.owner("GET", "/vex/status")["device"])
+        self.assertEqual(record["state"], "failed")
+        self.assertEqual(self.watch.seen, [])
+
+    def test_many_ends_never_show_the_device_held(self):
+        # The race itself, repeated: each record's end and the device's
+        # release are one step, whatever the exit.
+        for code in (0, 4, 6) * 3:
+            (self.world.vexcom_dir / "DOWNLOAD_EXIT").write_text(str(code))
+            sent = self.download()
+            self.settled(sent["download_id"])
+            self.assertIsNone(self.owner("GET", "/vex/status")["device"], code)
+            self.ended(sent["terminal_id"])
+        self.assertEqual(self.watch.seen, [])
+
+
 class Sockets(DaemonBase):
     def attach(self, tid):
         ticket = self.owner("POST", f"/terminals/{tid}/ticket")["ticket"]

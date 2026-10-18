@@ -1644,13 +1644,20 @@ class Vex:
             token = secrets.token_hex(8)
             self._device = {"kind": kind, "terminal_id": None, "token": token}
 
-        def release() -> bool:
-            with self._lock:
-                if self._device is not None and self._device["token"] == token:
-                    self._device = None
-                    self._device_idle.notify_all()
-                    return True
+        def free() -> bool:
+            if self._device is not None and self._device["token"] == token:
+                self._device = None
+                self._device_idle.notify_all()
+                return True
             return False
+
+        def release(*, locked: bool = False) -> bool:
+            # `locked`: the caller already holds `self._lock` (a download's
+            # exit hook, so its record ends and the device frees as one step).
+            if locked:
+                return free()
+            with self._lock:
+                return free()
 
         def bind(terminal_id) -> None:
             with self._lock:
@@ -1907,12 +1914,16 @@ class Vex:
                     record.output = output
                     record.state = "timed_out" if record.timed_out else "succeeded" if terminal.exit_code == 0 else "failed"
                     record.ended = _utcnow()
+                    # One step with the record's end: a `/vex/status` read
+                    # after a settled download record never still says
+                    # "download" (the HUD's Connect, 2026-10-17).
+                    release(locked=True)
                     timer, record.timer = record.timer, None
                     if timer is not None:
                         timer.cancel()
                         self._timers.discard(timer)
             finally:
-                release()
+                release()                   # a no-op once freed above
                 with self._lock:
                     self._held.discard(lock)
                 lock.release()
