@@ -9,7 +9,7 @@
   *typed* words (never an inlined file; attachments by name, images as a
   note), Jarvis's settled replies split at 2000 characters (never a delta,
   never thinking), one tool footer per turn and a "turn failed" or
-  "interrupted" line. Everything is scrubbed (`secrets.scrub`) and silent
+  "interrupted" line. Everything is scrubbed (`redact.scrub_text`) and silent
   (flag 4096); the only pings are the D1 lines after a provider question
   (here) and an approval (the gateway's `_post_approval`).
 * **In.** A message typed in that Discord thread runs a turn in the same chat
@@ -64,9 +64,8 @@ import re
 import threading
 import time
 
-from jarvis.tools.secrets import scrub
-
 from ..model import ProviderName, Role, utcnow
+from ..redact import scrub_text
 from ..stores import StoreError, _lock as store_lock, _write_bytes
 from .render import _cap
 from .rest import (MISSING_ACCESS, MISSING_PERMISSIONS, THREAD_ARCHIVED, UNKNOWN_CHANNEL,
@@ -109,6 +108,21 @@ STOPPED_TEXT = "You stopped that turn before it could take this, so I didn't sen
 _IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_.]{0,60}$")
 
 
+
+WITHHELD = "[output withheld: it could not be scrubbed]"
+
+
+def _scrub(text: str) -> str:
+    """Every post's text goes through the whole scrub (credential-file values,
+    provider key shapes, bearer/JWT shapes) before it leaves the machine, and
+    text that cannot be scrubbed is withheld, never posted as is (SEC-3). Call
+    it outside any send lock: it reads credential files."""
+    try:
+        return scrub_text(text)
+    except Exception:       # noqa: BLE001 — what cannot be scrubbed is withheld
+        return WITHHELD
+
+
 # -- names and lines ------------------------------------------------------------
 
 def chat_name(thread, first_text: str = "") -> str:
@@ -120,7 +134,7 @@ def chat_name(thread, first_text: str = "") -> str:
     else:
         excerpt = " ".join((first_text or "").split())[:EXCERPT].rstrip()
         name = f"{thread.id} · {excerpt}" if excerpt else thread.id
-    return _cap(scrub(name), NAME_MAX)
+    return _cap(_scrub(name), NAME_MAX)
 
 
 def moved_name(project_name: str, name: str) -> str:
@@ -151,7 +165,7 @@ def user_line(data: dict, *, dropped: str | bool | None = None) -> str | None:
         typed = f"/skill {data['skill']} {typed}".rstrip()
     why = _not_sent(None if dropped is True else dropped) if dropped else None
     if why and via in ("discord", "dm"):
-        return scrub(f"{why[0].upper()}{why[1:]}: {_cap(' '.join(typed.split()), 300)}")
+        return _scrub(f"{why[0].upper()}{why[1:]}: {_cap(' '.join(typed.split()), 300)}")
     if via in ("discord", "dm"):
         return None                                     # never echoed
     if via == "system":
@@ -161,7 +175,7 @@ def user_line(data: dict, *, dropped: str | bool | None = None) -> str | None:
         lines = typed.strip().splitlines() or [""]
         more = " (output in the HUD)" if len(lines) > 1 else ""
         head = f"· system: {_cap(' '.join(lines[0].split()), 300)}{more}"
-        return scrub(head)
+        return _scrub(head)
     elif via == "peer":
         head = f"↪ Request from another thread: {_cap(' '.join(typed.split()), 400)}"
     else:
@@ -178,7 +192,7 @@ def user_line(data: dict, *, dropped: str | bool | None = None) -> str | None:
     images = data.get("images")
     if isinstance(images, int) and not isinstance(images, bool) and images > 0:
         lines.append(f"[{images} image{'s' if images != 1 else ''}, in the HUD]")
-    return scrub("\n".join(lines))
+    return _scrub("\n".join(lines))
 
 
 def _waited(row) -> bool:
@@ -1096,7 +1110,7 @@ class ChatMirror:
         posts = []
         for index, texts in enumerate(parts):
             said = "\n\n".join(t.strip() for t in texts if t.strip())
-            chunks = _split(scrub(said)) if said else []
+            chunks = _split(_scrub(said)) if said else []
             if index == len(parts) - 1:
                 tail = "\n".join(x for x in (footer(tools, stop, error), pointer) if x)
                 if tail:
@@ -1113,8 +1127,10 @@ class ChatMirror:
         if reply and asked.get("spoken") and via in ("discord", "dm") and self._speak:
             # Spoken from the scrubbed text, like every other post: a value
             # the scrub redacts must not come back as audio.
-            posts.append(_Post(chat_id, reply_to, action="speak", content=scrub(reply),
-                               silent=silent))
+            spoken = _scrub(reply)
+            if spoken != WITHHELD:          # a marker is not worth saying aloud
+                posts.append(_Post(chat_id, reply_to, action="speak", content=spoken,
+                                   silent=silent))
         if posts:
             posts[-1].through = through
         else:
@@ -1138,7 +1154,7 @@ class ChatMirror:
         target = self.target(chat_id)
         if not target or not isinstance(text, str) or not text.strip():
             return
-        self._enqueue([_Post(chat_id, target, content=_cap(scrub(text), MAX_CHARS),
+        self._enqueue([_Post(chat_id, target, content=_cap(_scrub(text), MAX_CHARS),
                              silent=silent)])
 
     def _question(self, thread, data) -> None:
@@ -1172,7 +1188,7 @@ class ChatMirror:
         lines = [f"Question: {data.get('text') or ''}"]
         lines += [f"{i}. {_cap(o, 200)}" for i, o in enumerate(options[:10], 1)]
         lines.append("Answer by typing here.")
-        posts = [_Post(chat_id, target, content=_cap(scrub("\n".join(lines)), MAX_CHARS),
+        posts = [_Post(chat_id, target, content=_cap(_scrub("\n".join(lines)), MAX_CHARS),
                        keep=True)]
         if target != self._dm_id():
             posts.append(_Post(chat_id, target, action="ping"))
@@ -1286,7 +1302,7 @@ class ChatMirror:
                     self.rest.add_owner(new)
                 except Exception as exc:
                     self._failed("add_owner", exc)
-        label = _cap(scrub(project.name), 80)
+        label = _cap(_scrub(project.name), 80)
         retired = [r for r in side.get("retired") or [] if isinstance(r, str)]
         if old not in retired:
             retired.append(old)
@@ -1508,7 +1524,7 @@ class ChatMirror:
             project = self.stores.projects.get(thread.project_id) if thread else None
         except StoreError:
             project = None
-        label = _cap(scrub(project.name), 60) if project is not None else "Jarvis"
+        label = _cap(_scrub(project.name), 60) if project is not None else "Jarvis"
         prefix = f"[{label} · chat {item.chat_id}] "
         if item.action == "speak":
             moved = _Post(item.chat_id, dm, action="speak", content=item.content,
