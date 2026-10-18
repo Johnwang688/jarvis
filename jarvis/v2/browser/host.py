@@ -107,6 +107,7 @@ from urllib.parse import urlsplit
 from xml.sax.saxutils import escape as xml_escape
 
 from jarvis import config
+from jarvis.private_write import write_private
 
 from . import files as _files
 from . import password_store as _stores
@@ -495,21 +496,9 @@ def _remove_tree(path: Path, *, strict: bool = False) -> None:
 
 
 def _write_private(path: Path, data: bytes) -> None:
-    """`data` to `path`, atomically, 0600, never through a symlink."""
-    tmp = path.with_name(f".{path.name}.{secrets.token_hex(4)}.tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-    try:
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(data)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp, path)
-    except BaseException:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
+    """`data` to `path`, atomically, 0600, never through a symlink (the shared
+    recipe lives in `jarvis.private_write`)."""
+    write_private(path, data)
 
 
 def _read_capped(path: Path, cap: int) -> bytes | None:

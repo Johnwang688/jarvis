@@ -73,9 +73,9 @@ import logging
 import os
 import re
 import threading
-import uuid
 from typing import Any, Callable
 
+from ..private_write import write_private
 from .approvals import clean_line
 from .model import utcnow
 from .provider import Event, EventKind
@@ -650,26 +650,17 @@ class SubagentRecords:
         holds, which is at most `THREAD_BYTES` of entries. Written beside it
         (0600) and renamed over it, so a reader sees the old file or the
         new one, never half of either."""
-        tmp = path.with_name(f".{FILE}.{uuid.uuid4().hex}.tmp")
         try:
-            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-            try:
-                for child in state.children.values():
-                    data = {name: getattr(child, name) for name in _CHILD_FIELDS}
-                    data["entries"] = [_public(e) for e in child.entries]
-                    line = {"kind": "snapshot", "sid": child.sid, "at": child.started_at,
-                            "data": data}
-                    os.write(fd, (json.dumps(line, ensure_ascii=False, allow_nan=False) + "\n").encode("utf-8"))
-                os.fsync(fd)
-            finally:
-                os.close(fd)
-            os.replace(tmp, path)
+            out = []
+            for child in state.children.values():
+                data = {name: getattr(child, name) for name in _CHILD_FIELDS}
+                data["entries"] = [_public(e) for e in child.entries]
+                line = {"kind": "snapshot", "sid": child.sid, "at": child.started_at,
+                        "data": data}
+                out.append((json.dumps(line, ensure_ascii=False, allow_nan=False) + "\n").encode("utf-8"))
+            write_private(path, b"".join(out))
         except Exception:  # noqa: BLE001
             LOG.warning("Cannot compact %s", path, exc_info=True)
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
 
     # -- reading ---------------------------------------------------------------
 

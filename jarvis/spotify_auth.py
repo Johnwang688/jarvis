@@ -39,7 +39,6 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
-import os
 import secrets
 import threading
 import time
@@ -51,6 +50,7 @@ from urllib.parse import parse_qs, urlencode, urlparse
 import httpx
 
 from . import config
+from .private_write import write_private
 
 AUTH_URL = "https://accounts.spotify.com/authorize"
 TOKEN_URL = "https://accounts.spotify.com/api/token"
@@ -113,10 +113,7 @@ def _store(bundle: dict) -> None:
         path.parent.chmod(0o700)
     except OSError:
         pass
-    temporary = path.with_name(path.name + ".tmp")
-    temporary.write_text(json.dumps(bundle, indent=2) + "\n", encoding="utf-8")
-    temporary.chmod(0o600)
-    os.replace(temporary, path)
+    write_private(path, (json.dumps(bundle, indent=2) + "\n").encode("utf-8"))
 
 
 def access_token() -> str:

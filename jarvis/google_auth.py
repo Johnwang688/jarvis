@@ -32,6 +32,7 @@ from urllib.parse import parse_qs, urlencode, urlparse
 import httpx
 
 from . import config
+from .private_write import write_private
 
 AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
@@ -279,20 +280,21 @@ def connect(client_json: str | None) -> int:
 
     token_path.parent.mkdir(parents=True, exist_ok=True)
     token_path.parent.chmod(0o700)
-    token_path.write_text(
-        json.dumps(
-            {
-                "client_id": client_id,
-                "client_secret": client_secret,
-                "refresh_token": payload["refresh_token"],
-                "scopes": SCOPES,
-            },
-            indent=2,
-        )
-        + "\n",
-        encoding="utf-8",
+    write_private(
+        token_path,
+        (
+            json.dumps(
+                {
+                    "client_id": client_id,
+                    "client_secret": client_secret,
+                    "refresh_token": payload["refresh_token"],
+                    "scopes": SCOPES,
+                },
+                indent=2,
+            )
+            + "\n"
+        ).encode("utf-8"),
     )
-    token_path.chmod(0o600)
     invalidate()
     print(f"connected — token bundle written to {token_path} (mode 600).")
     print("Jarvis can now use Gmail; every send still needs your approval.")

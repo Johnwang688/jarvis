@@ -23,6 +23,7 @@ from typing import Annotated
 import httpx
 
 from .. import config
+from ..private_write import write_private
 from . import tool
 
 
@@ -258,11 +259,10 @@ def connect() -> int:
     input("press Enter once the bot is in the server… ")
 
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps({"bot_token": token, "owner_id": owner_id}, indent=2) + "\n",
-        encoding="utf-8",
+    write_private(
+        path,
+        (json.dumps({"bot_token": token, "owner_id": owner_id}, indent=2) + "\n").encode("utf-8"),
     )
-    path.chmod(0o600)
 
     result = discord_dm_owner("Jarvis online. This is where I will reach you.")
     if result.startswith("Error"):
