@@ -195,6 +195,15 @@ def validate(brief: Brief) -> None:
         raise BriefRefused("Codex app-server has no pre-tool callback to enforce Brief.always_ask")
     if not Path(brief.cwd).is_absolute() or not Path(brief.cwd).is_dir():
         raise BriefRefused("Codex cwd must be an existing absolute worktree directory")
+    # The workspace is writable without a prompt, so home (the Inbox) would
+    # open ~/.local/bin, every project's source and venv, and git hooks
+    # (2026-10-17 review). Owner's call: keep Codex out until it gets a
+    # narrower workspace there.
+    cwd, home = Path(brief.cwd).resolve(), Path.home().resolve()
+    if cwd == home or cwd in home.parents:
+        raise BriefRefused("Codex can't run in a project rooted at your home folder (like the Inbox): "
+                           "it could change any file there without asking. Use a Claude or Jarvis chat, "
+                           "or start Codex in a project folder.")
 
 
 def atomically_write(path: Path, text: str) -> None:
