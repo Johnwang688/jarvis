@@ -3,17 +3,25 @@
 tool, and it touches no device: it records its argv, working folder and
 environment *names* to `calls.jsonl` beside itself, then:
 
-* `--user`: the brain's user port — echoes each line typed as `brain> …`
-  until its input ends or it is killed;
-* `--write`: a download — prints progress, waits while `HOLD` exists beside
-  it (so a test can hold a download open), prints `Finished`;
+* `--user` (with `--quiet`, and maybe a port, as `brain_argv` builds it):
+  the brain's user port. Without `--quiet` it first prints a banner, as a
+  real download does (`vexcom utility …`); with `PORT_BUSY` beside it, it
+  says the port is busy and exits 3; otherwise it prints `brain user port
+  open`, echoes each line typed as `brain> …` until its input ends or it is
+  killed, and with `STREAM` beside it also streams the owner's telemetry
+  shape (`$RUN`, then a `$POSE,…` line every 20 ms) as a program would;
+* `--write`: a download — prints the port and banner a real one prints,
+  then progress, waits while `HOLD` exists beside it (so a test can hold a
+  download open), prints `Finished` (exits 5 early with `FAIL_DOWNLOAD`);
 * `--json` (exactly; vexcom's "system info in json format"): one line of
   JSON with markup in a string and an escape written as `\\u001b`;
 * `--programs` (exactly; "shows programs"): a text list with markup and a raw
   escape in it.
 
 Both reads hang while `HOLD_INFO` exists beside it. With `STARTUP_DSR`
-beside it, every mode but `--user` first waits for interop's cursor reply. The output shapes are
+beside it, every mode first waits for interop's cursor reply: `--user` (the
+brain terminal) hangs for it, printing nothing, as the owner saw on
+2026-10-17; every other mode exits 91 after 2 s without it. The output shapes are
 plausible guesses, not vexcom's: the real ones are only seen on a real brain.
 """
 import json
@@ -29,7 +37,7 @@ with open(HERE / "calls.jsonl", "a", encoding="utf-8") as log:
                           "env": sorted(os.environ), "wslenv": os.environ.get("WSLENV")}) + "\n")
 # Model Windows interop's startup handshake (as vex_fake/make.py): with
 # `STARTUP_DSR` beside it, nothing is printed until the cursor reply arrives.
-if (HERE / "STARTUP_DSR").is_file() and "--user" not in args:
+if (HERE / "STARTUP_DSR").is_file():
     import select
     import termios
     import tty
@@ -39,7 +47,7 @@ if (HERE / "STARTUP_DSR").is_file() and "--user" not in args:
         os.write(1, part)
         time.sleep(0.01)
     reply = b""
-    until = time.monotonic() + 2
+    until = time.monotonic() + (30 if "--user" in args else 2)
     while len(reply) < 6 and time.monotonic() < until:
         if select.select([0], [], [], 0.1)[0]:
             reply += os.read(0, 6 - len(reply))
@@ -54,12 +62,35 @@ if (HERE / "STARTUP_DSR").is_file() and "--user" not in args:
 else:
     CONSOLE_OFF = None
 if "--user" in args:
+    if "--quiet" not in args:
+        print("vexcom utility V1.0.2b2 (fake banner)", flush=True)
+    if (HERE / "PORT_BUSY").is_file():
+        print("fake: the serial port is in use by another program", flush=True)
+        sys.exit(3)
     print("brain user port open", flush=True)
+    if (HERE / "STREAM").is_file():
+        import threading
+
+        def stream():
+            print("$RUN,1,fake", flush=True)
+            n = 0
+            while True:
+                n += 1
+                print(f"$POSE,{n},{n * 0.5:.1f},{-n * 0.25:.2f},{n % 360}", flush=True)
+                time.sleep(0.02)
+        threading.Thread(target=stream, daemon=True).start()
     for line in sys.stdin:
-        print("brain> " + line.rstrip("\n"), flush=True)
+        print("brain> " + line.rstrip("\r\n"), flush=True)
     sys.exit(0)
 if "--write" in args:
+    # The real one's first lines (2026-10-14): the port it picked, then its
+    # banner. `DOWNLOAD_PORT` beside it replaces the port line's text.
+    port = HERE / "DOWNLOAD_PORT"
+    print(port.read_text() if port.exists() else "Device: COM7", flush=True)
+    print("vexcom utility V1.0.2b2", flush=True)
     print("Downloading User Program", flush=True)
+    if (HERE / "FAIL_DOWNLOAD").exists():
+        sys.exit(5)
     until = time.monotonic() + 30
     while (HERE / "HOLD").exists() and time.monotonic() < until:
         time.sleep(0.05)

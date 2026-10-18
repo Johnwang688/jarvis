@@ -7,9 +7,11 @@ interop** (V-1, V-5). Nothing is copied, bundled or committed: VEX's licence
 forbids redistribution and decompiling, so the only `vexcom` flags used here
 are the ones DishPy's MIT source uses (`--name --slot --write --progress` for
 a download, `--user` for the brain's user port), two reads the owner's own
-`vexcom --help` lists (`--json`, system info; `--programs`; `DEVICE_READS`), and
+`vexcom --help` lists (`--json`, system info; `--programs`; `DEVICE_READS`),
 fixed read-only `--usb` from the vendor-distributed readable extension source
-(evidence: docs/plans/2026-10-13-vex-download-device-status.md). USB presence
+(evidence: docs/plans/2026-10-13-vex-download-device-status.md), and the
+vendor extension's own user-port invocation, `--quiet --user <port>` (the
+plan's §5.2, offset 69190; VX-UI-4b, `brain_argv`). USB presence
 never asserts radio connectivity or download readiness.
 Which files those are is
 `config.VEX_PATH` (`vex.json`), written only by the human-run `jarvis vex
@@ -127,6 +129,14 @@ PROJECT_NAME = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_-]{0,63}", re.ASCII)
 # "system info in json format" and `-p --programs` "shows programs". Every
 # other option it lists writes, runs, erases or updates firmware; none is here.
 DEVICE_READS = {"system": "--json", "programs": "--programs"}
+# A Windows serial port, as vexcom names the device it used ("Device: COM3",
+# printed by a real download, 2026-10-14). The only port the brain terminal
+# is ever given (`brain_argv`).
+COM_PORT = re.compile(r"COM[1-9][0-9]{0,2}", re.ASCII)
+# Where a download's own output says which port it used: within its first
+# DOWNLOAD_PORT_SCAN characters (plain text), the first such line only.
+DOWNLOAD_PORT = re.compile(r"^[ \t]*Device:[ \t]*(COM[1-9][0-9]{0,2})[ \t]*$", re.ASCII | re.MULTILINE)
+DOWNLOAD_PORT_SCAN = 2048
 TEMPLATE_FILE = re.compile(r"(cpp|py)_v5_vsc_([a-z0-9_]+)\.zip", re.ASCII)
 TEMPLATE_ENTRIES = 200
 TEMPLATE_ENTRY_CAP = 1024 * 1024
@@ -706,9 +716,61 @@ def download_argv(cfg: VexConfig, name: str, slot: int, binary_windows: str) -> 
             "--write", binary_windows, "--progress"]
 
 
-def brain_argv(cfg: VexConfig) -> list[str]:
-    """The brain's user port, both ways (DishPy's `terminal`)."""
-    return [cfg.vexcom, "--user"]
+def check_port(port) -> str:
+    if not isinstance(port, str) or not COM_PORT.fullmatch(port):
+        raise ValueError("a port must be COM1 to COM999")
+    return port
+
+
+def brain_argv(cfg: VexConfig, port: str | None = None) -> list[str]:
+    """The brain's user port, both ways (DishPy's `terminal`), the way the
+    vendor's VS Code extension opens it (plan §5.2, offset 69190): `vexcom
+    --quiet --user <port>`, where `<port>` is a V5 controller's communication
+    port (offset 83443: a controller has no user port of its own, so vexcom
+    relays the brain's over the radio). With no port, vexcom picks the device
+    itself, as the download does. `port` only from `Vex._brain_port`."""
+    argv = [cfg.vexcom, "--quiet", "--user"]
+    if port is not None:
+        argv.append(check_port(port))
+    return argv
+
+
+def download_port(text: str) -> str | None:
+    """The port a download's plain output says it used (`Device: COM3`), or
+    None. Read from its first lines only, and only an exact port name."""
+    match = DOWNLOAD_PORT.search(text[:DOWNLOAD_PORT_SCAN])
+    return match.group(1) if match else None
+
+
+def escaped(data: bytes) -> str:
+    r"""Bytes as text a person can read, every control and invisible character
+    (and the backslash) escaped: `\x1b[6n`, `\r\n`. For the brain record."""
+    text = data.decode("utf-8", "backslashreplace")
+    return "".join(c if c.isprintable() and c != "\\" else c.encode("unicode_escape").decode("ascii")
+                   for c in text)
+
+
+def shape(data: bytes, cap: int = 600) -> str:
+    """The shape of a program's first output for the daemon log: its escape
+    sequences and line ends escaped, its text only counted (`<text 12>`), so
+    the log says whether vexcom printed anything and what the console wrote
+    around it without holding a word of the program's output."""
+    text = data.decode("utf-8", "replace")
+    parts, pos = [], 0
+    for match in itertools.chain(_ANSI.finditer(text), [None]):
+        end = match.start() if match else len(text)
+        for run in re.finditer(r"[^\x00-\x1f\x7f]+|[\x00-\x1f\x7f]", text[pos:end]):
+            chunk = run.group(0)
+            parts.append(f"<text {len(chunk)}>" if chunk[0] >= " " and chunk[0] != "\x7f"
+                         else chunk.encode("unicode_escape").decode("ascii"))
+        if match:
+            seq = match.group(0)
+            # An OSC carries text (a window title): counted, never copied.
+            parts.append(f"\\x1b]<osc {len(seq)}>" if seq.startswith("\x1b]")
+                         else seq.encode("unicode_escape").decode("ascii"))
+            pos = match.end()
+    out = "".join(parts)
+    return out if len(out) <= cap else out[:cap] + "…"
 
 
 def check_read(read) -> str:
@@ -1445,6 +1507,13 @@ class Vex:
         self._timers: set[threading.Timer] = set()
         self._held: set[BuildLock] = set()
         self._stopped = False
+        # The port the last successful download said it used (`download_port`),
+        # for the brain terminal (`_brain_port`). Memory only: a restart forgets it.
+        self._download_port: str | None = None
+        # The last brain terminal's diagnostic (`brain_record`): its argv's
+        # flags and port, its first bytes, the startup reply, its exit. Memory only.
+        self._brain_terminal = None
+        self._brain_record: dict | None = None
 
     # -- helpers ----------------------------------------------------------------------
 
@@ -1815,10 +1884,18 @@ class Vex:
             self._keep(self._downloads, record.id, record)
 
         def ended(terminal):
+            port = None
             try:
-                output = _visible(plain(terminal.history().data))[-BUILD_OUTPUT_CAP:]
+                history = terminal.history()
+                text = plain(history.data)
+                output = _visible(text)[-BUILD_OUTPUT_CAP:]
+                if history.start == 0 and terminal.exit_code == 0 and not record.timed_out:
+                    port = download_port(text)
             except Exception:
                 output = "Output preview unavailable; check the terminal."
+            if port is not None:
+                with self._lock:
+                    self._download_port = port
             try:
                 with self._lock:
                     record.terminal_id = terminal.id
@@ -1927,18 +2004,69 @@ class Vex:
 
     # -- the brain terminal -----------------------------------------------------------
 
+    def _brain_port(self) -> str | None:
+        """The port to give `vexcom --user`, or None to let vexcom pick (as the
+        download does). The vendor extension names the port only for a V5
+        controller, which has no user port of its own (plan §5.2, offset
+        83443); a brain on USB has one, and vexcom's own pick is kept. So: the
+        port the last successful download said it used, and only while the
+        last confirmed USB reading is a controller and no brain."""
+        with self._lock:
+            port = self._download_port
+        if port is None:
+            return None
+        with self.connection.lock:
+            reading = (self.connection.value["controller"], self.connection.value["brain"])
+        return port if reading == (True, False) else None
+
+    def brain_record(self) -> dict:
+        """The last brain terminal's diagnostic, for the owner (`GET
+        /vex/brain/record`): which flags and port it ran with, whether
+        interop's startup query was answered, when its first byte came, how
+        much it wrote, its first bytes escaped (at most `terminals.HEAD_CAP`),
+        and its exit. In memory only; the daemon log gets its shape
+        (`shape`), never its text."""
+        with self._lock:
+            record = dict(self._brain_record) if self._brain_record else None
+            terminal = self._brain_terminal
+        if record is None:
+            return {"record": None}
+        if terminal is not None:
+            record.update(self._brain_reading(terminal))
+        return {"record": record}
+
+    @staticmethod
+    def _brain_reading(terminal) -> dict:
+        first = (None if terminal.first_output_at is None or terminal.spawned_at is None
+                 else round(terminal.first_output_at - terminal.spawned_at, 3))
+        return {"terminal_id": terminal.id, "startup_replied": terminal.startup_replied,
+                "first_output_s": first, "bytes": terminal.output_bytes,
+                "head": escaped(terminal.head()), "exited": terminal.exited,
+                "exit_code": terminal.exit_code}
+
     def brain(self) -> dict:
         with self._lock:
             busy = self._device
             if busy is not None and busy["kind"] == "brain" and busy["terminal_id"]:
                 return {"terminal_id": busy["terminal_id"], "started": False}
         cfg = load_config()
-        argv = brain_argv(cfg)
+        port = self._brain_port()
+        argv = brain_argv(cfg, port)
         release, bind = self._reserve_device("brain")
+        finished: dict = {}             # set by `ended`, under the lock, if it runs at all
 
         def ended(terminal):
             release()
-            LOG.info("vex brain terminal ended (exit %s)", terminal.exit_code)
+            reading = self._brain_reading(terminal)
+            with self._lock:
+                finished.update(reading, ended=_utcnow())
+                if self._brain_terminal is terminal and self._brain_record is not None:
+                    self._brain_record.update(finished)
+                    self._brain_terminal = None
+            LOG.info("vex brain terminal ended (exit %s; %d bytes; first output after %s s; "
+                     "startup reply %s; output began %s)", terminal.exit_code, reading["bytes"],
+                     reading["first_output_s"], "sent" if reading["startup_replied"] else "not sent",
+                     shape(terminal.head()))
 
         try:
             terminal = self._start(argv, cfg=cfg, tool="vexcom",
@@ -1950,9 +2078,16 @@ class Vex:
             raise
         if not terminal.exited:
             bind(terminal.id)
+        with self._lock:
+            self._brain_record = {"terminal_id": terminal.id, "started": _utcnow(), "ended": None,
+                                  "args": argv[1:], "port": port}
+            # An exit hook that already ran (vexcom ended at once) left its
+            # reading; otherwise the record reads the live terminal until it does.
+            self._brain_record.update(finished)
+            self._brain_terminal = None if finished else terminal
         self._announce("brain")
-        LOG.info("vex brain terminal started")
-        return {"terminal_id": terminal.id, "started": True}
+        LOG.info("vex brain terminal started (--quiet, port %s)", port or "picked by vexcom")
+        return {"terminal_id": terminal.id, "started": True, "port": port}
 
     # -- device info --------------------------------------------------------------------
 
@@ -2198,6 +2333,9 @@ def route(handler, daemon, parts, query):
             _object(query, ())
             _object(handler._body(), ())
             return 200, vex.brain()
+        if parts == ["vex", "brain", "record"] and method == "GET":
+            _object(query, ())
+            return 200, vex.brain_record()
         if parts == ["vex", "templates"] and method == "GET":
             _object(query, ())
             return 200, vex.templates()

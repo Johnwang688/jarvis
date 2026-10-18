@@ -837,6 +837,21 @@ def _brain_checks(page, mock, check, until, fake):
     check("typing goes to the program, and Ctrl-C too",
           bool(until(lambda: b"g" in b"".join(sock["frames"]) and b"\x03" in sock["frames"], timeout=4)),
           str(sock["frames"][-4:]))
+    # VX-UI-4b: a program streaming telemetry (the owner's `$RUN` then a `$POSE` line every 50 ms) is
+    # drawn live in the Brain tab — the newest line on screen, the pane a real size, the rest scrolled back.
+    fake.output(brain, b"$RUN,1,override\r\n")
+    for i in range(1, 121):
+        fake.output(brain, f"$POSE,{i},{i * 0.5:.1f},{-i * 0.25:.2f},{i % 360}\r\n".encode())
+    rows = term.locator(".xterm-rows")
+    on_screen = lambda: rows.inner_text() if rows.count() else ""  # noqa: E731
+    box = term.locator(".termslot").bounding_box() or {"height": 0}
+    size = page.evaluate(f"window.__hudTerminals.size('{brain}')") or {"rows": 0}
+    check("streamed telemetry is drawn live: the newest $POSE line on screen, the first scrolled back",
+          bool(until(lambda: "$POSE,120,60.0,-30.00,120" in on_screen(), timeout=5))
+          and "$RUN,1,override" not in on_screen()
+          and "$RUN,1,override" in page.evaluate(f"window.__hudTerminals.text('{brain}')")
+          and size["rows"] >= 5 and box["height"] >= 100,
+          f"rows={size} box={box} screen={on_screen()[-120:]!r}")
     _shot(page, "15-brain-connected")
     page.evaluate("document.activeElement && document.activeElement.blur()")
 

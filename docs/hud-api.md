@@ -1687,11 +1687,21 @@ visible-window USB probe and is not an unclicked manual action notice.
   unknown identities, errors and busy checks preserve prior confirmed values.
   Empty fully validated lists confirm absence. This measures USB presence only,
   not radio link, extension-host health, program execution or download readiness.
-- `POST /vex/brain` `{}` → `{terminal_id, started}`: the brain's user port,
-  `vexcom.exe --user`, both ways (`program: "vex-brain"`, the only program
-  terminal that takes typed input). One at a time: the open one comes back
-  with `started: false`. 409 while a download or info read runs. Closing its
-  terminal frees the device.
+- `POST /vex/brain` `{}` → `{terminal_id, started, port?}`: the brain's user
+  port, `vexcom.exe --quiet --user [COMn]`, both ways (`program: "vex-brain"`,
+  the only program terminal that takes typed input). `COMn` (and `port`) is
+  the port the last successful download named, only while the last USB
+  reading is a controller and no brain; otherwise vexcom picks and `port` is
+  null (VX-UI-4b). One at a time: the open one comes back with
+  `started: false` (and no `port`). 409 while a download or info read runs.
+  Closing its terminal frees the device. Interop's first exact `ESC[6n` gets
+  one fixed `ESC[1;1R` from the daemon and is kept out of the ring.
+- `GET /vex/brain/record` → `{record}`: the last brain terminal's diagnostic,
+  in memory only, or `{record: null}`. `record` holds `terminal_id`, `started`,
+  `ended`, `args` (the argv after the executable), `port`, `startup_replied`,
+  `first_output_s` (seconds from spawn to its first byte), `bytes`, `head`
+  (its first 4 KB, every control and invisible character escaped), `exited`
+  and `exit_code`.
 - `POST /vex/device/info` `{read?}` → `{text, exit_code, read}`: a device
   read, from the owner's `vexcom --help` (vexcom 1.0.2b2). `read` is
   `"system"` (the default) — exactly `vexcom.exe --json`, "system info in

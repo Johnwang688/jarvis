@@ -47,7 +47,9 @@ answered in under a second. `ab84d58` answered the query for `vex-build`
 only. `terminals.STARTUP_REPLY_PROGRAMS` now lists every input-disabled VEX
 program (`vex-build`, `vex-download`, `vex-connection`, `vex-info`); the same
 one fixed `ESC[1;1R`, for the first exact query only, hidden from the ring.
-The brain terminal takes input and is not listed. The fake `vexcom` models
+The brain terminal takes input and is not listed (superseded on 2026-10-17:
+VX-UI-4b gives it the same reply; see "Brain terminal startup, VX-UI-4b"
+below). The fake `vexcom` models
 the handshake with `STARTUP_DSR` beside it and exits 91 without the reply;
 `tests/v2/vex_output_check.py` (`DeviceStartup`, and the pinned set in
 `StartupProtocol`) fails against the build-only rule. After the reply the console wraps `--usb`'s
@@ -519,7 +521,7 @@ switches to another output tab (or the pane is hidden) before the terminal view
 mounts: nothing is attached when the query arrives, so it lands in the ring and
 is replayed later, where xterm's answer is dropped by design. If H4 shows the hang, VX-UI-4b (a daemon
 reply for `vex-brain`'s first exact query) is the fix; this package does not
-build it.
+build it. (It did hang: VX-UI-4b, 2026-10-17, below.)
 
 Checks (fakes only; nothing installed, no live daemon, port or device):
 `lib/vex.test.ts` (`brainView`: every state, Connect's reasons, and no state
@@ -657,11 +659,10 @@ and help are computed in the window from the records the view already reads.
 
 **Pending.**
 
-- **VX-UI-4b**, the brain terminal's startup reply and `--quiet`, is not
-  built. It waits on hardware check **H4**: whether the brain terminal starts
-  under WSL interop's `ESC[6n` query. If it hangs, a daemon reply for
-  `vex-brain`'s first exact query is the fix, with an independent review of
-  the terminal boundary. H0–H4 and H9–H10 remain the owner's hardware session.
+- **VX-UI-4b**, the brain terminal's startup reply and `--quiet`: built on
+  2026-10-17 after the owner's hardware check showed a blank Brain tab (see
+  "Brain terminal startup, VX-UI-4b" below). H0–H4 and H9–H10 remain the
+  owner's hardware session.
 - Real VEX behaviour stays **UNRUN**: no tool, device or COM port was used.
 
 Checks (fakes only; nothing installed, no live daemon, port or device):
@@ -717,3 +718,115 @@ Receipts for this section (fakes only):
   - every stale build and rebuild said, superseded ones included (vitest);
   - stale words while something runs, once in `staleNotes` (vitest) and once
     in the view's call (face, with a Clean running).
+
+## Brain terminal startup, VX-UI-4b (2026-10-17)
+
+Plan §5.4 and §11. **The owner's evidence (hardware check H1, live).** The
+program on the brain prints unbuffered `$RUN` and `$POSE` lines every 50 ms.
+The VS Code VEX extension's terminal shows them through the V5 controller
+over radio. After Connect, the Jarvis Brain tab stayed **completely blank**:
+not even vexcom's `vexcom utility V1.0.2b2` banner, which the download
+terminal does print. That fits H4: under a sized PTY, WSL interop's console
+writes `ESC[6n` and waits for a cursor report before vexcom runs at all. The
+brain terminal was the one VEX program the daemon did not answer. Its answer
+came only from an attached, already-replayed xterm, so a query that reached
+the ring before the Brain tab attached was answered during the replay, where
+the answer is dropped by design, and vexcom hung behind it.
+
+**What changed.**
+
+- **Startup reply.** `terminals.STARTUP_REPLY_INPUT_PROGRAMS = {"vex-brain"}`.
+  The brain terminal gets the same one-shot answer as the input-disabled
+  VEX programs: only when the program's very first bytes are exactly
+  `ESC[6n` (split across reads or not), one fixed `ESC[1;1R`, and the query
+  hidden from the ring and from any attached window. That window therefore
+  never sees it and never answers a second time. A later query, a lookalike
+  (`ESC[?6n`, `ESC[16n`) and a query after any other byte are never answered
+  by the daemon. The reply goes to the writer's queue as protocol input. The
+  owner's input path (`Terminals.serve`, the socket's guard, the latch) is
+  unchanged, and typed input still reaches the program after it.
+- **The vendor's invocation.** `brain_argv` is now `vexcom --quiet --user`,
+  the VS Code extension's own (plan §5.2, offset 69190). The Brain tab's bar
+  says `vexcom --quiet --user`.
+- **The controller's port.** Jarvis had no record of the COM port: the
+  download, the USB check and the device reads all let vexcom pick it, and
+  `--usb`'s evidenced schema has no port field. The one place the port
+  appears is the download's own output (`Device: COM3`, seen live on
+  2026-10-14). The daemon now remembers, in memory, the port that the last
+  **successful** download's output names. It reads only an exact
+  `Device: COMn` line in the first 2 KB of output, with n from 1 to 999.
+  The brain terminal is given that port (`--quiet --user COM3`) only while
+  the last confirmed USB reading is a controller and no brain. That is the
+  vendor's rule (offset 83443): a controller has no user port of its own,
+  so vexcom relays the brain's through the controller's communication port,
+  while a brain on USB has its own user port and vexcom's pick is kept. In
+  every other case (no download since the daemon started, a failed download,
+  a brain on USB, an unknown reading), the argv carries no port, as before.
+  `check_port` refuses anything but `COM1`–`COM999`.
+- **Diagnostic.** Every program terminal keeps its first 4 KB of output
+  (`Terminal.head`, `terminals.HEAD_CAP`), when its first byte came, its
+  byte count, and whether the startup reply was sent. For the last brain
+  terminal the daemon keeps a record in memory: its flags and port, the
+  times, the bytes, the first 4 KB **escaped** (`vex.escaped`: every control,
+  invisible character and backslash spelled out), and the exit code. The
+  owner reads it at the owner-only `GET /vex/brain/record`, for example from
+  the HUD's DevTools console: `await (await fetch("/vex/brain/record")).json()`.
+  The daemon log's line when it ends gives the exit code, the byte count,
+  the first-byte time, whether the reply was sent, and the **shape** of the
+  first output (`vex.shape`): escape sequences spelled out, each run of text
+  only counted (`<text 12>`), an OSC's contents counted too. So the log
+  shows whether vexcom printed anything without holding a word of program
+  output, which still reaches no bus, log or file (`Leaks`). The next blank
+  pane can be read from the log: a shape of only `\x1b[6n` with the reply
+  not sent means a query the rule did not see; the reply sent and no
+  `<text …>` means vexcom started and printed nothing; text in the shape but
+  a blank pane means the HUD.
+- The Brain tab's "Nothing printed yet" sentence now says that Jarvis
+  answers the cursor query, and that a program that is not printing, or a
+  controller not linked to the brain, also leaves the pane empty.
+
+**Not changed.** `vexcom` stays DENY for agents (`rules.py`). Connect and
+Download stay the owner's trusted clicks, the brain terminal never opens by
+itself, and a download never reopens it. No new vexcom flag beyond the
+vendor's `--quiet` and its port argument. Nothing was run on hardware.
+
+**HARDWARE-UNVERIFIED (only the owner's robot can settle these).** Whether
+the real brain terminal's first bytes are exactly `ESC[6n` (as they were for
+the download, the USB check and the device reads). Whether `--quiet --user`
+without a port reaches the brain through the controller, or whether the
+port is needed. Whether a stale remembered port (the controller moved to
+another USB socket since the download) makes vexcom exit, and with what
+message. The line endings vexcom's console writes for the program's `\n`.
+Typed input reaching the program (H3) and the telemetry rate (H2).
+
+**Fakes.** The fake `vexcom` now models the brain's start: with
+`STARTUP_DSR`, `--user` writes the query and **hangs**, printing nothing,
+until the reply comes. It prints a banner unless `--quiet`, says the port is
+busy and exits 3 with `PORT_BUSY`, and streams `$RUN` then a `$POSE` line
+every 20 ms with `STREAM`. Its download prints `Device: COM7` and the
+banner first (`DOWNLOAD_PORT` replaces the port line; `FAIL_DOWNLOAD` exits
+5).
+
+Checks (fakes only; nothing installed, no live daemon, port or device):
+
+- `tests/v2/vex_output_check.py`:
+  - `StartupProtocol`: the brain's first exact query answered once and
+    hidden in every split, with a window already attached; a later query,
+    a mid-stream lookalike and a query after other output not answered; the
+    reply written before the owner's typed input, which still flows; the
+    head capped and kept only for program terminals.
+  - `BrainHelpers`: `download_port`, `escaped`, `shape`.
+  - `BrainStartup`, against the hanging fake: it starts with no window
+    attached and its output waits in the ring; streamed `$POSE` lines reach
+    an attached socket live and typed input reaches the program; a busy port
+    ends it, frees the device and is recorded; with the brain left out of
+    the rule it hangs blank (the owner's symptom); the record route is
+    owner-only and says what ran.
+  - `BrainPort`: the controller's port from a download, never with a brain
+    on USB, an unknown reading, a failed download or an odd port line.
+- `tests/v2/vex_check.py`: the exact `--quiet --user [COMn]` argv and
+  `check_port`'s refusals; `Leaks` holds the brain's log line to shape
+  only.
+- `tests/face/hud_v2_vex_check.py` `_brain_checks`: 120 streamed `$POSE`
+  lines are drawn live in the Brain tab. The newest is on screen, the first
+  is in the scrollback, and the pane has a real size.
