@@ -48,8 +48,8 @@ import time
 import uuid
 
 from jarvis import config, models
-from jarvis.tools.secrets import scrub
 from jarvis.untrusted import strip_invisible
+from jarvis.v2.redact import scrub_text
 
 from .approvals import clean_line
 from .model import PermissionProfile, ProviderName, Role, Thread, utcnow
@@ -232,10 +232,17 @@ def prompt(item: ReviewInput, harness: str) -> str:
 # --- reading the answer (D5) -------------------------------------------------------
 
 
+WITHHELD = "[output withheld: it could not be scrubbed]"
+
+
 def _clean(value, cap: int) -> str:
     if not isinstance(value, str):
         return ""
-    return clean_line(strip_invisible(scrub(value)), cap=cap).strip()
+    try:
+        value = scrub_text(value)
+    except Exception:       # noqa: BLE001 — what cannot be scrubbed is withheld, never raised
+        value = WITHHELD
+    return clean_line(strip_invisible(value), cap=cap).strip()
 
 
 def _line(value) -> int | None:

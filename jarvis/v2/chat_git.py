@@ -619,10 +619,10 @@ def run_gh(args: list[str], cwd: str, *, stdin: str | None = None) -> tuple[int,
 
 
 def _scrub(text: str) -> str:
+    from jarvis.tools import secrets
     from .redact import scrub_text
-    text = gitops._URL_USERINFO.sub(r"\1[redacted]@", text)
     try:
-        return scrub_text(text)
+        return scrub_text(secrets.strip_url_credentials(text))
     except Exception:       # noqa: BLE001 — what cannot be scrubbed is withheld
         return "[output withheld: it could not be scrubbed]"
 

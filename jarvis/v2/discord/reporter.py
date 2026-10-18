@@ -73,9 +73,8 @@ import queue
 import threading
 import time
 
-from jarvis.tools.secrets import scrub
-
 from ..model import TERMINAL_STATES, Task, TaskState, from_json, utcnow
+from ..redact import scrub_text
 from ..stores import StoreError, _lock, _write_bytes
 from .render import _cap, milestone, report_text, status_embed
 from .rest import (MISSING_ACCESS, MISSING_PERMISSIONS, UNKNOWN_CHANNEL, describe)
@@ -137,10 +136,20 @@ def _transient(exc) -> bool:
     return status is None or status == 429 or status >= 500
 
 
+WITHHELD = "[output withheld: it could not be scrubbed]"
+
+
 def _clean(text):
     """Everything this poster sends goes through the transcript scrub first:
-    a credential value from a protected file never reaches Discord."""
-    return scrub(text) if isinstance(text, str) and text else text
+    a credential value from a protected file, a provider key shape or a
+    bearer/JWT never reaches Discord (SEC-3). Text that cannot be scrubbed is
+    withheld, never posted as is."""
+    if not (isinstance(text, str) and text):
+        return text
+    try:
+        return scrub_text(text)
+    except Exception:       # noqa: BLE001 — what cannot be scrubbed is withheld
+        return WITHHELD
 
 
 def _scrubbed(task: Task) -> Task:
