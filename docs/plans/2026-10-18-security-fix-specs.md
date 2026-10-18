@@ -123,6 +123,37 @@ silent (a hole, not a crash), and the change has v1/v2 callers whose
 behaviour is easy to miss. The review is also Opus, focused on every caller of
 `is_loopback` and `_names_this_machine`.
 
+**Amendment (lead, 2026-10-18): tighten-only.** CLAUDE.md forbids loosening a
+safety check without the owner, so no URL that is refused today may become
+allowed. Three points replace the card's text above where they disagree:
+
+- `is_lan_host` keeps its early "not LAN" return on the narrowed
+  `is_loopback`. It does **not** switch to `_names_this_machine`. The card
+  said the short, hex, octal, integer and IPv4-mapped spellings and
+  `localhost.` "stay owner-local without a DNS lookup, exactly as they are
+  today". That was wrong about today: on main, `is_lan_host` sends
+  `0x7f000001`, `2130706433`, `::ffff:127.0.0.1` and `localhost.` to
+  `getaddrinfo`, and refuses them when they resolve to loopback, so
+  `fetch_page` and the v1 `*` browser refuse them on every port. They still
+  go to `getaddrinfo`, and `127.1` now does too (a tightening). Only
+  `LOCAL_HOSTS`, `*.localhost` and the literals `ipaddress.ip_address`
+  parses in 127/8 skip the lookup. Acceptance case 3 is rewritten to match.
+- `is_face_origin` keeps refusing everything it refuses today. A host whose
+  first dot-separated label is `127` (`127.rebind.example`,
+  `127.0.0.1.nip.io`) on a control port is still `True`, although
+  `is_loopback` no longer counts it as local. On any other port it is `False`
+  (`is_lan_host` refuses it). This replaces the behaviour-change bullet that
+  made `is_face_origin("http://127.rebind.example:8402/")` `False`.
+- A new case 10, "no loosening": for every host spelling the cases use, on
+  no port, 3000, a control port and 8403, with the `127.` names answering
+  loopback or a LAN address, every URL that `web._refusal` and the v1 `*`
+  allowlist refuse on main is still refused. The comparison uses a fixed
+  table recorded from main, not the old code. The canonical loopback
+  spellings off the control ports, and a public name, stay allowed.
+
+`policy.loopback_port` returning `None` for `127.<name>` stays (case 7d): such
+a name can no longer count as an owner-opened local server.
+
 ---
 
 ## SEC-2: invisible and bidi characters reach the approval card's origin line
