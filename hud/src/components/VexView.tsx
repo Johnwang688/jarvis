@@ -136,15 +136,17 @@ export function VexView(props: {
   // A download or device read the daemon says holds the port, with no chain
   // of this window's to see it end (another window's, or a read of status
   // that raced the end): asked again until it says the port is free, so
-  // Connect is offered without a focus or a reload (2026-10-17). A read only.
+  // Connect is offered without a focus or a reload (2026-10-17). A read only,
+  // and only while the view is drawn and no card is up, as the USB check
+  // below (#241 review LOW).
   const held = !vex.chain && (vex.status?.device === "download" || vex.status?.device === "info");
   useEffect(() => {
-    if (!held) return;
+    if (!held || props.drawn === false || blocked) return;
     const t = setInterval(() => {
       if (document.visibilityState === "visible") void vex.refreshStatus();
     }, DEVICE_POLL_MS);
     return () => clearInterval(t);
-  }, [held]);
+  }, [held, props.drawn, blocked]);
 
   useEffect(() => {
     if (props.drawn === false || blocked) return;

@@ -1764,6 +1764,16 @@ def _download_end_checks(page, mock, check, until, fake):
           bool(until(lambda: _connect_off(page).startswith(
               "A download holds the robot's port; Connect once it ends."), timeout=4)),
           _connect_off(page))
+    # #241 review LOW: the held-port poll stops under a card, as the USB check does.
+    _approval(mock, "vexheld1")
+    until(lambda: page.locator(_tid("approval-card")).count() > 0, timeout=4)
+    time.sleep(0.3)
+    cbase = len(mock.calls)
+    time.sleep(2.8)
+    check("another window's download: under a card the held-port status poll stops",
+          _status_reads(mock, cbase) == 0, str(_status_reads(mock, cbase)))
+    page.keyboard.press("Escape")
+    until(lambda: page.locator(_tid("approval-card")).count() == 0, timeout=4)
     mock_vex.end_download(mock, rid, 0)
     check("another window's download: once it ends, Connect is enabled here without a focus or a reload",
           bool(until(lambda: _connect_off(page) == "", timeout=5)), _connect_off(page))

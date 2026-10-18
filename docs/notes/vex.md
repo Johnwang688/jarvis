@@ -762,7 +762,9 @@ the answer is dropped by design, and vexcom hung behind it.
   while a brain on USB has its own user port and vexcom's pick is kept. In
   every other case (no download since the daemon started, a failed download,
   a brain on USB, an unknown reading), the argv carries no port, as before.
-  `check_port` refuses anything but `COM1`–`COM999`.
+  `check_port` refuses anything but `COM1`–`COM999`. Since the follow-up
+  (review LOW of #240, below) the port is also forgotten after any
+  confirmed USB change, and after a brain terminal that failed by itself.
 - **Diagnostic.** Every program terminal keeps its first 4 KB of output
   (`Terminal.head`, `terminals.HEAD_CAP`), when its first byte came, its
   byte count, and whether the startup reply was sent. For the last brain
@@ -930,3 +932,58 @@ Receipts:
   - no refresh after a device read;
   - no poll in the view (face: another window's download);
   - the daemon's settle and release split again (`DownloadEnd`).
+
+## Review follow-ups of #240 and #241 (2026-10-17)
+
+Branch `claude/vex-brain-followup`.
+
+- **Startup reply, whole reads** (#240 LOW 1). The negative table in
+  `StartupProtocol` fed each case one byte per read, so a rule that
+  answered the query anywhere in the first read (`query in initial`)
+  passed it. Each case is now also fed as one read, and that mutant fails.
+- **A stale brain port** (#240 LOW 2). `Vex._download_port` keeps the
+  port together with the USB reading's last confirmed change at the time of
+  the download (`_usb_mark`: the newest of `Connection`'s events). `_brain_port`
+  forgets the port once that mark has changed: a controller unplugged and moved
+  to another socket (COM7 → COM8) is two confirmed changes, and so is the first
+  reading after the download. It is also forgotten when a brain terminal that
+  was given it fails by itself (a non-zero exit while `Terminal.closing` is
+  false). The owner's Disconnect closes the terminal (exit 129) and keeps
+  the port. After either, the next Connect lets vexcom pick, until the next
+  successful download. A move between two USB checks that the poll never
+  saw is invisible: the connection record keeps no serial number or port by
+  design. The first failed Connect is then what forgets it.
+- **Held-port poll** (#241 LOW 1). The 2 s `/vex/status` poll while a
+  download or device read holds the port now runs only while the view is
+  drawn and no card is up, like the USB check.
+- **Superseded status reads** (#241 LOW 2). `refreshStatus` keeps its newest
+  read (`statusLatest`). A superseded read, whether it succeeded or failed,
+  settles only after that newest one, so the download chain's `await
+  refreshStatus()` then reads the newest answer, never an older one.
+- **An older failing read** (#241 LOW 3). A test now holds that it never
+  overwrites `statusError` after a newer success. The reviewer's mutant M5
+  (no guard in the error handler) fails it.
+- Not done: the NIT about owner keystrokes queued before the `ESC[1;1R`
+  reply. The HUD sends nothing until a window has attached and its replay
+  is parsed. The query comes at spawn, so the reply already precedes any
+  typing. Putting it at the head of the queue would change the reply's call
+  in every startup test for an ordering nothing produces.
+
+Checks (fakes only):
+
+- `vex_output_check`: 31 tests, including `BrainPort`'s USB-change,
+  first-reading, Disconnect and failure cases.
+- `state/vex.test.ts`: two new tests.
+- `_download_end_checks`: no status poll for 2.8 s under a card while
+  another window's download holds the port.
+
+Eight mutations each failed their checks:
+
+- the startup rule answering the query anywhere in the first read;
+- the USB change ignored;
+- the mark always None;
+- the Disconnect counted as a failure;
+- a brain failure keeping the port;
+- no guard in the error handler (M5);
+- a superseded read returning at once;
+- the held-port poll not gated on a card (face).

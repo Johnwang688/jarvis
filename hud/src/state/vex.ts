@@ -138,6 +138,8 @@ export class VexStore {
   status: VexStatus | null = null;
   statusError = "";
   private statusSeq = 0;
+  /** The newest `/vex/status` read: a superseded one waits for it (#241 review LOW). */
+  private statusLatest: Promise<void> = Promise.resolve();
   connection: ConnectionView | null = null;
   connectionError = "";
   private connectionPending = false;
@@ -310,12 +312,15 @@ export class VexStore {
    * asked before a download ended (the bus's `vex_device` at its start) can
    * answer after one asked once it had ended, and would bring back "download"
    * — Connect off for a port nothing holds (the owner, live, 2026-10-17).
+   * A superseded read settles only once the newest has, so whoever awaits any
+   * read (the download chain) then sees the newest answer, never an older one
+   * (#241 review LOW).
    */
   refreshStatus(): Promise<void> {
     const seq = ++this.statusSeq;
-    return api.vexStatus().then(
+    const read: Promise<void> = api.vexStatus().then(
       (s) => {
-        if (seq !== this.statusSeq) return;
+        if (seq !== this.statusSeq) return this.statusLatest;
         this.status = s;
         this.statusError = s ? "" : "the daemon answered without a VEX status";
         // A link the daemon holds open (a reload, another window's Connect) is
@@ -326,11 +331,13 @@ export class VexStore {
         this.changed();
       },
       (e: any) => {
-        if (seq !== this.statusSeq) return;
+        if (seq !== this.statusSeq) return this.statusLatest;
         this.statusError = e?.message || "the VEX status could not be read";
         this.changed();
       },
     );
+    this.statusLatest = read;
+    return read;
   }
 
   // -- build ---------------------------------------------------------------
