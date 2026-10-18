@@ -1078,6 +1078,12 @@ class Terminal:
             except OSError:
                 pass
 
+    @property
+    def closing(self) -> bool:
+        """Closed or hung up by Jarvis (a route, a timeout, the daemon's
+        stop), as opposed to a program that ended by itself."""
+        return self._closing
+
     def head(self) -> bytes:
         """A program terminal's first HEAD_CAP bytes of output, as the ring
         got them (b"" for a shell). Kept after the ring has moved on."""

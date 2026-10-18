@@ -893,6 +893,43 @@ describe("Connect is offered once a download ends, without a reload (the owner, 
     expect(off(store)).toBe("");
   });
 
+  it("a superseded status read settles only after the newest, so its awaiter sees the newest answer", async () => {
+    // #241 review LOW: the chain awaits refreshStatus() and then reads this.status.
+    const store = new VexStore();
+    const answers: ((s: any) => void)[] = [];
+    vi.spyOn(api, "vexStatus").mockImplementation(() => new Promise((r) => answers.push(r)));
+    const said = (device: string | null) => ({ configured: true, hint: null, vexcom_version: null, extension_version: null,
+      sdks: null, templates: false, project_folder: null, device, brain: null });
+    const early = store.refreshStatus();
+    const late = store.refreshStatus();
+    let seen: string | null | undefined = undefined;
+    const awaiter = early.then(() => { seen = store.status?.device ?? null; });
+    answers[0](said("download"));                          // the older answer comes first
+    await new Promise((r) => setTimeout(r, 0));
+    expect(seen).toBeUndefined();                          // still waiting for the newest
+    answers[1](said(null));
+    await awaiter;
+    await late;
+    expect(seen).toBeNull();
+    expect(store.status?.device).toBeNull();
+  });
+
+  it("an older failing status read after a newer success never overwrites the error state", async () => {
+    // #241 review LOW (its mutant M5: no guard in the error handler).
+    const store = new VexStore();
+    const answers: { ok: (s: any) => void; fail: (e: any) => void }[] = [];
+    vi.spyOn(api, "vexStatus").mockImplementation(() => new Promise((ok, fail) => answers.push({ ok, fail })));
+    const early = store.refreshStatus();
+    const late = store.refreshStatus();
+    answers[1].ok({ configured: true, hint: null, vexcom_version: null, extension_version: null,
+      sdks: null, templates: false, project_folder: null, device: null, brain: null });
+    await late;
+    answers[0].fail(new Error("connection refused"));
+    await early;
+    expect(store.statusError).toBe("");
+    expect(store.status?.device).toBeNull();
+  });
+
   it("a device read's end reads the status again (the same stale \"info\")", async () => {
     const store = new VexStore();
     h.device = "info";
