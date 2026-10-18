@@ -148,7 +148,9 @@ shells (at most six of each), get no startup file, start from
 `program_environment()` (the shell allowlist with `WSLENV` emptied, so
 nothing of the daemon's crosses into a Windows program), refuse typed input
 but a lone Ctrl-C unless `input_ok`, and tell `vex.py` when they end
-(`on_exit`, once, after the output is read to EOF).
+(`on_exit`, once, after the output is read to EOF). The VEX ones, the brain
+terminal included, get one fixed answer to WSL interop's first exact cursor
+query (`STARTUP_REPLY_PROGRAMS`, `STARTUP_REPLY_INPUT_PROGRAMS`).
 """
 from __future__ import annotations
 
@@ -730,9 +732,21 @@ class _Takeover:
 
 
 # The input-disabled program terminals whose Windows program waits on
-# interop's initial cursor report (`Terminal._output`). The brain terminal
-# takes input, so the attached window answers it; it is not listed.
+# interop's initial cursor report (`Terminal._output`).
 STARTUP_REPLY_PROGRAMS = frozenset({"vex-build", "vex-download", "vex-connection", "vex-info"})
+# The one program terminal that takes typed input and still gets that reply
+# (VX-UI-4b, 2026-10-17): the brain terminal. Leaving it to the attached xterm
+# raced (plan §5.4): a query that reached the ring before a window attached
+# was answered during the replay, where the answer is dropped by design, and
+# vexcom hung with a blank pane (the owner's hardware check H1/H4). The same
+# rule as the others: only the program's first bytes, only the exact query,
+# one fixed reply, the query hidden from the ring and the window. The owner's
+# input path (`Terminals.serve`) is not touched; the reply goes to the
+# writer's queue as protocol input, never through the socket.
+STARTUP_REPLY_INPUT_PROGRAMS = frozenset({"vex-brain"})
+# A program terminal keeps its first bytes, as written to the ring, for a
+# diagnostic (`Terminal.head`; vex.py's brain record). Memory only.
+HEAD_CAP = 4096
 
 
 class Terminal:
@@ -752,10 +766,20 @@ class Terminal:
         self.input_ok = input_ok
         # WSL Windows interop waits for an initial cursor report even with
         # no HUD attached. Only a fresh, input-disabled VEX program screen
-        # (`STARTUP_REPLY_PROGRAMS`) gets one fixed reply; later output and
-        # other terminals are untouched.
-        self._build_startup = (b"" if program in STARTUP_REPLY_PROGRAMS and input_ok is False
-                               else None)
+        # (`STARTUP_REPLY_PROGRAMS`) or the brain terminal
+        # (`STARTUP_REPLY_INPUT_PROGRAMS`) gets one fixed reply; later output
+        # and other terminals are untouched.
+        self._build_startup = (b"" if (program in STARTUP_REPLY_PROGRAMS and input_ok is False)
+                               or program in STARTUP_REPLY_INPUT_PROGRAMS else None)
+        # Whether that reply was sent (a diagnostic; the brain record).
+        self.startup_replied = False
+        # A program terminal's first output, for a diagnostic: when its
+        # first byte came (monotonic, the query included), how many bytes it
+        # has written, and its first HEAD_CAP bytes as the ring got them.
+        self.spawned_at: float | None = None
+        self.first_output_at: float | None = None
+        self.output_bytes = 0
+        self._head: bytearray | None = bytearray() if program is not None else None
         self.title = title or f"{os.path.basename(shell)} · {label}"
         # Called once, with this terminal, after its program has exited and
         # its output has been read to the end (or on finish). vex.py's only.
@@ -833,6 +857,7 @@ class Terminal:
         finally:
             if rc_fd is not None:
                 os.close(rc_fd)
+        self.spawned_at = time.monotonic()
         stat = _proc_stat(self._proc.pid)       # unreaped, so still ours to read
         self._start_time = stat[2] if stat is not None else None
         os.set_blocking(master, False)
@@ -879,6 +904,8 @@ class Terminal:
     def _output(self, data: bytes) -> None:
         reply = False
         with self._lock:
+            if self.first_output_at is None and data:
+                self.first_output_at = time.monotonic()
             if self._build_startup is not None:
                 initial = self._build_startup + data
                 query = b"\x1b[6n"
@@ -888,6 +915,7 @@ class Terminal:
                 self._build_startup = None
                 reply = initial.startswith(query)
                 data = initial[len(query):] if reply else initial
+                self.startup_replied = reply
         if reply:
             # Consume the query so xterm cannot send a second response. This
             # is protocol input, never an exception to the socket input guard.
@@ -905,6 +933,9 @@ class Terminal:
         with self._lock:
             start = self._ring.end
             self._ring.append(data)
+            self.output_bytes += len(data)
+            if self._head is not None and len(self._head) < HEAD_CAP:
+                self._head += data[:HEAD_CAP - len(self._head)]
             was_marked = self._marks.marked
             self._marks.feed(data)
             self._marks.prune(self._ring.start)
@@ -1046,6 +1077,12 @@ class Terminal:
                 os.kill(pid, sig)
             except OSError:
                 pass
+
+    def head(self) -> bytes:
+        """A program terminal's first HEAD_CAP bytes of output, as the ring
+        got them (b"" for a shell). Kept after the ring has moved on."""
+        with self._lock:
+            return bytes(self._head or b"")
 
     # -- input and size ------------------------------------------------------------
 
