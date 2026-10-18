@@ -24,12 +24,12 @@ from __future__ import annotations
 
 import json
 import os
-import secrets
 import stat
 import threading
 from pathlib import Path
 
 from . import config
+from .private_write import write_private
 
 BACKENDS = ("cloud", "local", "auto")
 FILE_CAP = 4096
@@ -151,19 +151,5 @@ def update(**changes) -> dict:
         current = dict(raw or {})
     current.update(changes)
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    tmp = path.with_name(f".{path.name}.{secrets.token_hex(4)}.tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(current, handle, indent=2, sort_keys=True)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp, path)
-    except BaseException:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
+    write_private(path, (json.dumps(current, indent=2, sort_keys=True) + "\n").encode("utf-8"))
     return load(_quiet=True)
