@@ -30,13 +30,12 @@ Design constraints, deliberate:
 from __future__ import annotations
 
 import itertools
-import re
 import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from . import config, runtime, tools
+from . import config, runtime, tools, untrusted
 from .tools.secrets import tool_args_for_display
 
 MAX_CONCURRENT = 3
@@ -135,9 +134,26 @@ def _tell(data: dict[str, Any]) -> None:
 def _label(task_id: str, name: str) -> str:
     """The attribution string. The name is model-chosen text that lands
     verbatim on the authorization surfaces, so it must not be able to fake a
-    second line or break the DM's formatting: collapse whitespace, strip
-    backticks, cap the length."""
-    clean = re.sub(r"\s+", " ", name.replace("`", "")).strip()[:60]
+    second line, reorder or hide text, or break the DM's formatting: every
+    run of whitespace and unseen characters (zero-width, bidi overrides,
+    NUL) becomes one space, backticks go, and a name over 60 characters is
+    capped with "…".
+
+    This is v2's `approvals.clean_line` rule. It is repeated here rather than
+    imported because no v1 module imports `jarvis.v2`; the character set is
+    the shared `untrusted.unseen`, so there is no second table to drift."""
+    out, space = [], False
+    for ch in str(name).replace("`", ""):
+        if ch.isspace() or untrusted.unseen(ch):
+            space = True
+            continue
+        if space and out:
+            out.append(" ")
+        space = False
+        out.append(ch)
+    clean = "".join(out)
+    if len(clean) > 60:
+        clean = clean[:59].rstrip() + "…"
     return f'task {task_id} "{clean}"' if clean else f"task {task_id}"
 
 
