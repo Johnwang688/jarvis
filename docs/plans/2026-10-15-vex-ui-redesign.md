@@ -410,6 +410,12 @@ machine:
   - only the first exact query is answered;
   - the reply is hidden from the ring;
   - the owner's input path stays unchanged.
+- **Outcome (2026-10-17).** The owner's hardware check showed a completely
+  blank Brain tab after Connect, with not even vexcom's banner. VX-UI-4b
+  built the daemon reply under exactly those three rules
+  (`terminals.STARTUP_REPLY_INPUT_PROGRAMS`), together with `--quiet`, the
+  controller's port and a diagnostic record. See `docs/notes/vex.md`,
+  "Brain terminal startup, VX-UI-4b".
 
 ### 5.5 Design
 
@@ -677,7 +683,12 @@ stays **UNRUN** until the owner's hardware session.
 **Status (2026-10-16).** Built: VX-UI-1 (#209), VX-UI-4a (#213), and the
 rest of VX-UI-2 and VX-UI-3 with VX-UI-6's docs ([#229](https://github.com/Johnwang688/jarvis/pull/229), merged 2026-10-16; branch `claude/vex-ui-finish`;
 `docs/notes/vex.md`, "The VEX view as built"). Dropped: VX-UI-5 (§0.1 item
-1). Pending: VX-UI-4b, which waits on hardware check H4.
+1). VX-UI-4b was built on 2026-10-17 (branch `claude/vex-brain-parity`), after
+the owner's hardware check H1 showed a blank Brain tab. It adds the one-shot
+startup reply for `vex-brain`, `--quiet --user`, the controller's port from the
+last successful download (only while USB shows a controller and no brain), and
+an in-memory diagnostic record (`GET /vex/brain/record`). It is
+hardware-unverified until the owner's next session (H1, H3, H4).
 
 ## 12. Hardware check list (the owner's session, nothing run by agents)
 

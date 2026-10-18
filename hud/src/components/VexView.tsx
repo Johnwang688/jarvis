@@ -1006,7 +1006,7 @@ function BrainTab(props: { pane: number; drawn: boolean; blocked: boolean; brain
   const connectHelp = view.connect.off ? `${view.connect.off} ${helpText("connect", props.slot)}` : helpText("connect", props.slot);
   return <div className="vexbrain" data-testid="vex-brain-tab" data-state={view.state}>
     <div className="vexobar">
-      <span>vexcom --user</span>
+      <span>vexcom --quiet --user</span>
       <span className={"vexbrain-state " + view.badge.state} data-testid="vex-brain-state">{view.badge.text}</span>
       <span className="vexobar-r">
         {other ? (
@@ -1054,7 +1054,9 @@ function BrainTab(props: { pane: number; drawn: boolean; blocked: boolean; brain
       {view.state === "connected" && silent ? (
         <span data-testid="vex-brain-silent">
           {" "}Nothing printed yet: output appears here as the program prints. If nothing ever appears, the link
-          may not have started: whether it starts through WSL is not yet checked on the real robot (hardware check H4).
+          may not have started or the program is not printing: check that it runs and that the controller is linked
+          to the brain. Jarvis answers vexcom&apos;s start-up cursor query itself; whether the link starts through WSL
+          is not yet checked on the real robot (hardware checks H1, H4).
         </span>
       ) : null}
     </div>

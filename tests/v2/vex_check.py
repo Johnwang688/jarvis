@@ -664,7 +664,14 @@ class Tables(Base):
         self.assertEqual(vex.download_argv(cfg, "auton_1", 3, "C:\\x\\build\\b.bin"),
                          [str(self.world.vexcom), "--name", "auton_1", "--slot", "3",
                           "--write", "C:\\x\\build\\b.bin", "--progress"])
-        self.assertEqual(vex.brain_argv(cfg), [str(self.world.vexcom), "--user"])
+        # The vendor extension's own user-port invocation (plan §5.2, offset
+        # 69190): `--quiet --user`, and the controller's port when known.
+        self.assertEqual(vex.brain_argv(cfg), [str(self.world.vexcom), "--quiet", "--user"])
+        self.assertEqual(vex.brain_argv(cfg, "COM3"), [str(self.world.vexcom), "--quiet", "--user", "COM3"])
+        for port in ("COM0", "COM1000", "com3", "COM3 ", "COM3&calc", "\\\\.\\COM3", "/dev/ttyACM0",
+                     "", "COM３", "COM3\n", 3, ["COM3"], "LPT1", "--write"):
+            with self.subTest(port=port), self.assertRaises(ValueError):
+                vex.brain_argv(cfg, port)
         self.assertEqual(vex.info_argv(cfg), [str(self.world.vexcom), "--json"])
         self.assertEqual(vex.info_argv(cfg, "system"), [str(self.world.vexcom), "--json"])
         self.assertEqual(vex.info_argv(cfg, "programs"), [str(self.world.vexcom), "--programs"])
@@ -1397,7 +1404,7 @@ class Device(DaemonBase):
         self.assertIn("brain terminal", answer["error"])
         self.owner("DELETE", f"/terminals/{brain}")
         eventually(lambda: self.owner("GET", "/vex/status")["device"] is None, what="released")
-        self.assertEqual([c["argv"] for c in self.world.calls("vexcom")][1:], [["--user"]],
+        self.assertEqual([c["argv"] for c in self.world.calls("vexcom")][1:], [["--quiet", "--user"]],
                          "neither refused read ran")
         # While a read runs, it holds the device: no download, brain or second read.
         (self.world.vexcom_dir / "HOLD_INFO").write_text("")
@@ -2283,7 +2290,10 @@ class Leaks(DaemonBase):
                                {"slot": 2, "name": "m"}, status=202)[1]["terminal_id"]
             self.ended(tid)
             brain = self.owner("POST", "/vex/brain")["terminal_id"]
+            brain_term = self.daemon.terminals.get(brain)
+            eventually(lambda: b"user port open" in brain_term.history().data, what="brain output")
             self.owner("DELETE", f"/terminals/{brain}")
+            eventually(lambda: any("vex brain terminal ended" in r for r in records), what="brain log")
         terminal = self.daemon.terminals.get(result["terminal_id"])
         self.assertIn(printed.encode(), terminal.history().data)        # the capture worked
         drained = []
@@ -2305,6 +2315,13 @@ class Leaks(DaemonBase):
         self.assertIn("vex build started for project override", text)
         self.assertIn("vex download to slot 2 started for project override", text)
         self.assertNotIn(printed, text)
+        # The brain's end is logged with the shape of its first output (VX-UI-4b's
+        # diagnostic): its text counted, never copied.
+        ended = [r for r in records if "vex brain terminal ended" in r]
+        self.assertEqual(len(ended), 1, records)
+        self.assertIn("<text ", ended[0])
+        self.assertNotIn("user port open", text)
+        self.assertNotIn("Downloading User Program", text)
         for path in self.root.rglob("*"):
             if path.is_file() and not path.is_symlink():
                 self.assertNotIn(printed.encode(), path.read_bytes(), path)
