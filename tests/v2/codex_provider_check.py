@@ -791,6 +791,24 @@ class Checks(unittest.TestCase):
         self.assertEqual(target.stat().st_mode & 0o777, 0o755)
         self.assertFalse((target / "child").exists())
 
+    def test_home_rooted_project_is_refused_before_anything_is_made(self):
+        # The Inbox: its workspace would be all of ~, writable with no prompt.
+        sub = self.work / "project"
+        sub.mkdir()
+        with patch.dict(os.environ, {"HOME": str(self.work)}):
+            for label, brief in (("chat at home", self.chat()), ("task at home", self.brief),
+                                 ("above home", replace(self.chat(), cwd=str(self.root)))):
+                with self.subTest(label):
+                    with self.assertRaisesRegex(BriefRefused, "rooted at your home folder"):
+                        self.start(brief=brief)
+                    thread = replace(self.thread, provider_session_id="codex:fixture", role=Role.CHAT)
+                    with self.assertRaisesRegex(BriefRefused, "rooted at your home folder"):
+                        self.provider.resume(thread, brief, lambda *_: Decision.ALLOW)
+            self.assertFalse(config.CHAT_WORKTREES_DIR.exists())
+            self.assertEqual(self.brain.rpcs, [])
+            # A project folder inside home is unaffected.
+            self.start(brief=replace(self.chat(), cwd=str(sub)))
+
     def test_existing_worktree_root_is_private_and_config_survives_mcp_removal(self):
         root = config.CHAT_WORKTREES_DIR
         root.mkdir(mode=0o755)
