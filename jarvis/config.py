@@ -62,17 +62,28 @@ LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "0.0.0.0", ""})
 
 
 def is_loopback(host: str) -> bool:
-    """True for every spelling of "this machine" a browser will resolve.
+    """True for the owner's canonical spellings of "this machine": the names
+    in `LOCAL_HOSTS`, `*.localhost`, and a dotted-quad literal in 127.0.0.0/8
+    (what `ipaddress.ip_address` parses there). No DNS, and no prefix match:
+    a *name* whose first label is `127` (`127.rebind.example`,
+    `127.0.0.1.nip.io`) is a DNS name like any other (SEC-1), and
+    `is_lan_host` resolves it.
 
     `*.localhost` is in here because Chrome resolves it to 127.0.0.1 — without
     that, `foo.localhost:8402` would be a way around the face-origin block.
+    The other spellings Chrome still reads as this machine (`127.1`, hex,
+    integer, IPv4-mapped) are `_names_this_machine`'s.
     """
+    import ipaddress
+
     host = (host or "").lower().strip("[]")
-    return (
-        host in LOCAL_HOSTS
-        or host.endswith(".localhost")
-        or host.startswith("127.")  # 127.0.0.0/8 is all loopback
-    )
+    if host in LOCAL_HOSTS or host.endswith(".localhost"):
+        return True
+    try:
+        addr = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return addr.version == 4 and addr.is_loopback  # 127.0.0.0/8
 
 
 # Jarvis's own listeners at their default ports: 8402 the face and v2's HUD,
@@ -123,6 +134,25 @@ def _names_this_machine(host: str) -> bool:
     return addr.is_loopback or addr.is_unspecified
 
 
+def claims_this_machine(host: str) -> bool:
+    """`_names_this_machine`, plus a host whose first dot-separated label is
+    `127` (`127.rebind.example`, `127.0.0.1.nip.io`): the set the refusal
+    checks treat as *claiming* to be this machine. No DNS.
+
+    Since SEC-1 such a name is not loopback (`is_loopback` and
+    `_names_this_machine` say no, and `is_lan_host` resolves it), but the
+    checks that refuse Jarvis's own ports keep refusing it on those ports, as
+    they did when `is_loopback` matched any `127.` prefix: tighten-only, no
+    URL refused before SEC-1 is allowed by it. For refusals only; never use
+    it to *admit* a host as local (`policy.loopback_port` deliberately calls
+    `_names_this_machine`).
+    """
+    if _names_this_machine(host):
+        return True
+    host = (host or "").lower().strip("[]").rstrip(".")
+    return host.startswith("127.")
+
+
 def ambiguous_authority(url: str) -> bool:
     """True for a URL whose host two parsers would read differently (BR-0).
 
@@ -159,18 +189,20 @@ def is_face_origin(url: str) -> bool:
     be able to reach are his own. The name is older than the check: it
     covers every port in `control_ports()`, not only the face's.
 
-    What it covers: a loopback host in every spelling `_names_this_machine`
-    knows (`*.localhost` included), on a control port — the URL's own port,
-    or 80/443 by scheme when it has none. What it does not: a public name
-    that resolves to loopback (`is_lan_host` refuses those, on every port),
-    and a v2 daemon started on ports this process's configuration does not
-    know of. A host two parsers read differently is `ambiguous_authority`'s.
+    What it covers: a host `claims_this_machine` — a loopback host in every
+    spelling `_names_this_machine` knows (`*.localhost` included), or a name
+    whose first label is `127` — on a control port: the URL's own port, or
+    80/443 by scheme when it has none. What it does not: any other name
+    that resolves to loopback (`is_lan_host` refuses those, on every port,
+    and a `127.` name too), and a v2 daemon started on ports this process's
+    configuration does not know of. A host two parsers read differently is
+    `ambiguous_authority`'s.
     """
     from urllib.parse import urlparse
 
     try:
         parsed = urlparse(url)
-        if not _names_this_machine(parsed.hostname or ""):
+        if not claims_this_machine(parsed.hostname or ""):
             return False
         port = parsed.port
     except ValueError:
@@ -183,10 +215,15 @@ def is_lan_host(host: str) -> bool:
 
     This is what keeps the open internet from including the home network:
     the router admin panel, other devices, WSL host services, cloud metadata
-    addresses. Loopback *spellings* (localhost, 127.x) are not LAN — the
-    owner's own machine is allowlisted by name. But a public DNS name that
-    merely *resolves* to loopback or a private range does count, so a domain
-    like lvh.me (→ 127.0.0.1) is not a route back to the face or the LAN.
+    addresses. The canonical loopback spellings `is_loopback` knows
+    (localhost, `*.localhost`, the literals in 127.0.0.0/8) are not LAN — the
+    owner's own machine is allowlisted by name — and are never looked up.
+    Every other host is resolved: a DNS name that merely *resolves* to
+    loopback or a private range does count, so a domain like lvh.me
+    (→ 127.0.0.1) is not a route back to the face or the LAN, nor is a name
+    that only starts like an address (`127.rebind.example`, SEC-1). The other
+    numeric spellings (`127.1`, `0x7f000001`) go to the resolver too, which
+    answers loopback for them, so they count as well.
     """
     import ipaddress
     import socket
