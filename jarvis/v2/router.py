@@ -98,7 +98,8 @@ def clamp_effort(wanted: str, ladder, provider) -> str | None:
 # the list cannot disagree about what exists.
 #
 # Claude: Claude Code's own model ids; `--effort` is the SDK's `EffortLevel`
-# (`providers/claude.py` `EFFORT_LEVELS`), and Haiku 4.5 has no effort control.
+# (`providers/claude.py` `EFFORT_LEVELS`). Haiku 5.5 takes all five (its
+# default is medium); Haiku 4.5 has no effort control.
 #
 # Codex: the signed-in account's own catalog (`model/list`, installed by
 # `set_codex_models` after a HUD read refreshes it), saved to
@@ -137,6 +138,7 @@ CLI_MODELS: dict[str, dict[str, dict]] = {
         "claude-fable-5-1": {"name": "Claude Fable 5.1", "efforts": _CLAUDE_EFFORTS, "vision": True},
         "claude-opus-5": {"name": "Claude Opus 5", "efforts": _CLAUDE_EFFORTS, "vision": True},
         "claude-sonnet-5": {"name": "Claude Sonnet 5", "efforts": _CLAUDE_EFFORTS, "vision": True},
+        "claude-haiku-5-5": {"name": "Claude Haiku 5.5", "efforts": _CLAUDE_EFFORTS, "vision": True},
         "claude-haiku-4-5": {"name": "Claude Haiku 4.5", "efforts": (), "vision": True},
     },
     "codex": {model: dict(entry) for model, entry in CODEX_FALLBACK.items()},
