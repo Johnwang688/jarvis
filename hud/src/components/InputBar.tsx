@@ -19,6 +19,16 @@ import { requestInputFit, cancelInputFit } from "../lib/inputFit";
 export { MAX_FILES };
 
 /**
+ * The Compact chip (WP-C of the compact-button plan). `state` and `title` come
+ * from lib/compact `compactFor`; `onCompact` is the confirmed click.
+ */
+export interface CompactChip {
+  state: "ready" | "running" | "off";
+  title: string;
+  onCompact: () => void;
+}
+
+/**
  * `in: <project>`, where this conversation lives. Editable only while a new
  * thread is being composed, because that is the only time the choice is still
  * free. After the first message, moving is a sidebar action, and the chip
@@ -93,6 +103,8 @@ export function InputBar(props: {
   projectChip?: ProjectChip | null;
   /** provider ▾ · model ▾ · effort ▾ (components/ModelChip), beside the project. */
   modelChip?: React.ReactNode;
+  /** The Compact chip and its inline confirm (WP-C, CB-2); absent for a compose pane or a task. */
+  compact?: CompactChip | null;
   /** Shown while an image is staged, when the model cannot see one (A5). */
   imageNote?: string | null;
   onSend: (text: string, attachments: Attachment[]) => void;
@@ -171,6 +183,31 @@ export function InputBar(props: {
   };
   const [notes, setNotes] = useState<string[]>([]);
   const box = useRef<HTMLTextAreaElement>(null);
+
+  // The Compact chip's inline confirm (CB-2): a click only asks. Anything but
+  // "ready" (a turn starts, a card arrives, the compaction itself begins)
+  // dismisses it, and it does not come back when the state does. Nothing here
+  // moves focus.
+  const [asking, setAsking] = useState(false);
+  const compactState = props.compact?.state;
+  const askOpen = asking && compactState === "ready";
+  useEffect(() => {
+    if (compactState !== "ready") setAsking(false);
+  }, [compactState]);
+  // Escape closes it from anywhere, the composer included: the box stops its
+  // keys from bubbling, so this is a document listener in the capture phase,
+  // and it exists only while the confirm is open.
+  useEffect(() => {
+    if (!askOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      e.preventDefault();
+      e.stopPropagation();
+      setAsking(false);
+    };
+    document.addEventListener("keydown", onKey, true);
+    return () => document.removeEventListener("keydown", onKey, true);
+  }, [askOpen]);
 
   // The box flexes up with what is typed, and scrolls past the least of:
   // MAX_LINES lines, MAX_PANE_SHARE of its pane, and what the pane has left
@@ -384,9 +421,41 @@ export function InputBar(props: {
           {props.running ? <SteerIcon /> : <SendIcon />}
         </button>
       </div>
+      {askOpen && props.compact ? (
+        <div className="compact-confirm" data-testid="compact-confirm" role="group" aria-label="Compact this conversation?">
+          <span>Compact this conversation?</span>
+          <button
+            type="button"
+            className="compact-yes"
+            data-testid="compact-confirm-yes"
+            onClick={() => {
+              if (!askOpen) return;
+              setAsking(false);
+              props.compact?.onCompact();
+            }}
+          >
+            Compact
+          </button>
+          <button type="button" data-testid="compact-confirm-no" onClick={() => setAsking(false)}>Cancel</button>
+        </div>
+      ) : null}
       <div className="row">
         {props.projectChip ? <Chip chip={props.projectChip} /> : null}
         {props.modelChip ?? null}
+        {props.compact ? (
+          <button
+            type="button"
+            className="chip compactbtn"
+            data-testid="compact"
+            data-state={props.compact.state}
+            aria-label="Compact the conversation"
+            title={props.compact.title}
+            disabled={props.compact.state !== "ready"}
+            onClick={() => { if (props.compact?.state === "ready") setAsking(true); }}
+          >
+            {props.compact.state === "running" ? "Compacting…" : "Compact"}
+          </button>
+        ) : null}
         {props.status != null ? (
           // This pane's own turn says what it is doing (WP-B); the selected
           // chat's says it on the orb, and here only while the orb is folded.

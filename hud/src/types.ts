@@ -79,6 +79,10 @@ export interface Thread {
   /** Live, never stored (WP-H): when the running turn began (ISO), present
    * only while `running`. The thinking line counts from it after a reload. */
   running_since?: string | null;
+  /** Live, never stored (WP-C): a compaction is running on this thread. A
+   * compaction is a turn too, so `running` holds as well. Absent from an
+   * older daemon. */
+  compacting?: boolean;
   /** Live, never stored (chat-to-chat C3 `thread_json`): messages from other
    * chats queued for this one, and this chat's own sends still queued or
    * running. Absent from an older daemon. */

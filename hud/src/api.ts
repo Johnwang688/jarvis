@@ -145,6 +145,11 @@ export const api = {
   send: (id: string, body: { text: string; images?: string[]; attachments?: Attachment[]; spoken?: boolean }) =>
     req<SendResult>(`/threads/${id}/send`, json(body)),
   interrupt: (id: string, expectedTurnId?: string) => req<any>(`/threads/${id}/interrupt`, json(expectedTurnId ? { expected_turn_id: expectedTurnId } : {})),
+  /** The Compact chip's confirmed click (WP-C, owner-only): the daemon starts a compaction as a
+   * turn, or answers 409 with the sentence for `pane-status`. The body is empty now so a later
+   * `{focus}` (CB-4) needs no new route. */
+  compact: (id: string) =>
+    req<{ status: string; turn_id?: string }>(`/threads/${encodeURIComponent(id)}/compact`, json({})),
   /** The sidebar dots (2026-10-08): every thread and task that is not idle. */
   activity: () => req<any>("/activity").then(parseActivity) as Promise<ActivityView>,
   /** The owner opened it: no longer unread or failed. */

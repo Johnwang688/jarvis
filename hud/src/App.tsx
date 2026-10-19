@@ -148,6 +148,7 @@ import {
 import { useStableHandlers, useStableValue } from "./lib/stable";
 import BootOverlay from "./components/BootOverlay";
 import { thinkingLine, type ThinkingLine } from "./lib/thinking";
+import { compactFor } from "./lib/compact";
 import { RELAY_KINDS, waitingLine, type RelayEvent } from "./lib/relays";
 import { thinkingClock } from "./components/MiniOrb";
 
@@ -1663,6 +1664,7 @@ export default function App() {
           }
           break;
         case "turn_finished": {
+          if (tid) dispatch({ type: "thread_patch", id: tid, patch: { compacting: false } });
           for (const n of mine) dispatch({ type: "tool_stop", pane: n,
             turn_id: e.turn_id ?? at.chats[n].toolTurnId ?? undefined, at: e.at ?? new Date().toISOString() });
           if (tid) {
@@ -1757,6 +1759,18 @@ export default function App() {
           }
           break;
         }
+        case "compact_started":
+          // A compaction is a turn (`turn_started` follows): the chip reads running.
+          if (tid) dispatch({ type: "thread_patch", id: tid, patch: { compacting: true } });
+          break;
+        case "compacted":
+          // Its one line, live: a reload reads the same row from the transcript, so a
+          // pane draws it once, here, and the window never re-reads the transcript for it.
+          if (tid) {
+            dispatch({ type: "thread_patch", id: tid, patch: { compacting: false } });
+            if (data.text) for (const n of mine) dispatch({ type: "message", pane: n, message: { role: "system", text: data.text, at: e.at, turn_id: e.turn_id } });
+          }
+          break;
         case "cli_turn":
           // A turn the CLI started by itself (SV-6): a system line where the
           // owner's message would be, as a model change is.
@@ -1957,6 +1971,21 @@ export default function App() {
       dispatch({ type: "patch", patch: { error: `Could not withdraw that message: ${why}` } });
     }).finally(() => withdrawing.current.delete(messageId));
   }, [dispatch]);
+  // The Compact chip's confirmed click (WP-C). One post at a time per thread; the
+  // chip turns "running" from `compact_started`, not from this answer. A refusal
+  // (the daemon's 409 sentence, or an unreachable daemon) is the pane's status line.
+  const compacting = useRef(new Set<string>());
+  const compactThread = useCallback((pane: PaneNo, threadId: string) => {
+    if (live.current.approvals.length > 0 || compacting.current.has(threadId)) return;
+    compacting.current.add(threadId);
+    api.compact(threadId).catch((error: unknown) => {
+      const why = error instanceof Error && error.message ? error.message : "The daemon could not be reached.";
+      chatPatch(pane, { status: why });
+      setTimeout(() => {
+        if (live.current.chats[pane].status === why) chatPatch(pane, { status: "" });
+      }, REFUSED_MS);
+    }).finally(() => compacting.current.delete(threadId));
+  }, [chatPatch]);
   // Stable, so a memoized ChatTab is not redrawn by a keystroke.
   const cancelTask = useCallback(
     (id: string) => void taskAction(id, "cancel").catch((error: unknown) => {
@@ -3927,6 +3956,9 @@ export default function App() {
       activity: shown ? state.activity.threads[shown] : undefined,
       approvalHere: !!shown && state.approvals.some((r) => r.thread_id === shown),
     }));
+    // The Compact chip: an opened chat thread without a task only (WP-C); a compose
+    // pane has no thread, so none.
+    const chip = compactFor(thread, { turnRunning: runningHere(chat) || chat.busy, card: workBlocked });
     return (
       <>
         <ChatTab
@@ -3968,6 +4000,7 @@ export default function App() {
             onNewProject: () => patch({ picker: "newProject" }),
           }}
           modelChip={threadModel.chipFor(n, view.zoom)}
+          compact={chip && thread ? { ...chip, onCompact: () => compactThread(n, thread.id) } : null}
           imageNote={threadModel.imageNoteFor(n)}
           onSend={(text, files) => void send(n, text, files)}
           onTranscriptTaken={() => chatPatch(n, { pendingTranscript: "" })}
