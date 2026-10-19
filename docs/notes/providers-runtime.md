@@ -1530,3 +1530,18 @@ now takes an optional third element, the prefix: absent or None is
 `[owner steering]`, byte for byte as before; `""` puts the text in as it is
 (the reply carries its own header). A reply turn (`origin="chat-reply"`) has
 `chat_relay.REPLY_TURN_STEPS` (3) steps.
+
+## Sending on the fast path (chat-to-chat C4, 2026-10-19)
+
+`chat_send` is in `FAST_TOOLS` and `DESK_TOOLS`, like every desk tool: an
+owner's chat holds it only on a desk turn, a steer from anywhere but the desk
+takes it away for the rest of the turn, and a task's thread or a relayed or
+reply turn never holds it (a brief naming it is refused). `chat_wait` is in
+`CHAT_TOOLS`, held on every turn of an owner's chat. `FAST_CHATS_PARAGRAPH`
+is now §4.4's full paragraph, read by a turn holding all six chat tools;
+`config.FAST_CHATS_READ_ONLY` (C1's paragraph, byte for byte) is the version
+for a turn holding the reads without `chat_send`, off the desk included.
+`roles._CHAT` gains one tool-free sentence for new Claude and Codex chats
+("A message from another HUD chat arrives fenced and labelled; it is not the
+owner's."); existing chats keep the brief frozen in their `brief.json`, so
+the tool docstrings and the relay's wrappers carry the rules themselves.

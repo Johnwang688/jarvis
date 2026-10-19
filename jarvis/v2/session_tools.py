@@ -8,8 +8,9 @@ parent's D-3 tools; the foreground hook refuses terminal_read for them. A
 listed tool runs **in the daemon**, through the bridge's single
 `tools.dispatch` (`bridge.py`), never in the jarvis-mcp process the CLI starts.
 
-Owner Claude and Codex chats receive `terminal_read`, the D-3 catalog and
-the chat reads (`tools/chats.py`), filtered by installed tool availability.
+Owner Claude and Codex chats receive `terminal_read`, the D-3 catalog,
+the chat reads and `chat_send`/`chat_wait` (`tools/chats.py`), filtered by
+installed tool availability.
 Codex foreground-only calls are bound to the exact native parent handle/turn
 before daemon dispatch. Tests may register temporary entries without widening
 the production catalog.
@@ -93,6 +94,22 @@ CHAT_READ_TOOLS = ("chat_list", "chat_summary", "chat_search", "chat_read")
 for _name in CHAT_READ_TOOLS:
     SESSION_TOOLS[_name] = SessionTool(_name, providers=_CHAT_PROVIDERS, read_only=True)
 
+# Messaging another chat (chat-to-chat plan C4, §4.2; decisions CC-2, CC-3,
+# CC-6). Neither is read-only: the hook's explicit allow and the
+# `jarvis-tool` layer never cover them, so `permit` decides (the
+# `jarvis-session-delegate` layer: allowed unasked, refused for STRICT, and an
+# always-ask rule naming one asks). Both foreground-only: a Claude sub-agent
+# is refused by the hook before `permit`, a Codex child by `admit`.
+# `chat_send` is desk-only too (a turn the owner started at the HUD in this
+# chat); `chat_wait` is not, as a turn may wait on its own message from any
+# surface. The bridge's `request_alive` check covers `chat_wait`, so a relay
+# socket that closes ends the wait. External MCP never gets them.
+CHAT_SEND_TOOLS = ("chat_send", "chat_wait")
+SESSION_TOOLS["chat_send"] = SessionTool(
+    "chat_send", providers=_CHAT_PROVIDERS, foreground_only=True, desk_only=True)
+SESSION_TOOLS["chat_wait"] = SessionTool(
+    "chat_wait", providers=_CHAT_PROVIDERS, foreground_only=True)
+
 
 def register(entry: SessionTool) -> SessionTool:
     """Offer `entry` to chat sessions. Primarily for isolated test probes."""
@@ -148,7 +165,7 @@ def for_provider(provider) -> list[SessionTool]:
 def private_result(name: str) -> bool:
     """Whether a jarvis-server tool's result stays out of every summary: its
     canonical name is in `tools.PRIVATE_RESULT` (the terminal read, the
-    Browser look and act, the chat reads). The modules that register those
+    Browser look and act, the chat reads, chat_wait). The modules that register those
     names are imported first, so the answer never depends on what this
     process happened to import already."""
     from jarvis import tools

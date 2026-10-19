@@ -173,6 +173,9 @@ FAST_TOOLS: frozenset[str] = frozenset(
         # only in an owner's chat turn typed in the HUD: `DESK_TOOLS`.
         "terminal_read",
         "hud_browser_view",
+        # a message to another HUD chat (chat-to-chat C4, decisions CC-2,
+        # CC-3, CC-6): in `DESK_TOOLS` too, so held only at the desk.
+        "chat_send",
     }
 ) | DRIVE_TOOLS
 
@@ -181,15 +184,20 @@ FAST_TOOLS: frozenset[str] = frozenset(
 # window (`UserMessage.desk`). Any other turn — Discord, the DM, the escape
 # hatch, a schedule — runs without them in the request, and the tool itself
 # refuses unless `runtime.at_desk()` (fail closed). A steer from anywhere but
-# the desk takes the turn off the desk for the rest of it.
-DESK_TOOLS: frozenset[str] = frozenset({"terminal_read", "hud_browser_view"}) | DRIVE_TOOLS
+# the desk takes the turn off the desk for the rest of it. `chat_send` is one
+# (chat-to-chat C4): a turn another chat's message or reply started is never
+# at the desk, so it cannot send onward (no chains, decision CC-7).
+DESK_TOOLS: frozenset[str] = (frozenset({"terminal_read", "hud_browser_view", "chat_send"})
+                              | DRIVE_TOOLS)
 
-# The other HUD chats, read-only (chat-to-chat plan C1, §4.2; decision CC-1).
-# Held on every turn of an owner's chat — Discord, the DM and schedules
-# included, desk or not — and never by a task's thread or another role, so
-# not in `FAST_TOOLS`, which every brief may hold. The tools refuse without a
-# v2 caller and the daemon's chat service.
-CHAT_TOOLS: frozenset[str] = frozenset({"chat_list", "chat_summary", "chat_search", "chat_read"})
+# The other HUD chats: the reads (chat-to-chat plan C1, §4.2; decision CC-1)
+# and `chat_wait` (C4), the wait on a message this chat sent. Held on every
+# turn of an owner's chat — Discord, the DM and schedules included, desk or
+# not — and never by a task's thread or another role, so not in `FAST_TOOLS`,
+# which every brief may hold. The tools refuse without a v2 caller and the
+# daemon's chat service. `chat_send` is a `DESK_TOOLS` member, not one of these.
+CHAT_TOOLS: frozenset[str] = frozenset({"chat_list", "chat_summary", "chat_search", "chat_read",
+                                        "chat_wait"})
 
 # The tools the owner's own chat turn at the HUD gains (decisions F-1, F-2,
 # 2026-10-14): small, direct work done in place. Held exactly as `DESK_TOOLS`
