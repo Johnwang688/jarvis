@@ -90,6 +90,10 @@ def csp_checks(browser, mock, base, check, until, guard_live, init_script):
     purpose)."""
     from tests.face.hud_v2_check import watch_csp
     from tests.face.hud_v2_terminal_check import FakePty, _approval, _boot, _open_terminal, pumping
+    try:  # speak only once the capture is listening (the dictation flake)
+        from tests.face.hud_voice import speak_when_listening
+    except ImportError:  # run as a script from tests/face
+        from hud_voice import speak_when_listening  # type: ignore[no-redef]
 
     print("\ncontent security policy (ED-4)")
     violations: list[str] = []
@@ -220,9 +224,7 @@ def csp_checks(browser, mock, base, check, until, guard_live, init_script):
         # -- audio: the microphone and a dictated clip to /stt ------------------------
         page.locator('[data-testid="dictation-review"]').click()
         stt_before = len(mock.sent("POST", "/stt"))
-        page.evaluate("""() => { const m = window.__hud.mic;
-            m.feedMs(2000, 0.001); window.__hud.capture.openFollowUp();
-            m.feedMs(1600, 0.06); m.feedMs(2800, 0.0005); }""")
+        speak_when_listening(page, until)
         until(lambda: len(mock.sent("POST", "/stt")) > stt_before)
         check("a dictated clip reaches POST /stt under the policy",
               len(mock.sent("POST", "/stt")) > stt_before)

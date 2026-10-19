@@ -52,6 +52,11 @@ from playwright.sync_api import sync_playwright  # noqa: E402
 
 from tests.face.hud_v2_mock import DIST, MockDaemon, etag_of  # noqa: E402
 
+try:  # speak only once the capture is listening (the dictation flake)
+    from tests.face.hud_voice import speak_when_listening
+except ImportError:  # run as a script from tests/face
+    from hud_voice import speak_when_listening  # type: ignore[no-redef]
+
 # Overridable, so two worktrees can run the suite at once.
 PORT = int(os.environ.get("HUD_V2_CHECK_PORT", "8479"))
 BASE = f"http://127.0.0.1:{PORT}"
@@ -536,38 +541,6 @@ def handed_back_checks(page, mock):
     until(lambda: state()["busy"] is False)
 
 
-# The scripted utterance the dictation checks speak, fed only once the HUD is
-# really listening (2026-10-19, the dictation flake). The status line changing
-# is not enough: the capture's own `muted` and `suppressed` (his voice playing,
-# a card, a picker ...) decide whether the follow-up window opens and whether a
-# frame can open an utterance, and they can lag the text. So the readiness and
-# the feed happen in one synchronous step, which nothing can interleave with,
-# and the step is retried until the capture agrees.
-_FEED_LISTENING = """(() => {
-  const c = window.__hud.capture, m = window.__hud.mic;
-  if (c.hooks.muted()) return "muted";
-  if (c.hooks.suppressed()) return "suppressed: " + (c.hooks.suppressionReason?.() ?? "?");
-  m.feedMs(2000, 0.001);
-  c.openFollowUp();
-  if (!c.conversing()) return "the follow-up window did not open";
-  m.feedMs(1600, 0.06); m.feedMs(2800, 0.0005);
-  return "fed";
-})()"""
-
-
-def feed_when_listening(page, timeout: float = 6.0) -> str:
-    """Speak the scripted utterance once the capture is listening: "fed", or
-    the last reason it was not (for the failing check's detail)."""
-    last = ["not tried"]
-
-    def attempt():
-        last[0] = page.evaluate(_FEED_LISTENING)
-        return last[0] == "fed"
-
-    until(attempt, timeout=timeout)
-    return last[0]
-
-
 def dictation_checks(page, mock):
     print("\ndictation modes")
     # He does not answer himself: the detector is suppressed while a turn is in
@@ -604,7 +577,7 @@ def dictation_checks(page, mock):
           page.locator('[data-testid="orb-status"]').inner_text())
     sends_before = len(mock.sent("POST", "/threads/t1/send"))
     stt_before = len(mock.sent("POST", "/stt"))
-    fed = feed_when_listening(page)
+    fed = speak_when_listening(page, until)
     until(lambda: len(mock.sent("POST", "/stt")) > stt_before)
     check("REVIEW transcribes the utterance", len(mock.sent("POST", "/stt")) > stt_before,
           f"feed: {fed}; drops: {page.evaluate('JSON.stringify(window.__hud.voiceDiagnostics().rows.slice(-3))')}")
@@ -623,7 +596,7 @@ def dictation_checks(page, mock):
           bool(until(lambda: "MUTED" not in page.locator('[data-testid="orb-status"]').inner_text(), timeout=2)),
           page.locator('[data-testid="orb-status"]').inner_text())
     sends_before = len(mock.sent("POST", "/threads/t1/send"))
-    fed = feed_when_listening(page)
+    fed = speak_when_listening(page, until)
     sent = until(lambda: mock.sent("POST", "/threads/t1/send")[sends_before:] or None)
     check("AUTO sends the finished utterance", bool(sent),
           f"feed: {fed}; drops: {page.evaluate('JSON.stringify(window.__hud.voiceDiagnostics().rows.slice(-3))')}")
@@ -2908,15 +2881,21 @@ def provider_default_checks(page, mock):
     # The chip's dialogs are open pickers: no open mic under them (review).
     page.locator('[data-testid="dictation-review"]').click()
 
-    def mic_uploads():
+    def mic_uploads(expect_taken=False):
         before = len(mock.sent("POST", "/stt"))
-        page.evaluate("""
-          const m = window.__hud.mic;
-          m.feedMs(2000, 0.001);
-          window.__hud.capture.openFollowUp();
-          m.feedMs(1600, 0.06); m.feedMs(2800, 0.0005);
-        """)
-        return until(lambda: len(mock.sent("POST", "/stt")) > before, timeout=1.0) is True
+        if expect_taken:
+            # Speech that must be taken waits for the capture to be listening;
+            # speech that must be dropped is fed regardless.
+            speak_when_listening(page, until)
+        else:
+            page.evaluate("""
+              const m = window.__hud.mic;
+              m.feedMs(2000, 0.001);
+              window.__hud.capture.openFollowUp();
+              m.feedMs(1600, 0.06); m.feedMs(2800, 0.0005);
+            """)
+        return until(lambda: len(mock.sent("POST", "/stt")) > before,
+                     timeout=4.0 if expect_taken else 1.0) is True
 
     pick_model(page, "__search__")
     page.wait_for_selector('[data-testid="catalog"]')
@@ -2931,7 +2910,7 @@ def provider_default_checks(page, mock):
     check("and the dialog stays under the approval veil (z-index 100)", int(z) < 100, z)
     page.locator('[data-testid="pd-close"]').click()
     until(lambda: page.locator('[data-testid="provider-defaults"]').count() == 0)
-    check("with both closed, the same speech is taken", mic_uploads())
+    check("with both closed, the same speech is taken", mic_uploads(expect_taken=True))
     until(lambda: page.locator('[data-testid="input"]').input_value() != "", timeout=2.0)
     page.locator('[data-testid="input"]').fill("")
 
