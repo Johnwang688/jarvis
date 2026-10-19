@@ -19,8 +19,8 @@ def free_port() -> int:
 def wait_for(predicate, what: str, timeout: float = 30.0, interval: float = 0.02) -> None:
     """Return as soon as `predicate()` is true; raise AssertionError naming
     `what` if it is still false after `timeout` seconds."""
-    deadline = time.time() + timeout
-    while time.time() < deadline:
+    deadline = time.monotonic() + timeout   # immune to wall-clock jumps
+    while time.monotonic() < deadline:
         if predicate():
             return
         time.sleep(interval)
