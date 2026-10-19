@@ -61,6 +61,7 @@ from jarvis.v2.provider import (Brief, BriefRefused, Decision, Event,  # noqa: E
                                 UserMessage)
 from jarvis.v2.providers import codex, codex_config  # noqa: E402
 from jarvis.v2.stores import Stores  # noqa: E402
+from tests import checklib  # noqa: E402
 
 CLAUDE, CODEX, FAST = ProviderName.CLAUDE, ProviderName.CODEX, ProviderName.FAST
 # Shaped like a caller token, minted by nobody: for the provider-level checks
@@ -1420,10 +1421,7 @@ class RelayChecks(unittest.TestCase):
     def test_unconnected_the_relay_lists_nothing_and_errors_every_call(self):
         with tempfile.TemporaryDirectory() as tmp:
             # A port nothing listens on (bound, then closed).
-            import socket
-            with socket.socket() as s:
-                s.bind(("127.0.0.1", 0))
-                port = s.getsockname()[1]
+            port = checklib.free_port()
             entry = bridge.server_entry(CLAUDE, port, PLACEHOLDER)
             got, err = run_relay(entry, [(READ, {})], cwd=Path(tmp))
         self.assertEqual(got[1]["result"]["capabilities"], {"tools": {}})
