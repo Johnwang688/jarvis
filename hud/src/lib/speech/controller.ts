@@ -56,6 +56,9 @@ export interface SpeechEventLike {
   stop?: string;
   /** A record of a turn the CLI started by itself (SV-6): never spoken (owner, 2026-10-15). */
   self_started?: boolean;
+  /** A record of a turn another chat's message started, or of the reply turn
+   * that reports its answer (chat-to-chat O-8): never spoken. */
+  relayed?: unknown;
 }
 
 export interface SpeakerGateLike {
@@ -412,6 +415,11 @@ export class SpeechController {
     // spoken or ends anything being read. Its Stop still silences the
     // children it hit (above); the sub-agents' own notices are not its records.
     if (e.self_started === true) return;
+    // Nor is a turn another chat's message started, or the short turn that
+    // reports another chat's reply (chat-to-chat O-8): the owner did not ask
+    // in this window, so it is not read to him. The daemon marks each such
+    // record `relayed: {message_id, from}` beside `kind`.
+    if (e.relayed !== null && typeof e.relayed === "object") return;
     if (!this.speaks(thread)) {
       if (this.open.has(thread)) this.open.delete(thread);
       return;

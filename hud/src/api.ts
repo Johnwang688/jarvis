@@ -133,6 +133,12 @@ export const api = {
       return req(`/threads/${id}/transcript`);
     }
   },
+  /** The owner's Withdraw on a message this chat queued for another
+   * (chat-to-chat §5.5, owner-only): 404 unknown, 409 once it is no longer
+   * queued. No HUD route ever sends a relay. */
+  withdrawRelay: (threadId: string, messageId: string) =>
+    req<{ ok: boolean; message_id?: string; state?: string }>(
+      `/threads/${encodeURIComponent(threadId)}/relays/${encodeURIComponent(messageId)}/withdraw`, json({})),
   /** `spoken` (PR C): dictated, so the Discord mirror says "You (HUD, voice)".
    * While a turn runs the message is steered into it or queued behind it
    * (2026-10-08) — never refused; `status` says which. */

@@ -148,6 +148,7 @@ import {
 import { useStableHandlers, useStableValue } from "./lib/stable";
 import BootOverlay from "./components/BootOverlay";
 import { thinkingLine, type ThinkingLine } from "./lib/thinking";
+import { RELAY_KINDS, waitingLine, type RelayEvent } from "./lib/relays";
 import { thinkingClock } from "./components/MiniOrb";
 
 const PROPOSAL_WINDOW_MS = 60_000;
@@ -260,6 +261,11 @@ export default function App() {
   // set before paint, so no frame offers it under one.
   useLayoutEffect(() => { subagents.setBlocked(blocked); }, [blocked]);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // Chat-to-chat (C5): who sent each message still waiting to start, heard
+  // from its `relay_out` (whose data names only the target): message id ->
+  // {from, to}. Only for the target's "1 message from ‹title›" line; the
+  // count itself is the thread record's `relays_waiting`.
+  const [relayFrom, setRelayFrom] = useState<Record<string, { from: string; to: string }>>({});
   const [settingsSection, setSettingsSection] = useState(loadSettingsSection);
   const settingsNow = useRef(settingsOpen);
   settingsNow.current = settingsOpen;
@@ -1854,6 +1860,26 @@ export default function App() {
           if (tid) subagents.heard(tid, data);
           break;
         default:
+          if (RELAY_KINDS.has(kind)) {
+            // A message one chat sent another (chat-to-chat C5): folded by
+            // message id into the panes showing that record's thread, and
+            // nowhere else. Nothing here opens, selects or focuses a pane.
+            dispatch({ type: "relay", event: e as RelayEvent });
+            const mid = typeof data.message_id === "string" ? data.message_id : null;
+            if (mid && kind === "relay_out" && tid && typeof data.to === "string") {
+              const to: string = data.to;
+              setRelayFrom((was) => mid in was ? was
+                : Object.fromEntries([...Object.entries(was).slice(-199), [mid, { from: tid, to }]]));
+            } else if (mid && (kind === "relay_in" || kind === "relay_state")) {
+              setRelayFrom((was) => {
+                if (!(mid in was)) return was;
+                const { [mid]: _gone, ...rest } = was;
+                return rest;
+              });
+            }
+            // The thread records' `relays_waiting`/`relays_out` follow.
+            if (kind === "relay_out" || kind === "relay_in" || kind === "relay_state") void refreshRelayCounts();
+          }
           break;
       }
     }, () => {
@@ -1913,6 +1939,24 @@ export default function App() {
       await refreshTasks();
     } finally { taskActions.current.delete(id); }
   }, [refreshTasks]);
+  // Chat-to-chat (C5): a received message's "Open" shows its sender beside
+  // this chat (the owner's click only, through Open beside's own path; it
+  // focuses no frame), and Withdraw takes back a send still queued. Both are
+  // dead under a card, here as well as on their disabled buttons.
+  const pickThreadRef = useRef<(id: string, beside?: boolean) => void>(() => {});
+  const openRelay = useCallback((threadId: string) => {
+    if (live.current.approvals.length > 0) return;
+    pickThreadRef.current(threadId, true);
+  }, []);
+  const withdrawing = useRef(new Set<string>());
+  const withdrawRelay = useCallback((threadId: string, messageId: string) => {
+    if (live.current.approvals.length > 0 || withdrawing.current.has(messageId)) return;
+    withdrawing.current.add(messageId);
+    api.withdrawRelay(threadId, messageId).catch((error: unknown) => {
+      const why = error instanceof Error ? error.message : "the daemon could not be reached";
+      dispatch({ type: "patch", patch: { error: `Could not withdraw that message: ${why}` } });
+    }).finally(() => withdrawing.current.delete(messageId));
+  }, [dispatch]);
   // Stable, so a memoized ChatTab is not redrawn by a keystroke.
   const cancelTask = useCallback(
     (id: string) => void taskAction(id, "cancel").catch((error: unknown) => {
@@ -1941,6 +1985,19 @@ export default function App() {
       /* keep what we had */
     }
   }, [dispatch]);
+
+  // Relay records come in bursts (a send, its start, its fate, in both
+  // chats): one read of the thread list at a time, and one more after it if
+  // another record arrived meanwhile, so the last read is never a stale one.
+  const relayRead = useRef({ running: false, again: false });
+  const refreshRelayCounts = useCallback(async () => {
+    const r = relayRead.current;
+    if (r.running) { r.again = true; return; }
+    r.running = true;
+    try {
+      do { r.again = false; await refreshThreads(); } while (r.again);
+    } finally { r.running = false; }
+  }, [refreshThreads]);
 
   /** Projects again, and the platform of the one that changed (its root may have). */
   const refreshProjects = useCallback(
@@ -2218,6 +2275,7 @@ export default function App() {
     openIn(pane, id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dispatch, mayShow, placeChat, openIn]);
+  pickThreadRef.current = pickThread;
 
   // ---- split and close (WP-G2, plan §3.4–§3.6) --------------------------------
 
@@ -3839,6 +3897,16 @@ export default function App() {
   };
   const paletteList: Entry[] = nav && state.picker === "palette" ? paletteEntries(nav.ctx, nav.actions) : [];
 
+  /** Chat-to-chat (C5): the muted line saying what waits for this chat's
+   * turn — the sender named when exactly one waits and the window heard it. */
+  const relayWaitingLine = (thread: Thread | null): string | null => {
+    const n = thread?.relays_waiting ?? 0;
+    if (!thread || !(n > 0)) return null;
+    const senders = Object.values(relayFrom).filter((r) => r.to === thread.id);
+    const from = n === 1 && senders.length === 1 ? threadOf(senders[0].from)?.title ?? null : null;
+    return waitingLine(n, from);
+  };
+
   /** One chat pane: its conversation, its box, its chips, its Send/Steer and Stop. */
   const renderChat = (n: PaneNo) => {
     const chat = state.chats[n];
@@ -3871,6 +3939,10 @@ export default function App() {
           thinking={thinking}
           accent={state.avatar?.accent ?? null}
           drawn={!settingsOpen && fit.panes.includes(n)}
+          blocked={blocked}
+          onOpenRelay={openRelay}
+          onWithdrawRelay={withdrawRelay}
+          relayWaiting={relayWaitingLine(thread)}
         />
         <InputBar
           status={status}
