@@ -435,6 +435,16 @@ class DiffReviewChecks(unittest.TestCase):
         result = R.parse("```json\n" + json.dumps(answer) + "\n```", ["x.py"])
         no_keys(self, json.dumps(result), "diff_review.parse")
 
+    def test_c1_diff_review_clean_redacts_a_key_split_by_invisible_characters(self):
+        """c1/diff_review._clean: a zero-width or bidi character inside a key
+        must not hide it from the scrub, only for `strip_invisible` to join it
+        back together on the way out (invisible characters go first)."""
+        for key in keys():
+            for mark in ("\u200b", "\u2060", "\u202e", "\ufeff"):
+                split = key[:6] + mark + key[6:]
+                text = R._clean(f"leaks {split} here", 400)
+                no_keys(self, text, f"diff_review._clean with {mark!r} inside the key")
+
     def test_c3_diff_review_clean_withholds_and_never_raises(self):
         """c3: with the scrub raising, `_clean` returns the withheld result."""
         with scrub_raises():

@@ -239,10 +239,12 @@ def _clean(value, cap: int) -> str:
     if not isinstance(value, str):
         return ""
     try:
-        value = scrub_text(value)
+        # Invisible characters go first: one inside a key would hide it from
+        # the scrub, and stripping it afterwards would put the key back together.
+        value = scrub_text(strip_invisible(value))
     except Exception:       # noqa: BLE001 — what cannot be scrubbed is withheld, never raised
         value = WITHHELD
-    return clean_line(strip_invisible(value), cap=cap).strip()
+    return clean_line(value, cap=cap).strip()
 
 
 def _line(value) -> int | None:
