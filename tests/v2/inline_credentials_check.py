@@ -832,5 +832,176 @@ class RawLogs(unittest.TestCase):
         self.assertEqual(row["data"]["args"], "[withheld: could not be judged]")
 
 
+
+# -- SEC-6 (owner, 2026-10-19): a private key's whole block -------------------
+#
+# `redact_command` (cards, logs) and `for_display` (v1's tool lines) applied
+# `credential_patterns.PATTERNS`, which know only a key's header and footer;
+# the base64 body between them showed (and on a card, rule 0 kept even the
+# header: it holds a blank). Both now take `redact.private_key_blocks` first.
+# On a card that is still bound by rules 1-3: a block goes only where it sits
+# inside one quoting with nothing active, holds nothing but key material, and
+# the line runs no text. Every body is seeded random base64 built here.
+
+import base64 as _b64  # noqa: E402
+import random as _random  # noqa: E402
+
+_RNG = _random.Random(20261019)
+
+
+def _body(lines: int = 4, width: int = 64) -> list[str]:
+    text = _b64.b64encode(_RNG.randbytes(width * 3 // 4 * lines + 7)).decode()
+    return [text[i:i + width] for i in range(0, len(text), width)]
+
+
+def _head(label: str = "PRIVATE KEY") -> str:
+    return "-----BEGIN " + label + "-----"
+
+
+def _foot(label: str = "PRIVATE KEY") -> str:
+    return "-----END " + label + "-----"
+
+
+def _block(label: str = "PRIVATE KEY", sep: str = "\n", extra: tuple = ()) -> str:
+    return sep.join([_head(label), *extra, *_body(), _foot(label)])
+
+
+_LABELS = ("PRIVATE KEY", "RSA PRIVATE KEY", "EC PRIVATE KEY", "OPENSSH PRIVATE KEY",
+           "ENCRYPTED PRIVATE KEY", "PGP PRIVATE KEY BLOCK")
+_LEGACY = ("Proc-Type: 4,ENCRYPTED", "DEK-Info: AES-128-CBC,0123456789ABCDEF0123456789ABCDEF", "")
+
+
+def _key_cards():
+    """(command, what its card and log must read)."""
+    cases = []
+    for label in _LABELS:
+        block = _block(label)
+        cases.append((f"printf '%s\\n' '{block}' > key.pem", "printf '%s\\n' '[redacted]' > key.pem"))
+    block = _block("RSA PRIVATE KEY", extra=_LEGACY)
+    cases.append((f"echo '{block}' | tee key.pem", "echo '[redacted]' | tee key.pem"))
+    block = _block(sep="\\n")
+    cases += [
+        # JSON's and ANSI-C's `\n`, and double quotes.
+        (f"curl -d '{{\"name\": \"deploy\", \"key\": \"{block}\\n\"}}' https://example.invalid/keys",
+         "curl -d '{\"name\": \"deploy\", \"key\": \"[redacted]\\n\"}' https://example.invalid/keys"),
+        (f"printf %s $'{block}' | ssh-add -", "printf %s $'[redacted]' | ssh-add -"),
+        (f"gh secret set DEPLOY_KEY --body \"{_block()}\"", "gh secret set DEPLOY_KEY --body \"[redacted]\""),
+        # An unterminated block: to its quote's end, never past it.
+        (f"printf %s '{_head()}\n" + "\n".join(_body()) + "' > key.pem", "printf %s '[redacted]' > key.pem"),
+        # A footer-only tail: the key material above the footer, in its quote.
+        ("printf %s '" + "\n".join(_body()) + f"\n{_foot()}' > key.pem", "printf %s '[redacted]' > key.pem"),
+        # Two blocks in two quotes stay two.
+        (f"echo '{_block()}' > a.pem && echo '{_block('EC PRIVATE KEY')}' > b.pem",
+         "echo '[redacted]' > a.pem && echo '[redacted]' > b.pem"),
+    ]
+    return cases
+
+
+def _key_lines():
+    """(tool line, what `for_display` must read)."""
+    before, after = "Here is the key you asked about:\n", "\nCan you tell me why ssh refuses it?"
+    cases = [(before + _block(label) + after, before + R + after) for label in _LABELS]
+    cases += [
+        (before + _block("RSA PRIVATE KEY", extra=_LEGACY) + after, before + R + after),
+        (before + _head() + "\n" + "\n".join(_body()), before + R),           # unterminated
+        ("\n".join(_body()) + "\n" + _foot() + after, R + after),             # a footer-only tail
+        ("echo '" + _block() + "' > key.pem", "echo '" + R + "' > key.pem"),
+    ]
+    return cases
+
+
+def _public_material():
+    cert = "\n".join(["-----BEGIN CERTIFICATE-----", *_body(), "-----END CERTIFICATE-----"])
+    pub = "\n".join(["-----BEGIN PUBLIC KEY-----", *_body(), "-----END PUBLIC KEY-----"])
+    ssh = "ssh-ed25519 " + _body(1)[0] + " me@laptop"
+    pgp = "\n".join(["-----BEGIN PGP PUBLIC KEY BLOCK-----", "", *_body(), "-----END PGP PUBLIC KEY BLOCK-----"])
+    return [cert, pub, ssh, pgp, f"echo '{cert}' > ca.pem", f"echo '{pub}' >> keys.pem",
+            f"echo '{ssh}' >> ~/.ssh/authorized_keys"]
+
+
+def _key_never_hidden():
+    """(command, what its card must still show): rules 1-3 hold for a block."""
+    body = "\n".join(_body())
+    block = f"{_head()}\n{body}\n{_foot()}"
+    return [
+        # Rule 1: a header and a footer in two quotes never take what is
+        # between them; an unquoted block and a here-document stay whole.
+        (f"echo '{_head()}'; rm -rf ~; echo '{_foot()}'", "rm -rf ~"),
+        (f"{_head()}\n{body}\n{_foot()}", body),
+        (f"cat > key.pem <<'EOF'\n{block}\nEOF", body),
+        (f"echo '{_head()}\nrm -rf ~\n{_foot()}' > x", "rm -rf ~"),        # not key material
+        (f"echo \"$KEYTAIL\n{body}\n{_foot()}\"", "$KEYTAIL"),          # an expansion's name stays
+        # Rule 3: a line that runs text shows it.
+        (f"bash -c '{_head()}\n{body}\n{_foot()}'", body),
+        (f"X='{block}'; eval \"$X\"", body),
+        (f"K='{block}'; echo \"$K\" > k.pem", body),
+        (f"printf %s '{block}' > a.sh; sh a.sh", body),
+        (f"printf %s '{block}' > a.sh; ./a.sh", body),
+        (f"printf %s '{block}' | python3", body),
+    ]
+
+
+class PrivateKeyBlocks(unittest.TestCase):
+    def setUp(self):
+        self.root = _env_isolated(self)
+
+    def test_a_card_and_a_log_hide_the_whole_block(self):
+        from jarvis.v2.approvals import ApprovalRequest
+        from jarvis.v2.permissions import ApprovalRecord, _safe_command, log_decision
+        for command, shown in _key_cards():
+            with self.subTest(command=command[:60]):
+                self.assertEqual(secrets.redact_command(command), shown)
+                self.assertEqual(secrets.redact_command(shown), shown)              # idempotent
+                self.assertEqual(secrets.redact_value({"command": command, "n": [command]}),
+                                 {"command": shown, "n": [shown]})
+                self.assertEqual(_safe_command(command), shown)
+                request = ApprovalRequest(tool="Bash", args={"command": command}, command=command)
+                self.assertEqual(request.to_json()["command"], shown)
+                self.assertEqual(request.to_json()["args"]["command"], shown)
+                self.assertEqual(request.command, command)                         # judged as typed
+        path = self.root / "decisions.jsonl"
+        command, shown = _key_cards()[0]
+        log_decision(ApprovalRecord(tool="Bash", args_digest="d", layer="ask", decision="allow",
+                                    reason=f"rule x: {command}", command=command), path)
+        entry = json.loads(path.read_text())
+        self.assertEqual((entry["command"], entry["reason"]), (shown, f"rule x: {shown}"))
+
+    def test_a_v1_tool_line_hides_the_whole_block(self):
+        for line, shown in _key_lines():
+            with self.subTest(line=line[:60]):
+                self.assertEqual(secrets.for_display(line), shown)
+                got = json.loads(secrets.tool_args_for_display(json.dumps({"path": "k.pem", "content": line})))
+                self.assertEqual(got, {"path": "k.pem", "content": shown})
+                self.assertEqual(secrets.tool_args_for_display(line), shown)        # not JSON: judged whole
+
+    def test_public_keys_and_certificates_are_unchanged(self):
+        for text in _public_material():
+            with self.subTest(text=text[:40]):
+                self.assertEqual(secrets.redact_command(text), text)
+                self.assertEqual(secrets.for_display(text), text)
+
+    def test_a_block_never_hides_code_that_runs(self):
+        from jarvis.v2.approvals import ApprovalRequest
+        for command, shows in _key_never_hidden():
+            with self.subTest(command=command[:60]):
+                card = secrets.redact_command(command)
+                self.assertIn(shows, card)
+                self.assertEqual(card, command)          # as before SEC-6: nothing withheld
+                hatch = ApprovalRequest(tool="Bash", args={"command": command}, command=command,
+                                        allowlistable=False, layer="escape-hatch").to_json()
+                self.assertIn(shows, hatch["command"])
+
+    def test_judges_never_read_the_new_pass(self):
+        def boom(*_a, **_k):
+            raise AssertionError("a judge read through the display redaction")
+
+        commands = [c for c, _ in _key_cards()] + [c for c, _ in _key_never_hidden()]
+        before = [(rules.decide(c).decision, v1_permissions.static_verdict(c).decision) for c in commands]
+        with patch.object(secrets, "redact_command", boom), patch.object(secrets, "for_display", boom), \
+                patch.object(secrets, "redact_value", boom):
+            after = [(rules.decide(c).decision, v1_permissions.static_verdict(c).decision) for c in commands]
+        self.assertEqual(before, after)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)
