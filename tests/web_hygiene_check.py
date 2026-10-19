@@ -61,6 +61,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from checklib import free_port  # noqa: E402
 
 from bs4 import BeautifulSoup  # noqa: E402
 
@@ -1155,10 +1156,7 @@ def browser_snapshot():
                 snap_err = tools.dispatch("browser_snapshot", "{}").text
                 session.goto(serve("/throw-rect", THROWING_RECT_PAGE))
                 shot_err = tools.dispatch("browser_screenshot", "{}").text
-                dead = socket.socket()
-                dead.bind(("127.0.0.1", 0))
-                dead_port = dead.getsockname()[1]
-                dead.close()
+                dead_port = free_port()
                 goto_err = tools.dispatch(
                     "browser_goto", json.dumps({"url": f"http://127.0.0.1:{dead_port}/"})).text
                 # The refused load raises at once, but Chromium then commits its

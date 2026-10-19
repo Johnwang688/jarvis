@@ -53,7 +53,6 @@ from __future__ import annotations
 
 import json
 import os
-import socket
 import sys
 from pathlib import Path
 
@@ -61,6 +60,7 @@ REPO = Path(__file__).resolve().parents[2]
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
+from tests import checklib  # noqa: E402
 from tests.face.hud_v2_layout_check import (  # noqa: E402
     _active_testid, _approval, _boot, _choose, _pane, _set_storage, _set_ws, _visible, _ws,
 )
@@ -171,12 +171,6 @@ def _inside(page, sel: str) -> str:
         return ""
 
 
-def _free_port() -> int:
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
-
-
 def _port_checks(page, mock, check, until):
     _setup(page, mock, until)
     for what, url, word in (
@@ -246,7 +240,7 @@ def _keep_checks(page, mock, check, until):
     check("another page on the same origin keeps it", _sandbox(page) == ON and _stored(page) == origin)
 
     for what, url in (("host (localhost for 127.0.0.1)", f"http://localhost:{mock.dev_port}/"),
-                      ("port", f"http://127.0.0.1:{_free_port()}/"),
+                      ("port", f"http://127.0.0.1:{checklib.free_port()}/"),
                       ("scheme", f"https://127.0.0.1:{mock.dev_port}/")):
         if not _keep_checked(page):
             _load(page, dev)
@@ -449,7 +443,7 @@ def _rename_checks(page, mock, check, until):
     check("BR-3a: the window saves it under the new names only",
           "preview" not in raw and saved.get("view") == "browser" and saved.get("browserUrl") == dev, raw[:300])
 
-    other = f"http://127.0.0.1:{_free_port()}"
+    other = f"http://127.0.0.1:{checklib.free_port()}"
     boot_with({"previewUrl": dev, "keepOrigin": other})
     until(lambda: page.locator(frame1).count() > 0, timeout=4)
     page.wait_for_timeout(300)
