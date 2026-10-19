@@ -26,12 +26,14 @@
 // chrome (the focus line, the context, the compact view menu, the ×) is drawn
 // only when there is more than one pane.
 //
-// Split and × (WP-G2): the split button adds a copy of the pane after it (App
-// decides what the copy shows and whether one fits); × closes exactly that
-// pane, asking first in an inline strip when App says it holds something that
-// cannot wait (an unsaved edit, a compose row's unsent words). A × clicked
-// within CLOSE_GUARD_MS of a close, or as a double-click's second click,
-// closes nothing. A pane neither drawn nor hidden by ⊞ is unmounted.
+// Split and × (WP-G2; directional since FS4): two buttons in every pane's
+// strip, split right and split down, each halving that pane for a copy of it
+// (App decides what the copy shows; lib/workspace whether each fits, per pane
+// and direction); × closes exactly that pane, its space going to its
+// neighbour, asking first in an inline strip when App says it holds something
+// that cannot wait (an unsaved edit, a compose row's unsent words). A ×
+// clicked within CLOSE_GUARD_MS of a close, or as a double-click's second
+// click, closes nothing. A pane neither drawn nor hidden by ⊞ is unmounted.
 //
 // Several chats (WP-B): any pane may show chat, each its own conversation.
 // The selected chat's pane (decisions W-6: the chat pane most recently
@@ -45,7 +47,8 @@ import {
   PANEL, PANE_NOS, PANE_VIEWS, VIEW_LABEL, inWorkspace, maxPanelHeight, presetOfWs, slotOf,
   type PaneNo, type PaneSpec, type View,
 } from "../lib/workspace";
-import type { Rect } from "../lib/splittree";
+import type { Axis, Rect } from "../lib/splittree";
+import { CLOSE_GUARD_MS } from "../lib/frameguard";
 import { placeTerminals, type InSpec } from "../lib/terminal";
 import type { Project } from "../types";
 import { AreaIcon, Separator, type LayoutControl } from "./Layout";
@@ -92,8 +95,10 @@ function useTerminalBridge(v: LayoutControl, place: Map<string, number>, termina
   useEffect(() => terminals.setSlots(slots ?? new Map()), [slotKey]);
 }
 
-/** A click on × this soon after a close closes nothing: the second click of a double-click lands on whatever × moved under the pointer. */
-export const CLOSE_GUARD_MS = 400;
+// A click on × CLOSE_GUARD_MS after a close closes nothing: the second click
+// of a double-click lands on whatever × moved under the pointer. The constant
+// lives in lib/frameguard, which uses it the same way: a press on a page's
+// shield that soon after the layout moved is no gesture toward the page.
 
 /** Under this, a split pane's File and Diff views hide their tree behind a toggle. */
 export const NARROW_W = 560;
@@ -163,12 +168,12 @@ export function Workspace(props: {
   /** `+ ▾`'s choices besides Home. */
   projects?: Project[];
   /**
-   * The split button (WP-G2): whether pane `pane` can be split now, and its
-   * title — what it does, or why not (lib/workspace `splitTitle`). Without
-   * it there is no button.
+   * The split buttons (FS4): for pane `pane`, whether each of split right and
+   * split down can be done now, and its title — what it does, or why not
+   * (lib/workspace `splitTitle`). Without it there are no buttons.
    */
-  splitFor?: (pane: PaneNo) => { ok: boolean; title: string };
-  onSplit?: (pane: PaneNo) => void;
+  splitFor?: (pane: PaneNo) => Record<"right" | "down", { ok: boolean; title: string }>;
+  onSplit?: (pane: PaneNo, axis: Axis) => void;
   /** × first asks this (an unsaved edit, unsent words): the question, or null to close at once. */
   closeQuestion?: (pane: PaneNo) => string | null;
   /**
@@ -293,7 +298,7 @@ export function Workspace(props: {
               onPointerDownCapture={() => v.focus(n)}
               onFocusCapture={() => v.focus(n)}
             >
-              <div className="tabs" id={at.drawn && at.slot === 1 ? "tabs" : undefined}>
+              <div className={at.compact ? "tabs compact" : "tabs"} id={at.drawn && at.slot === 1 ? "tabs" : undefined}>
                 <div className="viewstrip" data-testid={`pane-${n}-view`}>
                   {at.compact ? (
                     <select
@@ -324,22 +329,23 @@ export function Workspace(props: {
                 </div>
                 {props.splitFor ? (() => {
                   const sp = props.splitFor(n);
-                  return (
+                  return (["right", "down"] as const).map((d) => (
                     <button
                       type="button"
+                      key={d}
                       className="tb-icon panesplit"
-                      data-testid={`pane-${n}-split`}
-                      aria-label="Split pane"
-                      title={sp.title}
-                      disabled={props.blocked || !sp.ok}
+                      data-testid={`pane-${n}-split-${d}`}
+                      aria-label={d === "right" ? "Split right" : "Split down"}
+                      title={sp[d].title}
+                      disabled={props.blocked || !sp[d].ok}
                       onClick={() => {
-                        if (!props.blocked && sp.ok) props.onSplit?.(n);
+                        if (!props.blocked && sp[d].ok) props.onSplit?.(n, d === "right" ? "x" : "y");
                       }}
                       {...buttonKeys}
                     >
-                      <AreaIcon area="split" open={false} />
+                      <AreaIcon area={d === "right" ? "split-right" : "split-down"} open={false} />
                     </button>
-                  );
+                  ));
                 })() : null}
                 {at.split && spec.view === "chat" && n === props.selectedPane ? (
                   <span className="micmark" data-testid={`pane-${n}-mic`} role="img" aria-label="Selected chat"

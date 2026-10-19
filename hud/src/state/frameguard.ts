@@ -63,7 +63,7 @@
 // frame's `focus` with `contentWindow.focus()`, which updates it.
 
 import {
-  BELT_MS, RESTORE_MS, isModifierKey, isTabKey, judgeFocus, loadGrantLive, tabGesture,
+  BELT_MS, CLOSE_GUARD_MS, RESTORE_MS, isModifierKey, isTabKey, judgeFocus, loadGrantLive, tabGesture,
   type LoadGrant, type TabMark, type Verdict,
 } from "../lib/frameguard";
 import { isTypingTarget } from "../lib/talkkey";
@@ -103,6 +103,8 @@ let lastTab: TabMark | null = null;
 /** An element focus can be put on and taken off again, so that nothing is focused. */
 let sink: HTMLElement | null = null;
 let restoreGrant: { el: Element; until: number } | null = null;
+/** When the layout last moved (`layoutMoved`); -Infinity before it ever has. */
+let movedAt = -Infinity;
 let belt: ReturnType<typeof setInterval> | null = null;
 let raf: number | null = null;
 let installs = 0;
@@ -192,6 +194,24 @@ function frameLoaded(frame: HTMLIFrameElement) {
  */
 export function allowRestore(el: Element) {
   if (el instanceof HTMLIFrameElement && entries.has(el)) restoreGrant = { el, until: now() + RESTORE_MS };
+}
+
+/**
+ * The panes just moved under the pointer (a split, a close, ⊞; FS4): every
+ * shield comes back up, and for CLOSE_GUARD_MS no pointer event on a shield
+ * steps it aside — the second click of a double-click on × that lands on a
+ * page grown under the pointer is not the owner reaching for that page. It
+ * only narrows what counts as a gesture: it never focuses a frame, and after
+ * the window a press works as before.
+ */
+export function layoutMoved() {
+  movedAt = now();
+  for (const entry of Array.from(entries.values())) setOver(entry, false);
+}
+
+function justMoved(): boolean {
+  const t = now() - movedAt;
+  return t >= 0 && t < CLOSE_GUARD_MS;
 }
 
 // ---- the decision ---------------------------------------------------------
@@ -452,7 +472,11 @@ function onPointer(e: Event) {
   if (!entries.size) return;
   const t = e.target as Node | null;
   const mine = t instanceof Element ? shields.get(t) : undefined;
-  if (mine) {
+  if (mine && justMoved()) {
+    // The layout just moved under the pointer: this is no gesture toward the
+    // page (layoutMoved). The shield stays up (its own mousedown handler keeps
+    // focus where it is) and nothing is focused.
+  } else if (mine) {
     // The keyboard is the owner's where they type: a HUD text control, or
     // another page they put it in (PR #78 delta review: crossing page B while
     // typing in page A let B take the keys).
@@ -538,5 +562,6 @@ export function resetFrameGuardForTests() {
   sink?.remove();
   sink = null;
   restoreGrant = null;
+  movedAt = -Infinity;
   stopBelt();
 }

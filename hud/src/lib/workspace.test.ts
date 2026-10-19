@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { DEFAULT_LAYOUT, PANE, RAIL } from "./layout";
 import {
-  LADDER, MAX_DRAWN, MENU_PRESETS, PANEL, PANE_MIN_H, PANE_MIN_W, PANE_NOS, PANE_VIEWS, PATH_MAX, PRESETS, SHAPES,
+  MENU_PRESETS, PANEL, PANE_MIN_H, PANE_MIN_W, PANE_NOS, PANE_VIEWS, PATH_MAX, PRESETS, SHAPES,
   TITLEBAR_H, WORKSPACE_KEY, allocate, clampPanelHeight, closePane, copySpec,
-  defaultPane, defaultWorkspace, drawnSet, setFilePath, splitPane, splitTitle, splitVerdict,
+  defaultPane, defaultWorkspace, drawnSet, setFilePath, splitPane,
   fitWorkspace, focusPane, forgetTerminal, loadWorkspace, maxPanelHeight,
   inWorkspace, orderOf, paneAt, paneSequence, parseWorkspace, pinPane, presetOfWs, resetWorkspace, saveWorkspace, setKeepOrigin, setPaneTerminal,
   setBrowserUrl, setEditors, setPanel, setPreset, setSubagent, setView, show, slotOf, subagentSpec,
@@ -39,6 +39,8 @@ const ws = ({ preset, ...over }: Partial<Workspace> & { preset?: Preset } = {}):
 const sizesOf = (n: LayoutNode): unknown => (isLeaf(n) ? null : { axis: n.axis, sizes: n.sizes, children: n.children.map(sizesOf) });
 /** The window's room the way useLayout measures it: inner size over the zoom, the title bar off the height. */
 const room = (w: number, h: number, zoom: number) => [w / (zoom / 100), h / (zoom / 100) - TITLEBAR_H] as const;
+/** No measured window: nothing dropped, FS-4 skipped — a split is decided by FS-3 alone (FS4). */
+const unmeasured = (w: Workspace) => fitWorkspace(DEFAULT_LAYOUT, w, NaN, NaN);
 const fitAt = (w: Workspace, px: number, py: number, zoom: number, preferPanel = false) => {
   const [aw, ah] = room(px, py, zoom);
   return fitWorkspace(DEFAULT_LAYOUT, w, aw, ah, null, preferPanel);
@@ -57,17 +59,13 @@ describe("the preset table", () => {
     }
     expect([PANE_MIN_W, PANE_MIN_H]).toEqual([360, 200]);
     expect([PANEL.min, PANEL.def]).toEqual([120, 260]);
-    // Twelve ids (decision FS-1), and still at most eight drawn: the ladder stops at grid8 (FS2).
+    // Twelve ids (decision FS-1), all of them drawn at once since FS4 (no MAX_DRAWN: workspace.split.test.ts).
     expect(PANE_NOS).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
-    expect(MAX_DRAWN).toBe(8);
   });
 
   it("offers eight tiles in ⊞ — 6 and 8 directly, 5 and 7 only by split or close (decisions S-1)", () => {
     expect(MENU_PRESETS).toEqual(["single", "cols2", "rows2", "cols3", "main2", "grid4", "grid6", "grid8"]);
-    // The ladder a split climbs: three is three columns (decisions S-3).
-    expect([1, 2, 3, 4, 5, 6, 7, 8].map((n) => LADDER[n]))
-      .toEqual(["single", "cols2", "cols3", "grid4", "grid5", "grid6", "grid7", "grid8"]);
-    for (let n = 1; n <= 8; n++) expect(SHAPES[LADDER[n]].panes).toBe(n);
+    // FS4: the ladder a split climbed is gone (decisions FS-1..FS-5; workspace.split.test.ts, "the ladder is gone").
   });
 
 });
@@ -671,7 +669,7 @@ describe("a stored WP-A or WP-B workspace: no order, no kept", () => {
     // A split never writes over them (review of PR #47, L4): they are kept, so it takes a free id.
     expect(one.kept).toEqual([2, 3, 4]);
     expect(allocate(one)).toBe(5);
-    const two = splitPane(one, 1, allocate(one)!, { view: "chat", projectId: null, terminalId: null });
+    const two = splitPane(one, unmeasured(one), 1, "x", allocate(one)!, { view: "chat", projectId: null, terminalId: null });
     expect(orderOf(two)).toEqual([1, 5]);
     expect(two.panes.slice(1, 4).map((x) => x.view)).toEqual(["diff", "terminal", "file"]);
     expect(two.panes[2].terminalId).toBe("t-1");
@@ -978,90 +976,73 @@ describe("fitting eight panes: the plan's windows (§3.3)", () => {
   });
 });
 
-// ---- WP-G2: split and close ----------------------------------------------------
+// ---- WP-G2: split and close (directional since FS4) ------------------------------
+//
+// FS4 replaced the ladder (decisions FS-1..FS-5): a split halves its pane right
+// or down, and × gives the space to its neighbour. These are WP-G2's rules that
+// still hold — ids, focus, allocation, copies — on the new signatures. The ladder
+// tests that named shapes are gone, each replaced in workspace.split.test.ts:
+//   "climbs the ladder 1 → 8 and back"       → "6. the full 4×3 …" and "close gives the space … the previous sibling takes it"
+//   "lands on the ladder's shape …"           → "the split (§5.1) > halves only the pane split …"
+//   "decides the split button from the count" → the "the verdict …" blocks
+//   "says why on the button"                  → "the buttons' titles (§10)"
 
-describe("split and close (WP-G2, plan §3.4–§3.6)", () => {
+describe("split and close (WP-G2, plan §3.4–§3.6; directional since FS4)", () => {
   const chat = (): ReturnType<typeof defaultPane> => ({ view: "chat", projectId: null, terminalId: null });
   /** Split the pane in slot `slot` into the lowest free id, as the window does. */
-  const splitAt = (w: Workspace, slot: number) => splitPane(w, orderOf(w)[slot - 1], allocate(w)!, chat());
+  const splitAt = (w: Workspace, slot: number, axis: "x" | "y" = "x") =>
+    splitPane(w, unmeasured(w), orderOf(w)[slot - 1], axis, allocate(w)!, chat());
   /** Every id in use: ⊞ 8 → 1 (2…8 hidden), then four splits into the free 9…12. */
   const allTwelve = () => {
     let w = setPreset(setPreset(defaultWorkspace(), "grid8"), "single");
-    for (let i = 0; i < 4; i++) w = splitAt(w, orderOf(w).length);
+    for (const axis of ["x", "x", "x", "y"] as const) w = splitAt(w, orderOf(w).length, axis);
     expect([orderOf(w), w.kept]).toEqual([[1, 9, 10, 11, 12], [2, 3, 4, 5, 6, 7, 8]]);
     return w;
   };
 
-  it("climbs the ladder 1 → 8 and back, one pane at a time, on exactly the ladder's shapes", () => {
-    let w = defaultWorkspace();
-    const up: (Preset | null)[] = [];
-    for (let n = 1; n < 8; n++) {
-      w = splitAt(w, n);
-      up.push(presetOfWs(w));
-      expect(orderOf(w)).toHaveLength(n + 1);
-      expect(SHAPES[presetOfWs(w)!].panes).toBe(n + 1);
-    }
-    expect(up).toEqual(["cols2", "cols3", "grid4", "grid5", "grid6", "grid7", "grid8"]);
-    expect(splitAt(w, 1)).toBe(w); // eight is the most
-    const down: (Preset | null)[] = [];
-    for (let i = 0; i < 8 && orderOf(w).length > 1; i++) {
-      w = closePane(w, orderOf(w)[orderOf(w).length - 1]);
-      down.push(presetOfWs(w));
-    }
-    expect(down).toEqual(["grid7", "grid6", "grid5", "grid4", "cols3", "cols2", "single"]);
-    expect(closePane(w, orderOf(w)[0])).toBe(w); // the last pane is never closed
-  });
-
-  it("lands on the ladder's shape whatever the shape it starts from: rows2 splits to cols3, main2 closes to cols2", () => {
-    const rows2 = setPreset(defaultWorkspace(), "rows2");
-    expect(presetOfWs(splitPane(rows2, 1, 3, chat()))).toBe("cols3");
-    const main2 = setPreset(defaultWorkspace(), "main2");
-    expect(presetOfWs(closePane(main2, 3))).toBe("cols2");
-  });
-
   it("puts the new pane right after its source, in reading order — never at the end", () => {
     const three = setPreset(defaultWorkspace(), "cols3");
-    const w = splitPane(three, 2, 4, chat());
-    expect(orderOf(w)).toEqual([1, 2, 4, 3]);
-    expect(slotOf(w, 4)).toBe(3);
-    expect(presetOfWs(w)).toBe("grid4");
+    for (const axis of ["x", "y"] as const) {
+      const w = splitPane(three, unmeasured(three), 2, axis, 4, chat());
+      expect(orderOf(w), axis).toEqual([1, 2, 4, 3]);
+      expect(slotOf(w, 4), axis).toBe(3);
+    }
   });
 
-  it("focuses the new pane; × hands focus to the pane now in that slot, else the slot before", () => {
-    const w = splitPane(setPreset(defaultWorkspace(), "cols3"), 2, 4, chat());
+  it("focuses the new pane; × hands focus to `then`, else the neighbour that takes its space", () => {
+    const three = setPreset(defaultWorkspace(), "cols3");
+    const w = splitPane(three, unmeasured(three), 2, "x", 4, chat());
     expect(w.focused).toBe(4);
     const closed = closePane(w, 4);
     expect(orderOf(closed)).toEqual([1, 2, 3]);
-    expect(closed.focused).toBe(3); // slot 3 is pane 3 now
+    expect(closed.focused).toBe(2); // 2 took its space (FS4; the slot rule said 3)
     const last = closePane(focusPane(closed, 3), 3);
-    expect(last.focused).toBe(2); // no slot 3 any more: the one before
+    expect(last.focused).toBe(2);
     expect(closePane(focusPane(closed, 1), 3).focused).toBe(1); // focus elsewhere stays put
     // The window names where focus goes when the selected chat closes: the chat selected before it.
     const grid = setPreset(defaultWorkspace(), "grid4");
     expect(closePane(grid, 1, 3).focused).toBe(3);
-    expect(closePane(grid, 1, 1).focused).toBe(2); // not drawn after the close: the slot's pane
+    expect(closePane(grid, 1, 1).focused).toBe(2); // not drawn after the close: the neighbour that took its space
     expect(closePane(grid, 1, null).focused).toBe(2);
   });
 
   it("splits without moving focus when asked not to ({focus: false}, the browser's dev-server pane)", () => {
     const w = focusPane(setPreset(defaultWorkspace(), "cols2"), 1);
-    const quiet = splitPane(w, 2, 3, { view: "browser", projectId: null, terminalId: null }, { focus: false });
+    const quiet = splitPane(w, unmeasured(w), 2, "x", 3, { view: "browser", projectId: null, terminalId: null }, { focus: false });
     expect(orderOf(quiet)).toEqual([1, 2, 3]);
     expect(quiet.focused).toBe(1);
-    expect(splitPane(w, 2, 3, chat()).focused).toBe(3);
+    expect(splitPane(w, unmeasured(w), 2, "x", 3, chat()).focused).toBe(3);
   });
 
-  it("refuses an id already drawn, a source not drawn, and a ninth pane", () => {
+  it("refuses an id already drawn and a source not drawn; a ninth pane is a split like any other (FS-1)", () => {
     const w = setPreset(defaultWorkspace(), "cols2");
-    expect(splitPane(w, 1, 2, chat())).toBe(w);
-    expect(splitPane(w, 5, 3, chat())).toBe(w);
+    expect(splitPane(w, unmeasured(w), 1, "x", 2, chat())).toBe(w);
+    expect(splitPane(w, unmeasured(w), 5, "x", 3, chat())).toBe(w);
     const eight = setPreset(defaultWorkspace(), "grid8");
-    expect(orderOf(eight)).toHaveLength(MAX_DRAWN);
-    expect(splitPane(eight, 1, 2, chat())).toBe(eight);
-    // Ids 9–12 are free there, and still no ninth pane is drawn: the ladder stops at grid8 (FS2).
+    expect(splitPane(eight, unmeasured(eight), 1, "y", 2, chat())).toBe(eight);
     expect(allocate(eight)).toBe(9);
-    expect(splitPane(eight, 1, 9, chat())).toBe(eight);
-    expect(splitPane(eight, 8, 12, chat())).toBe(eight);
+    const nine = splitPane(eight, unmeasured(eight), 1, "y", 9, chat());
+    expect(orderOf(nine)).toEqual([1, 9, 2, 3, 4, 5, 6, 7, 8]);
   });
 
   it("allocates the lowest free id, else the oldest hidden pane with no unsaved edit, else none", () => {
@@ -1082,7 +1063,7 @@ describe("split and close (WP-G2, plan §3.4–§3.6)", () => {
     expect(allocate(one, [6], [2, 3, 4, 5, 7, 8])).toBe(8);
     expect(allocate(one, [2, 3, 4, 5, 6], [7, 8])).toBe(8);
     // A hidden pane a split takes back leaves `kept` and shows the copy.
-    const took = splitPane(one, 1, 8, chat());
+    const took = splitPane(one, unmeasured(one), 1, "y", 8, chat());
     expect(took.kept).toEqual([2, 3, 4, 5, 6, 7]);
     expect(orderOf(took)).toEqual([1, 8, 9, 10, 11, 12]);
   });
@@ -1093,7 +1074,7 @@ describe("split and close (WP-G2, plan §3.4–§3.6)", () => {
     expect(paneAt(w, 1)).toBe(2);
     expect(slotOf(w, 3)).toBe(2);
     // A free id 1 is the next a split takes, and it lands after its source.
-    const back = splitPane(w, 3, allocate(w)!, chat());
+    const back = splitPane(w, unmeasured(w), 3, "x", allocate(w)!, chat());
     expect(orderOf(back)).toEqual([2, 3, 1]);
     expect(slotOf(back, 1)).toBe(3);
     // Stored and read back, the order survives without a pane 1 first.
@@ -1134,42 +1115,6 @@ describe("split and close (WP-G2, plan §3.4–§3.6)", () => {
     // An empty pane copies empty.
     expect(copySpec({ view: "file", projectId: null, terminalId: null })).toEqual({ view: "file", projectId: null, terminalId: null });
     expect(copySpec({ view: "browser", projectId: null, terminalId: null })).toEqual({ view: "browser", projectId: null, terminalId: null });
-  });
-
-  it("decides the split button from the count and the room (G-5)", () => {
-    const at = (n: number, w: number, h: number, zoom = 100) => {
-      let x = defaultWorkspace();
-      // Bounded, so a split that stops working fails rather than hangs.
-      for (let i = 0; i < 8 && orderOf(x).length < n; i++) x = splitAt(x, orderOf(x).length);
-      expect(orderOf(x)).toHaveLength(n);
-      const [aw, ah] = room(w, h - 80, zoom);
-      return splitVerdict(DEFAULT_LAYOUT, x, aw, ah);
-    };
-    expect(at(2, 1280, 800)).toEqual({ ok: true, why: "" });
-    expect(at(6, 1280, 800)).toEqual({ ok: false, why: "room" });
-    expect(at(7, 1920, 1080)).toEqual({ ok: true, why: "" });
-    expect(at(8, 1920, 1080)).toEqual({ ok: false, why: "max" });
-    // A window already dropping panes can still split when the next shape fits:
-    // three columns drawn as two at 900 can become 2×2 (720 wide).
-    const three = setPreset(defaultWorkspace(), "cols3");
-    expect(fitWorkspace(DEFAULT_LAYOUT, three, 900, 700).dropped).toBe(1);
-    expect(splitVerdict(DEFAULT_LAYOUT, three, 900, 700)).toEqual({ ok: true, why: "" });
-    // Every free id hidden with an unsaved edit: all twelve ids used (FS2).
-    const one = allTwelve();
-    expect(splitVerdict(DEFAULT_LAYOUT, one, 1920, 1000, null, false, [2, 3, 4, 5, 6, 7, 8]))
-      .toEqual({ ok: false, why: "hidden-edit" });
-    expect(splitVerdict(DEFAULT_LAYOUT, one, 1920, 1000, null, false, [2])).toEqual({ ok: true, why: "" });
-    // ⊞ 8 → 1 leaves ids 9…12 free, so hidden edits there no longer block a split.
-    const eightToOne = setPreset(setPreset(defaultWorkspace(), "grid8"), "single");
-    expect(splitVerdict(DEFAULT_LAYOUT, eightToOne, 1920, 1000, null, false, [2, 3, 4, 5, 6, 7, 8]))
-      .toEqual({ ok: true, why: "" });
-  });
-
-  it("says why on the button", () => {
-    expect(splitTitle("", 2)).toBe("Split: a copy of this pane beside it");
-    expect(splitTitle("max", 8)).toBe("Eight panes is the most");
-    expect(splitTitle("room", 6)).toBe("No room for 7 panes in this window: widen it, zoom out (Ctrl+-) or close a pane");
-    expect(splitTitle("hidden-edit", 1)).toBe("A hidden pane has an unsaved edit: show it from ⊞ first");
   });
 
   it("remembers the file a File or Diff pane has open, and forgets it when the pane moves project", () => {
@@ -1260,7 +1205,8 @@ describe("the sub-agent view (SV-3)", () => {
 
   it("a split from it is a new chat (one sub-agent per pane), and a split opens one beside its chat", () => {
     expect(copySpec(subagentSpec(ref))).toEqual({ view: "chat", projectId: null, terminalId: null });
-    const ws = splitPane(defaultWorkspace(), 1, 2, subagentSpec(ref));
+    const one = defaultWorkspace();
+    const ws = splitPane(one, unmeasured(one), 1, "x", 2, subagentSpec(ref));
     expect(orderOf(ws)).toEqual([1, 2]);
     expect(ws.panes[1]).toEqual({ view: "subagent", projectId: null, terminalId: null, subagent: ref });
     expect(ws.focused).toBe(2);
@@ -1269,7 +1215,7 @@ describe("the sub-agent view (SV-3)", () => {
 
 // ---- FS2: twelve ids, still on the ladder ---------------------------------------
 
-describe("twelve ids, still on the ladder (FS2, decision FS-1)", () => {
+describe("twelve ids (FS2, decision FS-1; all twelve drawn since FS4)", () => {
   const chat = (): ReturnType<typeof defaultPane> => ({ view: "chat", projectId: null, terminalId: null });
 
   it("has twelve pane ids, 9–12 showing chat by default, and a spec for each", () => {
@@ -1287,7 +1233,7 @@ describe("twelve ids, still on the ladder (FS2, decision FS-1)", () => {
     const one = setPreset(setPreset(defaultWorkspace(), "grid8"), "single");
     expect([orderOf(one), one.kept]).toEqual([[1], [2, 3, 4, 5, 6, 7, 8]]);
     expect(allocate(one)).toBe(9);
-    const two = splitPane(one, 1, allocate(one)!, chat());
+    const two = splitPane(one, unmeasured(one), 1, "x", allocate(one)!, chat());
     expect([presetOfWs(two), orderOf(two), two.kept, two.focused]).toEqual(["cols2", [1, 9], [2, 3, 4, 5, 6, 7, 8], 9]);
     expect(slotOf(two, 9)).toBe(2);
     expect(paneAt(two, 2)).toBe(9);
@@ -1297,21 +1243,24 @@ describe("twelve ids, still on the ladder (FS2, decision FS-1)", () => {
     expect(allocate(two)).toBe(10);
   });
 
-  it("draws at most eight however many ids are free: ⊞ grid8 takes the drawn, then the hidden, never a ninth", () => {
+  it("⊞ grid8 takes the drawn, then the hidden; a ninth pane is a split, which takes a hidden one back (FS4)", () => {
     let w = setPreset(setPreset(defaultWorkspace(), "grid8"), "single");
-    for (let i = 0; i < 4; i++) w = splitPane(w, orderOf(w)[orderOf(w).length - 1], allocate(w)!, chat());
+    for (const axis of ["x", "x", "x", "y"] as const) {
+      w = splitPane(w, unmeasured(w), orderOf(w)[orderOf(w).length - 1], axis, allocate(w)!, chat());
+    }
     expect(orderOf(w)).toEqual([1, 9, 10, 11, 12]);
     expect(paneSequence(w)).toEqual([1, 9, 10, 11, 12, 2, 3, 4, 5, 6, 7, 8]);
     const eight = setPreset(w, "grid8");
     expect([orderOf(eight), eight.kept]).toEqual([[1, 9, 10, 11, 12, 2, 3, 4], [5, 6, 7, 8]]);
-    expect(splitPane(eight, 1, 5, chat())).toBe(eight);
-    expect(splitVerdict(DEFAULT_LAYOUT, eight, 4000, 2000)).toEqual({ ok: false, why: "max" });
-    expect(splitTitle("max", 8)).toBe("Eight panes is the most");
+    // Four across: right is refused (FS-3); down takes the hidden 5 back.
+    expect(splitPane(eight, unmeasured(eight), 1, "x", 5, chat())).toBe(eight);
+    const nine = splitPane(eight, unmeasured(eight), 1, "y", 5, chat());
+    expect([orderOf(nine), nine.kept]).toEqual([[1, 5, 9, 10, 11, 12, 2, 3, 4], [6, 7, 8]]);
   });
 
   it("× on a pane above 8 resets that pane's spec to its default, and frees its id", () => {
     const one = setPreset(setPreset(defaultWorkspace(), "grid8"), "single");
-    const two = splitPane(one, 1, 9, { view: "file", projectId: "p1", terminalId: null });
+    const two = splitPane(one, unmeasured(one), 1, "x", 9, { view: "file", projectId: "p1", terminalId: null });
     expect(two.panes[8]).toMatchObject({ view: "file", projectId: "p1" });
     const back = closePane(two, 9);
     expect([orderOf(back), back.kept]).toEqual([[1], [2, 3, 4, 5, 6, 7, 8]]);

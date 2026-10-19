@@ -20,8 +20,8 @@ def tabs(page):
     return [t for pane in panes(page) for t in pane.get("browser", {}).get("tabs", [])]
 
 
-def configure(page, mock, until, preset="single", views=("chat",), width=1600):
-    page.set_viewport_size({"width": width, "height": 900})
+def configure(page, mock, until, preset="single", views=("chat",), width=1600, height=900):
+    page.set_viewport_size({"width": width, "height": height})
     _set_storage(page, zoom="100", layout="{}")
     _set_ws(page, json.dumps({"preset": preset, "focused": 1,
         "panes": [{"view": view} for view in views]}))
@@ -86,7 +86,7 @@ def autoopen_checks(browser, check, until, guard, init_script):
               ("GET", "/browser/settings", {"extra": True}),
               ("PATCH", "/browser/settings", {"agents_may_drive": True}),
               ("POST", "/browser/act", {})]))
-    sections = (_split, _behind, _quiet, _prompt, _card, _settings, _off_race, _windows, _terminal, _pointer, _kept, _pane_ids, _lease, _source_window, _window_lapse, _hostile, _prompt_down, _dirty, _cross_off)
+    sections = (_split, _behind, _quiet, _down_split, _prompt, _card, _settings, _off_race, _windows, _terminal, _pointer, _kept, _pane_ids, _lease, _source_window, _window_lapse, _hostile, _prompt_down, _dirty, _cross_off)
     for section in sections:
         if os.environ.get("AUTO_ONLY") and os.environ["AUTO_ONLY"] not in section.__name__: continue
         mock = MockDaemon(0).start()
@@ -199,8 +199,31 @@ def _quiet(browser, context, page, mock, f, check, until, guard, init):
     check("explicit Open claims then places the quiet server", len(tabs(page)) == 1 and entry.state == "placed")
 
 
-def _prompt(browser, context, page, mock, f, check, until, guard, init):
+# FS4: autoSplit splits right, else down. A window with no room for either
+# (one pane 628 px wide; 420 px tall, so the pane area is under 400 and half
+# of it under 200) is where the prompt is offered.
+NO_ROOM_H = 420
+
+
+def _down_split(browser, context, page, mock, f, check, until, guard, init):
+    """FS4: the window that offered the prompt before (one pane, 700×900) has
+    no room to split right but room to split down: the server opens below,
+    focus and the chat where they were."""
     configure(page, mock, until, "single", ("chat",), 700)
+    entry = f.add(mock.dev_port)
+    until(lambda: len(tabs(page)) == 1)
+    until(lambda: entry.state == "placed")
+    ws = _ws(page)["ws"]
+    tree = ws.get("tree") or {}
+    check("FS4: one pane at 700×900 splits down for a dev server, never a prompt",
+          page.locator(PROMPT).count() == 0 and len(ws["order"]) == 2 and isinstance(tree, dict)
+          and tree.get("axis") == "y" and panes(page)[ws["order"][1] - 1]["view"] == "browser"
+          and panes(page)[0]["view"] == "chat" and ws["focused"] == 1 and entry.state == "placed",
+          f"{ws['order']} {tree} {entry.state}")
+
+
+def _prompt(browser, context, page, mock, f, check, until, guard, init):
+    configure(page, mock, until, "single", ("chat",), 700, NO_ROOM_H)
     inp = page.locator(_pane(1, '[data-testid="input"]'))
     inp.fill("draft")
     inp.focus()
@@ -216,7 +239,7 @@ def _prompt(browser, context, page, mock, f, check, until, guard, init):
     title = page.locator("#titlebar").bounding_box()
     check("prompt sits below titlebar and above chat input", rect["y"] >= title["y"] + title["height"] and rect["y"] + rect["height"] < input_rect["y"])
     target = page.locator(PROMPT + ' [data-dev-slot="1"]')
-    page.set_viewport_size({"width": 720, "height": 900})
+    page.set_viewport_size({"width": 720, "height": NO_ROOM_H})
     page.wait_for_timeout(60)
     target.dispatch_event("click")
     page.wait_for_timeout(120)
@@ -359,8 +382,10 @@ def _pane_ids(browser, context, page, mock, f, check, until, guard, init):
     # (App.tsx's `pane-N` match). The owner's last pointer in pane 10 makes it
     # the most recently used Browser, so with no room to split the automatic
     # tab goes there, behind its page, rather than to pane 2 in slot 2. (2×2
-    # at 1000 px: a fifth pane would need three columns.)
+    # at 1000×800: 464×386 px panes, too narrow to split right and too short
+    # to split down — FS4 splits down where a pane is 400 px tall.)
     configure(page, mock, until, "grid4", ("chat", "browser", "chat", "chat"), 1000)
+    page.set_viewport_size({"width": 1000, "height": 800})
     state = _ws(page)["ws"]
     if len(state["panes"]) < 12:
         check("FS2: the window holds twelve pane ids", False, str(len(state["panes"])))
@@ -467,7 +492,7 @@ def _hostile(browser, context, page, mock, f, check, until, guard, init):
 
 
 def _prompt_down(browser, context, page, mock, f, check, until, guard, init):
-    configure(page, mock, until, width=700)
+    configure(page, mock, until, width=700, height=NO_ROOM_H)
     entry = f.add(mock.dev_port)
     until(lambda: page.locator(PROMPT).count() == 1)
     button = page.locator(PROMPT + ' [data-dev-slot="1"]')
@@ -490,7 +515,7 @@ def _prompt_down(browser, context, page, mock, f, check, until, guard, init):
 
 def _dirty(browser, context, page, mock, f, check, until, guard, init):
     from tests.face.hud_v2_multichat_check import _open, _edit
-    configure(page, mock, until, "cols2", ("chat", "file"), 1100)
+    configure(page, mock, until, "cols2", ("chat", "file"), 1100, NO_ROOM_H)
     _open(page, until, 1, "t1")
     page.locator(_pane(2, '[data-testid="file-calc.py"]')).click()
     _edit(page, until, 2, "\n# keep my unsaved edit")

@@ -2061,7 +2061,7 @@ def _split_close_terminal_checks(page, mock, base, check, until, fake):
 
     posts = lambda: [c for c in mock.calls if c[0] == "POST" and c[1] == "/terminals"]  # noqa: E731
     n = len(posts())
-    page.locator('[data-testid="pane-1-split"]').click()
+    page.locator('[data-testid="pane-1-split-right"]').click()
     until(lambda: len(_created(mock)) > 0 and _created(mock)[-1][0] != tid, timeout=4)
     new = _created(mock)[-1][0]
     _attached(page, until, new)
@@ -2078,7 +2078,8 @@ def _split_close_terminal_checks(page, mock, base, check, until, fake):
     # At the cap the copy is the picker, with the daemon's sentence, and nothing retries.
     mock.terminal_refuse = "6 terminals are open; close one first"
     n = len(posts())
-    page.locator('[data-testid="pane-1-split"]').click()
+    # FS4: pane 1 is half of 1048 px now, too narrow to split right again: down.
+    page.locator('[data-testid="pane-1-split-down"]').click()
     until(lambda: len(posts()) > n, timeout=3)
     pick = page.locator('[data-testid="pane-3-terminal-pick"]')
     until(lambda: _visible(page, '[data-testid="pane-3-terminal-pick"]'), timeout=3)

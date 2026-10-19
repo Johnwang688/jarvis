@@ -40,8 +40,9 @@ import type { Attachment, ChatMessage, Thread, ToolOp } from "../types";
 import type { Compose } from "./compose";
 import type { GiveBack } from "./giveback";
 import {
-  LADDER, PANE_NOS, allocate, orderOf, presetOfWs, setPreset, slotOf, type PaneNo, type Preset, type Workspace,
+  PANE_NOS, allocate, orderOf, presetOfWs, slotOf, type PaneNo, type Workspace,
 } from "./workspace";
+import type { Axis } from "./splittree";
 
 /** One pane's conversation, and the turn it is waiting on. */
 export interface ChatState {
@@ -293,36 +294,35 @@ export function heldElsewhere(
  * it is a third column; from the last pane of any other shape it wraps to the
  * first drawn pane that is not the focused one.
  *
- * The two that grow are a split (WP-G2, plan §3.5): `source` names the pane
- * the new one goes after, and `pane` the id it takes (lib/workspace
- * `allocate`: a free id first, so a pane ⊞ hid keeps what it showed; never
- * one hidden with an unsaved edit, `dirty`). With every id taken, the grow
- * takes back the pane ⊞ would bring back there (`setPreset`), as before.
+ * The two that grow are a split right (WP-G2, plan §3.5; FS4): `source`
+ * names the pane the new one goes beside, `axis` is "x", and `pane` the id it
+ * takes (lib/workspace `allocate`: a free id first, so a pane ⊞ hid keeps what
+ * it showed; never one hidden with an unsaved edit, `dirty`). With every id
+ * taken by such a pane there is no split and nothing hidden comes back: the
+ * pane it names is a drawn one (the window then decides whether it may show
+ * the thread there).
  */
 export function besideTarget(
   ws: Workspace, drawn: readonly PaneNo[], dirty: readonly PaneNo[] = [], holding: readonly PaneNo[] = [],
-): { preset: Preset | null; pane: PaneNo; source?: PaneNo } {
+): { pane: PaneNo; source?: PaneNo; axis?: Axis } {
   const own = orderOf(ws);
-  // The preset the tree has (FS3, derived; null for a tree no preset has).
-  const preset = presetOfWs(ws);
   const visible = drawn.length ? drawn : [own[0]];
-  const grown = (to: Preset, slot: number) => {
-    const source = own[slot - 2];
+  const grown = (source: PaneNo) => {
     const id = allocate(ws, dirty, holding);
-    if (id !== null) return { preset: LADDER[own.length + 1], pane: id, source };
-    return { preset: to, pane: orderOf(setPreset(ws, to))[slot - 1] };
+    if (id !== null) return { pane: id, source, axis: "x" as const };
+    return { pane: visible.includes(ws.focused) ? ws.focused : visible[0] };
   };
   if (visible.length === 1) {
-    if (preset === "single") return grown("cols2", 2);
-    // A preset drawn as one pane for room: the next of its own panes.
+    if (own.length === 1) return grown(own[0]);
+    // A layout drawn as one pane for room: the next of its own panes.
     const at = own.indexOf(visible[0]);
-    return { preset, pane: own[(at + 1) % own.length] };
+    return { pane: own[(at + 1) % own.length] };
   }
   const at = visible.indexOf(ws.focused);
   const from = at < 0 ? 0 : at;
-  if (from < visible.length - 1) return { preset, pane: visible[from + 1] };
-  if (preset === "cols2" && visible.length === 2) return grown("cols3", 3);
-  return { preset, pane: visible.find((n) => n !== ws.focused) ?? visible[0] };
+  if (from < visible.length - 1) return { pane: visible[from + 1] };
+  if (presetOfWs(ws) === "cols2" && visible.length === 2) return grown(visible[1]);
+  return { pane: visible.find((n) => n !== ws.focused) ?? visible[0] };
 }
 
 /**

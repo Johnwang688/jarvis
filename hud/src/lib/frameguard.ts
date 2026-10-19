@@ -25,6 +25,14 @@ export const LOAD_WAIT_MS = 20000;
 export const BELT_MS = 250;
 /** How long the HUD's own giving-back of focus (after a card) stays valid. */
 export const RESTORE_MS = 300;
+/**
+ * After the layout moves (a split, a close, ⊞; FS4), how long a press on a
+ * Browser frame's shield does not step it aside: the second click of a
+ * double-click on × lands on whatever grew under the pointer, and that is no
+ * gesture toward the page. The × guard in components/Workspace.tsx closes
+ * nothing for as long, for the same reason.
+ */
+export const CLOSE_GUARD_MS = 400;
 
 /** `data-browser-frame` on every Browser iframe: the pane id and the tab index. */
 export function frameKey(pane: number, tab: number | string): string {

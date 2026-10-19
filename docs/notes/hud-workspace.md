@@ -1553,3 +1553,52 @@ each listed with its §7.1 reason in `workspace.tree.test.ts`. Tests:
 `workspace.tree.test.ts` (79), the ported workspace/chats/devopen/speech
 suites, `_no_remount_checks` in `hud_v2_layout_check.py` and
 `_guard_layout_checks` in `hud_v2_browser_check.py`.
+
+**The directional split and close (FS4, 2026-10-19).** The ladder is gone
+(`LADDER`, `MAX_DRAWN` and `autoSplitVerdict` with it). Every pane's strip
+has two buttons, `pane-<id>-split-right` and `pane-<id>-split-down` (the
+title bar's toggle button; an outline with a vertical or a horizontal
+divider), in the single layout too. `splitPane(ws, fit, source, axis, id,
+spec, {focus})` first commits the sizes `fit` drew along the root → source
+path (C3), then `insertBeside` halves only the source (a sibling in a parent
+of the same axis, else a new node), so no other pane, side pane or the panel
+moves a pixel (FS-5; vitest property over random trees and clamping
+windows, and the 4×3 built by clicking at 100% and 150% in
+`_split_twelve_checks`). It refuses a fit of another tree, an id already
+drawn and any split `splitVerdict(ws, fit, source, axis, dirty)` refuses;
+its reasons, first wins: `dropped` (P-6), `across`/`down` (FS-3, counted
+with `crossing` over the drawn rects of the whole window: a split right
+needs every horizontal line through the pane to cross at most three, a
+split down every vertical line at most two), `room` (FS-4: half the drawn
+pane under 360 × 200; never borrowed from the side panes, FS-7), `max`
+(twelve drawn, FS-1), `hidden-edit`. `splitTitle(why, axis, drawn, total)`
+gives the plan's §10 titles. `closePane` is `removeLeaf`: the space goes to
+the previous sibling (left or above), else the next, a two-child node
+collapsing into its survivor; focus goes to `then`, else that neighbour's
+leaf nearest the closed pane (no more "the pane now in that slot"). A drag
+stops where a line would cross a fifth pane across or a fourth down
+(`capStop`, §4.3; only searched when the render's structural count is over
+the cap), and the handle's min/max say so. `autoSplit(ws, fit, source,
+held)` is right, else down, else null, on `freeId` only; the dev-server
+window passes `canSplitFrom` (the drawn panes `autoSplit` allows) and a
+split starts only from the plan's own source. Open beside splits right (down
+when right has no room; a notice when neither fits) and `besideTarget` has no
+`preset` field; a sub-agent's pane and a file opened beside a view split
+right, else down. `__hud.split(source, {axis, focus})` returns the new id or
+null. The frame guard gains `layoutMoved()` (state/frameguard), called by
+every split, close and ⊞: it raises every shield and, for `CLOSE_GUARD_MS`
+(400 ms, now in lib/frameguard, shared with ×'s guard), no pointer event on a
+shield steps it aside, so the second click of a double-click on × that lands
+on a page grown under the pointer gives that page nothing; it never focuses
+a frame. Tests: `workspace.split.test.ts` (34), the ported workspace, tree,
+chats, devopen, speech and frameguard suites; `_split_buttons_checks`,
+`_split_room_checks`, `_split_twelve_checks` and `_split_close_checks` in
+`hud_v2_layout_check.py`, and `_guard_dblclose_checks` in
+`hud_v2_browser_check.py`. **× never moves when its pane takes focus**: a
+press on × focuses the pane first, and a focused pane can show more in its
+strip (the profile select when no chat pane is drawn), which wrapped a
+524 px terminal pane's strip and dropped × 34 px under the pointer, so the
+click closed nothing (pre-existing, exposed by the heir focus rule). The ×
+is now pinned out of the flow at the first row's right end (`theme.css`,
+`.tabs.compact` for the shorter select row), its 34 px kept free, so it sits
+where it did in an unwrapped strip and stays there when the strip wraps.

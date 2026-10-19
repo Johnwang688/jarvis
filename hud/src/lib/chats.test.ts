@@ -194,28 +194,30 @@ describe("where a thread click lands", () => {
   });
 });
 
+// FS4 (the FS4 card): Open beside's two grows are a split right — `{ pane, source, axis: "x" }` —
+// and the `preset` field is gone; the other cases name only the pane.
 describe("open beside", () => {
   it("from one pane, two columns: pane 2", () => {
-    // A split since WP-G2: pane 2 goes right after pane 1.
-    expect(besideTarget(defaultWorkspace(), [1])).toEqual({ preset: "cols2", pane: 2, source: 1 });
+    // A split since WP-G2: pane 2 goes right after pane 1; a split right since FS4 (no preset any more).
+    expect(besideTarget(defaultWorkspace(), [1])).toEqual({ pane: 2, source: 1, axis: "x" });
   });
 
   it("the next drawn pane to the right of the focused one", () => {
-    expect(besideTarget(shaped(["chat", "chat", "file"], "cols3", 1), [1, 2, 3])).toEqual({ preset: "cols3", pane: 2 });
-    expect(besideTarget(shaped(["chat", "chat", "file"], "cols3", 2), [1, 2, 3])).toEqual({ preset: "cols3", pane: 3 });
+    expect(besideTarget(shaped(["chat", "chat", "file"], "cols3", 1), [1, 2, 3])).toEqual({ pane: 2 });
+    expect(besideTarget(shaped(["chat", "chat", "file"], "cols3", 2), [1, 2, 3])).toEqual({ pane: 3 });
   });
 
   it("from the right of two columns, a third column", () => {
-    expect(besideTarget(shaped(["chat", "chat"], "cols2", 2), [1, 2])).toEqual({ preset: "cols3", pane: 3, source: 2 });
+    expect(besideTarget(shaped(["chat", "chat"], "cols2", 2), [1, 2])).toEqual({ pane: 3, source: 2, axis: "x" });
   });
 
   it("from the last pane of a grid, round to the first", () => {
     const w = shaped(["chat", "chat", "chat", "chat"], "grid4", 4);
-    expect(besideTarget(w, [1, 2, 3, 4])).toEqual({ preset: "grid4", pane: 1 });
+    expect(besideTarget(w, [1, 2, 3, 4])).toEqual({ pane: 1 });
   });
 
   it("in a preset drawn as one pane for room, the next of its own panes", () => {
-    expect(besideTarget(shaped(["chat", "chat"], "cols2", 1), [1])).toEqual({ preset: "cols2", pane: 2 });
+    expect(besideTarget(shaped(["chat", "chat"], "cols2", 1), [1])).toEqual({ pane: 2 });
   });
 });
 
@@ -292,17 +294,17 @@ describe("eight panes (WP-G1)", () => {
     const one = setPreset(parseWorkspace(JSON.stringify({ preset: "cols3", order: [1, 5, 2],
                                                           panes: [{ view: "chat" }, { view: "chat" }] })), "single");
     expect(one.kept).toEqual([5, 2]);
-    expect(besideTarget(one, [1])).toEqual({ preset: "cols2", pane: 3, source: 1 });
+    expect(besideTarget(one, [1])).toEqual({ pane: 3, source: 1, axis: "x" });
     const two = setPreset(one, "cols2");
-    expect(besideTarget(focusPane(two, 5), [1, 5])).toEqual({ preset: "cols3", pane: 3, source: 5 });
+    expect(besideTarget(focusPane(two, 5), [1, 5])).toEqual({ pane: 3, source: 5, axis: "x" });
   });
 
   it("after ⊞ 8 → 1 opens beside into the free id 9, never a hidden pane (FS2)", () => {
     const one = setPreset(setPreset(defaultWorkspace(), "grid8"), "single");
     expect(one.kept).toEqual([2, 3, 4, 5, 6, 7, 8]);
-    expect(besideTarget(one, [1])).toEqual({ preset: "cols2", pane: 9, source: 1 });
-    expect(besideTarget(one, [1], [8, 7])).toEqual({ preset: "cols2", pane: 9, source: 1 });
-    expect(besideTarget(one, [1], [2, 3, 4, 5, 6, 7, 8])).toEqual({ preset: "cols2", pane: 9, source: 1 });
+    expect(besideTarget(one, [1])).toEqual({ pane: 9, source: 1, axis: "x" });
+    expect(besideTarget(one, [1], [8, 7])).toEqual({ pane: 9, source: 1, axis: "x" });
+    expect(besideTarget(one, [1], [2, 3, 4, 5, 6, 7, 8])).toEqual({ pane: 9, source: 1, axis: "x" });
   });
 
   it("takes the oldest hidden pane with no unsaved edit when every id is used, never a dirty one", () => {
@@ -310,11 +312,15 @@ describe("eight panes (WP-G1)", () => {
     const one = parseWorkspace(JSON.stringify({ preset: "single", order: [1], kept: [9, 10, 11, 12, 2, 3, 4, 5, 6, 7, 8],
                                                 panes: Array.from({ length: 12 }, () => ({ view: "chat" })) }));
     expect([orderOf(one), one.kept]).toEqual([[1], [9, 10, 11, 12, 2, 3, 4, 5, 6, 7, 8]]);
-    expect(besideTarget(one, [1])).toEqual({ preset: "cols2", pane: 8, source: 1 });
-    expect(besideTarget(one, [1], [8, 7])).toEqual({ preset: "cols2", pane: 6, source: 1 });
-    expect(besideTarget(one, [1], [2, 3, 4, 5, 6, 7, 8])).toEqual({ preset: "cols2", pane: 12, source: 1 });
-    // All of them dirty: ⊞'s grow, as before (the window then refuses to switch a dirty pane).
-    expect(besideTarget(one, [1], [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12])).toEqual({ preset: "cols2", pane: 9 });
+    expect(besideTarget(one, [1])).toEqual({ pane: 8, source: 1, axis: "x" });
+    expect(besideTarget(one, [1], [8, 7])).toEqual({ pane: 6, source: 1, axis: "x" });
+    expect(besideTarget(one, [1], [2, 3, 4, 5, 6, 7, 8])).toEqual({ pane: 12, source: 1, axis: "x" });
+    // All of them dirty: no split and no ⊞ grow any more (FS4: no preset field). Whatever pane it
+    // names is drawn, and nothing hidden with an unsaved edit is brought back.
+    const none = besideTarget(one, [1], [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+    expect(none.source).toBeUndefined();
+    expect("preset" in none).toBe(false);
+    expect([1]).toContain(none.pane);
   });
 });
 
@@ -327,7 +333,8 @@ describe("with pane 1 closed (WP-G2): the fallbacks are the first pane in readin
   });
 
   it("Open beside with nothing drawn splits after that pane", () => {
-    expect(besideTarget(w, [])).toMatchObject({ preset: "cols2", source: 3 });
+    expect(besideTarget(w, [])).toMatchObject({ source: 3, axis: "x" });
+    expect("preset" in besideTarget(w, [])).toBe(false);
     expect(besideTarget(w, []).pane).not.toBe(3);
   });
 });
