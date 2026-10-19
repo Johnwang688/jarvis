@@ -9,9 +9,11 @@
 // says which panes are drawn, how they are arranged and their sizes. The order
 // (`orderOf`: the tree's leaves, depth first) and the preset (`presetOfWs`: the
 // preset whose structure the tree has, sizes ignored) are derived, never
-// stored as truth. Until FS4 only preset shapes are made: ⊞ lays a preset out
-// at its default sizes (decisions FS-8: no memory of a custom shape), and split
-// and × land on the ladder's shape for the new count, as WP-G2's did.
+// stored as truth. ⊞ lays a preset out at its default sizes (decisions FS-8:
+// no memory of a custom shape). A split (FS4) halves one pane, right or down,
+// and moves nothing else (FS-5); × gives the closed pane's space to its
+// neighbour in the same split. Four across and three down are the most, counted
+// over the drawn window (FS-3), and up to twelve panes (FS-1).
 //
 // **A pane's id is not its slot** (plan G-1). A pane keeps its id
 // (`pane-<id>`, its React key, `chats[id]`, its dirty flag) for life; its slot
@@ -50,8 +52,9 @@ import { parseTabs, sameTabs, type Tabs } from "./buffers";
 import { cleanTitle } from "./remote";
 import { parseRef, type SubagentRef } from "./subagents";
 import {
-  acrossS, clampSizes, downS, edgesOf, isLeaf, leaves, minH as treeMinH, minW as treeMinW, parseTree, pathOf,
-  presetOf, presetTree, prune, rectsOf, shapeKey, storeTree, withSizes,
+  MAX_ACROSS, MAX_DOWN, acrossS, clampSizes, crossing, downS, edgesOf, insertBeside, isLeaf, leaves,
+  minH as treeMinH, minW as treeMinW, parseTree, pathOf, presetOf, presetTree, prune, rectsOf, removeLeaf, shapeKey,
+  storeTree, withSizes,
   type Axis, type LayoutNode, type Path, type Rect, type StoredNode,
 } from "./splittree";
 
@@ -86,8 +89,12 @@ export const PRESETS: readonly Preset[] =
   ["single", "cols2", "rows2", "cols3", "main2", "grid4", "grid5", "grid6", "grid7", "grid8"];
 /** ⊞'s tiles, four to a row (decisions S-1: 6 and 8 directly; 5 and 7 by split or close). */
 export const MENU_PRESETS: readonly Preset[] = ["single", "cols2", "rows2", "cols3", "main2", "grid4", "grid6", "grid8"];
-/** The shape a split or a close lands on for each count (plan G-3; decisions S-3: three is three columns). */
-export const LADDER: Readonly<Record<number, Preset>> = {
+/**
+ * The shape WP-G2's ladder drew for each count, kept only for the v1 mirror
+ * (§8.1): a HUD rolled back past FS3 reads a free tree as this preset. FS4's
+ * split no longer climbs it.
+ */
+const MIRROR_SHAPE: Readonly<Record<number, Preset>> = {
   1: "single", 2: "cols2", 3: "cols3", 4: "grid4", 5: "grid5", 6: "grid6", 7: "grid7", 8: "grid8",
 };
 
@@ -572,7 +579,7 @@ export function workspaceStorage(ws: Workspace): StoredWorkspace {
     version: 2, tree: storeTree(ws.tree), kept: ws.kept, panes: ws.panes, focused: ws.focused, panel: ws.panel,
   }));
   const order = orderOf(clean);
-  const preset = presetOfWs(clean) ?? LADDER[Math.min(order.length, MAX_DRAWN)];
+  const preset = presetOfWs(clean) ?? MIRROR_SHAPE[Math.min(order.length, 8)];
   const mirror = order.every((n) => n <= 8) && order.length === SHAPES[preset].panes ? { order } : {};
   return { version: 2, tree: storeTree(clean.tree), kept: clean.kept, focused: clean.focused, panel: clean.panel,
            preset, ...mirror, panes: clean.panes.map((pane): StoredPane => {
@@ -982,23 +989,14 @@ export function resetWorkspace(ws: Workspace): Workspace {
   return { ...setPreset(ws, "single"), panel: defaultWorkspace().panel };
 }
 
-// ---- split and close (WP-G2) ----------------------------------------------------
+// ---- split and close (WP-G2; directional since FS4) --------------------------------
 //
-// Split adds a copy of a pane right after it in reading order; × removes
-// exactly that pane. Both always land on the ladder shape for the new count
-// (plan G-3), laid out at its default sizes: the tree is
-// `presetTree(LADDER[n ± 1], the new order)` (FS3; FS4 replaces the ladder
-// with the directional split). rows2 and main2 are ⊞'s alone. ⊞ hides panes (`kept`, specs
-// kept to come back); × discards one (its spec back to the default), and the
-// window mounts that id fresh if a later split reuses it (the incarnation in
-// useLayout).
-
-/**
- * The most panes a workspace draws: the ladder stops at grid8 until FS4 (the
- * directional split) removes the cap. Ids run to 12 (`PANE_NOS`); only this many
- * are ever drawn at once.
- */
-export const MAX_DRAWN = 8;
+// A split (plan §5.1) halves one pane, right ("x") or down ("y"), the copy
+// right after its source in reading order; nothing else moves (FS-5, §5.3).
+// × (§5.2) removes exactly that pane and gives its space to its neighbour in
+// the same split. ⊞ hides panes (`kept`, specs kept to come back); × discards
+// one (its spec back to the default), and the window mounts that id fresh if a
+// later split reuses it (the incarnation in useLayout).
 
 /**
  * The id a split takes (plan §3.4): the lowest id neither drawn nor hidden;
@@ -1021,24 +1019,41 @@ export function allocate(
 }
 
 /**
- * Pane `id` shows `spec`, right after `source` in reading order, and the
- * shape is the ladder's for one pane more. It takes focus (G-4) unless
+ * Pane `id` shows `spec`, beside `source`: right of it (`axis` "x") or below
+ * it ("y"), right after it in reading order (§5.1). Only `source` is halved:
+ * first every node on the root → source path takes the sizes `fit` drew it
+ * with (C3, so a node the window clamps keeps its other children where they
+ * are), then the source's leaf becomes two (`insertBeside`: a sibling in a
+ * parent of the same axis, else a new node). It takes focus (G-4) unless
  * `focus` is false — a split the owner did not ask for (a dev server the
  * window opens itself) never moves where they are working. `id` leaves
- * `kept` if ⊞ had hidden it. Nothing changes at eight panes, for an id
- * already drawn, or for a source that is not drawn.
+ * `kept` if ⊞ had hidden it.
+ *
+ * Nothing changes when the split is not allowed (`splitVerdict`), for an id
+ * already drawn or not an id at all, for a source that is not drawn, or for a
+ * fit of another tree (a stale one: its sizes are not this tree's).
  */
 export function splitPane(
-  ws: Workspace, source: PaneNo, id: PaneNo, spec: PaneSpec, opts: { focus?: boolean } = {},
+  ws: Workspace, fit: WorkspaceFit, source: PaneNo, axis: Axis, id: PaneNo, spec: PaneSpec,
+  opts: { focus?: boolean } = {},
 ): Workspace {
   const order = orderOf(ws);
-  const at = order.indexOf(source);
-  if (at < 0 || order.includes(id) || order.length >= MAX_DRAWN || !isPaneNo(id)) return ws;
-  const next = [...order.slice(0, at + 1), id, ...order.slice(at + 1)];
+  if (!isPaneNo(id) || order.includes(id) || !order.includes(source) || (axis !== "x" && axis !== "y")) return ws;
+  if (shapeKey(fit.render) !== shapeKey(ws.tree)) return ws;
+  if (!splitVerdict(ws, fit, source, axis).ok) return ws;
+  // C3: the path's nodes as drawn. With nothing dropped the render has the
+  // stored tree's structure, so a path names the same node in both.
+  let tree = ws.tree;
+  const path = pathOf(ws.tree, source) ?? [];
+  for (let k = 0; k < path.length; k++) {
+    const drawn = nodeAt(fit.render, path.slice(0, k));
+    if (drawn && !isLeaf(drawn)) tree = withSizes(tree, path.slice(0, k), drawn.sizes);
+  }
+  tree = insertBeside(tree, source, axis, id);
   const panes = ws.panes.map((p, i) => (i === id - 1 ? { ...spec } : p)) as Panes;
   return {
     ...ws,
-    tree: presetTree(LADDER[next.length], next),
+    tree,
     kept: ws.kept.filter((n) => n !== id),
     panes,
     focused: opts.focus === false && order.includes(ws.focused) ? ws.focused : id,
@@ -1046,23 +1061,26 @@ export function splitPane(
 }
 
 /**
- * × on pane `id` (plan §3.6): it leaves the tree, its spec goes back to the
- * default, and the shape is the ladder's for one pane fewer, at its default
- * sizes. `kept` is untouched. Focus, when it was on the closed pane, goes to
- * `then` when that is still drawn — the window passes the chat selected
- * before the closed one, so the owner's last choice keeps the microphone
- * (decisions W-6) — else to the pane now in that slot, else the slot before.
- * The last pane is never closed, and neither is one that is not drawn.
+ * × on pane `id` (§5.2): it leaves the tree and its space goes to its
+ * neighbour in the same split — the one before it (left or above), else the
+ * one after (`removeLeaf`); every other pane keeps its place. Its spec goes
+ * back to the default; `kept` is untouched. Focus, when it was on the closed
+ * pane, goes to `then` when that is still drawn — the window passes the chat
+ * selected before the closed one, so the owner's last choice keeps the
+ * microphone (decisions W-6) — else to the pane that took the space (its leaf
+ * nearest the closed pane). The last pane is never closed, and neither is
+ * one that is not drawn.
  */
 export function closePane(ws: Workspace, id: PaneNo, then: PaneNo | null = null): Workspace {
   const order = orderOf(ws);
-  const at = order.indexOf(id);
-  if (at < 0 || order.length <= 1) return ws;
-  const next = order.filter((n) => n !== id);
+  if (!order.includes(id) || order.length <= 1) return ws;
+  const removed = removeLeaf(ws.tree, id);
+  if (!removed) return ws;
+  const next = leaves(removed.tree);
   const panes = ws.panes.map((p, i) => (i === id - 1 ? defaultPane(id) : p)) as Panes;
   const focused = ws.focused !== id && next.includes(ws.focused) ? ws.focused
-    : then !== null && next.includes(then) ? then : next[Math.min(at, next.length - 1)];
-  return { ...ws, tree: presetTree(LADDER[next.length], next), kept: ws.kept.filter((n) => n !== id), panes, focused };
+    : then !== null && next.includes(then) ? then : removed.heir;
+  return { ...ws, tree: removed.tree, kept: ws.kept.filter((n) => n !== id), panes, focused };
 }
 
 /**
@@ -1143,61 +1161,95 @@ export function freeId(ws: Workspace, held: readonly PaneNo[] = []): PaneNo | nu
   return [...ws.kept].reverse().find(id => !held.includes(id) && blankKeptPane(ws, id)) ?? null;
 }
 
-/** Fit without folding anything the owner can currently see or dropping any pane. */
-export function autoSplitVerdict(
-  layout: PaneLayout, ws: Workspace, available: number, availableH: number,
-  prefer: Side | null = null, preferPanel = false, held: readonly PaneNo[] = [],
-): { ok: boolean; id: PaneNo | null } {
-  const order = orderOf(ws);
+/**
+ * Where a split the owner did not ask for goes (a dev server the window opens
+ * itself, plan §5.1): right of `source` when that split is allowed, else
+ * below it, else nowhere (null) — never folding a side pane or the panel,
+ * never dropping a pane (a split never does, FS-5), and never taking an id
+ * that holds something: a free id, else a blank hidden one (`freeId`, never
+ * `allocate`'s destructive tiers; `held` ids skipped).
+ */
+export function autoSplit(
+  ws: Workspace, fit: WorkspaceFit, source: PaneNo, held: readonly PaneNo[] = [],
+): { axis: Axis; id: PaneNo } | null {
   const id = freeId(ws, held);
-  if (order.length >= MAX_DRAWN || id === null) return { ok: false, id: null };
-  const before = fitWorkspace(layout, ws, available, availableH, prefer, preferPanel);
-  const trial = splitPane(ws, order[order.length - 1], id, defaultPane(id), { focus: false });
-  const after = fitWorkspace(layout, trial, available, availableH, prefer, preferPanel);
-  const folds = !before.sides.leftFolded && after.sides.leftFolded
-    || !before.sides.rightFolded && after.sides.rightFolded || before.panel.open && !after.panel.open;
-  return { ok: after.dropped === 0 && !folds, id };
+  if (id === null) return null;
+  for (const axis of ["x", "y"] as const) {
+    if (splitVerdict(ws, fit, source, axis).ok) return { axis, id };
+  }
+  return null;
 }
 
-export type SplitWhy = "" | "max" | "room" | "hidden-edit";
+/**
+ * Why a split is refused, first reason wins (§5.1): the window is dropping
+ * panes (P-6); a fifth pane across or a fourth down (FS-3); halves under the
+ * minimum pane (FS-4); all twelve ids drawn (FS-1); every free id a hidden
+ * pane with an unsaved edit.
+ */
+export type SplitWhy = "" | "dropped" | "across" | "down" | "room" | "max" | "hidden-edit";
 
 /**
- * Whether one more pane can be drawn (plan G-5): never past eight; never when
- * the ladder's next shape would not be drawn whole in this window, even with
- * the side panes and the panel folded for it (a button whose result the owner
- * cannot see); and never when every free id is a hidden pane holding an
- * unsaved edit. It depends only on the count, so every pane's button shares
- * it. A window already dropping panes can still split when the next shape
- * fits (three columns drawn as two at 900 px can become 2×2, 720 wide).
+ * Whether pane `source` can be split along `axis` in the window `fit` drew
+ * (plan §4, §5.1), per pane and per direction:
+ *  - **dropped**: the window is already leaving panes out (P-6): a new pane
+ *    would only add drops, so its result could not be seen.
+ *  - **across / down** (FS-3, §4.1): counted over the drawn rects of every
+ *    pane, the whole window. A split right adds one pane to every horizontal
+ *    line through the source and changes no other line, so it is allowed
+ *    while every such line crosses at most three; a split down, while every
+ *    vertical line through it crosses at most two.
+ *  - **room** (FS-4, §4.5): each half at least 360 wide (right) or 200 tall
+ *    (down), at the source's drawn px. Never by borrowing from the side
+ *    panes (FS-7). With no measured window it is skipped.
+ *  - **max**: all twelve ids are drawn (FS-1).
+ *  - **hidden-edit**: the only ids left are hidden panes with an unsaved
+ *    edit (`dirty`), which a split must never throw away.
  */
 export function splitVerdict(
-  layout: PaneLayout, ws: Workspace, available: number, availableH: number,
-  prefer: Side | null = null, preferPanel = false, dirty: readonly PaneNo[] = [],
+  ws: Workspace, fit: WorkspaceFit, source: PaneNo, axis: Axis, dirty: readonly PaneNo[] = [],
 ): { ok: boolean; why: SplitWhy } {
-  const order = orderOf(ws);
-  if (order.length >= MAX_DRAWN) return { ok: false, why: "max" };
-  // Words a hidden compose row holds are parked, never lost: only an unsaved edit blocks.
-  const id = allocate(ws, dirty);
-  const probe = id ?? PANE_NOS.find((n) => !order.includes(n))!;
-  const trial = splitPane(ws, order[order.length - 1], probe, defaultPane(probe));
-  if (fitWorkspace(layout, trial, available, availableH, prefer, preferPanel).dropped > 0) {
-    return { ok: false, why: "room" };
+  if (fit.dropped > 0) return { ok: false, why: "dropped" };
+  const box = fit.boxes[source];
+  if (!box) return { ok: false, why: "dropped" };
+  const rects: Partial<Record<PaneNo, Rect>> = {};
+  for (const n of fit.panes) if (fit.boxes[n]) rects[n] = fit.boxes[n]!.rect;
+  const r = box.rect;
+  if (axis === "x" ? crossing(rects, "x", r.top, r.top + r.height) > MAX_ACROSS - 1
+    : crossing(rects, "y", r.left, r.left + r.width) > MAX_DOWN - 1) {
+    return { ok: false, why: axis === "x" ? "across" : "down" };
   }
-  if (id === null) return { ok: false, why: "hidden-edit" };
+  const half = (axis === "x" ? box.px.width : box.px.height) / 2;
+  if (Number.isFinite(half) && half < (axis === "x" ? PANE_MIN_W : PANE_MIN_H)) return { ok: false, why: "room" };
+  if (orderOf(ws).length >= PANE_NOS.length) return { ok: false, why: "max" };
+  // Words a hidden compose row holds are parked, never lost: only an unsaved edit blocks.
+  if (allocate(ws, dirty) === null) return { ok: false, why: "hidden-edit" };
   return { ok: true, why: "" };
 }
 
-/** The split button's title: what it does, or why it cannot (plan §3.4). */
-export function splitTitle(why: SplitWhy, count: number): string {
+/**
+ * A split button's title (§10): what it does, or why it cannot. `drawn` and
+ * `total` are the panes the window draws and the panes the layout has (the
+ * "dropped" reason names both).
+ */
+export function splitTitle(why: SplitWhy, axis: Axis, drawn = 0, total = 0): string {
+  const right = axis === "x";
   switch (why) {
-    case "max":
-      return "Eight panes is the most";
+    case "dropped":
+      return `Showing ${drawn} of ${total} panes: widen the window or close a pane to split`;
+    case "across":
+      return "Four panes across the window is the most";
+    case "down":
+      return "Three panes down the window is the most";
     case "room":
-      return `No room for ${count + 1} panes in this window: widen it, zoom out (Ctrl+-) or close a pane`;
+      return right
+        ? "Not enough room to split right: widen the window, fold a side pane or zoom out (Ctrl+-)"
+        : "Not enough room to split down: make the window taller, close the panel or zoom out (Ctrl+-)";
+    case "max":
+      return "Twelve panes is the most";
     case "hidden-edit":
       return "A hidden pane has an unsaved edit: show it from ⊞ first";
     default:
-      return "Split: a copy of this pane beside it";
+      return right ? "Split right: a copy of this pane beside it" : "Split down: a copy of this pane below it";
   }
 }
 
@@ -1244,8 +1296,9 @@ function extent(n: LayoutNode, rects: Partial<Record<PaneNo, Rect>>, axis: Axis,
  * children are linked (P-5: 2×2's column edge through both rows). Its test id
  * is `split-<axis><the first member's path digits>-<i>`. `value`, `min` and
  * `max` are px from the pane area's left ("x") or top ("y"); min and max keep
- * every child beside every member at least its subtree minimum (the FS-3 stop
- * is FS4's). Plain data: the page may hold it.
+ * every child beside every member at least its subtree minimum, and stop it
+ * where some line would cross a fifth pane across or a fourth down (FS-3,
+ * §4.3; `capStop`). Plain data: the page may hold it.
  */
 export interface EdgeHandle {
   testid: string;
@@ -1276,6 +1329,95 @@ function storedBoundary(tree: LayoutNode, render: LayoutNode, path: Path, i: num
   return k < b.length ? { path: b.slice(0, k), i: b[k] } : null;
 }
 
+/**
+ * One member boundary of an edge being dragged, in px along its axis: the
+ * panes before it (from `from` to `at`) and after it (from `at` to `to`).
+ */
+interface Moving {
+  before: PaneNo[];
+  after: PaneNo[];
+  from: number;
+  at: number;
+  to: number;
+}
+
+/** A coordinate along the drag's axis as the edge moves to p: `a + b·p` px. */
+interface Lin { a: number; b: number }
+
+/**
+ * Where a drag of an edge must stop for FS-3 (§4.3), as px bounds on its
+ * position. A drag rescales the two children beside each member boundary
+ * (moveEdge), so every coordinate inside them moves linearly with the edge's
+ * position p and every other pane stays put; the most panes a line crosses
+ * changes only where a moving pane edge meets another pane edge. The edge
+ * stops at the first such meeting, each way from where it is, past which some
+ * line would cross more than the cap — or more than it already does, for a
+ * stored tree already over the cap (drags never make it worse).
+ */
+function capStop(
+  rects: Partial<Record<PaneNo, Rect>>, axis: Axis, moving: readonly Moving[], L: number,
+  value: number, min: number, max: number,
+): { min: number; max: number } {
+  const lines: Axis = axis === "y" ? "x" : "y";
+  const cap = axis === "y" ? MAX_ACROSS : MAX_DOWN;
+  const span = (r: Rect): [number, number] =>
+    axis === "x" ? [r.left * L, (r.left + r.width) * L] : [r.top * L, (r.top + r.height) * L];
+  const ends = new Map<PaneNo, [Lin, Lin]>();
+  for (const n of PANE_NOS) {
+    const r = rects[n];
+    if (!r) continue;
+    const [s, t] = span(r);
+    ends.set(n, [{ a: s, b: 0 }, { a: t, b: 0 }]);
+  }
+  for (const m of moving) {
+    // Before the boundary: [from, at] scaled to [from, p]. After it: [at, to] to [p, to].
+    const scaleBefore = (x: number): Lin => {
+      const k = m.at > m.from ? (x - m.from) / (m.at - m.from) : 1;
+      return { a: m.from * (1 - k), b: k };
+    };
+    const scaleAfter = (x: number): Lin => {
+      const k = m.to > m.at ? (x - m.at) / (m.to - m.at) : 0;
+      return { a: k * m.to, b: 1 - k };
+    };
+    for (const n of m.before) if (rects[n]) ends.set(n, span(rects[n]!).map(scaleBefore) as [Lin, Lin]);
+    for (const n of m.after) if (rects[n]) ends.set(n, span(rects[n]!).map(scaleAfter) as [Lin, Lin]);
+  }
+  const at = (p: number) => {
+    const out: Partial<Record<PaneNo, Rect>> = {};
+    for (const [n, [s, t]] of ends) {
+      const r = rects[n]!;
+      const lo = (s.a + s.b * p) / L;
+      const hi = (t.a + t.b * p) / L;
+      out[n] = axis === "x" ? { ...r, left: lo, width: hi - lo } : { ...r, top: lo, height: hi - lo };
+    }
+    return crossing(out, lines, 0, 1);
+  };
+  const limit = Math.max(cap, at(value));
+  // Where two pane edges meet as p moves: one of them moving, at a different rate.
+  const coords = [...ends.values()].flat();
+  const events: number[] = [];
+  for (let i = 0; i < coords.length; i++) {
+    for (let j = i + 1; j < coords.length; j++) {
+      const db = coords[i].b - coords[j].b;
+      if (Math.abs(db) < 1e-12) continue;
+      const p = (coords[j].a - coords[i].a) / db;
+      if (Number.isFinite(p) && p >= min && p <= max) events.push(p);
+    }
+  }
+  const walk = (stops: number[], end: number): number => {
+    let prev = value;
+    for (const e of [...stops, end]) {
+      if (Math.abs(e - prev) <= 1e-9) continue;
+      if (at((prev + e) / 2) > limit) return prev;
+      prev = e;
+    }
+    return end;
+  };
+  const up = walk(events.filter((p) => p > value).sort((a, b) => a - b), max);
+  const down = walk(events.filter((p) => p < value).sort((a, b) => b - a), min);
+  return { min: down, max: up };
+}
+
 /** Every separator of the fitted render, named and moved by the stored nodes its boundaries belong to. */
 function edgeHandles(tree: LayoutNode, render: LayoutNode, width: number, height: number): EdgeHandle[] {
   const rects = rectsOf(render);
@@ -1284,6 +1426,7 @@ function edgeHandles(tree: LayoutNode, render: LayoutNode, width: number, height
     const length = e.axis === "x" ? width : height;
     const L = Number.isFinite(length) ? length : 0;
     const members: { path: number[]; i: number }[] = [];
+    const moving: Moving[] = [];
     let value = NaN;
     let min = -Infinity;
     let max = Infinity;
@@ -1295,11 +1438,23 @@ function edgeHandles(tree: LayoutNode, render: LayoutNode, width: number, height
       const after = extent(r.children[m.i], rects, e.axis, L);
       if (!before || !after) continue;
       members.push(stored);
+      moving.push({ before: leaves(r.children[m.i - 1]), after: leaves(r.children[m.i]),
+                    from: before[0], at: after[0], to: after[1] });
       if (Number.isNaN(value)) value = after[0];
       min = Math.max(min, before[0] + minAlong(r.children[m.i - 1], e.axis));
       max = Math.min(max, after[1] - minAlong(r.children[m.i], e.axis));
     }
     if (!members.length) continue;
+    // The FS-3 stop (§4.3): never past where some line would cross a fifth
+    // pane across (a row edge moving) or a fourth down (a column edge).
+    // Geometric counts never exceed the structural ones, so a render whose
+    // structure stays within the cap needs no search.
+    const capped = e.axis === "y" ? acrossS(render) > MAX_ACROSS : downS(render) > MAX_DOWN;
+    if (capped && L > 0 && max > min) {
+      const stop = capStop(rects, e.axis, moving, L, value, min, max);
+      min = Math.max(min, stop.min);
+      max = Math.min(max, stop.max);
+    }
     out.push({
       testid: `split-${e.axis}${members[0].path.join("")}-${members[0].i}`,
       axis: e.axis, members, at: e.at, value, min, max: Math.max(min, max),

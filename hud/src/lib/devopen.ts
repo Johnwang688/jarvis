@@ -53,7 +53,13 @@ export interface DevWindow {
   focused: PaneNo;
   /** Pane containing activeElement, including a focused iframe. */
   activePane?: PaneNo;
-  canSplit: boolean;
+  /**
+   * The drawn panes a split could start from now (FS4: the window asks
+   * lib/workspace `autoSplit` for each). A split starts only from the plan's
+   * own source — the pane holding the server's source, else the focused
+   * drawn pane — never from another pane because that one had room.
+   */
+  canSplitFrom: readonly PaneNo[];
   pointerDown: boolean;
   pointerReleasedAt: number;
 }
@@ -110,7 +116,7 @@ export function autoOpenPlan(entry: DevEntry, s: DevOpenState, w: DevWindow, now
   }
   const holder = w.panes.find(p => w.drawn.includes(p.id) && p.source && sourceKey(p.source) === sourceKey(entry.source));
   const source = holder?.id ?? (w.drawn.includes(w.focused) ? w.focused : w.drawn[0]);
-  if (w.canSplit && source !== undefined) {
+  if (source !== undefined && w.canSplitFrom.includes(source)) {
     if (w.pointerDown || now - w.pointerReleasedAt < POINTER_QUIET_MS) return unchanged({ kind: "wait", why: "pointer" });
     return { state: record(s, entry, now), plan: { kind: "split", source, url } };
   }

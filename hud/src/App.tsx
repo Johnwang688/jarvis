@@ -138,6 +138,7 @@ import {
   PANE_NOS, allocate, closePane as closePaneOf, copySpec, inWorkspace, orderOf, presetOfWs, show as showOf, slotOf, splitTitle,
   subagentSpec, type PaneNo, type PaneSpec, type View,
 } from "./lib/workspace";
+import type { Axis } from "./lib/splittree";
 import { ActivitySync, clearsOnRead } from "./lib/activity";
 import {
   LISTENING_STATUS, ORPHAN_DRAFT, besideTarget, chatProjectId, chatTarget, composeRows, draftKey, drawnShowing, eitherPane, giveBackPane,
@@ -2190,18 +2191,24 @@ export default function App() {
       return;
     }
     if (beside) {
-      const to = besideTarget(lay.ws, lay.fit.panes, dirtyIds(), holdingIds());
+      const dirty = dirtyIds();
+      const to = besideTarget(lay.ws, lay.fit.panes, dirty, holdingIds());
       if (to.source !== undefined) {
-        // From one pane, or the right of two columns: a split, the thread's
-        // chat in the new pane (WP-G2, plan §3.5).
+        // From one pane, or the right of two columns: a split right, the
+        // thread's chat in the new pane (WP-G2, plan §3.5; FS4) — down when
+        // there is no room to the right, and nothing when there is neither.
         if (blockedNow.current) return;
+        const axis = (["x", "y"] as const).find((a) => lay.splitVerdict(to.source!, a, dirty).ok);
+        if (axis === undefined) {
+          dispatch({ type: "notice", text: "No room for another pane: close one or use ⊞" });
+          return;
+        }
         if (lay.ws.kept.includes(to.pane)) releasePane(to.pane, { keep: true });
-        view.split(to.source, to.pane, { view: "chat", projectId: null, terminalId: null });
+        view.split(to.source, axis, to.pane, { view: "chat", projectId: null, terminalId: null });
         openIn(to.pane, id);
         return;
       }
       if (!mayShow(to.pane, "chat")) return;
-      if (to.preset && to.preset !== presetOfWs(lay.ws)) view.setPreset(to.preset);
       view.setView(to.pane, "chat");
       openIn(to.pane, id);
       return;
@@ -2296,10 +2303,11 @@ export default function App() {
   }, []);
 
   /**
-   * × (plan §3.6): the pane lets go of what it held (`releasePane`), leaves
-   * the workspace, and focus goes to the pane now in its slot — the pane
-   * itself, never its box, so a held Enter cannot send what is typed there.
-   * The last pane is never closed, nor anything under a card.
+   * × (plan §3.6; FS4 §5.2): the pane lets go of what it held
+   * (`releasePane`), leaves the workspace, its space going to its neighbour in
+   * the same split, and focus goes to that neighbour — the pane itself, never
+   * its box, so a held Enter cannot send what is typed there. The last pane
+   * is never closed, nor anything under a card.
    */
   const closePane = useCallback((n: PaneNo) => {
     if (blockedNow.current) return;
@@ -2307,9 +2315,9 @@ export default function App() {
     const at = live.current;
     // Focus goes where the mic already is (W-6: the chat the owner selected
     // last): the selected chat when it is another drawn pane — closing a File
-    // pane must not hand the mic to the chat that slides into its slot
+    // pane must not hand the mic to the chat that takes its space
     // (review of PR #47, M1) — else, the selected chat closing, the chat
-    // selected before it; else the pane now in that slot.
+    // selected before it; else the pane that took its space.
     const drawnChat = (k: PaneNo | null): k is PaneNo =>
       k !== null && k !== n && lay.fit.panes.includes(k) && lay.ws.panes[k - 1].view === "chat";
     const then = drawnChat(at.selectedChat) ? at.selectedChat
@@ -2325,20 +2333,25 @@ export default function App() {
   }, [releasePane]);
 
   /**
-   * The split button (plan §3.4–§3.5): a copy of pane `source` right after
-   * it, focused. A chat's copy is a new compose row in the source's project,
-   * written before the layout changes; a terminal's is a new terminal in the
-   * folder the source was opened in, unreadable to Jarvis if the source is.
-   * Refused under a card, past eight, and when the next shape would not be
-   * drawn whole. A File pane's copy holds the same buffers (ED-2), so one
-   * holding an unsaved edit splits too.
+   * The split buttons (plan §3.4–§3.5; FS4 §5.1): pane `source` halved, right
+   * (`axis` "x") or down ("y"), a copy of it in the new half, focused. With
+   * no axis (a file opened beside a view, a sub-agent's pane): right when that
+   * fits, else down. A chat's copy is a new compose row in the source's
+   * project, written before the layout changes; a terminal's is a new
+   * terminal in the folder the source was opened in, unreadable to Jarvis if
+   * the source is. Refused under a card and whenever lib/workspace
+   * `splitVerdict` says no (four across, three down, no room, twelve panes).
+   * A File pane's copy holds the same buffers (ED-2), so one holding an
+   * unsaved edit splits too.
    */
-  const splitFrom = useCallback((source: PaneNo, opts: { focus?: boolean } = {}): PaneNo | null => {
+  const splitFrom = useCallback((source: PaneNo, opts: { axis?: Axis; focus?: boolean } = {}): PaneNo | null => {
     if (blockedNow.current) return null;
     const lay = layoutNow.current;
     const spec = lay.ws.panes[source - 1];
+    if (!spec) return null;
     const dirty = dirtyIds();
-    if (!lay.splitVerdict(dirty).ok) return null;
+    const axis = opts.axis ?? (lay.splitVerdict(source, "x", dirty).ok ? "x" : "y");
+    if ((axis !== "x" && axis !== "y") || !lay.splitVerdict(source, axis, dirty).ok) return null;
     const id = allocate(lay.ws, dirty, holdingIds());
     if (id === null) return null;
     if (lay.ws.kept.includes(id)) releasePane(id, { keep: true });
@@ -2355,7 +2368,7 @@ export default function App() {
         takeOrphan: true,
       });
     }
-    lay.split(source, id, copy, opts);
+    lay.split(source, axis, id, copy, { focus: opts.focus });
     if (spec.view === "terminal" && spec.terminalId) {
       const from = spec.terminalId;
       // Readable only when the source is known to be (a copy never widens
@@ -2395,11 +2408,14 @@ export default function App() {
       && shownThread(live.current.chats[n], pendingThread.current[n]) === ref.threadId);
     const source = chatPane ?? (lay.fit.panes.includes(lay.ws.focused) ? lay.ws.focused : lay.fit.panes[0]);
     const dirty = dirtyIds();
-    if (source !== undefined && lay.splitVerdict(dirty).ok) {
+    // Right of that pane when it fits, else below it (FS4).
+    const axis = source === undefined ? undefined
+      : (["x", "y"] as const).find((a) => lay.splitVerdict(source, a, dirty).ok);
+    if (source !== undefined && axis !== undefined) {
       const id = allocate(lay.ws, dirty, holdingIds());
       if (id !== null) {
         if (lay.ws.kept.includes(id)) releasePane(id, { keep: true });
-        lay.split(source, id, subagentSpec(ref));
+        lay.split(source, axis, id, subagentSpec(ref));
         lastSubPane.current = id;
         focusPaneElement(id);
         return;
@@ -2527,6 +2543,7 @@ export default function App() {
     if (ports.status !== "ok") return "wait";
     const active = document.activeElement?.closest<HTMLElement>('[data-testid^="pane-"]');
     const activePane = paneOfTestId(active?.dataset.testid);
+    const held = devHeld();
     const w: DevWindow = {
       enabled: devservers.enabled === true, blocked: blockedNow.current, covered: settingsNow.current,
       ports: ports.ports, controlPorts: ports.controlPorts,
@@ -2538,7 +2555,8 @@ export default function App() {
           browserProfile: (spec as PaneSpec & { browserProfile?: string }).browserProfile };
       }),
       drawn: lay.fit.panes, focused: lay.ws.focused, activePane: activePane ?? undefined,
-      canSplit: lay.autoSplitVerdict(devHeld()).ok,
+      // Each drawn pane a split could start from now (right, else down; FS4).
+      canSplitFrom: lay.fit.panes.filter(n => lay.autoSplit(n, held) !== null),
       pointerDown: devPointer.current.down, pointerReleasedAt: devPointer.current.released,
     };
     const result = autoOpenPlan(row, devPolicy.current, w, Date.now()), plan = result.plan;
@@ -2548,11 +2566,11 @@ export default function App() {
     const auto = { kind: row.source.kind, label: devLabel(row) };
     const source = { kind: "dev_server" as const, entryId: row.id };
     if (plan.kind === "split") {
-      const verdict = lay.autoSplitVerdict(devHeld());
-      if (!verdict.ok || verdict.id === null) return "wait";
-      const id = verdict.id, tab = { id: browserTabId(), url: plan.url, auto, source };
+      const got = lay.autoSplit(plan.source, held);
+      if (got === null) return "wait";
+      const id = got.id, tab = { id: browserTabId(), url: plan.url, auto, source };
       if (lay.ws.kept.includes(id)) releasePane(id, { keep: true });
-      lay.split(plan.source, id, { view: "browser", projectId: devProject(row), terminalId: null,
+      lay.split(plan.source, got.axis, id, { view: "browser", projectId: devProject(row), terminalId: null,
         browser: { tabs: [tab], active: tab.id }, browserUrl: plan.url }, { focus: false });
     } else {
       const tabs = lay.ws.panes[plan.pane - 1].browser?.tabs ?? [];
@@ -3466,8 +3484,9 @@ export default function App() {
       subagents: () => subagents.snapshot(),
       thinkingClock: () => ({ subscribers: thinkingClock.subscribers(), running: thinkingClock.running() }),
       // A split the owner did not click (WP-G2's `{focus: false}`, for the
-      // browser's dev-server pane): the id it took, or null when refused.
-      split: (source: PaneNo, opts: { focus?: boolean } = {}) => splitFrom(source, opts),
+      // browser's dev-server pane; FS4's `axis`, right when absent and it
+      // fits, else down): the id it took, or null when refused.
+      split: (source: PaneNo, opts: { axis?: Axis; focus?: boolean } = {}) => splitFrom(source, opts),
       // Monaco, read-only (lib/monaco.ts): live model URIs, live editors, and
       // the language the registry gives a path.
       monacoModels,
@@ -4253,13 +4272,20 @@ export default function App() {
     );
   };
 
-  // The split button's state, shared by every pane (it depends on the count).
-  // A File pane with an unsaved edit splits too since ED-2: the copy holds
-  // the same buffers, edit and all (decisions S-8's "save first" was for two
-  // copies of one file that could diverge).
-  const verdict = view.splitVerdict(PANE_NOS.filter((n) => dirtyPanes[n]));
+  // Each pane's split buttons (FS4): right and down, decided per pane and
+  // direction (lib/workspace `splitVerdict`). A File pane with an unsaved
+  // edit splits too since ED-2: the copy holds the same buffers, edit and all
+  // (decisions S-8's "save first" was for two copies of one file that could
+  // diverge).
+  const dirtyList = PANE_NOS.filter((n) => dirtyPanes[n]);
   const paneCount = orderOf(ws).length;
-  const splitFor = (_n: PaneNo) => ({ ok: verdict.ok, title: splitTitle(verdict.why, paneCount) });
+  const splitFor = (n: PaneNo) => {
+    const one = (axis: Axis) => {
+      const v = view.splitVerdict(n, axis, dirtyList);
+      return { ok: v.ok, title: splitTitle(v.why, axis, view.fit.panes.length, paneCount) };
+    };
+    return { right: one("x"), down: one("y") };
+  };
 
   const paneContext = (spec: PaneSpec, info: PaneInfo): string => {
     switch (spec.view) {
@@ -4438,7 +4464,7 @@ export default function App() {
               });
             }}
             splitFor={splitFor}
-            onSplit={(n) => void splitFrom(n)}
+            onSplit={(n, axis) => void splitFrom(n, { axis })}
             closeQuestion={closeQuestion}
             closeSave={(n) => (buffers.paneLosing(n).length ? () => buffers.savePane(n) : null)}
             onClose={closePane}
