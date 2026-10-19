@@ -2312,7 +2312,7 @@ def _owner(handler, daemon) -> None:
     else the request says."""
     from .projects import is_owner
     port = daemon.face_port
-    if handler.headers.get("Host", "") not in (f"127.0.0.1:{port}", f"localhost:{port}") \
+    if not config.own_host_header(handler.headers.get("Host", ""), port) \
             or not is_owner(handler, daemon):
         raise _api(403, "only the owner can do this, from the HUD")
 

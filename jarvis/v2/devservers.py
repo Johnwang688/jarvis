@@ -20,6 +20,8 @@ import threading
 import time
 from urllib.parse import urlsplit
 
+from jarvis import config
+
 from . import devlisten as dl
 from .model import utcnow
 
@@ -748,7 +750,7 @@ def route(handler, daemon, parts, query):
     from .projects import owner_only
     owner_only(handler, daemon)                       # before body, id or registry lookup
     port = daemon.face_port
-    if handler.headers.get("Host", "") not in (f"127.0.0.1:{port}", f"localhost:{port}"):
+    if not config.own_host_header(handler.headers.get("Host", ""), port):
         raise APIError(403, "untrusted Host")
     registry = daemon.devservers
     if parts == ["dev-servers"] and handler.command == "GET":

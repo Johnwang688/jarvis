@@ -41,6 +41,8 @@ import re
 import time
 import uuid
 
+from jarvis import config
+
 from .model import TERMINAL_STATES, Project, Role, Thread, to_json, utcnow
 from .stores import StoreError, _lock as _store_lock, _write_bytes
 from . import worktrees
@@ -162,7 +164,7 @@ def is_owner(handler, daemon) -> bool:
         return bool(origin) and origin == f"http://{host}"
     return (handler.command in ("GET", "HEAD")
             and handler.headers.get("Upgrade") is None
-            and host in (f"127.0.0.1:{port}", f"localhost:{port}")
+            and config.own_host_header(host, port)
             and handler.headers.get("Sec-Fetch-Site") == "same-origin")
 
 

@@ -1934,7 +1934,7 @@ def read_for_tool(terminal: str, lines: int = terminal_guard.DEFAULT_LINES) -> T
 def _strict_host(handler, daemon) -> None:
     host = handler.headers.get("Host", "")
     port = daemon.face_port
-    if host not in (f"127.0.0.1:{port}", f"localhost:{port}"):
+    if not config.own_host_header(host, port):
         _fail(403, "untrusted Host")
 
 

@@ -2777,8 +2777,7 @@ def _handler(daemon):
                     raise APIError(400, "always must be a boolean")
                 return 200, daemon.resolve_approval(
                     parts[1], Decision(_text(body["decision"], "decision")), always,
-                    hud=self.headers.get("Host", "") in (
-                        f"127.0.0.1:{daemon.face_port}", f"localhost:{daemon.face_port}"))
+                    hud=config.own_host_header(self.headers.get("Host", ""), daemon.face_port))
             if len(parts) in (2, 3) and parts[0] == "tasks":
                 task = daemon.require(stores.tasks, parts[1])
                 if len(parts) == 2 and method == "GET":
