@@ -61,7 +61,6 @@ import os
 import re
 import sys
 import tempfile
-import time
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
@@ -72,6 +71,7 @@ TMP = Path(_TMP.name)
 (TMP / "home").mkdir()
 os.environ["HOME"] = str(TMP / "home")  # before config computes any default
 
+from checklib import wait_for  # noqa: E402
 from jarvis import config  # noqa: E402
 
 config.ALLOWLIST_PATH = TMP / "allowlist.json"
@@ -150,15 +150,6 @@ def built_by(start) -> agent_mod.Agent:
     start()
     assert len(BUILT) > before, "the surface built no agent"
     return BUILT[before]
-
-
-def wait_for(predicate, what: str, timeout: float = 30.0) -> None:
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        if predicate():
-            return
-        time.sleep(0.02)
-    raise AssertionError(f"timed out waiting for {what}")
 
 
 _NAME = {}

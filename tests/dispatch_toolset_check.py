@@ -85,6 +85,7 @@ TMP = Path(_TMP.name)
 (TMP / "home").mkdir()
 os.environ["HOME"] = str(TMP / "home")  # before config computes any default
 
+from checklib import wait_for  # noqa: E402
 from jarvis import config  # noqa: E402
 
 config.ALLOWLIST_PATH = TMP / "allowlist.json"
@@ -251,15 +252,6 @@ def assert_wire_valid(messages) -> None:
         if message.get("role") == "tool":
             answered.append(message["tool_call_id"])
     assert declared == answered, f"declared {declared} answered {answered}"
-
-
-def wait_for(predicate, what: str, timeout: float = 30.0) -> None:
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        if predicate():
-            return
-        time.sleep(0.02)
-    raise AssertionError(f"timed out waiting for {what}")
 
 
 def deny(tool, args) -> bool:
