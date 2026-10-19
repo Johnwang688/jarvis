@@ -281,6 +281,10 @@ def call(daemon, session, caller, name: str, arguments: dict, *, codex_context=N
         turn_id = session.turn_id if worker is not None else None
         desk = session.desk.slot if worker is not None else {"present": False}
         browser_call = name in ("hud_browser_view", "hud_browser_act")
+        # A call that may outlast its relay's socket: the Browser look and act,
+        # and chat_wait (chat-to-chat C4, §5.3), whose wait reads `current()`
+        # through `runtime.should_stop()` and ends when the CLI's relay goes.
+        socket_bound = browser_call or name == "chat_wait"
         drive_turn = getattr(session, "drive_turn", None) if worker is not None else None
 
     native_current = None
@@ -311,7 +315,7 @@ def call(daemon, session, caller, name: str, arguments: dict, *, codex_context=N
                     and (drive_turn is None or not drive_turn.closed))
         if not live:
             return False
-        if browser_call and request_alive is not None:
+        if socket_bound and request_alive is not None:
             try:
                 if not request_alive():
                     return False

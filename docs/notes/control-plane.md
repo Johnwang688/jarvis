@@ -404,3 +404,33 @@ and `wait(caller, message_id, seconds)` are the service calls C4's
   are cleaned and their fence phrases annotated. The source guard in
   `tests/v2/chat_relay_check.py` keeps `chat_relay.py` and `tools/chats.py`
   free of the broker, the daemon's answer, `deliver` and `_steer`.
+
+## Sending in the session catalog (chat-to-chat C4, 2026-10-19)
+
+`chat_send` and `chat_wait` (`jarvis/v2/tools/chats.py`) call the service's
+`send` and `wait`. Both are `SESSION_TOOLS` entries for Claude and Codex
+owner chats, **not** read-only, so the listing says only `readOnlyHint:
+false`, and neither the hook's read-only allow nor the `jarvis-tool` layer
+covers them: `permit` decides at `jarvis-session-delegate` (allowed unasked
+on AUTO and ASK, refused unasked for STRICT; an always-ask rule naming one
+still asks). Both are `foreground_only`: Claude's hook denies a sub-agent's
+call (`agent_id`) before `permit` runs, and Codex admits only the exact
+native parent turn. `chat_send` is also `desk_only`; `chat_wait` is not, as
+a turn may wait on its own message from any surface. Codex gets the per-tool
+`approval_mode="approve"` and `enabled_tools` entries. Neither is in
+`mcp_catalog.MCP_TOOLS` or `PARALLEL_SAFE`; both are `EXPLICIT_ONLY`; only
+`chat_wait` is `PRIVATE_RESULT` (it returns another chat's words, while a
+send's result is its own sentence).
+
+Authority is checked twice (P-6). The tool refuses first, as
+`hud_browser_view` does: `chat_send` unless `runtime.at_desk()` and
+`runtime.depth() == 0` (CC-6: typed or spoken at the HUD; no `typed` key),
+`chat_wait` unless `runtime.depth() == 0`; both without a v2 caller or the
+installed service. The service then re-checks the live session and exact
+turn under the daemon lock (C3). A relayed or reply turn is never at the
+desk, so it cannot send onward (CC-7, no `RELAY_REFUSED`). The bridge's
+`request_alive` peek now covers `chat_wait` as well as the Browser look and
+act: a relay socket that closes makes `current()` false, so the wait's
+`should_stop` ends it and the reply goes on through the next delivery route.
+The owner's Stop ends a wait through the same `current()` and the service's
+own live-turn check.

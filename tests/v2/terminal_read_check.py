@@ -299,7 +299,7 @@ class Holders(unittest.TestCase):
         from jarvis.tools import subagent
         from jarvis.v2 import mcp
         self.assertIn("terminal_read", fastpath.FAST_TOOLS)
-        self.assertEqual(fastpath.DESK_TOOLS, frozenset({"terminal_read", "hud_browser_view", "hud_browser_act"}))
+        self.assertEqual(fastpath.DESK_TOOLS, frozenset({"terminal_read", "hud_browser_view", "hud_browser_act", "chat_send"}))
         self.assertEqual(fastpath.DRIVE_TOOLS, frozenset({"hud_browser_act"}))
         self.assertIn("terminal_read", tools.EXPLICIT_ONLY)
         self.assertFalse(tools.REGISTRY["terminal_read"].dangerous)

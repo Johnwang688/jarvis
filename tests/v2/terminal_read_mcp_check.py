@@ -36,6 +36,8 @@ REMOTE = UserMessage('remote words', via='discord')
 MARKER = 'WP2-PRIVATE-TERMINAL-MARKER'
 CATALOG = dict(session_tools.SESSION_TOOLS)
 CHAT_READS = ('chat_list', 'chat_summary', 'chat_search', 'chat_read')
+# chat_send and chat_wait (chat-to-chat C4): pinned by tests/v2/chat_send_check.py.
+CHAT_SENDS = ('chat_send', 'chat_wait')
 
 
 def setUpModule():
@@ -116,15 +118,16 @@ class CatalogChecks(unittest.TestCase):
     def test_exact_shared_catalog_flags_and_availability(self):
         self.assertIs(mcp.MCP_TOOLS, MCP_TOOLS)
         chat_git = set(session_tools.CHAT_GIT_TOOLS)
-        # The chat reads (chat-to-chat C1) are pinned by ChatReadCatalogChecks below.
-        self.assertEqual(set(CATALOG) - set(CHAT_READS),
+        # The chat reads (chat-to-chat C1) are pinned by ChatReadCatalogChecks below,
+        # chat_send and chat_wait (C4) by tests/v2/chat_send_check.py.
+        self.assertEqual(set(CATALOG) - set(CHAT_READS) - set(CHAT_SENDS),
                          MCP_TOOLS | {'terminal_read', 'hud_browser_view', 'hud_browser_act'} | chat_git)
         self.assertEqual(len(MCP_TOOLS), 23)
         self.assertEqual(MCP_TOOLS - MCP_READ_ONLY, {
             'memory_write', 'memory_delete', 'gmail_send', 'discord_dm_owner',
             'spotify_play', 'spotify_pause', 'schedule_create', 'schedule_delete'})
         for name, entry in CATALOG.items():
-            if name in CHAT_READS:
+            if name in CHAT_READS or name in CHAT_SENDS:
                 continue
             if name in chat_git:
                 # Codex chats' git tools (CG-0): Codex only, foreground only.
