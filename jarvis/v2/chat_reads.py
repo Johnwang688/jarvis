@@ -85,7 +85,7 @@ _ID = re.compile(r"[0-9a-f]{8}")
 _PROVIDER_WORD = {ProviderName.FAST.value: "Jarvis", ProviderName.CLAUDE.value: "Claude",
                   ProviderName.CODEX.value: "Codex"}
 _VIA_MARK = {"discord": "via Discord", "dm": "via DM"}
-_SYSTEM_KINDS = ("model_set", "notice", "cli_turn")
+_SYSTEM_KINDS = ("model_set", "notice", "cli_turn", "compacted")
 _RELAY_KINDS = ("relay_in", "relay_out", "relay_reply")
 
 

@@ -2214,6 +2214,19 @@ def route(handler, daemon, parts, query):
             fail(404, str(exc))
         except RelayConflict as exc:
             fail(409, str(exc))
+    if len(parts) == 3 and parts[0] == "threads" and parts[2] == "compact":
+        # The owner's Compact button (2026-10-19): the provider's own
+        # compaction of a chat's conversation. The owner's alone, checked
+        # before the thread is looked up or a body read; no tool, bridge,
+        # MCP, Discord or CLI path reaches `Daemon.compact`. No body yet (a
+        # focus text is a later PR).
+        from .projects import owner_only
+        owner_only(handler, daemon)
+        if method != "POST":
+            fail(405, "a conversation is compacted with POST")
+        _object(query, ())
+        _object(handler._body(), ())
+        return 202, daemon.compact(parts[1])
     if len(parts) == 3 and parts[0] == "threads" and parts[2] in ("transcript", "send"):
         thread = daemon.require(stores.threads, parts[1])
         if parts[2] == "send" and method == "POST":
@@ -2294,7 +2307,8 @@ def route(handler, daemon, parts, query):
                             message["turn_id"] = row["turn_id"]
                         messages.append(message)
                     continue
-                if kind not in (None, "text", "user", "model_set", "notice", "cli_turn"):
+                if kind not in (None, "text", "user", "model_set", "notice", "cli_turn",
+                                "compacted"):
                     continue
                 data = row.get("data", row)
                 text = data.get("text")
@@ -2303,9 +2317,11 @@ def route(handler, daemon, parts, query):
                     text = f"/skill {data['skill']} {text}".rstrip()
                 if isinstance(text, str):
                     # A turn the CLI started by itself opens with a `cli_turn`
-                    # line (SV-6): a system line, like a model change.
+                    # line (SV-6): a system line, like a model change; so does
+                    # the end of a compaction (`compacted`, the Compact button).
                     role = ("assistant" if kind == "text" else "user" if kind == "user"
-                            else "system" if kind in ("model_set", "notice", "cli_turn")
+                            else "system" if kind in ("model_set", "notice", "cli_turn",
+                                                      "compacted")
                             else row.get("role", "assistant"))
                     message = dict(role=role, text=text, at=row.get("at", row.get("t")))
                     # Opt-in clients reconcile an optimistic initial send by

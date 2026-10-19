@@ -434,3 +434,40 @@ act: a relay socket that closes makes `current()` false, so the wait's
 `should_stop` ends it and the reply goes on through the next delivery route.
 The owner's Stop ends a wait through the same `current()` and the service's
 own live-turn check.
+
+## The Compact button's route (2026-10-19, WP-A)
+
+`POST /threads/{id}/compact` (`hud_api.route`) is the owner's alone:
+`owner_only` runs first, before the thread is looked up or a body read, so
+the API listener gets 403 whatever it sends. Then an empty query and an
+empty body (a field is 400; a focus text is a later PR), and 202 with
+`Daemon.compact(id)`; any other method is 405. It is not a tool: no MCP
+tool, `bridge.py` route, Discord command or CLI verb reaches
+`Daemon.compact`, and a source guard in `tests/v2/compact_check.py` pins
+the HUD route as its only caller.
+
+`Daemon.compact` resumes a closed session (`_live_session`, no model call)
+and refuses with 409, never calling the provider, when `_sendable` refuses,
+the thread is not an owner's chat ("Tasks are not chats; only a chat
+compacts."), a turn runs ("A turn is running; compact when it ends."),
+owner messages or chat relays wait ("Messages are waiting to run first."),
+the provider has no `compact` ("This chat's provider cannot compact its
+conversation."), a CLI turn of its own waits (it starts instead), the turn
+waits on the owner ("Answer the card first.") or `compact_refusal` says why.
+`_begin_compact` (modelled on `_begin_cli`) sets `_Session.compacting`,
+logs a `compact_started` record, and runs `_turn` over `provider.compact`
+with no desk, model switch, drive turn or `user` record. While it runs,
+every record is stamped `compaction: true`, `deliver` queues (never steers)
+and `chat_relay._hand_over` never steers a reply into it (held, run as a
+reply turn after the owner's queue). Stop is `interrupt`, unchanged: the
+owner's queue is dropped (CB-1). A compaction is not counted in
+`thread.turns`; its usage and cost count. The provider's reason is
+scrubbed as chat reads are (`chat_reads.scrub`, then one line of at most
+200) before the turn's `turn_finished` is recorded, so neither the log nor
+the bus carries it raw, and the turn ends with a `compacted` record:
+`{"ok", "text"}`, the text "Conversation compacted", "Compaction stopped",
+"Not compacted: <reason>" (ended, nothing compacted) or "Compaction
+failed: <reason>". No summary text is logged. The task runner, the Discord
+mirror (CB-5) and activity skip `compaction` records (a compaction never
+makes a chat unread); `"compacted"` is a system row in chat reads and the
+HUD transcript; `thread_json` carries a live `compacting`.

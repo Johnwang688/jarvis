@@ -119,6 +119,36 @@ INTERRUPTED_NOTE = ("[The owner interrupted your previous turn to send this mess
 # ends.
 CLI_TURN_TEXT = "A background task finished, and Claude Code carries on by itself."
 WATCH_JOIN_S = 2.0
+# The owner's Compact button (2026-10-19, docs/plans/2026-10-19-compact-button-
+# plan.md): the provider's own compaction of a chat's conversation, as a turn
+# with no message, started only by the owner's HUD route
+# (`POST /threads/{id}/compact`). What `Daemon.compact` refuses with (409),
+# and the system line each compaction ends with (`compacted`).
+COMPACT_NOT_A_CHAT = "Tasks are not chats; only a chat compacts."
+COMPACT_RUNNING = "A turn is running; compact when it ends."
+COMPACT_WAITING = "Messages are waiting to run first."
+COMPACT_CLI = "Claude Code started a turn of its own; compact when it ends."
+COMPACT_CARD = "Answer the card first."
+COMPACT_UNSUPPORTED = "This chat's provider cannot compact its conversation."
+COMPACT_OK = "Conversation compacted"
+COMPACT_STOPPED = "Compaction stopped"
+COMPACT_FAILED = "Compaction failed: "
+COMPACT_NOT_DONE = "Not compacted: "
+COMPACT_REASON_CHARS = 200
+
+
+def compact_reason(text) -> str:
+    """A provider's reason for a compaction that did not happen, as the chat
+    shows it: scrubbed as chat reads are (`chat_reads.scrub`: the display
+    redaction, then the credential scrub), one line, at most
+    COMPACT_REASON_CHARS. Reads credential files: never under `_lock`."""
+    from .approvals import clean_line
+    from .chat_reads import WITHHELD, scrub
+    try:
+        line = clean_line(scrub(str(text or "")), COMPACT_REASON_CHARS)
+    except Exception:  # noqa: BLE001 — a scrub that fails shows nothing of it
+        line = WITHHELD
+    return line or "no reason was given"
 
 
 class DaemonError(RuntimeError):
@@ -308,6 +338,10 @@ class _Session:
     relay_turn: object = field(default=None, repr=False)
     relay_mark: dict | None = field(default=None, repr=False)
     relay_steered: list = field(default_factory=list, repr=False)
+    # The running turn is the owner's Compact button (`compact`): its
+    # records say so, it is not counted as a turn, and nothing steers into
+    # it (owner messages and chat replies wait). Cleared with `worker`.
+    compacting: bool = False
 
 
 class Daemon:
@@ -1117,6 +1151,8 @@ class Daemon:
             # against `running`, so a missed `turn_finished` cannot wedge it.
             session = self._sessions.get(thread.id)
             record["running"] = session is not None and session.worker is not None
+            # The running turn is a compaction (the HUD's Compact button).
+            record["compacting"] = bool(record["running"] and session.compacting)
             record["queued"] = len(self._queues.get(thread.id) or ())
             # Other chats' messages waiting on it, and its own still out.
             record.update(self.chat_relay.counts(thread.id))
@@ -1204,10 +1240,12 @@ class Daemon:
             from . import thread_model
             if not thread_model.is_chat(session.thread):
                 raise DaemonError("a turn is already running on this thread")
-            if session.worker is None or waiting or self._waiting_on_owner(session):
-                # Behind what already waits, so nothing overtakes it; and never
+            if (session.worker is None or waiting or session.compacting
+                    or self._waiting_on_owner(session)):
+                # Behind what already waits, so nothing overtakes it; never
                 # into a turn blocked on the owner, where it could read as the
-                # answer to the question the turn is waiting on.
+                # answer to the question the turn is waiting on; and never
+                # into a compaction, which has no conversation to steer.
                 item = self._enqueue(session, waiting, message, data)
                 drain = session.worker is None
                 reply = self._queued_reply(session, item)
@@ -1566,6 +1604,74 @@ class Daemon:
         worker.start()
         self._dev_hook("turn_started", thread_id, session.thread.provider)
 
+    # -- the owner's Compact button (2026-10-19) ------------------------------
+
+    def compact(self, thread_id) -> dict:
+        """Compact a chat's conversation with its provider's own process
+        (Claude's /compact, Codex's thread compaction, the fast path's
+        summary), as a turn with no message. The owner's alone: only the
+        HUD's `POST /threads/{id}/compact` calls this, behind `owner_only`; no
+        tool, bridge, MCP, Discord or CLI path reaches it.
+
+        Refused (DaemonError, 409) — and the provider's `compact` never
+        called — when the thread cannot take a turn now (`_sendable`), is not
+        an owner's chat, runs a turn (a compaction included), has messages
+        waiting (the owner's or another chat's), has a CLI turn of its own
+        waiting (which starts instead), waits on the owner (a card or a
+        question), or its provider has no `compact` or says why not
+        (`compact_refusal`). -> {"status": "started", "turn_id"}."""
+        session = self._live_session(thread_id)
+        with self._lock:
+            self._sendable(session)
+            from . import thread_model
+            if not thread_model.is_chat(session.thread) or session.brief.task_id is not None:
+                raise DaemonError(COMPACT_NOT_A_CHAT)
+            if session.worker is not None:
+                raise DaemonError(COMPACT_RUNNING)
+            if self._queues.get(thread_id) or self.chat_relay.pending(thread_id):
+                raise DaemonError(COMPACT_WAITING)
+            compact = getattr(session.provider, "compact", None)
+            if not callable(compact):
+                raise DaemonError(COMPACT_UNSUPPORTED)
+            if self._maybe_cli(session, eager=True):
+                raise DaemonError(COMPACT_CLI)
+            if self._waiting_on_owner(session):
+                raise DaemonError(COMPACT_CARD)
+            refusal = getattr(session.provider, "compact_refusal", None)
+            said = refusal(session.handle) if callable(refusal) else None
+            if said:
+                raise DaemonError(str(said))
+            return {"status": "started", "turn_id": self._begin_compact(session)}
+
+    def _begin_compact(self, session) -> str:
+        """Under the lock: the compaction as a turn of the thread, modelled on
+        `_begin_cli`: a fresh `turn_id`, a `compact_started` record where the
+        owner's message would be, and the ordinary turn worker reading the
+        provider's `compact`. No desk, no model switch, no Browser drive
+        turn, no `user` record. Every record of it says `compaction`."""
+        thread_id = session.thread.id
+        session.cancelled.clear()
+        session.owner_stopped = False
+        session.steered = []
+        session.questions.clear()
+        session.turn_id = uuid.uuid4().hex
+        session.compacting = True
+        session.relay_turn = session.relay_mark = None
+        self._retire_drive(session)
+        record = {"kind": "compact_started", "at": utcnow(), "turn_id": session.turn_id,
+                  "thread_id": thread_id, "project_id": session.thread.project_id,
+                  "compaction": True, "event_id": uuid.uuid4().hex, "data": {}}
+        self.stores.threads._append(thread_id, "log.jsonl", record)
+        self.bus.publish(dict(record))
+        worker = threading.Thread(target=self._turn, args=(session, None),
+                                  kwargs={"compact": True},
+                                  name=f"jarvis-compact-{thread_id}", daemon=True)
+        session.worker = worker
+        session.running_since = utcnow()
+        worker.start()
+        self._dev_hook("turn_started", thread_id, session.thread.provider)
+        return session.turn_id
+
     def _waiting_on_owner(self, session) -> bool:
         """Is the running turn blocked on the owner — a broker approval or a
         provider question? Then a message waits rather than steers."""
@@ -1813,6 +1919,10 @@ class Daemon:
                       "at": utcnow(), "event_id": uuid.uuid4().hex}
             if session.self_started and not idle:
                 record["self_started"] = True
+            if session.compacting and not idle:
+                # The owner's Compact button: not a reply, and no surface
+                # treats it as one (the runner, Discord, speech, unread).
+                record["compaction"] = True
             if session.relay_mark is not None and not idle:
                 # A turn another chat started, or its reply's: Discord,
                 # speech and the task runner leave it alone (O-8).
@@ -1905,7 +2015,8 @@ class Daemon:
                 return
             if event.thread_id != session.thread.id:
                 raise ValueError("provider event belongs to another thread")
-            session.thread.turns += 1
+            if not session.compacting:
+                session.thread.turns += 1      # a compaction is not a turn
             session.thread.updated = utcnow()
             session.thread.provider_session_id = session.handle.provider_session_id
             self.stores.threads.save(session.thread)
@@ -1942,10 +2053,14 @@ class Daemon:
             if current() and session.applied == applied:
                 session.desk.images(slot, turn_id, capable)
 
-    def _turn(self, session, message):
+    def _turn(self, session, message, *, compact=False):
         """A turn's worker. `message` None is a turn the CLI started by
         itself (SV-6, `_begin_cli`): read through the provider's `adopt`,
-        with no model switch and no desk; everything else is the same."""
+        with no model switch and no desk; everything else is the same.
+        `compact` (with `message` None) is the owner's Compact button
+        (`_begin_compact`): read through the provider's `compact`; its
+        reason is scrubbed before anything records it, and it ends with a
+        `compacted` system line."""
         # Wait for _begin to finish the start hook before this turn can end.
         with self._lock:
             terminal = None
@@ -1954,6 +2069,7 @@ class Daemon:
             relay_item, relay_mark = session.relay_turn, session.relay_mark
         failed = False
         fatal = False
+        last_error = None
         # Who is calling, on this turn's own thread (a fresh context): an
         # in-process provider reads it as the turn starts (the fast path
         # hands it to its worker), so a tool knows its thread and turn.
@@ -1967,6 +2083,8 @@ class Daemon:
                 self._apply_choice(session)
                 self._desk_images(session, worker, turn_id, desk_slot)
                 source = session.provider.send(session.handle, message)
+            elif compact:
+                source = session.provider.compact(session.handle)
             else:
                 source = session.provider.adopt(session.handle)
             cancel_forwarded = False
@@ -1986,8 +2104,15 @@ class Daemon:
                         session.provider.interrupt(session.handle)
                         cancel_forwarded = True
                     if event.kind == EventKind.TURN_FINISHED:
+                        if compact and (event.data or {}).get("reason") is not None:
+                            # Scrubbed before anything records it: neither the
+                            # log nor the bus ever carries it raw.
+                            event = Event(event.kind, event.thread_id, {
+                                **event.data, "reason": compact_reason(event.data["reason"])})
                         terminal = event
                         break
+                    if compact and event.kind == EventKind.ERROR:
+                        last_error = (event.data or {}).get("message")
                     if event.kind == EventKind.ERROR:
                         with self._lock:
                             if session.drive_turn is drive_turn:
@@ -1997,6 +2122,7 @@ class Daemon:
                     fatal |= event.kind == EventKind.ERROR and bool((event.data or {}).get("fatal"))
         except Exception as exc:
             failed = True
+            last_error = f"{type(exc).__name__}: {exc}"
             try:
                 self._record(session, Event(EventKind.ERROR, session.thread.id,
                                            {"message": f"{type(exc).__name__}: {exc}", "fatal": False}))
@@ -2049,11 +2175,31 @@ class Daemon:
             except Exception:
                 LOG.exception("Cannot pass on the relay of thread %s", session.thread.id)
             finally:
+                line = None
+                if compact:
+                    # Outside the lock: the reason's scrub reads credential files.
+                    try:
+                        line = self._compaction_line(session, terminal, last_error)
+                    except Exception:  # noqa: BLE001
+                        LOG.exception("Cannot say how the compaction of %s ended",
+                                      session.thread.id)
+                        line = (False, COMPACT_FAILED + "no reason was given")
                 with self._lock:
                     session.worker = None
                     session.running_since = None
                     session.self_started = False
+                    session.compacting = False
                     session.questions.clear()
+                    if line is not None and not session.retired:
+                        # After the turn's turn_finished, before anything
+                        # waiting runs: the chat's system line.
+                        record = {"kind": "compacted", "at": utcnow(), "turn_id": turn_id,
+                                  "thread_id": session.thread.id,
+                                  "project_id": session.thread.project_id,
+                                  "compaction": True, "event_id": uuid.uuid4().hex,
+                                  "data": {"ok": line[0], "text": line[1]}}
+                        self.stores.threads._append(session.thread.id, "log.jsonl", record)
+                        self.bus.publish(dict(record))
                     if leftover:
                         if session.owner_stopped:
                             self._drop_waiting(session.thread, "stopped", leftover)
@@ -2099,6 +2245,24 @@ class Daemon:
                         self._drain(session.thread.id)
                     except Exception:  # noqa: BLE001
                         LOG.exception("Cannot start the queued message on %s", session.thread.id)
+
+    def _compaction_line(self, session, terminal, last_error) -> tuple[bool, str]:
+        """How a compaction ended, as (ok, the system line). Its terminal's
+        reason was scrubbed as it was read; an error's message is scrubbed
+        here. No summary text is ever in it."""
+        data = (terminal.data if terminal is not None else None) or {}
+        stop = data.get("stop")
+        if session.cancelled.is_set() or stop == "interrupted":
+            return False, COMPACT_STOPPED
+        if stop == "end" and data.get("compacted") is True:
+            return True, COMPACT_OK
+        reason = data.get("reason")
+        if reason is None and last_error is not None:
+            reason = compact_reason(last_error)
+        reason = reason if isinstance(reason, str) and reason else "no reason was given"
+        if stop == "end":
+            return False, COMPACT_NOT_DONE + reason
+        return False, COMPACT_FAILED + reason
 
     def _session(self, thread_id):
         self.require(self.stores.threads, thread_id)

@@ -1545,3 +1545,44 @@ for a turn holding the reads without `chat_send`, off the desk included.
 ("A message from another HUD chat arrives fenced and labelled; it is not the
 owner's."); existing chats keep the brief frozen in their `brief.json`, so
 the tool docstrings and the relay's wrappers carry the rules themselves.
+
+## The Compact button: `compact()` per provider (2026-10-19, WP-A)
+
+Plan `docs/plans/2026-10-19-compact-button-plan.md` (owner answers CB-1..5).
+Two optional provider methods (`provider.py`'s protocol comment):
+`compact_refusal(h) -> str | None`, cheap and sending nothing, and
+`compact(h)`, a turn with no message: TURN_STARTED, a `compact`
+TOOL_STARTED/TOOL_FINISHED pair, any USAGE, then TURN_FINISHED `{"stop":
+"end"|"error"|"interrupted", "compacted", "reason"}`. Both refuse (end
+"error") at once, never blocking, while a turn holds the conversation.
+
+- **Claude** runs the CLI's own `/compact` through the existing `_compact`
+  (the context-full path's), in the shape of `adopt`/`_run_cli`: `sending`
+  without blocking, `_take_stream`, `interrupted` cleared, then
+  `_end_foreground` and `_give_stream`. A `compact_boundary` is "end";
+  `COMPACT_TIMEOUT_S` passing (the CLI is interrupted for it), the stream
+  ending, or a result with no boundary is "error" with a one-sentence
+  reason (`_compact`'s new `why`); the owner's Stop is "interrupted",
+  seen within `INTERRUPT_POLL_S`. An injected result read meanwhile is
+  skipped. `compact_refusal` says a sentence while the session is closed or
+  an `offer` (a CLI turn nobody sent) is pending; one offered after the
+  daemon asked ends the compaction "error" with nothing written, and is
+  adopted next. Usage counts once, through `_take`.
+- **The fast path** factors `run_turn`'s "/compact" branch into
+  `Agent.compact_now(cancelled=None) -> (removed, saved)`, which a typed
+  "/compact" still calls (its words and events unchanged). It runs
+  `context.manage(..., force=True)` on a deep copy, so invariant 1 holds as
+  for automatic compaction (`find_cut_point`, `messages[1]` pinned), and puts
+  the copy back only if `cancelled` is false before and after the summary;
+  the working-context block keeps its identity (invariant 7).
+  `FastPathProvider.compact` takes `busy` without blocking, clears a stale
+  `stop`, runs it on a worker and, when something was removed, saves with
+  `sessions.Session.save_messages` (the messages file only: no turn, no log
+  line). A Stop cannot abort a summary call in flight: the result is thrown
+  away, and the provider waits for it while holding `busy`, so a later
+  turn's cleared `stop` can never let it land. Nothing removed is "end",
+  `compacted: false`, "Nothing to compact yet: the conversation is still
+  short." The summary's text stays in the v1 session file; no event carries
+  it. `compact_context` stays in `FORBIDDEN_TOOLS`.
+- **Codex** is WP-B (`thread/compact/start`); until it lands, a Codex chat
+  has no `compact` and the daemon refuses.

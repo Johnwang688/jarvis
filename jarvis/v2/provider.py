@@ -315,6 +315,28 @@ class Provider(Protocol):
     #     TURN_FINISHED), with no message of ours. Yields nothing when none
     #     waits. Called only when no send runs."""
     #
+    # Optional (2026-10-19, the HUD's Compact button): the provider's own
+    # compaction of the conversation. The transcript keeps every row; only
+    # the model's context gets smaller. A provider without `compact` is
+    # refused by the daemon ("This chat's provider cannot compact its
+    # conversation."). Reached only from the owner's HUD route
+    # (`POST /threads/{id}/compact`): no tool, bridge, Discord or CLI path.
+    #
+    # def compact_refusal(self, h: SessionHandle) -> str | None:
+    #     """None when `compact(h)` would run now; otherwise one plain
+    #     sentence saying why not (the daemon's 409 says exactly that).
+    #     Cheap, sends nothing; asked under the daemon's lock."""
+    #
+    # def compact(self, h: SessionHandle) -> Iterator[Event]:
+    #     """A turn with no message: TURN_STARTED; a TOOL_STARTED /
+    #     TOOL_FINISHED pair named "compact"; any USAGE; then TURN_FINISHED
+    #     {"stop": "end"|"error"|"interrupted", "compacted": bool,
+    #     "reason": str | None}. `interrupt(h)` ends it ("interrupted",
+    #     nothing applied). Never blocks on a running turn: busy ends it
+    #     "error" at once. Called only when no send runs; a steer meanwhile
+    #     is refused (the daemon queues instead). `reason` is the provider's
+    #     own words, which the daemon scrubs before it logs them."""
+    #
     # def undelivered(self, h: SessionHandle) -> list[UserMessage]:
     #     """Steered messages the provider took but that never reached the
     #     model before its turn ended (the fast path's final answer came

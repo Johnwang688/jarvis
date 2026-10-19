@@ -228,7 +228,10 @@ class Activity:
                     if not asks:
                         self._asks.pop(thread_id, None)
                 meta = self._thread_meta(thread_id)
-                if meta is not None and meta[0] == "chat" and record.get("turn_id"):
+                # The owner's Compact button is no reply: the chat keeps
+                # whatever it was (never unread or failed because of it).
+                if (meta is not None and meta[0] == "chat" and record.get("turn_id")
+                        and not record.get("compaction")):
                     side = self._sidecar(self.stores.threads, thread_id)
                     side["last"] = {"turn_id": record["turn_id"], "stop": data.get("stop") or "end",
                                     "at": record.get("at")}

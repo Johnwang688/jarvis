@@ -120,9 +120,11 @@ def _for_turn(record: dict, thread_id: str) -> bool:
     """A bus record `_run_turn` reads: its thread's, not a delta, and not of a
     turn the CLI started by itself (SV-6) or another HUD chat started
     (`relayed`, chat-to-chat O-8) — that turn's words are never this turn's
-    reply — or the daemon's shutdown."""
+    reply — nor the owner's Compact button (`compaction`), or the daemon's
+    shutdown."""
     return ((record.get("thread_id") == thread_id and record.get("kind") != "text_delta"
-             and not record.get("self_started") and not record.get("relayed"))
+             and not record.get("self_started") and not record.get("relayed")
+             and not record.get("compaction"))
             or record.get("kind") == "shutdown")
 
 

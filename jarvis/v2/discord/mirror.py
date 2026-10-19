@@ -927,12 +927,13 @@ class ChatMirror:
                 continue
             turn = row.get("turn_id")
             if (not turn or kind not in TURN_KINDS or row.get("self_started")
-                    or row.get("relayed")):
+                    or row.get("relayed") or row.get("compaction")):
                 # A turn the CLI started by itself after a background
                 # sub-agent finished (SV-6) is never posted: the owner's
                 # decision, 2026-10-15. Nor a turn another HUD chat's
-                # message or reply started (chat-to-chat O-8). Each of its
-                # records is passed over.
+                # message or reply started (chat-to-chat O-8), nor the
+                # owner's Compact button (CB-5). Each of its records is
+                # passed over.
                 posts.append(_Post(chat_id, target, action="marker", through=cursor + 1))
                 cursor += 1
                 continue

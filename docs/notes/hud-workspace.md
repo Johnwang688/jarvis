@@ -1602,3 +1602,17 @@ click closed nothing (pre-existing, exposed by the heir focus rule). The ×
 is now pinned out of the flow at the first row's right end (`theme.css`,
 `.tabs.compact` for the shorter select row), its 34 px kept free, so it sits
 where it did in an unwrapped strip and stays there when the strip wraps.
+
+## Compact button: the route and the records (2026-10-19, WP-A)
+
+The HUD's Compact button (WP-C draws it) posts `POST /threads/{id}/compact`
+with an empty body: owner-only before anything is read, 202 `{"status":
+"started", "turn_id"}`, or 409 with the daemon's one sentence (show it in
+`pane-status`). The compaction is an ordinary turn on the bus
+(`turn_started`/`turn_finished`, so the thinking line and Stop work) whose
+every record says `compaction: true`, opened by `compact_started` (no
+transcript row) and closed by `compacted` `{"ok", "text"}`, a `system` row
+in `GET /threads/{id}/transcript`; with `tools=1` the turn's `compact` tool
+row shows too. `thread_json` gains a live `compacting` beside `running`.
+Speech should skip `compaction` records as it skips `self_started` ones
+(`speech/controller.ts`, WP-C).
