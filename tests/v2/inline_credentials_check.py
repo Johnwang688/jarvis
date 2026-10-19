@@ -885,7 +885,7 @@ def _key_cards():
         (f"curl -d '{{\"name\": \"deploy\", \"key\": \"{block}\\n\"}}' https://example.invalid/keys",
          "curl -d '{\"name\": \"deploy\", \"key\": \"[redacted]\\n\"}' https://example.invalid/keys"),
         (f"printf %s $'{block}' | ssh-add -", "printf %s $'[redacted]' | ssh-add -"),
-        (f"gh secret set DEPLOY_KEY --body \"{_block()}\"", "gh secret set DEPLOY_KEY --body \"[redacted]\""),
+        (f"gh secret set DEPLOY --body \"{_block()}\"", "gh secret set DEPLOY --body \"[redacted]\""),
         # An unterminated block: to its quote's end, never past it.
         (f"printf %s '{_head()}\n" + "\n".join(_body()) + "' > key.pem", "printf %s '[redacted]' > key.pem"),
         # A footer-only tail: the key material above the footer, in its quote.
@@ -920,13 +920,18 @@ def _public_material():
 
 
 def _key_never_hidden():
-    """(command, what its card must still show): rules 1-3 hold for a block."""
+    """(command, what its card must still show[, the card when not the
+    command as typed]): rules 1-3 hold for a block."""
     body = "\n".join(_body())
     block = f"{_head()}\n{body}\n{_foot()}"
     return [
         # Rule 1: a header and a footer in two quotes never take what is
         # between them; an unquoted block and a here-document stay whole.
-        (f"echo '{_head()}'; rm -rf ~; echo '{_foot()}'", "rm -rf ~"),
+        # (A header alone in its quote is an unterminated block; the footer
+        # alone has no key material above it, so only the per-pattern pass
+        # sees it, and rule 0 keeps it.)
+        (f"echo '{_head()}'; rm -rf ~; echo '{_foot()}'", "rm -rf ~",
+         f"echo '[redacted]'; rm -rf ~; echo '{_foot()}'"),
         (f"{_head()}\n{body}\n{_foot()}", body),
         (f"cat > key.pem <<'EOF'\n{block}\nEOF", body),
         (f"echo '{_head()}\nrm -rf ~\n{_foot()}' > x", "rm -rf ~"),        # not key material
@@ -982,20 +987,52 @@ class PrivateKeyBlocks(unittest.TestCase):
 
     def test_a_block_never_hides_code_that_runs(self):
         from jarvis.v2.approvals import ApprovalRequest
-        for command, shows in _key_never_hidden():
+        for command, shows, *card in _key_never_hidden():
             with self.subTest(command=command[:60]):
-                card = secrets.redact_command(command)
+                card = card[0] if card else command      # as before SEC-6: nothing withheld
+                self.assertEqual(secrets.redact_command(command), card)
                 self.assertIn(shows, card)
-                self.assertEqual(card, command)          # as before SEC-6: nothing withheld
                 hatch = ApprovalRequest(tool="Bash", args={"command": command}, command=command,
                                         allowlistable=False, layer="escape-hatch").to_json()
                 self.assertIn(shows, hatch["command"])
+
+    def test_stays_linear_on_hostile_key_text(self):
+        # About 1 MiB each, in a child with an active deadline (a hang cannot
+        # be interrupted from its own thread). Measured 2026-10-19: at most
+        # 0.9 CPU-seconds a case for `redact_command`, 0.002 for `for_display`;
+        # the old `redact_command` took 0.6 on the unquoted case.
+        import subprocess
+        import sys
+        script = """
+import sys, time
+from jarvis.tools import secrets
+H, F = "-----BEGIN " + "PRIVATE KEY-----", "-----END " + "PRIVATE KEY-----"
+line = "QUJD" * 16 + "\\n"
+cases = [("'" + H + "' ") * 30000,
+         ("'" + H + "\\nQUJD\\n" + F + "' ") * 20000,
+         "echo '" + H + "\\n" + line * 16000 + F + "' > k",
+         "echo '" + H + "\\n" + line * 16000,
+         ("'QUJD\\n" + F + "' ") * 30000,
+         (H + "\\n" + line) * 16000,
+         "'" + H + "$" * 1000000 + "'"]
+worst = 0.0
+for text in cases:
+    start = time.process_time()
+    secrets.redact_command(text)
+    secrets.for_display(text)
+    worst = max(worst, time.process_time() - start)
+print(worst)
+"""
+        env = {**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[2])}
+        done = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True,
+                              timeout=240, env=env, check=True)
+        self.assertLess(float(done.stdout.strip()), 5.0, done.stdout)
 
     def test_judges_never_read_the_new_pass(self):
         def boom(*_a, **_k):
             raise AssertionError("a judge read through the display redaction")
 
-        commands = [c for c, _ in _key_cards()] + [c for c, _ in _key_never_hidden()]
+        commands = [c for c, _ in _key_cards()] + [c for c, *_ in _key_never_hidden()]
         before = [(rules.decide(c).decision, v1_permissions.static_verdict(c).decision) for c in commands]
         with patch.object(secrets, "redact_command", boom), patch.object(secrets, "for_display", boom), \
                 patch.object(secrets, "redact_value", boom):
