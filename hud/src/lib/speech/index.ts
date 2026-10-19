@@ -12,81 +12,50 @@ import { SAY_LOCAL_ONLY } from "./policy";
 import { DuckLease } from "./duck";
 import { SpeakerGate, bindFocus, browserLocks } from "./speaker";
 import { ThreadVoices } from "./voices";
+import { readKey, writeKey } from "../storage";
 
 const KEY = "jarvis.readAloud";
 
 /** Read-aloud on/off, a per-window convenience kept in localStorage (default on). */
 export function loadReadAloud(storage?: Pick<Storage, "getItem">): boolean {
-  try {
-    return (storage ?? window.localStorage).getItem(KEY) !== "off";
-  } catch {
-    return true;
-  }
+  return readKey(KEY, storage) !== "off";
 }
 
 export function saveReadAloud(on: boolean, storage?: Pick<Storage, "setItem">): void {
-  try {
-    (storage ?? window.localStorage).setItem(KEY, on ? "on" : "off");
-  } catch {
-    /* a window with storage blocked still works, it just forgets */
-  }
+  writeKey(KEY, on ? "on" : "off", storage);
 }
 
 const GATE_KEY = "jarvis.selfVoiceGate";
 
 /** Self-voice gating on/off, a per-window convenience (default on). Off is V6's blanket hold: the mic is held for the whole of a reply. */
 export function loadSelfVoiceGate(storage?: Pick<Storage, "getItem">): boolean {
-  try {
-    return (storage ?? window.localStorage).getItem(GATE_KEY) !== "off";
-  } catch {
-    return true;
-  }
+  return readKey(GATE_KEY, storage) !== "off";
 }
 
 export function saveSelfVoiceGate(on: boolean, storage?: Pick<Storage, "setItem">): void {
-  try {
-    (storage ?? window.localStorage).setItem(GATE_KEY, on ? "on" : "off");
-  } catch {
-    /* a window with storage blocked still works, it just forgets */
-  }
+  writeKey(GATE_KEY, on ? "on" : "off", storage);
 }
 
 const DUCK_KEY = "jarvis.duckBrowser";
 
 /** "Lower Browser sound while Jarvis speaks" (V15): a per-window convenience in localStorage, default on. */
 export function loadDuckBrowser(storage?: Pick<Storage, "getItem">): boolean {
-  try {
-    return (storage ?? window.localStorage).getItem(DUCK_KEY) !== "off";
-  } catch {
-    return true;
-  }
+  return readKey(DUCK_KEY, storage) !== "off";
 }
 
 export function saveDuckBrowser(on: boolean, storage?: Pick<Storage, "setItem">): void {
-  try {
-    (storage ?? window.localStorage).setItem(DUCK_KEY, on ? "on" : "off");
-  } catch {
-    /* a window with storage blocked still works, it just forgets */
-  }
+  writeKey(DUCK_KEY, on ? "on" : "off", storage);
 }
 
 const NOTICES_KEY = "jarvis.subagentNotices";
 
 /** "Say when a sub-agent finishes or fails" (SV-5): a per-window convenience in localStorage, default on. */
 export function loadSubagentNotices(storage?: Pick<Storage, "getItem">): boolean {
-  try {
-    return (storage ?? window.localStorage).getItem(NOTICES_KEY) !== "off";
-  } catch {
-    return true;
-  }
+  return readKey(NOTICES_KEY, storage) !== "off";
 }
 
 export function saveSubagentNotices(on: boolean, storage?: Pick<Storage, "setItem">): void {
-  try {
-    (storage ?? window.localStorage).setItem(NOTICES_KEY, on ? "on" : "off");
-  } catch {
-    /* a window with storage blocked still works, it just forgets */
-  }
+  writeKey(NOTICES_KEY, on ? "on" : "off", storage);
 }
 
 /** 32 lowercase hex characters, the daemon's lease token for one window. */

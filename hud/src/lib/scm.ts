@@ -25,6 +25,7 @@
 //    with keys to move the selection — see the section below.
 
 import { isEnvName } from "./fileIcons";
+import { basename } from "./paths";
 
 export type DiffMode =
   /** `pane`: a drawn Task pane shows it; `focus`: it was picked more recently than a thread. */
@@ -99,7 +100,6 @@ export interface ScmRow {
   env: boolean;
 }
 
-const base = (p: string) => p.slice(p.lastIndexOf("/") + 1);
 const trim = (p: string) => p.replace(/^\/+|\/+$/g, "");
 
 /** The part of `git/status`'s answer the list needs. */
@@ -118,7 +118,7 @@ export function scmRows(status: ScmStatusLike | null | undefined): ScmRow[] {
     const path = trim(raw);
     if (!path || typeof state !== "string" || !LISTED.has(state)) continue;
     const s = state as ScmState;
-    out.push({ path, state: s, letter: SCM_LETTER[s], folder: false, env: isEnvName(base(path)) });
+    out.push({ path, state: s, letter: SCM_LETTER[s], folder: false, env: isEnvName(basename(path)) });
   }
   const dirs = status.dirs && typeof status.dirs === "object" ? status.dirs : {};
   for (const [raw, state] of Object.entries(dirs)) {

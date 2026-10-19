@@ -12,6 +12,7 @@
 // all, which is also what keeps an agent-written page from being a script
 // source for the window that gates approvals.
 
+import { basenameOrPath } from "./paths";
 import type * as MonacoNS from "monaco-editor/editor";
 
 export type Monaco = typeof MonacoNS;
@@ -219,7 +220,7 @@ export async function makeModel(text: string, abs: string, kind: string) {
 export function relanguage(model: any, abs: string, kind: string) {
   const m = loaded;
   if (!m || !model || typeof model.getLanguageId !== "function" || model.isDisposed?.()) return;
-  const name = abs.slice(abs.lastIndexOf("/") + 1) || abs;
+  const name = basenameOrPath(abs);
   const id = kind === "env" ? ENV_LANGUAGE : monacoLanguage(name, model.getLineCount?.() ? model.getLineContent(1) : "");
   if (id && id !== model.getLanguageId()) m.editor.setModelLanguage(model, id);
 }

@@ -21,6 +21,8 @@
 // A keyboard activation (Enter/Space on a focused button) has no pointer
 // position, so it bursts from the button's centre.
 
+import { readKey, writeKey } from "./storage";
+
 export const SPARKLE_KEY = "jarvis.hud.sparkle";
 /** Glyphs per click: "a few". */
 export const BURST_MIN = 5;
@@ -35,19 +37,11 @@ const REACH_MAX = 30;
 export const LAYER_ID = "sparkle-layer";
 
 export function loadSparkle(storage?: Pick<Storage, "getItem">): boolean {
-  try {
-    return (storage ?? window.localStorage).getItem(SPARKLE_KEY) !== "0";
-  } catch {
-    return true;
-  }
+  return readKey(SPARKLE_KEY, storage) !== "0";
 }
 
 export function saveSparkle(on: boolean, storage?: Pick<Storage, "setItem">): void {
-  try {
-    (storage ?? window.localStorage).setItem(SPARKLE_KEY, on ? "1" : "0");
-  } catch {
-    /* the window just forgets */
-  }
+  writeKey(SPARKLE_KEY, on ? "1" : "0", storage);
 }
 
 export interface SparkleHost {

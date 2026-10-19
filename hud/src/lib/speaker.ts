@@ -12,6 +12,8 @@
 // gate or an approval card. Guest voice only changes what the daemon does with a
 // clip; `guestLabel` is the only thing the rest of the window reads.
 
+import { readKey } from "./storage";
+
 export type SpeakerStateName = "not_enrolled" | "enrolling" | "enrolled" | "stale" | "damaged" | "unsafe";
 /** What `/stt?verify=1` does now: nobody enrolled (off), Guest voice, verifying (on), or enrolled but unable to (blocked). */
 export type SpeakerMode = "off" | "guest" | "on" | "blocked";
@@ -196,7 +198,7 @@ export function speakerLabel(v: Pick<SpeakerView, "guest" | "mode" | "wasEnrolle
 
 const SEEN_KEY = "jarvis.speaker.seenEnrolled";
 const memory = {
-  read(): boolean { try { return localStorage.getItem(SEEN_KEY) === "1"; } catch { return false; } },
+  read(): boolean { return readKey(SEEN_KEY, () => localStorage) === "1"; },
   write(on: boolean) { try { if (on) localStorage.setItem(SEEN_KEY, "1"); else localStorage.removeItem(SEEN_KEY); } catch { /* per-window convenience only */ } },
 };
 

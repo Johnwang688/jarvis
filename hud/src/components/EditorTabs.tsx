@@ -6,6 +6,7 @@
 
 import type { Tabs } from "../lib/buffers";
 import { FileIcon } from "./FileIcon";
+import { basenameOrPath } from "../lib/paths";
 
 export interface TabInfo {
   dirty: boolean;
@@ -16,8 +17,6 @@ export interface TabInfo {
   /** A save is on its way (or a second one waits for it): a hollow dot. */
   saving?: boolean;
 }
-
-const base = (path: string) => path.slice(path.lastIndexOf("/") + 1) || path;
 
 export function EditorTabs(props: {
   tabs: Tabs;
@@ -30,14 +29,14 @@ export function EditorTabs(props: {
   if (!tabs.paths.length) return null;
   // Two tabs with one name say which folder each is in.
   const names = new Map<string, number>();
-  for (const p of tabs.paths) names.set(base(p), (names.get(base(p)) || 0) + 1);
+  for (const p of tabs.paths) names.set(basenameOrPath(p), (names.get(basenameOrPath(p)) || 0) + 1);
   return (
     <div className="edtabs" data-testid="editor-tabs" role="tablist">
       {tabs.paths.map((path) => {
         const i = props.info(path);
         const active = tabs.active === path;
         const preview = tabs.preview === path;
-        const label = (names.get(base(path)) || 0) > 1 ? path : base(path);
+        const label = (names.get(basenameOrPath(path)) || 0) > 1 ? path : basenameOrPath(path);
         return (
           <div
             key={path}
@@ -73,7 +72,7 @@ export function EditorTabs(props: {
             {/* The explorer's own icon (components/FileIcon.tsx, lib/fileIcons.ts:
                 one source of truth), decorative; an env file wears the lock
                 there, so its words are for assistive technology only. */}
-            <FileIcon name={base(path)} policy={i.mark === "env" ? "env" : null} />
+            <FileIcon name={basenameOrPath(path)} policy={i.mark === "env" ? "env" : null} />
             {i.mark === "env" ? <span className="edtab-mark">Jarvis can't read this file</span> : null}
             <span className="edtab-name">{label}</span>
             {/* Dirty: the dot stands where × is, and hovering or focusing the

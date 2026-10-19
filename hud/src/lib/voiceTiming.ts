@@ -6,6 +6,7 @@
 // vad.ts, not settings.
 
 import { END_PAUSE_MAX_MS, END_PAUSE_MIN_MS, END_PAUSE_MS } from "./vad";
+import { readKey, writeKey } from "./storage";
 
 const KEY = "jarvis.hud.voice.endPauseMs";
 
@@ -17,18 +18,10 @@ export function clampEndPause(ms: number): number {
 }
 
 export function loadEndPause(storage?: Pick<Storage, "getItem">): number {
-  try {
-    const raw = (storage ?? window.localStorage).getItem(KEY);
-    return raw === null ? END_PAUSE_MS : clampEndPause(Number(raw));
-  } catch {
-    return END_PAUSE_MS;
-  }
+  const raw = readKey(KEY, storage);
+  return raw === null ? END_PAUSE_MS : clampEndPause(Number(raw));
 }
 
 export function saveEndPause(ms: number, storage?: Pick<Storage, "setItem">): void {
-  try {
-    (storage ?? window.localStorage).setItem(KEY, String(clampEndPause(ms)));
-  } catch {
-    /* forgets, still works */
-  }
+  writeKey(KEY, String(clampEndPause(ms)), storage);
 }

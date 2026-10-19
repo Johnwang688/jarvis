@@ -15,6 +15,8 @@
 // them, so VS Code's yellow `{}` and orange HTML are not copied
 // (fileIcons.test.ts holds every colour to that, from theme.css's own text).
 
+import { basename } from "./paths";
+
 /** The colours an icon may be drawn in: the editor's syntax hues and the quiet text tokens. */
 export const ICON_TOKENS = [
   "--syn-fn", "--syn-string", "--syn-const", "--syn-type", "--text-2", "--text-muted",
@@ -133,7 +135,7 @@ export function isEnvName(name: string): boolean {
  * daemon's word): `env` is the lock whatever the name.
  */
 export function iconFor(name: string, policy?: string | null): IconId {
-  const base = name.slice(name.lastIndexOf("/") + 1);
+  const base = basename(name);
   const lower = base.toLowerCase();
   if (policy === "env" || isEnvName(base)) return "env";
   const whole = NAMES[lower];
