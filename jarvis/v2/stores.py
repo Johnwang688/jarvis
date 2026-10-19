@@ -130,7 +130,13 @@ def _read_lines(path: Path) -> list[dict[str, Any]]:
             unfinished = False     # the cut line is gone; what is left ends in a newline
         else:
             raise StoreError(f"{path}: {exc}") from exc
-    lines = text.splitlines()
+    # Records end at "\n" only: JSON escapes \n and \r inside strings, but
+    # `ensure_ascii=False` leaves U+2028, U+0085 and friends raw, and
+    # `str.splitlines()` would cut a record at any of them.
+    lines = text.split("\n")
+    if lines[-1] == "":
+        lines.pop()                    # nothing after the final newline
+    lines = [line[:-1] if line.endswith("\r") else line for line in lines]
     result = []
     for number, line in enumerate(lines, 1):
         try:

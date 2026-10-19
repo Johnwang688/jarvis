@@ -321,6 +321,26 @@ def torn_read(root: Path) -> None:
     print(f"ok  torn read: {total} reads beside a large-record writer saw only whole records")
 
 
+def separator_characters(root: Path) -> None:
+    """Characters `str.splitlines()` treats as line breaks are data inside a record."""
+    stores = Stores(root)
+    thread = chat(stores)
+    odd = "\u2028\u2029\u0085\x0b\x0c\x1c\x1d\x1e"
+    texts = [f"a{odd}b", "before", f"{odd[0]}", f"mid{odd}{odd}end", "after"]
+    for text in texts:
+        stores.threads.log(thread.id, "you", text)
+    assert [row["text"] for row in stores.threads.read_log(thread.id)] == texts
+    task = stores.tasks.create("01234567", "Journal")
+    stores.tasks.journal(task.id, "step", note=f"x{odd}y")
+    stores.tasks.journal(task.id, "step", note="next")
+    assert [row["note"] for row in stores.tasks.read_journal(task.id)] == [f"x{odd}y", "next"]
+    # CRLF files (and a CRLF-ended one) still read; a record is never split inside a line.
+    log = stores.threads.path(thread.id).with_name("log.jsonl")
+    log.write_bytes(log.read_bytes().replace(b"\n", b"\r\n"))
+    assert [row["text"] for row in stores.threads.read_log(thread.id)] == texts
+    print("ok  separators: U+2028/2029/0085, VT, FF, FS/GS/RS inside records round-trip; CRLF still reads")
+
+
 def hashes(root: Path) -> dict[str, str]:
     return {str(path.relative_to(root)): hashlib.sha256(path.read_bytes()).hexdigest()
             for path in sorted(root.rglob("*")) if path.is_file()}
@@ -406,7 +426,7 @@ def migration(root: Path) -> None:
 
 def main() -> int:
     for check in (round_trip, lazy_and_ids, inbox_and_atomic, transitions_and_delete,
-                  all_transition_edges, append_and_corruption, torn_read, migration):
+                  all_transition_edges, append_and_corruption, torn_read, separator_characters, migration):
         with tempfile.TemporaryDirectory() as tmp:
             check(Path(tmp) / "data")
     print("\nall v2 store checks passed")
