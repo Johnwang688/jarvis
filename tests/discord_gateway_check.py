@@ -8,16 +8,23 @@ turn → spoken-reply pipeline with STT/TTS/download stubbed, every failure
 becoming a text reply, and — via the real face server — that a transcription
 can never resolve a pending authorization.
 
-Live (needs the real token bundle; skipped without it): connects to the real
-Gateway, completes HELLO -> IDENTIFY -> READY, and confirms the bot
-identity. No messages are sent.
+Live (opt-in: needs JARVIS_LIVE_DISCORD=1 *and* the real token bundle; skipped
+otherwise): connects to the real Gateway as the owner's bot, completes
+HELLO -> IDENTIFY -> READY, and confirms the bot identity. No messages are
+sent. Opt-in since 2026-10-18: a sweep or a reviewer agent must never use the
+owner's real token by default (CLAUDE.md: tests never use real tokens), and a
+"skip" that passes made a green run say nothing about the live path anyway.
+Run it on purpose when a change touches the Gateway or the Discord login, and
+report the result as live-validated.
 
 Run:  .venv/bin/python tests/discord_gateway_check.py
+Live: JARVIS_LIVE_DISCORD=1 .venv/bin/python tests/discord_gateway_check.py
 """
 
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 import types
@@ -240,7 +247,13 @@ def approval_isolation_check() -> None:
     print("ok  approvals: typed replies resolve them, voice notes never do")
 
 
+LIVE_FLAG = "JARVIS_LIVE_DISCORD"
+
+
 def live_handshake_check() -> None:
+    if os.environ.get(LIVE_FLAG) != "1":
+        print(f"skip live handshake: set {LIVE_FLAG}=1 to run it (uses the real bot token)")
+        return
     if not config.DISCORD_TOKEN_PATH.exists():
         print("skip live handshake: no token bundle")
         return
