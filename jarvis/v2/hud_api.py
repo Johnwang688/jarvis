@@ -2198,6 +2198,22 @@ def route(handler, daemon, parts, query):
                                     "thread_id": thread.id, "from_project_id": previous,
                                     "to_project_id": target.id}})
             return 200, to_json(thread)
+    if (len(parts) == 5 and parts[0] == "threads" and parts[2] == "relays"
+            and parts[4] == "withdraw" and method == "POST"):
+        # The owner's Withdraw on a message one chat queued for another
+        # (chat-to-chat §5.5): the owner's alone, checked before anything is
+        # looked up. No route sends (P-3).
+        from .projects import owner_only
+        owner_only(handler, daemon)
+        _object(query, ())
+        thread = daemon.require(stores.threads, parts[1])
+        from .chat_relay import RelayConflict
+        try:
+            return 200, daemon.chat_relay.withdraw(thread.id, parts[3])
+        except LookupError as exc:
+            fail(404, str(exc))
+        except RelayConflict as exc:
+            fail(409, str(exc))
     if len(parts) == 3 and parts[0] == "threads" and parts[2] in ("transcript", "send"):
         thread = daemon.require(stores.threads, parts[1])
         if parts[2] == "send" and method == "POST":
@@ -2230,14 +2246,27 @@ def route(handler, daemon, parts, query):
             # dropped. One still waiting must be in the live queue: after a
             # crash or restart nothing is, and it never ran.
             fate, requeued = {}, set()
+            # Chat-to-chat (§7): what became of each relay, folded into its
+            # rows from the relay records and the live service.
+            relay_fate, relay_status, relay_delivery, relay_ids = {}, {}, {}, set()
             for row in rows:
-                mid = (row.get("data") or {}).get("message_id")
+                data = row.get("data") if isinstance(row.get("data"), dict) else {}
+                mid = data.get("message_id")
                 if not isinstance(mid, str):
                     continue
                 if row.get("kind") in ("queued_started", "queued_dropped"):
                     fate[mid] = row["kind"]
                 elif row.get("kind") == "steer_queued":
                     requeued.add(mid)
+                elif row.get("kind") == "relay_state":
+                    relay_fate[mid] = data
+                elif row.get("kind") == "relay_reply":
+                    relay_status[mid] = data.get("status")
+                elif row.get("kind") == "relay_delivered":
+                    relay_delivery[mid] = data.get("delivery")
+                if row.get("kind") in _RELAY_ROWS:
+                    relay_ids.add(mid)
+            relay_live = daemon.chat_relay.describe(relay_ids) if relay_ids else {}
             with daemon._lock:
                 live = {item.message_id for item in daemon._queues.get(thread.id) or ()}
                 session = daemon._sessions.get(thread.id)
@@ -2257,6 +2286,14 @@ def route(handler, daemon, parts, query):
                     messages.append(tools[index])
                     continue
                 kind = row.get("kind")
+                if kind in _RELAY_ROWS:
+                    message = _relay_message(row, relay_fate, relay_status, relay_delivery,
+                                             relay_live)
+                    if message is not None:
+                        if query.get("tools") == "1" and isinstance(row.get("turn_id"), str):
+                            message["turn_id"] = row["turn_id"]
+                        messages.append(message)
+                    continue
                 if kind not in (None, "text", "user", "model_set", "notice", "cli_turn"):
                     continue
                 data = row.get("data", row)
@@ -2324,6 +2361,45 @@ def route(handler, daemon, parts, query):
             _object(query, ("path",), ("path",))
             return 200, diff(daemon, task, query["path"])
     return None
+
+
+_RELAY_ROWS = {"relay_in": "in", "relay_out": "out", "relay_reply": "reply"}
+# A relay's state from its reply's status (`chat_relay._FINAL_STATE`).
+_REPLY_STATE = {"answered": "answered", "empty": "answered", "stopped": "stopped",
+                "failed": "failed"}
+
+
+def _relay_message(row, fates, statuses, deliveries, live) -> dict | None:
+    """One relay record as a transcript row (chat-to-chat §7): never the
+    owner's, always `role: "relay"`. Its state comes from the relay's own
+    records, then the live service; a message neither knows (Jarvis
+    restarted before it ran) is "not delivered"."""
+    data = row.get("data")
+    if not isinstance(data, dict) or not isinstance(data.get("message_id"), str):
+        return None
+    mid = data["message_id"]
+    direction = _RELAY_ROWS[row["kind"]]
+    now = live.get(mid) or {}
+    fate = fates.get(mid) or {}
+    status = statuses.get(mid) or now.get("status")
+    if direction == "in":
+        state = fate.get("state") or now.get("state")
+    else:
+        state = (_REPLY_STATE.get(statuses.get(mid)) or fate.get("state")
+                 or now.get("state"))
+    if state is None:
+        state = "not delivered"
+    reason = fate.get("reason") or now.get("reason")
+    relay = {"dir": direction, "message_id": mid,
+             "peer": {"thread_id": data.get("to") if direction == "out" else data.get("from"),
+                      "title": data.get("title"), "provider": data.get("provider")},
+             "state": state, "status": status,
+             "delivery": deliveries.get(mid) or now.get("delivery")}
+    if isinstance(reason, str):
+        relay["reason"] = reason
+    text = data.get("text")
+    return {"role": "relay", "relay": relay, "text": text if isinstance(text, str) else "",
+            "at": row.get("at")}
 
 
 def connect_controls(daemon):

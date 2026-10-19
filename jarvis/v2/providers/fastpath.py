@@ -692,8 +692,11 @@ class FastPathProvider:
         with native.inbox_lock:
             if not native.accepting:
                 raise SteerRefused("no turn is running")
-            if not _at_desk(native.brief, message):
-                native.desk["present"] = False          # the rest of this turn is off the desk
+            if not _at_desk(native.brief, message) and message.origin != "chat-reply":
+                # The rest of this turn is off the desk. Except for another
+                # chat's reply to this turn's own message (P-7, O-2): it
+                # answers this turn's call and takes nothing from it.
+                native.desk["present"] = False
             native.inbox.append((message, text, list(message.images)))
 
     def undelivered(self, h: SessionHandle) -> list[UserMessage]:
@@ -709,8 +712,10 @@ class FastPathProvider:
     @classmethod
     def _take_steering(cls, native: _Native) -> list:
         """v1's `Agent.take_steering`: everything steered in since the last
-        step, as `(text, images)`. Called on the turn's worker thread, at the
-        step boundary, before the next request is built.
+        step, as `(text, images)` — or `(text, images, "")` for another chat's
+        reply, which carries its own header and is never labelled the owner's
+        steering. Called on the turn's worker thread, at the step boundary,
+        before the next request is built.
 
         A turn a steer took off the desk loses `DESK_TOOLS` and `EDIT_TOOLS`
         here, for the rest of the turn: the next request carries neither
@@ -727,7 +732,8 @@ class FastPathProvider:
 
             names = cls._turn_tools(native, False)
             runtime.bind(tool_names=set(names), ask_tools=frozenset())
-        return [(text, images or None) for _message, text, images in taken]
+        return [(text, images or None, "") if message.origin == "chat-reply"
+                else (text, images or None) for message, text, images in taken]
 
     def answer(self, h: SessionHandle, req_id: str, decision: Decision | str) -> None:
         raise ValueError(
@@ -833,6 +839,11 @@ class FastPathProvider:
         # Set per turn, before `run_turn` reads it; exhaustion still proposes.
         native.agent.max_steps = (FAST_EDIT_MAX_STEPS if EDIT_TOOLS <= set(names)
                                   else FAST_MAX_STEPS)
+        if message.origin == "chat-reply":
+            # A reply turn reports another chat's answer; it starts no work
+            # (chat-to-chat §5.3).
+            from ..chat_relay import REPLY_TURN_STEPS
+            native.agent.max_steps = REPLY_TURN_STEPS
         # Edits reach the gate as commands do (decision F-3), on this turn only.
         asked_tools = ASKED_TOOLS & set(names)
 

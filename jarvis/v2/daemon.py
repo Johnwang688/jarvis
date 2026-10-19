@@ -299,6 +299,15 @@ class _Session:
     # turn (after every event it read before it), so a turn that ends may
     # take it up in that order (`_maybe_cli`).
     cli_offered: bool = False
+    # Chat-to-chat (chat_relay.py, plan §5): the relay item this turn runs
+    # for — a message from another chat, or that chat's reply coming back —
+    # and the `relayed` field stamped on every record of it; None for any
+    # other turn. Such a turn is never at the desk and never sends (no
+    # chains). `relay_steered`: replies steered into the running turn, for
+    # the provider to hand back any it never took (never the owner's queue).
+    relay_turn: object = field(default=None, repr=False)
+    relay_mark: dict | None = field(default=None, repr=False)
+    relay_steered: list = field(default_factory=list, repr=False)
 
 
 class Daemon:
@@ -1109,6 +1118,8 @@ class Daemon:
             session = self._sessions.get(thread.id)
             record["running"] = session is not None and session.worker is not None
             record["queued"] = len(self._queues.get(thread.id) or ())
+            # Other chats' messages waiting on it, and its own still out.
+            record.update(self.chat_relay.counts(thread.id))
             # When that turn began (WP-H, H-b): present only while it runs, so
             # a reloaded HUD's thinking line shows the true elapsed time.
             if record["running"] and session.running_since:
@@ -1364,11 +1375,17 @@ class Daemon:
             from .browser.drive import retire_turn
             retire_turn(turn.key)
 
-    def _begin(self, session, message, data, *, queued: "_Queued | None" = None) -> str:
+    def _begin(self, session, message, data, *, queued: "_Queued | None" = None,
+               relay=None) -> str:
         """Under the lock: start a turn. `queued` is a message that waited:
         its `user` record is already in the log, so its turn opens with a
-        `queued_started` record instead of a second one."""
+        `queued_started` record instead of a second one. `relay` (a
+        `chat_relay.RelayStart`) is another chat's message or its reply: the
+        turn opens with the relay's own record, never `user` (P-8), and is
+        never at the desk (its message is not the owner's)."""
         thread_id = session.thread.id
+        session.relay_turn = relay.item if relay is not None else None
+        session.relay_mark = relay.mark if relay is not None else None
         session.cancelled.clear()
         session.owner_stopped = False
         session.steered = []
@@ -1386,7 +1403,9 @@ class Daemon:
         worker = threading.Thread(target=self._turn, args=(session, message),
                                   name=f"jarvis-turn-{thread_id}", daemon=True)
         turn_id = session.turn_id
-        if queued is None:
+        if relay is not None:
+            self.chat_relay.opened(session, relay, turn_id)
+        elif queued is None:
             self.stores.threads._append(thread_id, "log.jsonl",
                                         {"kind": "user", "at": utcnow(), "turn_id": turn_id,
                                          "thread_id": thread_id, "data": data})
@@ -1532,6 +1551,7 @@ class Daemon:
         session.turn_id = uuid.uuid4().hex
         session.self_started = True
         session.cli_offered = False
+        session.relay_turn = session.relay_mark = None
         self._retire_drive(session)
         record = {"kind": "cli_turn", "at": utcnow(), "turn_id": session.turn_id,
                   "thread_id": thread_id, "project_id": session.thread.project_id,
@@ -1616,9 +1636,14 @@ class Daemon:
 
     def _drain(self, thread_id) -> None:
         """Run the next waiting message as its own turn, if the thread is idle.
-        Resumes the session if the turn before dropped it."""
+        Resumes the session if the turn before dropped it.
+
+        The owner's queue first, always; only when it is empty, another
+        chat's message waiting on this thread, then a reply held for it
+        (chat_relay.py, P-4): two queues, never one."""
         with self._lock:
-            if self._stopping or thread_id in self._interrupting or not self._queues.get(thread_id):
+            if (self._stopping or thread_id in self._interrupting
+                    or not (self._queues.get(thread_id) or self.chat_relay.pending(thread_id))):
                 return
             session = self._sessions.get(thread_id)
             if session is not None and (session.worker is not None or session.closing
@@ -1631,24 +1656,36 @@ class Daemon:
         except Exception as exc:  # noqa: BLE001
             LOG.warning("Thread %s could not resume for its queued message (%s)",
                         thread_id, type(exc).__name__)
+            reason = f"the thread could not resume ({type(exc).__name__})"
             with self._lock:
-                stored = self.stores.threads.get(thread_id)
+                try:
+                    stored = self.stores.threads.get(thread_id)
+                except StoreError:
+                    stored = None
                 if stored is not None:
-                    self._drop_waiting(stored, f"the thread could not resume ({type(exc).__name__})")
+                    self._drop_waiting(stored, reason)
+                self.chat_relay.thread_closed(thread_id, reason)
             return
         with self._lock:
             waiting = self._queues.get(thread_id)
-            if self._stopping or thread_id in self._interrupting or not waiting or session.worker is not None:
+            if (self._stopping or thread_id in self._interrupting or session.worker is not None
+                    or not (waiting or self.chat_relay.pending(thread_id))):
                 return
             try:
                 self._sendable(session)
             except DaemonError as exc:
                 self._drop_waiting(session.thread, str(exc))
+                self.chat_relay.thread_closed(thread_id, str(exc))
                 return
             if self._maybe_cli(session, eager=True):
                 return      # the CLI's own turn first; its end drains the queue
-            item = waiting.popleft()
-            self._begin(session, item.message, item.data, queued=item)
+            if waiting:
+                item = waiting.popleft()
+                self._begin(session, item.message, item.data, queued=item)
+                return
+            start = self.chat_relay.next_start(session)
+            if start is not None:
+                self._begin(session, start.message, None, relay=start)
 
     # -- approvals (design §6) ---------------------------------------------
 
@@ -1729,6 +1766,8 @@ class Daemon:
             return
         # Scrub reads credential files: never do this while holding _lock.
         log_fields = _log_fields(event.data)
+        # A relayed turn's text for its sender's stream, scrubbed here too.
+        progress = self.chat_relay.progress_text(session, event)
         tool_label = None
         if event.kind == EventKind.TOOL_STARTED:
             from .tool_calls import label
@@ -1774,6 +1813,11 @@ class Daemon:
                       "at": utcnow(), "event_id": uuid.uuid4().hex}
             if session.self_started and not idle:
                 record["self_started"] = True
+            if session.relay_mark is not None and not idle:
+                # A turn another chat started, or its reply's: Discord,
+                # speech and the task runner leave it alone (O-8).
+                record["relayed"] = dict(session.relay_mark)
+                self.chat_relay.on_event(session, event, progress)
             data=record.get("data") or {}
             if data.get("name") in ("hud_browser_act", "mcp__jarvis__hud_browser_act"):
                 if event.kind==EventKind.TOOL_STARTED:
@@ -1907,6 +1951,7 @@ class Daemon:
             terminal = None
             worker, turn_id, desk_slot = session.worker, session.turn_id, session.desk.slot
             drive_turn = session.drive_turn
+            relay_item, relay_mark = session.relay_turn, session.relay_mark
         failed = False
         fatal = False
         # Who is calling, on this turn's own thread (a fresh context): an
@@ -1981,7 +2026,9 @@ class Daemon:
                 # thread working across the gap rather than flashing unread.
                 upcoming = 0 if session.closing or self._stopping else (
                     len(self._queues.get(session.thread.id) or ())
-                    + (0 if session.owner_stopped else len(leftover)))
+                    + (0 if session.owner_stopped else len(leftover))
+                    + self.chat_relay.pending(session.thread.id))
+            stop = "end"
             try:
                 stop = "interrupted" if session.cancelled.is_set() else "error" if failed else "end"
                 if terminal is None:
@@ -1993,6 +2040,14 @@ class Daemon:
                 self._finish(session, terminal)
             except Exception:
                 LOG.exception("Cannot finish thread %s", session.thread.id)
+            try:
+                # Before the worker is cleared: a relayed turn's reply goes
+                # back to its sender (chat_relay.py, §5.3), and a sending
+                # turn's budget ends with it.
+                stop = (terminal.data or {}).get("stop", stop) if terminal is not None else stop
+                self.chat_relay.turn_ended(session, turn_id, relay_item, relay_mark, stop, failed)
+            except Exception:
+                LOG.exception("Cannot pass on the relay of thread %s", session.thread.id)
             finally:
                 with self._lock:
                     session.worker = None
@@ -2006,7 +2061,12 @@ class Daemon:
                             waiting = self._queues.setdefault(session.thread.id, deque())
                             for item in reversed(leftover):
                                 self._requeue(session.thread, item, waiting, front=True)
-                    drain = bool(self._queues.get(session.thread.id)) and not session.closing
+                    # Chat replies steered into this turn that it never took
+                    # run as reply turns of their own; never the owner's queue.
+                    self.chat_relay.handed_back(session, returned)
+                    session.relay_turn = session.relay_mark = None
+                    drain = (bool(self._queues.get(session.thread.id))
+                             or bool(self.chat_relay.pending(session.thread.id))) and not session.closing
                     # A fatal turn error, or a provider that closed the session
                     # under us (Codex does on any RpcError), strands the
                     # session: every later send would answer "session is
@@ -2075,6 +2135,9 @@ class Daemon:
             if session.turn_id:
                 session.stopped_turns.append(session.turn_id)
             self._drop_waiting(session.thread, "stopped")
+            # Other chats' messages waiting here are dropped; this turn's own
+            # still waiting elsewhere are withdrawn (chat_relay.py, §5.5).
+            self.chat_relay.thread_stopped(session)
             provider, handle = session.provider, session.handle
             self._interrupting.add(thread_id)
         try:
@@ -2258,6 +2321,7 @@ class Daemon:
                 raise DaemonError("thread is still closing")
             self._sessions.pop(thread_id, None)
             self._drop_waiting(session.thread, "the thread was closed")
+            self.chat_relay.thread_closed(thread_id, "the chat was closed")
         self._lifecycle("thread_closed", session.thread)
 
     def _lifecycle(self, kind, obj):

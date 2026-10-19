@@ -3565,3 +3565,27 @@ The transcript route returns it as a `system` message. A fatal one means
 the provider closed the session, and the next message resumes it. A gate question asked between turns is logged
 (`gate_requested`/`gate_resolved`) with no `turn_id`.
 
+
+## Additions 2026-10-19 (chat-to-chat relay core — C3)
+
+- `POST /threads/{sender}/relays/{message_id}/withdraw` (owner-only: the HUD
+  listener and the HUD's Origin, else 403) withdraws a message one chat
+  queued for another → `{"ok": true, "message_id", "state": "withdrawn"}`;
+  404 for a message this thread did not send, 409 once it is no longer
+  queued. No route sends.
+- `GET /threads/{id}/transcript`: `relay_in`, `relay_out` and `relay_reply`
+  records become `{"role": "relay", "relay": {"dir": "in"|"out"|"reply",
+  "message_id", "peer": {"thread_id", "title", "provider"}, "state",
+  "status", "delivery", "reason"?}, "text", "at"}` — never `user`.
+  `relay_state` and `relay_delivered` records fold into those rows. A
+  message no record or live state accounts for (Jarvis restarted before it
+  ran) has `state: "not delivered"`.
+- Thread records gain `relays_waiting` (other chats' messages queued for it)
+  and `relays_out` (its own sends still queued or running).
+- Log and bus records: `relay_out` (sender), `relay_in` (target, the first
+  record of the relayed turn), `relay_state` (`{message_id, state,
+  reason?}`), `relay_reply` (sender), `relay_delivered` (sender:
+  `{message_id, delivery}`); `relay_progress` (`{message_id, text}`, at most
+  600 scrubbed characters of one complete text) goes on the bus only, on the
+  sender's thread. Every record of a relayed or reply turn carries
+  `relayed: {"message_id", "from", "reply"?}`.

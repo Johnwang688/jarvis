@@ -1512,3 +1512,21 @@ registering modules first) rather than a hard-coded list, so a chat read's
 summary in `log.jsonl` and on the bus is `read`, `refused` or `error`, never
 the text read. The HUD label of a `chat_read`/`chat_summary` row names its
 target (`"chat"` is the last of `tool_calls._KEYS`).
+
+## Messages from other chats (chat-to-chat C3, 2026-10-19)
+
+`UserMessage.origin` gains `"chat"` (another HUD chat's message, which
+starts a turn of its own) and `"chat-reply"` (that chat's reply coming
+back); both arrive with `via="peer"` and `desk=False`, so `desk.desk_message`
+never counts them, forged `desk=True` included. Every provider takes a
+relayed message as an ordinary turn: the fast path's `send`, Claude's
+`client.query`, Codex's `turn/start`.
+
+The fast path's `steer` keeps `native.desk["present"]` for a `chat-reply`
+(P-7/O-2: it answers the running turn's own call); every other non-desk
+steer still takes the turn off the desk. `_take_steering` hands such a reply
+to `Agent._take_steering` as `(text, images, "")`, and `Agent._take_steering`
+now takes an optional third element, the prefix: absent or None is
+`[owner steering]`, byte for byte as before; `""` puts the text in as it is
+(the reply carries its own header). A reply turn (`origin="chat-reply"`) has
+`chat_relay.REPLY_TURN_STEPS` (3) steps.
