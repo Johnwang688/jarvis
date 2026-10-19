@@ -102,6 +102,76 @@ def controls_checks(browser,mock,base,check,until,guard,fake):
         print("Controls workspace:",page.evaluate("window.__hud.workspace()"),flush=True)
         raise
     finally:ctx.close()
+    pane_ten_checks(browser,mock,base,check,until,guard,fake)
+
+def pane_ten_checks(browser,mock,base,check,until,guard,fake):
+    """FS2: a Browser pane with id 10 (slot 2) is published in /browser/front, and its
+    See/Drive changes are accepted by the mock's real BrowserPanes (PANE_MAX 12, FS0)."""
+    print("\nBrowser pane id 10 (FS2)")
+    ctx=browser.new_context(viewport={"width":1600,"height":800})
+    guard(ctx);ctx.add_init_script(fake);Remote(ctx,mock);page=ctx.new_page()
+    page.set_default_timeout(5000);errors=[];page.on("pageerror",lambda e:errors.append(str(e)))
+    try:
+        _boot(page,mock,base,until)
+        panes=[{"view":"chat"} for _ in range(12)]
+        panes[9]={"view":"browser","browserProfile":"p-11111111",
+                  "browser":{"active":"pagedd","tabs":[{"id":"pagedd","url":"https://example.test/ten","mode":"remote"}]}}
+        raw={"preset":"cols2","order":[1,10],"kept":[],"focused":10,"panes":panes}
+        _set_storage(page,zoom="100",layout="{}");_set_ws(page,json.dumps(raw));_boot(page,mock,None,until,reload=True)
+        ws=lambda:page.evaluate("window.__hud.workspace().ws")
+        drawn=ws()["order"]==[1,10] and page.locator(_pane(10)).count()==1
+        check("FS2: a stored Browser pane 10 is drawn in slot 2",drawn
+              and page.locator(_pane(10)).get_attribute("data-slot")=="2"
+              and page.locator(_pane(10)).get_attribute("data-view")=="browser",str(ws()["order"]))
+        if not drawn:return
+        pane=page.locator(_pane(10))
+        until(lambda:pane.locator("canvas").count()==1 and pane.locator("canvas").get_attribute("data-frame")=="ready",timeout=5)
+        fronts=lambda:[b for _,p,b in mock.calls if p=="/browser/front"]
+        mine=lambda b:next((x for x in b.get("panes",[]) if x.get("pane_id")==10),None)
+        until(lambda:any(mine(b) and mine(b)["drawn"] for b in fronts()),timeout=4)
+        last=next((b for b in reversed(fronts()) if mine(b)),None)
+        check("FS2: /browser/front publishes pane_id 10 in slot 2, drawn",last is not None
+              and mine(last)["slot"]==2 and mine(last)["drawn"] is True,str(last and mine(last)))
+        def daemon():
+            with mock.browser_lock:
+                try:snap=mock.browser_panes.resolve("2")
+                except PaneRefused as e:return str(e)
+            return (snap.pane_id,snap.slot,snap.see,snap.drive)
+        until(lambda:isinstance(daemon(),tuple),timeout=4)
+        check("FS2: the daemon's real BrowserPanes accepted it: slot 2 resolves to pane 10",
+              isinstance(daemon(),tuple) and daemon()[:2]==(10,2),str(daemon()))
+        def patches(field,value):
+            return [b for m,p,b in mock.calls if m=="PATCH" and p=="/browser/panes/10" and b.get(field) is value]
+        toggle=pane.locator('[data-testid="browser-options-toggle"]');options=pane.locator('[data-testid="browser-options"]')
+        def show_options(opened):
+            if (toggle.get_attribute("aria-expanded")=="true")!=opened:toggle.click()
+            until(lambda:options.is_visible()==opened,timeout=3)
+        show_options(True)
+        see=pane.locator('[data-testid="browser-see"]');drive=pane.locator('[data-testid="browser-drive"]')
+        until(lambda:see.is_visible() and see.is_checked() and drive.is_enabled() and drive.is_checked(),timeout=4)
+        drive.click();until(lambda:not drive.is_checked(),timeout=3)
+        until(lambda:ws()["panes"][9].get("drive") is False,timeout=3)
+        check("FS2: Drive off on pane 10: PATCH /browser/panes/10 succeeds and the HUD keeps it",
+              bool(patches("drive",False)) and ws()["panes"][9].get("drive") is False and not errors,str(ws()["panes"][9]))
+        see.click();until(lambda:not see.is_checked(),timeout=3)
+        until(lambda:ws()["panes"][9].get("see") is False,timeout=3)
+        check("FS2: See off on pane 10: PATCH /browser/panes/10 succeeds and the HUD keeps it",
+              bool(patches("see",False)) and ws()["panes"][9].get("see") is False,str(ws()["panes"][9]))
+        show_options(False)
+        until(lambda:isinstance(daemon(),tuple),timeout=4)
+        check("FS2: and the daemon holds pane 10 at See off, Drive off",daemon()==(10,2,False,False),str(daemon()))
+        show_options(True)
+        see.click();until(lambda:see.is_checked(),timeout=3)
+        until(lambda:ws()["panes"][9].get("see") is not False,timeout=3)
+        show_options(False)
+        until(lambda:isinstance(daemon(),tuple) and daemon()[2] is True,timeout=4)
+        check("FS2: See back on reaches the daemon for pane 10",bool(patches("see",True))
+              and isinstance(daemon(),tuple) and daemon()[:3]==(10,2,True),str(daemon()))
+        check("FS2: pane 10 raises no page errors and no control listener hits",not errors and not mock.api_hits,str(errors))
+    except Exception as e:  # a failure here is a failed check, and the suite goes on
+        check("FS2: the pane 10 Browser checks ran to the end",False,str(e).splitlines()[0][:200])
+        print("Pane 10 calls:",mock.calls[-12:],flush=True)
+    finally:ctx.close()
 
 def main():
     from playwright.sync_api import sync_playwright

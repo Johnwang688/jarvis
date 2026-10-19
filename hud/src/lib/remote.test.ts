@@ -104,6 +104,8 @@ describe("which keys a Browser pane gives the page", () => {
       key("a"), key("Escape"), key("Tab"), key("Enter"), key(" "), key("F1"), ctrl("a"), ctrl("s"), ctrl("f"),
       ctrl("k"), ctrl("p"), ctrl("P", { shiftKey: true }), ctrl("F", { shiftKey: true }),
       ctrl("D", { shiftKey: true }), ctrl("9", { altKey: true }), ctrl("B", { shiftKey: true }),
+      // Panes 9–12 have no focus key (decision FS-9): Ctrl+Alt+9 and Ctrl+Alt+0 are the page's.
+      ctrl("9", { altKey: true, code: "Digit9" }), ctrl("0", { altKey: true, code: "Digit0" }),
       altGr("{", "Digit7"), altGr("@", "KeyQ"),
     ]) {
       expect(browserTakesKey(ev)).toBe(true);

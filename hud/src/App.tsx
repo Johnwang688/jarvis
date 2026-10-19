@@ -215,6 +215,13 @@ interface NavContext {
 
 const PROVIDER_LABEL: Record<string, string> = { fast: "Jarvis", claude: "Claude", codex: "Codex" };
 
+/** `pane-N` (N = 1..12, no leading zero) to its id; anything else is not a pane. */
+function paneOfTestId(testid: string | undefined | null): PaneNo | null {
+  const match = /^pane-(\d{1,2})$/.exec(testid ?? "");
+  const n = match ? Number(match[1]) : 0;
+  return match && String(n) === match[1] && PANE_NOS.includes(n as PaneNo) ? n as PaneNo : null;
+}
+
 /** Who a thread is, for the editor's "changed on disk by …" toast. */
 function writerOf(threadId: string | undefined, at: { threads: { id: string; provider: string; task_id: string | null; title: string }[]; tasks: { id: string; thread_ids: string[] }[] }): string {
   const thread = threadId ? at.threads.find((t) => t.id === threadId) : undefined;
@@ -269,8 +276,7 @@ export default function App() {
       const id = Number(node?.dataset.pane);
       if (PANE_NOS.includes(id as PaneNo)) return id as PaneNo;
       const test = target instanceof Element ? target.closest<HTMLElement>('[data-testid^="pane-"]')?.dataset.testid : "";
-      const match = /^pane-([1-8])$/.exec(test ?? "");
-      return match ? Number(match[1]) as PaneNo : null;
+      return paneOfTestId(test);
     };
     const used = (e: Event) => { const pane = paneOf(e.target); if (pane) devUsed.current[pane] = Date.now(); };
     const down = (e: PointerEvent) => { devPointer.current.down = e.buttons !== 0; used(e); };
@@ -2520,7 +2526,7 @@ export default function App() {
     if (crashedRef.current) return "drop";
     if (ports.status !== "ok") return "wait";
     const active = document.activeElement?.closest<HTMLElement>('[data-testid^="pane-"]');
-    const activeMatch = /^pane-([1-8])$/.exec(active?.dataset.testid ?? "");
+    const activePane = paneOfTestId(active?.dataset.testid);
     const w: DevWindow = {
       enabled: devservers.enabled === true, blocked: blockedNow.current, covered: settingsNow.current,
       ports: ports.ports, controlPorts: ports.controlPorts,
@@ -2531,7 +2537,7 @@ export default function App() {
           driving: driving.active(spec.browser?.tabs.find(t => t.id === spec.browser?.active)?.remoteTabId, Date.now()),
           browserProfile: (spec as PaneSpec & { browserProfile?: string }).browserProfile };
       }),
-      drawn: lay.fit.panes, focused: lay.ws.focused, activePane: activeMatch ? Number(activeMatch[1]) as PaneNo : undefined,
+      drawn: lay.fit.panes, focused: lay.ws.focused, activePane: activePane ?? undefined,
       canSplit: lay.autoSplitVerdict(devHeld()).ok,
       pointerDown: devPointer.current.down, pointerReleasedAt: devPointer.current.released,
     };

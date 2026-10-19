@@ -2091,7 +2091,8 @@ def _thinking_many_checks(page, mock, check, until):
     workspace has eight panes (WP-G1), each its own thread (review of the
     merge onto main: a cap at four tested four lines in an eight-pane grid)."""
     _seed_thinking(mock)
-    count = len(page.evaluate("window.__hud.state().chats"))
+    # At most eight drawn, however many ids there are (twelve since FS2).
+    count = min(len(page.evaluate("window.__hud.state().chats")), 8)
     preset = {4: "grid4", 8: "grid8"}.get(count, "grid4")
     ws = json.dumps({"preset": preset, "focused": 1, "panes": [{"view": "chat"}] * count})
     _fresh(page, mock, until, ws, size=(1920, 1080))
@@ -2532,6 +2533,21 @@ def _state(page, key: str):
     return page.evaluate(f"window.__hud.state().{key}")
 
 
+def _hide_all_but_one(page, until) -> list:
+    """From eight drawn chat panes, every id in use, all but pane 1 hidden by ⊞,
+    pane 8 hidden longest: ⊞ to 2×2 hides 5–8, splits take the free ids above
+    8 (9–12 since FS2; none before), and ⊞ to one hides the rest. Returns the
+    ids above 8 the splits took."""
+    ids = len(_chats(page))
+    _choose(page, until, "grid4")
+    for n in range(5, 5 + ids - 8):
+        page.locator('[data-testid="pane-1-split"]').click()
+        until(lambda: len(_order(page)) == n, timeout=2)
+    _choose(page, until, "single")
+    until(lambda: page.evaluate("window.__hud.workspace().ws.kept")[-1:] == [8], timeout=2)
+    return list(range(9, ids + 1))
+
+
 def _rv47_kept_compose_checks(page, mock, check, until):
     """H1: a ⊞-hidden compose row's unsent words are never lost when a split
     or Open beside takes its pane back. An empty hidden pane goes first; when
@@ -2560,7 +2576,8 @@ def _rv47_kept_compose_checks(page, mock, check, until):
     _focus(page, until, 8)
     _box(page, 8).fill("precious unsent words in pane 8")
     _focus(page, until, 1)
-    _choose(page, until, "single")
+    for n in _hide_all_but_one(page, until):
+        page.evaluate("n => window.__hud.dispatch({type: 'input', pane: n, text: `words of pane ${n}`})", n)
     page.locator('[data-testid="pane-1-split"]').click()
     until(lambda: len(_order(page)) == 2, timeout=2)
     took = _order(page)[1]
@@ -2580,7 +2597,8 @@ def _rv47_kept_compose_checks(page, mock, check, until):
     _focus(page, until, 8)
     _box(page, 8).fill("precious words beside")
     _focus(page, until, 1)
-    _choose(page, until, "single")
+    for n in _hide_all_but_one(page, until):
+        page.evaluate("n => window.__hud.dispatch({type: 'input', pane: n, text: `words of pane ${n}`})", n)
     _expand(page, until, "p2", "thread-t3")
     page.locator('[data-testid="thread-t3"]').click(modifiers=["Alt"])
     until(lambda: len(_order(page)) == 2 and _chat(page, _order(page)[1])["threadId"] == "t3", timeout=3)
@@ -2816,7 +2834,13 @@ def _rv47b_park_said_checks(page, mock, check, until):
         }""", n)
     _focus(page, until, 1)
     _box(page, 1).fill("my own words in pane 1")
-    _choose(page, until, "single")
+    for n in _hide_all_but_one(page, until):
+        page.evaluate("""n => {
+          const c = window.__hud.state().chats[n].compose;
+          window.__hud.dispatch({type: 'chat', pane: n, patch: {compose: {...c, projectId: 'p2'}}});
+          window.__hud.dispatch({type: 'input', pane: n, text: `school words of pane ${n}`});
+          return true;
+        }""", n)
     _expand(page, until, "p2", "thread-t3")
     page.locator('[data-testid="thread-t3"]').click(modifiers=["Alt"])
     until(lambda: len(_order(page)) == 2 and _chat(page, _order(page)[1])["threadId"] == "t3", timeout=3)
