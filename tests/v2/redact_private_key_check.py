@@ -183,10 +183,17 @@ class BlockChecks(Base):
         legacy = "Proc-Type: 4,ENCRYPTED\nDEK-Info: AES-128-CBC,00112233445566778899AABBCCDDEEFF\n"
         self.assertWhole("prose here\n" + legacy + body + "\n" + tail, "prose here\n" + R)
         # CRLF, and the body glued to the footer on its last line.
+        # (`secrets.scrub` rejoins lines with LF, as it always has; the block
+        # pass itself keeps a CR, checked on `private_key_blocks` directly.)
         crlf = (body + "\n" + tail).replace("\n", "\r\n")
-        self.assertWhole("words here\r\n" + crlf + AFTER, "words here\r\n" + R + AFTER)
+        self.assertWhole("words here\r\n" + crlf + AFTER, "words here\n" + R + AFTER)
+        self.assertEqual(redact.private_key_blocks("words here\r\n" + crlf + "\r\nbye"),
+                         "words here\r\n" + R + "\r\nbye")
         glued = body + tail
         self.assertWhole("words here\n" + glued + AFTER, "words here\n" + R + AFTER)
+        # A PGP tail: the checksum line (`=` + 4) is key material too.
+        pgp = pgp_block(self.rng).splitlines()
+        self.assertWhole("gpg output:\n" + "\n".join(pgp[3:]) + AFTER, "gpg output:\n" + R + AFTER)
 
     def test_k3_the_footer_rule_stops_at_the_first_line_that_is_not_key_material(self):
         """k3: conservative: a blank line or a line of words ends the walk back."""
@@ -200,6 +207,11 @@ class BlockChecks(Base):
         # A footer straight after prose: only the footer, exactly as before.
         text = "I deleted the key, this is what was left:\n" + tail + AFTER
         self.assertWhole(text, "I deleted the key, this is what was left:\n" + R + AFTER)
+        self.assertEqual(redact.scrub_text(text), old_scrub(text))
+        # Words before the footer on its own line: that line is not key
+        # material, so nothing above it goes either; only the footer, as before.
+        text = body + "\nsee: " + tail + AFTER
+        self.assertWhole(text, body + "\nsee: " + R + AFTER)
         self.assertEqual(redact.scrub_text(text), old_scrub(text))
 
     def test_k4_two_blocks_stay_two(self):
@@ -230,7 +242,7 @@ class BlockChecks(Base):
         # A certificate chain with a key after it: the certificates stay.
         cert = block(self.rng, "CERTIFICATE")
         key = block(self.rng, "PRIVATE KEY")
-        self.assertWhole(cert + "\n" + cert + "\n" + key + "\n", cert + "\n" + cert + "\n" + R + "\n")
+        self.assertWhole(cert + "\n" + cert + "\n" + key + AFTER, cert + "\n" + cert + "\n" + R + AFTER)
         # A footer-only tail below a certificate: the walk stops at its footer.
         body = "\n".join(b64_lines(self.rng, 4))
         self.assertWhole(cert + "\n" + body + "\n" + footer("PRIVATE KEY"), cert + "\n" + R)
@@ -355,6 +367,7 @@ def timing_cases(rng: random.Random) -> dict[str, str]:
         "footer prefixes": fill("-----END AB "),
         "glued runs before headers": fill("A" * 1000 + head + "x" + foot),
         "glued runs before footers": fill("A" * 5000 + foot),
+        "words glued to footers": fill("a b" + foot),
         "short lines before footers": fill("A\n" * 300 + foot),
         "dashes": fill("-"),
         "one long line": fill("Ab0+/"),
