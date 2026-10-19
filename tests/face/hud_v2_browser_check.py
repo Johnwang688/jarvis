@@ -1160,12 +1160,13 @@ def _guard_layout_checks(page, mock, check, until):
           _count(page, frame) == 0 and _active_frame(page) is None and mock.dev_keys[keys:] == [],
           f"frames={_count(page, frame)} active={_active_frame(page)} keys={mock.dev_keys[keys:][:3]}")
 
-    # A close of another pane: 2×2, the Browser bottom left; × on pane 1 gives
-    # three columns, the Browser in the middle, under a pointer that rested on pane 2.
+    # A close of another pane: 2×2, the Browser bottom left; × on pane 4, its
+    # sibling, gives its space to the Browser (FS4: the neighbour in the same
+    # split takes it), which grows right under a pointer that rested on pane 4.
     frame = _lay(page, mock, until, "grid4", 3, who="c1")
-    _guard_after_move(page, mock, check, until, "a close of another pane", frame, 3, pt(0.55, 0.3),
-                      lambda: (_press(page, until, "pane-1-close"),
-                               until(lambda: _ws(page)["ws"]["order"] == [2, 3, 4], timeout=3)))
+    _guard_after_move(page, mock, check, until, "a close of another pane", frame, 3, pt(0.75, 0.75),
+                      lambda: (_press(page, until, "pane-4-close"),
+                               until(lambda: _ws(page)["ws"]["order"] == [1, 2, 3], timeout=3)))
 
     # An edge drag (from the keyboard, so the pointer stays): two columns, the
     # Browser right; Home takes the edge to pane 1's minimum, and the Browser
