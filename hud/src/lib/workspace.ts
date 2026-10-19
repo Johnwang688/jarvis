@@ -81,8 +81,8 @@ export const LADDER: Readonly<Record<number, Preset>> = {
 };
 
 /** A pane's id: stable for its life, never its position (that is `slotOf`). */
-export type PaneNo = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8;
-export const PANE_NOS: readonly PaneNo[] = [1, 2, 3, 4, 5, 6, 7, 8];
+export type PaneNo = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12;
+export const PANE_NOS: readonly PaneNo[] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
 
 /** A pane in a split is never drawn narrower or shorter than this. */
 export const PANE_MIN_W = 360;
@@ -248,6 +248,7 @@ export interface Workspace {
 
 const DEFAULT_VIEWS: Record<PaneNo, View> = {
   1: "chat", 2: "browser", 3: "file", 4: "task", 5: "chat", 6: "chat", 7: "chat", 8: "chat",
+  9: "chat", 10: "chat", 11: "chat", 12: "chat",
 };
 
 const equalEdges = (n: number) => Array.from({ length: n - 1 }, (_, i) => (i + 1) / n);
@@ -936,8 +937,12 @@ export function resetWorkspace(ws: Workspace): Workspace {
 // window mounts that id fresh if a later split reuses it (the incarnation in
 // useLayout).
 
-/** The most panes a workspace draws. */
-export const MAX_PANES = PANE_NOS.length;
+/**
+ * The most panes a workspace draws: the ladder stops at grid8 until FS4 (the
+ * directional split) removes the cap. Ids run to 12 (`PANE_NOS`); only this many
+ * are ever drawn at once.
+ */
+export const MAX_DRAWN = 8;
 
 /**
  * The id a split takes (plan §3.4): the lowest id neither drawn nor hidden;
@@ -971,7 +976,7 @@ export function splitPane(
 ): Workspace {
   const order = orderOf(ws);
   const at = order.indexOf(source);
-  if (at < 0 || order.includes(id) || order.length >= MAX_PANES || !isPaneNo(id)) return ws;
+  if (at < 0 || order.includes(id) || order.length >= MAX_DRAWN || !isPaneNo(id)) return ws;
   const next = [...order.slice(0, at + 1), id, ...order.slice(at + 1)];
   const panes = ws.panes.map((p, i) => (i === id - 1 ? { ...spec } : p)) as Panes;
   return {
@@ -1089,7 +1094,7 @@ export function autoSplitVerdict(
 ): { ok: boolean; id: PaneNo | null } {
   const order = orderOf(ws);
   const id = freeId(ws, held);
-  if (order.length >= MAX_PANES || id === null) return { ok: false, id: null };
+  if (order.length >= MAX_DRAWN || id === null) return { ok: false, id: null };
   const before = fitWorkspace(layout, ws, available, availableH, prefer, preferPanel);
   const trial = splitPane(ws, order[order.length - 1], id, defaultPane(id), { focus: false });
   const after = fitWorkspace(layout, trial, available, availableH, prefer, preferPanel);
@@ -1114,7 +1119,7 @@ export function splitVerdict(
   prefer: Side | null = null, preferPanel = false, dirty: readonly PaneNo[] = [],
 ): { ok: boolean; why: SplitWhy } {
   const order = orderOf(ws);
-  if (order.length >= MAX_PANES) return { ok: false, why: "max" };
+  if (order.length >= MAX_DRAWN) return { ok: false, why: "max" };
   // Words a hidden compose row holds are parked, never lost: only an unsaved edit blocks.
   const id = allocate(ws, dirty);
   const probe = id ?? PANE_NOS.find((n) => !order.includes(n))!;

@@ -1500,3 +1500,19 @@ refused" (the CLI's own refusal, its reason from the owner's list) are
 focusable notes (`tabIndex` 0) described by their reason (`aria-describedby`
 to a visually hidden span, `.sa-sr`), so the reason is reachable without a
 mouse; a refused child offers no Stop again. Face check: 74 checks.
+
+**Twelve pane ids, still on the ladder (FS2, 2026-10-19).** Pane ids, `PANE_NOS`
+and the per-pane arrays run 1-12 (decision FS-1); panes 9-12 default to chat.
+`workspace.ts`'s `MAX_DRAWN = 8` replaces `MAX_PANES`: the split ladder and
+every "at most this many drawn" check stop at grid8 until the directional
+split (FS4) lifts the cap, so `allocate`/`freeId` range over 12 ids and after
+grid8 -> single a split takes id 9, never a hidden pane. Decision FS-9 keeps
+the focus keys at Ctrl+Alt+1-8 (no focus9/focus10, no Ctrl+Alt+0; panes 9-12
+are click-only); `DevServerPrompt` keeps `/^[1-8]$/`. `App.tsx` reads a
+`pane-N` test id through `paneOfTestId` (`/^pane-(\d{1,2})$/`, the number
+round-trip and `PANE_NOS.includes` checked) in the dev-server "last used pane"
+tracker and in `devAttempt`'s active-pane read. `LEGACY_PANES`,
+`LIVE_FRAMES_WINDOW`, the 8 Browser profiles and the VEX slot range are
+unchanged. Tests: workspace/chats/devopen/layout/remote vitest, and
+`_twelve_ids_checks` in `hud_v2_layout_check.py` (pane 10 cases in the
+Browser controls check, `_pane_ids` in the auto-open check).
