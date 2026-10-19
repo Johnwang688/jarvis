@@ -3159,6 +3159,18 @@ def main():
             finally:
                 subagents_mock.stop()
 
+            # Chats that message each other (chat-to-chat C5): relay rows in
+            # both panes, their states and colours, Withdraw under a card, no
+            # focus or selection stolen — a context and a mock of their own
+            # (it reloads, "restarts" the relay service and raises a card).
+            from tests.face.hud_v2_relay_check import relay_checks
+            relay_mock = MockDaemon(0).start()
+            try:
+                relay_checks(browser, relay_mock, f"http://127.0.0.1:{relay_mock.port}", check, until,
+                             guard, FAKE_RECOGNIZER)
+            finally:
+                relay_mock.stop()
+
             # The sidebar's five most recent chats per project (2026-10-15): a
             # context and a mock of their own — it opens threads and reloads.
             from tests.face.hud_v2_recent_chats_check import recent_chats_checks
