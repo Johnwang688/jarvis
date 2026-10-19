@@ -9,7 +9,7 @@ from ..browser.drive_state import mark_attempt
 @tool
 def hud_browser_act(
     action: Annotated[str, "One of click, type, press, scroll, select, upload, navigate, back, forward."],
-    pane: Annotated[str, "Visible Browser pane slot 1–8 or empty for the owner-focused pane; never a tab ID."] = "",
+    pane: Annotated[str, "Visible Browser pane slot 1–12 or empty for the owner-focused pane; never a tab ID."] = "",
     target: Annotated[str, "Interactive eN ref from this turn's latest guarded Remote look; required for click/type/select/upload."] = "",
     text: Annotated[str, "Exact replacement text, unique option label, destination URL, named key, or scroll direction as appropriate."] = "",
     file: Annotated[str, "Upload only: permitted file inside this chat's project; approval binds its exact bytes."] = "",

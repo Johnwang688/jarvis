@@ -50,7 +50,8 @@ export function parseBrowserPrivateApproval(raw: unknown, expected: BrowserAppro
 export function parseBrowserApproval(raw: unknown, expected: BrowserApprovalPublic): BrowserApprovalDetail | null {
   if (expected.layer !== "browser-gate" || !matchingEnvelope(raw, expected)) return null;
   const b = raw.browser;
-  if (!record(b) || !id(b.tab_id, 8) || !id(b.action_id, 32) || !integer(b.pane) || b.pane < 1 || b.pane > 8
+  // Pane 1..12: the daemon's PANE_MAX (jarvis/v2/browser/panes.py, decision FS-1).
+  if (!record(b) || !id(b.tab_id, 8) || !id(b.action_id, 32) || !integer(b.pane) || b.pane < 1 || b.pane > 12
     || !integer(b.page_identity) || !integer(b.document_generation)
     || !(BROWSER_ACTIONS as readonly unknown[]).includes(b.action) || !(BROWSER_CATEGORIES as readonly unknown[]).includes(b.category)
     || !text(b.host, 200) || !text(b.path, 400) || !text(b.target, 120) || !text(b.text, b.action === "type" ? 10000 : 8192)) return null;

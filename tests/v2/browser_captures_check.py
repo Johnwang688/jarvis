@@ -207,6 +207,19 @@ class CaptureService(unittest.TestCase):
         with self.assertRaises(CaptureRefused):C.capture_page(self.daemon,self.snapshot.tab_id,self.query)
         self.host.capture_look.assert_not_called()
 
+    def test_pane_query_takes_ids_1_to_12_and_refuses_13_before_registry(self):
+        # FS0: a twelve-pane HUD's pane ids 9..12 can be captured; 13 never reaches the registry.
+        for pane in (1,9,10,11,12):
+            with self.subTest(pane=pane):
+                self.registry.resolve_owner.reset_mock()
+                C.capture_page(self.daemon,self.snapshot.tab_id,{**self.query,"pane":str(pane)})
+                self.registry.resolve_owner.assert_called_once_with(self.snapshot.window,pane,"aaaaaa",self.snapshot.view_id)
+        self.registry.resolve_owner.reset_mock();self.host.capture_look.reset_mock()
+        for pane in ("13","14","99","0","00","012","-1","+1"," 12","12 ","12\n","１２","١","12.0","1e1","",12,None):
+            with self.subTest(pane=pane),self.assertRaises(CaptureRefused):
+                C.capture_page(self.daemon,self.snapshot.tab_id,{**self.query,"pane":pane})
+        self.registry.resolve_owner.assert_not_called();self.host.capture_look.assert_not_called()
+
     def test_hold_stale_identity_and_transient_card_discard_entire_capture(self):
         for change in ("held","valid","epoch"):
             self.held=False;self.valid=True;self.epoch=0

@@ -2849,9 +2849,9 @@ Agents may drive remains OFF; `drive:true` is refused with 409.
   `window` is the page's shared memory-only 32-lowercase-hex identity and must
   have a live owner SSE connection. `seq` is a positive JavaScript safe integer;
   `focus_seq` is a nonnegative safe integer advanced only on owner Browser focus.
-  `focused_slot` is 1–8 or null; `covered` is boolean. At most eight pane rows:
-  `{pane_id,slot,drawn,profile,ctx,see,drive,active,tabs}`. Stable `pane_id` is 1–8;
-  displayed `slot` is separately 1–8 or null. A drawn pane needs a slot. Profile
+  `focused_slot` is 1–12 or null; `covered` is boolean. At most twelve pane rows:
+  `{pane_id,slot,drawn,profile,ctx,see,drive,active,tabs}`. Stable `pane_id` is 1–12;
+  displayed `slot` is separately 1–12 or null. A drawn pane needs a slot. Profile
   is `p-<8hex>` or `private`, ctx is null or the Private context's eight-hex ID,
   see/drawn/drive are required booleans; drive is an owner preference, active is a local tab ID or null. Missing/malformed wire values refuse.
   Each pane has at most twelve tabs with unique six-lowercase-alphanumeric IDs:
@@ -2923,7 +2923,7 @@ replay stored URLs (Private storage contains none).
 
 The explicit owner-HUD-chat tool `hud_browser_view(pane: str = "",
 whole_page: bool = False)` consumes the owner pane registry above; it adds no
-HTTP navigation or input route. Selectors are displayed slots `"1"`–`"8"` or
+HTTP navigation or input route. Selectors are displayed slots `"1"`–`"12"` or
 empty for the last owner-focused eligible pane. Raw tab IDs are refused.
 `whole_page` extends rendered text only, without scrolling the owner page.
 The current live window, visible selected binding, see permission, immutable
@@ -3013,7 +3013,7 @@ HUD's saved preference. This infrastructure does not expose a driving tool itsel
 
 ## Owner immutable Browser captures (BR4)
 
-GET /browser/tabs/<id>/capture accepts exactly window, pane (stable pane ID1–8),
+GET /browser/tabs/<id>/capture accepts exactly window, pane (stable pane ID 1–12),
 local_tab, view, and optional whole=0|1 (default0). Existing owner HUD listener,
 Origin/same-origin and strict Host checks run first. The exact live drawn active
 Remote binding must match its host-issued view ID; stale, covered, held, Direct
@@ -3044,7 +3044,7 @@ contract, see [Native owner Browser driving](#native-owner-browser-driving-br9d)
 
 Production `hud_browser_act` always refuses because Agents may drive is OFF.
 There is no enable or execute HTTP endpoint. The typed tool accepts action, pane
-(empty/front or slot 1–8), target (current eN ref where required), text and file;
+(empty/front or slot 1–12), target (current eN ref where required), text and file;
 it never accepts JavaScript, coordinates, tab IDs or a release-download action.
 The explicit fast-path toolset does not grant provider session tools driving.
 
