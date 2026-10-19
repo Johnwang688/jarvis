@@ -248,9 +248,17 @@ describe("what the sidebar marks", () => {
 });
 
 describe("eight panes (WP-G1)", () => {
-  it("holds one conversation per pane id, eight of them", () => {
+  it("holds one conversation per pane id, twelve of them (FS2)", () => {
+    expect(Object.keys(emptyChats()).map(Number)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
     expect(Object.keys(emptyChats()).map(Number)).toEqual([...PANE_NOS]);
-    expect(Object.values(nonePerPane())).toEqual([null, null, null, null, null, null, null, null]);
+    expect(Object.values(nonePerPane())).toEqual(Array(12).fill(null));
+  });
+
+  it("routes an event to a pane above 8 showing its thread (FS2)", () => {
+    const c = chats(Object.fromEntries(PANE_NOS.map((n) => [n, { threadId: `t${n}` }])));
+    expect(routeEvent("t10", c, none, 1)).toEqual({ mine: [10], ours: [] });
+    expect(routeEvent("t12", { ...c, 9: { ...c[9], turnThreadId: "t12" } }, none, 1)).toEqual({ mine: [12], ours: [9] });
+    expect(heldElsewhere(c, 1, "t11", none)).toBe(11);
   });
 
   it("routes an event to the one of eight panes showing its thread, and nowhere else", () => {
@@ -288,14 +296,24 @@ describe("eight panes (WP-G1)", () => {
     expect(besideTarget(focusPane(two, 5), [1, 5])).toEqual({ preset: "cols3", pane: 3, source: 5 });
   });
 
-  it("takes the oldest hidden pane with no unsaved edit when every id is used, never a dirty one", () => {
-    // Eight panes, ⊞ to one: 2…8 hidden, 8 the oldest.
+  it("after ⊞ 8 → 1 opens beside into the free id 9, never a hidden pane (FS2)", () => {
     const one = setPreset(setPreset(defaultWorkspace(), "grid8"), "single");
     expect(one.kept).toEqual([2, 3, 4, 5, 6, 7, 8]);
+    expect(besideTarget(one, [1])).toEqual({ preset: "cols2", pane: 9, source: 1 });
+    expect(besideTarget(one, [1], [8, 7])).toEqual({ preset: "cols2", pane: 9, source: 1 });
+    expect(besideTarget(one, [1], [2, 3, 4, 5, 6, 7, 8])).toEqual({ preset: "cols2", pane: 9, source: 1 });
+  });
+
+  it("takes the oldest hidden pane with no unsaved edit when every id is used, never a dirty one", () => {
+    // Twelve ids used, one drawn (FS2): 1 drawn, the other eleven hidden, 8 hidden longest (it is last).
+    const one = parseWorkspace(JSON.stringify({ preset: "single", order: [1], kept: [9, 10, 11, 12, 2, 3, 4, 5, 6, 7, 8],
+                                                panes: Array.from({ length: 12 }, () => ({ view: "chat" })) }));
+    expect([one.order, one.kept]).toEqual([[1], [9, 10, 11, 12, 2, 3, 4, 5, 6, 7, 8]]);
     expect(besideTarget(one, [1])).toEqual({ preset: "cols2", pane: 8, source: 1 });
     expect(besideTarget(one, [1], [8, 7])).toEqual({ preset: "cols2", pane: 6, source: 1 });
+    expect(besideTarget(one, [1], [2, 3, 4, 5, 6, 7, 8])).toEqual({ preset: "cols2", pane: 12, source: 1 });
     // All of them dirty: ⊞'s grow, as before (the window then refuses to switch a dirty pane).
-    expect(besideTarget(one, [1], [2, 3, 4, 5, 6, 7, 8])).toEqual({ preset: "cols2", pane: 2 });
+    expect(besideTarget(one, [1], [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12])).toEqual({ preset: "cols2", pane: 9 });
   });
 });
 

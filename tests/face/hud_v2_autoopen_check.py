@@ -86,7 +86,7 @@ def autoopen_checks(browser, check, until, guard, init_script):
               ("GET", "/browser/settings", {"extra": True}),
               ("PATCH", "/browser/settings", {"agents_may_drive": True}),
               ("POST", "/browser/act", {})]))
-    sections = (_split, _behind, _quiet, _prompt, _card, _settings, _off_race, _windows, _terminal, _pointer, _kept, _lease, _source_window, _window_lapse, _hostile, _prompt_down, _dirty, _cross_off)
+    sections = (_split, _behind, _quiet, _prompt, _card, _settings, _off_race, _windows, _terminal, _pointer, _kept, _pane_ids, _lease, _source_window, _window_lapse, _hostile, _prompt_down, _dirty, _cross_off)
     for section in sections:
         if os.environ.get("AUTO_ONLY") and os.environ["AUTO_ONLY"] not in section.__name__: continue
         mock = MockDaemon(0).start()
@@ -156,13 +156,15 @@ def _split(browser, context, page, mock, f, check, until, guard, init):
 
 
 def _behind(browser, context, page, mock, f, check, until, guard, init):
-    # Eight retained pane ids mean no spare split; a focused Browser receives
-    # a background tab while its original page and URL box remain selected.
+    # Every pane id retained (twelve since FS2) means no spare split; a focused
+    # Browser receives a background tab while its original page and URL box
+    # remain selected.
     configure(page, mock, until, "grid4", ("browser", "chat", "chat", "chat", "chat", "chat", "chat", "chat"), 1600)
     state = _ws(page)["ws"]
+    ids = len(state["panes"])
     state["order"] = [1, 2, 3, 4]
-    state["kept"] = [5, 6, 7, 8]
-    for n in (4, 5, 6, 7): state["panes"][n]["projectId"] = "p1"
+    state["kept"] = list(range(5, ids + 1))
+    for n in range(4, ids): state["panes"][n]["projectId"] = "p1"
     state["panes"][0]["browser"] = {"tabs": [{"id": "old001", "url": f"http://localhost:{mock.dev_port}/old"}], "active": "old001"}
     _set_ws(page, json.dumps(state))
     _boot(page, mock, None, until, reload=True)
@@ -334,12 +336,14 @@ def _pointer(browser, context, page, mock, f, check, until, guard, init):
 def _kept(browser, context, page, mock, f, check, until, guard, init):
     configure(page, mock, until)
     state = _ws(page)["ws"]
-    state["order"], state["kept"] = [1], [2, 3, 4, 5, 6, 7, 8]
+    # Every id but 1 hidden (twelve ids since FS2, eight before).
+    ids = len(state["panes"])
+    state["order"], state["kept"] = [1], list(range(2, ids + 1))
     # Nonblank kept specs must not be overwritten. Pane 4 is the oldest
     # genuinely blank default spec and may be reused.
     state["panes"][1].update(view="file", projectId="p1", filePath="calc.py")
     state["panes"][2].update(view="chat", projectId="p2")
-    for i in (4, 5, 6, 7): state["panes"][i]["projectId"] = "p1"
+    for i in range(4, ids): state["panes"][i]["projectId"] = "p1"
     _set_ws(page, json.dumps(state))
     _boot(page, mock, None, until, reload=True)
     before = panes(page)
@@ -347,7 +351,46 @@ def _kept(browser, context, page, mock, f, check, until, guard, init):
     until(lambda: len(tabs(page)) == 1)
     after = panes(page)
     check("8-to-1 retained layout reuses only its oldest blank pane", after[3]["view"] == "browser" and _ws(page)["ws"]["order"] == [1, 4], str(_ws(page)["ws"]["order"]))
-    check("all nonblank kept pane specs survive automatic splitting", all(before[i] == after[i] for i in (1, 2, 4, 5, 6, 7)))
+    check("all nonblank kept pane specs survive automatic splitting", all(before[i] == after[i] for i in [1, 2, *range(4, ids)]))
+
+
+def _pane_ids(browser, context, page, mock, f, check, until, guard, init):
+    # FS2: a pane id above 8 is read where the window parses one from the DOM
+    # (App.tsx's `pane-N` match). The owner's last pointer in pane 10 makes it
+    # the most recently used Browser, so with no room to split the automatic
+    # tab goes there, behind its page, rather than to pane 2 in slot 2. (2×2
+    # at 1000 px: a fifth pane would need three columns.)
+    configure(page, mock, until, "grid4", ("chat", "browser", "chat", "chat"), 1000)
+    state = _ws(page)["ws"]
+    if len(state["panes"]) < 12:
+        check("FS2: the window holds twelve pane ids", False, str(len(state["panes"])))
+        return
+    state["order"], state["kept"], state["focused"] = [1, 2, 3, 10], [4], 1
+    for n, name in ((1, "two"), (9, "ten")):
+        tab = f"{name}001"
+        state["panes"][n] = {"view": "browser", "projectId": None, "terminalId": None,
+                             "browser": {"tabs": [{"id": tab, "url": f"http://localhost:{mock.dev_port}/{name}"}], "active": tab}}
+    _set_ws(page, json.dumps(state))
+    _boot(page, mock, None, until, reload=True)
+    check("FS2 setup: 2×2 drawn whole, panes 2 and 10 its two Browsers, 10 in slot 4",
+          _ws(page)["ws"]["order"] == [1, 2, 3, 10] and _ws(page)["fit"]["panes"] == [1, 2, 3, 10]
+          and [panes(page)[n]["view"] for n in (1, 9)] == ["browser", "browser"]
+          and page.locator(_pane(10)).get_attribute("data-slot") == "4",
+          f'{_ws(page)["ws"]["order"]} {_ws(page)["fit"]["panes"]} {[p["view"] for p in panes(page)]}')
+    url = page.locator(_pane(10, '[data-testid="browser-url"]'))
+    url.click()
+    until(lambda: _ws(page)["ws"]["focused"] == 10)
+    page.wait_for_timeout(200)  # past the pointer's quiet interval
+    entry = f.add(mock.dev_port + 1)
+    until(lambda: len(tabs(page)) == 3)
+    now = panes(page)
+    check("FS2: with no room to split, the automatic tab goes to pane 10, the Browser last used, not pane 2",
+          len(now[9]["browser"]["tabs"]) == 2 and len(now[1]["browser"]["tabs"]) == 1
+          and _ws(page)["ws"]["order"] == [1, 2, 3, 10], str([now[1].get("browser"), now[9].get("browser")]))
+    check("FS2: behind pane 10's page, which stays selected (the owner is in it)",
+          now[9]["browser"]["active"] == "ten001" and url.evaluate("(e) => document.activeElement === e"),
+          str(now[9]["browser"]))
+    check("FS2: and the placement sends its receipt", bool(mock.posted("/dev-servers/" + entry.id + "/placed")))
 
 
 def _lease(browser, context, page, mock, f, check, until, guard, init):

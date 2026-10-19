@@ -116,7 +116,7 @@ def layout_checks(browser, mock, base, check, until, guard, init_script):
                         _card_focus_checks, _editor_card_checks, _save_scope_checks, _late_save_checks,
                         _chord_checks,
                         _menu_place_checks, _seen_checks, _eight_checks, _split_checks, _split_close_one_checks,
-                        _split_file_checks, _crash_checks):
+                        _twelve_ids_checks, _split_file_checks, _crash_checks):
             try:
                 section(page, mock, check, until)
             except Exception as e:  # a section that cannot run is a failure, and the rest still run
@@ -2420,10 +2420,12 @@ def _eight_checks(page, mock, check, until):
               and page.locator('[data-testid="layout-head"]').inner_text().strip().lower() == f"layout · {n} panes")
         page.keyboard.press("Escape")
         until(lambda: page.locator('[data-testid="layout-menu"]').count() == 0, timeout=2)
-    geo8 = _geo(page, range(1, 9))
-    check("4×2: two rows of four, the halves equal",
-          len({g[1] for g in geo8}) == 2 and len({g[0] for g in geo8}) == 4
-          and max(g[2] for g in geo8) - min(g[2] for g in geo8) <= 2, str(geo8))
+    geo12 = _geo(page, range(1, 13))
+    geo8 = [g for g in geo12[:8] if g]
+    check("4×2: two rows of four, the halves equal (and no id above 8 drawn)",
+          len(geo8) == 8 and geo12[8:] == [None] * 4
+          and len({g[1] for g in geo8}) == 2 and len({g[0] for g in geo8}) == 4
+          and max(g[2] for g in geo8) - min(g[2] for g in geo8) <= 2, str(geo12))
 
     # Every pane can show what any pane shows: chat, file, preview, diff, a terminal.
     views = {1: "chat", 2: "file", 3: "browser", 4: "diff", 5: "terminal", 6: "chat", 7: "file", 8: "browser"}
@@ -2476,7 +2478,7 @@ def _eight_checks(page, mock, check, until):
     if page.locator('[data-testid="layout-dropped"]').count():
         note = page.locator('[data-testid="layout-dropped"]').inner_text()
     page.keyboard.press("Escape")
-    drawn = [n for n in range(1, 9) if _visible(page, _pane(n))]
+    drawn = [n for n in range(1, 13) if _visible(page, _pane(n))]
     check("1280x800: eight panes draw as six, with a badge and \"Showing 6 of 8\"",
           _attr(page, ws, "data-drawn-preset") == "grid6" and len(drawn) == 6
           and page.locator('[data-testid="layout-badge"]').inner_text().strip() == "2"
@@ -2485,7 +2487,7 @@ def _eight_checks(page, mock, check, until):
           1 in drawn and all(g and g[2] >= 358 for g in _geo(page, drawn)), str(_geo(page, drawn)))
     _set_storage(page, zoom="150")
     _boot(page, mock, None, until, reload=True)
-    drawn = [n for n in range(1, 9) if _visible(page, _pane(n))]
+    drawn = [n for n in range(1, 13) if _visible(page, _pane(n))]
     check("1280x800 at 150%: four of the eight", _attr(page, ws, "data-drawn-preset") == "grid4" and len(drawn) == 4
           and page.locator('[data-testid="layout-badge"]').inner_text().strip() == "4", str(drawn))
     check("setup: pane 7 is not among them", 7 not in drawn, str(drawn))
@@ -2595,7 +2597,7 @@ def _eight_checks(page, mock, check, until):
         _project_root(page, 3)
         until(lambda: page.locator(_pane(3, "iframe")).count() > 0, timeout=4)
         until(lambda: page.locator(term).count() > 0 and _attr(page, term, "data-state") == "attached", timeout=6)
-        drawn = [n for n in range(1, 9) if _visible(page, _pane(n))]
+        drawn = [n for n in range(1, 13) if _visible(page, _pane(n))]
         check(f"at {zoom}% on 1920x1080 eight panes draw ({len(drawn)} of them), Monaco, a frame and a terminal on screen",
               {1, 2, 3, 5, 6}.issubset(drawn) and _visible(page, _pane(2, '[data-testid="editor"]'))
               and _visible(page, _pane(3, "iframe")) and _visible(page, _pane(5, f"{term} .xterm-screen")),
@@ -2613,7 +2615,7 @@ def _eight_checks(page, mock, check, until):
         check(f"at {zoom}% over eight panes, the card is wholly on screen and every button topmost at its point", ok, why)
         got = page.evaluate("""() => {
           const b = [...document.querySelectorAll('[data-testid$="-split"], [data-testid$="-close"]')]
-            .filter(e => /^pane-\\d-(split|close)$/.test(e.getAttribute('data-testid')));
+            .filter(e => /^pane-\\d+-(split|close)$/.test(e.getAttribute('data-testid')));
           const panes = [...document.querySelectorAll('section.wpane')];
           const drawn = panes.filter(e => e.offsetParent !== null).length;
           return [panes.length, drawn, b.length, b.filter(e => !e.disabled).map(e => e.getAttribute('data-testid'))];
@@ -2929,10 +2931,12 @@ def _split_checks(page, mock, check, until):
           and _order(page) == [1, 8, 7, 6, 5, 4, 3, 2], f"{_order(page)} {geo}")
     until(lambda: split1.is_disabled(), timeout=2)
     check("at eight the split button is disabled and says why",
-          all(page.locator(f'[data-testid="pane-{n}-split"]').is_disabled() for n in range(1, 9))
+          all(page.locator(f'[data-testid="pane-{n}-split"]').is_disabled() for n in _order(page))
           and split1.get_attribute("title") == "Eight panes is the most", str(split1.get_attribute("title")))
     check("and every one of the eight has a ×", all(page.locator(f'[data-testid="pane-{n}-close"]').count() == 1
-                                                     for n in range(1, 9)))
+                                                     for n in _order(page)))
+    check("(ids 9–12 are free, and still no ninth pane: the ladder stops at eight, FS2)",
+          all(page.locator(_pane(n)).count() == 0 for n in range(9, 13)))
 
     # × closes exactly that pane. A chat pane is the selected chat the moment
     # its × is pressed, so focus goes to the chat selected before it (W-6):
@@ -2971,7 +2975,7 @@ def _split_checks(page, mock, check, until):
     until(lambda: page.locator('[data-testid="approval-card"]').count() > 0, timeout=4)
     time.sleep(0.2)
     disabled = page.evaluate("""() => [...document.querySelectorAll('button')]
-      .filter(b => /^pane-\\d-(split|close)$/.test(b.getAttribute('data-testid') || ''))
+      .filter(b => /^pane-\\d+-(split|close)$/.test(b.getAttribute('data-testid') || ''))
       .every(b => b.disabled)""")
     check("under a card every split and × is disabled", disabled)
     check("and the card took focus off the split button", _active_testid(page) != "pane-1-split", str(_active_testid(page)))
@@ -3037,6 +3041,89 @@ def _split_close_one_checks(page, mock, check, until):
     until(lambda: len(_order(page)) == 2, timeout=2)
     check("the next split takes the free id 1, in slot 2 after its source",
           _order(page) == [2, 1] and _attr(page, _pane(1), "data-slot") == "2", str(_order(page)))
+    _reset_all(page, mock, until)
+
+
+# A Ctrl+Alt key as AltGr reports it (the symbol, on the digit's physical
+# key), dispatched where the window listens: whether the window took it.
+CTRL_ALT_JS = """([key, code]) => {
+  const e = new KeyboardEvent('keydown', {key, code, ctrlKey: true, altKey: true, bubbles: true, cancelable: true});
+  (document.activeElement || document.body).dispatchEvent(e);
+  return e.defaultPrevented;
+}"""
+
+
+def _twelve_ids_checks(page, mock, check, until):
+    """FS2 (decisions FS-1, FS-9): twelve pane ids, still on the ladder. ⊞ 4×2
+    then one pane hides 2–8, and the next split takes the free id 9 — in
+    slot 2, mounted fresh — never a hidden pane. Ctrl+Alt+N stays slots 1–8:
+    Ctrl+Alt+2 is pane 9 when 9 is in slot 2, while Ctrl+Alt+9 and
+    Ctrl+Alt+0 focus nothing (panes 9–12 are click-only) and are left to the
+    browser, as are the ] and } AltGr types on the 9 and 0 keys."""
+    ws = '[data-testid="workspace"]'
+    _reset_all(page, mock, until, (1920, 1080))
+    _choose(page, until, "grid8")
+    _choose(page, until, "single")
+    check("FS2 setup: ⊞ 4×2 then one pane: 2–8 hidden, still mounted",
+          _order(page) == [1] and _ws(page)["ws"]["kept"] == [2, 3, 4, 5, 6, 7, 8]
+          and all(page.locator(_pane(n)).count() == 1 and not _visible(page, _pane(n)) for n in range(2, 9)),
+          f'{_order(page)} {_ws(page)["ws"]["kept"]}')
+    page.locator('[data-testid="pane-1-split"]').click()
+    until(lambda: len(_order(page)) == 2, timeout=2)
+    check("FS2: the split after ⊞ 8 → 1 takes the free id 9, never a hidden pane",
+          _order(page) == [1, 9] and _ws(page)["ws"]["kept"] == [2, 3, 4, 5, 6, 7, 8]
+          and _attr(page, ws, "data-preset") == "cols2", f'{_order(page)} {_ws(page)["ws"]["kept"]}')
+    nine = _pane(9)
+    until(lambda: page.locator(nine).count() == 1 and _attr(page, nine, "data-focused") == "true", timeout=2)
+    g = _geo(page, (1, 9))
+    check('FS2: pane-9 mounts, drawn in slot 2 (data-slot="2"), focused, a chat with its own box',
+          page.locator(nine).count() == 1 and _attr(page, nine, "data-slot") == "2" and all(g) and g[0][0] < g[1][0]
+          and _attr(page, nine, "data-focused") == "true" and _attr(page, nine, "data-view") == "chat"
+          and _attr(page, nine, "aria-label").startswith("Pane 2:")
+          and page.locator(_pane(9, '[data-testid="input"]')).count() == 1, f"{g} {_attr(page, nine, 'aria-label')}")
+    check("FS2: pane 9 carries its own split and ×",
+          page.locator('[data-testid="pane-9-split"]').count() == 1 and page.locator('[data-testid="pane-9-close"]').count() == 1)
+    page.locator('[data-testid="pane-9-split"]').click()
+    until(lambda: len(_order(page)) == 3, timeout=2)
+    check("FS2: and the next split takes 10, right after its source",
+          _order(page) == [1, 9, 10] and _attr(page, _pane(10), "data-slot") == "3", str(_order(page)))
+    stored = json.loads(page.evaluate("localStorage.getItem('jarvis.hud.workspace')") or "{}")
+    check("FS2: ids 9 and 10 are stored, and the hidden panes with them",
+          stored.get("order") == [1, 9, 10] and stored.get("kept") == [2, 3, 4, 5, 6, 7, 8]
+          and len(stored.get("panes", [])) == 12, f'{stored.get("order")} {stored.get("kept")} {len(stored.get("panes", []))}')
+    _boot(page, mock, None, until, reload=True)
+    check("FS2: a reload draws them again, in their slots",
+          _order(page) == [1, 9, 10] and _attr(page, _pane(9), "data-slot") == "2"
+          and _attr(page, _pane(10), "data-slot") == "3" and _visible(page, _pane(10)), str(_order(page)))
+
+    # Ctrl+Alt+N is a slot, 1–8 only (decision FS-9).
+    page.locator(_pane(1, '[data-testid="input"]')).click()
+    until(lambda: _attr(page, _pane(1), "data-focused") == "true", timeout=2)
+    _press_on_body(page, "Control+Alt+2")
+    until(lambda: _attr(page, nine, "data-focused") == "true", timeout=2)
+    check("FS2: Ctrl+Alt+2 focuses pane 9, in slot 2", _attr(page, nine, "data-focused") == "true"
+          and _last_key(page).get("prevented") is True)
+    _press_on_body(page, "Control+Alt+1")
+    until(lambda: _attr(page, _pane(1), "data-focused") == "true", timeout=2)
+    zoom = _zoom(page)
+    for key in ("9", "0"):
+        _press_on_body(page, f"Control+Alt+{key}")
+        time.sleep(0.15)
+        check(f"FS-9: Ctrl+Alt+{key} focuses nothing with panes 9 and 10 drawn, and is left to the browser",
+              _attr(page, _pane(1), "data-focused") == "true" and _attr(page, nine, "data-focused") == "false"
+              and _attr(page, _pane(10), "data-focused") == "false" and _last_key(page).get("prevented") is False,
+              f"{_ws(page)['ws']['focused']} {_last_key(page)}")
+    check("FS-9: and Ctrl+Alt+0 is not the zoom reset", _zoom(page) == zoom, str(_zoom(page)))
+    # AltGr arrives as Ctrl+Alt with the symbol it types: ] on the 9 key, } on the 0 key.
+    page.evaluate("document.activeElement && document.activeElement.blur()")
+    took = {sym: page.evaluate(CTRL_ALT_JS, [sym, code]) for sym, code in (("]", "Digit9"), ("}", "Digit0"))}
+    time.sleep(0.15)
+    check("FS-9: AltGr's ] and } on the 9 and 0 keys match nothing",
+          took == {"]": False, "}": False} and _ws(page)["ws"]["focused"] == 1, f"{took} {_ws(page)['ws']['focused']}")
+    took2 = page.evaluate(CTRL_ALT_JS, ["3", "Digit3"])
+    until(lambda: _ws(page)["ws"]["focused"] == 10, timeout=2)
+    check("(the same dispatch with a digit does focus: Ctrl+Alt+3 is pane 10, in slot 3)",
+          took2 is True and _ws(page)["ws"]["focused"] == 10, f"{took2} {_ws(page)['ws']['focused']}")
     _reset_all(page, mock, until)
 
 
@@ -3181,23 +3268,34 @@ def _split_file_checks(page, mock, check, until):
     check("an id a close freed and a split reuses shows the new copy (README.md), never the old file",
           path3.inner_text() == "README.md", path3.inner_text())
 
-    # Every id used: ⊞ hid seven panes, and a split takes back the oldest.
+    # Every id used. ⊞ to 2×2 hides 5–8 (8 the oldest), splits take the free
+    # ids above 8 (9–12 since FS2; none before), and ⊞ to one hides the rest:
+    # a split then takes back the oldest hidden pane, 8.
     _set_ws(page, json.dumps({"preset": "grid8", "order": [2, 1, 3, 4, 5, 6, 7, 8], "focused": 2, "panes": [
         {"view": "chat"}, {"view": "file"}, {"view": "chat"}, {"view": "chat"},
         {"view": "chat"}, {"view": "chat"}, {"view": "chat"}, {"view": "file"}]}))
     _boot(page, mock, None, until, reload=True)
+    ids = len(page.evaluate("window.__hud.state().chats"))
     page.locator(_pane(8, '[data-testid="file-calc.py"]')).click()
     until(lambda: page.locator(_pane(8, '[data-testid="file-path"]')).inner_text() == "calc.py", timeout=4)
     page.locator(_pane(2, '[data-testid="file-README.md"]')).click()
     until(lambda: page.locator(_pane(2, '[data-testid="file-path"]')).inner_text() == "README.md", timeout=4)
+    _choose(page, until, "grid4")
+    for n in range(5, 5 + ids - 8):
+        page.locator('[data-testid="pane-2-split"]').click()
+        until(lambda: len(_order(page)) == n, timeout=2)
+    check(f"setup: ⊞ to 2×2 hid 5–8, and splits took the free ids above 8 ({ids} ids)",
+          sorted(_order(page)) == [1, 2, 3, 4, *range(9, ids + 1)] and _ws(page)["ws"]["kept"] == [5, 6, 7, 8],
+          f'{_order(page)} {_ws(page)["ws"]["kept"]}')
     _choose(page, until, "single")
-    check("setup: one pane, the other seven hidden by ⊞ (pane 8 still mounted on calc.py)",
-          _order(page) == [2] and _ws(page)["ws"]["kept"] == [1, 3, 4, 5, 6, 7, 8]
+    check("setup: one pane, every other id hidden by ⊞ (pane 8 still mounted on calc.py, hidden longest)",
+          _order(page) == [2] and len(_ws(page)["ws"]["kept"]) == ids - 1 and _ws(page)["ws"]["kept"][-1] == 8
           and page.locator(_pane(8, '[data-testid="file-path"]')).inner_text() == "calc.py", str(_ws(page)["ws"]["kept"]))
     page.locator('[data-testid="pane-2-split"]').click()
     until(lambda: _order(page) == [2, 8], timeout=2)
     p8 = page.locator(_pane(8, '[data-testid="file-path"]'))
     until(lambda: p8.count() > 0 and p8.inner_text() == "README.md", timeout=4)
     check("a split that takes back a hidden pane mounts it fresh: the copy (README.md), not its old calc.py",
-          p8.inner_text() == "README.md" and _ws(page)["ws"]["kept"] == [1, 3, 4, 5, 6, 7], p8.inner_text())
+          p8.inner_text() == "README.md" and 8 not in _ws(page)["ws"]["kept"] and len(_ws(page)["ws"]["kept"]) == ids - 2,
+          p8.inner_text())
     _reset_all(page, mock, until)
