@@ -1516,3 +1516,40 @@ tracker and in `devAttempt`'s active-pane read. `LEGACY_PANES`,
 unchanged. Tests: workspace/chats/devopen/layout/remote vitest, and
 `_twelve_ids_checks` in `hud_v2_layout_check.py` (pane 10 cases in the
 Browser controls check, `_pane_ids` in the auto-open check).
+
+**The split tree is the workspace's model (FS3, 2026-10-19).** `Workspace`
+holds `tree` (lib/splittree.ts), `kept`, `panes`, `focused` and `panel`;
+`order`, `preset` and `splits` are gone, and every reader uses `orderOf` (the
+tree's leaves, depth first), `presetOfWs` (the preset whose structure the
+tree has, sizes ignored, else null: `data-preset="free"`) or `inWorkspace`.
+The owner sees nothing new: the ladder, the one split button and its titles,
+the edges and ⊞ behave as before, except that ⊞ lays a preset out at its
+default sizes and keeps no memory of a dragged shape (FS-8), a double-click
+equalises only the nodes an edge moves, and main2's centre minimum is 720
+(§4.4). Split and × are `presetTree(LADDER[n ± 1], the new order)` at
+default sizes; FS4 replaces them. **Storage is version 2** under the same key:
+the tree with bare-number leaves plus a v1 mirror (`preset`: the tree's own,
+else the ladder's for min(count, 8); `order` only when every id is ≤ 8 and
+the count is the preset's) that a rolled-back HUD reads. A v1 value, a bad
+v2 tree or a version that is not the number 2 is read by `parseV1` (today's
+parser, verbatim) and migrated by §8.2's table, only the stored preset's edges
+carried over. **The fit is §7**: `prune` drops a column or a row of panes at
+a time (never the focused one), the sticky `DrawnSet` is keyed by
+`shapeKey`, each node is clamped top down (`clampSizes`, the identity when
+every child meets its minimum), and `fit.minW`/`fit.minH` replace
+`SHAPES[...].minW` (App's `mainMin`, the panel's drag limit). `WorkspaceFit`
+gives `render`, `boxes` (a Record of unit rects and px) and `edges`
+(`EdgeHandle`: `split-<axis><stored path>-<i>`, collinear boundaries of one
+node's children linked, `data-linked`); `moveEdge` and `equalize` replace
+`setSplit`/`equalSplit`, the FS-3 drag stop is FS4's. **Rendering is flat**:
+`#workspace` is no longer a grid; every section stays a direct child, keyed
+`${id}.${incarnation}` in `PANE_NOS` order, placed absolutely from its own
+box (the 1px rule shared out as the old grid gap was), so a split, close, ⊞,
+drag or resize changes only `style` and no Browser frame reloads or changes
+parent. `__hud.workspace()` returns `ws` with its derived `order` and
+`preset` ("free"), and `fit` with `drawn` (`drawnPreset ?? "free"`), all
+JSON-safe. The golden fits stay byte for byte; 62 keys draw differently,
+each listed with its §7.1 reason in `workspace.tree.test.ts`. Tests:
+`workspace.tree.test.ts` (79), the ported workspace/chats/devopen/speech
+suites, `_no_remount_checks` in `hud_v2_layout_check.py` and
+`_guard_layout_checks` in `hud_v2_browser_check.py`.

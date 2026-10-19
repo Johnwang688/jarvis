@@ -1,48 +1,59 @@
 // The centre's panes (design §18; plans docs/plans/2026-10-09-hud-workspace-
-// plan.md §2.2 and 2026-10-10-hud-split-panes-plan.md §3): which preset is
-// chosen, what each of the eight panes shows, where the edges between them
-// are, the bottom panel, and how all of it is fitted to the window. Pure,
-// like lib/layout.ts, so every rule is tested without a browser;
+// plan.md §2.2, 2026-10-10-hud-split-panes-plan.md §3 and 2026-10-19-hud-free-
+// split-plan.md §3, §7–§9): how the panes are arranged, what each of the twelve
+// pane ids shows, the bottom panel, and how all of it is fitted to the window.
+// Pure, like lib/layout.ts, so every rule is tested without a browser;
 // components/Workspace.tsx and the title bar only draw what this file decides.
 //
-// **Presets, not free splitting.** Ten shapes, one to eight panes (WP-G1,
-// 2026-10-10; decisions S-1): the six of WP-A, plus 3 over 2, 3×2, 4 over 3
-// and 4×2. ⊞ offers eight of them (`MENU_PRESETS`); 5 and 7 are reached by
-// split and close (WP-G2) or a stored workspace. Every shape but main2 is a
-// list of rows (`ShapeSpec.rows`, panes per row), and the CSS grid, the edges
-// and the drops are all derived from it.
+// **The split tree is the model (FS3, plan P-1).** `ws.tree` (lib/splittree.ts)
+// says which panes are drawn, how they are arranged and their sizes. The order
+// (`orderOf`: the tree's leaves, depth first) and the preset (`presetOfWs`: the
+// preset whose structure the tree has, sizes ignored) are derived, never
+// stored as truth. Until FS4 only preset shapes are made: ⊞ lays a preset out
+// at its default sizes (decisions FS-8: no memory of a custom shape), and split
+// and × land on the ladder's shape for the new count, as WP-G2's did.
 //
 // **A pane's id is not its slot** (plan G-1). A pane keeps its id
-// (`pane-<id>`, its React key, `chats[id]`, its dirty flag) for life;
-// `ws.order` lists the ids the preset draws, in reading order. Every number
-// the owner reads is the slot (`slotOf`). A stored WP-A or WP-B workspace has
-// no `order`, so it reads as ids 1…n: the same panes it always drew.
+// (`pane-<id>`, its React key, `chats[id]`, its dirty flag) for life; its slot
+// is its place in reading order (`slotOf`), and every number the owner reads
+// is the slot. A stored WP-A or WP-B workspace has no `order`, so it reads as
+// ids 1…n: the same panes it always drew.
 //
-// **All eight pane specs are always stored**, so going from eight panes to
-// one and back brings back what each pane showed: ⊞ to fewer panes moves the
-// rest to `kept`, and growing takes `kept` back first. A pane is mounted the
-// first time a preset shows it and is then hidden, never unmounted (the side
-// panes' rule): an unsaved edit in pane 3 survives switching to one pane.
+// **Every pane spec is always stored**, so going from eight panes to one and
+// back brings back what each pane showed: ⊞ to fewer panes moves the rest to
+// `kept`, and growing takes `kept` back first. A pane is mounted the first time
+// it is drawn and is then hidden, never unmounted (the side panes' rule): an
+// unsaved edit in pane 3 survives switching to one pane.
 //
 // **Several panes may show chat (WP-B, 2026-10-09)**, each its own
-// conversation (lib/chats.ts). WP-A kept the chat a singleton and swapped two
-// panes' views when chat was chosen in a second pane; that is gone, and a
-// stored workspace with several chat panes is kept as it is.
+// conversation (lib/chats.ts).
 //
 // **Fitting changes only the render, never what is stored** (`fitWorkspace`,
-// the generalisation of `fitLayout`). Across: the side panes give back their
-// slack, then fold (right first), and only then are columns dropped, never the
-// focused pane. Down: the panel shrinks to its minimum, then folds, and only
-// then are rows dropped. Opening a panel the window folded drops rows instead
-// (the vertical `prefer`).
+// the generalisation of `fitLayout`, §7). Across: the side panes give back
+// their slack, then fold (right first), and only then are panes dropped
+// (`prune`), never the focused one. Down: the panel shrinks to its minimum,
+// then folds, and only then are panes dropped. Opening a panel the window
+// folded drops panes instead (the vertical `prefer`). Each node is then
+// clamped so every pane gets its minimum, and each pane is drawn from its own
+// box (C5): moving one never moves another by a pixel.
+//
+// **Stored as version 2** (§8): the tree, with a v1 mirror (`preset`,
+// `order`) beside it that a HUD rolled back past FS3 reads; a v1 value (or a
+// bad v2 tree) is read by today's parser kept verbatim (`parseV1`) and
+// migrated (§8.2).
 //
 // Every number here is in the HUD's own (unzoomed) pixels, like layout.ts.
 
-import { MAIN_MIN, fitLayout, type Fitted, type PaneLayout, type Side } from "./layout";
+import { fitLayout, type Fitted, type PaneLayout, type Side } from "./layout";
 import { originOf, storableKeepOrigin } from "./browser";
 import { parseTabs, sameTabs, type Tabs } from "./buffers";
 import { cleanTitle } from "./remote";
 import { parseRef, type SubagentRef } from "./subagents";
+import {
+  acrossS, clampSizes, downS, edgesOf, isLeaf, leaves, minH as treeMinH, minW as treeMinW, parseTree, pathOf,
+  presetOf, presetTree, prune, rectsOf, shapeKey, storeTree, withSizes,
+  type Axis, type LayoutNode, type Path, type Rect, type StoredNode,
+} from "./splittree";
 
 export const WORKSPACE_KEY = "jarvis.hud.workspace";
 
@@ -92,59 +103,40 @@ export const PANEL = { min: 120, def: 260, max: 1600 } as const;
 /** The window-wide title bar above everything (§2.1). */
 export const TITLEBAR_H = 28;
 
+/**
+ * A preset's name and pane count. Its arrangement is `presetTree` (lib/
+ * splittree.ts) and its minimum size comes from the tree (§4.4: `fit.minW`,
+ * `fit.minH`), so main2's centre minimum is 720 (§7.1 (i)).
+ */
 export interface ShapeSpec {
   label: string;
   /** How many panes it draws. */
   panes: number;
-  /** The centre's minimum width, and the pane area's minimum height. */
-  minW: number;
-  minH: number;
-  /** Panes per row, top to bottom, in reading order; null for main2 (one large pane beside a stacked column). */
-  rows: number[] | null;
-}
-
-/** A shape made of rows: the widest row's minimum across, a pane's minimum per row down. */
-function rowShape(label: string, rows: number[]): ShapeSpec {
-  const widest = Math.max(...rows);
-  return {
-    label, rows, panes: rows.reduce((a, b) => a + b, 0),
-    minW: widest === 1 ? MAIN_MIN : widest * PANE_MIN_W, minH: rows.length * PANE_MIN_H,
-  };
 }
 
 export const SHAPES: Record<Preset, ShapeSpec> = {
-  single: rowShape("One pane", [1]),
-  cols2: rowShape("Two side by side", [2]),
-  rows2: rowShape("Two stacked", [1, 1]),
-  cols3: rowShape("Three side by side", [3]),
-  main2: { label: "One large, two stacked", panes: 3, minW: MAIN_MIN + PANE_MIN_W, minH: 2 * PANE_MIN_H, rows: null },
-  grid4: rowShape("Two by two", [2, 2]),
-  grid5: rowShape("Three over two", [3, 2]),
-  grid6: rowShape("Three by two", [3, 3]),
-  grid7: rowShape("Four over three", [4, 3]),
-  grid8: rowShape("Four by two", [4, 4]),
+  single: { label: "One pane", panes: 1 },
+  cols2: { label: "Two side by side", panes: 2 },
+  rows2: { label: "Two stacked", panes: 2 },
+  cols3: { label: "Three side by side", panes: 3 },
+  main2: { label: "One large, two stacked", panes: 3 },
+  grid4: { label: "Two by two", panes: 4 },
+  grid5: { label: "Three over two", panes: 5 },
+  grid6: { label: "Three by two", panes: 6 },
+  grid7: { label: "Four over three", panes: 7 },
+  grid8: { label: "Four by two", panes: 8 },
 };
 
-/** The shape whose rows are exactly these, if one is a preset. */
-function presetOfRows(rows: readonly number[]): Preset | null {
-  const key = rows.join(",");
-  return PRESETS.find((p) => SHAPES[p].rows?.join(",") === key) ?? null;
-}
+/** v1's rows per preset (WP-A/WP-B), read only by the v1 parse (`parseV1`). */
+const V1_ROWS: Readonly<Record<Preset, readonly number[] | null>> = {
+  single: [1], cols2: [2], rows2: [1, 1], cols3: [3], main2: null,
+  grid4: [2, 2], grid5: [3, 2], grid6: [3, 3], grid7: [4, 3], grid8: [4, 4],
+};
 
-/** How many rows a shape draws. */
-export function rowCount(preset: Preset): number {
-  return SHAPES[preset].rows?.length ?? 2;
-}
-
-/** A two-row shape whose rows differ (3 over 2, 4 over 3): its bottom row has edges of its own. */
-export function uneven(preset: Preset): boolean {
-  const r = SHAPES[preset].rows;
+/** A two-row v1 shape whose rows differ (3 over 2, 4 over 3): its bottom row had edges of its own. */
+function uneven(preset: Preset): boolean {
+  const r = V1_ROWS[preset];
   return !!r && r.length === 2 && r[0] !== r[1];
-}
-
-/** Columns in the top row (main2: the large pane and the stacked column). */
-function topColumns(preset: Preset): number {
-  return SHAPES[preset].rows?.[0] ?? 2;
 }
 
 export const BROWSER_TABS_MAX = 12;
@@ -220,28 +212,27 @@ export interface PaneSpec {
 }
 
 /**
- * Where a shape's edges are, as fractions: `cols` the cumulative column
- * edges, `row` the row edge, and — for 3 over 2 and 4 over 3 only, whose rows
- * cannot share columns — `bottom`, the bottom row's own column edges.
+ * Where a v1 shape's edges were, as fractions (WP-A/WP-B's `splits`, read
+ * only to migrate them, §8.2): `cols` the cumulative column edges, `row` the
+ * row edge, and — for 3 over 2 and 4 over 3 only — `bottom`, the bottom row's
+ * own column edges.
  */
-export interface Split {
+interface Split {
   cols: number[];
   row: number;
   bottom?: number[];
 }
 
-/** One spec per pane id, eight of them, by id (`panes[id - 1]`). */
+/** One spec per pane id, twelve of them, by id (`panes[id - 1]`). */
 export type Panes = PaneSpec[];
 
 export interface Workspace {
-  preset: Preset;
-  /** The ids the preset draws, in reading order: as many as `SHAPES[preset].panes`. */
-  order: PaneNo[];
-  /** Ids ⊞ hid, most recently hidden first, specs kept to come back; never in `order`. */
+  /** Which panes are drawn, how they are arranged, and their sizes (lib/splittree.ts). */
+  tree: LayoutNode;
+  /** Ids ⊞ hid, most recently hidden first, specs kept to come back; never in the tree. */
   kept: PaneNo[];
   panes: Panes;
-  splits: Record<Preset, Split>;
-  /** Always one of `order`. */
+  /** Always a leaf of the tree. */
   focused: PaneNo;
   panel: { open: boolean; height: number };
 }
@@ -253,10 +244,10 @@ const DEFAULT_VIEWS: Record<PaneNo, View> = {
 
 const equalEdges = (n: number) => Array.from({ length: n - 1 }, (_, i) => (i + 1) / n);
 
-/** Equal columns for a shape (main2's large pane is wider by default). */
+/** A v1 shape's default edges: equal columns (main2's large pane is wider by default). */
 function defaultSplit(preset: Preset): Split {
   if (preset === "main2") return { cols: [0.6], row: 0.5 };
-  const rows = SHAPES[preset].rows!;
+  const rows = V1_ROWS[preset]!;
   const split: Split = { cols: equalEdges(rows[0]), row: 0.5 };
   if (uneven(preset)) split.bottom = equalEdges(rows[1]);
   return split;
@@ -267,17 +258,23 @@ export function defaultPane(n: PaneNo): PaneSpec {
 }
 
 export function defaultWorkspace(): Workspace {
-  const splits = {} as Record<Preset, Split>;
-  for (const p of PRESETS) splits[p] = defaultSplit(p);
   return {
-    preset: "single",
-    order: [1],
+    tree: { pane: 1 },
     kept: [],
     panes: PANE_NOS.map(defaultPane),
-    splits,
     focused: 1,
     panel: { open: false, height: PANEL.def },
   };
+}
+
+/** The ids the tree draws, in reading order (its leaves, depth first; plan P-2). */
+export function orderOf(ws: Pick<Workspace, "tree">): PaneNo[] {
+  return leaves(ws.tree);
+}
+
+/** The preset whose structure the tree has, sizes ignored (a dragged cols2 is still cols2); null for any other tree. */
+export function presetOfWs(ws: Pick<Workspace, "tree">): Preset | null {
+  return presetOf(ws.tree);
 }
 
 /**
@@ -285,40 +282,31 @@ export function defaultWorkspace(): Workspace {
  * the ones ⊞ hid (most recently hidden first), then the free ones, lowest
  * first. ⊞ to n panes draws the first n of these.
  */
-export function paneSequence(ws: Pick<Workspace, "order" | "kept">): PaneNo[] {
-  const free = PANE_NOS.filter((n) => !inWorkspace(ws, n));
-  return [...ws.order, ...ws.kept, ...free];
+export function paneSequence(ws: Pick<Workspace, "tree" | "kept">): PaneNo[] {
+  const order = orderOf(ws);
+  const free = PANE_NOS.filter((n) => !order.includes(n) && !ws.kept.includes(n));
+  return [...order, ...ws.kept, ...free];
 }
 
 /** Id `n` is drawn, or hidden by ⊞ to come back — not free (closed by ×, or never drawn). */
-export function inWorkspace(ws: Pick<Workspace, "order" | "kept">, n: PaneNo): boolean {
-  return ws.order.includes(n) || ws.kept.includes(n);
-}
-
-/**
- * The ids the preset draws, in reading order. `ws.order` always has the
- * preset's count; a workspace put together by hand that does not is read the
- * way a grow would read it.
- */
-export function orderOf(ws: Pick<Workspace, "preset" | "order" | "kept">): PaneNo[] {
-  const n = SHAPES[ws.preset].panes;
-  return ws.order.length === n ? ws.order.slice() : paneSequence(ws).slice(0, n);
+export function inWorkspace(ws: Pick<Workspace, "tree" | "kept">, n: PaneNo): boolean {
+  return orderOf(ws).includes(n) || ws.kept.includes(n);
 }
 
 /**
  * The number the owner reads for pane `id` (plan G-1): its slot, 1-based in
- * reading order. A pane the preset does not draw reads as the slot a grow
+ * reading order. A pane the tree does not draw reads as the slot a grow
  * would bring it back in.
  */
-export function slotOf(ws: Pick<Workspace, "preset" | "order" | "kept">, id: PaneNo): number {
+export function slotOf(ws: Pick<Workspace, "tree" | "kept">, id: PaneNo): number {
   const drawn = orderOf(ws);
   const at = drawn.indexOf(id);
   if (at >= 0) return at + 1;
   return [...drawn, ...paneSequence(ws).filter((n) => !drawn.includes(n))].indexOf(id) + 1;
 }
 
-/** The id in slot `slot` (1-based), if the preset has that many. */
-export function paneAt(ws: Pick<Workspace, "preset" | "order" | "kept">, slot: number): PaneNo | null {
+/** The id in slot `slot` (1-based), if the tree has that many. */
+export function paneAt(ws: Pick<Workspace, "tree" | "kept">, slot: number): PaneNo | null {
   return orderOf(ws)[slot - 1] ?? null;
 }
 
@@ -448,25 +436,26 @@ function parseSplit(raw: unknown, preset: Preset): Split {
   return split;
 }
 
+/** What today's (WP-A … FS2) workspace value holds: the v1 model, read only to migrate it (§8.2). */
+interface V1Workspace {
+  preset: Preset;
+  order: PaneNo[];
+  kept: PaneNo[];
+  panes: Panes;
+  splits: Record<Preset, Split>;
+  focused: PaneNo;
+  panel: { open: boolean; height: number };
+}
+
 /**
- * The stored JSON → a workspace. Each field stands on its own (a bad split
- * does not reset the panes, a bad `order` does not reset the preset), an
- * unknown preset reads as `single`, and the panel is open only on a literal
- * `true`. A WP-A or WP-B value has no `order`: it draws ids 1…n, the panes it
- * always drew. A rolled-back HUD ignores `order` and `kept`, and reads a
- * preset it does not know as single, so that direction is safe too.
+ * Today's parser, kept verbatim (§8.1): a value with no `version` (WP-A …
+ * FS2), a bad v2 tree's mirror, or a version this HUD does not know. Each
+ * field stands on its own (a bad split does not reset the panes, a bad
+ * `order` does not reset the preset), an unknown preset reads as `single`,
+ * and the panel is open only on a literal `true`. A WP-A or WP-B value has no
+ * `order`: it draws ids 1…n, the panes it always drew.
  */
-export function parseWorkspace(raw: unknown): Workspace {
-  let v: unknown = null;
-  if (typeof raw === "string") {
-    try {
-      v = JSON.parse(raw);
-    } catch {
-      v = null;
-    }
-  }
-  const ws = defaultWorkspace();
-  if (!isObj(v)) return ws;
+function parseV1(v: Record<string, unknown>): V1Workspace {
   const preset = isPreset(v.preset) ? v.preset : "single";
   const n = SHAPES[preset].panes;
   const order = parseOrder(v.order, n) ?? PANE_NOS.slice(0, n);
@@ -491,6 +480,61 @@ export function parseWorkspace(raw: unknown): Workspace {
   };
 }
 
+const sameSplit = (a: Split, b: Split) => JSON.stringify(a) === JSON.stringify(b);
+
+/**
+ * §8.2: a v1 workspace as a tree. Its preset laid out with its order's ids in
+ * reading order, at the edges it stored for that preset only (a grid's two
+ * rows from `cols` together, 3 over 2's and 4 over 3's bottom row from
+ * `bottom`); the other presets' edges are not carried over (FS-8). Default
+ * edges give the preset's exact default sizes.
+ */
+function migrateV1(w: V1Workspace): Workspace {
+  const split = w.splits[w.preset];
+  const tree = sameSplit(split, defaultSplit(w.preset))
+    ? presetTree(w.preset, w.order) : presetTree(w.preset, w.order, split);
+  return { tree, kept: w.kept, panes: w.panes, focused: w.focused, panel: w.panel };
+}
+
+/**
+ * A v2 value (§8.1) whose tree `parseTree` accepted, field by field: `kept`
+ * the distinct ids not in the tree, `focused` a leaf else the first,
+ * `panel` and `panes` as v1 reads them, `panes` padded to twelve.
+ */
+function parseV2(v: Record<string, unknown>, tree: LayoutNode): Workspace {
+  const order = leaves(tree);
+  const rawPanes = Array.isArray(v.panes) ? v.panes : [];
+  const panel = isObj(v.panel) ? v.panel : {};
+  return {
+    tree,
+    kept: parseKept(v.kept, order),
+    panes: PANE_NOS.map((id) => parsePane(rawPanes[id - 1], id)),
+    focused: isPaneNo(v.focused) && order.includes(v.focused) ? v.focused : order[0],
+    panel: { open: panel.open === true, height: clampPanelHeight(panel.height) },
+  };
+}
+
+/**
+ * The stored JSON → a workspace. `version === 2` with a tree `parseTree`
+ * accepts is read as v2; anything else (no version, a bad v2 tree, a version
+ * that is not the number 2) by today's parser (`parseV1`) and migrated, so a
+ * bad v2 tree falls back to its own mirror (`preset`, `order`). FS-3 is never
+ * checked on read: a stored layout is never lost on reload.
+ */
+export function parseWorkspace(raw: unknown): Workspace {
+  let v: unknown = null;
+  if (typeof raw === "string") {
+    try {
+      v = JSON.parse(raw);
+    } catch {
+      v = null;
+    }
+  }
+  if (!isObj(v)) return defaultWorkspace();
+  const tree = v.version === 2 ? parseTree(v.tree) : null;
+  return tree ? parseV2(v, tree) : migrateV1(parseV1(v));
+}
+
 type Getter = Pick<Storage, "getItem">;
 type Setter = Pick<Storage, "setItem">;
 
@@ -506,9 +550,32 @@ export function loadWorkspace(storage?: Getter): Workspace {
  * must not blank a live page. Only opaque handles and structural state persist. */
 type StoredBrowserTab = Omit<BrowserTabSpec, "url"> & { url?: string };
 type StoredPane = Omit<PaneSpec, "browser"> & { browser?: { tabs: StoredBrowserTab[]; active: string } };
-export function workspaceStorage(ws: Workspace): Omit<Workspace, "panes"> & { panes: StoredPane[] } {
-  const clean = parseWorkspace(JSON.stringify(ws));
-  return { ...clean, panes: clean.panes.map((pane): StoredPane => {
+/**
+ * The stored value (§8.1): version 2, the tree with bare-number leaves, and
+ * beside it the v1 mirror a HUD rolled back past FS3 reads (its parser
+ * ignores the rest): `preset` the tree's own, else the ladder's shape for its
+ * count (at most eight), and `order` only when every id is ≤ 8 and the count
+ * is that preset's.
+ */
+export interface StoredWorkspace {
+  version: 2;
+  tree: StoredNode;
+  kept: PaneNo[];
+  panes: StoredPane[];
+  focused: PaneNo;
+  panel: { open: boolean; height: number };
+  preset: Preset;
+  order?: PaneNo[];
+}
+export function workspaceStorage(ws: Workspace): StoredWorkspace {
+  const clean = parseWorkspace(JSON.stringify({
+    version: 2, tree: storeTree(ws.tree), kept: ws.kept, panes: ws.panes, focused: ws.focused, panel: ws.panel,
+  }));
+  const order = orderOf(clean);
+  const preset = presetOfWs(clean) ?? LADDER[Math.min(order.length, MAX_DRAWN)];
+  const mirror = order.every((n) => n <= 8) && order.length === SHAPES[preset].panes ? { order } : {};
+  return { version: 2, tree: storeTree(clean.tree), kept: clean.kept, focused: clean.focused, panel: clean.panel,
+           preset, ...mirror, panes: clean.panes.map((pane): StoredPane => {
     if (pane.browserProfile !== "private") return pane;
     const out: StoredPane = { ...pane, browserPrivateEnded: true };
     delete out.browserUrl;
@@ -546,9 +613,10 @@ export function setPreset(ws: Workspace, preset: Preset): Workspace {
   const seq = paneSequence(ws);
   const n = SHAPES[preset].panes;
   const order = seq.slice(0, n);
-  const kept = seq.slice(n).filter((id) => ws.order.includes(id) || ws.kept.includes(id));
+  const kept = seq.slice(n).filter((id) => inWorkspace(ws, id));
   const focused = order.includes(ws.focused) ? ws.focused : order[0];
-  return { ...ws, preset, order, kept, focused };
+  // At the preset's default sizes: ⊞ keeps no memory of a shape (FS-8).
+  return { ...ws, tree: presetTree(preset, order), kept, focused };
 }
 
 export function focusPane(ws: Workspace, pane: PaneNo): Workspace {
@@ -899,19 +967,6 @@ export function setKeepOrigin(ws: Workspace, pane: PaneNo, origin: string | null
   return setTabKeepOrigin(ws, pane, ws.panes[pane - 1].browser?.active ?? "", origin);
 }
 
-export function setSplit(ws: Workspace, preset: Preset, split: Partial<Split>): Workspace {
-  const next = parseSplit({ ...ws.splits[preset], ...split }, preset);
-  return { ...ws, splits: { ...ws.splits, [preset]: next } };
-}
-
-/** Double-click on an edge: the shape's panes equal (each row's own, for 3 over 2 and 4 over 3). */
-export function equalSplit(ws: Workspace, preset: Preset): Workspace {
-  const rows = SHAPES[preset].rows;
-  const even: Split = { cols: equalEdges(topColumns(preset)), row: 0.5 };
-  if (rows && uneven(preset)) even.bottom = equalEdges(rows[1]);
-  return setSplit(ws, preset, even);
-}
-
 export function setPanel(ws: Workspace, panel: Partial<Workspace["panel"]>): Workspace {
   const open = panel.open ?? ws.panel.open;
   const height = panel.height === undefined ? ws.panel.height : clampPanelHeight(panel.height);
@@ -921,18 +976,19 @@ export function setPanel(ws: Workspace, panel: Partial<Workspace["panel"]>): Wor
 
 /**
  * Reset layout (§2.1): one pane (the first in reading order; ⊞ keeps the
- * rest), default edges, the panel closed. What each pane showed is kept.
+ * rest), the panel closed. What each pane showed is kept.
  */
 export function resetWorkspace(ws: Workspace): Workspace {
-  const d = defaultWorkspace();
-  return { ...setPreset({ ...ws, order: orderOf(ws) }, "single"), splits: d.splits, panel: d.panel };
+  return { ...setPreset(ws, "single"), panel: defaultWorkspace().panel };
 }
 
 // ---- split and close (WP-G2) ----------------------------------------------------
 //
 // Split adds a copy of a pane right after it in reading order; × removes
 // exactly that pane. Both always land on the ladder shape for the new count
-// (plan G-3): rows2 and main2 are ⊞'s alone. ⊞ hides panes (`kept`, specs
+// (plan G-3), laid out at its default sizes: the tree is
+// `presetTree(LADDER[n ± 1], the new order)` (FS3; FS4 replaces the ladder
+// with the directional split). rows2 and main2 are ⊞'s alone. ⊞ hides panes (`kept`, specs
 // kept to come back); × discards one (its spec back to the default), and the
 // window mounts that id fresh if a later split reuses it (the incarnation in
 // useLayout).
@@ -954,9 +1010,10 @@ export const MAX_DRAWN = 8;
  * the hidden pane it takes first.
  */
 export function allocate(
-  ws: Pick<Workspace, "order" | "kept">, dirty: readonly PaneNo[] = [], holding: readonly PaneNo[] = [],
+  ws: Pick<Workspace, "tree" | "kept">, dirty: readonly PaneNo[] = [], holding: readonly PaneNo[] = [],
 ): PaneNo | null {
-  const free = PANE_NOS.find((n) => !ws.order.includes(n) && !ws.kept.includes(n));
+  const order = orderOf(ws);
+  const free = PANE_NOS.find((n) => !order.includes(n) && !ws.kept.includes(n));
   if (free !== undefined) return free;
   // `kept` is most recently hidden first: the oldest is the last.
   const oldest = (ok: (n: PaneNo) => boolean) => [...ws.kept].reverse().find(ok) ?? null;
@@ -981,8 +1038,7 @@ export function splitPane(
   const panes = ws.panes.map((p, i) => (i === id - 1 ? { ...spec } : p)) as Panes;
   return {
     ...ws,
-    preset: LADDER[next.length],
-    order: next,
+    tree: presetTree(LADDER[next.length], next),
     kept: ws.kept.filter((n) => n !== id),
     panes,
     focused: opts.focus === false && order.includes(ws.focused) ? ws.focused : id,
@@ -990,9 +1046,9 @@ export function splitPane(
 }
 
 /**
- * × on pane `id` (plan §3.6): it leaves `order`, its spec goes back to the
- * default, and the shape is the ladder's for one pane fewer. `kept` and every
- * preset's edges are untouched. Focus, when it was on the closed pane, goes to
+ * × on pane `id` (plan §3.6): it leaves the tree, its spec goes back to the
+ * default, and the shape is the ladder's for one pane fewer, at its default
+ * sizes. `kept` is untouched. Focus, when it was on the closed pane, goes to
  * `then` when that is still drawn — the window passes the chat selected
  * before the closed one, so the owner's last choice keeps the microphone
  * (decisions W-6) — else to the pane now in that slot, else the slot before.
@@ -1006,7 +1062,7 @@ export function closePane(ws: Workspace, id: PaneNo, then: PaneNo | null = null)
   const panes = ws.panes.map((p, i) => (i === id - 1 ? defaultPane(id) : p)) as Panes;
   const focused = ws.focused !== id && next.includes(ws.focused) ? ws.focused
     : then !== null && next.includes(then) ? then : next[Math.min(at, next.length - 1)];
-  return { ...ws, preset: LADDER[next.length], order: next, kept: ws.kept.filter((n) => n !== id), panes, focused };
+  return { ...ws, tree: presetTree(LADDER[next.length], next), kept: ws.kept.filter((n) => n !== id), panes, focused };
 }
 
 /**
@@ -1123,7 +1179,7 @@ export function splitVerdict(
   // Words a hidden compose row holds are parked, never lost: only an unsaved edit blocks.
   const id = allocate(ws, dirty);
   const probe = id ?? PANE_NOS.find((n) => !order.includes(n))!;
-  const trial = splitPane({ ...ws, order }, order[order.length - 1], probe, defaultPane(probe));
+  const trial = splitPane(ws, order[order.length - 1], probe, defaultPane(probe));
   if (fitWorkspace(layout, trial, available, availableH, prefer, preferPanel).dropped > 0) {
     return { ok: false, why: "room" };
   }
@@ -1145,302 +1201,308 @@ export function splitTitle(why: SplitWhy, count: number): string {
   }
 }
 
-// ---- edges --------------------------------------------------------------------
+// ---- the tree, read --------------------------------------------------------------
 
-/**
- * Column edges fitted to a centre `width` px wide: every column at least
- * `min` wide, as close to the stored fractions as that allows. A centre too
- * narrow for that (only a window too small for anything) gets equal columns.
- */
-export function clampCols(cols: readonly number[], width: number, min: number = PANE_MIN_W): number[] {
-  const n = cols.length + 1;
-  if (n === 1) return [];
-  if (!Number.isFinite(width) || width <= 0) return cols.slice();
-  if (width < n * min) return Array.from({ length: n - 1 }, (_, i) => (i + 1) / n);
-  const px = cols.map((c) => c * width);
-  for (let i = 0; i < px.length; i++) px[i] = Math.max(px[i], (i === 0 ? 0 : px[i - 1]) + min);
-  for (let i = px.length - 1; i >= 0; i--) px[i] = Math.min(px[i], (i === px.length - 1 ? width : px[i + 1]) - min);
-  return px.map((x) => x / width);
-}
-
-/** The row edge fitted to a pane area `height` px tall. */
-export function clampRow(row: number, height: number, min: number = PANE_MIN_H): number {
-  if (!Number.isFinite(height) || height <= 0) return row;
-  if (height < 2 * min) return 0.5;
-  return Math.min(1 - min / height, Math.max(min / height, row));
-}
-
-/** Move column edge `i` to `frac`, stopped `min` px short of its neighbours. */
-export function moveColEdge(
-  cols: readonly number[], i: number, frac: number, width: number, min: number = PANE_MIN_W,
-): number[] {
-  if (i < 0 || i >= cols.length || !Number.isFinite(frac)) return cols.slice();
-  const gap = Number.isFinite(width) && width > 0 ? min / width : 0;
-  const lo = (i === 0 ? 0 : cols[i - 1]) + gap;
-  const hi = (i === cols.length - 1 ? 1 : cols[i + 1]) - gap;
-  const out = cols.slice();
-  out[i] = lo > hi ? cols[i] : Math.min(hi, Math.max(lo, frac));
-  return out;
-}
-
-/** Each column's width in px, from the fitted edges. */
-export function columnWidths(cols: readonly number[], width: number): number[] {
-  const edges = [0, ...cols, 1];
-  return edges.slice(1).map((e, i) => (e - edges[i]) * width);
-}
-
-// ---- the grid -----------------------------------------------------------------
-
-/** One pane's place in its shape, as fractions of the pane area: slot order, reading order. */
-export interface Cell {
-  left: number;
-  right: number;
-  top: number;
-  bottom: number;
-}
-
-/** The edges a shape is drawn with: its top-row columns, its row edge, its bottom row's own columns. */
-export type Edges = Pick<Split, "cols" | "row"> & { bottom?: readonly number[] };
-
-/**
- * Where each slot of `shape` sits, given its (fitted) edges. A uniform shape
- * shares one set of column edges between its rows; 3 over 2 and 4 over 3
- * read the bottom row from `bottom`; main2 is one large pane beside a stacked
- * column.
- */
-export function cellsOf(shape: Preset, edges: Edges): Cell[] {
-  const rows = SHAPES[shape].rows;
-  const r = edges.row;
-  // Edges of the wrong count (a hand-made value) read as equal columns.
-  const want = (e: readonly number[] | undefined, n: number) => (e && e.length === n - 1 ? e : equalEdges(n));
-  if (!rows) {
-    const c = want(edges.cols, 2)[0];
-    return [
-      { left: 0, right: c, top: 0, bottom: 1 },
-      { left: c, right: 1, top: 0, bottom: r },
-      { left: c, right: 1, top: r, bottom: 1 },
-    ];
+function nodeAt(n: LayoutNode, path: Path): LayoutNode | null {
+  let at: LayoutNode = n;
+  for (const i of path) {
+    if (isLeaf(at) || i < 0 || i >= at.children.length) return null;
+    at = at.children[i];
   }
-  const out: Cell[] = [];
-  rows.forEach((n, i) => {
-    const xs = [0, ...want(i === 1 && uneven(shape) ? edges.bottom : edges.cols, n), 1];
-    const top = rows.length === 1 ? 0 : i === 0 ? 0 : r;
-    const bottom = rows.length === 1 ? 1 : i === 0 ? r : 1;
-    for (let j = 0; j < n; j++) out.push({ left: xs[j], right: xs[j + 1], top, bottom });
-  });
-  return out;
+  return at;
 }
 
-/** Coincident edges are one (a drag that lines a bottom edge up with a top one). */
-const SAME_EDGE = 1e-4;
+const firstLeaf = (n: LayoutNode): PaneNo => (isLeaf(n) ? n.pane : firstLeaf(n.children[0]));
+const lastLeaf = (n: LayoutNode): PaneNo => (isLeaf(n) ? n.pane : lastLeaf(n.children[n.children.length - 1]));
 
-function unionEdges(xs: number[]): number[] {
-  const out: number[] = [];
-  for (const x of [...xs].sort((a, b) => a - b)) {
-    if (!out.length || x - out[out.length - 1] > SAME_EDGE) out.push(x);
+/** Structure only: no ids, no sizes. */
+const structure = (n: LayoutNode): string => (isLeaf(n) ? "." : `${n.axis}[${n.children.map(structure).join(",")}]`);
+
+/** A child's least size along `axis` (§4.4): 360 per pane across, 200 per pane down. */
+const minAlong = (n: LayoutNode, axis: Axis) => (axis === "x" ? acrossS(n) * PANE_MIN_W : downS(n) * PANE_MIN_H);
+
+/** Where `n`'s drawn panes lie along `axis`, in px of `length` (null when none of them is drawn). */
+function extent(n: LayoutNode, rects: Partial<Record<PaneNo, Rect>>, axis: Axis, length: number): [number, number] | null {
+  let lo = Infinity;
+  let hi = -Infinity;
+  for (const p of leaves(n)) {
+    const r = rects[p];
+    if (!r) continue;
+    const a = axis === "x" ? r.left : r.top;
+    lo = Math.min(lo, a);
+    hi = Math.max(hi, a + (axis === "x" ? r.width : r.height));
   }
-  out[0] = 0;
-  out[out.length - 1] = 1;
-  return out;
+  return lo <= hi ? [lo * length, hi * length] : null;
 }
 
-const nearest = (edges: readonly number[], x: number) =>
-  edges.reduce((best, e, i) => (Math.abs(e - x) < Math.abs(edges[best] - x) ? i : best), 0);
+// ---- edges (§9) --------------------------------------------------------------------
 
 /**
- * The CSS grid for a shape: its unit columns and rows (as fractions) and its
- * areas, slots named `s1` … `s8`. The unit columns are the union of every
- * row's edges, so a row whose edges are not the top row's (3 over 2: ⅓, ⅔
- * over ½ gives ⅓ ⅙ ⅙ ⅓) spans the units between its own edges: "s1 s2 s2 s3"
- * over "s4 s4 s5 s5". Coincident edges merge.
+ * One separator between panes (§9), from the fit. `members` are the stored
+ * node boundaries it moves — between children i − 1 and i of the node at
+ * `path` in `ws.tree` — several when collinear boundaries of one node's
+ * children are linked (P-5: 2×2's column edge through both rows). Its test id
+ * is `split-<axis><the first member's path digits>-<i>`. `value`, `min` and
+ * `max` are px from the pane area's left ("x") or top ("y"); min and max keep
+ * every child beside every member at least its subtree minimum (the FS-3 stop
+ * is FS4's). Plain data: the page may hold it.
  */
-export function gridTemplate(shape: Preset, edges: Edges): { columns: number[]; rows: number[]; areas: string[] } {
-  const cells = cellsOf(shape, edges);
-  const xs = unionEdges([0, 1, ...cells.flatMap((c) => [c.left, c.right])]);
-  const ys = unionEdges([0, 1, ...cells.flatMap((c) => [c.top, c.bottom])]);
-  const spans = cells.map((c) => ({
-    x0: nearest(xs, c.left), x1: nearest(xs, c.right), y0: nearest(ys, c.top), y1: nearest(ys, c.bottom),
-  }));
-  const areas: string[] = [];
-  for (let y = 0; y < ys.length - 1; y++) {
-    const row: string[] = [];
-    for (let x = 0; x < xs.length - 1; x++) {
-      const at = spans.findIndex((s) => s.x0 <= x && x < s.x1 && s.y0 <= y && y < s.y1);
-      row.push(`s${at + 1}`);
+export interface EdgeHandle {
+  testid: string;
+  /** The way it moves: "x" is a vertical separator. */
+  axis: Axis;
+  members: { path: Path; i: number }[];
+  /** Where it is drawn, in unit fractions: zero wide (x) or zero tall (y). */
+  at: Rect;
+  value: number;
+  min: number;
+  max: number;
+}
+
+/**
+ * The stored boundary a drawn one is. Pruning drops children and flattens
+ * nodes but never reorders, so the drawn children either side meet where the
+ * stored paths of their nearest leaves part: that node, and the child index
+ * the second leaf's branch has there.
+ */
+function storedBoundary(tree: LayoutNode, render: LayoutNode, path: Path, i: number): { path: number[]; i: number } | null {
+  const r = nodeAt(render, path);
+  if (!r || isLeaf(r) || i < 1 || i >= r.children.length) return null;
+  const a = pathOf(tree, lastLeaf(r.children[i - 1]));
+  const b = pathOf(tree, firstLeaf(r.children[i]));
+  if (!a || !b) return null;
+  let k = 0;
+  while (k < a.length && k < b.length && a[k] === b[k]) k++;
+  return k < b.length ? { path: b.slice(0, k), i: b[k] } : null;
+}
+
+/** Every separator of the fitted render, named and moved by the stored nodes its boundaries belong to. */
+function edgeHandles(tree: LayoutNode, render: LayoutNode, width: number, height: number): EdgeHandle[] {
+  const rects = rectsOf(render);
+  const out: EdgeHandle[] = [];
+  for (const e of edgesOf(render)) {
+    const length = e.axis === "x" ? width : height;
+    const L = Number.isFinite(length) ? length : 0;
+    const members: { path: number[]; i: number }[] = [];
+    let value = NaN;
+    let min = -Infinity;
+    let max = Infinity;
+    for (const m of e.members) {
+      const stored = storedBoundary(tree, render, m.path, m.i);
+      const r = nodeAt(render, m.path);
+      if (!stored || !r || isLeaf(r)) continue;
+      const before = extent(r.children[m.i - 1], rects, e.axis, L);
+      const after = extent(r.children[m.i], rects, e.axis, L);
+      if (!before || !after) continue;
+      members.push(stored);
+      if (Number.isNaN(value)) value = after[0];
+      min = Math.max(min, before[0] + minAlong(r.children[m.i - 1], e.axis));
+      max = Math.min(max, after[1] - minAlong(r.children[m.i], e.axis));
     }
-    areas.push(row.join(" "));
-  }
-  const diffs = (e: number[]) => e.slice(1).map((v, i) => v - e[i]);
-  return { columns: diffs(xs), rows: diffs(ys), areas };
-}
-
-// ---- fitting ------------------------------------------------------------------
-
-/** A shape's panes, row by row. */
-function byRows(rows: readonly number[], panes: readonly PaneNo[]): PaneNo[][] {
-  const out: PaneNo[][] = [];
-  let at = 0;
-  for (const n of rows) {
-    out.push(panes.slice(at, at + n));
-    at += n;
+    if (!members.length) continue;
+    out.push({
+      testid: `split-${e.axis}${members[0].path.join("")}-${members[0].i}`,
+      axis: e.axis, members, at: e.at, value, min, max: Math.max(min, max),
+    });
   }
   return out;
 }
 
-/** Where the focused pane is: its row and its place in it (the first pane's when it is not drawn). */
-function locate(grid: readonly PaneNo[][], focused: PaneNo): { row: number; at: number } {
-  const row = grid.findIndex((r) => r.includes(focused));
-  return row < 0 ? { row: 0, at: 0 } : { row, at: grid[row].indexOf(focused) };
-}
-
-/** The leftmost `w` panes of a row that still hold place `at`. */
-const windowStart = (at: number, w: number) => Math.max(0, at - w + 1);
+/** Sizes this close to a node's own are its own, value for value. */
+const SAME_SIZE = 1e-9;
 
 /**
- * One column fewer, keeping the focused pane's column: every row keeps a
- * contiguous window as wide as the widest row less one — the focused pane's
- * row the leftmost window that holds it, the other rows the window at the
- * same start, clamped. So 4×2 and 4 over 3 become 3×2, 3×2 and 3 over 2
- * become 2×2, 2×2 the focused column, three columns two, two one. One large
- * plus two stacked becomes the large pane or the stacked column. Null when
- * there is no column to drop.
+ * Drag an edge (§9): every member boundary to `px` (clamped to the handle's
+ * range), starting from the fitted sizes as today's drag started from the
+ * fitted columns. Only the two children beside a member boundary move; the
+ * node's other drawn children keep what they were drawn with (their stored
+ * size, value for value, when the window did not clamp them), and children a
+ * dropped render left out keep their stored sizes, the drawn window's share
+ * of the node unchanged. Every other node comes back as it was.
  */
-export function dropColumn(shape: Preset, panes: readonly PaneNo[], focused: PaneNo): { shape: Preset; panes: PaneNo[] } | null {
-  const rows = SHAPES[shape].rows;
-  if (!rows) {
-    const [a, b, c] = panes;
-    return focused === b || focused === c ? { shape: "rows2", panes: [b, c] } : { shape: "single", panes: [a] };
+export function moveEdge(
+  ws: Workspace, fit: Pick<WorkspaceFit, "boxes" | "width" | "height">, handle: EdgeHandle, px: number,
+): Workspace {
+  const length = handle.axis === "x" ? fit.width : fit.height;
+  if (!Number.isFinite(px) || !Number.isFinite(length) || length <= 0) return ws;
+  const to = Math.min(Math.max(handle.min, handle.max), Math.max(handle.min, px));
+  const rects: Partial<Record<PaneNo, Rect>> = {};
+  for (const n of PANE_NOS) if (fit.boxes[n]) rects[n] = fit.boxes[n]!.rect;
+  let tree = ws.tree;
+  for (const m of handle.members) {
+    const node = nodeAt(tree, m.path);
+    if (!node || isLeaf(node) || node.axis !== handle.axis || m.i < 1 || m.i >= node.children.length) continue;
+    const ext = node.children.map((c) => extent(c, rects, handle.axis, length));
+    const left = ext[m.i - 1];
+    const right = ext[m.i];
+    if (!left || !right || right[1] - left[0] <= 0) continue;
+    const drawn = ext.flatMap((x, k) => (x ? [k] : []));
+    const total = drawn.reduce((a, k) => a + (ext[k]![1] - ext[k]![0]), 0);
+    const share = drawn.reduce((a, k) => a + node.sizes[k], 0);
+    const sizes = node.sizes.slice();
+    let rest = share;
+    for (const k of drawn) {
+      if (k === m.i - 1 || k === m.i) continue;
+      const fitted = share * (ext[k]![1] - ext[k]![0]) / total;
+      sizes[k] = Math.abs(fitted - node.sizes[k]) <= SAME_SIZE ? node.sizes[k] : fitted;
+      rest -= sizes[k];
+    }
+    const p = Math.min(right[1], Math.max(left[0], to));
+    sizes[m.i - 1] = rest * (p - left[0]) / (right[1] - left[0]);
+    sizes[m.i] = rest - sizes[m.i - 1];
+    if (!(sizes[m.i - 1] > 0 && sizes[m.i] > 0)) continue;
+    tree = withSizes(tree, m.path, sizes);
   }
-  const t = Math.max(...rows) - 1;
-  if (t < 1) return null;
-  const grid = byRows(rows, panes);
-  const f = locate(grid, focused);
-  const start = windowStart(f.at, Math.min(grid[f.row].length, t));
-  const kept = grid.map((r) => {
-    const w = Math.min(r.length, t);
-    const s = Math.min(start, r.length - w);
-    return r.slice(s, s + w);
-  });
-  const next = presetOfRows(kept.map((r) => r.length));
-  return next ? { shape: next, panes: kept.flat() } : null;
+  return tree === ws.tree ? ws : { ...ws, tree };
 }
+
+/** Double-click on an edge: each node at `paths` (a linked edge's every member) with equal sizes. */
+export function equalize(ws: Workspace, paths: readonly Path[]): Workspace {
+  let tree = ws.tree;
+  for (const path of paths) {
+    const n = nodeAt(tree, path);
+    if (!n || isLeaf(n)) continue;
+    const k = n.children.length;
+    if (n.sizes.every((s) => s === 1 / k)) continue;
+    tree = withSizes(tree, path, Array.from({ length: k }, () => 1 / k));
+  }
+  return tree === ws.tree ? ws : { ...ws, tree };
+}
+
+// ---- fitting (§7) ------------------------------------------------------------------
 
 /**
- * One row fewer, keeping the focused pane's row (one large plus two stacked:
- * the large pane and the focused one of the stack). A row four wide also
- * loses a column — there is no four-column shape — keeping the leftmost
- * three that hold the focused pane. Null when there is no row to drop.
+ * What one render drew, handed to the next as `fitWorkspace`'s `previous`
+ * (§7.2): the stored tree's shape and the drawn tree's (structure and ids,
+ * never sizes), and the panes it drew.
  */
-export function dropRow(shape: Preset, panes: readonly PaneNo[], focused: PaneNo): { shape: Preset; panes: PaneNo[] } | null {
-  const rows = SHAPES[shape].rows;
-  if (!rows) {
-    const [a, b, c] = panes;
-    return { shape: "cols2", panes: [a, focused === c ? c : b] };
-  }
-  if (rows.length < 2) return null;
-  const grid = byRows(rows, panes);
-  const f = locate(grid, focused);
-  let keep = grid[f.row];
-  if (keep.length > 3) keep = keep.slice(windowStart(f.at, 3), windowStart(f.at, 3) + 3);
-  const next = presetOfRows([keep.length]);
-  return next ? { shape: next, panes: keep.slice() } : null;
-}
-
-/** What one render drew, handed to the next as `fitWorkspace`'s `previous`. */
 export interface DrawnSet {
-  preset: Preset;
-  drawn: Preset;
+  shape: string;
+  drawn: string;
   panes: readonly PaneNo[];
 }
 
+/** The set `fit` drew, for the next render's `previous`. */
+export function drawnSet(ws: Pick<Workspace, "tree">, fit: Pick<WorkspaceFit, "render" | "panes">): DrawnSet {
+  return { shape: shapeKey(ws.tree), drawn: shapeKey(fit.render), panes: fit.panes.slice() };
+}
+
+/** Where one drawn pane is: unit fractions of the pane area, and its size in px (NaN with no window to fit). */
+export interface PaneBox {
+  rect: Rect;
+  px: { width: number; height: number };
+}
+
+/** The drawn tree: the stored one less what the window dropped, its sizes fitted (clamped) to the window. */
+export type RenderNode = LayoutNode;
+
 export interface WorkspaceFit {
-  /** The side panes, as `fitLayout` draws them for the drawn shape. */
+  /** The side panes, as `fitLayout` draws them for the drawn tree. */
   sides: Fitted;
-  /** The shape this render draws, and the panes in its slots (ids, reading order). */
-  drawn: Preset;
+  render: RenderNode;
+  /** The drawn panes: the render's leaves, reading order. */
   panes: PaneNo[];
-  /** Panes the chosen preset has that this render leaves out, and why. */
+  /** One per drawn pane (a Record, never a Map: the page reads it through JSON). */
+  boxes: Partial<Record<PaneNo, PaneBox>>;
+  edges: EdgeHandle[];
+  /** Panes the tree has that this render leaves out, and why. */
   dropped: number;
   why: "" | "narrow" | "short";
   /** The centre's width and the panes' area height (NaN with no window to fit). */
   width: number;
   height: number;
-  /** The drawn shape's edges, fitted to the room: the top row's columns, the row edge, the bottom row's own columns (3 over 2, 4 over 3; else empty). */
-  cols: number[];
-  row: number;
-  bottom: number[];
+  /** The drawn tree's least centre width and pane-area height (§4.4: main2 720). */
+  minW: number;
+  minH: number;
+  /** The preset the drawn tree's structure is, else null (a four-wide row of a dropped 4×2). */
+  drawnPreset: Preset | null;
   /** The bottom panel as drawn; `auto` when the window folded it, not the owner. */
   panel: { open: boolean; height: number; auto: boolean };
 }
 
+/** §7.3: each node's sizes clamped top down to its own px, every child at least its subtree minimum. */
+function clampTree(n: LayoutNode, w: number, h: number): LayoutNode {
+  if (isLeaf(n)) return n;
+  const sizes = clampSizes(n.sizes, n.children.map((c) => minAlong(c, n.axis)), n.axis === "x" ? w : h);
+  return {
+    axis: n.axis,
+    children: n.children.map((c, i) => clampTree(c, n.axis === "x" ? w * sizes[i] : w, n.axis === "y" ? h * sizes[i] : h)),
+    sizes,
+  };
+}
+
 /**
- * What one render draws. Only the render changes, never what is stored.
+ * What one render draws (§7). Only the render changes, never what is stored.
  *
  * Across (`available` wide): the side panes give back their slack and fold
- * for the render (`fitLayout`, with the shape's own centre minimum and the
- * owner's `prefer`); only when even both rails leave the centre too narrow is
- * a column dropped, and the focused pane's column is always the one kept.
+ * for the render (`fitLayout`, with the drawn tree's own centre minimum and
+ * the owner's `prefer`); only when even both rails leave the centre too
+ * narrow are panes dropped, one column of panes at a time (`prune`, never the
+ * focused pane).
  *
  * Down (`availableH` tall, the room under the title bar): an open panel
  * shrinks toward its minimum, then folds for the render, and only then are
- * rows dropped. With `preferPanel` (the owner opened a panel the window had
- * folded) rows drop first and the panel is never folded, as `prefer` does
- * for the side panes.
+ * rows of panes dropped. With `preferPanel` (the owner opened a panel the
+ * window had folded) rows drop first and the panel is never folded, as
+ * `prefer` does for the side panes.
  *
- * **A dropped set is sticky** (`previous`, what the last render drew). Which
- * panes survive a drop is chosen from the focused pane, and focus follows
- * every click — so without this, clicking into the *other* drawn pane of
- * three-columns-drawn-as-two redrew a different pair, and the pane under the
- * pointer jumped. The last render's panes are kept while the preset and the
- * drawn shape are the same (the same shape fits the same room), they still
- * hold the focused pane, and they are a set these panes in this order can
- * draw in this shape — the same drops from some focused pane give exactly
- * them (so a reordered workspace is never drawn from a stale set); focus
- * moving to a pane they do not draw (Ctrl+Alt+N) draws a set that includes
- * it. Pure: `previous` is read, never written, and nothing here is stored.
+ * **A dropped set is sticky** (`previous`, what the last render drew, §7.2).
+ * Which panes survive a drop is chosen from the focused pane, and focus
+ * follows every click — so without this, clicking into the *other* drawn pane
+ * of three-columns-drawn-as-two redrew a different pair, and the pane under
+ * the pointer jumped. The last render's set is kept while the stored tree has
+ * the same shape, the drawn tree the same structure (the same room), it
+ * still holds the focused pane, and the same drops from some focused pane
+ * give exactly it (so a reordered workspace is never drawn from a stale set);
+ * focus moving to a pane it does not draw (Ctrl+Alt+N) draws a set that
+ * includes it.
+ *
+ * Then each node is clamped (§7.3) and every drawn pane gets its own box,
+ * computed from its own fractions (C5), and every edge its handle (§9). Pure:
+ * `previous` is read, never written, and nothing here is stored.
  */
 export function fitWorkspace(
   layout: PaneLayout, ws: Workspace, available: number, availableH: number,
   prefer: Side | null = null, preferPanel = false, previous: DrawnSet | null = null,
 ): WorkspaceFit {
-  let shape = ws.preset;
   const order = orderOf(ws);
-  let panes = order.slice();
-  const focused = panes.includes(ws.focused) ? ws.focused : panes[0];
+  const focused = order.includes(ws.focused) ? ws.focused : order[0];
+  let render: LayoutNode = ws.tree;
   let why: WorkspaceFit["why"] = "";
   const wide = Number.isFinite(available) && available > 0;
   const tall = Number.isFinite(availableH) && availableH > 0;
   // The drops made, in order, so a sticky set can be checked against them.
-  const drops: ("column" | "row")[] = [];
+  const drops: [Axis, number][] = [];
+  const drop = (axis: Axis): boolean => {
+    const t = (axis === "x" ? acrossS(render) : downS(render)) - 1;
+    if (t < 1) return false;
+    render = prune(render, axis, t, focused);
+    drops.push([axis, t]);
+    return true;
+  };
 
   const across = () => {
     for (;;) {
-      const sides = fitLayout(layout, available, prefer, SHAPES[shape].minW);
-      if (!wide || available - sides.left - sides.right >= SHAPES[shape].minW) return sides;
-      const next = dropColumn(shape, panes, focused);
-      if (!next) return sides;
-      ({ shape, panes } = next);
-      drops.push("column");
+      const sides = fitLayout(layout, available, prefer, treeMinW(render));
+      if (!wide || available - sides.left - sides.right >= treeMinW(render)) return sides;
+      if (!drop("x")) return sides;
       why = "narrow";
     }
   };
   let sides = across();
 
-  const before = shape;
+  const before = render;
   let panel = { open: false, height: 0, auto: false };
   if (ws.panel.open && !tall) {
     panel = { open: true, height: ws.panel.height, auto: false };
   } else if (ws.panel.open) {
     for (;;) {
-      const room = availableH - SHAPES[shape].minH;
+      const room = availableH - treeMinH(render);
       if (room >= PANEL.min) {
         panel = { open: true, height: Math.min(ws.panel.height, room), auto: false };
         break;
       }
-      const next = preferPanel ? dropRow(shape, panes, focused) : null;
-      if (next) {
-        ({ shape, panes } = next);
-        drops.push("row");
+      if (preferPanel && drop("y")) {
         why = why || "short";
         continue;
       }
@@ -1449,53 +1511,46 @@ export function fitWorkspace(
     }
   }
   if (tall) {
-    for (;;) {
-      if (SHAPES[shape].minH <= availableH - panel.height) break;
-      const next = dropRow(shape, panes, focused);
-      if (!next) break;
-      ({ shape, panes } = next);
-      drops.push("row");
-      why = why || "short";
-    }
+    while (treeMinH(render) > availableH - panel.height && drop("y")) why = why || "short";
   }
   // A row dropped can need less width: give the side panes back what it frees.
-  if (shape !== before) sides = fitLayout(layout, available, prefer, SHAPES[shape].minW);
-  // Sticky: the same shape as last render, and focus still inside what it drew.
-  const drawable = (set: readonly PaneNo[]) => order.some((f) => {
-    let s = ws.preset;
-    let p = order;
-    for (const d of drops) {
-      const next = d === "column" ? dropColumn(s, p, f) : dropRow(s, p, f);
-      if (!next) return false;
-      ({ shape: s, panes: p } = next);
+  if (render !== before) sides = fitLayout(layout, available, prefer, treeMinW(render));
+  // Sticky: the same stored shape and the same drawn structure as last
+  // render, focus still inside what it drew, and a set these drops can draw.
+  if (previous && drops.length && previous.shape === shapeKey(ws.tree) && previous.panes.includes(focused)
+      && previous.drawn !== shapeKey(render)) {
+    const want = structure(render);
+    for (const f of order) {
+      let r: LayoutNode = ws.tree;
+      for (const [axis, t] of drops) r = prune(r, axis, t, f);
+      if (shapeKey(r) === previous.drawn && structure(r) === want) {
+        render = r;
+        break;
+      }
     }
-    return s === shape && p.length === set.length && p.every((x, i) => x === set[i]);
-  });
-  if (previous && previous.preset === ws.preset && previous.drawn === shape && shape !== ws.preset
-      && previous.panes.length === panes.length && previous.panes.includes(focused) && drawable(previous.panes)) {
-    panes = previous.panes.slice();
   }
 
   const width = wide ? available - sides.left - sides.right : NaN;
   const height = tall ? availableH - panel.height : NaN;
-  const split = ws.splits[shape] ?? defaultSplit(shape);
+  const fitted = clampTree(render, width, height);
+  const panes = leaves(fitted);
+  const rects = rectsOf(fitted);
+  const boxes: Partial<Record<PaneNo, PaneBox>> = {};
+  for (const n of panes) {
+    const rect = rects[n]!;
+    boxes[n] = { rect, px: { width: rect.width * width, height: rect.height * height } };
+  }
   return {
-    sides, drawn: shape, panes,
-    dropped: SHAPES[ws.preset].panes - panes.length, why,
-    width, height,
-    cols: clampCols(split.cols, width), row: clampRow(split.row, height),
-    bottom: split.bottom ? clampCols(split.bottom, width) : [],
+    sides, render: fitted, panes, boxes, edges: edgeHandles(ws.tree, fitted, width, height),
+    dropped: order.length - panes.length, why,
+    width, height, minW: treeMinW(render), minH: treeMinH(render),
+    drawnPreset: presetOf(render),
     panel,
   };
 }
 
-/** Each drawn pane's width in px, by slot, from the fit (its own row's edges). */
-export function slotWidths(fit: Pick<WorkspaceFit, "drawn" | "cols" | "row" | "bottom" | "width">): number[] {
-  return cellsOf(fit.drawn, fit).map((c) => (c.right - c.left) * fit.width);
-}
-
 /** The tallest the panel may be dragged to: whatever leaves the drawn panes their minimum height. */
-export function maxPanelHeight(fit: WorkspaceFit, availableH: number): number {
+export function maxPanelHeight(fit: Pick<WorkspaceFit, "minH">, availableH: number): number {
   if (!Number.isFinite(availableH) || availableH <= 0) return PANEL.max;
-  return Math.max(PANEL.min, Math.min(PANEL.max, Math.floor(availableH - SHAPES[fit.drawn].minH)));
+  return Math.max(PANEL.min, Math.min(PANEL.max, Math.floor(availableH - fit.minH)));
 }

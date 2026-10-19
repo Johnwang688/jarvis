@@ -8,7 +8,8 @@ import { speakingThreads } from "./policy";
 import { SpeechQueue } from "./queue";
 import { FakeClock, FakeGate, FakePlayer, FakeSay, FakeSynth, MS_PER_CHAR } from "./testkit";
 import { ThreadVoices, voiceLabel, type VoicesApi } from "./voices";
-import { defaultPane, defaultWorkspace, PANE_NOS, type PaneNo, type View, type Workspace } from "../workspace";
+import { defaultPane, defaultWorkspace, LADDER, PANE_NOS, type PaneNo, type View, type Workspace } from "../workspace";
+import { presetTree } from "../splittree";
 
 let clock: FakeClock;
 let player: FakePlayer;
@@ -430,7 +431,7 @@ describe("many panes through one controller", () => {
 describe("speakingThreads", () => {
   const ws = (views: Partial<Record<PaneNo, View>>, order: PaneNo[], kept: PaneNo[]): Workspace => {
     const w = defaultWorkspace();
-    w.order = order;
+    w.tree = presetTree(LADDER[order.length], order);
     w.kept = kept;
     w.panes = PANE_NOS.map((n) => ({ ...defaultPane(n), view: views[n] ?? "chat" }));
     return w;

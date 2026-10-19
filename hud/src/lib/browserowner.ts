@@ -3,7 +3,7 @@
 // sequence immediately. The daemon generation fence cancels the old result;
 // waiting for Chrome here would leave a hidden pane discoverable until it ended.
 import { judgeBrowserUrl, type DaemonPorts } from "./browser";
-import type { BrowserSource, PaneNo, Workspace } from "./workspace";
+import { orderOf, type BrowserSource, type PaneNo, type Workspace } from "./workspace";
 
 export interface FrontTab {
   id: string; mode: "direct" | "remote"; source: BrowserSource | null;
@@ -28,7 +28,8 @@ const cancelled = () => new Error("That Browser action was cancelled because the
 export function browserFront(ws: Workspace, drawn: readonly PaneNo[], covered: boolean,
   window: string, profile: string | null, focused: PaneNo | null, focusSeq: number,
   ports: DaemonPorts, privateDrive: ReadonlyMap<number, string> = new Map()): BrowserFront {
-  const retained = new Set([...ws.order, ...ws.kept]);
+  const order = orderOf(ws);
+  const retained = new Set([...order, ...ws.kept]);
   const panes: FrontPane[] = [];
   ws.panes.forEach((spec, index) => {
     const pid = (index + 1) as PaneNo;
@@ -41,7 +42,7 @@ export function browserFront(ws: Workspace, drawn: readonly PaneNo[], covered: b
       const judged = judgeBrowserUrl(tab.url, ports);
       return {id:tab.id,mode:"direct",url:judged.ok ? judged.url : "",source};
     });
-    panes.push({pane_id:pid,slot:ws.order.includes(pid) ? ws.order.indexOf(pid)+1 : null,
+    panes.push({pane_id:pid,slot:order.includes(pid) ? order.indexOf(pid)+1 : null,
       drawn:drawn.includes(pid),profile:selectedProfile,ctx:spec.browserCtx ?? null,
       see:spec.see !== false,drive:spec.see !== false && (selectedProfile === "private"
         ? !!spec.browserCtx && privateDrive.get(pid) === spec.browserCtx : spec.drive !== false),active:spec.browser?.active || null,tabs});

@@ -116,7 +116,7 @@ def layout_checks(browser, mock, base, check, until, guard, init_script):
                         _card_focus_checks, _editor_card_checks, _save_scope_checks, _late_save_checks,
                         _chord_checks,
                         _menu_place_checks, _seen_checks, _eight_checks, _split_checks, _split_close_one_checks,
-                        _twelve_ids_checks, _split_file_checks, _crash_checks):
+                        _no_remount_checks, _twelve_ids_checks, _split_file_checks, _crash_checks):
             try:
                 section(page, mock, check, until)
             except Exception as e:  # a section that cannot run is a failure, and the rest still run
@@ -252,6 +252,28 @@ def _height(page, sel: str) -> int:
 
 def _attr(page, sel: str, name: str):
     return page.locator(sel).first.get_attribute(name)
+
+
+def _leaves(node) -> list:
+    """A stored v2 tree's panes in reading order (leaves are bare numbers, §8.1)."""
+    if isinstance(node, bool) or node is None:
+        return []
+    if isinstance(node, int):
+        return [node]
+    if isinstance(node, dict):
+        return [n for c in node.get("children") or [] for n in _leaves(c)]
+    return []
+
+
+def _pane_edges(page) -> list:
+    """The test ids of the separators between the centre's panes (not the side panes' or the panel's), sorted."""
+    return sorted(page.evaluate("""() => [...document.querySelectorAll('[role="separator"][data-testid^="split-"]')]
+      .map(e => e.getAttribute('data-testid')).filter(t => t !== 'split-left' && t !== 'split-right')"""))
+
+
+def _stored_order(stored: dict) -> list:
+    """The stored drawn order: the v2 tree's leaves (FS3), else a v1 value's `order`."""
+    return _leaves(stored["tree"]) if stored.get("version") == 2 and "tree" in stored else stored.get("order")
 
 
 def _active_testid(page):
@@ -1393,29 +1415,37 @@ def _workspace_checks(page, mock, check, until):
           _attr(page, _pane(2), "data-focused") == "true" and _attr(page, _pane(1), "data-focused") == "false"
           and "focused" in (_attr(page, _pane(2), "class") or ""))
 
-    sep = page.locator('[data-testid="split-col-1"]')
-    check("the edge between them is a vertical separator",
-          sep.get_attribute("role") == "separator" and sep.get_attribute("aria-orientation") == "vertical")
+    # FS3 (§9): edges are named by the tree, split-<axis><path>-<i>: two
+    # columns side by side are one x node at the root, so its edge is split-x-1.
+    sep = page.locator('[data-testid="split-x-1"]')
+    edge = sep.count() == 1   # (absent before FS3: these checks fail, the rest of the section runs)
+    check("the edge between them is a vertical separator, split-x-1",
+          edge and sep.get_attribute("role") == "separator" and sep.get_attribute("aria-orientation") == "vertical")
     w1 = _width(page, _pane(1))
-    _drag(page, '[data-testid="split-col-1"]', 100)
+    if edge:
+        _drag(page, '[data-testid="split-x-1"]', 100)
     check("dragging it moves it by the pointer's travel", abs(_width(page, _pane(1)) - (w1 + 100)) <= 3,
           f"{w1} -> {_width(page, _pane(1))}")
     w1 = _width(page, _pane(1))
-    sep.focus()
-    page.keyboard.press("ArrowLeft")
+    if edge:
+        sep.focus()
+        page.keyboard.press("ArrowLeft")
     check("ArrowLeft on it moves it a step", abs(_width(page, _pane(1)) - (w1 - 16)) <= 2,
           f"{w1} -> {_width(page, _pane(1))}")
-    sep.focus()
-    check("Space on it never starts the mic", _ptt_on_space(page) is None)
+    if edge:
+        sep.focus()
+        check("Space on it never starts the mic", _ptt_on_space(page) is None)
     w1 = _width(page, _pane(1))
     _boot(page, mock, None, until, reload=True)
     check("the preset and the edge survive a reload",
           _attr(page, ws, "data-preset") == "cols2" and abs(_width(page, _pane(1)) - w1) <= 2,
           f"{w1} -> {_width(page, _pane(1))}")
-    _drag(page, '[data-testid="split-col-1"]', -2000)
+    if edge:
+        _drag(page, '[data-testid="split-x-1"]', -2000)
     check("and stops short of the pane minimum", abs(_width(page, _pane(1)) - 360) <= 2, str(_width(page, _pane(1))))
-    page.locator('[data-testid="split-col-1"]').dblclick()
-    until(lambda: abs(_width(page, _pane(1)) - _width(page, _pane(2))) <= 2, timeout=2)
+    if edge:
+        page.locator('[data-testid="split-x-1"]').dblclick()
+        until(lambda: abs(_width(page, _pane(1)) - _width(page, _pane(2))) <= 2, timeout=2)
     check("a double-click makes the panes equal", abs(_width(page, _pane(1)) - _width(page, _pane(2))) <= 2)
 
     # Several chats (WP-B): choosing chat in pane 2 makes a second chat; it
@@ -1631,6 +1661,10 @@ def _workspace_checks(page, mock, check, until):
     check("and choosing from it switches the pane", _attr(page, _pane(3), "data-view") == "task")
     stored = json.loads(page.evaluate("localStorage.getItem('jarvis.hud.workspace')") or "{}")
     check("without storing the drop", stored.get("preset") == "cols3", str(stored.get("preset")))
+    check("FS3: stored as version 2, the tree three columns, with the v1 mirror beside it",
+          stored.get("version") == 2 and _leaves(stored.get("tree")) == [1, 2, 3]
+          and (stored.get("tree") or {}).get("axis") == "x" and stored.get("order") == [1, 2, 3]
+          and "splits" not in stored, f'{stored.get("version")} {stored.get("tree")} {sorted(stored)}')
 
     page.set_viewport_size({"width": 1600, "height": 900})
     _set_storage(page, zoom="100")
@@ -1640,21 +1674,54 @@ def _workspace_checks(page, mock, check, until):
     r2 = page.locator(_pane(2)).bounding_box()
     check("two stacked", abs(r1["x"] - r2["x"]) < 1 and r1["y"] < r2["y"] and abs(r1["width"] - r2["width"]) < 1,
           f"{r1} {r2}")
-    row = page.locator('[data-testid="split-row"]')
-    check("with a horizontal edge between them", row.get_attribute("aria-orientation") == "horizontal")
+    # Two stacked are one y node at the root: split-y-1 (FS3, §9).
+    row = page.locator('[data-testid="split-y-1"]')
+    check("with a horizontal edge between them, split-y-1",
+          row.count() == 1 and row.get_attribute("aria-orientation") == "horizontal")
     h1 = _height(page, _pane(1))
-    _drag_y(page, '[data-testid="split-row"]', 60)
+    if row.count():
+        _drag_y(page, '[data-testid="split-y-1"]', 60)
     check("dragging it down grows the top pane by the pointer's travel", abs(_height(page, _pane(1)) - (h1 + 60)) <= 3,
           f"{h1} -> {_height(page, _pane(1))}")
-    page.locator('[data-testid="split-row"]').dblclick()
+    if row.count():
+        row.dblclick()
 
     _choose(page, until, "grid4")
     boxes = [page.locator(_pane(n)).bounding_box() for n in (1, 2, 3, 4)]
     check("2×2: four panes, reading left to right, top to bottom",
           all(boxes) and boxes[0]["x"] < boxes[1]["x"] and boxes[0]["y"] < boxes[2]["y"]
           and abs(boxes[2]["x"] - boxes[0]["x"]) < 1 and abs(boxes[3]["y"] - boxes[2]["y"]) < 1, str(boxes))
-    check("an edge down and one across",
-          page.locator('[data-testid="split-col-1"]').count() == 1 and page.locator('[data-testid="split-row"]').count() == 1)
+    # 2×2 is rows first, y[x[1,2], x[3,4]]: each row its own x node, and their
+    # column boundaries coincide, so they are one linked separator (P-5),
+    # carrying the first member's id and data-linked="2" — still one edge
+    # down and one across, as before FS3.
+    col = page.locator('[data-testid="split-x0-1"]')
+    check("2×2: one edge down and one across (the column edge one separator through both rows, linked)",
+          col.count() == 1 and col.get_attribute("data-linked") == "2"
+          and page.locator('[data-testid="split-x1-1"]').count() == 0
+          and page.locator('[data-testid="split-y-1"]').count() == 1
+          and len(_pane_edges(page)) == 2,
+          f'{col.count()} {col.get_attribute("data-linked") if col.count() else None} {_pane_edges(page)}')
+    if col.count():
+        box = col.bounding_box()
+        wsbox = page.locator(ws).bounding_box()
+        check("2×2: the linked column edge spans both rows", box is not None and box["height"] >= wsbox["height"] - 4,
+              f"{box} {wsbox}")
+        w1, w3 = _width(page, _pane(1)), _width(page, _pane(3))
+        _drag(page, '[data-testid="split-x0-1"]', 80)
+        check("2×2: dragging it moves both rows' column edge together",
+              abs(_width(page, _pane(1)) - (w1 + 80)) <= 3 and abs(_width(page, _pane(3)) - (w3 + 80)) <= 3,
+              f"{w1},{w3} -> {_width(page, _pane(1))},{_width(page, _pane(3))}")
+        col.dblclick()
+        until(lambda: abs(_width(page, _pane(1)) - _width(page, _pane(2))) <= 2, timeout=2)
+        check("2×2: a double-click makes both rows equal again",
+              abs(_width(page, _pane(1)) - _width(page, _pane(2))) <= 2 and abs(_width(page, _pane(3)) - _width(page, _pane(4))) <= 2)
+    got = _ws(page)
+    check("FS3: the window's projection names the tree and its derived order and preset, and the fit's boxes",
+          "tree" in got["ws"] and got["ws"].get("order") == [1, 2, 3, 4] and got["ws"].get("preset") == "grid4"
+          and got["fit"].get("drawn") == "grid4" and sorted((got["fit"].get("boxes") or {}).keys()) == ["1", "2", "3", "4"]
+          and "splits" not in got["ws"],
+          f'{sorted(got["ws"])} {got["fit"].get("drawn")} {sorted((got["fit"].get("boxes") or {}).keys())}')
     _choose(page, until, "main2")
     m = [page.locator(_pane(n)).bounding_box() for n in (1, 2, 3)]
     check("one large and two stacked",
@@ -2558,28 +2625,37 @@ def _eight_checks(page, mock, check, until):
     until(lambda: page.locator('[data-testid="layout-menu"]').count() == 0, timeout=2)
     check("and the sidebar is still open", _visible(page, "#sidebar"))
 
-    # 3 over 2: the bottom row's edge is its own.
+    # 3 over 2: the bottom row's edge is its own. FS3 (§3.3): y[x[1,2,3],
+    # x[4,5]], the top row's edges split-x0-1 and split-x0-2, the bottom
+    # row's split-x1-1 (none coincide, so none is linked), the row split-y-1.
     _set_ws(page, json.dumps({"preset": "grid5"}))
     _boot(page, mock, None, until, reload=True)
     top0 = [g[2] for g in _geo(page, (1, 2, 3))]
     bot0 = [g[2] for g in _geo(page, (4, 5))]
+    ids5 = _pane_edges(page)
     check("3 over 2: three panes over two, the bottom row's edges its own",
-          _attr(page, ws, "data-drawn-preset") == "grid5" and page.locator('[data-testid="split-colb-1"]').count() == 1
-          and page.locator('[data-testid="split-col-2"]').count() == 1 and abs(bot0[0] - bot0[1]) <= 2, f"{top0} {bot0}")
-    _drag(page, '[data-testid="split-colb-1"]', 120)
+          _attr(page, ws, "data-drawn-preset") == "grid5" and page.locator('[data-testid="split-x1-1"]').count() == 1
+          and page.locator('[data-testid="split-x0-2"]').count() == 1 and abs(bot0[0] - bot0[1]) <= 2
+          and ids5 == ["split-x0-1", "split-x0-2", "split-x1-1", "split-y-1"], f"{top0} {bot0} {ids5}")
+    if page.locator('[data-testid="split-x1-1"]').count():
+        _drag(page, '[data-testid="split-x1-1"]', 120)
     top1 = [g[2] for g in _geo(page, (1, 2, 3))]
     bot1 = [g[2] for g in _geo(page, (4, 5))]
-    check("dragging split-colb-1 moves only the bottom row's edge",
+    check("in grid5, dragging split-x1-1 moves only the bottom row",
           abs(bot1[0] - (bot0[0] + 120)) <= 3 and abs(bot1[1] - (bot0[1] - 120)) <= 3 and top1 == top0,
           f"top {top0} -> {top1}, bottom {bot0} -> {bot1}")
-    _drag(page, '[data-testid="split-col-1"]', -60)
+    if page.locator('[data-testid="split-x0-1"]').count():
+        _drag(page, '[data-testid="split-x0-1"]', -60)
     top2 = [g[2] for g in _geo(page, (1, 2, 3))]
     bot2 = [g[2] for g in _geo(page, (4, 5))]
     check("and the top row's edge only the top row's", bot2 == bot1 and abs(top2[0] - (top1[0] - 60)) <= 3,
           f"top {top1} -> {top2}, bottom {bot1} -> {bot2}")
     stored = json.loads(page.evaluate("localStorage.getItem('jarvis.hud.workspace')") or "{}")
-    check("both survive in what is stored", len(stored.get("splits", {}).get("grid5", {}).get("bottom", [])) == 1,
-          str(stored.get("splits", {}).get("grid5")))
+    rows = (stored.get("tree") or {}).get("children") or [{}, {}]
+    sizes = [r.get("sizes", []) if isinstance(r, dict) else [] for r in rows]
+    check("both survive in what is stored: the tree's two rows each with sizes of their own (FS3, v2)",
+          stored.get("version") == 2 and len(sizes) == 2 and len(sizes[0]) == 3 and len(sizes[1]) == 2
+          and abs(sizes[1][0] - 0.5) > 0.02 and abs(sizes[0][0] - 1 / 3) > 0.01, str(stored.get("tree")))
 
     # Eight panes under a card: Monaco, a preview frame, a terminal and chats.
     grid8 = json.dumps({"preset": "grid8", "focused": 1, "panes": [
@@ -3044,6 +3120,132 @@ def _split_close_one_checks(page, mock, check, until):
     _reset_all(page, mock, until)
 
 
+# ---------------------------------------------------------------------------
+# FS3 (plan §10, P-4): moving panes never remounts, re-parents or reloads one.
+
+# Tag every section, the Browser frame and each of its ancestors up to its
+# section, Monaco's host and the terminal's xterm element with an expando.
+REMOUNT_TAG = """() => {
+  const tags = {};
+  const tag = (el, name) => { if (el) { el.__fs3 = name; tags[name] = true; } };
+  for (const n of [1, 2, 3, 4]) tag(document.querySelector(`[data-testid="pane-${n}"]`), `pane-${n}`);
+  const frame = document.querySelector('[data-testid="pane-3"] iframe[data-browser-frame]');
+  tag(frame, 'frame');
+  let up = frame && frame.parentElement, i = 0;
+  while (up && up.getAttribute('data-testid') !== 'pane-3') { tag(up, `frame-up-${i++}`); up = up.parentElement; }
+  tag(document.querySelector('[data-testid="pane-2"] [data-testid="editor"]'), 'monaco');
+  tag(document.querySelector('[data-testid="pane-4"] .xterm'), 'xterm');
+  return Object.keys(tags);
+}"""
+
+# Each tagged element is still the one found at its place, connected; the
+# sections are direct children of #workspace, in id order.
+REMOUNT_SAME = """(names) => {
+  const bad = [];
+  const at = (name) => {
+    if (name.startsWith('pane-')) return document.querySelector(`[data-testid="${name}"]`);
+    if (name === 'monaco') return document.querySelector('[data-testid="pane-2"] [data-testid="editor"]');
+    if (name === 'xterm') return document.querySelector('[data-testid="pane-4"] .xterm');
+    const frame = document.querySelector('[data-testid="pane-3"] iframe[data-browser-frame]');
+    if (name === 'frame') return frame;
+    let up = frame && frame.parentElement;
+    for (let i = Number(name.slice('frame-up-'.length)); up && i > 0; i--) up = up.parentElement;
+    return up;
+  };
+  for (const name of names) {
+    const el = at(name);
+    if (!el || !el.isConnected || el.__fs3 !== name) bad.push(name);
+  }
+  const ws = document.getElementById('workspace');
+  const sections = [...document.querySelectorAll('section.wpane')];
+  const flat = sections.every((s) => s.parentElement === ws);
+  const ids = sections.map((s) => Number(s.getAttribute('data-testid').slice(5)));
+  const sorted = ids.every((n, i) => i === 0 || ids[i - 1] < n);
+  return { bad, flat, ids, sorted };
+}"""
+
+
+def _no_remount_checks(page, mock, check, until):
+    """FS3 (plan §10, P-4, C5): the sections are one flat list in id order,
+    each placed from its own box; a split, a close, ⊞, a drag or a resize
+    changes only their style. Moving an iframe's ancestor reloads it, so every
+    section, the Browser frame and its ancestors, Monaco's host and the
+    terminal's xterm element carry a tag, and after ⊞ 2×2 → one → 2×2, a ladder
+    split, a close of another pane, an edge drag and a window resize the very
+    same elements are where they were, still in id order, the Browser page
+    was never loaded again, no new terminal ticket was fetched, and Monaco
+    holds the same models [rendering in slot order, or nested wrappers]."""
+    from tests.face.hud_v2_mock_terminals import row
+    ws = '[data-testid="workspace"]'
+    tid = "0f0f0f03"
+    if not any(r["id"] == tid for r in mock.world.setdefault("terminals", [])):
+        mock.world["terminals"].append(row(tid, "bash · remount"))
+    term = f'[data-testid="terminal-{tid}"]'
+    url = f"http://127.0.0.1:{mock.dev_port}/focus-none?who=remount"
+    page.set_viewport_size({"width": 1920, "height": 1080})
+    _set_storage(page, zoom="100", layout="{}")
+    _set_ws(page, json.dumps({"preset": "grid4", "focused": 1, "panes": [
+        {"view": "chat"}, {"view": "file"}, {"view": "browser", "browserUrl": url},
+        {"view": "terminal", "terminalId": tid}]}))
+    _boot(page, mock, None, until, reload=True)
+    page.locator(_pane(2, '[data-testid="file-calc.py"]')).click()
+    until(lambda: page.locator(_pane(2, '[data-testid="editor"] .view-line')).count() > 0, timeout=10)
+    until(lambda: page.locator(_pane(3, "iframe[data-browser-frame]")).count() > 0, timeout=4)
+    until(lambda: page.locator(term).count() > 0 and _attr(page, term, "data-state") == "attached", timeout=6)
+    until(lambda: any("who=remount" in h for h in mock.dev_hits), timeout=4)
+    time.sleep(0.5)
+    names = page.evaluate(REMOUNT_TAG)
+    check("no-remount setup: 2×2 with a chat, Monaco, a Browser page and a terminal, every one tagged",
+          {"pane-1", "pane-2", "pane-3", "pane-4", "frame", "monaco", "xterm"} <= set(names)
+          and any(n.startswith("frame-up-") for n in names), str(names))
+    hits = lambda: sum(1 for h in mock.dev_hits if "who=remount" in h)  # noqa: E731
+    tickets = lambda: len(mock.sent("POST", f"/terminals/{tid}/ticket"))  # noqa: E731
+    models = lambda: sorted(page.evaluate("window.__hud.monacoModels()"))  # noqa: E731
+    hits0, tickets0, models0 = hits(), tickets(), models()
+
+    def survived(move: str):
+        time.sleep(0.4)
+        got = page.evaluate(REMOUNT_SAME, names)
+        check(f"no-remount, after {move}: every tagged element is the same one, in its place",
+              got["bad"] == [], str(got["bad"]))
+        check(f"no-remount, after {move}: the sections are flat children of #workspace, in id order (never slot order)",
+              got["flat"] and got["sorted"], f'flat={got["flat"]} ids={got["ids"]}')
+        check(f"no-remount, after {move}: the Browser page was not loaded again", hits() == hits0, f"{hits0} -> {hits()}")
+        check(f"no-remount, after {move}: no new terminal ticket", tickets() == tickets0, f"{tickets0} -> {tickets()}")
+        check(f"no-remount, after {move}: Monaco holds the same models", models() == models0, f"{models0} -> {models()}")
+
+    _choose(page, until, "single")
+    _choose(page, until, "grid4")
+    until(lambda: all(_visible(page, _pane(n)) for n in (1, 2, 3, 4)), timeout=3)
+    survived("⊞ 2×2 → one → 2×2")
+
+    page.locator('[data-testid="pane-1-split"]').click()
+    until(lambda: len(_order(page)) == 5, timeout=3)
+    check("no-remount setup: the ladder split drew 3 over 2, the new pane in slot 2",
+          _order(page) == [1, 5, 2, 3, 4] and _attr(page, ws, "data-drawn-preset") == "grid5", str(_order(page)))
+    survived("a ladder split (slot order 1, 5, 2, 3, 4)")
+
+    _close(page, until, 5)
+    check("no-remount setup: × on the new pane, 2×2 again", _order(page) == [1, 2, 3, 4], str(_order(page)))
+    survived("a close of another pane")
+
+    edge = page.locator('[data-testid="split-x0-1"]')
+    check("no-remount setup: 2×2 draws its linked column edge, split-x0-1", edge.count() == 1)
+    if edge.count():
+        w1 = _width(page, _pane(1))
+        _drag(page, '[data-testid="split-x0-1"]', 90)
+        check("no-remount setup: the drag moved the edge", abs(_width(page, _pane(1)) - (w1 + 90)) <= 3,
+              f"{w1} -> {_width(page, _pane(1))}")
+        survived("an edge drag")
+
+    page.set_viewport_size({"width": 1600, "height": 900})
+    until(lambda: abs(page.locator(ws).bounding_box()["width"] - (1600 - 236 - 316)) <= 2, timeout=3)
+    page.set_viewport_size({"width": 1920, "height": 1080})
+    until(lambda: abs(page.locator(ws).bounding_box()["width"] - (1920 - 236 - 316)) <= 2, timeout=3)
+    survived("a window resize")
+    _reset_all(page, mock, until)
+
+
 # A Ctrl+Alt key as AltGr reports it (the symbol, on the digit's physical
 # key), dispatched where the window listens: whether the window took it.
 CTRL_ALT_JS = """([key, code]) => {
@@ -3089,8 +3291,8 @@ def _twelve_ids_checks(page, mock, check, until):
           _order(page) == [1, 9, 10] and _attr(page, _pane(10), "data-slot") == "3", str(_order(page)))
     stored = json.loads(page.evaluate("localStorage.getItem('jarvis.hud.workspace')") or "{}")
     check("FS2: ids 9 and 10 are stored, and the hidden panes with them",
-          stored.get("order") == [1, 9, 10] and stored.get("kept") == [2, 3, 4, 5, 6, 7, 8]
-          and len(stored.get("panes", [])) == 12, f'{stored.get("order")} {stored.get("kept")} {len(stored.get("panes", []))}')
+          _stored_order(stored) == [1, 9, 10] and stored.get("kept") == [2, 3, 4, 5, 6, 7, 8]
+          and len(stored.get("panes", [])) == 12, f'{_stored_order(stored)} {stored.get("kept")} {len(stored.get("panes", []))}')
     _boot(page, mock, None, until, reload=True)
     check("FS2: a reload draws them again, in their slots",
           _order(page) == [1, 9, 10] and _attr(page, _pane(9), "data-slot") == "2"

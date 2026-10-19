@@ -1409,17 +1409,20 @@ button.tb-icon[data-auto="true"] svg rect { stroke-dasharray: 2 1.4; }
 .laymenu .lm-label { flex: 1 1 auto; }
 .laymenu .lm-key { font: 10px var(--mono); color: var(--text-muted); }
 
-/* ---- the centre's panes (2026-10-09, plan §2.2; eight since WP-G1) ----
-   A grid of up to eight panes meeting at the same 1px rule the side panes do
-   (the grid's gap shows the border colour). A pane a preset does not draw is
-   display:none — hidden, never unmounted. 3 over 2 and 4 over 3 lay their
-   rows on unit columns (lib/workspace gridTemplate), so each row has edges of
-   its own. */
+/* ---- the centre's panes (2026-10-09, plan §2.2; the split tree since FS3) ----
+   Each drawn pane is placed absolutely from its own box (lib/workspace
+   fitWorkspace, `fit.boxes`; inline left/top/width/height), never in a shared
+   grid, so a split, a close or a drag moves no other pane by a sub-pixel and
+   no section ever moves in the DOM. Panes meet at the same 1px rule the side
+   panes do, shared out as the old grid's 1px gap was (Workspace.tsx
+   boxStyle), and the gap shows #workspace's border colour. A pane the tree does not draw is display:none —
+   hidden, never unmounted. */
 #workspace {
   flex: 1 1 auto; min-height: 0; min-width: 0; position: relative;
-  display: grid; gap: 1px; background: var(--border);
+  background: var(--border);
 }
 .wpane {
+  position: absolute;
   background: var(--bg-1); min-width: 0; min-height: 0;
   display: flex; flex-direction: column; overflow: hidden;
 }
@@ -1448,9 +1451,10 @@ button.tb-icon[data-auto="true"] svg rect { stroke-dasharray: 2 1.4; }
 .tree-row.panesel { color: var(--text); box-shadow: inset 2px 0 var(--border-strong); }
 .tree-row.ghost.panesel { box-shadow: none; color: var(--text-2); }
 
-/* The edges between panes: laid over the 1px rule, taking no room. In 3 over
-   2 and 4 over 3 a column edge spans its own row only (top, height or top
-   set inline: split-col-N the top row, split-colb-N the bottom). */
+/* The edges between panes: laid over the 1px rule, taking no room. Each spans
+   its own node's extent (left/top/height or width set inline from the fit's
+   edge handles, split-<axis><path>-<i>); a linked edge spans every row it
+   moves. */
 .wsplit { position: absolute; z-index: 6; touch-action: none; background: transparent; }
 .wsplit.col { top: 0; bottom: 0; width: 7px; cursor: col-resize; }
 .wsplit.row { height: 7px; cursor: row-resize; }

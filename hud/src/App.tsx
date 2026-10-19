@@ -135,7 +135,7 @@ import { SPACE_HINT, SPACE_HINT_KEY, TalkHold, isTalkKey, isTypingTarget, wantsS
 import { inMonaco, maxWidth } from "./lib/layout";
 import { chordSecond } from "./lib/editorkeys";
 import {
-  PANE_NOS, SHAPES, allocate, closePane as closePaneOf, copySpec, inWorkspace, orderOf, show as showOf, slotOf, splitTitle,
+  PANE_NOS, allocate, closePane as closePaneOf, copySpec, inWorkspace, orderOf, presetOfWs, show as showOf, slotOf, splitTitle,
   subagentSpec, type PaneNo, type PaneSpec, type View,
 } from "./lib/workspace";
 import { ActivitySync, clearsOnRead } from "./lib/activity";
@@ -2201,7 +2201,7 @@ export default function App() {
         return;
       }
       if (!mayShow(to.pane, "chat")) return;
-      if (to.preset !== lay.ws.preset) view.setPreset(to.preset);
+      if (to.preset && to.preset !== presetOfWs(lay.ws)) view.setPreset(to.preset);
       view.setView(to.pane, "chat");
       openIn(to.pane, id);
       return;
@@ -3451,7 +3451,14 @@ export default function App() {
       // against its thread record's live `running`.
       reconcile: () => reconcileBusy(),
       // The centre's panes as stored and as drawn (lib/workspace.ts).
-      workspace: () => ({ ws: layoutNow.current.ws, fit: layoutNow.current.fit }),
+      // JSON-safe (Records, never Maps: Playwright reads a Map as {}): the
+      // tree with its derived order and preset beside it, and the fit with
+      // the preset it draws ("free" for a tree no preset has; plan §3.2).
+      workspace: () => {
+        const { ws, fit } = layoutNow.current;
+        return { ws: { ...ws, order: orderOf(ws), preset: presetOfWs(ws) ?? "free" },
+                 fit: { ...fit, drawn: fit.drawnPreset ?? "free" } };
+      },
       // The thinking lines' one clock (WP-H): how many drawn lines tick, and
       // whether its interval runs at all. Read-only.
       toolGroups: () => toolGroups.keys(),
@@ -3505,8 +3512,8 @@ export default function App() {
   const drawn = view.fitted;
   const fit = view.fit;
   const ws = view.ws;
-  // The side panes leave the centre what the drawn shape needs (one pane: 480).
-  const mainMin = SHAPES[fit.drawn].minW;
+  // The side panes leave the centre what the drawn tree needs (one pane: 480; §4.4).
+  const mainMin = fit.minW;
   // A short window folds the orb's mic strip into one button beside it.
   const micTight = !drawn.leftFolded && view.availableH < MIC_TIGHT_H;
   // What the orb says under itself (PR #29; the input bar's hint used to say
@@ -4501,7 +4508,7 @@ export default function App() {
 
       <DevServerPrompts rows={devservers.rows().filter(row => ["prompt", "notice", "lost"].includes(row.phase))}
         hidden={workBlocked || crashed || devservers.enabled !== true}
-        layoutKey={JSON.stringify([view.ws.order, view.fit.panes, view.layout, view.zoom])} zoom={view.zoom}
+        layoutKey={JSON.stringify([orderOf(view.ws), view.fit.panes, view.layout, view.zoom])} zoom={view.zoom}
         label={devLabel} targets={devTargets()}
         onOpen={id => { if (!blockedNow.current && !settingsNow.current) void devservers.claim(id); }}
         onPlace={chooseDevPane}

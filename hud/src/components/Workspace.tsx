@@ -1,15 +1,24 @@
-// The centre's panes (plan §2.2): the drawn preset as a CSS grid, a header per
-// pane (its view strip, its context in a split, and whatever the caller puts
-// on the right — the profile select, a pinned project), the edges between
-// panes, and the bottom panel with its own edge. lib/workspace.ts decides
-// every number (`gridTemplate`, `slotWidths`); App decides what each view
-// shows.
+// The centre's panes (plan §2.2; 2026-10-19-hud-free-split-plan.md §10): the
+// drawn tree, each pane placed absolutely from its own box, a header per pane
+// (its view strip, its context in a split, and whatever the caller puts on
+// the right — the profile select, a pinned project), the edges between panes,
+// and the bottom panel with its own edge. lib/workspace.ts decides every
+// number (`fitWorkspace`: `fit.boxes`, `fit.edges`); App decides what each
+// view shows.
 //
-// A pane is mounted the first time a preset draws it and is then **hidden,
-// never unmounted**, as the side panes are: an unsaved edit or a loaded
-// preview in pane 3 survives switching to one pane and back. Up to eight
-// panes (WP-G1): a pane is known by its id (`pane-<id>`, its React key) and
-// carries its slot, the number the owner reads, as `data-slot`.
+// **Sections never move in the DOM** (FS3, plan P-4 and C5). Every section
+// is a direct child of #workspace, one flat list keyed `${id}.${incarnation}`
+// in id order (PANE_NOS), never slot order, and placed from its own fractions
+// only. A split, a close, ⊞, a drag or a resize changes only a section's
+// `style`: React never moves or re-parents one, because moving an iframe's
+// ancestor reloads it (a Browser page, its focus guard and its state), and a
+// shared grid would move unrelated panes by sub-pixels.
+//
+// A pane is mounted the first time it is drawn and is then **hidden, never
+// unmounted**, as the side panes are: an unsaved edit or a loaded preview in
+// pane 3 survives switching to one pane and back. A pane is known by its id
+// (`pane-<id>`, its React key) and carries its slot, the number the owner
+// reads, as `data-slot`.
 //
 // In the single layout — the default — one pane is mounted and its header is
 // the old tab row: the view buttons, the split button (WP-G2: that is how one
@@ -33,9 +42,10 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { keyStep } from "../lib/layout";
 import {
-  PANEL, PANE_MIN_H, PANE_MIN_W, PANE_NOS, PANE_VIEWS, VIEW_LABEL, gridTemplate, maxPanelHeight, moveColEdge,
-  rowCount, slotOf, slotWidths, uneven, type PaneNo, type PaneSpec, type View,
+  PANEL, PANE_NOS, PANE_VIEWS, VIEW_LABEL, inWorkspace, maxPanelHeight, presetOfWs, slotOf,
+  type PaneNo, type PaneSpec, type View,
 } from "../lib/workspace";
+import type { Rect } from "../lib/splittree";
 import { placeTerminals, type InSpec } from "../lib/terminal";
 import type { Project } from "../types";
 import { AreaIcon, Separator, type LayoutControl } from "./Layout";
@@ -98,13 +108,32 @@ export interface PaneInfo {
   drawn: boolean;
   /** More than one pane is drawn. */
   split: boolean;
-  /** The pane's width in the HUD's own pixels (NaN with no window to fit). */
+  /** The pane's width and height in the HUD's own pixels (NaN with no window to fit). */
   width: number;
+  height: number;
   /** A split pane too narrow for a tree beside its editor. */
   narrow: boolean;
   /** A split pane too narrow for the five view words. */
   compact: boolean;
   focused: boolean;
+}
+
+/**
+ * A drawn section's place, from its own box only (C5). The 1px rule between
+ * panes is shared out as the CSS grid's 1px gap was before FS3: every
+ * fraction is of the area plus one gap (`100% + 1px`) and each pane gives 1px
+ * back, so equal panes are equal to the sub-pixel, exactly where the grid drew
+ * them, and a pane's place still reads nothing but its own fractions.
+ */
+const unit = (f: number) => `${f} * (100% + 1px)`;
+function boxStyle(r: Rect): React.CSSProperties {
+  return {
+    position: "absolute",
+    left: `calc(${unit(r.left)})`,
+    top: `calc(${unit(r.top)})`,
+    width: `calc(${unit(r.width)} - 1px)`,
+    height: `calc(${unit(r.height)} - 1px)`,
+  };
 }
 
 export function Workspace(props: {
@@ -152,7 +181,6 @@ export function Workspace(props: {
 }) {
   const v = props.view;
   const { fit, ws } = v;
-  const grid = useRef<HTMLDivElement>(null);
   // One terminal is drawn in one place at a time (W-1): the first drawn pane
   // holding it, else the panel.
   const place = placeTerminals(ws.panes, fit.panes);
@@ -171,7 +199,7 @@ export function Workspace(props: {
   const ever = useRef<Set<PaneNo>>(new Set<PaneNo>());
   for (const n of fit.panes) ever.current.add(n);
   for (const n of Array.from(ever.current)) {
-    if (!ws.order.includes(n) && !ws.kept.includes(n) && !fit.panes.includes(n)) ever.current.delete(n);
+    if (!inWorkspace(ws, n) && !fit.panes.includes(n)) ever.current.delete(n);
   }
   // × that asks first (an unsaved edit, unsent words): which pane, and what it asks.
   const [asking, setAsking] = useState<{ pane: PaneNo; question: string; save: (() => Promise<boolean>) | null } | null>(null);
@@ -214,60 +242,29 @@ export function Workspace(props: {
   };
 
   const split = fit.panes.length > 1;
-  const tpl = gridTemplate(fit.drawn, fit);
-  const widths = slotWidths(fit);
-  const areas = tpl.areas
-    .map((row) => `"${row.replace(/s(\d+)/g, (_, i) => `p${fit.panes[Number(i) - 1]}`)}"`)
-    .join(" ");
-  const gridStyle: React.CSSProperties = {
-    gridTemplateColumns: tpl.columns.map((f) => `minmax(0, ${f}fr)`).join(" "),
-    gridTemplateRows: tpl.rows.map((f) => `minmax(0, ${f}fr)`).join(" "),
-    gridTemplateAreas: areas,
-  };
-  // The room a drag measures against: what is on screen, else what was fitted.
-  const roomW = () => grid.current?.offsetWidth || fit.width;
-  const roomH = () => grid.current?.offsetHeight || fit.height;
 
   const info = (n: PaneNo): PaneInfo => {
-    const at = fit.panes.indexOf(n);
-    const drawn = at >= 0;
-    const width = drawn ? (split ? widths[at] : fit.width) : NaN;
+    const box = fit.boxes[n];
+    const drawn = !!box;
+    const width = box ? box.px.width : NaN;
     return {
-      pane: n, slot: slotOf(ws, n), drawn: drawn && !props.covered, split, width,
+      pane: n, slot: slotOf(ws, n), drawn: drawn && !props.covered, split, width, height: box ? box.px.height : NaN,
       narrow: split && width < NARROW_W,
       compact: split && width < COMPACT_W,
       focused: ws.focused === n,
     };
   };
 
-  /** A column edge: its key in `Split`, the edges it moves among, and where it is drawn. */
-  const twoRows = rowCount(fit.drawn) === 2;
-  const ownBottom = uneven(fit.drawn);
-  const colEdges: { testid: string; part: "cols" | "bottom"; edges: number[]; i: number; style: React.CSSProperties }[] = [
-    ...fit.cols.map((c, i) => ({
-      testid: `split-col-${i + 1}`, part: "cols" as const, edges: fit.cols, i,
-      // 3 over 2 and 4 over 3: the top row's edges span the top row only.
-      style: ownBottom ? { left: `calc(${c * 100}% - 3px)`, bottom: "auto", height: `${fit.row * 100}%` }
-        : { left: `calc(${c * 100}% - 3px)` },
-    })),
-    ...(ownBottom ? fit.bottom : []).map((c, i) => ({
-      testid: `split-colb-${i + 1}`, part: "bottom" as const, edges: fit.bottom, i,
-      style: { left: `calc(${c * 100}% - 3px)`, top: `${fit.row * 100}%` },
-    })),
-  ];
-
   const panelMax = maxPanelHeight(fit, v.availableH);
 
   return (
     <>
       <div
-        ref={grid}
         id="workspace"
         data-testid="workspace"
-        data-preset={ws.preset}
-        data-drawn-preset={fit.drawn}
+        data-preset={presetOfWs(ws) ?? "free"}
+        data-drawn-preset={fit.drawnPreset ?? "free"}
         className={split ? "split" : undefined}
-        style={gridStyle}
       >
         {PANE_NOS.filter((n) => ever.current.has(n)).map((n) => {
           const spec = ws.panes[n - 1];
@@ -292,7 +289,7 @@ export function Workspace(props: {
               data-selected={spec.view === "chat" && n === props.selectedPane ? "true" : undefined}
               aria-label={`Pane ${at.slot}: ${VIEW_LABEL[spec.view]}`}
               tabIndex={-1}
-              style={at.drawn ? { gridArea: `p${n}` } : { display: "none" }}
+              style={fit.boxes[n] && !props.covered ? boxStyle(fit.boxes[n]!.rect) : { display: "none" }}
               onPointerDownCapture={() => v.focus(n)}
               onFocusCapture={() => v.focus(n)}
             >
@@ -418,73 +415,41 @@ export function Workspace(props: {
           );
         })}
 
-        {colEdges.map(({ testid, part, edges, i, style }) => {
-          const c = edges[i];
-          const w = Number.isFinite(fit.width) ? fit.width : 0;
-          const lo = (i === 0 ? 0 : edges[i - 1] * w) + PANE_MIN_W;
-          const hi = (i === edges.length - 1 ? w : edges[i + 1] * w) - PANE_MIN_W;
+        {/* One separator per boundary between a node's children (§9), named by the stored tree; linked when collinear (P-5). */}
+        {fit.edges.map((edge) => {
+          const x = edge.axis === "x";
+          const style: React.CSSProperties = x
+            // Centred on the 1px rule (`boxStyle`'s gap), spanning its node.
+            ? { left: `calc(${unit(edge.at.left)} - 4px)`, top: `calc(${unit(edge.at.top)})`, bottom: "auto",
+                height: `calc(${unit(edge.at.height)} - 1px)` }
+            : { top: `calc(${unit(edge.at.top)} - 4px)`, left: `calc(${unit(edge.at.left)})`,
+                width: `calc(${unit(edge.at.width)} - 1px)` };
           return (
             <Separator
-              key={testid}
-              testid={testid}
-              className="wsplit col"
-              orientation="vertical"
+              key={edge.testid}
+              testid={edge.testid}
+              linked={edge.members.length > 1 ? edge.members.length : undefined}
+              className={x ? "wsplit col" : "wsplit row"}
+              orientation={x ? "vertical" : "horizontal"}
               label="Resize the panes"
               title="Resize the panes · double-click to make them equal"
-              value={c * w}
-              min={lo}
-              max={Math.max(lo, hi)}
+              value={Number.isFinite(edge.value) ? edge.value : 0}
+              min={edge.min}
+              max={edge.max}
               zoom={v.zoom}
               blocked={props.blocked}
               style={style}
-              onDrag={(start, delta) => {
-                const room = roomW();
-                v.setSplit(fit.drawn, { [part]: moveColEdge(edges, i, (start + delta) / room, room) });
-              }}
+              onDrag={(start, delta) => v.moveEdge(edge, start + delta)}
               onKey={(key, shift) => {
-                const room = roomW();
-                const min = (i === 0 ? 0 : edges[i - 1] * room) + PANE_MIN_W;
-                const max = (i === edges.length - 1 ? room : edges[i + 1] * room) - PANE_MIN_W;
-                const next = keyStep("x", c * room, key, shift, min, Math.max(min, max));
+                const next = keyStep(x ? "x" : "y", edge.value, key, shift, edge.min, edge.max);
                 if (next === null) return false;
-                v.setSplit(fit.drawn, { [part]: moveColEdge(edges, i, next / room, room) });
+                v.moveEdge(edge, next);
                 return true;
               }}
-              onReset={() => v.equalSplit(fit.drawn)}
+              onReset={() => v.equalize(edge.members.map((m) => m.path))}
             />
           );
         })}
-        {twoRows ? (
-          <Separator
-            testid="split-row"
-            className="wsplit row"
-            orientation="horizontal"
-            label="Resize the panes"
-            title="Resize the panes · double-click to make them equal"
-            value={fit.row * (Number.isFinite(fit.height) ? fit.height : 0)}
-            min={PANE_MIN_H}
-            max={Math.max(PANE_MIN_H, (Number.isFinite(fit.height) ? fit.height : 0) - PANE_MIN_H)}
-            zoom={v.zoom}
-            blocked={props.blocked}
-            style={{
-              left: fit.drawn === "main2" ? `${fit.cols[0] * 100}%` : 0,
-              right: 0,
-              top: `calc(${fit.row * 100}% - 3px)`,
-            }}
-            onDrag={(start, delta) => {
-              const room = roomH();
-              v.setSplit(fit.drawn, { row: Math.min(1 - PANE_MIN_H / room, Math.max(PANE_MIN_H / room, (start + delta) / room)) });
-            }}
-            onKey={(key, shift) => {
-              const room = roomH();
-              const next = keyStep("y", fit.row * room, key, shift, PANE_MIN_H, Math.max(PANE_MIN_H, room - PANE_MIN_H));
-              if (next === null) return false;
-              v.setSplit(fit.drawn, { row: next / room });
-              return true;
-            }}
-            onReset={() => v.equalSplit(fit.drawn)}
-          />
-        ) : null}
       </div>
 
       {fit.panel.open ? (

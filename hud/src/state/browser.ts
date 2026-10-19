@@ -6,7 +6,7 @@ import type { LayoutControl } from "../components/Layout";
 import { browserFront, BrowserPublisher, type BrowserReceipt } from "../lib/browserowner";
 import { isLoopbackHost, judgeBrowserUrl, type DaemonPorts } from "../lib/browser";
 import { cleanTitle } from "../lib/remote";
-import { browserTabId, type PaneNo } from "../lib/workspace";
+import { browserTabId, inWorkspace, orderOf, type PaneNo } from "../lib/workspace";
 import { browserSettings } from "./browserSettings";
 import { WINDOW_ID } from "../lib/windowId";
 import { useDaemonPorts } from "./daemonPorts";
@@ -132,7 +132,7 @@ export function useBrowser(view:LayoutControl, covered:boolean, blocked:boolean)
     // Pin the initial default once. Deleting it later must show a missing
     // profile, not silently adopt whichever profile moved to the first row.
     const first=profiles[0]?.id;
-    if(first) for(const id of [...view.ws.order,...view.ws.kept]) {
+    if(first) for(const id of [...orderOf(view.ws),...view.ws.kept]) {
       const spec=view.ws.panes[id-1];
       if(spec.view==="browser"&&!spec.browserProfile)view.setBrowserProfile(id,first,true);
     }
@@ -140,7 +140,7 @@ export function useBrowser(view:LayoutControl, covered:boolean, blocked:boolean)
   useLayoutEffect(()=>{
     for (const [pane,ctx] of privateDrive.current) {
       const spec=view.ws.panes[pane-1];
-      if (spec.view!=="browser" || ![...view.ws.order,...view.ws.kept].includes(pane as PaneNo) || spec.browserProfile!=="private" || spec.browserCtx!==ctx || spec.see===false || spec.browserPrivateEnded)
+      if (spec.view!=="browser" || !inWorkspace(view.ws,pane as PaneNo) || spec.browserProfile!=="private" || spec.browserCtx!==ctx || spec.see===false || spec.browserPrivateEnded)
         privateDrive.current.delete(pane);
     }
     publish();

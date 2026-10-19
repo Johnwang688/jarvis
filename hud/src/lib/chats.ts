@@ -40,7 +40,7 @@ import type { Attachment, ChatMessage, Thread, ToolOp } from "../types";
 import type { Compose } from "./compose";
 import type { GiveBack } from "./giveback";
 import {
-  LADDER, PANE_NOS, allocate, orderOf, setPreset, slotOf, type PaneNo, type Preset, type Workspace,
+  LADDER, PANE_NOS, allocate, orderOf, presetOfWs, setPreset, slotOf, type PaneNo, type Preset, type Workspace,
 } from "./workspace";
 
 /** One pane's conversation, and the turn it is waiting on. */
@@ -301,26 +301,28 @@ export function heldElsewhere(
  */
 export function besideTarget(
   ws: Workspace, drawn: readonly PaneNo[], dirty: readonly PaneNo[] = [], holding: readonly PaneNo[] = [],
-): { preset: Preset; pane: PaneNo; source?: PaneNo } {
+): { preset: Preset | null; pane: PaneNo; source?: PaneNo } {
   const own = orderOf(ws);
+  // The preset the tree has (FS3, derived; null for a tree no preset has).
+  const preset = presetOfWs(ws);
   const visible = drawn.length ? drawn : [own[0]];
-  const grown = (preset: Preset, slot: number) => {
+  const grown = (to: Preset, slot: number) => {
     const source = own[slot - 2];
-    const id = allocate({ order: own, kept: ws.kept }, dirty, holding);
+    const id = allocate(ws, dirty, holding);
     if (id !== null) return { preset: LADDER[own.length + 1], pane: id, source };
-    return { preset, pane: setPreset({ ...ws, order: own }, preset).order[slot - 1] };
+    return { preset: to, pane: orderOf(setPreset(ws, to))[slot - 1] };
   };
   if (visible.length === 1) {
-    if (ws.preset === "single") return grown("cols2", 2);
+    if (preset === "single") return grown("cols2", 2);
     // A preset drawn as one pane for room: the next of its own panes.
     const at = own.indexOf(visible[0]);
-    return { preset: ws.preset, pane: own[(at + 1) % own.length] };
+    return { preset, pane: own[(at + 1) % own.length] };
   }
   const at = visible.indexOf(ws.focused);
   const from = at < 0 ? 0 : at;
-  if (from < visible.length - 1) return { preset: ws.preset, pane: visible[from + 1] };
-  if (ws.preset === "cols2" && visible.length === 2) return grown("cols3", 3);
-  return { preset: ws.preset, pane: visible.find((n) => n !== ws.focused) ?? visible[0] };
+  if (from < visible.length - 1) return { preset, pane: visible[from + 1] };
+  if (preset === "cols2" && visible.length === 2) return grown("cols3", 3);
+  return { preset, pane: visible.find((n) => n !== ws.focused) ?? visible[0] };
 }
 
 /**

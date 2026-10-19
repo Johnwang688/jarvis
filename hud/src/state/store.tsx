@@ -25,7 +25,7 @@ import {
   CAPTURE_STATUSES, CHAT_KEYS, MAX_FILES, ORPHAN_DRAFT, draftKey, emptyChat, emptyChats, sameConversation, shownThread,
   type ChatState, type Chats,
 } from "../lib/chats";
-import { PANE_NOS, defaultWorkspace, type PaneNo } from "../lib/workspace";
+import { PANE_NOS, defaultWorkspace, orderOf, type PaneNo } from "../lib/workspace";
 import { applyTurn, turnsAfterActivity, turnsAfterThreads, type TurnEvent, type Turns } from "../lib/thinking";
 
 // What the centre shows is the workspace's (lib/workspace.ts, 2026-10-09): a
@@ -119,7 +119,7 @@ export interface State {
 
 export const initialState: State = {
   projects: [], platforms: {}, threads: [], tasks: [], taskThreads: {}, activity: NO_ACTIVITY, turns: {},
-  chats: emptyChats(), selectedChat: null, selectedOrder: [], home: defaultWorkspace().order[0], loose: {},
+  chats: emptyChats(), selectedChat: null, selectedOrder: [], home: orderOf(defaultWorkspace())[0], loose: {},
   drafts: {}, composeSeq: 0, taskId: null, taskFocus: false,
   approvals: [], usage: null, discord: null, schedules: [],
   route: null, avatar: null, dictation: DEFAULT_MODE,
