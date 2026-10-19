@@ -1307,8 +1307,8 @@ def panels_checks(page, mock):
           page.locator('[data-testid="claude-mark"]').count() == 1
           and page.locator('[data-testid="quota-bar-claude-5h"]').count() == 1
           and page.locator('[data-testid="quota-bar-claude-week"]').count() == 1)
-    check("codex is a weekly meter",
-          "codex" in usage.inner_text().lower()
+    check("codex is the OpenAI mark and a weekly meter",
+          page.locator('[data-testid="codex-mark"] svg[aria-label="Codex (OpenAI)"]').count() == 1
           and page.locator('[data-testid="quota-bar-codex-weekly"]').count() == 1)
     check("and its 5-hour window is not drawn",
           page.locator('[data-testid="quota-bar-codex-5h"]').count() == 0)
