@@ -48,6 +48,7 @@
 import { ZOOM_DEFAULT, isZoom, shortcutFor, toCss, type Shortcut } from "./layout";
 import { isTalkKey, type KeyLike } from "./talkkey";
 import { CHUNK, cleanPaste } from "./terminal";
+import { isModifierKey } from "./modifierkeys";
 
 // ---- keys ---------------------------------------------------------------------
 
@@ -296,13 +297,7 @@ export type KeyRoute =
  * (amendment §B.9: the HUD's keys never reach the page and never count). The
  * page still learns them: every key and pointer event carries `modifiers`.
  */
-export const MODIFIER_KEYS: ReadonlySet<string> = new Set([
-  "Control", "Alt", "Shift", "Meta", "AltGraph", "OS", "Super", "Hyper", "Fn", "FnLock",
-]);
-
-export function isModifierKey(key: unknown): boolean {
-  return typeof key === "string" && MODIFIER_KEYS.has(key);
-}
+export { MODIFIER_KEYS, isModifierKey } from "./modifierkeys";
 
 export function routeKeyDown(e: KeyEventLike, blocked: boolean): KeyRoute {
   if (blocked) return { kind: "held" };
