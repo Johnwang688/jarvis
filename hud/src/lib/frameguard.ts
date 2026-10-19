@@ -45,11 +45,8 @@ export interface TabMark {
   landed?: unknown;
 }
 
-/** Keys that only modify another: pressing one is not "the owner typed something". */
-export function isModifierKey(key: string): boolean {
-  return key === "Shift" || key === "Control" || key === "Alt" || key === "Meta" || key === "AltGraph"
-    || key === "CapsLock" || key === "Fn" || key === "OS";
-}
+/** Keys that only modify another: the one list, in lib/modifierkeys.ts. */
+export { isModifierKey } from "./modifierkeys";
 
 /** Tab or Shift+Tab, with no Ctrl, Alt or Meta. */
 export function isTabKey(e: { key: string; ctrlKey: boolean; altKey: boolean; metaKey: boolean }): boolean {
