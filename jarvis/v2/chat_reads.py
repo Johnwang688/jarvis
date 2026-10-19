@@ -408,7 +408,7 @@ def _snippet(text: str, cap: int = SNIPPET_CHARS) -> str:
     return _cap(" ".join(text.split()), cap)
 
 
-def _state(live, thread_id: str, titles: dict[str, str]) -> str:
+def _state(live, thread_id: str, names: dict[str, str]) -> str:
     entry = live.get(thread_id) if isinstance(live, dict) else None
     if not isinstance(entry, dict):
         return "idle"
@@ -420,7 +420,7 @@ def _state(live, thread_id: str, titles: dict[str, str]) -> str:
     if entry.get("running") is True:
         sender = entry.get("relay_from")
         if isinstance(sender, str) and sender:
-            name = titles.get(sender) or f"another chat ({_thread_id(sender)})"
+            name = names.get(sender) or f"another chat ({_thread_id(sender)})"
             state = f"working on a message from {_cap(name, 40)}"
         else:
             state = "working"
@@ -430,17 +430,17 @@ def _state(live, thread_id: str, titles: dict[str, str]) -> str:
 
 
 def _titles(stores, threads: list[Thread], live) -> dict[str, str]:
-    titles = {t.id: clean_title(t.title) for t in threads}
+    names = {t.id: clean_title(t.title) for t in threads}
     for entry in (live.values() if isinstance(live, dict) else ()):
         sender = entry.get("relay_from") if isinstance(entry, dict) else None
-        if isinstance(sender, str) and sender not in titles and _ID.fullmatch(sender):
+        if isinstance(sender, str) and sender not in names and _ID.fullmatch(sender):
             try:
                 found = stores.threads.get(sender)
             except Exception:  # noqa: BLE001
                 found = None
             if found is not None:
-                titles[sender] = clean_title(found.title)
-    return titles
+                names[sender] = clean_title(found.title)
+    return names
 
 
 # -- the reads --------------------------------------------------------------------------------
@@ -451,12 +451,12 @@ def listing(stores, live, caller_id: str | None, query: str = "", limit: int = L
     id · provider · state · project / title · turns · last active."""
     limit = _bounded(limit, LIST_DEFAULT, LIST_MAX)
     threads, projects = _eligible(stores)
-    titles = _titles(stores, threads, live)
+    names = _titles(stores, threads, live)
     key = name_key(query) if isinstance(query, str) else ""
     lines = []
     matched = 0
     for thread in threads:
-        title, project = titles[thread.id], _project_name(projects, thread)
+        title, project = names[thread.id], _project_name(projects, thread)
         if key and not (key in title.casefold() or key in project.casefold() or key == thread.id):
             continue
         matched += 1
@@ -465,7 +465,7 @@ def listing(stores, live, caller_id: str | None, query: str = "", limit: int = L
         mine = " (this chat)" if caller_id is not None and thread.id == caller_id else ""
         turns = thread.turns if isinstance(thread.turns, int) else 0
         row = (f"{thread.id} · {getattr(thread.provider, 'value', thread.provider)} · "
-               f"{_state(live, thread.id, titles)} · {project} / {title}{mine} · "
+               f"{_state(live, thread.id, names)} · {project} / {title}{mine} · "
                f"{turns} turn{'s' if turns != 1 else ''} · last active {_when(thread.updated)}")
         lines.append(_cap(row, LIST_ROW_CHARS))
     body = "\n".join(lines) if lines else "(no open HUD chat matches)"
@@ -477,8 +477,8 @@ def summary(stores, live, thread: Thread) -> str:
     """A fixed-shape summary, no model call: the chat's header, its first
     owner message, its last rows and counts, within `SUMMARY_CHARS`."""
     threads, projects = _eligible(stores)
-    titles = _titles(stores, threads, live)
-    titles.setdefault(thread.id, clean_title(thread.title))
+    names = _titles(stores, threads, live)
+    names.setdefault(thread.id, clean_title(thread.title))
     records = tail_rows(stores, thread)
     dropped = _dropped(records)
     counts: dict[str, int] = {}
@@ -501,7 +501,7 @@ def summary(stores, live, thread: Thread) -> str:
             last.append(row)
     last.reverse()
     turns = thread.turns if isinstance(thread.turns, int) else 0
-    lines = [f"State: {_state(live, thread.id, titles)} · {turns} turns · "
+    lines = [f"State: {_state(live, thread.id, names)} · {turns} turns · "
              f"last active {_when(thread.updated)}",
              "First owner message: " + (_snippet(first.text) if first else "(none in view)"),
              f"Last {len(last)} rows:"]
