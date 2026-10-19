@@ -35,6 +35,7 @@ import os
 import sys
 import tempfile
 import threading
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -1098,6 +1099,245 @@ def chat_tools_checks() -> list[str]:
     return failed
 
 
+# --- the Compact button (plan 2026-10-19-compact-button-plan.md §1, WP-A) ----
+#
+# `FastPathProvider.compact(h)`: a turn with no message. It takes `busy`
+# without blocking (busy: it ends `stop: "error"`, nothing changed), clears a
+# stale `stop`, and on a worker deep-copies the transcript, runs
+# `context.manage(copy, agent.policy, summarize=agent._summarize, force=True)`
+# and only if no Stop came and something was removed puts the copy back
+# (`agent.messages[:] = copy`) and saves it with the new
+# `sessions.Session.save_messages(messages)`, which writes the messages file
+# only and counts no turn. Events: TURN_STARTED, a TOOL_STARTED/TOOL_FINISHED
+# pair named "compact", then TURN_FINISHED {"stop", "compacted", "reason"}.
+# `compact_refusal(h)`: None on an open session, a sentence on a closed one
+# (chosen). Each case below is separate: on today's code every one that needs
+# `compact` fails alone, and the others still run.
+
+NOTHING_TO_COMPACT = "Nothing to compact yet: the conversation is still short."
+_GOAL = {"role": "user", "content": "build the VEX drivetrain and report the wheelbase"}
+
+
+def _long_transcript(agent, exchanges=10):
+    messages = [agent.messages[0], dict(_GOAL)]
+    for i in range(exchanges):
+        messages.append({"role": "assistant", "content": None, "tool_calls": [
+            {"id": f"k{i}", "type": "function",
+             "function": {"name": "get_datetime", "arguments": "{}"}}]})
+        messages.append({"role": "tool", "tool_call_id": f"k{i}", "name": "get_datetime",
+                         "content": "x" * 300})
+        messages.append({"role": "user", "content": f"step {i}"})
+    return messages
+
+
+def _compactable(tid):
+    from jarvis import context
+
+    provider = FastPathProvider()
+    handle = provider.start(thread(tid), brief(), allow_all)
+    agent = handle.native.agent
+    agent.messages = _long_transcript(agent)
+    agent.policy = context.ContextPolicy(keep_recent_messages=4, spill_dir=_ROOT / "spill")
+    return provider, handle, agent
+
+
+def _summarizer(summaries, gate=None, returned=None):
+    def fake(model, messages, tools=None, on_delta=None, **kw):
+        if tools is None:
+            summaries.append(model)
+            if gate is not None:
+                gate.wait(5)
+            if returned is not None:
+                returned.set()
+            return reply("GOAL: the drivetrain\nFAILED: none")
+        return reply("done")
+    return fake
+
+
+def _finished(events):
+    assert events, "compact yielded nothing"
+    assert events[0].kind is EventKind.TURN_STARTED, kinds(events)
+    assert events[-1].kind is EventKind.TURN_FINISHED, kinds(events)
+    assert kinds(events).count(EventKind.TURN_FINISHED) == 1, kinds(events)
+    return events[-1].data
+
+
+def _bounded(gen, timeout=5.0):
+    box = {}
+    worker = threading.Thread(target=lambda: box.setdefault("events", list(gen)), daemon=True)
+    worker.start()
+    worker.join(timeout)
+    assert "events" in box, f"compact did not end within {timeout}s"
+    return box["events"]
+
+
+def compact_ok_check() -> None:
+    from jarvis import context
+
+    provider, handle, agent = _compactable("cmp-ok")
+    turns = handle.native.session.turns
+    summaries: list = []
+    with scripted(_summarizer(summaries)):
+        events = _bounded(provider.compact(handle))
+    done = _finished(events)
+    assert (done.get("stop"), done.get("compacted"), done.get("reason")) == ("end", True, None), done
+    tool = [(e.kind, e.data.get("name")) for e in events
+            if e.kind in (EventKind.TOOL_STARTED, EventKind.TOOL_FINISHED)]
+    assert tool == [(EventKind.TOOL_STARTED, "compact"), (EventKind.TOOL_FINISHED, "compact")], tool
+    assert summaries, "no summary was asked for"
+    assert agent.messages[1] == _GOAL, agent.messages[1]
+    assert str(agent.messages[2]["content"]).startswith(context.SUMMARY_PREFIX), agent.messages[2]
+    assert_wire_valid(agent.messages)
+    saved = handle.native.session.restore_messages()
+    assert saved and saved[0] == _GOAL, saved[:1]
+    assert str(saved[1]["content"]).startswith(context.SUMMARY_PREFIX), saved[1]
+    assert len(saved) == len(agent.messages) - 1, (len(saved), len(agent.messages))
+    assert handle.native.session.turns == turns, "a compaction counted a turn"
+    # `busy` was given back: the next turn runs.
+    with scripted(_summarizer([])):
+        after = drain(provider, handle, "and now?")
+    assert one(after, EventKind.TURN_FINISHED).data["stop"] == "end"
+    provider.close(handle)
+    print("ok  compact: summarised, messages[1] pinned, wire-valid, saved, no turn counted")
+
+
+def compact_nothing_check() -> None:
+    import copy
+
+    provider = FastPathProvider()
+    handle = provider.start(thread("cmp-short"), brief(), allow_all)
+    before = copy.deepcopy(handle.native.agent.messages)
+    summaries: list = []
+    with scripted(_summarizer(summaries)):
+        events = _bounded(provider.compact(handle))
+    done = _finished(events)
+    assert (done.get("stop"), done.get("compacted"), done.get("reason")) == (
+        "end", False, NOTHING_TO_COMPACT), done
+    assert handle.native.agent.messages == before
+    assert summaries == [], "a short conversation asked for a summary"
+    provider.close(handle)
+    print("ok  compact: a short conversation is not compacted, and says so")
+
+
+def compact_stop_check() -> None:
+    import copy
+
+    # Mutation: the stopped summary's result is applied (or saved).
+    provider, handle, agent = _compactable("cmp-stop")
+    before = copy.deepcopy(agent.messages)
+    path = handle.native.session._messages_path
+    on_disk = path.read_bytes() if path.exists() else None
+    gate, returned, summaries = threading.Event(), threading.Event(), []
+    box = {}
+    compact = provider.compact
+    with scripted(_summarizer(summaries, gate, returned)):
+        worker = threading.Thread(target=lambda: box.setdefault("events", list(compact(handle))),
+                                  daemon=True)
+        worker.start()
+        deadline = time.monotonic() + 5
+        while not summaries and time.monotonic() < deadline:
+            time.sleep(0.005)
+        assert summaries, "the summary was never asked for"
+        provider.interrupt(handle)
+        gate.set()
+        worker.join(5)
+        assert returned.wait(5), "the summary call never returned"
+        time.sleep(0.2)           # a worker that applied late would have by now
+    assert "events" in box, "compact did not end after Stop"
+    done = _finished(box["events"])
+    assert (done.get("stop"), done.get("compacted")) == ("interrupted", False), done
+    assert agent.messages == before, "Stop left the transcript changed"
+    assert (path.read_bytes() if path.exists() else None) == on_disk, "Stop saved a transcript"
+    provider.close(handle)
+    print("ok  compact: Stop during the summary throws its result away")
+
+
+def compact_stale_stop_check() -> None:
+    # A Stop aimed at the previous turn does not kill the compaction.
+    provider, handle, agent = _compactable("cmp-stale")
+    handle.native.stop.set()
+    with scripted(_summarizer([])):
+        events = _bounded(provider.compact(handle))
+    done = _finished(events)
+    assert (done.get("stop"), done.get("compacted")) == ("end", True), done
+    provider.close(handle)
+    print("ok  compact: a stale stop is cleared first")
+
+
+def compact_busy_check() -> None:
+    import copy
+
+    provider, handle, agent = _compactable("cmp-busy")
+    gate = threading.Event()
+
+    def slow(model, messages, tools=None, on_delta=None, **kw):
+        if tools is not None:
+            gate.wait(5)
+            return reply("done")
+        return reply("GOAL: x")
+
+    with scripted(slow):
+        sender = threading.Thread(target=lambda: drain(provider, handle, "long one"), daemon=True)
+        sender.start()
+        deadline = time.monotonic() + 5
+        while not handle.native.busy.locked() and time.monotonic() < deadline:
+            time.sleep(0.005)
+        assert handle.native.busy.locked(), "the send never took busy"
+        during = copy.deepcopy(agent.messages)
+        try:
+            events = _bounded(provider.compact(handle), timeout=3.0)
+            done = _finished(events)
+            assert (done.get("stop"), done.get("compacted")) == ("error", False), done
+            assert done.get("reason"), done
+            assert agent.messages == during, "a refused compaction changed the transcript"
+        finally:
+            gate.set()
+            sender.join(5)
+    provider.close(handle)
+    print("ok  compact: refused, never blocking, while a turn holds the conversation")
+
+
+def compact_refusal_check() -> None:
+    provider = FastPathProvider()
+    handle = provider.start(thread("cmp-refusal"), brief(), allow_all)
+    assert provider.compact_refusal(handle) is None
+    provider.close(handle)
+    said = provider.compact_refusal(handle)
+    assert isinstance(said, str) and said.strip(), said
+    print("ok  compact: compact_refusal is None while open, a sentence once closed")
+
+
+def save_messages_check() -> None:
+    from jarvis import sessions
+
+    session = sessions.new(surface="fast")
+    session.save_meta()             # a conversation that exists on disk, as any compacted one does
+    turns = session.turns
+    session.save_messages([{"role": "system", "content": "sys"}, dict(_GOAL),
+                           {"role": "user", "content": "[summary] earlier work"}])
+    assert session.restore_messages() == [_GOAL, {"role": "user", "content": "[summary] earlier work"}]
+    assert session.turns == turns, "save_messages counted a turn"
+    again = sessions.load(session.id)
+    assert again is not None and again.turns == turns
+    assert again.restore_messages()[0] == _GOAL
+    assert session.log_lines() == [], "save_messages wrote the turn log"
+    print("ok  compact: Session.save_messages writes the messages file only")
+
+
+def compact_checks() -> list[str]:
+    """Each compaction case on its own, so one failing does not hide the others."""
+    failed = []
+    for check in (compact_ok_check, compact_nothing_check, compact_stop_check,
+                  compact_stale_stop_check, compact_busy_check, compact_refusal_check,
+                  save_messages_check):
+        try:
+            check()
+        except Exception as exc:  # noqa: BLE001 - reported, and the run fails
+            failed.append(check.__name__)
+            print(f"FAIL {check.__name__}: {type(exc).__name__}: {exc}")
+    return failed
+
+
 def main() -> int:
     outcome_checks()
     boundary_checks()
@@ -1122,6 +1362,7 @@ def main() -> int:
     model_checks()
     no_self_switch_checks()
     failed = chat_tools_checks()
+    failed += compact_checks()
     if failed:
         print(f"\n{len(failed)} fast-path check group(s) failed: {', '.join(failed)}")
         return 1
