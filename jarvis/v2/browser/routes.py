@@ -60,6 +60,8 @@ import logging
 import os
 from urllib.parse import quote
 
+from jarvis import config
+
 from . import files as _files
 from .captures import CaptureRefused, capture_page
 from .files import FileRefused
@@ -88,7 +90,7 @@ def _strict_host(handler, daemon) -> None:
     """The Host must name the HUD listener on loopback exactly (as
     `/terminals` and `/vex` require): a rebound name never gets this far."""
     port = daemon.face_port
-    if handler.headers.get("Host", "") not in (f"127.0.0.1:{port}", f"localhost:{port}"):
+    if not config.own_host_header(handler.headers.get("Host", ""), port):
         _fail(403, "untrusted Host")
 
 

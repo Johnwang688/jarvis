@@ -108,6 +108,21 @@ def control_ports() -> frozenset[int]:
     return DEFAULT_CONTROL_PORTS | {FACE_PORT, DESKTOP_PORT, DAEMON_PORT, SPOTIFY_AUTH_PORT}
 
 
+def own_host_header(value, port) -> bool:
+    """True only when a request's `Host` header names the listener on `port`
+    by one of exactly two spellings: `127.0.0.1:<port>` or `localhost:<port>`.
+
+    The DNS-rebinding guard for Jarvis's v2 listeners: a page on an attacker's
+    name that resolves to 127.0.0.1 sends its own name in `Host`, so it never
+    matches. The comparison is exact on the raw header value (pass
+    `headers.get("Host", "")`; a missing header is `""` and fails). No case
+    folding, no stripping, no trailing dot, no `[::1]`, no `*.localhost`, no
+    port-less form, and no suffix or prefix match (`127.0.0.1.nip.io:<port>`
+    fails): admitting another spelling is a loosening of the guard.
+    """
+    return value in (f"127.0.0.1:{port}", f"localhost:{port}")
+
+
 def _names_this_machine(host: str) -> bool:
     """`is_loopback`, plus spellings a browser still resolves to this machine:
     a trailing dot (`localhost.`), an IPv4 literal in a short, hex, octal or

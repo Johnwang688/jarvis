@@ -1407,7 +1407,7 @@ AUDIO_ROUTES = frozenset({"/stt", "/speaker/reading"})
 def check_origin(handler, *, preview=False):
     host = handler.headers.get("Host", "")
     port = handler.server.server_address[1]
-    if host not in (f"127.0.0.1:{port}", f"localhost:{port}"):
+    if not config.own_host_header(host, port):
         fail(403, "untrusted Host")
     if not preview:
         origin = handler.headers.get("Origin")
