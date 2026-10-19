@@ -1272,6 +1272,8 @@ class MockDaemon:
                     return self._json(reply, 202)
                 if len(parts) == 3 and parts[0] == "threads" and parts[2] == "interrupt":
                     return self._json({"ok": True})
+                if len(parts) == 3 and parts[0] == "threads" and parts[2] == "compact":
+                    return mock.compact_route(self, parts[1], url.query)
                 if len(parts) == 3 and parts[0] in ("threads", "tasks") and parts[2] == "seen":
                     of = parts[0]
                     status = w["activity"][of].get(parts[1], "idle")
@@ -1823,6 +1825,69 @@ class MockDaemon:
         self.relay("relay_state", sender, fate)
         self.relay("relay_state", item["target"], fate)
         return h._json({"ok": True, "message_id": mid, "state": "withdrawn"})
+
+    # -- compact (WP-C of docs/plans/2026-10-19-compact-button-plan.md) ----------------
+
+    def compact_world(self) -> dict:
+        """The compact section of the world: `refuse` (a sentence the next POST
+        answers 409 with, then cleared when `sticky` is false), `refused` (POSTs
+        the owner gate turned away), `n` (compactions started) and `turn`
+        (the running compaction's turn id, by thread)."""
+        return self.world.setdefault("compact", {"refuse": None, "refused": 0, "n": 0, "turn": {}})
+
+    def compact_route(self, h, thread_id: str, query: str):
+        """`POST /threads/{id}/compact` as WP-A's daemon answers it: owner-only
+        first (403), then 404 unknown thread, 409 `{"error": sentence}` for a
+        scripted refusal, an archived chat, a thread with a task, or a turn
+        already running; otherwise 202 `{"status": "started", "turn_id"}` with
+        the thread `compacting` + `running` and `compact_started` +
+        `turn_started` on the bus. It does not finish by itself: a test calls
+        `compact_finish`."""
+        c = self.compact_world()
+        if not mock_subagents._owner(h, self, "POST"):
+            c["refused"] += 1
+            return h._err(403, "only the owner can do this, from the HUD")
+        if query:
+            return h._err(400, "unknown query field")
+        h._record("POST", f"/threads/{thread_id}/compact", h._body())
+        t = next((t for t in self.world["threads"] if t["id"] == thread_id), None)
+        if t is None:
+            return h._err(404, f"Thread {thread_id} not found")
+        refusal = c.get("refuse")
+        if refusal:
+            return h._err(409, refusal)
+        if t.get("archived"):
+            return h._err(409, "This chat is archived.")
+        if t.get("task_id") or t.get("role") != "chat":
+            return h._err(409, "Tasks are not chats; only a chat compacts.")
+        if t.get("running") or t.get("compacting"):
+            return h._err(409, "A turn is running; compact when it ends.")
+        c["n"] += 1
+        turn_id = f"compact-{c['n']}"
+        c["turn"][thread_id] = turn_id
+        t.update(compacting=True, running=True, running_since="2026-10-19T09:00:00+00:00")
+        frame = dict(thread_id=thread_id, project_id=t["project_id"], turn_id=turn_id, compaction=True)
+        self.emit("compact_started", {}, **frame)
+        self.emit("turn_started", {}, **frame)
+        return h._json({"status": "started", "turn_id": turn_id}, 202)
+
+    def compact_finish(self, thread_id: str, ok: bool = True, text: str | None = None, stop: str = "end"):
+        """End the running compaction as the daemon's `_turn` does: the thread
+        is idle again, `turn_finished` then `compacted` are published, and the
+        transcript gains the `system` row (`compacted`) that a reload shows."""
+        c = self.compact_world()
+        t = next(t for t in self.world["threads"] if t["id"] == thread_id)
+        turn_id = c["turn"].pop(thread_id, "compact-x")
+        text = text or ("Conversation compacted" if ok else "Compaction failed: the summary call timed out")
+        t.pop("compacting", None)
+        t.pop("running", None)
+        t.pop("running_since", None)
+        self.world["transcripts"].setdefault(thread_id, []).append(
+            {"role": "system", "text": text, "at": "2026-10-19T09:00:30+00:00", "turn_id": turn_id,
+             "compaction": True})
+        frame = dict(thread_id=thread_id, project_id=t["project_id"], turn_id=turn_id, compaction=True)
+        self.emit("turn_finished", {"stop": stop, "compacted": ok}, **frame)
+        self.emit("compacted", {"ok": ok, "text": text}, **frame)
 
     def emit(self, kind: str, data: dict | None = None, **extra):
         """Release one SSE frame."""
