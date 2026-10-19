@@ -11,6 +11,7 @@ import re
 import shutil
 import sys
 import tempfile
+import threading
 from contextlib import redirect_stdout
 from dataclasses import replace
 from datetime import datetime
@@ -235,6 +236,111 @@ def append_and_corruption(root: Path) -> None:
     print("ok  append/read order; malformed JSON, nested objects, enums and logs fail with paths")
 
 
+def torn_read(root: Path) -> None:
+    """A reader that lands while `_append` is mid-line must not fail."""
+    stores = Stores(root)
+    thread = chat(stores)
+    stores.threads.log(thread.id, "you", "first")
+    stores.threads.log(thread.id, "you", "second")
+    log = stores.threads.path(thread.id).with_name("log.jsonl")
+    good = log.read_bytes()
+    rows = lambda: [row["text"] for row in stores.threads.read_log(thread.id)]  # noqa: E731
+    # 1. an unterminated last line that does not parse is a write in progress: skipped.
+    for torn in (b'{"t": 1.5, "role": "you", "te', b'{"t": 1.5, "role": "you", "text": "cut \xe2\x9c',
+                 b'{', b'{"a": "b"'):
+        log.write_bytes(good + torn)
+        assert rows() == ["first", "second"], torn
+    # 2. a malformed line that is not the last still raises.
+    log.write_bytes(b'{"t": 1, "role": "you", "te\n' + good)
+    refused(lambda: stores.threads.read_log(thread.id), f"{log}:1")
+    log.write_bytes(good + b'{"broken\n{"t": 3, "role": "you", "text": "x"}')
+    refused(lambda: stores.threads.read_log(thread.id), f"{log}:3")
+    # 3. a malformed last line that IS newline-terminated is corruption, not a write in progress.
+    for ending in (b"\n", b"\r\n"):
+        log.write_bytes(good + b'{"t": 1, "role": "you", "te' + ending)
+        refused(lambda: stores.threads.read_log(thread.id), f"{log}:3")
+    # a cut multibyte character is a torn write too, but never hides an earlier bad line
+    log.write_bytes(good + b'{"bad\n{"t": 1, "role": "you", "text": "\xe2\x9c')
+    refused(lambda: stores.threads.read_log(thread.id), f"{log}:3")
+    log.write_bytes(good + b'{"t": 1, "role": "you", "text": "\xff"}\n')
+    refused(lambda: stores.threads.read_log(thread.id), str(log))
+    log.write_bytes(good + b'{"t": 1, "role": "you", "text": "\xff')
+    refused(lambda: stores.threads.read_log(thread.id), str(log))
+    # 4. an unterminated last line that parses (a migrated log) is returned.
+    log.write_bytes(good + b'{"t": 3, "role": "you", "text": "third"}')
+    assert rows() == ["first", "second", "third"]
+    log.write_bytes(good.replace(b"\n", b"\r\n") + b'{"t": 3, "role": "you", "text": "third"}')
+    assert rows() == ["first", "second", "third"]
+    # 5. a non-object stays an error, terminated or not; a torn log with only the torn line is empty.
+    for tail in (b"[]", b"[]\n", b"null", b"12"):
+        log.write_bytes(good + tail)
+        refused(lambda: stores.threads.read_log(thread.id), f"{log}:3")
+    log.write_bytes(b'{"t": 1, "ro')
+    assert rows() == []
+    log.write_bytes(good)
+    # 6. a reader racing a writer of large records never raises and sees only whole records.
+    big, count = "x" * (1 << 18), 200
+    failures: list[BaseException] = []
+    done = threading.Event()
+
+    def writer() -> None:
+        try:
+            for index in range(count):
+                stores.threads.log(thread.id, "w", f"{index}:{big}")
+        except BaseException as exc:  # noqa: BLE001
+            failures.append(exc)
+        finally:
+            done.set()
+
+    def reader() -> int:
+        reads = 0
+        try:
+            while not done.is_set():
+                seen = stores.threads.read_log(thread.id)
+                reads += 1
+                texts = [row["text"] for row in seen[2:]]
+                assert [t.split(":", 1)[0] for t in texts] == [str(i) for i in range(len(texts))]
+                assert all(t.endswith(big) for t in texts)
+        except BaseException as exc:  # noqa: BLE001
+            failures.append(exc)
+        return reads
+
+    task = threading.Thread(target=writer)
+    readers = [threading.Thread(target=lambda: counts.append(reader())) for _ in range(3)]
+    counts: list[int] = []
+    task.start()
+    for each in readers:
+        each.start()
+    task.join()
+    for each in readers:
+        each.join()
+    total = sum(counts)
+    assert not failures, failures[0]
+    assert total > 1 and len(stores.threads.read_log(thread.id)) == 2 + count
+    print("ok  torn read: unterminated unparseable last line skipped; interior, terminated, non-object still fail")
+    print(f"ok  torn read: {total} reads beside a large-record writer saw only whole records")
+
+
+def separator_characters(root: Path) -> None:
+    """Characters `str.splitlines()` treats as line breaks are data inside a record."""
+    stores = Stores(root)
+    thread = chat(stores)
+    odd = "\u2028\u2029\u0085\x0b\x0c\x1c\x1d\x1e"
+    texts = [f"a{odd}b", "before", f"{odd[0]}", f"mid{odd}{odd}end", "after"]
+    for text in texts:
+        stores.threads.log(thread.id, "you", text)
+    assert [row["text"] for row in stores.threads.read_log(thread.id)] == texts
+    task = stores.tasks.create("01234567", "Journal")
+    stores.tasks.journal(task.id, "step", note=f"x{odd}y")
+    stores.tasks.journal(task.id, "step", note="next")
+    assert [row["note"] for row in stores.tasks.read_journal(task.id)] == [f"x{odd}y", "next"]
+    # CRLF files (and a CRLF-ended one) still read; a record is never split inside a line.
+    log = stores.threads.path(thread.id).with_name("log.jsonl")
+    log.write_bytes(log.read_bytes().replace(b"\n", b"\r\n"))
+    assert [row["text"] for row in stores.threads.read_log(thread.id)] == texts
+    print("ok  separators: U+2028/2029/0085, VT, FF, FS/GS/RS inside records round-trip; CRLF still reads")
+
+
 def hashes(root: Path) -> dict[str, str]:
     return {str(path.relative_to(root)): hashlib.sha256(path.read_bytes()).hexdigest()
             for path in sorted(root.rglob("*")) if path.is_file()}
@@ -320,7 +426,7 @@ def migration(root: Path) -> None:
 
 def main() -> int:
     for check in (round_trip, lazy_and_ids, inbox_and_atomic, transitions_and_delete,
-                  all_transition_edges, append_and_corruption, migration):
+                  all_transition_edges, append_and_corruption, torn_read, separator_characters, migration):
         with tempfile.TemporaryDirectory() as tmp:
             check(Path(tmp) / "data")
     print("\nall v2 store checks passed")

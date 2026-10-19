@@ -3018,6 +3018,25 @@ default, and an id a later split reuses mounts fresh.
 - **Nothing assumes pane 1**: after it is closed, the window's chat falls
   back to the pane in slot 1, the header ids and Ctrl+Alt+1 follow the slot,
   and a reload keeps the order.
+
+**The directional split (2026-10-19, FS4 of
+`docs/plans/2026-10-19-hud-free-split-plan.md`; decisions FS-1–FS-10).**
+The ladder above is replaced. The split button is two: split right and split
+down. Each halves only its own pane and nothing else moves or resizes (the
+owner's words: "it shouldn't resize the window, it should just split the
+panel in half"). At most four panes across and three down, counted over the
+whole window, and up to twelve panes; a split that would break either, or
+whose halves would be under 360 × 200, or made while the window is already
+leaving panes out, is disabled and its title says why (at 1920×1080 with
+both side panes open a third column is disabled: a split never borrows
+from the side panes). × gives the closed pane's space to its neighbour in
+the same split (left or above, else right or below), and focus goes there
+when it does not go to the chat selected before. ⊞ keeps its tiles and
+keeps no memory of a custom shape. After any split, close or ⊞, a Browser
+page that moved under a still pointer gets no step-aside for 400 ms, so a
+double-click on × never hands it the keyboard. The rest of the WP-G2 rules
+(what a copy shows, what × keeps, ids not slots) stand. Details:
+`docs/notes/hud-workspace.md`.
 - **Under a card** every split, × and close question is disabled and inert,
   the card keeps focus and stays on top at 160% and 70% over eight panes.
 - **Free checks**: `workspace.test.ts`, `chats.test.ts`, `store.test.ts`,

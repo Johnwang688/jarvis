@@ -4,9 +4,9 @@
 // `focusin` on the iframe element, which runs the same decision.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { LOAD_GRACE_MS, RESTORE_MS, TAB_MS } from "../lib/frameguard";
+import { CLOSE_GUARD_MS, LOAD_GRACE_MS, RESTORE_MS, TAB_MS } from "../lib/frameguard";
 import {
-  allowRestore, cancelLoad, check, frameGuardProbe, installFrameGuard, ownLoad, registerFrame,
+  allowRestore, cancelLoad, check, frameGuardProbe, installFrameGuard, layoutMoved, ownLoad, registerFrame,
   resetFrameGuardForTests, setClock, selectFrame,
 } from "./frameguard";
 
@@ -439,5 +439,83 @@ describe("tab selection is bound to one frame", () => {
     selectFrame("3:0");
     b.frame.focus();
     expect(b.frame.isConnected).toBe(false);
+  });
+});
+
+// FS4 (docs/plans/2026-10-19-hud-free-split-plan.md, the FS4 card): panes move
+// under the pointer. After a split, a close or ⊞ (`layoutMoved()`, called by
+// the layout), every shield comes back, and for CLOSE_GUARD_MS a press on a
+// shield does not step it aside: the second click of a double-click on ×
+// lands on whatever grew under the pointer, and must not hand the keyboard to
+// that page. It only narrows: a later press works as before. (The test
+// writer's choice: CLOSE_GUARD_MS moves to lib/frameguard, where the rules
+// live, and components/Workspace.tsx's × guard uses the same constant.)
+describe("a layout move (FS4)", () => {
+  it("CLOSE_GUARD_MS is the × guard's 400 ms", () => {
+    expect(CLOSE_GUARD_MS).toBe(400);
+  });
+
+  it("raises every shield, a pointer resting over a page included", () => {
+    (document.querySelector('[data-testid="other"]') as HTMLElement).focus();
+    const a = frameIn(2);
+    const b = frameIn(3);
+    pointer("pointermove", a.shield);
+    expect(a.shield.style.pointerEvents).toBe("none");
+    layoutMoved();
+    for (const f of [a, b]) {
+      expect(f.shield.style.pointerEvents).toBe("auto");
+      expect(f.shield.dataset.up).toBe("true");
+    }
+    expect(frameGuardProbe().frames.every((f) => !f.over)).toBe(true);
+  });
+
+  it("a press on a shield within CLOSE_GUARD_MS does not step it aside, and the page that then takes focus goes [no layoutMoved]", () => {
+    const other = document.querySelector('[data-testid="other"]') as HTMLElement;
+    other.focus();
+    const f = frameIn(2);
+    layoutMoved();
+    t += CLOSE_GUARD_MS - 1;
+    pointer("pointerdown", f.shield);
+    expect(f.shield.style.pointerEvents).toBe("auto");
+    f.frame.focus();
+    expect(f.frame.isConnected).toBe(false);
+    expect(f.stolen).toBe(1);
+    expect(document.activeElement).toBe(other);
+  });
+
+  it("while a text control has the keyboard, that press does not put the keyboard in the page either", () => {
+    box().focus();
+    const f = frameIn(2);
+    let focused = 0;
+    Object.defineProperty(f.frame, "contentWindow", { value: { focus: () => { focused += 1; } } });
+    layoutMoved();
+    t += 10;
+    pointer("pointerdown", f.shield);
+    expect(focused).toBe(0);
+    expect(f.shield.style.pointerEvents).toBe("auto");
+    expect(document.activeElement).toBe(box());
+  });
+
+  it("only narrows: a press after CLOSE_GUARD_MS steps the shield aside as before", () => {
+    (document.querySelector('[data-testid="other"]') as HTMLElement).focus();
+    const f = frameIn(2);
+    layoutMoved();
+    t += CLOSE_GUARD_MS + 1;
+    pointer("pointerdown", f.shield);
+    expect(f.shield.style.pointerEvents).toBe("none");
+    f.frame.focus();
+    expect(f.frame.isConnected).toBe(true);
+    expect(frameGuardProbe().holding).toBe("2:0");
+  });
+
+  it("each move starts the window again", () => {
+    (document.querySelector('[data-testid="other"]') as HTMLElement).focus();
+    const f = frameIn(2);
+    layoutMoved();
+    t += CLOSE_GUARD_MS - 50;
+    layoutMoved();
+    t += 100; // past the first move's window, inside the second's
+    pointer("pointerdown", f.shield);
+    expect(f.shield.style.pointerEvents).toBe("auto");
   });
 });

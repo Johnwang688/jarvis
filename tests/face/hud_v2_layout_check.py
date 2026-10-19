@@ -115,7 +115,8 @@ def layout_checks(browser, mock, base, check, until, guard, init_script):
                         _titlebar_checks, _workspace_checks, _grid_card_checks, _sticky_checks,
                         _card_focus_checks, _editor_card_checks, _save_scope_checks, _late_save_checks,
                         _chord_checks,
-                        _menu_place_checks, _seen_checks, _eight_checks, _split_checks, _split_close_one_checks,
+                        _menu_place_checks, _seen_checks, _eight_checks, _split_buttons_checks, _split_room_checks,
+                        _split_twelve_checks, _split_close_checks, _split_close_one_checks,
                         _no_remount_checks, _twelve_ids_checks, _split_file_checks, _crash_checks):
             try:
                 section(page, mock, check, until)
@@ -2690,15 +2691,15 @@ def _eight_checks(page, mock, check, until):
         ok, why = _card_on_screen(page)
         check(f"at {zoom}% over eight panes, the card is wholly on screen and every button topmost at its point", ok, why)
         got = page.evaluate("""() => {
-          const b = [...document.querySelectorAll('[data-testid$="-split"], [data-testid$="-close"]')]
-            .filter(e => /^pane-\\d+-(split|close)$/.test(e.getAttribute('data-testid')));
+          const b = [...document.querySelectorAll('[data-testid$="-split-right"], [data-testid$="-split-down"], [data-testid$="-close"]')]
+            .filter(e => /^pane-\\d+-(split-right|split-down|close)$/.test(e.getAttribute('data-testid')));
           const panes = [...document.querySelectorAll('section.wpane')];
           const drawn = panes.filter(e => e.offsetParent !== null).length;
           return [panes.length, drawn, b.length, b.filter(e => !e.disabled).map(e => e.getAttribute('data-testid'))];
         }""")
-        # A split button in every mounted pane, a × in every drawn one: all disabled.
+        # Two split buttons in every mounted pane (FS4), a × in every drawn one: all disabled.
         check(f"at {zoom}% under the card every pane's split and × is disabled (WP-G2)",
-              got[1] >= 4 and got[2] == got[0] + got[1] and got[3] == [], str(got))
+              got[1] >= 4 and got[2] == 2 * got[0] + got[1] and got[3] == [], str(got))
         page.keyboard.type("y")
         page.keyboard.press("Enter")
         page.wait_for_timeout(150)
@@ -2962,99 +2963,271 @@ def _close(page, until, n: int):
     time.sleep(0.5)
 
 
-def _split_checks(page, mock, check, until):
-    """The owner's words: a split button VS Code style, and a × to close
-    exactly one pane. One pane to eight a click at a time, each copy right
-    after its source and focused; never a ninth, never a shape the window
-    cannot draw whole; nothing under a card; Space is never push-to-talk;
-    one click on × closes one pane, even when the second click of a
-    double-click lands on the × that moved under the pointer."""
+# FS4: the directional split (docs/plans/2026-10-19-hud-free-split-plan.md, the
+# FS4 card; decisions FS-1..FS-9). Two buttons in every pane's strip; each
+# halves only its pane. The titles are the plan's §10.
+SPLIT_RIGHT_OK = "Split right: a copy of this pane beside it"
+SPLIT_DOWN_OK = "Split down: a copy of this pane below it"
+ACROSS_TITLE = "Four panes across the window is the most"
+DOWN_TITLE = "Three panes down the window is the most"
+ROOM_RIGHT = "Not enough room to split right: widen the window, fold a side pane or zoom out (Ctrl+-)"
+TWELVE_TITLE = "Twelve panes is the most"
+FOLDED = json.dumps({"leftCollapsed": True, "rightCollapsed": True})
+# Twelve panes on which FS-3 still allows a split right of 1 and 11 (the
+# vitest suite's TWELVE_ROOM): only the id pool says no, so the title is "Twelve".
+TWELVE_ROOM = {"axis": "x", "sizes": [0.5, 0.5], "children": [
+    {"axis": "y", "sizes": [0.25, 0.25, 0.5], "children": [
+        {"axis": "x", "sizes": [0.5, 0.5], "children": [1, 11]},
+        {"axis": "x", "sizes": [0.25, 0.25, 0.5], "children": [8, 12, 10]},
+        {"axis": "x", "sizes": [0.5, 0.5], "children": [5, 6]}]},
+    {"axis": "y", "sizes": [0.5, 0.25, 0.25], "children": [
+        2, {"axis": "x", "sizes": [0.5, 0.5], "children": [3, 9]}, {"axis": "x", "sizes": [0.5, 0.5], "children": [4, 7]}]}]}
+
+# Every element's viewport box (null when absent or not drawn).
+BOXES_JS = """(sels) => sels.map((s) => {
+  const e = document.querySelector(s);
+  if (!e || e.offsetParent === null) return null;
+  const r = e.getBoundingClientRect();
+  return [r.x, r.y, r.width, r.height];
+})"""
+
+
+# Split wherever a split fits: the first drawn pane, in reading order, whose
+# split right (else down) the window takes; the new id, or null.
+GROW_JS = """() => {
+  for (const n of window.__hud.workspace().ws.order) for (const axis of ['x', 'y']) {
+    const got = window.__hud.split(n, {axis});
+    if (got !== null && got !== undefined) return got;
+  }
+  return null;
+}"""
+
+
+def _sb(n: int, d: str) -> str:
+    """Pane N's split button, d = "right" or "down"."""
+    return f'[data-testid="pane-{n}-split-{d}"]'
+
+
+def _split_click(page, until, n: int, d: str) -> int:
+    """Click pane N's split d; the new pane's id once the window has it."""
+    before = list(_order(page))
+    page.locator(_sb(n, d)).click()
+    until(lambda: len(_order(page)) == len(before) + 1, timeout=3)
+    return next(x for x in _order(page) if x not in before)
+
+
+def _same_boxes(a, b, tol: float = 0.5) -> bool:
+    return len(a) == len(b) and all(
+        (x is None and y is None) or (x is not None and y is not None and all(abs(p - q) <= tol for p, q in zip(x, y)))
+        for x, y in zip(a, b))
+
+
+def _split_buttons_checks(page, mock, check, until):
+    """FS-2: two buttons, split right and split down, in every pane's strip —
+    the single layout's too — drawn as the title bar's toggles, saying what
+    they do; Space presses one and is never push-to-talk; the one-click
+    ladder button is gone."""
+    _reset_all(page, mock, until, (1920, 1080))
+    right1, down1 = page.locator(_sb(1, "right")), page.locator(_sb(1, "down"))
+    check("FS4: the single layout's strip has both split buttons, and no ×",
+          right1.count() == 1 and down1.count() == 1 and right1.is_visible() and down1.is_visible()
+          and page.locator('[data-testid="pane-1-close"]').count() == 0)
+    check("FS4: the one-click ladder button is gone", page.locator('[data-testid="pane-1-split"]').count() == 0)
+    theirs = page.evaluate(STYLE_JS, '[data-testid="toggle-panel"]')
+    for d in ("right", "down"):
+        mine = page.evaluate(STYLE_JS, _sb(1, d))
+        check(f"FS4: split {d} is the title bar's toggles' button: their computed size and colour", mine == theirs,
+              f"{mine} vs {theirs}")
+    check("FS4: each says what it does",
+          right1.get_attribute("title") == SPLIT_RIGHT_OK and right1.get_attribute("aria-label") == "Split right"
+          and down1.get_attribute("title") == SPLIT_DOWN_OK and down1.get_attribute("aria-label") == "Split down",
+          f"{right1.get_attribute('title')!r} {down1.get_attribute('title')!r}")
+    right1.focus()
+    ptt = _ptt_on_space(page)
+    until(lambda: len(_order(page)) == 2, timeout=2)
+    check("FS4: Space on split right splits right, and is never push-to-talk",
+          not ptt and _order(page) == [1, 2] and _attr(page, '[data-testid="workspace"]', "data-preset") == "cols2",
+          f"ptt={ptt} {_order(page)}")
+    until(lambda: _attr(page, _pane(2), "data-focused") == "true", timeout=2)
+    check("FS4: the copy is right after its source (slot 2), focused, and both panes carry both buttons and a ×",
+          _attr(page, _pane(2), "data-slot") == "2"
+          and all(page.locator(_sb(n, d)).count() == 1 for n in (1, 2) for d in ("right", "down"))
+          and all(page.locator(f'[data-testid="pane-{n}-close"]').count() == 1 for n in (1, 2)))
+    _reset_all(page, mock, until)
+
+
+def _split_room_checks(page, mock, check, until):
+    """FS-3, FS-4, FS-7 at 1920×1080 with both side panes open (a 1368 px
+    centre): split right gives two 684 px columns, and a third column (342 px)
+    is disabled with the room title — never borrowing from the side panes;
+    down works twice in a column, then that column says three down is the
+    most. In a short window down says there is no room."""
+    _reset_all(page, mock, until, (1920, 1080))
+    sidebar = page.locator("#sidebar").bounding_box()
+    _split_click(page, until, 1, "right")
+    w1, w2 = _width(page, _pane(1)), _width(page, _pane(2))
+    check("FS4: split right halves the one pane: two columns of 684 px", abs(w1 - 684) <= 1.5 and abs(w2 - 684) <= 1.5,
+          f"{w1} {w2}")
+    for n in (1, 2):
+        b = page.locator(_sb(n, "right"))
+        until(lambda: b.is_disabled(), timeout=2)
+        check(f"FS-7: a third column (342 px) is disabled on pane {n}, saying how to get room",
+              b.is_disabled() and b.get_attribute("title") == ROOM_RIGHT, str(b.get_attribute("title")))
+    check("FS-7: and the side panes were never folded for it",
+          _visible(page, "#sidebar") and page.locator("#sidebar").bounding_box() == sidebar
+          and page.locator('[data-testid="rail-right"]').count() == 0)
+    a = _split_click(page, until, 1, "down")
+    b = _split_click(page, until, a, "down")
+    check("FS4: down works twice in the left column: 1, then its two copies, each right after its source",
+          _order(page) == [1, a, b, 2], str(_order(page)))
+    for n in (1, a, b):
+        btn = page.locator(_sb(n, "down"))
+        until(lambda: btn.is_disabled(), timeout=2)
+        check(f"FS-3: then down on pane {n} is disabled: three panes down is the most",
+              btn.is_disabled() and btn.get_attribute("title") == DOWN_TITLE, str(btn.get_attribute("title")))
+    check("FS-3: the right column still splits down", not page.locator(_sb(2, "down")).is_disabled())
+    page.set_viewport_size({"width": 1920, "height": 700})
+    _set_ws(page, None)
+    _boot(page, mock, None, until, reload=True)
+    _split_click(page, until, 1, "down")
+    btn = page.locator(_sb(1, "down"))
+    until(lambda: btn.is_disabled(), timeout=2)
+    title = btn.get_attribute("title") or ""
+    check("FS-4: 1920×700: a 336 px pane cannot split down, and says there is no room",
+          btn.is_disabled() and title.startswith("Not enough room to split down") and "zoom out (Ctrl+-)" in title, title)
+    _reset_all(page, mock, until)
+
+
+def _twelve_build(page, mock, check, until, zoom: int):
+    """Both side panes folded, the panel open at its minimum: build the 4×3,
+    row by row, by clicking. Each split leaves every other pane, both rails
+    and the panel where they were, to half a pixel (FS-5) [CSS grid rendering]."""
+    size = (1920, 1080) if zoom == 100 else (2880, 1620)       # 1920×1080 of the HUD's own px either way
+    page.set_viewport_size({"width": size[0], "height": size[1]})
+    _set_storage(page, zoom=str(zoom), layout=FOLDED)
+    _set_ws(page, json.dumps({"version": 2, "tree": 1, "kept": [], "focused": 1,
+                              "panel": {"open": True, "height": 120}, "panes": [{"view": "chat"}]}))
+    _boot(page, mock, None, until, reload=True)
+    fixed = ['[data-testid="rail-left"]', '[data-testid="rail-right"]', '[data-testid="panel"]']
+    check(f"FS-5 setup at {zoom}%: one pane, both rails, the panel open",
+          _order(page) == [1] and all(page.evaluate(BOXES_JS, fixed)), str(page.evaluate(BOXES_JS, fixed)))
+    moved = []
+
+    def split(n: int, d: str) -> int:
+        others = [x for x in _order(page) if x != n]
+        sels = [_pane(x) for x in others] + fixed
+        before = page.evaluate(BOXES_JS, sels)
+        src = page.evaluate(BOXES_JS, [_pane(n)])[0]
+        new = _split_click(page, until, n, d)
+        time.sleep(0.15)
+        after = page.evaluate(BOXES_JS, sels)
+        if not _same_boxes(before, after):
+            moved.append(f"{d} on {n}: {[(sels[i], before[i], after[i]) for i in range(len(sels)) if not _same_boxes([before[i]], [after[i]])][:2]}")
+        halves = page.evaluate(BOXES_JS, [_pane(n), _pane(new)])
+        i = 2 if d == "right" else 3
+        if not (src and all(halves) and abs(halves[0][i] - halves[1][i]) <= 1.5
+                and abs(halves[0][i] + halves[1][i] - src[i]) <= 3):
+            moved.append(f"{d} on {n}: halves {halves} of {src}")
+        return new
+
+    a = split(1, "down")
+    b = split(1, "down")
+    across = {}
+    for first in (1, b, a):                                  # top to bottom
+        c = split(first, "right")
+        split(first, "right")
+        split(c, "right")
+        across[first] = page.locator(_sb(first, "right")).get_attribute("title")
+    check(f"FS-5 at {zoom}%: twelve panes by clicking, a full 4×3",
+          len(_order(page)) == 12 and len(_drawn(page)) == 12, str(_order(page)))
+    check(f"FS-5 at {zoom}%: every split left every other pane, both rails and the panel where they were (±0.5 px), "
+          "and halved its own pane", not moved, "; ".join(moved[:3]))
+    check(f"FS-3 at {zoom}%: four across: split right says four is the most",
+          all(t == ACROSS_TITLE for t in across.values()), str(across))
+    for n in _order(page):
+        r, d = page.locator(_sb(n, "right")), page.locator(_sb(n, "down"))
+        if not (r.is_disabled() and d.is_disabled() and r.get_attribute("title") == ACROSS_TITLE
+                and d.get_attribute("title") == DOWN_TITLE):
+            check(f"FS-3 at {zoom}%: in the 4×3 every split is disabled, across and down saying why", False,
+                  f"pane {n}: {r.get_attribute('title')!r} {d.get_attribute('title')!r}")
+            break
+    else:
+        check(f"FS-3 at {zoom}%: in the 4×3 every split is disabled, across and down saying why", True)
+
+
+def _split_twelve_checks(page, mock, check, until):
+    """FS-1/FS-3/FS-5: the full 4×3 by clicking at 100% and 150%, nothing
+    else moving at any split; and with twelve panes where FS-3 would still
+    allow a split, the title says twelve is the most."""
+    _twelve_build(page, mock, check, until, 100)
+    _twelve_build(page, mock, check, until, 150)
+    page.set_viewport_size({"width": 3000, "height": 1700})
+    _set_storage(page, zoom="100", layout=FOLDED)
+    _set_ws(page, json.dumps({"version": 2, "tree": TWELVE_ROOM, "kept": [], "focused": 1,
+                              "panes": [{"view": "chat"} for _ in range(12)]}))
+    _boot(page, mock, None, until, reload=True)
+    until(lambda: len(_drawn(page)) == 12, timeout=4)
+    r1 = page.locator(_sb(1, "right"))
+    check("FS-1: twelve panes where FS-3 and FS-4 would allow a split right: disabled, twelve is the most",
+          r1.is_disabled() and r1.get_attribute("title") == TWELVE_TITLE, str(r1.get_attribute("title")))
+    _reset_all(page, mock, until)
+
+
+def _split_close_checks(page, mock, check, until):
+    """× gives the closed pane's space to its neighbour in the same split
+    (the one before it: left or above), and nothing else moves; a
+    double-click on × closes one pane, the second click landing on the ×
+    that moved under the pointer; under a card no split and no × does
+    anything, from the pointer or the keyboard; down to one pane, no ×."""
     ws = '[data-testid="workspace"]'
     _reset_all(page, mock, until, (1920, 1080))
-    split1 = page.locator('[data-testid="pane-1-split"]')
-    check("the single layout's strip has the split button, and no ×",
-          split1.count() == 1 and split1.is_visible() and page.locator('[data-testid="pane-1-close"]').count() == 0)
-    mine, theirs = page.evaluate(STYLE_JS, '[data-testid="pane-1-split"]'), page.evaluate(STYLE_JS, '[data-testid="toggle-panel"]')
-    check("it is the title bar's toggles' button: their computed size and colour", mine == theirs, f"{mine} vs {theirs}")
-    check("it says what it does", split1.get_attribute("title") == "Split: a copy of this pane beside it"
-          and split1.get_attribute("aria-label") == "Split pane", str(split1.get_attribute("title")))
+    a = _split_click(page, until, 1, "right")            # x[1, a]
+    b = _split_click(page, until, 1, "down")             # x[y[1, b], a]
+    c = _split_click(page, until, b, "down")             # x[y[1, b, c], a]
+    check("× setup: the left column holds 1, b, c; the right one a", _order(page) == [1, b, c, a], str(_order(page)))
+    sels = [_pane(n) for n in (1, b, c, a)]
+    before = page.evaluate(BOXES_JS, sels)
+    _close(page, until, c)
+    after = page.evaluate(BOXES_JS, [_pane(n) for n in (1, b, a)])
+    check("× on the lowest pane of a column gives its space to the pane above it; nothing else moves",
+          _same_boxes([before[0], before[3]], [after[0], after[2]])
+          and abs(after[1][1] - before[1][1]) <= 0.5 and abs(after[1][3] - (before[1][3] + before[2][3] + 1)) <= 1.5,
+          f"{before} -> {after}")
+    before = page.evaluate(BOXES_JS, [_pane(n) for n in (1, b, a)])
+    _close(page, until, a)
+    after = page.evaluate(BOXES_JS, [_pane(n) for n in (1, b)])
+    check("× on the right column gives its space to the column on its left: both its panes widen, their heights kept",
+          all(abs(after[i][0] - before[i][0]) <= 0.5 and abs(after[i][1] - before[i][1]) <= 0.5
+              and abs(after[i][3] - before[i][3]) <= 0.5 and abs(after[i][2] - (before[i][2] + before[2][2] + 1)) <= 1.5
+              for i in (0, 1)), f"{before} -> {after}")
 
-    for preset, order in (("cols2", [1, 2]), ("cols3", [1, 3, 2]), ("grid4", [1, 4, 3, 2])):
-        split1.click()
-        until(lambda: _attr(page, ws, "data-preset") == preset, timeout=2)
-        new = order[1]
-        until(lambda: _attr(page, _pane(new), "data-focused") == "true", timeout=2)
-        check(f"a click: {preset}, the copy right after pane 1 (slot 2) and focused",
-              _order(page) == order and _attr(page, _pane(new), "data-slot") == "2"
-              and _attr(page, _pane(new), "data-focused") == "true" and _attr(page, _pane(new), "data-view") == "chat",
-              f"{_order(page)} {_attr(page, _pane(new), 'data-focused')}")
-    check("every pane carries a ×", all(page.locator(f'[data-testid="pane-{n}-close"]').count() == 1 for n in (1, 2, 3, 4)))
-
-    # Space presses the button, and is never push-to-talk.
-    split1.focus()
-    ptt = _ptt_on_space(page)
-    until(lambda: len(_order(page)) == 5, timeout=2)
-    check("Space on the split button splits (grid5) and is never push-to-talk",
-          not ptt and _attr(page, ws, "data-preset") == "grid5", f"ptt={ptt} {_attr(page, ws, 'data-preset')}")
-
-    while len(_order(page)) < 8:
-        n = len(_order(page))
-        split1.click()
-        until(lambda: len(_order(page)) == n + 1, timeout=2)
-    geo = _geo(page, _order(page))
-    check("on to eight at 1920x1080: 4×2, all eight drawn in reading order",
-          _attr(page, ws, "data-drawn-preset") == "grid8" and all(geo) and _reading_order(geo)
-          and _order(page) == [1, 8, 7, 6, 5, 4, 3, 2], f"{_order(page)} {geo}")
-    until(lambda: split1.is_disabled(), timeout=2)
-    check("at eight the split button is disabled and says why",
-          all(page.locator(f'[data-testid="pane-{n}-split"]').is_disabled() for n in _order(page))
-          and split1.get_attribute("title") == "Eight panes is the most", str(split1.get_attribute("title")))
-    check("and every one of the eight has a ×", all(page.locator(f'[data-testid="pane-{n}-close"]').count() == 1
-                                                     for n in _order(page)))
-    check("(ids 9–12 are free, and still no ninth pane: the ladder stops at eight, FS2)",
-          all(page.locator(_pane(n)).count() == 0 for n in range(9, 13)))
-
-    # × closes exactly that pane. A chat pane is the selected chat the moment
-    # its × is pressed, so focus goes to the chat selected before it (W-6):
-    # a drawn pane, never the page. (The slot rule, for a pane that is not the
-    # selected chat, is in the File checks and workspace.test.)
-    for _ in range(3):
-        gone = _order(page)[1]
-        before = [n for n in page.evaluate("window.__hud.state().selectedOrder") if n != gone]
-        _close(page, until, gone)
-        focused = _ws(page)["ws"]["focused"]
-        check(f"× on pane {gone} (slot 2) closes it; focus is on the chat selected before it (pane {focused}), never the page",
-              gone not in _order(page) and page.locator(_pane(gone)).count() == 0
-              and _active_testid(page) == f"pane-{focused}" and focused in _drawn(page)
-              and focused == (before[0] if before else None)
-              and page.evaluate("window.__hud.state().selectedChat") == focused,
-              f"{_order(page)} {_active_testid(page)} {before}")
-    check("eight less three is 3 over 2", _attr(page, ws, "data-preset") == "grid5" and _order(page) == [1, 5, 4, 3, 2],
-          str(_order(page)))
-
-    # A double-click on slot 3's × (top right): after the first click 2×2's
-    # slot 2 × sits under the pointer. One pane goes, never two.
-    box = page.locator('[data-testid="pane-4-close"]').bounding_box()
-    page.mouse.dblclick(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
-    until(lambda: 4 not in _order(page), timeout=2)
+    # A double-click on the right column's ×: after the first click the middle
+    # pane grows right, its × under the pointer. One pane goes, never two.
+    _choose(page, until, "cols3")
+    order = _order(page)
+    x3 = page.locator(f'[data-testid="pane-{order[2]}-close"]').bounding_box()
+    page.mouse.dblclick(x3["x"] + x3["width"] / 2, x3["y"] + x3["height"] / 2)
+    until(lambda: order[2] not in _order(page), timeout=2)
     time.sleep(0.6)
-    check("a double-click on a × closes one pane: 3 over 2 → 2×2, never 2×2 → three",
-          _order(page) == [1, 5, 3, 2] and _attr(page, ws, "data-preset") == "grid4", str(_order(page)))
-    landed = page.locator('[data-testid="pane-5-close"]').bounding_box()
-    check("(the pane now top right has its × where the double-click landed)",
-          abs(landed["x"] - box["x"]) < 3 and abs(landed["y"] - box["y"]) < 3, f"{landed} vs {box}")
+    check("a double-click on × closes one pane: three columns → two, never one",
+          _order(page) == order[:2], str(_order(page)))
+    landed = page.locator(f'[data-testid="pane-{order[1]}-close"]').bounding_box()
+    check("(the pane that took the space has its × where the double-click landed)",
+          abs(landed["x"] - x3["x"]) < 3 and abs(landed["y"] - x3["y"]) < 3, f"{landed} vs {x3}")
 
-    # Under a card: every split and ×, and Enter on a focused one, do nothing.
-    split1.focus()
+    # Under a card: every split and ×, and Enter or Space on a focused one, do nothing.
+    page.locator(_sb(order[0], "down")).focus()
     before = _order(page)
     _approval(mock, "split-card")
     until(lambda: page.locator('[data-testid="approval-card"]').count() > 0, timeout=4)
     time.sleep(0.2)
-    disabled = page.evaluate("""() => [...document.querySelectorAll('button')]
-      .filter(b => /^pane-\\d+-(split|close)$/.test(b.getAttribute('data-testid') || ''))
-      .every(b => b.disabled)""")
-    check("under a card every split and × is disabled", disabled)
-    check("and the card took focus off the split button", _active_testid(page) != "pane-1-split", str(_active_testid(page)))
+    got = page.evaluate("""() => [...document.querySelectorAll('button')]
+      .filter(b => /^pane-\\d+-(split-right|split-down|close)$/.test(b.getAttribute('data-testid') || ''))
+      .map(b => [b.getAttribute('data-testid'), b.disabled])""")
+    check("under a card both split buttons and the × of every pane are disabled",
+          len(got) >= 3 * len(before) and all(d for _, d in got), str(got))
+    check("and the card took focus off the split button", _active_testid(page) != f"pane-{order[0]}-split-down",
+          str(_active_testid(page)))
     page.keyboard.press("Enter")
     page.keyboard.press("Space")
     time.sleep(0.3)
@@ -3062,25 +3235,10 @@ def _split_checks(page, mock, check, until):
     page.locator('[data-testid="approval-card"] button.deny').click()
     until(lambda: page.locator('[data-testid="approval-card"]').count() == 0, timeout=4)
 
-    # At 1280x800 six panes fit, seven do not: split says so.
-    page.set_viewport_size({"width": 1280, "height": 800})
-    until(lambda: not split1.is_disabled(), timeout=2)
-    check("at 1280x800 four panes can still split", not split1.is_disabled())
-    for n in (5, 6):
-        split1.click()
-        until(lambda: len(_order(page)) == n, timeout=2)
-    until(lambda: split1.is_disabled(), timeout=2)
-    title = split1.get_attribute("title") or ""
-    check("at 1280x800, six panes cannot become seven (4 over 3 would not be drawn whole): disabled, saying so",
-          split1.is_disabled() and title == "No room for 7 panes in this window: widen it, zoom out (Ctrl+-) or close a pane"
-          and _attr(page, ws, "data-drawn-preset") == "grid6", title)
-
-    # Down to one: no × with one pane drawn.
-    page.set_viewport_size({"width": 1920, "height": 1080})
     while len(_order(page)) > 1:
         _close(page, until, _order(page)[-1])
     check("closed down to one pane: single, and no ×", _attr(page, ws, "data-preset") == "single"
-          and page.locator('[data-testid$="-close"]').count() == 0 and split1.is_visible())
+          and page.locator('[data-testid$="-close"]').count() == 0 and page.locator(_sb(_order(page)[0], "right")).is_visible())
     _reset_all(page, mock, until)
 
 
@@ -3113,7 +3271,7 @@ def _split_close_one_checks(page, mock, check, until):
           and _visible(page, _pane(2, '[data-testid="input"]')), str(_order(page)))
     st = page.evaluate("(() => { const s = window.__hud.state(); return [s.selectedChat, s.home]; })()")
     check("and after it the window's chat is still pane 2's", st == [2, 2], str(st))
-    page.locator('[data-testid="pane-2-split"]').click()
+    page.locator('[data-testid="pane-2-split-right"]').click()
     until(lambda: len(_order(page)) == 2, timeout=2)
     check("the next split takes the free id 1, in slot 2 after its source",
           _order(page) == [2, 1] and _attr(page, _pane(1), "data-slot") == "2", str(_order(page)))
@@ -3170,8 +3328,8 @@ def _no_remount_checks(page, mock, check, until):
     each placed from its own box; a split, a close, ⊞, a drag or a resize
     changes only their style. Moving an iframe's ancestor reloads it, so every
     section, the Browser frame and its ancestors, Monaco's host and the
-    terminal's xterm element carry a tag, and after ⊞ 2×2 → one → 2×2, a ladder
-    split, a close of another pane, an edge drag and a window resize the very
+    terminal's xterm element carry a tag, and after ⊞ 2×2 → one → 2×2, a split
+    (split down since FS4), a close of another pane, an edge drag and a window resize the very
     same elements are where they were, still in id order, the Browser page
     was never loaded again, no new terminal ticket was fetched, and Monaco
     holds the same models [rendering in slot order, or nested wrappers]."""
@@ -3219,11 +3377,11 @@ def _no_remount_checks(page, mock, check, until):
     until(lambda: all(_visible(page, _pane(n)) for n in (1, 2, 3, 4)), timeout=3)
     survived("⊞ 2×2 → one → 2×2")
 
-    page.locator('[data-testid="pane-1-split"]').click()
+    page.locator('[data-testid="pane-1-split-down"]').click()
     until(lambda: len(_order(page)) == 5, timeout=3)
-    check("no-remount setup: the ladder split drew 3 over 2, the new pane in slot 2",
-          _order(page) == [1, 5, 2, 3, 4] and _attr(page, ws, "data-drawn-preset") == "grid5", str(_order(page)))
-    survived("a ladder split (slot order 1, 5, 2, 3, 4)")
+    check("no-remount setup: split down halves pane 1, the new pane in slot 2 (a free layout)",
+          _order(page) == [1, 5, 2, 3, 4] and _attr(page, ws, "data-drawn-preset") == "free", str(_order(page)))
+    survived("a split down (slot order 1, 5, 2, 3, 4)")
 
     _close(page, until, 5)
     check("no-remount setup: × on the new pane, 2×2 again", _order(page) == [1, 2, 3, 4], str(_order(page)))
@@ -3256,7 +3414,7 @@ CTRL_ALT_JS = """([key, code]) => {
 
 
 def _twelve_ids_checks(page, mock, check, until):
-    """FS2 (decisions FS-1, FS-9): twelve pane ids, still on the ladder. ⊞ 4×2
+    """FS2 (decisions FS-1, FS-9): twelve pane ids (split right, then down, since FS4). ⊞ 4×2
     then one pane hides 2–8, and the next split takes the free id 9 — in
     slot 2, mounted fresh — never a hidden pane. Ctrl+Alt+N stays slots 1–8:
     Ctrl+Alt+2 is pane 9 when 9 is in slot 2, while Ctrl+Alt+9 and
@@ -3270,7 +3428,7 @@ def _twelve_ids_checks(page, mock, check, until):
           _order(page) == [1] and _ws(page)["ws"]["kept"] == [2, 3, 4, 5, 6, 7, 8]
           and all(page.locator(_pane(n)).count() == 1 and not _visible(page, _pane(n)) for n in range(2, 9)),
           f'{_order(page)} {_ws(page)["ws"]["kept"]}')
-    page.locator('[data-testid="pane-1-split"]').click()
+    page.locator('[data-testid="pane-1-split-right"]').click()
     until(lambda: len(_order(page)) == 2, timeout=2)
     check("FS2: the split after ⊞ 8 → 1 takes the free id 9, never a hidden pane",
           _order(page) == [1, 9] and _ws(page)["ws"]["kept"] == [2, 3, 4, 5, 6, 7, 8]
@@ -3283,9 +3441,11 @@ def _twelve_ids_checks(page, mock, check, until):
           and _attr(page, nine, "data-focused") == "true" and _attr(page, nine, "data-view") == "chat"
           and _attr(page, nine, "aria-label").startswith("Pane 2:")
           and page.locator(_pane(9, '[data-testid="input"]')).count() == 1, f"{g} {_attr(page, nine, 'aria-label')}")
-    check("FS2: pane 9 carries its own split and ×",
-          page.locator('[data-testid="pane-9-split"]').count() == 1 and page.locator('[data-testid="pane-9-close"]').count() == 1)
-    page.locator('[data-testid="pane-9-split"]').click()
+    check("FS2: pane 9 carries its own split buttons and ×",
+          page.locator('[data-testid="pane-9-split-right"]').count() == 1
+          and page.locator('[data-testid="pane-9-split-down"]').count() == 1
+          and page.locator('[data-testid="pane-9-close"]').count() == 1)
+    page.locator('[data-testid="pane-9-split-down"]').click()
     until(lambda: len(_order(page)) == 3, timeout=2)
     check("FS2: and the next split takes 10, right after its source",
           _order(page) == [1, 9, 10] and _attr(page, _pane(10), "data-slot") == "3", str(_order(page)))
@@ -3348,14 +3508,15 @@ def _split_file_checks(page, mock, check, until):
     holds — Save / Don't save / Cancel, as closing the last tab on one does —
     and an id a split takes back mounts fresh, never the old FileTab. (A chat
     in pane 1: the window puts its chat on screen at boot, so a lone File pane
-    would boot as chat.)"""
+    would boot as chat.) FS4: the copies split down — two columns at 1920×1080
+    are 684 px, too narrow to split right."""
     page.set_viewport_size({"width": 1920, "height": 1080})
     _set_storage(page, zoom="100", layout="{}")
     _set_ws(page, json.dumps({"preset": "cols2", "focused": 2, "panes": [{"view": "chat"}, {"view": "file"}]}))
     _boot(page, mock, None, until, reload=True)
     page.locator(_pane(2, '[data-testid="file-calc.py"]')).click()
     until(lambda: page.locator(_pane(2, '[data-testid="file-path"]')).inner_text() == "calc.py", timeout=4)
-    page.locator('[data-testid="pane-2-split"]').click()
+    page.locator('[data-testid="pane-2-split-down"]').click()
     path3 = page.locator(_pane(3, '[data-testid="file-path"]'))
     until(lambda: path3.count() > 0 and path3.inner_text() == "calc.py", timeout=4)
     tabs3 = (_ws(page)["ws"]["panes"][2].get("editors") or {})
@@ -3369,7 +3530,7 @@ def _split_file_checks(page, mock, check, until):
           len(bufs) == 1 and sorted(bufs[0]["refs"]) == ["2|calc.py", "3|calc.py"], str(bufs))
 
     assert _edit(page, until, 2, "\n# edited in two")
-    s2 = page.locator('[data-testid="pane-2-split"]')
+    s2 = page.locator('[data-testid="pane-2-split-down"]')
     until(lambda: "editedintwo" in _file_text(page, 3), timeout=3)
     check("an edit in one shows in the copy at once, and a pane holding one still splits (the same buffers)",
           "editedintwo" in _file_text(page, 3) and not s2.is_disabled(), str(s2.get_attribute("title")))
@@ -3389,7 +3550,7 @@ def _split_file_checks(page, mock, check, until):
     until(lambda: page.locator(_pane(2, '[data-testid="file-save"]')).is_disabled(), timeout=4)
 
     # An edit only this pane holds: × asks Save / Don't save / Cancel.
-    page.locator('[data-testid="pane-2-split"]').click()
+    page.locator('[data-testid="pane-2-split-down"]').click()
     until(lambda: path3.count() > 0 and path3.inner_text() == "calc.py", timeout=4)
     time.sleep(0.5)  # past the one-click-one-close guard
     _open_file(page, until, 3, "README.md")
@@ -3437,7 +3598,7 @@ def _split_file_checks(page, mock, check, until):
           and "dirtyinthree" in "".join(mock.world["files"]["README.md"]["content"].split()), str(sent))
     mock.world["files"]["README.md"]["content"] = readme
     # And Don't save: the edit goes, the file untouched.
-    page.locator('[data-testid="pane-2-split"]').click()
+    page.locator('[data-testid="pane-2-split-down"]').click()
     until(lambda: path3.count() > 0 and path3.inner_text() == "calc.py", timeout=4)
     time.sleep(0.5)
     _open_file(page, until, 3, "README.md")
@@ -3458,13 +3619,13 @@ def _split_file_checks(page, mock, check, until):
           and page.evaluate("window.__hud.state().selectedChat") == 1, str(_active_testid(page)))
 
     # Close a File pane on calc.py, then split one on README.md into the same id.
-    page.locator('[data-testid="pane-2-split"]').click()
+    page.locator('[data-testid="pane-2-split-down"]').click()
     until(lambda: path3.count() > 0 and path3.inner_text() == "calc.py", timeout=4)
     time.sleep(0.5)
     _close(page, until, 3)
     page.locator(_pane(2, '[data-testid="file-README.md"]')).click()
     until(lambda: page.locator(_pane(2, '[data-testid="file-path"]')).inner_text() == "README.md", timeout=4)
-    page.locator('[data-testid="pane-2-split"]').click()
+    page.locator('[data-testid="pane-2-split-down"]').click()
     until(lambda: _order(page) == [1, 2, 3], timeout=2)
     until(lambda: path3.count() > 0 and path3.inner_text() == "README.md", timeout=4)
     check("an id a close freed and a split reuses shows the new copy (README.md), never the old file",
@@ -3472,7 +3633,10 @@ def _split_file_checks(page, mock, check, until):
 
     # Every id used. ⊞ to 2×2 hides 5–8 (8 the oldest), splits take the free
     # ids above 8 (9–12 since FS2; none before), and ⊞ to one hides the rest:
-    # a split then takes back the oldest hidden pane, 8.
+    # a split then takes back the oldest hidden pane, 8. (FS4: both side panes
+    # folded, so 2×2's 924 px panes have room for the four splits, wherever
+    # they fit: GROW_JS.)
+    _set_storage(page, layout=FOLDED)
     _set_ws(page, json.dumps({"preset": "grid8", "order": [2, 1, 3, 4, 5, 6, 7, 8], "focused": 2, "panes": [
         {"view": "chat"}, {"view": "file"}, {"view": "chat"}, {"view": "chat"},
         {"view": "chat"}, {"view": "chat"}, {"view": "chat"}, {"view": "file"}]}))
@@ -3484,7 +3648,7 @@ def _split_file_checks(page, mock, check, until):
     until(lambda: page.locator(_pane(2, '[data-testid="file-path"]')).inner_text() == "README.md", timeout=4)
     _choose(page, until, "grid4")
     for n in range(5, 5 + ids - 8):
-        page.locator('[data-testid="pane-2-split"]').click()
+        page.evaluate(GROW_JS)
         until(lambda: len(_order(page)) == n, timeout=2)
     check(f"setup: ⊞ to 2×2 hid 5–8, and splits took the free ids above 8 ({ids} ids)",
           sorted(_order(page)) == [1, 2, 3, 4, *range(9, ids + 1)] and _ws(page)["ws"]["kept"] == [5, 6, 7, 8],
@@ -3493,7 +3657,7 @@ def _split_file_checks(page, mock, check, until):
     check("setup: one pane, every other id hidden by ⊞ (pane 8 still mounted on calc.py, hidden longest)",
           _order(page) == [2] and len(_ws(page)["ws"]["kept"]) == ids - 1 and _ws(page)["ws"]["kept"][-1] == 8
           and page.locator(_pane(8, '[data-testid="file-path"]')).inner_text() == "calc.py", str(_ws(page)["ws"]["kept"]))
-    page.locator('[data-testid="pane-2-split"]').click()
+    page.locator('[data-testid="pane-2-split-right"]').click()
     until(lambda: _order(page) == [2, 8], timeout=2)
     p8 = page.locator(_pane(8, '[data-testid="file-path"]'))
     until(lambda: p8.count() > 0 and p8.inner_text() == "README.md", timeout=4)

@@ -8,7 +8,7 @@ import { speakingThreads } from "./policy";
 import { SpeechQueue } from "./queue";
 import { FakeClock, FakeGate, FakePlayer, FakeSay, FakeSynth, MS_PER_CHAR } from "./testkit";
 import { ThreadVoices, voiceLabel, type VoicesApi } from "./voices";
-import { defaultPane, defaultWorkspace, LADDER, PANE_NOS, type PaneNo, type View, type Workspace } from "../workspace";
+import { defaultPane, defaultWorkspace, PANE_NOS, type PaneNo, type Preset, type View, type Workspace } from "../workspace";
 import { presetTree } from "../splittree";
 
 let clock: FakeClock;
@@ -431,7 +431,9 @@ describe("many panes through one controller", () => {
 describe("speakingThreads", () => {
   const ws = (views: Partial<Record<PaneNo, View>>, order: PaneNo[], kept: PaneNo[]): Workspace => {
     const w = defaultWorkspace();
-    w.tree = presetTree(LADDER[order.length], order);
+    // The shape the ladder drew for this count (FS4 removed LADDER; the shape does not matter here).
+    const shape: Preset[] = ["single", "single", "cols2", "cols3", "grid4", "grid5", "grid6", "grid7", "grid8"];
+    w.tree = presetTree(shape[order.length], order);
     w.kept = kept;
     w.panes = PANE_NOS.map((n) => ({ ...defaultPane(n), view: views[n] ?? "chat" }));
     return w;

@@ -28,12 +28,11 @@ import {
   renameTerminal as renameTerminalOf,
   setPanel, setPreset as setPresetOf, setKeepOrigin as setKeepOriginOf,
   setBrowserUrl as setBrowserUrlOf, submitBrowserUrl as submitBrowserUrlOf, setView as setViewOf, show as showOf,
-  setFilePath as setFilePathOf, splitPane as splitPaneOf, splitVerdict as splitVerdictOf,
+  setFilePath as setFilePathOf, splitPane as splitPaneOf, splitVerdict as splitVerdictOf, autoSplit as autoSplitOf,
   unpinProject as unpinProjectOf, setEditors as setEditorsOf, setSubagent as setSubagentOf,
   type DrawnSet, type EdgeHandle, type PaneNo, type PaneSpec, type Preset, type SplitWhy, type View, type Workspace,
   type WorkspaceFit, type BrowserTabOptions,
   setBrowserRemote as setBrowserRemoteOf, setBrowserProfile as setBrowserProfileOf, setBrowserSee as setBrowserSeeOf, setBrowserDrive as setBrowserDriveOf,
-  autoSplitVerdict as autoSplitVerdictOf,
   addBrowserTab as addBrowserTabOf, closeBrowserTab as closeBrowserTabOf,
   activateBrowserTab as activateBrowserTabOf, setTabKeepOrigin as setTabKeepOriginOf,
 } from "../lib/workspace";
@@ -43,7 +42,8 @@ import { inTerminal, terminalTakesKey } from "../lib/terminal";
 import { chordSecond, isSaveKey, resetChord } from "../lib/editorkeys";
 import { terminals, usePanelDot } from "./Terminal";
 import type { Tabs } from "../lib/buffers";
-import { presetTree, rectsOf } from "../lib/splittree";
+import { presetTree, rectsOf, type Axis } from "../lib/splittree";
+import { layoutMoved } from "../state/frameguard";
 
 export interface LayoutControl {
   zoom: number;
@@ -119,16 +119,23 @@ export interface LayoutControl {
   /** Reset layout: one pane, default widths, the panel closed. */
   resetAll: () => void;
   /**
-   * Split (WP-G2, lib/workspace `splitPane`): pane `id` shows `spec` right
-   * after `source`, on the ladder's shape for one pane more. `focus: false`
-   * leaves focus where it is. An id ⊞ had hidden mounts fresh.
+   * Split (FS4, lib/workspace `splitPane`): pane `source` is halved, right
+   * (`axis` "x") or down ("y"), and pane `id` shows `spec` in the new half,
+   * right after `source`; nothing else moves. `focus: false` leaves focus
+   * where it is. An id ⊞ had hidden mounts fresh. Refused (nothing happens)
+   * when `splitVerdict` says no.
    */
-  split: (source: PaneNo, id: PaneNo, spec: PaneSpec, opts?: { focus?: boolean }) => void;
-  /** × (lib/workspace `closePane`): that pane goes, and mounts fresh if a split reuses its id; focus to `then` if drawn. */
+  split: (source: PaneNo, axis: Axis, id: PaneNo, spec: PaneSpec, opts?: { focus?: boolean }) => void;
+  /**
+   * × (lib/workspace `closePane`): that pane goes, its space to its neighbour
+   * in the same split, and it mounts fresh if a split reuses its id; focus to
+   * `then` if drawn.
+   */
   close: (pane: PaneNo, then?: PaneNo | null) => void;
-  /** Whether one more pane can be drawn in this window now (`dirty`: ids holding an unsaved edit). */
-  splitVerdict: (dirty?: readonly PaneNo[]) => { ok: boolean; why: SplitWhy };
-  autoSplitVerdict: (held?: readonly PaneNo[]) => { ok: boolean; id: PaneNo | null };
+  /** Whether pane `source` can be split along `axis` in this window now (`dirty`: ids holding an unsaved edit). */
+  splitVerdict: (source: PaneNo, axis: Axis, dirty?: readonly PaneNo[]) => { ok: boolean; why: SplitWhy };
+  /** Where a split the owner did not ask for would go from `source` (right, else down), or null (lib/workspace `autoSplit`). */
+  autoSplit: (source: PaneNo, held?: readonly PaneNo[]) => { axis: Axis; id: PaneNo } | null;
   /**
    * Render-only, by pane id: how many times that id has been closed (or
    * taken back from ⊞'s hidden panes by a split). The workspace keys a pane
@@ -241,7 +248,11 @@ export function useLayout(blocked = false, onEditorKey?: (what: EditorShortcut) 
     [open, fold],
   );
 
-  const setPreset = useCallback((preset: Preset) => setWs((w) => setPresetOf(w, preset)), []);
+  const setPreset = useCallback((preset: Preset) => {
+    // ⊞ moves panes under a pointer that has not moved (FS4): no frame there counts it as a gesture.
+    layoutMoved();
+    setWs((w) => setPresetOf(w, preset));
+  }, []);
   const setView = useCallback((pane: PaneNo, view: View) => setWs((w) => setViewOf(w, pane, view)), []);
   const setSubagent = useCallback((pane: PaneNo, ref: SubagentRef) => setWs((w) => setSubagentOf(w, pane, ref)), []);
   const focus = useCallback((pane: PaneNo) => setWs((w) => focusPane(w, pane)), []);
@@ -303,25 +314,32 @@ export function useLayout(blocked = false, onEditorKey?: (what: EditorShortcut) 
   const bump = useCallback(
     (pane: PaneNo) => setIncarnation((m) => ({ ...m, [pane]: (m[pane] ?? 0) + 1 })), [],
   );
-  const split = useCallback((source: PaneNo, id: PaneNo, spec: PaneSpec, opts: { focus?: boolean } = {}) => {
+  // A split and a close read the fit this render drew (the split commits the
+  // sizes it drew along the source's path, C3), and tell the frame guard the
+  // panes moved under the pointer (state/frameguard `layoutMoved`).
+  const split = useCallback((source: PaneNo, axis: Axis, id: PaneNo, spec: PaneSpec, opts: { focus?: boolean } = {}) => {
     if (blockedRef.current) return;
-    if (now.current.ws.kept.includes(id)) bump(id);
-    setWs((w) => splitPaneOf(w, source, id, spec, opts));
+    const at = now.current;
+    if (splitPaneOf(at.ws, at.fit, source, axis, id, spec, opts) === at.ws) return;
+    if (at.ws.kept.includes(id)) bump(id);
+    layoutMoved();
+    setWs((w) => splitPaneOf(w, at.fit, source, axis, id, spec, opts));
   }, [bump]);
   const close = useCallback((pane: PaneNo, then: PaneNo | null = null) => {
     if (blockedRef.current) return;
     const at = now.current.ws;
     if (closePaneOf(at, pane) === at) return;
     bump(pane);
+    layoutMoved();
     setWs((w) => closePaneOf(w, pane, then));
   }, [bump]);
-  const autoSplitVerdict = useCallback((held: readonly PaneNo[] = []) => {
+  const autoSplit = useCallback((source: PaneNo, held: readonly PaneNo[] = []) => {
     const at = now.current;
-    return autoSplitVerdictOf(at.layout, at.ws, at.available, at.availableH, at.prefer, at.preferPanel, held);
+    return autoSplitOf(at.ws, at.fit, source, held);
   }, []);
-  const splitVerdict = useCallback((dirty: readonly PaneNo[] = []) => {
+  const splitVerdict = useCallback((source: PaneNo, axis: Axis, dirty: readonly PaneNo[] = []) => {
     const at = now.current;
-    return splitVerdictOf(at.layout, at.ws, at.available, at.availableH, at.prefer, at.preferPanel, dirty);
+    return splitVerdictOf(at.ws, at.fit, source, axis, dirty);
   }, []);
   const ownerTogglePanel = useCallback((click?: { detail?: number }) => {
     if (blockedRef.current || (click?.detail ?? 0) > 1) return;
@@ -454,7 +472,7 @@ export function useLayout(blocked = false, onEditorKey?: (what: EditorShortcut) 
     setPreset, setView, setSubagent, focus, show, pin, setEditors, unpinProject, setBrowserUrl, submitBrowserUrl, setFilePath, setKeepOrigin,
     addBrowserTab, closeBrowserTab, activateBrowserTab, setTabKeepOrigin, setBrowserRemote, setBrowserProfile, setBrowserSee, setBrowserDrive,
     setTerminal, forgetTerminal, renameTerminal, moveEdge,
-    equalize, togglePanel, setPanelHeight, resetPanelHeight, resetAll, split, close, splitVerdict, autoSplitVerdict, incarnation,
+    equalize, togglePanel, setPanelHeight, resetPanelHeight, resetAll, split, close, splitVerdict, autoSplit, incarnation,
   };
 }
 
@@ -739,7 +757,7 @@ export function ZoomControl(props: {
 
 // ---- the title bar (2026-10-09, plan §2.1) -------------------------------------
 
-type Area = "left" | "panel" | "right" | "grid" | "split";
+type Area = "left" | "panel" | "right" | "grid" | "split-right" | "split-down";
 
 /**
  * A window outline, 16×16, with the area the button controls filled with
@@ -755,9 +773,12 @@ export function AreaIcon(props: { area: Area; open: boolean }) {
   return (
     <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
       <rect x="1.5" y="1.5" width="13" height="13" rx="1.5" fill="none" stroke="currentColor" strokeWidth="1.2" />
-      {area === "split" ? (
-        // A pane's split button (WP-G2): the outline and one divider, VS Code's split.
+      {area === "split-right" ? (
+        // A pane's split right (FS4): the outline and a vertical divider, VS Code's split.
         <line x1="8" y1="1.5" x2="8" y2="14.5" stroke="currentColor" strokeWidth="1.2" />
+      ) : area === "split-down" ? (
+        // Split down: the outline and a horizontal divider.
+        <line x1="1.5" y1="8" x2="14.5" y2="8" stroke="currentColor" strokeWidth="1.2" />
       ) : band ? (
         <rect
           x={band.x} y={band.y} width={band.w} height={band.h}

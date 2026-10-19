@@ -2376,7 +2376,7 @@ def _split_close_chat_checks(page, mock, check, until):
     _fresh(page, mock, until, json.dumps({"preset": "single", "order": [1], "kept": [], "focused": 1,
                                           "panes": [{"view": "chat"}]}))
     _open(page, until, 1, "t3", "p2")
-    page.locator('[data-testid="pane-1-split"]').click()
+    page.locator('[data-testid="pane-1-split-right"]').click()
     until(lambda: _order(page) == [1, 2], timeout=2)
     until(lambda: (_chat(page, 2)["compose"] or {}).get("projectId") == "p2", timeout=3)
     c = _chats(page)
@@ -2435,7 +2435,7 @@ def _split_close_chat_checks(page, mock, check, until):
     box2.fill("")
 
     # A compose row's unsent words: × asks; Keep keeps; Discard drops them.
-    page.locator('[data-testid="pane-2-split"]').click()
+    page.locator('[data-testid="pane-2-split-right"]').click()
     until(lambda: len(_order(page)) == 2, timeout=2)
     new = _order(page)[1]
     until(lambda: _chat(page, new)["compose"] is not None, timeout=3)
@@ -2454,7 +2454,7 @@ def _split_close_chat_checks(page, mock, check, until):
     page.locator(f'[data-testid="pane-{new}-close-discard"]').click()
     until(lambda: new not in _order(page), timeout=2)
     time.sleep(0.5)
-    page.locator('[data-testid="pane-2-split"]').click()
+    page.locator('[data-testid="pane-2-split-right"]').click()
     until(lambda: len(_order(page)) == 2, timeout=2)
     again = _order(page)[1]
     until(lambda: _chat(page, again)["compose"] is not None, timeout=3)
@@ -2489,7 +2489,8 @@ def _split_close_selected_checks(page, mock, check, until):
     active = page.evaluate("document.activeElement && document.activeElement.closest('[data-testid^=\"pane-\"]')"
                            ".getAttribute('data-testid')")
     focused = page.evaluate("window.__hud.workspace().ws.focused")
-    got = page.evaluate("window.__hud.split(4, {focus: false})")
+    # FS4: `__hud.split(source, {axis, focus})`. Pane 4 is 524×436 at 1600×900: down.
+    got = page.evaluate("window.__hud.split(4, {axis: 'y', focus: false})")
     until(lambda: len(_order(page)) == 4, timeout=2)
     time.sleep(0.3)
     after = page.evaluate("document.activeElement && document.activeElement.closest('[data-testid^=\"pane-\"]')"
@@ -2500,13 +2501,14 @@ def _split_close_selected_checks(page, mock, check, until):
 
     # The same from an event handler outside React (review of PR #47, L5: the
     # dev-server pane will be opened from a socket's message), with focus in
-    # pane 3's box: it stays there.
+    # pane 3's box: it stays there. (FS4: pane 4 has no room left; pane 2, the
+    # whole top row, splits right.)
     _box(page, 3).click()
     page.evaluate("""() => {
       window.__splitKey = (e) => {
         if (e.key !== 'F9') return;
         e.preventDefault();
-        window.__splitGot = window.__hud.split(4, {focus: false});
+        window.__splitGot = window.__hud.split(2, {axis: 'x', focus: false});
       };
       // Capture phase: the chat box stops its keys from bubbling.
       window.addEventListener('keydown', window.__splitKey, true);
@@ -2533,15 +2535,27 @@ def _state(page, key: str):
     return page.evaluate(f"window.__hud.state().{key}")
 
 
+# Split wherever a split fits: the first drawn pane, in reading order, whose
+# split right (else down) the window takes; the new id, or null.
+GROW_JS = """() => {
+  for (const n of window.__hud.workspace().ws.order) for (const axis of ['x', 'y']) {
+    const got = window.__hud.split(n, {axis});
+    if (got !== null && got !== undefined) return got;
+  }
+  return null;
+}"""
+
+
 def _hide_all_but_one(page, until) -> list:
     """From eight drawn chat panes, every id in use, all but pane 1 hidden by ⊞,
-    pane 8 hidden longest: ⊞ to 2×2 hides 5–8, splits take the free ids above
-    8 (9–12 since FS2; none before), and ⊞ to one hides the rest. Returns the
-    ids above 8 the splits took."""
+    pane 8 hidden longest: ⊞ to one hides 2–8, splits take the free ids above
+    8 (9–12 since FS2; none before) wherever a split fits (FS4: 2×2 at
+    1920×1080 has room for two splits only), and ⊞ to one hides the rest.
+    Returns the ids above 8 the splits took."""
     ids = len(_chats(page))
-    _choose(page, until, "grid4")
-    for n in range(5, 5 + ids - 8):
-        page.locator('[data-testid="pane-1-split"]').click()
+    _choose(page, until, "single")
+    for n in range(2, 2 + ids - 8):
+        page.evaluate(GROW_JS)
         until(lambda: len(_order(page)) == n, timeout=2)
     _choose(page, until, "single")
     until(lambda: page.evaluate("window.__hud.workspace().ws.kept")[-1:] == [8], timeout=2)
@@ -2558,7 +2572,7 @@ def _rv47_kept_compose_checks(page, mock, check, until):
     _box(page, 8).fill("precious unsent words in pane 8")
     _focus(page, until, 1)
     _choose(page, until, "single")
-    page.locator('[data-testid="pane-1-split"]').click()
+    page.locator('[data-testid="pane-1-split-right"]').click()
     until(lambda: len(_order(page)) == 2, timeout=2)
     took = _order(page)[1]
     check("review #47 H1: a split takes an empty hidden pane before one holding unsent words",
@@ -2578,7 +2592,7 @@ def _rv47_kept_compose_checks(page, mock, check, until):
     _focus(page, until, 1)
     for n in _hide_all_but_one(page, until):
         page.evaluate("n => window.__hud.dispatch({type: 'input', pane: n, text: `words of pane ${n}`})", n)
-    page.locator('[data-testid="pane-1-split"]').click()
+    page.locator('[data-testid="pane-1-split-right"]').click()
     until(lambda: len(_order(page)) == 2, timeout=2)
     took = _order(page)[1]
     until(lambda: "precious" in _box(page, took).input_value(), timeout=3)
