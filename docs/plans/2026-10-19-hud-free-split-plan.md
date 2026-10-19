@@ -646,3 +646,11 @@ Every check named as catching a mutation must be shown failing with that mutatio
 - hud/src/components/Layout.tsx
 - hud/src/App.tsx
 - jarvis/v2/browser/panes.py
+
+## Errata (found by the FS0/FS1 test writers, 2026-10-19)
+
+- **§4.2 example 5.** After both splits the counts are top = 4 and bottom = **4**. The plan's 4/3 holds only after the split on d alone. The FS1 tests check 4/4.
+- **§4.4 / §8.3 caps.** The 12-leaf cap and the 23-node cap can't be tested on their own. With ids 1–12 and no duplicates, the leaf cap holds automatically, and reaching 23 nodes needs one-child wrappers.
+- **§6.** `docs/hud-api.md:3016` and `:3047` also say 1–8, so FS0 changes them too. `docs/notes/browser.md:590` describes the Ctrl+Alt+1–8 keys, which stay 1–8 under FS-9, so it is left alone.
+- **§7.1 (iii).** Three old `dropRow` rows for grid7 and grid8 change: the four-wide row stays four wide. FS1's table marks them as the new expectations.
+- **`rectsOf`** must use a correctly rounded running sum when it computes offsets, or the FS-5 bit-identity property fails when a sibling is halved.
