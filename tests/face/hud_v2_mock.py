@@ -1273,7 +1273,7 @@ class MockDaemon:
                 if len(parts) == 3 and parts[0] == "threads" and parts[2] == "interrupt":
                     return self._json({"ok": True})
                 if len(parts) == 3 and parts[0] == "threads" and parts[2] == "compact":
-                    return mock.compact_route(self, parts[1], url.query)
+                    return mock.compact_route(self, parts[1], url.query, body)
                 if len(parts) == 3 and parts[0] in ("threads", "tasks") and parts[2] == "seen":
                     of = parts[0]
                     status = w["activity"][of].get(parts[1], "idle")
@@ -1835,7 +1835,7 @@ class MockDaemon:
         (the running compaction's turn id, by thread)."""
         return self.world.setdefault("compact", {"refuse": None, "refused": 0, "n": 0, "turn": {}})
 
-    def compact_route(self, h, thread_id: str, query: str):
+    def compact_route(self, h, thread_id: str, query: str, body: dict):
         """`POST /threads/{id}/compact` as WP-A's daemon answers it: owner-only
         first (403), then 404 unknown thread, 409 `{"error": sentence}` for a
         scripted refusal, an archived chat, a thread with a task, or a turn
@@ -1849,7 +1849,7 @@ class MockDaemon:
             return h._err(403, "only the owner can do this, from the HUD")
         if query:
             return h._err(400, "unknown query field")
-        h._record("POST", f"/threads/{thread_id}/compact", h._body())
+        # (`do_POST` has already recorded the call and read `body`.)
         t = next((t for t in self.world["threads"] if t["id"] == thread_id), None)
         if t is None:
             return h._err(404, f"Thread {thread_id} not found")

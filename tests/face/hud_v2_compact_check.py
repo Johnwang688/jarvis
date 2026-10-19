@@ -132,6 +132,8 @@ def _reset(mock, until, page=None):
         for key in ("compacting", "running", "running_since"):
             t.pop(key, None)
     mock.world["approvals"] = []
+    for tid, rows in mock.world["transcripts"].items():
+        mock.world["transcripts"][tid] = [r for r in rows if not r.get("compaction")]
 
 
 def _open_one(page, mock, until, tid=JARVIS, ws=SINGLE):
@@ -348,8 +350,9 @@ def _refusal_checks(page, mock, check, until):
     until(lambda: len(_posts(mock)) > posts, timeout=3)
     line = page.locator(_pane(1, '[data-testid="pane-status"]'))
     until(lambda: line.count() == 1 and "waiting" in line.inner_text().lower(), timeout=3)
+    # (the status line is drawn in capitals; the words are the daemon's)
     check("a 409 shows the daemon's sentence in pane-status",
-          line.count() == 1 and "Messages are waiting to run first." in line.inner_text(),
+          line.count() == 1 and "messages are waiting to run first." in line.inner_text().lower(),
           line.inner_text() if line.count() else "no pane-status")
     check("and the chip is not left running", _state(page) == "ready", str(_state(page)))
     mock.compact_world()["refuse"] = None
