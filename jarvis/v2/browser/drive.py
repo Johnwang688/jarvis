@@ -22,7 +22,7 @@ from jarvis.v2.provider import Decision
 from . import act_rules as rules, act_review as review, policy
 from .drive_state import DriveState, DriveStateRefused, current_turn
 from .look import LookRefused, CHANGED, SOURCE_OFF, SOURCE_UNKNOWN
-from .panes import PaneRefused
+from .panes import PANE_MAX, PANE_SLOTS, PaneRefused
 
 OFF = "Agents may drive is off; the owner must use the Browser directly."
 STOPPED = "this Browser action was stopped; look again before trying another action"
@@ -46,8 +46,8 @@ class Action:
         if any(not isinstance(v,str) for v in (self.action,self.pane,self.target,self.text,self.file)):
             raise LookRefused("Browser action arguments must be strings")
         if self.action not in rules.ACTIONS:raise LookRefused(rules.R_ACTION)
-        if self.pane and self.pane not in tuple(str(i) for i in range(1,9)):
-            raise LookRefused("pane must be a visible slot from 1 to 8 or empty")
+        if self.pane and self.pane not in PANE_SLOTS:
+            raise LookRefused(f"pane must be a visible slot from 1 to {PANE_MAX} or empty")
         targeted=self.action in ("click","type","select","upload")
         if targeted and (not self.target.startswith("e") or not self.target[1:].isdigit() or len(self.target)>4):
             raise LookRefused("choose an interactive ref from a fresh look at this pane")
@@ -231,7 +231,7 @@ class BrowserDrive:
         snapshot=None;lease=None;activity=None;outcome="refused";action_id=random.token_hex(16)
         try:
             turn=self._turn();turn.attempted=True
-            turn.pane=action.pane if action.pane in tuple(str(i) for i in range(1,9)) else ""
+            turn.pane=action.pane if action.pane in PANE_SLOTS else ""
             action.validate()
             snapshot=self.daemon.browser_panes.resolve(action.pane)
             snapshot=self._binding(snapshot)

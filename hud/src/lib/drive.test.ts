@@ -113,7 +113,14 @@ describe("the banner", () => {
   it("names the pane by its slot, or says the chat is not on screen", () => {
     const s = feed(driving(), { t: "agent", kind: "driver", thread_id: "th1", provider: "codex" }, T0);
     expect(bannerOf(s, T0, slots({}))?.text).toBe("Driven by a chat not on screen (Codex)");
-    expect(bannerOf(s, T0, slots({ th1: 9 }))?.text).toBe("Driven by a chat not on screen (Codex)");
+    expect(bannerOf(s, T0, slots({ th1: 13 }))?.text).toBe("Driven by a chat not on screen (Codex)");
+    // FS0: a twelve-pane HUD names slots 9..12; only the upper bound moved.
+    for (const n of [1, 8, 9, 10, 11, 12]) {
+      expect(bannerOf(s, T0, slots({ th1: n }))?.text).toBe(`Driven by the chat in pane ${n} (Codex)`);
+    }
+    for (const n of [13, 14, 99, 0, -1, 1.5, 12.5, NaN, Infinity]) {
+      expect(bannerOf(s, T0, slots({ th1: n }))?.text).toBe("Driven by a chat not on screen (Codex)");
+    }
     const anon = feed(DRIVE_IDLE, act(), T0);
     expect(bannerOf(anon, T0, slots({}))?.text).toBe("Driven by a chat");
   });

@@ -12,8 +12,20 @@ it("accepts exact private data but discards arbitrary wording, raw args and unpr
 it.each(["req_id","tool","layer","code","thread_id","asked_at","timeout_s","hud_only","allowlistable"])("rejects mismatched identity %s",field=>{
   expect(parseBrowserApproval({...fixture(),[field]:"wrong"},expected)).toBeNull();
 });
-it.each([['tab_id','bad'],['action_id','f'.repeat(31)],['pane',0],['pane',9],['page_identity',-1],['document_generation',NaN],['action','run_script'],['category','approved'],['host','x'.repeat(201)],['path','x'.repeat(401)],['target','x'.repeat(121)],['text','x'.repeat(10001)],['rect',{x:1,y:2,width:-1,height:3}]])("rejects malformed private metadata %s",(field,value)=>{
+it.each([['tab_id','bad'],['action_id','f'.repeat(31)],['pane',0],['pane',13],['page_identity',-1],['document_generation',NaN],['action','run_script'],['category','approved'],['host','x'.repeat(201)],['path','x'.repeat(401)],['target','x'.repeat(121)],['text','x'.repeat(10001)],['rect',{x:1,y:2,width:-1,height:3}]])("rejects malformed private metadata %s",(field,value)=>{
   const raw=fixture();expect(parseBrowserApproval({...raw,browser:{...raw.browser,[field]:value}},expected)).toBeNull();
+});
+// FS0: a twelve-pane HUD's panes 1..12 are valid; only the upper bound moved.
+// The card's args name the same pane, so only the bound itself can refuse.
+function withPane(pane: unknown) {
+  const raw=fixture(), args={...raw.args,pane:String(pane)};
+  return {...raw,args,command:JSON.stringify(args),browser:{...raw.browser,pane}};
+}
+it.each([1,8,9,10,11,12])("accepts pane %s of a twelve-pane HUD",pane=>{
+  expect(parseBrowserApproval(withPane(pane),expected)?.browser.pane).toBe(pane);
+});
+it.each([13,14,99,0,-1,1.5,12.000001,NaN,Infinity,-Infinity,true,false,null,"12","1",[12],{}])("rejects pane %s",pane=>{
+  expect(parseBrowserApproval(withPane(pane),expected)).toBeNull();
 });
 it("rejects missing, altered or extra command fields, including text mismatch",()=>{
   const raw=fixture();

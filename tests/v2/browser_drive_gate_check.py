@@ -125,6 +125,43 @@ class Gate(unittest.TestCase):
                 runtime.bind_caller("wrong" if change=="caller" else self.turn.thread_id,"project","fast",self.turn.turn_id)
                 self.refused_without_io()
 
+    BAD_PANES=("13","14","99","0","00","012","-1","+1"," 12","12 ","12\n","１２","١","12.0","e1",12,13,True,None)
+
+    def test_pane_slot_1_to_12_validates_and_13_never_reaches_the_registry(self):
+        # FS0: a twelve-pane HUD's slot 12 is a valid drive target; only the upper bound moved.
+        from jarvis.v2.browser.panes import PaneRefused
+        for n in range(1,13):
+            with self.subTest(slot=n):D.Action("scroll",pane=str(n),text="down").validate()
+        D.Action("scroll",pane="",text="down").validate()
+        for bad in self.BAD_PANES:
+            with self.subTest(pane=bad),self.assertRaises(D.LookRefused):
+                D.Action("scroll",pane=bad,text="down").validate()
+        self.registry.resolve.side_effect=PaneRefused(409,"choose one visible Browser pane in the owner window")
+        for n in (9,10,11,12):
+            with self.subTest(slot=n):
+                self.registry.resolve.reset_mock();self.turn.pane=""
+                result=self.service.act(D.Action("scroll",pane=str(n),text="down"))
+                self.assertEqual(result.outcome,"refused")
+                self.registry.resolve.assert_called_once_with(str(n))
+                self.assertEqual(self.turn.pane,str(n))
+        self.registry.resolve.reset_mock()
+        for bad in self.BAD_PANES:
+            with self.subTest(pane=bad):
+                self.turn.pane="5"
+                self.assertEqual(self.service.act(D.Action("scroll",pane=bad,text="down")).outcome,"refused")
+                self.assertEqual(self.turn.pane,"")
+        self.registry.resolve.assert_not_called()
+        self.host.prepare_action.assert_not_called();self.host.execute_action.assert_not_called()
+
+    def test_agent_facing_slot_range_text_says_12_not_8(self):
+        # FS0: the model is told the slot range it may use; a stale "1–8" hides slots 9..12.
+        from jarvis import tools
+        import jarvis.v2.tools.hud_browser_act  # noqa: F401 (registers the tool)
+        described=tools.REGISTRY["hud_browser_act"].schema["properties"]["pane"]["description"]
+        self.assertNotIn("1–8",described);self.assertIn("1–12",described)
+        refused=self.service.act(D.Action("scroll",pane="13",text="down")).text
+        self.assertNotIn("1 to 8",refused);self.assertIn("12",refused)
+
     def test_missing_or_stale_ref_never_prepares_or_reviews(self):
         for target in ("e2","e999"):
             self.assertEqual(self.action(target=target).outcome,"refused")

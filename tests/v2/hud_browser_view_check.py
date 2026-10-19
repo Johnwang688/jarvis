@@ -73,9 +73,38 @@ class Pure(unittest.TestCase):
                 self.assertTrue(hud_browser_view().text.startswith("Refused:"))
             with runtime.turn_scope(desk={"present":True}):
                 runtime.bind(depth=0)
-                for pane in ("abcdef01","0","9"," 2",2,True):self.assertTrue(hud_browser_view(pane).text.startswith("Refused:"))
+                for pane in ("abcdef01","0","13"," 2",2,True):self.assertTrue(hud_browser_view(pane).text.startswith("Refused:"))
+                # FS0: the slot bound is 1..12; only the upper bound moved.
+                for pane in ("14","99","00","012","-1","+1","12 "," 12","12\n","1.0","１２","١","²",12,13,None,1.0):
+                    with self.subTest(pane=pane):self.assertTrue(hud_browser_view(pane).text.startswith("Refused:"))
                 self.assertTrue(hud_browser_view("",1).text.startswith("Refused:"))
+                self.assertTrue(hud_browser_view("12",1).text.startswith("Refused:"))
             look.assert_not_called()
+
+    def test_slots_9_to_12_reach_the_registry_and_resolve_a_drawn_slot_12_pane(self):
+        # FS0: a twelve-pane HUD's slot 12 is a valid look target; 13 is not.
+        registry=BrowserPanes(SimpleNamespace(browser=SimpleNamespace(refused_ports=lambda:frozenset()),
+            devservers=SimpleNamespace(source_snapshot=lambda entry:None),browser_settings=Mock()),clock=lambda:1.0)
+        window="a"*32;registry.window_started(window)
+        registry.report({"window":window,"seq":1,"focus_seq":1,"focused_slot":12,"covered":False,"panes":[
+            {"pane_id":n,"slot":n,"drawn":True,"profile":"p-0123abcd","ctx":None,"see":True,"drive":False,
+             "active":"tab%03d"%n,"tabs":[{"id":"tab%03d"%n,"mode":"direct","url":"http://localhost:4567/%d"%n,"source":None}]}
+            for n in range(1,13)]})
+        def look(pane,whole):
+            snap=registry.resolve(pane)
+            return L.LookResult(text="pane %d slot %d"%(snap.pane_id,snap.slot),source="Fixture")
+        with patch("jarvis.v2.tools.hud_browser_view.look_for_tool",side_effect=look) as called:
+            with runtime.turn_scope(desk={"present":True}):
+                runtime.bind(depth=0)
+                for n in (9,10,11,12):
+                    with self.subTest(slot=n):
+                        result=hud_browser_view(str(n))
+                        self.assertFalse(result.text.startswith("Refused:"),result.text)
+                        self.assertIn("pane %d slot %d"%(n,n),result.text)
+                self.assertIn("pane 12 slot 12",hud_browser_view("").text)
+                refused=hud_browser_view("13").text
+                self.assertTrue(refused.startswith("Refused:"));self.assertNotIn("1 to 8",refused);self.assertIn("12",refused)
+        self.assertEqual([c.args[0] for c in called.call_args_list],["9","10","11","12",""])
 
     def test_provider_pins_vision_and_offdesk_surfaces_cannot_dispatch(self):
         from jarvis.v2.model import Role
@@ -512,6 +541,22 @@ class RegistryReal(Real):
         self.assertEqual(self.registry.resolve("2").source.terminal_id,"fixture-terminal")
         with patch.object(self.daemon.terminals,"readable_source",return_value=False),patch.object(self.host,"capture_look",wraps=self.host.capture_look) as capture:
             self.assertIn("terminal",self.read().refused);capture.assert_not_called()
+
+    def test_18_real_registry_reads_a_drawn_slot_12_pane_and_refuses_13(self):
+        # FS0: twelve panes; the pane in slot 12 is lookable, "13" never captures.
+        self.html("<p>Slot twelve fixture</p>")
+        self.body.update(focused_slot=12)
+        self.body["panes"][0].update(pane_id=12,slot=12)
+        for pid in range(1,12):
+            self.body["panes"].append({"pane_id":pid,"slot":pid,"drawn":True,"profile":"private",
+                "ctx":None,"see":True,"drive":False,"active":None,"tabs":[]})
+        self.registry.report(self.body)
+        result=self.service.read("12",False);self.assertFalse(result.refused,result.refused)
+        self.assertIn("Slot twelve fixture",result.text)
+        self.assertEqual(self.registry.resolve("12").pane_id,12)
+        with patch.object(self.host,"capture_look",wraps=self.host.capture_look) as capture:
+            for pane in ("13","0","012"):self.assertTrue(self.service.read(pane,False).refused)
+            capture.assert_not_called()
 
     def test_17_real_registry_permission_or_window_end_during_scan_discards(self):
         self.registry.report(self.body);original=C._scan
