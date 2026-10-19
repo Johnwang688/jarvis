@@ -622,8 +622,15 @@ class Agent:
             self.on_event("interim_text", f"[steering not delivered: {type(exc).__name__}]")
             return
         for item in items:
-            text, images = item if isinstance(item, tuple) else (item, None)
-            body = f"{STEERING_PREFIX} {text}".rstrip()
+            # `(text, images, prefix)`: a v2 chat's reply passes "" — it
+            # carries its own header and is never the owner's steering.
+            # Without a prefix, the owner's label, byte for byte.
+            if isinstance(item, tuple):
+                text, images, *rest = item
+                prefix = rest[0] if rest and rest[0] is not None else STEERING_PREFIX
+            else:
+                text, images, prefix = item, None, STEERING_PREFIX
+            body = f"{prefix} {text}".rstrip() if prefix else text
             if images:
                 self.messages.append(
                     {

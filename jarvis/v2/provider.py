@@ -176,7 +176,11 @@ class SessionHandle:
 class UserMessage:
     text: str
     images: list[dict] = field(default_factory=list)     # [{"b64":..., "mime":...}]
-    origin: str = "owner"                                 # "owner" | "system" | "owner-ran" (§6.1)
+    # "owner" | "system" | "owner-ran" (§6.1) | "chat" (a message from another
+    # HUD chat, chat-to-chat §5.2) | "chat-reply" (that chat's reply coming
+    # back, §5.3). Both chat origins arrive with via="peer" and desk=False,
+    # and neither is ever the owner's: `desk.desk_message` requires "owner".
+    origin: str = "owner"
     # A skill the owner invoked by name (`/skill`). Each provider maps it onto
     # its own mechanism: the fast path injects the body, Claude and Codex get a
     # directive to use the skill they have installed (`commands.skill_directive`).

@@ -348,3 +348,59 @@ The service hands the tools only the store and a snapshot of running turns
 and owner-queue lengths, taken under the daemon lock; the log reads and the
 scrub (`chat_reads.py`, C0) run outside it. Both files are SELF_PROTECTED
 (decision CC-8). Sending (`chat_send`, `chat_wait`) is C3/C4's.
+
+## The chat-to-chat relay core (chat-to-chat C3, 2026-10-19)
+
+`ChatRelay` (`jarvis/v2/chat_relay.py`) now sends. `send(caller, chat, text)`
+and `wait(caller, message_id, seconds)` are the service calls C4's
+`chat_send`/`chat_wait` tools will make; no HTTP route sends (P-3).
+
+- **Who may send** is checked by the service under the daemon lock, never
+  only by a tool: the caller's live session, a running worker, the exact
+  `turn_id`, an owner's chat (role CHAT, no task), not cancelled or closing,
+  `relay_turn is None` (no chains) and `desk.slot["present"] is True`. Under
+  CC-6 that is the whole desk rule: typed or spoken at the HUD, never Discord,
+  the DM, a schedule, the escape hatch, the API listener, a task or a turn a
+  foreign steer took off the desk. A relayed or reply turn is refused even
+  with a forged `present`.
+- **Bounds** (§5.4): 3 relays waiting per target (`RELAY_QUEUE_MAX`, separate
+  from the owner's `QUEUE_MAX`), 3 sends per turn, 4,000 characters (refused,
+  never cut, checked before the scrub), 30 sends per rolling hour
+  daemon-wide, a one-hour TTL on a waiting relay, waits of at most 300 s.
+  The TTL, hourly cap and wait deadlines read `ChatRelay.clock`.
+- **Two queues, never one (P-4).** A relay waits in `inbound[target]`, never
+  `_queues`. `_drain` takes the owner's queue first, then `inbound`, then
+  `held` replies. A relay never goes through `deliver()` or `_steer`: it
+  never steers, interrupts, reserves the desk, or answers a card or a
+  question; a target blocked on the owner keeps it queued. The owner's own
+  message still steers into a running relayed turn.
+- **A relayed turn** is `_begin(..., relay=RelayStart)` with
+  `UserMessage(origin="chat", via="peer", desk=False)`: off the desk, so
+  desk-only tools stay away, and every other tool a non-desk turn holds is
+  kept under the target's own gates (CC-7; there is no `RELAY_REFUSED`). Its
+  log opens with `relay_in`, never `user`, and every record of it carries
+  `relayed: {"message_id", "from"}`. The Discord mirror and the task runner
+  skip `relayed` records (O-8; HUD speech's skip is C5's).
+- **The reply goes back once** (`turn_ended`, from `_turn`'s `finally`
+  before the worker is cleared): to a blocked `wait`; else steered into the
+  sender's running owner turn with `origin="chat-reply"` and no
+  `desk.reserve()` (P-7), unless that turn waits on the owner; else, for an
+  answer, held to run as a reply turn (3 fast-path steps, `relayed` with
+  `"reply": true`); else only shown (P-10: stopped or failed never starts a
+  turn). A refused or failing steer, whatever its `fallback`, goes to
+  `held`; a reply never interrupts. A steered reply the turn never took
+  (`undelivered`) is handed back to `held`, never to `_queues`.
+- **Stop, Withdraw, close, shutdown.** The owner's Stop on a thread drops
+  relays waiting on it, withdraws that turn's own still-queued sends and
+  shows (never runs) its held replies; a running relay elsewhere goes on and
+  its reply is only shown. Closing or archiving drops what waits on the
+  thread; a sender archived or deleted mid-flight gets its reply dropped
+  (`relay_state` reason in the target's log). `POST
+  /threads/{sender}/relays/{mid}/withdraw` is owner-only. Shutdown drops
+  everything in memory and wakes waits without logging, so after a restart
+  an unfated `relay_out` reads "not delivered".
+- Bodies and replies go through `chat_reads.scrub` before they are logged or
+  delivered, and through `untrusted.fence_chat` with a fresh nonce; titles
+  are cleaned and their fence phrases annotated. The source guard in
+  `tests/v2/chat_relay_check.py` keeps `chat_relay.py` and `tools/chats.py`
+  free of the broker, the daemon's answer, `deliver` and `_steer`.
