@@ -12,7 +12,7 @@
 // scroller and above the input bar. It is outside `[data-testid=log]`, so what
 // the log says is the conversation and nothing else.
 
-import { Fragment, memo, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ChatMessage, Thread } from "../types";
 import { chatPlace } from "../lib/discord";
 import { ToolGroupRow } from "./ToolGroupRow";
@@ -22,6 +22,7 @@ import type { ThinkingLine } from "../lib/thinking";
 import { childrenOf, placeRows, placeableOf } from "../lib/subagents";
 import { useAnchors, useWatch } from "../state/subagents";
 import { SubagentRows } from "./SubagentRow";
+import { RelayRow } from "./RelayRow";
 
 /** What became of a message sent while a turn ran (2026-10-08). */
 const MARKS: Record<string, string> = {
@@ -60,8 +61,17 @@ function Proposal({ msg, onCancel }: { msg: ChatMessage; onCancel: (id: string) 
   );
 }
 
-export const MessageRow = memo(function MessageRow({ msg: m, onCancel }: { msg: ChatMessage; onCancel: (id: string) => void }) {
+export const MessageRow = memo(function MessageRow({ msg: m, onCancel, blocked, onOpenRelay, onWithdrawRelay }: {
+  msg: ChatMessage;
+  onCancel: (id: string) => void;
+  /** An approval card is up: a relay row's buttons are dead. */
+  blocked?: boolean;
+  onOpenRelay?: (threadId: string) => void;
+  onWithdrawRelay?: (messageId: string) => void;
+}) {
   if (m.proposal) return <Proposal msg={m} onCancel={onCancel} />;
+  // A message from or to another chat (chat-to-chat C5): never the owner's.
+  if (m.role === "relay") return <RelayRow msg={m} blocked={blocked} onOpen={onOpenRelay} onWithdraw={onWithdrawRelay} />;
   return <div className={`msg ${m.role}`} data-testid={`msg-${m.role}`}>
     <div className="who">
       {m.role === "user" ? "YOU" : m.role === "system" ? "SYSTEM" : "JARVIS"}
@@ -92,6 +102,15 @@ export const ChatTab = memo(function ChatTab(props: {
   accent?: string | null;
   /** The pane is on screen: the line's time ticks. */
   drawn?: boolean;
+  /** An approval card is up (chat-to-chat C5): Open and Withdraw are dead. */
+  blocked?: boolean;
+  /** A received message's "Open": that chat beside this one, on a click only. */
+  onOpenRelay?: (threadId: string) => void;
+  /** The owner's Withdraw on a send still queued, by this chat's thread. */
+  onWithdrawRelay?: (threadId: string, messageId: string) => void;
+  /** Messages from other chats waiting for this chat's turn to end, in
+   * words (lib/relays `waitingLine`), or null when none waits. */
+  relayWaiting?: string | null;
 }) {
   const logRef = useRef<HTMLDivElement>(null);
   const follows = useRef(true);
@@ -107,6 +126,10 @@ export const ChatTab = memo(function ChatTab(props: {
     [tid, anchors, props.messages],
   );
   const drawn = props.drawn !== false;
+  const { onWithdrawRelay } = props;
+  const withdraw = useCallback((messageId: string) => {
+    if (tid && onWithdrawRelay) onWithdrawRelay(tid, messageId);
+  }, [tid, onWithdrawRelay]);
   // Markdown fills each new body in a passive effect; follow after those
   // child effects, when the transcript has its final height.
   useEffect(() => {
@@ -140,7 +163,8 @@ export const ChatTab = memo(function ChatTab(props: {
             <ToolGroupRow group={m}
               threadId={props.thread?.id ?? ""} using={!!props.busy && i === props.messages.length - 1 && m.turn_id === props.toolTurnId}
               drawn={drawn} />
-          ) : <MessageRow msg={m} onCancel={props.onCancelTask} />;
+          ) : <MessageRow msg={m} onCancel={props.onCancelTask} blocked={props.blocked}
+            onOpenRelay={props.onOpenRelay} onWithdrawRelay={withdraw} />;
           return <Fragment key={m.calls ? `tool:${m.turn_id}|${m.calls[0].call_id}` : `msg:${i}`}>
             {body}
             {rows ? <SubagentRows threadId={tid!} rows={rows} drawn={drawn} /> : null}
@@ -155,6 +179,9 @@ export const ChatTab = memo(function ChatTab(props: {
         ) : null}
       </div>
       {props.thinking ? <ThinkingRow line={props.thinking} accent={props.accent} drawn={!!props.drawn} /> : null}
+      {props.relayWaiting ? (
+        <div className="relay-waiting" data-testid="relay-waiting">{props.relayWaiting}</div>
+      ) : null}
     </div>
   );
 });

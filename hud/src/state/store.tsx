@@ -26,6 +26,7 @@ import {
   type ChatState, type Chats,
 } from "../lib/chats";
 import { PANE_NOS, defaultWorkspace, orderOf, type PaneNo } from "../lib/workspace";
+import { relayMessage, type RelayEvent } from "../lib/relays";
 import { applyTurn, turnsAfterActivity, turnsAfterThreads, type TurnEvent, type Turns } from "../lib/thinking";
 
 // What the centre shows is the workspace's (lib/workspace.ts, 2026-10-09): a
@@ -153,6 +154,9 @@ export type Action = (
   | { type: "op_done"; pane: PaneNo; call_id: string; ok: boolean; summary: string; turn_id?: string; outcome?: ToolOutcome; at?: string }
   | { type: "tool_stop"; pane: PaneNo; turn_id?: string; at: string }
   | { type: "transcript"; threadId: string; rows: (ChatMessage | ToolEntry)[] }
+  /** A chat-to-chat bus record (lib/relays): folded by message id into every
+   * pane showing its thread. It never opens, selects or focuses a pane. */
+  | { type: "relay"; event: RelayEvent }
   | { type: "approval_add"; request: ApprovalRequest }
   | { type: "approval_drop"; req_id: string }
   | { type: "task_upsert"; task: Task }
@@ -510,11 +514,27 @@ export function reduce(s: State, a: Action): State {
         { kind: "stop", turn_id: a.turn_id, at: a.at });
       return withChat(s, a.pane, next);
     }
+    case "relay": {
+      const tid = a.event.thread_id;
+      if (!tid) return s;
+      let chats: Chats | null = null;
+      for (const n of PANE_NOS) {
+        const c = s.chats[n];
+        if (c.threadId !== tid) continue;
+        const next = transcriptEvent(c, { kind: "relay", event: a.event });
+        if (next.messages === c.messages && next.toolReplay === c.toolReplay) continue;
+        chats = { ...(chats ?? s.chats), [n]: next };
+      }
+      return chats ? { ...s, chats } : s;
+    }
+
     case "transcript": {
       const n = PANE_NOS.find(p => s.chats[p].threadId === a.threadId);
       if (n === undefined) return s;
       const c = s.chats[n];
-      const messages = fold(a.rows, c.toolReplay);
+      // A relay row is checked and copied (lib/relays): never the owner's.
+      const rows = a.rows.flatMap((row) => (row.role as string) === "relay" ? (relayMessage(row) ?? []) : [row]);
+      const messages = fold(rows, c.toolReplay);
       const ops = historyOps(messages, Date.now());
       // A finish heard during the request wins over a stale running snapshot.
       const active = [...ops].reverse().find(o => !o.finished)?.turn_id ?? null;

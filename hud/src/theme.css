@@ -1280,6 +1280,41 @@ button.danger:hover:not(:disabled) { background: var(--red-soft); }
 .msg .who .mark.steering { color: var(--accent); }
 .msg .who .mark.queued { color: var(--amber); }
 .msg .who .mark.not-sent { color: var(--text-muted); }
+/* Chat-to-chat (C5): a message one chat sent another, and its reply. Never
+   the owner's bubble; a 2px rule says it came from or went to another chat.
+   Graphite: amber only on a queued (pending) chip, red only on a failed one. */
+.msg.relay { padding-left: 10px; border-left: 2px solid var(--border-strong); }
+.msg.relay-in, .msg.relay-reply { border-left-color: var(--accent-line); }
+.msg.relay-in > .who, .msg.relay-reply > .who { color: var(--accent); }
+.msg.relay-out > .who { color: var(--text-2); }
+.msg.relay .who .badge { margin: 0 2px; vertical-align: 1px; }
+.msg.relay .body.user-text { color: var(--text); line-height: 1.5; }
+.msg.relay .body.user-text.collapsed {
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3; overflow: hidden;
+}
+.msg.relay-reply > .body { color: var(--text); line-height: 1.55; }
+.relay-state { margin-left: 6px; text-transform: none; letter-spacing: 0; font-weight: 400; }
+.relay-state.pending { color: var(--amber); }
+.relay-state.working { color: var(--accent); }
+.relay-state.done { color: var(--green); }
+.relay-state.muted { color: var(--text-muted); }
+.relay-state.error { color: var(--red); }
+.relay-progress, .relay-answered, .relay-delivery {
+  margin-top: 4px; font: 11px var(--mono); color: var(--text-muted); white-space: pre-wrap;
+}
+.relay-progress { overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; }
+.relay-foot { display: flex; align-items: center; gap: 10px; margin-top: 6px; }
+.relay-foot .relay-answered { margin-top: 0; }
+.msg.relay button { font-size: 11px; padding: 1px 8px; }
+.relay-expand {
+  margin-top: 2px; border: none; background: none; padding: 0 !important; color: var(--text-muted);
+  font: 11px var(--mono);
+}
+.relay-expand:hover:not(:disabled) { background: none; color: var(--text-2); }
+/* The target's foot while messages from other chats wait for its turn. */
+.relay-waiting { flex: 0 0 auto; padding: 0 20px 6px; font: 11px var(--mono); color: var(--text-muted); }
+/* The sidebar's count of them: pending, so amber. */
+.badge.relay { color: var(--amber); border-color: var(--amber-line); text-transform: none; }
 /* Stop is an action, not an error: no red (Graphite keeps red for errors). */
 :is(#inputrow, .inputrow) .iconbtn.stop { color: var(--text); }
 
