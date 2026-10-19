@@ -93,7 +93,8 @@ def browser_checks(browser, mock, base, check, until, guard, init_script):
                         _guard_mount_checks, _guard_timer_checks, _guard_hidden_checks, _guard_card_checks,
                         _guard_frame_to_frame_checks, _guard_parked_pointer_checks, _guard_gesture_checks,
                         _guard_reload_checks, _guard_refocus_checks, _guard_giveback_checks, _guard_tab_checks,
-                        _guard_typing_pointer_checks, _guard_survivor_checks, _guard_layout_checks):
+                        _guard_typing_pointer_checks, _guard_survivor_checks, _guard_layout_checks,
+                        _guard_dblclose_checks):
             # `BROWSER_ONLY=guard` runs just the sections whose name holds it.
             if os.environ.get("BROWSER_ONLY") and os.environ["BROWSER_ONLY"] not in section.__name__:
                 continue
@@ -384,7 +385,8 @@ def _split_checks(page, mock, check, until):
     _options(page)
     page.locator(KEEP).check()
     until(lambda: _sandbox(page) == ON and _stored(page) == origin, timeout=3)
-    page.locator('[data-testid="pane-2-split"]').click()
+    # FS4: two columns at 1600×900 are 524 px, too narrow to split right: down.
+    page.locator('[data-testid="pane-2-split-down"]').click()
     until(lambda: len(_ws(page)["ws"]["order"]) == 3, timeout=3)
     new = _ws(page)["ws"]["order"][2]           # right after pane 2; a free id (the stored 3 and 4 are kept)
     frame3 = _pane(new, '[data-testid="browser-frame"]')
@@ -1112,13 +1114,17 @@ def _guard_after_move(page, mock, check, until, move: str, frame: str, pane: int
 
 def _guard_layout_checks(page, mock, check, until):
     """FS3's boundary: moving panes never hands the keyboard to a Browser page.
-    After each move (⊞ 2×2 → one → 2×2, a ladder split, a close of another
-    pane, an edge drag, a window resize) a page calling focus() with no
+    After each move (⊞ 2×2 → one → 2×2, a close of another pane, an edge
+    drag, a window resize) a page calling focus() with no
     gesture is removed — with the pointer resting where the frame now is,
     having arrived there by the move and not by a pointer event; a frame in a
     pane ⊞ hid or the window dropped is refused as hidden; and under a card
     none of the moves happen. Geometry at 1920x1080, both side panes open: the
-    pane area is the workspace's box."""
+    pane area is the workspace's box.
+
+    FS4 (the FS4 card): a split moves no other pane (FS-5), so "a ladder
+    split" moving a frame under the pointer became "a split moves no frame";
+    and the double-click on × is `_guard_dblclose_checks`."""
     W = lambda: page.locator('[data-testid="workspace"]').bounding_box()  # noqa: E731
     pt = lambda fx, fy: (W()["x"] + fx * W()["width"], W()["y"] + fy * W()["height"])  # noqa: E731
 
@@ -1129,13 +1135,30 @@ def _guard_layout_checks(page, mock, check, until):
     _guard_after_move(page, mock, check, until, "⊞ 2×2 → one → 2×2", frame, 3, pt(0.25, 0.8),
                       lambda: _choose_keys(page, until, "grid4"))
 
-    # A ladder split: three columns, the Browser in the middle; pane 1 splits,
-    # 2×2 [1, 4, 2, 3] puts the Browser bottom left, under a pointer that
-    # rested on pane 1.
-    frame = _lay(page, mock, until, "cols3", 2, who="s1")
-    _guard_after_move(page, mock, check, until, "a ladder split", frame, 2, pt(0.2, 0.8),
-                      lambda: (_press(page, until, "pane-1-split"),
-                               until(lambda: _ws(page)["ws"]["order"] == [1, 4, 2, 3], timeout=3)))
+    # FS4, a split: two columns, the Browser right; pane 1 splits down from
+    # the keyboard under a pointer resting on pane 1. Nothing else moves
+    # (FS-5): the frame keeps its box, never comes under the pointer, and a
+    # grab with no gesture is still removed.
+    frame = _lay(page, mock, until, "cols2", 2, who="s1")
+    keys = len(mock.dev_keys)
+    x, y = pt(0.25, 0.6)
+    page.mouse.move(x, y)
+    page.wait_for_timeout(150)
+    was = page.locator(frame).first.bounding_box()
+    _press(page, until, "pane-1-split-down")
+    until(lambda: _ws(page)["ws"]["order"] == [1, 3, 2], timeout=3)
+    page.wait_for_timeout(400)
+    now = page.locator(frame).first.bounding_box() if _count(page, frame) else None
+    check("FS4, after a split: the Browser frame in the other pane kept its box to half a pixel (FS-5)",
+          bool(now) and all(abs(now[k] - was[k]) <= 0.5 for k in ("x", "y", "width", "height")), f"{was} -> {now}")
+    check("FS4, after a split: the pointer still rests on the HUD", not _over_frame(page, x, y))
+    _grab(page, frame, 0)
+    until(lambda: _count(page, _pane(2, '[data-testid="browser-stolen"]')) > 0, timeout=4)
+    page.keyboard.type("zz", delay=30)
+    page.wait_for_timeout(200)
+    check("FS4, after a split: a page calling focus() with no gesture is removed, and gets no key",
+          _count(page, frame) == 0 and _active_frame(page) is None and mock.dev_keys[keys:] == [],
+          f"frames={_count(page, frame)} active={_active_frame(page)} keys={mock.dev_keys[keys:][:3]}")
 
     # A close of another pane: 2×2, the Browser bottom left; × on pane 1 gives
     # three columns, the Browser in the middle, under a pointer that rested on pane 2.
@@ -1204,7 +1227,7 @@ def _guard_layout_checks(page, mock, check, until):
     _approval(mock, "fs3-moves")
     until(lambda: page.locator('[data-testid="approval-card"]').count() > 0, timeout=4)
     page.wait_for_timeout(200)
-    for testid in ("layout-customize", "pane-1-split", "pane-2-close"):
+    for testid in ("layout-customize", "pane-1-split-right", "pane-1-split-down", "pane-2-close"):
         b = page.locator(f'[data-testid="{testid}"]').bounding_box()
         if b:
             page.mouse.click(b["x"] + b["width"] / 2, b["y"] + b["height"] / 2)
@@ -1233,6 +1256,49 @@ def _guard_layout_checks(page, mock, check, until):
           and sum(1 for h in mock.dev_hits if "who=k1" in h) == hits)
     page.keyboard.press("Escape")
     until(lambda: page.locator('[data-testid="approval-card"]').count() == 0, timeout=4)
+    page.set_viewport_size({"width": 1600, "height": 900})
+
+
+def _guard_dblclose_checks(page, mock, check, until):
+    """FS4 (the FS4 card): a double-click on × whose second click lands on a
+    Browser page that grew under the pointer leaves the page without the
+    keyboard — the close raised its shield (layoutMoved) and a press within
+    CLOSE_GUARD_MS does not lower it [no layoutMoved]. Without that, the
+    second press lowers the shield (the pointer "is over" the page), and a
+    page that then takes the keyboard by itself keeps it."""
+    # Two stacked: a Browser page in the top pane, a chat below. The first
+    # click closes the chat and gives its space to the page above, which grows
+    # under the pointer; the second click lands on the page's shield, which
+    # must stay up. The page then calls focus() with no gesture: removed.
+    keys = len(mock.dev_keys)
+    page.set_viewport_size({"width": 1920, "height": 1080})
+    _set_storage(page, zoom="100", layout="{}")
+    _set_ws(page, json.dumps({"preset": "rows2", "focused": 2, "panes": [
+        {"view": "browser", "browserUrl": _focus_url(mock, "focus-none", who="dx")}, {"view": "chat"}]}))
+    _boot(page, mock, None, until, reload=True)
+    frame = _pane(1, '[data-testid="browser-frame"]')
+    until(lambda: _count(page, frame) > 0 and any("who=dx" in h for h in mock.dev_hits), timeout=5)
+    page.wait_for_timeout(400)
+    close = page.locator('[data-testid="pane-2-close"]').bounding_box()
+    x, y = close["x"] + close["width"] / 2, close["y"] + close["height"] / 2
+    page.mouse.move(x, y)
+    page.wait_for_timeout(150)
+    check("setup (a double-click on ×): the pointer rests on pane 2's ×, not on a frame", not _over_frame(page, x, y))
+    page.mouse.dblclick(x, y)
+    until(lambda: _ws(page)["ws"]["order"] == [1], timeout=3)
+    page.wait_for_timeout(600)
+    box = page.locator(frame).first.bounding_box() if _count(page, frame) else None
+    check("setup (a double-click on ×): one pane closed, and the page above grew under the pointer",
+          _ws(page)["ws"]["order"] == [1] and _box_holds(box, x, y), f"{box} vs {(x, y)}")
+    if box:
+        _grab(page, frame, 0)
+        page.wait_for_timeout(500)
+    page.keyboard.type("zz", delay=30)
+    page.wait_for_timeout(200)
+    check("FS4: a double-click on × over a Browser pane that grew under the pointer leaves the page without the keyboard "
+          "[no layoutMoved]", _active_frame(page) is None and mock.dev_keys[keys:] == [],
+          f"active={_active_frame(page)} keys={mock.dev_keys[keys:][:3]}")
+
     page.set_viewport_size({"width": 1600, "height": 900})
 
 

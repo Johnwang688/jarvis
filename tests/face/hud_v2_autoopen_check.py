@@ -359,8 +359,10 @@ def _pane_ids(browser, context, page, mock, f, check, until, guard, init):
     # (App.tsx's `pane-N` match). The owner's last pointer in pane 10 makes it
     # the most recently used Browser, so with no room to split the automatic
     # tab goes there, behind its page, rather than to pane 2 in slot 2. (2×2
-    # at 1000 px: a fifth pane would need three columns.)
+    # at 1000×800: 464×386 px panes, too narrow to split right and too short
+    # to split down — FS4 splits down where a pane is 400 px tall.)
     configure(page, mock, until, "grid4", ("chat", "browser", "chat", "chat"), 1000)
+    page.set_viewport_size({"width": 1000, "height": 800})
     state = _ws(page)["ws"]
     if len(state["panes"]) < 12:
         check("FS2: the window holds twelve pane ids", False, str(len(state["panes"])))
