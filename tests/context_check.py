@@ -560,6 +560,156 @@ def compaction_prompt_checks() -> None:
     print("ok  compaction: orchestrator tier, fenced transcript, fixed sections")
 
 
+# --- Agent.compact_now: the Compact button's fast-path process (2026-10-19) --
+#
+# The plan (docs/plans/2026-10-19-compact-button-plan.md §1, WP-A) factors
+# `run_turn`'s "/compact" branch into `Agent.compact_now(cancelled=None) ->
+# (removed, saved_tokens)`, which `run_turn` keeps calling, so the button and a
+# typed /compact run the same process. Chosen where the plan is silent:
+# compact_now works on a deep copy of `self.messages` (`context.manage(copy,
+# self.policy, summarize=self._summarize, force=True)`) and puts it back only
+# when `cancelled` (read after the summary) is false and something was
+# removed; a cancelled one returns removed 0 and changes nothing. `run_turn`'s
+# words and events for "/compact" are unchanged: on_event("context", stats),
+# then "text" with "Compacted; saved {stats.saved:,} tokens.". Each case runs
+# on its own (`compact_now_checks`), so one missing piece fails alone.
+
+
+def _orphan_layout() -> list[dict]:
+    """orphan_checks' transcript: the split group placed last."""
+    return [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "render the assembly two ways"},
+        {"role": "assistant", "content": None,
+         "tool_calls": [{"id": "x", "function": {"name": "cad_status", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "x", "name": "cad_status", "content": "sandbox ready"},
+        {"role": "user", "content": "good, now the renders"},
+        {"role": "assistant", "content": None,
+         "tool_calls": [{"id": "call_1", "function": {"name": "cad_render", "arguments": "{}"}},
+                        {"id": "call_2", "function": {"name": "cad_render", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "call_1", "name": "cad_render", "content": "iso view"},
+        _image_msg("A"),
+        {"role": "tool", "tool_call_id": "call_2", "name": "cad_render", "content": "top view"},
+        _image_msg("B"),
+    ]
+
+
+def _summary_llm(model, messages, **kwargs):
+    return llm.Reply(message={"content": "GOAL: renders\nFAILED: none"}, finish_reason="stop",
+                     model=model, latency_s=0.0)
+
+
+def _compact_agent(messages, keep_recent=2):
+    raw = tempfile.mkdtemp()
+    agent = Agent(tool_names=["get_datetime"],
+                  policy=context.ContextPolicy(keep_recent_messages=keep_recent, spill_dir=Path(raw)))
+    agent.messages = messages
+    return agent
+
+
+def compact_now_orphan_check() -> None:
+    """Invariant 1 through the button's process: on
+    assistant(c1,c2)·tool(c1)·user(image)·tool(c2), nothing is orphaned and
+    messages[1] is untouched."""
+    import copy
+
+    messages = _orphan_layout()
+    goal = copy.deepcopy(messages[1])
+    agent = _compact_agent(messages)
+    with patch.object(llm, "chat", _summary_llm):
+        removed, saved = agent.compact_now()
+    assert removed == 2, f"expected the fallback cut at 4 (2 removed), got {removed}"
+    assert isinstance(saved, int) and saved >= 0, saved
+    assert agent.messages[1] == goal, f"messages[1] changed: {agent.messages[1]}"
+    assert str(agent.messages[2]["content"]).startswith(context.SUMMARY_PREFIX), agent.messages[2]
+    _assert_wire_valid(agent.messages)
+    declared = {c["id"] for m in agent.messages for c in (m.get("tool_calls") or [])}
+    assert {"call_1", "call_2"} <= declared, declared
+    print(f"ok  compact_now: parallel image results never orphan a tool_call ({removed} removed)")
+
+
+def compact_now_cancelled_check() -> None:
+    """A Stop read after the summary throws the result away."""
+    import copy
+
+    agent = _compact_agent(_orphan_layout())
+    before = copy.deepcopy(agent.messages)
+    asked = []
+
+    def summary(model, messages, **kwargs):
+        asked.append(model)
+        return _summary_llm(model, messages, **kwargs)
+
+    with patch.object(llm, "chat", summary):
+        removed, _saved = agent.compact_now(cancelled=lambda: True)
+    assert removed == 0, removed
+    assert agent.messages == before, "a cancelled compaction changed the transcript"
+    print("ok  compact_now: cancelled, the transcript stays byte-identical")
+
+
+def _long_agent():
+    goal = "build the VEX drivetrain and report the wheelbase"
+    messages = [{"role": "system", "content": "sys"}, {"role": "user", "content": goal}]
+    for i in range(12):
+        messages.append({"role": "assistant", "content": None,
+                         "tool_calls": [{"id": f"c{i}", "function": {"name": "read_file", "arguments": "{}"}}]})
+        messages.append({"role": "tool", "tool_call_id": f"c{i}", "name": "read_file", "content": "x" * 200})
+        messages.append({"role": "user", "content": f"step {i}"})
+    return _compact_agent(messages, keep_recent=6), goal
+
+
+def typed_compact_output_check() -> None:
+    """Pin (passes today): a typed "/compact" says what it always said."""
+    import copy
+
+    agent, goal = _long_agent()
+    expected_copy = copy.deepcopy(agent.messages) + [{"role": "user", "content": "/compact"}]
+    seen = []
+    agent.on_event = lambda kind, data: seen.append((kind, data))
+    with patch.object(llm, "chat", _summary_llm):
+        expected = context.manage(expected_copy, agent.policy, summarize=agent._summarize, force=True)
+        turn = agent.run_turn("/compact")
+    assert [k for k, _ in seen] == ["context", "text"], [k for k, _ in seen]
+    stats = seen[0][1]
+    assert turn.text == f"Compacted; saved {stats.saved:,} tokens.", turn.text
+    assert stats.saved == expected.saved and stats.messages_compacted == expected.messages_compacted, (
+        stats, expected)
+    assert seen[1][1] == turn.text
+    assert agent.messages[1]["content"] == goal
+    assert any(m.get("content") == "/compact" for m in agent.messages), "the typed request is kept"
+    _assert_wire_valid(agent.messages)
+    print("ok  compact_now: a typed /compact's words and events are unchanged")
+
+
+def typed_compact_uses_compact_now_check() -> None:
+    """Mutation: the button and a typed /compact run different processes."""
+    agent, _goal = _long_agent()
+    original = Agent.compact_now
+    calls = []
+
+    def spy(self, *args, **kwargs):
+        calls.append((args, kwargs))
+        return original(self, *args, **kwargs)
+
+    with patch.object(Agent, "compact_now", spy), patch.object(llm, "chat", _summary_llm):
+        turn = agent.run_turn("/compact")
+    assert len(calls) == 1, f"run_turn called compact_now {len(calls)} times"
+    assert turn.text.startswith("Compacted; saved "), turn.text
+    print("ok  compact_now: a typed /compact goes through Agent.compact_now")
+
+
+def compact_now_checks() -> list[str]:
+    failed = []
+    for check in (compact_now_orphan_check, compact_now_cancelled_check,
+                  typed_compact_output_check, typed_compact_uses_compact_now_check):
+        try:
+            check()
+        except Exception as exc:  # noqa: BLE001 - reported, and the run fails
+            failed.append(check.__name__)
+            print(f"FAIL {check.__name__}: {type(exc).__name__}: {exc}")
+    return failed
+
+
 def main() -> int:
     # The owner's real model selection must not decide what this suite
     # asserts. `models.tier()` resolves through ~/.config/jarvis/models.json,
@@ -582,6 +732,10 @@ def main() -> int:
     manage_checks()
     compaction_prompt_checks()
     empty_turn_checks()
+    failed = compact_now_checks()
+    if failed:
+        print(f"\n{len(failed)} context check(s) failed: {', '.join(failed)}")
+        return 1
     print("\nall context checks passed")
     return 0
 

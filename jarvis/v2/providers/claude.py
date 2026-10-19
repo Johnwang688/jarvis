@@ -1778,14 +1778,16 @@ class ClaudeProvider:
         events.put(Event(EventKind.ERROR, session.thread_id, {"message": note, "fatal": False}))
         return held
 
-    async def _compact(self, session: _Session, events: queue.Queue) -> bool:
+    async def _compact(self, session: _Session, events: queue.Queue,
+                       why: list | None = None) -> bool:
         """Run the CLI's `/compact` (the stream-json form the Agent SDK
         documents) and read it to its result. -> whether a compact boundary
         came back. Shown as one tool call, so the wait is visible; bounded by
         COMPACT_TIMEOUT_S, after which the compaction is interrupted; and the
         owner's Stop is looked for every INTERRUPT_POLL_S, so it ends the wait
         at once (`interrupt()` has already told the CLI). A read left waiting
-        stays the pump's, for the next turn."""
+        stays the pump's, for the next turn. `why`, when given, gets one
+        sentence saying why it did not compact (not for a Stop)."""
         uid = str(uuid.uuid4())
         call_id = f"compact-{uid[:8]}"
         events.put(Event(EventKind.TOOL_STARTED, session.thread_id,
@@ -1803,6 +1805,9 @@ class ClaudeProvider:
                 if left <= 0:
                     with contextlib.suppress(Exception):
                         await session.client.interrupt()
+                    if why is not None:
+                        why.append(f"Claude Code's /compact did not finish within "
+                                   f"{COMPACT_TIMEOUT_S:g} s, so it was interrupted.")
                     break
                 try:
                     item = await self._next(session, min(left, INTERRUPT_POLL_S))
@@ -1810,6 +1815,8 @@ class ClaudeProvider:
                     continue
                 if item is _END:
                     session.pump = None
+                    if why is not None:
+                        why.append("Claude Code's stream ended before /compact finished.")
                     break
                 if isinstance(item, _Raised):
                     session.pump = None
@@ -1822,6 +1829,10 @@ class ClaudeProvider:
                     continue
                 if self._take(session, events, item) is not None:
                     compacted = compacted and not item.is_error
+                    if not compacted and why is not None:
+                        said = _safe(getattr(item, "result", None) or "").strip()[:160]
+                        why.append("Claude Code's /compact ended without compacting"
+                                   + (f": {said}" if said else "."))
                     break
         finally:
             events.put(Event(EventKind.TOOL_FINISHED, session.thread_id, {
@@ -2110,6 +2121,104 @@ class ClaudeProvider:
         future = asyncio.run_coroutine_threadsafe(turn(), session.loop)
         finished = False
         try:
+            while True:
+                item = events.get()
+                if item is done:
+                    break
+                if item.kind in (EventKind.TURN_FINISHED, EventKind.ERROR):
+                    finished = True
+                yield item
+        finally:
+            if not finished and not future.done():
+                self.interrupt(h)
+            future.cancel()
+
+    # -- the Compact button (2026-10-19) ----------------------------------------
+
+    def compact_refusal(self, h: SessionHandle) -> str | None:
+        """Why `compact` would not run now, in one plain sentence, or None.
+        Reads two fields; sends nothing (the daemon asks under its lock)."""
+        session = h.native
+        if session is None or session.closed:
+            return "This chat's Claude session is closed; send a message to resume it first."
+        if session.offer is not None:
+            return "Claude Code is running a turn of its own; compact when it ends."
+        return None
+
+    def compact(self, h: SessionHandle) -> Iterator[Event]:
+        """The owner's Compact button: the CLI's own `/compact` (`_compact`,
+        the same one a context-full turn runs) as a turn with no message, in
+        the shape of `adopt`/`_run_cli`. Takes `sending` without blocking (a
+        turn holds it: ends "error", nothing written), takes the stream,
+        clears `interrupted`, and ends with TURN_FINISHED {"stop",
+        "compacted", "reason"}: a boundary is "end"; COMPACT_TIMEOUT_S passing
+        (interrupted for it) or a result with no boundary is "error" with a
+        reason; the owner's Stop is "interrupted", seen within
+        INTERRUPT_POLL_S. A steer meanwhile is refused (`accepting` stays
+        False), so the daemon queues it. Usage and cost flow through `_take`,
+        once."""
+        session = h.native
+        if session is None or session.closed:
+            yield Event(EventKind.TURN_STARTED, h.thread_id)
+            yield Event(EventKind.TURN_FINISHED, h.thread_id,
+                        {"stop": "error", "compacted": False, "reason": "session closed"})
+            return
+        if not session.sending.acquire(blocking=False):
+            yield Event(EventKind.TURN_STARTED, h.thread_id)
+            yield Event(EventKind.TURN_FINISHED, h.thread_id,
+                        {"stop": "error", "compacted": False,
+                         "reason": "a turn is already running on this thread"})
+            return
+        try:
+            yield from self._run_compact(h, session)
+        finally:
+            session.events = None
+            with session.mutex:
+                session.accepting = False
+            session.sending.release()
+
+    def _run_compact(self, h: SessionHandle, session: _Session) -> Iterator[Event]:
+        events: queue.Queue = queue.Queue()
+        session.events = events
+        done = object()
+
+        async def turn() -> None:
+            try:
+                await self._take_stream(session)
+                if session.offer is not None:
+                    # The CLI began a turn of its own after the daemon asked:
+                    # it runs first (`adopt`), and nothing is written here.
+                    events.put(Event(EventKind.TURN_FINISHED, session.thread_id, {
+                        "stop": "error", "compacted": False,
+                        "reason": "Claude Code started a turn of its own; compact when it ends."}))
+                    return
+                session.interrupted = False
+                session.tools_seen.clear()
+                session.denied_tools.clear()
+                session.denial_without_id = False
+                why: list = []
+                compacted = await self._compact(session, events, why)
+                for event in self._end_foreground(session):
+                    events.put(event)
+                if session.interrupted:
+                    end = {"stop": "interrupted", "compacted": False, "reason": None}
+                elif compacted:
+                    end = {"stop": "end", "compacted": True, "reason": None}
+                else:
+                    end = {"stop": "error", "compacted": False,
+                           "reason": why[0] if why else "Claude Code's /compact did not finish."}
+                events.put(Event(EventKind.TURN_FINISHED, session.thread_id, end))
+            except BaseException as exc:  # noqa: BLE001 — reported, never swallowed
+                events.put(Event(EventKind.ERROR, session.thread_id,
+                                 {"message": _fatal_message(session, exc), "fatal": True}))
+            finally:
+                self._give_stream(session)
+                events.put(done)
+
+        future = asyncio.run_coroutine_threadsafe(turn(), session.loop)
+        finished = False
+        try:
+            yield Event(EventKind.TURN_STARTED, h.thread_id)
             while True:
                 item = events.get()
                 if item is done:

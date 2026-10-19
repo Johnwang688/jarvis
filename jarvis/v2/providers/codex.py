@@ -80,7 +80,8 @@ import subprocess
 import tempfile
 import threading
 import time
-from typing import Iterator
+from typing import Callable, Iterator
+import uuid
 
 from jarvis import config
 from jarvis.v2.model import ProviderName, Thread
@@ -89,6 +90,7 @@ from jarvis.v2.provider import (Brief, BriefRefused, Decision, Event, EventKind,
                                PermissionCallback, SessionHandle, SteerRefused, Usage,
                                UserMessage, takes_keyword as _takes_keyword)
 from ..approvals import clean_line
+from ..redact import scrub_text
 from . import codex_cli, codex_config
 from .codex_rpc import RpcCancelled, RpcError, RpcProcess, RpcTimeout
 from .codex_usage import Accounting
@@ -105,6 +107,14 @@ STEER_TIMEOUT = 10.0
 # interrupting instead.
 _NO_METHOD = -32601
 _STALE_STEERS = 64
+# The HUD's Compact button (plan 2026-10-19 §1): Codex's own compaction,
+# `thread/compact/start {threadId}` (0.161.0; answered `{}`, no turn id; the
+# turn id comes with the `turn/started` that follows, and a `contextCompaction`
+# item, or the deprecated `thread/compacted`, is the compaction). A Codex
+# without the method answers -32601, said once in this sentence and
+# remembered for the session (`compact_unsupported`).
+NO_COMPACT = "This Codex has no thread/compact/start; update Codex to compact."
+COMPACT_REASON_CAP = 200
 # One deadline for a whole account-metadata session, which holds `_auth_lock`
 # and so keeps every Codex turn from starting while it runs.
 METADATA_DEADLINE_S = 10.0
@@ -637,6 +647,13 @@ class _Session:
     steers: dict = field(default_factory=dict)
     stale_steers: deque = field(default_factory=lambda: deque(maxlen=_STALE_STEERS))
     steer_unsupported: bool = False
+    # The Compact button (plan 2026-10-19 §1): whether this Codex answered
+    # `thread/compact/start` with -32601 (then `compact_refusal` says so and
+    # nothing is sent again), and whether a compaction runs now (a steer is
+    # then refused for the daemon to queue, never sent into it). Both are
+    # written under `mutex`.
+    compact_unsupported: bool = False
+    compacting: bool = False
     # Sub-agents (SV-2a): child threadId -> its label (`agentPath`), oldest
     # first, for the session's life (children outlive the turn that spawned
     # them); which of them have no turn running (CHILD_LIMIT evicts those);
@@ -1108,10 +1125,78 @@ class CodexProvider:
         return value if value.get("retry_at", 0) > time.time() else None
 
     def send(self, h: SessionHandle, message: UserMessage) -> Iterator[Event]:
+        yield from self._drive(h, "turn/start", lambda: {"threadId": h.native.thread_id,
+                                                         "input": self._inputs(message)},
+                               compaction=False)
+
+    def compact_refusal(self, h: SessionHandle) -> str | None:
+        """Why `compact(h)` would not run now, in one plain sentence, or None
+        when it would. Cheap, and sends nothing (plan 2026-10-19 §1)."""
+        s = h.native
+        if s is None or s.closed.is_set():
+            return "This chat's Codex session is closed, so it cannot compact."
+        if s.compact_unsupported:
+            return NO_COMPACT
+        if s.sending.locked():
+            return "A turn is running; compact when it ends."
+        if not s.accounting.complete:
+            return "This Codex session's accounting is incomplete; start a fresh chat to compact."
+        return None
+
+    def compact(self, h: SessionHandle) -> Iterator[Event]:
+        """Codex's own compaction of the thread, as a turn with no message
+        (plan 2026-10-19 §1, recorded on 0.161.0 in
+        tests/v2/fixtures/compact/). One `thread/compact/start {threadId}`
+        (its params hold nothing else), driven by `send`'s loop: the reader
+        handshake, `_auth_lock`, accounting and cooldown are the same. Yields
+        TURN_STARTED, a `compact` TOOL_STARTED/TOOL_FINISHED pair, any USAGE,
+        then TURN_FINISHED {"stop", "compacted", "reason"} last.
+        `interrupt(h)` ends it (with the compaction's turn id once Codex
+        has named it); a steer meanwhile is refused for the daemon to queue."""
+        yield from self._drive(h, "thread/compact/start", lambda: {"threadId": h.native.thread_id},
+                               compaction=True)
+
+    @staticmethod
+    def _compact_reason(text, fallback: str) -> str:
+        """Codex's own words on a compaction that did not happen, as one
+        scrubbed display line; `fallback` when there are none or they
+        cannot be scrubbed (never shown unscrubbed)."""
+        if not isinstance(text, str) or not text.strip():
+            return fallback
+        try:
+            text = scrub_text(text)
+        except Exception:  # noqa: BLE001 — withheld, never shown unscrubbed
+            return fallback
+        return clean_line(text, COMPACT_REASON_CAP) or fallback
+
+    def _drive(self, h: SessionHandle, request_method: str, make_params: Callable[[], dict], *,
+               compaction: bool) -> Iterator[Event]:
+        """One turn on the transport: `send`'s (`turn/start`) or, with
+        `compaction`, the Compact button's (`thread/compact/start`). In
+        compaction mode the turn id is learned from the first `turn/started`
+        on this thread (the reply carries none), a `contextCompaction` item
+        or `thread/compacted` is the success, a completion without usage is
+        not fatal, -32601 is remembered, and TURN_FINISHED also says
+        `compacted` and `reason`."""
         s = h.native
         if not s.sending.acquire(blocking=False):
             raise ValueError("Codex session already has an active send")
         acquired, submitted, completed, reading = False, False, False, False
+        call_id, compacted = None, False
+
+        def finished(stop, reason=None):
+            if not compaction:
+                return self._event(h, EventKind.TURN_FINISHED, stop=stop)
+            return self._event(h, EventKind.TURN_FINISHED, stop=stop,
+                               compacted=compacted and stop == "end", reason=reason)
+
+        def tool_done(ok):
+            nonlocal call_id
+            done = self._event(h, EventKind.TOOL_FINISHED, call_id=call_id, name="compact", ok=ok,
+                               outcome="ok" if ok else "failed",
+                               summary="conversation compacted" if ok else "compaction did not finish")
+            call_id = None
+            return done
         try:
             # The transport's one reader (SV-6): the idle drain lets go between
             # messages; a child's card it is waiting on holds it, and this
@@ -1128,28 +1213,31 @@ class CodexProvider:
             if s.closed.is_set():
                 raise RpcError("Codex session is closed")
             if not reading:
-                yield self._event(h, EventKind.TURN_FINISHED, stop="interrupted")
+                yield finished("interrupted")
                 return
             while not acquired:
                 if s.closed.is_set():
                     raise RpcError("Codex session is closed")
                 if s.cancelled.is_set():
-                    yield self._event(h, EventKind.TURN_FINISHED, stop="interrupted")
+                    yield finished("interrupted")
                     return
                 acquired = _auth_lock.acquire(timeout=0.05)
             if s.closed.is_set():
                 raise RpcError("Codex session is closed")
             if not s.accounting.complete:
                 raise RpcError("Codex previous turn accounting incomplete; start a fresh thread")
-            if s.brief.max_turns is not None and s.accounting.turns >= s.brief.max_turns:
-                yield self._event(h, EventKind.TURN_FINISHED, stop="max_turns")
+            # A compaction is the owner's button on a chat, not one of a
+            # brief's turns: never refused as past `max_turns`.
+            if (not compaction and s.brief.max_turns is not None
+                    and s.accounting.turns >= s.brief.max_turns):
+                yield finished("max_turns")
                 return
             cooldown = self._cooldown(s.brief.model)
             if cooldown:
                 yield self._event(h, EventKind.ERROR, message="Codex model cooling", fatal=False, **cooldown)
-                yield self._event(h, EventKind.TURN_FINISHED, stop="error")
+                yield finished("error", "The Codex model is cooling down; try again later.")
                 return
-            inputs = self._inputs(message)
+            params = make_params()
             s.accounting.complete = False
             s.accounting.turns += 1
             s.accounting.save()
@@ -1158,18 +1246,32 @@ class CodexProvider:
             s.mcp_calls.clear()
             submitted = True
             start_deadline = time.monotonic() + START_TIMEOUT
-            params = {"threadId": s.thread_id, "input": inputs}
-            # turn/start's `model` and `effort` override "this turn and
-            # subsequent turns" (TurnStartParams; unchanged 0.153.4 → 0.161.0), so
-            # a change rides the next turn and then sticks to the thread.
-            override, s.override = s.override, None
-            params.update(override or {})
-            request = s.rpc.send("turn/start", params)
+            if compaction:
+                # `thread/compact/start` takes only the thread: a model
+                # change waits for the next `turn/start`. Under the lock
+                # `steer` reads it with, so no steer is sent into it.
+                with s.mutex:
+                    s.compacting = True
+            else:
+                # turn/start's `model` and `effort` override "this turn and
+                # subsequent turns" (TurnStartParams; unchanged 0.153.4 → 0.161.0), so
+                # a change rides the next turn and then sticks to the thread.
+                override, s.override = s.override, None
+                params.update(override or {})
+            request = s.rpc.send(request_method, params)
             started, response_seen, capacity, saw_usage = False, False, False, False
             early = deque()
+            if compaction:
+                # Shown at once, as one tool call, so the wait is visible.
+                started = True
+                yield from self._turn_started(h, s)
+                call_id = f"compact-{uuid.uuid4().hex[:8]}"
+                yield self._event(h, EventKind.TOOL_STARTED, call_id=call_id, name="compact", args={})
             while True:
                 if not response_seen and time.monotonic() >= start_deadline:
-                    raise RpcError("Codex turn/start response deadline expired")
+                    raise RpcError(f"Codex {request_method} response deadline expired")
+                if compaction and s.turn_id is None and time.monotonic() >= start_deadline:
+                    raise RpcError("Codex compaction turn never started")
                 if s.interrupt_at is not None and time.monotonic() - s.interrupt_at >= INTERRUPT_TIMEOUT:
                     raise RpcError("Codex turn interrupt deadline expired")
                 if s.closed.is_set():
@@ -1187,7 +1289,28 @@ class CodexProvider:
                         # items count in the order Codex sent them (SV-2a).
                         self._note_child(s, msg["method"], msg.get("params"))
                 if "method" not in msg:
-                    if msg.get("id") == request:
+                    if msg.get("id") == request and compaction:
+                        if "error" in msg:
+                            # Refused: no compaction turn ran, so the
+                            # accounting is as complete as it was.
+                            error = msg["error"] if isinstance(msg["error"], dict) else {}
+                            s.accounting.complete = True
+                            s.accounting.turns -= 1
+                            s.accounting.save()
+                            completed = True
+                            if error.get("code") == _NO_METHOD:
+                                with s.mutex:
+                                    s.compact_unsupported = True
+                                reason = NO_COMPACT
+                            else:
+                                reason = self._compact_reason(error.get("message"),
+                                                              "Codex refused to compact the conversation.")
+                            yield tool_done(False)
+                            yield finished("error", reason)
+                            return
+                        # `{}`: no turn id; the `turn/started` that follows names it.
+                        response_seen = True
+                    elif msg.get("id") == request:
                         if "error" in msg:
                             raise RpcError("Codex turn/start failed; submission outcome unknown")
                         turn_id = msg["result"]["turn"]["id"]
@@ -1250,6 +1373,8 @@ class CodexProvider:
                             raise RpcError("Codex server request identity mismatch")
                         if s.turn_id is None:
                             s.turn_id = params.get("turnId")
+                            if compaction and s.cancelled.is_set():
+                                self.interrupt(h)   # a Stop that came before the turn id
                     # A child's turnId is its own: it never becomes s.turn_id.
                     if not started:
                         started = True
@@ -1289,6 +1414,18 @@ class CodexProvider:
                     yield from self._announce(h, method, params)
                 if params.get("threadId") not in (None, s.thread_id):
                     continue
+                if (compaction and s.turn_id is None and method == "turn/started"
+                        and params.get("threadId") == s.thread_id):
+                    # The compaction's reply named no turn: the first turn to
+                    # start on this thread is the compaction's. A Stop that
+                    # came first is sent now, naming it.
+                    turn_id = (params.get("turn") or {}).get("id")
+                    if not isinstance(turn_id, str) or not turn_id:
+                        raise RpcError("Codex returned an invalid turn identity")
+                    with s.mutex:
+                        s.turn_id = turn_id
+                    if s.cancelled.is_set():
+                        self.interrupt(h)
                 tid = params.get("turnId", (params.get("turn") or {}).get("id"))
                 if tid is not None and tid != s.turn_id:
                     continue  # resume may replay previous-turn counters and items
@@ -1310,7 +1447,9 @@ class CodexProvider:
                     status = params["turn"]["status"]
                     err = params["turn"].get("error") or {}
                     capacity |= err.get("codexErrorInfo") in ("serverOverloaded", "rateLimitExceeded", "usageLimitExceeded")
-                    if status == "completed" and not saw_usage:
+                    # A compaction may report no usage of its own (its
+                    # totals are cumulative and already counted): not fatal.
+                    if status == "completed" and not saw_usage and not compaction:
                         raise RpcError("Codex completed without token usage; accounting incomplete")
                     if capacity:
                         retry = self._cooldown(s.brief.model, failed=True)
@@ -1344,15 +1483,39 @@ class CodexProvider:
                                           cached=u.cached_tokens, cost_usd=None, provider_reported={},
                                           partial_turns=s.accounting.partial_turns)
                     yield from self._mcp_unfinished(h)
-                    yield self._event(h, EventKind.TURN_FINISHED,
-                                      stop={"completed": "end", "interrupted": "interrupted"}.get(status, "error"))
+                    stop = {"completed": "end", "interrupted": "interrupted"}.get(status, "error")
+                    if compaction:
+                        compacted = compacted and status == "completed"
+                        reason = None
+                        if status == "failed":
+                            reason = self._compact_reason(err.get("message"),
+                                                          "Codex could not compact the conversation.")
+                        elif status == "completed":
+                            if not compacted:
+                                reason = "Codex finished without compacting the conversation."
+                        elif status != "interrupted":
+                            reason = "Codex ended the compaction unexpectedly."
+                        yield tool_done(compacted)
+                        yield finished(stop, reason)
+                    else:
+                        yield finished(stop)
                     return
+                elif compaction and method == "thread/compacted":
+                    compacted = True        # deprecated in 0.161.0, still the success
+                elif (compaction and method in ("item/started", "item/completed")
+                        and isinstance(params.get("item"), dict)
+                        and params["item"].get("type") == "contextCompaction"):
+                    compacted = compacted or method == "item/completed"
                 else:
                     yield from self._notification(h, method, params)
         except (RpcError, OSError, KeyError, TypeError, ValueError, AttributeError) as exc:
             yield from self._mcp_unfinished(h)
             self.close(h)
+            if call_id is not None:
+                yield tool_done(False)
             yield self._event(h, EventKind.ERROR, message=str(exc), fatal=True)
+            if compaction:
+                yield finished("error", "Codex failed while compacting; its session was closed.")
         finally:
             # A consumer abandoning the iterator must not leave a model mutating
             # files while another session acquires the shared-login lock.
@@ -1374,6 +1537,8 @@ class CodexProvider:
                     waiter.ready.set()
                     s.stale_steers.append(rid)
                 s.steers.clear()
+                if compaction:
+                    s.compacting = False
             s.interrupt_at = None
             s.mcp_items.clear()
             s.cancelled.clear()
@@ -2284,21 +2449,28 @@ class CodexProvider:
         Refused, for the daemon to queue, when no turn is running or the turn
         is waiting on an approval or a question (a steer must never read as
         an answer), and when Codex refuses it (the turn ended first, a
-        compaction turn). A Codex without the method is refused with the
-        `interrupt` fallback, so the daemon interrupts the turn and runs the
-        message next instead. No answer within STEER_TIMEOUT is *unknown*,
-        not refused: it is taken as delivered and logged, never queued too.
+        compaction turn). A compaction the Compact button started refuses it
+        here, before anything is sent, and always to queue: never the
+        `interrupt` fallback, which would stop the compaction. A Codex
+        without the method is refused with the `interrupt` fallback, so the
+        daemon interrupts the turn and runs the message next instead. No
+        answer within STEER_TIMEOUT is *unknown*, not refused: it is taken as
+        delivered and logged, never queued too.
         Returns False for that unconfirmed receipt, so Browser owner context
         cannot treat it as accepted; True means Codex answered successfully.
         """
         s = h.native
         if s is None or s.closed.is_set():
             raise SteerRefused("Codex session is closed")
+        if s.compacting:
+            raise SteerRefused("Codex is compacting the conversation")
         if s.steer_unsupported:
             raise SteerRefused("this Codex has no turn/steer", fallback="interrupt")
         inputs = self._inputs(message)
         waiter = _Steer()
         with s.mutex:
+            if s.compacting:
+                raise SteerRefused("Codex is compacting the conversation")
             if s.turn_id is None or s.cancelled.is_set():
                 raise SteerRefused("no Codex turn is running")
             if s.pending:

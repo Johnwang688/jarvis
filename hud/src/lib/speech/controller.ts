@@ -59,6 +59,8 @@ export interface SpeechEventLike {
   /** A record of a turn another chat's message started, or of the reply turn
    * that reports its answer (chat-to-chat O-8): never spoken. */
   relayed?: unknown;
+  /** A record of a compaction turn (WP-C): never spoken. */
+  compaction?: boolean;
 }
 
 export interface SpeakerGateLike {
@@ -420,6 +422,9 @@ export class SpeechController {
     // in this window, so it is not read to him. The daemon marks each such
     // record `relayed: {message_id, from}` beside `kind`.
     if (e.relayed !== null && typeof e.relayed === "object") return;
+    // Nor is a compaction: its one line ("Conversation compacted") is for the
+    // log, and the owner did not ask for it to be read (WP-C).
+    if (e.compaction === true) return;
     if (!this.speaks(thread)) {
       if (this.open.has(thread)) this.open.delete(thread);
       return;

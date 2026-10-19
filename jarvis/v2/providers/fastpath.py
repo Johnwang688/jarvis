@@ -91,6 +91,9 @@ FAST_EDIT_MAX_STEPS = config.FAST_EDIT_STEPS
 # this in a ticker; the transcript already holds the whole thing.
 SUMMARY_CHARS = 200
 
+# The Compact button on a conversation `find_cut_point` finds no cut in.
+NOTHING_TO_COMPACT = "Nothing to compact yet: the conversation is still short."
+
 # How a v1 tool result says "this did not happen". See `_TurnState._on_tool_end`.
 _NOT_OK = ("Error", "Refused", "The user declined")
 # The exact framing written by tools.dispatch and its approval gate.
@@ -762,6 +765,98 @@ class FastPathProvider:
         """
         native = h.native
         return Usage(cost_usd=native.cost_usd if native is not None else 0.0)
+
+    # -- the Compact button (2026-10-19)
+
+    def compact_refusal(self, h: SessionHandle) -> str | None:
+        """Why `compact` would not run now, or None. Sends nothing."""
+        native = h.native
+        if native is None or native.closed:
+            return "This chat's conversation is closed; send a message to reopen it first."
+        return None
+
+    def compact(self, h: SessionHandle) -> Iterator[Event]:
+        """The owner's Compact button: v1's own compaction (`Agent.compact_now`,
+        the process a typed "/compact" runs), as a turn with no message.
+
+        Takes `busy` without blocking (a turn holds it: ends "error", nothing
+        changed). On a worker it summarises a deep copy of the transcript and
+        puts it back only if no Stop came, then saves the messages file alone
+        (`Session.save_messages`: no turn counted, no log line). Invariant 1
+        holds as for automatic compaction: the cut comes from
+        `find_cut_point` and `messages[1]` is pinned. A Stop cannot abort a
+        summary call in flight; its result is thrown away, and this waits for
+        it (holding `busy`), so a later turn's cleared stop can never let a
+        stale summary land. The summary's text stays in the v1 session file;
+        no event carries it."""
+        native = h.native
+        if native is None or native.closed:
+            yield Event(EventKind.TURN_STARTED, h.thread_id)
+            yield Event(EventKind.TURN_FINISHED, h.thread_id,
+                        {"stop": "error", "compacted": False, "reason": "session closed"})
+            return
+        if not native.busy.acquire(blocking=False):
+            yield Event(EventKind.TURN_STARTED, h.thread_id)
+            yield Event(EventKind.TURN_FINISHED, h.thread_id,
+                        {"stop": "error", "compacted": False,
+                         "reason": "a turn is already running on this thread"})
+            return
+        try:
+            yield from self._compact(h, native)
+        finally:
+            native.busy.release()
+
+    def _compact(self, h: SessionHandle, native: _Native) -> Iterator[Event]:
+        thread_id = h.thread_id
+        # A Stop aimed at the previous turn does not kill this one (as `_run`).
+        native.stop.clear()
+        agent = native.agent
+        # The last turn's event sink is nobody's now; context stats are
+        # bookkeeping either way (`_TurnState` drops them).
+        agent.on_event = lambda kind, data: None
+        result: dict[str, Any] = {}
+
+        def work() -> None:
+            try:
+                removed, _saved = agent.compact_now(cancelled=native.stop.is_set)
+                result["removed"] = removed
+                if removed:
+                    # The working-context block is rebuilt every step and
+                    # never saved (invariant 7), as `run_turn` drops it.
+                    agent._drop_context_block()
+                    native.session.save_messages(agent.messages)
+            except BaseException as exc:  # noqa: BLE001 — reported, never swallowed
+                result["error"] = exc
+
+        worker = threading.Thread(target=work, name=f"jarvis-fast-compact-{thread_id}",
+                                  daemon=True)
+        call = {"call_id": "compact-1", "name": "compact"}
+        yield Event(EventKind.TURN_STARTED, thread_id)
+        yield Event(EventKind.TOOL_STARTED, thread_id, {**call, "args": {}})
+        worker.start()
+        try:
+            worker.join()
+        finally:
+            if worker.is_alive():           # the consumer left: stop, and wait it out
+                native.stop.set()
+                worker.join()
+        error, removed = result.get("error"), result.get("removed", 0)
+        if error is not None:
+            stop, compacted, reason = "error", False, f"{type(error).__name__}: {error}"
+        elif removed:
+            stop, compacted, reason = "end", True, None
+        elif native.stop.is_set():
+            stop, compacted, reason = "interrupted", False, None
+        else:
+            stop, compacted, reason = "end", False, NOTHING_TO_COMPACT
+        summary = ("conversation compacted" if compacted
+                   else "nothing to compact" if reason == NOTHING_TO_COMPACT
+                   else "compaction did not finish")
+        yield Event(EventKind.TOOL_FINISHED, thread_id,
+                    {**call, "ok": compacted, "outcome": "ok" if compacted else "failed",
+                     "summary": summary})
+        yield Event(EventKind.TURN_FINISHED, thread_id,
+                    {"stop": stop, "compacted": compacted, "reason": reason})
 
     # -- the turn
 

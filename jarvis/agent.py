@@ -8,6 +8,7 @@ tools it asked for, hand the results back, repeat until it stops asking. Read
 from __future__ import annotations
 
 import contextvars
+import copy
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -575,20 +576,44 @@ class Agent:
                 self.on_event("tool_end", (_call_name(call), results[index].text))
         return results
 
+    def compact_now(self, cancelled: Callable[[], bool] | None = None) -> tuple[int, int]:
+        """Summarise older history now (a typed "/compact", or the HUD's
+        Compact button through the fast path). -> (messages removed, tokens
+        saved).
+
+        The same process as automatic compaction (`context.manage(...,
+        force=True)`), so invariant 1 holds as it does there: the cut comes
+        from `find_cut_point`, never orphaning a tool_call, and
+        `messages[1]` is pinned. It runs on a deep copy, put back only if
+        `cancelled` (read before the summary is asked for and again after it
+        returns) is still false: a summary call already in flight cannot be
+        aborted, so a Stop throws its result away and the transcript stays
+        exactly as it was (`(0, 0)`). The context stats go to `on_event`
+        ("context") only when applied."""
+        if cancelled is not None and cancelled():
+            return 0, 0
+        memo: dict = {}
+        working = copy.deepcopy(self.messages, memo)
+        stats = context.manage(working, self.policy, summarize=self._summarize, force=True)
+        if cancelled is not None and cancelled():
+            return 0, 0
+        # The working-context block is found by identity (invariant 7), so
+        # its copy, if compaction kept it, goes back as the block itself.
+        block = self._context_block
+        twin = memo.get(id(block)) if block is not None else None
+        if twin is not None:
+            working = [block if message is twin else message for message in working]
+        self.messages[:] = working
+        self.on_event("context", stats)
+        return stats.messages_compacted, stats.saved
+
     def run_turn(self, user_input: str, images: list | None = None) -> Turn:
         """One user message through the loop, saved to the session if bound."""
         if not images and self._is_compact_request(user_input):
             self._refresh_system()
             self.messages.append({"role": "user", "content": user_input})
-            active = contextctl.ActiveContext(
-                self.messages, self.policy, self._summarize, self.on_event
-            )
-            token = contextctl.bind(active)
-            try:
-                compacted = contextctl.compact_now()
-            finally:
-                contextctl.reset(token)
-            turn = Turn(text=compacted)
+            _removed, saved = self.compact_now()
+            turn = Turn(text=f"Compacted; saved {saved:,} tokens.")
             self.on_event("text", turn.text)
         else:
             # A turn owns its plan, approver, cancellation, depth, toolset

@@ -528,6 +528,23 @@ button.tree-row.morechats:focus-visible { box-shadow: inset 0 0 0 1px var(--acce
 .chip b { cursor: pointer; color: var(--text-muted); font-weight: 400; }
 .chip b:hover { color: var(--red); }
 
+/* The Compact chip (WP-C): a Graphite chip, glacier only on hover and while it
+   works; an inline confirm sits above the row, never a window.confirm. */
+button.chip.compactbtn { cursor: pointer; padding: 2px 8px; }
+button.chip.compactbtn:hover:not(:disabled) { color: var(--accent-hi); border-color: var(--accent-line); background: var(--bg-2); }
+button.chip.compactbtn[data-state="running"] { color: var(--accent); border-color: var(--accent-line); background: var(--accent-soft); opacity: 1; }
+button.chip.compactbtn:focus-visible { box-shadow: var(--focus-ring); }
+.compact-confirm {
+  display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: center;
+  font: 11px var(--mono); color: var(--text-2);
+  background: var(--bg-2); border: 1px solid var(--border-strong); border-radius: var(--radius);
+  padding: 5px 8px;
+}
+.compact-confirm > span { flex: 1 1 auto; color: var(--text); }
+.compact-confirm button { padding: 3px 9px; font-size: 11px; }
+.compact-confirm button.compact-yes { background: var(--accent-soft); border-color: var(--accent-line); color: var(--text); }
+.compact-confirm button.compact-yes:hover:not(:disabled) { background: rgba(111, 195, 223, 0.22); }
+
 /* "in: School ▾" — which project a message goes to. A <select> while
    composing, plain text once the thread exists. */
 .projchip { white-space: nowrap; }

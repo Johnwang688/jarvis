@@ -248,6 +248,14 @@ class Session:
                 + "\n"
             )
 
+    def save_messages(self, messages: list[dict[str, Any]]) -> None:
+        """Persist the transcript alone, as `record` does, counting no turn
+        and writing no log line: a compaction the owner started with the
+        HUD's Compact button (2026-10-19) rewrote the model's context, and
+        nobody said anything."""
+        with _lock:
+            _write_json(self._messages_path, _persistable(messages), indent=None)
+
     def record(self, user_input: str, turn, messages: list[dict[str, Any]]) -> None:
         """Persist one completed turn. Called by Agent.run_turn.
 

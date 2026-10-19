@@ -3116,6 +3116,176 @@ def daemon_cost_checks() -> None:
                 daemon.stop()
 
 
+# --- the Compact button (plan 2026-10-19-compact-button-plan.md §1, WP-A) ----
+#
+# `ClaudeProvider.compact(h)` copies `adopt`/`_run_cli`: it takes
+# `session.sending` without blocking (busy: no "/compact" is written and the
+# turn ends `stop: "error"`, `compacted: False`, with a reason), takes the
+# stream, clears `interrupted`, runs the existing `_compact(session, events)`,
+# then `_end_foreground` and `_give_stream`, and puts a TURN_FINISHED
+# {"stop", "compacted", "reason"}. Chosen where the plan is terse: a boundary
+# is `stop: "end", compacted: True, reason: None`; COMPACT_TIMEOUT_S passing
+# interrupts the CLI and ends `stop: "error", compacted: False` with a reason
+# (the owner did not stop it); the owner's Stop ends it `stop: "interrupted",
+# compacted: False` within INTERRUPT_POLL_S (the 2 s bound below is slack for
+# a loaded machine). `compact_refusal(h)` says a sentence while the session
+# is closed or an `offer` (a CLI turn nobody sent) is pending, else None.
+# Each case below is separate, so on today's code each fails alone.
+
+
+def _compact_bounded(provider, handle, timeout: float = 5.0):
+    """`provider.compact(handle)` drained on a thread; None if it hangs."""
+    compact = provider.compact          # today: AttributeError, this case fails alone
+    box: dict = {}
+    worker = threading.Thread(target=lambda: box.setdefault("events", list(compact(handle))),
+                              daemon=True)
+    worker.start()
+    worker.join(timeout)
+    return box.get("events")
+
+
+def _compact_end(events, label: str):
+    check(bool(events), f"{label}: compact ended")
+    events = events or []
+    check(bool(events) and events[0].kind is EventKind.TURN_STARTED, f"{label}: opens with turn_started")
+    check(bool(events) and events[-1].kind is EventKind.TURN_FINISHED, f"{label}: ends with turn_finished")
+    eq(kinds(events).count("turn_finished"), 1, f"{label}: one finish")
+    return events[-1].data if events else {}
+
+
+def compact_button_ok_check(provider) -> None:
+    with steer_fake([*compacted(), PromptEcho(), assistant("after compacting"), result_message()]):
+        handle = provider.start(thread(), brief(), allow)
+        client = FakeClient.instances[0]
+        try:
+            events = _compact_bounded(provider, handle) or []
+            done = _compact_end(events, "compact button")
+            eq((done.get("stop"), done.get("compacted"), done.get("reason")), ("end", True, None),
+               "compact button: a boundary means compacted")
+            eq(sent_texts(client), ["/compact"], "compact button: the CLI's own /compact, once")
+            tool = [(e.kind.value, e.data.get("name"), e.data.get("ok")) for e in events
+                    if e.kind in (EventKind.TOOL_STARTED, EventKind.TOOL_FINISHED)]
+            eq(tool, [("tool_started", "compact", None), ("tool_finished", "compact", True)],
+               "compact button: one compact tool call that finished")
+            check("usage" in kinds(events), "compact button: its usage is counted")
+            eq([e for e in events if e.kind is EventKind.ERROR], [], "compact button: no error")
+            after = drain_bounded(provider, handle, "and now?")
+            eq(text_of(after or []), ["after compacting"],
+               "compact button: the next send runs (sending and the stream given back)")
+        finally:
+            provider.close(handle)
+
+
+def compact_button_injected_check(provider) -> None:
+    # A background notice's result read during the compaction is somebody
+    # else's turn, never the compaction's end.
+    with steer_fake([notice_replay(), notice_result(), *compacted()]):
+        handle = provider.start(thread(), brief(), allow)
+        try:
+            done = _compact_end(_compact_bounded(provider, handle), "compact button, a notice first")
+            eq((done.get("stop"), done.get("compacted")), ("end", True),
+               "compact button: an injected result is skipped")
+        finally:
+            provider.close(handle)
+
+
+def compact_button_timeout_check(provider) -> None:
+    gate = threading.Event()
+    with timings(COMPACT_TIMEOUT_S=0.3), steer_fake([Pause(gate)]):
+        handle = provider.start(thread(), brief(), allow)
+        client = FakeClient.instances[0]
+        try:
+            started = time.monotonic()
+            events = _compact_bounded(provider, handle)
+            check(events is not None and time.monotonic() - started < 3,
+                  "compact button: a compaction that never ends does not hang")
+            done = _compact_end(events, "compact button, timeout")
+            eq(client.interrupts, 1, "compact button: the stalled compaction is interrupted")
+            eq((done.get("stop"), done.get("compacted")), ("error", False),
+               "compact button: a timeout fails")
+            check(isinstance(done.get("reason"), str) and bool(done.get("reason").strip()),
+                  "compact button: a timeout says why")
+        finally:
+            gate.set()
+            provider.close(handle)
+
+
+def compact_button_stop_check(provider) -> None:
+    gate = threading.Event()
+    with steer_fake([Pause(gate)]):
+        handle = provider.start(thread(), brief(), allow)
+        client = FakeClient.instances[0]
+        try:
+            compact = provider.compact
+            box: dict = {}
+            worker = threading.Thread(target=lambda: box.setdefault("events", list(compact(handle))),
+                                      daemon=True)
+            worker.start()
+            check(wait_for(lambda: len(client.queries) == 1), "compact button: /compact was sent")
+            stopped = time.monotonic()
+            provider.interrupt(handle)
+            worker.join(5)
+            took = time.monotonic() - stopped
+            check("events" in box and took < 2,
+                  f"compact button: Stop ends it within the poll ({took:.2f}s)")
+            done = _compact_end(box.get("events"), "compact button, stopped")
+            eq((done.get("stop"), done.get("compacted")), ("interrupted", False),
+               "compact button: stopped means interrupted, not compacted")
+            eq([e for e in box.get("events") or [] if e.kind is EventKind.ERROR], [],
+               "compact button: a Stop is no error")
+        finally:
+            gate.set()
+            provider.close(handle)
+
+
+def compact_button_busy_check(provider) -> None:
+    with steer_fake([*compacted()]):
+        handle = provider.start(thread(), brief(), allow)
+        client = FakeClient.instances[0]
+        try:
+            handle.native.sending.acquire()
+            try:
+                done = _compact_end(_compact_bounded(provider, handle, timeout=3.0),
+                                    "compact button, busy")
+                eq((done.get("stop"), done.get("compacted")), ("error", False),
+                   "compact button: refused while a turn holds the conversation")
+                eq(len(client.queries), 0, "compact button: and nothing was written")
+            finally:
+                handle.native.sending.release()
+        finally:
+            provider.close(handle)
+
+
+def compact_button_refusal_check(provider) -> None:
+    with steer_fake([]):
+        handle = provider.start(thread(), brief(), allow)
+        try:
+            refusal = provider.compact_refusal
+            eq(refusal(handle), None, "compact_refusal: none while idle")
+            handle.native.offer = "task-notification"
+            said = refusal(handle)
+            check(isinstance(said, str) and bool(said.strip()),
+                  f"compact_refusal: a CLI turn nobody sent is pending (got {said!r})")
+            handle.native.offer = None
+        finally:
+            provider.close(handle)
+        said = provider.compact_refusal(handle)
+        check(isinstance(said, str) and bool(said.strip()),
+              f"compact_refusal: the session is closed (got {said!r})")
+
+
+def compact_button_checks() -> None:
+    print("\n-- the Compact button: ClaudeProvider.compact / compact_refusal")
+    provider = claude.ClaudeProvider()
+    for case in (compact_button_ok_check, compact_button_injected_check,
+                 compact_button_timeout_check, compact_button_stop_check,
+                 compact_button_busy_check, compact_button_refusal_check):
+        try:
+            case(provider)
+        except Exception as exc:  # noqa: BLE001 — this case fails alone
+            check(False, f"{case.__name__}: {type(exc).__name__}: {exc}")
+
+
 def main() -> int:
     # Hermetic: every client in this suite resolves to a fake executable in a
     # temp dir, never the owner's real `claude` (which nothing here may run).
@@ -3141,6 +3311,7 @@ def main() -> int:
     injected_turn_checks()
     context_full_checks()
     unechoed_steer_resend_checks()
+    compact_button_checks()
     error_checks()
     usage_checks()
     running_cost_checks()
