@@ -162,7 +162,8 @@ describe("unsolicited allocation cannot discard work", () => {
     expect(freeId(ws, [4])).toBe(5);
   });
   it("only reclaims the oldest strictly default blank kept pane", () => {
-    const ws = defaultWorkspace(); ws.kept = [8, 7, 6, 5, 4, 3, 2];
+    // Every id but 1 hidden (twelve ids, FS2): 2 hidden longest.
+    const ws = defaultWorkspace(); ws.kept = [12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2];
     expect(blankKeptPane(ws, 2)).toBe(true); expect(freeId(ws)).toBe(2);
     ws.panes[1].browser = { tabs: [], active: "" };
     ws.panes[2].filePath = "draft.ts";
@@ -170,7 +171,14 @@ describe("unsolicited allocation cannot discard work", () => {
     ws.panes[4].terminalId = "term1";
     ws.panes[5].view = "file";
     expect(freeId(ws, [7])).toBe(8);
-    expect(freeId(ws, [7, 8])).toBeNull();
+    expect(freeId(ws, [7, 8, 9, 10, 11, 12])).toBeNull();
+  });
+  it("after ⊞ 8 → 1 places an unsolicited pane in the free id 9, never a hidden one (FS2)", () => {
+    const one = setPreset(setPreset(defaultWorkspace(), "grid8"), "single");
+    expect(one.kept).toEqual([2, 3, 4, 5, 6, 7, 8]);
+    expect(freeId(one)).toBe(9);
+    expect(freeId(one, [9, 10])).toBe(11);
+    expect(autoSplitVerdict(DEFAULT_LAYOUT, one, 1700, 900)).toEqual({ ok: true, id: 9 });
   });
   it("refuses new folds and dropped panes but accepts a split that fits the current chrome", () => {
     const ws = defaultWorkspace();

@@ -64,9 +64,11 @@ def drive_checks(browser,mock,base,check,until,guard,init_script):
     page=ctx.new_page();page.set_default_timeout(5000);errors=[];page.on('pageerror',lambda e:errors.append(str(e)))
     try:
         _boot(page,mock,base,until)
-        panes=[{'view':'chat','projectId':'p1'} for _ in range(8)]
+        # Every id in use and none blank (twelve since FS2; a HUD of eight reads the first eight), so an
+        # automatic dev-server open has no pane to split into and adds a tab instead.
+        panes=[{'view':'chat','projectId':'p1'} for _ in range(12)]
         panes[0]={'view':'browser','browserProfile':'p-11111111','browser':{'active':'pageaa','tabs':[{'id':'pageaa','url':'https://example.test/one','mode':'remote'}]}}
-        raw={'preset':'grid4','order':[1,5,2,3],'kept':[4,6,7,8],'focused':5,'panes':panes}
+        raw={'preset':'grid4','order':[1,5,2,3],'kept':[4,6,7,8,9,10,11,12],'focused':5,'panes':panes}
         _set_storage(page,zoom='100',layout='{}');_set_ws(page,json.dumps(raw));_boot(page,mock,None,until,reload=True)
         page.evaluate("window.__hud.dispatch({type:'chat',pane:5,patch:{threadId:'t1'}})")
         active=_pane(1,'[data-browser-page][aria-hidden="false"]');canvas=page.locator(active+' canvas')

@@ -349,6 +349,18 @@ describe("shortcuts", () => {
     expect(k("1", { altKey: true, shiftKey: true })).toBeNull();
   });
 
+  it("keeps Ctrl+Alt+9 and Ctrl+Alt+0 unbound with twelve pane ids: panes 9–12 are click-only (decision FS-9)", () => {
+    expect(k("9", { altKey: true, code: "Digit9" })).toBeNull();
+    expect(k("0", { altKey: true, code: "Digit0" })).toBeNull();
+    expect(k("9", { altKey: true, code: "Numpad9" })).toBeNull();
+    expect(k("0", { altKey: true, code: "Numpad0" })).toBeNull();
+    // What AltGr+9 / AltGr+0 type on German-style layouts: never a pane.
+    expect(k("]", { altKey: true, code: "Digit9" })).toBeNull();
+    expect(k("}", { altKey: true, code: "Digit0" })).toBeNull();
+    // Ctrl+0 without Alt stays the zoom reset.
+    expect(k("0", { code: "Digit0" })).toBe("zoomReset");
+  });
+
   it("never matches what AltGr+digit types on European layouts", () => {
     // AltGr arrives as Ctrl+Alt and reports the symbol, not the digit.
     for (const sym of ["{", "[", "]", "}", "@", "²", "³", "#", "~", "|", "\\", "€", "¹", "¼", "`", "^", "½", "¾"]) {
