@@ -51,6 +51,10 @@ if __package__ in (None, ""):
 from tests.face.hud_v2_layout_check import (  # noqa: E402
     _active_testid, _approval, _attr, _choose, _pane, _press_on_body, _reachable, _visible,
 )
+try:  # speak only once the capture is listening (the dictation flake)
+    from tests.face.hud_voice import speak_when_listening
+except ImportError:  # run as a script from tests/face
+    from hud_voice import speak_when_listening  # type: ignore[no-redef]
 
 SINGLE = json.dumps({"preset": "single", "focused": 1,
                      "panes": [{"view": "chat"}, {"view": "file"}, {"view": "browser"}, {"view": "task"}]})
@@ -486,7 +490,7 @@ def _folded_status_checks(page, mock, check, until):
         return bool(whole), f"{line.inner_text()} (cut: {not whole})"
 
     # LISTENING: the mic opens on speech in the follow-up window.
-    page.evaluate("""() => { const m = window.__hud.mic; m.feedMs(2000, 0.001);
+    speak_when_listening(page, until, feed_js="""() => { const m = window.__hud.mic; m.feedMs(2000, 0.001);
         window.__hud.capture.openFollowUp(); m.feedMs(800, 0.06); return true; }""")
     ok, why = shown("LISTENING · SPEAK NOW")
     check("review #29 F3: folded, the bar says LISTENING · SPEAK NOW", ok, why)
@@ -772,7 +776,7 @@ def _line_whole(page) -> tuple[bool, str]:
 
 def _orb_line_checks(page, mock, check, until):
     _fresh(page, mock, until, SINGLE)
-    page.evaluate("""() => { const m = window.__hud.mic; m.feedMs(2000, 0.001);
+    speak_when_listening(page, until, feed_js="""() => { const m = window.__hud.mic; m.feedMs(2000, 0.001);
         window.__hud.capture.openFollowUp(); m.feedMs(800, 0.06); return true; }""")
     until(lambda: _orb_status(page).strip() == "LISTENING · SPEAK NOW", timeout=4)
     ok, why = _line_whole(page)

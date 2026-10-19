@@ -88,6 +88,10 @@ LONG_COMMAND = "rm -rf /home/johnw/projects/scratch && " + " && ".join(
 
 
 from tests.face.hud_v2_check import open_settings
+try:  # speak only once the capture is listening (the dictation flake)
+    from tests.face.hud_voice import speak_when_listening
+except ImportError:  # run as a script from tests/face
+    from hud_voice import speak_when_listening  # type: ignore[no-redef]
 
 def layout_checks(browser, mock, base, check, until, guard, init_script):
     print("\nzoom, folding and resizing")
@@ -2802,8 +2806,7 @@ def _crash_checks(page, mock, check, until):
         mock.stt_gate = threading.Event()
         try:
             stt0, sends0 = len(mock.sent("POST", "/stt")), _sends(mock)
-            page.evaluate("""() => { const m = window.__hud.mic; m.feedMs(2000, 0.001);
-              window.__hud.capture.openFollowUp(); m.feedMs(1600, 0.06); m.feedMs(2800, 0.0005); }""")
+            speak_when_listening(page, until)
             until(lambda: len(mock.sent("POST", "/stt")) > stt0, timeout=4)
             check("setup: an utterance is being transcribed", len(mock.sent("POST", "/stt")) > stt0)
             _crash(page, until)

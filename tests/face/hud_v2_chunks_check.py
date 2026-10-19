@@ -41,6 +41,10 @@ from tests.face.hud_v2_layout_check import _approval  # noqa: E402
 from tests.face.hud_v2_mock import MockDaemon  # noqa: E402
 from tests.face.hud_v2_multichat_check import _dictation, _sent  # noqa: E402
 from tests.face.hud_v2_voice_diagnostics_check import FAKE_MIC  # noqa: E402
+try:  # speak only once the capture is listening (the dictation flake)
+    from tests.face.hud_voice import speak_when_listening
+except ImportError:  # run as a script from tests/face
+    from hud_voice import speak_when_listening  # type: ignore[no-redef]
 
 CHROME_ARGS = ["--autoplay-policy=no-user-gesture-required"]
 
@@ -192,7 +196,7 @@ def main(argv=None):
                 pattern += [[900, 0]]
                 for i in range(4):
                     pattern += [[900, 0.1], [120, 0]]
-                page.evaluate("window.__hud.capture.openFollowUp()")
+                speak_when_listening(page, until, feed_js="window.__hud.capture.openFollowUp()")
                 total = page.evaluate("(p) => window.__fm.speak(p)", pattern)
                 check("setup: the dictation lasts about 14 s", 13 < total < 16, f"{total:.1f}")
                 page.wait_for_function("() => document.querySelector('[data-testid=\"input\"]').value.includes('hotel')", timeout=45000)
@@ -313,8 +317,7 @@ def main(argv=None):
                 clear_box()
                 s0, r0 = sends(), len(rows())
                 stt.reset("alpha beta gamma delta", "epsilon zeta eta theta", "iota kappa lambda mu", "nu xi omicron pi")
-                page.evaluate("window.__hud.mic.feedMs(2000, .0009)")
-                page.evaluate("window.__hud.capture.openFollowUp()")
+                speak_when_listening(page, until, feed_js="window.__hud.mic.feedMs(2000, .0009); window.__hud.capture.openFollowUp()")
                 page.evaluate(f"({WORDS})(36, 9, 900)")
                 page.evaluate("window.__hud.mic.feedMs(2800, .0005)")
                 check("a 36 s hands-free dictation is placed whole", waits(lambda: "omicron" in box() or len(stt.reqs) >= 2 and "zeta" in box()), box())
@@ -362,7 +365,7 @@ def main(argv=None):
                 clear_box()
                 s0 = sends()
                 stt.reset("first half of it", "never said")
-                page.evaluate("window.__hud.mic.feedMs(2000, .0009); window.__hud.capture.openFollowUp()")
+                speak_when_listening(page, until, feed_js="window.__hud.mic.feedMs(2000, .0009); window.__hud.capture.openFollowUp()")
                 page.evaluate(f"({WORDS})(9, 9, 900)")
                 page.evaluate("window.__hud.mic.feedMs(900, .0009)")     # the breath: the first half leaves
                 check("setup: the first half has been uploaded", waits(lambda: len(stt.reqs) == 1))

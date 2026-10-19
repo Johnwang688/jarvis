@@ -39,6 +39,10 @@ from tests.face.hud_v2_multichat_check import (  # noqa: E402
     TWO, _box, _chat, _dictation, _focus, _fresh, _open, _seed, _sent,
 )
 from tests.face.hud_v2_voice_diagnostics_check import FAKE_MIC  # noqa: E402
+try:  # speak only once the capture is listening (the dictation flake)
+    from tests.face.hud_voice import speak_when_listening
+except ImportError:  # run as a script from tests/face
+    from hud_voice import speak_when_listening  # type: ignore[no-redef]
 
 THREE = json.dumps({"preset": "cols3", "focused": 1,
                     "panes": [{"view": "chat"}, {"view": "chat"}, {"view": "chat"}, {"view": "task"}]})
@@ -454,10 +458,9 @@ def main(argv=None):
                 finish("t2", 2)
                 # Otherwise the selected chat (W-6).
                 _focus(page, until, 1)
-                page.evaluate("window.__hud.capture.closeFollowUp(); window.__hud.capture.openFollowUp()")
                 s1 = len(_sent(mock, "t1"))
                 mock.stt_script = [{"text": "to the selected chat"}]
-                page.evaluate(SPEECH % 2000)
+                speak_when_listening(page, until, feed_js="window.__hud.capture.closeFollowUp(); window.__hud.capture.openFollowUp(); " + SPEECH % 2000)
                 got = until(lambda: _sent(mock, "t1")[s1:] or None, timeout=5)
                 check("a follow-up with no pane behind it goes to the selected chat",
                       bool(got) and got[-1].get("text") == "to the selected chat" and sel() == 1, str(got))

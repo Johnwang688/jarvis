@@ -92,6 +92,10 @@ if __package__ in (None, ""):
 from tests.face.hud_v2_layout_check import (  # noqa: E402
     _active_testid, _approval, _attr, _choose, _edit, _hold_keys, _pane, _visible,
 )
+try:  # speak only once the capture is listening (the dictation flake)
+    from tests.face.hud_voice import speak_when_listening
+except ImportError:  # run as a script from tests/face
+    from hud_voice import speak_when_listening  # type: ignore[no-redef]
 
 # Both chat panes; files and the task behind them.
 TWO = json.dumps({"preset": "cols2", "focused": 1,
@@ -539,7 +543,7 @@ def _voice_checks(page, mock, check, until):
     check("the orb follows the selected chat's turn: pane 1's running tool does not light it",
           orb() not in ("thinking", "tool"), str(orb()))
     stt = len(mock.sent("POST", "/stt"))
-    page.evaluate(UTTERANCE)
+    speak_when_listening(page, until)
     until(lambda: len(mock.sent("POST", "/stt")) > stt, timeout=4)
     check("a long turn in another pane no longer silences the mic", len(mock.sent("POST", "/stt")) > stt)
     until(lambda: _box(page, 2).input_value() != "", timeout=4)
@@ -559,7 +563,7 @@ def _voice_checks(page, mock, check, until):
     # same evaluate as the utterance: closing it after the send was seen left a
     # gap in which a beep could already have been claimed (V4's worklet delivers
     # the device's frames as soon as the page yields, so the race was visible).
-    page.evaluate("() => { const r = (" + UTTERANCE + ")(); window.__hud.capture.closeContinuation(); return r; }")
+    speak_when_listening(page, until, feed_js="() => { const r = (" + UTTERANCE + ")(); window.__hud.capture.closeContinuation(); return r; }")
     sent = until(lambda: _sent(mock, "t2")[s2:] or None, timeout=5)
     check("AUTO sends the utterance to the selected chat's thread",
           bool(sent) and sent[-1].get("text") == "what is the weather" and sent[-1].get("spoken") is True, str(sent))
@@ -569,7 +573,7 @@ def _voice_checks(page, mock, check, until):
     check("the orb now shows the selected chat's own turn",bool(until(lambda: orb() == "thinking", timeout=2)),
           str(orb()))
     stt = len(mock.sent("POST", "/stt"))
-    page.evaluate(UTTERANCE)
+    speak_when_listening(page, until)
     # V3 changed this: a running turn no longer silences the mic. REVIEW still
     # puts the words in the box (AUTO would steer; hud_v2_steer_check.py).
     until(lambda: len(mock.sent("POST", "/stt")) > stt, timeout=4)
@@ -613,7 +617,7 @@ def _voice_checks(page, mock, check, until):
           page.locator('[data-testid="pane-1-mic"]').count() == 1 and page.locator('[data-testid="pane-2-mic"]').count() == 0
           and _status_lines(page)[:2] == [0, 1], str(_status_lines(page)))
     stt = len(mock.sent("POST", "/stt"))
-    page.evaluate(UTTERANCE)
+    speak_when_listening(page, until)
     until(lambda: _box(page, 1).input_value() != "", timeout=4)
     check("and REVIEW now fills pane 1's box", "what is the weather" in _box(page, 1).input_value(),
           f"{_box(page, 1).input_value()!r}")
@@ -1195,7 +1199,7 @@ def _rv_stt_lands_selected_checks(page, mock, check, until):
     held = []
     page.route("**/stt*", lambda r: held.append(r))
     try:
-        page.evaluate(UTTERANCE)
+        speak_when_listening(page, until)
         until(lambda: _pumped(page) and len(held) > 0, timeout=6)
         check("setup: an utterance spoken to pane 1 is being transcribed", len(held) > 0)
         page.locator(_pane(2, '[data-testid="log"]')).click()
@@ -1223,7 +1227,7 @@ def _rv_stale_status_checks(page, mock, check, until):
     _fresh(page, mock, until, TWO)
     _open(page, until, 1, "t1")
     _open(page, until, 2, "t2")
-    page.evaluate("""() => { const m = window.__hud.mic; m.feedMs(2000, 0.001);
+    speak_when_listening(page, until, feed_js="""() => { const m = window.__hud.mic; m.feedMs(2000, 0.001);
         window.__hud.capture.openFollowUp(); m.feedMs(800, 0.06); return true; }""")
     until(lambda: _chat(page, 2)["status"].startswith("LISTENING"), timeout=3)
     check("setup: the selected chat (pane 2) says it is listening", _chat(page, 2)["status"].startswith("LISTENING"))
@@ -1352,14 +1356,14 @@ def _w6_grid_checks(page, mock, check, until):
     time.sleep(0.2)
     check("W-6: clicking Preview or File in pane 4 leaves pane 3 selected",
           _sel(page) == 3 and _attr(page, _pane(4), "data-focused") == "true")
-    page.evaluate(UTTERANCE)
+    speak_when_listening(page, until)
     check("W-6: REVIEW puts what was said in the selected chat's box (pane 3)",
           bool(until(lambda: "what is the weather" in _box(page, 3).input_value(), timeout=5))
           and all(_box(page, n).input_value() == "" for n in (1, 2)))
     _box(page, 3).fill("")
     _dictation(page, "auto")
     s3 = len(_sent(mock, "t3"))
-    page.evaluate(UTTERANCE)
+    speak_when_listening(page, until)
     sent = until(lambda: _sent(mock, "t3")[s3:] or None, timeout=5)
     check("W-6: AUTO sends it to the selected chat's thread (pane 3)",
           bool(sent) and sent[-1].get("spoken") is True, str(sent))
@@ -2311,7 +2315,7 @@ def _eight_chats_checks(page, mock, check, until):
           _sel(page) == 6 and _attr(page, _pane(6), "data-selected") == "true"
           and page.locator('[data-testid="pane-6-mic"]').count() == 1
           and page.locator('[data-testid$="-mic"][data-testid^="pane-"]').count() == 1)
-    page.evaluate(UTTERANCE)
+    speak_when_listening(page, until)
     check("voice lands in pane 6's box (REVIEW), while pane 7's turn runs",
           bool(until(lambda: "what is the weather" in _box(page, 6).input_value(), timeout=5))
           and all(_box(page, n).input_value() == "" for n in range(1, 9) if n != 6),
@@ -2474,7 +2478,7 @@ def _split_close_selected_checks(page, mock, check, until):
     check("G2: closing the selected chat selects the one selected before it (pane 3)",
           bool(until(lambda: _sel(page) == 3, timeout=2)) and _attr(page, _pane(3), "data-selected") == "true"
           and 1 not in page.evaluate("window.__hud.state().selectedOrder"), str(_sel(page)))
-    page.evaluate(UTTERANCE)
+    speak_when_listening(page, until)
     check("G2: and what is said next lands in pane 3's box",
           bool(until(lambda: "what is the weather" in _box(page, 3).input_value(), timeout=5))
           and all(_box(page, n).input_value() == "" for n in (2, 4)))
@@ -2611,7 +2615,7 @@ def _rv47_close_keeps_mic_checks(page, mock, check, until):
     check("review #47 M1: a file dropped outside a pane goes to pane 1",
           any(f["name"] == "dropped.txt" for f in _chat(page, 1)["files"]) and not _chat(page, 3)["files"],
           str([f["name"] for f in _chat(page, 3)["files"]]))
-    page.evaluate(UTTERANCE)
+    speak_when_listening(page, until)
     until(lambda: "what is the weather" in _box(page, 1).input_value() + _box(page, 3).input_value(), timeout=5)
     check("review #47 M1: and what is said next lands in pane 1, not the chat that slid into the slot",
           "what is the weather" in _box(page, 1).input_value() and _box(page, 3).input_value() == "",
