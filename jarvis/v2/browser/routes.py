@@ -66,7 +66,7 @@ from . import files as _files
 from .captures import CaptureRefused, capture_page
 from .files import FileRefused
 from .host import BrowserRefused
-from .panes import PaneRefused
+from .panes import PANE_SLOTS, PaneRefused
 from .policy import URLRefused
 from .settings import DEFAULTS as SETTINGS
 from .stream import SOCKET_PENDING
@@ -161,7 +161,7 @@ def route(handler, daemon, parts, query):
         if parts == ["browser", "front"] and method == "POST":
             return 200, daemon.browser_panes.report(handler._body())
         if len(parts) >= 3 and parts[1] == "panes":
-            if parts[2] not in tuple(str(n) for n in range(1, 9)):
+            if parts[2] not in PANE_SLOTS:
                 _fail(400, "choose a Browser pane number")
             pane_id = int(parts[2])
             if len(parts) == 3 and method == "PATCH":

@@ -16,7 +16,7 @@ from typing import Callable
 
 from jarvis import runtime
 from .act_rules import MAX_ACTIONS_PER_TAB_HOUR, MAX_JUDGED_PER_TURN
-from .panes import PaneSnapshot
+from .panes import PANE_SLOTS, PaneSnapshot
 
 MAX_TURNS = 64
 MAX_TABS = 64
@@ -88,7 +88,7 @@ def mark_attempt(pane):
     turn=current_turn()
     if turn is not None and runtime.at_desk() and runtime.depth()==0:
         turn.attempted=True
-        turn.pane=pane if isinstance(pane,str) and pane in tuple(str(i) for i in range(1,9)) else ""
+        turn.pane=pane if isinstance(pane,str) and pane in PANE_SLOTS else ""
 
 
 @contextmanager

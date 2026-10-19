@@ -17,6 +17,7 @@ from collections import OrderedDict
 from jarvis import credential_patterns, untrusted
 from jarvis.tools import secrets as secret_store
 from .. import terminal_guard
+from .panes import PANE_SLOTS
 
 MIME = "application/x-jarvis-page-capture"
 TTL = 24 * 60 * 60
@@ -184,7 +185,7 @@ def capture_page(daemon, tab_id, query) -> dict:
     registry, host = daemon.browser_panes, daemon.browser
     if (not {"window", "pane", "local_tab", "view"} <= set(query)
             or set(query) - {"window", "pane", "local_tab", "view", "whole"}
-            or query["pane"] not in tuple(str(n) for n in range(1, 9))
+            or query["pane"] not in PANE_SLOTS
             or query.get("whole", "0") not in ("0", "1")):
         raise CaptureRefused("invalid page capture request")
     snapshot = registry.resolve_owner(query["window"], int(query["pane"]), query["local_tab"], query["view"])

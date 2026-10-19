@@ -1090,7 +1090,7 @@ The landing guard captures the offending document generation when scheduling its
 
 `hud_browser_view(pane="", whole_page=False)` is an explicit HUD owner-chat
 tool in the fast path and the foreground Claude/Codex session MCP catalog.
-The pane number is its displayed slot (1–8), not a tab ID;
+The pane number is its displayed slot (1–12), not a tab ID;
 empty selects the last owner-focused eligible Browser pane. It uses BR3b's live
 owner-window registry and never discovers background tabs or hidden windows.
 The registry, see switch, source, terminal readability, hold/approval state,

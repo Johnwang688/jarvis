@@ -276,8 +276,9 @@ export function bannerOf(s: DriveState, now: number, slotOf: (threadId: string) 
   const active = agentActive(s, now);
   if (!active && !s.paused) return null;
   const slot = s.threadId ? slotOf(s.threadId) : null;
+  // Panes run 1..12 (decision FS-1); anything else is not a pane on screen.
   const where = s.threadId === null ? "a chat"
-    : slot !== null && Number.isInteger(slot) && slot >= 1 && slot <= 8 ? `the chat in pane ${slot}`
+    : slot !== null && Number.isInteger(slot) && slot >= 1 && slot <= 12 ? `the chat in pane ${slot}`
     : "a chat not on screen";
   const who = s.provider ? `${where} (${PROVIDER_WORDS[s.provider]})` : where;
   if (s.paused) {

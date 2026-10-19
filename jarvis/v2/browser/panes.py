@@ -85,6 +85,10 @@ _PROFILE = re.compile(r"p-[0-9a-f]{8}")
 _ENTRY = re.compile(r"ds_[0-9a-f]{8}")
 LEASE_S = 60
 MAX_WINDOWS = 16
+# Browser pane ids and displayed slots run 1..PANE_MAX (decision FS-1). Only
+# this upper bound grew; the type checks and refusal order are unchanged.
+PANE_MAX = 12
+PANE_SLOTS = tuple(str(n) for n in range(1, PANE_MAX + 1))
 SAFE_INTEGER = 2**53 - 1
 
 
@@ -275,19 +279,19 @@ class BrowserPanes:
         _number(body["seq"], 1, SAFE_INTEGER)
         _number(body["focus_seq"], 0, SAFE_INTEGER)
         if body["focused_slot"] is not None:
-            _number(body["focused_slot"], 1, 8)
+            _number(body["focused_slot"], 1, PANE_MAX)
         _boolean(body["covered"])
-        if not isinstance(body["panes"], list) or len(body["panes"]) > 8:
+        if not isinstance(body["panes"], list) or len(body["panes"]) > PANE_MAX:
             _bad()
         panes, slots, remote_ids = {}, set(), set()
         for raw in body["panes"]:
             _shape(raw, ("pane_id", "slot", "drawn", "profile", "ctx", "see", "drive", "active", "tabs"))
-            pid = _number(raw["pane_id"], 1, 8)
+            pid = _number(raw["pane_id"], 1, PANE_MAX)
             if pid in panes:
                 _bad()
             slot = raw["slot"]
             if slot is not None:
-                _number(slot, 1, 8)
+                _number(slot, 1, PANE_MAX)
                 if slot in slots:
                     _bad()
                 slots.add(slot)
@@ -410,7 +414,7 @@ class BrowserPanes:
     def permissions(self, pane_id, body):
         if not isinstance(body, dict) or not {"window", "seq"} < set(body) or not set(body) <= {"window", "seq", "see", "drive"}:
             _bad()
-        _number(pane_id, 1, 8)
+        _number(pane_id, 1, PANE_MAX)
         for key in ("see", "drive"):
             if key in body:
                 _boolean(body[key])
@@ -457,7 +461,7 @@ class BrowserPanes:
                             page, document, tab.source)
 
     def resolve(self, pane=""):
-        if not isinstance(pane, str) or (pane and not re.fullmatch(r"[1-8]", pane)):
+        if not isinstance(pane, str) or (pane and pane not in PANE_SLOTS):
             raise PaneRefused(400, "choose a displayed Browser pane number")
         with self._lock:
             self._expire()
@@ -479,7 +483,7 @@ class BrowserPanes:
     def resolve_owner(self, window, pane_id, local_tab_id, expected_view_id):
         """Pin one owner-selected visible binding; never grant see or drive."""
         _id(window, _WINDOW)
-        _number(pane_id, 1, 8)
+        _number(pane_id, 1, PANE_MAX)
         _id(local_tab_id, _LOCAL)
         if not isinstance(expected_view_id, str) or not re.fullmatch(r"(?:v_[0-9a-f]{24}|[0-9a-f]{8})", expected_view_id):
             _bad()
@@ -556,7 +560,7 @@ class BrowserPanes:
             return fresh if pinned == snapshot else None
 
     def address(self, pane_id, local_id, body):
-        _number(pane_id, 1, 8)
+        _number(pane_id, 1, PANE_MAX)
         _id(local_id, _LOCAL)
         _shape(body, ("window", "seq", "url", "mode"))
         if body["mode"] not in ("direct", "remote"):
