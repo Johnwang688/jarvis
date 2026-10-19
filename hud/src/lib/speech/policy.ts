@@ -49,7 +49,7 @@ export function micSuppressedBySpeech(view: { active: boolean; blocked: boolean 
  * Reading is one shared queue, each thread in its own voice (`floor.ts`).
  */
 export function speakingThreads(
-  ws: Pick<Workspace, "order" | "kept" | "panes">,
+  ws: Pick<Workspace, "tree" | "kept" | "panes">,
   chats: Chats,
   pending: Readonly<Record<PaneNo, string | null>>,
 ): Set<string> {

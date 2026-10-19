@@ -22,15 +22,15 @@ import {
   type Fitted, type PaneLayout, type Side,
 } from "../lib/layout";
 import {
-  MENU_PRESETS, PANEL, SHAPES, TITLEBAR_H, cellsOf, closePane as closePaneOf, defaultWorkspace,
-  equalSplit as equalSplitOf, fitWorkspace, focusPane,
+  MENU_PRESETS, PANEL, PANE_NOS, SHAPES, TITLEBAR_H, closePane as closePaneOf, drawnSet,
+  equalize as equalizeOf, fitWorkspace, focusPane, moveEdge as moveEdgeOf, orderOf, presetOfWs,
   forgetTerminal as forgetTerminalOf, loadWorkspace, paneAt, pinPane, resetWorkspace, saveWorkspace, setPaneTerminal,
   renameTerminal as renameTerminalOf,
   setPanel, setPreset as setPresetOf, setKeepOrigin as setKeepOriginOf,
-  setBrowserUrl as setBrowserUrlOf, submitBrowserUrl as submitBrowserUrlOf, setSplit as setSplitOf, setView as setViewOf, show as showOf,
+  setBrowserUrl as setBrowserUrlOf, submitBrowserUrl as submitBrowserUrlOf, setView as setViewOf, show as showOf,
   setFilePath as setFilePathOf, splitPane as splitPaneOf, splitVerdict as splitVerdictOf,
   unpinProject as unpinProjectOf, setEditors as setEditorsOf, setSubagent as setSubagentOf,
-  type DrawnSet, type PaneNo, type PaneSpec, type Preset, type Split, type SplitWhy, type View, type Workspace,
+  type DrawnSet, type EdgeHandle, type PaneNo, type PaneSpec, type Preset, type SplitWhy, type View, type Workspace,
   type WorkspaceFit, type BrowserTabOptions,
   setBrowserRemote as setBrowserRemoteOf, setBrowserProfile as setBrowserProfileOf, setBrowserSee as setBrowserSeeOf, setBrowserDrive as setBrowserDriveOf,
   autoSplitVerdict as autoSplitVerdictOf,
@@ -43,6 +43,7 @@ import { inTerminal, terminalTakesKey } from "../lib/terminal";
 import { chordSecond, isSaveKey, resetChord } from "../lib/editorkeys";
 import { terminals, usePanelDot } from "./Terminal";
 import type { Tabs } from "../lib/buffers";
+import { presetTree, rectsOf } from "../lib/splittree";
 
 export interface LayoutControl {
   zoom: number;
@@ -95,8 +96,14 @@ export interface LayoutControl {
   forgetTerminal: (id: string) => void;
   /** A terminal continued under a new id after a restart: every pane holding it holds the new one. */
   renameTerminal: (from: string, to: string) => void;
-  setSplit: (preset: Preset, split: Partial<Split>) => void;
-  equalSplit: (preset: Preset) => void;
+  /**
+   * Drag an edge between panes (lib/workspace `moveEdge`, plan §9): every
+   * boundary `handle` moves to `px` from the pane area's left or top, from
+   * this render's fit.
+   */
+  moveEdge: (handle: EdgeHandle, px: number) => void;
+  /** Double-click on an edge: the nodes at `paths` (every member of a linked edge) equal. */
+  equalize: (paths: EdgeHandle["members"][number]["path"][]) => void;
   togglePanel: () => void;
   /**
    * The owner's own ⬓, the layout menu's Panel row and Ctrl+`: togglePanel,
@@ -195,7 +202,7 @@ export function useLayout(blocked = false, onEditorKey?: (what: EditorShortcut) 
   // writing it here is idempotent, so a repeated render draws the same.
   const drawnBefore = useRef<DrawnSet | null>(null);
   const fit = fitWorkspace(layout, ws, available, availableH, prefer, preferPanel, drawnBefore.current);
-  drawnBefore.current = { preset: ws.preset, drawn: fit.drawn, panes: fit.panes };
+  drawnBefore.current = drawnSet(ws, fit);
   const fitted = fit.sides;
   const now = useRef({ fit, ws, layout, available, availableH, prefer, preferPanel });
   now.current = { fit, ws, layout, available, availableH, prefer, preferPanel };
@@ -265,10 +272,16 @@ export function useLayout(blocked = false, onEditorKey?: (what: EditorShortcut) 
   const setTerminal = useCallback((pane: PaneNo, id: string | null) => setWs((w) => setPaneTerminal(w, pane, id)), []);
   const forgetTerminal = useCallback((id: string) => setWs((w) => forgetTerminalOf(w, id)), []);
   const renameTerminal = useCallback((from: string, to: string) => setWs((w) => renameTerminalOf(w, from, to)), []);
-  const setSplit = useCallback(
-    (preset: Preset, split: Partial<Split>) => setWs((w) => setSplitOf(w, preset, split)), [],
-  );
-  const equalSplit = useCallback((preset: Preset) => setWs((w) => equalSplitOf(w, preset)), []);
+  // Both read the fit this render drew: the handle and the px are its.
+  const moveEdge = useCallback((handle: EdgeHandle, px: number) => {
+    if (blockedRef.current) return;
+    const fitNow = now.current.fit;
+    setWs((w) => moveEdgeOf(w, fitNow, handle, px));
+  }, []);
+  const equalize = useCallback((paths: EdgeHandle["members"][number]["path"][]) => {
+    if (blockedRef.current) return;
+    setWs((w) => equalizeOf(w, paths));
+  }, []);
   const setPanelHeight = useCallback((height: number) => setWs((w) => setPanel(w, { height })), []);
   const resetPanelHeight = useCallback(() => setWs((w) => setPanel(w, { height: PANEL.def })), []);
   const togglePanel = useCallback(() => {
@@ -440,8 +453,8 @@ export function useLayout(blocked = false, onEditorKey?: (what: EditorShortcut) 
     setZoom, zoomBy, setWidth, resetWidth, open, fold, toggle,
     setPreset, setView, setSubagent, focus, show, pin, setEditors, unpinProject, setBrowserUrl, submitBrowserUrl, setFilePath, setKeepOrigin,
     addBrowserTab, closeBrowserTab, activateBrowserTab, setTabKeepOrigin, setBrowserRemote, setBrowserProfile, setBrowserSee, setBrowserDrive,
-    setTerminal, forgetTerminal, renameTerminal, setSplit,
-    equalSplit, togglePanel, setPanelHeight, resetPanelHeight, resetAll, split, close, splitVerdict, autoSplitVerdict, incarnation,
+    setTerminal, forgetTerminal, renameTerminal, moveEdge,
+    equalize, togglePanel, setPanelHeight, resetPanelHeight, resetAll, split, close, splitVerdict, autoSplitVerdict, incarnation,
   };
 }
 
@@ -455,6 +468,8 @@ export function useLayout(blocked = false, onEditorKey?: (what: EditorShortcut) 
  */
 export function Separator(props: {
   testid: string;
+  /** A linked edge (plan §9, P-5): how many collinear boundaries it moves together (`data-linked`). */
+  linked?: number;
   className: string;
   orientation: "vertical" | "horizontal";
   label: string;
@@ -499,6 +514,7 @@ export function Separator(props: {
     <div
       className={props.className + (dragging ? " dragging" : "")}
       data-testid={props.testid}
+      data-linked={props.linked}
       role="separator"
       aria-orientation={props.orientation}
       aria-label={props.label}
@@ -759,19 +775,22 @@ export function AreaIcon(props: { area: Area; open: boolean }) {
 
 /**
  * A preset tile's diagram: the shape's panes as small rectangles, drawn from
- * the shape itself (lib/workspace `cellsOf`, at its default edges), so a
- * tile can never disagree with what choosing it draws.
+ * the tree choosing it lays out (lib/splittree `presetTree` at its default
+ * sizes, `rectsOf`), so a tile can never disagree with what choosing it draws.
  */
 function PresetIcon(props: { preset: Preset }) {
-  const cells = cellsOf(props.preset, defaultWorkspace().splits[props.preset]);
+  const rects = rectsOf(presetTree(props.preset, PANE_NOS.slice(0, SHAPES[props.preset].panes)));
+  const cells = Object.values(rects).map((r) => ({ left: r!.left, right: r!.left + r!.width, top: r!.top, bottom: r!.top + r!.height }));
+  // Within a hair of an edge is the edge (fractions such as ⅓ + ⅓ + ⅓).
+  const end = (x: number) => x < 1 - 1e-9;
   const gap = 1;
   return (
     <svg width="24" height="16" viewBox="0 0 24 16" aria-hidden="true" focusable="false">
       {cells.map((c, i) => {
         const x = 1 + c.left * 22 + (c.left > 0 ? gap / 2 : 0);
         const y = 1 + c.top * 14 + (c.top > 0 ? gap / 2 : 0);
-        const w = (c.right - c.left) * 22 - (c.left > 0 ? gap / 2 : 0) - (c.right < 1 ? gap / 2 : 0);
-        const h = (c.bottom - c.top) * 14 - (c.top > 0 ? gap / 2 : 0) - (c.bottom < 1 ? gap / 2 : 0);
+        const w = (c.right - c.left) * 22 - (c.left > 0 ? gap / 2 : 0) - (end(c.right) ? gap / 2 : 0);
+        const h = (c.bottom - c.top) * 14 - (c.top > 0 ? gap / 2 : 0) - (end(c.bottom) ? gap / 2 : 0);
         return (
           <rect key={i} x={x} y={y} width={w} height={h} rx="1" fill="none" stroke="currentColor" strokeWidth="1.1" />
         );
@@ -967,7 +986,7 @@ export function TitleBar(props: {
           ref={customize}
           className="tb-icon"
           data-testid="layout-customize"
-          title={dropped ? `Customize layout · showing ${v.fit.panes.length} of ${SHAPES[v.ws.preset].panes} panes` : "Customize layout"}
+          title={dropped ? `Customize layout · showing ${v.fit.panes.length} of ${orderOf(v.ws).length} panes` : "Customize layout"}
           aria-label="Customize layout"
           aria-haspopup="menu"
           aria-expanded={!!layoutMenu}
@@ -1009,9 +1028,10 @@ export function TitleBar(props: {
 }
 
 /**
- * ⊞'s menu, the one entry point for presets: eight tiles, four to a row (the
- * stored preset checked; 3 over 2 and 4 over 3 have no tile, so with one of
- * them chosen no tile is), the three toggles written out with their
+ * ⊞'s menu, the one entry point for presets: eight tiles, four to a row (a
+ * tile checked when the tree has its shape, lib/workspace `presetOfWs`; 3
+ * over 2, 4 over 3 and any other tree have no tile, so with one of them no
+ * tile is), the three toggles written out with their
  * shortcuts, Reset layout, and — when the window is drawing fewer panes than
  * the preset has — a line saying so.
  */
@@ -1030,7 +1050,9 @@ export function LayoutMenu(props: {
     { area: "panel", label: "Panel", key: "Ctrl+`", on: v.fit.panel.open, act: v.ownerTogglePanel },
     { area: "right", label: "Status pane", key: "Ctrl+Alt+B", on: !sides.rightFolded, act: () => v.toggle("right") },
   ];
-  const total = SHAPES[v.ws.preset].panes;
+  const total = orderOf(v.ws).length;
+  // A tile is checked when the tree has its shape (sizes ignored): a dragged two columns is still two columns.
+  const chosen = presetOfWs(v.ws);
   return (
     <MenuShell
       at={props.at}
@@ -1049,9 +1071,9 @@ export function LayoutMenu(props: {
             key={p}
             role="menuitemradio"
             data-mi=""
-            className={"lm-tile" + (v.ws.preset === p ? " on" : "")}
+            className={"lm-tile" + (chosen === p ? " on" : "")}
             data-testid={`layout-preset-${p}`}
-            aria-checked={v.ws.preset === p}
+            aria-checked={chosen === p}
             title={SHAPES[p].label}
             aria-label={SHAPES[p].label}
             onClick={() => v.setPreset(p)}

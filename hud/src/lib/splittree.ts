@@ -2,8 +2,8 @@
 // plan.md §3.1; decisions FS-1..FS-10): VS Code's layout, where every node
 // lays its children side by side (`x`, split right) or stacked (`y`, split
 // down), each child holding a fraction of the node. Pure, like lib/layout.ts
-// and lib/workspace.ts, so every rule is tested without a browser. Nothing
-// uses it yet (FS1); FS3 makes it the workspace's model.
+// and lib/workspace.ts, so every rule is tested without a browser. Since FS3
+// it is the workspace's model (`Workspace.tree`).
 //
 // **A tree is kept normal.** Every split node has two or more children, none
 // of them of its own axis (a same-axis child is flattened into it), and sizes
@@ -22,9 +22,7 @@
 // structure. The structural counts (`acrossS`, `downS`) are the minimum sizes
 // (§4.4), which fitting and FS-4 use.
 //
-// Pane ids run 1–12 (FS-1). The signatures use workspace.ts's `PaneNo`, which
-// is still 1–8 until FS2 widens it; the values here already reach 12
-// (`MAX_LEAVES`), and FS2's change to `PaneNo` needs nothing in this file.
+// Pane ids run 1–12 (FS-1; workspace.ts's `PaneNo`, `MAX_LEAVES`).
 //
 // Every fraction here is of the pane area (the unit square); every pixel
 // count is the HUD's own (unzoomed) pixels, like layout.ts.
@@ -385,25 +383,54 @@ const PRESET_ROWS: Readonly<Record<Preset, readonly number[] | null>> = {
 };
 
 /**
+ * A workspace's edges as WP-A/WP-B stored them for one preset (workspace.ts's
+ * v1 `Split`): `cols` the cumulative column edges of the top row (main2: the
+ * large pane's right edge), `row` the row edge, and `bottom` the bottom row's
+ * own column edges (3 over 2 and 4 over 3 only).
+ */
+export interface LegacyEdges { cols: readonly number[]; row: number; bottom?: readonly number[] }
+
+/** Cumulative edges as sizes, `[e1, e2 − e1, …, 1 − ek]`; null when they are not `k − 1` increasing fractions. */
+function edgeSizes(edges: readonly number[] | undefined, k: number): number[] | null {
+  if (!edges || edges.length !== k - 1) return null;
+  const at = [0, ...edges, 1];
+  const sizes = at.slice(1).map((e, i) => e - at[i]);
+  return sizes.every((s) => Number.isFinite(s) && s > 0) ? sizes : null;
+}
+
+/**
  * A preset's tree, `ids` in reading order. The grids are rows first, each
  * row its own x node, so depth-first order is the reading order. Equal
  * sizes, except main2's 0.6 / 0.4.
+ *
+ * With `edges` (§8.2, a v1 workspace migrating) the sizes come from them
+ * instead: cols2/cols3 and every grid's top row from `cols`; the bottom row
+ * from `bottom` in 3 over 2 and 4 over 3, else from `cols` too (the rows were
+ * linked); the root y of every two-row shape and main2's stack `[row, 1 −
+ * row]`; main2's x from `cols`. An edge list of the wrong shape leaves that
+ * node at its default.
  */
-export function presetTree(p: Preset, ids: readonly PaneNo[]): LayoutNode {
+export function presetTree(p: Preset, ids: readonly PaneNo[], edges?: LegacyEdges): LayoutNode {
   let next = 0;
   const take = (): LayoutNode => ({ pane: ids[next++] });
-  const row = (k: number): LayoutNode => {
+  const row = (k: number, own?: readonly number[]): LayoutNode => {
     if (k === 1) return take();
-    return { axis: "x", children: Array.from({ length: k }, take), sizes: equal(k) };
+    return { axis: "x", children: Array.from({ length: k }, take), sizes: edgeSizes(own, k) ?? equal(k) };
   };
+  const rowEdge = edges && Number.isFinite(edges.row) && edges.row > 0 && edges.row < 1 ? [edges.row] : undefined;
   const rows = PRESET_ROWS[p];
   if (!rows) {
     const main = take();
-    const stack: LayoutNode = { axis: "y", children: [take(), take()], sizes: [0.5, 0.5] };
-    return { axis: "x", children: [main, stack], sizes: [0.6, 0.4] };
+    const stack: LayoutNode = { axis: "y", children: [take(), take()], sizes: edgeSizes(rowEdge, 2) ?? [0.5, 0.5] };
+    return { axis: "x", children: [main, stack], sizes: edgeSizes(edges?.cols, 2) ?? [0.6, 0.4] };
   }
-  if (rows.length === 1) return row(rows[0]);
-  return { axis: "y", children: rows.map(row), sizes: equal(rows.length) };
+  if (rows.length === 1) return row(rows[0], edges?.cols);
+  const bottom = rows[1] !== rows[0] ? edges?.bottom : edges?.cols;
+  return {
+    axis: "y",
+    children: rows.map((k, i) => row(k, i === 0 ? edges?.cols : bottom)),
+    sizes: (rows.length === 2 ? edgeSizes(rowEdge, 2) : null) ?? equal(rows.length),
+  };
 }
 
 /** Structure only: no ids, no sizes. */

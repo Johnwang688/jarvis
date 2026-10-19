@@ -3,7 +3,7 @@ import {
   DEV_OPEN_IDLE, OPENED_KEPT, WAIT_MS, WINDOW_MAX, autoOpenPlan, devUrl, enqueueDev,
   offerLabel, type DevEntry, type DevOpenState, type DevWindow, type PaneShows,
 } from "./devopen";
-import { autoSplitVerdict, blankKeptPane, defaultWorkspace, freeId, setPreset, splitPane, type PaneNo } from "./workspace";
+import { autoSplitVerdict, blankKeptPane, defaultWorkspace, freeId, orderOf, setPreset, splitPane, type PaneNo } from "./workspace";
 import { DEFAULT_LAYOUT } from "./layout";
 
 const T = 1_000_000;
@@ -28,7 +28,7 @@ describe("automatic Direct placement", () => {
     const result = plan().plan;
     if (result.kind !== "split") throw Error("expected split");
     const ws = splitPane(defaultWorkspace(), result.source, 2, { view: "browser", projectId: null, terminalId: null }, { focus: false });
-    expect([ws.order, ws.focused]).toEqual([[1, 2], 1]);
+    expect([orderOf(ws), ws.focused]).toEqual([[1, 2], 1]);
   });
   it("falls back to the focused drawn pane when the source is hidden or absent", () => {
     expect(plan(entry(), win({ panes: [pane(1), pane(3, { source: entry().source })] })).plan).toMatchObject({ kind: "split", source: 1 });

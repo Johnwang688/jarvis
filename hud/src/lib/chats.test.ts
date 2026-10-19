@@ -5,7 +5,8 @@ import {
   nonePerPane, sidebarPanes, type ChatState, type Chats,
 } from "./chats";
 import {
-  PANE_NOS, defaultWorkspace, focusPane, parseWorkspace, setPreset, setView, type PaneNo, type View, type Workspace,
+  PANE_NOS, defaultWorkspace, focusPane, orderOf, parseWorkspace, setPreset, setView, type PaneNo, type Preset, type View,
+  type Workspace,
 } from "./workspace";
 import type { Thread } from "../types";
 
@@ -17,7 +18,7 @@ const chats = (over: Partial<Record<PaneNo, Partial<ChatState>>> = {}): Chats =>
 const none = nonePerPane();
 
 /** A workspace with these views and this focus. */
-const shaped = (views: View[], preset: Workspace["preset"] = "cols2", focused: PaneNo = 1): Workspace => {
+const shaped = (views: View[], preset: Preset = "cols2", focused: PaneNo = 1): Workspace => {
   let w = setPreset(defaultWorkspace(), preset);
   views.forEach((v, i) => {
     w = setView(w, (i + 1) as PaneNo, v);
@@ -308,7 +309,7 @@ describe("eight panes (WP-G1)", () => {
     // Twelve ids used, one drawn (FS2): 1 drawn, the other eleven hidden, 8 hidden longest (it is last).
     const one = parseWorkspace(JSON.stringify({ preset: "single", order: [1], kept: [9, 10, 11, 12, 2, 3, 4, 5, 6, 7, 8],
                                                 panes: Array.from({ length: 12 }, () => ({ view: "chat" })) }));
-    expect([one.order, one.kept]).toEqual([[1], [9, 10, 11, 12, 2, 3, 4, 5, 6, 7, 8]]);
+    expect([orderOf(one), one.kept]).toEqual([[1], [9, 10, 11, 12, 2, 3, 4, 5, 6, 7, 8]]);
     expect(besideTarget(one, [1])).toEqual({ preset: "cols2", pane: 8, source: 1 });
     expect(besideTarget(one, [1], [8, 7])).toEqual({ preset: "cols2", pane: 6, source: 1 });
     expect(besideTarget(one, [1], [2, 3, 4, 5, 6, 7, 8])).toEqual({ preset: "cols2", pane: 12, source: 1 });
@@ -319,7 +320,7 @@ describe("eight panes (WP-G1)", () => {
 
 describe("with pane 1 closed (WP-G2): the fallbacks are the first pane in reading order (U36/U37)", () => {
   // Only pane 3 left, showing a file; nothing drawn yet (no window to fit).
-  const w = { ...defaultWorkspace(), preset: "single" as const, order: [3 as PaneNo], focused: 3 as PaneNo };
+  const w = { ...defaultWorkspace(), tree: { pane: 3 as PaneNo }, focused: 3 as PaneNo };
 
   it("a chat with nothing drawn lands in that pane, which switches to chat", () => {
     expect(chatTarget(w, [], null)).toEqual({ pane: 3, switches: true });
