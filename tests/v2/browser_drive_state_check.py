@@ -166,4 +166,19 @@ class TurnScope(unittest.TestCase):
             with turn_scope(t,fail):self.assertIs(current_turn(),t)
         self.assertIsNone(current_turn())
 
+    def test_mark_attempt_keeps_slots_1_to_12_and_clears_13(self):
+        # FS0: a twelve-pane HUD's slot 12 is kept on the turn; 13 and every
+        # other non-slot value clear it, exactly as 9 did when the bound was 8.
+        from jarvis.v2.browser.drive_state import mark_attempt
+        t=turn();runtime.bind_caller(t.thread_id,"project","fast",t.turn_id)
+        with runtime.turn_scope(desk={"present":True}),turn_scope(t,lambda owner:None):
+            runtime.bind(depth=0)
+            for n in range(1,13):
+                with self.subTest(slot=n):
+                    t.pane="";t.attempted=False;mark_attempt(str(n))
+                    self.assertEqual((t.pane,t.attempted),(str(n),True))
+            for bad in ("13","14","99","0","00","012","-1","+1"," 12","12 ","12\n","１２","١","12.0","",12,13,True,None):
+                with self.subTest(pane=bad):
+                    t.pane="5";mark_attempt(bad);self.assertEqual(t.pane,"")
+
 if __name__=="__main__":unittest.main()

@@ -296,7 +296,7 @@ class Panes(unittest.TestCase):
         self.registry.report(report())
         original = self.registry.resolve()
         cases = []
-        for key, value in (("seq", True), ("focus_seq", -1), ("covered", 1), ("focused_slot", 9)):
+        for key, value in (("seq", True), ("focus_seq", -1), ("covered", 1), ("focused_slot", 13)):
             cases.append(report(2, **{key: value}) if key != "seq" else report(value))
         for key, value in (("pane_id", True), ("drawn", 1), ("active", "missing"), ("see", "false"), ("drive", "true"), ("ctx", T)):
             body = report(2); body["panes"][0][key] = value; cases.append(body)
@@ -308,6 +308,86 @@ class Panes(unittest.TestCase):
             with self.subTest(body=body):
                 with self.assertRaises(PaneRefused): self.registry.report(body)
                 self.assertEqual(self.registry.resolve(), original)
+
+    # FS0 (2026-10-19, owner decision FS-1): the HUD may show up to twelve
+    # panes, so every pane id and slot bound is 1..12. Only the upper bound
+    # moves; every other refusal keeps its shape.
+    def panes_report(self, count=12, seq=1, focused=None):
+        panes = [{"pane_id": n, "slot": n, "drawn": True, "profile": P, "ctx": None,
+                  "see": True, "drive": False, "active": "tab%03d" % n,
+                  "tabs": [{"id": "tab%03d" % n, "mode": "direct",
+                            "url": "http://localhost:23456/pane%d" % n, "source": None}]}
+                 for n in range(1, count + 1)]
+        return report(seq, panes=panes, focused_slot=count if focused is None else focused)
+
+    BAD_NUMBERS = (0, -1, 13, 14, 99, True, False, "12", "1", 12.0, 1.5, None, [12])
+
+    def test_twelve_panes_and_ids_slots_focus_9_to_12_are_accepted(self):
+        receipt = self.registry.report(self.panes_report())
+        self.assertEqual(sorted(p["pane_id"] for p in receipt["panes"]), list(range(1, 13)))
+        for n in range(1, 13):
+            with self.subTest(slot=n):
+                snap = self.registry.resolve(str(n))
+                self.assertEqual((snap.pane_id, snap.slot), (n, n))
+        self.assertEqual(self.registry.resolve().slot, 12)
+        for n in (9, 10, 11, 12):
+            with self.subTest(focused=n):
+                self.setUp()
+                self.registry.report(self.panes_report(focused=n))
+                self.assertEqual(self.registry.resolve().pane_id, n)
+        # A lone pane may carry id 12 in slot 12, or id 12 in slot 1.
+        for pid, slot in ((12, 12), (12, 1), (9, 12), (1, 12)):
+            with self.subTest(pid=pid, slot=slot):
+                self.setUp()
+                body = report(focused_slot=slot); body["panes"][0].update(pane_id=pid, slot=slot)
+                self.registry.report(body)
+                self.assertEqual(self.registry.resolve(str(slot)).pane_id, pid)
+
+    def test_thirteen_rows_and_value_13_are_refused_atomically(self):
+        self.registry.report(report())
+        original = self.registry.resolve()
+        cases = [self.panes_report(13, seq=2), self.panes_report(20, seq=2)]
+        body = self.panes_report(12, seq=2); body["panes"].append(deepcopy(body["panes"][0])); cases.append(body)
+        for value in self.BAD_NUMBERS:
+            if value is not None:
+                cases.append(report(2, focused_slot=value))
+            body = report(2); body["panes"][0]["pane_id"] = value; cases.append(body)
+            if value is not None:
+                body = report(2, focused_slot=1); body["panes"][0]["slot"] = value; cases.append(body)
+        # focused_slot 12 is refused when no pane is in slot 12, as today's 1..8 are.
+        cases.append(report(2, focused_slot=12))
+        for body in cases:
+            with self.subTest(body=body):
+                with self.assertRaises(PaneRefused): self.registry.report(body)
+                self.assertEqual(self.registry.resolve(), original)
+
+    def test_resolve_accepts_slots_1_to_12_only_as_exact_decimal(self):
+        self.registry.report(self.panes_report())
+        for text in ("13", "0", "00", "012", "-1", "+1", " 12", "12 ", "12\n", "1 2", "1.0", "１２", "١", "²",
+                     "9a", "10e0", "0x9", "99", "123"):
+            with self.subTest(text=text), self.assertRaises(PaneRefused):
+                self.registry.resolve(text)
+        for value in (12, 9, True, None, b"12"):
+            with self.subTest(value=value), self.assertRaises(PaneRefused):
+                self.registry.resolve(value)
+
+    def test_permissions_resolve_owner_and_address_take_pane_12_not_13(self):
+        receipt = self.registry.report(self.panes_report())
+        view = next(t["view_id"] for p in receipt["panes"] if p["pane_id"] == 12 for t in p["tabs"])
+        self.assertEqual(self.registry.resolve_owner(W, 12, "tab012", view).pane_id, 12)
+        out = self.registry.permissions(12, {"window": W, "seq": 2, "see": False})
+        self.assertFalse(next(p for p in out["panes"] if p["pane_id"] == 12)["see"])
+        self.assertTrue(next(p for p in out["panes"] if p["pane_id"] == 11)["see"])
+        body = self.address(3); body["url"] = "http://localhost:23456/elsewhere"
+        self.assertEqual(self.registry.address(12, "tab012", body)["seq"], 3)
+        self.assertEqual(self.registry.resolve("12").url, "http://localhost:23456/elsewhere")
+        for value in self.BAD_NUMBERS:
+            with self.subTest(value=value):
+                with self.assertRaises(PaneRefused): self.registry.resolve_owner(W, value, "tab012", view)
+                with self.assertRaises(PaneRefused): self.registry.permissions(value, {"window": W, "seq": 4, "see": True})
+                with self.assertRaises(PaneRefused): self.registry.address(value, "tab012", self.address(4))
+        self.assertFalse(self.registry.resolve("12").see)
+        self.host.navigate.assert_not_called(); self.host.open_tab.assert_not_called()
 
     def test_remote_host_authority_navigation_epoch_closed_and_wrong_profile(self):
         body = self.remote()
@@ -517,6 +597,30 @@ class Ingress(unittest.TestCase):
         self.registry.address.assert_called_once_with(4,L,{})
         with self.assertRaises(APIError): route(self.handler,self.daemon,["browser","front"],{"url":"secret"})
         with self.assertRaises(APIError): route(self.handler,self.daemon,["browser","panes","04"],{})
+
+    def test_pane_routes_take_1_to_12_and_refuse_13_with_400_before_registry(self):
+        # FS0: /browser/panes/<id> grows to twelve ids; everything else stays a 400.
+        from jarvis.v2.browser.routes import route
+        from jarvis.v2.daemon import APIError
+        self.handler.command = "PATCH"
+        for n in range(1, 13):
+            with self.subTest(pane=n):
+                self.registry.permissions.reset_mock()
+                self.assertEqual(route(self.handler, self.daemon, ["browser", "panes", str(n)], {}), (200, {"seq": 2}))
+                self.registry.permissions.assert_called_once_with(n, {})
+        self.handler.command = "POST"
+        self.assertEqual(route(self.handler, self.daemon, ["browser", "panes", "12", "tabs", L, "address"], {}), (200, {"seq": 3}))
+        self.registry.address.assert_called_once_with(12, L, {})
+        self.registry.permissions.reset_mock(); self.registry.address.reset_mock(); self.handler._body.reset_mock()
+        for text in ("13", "14", "99", "0", "00", "012", "-1", "+1", " 12", "12 ", "１２", "١", "12.0", "1e1", ""):
+            for method, path in (("PATCH", ["browser", "panes", text]),
+                                 ("POST", ["browser", "panes", text, "tabs", L, "address"])):
+                with self.subTest(pane=text, method=method):
+                    self.handler.command = method
+                    with self.assertRaises(APIError) as raised: route(self.handler, self.daemon, path, {})
+                    self.assertEqual(raised.exception.status, 400)
+        self.registry.permissions.assert_not_called(); self.registry.address.assert_not_called()
+        self.handler._body.assert_not_called()
 
     def test_restore_is_owner_only_and_never_claims_owner_navigation(self):
         from jarvis.v2.browser.routes import route
