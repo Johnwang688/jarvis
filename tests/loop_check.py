@@ -32,6 +32,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from jarvis import agent as agent_mod  # noqa: E402
 from jarvis import llm, runtime, tools  # noqa: E402
+# PARALLEL_SAFE names the chat reads, which only a v2 process registers
+# (jarvis/tools never imports v2); register them so the drift check holds.
+import jarvis.v2.tools.chats  # noqa: E402,F401
 
 EMPTY_SCHEMA = {"type": "object", "properties": {}, "required": [], "additionalProperties": False}
 

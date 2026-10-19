@@ -8,10 +8,11 @@ parent's D-3 tools; the foreground hook refuses terminal_read for them. A
 listed tool runs **in the daemon**, through the bridge's single
 `tools.dispatch` (`bridge.py`), never in the jarvis-mcp process the CLI starts.
 
-Owner Claude and Codex chats receive `terminal_read` and the D-3 catalog,
-filtered by installed tool availability. Codex foreground-only calls are
-bound to the exact native parent handle/turn before daemon dispatch. Tests may
-register temporary entries without widening the production catalog.
+Owner Claude and Codex chats receive `terminal_read`, the D-3 catalog and
+the chat reads (`tools/chats.py`), filtered by installed tool availability.
+Codex foreground-only calls are bound to the exact native parent handle/turn
+before daemon dispatch. Tests may register temporary entries without widening
+the production catalog.
 
 The flags, each read by exactly one place:
 
@@ -83,6 +84,16 @@ for _name in CHAT_GIT_TOOLS:
     SESSION_TOOLS[_name] = SessionTool(_name, providers=_CODEX_ONLY, foreground_only=True)
 
 
+# The chat reads (chat-to-chat plan C1, §4.2; decision CC-1): every owner
+# Claude and Codex chat may read every other open HUD chat. Read-only — they
+# change nothing — so the hook allows them and the listing says readOnlyHint;
+# neither foreground- nor desk-only, as `session_*` are not. External MCP
+# never gets them (not in MCP_TOOLS).
+CHAT_READ_TOOLS = ("chat_list", "chat_summary", "chat_search", "chat_read")
+for _name in CHAT_READ_TOOLS:
+    SESSION_TOOLS[_name] = SessionTool(_name, providers=_CHAT_PROVIDERS, read_only=True)
+
+
 def register(entry: SessionTool) -> SessionTool:
     """Offer `entry` to chat sessions. Primarily for isolated test probes."""
     if not isinstance(entry, SessionTool) or not entry.name:
@@ -119,7 +130,7 @@ def for_provider(provider) -> list[SessionTool]:
     if not entries:
         return []
     from jarvis import tools
-    from .tools import terminal_read, hud_browser_view, hud_browser_act, schedules, chat_git_tools  # noqa: F401 — register implementations
+    from .tools import terminal_read, hud_browser_view, hud_browser_act, schedules, chat_git_tools, chats  # noqa: F401 — register implementations
     offered = []
     for entry in sorted(entries, key=lambda e: e.name):
         if entry.name not in tools.REGISTRY:
@@ -132,6 +143,17 @@ def for_provider(provider) -> list[SessionTool]:
             continue
         offered.append(entry)
     return offered
+
+
+def private_result(name: str) -> bool:
+    """Whether a jarvis-server tool's result stays out of every summary: its
+    canonical name is in `tools.PRIVATE_RESULT` (the terminal read, the
+    Browser look and act, the chat reads). The modules that register those
+    names are imported first, so the answer never depends on what this
+    process happened to import already."""
+    from jarvis import tools
+    from .tools import terminal_read, hud_browser_view, hud_browser_act, chats  # noqa: F401
+    return isinstance(name, str) and name in tools.PRIVATE_RESULT
 
 
 def offered(provider, name: str) -> SessionTool | None:

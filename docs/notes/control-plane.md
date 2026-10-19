@@ -326,3 +326,25 @@ Discord reply resolves the broker directly; `Daemon.answer` →
 it. A timeout, shutdown or unreadable answer denies. The fast path asks with
 an ASK copy of an AUTO brief, so layer 5 never hands its call to a reviewer it
 does not have.
+
+## Chat reads in the session catalog (chat-to-chat C1, 2026-10-19)
+
+`chat_list`, `chat_summary`, `chat_search` and `chat_read`
+(`jarvis/v2/tools/chats.py`) are `SESSION_TOOLS` entries for Claude and Codex
+owner chats: `read_only=True`, neither foreground- nor desk-only, so the
+listing says `readOnlyHint: true, destructiveHint: false, openWorldHint:
+false`, Claude's hook returns the explicit "a read-only Jarvis tool" allow
+(sub-agents included, as for `session_*`), and Codex gets the per-tool
+`approval_mode="approve"` and `enabled_tools` entry its readback must match.
+They are not in `mcp_catalog.MCP_TOOLS`: the external `jarvis mcp` neither
+lists nor runs them. They are `EXPLICIT_ONLY`, `PRIVATE_RESULT` and
+`PARALLEL_SAFE`.
+
+Each tool refuses (`Error: chats can be read only inside a Jarvis HUD chat.`)
+unless a v2 caller is bound and the daemon's `ChatRelay`
+(`jarvis/v2/chat_relay.py`) is installed. The daemon installs it in `start()`
+and removes it at the start of `stop()`; there is no HTTP route behind it.
+The service hands the tools only the store and a snapshot of running turns
+and owner-queue lengths, taken under the daemon lock; the log reads and the
+scrub (`chat_reads.py`, C0) run outside it. Both files are SELF_PROTECTED
+(decision CC-8). Sending (`chat_send`, `chat_wait`) is C3/C4's.

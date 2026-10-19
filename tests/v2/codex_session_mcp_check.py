@@ -131,6 +131,21 @@ class Events(unittest.TestCase):
         self.assertEqual(got.data["summary"],text[:200])
         got=self.emit(self.item(id="other",server="another"))
         self.assertEqual(got[-1].data["name"],"mcp__another__terminal_read")
+    def test_chat_reads_get_the_fixed_private_summary(self):
+        # Chat-to-chat C1: codex.py reads tools.PRIVATE_RESULT, not a
+        # hard-coded list [the ('terminal_read', 'hud_browser_view',
+        # 'hud_browser_act') tuple left as it is].
+        fenced='[untrusted chat text n1 from HUD chat aaaa0001 "x" (Claude, project p)]\nPRIVATE_MARKER'
+        for i,name in enumerate(("chat_list","chat_summary","chat_search","chat_read")):
+            for j,(text,summary,outcome) in enumerate(((fenced,"read","ok"),("Refused: PRIVATE_MARKER","refused","denied"),
+                                                     ("Error: PRIVATE_MARKER","error","failed"))):
+                with self.subTest(tool=name,expected=summary):
+                    row=self.item(id=f"chat-{i}-{j}",tool=name,arguments={"chat":"aaaa0001"},
+                                  result={"content":[{"type":"text","text":text}]})
+                    events=self.emit(row,method="item/started")+self.emit(row)
+                    self.assertEqual(events[-1].kind,K.TOOL_FINISHED)
+                    self.assertEqual((events[-1].data["summary"],events[-1].data["outcome"]),(summary,outcome))
+                    self.assertNotIn("PRIVATE_MARKER",json.dumps([x.data for x in events]))
     def test_reviewer_refusal_cannot_copy_terminal_rationale(self):
         self.emit(method="item/started")
         events=list(self.provider._notification(self.h,"item/autoApprovalReview/completed",{
@@ -248,6 +263,43 @@ class NativeConfig(F.CodexProviderChecks):
         resumed=self.provider.resume(thread,self.brief,lambda *a,**kw:D.ALLOW)
         self.handles.append(resumed)
         self.assertEqual(self.brain.calls('thread/resume')[-1]['params']['config']['mcp_servers.jarvis'],self.brief.mcp_servers['jarvis'])
+
+
+CHAT_READS=("chat_list","chat_summary","chat_search","chat_read")
+
+
+class ChatReadsNativeConfig(F.CodexProviderChecks):
+    """Chat-to-chat C1: a Codex owner chat's server entry approves and
+    enables the four reads, and the measured readback must hold them."""
+    def setUp(self):
+        guard=patch.dict(session_tools.SESSION_TOOLS,{n:F.PRODUCTION[n] for n in CHAT_READS if n in F.PRODUCTION})
+        guard.start();self.addCleanup(guard.stop)
+        super().setUp()
+    def test_the_server_entry_approves_and_enables_the_reads(self):
+        entry=self.brief.mcp_servers["jarvis"]
+        for name in CHAT_READS:
+            with self.subTest(tool=name):
+                self.assertEqual(entry.get("tools",{}).get(name),{"approval_mode":"approve"})
+                self.assertIn(name,entry.get("enabled_tools",[]))
+        server=F.tomllib.loads(codex_config.config_text(self.brief))["mcp_servers"]["jarvis"]
+        self.assertTrue(set(CHAT_READS)<=set(server.get("enabled_tools",[])),server.get("enabled_tools"))
+    def test_the_readback_must_include_the_reads(self):
+        expected=self.brief.mcp_servers["jarvis"]
+        self.start(thread_id="mcpcrok")       # the readback as written is accepted
+        enabled=[n for n in expected.get("enabled_tools",[]) if n!="chat_read"]
+        approved={k:v for k,v in expected.get("tools",{}).items() if k!="chat_read"}
+        for index,wrong in enumerate(({**expected,"enabled_tools":enabled},{**expected,"tools":approved},
+                                      {**expected,"disabled_tools":["chat_read"]})):
+            with self.subTest(wrong=sorted(set(expected)^set(wrong)) or index):
+                self.brain.script["config_override"]={"mcp_servers":{"jarvis":wrong}}
+                with self.assertRaises(F.BriefRefused):
+                    self.start(thread_id=f"mcpcrbad{index}")
+        self.brain.script.clear()
+
+
+# Only its own tests: the inherited ones pin the probe catalog it widens.
+for _name in [n for n in dir(F.CodexProviderChecks) if n.startswith("test_")]:
+    setattr(ChatReadsNativeConfig, _name, None)
 
 
 class ForegroundBridge(F.DaemonHarness):

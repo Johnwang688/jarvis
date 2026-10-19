@@ -171,6 +171,12 @@ _CHILD_LABEL_UNSAFE = re.compile(r"[^A-Za-z0-9_./-]+")
 CHILD_UNNAMED = "unnamed"
 
 
+def _private_result(tool) -> bool:
+    """A jarvis tool whose result never reaches a summary (`PRIVATE_RESULT`)."""
+    from ..session_tools import private_result
+    return private_result(tool)
+
+
 def _child_label(path) -> str:
     if not isinstance(path, str):
         return CHILD_UNNAMED
@@ -1453,7 +1459,7 @@ class CodexProvider:
                         or p.get("turnId") != s.turn_id):
                     return
                 name = mcp[2] if mcp is not None else "mcp"
-                if action.get("server") == "jarvis" and action.get("toolName") in ("terminal_read", "hud_browser_view", "hud_browser_act"):
+                if action.get("server") == "jarvis" and _private_result(action.get("toolName")):
                     name = action["toolName"]
                 yield self._event(h, EventKind.REVIEWER_DECLINED, tool=name,
                                   args={}, command=None, reason="refused")
@@ -1525,7 +1531,7 @@ class CodexProvider:
         if method != "item/completed":
             return
         s.mcp_items[call_id] = (*identity, True)
-        private = server == "jarvis" and tool in ("terminal_read", "hud_browser_view", "hud_browser_act")
+        private = server == "jarvis" and _private_result(tool)
         result = item.get("result")
         content = result.get("content") if isinstance(result, dict) else None
         # Text blocks only, bounded before concatenating; structured metadata,
@@ -1560,7 +1566,7 @@ class CodexProvider:
             if not done:
                 h.native.mcp_items[call_id] = (server, tool, name, True)
                 yield self._event(h, EventKind.TOOL_FINISHED, call_id=call_id, name=name,
-                                  ok=False, outcome="failed", summary=("stopped" if tool == "hud_browser_act" else "refused" if tool == "hud_browser_view" else "error") if server == "jarvis" and tool in ("terminal_read", "hud_browser_view", "hud_browser_act") else "interrupted")
+                                  ok=False, outcome="failed", summary=("stopped" if tool == "hud_browser_act" else "refused" if tool == "hud_browser_view" else "error") if server == "jarvis" and _private_result(tool) else "interrupted")
 
     @staticmethod
     def _reply(s, request, result=None, **kwargs):

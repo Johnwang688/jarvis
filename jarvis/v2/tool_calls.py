@@ -10,7 +10,7 @@ from jarvis.tools import secrets
 from .approvals import clean_line
 
 _KEYS = ("command", "cmd", "pattern", "file_path", "notebook_path", "path", "paths",
-         "url", "query", "description", "terminal", "name")
+         "url", "query", "description", "terminal", "name", "chat")
 _PATH_KEYS = frozenset(("file_path", "notebook_path", "path", "paths"))
 
 

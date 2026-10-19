@@ -75,6 +75,7 @@ from ..tools import schedules as _schedules  # noqa: F401  (registers schedule_*
 from ..tools import hud_browser_view as _hud_browser_view  # noqa: F401
 from ..tools import hud_browser_act as _hud_browser_act  # noqa: F401
 from ..tools import terminal_read as _terminal_read  # noqa: F401  (registers terminal_read)
+from ..tools import chats as _chats  # noqa: F401  (registers the chat reads)
 
 # Eight steps, per §8.1. Not a work limit — a *definition*: anything that needs
 # more than eight rounds of read-and-think is work, and work goes to a task.
@@ -96,7 +97,8 @@ _NOT_OK = ("Error", "Refused", "The user declined")
 _DENIAL_PREFIXES = ("Refused: ", "The user declined to run this.")
 # These results carry stored/file/page content, which can start with anything.
 _RAW_CONTENT_TOOLS = frozenset(("memory_read", "session_summary", "session_read",
-                               "read_file", "fetch_page", "skill_read"))
+                               "read_file", "fetch_page", "skill_read",
+                               "chat_list", "chat_summary", "chat_search", "chat_read"))
 
 # Written for the owner's desk turn holding the edit tools (decision F-5,
 # 2026-10-14). `config.narrow_prompt` — which `Agent.__init__` and
@@ -108,6 +110,9 @@ FAST_PROMPT = (
     + config.FAST_DIRECT_PARAGRAPH + "\n\n"
     + config.FAST_PROPOSE_PARAGRAPH + "\n\n"
     + config.FAST_DRIVE_PARAGRAPH + "\n\n"
+    # Narrowed away with the chat reads: a task's thread holds none, and its
+    # prompt is then what it was before them, byte for byte.
+    + config.FAST_CHATS_PARAGRAPH + "\n\n"
     + """**Answer directly** when the request is a question you can settle from memory,
 this transcript, one read or one fetch; a control request (mute, avatar,
 music); or ordinary conversation. Most turns are this.
@@ -179,6 +184,13 @@ FAST_TOOLS: frozenset[str] = frozenset(
 # the desk takes the turn off the desk for the rest of it.
 DESK_TOOLS: frozenset[str] = frozenset({"terminal_read", "hud_browser_view"}) | DRIVE_TOOLS
 
+# The other HUD chats, read-only (chat-to-chat plan C1, §4.2; decision CC-1).
+# Held on every turn of an owner's chat — Discord, the DM and schedules
+# included, desk or not — and never by a task's thread or another role, so
+# not in `FAST_TOOLS`, which every brief may hold. The tools refuse without a
+# v2 caller and the daemon's chat service.
+CHAT_TOOLS: frozenset[str] = frozenset({"chat_list", "chat_summary", "chat_search", "chat_read"})
+
 # The tools the owner's own chat turn at the HUD gains (decisions F-1, F-2,
 # 2026-10-14): small, direct work done in place. Held exactly as `DESK_TOOLS`
 # are — an owner's chat brief, a message typed or spoken at the HUD, and not
@@ -246,11 +258,11 @@ def _validate_toolset() -> None:
     A renamed or removed v1 tool must stop the process rather than leave the
     fast path one capability short with nothing said.
     """
-    every = FAST_TOOLS | EDIT_TOOLS
+    every = FAST_TOOLS | EDIT_TOOLS | CHAT_TOOLS
     missing = sorted(name for name in every if name not in tools.REGISTRY)
     if missing:
         raise RuntimeError(
-            "FAST_TOOLS or EDIT_TOOLS names tools that are not registered: "
+            "FAST_TOOLS, EDIT_TOOLS or CHAT_TOOLS names tools that are not registered: "
             + ", ".join(missing)
             + ". Either the tool was renamed or its module is no longer imported."
         )
@@ -264,6 +276,10 @@ def _validate_toolset() -> None:
     based = sorted(FAST_TOOLS & EDIT_TOOLS)
     if based:
         raise RuntimeError(f"FAST_TOOLS contains desk-only edit tools: {', '.join(based)}")
+    # The chat reads are an owner's chat's, never the base set a task holds.
+    based = sorted(FAST_TOOLS & CHAT_TOOLS | DESK_TOOLS & CHAT_TOOLS | EDIT_TOOLS & CHAT_TOOLS)
+    if based:
+        raise RuntimeError(f"CHAT_TOOLS overlaps FAST_TOOLS, DESK_TOOLS or EDIT_TOOLS: {', '.join(based)}")
     if not ASKED_TOOLS <= EDIT_TOOLS:
         raise RuntimeError("ASKED_TOOLS names tools outside EDIT_TOOLS: "
                            + ", ".join(sorted(ASKED_TOOLS - EDIT_TOOLS)))
@@ -494,6 +510,7 @@ class FastPathProvider:
         `DESK_TOOLS` and `EDIT_TOOLS` are an owner's chat brief's only: any
         other brief naming one is refused, and one naming none never holds
         them. Which turns of an owner's chat hold them is `_turn_tools`'.
+        `CHAT_TOOLS` are an owner's chat brief's only too, on every turn.
         """
         if brief.profile is PermissionProfile.STRICT:
             raise BriefRefused(
@@ -502,7 +519,7 @@ class FastPathProvider:
             )
         if brief.mcp_servers:
             raise BriefRefused("the fast path cannot load MCP servers; use a CLI provider")
-        allowed = _available_tools(FAST_TOOLS | EDIT_TOOLS)
+        allowed = _available_tools(FAST_TOOLS | EDIT_TOOLS | CHAT_TOOLS)
         if not _owners_chat(brief):
             # A task's thread (or any role but chat) never holds a desk tool,
             # nor an edit tool (decision F-2).
@@ -513,7 +530,12 @@ class FastPathProvider:
                 raise BriefRefused(
                     "the fast path's edit tools are for the owner's own chat at the HUD, "
                     "never a task's thread or another role")
-            allowed = [name for name in allowed if name not in _DESK_ONLY]
+            if brief.allowed_tools is not None and CHAT_TOOLS & set(brief.allowed_tools):
+                raise BriefRefused(
+                    "the chat reads are for the owner's own chats, never a task's thread "
+                    "or another role")
+            allowed = [name for name in allowed
+                       if name not in _DESK_ONLY and name not in CHAT_TOOLS]
         if brief.allowed_tools is None:
             return allowed
         asked = set(brief.allowed_tools)
@@ -525,7 +547,7 @@ class FastPathProvider:
             raise BriefRefused(
                 "the fast path's edit tools are pinned all together or not at all: "
                 + ", ".join(sorted(EDIT_TOOLS)))
-        widened = sorted(asked - FAST_TOOLS - EDIT_TOOLS)
+        widened = sorted(asked - FAST_TOOLS - EDIT_TOOLS - CHAT_TOOLS)
         if widened:
             raise BriefRefused(
                 "the fast path may not hold "

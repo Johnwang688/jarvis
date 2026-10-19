@@ -406,6 +406,10 @@ class Daemon:
         self.speech_ducker = Ducker(self.browser.duck_owners, journal=self._duck_journal)
         from .browser.look import BrowserLook
         self.browser_look = BrowserLook(self)
+        # The chat-to-chat service (chat_relay.py): what the chat tools read
+        # through. Installed in `start()`, removed in `stop()`; no route.
+        from .chat_relay import ChatRelay
+        self.chat_relay = ChatRelay(self)
         from .browser.drive import BrowserDrive
         self.browser_drive = BrowserDrive(self)
         from .devservers import DevServers
@@ -479,6 +483,7 @@ class Daemon:
             self.terminals.install()
             self.browser_look.install()
             self.browser_drive.install()
+            self.chat_relay.install()
             self.devservers.start()
             self.schedules.start()
             # A previous run's unrestored duck (V15) is repaired from its
@@ -2281,6 +2286,8 @@ class Daemon:
             # SIGKILLed below, before the listeners close.
             self.terminals.uninstall()
             self.terminals.hangup_all()
+            # No chat reads another once shutdown starts.
+            self.chat_relay.stop()
             sessions = list(self._sessions.values())
             # The queue is in memory; what waits on a turn at shutdown says so
             # in the log rather than reading as still waiting after a restart —
