@@ -872,9 +872,11 @@ class NoChains(Harness):
 
     def assert_refused(self, sender, target, caller=None):
         before = len(self.svc.items)
+        logged = self.log(sender, "relay_out") if sender is not None else []
         self.refused(self.send(sender, target, "do something", caller))
         self.assertEqual(len(self.svc.items), before)
-        self.assertEqual(self.log(sender, "relay_out") if sender is not None else [], [])
+        self.assertEqual(self.log(sender, "relay_out") if sender is not None else [], logged,
+                         "a refused send logs no relay_out")
 
     def test_off_desk_turns_cannot_send(self):
         target = self.chat()
