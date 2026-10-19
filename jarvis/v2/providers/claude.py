@@ -310,6 +310,12 @@ from ..redact import JMCPISH as _JMCPISH, JWTISH as _JWTISH, REDACTED as _REDACT
     TOKENISH as _TOKENISH  # noqa: E402
 
 
+def _private_result(canonical: str) -> bool:
+    """A jarvis tool whose result never reaches a summary (`PRIVATE_RESULT`)."""
+    from ..session_tools import private_result
+    return private_result(canonical)
+
+
 def _safe(text: Any) -> str:
     """Every string this module puts in an event, a reason or an exception.
 
@@ -2444,7 +2450,7 @@ class ClaudeProvider:
     @staticmethod
     def _tool_summary(name: str, text: str) -> str:
         canonical = name.removeprefix("mcp__jarvis__")
-        if canonical in ("terminal_read", "hud_browser_view", "hud_browser_act"):
+        if _private_result(canonical):
             from jarvis import tools
             return tools.private_summary(canonical, text)
         return text[:SUMMARY_CHARS]
@@ -2465,7 +2471,7 @@ class ClaudeProvider:
             denied = True
             session.denial_without_id = False
         session.denied_tools.discard(block.tool_use_id)
-        private_read = name.removeprefix("mcp__jarvis__") in ("terminal_read", "hud_browser_view", "hud_browser_act")
+        private_read = _private_result(name.removeprefix("mcp__jarvis__"))
         private_act = name in ("hud_browser_act", "mcp__jarvis__hud_browser_act")
         summary = self._tool_summary(name, text)
         if private_read:

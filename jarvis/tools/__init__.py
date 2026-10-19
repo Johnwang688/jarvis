@@ -382,6 +382,9 @@ PARALLEL_SAFE = frozenset(
         "spotify_library", "spotify_artist_tracks",
         "workflow_status", "workflow_log", "task_status", "task_log",
         "avatar_list",
+        # Another HUD chat, read-only (chat-to-chat plan C1; registered by
+        # jarvis/v2/tools/chats.py, which only a v2 process imports).
+        "chat_list", "chat_summary", "chat_search", "chat_read",
     }
 )
 

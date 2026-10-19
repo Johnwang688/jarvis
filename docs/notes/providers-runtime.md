@@ -1492,3 +1492,23 @@ speech mutant is killed by vitest. One candidate is equivalent and is not
 counted: `_park` without awaiting the cancelled task, because on one loop
 the cancel lands before the idle reader can run again.
 
+
+## Chat reads on all three providers (chat-to-chat C1, 2026-10-19)
+
+The fast path holds `fastpath.CHAT_TOOLS` (the four chat reads) on every turn
+of an owner's chat, Discord, the DM and schedules included, desk or not. They
+are not in `FAST_TOOLS`, `DESK_TOOLS` or `EDIT_TOOLS`: a task's thread and
+every other role never hold them, and a brief naming one is refused
+(`BriefRefused`). Their results are in `_RAW_CONTENT_TOOLS`. The prompt gains
+`config.FAST_CHATS_PARAGRAPH` ("**Other chats in the HUD**"), narrowed away
+for any agent without all four reads; C4 adds the send sentences and their
+version.
+
+Claude and Codex reach them through the session catalog
+([control plane](control-plane.md#chat-reads-in-the-session-catalog-chat-to-chat-c1-2026-10-19)).
+Their `TOOL_FINISHED` summaries for jarvis-server tools now follow
+`tools.PRIVATE_RESULT` (`session_tools.private_result`, which imports the
+registering modules first) rather than a hard-coded list, so a chat read's
+summary in `log.jsonl` and on the bus is `read`, `refused` or `error`, never
+the text read. The HUD label of a `chat_read`/`chat_summary` row names its
+target (`"chat"` is the last of `tool_calls._KEYS`).

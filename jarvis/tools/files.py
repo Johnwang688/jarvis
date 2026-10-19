@@ -98,6 +98,11 @@ SELF_PROTECTED = frozenset(
         "jarvis/v2/mcp_catalog.py",
         "jarvis/v2/desk.py",
         "jarvis/v2/mcp_session.py",
+        # What one HUD chat may read of another, and (later) send it: the
+        # chat tools and the daemon service behind them (decision CC-8,
+        # 2026-10-19). Editing them is editing what a read withholds.
+        "jarvis/v2/tools/chats.py",
+        "jarvis/v2/chat_relay.py",
         # Decides what the HUD's editor may show and write, and what an
         # `@path`, the preview origin and a task diff withhold (ED-2,
         # 2026-10-11). Editing it is editing which credentials the window
