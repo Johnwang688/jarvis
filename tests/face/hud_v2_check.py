@@ -536,6 +536,38 @@ def handed_back_checks(page, mock):
     until(lambda: state()["busy"] is False)
 
 
+# The scripted utterance the dictation checks speak, fed only once the HUD is
+# really listening (2026-10-19, the dictation flake). The status line changing
+# is not enough: the capture's own `muted` and `suppressed` (his voice playing,
+# a card, a picker ...) decide whether the follow-up window opens and whether a
+# frame can open an utterance, and they can lag the text. So the readiness and
+# the feed happen in one synchronous step, which nothing can interleave with,
+# and the step is retried until the capture agrees.
+_FEED_LISTENING = """(() => {
+  const c = window.__hud.capture, m = window.__hud.mic;
+  if (c.hooks.muted()) return "muted";
+  if (c.hooks.suppressed()) return "suppressed: " + (c.hooks.suppressionReason?.() ?? "?");
+  m.feedMs(2000, 0.001);
+  c.openFollowUp();
+  if (!c.conversing()) return "the follow-up window did not open";
+  m.feedMs(1600, 0.06); m.feedMs(2800, 0.0005);
+  return "fed";
+})()"""
+
+
+def feed_when_listening(page, timeout: float = 6.0) -> str:
+    """Speak the scripted utterance once the capture is listening: "fed", or
+    the last reason it was not (for the failing check's detail)."""
+    last = ["not tried"]
+
+    def attempt():
+        last[0] = page.evaluate(_FEED_LISTENING)
+        return last[0] == "fed"
+
+    until(attempt, timeout=timeout)
+    return last[0]
+
+
 def dictation_checks(page, mock):
     print("\ndictation modes")
     # He does not answer himself: the detector is suppressed while a turn is in
@@ -572,14 +604,10 @@ def dictation_checks(page, mock):
           page.locator('[data-testid="orb-status"]').inner_text())
     sends_before = len(mock.sent("POST", "/threads/t1/send"))
     stt_before = len(mock.sent("POST", "/stt"))
-    page.evaluate("""
-      const m = window.__hud.mic;
-      m.feedMs(2000, 0.001);
-      window.__hud.capture.openFollowUp();
-      m.feedMs(1600, 0.06); m.feedMs(2800, 0.0005);
-    """)
+    fed = feed_when_listening(page)
     until(lambda: len(mock.sent("POST", "/stt")) > stt_before)
-    check("REVIEW transcribes the utterance", len(mock.sent("POST", "/stt")) > stt_before)
+    check("REVIEW transcribes the utterance", len(mock.sent("POST", "/stt")) > stt_before,
+          f"feed: {fed}; drops: {page.evaluate('JSON.stringify(window.__hud.voiceDiagnostics().rows.slice(-3))')}")
     until(lambda: page.locator('[data-testid="input"]').input_value() != "")
     check("REVIEW puts the transcript in the box",
           "what is the weather" in page.locator('[data-testid="input"]').input_value(),
@@ -595,14 +623,10 @@ def dictation_checks(page, mock):
           bool(until(lambda: "MUTED" not in page.locator('[data-testid="orb-status"]').inner_text(), timeout=2)),
           page.locator('[data-testid="orb-status"]').inner_text())
     sends_before = len(mock.sent("POST", "/threads/t1/send"))
-    page.evaluate("""
-      const m = window.__hud.mic;
-      m.feedMs(2000, 0.001);
-      window.__hud.capture.openFollowUp();
-      m.feedMs(1600, 0.06); m.feedMs(2800, 0.0005);
-    """)
+    fed = feed_when_listening(page)
     sent = until(lambda: mock.sent("POST", "/threads/t1/send")[sends_before:] or None)
-    check("AUTO sends the finished utterance", bool(sent))
+    check("AUTO sends the finished utterance", bool(sent),
+          f"feed: {fed}; drops: {page.evaluate('JSON.stringify(window.__hud.voiceDiagnostics().rows.slice(-3))')}")
     check("carrying the transcript", bool(sent) and sent[-1].get("text") == "what is the weather",
           str(sent[-1] if sent else None))
     # PR C: a dictated send says so, so the Discord mirror writes "You (HUD, voice)".
