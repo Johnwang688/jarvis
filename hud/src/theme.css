@@ -1438,9 +1438,18 @@ button.tb-icon[data-auto="true"] svg rect { stroke-dasharray: 2 1.4; }
 }
 .micmark { align-self: center; display: inline-flex; color: var(--accent); padding: 0 4px 0 6px; }
 /* Split and × in a pane's strip (WP-G2): the title bar's icon buttons, centred
-   in the strip; × at the far right. */
-.tabs > button.tb-icon.panesplit, .tabs > button.tb-icon.paneclose { align-self: center; margin: 0 2px; }
-.tabs > button.tb-icon.paneclose { font: 15px/1 var(--mono); margin-right: 6px; }
+   in the strip; × at the far right. The × is pinned to the first row's right
+   end, out of the flow, with its room kept free: what else the strip holds
+   (the profile select a pane shows once focused, a chip) can wrap the strip
+   onto a second row, but never moves × — a press on × focuses its pane
+   first, and a × that jumped under the pointer closed nothing (FS4). */
+.tabs > button.tb-icon.panesplit { align-self: center; margin: 0 2px; }
+.wpane > .tabs:has(> .paneclose) { position: relative; padding-right: 34px; }
+.tabs > button.tb-icon.paneclose {
+  position: absolute; top: 7px; right: 6px; margin: 0; font: 15px/1 var(--mono);
+}
+/* A compact strip (the view select) is a shorter row: × stays centred in it. */
+.tabs.compact > button.tb-icon.paneclose { top: 5.5px; }
 /* "Discard and close?" — inline, in the pane, never a modal or a card look-alike. */
 .closeask {
   display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 6px 10px;

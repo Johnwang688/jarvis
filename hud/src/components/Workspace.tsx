@@ -298,7 +298,7 @@ export function Workspace(props: {
               onPointerDownCapture={() => v.focus(n)}
               onFocusCapture={() => v.focus(n)}
             >
-              <div className="tabs" id={at.drawn && at.slot === 1 ? "tabs" : undefined}>
+              <div className={at.compact ? "tabs compact" : "tabs"} id={at.drawn && at.slot === 1 ? "tabs" : undefined}>
                 <div className="viewstrip" data-testid={`pane-${n}-view`}>
                   {at.compact ? (
                     <select

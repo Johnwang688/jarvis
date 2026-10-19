@@ -1594,4 +1594,11 @@ a frame. Tests: `workspace.split.test.ts` (34), the ported workspace, tree,
 chats, devopen, speech and frameguard suites; `_split_buttons_checks`,
 `_split_room_checks`, `_split_twelve_checks` and `_split_close_checks` in
 `hud_v2_layout_check.py`, and `_guard_dblclose_checks` in
-`hud_v2_browser_check.py`.
+`hud_v2_browser_check.py`. **× never moves when its pane takes focus**: a
+press on × focuses the pane first, and a focused pane can show more in its
+strip (the profile select when no chat pane is drawn), which wrapped a
+524 px terminal pane's strip and dropped × 34 px under the pointer, so the
+click closed nothing (pre-existing, exposed by the heir focus rule). The ×
+is now pinned out of the flow at the first row's right end (`theme.css`,
+`.tabs.compact` for the shorter select row), its 34 px kept free, so it sits
+where it did in an unwrapped strip and stays there when the strip wraps.
