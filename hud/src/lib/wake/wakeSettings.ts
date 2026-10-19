@@ -4,6 +4,7 @@
 // Storage that throws leaves the defaults, and the window works.
 
 import { SENSITIVITY, type Sensitivity } from "./keywords";
+import { readKey, writeKey } from "../storage";
 
 const SENSITIVITY_KEY = "jarvis.wakeSensitivity";
 const CARD_COMMANDS_KEY = "jarvis.wakeCardCommands";
@@ -20,23 +21,19 @@ type Reader = Pick<Storage, "getItem">;
 type Writer = Pick<Storage, "setItem">;
 
 export function loadSensitivity(storage?: Reader): Sensitivity {
-  try {
-    const v = (storage ?? window.localStorage).getItem(SENSITIVITY_KEY);
-    return v && Object.hasOwn(SENSITIVITY, v) ? (v as Sensitivity) : DEFAULT_SENSITIVITY;
-  } catch { return DEFAULT_SENSITIVITY; }
+  const v = readKey(SENSITIVITY_KEY, storage);
+  return v && Object.hasOwn(SENSITIVITY, v) ? (v as Sensitivity) : DEFAULT_SENSITIVITY;
 }
 
 export function saveSensitivity(value: Sensitivity, storage?: Writer) {
-  try { (storage ?? window.localStorage).setItem(SENSITIVITY_KEY, value); } catch { /* the window just forgets */ }
+  writeKey(SENSITIVITY_KEY, value, storage);
 }
 
 export function loadCardCommands(storage?: Reader): boolean {
-  try {
-    const v = (storage ?? window.localStorage).getItem(CARD_COMMANDS_KEY);
-    return v === "on" ? true : v === "off" ? false : DEFAULT_CARD_COMMANDS;
-  } catch { return DEFAULT_CARD_COMMANDS; }
+  const v = readKey(CARD_COMMANDS_KEY, storage);
+  return v === "on" ? true : v === "off" ? false : DEFAULT_CARD_COMMANDS;
 }
 
 export function saveCardCommands(on: boolean, storage?: Writer) {
-  try { (storage ?? window.localStorage).setItem(CARD_COMMANDS_KEY, on ? "on" : "off"); } catch { /* ditto */ }
+  writeKey(CARD_COMMANDS_KEY, on ? "on" : "off", storage);
 }

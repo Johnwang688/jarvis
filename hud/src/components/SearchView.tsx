@@ -12,6 +12,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { api } from "../api";
 import type { SearchMatch, SearchResult } from "../types";
+import { basename, dirname } from "../lib/paths";
 
 function highlighted(text: string, ranges: readonly [number, number][]): ReactNode {
   if (!ranges.length) return text;
@@ -173,8 +174,8 @@ export function SearchView(props: {
             <div className="sfile" data-testid={`search-file-${path}`} title={path}
                  onClick={() => setFolded((f) => ({ ...f, [path]: !f[path] }))}>
               <span className="tw">{folded[path] ? "▸" : "▾"}</span>
-              <span className="nm">{path.slice(path.lastIndexOf("/") + 1)}</span>
-              <span className="sdir">{path.lastIndexOf("/") > 0 ? path.slice(0, path.lastIndexOf("/")) : ""}</span>
+              <span className="nm">{basename(path)}</span>
+              <span className="sdir">{dirname(path)}</span>
               <span className="scount">{matches.length}</span>
             </div>
             {folded[path] ? null : matches.map((m) => (

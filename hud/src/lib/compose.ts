@@ -13,6 +13,7 @@
 // in. Both are pure, which is where the free tests grade them.
 
 import type { Project, ProviderName, Task, Thread } from "../types";
+import { readKey, writeKey } from "./storage";
 
 /** A new thread being composed. `openedId` is set once the server has the
  * thread but its first message has not gone through, so a retry reuses it
@@ -45,19 +46,12 @@ export const LAST_PROJECT_KEY = "jarvis.hud.lastProject";
 /** Storage can be missing or throw (private window, blocked site data). A
  * read that fails is "nothing remembered", never an error. */
 export function loadLastProject(storage?: Storage | null): string | null {
-  try {
-    return (storage ?? window.localStorage).getItem(LAST_PROJECT_KEY);
-  } catch {
-    return null;
-  }
+  return readKey(LAST_PROJECT_KEY, storage);
 }
 
 export function saveLastProject(id: string, storage?: Storage | null): void {
-  try {
-    (storage ?? window.localStorage).setItem(LAST_PROJECT_KEY, id);
-  } catch {
-    /* a convenience, never a reason for a send to fail */
-  }
+  // A convenience, never a reason for a send to fail.
+  writeKey(LAST_PROJECT_KEY, id, storage);
 }
 
 /**

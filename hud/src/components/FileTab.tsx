@@ -44,6 +44,7 @@ import {
 } from "../lib/buffers";
 import { buffers, refOf, type BufferView } from "../state/buffers";
 import { useEditorSettings } from "../state/editorSettings";
+import { dirname } from "../lib/paths";
 
 function join(dir: string, name: string) {
   return dir ? `${dir}/${name}` : name;
@@ -174,8 +175,6 @@ type FsAsk =
   | { kind: "new_folder"; dir: string; value: string }
   | { kind: "rename"; path: string; dir: boolean; value: string }
   | { kind: "delete"; path: string; dir: boolean };
-
-const parentOf = (path: string) => (path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "");
 
 /** The zoom the window is drawn at (CSS `zoom` on #root): a fixed menu is placed in its pixels. */
 function zoomNow(): number {
@@ -659,7 +658,7 @@ export function FileTab(props: {
         return;
       case "newFile":
       case "newFolder":
-        askFs({ kind: ask.kind === "newFile" ? "new_file" : "new_folder", dir: active ? parentOf(active) : "", value: "" });
+        askFs({ kind: ask.kind === "newFile" ? "new_file" : "new_folder", dir: active ? dirname(active) : "", value: "" });
         return;
       case "save":
         void save();
@@ -741,12 +740,12 @@ export function FileTab(props: {
             <>
               <button type="button" className="sideact" data-testid="explorer-new-file" title="New file"
                       disabled={props.blocked}
-                      onClick={() => askFs({ kind: "new_file", dir: active ? parentOf(active) : "", value: "" })}>
+                      onClick={() => askFs({ kind: "new_file", dir: active ? dirname(active) : "", value: "" })}>
                 +
               </button>
               <button type="button" className="sideact" data-testid="explorer-new-folder" title="New folder"
                       disabled={props.blocked}
-                      onClick={() => askFs({ kind: "new_folder", dir: active ? parentOf(active) : "", value: "" })}>
+                      onClick={() => askFs({ kind: "new_folder", dir: active ? dirname(active) : "", value: "" })}>
                 +▸
               </button>
             </>
@@ -777,8 +776,8 @@ export function FileTab(props: {
           <ExplorerMenu
             target={menu}
             onClose={() => setMenu(null)}
-            onNewFile={() => askFs({ kind: "new_file", dir: menu.dir ? menu.path : parentOf(menu.path), value: "" })}
-            onNewFolder={() => askFs({ kind: "new_folder", dir: menu.dir ? menu.path : parentOf(menu.path), value: "" })}
+            onNewFile={() => askFs({ kind: "new_file", dir: menu.dir ? menu.path : dirname(menu.path), value: "" })}
+            onNewFolder={() => askFs({ kind: "new_folder", dir: menu.dir ? menu.path : dirname(menu.path), value: "" })}
             onRename={() => askFs({ kind: "rename", path: menu.path, dir: menu.dir, value: menu.path })}
             onDelete={() => askFs({ kind: "delete", path: menu.path, dir: menu.dir })}
             onCopy={() => {

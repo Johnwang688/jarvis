@@ -2,11 +2,12 @@ import { useLayoutEffect, useRef, useState } from "react";
 import { BOOT_DEFAULTS, FADE_OUT_S, HARD_CAP_MS, PLAYED_KEY, SHIELD_MS, SKIP_FADE_MS,
   RINGS, SPIN, bitAt, buildDust, clamp01, easeInOutCubic, hexToRgb, layoutFor,
   particleAt, plateGeometry, penAt, dotsAt, ringRot, shouldPlay } from "../lib/boot";
+import { readKey, writeKey } from "../lib/storage";
 
 declare global { interface Window { __hudBootForce?: boolean } }
 
 function seenInWindow(): boolean {
-  try { return sessionStorage.getItem(PLAYED_KEY) === "1"; } catch { return false; }
+  return readKey(PLAYED_KEY, () => sessionStorage) === "1";
 }
 
 /** Decorative only: no focus, audio, requests, or dependency of HUD startup. */
@@ -24,7 +25,7 @@ export default function BootOverlay({ cardUp }: { cardUp: boolean }) {
   // Considering a window consumes its boot, even if a card or reduced motion
   // suppresses it. A later reload must not become a new window opening.
   useLayoutEffect(() => {
-    try { sessionStorage.setItem(PLAYED_KEY, "1"); } catch { /* this mount still only decides once */ }
+    writeKey(PLAYED_KEY, "1", () => sessionStorage); // this mount still only decides once
   }, []);
 
   useLayoutEffect(() => {
