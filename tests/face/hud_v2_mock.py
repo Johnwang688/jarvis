@@ -66,6 +66,63 @@ try:  # a chat's native sub-agents (SV-1's owner routes, SV-3's view)
 except ImportError:
     import hud_v2_mock_subagents as mock_subagents  # type: ignore[no-redef]
 
+
+# -- chat-to-chat (C5): relay records exactly as C3's daemon writes them ------------------
+#
+# A thread's `transcripts` list may hold, besides the usual transcript rows,
+# **log records** of the relay kinds (`{"kind", "at", "turn_id", "thread_id",
+# "project_id", "data", "relayed"?}`, `ChatRelay._record`'s shape). The
+# transcript route folds them into rows with the daemon's own
+# `hud_api._relay_message`, as `GET /threads/{id}/transcript` does: relay_in,
+# relay_out and relay_reply become `{role: "relay", relay: {...}, text, at}`;
+# relay_state, relay_reply and relay_delivered fold into those rows, and the
+# mock's `relays()["live"]` stands for `ChatRelay.describe` (the live service).
+# A record with no final state that `live` does not know reads
+# "not delivered", as after a restart.
+RELAY_LOG_KINDS = ("relay_out", "relay_in", "relay_state", "relay_reply", "relay_delivered")
+
+
+def relay_record(kind: str, thread_id: str, project_id: str, data: dict, turn_id=None, relayed=None,
+                 at: str | None = None) -> dict:
+    """One relay record (log and bus), as `ChatRelay._record` builds it."""
+    record = {"kind": kind, "at": at or time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime()),
+              "turn_id": turn_id, "thread_id": thread_id, "project_id": project_id, "data": dict(data)}
+    if relayed is not None:
+        record["relayed"] = dict(relayed)
+    return record
+
+
+def relay_transcript(entries: list, live: dict) -> list:
+    """The transcript route's relay fold (hud_api.py, chat-to-chat §7) over a
+    thread's mixed list; ordinary rows pass through in place."""
+    from jarvis.v2 import hud_api
+    fates, statuses, deliveries = {}, {}, {}
+    for entry in entries:
+        if "kind" not in entry:
+            continue
+        data = entry.get("data") if isinstance(entry.get("data"), dict) else {}
+        mid = data.get("message_id")
+        if not isinstance(mid, str):
+            continue
+        if entry["kind"] == "relay_state":
+            fates[mid] = data
+        elif entry["kind"] == "relay_reply":
+            statuses[mid] = data.get("status")
+        elif entry["kind"] == "relay_delivered":
+            deliveries[mid] = data.get("delivery")
+    rows = []
+    for entry in entries:
+        if "kind" not in entry:
+            rows.append(entry)
+            continue
+        if entry["kind"] in hud_api._RELAY_ROWS:
+            message = hud_api._relay_message(entry, fates, statuses, deliveries, live)
+            if message is not None:
+                if isinstance(entry.get("turn_id"), str):
+                    message["turn_id"] = entry["turn_id"]
+                rows.append(message)
+    return rows
+
 # A hostile avatar, checked for what it does rather than what it says: the art
 # is drawn in the window that gates approvals, so an `onload` in it must never
 # run. The HUD renders it through an <img>, which cannot run script whatever
@@ -998,6 +1055,9 @@ class MockDaemon:
                     if q.get("tools") == ["1"] and w.get("transcript_tools_unsupported"):
                         return self._err(400, "unknown query field: tools")
                     rows = w["transcripts"].get(parts[1], [])
+                    if any("kind" in row for row in rows):
+                        rows = relay_transcript(rows, {mid: {k: item.get(k) for k in ("state", "status", "delivery", "reason")}
+                                                       for mid, item in mock.relays()["live"].items()})
                     if q.get("tools") != ["1"]:
                         rows = [{k: v for k, v in row.items() if k != "turn_id"} for row in rows if row.get("role") != "tool"]
                     return self._json({"messages": rows})
@@ -1031,6 +1091,9 @@ class MockDaemon:
                 if mock_subagents.handle(self, mock, "POST", path):   # owner, then 405
                     return
                 parts = [p for p in path.split("/") if p]
+                if (len(parts) == 5 and parts[0] == "threads" and parts[2] == "relays"
+                        and parts[4] == "withdraw"):
+                    return mock.relay_withdraw(self, parts[1], unquote(parts[3]), url.query)
                 if len(parts) in (4, 5) and parts[0] == "tasks" and parts[2:4] == ["diff", "review"]:
                     body = self._body()
                     self._record("POST", path, body)
@@ -1209,6 +1272,8 @@ class MockDaemon:
                     return self._json(reply, 202)
                 if len(parts) == 3 and parts[0] == "threads" and parts[2] == "interrupt":
                     return self._json({"ok": True})
+                if len(parts) == 3 and parts[0] == "threads" and parts[2] == "compact":
+                    return mock.compact_route(self, parts[1], url.query, body)
                 if len(parts) == 3 and parts[0] in ("threads", "tasks") and parts[2] == "seen":
                     of = parts[0]
                     status = w["activity"][of].get(parts[1], "idle")
@@ -1698,6 +1763,131 @@ class MockDaemon:
             else:
                 t["running"] = True
                 t["running_since"] = since
+
+    # -- chat-to-chat (C5) ------------------------------------------------------------
+
+    def relays(self) -> dict:
+        """The relay section of the world: `live` (message id -> {state,
+        status, delivery, reason, sender, target}: what the running daemon's
+        `ChatRelay.describe` would say; empty after a "restart"), `withdrawn`
+        (every Withdraw that got through, as (sender, message id)) and
+        `refused` (Withdraws the owner gate turned away)."""
+        return self.world.setdefault("relays", {"live": {}, "withdrawn": [], "refused": 0})
+
+    def _project_of(self, thread_id: str) -> str:
+        t = next((t for t in self.world["threads"] if t["id"] == thread_id), None)
+        return t["project_id"] if t else "p1"
+
+    def relay(self, kind: str, thread_id: str, data: dict, *, turn_id=None, relayed=None, at=None,
+              log: bool = True, publish: bool = True) -> dict:
+        """One relay record in `thread_id`'s log (not `relay_progress`, which
+        the daemon only publishes) and on the bus, as the daemon does both."""
+        record = relay_record(kind, thread_id, self._project_of(thread_id), data, turn_id, relayed, at)
+        if log and kind in RELAY_LOG_KINDS:
+            self.world["transcripts"].setdefault(thread_id, []).append(dict(record))
+        if publish:
+            frame = {k: v for k, v in record.items() if k not in ("kind", "data")}
+            self.emit(kind, record["data"], **frame)
+        return record
+
+    def relay_counts(self) -> None:
+        """`thread_json`'s live relay counts (`ChatRelay.counts`) on every
+        thread record: relays queued for it, and its own still queued or running."""
+        live = self.relays()["live"].values()
+        for t in self.world["threads"]:
+            t["relays_waiting"] = sum(1 for i in live if i.get("target") == t["id"] and i.get("state") == "queued")
+            t["relays_out"] = sum(1 for i in live if i.get("sender") == t["id"]
+                                  and i.get("state") in ("queued", "running"))
+
+    def relay_withdraw(self, h, sender: str, mid: str, query: str):
+        """`POST /threads/{sender}/relays/{mid}/withdraw` (C3, owner-only):
+        the owner gate first, as the daemon's route checks `owner_only` before
+        anything is looked up; then 404 unknown, 409 not queued, else the
+        relay is withdrawn in both logs and on the bus."""
+        r = self.relays()
+        if not mock_subagents._owner(h, self, "POST"):
+            r["refused"] += 1
+            return h._err(403, "only the owner can do this, from the HUD")
+        if query:
+            return h._err(400, "unknown query field")
+        h._record("POST", f"/threads/{sender}/relays/{mid}/withdraw", h._body())
+        if not any(t["id"] == sender for t in self.world["threads"]):
+            return h._err(404, f"Thread {sender} not found")
+        item = r["live"].get(mid)
+        if item is None or item.get("sender") != sender:
+            return h._err(404, "no such message from this chat")
+        if item.get("state") != "queued":
+            return h._err(409, f"message {mid} is {item.get('state')}, no longer queued")
+        item.update(state="withdrawn", reason="the owner withdrew it")
+        r["withdrawn"].append((sender, mid))
+        self.relay_counts()
+        fate = {"message_id": mid, "state": "withdrawn", "reason": "the owner withdrew it"}
+        self.relay("relay_state", sender, fate)
+        self.relay("relay_state", item["target"], fate)
+        return h._json({"ok": True, "message_id": mid, "state": "withdrawn"})
+
+    # -- compact (WP-C of docs/plans/2026-10-19-compact-button-plan.md) ----------------
+
+    def compact_world(self) -> dict:
+        """The compact section of the world: `refuse` (a sentence the next POST
+        answers 409 with, then cleared when `sticky` is false), `refused` (POSTs
+        the owner gate turned away), `n` (compactions started) and `turn`
+        (the running compaction's turn id, by thread)."""
+        return self.world.setdefault("compact", {"refuse": None, "refused": 0, "n": 0, "turn": {}})
+
+    def compact_route(self, h, thread_id: str, query: str, body: dict):
+        """`POST /threads/{id}/compact` as WP-A's daemon answers it: owner-only
+        first (403), then 404 unknown thread, 409 `{"error": sentence}` for a
+        scripted refusal, an archived chat, a thread with a task, or a turn
+        already running; otherwise 202 `{"status": "started", "turn_id"}` with
+        the thread `compacting` + `running` and `compact_started` +
+        `turn_started` on the bus. It does not finish by itself: a test calls
+        `compact_finish`."""
+        c = self.compact_world()
+        if not mock_subagents._owner(h, self, "POST"):
+            c["refused"] += 1
+            return h._err(403, "only the owner can do this, from the HUD")
+        if query:
+            return h._err(400, "unknown query field")
+        # (`do_POST` has already recorded the call and read `body`.)
+        t = next((t for t in self.world["threads"] if t["id"] == thread_id), None)
+        if t is None:
+            return h._err(404, f"Thread {thread_id} not found")
+        refusal = c.get("refuse")
+        if refusal:
+            return h._err(409, refusal)
+        if t.get("archived"):
+            return h._err(409, "This chat is archived.")
+        if t.get("task_id") or t.get("role") != "chat":
+            return h._err(409, "Tasks are not chats; only a chat compacts.")
+        if t.get("running") or t.get("compacting"):
+            return h._err(409, "A turn is running; compact when it ends.")
+        c["n"] += 1
+        turn_id = f"compact-{c['n']}"
+        c["turn"][thread_id] = turn_id
+        t.update(compacting=True, running=True, running_since="2026-10-19T09:00:00+00:00")
+        frame = dict(thread_id=thread_id, project_id=t["project_id"], turn_id=turn_id, compaction=True)
+        self.emit("compact_started", {}, **frame)
+        self.emit("turn_started", {}, **frame)
+        return h._json({"status": "started", "turn_id": turn_id}, 202)
+
+    def compact_finish(self, thread_id: str, ok: bool = True, text: str | None = None, stop: str = "end"):
+        """End the running compaction as the daemon's `_turn` does: the thread
+        is idle again, `turn_finished` then `compacted` are published, and the
+        transcript gains the `system` row (`compacted`) that a reload shows."""
+        c = self.compact_world()
+        t = next(t for t in self.world["threads"] if t["id"] == thread_id)
+        turn_id = c["turn"].pop(thread_id, "compact-x")
+        text = text or ("Conversation compacted" if ok else "Compaction failed: the summary call timed out")
+        t.pop("compacting", None)
+        t.pop("running", None)
+        t.pop("running_since", None)
+        self.world["transcripts"].setdefault(thread_id, []).append(
+            {"role": "system", "text": text, "at": "2026-10-19T09:00:30+00:00", "turn_id": turn_id,
+             "compaction": True})
+        frame = dict(thread_id=thread_id, project_id=t["project_id"], turn_id=turn_id, compaction=True)
+        self.emit("turn_finished", {"stop": stop, "compacted": ok}, **frame)
+        self.emit("compacted", {"ok": ok, "text": text}, **frame)
 
     def emit(self, kind: str, data: dict | None = None, **extra):
         """Release one SSE frame."""

@@ -1616,3 +1616,86 @@ in `GET /threads/{id}/transcript`; with `tools=1` the turn's `compact` tool
 row shows too. `thread_json` gains a live `compacting` beside `running`.
 Speech should skip `compaction` records as it skips `self_started` ones
 (`speech/controller.ts`, WP-C).
+
+## Chat-to-chat in the HUD (C5, 2026-10-19)
+
+A message one chat sent another is a `role: "relay"` row, drawn by
+`components/RelayRow.tsx` from `ChatTab`'s `MessageRow`: `msg-relay-in` in
+the target ("FROM <badge> · ‹title›", a plain body, an "Open" button, and
+"↩ reply sent to ‹title›" once answered), `msg-relay-out` in the sender
+("↪ SENT TO ‹title›" with a `relay-state` chip, the body collapsed past
+three lines or 240 characters, the latest `relay_progress` excerpt under a
+working chip, and Withdraw while queued) and `msg-relay-reply` ("↩ REPLY
+FROM <badge> · ‹title›", the sanitising `Markdown`, and a footer saying the
+delivery in words). A relay row is never the owner's: no "YOU", never the
+`user` class. The peer's title is another chat's, so it is shown only through
+`lib/relays` `peerLabel` (format characters gone, every other control
+character and run of white space one space, at most 60 code points) as React
+text; a badge's class is only `fast|claude|codex|unknown`. Graphite: amber
+only on a queued chip and the sidebar's `↪N` badge, red only on a failed
+chip; working is `--accent`, answered `--green`, the rest `--text-muted`.
+
+`lib/relays.ts` folds the transcript rows (`relayMessage`) and the six bus
+kinds (`applyRelay`: relay_out, relay_in, relay_state, relay_progress,
+relay_reply and C3's relay_delivered) by message id, never by text; the
+store's `relay` action applies a record to the panes showing its thread
+(and, while one loads, replays it over the transcript, as tool events are).
+The transcript fold keys a relay row by direction and message id, so two
+sends of the same words in the same second stay two rows. C3's code wins
+over plan §7: a row has no queue `position` (the chip reads "queued"), rows
+carry `reason`, and `relay_out` names only its target, so the target's
+"1 message from ‹title› waits for this turn" line (`relay-waiting`, under
+the thinking line) takes the sender from the `relay_out` the window heard,
+else says "another chat". The window re-reads the thread list on relay_out,
+relay_in and relay_state, one read at a time, so `relays_waiting` (the line
+and the sidebar's `relays-waiting-<id>` badge) follows.
+
+Nothing a relay record does opens, selects or focuses a pane, and no frame
+gains focus. "Open" is the owner's click only and goes through Open beside
+(`pickThread(id, true)`, FS4's directional split). Open and Withdraw are
+disabled under an approval card, and their handlers refuse too. Withdraw
+calls the owner-only `POST /threads/{sender}/relays/{id}/withdraw` once per
+click (`api.withdrawRelay`). Speech skips every record marked `relayed` (O-8),
+as it skips `self_started`. Tests: `lib/relays.test.ts`,
+`components/RelayRow.test.ts`, `api.relays.test.ts`,
+`lib/speech/relayed.test.ts`, and `tests/face/hud_v2_relay_check.py` (also a
+`hud_v2_check` section). An arrival's selection is the workspace's focus: a
+store `select` alone is undone by the window's sync from the layout, so the
+auto-select mutation that the face check catches is a focus of the pane
+showing the thread (or opening it).
+
+## The Compact chip (WP-C, 2026-10-19)
+
+Plan: `docs/plans/2026-10-19-compact-button-plan.md` §4 and the owner's CB-2.
+`InputBar`'s lower row carries a Graphite chip right after the model chip:
+`<button type="button" class="chip compactbtn" data-testid="compact"
+data-state="ready|running|off" aria-label="Compact the conversation">`, labelled
+"Compact", or "Compacting…" while it runs. `lib/compact.ts` `compactFor(thread,
+{turnRunning, card})` decides it: no chip for a compose pane, a task's thread or
+any role but `chat`; `running` while `Thread.compacting` (it wins, since a
+compaction is a turn too); `off` for an archived chat, a card (`workBlocked`) or
+a running turn, with the title ("This chat is archived." / "Answer the card
+first." / "A turn is running; compact when it ends.", in that order); otherwise
+`ready`, titled per provider (Claude Code's /compact, Codex's own compaction,
+Jarvis's older-message summary).
+
+A click only asks (CB-2): an inline `compact-confirm` ("Compact this
+conversation?" with `compact-confirm-yes` "Compact" and `compact-confirm-no`
+"Cancel") above the row; never `window.confirm`. Only the yes click calls
+`api.compact(id)` (`POST /threads/{id}/compact`, empty JSON body, owner-only),
+and App allows one post in flight per thread. Cancel, Escape (a document capture
+listener that exists only while the confirm is open, since the box stops its own
+keys), or any state other than `ready` (a turn starting, a card arriving, the
+compaction beginning) dismisses it, and it does not return when the state does.
+Neither the chip nor a state change takes focus.
+
+Events: `compact_started` sets `Thread.compacting`; `compacted` and
+`turn_finished` clear it, and `compacted` draws its `text` as one `system` line
+live (a reload reads the same row from the transcript, so it shows once). A 409
+(or an unreachable daemon) shows its sentence as the pane's `pane-status` for a
+few seconds. Speech skips every record marked `compaction: true`, as it skips
+`relayed`. Tests: `lib/compact.test.ts`, `components/InputBarCompact.test.ts`,
+`api.compact.test.ts`, `lib/speech/compaction.test.ts` and
+`tests/face/hud_v2_compact_check.py` (also a `hud_v2_check` section). Mutations
+the tests catch: no confirm step, a double post (the yes button not closing the
+confirm, or no in-flight guard), and enabled under a card.

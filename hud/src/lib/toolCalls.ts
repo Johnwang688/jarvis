@@ -1,5 +1,6 @@
 import type { ChatMessage, ToolCall, ToolEntry, ToolOp, ToolOutcome } from "../types";
 import { toolName } from "./thinking";
+import { applyRelay, type RelayEvent } from "./relays";
 
 /** Safe display text only; never derive labels from raw args or results in the window. */
 export function toolLabel(raw: unknown): string {
@@ -22,7 +23,9 @@ export type TranscriptEvent =
   | { kind: "finish"; call_id: string; turn_id: string; outcome: ToolOutcome; at: string }
   | { kind: "stop"; turn_id?: string; at: string }
   | { kind: "mark"; local?: string; message_id?: string; patch: Partial<ChatMessage> }
-  | { kind: "remove"; local: string };
+  | { kind: "remove"; local: string }
+  // A chat-to-chat bus record (lib/relays), folded by message id.
+  | { kind: "relay"; event: RelayEvent };
 
 export function applyStart(entries: ChatMessage[], input: ToolCall): ChatMessage[] {
   const call = cleanCall(input);
@@ -54,6 +57,9 @@ export function stopTurn(entries: ChatMessage[], turn: string | undefined, at: s
   return changed ? next : entries;
 }
 function messageIdentity(m: ChatMessage): string | undefined {
+  // A relay row is one message in one direction: two sends of the same words
+  // in the same second are two rows, and a send and its reply share an id.
+  if (m.role === "relay" && m.relay) return `relay:${m.relay.dir}:${m.relay.message_id}`;
   if (m.message_id) return `message:${m.message_id}`;
   // Only an initial owner message lacks a message id. Steers/queued owner
   // messages have their own id, even if their turn or text is the same.
@@ -70,6 +76,7 @@ export function applyEvent(entries: ChatMessage[], event: TranscriptEvent): Chat
     case "finish": return applyFinish(entries, event);
     case "stop": return stopTurn(entries, event.turn_id, event.at);
     case "remove": return entries.filter(m => m.local !== event.local);
+    case "relay": return applyRelay(entries, event.event);
     case "mark": {
       const next = entries.map(m => (event.message_id && m.message_id === event.message_id)
         || (event.local && m.local === event.local) ? { ...m, ...event.patch } : m);

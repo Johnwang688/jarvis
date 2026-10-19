@@ -133,12 +133,23 @@ export const api = {
       return req(`/threads/${id}/transcript`);
     }
   },
+  /** The owner's Withdraw on a message this chat queued for another
+   * (chat-to-chat §5.5, owner-only): 404 unknown, 409 once it is no longer
+   * queued. No HUD route ever sends a relay. */
+  withdrawRelay: (threadId: string, messageId: string) =>
+    req<{ ok: boolean; message_id?: string; state?: string }>(
+      `/threads/${encodeURIComponent(threadId)}/relays/${encodeURIComponent(messageId)}/withdraw`, json({})),
   /** `spoken` (PR C): dictated, so the Discord mirror says "You (HUD, voice)".
    * While a turn runs the message is steered into it or queued behind it
    * (2026-10-08) — never refused; `status` says which. */
   send: (id: string, body: { text: string; images?: string[]; attachments?: Attachment[]; spoken?: boolean }) =>
     req<SendResult>(`/threads/${id}/send`, json(body)),
   interrupt: (id: string, expectedTurnId?: string) => req<any>(`/threads/${id}/interrupt`, json(expectedTurnId ? { expected_turn_id: expectedTurnId } : {})),
+  /** The Compact chip's confirmed click (WP-C, owner-only): the daemon starts a compaction as a
+   * turn, or answers 409 with the sentence for `pane-status`. The body is empty now so a later
+   * `{focus}` (CB-4) needs no new route. */
+  compact: (id: string) =>
+    req<{ status: string; turn_id?: string }>(`/threads/${encodeURIComponent(id)}/compact`, json({})),
   /** The sidebar dots (2026-10-08): every thread and task that is not idle. */
   activity: () => req<any>("/activity").then(parseActivity) as Promise<ActivityView>,
   /** The owner opened it: no longer unread or failed. */

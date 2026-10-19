@@ -58,6 +58,7 @@ import { shortId, threadTooltip } from "../lib/threadmodel";
 import { shortThreadId, threadLabel } from "../lib/threadTitle";
 import { projectNamesTaken, threadTitlesTaken } from "../lib/projects";
 import { loadShowMore, moreLabel, recentChats, saveShowMore } from "../lib/recentChats";
+import { waitingTitle } from "../lib/relays";
 import { InlineRename } from "./InlineRename";
 import { HoverTitle } from "./HoverTitle";
 import { CollapseButton } from "./Layout";
@@ -503,6 +504,11 @@ export const Sidebar = memo(function Sidebar(props: {
                         <span className="moved" data-testid={`moved-${t.id}`}>↪ {folderName(t.cwd)}</span>
                       ) : null}
                       <span className={`badge ${t.provider}`}>{t.provider}</span>
+                      {/* Chat-to-chat (C5): messages from other chats wait for this one — pending, so amber. */}
+                      {(t.relays_waiting ?? 0) > 0 ? (
+                        <span className="badge relay" data-testid={`relays-waiting-${t.id}`}
+                          title={waitingTitle(t.relays_waiting!)}>↪{t.relays_waiting}</span>
+                      ) : null}
                       {t.model ? (
                         <span className="badge pin" data-testid={`pin-${t.id}`} title={t.model}>{shortId(t.model)}</span>
                       ) : null}

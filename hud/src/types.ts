@@ -79,6 +79,15 @@ export interface Thread {
   /** Live, never stored (WP-H): when the running turn began (ISO), present
    * only while `running`. The thinking line counts from it after a reload. */
   running_since?: string | null;
+  /** Live, never stored (WP-C): a compaction is running on this thread. A
+   * compaction is a turn too, so `running` holds as well. Absent from an
+   * older daemon. */
+  compacting?: boolean;
+  /** Live, never stored (chat-to-chat C3 `thread_json`): messages from other
+   * chats queued for this one, and this chat's own sends still queued or
+   * running. Absent from an older daemon. */
+  relays_waiting?: number;
+  relays_out?: number;
 }
 
 export interface ThreadDiscord {
@@ -550,7 +559,9 @@ export interface ToolCall {
 export interface ToolEntry extends ToolCall { role: "tool" }
 
 export interface ChatMessage {
-  role: "user" | "assistant" | "system" | "tool";
+  /** `relay`: a message one chat sent another, or its reply (chat-to-chat
+   * C5) — never the owner's, drawn by `RelayRow` from `relay`. */
+  role: "user" | "assistant" | "system" | "tool" | "relay";
   text: string;
   at?: string;
   /** A grouped transcript row; never contains raw args or result summaries. */
@@ -567,6 +578,34 @@ export interface ChatMessage {
   /** What became of a message sent while a turn ran (2026-10-08): steered
    * into it, waiting to run after it, or dropped when the owner stopped. */
   mark?: MessageMark;
+  /** A relay row's facts (role `relay` only; lib/relays.ts). */
+  relay?: RelayInfo;
+}
+
+/** One relayed message as a transcript row says it (`hud_api._relay_message`)
+ * and the bus records keep it (chat-to-chat §7; C3's code wins). */
+export interface RelayInfo {
+  /** `in`: another chat's message to this one; `out`: this chat's message to
+   * another; `reply`: the answer to an `out`. */
+  dir: "in" | "out" | "reply";
+  message_id: string;
+  /** The other chat: who sent `in`, who receives `out`, who answered `reply`. */
+  peer: { thread_id: string | null; title: string | null; provider: string | null };
+  /** queued | running | answered | failed | stopped | withdrawn | dropped |
+   * expired | "not delivered" (a message the live service no longer knows). */
+  state: string;
+  /** The reply's status: answered | stopped | failed | empty. */
+  status?: string | null;
+  /** How the reply reached the sender: step | turn | wait | shown | dropped. */
+  delivery?: string | null;
+  /** Why an unrun message was not delivered. */
+  reason?: string;
+  /** Its place in the target's queue, when known (C3 serves none). */
+  position?: number;
+  /** The latest `relay_progress` excerpt (live only). */
+  progress?: string;
+  /** `relay_delivered`'s flag: a steer not confirmed to have reached the turn. */
+  unconfirmed?: boolean;
 }
 
 export type MessageMark = "steering" | "queued" | "not sent";
