@@ -1080,7 +1080,7 @@ def _over_frame(page, x: float, y: float) -> bool:
       return !!e && (e.tagName === 'IFRAME' || !!e.closest('[data-testid="browser-shield"]')); }""", [x, y])
 
 
-def _inside(box, x: float, y: float) -> bool:
+def _box_holds(box, x: float, y: float) -> bool:
     return bool(box) and box["x"] + 4 < x < box["x"] + box["width"] - 4 and box["y"] + 4 < y < box["y"] + box["height"] - 4
 
 
@@ -1096,7 +1096,7 @@ def _guard_after_move(page, mock, check, until, move: str, frame: str, pane: int
     act()
     page.wait_for_timeout(400)
     box = page.locator(frame).first.bounding_box() if _count(page, frame) else None
-    check(f"setup ({move}): the frame now lies under the resting pointer", _inside(box, x, y), f"{box} vs {(x, y)}")
+    check(f"setup ({move}): the frame now lies under the resting pointer", _box_holds(box, x, y), f"{box} vs {(x, y)}")
     _grab(page, frame, 0)
     stolen = _pane(pane, '[data-testid="browser-stolen"]')
     until(lambda: _count(page, stolen) > 0, timeout=4)
