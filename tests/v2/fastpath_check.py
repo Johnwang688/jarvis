@@ -969,6 +969,135 @@ def outcome_checks() -> None:
     print("ok  outcomes: owned refusal prefixes, raw content stays ok, legacy ok unchanged")
 
 
+# --- the chat reads (chat-to-chat plan C1, §4.2) -------------------------------
+
+CHAT_READS = frozenset({"chat_list", "chat_summary", "chat_search", "chat_read"})
+
+
+class _Requests:
+    """A fake llm.chat recording each request's tool names and tool results;
+    `first` (a reply) answers the first request, then "done"."""
+
+    def __init__(self, first=None, on_first=None):
+        self.names: list[set[str]] = []
+        self.results: list[str] = []
+        self.first, self.on_first = first, on_first
+
+    def __call__(self, model, messages, tools=None, on_delta=None, **kw):
+        if tools is None:
+            return reply("DONE: some. OPEN: the rest. NEXT: carry on.")
+        self.names.append({spec["function"]["name"] for spec in tools})
+        self.results = [m["content"] for m in messages if m.get("role") == "tool"]
+        if len(self.names) == 1:
+            if self.on_first is not None:
+                self.on_first()
+            if self.first is not None:
+                return self.first
+        return reply("done")
+
+
+def chat_tools_boundary_checks() -> None:
+    """Where the reads sit. Mutation: put them in the base FAST_TOOLS (a
+    task's thread then holds them) or in DESK_TOOLS (a Discord turn then does
+    not)."""
+    chat_tools = getattr(fastpath, "CHAT_TOOLS", frozenset())
+    assert CHAT_READS <= chat_tools, f"fastpath.CHAT_TOOLS holds the reads: {sorted(chat_tools)}"
+    assert not CHAT_READS & fastpath.FAST_TOOLS, "not the base set every brief holds"
+    assert not CHAT_READS & fastpath.DESK_TOOLS, "not desk-only: Discord turns read too"
+    assert not CHAT_READS & fastpath.EDIT_TOOLS
+    assert CHAT_READS <= fastpath._RAW_CONTENT_TOOLS, "a read's result can start with anything"
+    for name in CHAT_READS:
+        assert name in tools.REGISTRY and not tools.REGISTRY[name].dangerous, name
+        assert name in tools.PARALLEL_SAFE, name
+    secret = "FAST-PRIVATE-" + "7" * 8
+    assert fastpath._summary("chat_read", "[untrusted chat text n from HUD chat x]\n" + secret) == "read"
+    print("ok  chat reads: CHAT_TOOLS, not FAST_TOOLS or DESK_TOOLS, parallel-safe, private summary")
+
+
+def chat_tools_owner_turn_checks() -> None:
+    """Held on every turn of an owner's chat: Discord, the DM, a schedule and
+    the HUD alike, desk or not."""
+    provider = FastPathProvider()
+    owner = provider._toolset(brief())
+    assert CHAT_READS <= set(owner), sorted(owner)
+    turns = {
+        "the HUD's window": UserMessage(text="go", via="hud", desk=True),
+        "the HUD API": UserMessage(text="go"),
+        "Discord": UserMessage(text="go", via="discord", desk=True),
+        "the DM": UserMessage(text="go", via="dm"),
+        "a schedule": UserMessage(text="go", origin="system", via="system"),
+        "the escape hatch": UserMessage(text="go", origin="owner-ran"),
+    }
+    for index, (label, message) in enumerate(turns.items()):
+        handle = provider.start(thread(f"cr{index}"), brief(), allow_all)
+        fake = _Requests()
+        with scripted(fake):
+            list(provider.send(handle, message))
+        provider.close(handle)
+        assert CHAT_READS <= fake.names[0], (label, sorted(fake.names[0]))
+    # One handle, a HUD turn and then a Discord turn: held on both.
+    handle = provider.start(thread("crboth"), brief(), allow_all)
+    for message in (turns["the HUD's window"], turns["Discord"]):
+        fake = _Requests()
+        with scripted(fake):
+            list(provider.send(handle, message))
+        assert CHAT_READS <= fake.names[0], (message.via, sorted(fake.names[0]))
+    provider.close(handle)
+    print("ok  chat reads: held on every turn of an owner's chat, Discord, DM and schedules included")
+
+    # A steer from Discord takes the turn off the desk, never off the reads.
+    handle = provider.start(thread("crsteer"), brief(), allow_all)
+    fake = _Requests(first=reply("", [("get_datetime", "{}")]),
+                     on_first=lambda: provider.steer(handle, UserMessage(text="from my phone",
+                                                                         via="discord")))
+    with scripted(fake):
+        list(provider.send(handle, UserMessage(text="go", via="hud", desk=True)))
+    provider.close(handle)
+    assert len(fake.names) >= 2, fake.names
+    assert "terminal_read" in fake.names[0] and "terminal_read" not in fake.names[1], fake.names
+    assert CHAT_READS <= fake.names[1], sorted(fake.names[1])
+    print("ok  chat reads: a steer from off the desk drops the desk tools and keeps the reads")
+
+
+def chat_tools_task_checks() -> None:
+    """A task's thread, and every role but chat, never holds them, and a brief
+    naming one is refused rather than quietly narrowed (plan §6)."""
+    provider = FastPathProvider()
+    others = [brief(task_id="task1")] + [brief(role=role) for role in Role if role is not Role.CHAT]
+    for other in others:
+        label = (other.role.value, other.task_id)
+        held = set(provider._toolset(other))
+        assert not CHAT_READS & held, (label, sorted(CHAT_READS & held))
+        for name in sorted(CHAT_READS):
+            try:
+                provider._toolset(brief(role=other.role, task_id=other.task_id,
+                                        allowed_tools=["read_file", name]))
+            except BriefRefused:
+                pass
+            else:
+                raise AssertionError(f"{label}: a brief naming {name} was accepted")
+    handle = provider.start(thread("crtask"), brief(task_id="task1"), allow_all)
+    fake = _Requests(first=reply("", [("chat_read", json.dumps({"chat": "aaaa0001"}))]))
+    with scripted(fake):
+        list(provider.send(handle, UserMessage(text="go", via="hud", desk=True)))
+    provider.close(handle)
+    assert not CHAT_READS & fake.names[0], sorted(CHAT_READS & fake.names[0])
+    assert fake.results and "not available to this agent" in fake.results[-1], fake.results
+    print("ok  chat reads: absent for a task's thread and every other role; naming one is refused")
+
+
+def chat_tools_checks() -> list[str]:
+    """Each C1 check on its own, so one failing does not hide the others."""
+    failed = []
+    for check in (chat_tools_boundary_checks, chat_tools_owner_turn_checks, chat_tools_task_checks):
+        try:
+            check()
+        except Exception as exc:  # noqa: BLE001 - reported, and the run fails
+            failed.append(check.__name__)
+            print(f"FAIL {check.__name__}: {type(exc).__name__}: {exc}")
+    return failed
+
+
 def main() -> int:
     outcome_checks()
     boundary_checks()
@@ -992,6 +1121,10 @@ def main() -> int:
     isolation_checks()
     model_checks()
     no_self_switch_checks()
+    failed = chat_tools_checks()
+    if failed:
+        print(f"\n{len(failed)} fast-path check group(s) failed: {', '.join(failed)}")
+        return 1
     print("\nall fast-path checks passed")
     return 0
 

@@ -35,6 +35,7 @@ HUD = UserMessage('owner words', desk=True, via='hud')
 REMOTE = UserMessage('remote words', via='discord')
 MARKER = 'WP2-PRIVATE-TERMINAL-MARKER'
 CATALOG = dict(session_tools.SESSION_TOOLS)
+CHAT_READS = ('chat_list', 'chat_summary', 'chat_search', 'chat_read')
 
 
 def setUpModule():
@@ -115,12 +116,16 @@ class CatalogChecks(unittest.TestCase):
     def test_exact_shared_catalog_flags_and_availability(self):
         self.assertIs(mcp.MCP_TOOLS, MCP_TOOLS)
         chat_git = set(session_tools.CHAT_GIT_TOOLS)
-        self.assertEqual(set(CATALOG), MCP_TOOLS | {'terminal_read', 'hud_browser_view', 'hud_browser_act'} | chat_git)
+        # The chat reads (chat-to-chat C1) are pinned by ChatReadCatalogChecks below.
+        self.assertEqual(set(CATALOG) - set(CHAT_READS),
+                         MCP_TOOLS | {'terminal_read', 'hud_browser_view', 'hud_browser_act'} | chat_git)
         self.assertEqual(len(MCP_TOOLS), 23)
         self.assertEqual(MCP_TOOLS - MCP_READ_ONLY, {
             'memory_write', 'memory_delete', 'gmail_send', 'discord_dm_owner',
             'spotify_play', 'spotify_pause', 'schedule_create', 'schedule_delete'})
         for name, entry in CATALOG.items():
+            if name in CHAT_READS:
+                continue
             if name in chat_git:
                 # Codex chats' git tools (CG-0): Codex only, foreground only.
                 self.assertEqual((entry.providers, entry.read_only, entry.foreground_only,
@@ -148,6 +153,46 @@ class CatalogChecks(unittest.TestCase):
 
     def test_external_mcp_approver_still_denies(self):
         self.assertFalse(mcp._approver(tools.REGISTRY[M.SEND], {'to': 'fake'}))
+
+
+
+class ChatReadCatalogChecks(unittest.TestCase):
+    """Chat-to-chat C1 (§4.2): the four reads are offered to Claude and Codex
+    chats as read-only, not foreground- or desk-only, and stay out of the
+    external MCP. Mutation: mark one not read-only (no readOnlyHint, no
+    explicit allow), or add it to MCP_TOOLS."""
+
+    def test_the_reads_are_read_only_session_tools_on_both_providers(self):
+        for name in CHAT_READS:
+            with self.subTest(tool=name):
+                self.assertIn(name, CATALOG)
+                entry = CATALOG[name]
+                self.assertEqual((entry.providers, entry.read_only, entry.foreground_only,
+                                  entry.desk_only, entry.owner_gated),
+                                 (frozenset({'claude', 'codex'}), True, False, False, False))
+                self.assertNotIn(name, MCP_TOOLS, 'the external jarvis mcp never lists them')
+                self.assertIn(name, tools.PRIVATE_RESULT)
+                self.assertNotIn(name, tools.default_names())
+        with patch.dict(session_tools.SESSION_TOOLS, CATALOG, clear=True):
+            for provider in ('claude', 'codex'):
+                offered = {t.name for t in session_tools.for_provider(provider)}
+                self.assertTrue(set(CHAT_READS) <= offered, (provider, sorted(offered)))
+            self.assertTrue({session_tools.CLAUDE_PREFIX + n for n in CHAT_READS}
+                            <= session_tools.read_only_claude_names())
+
+    def test_the_listing_marks_them_read_only_with_the_registry_schema(self):
+        with patch.dict(session_tools.SESSION_TOOLS, CATALOG, clear=True):
+            for provider in ('claude', 'codex'):
+                listed = {t['name']: t for t in bridge.listing(provider)}
+                for name in CHAT_READS:
+                    with self.subTest(provider=provider, tool=name):
+                        self.assertIn(name, listed)
+                        spec = tools.REGISTRY[name].spec()['function']
+                        self.assertEqual(listed[name]['inputSchema'], spec['parameters'])
+                        self.assertEqual(listed[name]['description'], spec['description'])
+                        self.assertEqual(listed[name]['annotations'],
+                                         {'readOnlyHint': True, 'destructiveHint': False,
+                                          'openWorldHint': False})
 
 
 class LifecycleChecks(M.DaemonHarness):
@@ -442,6 +487,21 @@ class LifecycleChecks(M.DaemonHarness):
                          ['hookSpecificOutput']['permissionDecision'], 'allow')
         self.assertFalse(self.d.approvals.pending())
 
+    def test_claude_hook_allows_the_chat_reads_explicitly_on_any_turn(self):
+        """C1: a read-only session tool, so Claude's PreToolUse hook returns
+        the explicit delegation allow, for the conversation and a sub-agent
+        alike (not foreground-only), on and off the desk; nobody is asked."""
+        for message in (HUD, REMOTE):
+            thread, session, release = self.held(message)
+            for name in CHAT_READS:
+                for agent_id in (None, 'child'):
+                    with self.subTest(via=message.via, tool=name, agent=agent_id):
+                        out = self.hook(thread, name, agent_id=agent_id).get('hookSpecificOutput', {})
+                        self.assertEqual(out.get('permissionDecision'), 'allow')
+                        self.assertEqual(out.get('permissionDecisionReason'), 'a read-only Jarvis tool')
+            self.assertFalse(self.d.approvals.pending())
+            self.finish(thread, release)
+
     def test_offdesk_d3_read_and_nondangerous_write_have_one_dispatch(self):
         t, s, release = self.held(REMOTE)
         token = M.token_of(self.run_brief(t))
@@ -521,6 +581,27 @@ class PrivacyChecks(unittest.TestCase):
                 self.assertNotIn(MARKER, json.dumps([e.data for e in events]))
         for name in ('mcp__other__terminal_read', 'terminal_read_extra', 'Bash'):
             self.assertEqual(provider._tool_summary(name, MARKER*20), (MARKER*20)[:200])
+
+    def test_chat_reads_get_the_fixed_private_summary_on_claude(self):
+        """C1: `claude.py` reads tools.PRIVATE_RESULT, not a hard-coded list.
+        Mutation: leave the list as ('terminal_read', 'hud_browser_view',
+        'hud_browser_act')."""
+        provider = claude.ClaudeProvider()
+        fenced = '[untrusted chat text n1 from HUD chat aaaa0001 "x" (Jarvis, project p)]\n' + MARKER
+        for canonical in CHAT_READS:
+            for name in (canonical, 'mcp__jarvis__' + canonical):
+                for text, expected in ((fenced, 'read'), ('Refused: ' + MARKER, 'refused'),
+                                       ('Error: ' + MARKER, 'error')):
+                    with self.subTest(name=name, expected=expected):
+                        block = claude.ToolResultBlock(tool_use_id='c', content=text, is_error=False)
+                        session = SimpleNamespace(tools_seen={'c': (name, {'chat': 'aaaa0001'})},
+                                                  denied_tools=set(), denial_without_id=False,
+                                                  thread_id='t')
+                        events = provider._tool_result(session, block)
+                        self.assertEqual(events[-1].data['summary'], expected)
+                        self.assertNotIn(MARKER, json.dumps([e.data for e in events]))
+        # Another server's tool of the same name keeps the ordinary summary.
+        self.assertEqual(provider._tool_summary('mcp__other__chat_read', MARKER * 20), (MARKER * 20)[:200])
 
     def test_classifier_terminal_reason_never_contains_output(self):
         text = claude.CLASSIFIER_DENIAL_PREFIX + ' reason: ' + MARKER

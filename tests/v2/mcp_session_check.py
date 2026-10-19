@@ -89,6 +89,9 @@ def mcp_probe_send(to: Annotated[str, "Who to send to"]) -> str:
 
 
 _saved_catalog = None
+# The production entries as imported, before setUpModule swaps in the probes.
+PRODUCTION = dict(session_tools.SESSION_TOOLS)
+CHAT_READS = ("chat_list", "chat_summary", "chat_search", "chat_read")
 
 
 def setUpModule():
@@ -507,6 +510,33 @@ class BridgeChecks(DaemonHarness):
         self.assertEqual(call["tools"], frozenset({READ, SEND}))
         self.assertEqual(self.stderr, [""], "the relay writes nothing to stderr")
 
+    def test_the_chat_reads_through_the_real_relay(self):
+        """C1: with the production entries offered, the real relay lists the
+        four reads with read-only annotations and the registry's schema, and
+        a call runs in the daemon and returns a fenced read."""
+        entries = {n: PRODUCTION[n] for n in CHAT_READS if n in PRODUCTION}
+        self.assertEqual(set(entries), set(CHAT_READS), "the production catalog offers them")
+        self.stack.enter_context(patch.dict(session_tools.SESSION_TOOLS, entries))
+        for provider in (CLAUDE, CODEX):
+            with self.subTest(provider=provider.value):
+                thread = self.chat(provider)
+                got, _ = self.relay_in_turn(thread, [("chat_list", {}),
+                                                     ("chat_read", {"chat": thread.id})])
+                listed = {t["name"]: t for t in got[2]["result"]["tools"]}
+                for name in CHAT_READS:
+                    self.assertIn(name, listed)
+                    spec = tools.REGISTRY[name].spec()["function"]
+                    self.assertEqual(listed[name]["inputSchema"], spec["parameters"])
+                    self.assertEqual(listed[name]["annotations"],
+                                     {"readOnlyHint": True, "destructiveHint": False,
+                                      "openWorldHint": False})
+                for index in (10, 11):
+                    result = got[index]["result"]
+                    self.assertFalse(result["isError"], result)
+                    self.assertTrue(result["content"][0]["text"].startswith("[untrusted chat text "),
+                                    result)
+                self.assertIn(thread.id, got[10]["result"]["content"][0]["text"])
+
     def test_codex_run_brief_delegates_every_offered_tool(self):
         thread = self.chat(CODEX)
         entry = entry_of(self.run_brief(thread))
@@ -836,7 +866,8 @@ class BridgeChecks(DaemonHarness):
             [sys.executable, "-c", "from jarvis.v2 import session_tools as s; "
                                    "from jarvis.v2.mcp_catalog import MCP_TOOLS; "
                                    "G = set(s.CHAT_GIT_TOOLS); "
-                                   "assert set(s.SESSION_TOOLS) == MCP_TOOLS | {'terminal_read', 'hud_browser_view', 'hud_browser_act'} | G; "
+                                   "C = {'chat_list', 'chat_summary', 'chat_search', 'chat_read'}; "
+                                   "assert set(s.SESSION_TOOLS) - C == MCP_TOOLS | {'terminal_read', 'hud_browser_view', 'hud_browser_act'} | G; "
                                    "assert all(t.providers == frozenset({'claude', 'codex'}) for n, t in s.SESSION_TOOLS.items() if n not in G); "
                                    "assert all(s.SESSION_TOOLS[n].providers == frozenset({'codex'}) and s.SESSION_TOOLS[n].foreground_only for n in G); "
                                    "assert not G & {t.name for t in s.for_provider('claude')}; "
@@ -846,6 +877,29 @@ class BridgeChecks(DaemonHarness):
                                    "assert s.SESSION_TOOLS['hud_browser_act'].foreground_only and s.SESSION_TOOLS['hud_browser_act'].desk_only; "
                                    "assert any(t.name == 'terminal_read' for t in s.for_provider('claude')); "
                                    "assert any(t.name == 'terminal_read' for t in s.for_provider('codex')); print('ok')"],
+            cwd=str(ROOT), env={**os.environ, "PYTHONPATH": str(ROOT)},
+            capture_output=True, text=True, timeout=60)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(out.stdout.strip(), "ok", out.stderr)
+
+
+    def test_production_catalog_offers_the_chat_reads_read_only(self):
+        """Chat-to-chat C1 (§4.2): the four reads, offered to Claude and Codex
+        chats, read-only, neither foreground- nor desk-only, never in the
+        external catalog. In a fresh interpreter, as production loads it."""
+        out = subprocess.run(
+            [sys.executable, "-c", "from jarvis.v2 import session_tools as s; "
+                                   "from jarvis.v2.mcp_catalog import MCP_TOOLS; "
+                                   "C = ('chat_list', 'chat_summary', 'chat_search', 'chat_read'); "
+                                   "assert all(n in s.SESSION_TOOLS for n in C), sorted(s.SESSION_TOOLS); "
+                                   "assert all(s.SESSION_TOOLS[n].providers == frozenset({'claude', 'codex'}) for n in C); "
+                                   "assert all(s.SESSION_TOOLS[n].read_only for n in C); "
+                                   "assert not any(s.SESSION_TOOLS[n].foreground_only or s.SESSION_TOOLS[n].desk_only "
+                                   "or s.SESSION_TOOLS[n].owner_gated for n in C); "
+                                   "assert not set(C) & MCP_TOOLS; "
+                                   "assert set(C) <= {t.name for t in s.for_provider('claude')}; "
+                                   "assert set(C) <= {t.name for t in s.for_provider('codex')}; "
+                                   "assert {s.CLAUDE_PREFIX + n for n in C} <= s.read_only_claude_names(); print('ok')"],
             cwd=str(ROOT), env={**os.environ, "PYTHONPATH": str(ROOT)},
             capture_output=True, text=True, timeout=60)
         self.assertEqual(out.returncode, 0, out.stderr)
@@ -1173,6 +1227,27 @@ class ClaudeProviderChecks(unittest.TestCase):
                                  "a read-only Jarvis tool")
                 self.assertEqual(len(calls), 1, "permit decided it (its jarvis-tool layer)")
                 self.assertEqual(asker.seen, [], "nobody was asked")
+
+    def test_the_hook_allows_the_chat_reads_explicitly(self):
+        """C1: each read gets the explicit allow, decided by permit's
+        jarvis-tool layer, under AUTO and ASK, and nobody is asked."""
+        entries = {n: PRODUCTION[n] for n in CHAT_READS if n in PRODUCTION}
+        self.assertEqual(set(entries), set(CHAT_READS), "the production catalog offers them")
+        self.stack.enter_context(patch.dict(session_tools.SESSION_TOOLS, entries))
+        for profile in (PermissionProfile.AUTO, PermissionProfile.ASK):
+            asker = Asker(Decision.DENY)
+            brief = Brief(Role.CHAT, str(self.cwd), profile=profile,
+                          mcp_servers={"jarvis": {"command": "/bin/true"}})
+            permit, calls = self.real_permit(brief, asker)
+            handle, _ = self.start(profile, permit, thread_id=f"mccr{profile.value[:3]}")
+            for name in CHAT_READS:
+                with self.subTest(profile=profile.value, tool=name):
+                    before = len(calls)
+                    out = self.hook(handle, session_tools.CLAUDE_PREFIX + name).get("hookSpecificOutput", {})
+                    self.assertEqual(out.get("permissionDecision"), "allow")
+                    self.assertEqual(out.get("permissionDecisionReason"), "a read-only Jarvis tool")
+                    self.assertEqual(len(calls) - before, 1, "permit decided it")
+            self.assertEqual(asker.seen, [], "nobody was asked")
 
     def test_the_explicit_allow_delegates_only_offered_session_tools(self):
         """The hook delegates offered tools; execution still goes through the

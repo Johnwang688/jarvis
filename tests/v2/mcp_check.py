@@ -174,6 +174,22 @@ class MCPCheck(unittest.TestCase):
         for name in ("spotify_play", "run_command", "invented"):
             self.assertTrue(client.call(name)["isError"])
 
+    def test_the_chat_reads_stay_out_of_the_external_server(self):
+        # Chat-to-chat C1 (§4.2): registered for the HUD's chats, never
+        # listed or run by the external `jarvis mcp` [added to MCP_TOOLS].
+        from jarvis.v2.tools import chats  # noqa: F401  (registers the reads)
+        reads = {"chat_list", "chat_summary", "chat_search", "chat_read"}
+        self.assertTrue(reads <= set(tools.REGISTRY))
+        self.assertFalse(reads & mcp.MCP_TOOLS)
+        self.assertFalse(reads & set(mcp.available_tools()))
+        client = self.client(groups=True)
+        client.initialize()
+        names = {t["name"] for t in client.request("tools/list")["result"]["tools"]}
+        self.assertFalse(reads & names, sorted(reads & names))
+        for name in sorted(reads):
+            result = client.call(name, {"chat": "aaaa0001", "query": "x"})
+            self.assertTrue(result["isError"], (name, result))
+
     def test_protocol_errors_survive_and_notifications_are_silent(self):
         client = self.client()
         client.initialize()
