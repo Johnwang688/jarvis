@@ -93,7 +93,7 @@ def browser_checks(browser, mock, base, check, until, guard, init_script):
                         _guard_mount_checks, _guard_timer_checks, _guard_hidden_checks, _guard_card_checks,
                         _guard_frame_to_frame_checks, _guard_parked_pointer_checks, _guard_gesture_checks,
                         _guard_reload_checks, _guard_refocus_checks, _guard_giveback_checks, _guard_tab_checks,
-                        _guard_typing_pointer_checks, _guard_survivor_checks):
+                        _guard_typing_pointer_checks, _guard_survivor_checks, _guard_layout_checks):
             # `BROWSER_ONLY=guard` runs just the sections whose name holds it.
             if os.environ.get("BROWSER_ONLY") and os.environ["BROWSER_ONLY"] not in section.__name__:
                 continue
@@ -1034,6 +1034,206 @@ def _guard_survivor_checks(page, mock, check, until):
     check("LOW: a page the owner once clicked into, re-grabbing after they left it, is removed",
           _count(page, STOLEN) == 1 and mock.dev_keys[keys:] == [] and box.input_value() == _letters(20),
           f"stolen={_count(page, STOLEN)} keys={mock.dev_keys[keys:][:3]} box={box.input_value()!r}")
+
+
+# ---------------------------------------------------------------------------
+# FS3: when panes move, no Browser frame takes the keyboard (plan FS3 card).
+
+def _lay(page, mock, until, preset: str, browser_pane: int, size=(1920, 1080), focused: int = 1, who: str = "lay"):
+    """`preset` with a Browser pane (a page that never focuses itself, `grab()`
+    from the test) in pane `browser_pane`, chats elsewhere, restored with no
+    gesture; returns the frame's selector once it is loaded."""
+    panes = [{"view": "chat"} for _ in range(4)]
+    panes[browser_pane - 1] = {"view": "browser", "browserUrl": _focus_url(mock, "focus-none", who=who)}
+    page.set_viewport_size({"width": size[0], "height": size[1]})
+    _set_storage(page, zoom="100", layout="{}")
+    _set_ws(page, json.dumps({"preset": preset, "focused": focused, "panes": panes}))
+    _boot(page, mock, None, until, reload=True)
+    frame = _pane(browser_pane, '[data-testid="browser-frame"]')
+    until(lambda: _count(page, frame) > 0 and any(f"who={who}" in h for h in mock.dev_hits), timeout=5)
+    page.wait_for_timeout(400)
+    return frame
+
+
+def _press(page, until, testid: str):
+    """Press a HUD button from the keyboard (focus, Enter): no pointer moves."""
+    page.evaluate("t => document.querySelector(`[data-testid=\"${t}\"]`).focus()", testid)
+    page.keyboard.press("Enter")
+
+
+def _choose_keys(page, until, preset: str):
+    """⊞ from the keyboard: the pointer stays where it rests."""
+    if page.locator('[data-testid="layout-menu"]').count() == 0:
+        _press(page, until, "layout-customize")
+    until(lambda: page.locator('[data-testid="layout-menu"]').count() > 0, timeout=2)
+    _press(page, until, f"layout-preset-{preset}")
+    until(lambda: page.locator('[data-testid="workspace"]').get_attribute("data-preset") == preset, timeout=2)
+    if page.locator('[data-testid="layout-menu"]').count():
+        page.keyboard.press("Escape")
+    until(lambda: page.locator('[data-testid="layout-menu"]').count() == 0, timeout=2)
+    page.wait_for_timeout(200)
+
+
+def _over_frame(page, x: float, y: float) -> bool:
+    """Whether the point is a frame (its shield or the iframe), not the HUD."""
+    return page.evaluate("""([x, y]) => { const e = document.elementFromPoint(x, y);
+      return !!e && (e.tagName === 'IFRAME' || !!e.closest('[data-testid="browser-shield"]')); }""", [x, y])
+
+
+def _inside(box, x: float, y: float) -> bool:
+    return bool(box) and box["x"] + 4 < x < box["x"] + box["width"] - 4 and box["y"] + 4 < y < box["y"] + box["height"] - 4
+
+
+def _guard_after_move(page, mock, check, until, move: str, frame: str, pane: int, at: tuple[float, float], act):
+    """Rest the pointer at `at`, over the HUD, not a frame; make the move with
+    no pointer event (`act`); the frame now lies under the resting pointer.
+    A grab with no gesture must still remove it."""
+    keys = len(mock.dev_keys)
+    x, y = at
+    page.mouse.move(x, y)
+    page.wait_for_timeout(150)
+    check(f"setup ({move}): the pointer rests on the HUD, not on a frame", not _over_frame(page, x, y))
+    act()
+    page.wait_for_timeout(400)
+    box = page.locator(frame).first.bounding_box() if _count(page, frame) else None
+    check(f"setup ({move}): the frame now lies under the resting pointer", _inside(box, x, y), f"{box} vs {(x, y)}")
+    _grab(page, frame, 0)
+    stolen = _pane(pane, '[data-testid="browser-stolen"]')
+    until(lambda: _count(page, stolen) > 0, timeout=4)
+    page.wait_for_timeout(200)
+    check(f"FS3, after {move}: a page calling focus() with no gesture is removed, the pointer resting where the frame now is",
+          _count(page, frame) == 0 and _count(page, stolen) == 1
+          and "This page took the keyboard" in page.locator(stolen).inner_text() and _active_frame(page) is None,
+          f"frames={_count(page, frame)} stolen={_count(page, stolen)} active={_active_frame(page)}")
+    page.keyboard.type("zz", delay=30)
+    page.wait_for_timeout(200)
+    check(f"FS3, after {move}: and the page's server received no key", mock.dev_keys[keys:] == [], str(mock.dev_keys[keys:][:3]))
+
+
+def _guard_layout_checks(page, mock, check, until):
+    """FS3's boundary: moving panes never hands the keyboard to a Browser page.
+    After each move (⊞ 2×2 → one → 2×2, a ladder split, a close of another
+    pane, an edge drag, a window resize) a page calling focus() with no
+    gesture is removed — with the pointer resting where the frame now is,
+    having arrived there by the move and not by a pointer event; a frame in a
+    pane ⊞ hid or the window dropped is refused as hidden; and under a card
+    none of the moves happen. Geometry at 1920x1080, both side panes open: the
+    pane area is the workspace's box."""
+    W = lambda: page.locator('[data-testid="workspace"]').bounding_box()  # noqa: E731
+    pt = lambda fx, fy: (W()["x"] + fx * W()["width"], W()["y"] + fy * W()["height"])  # noqa: E731
+
+    # ⊞: 2×2, the Browser bottom left; one pane hides it; the pointer rests low
+    # on the left over pane 1's chat; back to 2×2, the frame is under it.
+    frame = _lay(page, mock, until, "grid4", 3, who="g1")
+    _choose_keys(page, until, "single")
+    _guard_after_move(page, mock, check, until, "⊞ 2×2 → one → 2×2", frame, 3, pt(0.25, 0.8),
+                      lambda: _choose_keys(page, until, "grid4"))
+
+    # A ladder split: three columns, the Browser in the middle; pane 1 splits,
+    # 2×2 [1, 4, 2, 3] puts the Browser bottom left, under a pointer that
+    # rested on pane 1.
+    frame = _lay(page, mock, until, "cols3", 2, who="s1")
+    _guard_after_move(page, mock, check, until, "a ladder split", frame, 2, pt(0.2, 0.8),
+                      lambda: (_press(page, until, "pane-1-split"),
+                               until(lambda: _ws(page)["ws"]["order"] == [1, 4, 2, 3], timeout=3)))
+
+    # A close of another pane: 2×2, the Browser bottom left; × on pane 1 gives
+    # three columns, the Browser in the middle, under a pointer that rested on pane 2.
+    frame = _lay(page, mock, until, "grid4", 3, who="c1")
+    _guard_after_move(page, mock, check, until, "a close of another pane", frame, 3, pt(0.55, 0.3),
+                      lambda: (_press(page, until, "pane-1-close"),
+                               until(lambda: _ws(page)["ws"]["order"] == [2, 3, 4], timeout=3)))
+
+    # An edge drag (from the keyboard, so the pointer stays): two columns, the
+    # Browser right; Home takes the edge to pane 1's minimum, and the Browser
+    # grows under a pointer that rested on pane 1.
+    frame = _lay(page, mock, until, "cols2", 2, who="e1")
+    edge = page.locator('[data-testid="split-x-1"]')
+    check("setup (an edge drag): two columns draw their edge, split-x-1", edge.count() == 1)
+    if edge.count():
+        _guard_after_move(page, mock, check, until, "an edge drag", frame, 2, pt(0.4, 0.6),
+                          lambda: (_press(page, until, "split-x-1"), page.keyboard.press("Home")))
+
+    # A window resize: two columns, the Browser right; the window narrows and
+    # the Browser's left edge moves left under a pointer that rested on pane 1.
+    frame = _lay(page, mock, until, "cols2", 2, who="r1")
+    x, y = pt(0.4, 0.6)
+    _guard_after_move(page, mock, check, until, "a window resize", frame, 2, (x, y),
+                      lambda: page.set_viewport_size({"width": 1400, "height": 1080}))
+
+    # Hidden: a frame in a pane ⊞ hid, and one in a pane the window dropped.
+    keys = len(mock.dev_keys)
+    frame = _lay(page, mock, until, "grid4", 3, who="h1")
+    was = _centre(page, frame)
+    _choose_keys(page, until, "single")
+    check("setup: ⊞ to one pane hides pane 3, its frame still mounted",
+          not _visible(page, _pane(3)) and _count(page, frame) == 1)
+    # The pointer moves over where the hidden frame was drawn: nothing of it is there to hit.
+    page.mouse.move(was[0] - 15, was[1] - 15)
+    page.mouse.move(was[0], was[1], steps=3)
+    check("FS3: where the hidden frame was drawn, the pointer meets the HUD, never the frame or its shield",
+          not _over_frame(page, *was))
+    _grab(page, frame, 0)
+    until(lambda: _count(page, _pane(3, '[data-testid="browser-stolen"]')) > 0, timeout=4)
+    check("FS3: a frame in a pane ⊞ hid is refused as hidden: removed when it takes the keyboard",
+          _count(page, frame) == 0 and _count(page, _pane(3, '[data-testid="browser-stolen"]')) == 1
+          and _active_frame(page) is None and mock.dev_keys[keys:] == [])
+    frame = _lay(page, mock, until, "cols3", 1, focused=3, who="d1")
+    was = _centre(page, frame)
+    page.set_viewport_size({"width": 1100, "height": 900})
+    until(lambda: _ws(page)["fit"]["dropped"] == 1, timeout=3)
+    check("setup: at 1100px three columns draw as two, pane 1 dropped, its frame still mounted",
+          _ws(page)["fit"]["panes"] == [2, 3] and not _visible(page, _pane(1)) and _count(page, frame) == 1,
+          f'{_ws(page)["fit"]["panes"]} {_count(page, frame)}')
+    page.mouse.move(min(was[0], 1000) - 15, was[1] - 15)
+    page.mouse.move(min(was[0], 1000), was[1], steps=3)
+    check("FS3: where the dropped frame was drawn, the pointer meets the HUD, never the frame or its shield",
+          not _over_frame(page, min(was[0], 1000), was[1]))
+    _grab(page, frame, 0)
+    until(lambda: _count(page, _pane(1, '[data-testid="browser-stolen"]')) > 0, timeout=4)
+    check("FS3: a frame in a pane the window dropped is refused as hidden: removed when it takes the keyboard",
+          _count(page, frame) == 0 and _count(page, _pane(1, '[data-testid="browser-stolen"]')) == 1
+          and _active_frame(page) is None and mock.dev_keys[keys:] == [])
+
+    # Under a card none of the moves happen: ⊞, a split, a ×, an edge drag.
+    frame = _lay(page, mock, until, "grid4", 3, who="k1")
+    page.evaluate("document.querySelector('[data-testid=\"pane-3\"] iframe[data-browser-frame]').__fs3 = 'k1'")
+    before = _ws(page)["ws"]
+    hits = sum(1 for h in mock.dev_hits if "who=k1" in h)
+    boxes = [page.locator(_pane(n)).bounding_box() for n in (1, 2, 3, 4)]
+    _approval(mock, "fs3-moves")
+    until(lambda: page.locator('[data-testid="approval-card"]').count() > 0, timeout=4)
+    page.wait_for_timeout(200)
+    for testid in ("layout-customize", "pane-1-split", "pane-2-close"):
+        b = page.locator(f'[data-testid="{testid}"]').bounding_box()
+        if b:
+            page.mouse.click(b["x"] + b["width"] / 2, b["y"] + b["height"] / 2)
+            page.wait_for_timeout(150)
+        page.evaluate("t => document.querySelector(`[data-testid=\"${t}\"]`)?.focus()", testid)
+        page.keyboard.press("Enter")
+        page.wait_for_timeout(150)
+    sep = page.locator('#workspace [role="separator"]').first
+    if sep.count():
+        b = sep.bounding_box()
+        page.mouse.move(b["x"] + b["width"] / 2, b["y"] + b["height"] / 2)
+        page.mouse.down()
+        page.mouse.move(b["x"] + b["width"] / 2 + 120, b["y"] + b["height"] / 2 + 120, steps=6)
+        page.mouse.up()
+        page.evaluate("() => document.querySelector('#workspace [role=\"separator\"]')?.focus()")
+        page.keyboard.press("Home")
+    page.wait_for_timeout(300)
+    after = _ws(page)["ws"]
+    check("FS3: under a card none of the moves happen: ⊞, split, × and the edges change nothing",
+          after == before and page.locator('[data-testid="layout-menu"]').count() == 0
+          and [page.locator(_pane(n)).bounding_box() for n in (1, 2, 3, 4)] == boxes,
+          f'{before.get("order")} -> {after.get("order")}')
+    check("FS3: and under it the Browser frame is the same, never reloaded",
+          page.evaluate("(() => { const f = document.querySelector('[data-testid=\"pane-3\"] iframe[data-browser-frame]');"
+                        " return !!f && f.__fs3 === 'k1'; })()")
+          and sum(1 for h in mock.dev_hits if "who=k1" in h) == hits)
+    page.keyboard.press("Escape")
+    until(lambda: page.locator('[data-testid="approval-card"]').count() == 0, timeout=4)
+    page.set_viewport_size({"width": 1600, "height": 900})
 
 
 def _guard_gesture_checks(page, mock, check, until):
