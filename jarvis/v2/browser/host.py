@@ -117,7 +117,7 @@ from .gate import Gate
 from .pickers import PICK_METHOD
 from .settings import BrowserSettings
 from .stream import (MAX_DEVICE_PIXELS, TICKET_TTL_S, VIEW_MAX, TabStream, Tickets,
-                     serve as _serve_stream)
+                     _clean, serve as _serve_stream)
 
 LOG = logging.getLogger("jarvis.v2.browser")
 
@@ -607,11 +607,6 @@ def _net_error(exc: Exception) -> str:
     the URL, which must not reach a response the log might echo."""
     found = re.search(r"net::ERR_[A-Z0-9_]+", str(exc))
     return found.group(0) if found else "navigation failed"
-
-
-def _clean(text, cap: int) -> str:
-    from ..approvals import clean_line
-    return clean_line(text if isinstance(text, str) else "", cap)
 
 
 def _fitted(view: tuple, content: int) -> tuple[int, int, float]:
