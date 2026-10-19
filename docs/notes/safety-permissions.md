@@ -2567,6 +2567,27 @@ Files changed under SELF_PROTECTED, for the owner's review:
 and `jarvis/face/approvals.py` (the card's display copy). Both only
 withhold more from a display, and never from a judge.
 
+**A private key's whole block (SEC-6, owner 2026-10-19).** `PATTERNS` know
+only a key's header and footer, so the base64 body showed; on a card rule 0
+kept even the header (it holds a blank). `for_display` now applies
+`redact.private_key_blocks` (SEC-5) before the per-pattern pass, as
+`scrub_text` does. `redact_command` applies it first, through
+`secrets._key_blocks`, still bound by rules 1-3: a block goes only from
+inside one quoted run with nothing active that starts at its quote (so an
+unterminated block ends at its quote, and a `$NAME` in double quotes
+stays); only when the span is nothing but key material (each line a header,
+a footer, base64, a PGP checksum, `Proc-Type:`/`DEK-Info:` or blank, with no
+operator, quote, expansion, glob or `~`: rule 0's stand-in, since a block
+always holds a blank); and not at all when the line, judged without the
+blocks, may run text (rule 3, or it starts a shell, interpreter or
+`./program`). Otherwise the line shows as typed, as before. Limits: an
+unquoted block and one in a here-document stay visible on a card and in
+`log.jsonl` — including a key in a non-command argument such as a file
+write's `content`, which `redact_value` judges as a command line. v1's tool
+lines hide those too. Text with no private-key header or footer is
+byte-identical. Pinned by `PrivateKeyBlocks` in
+`tests/v2/inline_credentials_check.py`.
+
 ## Agent calls to the Secret Service are refused (2026-10-15)
 
 Follow-up to PR #215, which keeps the HUD Browser's Chrome password key in

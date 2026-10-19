@@ -1196,8 +1196,10 @@ _VAR_AT_COMMAND = re.compile(
     r"then|do|else|!|nice)[ \t]+)*[\"']?\$(?![Ee][Nn][Vv]:)")
 # The ones the line names, when it also writes a file or starts a program
 # that could read one back as code.
-_RUN_LATER = re.compile(r">|(?<![\w.-])tee(?![\w-])"
-                        r"|(?:^|[;&|(\n`{]|\$\()[ \t]*(?:(?:sudo|env|exec|nohup|time|command)[ \t]+)*\.{0,2}/[^\s;&|]")
+_PROGRAM_PATH = r"(?:^|[;&|(\n`{]|\$\()[ \t]*(?:(?:sudo|env|exec|nohup|time|command)[ \t]+)*\.{0,2}/[^\s;&|]"
+_RUN_LATER = re.compile(r">|(?<![\w.-])tee(?![\w-])|" + _PROGRAM_PATH)
+# A `./program` or `/path/program` at a command's place (SEC-6's rule 3).
+_RUN_PROGRAM = re.compile(_PROGRAM_PATH)
 
 
 def _runs_code(text: str) -> bool:
@@ -1629,15 +1631,107 @@ def _known_values(text: str) -> str:
     return text
 
 
+# SEC-6 (owner, 2026-10-19): a private key's whole block on a card or in a
+# log. A line break inside a key is a real one or the `\n` escape that
+# `printf`, `echo -e`, `$'…'` and JSON read as one.
+_KEY_BREAK = re.compile(r"\r?\n|(?:\\r)?\\n|\\r")
+# All a block may hold: its header and footer, base64, a PGP checksum, PEM's
+# `Proc-Type:`/`DEK-Info:` lines, blanks and those breaks. No operator, quote,
+# expansion, glob or `~`.
+_KEY_CHARS = re.compile(r"[A-Za-z0-9+/=:,\- \t\r\n\\]*")
+
+
+def _key_material(span: str) -> bool:
+    """Is `span` nothing but private-key blocks: each line a header (at its
+    start), a footer (at its end), key material or blank? Rule 0's stand-in
+    for a block, which always holds a blank: no line of it can be a command
+    with arguments or an operator."""
+    from ..v2.redact import _KEY_LINE, KEY_BEGIN, KEY_END
+
+    if not _KEY_CHARS.fullmatch(span):
+        return False
+    for line in _KEY_BREAK.split(span):
+        line = line.strip(" \t")
+        head = KEY_BEGIN.match(line)
+        if head is not None:
+            line = line[head.end():]
+        foot = KEY_END.search(line)
+        if foot is not None:
+            if line[foot.end():].strip(" \t"):
+                return False
+            line = line[:foot.start()]
+        line = line.strip(" \t")
+        if line and not _KEY_LINE.fullmatch(line):
+            return False
+    return True
+
+
+def _quoted_runs(mask: _Mask):
+    """Rule 1's data: each maximal span inside one quoting (`'…'`, `"…"`,
+    `$'…'`) that holds nothing active and starts at its opening quote (not
+    after a `$` or backtick inside double quotes, whose name or command
+    follows), as (start, end). Where the mask fails closed (a comment,
+    after a here-document's `<<`), there is none."""
+    state, active, text = mask.state, mask.active, mask.text
+    runs, start = [], None
+    for k in range(len(text) + 1):
+        if start is not None and (state[k] != state[start] or active[k] != active[start]):
+            runs.append((start, k - 1))
+            start = None
+        if start is None and state[k]:
+            start = k
+    if start is not None:
+        runs.append((start, len(text)))
+    return [(a, b) for a, b in runs if b > a and text[a - 1] in "'\""]
+
+
+def _key_blocks(text: str) -> str:
+    """`text` with each private key's whole block as one `[redacted]`
+    (`redact.private_key_blocks`, SEC-5), within rules 1-3: a block goes only
+    from inside one quoted run (so an unterminated block ends at its quote),
+    only when it is nothing but key material (`_key_material`), and not at
+    all when the line, judged without the blocks, may run text (rule 3, plus
+    any shell, interpreter or `./program` it starts). Anything else stays as
+    typed. Text with no private-key header or footer is returned unchanged."""
+    from ..v2.redact import private_key_blocks
+
+    if private_key_blocks(text) == text:
+        return text
+    pieces, pos = [], 0
+    for a, b in _quoted_runs(_Mask(text)):
+        run = text[a:b]
+        out = private_key_blocks(run)
+        if out == run:
+            continue
+        p = 0
+        while p < min(len(run), len(out)) and run[p] == out[p]:
+            p += 1
+        s = 0
+        while s < min(len(run), len(out)) - p and run[-1 - s] == out[-1 - s]:
+            s += 1
+        if not _key_material(run[p:len(run) - s]):
+            continue
+        pieces += [text[pos:a + p], out[p:len(out) - s]]
+        pos = b - s
+    if not pieces:
+        return text
+    pieces.append(text[pos:])
+    shown = "".join(pieces)
+    if _run_names(shown) or _RUNNER_WORD.search(shown) or _RUN_PROGRAM.search(shown):
+        return text
+    return shown
+
+
 def redact_command(text) -> str:
     """A command or tool argument as an approval card shows it and a log
     keeps it: whole, never truncated or summarised, with the known values,
-    the credentials typed into it and the shapes `credential_patterns` knows
-    withheld — and nothing withheld that the shell reads as structure or the
-    line may run (rules 1-3). Never for a judge."""
+    the credentials typed into it, a private key's whole block (`_key_blocks`)
+    and the shapes `credential_patterns` knows withheld — and nothing
+    withheld that the shell reads as structure or the line may run (rules
+    1-3). Never for a judge."""
     from ..credential_patterns import PATTERNS
 
-    text = _known_values(redact_inline(str(text)))
+    text = _known_values(redact_inline(_key_blocks(str(text))))
     for _, pattern in PATTERNS:
         text = _masked_sub(pattern, lambda m: INLINE_REDACTED, text)
     return text
@@ -1672,13 +1766,15 @@ DISPLAY_SCAN = 4096
 def for_display(text: str) -> str:
     """Model-supplied text headed for a one-line surface (v1's tool lines):
     the known values (`scrub`), the credentials typed inline
-    (`redact_inline`) and every shape in `credential_patterns`. Only the
-    first `DISPLAY_SCAN` characters are judged and kept."""
+    (`redact_inline`), a private key's whole block (SEC-6) and every shape
+    in `credential_patterns`. Only the first `DISPLAY_SCAN` characters are
+    judged and kept."""
     from ..credential_patterns import PATTERNS
+    from ..v2.redact import private_key_blocks
 
     # URLs first, as the label does: a known value inside a URL replaced by
     # the scrub's marker would break the URL apart.
-    text = redact_inline(scrub(strip_url_credentials(str(text)[:DISPLAY_SCAN])))
+    text = private_key_blocks(redact_inline(scrub(strip_url_credentials(str(text)[:DISPLAY_SCAN]))))
     for _, pattern in PATTERNS:
         text = pattern.sub(INLINE_REDACTED, text)
     return text
