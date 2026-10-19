@@ -118,15 +118,21 @@ export interface PaneInfo {
   focused: boolean;
 }
 
-/** A drawn section's place, from its own box only (C5): the 1px rule between panes is taken from the right or lower pane. */
+/**
+ * A drawn section's place, from its own box only (C5). The 1px rule between
+ * panes is shared out as the CSS grid's 1px gap was before FS3: every
+ * fraction is of the area plus one gap (`100% + 1px`) and each pane gives 1px
+ * back, so equal panes are equal to the sub-pixel, exactly where the grid drew
+ * them, and a pane's place still reads nothing but its own fractions.
+ */
+const unit = (f: number) => `${f} * (100% + 1px)`;
 function boxStyle(r: Rect): React.CSSProperties {
-  const at = (x: number) => x > 1e-9;
   return {
     position: "absolute",
-    left: at(r.left) ? `calc(${r.left * 100}% + 1px)` : 0,
-    top: at(r.top) ? `calc(${r.top * 100}% + 1px)` : 0,
-    width: at(r.left) ? `calc(${r.width * 100}% - 1px)` : `${r.width * 100}%`,
-    height: at(r.top) ? `calc(${r.height * 100}% - 1px)` : `${r.height * 100}%`,
+    left: `calc(${unit(r.left)})`,
+    top: `calc(${unit(r.top)})`,
+    width: `calc(${unit(r.width)} - 1px)`,
+    height: `calc(${unit(r.height)} - 1px)`,
   };
 }
 
@@ -413,8 +419,11 @@ export function Workspace(props: {
         {fit.edges.map((edge) => {
           const x = edge.axis === "x";
           const style: React.CSSProperties = x
-            ? { left: `calc(${edge.at.left * 100}% - 3px)`, top: `${edge.at.top * 100}%`, bottom: "auto", height: `${edge.at.height * 100}%` }
-            : { top: `calc(${edge.at.top * 100}% - 3px)`, left: `${edge.at.left * 100}%`, width: `${edge.at.width * 100}%` };
+            // Centred on the 1px rule (`boxStyle`'s gap), spanning its node.
+            ? { left: `calc(${unit(edge.at.left)} - 4px)`, top: `calc(${unit(edge.at.top)})`, bottom: "auto",
+                height: `calc(${unit(edge.at.height)} - 1px)` }
+            : { top: `calc(${unit(edge.at.top)} - 4px)`, left: `calc(${unit(edge.at.left)})`,
+                width: `calc(${unit(edge.at.width)} - 1px)` };
           return (
             <Separator
               key={edge.testid}

@@ -1544,7 +1544,7 @@ node's children linked, `data-linked`); `moveEdge` and `equalize` replace
 `setSplit`/`equalSplit`, the FS-3 drag stop is FS4's. **Rendering is flat**:
 `#workspace` is no longer a grid; every section stays a direct child, keyed
 `${id}.${incarnation}` in `PANE_NOS` order, placed absolutely from its own
-box (the 1px rule taken from the right or lower pane), so a split, close, ⊞,
+box (the 1px rule shared out as the old grid gap was), so a split, close, ⊞,
 drag or resize changes only `style` and no Browser frame reloads or changes
 parent. `__hud.workspace()` returns `ws` with its derived `order` and
 `preset` ("free"), and `fit` with `drawn` (`drawnPreset ?? "free"`), all

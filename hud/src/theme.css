@@ -1414,8 +1414,8 @@ button.tb-icon[data-auto="true"] svg rect { stroke-dasharray: 2 1.4; }
    fitWorkspace, `fit.boxes`; inline left/top/width/height), never in a shared
    grid, so a split, a close or a drag moves no other pane by a sub-pixel and
    no section ever moves in the DOM. Panes meet at the same 1px rule the side
-   panes do: a pane right of or below another starts 1px in, and the gap shows
-   #workspace's border colour. A pane the tree does not draw is display:none —
+   panes do, shared out as the old grid's 1px gap was (Workspace.tsx
+   boxStyle), and the gap shows #workspace's border colour. A pane the tree does not draw is display:none —
    hidden, never unmounted. */
 #workspace {
   flex: 1 1 auto; min-height: 0; min-width: 0; position: relative;
