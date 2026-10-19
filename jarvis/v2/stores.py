@@ -102,21 +102,46 @@ def _write_bytes(path: Path, data: bytes) -> None:
 
 
 def _read_lines(path: Path) -> list[dict[str, Any]]:
+    """The JSON object on each line of an append-only log.
+
+    `_append` writes under `_lock` and this reader takes none, so it can land
+    while a line is half written. Only the last line, and only when the file
+    does not end in a newline, can be that line: if it does not parse (or ends
+    mid-character) it is a write in progress and is left out. Everything else
+    stays an error: an interior or newline-terminated bad line is corruption.
+    """
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        raw = path.read_bytes()
     except FileNotFoundError:
         return []
-    except (OSError, UnicodeError) as exc:
+    except OSError as exc:
         raise StoreError(f"{path}: {exc}") from exc
+    unfinished = bool(raw) and not raw.endswith((b"\n", b"\r"))
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeError as exc:
+        if (unfinished and isinstance(exc, UnicodeDecodeError)
+                and exc.reason == "unexpected end of data" and exc.end == len(raw)
+                and exc.start > raw.rfind(b"\n")):
+            try:                   # everything up to the last whole line
+                text = raw[:raw.rfind(b"\n") + 1].decode("utf-8")
+            except UnicodeError as inner:
+                raise StoreError(f"{path}: {inner}") from inner
+            unfinished = False     # the cut line is gone; what is left ends in a newline
+        else:
+            raise StoreError(f"{path}: {exc}") from exc
+    lines = text.splitlines()
     result = []
     for number, line in enumerate(lines, 1):
         try:
             item = json.loads(line)
-            if not isinstance(item, dict):
-                raise ValueError("expected a JSON object")
-            result.append(item)
         except ValueError as exc:
+            if unfinished and number == len(lines):
+                break                  # a write in progress, not corruption
             raise StoreError(f"{path}:{number}: {exc}") from exc
+        if not isinstance(item, dict):
+            raise StoreError(f"{path}:{number}: expected a JSON object")
+        result.append(item)
     return result
 
 
