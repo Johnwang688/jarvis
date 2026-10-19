@@ -58,6 +58,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from jarvis import config  # noqa: E402
 from jarvis.v2 import hud_install, owner_ops as O  # noqa: E402
+from tests import checklib  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[2]
 LIVE_PORTS = {8402, 8403, 8405}
@@ -460,11 +461,7 @@ class FetchStatus(unittest.TestCase):
         self.assertIsNone(O.fetch_status(self.serve(200, b"[1, 2]")))
 
     def test_nothing_listening_is_none(self):
-        import socket
-        sock = socket.socket()
-        sock.bind(("127.0.0.1", 0))
-        port = sock.getsockname()[1]
-        sock.close()
+        port = checklib.free_port()
         self.assertIsNone(O.fetch_status(port, timeout=0.5))
 
     def test_the_live_ports_are_guarded(self):
@@ -476,10 +473,7 @@ class FetchStatus(unittest.TestCase):
     def test_a_refused_connection_and_no_answer_are_told_apart(self):
         """H1: "nothing listens" is not "something listens and is silent"."""
         import socket
-        sock = socket.socket()
-        sock.bind(("127.0.0.1", 0))
-        port = sock.getsockname()[1]
-        sock.close()
+        port = checklib.free_port()
         self.assertEqual(O.read_status(port, timeout=0.5), (None, O.REFUSED))
         silent = socket.socket()                        # listens, never answers
         silent.bind(("127.0.0.1", 0))

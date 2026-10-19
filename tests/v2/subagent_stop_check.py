@@ -54,6 +54,7 @@ from jarvis.v2.model import ProviderName as PN, Role, Thread  # noqa: E402
 from jarvis.v2.provider import (Brief, Decision, Event, EventKind as K, SessionHandle,  # noqa: E402
                                 Usage, UserMessage)
 from jarvis.v2.providers import claude, codex, codex_config  # noqa: E402
+from tests import checklib  # noqa: E402
 
 try:  # absent before SV-4: the checks that need them fail, by name
     from jarvis.v2.provider import SubagentNotLive, SubagentStopUnsupported  # noqa: E402
@@ -66,16 +67,6 @@ except ImportError:  # pragma: no cover
 
 OWNER = "stopped by the owner"
 REPO = Path(__file__).resolve().parents[2]
-
-
-def wait_for(predicate, timeout=10.0, what="the condition"):
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        value = predicate()
-        if value:
-            return value
-        time.sleep(0.01)
-    raise AssertionError(f"timed out waiting for {what}")
 
 
 # --- Claude, through the real provider -------------------------------------------
@@ -169,7 +160,7 @@ class ClaudeStop(unittest.TestCase):
         run = ClaudeRun("stop_fg_parallel")
         self.addCleanup(run.close)
         out, done = run.send_async()
-        wait_for(lambda: R.ReplayClient.instances and run.client.at_gate.is_set(), what="the stop gate")
+        checklib.wait_for(lambda: R.ReplayClient.instances and run.client.at_gate.is_set(), what="the stop gate", timeout=10.0)
         self.assertIsNone(run.provider.subagent_stop_refusal(run.handle, self.SLEEPER))
         run.provider.stop_subagent(run.handle, self.SLEEPER)
         self.assertTrue(done.wait(30), "the turn never finished")
@@ -207,7 +198,7 @@ class ClaudeStop(unittest.TestCase):
         run = ClaudeRun("stop_fg_parallel")
         self.addCleanup(run.close)
         out, done = run.send_async()
-        wait_for(lambda: R.ReplayClient.instances and run.client.at_gate.is_set(), what="the stop gate")
+        checklib.wait_for(lambda: R.ReplayClient.instances and run.client.at_gate.is_set(), what="the stop gate", timeout=10.0)
         p, h = run.provider, run.handle
         with self.assertRaises(SubagentNotLive):
             p.stop_subagent(h, "cl:toolu_nobody")
@@ -246,7 +237,7 @@ class ClaudeStop(unittest.TestCase):
         run = ClaudeRun("stop_fg_parallel")
         self.addCleanup(run.close)
         out, done = run.send_async()
-        wait_for(lambda: R.ReplayClient.instances and run.client.at_gate.is_set(), what="the stop gate")
+        checklib.wait_for(lambda: R.ReplayClient.instances and run.client.at_gate.is_set(), what="the stop gate", timeout=10.0)
 
         async def never(task_id):
             await asyncio.sleep(3600)
@@ -266,7 +257,7 @@ class ClaudeStop(unittest.TestCase):
         run = ClaudeRun("stop_fg_parallel")
         self.addCleanup(run.close)
         out, done = run.send_async()
-        wait_for(lambda: R.ReplayClient.instances and run.client.at_gate.is_set(), what="the stop gate")
+        checklib.wait_for(lambda: R.ReplayClient.instances and run.client.at_gate.is_set(), what="the stop gate", timeout=10.0)
         finished = threading.Event()
         real = run.client.stop_task
 
@@ -287,7 +278,7 @@ class ClaudeStop(unittest.TestCase):
         run = ClaudeRun("stop_fg_parallel")
         self.addCleanup(run.close)
         out, done = run.send_async()
-        wait_for(lambda: R.ReplayClient.instances and run.client.at_gate.is_set(), what="the stop gate")
+        checklib.wait_for(lambda: R.ReplayClient.instances and run.client.at_gate.is_set(), what="the stop gate", timeout=10.0)
 
         async def refuse(task_id):
             raise Exception(f"No task found with ID: {task_id}")    # the SDK's error control response
@@ -314,7 +305,7 @@ class ClaudeStop(unittest.TestCase):
         run = ClaudeRun("stop_fg_parallel")
         self.addCleanup(run.close)
         out, done = run.send_async()
-        wait_for(lambda: R.ReplayClient.instances and run.client.at_gate.is_set(), what="the stop gate")
+        checklib.wait_for(lambda: R.ReplayClient.instances and run.client.at_gate.is_set(), what="the stop gate", timeout=10.0)
         refused = threading.Event()
 
         async def late_refusal(task_id):
@@ -327,7 +318,7 @@ class ClaudeStop(unittest.TestCase):
                 run.provider.stop_subagent(run.handle, self.SLEEPER)
         child = run.handle.native.children[self.SLEEPER]
         self.assertTrue(child.owner_stop, "the mark came off before the CLI answered")
-        wait_for(lambda: refused.is_set() and not child.owner_stop, what="the late refusal to clear the mark")
+        checklib.wait_for(lambda: refused.is_set() and not child.owner_stop, what="the late refusal to clear the mark", timeout=10.0)
         self.assertTrue(done.wait(30), "the turn never finished")
         ended = [d for d in life(out, self.SLEEPER) if d["op"] == "finished"]
         self.assertEqual([d["status"] for d in ended], ["stopped"])
@@ -339,7 +330,7 @@ class ClaudeStop(unittest.TestCase):
         run = ClaudeRun("stop_fg_parallel")
         self.addCleanup(run.close)
         out, done = run.send_async()
-        wait_for(lambda: R.ReplayClient.instances and run.client.at_gate.is_set(), what="the stop gate")
+        checklib.wait_for(lambda: R.ReplayClient.instances and run.client.at_gate.is_set(), what="the stop gate", timeout=10.0)
         refused = threading.Event()
 
         async def late_refusal(task_id):
@@ -367,7 +358,7 @@ class ClaudeStop(unittest.TestCase):
         run = ClaudeRun("stop_fg_parallel")
         self.addCleanup(run.close)
         out, done = run.send_async()
-        wait_for(lambda: R.ReplayClient.instances and run.client.at_gate.is_set(), what="the stop gate")
+        checklib.wait_for(lambda: R.ReplayClient.instances and run.client.at_gate.is_set(), what="the stop gate", timeout=10.0)
         child = run.handle.native.children[self.SLEEPER]
 
         async def lost(task_id):
@@ -387,8 +378,8 @@ class ClaudeStop(unittest.TestCase):
             with self.assertRaises(TimeoutError):
                 run.provider.stop_subagent(run.handle, self.SLEEPER)
         self.assertTrue(child.owner_stop)
-        wait_for(lambda: failed.is_set() and not child.owner_stop,
-                 what="the late transport error to take the mark off")
+        checklib.wait_for(lambda: failed.is_set() and not child.owner_stop,
+                 what="the late transport error to take the mark off", timeout=10.0)
         self.assertEqual((child.owner_stops, child.owner_stop_taken), (0, False))
         self.assertTrue(done.wait(30), "the turn never finished")
         ended = [d for d in life(out, self.SLEEPER) if d["op"] == "finished"]
@@ -400,7 +391,7 @@ class ClaudeStop(unittest.TestCase):
         run = ClaudeRun("stop_fg_parallel")
         self.addCleanup(run.close)
         out, done = run.send_async()
-        wait_for(lambda: R.ReplayClient.instances and run.client.at_gate.is_set(), what="the stop gate")
+        checklib.wait_for(lambda: R.ReplayClient.instances and run.client.at_gate.is_set(), what="the stop gate", timeout=10.0)
         answered = threading.Event()
         real = run.client.stop_task
 
@@ -424,7 +415,7 @@ class ClaudeStop(unittest.TestCase):
         run = ClaudeRun("stop_fg_parallel")
         self.addCleanup(run.close)
         out, done = run.send_async()
-        wait_for(lambda: R.ReplayClient.instances and run.client.at_gate.is_set(), what="the stop gate")
+        checklib.wait_for(lambda: R.ReplayClient.instances and run.client.at_gate.is_set(), what="the stop gate", timeout=10.0)
         real = run.client.stop_task
 
         async def slow(task_id):
@@ -718,7 +709,7 @@ class Route(Daemonised):
     def begin(self):
         self.daemon.send(self.chat.id, UserMessage(text="go"))
         self.assertTrue(self.provider.started.wait(10))
-        wait_for(lambda: len(self.rows()) == 2, what="both children recorded")
+        checklib.wait_for(lambda: len(self.rows()) == 2, what="both children recorded", timeout=10.0)
 
     def rows(self):
         return {r["sid"]: r for r in self.owner("GET", f"/threads/{self.chat.id}/subagents")["subagents"]}
@@ -728,7 +719,7 @@ class Route(Daemonised):
             with self.daemon._lock:
                 session = self.daemon._sessions.get(self.chat.id)
                 return session is None or session.worker is None
-        wait_for(quiet, what="the turn to finish")
+        checklib.wait_for(quiet, what="the turn to finish", timeout=10.0)
 
     def bus(self):
         out = []
@@ -882,7 +873,7 @@ class Route(Daemonised):
             return self.rows()["cl:toolu_a"].get("stop") == "unconfirmed"
         with patch.object(S, "STOP_CONFIRM_S", 0.2):
             self.owner("POST", self.path(), {})
-            wait_for(unconfirmed, what="unconfirmed")
+            checklib.wait_for(unconfirmed, what="unconfirmed", timeout=10.0)
         records.extend(self.bus())
         self.assertTrue(any(r.get("kind") == "subagent" and r["data"].get("stop") == "unconfirmed"
                             for r in records))
