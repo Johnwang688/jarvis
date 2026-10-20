@@ -190,7 +190,8 @@ turns in all (quota). About 12 minutes.
 3. Send the same message again. This time **Allow** the card once. Expect
    the command to run and `gate-t` to reply with the result.
 4. Look at the card's text: does it say the turn began from another chat?
-   (C6 is not built; expected: no.)
+   (With C6 merged and installed, expected: yes, "turn started by a message
+   from chat ‹gate-s›" under REQUESTED BY; before it, no.)
 
 **Expected:** the card appears in `gate-t`'s pane for a relayed turn exactly
 as for a typed one, waits for a human, and the owner's answer decides the

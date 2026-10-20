@@ -3656,9 +3656,28 @@ spoken, posted or taken for a task result. Records of an unknown kind are
 ignored by a consumer that has no rule for them, so none of these can pass
 for `user`.
 
+### Approval cards from a relayed or reply turn (C6)
+
+A card raised during a turn another chat's message started (a relayed turn,
+in the target) or its reply started (a reply turn, in the sender) carries
+`"relayed_from": "<title>"` in its public JSON (the bus's
+`approval_requested`, `GET /approvals`): the title of the chat whose message
+or reply started the turn, as its relay header shows it, then reduced for
+the card (`chat_reads.card_title`): one line of at most 60 characters, no
+‹ › « » · • (each becomes `_`), no symbol, emoji or combining mark, and
+`(untitled)` for nothing left. The key is absent for any other turn (typed,
+spoken, Discord, a schedule, a task) and from a private (Browser) card's
+projection. The HUD draws it under REQUESTED BY as "turn started by a message
+from chat ‹title›" on one clipped line, the title reduced again by the same
+rule (`lib/relays.ts` `cardTitle`). It is display only: no layer reads it,
+the decision, the layer and Always are the same with and without it, and the
+owner's answer decides the card as on any other. Discord's card does not show
+it.
+
 ### What a relay cannot do
 
-A relay never answers an approval card or a provider question, never steers
+A relay never answers an approval card or a provider question (a card its
+turn raises only names it, above), never steers
 the target or reserves its desk, and never interrupts: an owner message in the
 target still goes first and steers into a running relayed turn. A turn a relay
 started cannot send onward (no chains). The owner's Stop in the target drops
