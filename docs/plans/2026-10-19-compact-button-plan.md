@@ -1,5 +1,7 @@
 # Plan: Compact button for HUD chats (2026-10-19)
 
+**Status (2026-10-19).** Built and installed as one PR, [#270](https://github.com/Johnwang688/jarvis/pull/270) (WP0 recording, WP-A route and Claude and fast-path providers, WP-B Codex, WP-C HUD chip). Not built: typed `/compact <focus>` text (CB-4, later; Claude first). As built: `docs/notes/providers-runtime.md` and `docs/notes/hud-workspace.md`, "Compact" sections; wire shapes in `docs/hud-api.md`.
+
 The owner asked for "a small compact button to compact the context… the same compact process as
 claude code's /compact." Each provider runs its own native compaction. The transcript keeps every
 row; only the model's context gets smaller. Planner: Opus (Plan agent); lead-reviewed.

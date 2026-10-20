@@ -1,6 +1,6 @@
 # Jarvis current feature map and team ownership
 
-Updated 2026-10-16 (America/Chicago, main `d80507c`). This is the shared coordination map for the
+Updated 2026-10-19 (America/Chicago, main `1c0c006`). This is the shared coordination map for the
 2026-10-12 checkpoint, the five plans merged in [PR #125](https://github.com/Johnwang688/jarvis/pull/125),
 and John's subsequent VEX, LaTeX and Browser-controls requests. It is a working
 registry: update the relevant row when claiming, handing off, opening a PR,
@@ -38,6 +38,8 @@ pop-up adoption ([#217](https://github.com/Johnwang688/jarvis/pull/217)); the Di
 ([#209](https://github.com/Johnwang688/jarvis/pull/209), [#213](https://github.com/Johnwang688/jarvis/pull/213)). Smaller merges: Codex Stop keeps the chat ([#200](https://github.com/Johnwang688/jarvis/pull/200)), Codex partial
 turns disclosed in usage ([#207](https://github.com/Johnwang688/jarvis/pull/207)), five recent chats per project in the sidebar ([#206](https://github.com/Johnwang688/jarvis/pull/206)), and
 the fast path's desk-turn edits and commands (F-1..F-7, [#182](https://github.com/Johnwang688/jarvis/pull/182)). Later merges [#227](https://github.com/Johnwang688/jarvis/pull/227) to [#235](https://github.com/Johnwang688/jarvis/pull/235) are INSTALLED per the lead's 2026-10-16 deploys: owner-only voice routes ([#227](https://github.com/Johnwang688/jarvis/pull/227)), SV-5 ([#228](https://github.com/Johnwang688/jarvis/pull/228)), VEX view finish ([#229](https://github.com/Johnwang688/jarvis/pull/229)), Codex profile leftovers ([#231](https://github.com/Johnwang688/jarvis/pull/231)), gate and Codex git leftovers ([#230](https://github.com/Johnwang688/jarvis/pull/230)), B-PICKERS ([#232](https://github.com/Johnwang688/jarvis/pull/232)), B-IME ([#233](https://github.com/Johnwang688/jarvis/pull/233), follow-up [#235](https://github.com/Johnwang688/jarvis/pull/235)) and SV-6 ([#234](https://github.com/Johnwang688/jarvis/pull/234)).
+
+**2026-10-17 to 2026-10-19 landings ([#238](https://github.com/Johnwang688/jarvis/pull/238) to [#272](https://github.com/Johnwang688/jarvis/pull/272); all merged and INSTALLED. The lead's last deploy on the evening of 2026-10-19 installed main `1c0c006` with `jarvis hud install` and restarted daemon2; no PR is open):** the directional split, up to twelve panes (FS0 to FS4); chat-to-chat (C0 to C5, C7); the Compact button ([#270](https://github.com/Johnwang688/jarvis/pull/270)); Claude skills in Jarvis and Codex chats ([#272](https://github.com/Johnwang688/jarvis/pull/272)); VX-UI-4b and its VEX follow-ups ([#240](https://github.com/Johnwang688/jarvis/pull/240), [#241](https://github.com/Johnwang688/jarvis/pull/241), [#242](https://github.com/Johnwang688/jarvis/pull/242)); the duplicate-helper probe's security fixes SEC-1 to SEC-6 and the cleanup cards CL-1 to CL-4. Rows below, under "2026-10-17 to 2026-10-19 additions" and the sections after it.
 
 ## How teams coordinate
 
@@ -303,7 +305,7 @@ apart from the coalesced finish/failure notices (SV-5, installed in [#228](https
 | VX-UI-2 | State marks on steps and tab badges | **INSTALLED — finished in [#229](https://github.com/Johnwang688/jarvis/pull/229), merged 2026-10-16** (marks first landed in [#209](https://github.com/Johnwang688/jarvis/pull/209)) | Idle/running/done/failed/stale/unknown marks with glyph and label; stale is advisory only. A mark and its tab badge read one `actionState` function. |
 | VX-UI-3 | First-use help | **INSTALLED — finished in [#229](https://github.com/Johnwang688/jarvis/pull/229), merged 2026-10-16**, in the owner's simplified form | Permanent hover help plus a `?` list with numbered controls; the plan's first-use counts were dropped by the owner. |
 | VX-UI-4a | Brain tab: the brain terminal in the VEX pane, Connect only on a trusted press | **INSTALLED — [#213](https://github.com/Johnwang688/jarvis/pull/213), merged 2026-10-16; Claude lead team; lead deploy log 2026-10-15/16** | Details in `docs/notes/vex.md`, "Brain tab, VX-UI-4a". |
-| VX-UI-4b | Brain startup reply and optional `--quiet` | **GATED — on hardware check H4** | Built only if H4 shows the brain terminal hangs on its first cursor query. |
+| VX-UI-4b | Brain startup reply and `--quiet --user <port>` | **INSTALLED — [#240](https://github.com/Johnwang688/jarvis/pull/240), merged 2026-10-17; follow-ups [#241](https://github.com/Johnwang688/jarvis/pull/241) (Connect offered once a download ends) and [#242](https://github.com/Johnwang688/jarvis/pull/242) (review LOWs)** | Built after hardware check H1 showed a blank Brain tab. Hardware-unverified until the owner's next session (H1, H3, H4). Details in `docs/notes/vex.md`, "Brain terminal startup, VX-UI-4b". |
 | VX-UI-5 | Run / Stop | **DROPPED** (owner, 2026-10-15: no Run button) | Stop is VX-UI-1's cancel of a running Clean/Build/Download. |
 | VX-UI-6 | Docs | **INSTALLED — [#229](https://github.com/Johnwang688/jarvis/pull/229), merged 2026-10-16** | `docs/notes/vex.md` ("The VEX view as built"), `docs/hud-api.md` (no route changed) and the decisions file (V-3 amendment). |
 | H1 to H10 | Hardware checks | **VERIFY / owner-assisted — UNRUN** | Include H9/H10 (what a Stop mid-download leaves on the brain and COM3). Open firmware decision: braking during a blocking whenWithin after a chained move. |
@@ -324,6 +326,38 @@ apart from the coalesced finish/failure notices (SV-5, installed in [#228](https
 | Codex profiles | [#231](https://github.com/Johnwang688/jarvis/pull/231) follow-ups to [#224](https://github.com/Johnwang688/jarvis/pull/224): `/mnt/c` walk deadline with a chat notice, symlinked profile folders, glob-syntax names, repo-top credential files. | **INSTALLED** (lead's 2026-10-16 deploy). Stores created mid-session stay readable until the next session start. |
 | Gate and Codex leftovers | [#230](https://github.com/Johnwang688/jarvis/pull/230) review leftovers of [#223](https://github.com/Johnwang688/jarvis/pull/223) and [#225](https://github.com/Johnwang688/jarvis/pull/225) (chat git and merge gate) and a `rules_check` path flake. | **INSTALLED — [#230](https://github.com/Johnwang688/jarvis/pull/230), merged 2026-10-16.** It edits SELF_PROTECTED files (`merge_gate.py`, `permissions.py`, `bridge.py`, `tools/__init__.py`); independent review passed. |
 
+## 2026-10-17 to 2026-10-19 additions
+
+| Area | Completed scope / evidence | Remaining qualification |
+|---|---|---|
+| Claude model menu | [#238](https://github.com/Johnwang688/jarvis/pull/238) offers Claude Haiku 5.5 | **INSTALLED.** |
+| Codex projects | [#239](https://github.com/Johnwang688/jarvis/pull/239) a project rooted at the owner's home is refused with a clear message | **INSTALLED.** |
+| Security (dup probe) | SEC-1 [#246](https://github.com/Johnwang688/jarvis/pull/246) `127.<name>` hosts no longer skip the LAN refusal (tighten-only); SEC-2 [#243](https://github.com/Johnwang688/jarvis/pull/243) unseen characters stripped from the approval card's origin; SEC-3 [#245](https://github.com/Johnwang688/jarvis/pull/245) full credential scrub on Discord and diff-review output, with [#248](https://github.com/Johnwang688/jarvis/pull/248) stripping invisible characters before it; SEC-4 [#244](https://github.com/Johnwang688/jarvis/pull/244) credential files private from creation; SEC-5 [#261](https://github.com/Johnwang688/jarvis/pull/261) `scrub_text` redacts a private key's whole block; SEC-6 [#263](https://github.com/Johnwang688/jarvis/pull/263) cards, logs and v1 tool lines hide it too. [Specs](2026-10-18-security-fix-specs.md) | **INSTALLED.** Open LOWs: `scrub_text` misses a short `Bearer` token that `chat_reads.scrub` catches; a non-compaction turn's `turn_finished` reason is published unscrubbed. |
+| Duplicate cleanup | CL-1a [#251](https://github.com/Johnwang688/jarvis/pull/251), CL-1b [#249](https://github.com/Johnwang688/jarvis/pull/249) shared test helpers; CL-2 [#252](https://github.com/Johnwang688/jarvis/pull/252) HUD path and storage helpers; CL-3 [#253](https://github.com/Johnwang688/jarvis/pull/253) one Host-header check; CL-4 [#250](https://github.com/Johnwang688/jarvis/pull/250); one HUD modifier-key list [#255](https://github.com/Johnwang688/jarvis/pull/255). [Plan](2026-10-18-dedupe-cleanup.md) | **INSTALLED.** Behaviour unchanged by rule. Copies in SELF_PROTECTED files wait on the owner. |
+| Tests | [#254](https://github.com/Johnwang688/jarvis/pull/254) the live Discord handshake is opt-in (`JARVIS_LIVE_DISCORD=1`); [#256](https://github.com/Johnwang688/jarvis/pull/256) HUD voice tests speak only once the capture listens | **MERGED.** |
+| HUD usage | [#247](https://github.com/Johnwang688/jarvis/pull/247) real Claude and OpenAI marks | **INSTALLED.** |
+| v2 stores | [#267](https://github.com/Johnwang688/jarvis/pull/267) a log read skips a torn last line still being written, and splits on `\n` only (a U+2028 in a record no longer splits it) | **INSTALLED.** Found as a `chat_relay_check` flake. |
+
+## HUD directional split (2026-10-19)
+
+Split right or down, VS Code style, up to twelve panes. Owner answers FS-1..FS-10: [decisions](2026-10-19-hud-free-split-decisions.md); [plan](2026-10-19-hud-free-split-plan.md); as built in `docs/notes/hud-workspace.md`. Claude lead team.
+
+| ID | Scope | Status |
+|---|---|---|
+| FS0 | The Browser pane contract grows to 12 | **INSTALLED — [#258](https://github.com/Johnwang688/jarvis/pull/258)** |
+| FS1 | The pure split tree (`splittree.ts`) | **INSTALLED — [#257](https://github.com/Johnwang688/jarvis/pull/257)** |
+| FS2 | Twelve pane ids, still on the ladder | **INSTALLED — [#259](https://github.com/Johnwang688/jarvis/pull/259)** |
+| FS3 | The tree becomes the workspace's model, behaviour preserved (with the plan's §10 1px-rule erratum) | **INSTALLED — [#264](https://github.com/Johnwang688/jarvis/pull/264)** |
+| FS4 | Directional split and close | **INSTALLED — [#268](https://github.com/Johnwang688/jarvis/pull/268)** |
+
+## Compact button (2026-10-19)
+
+A per-chat button that runs each provider's own compaction: Claude's CLI `/compact`, Codex's `thread/compact/start`, the fast path's `Agent.compact_now`. Owner answers CB-1..CB-5 and the plan: [compact-button plan](2026-10-19-compact-button-plan.md). **INSTALLED — [#270](https://github.com/Johnwang688/jarvis/pull/270)** (WP0 recording, WP-A route and providers, WP-B Codex, WP-C HUD chip). Not built: typed `/compact <focus>` (CB-4, later; Claude first). No live press is recorded here.
+
+## Claude skills in Jarvis and Codex chats (2026-10-19)
+
+`~/.claude/skills` (the owner's and the claude.ai-synced skills) is a second, read-only skill root for Jarvis chats, and `jarvis skills link` links those skills into `~/.codex/skills`. Owner answers SK-1, SK-2: [plan](2026-10-19-claude-skills-link.md). **INSTALLED — [#272](https://github.com/Johnwang688/jarvis/pull/272).** The first link run made 25 Codex links; the `/` menu lists 32 skills. Rerun `jarvis skills link` after adding a skill.
+
 ## Chat-to-chat (2026-10-19)
 
 Chats read and message each other. Owner answers CC-1..CC-9: [decisions](2026-10-19-chat-to-chat-decisions.md); [plan](2026-10-19-chat-to-chat-plan.md); rules in [control-plane.md](../notes/control-plane.md#chat-to-chat-the-rules-in-one-place-c0-c5-merged-2026-10-19). Claude lead team.
@@ -337,7 +371,7 @@ Chats read and message each other. Owner answers CC-1..CC-9: [decisions](2026-10
 | C4 | `chat_send` and `chat_wait` on all three providers | **MERGED — [#266](https://github.com/Johnwang688/jarvis/pull/266); INSTALLED** | L1, L3 not run. |
 | C5 | The HUD: relay rows, waiting line, sidebar badge, Withdraw | **MERGED — [#269](https://github.com/Johnwang688/jarvis/pull/269); INSTALLED** | Free and mock-daemon suites only; no live receipt is recorded here. |
 | C6 | Approval-card provenance ("turn started by a message from chat ‹title›") | **DEFERRED — optional, not done** | Add if L4 shows the owner cannot tell where a relayed turn's card came from. |
-| C7 | These notes, the `hud-api` contract and the live-gate runbook | **IN REVIEW** (this PR) | The runbook is a plan; nothing in it has been run. |
+| C7 | These notes, the `hud-api` contract and the live-gate runbook | **MERGED — [#271](https://github.com/Johnwang688/jarvis/pull/271)** | The runbook is a plan; nothing in it has been run. |
 | L1-L4 | Native release checks (a 300 s MCP call on Claude, mid-turn reply labelling, sub-agent and child refusal, a relayed Claude turn's approval on the owner's card) | **NOT RUN** | [Runbook](2026-10-19-chat-to-chat-live-gates.md); run only on the owner's go, by the lead. |
 
 ## Original checkpoint and requested fixes already landed
@@ -374,7 +408,7 @@ PR #125 itself adds plans, not the features those plans describe.
 | NOTES-CHECK | `slim_claude --check` failing on the archived notes | **INSTALLED — [#185](https://github.com/Johnwang688/jarvis/pull/185) (`editor.md`) and [#189](https://github.com/Johnwang688/jarvis/pull/189) (`terminals.md`), merged 2026-10-15; docs and tooling only.** | Each restored the archived `claude-source` payload byte for byte and moved the current text outside it (the terminals readable-switch note moved out of the archive). `python scripts/slim_claude.py --check` passes again. |
 | HUD-HARDENING | Owner hardening decisions of 2026-10-15 | **INSTALLED — [#191](https://github.com/Johnwang688/jarvis/pull/191), merged 2026-10-15.** | The approval page's CSP has no `'wasm-unsafe-eval'`. Only a `Sec-Fetch-Dest: worker` fetch of a `.js` directly under `/assets/` gets it, and those responses send `Vary: Sec-Fetch-Dest`; a path-only grant was rejected in review because a same-origin popup gained a realm that could compile WebAssembly. The three WebAssembly users (syntax, VAD, wake word) run in module workers. `jarvis hud rebuild` runs `npm ci --ignore-scripts`; this closes only the install-time route. Decisions in [the editor decisions](2026-10-09-hud-editor-decisions.md) under "Added 2026-10-15"; worker invariant in `docs/notes/editor.md`. |
 | VEX-DOWNLOAD | Match Download output/completion to Build/Clean; visible brain/controller connectivity and timestamped connection history | **INSTALLED — [#158](https://github.com/Johnwang688/jarvis/pull/158); Codex lead / `browser_auth`; verified build above.** Branch `codex/vex-download-device-status`, runtime `70dfd6c`, [contract/verified gates](2026-10-13-vex-download-device-status.md). Stable actual-PTY Download output/final records; shared source-verified USB-only Brain/Controller checks with unknown/busy/stale preservation and bounded timestamped history. PASS: 38 focused Python, 50 targeted HUD units, production build, 49 selected actual-HUD checks, 9 feedback/narrow checks and 7 Build/Clean output regressions. Merged at `f26848d1` and installed by the normal guarded rebuild/restart above. Real VEX tools/devices and robot Download acceptance **UNRUN**; no radio-link or extension-host health claim. |
-| VEX-UI | VEX view redesign ([plan](2026-10-15-vex-ui-redesign.md), [mockup](2026-10-15-vex-ui-mockup.html)) | **IN PROGRESS — VX-UI-1, 2, 3 and 6 installed ([#209](https://github.com/Johnwang688/jarvis/pull/209), [#229](https://github.com/Johnwang688/jarvis/pull/229)); VX-UI-4a installed ([#213](https://github.com/Johnwang688/jarvis/pull/213)); VX-UI-4b gated on hardware check H4.** See the VEX view redesign table below. The urgent Clean/Build fix ([#158](https://github.com/Johnwang688/jarvis/pull/158)) is installed. Does not authorize real robot operations. |
+| VEX-UI | VEX view redesign ([plan](2026-10-15-vex-ui-redesign.md), [mockup](2026-10-15-vex-ui-mockup.html)) | **INSTALLED — VX-UI-1, 2, 3 and 6 ([#209](https://github.com/Johnwang688/jarvis/pull/209), [#229](https://github.com/Johnwang688/jarvis/pull/229)); VX-UI-4a ([#213](https://github.com/Johnwang688/jarvis/pull/213)); VX-UI-4b ([#240](https://github.com/Johnwang688/jarvis/pull/240)). Hardware checks still unrun.** See the VEX view redesign table below. The urgent Clean/Build fix ([#158](https://github.com/Johnwang688/jarvis/pull/158)) is installed. Does not authorize real robot operations. |
 | PLATFORM | Physical Browser sound, real Windows mic/AEC, real account sign-in, VEX download | **VERIFY / owner-assisted.** Synthetic/unit/native-shell success must not be reported as these real-world acceptances. |
 
 Starting points for another team: **GIT-LIVE** (needs a disposable repo and the
@@ -386,15 +420,22 @@ unclaimed packages or coordinate a handoff with the named lead.
 **Remaining:** voice follow-ups are listed in
 [2026-10-15-voice-followups.md](2026-10-15-voice-followups.md). The boundary gap it named, `/stt` and `/say` without `owner_only`, is closed by [#227](https://github.com/Johnwang688/jarvis/pull/227) (installed).
 
-## Next up (2026-10-16)
+## Next up (2026-10-19)
 
-Open items, in this order:
+Added 2026-10-19, in this order:
+
+1. **Chat-to-chat live gates L1-L4:** [runbook](2026-10-19-chat-to-chat-live-gates.md); only on the owner's go, on the live daemon. C6 only if L4 asks for it.
+2. **Typed `/compact <focus>`** (CB-4), Claude first.
+3. **Scrub alignment:** give a non-compaction turn's `turn_finished` reason `chat_reads.scrub`-strength scrubbing, and close `scrub_text`'s short-`Bearer` gap.
+4. **Known failures on main:** `browser_drive_integration_check` has a stale fake (its session lacks `self_started`, its daemon lacks `chat_relay`); `ledger` and `devservers` also fail on main. `hud_install_check` fails only with `TMPDIR=/var/tmp` (environment, not a regression).
+
+Still open from 2026-10-16, in this order:
 
 1. **#230 test gaps (LOW/NIT, from its review):** pin that `tools.Refusal` is falsy; that `permissions` `_LAST_VERDICT` is per-context; the Browser-delegation ask marking `asked`; and a desk_only stale-turn test for `bridge._delegated`. Nothing is unsafe today.
 2. **B-DIRECT-CAPTURE:** READY and unclaimed. Before a Direct capture path is enabled, it needs an actual Windows app-mode `getDisplayMedia`/CropTarget prompt and pixel evidence.
 3. **B-PREVIEW:** blocked on a Chrome capability. Chrome 155 screencast metadata cannot prove matching-frame identity, so "Preview unavailable" stays.
 4. **B-PERF Chrome tile-size sweep:** run only when the machine is idle.
-5. **VX-UI-4b:** gated on hardware check H4.
+5. **VX-UI-4b:** built ([#240](https://github.com/Johnwang688/jarvis/pull/240)); hardware checks H1, H3 and H4 wait on the owner's next robot session.
 6. **Voice follow-ups:** [2026-10-15-voice-followups.md](2026-10-15-voice-followups.md).
 7. **Owner live checks:** [2026-10-16-owner-live-checks.md](2026-10-16-owner-live-checks.md). The pending checks for [#232](https://github.com/Johnwang688/jarvis/pull/232) (B-PICKERS), [#233](https://github.com/Johnwang688/jarvis/pull/233) and [#235](https://github.com/Johnwang688/jarvis/pull/235) (B-IME) and [#234](https://github.com/Johnwang688/jarvis/pull/234) (SV-6) are also in their rows above. The older owner-assisted items still stand: GIT-LIVE, B-LOGIN, the Quick review first press, and H1 to H10. The braking firmware decision is made (brake, keep the target heading); it is built as [Johnwang688/87867D-override#10](https://github.com/Johnwang688/87867D-override/pull/10), reviewed, and waits on the owner's robot test before it merges.
 

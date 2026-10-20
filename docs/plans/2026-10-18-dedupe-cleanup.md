@@ -1,5 +1,7 @@
 # Duplicate-helper cleanup (2026-10-18)
 
+**Status (2026-10-19).** All five cards merged and installed: CL-1a [#251](https://github.com/Johnwang688/jarvis/pull/251), CL-1b [#249](https://github.com/Johnwang688/jarvis/pull/249), CL-2 [#252](https://github.com/Johnwang688/jarvis/pull/252), CL-3 [#253](https://github.com/Johnwang688/jarvis/pull/253), CL-4 [#250](https://github.com/Johnwang688/jarvis/pull/250). The HUD's two `isModifierKey` sets became one list, the keys both copies agreed on ([#255](https://github.com/Johnwang688/jarvis/pull/255)). The other out-of-scope copies below are unchanged.
+
 Owner: "you may … clean up the duplicate helpers" (2026-10-18). Source: the five
 scout reports in `~/.cache/jarvis-lead/workflows/dup-scout-*.md` and
 `docs/plans/2026-10-18-security-fix-specs.md` ("Found but not filed").

@@ -1,5 +1,7 @@
 # Security fix specs from the duplicate-helper probe (2026-10-18)
 
+**Status (2026-10-19).** All four merged and installed: SEC-1 [#246](https://github.com/Johnwang688/jarvis/pull/246) (tighten-only), SEC-2 [#243](https://github.com/Johnwang688/jarvis/pull/243), SEC-3 [#245](https://github.com/Johnwang688/jarvis/pull/245), SEC-4 [#244](https://github.com/Johnwang688/jarvis/pull/244). Two later items from the same probe also landed: SEC-5, `scrub_text` redacts a private key's whole block ([#261](https://github.com/Johnwang688/jarvis/pull/261)), and SEC-6, approval cards, logs and v1 tool lines hide it too ([#263](https://github.com/Johnwang688/jarvis/pull/263)). SEC-3's review LOW (the diff review stripped invisible characters after the scrub) is [#248](https://github.com/Johnwang688/jarvis/pull/248). Details in `docs/notes/safety-permissions.md`.
+
 Source: five Haiku scouts searched for duplicate helpers (reports in
 `~/.cache/jarvis-lead/workflows/dup-scout-*.md`). Where helpers had been copied,
 some security checks had drifted apart. The lead read the code behind every

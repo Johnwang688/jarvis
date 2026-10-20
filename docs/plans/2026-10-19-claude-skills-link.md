@@ -86,3 +86,8 @@ One package, tests first: a test writer, then an implementer, then lead review a
 
 - Jarvis chats see the new root after a daemon restart. The owner said not to restart until they say.
 - Codex chats see the skills after the lead runs `jarvis skills link`, which writes symlinks only, then on their next session start.
+
+**Done (2026-10-20).** [#272](https://github.com/Johnwang688/jarvis/pull/272) merged; on the owner's go
+the lead installed main at 1c0c006 and restarted the daemon. The `/` menu lists 32 skills.
+`jarvis skills link` made 25 links in `~/.codex/skills`, refusing nothing and replacing nothing.
+Run it again after adding a skill to `~/.claude/skills`; Jarvis itself needs nothing.
