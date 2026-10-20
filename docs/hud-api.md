@@ -3664,3 +3664,46 @@ target still goes first and steers into a running relayed turn. A turn a relay
 started cannot send onward (no chains). The owner's Stop in the target drops
 what waits on it; Stop in the sender withdraws that turn's still-queued sends.
 Details: `docs/notes/control-plane.md`, "Chat-to-chat".
+
+## The Compact button (2026-10-19, PR #270)
+
+### `POST /threads/{id}/compact`
+
+Starts the chat provider's own compaction of the conversation: Claude Code's `/compact`, Codex's
+`thread/compact/start`, or the fast path's `Agent.compact_now`, the same path as a typed `/compact`.
+
+- **Who can call it:** the owner only. `owner_only` runs before the thread is looked up or any body
+  is read. The request takes an empty JSON body.
+- **No other route:** no tool, bridge, MCP, Discord or CLI path reaches it.
+
+**Responses**
+
+| Status | Body | When |
+|---|---|---|
+| `202` | `{"status": "started", "turn_id"}` | The compaction started. |
+| `409` | `{"error": "<one sentence>"}` | A turn is running; messages or relays are waiting; a card or question is pending; the thread is archived, closing or a task; or the provider cannot compact. |
+| `405` | | Any method other than POST. |
+
+**Running.** The compaction runs as a turn with no message. On the bus it sends `compact_started`,
+then the usual `turn_started`/`turn_finished`, then
+`compacted {"kind": "compacted", "compaction": true, "data": {"ok", "text"}}`.
+
+**Records.** Every record of that turn carries `compaction: true`. Discord, the task runner,
+activity, speech and chat reads skip them.
+
+**`text`** is one of:
+- "Conversation compacted";
+- "Not compacted: <reason>";
+- "Compaction failed: <reason>";
+- "Compaction stopped".
+
+Each reason is scrubbed. No summary text is logged.
+
+**Queueing and Stop.** While the compaction runs, owner messages and chat relays queue and never
+steer. The owner's Stop ends it and drops the queue.
+
+### Transcript and `thread_json`
+
+- `GET /threads/{id}/transcript` shows `compacted` as a `system` row. `compact_started` adds no row.
+  With `tools=1`, the turn's `compact` tool row shows as well.
+- `thread_json` gains `compacting: bool`, which is true while a compaction is the running turn.
