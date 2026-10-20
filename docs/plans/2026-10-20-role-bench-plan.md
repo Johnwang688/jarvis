@@ -1,6 +1,6 @@
 # Role bench: the cheapest good-enough reviewer and implementer (plan, 2026-10-20)
 
-**Status: PLAN, nothing built or run.** Owner decisions are in section 8, with defaults in
+**Status: PLAN; owner accepted the defaults 2026-10-20 ([decisions](2026-10-20-role-bench-decisions.md)).** Section 8 lists them, defaults in
 bold. Results feed the `claude-workflows` skill (section 9 of the skill, "Measured so far").
 
 ## 1. The question
