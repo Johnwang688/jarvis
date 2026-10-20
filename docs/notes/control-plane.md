@@ -327,6 +327,79 @@ it. A timeout, shutdown or unreadable answer denies. The fast path asks with
 an ASK copy of an AUTO brief, so layer 5 never hands its call to a reviewer it
 does not have.
 
+## Chat-to-chat: the rules in one place (C0-C5 merged, 2026-10-19)
+
+Owner request and answers: `docs/plans/2026-10-19-chat-to-chat-decisions.md`
+(CC-1..CC-9, which win over the plan, `docs/plans/2026-10-19-chat-to-chat-plan.md`).
+It widens the old rule "session tools read, never switch the owner's live
+session": no tool switches that session, and reading and messaging are as
+follows. Status: C0, C1, C3, C4 and C5 are merged and live (daemon restart
+2026-10-19, `00c11df`); C2 was folded into C3 (CC-6 dropped the plan's `typed`
+desk key); **C6 (approval-card provenance) is optional and not built**; the
+native release checks L1-L4 are **not run**
+([runbook](../plans/2026-10-19-chat-to-chat-live-gates.md)).
+
+| Decision | Rule now in force |
+|---|---|
+| CC-1 reads | Every HUD chat (Jarvis, Claude, Codex) reads every other open chat; archived and trashed chats are neither readable nor reachable. |
+| CC-2 sends | Every chat can send to every other chat. |
+| CC-3 / CC-6 when | Only during a turn the owner started at the HUD, typed or spoken: `desk.slot["present"]`, depth 0. A task, schedule, Discord message, DM, sub-agent or a turn a foreign steer took off the desk cannot send. |
+| CC-4 reply | Asynchronous: the sender moves on; the target's streamed reply comes back once (a step of the sender's running turn, else a short reply turn, else only shown). `chat_wait` blocks only when asked. |
+| CC-5 busy target | Queued behind the current turn (and the owner's own queue); never interrupts. |
+| CC-7 tools | A relayed or reply turn keeps every tool a non-desk turn holds, under the target's own gates and approvals; it cannot send onward (no chains). No `RELAY_REFUSED`. |
+| CC-8 | `jarvis/v2/chat_relay.py` and `jarvis/v2/tools/chats.py` are SELF_PROTECTED. |
+| CC-9 | Each C-PR merges once the lead's review and the full sweep pass; a daemon restart is still asked separately. |
+
+Lead defaults (reversible, not asked): the HUD shows every relayed message in
+both chats and it is never the owner's (no "YOU"); incoming text is fenced
+untrusted data with its provenance; a message from a chat never approves,
+denies or answers a card (the "no operation of one's own gate" rule: the
+service has no path to the broker, `Daemon.answer`, `deliver` or `_steer`);
+reads pass the same redaction as the HUD display plus the credential scrub;
+O-2 a mid-turn reply keeps the sender's desk, O-4 card provenance is C6 and
+Always stays, O-7 `chat_summary` is deterministic (no model call), O-8
+Discord and read-aloud skip relayed and reply turns, O-9 Stop withdraws queued
+sends.
+
+Where each part lives:
+
+| Part | Code | Notes |
+|---|---|---|
+| C0 read projection | `jarvis/v2/chat_reads.py`, `untrusted.fence_chat` | below, and Runtime |
+| C1 read tools | `tools/chats.py` (`chat_list`, `chat_summary`, `chat_search`, `chat_read`) | "Chat reads in the session catalog" |
+| C3 relay core | `jarvis/v2/chat_relay.py`, `Daemon._begin/_drain/_turn` | "The chat-to-chat relay core" |
+| C4 send tools | `tools/chats.py` (`chat_send`, `chat_wait`) | "Sending in the session catalog" |
+| Providers | fast path, Claude, Codex | [Runtime](providers-runtime.md#chat-reads-on-all-three-providers-chat-to-chat-c1-2026-10-19) |
+| C5 HUD rows | `hud/src/lib/relays.ts`, `components/RelayRow.tsx` | [Workspace](hud-workspace.md#chat-to-chat-in-the-hud-c5-2026-10-19) |
+| Wire contract | `hud_api._relay_message`, the withdraw route | [`docs/hud-api.md`](../hud-api.md) |
+
+**The C0 projection (`chat_reads.py`).** Pure over `Stores`, no daemon, no
+model call, no v1 session and never a native CLI transcript (P-1): the one
+source is each thread's own `log.jsonl`, and only these rows come back: the
+owner's typed words (`data.typed`, never the provider-received `text`,
+attachments named and never opened), each chat's `text`, the three relay
+records, and `model_set`, `notice`, `cli_turn` and `compacted` as system
+lines. Tool events, arguments, results, thinking, gates, questions, plans,
+usage, errors and sub-agents are never included. Every row is scrubbed where
+it is read, outside any daemon lock: `strip_invisible`, `secrets.redact_inline`
+(#205), `redact.scrub_text`, `strip_invisible` again; a scrub that raises
+withholds the row, never passes it. Every result carrying a chat's words is one
+`untrusted.fence_chat` with a fresh nonce. Limits (pinned by
+`tests/v2/chat_reads_check.py`): list 20/50, search 20/50 over the 200 latest
+chats in a 2 s budget (query 2-200 characters), read 20/100 messages, 2,000
+characters a row and 16,000 a read, summary 3,000 characters over 6 rows, a
+4 MiB log tail. A chat is named by its 8-hex id, its exact title or
+`Project / Title`; several candidates are refused with their ids, never
+guessed.
+
+**Messages and bounds at a glance.** 3 sends per owner turn, 3 relays waiting
+per target, 4,000 characters (refused, never cut), 30 relayed turns an hour
+daemon-wide, a waiting relay expires after 60 minutes, a reply passes to the
+model at 6,000 characters (tail kept), `chat_wait` 120 s by default and 300 s
+at most (under Codex's 900 s tool timeout and the relay's 900 s; whether the
+Claude CLI honours a 300 s MCP call is L1), a fast-path reply turn gets 3
+steps. All are constants in `chat_relay.py`.
+
 ## Chat reads in the session catalog (chat-to-chat C1, 2026-10-19)
 
 `chat_list`, `chat_summary`, `chat_search` and `chat_read`
@@ -347,13 +420,13 @@ and removes it at the start of `stop()`; there is no HTTP route behind it.
 The service hands the tools only the store and a snapshot of running turns
 and owner-queue lengths, taken under the daemon lock; the log reads and the
 scrub (`chat_reads.py`, C0) run outside it. Both files are SELF_PROTECTED
-(decision CC-8). Sending (`chat_send`, `chat_wait`) is C3/C4's.
+(decision CC-8). Sending (`chat_send`, `chat_wait`) is below.
 
 ## The chat-to-chat relay core (chat-to-chat C3, 2026-10-19)
 
-`ChatRelay` (`jarvis/v2/chat_relay.py`) now sends. `send(caller, chat, text)`
-and `wait(caller, message_id, seconds)` are the service calls C4's
-`chat_send`/`chat_wait` tools will make; no HTTP route sends (P-3).
+`ChatRelay` (`jarvis/v2/chat_relay.py`) sends. `send(caller, chat, text)`
+and `wait(caller, message_id, seconds)` are the service calls the
+`chat_send`/`chat_wait` tools make; no HTTP route sends (P-3).
 
 - **Who may send** is checked by the service under the daemon lock, never
   only by a tool: the caller's live session, a running worker, the exact
@@ -380,7 +453,7 @@ and `wait(caller, message_id, seconds)` are the service calls C4's
   kept under the target's own gates (CC-7; there is no `RELAY_REFUSED`). Its
   log opens with `relay_in`, never `user`, and every record of it carries
   `relayed: {"message_id", "from"}`. The Discord mirror and the task runner
-  skip `relayed` records (O-8; HUD speech's skip is C5's).
+  skip `relayed` records (O-8), as HUD speech does (Workspace note).
 - **The reply goes back once** (`turn_ended`, from `_turn`'s `finally`
   before the worker is cleared): to a blocked `wait`; else steered into the
   sender's running owner turn with `origin="chat-reply"` and no
