@@ -196,10 +196,29 @@ class Choose(unittest.TestCase):
 
     def test_messages_name_the_owner_terminal_and_commands(self):
         self.assertIn("Windows Terminal (not a Jarvis terminal)", S.UNLOCK_MESSAGE)
-        self.assertIn("gnome-keyring-daemon --unlock", S.UNLOCK_MESSAGE)
+        # WSLg's /run/user overlay hides the daemon's control socket from a terminal, so
+        # a plain `--unlock` only starts a stray second daemon: replace the real one,
+        # detached so it outlives the terminal, then re-register the secrets component.
+        self.assertIn("setsid -f gnome-keyring-daemon --replace --unlock --foreground", S.UNLOCK_MESSAGE)
+        self.assertIn("gnome-keyring-daemon --start --components=secrets", S.UNLOCK_MESSAGE)
+        self.assertNotIn("gnome-keyring-daemon --unlock", S.UNLOCK_MESSAGE)
         self.assertIn("read -rsp", S.UNLOCK_COMMAND)          # no echo, not in argv
+        self.assertIn("printf '%s' \"$KP\" |", S.UNLOCK_COMMAND)   # stdin only
+        # The whole recipe, as verified live on 2026-10-20: dropping `unset KP`, the
+        # redirects or the pause before re-registering is a change to review, not a tidy-up.
+        self.assertEqual(S.UNLOCK_COMMAND,
+                         "read -rsp 'Keyring password: ' KP; echo; printf '%s' \"$KP\" | "
+                         "setsid -f gnome-keyring-daemon --replace --unlock --foreground "
+                         ">/dev/null 2>&1; unset KP; sleep 2; "
+                         "gnome-keyring-daemon --start --components=secrets >/dev/null 2>&1 </dev/null")
         self.assertIn(S.INSTALL_COMMAND, S.UNPROTECTED_HINT)
-        self.assertLessEqual(len(S.UNLOCK_MESSAGE), 300)        # the HUD shows 300 characters
+        self.assertLessEqual(len(S.UNLOCK_MESSAGE), 500)        # the HUD's 409 cap (state/browser.ts)
+        # The longer messages that end in the command reach the HUD whole: its cap on
+        # a hint is 600 characters and on a 409 error 500 (BrowserProfile.tsx, state/browser.ts).
+        for text in (S.CHANGED_MESSAGE, S.STICKY_UNAVAILABLE_MESSAGE, S.FELL_BACK_MESSAGE,
+                     S.UNPROTECTED_HINT):
+            self.assertIn(S.UNLOCK_COMMAND, text)
+            self.assertLessEqual(len(text), 500, text)
 
 
 class Detached(unittest.TestCase):

@@ -104,8 +104,17 @@ REQUEST_KEYRING, REQUEST_BASIC = "keyring", "basic"
 # The owner's commands. Typed in a terminal Jarvis does not host: a HUD
 # terminal is a Jarvis PTY, so its keystrokes pass through the daemon.
 INSTALL_COMMAND = "sudo apt install --no-install-recommends gnome-keyring libsecret-1-0"
+# WSLg mounts its own /run/user/<uid> over systemd's, so a plain
+# `gnome-keyring-daemon --unlock` from a terminal cannot reach the daemon that
+# owns org.freedesktop.secrets on the session bus (it starts a stray second
+# one). This replaces the running daemon with one unlocked from stdin,
+# detached with setsid so it outlives the terminal, then re-registers the
+# secrets component. The password is read without echo and goes only through
+# stdin: never argv, never history.
 UNLOCK_COMMAND = ("read -rsp 'Keyring password: ' KP; echo; printf '%s' \"$KP\" | "
-                  "gnome-keyring-daemon --unlock >/dev/null; unset KP")
+                  "setsid -f gnome-keyring-daemon --replace --unlock --foreground "
+                  ">/dev/null 2>&1; unset KP; sleep 2; "
+                  "gnome-keyring-daemon --start --components=secrets >/dev/null 2>&1 </dev/null")
 UNLOCK_MESSAGE = ("Unlock the keyring in Windows Terminal (not a Jarvis terminal): "
                   + UNLOCK_COMMAND)
 STICKY_UNAVAILABLE_MESSAGE = (

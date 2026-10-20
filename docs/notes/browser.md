@@ -2100,7 +2100,9 @@ chooses each launch's `--password-store`; the lead decided the rules.
 - **locked**, **no_keyring** (the Secret Service answers, but has no default
   collection) or **error** (an answer the probe does not recognise) refuse the
   launch with 409: "Unlock the keyring in Windows Terminal (not a Jarvis
-  terminal): <command>". Jarvis never prompts, never unlocks, never downgrades.
+  terminal): <command>" (the `--replace --unlock` recipe in the setup steps;
+  the HUD shows a hint up to 600 characters and a 409 up to 500). Jarvis
+  never prompts, never unlocks, never downgrades.
 - **unavailable** (no Secret Service, no usable bus) launches `basic`, and
   `/status` and the HUD say "Unprotected (basic store)" with the install hint.
 - **Sticky**: a keyring launch records it twice *before* Chrome starts: a
@@ -2303,10 +2305,21 @@ and sign in again so everything lands as `v11`.
    then every named profile is refused with this command (the keyring is
    started locked by the Browser's own probe; see *`unavailable` effectively
    never happens*), and Private still opens:
-   `read -rsp 'Keyring password: ' KP; echo; printf '%s' "$KP" | gnome-keyring-daemon --unlock >/dev/null; unset KP`.
-   The first run creates the keyring with that password. Use a new password,
-   not the Google one. If a running daemon ignores `--unlock`, use
-   `--replace --unlock` then `gnome-keyring-daemon --start --components=secrets`.
+   `read -rsp 'Keyring password: ' KP; echo; printf '%s' "$KP" | setsid -f gnome-keyring-daemon --replace --unlock --foreground >/dev/null 2>&1; unset KP; sleep 2; gnome-keyring-daemon --start --components=secrets >/dev/null 2>&1 </dev/null`.
+   Why this and not a plain `gnome-keyring-daemon --unlock`: WSLg mounts its
+   own `/run/user/1000` over systemd's, so a terminal (and the session
+   dbus-daemon) sees a runtime dir with no `keyring/control`; a plain unlock
+   cannot reach the daemon that owns `org.freedesktop.secrets` and quietly
+   starts a stray second one, leaving the Secret Service Chrome and Jarvis use
+   locked. The recipe replaces the running daemon with one unlocked from
+   stdin, detached with `setsid` (a daemon started from a short-lived session
+   dies with it), then re-registers the secrets component. The password
+   stays out of argv and history (`read -rsp`, stdin only). The first run
+   creates the keyring with that password. Use a new password, not the Google
+   one. (Verified live 2026-10-20.)
+   The owner's machine also has a logon task that does this unlock
+   automatically (a DPAPI-stored password; scripts in `%LOCALAPPDATA%\jarvis`).
+   That is machine-local setup, not part of this repo.
 3. Check: `busctl --user get-property org.freedesktop.secrets
    /org/freedesktop/secrets/aliases/default org.freedesktop.Secret.Collection Locked`
    prints `b false`; the same with `Label` prints `s "Login"`;
