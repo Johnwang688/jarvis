@@ -58,6 +58,14 @@ describe("Manage panel",()=>{
     expect(line()!.textContent).toBe(UNLOCK);expect(line()!.className).toBe("err");
     expect(host.textContent).not.toContain("passwords use Chrome’s basic store");
   });
+  it("shows the whole unlock command, which is longer than the old 400-character cap",async()=>{
+    const full="Chrome started without the keyring (it wrote with the basic store), so it was closed; this profile's passwords stay in the keyring. Check that it is unlocked, in Windows Terminal (not a Jarvis terminal): read -rsp 'Keyring password: ' KP; echo; printf '%s' \"$KP\" | setsid -f gnome-keyring-daemon --replace --unlock --foreground >/dev/null 2>&1; unset KP; sleep 2; gnome-keyring-daemon --start --components=secrets >/dev/null 2>&1 </dev/null";
+    expect(full.length).toBeGreaterThan(400);expect(full.length).toBeLessThanOrEqual(600);
+    mocks.get.mockResolvedValue({sync:sync({keyring:"locked",next_launch:"refused",hint:full})});
+    await act(async()=>root.render(createElement(BrowserProfile,{pane:1,control,selected:main.id,see:false,blocked:false})));
+    await act(async()=>manage().click());
+    expect(line()!.textContent).toBe(full);
+  });
   it("treats a malformed status as unknown",async()=>{
     mocks.get.mockResolvedValue({sync:{password_store:"basic",source:"launch_argument"}});
     await act(async()=>root.render(createElement(BrowserProfile,{pane:1,control,selected:main.id,see:false,blocked:false})));

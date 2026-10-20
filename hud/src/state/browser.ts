@@ -15,7 +15,7 @@ export interface BrowserProfile { id:string; label:string; created:string; passw
 export interface RemoteRow { tab_id:string; profile:string; ctx:string|null; url?:string; title?:string; opener?:string|null; loaded?:boolean; auth_pending?:boolean; error?:string }
 export interface BrowserRuntime { busy?:boolean; error?:string; viewed?:{at:string;refused:boolean} }
 const tabKey = (pane:PaneNo,id:string) => `${pane}:${id}`;
-const message = (e:unknown) => cleanTitle(e instanceof Error ? e.message : "The Browser could not apply that change.", 300);
+const message = (e:unknown) => cleanTitle(e instanceof Error ? e.message : "The Browser could not apply that change.", 500);
 const frame = () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
 export function addressTarget(raw:string, ports:DaemonPorts, privatePane:boolean, chosen?:"direct"|"remote") {
   const text=raw.trim();

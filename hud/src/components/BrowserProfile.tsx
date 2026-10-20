@@ -8,7 +8,7 @@ import type { BrowserControl, BrowserProfile as Profile } from "../state/browser
 /** `/status` → `browser.sync` (password_store.py): the store each running Chrome was observed to use, never a secret. */
 export interface ProfileSync { store:string|null; sticky:boolean; next_launch:string; unprotected:boolean; hint:string|null }
 export interface PasswordSync { password_store:string|null; requested:string; keyring:string; next_launch:string; unprotected:boolean; hint:string|null; profiles?:Record<string,ProfileSync> }
-const text=(v:unknown)=>typeof v==="string"?v.slice(0,400):null;
+const text=(v:unknown)=>typeof v==="string"?v.slice(0,600):null;
 const profileOf=(raw:unknown):ProfileSync|null=>{
   const p=raw as Record<string,unknown>|null;
   if(!p||typeof p!=="object"||typeof p.next_launch!=="string"||typeof p.unprotected!=="boolean"||typeof p.sticky!=="boolean")return null;
@@ -67,7 +67,7 @@ export function BrowserProfile(props:{pane:PaneNo;control:BrowserControl;selecte
   const passwords=passwordLine(sync,row);
   const run=async(job:()=>Promise<unknown>)=>{
     if(latest.current.blocked||pending)return;setPending(true);setError("");
-    try {await job();}catch(e){setError(cleanTitle(e instanceof Error?e.message:"That profile could not be changed.",300));}
+    try {await job();}catch(e){setError(cleanTitle(e instanceof Error?e.message:"That profile could not be changed.",500));}
     finally{setPending(false);}
   };
   const disabled=props.blocked||pending||!props.control.online;
