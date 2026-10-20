@@ -3245,14 +3245,15 @@ def main():
             # B-DIRECT-CAPTURE: real Chromium tab capture of a Direct frame
             # (its own full-Chromium launch; not M6, which is the owner's probe).
             from tests.face.hud_v2_direct_capture_check import direct_capture_checks
-            direct_mock = MockDaemon(0).start()
-            try:
-                direct_capture_checks(pw, direct_mock, f"http://127.0.0.1:{direct_mock.port}", check, until,
-                                      guard, FAKE_RECOGNIZER)
-            except Exception as exc:
-                check("DC scenario completes", False, str(exc)[:500])
-            finally:
-                direct_mock.stop()
+            for dsf in (1, 1.5):
+                direct_mock = MockDaemon(0).start()
+                try:
+                    direct_capture_checks(pw, direct_mock, f"http://127.0.0.1:{direct_mock.port}", check, until,
+                                          guard, FAKE_RECOGNIZER, dsf)
+                except Exception as exc:
+                    check(f"DC@{dsf}x scenario completes", False, str(exc)[:500])
+                finally:
+                    direct_mock.stop()
 
             # The Browser pane's ports and "keep its own origin" (WP-E), and the rename (BR-3a): a
             # context and a mock of their own, the dev server and the API

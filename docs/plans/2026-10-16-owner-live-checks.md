@@ -118,12 +118,12 @@ four-colour test pattern that the HUD draws itself, never a web page. It records
 
 1. Open Settings → Browser. Expect "Capture Direct pages" unticked and greyed out, with "Not tested since Jarvis
    started. Turning this on needs a passing test."
-2. Press **Test Direct capture**. Expect a small four-colour pattern to appear, then Chrome's "share this tab"
-   prompt. Accept it.
+2. Press **Test Direct capture**. Expect a large four-colour pattern (up to 1120 px wide) to appear, then
+   Chrome's "share this tab" prompt. Accept it.
    - **Expect:** "Passed: Chrome shared this tab and cropped one frame to the test pattern." The pattern goes away,
      and Chrome's "sharing this tab" indicator disappears at once, within about a second.
-   - **If it says Failed:** note the words. "not the test pattern's size" is the likely one if Windows display
-     scaling is not 100%. Tell the lead.
+   - **If it says Failed:** note the words and tell the lead. The report file records the frame size, the scale and
+     the colours Chrome actually delivered.
    - **If you cancel the prompt:** expect "Cancelled: the share prompt was dismissed." Press the test again and
      accept.
 3. Tell the lead. The lead reads `~/.local/share/jarvis/direct-capture-probe.json`. It holds the prompt outcome,

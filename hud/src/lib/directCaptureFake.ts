@@ -74,7 +74,7 @@ export function fakeEnv(o: FakeOptions = {}): Fake {
         return f;
       }
     },
-    devicePixelRatio: o.dpr ?? 2, innerWidth: o.innerWidth ?? 1600, innerHeight: o.innerHeight ?? 1000,
+    devicePixelRatio: o.dpr ?? 2, innerWidth: o.innerWidth ?? 1500, innerHeight: o.innerHeight ?? 1000,
     now: (() => { let n = 0; return () => (n += 5); })(),
     trusted: () => o.trusted ?? true,
     sample: () => { calls.push("sample"); return o.sample === undefined ? sample : o.sample; },

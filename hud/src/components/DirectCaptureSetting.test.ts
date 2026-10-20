@@ -20,9 +20,9 @@ beforeEach(async () => {
   vi.mocked(browserApi.write).mockReset().mockImplementation(async (path: string, body: unknown) => {
     if (path === "/direct-capture/probe") {
       posted.push(body);
-      const facts = body as { prompt: string; samples: { got: number[]; want: number[] }[] };
+      const facts = body as { prompt: string; samples: { got: number[] }[] };
       const ok = facts.prompt === "accepted" && facts.samples.length === 9
-        && facts.samples.every(s => s.want.every((w, i) => Math.abs(w - s.got[i]) <= 24));
+        && facts.samples.every((s, i) => SAMPLE_POINTS[i][2].every((w, j) => Math.abs(w - s.got[j]) <= 24));
       probe = { passed: ok, reason: ok ? "" : facts.prompt === "cancelled" ? "cancelled" : "wrong_pixels", at: "2026-10-19T00:00:00Z" };
       return { ...(probe as object), saved: true } as never;
     }
@@ -80,9 +80,11 @@ describe("Direct capture switch and owner probe", () => {
     expect(posted).toHaveLength(1);
     const facts = posted[0] as Record<string, unknown>;
     expect(facts).toMatchObject({ display_mode: "standalone", prompt: "accepted", crop: { applied: true, error: "" },
-      frame: { width: 480, height: 300 }, expected: { width: 480, height: 300 }, tracks_live_after: 0, dpr: 1.5 });
+      frame: { width: 480, height: 300 }, viewport: { width: 1500, height: 1000 }, tracks_live_after: 0, dpr: 1.5 });
     expect((facts.samples as unknown[]).length).toBe(9);
-    expect((facts.samples as { want: number[] }[])[0].want).toEqual([...PATTERN.tl]);
+    expect((facts.samples as { got: number[] }[])[0].got).toEqual([...PATTERN.tl, 255]);
+    expect(Object.keys((facts.samples as object[])[0]).sort()).toEqual(["got", "x", "y"]);
+    expect(facts).not.toHaveProperty("expected");
     expect(JSON.stringify(facts)).not.toMatch(/data_b64|base64/);
     expect(f.tracks.every(t => t.readyState === "ended")).toBe(true);
     expect(f.calls).not.toContain("encode");

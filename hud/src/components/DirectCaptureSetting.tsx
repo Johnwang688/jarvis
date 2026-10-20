@@ -9,7 +9,7 @@ import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } fr
 import { browserSettings } from "../state/browserSettings";
 import { browserEnv, type CaptureEnv } from "../lib/directCapture";
 import {
-  PROBE_APP_ONLY, PROBE_HEIGHT, PROBE_REASONS, PROBE_WIDTH, chromeMajor, displayMode, patternHtml, runProbe,
+  PROBE_APP_ONLY, PROBE_REASONS, chromeMajor, displayMode, patternHtml, probeSize, runProbe,
 } from "../lib/directProbe";
 import { noPointerFocus } from "../lib/talkkey";
 
@@ -22,6 +22,8 @@ export function DirectCaptureSetting(props: { blocked: boolean; env?: CaptureEnv
   const [busy, setBusy] = useState(false), [probing, setProbing] = useState(false);
   const [note, setNote] = useState(""), [error, setError] = useState("");
   const pattern = useRef<HTMLIFrameElement>(null), loaded = useRef<(() => void) | null>(null);
+  const block = useRef<HTMLDivElement>(null);
+  const [size, setSize] = useState(probeSize(0));
   const mounted = useRef(true), epoch = useRef(0);
   const now = useRef(props); now.current = props;
   const env = () => now.current.env ?? browserEnv();
@@ -37,13 +39,17 @@ export function DirectCaptureSetting(props: { blocked: boolean; env?: CaptureEnv
     if (mode !== "standalone") { setNote(PROBE_APP_ONLY); return; }
     const token = ++epoch.current;
     const live = () => mounted.current && token === epoch.current && !now.current.blocked;
-    setNote(""); setProbing(true);
+    setNote(""); setSize(probeSize(block.current?.clientWidth ?? 0)); setProbing(true);
     try {
       const ready = new Promise<void>(resolve => { loaded.current = resolve; });
       await Promise.race([ready, new Promise(r => setTimeout(r, 2000))]);
       await new Promise<void>(r => requestAnimationFrame(() => requestAnimationFrame(() => r())));
       const frame = pattern.current;
       if (!frame || !live()) return;
+      // Scrolling Settings moves no focus; the pattern must be wholly on screen.
+      frame.scrollIntoView?.({ block: "nearest", inline: "nearest" });
+      await new Promise<void>(r => requestAnimationFrame(() => requestAnimationFrame(() => r())));
+      if (!live()) return;
       const facts = await runProbe(frame, e, mode, chromeMajor(navigator as Navigator & { userAgentData?: never }), live);
       if (!live()) return;
       const out = await browserSettings.reportProbe(facts);
@@ -56,7 +62,7 @@ export function DirectCaptureSetting(props: { blocked: boolean; env?: CaptureEnv
     }
   };
   const locked = direct !== true && !probe?.passed;
-  return <div className="block direct-capture-setting" data-testid="direct-capture-setting">
+  return <div ref={block} className="block direct-capture-setting" data-testid="direct-capture-setting">
     <label className="browser-auto-setting">
       <input type="checkbox" data-testid="browser-direct-capture" checked={direct === true}
         disabled={props.blocked || busy || probing || direct === null || locked} onMouseDown={noPointerFocus}
@@ -80,7 +86,7 @@ export function DirectCaptureSetting(props: { blocked: boolean; env?: CaptureEnv
     {error ? <p className="err" role="status">{error}</p> : null}
     {probing ? <iframe ref={pattern} className="direct-probe-pattern" data-testid="direct-probe-pattern"
       title="Direct capture test pattern" sandbox="" tabIndex={-1} srcDoc={patternHtml()}
-      style={{ width: PROBE_WIDTH, height: PROBE_HEIGHT, border: 0, display: "block", margin: "8px 0" }}
+      style={{ width: size.width, height: size.height, border: 0, display: "block", margin: "8px 0" }}
       onLoad={() => loaded.current?.()} /> : null}
   </div>;
 }

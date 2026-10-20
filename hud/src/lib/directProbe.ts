@@ -4,11 +4,22 @@
 // (`display-mode: standalone`). It takes one capture cropped to a HUD-made
 // test pattern, a sandboxed srcdoc frame with no scripts, and reports facts
 // only. Its pixel samples are the pattern's own known colours, never page
-// content. The daemon re-checks every field and decides pass or fail itself
-// (jarvis/v2/browser/direct_probe.py).
-import { DirectRefused, errorName, expectedSize, frameCovered, grabCroppedFrame, newFacts, type CaptureEnv } from "./directCapture";
+// content. The daemon re-checks every field, owns the pattern's colours, the
+// sample positions and the size rule, and decides pass or fail itself
+// (jarvis/v2/browser/direct_probe.py). The HUD sends only what it measured.
+import { DirectRefused, errorName, frameCovered, grabCroppedFrame, newFacts, type CaptureEnv } from "./directCapture";
 
-export const PROBE_WIDTH = 320, PROBE_HEIGHT = 200;
+/**
+ * The pattern is as wide as Settings allows, from 320 up to 1120 CSS px, so a
+ * large capture (one Chrome may downscale) is measured as well as a small one.
+ * 7:5 is not a window's usual shape, so a crop can't be mistaken for the whole
+ * window at an accepted scale.
+ */
+export const PROBE_MIN = 320, PROBE_MAX = 1120, PROBE_ASPECT = 1.4;
+export function probeSize(available: number) {
+  const width = Math.max(PROBE_MIN, Math.min(PROBE_MAX, Math.floor(available || PROBE_MIN)));
+  return { width, height: Math.round(width / PROBE_ASPECT) };
+}
 export const PATTERN = {
   tl: [220, 40, 40], tr: [40, 180, 60], bl: [40, 80, 220], br: [240, 200, 40], centre: [250, 250, 250],
 } as const;
@@ -49,9 +60,9 @@ export interface ProbeFacts {
   prompt: string; error: string;
   track: { display_surface: string; width: number; height: number; frame_rate: number; cursor: string } | null;
   crop: { applied: boolean; error: string };
-  frame: { width: number; height: number } | null; expected: { width: number; height: number };
+  frame: { width: number; height: number } | null; viewport: { width: number; height: number };
   rect: { width: number; height: number }; dpr: number;
-  samples: { x: number; y: number; want: number[]; got: number[] }[];
+  samples: { x: number; y: number; got: number[] }[];
   tracks_live_after: number; timing_ms: Record<string, number>;
 }
 
@@ -68,7 +79,7 @@ export async function runProbe(target: HTMLIFrameElement, env: CaptureEnv, mode:
     apis: { get_display_media: typeof env.mediaDevices?.getDisplayMedia === "function",
       crop_target: !!env.CropTarget, image_capture: !!env.ImageCapture },
     prompt: "not_shown", error: "", track: null, crop: { applied: false, error: "" },
-    frame: null, expected: expectedSize(rect, dpr),
+    frame: null, viewport: { width: Math.round(env.innerWidth), height: Math.round(env.innerHeight) },
     rect: { width: Math.round(rect.width * 1000) / 1000, height: Math.round(rect.height * 1000) / 1000 }, dpr,
     samples: [], tracks_live_after: 0, timing_ms: {},
   };
@@ -80,7 +91,8 @@ export async function runProbe(target: HTMLIFrameElement, env: CaptureEnv, mode:
   };
   if (frameCovered(target, [], env)) return finish();
   let frame;
-  try { frame = await grabCroppedFrame(target, env, live, grab); }
+  const clear = () => { const c = frameCovered(target, [], env); if (c) throw new DirectRefused(c); };
+  try { frame = await grabCroppedFrame(target, env, live, grab, { beforeGrab: clear, atGrab: clear }); }
   catch (e) {
     if (!(e instanceof DirectRefused) && !grab.error) grab.error = errorName(e);
     return finish();
@@ -90,7 +102,7 @@ export async function runProbe(target: HTMLIFrameElement, env: CaptureEnv, mode:
     const points = SAMPLE_POINTS.map(([fx, fy]) => [Math.min(frame.width - 1, Math.floor(frame.width * fx)),
       Math.min(frame.height - 1, Math.floor(frame.height * fy))] as const);
     const got = env.pixels(frame, points);
-    facts.samples = SAMPLE_POINTS.map(([, , want], i) => ({ x: points[i][0], y: points[i][1], want: [...want],
+    facts.samples = SAMPLE_POINTS.map((_, i) => ({ x: points[i][0], y: points[i][1],
       got: (got[i] ?? [0, 0, 0, 0]).slice(0, 4).map(v => Math.max(0, Math.min(255, Math.round(v)))) }));
   } finally { frame.close(); }
   return finish();
@@ -105,6 +117,8 @@ export const PROBE_REASONS: Record<string, string> = {
   prompt_error: "Failed: Chrome refused the share prompt.",
   not_this_tab: "Failed: Chrome shared something other than this tab.",
   not_cropped: "Failed: Chrome did not crop the capture.",
-  wrong_size: "Failed: the cropped frame was not the test pattern's size.",
+  wrong_size: "Failed: the cropped frame was not the test pattern's shape at any accepted scale.",
+  ambiguous: "Failed: the test pattern has the window's shape here, so the crop cannot be told apart. Resize the window and test again.",
+  wrong_rect: "Failed: the test pattern was not laid out at its own shape.",
   wrong_pixels: "Failed: the cropped frame's colours did not match the test pattern.",
 };

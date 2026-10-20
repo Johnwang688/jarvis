@@ -33,14 +33,18 @@ STANDALONE = """() => { const real = window.matchMedia.bind(window);
   window.matchMedia = q => q === '(display-mode: standalone)' ? {matches: true, media: q} : real(q); }"""
 
 
-def direct_capture_checks(pw, mock, base, check, until, guard, init_script):
+def direct_capture_checks(pw, mock, base, check, until, guard, init_script, dsf=1):
+    """`dsf` 1.5 is the review's case (PR #276 MED-1): Chromium then delivers
+    CSS-pixel frames, which the size rule must accept as a uniform scale."""
     from PIL import Image
-    print("\nB-DIRECT-CAPTURE Direct capture: owner switch, probe and one cropped frame (real Chromium, not M6)")
+    tag = "DC" if dsf == 1 else f"DC@{dsf}x"
+    def check(name, ok, detail="", _check=check): _check(name.replace("DC", tag, 1), ok, detail)
+    print(f"\nB-DIRECT-CAPTURE Direct capture at device scale {dsf}: owner switch, probe and one cropped frame (real Chromium, not M6)")
     try:
         browser = pw.chromium.launch(headless=True, channel="chromium", args=["--auto-accept-this-tab-capture"])
     except Exception as exc:
         check("DC full Chromium launches for real tab capture", False, str(exc)[:300]); return
-    ctx = browser.new_context(viewport={"width": 1600, "height": 1000}, device_scale_factor=1)
+    ctx = browser.new_context(viewport={"width": 1600, "height": 1000}, device_scale_factor=dsf)
     guard(ctx); ctx.add_init_script(init_script); ctx.add_init_script(WRAP)
     page = ctx.new_page(); page.set_default_timeout(6000); errors = []
     page.on("pageerror", lambda e: errors.append(str(e)))
@@ -99,6 +103,8 @@ def direct_capture_checks(pw, mock, base, check, until, guard, init_script):
               or "Failed" in page.locator('[data-testid="direct-probe-note"]').inner_text(), timeout=4)
         status = mock.browser_direct_probe.status() or {}
         note = page.locator('[data-testid="direct-probe-setting"], [data-testid="direct-capture-setting"]').inner_text()
+        pattern_ok = report.exists() and json.loads(report.read_text())["facts"]["rect"]["width"] > 320
+        check("DC the probe's pattern is as wide as Settings allows", pattern_ok)
         check("DC the real Chromium probe of the HUD's test pattern passes the daemon's own verdict", status.get("passed") is True,
               f"{status} calls={calls()} facts={json.dumps(json.loads(report.read_text())['facts']) if report.exists() else None}".replace("\n", " "))
         check("DC the probe asked once and stopped every track", calls() == 1 and page.evaluate(ENDED))
@@ -125,8 +131,9 @@ def direct_capture_checks(pw, mock, base, check, until, guard, init_script):
         files = page.evaluate("window.__hud.state().chats[1].files")
         check("DC Send stages the canonical pair", [f["name"] for f in files] == ["page.png", "page text"], str([f["name"] for f in files]))
         image = Image.open(io.BytesIO(base64.b64decode(files[0]["data_b64"])))
-        check("DC the staged picture is the frame's own size", abs(image.width - round(rect["width"])) <= 2
-              and abs(image.height - round(rect["height"])) <= 2, f"{image.size} vs {rect}")
+        scale = image.width / rect["width"]
+        check("DC the staged picture is the frame's own shape at a scale from 1 to the DPR",
+              1 - 0.01 <= scale <= dsf + 0.01 and abs(image.height - rect["height"] * scale) <= 2, f"{image.size} vs {rect}")
         colours = {image.getpixel((x, y)) for x in range(0, image.width, 37) for y in range(0, image.height, 23)}
         check("DC the staged picture is not blank", len(colours) > 1)
         check("DC staging sent no chat turn", not any(p.endswith("/send") for _, p, _ in mock.calls))
@@ -171,12 +178,12 @@ def main():
     from playwright.sync_api import sync_playwright
     from tests.face import hud_v2_check as v2
     from tests.face.hud_v2_mock import MockDaemon
-    mock = MockDaemon(0).start()
-    try:
-        with sync_playwright() as pw:
-            try: direct_capture_checks(pw, mock, f"http://127.0.0.1:{mock.port}", v2.check, v2.until, v2.guard, v2.FAKE_RECOGNIZER)
-            except Exception as exc: v2.check("DC scenario completes", False, str(exc)[:500])
-    finally: mock.stop()
+    with sync_playwright() as pw:
+        for dsf in (1, 1.5):
+            mock = MockDaemon(0).start()
+            try: direct_capture_checks(pw, mock, f"http://127.0.0.1:{mock.port}", v2.check, v2.until, v2.guard, v2.FAKE_RECOGNIZER, dsf)
+            except Exception as exc: v2.check(f"DC@{dsf}x scenario completes", False, str(exc)[:500])
+            finally: mock.stop()
     print(f"{v2.CHECKS} direct capture checks, {len(v2.FAILURES)} failures")
     return bool(v2.FAILURES)
 

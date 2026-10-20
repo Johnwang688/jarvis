@@ -2,8 +2,12 @@
 // B-DIRECT-CAPTURE: fakes only. A synthetic stream is not M6 acceptance.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  DISPLAY_OPTIONS, DirectRefused, blank, captureDirect, checkFrame, expectedSize, frameCovered, grabCroppedFrame,
+  DISPLAY_OPTIONS, DirectRefused, GRID_MAX, blank, captureDirect, checkFrame, frameCovered, grabCroppedFrame, scaleOf,
 } from "./directCapture";
+import { createElement } from "react";
+import { act } from "react";
+import { createRoot } from "react-dom/client";
+import { DevServerPrompts } from "../components/DevServerPrompt";
 import { fakeEnv, place } from "./directCaptureFake";
 
 let host: HTMLDivElement, frame: HTMLIFrameElement, shield: HTMLDivElement, hit: Element | null;
@@ -109,7 +113,7 @@ describe("Direct capture: the pixels are checked before use", () => {
   it("a frame of the wrong size, the whole tab, or blank is discarded with its tracks stopped", async () => {
     const cases = [
       [{ frame: { width: 790, height: 500 } }, "size"],
-      [{ frame: { width: 3200, height: 2000 } }, "not_cropped"],
+      [{ frame: { width: 3000, height: 2000 } }, "not_cropped"],
       [{ sample: new Uint8ClampedArray(16 * 16 * 4).fill(255) }, "blank"],
       [{ sample: new Uint8ClampedArray(16 * 16 * 4) }, "blank"],
       [{ sample: null }, "blank"],
@@ -129,13 +133,27 @@ describe("Direct capture: the pixels are checked before use", () => {
     frame.getBoundingClientRect = () => box(f.tracks.length && f.tracks.every(t => t.readyState === "ended") ? 290 : 250) as DOMRect;
     expect((await captureDirect(frame, f.env, () => true)).height).toBe(500);
   });
-  it("two device pixels of rounding are allowed, three are not", () => {
-    const rect = { width: 400.4, height: 250.3 }, vp = { width: 1600, height: 1000 };
-    expect(expectedSize(rect, 1.5)).toEqual({ width: 601, height: 375 });
-    expect(checkFrame({ width: 603, height: 373 }, rect, 1.5, vp)).toBe("");
-    expect(checkFrame({ width: 604, height: 375 }, rect, 1.5, vp)).toBe("size");
-    expect(checkFrame({ width: 2400, height: 1500 }, rect, 1.5, vp)).toBe("not_cropped");
-    expect(checkFrame({ width: 0, height: 0 }, { width: 0, height: 0 }, 1, vp)).toBe("size");
+  it("accepts the pane's shape at one uniform scale from CSS pixels to device pixels", () => {
+    const rect = { width: 400.4, height: 250.3 }, vp = { width: 1500, height: 1000 };
+    // Device pixels, and the CSS-pixel frame Chrome delivered under an emulated 1.5 DPR.
+    expect(checkFrame({ width: 601, height: 375 }, rect, 1.5, vp)).toEqual({ verdict: "", scale: 601 / 400.4 });
+    expect(checkFrame({ width: 400, height: 250 }, rect, 1.5, vp).verdict).toBe("");
+    // A large pane at 4K, downscaled by Chrome between the two.
+    expect(checkFrame({ width: 2560, height: 1600 }, { width: 1600, height: 1000 }, 2, { width: 1920, height: 1080 }).verdict).toBe("");
+    // The short edge must agree within about a pixel.
+    expect(checkFrame({ width: 601, height: 378 }, rect, 1.5, vp).verdict).toBe("size");
+    // Below 0.5, or above the DPR, is not this pane.
+    expect(checkFrame({ width: 160, height: 100 }, rect, 1.5, vp).verdict).toBe("size");
+    expect(checkFrame({ width: 801, height: 501 }, rect, 1.5, vp).verdict).toBe("size");
+    expect(checkFrame({ width: 0, height: 0 }, { width: 0, height: 0 }, 1, vp).verdict).toBe("size");
+  });
+  it("the whole window at any accepted scale is not a crop, and a pane of the window's shape is ambiguous", () => {
+    const rect = { width: 400, height: 250 }, vp = { width: 1600, height: 1000 };
+    for (const f of [{ width: 2400, height: 1500 }, { width: 1600, height: 1000 }, { width: 800, height: 500 }])
+      expect(checkFrame(f, rect, 1.5, vp).verdict).toBe("not_cropped");
+    // A 1400×875 pane in a 1600×1000 window: 1400×875 is the pane at 1 and the window at 0.875.
+    expect(checkFrame({ width: 1400, height: 875 }, { width: 1400, height: 875 }, 2, vp).verdict).toBe("ambiguous");
+    expect(scaleOf({ width: 1400, height: 875 }, vp, 2)).toBe(0.875);
   });
   it("blank means one colour throughout or fully transparent", () => {
     const px = new Uint8ClampedArray(64).fill(200);
@@ -160,6 +178,67 @@ describe("Direct capture: privacy and focus", () => {
       expect((await refused(captureDirect(frame, f.env, () => true))).reason).toBe("covered");
       expect(f.calls).toEqual([]);
     }
+  });
+  it("the real dev-server prompt over the frame refuses, even between hit-test points", async () => {
+    const stub = globalThis as unknown as Record<string, unknown>;
+    const saved = stub.ResizeObserver;
+    stub.ResizeObserver = class { observe() {} disconnect() {} };
+    const mount = document.createElement("div"); document.body.append(mount);
+    const root = createRoot(mount);
+    try {
+      (globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true;
+      await act(async () => root.render(createElement(DevServerPrompts, {
+        rows: [{ id: "ds_12345678", url: "http://localhost:5173/", source: { kind: "terminal", id: "term1" },
+          at: 0, phase: "prompt", token: 1, renewedAt: 0 }] as never,
+        hidden: false, layoutKey: "k", zoom: 100, label: () => "Terminal",
+        targets: [{ pane: 1, slot: 1, label: "Chat", disabled: false }],
+        onOpen: () => {}, onPlace: () => {}, onDismiss: () => {},
+      })));
+      const card = mount.querySelector('[data-testid="devserver-prompt"]')!;
+      expect(card).not.toBeNull();
+      expect(card.textContent).toContain("localhost:5173");
+      // pointer-events: none on its layer: the hit test sees only the frame's shield.
+      const layer = mount.querySelector(".devserver-prompts")!;
+      place(layer, { left: 0, top: 0, width: 0, height: 0 });
+      place(card, { left: 121, top: 131, width: 12, height: 9 });
+      const f = fakeEnv();
+      expect((await refused(captureDirect(frame, f.env, () => true))).reason).toBe("covered");
+      expect(f.calls).toEqual([]);
+      // An empty layer (no prompt) covers nothing.
+      card.remove();
+      expect(frameCovered(frame, [shield], { document, innerWidth: 1600, innerHeight: 1000 })).toBe("");
+    } finally {
+      await act(async () => root.unmount()); mount.remove(); stub.ResizeObserver = saved;
+    }
+  });
+  it("terminal toasts over the frame refuse", () => {
+    const toasts = document.createElement("div"); toasts.className = "termtoasts"; document.body.append(toasts);
+    place(toasts, { left: 480, top: 330, width: 15, height: 15 });
+    expect(frameCovered(frame, [shield], { document, innerWidth: 1600, innerHeight: 1000 })).toBe("covered");
+  });
+  it("hit-tests every 48 CSS px or closer, capped near 2000 points", () => {
+    const points: [number, number][] = [];
+    (document as unknown as { elementFromPoint: (x: number, y: number) => Element }).elementFromPoint = (x, y) => { points.push([x, y]); return shield; };
+    expect(frameCovered(frame, [shield], { document, innerWidth: 1600, innerHeight: 1000 })).toBe("");
+    const xs = [...new Set(points.map(p => p[0]))].sort((a, b) => a - b);
+    expect(Math.max(...xs.slice(1).map((x, i) => x - xs[i]))).toBeLessThanOrEqual(48);
+    points.length = 0;
+    place(frame, { left: 0, top: 0, width: 7680, height: 4320 });
+    frameCovered(frame, [shield], { document, innerWidth: 7680, innerHeight: 4320 });
+    expect(points.length).toBeLessThanOrEqual(GRID_MAX); expect(points.length).toBeGreaterThan(1000);
+  });
+  it("an overlay that shows only between the grabs is caught by the check before each grab", async () => {
+    const f = fakeEnv({ grabFails: 1 });
+    const card = document.createElement("div"); card.setAttribute("role", "tooltip");
+    const grab = f.env.ImageCapture!.prototype.grabFrame;
+    let n = 0;
+    f.env.ImageCapture!.prototype.grabFrame = async function (this: unknown) {
+      if (++n === 1) { document.body.append(card); place(card, { left: 200, top: 200, width: 30, height: 30 }); }
+      return grab.call(this);
+    };
+    const e = await refused(captureDirect(frame, f.env, () => true));
+    expect(e.reason).toBe("covered"); expect(allEnded(f)).toBe(true);
+    card.remove();
   });
   it("an overlay elsewhere or a hidden options dialog does not refuse", () => {
     const menu = document.createElement("div"); menu.setAttribute("role", "dialog"); menu.hidden = true;

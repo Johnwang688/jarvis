@@ -10,8 +10,9 @@ string; URLs travel only in JSON bodies, and nothing a route answers with a
 refusal ever contains one.
 
     GET    /browser                          state: running, profiles, tabs, settings
-    GET    /browser/settings                 {lan, local_servers, auto_open}
-    PATCH  /browser/settings                 {lan?, local_servers?, auto_open?}  (browser.json, protected)
+    GET    /browser/settings                 {lan, local_servers, auto_open, sound, agents_may_drive, direct_capture}
+    PATCH  /browser/settings                 any non-empty subset  (browser.json, protected);
+                                             direct_capture true -> 409 until the owner's probe passed
     GET    /browser/tabs                     [{tab_id, profile, ctx, url, title}]
     POST   /browser/tabs                     {profile?, ctx?, url?} -> 201 {tab_id, ...}
     DELETE /browser/tabs/<id>
@@ -24,6 +25,13 @@ refusal ever contains one.
     DELETE /browser/profiles/<id>            closes and deletes only this profile
     POST   /browser/profiles/<id>/signin     {} -> 201 exact owner settings entry
     DELETE /browser/contexts/<ctx>           closes a Private context and its data
+
+B-DIRECT-CAPTURE's (captures.py, direct_probe.py); neither ever receives pixels:
+
+    POST   /browser/direct-capture           {window, pane, local_tab, view} -> URL-only capture reference
+                                             (409 while direct_capture is off, a card waits, or the binding moved)
+    GET    /browser/direct-capture/probe     {probe: {passed, reason, at} | null}  (this daemon run only)
+    POST   /browser/direct-capture/probe     the probe's facts -> {passed, reason, at, saved}
 
 BR-1b's (stream.py, files.py):
 

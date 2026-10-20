@@ -39,8 +39,11 @@ cannot attach a Direct still.
 2. **Coverage, before the prompt.** The tab must be drawn and uncovered, with no approval card pending (`blocked`).
    Options close and the pane waits for a fresh uncovered receipt, the same path Remote uses. Then the HUD waits two
    animation frames and checks the frame directly. Its rect is non-empty and wholly inside the viewport. Every point
-   on a 5×5 grid hit-tests to the frame or its own transparent shield. No dialog, menu, listbox, tooltip, card or
-   prompt element (`role` or known HUD selectors) intersects it.
+   of a grid at most 48 CSS px apart (capped near 2000 points) hit-tests to the frame or its own transparent shield.
+   No overlay's own rect intersects it. Overlays with `pointer-events: none` defeat hit testing, so each one's rect
+   is tested directly. The overlays are dialogs, menus, listboxes, tooltips, the approval card, the dev-server
+   prompt layer and terminal toasts. This was revised after review of PR #276, MED-2: the dev-server prompt's test
+   id was wrong and a 5×5 grid could miss it.
 3. **Capture.** First `CropTarget.fromElement(iframe)`. Then `getDisplayMedia({video: {displaySurface: "browser"},
    audio: false, preferCurrentTab: true, selfBrowserSurface: "include", surfaceSwitching: "exclude",
    monitorTypeSurfaces: "exclude"})`, then `track.cropTo(target)`. Then one `ImageCapture.grabFrame()`. It gets at most 3 tries 150 ms apart, each bounded to 3 s, because a
@@ -50,12 +53,16 @@ cannot attach a Direct still.
    unmount during any await. A stream that arrives after the gesture went stale is stopped as soon as it resolves.
    The bitmap is closed after use.
 5. **Pixel check, before use.**
-   - The frame's size equals the iframe's on-screen size × `devicePixelRatio`, within 2 px.
-   - It is not the whole viewport's size, which would mean an uncropped tab.
+   - **Size rule (revised after review MED-1).** The frame is the iframe's on-screen shape at one uniform scale *s*,
+     with 0.5 ≤ *s* ≤ `devicePixelRatio`. The long edge sets *s*, within 2 px of rounding, and the short edge must
+     agree within about 1 px. Chrome delivered CSS pixels under an emulated 1.5 DPR, and may downscale a large pane
+     at 4K. The first rule, rect × DPR only, would have failed the owner's 4K display at 150%.
+   - It is not the whole window at any accepted scale, which would mean an uncropped tab. A frame that matches both
+     the pane and the window is refused as ambiguous.
    - `displaySurface` is `browser` when Chrome reports it.
    - The frame is not blank: a sampled 64×64 grid is not uniform and not fully transparent. A page that really is one colour is refused too.
-   - Coverage is checked again at the grab. Coverage and the rect are both read at that moment, before the tracks
-     stop, because Chrome's sharing bar can resize the page while it shares.
+   - Coverage is checked before each grab and again at it, and both must be clear. Coverage and the rect are read
+     at the grab, before the tracks stop, because Chrome's sharing bar can resize the page while it shares.
 
    Any failure discards the pixels and shows the existing Open in Remote offer, with a sentence that names the
    failure: cancelled, not cropped, wrong size, blank, or covered.
@@ -75,7 +82,8 @@ cannot attach a Direct still.
 - **Residual, stated rather than solved:** Remote withholds an image when its page text holds a credential. Direct
   cannot read a cross-origin page's text, so a Direct still has no credential check. This was already true of the
   approved design, which attaches only the URL. The switch's label and the still's note say so. The picture still
-  reaches an agent only through the owner's own Send.
+  reaches an agent only through the owner's own Send. A page that navigates itself while the prompt is up can also
+  show pixels from a different address than the binding URL attached with them.
 
 ## Owner probe (Settings, Browser, "Test Direct capture")
 
@@ -84,19 +92,29 @@ installed app. It crops to a HUD-made test-pattern iframe inside Settings, not a
 centre block, in a sandboxed `srcdoc` frame with no scripts. So its pixel samples are known colours, not page
 content, and they prove the crop was really applied.
 
+The pattern is 7:5, a shape a window rarely has, so a crop cannot coincide with the whole window. It is as wide
+as Settings allows, from 320 to 1120 CSS px, so the probe also measures a large capture that Chrome may downscale,
+not only a small one. That is the case the review raised for big panes at 4K.
+
 It records these facts:
 - display mode and Chrome major version;
 - whether the APIs are present;
 - the prompt outcome and the error name;
 - track settings (`displaySurface`, width, height, frame rate, cursor);
 - crop applied, and the crop error name;
-- frame size against the expected size;
-- nine colour samples against the expected colours;
+- the pattern's rect, the window size, the DPR and the frame size;
+- nine sample positions and the colours found there (no expected values);
 - the live tracks left afterwards (it must be 0);
 - step timings.
 
-The HUD posts them to `POST /browser/direct-capture/probe`, owner-only. The daemon re-validates every field against a
-fixed schema and recomputes pass or fail itself. It then writes `~/.local/share/jarvis/direct-capture-probe.json`
+The HUD posts them to `POST /browser/direct-capture/probe`, owner-only. The daemon decides pass or fail itself.
+- It re-validates every field against a fixed schema.
+- It checks that the rect has the pattern's 7:5 shape (±1%) and is at least 160 px wide.
+- It applies the size rule to the reported rect, window, DPR and frame, and records the scale that matched.
+- It checks the sample positions against its own nine fractions.
+- It classifies each colour to the nearest of its own five pattern colours, with a margin of 20.
+
+The HUD's measurements are trusted as measurements; the expected values are the daemon's. It then writes `~/.local/share/jarvis/direct-capture-probe.json`
 (`JARVIS_DIRECT_CAPTURE_PROBE`; 0600, atomic) for the lead, and keeps the pass in memory. No image is stored.
 
 ## Tests

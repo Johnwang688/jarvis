@@ -10,9 +10,10 @@
 //
 // A tab capture shows whatever the HUD paints over the frame, so the frame is
 // checked uncovered before the prompt and again after the grab. Nothing here
-// focuses the frame. The pixels are checked before use: the frame's size is
-// the iframe's on-screen size × devicePixelRatio, it is not the whole tab,
-// and it is not blank. Anything else is refused with a sentence, and the
+// focuses the frame. The pixels are checked before use: the frame is the
+// iframe's on-screen shape at one uniform scale between 0.5 and
+// devicePixelRatio (Chrome may deliver CSS pixels, or downscale a large
+// pane), it is not the whole tab at any such scale, and it is not blank. Anything else is refused with a sentence, and the
 // caller falls back to the existing "Open in Remote" offer.
 
 export const DIRECT_FALLBACK = "Open this in Remote to annotate.";
@@ -24,6 +25,7 @@ export const DIRECT_REASONS = {
   cancelled: "Chrome's share prompt was cancelled. Nothing was captured.",
   not_cropped: "Chrome did not crop the capture to this page, so it was discarded. " + DIRECT_FALLBACK,
   size: "The captured picture did not match this page's size, so it was discarded. " + DIRECT_FALLBACK,
+  ambiguous: "This page has the same shape as the whole window, so Jarvis cannot tell the crop worked; the picture was discarded. " + DIRECT_FALLBACK,
   blank: "The captured picture was blank, so it was discarded. " + DIRECT_FALLBACK,
   failed: "The capture did not finish. " + DIRECT_FALLBACK,
   stale: "",
@@ -62,13 +64,19 @@ export interface CaptureEnv {
 }
 
 /** The elements whose paint over a Direct frame would land in a tab capture. */
+// Approval cards are covered by `blocked`; the card selector stays as a
+// backstop. The dev-server prompt sits in `.devserver-prompts`, a fixed,
+// pointer-events:none layer: the hit test cannot see it, so every match's
+// own rect is tested against the frame's.
 export const OVERLAYS = [
   '[role="dialog"]:not([hidden])', '[role="alertdialog"]', '[role="menu"]', '[role="listbox"]',
-  '[role="tooltip"]', "dialog[open]", '[data-testid="approval-card"]', '[data-testid="browser-approval"]',
-  '[data-testid="dev-server-prompt"]', ".approval-card", ".toast",
+  '[role="tooltip"]', "dialog[open]", '[data-testid="approval-card"]',
+  ".devserver-prompts", '[data-testid="devserver-prompt"]', ".termtoasts",
 ].join(",");
 
 export const EDGE_INSET = 8;
+/** Hit-test spacing in CSS px, and the most points one check may take. */
+export const GRID_STEP = 48, GRID_MAX = 2000;
 type Box = { left: number; top: number; right: number; bottom: number; width: number; height: number };
 const intersects = (a: Box, b: Box) => a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom;
 
@@ -84,8 +92,12 @@ export function frameCovered(frame: Element, allowed: readonly Element[], env: P
   // Inset past the panes' resize handles, transparent hit areas that overlap
   // a frame's edges by a few pixels; painted overlays are matched below.
   const mx = Math.min(EDGE_INSET, r.width / 4), my = Math.min(EDGE_INSET, r.height / 4);
-  for (let i = 0; i < 5; i++) for (let j = 0; j < 5; j++) {
-    const x = r.left + mx + (r.width - 2 * mx) * i / 4, y = r.top + my + (r.height - 2 * my) * j / 4;
+  const w = r.width - 2 * mx, h = r.height - 2 * my;
+  let step = GRID_STEP;
+  while ((Math.ceil(w / step) + 1) * (Math.ceil(h / step) + 1) > GRID_MAX) step *= 1.25;
+  const nx = Math.ceil(w / step), ny = Math.ceil(h / step);
+  for (let i = 0; i <= nx; i++) for (let j = 0; j <= ny; j++) {
+    const x = r.left + mx + w * i / nx, y = r.top + my + h * j / ny;
     const hit = doc.elementFromPoint(x, y);
     if (!hit || (hit !== frame && !allowed.includes(hit))) return "covered";
   }
@@ -97,22 +109,31 @@ export function frameCovered(frame: Element, allowed: readonly Element[], env: P
   return "";
 }
 
-/** Device pixels the cropped frame should have: CSS size × devicePixelRatio. */
-export function expectedSize(rect: { width: number; height: number }, dpr: number) {
-  return { width: Math.round(rect.width * dpr), height: Math.round(rect.height * dpr) };
+type Size = { width: number; height: number };
+/** Accepted scales: CSS pixels (Chrome delivered those under a 1.5 DPR) up to device pixels. */
+export const MIN_SCALE = 0.5, SHAPE_SLACK = 1.5, EDGE_SLACK = 2;
+/**
+ * The uniform scale at which `frame` is `box`, or null. The long edge sets the
+ * scale (within 0.5…dpr, give or take 2 px of rounding); the short edge must
+ * then agree within about a pixel.
+ */
+export function scaleOf(frame: Size, box: Size, dpr: number): number | null {
+  if (!(box.width >= 1 && box.height >= 1 && frame.width >= 1 && frame.height >= 1)) return null;
+  const wide = box.width >= box.height;
+  const [long, short, fLong, fShort] = wide
+    ? [box.width, box.height, frame.width, frame.height] : [box.height, box.width, frame.height, frame.width];
+  const s = fLong / long;
+  if (s < MIN_SCALE - EDGE_SLACK / long || s > Math.max(MIN_SCALE, dpr) + EDGE_SLACK / long) return null;
+  return Math.abs(fShort - short * s) <= SHAPE_SLACK ? s : null;
 }
-
-export const SIZE_SLACK = 2;
-/** "" when the frame is the iframe's own size and not the whole tab. */
-export function checkFrame(frame: { width: number; height: number }, rect: { width: number; height: number },
-  dpr: number, viewport: { width: number; height: number }): "" | "size" | "not_cropped" {
-  const want = expectedSize(rect, dpr);
-  const whole = expectedSize(viewport, dpr);
-  const near = (a: number, b: number) => Math.abs(a - b) <= SIZE_SLACK;
-  if (near(frame.width, whole.width) && near(frame.height, whole.height)
-      && !(near(want.width, whole.width) && near(want.height, whole.height))) return "not_cropped";
-  if (!near(frame.width, want.width) || !near(frame.height, want.height) || !want.width || !want.height) return "size";
-  return "";
+/** The pane's own shape at an accepted scale, and not the whole window's. */
+export function checkFrame(frame: Size, rect: Size, dpr: number, viewport: Size):
+  { verdict: "" | "size" | "not_cropped" | "ambiguous"; scale: number | null } {
+  const pane = scaleOf(frame, rect, dpr), whole = scaleOf(frame, viewport, dpr);
+  if (pane !== null && whole !== null) return { verdict: "ambiguous", scale: pane };
+  if (whole !== null) return { verdict: "not_cropped", scale: whole };
+  if (pane === null) return { verdict: "size", scale: null };
+  return { verdict: "", scale: pane };
 }
 
 /** Fine enough that a page's text shows: a coarser grid called a mostly white page blank. */
@@ -151,7 +172,7 @@ export interface GrabFacts {
  * for the owner's probe.
  */
 export async function grabCroppedFrame(target: Element, env: CaptureEnv, live: () => boolean,
-  facts: GrabFacts = newFacts(), atGrab?: () => void): Promise<Frame> {
+  facts: GrabFacts = newFacts(), hooks: { beforeGrab?: () => void; atGrab?: () => void } = {}): Promise<Frame> {
   const start = env.now(), mark = (k: string, from: number) => { facts.timing[k] = Math.max(0, env.now() - from); };
   const gdm = env.mediaDevices?.getDisplayMedia;
   if (typeof gdm !== "function" || !env.CropTarget || !env.ImageCapture) throw new DirectRefused("unavailable");
@@ -200,6 +221,8 @@ export async function grabCroppedFrame(target: Element, env: CaptureEnv, live: (
     for (let attempt = 0; attempt < GRAB_TRIES && !frame; attempt++) {
       if (attempt) await new Promise(r => setTimeout(r, GRAB_RETRY_MS));
       if (!live()) throw new DirectRefused("stale");
+      // Coverage is checked before each grab and again at it: both must be clear.
+      hooks.beforeGrab?.();
       try { frame = await within(grabber.grabFrame(), GRAB_TIMEOUT_MS); }
       catch (e) { last = e; }
     }
@@ -207,7 +230,7 @@ export async function grabCroppedFrame(target: Element, env: CaptureEnv, live: (
     mark("frame", t);
     // The layout as it was when the frame was taken: Chrome's own "sharing
     // this tab" bar can resize the page while sharing and again once it stops.
-    try { atGrab?.(); } catch (e) { frame.close(); throw e; }
+    try { hooks.atGrab?.(); } catch (e) { frame.close(); throw e; }
     // One frame is all: the tracks stop before anything looks at it.
     stopAll(stream);
     if (!live()) { frame.close(); throw new DirectRefused("stale"); }
@@ -240,14 +263,17 @@ export async function captureDirect(frame: HTMLIFrameElement, env: CaptureEnv, l
   const before = frameCovered(frame, shield, env);
   if (before) throw new DirectRefused(before);
   let after: ReturnType<typeof frameCovered> = "hidden", rect = { width: 0, height: 0 }, viewport = rect;
-  const shot = await grabCroppedFrame(frame, env, live, newFacts(), () => {
-    after = frameCovered(frame, shield, env);
-    rect = frame.getBoundingClientRect();
-    viewport = { width: env.innerWidth, height: env.innerHeight };
+  const shot = await grabCroppedFrame(frame, env, live, newFacts(), {
+    beforeGrab: () => { const now = frameCovered(frame, shield, env); if (now) throw new DirectRefused(now); },
+    atGrab: () => {
+      after = frameCovered(frame, shield, env);
+      rect = frame.getBoundingClientRect();
+      viewport = { width: env.innerWidth, height: env.innerHeight };
+    },
   });
   try {
     if (after) throw new DirectRefused(after);
-    const size = checkFrame(shot, rect, env.devicePixelRatio, viewport);
+    const size = checkFrame(shot, rect, env.devicePixelRatio, viewport).verdict;
     if (size) throw new DirectRefused(size);
     if (blank(env.sample(shot))) throw new DirectRefused("blank");
     const image = await env.encode(shot);
