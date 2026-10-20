@@ -1,0 +1,32 @@
+{
+ "id": "sec2-clean",
+ "kind": "review",
+ "pr": 243,
+ "title": "SEC-2: strip unseen characters from the approval-card origin label",
+ "base": "2478b6e8641f6fadf53e7b439450f7237129ccea",
+ "head": "d7e6c8777b70122d8315f28d196fe03d9779199a",
+ "brief": "A model-written task name appears on the HUD and Discord approval card's 'requested by' line. Neither strips invisible or right-to-left override characters, so a name can change how the line reads. This PR strips them in the v2 origin cleaner and in v1's tasks._label (which repeats the v2 character list because no v1 module imports v2 code). Acceptance tests (tests/v2/approval_label_check.py) were committed first and fail on main.",
+ "focus": [
+  "correctness, including under concurrency and across the ordering of events",
+  "handling of untrusted input, and safety-boundary changes",
+  "test coverage of the new behaviour: would the tests fail without the change?",
+  "claims in the description against the evidence in the diff and tests"
+ ],
+ "suites": [
+  "tests/v2/approval_label_check.py",
+  "tests/v2/permissions_check.py",
+  "tests/tasks_check.py"
+ ],
+ "control": true,
+ "seeded": null,
+ "ground_truth": [
+  {
+   "id": "gt1",
+   "severity": "NIT",
+   "mechanism": "names made of visible-but-blank characters (for example Hangul fillers U+3164) pass the cleaner, so a task name can render as an empty-looking label in the quotes",
+   "location": "jarvis/v2/approvals.py label/clean_line; jarvis/tasks.py _label",
+   "evidence": "label('t1', '\\u3164\\u3164\\u3164') returns 'task t1 \"ㅤㅤㅤ\"' on this head; the same for tasks._label",
+   "source": "found while preparing the C6 title review (card_title drops these in #275); not raised in the SEC-2 review"
+  }
+ ]
+}

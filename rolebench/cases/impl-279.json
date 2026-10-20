@@ -1,0 +1,23 @@
+{
+ "id": "impl-279",
+ "kind": "implement",
+ "pr": 279,
+ "size": "S",
+ "base": "134ea187e2d6e8b7a0d902d51764b0837fde3e51",
+ "merged": "740f838b0a43199e63f607f09c1d251835c1be4c",
+ "brief": "The keyring unlock hint Jarvis shows when the Secret Service is locked does not work on this WSL2 machine: WSLg mounts its own /run/user/1000 over systemd's, so a plain `gnome-keyring-daemon --unlock` typed in a terminal starts a stray second daemon and the keyring Chrome and Jarvis use stays locked. Change the hint (UNLOCK_COMMAND in jarvis/v2/browser/password_store.py) to this exact one-line recipe: `read -rsp 'Keyring password: ' KP; echo; printf '%s' \"$KP\" | setsid -f gnome-keyring-daemon --replace --unlock --foreground >/dev/null 2>&1; unset KP; sleep 2; gnome-keyring-daemon --start --components=secrets >/dev/null 2>&1 </dev/null`. The password must go only through stdin, never argv or history. The old form must no longer appear in any message. Every message that ends in the command is longer than before: make sure the owner sees the whole command everywhere the HUD shows such a hint or error. Add tests that pin the recipe and the display. Update the setup docs in docs/notes/browser.md to match.",
+ "hidden_tests": [
+  "tests/v2/browser_password_store_check.py",
+  "hud/src/components/BrowserProfile.test.ts"
+ ],
+ "regression_suites": [
+  "tests/v2/browser_profiles_check.py"
+ ],
+ "scope": [
+  "jarvis/v2/browser/password_store.py",
+  "hud/src/components/BrowserProfile.tsx",
+  "hud/src/state/browser.ts",
+  "docs/notes/browser.md"
+ ],
+ "fixtures": []
+}

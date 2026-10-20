@@ -1,0 +1,62 @@
+{
+ "id": "bpreview-docs",
+ "kind": "review",
+ "pr": 274,
+ "title": "docs: B-PREVIEW capability probe (still blocked on Chrome 155)",
+ "base": "b1feb001b4bf9711938d27e092e235222bb2bbee",
+ "head": "902eb023af57c85b62c1a652fbd406d02052664d",
+ "brief": "Docs only. Answers B-PREVIEW's blocking question: can the Chrome the Remote browser runs prove that a captured image is the frame for the DOM and layout state an approval acts on? Claim: no; cards keep 'Preview unavailable'. New plan docs/plans/2026-10-19-browser-preview-capability.md records probes against isolated Chrome 155.0.8059.39 (HeadlessExperimental absent, screencast metadata, captureScreenshot after measuring, freeze plus bracket, tracing, LayerTree) with numeric results; a dated paragraph in docs/notes/browser.md and the feature-map row are updated. No code changed.",
+ "focus": [
+  "claims against evidence",
+  "accuracy and scope of the wording",
+  "documentation text pinned by tests",
+  "consistency with the existing notes"
+ ],
+ "suites": [
+  "scripts/slim_claude.py --check"
+ ],
+ "control": false,
+ "seeded": null,
+ "ground_truth": [
+  {
+   "id": "gt1",
+   "severity": "MED",
+   "mechanism": "every number in the plan (1/183, 161/161, 17/30, 23/30, 7/30, 113 ticks, 29/60, 24/29, 120/120 ...) is unverifiable: the scripts are uncommitted and no probe output was saved",
+   "location": "docs/plans/2026-10-19-browser-preview-capability.md:41-46,61-72",
+   "evidence": "probe directory holds only scripts",
+   "source": "review of #274"
+  },
+  {
+   "id": "gt2",
+   "severity": "MED",
+   "mechanism": "'has no way to prove' and 'the best capture scheme inside Chrome 155' are broader than the evidence; Emulation.setScriptExecutionDisabled, Debugger.pause, other setVirtualTimePolicy modes and DOMSnapshot were not probed",
+   "location": "docs/plans/2026-10-19-browser-preview-capability.md:3; docs/notes/browser.md (new paragraph)",
+   "evidence": "P6 docstring says 'strongest scheme we could build'",
+   "source": "review of #274"
+  },
+  {
+   "id": "gt3",
+   "severity": "MED",
+   "mechanism": "the 'open list of gaps' mixes tested items (CSSOM P6, out-of-process iframe P5) with untested reasoning (adoptedStyleSheets, closed shadow roots, canvas, media, scroll, late resources)",
+   "location": "docs/plans/2026-10-19-browser-preview-capability.md:53-57",
+   "evidence": "grep the plan's gaps list for each item and look for a matching probe script or result: only CSSOM (P6) and the out-of-process iframe (P5) have one; adoptedStyleSheets, closed shadow roots, canvas, media, scroll position and late resources have none in the probe directory",
+   "source": "review of #274"
+  },
+  {
+   "id": "gt4",
+   "severity": "MED",
+   "mechanism": "the probes did not use the product's launch_args (proxy, host-resolver rules, blink settings, Playwright launch); they ran /opt/google/chrome/chrome --headless over a CDP pipe, yet the plan says 'like the Remote browser'",
+   "location": "docs/plans/2026-10-19-browser-preview-capability.md:28-33; docs/notes/browser.md (the new dated paragraph after the BR9c note)",
+   "evidence": "product launches via channel='chrome' in jarvis/v2/browser/host.py:1270",
+   "source": "review of #274"
+  },
+  {
+   "id": "gt5",
+   "severity": "LOW",
+   "mechanism": "'makeSnapshot refuses every layer' tried one layer only; 'the page starved the stream', 'stamped after processing' and 'createTarget{enableBeginFrameControl} does nothing' are interpretations stated as fact; '30/30 timeouts' is ambiguous; 120/120 under paused virtual time mostly shows that pausing works; the plan and file name date (2026-10-19) predates the probe files (2026-10-20)",
+   "location": "docs/plans/2026-10-19-browser-preview-capability.md:41-52,66-72",
+   "evidence": "read the plan's P4 probe: it calls LayerTree.makeSnapshot on one layer (the latest with drawsContent) yet the plan says every layer is refused; the 'starved the stream' and 'stamped after processing' sentences have no counter or log behind them; 30/30 is not tied to a page; the plan's date differs from the probe files' modification times (Oct 20, 00:02-00:26)",
+   "source": "review of #274"
+  }
+ ]
+}

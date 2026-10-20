@@ -1,0 +1,26 @@
+{
+ "id": "impl-280",
+ "kind": "implement",
+ "pr": 280,
+ "size": "M",
+ "base": "134ea187e2d6e8b7a0d902d51764b0837fde3e51",
+ "merged": "3270fe75fe64549a67c1dae01a46174d91ceffc3",
+ "brief": "Bug (Claude chats with background sub-agents): after the sub-agents finish, Claude Code answers on its own, but the answer does not appear in the HUD until the owner sends the next message; that next turn then reads both of the CLI's own turns as its own. Symptom timeline, kinds and offsets only (synthetic, see the fixture rolebench/cases/fixtures/impl-280-timeline.json): the owner's turn spawns two background agents and ends (t=0); between turns the idle reader keeps running and child rows arrive (t=2 to 200 s); the CLI writes `rate_limit_event` messages between turns whenever the account's limit info changes, including on a background child's API calls; each child hands back and the CLI starts a turn of origin `peer` with an answer (t=170 and 200 s); no `cli_turn` record is ever written for them; the owner's next message arrives (t=340 s) and its first second logs both CLI turns. Fix the provider (jarvis/v2/providers/claude.py, the idle reader _route_idle) so the CLI's own turn is offered to the daemon with no owner message, while anything that really belongs to a turn is still held for the next send in order. Interface the hidden tests rely on: a module function claude._of_no_turn(item) (true for anything that is not a user, assistant, stream-event, result or system message); `RateLimitEvent` imported into claude from the SDK; a module-level set claude._NO_TURN_NAMED; a message of no turn of a kind the provider does not know (not RateLimitEvent, ConversationResetMessage or a system message) is passed by and its type name only is logged once per process at INFO, in a line containing 'does not know'; the first message actually held between turns is logged by type name. A message of no turn that arrives behind something already held is held too, in order. A main-thread user replay of origin `peer` must still be offered as self_started 'peer'; a late steer's echo stays held and a stopped one is interrupted. Add regression tests and extend tests/v2/idle_reader_mutants.py.",
+ "hidden_tests": [
+  "tests/v2/idle_reader_check.py"
+ ],
+ "regression_suites": [
+  "tests/v2/steer_check.py",
+  "tests/v2/claude_subagents_check.py",
+  "tests/v2/chat_relay_check.py",
+  "tests/v2/idle_reader_mutants.py"
+ ],
+ "scope": [
+  "jarvis/v2/providers/claude.py",
+  "tests/v2/idle_reader_mutants.py",
+  "docs/notes/providers-runtime.md"
+ ],
+ "fixtures": [
+  "rolebench/cases/fixtures/impl-280-timeline.json"
+ ]
+}

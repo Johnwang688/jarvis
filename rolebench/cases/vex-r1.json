@@ -1,0 +1,49 @@
+{
+ "id": "vex-r1",
+ "kind": "review",
+ "pr": 241,
+ "title": "VEX: Connect is offered once a download ends, without a reload",
+ "base": "6529af3095ad72b46dd4f36c2a974ed8da782348",
+ "head": "3f341bb8670d55276f5415ac407efce9a3a7a26e",
+ "brief": "Bug: after a VEX download ended, the Brain tab's Connect stayed disabled until a focus or reload, because the window's cached /vex/status still said 'download' (the bus announces the download's start, nothing announces its end, and the chain's finally did not re-read the status). Fix, HUD: hud/src/state/vex.ts re-reads /vex/status in three places (including the chain's finally), guarded so the newest-issued read wins and an older answer never brings back 'download'; VexView.tsx polls /vex/status every 2 s while another window's download or device read holds the port and stops when the daemon says free (status read only, no device action). Daemon: Vex.download's ended hook releases the device inside the same lock section that settles the record (release(locked=True)), closing a race where a status read could say 'download' for a record the HUD had seen end. Claims: no new device action, a download is still sent only from the owner's click-driven chain, the brain terminal never auto-reopens.",
+ "focus": [
+  "correctness, including under concurrency and across the ordering of events",
+  "handling of untrusted input, and safety-boundary changes",
+  "display, input and focus behaviour of the UI",
+  "test coverage of the new behaviour: would the tests fail without the change?",
+  "claims in the description against the evidence in the diff and tests"
+ ],
+ "suites": [
+  "tests/v2/vex_check.py",
+  "hud/src/state/vex.test.ts",
+  "tests/face/hud_v2_vex_check.py"
+ ],
+ "control": false,
+ "seeded": null,
+ "ground_truth": [
+  {
+   "id": "gt1",
+   "severity": "LOW",
+   "mechanism": "the 2 s held-port status poll is not gated on the pane being drawn or on an approval card being up, unlike the USB-check effect beside it",
+   "location": "hud/src/components/VexView.tsx:139-146",
+   "evidence": "render an undrawn pane, or raise an approval card, while the daemon reports device 'download': GET /vex/status still fires every 2 s",
+   "source": "review of #241; fixed in #242"
+  },
+  {
+   "id": "gt2",
+   "severity": "LOW",
+   "mechanism": "a superseded refreshStatus call resolves before the newest read lands, so the chain's await refreshStatus() can read a stale this.status at the 'before it downloaded' brain check and in the pause loop",
+   "location": "hud/src/state/vex.ts:318 refreshStatus; callers near :597 and :623",
+   "evidence": "issue a heardDevice/poll read, then the chain's read: the first call resolves with this.status still at the older value",
+   "source": "review of #241; fixed in #242"
+  },
+  {
+   "id": "gt3",
+   "severity": "NIT",
+   "mechanism": "an older failing status read arriving after a newer success overwrites statusError, and no test pins the guard (the mutant that removes the guard from the error handler passes all 48 tests)",
+   "location": "hud/src/state/vex.ts:329",
+   "evidence": "mutant: delete the seq guard in the catch handler; hud/src/state/vex.test.ts still passes 48/48",
+   "source": "review of #241; fixed in #242"
+  }
+ ]
+}

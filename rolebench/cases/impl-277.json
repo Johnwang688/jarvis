@@ -1,0 +1,25 @@
+{
+ "id": "impl-277",
+ "kind": "implement",
+ "pr": 277,
+ "size": "S",
+ "base": "725459c2125cc885ec0d8a4ddb79587ffdc5123e",
+ "merged": "c58f60acf8323b0d9ec984007e790d68c61b2fde",
+ "brief": "Follow-up to the merged C6 approval-card provenance (display only; permissions.py and approvals.py must not change; the code change is in jarvis/v2/daemon.py, and docs/notes/control-plane.md is updated). Each native sub-agent ('child') is stamped with the relay provenance of the turn that spawned it; its approval card shows kind 'started' (spawned by a relayed turn) or 'running' (a relayed turn is running now but did not spawn it). Required outcomes: (1) A child is shown 'started' only when it is known to be a top-level child of the orchestrator in the relayed turn. A grandchild whose parent the daemon never saw, a child whose first record is an event rather than its lifecycle start, and a lifecycle record other than the start are shown 'running' while a relayed turn runs and nothing otherwise, and a later start record does not change that. A grandchild of a seen parent inherits that parent's provenance, or none. (2) Claude may announce a child's task_started only after the spawning turn's result, when it is read between turns; a background child of a relayed turn must still be 'started' afterwards. (3) A child the daemon has forgotten is never restamped from a later turn; the relay stamps stay capped at 256. Interface the hidden tests call: daemon._stamp_child(session, prepared, running=...) with records shaped {'kind':'subagent','sid':...,'data':{'op':...,'parent_sid':...}}; daemon._spawned(session, data, *, running), where data is a Claude TOOL_STARTED payload ({'name','call_id','args'}) for a spawning call (Agent or Task) in the orchestrator's own turn stream, attributing providers.claude.child_sid(call_id) ahead of the later announcement; session.child_seen; session.child_relay; daemon._relayed_from(session, sid)['kind']. A spawning call marks the child's id seen in session.child_seen even when it stamps nothing (an owner turn's call); a non-spawning tool does nothing and marks nothing; a call whose turn changed stamps nothing. A spawn record must never cost an event record, and a turn that changed while the record was prepared stamps nothing.",
+ "hidden_tests": [
+  "tests/v2/relay_provenance_check.py"
+ ],
+ "regression_suites": [
+  "tests/v2/permissions_check.py",
+  "tests/v2/claude_subagents_check.py",
+  "tests/v2/codex_subagents_check.py",
+  "tests/v2/idle_reader_check.py",
+  "tests/v2/chat_relay_check.py",
+  "tests/v2/daemon_check.py"
+ ],
+ "scope": [
+  "jarvis/v2/daemon.py",
+  "docs/notes/control-plane.md"
+ ],
+ "fixtures": []
+}

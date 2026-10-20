@@ -1,0 +1,32 @@
+{
+ "id": "sec3-r1",
+ "kind": "review",
+ "pr": 245,
+ "title": "SEC-3: full credential scrub on Discord and diff-review output",
+ "base": "2478b6e8641f6fadf53e7b439450f7237129ccea",
+ "head": "567e5fe159a61c7d2a807ef9ba27e86775f9d391",
+ "brief": "redact.scrub_text is the one scrub for model-written text bound for a surface. Older outbound surfaces still call secrets.scrub alone, which knows only Jarvis-owned credential values. This PR routes the Discord chat mirror, task reporter, diff-review output and chat-git results through scrub_text, which also redacts provider key shapes and bearer/JWT shapes. Text that cannot be scrubbed is replaced with a withheld marker; diff review withholds instead of raising. The Discord approval DM is deliberately left alone (cards redact via redact_command; a value that runs is never hidden). Acceptance tests were committed first and fail on main.",
+ "focus": [
+  "correctness, including under concurrency and across the ordering of events",
+  "handling of untrusted input, and safety-boundary changes",
+  "test coverage of the new behaviour: would the tests fail without the change?",
+  "claims in the description against the evidence in the diff and tests"
+ ],
+ "suites": [
+  "tests/v2/outbound_scrub_check.py",
+  "tests/v2/diff_review_check.py",
+  "tests/v2/chat_git_check.py"
+ ],
+ "control": false,
+ "seeded": null,
+ "ground_truth": [
+  {
+   "id": "gt1",
+   "severity": "LOW",
+   "mechanism": "diff_review._clean scrubs first and strips invisible characters after, so a key split by a zero-width or bidi character (ghp_AB\\u200bCD...) slips past scrub_text and is then joined back together",
+   "location": "jarvis/v2/diff_review.py _clean",
+   "evidence": "swap the two calls; fixed by #248 with a test using U+200B, U+2060, U+202E, U+FEFF",
+   "source": "lead review of #245 (transcript record); fixed in #248"
+  }
+ ]
+}

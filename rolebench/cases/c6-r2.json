@@ -1,0 +1,56 @@
+{
+ "id": "c6-r2",
+ "kind": "review",
+ "pr": 275,
+ "title": "C6 approval-card provenance (delta, round 2)",
+ "base": "b1feb001b4bf9711938d27e092e235222bb2bbee",
+ "head": "9e1dfb06040ac874f0aaa60133d980bd57493f16",
+ "brief": "Chat-to-chat C6, display only. An approval card raised by a call from a turn that another chat's message started (a relayed turn, in the target chat), or that its reply started (a reply turn, in the sender), says which chat's message started the turn, under REQUESTED BY. Claims: no permission layer reads the provenance; a sub-agent's call in a relayed turn carries the line too; the chat title is reduced so it cannot forge or restyle the card; the HUD draws the line without changing buttons, focus or Tab order; nothing adds a path from a message to an approval. Children now carry the provenance of the turn that spawned them, stamped when the daemon first sees them.",
+ "focus": [
+  "correctness, including under concurrency and across the ordering of events",
+  "handling of untrusted input, and safety-boundary changes",
+  "test coverage of the new behaviour: would the tests fail without the change?",
+  "claims in the description against the evidence in the diff and tests"
+ ],
+ "suites": [
+  "tests/v2/relay_provenance_check.py",
+  "tests/v2/permissions_check.py",
+  "tests/face/hud_v2_relay_check.py"
+ ],
+ "control": false,
+ "seeded": null,
+ "ground_truth": [
+  {
+   "id": "gt1",
+   "severity": "MED",
+   "mechanism": "a child first stamped by an owner turn and re-tasked by a later relayed turn shows no line, although it now acts on the other chat's words",
+   "location": "jarvis/v2/daemon.py _relayed_from child branch and _stamp_child",
+   "evidence": "owner turn N starts background child C; relayed turn N+1 gives C new work; C's card has no line",
+   "source": "review of #275 round 2"
+  },
+  {
+   "id": "gt2",
+   "severity": "LOW",
+   "mechanism": "a child first seen between turns can be stamped by a relayed turn that begins while the record is prepared outside the lock (_idle_event/_record_subagent prepare outside the lock)",
+   "location": "jarvis/v2/daemon.py _idle_event (~1565) -> _record_subagent (~2055) -> _stamp_child",
+   "evidence": "watcher thread schedule vs _begin; docs claim 'a child first seen between turns gets none' is then false",
+   "source": "review of #275 round 2"
+  },
+  {
+   "id": "gt3",
+   "severity": "LOW",
+   "mechanism": "eviction from the 256-entry stamp cap restamps a still-running child from whatever turn is running",
+   "location": "jarvis/v2/daemon.py _stamp_child (CHILD_STAMPS eviction)",
+   "evidence": "evicted long-lived owner-turn child reports progress during a relayed turn and names that chat",
+   "source": "review of #275 round 2"
+  },
+  {
+   "id": "gt4",
+   "severity": "LOW",
+   "mechanism": "bridge cards for a child's dangerous jarvis-mcp tool carry no child origin and so follow the running turn",
+   "location": "jarvis/v2/bridge.py:220; jarvis/v2/permissions.py:1229-1235",
+   "evidence": "child of an owner turn calling a dangerous tool during a relayed turn names the other chat; reverse case shows nothing",
+   "source": "review of #275 round 2"
+  }
+ ]
+}

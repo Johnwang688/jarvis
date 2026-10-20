@@ -1,0 +1,56 @@
+{
+ "id": "c6-r3",
+ "kind": "review",
+ "pr": 275,
+ "title": "C6 approval-card provenance (delta, round 3)",
+ "base": "b1feb001b4bf9711938d27e092e235222bb2bbee",
+ "head": "4019f48617d796b71db0c89c6eec2884c23a337f",
+ "brief": "Chat-to-chat C6, display only. An approval card raised by a call from a turn that another chat's message started (a relayed turn, in the target chat), or that its reply started (a reply turn, in the sender), says which chat's message started the turn, under REQUESTED BY. Claims: no permission layer reads the provenance; a sub-agent's call in a relayed turn carries the line too; the chat title is reduced so it cannot forge or restyle the card; the HUD draws the line without changing buttons, focus or Tab order; nothing adds a path from a message to an approval. A call a relayed turn did not start now gets kind 'running' (wording 'while a turn started by ... runs'); a child's first-seen record only stamps if it arrives in the turn that spawned it.",
+ "focus": [
+  "correctness, including under concurrency and across the ordering of events",
+  "handling of untrusted input, and safety-boundary changes",
+  "test coverage of the new behaviour: would the tests fail without the change?",
+  "claims in the description against the evidence in the diff and tests"
+ ],
+ "suites": [
+  "tests/v2/relay_provenance_check.py",
+  "tests/v2/permissions_check.py",
+  "tests/face/hud_v2_relay_check.py"
+ ],
+ "control": false,
+ "seeded": null,
+ "ground_truth": [
+  {
+   "id": "gt1",
+   "severity": "LOW",
+   "mechanism": "a child whose parent the daemon never saw (parent_sid None because Claude's CHILD_LIMIT dropped its task_started), or whose first record is a subagent_event, is stamped 'started' from the running turn",
+   "location": "jarvis/v2/daemon.py:117-145 _stamp_child final else branch",
+   "evidence": "grandchild starts during relayed turn T2 and is stamped 'turn started by chat S'",
+   "source": "review of #275 round 3"
+  },
+  {
+   "id": "gt2",
+   "severity": "LOW",
+   "mechanism": "the 'grandchild of a seen, unstamped parent' branch (elif parent in seen: stamp = None) is not pinned; a mutant falling back to the running turn survives both suites",
+   "location": "tests/v2/relay_provenance_check.py (ChildRule); jarvis/v2/daemon.py _stamp_child",
+   "evidence": "mutant m4 survives relay_provenance_check and permissions_check",
+   "source": "review of #275 round 3"
+  },
+  {
+   "id": "gt3",
+   "severity": "LOW",
+   "mechanism": "if the CLI emits a relayed turn's child task_started only after the turn's result, the watcher reads it idle, marks it seen with no stamp, and the child never shows a line; ordering unverified",
+   "location": "jarvis/v2/daemon.py _record_subagent idle path",
+   "evidence": "could not be verified from code; pre-stamp from the spawning Agent call or add an L4 live check",
+   "source": "review of #275 round 3"
+  },
+  {
+   "id": "gt4",
+   "severity": "NIT",
+   "mechanism": "a live child evicted from the 4096-entry seen set would be restamped",
+   "location": "jarvis/v2/daemon.py CHILD_SEEN",
+   "evidence": "read _stamp_child's seen set at this head: it is capped (CHILD_SEEN, 4096 entries) and pops the oldest, so a live child evicted from it appears new on its next record and is stamped from the running turn; a test that records 5000 children then re-announces the first one shows it",
+   "source": "review of #275 round 3"
+  }
+ ]
+}

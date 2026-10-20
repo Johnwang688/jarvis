@@ -1,0 +1,49 @@
+{
+ "id": "monitor-r1",
+ "kind": "review",
+ "pr": 211,
+ "title": "v2: Claude's Monitor (and any command-bearing tool) is judged as a command",
+ "base": "722868a10a56e452f272eb2d13e6bcec57747323",
+ "head": "8bee098c14a83b5a9e454be24bef9aa87c35f636",
+ "brief": "Found in a boundary review of another PR; a pre-existing hole on main. Claude's Monitor tool runs a shell command but was not in permissions.COMMAND_TOOLS, so the permit read no command from it. Under AUTO, Monitor {command: 'cat .env'}, 'pkill -f daemon2', 'sudo rm -rf /' and a daemon restart went to the provider's reviewer at layer 5 instead of being refused at layer 1. An Always on a Monitor card minted {'tool': 'Monitor'}, a whole-tool grant. Fix (fail closed): approvals.is_command_tool(tool, args) is the single test layer 1, the always-ask rules, layer 4 (allowlist / rules ALLOW) and v1_request (Always minting) all use. It counts every known command tool (Bash, BashOutput, Monitor, PowerShell, Codex shell/local_shell/exec_command, run_command, run_readonly) and any tool whose arguments carry a command line under command, cmd or script (text or argv array). With more than one of those keys, all are judged; a non-text value is not read as a command. An Always on Monitor now mints a stem entry; an old {'tool': 'Monitor'} entry matches nothing. Codex approvals always arrive named 'shell', so Codex was never affected. Evidence claimed: 563 new checks in permissions_check.command_tool_checks (385 fail on main), 8 of 8 mutants killed (tests/v2/command_tool_mutants.py), related suites pass.",
+ "focus": [
+  "correctness, including under concurrency and across the ordering of events",
+  "handling of untrusted input, and safety-boundary changes",
+  "test coverage of the new behaviour: would the tests fail without the change?",
+  "claims in the description against the evidence in the diff and tests"
+ ],
+ "suites": [
+  "tests/v2/permissions_check.py",
+  "tests/v2/command_tool_mutants.py",
+  "tests/v2/claude_provider_check.py",
+  "tests/v2/codex_provider_check.py"
+ ],
+ "control": false,
+ "seeded": null,
+ "ground_truth": [
+  {
+   "id": "gt1",
+   "severity": "HIGH",
+   "mechanism": "treating any tool whose arguments carry a command/cmd/script key as a shell makes layer 4 (Bash stem allowlist entries and the static rules ALLOW) answer yes for tools that are not shells, under ASK and STRICT; only that one key is read and every other argument is ignored; an Always on such a card writes a Bash stem that then auto-allows local Bash",
+   "location": "jarvis/v2/permissions.py:1035-1040 (layer 4); jarvis/v2/approvals.py:156-160 v1_request",
+   "evidence": "build permits in-process on this head and on the merge-base: mcp__remote__exec {'command':'cat','args':['.env']} under STRICT is ALLOW at jarvis-allow here and DENY on main; {'command':'npm','args':['publish']} is ALLOW in ASK and STRICT with no allowlist entry; a git stem entry covers {'command':'git','args':['push','--force']}",
+   "source": "review of #211 round 1; fixed in b9fa654"
+  },
+  {
+   "id": "gt2",
+   "severity": "MED",
+   "mechanism": "Claude's Workflow tool is JavaScript (its script argument) but is now judged as a shell line: false refusals at layer 1 in every profile, 'too complex to judge' asks for scripts with many template literals, junk run_command stems on Always, and existing {'tool':'Workflow'} entries stop covering script calls",
+   "location": "jarvis/v2/approvals.py is_command_tool; jarvis/v2/permissions.py layers 1-2",
+   "evidence": "{'script': \"const x = 'see .env docs'\"} is refused at layer 1; a script with ~100 backtick template literals gets the 'too complex to judge' reason; Always on {'script':'agent(x)'} writes prefix 'agent(x)'",
+   "source": "review of #211 round 1; fixed in b9fa654"
+  },
+  {
+   "id": "gt3",
+   "severity": "LOW",
+   "mechanism": "a known shell tool whose command key is present but empty or not text (Bash {'command': {'x': 'cat .env'}}) leaves the command empty, so layer 1 is skipped and AUTO goes to the reviewer, which allows it; an unknown tool with a non-text command key is not judged",
+   "location": "jarvis/v2/permissions.py command extraction",
+   "evidence": "Bash {'command':[['cat','.env']]} under AUTO: ALLOW at the reviewer on this head",
+   "source": "review of #211 round 1; fixed in b9fa654"
+  }
+ ]
+}

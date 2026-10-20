@@ -1,0 +1,88 @@
+{
+ "synthetic": true,
+ "note": "Record kinds and offsets only; no content. Offsets in seconds from the end of the owner's turn.",
+ "records": [
+  {
+   "t": 0,
+   "src": "owner_turn",
+   "type": "result",
+   "origin": "owner"
+  },
+  {
+   "t": 2,
+   "src": "child_a",
+   "type": "task_started"
+  },
+  {
+   "t": 2,
+   "src": "child_b",
+   "type": "task_started"
+  },
+  {
+   "t": 30,
+   "src": "cli",
+   "type": "rate_limit_event"
+  },
+  {
+   "t": 95,
+   "src": "cli",
+   "type": "rate_limit_event"
+  },
+  {
+   "t": 170,
+   "src": "child_a",
+   "type": "SubagentHandback"
+  },
+  {
+   "t": 171,
+   "src": "cli",
+   "type": "user",
+   "origin": "peer",
+   "isReplay": true
+  },
+  {
+   "t": 171,
+   "src": "cli",
+   "type": "stream_event"
+  },
+  {
+   "t": 175,
+   "src": "cli",
+   "type": "assistant"
+  },
+  {
+   "t": 176,
+   "src": "cli",
+   "type": "result",
+   "origin": "peer"
+  },
+  {
+   "t": 200,
+   "src": "child_b",
+   "type": "SubagentHandback"
+  },
+  {
+   "t": 201,
+   "src": "cli",
+   "type": "user",
+   "origin": "peer",
+   "isReplay": true
+  },
+  {
+   "t": 205,
+   "src": "cli",
+   "type": "assistant"
+  },
+  {
+   "t": 206,
+   "src": "cli",
+   "type": "result",
+   "origin": "peer"
+  },
+  {
+   "t": 340,
+   "src": "owner_turn",
+   "type": "owner_message"
+  }
+ ]
+}

@@ -1,0 +1,20 @@
+{
+ "id": "impl-261",
+ "kind": "implement",
+ "pr": 261,
+ "size": "M",
+ "base": "85dfc2fce67af55d8b101f1ac1ef7be3be9e29a3",
+ "merged": "fc1e7398c024d6cab42a498b5fe5c06b42be5705",
+ "brief": "Security fix SEC-5 (tighten-only). redact.scrub_text (jarvis/v2/redact.py) redacts only the header and footer lines of a PEM, OpenSSH or PGP private key, so the key body goes out unredacted on every surface scrub_text feeds (Discord mirror and reporter, diff review, chat git, providers, subagents, the daemon). Make it redact the whole private-key block as a single [redacted], for RSA, OPENSSH, EC, ENCRYPTED (PKCS#8 and legacy Proc-Type/DEK-Info), PGP and plain PKCS#8 keys, in these shapes: a complete block; a block with no footer (through the end of the text); a footer with no header (the key-material lines directly above it, and no more; a line of key material is a run of base64, a PGP checksum line '=' plus 4 characters, or a Proc-Type: / DEK-Info: line, and the walk upward stops at the first other line, such as a blank line or one containing words; a footer preceded by a line of words changes nothing above it). Two blocks in one text stay two blocks. Public keys, certificates and text with no private-key header or footer come out byte for byte as they do today, and nothing the current scrub hides may become visible (including a token-character run glued to a header). Matching must stay fast: 1 MiB adversarial inputs finish within a CPU bound. Interface the tests call directly: redact.private_key_blocks(text) -> str, which keeps CR characters (scrub_text itself normalises line endings). Test key bodies are random seeded base64, never real keys.",
+ "hidden_tests": [
+  "tests/v2/redact_private_key_check.py"
+ ],
+ "regression_suites": [
+  "tests/v2/outbound_scrub_check.py",
+  "tests/v2/diff_review_check.py"
+ ],
+ "scope": [
+  "jarvis/v2/redact.py"
+ ],
+ "fixtures": []
+}
