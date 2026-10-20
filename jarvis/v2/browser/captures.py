@@ -222,3 +222,43 @@ def capture_page(daemon, tab_id, query) -> dict:
         raise CaptureRefused("this page could not be captured safely; try again") from None
     return dict(capture_id=row.id, image=image, url=row.url, title=row.title,
                 text_chars=len(row.text), whole=row.whole, notes=list(CAPTURE_NOTES))
+
+
+DIRECT_OFF = "Direct capture is off: turn it on in Settings, Browser"
+DIRECT_NOTES = (
+    "Direct capture: only the address is attached. Jarvis cannot read this page's text, so the picture had no credential check.",
+)
+
+
+def capture_direct(daemon, body) -> dict:
+    """A URL-only reference for an owner's Direct still (B-DIRECT-CAPTURE).
+
+    Called only after the Browser route's owner/listener/Host checks. The
+    pixels never come here: the HUD took them from Chrome's tab share on the
+    owner's press. The URL is the registry's own record of that exact visible
+    binding, never the HUD's word, and passes the same guard as any capture.
+    """
+    registry, host = daemon.browser_panes, daemon.browser
+    if not daemon.browser_settings.value("direct_capture"):
+        raise CaptureRefused(DIRECT_OFF)
+    if (not isinstance(body, dict) or set(body) != {"window", "pane", "local_tab", "view"}
+            or body["pane"] not in PANE_SLOTS):
+        raise CaptureRefused("invalid page capture request")
+    snapshot = registry.resolve_owner(body["window"], int(body["pane"]), body["local_tab"], body["view"])
+    if snapshot.mode != "direct":
+        raise CaptureRefused(CAPTURE_CHANGED)
+    if not registry.owner_current(snapshot):
+        raise CaptureRefused(CAPTURE_CHANGED)
+    if host.input_held():
+        raise CaptureRefused(CAPTURE_HELD)
+    try:
+        row = daemon.browser_captures.add({"url": snapshot.url, "title": "", "lines": [], "raw": []})
+    except CaptureRefused:
+        raise
+    except Exception:
+        raise CaptureRefused("this page could not be captured safely; try again") from None
+    if row.withheld:
+        raise CaptureRefused(CAPTURE_WITHHELD)
+    if not registry.owner_current(snapshot) or host.input_held():
+        raise CaptureRefused(CAPTURE_CHANGED)
+    return dict(capture_id=row.id, url=row.url, title="", text_chars=0, whole=False, notes=list(DIRECT_NOTES))

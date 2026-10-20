@@ -421,6 +421,10 @@ class Daemon:
         self.browser_settings = BrowserSettings()
         from .browser.captures import Captures
         self.browser_captures = Captures()
+        # The owner's Direct capture probe (B-DIRECT-CAPTURE): its pass is held
+        # in memory only; main() attaches the report file the lead reads.
+        from .browser.direct_probe import DirectProbe
+        self.browser_direct_probe = DirectProbe()
         # The owner's HUD terminals (WP-C, terminals.py). Owner-only routes on
         # the HUD listener; they end with the daemon. On the bus they are one
         # lifecycle record, `terminal_attached` (an id and a time), never output.
@@ -3355,6 +3359,7 @@ def main() -> int:
         daemon.browser_settings.attach(config.BROWSER_SETTINGS_PATH)
     except Exception as exc:     # noqa: BLE001
         LOG.warning("browser settings not attached (%s); using the defaults", type(exc).__name__)
+    daemon.browser_direct_probe.attach(config.DIRECT_CAPTURE_PROBE_PATH)
     # The owner's keyring (`browser/password_store.py`): the daemon's own
     # session bus, attached here for the same reason — no embedded or test
     # daemon ever reads the owner's keyring state or hands Chrome the bus.

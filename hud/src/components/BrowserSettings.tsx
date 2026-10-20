@@ -4,6 +4,7 @@ import { api } from "../api";
 import { BrowserSoundSetting } from "./BrowserSound";
 import { devservers } from "../state/devserverClient";
 import { noPointerFocus } from "../lib/talkkey";
+import { DirectCaptureSetting } from "./DirectCaptureSetting";
 
 /** Explicit owner preference action; automatic events never use this route. */
 export function BrowserSettings({ blocked }: { blocked: boolean }) {
@@ -37,5 +38,5 @@ export function BrowserSettings({ blocked }: { blocked: boolean }) {
       onChange={async e=>{if(!e.nativeEvent.isTrusted||blocked||busy||drive===null)return;const value=e.target.checked;setBusy(true);setError("");
         try{await browserSettings.setDrive(value);}catch(e){setError(e instanceof Error?e.message:"The setting could not be saved.");}finally{setBusy(false);}}} />Agents may drive</label>
     <p className="muted">Allows requested actions in visible Remote panes with their own driving permission.</p>
-  </div><BrowserSoundSetting blocked={blocked} /></>;
+  </div><BrowserSoundSetting blocked={blocked} /><DirectCaptureSetting blocked={blocked} /></>;
 }

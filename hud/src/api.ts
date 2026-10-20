@@ -95,6 +95,10 @@ export const api = {
       window: identity.window, pane: String(identity.pane_id), local_tab: identity.local_tab_id,
       view: identity.view_id, whole: whole ? "1" : "0",
     })),
+  /** B-DIRECT-CAPTURE: a URL-only reference for the owner's Direct still; no pixels are sent. */
+  directCapture: (identity: CaptureIdentity) => req<unknown>("/browser/direct-capture", json({
+    window: identity.window, pane: String(identity.pane_id), local_tab: identity.local_tab_id, view: identity.view_id,
+  })),
 
   // --- projects -----------------------------------------------------------
   projects: () => req<Project[]>("/projects"),

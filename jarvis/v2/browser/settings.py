@@ -24,6 +24,11 @@ owner's switches for the HUD's Browser, each a boolean:
 - **`sound`** (BR-10): master permission for owner speaker buttons, **allowed** by default.
   Each instance still starts muted; explicit memory-only owner gestures enable it.
 
+- **`direct_capture`** (B-DIRECT-CAPTURE, BR-4/M6): Annotate and Send to chat
+  on a Direct tab take one cropped frame through Chrome's tab-share prompt.
+  **Off** by default and fail-closed. The settings route refuses to turn it
+  on until the owner's probe passed on this daemon (`direct_probe.py`).
+
 - **`password_store`** (B-LOGIN, M12): not a switch but one word. Only the
   exact string `"basic"` asks for Chrome's basic store on purpose (loudly
   unprotected; never for a profile already in the keyring). Anything else —
@@ -72,8 +77,9 @@ import time
 
 LOG = logging.getLogger(__name__)
 
-DEFAULTS: dict[str, bool] = {"lan": False, "local_servers": False, "auto_open": True, "sound": True, "agents_may_drive": True}
-FAIL_CLOSED_KEYS = frozenset({"sound", "agents_may_drive"})
+DEFAULTS: dict[str, bool] = {"lan": False, "local_servers": False, "auto_open": True, "sound": True, "agents_may_drive": True,
+                             "direct_capture": False}
+FAIL_CLOSED_KEYS = frozenset({"sound", "agents_may_drive", "direct_capture"})
 _UNKNOWN = object()
 _UNREADABLE = object()
 FILE_CAP = 64 * 1024
