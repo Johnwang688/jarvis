@@ -747,6 +747,8 @@ label.iconbtn.attach:hover { background: var(--bg-3); border-color: var(--border
 }
 .auth .headline { font: 600 12px var(--mono); color: var(--red); border: 1px solid var(--red-line); padding: 6px 8px; margin-bottom: 8px; white-space: normal; overflow-wrap: anywhere; letter-spacing: 0.04em; }
 .auth .origin { font: 10px var(--mono); color: var(--accent); margin-bottom: 8px; letter-spacing: 0.06em; }
+/* C6: one line, clipped, in neither amber nor red (a chat title is not a state). */
+.auth .relayed { font: 10px var(--mono); color: var(--text-2); margin-bottom: 8px; letter-spacing: 0.06em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 14px; max-height: 14px; }
 .auth .tool { font: 600 13px var(--mono); color: var(--text); margin-bottom: 8px; }
 .auth .arg { font: 11px var(--mono); color: var(--text); margin-bottom: 4px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .auth .arg .k { color: var(--text-muted); }

@@ -49,6 +49,54 @@ export function peerLabel(title: unknown): string {
   return oneLine(title, PEER_CHARS) || "(untitled)";
 }
 
+/** The longest chat title an approval card's provenance line shows (C6). */
+export const CARD_TITLE_CHARS = 60;
+
+const CARD_KEPT_BRACKETS = new Set(["(", ")", "[", "]", "{", "}"]);
+const CARD_UNDERSCORE = /[<>﹤﹥＜＞·•∙⋅・‧･⸱ꞏ]/u;
+const CARD_DROPPED = /[\p{Mn}\p{Me}\p{So}\p{Sk}\p{Co}\p{Cn}\p{Cs}ㅤᅟᅠﾠ]/u;
+const CARD_BRACKET = /[\p{Ps}\p{Pe}\p{Pi}\p{Pf}]/u;
+
+/** Another chat's title on an approval card (C6), by the daemon's rule
+ * (`chat_reads.card_title`) applied again here: format characters become a
+ * space (as the daemon's `clean_line` does), NFC, then symbols, emoji,
+ * combining marks and Hangul fillers go; every opening, closing or quotation
+ * bracket but ASCII ( ) [ ] { }, < > and their look-alikes, and dot
+ * look-alikes become "_"; one line of at most `CARD_TITLE_CHARS`, or
+ * "(untitled)" when nothing visible is left. */
+export function cardTitle(title: unknown): string {
+  if (typeof title !== "string") return "(untitled)";
+  const spaced = title.replace(/\p{Cf}/gu, " ").normalize("NFC");
+  let out = "";
+  for (const ch of spaced) {
+    if (CARD_DROPPED.test(ch)) continue;
+    out += CARD_UNDERSCORE.test(ch) || (CARD_BRACKET.test(ch) && !CARD_KEPT_BRACKETS.has(ch)) ? "_" : ch;
+  }
+  return oneLine(out, CARD_TITLE_CHARS) || "(untitled)";
+}
+
+/** The provenance line's parts: the reduced title, then the provider in
+ * words and the thread id, so two chats with one title stay apart, and
+ * whether that chat's turn started the asking call (`started`) or was only
+ * running while it asked (`running`, the daemon's word for a child it did
+ * not spawn and a call nobody attributes). No title string, no line. */
+export function relayedParts(from: unknown): { title: string; who: string; started: boolean } | null {
+  if (!from || typeof from !== "object") return null;
+  const f = from as Record<string, unknown>;
+  if (typeof f.title !== "string") return null;
+  const id = typeof f.thread_id === "string" && /^[0-9a-f]{8}$/.test(f.thread_id) ? f.thread_id : "";
+  const word = providerWord(f.provider);
+  return { title: cardTitle(f.title), who: id ? `${word} · ${id}` : word, started: f.kind === "started" };
+}
+
+/** The whole provenance line as plain text (the card's hover title). */
+export function relayedLine(from: unknown): string {
+  const parts = relayedParts(from);
+  if (!parts) return "";
+  const turn = `turn started by a message from chat ‹${parts.title}› (${parts.who})`;
+  return parts.started ? turn : `while a ${turn} runs`;
+}
+
 const PROVIDER_WORDS: Record<string, string> = { fast: "Jarvis", claude: "Claude", codex: "Codex" };
 
 /** The provider in words: Jarvis, Claude, Codex, or "chat". */

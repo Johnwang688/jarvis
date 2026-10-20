@@ -3656,9 +3656,50 @@ spoken, posted or taken for a task result. Records of an unknown kind are
 ignored by a consumer that has no rule for them, so none of these can pass
 for `user`.
 
+### Approval cards from a relayed or reply turn (C6)
+
+A card raised by a call from a turn another chat's message started (a
+relayed turn, in the target) or its reply started (a reply turn, in the
+sender), or raised while such a turn runs by a call that turn did not start,
+carries in its public JSON (the bus's `approval_requested`, `GET /approvals`):
+
+```json
+"relayed_from": {"title": "…", "provider": "fast" | "claude" | "codex" | "",
+                 "thread_id": "…", "kind": "started" | "running"}
+```
+
+`title` is the chat whose message or reply started that turn, as its relay
+header shows it, reduced for the card (`chat_reads.card_title`): one line of
+at most 60 characters; every opening, closing and quotation bracket but ASCII
+( ) [ ] { }, < > and their look-alikes, and dot look-alikes become `_`;
+symbols, emoji, combining marks and Hangul fillers go; `(untitled)` for
+nothing left. `provider` and `thread_id` are that chat's (empty when not of
+the expected shape), so two chats with one title stay apart. Each value is
+one line of at most 80 characters.
+
+`kind` `started`: that turn made the asking call, or spawned the native
+sub-agent that made it (a background child of a relayed turn keeps it after
+the turn ends). The HUD draws "turn started by a message from chat ‹title›
+(Provider · id)". `kind` `running`: a call that turn did not start — a
+child of another turn, an unknown child, or a jarvis-mcp bridge call, which
+carries no child attribution — asked while it runs. The HUD draws "while a
+turn started by a message from chat ‹title› (Provider · id) runs", and does
+so for any kind but `started`. The key is absent for any other call (an
+owner's turn, typed, spoken, Discord, a schedule, a task; a card between
+turns that no relay started) and from a private (Browser) card's projection.
+
+The line sits under REQUESTED BY on one clipped line, the title reduced
+again by the same rule (`lib/relays.ts` `cardTitle`) inside a `<bdi>`, the
+whole line as its hover title; an id that is not 8 lowercase hex characters
+is not drawn, and a `relayed_from` without a string `title` draws nothing.
+It is display only: no layer reads it, the decision, the layer, Always and
+the rest of the request are the same with and without it, and the owner's
+answer decides the card as on any other. Discord's card does not show it.
+
 ### What a relay cannot do
 
-A relay never answers an approval card or a provider question, never steers
+A relay never answers an approval card or a provider question (a card its
+turn raises only names it, above), never steers
 the target or reserves its desk, and never interrupts: an owner message in the
 target still goes first and steers into a running relayed turn. A turn a relay
 started cannot send onward (no chains). The owner's Stop in the target drops

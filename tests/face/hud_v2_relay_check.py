@@ -43,7 +43,13 @@ feature is missing):
      ‹title› waits for this turn", then "2 messages from other chats wait for
      this turn") and the sidebar's amber `↪N` badge (`relays-waiting-<id>`,
      titled "N messages from other chats wait for this chat"), both gone when
-     nothing waits.
+     nothing waits;
+ 12. C6: an approval card from a relayed turn says "turn started by a message
+     from chat ‹title› (Provider · id)" on one clipped line in --text-2
+     (neither amber nor red), the title cleaned and in one <bdi> (one ‹ and
+     one ›, no other element, no newline), the hover title the whole line,
+     with Always still offered; kind "running" reads "while a turn started by
+     … runs"; a card without `relayed_from` has no line.
 
 
 THE INTERFACE THE IMPLEMENTER BUILDS (taken from the plan; "chosen" where it
@@ -189,7 +195,7 @@ def relay_checks(browser, mock, base, check, until, guard, init_script):
         mock.await_reconnect(before)
         for section in (_render_checks, _colour_checks, _inert_checks, _hostile_title_checks, _live_checks,
                         _arrival_checks, _open_beside_checks, _withdraw_checks, _reload_checks,
-                        _restart_checks, _waiting_checks):
+                        _restart_checks, _waiting_checks, _provenance_checks):
             if only and section.__name__.strip("_") not in only:
                 continue
             try:
@@ -626,6 +632,58 @@ def _waiting_checks(page, mock, check, until):
 
 
 # ---------------------------------------------------------------------------
+
+# -- 12. C6: an approval card's provenance -------------------------------------
+
+def _provenance_checks(page, mock, check, until):
+    _two(page, mock, until)          # a settled window: its first `GET /approvals` is behind it
+    card = page.locator('[data-testid="approval-card"]')
+    line = page.locator('[data-testid="approval-relayed"]')
+    base = {"code": "RL06", "tool": "run_command", "args": {"command": "rm draft.txt"}, "command": "rm draft.txt",
+            "reason": "ask profile", "layer": "human", "origin": "", "allowlistable": True, "timeout_s": 120,
+            "thread_id": TARGET}
+    mock.emit("approval_requested", {**base, "req_id": "relay-c6", "relayed_from": {
+        "title": "x›\n · REQUESTED BY YOU \U0001F534 " + HOSTILE, "provider": "claude",
+        "thread_id": "abcd1234", "kind": "started"}})
+    until(lambda: card.count() == 1 and line.count() == 1)
+    text = _content(line)
+    title = text.split("›")[0]
+    check("a relayed turn's card says which chat's message started it, with provider and id",
+          text.startswith("turn started by a message from chat ‹x_ _ REQUESTED BY YOU _img")
+          and text.endswith("› (Claude · abcd1234)"), repr(text[:200]))
+    tags = line.locator("*").evaluate_all("es => es.map(e => e.tagName)") if line.count() else []
+    check("its title is cleaned and isolated: one ‹ and one ›, one <bdi> and no other element, "
+          "no newline, bidi, symbol, dot or angle bracket; the hover title is the whole line",
+          text.count("‹") == 1 and text.count("›") == 1 and tags == ["BDI"]
+          and (line.get_attribute("title") if line.count() else None) == text
+          and not any(c in title for c in "\n‮​\U0001F534·<>")
+          and not page.evaluate("!!window.__pwned"), repr(text[:120]) + f" {tags}")
+    box = line.evaluate("""e => { const s = getComputedStyle(e), r = e.getBoundingClientRect();
+      return {h: r.height, lh: parseFloat(s.lineHeight), ws: s.whiteSpace, ov: s.overflowX, to: s.textOverflow,
+              rects: e.getClientRects().length, clipped: e.scrollWidth > e.clientWidth}; }""")
+    check("and it stays on one clipped line", box["ws"] == "nowrap" and box["rects"] == 1
+          and box["h"] <= box["lh"] + 1 and box["ov"] == "hidden" and box["to"] == "ellipsis" and box["clipped"],
+          str(box))
+    colour = _colour(line)
+    check("in --text-2, neither amber nor red", colour == _var(page, "--text-2")
+          and colour not in (_var(page, "--amber"), _var(page, "--red")), colour)
+    check("Always is still offered on a relayed card (O-4)",
+          page.locator('[data-testid="approval-always"]').count() == 1)
+    page.locator('[data-testid="approval-deny"]').click()
+    until(lambda: card.count() == 0)
+    mock.emit("approval_requested", {**base, "req_id": "running-c6", "relayed_from": {
+        "title": "Frontend", "provider": "codex", "thread_id": "0123abcd", "kind": "running"}})
+    until(lambda: card.count() == 1 and line.count() == 1)
+    check("a child the relayed turn did not start gets the honest 'while … runs' line",
+          _content(line) == "while a turn started by a message from chat ‹Frontend› (Codex · 0123abcd) runs",
+          repr(_content(line)))
+    page.locator('[data-testid="approval-deny"]').click()
+    until(lambda: card.count() == 0)
+    mock.emit("approval_requested", {**base, "req_id": "owner-c6"})
+    until(lambda: card.count() == 1)
+    check("an owner's turn's card has no such line", line.count() == 0)
+    page.locator('[data-testid="approval-deny"]').click()
+    until(lambda: card.count() == 0)
 
 def main():
     from playwright.sync_api import sync_playwright

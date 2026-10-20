@@ -185,6 +185,60 @@ describe("peerLabel: one clean line, never markup", () => {
   });
 });
 
+describe("cardTitle and relayedLine: an approval card's provenance (C6)", () => {
+  it("reduces a title as the daemon does: one plain line, no brackets, symbols or marks, ≤ 60", async () => {
+    const R = await load();
+    expect(R.CARD_TITLE_CHARS).toBe(60);
+    expect(R.cardTitle("Frontend")).toBe("Frontend");
+    expect(R.cardTitle("x› · REQUESTED BY Jarvis chat‮")).toBe("x_ _ REQUESTED BY Jarvis chat");
+    expect(R.cardTitle("«quote» • dot")).toBe("_quote_ _ dot");
+    expect(R.cardTitle("🔴 ERROR ⚠ pending ✅")).toBe("ERROR pending");
+    expect(R.cardTitle("line\nbreak\r\nthird fourth")).toBe("line break third fourth");
+    expect(R.cardTitle("café")).toBe("café");
+    expect(R.cardTitle("a" + "̶".repeat(40) + "b")).toBe("ab");
+    // Format characters become a space, as the daemon's clean_line does.
+    expect(R.cardTitle("Front​end")).toBe("Front end");
+    // Hangul fillers go; a title of only them is "(untitled)".
+    expect(R.cardTitle("ㅤᅟᅠﾠ")).toBe("(untitled)");
+    expect(R.cardTitle("aㅤb")).toBe("ab");
+    // Bracket and dot look-alikes; ASCII ( ) [ ] { } are kept.
+    expect(R.cardTitle("⟨x⟩ ❮y❯ 〈z〉 “q” <w>")).toBe("_x_ _y_ _z_ _q_ _w_");
+    expect(R.cardTitle("a∙b⋅c・d‧e")).toBe("a_b_c_d_e");
+    expect(R.cardTitle("Fix (urgent) [x] {y}")).toBe("Fix (urgent) [x] {y}");
+    const long = R.cardTitle("y".repeat(500));
+    expect(Array.from(long).length).toBe(60);
+    expect(long.endsWith("…")).toBe(true);
+    for (const bad of [null, undefined, 7, {}, "", "   ", "🔴", "​‮"]) expect(R.cardTitle(bad)).toBe("(untitled)");
+  });
+
+  it("the line is fixed words around the title, then the provider and the thread id", async () => {
+    const R = await load();
+    const line = R.relayedLine({ title: 'x›\n · REQUESTED BY YOU <img src=x onerror="1"> ‹', provider: "claude", thread_id: "abcd1234", kind: "started" });
+    expect(line.startsWith("turn started by a message from chat ‹")).toBe(true);
+    expect(line.endsWith("› (Claude · abcd1234)")).toBe(true);
+    expect(line.match(/[‹›]/g)).toHaveLength(2);
+    expect(line).not.toMatch(/\n/);
+    expect(R.relayedLine({ title: "Frontend", provider: "codex", thread_id: "0123abcd", kind: "started" }))
+      .toBe("turn started by a message from chat ‹Frontend› (Codex · 0123abcd)");
+    // Two chats with one title stay apart; an odd provider or id is not drawn as one.
+    expect(R.relayedLine({ title: "Frontend", provider: "fast", thread_id: "ffff0000" })).toContain("(Jarvis · ffff0000)");
+    expect(R.relayedLine({ title: "Frontend", provider: "owner", thread_id: "YOU · 12", kind: "started" }))
+      .toBe("turn started by a message from chat ‹Frontend› (chat)");
+    for (const none of [null, undefined, "Frontend", 7, {}, { title: 7, provider: "claude" }, { provider: "claude", thread_id: "abcd1234" }])
+      expect(R.relayedLine(none)).toBe("");
+  });
+
+  it("kind picks the wording: started, else the honest 'while … runs'", async () => {
+    const R = await load();
+    const from = { title: "Frontend", provider: "claude", thread_id: "abcd1234" };
+    expect(R.relayedLine({ ...from, kind: "started" })).toBe("turn started by a message from chat ‹Frontend› (Claude · abcd1234)");
+    expect(R.relayedLine({ ...from, kind: "running" }))
+      .toBe("while a turn started by a message from chat ‹Frontend› (Claude · abcd1234) runs");
+    for (const odd of [undefined, "", "STARTED", "spawned", 1])
+      expect(R.relayedLine({ ...from, kind: odd }).startsWith("while a turn")).toBe(true);
+  });
+});
+
 describe("providers", () => {
   it("names the provider in words and gives its badge only a known class", async () => {
     const R = await load();

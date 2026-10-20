@@ -21,6 +21,7 @@ import { noPointerFocus } from "../lib/talkkey";
 import { allowRestore } from "../state/frameguard";
 import { BrowserApprovalCard } from "./BrowserApproval";
 import { cardLabel, validSid, type SubagentRef } from "../lib/subagents";
+import { relayedLine, relayedParts } from "../lib/relays";
 import { useRow, useWatch } from "../state/subagents";
 
 export function approvalChime(ctx?: AudioContext | null) {
@@ -107,6 +108,8 @@ function OrdinaryApprovalCard(props: {
   const also = r.remote ? " · ALSO ASKED ON DISCORD" : "";
   // `args` is a dict of model-written strings; each is rendered as text.
   const args = Object.entries(r.args || {});
+  // Chat-to-chat C6: which chat's message started the asking call's turn.
+  const relay = relayedParts(r.relayed_from);
 
   return (
     // Focusable (tabIndex -1) so the veil can take focus off a frame or an
@@ -119,6 +122,14 @@ function OrdinaryApprovalCard(props: {
       ) : null}
       {r.origin ? (
         <div className="origin" data-testid="approval-origin">REQUESTED BY {r.origin}</div>
+      ) : null}
+      {/* Chat-to-chat C6: the relayed turn behind this call (or running). Display
+          only, one clipped line of plain text; it changes no button here. */}
+      {relay ? (
+        <div className="relayed" data-testid="approval-relayed" title={relayedLine(r.relayed_from)}>
+          {relay.started ? "" : "while a "}turn started by a message from chat ‹<bdi>{relay.title}</bdi>› ({relay.who})
+          {relay.started ? "" : " runs"}
+        </div>
       ) : null}
       {validSid(r.subagent) && r.thread_id ? (
         <SubagentLink threadId={r.thread_id} sid={r.subagent}

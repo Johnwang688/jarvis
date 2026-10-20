@@ -53,6 +53,7 @@ import os
 import re
 import time
 from typing import Any, Callable, Iterable
+import unicodedata
 
 from jarvis import untrusted
 from jarvis.tools import secrets
@@ -129,6 +130,44 @@ def clean_title(title: Any, cap: int = TITLE_CHARS) -> str:
     if line == WITHHELD:
         return "(title withheld)"
     return clean_line(line, cap=cap) or "(untitled)"
+
+
+# A chat's title on an approval card (C6): "turn started by a message from
+# chat ‹title› (Provider · id)". It lands on an authorization surface, so
+# beyond `clean_title` it can neither close the ‹ › it sits in nor draw one
+# (every opening, closing and quotation bracket but ASCII ( ) [ ] { }, and
+# < > and their look-alikes, become "_"), nor draw the card's " · " parts
+# (dot look-alikes become "_"), nor paint a symbol (an emoji, a warning sign
+# or a coloured dot standing in for pending or error meaning), nor stack
+# combining marks out of its line, nor render blank (Hangul fillers go).
+# `hud/src/lib/relays.ts` `cardTitle` applies the same rule again.
+CARD_TITLE_CHARS = 60
+_CARD_UNDERSCORE = frozenset("<>\uFE64\uFE65\uFF1C\uFF1E"
+                             "·•∙⋅・‧･⸱ꞏ\u2022\u00B7")
+_CARD_BRACKET_CATEGORIES = frozenset(("Ps", "Pe", "Pi", "Pf"))
+_CARD_KEPT_BRACKETS = frozenset("()[]{}")
+_CARD_DROPPED = frozenset(("Mn", "Me", "So", "Sk", "Co", "Cn", "Cs"))
+_CARD_FILLERS = frozenset("\u3164\u115F\u1160\uFFA0")
+
+
+def _card_char(ch: str) -> str:
+    category = unicodedata.category(ch)
+    if category in _CARD_DROPPED or ch in _CARD_FILLERS:
+        return ""
+    if ch in _CARD_UNDERSCORE or (category in _CARD_BRACKET_CATEGORIES and ch not in _CARD_KEPT_BRACKETS):
+        return "_"
+    return ch
+
+
+def card_title(title: Any) -> str:
+    """`title` (already one clean, scrubbed line, `chat_relay._title`) for an
+    approval card: one plain line of at most `CARD_TITLE_CHARS`, "(untitled)"
+    if nothing visible is left. Pure and total; it reads no file."""
+    if not isinstance(title, str):
+        return "(untitled)"
+    text = unicodedata.normalize("NFC", clean_line(title, cap=10 * CARD_TITLE_CHARS))
+    text = "".join(_card_char(ch) for ch in text)
+    return clean_line(" ".join(text.split()), cap=CARD_TITLE_CHARS) or "(untitled)"
 
 
 def provider_word(provider: Any) -> str:

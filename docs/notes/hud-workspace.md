@@ -1622,10 +1622,14 @@ Speech should skip `compaction` records as it skips `self_started` ones
 The rules behind these rows (who may send, the bounds, replies, Stop) are in
 [Control plane](control-plane.md#chat-to-chat-the-rules-in-one-place-c0-c5-merged-2026-10-19);
 the wire shapes are in [`docs/hud-api.md`](../hud-api.md#chat-to-chat-relays-between-chats-c3-c5-completed-in-c7-2026-10-19).
-This section is only what the HUD does with them. C5 is merged and live; C6
-(a "turn started by a message from chat ‹title›" line on approval cards) is
-not built, so a card from a relayed turn looks like any other and the owner
-tells the origin from the pane it appears in (live gate L4,
+This section is only what the HUD does with them. C5 is merged and live. C6
+(merged, #275; not yet live) adds a "turn started by a message from chat
+‹title› (Provider · id)" line to approval cards from a relayed or reply turn
+(or "while a turn started by … runs" for a call that turn did not start)
+(`Approvals.tsx`, `data-testid="approval-relayed"`, under REQUESTED BY: one
+clipped line in `--text-2` with the whole line as its hover title, the title
+through `lib/relays.ts` `cardTitle` in a `<bdi>`); it changes no button and
+decides nothing (live gate L4,
 [runbook](../plans/2026-10-19-chat-to-chat-live-gates.md), not run).
 
 A message one chat sent another is a `role: "relay"` row, drawn by
