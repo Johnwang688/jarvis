@@ -1601,8 +1601,18 @@ TOOL_STARTED/TOOL_FINISHED pair, any USAGE, then TURN_FINISHED `{"stop":
   `compacted: false`, "Nothing to compact yet: the conversation is still
   short." The summary's text stays in the v1 session file; no event carries
   it. `compact_context` stays in `FORBIDDEN_TOOLS`.
-- **Codex** is WP-B (`thread/compact/start`); until it lands, a Codex chat
-  has no `compact` and the daemon refuses.
+- **Codex** (WP-B) sends one `thread/compact/start {threadId}` through
+  `send`'s own loop, `_drive`, so the reader handshake, `_auth_lock`,
+  accounting and cooldown are shared. The reply carries no turn id: it is
+  learned from the first `turn/started` on the thread, and a
+  `contextCompaction` item (or the deprecated `thread/compacted`) is the
+  success, as recorded on 0.161.0 in `tests/v2/fixtures/compact/`. A
+  completion without usage is not fatal. A -32601 is remembered for the
+  session, and `compact_refusal` then says so. A compaction is never
+  refused as past a brief's `max_turns`, carries no model change (that waits
+  for the next `turn/start`), and a steer meanwhile is refused for the
+  daemon to queue. Codex's own reason for not compacting is shown only through
+  `scrub_text`, one line, else a fixed sentence.
 
 ## Claude skills in Jarvis and Codex chats (SK-1, SK-2, 2026-10-19)
 
@@ -1644,3 +1654,7 @@ Code: `jarvis/tools/skills.py` (`external_skills`, `_paths`),
 - **Tests** that build an agent holding `skill_read` or read the catalogue set
   `config.CLAUDE_SKILLS_DIR = None`, so no suite reads the owner's real
   `~/.claude/skills`.
+- **Rolled out 2026-10-20** (main 1c0c006): 32 skills in the `/` menu; the
+  first `jarvis skills link` made 25 Codex links. Synced skills written for
+  Claude-only tools (`computer-use`, `chrome-browser`) are listed but may
+  only half-work on the fast path or Codex.

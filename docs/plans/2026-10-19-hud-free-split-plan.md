@@ -1,5 +1,7 @@
 # Plan: directional split (VS Code style), up to twelve panes (Jarvis v2 HUD)
 
+**Status (2026-10-19).** Built and installed: FS1 [#257](https://github.com/Johnwang688/jarvis/pull/257), FS0 [#258](https://github.com/Johnwang688/jarvis/pull/258), FS2 [#259](https://github.com/Johnwang688/jarvis/pull/259), FS3 [#264](https://github.com/Johnwang688/jarvis/pull/264) and FS4 [#268](https://github.com/Johnwang688/jarvis/pull/268). As built: `docs/notes/hud-workspace.md`, "The directional split and close (FS4)". FS3 corrected §10's 1px rule (the erratum below).
+
 _A read-only planner's proposal against `main` at d9209b7. Where
 `docs/plans/2026-10-19-hud-free-split-decisions.md` and this plan disagree, the
 decisions file wins. This plan replaces S-1's ladder (`LADDER`,
