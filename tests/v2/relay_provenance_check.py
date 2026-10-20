@@ -145,8 +145,10 @@ class RealPermit(R.Harness):
         return card
 
     def published(self, card):
-        events = [e for e in self.bus("approval_requested")
-                  if (e.get("data") or {}).get("req_id") == card.req_id]
+        def mine():
+            return [e for e in self.bus("approval_requested")
+                    if (e.get("data") or {}).get("req_id") == card.req_id]
+        events = until(mine, "the card's approval_requested on the bus")
         self.assertEqual(len(events), 1)
         return events[0]["data"]
 
