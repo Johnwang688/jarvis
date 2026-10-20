@@ -180,12 +180,12 @@ class ChildRule(unittest.TestCase):
             daemon_mod._stamp_child(session, _started(f"cl:n{n}"))
         self.assertEqual(len(session.child_relay), daemon_mod.CHILD_STAMPS, "stamps bounded")
         self.assertNotIn("cl:old", session.child_relay)
-        session.relay(False)
-        daemon_mod._stamp_child(session, _started("cl:old"))     # seen: not restamped from anything
+        # A later relayed turn re-tasks it: seen, so never restamped from it.
+        daemon_mod._stamp_child(session, _started("cl:old"))
         self.assertNotIn("cl:old", session.child_relay)
-        self.assertIsNone(daemon_mod._relayed_from(session, "cl:old"))
-        session.relay(True)
         self.assertEqual(daemon_mod._relayed_from(session, "cl:old")["kind"], "running")
+        session.relay(False)
+        self.assertIsNone(daemon_mod._relayed_from(session, "cl:old"))
         for n in range(daemon_mod.CHILD_SEEN + 5):
             daemon_mod._stamp_child(session, {"kind": "subagent_event", "sid": f"cl:e{n}", "data": {}})
         self.assertEqual(len(session.child_seen), daemon_mod.CHILD_SEEN, "the seen set is bounded too")
