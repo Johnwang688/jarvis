@@ -5,7 +5,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "../api";
 import { BrowserCapture } from "./BrowserCapture";
 import { CAPTURE_MIME, CAPTURE_NO_CHAT, captureAttachments, type CaptureIdentity, type CaptureStill } from "../lib/pageCapture";
-vi.mock("../api", () => ({ api: { captureBrowser: vi.fn() } }));
+import { fakeEnv, place } from "../lib/directCaptureFake";
+vi.mock("../api", () => ({ api: { captureBrowser: vi.fn(), directCapture: vi.fn() } }));
 vi.mock("../lib/pageCapture", async original => ({
   ...await original<typeof import("../lib/pageCapture")>(), captureAttachments: vi.fn(),
 }));
@@ -153,4 +154,99 @@ it("portal controls can be hidden without unmounting the controller or captured 
   await show({ controlsTarget: panel });
   expect(host.querySelector('[data-testid="frozen-still"]')).not.toBeNull();
   panel.remove();
+});
+
+describe("Direct capture behind the owner's switch (B-DIRECT-CAPTURE)", () => {
+  let frame: HTMLIFrameElement, shield: HTMLDivElement, framehost: HTMLDivElement, on: boolean;
+  const ref = { capture_id: "b".repeat(32), url: "http://localhost:23456/", title: "", text_chars: 0, whole: false,
+    notes: ["Direct capture: only the address is attached."] };
+  beforeEach(() => {
+    framehost = document.createElement("div"); framehost.className = "framehost";
+    frame = document.createElement("iframe"); shield = document.createElement("div"); shield.className = "frameshield";
+    framehost.append(frame, shield); document.body.append(framehost);
+    place(frame, { left: 100, top: 100, width: 400, height: 250 });
+    (document as unknown as { elementFromPoint: () => Element }).elementFromPoint = () => shield;
+    on = true;
+    vi.mocked(api.directCapture).mockReset().mockResolvedValue(ref);
+  });
+  afterEach(() => framehost.remove());
+  const direct = (fake: ReturnType<typeof fakeEnv>) => ({ remoteTabId: null,
+    direct: { enabled: () => on, frame: () => frame, env: fake.env } });
+  const ended = (f: ReturnType<typeof fakeEnv>) => f.tracks.length > 0 && f.tracks.every(t => t.readyState === "ended");
+  const settle = () => act(async () => { for (let i = 0; i < 12; i++) await new Promise(r => setTimeout(r, 10)); });
+
+  it("off: the documented fallback, no prompt and no reference", async () => {
+    on = false; const f = fakeEnv();
+    await show(direct(f)); await click("Annotate"); await settle();
+    expect(host.textContent).toContain("Open this in Remote to annotate.");
+    expect(f.calls).toEqual([]); expect(api.directCapture).not.toHaveBeenCalled();
+  });
+  it("on: a trusted Annotate freezes one cropped frame and asks the daemon for the URL-only reference after it", async () => {
+    const f = fakeEnv();
+    await show(direct(f)); await click("Annotate"); await settle();
+    expect(host.querySelector('[data-testid="frozen-still"]')).not.toBeNull();
+    expect(ended(f)).toBe(true);
+    expect(api.directCapture).toHaveBeenCalledExactlyOnceWith(identity);
+    expect(api.captureBrowser).not.toHaveBeenCalled();
+    await click("Stage still");
+    expect(stage).toHaveBeenCalledExactlyOnceWith({ key: "thread-original" }, pair);
+    expect(vi.mocked(captureAttachments).mock.calls[0][0]).toMatchObject({ capture_id: ref.capture_id,
+      image: { mime: "image/png", width: 800, height: 500 }, url: ref.url, text_chars: 0 });
+  });
+  it("on: Send to chat stages the pair into the chat pinned at the press", async () => {
+    const f = fakeEnv();
+    await show(direct(f)); await click("Send to chat"); key = "later"; await settle();
+    expect(stage).toHaveBeenCalledExactlyOnceWith({ key: "thread-original" }, pair);
+    expect(ended(f)).toBe(true);
+  });
+  it("an untrusted press never prompts", async () => {
+    const f = fakeEnv({ trusted: false });
+    await show(direct(f)); await click("Annotate"); await settle();
+    expect(f.calls).toEqual([]);
+    expect(host.textContent).toContain("Press Annotate or Send to chat yourself");
+    expect(host.querySelector(".capture-remote")).toBeNull();
+  });
+  it("a cancelled prompt or a failed pixel check offers Remote and leaves no reference", async () => {
+    for (const [o, text] of [[{ prompt: "NotAllowedError" }, "share prompt was cancelled"],
+      [{ frame: { width: 10, height: 10 } }, "did not match this page's size"],
+      [{ sample: null }, "was blank"]] as const) {
+      const f = fakeEnv(o);
+      await show(direct(f)); await click("Annotate"); await settle();
+      expect(host.textContent).toContain(text);
+      expect(host.querySelector(".capture-remote")).not.toBeNull();
+      expect(api.directCapture).not.toHaveBeenCalled();
+      expect(host.querySelector('[data-testid="frozen-still"]')).toBeNull();
+      expect(f.tracks.every(t => t.readyState === "ended")).toBe(true);
+      await act(async () => root.unmount()); root = createRoot(host);
+    }
+  });
+  it("a card, a hidden pane or unmount during the prompt stops the tracks and keeps nothing", async () => {
+    for (const change of [{ blocked: true }, { drawn: false }, { active: false }, "unmount"] as const) {
+      const f = fakeEnv({ hold: true });
+      await show(direct(f)); await click("Send to chat"); await settle();
+      expect(f.calls).toContain("getDisplayMedia");
+      if (change === "unmount") await act(async () => root.unmount());
+      else await show({ ...direct(f), ...change });
+      f.release(); await settle();
+      expect(ended(f)).toBe(true);
+      expect(api.directCapture).not.toHaveBeenCalled(); expect(stage).not.toHaveBeenCalled();
+      expect(host.querySelector('[data-testid="frozen-still"]')).toBeNull();
+      root = createRoot(host); if (change !== "unmount") await act(async () => root.unmount()), root = createRoot(host);
+    }
+  });
+  it("the daemon refusing the reference keeps no still", async () => {
+    const f = fakeEnv();
+    vi.mocked(api.directCapture).mockRejectedValue(new Error("Direct capture is off: turn it on in Settings, Browser"));
+    await show(direct(f)); await click("Annotate"); await settle();
+    expect(host.textContent).toContain("Direct capture is off");
+    expect(host.querySelector('[data-testid="frozen-still"]')).toBeNull();
+    expect(ended(f)).toBe(true);
+  });
+  it("the capture never moves focus", async () => {
+    const f = fakeEnv(); let focused = 0; frame.focus = () => { focused++; };
+    await show(direct(f));
+    const button = Array.from(host.querySelectorAll("button")).find(b => b.textContent === "Annotate")!;
+    button.focus(); await click("Annotate"); await settle();
+    expect(focused).toBe(0); expect(document.activeElement).toBe(button);
+  });
 });

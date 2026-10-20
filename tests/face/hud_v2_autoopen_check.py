@@ -105,7 +105,9 @@ def autoopen_checks(browser, check, until, guard, init_script):
             section(browser, context, page, mock, fixture, check, until, guard, init_script)
             added = browser_calls(mock)[len(before_browser):]
             check(section.__name__ + " never invokes Remote browser routes",
-                  added == [] if section is not _settings else all(method == "PATCH" and path == "/browser/settings" and set(body) == {"auto_open"} and type(body["auto_open"]) is bool for method, path, body in added),
+                  added == [] if section is not _settings else all((method == "PATCH" and path == "/browser/settings" and set(body) == {"auto_open"} and type(body["auto_open"]) is bool)
+                                                   # Settings → Browser reads the Direct capture probe's status (B-DIRECT-CAPTURE): a read, never a Remote route.
+                                                   or (method == "GET" and path == "/browser/direct-capture/probe" and not body) for method, path, body in added),
                   str(added))
             check(section.__name__ + " has no page errors", not errors, "; ".join(errors[:2]))
         except Exception as error:

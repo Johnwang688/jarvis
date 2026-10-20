@@ -1224,6 +1224,122 @@ Direct capture remains unverified on this host. The real app-mode capability
 probe found getDisplayMedia/CropTarget but returned no accepted stream or pixels;
 synthetic stream/UI tests are not M6 acceptance. Direct therefore offers
 “Open this in Remote to annotate” and converts only on that second owner gesture.
+**Since B-DIRECT-CAPTURE (2026-10-19) a Direct capture path is built, gated, not
+enabled until the owner's probe passes**; the fallback above is still the default
+(next section).
+
+## Direct capture behind the owner's probe (B-DIRECT-CAPTURE, BR-4/M6, 2026-10-19)
+
+Built, gated, not enabled until the owner's probe passes. Plan and reasons:
+`docs/plans/2026-10-19-direct-capture-plan.md`.
+
+**The gate.** `browser.json` has one more owner switch, `direct_capture`. It is
+**off** by default, fail-closed on a malformed file, and protected like the
+others. `PATCH /browser/settings {direct_capture: true}` is refused (409) until
+the owner's probe has passed on this daemon. Turning it off always works. The
+pass is held in daemon memory only. The probe's JSON report
+(`config.DIRECT_CAPTURE_PROBE_PATH`, default
+`~/.local/share/jarvis/direct-capture-probe.json`, 0600, outside the Browser's
+credential folder) is written for the lead and never read back, so a planted
+file unlocks nothing. A switch rather than self-enabling, because every other
+Browser widening is an owner switch (B-5, B-12, `local_servers`). The probe in
+front of it, because the M6 rule says no Direct capture without the owner's
+prompt and pixel evidence.
+
+**The capture** (`hud/src/lib/directCapture.ts`). The switch must be on, and the
+press must be trusted: the existing Annotate or Send to chat button only. The
+tab must be the active one and drawn, with no card (`blocked`). Options close and
+the pane waits for the fresh uncovered receipt, as Remote does.
+
+Then the frame is checked. It must be fully on screen, not under a
+hidden/inert/aria-hidden ancestor, and the page must be visible. A hit-test
+grid at most 48 CSS px apart (capped near 2000 points), inset 8 px past the
+panes' transparent resize handles, may hit only the frame or its own shield.
+Overlays with `pointer-events: none` defeat hit testing, so each overlay's own
+rect is also tested against the frame's. The overlays checked are dialogs,
+menus, listboxes, tooltips, the approval card, the dev-server prompt layer
+(`.devserver-prompts`, `devserver-prompt`) and terminal toasts (`.termtoasts`).
+Approvals are also covered through `blocked`.
+
+Then the capture itself:
+- `CropTarget.fromElement(iframe)`;
+- `getDisplayMedia({preferCurrentTab: true, displaySurface: "browser", audio: false, …})`;
+- `cropTo`;
+- one `ImageCapture.grabFrame()`, at most 3 tries 150 ms apart, each bounded to 3 s, since a track can have no
+  frame yet just after the crop.
+
+Coverage is checked before each grab and again at it; both must be clear.
+Every track stops in a `finally` on every path. A stream that arrives after the gesture went stale is stopped
+the moment it resolves.
+
+The frame is checked once more, before it is used. Coverage and the iframe's rect are read at the grab, before
+the tracks stop, because Chrome's own sharing bar can resize the page while it shares:
+- it is uncovered;
+- **size rule** (`scaleOf`, mirrored in `direct_probe.scale_of`): the frame is the iframe's rect at one uniform
+  scale *s* with 0.5 ≤ *s* ≤ `devicePixelRatio`. The long edge sets *s*, give or take 2 px of rounding, and the
+  short edge must agree within 1 + short/long + 0.5 px (at most 2.5, since Chrome may round both edges).
+  Chrome delivered CSS pixels under a 1.5 DPR (review of PR #276, MED-1)
+  and may downscale a large pane at 4K;
+- a pane with the window's shape is refused as ambiguous. That is decided from the rect and the window
+  alone, before the frame is looked at. A frame with the window's shape at **any** scale is refused as not
+  cropped, including an uncropped tab delivered below 0.5 (delta review of #276);
+- it is not blank on a 64×64 sample.
+
+Anything else discards it with a sentence and offers Open in Remote. Only then
+does `POST /browser/direct-capture` (owner-only) mint a URL-only reference.
+The URL is the registry's own record of that exact Direct binding, through the
+usual capture guard; it has no title and no text. The daemon refuses it while
+the switch is off or a card is pending. The still then joins Remote's
+annotation and atomic Send flow unchanged. Nothing focuses the frame, and a
+cancelled prompt leaves no still, stream or reference.
+
+**Stated residual.** Direct cannot read a cross-origin page's text, so a Direct
+still has no credential check. Remote withholds an image when its page text
+holds a credential. The switch's help text and the still's note say so; the
+picture reaches an agent only through the owner's own Send. Also, a page that
+navigates itself while the prompt is up can show pixels from a different
+address than the binding URL attached with it.
+
+**The probe.** It lives in Settings → Browser → Test Direct capture. It runs on
+the owner's trusted press and only in the installed app (`display-mode:
+standalone`). It crops to a HUD-made test pattern: a sandboxed `srcdoc` frame,
+no script, never a web page. The pattern is 7:5, a shape windows rarely have
+(in a 7:5 window the probe is refused as ambiguous),
+and as wide as Settings allows, from 320 to 1120 CSS px. That way a large capture,
+which Chrome may downscale, is measured as well as a small one. It reports facts
+only:
+- display mode and Chrome major version;
+- whether the APIs are present;
+- the prompt outcome and the error name;
+- track settings;
+- whether the crop was applied;
+- the pattern's rect, the window size, the DPR and the frame size;
+- nine sample positions and the colours found there;
+- the live tracks left afterwards;
+- step timings.
+
+What `direct_probe.py` checks itself:
+- every field against a fixed schema;
+- the rect has the pattern's 7:5 shape (±1%) and is at least 160 px wide;
+- the size rule above, applied to the reported rect, window, DPR and frame;
+- the sample positions against its own nine fractions of the frame;
+- each colour is nearer its own pattern colour than any other by a margin of 20.
+
+The pattern colours and sample positions live on the daemon; the HUD sends no
+expected values. The report records the scale that matched. What the HUD says
+it *measured* is trusted as measurement.
+
+**Evidence so far.** These are not M6:
+- Vitest fakes (`directCapture.test.ts`, `BrowserCapture.test.ts`, `DirectCaptureSetting.test.ts`).
+- `tests/v2/direct_capture_check.py`.
+- `tests/face/hud_v2_direct_capture_check.py`. It runs Chromium's real getDisplayMedia, CropTarget, cropTo and
+  ImageCapture against the built HUD in new headless with `--auto-accept-this-tab-capture` and a faked
+  standalone media query. The probe passes there and a real Direct frame is staged.
+
+Under Playwright's *emulated* `device_scale_factor` 1.5, Chromium delivered CSS-pixel cropped frames: 1120×800
+for a 1120×800 pattern, which records scale 1.0. The first build's DPR-only rule refused these. The face check
+now runs at both 1 and 1.5. What a real Windows DPR does is what the owner's probe records. M6, the real Windows
+app-mode prompt and pixels, is still the owner's to produce (`docs/plans/2026-10-16-owner-live-checks.md`).
 
 ## BR10 sound helper groundwork (historical, superseded; 2026-10-13)
 

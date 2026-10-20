@@ -84,3 +84,11 @@ export async function captureAttachments(still: CaptureStill, ops: readonly Op[]
     canvas.width = canvas.height = 0;
   }
 }
+
+/** B-DIRECT-CAPTURE: the daemon's URL-only reference plus the HUD's own cropped frame. */
+export function directStill(raw: unknown, image: CaptureStill["image"]): CaptureStill {
+  const r = raw as Partial<CaptureStill> | null;
+  if (!r || r.title !== "" || r.text_chars !== 0 || r.whole !== false || "image" in r)
+    throw new Error("This capture could not be read. Capture it again.");
+  return captureReply({ ...r, image });
+}

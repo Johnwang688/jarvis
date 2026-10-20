@@ -10,8 +10,9 @@ string; URLs travel only in JSON bodies, and nothing a route answers with a
 refusal ever contains one.
 
     GET    /browser                          state: running, profiles, tabs, settings
-    GET    /browser/settings                 {lan, local_servers, auto_open}
-    PATCH  /browser/settings                 {lan?, local_servers?, auto_open?}  (browser.json, protected)
+    GET    /browser/settings                 {lan, local_servers, auto_open, sound, agents_may_drive, direct_capture}
+    PATCH  /browser/settings                 any non-empty subset  (browser.json, protected);
+                                             direct_capture true -> 409 until the owner's probe passed
     GET    /browser/tabs                     [{tab_id, profile, ctx, url, title}]
     POST   /browser/tabs                     {profile?, ctx?, url?} -> 201 {tab_id, ...}
     DELETE /browser/tabs/<id>
@@ -24,6 +25,13 @@ refusal ever contains one.
     DELETE /browser/profiles/<id>            closes and deletes only this profile
     POST   /browser/profiles/<id>/signin     {} -> 201 exact owner settings entry
     DELETE /browser/contexts/<ctx>           closes a Private context and its data
+
+B-DIRECT-CAPTURE's (captures.py, direct_probe.py); neither ever receives pixels:
+
+    POST   /browser/direct-capture           {window, pane, local_tab, view} -> URL-only capture reference
+                                             (409 while direct_capture is off, a card waits, or the binding moved)
+    GET    /browser/direct-capture/probe     {probe: {passed, reason, at} | null}  (this daemon run only)
+    POST   /browser/direct-capture/probe     the probe's facts -> {passed, reason, at, saved}
 
 BR-1b's (stream.py, files.py):
 
@@ -63,7 +71,8 @@ from urllib.parse import quote
 from jarvis import config
 
 from . import files as _files
-from .captures import CaptureRefused, capture_page
+from .captures import CaptureRefused, capture_direct, capture_page
+from .direct_probe import ProbeRefused
 from .files import FileRefused
 from .host import BrowserRefused
 from .panes import PANE_SLOTS, PaneRefused
@@ -158,6 +167,19 @@ def route(handler, daemon, parts, query):
     try:
         if capture:
             return 200, capture_page(daemon, parts[2], query)
+        # B-DIRECT-CAPTURE: a URL-only reference for the owner's Direct still,
+        # and the owner's probe report. Neither route ever receives pixels.
+        if parts == ["browser", "direct-capture"] and method == "POST":
+            keys = ("window", "pane", "local_tab", "view")
+            return 200, capture_direct(daemon, _object(handler._body(), keys, keys))
+        if parts == ["browser", "direct-capture", "probe"]:
+            if method == "GET":
+                return 200, {"probe": daemon.browser_direct_probe.status()}
+            if method == "POST":
+                try:
+                    return 200, daemon.browser_direct_probe.record(handler._body())
+                except ProbeRefused as refusal:
+                    _fail(400, str(refusal))
         if parts == ["browser", "front"] and method == "POST":
             return 200, daemon.browser_panes.report(handler._body())
         if len(parts) >= 3 and parts[1] == "panes":
@@ -199,6 +221,9 @@ def route(handler, daemon, parts, query):
                 body = _object(handler._body(), tuple(SETTINGS))
                 if not body:
                     _fail(400, "missing fields: " + " or ".join(SETTINGS))
+                if body.get("direct_capture") is True and not daemon.browser_direct_probe.passed():
+                    # Only the owner's passing probe on this daemon unlocks it (M6).
+                    _fail(409, "run Test Direct capture in Settings first: it has not passed since Jarvis started")
                 try:
                     values = settings.update(**body)
                 except ValueError as refusal:

@@ -51,6 +51,7 @@ import { BrowserProfile } from "./BrowserProfile";
 import { BrowserSpeaker } from "./BrowserSound";
 import { browserApi } from "../api";
 import { browserSound } from "../state/browserSoundClient";
+import { browserSettings } from "../state/browserSettings";
 import { RemoteView } from "./RemoteView";
 import type { BrowserControl } from "../state/browser";
 import { cleanTitle } from "../lib/remote";
@@ -287,7 +288,13 @@ function DirectTab(props: {
   const offer = status === "ok" && src ? judgeKeepOrigin(src, ports) : null;
   const workshopPort = status === "ok" ? ports.workshop : null;
   const viewed=props.control?.runtime[`${props.pane}:${props.tab.id}`]?.viewed;
-  return <div className="tabbody browserpage" data-browser-page={props.tab.id}
+  const page = useRef<HTMLDivElement>(null);
+  // B-DIRECT-CAPTURE: the owner's switch and this tab's own live frame, read at the gesture.
+  const direct = useRef({
+    enabled: () => browserSettings.directCapture() === true,
+    frame: () => page.current?.querySelector<HTMLIFrameElement>(":scope > .framehost > iframe[data-browser-frame]") ?? null,
+  });
+  return <div ref={page} className="tabbody browserpage" data-browser-page={props.tab.id}
     style={props.active ? undefined : { display: "none" }} aria-hidden={!props.active}
     {...(!props.active ? { inert: "" } as Record<string, string> : {})}>
     {props.active ? <>
@@ -332,7 +339,7 @@ function DirectTab(props: {
       identity={() => props.control!.captureIdentity(props.pane as PaneNo, props.tab.id)}
       destination={props.captureDestination}
       controlsTarget={props.optionsTarget} beforeCapture={props.beforeCapture}
-      onAnnotating={props.onAnnotating}
+      onAnnotating={props.onAnnotating} direct={direct.current}
       onRemote={() => void props.control!.convert(props.pane as PaneNo, props.tab.id, "remote")
         .catch(e => setOwnerError(cleanTitle(e.message, 300)))} /> : null}
     {src && stolen ? <div className="pad stolen" data-testid="browser-stolen" role="status" tabIndex={-1} ref={notice}>

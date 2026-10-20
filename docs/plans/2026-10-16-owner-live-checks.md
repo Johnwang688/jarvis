@@ -108,6 +108,44 @@ The PR body has no live-check section. Its own owner steps and expected results 
 4. Stop one child yourself. Expect: no sentence.
 5. Not yet checked, per the PR's "Not run" list: a physical speaker or Windows audio, and a live Claude or Codex child in your HUD. Report what you hear.
 
+## Direct capture probe (B-DIRECT-CAPTURE, BR-4/M6; PR from `claude/b-direct-capture`)
+
+**Not deployed yet.** Do this after the lead merges the PR, installs the HUD and restarts the daemon. Use the
+**installed Jarvis app** window, not a Chrome tab: the test refuses to run in a tab. Press Ctrl+R first.
+
+Direct capture is built but off, and nothing can turn it on until this test passes. The test captures only a
+four-colour test pattern that the HUD draws itself, never a web page. It records facts only, no picture.
+
+1. Open Settings → Browser. Expect "Capture Direct pages" unticked and greyed out, with "Not tested since Jarvis
+   started. Turning this on needs a passing test."
+2. Press **Test Direct capture**. Expect a large four-colour pattern (up to 1120 px wide) to appear, then
+   Chrome's "share this tab" prompt. Accept it.
+   - **Expect:** "Passed: Chrome shared this tab and cropped one frame to the test pattern." The pattern goes away,
+     and Chrome's "sharing this tab" indicator disappears at once, within about a second.
+   - **If it says Failed:** note the words and tell the lead. The report file records the frame size, the scale and
+     the colours Chrome actually delivered.
+   - **If you cancel the prompt:** expect "Cancelled: the share prompt was dismissed." Press the test again and
+     accept.
+3. Tell the lead. The lead reads `~/.local/share/jarvis/direct-capture-probe.json`. It holds the prompt outcome,
+   track settings, crop, frame size, nine colour samples and timings.
+4. **Only if it passed:** tick "Capture Direct pages".
+5. Open a local page in a Direct tab. A dev server or Project root will do. Open Browser options (⋯) and press
+   **Annotate**, then accept Chrome's prompt.
+   - **Expect:** a frozen picture of just that page, with none of the HUD around it. The sharing indicator goes
+     away at once.
+   - Draw a box, then press Send. **Expect:** `page.png` and "page text" in the selected chat's box, and no message
+     sent.
+6. Press Annotate again and **cancel** Chrome's prompt. **Expect:** "Chrome's share prompt was cancelled. Nothing
+   was captured.", an "Open in Remote" button, and no picture.
+7. After either capture, type in a chat box. **Expect:** the keys go there. The page never shows "This page took
+   the keyboard".
+8. While an approval card is up, **expect** Annotate and Send to chat to be greyed out.
+9. Untick "Capture Direct pages". **Expect:** Annotate on a Direct tab offers "Open this in Remote to annotate."
+   again, with no Chrome prompt.
+
+Not proven by the PR's tests, which run headless Chromium with an auto-accepted prompt: the real Windows prompt,
+real display scaling, and Chrome's sharing bar in the app window.
+
 ## Also waiting on the owner
 
 - **Firmware brake, robot test** ([Johnwang688/87867D-override#10](https://github.com/Johnwang688/87867D-override/pull/10), open; merges only after this test). You decided 2026-10-16 that a chained move brakes before a drive or turn with a blocking `whenWithin` armed, and that the next drive keeps the chained motion's target heading. None of the current autons reach this case, so use the PR's test routine:

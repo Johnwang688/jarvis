@@ -665,6 +665,15 @@ BROWSER_SETTINGS_PATH = Path(
     os.environ.get("JARVIS_BROWSER_SETTINGS")
     or Path.home() / ".config" / "jarvis" / "browser.json"
 ).expanduser()
+# The owner's Direct capture probe report (B-DIRECT-CAPTURE, BR-4/M6): facts
+# about one tab-share prompt and a HUD-made test pattern, never page pixels.
+# Written by `v2/browser/direct_probe.py` for the lead to read, and never read
+# back: a pass counts only in the daemon's memory. Outside the Browser's
+# credential folder on purpose. An empty `JARVIS_DIRECT_CAPTURE_PROBE` means unset.
+DIRECT_CAPTURE_PROBE_PATH = Path(
+    os.environ.get("JARVIS_DIRECT_CAPTURE_PROBE")
+    or Path.home() / ".local" / "share" / "jarvis" / "direct-capture-probe.json"
+).expanduser()
 # B-13: twelve tabs in all, across every profile and Private. The suites set
 # a lower number.
 BROWSER_TAB_CAP = int(os.environ.get("JARVIS_BROWSER_TAB_CAP", "12"))

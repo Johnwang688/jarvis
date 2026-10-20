@@ -9,6 +9,8 @@ from types import SimpleNamespace
 from jarvis.v2.browser.settings import BrowserSettings
 from jarvis.v2.browser.panes import BrowserPanes, PaneRefused
 from jarvis.v2.browser.policy import judge_url, URLRefused
+from jarvis.v2.browser.captures import Captures, CaptureRefused, capture_direct
+from jarvis.v2.browser.direct_probe import DirectProbe, ProbeRefused
 
 class Host:
     def __init__(self, mock):
@@ -53,6 +55,9 @@ def state(mock):
         mock.browser_panes = BrowserPanes(SimpleNamespace(browser=mock.browser_host, devservers=SimpleNamespace(source_snapshot=lambda _: None), browser_settings=mock.browser_settings))
         mock.browser_window = None
         mock.browser_lock = threading.RLock()
+        # B-DIRECT-CAPTURE: the real probe verdict and URL-only reference.
+        mock.browser_captures = Captures(values=lambda: [])
+        mock.browser_direct_probe = DirectProbe()
     return mock.browser_host
 
 def connected(mock, window):
@@ -70,7 +75,9 @@ def handle(h, mock, method, path, body):
             out=mock.browser_settings.snapshot()
             if mock.dev_fixture: out["auto_open"]=mock.dev_fixture.enabled
             h._json(out);return True
-        if method == "PATCH" and set(body)=={"agents_may_drive"}:
+        if method == "PATCH" and set(body) in ({"agents_may_drive"}, {"direct_capture"}):
+            if body.get("direct_capture") is True and not mock.browser_direct_probe.passed():
+                h._err(409,"run Test Direct capture in Settings first: it has not passed since Jarvis started");return True
             try: h._json(mock.browser_settings.update(**body))
             except ValueError: h._err(400,"invalid setting")
             return True
@@ -83,6 +90,15 @@ def handle(h, mock, method, path, body):
     try:
         with mock.browser_lock:
             if path == "/browser/front" and method == "POST": out = mock.browser_panes.report(body)
+            elif path == "/browser/direct-capture/probe":
+                try: out = {"probe": mock.browser_direct_probe.status()} if method == "GET" else mock.browser_direct_probe.record(body)
+                except ProbeRefused as exc: raise PaneRefused(400, str(exc))
+            elif path == "/browser/direct-capture" and method == "POST":
+                mock.direct_capture_requests = getattr(mock, "direct_capture_requests", 0) + 1
+                daemon = SimpleNamespace(browser_panes=mock.browser_panes, browser=host,
+                                         browser_settings=mock.browser_settings, browser_captures=mock.browser_captures)
+                try: out = capture_direct(daemon, body)
+                except CaptureRefused as exc: raise PaneRefused(409, str(exc))
             elif len(parts) == 3 and parts[1] == "panes" and method == "PATCH": out = mock.browser_panes.permissions(int(parts[2]), body)
             elif len(parts) == 6 and parts[1] == "panes" and parts[5] == "address": out = mock.browser_panes.address(int(parts[2]), parts[4], body)
             elif path == "/browser/profiles":

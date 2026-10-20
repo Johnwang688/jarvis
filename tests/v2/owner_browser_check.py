@@ -1150,7 +1150,7 @@ class OwnerBrowser(unittest.TestCase):
     def test_15_settings_are_the_owners_and_protected(self):
         self.assertEqual(self.owner("GET", "/browser/settings"),
                          {"lan": False, "local_servers": False, "auto_open": True,
-                          "sound": True, "agents_may_drive": True})
+                          "sound": True, "agents_may_drive": True, "direct_capture": False})
         self.assertEqual(self.ask("PATCH", "/browser/settings", {"lan": "yes"})[0], 400)
         self.assertEqual(self.ask("PATCH", "/browser/settings", {})[0], 400)
         # An unknown key is counted, never echoed (review of PR #69, NIT).
@@ -1158,7 +1158,7 @@ class OwnerBrowser(unittest.TestCase):
         self.assertEqual((status, payload), (400, {"error": "unknown fields (2)"}))
         self.assertEqual(self.owner("PATCH", "/browser/settings", {"lan": True}),
                          {"lan": True, "local_servers": False, "auto_open": True,
-                          "sound": True, "agents_may_drive": True})
+                          "sound": True, "agents_may_drive": True, "direct_capture": False})
         path = config.BROWSER_SETTINGS_PATH
         self.assertEqual(oct(path.stat().st_mode & 0o777), "0o600")
         self.assertTrue(self.ask("GET", "/status", listener="api")[1]["browser"]["lan"])
