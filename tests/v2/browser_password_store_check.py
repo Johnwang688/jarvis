@@ -204,8 +204,15 @@ class Choose(unittest.TestCase):
         self.assertNotIn("gnome-keyring-daemon --unlock", S.UNLOCK_MESSAGE)
         self.assertIn("read -rsp", S.UNLOCK_COMMAND)          # no echo, not in argv
         self.assertIn("printf '%s' \"$KP\" |", S.UNLOCK_COMMAND)   # stdin only
+        # The whole recipe, as verified live on 2026-10-20: dropping `unset KP`, the
+        # redirects or the pause before re-registering is a change to review, not a tidy-up.
+        self.assertEqual(S.UNLOCK_COMMAND,
+                         "read -rsp 'Keyring password: ' KP; echo; printf '%s' \"$KP\" | "
+                         "setsid -f gnome-keyring-daemon --replace --unlock --foreground "
+                         ">/dev/null 2>&1; unset KP; sleep 2; "
+                         "gnome-keyring-daemon --start --components=secrets >/dev/null 2>&1 </dev/null")
         self.assertIn(S.INSTALL_COMMAND, S.UNPROTECTED_HINT)
-        self.assertLessEqual(len(S.UNLOCK_MESSAGE), 300)        # the HUD shows 300 characters
+        self.assertLessEqual(len(S.UNLOCK_MESSAGE), 500)        # the HUD's 409 cap (state/browser.ts)
         # The longer messages that end in the command reach the HUD whole: its cap on
         # a hint is 600 characters and on a 409 error 500 (BrowserProfile.tsx, state/browser.ts).
         for text in (S.CHANGED_MESSAGE, S.STICKY_UNAVAILABLE_MESSAGE, S.FELL_BACK_MESSAGE,
