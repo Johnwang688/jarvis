@@ -1396,6 +1396,37 @@ is drawn. Amendment B.6/B.9 positive pixel identity remains capability-blocked,
 not verified by the synthetic stream tests. No screenshot or capture call is
 created to manufacture that proof.
 
+**Re-checked 2026-10-20 (B-PREVIEW probe, still blocked).** Probes against an
+isolated Chrome 155.0.8059.39, launched directly over a CDP pipe and not with the
+product's `launch_args`, found no mechanism that proves frame identity:
+
+- No `HeadlessExperimental` domain with the three flag sets tried (begin-frame
+  control, deterministic mode, `--headless=old`).
+- Screencast metadata has no frame or commit id. Under 11 ms DOM changes, the DOM
+  state at a frame's `timestamp` matched its pixels in 2 of 182 frames (1 of 183
+  in an unarchived first run).
+- No `Screenshot` trace events in headless.
+- `LayerTree.makeSnapshot` refused the one content layer tried.
+- The strongest scheme tried was defeated. It froze the page lifecycle, paused
+  animations, and bracketed `captureScreenshot` with an isolated-world mutation
+  and rect check. The page's timers ran during a capture, and a CSSOM rule toggle
+  is not a DOM mutation: 7 of 28 accepted captures were false (24 of 29 in the
+  first run).
+
+Not probed: `Emulation.setScriptExecutionDisabled`, `Debugger.pause`, virtual
+time policies other than pause, and `DOMSnapshot`.
+
+Only chrome-headless-shell (151) with begin-frame control and paused virtual time
+matched (120/120). That mostly shows that pausing stops the page. This route:
+- is a different browser;
+- needs daemon-driven frames (in the shell, the screencast sent no frames
+  otherwise and `captureScreenshot` timed out);
+- freezes the page for each card;
+- is not proven against cross-site iframes, media or loads.
+
+It is not adopted. Evidence, logs and unblock conditions are in
+`docs/plans/2026-10-19-browser-preview-capability.md`.
+
 The named always-ask layer uses a distinct private delegation card with exactly
 `{kind: "delegation", tool: "hud_browser_act"}`, empty args and null command. It
 permits only reaching subsequent Browser checks, never authorizes a page action.
