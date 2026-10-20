@@ -1,0 +1,6 @@
+{"id": "tiny-review", "kind": "review", "pr": null, "title": "tiny fixture", "base": "BASE", "head": "HEAD",
+ "brief": "Adds a clamp helper.", "focus": ["off-by-one"], "suites": ["tests/tiny_check.py"],
+ "control": false, "seeded": null,
+ "ground_truth": [
+  {"id": "gt1", "severity": "MED", "mechanism": "clamp excludes the upper bound", "location": "tiny.py:clamp", "evidence": "clamp(5,0,5) returns 4", "source": "fixture"},
+  {"id": "gt2", "severity": "LOW", "mechanism": "docstring wrong", "location": "tiny.py:clamp", "evidence": "says inclusive", "source": "fixture"}]}

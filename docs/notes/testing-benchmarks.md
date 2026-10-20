@@ -1149,3 +1149,24 @@ nothing: `+` is a quantifier); `timeout` is the backstop.
   `web_hygiene_check`'s error-page commit (62856fe), `hud_v2_editor_check`'s
   `_kinds_checks` and the `.editorconfig` vitests (ED-8), and the full vitest
   suite (2 of 2).
+
+## Role bench (2026-10-20, in progress)
+
+`python -m rolebench` picks the cheapest model that is good enough to review or
+implement a pull request in this repository (plan:
+`docs/plans/2026-10-20-role-bench-plan.md`, decisions and case schema:
+`docs/plans/2026-10-20-role-bench-decisions.md`). Cases are JSON files in
+`rolebench/cases/`. Its scores are **never pooled** with agent-bench,
+long-bench or swecompare: it measures review recall and cost to merge-ready on
+this repo's own history, not generic ability.
+
+State of the build (P1 is partial): case validation, the leak-proof snapshot
+(`git archive` base, then the PR diff as one commit; hidden tests removed and
+restored only in a grading copy), the spend ledger ($10 total, $0.50 per run,
+Kimi K3 at $3/$15 per M), the quota guard (skip at 75%), the judge answer
+validator, scoring and report math exist and are covered by
+`tests/rolebench_check.py` (free). The harness adapters (`claude`, `codex`,
+`jarvis`), the `review`/`implement`/`judge`/`report` commands, the JSONL log
+and the blinded Opus judge call are not built yet. Run the checks with
+`PYTHONPATH=<checkout> .venv/bin/python tests/rolebench_check.py` under the
+usual `systemd-run` memory cap.
