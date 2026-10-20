@@ -1500,18 +1500,20 @@ installed CLI against the SV-0 scripted model, sending unified rate-limit
 headers, emitted no such event (it appears to need the owner's claude.ai
 login), and the provider logged nothing it held, so the regression replays
 `one_default` with the event inserted. The fix passes by any message of no
-turn, not only this one. Codex has no turn of its own and the
+turn, not only this one; a kind the provider does not know (the SDK is not
+pinned) is also named once in the journal, by type. Codex has no turn of its own and the
 fast path no background children, so neither is affected.
 
-**Checks** (free, offline): `tests/v2/idle_reader_check.py`, 44 tests. They
+**Checks** (free, offline): `tests/v2/idle_reader_check.py`, 47 tests. They
 cover the SV-0 recordings through the real providers (`one_default`,
 `parallel_default`, `stop_bg`, Codex `no_wait`), an SDK-shaped client with
 the SDK's 100-message buffer (which reproduces the 2026-10-12 stall
 unwatched and shows it gone watched), real daemons, the Discord harness and
 the runner. The speech skip is in `hud/src/lib/speech/controller.test.ts`.
-`tests/v2/idle_reader_mutants.py` kills all 29 of its mutants (2026-10-20
-added a rate_limit_event held between turns and a turn's stream events taken
-for messages of no turn) (each in a
+`tests/v2/idle_reader_mutants.py` kills all 32 of its mutants (2026-10-20
+added a rate_limit_event held between turns, a turn's stream events or a
+main-thread user message taken for messages of no turn, no-turn messages
+passed by behind something held, and an unknown kind passed by unnamed) (each in a
 temp copy; the review of #234 added the generator left suspended, the
 orchestrator's own between-turn approval reaching `permit`, a stopped or
 failed CLI turn's end posted, the daemon answering a between-turn approval,
