@@ -151,7 +151,7 @@ export interface GrabFacts {
  * for the owner's probe.
  */
 export async function grabCroppedFrame(target: Element, env: CaptureEnv, live: () => boolean,
-  facts: GrabFacts = newFacts()): Promise<Frame> {
+  facts: GrabFacts = newFacts(), atGrab?: () => void): Promise<Frame> {
   const start = env.now(), mark = (k: string, from: number) => { facts.timing[k] = Math.max(0, env.now() - from); };
   const gdm = env.mediaDevices?.getDisplayMedia;
   if (typeof gdm !== "function" || !env.CropTarget || !env.ImageCapture) throw new DirectRefused("unavailable");
@@ -205,6 +205,9 @@ export async function grabCroppedFrame(target: Element, env: CaptureEnv, live: (
     }
     if (!frame) { facts.error = errorName(last); throw new DirectRefused("failed", facts.error); }
     mark("frame", t);
+    // The layout as it was when the frame was taken: Chrome's own "sharing
+    // this tab" bar can resize the page while sharing and again once it stops.
+    try { atGrab?.(); } catch (e) { frame.close(); throw e; }
     // One frame is all: the tracks stop before anything looks at it.
     stopAll(stream);
     if (!live()) { frame.close(); throw new DirectRefused("stale"); }
@@ -236,12 +239,15 @@ export async function captureDirect(frame: HTMLIFrameElement, env: CaptureEnv, l
   const shield = frame.nextElementSibling?.classList.contains("frameshield") ? [frame.nextElementSibling] : [];
   const before = frameCovered(frame, shield, env);
   if (before) throw new DirectRefused(before);
-  const shot = await grabCroppedFrame(frame, env, live);
+  let after: ReturnType<typeof frameCovered> = "hidden", rect = { width: 0, height: 0 }, viewport = rect;
+  const shot = await grabCroppedFrame(frame, env, live, newFacts(), () => {
+    after = frameCovered(frame, shield, env);
+    rect = frame.getBoundingClientRect();
+    viewport = { width: env.innerWidth, height: env.innerHeight };
+  });
   try {
-    const after = frameCovered(frame, shield, env);
     if (after) throw new DirectRefused(after);
-    const rect = frame.getBoundingClientRect();
-    const size = checkFrame(shot, rect, env.devicePixelRatio, { width: env.innerWidth, height: env.innerHeight });
+    const size = checkFrame(shot, rect, env.devicePixelRatio, viewport);
     if (size) throw new DirectRefused(size);
     if (blank(env.sample(shot))) throw new DirectRefused("blank");
     const image = await env.encode(shot);

@@ -123,6 +123,12 @@ describe("Direct capture: the pixels are checked before use", () => {
       expect(f.calls).not.toContain("encode");
     }
   });
+  it("the frame is judged by the layout at the grab, not after Chrome's sharing bar goes away", async () => {
+    const f = fakeEnv();
+    const box = (h: number) => ({ left: 100, top: 100, right: 500, bottom: 100 + h, x: 100, y: 100, width: 400, height: h, toJSON() {} });
+    frame.getBoundingClientRect = () => box(f.tracks.length && f.tracks.every(t => t.readyState === "ended") ? 290 : 250) as DOMRect;
+    expect((await captureDirect(frame, f.env, () => true)).height).toBe(500);
+  });
   it("two device pixels of rounding are allowed, three are not", () => {
     const rect = { width: 400.4, height: 250.3 }, vp = { width: 1600, height: 1000 };
     expect(expectedSize(rect, 1.5)).toEqual({ width: 601, height: 375 });
