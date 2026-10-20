@@ -7,11 +7,10 @@
  "head": "4019f48617d796b71db0c89c6eec2884c23a337f",
  "brief": "Chat-to-chat C6, display only. An approval card raised by a call from a turn that another chat's message started (a relayed turn, in the target chat), or that its reply started (a reply turn, in the sender), says which chat's message started the turn, under REQUESTED BY. Claims: no permission layer reads the provenance; a sub-agent's call in a relayed turn carries the line too; the chat title is reduced so it cannot forge or restyle the card; the HUD draws the line without changing buttons, focus or Tab order; nothing adds a path from a message to an approval. A call a relayed turn did not start now gets kind 'running' (wording 'while a turn started by ... runs'); a child's first-seen record only stamps if it arrives in the turn that spawned it.",
  "focus": [
-  "display-only: the decision, layer, reason, Always offer and waits are unchanged",
-  "untrusted chat titles on an authorization surface",
-  "SELF_PROTECTED hunks in permissions.py and approvals.py",
-  "provenance of background sub-agents across turns",
-  "no lock taken by the card reader"
+  "correctness, including under concurrency and across the ordering of events",
+  "handling of untrusted input, and safety-boundary changes",
+  "test coverage of the new behaviour: would the tests fail without the change?",
+  "claims in the description against the evidence in the diff and tests"
  ],
  "suites": [
   "tests/v2/relay_provenance_check.py",
@@ -33,7 +32,7 @@
    "id": "gt2",
    "severity": "LOW",
    "mechanism": "the 'grandchild of a seen, unstamped parent' branch (elif parent in seen: stamp = None) is not pinned; a mutant falling back to the running turn survives both suites",
-   "location": "tests/v2/relay_provenance_check.py (ChildRule); daemon.py _stamp_child",
+   "location": "tests/v2/relay_provenance_check.py (ChildRule); jarvis/v2/daemon.py _stamp_child",
    "evidence": "mutant m4 survives relay_provenance_check and permissions_check",
    "source": "review of #275 round 3"
   },

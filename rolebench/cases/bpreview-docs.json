@@ -5,12 +5,12 @@
  "title": "docs: B-PREVIEW capability probe (still blocked on Chrome 155)",
  "base": "b1feb001b4bf9711938d27e092e235222bb2bbee",
  "head": "902eb023af57c85b62c1a652fbd406d02052664d",
- "brief": "Docs only. Answers B-PREVIEW's blocking question: can the Chrome the Remote browser runs prove that a captured image is the frame for the DOM and layout state an approval acts on? Claim: no; cards keep 'Preview unavailable'. New plan docs/plans/2026-10-19-browser-preview-capability.md records probes against isolated Chrome 155.0.8059.39 (HeadlessExperimental absent, screencast metadata, captureScreenshot after measuring, freeze plus bracket, tracing, LayerTree) with numeric results; a dated paragraph in docs/notes/browser.md and the feature-map row are updated. No code changed. Probe scripts are in ~/.cache/jarvis-lead/b-preview-probe/ and not committed.",
+ "brief": "Docs only. Answers B-PREVIEW's blocking question: can the Chrome the Remote browser runs prove that a captured image is the frame for the DOM and layout state an approval acts on? Claim: no; cards keep 'Preview unavailable'. New plan docs/plans/2026-10-19-browser-preview-capability.md records probes against isolated Chrome 155.0.8059.39 (HeadlessExperimental absent, screencast metadata, captureScreenshot after measuring, freeze plus bracket, tracing, LayerTree) with numeric results; a dated paragraph in docs/notes/browser.md and the feature-map row are updated. No code changed.",
  "focus": [
-  "claims no broader than what was probed",
-  "numbers verifiable from saved output",
-  "tested vs untested items kept apart",
-  "pinned doc text not broken"
+  "claims against evidence",
+  "accuracy and scope of the wording",
+  "documentation text pinned by tests",
+  "consistency with the existing notes"
  ],
  "suites": [
   "scripts/slim_claude.py --check"
@@ -46,7 +46,7 @@
    "id": "gt4",
    "severity": "MED",
    "mechanism": "the probes did not use the product's launch_args (proxy, host-resolver rules, blink settings, Playwright launch); they ran /opt/google/chrome/chrome --headless over a CDP pipe, yet the plan says 'like the Remote browser'",
-   "location": "docs/plans/2026-10-19-browser-preview-capability.md:36-39,99-100",
+   "location": "docs/plans/2026-10-19-browser-preview-capability.md:28-33; docs/notes/browser.md (the new dated paragraph after the BR9c note)",
    "evidence": "product launches via channel='chrome' in jarvis/v2/browser/host.py:1270",
    "source": "review of #274"
   },

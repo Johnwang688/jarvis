@@ -7,11 +7,10 @@
  "head": "9e1dfb06040ac874f0aaa60133d980bd57493f16",
  "brief": "Chat-to-chat C6, display only. An approval card raised by a call from a turn that another chat's message started (a relayed turn, in the target chat), or that its reply started (a reply turn, in the sender), says which chat's message started the turn, under REQUESTED BY. Claims: no permission layer reads the provenance; a sub-agent's call in a relayed turn carries the line too; the chat title is reduced so it cannot forge or restyle the card; the HUD draws the line without changing buttons, focus or Tab order; nothing adds a path from a message to an approval. Children now carry the provenance of the turn that spawned them, stamped when the daemon first sees them.",
  "focus": [
-  "display-only: the decision, layer, reason, Always offer and waits are unchanged",
-  "untrusted chat titles on an authorization surface",
-  "SELF_PROTECTED hunks in permissions.py and approvals.py",
-  "provenance of background sub-agents across turns",
-  "no lock taken by the card reader"
+  "correctness, including under concurrency and across the ordering of events",
+  "handling of untrusted input, and safety-boundary changes",
+  "test coverage of the new behaviour: would the tests fail without the change?",
+  "claims in the description against the evidence in the diff and tests"
  ],
  "suites": [
   "tests/v2/relay_provenance_check.py",

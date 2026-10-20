@@ -7,11 +7,10 @@
  "head": "5c4cfa6951d69accb4c68618e75a26f46b20e16c",
  "brief": "SV-6 Claude idle reader. Between turns the idle reader (_route_idle) holds any main-thread message it cannot place; everything behind a held message is held too, including the CLI's own turn, which then waits for the owner's next send. The PR adds _of_no_turn(item), true for anything that is not a user, assistant, stream-event, result or system message (rate_limit_event, conversation_reset, any kind a newer SDK adds). Such a message is read and passed by, as a system message already is, unless it arrives behind something already held (held in order). The first held message's type is logged. Offers, adopt, self_started marking, Discord, speech, runner skips, approvals, steering and C3/C6 provenance are claimed unchanged.",
  "focus": [
-  "held-in-order semantics",
-  "provenance of offered CLI turns (peer, task-notification, background)",
-  "late steer echoes and stop-means-stop",
-  "behaviour on SDK upgrade (claude-agent-sdk is not pinned)",
-  "mutation coverage"
+  "correctness, including under concurrency and across the ordering of events",
+  "handling of untrusted input, and safety-boundary changes",
+  "test coverage of the new behaviour: would the tests fail without the change?",
+  "claims in the description against the evidence in the diff and tests"
  ],
  "suites": [
   "tests/v2/idle_reader_check.py",

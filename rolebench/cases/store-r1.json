@@ -7,10 +7,10 @@
  "head": "1b13630572360d082465e2f30e4b2680a09b9ea1",
  "brief": "_Store._append writes a JSONL line under the module _lock; _read_lines takes no lock, so a reader landing mid-line saw an unterminated last line and raised StoreError ('path:N: Unterminated string ...'). In the product a transcript route, chat_read or the runner's read_log could fail transiently. _read_lines now reads bytes and, only when the file does not end in a newline and the LAST line fails JSON parsing, treats it as a write in progress and returns the rows before it. A write cut mid multi-byte character (UnicodeDecodeError 'unexpected end of data' at EOF inside the last line) is treated the same way. Unchanged: a malformed interior line, a malformed newline-terminated last line (LF or CRLF), any other invalid UTF-8 and non-object JSON all still raise with the same path:N: messages; an unterminated last line that parses is still returned. New torn_read test covers these plus a concurrent writer/reader case.",
  "focus": [
-  "only a genuinely torn last line is forgiven",
-  "corruption still raises",
-  "record framing of the JSONL logs",
-  "every writer's record format against the reader"
+  "correctness, including under concurrency and across the ordering of events",
+  "handling of untrusted input, and safety-boundary changes",
+  "test coverage of the new behaviour: would the tests fail without the change?",
+  "claims in the description against the evidence in the diff and tests"
  ],
  "suites": [
   "tests/v2/stores_check.py",

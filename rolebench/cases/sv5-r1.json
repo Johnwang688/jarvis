@@ -7,10 +7,11 @@
  "head": "8b81ab40e9cded41e01bea51de2b6c0652cc8289",
  "brief": "SV-5: one short spoken notice when a chat's native sub-agents finish or fail. HUD only, no daemon, provider or reader change. The first subagent bus record with op finished and status done/failed opens a fixed 3 s window per chat; endings inside it join one sentence ('A sub-agent finished.', 'Two sub-agents finished, one failed.'), queued through the shared speech queue as a notice item, local TTS only, no summary call. Never read: a child's prose, name, kind, brief, last tool or stop reason; notices.ts reads only sid, op, status, stop of a record. Silent: status stopped; a child whose record said stop: stopping|unconfirmed however it then ends; repeats; a chat not read now. Dropped by a send, Stop, an interrupted turn or the chat leaving its pane; waits while the owner is talking. Not posted to Discord. Settings > Voice > Sub-agent notices, per window, on by default.",
  "focus": [
-  "child text never reaches speech",
-  "owner Stop is never spoken as a failure",
-  "queue and floor semantics for notice items",
-  "timers and memory are bounded"
+  "correctness, including under concurrency and across the ordering of events",
+  "handling of untrusted input, and safety-boundary changes",
+  "display, input and focus behaviour of the UI",
+  "test coverage of the new behaviour: would the tests fail without the change?",
+  "claims in the description against the evidence in the diff and tests"
  ],
  "suites": [
   "hud/src/lib/speech/notices.test.ts",
@@ -26,7 +27,7 @@
    "id": "gt1",
    "severity": "LOW",
    "mechanism": "the owner's main Stop is not remembered: it only drops a burst already waiting, so a child that ends done or failed after the interrupt (for example a Codex status the provider maps to failed) is spoken",
-   "location": "hud/src/lib/speech/controller.ts:~419-421 and the notices.cancel(thread) call on turn_finished stop 'interrupted'",
+   "location": "hud/src/lib/speech/controller.ts:423 (turn_finished stop 'interrupted' branch: notices.cancel(thread))",
    "evidence": "feed turn_finished with stop 'interrupted', then a child finished record with status failed: a notice is queued; no test covers it",
    "source": "review of #228 round 1; fixed in 34b2b4d"
   },
@@ -34,7 +35,7 @@
    "id": "gt2",
    "severity": "LOW",
    "mechanism": "the 'asked' memory is per window and built only from live bus records, so a window that reloaded or reconnected between the owner's Stop and the child's end announces a killed-then-failed child",
-   "location": "hud/src/lib/speech/notices.ts:~95-106",
+   "location": "hud/src/lib/speech/notices.ts:98-125",
    "evidence": "reconnect the window after a child's stop: 'stopping' record, then reload, then a failed ending: notice spoken",
    "source": "review of #228 round 1; fixed in 34b2b4d"
   },

@@ -7,8 +7,10 @@
  "head": "d44018462733ff9d6c6f71fd401237822d8dfa2d",
  "brief": "_read_lines reads an append-only JSONL log without the writer's lock. Only the last line, and only when the file does not end in a newline, can be a write in progress; if it does not parse (or ends mid-character) it is left out. Everything else stays an error: an interior or newline-terminated bad line is corruption and raises StoreError with a path:N: message. Records end at the newline only (U+2028 and friends are data). Tests: torn_read and separator_characters in tests/v2/stores_check.py.",
  "focus": [
-  "only the final unterminated line is forgiven",
-  "corruption still raises"
+  "correctness, including under concurrency and across the ordering of events",
+  "handling of untrusted input, and safety-boundary changes",
+  "test coverage of the new behaviour: would the tests fail without the change?",
+  "claims in the description against the evidence in the diff and tests"
  ],
  "suites": [
   "tests/v2/stores_check.py",

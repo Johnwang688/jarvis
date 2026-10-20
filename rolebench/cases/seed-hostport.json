@@ -5,11 +5,12 @@
  "title": "CL-3 (seeded): one Host-header check for the v2 listeners",
  "base": "aedcdd4b0852dc351423fc278a62f753aff80d1d",
  "head": "847434e03cfc5f508968260570f69366500958dc",
- "brief": "Card CL-3 of the duplicate-helper cleanup. Adds config.own_host_header(value, port), replacing seven inline copies of the DNS-rebinding Host check across the v2 listeners. It must accept exactly the two spellings 127.0.0.1:<port> and localhost:<port> on the raw header and nothing else; each caller passes its own port; a missing header fails. Tests: tests/v2/own_host_header_check.py.",
+ "brief": "Card CL-3 of the duplicate-helper cleanup. Adds config.own_host_header(value, port), replacing seven inline copies of the DNS-rebinding Host check across the v2 listeners. The refactor is claimed to be behaviour-preserving: the helper accepts exactly what each copy accepted. Tests: tests/v2/own_host_header_check.py.",
  "focus": [
-  "the helper accepts exactly what each copy accepted",
-  "port handling",
-  "DNS-rebinding guard"
+  "correctness, including under concurrency and across the ordering of events",
+  "handling of untrusted input, and safety-boundary changes",
+  "test coverage of the new behaviour: would the tests fail without the change?",
+  "claims in the description against the evidence in the diff and tests"
  ],
  "suites": [
   "tests/v2/own_host_header_check.py",
@@ -25,7 +26,7 @@
   {
    "id": "gt1",
    "severity": "MED",
-   "mechanism": "own_host_header no longer compares the port: any 127.0.0.1:<anything> or localhost:<anything> now passes, so a request addressed to another local listener's port, or a DNS-rebound name that carries a matching prefix, is accepted at every listener that uses the helper",
+   "mechanism": "own_host_header no longer compares the port: any port is accepted on the two loopback spellings (127.0.0.1:<anything>, localhost:<anything>), so a Host naming a different listener's port passes the guard at every listener that uses the helper",
    "location": "jarvis/config.py own_host_header",
    "evidence": "own_host_header('127.0.0.1:9999', 8402) is True; the docstring and tests/v2/own_host_header_check.py's unit table require False",
    "source": "seeded bug, injected by P0 (clean head 847434e)"

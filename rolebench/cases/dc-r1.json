@@ -7,11 +7,11 @@
  "head": "59188dfc9b262d171d7c7ff41b0471ec4ec8bf46",
  "brief": "Annotate and Send to chat can capture a Direct Browser tab. On the owner's trusted press the HUD checks the iframe is fully on screen with nothing painted over it, calls CropTarget.fromElement, getDisplayMedia (preferCurrentTab), cropTo, grabs one ImageCapture frame, stops every track in a finally, then checks pixels (still uncovered at the grab, size equal to rect x devicePixelRatio within 2 px, not the whole tab, not blank). Only then POST /browser/direct-capture mints a URL-only reference. A browser.json switch direct_capture is off by default and PATCH true returns 409 unless the owner's probe (Settings > Browser > Test Direct capture, a HUD-made four-colour pattern) has passed on this daemon; the pass is in memory only. direct_probe.py re-validates every field and computes the verdict itself.",
  "focus": [
-  "owner-only routes and the 409 gate",
-  "track lifecycle and focus",
-  "overlay and coverage refusal",
-  "daemon verdict independence",
-  "Chromium behaviour at non-1 devicePixelRatio"
+  "correctness, including under concurrency and across the ordering of events",
+  "handling of untrusted input, and safety-boundary changes",
+  "display, input and focus behaviour of the UI",
+  "test coverage of the new behaviour: would the tests fail without the change?",
+  "claims in the description against the evidence in the diff and tests"
  ],
  "suites": [
   "tests/v2/direct_capture_check.py",

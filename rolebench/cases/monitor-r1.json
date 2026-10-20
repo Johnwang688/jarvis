@@ -7,10 +7,10 @@
  "head": "8bee098c14a83b5a9e454be24bef9aa87c35f636",
  "brief": "Found in a boundary review of another PR; a pre-existing hole on main. Claude's Monitor tool runs a shell command but was not in permissions.COMMAND_TOOLS, so the permit read no command from it. Under AUTO, Monitor {command: 'cat .env'}, 'pkill -f daemon2', 'sudo rm -rf /' and a daemon restart went to the provider's reviewer at layer 5 instead of being refused at layer 1. An Always on a Monitor card minted {'tool': 'Monitor'}, a whole-tool grant. Fix (fail closed): approvals.is_command_tool(tool, args) is the single test layer 1, the always-ask rules, layer 4 (allowlist / rules ALLOW) and v1_request (Always minting) all use. It counts every known command tool (Bash, BashOutput, Monitor, PowerShell, Codex shell/local_shell/exec_command, run_command, run_readonly) and any tool whose arguments carry a command line under command, cmd or script (text or argv array). With more than one of those keys, all are judged; a non-text value is not read as a command. An Always on Monitor now mints a stem entry; an old {'tool': 'Monitor'} entry matches nothing. Codex approvals always arrive named 'shell', so Codex was never affected. Evidence claimed: 563 new checks in permissions_check.command_tool_checks (385 fail on main), 8 of 8 mutants killed (tests/v2/command_tool_mutants.py), related suites pass.",
  "focus": [
-  "permission layers 1-5 and what each now answers for non-shell tools",
-  "Always minting and cross-tool allowlist stems",
-  "fail-closed behaviour for odd argument shapes",
-  "SELF_PROTECTED permissions.py/approvals.py"
+  "correctness, including under concurrency and across the ordering of events",
+  "handling of untrusted input, and safety-boundary changes",
+  "test coverage of the new behaviour: would the tests fail without the change?",
+  "claims in the description against the evidence in the diff and tests"
  ],
  "suites": [
   "tests/v2/permissions_check.py",

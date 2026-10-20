@@ -7,9 +7,10 @@
  "head": "567e5fe159a61c7d2a807ef9ba27e86775f9d391",
  "brief": "redact.scrub_text is the one scrub for model-written text bound for a surface. Older outbound surfaces still call secrets.scrub alone, which knows only Jarvis-owned credential values. This PR routes the Discord chat mirror, task reporter, diff-review output and chat-git results through scrub_text, which also redacts provider key shapes and bearer/JWT shapes. Text that cannot be scrubbed is replaced with a withheld marker; diff review withholds instead of raising. The Discord approval DM is deliberately left alone (cards redact via redact_command; a value that runs is never hidden). Acceptance tests were committed first and fail on main.",
  "focus": [
-  "every outbound surface uses the full scrub",
-  "scrub failure withholds rather than leaks or crashes",
-  "approval card rules left alone"
+  "correctness, including under concurrency and across the ordering of events",
+  "handling of untrusted input, and safety-boundary changes",
+  "test coverage of the new behaviour: would the tests fail without the change?",
+  "claims in the description against the evidence in the diff and tests"
  ],
  "suites": [
   "tests/v2/outbound_scrub_check.py",

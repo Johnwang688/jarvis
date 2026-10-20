@@ -7,10 +7,11 @@
  "head": "1eb0f85384d581ae4343f0f307b1de07e4d0ee59",
  "brief": "The unlock command Jarvis shows when the keyring is locked does not work under WSLg, which mounts its own /run/user/1000 over systemd's, so a plain `gnome-keyring-daemon --unlock` starts a stray second daemon. UNLOCK_COMMAND in jarvis/v2/browser/password_store.py is now the recipe verified live by the lead: replace the running daemon with one unlocked from stdin, detached with setsid, then re-register the secrets component. The password goes only through read -rsp and stdin. The longer command would be truncated by the HUD, so the Manage panel hint cap goes from 400 to 600 characters and the 409 error cap from 300 to 500. Docs and tests updated.",
  "focus": [
-  "password never in argv or history",
-  "the command string copies correctly from the HUD",
-  "HUD caps vs message lengths",
-  "tests pin the recipe"
+  "correctness, including under concurrency and across the ordering of events",
+  "handling of untrusted input, and safety-boundary changes",
+  "display, input and focus behaviour of the UI",
+  "test coverage of the new behaviour: would the tests fail without the change?",
+  "claims in the description against the evidence in the diff and tests"
  ],
  "suites": [
   "tests/v2/browser_password_store_check.py",
@@ -40,7 +41,7 @@
    "id": "gt3",
    "severity": "LOW",
    "mechanism": "no HUD test for the 500 caps: reverting them in BrowserProfile.tsx or state/browser.ts fails no HUD test",
-   "location": "hud/src/components/BrowserProfile.test.ts:61-68; BrowserProfile.tsx:70; state/browser.ts:18",
+   "location": "hud/src/components/BrowserProfile.test.ts:61-68; hud/src/components/BrowserProfile.tsx:70; hud/src/state/browser.ts:18",
    "evidence": "only the 600 hint cap is tested",
    "source": "review of #279"
   },

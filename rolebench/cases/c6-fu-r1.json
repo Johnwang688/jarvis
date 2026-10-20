@@ -7,11 +7,10 @@
  "head": "94dd73c440812d2f609b5e39a753f0e736c5fc57",
  "brief": "Follow-up to #275 (display only). _stamp_child stamps from the running turn only for a lifecycle 'started' record with no parent; a grandchild of an unseen parent, a first subagent_event or a non-started lifecycle record gets no stamp. A new daemon._spawned pre-stamps cl:<call id> from a Claude TOOL_STARTED named Agent/Task in the orchestrator's own turn stream. The seen-sid set no longer evicts. Docs now show C6 as live.",
  "focus": [
-  "display-only: the decision, layer, reason, Always offer and waits are unchanged",
-  "untrusted chat titles on an authorization surface",
-  "SELF_PROTECTED hunks in permissions.py and approvals.py",
-  "provenance of background sub-agents across turns",
-  "no lock taken by the card reader"
+  "correctness, including under concurrency and across the ordering of events",
+  "handling of untrusted input, and safety-boundary changes",
+  "test coverage of the new behaviour: would the tests fail without the change?",
+  "claims in the description against the evidence in the diff and tests"
  ],
  "suites": [
   "tests/v2/relay_provenance_check.py",

@@ -7,10 +7,11 @@
  "head": "3f341bb8670d55276f5415ac407efce9a3a7a26e",
  "brief": "Bug: after a VEX download ended, the Brain tab's Connect stayed disabled until a focus or reload, because the window's cached /vex/status still said 'download' (the bus announces the download's start, nothing announces its end, and the chain's finally did not re-read the status). Fix, HUD: hud/src/state/vex.ts re-reads /vex/status in three places (including the chain's finally), guarded so the newest-issued read wins and an older answer never brings back 'download'; VexView.tsx polls /vex/status every 2 s while another window's download or device read holds the port and stops when the daemon says free (status read only, no device action). Daemon: Vex.download's ended hook releases the device inside the same lock section that settles the record (release(locked=True)), closing a race where a status read could say 'download' for a record the HUD had seen end. Claims: no new device action, a download is still sent only from the owner's click-driven chain, the brain terminal never auto-reopens.",
  "focus": [
-  "lock discipline in Vex.download ended/release",
-  "stale and out-of-order status reads",
-  "poll lifecycle and what it is allowed to do",
-  "VX-UI-4a: no device action without the owner's click"
+  "correctness, including under concurrency and across the ordering of events",
+  "handling of untrusted input, and safety-boundary changes",
+  "display, input and focus behaviour of the UI",
+  "test coverage of the new behaviour: would the tests fail without the change?",
+  "claims in the description against the evidence in the diff and tests"
  ],
  "suites": [
   "tests/v2/vex_check.py",
