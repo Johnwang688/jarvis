@@ -324,6 +324,22 @@ apart from the coalesced finish/failure notices (SV-5, installed in [#228](https
 | Codex profiles | [#231](https://github.com/Johnwang688/jarvis/pull/231) follow-ups to [#224](https://github.com/Johnwang688/jarvis/pull/224): `/mnt/c` walk deadline with a chat notice, symlinked profile folders, glob-syntax names, repo-top credential files. | **INSTALLED** (lead's 2026-10-16 deploy). Stores created mid-session stay readable until the next session start. |
 | Gate and Codex leftovers | [#230](https://github.com/Johnwang688/jarvis/pull/230) review leftovers of [#223](https://github.com/Johnwang688/jarvis/pull/223) and [#225](https://github.com/Johnwang688/jarvis/pull/225) (chat git and merge gate) and a `rules_check` path flake. | **INSTALLED — [#230](https://github.com/Johnwang688/jarvis/pull/230), merged 2026-10-16.** It edits SELF_PROTECTED files (`merge_gate.py`, `permissions.py`, `bridge.py`, `tools/__init__.py`); independent review passed. |
 
+## Chat-to-chat (2026-10-19)
+
+Chats read and message each other. Owner answers CC-1..CC-9: [decisions](2026-10-19-chat-to-chat-decisions.md); [plan](2026-10-19-chat-to-chat-plan.md); rules in [control-plane.md](../notes/control-plane.md#chat-to-chat-the-rules-in-one-place-c0-c5-merged-2026-10-19). Claude lead team.
+
+| ID | Scope | Status | Remaining qualification |
+|---|---|---|---|
+| C0 | The read projection (`chat_reads.py`) and `untrusted.fence_chat` | **MERGED — [#260](https://github.com/Johnwang688/jarvis/pull/260); INSTALLED** (daemon restart 2026-10-19) | None. |
+| C1 | `chat_list`, `chat_summary`, `chat_search`, `chat_read` on the fast path, Claude and Codex | **MERGED — [#262](https://github.com/Johnwang688/jarvis/pull/262); INSTALLED** | Free suites only; no live receipt is recorded here. |
+| C2 | Owner-typed authority | **FOLDED into C3** | CC-6 dropped the `typed` desk key: typed or spoken HUD turns send, decided by the desk. |
+| C3 | The relay core (`chat_relay.py`), queues, replies, Stop, Withdraw route | **MERGED — [#265](https://github.com/Johnwang688/jarvis/pull/265); INSTALLED** | L1, L2 not run. |
+| C4 | `chat_send` and `chat_wait` on all three providers | **MERGED — [#266](https://github.com/Johnwang688/jarvis/pull/266); INSTALLED** | L1, L3 not run. |
+| C5 | The HUD: relay rows, waiting line, sidebar badge, Withdraw | **MERGED — [#269](https://github.com/Johnwang688/jarvis/pull/269); INSTALLED** | Free and mock-daemon suites only; no live receipt is recorded here. |
+| C6 | Approval-card provenance ("turn started by a message from chat ‹title›") | **DEFERRED — optional, not done** | Add if L4 shows the owner cannot tell where a relayed turn's card came from. |
+| C7 | These notes, the `hud-api` contract and the live-gate runbook | **IN REVIEW** (this PR) | The runbook is a plan; nothing in it has been run. |
+| L1-L4 | Native release checks (a 300 s MCP call on Claude, mid-turn reply labelling, sub-agent and child refusal, a relayed Claude turn's approval on the owner's card) | **NOT RUN** | [Runbook](2026-10-19-chat-to-chat-live-gates.md); run only on the owner's go, by the lead. |
+
 ## Original checkpoint and requested fixes already landed
 
 These are not available implementation tasks. All listed code is included in the

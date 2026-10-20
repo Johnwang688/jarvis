@@ -3566,26 +3566,144 @@ the provider closed the session, and the next message resumes it. A gate questio
 (`gate_requested`/`gate_resolved`) with no `turn_id`.
 
 
-## Additions 2026-10-19 (chat-to-chat relay core — C3)
+## Chat-to-chat: relays between chats (C3, C5; completed in C7, 2026-10-19)
 
-- `POST /threads/{sender}/relays/{message_id}/withdraw` (owner-only: the HUD
-  listener and the HUD's Origin, else 403) withdraws a message one chat
-  queued for another → `{"ok": true, "message_id", "state": "withdrawn"}`;
-  404 for a message this thread did not send, 409 once it is no longer
-  queued. No route sends.
-- `GET /threads/{id}/transcript`: `relay_in`, `relay_out` and `relay_reply`
-  records become `{"role": "relay", "relay": {"dir": "in"|"out"|"reply",
-  "message_id", "peer": {"thread_id", "title", "provider"}, "state",
-  "status", "delivery", "reason"?}, "text", "at"}` — never `user`.
-  `relay_state` and `relay_delivered` records fold into those rows. A
+One chat (Jarvis, Claude or Codex) can send another a message; the target runs
+it as a turn of its own and its answer comes back to the sender. Decisions:
+`docs/plans/2026-10-19-chat-to-chat-decisions.md` (CC-1..CC-9). **No HTTP
+route sends** (P-3): sending is the `chat_send` tool through the daemon's
+`ChatRelay`, which only an owner chat's desk turn may call. This contract
+covers what the HUD reads and the one write it has.
+
+### `POST /threads/{sender}/relays/{message_id}/withdraw`
+
+The HUD's Withdraw on a message one chat queued for another. **Owner-only:**
+the HUD listener and the HUD's Origin, else 403, checked before the thread is
+looked up; the API listener never reaches it. No body (a field is 400).
+
+- 200 `{"ok": true, "message_id", "state": "withdrawn"}`. The message leaves
+  the target's queue, never runs, and both chats log a `relay_state`
+  `withdrawn` ("the owner withdrew it"). A blocked `chat_wait` on it wakes.
+- 404 for an unknown thread, or a message this thread did not send.
+- 409 once the message is no longer `queued` (it is running, answered, ...).
+  A message that already runs is stopped in its own chat, never here.
+
+### `GET /threads/{id}/transcript`: relay rows
+
+`relay_in`, `relay_out` and `relay_reply` log records become rows that are
+**never** `role: "user"` (a relayed message is never the owner's words):
+
+```json
+{"role": "relay", "at": "…", "text": "…",
+ "relay": {"dir": "in" | "out" | "reply", "message_id": "m…",
+           "peer": {"thread_id": "…", "title": "…", "provider": "fast|claude|codex"},
+           "state": "…", "status": null | "…", "delivery": null | "…",
+           "reason": "…"}}
+```
+
+- `dir` `out` is in the sender's transcript (`peer` is the target), `in` in
+  the target's (`peer` is the sender), `reply` in the sender's (`peer` is the
+  target again). `text` is the scrubbed message or reply; the sender's own
+  title for the peer is the one at send time.
+- `state` is the message's fate: `queued`, `running`, `answered`, `failed`,
+  `stopped`, `withdrawn`, `dropped`, `expired`, or `"not delivered"` for a
   message no record or live state accounts for (Jarvis restarted before it
-  ran) has `state: "not delivered"`.
-- Thread records gain `relays_waiting` (other chats' messages queued for it)
-  and `relays_out` (its own sends still queued or running).
-- Log and bus records: `relay_out` (sender), `relay_in` (target, the first
-  record of the relayed turn), `relay_state` (`{message_id, state,
-  reason?}`), `relay_reply` (sender), `relay_delivered` (sender:
-  `{message_id, delivery}`); `relay_progress` (`{message_id, text}`, at most
-  600 scrubbed characters of one complete text) goes on the bus only, on the
-  sender's thread. Every record of a relayed or reply turn carries
-  `relayed: {"message_id", "from", "reply"?}`.
+  ran). It folds the `relay_state` and `relay_reply` records and, for a
+  message still live, the service's own state.
+- `status` is the reply's: `answered`, `empty` (it ended without a reply),
+  `stopped` or `failed`; null until a reply exists.
+- `delivery` is how the reply reached the sender: `step` (steered into its
+  running turn), `turn` (a short reply turn of its own), `wait` (a blocked
+  `chat_wait` took it), `shown` (only shown in the HUD: a stop, a failure, a
+  sender that had stopped) or `dropped`; null until delivered.
+- `reason` (optional) is the one sentence for `withdrawn`, `dropped`,
+  `expired` or a sender archived mid-flight.
+- `relay_state` and `relay_delivered` records have no row of their own; they
+  fold into these. Rows are keyed by direction and `message_id`.
+
+### `thread_json` counts
+
+Every thread record (`Daemon.thread_json`: the list, a single thread, the
+create and update routes) carries, live and never stored:
+
+- `relays_waiting`: other chats' messages queued for this chat and not yet
+  started (at most 3, `RELAY_QUEUE_MAX`).
+- `relays_out`: this chat's own sends still `queued` or `running`.
+
+The owner's own queue stays `queued`; relays never count in it.
+
+### Log and bus records
+
+All carry the usual `kind`, `at`, `turn_id`, `thread_id`, `project_id`, `data`.
+Except `relay_progress`, each is written to the thread's `log.jsonl` and
+published on `/events`.
+
+| kind | thread | `data` |
+|---|---|---|
+| `relay_out` | sender | `{message_id, to, title, provider, text, chars}`; `to` is the target's thread id. `text` is the scrubbed body (at most 4,000 characters). |
+| `relay_in` | target | `{message_id, from, title, provider, text, chars}`; the first record of the relayed turn, standing where `user` would. |
+| `relay_state` | both, or the target | `{message_id, state, reason?}`; the fate of a message that never ran is logged in both chats, a finished run's in the target (the sender gets `relay_reply`). |
+| `relay_reply` | sender | `{message_id, from, title, provider, status, text}`; `text` is the scrubbed reply, the tail of at most 64 KiB. |
+| `relay_delivered` | sender | `{message_id, delivery, unconfirmed?}`; `delivery` as above. `unconfirmed: true` only for `step`: the Codex steer may not have reached the turn. A reply turn logs `turn` at its own start. |
+| `relay_progress` | sender, **bus only** | `{message_id, text}`: at most 600 scrubbed characters of one complete message of the target's turn, never a delta, never logged. |
+
+**`relayed`.** Every record of a relayed turn (in the target), and of a reply
+turn (in the sender), carries a top-level `relayed: {"message_id", "from",
+"reply"?}` (`reply: true` on a reply turn), as `self_started` marks a CLI
+turn. Consumers that read aloud or mirror turns skip it: HUD speech, the
+Discord mirror and the task runner do (O-8), so a relayed message is never
+spoken, posted or taken for a task result. Records of an unknown kind are
+ignored by a consumer that has no rule for them, so none of these can pass
+for `user`.
+
+### What a relay cannot do
+
+A relay never answers an approval card or a provider question, never steers
+the target or reserves its desk, and never interrupts: an owner message in the
+target still goes first and steers into a running relayed turn. A turn a relay
+started cannot send onward (no chains). The owner's Stop in the target drops
+what waits on it; Stop in the sender withdraws that turn's still-queued sends.
+Details: `docs/notes/control-plane.md`, "Chat-to-chat".
+
+## The Compact button (2026-10-19, PR #270)
+
+### `POST /threads/{id}/compact`
+
+Starts the chat provider's own compaction of the conversation: Claude Code's `/compact`, Codex's
+`thread/compact/start`, or the fast path's `Agent.compact_now`, the same path as a typed `/compact`.
+
+- **Who can call it:** the owner only. `owner_only` runs before the thread is looked up or any body
+  is read. The request takes an empty JSON body.
+- **No other route:** no tool, bridge, MCP, Discord or CLI path reaches it.
+
+**Responses**
+
+| Status | Body | When |
+|---|---|---|
+| `202` | `{"status": "started", "turn_id"}` | The compaction started. |
+| `409` | `{"error": "<one sentence>"}` | A turn is running; messages or relays are waiting; a card or question is pending; the thread is archived, closing or a task; or the provider cannot compact. |
+| `405` | | Any method other than POST. |
+
+**Running.** The compaction runs as a turn with no message. On the bus it sends `compact_started`,
+then the usual `turn_started`/`turn_finished`, then
+`compacted {"kind": "compacted", "compaction": true, "data": {"ok", "text"}}`.
+
+**Records.** Every record of that turn carries `compaction: true`. Discord, the task runner,
+activity, speech and chat reads skip them.
+
+**`text`** is one of:
+- "Conversation compacted";
+- "Not compacted: <reason>";
+- "Compaction failed: <reason>";
+- "Compaction stopped".
+
+Each reason is scrubbed. No summary text is logged.
+
+**Queueing and Stop.** While the compaction runs, owner messages and chat relays queue and never
+steer. The owner's Stop ends it and drops the queue.
+
+### Transcript and `thread_json`
+
+- `GET /threads/{id}/transcript` shows `compacted` as a `system` row. `compact_started` adds no row.
+  With `tools=1`, the turn's `compact` tool row shows as well.
+- `thread_json` gains `compacting: bool`, which is true while a compaction is the running turn.

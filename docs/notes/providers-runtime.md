@@ -1495,14 +1495,21 @@ the cancel lands before the idle reader can run again.
 
 ## Chat reads on all three providers (chat-to-chat C1, 2026-10-19)
 
+The rules, owner decisions (CC-1..CC-9) and bounds of chat-to-chat as a whole
+are in [Control plane](control-plane.md#chat-to-chat-the-rules-in-one-place-c0-c5-merged-2026-10-19);
+this part is what each provider does. Provider-side status: C1, C3 and C4 are
+merged and live on the fast path, Claude and Codex; C2's desk key was folded
+into C3 and dropped by CC-6; native release checks L1-L4 are not run
+([runbook](../plans/2026-10-19-chat-to-chat-live-gates.md)).
+
 The fast path holds `fastpath.CHAT_TOOLS` (the four chat reads) on every turn
 of an owner's chat, Discord, the DM and schedules included, desk or not. They
 are not in `FAST_TOOLS`, `DESK_TOOLS` or `EDIT_TOOLS`: a task's thread and
 every other role never hold them, and a brief naming one is refused
 (`BriefRefused`). Their results are in `_RAW_CONTENT_TOOLS`. The prompt gains
 `config.FAST_CHATS_PARAGRAPH` ("**Other chats in the HUD**"), narrowed away
-for any agent without all four reads; C4 adds the send sentences and their
-version.
+for any agent without all four reads (C4 later added the send sentences and
+a second version; see "Sending on the fast path" below).
 
 Claude and Codex reach them through the session catalog
 ([control plane](control-plane.md#chat-reads-in-the-session-catalog-chat-to-chat-c1-2026-10-19)).
@@ -1520,7 +1527,17 @@ starts a turn of its own) and `"chat-reply"` (that chat's reply coming
 back); both arrive with `via="peer"` and `desk=False`, so `desk.desk_message`
 never counts them, forged `desk=True` included. Every provider takes a
 relayed message as an ordinary turn: the fast path's `send`, Claude's
-`client.query`, Codex's `turn/start`.
+`client.query`, Codex's `turn/start`. The model reads it as one
+fenced wrapper (`chat_relay.MESSAGE_HEADER`, a line naming the sender's chat
+id, title, provider, project and message id, the rules, then
+`untrusted.fence_chat` of the body): another chat's request, not the owner's
+words, which cannot approve or answer anything and after which the turn
+cannot message onward. A reply arrives the same way under `REPLY_HEADER`, at
+most 6,000 characters with the tail kept. Because `roles._CHAT` is frozen
+into each existing chat's `brief.json`, these wrappers and the tool
+docstrings carry every rule themselves. A steered reply on Claude is a stdin
+steer and on Codex `turn/steer`; whether each CLI shows it under its header
+and not as the owner is L2, not yet run.
 
 The fast path's `steer` keeps `native.desk["present"]` for a `chat-reply`
 (P-7/O-2: it answers the running turn's own call); every other non-desk
