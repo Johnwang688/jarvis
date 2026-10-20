@@ -6,6 +6,8 @@ import threading
 import unittest
 from unittest.mock import Mock,patch
 from jarvis import runtime,tools
+from jarvis import config as _skills_config  # noqa: E402
+_skills_config.CLAUDE_SKILLS_DIR = None  # never read the owner's real ~/.claude/skills
 from jarvis.v2.provider import Event,EventKind,UserMessage
 from jarvis.v2.browser.drive_state import current_turn,DriveTurn,turn_scope
 from jarvis.v2.browser.drive import ActResult

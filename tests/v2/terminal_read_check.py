@@ -36,6 +36,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from terminal_check import Base, eventually  # noqa: E402
 
 from jarvis import config, llm, runtime, tools  # noqa: E402
+config.CLAUDE_SKILLS_DIR = None  # never read the owner's real ~/.claude/skills
 from jarvis.agent import CONTEXT_BLOCK_PREFIX  # noqa: E402
 from jarvis.v2 import terminal_guard as G, terminals as T  # noqa: E402
 from jarvis.v2.model import ProviderName, Role, Thread  # noqa: E402

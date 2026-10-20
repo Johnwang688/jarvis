@@ -36,6 +36,7 @@ import httpx
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from jarvis import config  # noqa: E402
+config.CLAUDE_SKILLS_DIR = None  # never read the owner's real ~/.claude/skills
 from jarvis import discord_gateway as v1gw  # noqa: E402
 from jarvis.v2 import commands as registry  # noqa: E402
 from jarvis.v2 import hud_api  # noqa: E402

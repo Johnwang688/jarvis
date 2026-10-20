@@ -99,6 +99,7 @@ config.SPILL_DIR = TMP / "spill"
 config.SESSIONS_DIR = TMP / "sessions"
 config.MEMORY_DIR = TMP / "memory"
 config.SKILLS_DIR = TMP / "skills"
+config.CLAUDE_SKILLS_DIR = None  # never read the owner's real ~/.claude/skills
 config.GOALS_DIR = TMP / "goals"
 config.GIT_WORKTREES_DIR = TMP / "worktrees"
 config.DESIGNS_DIR = TMP / "designs"

@@ -118,6 +118,7 @@ sys.path.insert(0, str(HERE))
 import chat_relay_check as CR  # noqa: E402  (helpers and the Fake provider only)
 import mcp_session_check as M  # noqa: E402  (helpers only; not its setUpModule)
 from jarvis import config, llm, runtime, tools  # noqa: E402
+config.CLAUDE_SKILLS_DIR = None  # never read the owner's real ~/.claude/skills
 from jarvis.v2 import bridge, session_tools  # noqa: E402
 from jarvis.v2 import daemon as daemon_mod  # noqa: E402
 from jarvis.v2.approvals import PendingApprovals  # noqa: E402

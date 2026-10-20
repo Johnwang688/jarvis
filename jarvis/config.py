@@ -393,6 +393,17 @@ MODEL_CACHE_HOURS = float(os.environ.get("JARVIS_MODEL_CACHE_HOURS", "12"))
 
 # Where skill files live (see tools/skills.py).
 SKILLS_DIR = Path(os.environ.get("JARVIS_SKILLS", REPO_ROOT / "skills"))
+# The owner's Claude Code skills (SK-1, SK-2; docs/plans/2026-10-19-claude-skills-link.md):
+# a second skill root, read live and never written (`tools/skills.py`), whose
+# skills `jarvis skills link` also links into ~/.codex/skills. A repo skill of
+# the same name wins. `JARVIS_CLAUDE_SKILLS` moves it; an empty value turns it
+# off (None). Tests that build agents or read the catalogue set it to None.
+_claude_skills = os.environ.get("JARVIS_CLAUDE_SKILLS")
+CLAUDE_SKILLS_DIR: Path | None = (
+    Path.home() / ".claude" / "skills" if _claude_skills is None
+    else Path(_claude_skills).expanduser() if _claude_skills else None
+)
+del _claude_skills
 
 # Avatars: who he is presenting as — name, wake phrases, and the face drawn in
 # the orb (see avatars.py). Gitignored, like memory/*.md: an avatar is the
