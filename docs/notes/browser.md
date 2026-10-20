@@ -1396,6 +1396,26 @@ is drawn. Amendment B.6/B.9 positive pixel identity remains capability-blocked,
 not verified by the synthetic stream tests. No screenshot or capture call is
 created to manufacture that proof.
 
+**Re-checked 2026-10-19 (B-PREVIEW probe, still blocked).** Probes against
+isolated Chrome 155.0.8059.39 found:
+
+- No `HeadlessExperimental` domain, with any flag.
+- Screencast metadata with no frame or commit id; under 11 ms DOM changes, the DOM
+  state at a frame's `timestamp` matched its pixels in 1 of 183 frames.
+- No `Screenshot` trace events in headless.
+- `LayerTree.makeSnapshot` refusing every layer.
+- The best capture scheme inside Chrome 155 defeated: lifecycle freeze, paused
+  animations, and an isolated-world mutation and rect bracket around
+  `captureScreenshot`. The page's timers run during a capture, and a CSSOM rule
+  toggle is not a DOM mutation, so 24 of 29 accepted captures were false.
+
+Only chrome-headless-shell (151) with begin-frame control and paused virtual time
+matched (120/120). It is a different browser, needs daemon-driven frames (no
+screencast frames otherwise; `captureScreenshot` timed out), freezes the page for
+each card, and is not proven against cross-site iframes, media or loads. It is not
+adopted. Evidence and unblock conditions:
+`docs/plans/2026-10-19-browser-preview-capability.md`.
+
 The named always-ask layer uses a distinct private delegation card with exactly
 `{kind: "delegation", tool: "hud_browser_act"}`, empty args and null command. It
 permits only reaching subsequent Browser checks, never authorizes a page action.
