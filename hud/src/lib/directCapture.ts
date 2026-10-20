@@ -53,7 +53,7 @@ export interface CaptureEnv {
   now(): number;
   /** The press that asked for the capture was the owner's own. */
   trusted(event: { isTrusted: boolean }): boolean;
-  /** A coarse 16×16 RGBA sample of the frame, for the blank check. */
+  /** A 64×64 RGBA sample of the frame, area-averaged, for the blank check. */
   sample(frame: Frame): Uint8ClampedArray | null;
   /** RGBA at exact frame pixels (the probe's test pattern). */
   pixels(frame: Frame, points: readonly (readonly [number, number])[]): number[][];
@@ -68,6 +68,7 @@ export const OVERLAYS = [
   '[data-testid="dev-server-prompt"]', ".approval-card", ".toast",
 ].join(",");
 
+export const EDGE_INSET = 8;
 type Box = { left: number; top: number; right: number; bottom: number; width: number; height: number };
 const intersects = (a: Box, b: Box) => a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom;
 
@@ -80,8 +81,11 @@ export function frameCovered(frame: Element, allowed: readonly Element[], env: P
   if (!(r.width >= 2 && r.height >= 2) || r.left < 0 || r.top < 0
       || r.right > env.innerWidth + 0.5 || r.bottom > env.innerHeight + 0.5) return "hidden";
   if (typeof doc.elementFromPoint !== "function") return "covered";
+  // Inset past the panes' resize handles, transparent hit areas that overlap
+  // a frame's edges by a few pixels; painted overlays are matched below.
+  const mx = Math.min(EDGE_INSET, r.width / 4), my = Math.min(EDGE_INSET, r.height / 4);
   for (let i = 0; i < 5; i++) for (let j = 0; j < 5; j++) {
-    const x = r.left + 1 + (r.width - 2) * i / 4, y = r.top + 1 + (r.height - 2) * j / 4;
+    const x = r.left + mx + (r.width - 2 * mx) * i / 4, y = r.top + my + (r.height - 2 * my) * j / 4;
     const hit = doc.elementFromPoint(x, y);
     if (!hit || (hit !== frame && !allowed.includes(hit))) return "covered";
   }
@@ -111,7 +115,9 @@ export function checkFrame(frame: { width: number; height: number }, rect: { wid
   return "";
 }
 
-/** No sample, all transparent, or one colour throughout. */
+/** Fine enough that a page's text shows: a coarser grid called a mostly white page blank. */
+export const BLANK_GRID = 64;
+/** No sample, all transparent, or one colour throughout. A page that really is one colour is refused too. */
 export function blank(samples: Uint8ClampedArray | null): boolean {
   if (!samples || samples.length < 8 || samples.length % 4) return true;
   if (samples.every((v, i) => i % 4 !== 3 || v === 0)) return true;
@@ -186,9 +192,18 @@ export async function grabCroppedFrame(target: Element, env: CaptureEnv, live: (
     mark("crop", t);
     if (!live()) throw new DirectRefused("stale");
     t = env.now();
-    let frame: Frame;
-    try { frame = await new env.ImageCapture(track).grabFrame(); }
-    catch (e) { throw new DirectRefused("failed", errorName(e)); }
+    // A track can have no frame yet just after the crop (Chrome rejects with
+    // InvalidStateError), or never deliver one: a few short tries, each
+    // bounded, and only the frame that arrives is kept.
+    const grabber = new env.ImageCapture(track);
+    let frame: Frame | null = null, last: unknown = null;
+    for (let attempt = 0; attempt < GRAB_TRIES && !frame; attempt++) {
+      if (attempt) await new Promise(r => setTimeout(r, GRAB_RETRY_MS));
+      if (!live()) throw new DirectRefused("stale");
+      try { frame = await within(grabber.grabFrame(), GRAB_TIMEOUT_MS); }
+      catch (e) { last = e; }
+    }
+    if (!frame) { facts.error = errorName(last); throw new DirectRefused("failed", facts.error); }
     mark("frame", t);
     // One frame is all: the tracks stop before anything looks at it.
     stopAll(stream);
@@ -199,6 +214,17 @@ export async function grabCroppedFrame(target: Element, env: CaptureEnv, live: (
     facts.tracksLiveAfter = stream ? stream.getTracks().filter(x => x.readyState !== "ended").length : 0;
     facts.timing.total = Math.max(0, env.now() - start);
   }
+}
+
+export const GRAB_TRIES = 3, GRAB_RETRY_MS = 150, GRAB_TIMEOUT_MS = 3000;
+/** `p`, or a TimeoutError after `ms`; a frame that arrives late is closed, never kept. */
+function within(p: Promise<Frame>, ms: number): Promise<Frame> {
+  return new Promise((resolve, reject) => {
+    let done = false;
+    const timer = setTimeout(() => { done = true; reject(Object.assign(new Error("TimeoutError"), { name: "TimeoutError" })); }, ms);
+    p.then(f => { clearTimeout(timer); if (done) f.close(); else { done = true; resolve(f); } },
+      e => { clearTimeout(timer); if (!done) { done = true; reject(e); } });
+  });
 }
 
 export function newFacts(): GrabFacts {
@@ -244,11 +270,12 @@ export function browserEnv(): CaptureEnv {
     now: () => performance.now(),
     trusted: e => e.isTrusted === true,
     sample(frame) {
-      const c = canvas(16, 16), ctx = c.getContext("2d", { willReadFrequently: true });
+      const n = BLANK_GRID, c = canvas(n, n), ctx = c.getContext("2d", { willReadFrequently: true });
       try {
         if (!ctx) return null;
-        ctx.drawImage(frame as unknown as CanvasImageSource, 0, 0, 16, 16);
-        return ctx.getImageData(0, 0, 16, 16).data;
+        ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = "high";
+        ctx.drawImage(frame as unknown as CanvasImageSource, 0, 0, n, n);
+        return ctx.getImageData(0, 0, n, n).data;
       } finally { c.width = c.height = 0; }
     },
     pixels(frame, points) {

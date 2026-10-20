@@ -52,7 +52,7 @@ cannot attach a Direct still.
    - The frame's size equals the iframe's on-screen size × `devicePixelRatio`, within 2 px.
    - It is not the whole viewport's size, which would mean an uncropped tab.
    - `displaySurface` is `browser` when Chrome reports it.
-   - The frame is not blank: a sampled 16×16 grid is not uniform and not fully transparent.
+   - The frame is not blank: a sampled 64×64 grid is not uniform and not fully transparent. A page that really is one colour is refused too.
    - Coverage is checked again right after the grab.
 
    Any failure discards the pixels and shows the existing Open in Remote offer, with a sentence that names the
