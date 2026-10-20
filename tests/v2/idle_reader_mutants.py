@@ -146,6 +146,19 @@ MUTANTS = [
      "        if session.reading is not asyncio.current_task():\n            return\n        session.reading = None",
      "        session.reading = None",
      ["tests/v2/idle_reader_check.py", "ClaudeScripted.test_only_the_reader_gives_the_stream_back"]),
+    # The owner's report of 2026-10-20: the CLI's answer after its children
+    # waited for the next message.
+    ("2026-10-20: a rate_limit_event between turns is held, and the CLI's turn behind it", C,
+     "        if isinstance(item, SystemMessage) or _of_no_turn(item):",
+     "        if isinstance(item, SystemMessage):",
+     ["tests/v2/idle_reader_check.py",
+      "ClaudeRecordings.test_a_rate_limit_event_between_turns_never_holds_back_the_clis_own_turn",
+      "DaemonClaude.test_the_clis_answer_after_its_children_reaches_the_hud_with_no_owner_message"]),
+    ("2026-10-20: a turn's own stream events taken for messages of no turn", C,
+     "    return not isinstance(item, (SdkUserMessage, AssistantMessage, StreamEvent,\n",
+     "    return not isinstance(item, (SdkUserMessage, AssistantMessage,\n",
+     ["tests/v2/idle_reader_check.py", "DaemonClaude.test_the_clis_own_turn_is_a_turn_of_the_thread",
+      "DaemonClaude.test_the_clis_answer_after_its_children_reaches_the_hud_with_no_owner_message"]),
 ]
 
 
