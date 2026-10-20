@@ -1,0 +1,56 @@
+{
+ "id": "hint-r1",
+ "kind": "review",
+ "pr": 279,
+ "title": "Keyring unlock hint: use the command that works under WSLg",
+ "base": "134ea187e2d6e8b7a0d902d51764b0837fde3e51",
+ "head": "1eb0f85384d581ae4343f0f307b1de07e4d0ee59",
+ "brief": "The unlock command Jarvis shows when the keyring is locked does not work under WSLg, which mounts its own /run/user/1000 over systemd's, so a plain `gnome-keyring-daemon --unlock` starts a stray second daemon. UNLOCK_COMMAND in jarvis/v2/browser/password_store.py is now the recipe verified live by the lead: replace the running daemon with one unlocked from stdin, detached with setsid, then re-register the secrets component. The password goes only through read -rsp and stdin. The longer command would be truncated by the HUD, so the Manage panel hint cap goes from 400 to 600 characters and the 409 error cap from 300 to 500. Docs and tests updated.",
+ "focus": [
+  "password never in argv or history",
+  "the command string copies correctly from the HUD",
+  "HUD caps vs message lengths",
+  "tests pin the recipe"
+ ],
+ "suites": [
+  "tests/v2/browser_password_store_check.py",
+  "tests/v2/browser_profiles_check.py",
+  "hud/src/components/BrowserProfile.test.ts"
+ ],
+ "control": false,
+ "seeded": null,
+ "ground_truth": [
+  {
+   "id": "gt1",
+   "severity": "LOW",
+   "mechanism": "stale comment and bound: assertLessEqual(len(UNLOCK_MESSAGE), 300) 'the HUD shows 300 characters' leaves no headroom; the limits that matter are now 500/600",
+   "location": "tests/v2/browser_password_store_check.py:207",
+   "evidence": "UNLOCK_MESSAGE is exactly 300",
+   "source": "review of #279"
+  },
+  {
+   "id": "gt2",
+   "severity": "LOW",
+   "mechanism": "the recipe is pinned only in fragments; dropping unset KP, sleep 2, the redirects or </dev/null still passes",
+   "location": "tests/v2/browser_password_store_check.py:196-214",
+   "evidence": "assert the whole UNLOCK_COMMAND string",
+   "source": "review of #279"
+  },
+  {
+   "id": "gt3",
+   "severity": "LOW",
+   "mechanism": "no HUD test for the 500 caps: reverting them in BrowserProfile.tsx or state/browser.ts fails no HUD test",
+   "location": "hud/src/components/BrowserProfile.test.ts:61-68; BrowserProfile.tsx:70; state/browser.ts:18",
+   "evidence": "only the 600 hint cap is tested",
+   "source": "review of #279"
+  },
+  {
+   "id": "gt4",
+   "severity": "LOW",
+   "mechanism": "the error paragraph has no max-height, so a 440-character 409 error can push the Browser content down in a narrow pane",
+   "location": "hud/src/components/BrowserProfile.tsx:78",
+   "evidence": "cosmetic",
+   "source": "review of #279"
+  }
+ ]
+}

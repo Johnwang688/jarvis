@@ -1,0 +1,22 @@
+{
+ "id": "sec4-clean",
+ "kind": "review",
+ "pr": 244,
+ "title": "SEC-4: create credential files private from the start",
+ "base": "2478b6e8641f6fadf53e7b439450f7237129ccea",
+ "head": "8fa491efedb19a4bb0da7aa97ab1363b4db74021",
+ "brief": "Discord connect and Google connect created the token file with write_text at the umask mode and chmodded it afterwards; spotify_auth._store wrote a fixed <name>.tmp at umask mode, followed a symlink at that name and left the temp behind on failure. New jarvis/private_write.py write_private(path, data: bytes): unique temp name beside the target, created O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC at 0600, fsync, os.replace, temp unlinked on any failure. browser/host._write_private delegates to it and subagents._compact calls it. Acceptance tests (tests/private_writes_check.py) were committed first.",
+ "focus": [
+  "file mode from the first byte",
+  "symlink and temp-file handling",
+  "failure cleanup",
+  "callers keep their names and signatures"
+ ],
+ "suites": [
+  "tests/private_writes_check.py",
+  "tests/v2/browser_host_activity_check.py"
+ ],
+ "control": true,
+ "seeded": null,
+ "ground_truth": []
+}

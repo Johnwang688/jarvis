@@ -1,0 +1,41 @@
+{
+ "id": "c6-fu-r1",
+ "kind": "review",
+ "pr": 277,
+ "title": "C6 follow-up: stamp only top-level starts, pre-stamp Claude spawns",
+ "base": "725459c2125cc885ec0d8a4ddb79587ffdc5123e",
+ "head": "94dd73c440812d2f609b5e39a753f0e736c5fc57",
+ "brief": "Follow-up to #275 (display only). _stamp_child stamps from the running turn only for a lifecycle 'started' record with no parent; a grandchild of an unseen parent, a first subagent_event or a non-started lifecycle record gets no stamp. A new daemon._spawned pre-stamps cl:<call id> from a Claude TOOL_STARTED named Agent/Task in the orchestrator's own turn stream. The seen-sid set no longer evicts. Docs now show C6 as live.",
+ "focus": [
+  "display-only: the decision, layer, reason, Always offer and waits are unchanged",
+  "untrusted chat titles on an authorization surface",
+  "SELF_PROTECTED hunks in permissions.py and approvals.py",
+  "provenance of background sub-agents across turns",
+  "no lock taken by the card reader"
+ ],
+ "suites": [
+  "tests/v2/relay_provenance_check.py",
+  "tests/v2/claude_subagents_check.py",
+  "tests/v2/daemon_check.py"
+ ],
+ "control": true,
+ "seeded": null,
+ "ground_truth": [
+  {
+   "id": "gt1",
+   "severity": "NIT",
+   "mechanism": "_spawned is called under the daemon lock in _record without an exception guard, so a raise would cost the event's log and bus record",
+   "location": "jarvis/v2/daemon.py _record TOOL_STARTED branch",
+   "evidence": "cannot raise on today's inputs",
+   "source": "review of #275 (#277 review)"
+  },
+  {
+   "id": "gt2",
+   "severity": "NIT",
+   "mechanism": "the turn-changed guard on the _spawned call is untested (mutant dropping it survives) and cannot trip on today's paths",
+   "location": "jarvis/v2/daemon.py _record; tests/v2/relay_provenance_check.py",
+   "evidence": "mutant m3 survives",
+   "source": "review of #275 (#277 review)"
+  }
+ ]
+}

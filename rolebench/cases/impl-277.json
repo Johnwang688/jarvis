@@ -1,0 +1,25 @@
+{
+ "id": "impl-277",
+ "kind": "implement",
+ "pr": 277,
+ "size": "S",
+ "base": "725459c2125cc885ec0d8a4ddb79587ffdc5123e",
+ "merged": "c58f60acf8323b0d9ec984007e790d68c61b2fde",
+ "brief": "Follow-up to the merged C6 approval-card provenance work (display only; permissions.py and approvals.py must not change; the code change is in jarvis/v2/daemon.py). Three rules for how a sub-agent ('child') is stamped with the relay provenance of the turn that spawned it. (1) A child is stamped from the running relayed turn only on its lifecycle record with op 'started' and no parent (a top-level child of the orchestrator). A grandchild whose parent the daemon never saw, a child whose first record is a subagent_event, and a lifecycle record with any other op get no stamp, so while a relayed turn runs their card says 'running', never 'started'; a later 'started' record does not restamp them. A grandchild of a seen parent takes a copy of the parent's stamp, or none if the parent has none (including a parent first seen while no relay was running). (2) Claude can emit a child's task_started only after the spawning turn's result, when the record is read between turns and stamps nothing. So add daemon._spawned(session, data, *, running): called under the lock from _record for a Claude TOOL_STARTED named 'Agent' or 'Task' in the orchestrator's own turn stream, it stamps providers.claude.child_sid(call_id) as seen, with the running relay's stamp when running is true and none otherwise; an owner turn's call marks the sid seen without a stamp; other tool names do nothing. It uses the same turn-changed guard as _record_subagent and must never cost an event record. (3) The seen-sid set (session.child_seen) must not evict; stamps stay capped at 256. Prepared records look like {'kind': 'subagent', 'sid': ..., 'data': {'op': ..., 'parent_sid': ...}}. Update docs/notes/control-plane.md for the new rules.",
+ "hidden_tests": [
+  "tests/v2/relay_provenance_check.py"
+ ],
+ "regression_suites": [
+  "tests/v2/permissions_check.py",
+  "tests/v2/claude_subagents_check.py",
+  "tests/v2/codex_subagents_check.py",
+  "tests/v2/idle_reader_check.py",
+  "tests/v2/chat_relay_check.py",
+  "tests/v2/daemon_check.py"
+ ],
+ "scope": [
+  "jarvis/v2/daemon.py",
+  "docs/notes/control-plane.md"
+ ],
+ "fixtures": []
+}

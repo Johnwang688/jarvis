@@ -1,0 +1,22 @@
+{
+ "id": "sec2-clean",
+ "kind": "review",
+ "pr": 243,
+ "title": "SEC-2: strip unseen characters from the approval-card origin label",
+ "base": "2478b6e8641f6fadf53e7b439450f7237129ccea",
+ "head": "d7e6c8777b70122d8315f28d196fe03d9779199a",
+ "brief": "A model-written task name appears on the HUD and Discord approval card's 'requested by' line. Neither strips invisible or right-to-left override characters, so a name can change how the line reads. This PR strips them in the v2 origin cleaner and in v1's tasks._label (which repeats the v2 character list because no v1 module imports v2 code). Acceptance tests (tests/v2/approval_label_check.py) were committed first and fail on main.",
+ "focus": [
+  "origin label cleaning on an authorization surface",
+  "other sources of the origin line (sub-agent label)",
+  "v1/v2 character-list parity"
+ ],
+ "suites": [
+  "tests/v2/approval_label_check.py",
+  "tests/v2/permissions_check.py",
+  "tests/tasks_check.py"
+ ],
+ "control": true,
+ "seeded": null,
+ "ground_truth": []
+}

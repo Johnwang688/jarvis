@@ -1,0 +1,65 @@
+{
+ "id": "c6-r1",
+ "kind": "review",
+ "pr": 275,
+ "title": "C6 approval-card provenance",
+ "base": "b1feb001b4bf9711938d27e092e235222bb2bbee",
+ "head": "5e9f21a6cf004bb40973a07b82869622646553fa",
+ "brief": "Chat-to-chat C6, display only. An approval card raised by a call from a turn that another chat's message started (a relayed turn, in the target chat), or that its reply started (a reply turn, in the sender), says which chat's message started the turn, under REQUESTED BY. Claims: no permission layer reads the provenance; a sub-agent's call in a relayed turn carries the line too; the chat title is reduced so it cannot forge or restyle the card; the HUD draws the line without changing buttons, focus or Tab order; nothing adds a path from a message to an approval.",
+ "focus": [
+  "display-only: the decision, layer, reason, Always offer and waits are unchanged",
+  "untrusted chat titles on an authorization surface",
+  "SELF_PROTECTED hunks in permissions.py and approvals.py",
+  "provenance of background sub-agents across turns",
+  "no lock taken by the card reader"
+ ],
+ "suites": [
+  "tests/v2/relay_provenance_check.py",
+  "tests/v2/permissions_check.py",
+  "tests/face/hud_v2_relay_check.py"
+ ],
+ "control": false,
+ "seeded": null,
+ "ground_truth": [
+  {
+   "id": "gt1",
+   "severity": "MED",
+   "mechanism": "provenance follows the turn running when the card is raised, not the turn that spawned the sub-agent; a background child of a relayed turn that asks after the turn ends gets no line, and an owner turn's child asking during a later relayed turn gets a wrong line",
+   "location": "jarvis/v2/daemon.py:62-77 _relayed_from; daemon.py:~1846 _permit",
+   "evidence": "relayed turn starts a background Agent and ends; the child then runs a dangerous command and the card shows no line. Conversely an owner-turn child asking during a later relayed turn names the other chat",
+   "source": "review of #275 round 1"
+  },
+  {
+   "id": "gt2",
+   "severity": "LOW",
+   "mechanism": "the decision-unchanged matrix compares only request.to_json(), so a label-driven change to a field not in to_json (max_wait_s) passes every suite",
+   "location": "tests/v2/permissions_check.py:3334 card() in relay_provenance_checks",
+   "evidence": "mutant: if request.relayed_from: request.max_wait_s = 1.0 in _ask passes both relay_provenance_checks and relay_provenance_check.py",
+   "source": "review of #275 round 1"
+  },
+  {
+   "id": "gt3",
+   "severity": "LOW",
+   "mechanism": "the line shows only the chat title, so two chats with the same model-written title are indistinguishable",
+   "location": "jarvis/v2/chat_reads.py:145 card_title; hud/src/components/Approvals.tsx:126-128",
+   "evidence": "no provider word or thread id is shown",
+   "source": "review of #275 round 1"
+  },
+  {
+   "id": "gt4",
+   "severity": "LOW",
+   "mechanism": "card_title lets Hangul fillers (U+3164, U+115F, U+1160, U+FFA0) and look-alike brackets and dots through, so a title can be blank or can imitate the card's own bracket and dot punctuation",
+   "location": "jarvis/v2/chat_reads.py:~142 _CARD_BRACKETS/_CARD_DROPPED",
+   "evidence": "'x⟩ ⋅ your own turn ⟨y' is returned unchanged; a filler-only title renders blank",
+   "source": "review of #275 round 1"
+  },
+  {
+   "id": "gt5",
+   "severity": "NIT",
+   "mechanism": "title is not wrapped in <bdi> and a clipped title has no title attribute with the full line; status text in docs goes stale on merge",
+   "location": "hud/src/components/Approvals.tsx:127; docs/notes/control-plane.md:338",
+   "evidence": "",
+   "source": "review of #275 round 1"
+  }
+ ]
+}

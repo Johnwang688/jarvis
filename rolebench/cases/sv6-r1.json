@@ -1,0 +1,51 @@
+{
+ "id": "sv6-r1",
+ "kind": "review",
+ "pr": 280,
+ "title": "SV-6: a message of no turn never holds back the CLI's own turn",
+ "base": "134ea187e2d6e8b7a0d902d51764b0837fde3e51",
+ "head": "5c4cfa6951d69accb4c68618e75a26f46b20e16c",
+ "brief": "SV-6 Claude idle reader. Between turns the idle reader (_route_idle) holds any main-thread message it cannot place; everything behind a held message is held too, including the CLI's own turn, which then waits for the owner's next send. The PR adds _of_no_turn(item), true for anything that is not a user, assistant, stream-event, result or system message (rate_limit_event, conversation_reset, any kind a newer SDK adds). Such a message is read and passed by, as a system message already is, unless it arrives behind something already held (held in order). The first held message's type is logged. Offers, adopt, self_started marking, Discord, speech, runner skips, approvals, steering and C3/C6 provenance are claimed unchanged.",
+ "focus": [
+  "held-in-order semantics",
+  "provenance of offered CLI turns (peer, task-notification, background)",
+  "late steer echoes and stop-means-stop",
+  "behaviour on SDK upgrade (claude-agent-sdk is not pinned)",
+  "mutation coverage"
+ ],
+ "suites": [
+  "tests/v2/idle_reader_check.py",
+  "tests/v2/idle_reader_mutants.py",
+  "tests/v2/steer_check.py",
+  "tests/v2/claude_subagents_check.py",
+  "tests/v2/chat_relay_check.py"
+ ],
+ "control": false,
+ "seeded": null,
+ "ground_truth": [
+  {
+   "id": "gt1",
+   "severity": "MED",
+   "mechanism": "SdkUserMessage in the _of_no_turn exclusion tuple is not pinned: removing it survives every suite, and the owner's real case (a peer-origin replay offered as 'peer', and a late steer's echo staying held/interrupted) is untested",
+   "location": "jarvis/v2/providers/claude.py:~3167-3175 _of_no_turn; tests/v2/idle_reader_check.py",
+   "evidence": "mutant removing SdkUserMessage survives idle_reader_check, steer_check, claude_subagents_check, chat_relay_check; new tests use one_default whose CLI turns open with a stream event",
+   "source": "review of #280 round 1"
+  },
+  {
+   "id": "gt2",
+   "severity": "LOW",
+   "mechanism": "test_a_rate_limit_event_mid_cli_turn_is_read_in_order does not test order: it passes on pre-fix code and under a reorder mutant",
+   "location": "tests/v2/idle_reader_check.py:384",
+   "evidence": "reorder mutant (drop no-turn messages even behind a held one) survives; matters for ConversationResetMessage zeroing cost_seen ahead of a held result",
+   "source": "review of #280 round 1"
+  },
+  {
+   "id": "gt3",
+   "severity": "LOW",
+   "mechanism": "an SDK upgrade can silently widen what is dropped between turns: a new Message class is passed by with nothing logged",
+   "location": "jarvis/v2/providers/claude.py _route_idle / _of_no_turn",
+   "evidence": "claude-agent-sdk is not declared in pyproject.toml",
+   "source": "review of #280 round 1"
+  }
+ ]
+}

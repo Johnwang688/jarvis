@@ -1,0 +1,67 @@
+{
+ "id": "dc-r1",
+ "kind": "review",
+ "pr": 276,
+ "title": "B-DIRECT-CAPTURE: gated Direct capture with owner probe",
+ "base": "4098444ff7e0511679e881b02ccf89a6af16f164",
+ "head": "59188dfc9b262d171d7c7ff41b0471ec4ec8bf46",
+ "brief": "Annotate and Send to chat can capture a Direct Browser tab. On the owner's trusted press the HUD checks the iframe is fully on screen with nothing painted over it, calls CropTarget.fromElement, getDisplayMedia (preferCurrentTab), cropTo, grabs one ImageCapture frame, stops every track in a finally, then checks pixels (still uncovered at the grab, size equal to rect x devicePixelRatio within 2 px, not the whole tab, not blank). Only then POST /browser/direct-capture mints a URL-only reference. A browser.json switch direct_capture is off by default and PATCH true returns 409 unless the owner's probe (Settings > Browser > Test Direct capture, a HUD-made four-colour pattern) has passed on this daemon; the pass is in memory only. direct_probe.py re-validates every field and computes the verdict itself.",
+ "focus": [
+  "owner-only routes and the 409 gate",
+  "track lifecycle and focus",
+  "overlay and coverage refusal",
+  "daemon verdict independence",
+  "Chromium behaviour at non-1 devicePixelRatio"
+ ],
+ "suites": [
+  "tests/v2/direct_capture_check.py",
+  "tests/face/hud_v2_direct_capture_check.py",
+  "hud/src/lib/directCapture.test.ts",
+  "hud/src/components/DirectCaptureSetting.test.ts",
+  "hud/src/components/BrowserCapture.test.ts"
+ ],
+ "control": false,
+ "seeded": null,
+ "ground_truth": [
+  {
+   "id": "gt1",
+   "severity": "MED",
+   "mechanism": "the size check requires the frame to equal rect x devicePixelRatio, but Chromium returns the cropped frame at CSS size, so the probe reports wrong_size at 150% scaling and the switch can never unlock",
+   "location": "hud/src/lib/directCapture.ts:107-116 checkFrame; hud/src/lib/directProbe.ts:71; jarvis/v2/browser/direct_probe.py:141-145",
+   "evidence": "copy of the face check with device_scale_factor=1.5: frame 320x200 against expected 480x300",
+   "source": "review of #276 round 1"
+  },
+  {
+   "id": "gt2",
+   "severity": "MED",
+   "mechanism": "the overlay list names data-testid dev-server-prompt but the real testid is devserver-prompt (and its container .devserver-prompts is pointer-events:none), so the 5x5 hit-test grid can miss an agent-triggered prompt painted over the frame",
+   "location": "hud/src/lib/directCapture.ts:68 (real element hud/src/components/DevServerPrompt.tsx:74)",
+   "evidence": "prompt between grid columns passes the grab-time re-check and its host:port lands in the still",
+   "source": "review of #276 round 1"
+  },
+  {
+   "id": "gt3",
+   "severity": "LOW",
+   "mechanism": "the daemon's verdict compares the HUD's frame against the HUD's own expected and the HUD's got against the HUD's want; it holds no pattern colours, does not recompute rect x dpr, and does not check the rect, so 'computes the verdict itself' overstates it",
+   "location": "jarvis/v2/browser/direct_probe.py:141-150",
+   "evidence": "",
+   "source": "review of #276 round 1"
+  },
+  {
+   "id": "gt4",
+   "severity": "LOW",
+   "mechanism": "COLOUR_SLACK = 24 per channel is tight; measured channel errors reached 20 in headless Chromium and a colour-managed Windows display could exceed 24",
+   "location": "jarvis/v2/browser/direct_probe.py:37",
+   "evidence": "spurious wrong_pixels",
+   "source": "review of #276 round 1"
+  },
+  {
+   "id": "gt5",
+   "severity": "LOW",
+   "mechanism": "the coverage re-check runs after grabFrame resolves, so an overlay removed between frame production and the check (a fade-out ending) slips through",
+   "location": "hud/src/lib/directCapture.ts grabCroppedFrame atGrab callback",
+   "evidence": "",
+   "source": "review of #276 round 1"
+  }
+ ]
+}
