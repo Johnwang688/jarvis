@@ -1954,6 +1954,133 @@ Remote, all passing. The raw runs are not kept; the script reproduces them
 (`--ack draw` emulates the old ack; `--quality` and `--chrome-flag` were the
 knobs for the rest).
 
+## Chrome tile-size sweep (B-PERF, 2026-10-20)
+
+The last open B-PERF measurement: does Chrome's raster tile size change
+input-to-picture latency, frame encode time or frame size at `RASTER_SCALE`
+1.5? **No. No tile configuration beats the default outside run-to-run noise,
+and none changes frame bytes or memory. The launch flags stay as they are;
+nothing is recommended.** Scripts and raw runs are kept outside the repo, in
+`~/.cache/jarvis-lead/tile-sweep/` (`verify_tiles.py`, `sweep.py`,
+`analyze.py`, `results.jsonl`, `confirm.jsonl`, `sweep.log`, `analysis.md`,
+`v_*.json`); `sweep.py` drives `scripts/browser_measure.py` as a library and
+adds only a `flip` fixture and raw-sample capture.
+
+**Which flags Chrome 155 honours** (155.0.8059.39, headless, software raster,
+`--force-device-scale-factor=1.5`; checked by a `cc` + `disabled-by-default-cc.debug`
+trace over twelve wheel notches and six key flips on a 500-paragraph page,
+reading the tile `content_rect`s the compositor snapshots, not by whether
+Chrome launched):
+
+| flag | tile sizes in the trace | raster tasks in the trace |
+|---|---|---|
+| none (default) | 256 × 256 | 1344 |
+| `--default-tile-width/height=256` | 256 × 256 (same as the default) | 1344 |
+| `=128` | 128 × 128 | 4830 |
+| `=512` | 512 × 512 | 344 |
+| `=1024` | 1024 × 1024 | 92 |
+| `=2048` | **clamped** to 1856 × 512 | 86 |
+| `width=1024 height=256` | 1024 × 256 | 354 |
+| `--max-untiled-layer-width/height=2048` or `=64` | unchanged (256 × 256; not tried on a small layer) | 1340 / 1344 |
+| `--enable-gpu-rasterization` with `=512` | 512 × 512 (no GPU, so nothing else changes) | 344 |
+
+So `--default-tile-width` and `--default-tile-height` work (the software
+default is 256 × 256) and Chrome clamps what it will not tile; the
+`--max-untiled-layer-*` pair changed nothing observable. Raster task counts
+are one trace each (the page scrolls on a timer), so read them as the order
+of magnitude: a larger tile means fewer, bigger tasks, not less raster work.
+
+**The sweep.** Seven configurations, four interleaved rounds (the order
+rotated each round and reversed on odd ones, so no configuration always ran
+first or last), a fresh daemon and Chrome per configuration and round, the
+real `scripts/browser_measure.py` pipeline (JPEG quality 70, ack at decode
+start). `default` and `t256` are the same tiles, so their difference is the
+noise floor. The machine was idle for every run: `sweep.py` waited for
+load1 below 1.5 and CPU busy below 10% (it waited 9 times, up to 2.3);
+load1 at each run's start was 0.56–1.43 (median 0.96); the only other work
+was the trading firm's idle loop and the daemon at 2%. Chrome's summed
+user + system time and PSS are read from `/proc`. Samples: 200 key presses
+per configuration for the text page (50 × 4) and 160 for the flip page
+(40 × 4), 2560 moves for hover, 4 × 4 s of scroll. p50 / p95 ms, pooled over
+the four rounds:
+
+| scenario (what moves) | config | press → frame drawn | Chrome frame (handler → capture) | encode + base64 → daemon | frame KB p50 |
+|---|---|---|---|---|---|
+| text page, typing every 125 ms, pane (1800 × 1200 px) | default | 43.7 / 55.1 | 12.7 / 15.2 | 16.3 / 19.4 | 428 |
+| | t256 (control) | 42.4 / 44.7 | 12.1 / 13.7 | 15.8 / 16.7 | 428 |
+| | t128 | 43.8 / 50.9 | 13.1 / 15.6 | 16.0 / 18.9 | 428 |
+| | t512 | 42.5 / 47.5 | 12.2 / 14.5 | 15.7 / 17.6 | 428 |
+| | t1024 | 42.2 / 45.4 | 12.0 / 13.6 | 15.7 / 16.8 | 428 |
+| | 1024 × 256 | 42.7 / 50.6 | 12.3 / 14.7 | 15.8 / 18.1 | 428 |
+| | t2048 (1856 × 512) | 42.7 / 45.2 | 12.1 / 13.5 | 15.9 / 16.8 | 428 |
+| flip page, a key every 400 ms, pane | default | 31.0 / 37.9 | 13.5 / 17.3 | 8.5 / 9.4 | 14 |
+| | t256 (control) | 30.8 / 41.5 | 13.5 / 18.4 | 8.5 / 9.6 | 14 |
+| | t128 | 31.3 / 35.4 | 13.8 / 16.8 | 8.5 / 9.2 | 14 |
+| | t512 | 31.2 / 39.3 | 13.9 / 18.5 | 8.4 / 9.5 | 14 |
+| | t1024 | 31.2 / 39.0 | 13.9 / 18.1 | 8.5 / 9.7 | 14 |
+| | 1024 × 256 | 31.0 / 37.1 | 13.6 / 17.9 | 8.4 / 9.1 | 14 |
+| | t2048 | 31.9 / 40.1 | 14.3 / 17.7 | 8.6 / 9.4 | 14 |
+| hover grid, 160 Hz, pane | default | 78.6 / 88.9 | 28.2 / 30.7 | 14.0 / 16.5 | 351 |
+| | t256 (control) | 79.2 / 88.9 | 28.3 / 31.0 | 14.2 / 16.7 | 351 |
+| | t128 | 80.2 / 90.2 | 29.0 / 32.3 | 14.3 / 16.8 | 351 |
+| | t512 | 79.3 / 89.4 | 28.4 / 31.1 | 14.2 / 16.8 | 351 |
+| | t1024 | 78.6 / 88.3 | 28.1 / 30.7 | 14.0 / 16.3 | 351 |
+| | 1024 × 256 | 79.0 / 88.7 | 28.3 / 31.0 | 14.0 / 16.7 | 351 |
+| | t2048 | 78.8 / 88.8 | 28.0 / 31.0 | 14.1 / 17.2 | 351 |
+| text page, typing every 125 ms, 4K pane (3810 × 2010 px) | default | 137.7 / 144.0 | 37.0 / 38.7 | 55.4 / 59.6 | 1492 |
+| | t256 (control) | 138.6 / 147.3 | 37.3 / 39.7 | 55.6 / 60.2 | 1492 |
+| | t128 | 140.5 / 149.7 | 39.5 / 42.2 | 55.9 / 61.4 | 1492 |
+| | t512 | 137.8 / 143.7 | 37.2 / 38.8 | 55.4 / 59.1 | 1492 |
+| | t1024 | 137.2 / 144.3 | 36.8 / 38.8 | 55.4 / 59.6 | 1492 |
+| | 1024 × 256 | 138.3 / 145.7 | 37.2 / 39.3 | 55.7 / 60.4 | 1492 |
+| | t2048 | 136.7 / 144.5 | 36.0 / 37.4 | 55.3 / 59.1 | 1492 |
+| flip page, a key every 400 ms, 4K pane | default | 81.8 / 93.0 | 34.8 / 41.9 | 25.5 / 28.5 | 46 |
+| | t256 (control) | 84.3 / 94.0 | 36.7 / 42.0 | 26.2 / 28.7 | 46 |
+| | t128 | 82.7 / 93.2 | 35.5 / 44.6 | 25.6 / 28.1 | 46 |
+| | t512 | 83.4 / 86.2 | 37.0 / 38.5 | 25.4 / 26.7 | 46 |
+| | t1024 | 83.2 / 86.0 | 36.5 / 37.5 | 25.5 / 26.6 | 46 |
+| | 1024 × 256 | 83.1 / 90.8 | 36.2 / 39.9 | 25.7 / 27.3 | 46 |
+| | t2048 | 84.6 / 97.5 | 37.7 / 46.1 | 25.8 / 28.0 | 46 |
+
+Scroll at 120 Hz, pane: every configuration drew 57–60 fps (default 59.9,
+t512 60.0, t2048 59.9, t128 56.9, t1024 58.6, 1024 × 256 59.0, control 58.2),
+the frame at 491 KB p50 in all, encode + base64 18.6–19.1 ms p50 (the
+default's p95 21.5 ms against 21.3–25.7). The 1–3 fps spread is the same
+size as the default-against-control gap in other rows.
+
+**Reading it.** Frame bytes are identical in every configuration (the JPEG
+depends on the pixels, not on how they were rastered). Where the tile size
+could matter, nothing moves beyond noise: between `default` and `t256`,
+which are the same tiles, press → frame differs by up to 1.3 ms p50 (text
+pane) and 2.5 ms (flip 4K), and p95 by up to 10 ms (text pane, where one
+round of `default` had a few slow keys); the round-by-round p50s of each
+configuration overlap. **The only difference outside that noise is that
+128 × 128 is a little worse**: text 4K 140.5 against 137.7 ms (p50 of every
+round 140–141 against 137–138, Chrome's frame 39.5 against 37.0 ms), and
+hover pane 80.2 against 78.6–79.3 ms. More, smaller tiles mean more per-tile
+work for the same pixels; the large tiles buy none of it back, because a
+software raster costs what its pixels cost.
+
+A text-page confirmation (`confirm.jsonl`): default, 256, 512 and 1024, eight
+interleaved rounds, 400 key presses each, since the first sweep's `default`
+text row sat 1.3 ms above the control. Press → frame p50 / p95: default
+42.6 / 45.2, t256 42.7 / 45.2, t512 42.9 / 46.3, t1024 43.1 / 52.7 ms; Chrome
+CPU 2.81–2.83 s in each. That earlier gap was noise.
+
+Chrome's CPU time over a scenario is within about 9% across configurations in every row, with the default and the control among the extremes
+(text pane 2.77–3.01 s, hover 7.2–7.6 s, scroll 8.9–9.2 s, text 4K 5.8–6.2 s).
+PSS summed over Chrome's processes showed no tile-size trend (text pane
+346–360 MB, hover 300–301 MB; at 4K it split into two groups, 341–399 MB, by
+run rather than by configuration, which looks like which helper processes
+were alive at the read). Peak working-set differences between tile sizes
+were not separately measured.
+
+**Result.** The default (256 × 256 in software raster) is as fast as any
+other size tried and cheaper than 128 × 128. Nothing here changes
+`launch_args`, and no tile flag is recommended. That closes the B-PERF tile
+question; a bigger change has to come from the levers already listed (frames
+at 1× while the pointer moves, a video stream, a GPU for Chrome).
+
 ## Password store: the owner's keyring (B-LOGIN, M12, 2026-10-15)
 
 The owner asked for synced Google passwords to stop sitting under Chrome's
