@@ -1,0 +1,26 @@
+{
+ "id": "cl3-clean",
+ "kind": "review",
+ "pr": 253,
+ "title": "CL-3: one Host-header check for the v2 listeners",
+ "base": "aedcdd4b0852dc351423fc278a62f753aff80d1d",
+ "head": "847434e03cfc5f508968260570f69366500958dc",
+ "brief": "Card CL-3 of the duplicate-helper cleanup. Adds config.own_host_header(value, port): True only for 127.0.0.1:<port> or localhost:<port>, exact, on the raw header value. It replaces seven inline copies at v2/browser/routes.py _strict_host, v2/hud_api.py check_origin, v2/terminals.py _strict_host, v2/vex.py _owner, v2/devservers.py route, v2/projects.py is_owner and the v2/daemon.py approvals hud= check. All seven were byte-identical in what they accept; none strips or lowercases; each site keeps its own port choice and a missing header fails. No SELF_PROTECTED file is touched. New tests/v2/own_host_header_check.py sends each listener a forged Host plus matching Origin through its real handler with check_origin patched out.",
+ "focus": [
+  "the helper accepts exactly what each copy accepted",
+  "each site keeps its own port source",
+  "a missing or odd header fails closed",
+  "behaviour-preserving refactor of a DNS-rebinding guard"
+ ],
+ "suites": [
+  "tests/v2/own_host_header_check.py",
+  "tests/v2/browser_routes_check.py",
+  "tests/v2/hud_backend_check.py",
+  "tests/v2/terminal_check.py",
+  "tests/v2/vex_check.py",
+  "tests/v2/owner_read_check.py"
+ ],
+ "control": true,
+ "seeded": null,
+ "ground_truth": []
+}

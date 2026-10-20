@@ -1,0 +1,19 @@
+{
+ "id": "impl-248",
+ "kind": "implement",
+ "pr": 248,
+ "size": "S",
+ "base": "1fafb3abbeb16883eadae9b716031934db0006ab",
+ "merged": "906efdc873284afefc5dce692a9dc14653cc369a",
+ "brief": "Follow-up to the outbound-scrub work (SEC-3). In jarvis/v2/diff_review.py, _clean cleans a model-written field (the review summary and each finding's why and file) by running the credential scrub (redact.scrub_text) first and removing invisible characters after. A key split by a zero-width or bidi character (for example 'ghp_AB' + U+200B + 'CD...') slips past the scrub and is then joined back together by the strip. Make the cleaned text safe regardless of invisible characters inside a key (U+200B, U+2060, U+202E, U+FEFF inside each provider key shape). Do not change behaviour for text without invisible characters.",
+ "hidden_tests": [
+  "tests/v2/outbound_scrub_check.py"
+ ],
+ "regression_suites": [
+  "tests/v2/diff_review_check.py"
+ ],
+ "scope": [
+  "jarvis/v2/diff_review.py"
+ ],
+ "fixtures": []
+}

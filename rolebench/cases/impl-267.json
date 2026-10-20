@@ -1,0 +1,23 @@
+{
+ "id": "impl-267",
+ "kind": "implement",
+ "pr": 267,
+ "size": "S",
+ "base": "8d73bead58cf297927cbe83f7917aa6a24ad7743",
+ "merged": "d44018462733ff9d6c6f71fd401237822d8dfa2d",
+ "brief": "Bug: jarvis/v2/stores.py _Store._append writes a JSONL line under the module _lock but _read_lines takes no lock, so a reader that lands mid-write sees an unterminated last line and raises StoreError ('path:N: Unterminated string ...'). It shows in tests/v2/chat_relay_check.py and, in the product, in a transcript load, chat_read or the runner's read_log. Make a read never fail on a line still being written, without hiding corruption: only the LAST line, and only when the file does not end in a newline, may be treated as a write in progress and left out (also when the write is cut in the middle of a multi-byte character). A malformed interior line, a malformed newline-terminated last line (LF or CRLF), any other invalid UTF-8 and non-object JSON still raise StoreError with the same 'path:N:' messages; an unterminated last line that parses is still returned. Records are separated by the newline only: any other Unicode character inside a JSON string, including line and paragraph separators, is record data, never a break; a CRLF-rewritten file still reads.",
+ "hidden_tests": [
+  "tests/v2/stores_check.py"
+ ],
+ "regression_suites": [
+  "tests/v2/chat_relay_check.py",
+  "tests/v2/chat_reads_check.py",
+  "tests/v2/archive_check.py",
+  "tests/v2/hud_backend_check.py",
+  "tests/v2/daemon_check.py"
+ ],
+ "scope": [
+  "jarvis/v2/stores.py"
+ ],
+ "fixtures": []
+}

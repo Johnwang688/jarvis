@@ -1,0 +1,22 @@
+{
+ "id": "impl-243",
+ "kind": "implement",
+ "pr": 243,
+ "size": "S",
+ "base": "2478b6e8641f6fadf53e7b439450f7237129ccea",
+ "merged": "d7e6c8777b70122d8315f28d196fe03d9779199a",
+ "brief": "Security fix SEC-2. The attribution string on approval surfaces ('task <id> \"<brief>\"') can carry zero-width, bidi-override and other unseen characters, so a model-written task brief can reorder or hide part of the text the owner reads before approving. The v2 label() in jarvis/v2/approvals.py collapses whitespace and strips backticks only; U+202E, U+200B and the other characters in untrusted.UNSEEN_CATEGORIES are not whitespace and survive. The result becomes the origin field on HUD and Discord approval cards. v1's jarvis/tasks.py _label is the original copy with the same gap. approvals.clean_line already does the right thing and calls itself label()'s rule generalised. Goal: neither label contains unseen characters, both are a single line, v1 and v2 give the same results for the same inputs, a name longer than 60 characters is capped and ends in an ellipsis, backticks are removed, and the 'task <id> \"...\"' shape is unchanged. Reuse the existing helpers; write no new character table (if v1 must not import jarvis.v2, say why in a comment). Do not change permissions.py logic or the renderers. Existing label-format assertions in tests/tasks_check.py and tests/dispatch_toolset_check.py must still hold; update one that pins the old hard cut at 60 in the same change.",
+ "hidden_tests": [
+  "tests/v2/approval_label_check.py"
+ ],
+ "regression_suites": [
+  "tests/tasks_check.py",
+  "tests/v2/permissions_check.py",
+  "tests/dispatch_toolset_check.py"
+ ],
+ "scope": [
+  "jarvis/v2/approvals.py",
+  "jarvis/tasks.py"
+ ],
+ "fixtures": []
+}

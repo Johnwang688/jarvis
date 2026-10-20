@@ -1,0 +1,32 @@
+{
+ "id": "seed-readlines",
+ "kind": "review",
+ "pr": 267,
+ "title": "v2 stores (seeded): a log read never fails on a line still being written",
+ "base": "8d73bead58cf297927cbe83f7917aa6a24ad7743",
+ "head": "d44018462733ff9d6c6f71fd401237822d8dfa2d",
+ "brief": "_read_lines reads an append-only JSONL log without the writer's lock. Only the last line, and only when the file does not end in a newline, can be a write in progress; if it does not parse (or ends mid-character) it is left out. Everything else stays an error: an interior or newline-terminated bad line is corruption and raises StoreError with a path:N: message. Records end at the newline only (U+2028 and friends are data). Tests: torn_read and separator_characters in tests/v2/stores_check.py.",
+ "focus": [
+  "only the final unterminated line is forgiven",
+  "corruption still raises"
+ ],
+ "suites": [
+  "tests/v2/stores_check.py",
+  "tests/v2/chat_relay_check.py"
+ ],
+ "control": false,
+ "seeded": {
+  "description": "the in-progress-write exemption in _read_lines covers the last two lines instead of the last line",
+  "patch": "diff --git a/jarvis/v2/stores.py b/jarvis/v2/stores.py\nindex 2b49e31..04b7033 100644\n--- a/jarvis/v2/stores.py\n+++ b/jarvis/v2/stores.py\n@@ -142,7 +142,7 @@ def _read_lines(path: Path) -> list[dict[str, Any]]:\n         try:\n             item = json.loads(line)\n         except ValueError as exc:\n-            if unfinished and number == len(lines):\n+            if unfinished and number >= len(lines) - 1:\n                 break                  # a write in progress, not corruption\n             raise StoreError(f\"{path}:{number}: {exc}\") from exc\n         if not isinstance(item, dict):\n"
+ },
+ "ground_truth": [
+  {
+   "id": "gt1",
+   "severity": "MED",
+   "mechanism": "the torn-write exemption is off by one: a bad line that is second to last is now treated as a write in progress, so an unterminated file whose second-to-last record is corrupt is silently cut short there, dropping the corrupt record and the valid final record instead of raising",
+   "location": "jarvis/v2/stores.py _read_lines (if unfinished and number >= len(lines) - 1)",
+   "evidence": "file 'good\\nBAD\\n{\"x\":1}' (no trailing newline): read returns only the first row where the contract is StoreError at line 2",
+   "source": "seeded bug, injected by P0 (clean head d440184)"
+  }
+ ]
+}

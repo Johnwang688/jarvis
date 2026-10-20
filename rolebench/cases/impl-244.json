@@ -1,0 +1,26 @@
+{
+ "id": "impl-244",
+ "kind": "implement",
+ "pr": 244,
+ "size": "M",
+ "base": "2478b6e8641f6fadf53e7b439450f7237129ccea",
+ "merged": "8fa491efedb19a4bb0da7aa97ab1363b4db74021",
+ "brief": "Security fix SEC-4 (low severity). Token and private-state files are created with the umask mode and narrowed afterwards: jarvis/tools/discord.py (bot token) and jarvis/google_auth.py use write_text then chmod 0600; jarvis/spotify_auth._store does the same through a fixed '<name>.tmp' that follows a symlink planted at that name and is left behind on failure; jarvis/v2/subagents.py _compact creates with O_EXCL and 0600 but without O_NOFOLLOW or fsync; jarvis/stt_settings.update has an inline copy of the recipe; jarvis/v2/browser/host.py has the reference recipe (_write_private). Goal: one shared private-write helper (bytes in; mode 0600 from the first byte; O_EXCL and O_NOFOLLOW; fsync; os.replace; temp unlinked on failure; importable from both v1 and v2 code, so a v1-level module) used by the three credential writers, subagents._compact, stt_settings.update, with host._write_private keeping its name and signature. With a umask of 022 each writer's file must be 0600 at every point (the tests inspect the temp file's mode before the rename by patching os.replace); an existing symlink at the target is refused, not followed; a failed write leaves no temp file; Spotify's rotating-token write must still persist the new token before it is used. Do not touch secrets.py credential-name rules or .env handling. Tests must use temporary HOME and config, never real tokens.",
+ "hidden_tests": [
+  "tests/private_writes_check.py"
+ ],
+ "regression_suites": [
+  "tests/v2/browser_host_activity_check.py",
+  "tests/tasks_check.py"
+ ],
+ "scope": [
+  "jarvis/private_write.py",
+  "jarvis/tools/discord.py",
+  "jarvis/google_auth.py",
+  "jarvis/spotify_auth.py",
+  "jarvis/v2/subagents.py",
+  "jarvis/stt_settings.py",
+  "jarvis/v2/browser/host.py"
+ ],
+ "fixtures": []
+}
