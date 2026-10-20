@@ -43,7 +43,8 @@ cannot attach a Direct still.
    prompt element (`role` or known HUD selectors) intersects it.
 3. **Capture.** First `CropTarget.fromElement(iframe)`. Then `getDisplayMedia({video: {displaySurface: "browser"},
    audio: false, preferCurrentTab: true, selfBrowserSurface: "include", surfaceSwitching: "exclude",
-   monitorTypeSurfaces: "exclude"})`, then `track.cropTo(target)`. Then one `ImageCapture.grabFrame()`.
+   monitorTypeSurfaces: "exclude"})`, then `track.cropTo(target)`. Then one `ImageCapture.grabFrame()`. It gets at most 3 tries 150 ms apart, each bounded to 3 s, because a
+   track can have no frame yet just after the crop. Only the frame that arrives is kept.
 4. **Tracks stop at once on every path.** One `finally` stops every track of the stream. That covers success, the
    prompt being cancelled (no stream), an error at any step, a pixel-check failure, and a card, hide, tab change or
    unmount during any await. A stream that arrives after the gesture went stale is stopped as soon as it resolves.
@@ -53,7 +54,8 @@ cannot attach a Direct still.
    - It is not the whole viewport's size, which would mean an uncropped tab.
    - `displaySurface` is `browser` when Chrome reports it.
    - The frame is not blank: a sampled 64×64 grid is not uniform and not fully transparent. A page that really is one colour is refused too.
-   - Coverage is checked again right after the grab.
+   - Coverage is checked again at the grab. Coverage and the rect are both read at that moment, before the tracks
+     stop, because Chrome's sharing bar can resize the page while it shares.
 
    Any failure discards the pixels and shows the existing Open in Remote offer, with a sentence that names the
    failure: cancelled, not cropped, wrong size, blank, or covered.

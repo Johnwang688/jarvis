@@ -1267,7 +1267,8 @@ Then the capture itself:
 Every track stops in a `finally` on every path. A stream that arrives after the gesture went stale is stopped
 the moment it resolves.
 
-The frame is checked once more, before it is used:
+The frame is checked once more, before it is used. Coverage and the iframe's rect are read at the grab, before
+the tracks stop, because Chrome's own sharing bar can resize the page while it shares:
 - it is uncovered again;
 - its size is the iframe's rect × `devicePixelRatio` within 2 px;
 - it is not the whole viewport's size;
