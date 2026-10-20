@@ -39,7 +39,7 @@
    "severity": "MED",
    "mechanism": "the 'open list of gaps' mixes tested items (CSSOM P6, out-of-process iframe P5) with untested reasoning (adoptedStyleSheets, closed shadow roots, canvas, media, scroll, late resources)",
    "location": "docs/plans/2026-10-19-browser-preview-capability.md:53-57",
-   "evidence": "",
+   "evidence": "grep the plan's gaps list for each item and look for a matching probe script or result: only CSSOM (P6) and the out-of-process iframe (P5) have one; adoptedStyleSheets, closed shadow roots, canvas, media, scroll position and late resources have none in the probe directory",
    "source": "review of #274"
   },
   {
@@ -55,7 +55,7 @@
    "severity": "LOW",
    "mechanism": "'makeSnapshot refuses every layer' tried one layer only; 'the page starved the stream', 'stamped after processing' and 'createTarget{enableBeginFrameControl} does nothing' are interpretations stated as fact; '30/30 timeouts' is ambiguous; 120/120 under paused virtual time mostly shows that pausing works; the plan and file name date (2026-10-19) predates the probe files (2026-10-20)",
    "location": "docs/plans/2026-10-19-browser-preview-capability.md:41-52,66-72",
-   "evidence": "",
+   "evidence": "read the plan's P4 probe: it calls LayerTree.makeSnapshot on one layer (the latest with drawsContent) yet the plan says every layer is refused; the 'starved the stream' and 'stamped after processing' sentences have no counter or log behind them; 30/30 is not tied to a page; the plan's date differs from the probe files' modification times (Oct 20, 00:02-00:26)",
    "source": "review of #274"
   }
  ]

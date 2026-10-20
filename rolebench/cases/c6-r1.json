@@ -58,7 +58,7 @@
    "severity": "NIT",
    "mechanism": "title is not wrapped in <bdi> and a clipped title has no title attribute with the full line; status text in docs goes stale on merge",
    "location": "hud/src/components/Approvals.tsx:127; docs/notes/control-plane.md:338",
-   "evidence": "",
+   "evidence": "render the card with a right-to-left title: the title is a bare text child in Approvals.tsx with no <bdi> or unicode-bidi isolation, and a title clipped by the nowrap/ellipsis CSS has no title attribute; grep docs/notes/control-plane.md and the feature map for 'built on branch ... not merged', which is stale once the PR merges",
    "source": "review of #275 round 1"
   }
  ]

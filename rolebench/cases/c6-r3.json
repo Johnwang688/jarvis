@@ -50,7 +50,7 @@
    "severity": "NIT",
    "mechanism": "a live child evicted from the 4096-entry seen set would be restamped",
    "location": "jarvis/v2/daemon.py CHILD_SEEN",
-   "evidence": "",
+   "evidence": "read _stamp_child's seen set at this head: it is capped (CHILD_SEEN, 4096 entries) and pops the oldest, so a live child evicted from it appears new on its next record and is stamped from the running turn; a test that records 5000 children then re-announces the first one shows it",
    "source": "review of #275 round 3"
   }
  ]

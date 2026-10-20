@@ -44,7 +44,7 @@
    "severity": "LOW",
    "mechanism": "the daemon's verdict compares the HUD's frame against the HUD's own expected and the HUD's got against the HUD's want; it holds no pattern colours, does not recompute rect x dpr, and does not check the rect, so 'computes the verdict itself' overstates it",
    "location": "jarvis/v2/browser/direct_probe.py:141-150",
-   "evidence": "",
+   "evidence": "read direct_probe.py's verdict: it compares facts['frame'] with facts['expected'] and each sample's got with its want, all posted by the HUD; post a report whose expected equals a wrong frame size and whose want equals the colours it got, and the verdict still passes",
    "source": "review of #276 round 1"
   },
   {
@@ -60,7 +60,7 @@
    "severity": "LOW",
    "mechanism": "the coverage re-check runs after grabFrame resolves, so an overlay removed between frame production and the check (a fade-out ending) slips through",
    "location": "hud/src/lib/directCapture.ts grabCroppedFrame atGrab callback",
-   "evidence": "",
+   "evidence": "read grabCroppedFrame in directCapture.ts: the coverage re-check (atGrab) runs after grabFrame resolves, and the capture runs at up to 5 fps; an overlay present when the frame was produced and removed before the re-check is not seen, so its pixels are in the still",
    "source": "review of #276 round 1"
   }
  ]
