@@ -181,6 +181,27 @@ def owner_turn_rows(n, text):
     ]
 
 
+def rate_limit_row(n, status="allowed_warning"):
+    """A `rate_limit_event` as the CLI writes it whenever the account's limit
+    info changes: on any API response, a background child's included, so
+    between turns too. It carries no words and starts no turn."""
+    return {"seq": 9500 + n, "ms": 0, "src": "cli", "data": {
+        "type": "rate_limit_event", "uuid": f"00000000-0000-4000-8000-0000000095{n:02d}",
+        "session_id": SID, "rate_limit_info": {
+            "status": status, "rateLimitType": "five_hour", "utilization": 81.0,
+            "resetsAt": 1760900000}}}
+
+
+def after_first_result(extra):
+    """An edit: `extra` rows right after the first result, so the idle reader
+    meets them first, before any child message or the CLI's own turn."""
+    def edit(rows):
+        at = next(i for i, r in enumerate(rows) if r["src"] == "cli"
+                  and r["data"].get("type") == "result")
+        return rows[:at + 1] + extra + rows[at + 1:]
+    return edit
+
+
 def before_disconnect(extra):
     """An edit: `extra` rows just before the recorder's disconnect."""
     def edit(rows):
@@ -337,6 +358,44 @@ class ClaudeRecordings(unittest.TestCase):
                          ["SV0 parent: one_default step 1 done.", "SV0 parent: one_default step 2 done.",
                           "owner answer 2"])
         self.assertEqual([e.data["stop"] for e in second if e.kind == K.TURN_FINISHED], ["end"])
+
+    def test_a_rate_limit_event_between_turns_never_holds_back_the_clis_own_turn(self):
+        # The owner's report of 2026-10-20 (thread c5ee7933): two background
+        # agents finished at 13:03, Claude Code answered at once by itself,
+        # and nothing showed until the owner's next message at 13:06, which
+        # then read both of the CLI's turns as its own. Children were calling
+        # the API while the chat was idle, so the CLI wrote `rate_limit_event`
+        # lines between turns. The idle reader held the first one ("anything
+        # else"), and everything behind a held message is held: the CLI's own
+        # turn was never offered. A message of no turn is read and passed by.
+        run = self.play("one_default", edit=after_first_result(
+            [rate_limit_row(1), rate_limit_row(2, "allowed")]))
+        first = run.send("turn 1")
+        run.feed.wait(lambda ev: any(e.data.get("self_started") for e in ev if e.kind == K.TURN_STARTED),
+                      what="the CLI's own turn, with no owner message")
+        self.assertTrue(run.provider.cli_turn_pending(run.handle))
+        cli = run.adopt()
+        self.assertEqual(cli[0].data, {"self_started": "background"})
+        self.assertEqual(texts(cli), injected_texts("one_default")[0])
+        self.assertEqual(cli[-1].kind, K.TURN_FINISHED)
+        self.assertNotIn("SV0 parent: one_default step 2 done.", texts(first))
+        self.assertEqual([x for x in run.session.held if x is not claude._END], [])
+
+    def test_a_rate_limit_event_mid_cli_turn_is_read_in_order(self):
+        # One that arrives after the CLI's own turn began is held behind it,
+        # in order, and the adopted turn reads past it to its result.
+        rows = R.rows("one_default")
+        at = next(i for i, r in enumerate(rows) if r["src"] == "cli" and r["data"].get("type") == "assistant"
+                  and "step 2" in json.dumps(r["data"]))
+
+        def edit(rows):
+            return rows[:at] + [rate_limit_row(3)] + rows[at:]
+        run = self.play("one_default", edit=edit)
+        run.send("turn 1")
+        run.feed.wait(lambda ev: run.provider.cli_turn_pending(run.handle), what="the offer")
+        cli = run.adopt()
+        self.assertEqual(texts(cli), injected_texts("one_default")[0])
+        self.assertEqual(cli[-1].data["stop"], "end")
 
     def test_without_a_watcher_nothing_is_read_between_turns(self):
         run = self.play("one_default", watch=False)
@@ -821,6 +880,34 @@ class DaemonClaude(Daemonised):
         self.assertTrue(cli_records)
         self.assertTrue(all(r.get("self_started") is True for r in cli_records), cli_records)
         self.assertIn("text_delta", {r["kind"] for r in cli_records})
+
+    def test_the_clis_answer_after_its_children_reaches_the_hud_with_no_owner_message(self):
+        # The daemon end of the 2026-10-20 report: with the CLI's
+        # `rate_limit_event` between turns, its own answer is still a turn of
+        # the thread at once (`cli_turn`, on the bus and in the transcript),
+        # never the next owner message's.
+        chat = self.chat("one_default", edit=after_first_result([rate_limit_row(1)]))
+        bus = self.daemon.bus.subscribe()
+        owner = self.daemon.send(chat, UserMessage(text="turn 1"))
+        self.cli_finished(chat)
+        log = self.log(chat)
+        opened = [r for r in log if r.get("kind") == "cli_turn"]
+        self.assertEqual(len(opened), 1)
+        cli = opened[0]["turn_id"]
+        words = [r["data"]["text"] for r in log if r.get("turn_id") == cli and r["kind"] == "text"]
+        self.assertEqual(words, injected_texts("one_default")[0])
+        self.assertFalse(any(r.get("turn_id") == owner and r.get("kind") == "text"
+                             and r["data"]["text"] == "SV0 parent: one_default step 2 done." for r in log))
+        seen = []
+        while not bus.empty():
+            seen.append(bus.get_nowait())
+        published = [r for r in seen if r.get("turn_id") == cli and r.get("kind") == "text"]
+        self.assertEqual([r["data"]["text"] for r in published], words)
+        self.assertTrue(all(r.get("self_started") is True for r in published))
+        messages = self.owner("GET", f"/threads/{chat}/transcript")["messages"]
+        roles = [(m["role"], m["text"]) for m in messages]
+        at = roles.index(("system", D.CLI_TURN_TEXT))
+        self.assertEqual(roles[at + 1], ("assistant", "SV0 parent: one_default step 2 done."))
 
     def test_an_owner_message_waits_for_the_clis_turn_and_stop_stops_it(self):
         rows = R.rows("one_default")
