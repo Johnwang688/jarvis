@@ -77,6 +77,7 @@ from claude_agent_sdk import (
     HookMatcher,
     PermissionResultAllow,
     PermissionResultDeny,
+    RateLimitEvent,
     ResultMessage,
     StreamEvent,
     SystemMessage,
@@ -1975,6 +1976,7 @@ class ClaudeProvider:
             self._hold(session, item)
             return True
         if isinstance(item, SystemMessage) or _of_no_turn(item):
+            _note_no_turn_kind(session, item)
             self._translate(session, item)
             return True
         origin = self._cli_turn(session, item)
@@ -3170,9 +3172,34 @@ def _of_no_turn(item: Any) -> bool:
     adds). Only the turn-shaped kinds — user, assistant, stream event,
     result — and system messages take part in deciding whose turn is under
     way; this one is read wherever it comes, by `_translate`, and `_read`
-    gives it no part in ownership either."""
+    gives it no part in ownership either — though, as any frame does, it
+    still counts as the CLI's sign of life during a steer hold (it extends
+    `hold_quiet`). Between turns the idle reader passes it by only when
+    nothing is held: behind a held message it is held too, in order (a
+    `conversation_reset` must not zero `cost_seen` ahead of a held result)."""
     return not isinstance(item, (SdkUserMessage, AssistantMessage, StreamEvent,
                                  ResultMessage, SystemMessage))
+
+
+# Kinds of no turn the provider knows and expects between turns. Any other
+# (a Message class a newer SDK adds: `claude-agent-sdk` is not pinned) is
+# still passed by, and named once in the journal, so a kind that should have
+# been read is not dropped unseen.
+_KNOWN_NO_TURN = (RateLimitEvent, ConversationResetMessage)
+_NO_TURN_NAMED: set = set()
+
+
+def _note_no_turn_kind(session: Any, item: Any) -> None:
+    """Log, once per process and kind, a message of no turn of a kind the
+    provider does not know (its type name only, never its content)."""
+    if isinstance(item, SystemMessage) or isinstance(item, _KNOWN_NO_TURN):
+        return
+    kind = type(item).__name__
+    if kind in _NO_TURN_NAMED:
+        return
+    _NO_TURN_NAMED.add(kind)
+    LOG.info("claude %s: passed by a %s read between turns (a kind this provider "
+             "does not know)", session.thread_id, kind)
 
 
 def _subagent_message(item: Any) -> bool:

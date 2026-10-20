@@ -159,6 +159,26 @@ MUTANTS = [
      "    return not isinstance(item, (SdkUserMessage, AssistantMessage,\n",
      ["tests/v2/idle_reader_check.py", "DaemonClaude.test_the_clis_own_turn_is_a_turn_of_the_thread",
       "DaemonClaude.test_the_clis_answer_after_its_children_reaches_the_hud_with_no_owner_message"]),
+    # Review of #280.
+    ("#280 MED: a main-thread user message taken for a message of no turn", C,
+     "    return not isinstance(item, (SdkUserMessage, AssistantMessage, StreamEvent,\n",
+     "    return not isinstance(item, (AssistantMessage, StreamEvent,\n",
+     ["tests/v2/idle_reader_check.py",
+      "ClaudeScripted.test_a_peer_handback_turn_behind_a_rate_limit_event_is_offered_as_peer",
+      "ClaudeScripted.test_a_late_steers_echo_between_turns_stays_held_and_a_stopped_one_is_stopped"]),
+    ("#280 LOW 1: a message of no turn passed by even behind something held", C,
+     "        if session.held:\n            self._hold(session, item)\n            return True\n"
+     "        if isinstance(item, SystemMessage) or _of_no_turn(item):",
+     "        if _of_no_turn(item):\n            self._translate(session, item)\n            return True\n"
+     "        if session.held:\n            self._hold(session, item)\n            return True\n"
+     "        if isinstance(item, SystemMessage) or _of_no_turn(item):",
+     ["tests/v2/idle_reader_check.py",
+      "ClaudeRecordings.test_a_rate_limit_event_mid_cli_turn_is_read_in_order"]),
+    ("#280 LOW 2: a kind the provider does not know is passed by unnamed", C,
+     "    _NO_TURN_NAMED.add(kind)\n    LOG.info(",
+     "    _NO_TURN_NAMED.add(kind)\n    return\n    LOG.info(",
+     ["tests/v2/idle_reader_check.py",
+      "ClaudeScripted.test_a_kind_the_provider_does_not_know_is_passed_by_and_named_once"]),
 ]
 
 
