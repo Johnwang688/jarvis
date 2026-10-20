@@ -1150,7 +1150,7 @@ nothing: `+` is a quantifier); `timeout` is the backstop.
   `_kinds_checks` and the `.editorconfig` vitests (ED-8), and the full vitest
   suite (2 of 2).
 
-## Role bench (2026-10-20, in progress)
+## Role bench (2026-10-20)
 
 `python -m rolebench` picks the cheapest model that is good enough to review or
 implement a pull request in this repository (plan:
@@ -1160,13 +1160,36 @@ implement a pull request in this repository (plan:
 long-bench or swecompare: it measures review recall and cost to merge-ready on
 this repo's own history, not generic ability.
 
-State of the build (P1 is partial): case validation, the leak-proof snapshot
-(`git archive` base, then the PR diff as one commit; hidden tests removed and
-restored only in a grading copy), the spend ledger ($10 total, $0.50 per run,
-Kimi K3 at $3/$15 per M), the quota guard (skip at 75%), the judge answer
-validator, scoring and report math exist and are covered by
-`tests/rolebench_check.py` (free). The harness adapters (`claude`, `codex`,
-`jarvis`), the `review`/`implement`/`judge`/`report` commands, the JSONL log
-and the blinded Opus judge call are not built yet. Run the checks with
-`PYTHONPATH=<checkout> .venv/bin/python tests/rolebench_check.py` under the
-usual `systemd-run` memory cap.
+    python -m rolebench snapshot hint-r1
+    python -m rolebench review --harness claude --model haiku --case hint-r1 --runs 3
+    python -m rolebench judge --run ~/.cache/jarvis-lead/rolebench/runs/<run-id>   # or the runs/ directory
+    python -m rolebench implement --harness claude --model sonnet --case impl-279 \
+        --reviewer-harness claude --reviewer-model opus
+    python -m rolebench report
+
+`--no-quota-guard` goes before the subcommand. Everything is written under
+`~/.cache/jarvis-lead/rolebench/` (`ROLEBENCH_HOME`): `snap/` (one isolated repo
+per run: `git archive` of the base, the PR diff as one commit, no remote, no
+later objects, the bench's own files stripped; an implement snapshot has the
+hidden tests removed, restored only in a grading copy), `runs/<run-id>/`
+(prompt, review text, findings, `run.json`, `judge.json`, `stdout.jsonl`),
+`log.jsonl` (one row per run), `spend.json` (the OpenRouter ledger: $10 total,
+$0.50 per run, a model that hits the per-run cap is aborted; Kimi K3 is
+budgeted at $3/$15 per M) and `report.md`.
+
+Harnesses: `claude -p` (stream-json so tool calls reach the audit; strict MCP,
+project-only settings, no web, `gh`, `curl` or push), `codex exec` (workspace-write,
+network off, `--json` token counts) and the Jarvis loop (a subprocess worker around
+`longbench.harness.run_jarvis`; the key arrives on stdin and is gone from the
+environment before the model gets a shell). Every run is in a 3 GB no-swap
+`systemd-run` scope with a wall timeout that kills the process group, at most 3
+at once, and a scrubbed environment (no `GH_TOKEN`, `GITHUB_TOKEN`,
+`OPENROUTER_API_KEY`). A Claude or Codex cell is skipped at 75% of a quota window
+(one read-only GET of the daemon's `/usage`; unknown proceeds with a warning). The
+network and outside-the-snapshot audits are detection, reported next to the score.
+
+The judge is `claude -p --model opus` over blinded findings plus the answer key, with
+read-only access to the pristine snapshot; its JSON is validated strictly (one retry),
+and `spotcheck.md` is a 20% sample for the lead, with the run key kept in a separate
+file. Free checks: `PYTHONPATH=<checkout> .venv/bin/python tests/rolebench_check.py`
+under the usual `systemd-run` memory cap.

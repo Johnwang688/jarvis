@@ -65,6 +65,7 @@ def build(case: dict, run_id: str, repo: Path | None = None, out_root: Path | No
         if case["kind"] == "implement":
             for rel in case["hidden_tests"]:
                 (snap / rel).unlink(missing_ok=True)
+        _fixtures(snap, case)
         git(snap, "init", "-q", "-b", "main")
         git(snap, "add", "-A")
         git(snap, "commit", "-q", "-m", "base", "--no-gpg-sign")
@@ -82,6 +83,7 @@ def build(case: dict, run_id: str, repo: Path | None = None, out_root: Path | No
         problems = check(snap, case)
         if problems:
             raise SnapshotError("; ".join(problems))
+        _link_node_modules(snap, repo)
     except Exception:
         shutil.rmtree(snap, ignore_errors=True)
         raise
@@ -110,10 +112,51 @@ def check(snap: Path, case: dict) -> list[str]:
     for rel in case.get("hidden_tests", []):
         if (snap / rel).exists():
             bad.append(f"hidden test present: {rel}")
+    keep = {f.split("/")[0] for f in case.get("fixtures", []) if f.startswith("rolebench/")}
     for rel in STRIP:
-        if (snap / rel).exists():
+        if (snap / rel).exists() and not (rel in keep and _only_fixtures(snap / rel, case)):
             bad.append(f"bench file present: {rel}")
     return bad
+
+
+def _only_fixtures(path: Path, case: dict) -> bool:
+    """`rolebench/` may exist in a snapshot only to hold the case's fixtures."""
+    wanted = {str((Path(snap_rel))) for snap_rel in case.get("fixtures", [])}
+    found = {str(p.relative_to(path.parent)) for p in path.rglob("*") if p.is_file()}
+    return found <= wanted
+
+
+def _fixtures(snap: Path, case: dict) -> None:
+    """Sanitized inputs the brief refers to. A path under `rolebench/cases/` is
+    read from the cases directory; it is copied to the same path in the
+    snapshot (the strip above removed everything else under `rolebench/`)."""
+    for rel in case.get("fixtures", []):
+        prefix = "rolebench/cases/"
+        source = (config.cases_dir() / rel[len(prefix):]) if rel.startswith(prefix) else (config.cases_dir() / "fixtures" / rel)
+        if not source.is_file():
+            raise SnapshotError(f"fixture {rel} not found at {source}")
+        (snap / rel).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, snap / rel)
+
+
+def _link_node_modules(snap: Path, repo: Path) -> None:
+    """TypeScript suites need hud/node_modules; link the source checkout's."""
+    for base in (repo, Path.home() / "projects" / "Jarvis"):
+        nm = base / "hud" / "node_modules"
+        if nm.is_dir() and (snap / "hud").is_dir():
+            if not (snap / "hud" / "node_modules").exists():
+                (snap / "hud" / "node_modules").symlink_to(nm)
+                exclude = snap / ".git" / "info" / "exclude"     # local: never part of a diff or a commit
+                exclude.parent.mkdir(exist_ok=True)
+                with exclude.open("a", encoding="utf-8") as fh:
+                    fh.write("\nhud/node_modules\n")
+            return
+
+
+def reset(snap: Path) -> None:
+    """Undo a reviewer's mutants: the tree back to HEAD, untracked files gone."""
+    git(snap, "reset", "-q", "--hard", "HEAD")
+    git(snap, "clean", "-fdq", "-e", "hud/node_modules")
 
 
 def restore_hidden(snap: Path, case: dict, repo: Path | None = None) -> Path:
