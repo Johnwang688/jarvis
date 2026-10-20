@@ -125,6 +125,14 @@ class Probe(unittest.TestCase):
         self.assertEqual(ok(frame=(1600, 1000)), "not_cropped")
         self.assertEqual(D.size_verdict({"width": 320, "height": 229}, {"width": 320, "height": 229}, 1.5,
                                         {"width": 1600, "height": 1000}), ("", 1.0))
+        sz = lambda w, h: {"width": w, "height": h}
+        # Both edges rounded (to even sizes, say): 1001×999 delivered as 1002×998.
+        self.assertEqual(D.size_verdict(sz(1002, 998), sz(1001, 999), 1, sz(1500, 1000))[0], "")
+        # A window-shaped uncropped frame below the accepted scales is still refused.
+        self.assertEqual(D.size_verdict(sz(600, 400), sz(400, 300), 1.5, sz(1500, 1000))[0], "not_cropped")
+        # A pane of the window's shape is ambiguous whatever the frame.
+        for frame in (sz(1400, 875), sz(560, 350), sz(10, 10)):
+            self.assertEqual(D.size_verdict(frame, sz(1400, 875), 2, sz(1600, 1000)), ("ambiguous", None))
 
     def test_the_report_records_the_scale_that_matched(self):
         with tempfile.TemporaryDirectory() as tmp:

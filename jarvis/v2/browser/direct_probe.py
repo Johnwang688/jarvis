@@ -51,7 +51,6 @@ PROBE_MIN_WIDTH = 160  # CSS px after any HUD zoom
 # The size rule (hud/src/lib/directCapture.ts `scaleOf`): one uniform scale
 # between CSS pixels and device pixels, give or take rounding.
 MIN_SCALE = 0.5
-SHAPE_SLACK = 1.5
 EDGE_SLACK = 2
 COLOUR_MARGIN = 20   # a sample must be this much nearer its own colour than any other
 MAX_EDGE = 16384
@@ -141,29 +140,44 @@ def normalize(raw) -> dict:
     }
 
 
-def scale_of(frame: dict, box: dict, dpr: float):
-    """The uniform scale at which `frame` is `box`, or None (`scaleOf` in the HUD)."""
-    if min(box["width"], box["height"], frame["width"], frame["height"]) < 1:
+def shape_slack(short: float, long: float) -> float:
+    """Short-edge slack in px: Chrome may round both edges, so 1 + short/long + 0.5 (at most 2.5)."""
+    return 1 + short / long + 0.5
+
+
+def fit_scale(a: dict, box: dict):
+    """The uniform scale at which `a` has `box`'s shape, at any scale, or None (`fitScale` in the HUD)."""
+    if min(box["width"], box["height"], a["width"], a["height"]) < 1:
         return None
     wide = box["width"] >= box["height"]
     long, short = (box["width"], box["height"]) if wide else (box["height"], box["width"])
-    f_long, f_short = (frame["width"], frame["height"]) if wide else (frame["height"], frame["width"])
-    s = f_long / long
+    a_long, a_short = (a["width"], a["height"]) if wide else (a["height"], a["width"])
+    s = a_long / long
+    return s if abs(a_short - short * s) <= shape_slack(short, long) else None
+
+
+def scale_of(frame: dict, box: dict, dpr: float):
+    """The scale at which `frame` is `box`, within 0.5…dpr, or None (`scaleOf` in the HUD)."""
+    s = fit_scale(frame, box)
+    if s is None:
+        return None
+    long = max(box["width"], box["height"])
     if s < MIN_SCALE - EDGE_SLACK / long or s > max(MIN_SCALE, dpr) + EDGE_SLACK / long:
         return None
-    return s if abs(f_short - short * s) <= SHAPE_SLACK else None
+    return s
 
 
 def size_verdict(frame: dict, rect: dict, dpr: float, viewport: dict):
-    """('' | 'wrong_size' | 'not_cropped' | 'ambiguous', scale)."""
-    pane, whole = scale_of(frame, rect, dpr), scale_of(frame, viewport, dpr)
-    if pane is not None and whole is not None:
-        return "ambiguous", pane
+    """('' | 'wrong_size' | 'not_cropped' | 'ambiguous', scale). Ambiguity is
+    the pane's shape against the window's, before the frame is looked at; a
+    frame of the window's shape is refused at any scale."""
+    if fit_scale(rect, viewport) is not None:
+        return "ambiguous", None
+    whole = fit_scale(frame, viewport)
     if whole is not None:
         return "not_cropped", whole
-    if pane is None:
-        return "wrong_size", None
-    return "", pane
+    pane = scale_of(frame, rect, dpr)
+    return ("wrong_size", None) if pane is None else ("", pane)
 
 
 def sample_positions(frame: dict):

@@ -1277,10 +1277,12 @@ the tracks stop, because Chrome's own sharing bar can resize the page while it s
 - it is uncovered;
 - **size rule** (`scaleOf`, mirrored in `direct_probe.scale_of`): the frame is the iframe's rect at one uniform
   scale *s* with 0.5 ≤ *s* ≤ `devicePixelRatio`. The long edge sets *s*, give or take 2 px of rounding, and the
-  short edge must agree within about 1 px. Chrome delivered CSS pixels under a 1.5 DPR (review of PR #276, MED-1)
+  short edge must agree within 1 + short/long + 0.5 px (at most 2.5, since Chrome may round both edges).
+  Chrome delivered CSS pixels under a 1.5 DPR (review of PR #276, MED-1)
   and may downscale a large pane at 4K;
-- it is not the whole window at any accepted scale (“not cropped”). A frame that matches both the pane and the
-  window is refused as ambiguous;
+- a pane with the window's shape is refused as ambiguous. That is decided from the rect and the window
+  alone, before the frame is looked at. A frame with the window's shape at **any** scale is refused as not
+  cropped, including an uncropped tab delivered below 0.5 (delta review of #276);
 - it is not blank on a 64×64 sample.
 
 Anything else discards it with a sentence and offers Open in Remote. Only then
@@ -1301,7 +1303,8 @@ address than the binding URL attached with it.
 **The probe.** It lives in Settings → Browser → Test Direct capture. It runs on
 the owner's trusted press and only in the installed app (`display-mode:
 standalone`). It crops to a HUD-made test pattern: a sandboxed `srcdoc` frame,
-no script, never a web page. The pattern is 7:5, a shape windows rarely have,
+no script, never a web page. The pattern is 7:5, a shape windows rarely have
+(in a 7:5 window the probe is refused as ambiguous),
 and as wide as Settings allows, from 320 to 1120 CSS px. That way a large capture,
 which Chrome may downscale, is measured as well as a small one. It reports facts
 only:

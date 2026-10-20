@@ -111,29 +111,40 @@ export function frameCovered(frame: Element, allowed: readonly Element[], env: P
 
 type Size = { width: number; height: number };
 /** Accepted scales: CSS pixels (Chrome delivered those under a 1.5 DPR) up to device pixels. */
-export const MIN_SCALE = 0.5, SHAPE_SLACK = 1.5, EDGE_SLACK = 2;
+export const MIN_SCALE = 0.5, EDGE_SLACK = 2;
+/** Short-edge slack in px: Chrome may round both edges (to even sizes, say), so about 1 + short/long + 0.5, at most 2.5. */
+export const shapeSlack = (short: number, long: number) => 1 + short / long + 0.5;
 /**
- * The uniform scale at which `frame` is `box`, or null. The long edge sets the
- * scale (within 0.5…dpr, give or take 2 px of rounding); the short edge must
- * then agree within about a pixel.
+ * The uniform scale at which `a` has `box`'s shape, at any scale, or null.
+ * The long edge sets the scale; the short edge must agree within `shapeSlack`.
  */
-export function scaleOf(frame: Size, box: Size, dpr: number): number | null {
-  if (!(box.width >= 1 && box.height >= 1 && frame.width >= 1 && frame.height >= 1)) return null;
+export function fitScale(a: Size, box: Size): number | null {
+  if (!(box.width >= 1 && box.height >= 1 && a.width >= 1 && a.height >= 1)) return null;
   const wide = box.width >= box.height;
-  const [long, short, fLong, fShort] = wide
-    ? [box.width, box.height, frame.width, frame.height] : [box.height, box.width, frame.height, frame.width];
-  const s = fLong / long;
-  if (s < MIN_SCALE - EDGE_SLACK / long || s > Math.max(MIN_SCALE, dpr) + EDGE_SLACK / long) return null;
-  return Math.abs(fShort - short * s) <= SHAPE_SLACK ? s : null;
+  const [long, short, aLong, aShort] = wide
+    ? [box.width, box.height, a.width, a.height] : [box.height, box.width, a.height, a.width];
+  const s = aLong / long;
+  return Math.abs(aShort - short * s) <= shapeSlack(short, long) ? s : null;
 }
-/** The pane's own shape at an accepted scale, and not the whole window's. */
+/** The scale at which `frame` is `box`, within 0.5…dpr (give or take 2 px of rounding), or null. */
+export function scaleOf(frame: Size, box: Size, dpr: number): number | null {
+  const s = fitScale(frame, box);
+  if (s === null) return null;
+  const long = Math.max(box.width, box.height);
+  return s < MIN_SCALE - EDGE_SLACK / long || s > Math.max(MIN_SCALE, dpr) + EDGE_SLACK / long ? null : s;
+}
+/**
+ * The pane's own shape at an accepted scale, and not the whole window's.
+ * Ambiguity is the pane's shape against the window's, decided before the
+ * frame is looked at; a frame of the window's shape is refused at any scale.
+ */
 export function checkFrame(frame: Size, rect: Size, dpr: number, viewport: Size):
   { verdict: "" | "size" | "not_cropped" | "ambiguous"; scale: number | null } {
-  const pane = scaleOf(frame, rect, dpr), whole = scaleOf(frame, viewport, dpr);
-  if (pane !== null && whole !== null) return { verdict: "ambiguous", scale: pane };
+  if (fitScale(rect, viewport) !== null) return { verdict: "ambiguous", scale: null };
+  const whole = fitScale(frame, viewport);
   if (whole !== null) return { verdict: "not_cropped", scale: whole };
-  if (pane === null) return { verdict: "size", scale: null };
-  return { verdict: "", scale: pane };
+  const pane = scaleOf(frame, rect, dpr);
+  return pane === null ? { verdict: "size", scale: null } : { verdict: "", scale: pane };
 }
 
 /** Fine enough that a page's text shows: a coarser grid called a mostly white page blank. */

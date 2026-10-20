@@ -55,10 +55,10 @@ cannot attach a Direct still.
 5. **Pixel check, before use.**
    - **Size rule (revised after review MED-1).** The frame is the iframe's on-screen shape at one uniform scale *s*,
      with 0.5 ≤ *s* ≤ `devicePixelRatio`. The long edge sets *s*, within 2 px of rounding, and the short edge must
-     agree within about 1 px. Chrome delivered CSS pixels under an emulated 1.5 DPR, and may downscale a large pane
+     agree within 1 + short/long + 0.5 px (at most 2.5, for rounding of both edges). Chrome delivered CSS pixels under an emulated 1.5 DPR, and may downscale a large pane
      at 4K. The first rule, rect × DPR only, would have failed the owner's 4K display at 150%.
-   - It is not the whole window at any accepted scale, which would mean an uncropped tab. A frame that matches both
-     the pane and the window is refused as ambiguous.
+   - A pane with the window's shape is refused as ambiguous, decided from the rect and the window alone. A frame
+     with the window's shape at any scale is refused as not cropped, even below 0.5.
    - `displaySurface` is `browser` when Chrome reports it.
    - The frame is not blank: a sampled 64×64 grid is not uniform and not fully transparent. A page that really is one colour is refused too.
    - Coverage is checked before each grab and again at it, and both must be clear. Coverage and the rect are read
@@ -92,7 +92,8 @@ installed app. It crops to a HUD-made test-pattern iframe inside Settings, not a
 centre block, in a sandboxed `srcdoc` frame with no scripts. So its pixel samples are known colours, not page
 content, and they prove the crop was really applied.
 
-The pattern is 7:5, a shape a window rarely has, so a crop cannot coincide with the whole window. It is as wide
+The pattern is 7:5, a shape a window rarely has, so a crop rarely coincides with the whole window; in a 7:5
+window the probe is refused as ambiguous. It is as wide
 as Settings allows, from 320 to 1120 CSS px, so the probe also measures a large capture that Chrome may downscale,
 not only a small one. That is the case the review raised for big panes at 4K.
 

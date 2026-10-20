@@ -141,19 +141,24 @@ describe("Direct capture: the pixels are checked before use", () => {
     // A large pane at 4K, downscaled by Chrome between the two.
     expect(checkFrame({ width: 2560, height: 1600 }, { width: 1600, height: 1000 }, 2, { width: 1920, height: 1080 }).verdict).toBe("");
     // The short edge must agree within about a pixel.
-    expect(checkFrame({ width: 601, height: 378 }, rect, 1.5, vp).verdict).toBe("size");
+    expect(checkFrame({ width: 601, height: 379 }, rect, 1.5, vp).verdict).toBe("size");
+    // Both edges rounded (to even sizes, say): 1001×999 delivered as 1002×998.
+    expect(checkFrame({ width: 1002, height: 998 }, { width: 1001, height: 999 }, 1, vp).verdict).toBe("");
     // Below 0.5, or above the DPR, is not this pane.
     expect(checkFrame({ width: 160, height: 100 }, rect, 1.5, vp).verdict).toBe("size");
     expect(checkFrame({ width: 801, height: 501 }, rect, 1.5, vp).verdict).toBe("size");
     expect(checkFrame({ width: 0, height: 0 }, { width: 0, height: 0 }, 1, vp).verdict).toBe("size");
   });
-  it("the whole window at any accepted scale is not a crop, and a pane of the window's shape is ambiguous", () => {
-    const rect = { width: 400, height: 250 }, vp = { width: 1600, height: 1000 };
-    for (const f of [{ width: 2400, height: 1500 }, { width: 1600, height: 1000 }, { width: 800, height: 500 }])
+  it("a frame of the window's shape is not a crop at any scale, and a pane of the window's shape is ambiguous", () => {
+    const rect = { width: 400, height: 300 }, vp = { width: 1500, height: 1000 };
+    // Including an uncropped tab delivered at 0.4, below the accepted scales.
+    for (const f of [{ width: 2250, height: 1500 }, { width: 1500, height: 1000 }, { width: 600, height: 400 }, { width: 150, height: 100 }])
       expect(checkFrame(f, rect, 1.5, vp).verdict).toBe("not_cropped");
-    // A 1400×875 pane in a 1600×1000 window: 1400×875 is the pane at 1 and the window at 0.875.
-    expect(checkFrame({ width: 1400, height: 875 }, { width: 1400, height: 875 }, 2, vp).verdict).toBe("ambiguous");
-    expect(scaleOf({ width: 1400, height: 875 }, vp, 2)).toBe(0.875);
+    // A pane of the window's shape is ambiguous before the frame is looked at, whatever its scale.
+    const square = { width: 1400, height: 875 }, win = { width: 1600, height: 1000 };
+    for (const f of [square, { width: 560, height: 350 }, { width: 10, height: 10 }])
+      expect(checkFrame(f, square, 2, win).verdict).toBe("ambiguous");
+    expect(scaleOf({ width: 1400, height: 875 }, win, 2)).toBe(0.875);
   });
   it("blank means one colour throughout or fully transparent", () => {
     const px = new Uint8ClampedArray(64).fill(200);
