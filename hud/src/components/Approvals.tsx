@@ -21,6 +21,7 @@ import { noPointerFocus } from "../lib/talkkey";
 import { allowRestore } from "../state/frameguard";
 import { BrowserApprovalCard } from "./BrowserApproval";
 import { cardLabel, validSid, type SubagentRef } from "../lib/subagents";
+import { relayedLine } from "../lib/relays";
 import { useRow, useWatch } from "../state/subagents";
 
 export function approvalChime(ctx?: AudioContext | null) {
@@ -119,6 +120,11 @@ function OrdinaryApprovalCard(props: {
       ) : null}
       {r.origin ? (
         <div className="origin" data-testid="approval-origin">REQUESTED BY {r.origin}</div>
+      ) : null}
+      {/* Chat-to-chat C6: which chat's message started this turn. Display
+          only, one clipped line of plain text; it changes no button here. */}
+      {typeof r.relayed_from === "string" && r.relayed_from ? (
+        <div className="relayed" data-testid="approval-relayed">{relayedLine(r.relayed_from)}</div>
       ) : null}
       {validSid(r.subagent) && r.thread_id ? (
         <SubagentLink threadId={r.thread_id} sid={r.subagent}

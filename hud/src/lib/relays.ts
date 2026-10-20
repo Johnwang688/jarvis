@@ -49,6 +49,26 @@ export function peerLabel(title: unknown): string {
   return oneLine(title, PEER_CHARS) || "(untitled)";
 }
 
+/** The longest chat title an approval card's provenance line shows (C6). */
+export const CARD_TITLE_CHARS = 60;
+
+/** Another chat's title on an approval card (C6), as the daemon reduces it
+ * (`chat_reads.card_title`), again here: one plain line of at most
+ * `CARD_TITLE_CHARS`, with no ‹ › « » · • to close its brackets or draw the
+ * card's parts, and no symbol (an emoji, a coloured dot) or combining mark to
+ * paint pending or error meaning or stack out of its line. */
+export function cardTitle(title: unknown): string {
+  if (typeof title !== "string") return "(untitled)";
+  const plain = title.normalize("NFC").replace(/\p{Cf}/gu, "")
+    .replace(/[\p{Mn}\p{Me}\p{So}\p{Sk}\p{Co}\p{Cn}\p{Cs}]/gu, "").replace(/[‹›«»·•]/g, "_");
+  return oneLine(plain, CARD_TITLE_CHARS) || "(untitled)";
+}
+
+/** The provenance line itself: never the owner's words, and never a turn the owner started. */
+export function relayedLine(title: unknown): string {
+  return `turn started by a message from chat ‹${cardTitle(title)}›`;
+}
+
 const PROVIDER_WORDS: Record<string, string> = { fast: "Jarvis", claude: "Claude", codex: "Codex" };
 
 /** The provider in words: Jarvis, Claude, Codex, or "chat". */

@@ -277,6 +277,10 @@ class ApprovalRequest:
     # link the card to the child's row. Set by `permissions.build_permit`
     # from a provider's `subagent_sid`; an id, never a word the model chose.
     subagent: str = ""
+    # Display only (chat-to-chat C6): the clean title of the chat whose
+    # message or reply started this turn (`PermitContext.relayed`). Decides
+    # nothing; the card says "turn started by a message from chat ‹title›".
+    relayed_from: str = ""
     _hud_private: bool = field(default=False, init=False, repr=False)
     _card: dict | None = field(default=None, init=False, repr=False, compare=False)
 
@@ -313,6 +317,7 @@ class ApprovalRequest:
             "headline": self.card()["headline"],
             "discord_channel_id": self.discord_channel_id,
             **({"subagent": self.subagent} if self.subagent else {}),
+            **({"relayed_from": clean_line(self.relayed_from, 80)} if self.relayed_from else {}),
         }
 
     def owner_json(self) -> dict:

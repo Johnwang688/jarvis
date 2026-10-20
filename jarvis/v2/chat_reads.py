@@ -53,6 +53,7 @@ import os
 import re
 import time
 from typing import Any, Callable, Iterable
+import unicodedata
 
 from jarvis import untrusted
 from jarvis.tools import secrets
@@ -129,6 +130,28 @@ def clean_title(title: Any, cap: int = TITLE_CHARS) -> str:
     if line == WITHHELD:
         return "(title withheld)"
     return clean_line(line, cap=cap) or "(untitled)"
+
+
+# A chat's title on an approval card (C6): "turn started by a message from
+# chat ‹title›". It lands on an authorization surface, so beyond `clean_title`
+# it can neither close the ‹ › it sits in, nor draw the card's " · " parts,
+# nor paint a symbol (an emoji, a warning sign or a coloured dot standing in
+# for pending or error meaning), nor stack combining marks out of its line.
+CARD_TITLE_CHARS = 60
+_CARD_BRACKETS = frozenset("‹›«»·•")
+_CARD_DROPPED = frozenset(("Mn", "Me", "So", "Sk", "Co", "Cn", "Cs"))
+
+
+def card_title(title: Any) -> str:
+    """`title` (already one clean, scrubbed line, `chat_relay._title`) for an
+    approval card: one plain line of at most `CARD_TITLE_CHARS`. Pure and
+    total; it reads no file."""
+    if not isinstance(title, str):
+        return "(untitled)"
+    text = unicodedata.normalize("NFC", clean_line(title, cap=10 * CARD_TITLE_CHARS))
+    text = "".join("_" if ch in _CARD_BRACKETS else ch for ch in text
+                   if unicodedata.category(ch) not in _CARD_DROPPED)
+    return clean_line(" ".join(text.split()), cap=CARD_TITLE_CHARS) or "(untitled)"
 
 
 def provider_word(provider: Any) -> str:

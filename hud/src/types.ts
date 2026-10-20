@@ -495,6 +495,8 @@ export interface ApprovalRequest {
   remote?: boolean;
   /** The native sub-agent whose call raised it (SV-3): its sid, for the card's link to its row. */
   subagent?: string;
+  /** Chat-to-chat C6, display only: the title of the chat whose message (or reply) started this turn. */
+  relayed_from?: string;
 }
 
 export interface AvatarDesc {

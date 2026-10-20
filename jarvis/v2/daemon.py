@@ -59,6 +59,24 @@ STOP_TIMEOUT = 2.0
 LOGGED_REDACTED = ("args", "command", "cmd", "reason", "headline")
 
 
+def _relayed_from(session) -> str:
+    """Chat-to-chat C6, display only: the card title of the chat whose message
+    (a relayed turn) or reply (a reply turn) started the turn `session` is
+    running now, else "" — an owner's turn, typed, spoken or from Discord,
+    a task's, or one with no turn. Read when a card is raised, outside the
+    lock (one attribute each; a mark that does not name the item's chat is
+    taken for a turn changing hands and shows nothing). No permission layer
+    reads it: `PermitContext.relayed` puts it on the card and nowhere else."""
+    item, mark = getattr(session, "relay_turn", None), getattr(session, "relay_mark", None)
+    if item is None or not isinstance(mark, dict):
+        return ""
+    peer = item.target if mark.get("reply") else item.sender
+    if not isinstance(peer, dict) or not peer.get("thread_id") or peer.get("thread_id") != mark.get("from"):
+        return ""
+    from .chat_reads import card_title
+    return card_title(peer.get("title"))
+
+
 def _log_fields(data) -> dict:
     """`LOGGED_REDACTED` fields of an event's data through
     `secrets.redact_value`, computed outside the daemon's lock (it reads
@@ -1825,11 +1843,15 @@ class Daemon:
                 task = self.stores.tasks.get(task_id)
         except StoreError:
             LOG.warning("Cannot read project/task for thread %s", thread_id, exc_info=True)
+        # The session `_open` registered just before building this permit:
+        # its card says which chat's message started a relayed turn (C6).
+        session = self._sessions.get(thread_id)
         ctx = PermitContext(
             thread_id=thread_id, brief=brief,
             provider=thread.provider.value if thread is not None else "",
             project=project, task=task,
-            delegation_cancelled=lambda: self._delegation_cancelled(thread_id))
+            delegation_cancelled=lambda: self._delegation_cancelled(thread_id),
+            relayed_from=(lambda: _relayed_from(session)) if session is not None else None)
         return build_permit(ctx, self.approvals)
 
     def _approval_requested(self, request: ApprovalRequest) -> None:
