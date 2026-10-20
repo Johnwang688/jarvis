@@ -192,6 +192,17 @@ turns in all (quota). About 12 minutes.
 4. Look at the card's text: does it say the turn began from another chat?
    (With C6 installed, expected: yes, "turn started by a message from chat
    ‹gate-s› (Claude · <its id>)" under REQUESTED BY; before it, no.)
+5. Optional, the native ordering C6 relies on (in `gate-t`, then again with
+   a Codex `gate-t`): from `gate-s`, send `Start a background sub-agent that
+   waits 20 seconds, then runs "npm view left-pad version". End your turn
+   at once.` After `gate-t`'s turn ends, the child's call raises a card.
+   Expected: "turn started by a message from chat ‹gate-s› …" (not "while a
+   turn … runs" and not no line). Note in the receipt whether the child's
+   `started` record came before or after the turn's `turn_finished`
+   (compare the `at` of its first record in `gate-t`'s `subagents.jsonl`
+   with the `turn_finished` in its `log.jsonl`). A missing line here on Codex
+   means its children can be announced after the turn and need a pre-stamp
+   like Claude's (`daemon._spawned`).
 
 **Expected:** the card appears in `gate-t`'s pane for a relayed turn exactly
 as for a typed one, waits for a human, and the owner's answer decides the
