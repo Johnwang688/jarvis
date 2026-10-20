@@ -123,11 +123,12 @@ function OrdinaryApprovalCard(props: {
       {r.origin ? (
         <div className="origin" data-testid="approval-origin">REQUESTED BY {r.origin}</div>
       ) : null}
-      {/* Chat-to-chat C6: which chat's message started this turn. Display
+      {/* Chat-to-chat C6: the relayed turn behind this call (or running). Display
           only, one clipped line of plain text; it changes no button here. */}
       {relay ? (
         <div className="relayed" data-testid="approval-relayed" title={relayedLine(r.relayed_from)}>
-          turn started by a message from chat ‹<bdi>{relay.title}</bdi>› ({relay.who})
+          {relay.started ? "" : "while a "}turn started by a message from chat ‹<bdi>{relay.title}</bdi>› ({relay.who})
+          {relay.started ? "" : " runs"}
         </div>
       ) : null}
       {validSid(r.subagent) && r.thread_id ? (

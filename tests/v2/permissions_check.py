@@ -3353,8 +3353,8 @@ def relay_provenance_checks():
             self.seen.append(request)
             return super().ask(request, **kw)
 
-    def provenance(title):
-        return {"title": title, "provider": "claude", "thread_id": "beef1234"}
+    def provenance(title, kind="started"):
+        return {"title": title, "provider": "claude", "thread_id": "beef1234", "kind": kind}
 
     with Sandbox() as box:
         (box.root / "proj").mkdir()
@@ -3373,7 +3373,10 @@ def relay_provenance_checks():
                    ("Bash", {"command": "rm draft.txt"}, {"subagent": "Explore"}),
                    ("Bash", {"command": "rm draft.txt"}, {"widening": "write /x", "subagent": "c",
                                                           "subagent_sid": "cx:kid-2"})]
+        # Each kind, and a reader that answers by who asks, as the daemon's does.
         readers = [lambda child, t=t: provenance(t) for t in RELAY_TITLES]
+        readers += [lambda child: provenance("Frontend", "running"),
+                    lambda child: provenance("Frontend", "started" if child is None else "running")]
 
         def boom(child):
             raise RuntimeError("the reader failed")
@@ -3411,24 +3414,29 @@ def relay_provenance_checks():
                             asked_total += new
                             eq(len(reads) - seen[1], new,
                                f"the reader is read once per card and never to decide: {what}")
-                            want = (None if "subagent" not in extra else extra.get("subagent_sid", ""))
+                            # The bridge's dangerous-tool ask is nobody's; a
+                            # child's is its sid ("" when the provider has none).
+                            want = ("" if extra.get("dangerous_tool") else
+                                    None if "subagent" not in extra else extra.get("subagent_sid", ""))
                             eq(reads[seen[1]:], [want] * new,
                                f"the reader is asked about the calling child (or the turn): {what}")
                         if relay_asker.seen:
-                            try:
-                                want = reader(None)
-                            except RuntimeError:
-                                want = None
-                            want = want if isinstance(want, dict) and want else None
-                            eq([r.relayed_from for r in relay_asker.seen], [want] * len(relay_asker.seen),
+                            def answer(child):
+                                try:
+                                    value = reader(child)
+                                except RuntimeError:
+                                    return None
+                                return value if isinstance(value, dict) and value else None
+                            wanted = [answer(c) for c in reads[-len(relay_asker.seen):]]
+                            eq([r.relayed_from for r in relay_asker.seen], wanted,
                                f"the card carries the reader's provenance, or nothing: {reader}")
                             eq({repr(r.relayed_from) for r in plain_asker.seen}, {"None"},
                                "a card from a turn no chat started carries none")
-                            for r in relay_asker.seen:
+                            for r, want in zip(relay_asker.seen, wanted):
                                 shown = r.to_json()
                                 if want:
                                     line = shown.get("relayed_from") or {}
-                                    ok(set(line) == {"title", "provider", "thread_id"}
+                                    ok(set(line) == {"title", "provider", "thread_id", "kind"}
                                        and all(isinstance(v, str) and "\n" not in v and len(v) <= 80
                                                for v in line.values()),
                                        f"the published provenance is three bounded lines: {line!r}")
@@ -3448,6 +3456,21 @@ def relay_provenance_checks():
            "a relayed card still offers Always, to the same human-backed asker")
         private = dataclasses.replace(request, hud_only=True)
         ok("relayed_from" not in private.to_json(), "a private (Browser) card publishes only its fixed fields")
+
+        # A Codex chat's session tool is asked by the daemon's bridge, which
+        # cannot tell a child from the orchestrator: the reader hears "".
+        from jarvis.v2.model import Role
+        from jarvis.v2.provider import Brief
+        chat = Brief(role=Role.CHAT, cwd=str(cwd), profile=P.AUTO, mcp_servers=["jarvis"],
+                     always_ask=["memory_write"])
+        for provider, heard in (("codex", ""), ("claude", None)):
+            asker, reads = Asker(Decision.DENY), []
+            ctx = PermitContext("abcd1234", chat, provider,
+                                relayed_from=lambda child=None: reads.append(child) or provenance("F", "running"))
+            name = "memory_write" if provider == "codex" else "mcp__jarvis__memory_write"
+            eq(build_permit(ctx, asker)(name, {"text": "x"}, chat), Decision.DENY, f"{provider}: the owner's no")
+            eq((len(asker.seen), reads), (1, [heard]),
+               f"{provider}: a session tool's card is asked about {heard!r}")
 
 def main():
     for section in (matrix_checks, always_ask_checks, file_deny_checks,

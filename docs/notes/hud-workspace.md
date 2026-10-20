@@ -1625,6 +1625,7 @@ the wire shapes are in [`docs/hud-api.md`](../hud-api.md#chat-to-chat-relays-bet
 This section is only what the HUD does with them. C5 is merged and live. C6
 (merged, #275; not yet live) adds a "turn started by a message from chat
 ‹title› (Provider · id)" line to approval cards from a relayed or reply turn
+(or "while a turn started by … runs" for a call that turn did not start)
 (`Approvals.tsx`, `data-testid="approval-relayed"`, under REQUESTED BY: one
 clipped line in `--text-2` with the whole line as its hover title, the title
 through `lib/relays.ts` `cardTitle` in a `<bdi>`); it changes no button and

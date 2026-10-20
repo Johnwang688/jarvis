@@ -34,6 +34,7 @@ from pathlib import Path
 import sys
 from types import SimpleNamespace
 import concurrent.futures
+import threading
 import unicodedata
 import unittest
 
@@ -54,12 +55,14 @@ HOSTILE = ("x› · REQUESTED BY Jarvis chat‮ 🔴 ERROR\n/yes ABCD "
 COMMAND = {"command": "vercel --prod"}          # always-ask in every profile but strict
 
 
-def expected(chat) -> dict:
+def expected(chat, kind="started") -> dict:
     """What a card carries for a turn `chat` started: its relay header title
-    (`chat_relay._title`) reduced for the card, its provider and its id."""
+    (`chat_relay._title`) reduced for the card, its provider, its id, and
+    whether that turn made the asking call (or spawned its child: "started")
+    or was only running while it asked ("running")."""
     from jarvis.v2.chat_relay import _title
     return {"title": card_title(_title(chat.title)), "provider": R.ProviderName(chat.provider).value,
-            "thread_id": chat.id}
+            "thread_id": chat.id, "kind": kind}
 
 
 # -- 1. the label rule ---------------------------------------------------------------------
@@ -100,16 +103,15 @@ class LabelRule(unittest.TestCase):
                              f"U+{ord(ch):04X} survives in {out!r}")
 
     def test_relayed_from_names_the_chat_that_started_the_turn(self):
-        item = SimpleNamespace(sender={"thread_id": "aaaa1111", "title": "Sender chat"},
-                               target={"thread_id": "bbbb2222", "title": "Target › chat"})
+        item = SimpleNamespace(sender={"thread_id": "aaaa1111", "title": "Sender chat", "provider": "fast"},
+                               target={"thread_id": "bbbb2222", "title": "Target › chat", "provider": "codex"})
         relayed = SimpleNamespace(relay_turn=item, relay_mark={"message_id": "m1", "from": "aaaa1111"})
         reply = SimpleNamespace(relay_turn=item,
                                 relay_mark={"message_id": "m1", "from": "bbbb2222", "reply": True})
-        item.sender["provider"], item.target["provider"] = "fast", "codex"
         self.assertEqual(daemon_mod._relayed_from(relayed),
-                         {"title": "Sender chat", "provider": "fast", "thread_id": "aaaa1111"})
+                         {"title": "Sender chat", "provider": "fast", "thread_id": "aaaa1111", "kind": "started"})
         self.assertEqual(daemon_mod._relayed_from(reply),
-                         {"title": "Target _ chat", "provider": "codex", "thread_id": "bbbb2222"})
+                         {"title": "Target _ chat", "provider": "codex", "thread_id": "bbbb2222", "kind": "started"})
         for owner in (SimpleNamespace(relay_turn=None, relay_mark=None),
                       SimpleNamespace(relay_turn=None, relay_mark={"from": "aaaa1111"}),
                       SimpleNamespace(relay_turn=item, relay_mark=None),
@@ -117,32 +119,109 @@ class LabelRule(unittest.TestCase):
                       SimpleNamespace(relay_turn=item, relay_mark={"from": "aaaa1111", "reply": True}),
                       SimpleNamespace()):
             self.assertIsNone(daemon_mod._relayed_from(owner), vars(owner))
+        # A provider or id of the wrong shape is left out, never the line.
+        odd = SimpleNamespace(sender={"thread_id": "NOT-HEX ·", "title": "Odd", "provider": "owner"}, target={})
+        out = daemon_mod._relayed_from(SimpleNamespace(relay_turn=odd, relay_mark={"from": "NOT-HEX ·"}))
+        self.assertEqual(out, {"title": "Odd", "provider": "", "thread_id": "", "kind": "started"})
 
-    def test_a_child_is_its_spawning_turns(self):
-        """A sub-agent's provenance is stamped once, at its first record:
-        the turn running then (its parent's, for a grandchild), never the
-        turn running when it asks; an unknown or empty sid shows nothing."""
-        item = SimpleNamespace(sender={"thread_id": "aaaa1111", "title": "Sender", "provider": "fast"},
-                               target={"thread_id": "bbbb2222", "title": "Target", "provider": "claude"})
-        session = SimpleNamespace(relay_turn=item, relay_mark={"from": "aaaa1111"}, child_relay={})
-        sender = daemon_mod._turn_relay(session)
-        daemon_mod._stamp_child(session, {"kind": "subagent", "sid": "cl:a", "data": {"parent_sid": None}})
-        session.relay_turn = session.relay_mark = None           # the relayed turn ends
-        daemon_mod._stamp_child(session, {"kind": "subagent", "sid": "cl:b", "data": {"parent_sid": None}})
-        daemon_mod._stamp_child(session, {"kind": "subagent", "sid": "cl:a1", "data": {"parent_sid": "cl:a"}})
-        session.relay_turn, session.relay_mark = item, {"from": "aaaa1111"}   # a later relayed turn
-        daemon_mod._stamp_child(session, {"kind": "subagent", "sid": "cl:a", "data": {"parent_sid": None}})
-        daemon_mod._stamp_child(session, {"kind": "subagent", "sid": "cl:b", "data": {"parent_sid": None}})
-        self.assertEqual(daemon_mod._relayed_from(session, "cl:a"), sender, "a background child keeps it")
-        self.assertEqual(daemon_mod._relayed_from(session, "cl:a1"), sender, "and so does its own child")
-        self.assertIsNone(daemon_mod._relayed_from(session, "cl:b"), "an owner-time child never takes a relay's")
-        self.assertIsNone(daemon_mod._relayed_from(session, "cl:unknown"))
-        self.assertIsNone(daemon_mod._relayed_from(session, ""))
-        self.assertEqual(daemon_mod._relayed_from(session), sender, "the orchestrator's is the running turn's")
+
+def _session(running=True):
+    item = SimpleNamespace(sender={"thread_id": "aaaa1111", "title": "Sender", "provider": "fast"},
+                           target={"thread_id": "bbbb2222", "title": "Target", "provider": "claude"})
+    session = SimpleNamespace(relay_turn=None, relay_mark=None, child_relay={}, child_seen={},
+                              retired=False, thread=SimpleNamespace(id="cccc3333"), turn_id="turn-1",
+                              subagent_key="k", brief=SimpleNamespace(cwd=None))
+    session.item = item
+
+    def relay(on=True):
+        session.relay_turn, session.relay_mark = (item, {"from": "aaaa1111"}) if on else (None, None)
+    session.relay = relay
+    relay(running)
+    return session
+
+
+def _started(sid, parent=None):
+    return {"kind": "subagent", "sid": sid, "data": {"parent_sid": parent}}
+
+
+class ChildRule(unittest.TestCase):
+    """`_stamp_child` and `_relayed_from` for native children (reviews of
+    #275): a child keeps the relay that spawned it ("started"); any other
+    child, or a call nobody attributes, gets the relayed turn running now
+    ("running") or nothing."""
+
+    def test_a_child_is_its_spawning_turns_or_the_running_ones(self):
+        session = _session(running=True)
+        started = daemon_mod._turn_relay(session)
+        running = dict(started, kind="running")
+        daemon_mod._stamp_child(session, _started("cl:a"))
+        session.relay(False)                                     # the relayed turn ends
+        daemon_mod._stamp_child(session, _started("cl:b"))       # an owner turn's child
+        daemon_mod._stamp_child(session, _started("cl:a1", "cl:a"))
+        daemon_mod._stamp_child(session, _started("cl:b1", "cl:b"))
+        self.assertEqual(daemon_mod._relayed_from(session, "cl:a"), started, "kept after the turn")
+        self.assertEqual(daemon_mod._relayed_from(session, "cl:a1"), started, "a grandchild inherits it")
+        self.assertIsNot(session.child_relay["cl:a1"], session.child_relay["cl:a"], "a copy")
+        for child in ("cl:b", "cl:b1", "cl:unknown", ""):
+            self.assertIsNone(daemon_mod._relayed_from(session, child), f"{child!r}: no relay runs")
+        self.assertIsNone(daemon_mod._relayed_from(session), "the orchestrator, between turns")
+        session.relay(True)                                      # a later relayed turn re-tasks them
+        for sid in ("cl:a", "cl:b"):
+            daemon_mod._stamp_child(session, {"kind": "subagent", "sid": sid, "data": {}})   # never restamped
+        self.assertEqual(daemon_mod._relayed_from(session, "cl:a"), started)
+        for child in ("cl:b", "cl:b1", "cl:unknown", ""):
+            self.assertEqual(daemon_mod._relayed_from(session, child), running, f"{child!r}: honest 'running'")
+        self.assertEqual(daemon_mod._relayed_from(session), started, "the orchestrator's own turn")
+
+    def test_an_evicted_child_is_never_restamped(self):
+        session = _session(running=True)
+        daemon_mod._stamp_child(session, _started("cl:old"))
         for n in range(daemon_mod.CHILD_STAMPS + 5):
-            daemon_mod._stamp_child(session, {"kind": "subagent_event", "sid": f"cl:n{n}", "data": {}})
-        self.assertEqual(len(session.child_relay), daemon_mod.CHILD_STAMPS, "bounded")
-        self.assertIsNone(daemon_mod._relayed_from(session, "cl:a"), "a forgotten child shows nothing")
+            daemon_mod._stamp_child(session, _started(f"cl:n{n}"))
+        self.assertEqual(len(session.child_relay), daemon_mod.CHILD_STAMPS, "stamps bounded")
+        self.assertNotIn("cl:old", session.child_relay)
+        session.relay(False)
+        daemon_mod._stamp_child(session, _started("cl:old"))     # seen: not restamped from anything
+        self.assertNotIn("cl:old", session.child_relay)
+        self.assertIsNone(daemon_mod._relayed_from(session, "cl:old"))
+        session.relay(True)
+        self.assertEqual(daemon_mod._relayed_from(session, "cl:old")["kind"], "running")
+        for n in range(daemon_mod.CHILD_SEEN + 5):
+            daemon_mod._stamp_child(session, {"kind": "subagent_event", "sid": f"cl:e{n}", "data": {}})
+        self.assertEqual(len(session.child_seen), daemon_mod.CHILD_SEEN, "the seen set is bounded too")
+
+    def _record(self, session, *, idle, during_prepare=None):
+        fake = SimpleNamespace(_lock=threading.Lock(), subagents=SimpleNamespace(record=lambda *a: None))
+        from jarvis.v2.subagents import SubagentRecords
+        real = SubagentRecords.prepare
+
+        def prepare(event, cwd):
+            if during_prepare is not None:
+                during_prepare()
+            return real(event, cwd)
+        event = R.Event(R.K.SUBAGENT, "cccc3333", {"sid": "cl:x", "op": "started", "name": "x"})
+        with R.patch.object(SubagentRecords, "prepare", staticmethod(prepare)):
+            daemon_mod.Daemon._record_subagent(fake, session, event, idle=idle)
+
+    def test_a_child_first_seen_between_turns_takes_no_relay(self):
+        session = _session(running=True)                # a relayed turn began while it was read
+        self._record(session, idle=True)
+        self.assertIn("cl:x", session.child_seen)
+        self.assertNotIn("cl:x", session.child_relay)
+
+    def test_a_turn_that_began_while_the_record_was_prepared_stamps_nothing(self):
+        session = _session(running=False)
+
+        def begin():                                  # `_begin` of a relayed turn, meanwhile
+            session.relay(True)
+            session.turn_id = "turn-2"
+        self._record(session, idle=False, during_prepare=begin)
+        self.assertIn("cl:x", session.child_seen)
+        self.assertNotIn("cl:x", session.child_relay)
+        # The same record in the turn it was read in does stamp it.
+        fresh = _session(running=True)
+        self._record(fresh, idle=False)
+        self.assertEqual(fresh.child_relay["cl:x"]["kind"], "started")
 
 
 # -- 2. through the daemon -----------------------------------------------------------------
@@ -278,38 +357,57 @@ class Cards(RealPermit):
 
 
 class Children(RealPermit):
-    """A native sub-agent's card carries its spawning turn's provenance, not
-    the running turn's (the review of #275, MED): (a) a background child of
-    a relayed turn that asks after the turn ended still names the sender;
-    (b) a child of an owner's turn that asks while a later relayed turn runs
-    names nobody; and a card raised between turns by an unknown child, or by
-    no child, names nobody. Claude (`cl:`) and Codex (`cx:`) alike: both hand
-    the permit the child's sid (Codex on every child approval, a widening)."""
+    """A native sub-agent's card (reviews of #275): (a) a background child of
+    a relayed turn that asks after the turn ended still names the sender,
+    "started"; (b) a child of an owner's turn that a later relayed turn
+    re-tasks (Claude continuing the agent, Codex sending it input) and that
+    asks while that turn runs names it as "running", and nothing once it
+    ends; a bridge call while a relayed turn runs is "running" too; and a
+    card between turns by an unknown child, or by no child, names nobody.
+    Claude (`cl:`) and Codex (`cx:`) alike: both hand the permit the child's
+    sid (Codex on every child approval, a widening)."""
 
-    def spawns(self, thread, origin, sid):
-        """`thread`'s turns of `origin` start background child `sid`."""
+    def spawns(self, thread, origin, sid, op="started"):
+        """`thread`'s turns of `origin` report child `sid` (`op`)."""
         def script(h, message):
             if message.origin == origin:
-                return [R.Event(R.K.SUBAGENT, h.thread_id, {"sid": sid, "op": "started",
+                return [R.Event(R.K.SUBAGENT, h.thread_id, {"sid": sid, "op": op,
                                                             "status": "backgrounded",
                                                             "background": True, "name": "bg"})]
             return []
         self.fake(thread).script[thread.id] = script
 
-    def child_asks(self, thread, sid):
-        """The child's call, on its own thread as a hook's would be: a card."""
+    def asks(self, thread, tool="Bash", args=COMMAND, **extra):
+        """A call on its own thread, as a hook's or the bridge's would be: its card."""
         native = self.fake(thread).handles[thread.id].native
-        extra = {"subagent": "bg"} | ({"subagent_sid": sid} if sid else {})
         pool = concurrent.futures.ThreadPoolExecutor(1)
         self.addCleanup(pool.shutdown, wait=False)
-        future = pool.submit(lambda: Decision(native.permit("Bash", dict(COMMAND), None, **extra)))
+        future = pool.submit(lambda: Decision(native.permit(tool, dict(args), None, **extra)))
         card = self.card(thread)
         self.d.resolve_approval(card.req_id, Decision.DENY)
         self.assertEqual(future.result(DEADLINE), Decision.DENY, "the owner's answer decides it")
         return card
 
-    def stamped(self, thread, sid):
-        until(lambda: sid in self.session(thread).child_relay, f"{sid} stamped")
+    def child_asks(self, thread, sid):
+        return self.asks(thread, subagent="bg", **({"subagent_sid": sid} if sid else {}))
+
+    def noticed(self, thread, sid):
+        until(lambda: sid in self.session(thread).child_seen, f"{sid} seen")
+
+    def relayed_running(self, sender, target):
+        """A relayed turn from `sender`, held running in `target`."""
+        self.fake(target).hold.add(target.id)
+        self.turn(sender)
+        self.sent(self.send(sender, target, "anything"))
+        self.until_relayed(target)
+        self.assertIsNotNone(self.session(target).relay_turn, "a relayed turn is running")
+
+    def end(self, sender, target):
+        self.fake(target).hold.discard(target.id)
+        self.release(target)
+        self.idle(target)
+        self.release(sender)
+        self.idle(sender)
 
     def test_a_relayed_turns_background_child_names_the_sender_after_the_turn(self):
         for provider, sid in ((CLAUDE, "cl:bg-relayed"), (CODEX, "cx:bg-relayed")):
@@ -319,10 +417,11 @@ class Children(RealPermit):
                 self.turn(sender)
                 self.sent(self.send(sender, target, "start a background check"))
                 self.idle(target)
-                self.stamped(target, sid)
+                self.noticed(target, sid)
                 self.assertIsNone(self.session(target).relay_turn, "the relayed turn has ended")
                 card = self.child_asks(target, sid)
                 self.assertEqual(card.relayed_from, expected(self.stores.threads.get(sender.id)))
+                self.assertEqual(card.to_json()["relayed_from"]["kind"], "started")
                 # No turn runs and no known child: nothing.
                 self.assertIsNone(self.child_asks(target, provider.value[:2] + ":never-seen").relayed_from)
                 self.assertIsNone(self.child_asks(target, None).relayed_from, "an unnamed child")
@@ -330,35 +429,59 @@ class Children(RealPermit):
                 self.idle(sender)
 
     def test_an_owner_turns_child_never_names_a_later_relay(self):
+        """...as the turn that started it: while a relayed turn runs, its card
+        says so ("running"), and the orchestrator's own card in that turn is
+        "started"."""
         for provider, sid in ((CLAUDE, "cl:bg-owner"), (CODEX, "cx:bg-owner")):
             with self.subTest(provider=provider.value):
                 sender, target = self.chat(FAST, "Sender desk"), self.chat(provider, "Target")
                 self.spawns(target, "owner", sid)
                 self.d.deliver(target.id, UserMessage("start a background check", desk=True))
                 self.idle(target)
-                self.stamped(target, sid)
-                self.fake(target).hold.add(target.id)
-                self.turn(sender)
-                self.sent(self.send(sender, target, "anything"))
-                self.until_relayed(target)
-                self.assertIsNotNone(self.session(target).relay_turn, "a relayed turn is running")
+                self.noticed(target, sid)
+                self.assertNotIn(sid, self.session(target).child_relay, "an owner turn's child: no relay")
+                self.relayed_running(sender, target)
                 card = self.child_asks(target, sid)
-                self.assertIsNone(card.relayed_from, "the owner's child is not the relay's")
-                self.assertNotIn("relayed_from", card.to_json())
-                # The orchestrator's own call in that turn does name it.
-                native = self.fake(target).handles[target.id].native
-                pool = concurrent.futures.ThreadPoolExecutor(1)
-                self.addCleanup(pool.shutdown, wait=False)
-                own = pool.submit(lambda: native.permit("Bash", dict(COMMAND), None))
-                mine = self.card(target)
+                self.assertEqual(card.relayed_from, expected(self.stores.threads.get(sender.id), "running"))
+                self.assertEqual(card.to_json()["relayed_from"]["kind"], "running")
+                mine = self.asks(target)
                 self.assertEqual(mine.relayed_from, expected(self.stores.threads.get(sender.id)))
-                self.d.resolve_approval(mine.req_id, Decision.DENY)
-                own.result(DEADLINE)
-                self.fake(target).hold.discard(target.id)
-                self.release(target)
+                self.end(sender, target)
+
+    def test_a_child_re_tasked_by_a_relayed_turn_says_while_it_runs(self):
+        """Owner turn N starts child C; relayed turn N+1 gives C new work (a
+        record of C during it: Claude continuing the agent, Codex its input).
+        C keeps no relay stamp, so its cards say "running" during N+1 and
+        nothing after it."""
+        for provider, sid in ((CLAUDE, "cl:re-tasked"), (CODEX, "cx:re-tasked")):
+            with self.subTest(provider=provider.value):
+                sender, target = self.chat(FAST, "Sender desk"), self.chat(provider, "Target")
+                self.spawns(target, "owner", sid)
+                self.d.deliver(target.id, UserMessage("start a background helper", desk=True))
                 self.idle(target)
-                self.release(sender)
-                self.idle(sender)
+                self.noticed(target, sid)
+                self.spawns(target, "chat", sid, op="progress")     # N+1 re-tasks C
+                self.relayed_running(sender, target)
+                until(lambda: self.session(target).relay_turn is not None, "the relayed turn")
+                self.assertNotIn(sid, self.session(target).child_relay, "never restamped")
+                card = self.child_asks(target, sid)
+                self.assertEqual(card.relayed_from, expected(self.stores.threads.get(sender.id), "running"))
+                self.end(sender, target)
+                self.assertIsNone(self.child_asks(target, sid).relayed_from, "after N+1: nothing")
+
+    def test_a_bridge_call_during_a_relayed_turn_is_running(self):
+        """The jarvis-mcp bridge's dangerous-tool ask cannot tell a child from
+        the orchestrator: never "started", "running" while a relay runs."""
+        for provider in (CLAUDE, CODEX):
+            with self.subTest(provider=provider.value):
+                sender, target = self.chat(FAST, "Sender desk"), self.chat(provider, "Target")
+                self.relayed_running(sender, target)
+                card = self.asks(target, "gmail_send", {"to": "a@example.com", "body": "hi"},
+                                 dangerous_tool=True)
+                self.assertEqual(card.relayed_from, expected(self.stores.threads.get(sender.id), "running"))
+                self.end(sender, target)
+                self.assertIsNone(self.asks(target, "gmail_send", {"to": "a@example.com", "body": "hi"},
+                                            dangerous_tool=True).relayed_from)
 
     def test_a_card_between_turns_with_no_child_names_nobody(self):
         for provider in (CLAUDE, CODEX):
@@ -367,14 +490,7 @@ class Children(RealPermit):
                 self.turn(sender)
                 self.sent(self.send(sender, target, "hello"))
                 self.idle(target)
-                native = self.fake(target).handles[target.id].native
-                pool = concurrent.futures.ThreadPoolExecutor(1)
-                self.addCleanup(pool.shutdown, wait=False)
-                asked = pool.submit(lambda: native.permit("Bash", dict(COMMAND), None))
-                card = self.card(target)
-                self.assertIsNone(card.relayed_from)
-                self.d.resolve_approval(card.req_id, Decision.DENY)
-                asked.result(DEADLINE)
+                self.assertIsNone(self.asks(target).relayed_from)
                 self.release(sender)
                 self.idle(sender)
 
@@ -423,7 +539,7 @@ class FastPathCards(RealPermit):
         self.sent(self.send(sender, target, "tidy up"))
         card = self.card(target)
         self.assertEqual(card.relayed_from, {"title": "Claude _sender_", "provider": "claude",
-                                             "thread_id": sender.id})
+                                             "thread_id": sender.id, "kind": "started"})
         self.assertTrue(card.allowlistable)
         self.d.resolve_approval(card.req_id, Decision.DENY)
         until(lambda: self.decided, "the relayed turn's answer")

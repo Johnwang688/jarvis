@@ -48,7 +48,8 @@ feature is missing):
      from chat ‹title› (Provider · id)" on one clipped line in --text-2
      (neither amber nor red), the title cleaned and in one <bdi> (one ‹ and
      one ›, no other element, no newline), the hover title the whole line,
-     with Always still offered; a card without `relayed_from` has no line.
+     with Always still offered; kind "running" reads "while a turn started by
+     … runs"; a card without `relayed_from` has no line.
 
 
 THE INTERFACE THE IMPLEMENTER BUILDS (taken from the plan; "chosen" where it
@@ -643,7 +644,7 @@ def _provenance_checks(page, mock, check, until):
             "thread_id": TARGET}
     mock.emit("approval_requested", {**base, "req_id": "relay-c6", "relayed_from": {
         "title": "x›\n · REQUESTED BY YOU \U0001F534 " + HOSTILE, "provider": "claude",
-        "thread_id": "abcd1234"}})
+        "thread_id": "abcd1234", "kind": "started"}})
     until(lambda: card.count() == 1 and line.count() == 1)
     text = _content(line)
     title = text.split("›")[0]
@@ -668,6 +669,14 @@ def _provenance_checks(page, mock, check, until):
           and colour not in (_var(page, "--amber"), _var(page, "--red")), colour)
     check("Always is still offered on a relayed card (O-4)",
           page.locator('[data-testid="approval-always"]').count() == 1)
+    page.locator('[data-testid="approval-deny"]').click()
+    until(lambda: card.count() == 0)
+    mock.emit("approval_requested", {**base, "req_id": "running-c6", "relayed_from": {
+        "title": "Frontend", "provider": "codex", "thread_id": "0123abcd", "kind": "running"}})
+    until(lambda: card.count() == 1 and line.count() == 1)
+    check("a child the relayed turn did not start gets the honest 'while … runs' line",
+          _content(line) == "while a turn started by a message from chat ‹Frontend› (Codex · 0123abcd) runs",
+          repr(_content(line)))
     page.locator('[data-testid="approval-deny"]').click()
     until(lambda: card.count() == 0)
     mock.emit("approval_requested", {**base, "req_id": "owner-c6"})

@@ -369,26 +369,41 @@ under REQUESTED BY: the provider and the chat's thread id keep two chats with
 one title apart. The route is the one permit every provider is handed:
 `Daemon._permit` gives `PermitContext` a `relayed_from` reader over the live
 session, and `permissions._ask` copies `ctx.relayed(child)` onto
-`ApprovalRequest.relayed_from` (`{"title", "provider", "thread_id"}` or None)
-for the card. **Whose turn:** the orchestrator's own call (`child` None) is
-the running turn's (`daemon._turn_relay`: the relay item's sender for a
-relayed turn, its target for a reply turn, None for any other turn, between
-turns, or a mark that does not match). A native sub-agent's call (`child` its
-sid) is the turn that *spawned* it, not the one running when it asks
-(review of #275, MED): `_record_subagent` stamps each child at its first
-record (`daemon._stamp_child`; a grandchild takes its known parent's stamp,
-a child first seen between turns gets none) on `_Session.child_relay`, at
-most 256 per session, oldest forgotten first. So a background child of a
-relayed turn that asks after the turn ended still names the sender, and a
-child of an owner's turn that asks during a later relayed turn names nobody.
-A child whose sid the daemon never saw (Claude's unnamed child before its
-`task_started`, a forgotten one) shows no line: nothing is attributed by
-guessing. Claude passes the child's sid with every child call it knows;
-Codex passes it on every child approval (each is a widening). So it covers
-the Claude hook's question and the jarvis-mcp bridge's (both
-`session.permit`), Codex's approvals and widenings, and the fast path's
-approver. The fast path's relayed and reply turns hold no tool that reaches
-the permit today (`run_command` and the edits are desk-only, and no
+`ApprovalRequest.relayed_from` (`{"title", "provider", "thread_id", "kind"}`
+or None) for the card. **Whose turn** (`daemon._relayed_from`; the lead's
+decision on the reviews of #275):
+
+- The orchestrator's own call (`child` None): the running turn's
+  (`_turn_relay`: the relay item's sender for a relayed turn, its target
+  for a reply turn, None for any other turn, between turns, or a mark that
+  does not match), kind `started`.
+- A native sub-agent's call (`child` its sid) whose spawning turn was a
+  relayed one: that turn's, kind `started`, even after it ended.
+  `_record_subagent` stamps each child once, at its first record
+  (`_stamp_child`): a grandchild takes a copy of its seen parent's stamp, any
+  other child the turn its record was read in — never a record read between
+  turns (`idle`), nor one during whose preparation outside the lock another
+  turn began. A child seen once is never stamped again: the session keeps up
+  to 256 relay stamps and 4096 seen sids, oldest forgotten first.
+- Any other child, or a call nobody can attribute (`child` ""): if a relayed
+  turn is running when it asks, that turn with kind `running`, drawn as
+  "while a turn started by a message from chat ‹title› (Provider · id) runs"
+  (it may be carrying that chat's words to the child: Claude continuing an
+  agent, Codex sending a child input), else nothing. So an owner turn's
+  child re-tasked by a later relayed turn says "running" while it runs, and
+  nothing after; a child the daemon never saw (Claude's unnamed child before
+  its `task_started`, a forgotten one) is treated the same way.
+- **The jarvis-mcp bridge carries no child attribution**: its dangerous-tool
+  ask (`bridge._approver`, `dangerous_tool=True`) and a Codex session tool's
+  ask (`bridge._delegated`) cannot tell a child from the orchestrator, so
+  `build_permit` asks the reader with "" and their cards are at most
+  `running`, never `started`.
+
+Claude passes the child's sid with every child call it knows; Codex passes
+it on every child approval (each is a widening). So it covers the Claude
+hook's question, Codex's approvals and widenings, the bridge and the fast
+path's approver. The fast path's relayed and reply turns hold no tool that
+reaches the permit today (`run_command` and the edits are desk-only, and no
 `dangerous` tool is in the set), so no card arises there yet; Browser drive
 cards cannot arise in a relayed turn (the drive refuses any turn not at the
 desk); the Browser delegation consent card is private and its projection
@@ -397,18 +412,20 @@ show it. **Display only:** the reader is read once per card, a reader that
 raises or returns a non-dict shows nothing, and no layer reads it; the
 decision, layer, reason, asked-or-not, the whole request but the provenance
 (Always, timeouts and waits included) and human-backed status are the same
-with and without it (`tests/v2/permissions_check.py relay_provenance_checks`,
-every profile, provider and asker). The title is another chat's model-written
-text: `chat_reads.card_title` (and the HUD's `cardTitle` again, by the same
-rule) keeps one line of at most 60 characters; every opening, closing and
-quotation bracket but ASCII ( ) [ ] { }, < > and their look-alikes, and dot
-look-alikes become `_`; symbols, emoji, combining marks and Hangul fillers
-go; nothing left is "(untitled)". The HUD isolates it in a `<bdi>`, clips the
-line in `--text-2`, never amber or red, and puts the whole line in its hover
-title. A mid-turn reply step in an owner's turn adds no line (the turn is the
-owner's). Tests: `tests/v2/relay_provenance_check.py`, the
-`provenance_checks` section of `tests/face/hud_v2_relay_check.py`, and vitest
-in `Approvals.test.ts` and `relays.test.ts`.
+with and without it, whatever its kind (`tests/v2/permissions_check.py
+relay_provenance_checks`, every profile, provider and asker). The title is
+another chat's model-written text: `chat_reads.card_title` (and the HUD's
+`cardTitle` again, by the same rule) keeps one line of at most 60 characters;
+every opening, closing and quotation bracket but ASCII ( ) [ ] { }, < > and
+their look-alikes, and dot look-alikes become `_`; symbols, emoji, combining
+marks and Hangul fillers go; nothing left is "(untitled)". `_turn_relay`
+leaves out a provider outside fast/claude/codex and an id that is not 8 hex
+characters, and the HUD draws neither. The HUD isolates the title in a
+`<bdi>`, clips the line in `--text-2`, never amber or red, and puts the whole
+line in its hover title. A mid-turn reply step in an owner's turn adds no
+line (the turn is the owner's). Tests: `tests/v2/relay_provenance_check.py`,
+the `provenance_checks` section of `tests/face/hud_v2_relay_check.py`, and
+vitest in `Approvals.test.ts` and `relays.test.ts`.
 
 Where each part lives:
 

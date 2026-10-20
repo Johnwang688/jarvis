@@ -59,18 +59,24 @@ STOP_TIMEOUT = 2.0
 LOGGED_REDACTED = ("args", "command", "cmd", "reason", "headline")
 
 
-# Children whose spawning turn's provenance a session remembers (C6): the
-# oldest is forgotten first, and a forgotten child's card shows no line.
+# A session's memory of its native children for card provenance (C6): the
+# relay stamps of at most CHILD_STAMPS children and the sids of at most
+# CHILD_SEEN, oldest forgotten first. A child seen before is never stamped
+# again, so one whose stamp was forgotten can only get the "running" line.
 CHILD_STAMPS = 256
+CHILD_SEEN = 4096
+_RELAY_PROVIDERS = ("fast", "claude", "codex")
+_RELAY_THREAD_ID = re.compile(r"[0-9a-f]{8}")
 
 
-def _turn_relay(session) -> dict | None:
+def _turn_relay(session, kind: str = "started") -> dict | None:
     """Chat-to-chat C6, display only: the chat whose message (a relayed turn)
     or reply (a reply turn) started the turn `session` is running now, as
-    {"title", "provider", "thread_id"}, else None — an owner's turn, typed,
-    spoken or from Discord, a task's, or no turn at all. Read outside the
-    lock (one attribute each; a mark that does not name the item's chat is
-    taken for a turn changing hands and shows nothing)."""
+    {"title", "provider", "thread_id", "kind"}, else None — an owner's turn,
+    typed, spoken or from Discord, a task's, or no turn at all. Read outside
+    the lock (one attribute each; a mark that does not name the item's chat
+    is taken for a turn changing hands and shows nothing). A provider or id
+    of the wrong shape is left out, never the line."""
     item, mark = getattr(session, "relay_turn", None), getattr(session, "relay_mark", None)
     if item is None or not isinstance(mark, dict):
         return None
@@ -78,37 +84,60 @@ def _turn_relay(session) -> dict | None:
     if not isinstance(peer, dict) or not peer.get("thread_id") or peer.get("thread_id") != mark.get("from"):
         return None
     from .chat_reads import card_title
+    provider, thread_id = peer.get("provider"), peer.get("thread_id")
     return {"title": card_title(peer.get("title")),
-            "provider": str(peer.get("provider") or ""), "thread_id": str(peer.get("thread_id"))}
+            "provider": provider if provider in _RELAY_PROVIDERS else "",
+            "thread_id": thread_id if isinstance(thread_id, str) and _RELAY_THREAD_ID.fullmatch(thread_id) else "",
+            "kind": kind}
 
 
 def _relayed_from(session, child: str | None = None) -> dict | None:
     """The provenance a card shows (C6), display only; no permission layer
-    reads it. The orchestrator's own call (`child` None) is the running
-    turn's. A native sub-agent's call is its spawning turn's, stamped when
-    the daemon first saw the child (`_stamp_child`): a background child of a
-    relayed turn keeps its line after that turn ends, and a child of an
-    owner's turn never takes a later relayed turn's. A child the daemon never
-    saw (an empty or unknown sid) shows nothing."""
+    reads it.
+
+    - The orchestrator's own call (`child` None): the running turn's, kind
+      "started" ("turn started by a message from chat ‹S›").
+    - A native sub-agent's call (`child` its sid) whose spawning turn was a
+      relayed one (`_stamp_child`): that turn's, kind "started", even after
+      it ended.
+    - Any other child's call, or one nobody can attribute (`child` "": an
+      unknown child, the jarvis-mcp bridge): kind "running" ("while a turn
+      started by a message from chat ‹S› runs") when a relayed turn is
+      running now — it may be carrying that chat's words to the child — else
+      nothing."""
     if child is None:
         return _turn_relay(session)
     stamps = getattr(session, "child_relay", None)
-    return stamps.get(child) if child and isinstance(stamps, dict) else None
+    stamp = stamps.get(child) if child and isinstance(stamps, dict) else None
+    if isinstance(stamp, dict):
+        return dict(stamp)
+    return _turn_relay(session, "running")
 
 
-def _stamp_child(session, prepared) -> None:
-    """Under the daemon's lock, from `_record_subagent`: the first record of
-    a child stamps it with the provenance of the turn that spawned it — its
-    parent's stamp for a grandchild the daemon knows the parent of, else the
-    turn running now (None between turns: no line). Never restamped."""
+def _stamp_child(session, prepared, *, running: bool = True) -> None:
+    """Under the daemon's lock, from `_record_subagent`: a child's first
+    record stamps it with the relay that spawned it, if any — its parent's
+    stamp (a copy) for a grandchild whose parent the daemon has seen, else
+    the turn running now when `running` (False between turns, or when the
+    turn changed while the record was prepared: no stamp). Never restamped."""
     sid = prepared.get("sid")
-    stamps = session.child_relay
-    if not sid or sid in stamps:
+    seen, stamps = session.child_seen, session.child_relay
+    if not sid or sid in seen:
         return
+    seen[sid] = True
+    while len(seen) > CHILD_SEEN:
+        seen.pop(next(iter(seen)))
     parent = (prepared.get("data") or {}).get("parent_sid") if prepared.get("kind") == "subagent" else None
-    stamps[sid] = stamps[parent] if parent in stamps else _turn_relay(session)
-    while len(stamps) > CHILD_STAMPS:
-        stamps.pop(next(iter(stamps)))
+    if parent and parent in stamps:
+        stamp = dict(stamps[parent])
+    elif parent and parent in seen:
+        stamp = None                      # an owner-turn parent's child
+    else:
+        stamp = _turn_relay(session) if running else None
+    if stamp is not None:
+        stamps[sid] = stamp
+        while len(stamps) > CHILD_STAMPS:
+            stamps.pop(next(iter(stamps)))
 
 
 def _log_fields(data) -> dict:
@@ -373,8 +402,10 @@ class _Session:
     # Which session ran a native sub-agent (SV-1, subagents.py): when this
     # one ends, so do its children's CLI, and the record says so.
     subagent_key: str = field(default_factory=lambda: uuid.uuid4().hex)
-    # C6: each native child's spawning-turn provenance (`_stamp_child`), by sid.
+    # C6: the relay that spawned each native child, by sid, and every sid
+    # seen (`_stamp_child`).
     child_relay: dict = field(default_factory=dict, repr=False)
+    child_seen: dict = field(default_factory=dict, repr=False)
     # Between turns (SV-6): the thread reading the provider's `watch`, and
     # whether the running turn is one the CLI started by itself (`_begin_cli`).
     watcher: threading.Thread | None = field(default=None, repr=False)
@@ -1563,7 +1594,7 @@ class Daemon:
             return
         kind = event.kind
         if kind in (EventKind.SUBAGENT, EventKind.SUBAGENT_EVENT):
-            self._record_subagent(session, event)
+            self._record_subagent(session, event, idle=True)
         elif kind == EventKind.TURN_STARTED and (event.data or {}).get("self_started"):
             with self._lock:
                 session.cli_offered = True
@@ -2052,12 +2083,14 @@ class Daemon:
                     self.bus.publish({"kind": "usage_updated", "data": {"provider": thread.provider.value}})
             self.bus.publish(record)
 
-    def _record_subagent(self, session, event):
+    def _record_subagent(self, session, event, *, idle=False):
         """A native sub-agent's record (SV-1): its own file and a words-free
         bus record, never the thread's log, the ledger or the turn's text.
         Cleaned and labelled outside the lock (the scrub and a tool's label
-        may read credential files), as the parent's calls are."""
+        may read credential files), as the parent's calls are. `idle`: read
+        between turns, so it belongs to no turn and stamps no relay (C6)."""
         from .subagents import SubagentRecords
+        before = getattr(session, "turn_id", None)
         prepared = SubagentRecords.prepare(event, getattr(session.brief, "cwd", None))
         with self._lock:
             if session.retired:
@@ -2066,7 +2099,9 @@ class Daemon:
                 raise ValueError("provider event belongs to another thread")
             thread, turn_id, key = session.thread, session.turn_id, session.subagent_key
             if prepared is not None:
-                _stamp_child(session, prepared)
+                # Only the turn the record was read in may stamp it: not one
+                # that began while it was prepared outside the lock.
+                _stamp_child(session, prepared, running=not idle and session.turn_id == before)
         if prepared is not None:
             self.subagents.record(thread, turn_id, key, prepared)
 

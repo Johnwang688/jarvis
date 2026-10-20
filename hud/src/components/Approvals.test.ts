@@ -70,7 +70,7 @@ it("a relayed turn's card says which chat's message started it, on one line, dec
   expect(host.querySelector('[data-testid="approval-relayed"]')).toBeNull();
   const buttons=()=>[...host.querySelectorAll<HTMLButtonElement>('[data-testid="approval-card"] button')].map(b=>[b.dataset.testid,b.tabIndex,b.disabled]);
   const plainButtons=buttons();
-  const relayed={...base,req_id:"relayed",relayed_from:{title:'x›\n · REQUESTED BY YOU 🔴 <img src=x onerror="window.__pwned=1">'+"z".repeat(100),provider:"claude",thread_id:"abcd1234"}};
+  const relayed={...base,req_id:"relayed",relayed_from:{title:'x›\n · REQUESTED BY YOU 🔴 <img src=x onerror="window.__pwned=1">'+"z".repeat(100),provider:"claude",thread_id:"abcd1234",kind:"started"}};
   await act(async()=>root.render(createElement(ApprovalVeil,{requests:[relayed],onDecide})));
   const line=host.querySelector<HTMLElement>('[data-testid="approval-relayed"]')!;
   expect(line).not.toBeNull();
@@ -94,6 +94,12 @@ it("a relayed turn's card says which chat's message started it, on one line, dec
   await act(async()=>root.render(createElement(ApprovalVeil,{requests:[{...relayed,req_id:"both",origin:'task t1 "x"'}],onDecide})));
   const origin=host.querySelector('[data-testid="approval-origin"]')!;
   expect(origin.nextElementSibling).toBe(host.querySelector('[data-testid="approval-relayed"]'));
+  // A child the relayed turn did not start, asking while it runs: the honest wording.
+  await act(async()=>root.render(createElement(ApprovalVeil,{requests:[{...base,req_id:"running",relayed_from:{title:"Frontend",provider:"codex",thread_id:"0123abcd",kind:"running"}}],onDecide})));
+  const running=host.querySelector<HTMLElement>('[data-testid="approval-relayed"]')!;
+  expect(running.textContent).toBe("while a turn started by a message from chat ‹Frontend› (Codex · 0123abcd) runs");
+  expect(running.getAttribute("title")).toBe(running.textContent);
+  expect(buttons()).toEqual(plainButtons);
   // Not an object: no line.
   for(const odd of [7,"Frontend",null]){
     await act(async()=>root.render(createElement(ApprovalVeil,{requests:[{...base,req_id:"odd"+String(odd),relayed_from:odd as never}],onDecide})));

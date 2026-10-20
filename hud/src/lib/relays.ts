@@ -76,19 +76,25 @@ export function cardTitle(title: unknown): string {
 }
 
 /** The provenance line's parts: the reduced title, then the provider in
- * words and the thread id, so two chats with one title stay apart. */
-export function relayedParts(from: unknown): { title: string; who: string } | null {
+ * words and the thread id, so two chats with one title stay apart, and
+ * whether that chat's turn started the asking call (`started`) or was only
+ * running while it asked (`running`, the daemon's word for a child it did
+ * not spawn and a call nobody attributes). No title string, no line. */
+export function relayedParts(from: unknown): { title: string; who: string; started: boolean } | null {
   if (!from || typeof from !== "object") return null;
   const f = from as Record<string, unknown>;
+  if (typeof f.title !== "string") return null;
   const id = typeof f.thread_id === "string" && /^[0-9a-f]{8}$/.test(f.thread_id) ? f.thread_id : "";
   const word = providerWord(f.provider);
-  return { title: cardTitle(f.title), who: id ? `${word} · ${id}` : word };
+  return { title: cardTitle(f.title), who: id ? `${word} · ${id}` : word, started: f.kind === "started" };
 }
 
 /** The whole provenance line as plain text (the card's hover title). */
 export function relayedLine(from: unknown): string {
   const parts = relayedParts(from);
-  return parts ? `turn started by a message from chat ‹${parts.title}› (${parts.who})` : "";
+  if (!parts) return "";
+  const turn = `turn started by a message from chat ‹${parts.title}› (${parts.who})`;
+  return parts.started ? turn : `while a ${turn} runs`;
 }
 
 const PROVIDER_WORDS: Record<string, string> = { fast: "Jarvis", claude: "Claude", codex: "Codex" };
