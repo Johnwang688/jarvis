@@ -27,6 +27,8 @@ class SkillsLayoutCheck(unittest.TestCase):
         self.library.mkdir()
         self.addCleanup(patch.stopall)
         patch.object(config, "SKILLS_DIR", self.library).start()
+        # Never read the owner's real ~/.claude/skills (the second skill root).
+        patch.object(config, "CLAUDE_SKILLS_DIR", None, create=True).start()
         patch.object(skills, "_index_cache", None).start()
         patch.object(skills, "_warned_flat", set()).start()
 

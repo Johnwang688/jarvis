@@ -140,6 +140,8 @@ def injection_checks() -> None:
 
 
 def main() -> int:
+    # Never read the owner's real ~/.claude/skills (the second skill root).
+    config.CLAUDE_SKILLS_DIR = None
     with tempfile.TemporaryDirectory() as tmp:
         config.SKILLS_DIR = Path(tmp) / "skills"
         crud_checks()
