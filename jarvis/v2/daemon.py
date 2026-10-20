@@ -2021,7 +2021,13 @@ class Daemon:
             if (event.kind == EventKind.TOOL_STARTED and not idle
                     and thread.provider == ProviderName.CLAUDE):
                 # C6: a spawning Agent call stamps its child (`_spawned`).
-                _spawned(session, event.data, running=session.turn_id == before)
+                # Display only, so it can never cost the record. The turn
+                # check is defensive: TOOL_STARTED arrives only on the running
+                # turn's worker, and turn_id changes only with no worker.
+                try:
+                    _spawned(session, event.data, running=session.turn_id == before)
+                except Exception:
+                    LOG.exception("C6 spawn stamp failed; the card shows no line")
             if event.kind == EventKind.USAGE:
                 data = event.data
                 usage = Usage(data.get("input", 0), data.get("output", 0),
