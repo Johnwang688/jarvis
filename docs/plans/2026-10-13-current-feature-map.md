@@ -370,7 +370,7 @@ Chats read and message each other. Owner answers CC-1..CC-9: [decisions](2026-10
 | C3 | The relay core (`chat_relay.py`), queues, replies, Stop, Withdraw route | **MERGED — [#265](https://github.com/Johnwang688/jarvis/pull/265); INSTALLED** | L1, L2 not run. |
 | C4 | `chat_send` and `chat_wait` on all three providers | **MERGED — [#266](https://github.com/Johnwang688/jarvis/pull/266); INSTALLED** | L1, L3 not run. |
 | C5 | The HUD: relay rows, waiting line, sidebar badge, Withdraw | **MERGED — [#269](https://github.com/Johnwang688/jarvis/pull/269); INSTALLED** | Free and mock-daemon suites only; no live receipt is recorded here. |
-| C6 | Approval-card provenance ("turn started by a message from chat ‹title›") | **BUILT — PR open, not merged or live** | Branch `claude/chat-c6-provenance`: relayed and reply turns' cards (Claude, Codex; the fast path's permit too) carry `relayed_from`, display only (decision unchanged, Always kept). Not on Discord's card or the Browser delegation card. L4 still not run. |
+| C6 | Approval-card provenance ("turn started by a message from chat ‹title› (Provider · id)") | **MERGED — #275** (not yet live; L4 not run) | Relayed and reply turns' cards (Claude, Codex; the fast path's permit too) carry `relayed_from`, display only (decision unchanged, Always kept); a sub-agent's card takes its spawning turn's. Not on Discord's card or the Browser delegation card. |
 | C7 | These notes, the `hud-api` contract and the live-gate runbook | **MERGED — [#271](https://github.com/Johnwang688/jarvis/pull/271)** | The runbook is a plan; nothing in it has been run. |
 | L1-L4 | Native release checks (a 300 s MCP call on Claude, mid-turn reply labelling, sub-agent and child refusal, a relayed Claude turn's approval on the owner's card) | **NOT RUN** | [Runbook](2026-10-19-chat-to-chat-live-gates.md); run only on the owner's go, by the lead. |
 
@@ -424,7 +424,7 @@ unclaimed packages or coordinate a handoff with the named lead.
 
 Added 2026-10-19, in this order:
 
-1. **Chat-to-chat live gates L1-L4:** [runbook](2026-10-19-chat-to-chat-live-gates.md); only on the owner's go, on the live daemon. C6 is built (PR open); L4 step 4 then checks the card's line.
+1. **Chat-to-chat live gates L1-L4:** [runbook](2026-10-19-chat-to-chat-live-gates.md); only on the owner's go, on the live daemon. C6 is merged (#275, not yet live); L4 step 4 then checks the card's line.
 2. **Typed `/compact <focus>`** (CB-4), Claude first.
 3. **Scrub alignment:** give a non-compaction turn's `turn_finished` reason `chat_reads.scrub`-strength scrubbing, and close `scrub_text`'s short-`Bearer` gap.
 4. **Known failures on main:** `browser_drive_integration_check` has a stale fake (its session lacks `self_started`, its daemon lacks `chat_relay`); `ledger` and `devservers` also fail on main. `hud_install_check` fails only with `TMPDIR=/var/tmp` (environment, not a regression).

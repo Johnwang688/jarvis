@@ -52,21 +52,43 @@ export function peerLabel(title: unknown): string {
 /** The longest chat title an approval card's provenance line shows (C6). */
 export const CARD_TITLE_CHARS = 60;
 
-/** Another chat's title on an approval card (C6), as the daemon reduces it
- * (`chat_reads.card_title`), again here: one plain line of at most
- * `CARD_TITLE_CHARS`, with no ‹ › « » · • to close its brackets or draw the
- * card's parts, and no symbol (an emoji, a coloured dot) or combining mark to
- * paint pending or error meaning or stack out of its line. */
+const CARD_KEPT_BRACKETS = new Set(["(", ")", "[", "]", "{", "}"]);
+const CARD_UNDERSCORE = /[<>﹤﹥＜＞·•∙⋅・‧･⸱ꞏ]/u;
+const CARD_DROPPED = /[\p{Mn}\p{Me}\p{So}\p{Sk}\p{Co}\p{Cn}\p{Cs}ㅤᅟᅠﾠ]/u;
+const CARD_BRACKET = /[\p{Ps}\p{Pe}\p{Pi}\p{Pf}]/u;
+
+/** Another chat's title on an approval card (C6), by the daemon's rule
+ * (`chat_reads.card_title`) applied again here: format characters become a
+ * space (as the daemon's `clean_line` does), NFC, then symbols, emoji,
+ * combining marks and Hangul fillers go; every opening, closing or quotation
+ * bracket but ASCII ( ) [ ] { }, < > and their look-alikes, and dot
+ * look-alikes become "_"; one line of at most `CARD_TITLE_CHARS`, or
+ * "(untitled)" when nothing visible is left. */
 export function cardTitle(title: unknown): string {
   if (typeof title !== "string") return "(untitled)";
-  const plain = title.normalize("NFC").replace(/\p{Cf}/gu, "")
-    .replace(/[\p{Mn}\p{Me}\p{So}\p{Sk}\p{Co}\p{Cn}\p{Cs}]/gu, "").replace(/[‹›«»·•]/g, "_");
-  return oneLine(plain, CARD_TITLE_CHARS) || "(untitled)";
+  const spaced = title.replace(/\p{Cf}/gu, " ").normalize("NFC");
+  let out = "";
+  for (const ch of spaced) {
+    if (CARD_DROPPED.test(ch)) continue;
+    out += CARD_UNDERSCORE.test(ch) || (CARD_BRACKET.test(ch) && !CARD_KEPT_BRACKETS.has(ch)) ? "_" : ch;
+  }
+  return oneLine(out, CARD_TITLE_CHARS) || "(untitled)";
 }
 
-/** The provenance line itself: never the owner's words, and never a turn the owner started. */
-export function relayedLine(title: unknown): string {
-  return `turn started by a message from chat ‹${cardTitle(title)}›`;
+/** The provenance line's parts: the reduced title, then the provider in
+ * words and the thread id, so two chats with one title stay apart. */
+export function relayedParts(from: unknown): { title: string; who: string } | null {
+  if (!from || typeof from !== "object") return null;
+  const f = from as Record<string, unknown>;
+  const id = typeof f.thread_id === "string" && /^[0-9a-f]{8}$/.test(f.thread_id) ? f.thread_id : "";
+  const word = providerWord(f.provider);
+  return { title: cardTitle(f.title), who: id ? `${word} · ${id}` : word };
+}
+
+/** The whole provenance line as plain text (the card's hover title). */
+export function relayedLine(from: unknown): string {
+  const parts = relayedParts(from);
+  return parts ? `turn started by a message from chat ‹${parts.title}› (${parts.who})` : "";
 }
 
 const PROVIDER_WORDS: Record<string, string> = { fast: "Jarvis", claude: "Claude", codex: "Codex" };

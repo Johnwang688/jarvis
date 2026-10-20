@@ -70,15 +70,19 @@ it("a relayed turn's card says which chat's message started it, on one line, dec
   expect(host.querySelector('[data-testid="approval-relayed"]')).toBeNull();
   const buttons=()=>[...host.querySelectorAll<HTMLButtonElement>('[data-testid="approval-card"] button')].map(b=>[b.dataset.testid,b.tabIndex,b.disabled]);
   const plainButtons=buttons();
-  const relayed={...base,req_id:"relayed",relayed_from:'x›\n · REQUESTED BY YOU 🔴 <img src=x onerror="window.__pwned=1">'+"z".repeat(100)};
+  const relayed={...base,req_id:"relayed",relayed_from:{title:'x›\n · REQUESTED BY YOU 🔴 <img src=x onerror="window.__pwned=1">'+"z".repeat(100),provider:"claude",thread_id:"abcd1234"}};
   await act(async()=>root.render(createElement(ApprovalVeil,{requests:[relayed],onDecide})));
   const line=host.querySelector<HTMLElement>('[data-testid="approval-relayed"]')!;
   expect(line).not.toBeNull();
   expect(line.className).toBe("relayed");
-  expect(line.children).toHaveLength(0);
-  expect(line.textContent!.startsWith("turn started by a message from chat ‹x_ _ REQUESTED BY YOU <img")).toBe(true);
+  // The title is isolated text in one <bdi>; nothing else is an element.
+  expect([...line.children].map(c=>c.tagName)).toEqual(["BDI"]);
+  expect(line.querySelector("bdi")!.children).toHaveLength(0);
+  expect(line.textContent!.startsWith("turn started by a message from chat ‹x_ _ REQUESTED BY YOU _img")).toBe(true);
+  expect(line.textContent!.endsWith("› (Claude · abcd1234)")).toBe(true);
+  expect(line.getAttribute("title")).toBe(line.textContent);
   expect(line.textContent!.match(/[‹›]/g)).toHaveLength(2);
-  expect(line.textContent).not.toMatch(/[\n🔴·]/);
+  expect(line.textContent).not.toMatch(/[\n🔴<>]/);
   expect((window as any).__pwned).toBeUndefined();
   // Display only: the same buttons, Always included, in the same Tab order.
   expect(buttons()).toEqual(plainButtons);
@@ -90,7 +94,9 @@ it("a relayed turn's card says which chat's message started it, on one line, dec
   await act(async()=>root.render(createElement(ApprovalVeil,{requests:[{...relayed,req_id:"both",origin:'task t1 "x"'}],onDecide})));
   const origin=host.querySelector('[data-testid="approval-origin"]')!;
   expect(origin.nextElementSibling).toBe(host.querySelector('[data-testid="approval-relayed"]'));
-  // Not a string: no line.
-  await act(async()=>root.render(createElement(ApprovalVeil,{requests:[{...base,req_id:"odd",relayed_from:7 as unknown as string}],onDecide})));
-  expect(host.querySelector('[data-testid="approval-relayed"]')).toBeNull();
+  // Not an object: no line.
+  for(const odd of [7,"Frontend",null]){
+    await act(async()=>root.render(createElement(ApprovalVeil,{requests:[{...base,req_id:"odd"+String(odd),relayed_from:odd as never}],onDecide})));
+    expect(host.querySelector('[data-testid="approval-relayed"]')).toBeNull();
+  }
 });

@@ -335,9 +335,9 @@ It widens the old rule "session tools read, never switch the owner's live
 session": no tool switches that session, and reading and messaging are as
 follows. Status: C0, C1, C3, C4 and C5 are merged and live (daemon restart
 2026-10-19, `00c11df`); C2 was folded into C3 (CC-6 dropped the plan's `typed`
-desk key); C6 (approval-card provenance) is built on branch
-`claude/chat-c6-provenance` (below; not merged or live until its PR is); the
-native release checks L1-L4 are **not run**
+desk key); C6 (approval-card provenance) is **merged** (#275, below) but not
+yet live (no daemon restart or HUD install since); the native release checks
+L1-L4 are **not run**
 ([runbook](../plans/2026-10-19-chat-to-chat-live-gates.md)).
 
 | Decision | Rule now in force |
@@ -362,32 +362,51 @@ Always stays, O-7 `chat_summary` is deterministic (no model call), O-8
 Discord and read-aloud skip relayed and reply turns, O-9 Stop withdraws queued
 sends.
 
-**C6, card provenance (O-4: add the line, keep Always).** A card raised
-during a relayed turn (in the target) or a reply turn (in the sender) says
-"turn started by a message from chat ‹title›" under REQUESTED BY. The route
-is the one permit every provider is handed: `Daemon._permit` gives
-`PermitContext` a `relayed_from` reader over the live session
-(`daemon._relayed_from`: the relay item's sender for a relayed turn, its
-target for a reply turn, "" for any other turn or a mark that does not match),
-and `permissions._ask` copies `ctx.relayed()` onto `ApprovalRequest.relayed_from`
-for the card. So it covers the Claude hook's question and the jarvis-mcp
-bridge's (both `session.permit`), Codex's approvals and widenings, and the fast
-path's approver. The fast path's relayed and reply turns hold no tool that
-reaches the permit today (`run_command` and the edits are desk-only, and no
+**C6, card provenance (O-4: add the line, keep Always; #275).** A card
+raised by a call from a relayed turn (in the target) or a reply turn (in the
+sender) says "turn started by a message from chat ‹title› (Provider · id)"
+under REQUESTED BY: the provider and the chat's thread id keep two chats with
+one title apart. The route is the one permit every provider is handed:
+`Daemon._permit` gives `PermitContext` a `relayed_from` reader over the live
+session, and `permissions._ask` copies `ctx.relayed(child)` onto
+`ApprovalRequest.relayed_from` (`{"title", "provider", "thread_id"}` or None)
+for the card. **Whose turn:** the orchestrator's own call (`child` None) is
+the running turn's (`daemon._turn_relay`: the relay item's sender for a
+relayed turn, its target for a reply turn, None for any other turn, between
+turns, or a mark that does not match). A native sub-agent's call (`child` its
+sid) is the turn that *spawned* it, not the one running when it asks
+(review of #275, MED): `_record_subagent` stamps each child at its first
+record (`daemon._stamp_child`; a grandchild takes its known parent's stamp,
+a child first seen between turns gets none) on `_Session.child_relay`, at
+most 256 per session, oldest forgotten first. So a background child of a
+relayed turn that asks after the turn ended still names the sender, and a
+child of an owner's turn that asks during a later relayed turn names nobody.
+A child whose sid the daemon never saw (Claude's unnamed child before its
+`task_started`, a forgotten one) shows no line: nothing is attributed by
+guessing. Claude passes the child's sid with every child call it knows;
+Codex passes it on every child approval (each is a widening). So it covers
+the Claude hook's question and the jarvis-mcp bridge's (both
+`session.permit`), Codex's approvals and widenings, and the fast path's
+approver. The fast path's relayed and reply turns hold no tool that reaches
+the permit today (`run_command` and the edits are desk-only, and no
 `dangerous` tool is in the set), so no card arises there yet; Browser drive
 cards cannot arise in a relayed turn (the drive refuses any turn not at the
 desk); the Browser delegation consent card is private and its projection
 keeps its fixed fields, so it does not show the line; Discord's card does not
 show it. **Display only:** the reader is read once per card, a reader that
-raises or returns a non-string shows nothing, and no layer reads it; the
-decision, layer, reason, asked-or-not, Always and human-backed status are the
-same with and without it (`tests/v2/permissions_check.py
-relay_provenance_checks`, every profile, provider and asker). The title is
-another chat's model-written text: `chat_reads.card_title` (and the HUD's
-`cardTitle` again) keeps one line of at most 60 characters with no ‹ › « » · •,
-symbol, emoji or combining mark; the HUD clips it on one `--text-2` line, never
-amber or red. A mid-turn reply step in an owner's turn adds no line (the turn
-is the owner's). Tests: `tests/v2/relay_provenance_check.py`, the
+raises or returns a non-dict shows nothing, and no layer reads it; the
+decision, layer, reason, asked-or-not, the whole request but the provenance
+(Always, timeouts and waits included) and human-backed status are the same
+with and without it (`tests/v2/permissions_check.py relay_provenance_checks`,
+every profile, provider and asker). The title is another chat's model-written
+text: `chat_reads.card_title` (and the HUD's `cardTitle` again, by the same
+rule) keeps one line of at most 60 characters; every opening, closing and
+quotation bracket but ASCII ( ) [ ] { }, < > and their look-alikes, and dot
+look-alikes become `_`; symbols, emoji, combining marks and Hangul fillers
+go; nothing left is "(untitled)". The HUD isolates it in a `<bdi>`, clips the
+line in `--text-2`, never amber or red, and puts the whole line in its hover
+title. A mid-turn reply step in an owner's turn adds no line (the turn is the
+owner's). Tests: `tests/v2/relay_provenance_check.py`, the
 `provenance_checks` section of `tests/face/hud_v2_relay_check.py`, and vitest
 in `Approvals.test.ts` and `relays.test.ts`.
 

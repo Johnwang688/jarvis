@@ -209,10 +209,12 @@ class PermitContext:
     task: Task | None = None
     # Factory captures exact request-time session/worker/turn, not a successor.
     delegation_cancelled: Callable | None = field(default=None, repr=False)
-    # Display only (chat-to-chat C6): the clean title of the chat whose
-    # message or reply started the turn a card is raised in, "" for any other
-    # turn. Read by `_ask` for the card and by nothing that decides.
-    relayed_from: Callable[[], str] | None = field(default=None, repr=False)
+    # Display only (chat-to-chat C6): which chat's message or reply started
+    # the turn that made the asking call — {"title", "provider", "thread_id"},
+    # or None. Called with None for the orchestrator's own call and with the
+    # child's sid ("" when unknown) for a native sub-agent's, whose turn may
+    # have ended. Read by `_ask` for the card and by nothing that decides.
+    relayed_from: Callable[[str | None], dict | None] | None = field(default=None, repr=False)
 
     @property
     def task_id(self) -> str | None:
@@ -228,14 +230,15 @@ class PermitContext:
         name = self.task.brief if self.task is not None else ""
         return label(task_id, name)
 
-    def relayed(self) -> str:
-        """The card's "turn started by a message from chat" title, or "".
-        Display only: a reader that fails or returns a non-string shows nothing."""
+    def relayed(self, child: str | None = None) -> dict | None:
+        """The card's "turn started by a message from chat" provenance, or
+        None. Display only: a reader that fails or returns a non-dict shows
+        nothing."""
         try:
-            value = self.relayed_from() if self.relayed_from is not None else ""
+            value = self.relayed_from(child) if self.relayed_from is not None else None
         except Exception:  # noqa: BLE001
-            return ""
-        return value if isinstance(value, str) else ""
+            return None
+        return value if isinstance(value, dict) and value else None
 
 
 @dataclass
@@ -1337,7 +1340,9 @@ def _ask(asker, ctx: PermitContext, tool: str, args: dict, command: str,
         thread_id=ctx.thread_id, task_id=ctx.task_id,
         provider=ctx.provider or None, origin=origin if origin is not None else ctx.origin(),
         allowlistable=allowlistable, headline=clean_line(headline, 420) if headline else "",
-        subagent=subagent, relayed_from=ctx.relayed())
+        # Every caller passes `origin=who`, which is not None exactly for a
+        # native sub-agent's call: its provenance is its spawning turn's (C6).
+        subagent=subagent, relayed_from=ctx.relayed(subagent if origin is not None else None))
     try:
         return Decision(asker.ask(request))
     except Exception:       # an asker that raises has not approved anything

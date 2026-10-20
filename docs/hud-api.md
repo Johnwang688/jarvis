@@ -3658,19 +3658,35 @@ for `user`.
 
 ### Approval cards from a relayed or reply turn (C6)
 
-A card raised during a turn another chat's message started (a relayed turn,
-in the target) or its reply started (a reply turn, in the sender) carries
-`"relayed_from": "<title>"` in its public JSON (the bus's
-`approval_requested`, `GET /approvals`): the title of the chat whose message
-or reply started the turn, as its relay header shows it, then reduced for
-the card (`chat_reads.card_title`): one line of at most 60 characters, no
-‹ › « » · • (each becomes `_`), no symbol, emoji or combining mark, and
-`(untitled)` for nothing left. The key is absent for any other turn (typed,
-spoken, Discord, a schedule, a task) and from a private (Browser) card's
+A card raised by a call from a turn another chat's message started (a
+relayed turn, in the target) or its reply started (a reply turn, in the
+sender) carries, in its public JSON (the bus's `approval_requested`,
+`GET /approvals`):
+
+```json
+"relayed_from": {"title": "…", "provider": "fast" | "claude" | "codex", "thread_id": "…"}
+```
+
+`title` is the chat whose message or reply started the turn, as its relay
+header shows it, reduced for the card (`chat_reads.card_title`): one line of
+at most 60 characters; every opening, closing and quotation bracket but ASCII
+( ) [ ] { }, < > and their look-alikes, and dot look-alikes become `_`;
+symbols, emoji, combining marks and Hangul fillers go; `(untitled)` for
+nothing left. `provider` and `thread_id` are that chat's, so two chats with
+one title stay apart. Each value is one line of at most 80 characters.
+
+A native sub-agent's call carries its *spawning* turn's provenance, not the
+running turn's: a background child of a relayed turn still names the sender
+after that turn ends, a child of an owner's turn never names a later relay,
+and a child the daemon never saw names nobody. The key is absent for any
+other call (an owner's turn, typed, spoken, Discord, a schedule, a task; a
+card between turns with no known child) and from a private (Browser) card's
 projection. The HUD draws it under REQUESTED BY as "turn started by a message
-from chat ‹title›" on one clipped line, the title reduced again by the same
-rule (`lib/relays.ts` `cardTitle`). It is display only: no layer reads it,
-the decision, the layer and Always are the same with and without it, and the
+from chat ‹title› (Provider · id)" on one clipped line, the title reduced
+again by the same rule (`lib/relays.ts` `cardTitle`) inside a `<bdi>`, the
+whole line as its hover title; an id that is not 8 lowercase hex characters
+is not drawn. It is display only: no layer reads it, the decision, the layer,
+Always and the rest of the request are the same with and without it, and the
 owner's answer decides the card as on any other. Discord's card does not show
 it.
 

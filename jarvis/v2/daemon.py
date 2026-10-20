@@ -59,22 +59,56 @@ STOP_TIMEOUT = 2.0
 LOGGED_REDACTED = ("args", "command", "cmd", "reason", "headline")
 
 
-def _relayed_from(session) -> str:
-    """Chat-to-chat C6, display only: the card title of the chat whose message
-    (a relayed turn) or reply (a reply turn) started the turn `session` is
-    running now, else "" — an owner's turn, typed, spoken or from Discord,
-    a task's, or one with no turn. Read when a card is raised, outside the
+# Children whose spawning turn's provenance a session remembers (C6): the
+# oldest is forgotten first, and a forgotten child's card shows no line.
+CHILD_STAMPS = 256
+
+
+def _turn_relay(session) -> dict | None:
+    """Chat-to-chat C6, display only: the chat whose message (a relayed turn)
+    or reply (a reply turn) started the turn `session` is running now, as
+    {"title", "provider", "thread_id"}, else None — an owner's turn, typed,
+    spoken or from Discord, a task's, or no turn at all. Read outside the
     lock (one attribute each; a mark that does not name the item's chat is
-    taken for a turn changing hands and shows nothing). No permission layer
-    reads it: `PermitContext.relayed` puts it on the card and nowhere else."""
+    taken for a turn changing hands and shows nothing)."""
     item, mark = getattr(session, "relay_turn", None), getattr(session, "relay_mark", None)
     if item is None or not isinstance(mark, dict):
-        return ""
+        return None
     peer = item.target if mark.get("reply") else item.sender
     if not isinstance(peer, dict) or not peer.get("thread_id") or peer.get("thread_id") != mark.get("from"):
-        return ""
+        return None
     from .chat_reads import card_title
-    return card_title(peer.get("title"))
+    return {"title": card_title(peer.get("title")),
+            "provider": str(peer.get("provider") or ""), "thread_id": str(peer.get("thread_id"))}
+
+
+def _relayed_from(session, child: str | None = None) -> dict | None:
+    """The provenance a card shows (C6), display only; no permission layer
+    reads it. The orchestrator's own call (`child` None) is the running
+    turn's. A native sub-agent's call is its spawning turn's, stamped when
+    the daemon first saw the child (`_stamp_child`): a background child of a
+    relayed turn keeps its line after that turn ends, and a child of an
+    owner's turn never takes a later relayed turn's. A child the daemon never
+    saw (an empty or unknown sid) shows nothing."""
+    if child is None:
+        return _turn_relay(session)
+    stamps = getattr(session, "child_relay", None)
+    return stamps.get(child) if child and isinstance(stamps, dict) else None
+
+
+def _stamp_child(session, prepared) -> None:
+    """Under the daemon's lock, from `_record_subagent`: the first record of
+    a child stamps it with the provenance of the turn that spawned it — its
+    parent's stamp for a grandchild the daemon knows the parent of, else the
+    turn running now (None between turns: no line). Never restamped."""
+    sid = prepared.get("sid")
+    stamps = session.child_relay
+    if not sid or sid in stamps:
+        return
+    parent = (prepared.get("data") or {}).get("parent_sid") if prepared.get("kind") == "subagent" else None
+    stamps[sid] = stamps[parent] if parent in stamps else _turn_relay(session)
+    while len(stamps) > CHILD_STAMPS:
+        stamps.pop(next(iter(stamps)))
 
 
 def _log_fields(data) -> dict:
@@ -339,6 +373,8 @@ class _Session:
     # Which session ran a native sub-agent (SV-1, subagents.py): when this
     # one ends, so do its children's CLI, and the record says so.
     subagent_key: str = field(default_factory=lambda: uuid.uuid4().hex)
+    # C6: each native child's spawning-turn provenance (`_stamp_child`), by sid.
+    child_relay: dict = field(default_factory=dict, repr=False)
     # Between turns (SV-6): the thread reading the provider's `watch`, and
     # whether the running turn is one the CLI started by itself (`_begin_cli`).
     watcher: threading.Thread | None = field(default=None, repr=False)
@@ -1844,14 +1880,15 @@ class Daemon:
         except StoreError:
             LOG.warning("Cannot read project/task for thread %s", thread_id, exc_info=True)
         # The session `_open` registered just before building this permit:
-        # its card says which chat's message started a relayed turn (C6).
+        # its card says which chat's message started the asking call's turn
+        # (C6; a sub-agent's is its spawning turn's).
         session = self._sessions.get(thread_id)
         ctx = PermitContext(
             thread_id=thread_id, brief=brief,
             provider=thread.provider.value if thread is not None else "",
             project=project, task=task,
             delegation_cancelled=lambda: self._delegation_cancelled(thread_id),
-            relayed_from=(lambda: _relayed_from(session)) if session is not None else None)
+            relayed_from=(lambda child=None: _relayed_from(session, child)) if session is not None else None)
         return build_permit(ctx, self.approvals)
 
     def _approval_requested(self, request: ApprovalRequest) -> None:
@@ -2028,6 +2065,8 @@ class Daemon:
             if event.thread_id != session.thread.id:
                 raise ValueError("provider event belongs to another thread")
             thread, turn_id, key = session.thread, session.turn_id, session.subagent_key
+            if prepared is not None:
+                _stamp_child(session, prepared)
         if prepared is not None:
             self.subagents.record(thread, turn_id, key, prepared)
 

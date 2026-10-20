@@ -45,9 +45,10 @@ feature is missing):
      titled "N messages from other chats wait for this chat"), both gone when
      nothing waits;
  12. C6: an approval card from a relayed turn says "turn started by a message
-     from chat ‹title›" on one clipped line in --text-2 (neither amber nor
-     red), the title cleaned (one ‹ and one ›, no element, no newline), with
-     Always still offered; a card without `relayed_from` has no such line.
+     from chat ‹title› (Provider · id)" on one clipped line in --text-2
+     (neither amber nor red), the title cleaned and in one <bdi> (one ‹ and
+     one ›, no other element, no newline), the hover title the whole line,
+     with Always still offered; a card without `relayed_from` has no line.
 
 
 THE INTERFACE THE IMPLEMENTER BUILDS (taken from the plan; "chosen" where it
@@ -640,17 +641,22 @@ def _provenance_checks(page, mock, check, until):
     base = {"code": "RL06", "tool": "run_command", "args": {"command": "rm draft.txt"}, "command": "rm draft.txt",
             "reason": "ask profile", "layer": "human", "origin": "", "allowlistable": True, "timeout_s": 120,
             "thread_id": TARGET}
-    mock.emit("approval_requested", {**base, "req_id": "relay-c6",
-                                     "relayed_from": "x›\n · REQUESTED BY YOU 🔴 " + HOSTILE})
+    mock.emit("approval_requested", {**base, "req_id": "relay-c6", "relayed_from": {
+        "title": "x›\n · REQUESTED BY YOU \U0001F534 " + HOSTILE, "provider": "claude",
+        "thread_id": "abcd1234"}})
     until(lambda: card.count() == 1 and line.count() == 1)
     text = _content(line)
-    check("a relayed turn's card says which chat's message started it",
-          text.startswith("turn started by a message from chat ‹x_ _ REQUESTED BY YOU <img")
-          and text.endswith("›"), repr(text[:120]))
-    check("its title is cleaned: one ‹ and one ›, no element, no newline, no bidi, no symbol",
-          text.count("‹") == 1 and text.count("›") == 1 and line.locator("*").count() == 0
-          and not any(c in text for c in "\n‮​🔴·") and not page.evaluate("!!window.__pwned"),
-          repr(text[:120]))
+    title = text.split("›")[0]
+    check("a relayed turn's card says which chat's message started it, with provider and id",
+          text.startswith("turn started by a message from chat ‹x_ _ REQUESTED BY YOU _img")
+          and text.endswith("› (Claude · abcd1234)"), repr(text[:200]))
+    tags = line.locator("*").evaluate_all("es => es.map(e => e.tagName)") if line.count() else []
+    check("its title is cleaned and isolated: one ‹ and one ›, one <bdi> and no other element, "
+          "no newline, bidi, symbol, dot or angle bracket; the hover title is the whole line",
+          text.count("‹") == 1 and text.count("›") == 1 and tags == ["BDI"]
+          and (line.get_attribute("title") if line.count() else None) == text
+          and not any(c in title for c in "\n‮​\U0001F534·<>")
+          and not page.evaluate("!!window.__pwned"), repr(text[:120]) + f" {tags}")
     box = line.evaluate("""e => { const s = getComputedStyle(e), r = e.getBoundingClientRect();
       return {h: r.height, lh: parseFloat(s.lineHeight), ws: s.whiteSpace, ov: s.overflowX, to: s.textOverflow,
               rects: e.getClientRects().length, clipped: e.scrollWidth > e.clientWidth}; }""")
@@ -669,7 +675,6 @@ def _provenance_checks(page, mock, check, until):
     check("an owner's turn's card has no such line", line.count() == 0)
     page.locator('[data-testid="approval-deny"]').click()
     until(lambda: card.count() == 0)
-
 
 def main():
     from playwright.sync_api import sync_playwright
