@@ -1366,13 +1366,20 @@ its stream at a time:
   to the watcher. The child's row moves while the chat is idle, and a
   `stop_task` between turns is confirmed at once.
 - A main-thread `init` or `status` message is read for the session id only.
+- A message of no turn (`_of_no_turn`: anything but a user, assistant,
+  stream-event, result or system message — the CLI's `rate_limit_event`,
+  `conversation_reset`, any kind a newer SDK adds) is read and passed by,
+  never held (2026-10-20, below).
 - A CLI turn nobody sent is **offered**. That is an untagged stream event or
   assistant message, a replayed user message with a non-human `origin`, or
   such a result, and it counts only on a CLI known to echo. It is held, and
   the watcher hears TURN_STARTED `{self_started: origin}` once.
 - Anything else main-thread is **held** for the next turn, which judges it
   by `_read`'s old rules. That covers a late steer's echo (interrupted at
-  once if its turn was stopped) and a stray result.
+  once if its turn was stopped) and a stray result. Everything read behind
+  a held message is held too, in order, and no CLI turn is offered from
+  behind one; the reader logs the type of the first message it holds
+  ("holding a … read between turns for the next message").
 - The end of the stream, or an SDK error, is held for the next turn. That
   turn reports it exactly as before: the dead CLI's error is fatal and the
   next message resumes.
@@ -1470,13 +1477,43 @@ next, queued turn — refused "already running" under load, and
 `contextlib.closing(source)`. A turn marks itself the reader before it parks
 the idle reader, and only that turn gives the stream back.
 
-**Checks** (free, offline): `tests/v2/idle_reader_check.py`, 41 tests. They
+**The CLI's answer waited for the next message (fixed 2026-10-20).** The
+owner's report: after background agents finished, Jarvis's follow-up did
+not show until the next message. Thread c5ee7933 (Claude, a fresh session):
+the owner's turn spawned two background agents and ended at 13:00:26 UTC;
+the agents' rows moved between turns (the idle reader ran); each finished
+with a `SubagentHandback`, at 13:03:16 and 13:03:47, and the CLI started a
+turn of origin `peer` for each, ran a Bash (logged as a between-turn gate
+with no turn) and answered by 13:04:35. No `cli_turn` was recorded. At
+13:06:01 the owner's next message read both CLI turns as its own (its log
+holds their two Bash calls, texts and usages in the first second, and the
+journal says "read a CLI turn of origin peer" twice). The idle reader had
+held a message it could not place before 13:03:16, and what is held holds
+everything behind it. The only main-thread message that can come between
+turns with no words and no turn is the CLI's `rate_limit_event` (2.1.295
+writes one whenever the account's limit info changes, on any API response,
+a background child's included): the provider read it nowhere, so between
+turns it fell to "anything else" and was held. The same peer turns were
+offered on 2026-10-18 (thread 9ff04f39, 40 `cli_turn`s), when no such event
+came between turns. Inferred, not reproduced: an API-key run of the
+installed CLI against the SV-0 scripted model, sending unified rate-limit
+headers, emitted no such event (it appears to need the owner's claude.ai
+login), and the provider logged nothing it held, so the regression replays
+`one_default` with the event inserted. The fix passes by any message of no
+turn, not only this one; a kind the provider does not know (the SDK is not
+pinned) is also named once in the journal, by type. Codex has no turn of its own and the
+fast path no background children, so neither is affected.
+
+**Checks** (free, offline): `tests/v2/idle_reader_check.py`, 47 tests. They
 cover the SV-0 recordings through the real providers (`one_default`,
 `parallel_default`, `stop_bg`, Codex `no_wait`), an SDK-shaped client with
 the SDK's 100-message buffer (which reproduces the 2026-10-12 stall
 unwatched and shows it gone watched), real daemons, the Discord harness and
 the runner. The speech skip is in `hud/src/lib/speech/controller.test.ts`.
-`tests/v2/idle_reader_mutants.py` kills all 27 of its mutants (each in a
+`tests/v2/idle_reader_mutants.py` kills all 32 of its mutants (2026-10-20
+added a rate_limit_event held between turns, a turn's stream events or a
+main-thread user message taken for messages of no turn, no-turn messages
+passed by behind something held, and an unknown kind passed by unnamed) (each in a
 temp copy; the review of #234 added the generator left suspended, the
 orchestrator's own between-turn approval reaching `permit`, a stopped or
 failed CLI turn's end posted, the daemon answering a between-turn approval,

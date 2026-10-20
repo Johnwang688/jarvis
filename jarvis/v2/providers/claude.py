@@ -77,6 +77,7 @@ from claude_agent_sdk import (
     HookMatcher,
     PermissionResultAllow,
     PermissionResultDeny,
+    RateLimitEvent,
     ResultMessage,
     StreamEvent,
     SystemMessage,
@@ -1945,8 +1946,13 @@ class ClaudeProvider:
         - A sub-agent's message or a task message: translated and handed to
           the watcher now — the child's row moves while the chat is idle.
         - Behind something already held: held, in order.
-        - A main-thread system message (`init`, `status`): read for the
-          session id, nothing more.
+        - A main-thread system message (`init`, `status`), or a message of
+          no turn at all (`_of_no_turn`: the `rate_limit_event` the CLI
+          writes whenever the account's limit info changes, a background
+          child's API calls included): read, nothing more. Never held: a
+          held message holds everything behind it, the CLI's own turn
+          included, until the owner's next message (the owner's report of
+          2026-10-20, thread c5ee7933).
         - A CLI turn nobody sent: offered to the daemon (`adopt`), and held.
         - Anything else (a late steer's echo, a stray result): held for the
           next send's `_read`, whose rules judge it as before."""
@@ -1969,7 +1975,8 @@ class ClaudeProvider:
         if session.held:
             self._hold(session, item)
             return True
-        if isinstance(item, SystemMessage):
+        if isinstance(item, SystemMessage) or _of_no_turn(item):
+            _note_no_turn_kind(session, item)
             self._translate(session, item)
             return True
         origin = self._cli_turn(session, item)
@@ -1978,6 +1985,10 @@ class ClaudeProvider:
             session.offer = origin
             watch.put(Event(EventKind.TURN_STARTED, session.thread_id, {"self_started": origin}))
             return True
+        # What waits for the next message from here on, named (no content):
+        # anything read behind it waits too.
+        LOG.info("claude %s: holding a %s read between turns for the next message",
+                 session.thread_id, type(item).__name__)
         uid = str(item.uuid).lower() if isinstance(item, SdkUserMessage) and item.uuid else None
         with session.mutex:
             stopped = uid is not None and uid in session.stopped
@@ -3153,6 +3164,42 @@ class _Raised:
 
 _END = object()   # the client's stream ended
 _CLOSED = object()   # the session closed: the watcher's feed ends (SV-6)
+
+
+def _of_no_turn(item: Any) -> bool:
+    """A message that belongs to no CLI turn: neither words nor a turn's start
+    or end (`rate_limit_event`, `conversation_reset`, and any kind a newer SDK
+    adds). Only the turn-shaped kinds — user, assistant, stream event,
+    result — and system messages take part in deciding whose turn is under
+    way; this one is read wherever it comes, by `_translate`, and `_read`
+    gives it no part in ownership either — though, as any frame does, it
+    still counts as the CLI's sign of life during a steer hold (it extends
+    `hold_quiet`). Between turns the idle reader passes it by only when
+    nothing is held: behind a held message it is held too, in order (a
+    `conversation_reset` must not zero `cost_seen` ahead of a held result)."""
+    return not isinstance(item, (SdkUserMessage, AssistantMessage, StreamEvent,
+                                 ResultMessage, SystemMessage))
+
+
+# Kinds of no turn the provider knows and expects between turns. Any other
+# (a Message class a newer SDK adds: `claude-agent-sdk` is not pinned) is
+# still passed by, and named once in the journal, so a kind that should have
+# been read is not dropped unseen.
+_KNOWN_NO_TURN = (RateLimitEvent, ConversationResetMessage)
+_NO_TURN_NAMED: set = set()
+
+
+def _note_no_turn_kind(session: Any, item: Any) -> None:
+    """Log, once per process and kind, a message of no turn of a kind the
+    provider does not know (its type name only, never its content)."""
+    if isinstance(item, SystemMessage) or isinstance(item, _KNOWN_NO_TURN):
+        return
+    kind = type(item).__name__
+    if kind in _NO_TURN_NAMED:
+        return
+    _NO_TURN_NAMED.add(kind)
+    LOG.info("claude %s: passed by a %s read between turns (a kind this provider "
+             "does not know)", session.thread_id, kind)
 
 
 def _subagent_message(item: Any) -> bool:
