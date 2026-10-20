@@ -1623,7 +1623,7 @@ The rules behind these rows (who may send, the bounds, replies, Stop) are in
 [Control plane](control-plane.md#chat-to-chat-the-rules-in-one-place-c0-c5-merged-2026-10-19);
 the wire shapes are in [`docs/hud-api.md`](../hud-api.md#chat-to-chat-relays-between-chats-c3-c5-completed-in-c7-2026-10-19).
 This section is only what the HUD does with them. C5 is merged and live. C6
-(merged, #275; not yet live) adds a "turn started by a message from chat
+(merged in #275 and live since 2026-10-20, `725459c`; L4 not run) adds a "turn started by a message from chat
 ‹title› (Provider · id)" line to approval cards from a relayed or reply turn
 (or "while a turn started by … runs" for a call that turn did not start)
 (`Approvals.tsx`, `data-testid="approval-relayed"`, under REQUESTED BY: one

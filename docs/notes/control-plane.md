@@ -335,9 +335,8 @@ It widens the old rule "session tools read, never switch the owner's live
 session": no tool switches that session, and reading and messaging are as
 follows. Status: C0, C1, C3, C4 and C5 are merged and live (daemon restart
 2026-10-19, `00c11df`); C2 was folded into C3 (CC-6 dropped the plan's `typed`
-desk key); C6 (approval-card provenance) is **merged** (#275, below) but not
-yet live (no daemon restart or HUD install since); the native release checks
-L1-L4 are **not run**
+desk key); C6 (approval-card provenance) is merged (#275, below) and
+installed and live (`725459c`, build `20261020T071216527282Z-f85e9cd91489`, daemon restarted 2026-10-20 ~07:12Z; L4 not run); the native release checks L1-L4 are **not run**
 ([runbook](../plans/2026-10-19-chat-to-chat-live-gates.md)).
 
 | Decision | Rule now in force |
@@ -380,11 +379,23 @@ decision on the reviews of #275):
 - A native sub-agent's call (`child` its sid) whose spawning turn was a
   relayed one: that turn's, kind `started`, even after it ended.
   `_record_subagent` stamps each child once, at its first record
-  (`_stamp_child`): a grandchild takes a copy of its seen parent's stamp, any
-  other child the turn its record was read in — never a record read between
-  turns (`idle`), nor one during whose preparation outside the lock another
-  turn began. A child seen once is never stamped again: the session keeps up
-  to 256 relay stamps and 4096 seen sids, oldest forgotten first.
+  (`_stamp_child`): a grandchild whose parent the daemon has seen takes a
+  copy of the parent's stamp (none if it has none); a top-level child — its
+  lifecycle `started`, with no parent — takes the turn its record was read
+  in, never a record read between turns (`idle`) nor one during whose
+  preparation outside the lock another turn began; anything else (a parent
+  the daemon never saw, its `started` dropped past a provider's bound, or a
+  first record that is not the lifecycle `started`) gets no stamp. A child
+  seen once is never stamped again: the session keeps up to 256 relay
+  stamps (oldest forgotten first) and every sid it has seen, for its life.
+  **Native ordering (follow-up to #275):** a Claude child is also stamped
+  from the orchestrator's own spawning `Agent` (or `Task`) call, a
+  TOOL_STARTED in the turn's stream whose call id makes the child's sid
+  "cl:<id>" (`daemon._spawned`), so a background child whose `task_started`
+  the CLI emits only after the turn's result keeps its line. Codex children
+  are stamped from their first record only; whether Codex can announce a
+  relayed turn's child only after that turn ends is not verified: L4 step 5
+  of the [runbook](../plans/2026-10-19-chat-to-chat-live-gates.md) observes it.
 - Any other child, or a call nobody can attribute (`child` ""): if a relayed
   turn is running when it asks, that turn with kind `running`, drawn as
   "while a turn started by a message from chat ‹title› (Provider · id) runs"

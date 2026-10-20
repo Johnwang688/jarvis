@@ -140,8 +140,9 @@ def _session(running=True):
     return session
 
 
-def _started(sid, parent=None):
-    return {"kind": "subagent", "sid": sid, "data": {"parent_sid": parent}}
+def _started(sid, parent=None, op="started"):
+    """A child's lifecycle record as `SubagentRecords.prepare` keeps it."""
+    return {"kind": "subagent", "sid": sid, "data": {"op": op, "parent_sid": parent}}
 
 
 class ChildRule(unittest.TestCase):
@@ -186,9 +187,65 @@ class ChildRule(unittest.TestCase):
         self.assertEqual(daemon_mod._relayed_from(session, "cl:old")["kind"], "running")
         session.relay(False)
         self.assertIsNone(daemon_mod._relayed_from(session, "cl:old"))
-        for n in range(daemon_mod.CHILD_SEEN + 5):
+        # The seen set only grows: a provider that forgot a child may announce
+        # it again as new, and it must not be restamped then.
+        for n in range(5000):
             daemon_mod._stamp_child(session, {"kind": "subagent_event", "sid": f"cl:e{n}", "data": {}})
-        self.assertEqual(len(session.child_seen), daemon_mod.CHILD_SEEN, "the seen set is bounded too")
+        self.assertIn("cl:old", session.child_seen)
+        self.assertGreater(len(session.child_seen), 5000, "grow-only for the session's life")
+        daemon_mod._stamp_child(session, _started("cl:old"))
+        self.assertNotIn("cl:old", session.child_relay)
+
+    def test_only_a_top_level_start_takes_the_running_turn(self):
+        """The review of #275's round 3, LOW 1: a child whose parent the
+        daemon never saw (its `started` dropped past a provider's bound) and
+        a child whose first record is not its lifecycle `started` are not
+        known to be the running turn's: no stamp, so "running" while a relay
+        runs, never "started"; a later `started` does not restamp them."""
+        session = _session(running=True)
+        daemon_mod._stamp_child(session, _started("cl:orphan", parent="cl:never-seen"))
+        daemon_mod._stamp_child(session, {"kind": "subagent_event", "sid": "cl:chatty", "data": {}})
+        daemon_mod._stamp_child(session, _started("cl:late", op="progress"))
+        for sid in ("cl:orphan", "cl:chatty", "cl:late"):
+            self.assertNotIn(sid, session.child_relay, sid)
+            self.assertEqual(daemon_mod._relayed_from(session, sid)["kind"], "running", sid)
+            daemon_mod._stamp_child(session, _started(sid))                     # its `started`, late
+            self.assertNotIn(sid, session.child_relay, f"{sid}: never restamped")
+        daemon_mod._stamp_child(session, _started("cl:top"))
+        self.assertEqual(daemon_mod._relayed_from(session, "cl:top")["kind"], "started", "a top-level start")
+        session.relay(False)
+        for sid in ("cl:orphan", "cl:chatty", "cl:late"):
+            self.assertIsNone(daemon_mod._relayed_from(session, sid))
+
+    def test_a_grandchild_of_an_unstamped_parent_is_running(self):
+        """...and m4: parent P first seen with no relay running; a relayed
+        turn starts; grandchild G (parent P) is not stamped from it."""
+        session = _session(running=False)
+        daemon_mod._stamp_child(session, _started("cl:P"))
+        self.assertNotIn("cl:P", session.child_relay)
+        session.relay(True)
+        daemon_mod._stamp_child(session, _started("cl:G", parent="cl:P"))
+        self.assertNotIn("cl:G", session.child_relay)
+        self.assertEqual(daemon_mod._relayed_from(session, "cl:G")["kind"], "running")
+
+    def test_a_spawning_agent_call_stamps_its_child(self):
+        """LOW 3: the orchestrator's Agent call in a relayed Claude turn
+        stamps "cl:<call id>" before the CLI's `task_started`, which may come
+        only after the turn's result (read between turns, stamping nothing)."""
+        from jarvis.v2.providers.claude import child_sid
+        session = _session(running=True)
+        daemon_mod._spawned(session, {"name": "Agent", "call_id": "toolu_01abc", "args": {}}, running=True)
+        daemon_mod._spawned(session, {"name": "Bash", "call_id": "toolu_02bash", "args": {}}, running=True)
+        daemon_mod._spawned(session, {"name": "Agent", "call_id": "toolu_03late", "args": {}}, running=False)
+        session.relay(False)
+        daemon_mod._stamp_child(session, _started(child_sid("toolu_01abc")), running=False)   # idle
+        self.assertEqual(daemon_mod._relayed_from(session, child_sid("toolu_01abc"))["kind"], "started")
+        self.assertNotIn(child_sid("toolu_02bash"), session.child_seen, "only a spawning call")
+        self.assertNotIn(child_sid("toolu_03late"), session.child_relay, "not from a turn that changed")
+        # An owner turn's Agent call: seen, no stamp.
+        daemon_mod._spawned(session, {"name": "Agent", "call_id": "toolu_04own", "args": {}}, running=True)
+        self.assertIn(child_sid("toolu_04own"), session.child_seen)
+        self.assertNotIn(child_sid("toolu_04own"), session.child_relay)
 
     def _record(self, session, *, idle, during_prepare=None):
         fake = SimpleNamespace(_lock=threading.Lock(), subagents=SimpleNamespace(record=lambda *a: None))
@@ -468,6 +525,33 @@ class Children(RealPermit):
                 self.assertEqual(card.relayed_from, expected(self.stores.threads.get(sender.id), "running"))
                 self.end(sender, target)
                 self.assertIsNone(self.child_asks(target, sid).relayed_from, "after N+1: nothing")
+
+    def test_a_child_announced_only_after_the_relayed_turn_keeps_its_line(self):
+        """LOW 3 through the daemon (Claude): the relayed turn's Agent call is
+        a TOOL_STARTED in its stream; the child's `task_started` arrives
+        between turns (`_idle_event`), yet its card is "started"."""
+        from jarvis.v2.providers.claude import child_sid
+        sender, target = self.chat(FAST, "Sender desk"), self.chat(CLAUDE, "Target")
+        call = "toolu_01Late" + R.mark("x").split("-")[1]
+
+        def script(h, message):
+            if message.origin == "chat":
+                return [R.Event(R.K.TOOL_STARTED, h.thread_id,
+                                {"call_id": call, "name": "Agent", "args": {"description": "bg"}})]
+            return []
+        self.fake(target).script[target.id] = script
+        self.turn(sender)
+        self.sent(self.send(sender, target, "start a background helper"))
+        self.idle(target)
+        sid = child_sid(call)
+        self.noticed(target, sid)
+        session = self.session(target)
+        self.d._idle_event(session, R.Event(R.K.SUBAGENT, target.id, {
+            "sid": sid, "op": "started", "status": "backgrounded", "background": True, "name": "bg"}))
+        card = self.child_asks(target, sid)
+        self.assertEqual(card.relayed_from, expected(self.stores.threads.get(sender.id)))
+        self.release(sender)
+        self.idle(sender)
 
     def test_a_bridge_call_during_a_relayed_turn_is_running(self):
         """The jarvis-mcp bridge's dangerous-tool ask cannot tell a child from

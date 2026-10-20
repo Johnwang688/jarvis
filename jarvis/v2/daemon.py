@@ -60,11 +60,18 @@ LOGGED_REDACTED = ("args", "command", "cmd", "reason", "headline")
 
 
 # A session's memory of its native children for card provenance (C6): the
-# relay stamps of at most CHILD_STAMPS children and the sids of at most
-# CHILD_SEEN, oldest forgotten first. A child seen before is never stamped
-# again, so one whose stamp was forgotten can only get the "running" line.
+# relay stamps of at most CHILD_STAMPS children (oldest forgotten first) and
+# every sid it has seen, for the session's life. A child seen before is never
+# stamped again, so one whose stamp was forgotten can only get the "running"
+# line. The seen set only grows: a provider that forgot a child may announce
+# it again as new (Claude past its CHILD_LIMIT), and a forgotten sid would be
+# restamped from whatever turn runs then. It costs one short string per child
+# ever spawned in the session (about 100 bytes; 10,000 children is ~1 MB),
+# and goes with the session.
 CHILD_STAMPS = 256
-CHILD_SEEN = 4096
+# The tools whose call spawns a Claude child "cl:<call id>" (SV-0): seen in
+# the orchestrator's own stream, inside the turn that made it.
+CLAUDE_SPAWN_TOOLS = frozenset(("Agent", "Task"))
 _RELAY_PROVIDERS = ("fast", "claude", "codex")
 _RELAY_THREAD_ID = re.compile(r"[0-9a-f]{8}")
 
@@ -115,29 +122,55 @@ def _relayed_from(session, child: str | None = None) -> dict | None:
 
 
 def _stamp_child(session, prepared, *, running: bool = True) -> None:
-    """Under the daemon's lock, from `_record_subagent`: a child's first
-    record stamps it with the relay that spawned it, if any — its parent's
-    stamp (a copy) for a grandchild whose parent the daemon has seen, else
-    the turn running now when `running` (False between turns, or when the
-    turn changed while the record was prepared: no stamp). Never restamped."""
+    """Under the daemon's lock, from `_record_subagent` (and `_spawned`): a
+    child's first record stamps it with the relay that spawned it, if any.
+
+    - A grandchild whose parent the daemon has seen: a copy of the parent's
+      stamp, or none if the parent has none.
+    - A top-level child (its lifecycle `started`, no parent): the turn
+      running now, when `running` (False between turns, or when the turn
+      changed while the record was prepared: no stamp).
+    - Anything else — a parent the daemon never saw (its `started` dropped
+      past a provider's bound), or a first record that is not the lifecycle
+      `started` — no stamp: who spawned it is not known, so it can only get
+      the "running" line.
+
+    Never restamped: a sid once seen stays seen for the session's life."""
     sid = prepared.get("sid")
     seen, stamps = session.child_seen, session.child_relay
     if not sid or sid in seen:
         return
     seen[sid] = True
-    while len(seen) > CHILD_SEEN:
-        seen.pop(next(iter(seen)))
-    parent = (prepared.get("data") or {}).get("parent_sid") if prepared.get("kind") == "subagent" else None
+    data = prepared.get("data") or {}
+    lifecycle = prepared.get("kind") == "subagent"
+    parent = data.get("parent_sid") if lifecycle else None
     if parent and parent in stamps:
         stamp = dict(stamps[parent])
-    elif parent and parent in seen:
-        stamp = None                      # an owner-turn parent's child
-    else:
+    elif lifecycle and not parent and data.get("op") == "started":
         stamp = _turn_relay(session) if running else None
+    else:
+        stamp = None                      # an unstamped or unknown parent; not a start
     if stamp is not None:
         stamps[sid] = stamp
         while len(stamps) > CHILD_STAMPS:
             stamps.pop(next(iter(stamps)))
+
+
+def _spawned(session, data, *, running: bool) -> None:
+    """Under the daemon's lock, from `_record`: the orchestrator's own Agent
+    call in a Claude turn names the child it spawns ("cl:" and the call's
+    id, `providers.claude.child_sid`). Stamped here, from the turn that made
+    the call, so a background child whose `task_started` the CLI emits only
+    after the turn's result (read between turns, which stamps nothing) still
+    carries its relay. A call that spawns nothing leaves one unused sid."""
+    if not isinstance(data, dict) or data.get("name") not in CLAUDE_SPAWN_TOOLS:
+        return
+    call_id = data.get("call_id")
+    if not isinstance(call_id, str) or not call_id:
+        return
+    from .providers.claude import child_sid
+    _stamp_child(session, {"kind": "subagent", "sid": child_sid(call_id),
+                           "data": {"op": "started", "parent_sid": None}}, running=running)
 
 
 def _log_fields(data) -> dict:
@@ -1964,6 +1997,7 @@ class Daemon:
         if event.kind in (EventKind.SUBAGENT, EventKind.SUBAGENT_EVENT):
             self._record_subagent(session, event)
             return
+        before = getattr(session, "turn_id", None)
         # Scrub reads credential files: never do this while holding _lock.
         log_fields = _log_fields(event.data)
         # A relayed turn's text for its sender's stream, scrubbed here too.
@@ -1984,6 +2018,16 @@ class Daemon:
             if event.thread_id != session.thread.id:
                 raise ValueError("provider event belongs to another thread")
             thread = session.thread
+            if (event.kind == EventKind.TOOL_STARTED and not idle
+                    and thread.provider == ProviderName.CLAUDE):
+                # C6: a spawning Agent call stamps its child (`_spawned`).
+                # Display only, so it can never cost the record. The turn
+                # check is defensive: TOOL_STARTED arrives only on the running
+                # turn's worker, and turn_id changes only with no worker.
+                try:
+                    _spawned(session, event.data, running=session.turn_id == before)
+                except Exception:
+                    LOG.exception("C6 spawn stamp failed; the card shows no line")
             if event.kind == EventKind.USAGE:
                 data = event.data
                 usage = Usage(data.get("input", 0), data.get("output", 0),
