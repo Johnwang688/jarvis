@@ -234,6 +234,8 @@ def test_parsers() -> None:
     calls_ok = [("Bash", '{"command": "python tests/foo_check.py"}'), ("Edit", "{}")]
     check("tests and a mutant are observed", findings.flags(calls_ok, p) == {"ran_tests": True, "tried_mutant": True, "observed": True})
     calls_no_edit = [("Bash", '{"command": "python tests/foo_check.py"}'), ("Read", "{}")]
+    perl = [("shell", "/bin/bash -lc \"perl -0pi -e 's/a/b/' x.py\""), ("shell", "python tests/foo_check.py")]
+    check("a perl/sed in-place edit counts as an edit", findings.flags(perl, p)["tried_mutant"] is True)
     check("a claimed mutant without any edit is not believed", findings.flags(calls_no_edit, p)["tried_mutant"] is False)
     check("no tool calls falls back to the self-report", findings.flags([], p)["ran_tests"] is True)
     check("no tests run is observed", findings.flags([("Read", "{}")], p)["ran_tests"] is False)

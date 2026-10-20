@@ -10,7 +10,9 @@ from . import config
 
 FENCE = re.compile(r"```(?:json)?[ \t]*\n(.*?)```", re.S)
 EDIT_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit", "file_change", "edit_file", "write_file"}
-EDIT_MARKERS = ("sed -i", "git apply", "git stash", "patch -p", "perl -pi")
+EDIT_RE = re.compile(
+    r"\b(?:sed|perl)\s+-[0-9A-Za-z]*i|\bgit\s+(?:apply|stash)\b|\bpatch\s+-p|apply_patch|\btee\b"
+    r"|>\s*[\w./-]+\.(?:py|ts|tsx|md)\b|write_text|\.write\(")
 TEST_MARKERS = ("_check.py", "pytest", "vitest", "unittest")
 
 
@@ -72,7 +74,7 @@ def flags(tool_calls: list, parsed: Parsed) -> dict:
         return {"ran_tests": bool(parsed.ran_tests), "tried_mutant": bool(parsed.tried_mutant),
                 "observed": False}
     saw_tests = any(any(m in args for m in TEST_MARKERS) for _, args in tool_calls)
-    saw_edit = any(name in EDIT_TOOLS or any(m in args for m in EDIT_MARKERS) for name, args in tool_calls)
+    saw_edit = any(name in EDIT_TOOLS or EDIT_RE.search(args) for name, args in tool_calls)
     return {"ran_tests": saw_tests, "tried_mutant": bool(parsed.tried_mutant) and saw_edit, "observed": True}
 
 
