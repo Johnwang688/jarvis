@@ -1,10 +1,11 @@
-# B-PREVIEW: can Chrome prove which frame a crop came from? (2026-10-19)
+# B-PREVIEW: can Chrome prove which frame a crop came from? (2026-10-20)
 
-**Verdict: no.** The Chrome the Remote browser runs (Google Chrome 155.0.8059.39
-stable, `--headless`, launched by Playwright with `channel="chrome"`) has no way
-to prove that a captured image is the frame for a given DOM and layout state.
-B-PREVIEW stays blocked. Cards keep **Preview unavailable** and draw no target
-outline. Nothing was built.
+**Verdict: not with anything probed.** The Remote browser runs Google Chrome
+155.0.8059.39 stable with `--headless`, launched by Playwright with
+`channel="chrome"`. None of the mechanisms probed in it proves that a captured
+image is the frame for a given DOM and layout state. B-PREVIEW stays blocked.
+Cards keep **Preview unavailable** and draw no target outline. Nothing was built.
+Several mechanisms were not probed; they are listed [below](#not-probed).
 
 One mechanism did hold in these probes, but only in a different browser:
 `chrome-headless-shell` with begin-frame control and virtual time paused. Using
@@ -23,100 +24,152 @@ The outline comes from a rect measured in the DOM, so the proof has to tie the
 image to the same layout state the rect came from. A timestamp close in time is
 not enough, and neither is a capture that "probably" came next.
 
-## What was measured
+## How it was measured
 
-All probes ran against isolated browsers: a temporary profile and HOME, a raw CDP
-pipe (no debugging port), `data:` URLs or an in-process fixture with request
-interception, each run under `systemd-run --user --scope -p MemoryMax=2G`. They
-never touched the live daemon, the owner's profiles or ports 8402/8403/8405. All
-runs used `--force-device-scale-factor=1.5`, like the Remote browser. The scripts
-are in `~/.cache/jarvis-lead/b-preview-probe/` (`p1`–`p8`) and are not committed.
+**Isolation.** Every probe ran an isolated browser:
+- a temporary profile and HOME;
+- a raw CDP pipe, so no debugging port was opened;
+- `data:` URLs, or an in-process fixture served by request interception;
+- each run under `systemd-run --user --scope -p MemoryMax=2G -p MemorySwapMax=0`.
 
-The test pages move a red target between x = 100 and x = 500 CSS px. A probe reads
-the target's position from each image's pixels and compares it with the position
-the DOM reported.
+The probes never touched the live daemon, the owner's profiles or ports
+8402/8403/8405.
 
-| # | Candidate | Chrome 155 result | Verdict |
+**Launch.** The probes launched `/opt/google/chrome/chrome --headless` directly over
+a CDP pipe, not through Playwright and not with the product's `launch_args`. Of the
+product's command line, only `--headless` and `--force-device-scale-factor=1.5` were
+copied; the proxy, the host-resolver rules and the blink settings were not. The
+probes also added `--no-first-run --no-default-browser-check --mute-audio
+--disable-extensions`, and opened pages in a fresh browser context created with
+`Target.createBrowserContext`. A fresh profile's default context did not send
+loopback navigations in this environment.
+
+**Scripts and logs.** The scripts are in `~/.cache/jarvis-lead/b-preview-probe/`
+(`p1`–`p8`, `cdp.py`, `rerun.sh`) and are not committed. They ran twice:
+- **Run 1**, 2026-10-19 23:58 to 2026-10-20 00:26, was not archived.
+- **Run 2**, 2026-10-20 00:35 to 00:42, with the same caps and fresh temporary
+  profiles, saved its output in `~/.cache/jarvis-lead/b-preview-probe/logs/`
+  (one log per probe).
+
+The tables below give run 2 and add run 1 where a figure moved. Each figure comes
+from one run of that probe on a loaded 24-core WSL2 machine, so read the figures
+as illustrations, not rates.
+
+**Method.** Each test page moves a red target between x = 100 and x = 500 CSS px.
+A probe reads the target's position from each image's pixels and compares it with
+the position the DOM reported.
+
+## Results in Chrome 155
+
+| # | Candidate | Result (run 2; run 1 where it differs) | Verdict |
 |---|---|---|---|
-| P1 | `HeadlessExperimental.beginFrame` (the caller drives each frame and gets its screenshot) | The domain does not exist: `'HeadlessExperimental.enable' wasn't found`. Same result with `--enable-begin-frame-control`, `--deterministic-mode`, and `--headless=old` (P8; 155 accepts that flag but runs new headless). `Target.createTarget{enableBeginFrameControl}` is accepted and does nothing. | **Unavailable** |
-| P2 | `Page.screencastFrame` metadata and ack ordering | The metadata has seven keys: `offsetTop, pageScaleFactor, deviceWidth, deviceHeight, scrollOffsetX, scrollOffsetY, timestamp`. No frame, commit or layout id. The `sessionId` is only the ack counter. The flip test: with a flip every 37 ms, the DOM state at the frame's `timestamp` matched the pixels in 161/161 frames. With a flip every 11 ms it matched in **1 of 183** frames. With a flip every 4 ms, 5 of 22 (the page starved the stream). The timestamp falls 5–23 ms after the change the frame shows and about 3 ms before the frame reaches us, so it is a time stamped after processing, not a capture-state token. It gives an upper bound and no lower bound. | **No identity** |
-| P3 | `Page.captureScreenshot` after a rect measurement (no option ties the image to a layout or paint state: `format, quality, clip, fromSurface, captureBeyondViewport, optimizeForSpeed`) | Measure, then capture, with nothing else: the image disagreed with the measurement in 17/30 captures (script flips), 23/30 (a CSS `steps()` animation) and 7/30 (SVG SMIL). | **Races** |
-| P3/P5/P6 | Make it hold: freeze the page (`Page.setWebLifecycleState frozen`), pause animations (`Animation.setPlaybackRate 0`), then bracket the capture with an isolated-world MutationObserver and the rect read before and after, accepting only if nothing changed | Freezing stops the page's timers while idle (0 ticks in 500 ms), but **they run while a capture is in flight**: 113 timer ticks during 20 captures (P5). A cross-site iframe (a separate renderer) kept animating (P5). Attack (P6): the page moves the target by toggling a CSSOM rule (`insertRule`/`deleteRule`), which is not a DOM mutation. **29 of 60 captures passed the bracket and 24 of those 29 showed the target away from the measured rect.** Virtual time pause (`Emulation.setVirtualTimePolicy pause`) instead made captures hang on two of three pages (30/30 timeouts). | **Defeated** |
-| P4 | Tracing frame tokens | A trace links main-thread frames to presentation (`BeginMainThreadFrame.frameId`, `DrawFrame.frameSeqId`, `PipelineReporter.frame_sequence`), and a `console.timeStamp` made in a rAF lands in it. But headless Chrome emits **no `Screenshot` trace events**, with or without a running screencast. Screencast frames and screenshots carry no `frame_sequence`. So the trace never names the pixels we hold. A trace would also be browser-wide and always on. | **No link to pixels** |
-| P4 | `LayerTree` snapshots | `layerTreeDidChange` fires, but `makeSnapshot` refuses every layer, including those with `drawsContent: true`: "Layer does not draw content" (CompositeAfterPaint). Even when they worked, these were per-layer recordings, not the composited frame. | **Unavailable** |
+| P1, P8 | `HeadlessExperimental.beginFrame` (the caller drives each frame and gets its screenshot) | The domain is missing: `'HeadlessExperimental.enable' wasn't found`. Same with each of the flag sets tried: none, `--enable-begin-frame-control`, `--enable-begin-frame-control --deterministic-mode`, and `--headless=old` (P8; 155 accepts that flag and still reports HeadlessChrome). `Target.createTarget` with `enableBeginFrameControl: true` returned success. The probe recorded only that, not any effect of the parameter. | **Unavailable** |
+| P2 | `Page.screencastFrame` metadata and ack ordering | Seven metadata keys: `offsetTop, pageScaleFactor, deviceWidth, deviceHeight, scrollOffsetX, scrollOffsetY, timestamp`. There is no frame, commit or layout id, and `sessionId` is only the ack counter. The test compares the DOM state at each frame's `timestamp` with the state its pixels show. **Flip every 37 ms:** they matched in 155 of 157 frames (run 1: 161/161). **Every 11 ms:** **2 of 182** (run 1: 1 of 183). **Every 4 ms:** 13 of 22 (run 1: 5 of 22); only 24 frames arrived in 6 s. The timestamp came 5–72 ms after the change the frame shows (11–20 ms at 11 ms flips) and 3–9 ms before the frame reached the probe. At 11 ms the near-total mismatch is anti-correlation, which fits a systematic lag of more than one flip between the shown state and the timestamp. *Interpretation:* the timestamp is taken after the frame is produced, so it gives an upper bound on capture time and no lower bound. Why so few frames came at 4 ms was not investigated. | **No identity** |
+| P3 | `Page.captureScreenshot` right after a rect measurement. Its options are `format, quality, clip, fromSurface, captureBeyondViewport, optimizeForSpeed`; none names a layout or paint state. | **Measure, then capture:** the image disagreed with the measurement in 19/30 captures with script flips, 26/30 with a CSS `steps()` animation and 15/30 with SVG SMIL (run 1: 17, 23, 7). **Bracket only** (an isolated-world MutationObserver and the rect read before and after; accept if nothing changed): no script-flip capture was accepted. For CSS, **26 accepted, all 26 false**; for SMIL, **21 accepted, 6 false** (run 1: 9 and 16 accepted, none false). | **Races; bracket defeated** |
+| P3, P5, P6 | Freeze the page (`Page.setWebLifecycleState frozen`), pause animations (`Animation.setPlaybackRate 0`), then bracket as above | **CSS and SMIL pages:** 30/30 accepted, none false, in both runs. **Timers:** with no capture running, freezing stopped them (0 ticks in 500 ms, P5). **They ran while captures were in flight:** 98 ticks across 20 captures (run 1: 113), and 10 of the 20 images disagreed with the rect read just before (run 1: 14). **Cross-site iframe:** one in a separate renderer kept changing colour (P5). **Attack (P6):** the page moves the target by toggling a CSSOM rule (`insertRule`/`deleteRule`), which is not a DOM mutation. 28 of 60 captures passed the bracket, and **7 of those 28 showed the target away from the measured rect** (run 1: 24 of 29). **Virtual time pause instead** (`Emulation.setVirtualTimePolicy pause`; the only policy tried): captures timed out 30 of 30 on the script page and 30 of 30 on the CSS page, in both runs. They worked on the SMIL page. | **Defeated** |
+| P4 | Tracing frame tokens | A trace links main-thread frames to presentation (`BeginMainThreadFrame.frameId`, `DrawFrame.frameSeqId`, `PipelineReporter.frame_sequence`), and a `console.timeStamp` made in a rAF lands in it. But headless Chrome emitted **no `Screenshot` trace events**, with or without a running screencast. Screencast frames and screenshots carry no `frame_sequence`. So the trace never names the pixels the probe holds. A trace would also be browser-wide and always on. | **No link to pixels** |
+| P4 | `LayerTree` snapshots | `layerTreeDidChange` fires. `makeSnapshot` was tried on one layer, the latest one with `drawsContent: true`, and refused it: "Layer does not draw content". That CompositeAfterPaint is the cause is an inference. Even if snapshots worked, they would be per-layer recordings, not the composited frame. | **Refused (one layer tried)** |
 
-Two more notes:
+**What the bracket misses.** It checks DOM mutations and the target's rect, and a
+change can avoid both. The cases below are an open list; adding a check for one
+leaves the rest open, so the bracket cannot become a positive proof.
+- **Tested:** CSSOM rule toggles (P6, defeated it) and a cross-site iframe that
+  kept changing under freeze (P5).
+- **Not probed (reasoning only):** `adoptedStyleSheets`, closed shadow roots
+  (MutationObserver does not cross them), canvas drawing, media, and resources
+  that finish loading.
+- **Covered by the bracket:** a viewport scroll moves the measured rect, so the
+  bracket would catch one that persists. A scroll that reverts between the two
+  reads was not probed.
 
-- Playwright's own default launch adds `--enable-features=CDPScreenshotNewSurface`,
-  so a screenshot waits for a fresh surface. That makes it fresher, not tied to a
-  state. Jarvis launches with `ignore_default_args=True` and does not use it.
-- The bracket's gaps form an open list, not a fixed set: CSSOM, `adoptedStyleSheets`,
-  closed shadow roots (MutationObserver does not cross them), canvas, scroll
-  position, media, out-of-process iframes, and resources that finish loading.
-  Adding a check for one leaves the rest open, so this approach cannot become a
-  positive proof.
+**Background, not probed:** Playwright's own default launch adds
+`--enable-features=CDPScreenshotNewSurface`. From its name, it makes a screenshot
+wait for a fresh surface, which would make the image fresher but not tie it to a
+state. Jarvis launches with `ignore_default_args=True` and does not use it.
+
+### Not probed
+
+- `Emulation.setScriptExecutionDisabled` and `Debugger.pause`, as other ways to
+  stop the page's scripts around a capture.
+- `Emulation.setVirtualTimePolicy` with a budget, or any policy other than `pause`.
+- `DOMSnapshot.captureSnapshot`, as a layout record to compare with a capture.
+
+Like freezing, these could at best stop some page activity. They would leave the
+non-script channels above (CSSOM by other means, iframes, media, loads) and still
+give no token linking an image to a layout.
 
 ## The one candidate, and why it is not recommended
 
 **chrome-headless-shell** (Playwright's bundled build, HeadlessChrome 151.0.7922.34)
 still has `HeadlessExperimental.beginFrame`, with `--enable-begin-frame-control`
-and a target created with `enableBeginFrameControl`. P7 used it as measure, then
-`beginFrame{screenshot}`, then measure, against the CSSOM toggle driven three ways:
+and a target created with `enableBeginFrameControl`. P7 measured, called
+`beginFrame{screenshot}`, then measured again, against the CSSOM toggle driven three
+ways:
 
-| driver | virtual time running | virtual time paused |
+| driver | virtual time running (run 2; run 1) | virtual time paused (both runs) |
 |---|---|---|
-| timer (3 ms) | 23 accepted, **9 false** | 40 accepted, 0 false |
-| MessageChannel loop | 21 accepted, **10 false** | 40 accepted, 0 false |
-| dedicated worker messages | 28 accepted, **5 false** | 40 accepted, 0 false |
+| timer (3 ms) | 19 accepted, 0 false; run 1: 23 accepted, **9 false** | 40 accepted, 0 false |
+| MessageChannel loop | 18 accepted, **7 false**; run 1: 21, **10 false** | 40 accepted, 0 false |
+| dedicated worker messages | 20 accepted, **10 false**; run 1: 28, **5 false** | 40 accepted, 0 false |
 
-With virtual time paused, the page ran no tasks between the measurements and the
-frame, so the frame showed the measured state 120 of 120 times. Beginframe on its
-own (virtual time running) is defeated the same way captureScreenshot is.
+**What the paused column shows.** With virtual time paused, the page ran no tasks
+between the measurements and the frame, so nothing changed. The 120 of 120 matches
+mostly show that pausing stops these three drivers, and the check was exercised only
+at the one position where each page froze. beginFrame alone, with virtual time
+running, is defeated the same way captureScreenshot is.
 
-What adopting it would cost or change. Each item is a recorded decision or a
-measured property:
+**What adopting it would cost or change.** Each item is a recorded decision, a
+measured property or labelled background:
 
 1. **Another browser.** The Remote browser is Chrome stable through
-   `channel="chrome"` (B-3), with persistent signed-in profiles, sync (BD-5), the
-   keyring password store (B-LOGIN) and Chrome's sign-in tab. The shell is a
-   different, older Chromium build with no Chrome sync or sign-in. Every one of
-   those receipts would have to be redone, and some cannot carry over.
+   `channel="chrome"` (B-3), with:
+   - persistent signed-in profiles and sync (BD-5);
+   - the keyring password store (B-LOGIN);
+   - Chrome's sign-in tab.
+
+   The shell is a different, older Chromium build. Background, not probed: it is not
+   branded Google Chrome, so Chrome sync and Google sign-in should not be expected.
+   Each of those receipts would have to be redone.
 2. **New launch flags.** `launch_args` is a curated, reviewed command line.
-3. **Every live frame would be driven by the daemon.** Under begin-frame control,
-   the screencast sent **0 frames** in 2 s of page changes until we issued
-   BeginFrames (P1). Separately, `Page.captureScreenshot` timed out (P1), and looks
-   and captures use it. B-PERF's measured pipeline would have to be rebuilt.
-4. **The owner's page freezes for the life of every card** (up to 120 s): virtual
-   time paused means no timers, messages, workers or animations.
-5. **A capture call made for the card.** This is the "No screenshot or capture
-   call is created to manufacture that proof" rule in `docs/notes/browser.md`
-   (BR9c). A beginFrame screenshot taken under a paused page is a different kind
-   of evidence, but it is still a new capture path, so that rule would need an
-   explicit owner decision.
-6. **Not proven sound.** Untested here: out-of-process iframes (their own renderer
-   and virtual time), media, network loads that finish during the pause, service
-   workers, and whether DevTools' own work (layout forced by the measurement)
-   matches the frame in every case. 120 of 120 against three drivers is evidence,
-   not a proof.
+3. **Every live frame would be driven by the daemon.** In headless-shell under
+   begin-frame control, the screencast sent **0 frames** in 2 s of page changes
+   until the probe issued BeginFrames (3 frames for 10 BeginFrames, unacked).
+   `Page.captureScreenshot` timed out (P1, both runs), and looks and captures use
+   it. B-PERF's measured pipeline would have to be rebuilt.
+4. **The owner's page freezes for the life of every card** (up to 120 s): with
+   virtual time paused, no timers, messages, workers or animations run.
+5. **A capture call made for the card.** This is the "No screenshot or capture call
+   is created to manufacture that proof" rule in `docs/notes/browser.md` (BR9c). A
+   beginFrame screenshot under a paused page is a different kind of evidence, but it
+   is still a new capture path, so that rule would need an explicit owner decision.
+6. **Not proven sound.** Untested here:
+   - out-of-process iframes, which have their own renderer and virtual time;
+   - media;
+   - network loads that finish during the pause;
+   - service workers;
+   - whether DevTools' own work (the layout the measurement forces) matches the
+     frame in every case.
 
 **Recommendation:** do not pursue it. The preview is a convenience on a card whose
-authority is the exact command text, and that text the owner already gets. The
-cost is the Remote browser's identity and its live-stream design.
+authority is the exact command text, which the owner already gets. Its cost would
+be the Remote browser's identity and its live-stream design.
 
 ## What would unblock B-PREVIEW
 
-Any one of these, each to be measured again against the attacks above (P2's 11 ms
-flips, P6's CSSOM toggle, a cross-site iframe) before a plan is written:
+Any one of these would. Each must be measured again against the attacks above
+(P2's 11 ms flips, P3's `steps()` animation, P6's CSSOM toggle and a cross-site
+iframe) before a plan is written:
 
 - Chrome stable's new headless gets a frame-control API again (beginFrame or a
   successor) that works alongside the screencast.
-- A CDP capture that returns pixels together with a layout or commit token that a
-  DOM call can be checked against (for example, `DOMSnapshot.captureSnapshot` or
-  `DOM.getBoxModel` reporting the same generation), atomically in one lifecycle.
+- A CDP capture returns pixels together with a layout or commit token that a DOM
+  call can be checked against, atomically in one lifecycle. For example,
+  `DOMSnapshot.captureSnapshot` or `DOM.getBoxModel` would report the same
+  generation.
 - `Page.screencastFrame` metadata gains a commit or frame id that a rect
   measurement can be checked against.
-- An owner decision to accept the headless-shell candidate's costs (items 1–6).
+- The owner decides to accept the headless-shell candidate's costs (items 1–6).
   That is a decision for the owner, not a package.
 
-Re-check on each Chrome stable update: `HeadlessExperimental.enable` in new
-headless (P1), and the `screencastFrame` metadata keys (P2).
+On each Chrome stable update, re-check `HeadlessExperimental.enable` in new
+headless (P1) and the `screencastFrame` metadata keys (P2).
