@@ -9,12 +9,24 @@ Skill bodies become instructions in context, so they share memory's trust
 model: they are the owner's words, and skill_write is how they get there —
 the system prompt already forbids taking instructions from fetched web
 content, which covers laundering them into a skill.
+
+A second, read-only root (SK-1, SK-2; docs/plans/2026-10-19-claude-skills-link.md):
+the owner's Claude Code skills in `config.CLAUDE_SKILLS_DIR` (`~/.claude/skills`),
+read live, never copied and never written. A repo skill wins a name over a
+top-level `<root>/<name>/SKILL.md`, which wins over a claude.ai-synced
+`<root>/synced/<bucket>/<name>/SKILL.md` (first bucket in sorted order). An
+external entry is refused, and skipped, unless its SKILL.md resolves to a
+regular file named exactly SKILL.md outside every credential folder and
+credential file, under a short kebab-case name that does not read as a
+credential's (`external_skills` says why for each).
 """
 
 from __future__ import annotations
 
 import json
+import os
 import re
+import stat
 import warnings
 from pathlib import Path
 from typing import Annotated
@@ -23,6 +35,10 @@ from .. import config
 from . import tool
 
 _NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,60}$")
+# Claude Code's own limit for a skill's name (64), for the external root.
+_EXTERNAL_NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
+# What skill_write says to a name that exists only in the external root.
+_LIVES_ELSEWHERE = "Error: `{}` lives in ~/.claude/skills; edit it there."
 
 # The always-in-context index is capped so a large library can't flood every
 # turn; the tail line points at skill_list for the rest.
@@ -33,18 +49,105 @@ _index_cache: tuple[tuple, str] | None = None  # (freshness key, rendered)
 _warned_flat: set[Path] = set()
 
 
-def _paths() -> dict[str, Path]:
-    """New layout wins during the one-release flat-file compatibility period."""
+def _repo_paths() -> dict[str, Path]:
+    """The repo's skills. New layout wins during the one-release flat-file
+    compatibility period."""
     paths = {}
     for path in sorted(config.SKILLS_DIR.glob("*.md")):
         absolute = path.absolute()
         if absolute not in _warned_flat:
             warnings.warn(f"Legacy flat skill {path}; migrate to {path.stem}/SKILL.md",
-                          FutureWarning, stacklevel=2)
+                          FutureWarning, stacklevel=3)
             _warned_flat.add(absolute)
         paths[path.stem] = path
     paths.update({p.parent.name: p for p in config.SKILLS_DIR.glob("*/SKILL.md")})
+    return paths
+
+
+def _paths() -> dict[str, Path]:
+    """Every skill, sorted by name: the repo's, then the external root's for
+    names the repo does not hold (module docstring)."""
+    paths = _repo_paths()
+    for name, path in external_skills()[0].items():
+        paths.setdefault(name, path)
     return dict(sorted(paths.items()))
+
+
+def _entries(directory: Path) -> list[Path]:
+    try:
+        return sorted(directory.iterdir())
+    except OSError:
+        return []
+
+
+def _refusal(name: str, written: Path, credential_folder, repo: Path | None) -> tuple[str, Path | None]:
+    """("", resolved SKILL.md) for a loadable external entry, ("same as repo",
+    None) for a link back into the repo's skills, else (why, None)."""
+    if not _EXTERNAL_NAME.match(name):
+        return "name is not short kebab-case", None
+    from .secrets import credential_name, is_credential
+
+    if credential_name(name):
+        return "name reads as a credential's", None
+    try:
+        resolved = written.resolve(strict=True)
+        mode = os.stat(resolved).st_mode
+    except (OSError, RuntimeError, ValueError):
+        return "SKILL.md cannot be followed", None
+    if resolved.name != "SKILL.md" or not stat.S_ISREG(mode):
+        return "SKILL.md is not a regular file named SKILL.md", None
+    if is_credential(written) or is_credential(resolved) \
+            or credential_folder(written) or credential_folder(resolved):
+        return "in or linked to a credential folder or file", None
+    if repo is not None and resolved.is_relative_to(repo):
+        return "same as repo", None
+    return "", resolved
+
+
+def external_skills() -> tuple[dict[str, Path], list[tuple[str, str]]]:
+    """The external root's skills: ({name: resolved SKILL.md}, [(name, why
+    refused)]). Top-level entries win over synced ones, the first synced
+    bucket in sorted order over later ones; a refused entry claims no name.
+    An entry linking back into the repo's skills is the repo's skill, and is
+    neither listed nor refused. Only SKILL.md is ever opened, and only by the
+    caller, after these checks (a FIFO or a directory is never read)."""
+    root = getattr(config, "CLAUDE_SKILLS_DIR", None)
+    if root is None:
+        return {}, []
+    root = Path(root).expanduser()
+    from .files import credential_folder_judge
+
+    credential_folder = credential_folder_judge()
+    try:
+        repo = config.SKILLS_DIR.resolve()
+    except (OSError, RuntimeError):
+        repo = None
+    found: dict[str, Path] = {}
+    refused: list[tuple[str, str]] = []
+
+    def consider(entry: Path) -> None:
+        if entry.name in found:
+            return
+        written = entry / "SKILL.md"
+        if not os.path.lexists(written):
+            if entry.is_symlink() and not entry.exists():
+                refused.append((entry.name, "refused: link cannot be followed"))
+            return  # not a skill (a marker file, a manifest, an empty folder)
+        why, resolved = _refusal(entry.name, written, credential_folder, repo)
+        if resolved is not None:
+            found[entry.name] = resolved
+        elif why != "same as repo":
+            refused.append((entry.name, f"refused: {why}"))
+
+    synced = root / "synced"
+    for entry in _entries(root):
+        if entry.name != "synced":
+            consider(entry)
+    for bucket in _entries(synced):
+        if not bucket.name.startswith(".") and bucket.is_dir():
+            for entry in _entries(bucket):
+                consider(entry)
+    return found, refused
 
 
 def _index_key() -> tuple:
@@ -55,16 +158,17 @@ def _index_key() -> tuple:
     of those ties, and skill_write busts the cache outright for its own
     writes.
     """
+    roots = (str(config.SKILLS_DIR), str(getattr(config, "CLAUDE_SKILLS_DIR", None)))
     try:
         return (
-            str(config.SKILLS_DIR),
+            roots,
             tuple(
-                (str(p), p.stat().st_mtime_ns, p.stat().st_size)
-                for p in _paths().values()
+                (name, str(p), p.stat().st_mtime_ns, p.stat().st_size)
+                for name, p in _paths().items()
             ),
         )
     except OSError:
-        return (str(config.SKILLS_DIR), ())
+        return (roots, ())
 
 
 def index() -> str:
@@ -178,9 +282,13 @@ def skill_write(
     """
     if not _NAME.match(name):
         return "Error: name must be short kebab-case (letters, digits, dashes)."
+    # The external root is read-only: a name only it holds is the owner's
+    # Claude Code skill, edited there (plan §2). Nothing is written anywhere.
+    previous = _repo_paths().get(name)
+    if previous is None and name in external_skills()[0]:
+        return _LIVES_ELSEWHERE.format(name)
     config.SKILLS_DIR.mkdir(parents=True, exist_ok=True)
     path = config.SKILLS_DIR / name / "SKILL.md"
-    previous = _paths().get(name)
     existed = previous is not None
     extra = ""
     if previous is not None:

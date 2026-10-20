@@ -51,6 +51,7 @@ config.PROVIDER_DEFAULTS_PATH = _ROOT / "provider_defaults.json"
 config.MODEL_CACHE_PATH = _ROOT / "catalog.json"
 config.SKILLS_DIR = _ROOT / "skills"
 config.SKILLS_DIR.mkdir(parents=True, exist_ok=True)
+config.CLAUDE_SKILLS_DIR = None  # never read the owner's real ~/.claude/skills
 config.AVATAR_ENV = "jarvis"
 
 from jarvis import llm, tools  # noqa: E402

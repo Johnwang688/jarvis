@@ -36,6 +36,7 @@ import httpx
 
 from jarvis import cadbench as cb
 from jarvis import config
+config.CLAUDE_SKILLS_DIR = None  # never read the owner's real ~/.claude/skills
 from jarvis.tools import onshape as cad
 
 PASSED = 0

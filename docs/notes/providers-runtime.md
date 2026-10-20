@@ -1586,3 +1586,44 @@ TOOL_STARTED/TOOL_FINISHED pair, any USAGE, then TURN_FINISHED `{"stop":
   it. `compact_context` stays in `FORBIDDEN_TOOLS`.
 - **Codex** is WP-B (`thread/compact/start`); until it lands, a Codex chat
   has no `compact` and the daemon refuses.
+
+## Claude skills in Jarvis and Codex chats (SK-1, SK-2, 2026-10-19)
+
+Plan and owner answers: `docs/plans/2026-10-19-claude-skills-link.md`.
+Code: `jarvis/tools/skills.py` (`external_skills`, `_paths`),
+`jarvis/v2/skills_link.py`; free checks: `tests/v2/claude_skills_check.py`.
+
+- **A second, read-only root.** `config.CLAUDE_SKILLS_DIR` is
+  `~/.claude/skills`; `JARVIS_CLAUDE_SKILLS` moves it and an empty value turns
+  it off. It is read live on every call, with no copies, and the index cache
+  key covers both roots, so a skill added or edited there shows up without a
+  restart. Claude chats already loaded these natively.
+- **Precedence.** A repo skill wins a name, then a top-level
+  `<root>/<name>/SKILL.md` (a symlinked folder included), then a synced
+  `<root>/synced/<bucket>/<name>/SKILL.md`, the first bucket in sorted order.
+  An entry linking back into the repo's `skills/` is the repo skill, listed
+  once. Bucket markers and `manifest.json` are not skills.
+- **Refusals.** An external entry is skipped, and the rest still load, when
+  its folder name fails `^[a-z0-9][a-z0-9-]{0,63}$`, its name reads as a
+  credential's (`secrets.credential_name`: `github-token`, `api-key`,
+  `session-notes`), its `SKILL.md` cannot be followed or does not resolve to
+  a regular file named exactly `SKILL.md` (a FIFO or folder is never opened),
+  or it lies, as written or resolved, in a credential folder
+  (`files.credential_folder_judge`) or is a credential file
+  (`secrets.is_credential`). A refused entry claims no name.
+- **Read-only.** `skill_read`, `skill_list`, the skills index, the `/` menu
+  and `check_skill` include external skills (`jarvis-only` still honoured);
+  only `SKILL.md` is read. `skill_write` never writes outside `SKILLS_DIR`: a
+  name only the external root holds gets "`<name>` lives in ~/.claude/skills;
+  edit it there." and nothing is written.
+- **`jarvis skills link`** links each external skill into `~/.codex/skills`
+  only, at the resolved skill folder, and never makes anything in
+  `~/.claude/skills` for one (it is the source). Repo skills still go to both.
+  It never replaces a foreign entry, and each refused external entry is a
+  `refused: <why>` row (the exit status is then 1). `--unlink` removes a
+  `.codex` link at a current external skill, or a dangling one whose recorded
+  target lies under the repo's `skills/` or the external root; the owner's
+  own entries in `~/.claude/skills` are never touched.
+- **Tests** that build an agent holding `skill_read` or read the catalogue set
+  `config.CLAUDE_SKILLS_DIR = None`, so no suite reads the owner's real
+  `~/.claude/skills`.

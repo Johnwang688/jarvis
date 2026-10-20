@@ -71,6 +71,7 @@ sys.path.insert(0, str(HERE))
 
 import mcp_session_check as M  # noqa: E402  (helpers only; not its setUpModule)
 from jarvis import config, llm  # noqa: E402
+config.CLAUDE_SKILLS_DIR = None  # never read the owner's real ~/.claude/skills
 from jarvis.agent import CONTEXT_BLOCK_PREFIX, STEERING_PREFIX, Agent  # noqa: E402
 from jarvis.v2 import daemon as daemon_mod  # noqa: E402
 from jarvis.v2 import desk  # noqa: E402

@@ -18,6 +18,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from jarvis import runtime
+from jarvis import config as _skills_config  # noqa: E402
+_skills_config.CLAUDE_SKILLS_DIR = None  # never read the owner's real ~/.claude/skills
 import jarvis.agent as agent_mod
 from jarvis import config, context, sessions, tools
 

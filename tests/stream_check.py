@@ -32,6 +32,8 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from jarvis import agent as agent_mod  # noqa: E402
+from jarvis import config as _skills_config  # noqa: E402
+_skills_config.CLAUDE_SKILLS_DIR = None  # never read the owner's real ~/.claude/skills
 from jarvis import llm  # noqa: E402
 
 

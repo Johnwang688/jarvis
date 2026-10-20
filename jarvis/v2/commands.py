@@ -164,7 +164,9 @@ class SkillRefused(ValueError):
 
 
 def _catalogue() -> dict[str, tuple[str, bool, Any]]:
-    """name -> (description, jarvis_only, path) for the repo's skills (D8)."""
+    """name -> (description, jarvis_only, path) for every skill (D8): the
+    repo's and, read-only, the owner's Claude Code skills (SK-1,
+    `skills._paths`, which refuses unsafe external entries before any read)."""
     from jarvis.tools import skills
 
     out = {}
@@ -180,7 +182,7 @@ def _catalogue() -> dict[str, tuple[str, bool, Any]]:
 
 
 def invocable_skills() -> list[tuple[str, str]]:
-    """(name, description) for every repo skill a v2 thread can run.
+    """(name, description) for every skill a v2 thread can run.
 
     `jarvis-only` skills are excluded: each needs a v1-loop tool the v2 fast
     path refuses, or a protected file, so offering one would offer a failure.
