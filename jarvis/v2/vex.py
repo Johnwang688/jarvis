@@ -145,6 +145,11 @@ DOWNLOAD_PORT_SCAN = 2048
 # channel. Without it a download crawls over the controller's ordinary link
 # (156 KB in 80 s, live 2026-10-20), long enough for a radio dropout to fail it.
 DOWNLOAD_CHANNEL = ("--chan", "1")
+# ... and only on a USB reading at most this old: a controller swapped for a
+# brain on USB just before Download must not send a brain the channel (PR
+# #285 review LOW-3). The HUD checks every 5 s while a window shows it, and
+# pauses for its chain's clean and build; an older reading keeps the plain argv.
+CHANNEL_READING_MAX_S = 60.0
 TEMPLATE_FILE = re.compile(r"(cpp|py)_v5_vsc_([a-z0-9_]+)\.zip", re.ASCII)
 TEMPLATE_ENTRIES = 200
 TEMPLATE_ENTRY_CAP = 1024 * 1024
@@ -1895,7 +1900,7 @@ class Vex:
             raise VexError("a build of this project is running; download when it has finished")
         try:
             found = self._fresh(root, detected.name)
-            controller = self._controller_only()
+            controller = self._controller_only(fresh=True)
             argv = download_argv(cfg, name, slot, to_windows(str(Path(root) / found["path"])),
                                  controller=controller)
         except BaseException:
@@ -2054,12 +2059,16 @@ class Vex:
             return None
         return known[0] if self._controller_only() else None
 
-    def _controller_only(self) -> bool:
+    def _controller_only(self, fresh: bool = False) -> bool:
         """Whether the last confirmed USB reading is a V5 controller and no
         brain: the device a download or the brain terminal then goes through
-        is the controller, over its radio. An unknown reading is not."""
+        is the controller, over its radio. An unknown reading is not, and
+        with `fresh` neither is one older than CHANNEL_READING_MAX_S."""
         with self.connection.lock:
             reading = (self.connection.value["controller"], self.connection.value["brain"])
+            at = self.connection.checked_mono
+        if fresh and (at is None or time.monotonic() - at > CHANNEL_READING_MAX_S):
+            return False
         return reading == (True, False)
 
     def _usb_mark(self) -> tuple | None:

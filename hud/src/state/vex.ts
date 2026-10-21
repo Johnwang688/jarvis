@@ -682,23 +682,38 @@ export class VexStore {
           chain.downloadTerminal = null;
           chain.attempt = attempt + 1;
           phase("retry");
-          this.say(projectId, `The download failed with exit 4 (the radio link dropped). Trying again `
-            + `(try ${attempt + 1} of ${DOWNLOAD_TRIES})…`, "info");
+          // The failed try's mark is not the running try's (review LOW-2).
+          this.patchRun(projectId, {downloaded: null});
+          this.say(projectId, `The download failed with exit 4 (vexcom's command error; a radio dropout `
+            + `causes it). Trying again (try ${attempt + 1} of ${DOWNLOAD_TRIES})…`, "info");
           const until = Date.now() + DOWNLOAD_RETRY_WAIT_MS;
           while (holds() && Date.now() < until) await sleep(200);
+          // Whatever ends the chain between tries, a try was sent and failed:
+          // said as such, never "nothing was downloaded" (review LOW-1).
+          const notAgain = (why: string, sentence: string) => {
+            droppedBy = why;
+            this.downloadEnded(projectId, slot, end, false, attempt);
+            this.say(projectId, `Download failed (exit 4) on try ${attempt} of ${DOWNLOAD_TRIES}; ${sentence}. `
+              + "Check its terminal.");
+          };
           if (chain.cancelled) {
             droppedBy = "the download was stopped";
             // Stopped between tries: the last try's failure is what the slot holds.
             this.downloadEnded(projectId, slot, end, true);
             return;
           }
-          if (!holds()) return dropped("before it tried the download again");
+          if (this.crashed) return notAgain("the window hit an error", "the window hit an error, so it was not sent again");
+          if (!holds()) return notAgain("an approval card came up", "an approval card came up, so it was not sent again");
           phase("download");
           sent = await this.sendDownload(projectId, slot, name);
           if (sent.refused || !sent.terminal || !sent.id) {
-            if (chain.cancelled) return dropped("");
-            this.say(projectId, sent.refused || "the download could not start");
-            return;
+            if (chain.cancelled) {
+              droppedBy = "the download was stopped";
+              this.downloadEnded(projectId, slot, end, true);
+              return;
+            }
+            return notAgain("the next try could not start",
+              `the next try could not start (${sent.refused || "the download could not start"})`);
           }
           continue;
         }

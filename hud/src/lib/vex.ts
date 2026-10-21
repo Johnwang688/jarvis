@@ -368,7 +368,7 @@ export function chainLine(c: ChainView): string {
     case "rebuild":
       return `Rebuilding ${who} from scratch, then downloading to slot ${c.slot}`;
     case "retry":
-      return `The radio link dropped: downloading ${who} to slot ${c.slot} again in a moment (try ${c.attempt ?? 2} of ${DOWNLOAD_TRIES})…`;
+      return `Exit 4 (often a radio dropout): downloading ${who} to slot ${c.slot} again in a moment (try ${c.attempt ?? 2} of ${DOWNLOAD_TRIES})…`;
     default:
       return (c.attempt ?? 1) > 1
         ? `Downloading ${who} to slot ${c.slot} (try ${c.attempt} of ${DOWNLOAD_TRIES})…`

@@ -113,7 +113,7 @@ describe("one chain per window (M1): clean, build, download (owner decision 3)",
     expect(chainLine(c({ phase: "download", attempt: 1 }))).toBe("Downloading override to slot 3…");
     expect(chainLine(c({ phase: "download", attempt: 2 }))).toBe("Downloading override to slot 3 (try 2 of 3)…");
     expect(chainLine(c({ phase: "retry", attempt: 3 })))
-      .toBe("The radio link dropped: downloading override to slot 3 again in a moment (try 3 of 3)…");
+      .toBe("Exit 4 (often a radio dropout): downloading override to slot 3 again in a moment (try 3 of 3)…");
     expect(chainStepOf("retry")).toBe("download");
   });
 

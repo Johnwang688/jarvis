@@ -1743,8 +1743,8 @@ def _download_end_checks(page, mock, check, until, fake):
     first = next(iter(v["download_records"]))
     mock_vex.end_download(mock, first, 4)
     line = page.locator(_view(V, _tid("vex-chain-line")))
-    check("download retry: after exit 4 the chain says the radio dropped and it tries again",
-          bool(until(lambda: line.count() and "radio link dropped" in line.inner_text(), timeout=4)),
+    check("download retry: after exit 4 the chain says so and that it tries again",
+          bool(until(lambda: line.count() and "Exit 4 (often a radio dropout)" in line.inner_text(), timeout=4)),
           line.inner_text() if line.count() else "")
     assert until(lambda: len(v["download_records"]) == 2, timeout=10), "the download was not sent again"
     check("download retry: the second try is said as such",

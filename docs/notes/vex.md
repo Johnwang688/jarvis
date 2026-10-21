@@ -1022,12 +1022,33 @@ The change:
 - **The HUD chain.** A download that ends `failed` with exit 4
   (`retriesDownload`) is sent again by the same click's chain after
   `DOWNLOAD_RETRY_WAIT_MS` (3 s), up to `DOWNLOAD_TRIES` (3) in all. The
-  line says "The radio link dropped: … again in a moment (try 2 of 3)", and
+  line says "Exit 4 (often a radio dropout): … again in a moment (try 2 of 3)", and
   a final failure says "after 3 tries". Nothing else is retried: not 5, 6,
   a timeout or Stop. Stop between tries sends nothing more and says the
   slot is unknown. A card or a crash between tries drops the chain. The
   brain terminal stays closed throughout, as before. The route never
   retries; it is the owner's one click that sends the same binary again.
+
+**Review of #285** (no HIGH or MED), fixed in the PR:
+
+- LOW-1: a card, a crash or a refused next try between tries used to say
+  "nothing was downloaded", though a try had been sent and failed. It now
+  says "Download failed (exit 4) on try 1 of 3; … so it was not sent
+  again", and Stop during the next try's request says the slot is unknown.
+- LOW-2: the failed try's red mark stayed beside the next try's progress.
+  It is cleared when a retry starts.
+- LOW-3: the channel used the last confirmed USB reading however old it
+  was. It is now passed only on a reading at most
+  `CHANNEL_READING_MAX_S` (60 s) old (`Connection.checked_mono`, set with
+  each validated snapshot). An older or never-validated one keeps the plain
+  argv. `_brain_port` keeps its old rule.
+- NIT: the wording no longer claims a radio dropout, since exit 4 can come
+  from a brain on USB too ("Exit 4 (often a radio dropout)").
+
+Open, for the owner's robot check (LOW-4): whether the controller goes
+back to its normal channel after a `--chan 1` download (PROS switches it
+back to the pit channel after an upload), so drive control right after a
+download is worth trying, along with the retry on real hardware.
 
 Not done: a resumable or differential upload. vexcom has no such option,
 and vexide's differential upload needs a patcher in the robot program's
@@ -1041,17 +1062,19 @@ Checks (fakes only; no vexcom, port or live daemon):
 - `vex_check` `Tables`: the exact argv with and without the channel; only
   a real True asks for it.
 - `vex_output_check` `BrainPort`: a controller alone gets `--chan 1
-  --progress`; five other readings do not.
+  --progress`; five other readings do not, nor does an old or
+  never-validated reading.
 - `lib/vex.test.ts`: the retry table (exit 4 only, before the third try)
   and the chain's lines.
 - `state/vex.test.ts`: dropout then success (two sends), three dropouts
   (three sends, "after 3 tries"), the wait, Stop between tries, a card
-  between tries, and exits 1, 5, 6 and 129 not retried. The old "exit 4"
-  end case is now exit 5.
+  between tries, a crash between tries, Stop during the next try's request
+  (sent and refused), a refused next try, and exits 1, 5, 6 and 129 not
+  retried. The old "exit 4" end case is now exit 5.
 - `hud_v2_vex_check` 333/333: the exit-4 end case is exit 5, and a new
   retry section (exit 4, the chain's two lines, success on try 2, two sends).
 
-Ten mutations each failed their checks:
+Seventeen mutations each failed their checks (the review's seven last):
 
 - no try cap;
 - any failure retried;
@@ -1062,4 +1085,10 @@ Ten mutations each failed their checks:
 - a truthy non-True controller;
 - a controller with a brain;
 - the channel never passed;
-- the channel after `--progress`.
+- the channel after `--progress`;
+- the failed try's mark kept;
+- "nothing was downloaded" after a crash, after a card, and after Stop
+  with a refused next try (three);
+- Stop during the next try's request ignored;
+- no freshness rule;
+- a never-validated reading passing.

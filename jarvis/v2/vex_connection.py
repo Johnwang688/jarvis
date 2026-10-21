@@ -61,6 +61,9 @@ class Connection:
         self.running = False
         self.next_at = 0.0
         self.failures = 0
+        # When the last fully validated snapshot was taken (`time.monotonic`),
+        # for readers that must not act on an old one (`Vex.download`'s channel).
+        self.checked_mono = None
         self.value = {"brain": None, "controller": None, "checked_at": None,
                       "state": "unknown", "message": "USB devices have not been checked.", "events": []}
 
@@ -128,7 +131,8 @@ class Connection:
                     self.value.update(brain=brain, controller=controller, checked_at=at,
                                       state="ready", message="USB check complete.", events=events[-32:])
                     self.failures = 0
-                    self.next_at = time.monotonic() + MIN_INTERVAL
+                    self.checked_mono = time.monotonic()
+                    self.next_at = self.checked_mono + MIN_INTERVAL
             except Exception:  # Untrusted output or an unavailable ring never changes confirmed state.
                 with self.lock:
                     self.fail("USB check failed or returned an unsupported response; last confirmed state retained.")
