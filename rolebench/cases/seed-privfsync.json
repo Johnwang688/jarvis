@@ -1,0 +1,33 @@
+{
+ "id": "seed-privfsync",
+ "kind": "review",
+ "pr": 244,
+ "title": "SEC-4 (seeded): create credential files private from the start",
+ "base": "2478b6e8641f6fadf53e7b439450f7237129ccea",
+ "head": "8fa491efedb19a4bb0da7aa97ab1363b4db74021",
+ "brief": "Discord connect and Google connect created the token file with write_text at the umask mode and chmodded it afterwards; spotify_auth._store wrote a fixed <name>.tmp at umask mode and followed a symlink planted at that name. New jarvis/private_write.py write_private(path, data: bytes): unique temp name beside the target, created O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC at 0600, fsync, os.replace, temp unlinked on any failure. browser/host._write_private delegates to it; subagents._compact and stt_settings.update call it; the Spotify rotated token is still persisted before use. Tests: tests/private_writes_check.py checks per-writer modes (never wider than 0600), create flags, symlink refusal and rollback.",
+ "focus": [
+  "correctness, including under concurrency and across the ordering of events",
+  "handling of untrusted input, and safety-boundary changes",
+  "test coverage of the new behaviour: would the tests fail without the change?",
+  "claims in the description against the evidence in the diff and tests"
+ ],
+ "suites": [
+  "tests/private_writes_check.py"
+ ],
+ "control": false,
+ "seeded": {
+  "description": "write_private drops the handle.flush() before os.fsync, so fsync runs while the data is still in the userspace write buffer",
+  "patch": "diff --git a/jarvis/private_write.py b/jarvis/private_write.py\nindex 41f0af42..24975c6d 100644\n--- a/jarvis/private_write.py\n+++ b/jarvis/private_write.py\n@@ -37,7 +37,6 @@ def write_private(path: Path | str, data: bytes) -> None:\n     try:\n         with os.fdopen(fd, \"wb\") as handle:\n             handle.write(data)\n-            handle.flush()\n             os.fsync(handle.fileno())\n         os.replace(tmp, path)\n     except BaseException:\n"
+ },
+ "ground_truth": [
+  {
+   "id": "gt1",
+   "severity": "MED",
+   "mechanism": "the buffered writer is no longer flushed before os.fsync, so the bytes are still in Python's userspace buffer when fsync runs and it persists an empty file; the data reaches the file only when the with block closes the handle, after the fsync, and os.replace then publishes a file whose contents were never synced. A crash or power loss after the rename can leave a zero-length token or settings file (for Spotify, the rotated refresh token is already spent, so the login is lost); the module docstring's 'the data is fsynced, then os.replace swaps it in' is untrue",
+   "location": "jarvis/private_write.py write_private (the with block: handle.write(data) followed directly by os.fsync(handle.fileno()), the removed handle.flush())",
+   "evidence": "probe (HOME=$(mktemp -d) PYTHONPATH=<tree> python probe.py): wrap os.fsync to record os.fstat(fd).st_size, then write_private(dir/'token.json', b'{\"refresh_token\": \"x\"}\\n') (23 bytes), print the recorded sizes. Seeded tree prints 'len(data)=23  size_at_fsync=[0]  final_size=23' (fsync persisted an empty file); clean head 8fa491e prints 'size_at_fsync=[23]'. Seeded tree suites: tests/private_writes_check.py 36 passed 0 failed (its fsync cases only check that fsync is reached, never what is on disk at that point); tests/v2/browser_host_activity_check.py 10 tests OK",
+   "source": "seeded bug, injected by P0 (clean head 8fa491e)"
+  }
+ ]
+}
