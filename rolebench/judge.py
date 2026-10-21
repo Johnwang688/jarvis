@@ -18,7 +18,7 @@ import shutil
 import time
 from pathlib import Path
 
-from . import config, quota, runners, sandbox, snapshot
+from . import cases, config, quota, runners, sandbox, snapshot
 
 VERDICTS = ("match", "valid-new", "invalid", "nit")
 
@@ -179,7 +179,8 @@ def judge_run(run_dir: Path, case: dict, judge_fn=default_judge, quota_override:
         if done is not None:
             return {**done, "reused": True}
     items = json.loads((run_dir / "findings.json").read_text(encoding="utf-8"))
-    gt = case["ground_truth"]
+    # A run judged after pooling sees the original key plus the accepted pooled entries.
+    gt = cases.full_ground_truth(case)
     text, ids = blind(items, rng or random.Random())
     bad = (run.get("hygiene") or {}).get("after_reset")
     if bad:
@@ -228,6 +229,8 @@ def judge_run(run_dir: Path, case: dict, judge_fn=default_judge, quota_override:
            "finding_ids": ids, "quota_guard": f"off: {quota_override}" if quota_override else "on",
            "quota_before": quota_before, "quota_after": quota.readings(["claude"], quota_reader),
            "effort": config.EFFORT["judge"],
+           "key": {"original": [g["id"] for g in case["ground_truth"]],
+                   "pooled": [g["id"] for g in gt if g not in case["ground_truth"]]},
            "judged_at": time.strftime("%Y-%m-%dT%H:%M:%S")}
     (run_dir / "judge.json").write_text(json.dumps(doc, indent=1), encoding="utf-8")
     run["score"], run["judged"] = doc["score"], True

@@ -26,8 +26,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from rolebench import (audit, brief, cases, config, findings, flows, jarvis_worker, judge, netcell, prices,  # noqa: E402
-                       quota, report, runlog, runners, sandbox, snapshot, spend)
+from rolebench import (audit, brief, cases, config, findings, flows, jarvis_worker, judge, netcell, pool,  # noqa: E402
+                       prices, quota, report, runlog, runners, sandbox, snapshot, spend)
 
 PASSED = 0
 FAILED: list[str] = []
@@ -2036,6 +2036,211 @@ def test_implement_flow(shas, root: Path) -> None:
         check("graded code cannot open a network connection", ok2 is False)
 
 
+def _fake_judged_run(runs: Path, run_id: str, case_id: str, model: str, items: list[dict], matches: list[dict],
+                     ids: dict) -> None:
+    d = runs / run_id
+    d.mkdir(parents=True)
+    (d / "run.json").write_text(json.dumps({"run_id": run_id, "case_id": case_id, "kind": "review", "harness": "claude",
+                                            "model": model, "result": "ok", "judged": True}))
+    (d / "findings.json").write_text(json.dumps(items))
+    (d / "judge.json").write_text(json.dumps({"valid": True, "matches": matches, "finding_ids": ids}))
+
+
+def _finding(title, sev="LOW", file="tiny.py", line=2):
+    return {"severity": sev, "file": file, "line": line, "title": title, "scenario": f"{title}: shown by a test"}
+
+
+def test_pool(shas, root: Path) -> None:
+    """Pooled ground truth with fake clustering calls only (no model)."""
+    base = review_case(shas)
+    cid = base["id"]
+    home, cdir = root / "pool-home", root / "pool-cases"
+    cdir.mkdir()
+    case_file = cdir / f"{cid}.json"
+    case_file.write_text(json.dumps(base, indent=1))
+    original_bytes = case_file.read_bytes()
+    with env(ROLEBENCH_HOME=str(home), ROLEBENCH_CASES=str(cdir)):
+        runs = config.runs_root()
+        # run A: matches gt1, two valid-new (the same off-by-one in docs, and a race); run B: one valid-new (the race again)
+        _fake_judged_run(runs, "A-run", cid, "haiku",
+                         [_finding("bound excluded", "MED"), _finding("doc says inclusive"), _finding("race on write", "MED", "io.py", 9)],
+                         [{"finding": "F1", "verdict": "match", "gt": "gt1"}, {"finding": "F2", "verdict": "valid-new", "severity": "LOW", "note": "doc wrong"},
+                          {"finding": "F3", "verdict": "valid-new", "severity": "MED", "note": "real race"}],
+                         {"F1": 0, "F2": 1, "F3": 2})
+        _fake_judged_run(runs, "B-run", cid, "opus", [_finding("concurrent writes clobber", "HIGH", "io.py", 10)],
+                         [{"finding": "F1", "verdict": "valid-new", "severity": "MED", "note": "same race"}], {"F1": 0})
+        prompts = []
+
+        def clusterer(reply):
+            def fn(prompt, cwd):
+                prompts.append(prompt)
+                return (reply(prompt) if callable(reply) else reply), 0.02
+            return fn
+
+        def first_reply(prompt):
+            vs = dict(re.findall(r"(V\d+) \[\w+\] \S+ - ([^\n]+)", prompt))
+            race = [v for v, t in vs.items() if "race" in t or "concurrent" in t]
+            doc = [v for v, t in vs.items() if "doc" in t]
+            return json.dumps({"assign": [{"finding": v, "cluster": "new1"} for v in race] + [{"finding": v, "cluster": "new2"} for v in doc],
+                               "new_clusters": [{"id": "new1", "severity": "MED", "mechanism": "two writers race on the file", "location": "io.py:write"},
+                                                {"id": "new2", "severity": "LOW", "mechanism": "docstring says the bound is inclusive", "location": "tiny.py:clamp"}]})
+        cold = lambda p: {"windows": [{"name": "weekly", "used_percent": 10}]}
+        p1 = pool.pool_case(cid, pool_fn=clusterer(first_reply), quota_reader=cold, rng=random.Random(1))
+        c = {x["mechanism"]: x for x in p1["clusters"]}
+        race, doc = c["two writers race on the file"], c["docstring says the bound is inclusive"]
+        check("pool: one call clusters every valid-new finding; duplicates across runs share a cluster",
+              len(prompts) == 1 and len(p1["clusters"]) == 2 and {(m["run"], m["finding"]) for m in race["members"]} == {("A-run", 2), ("B-run", 0)}
+              and [(m["run"], m["finding"]) for m in doc["members"]] == [("A-run", 1)] and race["status"] == "proposed"
+              and race["id"] == "p1" and doc["id"] == "p2" and race["judge_notes"])
+        check("pool: the clustering prompt is blinded (no run id or model) and names no original-key match",
+              all(w not in prompts[0] for w in ("A-run", "B-run", "haiku", "opus", "claude")) and "bound excluded" not in prompts[0])
+        check("pool: the pool file is under the bench's home, never in the cases dir", pool.pool_path(cid).is_file()
+              and str(pool.pool_path(cid)).startswith(str(home)) and not pool.key_path(cid).exists())
+        again = pool.pool_case(cid, pool_fn=clusterer("{}"), quota_reader=cold)
+        check("pool: re-pooling with nothing new makes no call and changes nothing", len(prompts) == 1 and again["clusters"] == p1["clusters"])
+        _fake_judged_run(runs, "C-run", cid, "sonnet", [_finding("lost update under two writers", "MED", "io.py", 11), _finding("magic number 5")],
+                         [{"finding": "F1", "verdict": "valid-new", "severity": "MED"}, {"finding": "F2", "verdict": "valid-new", "severity": "LOW"}],
+                         {"F1": 0, "F2": 1})
+
+        def second_reply(prompt):
+            vs = dict(re.findall(r"(V\d+) \[\w+\] \S+ - ([^\n]+)", prompt))
+            return json.dumps({"assign": [{"finding": v, "cluster": "p1" if "two writers" in t else "new1"} for v, t in vs.items()],
+                               "new_clusters": [{"id": "new1", "severity": "LOW", "mechanism": "unnamed constant", "location": "tiny.py:clamp"}]})
+        p2 = pool.pool_case(cid, pool_fn=clusterer(second_reply), quota_reader=cold)
+        check("pool: a re-pool sends only the new findings, with the existing clusters; members join or found new clusters",
+              len(prompts) == 2 and "A-run" not in prompts[1] and "p1 [MED]" in prompts[1] and prompts[1].count("\nV") + prompts[1].startswith("V") <= 2
+              and len(p2["clusters"]) == 3 and len(p2["clusters"][0]["members"]) == 3 and p2["clusters"][2]["id"] == "p3")
+
+        # validation of the clustering reply
+        fids, cids = ["V1", "V2"], ["p1"]
+        ok_doc = {"assign": [{"finding": "V1", "cluster": "p1"}, {"finding": "V2", "cluster": "new1"}],
+                  "new_clusters": [{"id": "new1", "severity": "LOW", "mechanism": "m", "location": "l"}]}
+        bad = {
+            "missing a finding": {"assign": ok_doc["assign"][:1], "new_clusters": []},
+            "repeated finding": {"assign": ok_doc["assign"] + [{"finding": "V1", "cluster": "p1"}], "new_clusters": ok_doc["new_clusters"]},
+            "unknown cluster": {"assign": [{"finding": "V1", "cluster": "p9"}, {"finding": "V2", "cluster": "p1"}], "new_clusters": []},
+            "unused new cluster": {"assign": [{"finding": "V1", "cluster": "p1"}, {"finding": "V2", "cluster": "p1"}], "new_clusters": ok_doc["new_clusters"]},
+            "bad severity": {"assign": ok_doc["assign"], "new_clusters": [{**ok_doc["new_clusters"][0], "severity": "NIT"}]},
+            "extra key": {**ok_doc, "notes": "x"},
+            "empty mechanism": {"assign": ok_doc["assign"], "new_clusters": [{**ok_doc["new_clusters"][0], "mechanism": " "}]},
+            "new id shape": {"assign": [ok_doc["assign"][0], {"finding": "V2", "cluster": "p2"}],
+                             "new_clusters": [{**ok_doc["new_clusters"][0], "id": "p2"}]},
+        }
+        check("pool: a valid clustering reply validates", pool.validate_reply(ok_doc, fids, cids)[0] == {"V1": "p1", "V2": "new1"})
+        for label, d in bad.items():
+            check(f"pool: the clustering reply is rejected: {label}", raises(lambda d=d: pool.validate_reply(d, fids, cids), pool.PoolError))
+        _fake_judged_run(runs, "D-run", cid, "haiku", [_finding("yet another")], [{"finding": "F1", "verdict": "valid-new", "severity": "LOW"}], {"F1": 0})
+        calls_before = len(prompts)
+        check("pool: invalid output twice fails the pool call and adds nothing",
+              raises(lambda: pool.pool_case(cid, pool_fn=clusterer("not json"), quota_reader=cold), pool.PoolError)
+              and len(prompts) == calls_before + 2 and len(pool.load_pool(cid)["clusters"]) == 3)
+        hot = lambda p: {"windows": [{"name": "weekly", "used_percent": 97}]}
+        n0 = len(prompts)
+        check("pool: the call is refused at the quota ceiling even under the override, before any call",
+              raises(lambda: pool.pool_case(cid, pool_fn=clusterer("{}"), quota_reader=hot, quota_override="ok"), pool.PoolError)
+              and len(prompts) == n0)
+        with env(ROLEBENCH_NET="none"):
+            check("pool: the real clustering call is refused up front without pasta (as the judge)",
+                  raises(lambda: pool.pool_case(cid, quota_reader=cold), pool.PoolError) and len(prompts) == n0)
+
+        # adjudication
+        check("pool: adjudication needs --by, known ids, and no id both accepted and rejected",
+              raises(lambda: pool.adjudicate(cid, accept=["p1"]), pool.PoolError)
+              and raises(lambda: pool.adjudicate(cid, accept=["p9"], by="john"), pool.PoolError)
+              and raises(lambda: pool.adjudicate(cid, accept=["p1"], reject=["p1"], by="john"), pool.PoolError)
+              and raises(lambda: pool.adjudicate(cid, severities={"p2": "MED"}, by="john"), pool.PoolError))
+        pool.adjudicate(cid, accept=["p1", "p2"], reject=["p3"], severities={"p1": "HIGH"}, by="john", date="2026-10-21")
+        key = json.loads(pool.key_path(cid).read_text())
+        check("pool: accepted clusters become the committed pooled key; rejected ones never do",
+              [g["id"] for g in key["ground_truth"]] == ["pool-p1", "pool-p2"] and key["source"] == "pooled"
+              and key["adjudicated_by"] == "john" and key["date"] == "2026-10-21"
+              and key["ground_truth"][0]["severity"] == "HIGH" and "accepted by john on 2026-10-21" in key["ground_truth"][0]["source"]
+              and key["members"]["pool-p1"] == [["A-run", 2], ["B-run", 0], ["C-run", 0]])
+        check("pool: the pooled key validates, sits under cases/pooled/, and the original case file is untouched",
+              cases.load_pooled(cid) == key and pool.key_path(cid) == cdir / "pooled" / f"{cid}.json"
+              and case_file.read_bytes() == original_bytes)
+        mainmod = __import__("rolebench.__main__", fromlist=["main"])
+        check("pool: the pooled key is never listed as a case of its own", mainmod._case_ids(["all"], "review") == [cid])
+        badkeys = {"wrong source": {**key, "source": "original"}, "collides with the original key": {**key, "ground_truth": [{**key["ground_truth"][0], "id": "gt1"}]},
+                   "member list mismatch": {**key, "members": {}}, "no pool- prefix": {**key, "ground_truth": [{**key["ground_truth"][0], "id": "x1"}],
+                                                                                        "members": {"x1": [["A-run", 2]]}},
+                   "bad date": {**key, "date": "21/10/2026"}, "extra key": {**key, "notes": "x"}}
+        for label, d in badkeys.items():
+            check(f"pool: a pooled key is rejected: {label}", raises(lambda d=d: cases.validate_pooled(d, base), cases.CaseError))
+
+        with contextlib.redirect_stdout(io.StringIO()) as out_:
+            mainmod.main(["pool", "--case", cid, "--severity", "p1=med", "--by", "lead"])
+        check("CLI: pool --severity id=SEV (case-insensitive) re-adjudicates an accepted cluster",
+              json.loads(pool.key_path(cid).read_text())["ground_truth"][0]["severity"] == "MED" and "p1 [MED] accepted" in out_.getvalue())
+        with contextlib.redirect_stdout(io.StringIO()):
+            check("CLI: pool adjudication without --by, or a bad --severity, exits",
+                  raises(lambda: mainmod.main(["pool", "--case", cid, "--accept", "p1"]), SystemExit)
+                  and raises(lambda: mainmod.main(["pool", "--case", cid, "--severity", "p1", "--by", "x"]), SystemExit))
+            mainmod.main(["pool", "--case", cid, "--severity", "p1=HIGH", "--by", "john"])
+        key = json.loads(pool.key_path(cid).read_text())
+
+        # rescoring without re-judging
+        jd = lambda r: json.loads((runs / r / "judge.json").read_text())
+        ra = pool.rescore("A-run", jd("A-run"), base, key)
+        rb = pool.rescore("B-run", jd("B-run"), base, key)
+        rd = pool.rescore("D-run", jd("D-run"), base, key)
+        # original: gt1 MED(3) + gt2 LOW(1); pooled adds pool-p1 HIGH(5) + pool-p2 LOW(1)
+        check("rescore: original-key recall is unchanged by pooling", ra["original"] == {"weighted_recall": 3 / 4, "medplus_recall": 1.0}
+              and rb["original"] == {"weighted_recall": 0.0, "medplus_recall": 0.0})
+        check("rescore: a finding in an accepted cluster is a hit on that pooled id",
+              ra["pooled_hits"] == ["pool-p1", "pool-p2"] and abs(ra["pooled"]["weighted_recall"] - (3 + 5 + 1) / 10) < 1e-9
+              and ra["pooled"]["medplus_recall"] == 1.0 and rb["pooled_hits"] == ["pool-p1"]
+              and abs(rb["pooled"]["weighted_recall"] - 5 / 10) < 1e-9 and rb["pooled"]["medplus_recall"] == 0.5)
+        check("rescore: a rejected cluster's finding is no hit, and a run missing every pooled bug gains nothing",
+              rd["pooled_hits"] == [] and rd["pooled"]["weighted_recall"] == 0.0)
+        later = {"valid": True, "finding_ids": {"F1": 0}, "matches": [{"finding": "F1", "verdict": "match", "gt": "pool-p2"}]}
+        check("rescore: a run judged after pooling scores a judge's match on a pooled id",
+              pool.rescore("E-run", later, base, key)["pooled_hits"] == ["pool-p2"])
+        check("rescore: no pooled key means the pooled score equals the original",
+              pool.rescore("A-run", jd("A-run"), base, None)["pooled"] == ra["original"])
+
+        # a new run is judged against original + pooled ground truth
+        seen_key = []
+        rdir = runs / "F-run"
+        _fake_judged_run(runs, "F-run", cid, "haiku", [], [], {})
+        (rdir / "judge.json").unlink()
+        jdoc = judge.judge_run(rdir, base, judge_fn=lambda prompt, cwd: (_ for _ in ()).throw(AssertionError("called")),
+                               quota_override=NO_QUOTA, quota_reader=cold)
+        check("judge: a run judged after pooling records the original and pooled ids it was judged against",
+              jdoc["key"] == {"original": ["gt1", "gt2"], "pooled": ["pool-p1", "pool-p2"]})
+        check("judge: the judge's key text carries the pooled entries", "pool-p1" in judge.gt_text(cases.full_ground_truth(base)))
+
+        # report: both keys, labelled, plus the pooling-bias note
+        allruns = report.load_runs(runs)
+        resc = pool.rescore_runs(allruns, runs)
+        text = report.render(allruns, resc)
+        check("report: original-key and pooled-key recall columns, labelled, with the pooling-bias note",
+              "weighted recall (original key)" in text and "MED+ recall (pooled key)" in text and "Pooling bias" in text
+              and set(resc) == {"A-run", "B-run", "C-run", "D-run", "F-run"})
+        rows = {r["case"] + r["model"]: r for r in report.review_rows(allruns, resc) if r["model"] == "opus"}
+        check("report: a row carries both recalls", list(rows.values())[0]["weighted_recall"] == 0.0
+              and abs(list(rows.values())[0]["weighted_recall_pooled"] - 0.5) < 1e-9)
+
+        # re-pool after acceptance: a new member of an accepted cluster follows into the key
+        _fake_judged_run(runs, "G-run", cid, "sonnet", [_finding("writers race", "MED", "io.py", 9)],
+                         [{"finding": "F1", "verdict": "valid-new", "severity": "MED"}], {"F1": 0})
+
+        def titles(prompt):
+            return dict(re.findall(r"(V\d+) \[\w+\] \S+ - ([^\n]+)", prompt))
+        to_rejected = lambda prompt: json.dumps({"assign": [{"finding": v, "cluster": "p3"} for v in titles(prompt)], "new_clusters": []})
+        check("pool: a re-pool may not put a finding in a rejected cluster",
+              raises(lambda: pool.pool_case(cid, pool_fn=clusterer(to_rejected), quota_reader=cold), pool.PoolError)
+              and "p3 [" not in prompts[-1])
+        follow = lambda prompt: json.dumps({
+            "assign": [{"finding": v, "cluster": "p1" if "race" in t else "new1"} for v, t in titles(prompt).items()],
+            "new_clusters": [{"id": "new1", "severity": "LOW", "mechanism": "another nit-level issue", "location": "tiny.py"}]})
+        p3 = pool.pool_case(cid, pool_fn=clusterer(follow), quota_reader=cold)
+        key2 = json.loads(pool.key_path(cid).read_text())
+        check("pool: a new member of an accepted cluster follows into the pooled key; a new cluster waits as proposed",
+              ["G-run", 0] in key2["members"]["pool-p1"] and [g["id"] for g in key2["ground_truth"]] == ["pool-p1", "pool-p2"]
+              and p3["clusters"][-1]["id"] == "p4" and p3["clusters"][-1]["status"] == "proposed")
+
+
 def test_cli_and_cells(shas, root: Path) -> None:
     live, peak, lock = [0], [0], threading.Lock()
 
@@ -2163,6 +2368,7 @@ def main() -> int:
         test_jarvis_in_cell(root)
         test_review_flow(shas, root)
         test_implement_flow(shas, root)
+        test_pool(shas, root)
         test_cli_and_cells(shas, root)
     test_env_and_quota()
     test_judge_and_report()

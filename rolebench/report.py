@@ -52,7 +52,9 @@ def _split(doc: dict, key: str):
     return v if isinstance(v, int) else None
 
 
-def review_rows(runs: list[dict]) -> list[dict]:
+def review_rows(runs: list[dict], rescored: dict | None = None) -> list[dict]:
+    """One row per review run. With `rescored` (pool.rescore_runs) a judged run
+    carries both its original-key and its pooled-key recall."""
     rows = []
     for r in runs:
         if r.get("kind") != "review" or r.get("result") == "skipped":
@@ -60,9 +62,14 @@ def review_rows(runs: list[dict]) -> list[dict]:
         doc = r.get("reviewer") or {}
         flags = r.get("flags") or {}
         score = r.get("score") or {}
+        rs = (rescored or {}).get(r.get("run_id"))
+        orig = rs["original"] if rs else {"weighted_recall": score.get("weighted_recall"),
+                                          "medplus_recall": score.get("medplus_recall")}
+        pooled = rs["pooled"] if rs else {}
         rows.append({
             "harness": r["harness"], "model": r["model"], "case": r["case_id"], "result": r["result"],
-            "weighted_recall": score.get("weighted_recall"), "medplus_recall": score.get("medplus_recall"),
+            "weighted_recall": orig.get("weighted_recall"), "medplus_recall": orig.get("medplus_recall"),
+            "weighted_recall_pooled": pooled.get("weighted_recall"), "medplus_recall_pooled": pooled.get("medplus_recall"),
             "false_positives": score.get("false_positives"),
             "ran_tests": float(flags["ran_tests"]) if "ran_tests" in flags else None,
             "tried_mutant": float(flags["tried_mutant"]) if "tried_mutant" in flags else None,
@@ -94,22 +101,32 @@ def implement_rows(runs: list[dict]) -> list[dict]:
     return rows
 
 
-def render(runs: list[dict]) -> str:
-    out = ["# Role bench report", "",
+POOLING_NOTE = ("Recall is shown against two keys: the original key (the findings the PR's own review "
+                "adjudicated) and the pooled key (the original plus the clusters of judge-confirmed valid-new "
+                "findings the lead accepted, `rolebench pool`). Pooling bias: the pool is built from the models "
+                "that ran, so a defect no model found is still missing from both keys, and pooled recall rewards "
+                "finding what other models in this bench found.")
+
+
+def render(runs: list[dict], rescored: dict | None = None) -> str:
+    out = ["# Role bench report", "", POOLING_NOTE, "",
            "Ranges are lo-hi over runs. Review scores come from the Opus judge and are blank for unjudged runs. "
            "Cost is dollars (jarvis), list-price equivalent (claude) or blank (codex: tokens only). "
            "Tokens: input excludes cached reads in every harness (Codex's input_tokens include them and are split here). "
            "Never pooled with agent-bench, long-bench or swecompare.", ""]
-    rev = by_model(review_rows(runs), ["weighted_recall", "medplus_recall", "false_positives", "ran_tests",
+    rev = by_model(review_rows(runs, rescored), ["weighted_recall", "medplus_recall", "weighted_recall_pooled",
+                                                 "medplus_recall_pooled", "false_positives", "ran_tests",
                                       "tried_mutant", "cost", "in_tokens", "cached_tokens", "out_tokens", "wall",
                                       "tool_calls", "network", "escape"])
     out += ["## Reviewer bench", ""]
     if rev:
-        out += ["| harness | model | weighted recall | MED+ recall | false pos | ran tests | tried mutant | cost | "
+        out += ["| harness | model | weighted recall (original key) | MED+ recall (original key) | "
+                "weighted recall (pooled key) | MED+ recall (pooled key) | false pos | ran tests | tried mutant | cost | "
                 "in tok | cached tok | out tok | wall s | tool calls | net/escape flags |",
-                "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+                "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
         for (h, m), v in sorted(rev.items()):
             out.append(f"| {h} | {m} | {_fmt(v['weighted_recall'], pct=True)} | {_fmt(v['medplus_recall'], pct=True)} | "
+                       f"{_fmt(v['weighted_recall_pooled'], pct=True)} | {_fmt(v['medplus_recall_pooled'], pct=True)} | "
                        f"{_fmt(v['false_positives'], digits=0)} | {_fmt(v['ran_tests'], pct=True)} | {_fmt(v['tried_mutant'], pct=True)} | "
                        f"{_fmt(v['cost'], money=True)} | {_fmt(v['in_tokens'], digits=0)} | {_fmt(v['cached_tokens'], digits=0)} | "
                        f"{_fmt(v['out_tokens'], digits=0)} | {_fmt(v['wall'], digits=0)} | "

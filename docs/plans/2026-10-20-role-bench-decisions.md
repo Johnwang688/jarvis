@@ -162,3 +162,12 @@ alone left a path open or a guarantee implicit:
   capped at the reservation; with no meter line, the whole reservation. Earlier ledger
   entries are not rewritten.
 
+## Pooled ground truth (owner-approved, 2026-10-21, after the P2 pilot)
+
+The original key is one reviewer's findings, and the pilot showed it is incomplete. Judge-confirmed
+valid-new findings from every run are clustered by one blinded Opus call (`rolebench pool`), the lead
+adjudicates the clusters, and accepted ones form a committed pooled key
+(`rolebench/cases/pooled/<case>.json`, `source: "pooled"`). The original case files are never edited.
+Recall is reported against both keys, labelled; the pool's bias toward what the run's models found
+is stated in the report.
+

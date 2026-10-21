@@ -1260,7 +1260,12 @@ quoted strings inside inline code), never words of prose or a commit message. Ea
 resolved first: simple `NAME=value` assignments are tracked so a later `$NAME` expands,
 `~` and `~user` expand, `file://` URLs and `/proc/<n>/root/X` become paths, and a word is
 judged by its literal prefix up to its first glob or unknown variable
-(`/home/u/projects/*` names `/home/u/projects/`). It is then judged by the cell's layout: the snapshot, the system trees, the
+(`/home/u/projects/*` names `/home/u/projects/`). A relative path is resolved against the shell's
+cwd as `cd` moves it (Claude's Bash keeps its cwd between calls; codex and Jarvis start
+each call at the snapshot root; a `cd` that cannot be followed falls back to the root), so
+`cd hud && … && cd ..` stays inside while a climb above the root is flagged. In a claude
+cell the CLI's own task output, `/tmp/claude-<uid>/<slug of the cell's cwd>/`, is in-cell;
+any other `/tmp/claude-*` is flagged. It is then judged by the cell's layout: the snapshot, the system trees, the
 cell's `/tmp` and, on the tmpfs HOME (mounted at the real home's path), only the trees that
 exist in the cell (its CLI's own state: the trimmed login and the few files Claude Code
 keeps for itself, `~/.codex-rolebench`, the Jarvis loop's spill files; and the binds).
@@ -1330,6 +1335,26 @@ A review whose final reply still ends at the output limit (the loop's `[cut off 
 token limit]` after its own continuations) is recorded as `result: "truncated"`,
 `truncated: true` in `run.json` and the log row, never scored as a review with no
 findings; implement runs carry `truncated` too.
+
+**Pooled ground truth (2026-10-21, after the P2 pilot).** One reviewer's key is incomplete: on
+c6-r1 and dc-r1 every model, Opus included, scored 0–50% recall against the original key but
+reported many defects the judge confirmed as valid-new (the lead spot-checked dc-r1/opus: the
+judge was right). TREC-style pooling turns them into ground truth:
+`python -m rolebench pool --case <id>` collects every judged run's valid-new findings and, for
+the ones in no cluster yet, makes **one** Opus call (blinded, a read-only judge cell, effort
+high, the net gate, quota guard and ceiling as for the judge, one retry on invalid JSON) that
+puts each in an existing cluster or a new one. The pool is `pool/<case>.json` under the
+bench's home; re-running it sends only what is new. `pool --case <id> --accept p1,p3
+[--severity p1=MED] --reject p2 --by <name>` is the lead's adjudication: accepted clusters
+become the committed pooled key `rolebench/cases/pooled/<case>.json` (the ground-truth schema,
+`pool-` ids, `source: "pooled"`, who and when, each entry's member findings), validated by
+`cases.validate_pooled`; the original case file is never edited. Runs already judged are
+rescored without judging again: a finding that is a member of an accepted cluster is a hit on
+that pooled id. Runs judged later see original plus pooled entries in the judge's key
+(`judge.json` records both id lists). The report shows weighted and MED+ recall against the
+**original key** and the **pooled key**, labelled. Pooling bias: the pool is built from the
+models that ran, so a defect none found is missing from both keys, and pooled recall rewards
+finding what the other models found.
 
 The judge is `claude -p --model opus` over shuffled, blinded findings plus the answer
 key, reading an export of the change commit (no `.git`, its diff beside it) in a
