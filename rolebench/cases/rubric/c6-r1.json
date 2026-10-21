@@ -1,0 +1,91 @@
+{
+ "case": "c6-r1",
+ "head": "5e9f21a6cf004bb40973a07b82869622646553fa",
+ "seeded": false,
+ "built_by": "opus rubric agent",
+ "built_at": "2026-10-21",
+ "original_review": [
+  {
+   "gt": "gt1",
+   "status": "confirmed",
+   "note": "daemon.py:62-77 `_relayed_from(session)` reads only the session's current relay_turn/relay_mark and _permit (daemon.py:1846-1854) passes it for every call, so a child's card follows whatever turn runs when it asks. Fixed in 9e1dfb06 (round 2: child stamps), though Codex children stay unattributed (see c6-r2/c6-r3 rb1)."
+  },
+  {
+   "gt": "gt2",
+   "status": "confirmed",
+   "note": "Reproduced: mutant `if request.relayed_from: request.max_wait_s = 1.0` after the ApprovalRequest in permissions._ask passed `permissions_check.py relay_provenance_checks` (13192 checks) and relay_provenance_check.py (7 tests OK); card() compares to_json() only (tests/v2/permissions_check.py:3334-3337). Fixed in 9e1dfb06 (asdict comparison)."
+  },
+  {
+   "gt": "gt3",
+   "status": "confirmed",
+   "note": "relays.ts relayedLine draws only `‹title›`; approvals.py publishes only the title string. Fixed in 9e1dfb06 (provider word + 8-hex id)."
+  },
+  {
+   "gt": "gt4",
+   "status": "confirmed",
+   "note": "Reproduced with chat_reads.card_title at this head: 'x⟩ ⋅ your own turn ⟨y' is returned unchanged, '\\u3164\\u3164' returns two Hangul fillers (renders blank), 'Ｘ〉ｙ' unchanged. Fixed in 9e1dfb06 (bracket categories, dot look-alikes, fillers)."
+  },
+  {
+   "gt": "gt5",
+   "status": "confirmed",
+   "note": "Approvals.tsx:126-128 renders the line as a bare text child with no <bdi> and no title attribute while theme.css clips it; control-plane.md:338-340 and the feature map row (current-feature-map.md:373) say 'built on branch ... not merged', stale on merge. Fixed in 9e1dfb06."
+  }
+ ],
+ "entries": [],
+ "non_issues": [
+  {
+   "id": "ni1",
+   "claim": "A card raised in a relayed turn should not offer Always (another chat's words could mint a standing allowlist entry).",
+   "location": "jarvis/v2/permissions.py:1340; hud/src/components/Approvals.tsx:124-128",
+   "why_not": "Owner decision O-4: 'add the line (C6); keep Always' (docs/plans/2026-10-19-chat-to-chat-plan.md:618; docs/plans/2026-10-19-chat-to-chat-decisions.md:41; control-plane.md:365). The owner still answers every card; the line only informs."
+  },
+  {
+   "id": "ni2",
+   "claim": "The PR edits SELF_PROTECTED permissions.py/approvals.py and so may change a permission decision.",
+   "location": "jarvis/v2/permissions.py:212-238,1340; jarvis/v2/approvals.py:280-283,320",
+   "why_not": "The plan names these files as C6's (plan.md:593-595, 'Boundary-sensitive'). The only new read is ctx.relayed() inside _ask after every layer has decided to ask; no layer reads relayed_from, and the matrix (permissions_check.py:3321+) compares decision, verdict and card with and without a reader across providers, profiles and askers."
+  },
+  {
+   "id": "ni3",
+   "claim": "A relayed_from reader that raises or returns garbage could deny/allow the call or crash the permit.",
+   "location": "jarvis/v2/permissions.py:231-238",
+   "why_not": "PermitContext.relayed catches every exception and returns '' for a non-string; _ask passes the value only to the ApprovalRequest. The matrix includes a raising reader, an int and ''."
+  },
+  {
+   "id": "ni4",
+   "claim": "_relayed_from reads relay_turn and relay_mark outside the daemon lock, so a card can combine one turn's item with another turn's mark and name the wrong chat.",
+   "location": "jarvis/v2/daemon.py:62-77",
+   "why_not": "Each is a single attribute read, and the function requires the peer's thread_id to equal mark['from'] (daemon.py:73-74) before naming anyone; a mismatched pair shows nothing. A matching pair from two different turns names the same chat either way."
+  },
+  {
+   "id": "ni5",
+   "claim": "Discord's copy of the card and the Browser delegation consent card do not show the provenance line.",
+   "location": "jarvis/v2/approvals.py:320; jarvis/v2/permissions.py (_ask_owner_delegation)",
+   "why_not": "Out of scope by design: control-plane.md:379-381 (this head) says the private Browser delegation card keeps its fixed projection and Discord's card does not show the line; the plan's C6 file list is PermitContext + Approvals.tsx only (plan.md:594)."
+  },
+  {
+   "id": "ni6",
+   "claim": "A relayed fast-path (Jarvis) turn never produces a card with the line; the fast path is uncovered.",
+   "location": "tests/v2/relay_provenance_check.py (FastPathCards)",
+   "why_not": "A relayed or reply fast turn is never at the desk, so it holds no tool that reaches the permit (control-plane.md:375-378); the permit still carries the reader, and a test pins that no card arises today."
+  },
+  {
+   "id": "ni7",
+   "claim": "A chat's reply steered mid-turn into an owner's turn should label that turn's cards.",
+   "location": "jarvis/v2/daemon.py:62-77",
+   "why_not": "Deliberate: control-plane.md:389 'A mid-turn reply step in an owner's turn adds no line (the turn is the owner's)'; relay_turn is set only by _begin for a relay-started turn."
+  },
+  {
+   "id": "ni8",
+   "claim": "In a reply turn the card names the replying chat instead of the original sender (wrong chat).",
+   "location": "jarvis/v2/daemon.py:72",
+   "why_not": "Intended: the brief and plan say a reply turn (in the sender) names the chat whose reply started it. mark['from'] is item.target's id for a reply (chat_relay.py:138-140) and _relayed_from uses item.target when mark['reply']."
+  },
+  {
+   "id": "ni9",
+   "claim": "The chat title can inject markup or a second line into the card.",
+   "location": "hud/src/components/Approvals.tsx:126-128; jarvis/v2/chat_reads.py:145-154",
+   "why_not": "React renders relayedLine(...) as a text child (no HTML); card_title and the HUD's cardTitle reduce to one clean line of at most 60 characters and the CSS clips it to one line. Only the look-alike/filler gaps (gt4) and bidi isolation (gt5) are real."
+  }
+ ]
+}

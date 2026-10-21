@@ -1,0 +1,77 @@
+{
+ "case": "c6-fu-r1",
+ "head": "94dd73c440812d2f609b5e39a753f0e736c5fc57",
+ "seeded": false,
+ "built_by": "opus rubric agent",
+ "built_at": "2026-10-21",
+ "original_review": [
+  {
+   "gt": "gt1",
+   "status": "confirmed",
+   "note": "_spawned is called inside `with self._lock` in _record (daemon.py:2021-2024) before the log/bus writes, with no try/except; it cannot raise on today's inputs. Fixed in c58f60ac (try/except + LOG.exception)."
+  },
+  {
+   "gt": "gt2",
+   "status": "confirmed",
+   "note": "Reproduced: replacing `running=session.turn_id == before` with `running=True` in _record leaves relay_provenance_check passing (20 tests OK). c58f60ac documents the guard as defensive (TOOL_STARTED arrives only on the running turn's worker)."
+  }
+ ],
+ "entries": [
+  {
+   "id": "rb1",
+   "severity": "LOW",
+   "mechanism": "The follow-up's fix for the round-3 LOW (a grandchild of a parent the daemon never saw is stamped from the running turn) does not cover the case it names. Claude never reports a parent it dropped at CHILD_LIMIT: _task looks the parent up in session.tasks and sends parent_sid None, so the grandchild's record is a parentless lifecycle 'started' and the new rule treats it as a top-level start, stamping it from the running (relayed) turn for its life. The PR body's example ('a parent whose task_started was dropped at Claude's CHILD_LIMIT') therefore still gets a wrong 'started' line; the new 'unseen parent' branch is effectively unreachable from either provider.",
+   "location": "jarvis/v2/daemon.py:147-152 (_stamp_child branches); jarvis/v2/providers/claude.py:2442 (parent_sid = session.tasks.get(parent_task_id)); docs/notes/control-plane.md:381-389",
+   "evidence": "Reproduced with /home/johnw/.cache/jarvis-lead/tmp/rb-c6-scripts/limit_grandchild.py at this head: real ClaudeProvider._translate with CHILD_LIMIT (256) live children; owner-turn parent P dropped (task_started -> []), P's events recorded seen/unstamped; a slot frees; with a relayed turn running P spawns G -> G's record {'op': 'started', 'parent_sid': None, 'depth': 2} -> _stamp_child stamps {'title': 'Sender', ..., 'kind': 'started'}, still returned by _relayed_from after the relay ends. Narrow (needs 256 live children).",
+   "verified": "reproduced",
+   "fixed_later": null
+  },
+  {
+   "id": "rb2",
+   "severity": "LOW",
+   "mechanism": "The new docs and L4 step 5 treat a missing Codex line as a native-ordering problem ('Codex children are stamped from their first record only ... A missing line here on Codex means its children can be announced after the turn and need a pre-stamp like Claude's'), but Codex child cards never consult the stamp at all: codex.py passes subagent_sid without a subagent label, so build_permit's child is None and the card follows the running turn (pre-existing from #275, see c6-r3 rb1). The runbook step would misdiagnose its own result, and adding a Codex pre-stamp would not fix it.",
+   "location": "docs/plans/2026-10-19-chat-to-chat-live-gates.md:195-205; docs/notes/control-plane.md:395-398,413; jarvis/v2/permissions.py:983,989; jarvis/v2/providers/codex.py:2318-2331",
+   "evidence": "Reproduced with /home/johnw/.cache/jarvis-lead/tmp/rb-c6-scripts/codex_child.py at this head (head's Children harness, real _permit, Codex call shape): relayed turn's Codex background child stamped 'started' asks after the turn -> card.relayed_from = None; owner-turn Codex child during a later relayed turn -> kind 'started' naming the sender.",
+   "verified": "reproduced",
+   "fixed_later": null
+  }
+ ],
+ "non_issues": [
+  {
+   "id": "ni1",
+   "claim": "The seen-sid set now grows without bound (memory leak).",
+   "location": "jarvis/v2/daemon.py:63-70,140-143",
+   "why_not": "Deliberate trade-off documented in the comment: one short string per child ever spawned in the session (~100 bytes; 10,000 children ~1 MB), freed with the session; eviction caused restamps (round-3 NIT)."
+  },
+  {
+   "id": "ni2",
+   "claim": "_spawned stamps a sid even when the Agent call is denied or spawns nothing, leaving a wrong or stale stamp.",
+   "location": "jarvis/v2/daemon.py:159-174",
+   "why_not": "The sid is cl:<that call's id>, unique to the call; if nothing spawns it is never asked about (docstring 'A call that spawns nothing leaves one unused sid')."
+  },
+  {
+   "id": "ni3",
+   "claim": "A sub-agent's own Agent/Task call would be pre-stamped as a top-level child from the running turn.",
+   "location": "jarvis/v2/daemon.py:1997-1999,2021-2024",
+   "why_not": "A child's tool calls reach the daemon as SUBAGENT_EVENT (claude.py:2392-2394 wraps them) and _record returns for those kinds before the _spawned call; only the orchestrator's own TOOL_STARTED is seen there."
+  },
+  {
+   "id": "ni4",
+   "claim": "A grandchild of a relay-stamped child announced between turns (idle, running=False) loses its line.",
+   "location": "jarvis/v2/daemon.py:147-148",
+   "why_not": "The parent branch copies the parent's stamp regardless of `running`; only top-level starts depend on the turn."
+  },
+  {
+   "id": "ni5",
+   "claim": "A top-level child whose first record is a progress record or a subagent_event now never gets 'started', a regression.",
+   "location": "jarvis/v2/daemon.py:149-152",
+   "why_not": "Intended by the PR's brief and docs (control-plane.md:381-389): who spawned it is not known, so it gets 'running' while a relay runs and nothing otherwise; for Claude top-level children the Agent-call pre-stamp marks them first."
+  },
+  {
+   "id": "ni6",
+   "claim": "Matching the tool name 'Task' may stamp from an unrelated tool.",
+   "location": "jarvis/v2/daemon.py:74",
+   "why_not": "Exact names only: 'Agent' and the older 'Task' are Claude's sub-agent spawn tool (SV-0); todo tools have other names (TaskCreate etc.)."
+  }
+ ]
+}

@@ -1,0 +1,82 @@
+{
+  "case": "monitor-r1",
+  "head": "8bee098c14a83b5a9e454be24bef9aa87c35f636",
+  "seeded": false,
+  "built_by": "opus rubric agent",
+  "built_at": "2026-10-21",
+  "original_review": [
+    {"gt": "gt1", "status": "confirmed", "note": "Reproduced in-process on head (temp HOME, test Sandbox, human-backed Asker): mcp__remote__exec {'command':'cat','args':['.env']} and {'command':'npm','args':['publish']} are ALLOW at jarvis-allow (rules ALLOW) under STRICT and ASK; with a run_command 'git' stem entry, {'command':'git','args':['push','--force']} is ALLOW (allowlist); Always on mcp__ops__deploy {'command':'fly deploy'} minted {'tool':'run_command','prefix':'fly'}, after which Bash 'fly status' is ALLOW at jarvis-allow under STRICT. Fixed in b9fa654 (is_shell_tool gate at layer 4, allowlistable=False, broker refuses minting)."},
+    {"gt": "gt2", "status": "confirmed", "note": "Reproduced: Workflow {'script': \"const x = 'see .env docs'\"} is DENY at layer 1 under AUTO; with a {'tool':'Workflow'} allowlist entry, Workflow {'script':'agent(x)'} under STRICT is DENY at 'human' (the entry no longer covers it). Fixed in b9fa654 (CODE_TOOLS keep main's treatment)."},
+    {"gt": "gt3", "status": "confirmed", "note": "Reproduced: Bash {'command':{'x':'cat .env'}} and Bash {'command':[['cat','.env']]} under AUTO are ALLOW at 'reviewer' (layer 1 skipped because command_text returns ''); FutureTool {'command':{'x':'cat .env'}} also goes to the reviewer. Fixed in b9fa654 (unreadable_command: deny for a known shell, ask for an unknown tool)."}
+  ],
+  "entries": [
+    {
+      "id": "rb1",
+      "severity": "MED",
+      "mechanism": "Adding PowerShell to the trusted shell list (V2_COMMAND_TOOLS) makes its lines eligible for layer 4's rules static ALLOW and stem allowlist, but the line is parsed with the POSIX shell rules. PowerShell evaluates a parenthesised argument as an expression, so `ls (Remove-Item -Recurse -Force ~)` is read as a harmless `ls` and auto-allowed (jarvis-allow, 'ordinary development command') under STRICT, ASK and AUTO with no card. Before the diff a PowerShell call was a whole-tool call: STRICT denied it, ASK asked and AUTO went to the reviewer. This is a different defect from gt1, which is about non-shell tools reaching layer 4. It is reachable only where the Claude CLI offers its PowerShell tool (a Windows host), not in the WSL deployment.",
+      "location": "jarvis/v2/approvals.py:93-97 (PowerShell in V2_COMMAND_TOOLS); jarvis/v2/approvals.py:156-160 (v1_request maps it to run_command); jarvis/v2/permissions.py:1035-1041 (layer 4 allowlist and static_verdict ALLOW)",
+      "evidence": "In-process probe with tests/v2/permissions_check.py helpers (Sandbox, brief_for, Asker): PowerShell {'command':'ls (Remove-Item -Recurse -Force ~)'} is ALLOW at jarvis-allow 'ordinary development command (rules ALLOW)' under STRICT and AUTO on head 8bee098; on base 722868a it is DENY at 'human' (STRICT) and 'reviewer' (AUTO). The same probe on origin/main 20d89463 still prints 'PowerShell allow jarvis-allow' under STRICT. b9fa654 documented only that layer 1 can miss PowerShell spellings (docs/notes/safety-permissions.md 'Limit.' bullet on main), not this layer-4 auto-allow.",
+      "verified": "reproduced",
+      "fixed_later": null
+    },
+    {
+      "id": "rb2",
+      "severity": "MED",
+      "mechanism": "The exposure claim in the PR description and the new doc section is false. They say the recorded 2.1.295 catalog does not list Monitor, 'so it is feature-gated in the CLI' and has not been seen offered to a Jarvis session. That understates how reachable the hole is. The catalog records only the tools sent in each first request. The CLI offers Monitor as a deferred tool that the model loads through ToolSearch, so a Jarvis session can reach it.",
+      "location": "docs/notes/safety-permissions.md:2298-2303 (Exposure bullet); PR #211 description 'Is Monitor actually offered to Jarvis sessions?'",
+      "evidence": "The owner's review-fix commit b9fa654 (F5) rewrote this bullet: 'lists the tools sent in each first request and does not list Monitor, because the CLI offers it as a deferred tool: named in the session and loaded through ToolSearch ... So a Jarvis session can reach it.' A current Claude Code session (the one that built this rubric) lists Monitor among its deferred tools loadable via ToolSearch. The fixture tests/v2/fixtures/subagents/claude/catalog.json note says 'Tool names each agent was offered in its first model request'.",
+      "verified": "traced",
+      "fixed_later": "b9fa65432d16bef584c526f527b8be4f0c3ece77"
+    }
+  ],
+  "non_issues": [
+    {
+      "id": "ni1",
+      "claim": "Codex is also exposed: its exec_command/local_shell approvals (or other tool names) bypass the command judge, so the 'Codex was never affected' claim is false.",
+      "location": "jarvis/v2/approvals.py:96",
+      "why_not": "Codex command approvals reach the permit only as 'shell' with a string command: CodexProvider._tool returns ('shell', {'command': item.get('command'), ...}) for commandExecution (jarvis/v2/providers/codex.py:1277-1279), and 'shell' was already a command tool on base. exec_command is listed for completeness only."
+    },
+    {
+      "id": "ni2",
+      "claim": "command_text joins several command keys with a newline, so a stem allowlist entry for the first line (e.g. git) also covers a second, dangerous line.",
+      "location": "jarvis/v2/approvals.py:128-136",
+      "why_not": "rules.segments splits on the newline (probe: rules.segments('git status\\nrm -rf build') -> ['git status', 'rm -rf build']). v1 allows() requires every segment to be covered (jarvis/permissions.py allows: 'still required for every segment'), and entry_for refuses to mint for more than one stem (jarvis/permissions.py:135-140). The real layer-4 problem with unknown tools is gt1, not the join."
+    },
+    {
+      "id": "ni3",
+      "claim": "An Always on a BashOutput card, or on a command-tool card with an empty command, mints a prefix-less run_command entry that allows every command.",
+      "location": "jarvis/v2/approvals.py:156-160",
+      "why_not": "entry_for raises NotAllowlistable for an empty or whitespace command (jarvis/permissions.py:133-134), so the broker records a plain approval. BashOutput already mapped to run_command on base (_V2_COMMAND_TOOLS included it), so this is unchanged."
+    },
+    {
+      "id": "ni4",
+      "claim": "An Always on a Monitor card mints a run_command stem entry, which then also auto-allows Bash commands with that stem: a cross-tool widening.",
+      "location": "jarvis/v2/approvals.py:156-160",
+      "why_not": "This is the stated design. Monitor runs a shell line, and the PR replaces the whole-tool {'tool':'Monitor'} grant with a stem entry (docs/notes/safety-permissions.md:2290-2294 on head). A stem entry is narrower than the old grant and means the same thing for Bash and Monitor. The test asserts it (tests/v2/permissions_check.py:2147-2149)."
+    },
+    {
+      "id": "ni5",
+      "claim": "Dropping `tool in COMMAND_TOOLS` from the layer-1 condition means non-command tools such as WebFetch or Agent are now refused when their prompt mentions .env.",
+      "location": "jarvis/v2/permissions.py:876",
+      "why_not": "`command` is '' unless is_command_tool(tool, args) holds (jarvis/v2/permissions.py:862), and only the command/cmd/script keys are read (jarvis/v2/approvals.py:99, 111-125). WebFetch {'prompt':'cat .env'} and Agent {'prompt':'run cat .env'} are asserted not to be command tools (tests/v2/permissions_check.py:2114-2117)."
+    },
+    {
+      "id": "ni6",
+      "claim": "Ordinary Monitor use (tail -f build.log | grep ERROR) is now blocked, or always asks the owner under AUTO.",
+      "location": "jarvis/v2/permissions.py:862-880",
+      "why_not": "Monitor lines go through the same layers as Bash. A benign line passes layer 1 and reaches the reviewer or the static ALLOW, unasked under AUTO. tests/v2/permissions_check.py:2106-2111 asserts ALLOW with no card, and the suite passes (2188 checks)."
+    },
+    {
+      "id": "ni7",
+      "claim": "Judging an unknown or MCP tool's command/cmd/script value at layer 1 and the always-ask rules is itself wrong, because the value may not be a shell line.",
+      "location": "jarvis/v2/approvals.py:111-125",
+      "why_not": "Judging such values at layers 1-2 is the PR's stated fail-closed design (docs/notes/safety-permissions.md:2282-2289 on head). The owner kept it after review: b9fa654 says 'is_command_tool stays the test for layers 1-2 (judging, fail closed)'. The real defects are trusting those tools at layer 4 (gt1) and Workflow's JavaScript script (gt2). A finding that names one of those is gt1 or gt2, not this."
+    },
+    {
+      "id": "ni8",
+      "claim": "Existing whole-tool allowlist entries (e.g. {'tool':'Monitor'} or {'tool':'mcp__x__exec'}) silently stop matching: a regression for the owner.",
+      "location": "jarvis/v2/approvals.py:156-160",
+      "why_not": "This is intended fail-closed behavior. The PR description says 'An old {'tool': 'Monitor'} entry no longer matches anything', and b9fa654's doc makes it explicit: 'Whole-tool entries stop matching for every command-bearing tool'. The exception is Workflow's whole-tool entry, which belongs to gt2."
+    }
+  ]
+}

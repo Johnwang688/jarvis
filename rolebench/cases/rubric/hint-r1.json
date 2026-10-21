@@ -1,0 +1,68 @@
+{
+  "case": "hint-r1",
+  "head": "1eb0f85384d581ae4343f0f307b1de07e4d0ee59",
+  "seeded": false,
+  "built_by": "opus rubric agent",
+  "built_at": "2026-10-21",
+  "original_review": [
+    {"gt": "gt1", "status": "confirmed", "note": "len(UNLOCK_MESSAGE) is exactly 300 at head (computed), so the bound has no headroom. Nuance: the comment 'the HUD shows 300 characters' is not entirely stale, because BrowserTab.tsx still caps its error lines at 300 (see rb1); main later moved the bound to 500 (740f838b), which pins the wrong cap for those displays."},
+    {"gt": "gt2", "status": "confirmed", "note": "At head the test pins only fragments (setsid ... --foreground, --start --components=secrets, read -rsp, printf ... |); dropping unset KP, sleep 2 or the redirects passes. Fixed later by 740f838b, which asserts the whole UNLOCK_COMMAND string."},
+    {"gt": "gt3", "status": "confirmed", "note": "BrowserProfile.test.ts adds only the 600-character hint test (line 61-68); no test exercises the 500 cap in BrowserProfile.tsx:70 or state/browser.ts:18, so reverting either fails no HUD test."},
+    {"gt": "gt4", "status": "confirmed", "note": "The error <p className=\"err\"> (BrowserProfile.tsx:78) is rendered via `status`, outside .browserprofilemanage (the only rule with max-height, theme.css:1941), portaled to statusTarget with no height limit; FELL_BACK_MESSAGE is 440 characters. Cosmetic."}
+  ],
+  "entries": [
+    {
+      "id": "rb1",
+      "severity": "MED",
+      "mechanism": "The PR lengthens every message that ends in the unlock command (STICKY_UNAVAILABLE_MESSAGE 371, CHANGED_MESSAGE 364, FELL_BACK_MESSAGE 440 characters) and raises the 409 cap to 500 only in BrowserProfile.tsx and state/browser.ts. The Browser tab's own error lines still cap at 300: a Direct tab's owner address entry (ownerGo) and its 'Open in Remote' convert, and a Remote tab's Load/Enter (action(), whose `error` is shown in preference to runtime.error). When the profile launch is refused there (panes.address -> host.open_tab -> _instance -> _launch raises BrowserRefused 409), the owner sees the command cut mid-way with an ellipsis (e.g. FELL_BACK ends '... setsid -f gnome-keyring-daemon --r…', CHANGED ends '... sleep 2; gnome-keyri…'), so the recipe the PR exists to show is unusable or, if copied, incomplete. The new doc sentence 'a 409 up to 500' is therefore false for these displays. Only UNLOCK_MESSAGE (exactly 300) survives whole.",
+      "location": "hud/src/components/BrowserTab.tsx:264; hud/src/components/BrowserTab.tsx:344; hud/src/components/BrowserTab.tsx:374 (shown at :335 and :392); jarvis/v2/browser/password_store.py:114-131; docs/notes/browser.md:2103-2104",
+      "evidence": "Computed lengths at head (python import of password_store): UNLOCK_MESSAGE 300, STICKY_UNAVAILABLE 371, CHANGED 364, FELL_BACK 440, UNPROTECTED_HINT 405. A throwaway vitest calling cleanTitle(msg, 300) (lib/remote.ts:939) printed TRUNCATED for STICKY_UNAVAILABLE, CHANGED and FELL_BACK, whole only for UNLOCK_MESSAGE. Path: BrowserTab ownerGo -> control.submit (state/browser.ts:200-211, which also patches runtime.error at 500 but rethrows) -> catch at BrowserTab.tsx:264 sets ownerError at 300, rendered at :335; Remote tab action() at :374 sets error at 300, and :392 renders `error||runtime?.error`, so the 300 copy wins. Server: routes.py:311 returns str(BrowserRefused) as the 409 body; host.py:1297-1299 raises CHANGED/FELL_BACK, password_store.choose (:262) STICKY_UNAVAILABLE. Before the PR STICKY_UNAVAILABLE and CHANGED fit in 300. origin/main still has the three 300 caps.",
+      "verified": "reproduced",
+      "fixed_later": null
+    }
+  ],
+  "non_issues": [
+    {
+      "id": "ni1",
+      "claim": "printf '%s' \"$KP\" puts the password in a process's argv (visible in ps / /proc)",
+      "location": "jarvis/v2/browser/password_store.py:114",
+      "why_not": "printf is a bash builtin, so \"$KP\" is expanded inside the shell and never becomes an exec'd argv; the password reaches gnome-keyring-daemon only on stdin through the pipe. read -rsp keeps it out of echo and history (the command line stored in history contains only the variable name)."
+    },
+    {
+      "id": "ni2",
+      "claim": "setsid -f forks away from the pipe, so the replacement daemon cannot read the password from stdin",
+      "location": "jarvis/v2/browser/password_store.py:115",
+      "why_not": "setsid -f forks and the child inherits the parent's file descriptors, including the pipe on stdin; only the controlling session changes. The recipe is recorded as verified live on the owner's machine (docs/notes/browser.md:2319, 'Verified live 2026-10-20')."
+    },
+    {
+      "id": "ni3",
+      "claim": "The new assertNotIn('gnome-keyring-daemon --unlock') contradicts the command, which still unlocks",
+      "location": "tests/v2/browser_password_store_check.py:204",
+      "why_not": "The command contains 'gnome-keyring-daemon --replace --unlock', so the exact substring 'gnome-keyring-daemon --unlock' is absent; the assertion deliberately rejects the old plain-unlock form that starts a stray daemon under WSLg (password_store.py:107-113). The suite passes at head (39 tests OK)."
+    },
+    {
+      "id": "ni4",
+      "claim": "The fixed `sleep 2` before `--start --components=secrets` is a race that should be replaced by polling",
+      "location": "jarvis/v2/browser/password_store.py:116-117",
+      "why_not": "It is the owner/lead's live-verified recipe (docs/notes/browser.md:2308-2319); a later commit on main deliberately pins the whole string including the pause ('dropping unset KP, the redirects or the pause before re-registering is a change to review', 740f838b). No failure of the pause is shown by anything in the diff."
+    },
+    {
+      "id": "ni5",
+      "claim": "Raising the HUD caps from 300/400 to 500/600 lets untrusted page text inject or flood the UI",
+      "location": "hud/src/components/BrowserProfile.tsx:11; hud/src/components/BrowserProfile.tsx:70; hud/src/state/browser.ts:18",
+      "why_not": "The hints and these 409 bodies are daemon-authored constants (password_store.py:114-141, routes.py:311); all text still passes cleanTitle (lib/remote.ts:939), which strips controls, bidi and invisible characters, and is rendered as React text, never innerHTML. A longer cap changes only how much is shown."
+    },
+    {
+      "id": "ni6",
+      "claim": "The unlock command should be offered to run in a HUD/Jarvis terminal instead of Windows Terminal",
+      "location": "jarvis/v2/browser/password_store.py:104-105",
+      "why_not": "Deliberate: a HUD terminal is a Jarvis PTY whose keystrokes pass through the daemon (password_store.py:104-105 comment), and Jarvis never prompts or unlocks (docs/notes/browser.md:2105-2106). Unchanged by this PR."
+    },
+    {
+      "id": "ni7",
+      "claim": "The docs mention a logon task with a DPAPI-stored password that is not in the repo, an undocumented secret path",
+      "location": "docs/notes/browser.md:2320-2322",
+      "why_not": "The paragraph states it is machine-local owner setup, not part of the repo; no code reads it and no password value is documented. It describes the owner's environment, not a Jarvis credential route."
+    }
+  ]
+}

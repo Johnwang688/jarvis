@@ -1,0 +1,84 @@
+{
+  "case": "dc-r1",
+  "head": "59188dfc9b262d171d7c7ff41b0471ec4ec8bf46",
+  "seeded": false,
+  "built_by": "opus rubric agent",
+  "built_at": "2026-10-21",
+  "original_review": [
+    {"gt": "gt1", "status": "confirmed", "note": "Reproduced: a copy of tests/face/hud_v2_direct_capture_check.py with device_scale_factor=1.5 (built HUD, real Chromium) recorded {'passed': False, 'reason': 'wrong_size'} with frame 320x200 against expected 480x300; the same check at 1 passes. The PR's own browser.md section already mentions this caveat, but the check ships unchanged. Fixed in 59198622 (scale-tolerant scaleOf/scale_of)."},
+    {"gt": "gt2", "status": "confirmed", "note": "OVERLAYS (directCapture.ts:65-69) names data-testid dev-server-prompt; the real element is devserver-prompt (DevServerPrompt.tsx:74) inside .devserver-prompts (pointer-events:none, theme.css:1960); the prompt itself hit-tests, so only the sparse 5x5 grid lets it through. The same mechanism covers the other dead selectors (.toast, .approval-card, browser-approval) and the unlisted terminal 'attached' notice (Terminal.tsx:2632, role=status, inside .termtoasts over the panes), which can also sit between grid points. Fixed in 59198622 (real selectors, .termtoasts, 48 px grid)."},
+    {"gt": "gt3", "status": "confirmed", "note": "direct_probe.verdict (direct_probe.py:141-150) compares facts['frame'] with the HUD-posted facts['expected'] and each sample's got with its HUD-posted want; rect and dpr are validated but unused, and no pattern colours live on the daemon. Fixed in 59198622 (pattern and sample points on the daemon, scale rule over rect/window/DPR, rect-shape check)."},
+    {"gt": "gt4", "status": "confirmed", "note": "In the 1.5x face-check run above, real Chromium returned the pattern's green as [29,160,61] for want [40,180,60] and red as [234,59,40] for [220,40,40]: channel errors of 19-20 against COLOUR_SLACK 24 (direct_probe.py:37). Replaced by nearest-colour classification in 59198622."},
+    {"gt": "gt5", "status": "confirmed", "note": "grabCroppedFrame runs atGrab only after `await within(grabber.grabFrame(), ...)` resolves (directCapture.ts:203-210), so coverage at frame production is never checked. 59198622 adds a beforeGrab check as well, narrowing but not closing the window."}
+  ],
+  "entries": [
+    {
+      "id": "rb1",
+      "severity": "MED",
+      "mechanism": "The owner's probe renders its 320x200 test-pattern iframe below the Test button only once probing starts, and never scrolls it into view. In a window too short to show it (the pattern sits ~200 px below the button), runProbe's first frameCovered check returns 'hidden', no share prompt is shown, and the facts go to the daemon with prompt 'not_shown'. The daemon's verdict maps that to 'prompt_error', so the owner reads 'Failed: Chrome refused the share prompt.' although Chrome never asked, and record() overwrites any earlier pass with this failure, so the switch cannot be unlocked from that window. The same misleading 'prompt_error' is reported whenever the pattern is covered.",
+      "location": "hud/src/components/DirectCaptureSetting.tsx:42-47,81-84; hud/src/lib/directProbe.ts:81,105; jarvis/v2/browser/direct_probe.py:135-136,186-188",
+      "evidence": "Built the HUD at head and ran copies of tests/face/hud_v2_direct_capture_check.py with only the viewport changed. At 1280x560 and 1024x600 the probe made 0 getDisplayMedia calls and the daemon recorded {'passed': False, 'reason': 'prompt_error'} with facts prompt 'not_shown', frame null. At 1280x560 the Test button's rect was top 384, bottom 410, so the pattern (margin 8 px, height 200) ends near 618 > innerHeight 560. At 1280x720, 1366x768 and 1600x1000 the probe passed. Trace: frameCovered returns 'hidden' when r.bottom > innerHeight + 0.5 (directCapture.ts:81-82); runProbe returns finish() with prompt 'not_shown' (directProbe.ts:81); verdict returns 'prompt_error' for any prompt other than accepted (direct_probe.py:135-136); PROBE_REASONS.prompt_error is 'Failed: Chrome refused the share prompt.' (directProbe.ts:105); DirectProbe.record sets _last unconditionally (direct_probe.py:186-188). Fixed later by 59198622, which adds frame.scrollIntoView before runProbe ('the pattern must be wholly on screen').",
+      "verified": "reproduced",
+      "fixed_later": "5919862225dfdf57a42d048afacf8fd5c24f375f"
+    },
+    {
+      "id": "rb2",
+      "severity": "LOW",
+      "mechanism": "The URL-only reference paired with a Direct still is the registry's binding URL, the address the owner loaded, but the Direct iframe can navigate itself (a link, an SPA route, a redirect) without the HUD or the registry learning of it: the frame is sandboxed with an opaque origin and nothing tracks its location. Annotate/Send then stage pixels of one page with the address of another, and the agent receives a mismatched pair. Neither the plan nor the notes state this at head.",
+      "location": "jarvis/v2/browser/captures.py:233-264 (snapshot.url at :255); hud/src/components/BrowserCapture.tsx:98; docs/plans/2026-10-19-direct-capture-plan.md:62-63",
+      "evidence": "Traced: capture_direct takes the URL from registry.resolve_owner(...).url (captures.py:246-255); a Direct binding's URL is set only by owner address/report calls (panes.address stores `target` for direct mode), and FrameHost/DirectTab add no load or navigation listener that reports the frame's current location (grep of FrameHost.tsx and BrowserTab.tsx). The PR's review-fix commit 59198622 adds a residual sentence to browser.md and the plan ('a page that navigates itself while the prompt is up can show pixels from a different address than the binding URL'), narrower than the actual gap (any self-navigation before the press).",
+      "verified": "traced",
+      "fixed_later": null
+    }
+  ],
+  "non_issues": [
+    {
+      "id": "ni1",
+      "claim": "The probe pass is held only in daemon memory, so after a restart the saved direct_capture=true stays on without a probe (or the pass should persist)",
+      "location": "jarvis/v2/browser/direct_probe.py:9-13; jarvis/v2/browser/routes.py:216",
+      "why_not": "Deliberate: the plan says 'The pass is held in daemon memory only ... After a restart the switch keeps its saved value; turning it on again means running the probe again' (docs/plans/2026-10-19-direct-capture-plan.md:22-24). The gate is on turning the switch on, not on the saved value."
+    },
+    {
+      "id": "ni2",
+      "claim": "A planted or edited direct-capture-probe.json report could unlock the switch",
+      "location": "jarvis/v2/browser/direct_probe.py:154-206",
+      "why_not": "The file is only written (O_EXCL temp + os.replace, 0600) and never read; passed() reads the in-memory _last (direct_probe.py:204-206). The plan states 'never read back as authority, so a planted file unlocks nothing' (plan:22-24)."
+    },
+    {
+      "id": "ni3",
+      "claim": "A Direct still bypasses the credential check that Remote captures get, so secrets on the page can reach an agent",
+      "location": "jarvis/v2/browser/captures.py:228-231; hud/src/components/DirectCaptureSetting.tsx:16",
+      "why_not": "A stated residual of the approved design: Direct cannot read a cross-origin page's text; the switch's help text and the still's note say so, and the picture reaches an agent only through the owner's own Send (plan:75-78). The URL itself still goes through Captures.add's credential guard (captures.py:255-259)."
+    },
+    {
+      "id": "ni4",
+      "claim": "PATCH {direct_capture: 1} or \"true\" bypasses the probe gate, because the route only checks `is True`",
+      "location": "jarvis/v2/browser/routes.py:216",
+      "why_not": "settings.update rejects any non-bool value with ValueError -> 400 before anything is saved (jarvis/v2/browser/settings.py:243-244), so only a literal true can turn it on, and that is gated."
+    },
+    {
+      "id": "ni5",
+      "claim": "A page, script or agent could forge a passing probe or mint a Direct reference",
+      "location": "jarvis/v2/browser/routes.py:144-145,162-174",
+      "why_not": "Every /browser route runs owner_only and _strict_host first (routes.py:144-145); the suite shows non-owner and cross-origin probe/PATCH/reference requests refused with 403. The HUD calls only on an isTrusted press (BrowserCapture.tsx:71, DirectCaptureSetting.tsx:34,64), and the face check confirms a scripted click does nothing. (The verdict trusting the HUD's own numbers is gt3.)"
+    },
+    {
+      "id": "ni6",
+      "claim": "A HUD that missed the switch being turned off elsewhere can still attach a Direct still",
+      "location": "jarvis/v2/browser/captures.py:242-243",
+      "why_not": "The daemon refuses the reference with 'Direct capture is off' whenever the switch is off (captures.py:242-243), and BrowserCapture asks for the reference only after the pixels and throws away the still on any error (BrowserCapture.tsx:98, catch at :113-114). Plan:32-33 states exactly this; the HUD also refreshes settings on connect and every 20 s (state/browser.ts:111,148)."
+    },
+    {
+      "id": "ni7",
+      "claim": "Tracks can be left running when the prompt is cancelled, a card appears, or a step throws",
+      "location": "hud/src/lib/directCapture.ts:164-219",
+      "why_not": "One finally stops every track of the stream on every path (directCapture.ts:215-217), a stream that resolves after the gesture went stale is stopped by the same finally after the live() check throws (:175), and a cancelled prompt leaves no stream at all. Covered by directCapture.test.ts and BrowserCapture.test.ts; the face check asserts every track ended."
+    },
+    {
+      "id": "ni8",
+      "claim": "The switch should turn itself on after a passing probe instead of needing a second owner action",
+      "location": "hud/src/components/DirectCaptureSetting.tsx:58-71",
+      "why_not": "Deliberate: 'Self-enabling after a probe would turn on a new way of capturing the screen without the owner choosing it'; every Browser widening is an owner switch (B-5, B-12, local_servers) (plan:26-30)."
+    }
+  ]
+}

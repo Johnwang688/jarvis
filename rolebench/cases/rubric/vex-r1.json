@@ -1,0 +1,63 @@
+{
+  "case": "vex-r1",
+  "head": "3f341bb8670d55276f5415ac407efce9a3a7a26e",
+  "seeded": false,
+  "built_by": "opus rubric agent",
+  "built_at": "2026-10-21",
+  "original_review": [
+    {"gt": "gt1", "status": "confirmed", "note": "Traced. The held-port effect (hud/src/components/VexView.tsx:139-146) depends only on `held` and checks only document.visibilityState. The USB-check effect beside it returns early on `props.drawn === false || blocked` (VexView.tsx:150). Fixed in #242 (70740c2): the poll is gated on drawn and !blocked."},
+    {"gt": "gt2", "status": "confirmed", "note": "Reproduced with a throwaway vitest. Issue the chain's refreshStatus, then a second read (as heardDevice would), and answer the first: `await` on the first resolves while store.status is still null, because the success handler returns early on seq !== statusSeq (vex.ts:318). So `const brain = this.status?.brain` (vex.ts:599) and the pause loop (vex.ts:623-627) can read a stale status. Fixed in #242 (statusLatest)."},
+    {"gt": "gt3", "status": "confirmed", "note": "Only the test gap holds on head. Deleting the guard in the error handler (vex.ts:329) leaves hud/src/state/vex.test.ts at 48/48 passing (reproduced). With the guard in place, an older failing read after a newer success does NOT overwrite statusError on head (probe: statusError stays ''). The overwrite is the mutant's behavior, not head's. Test added in #242."}
+  ],
+  "entries": [],
+  "non_issues": [
+    {
+      "id": "ni1",
+      "claim": "The new 2 s poll performs a device action, or touches the robot or USB, behind the owner's back.",
+      "location": "hud/src/components/VexView.tsx:140-146",
+      "why_not": "It calls only vex.refreshStatus() -> GET /vex/status. Vex.status() reads self._device under the lock plus local config and runs no vexcom (jarvis/v2/vex.py:1609-1627). Whether the poll is gated on a drawn pane or an approval card is gt1, a separate point."
+    },
+    {
+      "id": "ni2",
+      "claim": "Connect can now be offered, or a brain terminal opened, while a download is still running.",
+      "location": "jarvis/v2/vex.py:1833-1840",
+      "why_not": "The device is freed only in the exit hook, in the same locked step that settles the record. While vexcom runs, /vex/status says 'download' and POST /vex/brain is refused. tests/v2/vex_check.py DownloadEnd.test_stopped (1514) asserts device 'download' and a 409 for /vex/brain while it runs. The store never opens the brain itself; the vitest `offered` helper asserts brainOpened 0."
+    },
+    {
+      "id": "ni3",
+      "claim": "release(locked=True) deadlocks, or calls notify_all without holding the condition's lock.",
+      "location": "jarvis/v2/vex.py:1575-1588",
+      "why_not": "The locked path takes no lock. It runs inside the caller's `with self._lock`, and _device_idle is threading.Condition(self._lock) (vex.py:1423-1424), so notify_all runs under its own lock. The finally's release() takes the lock only after that block has exited. DownloadEnd passes on head (5/5)."
+    },
+    {
+      "id": "ni4",
+      "claim": "The `finally: release()` after the in-lock release double-frees the device, or frees a reservation a newer action has taken in between.",
+      "location": "jarvis/v2/vex.py:1844-1845",
+      "why_not": "free() acts only when self._device's token equals this reservation's token (vex.py:1575-1580; docstring 1549-1551: 'frees it at most once and never another holder's reservation'). After the first free, the second call returns False."
+    },
+    {
+      "id": "ni5",
+      "claim": "Awaiting refreshStatus() in the chain's finally keeps the chain or its busy state alive until the daemon answers, or can throw out of the finally.",
+      "location": "hud/src/state/vex.ts:669-686",
+      "why_not": "this.chain is cleared and busy reset before the await (vex.ts:670-671). refreshStatus handles its own failure in the rejection handler (vex.ts:328-332), so the promise never rejects."
+    },
+    {
+      "id": "ni6",
+      "claim": "With an instant exit, the exit hook frees the device before bind() and _announce('download'), so the late bus record brings 'download' back.",
+      "location": "jarvis/v2/vex.py:1867-1868",
+      "why_not": "The late record only triggers a fresh status read (heardDevice -> refreshStatus). It reads the already-freed device and answers null, and the newest-issued read wins. bind() is a no-op for a released token (vex.py:1590-1593). The vitest 'instant exit 6' and DownloadEnd.test_instant_exit_6 cover this path."
+    },
+    {
+      "id": "ni7",
+      "claim": "refreshDownload now fires a status read on every download poll, or again for an already-settled receipt.",
+      "location": "hud/src/state/vex.ts:476-486",
+      "why_not": "A settled receipt returns before the patch (`if (current.state !== \"running\") return current;`, vex.ts:479). The read fires only on the first transition from running to ended."
+    },
+    {
+      "id": "ni8",
+      "claim": "Several VEX panes each start their own 2 s poll, so the reads multiply and the newest-wins guard drops answers, leaving the status wrong.",
+      "location": "hud/src/components/VexView.tsx:140-146",
+      "why_not": "Each answer is a full snapshot and the newest-issued read is applied, so the status converges. The reads are cheap and read-only, and the same per-pane pattern already exists for the unconfigured 4 s poll (VexView.tsx:128-135). The real stale-read problem is a superseded `await` inside the chain (gt2)."
+    }
+  ]
+}

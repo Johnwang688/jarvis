@@ -1,0 +1,63 @@
+{
+  "case": "sv6-r1",
+  "head": "5c4cfa6951d69accb4c68618e75a26f46b20e16c",
+  "seeded": false,
+  "built_by": "opus rubric agent",
+  "built_at": "2026-10-21",
+  "original_review": [
+    {"gt": "gt1", "status": "confirmed", "note": "Reproduced: a copy of head with SdkUserMessage removed from the _of_no_turn tuple (claude.py:3174) passes idle_reader_check (44 OK), steer_check (16 OK), claude_subagents_check (35 OK) and chat_relay_check (55 OK). The behaviour it breaks is real: the review-round tests from 92f0ecb7 run against that mutant fail with self_started 'background' instead of 'peer' for a peer handback behind a rate_limit_event, and 'timed out waiting for the late steer, held' (the steer echo is passed by, so a stopped steer is never interrupted). Fixed in 92f0ecb7 (merged in 2491f007)."},
+    {"gt": "gt2", "status": "confirmed", "note": "Reproduced: head's test_a_rate_limit_event_mid_cli_turn_is_read_in_order passes against base 134ea187 code (only the between-turns test fails there), and a reorder mutant that passes no-turn messages by before the session.held check (claude.py:1974-1979) survives all 44 idle_reader_check tests. Under that mutant a ConversationResetMessage behind a held result would zero cost_seen (claude.py:2333-2337) before the result is read. Fixed in 92f0ecb7."},
+    {"gt": "gt3", "status": "confirmed", "note": "Traced: claude-agent-sdk is absent from pyproject.toml dependencies; at head _of_no_turn (claude.py:3167-3175) is true for any class outside the five, _route_idle (1977-1979) calls _translate, which returns [] for an unknown class (claude.py:2292-2340), and nothing is logged on that path. Unknown wire types are dropped by the SDK itself (message_parser.py:394-395, client.py:251), so only a new Message class reaches this. Fixed in 92f0ecb7 (_note_no_turn_kind logs a kind once)."}
+  ],
+  "entries": [],
+  "non_issues": [
+    {
+      "id": "ni1",
+      "claim": "Passing a ConversationResetMessage by between turns loses it, so cost_seen is never reset after a /clear and the next turn's cost is wrong",
+      "location": "jarvis/v2/providers/claude.py:1977-1979",
+      "why_not": "Passed-by messages are still handed to _translate (claude.py:1978), whose ConversationResetMessage branch zeroes session.cost_seen (claude.py:2333-2337). With nothing held there is no result in between, so applying it now or at the next _read gives the same figure; behind a held message it is held in order (claude.py:1974-1976)."
+    },
+    {
+      "id": "ni2",
+      "claim": "_of_no_turn also swallows system/task messages (task_started, task_notification, init, status), so sub-agent rows or the session id are lost between turns",
+      "location": "jarvis/v2/providers/claude.py:3167-3175",
+      "why_not": "SystemMessage (and so every Task*/HookEvent/MirrorError subclass) is in the exclusion tuple (claude.py:3174-3175); task_* messages are routed earlier by _subagent_message (claude.py:1970-1973, 3178-3185), and init/status still go through _translate for the session id exactly as before (claude.py:1977-1979, 2301-2303)."
+    },
+    {
+      "id": "ni3",
+      "claim": "A rate_limit_event that arrives after a CLI turn was offered, or behind a late steer's echo, is now dropped or read out of order",
+      "location": "jarvis/v2/providers/claude.py:1974-1983",
+      "why_not": "The session.held check (claude.py:1974-1976) comes before the no-turn branch, and an offered item is itself held (claude.py:1981), so anything behind it is held in order and read by the adopting turn; the notes say so (docs/notes/providers-runtime.md:1379-1382). (That the mid-turn test does not pin this order is gt2, not a behaviour bug.)"
+    },
+    {
+      "id": "ni4",
+      "claim": "_of_no_turn is true for the stream-end sentinel _END or a _Raised error, so a dead CLI between turns is silently passed by instead of reported by the next message",
+      "location": "jarvis/v2/providers/claude.py:1958-1966",
+      "why_not": "_END and _Raised are handled first in _route_idle (claude.py:1958-1966): held and reading stops, before _subagent_message or _of_no_turn is ever consulted."
+    },
+    {
+      "id": "ni5",
+      "claim": "Discarding a rate_limit_event between turns hides a 'rejected' or 'allowed_warning' limit status the owner should be warned about",
+      "location": "jarvis/v2/providers/claude.py:1977-1979",
+      "why_not": "Nothing was ever surfaced from it: before the PR it was held and the next _read's _take/_translate produced no event for a RateLimitEvent (claude.py:2292-2340 falls through to return out). The PR changes only whether it blocks later messages, not what reaches the owner."
+    },
+    {
+      "id": "ni6",
+      "claim": "The root cause is unproven, so the change does not fix the owner's bug (the answer after sub-agents waiting for the next message)",
+      "location": "docs/notes/providers-runtime.md:1480-1504",
+      "why_not": "The PR body and notes say explicitly the cause is inferred, not reproduced live. The mechanism is sound: SDK 0.2.153 parses rate_limit_event into RateLimitEvent (message_parser.py:356), which base _route_idle had no branch for, so it was held and held everything behind it. Reproduced: head's between-turns regression test fails on base code (timed out waiting for the CLI's own turn) and passes on head; the fix covers every no-turn kind, not only this one."
+    },
+    {
+      "id": "ni7",
+      "claim": "The new 'holding a … read between turns' log line leaks message content (a user's text, a tool result) into the journal",
+      "location": "jarvis/v2/providers/claude.py:1986-1989",
+      "why_not": "It logs only the thread id and type(item).__name__, never the message; the comment says 'named (no content)'."
+    },
+    {
+      "id": "ni8",
+      "claim": "Inside a turn, _read now gives a rate_limit_event a part in deciding ownership, so it can start or steal a turn",
+      "location": "jarvis/v2/providers/claude.py:1594-1660",
+      "why_not": "The diff does not touch _read. Its ownership branches test SdkUserMessage, AssistantMessage, StreamEvent and ResultMessage explicitly (claude.py:1596-1660); a no-turn frame only extends hold_quiet during a steer hold ('any frame is life', claude.py:1595), as every frame did before the PR."
+    }
+  ]
+}
