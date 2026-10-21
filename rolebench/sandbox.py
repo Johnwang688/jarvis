@@ -102,6 +102,8 @@ class Cell:
             raise SandboxError(f"unknown sandbox profile {self.profile!r}")
         if self.network is None:
             self.network = NETWORK[self.profile]
+        if self.profile == "judge":
+            self.work_ro = True                   # the judge only ever reads
 
 
 def sandbox_home() -> str:

@@ -492,7 +492,7 @@ def test_sandbox_escape(root: Path) -> None:
         probes[f"lead_tmp_{i}"] = p
     host_present = {k for k, p in probes.items() if os.path.exists(p)}
     extra = ('if env | grep -q "^OPENROUTER_API_KEY="; then echo "or_key=yes"; else echo "or_key=no"; fi\n'
-             'if env | grep -q "^CLAUDE_CODE_\\|^ANTHROPIC_"; then echo "claude_env=yes"; else echo "claude_env=no"; fi\n'
+             'if env | grep "^CLAUDE_CODE_\\|^ANTHROPIC_" | grep -qv "^CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="; then echo "claude_env=yes"; else echo "claude_env=no"; fi\n'
              'if systemd-run --user --scope -q true 2>/dev/null; then echo "systemd=yes"; else echo "systemd=no"; fi\n'
              'if grep -qv "lo:\\|Inter-\\|face" /proc/net/dev; then echo "netdev=yes"; else echo "netdev=no"; fi\n'
              f'if test -e "{real}/.claude/.credentials.json"; then echo "claude_login=present"; else echo "claude_login=absent"; fi\n'
@@ -791,7 +791,7 @@ def test_parsers(root: Path) -> None:
           "workspace-write" in cx and "sandbox_workspace_write.network_access=false" in cx and "--json" in cx
           and cx[0] == str(sandbox.CODEX / "bin" / "codex"))
 
-    snap = root / "a" / "snap"
+    snap = Path("/home/rolebench-audit/cache/snap/0123456789abcdef")    # outside /tmp, which a cell may use
     R = runners.RunResult
     check("audit: gh and api.github are network markers",
           audit.network_flags(R("c", "m", tool_calls=[("Bash", '{"command": "gh pr view 1"}')]))
@@ -1141,13 +1141,17 @@ def test_cli_and_cells(shas, root: Path) -> None:
           not any("{" + k + "}" in t for t in texts for k in ("snap", "python", "brief", "focus", "suites", "scope", "fixtures",
                                                                "implement", "round", "findings", "environment")))
     main = __import__("rolebench.__main__", fromlist=["main"]).main
-    check("the CLI parses", main(["report", "--out", str(root / "r.md")]) == 0)
+    with contextlib.redirect_stdout(io.StringIO()):
+        check("the CLI parses", main(["report", "--out", str(root / "r.md")]) == 0)
+    cli_run = root / "cli-run"
+    cli_run.mkdir()
+    (cli_run / "run.json").write_text(json.dumps({"kind": "implement", "result": "ok"}))
     with env(ROLEBENCH_QUOTA_OVERRIDE=None):
         refused = raises(lambda: main(["--no-quota-guard", "judge", "--run", str(root)]), SystemExit)
     check("--no-quota-guard without ROLEBENCH_QUOTA_OVERRIDE is refused", refused)
     err = io.StringIO()
     with env(ROLEBENCH_QUOTA_OVERRIDE="owner OK in test"), contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
-        main(["--no-quota-guard", "judge", "--run", str(config.runs_root())])
+        main(["--no-quota-guard", "judge", "--run", str(cli_run)])
     check("--no-quota-guard with a reason prints a loud warning", "quota guard is OFF" in err.getvalue() and "owner OK in test" in err.getvalue())
     help_text = __import__("rolebench.__main__", fromlist=["main"]).__doc__
     check("the docs say an agent never passes the override without the owner's OK", "never passes it" in help_text)

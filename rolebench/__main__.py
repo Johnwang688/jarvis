@@ -138,7 +138,7 @@ def cmd_judge(args) -> int:
             continue
         try:
             doc = judge.judge_run(d, cases.load(run["case_id"]), quota_override=override, force=args.force)
-        except judge.JudgeError as exc:
+        except (judge.JudgeError, cases.CaseError) as exc:
             print(f"{d.name}: judge failed: {exc}")
             continue
         judged.append(d)
