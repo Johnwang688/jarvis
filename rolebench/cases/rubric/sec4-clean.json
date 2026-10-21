@@ -11,7 +11,7 @@
    "id": "ni1",
    "claim": "write_private replaces a symlink that already sits at the target instead of refusing it, contradicting 'never through a symlink' / the spec's 'refused, not followed'",
    "location": "jarvis/private_write.py:14-15, 43",
-   "why_not": "The security property is that no write goes through the link, and os.replace swaps the link itself for the new file, which the module docstring states (jarvis/private_write.py:14-15). The acceptance test accepts either outcome ('refusing (raising) or replacing the link are both fine', tests/private_writes_check.py:483) and checks the link's target is untouched; it passes for all five writers."
+   "why_not": "The security property is that no write goes through the link, and os.replace swaps the link itself for the new file, which the module docstring states (jarvis/private_write.py:14-15). The acceptance test accepts either outcome ('refusing (raising) or replacing the link are both fine', tests/private_writes_check.py:483) and checks the link's target is untouched; it passes for all five writers. The spec's acceptance text (docs/plans/2026-10-18-security-fix-specs.md:325-326) literally says an existing symlink at the target 'is refused, not followed'. Replacing it departs from that wording but is not a security defect: a finding that only cites the wording is a nit, and one claiming a write through the link is invalid."
   },
   {
    "id": "ni2",
