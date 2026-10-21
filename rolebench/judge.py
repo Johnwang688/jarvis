@@ -18,7 +18,7 @@ import shutil
 import time
 from pathlib import Path
 
-from . import config, quota, runners, sandbox, snapshot
+from . import cases, config, quota, runners, sandbox, snapshot
 
 VERDICTS = ("match", "valid-new", "invalid", "nit")
 
@@ -65,6 +65,13 @@ def score(matches: list[dict], ground_truth: list[dict]) -> dict:
         "valid_new": sum(m["verdict"] == "valid-new" for m in matches),
         "nits": sum(m["verdict"] == "nit" for m in matches),
     }
+
+
+def scores(matches: list[dict], case: dict, gt: list[dict]) -> tuple[dict, dict | None]:
+    """(the score on the original key, the score on original + pooled or None
+    without a pooled key). A match on a pooled id counts only in the second."""
+    pooled = len(gt) > len(case["ground_truth"])
+    return score(matches, case["ground_truth"]), (score(matches, gt) if pooled else None)
 
 
 PROMPT = """\
@@ -179,7 +186,8 @@ def judge_run(run_dir: Path, case: dict, judge_fn=default_judge, quota_override:
         if done is not None:
             return {**done, "reused": True}
     items = json.loads((run_dir / "findings.json").read_text(encoding="utf-8"))
-    gt = case["ground_truth"]
+    # A run judged after pooling sees the original key plus the accepted pooled entries.
+    gt = cases.full_ground_truth(case)
     text, ids = blind(items, rng or random.Random())
     bad = (run.get("hygiene") or {}).get("after_reset")
     if bad:
@@ -224,13 +232,18 @@ def judge_run(run_dir: Path, case: dict, judge_fn=default_judge, quota_override:
         if matches is None:
             (run_dir / "judge.json").write_text(json.dumps({"valid": False, "error": error, "attempts": attempts}), encoding="utf-8")
             raise JudgeError(f"judge output invalid twice: {error}")
-    doc = {"valid": True, "matches": matches, "score": score(matches, gt), "attempts": attempts, "cost_usd": cost,
+    pooled_ids = [g["id"] for g in gt if g not in case["ground_truth"]]
+    original_score, pooled_score = scores(matches, case, gt)
+    doc = {"valid": True, "matches": matches, "score": original_score,
+           "score_pooled": pooled_score, "attempts": attempts, "cost_usd": cost,
            "finding_ids": ids, "quota_guard": f"off: {quota_override}" if quota_override else "on",
            "quota_before": quota_before, "quota_after": quota.readings(["claude"], quota_reader),
            "effort": config.EFFORT["judge"],
+           "key": {"original": [g["id"] for g in case["ground_truth"]], "pooled": pooled_ids},
            "judged_at": time.strftime("%Y-%m-%dT%H:%M:%S")}
     (run_dir / "judge.json").write_text(json.dumps(doc, indent=1), encoding="utf-8")
-    run["score"], run["judged"] = doc["score"], True
+    # run.score stays on the original key; the pooled key's score is apart
+    run["score"], run["score_pooled"], run["judged"] = doc["score"], doc["score_pooled"], True
     (run_dir / "run.json").write_text(json.dumps(run, indent=1), encoding="utf-8")
     _record_valid_new(run, [{"case": run["case_id"], "run": run["run_id"], "severity": m["severity"],
                              "finding": items[ids[m["finding"]]], "note": m.get("note", "")}

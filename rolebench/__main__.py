@@ -5,6 +5,8 @@
     python -m rolebench judge --run ~/.cache/jarvis-lead/rolebench/runs/<run-id>
     python -m rolebench implement --harness claude --model sonnet --case impl-279 \\
         --reviewer-harness claude --reviewer-model opus
+    python -m rolebench pool --case c6-r1                       # cluster valid-new findings (one Opus call)
+    python -m rolebench pool --case c6-r1 --accept p1,p3 --severity p1=MED --reject p2 --by john
     python -m rolebench report
     python -m rolebench clean --judged
 
@@ -29,7 +31,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import cases, config, flows, judge, report, snapshot
+from . import cases, config, flows, judge, pool, report, snapshot
 
 OVERRIDE_ENV = "ROLEBENCH_QUOTA_OVERRIDE"
 
@@ -101,7 +103,8 @@ def _print_run(run: dict) -> None:
         split = doc.get("token_split") or {}
         line += (f" - {run['n_findings']} findings, {doc.get('turns')} turns, cost {doc.get('cost_usd')}, "
                  f"tokens in {split.get('input')} cached {split.get('cached')} out {split.get('output')}, "
-                 f"{run['wall_s']}s, net flags {len(run['network_flags'])}, escape flags {len(run['escape_flags'])}")
+                 f"{run['wall_s']}s, net flags {len(run['network_flags'])}, escape flags {len(run['escape_flags'])} "
+                 f"(of which {len(run.get('escape_cd_relative') or [])} probably cd-relative)")
         if doc.get("multi_model"):
             line += f", models {doc.get('models_used')}"
     if run["kind"] == "implement" and "merged_ready" in run:
@@ -173,12 +176,67 @@ def cmd_judge(args) -> int:
 
 
 def cmd_report(args) -> int:
-    text = report.render(report.load_runs(config.runs_root()))
+    runs = report.load_runs(config.runs_root())
+    text = report.render(runs, pool.rescore_runs(runs))
     out = Path(args.out) if args.out else config.home() / "report.md"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(text, encoding="utf-8")
     print(text)
     print(f"written to {out}")
+    return 0
+
+
+def _ids(values) -> list[str]:
+    return [v.strip() for item in values or () for v in item.split(",") if v.strip()]
+
+
+def cmd_pool(args) -> int:
+    """Cluster a case's valid-new findings (one Opus call), or adjudicate the clusters."""
+    if args.accept or args.reject or args.severity or args.accept_members:
+        severities = {}
+        for item in _ids(args.severity):
+            cid, _, sev = item.partition("=")
+            if not sev:
+                raise SystemExit(f"--severity takes id=SEVERITY, got {item!r}")
+            severities[cid.strip()] = sev.strip().upper()
+        try:
+            doc = pool.adjudicate(args.case, accept=_ids(args.accept), reject=_ids(args.reject),
+                                  severities=severities, by=args.by or "", accept_members=_ids(args.accept_members),
+                                  redefine=args.redefine)
+        except (pool.PoolError, cases.CaseError) as exc:
+            raise SystemExit(f"pool: {exc}")
+        print(f"{pool.key_path(args.case)}: {sum(c['status'] == pool.ACCEPTED for c in doc['clusters'])} accepted cluster(s)")
+    else:
+        try:
+            doc = pool.pool_case(args.case, quota_override=quota_override(args))
+        except (pool.PoolError, cases.CaseError) as exc:
+            raise SystemExit(f"pool: {exc}")
+    for c in doc["clusters"]:
+        print(f"{c['id']} [{c.get('severity_final') or c['severity']}] {c['status']}: {c['location']}: "
+              f"{c['mechanism']} ({len(c['members'])} member(s))")
+        for m in c.get("pending") or ():
+            print(f"    pending (needs --accept-members {c['id']}): {m['run']} finding {m['finding']}: {m.get('title', '')}")
+    print(pool.pool_path(args.case))
+    return 0
+
+
+def cmd_clear_flags(args) -> int:
+    """The lead clears a run's escape flags by hand, recording who, when and exactly which."""
+    run_dir = config.runs_root() / args.run
+    path = run_dir / "run.json"
+    if not path.is_file():
+        raise SystemExit(f"no run {args.run!r} under {config.runs_root()}")
+    if not (args.by or "").strip():
+        raise SystemExit("clear-flags needs --by <name>")
+    run = json.loads(path.read_text(encoding="utf-8"))
+    flags = list(run.get("escape_flags") or [])
+    if not flags:
+        raise SystemExit(f"{args.run}: no escape flags to clear")
+    run.setdefault("escape_cleared_log", []).append({"by": args.by.strip(), "on": time.strftime("%Y-%m-%d"),
+                                                     "flags": flags, "note": args.note or ""})
+    run["escape_cleared"] = {"by": args.by.strip(), "on": time.strftime("%Y-%m-%d"), "flags": flags}
+    path.write_text(json.dumps(run, indent=1), encoding="utf-8")
+    print(f"{args.run}: {len(flags)} escape flag(s) cleared by {args.by.strip()}")
     return 0
 
 
@@ -246,6 +304,24 @@ def main(argv: list[str] | None = None) -> int:
     j.add_argument("--run", required=True)
     j.add_argument("--force", action="store_true", help="judge again a run already judged")
     j.set_defaults(func=cmd_judge)
+
+    po = sub.add_parser("pool", help="cluster a case's judge-confirmed valid-new findings, or adjudicate the clusters")
+    po.add_argument("--case", required=True)
+    po.add_argument("--accept", action="append", help="cluster ids to accept into the pooled key (comma-separated, repeatable)")
+    po.add_argument("--reject", action="append", help="cluster ids to reject")
+    po.add_argument("--severity", action="append", help="id=SEVERITY for an accepted cluster (repeatable)")
+    po.add_argument("--accept-members", action="append",
+                    help="accepted cluster ids whose pending members (proposed by a later pool run) join the key")
+    po.add_argument("--redefine", action="store_true",
+                    help="allow an accepted cluster's committed mechanism or location to change")
+    po.add_argument("--by", help="who adjudicated (required with --accept/--reject/--severity/--accept-members)")
+    po.set_defaults(func=cmd_pool)
+
+    cf = sub.add_parser("clear-flags", help="the lead clears a run's escape flags by hand (recorded)")
+    cf.add_argument("--run", required=True, help="the run id (a directory under runs/)")
+    cf.add_argument("--by", required=True)
+    cf.add_argument("--note")
+    cf.set_defaults(func=cmd_clear_flags)
 
     rep = sub.add_parser("report", help="per-model tables over every run")
     rep.add_argument("--out")

@@ -164,7 +164,7 @@ def review_step(deps: Deps, rcase: dict, snap: Path, *, harness: str, model: str
     parsed = findings.parse(result.text)
     doc = {**result.summary(), "flags": findings.flags(result.tool_calls, parsed),
            "findings": parsed.findings, "parse_errors": parsed.errors,
-           "network_flags": audit.network_flags(result), "escape_flags": audit.escape_flags(result, snap),
+           "network_flags": audit.network_flags(result), **_escape_fields(result, snap),
            "settled_usd": result.raw.get("settled_usd")}
     cap = config.PER_RUN_CAP_USD
     doc["over_cap"] = harness == "jarvis" and max(result.cost_usd or 0, result.spend_usd or 0) >= cap
@@ -176,6 +176,18 @@ def review_step(deps: Deps, rcase: dict, snap: Path, *, harness: str, model: str
                      else "truncated" if result.truncated and not parsed.found_block
                      else "unparsed" if not parsed.found_block else "over-cap" if doc["over_cap"] else "ok")
     return doc
+
+
+def _escape_fields(result, snap: Path) -> dict:
+    """escape_flags: every flag (a superset of main's), all of which count
+    against the run until the lead clears them (`rolebench clear-flags`);
+    escape_cd_relative: the subset a lexical reading of cd would put inside
+    the snapshot, with the assumed cwd and the command, as a triage hint only
+    (the reading is unsound, so it never discounts a flag)."""
+    details = audit.escape_details(result, snap)
+    return {"escape_flags": [d["flag"] for d in details],
+            "escape_cd_relative": [{k: d[k] for k in ("flag", "assumed_cwd", "command")}
+                                   for d in details if d["probable_cd_relative"]]}
 
 
 def _base_run(deps: Deps, case: dict, harness: str, model: str, run_id: str, quota_before: dict | None = None) -> dict:
@@ -192,6 +204,10 @@ def _base_run(deps: Deps, case: dict, harness: str, model: str, run_id: str, quo
 def _finish(deps: Deps, run: dict, out_dir: Path, started: float) -> dict:
     run["finished"] = time.strftime("%Y-%m-%dT%H:%M:%S")
     run["wall_s"] = round(time.time() - started, 1)
+    # One cost field for every harness, the log row's: dollars for jarvis, the
+    # CLI's list-price equivalent for claude, None for codex (tokens only).
+    run["cost_usd"] = runlog.row(run)["cost_usd"]
+    run["cost_basis"], run["cost_parts"] = runlog.cost_basis(run), runlog.cost_parts(run)
     if run.get("quota_before"):
         # The same providers read again, so the lead can measure percent per run.
         run["quota_after"] = quota.readings(list(run["quota_before"]), deps.quota_reader)
@@ -247,6 +263,7 @@ def review_once(deps: Deps, case: dict, *, harness: str, model: str, n: int = 1)
     run = {**_base_run(deps, case, harness, model, run_id, qb), "snapshot": str(snap), "shas": shas,
            "task_class": "review", "reviewer": doc, "result": doc["result"], "n_findings": len(doc["findings"]),
            "flags": doc["flags"], "network_flags": doc["network_flags"], "escape_flags": doc["escape_flags"],
+           "escape_cd_relative": doc["escape_cd_relative"],
            "hygiene": hygiene, "quota_notes": notes, "reason": doc.get("error", ""), "truncated": bool(doc.get("truncated"))}
     return _finish(deps, run, out_dir, started)
 
@@ -350,7 +367,7 @@ def implement_once(deps: Deps, case: dict, *, harness: str, model: str, reviewer
     rcase = brief.reviewer_case(case)
     cumulative_cost, cumulative_known = 0.0, False
     cost_at_ready = None
-    net_flags, esc_flags = [], []
+    net_flags, esc_flags, esc_soft = [], [], []
     for round_no in range(max_rounds + 1):
         rdir = out_dir / f"round-{round_no}"
         rdir.mkdir(exist_ok=True)
@@ -367,10 +384,11 @@ def implement_once(deps: Deps, case: dict, *, harness: str, model: str, reviewer
         (rdir / "implementer-reply.txt").write_text(result.text, encoding="utf-8")
         impl_sum = result.summary()
         impl_sum["network_flags"] = audit.network_flags(result)
-        impl_sum["escape_flags"] = audit.escape_flags(result, snap)
+        impl_sum.update(_escape_fields(result, snap))
         impl_sum["settled_usd"] = result.raw.get("settled_usd")
         net_flags += [f"implementer r{round_no}: {f}" for f in impl_sum["network_flags"]]
         esc_flags += [f"implementer r{round_no}: {f}" for f in impl_sum["escape_flags"]]
+        esc_soft += [{**d, "flag": f"implementer r{round_no}: {d['flag']}"} for d in impl_sum["escape_cd_relative"]]
         try:
             folded = snapshot.fold_commits(snap, base)        # a commit never hides the change
             hygiene = snapshot.check(snap, case, {"change": base})
@@ -392,6 +410,7 @@ def implement_once(deps: Deps, case: dict, *, harness: str, model: str, reviewer
         if review_doc:
             net_flags += [f"reviewer r{round_no}: {f}" for f in review_doc["network_flags"]]
             esc_flags += [f"reviewer r{round_no}: {f}" for f in review_doc["escape_flags"]]
+            esc_soft += [{**d, "flag": f"reviewer r{round_no}: {d['flag']}"} for d in review_doc["escape_cd_relative"]]
         found = (review_doc or {}).get("findings", [])
         medplus = [f for f in found if f["severity"] in ("HIGH", "MED")]
         for part in (impl_sum, review_doc):
@@ -421,7 +440,7 @@ def implement_once(deps: Deps, case: dict, *, harness: str, model: str, reviewer
            "result": "ok" if rounds and not reason else "skipped" if not rounds else "partial", "reason": reason,
            "implementer": rounds[-1]["implementer"] if rounds else None,
            "reviewer": rounds[-1].get("reviewer") if rounds else None, "quota_notes": notes,
-           "network_flags": net_flags, "escape_flags": esc_flags,
+           "network_flags": net_flags, "escape_flags": esc_flags, "escape_cd_relative": esc_soft,
            "truncated": any(bool((r.get(k) or {}).get("truncated")) for r in rounds for k in ("implementer", "reviewer"))}
     return _finish(deps, run, out_dir, started)
 

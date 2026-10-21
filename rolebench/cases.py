@@ -90,6 +90,65 @@ def validate(d) -> dict:
     return d
 
 
+GT_KEYS = {"id", "severity", "mechanism", "location", "evidence", "source"}
+POOLED_KEYS = {"case", "source", "adjudicated_by", "date", "ground_truth", "members"}
+DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def pooled_path(case_id: str, directory: Path | None = None) -> Path:
+    """The committed pooled key: rolebench/cases/pooled/<case>.json."""
+    return (directory or config.cases_dir()) / "pooled" / f"{case_id}.json"
+
+
+def validate_pooled(d, case: dict) -> dict:
+    """A pooled key (pool.adjudicate writes it): the ground-truth schema with
+    `pool-` ids that never collide with the original key, who adjudicated it
+    and when, and each entry's member findings (run id, finding index)."""
+    _need(isinstance(d, dict) and set(d) == POOLED_KEYS, f"a pooled key has exactly {sorted(POOLED_KEYS)}")
+    _need(d["case"] == case["id"], f"pooled key for {d['case']!r}, not {case['id']!r}")
+    _need(d["source"] == "pooled", "source must be 'pooled'")
+    _need(isinstance(d["adjudicated_by"], str) and d["adjudicated_by"].strip() != "", "adjudicated_by must be a name")
+    _need(isinstance(d["date"], str) and bool(DATE_RE.match(d["date"])), "date must be YYYY-MM-DD")
+    _need(not SECRET_RE.search(json.dumps(d)), "pooled key contains something that looks like a credential")
+    original = {g["id"] for g in case.get("ground_truth") or []}
+    gt = d["ground_truth"]
+    _need(isinstance(gt, list), "ground_truth must be a list")
+    ids = set()
+    for g in gt:
+        _need(isinstance(g, dict) and set(g) == GT_KEYS, f"pooled ground truth entries need exactly {sorted(GT_KEYS)}")
+        _need(all(isinstance(v, str) and v.strip() for v in g.values()), "ground_truth fields must be non-empty strings")
+        _need(g["severity"] in config.SEVERITIES, f"bad severity {g['severity']!r}")
+        _need(g["id"].startswith("pool-") and g["id"] not in ids and g["id"] not in original,
+              f"pooled id {g['id']!r} must start with pool- and be unique")
+        ids.add(g["id"])
+    mem = d["members"]
+    _need(isinstance(mem, dict) and set(mem) == ids, "members must list exactly the pooled ids")
+    for gid, rows in mem.items():
+        _need(isinstance(rows, list) and rows and all(
+            isinstance(r, list) and len(r) == 2 and isinstance(r[0], str) and r[0]
+            and isinstance(r[1], int) and not isinstance(r[1], bool) and r[1] >= 0 for r in rows),
+            f"members of {gid} must be [run id, finding index] pairs")
+    return d
+
+
+def load_pooled(case_id: str, directory: Path | None = None) -> dict | None:
+    """The case's validated pooled key, or None when it has none."""
+    path = pooled_path(case_id, directory)
+    if not path.exists():
+        return None
+    try:
+        d = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise CaseError(f"cannot read {path}: {exc}") from exc
+    return validate_pooled(d, load(case_id, directory))
+
+
+def full_ground_truth(case: dict, directory: Path | None = None) -> list[dict]:
+    """The original key plus the accepted pooled entries (what a new run is judged against)."""
+    key = load_pooled(case["id"], directory) if case.get("kind") == "review" else None
+    return list(case.get("ground_truth") or []) + list((key or {}).get("ground_truth") or [])
+
+
 def load(case_id: str, directory: Path | None = None) -> dict:
     path = (directory or config.cases_dir()) / f"{case_id}.json"
     try:

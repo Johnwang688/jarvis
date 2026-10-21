@@ -52,7 +52,15 @@ def _split(doc: dict, key: str):
     return v if isinstance(v, int) else None
 
 
-def review_rows(runs: list[dict]) -> list[dict]:
+def escape_cleared(run: dict) -> bool:
+    """The lead cleared exactly the run's current escape flags (a later flag is never pre-cleared)."""
+    c = run.get("escape_cleared") or {}
+    return bool(c) and sorted(c.get("flags") or []) == sorted(run.get("escape_flags") or [])
+
+
+def review_rows(runs: list[dict], rescored: dict | None = None) -> list[dict]:
+    """One row per review run. With `rescored` (pool.rescore_runs) a judged run
+    carries both its original-key and its pooled-key recall."""
     rows = []
     for r in runs:
         if r.get("kind") != "review" or r.get("result") == "skipped":
@@ -60,14 +68,23 @@ def review_rows(runs: list[dict]) -> list[dict]:
         doc = r.get("reviewer") or {}
         flags = r.get("flags") or {}
         score = r.get("score") or {}
+        rs = (rescored or {}).get(r.get("run_id"))
+        orig = rs["original"] if rs else {"weighted_recall": score.get("weighted_recall"),
+                                          "medplus_recall": score.get("medplus_recall")}
+        pooled = rs["pooled"] if rs else (r.get("score_pooled") or {})
         rows.append({
             "harness": r["harness"], "model": r["model"], "case": r["case_id"], "result": r["result"],
-            "weighted_recall": score.get("weighted_recall"), "medplus_recall": score.get("medplus_recall"),
+            "weighted_recall": orig.get("weighted_recall"), "medplus_recall": orig.get("medplus_recall"),
+            "weighted_recall_pooled": pooled.get("weighted_recall"), "medplus_recall_pooled": pooled.get("medplus_recall"),
             "false_positives": score.get("false_positives"),
             "ran_tests": float(flags["ran_tests"]) if "ran_tests" in flags else None,
             "tried_mutant": float(flags["tried_mutant"]) if "tried_mutant" in flags else None,
             "cost": doc.get("cost_usd"), "wall": r.get("wall_s"), "tool_calls": doc.get("tool_calls"),
-            "network": len(r.get("network_flags") or []), "escape": len(r.get("escape_flags") or []),
+            "network": len(r.get("network_flags") or []),
+            # every escape flag counts until the lead clears it (clear-flags); the cd-relative
+            # count is "of which", a triage hint that never discounts a flag
+            "escape": 0 if escape_cleared(r) else len(r.get("escape_flags") or []),
+            "escape_soft": len(r.get("escape_cd_relative") or []),
             "in_tokens": _split(doc, "input"), "cached_tokens": _split(doc, "cached"), "out_tokens": _split(doc, "output"),
         })
     return rows
@@ -94,26 +111,37 @@ def implement_rows(runs: list[dict]) -> list[dict]:
     return rows
 
 
-def render(runs: list[dict]) -> str:
-    out = ["# Role bench report", "",
+POOLING_NOTE = ("Recall is shown against two keys: the original key (the findings the PR's own review "
+                "adjudicated) and the pooled key (the original plus the clusters of judge-confirmed valid-new "
+                "findings the lead accepted, `rolebench pool`). Pooling bias: the pool is built from the models "
+                "that ran, so a defect no model found is still missing from both keys, and pooled recall rewards "
+                "finding what other models in this bench found.")
+
+
+def render(runs: list[dict], rescored: dict | None = None) -> str:
+    out = ["# Role bench report", "", POOLING_NOTE, "",
            "Ranges are lo-hi over runs. Review scores come from the Opus judge and are blank for unjudged runs. "
            "Cost is dollars (jarvis), list-price equivalent (claude) or blank (codex: tokens only). "
            "Tokens: input excludes cached reads in every harness (Codex's input_tokens include them and are split here). "
            "Never pooled with agent-bench, long-bench or swecompare.", ""]
-    rev = by_model(review_rows(runs), ["weighted_recall", "medplus_recall", "false_positives", "ran_tests",
+    rev = by_model(review_rows(runs, rescored), ["weighted_recall", "medplus_recall", "weighted_recall_pooled",
+                                                 "medplus_recall_pooled", "false_positives", "ran_tests",
                                       "tried_mutant", "cost", "in_tokens", "cached_tokens", "out_tokens", "wall",
-                                      "tool_calls", "network", "escape"])
+                                      "tool_calls", "network", "escape", "escape_soft"])
     out += ["## Reviewer bench", ""]
     if rev:
-        out += ["| harness | model | weighted recall | MED+ recall | false pos | ran tests | tried mutant | cost | "
-                "in tok | cached tok | out tok | wall s | tool calls | net/escape flags |",
-                "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+        out += ["| harness | model | weighted recall (original key) | MED+ recall (original key) | "
+                "weighted recall (pooled key) | MED+ recall (pooled key) | false pos | ran tests | tried mutant | cost | "
+                "in tok | cached tok | out tok | wall s | tool calls | net/escape flags | of which probably cd-relative |",
+                "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
         for (h, m), v in sorted(rev.items()):
             out.append(f"| {h} | {m} | {_fmt(v['weighted_recall'], pct=True)} | {_fmt(v['medplus_recall'], pct=True)} | "
+                       f"{_fmt(v['weighted_recall_pooled'], pct=True)} | {_fmt(v['medplus_recall_pooled'], pct=True)} | "
                        f"{_fmt(v['false_positives'], digits=0)} | {_fmt(v['ran_tests'], pct=True)} | {_fmt(v['tried_mutant'], pct=True)} | "
                        f"{_fmt(v['cost'], money=True)} | {_fmt(v['in_tokens'], digits=0)} | {_fmt(v['cached_tokens'], digits=0)} | "
                        f"{_fmt(v['out_tokens'], digits=0)} | {_fmt(v['wall'], digits=0)} | "
-                       f"{_fmt(v['tool_calls'], digits=0)} | {_fmt(v['network'], digits=0)}/{_fmt(v['escape'], digits=0)} |")
+                       f"{_fmt(v['tool_calls'], digits=0)} | {_fmt(v['network'], digits=0)}/{_fmt(v['escape'], digits=0)} | "
+                       f"{_fmt(v['escape_soft'], digits=0)} |")
     else:
         out.append("No review runs yet.")
     impl = by_model(implement_rows(runs), ["merge_ready", "rounds", "cost_to_ready", "total_cost", "in_tokens",
@@ -143,6 +171,16 @@ def render(runs: list[dict]) -> str:
     if dirty:
         out += ["", "## Snapshots an agent changed (commits, refs or HEAD; undone before judging)", ""] + [
             f"- {r['run_id']}: {'; '.join(r['hygiene']['after_run'])}" for r in dirty]
+    soft = [(r, d) for r in runs for d in r.get("escape_cd_relative") or ()]
+    if soft:
+        out += ["", "## Escape flags that are probably cd-relative (a triage hint: they still count until cleared)", ""] + [
+            f"- {r['run_id']}: {d['flag']} (assumed cwd `{d.get('assumed_cwd')}`) in `{(d.get('command') or '')[:160]}`"
+            for r, d in soft]
+    cleared = [r for r in runs if escape_cleared(r)]
+    if cleared:
+        out += ["", "## Escape flags cleared by hand", ""] + [
+            f"- {r['run_id']}: {len(r['escape_cleared']['flags'])} flag(s) cleared by {r['escape_cleared']['by']} "
+            f"on {r['escape_cleared']['on']}" for r in cleared]
     skipped = [r for r in runs if r.get("result") == "skipped"]
     if skipped:
         out += ["", "## Skipped cells", ""] + [f"- {r['run_id']}: {r.get('reason', '')}" for r in skipped]

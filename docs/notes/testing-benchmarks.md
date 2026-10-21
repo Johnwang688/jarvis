@@ -1260,7 +1260,25 @@ quoted strings inside inline code), never words of prose or a commit message. Ea
 resolved first: simple `NAME=value` assignments are tracked so a later `$NAME` expands,
 `~` and `~user` expand, `file://` URLs and `/proc/<n>/root/X` become paths, and a word is
 judged by its literal prefix up to its first glob or unknown variable
-(`/home/u/projects/*` names `/home/u/projects/`). It is then judged by the cell's layout: the snapshot, the system trees, the
+(`/home/u/projects/*` names `/home/u/projects/`). Every path is judged from the snapshot root, exactly as on main
+(c717ed9), so the flags are a **superset of main's by construction** (one exception: a claude
+cell's own task output, below); a bare `cd` names HOME and is flagged too. The audit is a
+detector and bwrap is the boundary, so no reading of `cd` ever removes a flag (two review rounds
+showed cwd inference leaking: heredoc bodies, functions, and trees changed after the run).
+Instead each flag may carry a **triage hint**: `probable_cd_relative: true` with the assumed
+cwd when a lexical reading of the preceding cds (in command position; Claude's Bash keeps its
+cwd between calls and is reset to the root when it leaves) would put the path inside the
+snapshot. The reading is the same unsound inference, so **every flag counts** against the run's
+validity: `run.json` and the log carry `escape_flags` (all) and `escape_cd_relative` (the hinted
+subset, with the command), and the report's escape column counts every flag, with an "of which
+probably cd-relative" column and a listing. A run stays flagged until the lead clears it by hand:
+`python -m rolebench clear-flags --run <id> --by <name> [--note ...]` records who, when and
+exactly which flags (a flag that appears later is not cleared). A bare `cd` is read only from a
+command (never a grep pattern or a description), in command position, followed by an operator or
+the end. Re-auditing the P2 pilot: the 12 old false positives are 11 hinted flags plus Claude's
+own task output, now in-cell; all 11 still count until cleared. In a claude
+cell the CLI's own task output, `/tmp/claude-<uid>/<slug of the cell's cwd>/`, is in-cell;
+any other `/tmp/claude-*` is flagged. It is then judged by the cell's layout: the snapshot, the system trees, the
 cell's `/tmp` and, on the tmpfs HOME (mounted at the real home's path), only the trees that
 exist in the cell (its CLI's own state: the trimmed login and the few files Claude Code
 keeps for itself, `~/.codex-rolebench`, the Jarvis loop's spill files; and the binds).
@@ -1330,6 +1348,33 @@ A review whose final reply still ends at the output limit (the loop's `[cut off 
 token limit]` after its own continuations) is recorded as `result: "truncated"`,
 `truncated: true` in `run.json` and the log row, never scored as a review with no
 findings; implement runs carry `truncated` too.
+
+**Pooled ground truth (2026-10-21, after the P2 pilot).** One reviewer's key is incomplete: on
+c6-r1 and dc-r1 every model, Opus included, scored 0–50% recall against the original key but
+reported many defects the judge confirmed as valid-new (the lead spot-checked dc-r1/opus: the
+judge was right). TREC-style pooling turns them into ground truth:
+`python -m rolebench pool --case <id>` collects every judged run's valid-new findings and, for
+the ones in no cluster yet, makes **one** Opus call (blinded, a read-only judge cell, effort
+high, the net gate, quota guard and ceiling as for the judge, one retry on invalid JSON) that
+puts each in an existing cluster or a new one. The pool is `pool/<case>.json` under the
+bench's home; re-running it sends only what is new. `pool --case <id> --accept p1,p3
+[--severity p1=MED] --reject p2 --by <name>` is the lead's adjudication: accepted clusters
+become the committed pooled key `rolebench/cases/pooled/<case>.json` (the ground-truth schema,
+`pool-` ids, `source: "pooled"`, who and when, each entry's member findings), validated by
+`cases.validate_pooled`; the original case file is never edited. Findings a later pool run proposes for an
+accepted cluster wait as `pending` until `--accept-members <id>`; the key is built and
+validated before anything is saved; a committed id is never dropped or reused (a lost pool
+restarts from the key) and never redefined without `--redefine`; the key's evidence names
+the cluster and its size, never reviewer text (untrusted, and it reaches every later judge). Runs already judged are
+rescored without judging again: a finding that is a member of an accepted cluster is a hit on
+that pooled id while its current verdict is still valid-new. `run.json` keeps `score` on the
+original key and the pooled key's in `score_pooled`. A mixed-unit implement run (say a claude
+implementer and a jarvis reviewer) has `cost_basis: "mixed"`, its costs per basis in
+`cost_parts`, and no summed `cost_usd`. Runs judged later see original plus pooled entries in the judge's key
+(`judge.json` records both id lists). The report shows weighted and MED+ recall against the
+**original key** and the **pooled key**, labelled. Pooling bias: the pool is built from the
+models that ran, so a defect none found is missing from both keys, and pooled recall rewards
+finding what the other models found.
 
 The judge is `claude -p --model opus` over shuffled, blinded findings plus the answer
 key, reading an export of the change commit (no `.git`, its diff beside it) in a
