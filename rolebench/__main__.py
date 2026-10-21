@@ -191,7 +191,7 @@ def _ids(values) -> list[str]:
 
 def cmd_pool(args) -> int:
     """Cluster a case's valid-new findings (one Opus call), or adjudicate the clusters."""
-    if args.accept or args.reject or args.severity:
+    if args.accept or args.reject or args.severity or args.accept_members:
         severities = {}
         for item in _ids(args.severity):
             cid, _, sev = item.partition("=")
@@ -200,8 +200,9 @@ def cmd_pool(args) -> int:
             severities[cid.strip()] = sev.strip().upper()
         try:
             doc = pool.adjudicate(args.case, accept=_ids(args.accept), reject=_ids(args.reject),
-                                  severities=severities, by=args.by or "")
-        except pool.PoolError as exc:
+                                  severities=severities, by=args.by or "", accept_members=_ids(args.accept_members),
+                                  redefine=args.redefine)
+        except (pool.PoolError, cases.CaseError) as exc:
             raise SystemExit(f"pool: {exc}")
         print(f"{pool.key_path(args.case)}: {sum(c['status'] == pool.ACCEPTED for c in doc['clusters'])} accepted cluster(s)")
     else:
@@ -212,6 +213,8 @@ def cmd_pool(args) -> int:
     for c in doc["clusters"]:
         print(f"{c['id']} [{c.get('severity_final') or c['severity']}] {c['status']}: {c['location']}: "
               f"{c['mechanism']} ({len(c['members'])} member(s))")
+        for m in c.get("pending") or ():
+            print(f"    pending (needs --accept-members {c['id']}): {m['run']} finding {m['finding']}: {m.get('title', '')}")
     print(pool.pool_path(args.case))
     return 0
 
@@ -286,7 +289,11 @@ def main(argv: list[str] | None = None) -> int:
     po.add_argument("--accept", action="append", help="cluster ids to accept into the pooled key (comma-separated, repeatable)")
     po.add_argument("--reject", action="append", help="cluster ids to reject")
     po.add_argument("--severity", action="append", help="id=SEVERITY for an accepted cluster (repeatable)")
-    po.add_argument("--by", help="who adjudicated (required with --accept/--reject/--severity)")
+    po.add_argument("--accept-members", action="append",
+                    help="accepted cluster ids whose pending members (proposed by a later pool run) join the key")
+    po.add_argument("--redefine", action="store_true",
+                    help="allow an accepted cluster's committed mechanism or location to change")
+    po.add_argument("--by", help="who adjudicated (required with --accept/--reject/--severity/--accept-members)")
     po.set_defaults(func=cmd_pool)
 
     rep = sub.add_parser("report", help="per-model tables over every run")

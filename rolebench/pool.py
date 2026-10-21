@@ -14,12 +14,18 @@ confirmed them as "valid-new". Pooling turns those into ground truth:
 2. `adjudicate` is the lead's call: accepted clusters become the committed
    pooled key `rolebench/cases/pooled/<case>.json` (the ground-truth schema,
    `source: "pooled"`, who and when, and each cluster's members), rejected
-   ones never do. The original case file is never edited.
+   ones never do. The original case file is never edited. Findings a later
+   pool run proposes for an accepted cluster wait as `pending` until the lead
+   takes them in (`accept_members`). The key is built and validated before
+   anything is saved; a committed id is never dropped or reused (a lost pool
+   restarts from the key, new ids start past it) and never given another
+   mechanism or location without `redefine`.
 3. `rescore` scores a judged run against the original key and against the
    pooled key (original plus accepted clusters) without judging it again: a
    finding that is a member of an accepted cluster is a hit on that pooled
    id, deterministically. Runs judged after pooling see original plus pooled
-   ground truth in the judge's key.
+   ground truth in the judge's key. A member counts only while the run's
+   current verdict for that finding is still valid-new.
 
 Pooling bias: the pool is built from the models that ran, so a defect no
 model found is still missing, and a model's own finds raise its pooled recall
@@ -69,9 +75,21 @@ def _atomic(path: Path, doc: dict) -> None:
 
 
 def load_pool(case_id: str) -> dict:
+    """The pool, or a fresh one. A fresh pool starts from the committed key's
+    accepted clusters (the pool file lives in a cache; the key is committed),
+    so a lost pool can never reuse a committed id or drop an entry."""
     path = pool_path(case_id)
     if not path.exists():
-        return {"case": case_id, "clusters": [], "calls": []}
+        pool = {"case": case_id, "clusters": [], "calls": []}
+        key = cases.load_pooled(case_id) if cases.pooled_path(case_id).exists() else None
+        for g in (key or {}).get("ground_truth") or ():
+            cid = g["id"][len(KEY_PREFIX):]
+            pool["clusters"].append({"id": cid, "severity": g["severity"], "mechanism": g["mechanism"],
+                                     "location": g["location"], "status": ACCEPTED, "judge_notes": [], "pending": [],
+                                     "members": [{"run": r, "finding": int(i)} for r, i in key["members"].get(g["id"], [])],
+                                     "adjudicated_by": key["adjudicated_by"], "adjudicated_on": key["date"],
+                                     "restored_from_key": True})
+        return pool
     doc = json.loads(path.read_text(encoding="utf-8"))
     if doc.get("case") != case_id or not isinstance(doc.get("clusters"), list):
         raise PoolError(f"{path} is not the pool for {case_id}")
@@ -126,10 +144,6 @@ def collect(case_id: str, runs_root: Path | None = None) -> list[dict]:
 
 def _member_key(item: dict) -> tuple[str, int]:
     return (item["run"], int(item["finding"]))
-
-
-def members(pool: dict) -> set[tuple[str, int]]:
-    return {(m["run"], int(m["finding"])) for c in pool["clusters"] for m in c["members"]}
 
 
 # --- the clustering call --------------------------------------------------------------
@@ -201,6 +215,8 @@ def validate_reply(doc, finding_ids: list[str], cluster_ids: list[str]) -> tuple
     for a in doc["assign"]:
         if not isinstance(a, dict) or set(a) != {"finding", "cluster"}:
             raise PoolError(f"bad assignment {a!r}")
+        if not isinstance(a["finding"], str) or not isinstance(a["cluster"], str):
+            raise PoolError(f"assignment values must be strings: {a!r}")
         if a["finding"] not in finding_ids or a["finding"] in assign:
             raise PoolError(f"unknown or repeated finding {a['finding']!r}")
         if a["cluster"] not in cluster_ids and a["cluster"] not in new:
@@ -223,8 +239,12 @@ def default_pool_fn(prompt: str, cwd: Path) -> tuple[str, float | None]:
     return result.text, result.cost_usd
 
 
-def _next_id(pool: dict) -> int:
+def _next_id(pool: dict, case_id: str) -> int:
+    """Past every id in the pool and every id in the committed key."""
     nums = [int(c["id"][1:]) for c in pool["clusters"] if CLUSTER_ID.match(c["id"])]
+    key = cases.load_pooled(case_id) if cases.pooled_path(case_id).exists() else None
+    nums += [int(g["id"][len(KEY_PREFIX) + 1:]) for g in (key or {}).get("ground_truth") or ()
+             if CLUSTER_ID.match(g["id"][len(KEY_PREFIX):])]
     return max(nums, default=0) + 1
 
 
@@ -255,7 +275,7 @@ def pool_case(case_id: str, pool_fn=default_pool_fn, quota_override: str = "", q
         prompt = PROMPT.format(clusters=clusters_text(pool), findings=text)
         cell = config.home() / "pool-cell" / snapshot.new_name()
         cell.mkdir(parents=True, exist_ok=True)
-        error, cost, result = "", 0.0, None
+        error, cost, result, attempt = "", 0.0, None, 0
         try:
             for attempt in (1, 2):
                 check_quota()
@@ -269,54 +289,65 @@ def pool_case(case_id: str, pool_fn=default_pool_fn, quota_override: str = "", q
                     error = str(exc)
         finally:
             shutil.rmtree(cell, ignore_errors=True)
-        pool.setdefault("calls", []).append({"at": time.strftime("%Y-%m-%dT%H:%M:%S"), "findings": len(new_items),
-                                             "attempts": attempt, "cost_usd": cost, "valid": result is not None,
-                                             "error": error if result is None else "", "effort": config.EFFORT["judge"],
-                                             "quota_guard": f"off: {quota_override}" if quota_override else "on",
-                                             "quota_before": quota_before,
-                                             "quota_after": quota.readings(["claude"], reader)})
+            if attempt:                                  # a paid call is recorded, however it ended
+                pool.setdefault("calls", []).append({
+                    "at": time.strftime("%Y-%m-%dT%H:%M:%S"), "findings": len(new_items), "attempts": attempt,
+                    "cost_usd": cost, "valid": result is not None, "error": error if result is None else "",
+                    "effort": config.EFFORT["judge"], "quota_guard": f"off: {quota_override}" if quota_override else "on",
+                    "quota_before": quota_before, "quota_after": quota.readings(["claude"], reader)})
+                if result is None:
+                    _atomic(pool_path(case_id), pool)
         if result is None:
-            _atomic(pool_path(case_id), pool)
             raise PoolError(f"pool output invalid twice: {error}")
         assign, new = result
         named = {}
-        n = _next_id(pool)
+        n = _next_id(pool, case_id)
         for tmp_id in sorted(new, key=lambda k: int(k[3:])):
             cid = f"p{n}"
             n += 1
             named[tmp_id] = cid
-            pool["clusters"].append({"id": cid, **new[tmp_id], "members": [], "judge_notes": [], "status": PROPOSED})
+            pool["clusters"].append({"id": cid, **new[tmp_id], "members": [], "pending": [], "judge_notes": [],
+                                     "status": PROPOSED})
         by_id = {c["id"]: c for c in pool["clusters"]}
-        grown = set()
         for vid, cid in assign.items():
             cluster = by_id[named.get(cid, cid)]
             item = new_items[ids[vid]]
-            cluster["members"].append({k: item[k] for k in ("run", "finding", "severity", "file", "line", "title", "scenario")})
+            member = {k: item[k] for k in ("run", "finding", "severity", "file", "line", "title", "scenario")}
+            # A finding proposed for an accepted cluster waits for the lead (--accept-members)
+            # before it counts: the committed key changes only by adjudication.
+            cluster.setdefault("pending", [])
+            (cluster["pending"] if cluster["status"] == ACCEPTED else cluster["members"]).append(member)
             if item.get("note"):
                 cluster["judge_notes"].append(item["note"])
-            grown.add(cluster["id"])
         pool["updated"] = time.strftime("%Y-%m-%dT%H:%M:%S")
         _atomic(pool_path(case_id), pool)
-        if any(by_id[c]["status"] == ACCEPTED for c in grown) and key_path(case_id).exists():
-            write_key(case_id, pool)                     # accepted clusters that grew: their members follow
         return pool
+
+
+def members(pool: dict) -> set[tuple[str, int]]:
+    """Every (run, finding) already placed: members and pending ones."""
+    return {(m["run"], int(m["finding"])) for c in pool["clusters"]
+            for m in list(c["members"]) + list(c.get("pending") or [])}
 
 
 # --- adjudication ---------------------------------------------------------------------
 
 
 def adjudicate(case_id: str, accept=(), reject=(), severities: dict | None = None, by: str = "",
-               date: str | None = None) -> dict:
+               date: str | None = None, accept_members=(), redefine: bool = False) -> dict:
     """The lead's call. Accepted clusters (with an optional severity override)
-    go to the committed pooled key; rejected ones never do. Returns the pool."""
+    go to the committed pooled key; rejected ones never do; `accept_members`
+    takes an accepted cluster's pending members into it. The key is built and
+    validated before anything is saved. Returns the pool."""
     if not (by or "").strip():
         raise PoolError("adjudication needs --by <name>")
+    by = by.strip()
     severities = dict(severities or {})
     date = date or time.strftime("%Y-%m-%d")
     with _Locked(case_id):
         pool = load_pool(case_id)
         by_id = {c["id"]: c for c in pool["clusters"]}
-        for cid in list(accept) + list(reject) + list(severities):
+        for cid in list(accept) + list(reject) + list(severities) + list(accept_members):
             if cid not in by_id:
                 raise PoolError(f"no cluster {cid!r} in the pool for {case_id}")
         if set(accept) & set(reject):
@@ -326,46 +357,77 @@ def adjudicate(case_id: str, accept=(), reject=(), severities: dict | None = Non
                 raise PoolError(f"bad severity {sev!r} for {cid}")
             if cid not in accept and by_id[cid]["status"] != ACCEPTED:
                 raise PoolError(f"{cid}: a severity is set only on an accepted cluster")
+        for cid in accept_members:
+            if by_id[cid]["status"] != ACCEPTED and cid not in accept:
+                raise PoolError(f"{cid}: members are accepted only into an accepted cluster")
         for cid in accept:
             c = by_id[cid]
-            c["status"], c["adjudicated_by"], c["adjudicated_on"] = ACCEPTED, by.strip(), date
+            c["status"], c["adjudicated_by"], c["adjudicated_on"] = ACCEPTED, by, date
         for cid in reject:
             c = by_id[cid]
-            c["status"], c["adjudicated_by"], c["adjudicated_on"] = REJECTED, by.strip(), date
+            c["status"], c["adjudicated_by"], c["adjudicated_on"] = REJECTED, by, date
         for cid, sev in severities.items():
             by_id[cid]["severity_final"] = sev
+        for cid in accept_members:
+            c = by_id[cid]
+            moved = c.get("pending") or []
+            c["members"] = list(c["members"]) + moved
+            c["pending"] = []
+            c.setdefault("members_accepted", []).append(
+                {"by": by, "on": date, "members": [[m["run"], int(m["finding"])] for m in moved]})
+        doc = key_doc(case_id, pool, by=by, date=date, redefine=redefine)   # raises before anything is saved
         _atomic(pool_path(case_id), pool)
-        write_key(case_id, pool, by=by.strip(), date=date)
+        _atomic(key_path(case_id), doc)
         return pool
 
 
 def key_entries(pool: dict) -> tuple[list[dict], dict]:
-    """(ground-truth entries, {gt id: [[run, finding], ...]}) for the accepted clusters."""
+    """(ground-truth entries, {gt id: [[run, finding], ...]}) for the accepted
+    clusters. The evidence names the cluster and how many findings it holds,
+    never a reviewer's text: that text is untrusted (it reaches the judge's
+    key for every later run) and may carry anything a reviewer wrote."""
     gt, mem = [], {}
     for c in pool["clusters"]:
         if c["status"] != ACCEPTED:
             continue
         gid = KEY_PREFIX + c["id"]
-        first = (c["members"][0].get("scenario") or c["members"][0].get("title") or "").strip() if c["members"] else ""
         gt.append({"id": gid, "severity": c.get("severity_final") or c["severity"], "mechanism": c["mechanism"],
                    "location": c["location"],
-                   "evidence": (f"{len(c['members'])} reviewer finding(s) judged valid-new"
-                                + (f"; e.g. {first[:300]}" if first else "")),
+                   "evidence": f"pooled cluster {c['id']}: {len(c['members'])} reviewer finding(s) the blinded judge "
+                               f"confirmed as valid-new (listed under members)",
                    "source": f"pooled cluster {c['id']}, accepted by {c['adjudicated_by']} on {c['adjudicated_on']}"})
         mem[gid] = sorted([m["run"], int(m["finding"])] for m in c["members"])
     return gt, mem
 
 
-def write_key(case_id: str, pool: dict, by: str | None = None, date: str | None = None) -> Path:
-    """Write (or rewrite) the committed pooled key from the pool's accepted clusters."""
+def key_doc(case_id: str, pool: dict, by: str | None = None, date: str | None = None, redefine: bool = False) -> dict:
+    """The pooled key the pool's accepted clusters make, validated. A committed
+    id is never dropped, and never given another mechanism or location unless
+    `redefine` (the CLI's --redefine)."""
     gt, mem = key_entries(pool)
     path = key_path(case_id)
     old = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    new_by_id = {g["id"]: g for g in gt}
+    for g in old.get("ground_truth") or ():
+        now = new_by_id.get(g["id"])
+        if now is None:
+            raise PoolError(f"{g['id']} is in the committed key and would be dropped")
+        if (now["mechanism"], now["location"]) != (g["mechanism"], g["location"]) and not redefine:
+            raise PoolError(f"{g['id']} would change its mechanism or location; pass --redefine to do that on purpose")
     doc = {"case": case_id, "source": "pooled", "adjudicated_by": by or old.get("adjudicated_by") or "",
            "date": date or old.get("date") or time.strftime("%Y-%m-%d"), "ground_truth": gt, "members": mem}
-    cases.validate_pooled(doc, cases.load(case_id))
-    _atomic(path, doc)
-    return path
+    try:
+        cases.validate_pooled(doc, cases.load(case_id))
+    except cases.CaseError as exc:
+        raise PoolError(f"the pooled key would not validate: {exc}")
+    return doc
+
+
+def write_key(case_id: str, pool: dict, by: str | None = None, date: str | None = None, redefine: bool = False) -> Path:
+    """Write (or rewrite) the committed pooled key from the pool's accepted clusters."""
+    doc = key_doc(case_id, pool, by=by, date=date, redefine=redefine)
+    _atomic(key_path(case_id), doc)
+    return key_path(case_id)
 
 
 # --- rescoring --------------------------------------------------------------------------
@@ -391,9 +453,13 @@ def rescore(run_id: str, judge_doc: dict, case: dict, key: dict | None) -> dict:
     pooled_ids = {g["id"] for g in pooled_gt}
     matches = judge_doc.get("matches") or []
     caught = {m.get("gt") for m in matches if m.get("verdict") == "match"}
-    findings = {int(i) for i in (judge_doc.get("finding_ids") or {}).values()}
+    ids = judge_doc.get("finding_ids") or {}
+    # membership counts only for a finding the run's current verdict still calls
+    # valid-new: never one now judged invalid, nor beside a match on the key
+    still_new = {int(ids[m["finding"]]) for m in matches
+                 if m.get("verdict") == "valid-new" and m.get("finding") in ids}
     via_members = {gid for gid, mem in ((key or {}).get("members") or {}).items()
-                   if any(r == run_id and int(i) in findings for r, i in mem)}
+                   if any(r == run_id and int(i) in still_new for r, i in mem)}
     pooled_hits = (caught & pooled_ids) | via_members
     return {"original": recall(original, caught & orig_ids),
             "pooled": recall(original + pooled_gt, (caught & orig_ids) | pooled_hits),

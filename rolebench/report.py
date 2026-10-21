@@ -65,7 +65,7 @@ def review_rows(runs: list[dict], rescored: dict | None = None) -> list[dict]:
         rs = (rescored or {}).get(r.get("run_id"))
         orig = rs["original"] if rs else {"weighted_recall": score.get("weighted_recall"),
                                           "medplus_recall": score.get("medplus_recall")}
-        pooled = rs["pooled"] if rs else {}
+        pooled = rs["pooled"] if rs else (r.get("score_pooled") or {})
         rows.append({
             "harness": r["harness"], "model": r["model"], "case": r["case_id"], "result": r["result"],
             "weighted_recall": orig.get("weighted_recall"), "medplus_recall": orig.get("medplus_recall"),

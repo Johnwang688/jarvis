@@ -22,11 +22,26 @@ def role(summary: dict | None) -> dict | None:
 COST_BASIS = {"claude": "list-price equivalent", "jarvis": "usd (OpenRouter reported)", "codex": None}
 
 
+def cost_parts(run: dict) -> dict:
+    """{basis: dollars} over every role of a run (every round of an implement run)."""
+    parts: dict = {}
+    if run.get("kind") == "implement":
+        roles = [p for rd in run.get("rounds") or () for p in (rd.get("implementer"), rd.get("reviewer")) if p]
+    else:
+        roles = [run.get("reviewer")] if run.get("reviewer") else []
+    for part in roles:
+        basis = COST_BASIS.get(part.get("harness") or run.get("harness"))
+        if basis and isinstance(part.get("cost_usd"), (int, float)):
+            parts[basis] = round(parts.get(basis, 0.0) + part["cost_usd"], 6)
+    return parts
+
+
 def cost_basis(run: dict) -> str | None:
-    """What a run's cost_usd means; implement runs name both roles' harnesses."""
+    """What a run's cost_usd means: one basis, "mixed" (implement runs whose
+    roles bill in different units; the parts are in cost_parts), or None."""
     harnesses = [run.get("harness")] + ([run["reviewer_harness"]] if run.get("reviewer_harness") else [])
     bases = sorted({COST_BASIS.get(h) for h in harnesses if COST_BASIS.get(h)})
-    return " + ".join(bases) or None
+    return bases[0] if len(bases) == 1 else ("mixed" if bases else None)
 
 
 def row(run: dict) -> dict:
@@ -46,7 +61,9 @@ def row(run: dict) -> dict:
         "task_class": run.get("task_class") or run["kind"],
         "model": run["model"], "harness": run["harness"],
         "roles": roles,
-        "cost_usd": cost, "cost_basis": cost_basis(run),
+        # never a sum across units: a mixed run's cost is per basis only
+        "cost_usd": None if cost_basis(run) == "mixed" else cost, "cost_basis": cost_basis(run),
+        "cost_parts": cost_parts(run),
         "wall_s": run.get("wall_s"), "tool_calls": tool_calls,
         "result": run["result"], "reason": run.get("reason", ""),
         "rounds": run.get("rounds_to_merge_ready"), "merged_ready": run.get("merged_ready"),

@@ -195,7 +195,7 @@ def _finish(deps: Deps, run: dict, out_dir: Path, started: float) -> dict:
     # One cost field for every harness, the log row's: dollars for jarvis, the
     # CLI's list-price equivalent for claude, None for codex (tokens only).
     run["cost_usd"] = runlog.row(run)["cost_usd"]
-    run["cost_basis"] = runlog.cost_basis(run)
+    run["cost_basis"], run["cost_parts"] = runlog.cost_basis(run), runlog.cost_parts(run)
     if run.get("quota_before"):
         # The same providers read again, so the lead can measure percent per run.
         run["quota_after"] = quota.readings(list(run["quota_before"]), deps.quota_reader)

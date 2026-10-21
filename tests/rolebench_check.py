@@ -1595,6 +1595,7 @@ def test_parsers(root: Path) -> None:
         "cd a/b && cat ../../../x": ["cd a/b && cat ../../../x"],
         "for d in a/b; do cd $d; done; cat ../../x": ["for d in a/b; do cd $d; done; cat ../../x"],
         "cd hud && cd ../..": ["cd hud && cd ../.."], "ls ..": ["ls .."],
+        "cd hud; cd -P ..; cat ../x (an option makes the cwd unknown)": ["cd hud; cd -P ..; cat ../x"],
         "cd /tmp && cat ../home/johnw/.gitconfig": ["cd /tmp && cat ../home/johnw/.gitconfig"],
     }
     missed = [k for k, v in must_flag.items() if not calls("claude", v)]
@@ -1678,6 +1679,17 @@ def test_review_flow(shas, root: Path) -> None:
           audit.escape_flags(benign, snap_p) == [] and len(audit.escape_flags(escape, snap_p)) == 1,
           str(audit.escape_flags(benign, snap_p)))
     check("the claude cell had no budget imposed", deps.runners["claude"].calls[0]["budget"] is None)
+    mixed = {"run_id": "m1", "case_id": "c", "kind": "implement", "harness": "claude", "reviewer_harness": "jarvis",
+             "model": "haiku", "result": "ok", "total_cost_usd": 0.52,
+             "rounds": [{"implementer": {"harness": "claude", "cost_usd": 0.5}, "reviewer": {"harness": "jarvis", "cost_usd": 0.02}}]}
+    same = {**mixed, "reviewer_harness": "claude",
+            "rounds": [{"implementer": {"harness": "claude", "cost_usd": 0.5}, "reviewer": {"harness": "claude", "cost_usd": 0.25}}],
+            "total_cost_usd": 0.75}
+    mr, sr = runlog.row(mixed), runlog.row(same)
+    check("a mixed-unit implement run's cost is per basis, never one summed number",
+          mr["cost_usd"] is None and mr["cost_basis"] == "mixed"
+          and mr["cost_parts"] == {"list-price equivalent": 0.5, "usd (OpenRouter reported)": 0.02}
+          and sr["cost_usd"] == 0.75 and sr["cost_basis"] == "list-price equivalent" and sr["cost_parts"] == {"list-price equivalent": 0.75})
     check("run.json carries the same cost_usd as the log row, with what it means",
           run["cost_usd"] == row["cost_usd"] == 0.01 and run["cost_basis"] == row["cost_basis"] == "list-price equivalent")
     check("run.json keeps the random snapshot name and the build-time shas",
@@ -2178,6 +2190,8 @@ def test_pool(shas, root: Path) -> None:
                              "new_clusters": [{**ok_doc["new_clusters"][0], "id": "p2"}]},
         }
         check("pool: a valid clustering reply validates", pool.validate_reply(ok_doc, fids, cids)[0] == {"V1": "p1", "V2": "new1"})
+        bad["a list as the cluster"] = {"assign": [{"finding": "V1", "cluster": ["p1"]}, {"finding": "V2", "cluster": "p1"}], "new_clusters": []}
+        bad["a number as the finding"] = {"assign": [{"finding": 1, "cluster": "p1"}, {"finding": "V2", "cluster": "p1"}], "new_clusters": []}
         for label, d in bad.items():
             check(f"pool: the clustering reply is rejected: {label}", raises(lambda d=d: pool.validate_reply(d, fids, cids), pool.PoolError))
         _fake_judged_run(runs, "D-run", cid, "haiku", [_finding("yet another")], [{"finding": "F1", "verdict": "valid-new", "severity": "LOW"}], {"F1": 0})
@@ -2185,14 +2199,43 @@ def test_pool(shas, root: Path) -> None:
         check("pool: invalid output twice fails the pool call and adds nothing",
               raises(lambda: pool.pool_case(cid, pool_fn=clusterer("not json"), quota_reader=cold), pool.PoolError)
               and len(prompts) == calls_before + 2 and len(pool.load_pool(cid)["clusters"]) == 3)
+        listy = json.dumps({"assign": [{"finding": "V1", "cluster": ["p1"]}], "new_clusters": []})
+        rows_before = len(pool.load_pool(cid).get("calls", []))
+        err = ""
+        try:
+            pool.pool_case(cid, pool_fn=clusterer(listy), quota_reader=cold)
+        except pool.PoolError as exc:
+            err = str(exc)
+        rows = pool.load_pool(cid)["calls"]
+        check("pool: a non-string cluster is a PoolError with a retry, and the paid calls are recorded with their cost",
+              "invalid twice" in err and len(prompts) == calls_before + 4 and len(rows) == rows_before + 1
+              and rows[-1]["attempts"] == 2 and abs(rows[-1]["cost_usd"] - 0.04) < 1e-9 and rows[-1]["valid"] is False)
+
+        def boom(prompt, cwd):
+            prompts.append(prompt)
+            raise RuntimeError("the cell died")
+        raises(lambda: pool.pool_case(cid, pool_fn=boom, quota_reader=cold), RuntimeError)
+        check("pool: a call that dies is still recorded", len(pool.load_pool(cid)["calls"]) == rows_before + 2)
         hot = lambda p: {"windows": [{"name": "weekly", "used_percent": 97}]}
         n0 = len(prompts)
         check("pool: the call is refused at the quota ceiling even under the override, before any call",
               raises(lambda: pool.pool_case(cid, pool_fn=clusterer("{}"), quota_reader=hot, quota_override="ok"), pool.PoolError)
               and len(prompts) == n0)
         with env(ROLEBENCH_NET="none"):
-            check("pool: the real clustering call is refused up front without pasta (as the judge)",
-                  raises(lambda: pool.pool_case(cid, quota_reader=cold), pool.PoolError) and len(prompts) == n0)
+            launched = []
+            saved_rc = runners.run_claude
+            runners.run_claude = lambda **kw: launched.append(kw) or runners.RunResult("claude", "opus", error="spy", crashed=True)
+            try:
+                err = ""
+                try:
+                    pool.pool_case(cid, quota_reader=cold)
+                except pool.PoolError as exc:
+                    err = str(exc)
+            finally:
+                runners.run_claude = saved_rc
+            check("pool: the real clustering call is refused up front without pasta (as the judge): the net gate's "
+                  "refusal, and no cell is ever launched", "no network, so no API access" in err and launched == []
+                  and len(prompts) == n0, err)
 
         # adjudication
         check("pool: adjudication needs --by, known ids, and no id both accepted and rejected",
@@ -2247,6 +2290,15 @@ def test_pool(shas, root: Path) -> None:
         later = {"valid": True, "finding_ids": {"F1": 0}, "matches": [{"finding": "F1", "verdict": "match", "gt": "pool-p2"}]}
         check("rescore: a run judged after pooling scores a judge's match on a pooled id",
               pool.rescore("E-run", later, base, key)["pooled_hits"] == ["pool-p2"])
+        rejudged_invalid = {"valid": True, "finding_ids": {"F1": 0}, "matches": [{"finding": "F1", "verdict": "invalid"}]}
+        rejudged_match = {"valid": True, "finding_ids": {"F1": 0}, "matches": [{"finding": "F1", "verdict": "match", "gt": "gt1"}]}
+        check("rescore: a member counts only while its finding is still valid-new (not re-judged invalid, not beside a match)",
+              pool.rescore("B-run", rejudged_invalid, base, key)["pooled_hits"] == []
+              and pool.rescore("B-run", rejudged_match, base, key)["pooled_hits"] == [])
+        clash = copy.deepcopy(base)
+        clash["ground_truth"] = clash["ground_truth"] + [{**clash["ground_truth"][0], "id": "pool-p1"}]
+        check("pool: a pooled id is refused when the original key already uses it, even with the pool- prefix",
+              raises(lambda: cases.validate_pooled(key, clash), cases.CaseError))
         check("rescore: no pooled key means the pooled score equals the original",
               pool.rescore("A-run", jd("A-run"), base, None)["pooled"] == ra["original"])
 
@@ -2259,6 +2311,16 @@ def test_pool(shas, root: Path) -> None:
                                quota_override=NO_QUOTA, quota_reader=cold)
         check("judge: a run judged after pooling records the original and pooled ids it was judged against",
               jdoc["key"] == {"original": ["gt1", "gt2"], "pooled": ["pool-p1", "pool-p2"]})
+        frun = json.loads((rdir / "run.json").read_text())
+        check("judge: run.score stays on the original key; the pooled key's score is in score_pooled",
+              frun["score"] == judge.score([], base["ground_truth"]) and frun["score_pooled"] == jdoc["score_pooled"]
+              and frun["score_pooled"] == judge.score([], cases.full_ground_truth(base)))
+        later_pool = {"valid": True, "finding_ids": {"F1": 0}, "matches": [{"finding": "F1", "verdict": "match", "gt": "pool-p1"}]}
+        check("judge: a match on a pooled id counts in score_pooled only, never in the original-key score",
+              judge.score(later_pool["matches"], base["ground_truth"])["weighted_recall"] == 0.0
+              and judge.score(later_pool["matches"], cases.full_ground_truth(base))["weighted_recall"] > 0)
+        check("pool: the pooled key's evidence carries no reviewer text (untrusted, it reaches every later judge)",
+              all("shown by a test" not in g["evidence"] and "race" not in g["evidence"] for g in key["ground_truth"]))
         check("judge: the judge's key text carries the pooled entries", "pool-p1" in judge.gt_text(cases.full_ground_truth(base)))
 
         # report: both keys, labelled, plus the pooling-bias note
@@ -2285,11 +2347,63 @@ def test_pool(shas, root: Path) -> None:
         follow = lambda prompt: json.dumps({
             "assign": [{"finding": v, "cluster": "p1" if "race" in t else "new1"} for v, t in titles(prompt).items()],
             "new_clusters": [{"id": "new1", "severity": "LOW", "mechanism": "another nit-level issue", "location": "tiny.py"}]})
+        key_before = pool.key_path(cid).read_text()
         p3 = pool.pool_case(cid, pool_fn=clusterer(follow), quota_reader=cold)
-        key2 = json.loads(pool.key_path(cid).read_text())
-        check("pool: a new member of an accepted cluster follows into the pooled key; a new cluster waits as proposed",
-              ["G-run", 0] in key2["members"]["pool-p1"] and [g["id"] for g in key2["ground_truth"]] == ["pool-p1", "pool-p2"]
+        c1 = next(c for c in p3["clusters"] if c["id"] == "p1")
+        check("pool: a member proposed for an accepted cluster waits as pending; the committed key is untouched",
+              [(m["run"], m["finding"]) for m in c1["pending"]] == [("G-run", 0)] and ("G-run", 0) not in [(m["run"], m["finding"]) for m in c1["members"]]
+              and pool.key_path(cid).read_text() == key_before
               and p3["clusters"][-1]["id"] == "p4" and p3["clusters"][-1]["status"] == "proposed")
+        gjd = json.loads((runs / "G-run" / "judge.json").read_text())
+        check("rescore: a pending member is no hit yet", pool.rescore("G-run", gjd, base, cases.load_pooled(cid))["pooled_hits"] == [])
+        with contextlib.redirect_stdout(io.StringIO()) as shown:
+            mainmod.main(["pool", "--case", cid, "--accept-members", "p1", "--by", "john"])
+        key3 = cases.load_pooled(cid)
+        c1 = next(c for c in pool.load_pool(cid)["clusters"] if c["id"] == "p1")
+        check("pool: --accept-members takes the pending members into the key, recording who and when",
+              ["G-run", 0] in key3["members"]["pool-p1"] and c1["pending"] == []
+              and c1["members_accepted"][-1]["by"] == "john" and c1["members_accepted"][-1]["members"] == [["G-run", 0]]
+              and pool.rescore("G-run", gjd, base, key3)["pooled_hits"] == ["pool-p1"])
+        check("CLI: pool prints pending members with the flag that accepts them",
+              "pending" not in shown.getvalue() or "--accept-members p1" in shown.getvalue())
+        with contextlib.redirect_stdout(io.StringIO()):
+            check("CLI: --accept-members needs --by", raises(lambda: mainmod.main(["pool", "--case", cid, "--accept-members", "p1"]), SystemExit))
+
+        # the pool file lives in a cache and can be lost: it restarts from the committed key
+        os.remove(pool.pool_path(cid))
+        restored = pool.load_pool(cid)
+        check("pool: a lost pool restarts from the committed key's accepted clusters (ids, members, status)",
+              [(c["id"], c["status"]) for c in restored["clusters"]] == [("p1", "accepted"), ("p2", "accepted")]
+              and [[m["run"], m["finding"]] for m in restored["clusters"][0]["members"]] == key3["members"]["pool-p1"])
+        _fake_judged_run(runs, "H-run", cid, "haiku", [_finding("an fd leak", "LOW", "io.py", 20)],
+                         [{"finding": "F1", "verdict": "valid-new", "severity": "LOW"}], {"F1": 0})
+        newone = lambda prompt: json.dumps({"assign": [{"finding": v, "cluster": "new1"} for v in titles(prompt)],
+                                             "new_clusters": [{"id": "new1", "severity": "LOW", "mechanism": "fd leak", "location": "io.py"}]})
+        p5 = pool.pool_case(cid, pool_fn=clusterer(newone), quota_reader=cold)
+        check("pool: after a lost pool, a new cluster never reuses a committed id",
+              p5["clusters"][-1]["id"] not in ("p1", "p2") and int(p5["clusters"][-1]["id"][1:]) > 2)
+        # write_key never drops or silently redefines a committed id
+        dropped = copy.deepcopy(p5)
+        dropped["clusters"] = [c for c in dropped["clusters"] if c["id"] != "p2"]
+        redefined = copy.deepcopy(p5)
+        redefined["clusters"][0]["mechanism"] = "a different defect"
+        check("pool: the key refuses to drop a committed id", raises(lambda: pool.key_doc(cid, dropped, by="john"), pool.PoolError))
+        check("pool: the key refuses to redefine a committed id without --redefine, and allows it with it",
+              raises(lambda: pool.key_doc(cid, redefined, by="john"), pool.PoolError)
+              and pool.key_doc(cid, redefined, by="john", redefine=True)["ground_truth"][0]["mechanism"] == "a different defect")
+
+        # L1: the key is validated before the pool is saved
+        sec = copy.deepcopy(pool.load_pool(cid))
+        newest = sec["clusters"][-1]["id"]
+        sec["clusters"][-1]["mechanism"] = "fixture holds sk-" + "a" * 24
+        pool._atomic(pool.pool_path(cid), sec)
+        key_now = pool.key_path(cid).read_text()
+        check("pool: an adjudication whose key would not validate saves nothing (pool status and key unchanged)",
+              raises(lambda: pool.adjudicate(cid, accept=[newest], by="john"), pool.PoolError)
+              and next(c for c in pool.load_pool(cid)["clusters"] if c["id"] == newest)["status"] == "proposed"
+              and pool.key_path(cid).read_text() == key_now)
+        with contextlib.redirect_stdout(io.StringIO()):
+            check("CLI: pool on an unknown case exits cleanly", raises(lambda: mainmod.main(["pool", "--case", "no-such-case"]), SystemExit))
 
 
 def test_cli_and_cells(shas, root: Path) -> None:

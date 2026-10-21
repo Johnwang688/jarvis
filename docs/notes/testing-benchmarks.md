@@ -1261,9 +1261,14 @@ resolved first: simple `NAME=value` assignments are tracked so a later `$NAME` e
 `~` and `~user` expand, `file://` URLs and `/proc/<n>/root/X` become paths, and a word is
 judged by its literal prefix up to its first glob or unknown variable
 (`/home/u/projects/*` names `/home/u/projects/`). A relative path is resolved against the shell's
-cwd as `cd` moves it (Claude's Bash keeps its cwd between calls; codex and Jarvis start
-each call at the snapshot root; a `cd` that cannot be followed falls back to the root), so
-`cd hud && … && cd ..` stays inside while a climb above the root is flagged. In a claude
+cwd, which only a `cd` the audit is certain of moves: from a `command` field, in command
+position (start, `;`, newline, or `&&` after a chain of such cds) at the top level, never in
+`( )`, a pipeline, `&` or `||`, never with an option, and only to an existing directory inside
+the snapshot (resolved, so a symlink out is caught); a `-c` script works on a copy and
+`pushd`/`popd` make the cwd unknown. Anything uncertain is judged from the snapshot root (a cd
+to a missing path leaves a known cwd where it was, as the shell does). Claude's Bash keeps its
+cwd between calls while it is inside the snapshot; codex and Jarvis start each call at the
+root. So `cd hud && … ; cd ..` stays inside while a climb above the root is flagged. In a claude
 cell the CLI's own task output, `/tmp/claude-<uid>/<slug of the cell's cwd>/`, is in-cell;
 any other `/tmp/claude-*` is flagged. It is then judged by the cell's layout: the snapshot, the system trees, the
 cell's `/tmp` and, on the tmpfs HOME (mounted at the real home's path), only the trees that
@@ -1348,9 +1353,16 @@ bench's home; re-running it sends only what is new. `pool --case <id> --accept p
 [--severity p1=MED] --reject p2 --by <name>` is the lead's adjudication: accepted clusters
 become the committed pooled key `rolebench/cases/pooled/<case>.json` (the ground-truth schema,
 `pool-` ids, `source: "pooled"`, who and when, each entry's member findings), validated by
-`cases.validate_pooled`; the original case file is never edited. Runs already judged are
+`cases.validate_pooled`; the original case file is never edited. Findings a later pool run proposes for an
+accepted cluster wait as `pending` until `--accept-members <id>`; the key is built and
+validated before anything is saved; a committed id is never dropped or reused (a lost pool
+restarts from the key) and never redefined without `--redefine`; the key's evidence names
+the cluster and its size, never reviewer text (untrusted, and it reaches every later judge). Runs already judged are
 rescored without judging again: a finding that is a member of an accepted cluster is a hit on
-that pooled id. Runs judged later see original plus pooled entries in the judge's key
+that pooled id while its current verdict is still valid-new. `run.json` keeps `score` on the
+original key and the pooled key's in `score_pooled`. A mixed-unit implement run (say a claude
+implementer and a jarvis reviewer) has `cost_basis: "mixed"`, its costs per basis in
+`cost_parts`, and no summed `cost_usd`. Runs judged later see original plus pooled entries in the judge's key
 (`judge.json` records both id lists). The report shows weighted and MED+ recall against the
 **original key** and the **pooled key**, labelled. Pooling bias: the pool is built from the
 models that ran, so a defect none found is missing from both keys, and pooled recall rewards
