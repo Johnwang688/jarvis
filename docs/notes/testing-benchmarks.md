@@ -1265,14 +1265,18 @@ judged by its literal prefix up to its first glob or unknown variable
 cell's own task output, below); a bare `cd` names HOME and is flagged too. The audit is a
 detector and bwrap is the boundary, so no reading of `cd` ever removes a flag (two review rounds
 showed cwd inference leaking: heredoc bodies, functions, and trees changed after the run).
-Instead each flag carries an **advisory** label: `probable_cd_relative: true` with the assumed
+Instead each flag may carry a **triage hint**: `probable_cd_relative: true` with the assumed
 cwd when a lexical reading of the preceding cds (in command position; Claude's Bash keeps its
 cwd between calls and is reset to the root when it leaves) would put the path inside the
-snapshot. `run.json` lists `escape_flags` (all), `escape_hard` (those that count against the
-run's validity) and `escape_cd_relative` (for the lead to glance at, with the command); the
-report shows hard and probably-cd-relative flags in separate columns. Re-auditing the P2 pilot:
-the 12 old false positives are 0 hard and 11 probably-cd-relative (the twelfth is Claude's own
-task output, now in-cell). In a claude
+snapshot. The reading is the same unsound inference, so **every flag counts** against the run's
+validity: `run.json` and the log carry `escape_flags` (all) and `escape_cd_relative` (the hinted
+subset, with the command), and the report's escape column counts every flag, with an "of which
+probably cd-relative" column and a listing. A run stays flagged until the lead clears it by hand:
+`python -m rolebench clear-flags --run <id> --by <name> [--note ...]` records who, when and
+exactly which flags (a flag that appears later is not cleared). A bare `cd` is read only from a
+command (never a grep pattern or a description), in command position, followed by an operator or
+the end. Re-auditing the P2 pilot: the 12 old false positives are 11 hinted flags plus Claude's
+own task output, now in-cell; all 11 still count until cleared. In a claude
 cell the CLI's own task output, `/tmp/claude-<uid>/<slug of the cell's cwd>/`, is in-cell;
 any other `/tmp/claude-*` is flagged. It is then judged by the cell's layout: the snapshot, the system trees, the
 cell's `/tmp` and, on the tmpfs HOME (mounted at the real home's path), only the trees that

@@ -179,13 +179,13 @@ def review_step(deps: Deps, rcase: dict, snap: Path, *, harness: str, model: str
 
 
 def _escape_fields(result, snap: Path) -> dict:
-    """escape_flags: every flag (a superset of main's); escape_hard: those that
-    count against the run; escape_cd_relative: the ones a lexical reading of
-    cd would put inside the snapshot, with the assumed cwd and the command, for
-    the lead to glance at (advisory: still in escape_flags)."""
+    """escape_flags: every flag (a superset of main's), all of which count
+    against the run until the lead clears them (`rolebench clear-flags`);
+    escape_cd_relative: the subset a lexical reading of cd would put inside
+    the snapshot, with the assumed cwd and the command, as a triage hint only
+    (the reading is unsound, so it never discounts a flag)."""
     details = audit.escape_details(result, snap)
     return {"escape_flags": [d["flag"] for d in details],
-            "escape_hard": [d["flag"] for d in details if not d["probable_cd_relative"]],
             "escape_cd_relative": [{k: d[k] for k in ("flag", "assumed_cwd", "command")}
                                    for d in details if d["probable_cd_relative"]]}
 
@@ -263,7 +263,7 @@ def review_once(deps: Deps, case: dict, *, harness: str, model: str, n: int = 1)
     run = {**_base_run(deps, case, harness, model, run_id, qb), "snapshot": str(snap), "shas": shas,
            "task_class": "review", "reviewer": doc, "result": doc["result"], "n_findings": len(doc["findings"]),
            "flags": doc["flags"], "network_flags": doc["network_flags"], "escape_flags": doc["escape_flags"],
-           "escape_hard": doc["escape_hard"], "escape_cd_relative": doc["escape_cd_relative"],
+           "escape_cd_relative": doc["escape_cd_relative"],
            "hygiene": hygiene, "quota_notes": notes, "reason": doc.get("error", ""), "truncated": bool(doc.get("truncated"))}
     return _finish(deps, run, out_dir, started)
 
@@ -367,7 +367,7 @@ def implement_once(deps: Deps, case: dict, *, harness: str, model: str, reviewer
     rcase = brief.reviewer_case(case)
     cumulative_cost, cumulative_known = 0.0, False
     cost_at_ready = None
-    net_flags, esc_flags, esc_hard, esc_soft = [], [], [], []
+    net_flags, esc_flags, esc_soft = [], [], []
     for round_no in range(max_rounds + 1):
         rdir = out_dir / f"round-{round_no}"
         rdir.mkdir(exist_ok=True)
@@ -388,7 +388,6 @@ def implement_once(deps: Deps, case: dict, *, harness: str, model: str, reviewer
         impl_sum["settled_usd"] = result.raw.get("settled_usd")
         net_flags += [f"implementer r{round_no}: {f}" for f in impl_sum["network_flags"]]
         esc_flags += [f"implementer r{round_no}: {f}" for f in impl_sum["escape_flags"]]
-        esc_hard += [f"implementer r{round_no}: {f}" for f in impl_sum["escape_hard"]]
         esc_soft += [{**d, "flag": f"implementer r{round_no}: {d['flag']}"} for d in impl_sum["escape_cd_relative"]]
         try:
             folded = snapshot.fold_commits(snap, base)        # a commit never hides the change
@@ -411,7 +410,6 @@ def implement_once(deps: Deps, case: dict, *, harness: str, model: str, reviewer
         if review_doc:
             net_flags += [f"reviewer r{round_no}: {f}" for f in review_doc["network_flags"]]
             esc_flags += [f"reviewer r{round_no}: {f}" for f in review_doc["escape_flags"]]
-            esc_hard += [f"reviewer r{round_no}: {f}" for f in review_doc["escape_hard"]]
             esc_soft += [{**d, "flag": f"reviewer r{round_no}: {d['flag']}"} for d in review_doc["escape_cd_relative"]]
         found = (review_doc or {}).get("findings", [])
         medplus = [f for f in found if f["severity"] in ("HIGH", "MED")]
@@ -442,7 +440,7 @@ def implement_once(deps: Deps, case: dict, *, harness: str, model: str, reviewer
            "result": "ok" if rounds and not reason else "skipped" if not rounds else "partial", "reason": reason,
            "implementer": rounds[-1]["implementer"] if rounds else None,
            "reviewer": rounds[-1].get("reviewer") if rounds else None, "quota_notes": notes,
-           "network_flags": net_flags, "escape_flags": esc_flags, "escape_hard": esc_hard, "escape_cd_relative": esc_soft,
+           "network_flags": net_flags, "escape_flags": esc_flags, "escape_cd_relative": esc_soft,
            "truncated": any(bool((r.get(k) or {}).get("truncated")) for r in rounds for k in ("implementer", "reviewer"))}
     return _finish(deps, run, out_dir, started)
 

@@ -108,16 +108,13 @@ def _is_candidate(lit: str) -> bool:
     return lit.startswith("/") or ".." in lit.split("/")
 
 
-BARE_CD = re.compile(r"(?:^|[;&|()\n])\s*(cd)\s*(?=$|[;&|)\n])")
-
-
 def path_candidates(text: str, env: dict | None = None, depth: int = 0) -> list[tuple[str, str, int | None]]:
     """(word, what it names, its word ordinal) for the path arguments in one
     argument value: shell words (and the value of every NAME=value, key=value
     or --opt=value word, with simple assignments tracked so a later $NAME
     expands), the script of `sh -c`/`bash -lc` (tokenized again), and quoted
     strings inside inline code such as `python -c`. Prose in a quoted argument
-    or a commit message is never split into words. A bare `cd` names HOME.
+    or a commit message is never split into words.
 
     The candidates are main's (c717ed9), word for word; the ordinal (the
     word's place among the words of `text`, None inside a `-c` script) only
@@ -150,9 +147,20 @@ def path_candidates(text: str, env: dict | None = None, depth: int = 0) -> list[
                 lit = literal(w, env)
                 if lit and _is_candidate(lit):
                     out.append((w, lit, ordinal if depth == 0 else None))
-    if depth == 0 and env.get("HOME"):
-        out += [("cd", env["HOME"], None) for _ in BARE_CD.finditer(text)]   # a bare cd goes HOME
     return out
+
+
+def bare_cds(command: str) -> int:
+    """How many bare `cd`s (no operand: it goes HOME) a shell command runs, in
+    command position and followed by an operator or the end. Only a command
+    is read, never a pattern or a description."""
+    tokens = _aware_tokens(command)
+    n = 0
+    for i, tok in enumerate(tokens):
+        if tok == "cd" and (i == 0 or set(tokens[i - 1]) <= set(AWARE_PUNCT)) \
+                and (i + 1 == len(tokens) or set(tokens[i + 1]) <= set(AWARE_PUNCT)):
+            n += 1
+    return n
 
 
 # --- the advisory label: a lexical reading of cd ------------------------------------
@@ -208,6 +216,12 @@ def claude_task_dir(snap: Path | str) -> str:
     return f"/tmp/claude-{os.getuid()}/" + re.sub(r"[^A-Za-z0-9]", "-", os.path.normpath(str(snap)))
 
 
+def claude_task_dirs(snap: Path | str) -> list[str]:
+    """The task directory for the snapshot's path as given and as resolved
+    (the cell chdirs to the resolved work tree)."""
+    return sorted({claude_task_dir(snap), claude_task_dir(os.path.realpath(str(snap)))})
+
+
 def escape_details(result, snap: Path, extra_allowed: tuple[str, ...] = ()) -> list[dict]:
     """Every path argument in a tool call that names something outside the
     cell, judged exactly as on main (c717ed9), so the flags are a superset of
@@ -224,16 +238,18 @@ def escape_details(result, snap: Path, extra_allowed: tuple[str, ...] = ()) -> l
       (`/v.slice` from a sed or grep pattern) names nothing, so it is not one.
 
     Each flag is {"flag", "probable_cd_relative", "assumed_cwd", "command"}.
-    The label is advisory and never removes a flag: a relative path that a
-    lexical reading of the preceding cds (Claude's Bash keeps its cwd between
-    calls) would put inside the snapshot is marked for the lead to glance at."""
+    The label is a triage hint only: a relative path that a lexical reading of
+    the preceding cds (Claude's Bash keeps its cwd between calls) would put
+    inside the snapshot is marked. The reading is unsound (it is the inference
+    two review rounds showed leaking), so a labelled flag still counts against
+    the run until the lead clears it by hand (`rolebench clear-flags`)."""
     snap_s = os.path.normpath(str(snap))
     roots = [snap_s, os.path.normpath(os.path.realpath(snap)), *map(os.path.normpath, extra_allowed)]
     home = os.path.normpath(sandbox.sandbox_home())
     harness = getattr(result, "harness", "")
     profile = {"claude": "claude", "codex": "codex", "jarvis": "jarvis"}.get(harness, "grade")
     in_home = [os.path.normpath(p) for p in sandbox.cell_home_paths(profile)]
-    own_tmp = claude_task_dir(snap_s) if harness == "claude" else None
+    own_tmp = claude_task_dirs(snap_s) if harness == "claude" else None
     out = []
     carried = ""                                  # Claude's lexical cwd across calls; the others start at the root
     for name, args in result.tool_calls:
@@ -245,7 +261,9 @@ def escape_details(result, snap: Path, extra_allowed: tuple[str, ...] = ()) -> l
             # Claude resets its shell to the project when a cd leaves it: an
             # unknown or outside cwd starts the next call at the root
             carried = after if after is not None else ""
-        for raw, lit, ordinal in path_candidates(text, {"HOME": home}):
+        candidates = path_candidates(text, {"HOME": home})
+        candidates += [("cd", home, None)] * (bare_cds(command) if command else 0)   # a bare cd goes HOME
+        for raw, lit, ordinal in candidates:
             if not _outside(lit, snap_s, roots, home, in_home, own_tmp):
                 continue
             soft, assumed = False, None
@@ -284,7 +302,7 @@ def _aware_word_offset(text: str, command: str) -> list[str]:
     return [t for t in _shell_tokens(text[:idx]) if not set(t) <= PUNCT]
 
 
-def _outside(lit: str, snap_s: str, roots: list[str], home: str, in_home: list[str], own_tmp: str | None) -> bool:
+def _outside(lit: str, snap_s: str, roots: list[str], home: str, in_home: list[str], own_tmp: list[str] | None) -> bool:
     if not lit.startswith("/"):
         path = os.path.normpath(os.path.join(snap_s, lit))
         return not any(_within(path, r) for r in roots)
@@ -294,7 +312,7 @@ def _outside(lit: str, snap_s: str, roots: list[str], home: str, in_home: list[s
     if _within(path, home):
         return not any(_within(path, p) for p in in_home)
     if path.startswith("/tmp/claude-"):
-        return not (own_tmp and _within(path, own_tmp))
+        return not (own_tmp and any(_within(path, t) for t in own_tmp))
     if any(_within(path, a) for a in ALLOWED_ABS):
         return False
     top = "/" + path.lstrip("/").split("/", 1)[0]

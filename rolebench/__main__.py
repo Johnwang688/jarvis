@@ -103,8 +103,8 @@ def _print_run(run: dict) -> None:
         split = doc.get("token_split") or {}
         line += (f" - {run['n_findings']} findings, {doc.get('turns')} turns, cost {doc.get('cost_usd')}, "
                  f"tokens in {split.get('input')} cached {split.get('cached')} out {split.get('output')}, "
-                 f"{run['wall_s']}s, net flags {len(run['network_flags'])}, escape flags {len(run.get('escape_hard', run['escape_flags']))} hard, "
-                 f"{len(run.get('escape_cd_relative') or [])} probably cd-relative")
+                 f"{run['wall_s']}s, net flags {len(run['network_flags'])}, escape flags {len(run['escape_flags'])} "
+                 f"(of which {len(run.get('escape_cd_relative') or [])} probably cd-relative)")
         if doc.get("multi_model"):
             line += f", models {doc.get('models_used')}"
     if run["kind"] == "implement" and "merged_ready" in run:
@@ -220,6 +220,26 @@ def cmd_pool(args) -> int:
     return 0
 
 
+def cmd_clear_flags(args) -> int:
+    """The lead clears a run's escape flags by hand, recording who, when and exactly which."""
+    run_dir = config.runs_root() / args.run
+    path = run_dir / "run.json"
+    if not path.is_file():
+        raise SystemExit(f"no run {args.run!r} under {config.runs_root()}")
+    if not (args.by or "").strip():
+        raise SystemExit("clear-flags needs --by <name>")
+    run = json.loads(path.read_text(encoding="utf-8"))
+    flags = list(run.get("escape_flags") or [])
+    if not flags:
+        raise SystemExit(f"{args.run}: no escape flags to clear")
+    run.setdefault("escape_cleared_log", []).append({"by": args.by.strip(), "on": time.strftime("%Y-%m-%d"),
+                                                     "flags": flags, "note": args.note or ""})
+    run["escape_cleared"] = {"by": args.by.strip(), "on": time.strftime("%Y-%m-%d"), "flags": flags}
+    path.write_text(json.dumps(run, indent=1), encoding="utf-8")
+    print(f"{args.run}: {len(flags)} escape flag(s) cleared by {args.by.strip()}")
+    return 0
+
+
 def cmd_clean(args) -> int:
     """Remove the snapshots of runs that need them no more."""
     if not args.judged:
@@ -296,6 +316,12 @@ def main(argv: list[str] | None = None) -> int:
                     help="allow an accepted cluster's committed mechanism or location to change")
     po.add_argument("--by", help="who adjudicated (required with --accept/--reject/--severity/--accept-members)")
     po.set_defaults(func=cmd_pool)
+
+    cf = sub.add_parser("clear-flags", help="the lead clears a run's escape flags by hand (recorded)")
+    cf.add_argument("--run", required=True, help="the run id (a directory under runs/)")
+    cf.add_argument("--by", required=True)
+    cf.add_argument("--note")
+    cf.set_defaults(func=cmd_clear_flags)
 
     rep = sub.add_parser("report", help="per-model tables over every run")
     rep.add_argument("--out")

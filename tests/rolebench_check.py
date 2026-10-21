@@ -1606,6 +1606,11 @@ def test_parsers(root: Path) -> None:
     missed += [c for c, post in later if not flags("claude", c, post)]
     check("audit: every input from both #289 reviews is flagged, from claude and codex cells, whatever the tree became",
           missed == [], str(missed[:4]))
+    check("audit: a bare cd is read only from a command, in command position: patterns and descriptions are not",
+          flags("claude", [("Grep", json.dumps({"pattern": "cd", "path": "."}))]) == []
+          and flags("claude", ["grep -nE '(cd)' f"]) == [] and flags("codex", ["grep -n 'pushd|cd|popd' x.sh"]) == []
+          and flags("claude", [("Bash", json.dumps({"command": "ls", "description": "then cd"}))]) == []
+          and flags("claude", ["ls; cd"]) != [] and flags("claude", ["cd && ls"]) != [] and flags("claude", ["(cd)"]) != [])
     check("audit: a bare cd names HOME and is flagged; so is cd ~",
           flags("claude", ["cd"]) != [] and flags("codex", ["cd; ls"]) != [] and flags("claude", ["cd ~"]) != []
           and all(not d["probable_cd_relative"] for d in details("claude", ["cd"])))
@@ -1631,6 +1636,12 @@ def test_parsers(root: Path) -> None:
     }
     check("audit: a flag no lexical reading puts inside stays hard",
           all(v and not any(d["probable_cd_relative"] for d in v) for v in hard.values()), str(hard))
+    alias = vroot / "alias"
+    alias.symlink_to(rsnap.parent)
+    via = alias / rsnap.name
+    task = f"/tmp/claude-{os.getuid()}/" + re.sub(r"[^A-Za-z0-9]", "-", str(rsnap)) + "/t/tasks/a.output"
+    check("audit: the claude task-dir allowance also covers the resolved work tree the cell chdirs to",
+          audit.escape_flags(R("claude", "m", tool_calls=[("Bash", json.dumps({"command": f"tail {task}"}))]), via) == [])
     shutil.rmtree(vroot, ignore_errors=True)
     own = audit.claude_task_dir(snap)
     check("audit: a claude cell's own task output under /tmp/claude-<uid>/<its cwd slug>/ is in-cell",
@@ -1713,6 +1724,36 @@ def test_review_flow(shas, root: Path) -> None:
           mr["cost_usd"] is None and mr["cost_basis"] == "mixed"
           and mr["cost_parts"] == {"list-price equivalent": 0.5, "usd (OpenRouter reported)": 0.02}
           and sr["cost_usd"] == 0.75 and sr["cost_basis"] == "list-price equivalent" and sr["cost_parts"] == {"list-price equivalent": 0.75})
+    mixed_calls = [("Bash", json.dumps({"command": "cd sub && cat ../tiny.py"})), ("Bash", json.dumps({"command": "cat ../../outside.txt"}))]
+    edeps = flows.Deps(runners={"claude": fake_runner([REVIEW_REPLY], tool_calls=mixed_calls)}, quota_override=NO_QUOTA, repo=shas["repo"])
+    erun = flows.review_once(edeps, case, harness="claude", model="haiku", n=7)
+    erow = json.loads(config.log_path().read_text().splitlines()[-1])
+    efile = json.loads((config.runs_root() / erun["run_id"] / "run.json").read_text())
+    ether = flows._escape_fields(runners.RunResult("claude", "m", tool_calls=mixed_calls), Path(erun["snapshot"]))
+    check("escape fields: every flag, labelled or not, is in escape_flags; the cd-relative list is a subset hint",
+          len(ether["escape_flags"]) == 2 and [d["flag"] for d in ether["escape_cd_relative"]] == [ether["escape_flags"][0]]
+          and "escape_hard" not in ether)
+    check("escape fields: run.json and the log row count every flag (a probably cd-relative one included)",
+          efile["escape_flags"] == ether["escape_flags"] and len(efile["escape_cd_relative"]) == 1
+          and erow["escape_flags"] == 2 and erow["escape_cd_relative"] == 1 and erow["escape_cleared"] is False
+          and "escape_hard" not in efile and "escape_hard" not in erow)
+    erows = [r for r in report.review_rows([efile]) if r["model"] == "haiku"]
+    check("report: the escape count counts every flag; the cd-relative count is 'of which'",
+          erows[0]["escape"] == 2 and erows[0]["escape_soft"] == 1
+          and "of which probably cd-relative" in report.render([efile]) and "still count until cleared" in report.render([efile]))
+    main_ = __import__("rolebench.__main__", fromlist=["main"]).main
+    with contextlib.redirect_stdout(io.StringIO()):
+        main_(["clear-flags", "--run", erun["run_id"], "--by", "john", "--note", "cd-relative, checked"])
+    cleared = json.loads((config.runs_root() / erun["run_id"] / "run.json").read_text())
+    check("clear-flags: the lead clears a run's flags by hand, recording who, when and which; the report then counts 0",
+          cleared["escape_cleared"]["by"] == "john" and cleared["escape_cleared"]["flags"] == ether["escape_flags"]
+          and cleared["escape_cleared_log"][-1]["note"] == "cd-relative, checked"
+          and report.review_rows([cleared])[0]["escape"] == 0 and "cleared by hand" in report.render([cleared]))
+    later_flag = {**cleared, "escape_flags": cleared["escape_flags"] + ["Bash: /home/johnw/.ssh"]}
+    check("clear-flags: a flag the lead did not clear still counts", report.review_rows([later_flag])[0]["escape"] == 3)
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        check("clear-flags: needs a known run and --by", raises(lambda: main_(["clear-flags", "--run", "no-such-run", "--by", "x"]), SystemExit)
+              and raises(lambda: main_(["clear-flags", "--run", erun["run_id"]]), SystemExit))
     check("run.json carries the same cost_usd as the log row, with what it means",
           run["cost_usd"] == row["cost_usd"] == 0.01 and run["cost_basis"] == row["cost_basis"] == "list-price equivalent")
     check("run.json keeps the random snapshot name and the build-time shas",
