@@ -19,6 +19,16 @@ def role(summary: dict | None) -> dict | None:
                                         "tool_calls", "turns", "models_used", "multi_model")}
 
 
+COST_BASIS = {"claude": "list-price equivalent", "jarvis": "usd (OpenRouter reported)", "codex": None}
+
+
+def cost_basis(run: dict) -> str | None:
+    """What a run's cost_usd means; implement runs name both roles' harnesses."""
+    harnesses = [run.get("harness")] + ([run["reviewer_harness"]] if run.get("reviewer_harness") else [])
+    bases = sorted({COST_BASIS.get(h) for h in harnesses if COST_BASIS.get(h)})
+    return " + ".join(bases) or None
+
+
 def row(run: dict) -> dict:
     """A log row from a run.json document."""
     roles = {name: role(run.get(name)) for name in ("reviewer", "implementer") if run.get(name)}
@@ -36,7 +46,7 @@ def row(run: dict) -> dict:
         "task_class": run.get("task_class") or run["kind"],
         "model": run["model"], "harness": run["harness"],
         "roles": roles,
-        "cost_usd": cost,
+        "cost_usd": cost, "cost_basis": cost_basis(run),
         "wall_s": run.get("wall_s"), "tool_calls": tool_calls,
         "result": run["result"], "reason": run.get("reason", ""),
         "rounds": run.get("rounds_to_merge_ready"), "merged_ready": run.get("merged_ready"),

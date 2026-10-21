@@ -1627,6 +1627,8 @@ def test_review_flow(shas, root: Path) -> None:
           audit.escape_flags(benign, snap_p) == [] and len(audit.escape_flags(escape, snap_p)) == 1,
           str(audit.escape_flags(benign, snap_p)))
     check("the claude cell had no budget imposed", deps.runners["claude"].calls[0]["budget"] is None)
+    check("run.json carries the same cost_usd as the log row, with what it means",
+          run["cost_usd"] == row["cost_usd"] == 0.01 and run["cost_basis"] == row["cost_basis"] == "list-price equivalent")
     check("run.json keeps the random snapshot name and the build-time shas",
           run["snapshot"].endswith(Path(run["snapshot"]).name) and run["shas"]["change"] and run["hygiene"]["after_reset"] == [])
 

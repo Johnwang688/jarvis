@@ -192,6 +192,10 @@ def _base_run(deps: Deps, case: dict, harness: str, model: str, run_id: str, quo
 def _finish(deps: Deps, run: dict, out_dir: Path, started: float) -> dict:
     run["finished"] = time.strftime("%Y-%m-%dT%H:%M:%S")
     run["wall_s"] = round(time.time() - started, 1)
+    # One cost field for every harness, the log row's: dollars for jarvis, the
+    # CLI's list-price equivalent for claude, None for codex (tokens only).
+    run["cost_usd"] = runlog.row(run)["cost_usd"]
+    run["cost_basis"] = runlog.cost_basis(run)
     if run.get("quota_before"):
         # The same providers read again, so the lead can measure percent per run.
         run["quota_after"] = quota.readings(list(run["quota_before"]), deps.quota_reader)
