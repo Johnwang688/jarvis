@@ -407,9 +407,10 @@ class BrainStartup(DaemonBase):
 class BrainPort(DaemonBase):
     """The controller's port, from the download that used it (VX-UI-4b)."""
 
-    def reading(self, controller, brain):
+    def reading(self, controller, brain, age=0.0):
         with self.daemon.vex.connection.lock:
             self.daemon.vex.connection.value.update(controller=controller, brain=brain)
+            self.daemon.vex.connection.checked_mono = time.monotonic() - age
 
     def change(self, device, connected, at):
         """A confirmed USB change, as `Connection.run` records one."""
@@ -482,6 +483,35 @@ class BrainPort(DaemonBase):
             with self.subTest(controller=controller, brain=brain):
                 self.reading(controller, brain)
                 self.assertEqual(self.brain_args(), (["--quiet", "--user"], None))
+
+    def test_a_controller_alone_downloads_on_the_radios_download_channel(self):
+        # The vendor extension's `--chan 1` (vex.DOWNLOAD_CHANNEL), only
+        # while the last confirmed reading is a controller and no brain.
+        self.reading(True, False)
+        self.download()
+        self.assertEqual(self.world.calls("vexcom")[-1]["argv"][-3:], ["--chan", "1", "--progress"])
+        for controller, brain in ((True, True), (False, True), (None, None), (True, None), (False, False)):
+            with self.subTest(controller=controller, brain=brain):
+                self.reading(controller, brain)
+                self.download()
+                argv = self.world.calls("vexcom")[-1]["argv"]
+                self.assertNotIn("--chan", argv)
+                self.assertEqual(argv[-1], "--progress")
+
+    def test_an_old_or_never_validated_reading_gets_no_channel(self):
+        # Review LOW-3: a controller swapped for a brain on USB just before
+        # Download must not send the brain the channel.
+        self.reading(True, False, age=vex.CHANNEL_READING_MAX_S + 5)
+        self.download()
+        self.assertNotIn("--chan", self.world.calls("vexcom")[-1]["argv"])
+        self.reading(True, False)
+        with self.daemon.vex.connection.lock:
+            self.daemon.vex.connection.checked_mono = None
+        self.download()
+        self.assertNotIn("--chan", self.world.calls("vexcom")[-1]["argv"])
+        self.reading(True, False, age=vex.CHANNEL_READING_MAX_S - 5)
+        self.download()
+        self.assertIn("--chan", self.world.calls("vexcom")[-1]["argv"])
 
     def test_a_failed_download_or_an_odd_port_line_teaches_nothing(self):
         self.reading(True, False)

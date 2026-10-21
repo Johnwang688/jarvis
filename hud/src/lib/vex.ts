@@ -345,7 +345,9 @@ export type ChainStep = "clean" | "build" | "rebuild" | "download";
 export interface ChainView {
   label: string;
   slot: number;
-  phase: "start" | "clean" | "build" | "pause" | "rebuild" | "download";
+  phase: "start" | "clean" | "build" | "pause" | "rebuild" | "download" | "retry";
+  /** Which try of the download this is (`DOWNLOAD_TRIES`); 1 when absent. */
+  attempt?: number;
   /** The owner pressed Stop. */
   cancelled: boolean;
   /** The steps that have succeeded, in order. */
@@ -365,9 +367,31 @@ export function chainLine(c: ChainView): string {
       return `Building ${who}, then downloading to slot ${c.slot}`;
     case "rebuild":
       return `Rebuilding ${who} from scratch, then downloading to slot ${c.slot}`;
+    case "retry":
+      return `Exit 4 (often a radio dropout): downloading ${who} to slot ${c.slot} again in a moment (try ${c.attempt ?? 2} of ${DOWNLOAD_TRIES})…`;
     default:
-      return `Downloading ${who} to slot ${c.slot}…`;
+      return (c.attempt ?? 1) > 1
+        ? `Downloading ${who} to slot ${c.slot} (try ${c.attempt} of ${DOWNLOAD_TRIES})…`
+        : `Downloading ${who} to slot ${c.slot}…`;
   }
+}
+
+/**
+ * vexcom's exit 4, "VEX Command Error" (the vendor extension's
+ * `ExitCode.vexErrorCmd`): a command to the brain went unanswered. A V5
+ * radio drops its link for a few seconds now and then and links again by
+ * itself; a dropout during a download ends it with exactly this (the owner,
+ * live, 2026-10-20), and the whole program must be sent again.
+ */
+export const DOWNLOAD_RETRY_EXIT = 4;
+/** So the same click's chain sends it this many times in all before it says it failed. */
+export const DOWNLOAD_TRIES = 3;
+/** After waiting this long for the radio to link again. */
+export const DOWNLOAD_RETRY_WAIT_MS = 3000;
+
+/** Whether a download that ended so, on this try, is sent again. Only exit 4, never a Stop, timeout or other failure. */
+export function retriesDownload(d: { state: string; exit_code: number | null } | null, attempt: number): boolean {
+  return !!d && d.state === "failed" && d.exit_code === DOWNLOAD_RETRY_EXIT && attempt < DOWNLOAD_TRIES;
 }
 
 /** Which step a chain phase belongs to. */

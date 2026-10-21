@@ -664,6 +664,13 @@ class Tables(Base):
         self.assertEqual(vex.download_argv(cfg, "auton_1", 3, "C:\\x\\build\\b.bin"),
                          [str(self.world.vexcom), "--name", "auton_1", "--slot", "3",
                           "--write", "C:\\x\\build\\b.bin", "--progress"])
+        # Through a V5 controller: the vendor extension's download channel,
+        # before `--progress`. Only a real True asks for it.
+        self.assertEqual(vex.download_argv(cfg, "auton_1", 3, "C:\\x\\build\\b.bin", controller=True),
+                         [str(self.world.vexcom), "--name", "auton_1", "--slot", "3",
+                          "--write", "C:\\x\\build\\b.bin", "--chan", "1", "--progress"])
+        for truthy in (1, "yes", [True], None):
+            self.assertNotIn("--chan", vex.download_argv(cfg, "auton_1", 3, "C:\\b.bin", controller=truthy))
         # The vendor extension's own user-port invocation (plan §5.2, offset
         # 69190): `--quiet --user`, and the controller's port when known.
         self.assertEqual(vex.brain_argv(cfg), [str(self.world.vexcom), "--quiet", "--user"])

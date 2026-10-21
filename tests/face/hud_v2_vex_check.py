@@ -1683,9 +1683,10 @@ def _download_end_checks(page, mock, check, until, fake):
     port; Connect once it ends." The bus's `vex_device` record at the
     download's start had the window read `/vex/status` while the daemon held
     the device, and nothing read it again at the end. However a download ends
-    — success, a failure (exit 4), an instant exit (6) or Stop — Connect is
-    offered without a reload, and never pressed for the owner (VX-UI-4a)."""
-    for label, code, how in (("succeeded", 0, "end"), ("failed (exit 4)", 4, "end"),
+    — success, a failure (exit 5), an instant exit (6) or Stop — Connect is
+    offered without a reload, and never pressed for the owner (VX-UI-4a).
+    (Exit 4, a radio dropout, is sent again since 2026-10-20: below.)"""
+    for label, code, how in (("succeeded", 0, "end"), ("failed (exit 5)", 5, "end"),
                              ("an instant exit 6", 6, "instant"), ("stopped", 129, "stop")):
         _reset(page, mock, until)
         check(f"download end, {label}: setup: the view draws", _ready(page, until))
@@ -1729,6 +1730,37 @@ def _download_end_checks(page, mock, check, until, fake):
               not _posted_since(mock, base, "/vex/brain") and len(_sent_downloads(mock)) == 1)
         if how == "end" and code == 0:
             _shot(page, "30-brain-after-download-ends")
+    # A radio dropout (exit 4) is sent again by the same click (the owner, 2026-10-20).
+    _reset(page, mock, until)
+    check("download retry: setup: the view draws", _ready(page, until))
+    v = mock_vex.state(mock)
+    v["download_auto"] = False
+    _auto(mock)
+    _tab(page, "brain")
+    base = len(mock.calls)
+    page.locator(_view(V, _tid("vex-download-btn"))).click()
+    assert until(lambda: v["download_records"], timeout=10), "the download did not start"
+    first = next(iter(v["download_records"]))
+    mock_vex.end_download(mock, first, 4)
+    line = page.locator(_view(V, _tid("vex-chain-line")))
+    check("download retry: after exit 4 the chain says so and that it tries again",
+          bool(until(lambda: line.count() and "Exit 4 (often a radio dropout)" in line.inner_text(), timeout=4)),
+          line.inner_text() if line.count() else "")
+    assert until(lambda: len(v["download_records"]) == 2, timeout=10), "the download was not sent again"
+    check("download retry: the second try is said as such",
+          bool(until(lambda: line.count() and "(try 2 of 3)" in line.inner_text(), timeout=4)),
+          line.inner_text() if line.count() else "")
+    second = next(r for r in v["download_records"] if r != first)
+    mock_vex.end_download(mock, second, 0)
+    assert until(lambda: page.evaluate("window.__hudVex.chain()") is None, timeout=8), "the chain did not end"
+    _tab(page, "brain")
+    note = page.locator(_view(V, _tid("vex-note")))
+    check("download retry: the second try's success is what the status line says",
+          bool(until(lambda: note.count() and "Downloaded to slot 1" in note.inner_text(), timeout=4)),
+          note.inner_text() if note.count() else "")
+    check("download retry: two downloads in all, one click, no brain terminal opened",
+          len(_sent_downloads(mock)) == 2 and not _posted_since(mock, base, "/vex/brain"))
+
     # A reload always showed it free: the daemon held nothing (the bug was the window's read).
     _reset(page, mock, until)
     _ready(page, until)

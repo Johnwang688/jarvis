@@ -70,7 +70,7 @@ vi.mock("../components/Terminal", () => ({
 }));
 
 import { VexStore } from "./vex";
-import { brainView, type DownloadView } from "../lib/vex";
+import { DOWNLOAD_RETRY_WAIT_MS, DOWNLOAD_TRIES, brainView, chainLine, type DownloadView } from "../lib/vex";
 import { api } from "../api";
 import { terminals } from "../components/Terminal";
 
@@ -815,9 +815,9 @@ describe("Connect is offered once a download ends, without a reload (the owner, 
     offered(store);
   });
 
-  it("after a download that failed (exit 4)", async () => {
-    const store = await chain({ state: "failed", exit_code: 4 });
-    expect(store.run("p3").note).toMatch(/^Download failed \(exit 4\)/);
+  it("after a download that failed (exit 5)", async () => {
+    const store = await chain({ state: "failed", exit_code: 5 });
+    expect(store.run("p3").note).toMatch(/^Download failed \(exit 5\)/);
     offered(store);
   });
 
@@ -939,4 +939,177 @@ describe("Connect is offered once a download ends, without a reload (the owner, 
     await vi.waitFor(() => expect(store.status?.device).toBeNull());
     expect(off(store)).toBe("");
   });
+});
+
+describe("a radio dropout (exit 4) is sent again by the same click (the owner, 2026-10-20)", () => {
+  /** Downloads whose records end with these exit codes in turn (0 succeeds). */
+  function script(codes: number[]) {
+    vi.useFakeTimers();
+    let n = 0;
+    const ends = new Map<string, number>();
+    h.download = async () => {
+      n += 1;
+      const id = `b000000${n}`;
+      ends.set(id, codes[n - 1] ?? 0);
+      return { terminal_id: id };
+    };
+    vi.spyOn(api, "vexDownloadState").mockImplementation(async (id: string) => {
+      const code = ends.get(id)!;
+      return { id, project_id: "p3", slot: 1, state: code === 0 ? "succeeded" : "failed", terminal_id: id,
+               exit_code: code, output: "", started: "", ended: "x" } as DownloadView;
+    });
+  }
+
+  it("a dropout, then a good try: downloaded, on the second try", async () => {
+    script([4, 0]);
+    const store = new VexStore();
+    const work = store.download("p3", 1, "auton", "override");
+    await vi.advanceTimersByTimeAsync(10_000);
+    await work;
+    expect(h.downloads).toHaveLength(2);
+    expect(store.run("p3").note).toBe("Downloaded to slot 1. Start it on the brain or the controller.");
+    expect(store.run("p3").downloaded).toMatchObject({ ok: true, code: 0 });
+    expect(store.chain).toBeNull();
+  });
+
+  it("three dropouts: three tries, then failed, said with the count", async () => {
+    script([4, 4, 4, 0]);
+    const store = new VexStore();
+    const work = store.download("p3", 1, "auton", "override");
+    await vi.advanceTimersByTimeAsync(20_000);
+    await work;
+    expect(h.downloads).toHaveLength(DOWNLOAD_TRIES);
+    expect(store.run("p3").note).toBe("Download failed (exit 4) after 3 tries; check its terminal.");
+    expect(store.run("p3").downloaded).toMatchObject({ ok: false, code: 4 });
+  });
+
+  it("waits for the radio between tries, and says which try it is", async () => {
+    script([4, 0]);
+    const store = new VexStore();
+    const work = store.download("p3", 1, "auton", "override");
+    await vi.waitFor(() => expect(store.chain?.phase).toBe("retry"));
+    expect(chainLine(store.chain!)).toBe("Exit 4 (often a radio dropout): downloading override to slot 1 again in a moment (try 2 of 3)…");
+    expect(store.run("p3").note).toMatch(/exit 4 \(vexcom's command error; a radio dropout causes it\)\. Trying again \(try 2 of 3\)/);
+    // The failed try's mark is not shown beside the next one (review LOW-2).
+    expect(store.run("p3").downloaded).toBeNull();
+    await vi.advanceTimersByTimeAsync(DOWNLOAD_RETRY_WAIT_MS - 400);
+    expect(h.downloads).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(5000);
+    await work;
+    expect(h.downloads).toHaveLength(2);
+  });
+
+  it("Stop between tries: nothing more is sent, and the slot is said to be unknown", async () => {
+    script([4, 0]);
+    const store = new VexStore();
+    const work = store.download("p3", 1, "auton", "override");
+    await vi.waitFor(() => expect(store.chain?.phase).toBe("retry"));
+    expect(store.stoppable("p3")).toBe(true);
+    store.stop("p3");
+    await vi.advanceTimersByTimeAsync(10_000);
+    await work;
+    expect(h.downloads).toHaveLength(1);
+    expect(store.run("p3").downloaded).toMatchObject({ ok: false, stopped: true });
+    expect(store.run("p3").note).toMatch(/^Download stopped: slot 1 may hold/);
+  });
+
+  it("a card that comes up between tries drops the chain: nothing more is sent", async () => {
+    script([4, 0]);
+    const store = new VexStore();
+    const work = store.download("p3", 1, "auton", "override");
+    await vi.waitFor(() => expect(store.chain?.phase).toBe("retry"));
+    store.setBlocked(true);
+    await vi.advanceTimersByTimeAsync(10_000);
+    await work;
+    expect(h.downloads).toHaveLength(1);
+    // A try was sent and failed: never "nothing was downloaded" (review LOW-1).
+    expect(store.run("p3").note).toBe("Download failed (exit 4) on try 1 of 3; an approval card came up, "
+      + "so it was not sent again. Check its terminal.");
+    expect(store.run("p3").downloaded).toMatchObject({ ok: false, code: 4 });
+  });
+
+  it("a crash between tries: nothing more is sent, and the failed try is what is said", async () => {
+    script([4, 0]);
+    const store = new VexStore();
+    const work = store.download("p3", 1, "auton", "override");
+    await vi.waitFor(() => expect(store.chain?.phase).toBe("retry"));
+    store.crash();
+    await vi.advanceTimersByTimeAsync(10_000);
+    await work;
+    expect(h.downloads).toHaveLength(1);
+    expect(store.run("p3").note).toBe("Download failed (exit 4) on try 1 of 3; the window hit an error, "
+      + "so it was not sent again. Check its terminal.");
+    expect(store.run("p3").note).not.toMatch(/nothing was downloaded/);
+  });
+
+  it("Stop while the retry's request is on its way: its vexcom is closed as soon as it is known", async () => {
+    script([4, 129]);                                     // the second ends as the close made it
+    const store = new VexStore();
+    const sendSecond = h.download!;
+    let release!: () => void;
+    h.download = async (pid: string) => {
+      if (h.downloads.length === 2) await new Promise<void>((res) => { release = res; });
+      return sendSecond(pid);
+    };
+    const work = store.download("p3", 1, "auton", "override");
+    await vi.advanceTimersByTimeAsync(DOWNLOAD_RETRY_WAIT_MS + 1000);
+    expect(h.downloads).toHaveLength(2);
+    store.stop("p3");
+    release();
+    await vi.advanceTimersByTimeAsync(10_000);
+    await work;
+    expect(h.closed).toContain("b0000002");
+    expect(store.run("p3").downloaded).toMatchObject({ ok: false, stopped: true });
+    expect(store.run("p3").note).toMatch(/^Download stopped: slot 1 may hold/);
+  });
+
+  it("Stop while the retry's request is on its way and it is refused: the slot is said to be unknown", async () => {
+    script([4, 0]);
+    const store = new VexStore();
+    let reject!: (e: Error) => void;
+    h.download = async () => {
+      if (h.downloads.length === 1) return { terminal_id: "b0000001" };
+      return new Promise((_, rej) => { reject = rej; });
+    };
+    vi.spyOn(api, "vexDownloadState").mockImplementation(async (id: string) => ({ id, project_id: "p3", slot: 1,
+      state: "failed", terminal_id: id, exit_code: 4, output: "", started: "", ended: "x" } as DownloadView));
+    const work = store.download("p3", 1, "auton", "override");
+    await vi.advanceTimersByTimeAsync(DOWNLOAD_RETRY_WAIT_MS + 1000);
+    expect(h.downloads).toHaveLength(2);
+    store.stop("p3");
+    reject(new Error("refused"));
+    await vi.advanceTimersByTimeAsync(10_000);
+    await work;
+    expect(store.run("p3").note).toMatch(/^Download stopped: slot 1 may hold/);
+    expect(store.run("p3").note).not.toMatch(/nothing was downloaded/);
+  });
+
+  it("a retry the daemon refuses: the failed try and the refusal are both said", async () => {
+    script([4, 0]);
+    const store = new VexStore();
+    h.download = async () => {
+      if (h.downloads.length === 1) return { terminal_id: "b0000001" };
+      throw new Error("another device action is running");
+    };
+    vi.spyOn(api, "vexDownloadState").mockImplementation(async (id: string) => ({ id, project_id: "p3", slot: 1,
+      state: "failed", terminal_id: id, exit_code: 4, output: "", started: "", ended: "x" } as DownloadView));
+    const work = store.download("p3", 1, "auton", "override");
+    await vi.advanceTimersByTimeAsync(10_000);
+    await work;
+    expect(h.downloads).toHaveLength(2);
+    expect(store.run("p3").note).toBe("Download failed (exit 4) on try 1 of 3; the next try could not start "
+      + "(another device action is running). Check its terminal.");
+  });
+
+  for (const code of [1, 5, 6, 129]) {
+    it(`exit ${code} is not retried`, async () => {
+      script([code, 0]);
+      const store = new VexStore();
+      const work = store.download("p3", 1, "auton", "override");
+      await vi.advanceTimersByTimeAsync(10_000);
+      await work;
+      expect(h.downloads).toHaveLength(1);
+      expect(store.run("p3").note).toBe(`Download failed (exit ${code}); check its terminal.`);
+    });
+  }
 });
