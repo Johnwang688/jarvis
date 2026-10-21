@@ -1625,6 +1625,12 @@ def test_parsers(root: Path) -> None:
           "with the assumed cwd and the command",
           all(v and all(d["probable_cd_relative"] and d["assumed_cwd"] == soft_cases[k][2] and d["command"] for d in v)
               for k, v in got.items()), str({k: v for k, v in got.items()}))
+    later_field = details("claude", [("Bash", json.dumps({"description": "run the hud tests now", "command": "cd hud && cat ../tiny.py"}))])
+    check("audit: the hint's cwd lines up with the command when another field comes first",
+          later_field and later_field[0]["probable_cd_relative"] and later_field[0]["assumed_cwd"] == "hud")
+    reset = details("claude", ["cd /tmp", "cd hud", "cat ../tiny.py"])
+    check("audit: Claude's hint cwd restarts at the root after a cd out of the snapshot (as Claude resets its shell)",
+          reset and reset[-1]["probable_cd_relative"] and reset[-1]["assumed_cwd"] == "hud")
     check("audit: a soft mark never removes a flag: escape_flags lists every flag, soft or hard",
           all(audit.escape_flags(R(soft_cases[k][0], "m", tool_calls=[("Bash", json.dumps({"command": c})) for c in soft_cases[k][1]]),
                                  rsnap) == [d["flag"] for d in got[k]] for k in got))
