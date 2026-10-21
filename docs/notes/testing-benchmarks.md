@@ -1276,13 +1276,15 @@ cost (prompt chars/4 plus `max_tokens`) at the model's **most expensive** OpenRo
 endpoint (`/api/v1/models/<id>/endpoints`, the highest prompt and completion price
 over every endpoint, cached a day under `prices/`; if a refetch fails a cache at most
 7 days old is used, raised 25%, else the model is refused), counting the tool schemas,
-a completion allowance (the call's `max_tokens`, else the endpoint's maximum, else
-16k) and Haiku 5.5's 5x price from 100k prompt tokens, would cross the budget is refused before it is
+a completion allowance (min of the call's `max_tokens`, the endpoint's maximum and
+16k: the endpoint maximum alone is ~1M on 1M-context models, which priced a first call
+at $2.27 and refused deepseek-v4.1-flash and glm-5.3-flash before sending) and Haiku 5.5's 5x price from 100k prompt tokens, would cross the budget is refused before it is
 sent, no call is made once the total reaches the budget, and the call that still
 crosses it raises (at most one can overshoot). The ledger settles on the usage
 OpenRouter reports (`llm._cost`, BYOK upstream cost included), never on the
 estimate; a timeout, OOM or crash is charged its whole reservation. Every tier runs
-on the cell's model, nothing is provider-pinned, and every `moonshotai/` id is
+on the cell's model with 16k output tokens per call (`jarvis.config.MAX_TOKENS` is 8192,
+which cut a Haiku review off before its findings block), nothing is provider-pinned, and every `moonshotai/` id is
 refused (Kimi left the matrix, O-1 amendment 2026-10-21).
 
 **Quota.** A Claude or Codex cell is skipped at 75% of a quota window, and also when
@@ -1308,6 +1310,11 @@ every diff is against the base. The harness's own git passes `-c core.hooksPath=
 attributes an agent could have planted. Grading copies restore the hidden tests from
 the merged commit and the regression suites from the base, and an edit outside the
 case's scope (test files aside) blocks merge-ready.
+
+A review whose final reply still ends at the output limit (the loop's `[cut off at the
+token limit]` after its own continuations) is recorded as `result: "truncated"`,
+`truncated: true` in `run.json` and the log row, never scored as a review with no
+findings; implement runs carry `truncated` too.
 
 The judge is `claude -p --model opus` over shuffled, blinded findings plus the answer
 key, reading an export of the change commit (no `.git`, its diff beside it) in a

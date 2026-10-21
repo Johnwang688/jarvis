@@ -50,6 +50,7 @@ class RunResult:
     error: str = ""
     timed_out: bool = False
     crashed: bool = False          # no result from the agent process at all
+    truncated: bool = False        # the final reply still ended at the output limit (finish_reason=length)
     spend_usd: float | None = None  # the jarvis worker's own running total
     models_used: list = field(default_factory=list)
     raw: dict = field(default_factory=dict)
@@ -59,7 +60,7 @@ class RunResult:
                 "tokens": self.tokens, "token_split": token_split(self.harness, self.tokens),
                 "turns": self.turns, "tool_calls": len(self.tool_calls),
                 "duration_s": round(self.duration_s, 1), "error": self.error, "timed_out": self.timed_out,
-                "crashed": self.crashed, "spend_usd": self.spend_usd, "models_used": self.models_used,
+                "crashed": self.crashed, "truncated": self.truncated, "spend_usd": self.spend_usd, "models_used": self.models_used,
                 "multi_model": len(self.models_used) > 1}
 
 
@@ -312,6 +313,7 @@ def jarvis_spec(*, model, prompt, cwd, max_turns, budget_usd, price_fn=None) -> 
             "prices": {model: {"prompt": prompt_usd, "completion": completion_usd,
                                "max_completion": max_out or config.DEFAULT_COMPLETION_ALLOWANCE,
                                "tier": list(tier) if tier else None}},
+            "max_output_tokens": config.JARVIS_MAX_OUTPUT_TOKENS, "allowance_cap": config.DEFAULT_COMPLETION_ALLOWANCE,
             "io": str(sandbox.IO)}
 
 
@@ -352,6 +354,7 @@ def run_jarvis(*, model, prompt, cwd, timeout_s, max_turns, budget_usd=None, out
         result.tokens, result.turns = doc.get("tokens", {}), doc.get("turns")
         result.tool_calls = [tuple(c) for c in doc.get("tool_calls", [])]
         result.error = doc.get("error", "")
+        result.truncated = bool(doc.get("truncated"))
         result.models_used = sorted(doc.get("models") or {})
         if isinstance(doc.get("spend_usd"), (int, float)):
             result.spend_usd = max(result.spend_usd or 0.0, float(doc["spend_usd"]))

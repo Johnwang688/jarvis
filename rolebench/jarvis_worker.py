@@ -16,8 +16,9 @@ code with no `.env` and no cases. Wraps `longbench.harness.run_jarvis` and adds:
   is sent, and the call that still crosses it raises. At most one call can
   overshoot. The estimate prices the call at the model's most expensive
   OpenRouter endpoint (the spec's `prices`) and counts all of it: the
-  messages and the tool schemas (chars/4), a completion allowance (the call's
-  `max_tokens`, else the endpoint's maximum completion, else 16k) and a
+  messages and the tool schemas (chars/4), a completion allowance
+  (min of the call's `max_tokens`, the endpoint's maximum completion and
+  16k) and a
   long-context tier (Haiku 5.5: the whole request at 5x from 100k prompt
   tokens). The total is the usage OpenRouter reports (BYOK upstream cost
   included, `llm._cost`).
@@ -68,6 +69,7 @@ class Meter:
 
     def __init__(self, spec: dict, stream=None):
         self.budget = float(spec["budget_usd"])
+        self.allowance_cap = int(spec.get("allowance_cap") or 16_000)
         self.prices = {k.lower(): dict(v) for k, v in (spec.get("prices") or {}).items()}
         self.stream = stream if stream is not None else sys.stdout
         self.total, self.calls, self.models = 0.0, 0, {}
@@ -86,7 +88,7 @@ class Meter:
         if not price:
             raise BudgetExceeded(f"refused: no endpoint price for {model}, so no estimate")
         prompt_tokens = (_chars(messages) + (len(json.dumps(tools)) if tools else 0)) / 4
-        completion_tokens = max_tokens or price.get("max_completion") or 16_000
+        completion_tokens = min(x for x in (max_tokens, price.get("max_completion"), self.allowance_cap) if x)
         tier = price.get("tier")
         multiplier = float(tier[1]) if tier and prompt_tokens >= tier[0] else 1.0
         usd = (prompt_tokens * price["prompt"] + completion_tokens * price["completion"]) * multiplier / 1e6
@@ -152,8 +154,19 @@ def prepare(spec: dict, key: str | None):
     jconfig.CHAT_PROVIDER = ""
     for tier in list(jconfig.TIERS):
         jconfig.TIERS[tier] = model
+    # Room for a full review plus its findings block in one reply (llm.chat
+    # reads config.MAX_TOKENS at call time when a caller passes none).
+    jconfig.MAX_TOKENS = int(spec.get("max_output_tokens") or jconfig.MAX_TOKENS)
     jmodels.selected = lambda: ""                              # no roster selection can move a tier
     return jconfig
+
+
+CUT_OFF_MARK = "[cut off at the token limit]"     # jarvis.agent appends it when the last reply ended on length
+
+
+def final_truncated(text: str) -> bool:
+    """The final answer still ended at the output limit (after the loop's own continuations)."""
+    return (text or "").rstrip().endswith(CUT_OFF_MARK)
 
 
 def _atomic_write(path: Path, doc: dict) -> None:
@@ -171,13 +184,16 @@ def run(spec: dict, key: str | None, io_dir: Path) -> dict:
     meter = Meter(spec)                           # streams the running total on stdout
     meter.write()
     texts: list[str] = []
+    limits: list[bool] = []
+    jconfig = sys.modules["jarvis.config"]
     real_chat, real_turn = llm.chat, agent_mod.Agent.run_turn
 
     def chat(model, messages, *args, **kwargs):
         def arg(name):
             i = CHAT_ARGS[name]
             return args[i] if len(args) > i else kwargs.get(name)
-        pin = meter.before(model, messages, arg("max_tokens"), arg("tools"))
+        # A call with no max_tokens gets config.MAX_TOKENS from llm.chat: estimate that, not 0.
+        pin = meter.before(model, messages, arg("max_tokens") or jconfig.MAX_TOKENS, arg("tools"))
         if len(args) > CHAT_ARGS["provider"]:     # provider passed positionally
             args = list(args)
             args[CHAT_ARGS["provider"]] = pin
@@ -190,13 +206,16 @@ def run(spec: dict, key: str | None, io_dir: Path) -> dict:
     def run_turn(self, *args, **kwargs):
         turn = real_turn(self, *args, **kwargs)
         texts.append(turn.text or "")
+        limits.append(bool(getattr(turn, "truncated", False)))
         return turn
 
     llm.chat, agent_mod.Agent.run_turn = chat, run_turn
     lh.JARVIS_TOOLS = list(TOOLS)                 # no run_subagent / run_fleet
     record = lh.run_jarvis([spec["prompt"]], Path(spec["workspace"]), spec["model"], spec["max_turns"],
                            budget_usd=meter.budget)
-    return {"text": texts[-1] if texts else record.reply, "cost_usd": record.cost_usd, "turns": record.turns,
+    text = texts[-1] if texts else record.reply
+    return {"text": text, "truncated": final_truncated(text), "hit_output_limit": any(limits),
+            "cost_usd": record.cost_usd, "turns": record.turns,
             "spend_usd": round(meter.total, 6), "calls": meter.calls, "models": meter.models,
             "tokens": meter.tokens, "tool_calls": record.tool_calls, "error": record.error,
             "over_budget": meter.total >= meter.budget - 1e-12}

@@ -162,7 +162,9 @@ def review_step(deps: Deps, rcase: dict, snap: Path, *, harness: str, model: str
     (out_dir / "review.txt").write_text(result.text, encoding="utf-8")
     _write(out_dir / "findings.json", parsed.findings)
     doc["ok"] = bool(parsed.found_block) and not result.error
+    # A reply cut off at the output limit is "truncated", never scored as a review with no findings.
     doc["result"] = ("timeout" if result.timed_out else "error" if result.error and not parsed.found_block
+                     else "truncated" if result.truncated and not parsed.found_block
                      else "unparsed" if not parsed.found_block else "over-cap" if doc["over_cap"] else "ok")
     return doc
 
@@ -234,7 +236,7 @@ def review_once(deps: Deps, case: dict, *, harness: str, model: str, n: int = 1)
     run = {**_base_run(deps, case, harness, model, run_id, qb), "snapshot": str(snap), "shas": shas,
            "task_class": "review", "reviewer": doc, "result": doc["result"], "n_findings": len(doc["findings"]),
            "flags": doc["flags"], "network_flags": doc["network_flags"], "escape_flags": doc["escape_flags"],
-           "hygiene": hygiene, "quota_notes": notes, "reason": doc.get("error", "")}
+           "hygiene": hygiene, "quota_notes": notes, "reason": doc.get("error", ""), "truncated": bool(doc.get("truncated"))}
     return _finish(deps, run, out_dir, started)
 
 
@@ -407,7 +409,8 @@ def implement_once(deps: Deps, case: dict, *, harness: str, model: str, reviewer
            "result": "ok" if rounds and not reason else "skipped" if not rounds else "partial", "reason": reason,
            "implementer": rounds[-1]["implementer"] if rounds else None,
            "reviewer": rounds[-1].get("reviewer") if rounds else None, "quota_notes": notes,
-           "network_flags": net_flags, "escape_flags": esc_flags}
+           "network_flags": net_flags, "escape_flags": esc_flags,
+           "truncated": any(bool((r.get(k) or {}).get("truncated")) for r in rounds for k in ("implementer", "reviewer"))}
     return _finish(deps, run, out_dir, started)
 
 

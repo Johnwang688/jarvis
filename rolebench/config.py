@@ -66,9 +66,13 @@ def check_matrix(harness: str, model: str, off_matrix: bool = False) -> None:
                     f"({', '.join(MATRIX.get(harness, ())) or 'none'}); pass --off-matrix to run it anyway")
 
 
-# The estimate's completion allowance when the call sets no max_tokens and no
-# endpoint lists its maximum completion.
+# The estimate's completion allowance is min(the call's max_tokens, the
+# endpoint's maximum completion, this): an endpoint's maximum alone can be ~1M
+# on a 1M-context model, which priced a first call at dollars.
 DEFAULT_COMPLETION_ALLOWANCE = 16_000
+# Per-call output room for the Jarvis-loop cells (jarvis.config.MAX_TOKENS is
+# 8192, which a full review plus its findings block can overrun).
+JARVIS_MAX_OUTPUT_TOKENS = 16_000
 # Long-context price tiers the endpoints list does not carry: at or above
 # `threshold` prompt tokens the whole request is priced at `multiplier` times
 # (Haiku 5.5: 5x from 100k, CLAUDE.md's model default note).

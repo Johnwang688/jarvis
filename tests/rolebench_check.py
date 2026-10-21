@@ -346,7 +346,7 @@ def _price(prompt, completion, max_completion=1000, tier=None):
 
 def test_worker_meter(root: Path) -> None:
     luna, glm, haiku = "openai/gpt-6-luna", "z-ai/glm-5.3-flash", "anthropic/claude-haiku-5.5"
-    spec = {"budget_usd": 0.1, "prices": {luna: _price(1.0, 5.0), "x/y": _price(1.0, 5.0), glm: _price(3.0, 15.0)}}
+    spec = {"budget_usd": 0.1, "prices": {luna: _price(1.0, 5.0), "x/y": _price(1.0, 5.0), glm: _price(3.0, 15.0, 1_000_000)}}
     out = io.StringIO()
     m = jarvis_worker.Meter(spec, stream=out)
 
@@ -371,7 +371,7 @@ def test_worker_meter(root: Path) -> None:
     m4 = jarvis_worker.Meter(spec, stream=io.StringIO())
     big = [{"role": "user", "content": "x" * 600_000}]        # ~150k tokens; at $3/M ~$0.45 > $0.10
     refused = raises(lambda: m4.before(glm, big, max_tokens=1), jarvis_worker.BudgetExceeded)
-    small_ok = m4.before(glm, [{"role": "user", "content": "hi"}], max_tokens=1) == ""
+    small_ok = not raises(lambda: m4.before(glm, [{"role": "user", "content": "hi"}], max_tokens=1))
     out_refused = raises(lambda: m4.before(glm, [{"role": "user", "content": "hi"}], max_tokens=10_000), jarvis_worker.BudgetExceeded)
     check("a call whose estimate (prompt and max output) at the spec's price would cross the budget is refused before sending",
           refused and small_ok and out_refused and m4.calls == 0)
@@ -385,10 +385,21 @@ def test_worker_meter(root: Path) -> None:
     naive = (len(msgs[0]["content"]) / 4) * 0.10 / 1e6       # what the old estimate saw: messages only, no output
     check("tool schemas count toward the prompt estimate (chars/4)",
           abs(e["prompt_tokens"] - (380_000 + len(json.dumps(tools))) / 4) < 1e-6 and e["prompt_tokens"] > 100_000)
-    check("with no max_tokens the completion allowance is the endpoint's maximum (else 16k)",
-          e["completion_tokens"] == 64_000
-          and jarvis_worker.Meter({"budget_usd": 1, "prices": {"a/b": {"prompt": 1, "completion": 1, "tier": None}}},
-                                  stream=io.StringIO()).estimate("a/b", [], None)["completion_tokens"] == 16_000)
+    ma = jarvis_worker.Meter({"budget_usd": 1, "prices": {"a/b": _price(1, 1, 4000), "c/d": {"prompt": 1, "completion": 1, "tier": None}}},
+                             stream=io.StringIO())
+    check("the completion allowance is min(max_tokens, the endpoint's maximum, 16k)",
+          e["completion_tokens"] == 16_000 and ma.estimate("a/b", [], None)["completion_tokens"] == 4000
+          and ma.estimate("a/b", [], 2400)["completion_tokens"] == 2400
+          and ma.estimate("c/d", [], None)["completion_tokens"] == 16_000
+          and ma.estimate("c/d", [], 100_000)["completion_tokens"] == 16_000)
+    # a 1M-context matrix model: its endpoint lists ~1M max completion; the first call must cost cents, not dollars
+    mm = jarvis_worker.Meter({"budget_usd": 0.5, "prices": {"z-ai/glm-5.3-flash": _price(0.6, 2.2, 1_000_000)}}, stream=io.StringIO())
+    first = mm.estimate("z-ai/glm-5.3-flash", [{"role": "user", "content": "x" * 80_000}], 16_000, tools)
+    unset = mm.estimate("z-ai/glm-5.3-flash", [{"role": "user", "content": "x" * 80_000}], None, tools)
+    check("a 1M-context model's first call estimates at cents, not dollars (with and without max_tokens)",
+          first["usd"] < 0.10 and unset["usd"] < 0.10, f"${first['usd']:.4f} / ${unset['usd']:.4f}")
+    check("and it is not refused before sending",
+          not raises(lambda: mm.before("z-ai/glm-5.3-flash", [{"role": "user", "content": "x" * 80_000}], 16_000, tools)))
     check("Haiku 5.5 is priced at 5x for the whole request from 100k prompt tokens",
           e["multiplier"] == 5.0 and mh.estimate(haiku, [{"role": "user", "content": "x" * 1000}], 10)["multiplier"] == 1.0)
     check("one call crosses the per-run budget only once tools, the allowance and the tier are counted",
@@ -411,6 +422,8 @@ def test_worker_meter(root: Path) -> None:
           not {"run_subagent", "run_fleet"} & set(jarvis_worker.TOOLS) and "run_command" in jarvis_worker.TOOLS)
     s = runners.jarvis_spec(model=glm, prompt="p", cwd="/w", max_turns=3, budget_usd=0.2, price_fn=lambda m: (0.5, 2.0, None))
     s2 = runners.jarvis_spec(model=haiku, prompt="p", cwd="/w", max_turns=3, budget_usd=None)
+    check("the spec gives the Jarvis cell 16k output tokens per call and the 16k allowance cap",
+          s["max_output_tokens"] == 16_000 == config.JARVIS_MAX_OUTPUT_TOKENS and s["allowance_cap"] == 16_000)
     check("the spec prices the cell's model at its endpoint price, the 16k default allowance and its tier; no pins",
           s["prices"] == {glm: _price(0.5, 2.0, 16_000)} and "pins" not in s
           and s2["prices"] == {haiku: _price(1.0, 5.0, 8000, [100_000, 5.0])} and s2["budget_usd"] == config.PER_RUN_CAP_USD)
@@ -465,12 +478,12 @@ def test_worker_env(root: Path) -> None:
     driver = (
         "import json, os, subprocess, sys\n"
         "from rolebench import jarvis_worker as w\n"
-        "cfg = w.prepare({'model': 'm/cell-model'}, 'sk-dummy-from-stdin')\n"
+        "cfg = w.prepare({'model': 'm/cell-model', 'max_output_tokens': 16000}, 'sk-dummy-from-stdin')\n"
         "out = subprocess.run(['env'], capture_output=True, text=True).stdout\n"
         "from jarvis import models\n"
         "print(json.dumps({'key': 'OPENROUTER_API_KEY=' in out, 'probe': 'ROLEBENCH_PROBE_SECRET' in out,\n"
         "  'api': cfg.api_key() == 'sk-dummy-from-stdin', 'tiers': sorted(set(cfg.TIERS.values())),\n"
-        "  'tier': models.tier('compaction'), 'provider': cfg.CHAT_PROVIDER}))\n")
+        "  'tier': models.tier('compaction'), 'provider': cfg.CHAT_PROVIDER, 'max_tokens': cfg.MAX_TOKENS}))\n")
     home = root / "m1-home"
     home.mkdir()
     done = subprocess.run([config.python_bin(), "-c", driver], capture_output=True, text=True, cwd=str(rt),
@@ -484,6 +497,7 @@ def test_worker_env(root: Path) -> None:
           doc.get("key") is False, done.stderr[-400:])
     check("a child of the worker has no other key the .env import added", doc.get("probe") is False)
     check("the worker still holds the key from stdin, through config.api_key only", doc.get("api") is True)
+    check("the worker gives every call 16k output tokens unless the caller sets its own", doc.get("max_tokens") == 16000)
     check("every tier is pinned to the cell's model, and nothing is provider-pinned globally",
           doc.get("tiers") == ["m/cell-model"] and doc.get("tier") == "m/cell-model" and doc.get("provider") == "")
 
@@ -1676,6 +1690,19 @@ def test_review_flow(shas, root: Path) -> None:
         runners.REGISTRY.update(saved)
         runners.run_claude = saved_claude
         sandbox.PASTA = saved_pasta
+    def cut_off(**kw):
+        return runners.RunResult("jarvis", kw["model"], text="half a review\n\n" + jarvis_worker.CUT_OFF_MARK,
+                                 cost_usd=0.01, turns=7, truncated=True)
+    tr = flows.review_once(flows.Deps(runners={"jarvis": cut_off}, quota_override=NO_QUOTA, repo=shas["repo"],
+                                      ledger=spend.Ledger(root / "led-trunc.json", 10, 0.5)),
+                           case, harness="jarvis", model="anthropic/claude-haiku-5.5")
+    trow = json.loads(config.log_path().read_text().splitlines()[-1])
+    check("a review cut off at the output limit is 'truncated' in run.json and the log row, not scored as no findings",
+          tr["result"] == "truncated" and tr["truncated"] is True and trow["truncated"] is True and trow["result"] == "truncated")
+    check("the worker's cut-off mark is the one jarvis.agent appends",
+          f'"\\n\\n{jarvis_worker.CUT_OFF_MARK}"' in (Path(config.REPO_ROOT) / "jarvis" / "agent.py").read_text())
+    check("the worker marks a final answer that still ends at the limit, and only that",
+          jarvis_worker.final_truncated("x\n\n[cut off at the token limit]") and not jarvis_worker.final_truncated("done"))
     bad = flows.Deps(runners={"claude": fake_runner(["no block at all"])}, quota_override=NO_QUOTA, repo=shas["repo"])
     check("a reply without a findings block is 'unparsed'", flows.review_once(bad, case, harness="claude", model="sonnet")["result"] == "unparsed")
 
