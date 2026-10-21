@@ -115,7 +115,13 @@ NODE_SCRATCH = (".vite", ".vite-temp", ".vitest", ".cache")
 # The credential fields each CLI needs; everything else (refresh tokens, the
 # MCP OAuth block) is dropped and the trimmed view is passed in memory (A2).
 CLAUDE_OAUTH_KEEP = ("accessToken", "expiresAt", "scopes", "subscriptionType", "rateLimitTier")
-CODEX_TOKEN_DROP = ("refresh_token",)
+# Codex's TokenData (login/src/token_data.rs: id_token, access_token,
+# refresh_token: String, account_id) requires refresh_token: without it the
+# ChatGPT login does not parse and codex falls back to API-key mode (401,
+# "Missing bearer"). So the real one is replaced by an inert placeholder that
+# parses as a string; a refresh attempt in the cell fails at the auth server
+# and can never rotate the owner's token (A2 amendment, 2026-10-21).
+CODEX_REFRESH_PLACEHOLDER = "rolebench-placeholder-no-refresh"
 
 
 class SandboxError(RuntimeError):
@@ -261,12 +267,14 @@ def trimmed_claude_credentials() -> bytes:
 
 
 def trimmed_codex_auth() -> bytes:
-    """The Codex login a cell gets: auth.json without the refresh token."""
+    """The Codex login a cell gets: auth.json with its refresh token replaced by
+    an inert placeholder (every other field kept)."""
     try:
         raw = json.loads(codex_auth().read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         raise SandboxError(f"cannot read the Codex login: {exc}")
-    tokens = {k: v for k, v in (raw.get("tokens") or {}).items() if k not in CODEX_TOKEN_DROP}
+    tokens = dict(raw.get("tokens") or {})
+    tokens["refresh_token"] = CODEX_REFRESH_PLACEHOLDER
     out = {"tokens": tokens}
     for k in ("auth_mode", "OPENAI_API_KEY", "last_refresh"):
         if k in raw:

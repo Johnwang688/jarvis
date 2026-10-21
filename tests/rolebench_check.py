@@ -531,13 +531,18 @@ def test_sandbox_argv(root: Path) -> None:
         argvs = {p: sandbox.bwrap_argv(sandbox.Cell(p, work), ["true"]) for p in sandbox.PROFILES}
         # A2: the trimmed credential views, checked by key name only (no values printed)
         claude_cred = json.loads(sandbox.trimmed_claude_credentials())["claudeAiOauth"]
-        codex_cred = json.loads(sandbox.trimmed_codex_auth())
+        codex_raw = sandbox.trimmed_codex_auth()
+        codex_cred = json.loads(codex_raw)
     home = sandbox.sandbox_home()
     check("the trimmed Claude login keeps only the access token and its metadata, no refresh or MCP token",
           set(claude_cred) <= set(sandbox.CLAUDE_OAUTH_KEEP) and "accessToken" in claude_cred
           and "refreshToken" not in claude_cred and "mcpOAuth" not in json.loads(sandbox.trimmed_claude_credentials()))
-    check("the trimmed Codex login drops the refresh token", "access_token" in codex_cred["tokens"]
-          and "refresh_token" not in codex_cred["tokens"])
+    check("the trimmed Codex login replaces the refresh token with the inert placeholder (A2 amendment)",
+          "access_token" in codex_cred["tokens"] and codex_cred["tokens"].get("refresh_token") == sandbox.CODEX_REFRESH_PLACEHOLDER
+          and b"cx-refresh-dummy" not in codex_raw)
+    check("the trimmed Codex login keeps every other field (codex's TokenData needs refresh_token as a string)",
+          set(codex_cred["tokens"]) == {"access_token", "refresh_token", "id_token", "account_id"}
+          and {"auth_mode", "last_refresh"} <= set(codex_cred) and isinstance(codex_cred["tokens"].get("refresh_token"), str))
 
     def sources(a):
         return [a[i + 1] for i, t in enumerate(a) if t in ("--bind", "--ro-bind")]
@@ -1090,7 +1095,8 @@ def test_fake_clis(root: Path) -> None:
     import base64
     payload = base64.urlsafe_b64encode(json.dumps({"exp": time.time() + 86400}).encode()).decode().rstrip("=")
     (login / ".codex").mkdir()
-    (login / ".codex" / "auth.json").write_text(json.dumps({"tokens": {"access_token": f"h.{payload}.s", "refresh_token": "r"}}))
+    (login / ".codex" / "auth.json").write_text(json.dumps({"auth_mode": "chatgpt", "tokens": {
+        "access_token": f"h.{payload}.s", "refresh_token": "cx-real-refresh-dummy-7f3a", "id_token": "i", "account_id": "a"}}))
     fake = root / "bin"
     (fake / "rel" / "bin").mkdir(parents=True)
     (fake / "rel" / "codex-path").mkdir()
@@ -1103,6 +1109,13 @@ def test_fake_clis(root: Path) -> None:
     (fake / "claude").chmod(0o755)
     (fake / "rel" / "bin" / "codex").write_text(
         "#!/bin/sh\nenv > ./codex-env.txt\ntest -e \"$CODEX_HOME/auth.json\" && echo auth=present > ./codex-auth.txt\n"
+        "python3 -c \"import json,os;t=json.load(open(os.environ['CODEX_HOME']+'/auth.json'))['tokens'];"
+        "print(json.dumps({'keys':sorted(t),'placeholder':t.get('refresh_token')=='" + sandbox.CODEX_REFRESH_PLACEHOLDER + "'}))\""
+        " > ./codex-refresh.json 2>/dev/null\n"
+        # the needle is assembled at run time, so this script (bound under /opt/rolebench) never matches itself
+        "N=cx-real-refresh-; N=\"${N}dummy-7f3a\"\n"
+        "if grep -rqsF \"$N\" \"$HOME\" /tmp /opt/rolebench 2>/dev/null || env | grep -qF \"$N\";"
+        " then echo leak=yes > ./codex-leak.txt; else echo leak=no > ./codex-leak.txt; fi\n"
         "cat > /dev/null\necho '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"done\"}}'\n"
         "echo '{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":100,\"cached_input_tokens\":40,\"output_tokens\":5}}'\n")
     (fake / "rel" / "bin" / "codex").chmod(0o755)
@@ -1130,6 +1143,12 @@ def test_fake_clis(root: Path) -> None:
           (work / "claude-stdin.txt").read_text() == "PROMPT TEXT" and res.text == "ok" and res.cost_usd == 0.5)
     check("claude's modelUsage is recorded and a two-model run is flagged",
           res.models_used == ["claude-haiku-5-5", "claude-sonnet-5-5"] and res.summary()["multi_model"])
+    seen_refresh = json.loads((work / "codex-refresh.json").read_text()) if (work / "codex-refresh.json").exists() else {}
+    check("the codex cell's auth.json has refresh_token equal to the placeholder, and all four token fields",
+          seen_refresh.get("placeholder") is True
+          and seen_refresh.get("keys") == ["access_token", "account_id", "id_token", "refresh_token"], str(seen_refresh))
+    check("the real refresh token is nowhere in the codex cell (home, /tmp, /opt/rolebench, environment)",
+          (work / "codex-leak.txt").exists() and (work / "codex-leak.txt").read_text().strip() == "leak=no")
     cenv = (work / "codex-env.txt").read_text() if (work / "codex-env.txt").exists() else ""
     check("codex runs inside the cell with its own CODEX_HOME and the login in it",
           f"CODEX_HOME={sandbox.sandbox_home()}/{sandbox.CODEX_HOME_NAME}" in cenv

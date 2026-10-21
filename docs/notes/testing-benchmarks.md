@@ -1196,7 +1196,9 @@ cell cannot ask systemd to start anything outside), and the lead's `/tmp/claude-
 Logins are a **trimmed, in-memory view**, not a file bind (A2, decisions doc).
 The claude cell and the judge get `{claudeAiOauth: {accessToken, expiresAt,
 scopes, subscriptionType, rateLimitTier}}` — no refresh token, no MCP OAuth
-block; the codex cell gets `auth.json` without its refresh token, in its own
+block; the codex cell gets `auth.json` with its refresh token replaced by an inert
+placeholder (codex's token struct requires the field: without it the login falls back
+to API-key mode and 401s; A2 amendment), in its own
 `CODEX_HOME` on the tmpfs (no owner config, skills, memories or `trusted` entries
 written back); the Jarvis cell gets no login (the OpenRouter key goes to the
 worker on stdin). The trimmed JSON is written to a pipe and bound with `bwrap
@@ -1252,7 +1254,7 @@ loops back to this LAN, such as a router's hairpin NAT, is not closed). **Accept
 exposure (lead, review of #284):** a pasta cell can send to any public address on
 TCP 443 and resolve any name through the host's resolver, so an agent could send
 the snapshot's repo code out; the only credential in a cell is the trimmed login
-(A2), never a refresh token, a gh login or a key. The network and outside-the-snapshot audits are best-effort detection
+(A2), never a real refresh token, a gh login or a key. The network and outside-the-snapshot audits are best-effort detection
 beside that, reported next to the score. Claude's tools are an allowlist
 (`Bash,Read,Edit,Write,Grep,Glob`; the judge `Read,Grep,Glob`), and the Jarvis
 cell offers no delegation tools.

@@ -77,7 +77,17 @@ veto it.
 
 - The claude and judge cells get `{"claudeAiOauth": {accessToken, expiresAt,
   scopes, subscriptionType, rateLimitTier}}` — no `refreshToken`, no `mcpOAuth`.
-- The codex cell gets `auth.json` without `refresh_token`.
+- The codex cell gets `auth.json` with `refresh_token` replaced by the inert placeholder
+  `rolebench-placeholder-no-refresh` (amended 2026-10-21, below).
+- **A2 amendment (lead, 2026-10-21):** deleting `refresh_token` broke the Codex login. Codex's
+  `TokenData` (`id_token`, `access_token`, `refresh_token: String`, `account_id`; its binary
+  carries "struct TokenData with 4 elements") requires the field, so without it the ChatGPT
+  login did not parse and codex fell back to API-key mode: a real smoke on merged main got
+  `401 Unauthorized: Missing bearer` from `api.openai.com/v1/responses` with 0 tokens. The
+  real refresh token is now replaced by the placeholder, a string that parses; every other
+  field (`auth_mode`, `id_token`, `access_token`, `account_id`, `last_refresh`) is kept. A
+  refresh attempt inside the cell then fails at the auth server and can never rotate the
+  owner's token, and the file stays read-only and in memory.
 - The trimmed JSON is written to a pipe and bound with `bwrap --perms 0400
   --ro-bind-data <fd> <dest>`, so it is never on disk, never writable, and never
   written back. The `login_problem` pre-flight still refuses a run whose access
