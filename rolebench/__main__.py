@@ -1,4 +1,4 @@
-"""python -m rolebench <snapshot|review|implement|judge|report>
+"""python -m rolebench <snapshot|review|implement|judge|report|clean>
 
     python -m rolebench snapshot hint-r1
     python -m rolebench review --harness claude --model haiku --case hint-r1 --runs 3
@@ -6,17 +6,26 @@
     python -m rolebench implement --harness claude --model sonnet --case impl-279 \\
         --reviewer-harness claude --reviewer-model opus
     python -m rolebench report
+    python -m rolebench clean --judged
+
+The quota guard is always on. `--no-quota-guard` exists for the owner only: it
+also needs ROLEBENCH_QUOTA_OVERRIDE=<reason>, and an agent never passes it
+without the owner's explicit OK for that run.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
+import shutil
 import sys
 import time
 from pathlib import Path
 
 from . import cases, config, flows, judge, report, snapshot
+
+OVERRIDE_ENV = "ROLEBENCH_QUOTA_OVERRIDE"
 
 
 def _case_ids(wanted: list[str], kind: str) -> list[str]:
@@ -31,14 +40,29 @@ def _case_ids(wanted: list[str], kind: str) -> list[str]:
     return ids
 
 
+def quota_override(args) -> str:
+    """The owner's reason when the guard is off, else ''. Exits without one."""
+    if not args.no_quota_guard:
+        return ""
+    reason = (os.environ.get(OVERRIDE_ENV) or "").strip()
+    if not reason:
+        raise SystemExit(f"--no-quota-guard needs {OVERRIDE_ENV}=<reason> (the owner's explicit OK for this run)")
+    bar = "!" * 72
+    print(f"{bar}\nWARNING: the quota guard is OFF for this command: {reason}\n"
+          f"Every cell is recorded with quota_guard \"off: {reason}\".\n{bar}", file=sys.stderr, flush=True)
+    return reason
+
+
 def _deps(args) -> flows.Deps:
-    return flows.Deps(use_quota=not args.no_quota_guard)
+    return flows.Deps(quota_override=quota_override(args))
 
 
 def cmd_snapshot(args) -> int:
     case = cases.load(args.case)
     run = args.run or time.strftime("%Y%m%d-%H%M%S")
-    print(snapshot.build(case, run))
+    snap = snapshot.build(case, run)
+    print(snap)
+    print(json.dumps(snapshot.shas(snap)))
     return 0
 
 
@@ -46,11 +70,16 @@ def _print_run(run: dict) -> None:
     line = f"{run['run_id']}: {run['result']}"
     if run.get("reason"):
         line += f" ({run['reason']})"
+    if run.get("quota_guard", "on") != "on":
+        line += f" [quota guard {run['quota_guard']}]"
     if run["kind"] == "review" and run.get("reviewer"):
         doc = run["reviewer"]
+        split = doc.get("token_split") or {}
         line += (f" - {run['n_findings']} findings, {doc.get('turns')} turns, cost {doc.get('cost_usd')}, "
-                 f"tokens {sum((doc.get('tokens') or {}).values())}, {run['wall_s']}s, "
-                 f"net flags {len(run['network_flags'])}, escape flags {len(run['escape_flags'])}")
+                 f"tokens in {split.get('input')} cached {split.get('cached')} out {split.get('output')}, "
+                 f"{run['wall_s']}s, net flags {len(run['network_flags'])}, escape flags {len(run['escape_flags'])}")
+        if doc.get("multi_model"):
+            line += f", models {doc.get('models_used')}"
     if run["kind"] == "implement" and "merged_ready" in run:
         line += f" - merge-ready {run['merged_ready']} after {run['rounds_to_merge_ready']} fix rounds"
     print(line, flush=True)
@@ -91,9 +120,14 @@ def cmd_implement(args) -> int:
     return 0
 
 
+def _run_dirs(root: Path) -> list[Path]:
+    return [root] if (root / "run.json").is_file() else sorted(p.parent for p in root.glob("*/run.json"))
+
+
 def cmd_judge(args) -> int:
+    override = quota_override(args)
     root = Path(args.run).expanduser().resolve()
-    dirs = [root] if (root / "run.json").is_file() else sorted(p.parent for p in root.glob("*/run.json"))
+    dirs = _run_dirs(root)
     if not dirs:
         raise SystemExit(f"no run.json under {root}")
     judged = []
@@ -103,14 +137,14 @@ def cmd_judge(args) -> int:
             print(f"{d.name}: not judged ({run.get('result')})")
             continue
         try:
-            doc = judge.judge_run(d, cases.load(run["case_id"]), use_quota=not args.no_quota_guard)
+            doc = judge.judge_run(d, cases.load(run["case_id"]), quota_override=override, force=args.force)
         except judge.JudgeError as exc:
             print(f"{d.name}: judge failed: {exc}")
             continue
         judged.append(d)
-        print(f"{d.name}: {json.dumps(doc['score'])}")
-    size = judge.spotcheck(judged, root / "spotcheck.md")
-    print(f"spotcheck.md: {size} finding(s) to check")
+        print(f"{d.name}: {json.dumps(doc['score'])}" + (" (already judged; --force to redo)" if doc.get("reused") else ""))
+    size, path = judge.spotcheck(judged)
+    print(f"{path}: {size} finding(s) to check")
     return 0
 
 
@@ -124,10 +158,36 @@ def cmd_report(args) -> int:
     return 0
 
 
+def cmd_clean(args) -> int:
+    """Remove the snapshots of runs that need them no more."""
+    if not args.judged:
+        raise SystemExit("say what to clean: --judged")
+    snap_root = config.snap_root().resolve()
+    removed = 0
+    for d in _run_dirs(config.runs_root()):
+        path = d / "run.json"
+        run = json.loads(path.read_text(encoding="utf-8"))
+        done = run.get("judged") or (run.get("kind") == "implement" and run.get("finished"))
+        snap = Path(run.get("snapshot") or "")
+        if not done or not run.get("snapshot") or run.get("snapshot_removed"):
+            continue
+        if snap.parent.resolve() != snap_root:
+            print(f"{d.name}: snapshot {snap} is not under {snap_root}; left alone")
+            continue
+        shutil.rmtree(snap, ignore_errors=True)
+        run["snapshot_removed"] = True
+        path.write_text(json.dumps(run, indent=1), encoding="utf-8")
+        removed += 1
+    print(f"removed {removed} snapshot(s)")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="rolebench", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--no-quota-guard", action="store_true", help="do not read the daemon's usage (tests, offline)")
+    parser.add_argument("--no-quota-guard", action="store_true",
+                        help=f"owner only, never routine: run Claude/Codex cells without the 75%% quota guard. "
+                             f"Also needs {OVERRIDE_ENV}=<reason>; every cell is marked as overridden.")
     sub = parser.add_subparsers(dest="command", required=True)
 
     s = sub.add_parser("snapshot", help="build the isolated repo for a case")
@@ -155,11 +215,16 @@ def main(argv: list[str] | None = None) -> int:
 
     j = sub.add_parser("judge", help="blind-judge a review run (or every run under a directory)")
     j.add_argument("--run", required=True)
+    j.add_argument("--force", action="store_true", help="judge again a run already judged")
     j.set_defaults(func=cmd_judge)
 
     rep = sub.add_parser("report", help="per-model tables over every run")
     rep.add_argument("--out")
     rep.set_defaults(func=cmd_report)
+
+    c = sub.add_parser("clean", help="remove snapshots no longer needed")
+    c.add_argument("--judged", action="store_true", help="snapshots of judged review runs and finished implement runs")
+    c.set_defaults(func=cmd_clean)
 
     args = parser.parse_args(argv)
     return args.func(args)

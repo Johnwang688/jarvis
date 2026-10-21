@@ -1,4 +1,4 @@
-"""Skip a Claude or Codex cell at 75% of a quota window (read-only)."""
+"""Skip a Claude or Codex cell at 75% of a quota window, or when the quota is unknown (read-only)."""
 
 from __future__ import annotations
 
@@ -11,6 +11,10 @@ import urllib.request
 from . import config
 
 HARNESS_PROVIDER = {"claude": "claude", "codex": "codex"}
+
+
+def _number(v) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
 
 
 def over(quota, now: float | None = None) -> str | None:
@@ -43,7 +47,9 @@ def daemon_reader(provider: str):
 
 
 def guard(harness: str, reader=daemon_reader) -> tuple[bool, str]:
-    """(skip, note). Unknown is 'proceed with a warning'; jarvis has no quota."""
+    """(skip, note). Unknown quota skips too (fail closed): only the owner's
+    explicit override (`--no-quota-guard` with ROLEBENCH_QUOTA_OVERRIDE) runs a
+    cell blind. jarvis has no quota."""
     provider = HARNESS_PROVIDER.get(harness)
     if provider is None:
         return False, ""
@@ -51,7 +57,9 @@ def guard(harness: str, reader=daemon_reader) -> tuple[bool, str]:
         quota = reader(provider)
     except Exception:
         quota = None
-    if quota is None:
-        return False, f"warning: {provider} quota unknown, proceeding"
+    windows = quota.get("windows") if isinstance(quota, dict) else None
+    measured = [w for w in windows or () if isinstance(w, dict) and _number(w.get("used_percent"))]
+    if not measured:
+        return True, f"{provider} quota unknown (fail closed)"
     hit = over(quota)
     return (True, f"{provider} {hit}") if hit else (False, "")

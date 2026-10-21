@@ -1,44 +1,40 @@
-"""Harness adapters: claude, codex, and the Jarvis loop.
+"""Harness adapters: claude, codex, and the Jarvis loop, each inside a sandbox cell.
 
-The Claude Code stream parser and the Jarvis loop are `longbench.harness`'s,
-reused as they are. What this adds: a scrubbed environment, a memory-capped
-scope, a wall timeout that kills the whole process group, a codex adapter, and
-a subprocess worker for the Jarvis loop (`run_jarvis` does `os.chdir` and edits
-`config`, which three concurrent in-process runs would trample).
+Every agent process runs in `rolebench.sandbox`: bwrap in a named, 3 GB
+`systemd-run` unit, an allowlisted environment, and only the login its CLI
+needs. The Claude Code stream parser is `longbench.harness`'s. The Jarvis loop
+runs as a subprocess worker (`rolebench.jarvis_worker`) from a copy of the code
+with no `.env` and no cases.
 
 Every runner has the same shape, so tests inject fakes:
 
-    runner(model=, prompt=, cwd=, timeout_s=, max_turns=, budget_usd=, out_dir=) -> RunResult
+    runner(model=, prompt=, cwd=, timeout_s=, max_turns=, budget_usd=, out_dir=, run_id=) -> RunResult
 """
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import shutil
-import signal
-import subprocess
-import sys
 import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import config
+from . import config, sandbox
 
-CLAUDE_DISALLOWED = ["WebFetch", "WebSearch", "Bash(gh:*)", "Bash(curl:*)", "Bash(wget:*)",
-                     "Bash(git push:*)"]
+# The claude cell's tools: an allowlist. No web, no Task/agents, no messaging,
+# triggers, crons, notifications, artifacts or workflows.
+CLAUDE_TOOLS = "Bash,Read,Edit,Write,Grep,Glob"
+CLAUDE_READ_ONLY_TOOLS = "Read,Grep,Glob"
 STDOUT_KEEP = 5_000_000
+LOGIN_MARGIN_S = 600
 
 
 def scrubbed_env(base=None) -> dict:
-    """The environment a run gets: no tokens, no API keys."""
+    """The harness's own environment minus tokens (the cells use `sandbox.env_for`)."""
     return {k: v for k, v in (os.environ if base is None else base).items() if k not in config.SCRUBBED_ENV}
-
-
-def wrap_scope(argv: list[str]) -> list[str]:
-    return ["systemd-run", "--user", "--scope", "-q", "-p", f"MemoryMax={config.MEMORY_MAX}",
-            "-p", "MemorySwapMax=0", *argv]
 
 
 @dataclass
@@ -53,45 +49,99 @@ class RunResult:
     duration_s: float = 0.0
     error: str = ""
     timed_out: bool = False
+    crashed: bool = False          # no result from the agent process at all
+    spend_usd: float | None = None  # the jarvis worker's own running total
+    models_used: list = field(default_factory=list)
     raw: dict = field(default_factory=dict)
 
     def summary(self) -> dict:
         return {"harness": self.harness, "model": self.model, "cost_usd": self.cost_usd,
-                "tokens": self.tokens, "turns": self.turns, "tool_calls": len(self.tool_calls),
-                "duration_s": round(self.duration_s, 1), "error": self.error, "timed_out": self.timed_out}
+                "tokens": self.tokens, "token_split": token_split(self.harness, self.tokens),
+                "turns": self.turns, "tool_calls": len(self.tool_calls),
+                "duration_s": round(self.duration_s, 1), "error": self.error, "timed_out": self.timed_out,
+                "crashed": self.crashed, "spend_usd": self.spend_usd, "models_used": self.models_used,
+                "multi_model": len(self.models_used) > 1}
 
 
-def run_scoped(argv: list[str], *, cwd, env: dict, timeout_s: float, stdin: str | None = None,
-               wrap=wrap_scope) -> tuple[int | None, str, str, bool]:
-    """(returncode, stdout, stderr, timed_out). The whole process group dies on timeout."""
-    proc = subprocess.Popen(wrap(argv) if wrap else argv, cwd=cwd, env=env, text=True,
-                            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            start_new_session=True)
+def token_split(harness: str, tokens: dict) -> dict:
+    """{"input", "cached", "output"}: input excludes cached reads in every harness.
+    Codex's input_tokens already include cached_input_tokens; Claude's do not;
+    OpenRouter's prompt_tokens include cached_tokens."""
+    t = tokens or {}
+    if harness == "codex":
+        cached = int(t.get("cached_input_tokens") or 0)
+        return {"input": max(0, int(t.get("input_tokens") or 0) - cached), "cached": cached,
+                "output": int(t.get("output_tokens") or 0)}
+    if harness == "jarvis":
+        cached = int(t.get("cached_tokens") or 0)
+        return {"input": max(0, int(t.get("prompt_tokens") or 0) - cached), "cached": cached,
+                "output": int(t.get("completion_tokens") or 0)}
+    if harness == "claude":
+        return {"input": int(t.get("input_tokens") or 0) + int(t.get("cache_creation_input_tokens") or 0),
+                "cached": int(t.get("cache_read_input_tokens") or 0), "output": int(t.get("output_tokens") or 0)}
+    return {"input": int(t.get("input_tokens") or 0), "cached": 0, "output": int(t.get("output_tokens") or 0)}
+
+
+def _io_dir(run_id: str) -> Path:
+    root = config.home() / "io"
+    root.mkdir(parents=True, exist_ok=True)
+    return Path(tempfile.mkdtemp(prefix="io-", dir=root))
+
+
+# --- logins: never refreshed inside a cell ------------------------------------------
+
+
+def _jwt_exp(token) -> float | None:
+    if not isinstance(token, str) or token.count(".") != 2:
+        return None
     try:
-        out, err = proc.communicate(stdin, timeout=timeout_s)
-        return proc.returncode, out, err, False
-    except subprocess.TimeoutExpired:
+        part = token.split(".")[1]
+        part += "=" * (-len(part) % 4)
+        exp = json.loads(base64.urlsafe_b64decode(part)).get("exp")
+        return float(exp) if isinstance(exp, (int, float)) else None
+    except Exception:
+        return None
+
+
+def login_problem(harness: str, timeout_s: float, now: float | None = None) -> str | None:
+    """Why the CLI login might be refreshed during this run, or None.
+
+    The login is bound read-only into the cell, so a refresh there could rotate
+    the token without saving it. A login that would expire inside the run is
+    refused instead; refresh it outside the bench (any ordinary CLI call)."""
+    now = time.time() if now is None else now
+    need = now + timeout_s + LOGIN_MARGIN_S
+    if harness in ("claude", "judge"):
+        path = sandbox.claude_credentials()
         try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        out, err = proc.communicate()
-        return None, out or "", err or "", True
+            exp = json.loads(path.read_text(encoding="utf-8"))["claudeAiOauth"]["expiresAt"] / 1000
+        except Exception:
+            return f"cannot read the Claude login's expiry ({path.name})"
+        return None if exp > need else "the Claude login expires within this run: refresh it outside the bench first"
+    if harness == "codex":
+        path = sandbox.codex_auth()
+        try:
+            exp = _jwt_exp(json.loads(path.read_text(encoding="utf-8"))["tokens"]["access_token"])
+        except Exception:
+            return f"cannot read the Codex login's expiry ({path.name})"
+        if exp is None:
+            return "the Codex login has no readable expiry"
+        return None if exp > need else "the Codex login expires within this run: refresh it outside the bench first"
+    return None
 
 
 # --- claude -----------------------------------------------------------------------
 
 
-def claude_argv(model: str, max_turns: int, *, read_only: bool = False) -> list[str]:
-    binary = shutil.which("claude") or "claude"
-    argv = [binary, "-p", "--output-format", "stream-json", "--verbose", "--model", model,
-            "--max-turns", str(max_turns), "--no-session-persistence",
-            # the real login, but none of the owner's hooks, plugins or MCP servers
+def claude_argv(model: str, max_turns: int, *, read_only: bool = False, binary: str | None = None) -> list[str]:
+    argv = [binary or str(sandbox.BIN / "claude"), "-p", "--output-format", "stream-json", "--verbose",
+            "--model", model, "--max-turns", str(max_turns), "--no-session-persistence",
+            # the login, but no MCP servers and no user settings (the cell's HOME is empty anyway)
             "--strict-mcp-config", "--setting-sources", "project,local"]
     if read_only:
-        argv += ["--permission-mode", "default", "--tools", "Read,Grep,Glob"]
+        argv += ["--permission-mode", "default", "--tools", CLAUDE_READ_ONLY_TOOLS]
     else:
-        argv += ["--permission-mode", "bypassPermissions", "--disallowedTools", *CLAUDE_DISALLOWED]
+        argv += ["--permission-mode", "bypassPermissions", "--tools", CLAUDE_TOOLS]
     return argv
 
 
@@ -113,22 +163,36 @@ def parse_claude_stream(stdout: str, model: str) -> RunResult:
             result.tokens = {k: int(usage.get(k) or 0) for k in
                              ("input_tokens", "output_tokens", "cache_read_input_tokens",
                               "cache_creation_input_tokens")}
+            usage_by_model = message.get("modelUsage")
+            if isinstance(usage_by_model, dict):
+                result.models_used = sorted(usage_by_model)
+                result.raw["modelUsage"] = usage_by_model
     return result
 
 
 def run_claude(*, model, prompt, cwd, timeout_s, max_turns, budget_usd=None, out_dir=None,
-               read_only=False, wrap=wrap_scope, env=None) -> RunResult:
-    if not shutil.which("claude"):
-        return RunResult("claude", model, error="claude CLI not found on PATH")
+               read_only=False, run_id=None, launch=None, profile=None) -> RunResult:
+    profile = profile or ("judge" if read_only else "claude")
+    if not sandbox.claude_binary():
+        return RunResult("claude", model, error="claude CLI not found on PATH", crashed=True)
+    problem = login_problem("claude", timeout_s)
+    if problem:
+        return RunResult("claude", model, error=f"refused: {problem}", crashed=True)
+    cell = sandbox.Cell(profile, Path(cwd), work_ro=read_only)
     started = time.time()
-    rc, out, err, timed_out = run_scoped(claude_argv(model, max_turns, read_only=read_only), cwd=cwd,
-                                         env=env or scrubbed_env(), timeout_s=timeout_s, stdin=prompt, wrap=wrap)
+    try:
+        rc, out, err, timed_out = (launch or sandbox.launch)(
+            claude_argv(model, max_turns, read_only=read_only), cell=cell,
+            run_id=run_id or f"claude-{os.getpid()}-{int(started)}", timeout_s=timeout_s, stdin=prompt)
+    except sandbox.SandboxError as exc:
+        return RunResult("claude", model, error=f"sandbox: {exc}", crashed=True)
     result = parse_claude_stream(out, model)
     result.duration_s, result.timed_out = time.time() - started, timed_out
+    result.crashed = result.turns is None
     if timed_out:
         result.error = result.error or f"timed out after {timeout_s}s"
     elif result.turns is None and rc:
-        result.error = result.error or (err or "").strip()[:400]
+        result.error = result.error or (err or "").strip()[:400] or f"exit {rc}"
     if out_dir:
         Path(out_dir, "stdout.jsonl").write_text(out[:STDOUT_KEEP], encoding="utf-8")
     return result
@@ -137,8 +201,9 @@ def run_claude(*, model, prompt, cwd, timeout_s, max_turns, budget_usd=None, out
 # --- codex ------------------------------------------------------------------------
 
 
-def codex_argv(model: str, cwd, last_message: Path) -> list[str]:
-    return [shutil.which("codex") or "codex", "exec", "-m", model, "-c", "model_reasoning_effort=high",
+def codex_argv(model: str, cwd, last_message: Path, binary: str | None = None) -> list[str]:
+    return [binary or str(sandbox.CODEX / "bin" / "codex"), "exec", "-m", model,
+            "-c", "model_reasoning_effort=high",
             "-s", "workspace-write", "-c", "sandbox_workspace_write.network_access=false",
             "--json", "--skip-git-repo-check", "--ephemeral", "-C", str(cwd),
             "-o", str(last_message), "-"]
@@ -171,26 +236,38 @@ def parse_codex_events(stdout: str, model: str) -> RunResult:
             message = event.get("message") or (event.get("error") or {}).get("message") or kind
             result.error = str(message)[:300]
     result.turns = turns or None
+    result.models_used = [model]
     return result
 
 
 def run_codex(*, model, prompt, cwd, timeout_s, max_turns=None, budget_usd=None, out_dir=None,
-              wrap=wrap_scope, env=None) -> RunResult:
-    if not shutil.which("codex"):
-        return RunResult("codex", model, error="codex CLI not found on PATH")
-    last = Path(tempfile.mkdtemp(prefix="rolebench-codex-")) / "last.txt"
+              run_id=None, launch=None) -> RunResult:
+    if not sandbox.codex_release():
+        return RunResult("codex", model, error="codex CLI not found on PATH", crashed=True)
+    problem = login_problem("codex", timeout_s)
+    if problem:
+        return RunResult("codex", model, error=f"refused: {problem}", crashed=True)
+    io = _io_dir(run_id or "codex")
+    cell = sandbox.Cell("codex", Path(cwd), io_dir=io)
     started = time.time()
-    rc, out, err, timed_out = run_scoped(codex_argv(model, cwd, last), cwd=cwd, env=env or scrubbed_env(),
-                                         timeout_s=timeout_s, stdin=prompt, wrap=wrap)
+    try:
+        rc, out, err, timed_out = (launch or sandbox.launch)(
+            codex_argv(model, cwd, sandbox.IO / "last.txt"), cell=cell,
+            run_id=run_id or f"codex-{os.getpid()}-{int(started)}", timeout_s=timeout_s, stdin=prompt)
+    except sandbox.SandboxError as exc:
+        shutil.rmtree(io, ignore_errors=True)
+        return RunResult("codex", model, error=f"sandbox: {exc}", crashed=True)
     result = parse_codex_events(out, model)
-    if not result.text and last.exists():
+    last = io / "last.txt"
+    if not result.text and last.is_file() and not last.is_symlink():
         result.text = last.read_text(encoding="utf-8", errors="replace")
-    shutil.rmtree(last.parent, ignore_errors=True)
+    shutil.rmtree(io, ignore_errors=True)
     result.duration_s, result.timed_out = time.time() - started, timed_out
+    result.crashed = result.turns is None and not result.text
     if timed_out:
         result.error = result.error or f"timed out after {timeout_s}s"
     elif not result.text and rc:
-        result.error = result.error or (err or "").strip()[:400]
+        result.error = result.error or (err or "").strip()[:400] or f"exit {rc}"
     if out_dir:
         Path(out_dir, "stdout.jsonl").write_text(out[:STDOUT_KEEP], encoding="utf-8")
     return result
@@ -200,11 +277,12 @@ def run_codex(*, model, prompt, cwd, timeout_s, max_turns=None, budget_usd=None,
 
 
 def openrouter_key() -> str | None:
-    """The key, from the environment or the checkout's .env. Never printed."""
+    """The key, from the harness's environment or the checkout's .env. Never
+    printed, never put in a cell's environment: it goes to the worker on stdin."""
     if os.environ.get("OPENROUTER_API_KEY"):
         return os.environ["OPENROUTER_API_KEY"]
     candidates = [os.environ.get("ROLEBENCH_ENV_FILE"), config.source_repo() / ".env",
-                  Path.home() / "projects" / "Jarvis" / ".env"]
+                  Path(config.real_home()) / "projects" / "Jarvis" / ".env"]
     for path in candidates:
         if not path:
             continue
@@ -218,40 +296,75 @@ def openrouter_key() -> str | None:
     return None
 
 
+def jarvis_spec(*, model, prompt, cwd, max_turns, budget_usd) -> dict:
+    """What the worker is told. Raises config.UnknownModel for an unpriced Kimi id."""
+    price = config.price_override(model)
+    pin = config.provider_pin(model)
+    return {"model": model, "prompt": prompt, "workspace": str(cwd), "max_turns": max_turns,
+            "budget_usd": float(config.PER_RUN_CAP_USD if budget_usd is None else budget_usd),
+            "prices": {model: list(price)} if price else {}, "pins": {model: pin} if pin else {},
+            "io": str(sandbox.IO)}
+
+
 def run_jarvis(*, model, prompt, cwd, timeout_s, max_turns, budget_usd=None, out_dir=None,
-               wrap=wrap_scope, env=None) -> RunResult:
-    key = openrouter_key()
-    if not key:
-        return RunResult("jarvis", model, error="no OPENROUTER_API_KEY in the environment or .env")
-    out_file = Path(tempfile.mkdtemp(prefix="rolebench-jarvis-")) / "result.json"
-    spec = {"model": model, "prompt": prompt, "workspace": str(cwd), "max_turns": max_turns,
-            "budget_usd": budget_usd, "provider": config.PROVIDER_PINS.get(model, ""),
-            "price": config.PRICE_OVERRIDES.get(model), "out": str(out_file)}
-    spec_file = out_file.parent / "spec.json"
-    spec_file.write_text(json.dumps(spec), encoding="utf-8")
-    worker_env = dict(env or scrubbed_env())
-    # The key goes over stdin, not the environment: /proc/<pid>/environ is
-    # readable by the shell the loop gives the model.
-    worker_env["PYTHONPATH"] = os.pathsep.join(
-        [str(config.REPO_ROOT)] + ([worker_env["PYTHONPATH"]] if worker_env.get("PYTHONPATH") else []))
-    argv = [config.python_bin(), "-m", "rolebench.jarvis_worker", str(spec_file)]
-    started = time.time()
-    rc, out, err, timed_out = run_scoped(argv, cwd=config.REPO_ROOT, env=worker_env, timeout_s=timeout_s,
-                                         stdin=key + "\n", wrap=wrap)
-    result = RunResult("jarvis", model)
+               run_id=None, launch=None, key_fn=None) -> RunResult:
     try:
-        doc = json.loads(out_file.read_text(encoding="utf-8"))
+        spec = jarvis_spec(model=model, prompt=prompt, cwd=cwd, max_turns=max_turns, budget_usd=budget_usd)
+    except config.UnknownModel as exc:
+        return RunResult("jarvis", model, error=f"refused: {exc}", crashed=True)
+    key = (key_fn or openrouter_key)()
+    if not key:
+        return RunResult("jarvis", model, error="no OPENROUTER_API_KEY in the environment or .env", crashed=True)
+    io = _io_dir(run_id or "jarvis")
+    runtime = Path(tempfile.mkdtemp(prefix="runtime-", dir=io.parent))
+    shutil.rmtree(runtime)
+    started = time.time()
+    try:
+        sandbox.build_runtime(runtime)
+        (io / "spec.json").write_text(json.dumps(spec), encoding="utf-8")
+        cell = sandbox.Cell("jarvis", Path(cwd), io_dir=io, runtime=runtime,
+                            env={"PYTHONPATH": str(sandbox.RUNTIME)})
+        rc, out, err, timed_out = (launch or sandbox.launch)(
+            [sandbox.PYTHON, "-m", "rolebench.jarvis_worker", str(sandbox.IO / "spec.json")], cell=cell,
+            run_id=run_id or f"jarvis-{os.getpid()}-{int(started)}", timeout_s=timeout_s, stdin=key + "\n")
+    except sandbox.SandboxError as exc:
+        shutil.rmtree(io, ignore_errors=True)
+        shutil.rmtree(runtime, ignore_errors=True)
+        return RunResult("jarvis", model, error=f"sandbox: {exc}", crashed=True)
+    result = RunResult("jarvis", model)
+    result.spend_usd = _read_spend(io / "spend.json")
+    try:
+        if (io / "result.json").is_symlink():
+            raise OSError("result.json is a symlink")
+        doc = json.loads((io / "result.json").read_text(encoding="utf-8"))
         result.text, result.cost_usd = doc.get("text", ""), doc.get("cost_usd")
         result.tokens, result.turns = doc.get("tokens", {}), doc.get("turns")
         result.tool_calls = [tuple(c) for c in doc.get("tool_calls", [])]
         result.error = doc.get("error", "")
-    except (OSError, json.JSONDecodeError):
-        result.error = (err or "").strip()[-400:] or "worker produced no result"
-    shutil.rmtree(out_file.parent, ignore_errors=True)
+        result.models_used = sorted(doc.get("models") or {})
+        if isinstance(doc.get("spend_usd"), (int, float)):
+            result.spend_usd = max(result.spend_usd or 0.0, float(doc["spend_usd"]))
+    except (OSError, json.JSONDecodeError, AttributeError, TypeError):
+        result.crashed = True
+        result.error = (err or "").strip()[-400:] or f"worker produced no result (exit {rc})"
+    shutil.rmtree(io, ignore_errors=True)
+    shutil.rmtree(runtime, ignore_errors=True)
     result.duration_s, result.timed_out = time.time() - started, timed_out
     if timed_out:
         result.error = result.error or f"timed out after {timeout_s}s"
+    if out_dir:
+        Path(out_dir, "stderr.txt").write_text((err or "")[-200_000:], encoding="utf-8")
     return result
+
+
+def _read_spend(path: Path) -> float | None:
+    try:
+        if path.is_symlink():
+            return None
+        usd = json.loads(path.read_text(encoding="utf-8")).get("usd")
+        return float(usd) if isinstance(usd, (int, float)) and not isinstance(usd, bool) else None
+    except (OSError, ValueError, AttributeError):
+        return None
 
 
 REGISTRY = {"claude": run_claude, "codex": run_codex, "jarvis": run_jarvis}

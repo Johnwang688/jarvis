@@ -1,15 +1,27 @@
 """The fixed prompts. Every model gets the same text (plan 3.3); only the
-case-specific fields change."""
+case-specific fields, and the one sentence that states what the harness's
+sandbox really allows, change."""
 
 from __future__ import annotations
 
-from . import config
+from . import sandbox
+
+# What is true in each harness's cell (rolebench.sandbox). Codex's own sandbox
+# keeps its commands off the network; Claude's and Jarvis's API traffic shares
+# the cell's network, so their shells are not cut off from it: the prompt says
+# what is true and asks for the rest.
+ENVIRONMENT = {
+    "codex": "There is no remote, no GitHub login and no network access for your commands.",
+    "claude": "There is no remote and no GitHub login or credentials here. Do not use the network.",
+    "jarvis": "There is no remote and no GitHub login or credentials here. Do not use the network.",
+}
+DEFAULT_ENVIRONMENT = ENVIRONMENT["claude"]
 
 REVIEW = """\
 You are reviewing a pull request in an isolated copy of the repository at {snap}. \
-HEAD is the change under review: run `git diff HEAD~1` to see it. There is no remote, no \
-network and no GitHub access. Do not push, fetch or install anything, and do not read \
-outside this directory (the one exception is the Python interpreter at {python}).
+HEAD is the change under review: run `git diff HEAD~1` to see it. {environment} \
+Do not push, fetch or install anything, and do not read outside this directory (the one \
+exception is the Python interpreter at {python}).
 
 ## What the change claims to do
 {brief}
@@ -21,8 +33,9 @@ the files in the diff.
 
 ## What you must do
 1. Read the diff and the code around it.
-2. Run the relevant suites under a memory cap, from the repository root:
-   systemd-run --user --scope -q -p MemoryMax=3G -p MemorySwapMax=0 env PYTHONPATH={snap} {python} <suite>
+2. Run the relevant suites from the repository root. This session already runs under a \
+3 GB memory cap, so run them directly:
+   env PYTHONPATH={snap} {python} <suite>
    Suites for this change:
 {suites}
    (A `.ts` suite runs from hud/ with `npx vitest run <path relative to hud>`.)
@@ -47,7 +60,7 @@ block, exactly this shape (`line` may be null; use [] for no findings):
 
 IMPLEMENT = """\
 You are implementing a change in the repository at {snap}. Work only in this directory. \
-There is no network and no GitHub access; do not push, fetch or install anything.
+{environment} Do not push, fetch or install anything.
 
 ## Task
 {brief}
@@ -57,8 +70,9 @@ There is no network and no GitHub access; do not push, fetch or install anything
 - Do not commit. Leave the finished change in the working tree.
 - Add or extend tests for what you change. Some acceptance tests are hidden from you; \
 build to the task text and the interface it states.
-- Run the existing suites that touch your change under a memory cap, from the repository root:
-  systemd-run --user --scope -q -p MemoryMax=3G -p MemorySwapMax=0 env PYTHONPATH={snap} {python} <suite>
+- Run the existing suites that touch your change from the repository root. This session \
+already runs under a 3 GB memory cap, so run them directly:
+  env PYTHONPATH={snap} {python} <suite>
 {suites}
 - CLAUDE.md at the repository root holds the project's rules; follow them.
 {fixtures}
@@ -77,26 +91,32 @@ widen the scope of the change. Re-run the suites afterwards.
 """
 
 
-def review_prompt(case: dict, snap, python: str | None = None) -> str:
-    python = python or config.python_bin()
+def _environment(harness: str | None) -> str:
+    return ENVIRONMENT.get(harness or "", DEFAULT_ENVIRONMENT)
+
+
+def review_prompt(case: dict, snap, python: str | None = None, harness: str | None = None) -> str:
+    python = python or sandbox.PYTHON
     focus = "\n".join(f"- {f}" for f in case.get("focus") or []) or "- correctness against the stated claim"
     suites = "\n".join(f"   - {s}" for s in case.get("suites") or []) or "   - (none named: find the relevant ones)"
-    return REVIEW.format(snap=snap, python=python, brief=case["brief"].strip(), focus=focus, suites=suites)
+    return REVIEW.format(snap=snap, python=python, brief=case["brief"].strip(), focus=focus, suites=suites,
+                         environment=_environment(harness))
 
 
-def implement_prompt(case: dict, snap, python: str | None = None) -> str:
-    python = python or config.python_bin()
+def implement_prompt(case: dict, snap, python: str | None = None, harness: str | None = None) -> str:
+    python = python or sandbox.PYTHON
     suites = "\n".join(f"   - {s}" for s in case.get("regression_suites") or []) or "   - (none named)"
     fixtures = ""
     if case.get("fixtures"):
         fixtures = "- Inputs the task refers to: " + ", ".join(case["fixtures"]) + "\n"
     return IMPLEMENT.format(snap=snap, python=python, brief=case["brief"].strip(),
                             scope=", ".join(case.get("scope") or []) or "as the task needs",
-                            suites=suites, fixtures=fixtures)
+                            suites=suites, fixtures=fixtures, environment=_environment(harness))
 
 
-def fix_prompt(case: dict, snap, round_no: int, findings_text: str, python: str | None = None) -> str:
-    return FIX.format(implement=implement_prompt(case, snap, python), round=round_no,
+def fix_prompt(case: dict, snap, round_no: int, findings_text: str, python: str | None = None,
+               harness: str | None = None) -> str:
+    return FIX.format(implement=implement_prompt(case, snap, python, harness), round=round_no,
                       findings=findings_text.strip() or "(the reviewer's findings could not be read)")
 
 
