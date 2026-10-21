@@ -1933,6 +1933,39 @@ def test_cli_and_cells(shas, root: Path) -> None:
     with env(ROLEBENCH_QUOTA_OVERRIDE="owner OK in test"), contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
         main(["--no-quota-guard", "judge", "--run", str(cli_run)])
     check("--no-quota-guard with a reason prints a loud warning", "quota guard is OFF" in err.getvalue() and "owner OK in test" in err.getvalue())
+    # --off-matrix through the CLI itself: refused without it, run and logged with it.
+    # Stand-in runners take the real ones' places (never a real CLI, network or model).
+    ccase = review_case(shas)
+    mdir = root / "cases-matrix"
+    mdir.mkdir()
+    (mdir / f"{ccase['id']}.json").write_text(json.dumps(ccase))
+    saved_reg = dict(runners.REGISTRY)
+    seen_models = []
+
+    def standin(**kw):
+        seen_models.append(kw.get("model"))
+        return runners.RunResult("jarvis", kw.get("model", ""), text=REVIEW_REPLY, cost_usd=0.001)
+    off_argv = ["review", "--harness", "jarvis", "--model", "openai/gpt-6-luna", "--case", ccase["id"]]
+    merr = io.StringIO()
+    try:
+        runners.REGISTRY["jarvis"] = standin
+        with env(ROLEBENCH_CASES=str(mdir), ROLEBENCH_REPO=str(shas["repo"]), ROLEBENCH_NET="pasta"), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(merr):
+            main(off_argv)
+            refused_row = json.loads(config.log_path().read_text().splitlines()[-1])
+            calls_without = len(seen_models)
+            main(["--off-matrix", *off_argv])
+            allowed_row = json.loads(config.log_path().read_text().splitlines()[-1])
+    finally:
+        runners.REGISTRY.clear()
+        runners.REGISTRY.update(saved_reg)
+    check("CLI: an off-matrix model is refused without --off-matrix (no runner call, off_matrix false in the row)",
+          refused_row["model"] == "openai/gpt-6-luna" and refused_row["result"] == "skipped"
+          and "not in the O-1 matrix" in refused_row["reason"] and refused_row["off_matrix"] is False
+          and calls_without == 0)
+    check("CLI: --off-matrix parses, warns, runs it, and the run row records off_matrix: true",
+          allowed_row["model"] == "openai/gpt-6-luna" and allowed_row["result"] == "ok" and allowed_row["off_matrix"] is True
+          and seen_models == ["openai/gpt-6-luna"] and "--off-matrix" in merr.getvalue())
     help_text = __import__("rolebench.__main__", fromlist=["main"]).__doc__
     check("the docs say an agent never passes the override without the owner's OK", "never passes it" in help_text)
 

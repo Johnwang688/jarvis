@@ -100,7 +100,9 @@ gpt-6-luna leaves the Jarvis loop (it stays in Codex).
 | Codex CLI | gpt-6.1-sol, gpt-6-luna |
 | Jarvis loop via OpenRouter | `anthropic/claude-haiku-5.5` (harness control), `deepseek/deepseek-v4.1-flash`, `z-ai/glm-5.3-flash` |
 
-`rolebench.config.MATRIX` holds it.
+`rolebench.config.MATRIX` holds it, and it is enforced: a model outside it for its harness (the
+reviewer's too) is refused before any quota read or spend, unless the run is started with
+`--off-matrix`, which every run row records as `off_matrix: true`.
 
 - **No Kimi special cases.** The Moonshot provider pin and the $3 / $15 price floor are gone.
   The refuse-unknown-Kimi guard stays, with no Kimi id allowed: every `moonshotai/` id is
