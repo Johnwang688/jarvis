@@ -42,22 +42,22 @@ def network_flags(result) -> list[str]:
 BODY_KEYS = {"content", "new_string", "old_string", "text", "new_source", "edits", "todos", "plan", "items"}
 
 
-def fields(args: str) -> list[tuple[str | None, str]]:
-    """(key, value) for the parts of one tool call's arguments that name paths
-    or run commands; a non-JSON argument (a codex shell command) is (None, it)."""
+def scan_text(args: str) -> str:
+    """The parts of one tool call's arguments that name paths or run commands."""
     try:
         doc = json.loads(args)
     except (json.JSONDecodeError, TypeError):
-        return [(None, args)]
+        return args
     if not isinstance(doc, dict):
-        return [(None, args)]
-    return [(k, str(v)) for k, v in doc.items() if k not in BODY_KEYS and isinstance(v, (str, int, float))]
+        return args
+    return "\n".join(str(v) for k, v in doc.items() if k not in BODY_KEYS and isinstance(v, (str, int, float)))
 
 
 def _within(path: str, root: str) -> bool:
     return path == root or path.startswith(root.rstrip(os.sep) + os.sep)
 
 
+PUNCT = set(";&|<>()")
 SHELLS = {"sh", "bash", "dash", "zsh"}
 SHELL_C = re.compile(r"^-[a-z]*c$")
 ASSIGN = re.compile(r"^-*([A-Za-z_][\w.-]*)=(.*)$", re.S)        # NAME=value, key=value, --opt=value
@@ -71,8 +71,7 @@ QUOTED = re.compile(r"""(['"])([^'"\s]+?)\1""")
 def _shell_tokens(text: str) -> list[str]:
     import shlex
     try:
-        lex = shlex.shlex(text, posix=True, punctuation_chars=";&|<>()\n")
-        lex.whitespace = " \t\r"                # a newline separates commands, like ;
+        lex = shlex.shlex(text, posix=True, punctuation_chars=";&|<>()")
         lex.whitespace_split = True
         return list(lex)
     except ValueError:                       # unbalanced quotes: fall back to whitespace
@@ -97,149 +96,43 @@ def literal(word: str, env: dict) -> str:
                 w = pwd.getpwnam(m.group(1)).pw_dir + w[m.end():]
             except KeyError:
                 pass
-    return _resolve(w)[0]
-
-
-def _resolve(w: str) -> tuple[str, bool]:
-    """(the literal prefix up to the first glob or unknown variable, whether it was cut)."""
     cut = GLOB.search(w)
     if cut:
         w = w[:cut.start()]
     while PROC_ROOT.match(w):
         w = PROC_ROOT.sub("", w, count=1) or "/"
-    return w, bool(cut)
-
-
-def literal_cut(word: str, env: dict) -> bool:
-    """Whether `literal(word, env)` stopped at a glob or an unknown variable."""
-    w = VAR.sub(lambda m: env.get(m.group(1) or m.group(2), m.group(0)), word)
-    return bool(GLOB.search(w.replace("file://", "", 1)))
+    return w
 
 
 def _is_candidate(lit: str) -> bool:
     return lit.startswith("/") or ".." in lit.split("/")
 
 
-PUNCT = set(";&|<>()\n")
-SEPARATOR_KINDS = {"seq", "and", "or", "pipe", "bg"}
+BARE_CD = re.compile(r"(?:^|[;&|()\n])\s*(cd)\s*(?=$|[;&|)\n])")
 
 
-def _punct_kind(tok: str) -> str | None:
-    """None for a word; else the kind of a punctuation token: seq (; or a
-    newline), and (&&), or (||), pipe (| or |&), bg (&), redirect, paren."""
-    if not tok or not set(tok) <= PUNCT:
-        return None
-    bare = tok.replace("(", "").replace(")", "")
-    if not bare:
-        return "paren"
-    if ";" in bare or "\n" in bare:
-        return "seq"
-    if bare == "&&":
-        return "and"
-    if bare == "||":
-        return "or"
-    if bare in ("|", "|&"):
-        return "pipe"
-    if bare == "&":
-        return "bg"
-    return "redirect"
+def path_candidates(text: str, env: dict | None = None, depth: int = 0) -> list[tuple[str, str, int | None]]:
+    """(word, what it names, its word ordinal) for the path arguments in one
+    argument value: shell words (and the value of every NAME=value, key=value
+    or --opt=value word, with simple assignments tracked so a later $NAME
+    expands), the script of `sh -c`/`bash -lc` (tokenized again), and quoted
+    strings inside inline code such as `python -c`. Prose in a quoted argument
+    or a commit message is never split into words. A bare `cd` names HOME.
 
-
-def _certain_dir(path: str | None, root: str | None) -> str | None:
-    """`path` resolved, if it is an existing directory inside the snapshot; else None."""
-    if not path or not root:
-        return None
-    real = os.path.realpath(path)
-    return real if os.path.isdir(real) and _within(real, root) else None
-
-
-def path_candidates(text: str, env: dict | None = None, depth: int = 0, state: dict | None = None,
-                    track_cd: bool = False) -> list[tuple[str, str, str | None]]:
-    """(word, what it names, the shell's cwd there) for the path arguments in
-    one argument value: shell words (and the value of every NAME=value,
-    key=value or --opt=value word, with simple assignments tracked so a later
-    $NAME expands), the script of `sh -c`/`bash -lc` (tokenized again), and
-    quoted strings inside inline code such as `python -c`. Prose in a quoted
-    argument or a commit message is never split into words.
-
-    The cwd (`state["cwd"]`, None = unknown, judged from the snapshot root) is
-    moved only by a `cd` it is certain of (`track_cd`: a `command` field): a
-    `cd` in command position at the start, after `;` or a newline, or after
-    `&&` when every command before it in that chain was such a `cd`; never in
-    `( … )`, a pipeline, `&` or `||`, never with an option, and only to an
-    existing directory inside the snapshot (resolved, so a symlink out is
-    caught). A cd to a path that does not exist leaves a known cwd where it
-    was, as the shell does (were it deleted after the run, the cwd judged
-    from is only shallower, which flags more); anything else makes it
-    unknown. A `-c` script works on a copy and never moves the parent's cwd;
-    `pushd`/`popd` anywhere make it unknown."""
+    The candidates are main's (c717ed9), word for word; the ordinal (the
+    word's place among the words of `text`, None inside a `-c` script) only
+    lets `escape_details` attach an advisory label."""
     env = env if env is not None else {}
-    state = state if state is not None else {"cwd": None, "root": None}
     out = []
     tokens = _shell_tokens(text)
-    paren, last_sep, chain_ok, cmd_start = 0, "seq", True, True
-    i = 0
-    while i < len(tokens):
-        tok = tokens[i]
-        kind = _punct_kind(tok)
-        if kind is not None:
-            paren += tok.count("(") - tok.count(")")
-            if kind in SEPARATOR_KINDS:
-                last_sep, cmd_start = kind, True
-                if kind == "seq":
-                    chain_ok = True
-                elif kind != "and":
-                    chain_ok = False
-            elif kind == "paren" and "(" in tok:
-                cmd_start, chain_ok = True, False
-            i += 1
-            continue
-        starting, cmd_start = cmd_start, False
+    ordinal = -1
+    for i, tok in enumerate(tokens):
+        if not set(tok) <= PUNCT:
+            ordinal += 1
         if (depth < 3 and i >= 2 and SHELL_C.match(tokens[i - 1])
                 and os.path.basename(tokens[i - 2]) in SHELLS):
-            out += path_candidates(tok, env, depth + 1, dict(state), track_cd)      # a copy: never the parent's cwd
-            i += 1
+            out += [(w, lit, None) for w, lit, _ in path_candidates(tok, env, depth + 1)]
             continue
-        if track_cd and tok in ("pushd", "popd"):
-            state["cwd"] = None
-        if track_cd and tok == "cd" and starting:
-            j, args = i + 1, []
-            while j < len(tokens) and _punct_kind(tokens[j]) not in SEPARATOR_KINDS:
-                if _punct_kind(tokens[j]) == "redirect":
-                    j += 2                              # the redirect and its target
-                    continue
-                if _punct_kind(tokens[j]) is None:
-                    args.append(tokens[j])
-                j += 1
-            nxt = _punct_kind(tokens[j]) if j < len(tokens) else None
-            certain = (paren == 0 and nxt not in ("pipe", "bg", "or")
-                       and (last_sep == "seq" or (last_sep == "and" and chain_ok)))
-            before = state.get("cwd")
-            target = args[0] if args else "~"
-            lit = literal(target, env)
-            for arg in args:                            # every operand is judged (`cd -P ..`, `cd -- ..`)
-                alit = literal(arg, env)
-                if alit and _is_candidate(alit):
-                    out.append((arg, alit, before))
-            if len(args) > 1 or target.startswith("-") or literal_cut(target, env) or not lit:
-                new = None
-            else:
-                base = before or state.get("root")
-                dest = lit if lit.startswith("/") else (os.path.join(base, lit) if base else None)
-                if dest and before and not os.path.lexists(dest):
-                    new = before                        # nothing there: the cd failed and the cwd stayed
-                else:
-                    new = _certain_dir(dest, state.get("root"))
-            if certain:
-                state["cwd"] = new
-            elif nxt not in ("pipe", "bg") and paren == 0:
-                state["cwd"] = None                     # may or may not have run: unknown
-            if not certain:
-                chain_ok = False
-            i = j
-            continue
-        if starting:
-            chain_ok = False                            # a command other than an accepted cd
         words = [tok]
         m = ASSIGN.match(tok)
         if m:
@@ -256,9 +149,56 @@ def path_candidates(text: str, env: dict | None = None, depth: int = 0, state: d
             for w in inner:
                 lit = literal(w, env)
                 if lit and _is_candidate(lit):
-                    out.append((w, lit, state.get("cwd")))
-        i += 1
+                    out.append((w, lit, ordinal if depth == 0 else None))
+    if depth == 0 and env.get("HOME"):
+        out += [("cd", env["HOME"], None) for _ in BARE_CD.finditer(text)]   # a bare cd goes HOME
     return out
+
+
+# --- the advisory label: a lexical reading of cd ------------------------------------
+
+AWARE_PUNCT = ";&|<>()\n"
+
+
+def _aware_tokens(text: str) -> list[str]:
+    import shlex
+    try:
+        lex = shlex.shlex(text, posix=True, punctuation_chars=AWARE_PUNCT)
+        lex.whitespace = " \t\r"
+        lex.whitespace_split = True
+        return list(lex)
+    except ValueError:
+        return text.split()
+
+
+def lexical_cwds(text: str, start: str | None) -> tuple[list[str | None], str | None]:
+    """(the lexical cwd at each word of `text`, the cwd after it), relative to
+    the snapshot root ("" is the root, None is outside or unknown). A cd in
+    command position moves it to its first non-option operand, no questions
+    asked: this only labels a flag, it never removes one."""
+    cwds, cwd, pending = [], start, None
+    tokens = _aware_tokens(text)
+    for i, tok in enumerate(tokens):
+        if set(tok) <= set(AWARE_PUNCT):
+            if pending is not None:
+                cwd, pending = pending[0], None         # a cd takes effect after its operands
+            continue
+        cwds.append(cwd)
+        if tok == "cd" and (i == 0 or set(tokens[i - 1]) <= set(AWARE_PUNCT)):
+            args = []
+            for t in tokens[i + 1:]:
+                if set(t) <= set(AWARE_PUNCT):
+                    break
+                args.append(t)
+            target = next((a for a in args if not a.startswith("-")), None)
+            if target is None or target == "~" or target.startswith(("/", "~", "$")) or cwd is None:
+                pending = (None,)
+            else:
+                rel = os.path.normpath(os.path.join(cwd, target))
+                pending = (None if rel == ".." or rel.startswith("../") else ("" if rel == "." else rel),)
+    if pending is not None:
+        cwd = pending[0]
+    return cwds, cwd
 
 
 def claude_task_dir(snap: Path | str) -> str:
@@ -268,21 +208,25 @@ def claude_task_dir(snap: Path | str) -> str:
     return f"/tmp/claude-{os.getuid()}/" + re.sub(r"[^A-Za-z0-9]", "-", os.path.normpath(str(snap)))
 
 
-def escape_flags(result, snap: Path, extra_allowed: tuple[str, ...] = ()) -> list[str]:
-    """Path arguments in tool calls that name something outside the cell:
+def escape_details(result, snap: Path, extra_allowed: tuple[str, ...] = ()) -> list[dict]:
+    """Every path argument in a tool call that names something outside the
+    cell, judged exactly as on main (c717ed9), so the flags are a superset of
+    main's by construction (the one exception: a claude cell's own task
+    output under /tmp/claude-<uid>/<its cwd slug>/, which is in-cell):
 
-    - every path is resolved first: a relative one against the shell's cwd
-      as `cd` moved it (from the snapshot root; Claude's Bash keeps its cwd
-      from one call to the next, the other harnesses start each call there);
+    - a relative path is judged from the snapshot root, whatever `cd` did;
     - an absolute path is in-cell under the snapshot, the system/interpreter
-      trees, the cell's /tmp (but not the lead's /tmp/claude-*: only a claude
-      cell's own task directory there, `claude_task_dir`), or, under the
+      trees, the cell's /tmp (not the lead's /tmp/claude-*), or, under the
       cell's HOME, only the trees that exist in the cell (its CLI's own state
-      and the binds, `sandbox.cell_home_paths`): the cell's HOME is a tmpfs at
-      the real home's path, so anything else there (`~/projects/Jarvis`,
-      `~/.config/gh`) is an attempt on the host's copy;
+      and the binds, `sandbox.cell_home_paths`); anything else there
+      (`~/projects/Jarvis`, `~/.config/gh`, a bare `cd`) is an attempt;
     - an absolute path whose top-level directory does not exist on the host
-      (`/v.slice` from a sed or grep pattern) names nothing, so it is not one."""
+      (`/v.slice` from a sed or grep pattern) names nothing, so it is not one.
+
+    Each flag is {"flag", "probable_cd_relative", "assumed_cwd", "command"}.
+    The label is advisory and never removes a flag: a relative path that a
+    lexical reading of the preceding cds (Claude's Bash keeps its cwd between
+    calls) would put inside the snapshot is marked for the lead to glance at."""
     snap_s = os.path.normpath(str(snap))
     roots = [snap_s, os.path.normpath(os.path.realpath(snap)), *map(os.path.normpath, extra_allowed)]
     home = os.path.normpath(sandbox.sandbox_home())
@@ -290,26 +234,61 @@ def escape_flags(result, snap: Path, extra_allowed: tuple[str, ...] = ()) -> lis
     profile = {"claude": "claude", "codex": "codex", "jarvis": "jarvis"}.get(harness, "grade")
     in_home = [os.path.normpath(p) for p in sandbox.cell_home_paths(profile)]
     own_tmp = claude_task_dir(snap_s) if harness == "claude" else None
-    hits = []
-    root = os.path.realpath(snap_s)
-    state = {"cwd": None, "root": root}
+    out = []
+    carried = ""                                  # Claude's lexical cwd across calls; the others start at the root
     for name, args in result.tool_calls:
-        if harness != "claude" or not (state.get("cwd") and _within(state["cwd"], root)):
-            # codex and jarvis start every command at the snapshot; Claude keeps
-            # its cwd only while it is certain and inside the snapshot
-            state = {"cwd": None, "root": root}
-        env = {"HOME": home}
-        for key, value in fields(args):
-            for raw, lit, cwd in path_candidates(value, env, state=state, track_cd=key in ("command", None)):
-                hit = _judge(lit, cwd or snap_s, roots, home, in_home, own_tmp)
-                if hit:
-                    hits.append(f"{name}: {raw[:160]}")
-    return hits
+        text = scan_text(args)
+        command = _command_of(args)
+        cwds, after = lexical_cwds(command, carried if harness == "claude" else "") if command else ([], None)
+        start = len(_aware_word_offset(text, command)) if command else 0
+        if harness == "claude" and command:
+            # Claude resets its shell to the project when a cd leaves it: an
+            # unknown or outside cwd starts the next call at the root
+            carried = after if after is not None else ""
+        for raw, lit, ordinal in path_candidates(text, {"HOME": home}):
+            if not _outside(lit, snap_s, roots, home, in_home, own_tmp):
+                continue
+            soft, assumed = False, None
+            if not lit.startswith("/") and ordinal is not None and command:
+                k = ordinal - start
+                cwd = cwds[k] if 0 <= k < len(cwds) else None
+                if cwd is not None and cwd != "":
+                    inside = os.path.normpath(os.path.join(snap_s, cwd, lit))
+                    if any(_within(inside, r) for r in roots):
+                        soft, assumed = True, cwd
+            out.append({"flag": f"{name}: {raw[:160]}", "probable_cd_relative": soft, "assumed_cwd": assumed,
+                        "command": (command or text)[:300]})
+    return out
 
 
-def _judge(lit: str, cwd: str, roots: list[str], home: str, in_home: list[str], own_tmp: str | None) -> bool:
-    """Whether a path a tool call names is outside the cell."""
-    path = os.path.normpath(lit if lit.startswith("/") else os.path.join(cwd, lit))
+def escape_flags(result, snap: Path, extra_allowed: tuple[str, ...] = ()) -> list[str]:
+    """Every flag (hard and probable-cd-relative alike): a superset of main's."""
+    return [d["flag"] for d in escape_details(result, snap, extra_allowed)]
+
+
+def _command_of(args: str) -> str:
+    """The shell command of a tool call (a `command` field, or a codex string), or ""."""
+    try:
+        doc = json.loads(args)
+    except (json.JSONDecodeError, TypeError):
+        return args if isinstance(args, str) else ""
+    return str(doc.get("command") or "") if isinstance(doc, dict) else ""
+
+
+def _aware_word_offset(text: str, command: str) -> list[str]:
+    """The words of `text` (scan_text's join of the call's fields) before the
+    command's own words, so a candidate's ordinal maps onto the command."""
+    idx = text.find(command)
+    if idx <= 0:
+        return []
+    return [t for t in _shell_tokens(text[:idx]) if not set(t) <= PUNCT]
+
+
+def _outside(lit: str, snap_s: str, roots: list[str], home: str, in_home: list[str], own_tmp: str | None) -> bool:
+    if not lit.startswith("/"):
+        path = os.path.normpath(os.path.join(snap_s, lit))
+        return not any(_within(path, r) for r in roots)
+    path = os.path.normpath(lit)
     if any(_within(path, r) for r in roots):
         return False
     if _within(path, home):

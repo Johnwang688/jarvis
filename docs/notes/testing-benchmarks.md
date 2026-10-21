@@ -1260,15 +1260,19 @@ quoted strings inside inline code), never words of prose or a commit message. Ea
 resolved first: simple `NAME=value` assignments are tracked so a later `$NAME` expands,
 `~` and `~user` expand, `file://` URLs and `/proc/<n>/root/X` become paths, and a word is
 judged by its literal prefix up to its first glob or unknown variable
-(`/home/u/projects/*` names `/home/u/projects/`). A relative path is resolved against the shell's
-cwd, which only a `cd` the audit is certain of moves: from a `command` field, in command
-position (start, `;`, newline, or `&&` after a chain of such cds) at the top level, never in
-`( )`, a pipeline, `&` or `||`, never with an option, and only to an existing directory inside
-the snapshot (resolved, so a symlink out is caught); a `-c` script works on a copy and
-`pushd`/`popd` make the cwd unknown. Anything uncertain is judged from the snapshot root (a cd
-to a missing path leaves a known cwd where it was, as the shell does). Claude's Bash keeps its
-cwd between calls while it is inside the snapshot; codex and Jarvis start each call at the
-root. So `cd hud && … ; cd ..` stays inside while a climb above the root is flagged. In a claude
+(`/home/u/projects/*` names `/home/u/projects/`). Every path is judged from the snapshot root, exactly as on main
+(c717ed9), so the flags are a **superset of main's by construction** (one exception: a claude
+cell's own task output, below); a bare `cd` names HOME and is flagged too. The audit is a
+detector and bwrap is the boundary, so no reading of `cd` ever removes a flag (two review rounds
+showed cwd inference leaking: heredoc bodies, functions, and trees changed after the run).
+Instead each flag carries an **advisory** label: `probable_cd_relative: true` with the assumed
+cwd when a lexical reading of the preceding cds (in command position; Claude's Bash keeps its
+cwd between calls and is reset to the root when it leaves) would put the path inside the
+snapshot. `run.json` lists `escape_flags` (all), `escape_hard` (those that count against the
+run's validity) and `escape_cd_relative` (for the lead to glance at, with the command); the
+report shows hard and probably-cd-relative flags in separate columns. Re-auditing the P2 pilot:
+the 12 old false positives are 0 hard and 11 probably-cd-relative (the twelfth is Claude's own
+task output, now in-cell). In a claude
 cell the CLI's own task output, `/tmp/claude-<uid>/<slug of the cell's cwd>/`, is in-cell;
 any other `/tmp/claude-*` is flagged. It is then judged by the cell's layout: the snapshot, the system trees, the
 cell's `/tmp` and, on the tmpfs HOME (mounted at the real home's path), only the trees that

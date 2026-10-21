@@ -74,6 +74,8 @@ def row(run: dict) -> dict:
         # {provider: {window: used percent}} read before and after the cell (None = unknown)
         "quota_before": run.get("quota_before"), "quota_after": run.get("quota_after"),
         "network_flags": len(run.get("network_flags") or []), "escape_flags": len(run.get("escape_flags") or []),
+        "escape_hard": len(run.get("escape_hard", run.get("escape_flags")) or []),
+        "escape_cd_relative": len(run.get("escape_cd_relative") or []),
     }
 
 

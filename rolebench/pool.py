@@ -277,8 +277,9 @@ def pool_case(case_id: str, pool_fn=default_pool_fn, quota_override: str = "", q
         cell.mkdir(parents=True, exist_ok=True)
         error, cost, result, attempt = "", 0.0, None, 0
         try:
-            for attempt in (1, 2):
+            for _ in (1, 2):
                 check_quota()
+                attempt += 1                             # calls actually made (a refused retry is none)
                 reply, c = pool_fn(prompt if not error else prompt + f"\n\nYour previous reply was rejected: {error}\n"
                                    "Reply again with valid JSON only.", cell)
                 cost += c or 0.0

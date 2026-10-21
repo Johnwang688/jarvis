@@ -103,7 +103,8 @@ def _print_run(run: dict) -> None:
         split = doc.get("token_split") or {}
         line += (f" - {run['n_findings']} findings, {doc.get('turns')} turns, cost {doc.get('cost_usd')}, "
                  f"tokens in {split.get('input')} cached {split.get('cached')} out {split.get('output')}, "
-                 f"{run['wall_s']}s, net flags {len(run['network_flags'])}, escape flags {len(run['escape_flags'])}")
+                 f"{run['wall_s']}s, net flags {len(run['network_flags'])}, escape flags {len(run.get('escape_hard', run['escape_flags']))} hard, "
+                 f"{len(run.get('escape_cd_relative') or [])} probably cd-relative")
         if doc.get("multi_model"):
             line += f", models {doc.get('models_used')}"
     if run["kind"] == "implement" and "merged_ready" in run:

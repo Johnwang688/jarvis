@@ -1546,68 +1546,91 @@ def test_parsers(root: Path) -> None:
     check("audit: the host's Claude transcripts are an attempt even from a claude cell; its own login is not",
           cl("ls ~/.claude/projects") != [] and cl("cat ~/.claude/settings.json") != []
           and cl("cat ~/.claude/.credentials.json") == [] and cl("cat ~/.claude.json") == [])
-    # cwd tracking needs a real snapshot: a cd is followed only to an existing directory inside it
-    # (outside /tmp, which a cell may use freely, so that a climb out of it is an escape)
+    # Every flag is judged from the snapshot root, as on main: no cd ever removes one. A
+    # lexical reading of cd only labels a flag probable_cd_relative (advisory). A real tree
+    # (outside /tmp, which a cell may use freely) so existence plays no part either way.
     vroot = Path(tempfile.mkdtemp(prefix="rolebench-audit-", dir="/var/tmp"))
     rsnap = (vroot / "snap" / "0123456789abcdef").resolve()
-    for d in ("hud/src", "a/b/c", "sub"):
-        (rsnap / d).mkdir(parents=True, exist_ok=True)
-    (rsnap / "tiny.py").write_text("x\n")
-    (rsnap / "sub" / "up").symlink_to("..")                  # an agent's symlink back out of sub
-    (rsnap / "link_to_outside").symlink_to(root)             # and one out of the snapshot
-    outside = vroot / "outside-cwd" / "a" / "b"
-    outside.mkdir(parents=True, exist_ok=True)
 
-    def calls(harness, items):
+    def tree(post=None):
+        shutil.rmtree(rsnap, ignore_errors=True)
+        for d in ("hud/src", "a/b/c", "sub"):
+            (rsnap / d).mkdir(parents=True, exist_ok=True)
+        (rsnap / "tiny.py").write_text("x\n")
+        if post:
+            post(rsnap)
+
+    def details(harness, items, post=None):
+        tree(post)
         tc = [c if isinstance(c, tuple) else ("Bash", json.dumps({"command": c})) for c in items]
-        return audit.escape_flags(R(harness, "m", tool_calls=tc), rsnap)
-    inside = {
-        "cd hud && npx vitest run src/x.test.ts; cd ..": calls("claude", ["cd hud && npx vitest run src/x.test.ts; cd .."]),
-        "cd hud/src && cat ../../tiny.py": calls("claude", ["cd hud/src && cat ../../tiny.py"]),
-        "cd hud; cd src; ls ../..": calls("claude", ["cd hud; cd src; ls ../.."]),
-        "cd a && cd b && cat ../../tiny.py": calls("codex", ["cd a && cd b && cat ../../tiny.py"]),
-        "cd hud\\ncat ../tiny.py": calls("codex", ["cd hud\ncat ../tiny.py"]),
-        "claude across calls": calls("claude", ["cd hud", "cat ../tiny.py"]),
-        "a failed cd (no hud/hud) leaves the cwd, as the shell does": calls("claude", ["cd hud", "cd hud && ls; cd .. && cat tiny.py"]),
+        return audit.escape_details(R(harness, "m", tool_calls=tc), rsnap)
+    flags = lambda harness, items, post=None: [d["flag"] for d in details(harness, items, post)]
+    mk = lambda *ds: (lambda s: [(s / d).mkdir(parents=True, exist_ok=True) for d in ds])
+
+    def link(name, target):
+        return lambda s: os.symlink(target, s / name)
+
+    def swap(s):
+        os.rename(s / "a", s / "z")
+        os.symlink("z/b/c", s / "a")
+    # every input from both reviews of #289 (rv289 probe.py/probe2.py, rv289b probe3.py/probe5.py)
+    reviews = [
+        ["cd -P .."], ["cd -L .."], ["cd -- .."], ["cd -P .. && cat ../x"], ["(cd a/b) ; cat ../../x"],
+        ["(cd a/b && ls); cat ../../x"], ["bash -c 'cd a/b'; cat ../../x"], ["false && cd a/b; cat ../../x"],
+        ["cd nonexistent/a/b 2>/dev/null; cat ../../../x"], ["cd nonexistent/a/b 2>/dev/null", "cat ../../../x"],
+        [("Bash", json.dumps({"command": "ls", "description": "cd into a b c"})), "cat ../../x"],
+        [("Grep", json.dumps({"pattern": "cd", "path": "a/b"})), "cat ../../x"],
+        [("Bash", json.dumps({"command": "ls", "description": "cd to the build dir"})), "cat ../x"],
+        ["echo cd a/b; cat ../../x"], ["git log --grep cd a/b; cat ../../x"], ["pushd a/b; cat ../../../x"],
+        ["cd a/b; popd; cat ../../x"], ["cd /tmp/a/b", "cat ../../x"], ["cd /tmp/a/b/c/d", "cat ../../../../home/johnw/.gitconfig"],
+        ["cd", "cat .ssh/id_rsa"], ["cd ~", "cat .ssh/id_rsa"], ["cd a/b && cd ../../.. "], ["sh -c 'cd a/b' ; cat ../../x"],
+        ["cd a/b\ncat ../../x"], ["x=1 cd a/b; cat ../../x"], ["builtin cd ..; cat x"], ["command cd .."],
+        ["cd a/b | true; cat ../../x"], ["cd $(echo ..)"], ["cd a/b && cat ../../../x"],
+        ["for d in a/b; do cd $d; done; cat ../../x"], ["cd 'a/b'; cat ../../x"], ["cd a/b; exec bash; cat ../../x"],
+        ["cd sub; ln -s .. up; cd up; cd up; ls"], ["cd a/b/c; pushd ../../..; cat ../../x"], ["cd a/b & cat ../../x"],
+        ["cd sub && ln -s .. up && cd up && cat ../x"], ["cd a/b || exit 1; cat ../../x"], ["cd -P ../.."],
+        ["cd -- ../../.. && ls"], ["cd a/b", "cat ../../x"], ["(cd a/b)", "cat ../../x"],
+        ["cat > run.sh <<'EOF'\ncd a/b\nmake\nEOF\ncat ../../x"], ["cat > run.sh <<EOF\ncd a/b\nEOF", "cat ../../x"],
+        ["python3 - <<'PY'\nimport os\ncd a/b\nPY\ncat ../../x"], ["f() {\ncd a/b\n}\ncat ../../x"],
+        ["while false; do\ncd a/b\ndone\ncat ../../x"], ["if false; then cd a/b; fi; cat ../../x"],
+        ["case x in y) cd a/b;; esac; cat ../../x"], ["echo 'line\ncd a/b'; cat ../../x"], ["echo foo \\\ncd a/b; cat ../../x"],
+    ]
+    later = [  # (calls, the post-run tree): what the tree looks like after the run must never matter
+        (["cd a2/b; cat ../../x; mkdir -p a2/b"], mk("a2/b")), (["cd a2/b 2>/dev/null; cat ../../x; mkdir -p a2/b"], mk("a2/b")),
+        (["cd a2/b", "cat ../../x", "mkdir -p a2/b"], mk("a2/b")), (["cd lnk; cat ../../x; ln -s a/b lnk"], link("lnk", "a/b")),
+        (["cd hud2; cd nonexist; cat ../x; mkdir hud2"], mk("hud2")), (["cd hud; cd n1/n2; cat ../../../x; mkdir -p n1/n2"], mk("hud/n1/n2")),
+        (["cd a/b; ln -s ../.. up; cd up; cat ../x; rm a/b/up"], None), (["cd a; cat ../../x; cd ..; mv a z; ln -s z/b/c a"], swap),
+        (["mkdir -p t/u; cd t/u; cat ../../../x; cd ../..; rm -r t"], None),
+    ]
+    missed = [c for c in reviews if not flags("claude", c)] + [c for c in reviews if not flags("codex", c)]
+    missed += [c for c, post in later if not flags("claude", c, post)]
+    check("audit: every input from both #289 reviews is flagged, from claude and codex cells, whatever the tree became",
+          missed == [], str(missed[:4]))
+    check("audit: a bare cd names HOME and is flagged; so is cd ~",
+          flags("claude", ["cd"]) != [] and flags("codex", ["cd; ls"]) != [] and flags("claude", ["cd ~"]) != []
+          and all(not d["probable_cd_relative"] for d in details("claude", ["cd"])))
+    soft_cases = {
+        "cd hud && npx vitest run src/x.test.ts; cd ..": ("claude", ["cd hud && npx vitest run src/x.test.ts; cd .."], "hud"),
+        "cd hud/src && cat ../../tiny.py": ("claude", ["cd hud/src && cat ../../tiny.py"], "hud/src"),
+        "Claude across calls": ("claude", ["cd hud", "cat ../tiny.py"], "hud"),
+        "a heredoc body that moves (lexical)": ("claude", ["cd hud\ncat ../tiny.py"], "hud"),
     }
-    check("audit: `..` back from a subdirectory a certain cd moved into stays inside (a real snapshot)",
-          all(v == [] for v in inside.values()), str({k: v for k, v in inside.items() if v}))
-    must_flag = {
-        "cd -P ..": ["cd -P .."], "cd -L ..": ["cd -L .."], "cd -- ..": ["cd -- .."],
-        "(cd a/b); cat ../../x": ["(cd a/b); cat ../../x"],
-        "bash -c 'cd a/b'; cat ../../x": ["bash -c 'cd a/b'; cat ../../x"],
-        "cd a/b | true; cat ../../x": ["cd a/b | true; cat ../../x"],
-        "cd a/b & cat ../../x": ["cd a/b & cat ../../x"],
-        "false && cd a/b; cat ../../x": ["false && cd a/b; cat ../../x"],
-        "cd a/b || exit 1; cat ../../x": ["cd a/b || exit 1; cat ../../x"],
-        "cd nonexistent/a/b 2>/dev/null; cat ../../../x": ["cd nonexistent/a/b 2>/dev/null; cat ../../../x"],
-        "echo cd a/b; cat ../../x": ["echo cd a/b; cat ../../x"],
-        "git log --grep cd a/b; cat ../../x": ["git log --grep cd a/b; cat ../../x"],
-        "a description 'cd a/b'": [("Bash", json.dumps({"command": "ls", "description": "cd a/b"})), "cat ../../x"],
-        "a description 'cd to the build dir'": [("Bash", json.dumps({"command": "ls", "description": "cd to the build dir"})), "cat ../x"],
-        "Grep pattern cd, path a/b": [("Grep", json.dumps({"pattern": "cd", "path": "a/b"})), "cat ../../x"],
-        "cd a/b/c; pushd ../../..; cat ../../x": ["cd a/b/c; pushd ../../..; cat ../../x"],
-        "cd a/b; popd; cat ../../x": ["cd a/b; popd; cat ../../x"],
-        "cd sub && ln -s .. up && cd up && cat ../x": ["cd sub && ln -s .. up && cd up && cat ../x"],
-        "cd sub; cd up; cat ../x (a symlink, resolved)": ["cd sub; cd up; cat ../x"],
-        "cd link_to_outside; cat ../x": ["cd link_to_outside", "cat ../x"],
-        "Claude leaves the snapshot: cd <outside>/a/b, then ../../x": [f"cd {outside}", "cat ../../x"],
-        "cd a/b && cat ../../../x": ["cd a/b && cat ../../../x"],
-        "for d in a/b; do cd $d; done; cat ../../x": ["for d in a/b; do cd $d; done; cat ../../x"],
-        "cd hud && cd ../..": ["cd hud && cd ../.."], "ls ..": ["ls .."],
-        "cd hud; cd -P ..; cat ../x (an option makes the cwd unknown)": ["cd hud; cd -P ..; cat ../x"],
-        "cd /tmp && cat ../home/johnw/.gitconfig": ["cd /tmp && cat ../home/johnw/.gitconfig"],
+    got = {k: details(h, c) for k, (h, c, _) in soft_cases.items()}
+    check("audit: a flag a lexical cd reading puts inside the snapshot is still a flag, marked probable_cd_relative "
+          "with the assumed cwd and the command",
+          all(v and all(d["probable_cd_relative"] and d["assumed_cwd"] == soft_cases[k][2] and d["command"] for d in v)
+              for k, v in got.items()), str({k: v for k, v in got.items()}))
+    check("audit: a soft mark never removes a flag: escape_flags lists every flag, soft or hard",
+          all(audit.escape_flags(R(soft_cases[k][0], "m", tool_calls=[("Bash", json.dumps({"command": c})) for c in soft_cases[k][1]]),
+                                 rsnap) == [d["flag"] for d in got[k]] for k in got))
+    hard = {
+        "escape even after the cd": details("claude", ["cd a/b; cat ../../../x"]),
+        "codex does not carry its cwd": details("codex", ["cd hud", "cat ../tiny.py"]),
+        "an absolute path out": details("claude", ["cd hud && cat /home/johnw/.gitconfig"]),
+        "a cd out of the snapshot": details("claude", ["cd /tmp/a", "cat ../x"]),
     }
-    missed = [k for k, v in must_flag.items() if not calls("claude", v)]
-    check("audit: every uncertain or escaping cd falls back to the snapshot root and is flagged (a real snapshot)",
-          missed == [], str(missed))
-    missed_cx = [k for k, v in must_flag.items() if not calls("codex", v)]
-    check("audit: the same inputs are flagged from a codex cell", missed_cx == [], str(missed_cx))
-    check("audit: codex and jarvis start each call at the snapshot; Claude carries only a certain cwd inside it",
-          calls("codex", ["cd hud", "cat ../tiny.py"]) != [] and calls("jarvis", ["cd hud", "cat ../tiny.py"]) != []
-          and calls("claude", ["cd hud", "cd ../..", "ls"]) != [])
-    check("audit: after a cd that cannot be followed ($UNKNOWN, -), relative paths are judged from the snapshot root",
-          calls("claude", ["cd $SOMEWHERE && cat ../x"]) != [] and calls("claude", ["cd hud && cd - && cat ../x"]) != [])
+    check("audit: a flag no lexical reading puts inside stays hard",
+          all(v and not any(d["probable_cd_relative"] for d in v) for v in hard.values()), str(hard))
     shutil.rmtree(vroot, ignore_errors=True)
     own = audit.claude_task_dir(snap)
     check("audit: a claude cell's own task output under /tmp/claude-<uid>/<its cwd slug>/ is in-cell",
@@ -2211,11 +2234,22 @@ def test_pool(shas, root: Path) -> None:
               "invalid twice" in err and len(prompts) == calls_before + 4 and len(rows) == rows_before + 1
               and rows[-1]["attempts"] == 2 and abs(rows[-1]["cost_usd"] - 0.04) < 1e-9 and rows[-1]["valid"] is False)
 
+        quota_seq = iter([10, 10, 99, 99, 99, 99])
+        rows0 = len(pool.load_pool(cid).get("calls", []))
+        raises(lambda: pool.pool_case(cid, pool_fn=clusterer("not json"),
+                                      quota_reader=lambda p: {"windows": [{"name": "weekly", "used_percent": next(quota_seq, 99)}]}),
+               pool.PoolError)
+        rows = pool.load_pool(cid)["calls"]
+        check("pool: a retry the quota ceiling refuses is not counted: attempts are the calls actually made",
+              len(rows) == rows0 + 1 and rows[-1]["attempts"] == 1 and abs(rows[-1]["cost_usd"] - 0.02) < 1e-9)
+
         def boom(prompt, cwd):
             prompts.append(prompt)
             raise RuntimeError("the cell died")
+        rows_boom = len(pool.load_pool(cid)["calls"])
         raises(lambda: pool.pool_case(cid, pool_fn=boom, quota_reader=cold), RuntimeError)
-        check("pool: a call that dies is still recorded", len(pool.load_pool(cid)["calls"]) == rows_before + 2)
+        check("pool: a call that dies is still recorded", len(pool.load_pool(cid)["calls"]) == rows_boom + 1
+              and pool.load_pool(cid)["calls"][-1]["attempts"] == 1)
         hot = lambda p: {"windows": [{"name": "weekly", "used_percent": 97}]}
         n0 = len(prompts)
         check("pool: the call is refused at the quota ceiling even under the override, before any call",

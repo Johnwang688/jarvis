@@ -74,7 +74,10 @@ def review_rows(runs: list[dict], rescored: dict | None = None) -> list[dict]:
             "ran_tests": float(flags["ran_tests"]) if "ran_tests" in flags else None,
             "tried_mutant": float(flags["tried_mutant"]) if "tried_mutant" in flags else None,
             "cost": doc.get("cost_usd"), "wall": r.get("wall_s"), "tool_calls": doc.get("tool_calls"),
-            "network": len(r.get("network_flags") or []), "escape": len(r.get("escape_flags") or []),
+            "network": len(r.get("network_flags") or []),
+            # hard flags count against the run; probable-cd-relative ones are for the lead to glance at
+            "escape": len(r.get("escape_hard", r.get("escape_flags")) or []),
+            "escape_soft": len(r.get("escape_cd_relative") or []),
             "in_tokens": _split(doc, "input"), "cached_tokens": _split(doc, "cached"), "out_tokens": _split(doc, "output"),
         })
     return rows
@@ -117,20 +120,21 @@ def render(runs: list[dict], rescored: dict | None = None) -> str:
     rev = by_model(review_rows(runs, rescored), ["weighted_recall", "medplus_recall", "weighted_recall_pooled",
                                                  "medplus_recall_pooled", "false_positives", "ran_tests",
                                       "tried_mutant", "cost", "in_tokens", "cached_tokens", "out_tokens", "wall",
-                                      "tool_calls", "network", "escape"])
+                                      "tool_calls", "network", "escape", "escape_soft"])
     out += ["## Reviewer bench", ""]
     if rev:
         out += ["| harness | model | weighted recall (original key) | MED+ recall (original key) | "
                 "weighted recall (pooled key) | MED+ recall (pooled key) | false pos | ran tests | tried mutant | cost | "
-                "in tok | cached tok | out tok | wall s | tool calls | net/escape flags |",
-                "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+                "in tok | cached tok | out tok | wall s | tool calls | net/escape flags (hard) | escape: probably cd-relative |",
+                "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
         for (h, m), v in sorted(rev.items()):
             out.append(f"| {h} | {m} | {_fmt(v['weighted_recall'], pct=True)} | {_fmt(v['medplus_recall'], pct=True)} | "
                        f"{_fmt(v['weighted_recall_pooled'], pct=True)} | {_fmt(v['medplus_recall_pooled'], pct=True)} | "
                        f"{_fmt(v['false_positives'], digits=0)} | {_fmt(v['ran_tests'], pct=True)} | {_fmt(v['tried_mutant'], pct=True)} | "
                        f"{_fmt(v['cost'], money=True)} | {_fmt(v['in_tokens'], digits=0)} | {_fmt(v['cached_tokens'], digits=0)} | "
                        f"{_fmt(v['out_tokens'], digits=0)} | {_fmt(v['wall'], digits=0)} | "
-                       f"{_fmt(v['tool_calls'], digits=0)} | {_fmt(v['network'], digits=0)}/{_fmt(v['escape'], digits=0)} |")
+                       f"{_fmt(v['tool_calls'], digits=0)} | {_fmt(v['network'], digits=0)}/{_fmt(v['escape'], digits=0)} | "
+                       f"{_fmt(v['escape_soft'], digits=0)} |")
     else:
         out.append("No review runs yet.")
     impl = by_model(implement_rows(runs), ["merge_ready", "rounds", "cost_to_ready", "total_cost", "in_tokens",
@@ -160,6 +164,11 @@ def render(runs: list[dict], rescored: dict | None = None) -> str:
     if dirty:
         out += ["", "## Snapshots an agent changed (commits, refs or HEAD; undone before judging)", ""] + [
             f"- {r['run_id']}: {'; '.join(r['hygiene']['after_run'])}" for r in dirty]
+    soft = [(r, d) for r in runs for d in r.get("escape_cd_relative") or ()]
+    if soft:
+        out += ["", "## Escape flags that are probably cd-relative (advisory: for the lead to glance at)", ""] + [
+            f"- {r['run_id']}: {d['flag']} (assumed cwd `{d.get('assumed_cwd')}`) in `{(d.get('command') or '')[:160]}`"
+            for r, d in soft]
     skipped = [r for r in runs if r.get("result") == "skipped"]
     if skipped:
         out += ["", "## Skipped cells", ""] + [f"- {r['run_id']}: {r.get('reason', '')}" for r in skipped]
