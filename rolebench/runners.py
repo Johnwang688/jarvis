@@ -332,7 +332,7 @@ def run_jarvis(*, model, prompt, cwd, timeout_s, max_turns, budget_usd=None, out
         shutil.rmtree(runtime, ignore_errors=True)
         return RunResult("jarvis", model, error=f"sandbox: {exc}", crashed=True)
     result = RunResult("jarvis", model)
-    result.spend_usd = _read_spend(io / "spend.json")
+    result.spend_usd = spend_from_stdout(out)         # streamed, so it survives a kill mid-call
     try:
         if (io / "result.json").is_symlink():
             raise OSError("result.json is a symlink")
@@ -353,18 +353,24 @@ def run_jarvis(*, model, prompt, cwd, timeout_s, max_turns, budget_usd=None, out
     if timed_out:
         result.error = result.error or f"timed out after {timeout_s}s"
     if out_dir:
+        Path(out_dir, "stdout.jsonl").write_text((out or "")[:STDOUT_KEEP], encoding="utf-8")
         Path(out_dir, "stderr.txt").write_text((err or "")[-200_000:], encoding="utf-8")
     return result
 
 
-def _read_spend(path: Path) -> float | None:
-    try:
-        if path.is_symlink():
-            return None
-        usd = json.loads(path.read_text(encoding="utf-8")).get("usd")
-        return float(usd) if isinstance(usd, (int, float)) and not isinstance(usd, bool) else None
-    except (OSError, ValueError, AttributeError):
-        return None
+def spend_from_stdout(out: str) -> float | None:
+    """The last ROLEBENCH_SPEND line's total, or None."""
+    from rolebench.jarvis_worker import SPEND_PREFIX
+    usd = None
+    for line in (out or "").splitlines():
+        if line.startswith(SPEND_PREFIX):
+            try:
+                v = json.loads(line[len(SPEND_PREFIX):]).get("usd")
+                if isinstance(v, (int, float)) and not isinstance(v, bool):
+                    usd = float(v)
+            except (ValueError, AttributeError):
+                continue
+    return usd
 
 
 REGISTRY = {"claude": run_claude, "codex": run_codex, "jarvis": run_jarvis}

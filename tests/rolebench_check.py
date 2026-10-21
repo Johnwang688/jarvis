@@ -319,26 +319,36 @@ def test_spend(root: Path) -> None:
 
 def test_worker_meter(root: Path) -> None:
     spec = {"budget_usd": 0.1, "prices": {"moonshotai/kimi-k3": [3.0, 15.0]}, "pins": {"moonshotai/kimi-k3": "moonshotai"}}
-    sp = root / "meter-spend.json"
-    m = jarvis_worker.Meter(spec, sp)
+    out = io.StringIO()
+    m = jarvis_worker.Meter(spec, stream=out)
 
     class R:
         def __init__(self, cost, p=0, c=0):
             self.cost_usd, self.prompt_tokens, self.completion_tokens, self.raw = cost, p, c, {}
+
+    def last_spend():
+        return runners.spend_from_stdout(out.getvalue())
     check("the meter allows the first call", m.before("openai/gpt-6-luna") == "")
     m.after("openai/gpt-6-luna", R(0.06))
-    check("each call's running total is written to spend.json", json.loads(sp.read_text())["usd"] == 0.06)
+    check("each call's running total is streamed on stdout", last_spend() == 0.06)
     check("the call that crosses the budget raises", raises(lambda: m.after("openai/gpt-6-luna", R(0.05)), jarvis_worker.BudgetExceeded))
-    check("the total covers every reply (sub-agents and compaction included) and is on disk",
-          abs(json.loads(sp.read_text())["usd"] - 0.11) < 1e-9 and m.calls == 2)
+    check("the total covers every reply (sub-agents and compaction included) and is on the stream",
+          abs(last_spend() - 0.11) < 1e-9 and m.calls == 2)
     check("no further call is made once the budget is spent", raises(lambda: m.before("x/y"), jarvis_worker.BudgetExceeded))
-    m2 = jarvis_worker.Meter(spec, None)
+    # LOW: a call whose estimated prompt cost would cross the budget is refused before it is sent
+    m4 = jarvis_worker.Meter(spec, stream=io.StringIO())
+    big = [{"role": "user", "content": "x" * 600_000}]        # ~150k tokens; at $3/M ~$0.45 > $0.10
+    refused = raises(lambda: m4.before("moonshotai/kimi-k3", big, max_tokens=0), jarvis_worker.BudgetExceeded)
+    small_ok = m4.before("moonshotai/kimi-k3", [{"role": "user", "content": "hi"}], max_tokens=0) == "moonshotai"
+    check("a jarvis call whose estimated prompt cost would cross the budget is refused before sending",
+          refused and small_ok and m4.calls == 0)
+    m2 = jarvis_worker.Meter(spec, stream=io.StringIO())
     check("a Kimi call is pinned to Moonshot; any other model is sent unpinned",
           m2.route("moonshotai/kimi-k3") == "moonshotai" and m2.route("openai/gpt-oss-20b") == ""
           and m2.route("anthropic/claude-haiku-5.5") == "")
     check("a moonshotai/ id the spec does not price is refused", raises(lambda: m2.route("moonshotai/kimi-k9")))
     r = R(0.0, 1_000_000, 0)
-    m3 = jarvis_worker.Meter({"budget_usd": 100, **{k: v for k, v in spec.items() if k != "budget_usd"}}, None)
+    m3 = jarvis_worker.Meter({"budget_usd": 100, **{k: v for k, v in spec.items() if k != "budget_usd"}}, stream=io.StringIO())
     m3.after("moonshotai/kimi-k3", r)
     check("the Kimi floor applies per call, and to the reply the loop sees", m3.total == 3.0 and r.cost_usd == 3.0)
     check("the rolebench Jarvis toolset has no delegation",
@@ -407,9 +417,13 @@ def test_sandbox_argv(root: Path) -> None:
           and "helper =" in sandbox.GITCONFIG_TEXT and "hooksPath = /dev/null" in sandbox.GITCONFIG_TEXT)
     login = root / "login"
     (login / ".claude").mkdir(parents=True)
-    (login / ".claude" / ".credentials.json").write_text(json.dumps({"claudeAiOauth": {"expiresAt": (time.time() + 86400) * 1000}}))
+    (login / ".claude" / ".credentials.json").write_text(json.dumps({"claudeAiOauth": {
+        "accessToken": "sk-ant-dummy", "refreshToken": "sk-ant-refresh-dummy", "expiresAt": (time.time() + 86400) * 1000,
+        "scopes": ["user:inference"], "subscriptionType": "max", "rateLimitTier": "default"},
+        "mcpOAuth": {"some-server": {"accessToken": "mcp-dummy"}}}))
     (login / ".codex").mkdir()
-    (login / ".codex" / "auth.json").write_text("{}")
+    (login / ".codex" / "auth.json").write_text(json.dumps({"auth_mode": "max", "OPENAI_API_KEY": None, "last_refresh": "x",
+        "tokens": {"access_token": "cx-access-dummy", "refresh_token": "cx-refresh-dummy", "id_token": "cx-id", "account_id": "acc"}}))
     fakebin = root / "fakebin"
     (fakebin / "rel" / "bin").mkdir(parents=True)
     for name in ("claude",):
@@ -418,15 +432,26 @@ def test_sandbox_argv(root: Path) -> None:
     (fakebin / "rel" / "bin" / "codex").write_text("#!/bin/sh\n")
     (fakebin / "rel" / "bin" / "codex").chmod(0o755)
     (fakebin / "codex").symlink_to(fakebin / "rel" / "bin" / "codex")
-    with env(ROLEBENCH_LOGIN_HOME=str(login), PATH=f"{fakebin}:{os.environ['PATH']}"):
+    with env(ROLEBENCH_LOGIN_HOME=str(login), PATH=f"{fakebin}:{os.environ['PATH']}", ROLEBENCH_NET="none"):
         argvs = {p: sandbox.bwrap_argv(sandbox.Cell(p, work), ["true"]) for p in sandbox.PROFILES}
+        # A2: the trimmed credential views, checked by key name only (no values printed)
+        claude_cred = json.loads(sandbox.trimmed_claude_credentials())["claudeAiOauth"]
+        codex_cred = json.loads(sandbox.trimmed_codex_auth())
     home = sandbox.sandbox_home()
+    check("the trimmed Claude login keeps only the access token and its metadata, no refresh or MCP token",
+          set(claude_cred) <= set(sandbox.CLAUDE_OAUTH_KEEP) and "accessToken" in claude_cred
+          and "refreshToken" not in claude_cred and "mcpOAuth" not in json.loads(sandbox.trimmed_claude_credentials()))
+    check("the trimmed Codex login drops the refresh token", "access_token" in codex_cred["tokens"]
+          and "refresh_token" not in codex_cred["tokens"])
 
     def sources(a):
         return [a[i + 1] for i, t in enumerate(a) if t in ("--bind", "--ro-bind")]
 
     def dests(a):
         return [a[i + 2] for i, t in enumerate(a) if t in ("--bind", "--ro-bind")]
+
+    def data_dests(a):
+        return [a[i + 2] for i, t in enumerate(a) if t == "--ro-bind-data"]
     banned = [str(Path(REAL_HOME) / "projects" / "Jarvis"), str(Path(REAL_HOME) / ".config" / "gh"),
               str(Path(REAL_HOME) / ".gitconfig"), str(Path(REAL_HOME) / ".ssh"), "/mnt/c", "/run", "/home"]
     ok = True
@@ -437,28 +462,44 @@ def test_sandbox_argv(root: Path) -> None:
                     ok = False
     check("no profile binds the checkout, ~/.config/gh, ~/.gitconfig, ~/.ssh, /mnt/c, /run or /home", ok,
           json.dumps({p: sources(a) for p, a in argvs.items()})[:600])
+    check("no login file is bound from disk: credentials come only through --ro-bind-data",
+          not any(d.endswith(".credentials.json") or d.endswith("auth.json") for a in argvs.values() for d in dests(a)))
     check("the venv is read-only at /opt/rolebench/venv, never at its checkout path",
           all(str(sandbox.VENV) in dests(a) and str(config.venv_dir()) not in dests(a) for a in argvs.values()))
     check("HOME and /tmp are tmpfs in every profile",
           all(a[a.index("--tmpfs", a.index("/proc")) + 1] == "/tmp" and home in a for a in argvs.values()))
     cl, cx, gr, jv, jd = (argvs[k] for k in ("claude", "codex", "grade", "jarvis", "judge"))
     creds_dest = str(Path(home) / ".claude" / ".credentials.json")
-    check("the claude cell binds only the Claude login file, read-only",
-          creds_dest in dests(cl) and cl[dests(cl).index(creds_dest) * 0 + cl.index(creds_dest) - 2] == "--ro-bind"
-          and not any(".claude.json" in d or d.endswith("/.claude") for d in dests(cl)))
+    k = cl.index(creds_dest)
+    check("the claude cell gets the Claude login via --ro-bind-data at 0400, and nothing else under ~/.claude",
+          creds_dest in data_dests(cl) and cl[k - 2] == "--ro-bind-data" and cl[k - 3] == "0400" and cl[k - 4] == "--perms"
+          and not any(d.rstrip("/").endswith("/.claude") for d in dests(cl)))
     codex_auth = str(Path(home) / sandbox.CODEX_HOME_NAME / "auth.json")
-    check("the codex cell gets an isolated CODEX_HOME holding a read-only auth.json, never ~/.codex",
-          codex_auth in dests(cx) and cx[cx.index(codex_auth) - 2] == "--ro-bind"
-          and not any(d.rstrip("/").endswith("/.codex") for d in dests(cx))
-          and f"CODEX_HOME" in cx and cx[cx.index("CODEX_HOME") + 1] == str(Path(home) / sandbox.CODEX_HOME_NAME))
+    check("the codex cell gets an isolated CODEX_HOME holding its auth.json via --ro-bind-data, never ~/.codex",
+          codex_auth in data_dests(cx) and not any(d.rstrip("/").endswith("/.codex") for d in dests(cx))
+          and "CODEX_HOME" in cx and cx[cx.index("CODEX_HOME") + 1] == str(Path(home) / sandbox.CODEX_HOME_NAME))
     check("logins go only where they are needed",
-          creds_dest not in dests(cx) + dests(gr) + dests(jv) and codex_auth not in dests(cl) + dests(gr) + dests(jv))
-    check("network: shared for claude, codex, jarvis and the judge; unshared for grading",
-          all("--share-net" in a for a in (cl, cx, jv, jd)) and "--share-net" not in gr and "--unshare-all" in gr)
+          creds_dest not in data_dests(cx) + data_dests(gr) + data_dests(jv) and codex_auth not in data_dests(cl) + data_dests(gr) + data_dests(jv))
     check("the judge's work tree is read-only", jd[jd.index(str(work.resolve())) - 1] == "--ro-bind"
           if str(work.resolve()) in jd else False)
     check("every cell clears the environment and dies with its parent",
           all("--clearenv" in a and "--die-with-parent" in a and "--new-session" in a for a in argvs.values()))
+
+    # A1: network is gated. With ROLEBENCH_NET unset a claude/jarvis/judge cell is refused;
+    # ROLEBENCH_NET=none gives them no network; codex is exempt and keeps the host netns.
+    with env(ROLEBENCH_LOGIN_HOME=str(login), PATH=f"{fakebin}:{os.environ['PATH']}", ROLEBENCH_NET=None):
+        for p in ("claude", "jarvis", "judge"):
+            check(f"a {p} cell is refused with no ROLEBENCH_NET mode",
+                  raises(lambda p=p: sandbox.bwrap_argv(sandbox.Cell(p, work), ["true"]), sandbox.SandboxError))
+        check("a codex cell is not gated and keeps the host netns",
+              "--share-net" in sandbox.bwrap_argv(sandbox.Cell("codex", work), ["true"]))
+        check("ROLEBENCH_NET=pasta is refused until it is wired, never silently shared",
+              raises(lambda: sandbox.bwrap_argv(sandbox.Cell("claude", work), ["true"]), sandbox.SandboxError)
+              if (os.environ.update(ROLEBENCH_NET="pasta") or True) else False)
+        os.environ.pop("ROLEBENCH_NET", None)
+    check("under ROLEBENCH_NET=none, claude/jarvis/judge get no shared netns; codex does",
+          all("--share-net" not in a for a in (cl, jv, jd)) and "--share-net" in cx
+          and all("--unshare-all" in a for a in argvs.values()))
     u = sandbox.unit_argv(sandbox.unit_name("2026-x/y z"), ["echo"])
     check("each run is a named, capped transient unit", u[:4] == ["systemd-run", "--user", "--scope", "-q"]
           and "--unit=rolebench-2026-x-y-z" in u and "MemoryMax=3G" in u and "MemorySwapMax=0" in u and u[-1] == "echo")
@@ -470,12 +511,29 @@ def _probe_script(paths: dict, extra: str = "") -> str:
 
 
 def _parse_probe(out: str) -> dict:
-    return dict(line.split("=", 1) for line in out.splitlines() if "=" in line and line.split("=", 1)[1] in ("present", "absent", "yes", "no"))
+    d = {}
+    for line in out.splitlines():
+        if "=" in line:
+            k, v = line.split("=", 1)
+            if re.fullmatch(r"[a-z0-9_]+", k):
+                d[k] = v.strip()
+    return d
+
+
+def _throwaway_listener():
+    """A socket listening on a random host port, as an inert connect target.
+    Never a real daemon port. Returns (port, close)."""
+    import socket
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind(("127.0.0.1", 0))
+    s.listen(1)
+    return s.getsockname()[1], s.close
 
 
 def test_sandbox_escape(root: Path) -> None:
     """Real cells: a child cannot reach the gh login, the checkout, the lead's
-    session dirs or the OpenRouter key. Existence probes only."""
+    session dirs, the OpenRouter key, a host port, or the host PID/IPC/UTS
+    namespaces. Existence probes only; no secret is ever read or printed."""
     why = sandbox.available()
     if why:
         check(f"sandbox available ({why})", False)
@@ -483,50 +541,72 @@ def test_sandbox_escape(root: Path) -> None:
     work = root / "w-escape"
     work.mkdir()
     real = Path(REAL_HOME)
+    port, close = _throwaway_listener()
+    host_pid = os.getpid()
     probes = {"gh_hosts": real / ".config" / "gh" / "hosts.yml", "checkout": real / "projects" / "Jarvis",
               "checkout_env": real / "projects" / "Jarvis" / ".env", "ssh": real / ".ssh",
               "gitconfig": real / ".gitconfig", "mnt_c": "/mnt/c", "user_bus": f"/run/user/{os.getuid()}/bus",
               "claude_json": real / ".claude.json", "claude_projects": real / ".claude" / "projects",
-              "codex_config": real / ".codex" / "config.toml", "codex_sessions": real / ".codex" / "sessions"}
+              "codex_config": real / ".codex" / "config.toml", "codex_sessions": real / ".codex" / "sessions",
+              "host_pid": f"/proc/{host_pid}", "host_pid_env": f"/proc/{host_pid}/environ",
+              "proc1_root_home": f"/proc/1/root{real}/projects"}
     lead = [p for p in Path("/tmp").glob("claude-*/*") if not str(work).startswith(str(p))]
     for i, p in enumerate(lead[:6]):
         probes[f"lead_tmp_{i}"] = p
     host_present = {k for k, p in probes.items() if os.path.exists(p)}
+    # host_pid/proc1 always "exist" from the host's view; they prove the PID ns only inside.
+    pidns_probes = {"host_pid", "host_pid_env", "proc1_root_home"}
     extra = ('if env | grep -q "^OPENROUTER_API_KEY="; then echo "or_key=yes"; else echo "or_key=no"; fi\n'
              'if env | grep "^CLAUDE_CODE_\\|^ANTHROPIC_" | grep -qv "^CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="; then echo "claude_env=yes"; else echo "claude_env=no"; fi\n'
              'if systemd-run --user --scope -q true 2>/dev/null; then echo "systemd=yes"; else echo "systemd=no"; fi\n'
              'if grep -qv "lo:\\|Inter-\\|face" /proc/net/dev; then echo "netdev=yes"; else echo "netdev=no"; fi\n'
+             'echo "pidcount=$(ls -d /proc/[0-9]* 2>/dev/null | wc -l)"\n'
+             'if ls /etc/ssh 2>/dev/null | grep -q .; then echo "etcssh=exposed"; else echo "etcssh=masked"; fi\n'
+             'echo "ipcshm=$(cat /proc/sysvipc/shm 2>/dev/null | wc -l)"\n'
              f'if test -e "{real}/.claude/.credentials.json"; then echo "claude_login=present"; else echo "claude_login=absent"; fi\n'
              f'if test -e "$CODEX_HOME/auth.json"; then echo "codex_login=present"; else echo "codex_login=absent"; fi\n'
-             f'if touch "{work}/w.txt" 2>/dev/null; then echo "work_rw=yes"; else echo "work_rw=no"; fi\n')
+             f'if touch "{work}/w.txt" 2>/dev/null; then echo "work_rw=yes"; else echo "work_rw=no"; fi\n'
+             f"if python3 -c \"import socket;s=socket.socket();s.settimeout(2);s.connect(('127.0.0.1',{port}))\" 2>/dev/null; then echo \"hostport=reachable\"; else echo \"hostport=unreachable\"; fi\n")
     script = _probe_script(probes, extra)
     results = {}
-    with env(OPENROUTER_API_KEY="sk-dummy-not-a-key", CLAUDE_CODE_SSE_PORT="1", ANTHROPIC_BASE_URL="http://x",
-             ROLEBENCH_LOGIN_HOME=None):
-        for profile in ("claude", "codex", "jarvis", "grade"):
-            try:
-                rc, out, err, to = sandbox.launch(["/bin/sh", "-c", script], cell=sandbox.Cell(profile, work),
-                                                  run_id=f"check-escape-{profile}-{os.getpid()}", timeout_s=60)
-            except sandbox.SandboxError as exc:
-                rc, out, err, to = None, "", str(exc), False
-            results[profile] = _parse_probe(out)
-            if rc != 0:
-                print(f"    ({profile}: rc={rc} {err.strip()[:200]})")
-    print("    host has:", ", ".join(sorted(host_present)) or "(none)")
+    try:
+        with env(OPENROUTER_API_KEY="sk-dummy-not-a-key", CLAUDE_CODE_SSE_PORT="1", ANTHROPIC_BASE_URL="http://x",
+                 ROLEBENCH_LOGIN_HOME=None, ROLEBENCH_NET="none"):
+            for profile in ("claude", "codex", "jarvis", "grade"):
+                try:
+                    rc, out, err, to = sandbox.launch(["/bin/sh", "-c", script], cell=sandbox.Cell(profile, work),
+                                                      run_id=f"check-escape-{profile}-{os.getpid()}", timeout_s=60)
+                except sandbox.SandboxError as exc:
+                    rc, out, err, to = None, "", str(exc), False
+                results[profile] = _parse_probe(out)
+                if rc != 0:
+                    print(f"    ({profile}: rc={rc} {err.strip()[:200]})")
+    finally:
+        close()
+    print("    host has:", ", ".join(sorted(host_present - pidns_probes)) or "(none)")
     for profile, r in results.items():
-        visible = sorted(k for k in probes if r.get(k) == "present")
+        visible = sorted(k for k in probes if k not in pidns_probes and r.get(k) == "present")
         print(f"    {profile}: visible={visible or 'none'} key={r.get('or_key')} claude_env={r.get('claude_env')} "
-              f"systemd={r.get('systemd')} netdev={r.get('netdev')} claude_login={r.get('claude_login')} "
-              f"codex_login={r.get('codex_login')} work_rw={r.get('work_rw')}")
+              f"systemd={r.get('systemd')} netdev={r.get('netdev')} pidcount={r.get('pidcount')} "
+              f"etcssh={r.get('etcssh')} hostport={r.get('hostport')} host_pid={r.get('host_pid')} "
+              f"proc1_home={r.get('proc1_root_home')} login={r.get('claude_login')}/{r.get('codex_login')} rw={r.get('work_rw')}")
         check(f"{profile} cell: none of the gh login, checkout, ssh, gitconfig, /mnt/c, user bus, owner session "
               f"files or lead /tmp dirs is reachable", r and not visible, f"visible: {visible}")
         check(f"{profile} cell: no OPENROUTER_API_KEY, CLAUDE_CODE_* or ANTHROPIC_* in a child's environment",
               r.get("or_key") == "no" and r.get("claude_env") == "no")
         check(f"{profile} cell: cannot ask the user systemd to start anything outside", r.get("systemd") == "no")
         check(f"{profile} cell: the work tree is writable", r.get("work_rw") == "yes")
+        # A3: PID namespace — the host's own pid and its environ are invisible, /proc/1 is the cell
+        check(f"{profile} cell: the host PID namespace is not visible (no host pid, no host /proc/1/root)",
+              r.get("host_pid") == "absent" and r.get("host_pid_env") == "absent" and r.get("proc1_root_home") == "absent"
+              and r.get("pidcount", "999").isdigit() and int(r.get("pidcount", "999")) < 50, f"pidcount={r.get('pidcount')}")
+        # LOW: the /etc masks (mutant MB drops them)
+        check(f"{profile} cell: /etc/ssh is masked", r.get("etcssh") == "masked")
     if "gh_hosts" not in host_present:
         print("    (this host has no gh hosts.yml: that probe proves nothing here)")
-    check("the grade cell has no network interface but lo", results.get("grade", {}).get("netdev") == "no")
+    for p in ("claude", "jarvis", "grade"):
+        check(f"{p} cell (ROLEBENCH_NET=none): no network interface but lo, and a host port is unreachable",
+              results[p].get("netdev") == "no" and results[p].get("hostport") == "unreachable")
     check("only the claude cell holds the Claude login",
           results["claude"].get("claude_login") == "present"
           and all(results[p].get("claude_login") == "absent" for p in ("codex", "jarvis", "grade")))
@@ -573,16 +653,20 @@ def test_fake_clis(root: Path) -> None:
     work.mkdir()
     login = root / "login2"
     (login / ".claude").mkdir(parents=True)
-    (login / ".claude" / ".credentials.json").write_text(json.dumps({"claudeAiOauth": {"expiresAt": (time.time() + 86400) * 1000}}))
+    (login / ".claude" / ".credentials.json").write_text(json.dumps({"claudeAiOauth": {
+        "accessToken": "sk-ant-dummy", "refreshToken": "r", "expiresAt": (time.time() + 86400) * 1000,
+        "scopes": ["user:inference"], "subscriptionType": "max"}}))
     import base64
     payload = base64.urlsafe_b64encode(json.dumps({"exp": time.time() + 86400}).encode()).decode().rstrip("=")
     (login / ".codex").mkdir()
-    (login / ".codex" / "auth.json").write_text(json.dumps({"tokens": {"access_token": f"h.{payload}.s"}}))
+    (login / ".codex" / "auth.json").write_text(json.dumps({"tokens": {"access_token": f"h.{payload}.s", "refresh_token": "r"}}))
     fake = root / "bin"
     (fake / "rel" / "bin").mkdir(parents=True)
     (fake / "rel" / "codex-path").mkdir()
     (fake / "claude").write_text(
         "#!/bin/sh\nenv > ./claude-env.txt\necho \"$@\" > ./claude-argv.txt\ncat > ./claude-stdin.txt\n"
+        "C=\"$HOME/.claude/.credentials.json\"\n"
+        "python3 -c \"import json,os,stat;d=json.load(open('$C'));d['_perm']=oct(stat.S_IMODE(os.stat('$C').st_mode))[2:];print(json.dumps(d))\" > ./claude-cred.json 2>/dev/null\n"
         "echo '{\"type\":\"result\",\"is_error\":false,\"result\":\"ok\",\"total_cost_usd\":0.5,\"num_turns\":1,\"usage\":{},"
         "\"modelUsage\":{\"claude-haiku-5-5\":{},\"claude-sonnet-5-5\":{}}}'\n")
     (fake / "claude").chmod(0o755)
@@ -593,12 +677,18 @@ def test_fake_clis(root: Path) -> None:
     (fake / "rel" / "bin" / "codex").chmod(0o755)
     (fake / "codex").symlink_to(fake / "rel" / "bin" / "codex")
     with env(PATH=f"{fake}:{os.environ['PATH']}", ROLEBENCH_LOGIN_HOME=str(login), GH_TOKEN="gh-dummy",
-             OPENROUTER_API_KEY="sk-dummy-not-a-key", CLAUDE_CODE_SSE_PORT="9"):
+             OPENROUTER_API_KEY="sk-dummy-not-a-key", CLAUDE_CODE_SSE_PORT="9", ROLEBENCH_NET="none"):
         res = runners.run_claude(model="haiku", prompt="PROMPT TEXT", cwd=work, timeout_s=60, max_turns=3,
                                  run_id=f"check-claude-{os.getpid()}")
         cx = runners.run_codex(model="gpt-6-luna", prompt="P", cwd=work, timeout_s=60, run_id=f"check-codex-{os.getpid()}")
+        # A2: the trimmed login the claude cell actually got, read back from the fake CLI's dump
+        cred_seen = (work / "claude-cred.json").read_text() if (work / "claude-cred.json").exists() else "{}"
     env_seen = (work / "claude-env.txt").read_text() if (work / "claude-env.txt").exists() else ""
     argv_seen = (work / "claude-argv.txt").read_text() if (work / "claude-argv.txt").exists() else ""
+    cred = json.loads(cred_seen).get("claudeAiOauth", {})
+    check("the claude cell's login is the trimmed view, 0400, no refresh or MCP token (A2)",
+          "accessToken" in cred and "refreshToken" not in cred and "mcpOAuth" not in json.loads(cred_seen)
+          and json.loads(cred_seen).get("_perm") in ("400", None))
     check("claude runs inside the cell: no GH_TOKEN, key or CLAUDE_CODE_SSE_PORT, and HOME is the cell's",
           env_seen and "GH_TOKEN" not in env_seen and "OPENROUTER" not in env_seen and "CLAUDE_CODE_SSE_PORT" not in env_seen
           and f"HOME={sandbox.sandbox_home()}" in env_seen and "GIT_ASKPASS=/bin/false" in env_seen, res.error)
@@ -615,8 +705,9 @@ def test_fake_clis(root: Path) -> None:
           and (work / "codex-auth.txt").read_text().strip() == "auth=present" and cx.text == "done", cx.error)
     check("codex tokens split: input excludes the cached tokens it includes",
           cx.summary()["token_split"] == {"input": 60, "cached": 40, "output": 5})
-    with env(ROLEBENCH_LOGIN_HOME=str(login)):
-        (login / ".claude" / ".credentials.json").write_text(json.dumps({"claudeAiOauth": {"expiresAt": (time.time() + 60) * 1000}}))
+    with env(ROLEBENCH_LOGIN_HOME=str(login), ROLEBENCH_NET="none"):
+        (login / ".claude" / ".credentials.json").write_text(json.dumps({"claudeAiOauth": {
+            "accessToken": "sk-ant-dummy", "expiresAt": (time.time() + 60) * 1000}}))
         soon = runners.run_claude(model="haiku", prompt="x", cwd=work, timeout_s=1800, max_turns=1)
     check("a login that would expire during the run is refused (never refreshed in a read-only cell)",
           soon.error.startswith("refused:") and soon.crashed)

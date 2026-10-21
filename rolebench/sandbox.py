@@ -25,6 +25,7 @@ network; Claude's Bash and Jarvis's shell are not.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -70,10 +71,18 @@ PASS_PREFIX = ("LC_",)
 
 PROFILES = ("claude", "codex", "jarvis", "grade", "judge")
 NETWORK = {"claude": True, "codex": True, "jarvis": True, "judge": True, "grade": False}
+# Cells whose network, when on, must go through a declared ROLEBENCH_NET mode
+# (A1). Codex is exempt: its own sandbox keeps its commands off the network.
+NET_GATED = ("claude", "jarvis", "judge")
+NET_MODES = ("none", "pasta")
 MASK_ETC = ("/etc/ssh", "/etc/ssl/private")
 # Installed software outside /usr that suites use (the Browser suites' Chrome).
 SYSTEM_RO = ("/opt/google",)
 NODE_SCRATCH = (".vite", ".vite-temp", ".vitest", ".cache")
+# The credential fields each CLI needs; everything else (refresh tokens, the
+# MCP OAuth block) is dropped and the trimmed view is passed in memory (A2).
+CLAUDE_OAUTH_KEEP = ("accessToken", "expiresAt", "scopes", "subscriptionType", "rateLimitTier")
+CODEX_TOKEN_DROP = ("refresh_token",)
 
 
 class SandboxError(RuntimeError):
@@ -183,6 +192,50 @@ def codex_auth() -> Path:
     return Path(config.login_home()) / ".codex" / "auth.json"
 
 
+def net_mode() -> str:
+    return (os.environ.get("ROLEBENCH_NET") or "").strip().lower()
+
+
+def trimmed_claude_credentials() -> bytes:
+    """The Claude login a cell gets: the access token and its metadata only, no
+    refresh token and no MCP OAuth block. Never printed, never on disk."""
+    try:
+        raw = json.loads(claude_credentials().read_text(encoding="utf-8"))
+        oauth = raw["claudeAiOauth"]
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise SandboxError(f"cannot read the Claude login: {exc}")
+    keep = {k: oauth[k] for k in CLAUDE_OAUTH_KEEP if k in oauth}
+    if "accessToken" not in keep:
+        raise SandboxError("the Claude login has no accessToken")
+    return json.dumps({"claudeAiOauth": keep}).encode()
+
+
+def trimmed_codex_auth() -> bytes:
+    """The Codex login a cell gets: auth.json without the refresh token."""
+    try:
+        raw = json.loads(codex_auth().read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise SandboxError(f"cannot read the Codex login: {exc}")
+    tokens = {k: v for k, v in (raw.get("tokens") or {}).items() if k not in CODEX_TOKEN_DROP}
+    out = {"tokens": tokens}
+    for k in ("auth_mode", "OPENAI_API_KEY", "last_refresh"):
+        if k in raw:
+            out[k] = raw[k]
+    if not tokens.get("access_token"):
+        raise SandboxError("the Codex login has no access_token")
+    return json.dumps(out).encode()
+
+
+def credential_binds(cell: "Cell") -> list[tuple[str, bytes]]:
+    """(dest path in the cell, trimmed JSON bytes) for this profile's login."""
+    home = sandbox_home()
+    if cell.profile in ("claude", "judge"):
+        return [(str(Path(home) / ".claude" / ".credentials.json"), trimmed_claude_credentials())]
+    if cell.profile == "codex":
+        return [(str(Path(home) / CODEX_HOME_NAME / "auth.json"), trimmed_codex_auth())]
+    return []
+
+
 def env_for(cell: Cell, base: dict | None = None) -> dict:
     """The whole environment a cell gets (bwrap --clearenv, then these)."""
     base = os.environ if base is None else base
@@ -211,11 +264,44 @@ def env_for(cell: Cell, base: dict | None = None) -> dict:
     return env
 
 
-def bwrap_argv(cell: Cell, command: list[str], base_env: dict | None = None) -> list[str]:
+def resolve_network(cell: Cell) -> bool:
+    """Whether this cell gets a shared host netns, enforcing A1's gate.
+
+    `--unshare-all` gives each cell an empty netns; only a gated profile that is
+    explicitly cleared here is given the host's. A claude/jarvis/judge cell with
+    network on must declare ROLEBENCH_NET:
+      - `none`: run with no network (so no host loopback, no daemon ports);
+      - `pasta`: the intended confined egress, not wired yet — refused until
+        passt is installed and wired, never silently given the host netns.
+    Codex is exempt (its own sandbox keeps its commands off the network)."""
+    if not cell.network:
+        return False
+    if cell.profile not in NET_GATED:
+        return True
+    mode = net_mode()
+    if mode == "none":
+        return False
+    if mode == "pasta":
+        # TODO(passt): run pasta against this cell's netns with
+        #   pasta --config-net --no-map-gw <pid-or-netns>  (no -t/-u/-T/-U
+        #   forwards, so nothing on the host is reachable inbound), then return
+        #   False here (the cell keeps its own netns; pasta provides egress).
+        raise SandboxError(
+            "ROLEBENCH_NET=pasta is not wired yet: it needs the passt package "
+            "(pasta --config-net --no-map-gw, no -t/-u/-T/-U forwards). "
+            "Use ROLEBENCH_NET=none until it is wired.")
+    raise SandboxError(
+        f"a {cell.profile} cell with network needs ROLEBENCH_NET=none or pasta "
+        f"(sharing the host netns is an escape; see the Network note). Got {mode!r}.")
+
+
+def bwrap_argv(cell: Cell, command: list[str], base_env: dict | None = None,
+               cred_fds: dict[str, int] | None = None) -> list[str]:
     home = sandbox_home()
     work = Path(cell.work).resolve()
+    shared_net = resolve_network(cell)
     a = [BWRAP, "--unshare-all"]
-    if cell.network:
+    if shared_net:
         a.append("--share-net")
     a += ["--die-with-parent", "--new-session",
           "--ro-bind", "/usr", "/usr", *_root_links(),
@@ -225,7 +311,7 @@ def bwrap_argv(cell: Cell, command: list[str], base_env: dict | None = None) -> 
             a += ["--tmpfs", masked]
     if os.path.exists("/etc/gitconfig"):
         a += ["--ro-bind", "/dev/null", "/etc/gitconfig"]
-    if cell.network:
+    if shared_net:
         a += _resolv()
     a += ["--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp", "--tmpfs", home,
           "--dir", "/tmp/rolebench-gh-empty"]
@@ -251,22 +337,22 @@ def bwrap_argv(cell: Cell, command: list[str], base_env: dict | None = None) -> 
     if cell.runtime is not None:
         a += ["--ro-bind", str(Path(cell.runtime).resolve()), str(RUNTIME)]
     if cell.profile in ("claude", "judge"):
-        binary, creds = claude_binary(), claude_credentials()
+        binary = claude_binary()
         if not binary:
             raise SandboxError("claude CLI not found on PATH")
-        if not creds.is_file():
-            raise SandboxError("no Claude CLI login (~/.claude/.credentials.json is missing)")
-        a += ["--ro-bind", binary, str(BIN / "claude"),
-              "--ro-bind", str(creds), str(Path(home) / ".claude" / ".credentials.json")]
+        a += ["--ro-bind", binary, str(BIN / "claude")]
     if cell.profile == "codex":
-        release, auth = codex_release(), codex_auth()
+        release = codex_release()
         if not release:
             raise SandboxError("codex CLI not found on PATH")
-        if not auth.is_file():
-            raise SandboxError("no Codex CLI login (~/.codex/auth.json is missing)")
-        codex_home = Path(home) / CODEX_HOME_NAME
-        a += ["--ro-bind", str(release), str(CODEX), "--dir", str(codex_home),
-              "--ro-bind", str(auth), str(codex_home / "auth.json")]
+        a += ["--ro-bind", str(release), str(CODEX), "--dir", str(Path(home) / CODEX_HOME_NAME)]
+    # The login: a trimmed, in-memory view, passed through an fd with
+    # --ro-bind-data, so no refresh token reaches the cell and nothing is on
+    # disk or written back (A2). cred_fds carries the live fds at launch; a
+    # placeholder keeps the argv inspectable without them.
+    for dest, _data in credential_binds(cell):
+        fd = (cred_fds or {}).get(dest, -1)
+        a += ["--perms", "0400", "--ro-bind-data", str(fd), dest]
     a.append("--clearenv")
     for key, value in sorted(env_for(cell, base_env).items()):
         a += ["--setenv", key, value]
@@ -299,6 +385,22 @@ def kill_unit(unit: str) -> None:
                    capture_output=True, timeout=30)
 
 
+def _credential_fds(cell: Cell) -> tuple[dict[str, int], list[int]]:
+    """Open a read-only pipe per credential bind, writing the trimmed JSON into
+    it (it is small, so the write never blocks). Returns (dest -> read fd, all
+    read fds to pass and then close). The data is never on disk."""
+    fds: dict[str, int] = {}
+    for dest, data in credential_binds(cell):
+        r, w = os.pipe()
+        try:
+            os.write(w, data)
+        finally:
+            os.close(w)
+        os.set_inheritable(r, True)
+        fds[dest] = r
+    return fds, list(fds.values())
+
+
 def launch(command: list[str], *, cell: Cell, run_id: str, timeout_s: float,
            stdin: str | None = None) -> tuple[int | None, str, str, bool]:
     """(returncode, stdout, stderr, timed_out) for `command` inside the cell."""
@@ -306,15 +408,23 @@ def launch(command: list[str], *, cell: Cell, run_id: str, timeout_s: float,
     if why:
         raise SandboxError(f"cannot sandbox this run: {why}")
     unit = unit_name(run_id)
-    argv = unit_argv(unit, bwrap_argv(cell, command))
-    return run_unit(argv, unit=unit, timeout_s=timeout_s, stdin=stdin)
+    fds, to_pass = _credential_fds(cell)
+    try:
+        argv = unit_argv(unit, bwrap_argv(cell, command, cred_fds=fds))
+        return run_unit(argv, unit=unit, timeout_s=timeout_s, stdin=stdin, pass_fds=tuple(to_pass))
+    finally:
+        for fd in to_pass:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
 
 
 def run_unit(argv: list[str], *, unit: str | None, timeout_s: float, stdin: str | None = None,
-             env: dict | None = None, cwd=None) -> tuple[int | None, str, str, bool]:
+             env: dict | None = None, cwd=None, pass_fds: tuple = ()) -> tuple[int | None, str, str, bool]:
     proc = subprocess.Popen(argv, cwd=cwd or "/", env=env if env is not None else _launcher_env(), text=True,
                             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            start_new_session=True)
+                            start_new_session=True, pass_fds=pass_fds)
     try:
         out, err = proc.communicate(stdin, timeout=timeout_s)
         return proc.returncode, out, err, False

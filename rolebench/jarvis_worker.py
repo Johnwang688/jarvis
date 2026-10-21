@@ -10,9 +10,11 @@ code with no `.env` and no cases. Wraps `longbench.harness.run_jarvis` and adds:
 - **Every tier is the cell's model.** Sub-agent, compaction, review and the
   cheap tiers are pinned before import; delegation tools are not offered.
 - **A hard dollar ceiling.** `llm.chat` is wrapped: every reply, from any
-  caller, is added to a running total that is written to `spend.json` after
-  each call; a call is refused once the total reaches the budget, and the call
-  that crosses it raises. At most one call can overshoot.
+  caller, is added to a running total streamed on stdout (a `ROLEBENCH_SPEND`
+  line) after each call; a call is refused once the total reaches the budget,
+  the call whose *estimated* prompt cost would cross the budget is refused
+  before it is sent (one Kimi call can be ~$0.45), and the call that still
+  crosses it raises. At most one call can overshoot.
 - **The Moonshot pin only for Moonshot ids.** A call to a `moonshotai/` model
   is pinned to the provider the spec names (no fallbacks) and floored at its
   price; any other model is sent unpinned. A `moonshotai/` id the spec does not
@@ -31,26 +33,36 @@ TOOLS = ["read_file", "write_file", "edit_file", "list_dir", "find_files", "grep
 TIER_ENV = ("JARVIS_ORCHESTRATOR", "JARVIS_SUBAGENT", "JARVIS_COMPACTION", "JARVIS_REVIEW_MODEL",
             "JARVIS_BROWSER_REVIEW_MODEL", "JARVIS_WORKER", "JARVIS_CHEAP", "JARVIS_SPEECH_SUMMARY_MODEL")
 MOONSHOT_PREFIX = "moonshotai/"
+# The runner reads the running total from the worker's stdout, not a file.
+SPEND_PREFIX = "ROLEBENCH_SPEND "
 
 
 class BudgetExceeded(RuntimeError):
     pass
 
 
-def _atomic_write(path: Path, doc: dict) -> None:
-    tmp = path.with_name(f".{path.name}.tmp")
-    tmp.write_text(json.dumps(doc), encoding="utf-8")
-    os.replace(tmp, path)
+def _chars(messages) -> int:
+    total = 0
+    for m in messages or ():
+        c = m.get("content") if isinstance(m, dict) else None
+        if isinstance(c, str):
+            total += len(c)
+        elif isinstance(c, list):
+            total += sum(len(str(part.get("text", ""))) if isinstance(part, dict) else len(str(part)) for part in c)
+        if isinstance(m, dict) and m.get("tool_calls"):
+            total += len(json.dumps(m["tool_calls"]))
+    return total
 
 
 class Meter:
-    """The running total over every chat call in this process."""
+    """The running total over every chat call in this process. It is streamed on
+    stdout so the harness has it even if the cell is killed mid-call."""
 
-    def __init__(self, spec: dict, spend_path: Path | None):
+    def __init__(self, spec: dict, stream=None):
         self.budget = float(spec["budget_usd"])
         self.prices = {k.lower(): tuple(v) for k, v in (spec.get("prices") or {}).items()}
         self.pins = {k.lower(): v for k, v in (spec.get("pins") or {}).items()}
-        self.spend_path = spend_path
+        self.stream = stream if stream is not None else sys.stdout
         self.total, self.calls, self.models = 0.0, 0, {}
         self.tokens = {"prompt_tokens": 0, "completion_tokens": 0, "cached_tokens": 0}
 
@@ -63,9 +75,21 @@ class Meter:
             return self.pins[key]
         return ""
 
-    def before(self, model: str) -> str:
+    def before(self, model: str, messages=None, max_tokens: int | None = None) -> str:
         if self.total >= self.budget - 1e-12:
             raise BudgetExceeded(f"budget ${self.budget:.4f} spent (${self.total:.4f}); no further calls")
+        price = self.prices.get((model or "").strip().lower())
+        if price and messages is not None:
+            # Estimate at the bench's price, not the catalog's: at Kimi's $3/M a
+            # 150k-token prompt is ~$0.45. Refuse before sending if it would
+            # cross the budget. chars/4 is the loop's own rough token estimate.
+            est_prompt = _chars(messages) / 4
+            est_completion = max_tokens or 0
+            est = (est_prompt * price[0] + est_completion * price[1]) / 1e6
+            if self.total + est > self.budget + 1e-12:
+                raise BudgetExceeded(
+                    f"refused before sending: estimated ${est:.4f} for this call would cross the "
+                    f"${self.budget:.4f} budget (${self.total:.4f} already spent)")
         return self.route(model)
 
     def after(self, model: str, reply) -> None:
@@ -92,9 +116,12 @@ class Meter:
             raise BudgetExceeded(f"budget ${self.budget:.4f} reached (${self.total:.4f} after {self.calls} calls)")
 
     def write(self) -> None:
-        if self.spend_path is not None:
-            _atomic_write(self.spend_path, {"usd": round(self.total, 6), "calls": self.calls,
-                                            "models": self.models, "budget_usd": self.budget})
+        try:
+            self.stream.write(SPEND_PREFIX + json.dumps({"usd": round(self.total, 6), "calls": self.calls,
+                                                         "models": self.models, "budget_usd": self.budget}) + "\n")
+            self.stream.flush()
+        except (OSError, ValueError):
+            pass
 
 
 def prepare(spec: dict, key: str | None):
@@ -124,19 +151,26 @@ def prepare(spec: dict, key: str | None):
     return jconfig
 
 
+def _atomic_write(path: Path, doc: dict) -> None:
+    tmp = path.with_name(f".{path.name}.tmp")
+    tmp.write_text(json.dumps(doc), encoding="utf-8")
+    os.replace(tmp, path)
+
+
 def run(spec: dict, key: str | None, io_dir: Path) -> dict:
     prepare(spec, key)
     from jarvis import agent as agent_mod
     from jarvis import llm
     from longbench import harness as lh
 
-    meter = Meter(spec, io_dir / "spend.json")
+    meter = Meter(spec)                           # streams the running total on stdout
     meter.write()
     texts: list[str] = []
     real_chat, real_turn = llm.chat, agent_mod.Agent.run_turn
 
     def chat(model, messages, *args, **kwargs):
-        pin = meter.before(model)
+        max_tokens = args[3] if len(args) > 3 else kwargs.get("max_tokens")
+        pin = meter.before(model, messages, max_tokens)
         if len(args) > 5:                         # provider passed positionally
             args = list(args)
             args[5] = pin

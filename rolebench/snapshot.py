@@ -19,6 +19,7 @@ every harness git call also passes `-c core.hooksPath=/dev/null
 
 from __future__ import annotations
 
+import hashlib
 import os
 import secrets
 import shutil
@@ -187,15 +188,43 @@ def _fixtures(snap: Path, case: dict) -> None:
         shutil.copyfile(source, snap / rel)
 
 
-def ensure_node_modules(repo: Path | None = None) -> Path | None:
+def _lock_hash(hud: Path) -> str | None:
+    lock = hud / "package-lock.json"
+    try:
+        return hashlib.sha256(lock.read_bytes()).hexdigest() if lock.is_file() else None
+    except OSError:
+        return None
+
+
+def _lock_marker() -> Path:
+    return config.node_modules_dir().parent / "package-lock.sha256"
+
+
+def _read_marker() -> str | None:
+    try:
+        return _lock_marker().read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+
+
+def ensure_node_modules(repo: Path | None = None, want_lock: str | None = None) -> Path | None:
     """The bench's own copy of hud/node_modules, made once from the source
-    checkout (or the owner's), then only ever mounted read-only."""
+    checkout (or the owner's), then only ever mounted read-only. The source's
+    package-lock.json hash is recorded beside it; a copy that no longer matches
+    the case's lock is rebuilt rather than silently reused stale."""
     dest = config.node_modules_dir()
     if dest.is_dir():
-        return dest
+        if want_lock is None or _read_marker() == want_lock:
+            return dest
+        shutil.rmtree(dest, ignore_errors=True)       # stale against this case's lock
+        _lock_marker().unlink(missing_ok=True)
     for base in (repo or config.source_repo(), Path(config.real_home()) / "projects" / "Jarvis"):
-        nm = Path(base) / "hud" / "node_modules"
+        hud = Path(base) / "hud"
+        nm = hud / "node_modules"
         if nm.is_dir() and not nm.is_symlink():
+            lock = _lock_hash(hud)
+            if want_lock is not None and lock is not None and lock != want_lock:
+                continue                              # this source's lock is not the case's
             dest.parent.mkdir(parents=True, exist_ok=True)
             tmp = dest.with_name(dest.name + f".tmp-{os.getpid()}")
             shutil.rmtree(tmp, ignore_errors=True)
@@ -204,7 +233,11 @@ def ensure_node_modules(repo: Path | None = None) -> Path | None:
                 os.replace(tmp, dest)
             except OSError:
                 shutil.rmtree(tmp, ignore_errors=True)    # another process made it first
-            return dest if dest.is_dir() else None
+            if dest.is_dir():
+                if lock is not None:
+                    _lock_marker().write_text(lock, encoding="utf-8")
+                return dest
+            return None
     return None
 
 
@@ -225,7 +258,7 @@ def _link_node_modules(snap: Path, repo: Path) -> None:
     excluded from git so it is never part of a diff or a commit."""
     if not (snap / "hud").is_dir():
         return
-    nm = ensure_node_modules(repo)
+    nm = ensure_node_modules(repo, want_lock=_lock_hash(snap / "hud"))
     if nm is None:
         return
     _point_node_modules(snap, nm)
