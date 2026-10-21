@@ -1,0 +1,36 @@
+{
+ "id": "seed-unreadable",
+ "kind": "review",
+ "pr": 267,
+ "title": "v2 stores (seeded): a log read never fails on a line still being written",
+ "base": "8d73bead58cf297927cbe83f7917aa6a24ad7743",
+ "head": "d44018462733ff9d6c6f71fd401237822d8dfa2d",
+ "brief": "_read_lines reads an append-only JSONL log without the writer's lock, so a reader can land while a line is half written. Only the last line of a file that does not end in a newline may be treated as a write in progress and left out. Records end at the newline only. Tests: torn_read and separator_characters in tests/v2/stores_check.py.",
+ "focus": [
+  "correctness, including under concurrency and across the ordering of events",
+  "handling of untrusted input, and safety-boundary changes",
+  "test coverage of the new behaviour: would the tests fail without the change?",
+  "claims in the description against the evidence in the diff and tests"
+ ],
+ "suites": [
+  "tests/v2/stores_check.py",
+  "tests/v2/chat_relay_check.py",
+  "tests/v2/chat_reads_check.py",
+  "tests/v2/archive_check.py"
+ ],
+ "control": false,
+ "seeded": {
+  "description": "_read_lines returns an empty log for an unreadable file (PermissionError) instead of raising StoreError",
+  "patch": "diff --git a/jarvis/v2/stores.py b/jarvis/v2/stores.py\nindex 2b49e31..609034f 100644\n--- a/jarvis/v2/stores.py\n+++ b/jarvis/v2/stores.py\n@@ -112,7 +112,7 @@ def _read_lines(path: Path) -> list[dict[str, Any]]:\n     \"\"\"\n     try:\n         raw = path.read_bytes()\n-    except FileNotFoundError:\n+    except (FileNotFoundError, PermissionError):\n         return []\n     except OSError as exc:\n         raise StoreError(f\"{path}: {exc}\") from exc\n"
+ },
+ "ground_truth": [
+  {
+   "id": "gt1",
+   "severity": "MED",
+   "mechanism": "a log the process cannot read (PermissionError) is now reported as an empty log instead of a StoreError, so transcript, chat_read and every reader treat an unreadable history as no history; only a missing file was ever empty",
+   "location": "jarvis/v2/stores.py _read_lines (the except clause around path.read_bytes)",
+   "evidence": "in-process on the seeded tree: stores._read_lines on a log with mode 000 returns [] where the original raises StoreError (OSError branch); a missing file returns [] in both",
+   "source": "seeded bug, injected by P0 (clean head d440184)"
+  }
+ ]
+}
