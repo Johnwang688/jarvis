@@ -1254,7 +1254,14 @@ loops back to this LAN, such as a router's hairpin NAT, is not closed). **Accept
 exposure (lead, review of #284):** a pasta cell can send to any public address on
 TCP 443 and resolve any name through the host's resolver, so an agent could send
 the snapshot's repo code out; the only credential in a cell is the trimmed login
-(A2), never a real refresh token, a gh login or a key. The network and outside-the-snapshot audits are best-effort detection
+(A2), never a real refresh token, a gh login or a key. The outside-the-snapshot audit reads path *arguments* (shell words, the
+script of `sh -c`/`bash -lc`, quoted strings inside inline code), never words of prose or a
+commit message, and judges them by the cell's layout: the snapshot, the system trees, the
+cell's `/tmp` and, on the tmpfs HOME (mounted at the real home's path), only the trees that
+exist in the cell (its CLI's own state, such as the Jarvis loop's spill files, and the
+binds). Anything else under that path (`~/projects/Jarvis`, `~/.config/gh`) is flagged as
+an attempt; an absolute path whose top directory does not exist on the host (`/v.slice` from
+a sed pattern) names nothing and is not. The network and outside-the-snapshot audits are best-effort detection
 beside that, reported next to the score. Claude's tools are an allowlist
 (`Bash,Read,Edit,Write,Grep,Glob`; the judge `Read,Grep,Glob`), and the Jarvis
 cell offers no delegation tools.

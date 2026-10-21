@@ -76,6 +76,14 @@ GITCONFIG_TEXT = """\
 \tdirectory = *
 """
 
+# HOME-relative trees that are cell-private by construction (the tmpfs HOME
+# holds the real home's path string, but only these, the snapshot and the
+# binds below exist in it): each CLI's own state. A path under the cell's HOME
+# outside them names something on the host that is not mounted, which the
+# escape audit flags as an attempt.
+CELL_PRIVATE_HOME = {"claude": (".claude", ".claude.json"), "judge": (".claude", ".claude.json"),
+                     "codex": (CODEX_HOME_NAME,), "jarvis": (".local/share/jarvis",), "grade": ()}
+
 # Passed through from the harness's own environment when set; everything
 # else a cell sees is set below. Never CLAUDE_CODE_*, ANTHROPIC_*, OPENAI_*,
 # GH_*, SSH_AUTH_SOCK, DBUS_*, XDG_RUNTIME_DIR or any *_KEY / *_TOKEN.
@@ -192,6 +200,21 @@ def _python_links(venv: Path) -> list[str]:
             args += ["--symlink", os.path.realpath(target), str(target)]
         link, seen = target, seen + 1
     return args
+
+
+def cell_home_paths(profile: str) -> list[str]:
+    """Absolute paths under the cell's HOME that exist in the cell: the
+    profile's private trees and the binds every cell gets there (the
+    Playwright cache, the bench's node_modules, the venv's python links)."""
+    home = Path(sandbox_home())
+    out = [str(home / p) for p in CELL_PRIVATE_HOME.get(profile, ())]
+    out += [str(home / ".cache" / "ms-playwright"), str(config.node_modules_dir())]
+    try:
+        links = _python_links(config.venv_dir())
+        out += [links[i + 2] for i, a in enumerate(links) if a == "--symlink"]
+    except OSError:
+        pass
+    return out
 
 
 def _root_links() -> list[str]:

@@ -1497,6 +1497,25 @@ def test_parsers(root: Path) -> None:
           audit.escape_flags(R("c", "m", tool_calls=[("Edit", json.dumps({"file_path": f"{snap}/a.ts",
                                                                             "new_string": "import x from '../../lib'"}))]), snap) == [])
     check("audit: the lead's /tmp/claude-* is flagged", esc("ls /tmp/claude-1000/") != [])
+    home = sandbox.sandbox_home()
+    jv = lambda tool, args: audit.escape_flags(R("jarvis", "m", tool_calls=[(tool, json.dumps(args))]), snap)
+    cl = lambda cmd: audit.escape_flags(R("claude", "m", tool_calls=[("Bash", json.dumps({"command": cmd}))]), snap)
+    check("audit: the Jarvis loop's own spill file on the cell's tmpfs HOME is not an escape",
+          jv("read_file", {"path": f"{home}/.local/share/jarvis/spill/71b458b86b3448cf.txt"}) == []
+          and jv("run_command", {"command": "cat ~/.local/share/jarvis/spill/x.txt"}) == [])
+    check("audit: the cell's /tmp is in-cell", esc("python3 x.py > /tmp/out.txt 2>/dev/null && cat /tmp/out.txt") == [])
+    check("audit: words in prose, a commit message or a sed/grep pattern are not paths",
+          esc("sed -n '/v.slice/p' hud/src/state/browser.ts") == [] and esc("grep -n 'scope\\|/could' x.py") == []
+          and esc('git commit -qam "fix the cap: it could/should be 600, see /etc and /home notes"') == []
+          and esc("echo 'this /could be a problem'") == [])
+    check("audit: still flagged: ~/projects/Jarvis, ~/.config/gh/hosts.yml and /mnt/c, through any spelling",
+          jv("read_file", {"path": f"{home}/projects/Jarvis/CLAUDE.md"}) != [] and esc("cat ~/.config/gh/hosts.yml") != []
+          and esc("ls /mnt/c/Users") != [] and jv("run_command", {"command": "ls $HOME/projects/Jarvis"}) != [])
+    check("audit: a path inside a shell script or inline code is still seen",
+          esc("/bin/bash -lc \"git status && cat /home/johnw/projects/Jarvis/.env\"") != []
+          and esc("python3 -c \"print(open('/mnt/c/Users/x').read())\"") != [])
+    check("audit: one CLI's state dir is in-cell only for that CLI (the cell layout, not the path string)",
+          cl(f"cat {home}/.claude/settings.json") == [] and jv("read_file", {"path": f"{home}/.claude/settings.json"}) != [])
 
 
 # --- the flows, against fakes ---------------------------------------------------------
