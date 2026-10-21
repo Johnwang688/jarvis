@@ -67,6 +67,13 @@ def score(matches: list[dict], ground_truth: list[dict]) -> dict:
     }
 
 
+def scores(matches: list[dict], case: dict, gt: list[dict]) -> tuple[dict, dict | None]:
+    """(the score on the original key, the score on original + pooled or None
+    without a pooled key). A match on a pooled id counts only in the second."""
+    pooled = len(gt) > len(case["ground_truth"])
+    return score(matches, case["ground_truth"]), (score(matches, gt) if pooled else None)
+
+
 PROMPT = """\
 You are judging a code review against a known answer key. Several reviewers read the \
 same change; you see one review with no indication of who wrote it.
@@ -226,8 +233,9 @@ def judge_run(run_dir: Path, case: dict, judge_fn=default_judge, quota_override:
             (run_dir / "judge.json").write_text(json.dumps({"valid": False, "error": error, "attempts": attempts}), encoding="utf-8")
             raise JudgeError(f"judge output invalid twice: {error}")
     pooled_ids = [g["id"] for g in gt if g not in case["ground_truth"]]
-    doc = {"valid": True, "matches": matches, "score": score(matches, case["ground_truth"]),
-           "score_pooled": score(matches, gt) if pooled_ids else None, "attempts": attempts, "cost_usd": cost,
+    original_score, pooled_score = scores(matches, case, gt)
+    doc = {"valid": True, "matches": matches, "score": original_score,
+           "score_pooled": pooled_score, "attempts": attempts, "cost_usd": cost,
            "finding_ids": ids, "quota_guard": f"off: {quota_override}" if quota_override else "on",
            "quota_before": quota_before, "quota_after": quota.readings(["claude"], quota_reader),
            "effort": config.EFFORT["judge"],

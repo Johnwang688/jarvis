@@ -2316,9 +2316,10 @@ def test_pool(shas, root: Path) -> None:
               frun["score"] == judge.score([], base["ground_truth"]) and frun["score_pooled"] == jdoc["score_pooled"]
               and frun["score_pooled"] == judge.score([], cases.full_ground_truth(base)))
         later_pool = {"valid": True, "finding_ids": {"F1": 0}, "matches": [{"finding": "F1", "verdict": "match", "gt": "pool-p1"}]}
+        orig_s, pool_s = judge.scores(later_pool["matches"], base, cases.full_ground_truth(base))
         check("judge: a match on a pooled id counts in score_pooled only, never in the original-key score",
-              judge.score(later_pool["matches"], base["ground_truth"])["weighted_recall"] == 0.0
-              and judge.score(later_pool["matches"], cases.full_ground_truth(base))["weighted_recall"] > 0)
+              orig_s["weighted_recall"] == 0.0 and pool_s["weighted_recall"] > 0
+              and judge.scores([], base, base["ground_truth"])[1] is None)
         check("pool: the pooled key's evidence carries no reviewer text (untrusted, it reaches every later judge)",
               all("shown by a test" not in g["evidence"] and "race" not in g["evidence"] for g in key["ground_truth"]))
         check("judge: the judge's key text carries the pooled entries", "pool-p1" in judge.gt_text(cases.full_ground_truth(base)))
@@ -2382,6 +2383,19 @@ def test_pool(shas, root: Path) -> None:
         p5 = pool.pool_case(cid, pool_fn=clusterer(newone), quota_reader=cold)
         check("pool: after a lost pool, a new cluster never reuses a committed id",
               p5["clusters"][-1]["id"] not in ("p1", "p2") and int(p5["clusters"][-1]["id"][1:]) > 2)
+        # a pool file that lacks the committed clusters (an older copy): ids still start past the key
+        stale = {"case": cid, "clusters": [], "calls": []}
+        saved_pool = pool.pool_path(cid).read_text()
+        pool._atomic(pool.pool_path(cid), stale)
+        _fake_judged_run(runs, "I-run", cid, "haiku", [_finding("a third thing", "LOW", "x.py", 3)],
+                         [{"finding": "F1", "verdict": "valid-new", "severity": "LOW"}], {"F1": 0})
+        only_new = lambda prompt: json.dumps({"assign": [{"finding": v, "cluster": "new1"} for v in titles(prompt)],
+                                               "new_clusters": [{"id": "new1", "severity": "LOW", "mechanism": "x", "location": "x.py"}]})
+        p6 = pool.pool_case(cid, pool_fn=clusterer(only_new), quota_reader=cold)
+        committed = [int(g["id"][len("pool-p"):]) for g in cases.load_pooled(cid)["ground_truth"]]
+        check("pool: new ids start past every committed id even when the pool file lacks them",
+              p6["clusters"][0]["id"] not in ("p1", "p2") and int(p6["clusters"][0]["id"][1:]) > max(committed))
+        pool._atomic(pool.pool_path(cid), json.loads(saved_pool))
         # write_key never drops or silently redefines a committed id
         dropped = copy.deepcopy(p5)
         dropped["clusters"] = [c for c in dropped["clusters"] if c["id"] != "p2"]
