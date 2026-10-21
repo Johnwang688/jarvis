@@ -98,8 +98,10 @@ def venv_dir() -> Path:
 
 
 def node_modules_dir() -> Path:
-    """The bench's own copy of hud/node_modules, made once (never the owner's tree)."""
-    return home() / "hud-node_modules"
+    """The bench's own copy of hud/node_modules, made once (never the owner's tree).
+    The directory must be named node_modules: Node resolves a package's own
+    dependencies by walking up from its real path to a `node_modules` dir."""
+    return home() / "hud-deps" / "node_modules"
 
 
 def home() -> Path:

@@ -1167,29 +1167,90 @@ this repo's own history, not generic ability.
         --reviewer-harness claude --reviewer-model opus
     python -m rolebench report
 
-`--no-quota-guard` goes before the subcommand. Everything is written under
-`~/.cache/jarvis-lead/rolebench/` (`ROLEBENCH_HOME`): `snap/` (one isolated repo
-per run: `git archive` of the base, the PR diff as one commit, no remote, no
-later objects, the bench's own files stripped; an implement snapshot has the
-hidden tests removed, restored only in a grading copy), `runs/<run-id>/`
-(prompt, review text, findings, `run.json`, `judge.json`, `stdout.jsonl`),
-`log.jsonl` (one row per run), `spend.json` (the OpenRouter ledger: $10 total,
-$0.50 per run, a model that hits the per-run cap is aborted; Kimi K3 is
-budgeted at $3/$15 per M) and `report.md`.
+Everything is written under `~/.cache/jarvis-lead/rolebench/` (`ROLEBENCH_HOME`):
+`snap/<random>/` (one isolated repo per run, named at random so no path a model sees
+carries the case, model or run id: `git archive` of the base, the PR diff as one
+commit, no remote, no later objects, the bench's own files stripped, objects packed;
+an implement snapshot has the hidden tests removed, restored only in a grading copy),
+`runs/<run-id>/` (prompt, review text, findings, `run.json` with the snapshot path
+and the build-time base/change shas, `judge.json`, `stdout.jsonl`), `log.jsonl`,
+`spend.json` (the OpenRouter ledger), `hud-deps/node_modules` (the bench's own copy
+of the HUD's dependencies, made once, mounted read-only), `spotcheck/` and
+`spotcheck-keys/` (kept apart), `valid_new.jsonl` and `report.md`.
+`python -m rolebench clean --judged` removes the snapshots of judged and finished runs.
 
-Harnesses: `claude -p` (stream-json so tool calls reach the audit; strict MCP,
-project-only settings, no web, `gh`, `curl` or push), `codex exec` (workspace-write,
-network off, `--json` token counts) and the Jarvis loop (a subprocess worker around
-`longbench.harness.run_jarvis`; the key arrives on stdin and is gone from the
-environment before the model gets a shell). Every run is in a 3 GB no-swap
-`systemd-run` scope with a wall timeout that kills the process group, at most 3
-at once, and a scrubbed environment (no `GH_TOKEN`, `GITHUB_TOKEN`,
-`OPENROUTER_API_KEY`). A Claude or Codex cell is skipped at 75% of a quota window
-(one read-only GET of the daemon's `/usage`; unknown proceeds with a warning). The
-network and outside-the-snapshot audits are detection, reported next to the score.
+**Confinement (2026-10-20 fix round).** Every agent process (claude, codex and Jarvis
+reviewers and implementers, every fix round, the judge, and every suite run over
+agent-written code) runs in `rolebench.sandbox`: `systemd-run --user --scope
+--unit=rolebench-<id>` (3 GB, no swap) around `bwrap`. Mounted: `/usr` and its
+`/bin`/`/lib*` links, `/etc` read-only (`/etc/ssh` masked, `/etc/gitconfig` blanked),
+`/opt/google` (Chrome, for the Browser suites), the venv read-only at
+`/opt/rolebench/venv`, the work tree read-write (read-only for the judge), the bench's
+`node_modules` copy read-only (vite's cache dirs get a tmpfs each), and a tmpfs HOME
+and `/tmp`. Not mounted: the owner's checkout (so the venv's editable `.pth` points
+at nothing and no code imports from it), `~/.config/gh`, `~/.gitconfig`, `~/.ssh`,
+`/mnt` (but WSL's `resolv.conf` where the cell has network), `/run` (no user bus: a
+cell cannot ask systemd to start anything outside), and the lead's `/tmp/claude-*`.
+Logins: the claude cell and the judge get only `~/.claude/.credentials.json`,
+read-only; the codex cell gets its own `CODEX_HOME` on the tmpfs with only
+`auth.json` bound read-only (no owner config, skills, memories or `trusted` entries
+written back); the Jarvis cell gets no login (the OpenRouter key goes to the worker
+on stdin). A login that would expire within the run is refused, since a refresh in
+a read-only cell could rotate the token without saving it. The environment is an
+allowlist (`PATH`, `HOME`, `USER`, `LANG`/`LC_*`, `TERM`, `TZ`, `TMPDIR`, plus each
+CLI's own), with `GH_CONFIG_DIR` empty, a `GIT_CONFIG_GLOBAL` with no credential
+helper and no hooks, `GIT_CONFIG_NOSYSTEM=1`, `GIT_TERMINAL_PROMPT=0` and
+`GIT_ASKPASS=/bin/false`. A timeout kills the whole unit (setsid children too).
+Network: unshared for grading; shared for claude, codex, Jarvis and the judge, because
+their CLIs must reach their APIs. **That is the remaining exposure**: Claude's Bash and
+Jarvis's shell can reach the internet and this machine's loopback ports, and the
+claude cell's Bash can read the Claude login it was given (that file also holds an
+MCP login). Codex's own sandbox keeps its commands off the network. The network and
+outside-the-snapshot audits are best-effort detection beside that, reported next to
+the score. Claude's tools are an allowlist (`Bash,Read,Edit,Write,Grep,Glob`; the
+judge `Read,Grep,Glob`), and the Jarvis cell offers no delegation tools.
 
-The judge is `claude -p --model opus` over blinded findings plus the answer key, with
-read-only access to the pristine snapshot; its JSON is validated strictly (one retry),
-and `spotcheck.md` is a 20% sample for the lead, with the run key kept in a separate
-file. Free checks: `PYTHONPATH=<checkout> .venv/bin/python tests/rolebench_check.py`
-under the usual `systemd-run` memory cap.
+**The memory cap and its sibling.** A `systemd-run --user --scope` started inside
+another scope is a sibling of it under the user manager, not a child, so a nested
+scope escapes the outer cap. That is why the prompts no longer tell agents to wrap
+suites in `systemd-run` (a cell has no user bus anyway): everything an agent starts
+stays in its run's 3 GB unit. The harness's own test and grading runs each get their
+own unit.
+
+**Spend.** `spend.json` is read and written only under an exclusive lock, atomically;
+an unreadable ledger is "cap reached". A reservation is a pending entry in the file,
+so concurrent processes share one cap; a pending entry whose process died is charged
+in full. The Jarvis worker wraps `llm.chat`: every reply (any tier, any caller) is
+added to a running total written to the run's `spend.json` after each call; no call
+is made once the total reaches the budget, and the call that crosses it raises (at
+most one call can overshoot). A timeout, OOM or crash is charged its whole
+reservation. Every tier runs on the cell's model; only a `moonshotai/` id is pinned
+to Moonshot (no fallbacks) and floored at $3/$15 per M, and an unknown `moonshotai/`
+id is refused.
+
+**Quota.** A Claude or Codex cell is skipped at 75% of a quota window, and also when
+the quota is unknown (fail closed); the guard is checked again before every implement
+round and before the judge. `--no-quota-guard` (before the subcommand) also needs
+`ROLEBENCH_QUOTA_OVERRIDE=<reason>`, prints a warning, and marks every cell
+`quota_guard: "off: <reason>"` in `run.json`, the log and the report. **An agent
+never passes it without the owner's explicit OK for that run.**
+
+**Snapshot integrity.** After a reviewer the snapshot is checked against the
+build-time shas (moved HEAD, extra refs or commits are recorded), then reset to the
+change commit and pruned; an implementer's commits are folded back onto the base, so
+every diff is against the base. The harness's own git passes `-c core.hooksPath=/dev/null
+-c core.fsmonitor=false` and first rewrites `.git/config` and removes hooks and
+attributes an agent could have planted. Grading copies restore the hidden tests from
+the merged commit and the regression suites from the base, and an edit outside the
+case's scope (test files aside) blocks merge-ready.
+
+The judge is `claude -p --model opus` over shuffled, blinded findings plus the answer
+key, reading an export of the change commit (no `.git`, its diff beside it) in a
+random-named directory; its JSON is validated strictly (one retry). Judging a run
+again reuses its verdicts unless `--force`. `spotcheck.md` is a 20% sample for the
+lead, with the key in a separate directory. The report splits input, cached and
+output tokens (Codex's `input_tokens` include the cached ones), and lists
+overridden cells, runs that used more than one model and snapshots an agent changed.
+Free checks: `PYTHONPATH=<checkout> OPENROUTER_API_KEY=sk-dummy-not-a-key HOME=<tmp>
+.venv/bin/python tests/rolebench_check.py` under the usual `systemd-run` memory cap;
+they need `/usr/bin/bwrap` and run real cells with harmless probes.

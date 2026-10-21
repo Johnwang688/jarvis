@@ -15,6 +15,7 @@ import io
 import json
 import os
 import random
+import re
 import subprocess
 import sys
 import tempfile
@@ -941,7 +942,6 @@ def test_review_flow(shas, root: Path) -> None:
         med = [f for f in re.findall(r"(F\d) \[(\w+)\]", prompt)]
         return json.dumps({"matches": [{"finding": fid, "verdict": "match", "gt": "gt1" if sev == "MED" else "gt2"}
                                        for fid, sev in med]}), 0.05
-    import re
     doc = judge.judge_run(rdir, case, judge_fn=fake_judge, quota_override=NO_QUOTA, rng=random.Random(3))
     check("the judge is retried once on invalid JSON, then accepted", doc["attempts"] == 2 and doc["score"]["weighted_recall"] == 1.0)
     check("the judge prompt is blind: no model, harness or run id, but it has the key",

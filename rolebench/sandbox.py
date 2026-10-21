@@ -71,6 +71,9 @@ PASS_PREFIX = ("LC_",)
 PROFILES = ("claude", "codex", "jarvis", "grade", "judge")
 NETWORK = {"claude": True, "codex": True, "jarvis": True, "judge": True, "grade": False}
 MASK_ETC = ("/etc/ssh", "/etc/ssl/private")
+# Installed software outside /usr that suites use (the Browser suites' Chrome).
+SYSTEM_RO = ("/opt/google",)
+NODE_SCRATCH = (".vite", ".vite-temp", ".vitest", ".cache")
 
 
 class SandboxError(RuntimeError):
@@ -236,6 +239,12 @@ def bwrap_argv(cell: Cell, command: list[str], base_env: dict | None = None) -> 
     nm = config.node_modules_dir()
     if nm.is_dir():
         a += ["--ro-bind", str(nm), str(nm)]
+        for scratch in NODE_SCRATCH:              # vite/vitest write caches here: a per-cell tmpfs each
+            (nm / scratch).mkdir(exist_ok=True)
+            a += ["--tmpfs", str(nm / scratch)]
+    for extra in SYSTEM_RO:
+        if os.path.isdir(extra):
+            a += ["--ro-bind", extra, extra]
     a += ["--ro-bind" if cell.work_ro else "--bind", str(work), str(work)]
     if cell.io_dir is not None:
         a += ["--bind", str(Path(cell.io_dir).resolve()), str(IO)]
