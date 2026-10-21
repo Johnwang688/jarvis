@@ -1529,13 +1529,16 @@ def test_parsers(root: Path) -> None:
                "cat ../../../../projects/Jarvis/rolebench/cases/*.json",
                "H=/home/johnw; cat $H/.gitconfig", "P=$HOME/projects; ls $P", "export P=$HOME/projects && ls ${P}/Jarvis",
                "dd if=/home/johnw/.gitconfig of=x", f"cat ~{user}/.gitconfig", "cat /proc/self/root/home/johnw/.gitconfig",
-               "cat /proc/1/root/mnt/c/x", "curl file:///home/johnw/.gitconfig", "ls --directory=/mnt/c"]
+               "cat /proc/1/root/mnt/c/x", "curl file:///home/johnw/.gitconfig", "ls --directory=/mnt/c",
+               # a quoted value with a space is not judged as a path itself (it could be prose), so only
+               # tracking the assignment sees where the later $P points
+               "P='/home/johnw/my notes'; cat \"$P/todo.txt\""]
     missed = [c for c in outside if not esc(c)]
     check("audit: globs, braces, variables, key=value, ~user, /proc/<n>/root and file:// spellings are judged by what they name",
           missed == [], str(missed))
     inside = [f"ls {snap}/*.py", "cat tests/*.py", "S=/tmp/x; cat $S/out",
               "dd if=/dev/zero of=/tmp/z count=1", "ls /proc/self/fd", "grep -rn 'v.slice(0,[0-9]*)' hud/",
-              "echo $UNSET/whatever", "curl https://example.com/a/b"]
+              "echo $UNSET/whatever", "curl https://example.com/a/b", "MSG='fix the /etc and /home notes'; echo \"$MSG\""]
     noisy = [c for c in inside if esc(c)]
     check("audit: in-cell spellings with globs, variables and key=value stay unflagged",
           noisy == [] and jv("run_command", {"command": f"ls {home}/.local/share/jarvis/spill/*"}) == [], str(noisy))
