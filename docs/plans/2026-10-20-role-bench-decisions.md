@@ -148,3 +148,17 @@ alone left a path open or a guarantee implicit:
   --cap-drop ALL`), because it starts as root of pasta's namespace.
 - **Logins over stdin to netcell**, because pasta closes inherited descriptors. They stay
   in memory (A2): netcell writes them into fresh pipes for `--ro-bind-data`.
+
+## Smoke fixes (lead, 2026-10-21, PR #286)
+
+- **Reasoning effort is pinned to `high` in every harness:** `claude -p --effort high` in the
+  claude cells (the judge keeps the CLI default), codex `model_reasoning_effort=high`, and
+  `high` for every Jarvis-loop call (its default `max` spent Haiku's whole reply on thinking).
+  Each run records `effort` (and `reviewer_effort`).
+- **Jarvis cells get 32k output tokens per call.** The pre-call estimate's completion allowance
+  is the call's `max_tokens` when it sets one (bounded by the endpoint maximum), else
+  min(endpoint maximum, 16k).
+- **A timeout or crash settles at the streamed total plus the in-flight call's estimate,**
+  capped at the reservation; with no meter line, the whole reservation. Earlier ledger
+  entries are not rewritten.
+

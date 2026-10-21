@@ -503,7 +503,8 @@ def test_worker_env(root: Path) -> None:
         "print(json.dumps({'key': 'OPENROUTER_API_KEY=' in out, 'probe': 'ROLEBENCH_PROBE_SECRET' in out,\n"
         "  'api': cfg.api_key() == 'sk-dummy-from-stdin', 'tiers': sorted(set(cfg.TIERS.values())),\n"
         "  'tier': models.tier('compaction'), 'provider': cfg.CHAT_PROVIDER, 'max_tokens': cfg.MAX_TOKENS,\n"
-        "  'effort': [cfg.REASONING_EFFORT, models.effort_for('m/cell-model'), models.effort_for('openai/gpt-6-luna')]}))\n")
+        "  'effort': [cfg.REASONING_EFFORT, models.effort_for('m/cell-model'), models.effort_for('openai/gpt-6-luna'),\n"
+        "             models.effort_for('m/cell-model', {'m/cell-model': 'max'})]}))\n")
     home = root / "m1-home"
     home.mkdir()
     done = subprocess.run([config.python_bin(), "-c", driver], capture_output=True, text=True, cwd=str(rt),
@@ -518,8 +519,8 @@ def test_worker_env(root: Path) -> None:
     check("a child of the worker has no other key the .env import added", doc.get("probe") is False)
     check("the worker still holds the key from stdin, through config.api_key only", doc.get("api") is True)
     check("the worker gives every call 32k output tokens unless the caller sets its own", doc.get("max_tokens") == 32000)
-    check("the worker pins every call's reasoning effort to high (never the loop's default max)",
-          doc.get("effort") == ["high", "high", "high"])
+    check("the worker pins every call's reasoning effort to high (never the loop's default max, nor a roster pin)",
+          doc.get("effort") == ["high", "high", "high", "high"])
     check("every tier is pinned to the cell's model, and nothing is provider-pinned globally",
           doc.get("tiers") == ["m/cell-model"] and doc.get("tier") == "m/cell-model" and doc.get("provider") == "")
 

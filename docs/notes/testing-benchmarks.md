@@ -1276,15 +1276,18 @@ cost (prompt chars/4 plus `max_tokens`) at the model's **most expensive** OpenRo
 endpoint (`/api/v1/models/<id>/endpoints`, the highest prompt and completion price
 over every endpoint, cached a day under `prices/`; if a refetch fails a cache at most
 7 days old is used, raised 25%, else the model is refused), counting the tool schemas,
-a completion allowance (min of the call's `max_tokens`, the endpoint's maximum and
-16k: the endpoint maximum alone is ~1M on 1M-context models, which priced a first call
+a completion allowance (the call's `max_tokens` when it sets one, bounded by the
+endpoint's maximum; otherwise min of the endpoint's maximum and 16k: the endpoint maximum alone is ~1M on 1M-context models, which priced a first call
 at $2.27 and refused deepseek-v4.1-flash and glm-5.3-flash before sending) and Haiku 5.5's 5x price from 100k prompt tokens, would cross the budget is refused before it is
 sent, no call is made once the total reaches the budget, and the call that still
 crosses it raises (at most one can overshoot). The ledger settles on the usage
 OpenRouter reports (`llm._cost`, BYOK upstream cost included), never on the
-estimate; a timeout, OOM or crash is charged its whole reservation. Every tier runs
-on the cell's model with 16k output tokens per call (`jarvis.config.MAX_TOKENS` is 8192,
-which cut a Haiku review off before its findings block), nothing is provider-pinned, and every `moonshotai/` id is
+estimate; a timeout, OOM or crash settles at the worker's streamed total plus the
+pre-call estimate of the one call that may have been in flight (streamed before each call),
+capped at the reservation, and at the whole reservation when there is no meter line at all. Every tier runs
+on the cell's model with 32k output tokens per call (`jarvis.config.MAX_TOKENS` is 8192)
+and reasoning effort pinned to `high` (the loop's default `max` spent Haiku's whole reply on
+thinking, so its reviews came back empty), nothing is provider-pinned, and every `moonshotai/` id is
 refused (Kimi left the matrix, O-1 amendment 2026-10-21).
 
 **Quota.** A Claude or Codex cell is skipped at 75% of a quota window, and also when
