@@ -95,32 +95,68 @@ def literal(word: str, env: dict) -> str:
                 w = pwd.getpwnam(m.group(1)).pw_dir + w[m.end():]
             except KeyError:
                 pass
+    return _resolve(w)[0]
+
+
+def _resolve(w: str) -> tuple[str, bool]:
+    """(the literal prefix up to the first glob or unknown variable, whether it was cut)."""
     cut = GLOB.search(w)
     if cut:
         w = w[:cut.start()]
     while PROC_ROOT.match(w):
         w = PROC_ROOT.sub("", w, count=1) or "/"
-    return w
+    return w, bool(cut)
+
+
+def literal_cut(word: str, env: dict) -> bool:
+    """Whether `literal(word, env)` stopped at a glob or an unknown variable."""
+    w = VAR.sub(lambda m: env.get(m.group(1) or m.group(2), m.group(0)), word)
+    return bool(GLOB.search(w.replace("file://", "", 1)))
 
 
 def _is_candidate(lit: str) -> bool:
     return lit.startswith("/") or ".." in lit.split("/")
 
 
-def path_candidates(text: str, env: dict | None = None, depth: int = 0) -> list[tuple[str, str]]:
-    """(word, what it names) for the path arguments in one argument value:
-    shell words (and the value of every NAME=value, key=value or --opt=value
-    word, with simple assignments tracked so a later $NAME expands), the
-    script of `sh -c`/`bash -lc` (tokenized again), and quoted strings inside
-    inline code such as `python -c`. Prose in a quoted argument or a commit
-    message is never split into words."""
+PUNCT = set(";&|<>()")
+
+
+def path_candidates(text: str, env: dict | None = None, depth: int = 0,
+                    state: dict | None = None) -> list[tuple[str, str, str | None]]:
+    """(word, what it names, the shell's cwd there) for the path arguments in
+    one argument value: shell words (and the value of every NAME=value,
+    key=value or --opt=value word, with simple assignments tracked so a later
+    $NAME expands), the script of `sh -c`/`bash -lc` (tokenized again), and
+    quoted strings inside inline code such as `python -c`. Prose in a quoted
+    argument or a commit message is never split into words. `cd` moves the
+    tracked cwd (`state["cwd"]`, None once it cannot be told)."""
     env = env if env is not None else {}
+    state = state if state is not None else {"cwd": None}
     out = []
     tokens = _shell_tokens(text)
     for i, tok in enumerate(tokens):
         if (depth < 3 and i >= 2 and SHELL_C.match(tokens[i - 1])
                 and os.path.basename(tokens[i - 2]) in SHELLS):
-            out += path_candidates(tok, env, depth + 1)
+            out += path_candidates(tok, env, depth + 1, state)
+            continue
+        if tok == "cd":
+            nxt = tokens[i + 1] if i + 1 < len(tokens) and not set(tokens[i + 1]) <= PUNCT else ""
+            if not nxt:
+                state["cwd"] = env.get("HOME")
+            continue
+        if i >= 1 and tokens[i - 1] == "cd":
+            before = state.get("cwd")
+            lit = literal(tok, env)
+            if lit and _is_candidate(lit):
+                out.append((tok, lit, before))
+            if tok == "-" or literal_cut(tok, env):
+                state["cwd"] = None
+            elif lit.startswith("/"):
+                state["cwd"] = os.path.normpath(lit)
+            elif lit:
+                state["cwd"] = os.path.normpath(os.path.join(before, lit)) if before else None
+            else:
+                state["cwd"] = None
             continue
         words = [tok]
         m = ASSIGN.match(tok)
@@ -138,37 +174,46 @@ def path_candidates(text: str, env: dict | None = None, depth: int = 0) -> list[
             for w in inner:
                 lit = literal(w, env)
                 if lit and _is_candidate(lit):
-                    out.append((w, lit))
+                    out.append((w, lit, state.get("cwd")))
     return out
+
+
+def claude_task_dir(snap: Path | str) -> str:
+    """Where the Claude CLI keeps its own task output for a session in `snap`:
+    /tmp/claude-<uid>/<cwd with every non-alphanumeric as '-'>. In a cell
+    that is the cell's own tmpfs /tmp."""
+    return f"/tmp/claude-{os.getuid()}/" + re.sub(r"[^A-Za-z0-9]", "-", os.path.normpath(str(snap)))
 
 
 def escape_flags(result, snap: Path, extra_allowed: tuple[str, ...] = ()) -> list[str]:
     """Path arguments in tool calls that name something outside the cell:
 
+    - every path is resolved first: a relative one against the shell's cwd
+      as `cd` moved it (from the snapshot root; Claude's Bash keeps its cwd
+      from one call to the next, the other harnesses start each call there);
     - an absolute path is in-cell under the snapshot, the system/interpreter
-      trees, the cell's /tmp (but not the lead's /tmp/claude-*), or, under the
+      trees, the cell's /tmp (but not the lead's /tmp/claude-*: only a claude
+      cell's own task directory there, `claude_task_dir`), or, under the
       cell's HOME, only the trees that exist in the cell (its CLI's own state
       and the binds, `sandbox.cell_home_paths`): the cell's HOME is a tmpfs at
       the real home's path, so anything else there (`~/projects/Jarvis`,
       `~/.config/gh`) is an attempt on the host's copy;
     - an absolute path whose top-level directory does not exist on the host
-      (`/v.slice` from a sed or grep pattern) names nothing, so it is not one;
-    - a relative path whose `..` climbs out of the snapshot (taken relative to
-      the snapshot root) is."""
+      (`/v.slice` from a sed or grep pattern) names nothing, so it is not one."""
     snap_s = os.path.normpath(str(snap))
     roots = [snap_s, os.path.normpath(os.path.realpath(snap)), *map(os.path.normpath, extra_allowed)]
     home = os.path.normpath(sandbox.sandbox_home())
-    profile = {"claude": "claude", "codex": "codex", "jarvis": "jarvis"}.get(getattr(result, "harness", ""), "grade")
+    harness = getattr(result, "harness", "")
+    profile = {"claude": "claude", "codex": "codex", "jarvis": "jarvis"}.get(harness, "grade")
     in_home = [os.path.normpath(p) for p in sandbox.cell_home_paths(profile)]
+    own_tmp = claude_task_dir(snap_s) if harness == "claude" else None
     hits = []
+    state = {"cwd": snap_s}
     for name, args in result.tool_calls:
-        for raw, lit in path_candidates(scan_text(args), {"HOME": home}):
-            if not lit.startswith("/"):
-                path = os.path.normpath(os.path.join(snap_s, lit))
-                if not any(_within(path, r) for r in roots):
-                    hits.append(f"{name}: {raw[:160]}")
-                continue
-            path = os.path.normpath(lit)
+        if harness != "claude":
+            state = {"cwd": snap_s}               # codex and jarvis start every command at the snapshot
+        for raw, lit, cwd in path_candidates(scan_text(args), {"HOME": home}, state=state):
+            path = os.path.normpath(lit if lit.startswith("/") else os.path.join(cwd or snap_s, lit))
             if any(_within(path, r) for r in roots):
                 continue
             if _within(path, home):
@@ -176,7 +221,8 @@ def escape_flags(result, snap: Path, extra_allowed: tuple[str, ...] = ()) -> lis
                     hits.append(f"{name}: {raw[:160]}")
                 continue
             if path.startswith("/tmp/claude-"):
-                hits.append(f"{name}: {raw[:160]}")
+                if not (own_tmp and _within(path, own_tmp)):
+                    hits.append(f"{name}: {raw[:160]}")
                 continue
             if any(_within(path, a) for a in ALLOWED_ABS):
                 continue
