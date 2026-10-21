@@ -437,11 +437,19 @@ def test_worker_meter(root: Path) -> None:
     mi.before("a/b", [{"role": "user", "content": "x" * 400}], 1000)
     mid = mi.stream.getvalue()
     mi.after("a/b", R(0.001))
-    check("the meter streams the in-flight estimate before a call and clears it after",
-          runners.inflight_from_stdout(mid) > 0 and runners.inflight_from_stdout(mi.stream.getvalue()) == 0.0
+    lines = [json.loads(l[len(jarvis_worker.SPEND_PREFIX):]) for l in mi.stream.getvalue().splitlines()]
+    check("the meter streams the in-flight estimate before a call and 0 after it returns",
+          runners.inflight_from_stdout(mid) > 0 and lines[-2]["inflight"] > 0 and lines[-1]["inflight"] == 0.0
           and runners.inflight_from_stdout("noise") is None)
-    check("the cells pin effort: claude --effort high (not the judge), codex model_reasoning_effort=high",
-          (lambda a: "--effort" in a and a[a.index("--effort") + 1] == "high")(runners.claude_argv("haiku", 3)) and "--effort" not in runners.claude_argv("opus", 3, read_only=True)
+    P2 = jarvis_worker.SPEND_PREFIX
+    forged = (f'{P2}{{"usd": 0.1, "inflight": 0.08}}\n{P2}{{"usd": 0.1, "inflight": 0.0}}\n')
+    check("a forged later inflight:0 line cannot lower the in-flight charge (the max over every line)",
+          runners.inflight_from_stdout(forged) == 0.08
+          and flows.settle_amount(runners.RunResult("jarvis", "m", timed_out=True, spend_usd=runners.spend_from_stdout(forged),
+                                                    inflight_usd=runners.inflight_from_stdout(forged)), 0.5, "m")[0] == 0.18)
+    eff = lambda a: "--effort" in a and a[a.index("--effort") + 1] == "high"
+    check("effort is pinned: claude cells and the judge --effort high, codex model_reasoning_effort=high",
+          eff(runners.claude_argv("haiku", 3)) and eff(runners.claude_argv("opus", 3, read_only=True))
           and "model_reasoning_effort=high" in runners.codex_argv("gpt-6-luna", "/w", Path("/x")))
     check("the spec prices the cell's model at its endpoint price, the 16k default allowance and its tier; no pins",
           s["prices"] == {glm: _price(0.5, 2.0, 16_000)} and "pins" not in s
@@ -1514,8 +1522,28 @@ def test_parsers(root: Path) -> None:
     check("audit: a path inside a shell script or inline code is still seen",
           esc("/bin/bash -lc \"git status && cat /home/johnw/projects/Jarvis/.env\"") != []
           and esc("python3 -c \"print(open('/mnt/c/Users/x').read())\"") != [])
+    rh = config.real_home()
+    user = Path(rh).name
+    outside = ["ls /home/johnw/projects/*", "cat ~/projects/Jarvis/*.md", "ls ~/.config/gh/*", "cat ~/.config/gh/hosts.y?l",
+               "cat /home/*/.gitconfig", "ls /home/johnw/projects/{Jarvis,x}",
+               "cat ../../../../projects/Jarvis/rolebench/cases/*.json",
+               "H=/home/johnw; cat $H/.gitconfig", "P=$HOME/projects; ls $P", "export P=$HOME/projects && ls ${P}/Jarvis",
+               "dd if=/home/johnw/.gitconfig of=x", f"cat ~{user}/.gitconfig", "cat /proc/self/root/home/johnw/.gitconfig",
+               "cat /proc/1/root/mnt/c/x", "curl file:///home/johnw/.gitconfig", "ls --directory=/mnt/c"]
+    missed = [c for c in outside if not esc(c)]
+    check("audit: globs, braces, variables, key=value, ~user, /proc/<n>/root and file:// spellings are judged by what they name",
+          missed == [], str(missed))
+    inside = [f"ls {snap}/*.py", "cat tests/*.py", "S=/tmp/x; cat $S/out",
+              "dd if=/dev/zero of=/tmp/z count=1", "ls /proc/self/fd", "grep -rn 'v.slice(0,[0-9]*)' hud/",
+              "echo $UNSET/whatever", "curl https://example.com/a/b"]
+    noisy = [c for c in inside if esc(c)]
+    check("audit: in-cell spellings with globs, variables and key=value stay unflagged",
+          noisy == [] and jv("run_command", {"command": f"ls {home}/.local/share/jarvis/spill/*"}) == [], str(noisy))
+    check("audit: the host's Claude transcripts are an attempt even from a claude cell; its own login is not",
+          cl("ls ~/.claude/projects") != [] and cl("cat ~/.claude/settings.json") != []
+          and cl("cat ~/.claude/.credentials.json") == [] and cl("cat ~/.claude.json") == [])
     check("audit: one CLI's state dir is in-cell only for that CLI (the cell layout, not the path string)",
-          cl(f"cat {home}/.claude/settings.json") == [] and jv("read_file", {"path": f"{home}/.claude/settings.json"}) != [])
+          cl(f"cat {home}/.claude/todos/t.json") == [] and jv("read_file", {"path": f"{home}/.claude/todos/t.json"}) != [])
 
 
 # --- the flows, against fakes ---------------------------------------------------------
@@ -1830,6 +1858,7 @@ def test_review_flow(shas, root: Path) -> None:
                            judge.JudgeError)
     check("the ceiling is checked again before the judge's retry", retry_refused and jcalls == [1])
     jdoc = json.loads((rdir / "judge.json").read_text())
+    check("judge.json records the judge's effort", jdoc.get("effort") == "high")
     check("judge.json records the quota before and after", jdoc["quota_before"] == {"claude": {"5h": 10.0, "weekly": 20.0}}
           and jdoc["quota_after"] == {"claude": {"5h": 10.0, "weekly": 20.0}})
     always_bad = lambda prompt, cwd: ("{}", 0.0)
@@ -2066,7 +2095,13 @@ def test_cli_and_cells(shas, root: Path) -> None:
     check("CLI: --off-matrix parses, warns, runs it, and the run row records off_matrix: true",
           allowed_row["model"] == "openai/gpt-6-luna" and allowed_row["result"] == "ok" and allowed_row["off_matrix"] is True
           and seen_models == ["openai/gpt-6-luna"] and "--off-matrix" in merr.getvalue())
-    check("CLI: --timeout and --max-turns reach the runner (smoke caps)", seen_caps == [(77, 9)])
+    check("CLI: --timeout and --max-turns reach the runner (smoke caps) and the run row records them",
+          seen_caps == [(77, 9)] and allowed_row["timeout_s"] == 77 and allowed_row["max_turns"] == 9
+          and refused_row["timeout_s"] == config.REVIEW_TIMEOUT_S and refused_row["max_turns"] == config.REVIEW_MAX_TURNS)
+    with contextlib.redirect_stderr(io.StringIO()):
+        bad_caps = [raises(lambda a=a: main(off_argv + a), SystemExit)
+                    for a in (["--timeout", "0"], ["--max-turns", "-3"], ["--timeout", "x"])]
+    check("CLI: --timeout and --max-turns must be whole numbers above 0", all(bad_caps))
     help_text = __import__("rolebench.__main__", fromlist=["main"]).__doc__
     check("the docs say an agent never passes the override without the owner's OK", "never passes it" in help_text)
 

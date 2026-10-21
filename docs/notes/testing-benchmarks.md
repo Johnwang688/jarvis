@@ -1254,12 +1254,17 @@ loops back to this LAN, such as a router's hairpin NAT, is not closed). **Accept
 exposure (lead, review of #284):** a pasta cell can send to any public address on
 TCP 443 and resolve any name through the host's resolver, so an agent could send
 the snapshot's repo code out; the only credential in a cell is the trimmed login
-(A2), never a real refresh token, a gh login or a key. The outside-the-snapshot audit reads path *arguments* (shell words, the
-script of `sh -c`/`bash -lc`, quoted strings inside inline code), never words of prose or a
-commit message, and judges them by the cell's layout: the snapshot, the system trees, the
+(A2), never a real refresh token, a gh login or a key. The outside-the-snapshot audit reads path *arguments* (shell words, the value
+of every `NAME=value`/`key=value`/`--opt=value` word, the script of `sh -c`/`bash -lc`,
+quoted strings inside inline code), never words of prose or a commit message. Each is
+resolved first: simple `NAME=value` assignments are tracked so a later `$NAME` expands,
+`~` and `~user` expand, `file://` URLs and `/proc/<n>/root/X` become paths, and a word is
+judged by its literal prefix up to its first glob or unknown variable
+(`/home/u/projects/*` names `/home/u/projects/`). It is then judged by the cell's layout: the snapshot, the system trees, the
 cell's `/tmp` and, on the tmpfs HOME (mounted at the real home's path), only the trees that
-exist in the cell (its CLI's own state, such as the Jarvis loop's spill files, and the
-binds). Anything else under that path (`~/projects/Jarvis`, `~/.config/gh`) is flagged as
+exist in the cell (its CLI's own state: the trimmed login and the few files Claude Code
+keeps for itself, `~/.codex-rolebench`, the Jarvis loop's spill files; and the binds).
+`~/.claude/projects` (the host's transcripts) and the rest of `~/.claude` are flagged. Anything else under that path (`~/projects/Jarvis`, `~/.config/gh`) is flagged as
 an attempt; an absolute path whose top directory does not exist on the host (`/v.slice` from
 a sed pattern) names nothing and is not. The network and outside-the-snapshot audits are best-effort detection
 beside that, reported next to the score. Claude's tools are an allowlist
@@ -1290,8 +1295,8 @@ sent, no call is made once the total reaches the budget, and the call that still
 crosses it raises (at most one can overshoot). The ledger settles on the usage
 OpenRouter reports (`llm._cost`, BYOK upstream cost included), never on the
 estimate; a timeout, OOM or crash settles at the worker's streamed total plus the
-pre-call estimate of the one call that may have been in flight (streamed before each call),
-capped at the reservation, and at the whole reservation when there is no meter line at all. Every tier runs
+pre-call estimate of the one call that may have been in flight (streamed before each call; the largest one on any meter line, so a forged later line
+cannot lower it), capped at the reservation, and at the whole reservation when there is no meter line at all. Every tier runs
 on the cell's model with 32k output tokens per call (`jarvis.config.MAX_TOKENS` is 8192)
 and reasoning effort pinned to `high` (the loop's default `max` spent Haiku's whole reply on
 thinking, so its reviews came back empty), nothing is provider-pinned, and every `moonshotai/` id is

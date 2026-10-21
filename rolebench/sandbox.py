@@ -81,8 +81,14 @@ GITCONFIG_TEXT = """\
 # binds below exist in it): each CLI's own state. A path under the cell's HOME
 # outside them names something on the host that is not mounted, which the
 # escape audit flags as an attempt.
-CELL_PRIVATE_HOME = {"claude": (".claude", ".claude.json"), "judge": (".claude", ".claude.json"),
-                     "codex": (CODEX_HOME_NAME,), "jarvis": (".local/share/jarvis",), "grade": ()}
+# Narrow on purpose: the host has its own ~/.claude (transcripts under
+# projects/, settings, skills) and ~/.local/share/jarvis (sessions, memory), so
+# only the files the CLI keeps for itself in a cell count, and a reference to
+# the rest (`~/.claude/projects`) is flagged as an attempt on the host's copy.
+_CLAUDE_STATE = (".claude/.credentials.json", ".claude.json", ".claude/statsig", ".claude/todos",
+                 ".claude/shell-snapshots", ".claude/session-env")
+CELL_PRIVATE_HOME = {"claude": _CLAUDE_STATE, "judge": _CLAUDE_STATE, "codex": (CODEX_HOME_NAME,),
+                     "jarvis": (".local/share/jarvis/spill",), "grade": ()}
 
 # Passed through from the harness's own environment when set; everything
 # else a cell sees is set below. Never CLAUDE_CODE_*, ANTHROPIC_*, OPENAI_*,

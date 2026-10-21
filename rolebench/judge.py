@@ -227,6 +227,7 @@ def judge_run(run_dir: Path, case: dict, judge_fn=default_judge, quota_override:
     doc = {"valid": True, "matches": matches, "score": score(matches, gt), "attempts": attempts, "cost_usd": cost,
            "finding_ids": ids, "quota_guard": f"off: {quota_override}" if quota_override else "on",
            "quota_before": quota_before, "quota_after": quota.readings(["claude"], quota_reader),
+           "effort": config.EFFORT["judge"],
            "judged_at": time.strftime("%Y-%m-%dT%H:%M:%S")}
     (run_dir / "judge.json").write_text(json.dumps(doc, indent=1), encoding="utf-8")
     run["score"], run["judged"] = doc["score"], True

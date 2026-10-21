@@ -78,8 +78,8 @@ JARVIS_MAX_OUTPUT_TOKENS = 32_000
 # (lead, 2026-10-21): `claude -p --effort high`, codex
 # `model_reasoning_effort=high`, and the Jarvis loop's JARVIS_REASONING_EFFORT
 # (its default is `max`, which spent Haiku's whole reply on thinking). The
-# judge runs at the CLI's default.
-EFFORT = {"claude": "high", "codex": "high", "jarvis": "high"}
+# judge (claude -p, read-only) is pinned too.
+EFFORT = {"claude": "high", "codex": "high", "jarvis": "high", "judge": "high"}
 # Long-context price tiers the endpoints list does not carry: at or above
 # `threshold` prompt tokens the whole request is priced at `multiplier` times
 # (Haiku 5.5: 5x from 100k, CLAUDE.md's model default note).

@@ -140,8 +140,7 @@ def claude_argv(model: str, max_turns: int, *, read_only: bool = False, binary: 
             "--model", model, "--max-turns", str(max_turns), "--no-session-persistence",
             # the login, but no MCP servers and no user settings (the cell's HOME is empty anyway)
             "--strict-mcp-config", "--setting-sources", "project,local"]
-    if not read_only:                       # the cells; the judge keeps the CLI's default effort
-        argv += ["--effort", config.EFFORT["claude"]]
+    argv += ["--effort", config.EFFORT["judge" if read_only else "claude"]]
     if read_only:
         argv += ["--permission-mode", "default", "--tools", CLAUDE_READ_ONLY_TOOLS]
     else:
@@ -395,18 +394,21 @@ def spend_from_stdout(out: str) -> float | None:
 
 
 def inflight_from_stdout(out: str) -> float | None:
-    """The in-flight estimate on the last ROLEBENCH_SPEND line (the call the
-    worker had started and not yet seen return), or None without a meter line."""
+    """The largest in-flight estimate on any ROLEBENCH_SPEND line, or None
+    without a meter line. The max, never the last: a child of the worker can
+    append a forged line (through /proc/<ppid>/fd/1), and like the total, a
+    forged line may only raise the charge, never lower it."""
     from rolebench.jarvis_worker import SPEND_PREFIX
-    last = None
+    best = None
     for line in (out or "").splitlines():
         if line.startswith(SPEND_PREFIX):
             try:
                 v = json.loads(line[len(SPEND_PREFIX):]).get("inflight", 0.0)
-                last = float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and v >= 0 else 0.0
             except (ValueError, AttributeError):
                 continue
-    return last
+            v = float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and v >= 0 else 0.0
+            best = v if best is None else max(best, v)
+    return best
 
 
 REGISTRY = {"claude": run_claude, "codex": run_codex, "jarvis": run_jarvis}

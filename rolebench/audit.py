@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import json
 import os
+import pwd
 import re
+import urllib.parse
 from pathlib import Path
 
 from . import sandbox
@@ -18,8 +20,7 @@ from . import sandbox
 # Markers beyond swecompare's: the GitHub CLI and API host.
 EXTRA_NETWORK = ("gh ", "api.github")
 # Absolute trees every cell may name (system, interpreter, its own /tmp and /opt/rolebench).
-ALLOWED_ABS = ("/usr", "/bin", "/lib", "/lib64", "/dev/null", "/dev/stdout", "/dev/stderr", "/dev/stdin",
-               "/proc/self", "/tmp", str(sandbox.OPT))
+ALLOWED_ABS = ("/usr", "/bin", "/lib", "/lib64", "/dev", "/proc/self", "/tmp", str(sandbox.OPT))   # /dev: bwrap's own
 
 
 def network_flags(result) -> list[str]:
@@ -58,8 +59,11 @@ def _within(path: str, root: str) -> bool:
 
 SHELLS = {"sh", "bash", "dash", "zsh"}
 SHELL_C = re.compile(r"^-[a-z]*c$")
-PATH_TOKEN = re.compile(r"^(?:~|\$HOME|\$\{HOME\})?(?:/[\w.@+=,%~-]*)*$")
-RELATIVE_UP = re.compile(r"^(?:[\w.@+=,%-]+/)*\.\.(?:/[\w.@+=,%-]*)*$")
+ASSIGN = re.compile(r"^-*([A-Za-z_][\w.-]*)=(.*)$", re.S)        # NAME=value, key=value, --opt=value
+VAR = re.compile(r"\$\{(\w+)\}|\$(\w+)")
+TILDE_USER = re.compile(r"^~([a-z_][\w.-]*)(?=/|$)")
+PROC_ROOT = re.compile(r"^/proc/(?:self|thread-self|\d+)/root(?=/|$)")
+GLOB = re.compile(r"[*?\[{$]")
 QUOTED = re.compile(r"""(['"])([^'"\s]+?)\1""")
 
 
@@ -73,34 +77,69 @@ def _shell_tokens(text: str) -> list[str]:
         return text.split()
 
 
-def path_candidates(text: str, depth: int = 0) -> list[str]:
-    """Tokens of one argument value that are plausibly paths: whole shell
-    words with a path shape, the script of `sh -c`/`bash -lc` (tokenized
-    again), and quoted path-shaped strings inside code such as `python -c`.
-    Prose in a quoted argument or a commit message is never split into words."""
+def literal(word: str, env: dict) -> str:
+    """What a word names once its known variables, `~`, `~user`, `file://` and
+    `/proc/<n>/root` are resolved, cut at its first glob or unknown variable
+    (`/home/u/projects/*` names `/home/u/projects/`)."""
+    w = word
+    if w.startswith("file://"):
+        rest = urllib.parse.unquote(w[len("file://"):])
+        w = rest if rest.startswith("/") else ("/" + rest.split("/", 1)[1] if "/" in rest else "")
+    w = VAR.sub(lambda m: env.get(m.group(1) or m.group(2), m.group(0)), w)
+    if w == "~" or w.startswith("~/"):
+        w = env["HOME"] + w[1:]
+    else:
+        m = TILDE_USER.match(w)
+        if m:
+            try:
+                w = pwd.getpwnam(m.group(1)).pw_dir + w[m.end():]
+            except KeyError:
+                pass
+    cut = GLOB.search(w)
+    if cut:
+        w = w[:cut.start()]
+    while PROC_ROOT.match(w):
+        w = PROC_ROOT.sub("", w, count=1) or "/"
+    return w
+
+
+def _is_candidate(lit: str) -> bool:
+    return lit.startswith("/") or ".." in lit.split("/")
+
+
+def path_candidates(text: str, env: dict | None = None, depth: int = 0) -> list[tuple[str, str]]:
+    """(word, what it names) for the path arguments in one argument value:
+    shell words (and the value of every NAME=value, key=value or --opt=value
+    word, with simple assignments tracked so a later $NAME expands), the
+    script of `sh -c`/`bash -lc` (tokenized again), and quoted strings inside
+    inline code such as `python -c`. Prose in a quoted argument or a commit
+    message is never split into words."""
+    env = env if env is not None else {}
     out = []
     tokens = _shell_tokens(text)
     for i, tok in enumerate(tokens):
-        if tok.startswith("-") and "=" in tok:
-            tok = tok.split("=", 1)[1]
         if (depth < 3 and i >= 2 and SHELL_C.match(tokens[i - 1])
                 and os.path.basename(tokens[i - 2]) in SHELLS):
-            out += path_candidates(tok, depth + 1)
-        elif tok and not any(c.isspace() for c in tok) and (PATH_TOKEN.match(tok) and tok.startswith(("/", "~", "$"))
-                                                            or RELATIVE_UP.match(tok)):
-            out.append(tok)
-        else:
-            out += [m.group(2) for m in QUOTED.finditer(tok)
-                    if PATH_TOKEN.match(m.group(2)) and m.group(2).startswith(("/", "~", "$"))
-                    or RELATIVE_UP.match(m.group(2))]
+            out += path_candidates(tok, env, depth + 1)
+            continue
+        words = [tok]
+        m = ASSIGN.match(tok)
+        if m:
+            words = [m.group(2)]
+            if re.fullmatch(r"[A-Za-z_]\w*", m.group(1)) and not tok.startswith("-"):
+                env[m.group(1)] = literal(m.group(2), env) if not any(c.isspace() for c in m.group(2)) else m.group(2)
+        for word in words:
+            if any(c.isspace() for c in word):
+                inner = [q.group(2) for q in QUOTED.finditer(word)]
+            else:
+                inner = [word]
+                if not _is_candidate(literal(word, env)):
+                    inner = [q.group(2) for q in QUOTED.finditer(word)]
+            for w in inner:
+                lit = literal(w, env)
+                if lit and _is_candidate(lit):
+                    out.append((w, lit))
     return out
-
-
-def _expand_home(tok: str, home: str) -> str:
-    for prefix in ("${HOME}", "$HOME", "~"):
-        if tok == prefix or tok.startswith(prefix + "/"):
-            return home + tok[len(prefix):]
-    return tok
 
 
 def escape_flags(result, snap: Path, extra_allowed: tuple[str, ...] = ()) -> list[str]:
@@ -123,13 +162,13 @@ def escape_flags(result, snap: Path, extra_allowed: tuple[str, ...] = ()) -> lis
     in_home = [os.path.normpath(p) for p in sandbox.cell_home_paths(profile)]
     hits = []
     for name, args in result.tool_calls:
-        for raw in path_candidates(scan_text(args)):
-            if not raw.startswith(("/", "~", "$")):
-                path = os.path.normpath(os.path.join(snap_s, raw))
+        for raw, lit in path_candidates(scan_text(args), {"HOME": home}):
+            if not lit.startswith("/"):
+                path = os.path.normpath(os.path.join(snap_s, lit))
                 if not any(_within(path, r) for r in roots):
                     hits.append(f"{name}: {raw[:160]}")
                 continue
-            path = os.path.normpath(_expand_home(raw, home))
+            path = os.path.normpath(lit)
             if any(_within(path, r) for r in roots):
                 continue
             if _within(path, home):

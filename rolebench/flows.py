@@ -181,7 +181,9 @@ def review_step(deps: Deps, rcase: dict, snap: Path, *, harness: str, model: str
 def _base_run(deps: Deps, case: dict, harness: str, model: str, run_id: str, quota_before: dict | None = None) -> dict:
     run = {"run_id": run_id, "case_id": case["id"], "kind": case["kind"], "harness": harness, "model": model,
            "started": time.strftime("%Y-%m-%dT%H:%M:%S"), "quota_guard": deps.quota_state,
-           "off_matrix": deps.off_matrix, "effort": config.EFFORT.get(harness)}
+           "off_matrix": deps.off_matrix, "effort": config.EFFORT.get(harness),
+           "timeout_s": deps.implement_timeout if case["kind"] == "implement" else deps.review_timeout,
+           "max_turns": config.IMPLEMENT_MAX_TURNS if case["kind"] == "implement" else deps.review_max_turns}
     if quota_before is not None:
         run["quota_before"] = quota_before
     return run
