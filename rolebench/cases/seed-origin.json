@@ -1,0 +1,35 @@
+{
+ "id": "seed-origin",
+ "kind": "review",
+ "pr": 253,
+ "title": "CL-3 (seeded): one Host-header check for the v2 listeners",
+ "base": "aedcdd4b0852dc351423fc278a62f753aff80d1d",
+ "head": "847434e03cfc5f508968260570f69366500958dc",
+ "brief": "Card CL-3 of the duplicate-helper cleanup. Adds config.own_host_header(value, port), replacing seven inline copies of the DNS-rebinding Host check across the v2 listeners. The refactor is claimed to be behaviour-preserving: the helper accepts exactly what each copy accepted. Tests: tests/v2/own_host_header_check.py.",
+ "focus": [
+  "correctness, including under concurrency and across the ordering of events",
+  "handling of untrusted input, and safety-boundary changes",
+  "test coverage of the new behaviour: would the tests fail without the change?",
+  "claims in the description against the evidence in the diff and tests"
+ ],
+ "suites": [
+  "tests/v2/own_host_header_check.py",
+  "tests/v2/hud_backend_check.py",
+  "tests/v2/owner_read_check.py"
+ ],
+ "control": false,
+ "seeded": {
+  "description": "check_origin compares the request's Origin to the Host with startswith instead of equality",
+  "patch": "diff --git a/jarvis/v2/hud_api.py b/jarvis/v2/hud_api.py\nindex 8691ee0..bfa671c 100644\n--- a/jarvis/v2/hud_api.py\n+++ b/jarvis/v2/hud_api.py\n@@ -1411,7 +1411,7 @@ def check_origin(handler, *, preview=False):\n         fail(403, \"untrusted Host\")\n     if not preview:\n         origin = handler.headers.get(\"Origin\")\n-        if origin and origin != f\"http://{host}\":\n+        if origin and not origin.startswith(f\"http://{host}\"):\n             fail(403, \"cross-origin request refused\")\n         if handler.headers.get(\"Sec-Fetch-Site\") == \"cross-site\":\n             fail(403, \"cross-site request refused\")\n"
+ },
+ "ground_truth": [
+  {
+   "id": "gt1",
+   "severity": "MED",
+   "mechanism": "the cross-origin refusal in check_origin compares Origin to http://<host> with startswith, so an origin that merely begins with the listener's own origin (http://127.0.0.1:<port>.evil.example) is accepted as same-origin; a mutating request from such a page, with a correct Host, is no longer refused for being cross-origin",
+   "location": "jarvis/v2/hud_api.py check_origin (the origin comparison after the strict Host test)",
+   "evidence": "in-process on the seeded tree, with a handler whose Host is 127.0.0.1:8402 and command is POST: check_origin accepts Origin http://127.0.0.1:8402.evil.example (and the real origin), and still refuses http://evil.example; with the original equality test the prefixed origin is refused as cross-origin",
+   "source": "seeded bug, injected by P0 (clean head 847434e)"
+  }
+ ]
+}
