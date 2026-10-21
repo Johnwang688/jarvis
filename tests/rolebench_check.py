@@ -567,11 +567,15 @@ def test_sandbox_argv(root: Path) -> None:
         saved = sandbox.PASTA
         sandbox.PASTA = str(root / "no-such-pasta")
         try:
-            missing = all(raises(lambda p=p: sandbox.bwrap_argv(sandbox.Cell(p, work), ["true"]), sandbox.SandboxError)
+            missing = all(raises(lambda p=p: sandbox.cell_command(sandbox.Cell(p, work), ["true"]), sandbox.SandboxError)
                           for p in sandbox.NET_GATED)
         finally:
             sandbox.PASTA = saved
     check("with pasta missing, a claude/jarvis/judge cell is refused, never given the host netns", missing)
+    with env(ROLEBENCH_LOGIN_HOME=str(login), PATH=f"{fakebin}:{os.environ['PATH']}", ROLEBENCH_NET="pasta"):
+        bare = all(raises(lambda p=p: sandbox.bwrap_argv(sandbox.Cell(p, work), ["true"]), sandbox.SandboxError)
+                   for p in sandbox.NET_GATED)
+    check("a pasta cell's bwrap argv is never built bare (it would share the host netns outside pasta)", bare)
     check("claude, jarvis and judge cells run under pasta; codex and grade never do",
           all(composed[p][1] == "pasta" and composed[p][0][0] == sandbox.PASTA for p in sandbox.NET_GATED)
           and composed["codex"][1] == "host" and composed["grade"][1] == "none"
@@ -599,8 +603,8 @@ def test_sandbox_argv(root: Path) -> None:
           and policy["allow_tcp"] == [443] and policy["dns"] == sandbox.DNS_FORWARD)
     bw = inner[5:]
     check("bwrap in a pasta cell keeps pasta's netns but takes its own user namespace, the host uid and no capabilities",
-          "--share-net" in bw and "--unshare-user" in bw and bw[bw.index("--uid") + 1] == str(os.getuid())
-          and bw[bw.index("--cap-drop") + 1] == "ALL")
+          "--share-net" in bw and "--unshare-user" in bw and "--uid" in bw and bw[bw.index("--uid") + 1] == str(os.getuid())
+          and "--cap-drop" in bw and bw[bw.index("--cap-drop") + 1] == "ALL")
     check("a pasta cell's resolv.conf names only pasta's DNS forwarder, with no search list and no AAAA",
           sandbox.PASTA_RESOLV.splitlines()[0] == f"nameserver {sandbox.DNS_FORWARD}" and "search" not in sandbox.PASTA_RESOLV
           and "no-aaaa" in sandbox.PASTA_RESOLV)
@@ -798,6 +802,7 @@ if spec.get("names"):
     l = socket.socket(); l.bind(("127.0.0.1", 0)); l.listen(1)
     r["own_lo"] = conn("127.0.0.1", l.getsockname()[1])
     r["capeff"] = [x.split()[1] for x in open("/proc/self/status") if x.startswith("CapEff")][0]
+    r["uid"] = os.getuid()
     d = subprocess.run(["ip", "-4", "rule", "del", "pref", "120"], capture_output=True, text=True)
     r["rule_del"] = d.returncode
     r["prohibits"] = subprocess.run(["ip", "-4", "rule", "show"], capture_output=True, text=True).stdout.count("prohibit")
@@ -918,6 +923,7 @@ def test_pasta_network(root: Path) -> None:
     check("cell: any other port to the internet is prohibited (TCP 80)", all(cr.get(f"tcp80_{n}") == "EACCES" for n in spec["names"]))
     check("cell: UDP to the host's resolver directly is prohibited (DNS only through pasta's forwarder)", cr.get("udp_host53") == "EACCES")
     check("cell: its own loopback still works (suites can bind 127.0.0.1)", cr.get("own_lo") == "OPEN")
+    check("cell: the agent runs as the host's uid, not as root of pasta's namespace", cr.get("uid") == os.getuid())
     check("cell: no capabilities, so the egress rules cannot be changed from inside",
           cr.get("capeff") == "0000000000000000" and cr.get("rule_del") not in (None, 0) and cr.get("prohibits", 0) >= len(sandbox.BLOCK_V4) + 3)
     check("cell: no IPv6 address but loopback", cr.get("v6_addrs") == "" and cr.get("v6_link") == [])
@@ -930,6 +936,23 @@ def test_netcell_fail_closed(root: Path) -> None:
     """netcell runs nothing unless the policy is in place: outside a pasta
     namespace (no CAP_NET_ADMIN), with a bad policy, or with a truncated
     credential header it exits 125 and the command never starts."""
+    # an `ip` that reports success but installs nothing: the read-back must refuse
+    calls = []
+
+    def silent_ip(argv, **kw):
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, stdout="[]", stderr="")
+    saved_run, saved_conf = netcell.subprocess.run, netcell.IPV6_CONF
+    fake_conf = root / "fake-ipv6-conf"
+    (fake_conf / "eth0").mkdir(parents=True)                # never the host's /proc/sys
+    netcell.subprocess.run, netcell.IPV6_CONF = silent_ip, str(fake_conf)
+    try:
+        lied = raises(lambda: netcell.install({"dns": sandbox.DNS_FORWARD, "block": ["10.0.0.0/8"], "allow_tcp": [443]}),
+                      netcell.Refused)
+    finally:
+        netcell.subprocess.run, netcell.IPV6_CONF = saved_run, saved_conf
+    check("netcell reads its rules back and refuses when they are not in place, whatever `ip` said",
+          lied and any(a[1:3] == ["-j", "-4"] for a in calls))
     if os.geteuid() == 0:
         print("    (netcell fail-closed test skipped as root: it would touch the host's rules)")
         return

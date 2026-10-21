@@ -398,7 +398,13 @@ def bwrap_argv(cell: Cell, command: list[str], base_env: dict | None = None,
                cred_fds: dict[str, int] | None = None, net: str | None = None) -> list[str]:
     home = sandbox_home()
     work = Path(cell.work).resolve()
-    net = resolve_network(cell) if net is None else net
+    if net is None:
+        net = resolve_network(cell)
+        if net == "pasta":
+            # A pasta cell's bwrap shares the netns it starts in, so run bare it
+            # would share the host's: only cell_command, which wraps it in pasta
+            # and netcell, may build it.
+            raise SandboxError("a pasta cell's bwrap argv is built only by cell_command (inside pasta)")
     a = [BWRAP, "--unshare-all"]
     if net in ("host", "pasta"):
         a.append("--share-net")                   # the host's netns for codex; pasta's for the rest

@@ -35,6 +35,7 @@ import subprocess
 import sys
 
 IP = "/usr/sbin/ip"
+IPV6_CONF = "/proc/sys/net/ipv6/conf"   # the namespace's own (procfs follows the netns)
 EXIT_REFUSED = 125
 MAX_HEADER = 1 << 20
 
@@ -104,7 +105,7 @@ def install(policy: dict) -> None:
     done = subprocess.run([IP, "-6", "rule", "add", "pref", "100", "prohibit"], capture_output=True, text=True, timeout=10)
     if done.returncode and "not supported" not in done.stderr.lower():
         raise Refused(f"ip -6 rule failed: {done.stderr.strip()[:200]}")
-    conf = "/proc/sys/net/ipv6/conf"
+    conf = IPV6_CONF
     if os.path.isdir(conf):
         for name in sorted(os.listdir(conf)):
             if name in ("all", "lo"):
@@ -120,7 +121,7 @@ def verify(policy: dict) -> None:
     missing = [r for r in rules(policy) if _key(r) not in seen]
     if missing:
         raise Refused(f"{len(missing)} egress rule(s) are not in place, e.g. {missing[0]}")
-    conf = "/proc/sys/net/ipv6/conf"
+    conf = IPV6_CONF
     if os.path.isdir(conf):
         if (100, "", "", 0, "prohibit") not in _installed("-6"):
             raise Refused("the IPv6 prohibit rule is not in place")
