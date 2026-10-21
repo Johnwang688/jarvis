@@ -212,7 +212,7 @@ function Body(props: {
   const chain = vex.chain;
   useEffect(() => {
     if (!chain || chain.seq !== mine.current) return;
-    const tab = chain.phase === "download" || chain.phase === "pause" ? "download" : "build";
+    const tab = chain.phase === "download" || chain.phase === "pause" || chain.phase === "retry" ? "download" : "build";
     if (ui.tab !== tab) setUi({ tab });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chain?.seq, chain?.phase]);

@@ -137,6 +137,14 @@ COM_PORT = re.compile(r"COM[1-9][0-9]{0,2}", re.ASCII)
 # DOWNLOAD_PORT_SCAN characters (plain text), the first such line only.
 DOWNLOAD_PORT = re.compile(r"^[ \t]*Device:[ \t]*(COM[1-9][0-9]{0,2})[ \t]*$", re.ASCII | re.MULTILINE)
 DOWNLOAD_PORT_SCAN = 2048
+# The radio's download channel, as the vendor's VS Code extension asks for it
+# (extension 0.8.2026020401, `dist/extension.js`: `DownloadChannel.
+# vexDownloadchannel = "--chan 1 "`, offset 77665). It passes it when the
+# device it downloads through is a V5 controller and its "Controller Channel"
+# setting is "Download", the default (offset 399175); a brain on USB gets no
+# channel. Without it a download crawls over the controller's ordinary link
+# (156 KB in 80 s, live 2026-10-20), long enough for a radio dropout to fail it.
+DOWNLOAD_CHANNEL = ("--chan", "1")
 TEMPLATE_FILE = re.compile(r"(cpp|py)_v5_vsc_([a-z0-9_]+)\.zip", re.ASCII)
 TEMPLATE_ENTRIES = 200
 TEMPLATE_ENTRY_CAP = 1024 * 1024
@@ -710,10 +718,14 @@ def check_name(name) -> str:
     return name
 
 
-def download_argv(cfg: VexConfig, name: str, slot: int, binary_windows: str) -> list[str]:
-    """DishPy's download flags, exactly: `--name --slot --write --progress`."""
+def download_argv(cfg: VexConfig, name: str, slot: int, binary_windows: str,
+                  controller: bool = False) -> list[str]:
+    """DishPy's download flags, exactly: `--name --slot --write --progress`,
+    and the vendor extension's `--chan 1` before `--progress` when the
+    download goes through a V5 controller (`DOWNLOAD_CHANNEL`)."""
+    channel = list(DOWNLOAD_CHANNEL) if controller is True else []
     return [cfg.vexcom, "--name", check_name(name), "--slot", str(check_slot(slot)),
-            "--write", binary_windows, "--progress"]
+            "--write", binary_windows, *channel, "--progress"]
 
 
 def check_port(port) -> str:
@@ -1883,7 +1895,9 @@ class Vex:
             raise VexError("a build of this project is running; download when it has finished")
         try:
             found = self._fresh(root, detected.name)
-            argv = download_argv(cfg, name, slot, to_windows(str(Path(root) / found["path"])))
+            controller = self._controller_only()
+            argv = download_argv(cfg, name, slot, to_windows(str(Path(root) / found["path"])),
+                                 controller=controller)
         except BaseException:
             release()
             lock.release()
@@ -1947,7 +1961,8 @@ class Vex:
             record.terminal_id = terminal.id
         bind(terminal.id)
         self._announce("download")
-        LOG.info("vex download to slot %d started for project %s", slot, project.name)
+        LOG.info("vex download to slot %d started for project %s%s", slot, project.name,
+                 " (controller download channel)" if controller else "")
         def timeout():
             with self._lock:
                 if record.state != "running":
@@ -2037,9 +2052,15 @@ class Vex:
                 self._download_port = known = None
         if known is None:
             return None
+        return known[0] if self._controller_only() else None
+
+    def _controller_only(self) -> bool:
+        """Whether the last confirmed USB reading is a V5 controller and no
+        brain: the device a download or the brain terminal then goes through
+        is the controller, over its radio. An unknown reading is not."""
         with self.connection.lock:
             reading = (self.connection.value["controller"], self.connection.value["brain"])
-        return known[0] if reading == (True, False) else None
+        return reading == (True, False)
 
     def _usb_mark(self) -> tuple | None:
         """The USB reading's last confirmed change (`Connection`'s events: the

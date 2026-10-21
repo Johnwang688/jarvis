@@ -483,6 +483,20 @@ class BrainPort(DaemonBase):
                 self.reading(controller, brain)
                 self.assertEqual(self.brain_args(), (["--quiet", "--user"], None))
 
+    def test_a_controller_alone_downloads_on_the_radios_download_channel(self):
+        # The vendor extension's `--chan 1` (vex.DOWNLOAD_CHANNEL), only
+        # while the last confirmed reading is a controller and no brain.
+        self.reading(True, False)
+        self.download()
+        self.assertEqual(self.world.calls("vexcom")[-1]["argv"][-3:], ["--chan", "1", "--progress"])
+        for controller, brain in ((True, True), (False, True), (None, None), (True, None), (False, False)):
+            with self.subTest(controller=controller, brain=brain):
+                self.reading(controller, brain)
+                self.download()
+                argv = self.world.calls("vexcom")[-1]["argv"]
+                self.assertNotIn("--chan", argv)
+                self.assertEqual(argv[-1], "--progress")
+
     def test_a_failed_download_or_an_odd_port_line_teaches_nothing(self):
         self.reading(True, False)
         (self.world.vexcom_dir / "FAIL_DOWNLOAD").write_text("")

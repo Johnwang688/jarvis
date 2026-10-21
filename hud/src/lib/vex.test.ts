@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   BUILD_FIRST_CODE, actionState, type ActionRun, deviceBadge, staleNotes, tabBadge, brainView, type BrainInput, DOWNLOAD_NAME, DeviceLedger, OUTPUT_TABS, SETUP_COMMAND, buildLine, buildMark, chainLine,
   chainStepOf, chainSteps, chainStoppable, downloadButtonLabel, downloadMark, helpText, isSourcePath, isTrustedPress,
-  markGlyph, nextTab, outputTabFor, stillStale, stoppedDownloadNote,
+  markGlyph, nextTab, outputTabFor, stillStale, stoppedDownloadNote, retriesDownload, DOWNLOAD_RETRY_EXIT, DOWNLOAD_TRIES,
   defaultName, downloadLabel, downloadProgress, errorTarget, isExplicitClick, nameRefusal, needsBuildFirst, offersVex, parseBuild, parseDetection, parseDeviceRecord, parseLastBuilds,
   parseStatus, parseDownload, parseConnection, setupNote, slotRefusal, type BuildError, type BuildView,
 } from "./vex";
@@ -110,6 +110,11 @@ describe("one chain per window (M1): clean, build, download (owner decision 3)",
     expect(chainLine(c({ cancelled: true }))).toMatch(/^Stopping/);
     expect(chainLine(c({ label: "" }))).toBe("Building this project, then downloading to slot 3");
     expect(chainLine(c({ phase: "rebuild" }))).toBe("Rebuilding override from scratch, then downloading to slot 3");
+    expect(chainLine(c({ phase: "download", attempt: 1 }))).toBe("Downloading override to slot 3…");
+    expect(chainLine(c({ phase: "download", attempt: 2 }))).toBe("Downloading override to slot 3 (try 2 of 3)…");
+    expect(chainLine(c({ phase: "retry", attempt: 3 })))
+      .toBe("The radio link dropped: downloading override to slot 3 again in a moment (try 3 of 3)…");
+    expect(chainStepOf("retry")).toBe("download");
   });
 
   it("lists its steps: done, running, to come; a rebuild only once it happens", () => {
@@ -695,5 +700,20 @@ describe("brainView: the Brain tab's states (VX-UI-4a; owner decision 5)", () =>
         }
       }
     }
+  });
+});
+
+describe("which download ends are sent again (a radio dropout, 2026-10-20)", () => {
+  const end = (state: string, exit_code: number | null) => ({ state, exit_code });
+  it("only a failure with exit 4, and only before the last try", () => {
+    expect(DOWNLOAD_RETRY_EXIT).toBe(4);
+    expect(DOWNLOAD_TRIES).toBe(3);
+    expect(retriesDownload(end("failed", 4), 1)).toBe(true);
+    expect(retriesDownload(end("failed", 4), 2)).toBe(true);
+    expect(retriesDownload(end("failed", 4), 3)).toBe(false);
+    for (const code of [0, 1, 2, 3, 5, 6, 7, 8, 129, -15, null]) expect(retriesDownload(end("failed", code), 1)).toBe(false);
+    expect(retriesDownload(end("timed_out", 4), 1)).toBe(false);
+    expect(retriesDownload(end("succeeded", 4), 1)).toBe(false);
+    expect(retriesDownload(null, 1)).toBe(false);
   });
 });

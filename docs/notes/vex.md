@@ -987,3 +987,79 @@ Eight mutations each failed their checks:
 - no guard in the error handler (M5);
 - a superseded read returning at once;
 - the held-port poll not gated on a card (face).
+
+**Downloads through the controller: the radio's download channel, and a
+retry after a dropout (2026-10-20).** The owner, live: a download of the
+override project (156 KB) took about 80 s each time, and failed with exit 4
+again and again; "the connection is closing randomly sometimes when
+downloading and then reopening. This is a known issue with VEX radios",
+and a longer download is more likely to meet one. The vendor's VS Code
+extension does not suffer from it.
+
+What the extension does (0.8.2026020401, `dist/extension.js`, read for the
+flags it passes, as for `--usb` and `--user`):
+
+- `downloadUserProgram` runs `--name --slot --write <bin> --json [channel]
+  [--progress] <port>` and sends the whole binary every time. Nothing is
+  diffed.
+- The channel is `DownloadChannel.vexDownloadchannel = "--chan 1 "`
+  (offset 77665). It is passed when the device it downloads through is a V5
+  controller and the setting `vexrobotics.vexcode.Controller.Channel` is
+  "Download" (offset 399175). That is its default, and the owner has not
+  changed it. A brain on USB gets no channel. PROS switches the controller
+  to the same download channel before an upload.
+- Its exit-code table (offset 77619): 4 is "VEX Command Error"
+  (`vexErrorCmd`), 5 "VEX Device Error", 6 "VEX Port Error".
+
+The change:
+
+- **The daemon.** `download_argv(..., controller=True)` puts
+  `vex.DOWNLOAD_CHANNEL` (`--chan 1`) before `--progress`. `Vex.download`
+  passes it while the last confirmed USB reading is a controller and no
+  brain (`_controller_only`, the rule `_brain_port` already used). An
+  unknown reading, a brain, or both keep today's argv. The log line says
+  "(controller download channel)" when it was used.
+- **The HUD chain.** A download that ends `failed` with exit 4
+  (`retriesDownload`) is sent again by the same click's chain after
+  `DOWNLOAD_RETRY_WAIT_MS` (3 s), up to `DOWNLOAD_TRIES` (3) in all. The
+  line says "The radio link dropped: … again in a moment (try 2 of 3)", and
+  a final failure says "after 3 tries". Nothing else is retried: not 5, 6,
+  a timeout or Stop. Stop between tries sends nothing more and says the
+  slot is unknown. A card or a crash between tries drops the chain. The
+  brain terminal stays closed throughout, as before. The route never
+  retries; it is the owner's one click that sends the same binary again.
+
+Not done: a resumable or differential upload. vexcom has no such option,
+and vexide's differential upload needs a patcher in the robot program's
+own startup code (vexide-startup), which a VEX SDK program does not have.
+A gzip-compressing uploader on vexide's MIT `vex-v5-serial` (the binary
+gzips 156 KB to 79 KB) is the next step if the channel and retries are
+not enough. Not yet verified on the robot: the speed with `--chan 1`.
+
+Checks (fakes only; no vexcom, port or live daemon):
+
+- `vex_check` `Tables`: the exact argv with and without the channel; only
+  a real True asks for it.
+- `vex_output_check` `BrainPort`: a controller alone gets `--chan 1
+  --progress`; five other readings do not.
+- `lib/vex.test.ts`: the retry table (exit 4 only, before the third try)
+  and the chain's lines.
+- `state/vex.test.ts`: dropout then success (two sends), three dropouts
+  (three sends, "after 3 tries"), the wait, Stop between tries, a card
+  between tries, and exits 1, 5, 6 and 129 not retried. The old "exit 4"
+  end case is now exit 5.
+- `hud_v2_vex_check` 333/333: the exit-4 end case is exit 5, and a new
+  retry section (exit 4, the chain's two lines, success on try 2, two sends).
+
+Ten mutations each failed their checks:
+
+- no try cap;
+- any failure retried;
+- Stop between tries ignored;
+- a card between tries ignored;
+- no wait;
+- no retry;
+- a truthy non-True controller;
+- a controller with a brain;
+- the channel never passed;
+- the channel after `--progress`.

@@ -38,7 +38,8 @@ import { api } from "../api";
 import { terminals } from "../components/Terminal";
 import {
   DeviceLedger, LAST_BUILDS_KEY, chainStoppable, isSourcePath, isVexId, needsBuildFirst, nameRefusal,
-  parseDeviceRecord, parseLastBuilds, slotRefusal, stillStale, stoppedDownloadNote, type BuildView, type ChainStep,
+  parseDeviceRecord, parseLastBuilds, retriesDownload, slotRefusal, stillStale, stoppedDownloadNote,
+  DOWNLOAD_RETRY_WAIT_MS, DOWNLOAD_TRIES, type BuildView, type ChainStep,
   type ChainView, type Detection,
   type DeviceAction, type DeviceRead, type VexStatus, type DownloadView, type ConnectionView,
 } from "../lib/vex";
@@ -660,19 +661,51 @@ export class VexStore {
         this.say(projectId, sent.refused || "the download could not start");
         return;
       }
-      chain.downloadTerminal = sent.terminal;
-      // Stop pressed while the request was on its way: vexcom is closed at once.
-      if (chain.cancelled) {
-        this.stoppedDownloads.add(sent.id);
-        void this.stopProgram(sent.terminal);
-      } else void terminals.showProgram(sent.terminal);
-      const seeded: DownloadView = {id: sent.id, project_id: projectId, slot, state: "running",
-        terminal_id: sent.terminal, exit_code: null, output: "", started: new Date().toISOString(), ended: null};
-      this.patchRun(projectId, {download: seeded});
-      const end = await this.followDownload(projectId, sent.id);
-      if (chain.cancelled) droppedBy = "the download was stopped";
-      this.downloadEnded(projectId, slot, end, chain.cancelled);
-      if (end?.state === "succeeded") chain.done = [...chain.done, "download"];
+      // A radio dropout ends a download with exit 4 (`retriesDownload`): the
+      // same click's chain sends it again, up to DOWNLOAD_TRIES in all, after
+      // a moment for the radio to link again (the owner's ask, 2026-10-20).
+      // Nothing else is retried; Stop, a card or a crash ends the chain here too.
+      for (let attempt = 1; ; attempt++) {
+        if (!sent.terminal || !sent.id) return;
+        chain.downloadTerminal = sent.terminal;
+        // Stop pressed while the request was on its way: vexcom is closed at once.
+        if (chain.cancelled) {
+          this.stoppedDownloads.add(sent.id);
+          void this.stopProgram(sent.terminal);
+        } else void terminals.showProgram(sent.terminal);
+        const seeded: DownloadView = {id: sent.id, project_id: projectId, slot, state: "running",
+          terminal_id: sent.terminal, exit_code: null, output: "", started: new Date().toISOString(), ended: null};
+        this.patchRun(projectId, {download: seeded});
+        const end = await this.followDownload(projectId, sent.id);
+        if (chain.cancelled) droppedBy = "the download was stopped";
+        if (!chain.cancelled && retriesDownload(end, attempt) && holds()) {
+          chain.downloadTerminal = null;
+          chain.attempt = attempt + 1;
+          phase("retry");
+          this.say(projectId, `The download failed with exit 4 (the radio link dropped). Trying again `
+            + `(try ${attempt + 1} of ${DOWNLOAD_TRIES})…`, "info");
+          const until = Date.now() + DOWNLOAD_RETRY_WAIT_MS;
+          while (holds() && Date.now() < until) await sleep(200);
+          if (chain.cancelled) {
+            droppedBy = "the download was stopped";
+            // Stopped between tries: the last try's failure is what the slot holds.
+            this.downloadEnded(projectId, slot, end, true);
+            return;
+          }
+          if (!holds()) return dropped("before it tried the download again");
+          phase("download");
+          sent = await this.sendDownload(projectId, slot, name);
+          if (sent.refused || !sent.terminal || !sent.id) {
+            if (chain.cancelled) return dropped("");
+            this.say(projectId, sent.refused || "the download could not start");
+            return;
+          }
+          continue;
+        }
+        this.downloadEnded(projectId, slot, end, chain.cancelled, attempt);
+        if (end?.state === "succeeded") chain.done = [...chain.done, "download"];
+        break;
+      }
     } finally {
       if (this.chain === chain) this.chain = null;
       this.patchRun(projectId, { busy: null });
@@ -693,7 +726,7 @@ export class VexStore {
     }
   }
 
-  private downloadEnded(projectId: string, slot: number, d: DownloadView | null, stopped = false) {
+  private downloadEnded(projectId: string, slot: number, d: DownloadView | null, stopped = false, tries = 1) {
     // A download Stop cut off stays "stopped" however its end is learned —
     // the chain's own follow, or a later Check status (review NIT-2).
     stopped = stopped || (!!d && this.stoppedDownloads.has(d.id))
@@ -709,7 +742,7 @@ export class VexStore {
         : ok === true ? `Downloaded to slot ${slot}. Start it on the brain or the controller.`
         : !d ? "Download outcome unknown. Check status or its terminal; no download was retried."
           : d.state === "timed_out" ? "Download timed out. Check its terminal and the brain before retrying."
-            : `Download failed (exit ${d.exit_code ?? "unknown"}); check its terminal.`,
+            : `Download failed (exit ${d.exit_code ?? "unknown"})${tries > 1 ? ` after ${tries} tries` : ""}; check its terminal.`,
       noteTone: ok === true ? "ok" : ok === null && !cut ? "info" : "bad",
     });
   }
