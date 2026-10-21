@@ -335,6 +335,10 @@ def test_worker_meter(root: Path) -> None:
     check("the total covers every reply (sub-agents and compaction included) and is on the stream",
           abs(last_spend() - 0.11) < 1e-9 and m.calls == 2)
     check("no further call is made once the budget is spent", raises(lambda: m.before("x/y"), jarvis_worker.BudgetExceeded))
+    P = jarvis_worker.SPEND_PREFIX
+    check("the spend read from stdout is the max over every line, so a later lower line cannot undercharge",
+          runners.spend_from_stdout(f'{P}{{"usd": 0.3}}\nnoise\n{P}{{"usd": 0.1}}\n') == 0.3
+          and runners.spend_from_stdout("nothing") is None)
     # LOW: a call whose estimated prompt cost would cross the budget is refused before it is sent
     m4 = jarvis_worker.Meter(spec, stream=io.StringIO())
     big = [{"role": "user", "content": "x" * 600_000}]        # ~150k tokens; at $3/M ~$0.45 > $0.10
@@ -713,6 +717,74 @@ def test_fake_clis(root: Path) -> None:
           soon.error.startswith("refused:") and soon.crashed)
 
 
+CODEX_PROBE = """import socket, errno, json
+r = {{}}
+for key, fam, addr in (("tcp", socket.AF_INET, ("127.0.0.1", {port})), ("abstract", socket.AF_UNIX, "\\0{name}")):
+    try:
+        s = socket.socket(fam, socket.SOCK_STREAM); s.settimeout(3); s.connect(addr); r[key] = "connected"
+    except OSError as e:
+        r[key] = errno.errorcode.get(e.errno, str(e.errno))
+print("PROBE " + json.dumps(r))
+"""
+
+
+def test_codex_loopback(root: Path) -> None:
+    """Codex keeps the host netns, so its own sandbox is what keeps agent commands
+    off loopback. `codex sandbox` (no model call) in our codex cell: the
+    workspace profile gets EPERM on a throwaway TCP listener and a throwaway
+    abstract unix socket, with zero accepts; danger-full-access (the positive
+    control) connects to both, so the probe is sensitive."""
+    if sandbox.available():
+        return
+    if not sandbox.codex_release() or not Path(config.real_home(), ".codex", "auth.json").is_file():
+        print("    (codex loopback test skipped: no codex binary or login on this host)")
+        return
+    import secrets
+    import socket
+    work = root / "w-codexnet"
+    work.mkdir()
+    tcp = socket.socket()
+    tcp.bind(("127.0.0.1", 0))
+    tcp.listen(8)
+    name = "rolebench-probe-" + secrets.token_hex(4)
+    ab = socket.socket(socket.AF_UNIX)
+    ab.bind("\0" + name)
+    ab.listen(8)
+    (work / "probe.py").write_text(CODEX_PROBE.format(port=tcp.getsockname()[1], name=name))
+    seen = {}
+    try:
+        with env(ROLEBENCH_LOGIN_HOME=None):
+            for prof in (":workspace", ":danger-full-access"):
+                cmd = [str(sandbox.CODEX / "bin" / "codex"), "sandbox", "-P", prof, "-C", str(work), "--",
+                       "python3", str(work / "probe.py")]
+                rc, out, err, to = sandbox.launch(cmd, cell=sandbox.Cell("codex", work),
+                                                  run_id=f"check-cxnet-{prof.strip(':')}-{os.getpid()}", timeout_s=90)
+                line = next((l for l in out.splitlines() if l.startswith("PROBE ")), "PROBE {}")
+                accepts = {}
+                for key, sock in (("tcp", tcp), ("abstract", ab)):
+                    sock.setblocking(False)
+                    accepts[key] = 0
+                    while True:
+                        try:
+                            c, _ = sock.accept()
+                            c.close()
+                            accepts[key] += 1
+                        except BlockingIOError:
+                            break
+                seen[prof] = (json.loads(line[6:]), accepts, err.strip()[-200:])
+    finally:
+        tcp.close()
+        ab.close()
+    ws, ws_acc, ws_err = seen.get(":workspace", ({}, {}, ""))
+    dfa, dfa_acc, _ = seen.get(":danger-full-access", ({}, {}, ""))
+    print(f"    codex sandbox :workspace -> {ws} accepts {ws_acc}; :danger-full-access -> {dfa} accepts {dfa_acc}")
+    check("codex's workspace sandbox refuses loopback TCP and abstract unix sockets (EPERM, zero accepts)",
+          ws.get("tcp") == "EPERM" and ws.get("abstract") == "EPERM" and ws_acc == {"tcp": 0, "abstract": 0}, ws_err)
+    check("positive control: danger-full-access connects to both, so the probe is sensitive",
+          dfa.get("tcp") == "connected" and dfa.get("abstract") == "connected"
+          and dfa_acc.get("tcp", 0) >= 1 and dfa_acc.get("abstract", 0) >= 1)
+
+
 def test_jarvis_in_cell(root: Path) -> None:
     """The real jarvis adapter and worker in a cell with no network: a zero
     budget means the first chat call is refused, so nothing leaves the machine."""
@@ -882,6 +954,8 @@ def test_parsers(root: Path) -> None:
     check("codex flags: workspace-write, network off, json, the sandbox's binary",
           "workspace-write" in cx and "sandbox_workspace_write.network_access=false" in cx and "--json" in cx
           and cx[0] == str(sandbox.CODEX / "bin" / "codex"))
+    check("codex's approval policy is pinned to never (no escalated, unsandboxed re-run)",
+          'approval_policy="never"' in cx and cx[cx.index('approval_policy="never"') - 1] == "-c")
 
     snap = Path("/home/rolebench-audit/cache/snap/0123456789abcdef")    # outside /tmp, which a cell may use
     R = runners.RunResult
@@ -1004,6 +1078,43 @@ def test_review_flow(shas, root: Path) -> None:
                      quota_override="owner said so")
     uo = flows.review_once(ovr, case, harness="claude", model="opus")
     check("the owner's override runs it, recorded in run.json", uo["result"] == "ok" and uo["quota_guard"] == "off: owner said so")
+    # The up-front refusal keys on "is this the real runner". Stand-ins take the
+    # real runners' places in REGISTRY, so the identity check sees "real" while
+    # a regression (refusal removed) can only ever reach a harmless fake.
+    reads, ran = [], []
+
+    def standin(name):
+        def run(**kw):
+            ran.append(name)
+            return runners.RunResult(name, kw.get("model", ""), text=REVIEW_REPLY)
+        return run
+    saved = dict(runners.REGISTRY)
+    saved_claude = runners.run_claude
+    try:
+        for k in ("claude", "codex", "jarvis"):
+            runners.REGISTRY[k] = standin(k)
+        runners.run_claude = standin("judge")
+        for net in ("none", None, "pasta"):
+            with env(ROLEBENCH_NET=net):
+                led = spend.Ledger(root / f"led-net-{net}.json", 10, 0.5)
+                real = flows.Deps(runners=dict(runners.REGISTRY), repo=shas["repo"], ledger=led,
+                                  quota_reader=lambda p: reads.append(p) or {"windows": [{"used_percent": 1}]})
+                rc = flows.review_once(real, case, harness="claude", model="haiku")
+                rj = flows.review_once(real, case, harness="jarvis", model="openai/gpt-6-luna")
+                ri = flows.implement_once(real, impl_case(shas), harness="codex", model="m", reviewer_harness="claude",
+                                          reviewer_model="opus")
+            check(f"ROLEBENCH_NET={net}: real claude/jarvis runs (and a claude reviewer) are refused up front",
+                  all(r["result"] == "skipped" and "no API access until pasta is wired" in r["reason"] for r in (rc, rj, ri)))
+            check(f"ROLEBENCH_NET={net}: refused before any quota read, ledger reservation or runner call",
+                  reads == [] and ran == [] and not (root / f"led-net-{net}.json").exists())
+        with env(ROLEBENCH_NET="none"):
+            jr = raises(lambda: judge.judge_run(config.runs_root() / run["run_id"], case, force=True,
+                                                quota_reader=lambda p: reads.append(p)), judge.JudgeError)
+        check("the real judge is refused up front too, before its quota read", jr and reads == [] and ran == [])
+    finally:
+        runners.REGISTRY.clear()
+        runners.REGISTRY.update(saved)
+        runners.run_claude = saved_claude
     bad = flows.Deps(runners={"claude": fake_runner(["no block at all"])}, quota_override=NO_QUOTA, repo=shas["repo"])
     check("a reply without a findings block is 'unparsed'", flows.review_once(bad, case, harness="claude", model="x")["result"] == "unparsed")
 
@@ -1274,6 +1385,7 @@ def main() -> int:
         test_sandbox_escape(root)
         test_unit_kill(root)
         test_fake_clis(root)
+        test_codex_loopback(root)
         test_jarvis_in_cell(root)
         test_review_flow(shas, root)
         test_implement_flow(shas, root)

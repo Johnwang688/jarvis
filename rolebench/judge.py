@@ -18,7 +18,7 @@ import shutil
 import time
 from pathlib import Path
 
-from . import config, quota, runners, snapshot
+from . import config, quota, runners, sandbox, snapshot
 
 VERDICTS = ("match", "valid-new", "invalid", "nit")
 
@@ -184,6 +184,10 @@ def judge_run(run_dir: Path, case: dict, judge_fn=default_judge, quota_override:
     bad = (run.get("hygiene") or {}).get("after_reset")
     if bad:
         raise JudgeError(f"the snapshot was not clean after the reviewer: {bad}")
+    if judge_fn is default_judge:
+        refusal = sandbox.agent_net_refusal("judge")
+        if refusal:
+            raise JudgeError(refusal)
     if not quota_override:
         skip, note = quota.guard("claude", quota_reader)
         if skip:

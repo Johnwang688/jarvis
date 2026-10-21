@@ -264,6 +264,16 @@ def env_for(cell: Cell, base: dict | None = None) -> dict:
     return env
 
 
+def agent_net_refusal(profile: str) -> str | None:
+    """Why an agent run on this profile is refused before any quota read or
+    ledger reservation, or None. claude, jarvis and judge cells have no API
+    access until pasta is wired: `none` has no network, `pasta` is not wired."""
+    if profile not in NET_GATED:
+        return None
+    mode = net_mode() or "unset"
+    return f"ROLEBENCH_NET={mode}: no API access until pasta is wired ({profile} runs are refused)"
+
+
 def resolve_network(cell: Cell) -> bool:
     """Whether this cell gets a shared host netns, enforcing A1's gate.
 

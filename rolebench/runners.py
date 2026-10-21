@@ -205,6 +205,8 @@ def codex_argv(model: str, cwd, last_message: Path, binary: str | None = None) -
     return [binary or str(sandbox.CODEX / "bin" / "codex"), "exec", "-m", model,
             "-c", "model_reasoning_effort=high",
             "-s", "workspace-write", "-c", "sandbox_workspace_write.network_access=false",
+            # never ask, so a command is never re-run escalated (unsandboxed, on the host netns)
+            "-c", 'approval_policy="never"',
             "--json", "--skip-git-repo-check", "--ephemeral", "-C", str(cwd),
             "-o", str(last_message), "-"]
 
@@ -359,7 +361,8 @@ def run_jarvis(*, model, prompt, cwd, timeout_s, max_turns, budget_usd=None, out
 
 
 def spend_from_stdout(out: str) -> float | None:
-    """The last ROLEBENCH_SPEND line's total, or None."""
+    """The highest ROLEBENCH_SPEND total on stdout, or None (a line injected
+    into the stream can only raise the charge, never lower it)."""
     from rolebench.jarvis_worker import SPEND_PREFIX
     usd = None
     for line in (out or "").splitlines():
@@ -367,7 +370,7 @@ def spend_from_stdout(out: str) -> float | None:
             try:
                 v = json.loads(line[len(SPEND_PREFIX):]).get("usd")
                 if isinstance(v, (int, float)) and not isinstance(v, bool):
-                    usd = float(v)
+                    usd = float(v) if usd is None else max(usd, float(v))
             except (ValueError, AttributeError):
                 continue
     return usd

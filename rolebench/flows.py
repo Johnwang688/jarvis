@@ -60,6 +60,13 @@ class Skipped(Exception):
     pass
 
 
+def _net_refusal(deps: Deps, harness: str) -> str | None:
+    """The up-front A1 refusal, for the real runners only (fakes never reach a network)."""
+    if deps.runners.get(harness) is not runners.REGISTRY.get(harness):
+        return None
+    return sandbox.agent_net_refusal(harness)
+
+
 def _guard(deps: Deps, harness: str, notes: list[str]) -> None:
     if deps.quota_override:
         return
@@ -171,6 +178,9 @@ def review_once(deps: Deps, case: dict, *, harness: str, model: str, n: int = 1)
     notes: list[str] = []
     snap = None
     hygiene: dict = {}
+    refusal = _net_refusal(deps, harness)
+    if refusal:
+        return _skipped(deps, case, harness, model, run_id, out_dir, refusal, started)
     try:
         _guard(deps, harness, notes)
         snap = snapshot.build(case, run_id, repo=deps.repo)
@@ -276,6 +286,9 @@ def implement_once(deps: Deps, case: dict, *, harness: str, model: str, reviewer
     out_dir = config.runs_root() / run_id
     out_dir.mkdir(parents=True, exist_ok=True)
     notes: list[str] = []
+    refusal = _net_refusal(deps, harness) or _net_refusal(deps, reviewer_harness)
+    if refusal:
+        return _skipped(deps, case, harness, model, run_id, out_dir, refusal, started)
     try:
         _guard(deps, harness, notes)
         if reviewer_harness != harness:
