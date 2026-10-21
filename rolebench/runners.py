@@ -50,7 +50,9 @@ class RunResult:
     error: str = ""
     timed_out: bool = False
     crashed: bool = False          # no result from the agent process at all
+    truncated: bool = False        # the final reply still ended at the output limit (finish_reason=length)
     spend_usd: float | None = None  # the jarvis worker's own running total
+    inflight_usd: float | None = None  # the pre-call estimate of the call it last started (0 once it returned)
     models_used: list = field(default_factory=list)
     raw: dict = field(default_factory=dict)
 
@@ -59,7 +61,7 @@ class RunResult:
                 "tokens": self.tokens, "token_split": token_split(self.harness, self.tokens),
                 "turns": self.turns, "tool_calls": len(self.tool_calls),
                 "duration_s": round(self.duration_s, 1), "error": self.error, "timed_out": self.timed_out,
-                "crashed": self.crashed, "spend_usd": self.spend_usd, "models_used": self.models_used,
+                "crashed": self.crashed, "truncated": self.truncated, "spend_usd": self.spend_usd, "models_used": self.models_used,
                 "multi_model": len(self.models_used) > 1}
 
 
@@ -138,6 +140,7 @@ def claude_argv(model: str, max_turns: int, *, read_only: bool = False, binary: 
             "--model", model, "--max-turns", str(max_turns), "--no-session-persistence",
             # the login, but no MCP servers and no user settings (the cell's HOME is empty anyway)
             "--strict-mcp-config", "--setting-sources", "project,local"]
+    argv += ["--effort", config.EFFORT["judge" if read_only else "claude"]]
     if read_only:
         argv += ["--permission-mode", "default", "--tools", CLAUDE_READ_ONLY_TOOLS]
     else:
@@ -203,7 +206,7 @@ def run_claude(*, model, prompt, cwd, timeout_s, max_turns, budget_usd=None, out
 
 def codex_argv(model: str, cwd, last_message: Path, binary: str | None = None) -> list[str]:
     return [binary or str(sandbox.CODEX / "bin" / "codex"), "exec", "-m", model,
-            "-c", "model_reasoning_effort=high",
+            "-c", f"model_reasoning_effort={config.EFFORT['codex']}",
             "-s", "workspace-write", "-c", "sandbox_workspace_write.network_access=false",
             # never ask, so a command is never re-run escalated (unsandboxed, on the host netns)
             "-c", 'approval_policy="never"',
@@ -312,6 +315,8 @@ def jarvis_spec(*, model, prompt, cwd, max_turns, budget_usd, price_fn=None) -> 
             "prices": {model: {"prompt": prompt_usd, "completion": completion_usd,
                                "max_completion": max_out or config.DEFAULT_COMPLETION_ALLOWANCE,
                                "tier": list(tier) if tier else None}},
+            "max_output_tokens": config.JARVIS_MAX_OUTPUT_TOKENS, "allowance_cap": config.DEFAULT_COMPLETION_ALLOWANCE,
+            "effort": config.EFFORT["jarvis"],
             "io": str(sandbox.IO)}
 
 
@@ -344,6 +349,7 @@ def run_jarvis(*, model, prompt, cwd, timeout_s, max_turns, budget_usd=None, out
         return RunResult("jarvis", model, error=f"sandbox: {exc}", crashed=True)
     result = RunResult("jarvis", model)
     result.spend_usd = spend_from_stdout(out)         # streamed, so it survives a kill mid-call
+    result.inflight_usd = inflight_from_stdout(out)
     try:
         if (io / "result.json").is_symlink():
             raise OSError("result.json is a symlink")
@@ -352,6 +358,8 @@ def run_jarvis(*, model, prompt, cwd, timeout_s, max_turns, budget_usd=None, out
         result.tokens, result.turns = doc.get("tokens", {}), doc.get("turns")
         result.tool_calls = [tuple(c) for c in doc.get("tool_calls", [])]
         result.error = doc.get("error", "")
+        result.truncated = bool(doc.get("truncated"))
+        result.raw["efforts_sent"] = doc.get("efforts_sent")
         result.models_used = sorted(doc.get("models") or {})
         if isinstance(doc.get("spend_usd"), (int, float)):
             result.spend_usd = max(result.spend_usd or 0.0, float(doc["spend_usd"]))
@@ -383,6 +391,24 @@ def spend_from_stdout(out: str) -> float | None:
             except (ValueError, AttributeError):
                 continue
     return usd
+
+
+def inflight_from_stdout(out: str) -> float | None:
+    """The largest in-flight estimate on any ROLEBENCH_SPEND line, or None
+    without a meter line. The max, never the last: a child of the worker can
+    append a forged line (through /proc/<ppid>/fd/1), and like the total, a
+    forged line may only raise the charge, never lower it."""
+    from rolebench.jarvis_worker import SPEND_PREFIX
+    best = None
+    for line in (out or "").splitlines():
+        if line.startswith(SPEND_PREFIX):
+            try:
+                v = json.loads(line[len(SPEND_PREFIX):]).get("inflight", 0.0)
+            except (ValueError, AttributeError):
+                continue
+            v = float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and v >= 0 else 0.0
+            best = v if best is None else max(best, v)
+    return best
 
 
 REGISTRY = {"claude": run_claude, "codex": run_codex, "jarvis": run_jarvis}

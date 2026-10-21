@@ -338,6 +338,13 @@ def test_spend(root: Path) -> None:
           flows.settle_amount(big, 0.5, "anthropic/claude-haiku-5.5")[0] == 0.002)
     check("a timeout does not abort the model (its spend is unknown, not measured over the cap)",
           flows.settle_amount(to, 0.5, "m")[1] is False)
+    tm = runners.RunResult("jarvis", "m", timed_out=True, spend_usd=0.2, inflight_usd=0.05)
+    cm = runners.RunResult("jarvis", "m", crashed=True, spend_usd=0.48, inflight_usd=0.1)
+    zero = runners.RunResult("jarvis", "m", timed_out=True, spend_usd=0.0, inflight_usd=0.0)
+    check("a timeout with a meter settles at streamed total + the in-flight estimate",
+          abs(flows.settle_amount(tm, 0.5, "m")[0] - 0.25) < 1e-9 and "in-flight" in flows.settle_amount(tm, 0.5, "m")[2])
+    check("that settlement is capped at the reservation, and a crash with a meter is settled the same way",
+          flows.settle_amount(cm, 0.5, "m")[0] == 0.5 and flows.settle_amount(zero, 0.5, "m")[0] == 0.0)
 
 
 def _price(prompt, completion, max_completion=1000, tier=None):
@@ -346,7 +353,7 @@ def _price(prompt, completion, max_completion=1000, tier=None):
 
 def test_worker_meter(root: Path) -> None:
     luna, glm, haiku = "openai/gpt-6-luna", "z-ai/glm-5.3-flash", "anthropic/claude-haiku-5.5"
-    spec = {"budget_usd": 0.1, "prices": {luna: _price(1.0, 5.0), "x/y": _price(1.0, 5.0), glm: _price(3.0, 15.0)}}
+    spec = {"budget_usd": 0.1, "prices": {luna: _price(1.0, 5.0), "x/y": _price(1.0, 5.0), glm: _price(3.0, 15.0, 1_000_000)}}
     out = io.StringIO()
     m = jarvis_worker.Meter(spec, stream=out)
 
@@ -371,7 +378,7 @@ def test_worker_meter(root: Path) -> None:
     m4 = jarvis_worker.Meter(spec, stream=io.StringIO())
     big = [{"role": "user", "content": "x" * 600_000}]        # ~150k tokens; at $3/M ~$0.45 > $0.10
     refused = raises(lambda: m4.before(glm, big, max_tokens=1), jarvis_worker.BudgetExceeded)
-    small_ok = m4.before(glm, [{"role": "user", "content": "hi"}], max_tokens=1) == ""
+    small_ok = not raises(lambda: m4.before(glm, [{"role": "user", "content": "hi"}], max_tokens=1))
     out_refused = raises(lambda: m4.before(glm, [{"role": "user", "content": "hi"}], max_tokens=10_000), jarvis_worker.BudgetExceeded)
     check("a call whose estimate (prompt and max output) at the spec's price would cross the budget is refused before sending",
           refused and small_ok and out_refused and m4.calls == 0)
@@ -385,10 +392,22 @@ def test_worker_meter(root: Path) -> None:
     naive = (len(msgs[0]["content"]) / 4) * 0.10 / 1e6       # what the old estimate saw: messages only, no output
     check("tool schemas count toward the prompt estimate (chars/4)",
           abs(e["prompt_tokens"] - (380_000 + len(json.dumps(tools))) / 4) < 1e-6 and e["prompt_tokens"] > 100_000)
-    check("with no max_tokens the completion allowance is the endpoint's maximum (else 16k)",
-          e["completion_tokens"] == 64_000
-          and jarvis_worker.Meter({"budget_usd": 1, "prices": {"a/b": {"prompt": 1, "completion": 1, "tier": None}}},
-                                  stream=io.StringIO()).estimate("a/b", [], None)["completion_tokens"] == 16_000)
+    ma = jarvis_worker.Meter({"budget_usd": 1, "prices": {"a/b": _price(1, 1, 4000), "c/d": {"prompt": 1, "completion": 1, "tier": None}}},
+                             stream=io.StringIO())
+    check("the completion allowance: the call's max_tokens when set (bounded by the endpoint), else min(endpoint max, 16k)",
+          e["completion_tokens"] == 16_000 and ma.estimate("a/b", [], None)["completion_tokens"] == 4000
+          and ma.estimate("a/b", [], 2400)["completion_tokens"] == 2400
+          and ma.estimate("a/b", [], 32_000)["completion_tokens"] == 4000
+          and ma.estimate("c/d", [], None)["completion_tokens"] == 16_000
+          and ma.estimate("c/d", [], 32_000)["completion_tokens"] == 32_000)
+    # a 1M-context matrix model: its endpoint lists ~1M max completion; the first call must cost cents, not dollars
+    mm = jarvis_worker.Meter({"budget_usd": 0.5, "prices": {"z-ai/glm-5.3-flash": _price(0.6, 2.2, 1_000_000)}}, stream=io.StringIO())
+    first = mm.estimate("z-ai/glm-5.3-flash", [{"role": "user", "content": "x" * 80_000}], 16_000, tools)
+    unset = mm.estimate("z-ai/glm-5.3-flash", [{"role": "user", "content": "x" * 80_000}], None, tools)
+    check("a 1M-context model's first call estimates at cents, not dollars (with and without max_tokens)",
+          first["usd"] < 0.10 and unset["usd"] < 0.10, f"${first['usd']:.4f} / ${unset['usd']:.4f}")
+    check("and it is not refused before sending",
+          not raises(lambda: mm.before("z-ai/glm-5.3-flash", [{"role": "user", "content": "x" * 80_000}], 16_000, tools)))
     check("Haiku 5.5 is priced at 5x for the whole request from 100k prompt tokens",
           e["multiplier"] == 5.0 and mh.estimate(haiku, [{"role": "user", "content": "x" * 1000}], 10)["multiplier"] == 1.0)
     check("one call crosses the per-run budget only once tools, the allowance and the tier are counted",
@@ -411,6 +430,27 @@ def test_worker_meter(root: Path) -> None:
           not {"run_subagent", "run_fleet"} & set(jarvis_worker.TOOLS) and "run_command" in jarvis_worker.TOOLS)
     s = runners.jarvis_spec(model=glm, prompt="p", cwd="/w", max_turns=3, budget_usd=0.2, price_fn=lambda m: (0.5, 2.0, None))
     s2 = runners.jarvis_spec(model=haiku, prompt="p", cwd="/w", max_turns=3, budget_usd=None)
+    check("the spec gives the Jarvis cell 32k output tokens per call, the 16k allowance cap and effort high",
+          s["max_output_tokens"] == 32_000 == config.JARVIS_MAX_OUTPUT_TOKENS and s["allowance_cap"] == 16_000
+          and s["effort"] == "high")
+    mi = jarvis_worker.Meter({"budget_usd": 1, "prices": {"a/b": _price(1, 1, 4000)}}, stream=io.StringIO())
+    mi.before("a/b", [{"role": "user", "content": "x" * 400}], 1000)
+    mid = mi.stream.getvalue()
+    mi.after("a/b", R(0.001))
+    lines = [json.loads(l[len(jarvis_worker.SPEND_PREFIX):]) for l in mi.stream.getvalue().splitlines()]
+    check("the meter streams the in-flight estimate before a call and 0 after it returns",
+          runners.inflight_from_stdout(mid) > 0 and lines[-2]["inflight"] > 0 and lines[-1]["inflight"] == 0.0
+          and runners.inflight_from_stdout("noise") is None)
+    P2 = jarvis_worker.SPEND_PREFIX
+    forged = (f'{P2}{{"usd": 0.1, "inflight": 0.08}}\n{P2}{{"usd": 0.1, "inflight": 0.0}}\n')
+    check("a forged later inflight:0 line cannot lower the in-flight charge (the max over every line)",
+          runners.inflight_from_stdout(forged) == 0.08
+          and flows.settle_amount(runners.RunResult("jarvis", "m", timed_out=True, spend_usd=runners.spend_from_stdout(forged),
+                                                    inflight_usd=runners.inflight_from_stdout(forged)), 0.5, "m")[0] == 0.18)
+    eff = lambda a: "--effort" in a and a[a.index("--effort") + 1] == "high"
+    check("effort is pinned: claude cells and the judge --effort high, codex model_reasoning_effort=high",
+          eff(runners.claude_argv("haiku", 3)) and eff(runners.claude_argv("opus", 3, read_only=True))
+          and "model_reasoning_effort=high" in runners.codex_argv("gpt-6-luna", "/w", Path("/x")))
     check("the spec prices the cell's model at its endpoint price, the 16k default allowance and its tier; no pins",
           s["prices"] == {glm: _price(0.5, 2.0, 16_000)} and "pins" not in s
           and s2["prices"] == {haiku: _price(1.0, 5.0, 8000, [100_000, 5.0])} and s2["budget_usd"] == config.PER_RUN_CAP_USD)
@@ -465,12 +505,14 @@ def test_worker_env(root: Path) -> None:
     driver = (
         "import json, os, subprocess, sys\n"
         "from rolebench import jarvis_worker as w\n"
-        "cfg = w.prepare({'model': 'm/cell-model'}, 'sk-dummy-from-stdin')\n"
+        "cfg = w.prepare({'model': 'm/cell-model', 'max_output_tokens': 32000, 'effort': 'high'}, 'sk-dummy-from-stdin')\n"
         "out = subprocess.run(['env'], capture_output=True, text=True).stdout\n"
         "from jarvis import models\n"
         "print(json.dumps({'key': 'OPENROUTER_API_KEY=' in out, 'probe': 'ROLEBENCH_PROBE_SECRET' in out,\n"
         "  'api': cfg.api_key() == 'sk-dummy-from-stdin', 'tiers': sorted(set(cfg.TIERS.values())),\n"
-        "  'tier': models.tier('compaction'), 'provider': cfg.CHAT_PROVIDER}))\n")
+        "  'tier': models.tier('compaction'), 'provider': cfg.CHAT_PROVIDER, 'max_tokens': cfg.MAX_TOKENS,\n"
+        "  'effort': [cfg.REASONING_EFFORT, models.effort_for('m/cell-model'), models.effort_for('openai/gpt-6-luna'),\n"
+        "             models.effort_for('m/cell-model', {'m/cell-model': 'max'})]}))\n")
     home = root / "m1-home"
     home.mkdir()
     done = subprocess.run([config.python_bin(), "-c", driver], capture_output=True, text=True, cwd=str(rt),
@@ -484,6 +526,9 @@ def test_worker_env(root: Path) -> None:
           doc.get("key") is False, done.stderr[-400:])
     check("a child of the worker has no other key the .env import added", doc.get("probe") is False)
     check("the worker still holds the key from stdin, through config.api_key only", doc.get("api") is True)
+    check("the worker gives every call 32k output tokens unless the caller sets its own", doc.get("max_tokens") == 32000)
+    check("the worker pins every call's reasoning effort to high (never the loop's default max, nor a roster pin)",
+          doc.get("effort") == ["high", "high", "high", "high"])
     check("every tier is pinned to the cell's model, and nothing is provider-pinned globally",
           doc.get("tiers") == ["m/cell-model"] and doc.get("tier") == "m/cell-model" and doc.get("provider") == "")
 
@@ -531,13 +576,18 @@ def test_sandbox_argv(root: Path) -> None:
         argvs = {p: sandbox.bwrap_argv(sandbox.Cell(p, work), ["true"]) for p in sandbox.PROFILES}
         # A2: the trimmed credential views, checked by key name only (no values printed)
         claude_cred = json.loads(sandbox.trimmed_claude_credentials())["claudeAiOauth"]
-        codex_cred = json.loads(sandbox.trimmed_codex_auth())
+        codex_raw = sandbox.trimmed_codex_auth()
+        codex_cred = json.loads(codex_raw)
     home = sandbox.sandbox_home()
     check("the trimmed Claude login keeps only the access token and its metadata, no refresh or MCP token",
           set(claude_cred) <= set(sandbox.CLAUDE_OAUTH_KEEP) and "accessToken" in claude_cred
           and "refreshToken" not in claude_cred and "mcpOAuth" not in json.loads(sandbox.trimmed_claude_credentials()))
-    check("the trimmed Codex login drops the refresh token", "access_token" in codex_cred["tokens"]
-          and "refresh_token" not in codex_cred["tokens"])
+    check("the trimmed Codex login replaces the refresh token with the inert placeholder (A2 amendment)",
+          "access_token" in codex_cred["tokens"] and codex_cred["tokens"].get("refresh_token") == sandbox.CODEX_REFRESH_PLACEHOLDER
+          and b"cx-refresh-dummy" not in codex_raw)
+    check("the trimmed Codex login keeps every other field (codex's TokenData needs refresh_token as a string)",
+          set(codex_cred["tokens"]) == {"access_token", "refresh_token", "id_token", "account_id"}
+          and {"auth_mode", "last_refresh"} <= set(codex_cred) and isinstance(codex_cred["tokens"].get("refresh_token"), str))
 
     def sources(a):
         return [a[i + 1] for i, t in enumerate(a) if t in ("--bind", "--ro-bind")]
@@ -1090,7 +1140,8 @@ def test_fake_clis(root: Path) -> None:
     import base64
     payload = base64.urlsafe_b64encode(json.dumps({"exp": time.time() + 86400}).encode()).decode().rstrip("=")
     (login / ".codex").mkdir()
-    (login / ".codex" / "auth.json").write_text(json.dumps({"tokens": {"access_token": f"h.{payload}.s", "refresh_token": "r"}}))
+    (login / ".codex" / "auth.json").write_text(json.dumps({"auth_mode": "chatgpt", "tokens": {
+        "access_token": f"h.{payload}.s", "refresh_token": "cx-real-refresh-dummy-7f3a", "id_token": "i", "account_id": "a"}}))
     fake = root / "bin"
     (fake / "rel" / "bin").mkdir(parents=True)
     (fake / "rel" / "codex-path").mkdir()
@@ -1103,6 +1154,13 @@ def test_fake_clis(root: Path) -> None:
     (fake / "claude").chmod(0o755)
     (fake / "rel" / "bin" / "codex").write_text(
         "#!/bin/sh\nenv > ./codex-env.txt\ntest -e \"$CODEX_HOME/auth.json\" && echo auth=present > ./codex-auth.txt\n"
+        "python3 -c \"import json,os;t=json.load(open(os.environ['CODEX_HOME']+'/auth.json'))['tokens'];"
+        "print(json.dumps({'keys':sorted(t),'placeholder':t.get('refresh_token')=='" + sandbox.CODEX_REFRESH_PLACEHOLDER + "'}))\""
+        " > ./codex-refresh.json 2>/dev/null\n"
+        # the needle is assembled at run time, so this script (bound under /opt/rolebench) never matches itself
+        "N=cx-real-refresh-; N=\"${N}dummy-7f3a\"\n"
+        "if grep -rqsF \"$N\" \"$HOME\" /tmp /opt/rolebench 2>/dev/null || env | grep -qF \"$N\";"
+        " then echo leak=yes > ./codex-leak.txt; else echo leak=no > ./codex-leak.txt; fi\n"
         "cat > /dev/null\necho '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"done\"}}'\n"
         "echo '{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":100,\"cached_input_tokens\":40,\"output_tokens\":5}}'\n")
     (fake / "rel" / "bin" / "codex").chmod(0o755)
@@ -1130,6 +1188,12 @@ def test_fake_clis(root: Path) -> None:
           (work / "claude-stdin.txt").read_text() == "PROMPT TEXT" and res.text == "ok" and res.cost_usd == 0.5)
     check("claude's modelUsage is recorded and a two-model run is flagged",
           res.models_used == ["claude-haiku-5-5", "claude-sonnet-5-5"] and res.summary()["multi_model"])
+    seen_refresh = json.loads((work / "codex-refresh.json").read_text()) if (work / "codex-refresh.json").exists() else {}
+    check("the codex cell's auth.json has refresh_token equal to the placeholder, and all four token fields",
+          seen_refresh.get("placeholder") is True
+          and seen_refresh.get("keys") == ["access_token", "account_id", "id_token", "refresh_token"], str(seen_refresh))
+    check("the real refresh token is nowhere in the codex cell (home, /tmp, /opt/rolebench, environment)",
+          (work / "codex-leak.txt").exists() and (work / "codex-leak.txt").read_text().strip() == "leak=no")
     cenv = (work / "codex-env.txt").read_text() if (work / "codex-env.txt").exists() else ""
     check("codex runs inside the cell with its own CODEX_HOME and the login in it",
           f"CODEX_HOME={sandbox.sandbox_home()}/{sandbox.CODEX_HOME_NAME}" in cenv
@@ -1441,6 +1505,48 @@ def test_parsers(root: Path) -> None:
           audit.escape_flags(R("c", "m", tool_calls=[("Edit", json.dumps({"file_path": f"{snap}/a.ts",
                                                                             "new_string": "import x from '../../lib'"}))]), snap) == [])
     check("audit: the lead's /tmp/claude-* is flagged", esc("ls /tmp/claude-1000/") != [])
+    home = sandbox.sandbox_home()
+    jv = lambda tool, args: audit.escape_flags(R("jarvis", "m", tool_calls=[(tool, json.dumps(args))]), snap)
+    cl = lambda cmd: audit.escape_flags(R("claude", "m", tool_calls=[("Bash", json.dumps({"command": cmd}))]), snap)
+    check("audit: the Jarvis loop's own spill file on the cell's tmpfs HOME is not an escape",
+          jv("read_file", {"path": f"{home}/.local/share/jarvis/spill/71b458b86b3448cf.txt"}) == []
+          and jv("run_command", {"command": "cat ~/.local/share/jarvis/spill/x.txt"}) == [])
+    check("audit: the cell's /tmp is in-cell", esc("python3 x.py > /tmp/out.txt 2>/dev/null && cat /tmp/out.txt") == [])
+    check("audit: words in prose, a commit message or a sed/grep pattern are not paths",
+          esc("sed -n '/v.slice/p' hud/src/state/browser.ts") == [] and esc("grep -n 'scope\\|/could' x.py") == []
+          and esc('git commit -qam "fix the cap: it could/should be 600, see /etc and /home notes"') == []
+          and esc("echo 'this /could be a problem'") == [])
+    check("audit: still flagged: ~/projects/Jarvis, ~/.config/gh/hosts.yml and /mnt/c, through any spelling",
+          jv("read_file", {"path": f"{home}/projects/Jarvis/CLAUDE.md"}) != [] and esc("cat ~/.config/gh/hosts.yml") != []
+          and esc("ls /mnt/c/Users") != [] and jv("run_command", {"command": "ls $HOME/projects/Jarvis"}) != [])
+    check("audit: a path inside a shell script or inline code is still seen",
+          esc("/bin/bash -lc \"git status && cat /home/johnw/projects/Jarvis/.env\"") != []
+          and esc("python3 -c \"print(open('/mnt/c/Users/x').read())\"") != [])
+    rh = config.real_home()
+    user = Path(rh).name
+    outside = ["ls /home/johnw/projects/*", "cat ~/projects/Jarvis/*.md", "ls ~/.config/gh/*", "cat ~/.config/gh/hosts.y?l",
+               "cat /home/*/.gitconfig", "ls /home/johnw/projects/{Jarvis,x}",
+               "cat ../../../../projects/Jarvis/rolebench/cases/*.json",
+               "H=/home/johnw; cat $H/.gitconfig", "P=$HOME/projects; ls $P", "export P=$HOME/projects && ls ${P}/Jarvis",
+               "dd if=/home/johnw/.gitconfig of=x", f"cat ~{user}/.gitconfig", "cat /proc/self/root/home/johnw/.gitconfig",
+               "cat /proc/1/root/mnt/c/x", "curl file:///home/johnw/.gitconfig", "ls --directory=/mnt/c",
+               # a quoted value with a space is not judged as a path itself (it could be prose), so only
+               # tracking the assignment sees where the later $P points
+               "P='/home/johnw/my notes'; cat \"$P/todo.txt\""]
+    missed = [c for c in outside if not esc(c)]
+    check("audit: globs, braces, variables, key=value, ~user, /proc/<n>/root and file:// spellings are judged by what they name",
+          missed == [], str(missed))
+    inside = [f"ls {snap}/*.py", "cat tests/*.py", "S=/tmp/x; cat $S/out",
+              "dd if=/dev/zero of=/tmp/z count=1", "ls /proc/self/fd", "grep -rn 'v.slice(0,[0-9]*)' hud/",
+              "echo $UNSET/whatever", "curl https://example.com/a/b", "MSG='fix the /etc and /home notes'; echo \"$MSG\""]
+    noisy = [c for c in inside if esc(c)]
+    check("audit: in-cell spellings with globs, variables and key=value stay unflagged",
+          noisy == [] and jv("run_command", {"command": f"ls {home}/.local/share/jarvis/spill/*"}) == [], str(noisy))
+    check("audit: the host's Claude transcripts are an attempt even from a claude cell; its own login is not",
+          cl("ls ~/.claude/projects") != [] and cl("cat ~/.claude/settings.json") != []
+          and cl("cat ~/.claude/.credentials.json") == [] and cl("cat ~/.claude.json") == [])
+    check("audit: one CLI's state dir is in-cell only for that CLI (the cell layout, not the path string)",
+          cl(f"cat {home}/.claude/todos/t.json") == [] and jv("read_file", {"path": f"{home}/.claude/todos/t.json"}) != [])
 
 
 # --- the flows, against fakes ---------------------------------------------------------
@@ -1492,6 +1598,15 @@ def test_review_flow(shas, root: Path) -> None:
           row.keys() >= {"case_id", "run_id", "model", "harness", "roles", "wall_s", "result", "rounds", "merged_ready",
                          "task_class", "tool_calls", "quota_guard"} and row["quota_guard"] == f"off: {NO_QUOTA}")
     check("the snapshot is reset to the PR commit after the run", sh(Path(run["snapshot"]), "status", "--short") == "")
+    check("the run records its reasoning effort in run.json and the log row", run["effort"] == "high" and row["effort"] == "high")
+    snap_p = Path(run["snapshot"])
+    benign = runners.RunResult("codex", "m", tool_calls=[
+        ("shell", "/bin/bash -lc \"rg --files -g 'CLAUDE.md' -g '!**/.git/**'\""), ("shell", "cat .git/config"),
+        ("shell", "git -C . status"), ("shell", f"ls {snap_p}/.git/")])
+    escape = runners.RunResult("codex", "m", tool_calls=[("shell", "cat /home/johnw/.git/config")])
+    check("the escape audit ignores a glob's /.git/ and paths inside the snapshot, and still flags a real escape",
+          audit.escape_flags(benign, snap_p) == [] and len(audit.escape_flags(escape, snap_p)) == 1,
+          str(audit.escape_flags(benign, snap_p)))
     check("the claude cell had no budget imposed", deps.runners["claude"].calls[0]["budget"] is None)
     check("run.json keeps the random snapshot name and the build-time shas",
           run["snapshot"].endswith(Path(run["snapshot"]).name) and run["shas"]["change"] and run["hygiene"]["after_reset"] == [])
@@ -1657,6 +1772,19 @@ def test_review_flow(shas, root: Path) -> None:
         runners.REGISTRY.update(saved)
         runners.run_claude = saved_claude
         sandbox.PASTA = saved_pasta
+    def cut_off(**kw):
+        return runners.RunResult("jarvis", kw["model"], text="half a review\n\n" + jarvis_worker.CUT_OFF_MARK,
+                                 cost_usd=0.01, turns=7, truncated=True)
+    tr = flows.review_once(flows.Deps(runners={"jarvis": cut_off}, quota_override=NO_QUOTA, repo=shas["repo"],
+                                      ledger=spend.Ledger(root / "led-trunc.json", 10, 0.5)),
+                           case, harness="jarvis", model="anthropic/claude-haiku-5.5")
+    trow = json.loads(config.log_path().read_text().splitlines()[-1])
+    check("a review cut off at the output limit is 'truncated' in run.json and the log row, not scored as no findings",
+          tr["result"] == "truncated" and tr["truncated"] is True and trow["truncated"] is True and trow["result"] == "truncated")
+    check("the worker's cut-off mark is the one jarvis.agent appends",
+          f'"\\n\\n{jarvis_worker.CUT_OFF_MARK}"' in (Path(config.REPO_ROOT) / "jarvis" / "agent.py").read_text())
+    check("the worker marks a final answer that still ends at the limit, and only that",
+          jarvis_worker.final_truncated("x\n\n[cut off at the token limit]") and not jarvis_worker.final_truncated("done"))
     bad = flows.Deps(runners={"claude": fake_runner(["no block at all"])}, quota_override=NO_QUOTA, repo=shas["repo"])
     check("a reply without a findings block is 'unparsed'", flows.review_once(bad, case, harness="claude", model="sonnet")["result"] == "unparsed")
 
@@ -1733,6 +1861,7 @@ def test_review_flow(shas, root: Path) -> None:
                            judge.JudgeError)
     check("the ceiling is checked again before the judge's retry", retry_refused and jcalls == [1])
     jdoc = json.loads((rdir / "judge.json").read_text())
+    check("judge.json records the judge's effort", jdoc.get("effort") == "high")
     check("judge.json records the quota before and after", jdoc["quota_before"] == {"claude": {"5h": 10.0, "weekly": 20.0}}
           and jdoc["quota_after"] == {"claude": {"5h": 10.0, "weekly": 20.0}})
     always_bad = lambda prompt, cwd: ("{}", 0.0)
@@ -1942,8 +2071,11 @@ def test_cli_and_cells(shas, root: Path) -> None:
     saved_reg = dict(runners.REGISTRY)
     seen_models = []
 
+    seen_caps = []
+
     def standin(**kw):
         seen_models.append(kw.get("model"))
+        seen_caps.append((kw.get("timeout_s"), kw.get("max_turns")))
         return runners.RunResult("jarvis", kw.get("model", ""), text=REVIEW_REPLY, cost_usd=0.001)
     off_argv = ["review", "--harness", "jarvis", "--model", "openai/gpt-6-luna", "--case", ccase["id"]]
     merr = io.StringIO()
@@ -1954,7 +2086,7 @@ def test_cli_and_cells(shas, root: Path) -> None:
             main(off_argv)
             refused_row = json.loads(config.log_path().read_text().splitlines()[-1])
             calls_without = len(seen_models)
-            main(["--off-matrix", *off_argv])
+            main(["--off-matrix", *off_argv, "--timeout", "77", "--max-turns", "9"])
             allowed_row = json.loads(config.log_path().read_text().splitlines()[-1])
     finally:
         runners.REGISTRY.clear()
@@ -1966,6 +2098,13 @@ def test_cli_and_cells(shas, root: Path) -> None:
     check("CLI: --off-matrix parses, warns, runs it, and the run row records off_matrix: true",
           allowed_row["model"] == "openai/gpt-6-luna" and allowed_row["result"] == "ok" and allowed_row["off_matrix"] is True
           and seen_models == ["openai/gpt-6-luna"] and "--off-matrix" in merr.getvalue())
+    check("CLI: --timeout and --max-turns reach the runner (smoke caps) and the run row records them",
+          seen_caps == [(77, 9)] and allowed_row["timeout_s"] == 77 and allowed_row["max_turns"] == 9
+          and refused_row["timeout_s"] == config.REVIEW_TIMEOUT_S and refused_row["max_turns"] == config.REVIEW_MAX_TURNS)
+    with contextlib.redirect_stderr(io.StringIO()):
+        bad_caps = [raises(lambda a=a: main(off_argv + a), SystemExit)
+                    for a in (["--timeout", "0"], ["--max-turns", "-3"], ["--timeout", "x"])]
+    check("CLI: --timeout and --max-turns must be whole numbers above 0", all(bad_caps))
     help_text = __import__("rolebench.__main__", fromlist=["main"]).__doc__
     check("the docs say an agent never passes the override without the owner's OK", "never passes it" in help_text)
 

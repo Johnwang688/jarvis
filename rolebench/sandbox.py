@@ -76,6 +76,20 @@ GITCONFIG_TEXT = """\
 \tdirectory = *
 """
 
+# HOME-relative trees that are cell-private by construction (the tmpfs HOME
+# holds the real home's path string, but only these, the snapshot and the
+# binds below exist in it): each CLI's own state. A path under the cell's HOME
+# outside them names something on the host that is not mounted, which the
+# escape audit flags as an attempt.
+# Narrow on purpose: the host has its own ~/.claude (transcripts under
+# projects/, settings, skills) and ~/.local/share/jarvis (sessions, memory), so
+# only the files the CLI keeps for itself in a cell count, and a reference to
+# the rest (`~/.claude/projects`) is flagged as an attempt on the host's copy.
+_CLAUDE_STATE = (".claude/.credentials.json", ".claude.json", ".claude/statsig", ".claude/todos",
+                 ".claude/shell-snapshots", ".claude/session-env")
+CELL_PRIVATE_HOME = {"claude": _CLAUDE_STATE, "judge": _CLAUDE_STATE, "codex": (CODEX_HOME_NAME,),
+                     "jarvis": (".local/share/jarvis/spill",), "grade": ()}
+
 # Passed through from the harness's own environment when set; everything
 # else a cell sees is set below. Never CLAUDE_CODE_*, ANTHROPIC_*, OPENAI_*,
 # GH_*, SSH_AUTH_SOCK, DBUS_*, XDG_RUNTIME_DIR or any *_KEY / *_TOKEN.
@@ -115,7 +129,13 @@ NODE_SCRATCH = (".vite", ".vite-temp", ".vitest", ".cache")
 # The credential fields each CLI needs; everything else (refresh tokens, the
 # MCP OAuth block) is dropped and the trimmed view is passed in memory (A2).
 CLAUDE_OAUTH_KEEP = ("accessToken", "expiresAt", "scopes", "subscriptionType", "rateLimitTier")
-CODEX_TOKEN_DROP = ("refresh_token",)
+# Codex's TokenData (login/src/token_data.rs: id_token, access_token,
+# refresh_token: String, account_id) requires refresh_token: without it the
+# ChatGPT login does not parse and codex falls back to API-key mode (401,
+# "Missing bearer"). So the real one is replaced by an inert placeholder that
+# parses as a string; a refresh attempt in the cell fails at the auth server
+# and can never rotate the owner's token (A2 amendment, 2026-10-21).
+CODEX_REFRESH_PLACEHOLDER = "rolebench-placeholder-no-refresh"
 
 
 class SandboxError(RuntimeError):
@@ -186,6 +206,21 @@ def _python_links(venv: Path) -> list[str]:
             args += ["--symlink", os.path.realpath(target), str(target)]
         link, seen = target, seen + 1
     return args
+
+
+def cell_home_paths(profile: str) -> list[str]:
+    """Absolute paths under the cell's HOME that exist in the cell: the
+    profile's private trees and the binds every cell gets there (the
+    Playwright cache, the bench's node_modules, the venv's python links)."""
+    home = Path(sandbox_home())
+    out = [str(home / p) for p in CELL_PRIVATE_HOME.get(profile, ())]
+    out += [str(home / ".cache" / "ms-playwright"), str(config.node_modules_dir())]
+    try:
+        links = _python_links(config.venv_dir())
+        out += [links[i + 2] for i, a in enumerate(links) if a == "--symlink"]
+    except OSError:
+        pass
+    return out
 
 
 def _root_links() -> list[str]:
@@ -261,12 +296,14 @@ def trimmed_claude_credentials() -> bytes:
 
 
 def trimmed_codex_auth() -> bytes:
-    """The Codex login a cell gets: auth.json without the refresh token."""
+    """The Codex login a cell gets: auth.json with its refresh token replaced by
+    an inert placeholder (every other field kept)."""
     try:
         raw = json.loads(codex_auth().read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         raise SandboxError(f"cannot read the Codex login: {exc}")
-    tokens = {k: v for k, v in (raw.get("tokens") or {}).items() if k not in CODEX_TOKEN_DROP}
+    tokens = dict(raw.get("tokens") or {})
+    tokens["refresh_token"] = CODEX_REFRESH_PLACEHOLDER
     out = {"tokens": tokens}
     for k in ("auth_mode", "OPENAI_API_KEY", "last_refresh"):
         if k in raw:

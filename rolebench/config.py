@@ -66,9 +66,20 @@ def check_matrix(harness: str, model: str, off_matrix: bool = False) -> None:
                     f"({', '.join(MATRIX.get(harness, ())) or 'none'}); pass --off-matrix to run it anyway")
 
 
-# The estimate's completion allowance when the call sets no max_tokens and no
-# endpoint lists its maximum completion.
+# The estimate's completion allowance is min(the call's max_tokens, the
+# endpoint's maximum completion, this): an endpoint's maximum alone can be ~1M
+# on a 1M-context model, which priced a first call at dollars.
 DEFAULT_COMPLETION_ALLOWANCE = 16_000
+# Per-call output room for the Jarvis-loop cells (jarvis.config.MAX_TOKENS is
+# 8192, which a full review plus its findings block can overrun).
+JARVIS_MAX_OUTPUT_TOKENS = 32_000
+
+# Reasoning effort, pinned per harness so the cells compare at one level
+# (lead, 2026-10-21): `claude -p --effort high`, codex
+# `model_reasoning_effort=high`, and the Jarvis loop's JARVIS_REASONING_EFFORT
+# (its default is `max`, which spent Haiku's whole reply on thinking). The
+# judge (claude -p, read-only) is pinned too.
+EFFORT = {"claude": "high", "codex": "high", "jarvis": "high", "judge": "high"}
 # Long-context price tiers the endpoints list does not carry: at or above
 # `threshold` prompt tokens the whole request is priced at `multiplier` times
 # (Haiku 5.5: 5x from 100k, CLAUDE.md's model default note).

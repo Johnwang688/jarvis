@@ -1196,7 +1196,9 @@ cell cannot ask systemd to start anything outside), and the lead's `/tmp/claude-
 Logins are a **trimmed, in-memory view**, not a file bind (A2, decisions doc).
 The claude cell and the judge get `{claudeAiOauth: {accessToken, expiresAt,
 scopes, subscriptionType, rateLimitTier}}` — no refresh token, no MCP OAuth
-block; the codex cell gets `auth.json` without its refresh token, in its own
+block; the codex cell gets `auth.json` with its refresh token replaced by an inert
+placeholder (codex's token struct requires the field: without it the login falls back
+to API-key mode and 401s; A2 amendment), in its own
 `CODEX_HOME` on the tmpfs (no owner config, skills, memories or `trusted` entries
 written back); the Jarvis cell gets no login (the OpenRouter key goes to the
 worker on stdin). The trimmed JSON is written to a pipe and bound with `bwrap
@@ -1252,7 +1254,19 @@ loops back to this LAN, such as a router's hairpin NAT, is not closed). **Accept
 exposure (lead, review of #284):** a pasta cell can send to any public address on
 TCP 443 and resolve any name through the host's resolver, so an agent could send
 the snapshot's repo code out; the only credential in a cell is the trimmed login
-(A2), never a refresh token, a gh login or a key. The network and outside-the-snapshot audits are best-effort detection
+(A2), never a real refresh token, a gh login or a key. The outside-the-snapshot audit reads path *arguments* (shell words, the value
+of every `NAME=value`/`key=value`/`--opt=value` word, the script of `sh -c`/`bash -lc`,
+quoted strings inside inline code), never words of prose or a commit message. Each is
+resolved first: simple `NAME=value` assignments are tracked so a later `$NAME` expands,
+`~` and `~user` expand, `file://` URLs and `/proc/<n>/root/X` become paths, and a word is
+judged by its literal prefix up to its first glob or unknown variable
+(`/home/u/projects/*` names `/home/u/projects/`). It is then judged by the cell's layout: the snapshot, the system trees, the
+cell's `/tmp` and, on the tmpfs HOME (mounted at the real home's path), only the trees that
+exist in the cell (its CLI's own state: the trimmed login and the few files Claude Code
+keeps for itself, `~/.codex-rolebench`, the Jarvis loop's spill files; and the binds).
+`~/.claude/projects` (the host's transcripts) and the rest of `~/.claude` are flagged. Anything else under that path (`~/projects/Jarvis`, `~/.config/gh`) is flagged as
+an attempt; an absolute path whose top directory does not exist on the host (`/v.slice` from
+a sed pattern) names nothing and is not. The network and outside-the-snapshot audits are best-effort detection
 beside that, reported next to the score. Claude's tools are an allowlist
 (`Bash,Read,Edit,Write,Grep,Glob`; the judge `Read,Grep,Glob`), and the Jarvis
 cell offers no delegation tools.
@@ -1274,13 +1288,18 @@ cost (prompt chars/4 plus `max_tokens`) at the model's **most expensive** OpenRo
 endpoint (`/api/v1/models/<id>/endpoints`, the highest prompt and completion price
 over every endpoint, cached a day under `prices/`; if a refetch fails a cache at most
 7 days old is used, raised 25%, else the model is refused), counting the tool schemas,
-a completion allowance (the call's `max_tokens`, else the endpoint's maximum, else
-16k) and Haiku 5.5's 5x price from 100k prompt tokens, would cross the budget is refused before it is
+a completion allowance (the call's `max_tokens` when it sets one, bounded by the
+endpoint's maximum; otherwise min of the endpoint's maximum and 16k: the endpoint maximum alone is ~1M on 1M-context models, which priced a first call
+at $2.27 and refused deepseek-v4.1-flash and glm-5.3-flash before sending) and Haiku 5.5's 5x price from 100k prompt tokens, would cross the budget is refused before it is
 sent, no call is made once the total reaches the budget, and the call that still
 crosses it raises (at most one can overshoot). The ledger settles on the usage
 OpenRouter reports (`llm._cost`, BYOK upstream cost included), never on the
-estimate; a timeout, OOM or crash is charged its whole reservation. Every tier runs
-on the cell's model, nothing is provider-pinned, and every `moonshotai/` id is
+estimate; a timeout, OOM or crash settles at the worker's streamed total plus the
+pre-call estimate of the one call that may have been in flight (streamed before each call; the largest one on any meter line, so a forged later line
+cannot lower it), capped at the reservation, and at the whole reservation when there is no meter line at all. Every tier runs
+on the cell's model with 32k output tokens per call (`jarvis.config.MAX_TOKENS` is 8192)
+and reasoning effort pinned to `high` (the loop's default `max` spent Haiku's whole reply on
+thinking, so its reviews came back empty), nothing is provider-pinned, and every `moonshotai/` id is
 refused (Kimi left the matrix, O-1 amendment 2026-10-21).
 
 **Quota.** A Claude or Codex cell is skipped at 75% of a quota window, and also when
@@ -1306,6 +1325,11 @@ every diff is against the base. The harness's own git passes `-c core.hooksPath=
 attributes an agent could have planted. Grading copies restore the hidden tests from
 the merged commit and the regression suites from the base, and an edit outside the
 case's scope (test files aside) blocks merge-ready.
+
+A review whose final reply still ends at the output limit (the loop's `[cut off at the
+token limit]` after its own continuations) is recorded as `result: "truncated"`,
+`truncated: true` in `run.json` and the log row, never scored as a review with no
+findings; implement runs carry `truncated` too.
 
 The judge is `claude -p --model opus` over shuffled, blinded findings plus the answer
 key, reading an export of the change commit (no `.git`, its diff beside it) in a

@@ -33,6 +33,7 @@ class Deps:
     suite_runner: Callable | None = None       # (grade_dir, rel) -> (ok, tail)
     review_timeout: int = config.REVIEW_TIMEOUT_S
     implement_timeout: int = config.IMPLEMENT_TIMEOUT_S
+    review_max_turns: int = config.REVIEW_MAX_TURNS
     log: bool = True
 
     def get_ledger(self) -> spend.Ledger:
@@ -98,10 +99,18 @@ def _providers(*harnesses: str) -> list[str]:
 def settle_amount(result: runners.RunResult | None, budget: float, model: str) -> tuple[float, bool, str]:
     """(usd, abort the model, note). A finished run settles on the usage
     OpenRouter reported (the higher of the worker's running total and the
-    loop's own cost). A run whose spend is unknown (timeout, OOM, crash, no
-    result) is charged its whole reservation."""
-    if result is None or result.timed_out or result.crashed:
-        return budget, False, "spend unknown (timeout, crash or no result): charged the full reservation"
+    loop's own cost). A run that timed out or crashed settles at the worker's
+    streamed total plus the pre-call estimate of the one call that may have
+    been in flight, capped at the reservation; with no meter line at all it
+    is charged the whole reservation."""
+    if result is None:
+        return budget, False, "spend unknown (no result): charged the full reservation"
+    if result.timed_out or result.crashed:
+        if result.spend_usd is None:
+            return budget, False, "spend unknown (timeout or crash, no meter line): charged the full reservation"
+        usd = min(budget, result.spend_usd + (result.inflight_usd or 0.0))
+        return usd, False, (f"timeout or crash: streamed ${result.spend_usd:.6f} + in-flight estimate "
+                            f"${(result.inflight_usd or 0.0):.6f}, capped at the ${budget:.2f} reservation")
     usd = max(result.cost_usd or 0.0, result.spend_usd or 0.0)
     return usd, usd >= config.PER_RUN_CAP_USD - 1e-9, ""
 
@@ -151,7 +160,7 @@ def review_step(deps: Deps, rcase: dict, snap: Path, *, harness: str, model: str
     prompt = brief.review_prompt(rcase, snap, harness=harness)
     (out_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
     result = model_step(deps, harness=harness, model=model, prompt=prompt, cwd=snap, run_id=run_id,
-                        out_dir=out_dir, timeout_s=deps.review_timeout, max_turns=config.REVIEW_MAX_TURNS, notes=notes)
+                        out_dir=out_dir, timeout_s=deps.review_timeout, max_turns=deps.review_max_turns, notes=notes)
     parsed = findings.parse(result.text)
     doc = {**result.summary(), "flags": findings.flags(result.tool_calls, parsed),
            "findings": parsed.findings, "parse_errors": parsed.errors,
@@ -162,7 +171,9 @@ def review_step(deps: Deps, rcase: dict, snap: Path, *, harness: str, model: str
     (out_dir / "review.txt").write_text(result.text, encoding="utf-8")
     _write(out_dir / "findings.json", parsed.findings)
     doc["ok"] = bool(parsed.found_block) and not result.error
+    # A reply cut off at the output limit is "truncated", never scored as a review with no findings.
     doc["result"] = ("timeout" if result.timed_out else "error" if result.error and not parsed.found_block
+                     else "truncated" if result.truncated and not parsed.found_block
                      else "unparsed" if not parsed.found_block else "over-cap" if doc["over_cap"] else "ok")
     return doc
 
@@ -170,7 +181,9 @@ def review_step(deps: Deps, rcase: dict, snap: Path, *, harness: str, model: str
 def _base_run(deps: Deps, case: dict, harness: str, model: str, run_id: str, quota_before: dict | None = None) -> dict:
     run = {"run_id": run_id, "case_id": case["id"], "kind": case["kind"], "harness": harness, "model": model,
            "started": time.strftime("%Y-%m-%dT%H:%M:%S"), "quota_guard": deps.quota_state,
-           "off_matrix": deps.off_matrix}
+           "off_matrix": deps.off_matrix, "effort": config.EFFORT.get(harness),
+           "timeout_s": deps.implement_timeout if case["kind"] == "implement" else deps.review_timeout,
+           "max_turns": config.IMPLEMENT_MAX_TURNS if case["kind"] == "implement" else deps.review_max_turns}
     if quota_before is not None:
         run["quota_before"] = quota_before
     return run
@@ -234,7 +247,7 @@ def review_once(deps: Deps, case: dict, *, harness: str, model: str, n: int = 1)
     run = {**_base_run(deps, case, harness, model, run_id, qb), "snapshot": str(snap), "shas": shas,
            "task_class": "review", "reviewer": doc, "result": doc["result"], "n_findings": len(doc["findings"]),
            "flags": doc["flags"], "network_flags": doc["network_flags"], "escape_flags": doc["escape_flags"],
-           "hygiene": hygiene, "quota_notes": notes, "reason": doc.get("error", "")}
+           "hygiene": hygiene, "quota_notes": notes, "reason": doc.get("error", ""), "truncated": bool(doc.get("truncated"))}
     return _finish(deps, run, out_dir, started)
 
 
@@ -401,13 +414,15 @@ def implement_once(deps: Deps, case: dict, *, harness: str, model: str, reviewer
             else "(no MED+ findings; files outside the expected scope: " + ", ".join(stats["out_of_scope"]) + ")")
     run = {**_base_run(deps, case, harness, model, run_id, qb), "snapshot": str(snap), "shas": shas,
            "reviewer_harness": reviewer_harness, "reviewer_model": reviewer_model,
+           "reviewer_effort": config.EFFORT.get(reviewer_harness),
            "task_class": f"implement-{case['size']}", "rounds": rounds, "merged_ready": merged_ready,
            "rounds_to_merge_ready": (len(rounds) - 1) if merged_ready else None,
            "cost_to_merge_ready": cost_at_ready, "total_cost_usd": round(cumulative_cost, 6) if cumulative_known else None,
            "result": "ok" if rounds and not reason else "skipped" if not rounds else "partial", "reason": reason,
            "implementer": rounds[-1]["implementer"] if rounds else None,
            "reviewer": rounds[-1].get("reviewer") if rounds else None, "quota_notes": notes,
-           "network_flags": net_flags, "escape_flags": esc_flags}
+           "network_flags": net_flags, "escape_flags": esc_flags,
+           "truncated": any(bool((r.get(k) or {}).get("truncated")) for r in rounds for k in ("implementer", "reviewer"))}
     return _finish(deps, run, out_dir, started)
 
 
