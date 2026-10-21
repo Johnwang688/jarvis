@@ -27,14 +27,6 @@ class CapReached(RuntimeError):
     pass
 
 
-def estimate(model: str, prompt_tokens: int, completion_tokens: int) -> float | None:
-    """Cost at the pinned provider's price (Kimi K3: $3 / $15 per M), or None."""
-    price = config.price_override(model)
-    if not price:
-        return None
-    return (prompt_tokens * price[0] + completion_tokens * price[1]) / 1e6
-
-
 def _fresh() -> dict:
     return {"total_usd": 0.0, "runs": [], "aborted_models": [], "pending": {}}
 

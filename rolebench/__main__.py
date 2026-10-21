@@ -10,7 +10,13 @@
 
 The quota guard is always on. `--no-quota-guard` exists for the owner only: it
 also needs ROLEBENCH_QUOTA_OVERRIDE=<reason>, and an agent never passes it
-without the owner's explicit OK for that run.
+without the owner's explicit OK for that run. It lifts the 75% guard, never
+the hard ceiling (ROLEBENCH_QUOTA_CEILING, default 97%): at or above it, or
+with the quota unreadable, a Claude or Codex cell or a judge call is refused.
+
+Claude, Jarvis and judge cells reach their APIs through pasta
+(ROLEBENCH_NET=pasta, the default); ROLEBENCH_NET=none has no network, so
+real runs of them are refused.
 """
 
 from __future__ import annotations
@@ -186,7 +192,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="rolebench", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--no-quota-guard", action="store_true",
-                        help=f"owner only, never routine: run Claude/Codex cells without the 75%% quota guard. "
+                        help=f"owner only, never routine: run Claude/Codex cells without the 75%% quota guard "
+                             f"(never past ROLEBENCH_QUOTA_CEILING, default 97%%). "
                              f"Also needs {OVERRIDE_ENV}=<reason>; every cell is marked as overridden.")
     sub = parser.add_subparsers(dest="command", required=True)
 

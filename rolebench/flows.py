@@ -14,17 +14,19 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from . import audit, brief, config, findings, quota, runlog, runners, sandbox, snapshot, spend
+from . import audit, brief, config, findings, prices, quota, runlog, runners, sandbox, snapshot, spend
 
 
 @dataclass
 class Deps:
     runners: dict = field(default_factory=lambda: dict(runners.REGISTRY))
-    quota_reader: Callable = quota.daemon_reader
+    quota_reader: Callable = field(default_factory=lambda: quota.daemon_reader)
     # The owner's reason for running without the quota guard ("" = guard on).
     # Set only from `--no-quota-guard` plus ROLEBENCH_QUOTA_OVERRIDE.
     quota_override: str = ""
     ledger: spend.Ledger | None = None
+    # The jarvis estimate's price (most expensive OpenRouter endpoint), or PriceError.
+    price_fn: Callable = field(default_factory=lambda: prices.endpoint_price)
     repo: Path | None = None
     suite_runner: Callable | None = None       # (grade_dir, rel) -> (ok, tail)
     review_timeout: int = config.REVIEW_TIMEOUT_S
@@ -68,30 +70,34 @@ def _net_refusal(deps: Deps, harness: str) -> str | None:
 
 
 def _guard(deps: Deps, harness: str, notes: list[str]) -> None:
-    if deps.quota_override:
-        return
-    skip, note = quota.guard(harness, deps.quota_reader)
+    """The quota check before a model step: the 75% guard (lifted only by the
+    owner's override) and the hard ceiling (never lifted)."""
+    skip, note = quota.guard(harness, deps.quota_reader, override=deps.quota_override)
     if skip:
         raise Skipped(f"quota: {note}")
     if note:
         notes.append(note)
 
 
+def _providers(*harnesses: str) -> list[str]:
+    return sorted({quota.HARNESS_PROVIDER[h] for h in harnesses if h in quota.HARNESS_PROVIDER})
+
+
 def settle_amount(result: runners.RunResult | None, budget: float, model: str) -> tuple[float, bool, str]:
-    """(usd, abort the model, note). A run whose spend is unknown (timeout,
-    OOM, crash, no result) is charged its whole reservation."""
+    """(usd, abort the model, note). A finished run settles on the usage
+    OpenRouter reported (the higher of the worker's running total and the
+    loop's own cost). A run whose spend is unknown (timeout, OOM, crash, no
+    result) is charged its whole reservation."""
     if result is None or result.timed_out or result.crashed:
         return budget, False, "spend unknown (timeout, crash or no result): charged the full reservation"
-    tokens = result.tokens or {}
-    est = spend.estimate(model, tokens.get("prompt_tokens", 0), tokens.get("completion_tokens", 0)) or 0.0
-    usd = max(result.cost_usd or 0.0, result.spend_usd or 0.0, est)
+    usd = max(result.cost_usd or 0.0, result.spend_usd or 0.0)
     return usd, usd >= config.PER_RUN_CAP_USD - 1e-9, ""
 
 
 def model_step(deps: Deps, *, harness: str, model: str, prompt: str, cwd: Path, run_id: str,
                out_dir: Path, timeout_s: int, max_turns: int, notes: list[str] | None = None) -> runners.RunResult:
-    """One agent run: the quota guard (every call, so every implement round),
-    the jarvis budget reserved before and settled after."""
+    """One agent run: the quota guard and ceiling (every call, so every
+    implement round), the jarvis budget reserved before and settled after."""
     if harness in quota.HARNESS_PROVIDER:
         _guard(deps, harness, notes if notes is not None else [])
     runner = deps.runners[harness]
@@ -99,8 +105,9 @@ def model_step(deps: Deps, *, harness: str, model: str, prompt: str, cwd: Path, 
     ledger = deps.get_ledger() if harness == "jarvis" else None
     if ledger:
         try:
-            config.price_override(model)
-        except config.UnknownModel as exc:
+            config.check_model(model)
+            deps.price_fn(model)                  # the estimate's price; refused before any spend
+        except (config.UnknownModel, prices.PriceError) as exc:
             raise Skipped(f"refused: {exc}")
         try:
             budget = ledger.reserve(run_id, model)
@@ -148,22 +155,29 @@ def review_step(deps: Deps, rcase: dict, snap: Path, *, harness: str, model: str
     return doc
 
 
-def _base_run(deps: Deps, case: dict, harness: str, model: str, run_id: str) -> dict:
-    return {"run_id": run_id, "case_id": case["id"], "kind": case["kind"], "harness": harness, "model": model,
-            "started": time.strftime("%Y-%m-%dT%H:%M:%S"), "quota_guard": deps.quota_state}
+def _base_run(deps: Deps, case: dict, harness: str, model: str, run_id: str, quota_before: dict | None = None) -> dict:
+    run = {"run_id": run_id, "case_id": case["id"], "kind": case["kind"], "harness": harness, "model": model,
+           "started": time.strftime("%Y-%m-%dT%H:%M:%S"), "quota_guard": deps.quota_state}
+    if quota_before is not None:
+        run["quota_before"] = quota_before
+    return run
 
 
 def _finish(deps: Deps, run: dict, out_dir: Path, started: float) -> dict:
     run["finished"] = time.strftime("%Y-%m-%dT%H:%M:%S")
     run["wall_s"] = round(time.time() - started, 1)
+    if run.get("quota_before"):
+        # The same providers read again, so the lead can measure percent per run.
+        run["quota_after"] = quota.readings(list(run["quota_before"]), deps.quota_reader)
     _write(out_dir / "run.json", run)
     if deps.log:
         runlog.append(run)
     return run
 
 
-def _skipped(deps: Deps, case: dict, harness: str, model: str, run_id: str, out_dir: Path, reason: str, started: float) -> dict:
-    run = {**_base_run(deps, case, harness, model, run_id), "result": "skipped", "reason": reason}
+def _skipped(deps: Deps, case: dict, harness: str, model: str, run_id: str, out_dir: Path, reason: str, started: float,
+             quota_before: dict | None = None) -> dict:
+    run = {**_base_run(deps, case, harness, model, run_id, quota_before), "result": "skipped", "reason": reason}
     return _finish(deps, run, out_dir, started)
 
 
@@ -181,6 +195,7 @@ def review_once(deps: Deps, case: dict, *, harness: str, model: str, n: int = 1)
     refusal = _net_refusal(deps, harness)
     if refusal:
         return _skipped(deps, case, harness, model, run_id, out_dir, refusal, started)
+    qb = quota.readings(_providers(harness), deps.quota_reader)
     try:
         _guard(deps, harness, notes)
         snap = snapshot.build(case, run_id, repo=deps.repo)
@@ -199,11 +214,11 @@ def review_once(deps: Deps, case: dict, *, harness: str, model: str, n: int = 1)
     except Skipped as exc:
         if snap is not None:
             shutil.rmtree(snap, ignore_errors=True)
-        return _skipped(deps, case, harness, model, run_id, out_dir, str(exc), started)
+        return _skipped(deps, case, harness, model, run_id, out_dir, str(exc), started, qb)
     except snapshot.SnapshotError as exc:
-        run = {**_base_run(deps, case, harness, model, run_id), "result": "error", "reason": f"snapshot: {exc}"}
+        run = {**_base_run(deps, case, harness, model, run_id, qb), "result": "error", "reason": f"snapshot: {exc}"}
         return _finish(deps, run, out_dir, started)
-    run = {**_base_run(deps, case, harness, model, run_id), "snapshot": str(snap), "shas": shas,
+    run = {**_base_run(deps, case, harness, model, run_id, qb), "snapshot": str(snap), "shas": shas,
            "task_class": "review", "reviewer": doc, "result": doc["result"], "n_findings": len(doc["findings"]),
            "flags": doc["flags"], "network_flags": doc["network_flags"], "escape_flags": doc["escape_flags"],
            "hygiene": hygiene, "quota_notes": notes, "reason": doc.get("error", "")}
@@ -289,6 +304,7 @@ def implement_once(deps: Deps, case: dict, *, harness: str, model: str, reviewer
     refusal = _net_refusal(deps, harness) or _net_refusal(deps, reviewer_harness)
     if refusal:
         return _skipped(deps, case, harness, model, run_id, out_dir, refusal, started)
+    qb = quota.readings(_providers(harness, reviewer_harness), deps.quota_reader)
     try:
         _guard(deps, harness, notes)
         if reviewer_harness != harness:
@@ -296,9 +312,9 @@ def implement_once(deps: Deps, case: dict, *, harness: str, model: str, reviewer
         snap = snapshot.build(case, run_id, repo=deps.repo)
         shas = snapshot.shas(snap)
     except Skipped as exc:
-        return _skipped(deps, case, harness, model, run_id, out_dir, str(exc), started)
+        return _skipped(deps, case, harness, model, run_id, out_dir, str(exc), started, qb)
     except snapshot.SnapshotError as exc:
-        run = {**_base_run(deps, case, harness, model, run_id), "result": "error", "reason": f"snapshot: {exc}"}
+        run = {**_base_run(deps, case, harness, model, run_id, qb), "result": "error", "reason": f"snapshot: {exc}"}
         return _finish(deps, run, out_dir, started)
     base = shas["base"]
 
@@ -369,7 +385,7 @@ def implement_once(deps: Deps, case: dict, *, harness: str, model: str, reviewer
         findings_text = findings.render(found) or (
             "(no findings were parsed; the hidden acceptance tests do not all pass)" if not graded["hidden_pass"]
             else "(no MED+ findings; files outside the expected scope: " + ", ".join(stats["out_of_scope"]) + ")")
-    run = {**_base_run(deps, case, harness, model, run_id), "snapshot": str(snap), "shas": shas,
+    run = {**_base_run(deps, case, harness, model, run_id, qb), "snapshot": str(snap), "shas": shas,
            "reviewer_harness": reviewer_harness, "reviewer_model": reviewer_model,
            "task_class": f"implement-{case['size']}", "rounds": rounds, "merged_ready": merged_ready,
            "rounds_to_merge_ready": (len(rounds) - 1) if merged_ready else None,

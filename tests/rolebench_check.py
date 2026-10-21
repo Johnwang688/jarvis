@@ -26,14 +26,33 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from rolebench import (audit, brief, cases, config, findings, flows, jarvis_worker, judge, quota, report,  # noqa: E402
-                       runlog, runners, sandbox, snapshot, spend)
+from rolebench import (audit, brief, cases, config, findings, flows, jarvis_worker, judge, netcell, prices,  # noqa: E402
+                       quota, report, runlog, runners, sandbox, snapshot, spend)
 
 PASSED = 0
 FAILED: list[str] = []
 FIX = Path(__file__).parent / "fixtures" / "rolebench"
 REAL_HOME = config.real_home()
 NO_QUOTA = "rolebench_check: fakes only"
+
+# Nothing here reads the live daemon's quota or OpenRouter's price list: the
+# defaults every Deps and judge call resolve at call time are fakes, and the
+# price fetcher refuses. Tests that need a reader or a price pass their own.
+COLD = {"windows": [{"name": "5h", "used_percent": 10.0}, {"name": "weekly", "used_percent": 20.0}]}
+REAL_ENDPOINT_PRICE = prices.endpoint_price
+
+
+def _no_network(*args, **kwargs):
+    raise AssertionError("a test reached for the network")
+
+
+def FAKE_PRICE(model):
+    return (1.0, 5.0)
+
+
+prices._http_get = _no_network
+prices.endpoint_price = FAKE_PRICE
+quota.daemon_reader = lambda provider: copy.deepcopy(COLD)
 
 
 def check(name: str, ok: bool, detail: str = "") -> None:
@@ -295,15 +314,15 @@ def test_spend(root: Path) -> None:
     bad = root / "bad.json"
     bad.write_text("{not json")
     check("an unreadable ledger means cap reached", raises(lambda: spend.Ledger(bad).reserve("x", "m"), spend.CapReached))
-    est = spend.estimate("moonshotai/kimi-k3", 1_000_000, 1_000_000)
-    check("Kimi K3 is budgeted at $3/$15 per M", est == 18.0 and spend.estimate("openai/gpt-6-luna", 1, 1) is None)
-    check("the Kimi floor matches the moonshotai/ prefix, case-insensitively",
-          spend.estimate("MoonshotAI/Kimi-K3", 1_000_000, 0) == 3.0)
-    check("an unknown moonshotai/ id is refused, not run unpriced",
-          raises(lambda: spend.estimate("moonshotai/kimi-k9", 1, 1), config.UnknownModel)
-          and raises(lambda: config.provider_pin("moonshotai/kimi-k9"), config.UnknownModel))
-    check("only moonshotai/ ids are pinned to Moonshot",
-          config.provider_pin("moonshotai/kimi-k3") == "moonshotai" and config.provider_pin("openai/gpt-6-luna") == "")
+    check("every moonshotai/ id is refused now (Kimi left the matrix), case-insensitively",
+          all(raises(lambda m=m: config.check_model(m), config.UnknownModel)
+              for m in ("moonshotai/kimi-k3", "MoonshotAI/Kimi-K3", "moonshotai/kimi-k9")))
+    check("the amended O-1 matrix runs, with no Kimi and no gpt-6-luna in the Jarvis loop",
+          config.MATRIX == {"claude": ("haiku", "sonnet", "opus"), "codex": ("gpt-6.1-sol", "gpt-6-luna"),
+                            "jarvis": ("anthropic/claude-haiku-5.5", "deepseek/deepseek-v4.1-flash", "z-ai/glm-5.3-flash")}
+          and all(config.check_model(m) is None for m in config.MATRIX["jarvis"]))
+    check("no Kimi pin or price floor is left", not hasattr(config, "price_override") and not hasattr(config, "provider_pin")
+          and not hasattr(spend, "estimate") and config.KIMI_ALLOWED == ())
 
     # settlement: unknown spend is the full reservation
     to = runners.RunResult("jarvis", "m", timed_out=True, cost_usd=0.0)
@@ -313,12 +332,17 @@ def test_spend(root: Path) -> None:
     check("a crash (no result) settles at the full reservation", flows.settle_amount(cr, 0.4, "m")[0] == 0.4)
     check("a finished run settles at the worker's running total when it is higher",
           flows.settle_amount(ok, 0.5, "m")[0] == 0.03)
+    big = runners.RunResult("jarvis", "anthropic/claude-haiku-5.5", cost_usd=0.002, spend_usd=0.002,
+                            tokens={"prompt_tokens": 1_000_000, "completion_tokens": 0})
+    check("settlement is the reported usage, never a price estimate from the token count",
+          flows.settle_amount(big, 0.5, "anthropic/claude-haiku-5.5")[0] == 0.002)
     check("a timeout does not abort the model (its spend is unknown, not measured over the cap)",
           flows.settle_amount(to, 0.5, "m")[1] is False)
 
 
 def test_worker_meter(root: Path) -> None:
-    spec = {"budget_usd": 0.1, "prices": {"moonshotai/kimi-k3": [3.0, 15.0]}, "pins": {"moonshotai/kimi-k3": "moonshotai"}}
+    luna, glm = "openai/gpt-6-luna", "z-ai/glm-5.3-flash"
+    spec = {"budget_usd": 0.1, "prices": {luna: [1.0, 5.0], "x/y": [1.0, 5.0], glm: [3.0, 15.0]}}
     out = io.StringIO()
     m = jarvis_worker.Meter(spec, stream=out)
 
@@ -328,10 +352,10 @@ def test_worker_meter(root: Path) -> None:
 
     def last_spend():
         return runners.spend_from_stdout(out.getvalue())
-    check("the meter allows the first call", m.before("openai/gpt-6-luna") == "")
-    m.after("openai/gpt-6-luna", R(0.06))
+    check("the meter allows the first call, unpinned", m.before(luna) == "")
+    m.after(luna, R(0.06))
     check("each call's running total is streamed on stdout", last_spend() == 0.06)
-    check("the call that crosses the budget raises", raises(lambda: m.after("openai/gpt-6-luna", R(0.05)), jarvis_worker.BudgetExceeded))
+    check("the call that crosses the budget raises", raises(lambda: m.after(luna, R(0.05)), jarvis_worker.BudgetExceeded))
     check("the total covers every reply (sub-agents and compaction included) and is on the stream",
           abs(last_spend() - 0.11) < 1e-9 and m.calls == 2)
     check("no further call is made once the budget is spent", raises(lambda: m.before("x/y"), jarvis_worker.BudgetExceeded))
@@ -339,29 +363,62 @@ def test_worker_meter(root: Path) -> None:
     check("the spend read from stdout is the max over every line, so a later lower line cannot undercharge",
           runners.spend_from_stdout(f'{P}{{"usd": 0.3}}\nnoise\n{P}{{"usd": 0.1}}\n') == 0.3
           and runners.spend_from_stdout("nothing") is None)
-    # LOW: a call whose estimated prompt cost would cross the budget is refused before it is sent
+    # a call whose estimated cost at the most expensive endpoint would cross the budget is refused before it is sent
     m4 = jarvis_worker.Meter(spec, stream=io.StringIO())
     big = [{"role": "user", "content": "x" * 600_000}]        # ~150k tokens; at $3/M ~$0.45 > $0.10
-    refused = raises(lambda: m4.before("moonshotai/kimi-k3", big, max_tokens=0), jarvis_worker.BudgetExceeded)
-    small_ok = m4.before("moonshotai/kimi-k3", [{"role": "user", "content": "hi"}], max_tokens=0) == "moonshotai"
-    check("a jarvis call whose estimated prompt cost would cross the budget is refused before sending",
-          refused and small_ok and m4.calls == 0)
+    refused = raises(lambda: m4.before(glm, big, max_tokens=0), jarvis_worker.BudgetExceeded)
+    small_ok = m4.before(glm, [{"role": "user", "content": "hi"}], max_tokens=0) == ""
+    out_refused = raises(lambda: m4.before(glm, [{"role": "user", "content": "hi"}], max_tokens=10_000), jarvis_worker.BudgetExceeded)
+    check("a call whose estimate (prompt and max output) at the spec's price would cross the budget is refused before sending",
+          refused and small_ok and out_refused and m4.calls == 0)
     m2 = jarvis_worker.Meter(spec, stream=io.StringIO())
-    check("a Kimi call is pinned to Moonshot; any other model is sent unpinned",
-          m2.route("moonshotai/kimi-k3") == "moonshotai" and m2.route("openai/gpt-oss-20b") == ""
-          and m2.route("anthropic/claude-haiku-5.5") == "")
-    check("a moonshotai/ id the spec does not price is refused", raises(lambda: m2.route("moonshotai/kimi-k9")))
-    r = R(0.0, 1_000_000, 0)
-    m3 = jarvis_worker.Meter({"budget_usd": 100, **{k: v for k, v in spec.items() if k != "budget_usd"}}, stream=io.StringIO())
-    m3.after("moonshotai/kimi-k3", r)
-    check("the Kimi floor applies per call, and to the reply the loop sees", m3.total == 3.0 and r.cost_usd == 3.0)
+    check("a moonshotai/ id is refused in the worker too, and a model with no price is refused, not estimated at 0",
+          raises(lambda: m2.before("moonshotai/kimi-k3"), jarvis_worker.BudgetExceeded)
+          and raises(lambda: m2.before("other/unpriced"), jarvis_worker.BudgetExceeded))
+    r = R(0.004, 1_000_000, 0)
+    m3 = jarvis_worker.Meter({**spec, "budget_usd": 100}, stream=io.StringIO())
+    m3.after(glm, r)
+    check("the running total is the reported cost, never floored at the estimate price", m3.total == 0.004 and r.cost_usd == 0.004)
     check("the rolebench Jarvis toolset has no delegation",
           not {"run_subagent", "run_fleet"} & set(jarvis_worker.TOOLS) and "run_command" in jarvis_worker.TOOLS)
-    s = runners.jarvis_spec(model="moonshotai/kimi-k3", prompt="p", cwd="/w", max_turns=3, budget_usd=0.2)
-    s2 = runners.jarvis_spec(model="openai/gpt-6-luna", prompt="p", cwd="/w", max_turns=3, budget_usd=None)
-    check("the spec pins and prices only the Kimi cell; a missing budget is the per-run cap",
-          s["pins"] == {"moonshotai/kimi-k3": "moonshotai"} and s["prices"]["moonshotai/kimi-k3"] == [3.0, 15.0]
-          and s2["pins"] == {} and s2["prices"] == {} and s2["budget_usd"] == config.PER_RUN_CAP_USD)
+    s = runners.jarvis_spec(model=glm, prompt="p", cwd="/w", max_turns=3, budget_usd=0.2, price_fn=lambda m: (0.5, 2.0))
+    s2 = runners.jarvis_spec(model=luna, prompt="p", cwd="/w", max_turns=3, budget_usd=None)
+    check("the spec prices the cell's model at its endpoint price and pins nothing; a missing budget is the per-run cap",
+          s["prices"] == {glm: [0.5, 2.0]} and "pins" not in s and s2["prices"] == {luna: [1.0, 5.0]}
+          and s2["budget_usd"] == config.PER_RUN_CAP_USD)
+    check("the spec refuses a Kimi id", raises(lambda: runners.jarvis_spec(model="moonshotai/kimi-k3", prompt="p", cwd="/w",
+                                                                            max_turns=1, budget_usd=0.1), config.UnknownModel))
+
+
+def test_prices(root: Path) -> None:
+    """The estimate's price: the most expensive endpoint, cached, never zero."""
+    reply = {"data": {"id": "z-ai/glm-5.3-flash", "endpoints": [
+        {"provider_name": "cheap", "pricing": {"prompt": "0.0000001", "completion": "0.0000004"}},
+        {"provider_name": "dear-in", "pricing": {"prompt": "0.0000009", "completion": "0.000001"}},
+        {"provider_name": "dear-out", "pricing": {"prompt": "0.0000002", "completion": "0.000003"}},
+        {"provider_name": "broken", "pricing": {"prompt": "n/a"}}]}}
+    p, c, n = prices.max_price(reply)
+    check("the estimate takes the highest prompt and the highest completion price over every endpoint",
+          abs(p - 0.9) < 1e-9 and abs(c - 3.0) < 1e-9 and n == 3)
+    check("a reply with no priced endpoint is an error, never a zero price",
+          raises(lambda: prices.max_price({"data": {"endpoints": [{"pricing": {}}]}}), prices.PriceError)
+          and raises(lambda: prices.max_price({"data": {}}), prices.PriceError))
+    urls = []
+
+    def fetch(url):
+        urls.append(url)
+        return reply
+    with env(ROLEBENCH_HOME=str(root / "prices-home")):
+        first = REAL_ENDPOINT_PRICE("z-ai/glm-5.3-flash", fetch=fetch, now=1000.0)
+        again = REAL_ENDPOINT_PRICE("z-ai/glm-5.3-flash", fetch=fetch, now=1000.0 + 3600)
+        check("the endpoints list is fetched once and cached",
+              first == again and len(urls) == 1 and urls[0] == "https://openrouter.ai/api/v1/models/z-ai/glm-5.3-flash/endpoints")
+        stale = REAL_ENDPOINT_PRICE("z-ai/glm-5.3-flash", fetch=_no_network, now=1000.0 + 2 * prices.CACHE_TTL_S)
+        check("a failed refetch of a stale price falls back to the cache", stale == first)
+        check("no cache and no fetch: the run is refused",
+              raises(lambda: REAL_ENDPOINT_PRICE("deepseek/deepseek-v4.1-flash", fetch=_no_network), prices.PriceError))
+        check("a model id that is not an OpenRouter id is refused before any fetch",
+              raises(lambda: REAL_ENDPOINT_PRICE("../../etc/passwd", fetch=fetch), prices.PriceError) and len(urls) == 1)
 
 
 def test_worker_env(root: Path) -> None:
@@ -489,21 +546,75 @@ def test_sandbox_argv(root: Path) -> None:
     check("every cell clears the environment and dies with its parent",
           all("--clearenv" in a and "--die-with-parent" in a and "--new-session" in a for a in argvs.values()))
 
-    # A1: network is gated. With ROLEBENCH_NET unset a claude/jarvis/judge cell is refused;
-    # ROLEBENCH_NET=none gives them no network; codex is exempt and keeps the host netns.
-    with env(ROLEBENCH_LOGIN_HOME=str(login), PATH=f"{fakebin}:{os.environ['PATH']}", ROLEBENCH_NET=None):
-        for p in ("claude", "jarvis", "judge"):
-            check(f"a {p} cell is refused with no ROLEBENCH_NET mode",
-                  raises(lambda p=p: sandbox.bwrap_argv(sandbox.Cell(p, work), ["true"]), sandbox.SandboxError))
-        check("a codex cell is not gated and keeps the host netns",
-              "--share-net" in sandbox.bwrap_argv(sandbox.Cell("codex", work), ["true"]))
-        check("ROLEBENCH_NET=pasta is refused until it is wired, never silently shared",
-              raises(lambda: sandbox.bwrap_argv(sandbox.Cell("claude", work), ["true"]), sandbox.SandboxError)
-              if (os.environ.update(ROLEBENCH_NET="pasta") or True) else False)
-        os.environ.pop("ROLEBENCH_NET", None)
+    # A1: network is gated. claude/jarvis/judge get pasta (the default) or, under
+    # ROLEBENCH_NET=none, no network; codex is exempt and keeps the host netns;
+    # any other mode is refused, and so is a missing pasta. Never the host netns.
     check("under ROLEBENCH_NET=none, claude/jarvis/judge get no shared netns; codex does",
           all("--share-net" not in a for a in (cl, jv, jd)) and "--share-net" in cx
           and all("--unshare-all" in a for a in argvs.values()))
+    with env(ROLEBENCH_LOGIN_HOME=str(login), PATH=f"{fakebin}:{os.environ['PATH']}", ROLEBENCH_NET="bogus"):
+        for p in ("claude", "jarvis", "judge"):
+            check(f"a {p} cell is refused under an unknown ROLEBENCH_NET mode",
+                  raises(lambda p=p: sandbox.bwrap_argv(sandbox.Cell(p, work), ["true"]), sandbox.SandboxError))
+        check("a codex cell is not gated and keeps the host netns",
+              "--share-net" in sandbox.bwrap_argv(sandbox.Cell("codex", work), ["true"]))
+    with env(ROLEBENCH_LOGIN_HOME=str(login), PATH=f"{fakebin}:{os.environ['PATH']}", ROLEBENCH_NET=None):
+        check("pasta is the default network mode", sandbox.net_mode() == "pasta")
+        if sandbox.pasta_available():
+            check(f"pasta available ({sandbox.pasta_available()})", False)
+            return
+        composed = {p: sandbox.cell_command(sandbox.Cell(p, work), ["true"], cred_fds={}) for p in sandbox.PROFILES}
+        saved = sandbox.PASTA
+        sandbox.PASTA = str(root / "no-such-pasta")
+        try:
+            missing = all(raises(lambda p=p: sandbox.bwrap_argv(sandbox.Cell(p, work), ["true"]), sandbox.SandboxError)
+                          for p in sandbox.NET_GATED)
+        finally:
+            sandbox.PASTA = saved
+    check("with pasta missing, a claude/jarvis/judge cell is refused, never given the host netns", missing)
+    check("claude, jarvis and judge cells run under pasta; codex and grade never do",
+          all(composed[p][1] == "pasta" and composed[p][0][0] == sandbox.PASTA for p in sandbox.NET_GATED)
+          and composed["codex"][1] == "host" and composed["grade"][1] == "none"
+          and all(sandbox.PASTA not in composed[p][0] for p in ("codex", "grade")))
+    full = composed["claude"][0]
+    dash = full.index("--")
+    flags = full[1:dash]
+    check("pasta's flags are exactly the pinned set (config-net, no map-gw, no host loopback or guest mapping, "
+          "DNS forward, IPv4 only, no ICMP/DHCP/RA)", tuple(flags) == sandbox.PASTA_FLAGS)
+    pairs = {flags[i]: flags[i + 1] for i in range(len(flags) - 1) if flags[i] in ("-t", "-u", "-T", "-U")}
+    check("no port is forwarded either way: -t, -u, -T and -U are all none (each defaults to auto)",
+          pairs == {"-t": "none", "-u": "none", "-T": "none", "-U": "none"}
+          and not any(f.startswith(("--tcp-ports", "--udp-ports", "--tcp-ns", "--udp-ns")) for f in flags))
+    check("pasta maps no address to the host: --no-map-gw, --map-host-loopback none, --map-guest-addr none",
+          "--no-map-gw" in flags and flags[flags.index("--map-host-loopback") + 1] == "none"
+          and flags[flags.index("--map-guest-addr") + 1] == "none")
+    inner = full[dash + 1:]
+    check("pasta runs netcell (isolated python) with the policy, then bwrap",
+          inner[1] == "-I" and inner[2] == str(sandbox.NETCELL) and inner[4] == "--" and inner[5] == sandbox.BWRAP)
+    policy = json.loads(inner[3])
+    host = sandbox.host_addresses()
+    check("the policy blocks every private, link-local, CGNAT and host-owned address, allows only TCP 443 and DNS",
+          set(sandbox.BLOCK_V4) <= set(policy["block"]) and set(host) <= set(policy["block"])
+          and {"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16", "100.64.0.0/10", "127.0.0.0/8"} <= set(policy["block"])
+          and policy["allow_tcp"] == [443] and policy["dns"] == sandbox.DNS_FORWARD)
+    bw = inner[5:]
+    check("bwrap in a pasta cell keeps pasta's netns but takes its own user namespace, the host uid and no capabilities",
+          "--share-net" in bw and "--unshare-user" in bw and bw[bw.index("--uid") + 1] == str(os.getuid())
+          and bw[bw.index("--cap-drop") + 1] == "ALL")
+    check("a pasta cell's resolv.conf names only pasta's DNS forwarder, with no search list and no AAAA",
+          sandbox.PASTA_RESOLV.splitlines()[0] == f"nameserver {sandbox.DNS_FORWARD}" and "search" not in sandbox.PASTA_RESOLV
+          and "no-aaaa" in sandbox.PASTA_RESOLV)
+    rules = netcell.rules(policy)
+    check("netcell's rule order: DNS to the forwarder, the blocks, TCP 443, then prohibit everything else",
+          [r["pref"] for r in rules] == sorted(r["pref"] for r in rules) and rules[-1] == {"pref": 120, "do": "prohibit"}
+          and {"pref": 110, "ipproto": "tcp", "dport": 443, "do": "main"} in rules
+          and sum(1 for r in rules if r["do"] == "main") == 3)
+    with env(ROLEBENCH_LOGIN_HOME=str(login)):
+        fds, header = sandbox.credential_header(sandbox.Cell("claude", work))
+    size, _, body = header.partition("\n")
+    check("a pasta cell's logins go to netcell on stdin (pasta closes inherited fds), at fds bwrap's --ro-bind-data names",
+          int(size) == len(body) and set(json.loads(body)) == {str(sandbox.CRED_FD_BASE)}
+          and list(fds.values()) == [sandbox.CRED_FD_BASE])
     u = sandbox.unit_argv(sandbox.unit_name("2026-x/y z"), ["echo"])
     check("each run is a named, capped transient unit", u[:4] == ["systemd-run", "--user", "--scope", "-q"]
           and "--unit=rolebench-2026-x-y-z" in u and "MemoryMax=3G" in u and "MemorySwapMax=0" in u and u[-1] == "echo")
@@ -573,18 +684,25 @@ def test_sandbox_escape(root: Path) -> None:
              f"if python3 -c \"import socket;s=socket.socket();s.settimeout(2);s.connect(('127.0.0.1',{port}))\" 2>/dev/null; then echo \"hostport=reachable\"; else echo \"hostport=unreachable\"; fi\n")
     script = _probe_script(probes, extra)
     results = {}
+    cells = [(p, "none") for p in ("claude", "codex", "jarvis", "grade")]
+    if not sandbox.pasta_available():
+        cells += [(p, "pasta") for p in ("claude", "jarvis", "judge")]
+    else:
+        check(f"pasta available for the escape probes ({sandbox.pasta_available()})", False)
     try:
         with env(OPENROUTER_API_KEY="sk-dummy-not-a-key", CLAUDE_CODE_SSE_PORT="1", ANTHROPIC_BASE_URL="http://x",
-                 ROLEBENCH_LOGIN_HOME=None, ROLEBENCH_NET="none"):
-            for profile in ("claude", "codex", "jarvis", "grade"):
+                 ROLEBENCH_LOGIN_HOME=None):
+            for profile, net in cells:
+                name = profile if net == "none" else f"{profile}+pasta"
                 try:
-                    rc, out, err, to = sandbox.launch(["/bin/sh", "-c", script], cell=sandbox.Cell(profile, work),
-                                                      run_id=f"check-escape-{profile}-{os.getpid()}", timeout_s=60)
+                    with env(ROLEBENCH_NET=net):
+                        rc, out, err, to = sandbox.launch(["/bin/sh", "-c", script], cell=sandbox.Cell(profile, work),
+                                                          run_id=f"check-escape-{profile}-{net}-{os.getpid()}", timeout_s=60)
                 except sandbox.SandboxError as exc:
                     rc, out, err, to = None, "", str(exc), False
-                results[profile] = _parse_probe(out)
+                results[name] = _parse_probe(out)
                 if rc != 0:
-                    print(f"    ({profile}: rc={rc} {err.strip()[:200]})")
+                    print(f"    ({name}: rc={rc} {err.strip()[:200]})")
     finally:
         close()
     print("    host has:", ", ".join(sorted(host_present - pidns_probes)) or "(none)")
@@ -599,7 +717,8 @@ def test_sandbox_escape(root: Path) -> None:
         check(f"{profile} cell: no OPENROUTER_API_KEY, CLAUDE_CODE_* or ANTHROPIC_* in a child's environment",
               r.get("or_key") == "no" and r.get("claude_env") == "no")
         check(f"{profile} cell: cannot ask the user systemd to start anything outside", r.get("systemd") == "no")
-        check(f"{profile} cell: the work tree is writable", r.get("work_rw") == "yes")
+        check(f"{profile} cell: the work tree is " + ("read-only" if profile.startswith("judge") else "writable"),
+              r.get("work_rw") == ("no" if profile.startswith("judge") else "yes"))
         # A3: PID namespace — the host's own pid and its environ are invisible, /proc/1 is the cell
         check(f"{profile} cell: the host PID namespace is not visible (no host pid, no host /proc/1/root)",
               r.get("host_pid") == "absent" and r.get("host_pid_env") == "absent" and r.get("proc1_root_home") == "absent"
@@ -611,42 +730,265 @@ def test_sandbox_escape(root: Path) -> None:
     for p in ("claude", "jarvis", "grade"):
         check(f"{p} cell (ROLEBENCH_NET=none): no network interface but lo, and a host port is unreachable",
               results[p].get("netdev") == "no" and results[p].get("hostport") == "unreachable")
-    check("only the claude cell holds the Claude login",
+    for p in [k for k in results if k.endswith("+pasta")]:
+        check(f"{p} cell: a host loopback port is unreachable (pasta forwards nothing)", results[p].get("hostport") == "unreachable")
+    pasta_cells = [k for k in results if k.endswith("+pasta")]
+    check("only the claude cell (and the judge) holds the Claude login, in both network modes",
           results["claude"].get("claude_login") == "present"
-          and all(results[p].get("claude_login") == "absent" for p in ("codex", "jarvis", "grade")))
+          and all(results[p].get("claude_login") == "absent" for p in ("codex", "jarvis", "grade"))
+          and all(results[p].get("claude_login") == ("absent" if p.startswith("jarvis") else "present") for p in pasta_cells))
     check("only the codex cell holds the Codex login (in its own CODEX_HOME)",
           results["codex"].get("codex_login") == "present"
-          and all(results[p].get("codex_login") == "absent" for p in ("claude", "jarvis", "grade")))
+          and all(results[p].get("codex_login") == "absent" for p in ("claude", "jarvis", "grade", *pasta_cells)))
+
+
+NET_PROBE = """import errno, json, os, socket, subprocess, sys, time
+spec = json.loads(sys.argv[1])
+r = {}
+def err(e):
+    return errno.errorcode.get(getattr(e, "errno", None) or 0, type(e).__name__)
+def conn(host, port, timeout=2.0):
+    s = socket.socket(); s.settimeout(timeout)
+    try:
+        s.connect((host, port)); return "OPEN"
+    except OSError as e:
+        return err(e)
+    finally:
+        s.close()
+def conn_retry(host, port, seconds):
+    # pasta's -T auto rescans the host's listeners every second: keep trying
+    deadline, last = time.monotonic() + seconds, ""
+    while time.monotonic() < deadline:
+        last = conn(host, port, 0.5)
+        if last == "OPEN":
+            return last
+        time.sleep(0.2)
+    return last
+r["lo_tcp"] = conn_retry("127.0.0.1", spec["lo_port"], spec.get("retry", 3.0))
+r["host_any"] = {a: conn(a, spec["any_port"]) for a in spec["host_addrs"]}
+r["host_lo_port"] = {a: conn(a, spec["lo_port"]) for a in spec["host_addrs"]}
+if spec.get("gateway"):
+    r["gw_any"] = conn(spec["gateway"], spec["any_port"])
+    r["gw_lo"] = conn(spec["gateway"], spec["lo_port"])
+r["private"] = {a: conn(a, 443, 1.0) for a in spec.get("private", [])}
+if spec.get("names"):
+    for name in spec["names"]:
+        try:
+            infos = socket.getaddrinfo(name, 443, type=socket.SOCK_STREAM)
+            r["dns_" + name] = sorted({i[0].name for i in infos})
+        except OSError as e:
+            r["dns_" + name] = "FAIL " + err(e)
+            continue
+        try:
+            socket.create_connection((name, 443), timeout=10).close(); r["tcp443_" + name] = "OPEN"
+        except OSError as e:
+            r["tcp443_" + name] = err(e)
+        v4 = [i[4][0] for i in infos if i[0] == socket.AF_INET]
+        r["tcp80_" + name] = conn(v4[0], 80) if v4 else "no v4"
+    u = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        u.sendto(b"x", (spec["host_addrs"][0], 53)); r["udp_host53"] = "SENT"
+    except OSError as e:
+        r["udp_host53"] = err(e)
+    a = socket.socket(socket.AF_UNIX)
+    try:
+        a.connect("\\0" + spec["abstract"]); r["abstract"] = "OPEN"
+    except OSError as e:
+        r["abstract"] = err(e)
+    l = socket.socket(); l.bind(("127.0.0.1", 0)); l.listen(1)
+    r["own_lo"] = conn("127.0.0.1", l.getsockname()[1])
+    r["capeff"] = [x.split()[1] for x in open("/proc/self/status") if x.startswith("CapEff")][0]
+    d = subprocess.run(["ip", "-4", "rule", "del", "pref", "120"], capture_output=True, text=True)
+    r["rule_del"] = d.returncode
+    r["prohibits"] = subprocess.run(["ip", "-4", "rule", "show"], capture_output=True, text=True).stdout.count("prohibit")
+    r["v6_addrs"] = subprocess.run(["ip", "-6", "-o", "addr", "show", "scope", "global"], capture_output=True, text=True).stdout.strip()
+    r["v6_link"] = [x for x in subprocess.run(["ip", "-6", "-o", "addr", "show"], capture_output=True, text=True).stdout.splitlines()
+                    if " lo " not in x]
+print("NETPROBE " + json.dumps(r))
+"""
+
+NODE_PROBE = """const net = require('net');
+const s = net.connect({host: 'api.anthropic.com', port: 443, timeout: 10000});
+s.on('connect', () => { console.log('NODEPROBE OPEN'); s.destroy(); });
+s.on('timeout', () => { console.log('NODEPROBE timeout'); s.destroy(); });
+s.on('error', (e) => console.log('NODEPROBE ' + e.code));
+"""
+
+
+def _gateway() -> str | None:
+    try:
+        routes = json.loads(subprocess.run(["ip", "-j", "-4", "route", "show", "default"], capture_output=True, text=True).stdout)
+        return routes[0].get("gateway")
+    except Exception:
+        return None
+
+
+def test_pasta_network(root: Path) -> None:
+    """A pasta cell against throwaway listeners (never a real port): nothing on
+    the host's loopback, its own addresses (where 0.0.0.0 services listen), the
+    gateway, or private/link-local/CGNAT space is reachable, nor an abstract
+    unix socket; DNS resolves and TCP 443 connects (TCP only, no request).
+    Positive controls show the listeners are live and the probes sensitive."""
+    if sandbox.available() or sandbox.pasta_available():
+        check(f"pasta cells can run ({sandbox.available() or sandbox.pasta_available()})", False)
+        return
+    import secrets
+    import socket
+    work = root / "w-pasta"
+    work.mkdir()
+    lo = socket.socket()
+    lo.bind(("127.0.0.1", 0))
+    lo.listen(64)
+    anyl = socket.socket()
+    anyl.bind(("0.0.0.0", 0))
+    anyl.listen(64)
+    abstract = "rolebench-pasta-" + secrets.token_hex(4)
+    ab = socket.socket(socket.AF_UNIX)
+    ab.bind("\0" + abstract)
+    ab.listen(8)
+    host_addrs = [a.split("/")[0] for a in sandbox.host_addresses() if not a.startswith("127.")]
+    gw = _gateway()
+    spec = {"lo_port": lo.getsockname()[1], "any_port": anyl.getsockname()[1], "host_addrs": host_addrs, "gateway": gw,
+            "private": ["10.0.0.1", "192.168.1.1", "172.16.0.1", "100.100.100.100", "169.254.169.254"],
+            "names": ["api.anthropic.com", "openrouter.ai"], "abstract": abstract}
+    (work / "netprobe.py").write_text(NET_PROBE)
+
+    def accepts():
+        n = 0
+        for sock in (lo, anyl, ab):
+            sock.setblocking(False)
+            while True:
+                try:
+                    c, _ = sock.accept()
+                    c.close()
+                    n += 1
+                except BlockingIOError:
+                    break
+        return n
+    try:
+        # positive control: from the host itself every listener answers
+        host = subprocess.run([sys.executable, str(work / "netprobe.py"), json.dumps({**spec, "names": [], "private": [], "retry": 0.5})],
+                              capture_output=True, text=True, timeout=60)
+        hr = json.loads(next((l for l in host.stdout.splitlines() if l.startswith("NETPROBE ")), "NETPROBE {}")[9:])
+        accepts()
+        # the pasta layer alone (no netcell policy): no forwarding, no gateway mapping
+        layer = subprocess.run([sandbox.PASTA, *sandbox.PASTA_FLAGS, "--", sys.executable, "-I", str(work / "netprobe.py"),
+                                json.dumps({**spec, "names": [], "private": []})], capture_output=True, text=True, timeout=90)
+        lr = json.loads(next((l for l in layer.stdout.splitlines() if l.startswith("NETPROBE ")), "NETPROBE {}")[9:])
+        layer_accepts = accepts()
+        # the whole cell
+        with env(ROLEBENCH_NET="pasta", ROLEBENCH_LOGIN_HOME=None):
+            rc, out, err, _ = sandbox.launch(["python3", str(work / "netprobe.py"), json.dumps(spec)],
+                                             cell=sandbox.Cell("jarvis", work), run_id=f"check-pasta-{os.getpid()}", timeout_s=120)
+            node_out = node_err = None
+            if os.path.exists("/usr/bin/node"):
+                (work / "nodeprobe.js").write_text(NODE_PROBE)
+                _, node_out, node_err, _ = sandbox.launch(["/usr/bin/node", str(work / "nodeprobe.js")], cell=sandbox.Cell("claude", work),
+                                                   run_id=f"check-pasta-node-{os.getpid()}", timeout_s=60)
+        cr = json.loads(next((l for l in out.splitlines() if l.startswith("NETPROBE ")), "NETPROBE {}")[9:])
+        cell_accepts = accepts()
+    finally:
+        for sock in (lo, anyl, ab):
+            sock.close()
+    print(f"    host control: {hr}")
+    print(f"    pasta layer only: lo={lr.get('lo_tcp')} gw_lo={lr.get('gw_lo')} host_any={lr.get('host_any')} accepts={layer_accepts}")
+    print(f"    pasta cell: {json.dumps(cr)[:1500]} accepts={cell_accepts} rc={rc} {err.strip()[-300:]}")
+    check("positive control: from the host the loopback and 0.0.0.0 listeners answer on every host address",
+          hr.get("lo_tcp") == "OPEN" and hr.get("host_any") and all(v == "OPEN" for v in hr["host_any"].values()))
+    check("pasta layer alone: host loopback is not forwarded (-T none), even after its 1 s rescan",
+          lr.get("lo_tcp") not in (None, "OPEN"), layer.stderr[-300:])
+    check("pasta layer alone: the gateway address is not mapped to host loopback (--no-map-gw)",
+          gw is None or lr.get("gw_lo") not in (None, "OPEN"))
+    check("cell: a host 127.0.0.1 listener is unreachable (retried past pasta's rescan)", cr.get("lo_tcp") not in (None, "OPEN"))
+    check("cell: a 0.0.0.0 listener is unreachable on every host address (eth0 and the rest)",
+          cr.get("host_any") and all(v != "OPEN" for v in cr["host_any"].values())
+          and all(v != "OPEN" for v in cr.get("host_lo_port", {}).values()))
+    check("cell: the gateway is unreachable (both listeners' ports)",
+          gw is None or (cr.get("gw_any") not in (None, "OPEN") and cr.get("gw_lo") not in (None, "OPEN")))
+    check("cell: private, CGNAT and link-local addresses are prohibited before any packet leaves",
+          cr.get("private") and all(v == "EACCES" for v in cr["private"].values()))
+    check("cell: no listener saw a single connection from a cell", cell_accepts == 0, str(cell_accepts))
+    if any(v == "OPEN" for v in lr.get("host_any", {}).values()):
+        print("    (pasta alone still reaches a host address that is not on its interface; netcell's policy is what closes it)")
+    check("cell: an abstract unix socket on the host is unreachable (its own netns)", cr.get("abstract") not in (None, "OPEN"))
+    check("cell: DNS resolves both API hosts, IPv4 only", all(cr.get(f"dns_{n}") == ["AF_INET"] for n in spec["names"]),
+          str({n: cr.get(f"dns_{n}") for n in spec["names"]}))
+    check("cell: TCP 443 connects to api.anthropic.com and openrouter.ai (connect only, no request)",
+          all(cr.get(f"tcp443_{n}") == "OPEN" for n in spec["names"]))
+    check("cell: any other port to the internet is prohibited (TCP 80)", all(cr.get(f"tcp80_{n}") == "EACCES" for n in spec["names"]))
+    check("cell: UDP to the host's resolver directly is prohibited (DNS only through pasta's forwarder)", cr.get("udp_host53") == "EACCES")
+    check("cell: its own loopback still works (suites can bind 127.0.0.1)", cr.get("own_lo") == "OPEN")
+    check("cell: no capabilities, so the egress rules cannot be changed from inside",
+          cr.get("capeff") == "0000000000000000" and cr.get("rule_del") not in (None, 0) and cr.get("prohibits", 0) >= len(sandbox.BLOCK_V4) + 3)
+    check("cell: no IPv6 address but loopback", cr.get("v6_addrs") == "" and cr.get("v6_link") == [])
+    if node_out is not None:
+        check("cell: Node connects to api.anthropic.com:443 too (its own resolver path)", "NODEPROBE OPEN" in node_out,
+              (node_out + node_err)[-300:])
+
+
+def test_netcell_fail_closed(root: Path) -> None:
+    """netcell runs nothing unless the policy is in place: outside a pasta
+    namespace (no CAP_NET_ADMIN), with a bad policy, or with a truncated
+    credential header it exits 125 and the command never starts."""
+    if os.geteuid() == 0:
+        print("    (netcell fail-closed test skipped as root: it would touch the host's rules)")
+        return
+    marker = root / "netcell-ran"
+    policy = json.dumps(sandbox.pasta_policy())
+    cmd = [sys.executable, "-I", str(sandbox.NETCELL)]
+    host = subprocess.run(cmd + [policy, "--", "/usr/bin/touch", str(marker)], input="2\n{}", capture_output=True,
+                          text=True, timeout=30)
+    check("netcell outside pasta's namespace (no CAP_NET_ADMIN) refuses and starts nothing",
+          host.returncode == netcell.EXIT_REFUSED and not marker.exists() and "refused" in host.stderr, host.stderr[-200:])
+    if not sandbox.pasta_available():
+        inner = [sandbox.PASTA, *sandbox.PASTA_FLAGS, "--", *cmd]
+        bad = subprocess.run(inner + [json.dumps({**sandbox.pasta_policy(), "allow_tcp": [0]}), "--", "/usr/bin/touch", str(marker)],
+                             input="2\n{}", capture_output=True, text=True, timeout=60)
+        trunc = subprocess.run(inner + [policy, "--", "/usr/bin/touch", str(marker)], input="40\n{}", capture_output=True,
+                               text=True, timeout=60)
+        good = subprocess.run(inner + [policy, "--", "/usr/bin/touch", str(marker)], input="2\n{}", capture_output=True,
+                              text=True, timeout=60)
+        check("inside pasta: a bad policy or a truncated credential header refuses with 125 and runs nothing",
+              bad.returncode == netcell.EXIT_REFUSED and trunc.returncode == netcell.EXIT_REFUSED, bad.stderr[-200:] + trunc.stderr[-200:])
+        check("inside pasta: a good policy and header run the command (the control)", good.returncode == 0 and marker.exists(),
+              good.stderr[-200:])
 
 
 def test_unit_kill(root: Path) -> None:
-    """M7: a timeout kills the whole unit, a setsid child included."""
+    """M7: a timeout kills the whole unit, a setsid child included, and in a
+    pasta cell pasta and netcell's bwrap too (pasta's own command line carries
+    the marker, so a surviving pasta is a survivor)."""
     if sandbox.available():
         return
-    marker = str(random.randint(400000, 499999))
-    work = root / "w-kill"
-    work.mkdir()
-    t = time.time()
-    rc, out, err, timed_out = sandbox.launch(
-        ["/bin/sh", "-c", f"setsid sleep {marker} & sleep {marker}"], cell=sandbox.Cell("grade", work),
-        run_id=f"check-kill-{os.getpid()}", timeout_s=2)
+    cells = [("grade", "none")] + ([("jarvis", "pasta")] if not sandbox.pasta_available() else [])
+    for profile, net in cells:
+        marker = str(random.randint(400000, 499999))
+        work = root / f"w-kill-{net}"
+        work.mkdir()
+        t = time.time()
+        run_id = f"check-kill-{net}-{os.getpid()}"
+        with env(ROLEBENCH_NET=net):
+            rc, out, err, timed_out = sandbox.launch(
+                ["/bin/sh", "-c", f"setsid sleep {marker} & sleep {marker}"], cell=sandbox.Cell(profile, work),
+                run_id=run_id, timeout_s=2)
 
-    def survivors():
-        found = []
-        for p in Path("/proc").iterdir():
-            if p.name.isdigit():
-                try:
-                    if marker in (p / "cmdline").read_bytes().decode(errors="replace"):
-                        found.append(p.name)
-                except OSError:
-                    pass
-        return found
-    deadline = time.monotonic() + 10
-    while survivors() and time.monotonic() < deadline:
-        time.sleep(0.1)
-    check("a timeout is reported quickly and the unit's setsid child dies too",
-          timed_out and time.time() - t < 20 and survivors() == [] and
-          sandbox.wait_unit_gone(sandbox.unit_name(f"check-kill-{os.getpid()}")), f"survivors {survivors()}")
+        def survivors():
+            found = []
+            for p in Path("/proc").iterdir():
+                if p.name.isdigit():
+                    try:
+                        if marker in (p / "cmdline").read_bytes().decode(errors="replace"):
+                            found.append(p.name)
+                    except OSError:
+                        pass
+            return found
+        deadline = time.monotonic() + 10
+        while survivors() and time.monotonic() < deadline:
+            time.sleep(0.1)
+        check(f"{profile} cell ({net}): a timeout is reported quickly and the unit's setsid child dies too"
+              + (", pasta included" if net == "pasta" else ""),
+              timed_out and time.time() - t < 20 and survivors() == [] and
+              sandbox.wait_unit_gone(sandbox.unit_name(run_id)), f"survivors {survivors()}")
 
 
 def test_fake_clis(root: Path) -> None:
@@ -709,6 +1051,17 @@ def test_fake_clis(root: Path) -> None:
           and (work / "codex-auth.txt").read_text().strip() == "auth=present" and cx.text == "done", cx.error)
     check("codex tokens split: input excludes the cached tokens it includes",
           cx.summary()["token_split"] == {"input": 60, "cached": 40, "output": 5})
+    if not sandbox.pasta_available():
+        for f in ("claude-cred.json", "claude-stdin.txt", "claude-env.txt"):
+            (work / f).unlink(missing_ok=True)
+        with env(PATH=f"{fake}:{os.environ['PATH']}", ROLEBENCH_LOGIN_HOME=str(login), ROLEBENCH_NET="pasta"):
+            pres = runners.run_claude(model="haiku", prompt="PASTA PROMPT \u00e9", cwd=work, timeout_s=60, max_turns=3,
+                                      run_id=f"check-claude-pasta-{os.getpid()}")
+        pcred = json.loads((work / "claude-cred.json").read_text()) if (work / "claude-cred.json").exists() else {}
+        check("in a pasta cell the claude adapter gets the trimmed 0400 login through netcell, and the prompt intact",
+              "accessToken" in pcred.get("claudeAiOauth", {}) and "refreshToken" not in pcred.get("claudeAiOauth", {})
+              and pcred.get("_perm") in ("400", None) and (work / "claude-stdin.txt").read_text() == "PASTA PROMPT \u00e9"
+              and pres.text == "ok", pres.error)
     with env(ROLEBENCH_LOGIN_HOME=str(login), ROLEBENCH_NET="none"):
         (login / ".claude" / ".credentials.json").write_text(json.dumps({"claudeAiOauth": {
             "accessToken": "sk-ant-dummy", "expiresAt": (time.time() + 60) * 1000}}))
@@ -829,6 +1182,24 @@ def test_env_and_quota() -> None:
     check("a reader that raises is unknown, so skipped", quota.guard("codex", lambda p: 1 / 0)[0] is True)
     check("a quota with no measured window is unknown", quota.guard("claude", lambda p: {"windows": [{"used_percent": None}]})[0] is True)
     check("the jarvis harness has no quota guard", quota.guard("jarvis", lambda p: hot) == (False, ""))
+    at = lambda pct: (lambda p: {"windows": [{"name": "weekly", "used_percent": pct}]})
+    check("the override lifts the 75% guard", quota.guard("claude", at(90), override="ok") == (False, ""))
+    check("the override never lifts the 97% ceiling (claude and codex)",
+          quota.guard("claude", at(97), override="ok")[0] is True and quota.guard("codex", at(99), override="ok")[0] is True
+          and "ceiling" in quota.guard("claude", at(97), override="ok")[1])
+    check("the ceiling defaults to 97", config.QUOTA_CEILING == 97.0 and quota.ceiling() == 97.0)
+    check("the override does not run blind: unknown quota still skips",
+          quota.guard("claude", lambda p: None, override="ok")[0] is True)
+    with env(ROLEBENCH_QUOTA_CEILING="80"):
+        check("ROLEBENCH_QUOTA_CEILING sets the ceiling", quota.guard("claude", at(85), override="ok")[0] is True
+              and quota.guard("claude", at(79), override="ok")[0] is False)
+    for bad in ("abc", "0", "-5", "101", "nan", "inf"):
+        with env(ROLEBENCH_QUOTA_CEILING=bad):
+            check(f"ROLEBENCH_QUOTA_CEILING={bad} fails closed", quota.guard("claude", at(1), override="ok")[0] is True)
+    check("a stale window does not count toward the ceiling either",
+          quota.guard("claude", lambda p: {"windows": [{"used_percent": 99, "resets_at": 1}, {"used_percent": 5}]}, override="ok") == (False, ""))
+    check("readings are per provider and window, None when unknown",
+          quota.readings(["claude", "codex"], lambda p: cold if p == "claude" else None) == {"claude": {"5h": 40.0}, "codex": None})
     try:
         from jarvis.v2 import diff_review
         check("threshold matches the Diff quick review", diff_review.THRESHOLD == config.QUOTA_THRESHOLD)
@@ -1033,36 +1404,48 @@ def test_review_flow(shas, root: Path) -> None:
     check("run.json keeps the random snapshot name and the build-time shas",
           run["snapshot"].endswith(Path(run["snapshot"]).name) and run["shas"]["change"] and run["hygiene"]["after_reset"] == [])
 
-    j = flows.review_once(deps, case, harness="jarvis", model="moonshotai/kimi-k3", n=2)
+    glm, ds, luna = "z-ai/glm-5.3-flash", "deepseek/deepseek-v4.1-flash", "openai/gpt-6-luna"
+    j = flows.review_once(deps, case, harness="jarvis", model=glm, n=2)
     check("a jarvis cell is given a budget from the ledger", deps.runners["jarvis"].calls[0]["budget"] == 0.5)
     check("a jarvis run is charged to the ledger", abs(deps.get_ledger().spent() - 0.3) < 1e-9)
-    j2 = flows.review_once(deps, case, harness="jarvis", model="moonshotai/kimi-k3", n=3)
+    j2 = flows.review_once(deps, case, harness="jarvis", model=glm, n=3)
     j3 = flows.review_once(deps, case, harness="jarvis", model="other/model", n=4)
     check("the budget is whatever the total cap leaves", deps.runners["jarvis"].calls[1]["budget"] == 0.5 and j3["result"] in ("ok", "skipped"))
+    check("a jarvis-only run reads no quota", j["quota_before"] == {} and "quota_after" not in j)
     over = fake_runner([REVIEW_REPLY], cost=0.6)
     deps2 = flows.Deps(runners={"jarvis": over}, quota_override=NO_QUOTA, repo=shas["repo"], ledger=spend.Ledger(root / "led2.json", 10, 0.5))
     o1 = flows.review_once(deps2, case, harness="jarvis", model="m/over", n=1)
     o2 = flows.review_once(deps2, case, harness="jarvis", model="m/over", n=2)
     check("a run over the per-run cap is marked, and its model is aborted", o1["result"] == "over-cap" and o2["result"] == "skipped" and "per-run cap" in o2["reason"])
-    deps3 = flows.Deps(runners={"jarvis": fake_runner([REVIEW_REPLY], cost=0.0, tokens={"prompt_tokens": 1_000_000, "completion_tokens": 0})},
+    deps3 = flows.Deps(runners={"jarvis": fake_runner([REVIEW_REPLY], cost=0.001, tokens={"prompt_tokens": 1_000_000, "completion_tokens": 0})},
                        quota_override=NO_QUOTA, repo=shas["repo"], ledger=spend.Ledger(root / "led3.json", 10, 100))
-    flows.review_once(deps3, case, harness="jarvis", model="moonshotai/kimi-k3", n=1)
-    check("Kimi is charged at $3 per M input even when the reported cost is 0", abs(deps3.get_ledger().spent() - 3.0) < 1e-9)
+    flows.review_once(deps3, case, harness="jarvis", model=ds, n=1)
+    check("the ledger settles on reported usage, not on the estimate price", abs(deps3.get_ledger().spent() - 0.001) < 1e-9)
     deps4 = flows.Deps(runners={"jarvis": fake_runner([REVIEW_REPLY], cost=0.0, timed_out=True)}, quota_override=NO_QUOTA,
                        repo=shas["repo"], ledger=spend.Ledger(root / "led4.json", 10, 0.5))
-    flows.review_once(deps4, case, harness="jarvis", model="openai/gpt-6-luna", n=1)
+    flows.review_once(deps4, case, harness="jarvis", model=luna, n=1)
     check("a jarvis run that timed out is charged its whole reservation", abs(deps4.get_ledger().spent() - 0.5) < 1e-9
           and deps4.get_ledger().pending() == {})
     deps5 = flows.Deps(runners={"jarvis": fake_runner([REVIEW_REPLY], cost=0.01, spend_usd=0.2)}, quota_override=NO_QUOTA,
                        repo=shas["repo"], ledger=spend.Ledger(root / "led5.json", 10, 0.5))
-    flows.review_once(deps5, case, harness="jarvis", model="openai/gpt-6-luna", n=1)
+    flows.review_once(deps5, case, harness="jarvis", model=luna, n=1)
     check("the worker's running total (sub-agents included) wins over a lower reported cost",
           abs(deps5.get_ledger().spent() - 0.2) < 1e-9)
     deps6 = flows.Deps(runners={"jarvis": fake_runner([REVIEW_REPLY])}, quota_override=NO_QUOTA, repo=shas["repo"],
                        ledger=spend.Ledger(root / "led6.json", 10, 0.5))
-    k9 = flows.review_once(deps6, case, harness="jarvis", model="moonshotai/kimi-k9", n=1)
-    check("an unknown Kimi id is skipped before any spend", k9["result"] == "skipped" and "refused" in k9["reason"]
-          and deps6.runners["jarvis"].calls == [])
+    k3 = flows.review_once(deps6, case, harness="jarvis", model="moonshotai/kimi-k3", n=1)
+    check("a Kimi id (even K3, now off the matrix) is skipped before any spend",
+          k3["result"] == "skipped" and "refused" in k3["reason"] and deps6.runners["jarvis"].calls == []
+          and deps6.get_ledger().pending() == {} and deps6.get_ledger().spent() == 0)
+
+    def no_price(model):
+        raise prices.PriceError(f"no endpoint price for {model}")
+    deps7 = flows.Deps(runners={"jarvis": fake_runner([REVIEW_REPLY])}, quota_override=NO_QUOTA, repo=shas["repo"],
+                       ledger=spend.Ledger(root / "led7.json", 10, 0.5), price_fn=no_price)
+    np_ = flows.review_once(deps7, case, harness="jarvis", model=glm, n=1)
+    check("a jarvis model with no endpoint price is skipped before any reservation or call",
+          np_["result"] == "skipped" and "no endpoint price" in np_["reason"] and deps7.runners["jarvis"].calls == []
+          and not (root / "led7.json").exists())
 
     hot = flows.Deps(runners={"claude": fake_runner([REVIEW_REPLY])}, repo=shas["repo"],
                      quota_reader=lambda p: {"windows": [{"name": "weekly", "used_percent": 91}]})
@@ -1074,10 +1457,42 @@ def test_review_flow(shas, root: Path) -> None:
     u = flows.review_once(unk, case, harness="claude", model="opus")
     check("an unknown quota skips the cell (fail closed)", u["result"] == "skipped" and "unknown" in u["reason"]
           and unk.runners["claude"].calls == [])
-    ovr = flows.Deps(runners={"claude": fake_runner([REVIEW_REPLY])}, repo=shas["repo"], quota_reader=lambda p: None,
-                     quota_override="owner said so")
+    ovr = flows.Deps(runners={"claude": fake_runner([REVIEW_REPLY])}, repo=shas["repo"],
+                     quota_reader=lambda p: {"windows": [{"name": "weekly", "used_percent": 91}]}, quota_override="owner said so")
     uo = flows.review_once(ovr, case, harness="claude", model="opus")
-    check("the owner's override runs it, recorded in run.json", uo["result"] == "ok" and uo["quota_guard"] == "off: owner said so")
+    check("the owner's override runs a cell over the 75% guard, recorded in run.json",
+          uo["result"] == "ok" and uo["quota_guard"] == "off: owner said so")
+    check("quota_before and quota_after are recorded per window, in run.json and the log row",
+          uo["quota_before"] == {"claude": {"weekly": 91.0}} and uo["quota_after"] == {"claude": {"weekly": 91.0}}
+          and json.loads(config.log_path().read_text().splitlines()[-1])["quota_before"] == {"claude": {"weekly": 91.0}})
+    blind = flows.Deps(runners={"claude": fake_runner([REVIEW_REPLY])}, repo=shas["repo"], quota_reader=lambda p: None,
+                       quota_override="owner said so")
+    ub = flows.review_once(blind, case, harness="claude", model="opus")
+    check("under the override an unknown quota is still refused (the ceiling cannot be checked)",
+          ub["result"] == "skipped" and "unknown" in ub["reason"] and blind.runners["claude"].calls == [])
+    for used, runs in ((96.9, True), (97, False), (99.5, False)):
+        cd = flows.Deps(runners={"claude": fake_runner([REVIEW_REPLY])}, repo=shas["repo"], quota_override="owner said so",
+                        quota_reader=lambda p, used=used: {"windows": [{"name": "5h", "used_percent": 10},
+                                                                       {"name": "weekly", "used_percent": used}]})
+        cr = flows.review_once(cd, case, harness="claude", model="opus")
+        check(f"under the override, weekly at {used}%: " + ("runs (below the 97% ceiling)" if runs else "refused at the ceiling"),
+              (cr["result"] == "ok") if runs else (cr["result"] == "skipped" and "ceiling" in cr["reason"]
+                                                   and cd.runners["claude"].calls == []), cr.get("reason", ""))
+    with env(ROLEBENCH_QUOTA_CEILING="90"):
+        c90 = flows.review_once(ovr, case, harness="claude", model="opus")
+    with env(ROLEBENCH_QUOTA_CEILING="250"):
+        cbad = flows.review_once(ovr, case, harness="claude", model="opus")
+    check("ROLEBENCH_QUOTA_CEILING lowers the ceiling; a value outside (0, 100] fails closed",
+          c90["result"] == "skipped" and "90% ceiling" in c90["reason"] and cbad["result"] == "skipped"
+          and "fail closed" in cbad["reason"])
+    # the ceiling is checked before every model step: a window that crosses it between the
+    # up-front check and the step refuses the step
+    climbing = iter([50, 50, 98, 98, 98, 98])
+    cl_deps = flows.Deps(runners={"claude": fake_runner([REVIEW_REPLY])}, repo=shas["repo"], quota_override="owner said so",
+                         quota_reader=lambda p: {"windows": [{"name": "weekly", "used_percent": next(climbing, 98)}]})
+    clr = flows.review_once(cl_deps, case, harness="claude", model="opus")
+    check("a window that reaches the ceiling before the model step refuses that step, under the override",
+          clr["result"] == "skipped" and "ceiling" in clr["reason"] and cl_deps.runners["claude"].calls == [])
     # The up-front refusal keys on "is this the real runner". Stand-ins take the
     # real runners' places in REGISTRY, so the identity check sees "real" while
     # a regression (refusal removed) can only ever reach a harmless fake.
@@ -1090,12 +1505,16 @@ def test_review_flow(shas, root: Path) -> None:
         return run
     saved = dict(runners.REGISTRY)
     saved_claude = runners.run_claude
+    saved_pasta = sandbox.PASTA
     try:
         for k in ("claude", "codex", "jarvis"):
             runners.REGISTRY[k] = standin(k)
         runners.run_claude = standin("judge")
-        for net in ("none", None, "pasta"):
-            with env(ROLEBENCH_NET=net):
+        for net, why in (("none", "no network, so no API access"), ("bogus", "is not a mode"),
+                         ("pasta-missing", "not found (install the passt package)")):
+            if net == "pasta-missing":
+                sandbox.PASTA = str(root / "no-such-pasta")
+            with env(ROLEBENCH_NET="pasta" if net == "pasta-missing" else net):
                 led = spend.Ledger(root / f"led-net-{net}.json", 10, 0.5)
                 real = flows.Deps(runners=dict(runners.REGISTRY), repo=shas["repo"], ledger=led,
                                   quota_reader=lambda p: reads.append(p) or {"windows": [{"used_percent": 1}]})
@@ -1103,18 +1522,30 @@ def test_review_flow(shas, root: Path) -> None:
                 rj = flows.review_once(real, case, harness="jarvis", model="openai/gpt-6-luna")
                 ri = flows.implement_once(real, impl_case(shas), harness="codex", model="m", reviewer_harness="claude",
                                           reviewer_model="opus")
+            sandbox.PASTA = saved_pasta
             check(f"ROLEBENCH_NET={net}: real claude/jarvis runs (and a claude reviewer) are refused up front",
-                  all(r["result"] == "skipped" and "no API access until pasta is wired" in r["reason"] for r in (rc, rj, ri)))
+                  all(r["result"] == "skipped" and why in r["reason"] for r in (rc, rj, ri)), rc.get("reason", ""))
             check(f"ROLEBENCH_NET={net}: refused before any quota read, ledger reservation or runner call",
                   reads == [] and ran == [] and not (root / f"led-net-{net}.json").exists())
         with env(ROLEBENCH_NET="none"):
             jr = raises(lambda: judge.judge_run(config.runs_root() / run["run_id"], case, force=True,
                                                 quota_reader=lambda p: reads.append(p)), judge.JudgeError)
         check("the real judge is refused up front too, before its quota read", jr and reads == [] and ran == [])
+        if not sandbox.pasta_available():
+            for net in ("pasta", None):
+                with env(ROLEBENCH_NET=net):
+                    real = flows.Deps(runners=dict(runners.REGISTRY), repo=shas["repo"],
+                                      ledger=spend.Ledger(root / f"led-net-ok-{net}.json", 10, 0.5),
+                                      quota_reader=lambda p: {"windows": [{"used_percent": 1}]})
+                    ok_c = flows.review_once(real, case, harness="claude", model="haiku")
+                    ok_j = flows.review_once(real, case, harness="jarvis", model="openai/gpt-6-luna")
+                check(f"ROLEBENCH_NET={net or 'unset'} (pasta): real claude and jarvis runs are no longer refused up front",
+                      ok_c["result"] == "ok" and ok_j["result"] == "ok", ok_c.get("reason", ""))
     finally:
         runners.REGISTRY.clear()
         runners.REGISTRY.update(saved)
         runners.run_claude = saved_claude
+        sandbox.PASTA = saved_pasta
     bad = flows.Deps(runners={"claude": fake_runner(["no block at all"])}, quota_override=NO_QUOTA, repo=shas["repo"])
     check("a reply without a findings block is 'unparsed'", flows.review_once(bad, case, harness="claude", model="x")["result"] == "unparsed")
 
@@ -1173,6 +1604,26 @@ def test_review_flow(shas, root: Path) -> None:
     hot_judge = raises(lambda: judge.judge_run(config.runs_root() / rm["run_id"], case, judge_fn=fake_judge,
                                                quota_reader=lambda p: None), judge.JudgeError)
     check("the judge fails closed on unknown quota", hot_judge)
+    jcalls = []
+
+    def counting_judge(prompt, cwd):
+        jcalls.append(1)
+        return "not json", 0.0
+    at_ceiling = raises(lambda: judge.judge_run(config.runs_root() / rm["run_id"], case, judge_fn=counting_judge, force=True,
+                                                quota_override="owner said so",
+                                                quota_reader=lambda p: {"windows": [{"name": "weekly", "used_percent": 97}]}),
+                        judge.JudgeError)
+    check("under the override, a judge call at the ceiling is refused before it is made", at_ceiling and jcalls == [])
+    rising = iter([50, 50, 98])
+    retry_refused = raises(lambda: judge.judge_run(config.runs_root() / rm["run_id"], case, judge_fn=counting_judge, force=True,
+                                                   quota_override="owner said so",
+                                                   quota_reader=lambda p: {"windows": [{"name": "weekly",
+                                                                                        "used_percent": next(rising, 98)}]}),
+                           judge.JudgeError)
+    check("the ceiling is checked again before the judge's retry", retry_refused and jcalls == [1])
+    jdoc = json.loads((rdir / "judge.json").read_text())
+    check("judge.json records the quota before and after", jdoc["quota_before"] == {"claude": {"5h": 10.0, "weekly": 20.0}}
+          and jdoc["quota_after"] == {"claude": {"5h": 10.0, "weekly": 20.0}})
     always_bad = lambda prompt, cwd: ("{}", 0.0)
     rd2 = config.runs_root() / uo["run_id"]
     check("a judge that is invalid twice fails the run, not the bench", raises(lambda: judge.judge_run(rd2, case, judge_fn=always_bad, quota_override=NO_QUOTA), judge.JudgeError)
@@ -1275,12 +1726,28 @@ def test_implement_flow(shas, root: Path) -> None:
 
     def warming(p):
         reads.append(p)
-        return {"windows": [{"name": "5h", "used_percent": 10 if len(reads) <= 3 else 90}]}
+        # two reads for quota_before (claude, codex), then the up-front guards and round 0's implementer
+        return {"windows": [{"name": "5h", "used_percent": 10 if len(reads) <= 5 else 90}]}
     q = flows.implement_once(flows.Deps(runners={"claude": fake_runner(["x"], edits=lambda n, c: None), "codex": fake_runner([med])},
                                         repo=shas["repo"], quota_reader=warming, suite_runner=lambda g, r: (False, "f")),
                              icase, harness="claude", model="haiku", reviewer_harness="codex", reviewer_model="m")
     check("the quota is re-checked per implement round: a window that heats up stops the run",
           q["result"] == "partial" and "quota" in q["reason"] and len(q["rounds"]) < 3)
+    check("an implement run records quota before and after for both roles' providers",
+          q["quota_before"] == {"claude": {"5h": 10.0}, "codex": {"5h": 10.0}}
+          and q["quota_after"] == {"claude": {"5h": 90.0}, "codex": {"5h": 90.0}})
+    ceil_reads = []
+
+    def to_ceiling(p):
+        ceil_reads.append(p)
+        return {"windows": [{"name": "weekly", "used_percent": 80 if len(ceil_reads) <= 5 else 97}]}
+    qc = flows.implement_once(flows.Deps(runners={"claude": fake_runner(["x"], edits=lambda n, c: None), "codex": fake_runner([med])},
+                                         repo=shas["repo"], quota_reader=to_ceiling, quota_override="owner said so",
+                                         suite_runner=lambda g, r: (False, "f")),
+                              icase, harness="claude", model="haiku", reviewer_harness="codex", reviewer_model="m")
+    check("under the override, a window reaching the ceiling mid-run refuses the next model step",
+          qc["result"] == "partial" and "ceiling" in qc["reason"] and len(qc["rounds"]) == 1
+          and qc["rounds"][0]["reviewer"] is None)
 
     flaky_calls = []
 
@@ -1379,10 +1846,13 @@ def main() -> int:
         test_snapshot(shas, root)
         test_spend(root)
         test_worker_meter(root)
+        test_prices(root)
         test_worker_env(root)
         test_parsers(root)
         test_sandbox_argv(root)
         test_sandbox_escape(root)
+        test_pasta_network(root)
+        test_netcell_fail_closed(root)
         test_unit_kill(root)
         test_fake_clis(root)
         test_codex_loopback(root)

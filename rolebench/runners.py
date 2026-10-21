@@ -298,21 +298,26 @@ def openrouter_key() -> str | None:
     return None
 
 
-def jarvis_spec(*, model, prompt, cwd, max_turns, budget_usd) -> dict:
-    """What the worker is told. Raises config.UnknownModel for an unpriced Kimi id."""
-    price = config.price_override(model)
-    pin = config.provider_pin(model)
+def jarvis_spec(*, model, prompt, cwd, max_turns, budget_usd, price_fn=None) -> dict:
+    """What the worker is told. Raises config.UnknownModel for a refused (Kimi)
+    id and prices.PriceError when no endpoint price is known. `prices` is the
+    model's most expensive OpenRouter endpoint, for the worker's
+    refuse-before-sending estimate only (spend settles on reported usage)."""
+    from . import prices
+    config.check_model(model)
+    price = (price_fn or prices.endpoint_price)(model)
     return {"model": model, "prompt": prompt, "workspace": str(cwd), "max_turns": max_turns,
             "budget_usd": float(config.PER_RUN_CAP_USD if budget_usd is None else budget_usd),
-            "prices": {model: list(price)} if price else {}, "pins": {model: pin} if pin else {},
-            "io": str(sandbox.IO)}
+            "prices": {model: list(price)}, "io": str(sandbox.IO)}
 
 
 def run_jarvis(*, model, prompt, cwd, timeout_s, max_turns, budget_usd=None, out_dir=None,
-               run_id=None, launch=None, key_fn=None) -> RunResult:
+               run_id=None, launch=None, key_fn=None, price_fn=None) -> RunResult:
+    from . import prices
     try:
-        spec = jarvis_spec(model=model, prompt=prompt, cwd=cwd, max_turns=max_turns, budget_usd=budget_usd)
-    except config.UnknownModel as exc:
+        spec = jarvis_spec(model=model, prompt=prompt, cwd=cwd, max_turns=max_turns, budget_usd=budget_usd,
+                           price_fn=price_fn)
+    except (config.UnknownModel, prices.PriceError) as exc:
         return RunResult("jarvis", model, error=f"refused: {exc}", crashed=True)
     key = (key_fn or openrouter_key)()
     if not key:

@@ -30,6 +30,10 @@ PER_RUN_CAP_USD = 0.50
 # At or above this percent of any quota window the Claude or Codex cell is
 # skipped (the Diff quick review's threshold, `jarvis.v2.diff_review.THRESHOLD`).
 QUOTA_THRESHOLD = 75.0
+# The hard ceiling: at or above it a Claude or Codex cell, or a judge call, is
+# refused even under the owner's override (ROLEBENCH_QUOTA_CEILING overrides
+# the number, never the rule).
+QUOTA_CEILING = 97.0
 
 MAX_CONCURRENT = 3
 MEMORY_MAX = "3G"
@@ -40,37 +44,31 @@ GRADE_TIMEOUT_S = 900
 REVIEW_MAX_TURNS = 80
 IMPLEMENT_MAX_TURNS = 120
 
-# Decision O-3: Kimi K3 runs on Moonshot direct (the BYOK credit) and is
-# budgeted at that provider's price, never the catalog's. Any id under the
-# `moonshotai/` prefix must be listed here: an unknown Kimi id is refused
-# rather than run unpinned at an unknown price.
+# Decision O-1 as amended 2026-10-21 (owner): the models each harness runs.
+MATRIX = {
+    "claude": ("haiku", "sonnet", "opus"),                   # Claude Code, the 5.5 family
+    "codex": ("gpt-6.1-sol", "gpt-6-luna"),
+    "jarvis": ("anthropic/claude-haiku-5.5", "deepseek/deepseek-v4.1-flash", "z-ai/glm-5.3-flash"),
+}
+
+# Kimi K3 was dropped from the matrix by the owner (O-1 amendment, 2026-10-21),
+# and with it the Moonshot pin and its price floor. The guard stays: a
+# `moonshotai/` id is refused unless it is listed here, and none is, so no
+# Kimi id runs unpinned at an unknown price.
 MOONSHOT_PREFIX = "moonshotai/"
-MOONSHOT_PROVIDER = "moonshotai"
-MOONSHOT_PRICES = {"moonshotai/kimi-k3": (3.0, 15.0)}   # $ per M input, output
+KIMI_ALLOWED: tuple[str, ...] = ()
 
 
 class UnknownModel(ValueError):
     pass
 
 
-def _moonshot(model: str) -> bool:
-    return (model or "").strip().lower().startswith(MOONSHOT_PREFIX)
-
-
-def price_override(model: str) -> tuple[float, float] | None:
-    """The pinned provider's price for a `moonshotai/` id; None for any other
-    model; UnknownModel for a Kimi id that is not in the table."""
-    if not _moonshot(model):
-        return None
-    key = model.strip().lower()
-    if key not in MOONSHOT_PRICES:
-        raise UnknownModel(f"{model}: unknown moonshotai/ model (known: {', '.join(sorted(MOONSHOT_PRICES))})")
-    return MOONSHOT_PRICES[key]
-
-
-def provider_pin(model: str) -> str:
-    """The provider a call to `model` is pinned to ('' = OpenRouter picks)."""
-    return MOONSHOT_PROVIDER if price_override(model) else ""
+def check_model(model: str) -> None:
+    """UnknownModel for a `moonshotai/` id that is not allowed (all of them, now)."""
+    key = (model or "").strip().lower()
+    if key.startswith(MOONSHOT_PREFIX) and key not in KIMI_ALLOWED:
+        raise UnknownModel(f"{model}: moonshotai/ ids are refused (Kimi left the matrix in the "
+                           f"O-1 amendment; allowed: {', '.join(KIMI_ALLOWED) or 'none'})")
 
 # Never in a bench run's environment (use the CLI logins, never a key). The
 # first three are the ones the plan names; the rest would silently switch a CLI
@@ -137,3 +135,7 @@ def log_path() -> Path:
 
 def ledger_path() -> Path:
     return home() / "spend.json"
+
+
+def prices_dir() -> Path:
+    return home() / "prices"

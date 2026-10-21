@@ -12,13 +12,13 @@ code with no `.env` and no cases. Wraps `longbench.harness.run_jarvis` and adds:
 - **A hard dollar ceiling.** `llm.chat` is wrapped: every reply, from any
   caller, is added to a running total streamed on stdout (a `ROLEBENCH_SPEND`
   line) after each call; a call is refused once the total reaches the budget,
-  the call whose *estimated* prompt cost would cross the budget is refused
-  before it is sent (one Kimi call can be ~$0.45), and the call that still
-  crosses it raises. At most one call can overshoot.
-- **The Moonshot pin only for Moonshot ids.** A call to a `moonshotai/` model
-  is pinned to the provider the spec names (no fallbacks) and floored at its
-  price; any other model is sent unpinned. A `moonshotai/` id the spec does not
-  price is refused.
+  the call whose *estimated* cost would cross the budget is refused before it
+  is sent, and the call that still crosses it raises. At most one call can
+  overshoot. The estimate prices the call at the model's most expensive
+  OpenRouter endpoint (the spec's `prices`); the total is the usage OpenRouter
+  reports (BYOK upstream cost included, `llm._cost`).
+- **No Kimi.** A `moonshotai/` id is refused (Kimi left the matrix), and so
+  is a call to any model the spec does not price.
 """
 
 from __future__ import annotations
@@ -61,50 +61,42 @@ class Meter:
     def __init__(self, spec: dict, stream=None):
         self.budget = float(spec["budget_usd"])
         self.prices = {k.lower(): tuple(v) for k, v in (spec.get("prices") or {}).items()}
-        self.pins = {k.lower(): v for k, v in (spec.get("pins") or {}).items()}
         self.stream = stream if stream is not None else sys.stdout
         self.total, self.calls, self.models = 0.0, 0, {}
         self.tokens = {"prompt_tokens": 0, "completion_tokens": 0, "cached_tokens": 0}
 
     def route(self, model: str) -> str:
-        """The provider pin for one call ('' = OpenRouter picks)."""
-        key = (model or "").strip().lower()
-        if key.startswith(MOONSHOT_PREFIX):
-            if key not in self.prices or key not in self.pins:
-                raise BudgetExceeded(f"refused: {model} is a moonshotai/ id with no known price or pin")
-            return self.pins[key]
+        """The provider pin for one call: always '' (OpenRouter picks), but a
+        `moonshotai/` id is refused."""
+        if (model or "").strip().lower().startswith(MOONSHOT_PREFIX):
+            raise BudgetExceeded(f"refused: {model} is a moonshotai/ id (Kimi left the matrix)")
         return ""
 
     def before(self, model: str, messages=None, max_tokens: int | None = None) -> str:
         if self.total >= self.budget - 1e-12:
             raise BudgetExceeded(f"budget ${self.budget:.4f} spent (${self.total:.4f}); no further calls")
+        pin = self.route(model)
         price = self.prices.get((model or "").strip().lower())
-        if price and messages is not None:
-            # Estimate at the bench's price, not the catalog's: at Kimi's $3/M a
-            # 150k-token prompt is ~$0.45. Refuse before sending if it would
-            # cross the budget. chars/4 is the loop's own rough token estimate.
-            est_prompt = _chars(messages) / 4
-            est_completion = max_tokens or 0
-            est = (est_prompt * price[0] + est_completion * price[1]) / 1e6
-            if self.total + est > self.budget + 1e-12:
-                raise BudgetExceeded(
-                    f"refused before sending: estimated ${est:.4f} for this call would cross the "
-                    f"${self.budget:.4f} budget (${self.total:.4f} already spent)")
-        return self.route(model)
+        if not price:
+            raise BudgetExceeded(f"refused: no endpoint price for {model}, so no estimate")
+        # Estimate at the most expensive endpoint's price, and refuse before
+        # sending a call that would cross the budget. chars/4 is the loop's
+        # own rough token estimate.
+        est_prompt = _chars(messages) / 4
+        est_completion = max_tokens or 0
+        est = (est_prompt * price[0] + est_completion * price[1]) / 1e6
+        if self.total + est > self.budget + 1e-12:
+            raise BudgetExceeded(
+                f"refused before sending: estimated ${est:.4f} for this call would cross the "
+                f"${self.budget:.4f} budget (${self.total:.4f} already spent)")
+        return pin
 
     def after(self, model: str, reply) -> None:
         prompt = int(getattr(reply, "prompt_tokens", 0) or 0)
         completion = int(getattr(reply, "completion_tokens", 0) or 0)
         usage = (getattr(reply, "raw", None) or {}).get("usage") or {}
         cached = int(((usage.get("prompt_tokens_details") or {}).get("cached_tokens")) or 0)
-        cost = float(getattr(reply, "cost_usd", 0.0) or 0.0)
-        price = self.prices.get((model or "").strip().lower())
-        if price:
-            cost = max(cost, (prompt * price[0] + completion * price[1]) / 1e6)
-            try:
-                reply.cost_usd = cost
-            except Exception:
-                pass
+        cost = float(getattr(reply, "cost_usd", 0.0) or 0.0)      # reported usage, BYOK included
         self.total += cost
         self.calls += 1
         self.models[model] = self.models.get(model, 0) + 1

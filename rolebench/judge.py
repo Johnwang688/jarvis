@@ -168,7 +168,7 @@ def _record_valid_new(run: dict, rows: list[dict]) -> None:
 
 
 def judge_run(run_dir: Path, case: dict, judge_fn=default_judge, quota_override: str = "",
-              quota_reader=quota.daemon_reader, force: bool = False, rng: random.Random | None = None) -> dict:
+              quota_reader=None, force: bool = False, rng: random.Random | None = None) -> dict:
     """Judge one review run in place: writes judge.json and folds the score into
     run.json. A run already judged validly is returned as it is unless `force`."""
     run = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
@@ -188,10 +188,15 @@ def judge_run(run_dir: Path, case: dict, judge_fn=default_judge, quota_override:
         refusal = sandbox.agent_net_refusal("judge")
         if refusal:
             raise JudgeError(refusal)
-    if not quota_override:
-        skip, note = quota.guard("claude", quota_reader)
+    quota_reader = quota_reader or quota.daemon_reader
+
+    def check_quota() -> None:
+        # Before every judge call: the 75% guard unless overridden, the ceiling always.
+        skip, note = quota.guard("claude", quota_reader, override=quota_override)
         if skip:
             raise JudgeError(f"judge skipped on quota: {note}")
+    quota_before = quota.readings(["claude"], quota_reader)
+    check_quota()
     if not items:
         matches, attempts, cost = [], 0, 0.0
     else:
@@ -205,6 +210,8 @@ def judge_run(run_dir: Path, case: dict, judge_fn=default_judge, quota_override:
             prompt = PROMPT.format(ground_truth=gt_text(gt), findings=text, diff=snapshot.CHANGE_DIFF)
             error, cost, attempts, matches = "", 0.0, 0, None
             for attempts in (1, 2):
+                if attempts > 1:
+                    check_quota()
                 reply, c = judge_fn(prompt if not error else prompt + f"\n\nYour previous reply was rejected: {error}\nReply again with valid JSON only.", copy)
                 cost += c or 0.0
                 try:
@@ -219,6 +226,7 @@ def judge_run(run_dir: Path, case: dict, judge_fn=default_judge, quota_override:
             raise JudgeError(f"judge output invalid twice: {error}")
     doc = {"valid": True, "matches": matches, "score": score(matches, gt), "attempts": attempts, "cost_usd": cost,
            "finding_ids": ids, "quota_guard": f"off: {quota_override}" if quota_override else "on",
+           "quota_before": quota_before, "quota_after": quota.readings(["claude"], quota_reader),
            "judged_at": time.strftime("%Y-%m-%dT%H:%M:%S")}
     (run_dir / "judge.json").write_text(json.dumps(doc, indent=1), encoding="utf-8")
     run["score"], run["judged"] = doc["score"], True
