@@ -72,7 +72,14 @@ def check_matrix(harness: str, model: str, off_matrix: bool = False) -> None:
 DEFAULT_COMPLETION_ALLOWANCE = 16_000
 # Per-call output room for the Jarvis-loop cells (jarvis.config.MAX_TOKENS is
 # 8192, which a full review plus its findings block can overrun).
-JARVIS_MAX_OUTPUT_TOKENS = 16_000
+JARVIS_MAX_OUTPUT_TOKENS = 32_000
+
+# Reasoning effort, pinned per harness so the cells compare at one level
+# (lead, 2026-10-21): `claude -p --effort high`, codex
+# `model_reasoning_effort=high`, and the Jarvis loop's JARVIS_REASONING_EFFORT
+# (its default is `max`, which spent Haiku's whole reply on thinking). The
+# judge runs at the CLI's default.
+EFFORT = {"claude": "high", "codex": "high", "jarvis": "high"}
 # Long-context price tiers the endpoints list does not carry: at or above
 # `threshold` prompt tokens the whole request is priced at `multiplier` times
 # (Haiku 5.5: 5x from 100k, CLAUDE.md's model default note).

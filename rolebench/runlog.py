@@ -42,7 +42,8 @@ def row(run: dict) -> dict:
         "rounds": run.get("rounds_to_merge_ready"), "merged_ready": run.get("merged_ready"),
         "findings": run.get("n_findings"), "score": run.get("score"),
         "quota_guard": run.get("quota_guard", "on"), "off_matrix": bool(run.get("off_matrix")),
-        "truncated": bool(run.get("truncated")),
+        "truncated": bool(run.get("truncated")), "effort": run.get("effort"),
+        "reviewer_effort": run.get("reviewer_effort"),
         # {provider: {window: used percent}} read before and after the cell (None = unknown)
         "quota_before": run.get("quota_before"), "quota_after": run.get("quota_after"),
         "network_flags": len(run.get("network_flags") or []), "escape_flags": len(run.get("escape_flags") or []),

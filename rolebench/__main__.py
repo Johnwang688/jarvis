@@ -63,7 +63,12 @@ def _deps(args) -> flows.Deps:
     if args.off_matrix:
         print("WARNING: --off-matrix: models outside the O-1 matrix may run; every run row records off_matrix: true",
               file=sys.stderr, flush=True)
-    return flows.Deps(quota_override=quota_override(args), off_matrix=bool(args.off_matrix))
+    deps = flows.Deps(quota_override=quota_override(args), off_matrix=bool(args.off_matrix))
+    if getattr(args, "timeout", None):
+        deps.review_timeout = deps.implement_timeout = int(args.timeout)
+    if getattr(args, "max_turns", None):
+        deps.review_max_turns = int(args.max_turns)
+    return deps
 
 
 def cmd_snapshot(args) -> int:
@@ -214,6 +219,8 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument("--runs", type=int, default=1)
         p.add_argument("--seed", type=int, default=1, help="shuffle seed for the cell order")
         p.add_argument("--workers", type=int, default=config.MAX_CONCURRENT)
+        p.add_argument("--timeout", type=int, help="seconds per agent run (a smoke's cap; default the config's)")
+        p.add_argument("--max-turns", type=int, help="reviewer steps (a smoke's cap; default the config's)")
 
     r = sub.add_parser("review", help="run a reviewer over review cases")
     cell_args(r)

@@ -17,9 +17,10 @@ from . import sandbox
 
 # Markers beyond swecompare's: the GitHub CLI and API host.
 EXTRA_NETWORK = ("gh ", "api.github")
-# An absolute path (not the tail of a relative one, not part of a URL), a
-# home-relative one, or a relative one that climbs.
-ABS_RE = re.compile(r"(?<![\w.~$}/:-])/(?:[\w.@+=,%-]+/?)+")
+# An absolute path (not the tail of a relative one, not part of a URL, not
+# the inside of a glob such as rg's `-g '!**/.git/**'`), a home-relative one,
+# or a relative one that climbs.
+ABS_RE = re.compile(r"(?<![\w.~$}/:*?-])/(?:[\w.@+=,%-]+/?)+")
 HOME_RE = re.compile(r"(?:\$\{HOME\}|\$HOME|(?<![\w/])~)(?:/[\w.@+=,%-]*)*")
 UP_RE = re.compile(r"(?<![\w/])(?:[\w.@+-]+/)*\.\.(?:/[\w.@+=,%-]*)*")
 ALLOWED_ABS = ("/usr", "/bin", "/lib", "/lib64", "/dev/null", "/dev/stdout", "/dev/stderr", "/dev/stdin",

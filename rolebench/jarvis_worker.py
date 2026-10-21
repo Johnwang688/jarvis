@@ -88,7 +88,13 @@ class Meter:
         if not price:
             raise BudgetExceeded(f"refused: no endpoint price for {model}, so no estimate")
         prompt_tokens = (_chars(messages) + (len(json.dumps(tools)) if tools else 0)) / 4
-        completion_tokens = min(x for x in (max_tokens, price.get("max_completion"), self.allowance_cap) if x)
+        # The call's own max_tokens when it sets one (bounded by what the endpoint
+        # can return); otherwise the endpoint maximum, capped at 16k.
+        endpoint_max = price.get("max_completion")
+        if max_tokens:
+            completion_tokens = min(x for x in (max_tokens, endpoint_max) if x)
+        else:
+            completion_tokens = min(x for x in (endpoint_max, self.allowance_cap) if x)
         tier = price.get("tier")
         multiplier = float(tier[1]) if tier and prompt_tokens >= tier[0] else 1.0
         usd = (prompt_tokens * price["prompt"] + completion_tokens * price["completion"]) * multiplier / 1e6
@@ -104,6 +110,7 @@ class Meter:
             raise BudgetExceeded(
                 f"refused before sending: estimated ${est:.4f} for this call would cross the "
                 f"${self.budget:.4f} budget (${self.total:.4f} already spent)")
+        self.write(inflight=est)                  # if the cell dies mid-call, this is what it may have cost
         return pin
 
     def after(self, model: str, reply) -> None:
@@ -122,10 +129,11 @@ class Meter:
         if self.total >= self.budget - 1e-12:
             raise BudgetExceeded(f"budget ${self.budget:.4f} reached (${self.total:.4f} after {self.calls} calls)")
 
-    def write(self) -> None:
+    def write(self, inflight: float = 0.0) -> None:
         try:
             self.stream.write(SPEND_PREFIX + json.dumps({"usd": round(self.total, 6), "calls": self.calls,
-                                                         "models": self.models, "budget_usd": self.budget}) + "\n")
+                                                         "models": self.models, "budget_usd": self.budget,
+                                                         "inflight": round(inflight, 6)}) + "\n")
             self.stream.flush()
         except (OSError, ValueError):
             pass
@@ -138,6 +146,8 @@ def prepare(spec: dict, key: str | None):
     model = spec["model"]
     for name in TIER_ENV:
         os.environ[name] = model
+    if spec.get("effort"):
+        os.environ["JARVIS_REASONING_EFFORT"] = spec["effort"]
     os.environ["JARVIS_CHAT_PROVIDER"] = ""
     os.environ.pop("OPENROUTER_API_KEY", None)
     before = dict(os.environ)
@@ -157,6 +167,12 @@ def prepare(spec: dict, key: str | None):
     # Room for a full review plus its findings block in one reply (llm.chat
     # reads config.MAX_TOKENS at call time when a caller passes none).
     jconfig.MAX_TOKENS = int(spec.get("max_output_tokens") or jconfig.MAX_TOKENS)
+    # One reasoning effort for every call (the harness's pin, never `max` and
+    # never a roster pin): agent.py asks models.effort_for per call.
+    effort = (spec.get("effort") or "").strip().lower()
+    if effort:
+        jconfig.REASONING_EFFORT = effort
+        jmodels.effort_for = lambda model_id, efforts=None: effort
     jmodels.selected = lambda: ""                              # no roster selection can move a tier
     return jconfig
 
@@ -185,6 +201,7 @@ def run(spec: dict, key: str | None, io_dir: Path) -> dict:
     meter.write()
     texts: list[str] = []
     limits: list[bool] = []
+    efforts_sent: dict[str, int] = {}
     jconfig = sys.modules["jarvis.config"]
     real_chat, real_turn = llm.chat, agent_mod.Agent.run_turn
 
@@ -199,6 +216,7 @@ def run(spec: dict, key: str | None, io_dir: Path) -> dict:
             args[CHAT_ARGS["provider"]] = pin
         else:
             kwargs["provider"] = pin
+        efforts_sent[str(kwargs.get("effort"))] = efforts_sent.get(str(kwargs.get("effort")), 0) + 1
         reply = real_chat(model, messages, *args, **kwargs)
         meter.after(model, reply)
         return reply
@@ -214,7 +232,7 @@ def run(spec: dict, key: str | None, io_dir: Path) -> dict:
     record = lh.run_jarvis([spec["prompt"]], Path(spec["workspace"]), spec["model"], spec["max_turns"],
                            budget_usd=meter.budget)
     text = texts[-1] if texts else record.reply
-    return {"text": text, "truncated": final_truncated(text), "hit_output_limit": any(limits),
+    return {"text": text, "truncated": final_truncated(text), "hit_output_limit": any(limits), "efforts_sent": efforts_sent,
             "cost_usd": record.cost_usd, "turns": record.turns,
             "spend_usd": round(meter.total, 6), "calls": meter.calls, "models": meter.models,
             "tokens": meter.tokens, "tool_calls": record.tool_calls, "error": record.error,
