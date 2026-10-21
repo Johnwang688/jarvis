@@ -65,3 +65,25 @@ in the reviewer's terms (mechanism and location), never copied from the owner's 
 ```
 
 Severity is one of HIGH, MED, LOW or NIT. NIT ground truth is recorded but not scored.
+
+## A2 (2026-10-20 fix round): a cell gets a trimmed, in-memory login
+
+The independent review (PR #283 delta) flagged that binding the owner's whole
+`~/.claude/.credentials.json` into a cell hands the agent's shell the refresh
+token and the MCP OAuth block, not only the access token the CLI needs. Lead
+decision: pass a **narrower in-memory view**, not a new grant, and the owner can
+veto it.
+
+- The claude and judge cells get `{"claudeAiOauth": {accessToken, expiresAt,
+  scopes, subscriptionType, rateLimitTier}}` — no `refreshToken`, no `mcpOAuth`.
+- The codex cell gets `auth.json` without `refresh_token`.
+- The trimmed JSON is written to a pipe and bound with `bwrap --perms 0400
+  --ro-bind-data <fd> <dest>`, so it is never on disk, never writable, and never
+  written back. The `login_problem` pre-flight still refuses a run whose access
+  token would expire within it (the cell cannot refresh a read-only file).
+- Values are never printed or logged; tests check key names only.
+
+This is strictly less than the cell saw before, so it needs no new approval; it
+is recorded here so the owner can object if even the access token in a cell is
+too much (the alternative is a short-lived minted token, which the Max plan does
+not offer).
