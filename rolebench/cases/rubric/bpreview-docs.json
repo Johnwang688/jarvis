@@ -1,0 +1,69 @@
+{
+  "case": "bpreview-docs",
+  "head": "902eb023af57c85b62c1a652fbd406d02052664d",
+  "seeded": false,
+  "built_by": "opus rubric agent",
+  "built_at": "2026-10-21",
+  "original_review": [
+    {"gt": "gt1", "status": "confirmed", "note": "At head (committed 2026-10-20 00:28) the plan cites only uncommitted scripts (plan:32-33); the archived logs in ~/.cache/jarvis-lead/b-preview-probe/logs/ and rerun.out were written 00:35-00:42, after head, in response to review. Fixed in the PR's second commit 0f49522c (archived run 2, run-1 figures marked)."},
+    {"gt": "gt2", "status": "confirmed", "note": "plan:3-5 'has no way to prove' and browser.md's 'The best capture scheme inside Chrome 155 defeated' exceed what was probed; the same overreach appears in browser.md's 'No HeadlessExperimental domain, with any flag' (only three flag sets plus --headless=old were tried, per p1/p8 logs). Narrowed in 0f49522c, which adds a 'Not probed' list."},
+    {"gt": "gt3", "status": "confirmed", "note": "plan:53-57 lists CSSOM, adoptedStyleSheets, closed shadow roots, canvas, scroll, media, out-of-process iframes and loads as one list; only CSSOM (p6_attack.py) and the cross-site iframe (p5_freeze.py, oopif_colors_seen) have a probe. 0f49522c splits tested from reasoned."},
+    {"gt": "gt4", "status": "confirmed", "note": "cdp.py launches /opt/google/chrome/chrome --headless --remote-debugging-pipe with its own flags (--no-first-run, --mute-audio, --disable-extensions, --force-device-scale-factor=1.5), not Playwright and not host.launch_args (host.py:259-310, launched at host.py:1270 with channel='chrome'). The plan's 'like the Remote browser' (plan:32) covers only the scale factor. 0f49522c states the actual launch."},
+    {"gt": "gt5", "status": "confirmed", "note": "Confirmed for the interpretive claims: p4_trace_layers.py:60-62 calls makeSnapshot on exactly one layer (the latest with drawsContent), and p1 only records that createTarget{enableBeginFrameControl} returned success. One sub-point is weak: the 2026-10-19 date is defensible, since 0f49522c records run 1 as starting 2026-10-19 23:58 (the scripts' mtimes are 00:02-00:26 on 10-20)."}
+  ],
+  "entries": [
+    {
+      "id": "rb1",
+      "severity": "LOW",
+      "mechanism": "The headline counts are single runs of timing-dependent probes on a loaded machine, but the plan, browser.md and the feature-map row present them as fixed measured results with no run count or spread. They do not reproduce: the CSSOM-attack figure '24 of 29 accepted captures were false' came out 7/28 in the lead's archived rerun and 30/40 and 18/31 in two fresh runs; P7's 'timer: 23 accepted, 9 false' came out 19/0 (archived) and 4/1 (fresh); P3's SMIL 'disagreed in 7/30' came out 15/30. The verdicts (bracket defeated; begin-frame alone defeated by at least some drivers; paused virtual time 120/120) survive, but the specific figures cited as evidence in three documents are not stable values. Distinct from gt1: the numbers are not only unarchived, they vary widely between runs and are stated as if they were rates.",
+      "location": "docs/plans/2026-10-19-browser-preview-capability.md:42-44,66-74; docs/notes/browser.md (new 'Re-checked 2026-10-19' paragraph, the '24 of 29' and '1 of 183' bullets); docs/plans/2026-10-13-current-feature-map.md:238",
+      "evidence": "Ran ~/.cache/jarvis-lead/b-preview-probe/p6_attack.py 60 twice and p7_shell_beginframe.py once (isolated Chrome over a CDP pipe, data: URLs, temp HOME, systemd-run MemoryMax=2G): p6 printed accepted 40 / accepted_mismatch 30, then 31 / 18; p7 timer-running 4 accepted / 1 false, worker 5 / 4, message 25 / 17, paused 40/40 with 0 false for all three. The archived rerun logs (logs/p6_attack.log: 28 accepted, 7 mismatch; logs/p7_shell_beginframe.log: timer 19/0; logs/p3_capture.log: smil naive 15/30). The PR's own fix commit 0f49522c rewrites the figures to run 2 with run 1 in brackets and adds 'read the figures as illustrations, not rates'.",
+      "verified": "reproduced",
+      "fixed_later": "0f49522c2f8c7cb1788acd0120e4f340126d2ce4"
+    }
+  ],
+  "non_issues": [
+    {
+      "id": "ni1",
+      "claim": "The headless-shell route held 120/120, so the plan should adopt it rather than keep Preview unavailable",
+      "location": "docs/plans/2026-10-19-browser-preview-capability.md:59-104",
+      "why_not": "Adopting it would reverse recorded decisions the plan cites: Chrome stable via apt (B-3, docs/plans/2026-10-10-hud-browser-decisions.md:13,53), Chrome sign-in and sync on (BD-5, docs/plans/2026-10-11-hud-browser-plan-amendment-1.md:772), and BR9c's rule that no screenshot or capture call is created to manufacture the proof (docs/notes/browser.md:1396-1397); BR9c's accepted fallback is Preview unavailable (browser.md:1269). The plan correctly leaves it as an owner decision (plan:118-119)."
+    },
+    {
+      "id": "ni2",
+      "claim": "The P3 race does not apply to Jarvis because Playwright's default CDPScreenshotNewSurface makes captureScreenshot wait for a fresh surface",
+      "location": "docs/plans/2026-10-19-browser-preview-capability.md:50-52",
+      "why_not": "Jarvis replaces Playwright's defaults whole: host.py:32-33 and host.py:1270 pass ignore_default_args=True with the curated launch_args, so that feature is not enabled; the plan says exactly this."
+    },
+    {
+      "id": "ni3",
+      "claim": "Looks and captures use screencast frames, not Page.captureScreenshot, so item 3's 'captureScreenshot timed out ... and looks and captures use it' is wrong",
+      "location": "docs/plans/2026-10-19-browser-preview-capability.md:85-88",
+      "why_not": "jarvis/v2/browser/look_capture.py:146 calls Page.captureScreenshot, and owner captures go through captures.capture_page -> host.capture_look (jarvis/v2/browser/captures.py:182-210), the same path."
+    },
+    {
+      "id": "ni4",
+      "claim": "The probes used a different device scale factor from the Remote browser, so the pixel comparisons are invalid",
+      "location": "docs/plans/2026-10-19-browser-preview-capability.md:32",
+      "why_not": "Both use 1.5: the product passes --force-device-scale-factor=RASTER_SCALE with RASTER_SCALE = 1.5 (jarvis/v2/browser/host.py:182,310), and the probe client passes --force-device-scale-factor=1.5 on every launch. (The other launch differences are gt4.)"
+    },
+    {
+      "id": "ni5",
+      "claim": "The Chrome version 155.0.8059.39 is asserted without evidence",
+      "location": "docs/plans/2026-10-19-browser-preview-capability.md:3",
+      "why_not": "It matches the recorded install receipt: docs/plans/2026-10-10-hud-browser-decisions.md:53 ('google-chrome --version reports 155.0.8059.39'), and the p1/p8 logs report Chrome/155.0.8059.39."
+    },
+    {
+      "id": "ni6",
+      "claim": "Running Chrome probes risked the owner's profiles, the live daemon or an open debugging port",
+      "location": "docs/plans/2026-10-19-browser-preview-capability.md:28-31",
+      "why_not": "The probe client uses --remote-debugging-pipe (no port), a fresh temp --user-data-dir, temp HOME and data: URLs or request interception, under a MemoryMax scope; nothing addresses 8402/8403/8405. Nothing in the repo changed (diffstat: three docs files)."
+    },
+    {
+      "id": "ni7",
+      "claim": "Editing browser.md and the feature map breaks the docs pinned by tests / the CLAUDE.md migration check",
+      "location": "docs/notes/browser.md:1399; docs/plans/2026-10-13-current-feature-map.md:238,436",
+      "why_not": "scripts/slim_claude.py --check passes at head ('verified: blocks 50 ... notes 19'), and the feature-map edits only append to the B-PREVIEW row and item 3, keeping the existing sentences ('Current Chrome 155 screencast metadata cannot prove matching-frame identity', 'Preview unavailable')."
+    }
+  ]
+}

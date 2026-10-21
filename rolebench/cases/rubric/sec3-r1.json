@@ -1,0 +1,85 @@
+{
+ "case": "sec3-r1",
+ "head": "567e5fe159a61c7d2a807ef9ba27e86775f9d391",
+ "seeded": false,
+ "built_by": "opus rubric agent",
+ "built_at": "2026-10-21",
+ "original_review": [
+  {
+   "gt": "gt1",
+   "status": "confirmed",
+   "note": "Reproduced on the head: diff_review._clean('see ' + ghp_key) redacts the key, but with U+200B inserted after 10 characters the returned text contains the whole rejoined key (scrub_text misses the split key, strip_invisible then removes the U+200B). Fixed on main by 906efdc8 (#248), which strips before scrubbing."
+  }
+ ],
+ "entries": [
+  {
+   "id": "rb1",
+   "severity": "MED",
+   "mechanism": "chat_git._scrub swapped gitops._URL_USERINFO (which unconditionally replaced http(s) userinfo with [redacted]@) for secrets.strip_url_credentials, a command-redaction helper that applies shell-quoting rules (_Mask) to the text. On git/gh output it leaves the userinfo in place when the userinfo contains $ or a backtick, or when anything earlier in the output is a backtick, a word-start # (treated as a shell comment) or <<: all common in PR titles, commit messages and hints. So an http(s) URL password that the old code stripped now reaches the Codex chat's tool result unredacted (scrub_text then catches it only if it happens to be a known key shape). A regression, not just a gap: the description presents the change as widening the strip to every scheme.",
+   "location": "jarvis/v2/chat_git.py:621-627 (_scrub); used by _render jarvis/v2/chat_git.py:630-638 and the mirror error at :282; jarvis/tools/secrets.py:1347-1400 (strip_url_credentials and its mask/$/backtick skips), :1233-1293 (_Mask)",
+   "evidence": "Reproduced (temp HOME, in-process): chat_git._render(128, 'title:\\tFix `parse()` on empty input\\n', \"fatal: unable to access 'https://deploy:hunter2pass@git.example.com/o/r.git/': ... 403\") returns the password on the head and 'https://[redacted]@git.example.com/...' with base chat_git.py. _scrub alone also leaks for 'https://user:pa$$w0rd@...', for output containing '#123 ' before the URL, and for '<<' before it; all four were redacted on base. Plain cases (no shell-active character) are stripped on both, and postgresql:///ssh:// userinfo is now stripped where base leaked it. chat_git_check (628) and outbound_scrub_check pass, so no test covers it. Unchanged on origin/main.",
+   "verified": "reproduced",
+   "fixed_later": null
+  },
+  {
+   "id": "rb2",
+   "severity": "LOW",
+   "mechanism": "The mirror still truncates text before scrubbing it, so a provider key that straddles the cut is shortened below its pattern's minimum length (ghp_ needs 36 characters after the prefix) and scrub_text no longer matches it: the key's prefix, up to all but one character, is posted to Discord. Sites: chat_name cuts the first message to EXCERPT=50 before _scrub (posted as the Discord thread name); user_line caps at 300 (dropped and system lines) and 400 (peer requests) before _scrub; _question caps each option at 200 before _scrub. The spec asked for scrub-before-cap on the reporter only, but the PR claims provider key shapes never reach Discord from the mirror.",
+   "location": "jarvis/v2/discord/mirror.py:128-138 (chat_name, EXCERPT at :78); :168, :177, :180 (user_line caps); :1189 (_question options)",
+   "evidence": "Reproduced in-process on the head: mirror.chat_name(thread with no title, 'please use ' + 40-char ghp_ key + ' now') returns 'th1 · please use ghp_' + the first 35 of the key's 36 secret characters (the 50-character excerpt drops the last one, so the github pattern no longer matches). user_line({'via':'system'|'peer'} or dropped=True) with the key straddling 300/400 posts 'ghp_iK2ZWeqhFWCEPyY…' (a 15-character prefix); the same key in an uncapped HUD line is redacted. Same order on origin/main.",
+   "verified": "reproduced",
+   "fixed_later": null
+  }
+ ],
+ "non_issues": [
+  {
+   "id": "ni1",
+   "claim": "The Discord approval DM (gateway.py approval card) still goes through secrets.scrub only; the PR missed an outbound Discord surface",
+   "location": "jarvis/v2/discord/gateway.py:769",
+   "why_not": "Deliberately excluded, as the brief says: approval cards redact typed credentials through secrets.redact_command and must never hide a value that runs (owner decision 2026-10-15, recorded at jarvis/v2/approvals.py:75-81 card_text). Running the key-shape layer over a card could hide executable text."
+  },
+  {
+   "id": "ni2",
+   "claim": "tools/__init__.py (tool results), hud_api.py, titles.py, speech_summary.py and mcp.py still call secrets.scrub and should switch to scrub_text too",
+   "location": "jarvis/tools/__init__.py:481; jarvis/v2/hud_api.py:623",
+   "why_not": "Explicitly out of scope: on-machine or model-bound surfaces left on secrets.scrub on purpose, and changing them is a separate owner call (docs/plans/2026-10-18-security-fix-specs.md:227-231)."
+  },
+  {
+   "id": "ni3",
+   "claim": "scrub_text's TOKENISH layer (sk-/rt_/oat_ followed by 12+ characters) will redact ordinary identifiers such as rt_tokenizer_config in mirrored replies",
+   "location": "jarvis/v2/redact.py:23; jarvis/v2/discord/mirror.py:115-123",
+   "why_not": "Accepted trade-off: the owner answered Q1 yes on 2026-10-18 (docs/plans/2026-10-18-security-fix-specs.md:210-216): the Discord mirror gets the full scrub because Discord leaves the machine and a false [redacted] costs little."
+  },
+  {
+   "id": "ni4",
+   "claim": "When scrubbing fails, the spoken reply is silently dropped, so a voice user gets no answer",
+   "location": "jarvis/v2/discord/mirror.py:1127-1133",
+   "why_not": "Intended and documented in the PR: the text post still carries the withheld marker, and a marker is not worth saying aloud (comment at mirror.py:1131); the spec requires that nothing unscrubbed is posted (docs/plans/2026-10-18-security-fix-specs.md:218-221)."
+  },
+  {
+   "id": "ni5",
+   "claim": "Replacing a short secret with the longer [redacted] marker can push reporter posts past Discord's limits (400/1500/1024/6000)",
+   "location": "jarvis/v2/discord/reporter.py:142-152",
+   "why_not": "The reporter scrubs in _scrubbed before render caps are applied (spec docs/plans/2026-10-18-security-fix-specs.md:221-223), and acceptance test c5 (tests/v2/outbound_scrub_check.py ReporterChecks.test_c5_reporter_render_caps_hold_when_a_short_value_grows) passes. In the mirror every _scrub result is capped afterwards (_cap(_scrub(..)) or _split)."
+  },
+  {
+   "id": "ni6",
+   "claim": "Scrubbing (which reads credential files) now runs inside the mirror's send path or a lock, blocking other posts",
+   "location": "jarvis/v2/discord/mirror.py:1518-1528 (_to_dm); :115-123",
+   "why_not": "No scrub moved: every _scrub call replaced a secrets.scrub call at the same place, and the only one in the sender (_to_dm's project label) runs on the worker thread outside self._lock, as before (spec docs/plans/2026-10-18-security-fix-specs.md:233-235)."
+  },
+  {
+   "id": "ni7",
+   "claim": "The chat_git_mutants change weakens the mutation suite by editing a mutant",
+   "location": "tests/v2/chat_git_mutants.py:111-112",
+   "why_not": "Only the anchor text changed to match the new _scrub line; the mutant still replaces the scrub with 'return text' and is still killed by gh_checks (PR body: 45/45 killed)."
+  },
+  {
+   "id": "ni8",
+   "claim": "diff_review._clean can now raise if scrub_text fails, crashing the review",
+   "location": "jarvis/v2/diff_review.py:238-245",
+   "why_not": "The new code catches every Exception from scrub_text and substitutes the withheld marker before clean_line; acceptance test 3 (outbound_scrub_check) covers it. Raising was the base behaviour this PR removes."
+  }
+ ],
+ "notes": "Suites pass on the head: outbound_scrub_check 25, diff_review_check 43, chat_git_check 628, discord_mirror_check 55. Not classified: a key split by a zero-width character also passes the mirror's scrub_text (no strip afterwards, so the string is not rejoined but Discord renders it whole); this is a variant of gt1's input without its rejoin step, too adversarial for an accident guard to call a separate defect."
+}

@@ -1,0 +1,60 @@
+{
+ "case": "seed-origin",
+ "head": "847434e03cfc5f508968260570f69366500958dc",
+ "seeded": true,
+ "built_by": "opus rubric agent",
+ "built_at": "2026-10-21",
+ "original_review": [
+  {
+   "gt": "gt1",
+   "status": "confirmed",
+   "note": "Reproduced in-process (fake handler, Host 127.0.0.1:8402, POST): seeded check_origin accepts Origin http://127.0.0.1:8402.evil.example and http://127.0.0.1:84021 (any origin that merely starts with http://<host>), refuses http://evil.example; the clean head refuses all three as cross-origin. A prefixed origin that also sends Sec-Fetch-Site: cross-site is still refused by the next check. The seed is test-invisible: own_host_header_check, hud_backend_check and owner_read_check all pass on the seeded tree."
+  }
+ ],
+ "entries": [],
+ "non_issues": [
+  {
+   "id": "ni1",
+   "claim": "own_host_header should normalise the Host (lowercase, strip a trailing dot or whitespace, accept [::1]:<port> or *.localhost) because browsers can send those spellings; the exact comparison is too strict",
+   "location": "jarvis/config.py:111-123",
+   "why_not": "Deliberate: the helper must be byte-identical to the seven copies it replaces and admit no new spelling (docs/plans/2026-10-18-dedupe-cleanup.md:75-82: 'no new spelling ([::1], a trailing dot, case) is admitted'); the docstring at jarvis/config.py:117-121 says admitting another spelling loosens the DNS-rebinding guard. The old copies were the same exact tuple membership test."
+  },
+  {
+   "id": "ni2",
+   "claim": "projects.is_owner's Origin branch compares origin == f'http://{host}' without checking the Host through own_host_header, so a forged Host with a matching Origin is treated as the owner",
+   "location": "jarvis/v2/projects.py:160-164",
+   "why_not": "Unchanged by this diff and covered upstream: hud_api.check_origin runs on every request before any route (jarvis/v2/daemon.py:2520-2521) and refuses any Host that is not 127.0.0.1:<port>/localhost:<port> ('untrusted Host'); the is_owner docstring (jarvis/v2/projects.py:146-151) records this layering and says to keep all three checks. own_host_header_check's Sites tests patch check_origin out precisely to show the per-route checks still refuse (tests/v2/own_host_header_check.py:186-262)."
+  },
+  {
+   "id": "ni3",
+   "claim": "check_origin takes the port from handler.server.server_address[1] while the other sites use daemon.face_port, so the helper is called inconsistently and one of them checks the wrong port",
+   "location": "jarvis/v2/hud_api.py:1407-1411",
+   "why_not": "Each site keeps its own port choice on purpose (docs/plans/2026-10-18-dedupe-cleanup.md:79-81: 'some take a different port (face_port, hud=); keep that'): check_origin also guards the preview listener, whose own port is the right one (daemon.py:450 preview_only, :2521). The pre-diff code used exactly the same ports at every site."
+  },
+  {
+   "id": "ni4",
+   "claim": "The Sites tests patch jarvis.v2.hud_api.check_origin, but the daemon holds its own reference, so the patch has no effect and the per-route tests pass vacuously on check_origin's refusal",
+   "location": "tests/v2/own_host_header_check.py:186-262; jarvis/v2/daemon.py:2520",
+   "why_not": "The daemon imports check_origin inside the handler on every request (jarvis/v2/daemon.py:2520 'from .hud_api import check_origin'), so the patch takes effect. Verified by mutation: replacing the own_host_header call with True at browser/routes.py, vex.py, devservers.py, terminals.py or daemon.py (approvals hud=) each makes the matching Sites test fail with 7 failures (8 for daemon), and is_owner's mutation makes owner_read_check IsOwnerClauses fail."
+  },
+  {
+   "id": "ni5",
+   "claim": "own_host_header crashes or misbehaves on a missing/None Host value",
+   "location": "jarvis/config.py:123",
+   "why_not": "Every caller passes headers.get('Host', '') so a missing header is '' and fails; None is also just not in the tuple and returns False. Both are in the unit table (tests/v2/own_host_header_check.py:89-90) and pass."
+  },
+  {
+   "id": "ni6",
+   "claim": "Treating the Host header as proof of the owner (approvals hud= flag, vex/devservers owner checks) is spoofable by any local process that sends Host: 127.0.0.1:<port>",
+   "location": "jarvis/v2/daemon.py:2780; jarvis/v2/vex.py:2315",
+   "why_not": "Documented scope: these checks are a DNS-rebinding guard for browser pages, not a boundary against a program running as the owner (jarvis/v2/projects.py:150-152 'A program running as the owner can send any of these headers; this was never a boundary against one'). Behaviour is unchanged by this refactor."
+  },
+  {
+   "id": "ni7",
+   "claim": "With the startswith Origin test, a page on http://127.0.0.1:<port>.evil.example can now act as the owner (owner-only routes such as PATCH /projects or the vex/dev-servers/terminal routes accept it)",
+   "location": "jarvis/v2/hud_api.py:1414; jarvis/v2/projects.py:163-164",
+   "why_not": "Over-claim of the seeded defect: projects.is_owner keeps its own exact equality (origin == f'http://{host}', jarvis/v2/projects.py:164), so owner-only routes still refuse a prefixed Origin. The seed loosens only check_origin's general cross-origin refusal for routes that rely on it alone; in a fetch-metadata browser the next check (Sec-Fetch-Site == cross-site, hud_api.py:1416) still refuses such a page. The seeded finding (gt1) is the check_origin loosening itself."
+  }
+ ],
+ "notes": "Same head as cl3-clean; that case's analysis (no other defects) was re-checked here: the seed patch changes only the Origin comparison line in hud_api.check_origin, so cl3-clean's empty entries list carries over. ni5 of cl3-clean (tests pin every site) is dropped here because the seeded tree's tests do miss gt1."
+}

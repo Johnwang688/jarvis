@@ -1,0 +1,60 @@
+{
+ "case": "sec2-clean",
+ "head": "d7e6c8777b70122d8315f28d196fe03d9779199a",
+ "seeded": false,
+ "built_by": "opus rubric agent",
+ "built_at": "2026-10-21",
+ "original_review": [
+  {
+   "gt": "gt1",
+   "status": "confirmed",
+   "note": "Reproduced on the head: label('t1', '\\u3164\\u3164') and tasks._label give 'task t1 \"ㅤㅤ\"'. The same mechanism (characters outside untrusted.UNSEEN_CATEGORIES = Cc/Cf/Zl/Zp that draw nothing) also passes for U+115F/U+1160 and U+FFA0 Hangul fillers, U+2800 braille blank, unassigned default-ignorables such as U+E0000, and Mn invisibles such as U+034F and variation selectors; a reviewer naming any of these is describing gt1. None of them can reorder text or fake a line; the effect is an empty-looking or padded name."
+  }
+ ],
+ "entries": [],
+ "non_issues": [
+  {
+   "id": "ni1",
+   "claim": "v1 tasks._label re-implements clean_line instead of importing it, so the two copies (and their character tables) can drift",
+   "location": "jarvis/tasks.py:134-157",
+   "why_not": "The spec allows exactly this when v1 must not import jarvis.v2 (docs/plans/2026-10-18-security-fix-specs.md:146-149), and there is no second table: both call the shared untrusted.unseen (jarvis/untrusted.py:76-81), as the _label docstring says. Parity is tested (tests/v2/approval_label_check.py v1_checks); every probed input gives identical v1/v2 output."
+  },
+  {
+   "id": "ni2",
+   "claim": "The description says v1 'repeats the v2 character list', but the diff has no character list, so the claim is false",
+   "location": "jarvis/tasks.py:137-145",
+   "why_not": "Wording, not behaviour: v1 repeats the rule and uses the same shared character set (untrusted.unseen), which is what the spec asked for (docs/plans/2026-10-18-security-fix-specs.md:146-149, 159-160 'Write no new character table'). The property the sentence describes (same characters stripped in v1 and v2) holds."
+  },
+  {
+   "id": "ni3",
+   "claim": "Labels are now capped at 59 characters plus '…' instead of a hard cut at 60, a behaviour change that breaks existing label pins",
+   "location": "jarvis/v2/approvals.py:111-112; jarvis/tasks.py:154-156",
+   "why_not": "Required by the spec (docs/plans/2026-10-18-security-fix-specs.md:149-150 'A truncated label now ends in \"…\"', acceptance 3 and 5 at :174-179). tests/tasks_check.py, tests/v2/permissions_check.py and dispatch_toolset_check pass; no pin needed changing."
+  },
+  {
+   "id": "ni4",
+   "claim": "The HUD approval card (Approvals.tsx) and the Discord renderer (render.py approval_text) should also strip these characters; fixing only the server side leaves the renderers exposed",
+   "location": "hud/src/components/Approvals.tsx:121; jarvis/v2/discord/render.py:139",
+   "why_not": "The spec puts the renderers out of scope ('Must not touch: permissions.py logic, the renderers', docs/plans/2026-10-18-security-fix-specs.md:167) and requires a server-side fix either way (:152-155); every origin reaching those renderers is built by approvals.label / tasks._label, which now strip them. The PR body records that the renderers do not strip."
+  },
+  {
+   "id": "ni5",
+   "claim": "Stripping ZWJ/ZWNJ and variation selectors breaks emoji sequences and scripts that need joiners (Persian, Indic) in task names",
+   "location": "jarvis/v2/approvals.py:53-71",
+   "why_not": "Intended: the label is a display line on an authorization surface and clean_line's rule (all Cf, which includes ZWJ/ZWNJ) is the canonical one the spec says to reuse (docs/plans/2026-10-18-security-fix-specs.md:145-146, 159-160). Joined glyphs splitting into their parts is cosmetic and does not hide text."
+  },
+  {
+   "id": "ni6",
+   "claim": "Right-to-left letters (Hebrew, Arabic) in a task name can still reorder the line, so the bidi fix is incomplete",
+   "location": "jarvis/v2/approvals.py:102-115",
+   "why_not": "The defect being fixed is invisible or override characters (spec goal, docs/plans/2026-10-18-security-fix-specs.md:130-132). Every explicit bidi control (LRE/RLE/LRO/RLO/PDF, LRI/RLI/FSI/PDI, LRM/RLM/ALM) is Cf and is stripped (jarvis/untrusted.py:76-81; tested in tests/v2/approval_label_check.py 'bidi-embeds', 'isolate', 'rlo'). Visible RTL letters render with ordinary implicit bidi, cannot hide characters and stay inside the closing quote of the label, which is last in its text."
+  },
+  {
+   "id": "ni7",
+   "claim": "Importing untrusted into jarvis/tasks.py risks an import cycle (agent.py imports tasks)",
+   "location": "jarvis/tasks.py:38",
+   "why_not": "untrusted is a leaf utility module that tasks may import at module level; tests/tasks_check.py, approval_label_check.py and permissions_check.py all import and pass on the head."
+  }
+ ],
+ "notes": "Verified clean apart from gt1. Suites pass on the head (approval_label_check 142 checks, permissions_check 32216 checks, tasks_check all). approval_label_check fails on base source (RLO/ZWSP kept, no ellipsis, hostile id leaked), so the acceptance claim holds. Not classified (pre-existing, unchanged by the diff, outside SEC-2's unseen-character scope): a name containing a double quote can close the quoted name early ('task t1 \"ok\" approved by \"owner\"'), as before the PR."
+}

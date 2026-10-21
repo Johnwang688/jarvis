@@ -1,0 +1,126 @@
+{
+ "case": "c6-r2",
+ "head": "9e1dfb06040ac874f0aaa60133d980bd57493f16",
+ "seeded": false,
+ "built_by": "opus rubric agent",
+ "built_at": "2026-10-21",
+ "original_review": [
+  {
+   "gt": "gt1",
+   "status": "confirmed",
+   "note": "daemon.py:99-111: an owner-turn child is stamped None and never restamped; _relayed_from (daemon.py:85-96) returns stamps.get(child) = None, so its card has no line during a later relayed turn that re-tasks it. Fixed in 4df94be9 ('running' kind)."
+  },
+  {
+   "gt": "gt2",
+   "status": "confirmed",
+   "note": "_idle_event calls _record_subagent(session, event) with no idle flag (daemon.py:1566); prepare runs outside the lock and _stamp_child under it reads _turn_relay(session) at that moment, so a relayed turn begun during prepare stamps a between-turn child. Fixed in 4df94be9 (idle flag + turn_id guard)."
+  },
+  {
+   "gt": "gt3",
+   "status": "confirmed",
+   "note": "_stamp_child's only 'seen' test is `sid in stamps` and it pops the oldest past CHILD_STAMPS=256 (daemon.py:104-111), so an evicted live child's next record restamps it from the running turn. Fixed in 4df94be9 (separate seen set), fully in 94dd73c4 (seen set never evicts)."
+  },
+  {
+   "gt": "gt4",
+   "status": "confirmed",
+   "note": "The bridge's dangerous-tool ask passes no subagent, so who=None and _ask asks relayed(None) = the running turn (permissions.py:1345). Fixed in 4df94be9 (relay_child='')."
+  }
+ ],
+ "entries": [
+  {
+   "id": "rb1",
+   "severity": "MED",
+   "mechanism": "A Codex sub-agent's approval never reaches the child's stamp. codex.py calls the permit with widening=... and subagent_sid=<cx:sid> but no `subagent` label (providers/codex.py:2318-2331), so build_permit's who=subagent_origin(...) is None and the call is treated as the orchestrator's: the reader is asked with child=None and the card follows the turn running when it asks. A Codex background child of a relayed turn that asks after the turn ended shows no line, and a Codex child of an owner turn that asks while a later relayed turn runs is labelled 'turn started by a message from chat S' (kind 'started' at r3+), the exact case the round-1 MED fix was meant to close. The description/docs claim Codex children are covered ('Codex passes it on every child approval'); the tests only pass because they call the permit with subagent='bg' (or 'c' in the matrix), a call shape the real Codex provider never makes. At this head _ask computes ctx.relayed(subagent if origin is not None else None); origin=who is None for Codex.",
+   "location": "jarvis/v2/permissions.py:982,1108-1110,1345; jarvis/v2/providers/codex.py:2318-2331; tests/v2/relay_provenance_check.py:299-308 (child_asks passes subagent='bg'); tests/v2/permissions_check.py:3375 (matrix Codex route passes subagent='c'); docs/notes/control-plane.md:387",
+   "evidence": "Reproduced with /home/johnw/.cache/jarvis-lead/tmp/rb-c6-scripts/codex_child_r2.py (subclass of the head's Children harness, real daemon _permit, child_asks sending only widening + subagent_sid as codex.py does): background Codex child of a relayed turn, stamped {'title': 'Sender desk', ...}, asks after the turn -> card.relayed_from = None; owner-turn Codex child asking during a later relayed turn -> card.relayed_from = {'title': 'Sender desk', ...}. The suite's own Codex subtests pass only because child_asks adds subagent='bg'.",
+   "verified": "reproduced",
+   "fixed_later": null
+  },
+  {
+   "id": "rb2",
+   "severity": "LOW",
+   "mechanism": "A sub-agent call whose sid the daemon has not recorded (an unnamed Claude child with no sid, or a hook that arrives before the daemon records the child's task_started) gets no line even while the relayed turn that spawned it runs: _relayed_from returns stamps.get(child) and None for '' or an unknown sid, contradicting the claim that a sub-agent's call in a relayed turn carries the line.",
+   "location": "jarvis/v2/daemon.py:85-96 (_relayed_from child branch)",
+   "evidence": "/home/johnw/.cache/jarvis-lead/tmp/rb-c6-scripts/unknown_child.py at this head with a relayed turn running: _relayed_from(session, '') -> None and _relayed_from(session, 'cl:fresh') -> None (at 4019f486 both return the relay with kind 'running').",
+   "verified": "reproduced",
+   "fixed_later": "4df94be9"
+  },
+  {
+   "id": "rb3",
+   "severity": "LOW",
+   "mechanism": "A child whose first record does not show who spawned it is stamped from the turn running now: a grandchild whose parent the daemon never saw, or a child whose first record is a subagent_event or a non-start lifecycle record, takes _turn_relay(session) as 'its spawning turn'. Concretely, Claude reports a grandchild of a parent dropped at CHILD_LIMIT with parent_sid None (claude.py `_task`), so if it starts during a relayed turn it is labelled as started by that chat, permanently, though an owner-turn child spawned it.",
+   "location": "jarvis/v2/daemon.py:99-111 (_stamp_child: `stamps[parent] if parent in stamps else _turn_relay(session)`); jarvis/v2/providers/claude.py (_task parent_sid lookup)",
+   "evidence": "Reproduced with /home/johnw/.cache/jarvis-lead/tmp/rb-c6-scripts/limit_grandchild_r2.py: real ClaudeProvider._translate with CHILD_LIMIT live children; parent P (owner turn) dropped, its events recorded unstamped; a slot frees; during a relayed turn P spawns G -> G's lifecycle has parent_sid None, depth 2 -> stamp {'title': 'Sender', ...}, still shown after the relayed turn ends.",
+   "verified": "reproduced",
+   "fixed_later": "94dd73c4 (partial: only non-start first records and a named-but-unseen parent; the Claude CHILD_LIMIT case still stamps, see c6-fu-r1 rb1)"
+  },
+  {
+   "id": "rb4",
+   "severity": "LOW",
+   "mechanism": "A relayed turn's background child whose first record arrives only after the turn's result (read between turns through _idle_event) is stamped with the between-turn provenance None and, never restamped, shows no line for its whole life, although that relayed turn spawned it. Whether the native CLIs emit task_started that late is unverified.",
+   "location": "jarvis/v2/daemon.py:99-111 (_stamp_child); jarvis/v2/daemon.py:1566 (_idle_event -> _record_subagent)",
+   "evidence": "Traced: relay_turn is cleared at turn end (daemon.py:2274 `session.relay_turn = session.relay_mark = None`); a later idle record reaches _stamp_child, `_turn_relay(session)` returns None, stamps[sid] = None, and `sid in stamps` blocks any later stamp. Same mechanism as c6-r3 gt3; Claude got a pre-stamp from the spawning Agent call in 94dd73c4.",
+   "verified": "traced",
+   "fixed_later": "94dd73c4 (Claude only)"
+  },
+  {
+   "id": "rb5",
+   "severity": "LOW",
+   "mechanism": "A child stamped by chat S1's relayed turn keeps naming S1 when a later relayed turn from chat S2 re-tasks it (Claude continuing the agent, Codex sendInput): stamps are never revisited, so its cards say 'turn started by a message from chat S1' and never mention S2, whose words it is now acting on, while the orchestrator's card in the same turn names S2. Mirror of gt1 for an already relay-stamped child.",
+   "location": "jarvis/v2/daemon.py:85-111 (_relayed_from returns the stamp; _stamp_child never restamps)",
+   "evidence": "/home/johnw/.cache/jarvis-lead/tmp/rb-c6-scripts/retask_s2.py at this head: stamp C during S1's relay, end it, run S2's relay with a progress record of C -> _relayed_from(C) = S1 while _relayed_from(None) = S2. Same result at 4019f486 and 94dd73c4 (kind 'started').",
+   "verified": "reproduced",
+   "fixed_later": null
+  }
+ ],
+ "non_issues": [
+  {
+   "id": "ni1",
+   "claim": "A card raised in a relayed turn should not offer Always.",
+   "location": "jarvis/v2/permissions.py:1345",
+   "why_not": "Owner decision O-4 'add the line (C6); keep Always' (plan.md:618; decisions.md:41; control-plane.md:365)."
+  },
+  {
+   "id": "ni2",
+   "claim": "A relayed_from reader that raises or returns a non-dict could change or break the decision.",
+   "location": "jarvis/v2/permissions.py:233-241",
+   "why_not": "PermitContext.relayed catches every exception and returns None for anything but a non-empty dict; it is called only inside _ask after the layer decided to ask. The matrix covers raising, string, None and {} readers."
+  },
+  {
+   "id": "ni3",
+   "claim": "_turn_relay reads relay_turn/relay_mark outside the lock and can mix two turns.",
+   "location": "jarvis/v2/daemon.py:67-82",
+   "why_not": "Single attribute reads, and it names a chat only when the peer's thread_id equals mark['from']; a mismatched pair returns None."
+  },
+  {
+   "id": "ni4",
+   "claim": "A grandchild's stamp is the parent's dict object (stamps[sid] = stamps[parent]), so changing one changes the other / leaks into the card.",
+   "location": "jarvis/v2/daemon.py:109",
+   "why_not": "Stamps are never mutated after creation, and to_json builds a fresh dict of cleaned strings (approvals.py:321-323). Not a defect (round 3 copies it anyway)."
+  },
+  {
+   "id": "ni5",
+   "claim": "provider and thread_id in relayed_from are model-written text that can spoof the '(Provider · id)' part.",
+   "location": "jarvis/v2/daemon.py:79-81; jarvis/v2/approvals.py:321-323",
+   "why_not": "Both come from the relay item the daemon built: provider from ProviderName(...).value and thread_id from the store (chat_relay.py:252-258; stores.py:173 token_hex(4)); each is clean_line'd to 80, and the HUD draws only a known provider word and an 8-hex id (relays.ts relayedParts)."
+  },
+  {
+   "id": "ni6",
+   "claim": "Discord's card and the Browser delegation card lack the line.",
+   "location": "jarvis/v2/approvals.py:321",
+   "why_not": "By design: control-plane.md:394-396 (this head)."
+  },
+  {
+   "id": "ni7",
+   "claim": "Relayed fast-path turns are uncovered.",
+   "location": "tests/v2/relay_provenance_check.py (FastPathCards)",
+   "why_not": "They hold no tool that reaches the permit (control-plane.md:390-393); pinned by a test."
+  },
+  {
+   "id": "ni8",
+   "claim": "A reply steered mid-turn into an owner's turn should label its cards.",
+   "location": "jarvis/v2/daemon.py:67-82",
+   "why_not": "control-plane.md:408: 'A mid-turn reply step in an owner's turn adds no line (the turn is the owner's)'."
+  }
+ ]
+}

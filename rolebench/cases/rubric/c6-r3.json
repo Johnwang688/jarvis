@@ -1,0 +1,99 @@
+{
+ "case": "c6-r3",
+ "head": "4019f48617d796b71db0c89c6eec2884c23a337f",
+ "seeded": false,
+ "built_by": "opus rubric agent",
+ "built_at": "2026-10-21",
+ "original_review": [
+  {
+   "gt": "gt1",
+   "status": "confirmed",
+   "note": "Reproduced with limit_grandchild.py: Claude reports a grandchild of a parent dropped at CHILD_LIMIT with parent_sid None, so _stamp_child's final else (daemon.py:135-136) stamps it from the relayed turn. 94dd73c4 fixes the first-subagent_event and non-start cases but NOT this parent_sid=None case (c6-fu-r1 rb1)."
+  },
+  {
+   "gt": "gt2",
+   "status": "confirmed",
+   "note": "Reproduced: deleting the `elif parent and parent in seen: stamp = None` branch (daemon.py:133-134) leaves relay_provenance_check (16 tests) and permissions_check relay_provenance_checks (26396 checks) passing. Pinned in 94dd73c4."
+  },
+  {
+   "gt": "gt3",
+   "status": "confirmed",
+   "note": "Traced: _idle_event passes idle=True (daemon.py:1597) so a child announced after the turn's result is marked seen with no stamp and never gets one. Native ordering is unverified; 94dd73c4 adds a Claude pre-stamp from the Agent call (Codex not)."
+  },
+  {
+   "gt": "gt4",
+   "status": "confirmed",
+   "note": "CHILD_SEEN=4096 and `seen.pop(next(iter(seen)))` (daemon.py:67,128-129): an evicted live child is new again and stamped from the running turn. Fixed in 94dd73c4 (grow-only seen set)."
+  }
+ ],
+ "entries": [
+  {
+   "id": "rb1",
+   "severity": "MED",
+   "mechanism": "A Codex sub-agent's approval never reaches the child's stamp. codex.py calls the permit with widening=... and subagent_sid=<cx:sid> but no `subagent` label (providers/codex.py:2318-2331), so build_permit's who=subagent_origin(...) is None and the call is treated as the orchestrator's: the reader is asked with child=None and the card follows the turn running when it asks. A Codex background child of a relayed turn that asks after the turn ended shows no line, and a Codex child of an owner turn that asks while a later relayed turn runs is labelled 'turn started by a message from chat S' (kind 'started' at r3+), the exact case the round-1 MED fix was meant to close. The description/docs claim Codex children are covered ('Codex passes it on every child approval'); the tests only pass because they call the permit with subagent='bg' (or 'c' in the matrix), a call shape the real Codex provider never makes. At this head build_permit sets child = sid if who is not None else None (permissions.py:989), so relay_child is None for every Codex child widening.",
+   "location": "jarvis/v2/permissions.py:983,989,1115,1353; jarvis/v2/providers/codex.py:2318-2331; tests/v2/relay_provenance_check.py:391-392 (child_asks passes subagent='bg'); tests/v2/permissions_check.py:3374-3375 (matrix Codex route passes subagent='c'); docs/notes/control-plane.md:402-403; docs/hud-api.md:3680-3683",
+   "evidence": "Reproduced with /home/johnw/.cache/jarvis-lead/tmp/rb-c6-scripts/codex_child.py (subclass of the head's Children harness; child_asks sends only widening + subagent_sid, as codex.py:2326-2330 does): relayed turn's Codex background child, stamp {'title': 'Sender desk', ..., 'kind': 'started'}, asks after the turn -> card.relayed_from = None; owner-turn Codex child asking during a later relayed turn -> {'title': 'Sender desk', ..., 'kind': 'started'} (should be 'running'). Running the head's whole Children class with that call shape fails its Codex subtests (6 failures).",
+   "verified": "reproduced",
+   "fixed_later": null
+  },
+  {
+   "id": "rb2",
+   "severity": "LOW",
+   "mechanism": "A child stamped by chat S1's relayed turn keeps kind 'started' naming S1 when a later relayed turn from chat S2 re-tasks it; stamps are never revisited, so its cards never say S2 is running/carrying words to it, while the orchestrator's card in the same turn names S2. The 'running' fix of round 2 covers only unstamped children.",
+   "location": "jarvis/v2/daemon.py:94-114 (_relayed_from returns dict(stamp) first); jarvis/v2/daemon.py:117-140 (_stamp_child never restamps)",
+   "evidence": "/home/johnw/.cache/jarvis-lead/tmp/rb-c6-scripts/retask_s2.py at this head: _relayed_from(C) = {'title': 'Chat S1', ..., 'kind': 'started'} during S2's relayed turn, _relayed_from(None) = S2.",
+   "verified": "reproduced",
+   "fixed_later": null
+  }
+ ],
+ "non_issues": [
+  {
+   "id": "ni1",
+   "claim": "A card raised in a relayed turn should not offer Always.",
+   "location": "jarvis/v2/permissions.py:1353",
+   "why_not": "O-4 'keep Always' (plan.md:618; decisions.md:41; control-plane.md:365)."
+  },
+  {
+   "id": "ni2",
+   "claim": "A bridge (jarvis-mcp dangerous tool) call from a relay-spawned background child shows no line after the relayed turn ends.",
+   "location": "jarvis/v2/permissions.py:1141",
+   "why_not": "Deliberate: the bridge cannot tell a child from the orchestrator, so its asks are unattributed, 'running' at most (control-plane.md:396-400; hud-api.md:3683-3686)."
+  },
+  {
+   "id": "ni3",
+   "claim": "A relay-spawned child whose first hook beats the daemon's record of its start shows 'while ... runs' instead of 'started'.",
+   "location": "jarvis/v2/daemon.py:94-114",
+   "why_not": "Documented: a child the daemon never saw is treated as unattributed ('running' while a relay runs; control-plane.md:392-395). It still names the chat, and it is not a wrong attribution."
+  },
+  {
+   "id": "ni4",
+   "claim": "A relayed_from without kind (or with an unknown kind) is drawn as 'while ... runs'; it should default to 'started'.",
+   "location": "hud/src/lib/relays.ts:89",
+   "why_not": "Intended fail-safe: hud-api.md:3680-3688 says the HUD draws the 'running' wording for any kind but 'started'; the daemon always sends kind."
+  },
+  {
+   "id": "ni5",
+   "claim": "The 8-hex thread-id check (_RELAY_THREAD_ID, the HUD regex) drops real thread ids.",
+   "location": "jarvis/v2/daemon.py:69; hud/src/lib/relays.ts:87",
+   "why_not": "Thread ids are secrets.token_hex(4), 8 lowercase hex (jarvis/v2/stores.py:173); the tests' expected() uses the real chat.id."
+  },
+  {
+   "id": "ni6",
+   "claim": "Discord's card and the Browser delegation card lack the line.",
+   "location": "jarvis/v2/approvals.py:321-324",
+   "why_not": "By design: control-plane.md:409-411."
+  },
+  {
+   "id": "ni7",
+   "claim": "Relayed fast-path turns are uncovered.",
+   "location": "tests/v2/relay_provenance_check.py (FastPathCards)",
+   "why_not": "No permit-reaching tool in a relayed fast turn (control-plane.md:405-408); pinned by a test."
+  },
+  {
+   "id": "ni8",
+   "claim": "A reply steered mid-turn into an owner's turn should label its cards.",
+   "location": "jarvis/v2/daemon.py:72-91",
+   "why_not": "control-plane.md:425: a mid-turn reply step in an owner's turn adds no line."
+  }
+ ]
+}

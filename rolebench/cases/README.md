@@ -39,9 +39,20 @@ Schema: `docs/plans/2026-10-20-role-bench-decisions.md`; validated by `rolebench
 - **Controls.** `sec2-clean`, `sec4-clean` and `cl3-clean` are PRs whose review found nothing (the lead's own diff reading for the first two and `cl3-clean`; no independent reviewer report). `c6-fu-r1` (#277) found only two NITs, which are recorded but unscored.
 - **Ground truth provenance.** Cases for PRs >= #274 and `monitor-r1`, `vex-r1`, `sv5-r1` come from structured reviewer hand-backs. `store-r1` and `sec3-r1` come from the lead's own review narrative in the session transcript (severity is the lead's, assigned in prose). Every entry was fixed in the PR or a named follow-up.
 - **Range.** Reviews of #243-#272 were mostly the lead reading the diff and rarely produced structured findings, so `monitor-r1` (#211), `vex-r1` (#241) and `sv5-r1` (#228) were mined from earlier reviewer hand-backs (#193-#242) instead.
-- **Seeded cases.** `seed-*` keep the PR's real diff and apply a small patch (checked with `git apply --check` at the head). The ground truth is the injected bug only; the underlying PR was reviewed clean. The `brief` describes the clean PR. `seed-origin` and `seed-unreadable` are test-invisible: their named `suites` pass on the seeded tree (checked), so only reading the code finds the bug. (`seed-hostport` was removed: the PR's own suite failed on it, so it measured running the suites.)
+- **Seeded cases.** `seed-*` keep the PR's real diff and apply a small patch (checked with `git apply --check` at the head). The ground truth is the injected bug only; the underlying PR was reviewed clean. The `brief` describes the clean PR. `seed-origin` and `seed-unreadable` are test-invisible: their named `suites` pass on the seeded tree (checked), so only reading the code finds the bug. (`seed-hostport` was removed: the PR's own suite failed on it, so it measured running the suites.) `seed-privwrite` and `seed-readlines` are test-visible (`tests/private_writes_check.py` fails 10 of 36 and `tests/v2/stores_check.py` torn_read fails on the seeded trees, found by the rubric build), so they too measure running the suites.
 - **Implement tasks.** Hidden tests are the PR's test file(s) at the merged head (for SEC fixes, the acceptance tests committed first on the branch). `impl-277`, `impl-280` and `impl-261` briefs state the private interface their tests call; `impl-280`'s fixture is synthetic (kinds and offsets only).
 - **Implement snapshots keep plan docs that existed at base** (for example `docs/plans/2026-10-18-security-fix-specs.md` in `impl-243` and `impl-244`): they are the planner's real output, which the cheaper builder receives in this workflow. The two briefs say the spec is there.
 - **Hidden file is an existing suite** for `impl-248`, `impl-267`, `impl-277`, `impl-279` and `impl-280`: the implementer loses that suite from the snapshot, so it has no copy of the regression tests for the code it edits.
 - **Review `focus` and `brief` are generic on purpose.** Focus lists name general review areas only; briefs state what the PR claims, never a finding.
 - `impl-267`'s brief states the newline-only record rule, which the PR got from review (the first commit lacked it); the hidden test includes that case.
+
+## Rubric (`rubric/<case>.json`)
+
+Built once per review case on 2026-10-21 by Opus agents. They were blind to every benched review: they did not read the bench's run, pilot or judge-comparison directories. The rubric lets a grader that cannot open the code score findings, so the case's code is checked once rather than on every run.
+
+- `original_review`: each `ground_truth` entry, `confirmed` or `disputed`, with a note. All 48 were confirmed.
+- `entries`: further verified defects in the diff (ids `rb<n>`, the ground-truth schema plus `verified: reproduced|traced` and `fixed_later`). There are 20 across the cases, and none duplicates a ground-truth entry.
+- `non_issues`: tempting claims that are not defects (ids `ni<n>`), each with a code or design-document citation. There are 157.
+- `notes` (optional): suite results and observations left unclassified.
+
+The case file is never edited. Rubric entries come from one model family, so the report should keep recall on the original key, which is human- and seed-sourced, separate from recall on the rubric.

@@ -1,0 +1,77 @@
+{
+  "case": "seed-unreadable",
+  "head": "d44018462733ff9d6c6f71fd401237822d8dfa2d",
+  "seeded": true,
+  "built_by": "opus rubric agent",
+  "built_at": "2026-10-21",
+  "original_review": [
+    {
+      "gt": "gt1",
+      "status": "confirmed",
+      "note": "Reproduced on the seeded tree: _read_lines on a mode-000 log returns [] where clean d4401846 raises StoreError 'x.jsonl: [Errno 13] Permission denied'; a missing file returns [] on both. All four case suites (stores, chat_relay, chat_reads, archive) pass on the seeded tree, so it is test-invisible. Same path also makes read_journal of an unreadable task journal look empty to router/worktrees callers, which is within the gt's 'every reader'."
+    }
+  ],
+  "entries": [],
+  "non_issues": [
+    {
+      "id": "ni1",
+      "claim": "_read_lines should take _lock (or the reader is racy); tolerating a torn tail is papering over a race",
+      "location": "jarvis/v2/stores.py:104-112",
+      "why_not": "Lock-free reads are the stated design (docstring jarvis/v2/stores.py:104-112): only the last unterminated line can be in flight because _append writes whole lines under _lock (stores.py:248-264). The concurrent writer/reader test (tests/v2/stores_check.py torn_read part 6) passes on head and the torn_read test fails on base stores.py (verified: StoreError log.jsonl:3 Unterminated string). Taking the lock is an alternative, not a defect."
+    },
+    {
+      "id": "ni2",
+      "claim": "a torn last line that happens to parse returns a truncated or wrong record",
+      "location": "jarvis/v2/stores.py:140-151",
+      "why_not": "_append only writes one JSON object per line (stores.py:248-264, json.dumps(entry) of a dict); a proper prefix of a serialized object never parses, because the first depth-0 '}' is its last character. A complete record that only lacks its newline parses and is correctly returned; a non-object tail still raises (stores.py:148-149, test part 5)."
+    },
+    {
+      "id": "ni3",
+      "claim": "callers that page by row index (transcript ?after=, task journal ?after=, the Discord mirror's len(read_log)) skip or repeat a record when a read leaves out the torn tail",
+      "location": "jarvis/v2/daemon.py:2814; jarvis/v2/hud_api.py:2345; jarvis/v2/discord/mirror.py:532",
+      "why_not": "Only the final row can be omitted, so a read returns a prefix of the next read: counts are monotonic and the omitted record appears at the same index once its newline lands. No earlier row ever shifts."
+    },
+    {
+      "id": "ni4",
+      "claim": "a file ending in a bare '\\r' is treated as newline-terminated, so a torn write ending at '\\r' is reported as corruption",
+      "location": "jarvis/v2/stores.py:119",
+      "why_not": "No writer can stop at a raw CR: json.dumps escapes every control character below 0x20 even with ensure_ascii=False, and _append writes only '\\n' (stores.py:248-264). UTF-8 multibyte sequences never contain 0x0A/0x0D."
+    },
+    {
+      "id": "ni5",
+      "claim": "the PR makes a crash-torn tail permanent: it is hidden until the next append, whose newline repair turns it into interior corruption that raises forever",
+      "location": "jarvis/v2/stores.py:248-264; jarvis/v2/stores.py:140-151",
+      "why_not": "Pre-existing and not caused by the diff: base 8d73bead raises StoreError log:2 both before and after the next append (probe run in-process on base and head); head only stops raising while no further write happens. The newline repair in _append predates the PR. A daemon crash mid-append is the only way to leave such a tail (writes are under _lock)."
+    },
+    {
+      "id": "ni6",
+      "claim": "the cut-multibyte branch can hide invalid UTF-8 elsewhere in the file, or mishandles a file with no newline at all",
+      "location": "jarvis/v2/stores.py:120-131",
+      "why_not": "bytes.decode reports the first error, so an earlier invalid byte gives a different reason ('invalid start byte'/'invalid continuation byte') and raises; tests/v2/stores_check.py:262-268 cover \\xff terminated and unterminated and an earlier bad line before a cut character. With no newline rfind is -1, the slice is empty and the read is [] (probe: b'{\"t\": \"\\xe2\\x9c' -> [])."
+    },
+    {
+      "id": "ni7",
+      "claim": "other JSONL readers (chat_reads.tail_rows, SubagentStore._read) still fail on a torn line or split on U+2028",
+      "location": "jarvis/v2/chat_reads.py:254-286; jarvis/v2/subagents.py:692-715",
+      "why_not": "Both split on b'\\n' and skip any unparseable line, never raising (chat_reads.py:277-286, subagents.py:704-714). (migrate.py:49 still uses splitlines on a v1 log, but that is pre-existing, a one-time v1 import outside this diff, not a defect of this PR.)"
+    },
+    {
+      "id": "ni8",
+      "claim": "splitting on '\\n' only regresses CR-only line endings (the old read_text/splitlines read them; now a CR-only file raises 'Extra data')",
+      "location": "jarvis/v2/stores.py:133-139",
+      "why_not": "True of the bytes (probe: b'{\"a\":1}\\r{\"b\":2}\\r' reads on 1b136305, raises on d4401846) but intended: 'Records end at the newline only' is the stated contract (case brief; comment stores.py:133-135), and no writer produces CR-only logs: _append writes '\\n' (stores.py:248-264), v1 sessions.py:247 writes json.dumps(...)+'\\n', json escapes raw CR, and CRLF still reads (separator_characters, stores_check.py:337-340)."
+    },
+    {
+      "id": "ni9",
+      "claim": "separator_characters is vacuous: VT, FF and FS/GS/RS are escaped by json.dumps, so the test would pass without the change",
+      "location": "tests/v2/stores_check.py:324-341",
+      "why_not": "Partly right for those five characters, but the same strings carry U+2028/U+2029/U+0085, which json.dumps leaves raw: reverting split('\\n') to splitlines() at d4401846 fails stores_check with StoreError 'log.jsonl:1: Unterminated string' (mutation run)."
+    },
+    {
+      "id": "ni10",
+      "claim": "returning [] for a missing log (FileNotFoundError) is the same bug as the PermissionError case",
+      "location": "jarvis/v2/stores.py:113-117",
+      "why_not": "Intended and pre-existing (base 8d73bead has the same FileNotFoundError -> []): a thread or task with no log yet has no records, and stores are lazy (module docstring stores.py:1-6, 'missing ids return None'; the log file is created by the first _append). Only an unreadable existing file must stay a StoreError."
+    }
+  ]
+}
