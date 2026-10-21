@@ -1175,7 +1175,9 @@ an implement snapshot has the hidden tests removed, restored only in a grading c
 `runs/<run-id>/` (prompt, review text, findings, `run.json` with the snapshot path
 and the build-time base/change shas, `judge.json`, `stdout.jsonl`), `log.jsonl`,
 `spend.json` (the OpenRouter ledger), `hud-deps/node_modules` (the bench's own copy
-of the HUD's dependencies, made once, mounted read-only), `spotcheck/` and
+of the HUD's dependencies, made once, mounted read-only, rebuilt if a case's
+base carries a different `package-lock.json` hash than the recorded one),
+`spotcheck/` and
 `spotcheck-keys/` (kept apart), `valid_new.jsonl` and `report.md`.
 `python -m rolebench clean --judged` removes the snapshots of judged and finished runs.
 
@@ -1191,24 +1193,38 @@ and `/tmp`. Not mounted: the owner's checkout (so the venv's editable `.pth` poi
 at nothing and no code imports from it), `~/.config/gh`, `~/.gitconfig`, `~/.ssh`,
 `/mnt` (but WSL's `resolv.conf` where the cell has network), `/run` (no user bus: a
 cell cannot ask systemd to start anything outside), and the lead's `/tmp/claude-*`.
-Logins: the claude cell and the judge get only `~/.claude/.credentials.json`,
-read-only; the codex cell gets its own `CODEX_HOME` on the tmpfs with only
-`auth.json` bound read-only (no owner config, skills, memories or `trusted` entries
-written back); the Jarvis cell gets no login (the OpenRouter key goes to the worker
-on stdin). A login that would expire within the run is refused, since a refresh in
-a read-only cell could rotate the token without saving it. The environment is an
+Logins are a **trimmed, in-memory view**, not a file bind (A2, decisions doc).
+The claude cell and the judge get `{claudeAiOauth: {accessToken, expiresAt,
+scopes, subscriptionType, rateLimitTier}}` — no refresh token, no MCP OAuth
+block; the codex cell gets `auth.json` without its refresh token, in its own
+`CODEX_HOME` on the tmpfs (no owner config, skills, memories or `trusted` entries
+written back); the Jarvis cell gets no login (the OpenRouter key goes to the
+worker on stdin). The trimmed JSON is written to a pipe and bound with `bwrap
+--perms 0400 --ro-bind-data <fd>`, so it is never on disk and never written
+back. A login that would expire within the run is refused, since a refresh in a
+read-only cell could rotate the token without saving it. The environment is an
 allowlist (`PATH`, `HOME`, `USER`, `LANG`/`LC_*`, `TERM`, `TZ`, `TMPDIR`, plus each
 CLI's own), with `GH_CONFIG_DIR` empty, a `GIT_CONFIG_GLOBAL` with no credential
 helper and no hooks, `GIT_CONFIG_NOSYSTEM=1`, `GIT_TERMINAL_PROMPT=0` and
 `GIT_ASKPASS=/bin/false`. A timeout kills the whole unit (setsid children too).
-Network: unshared for grading; shared for claude, codex, Jarvis and the judge, because
-their CLIs must reach their APIs. **That is the remaining exposure**: Claude's Bash and
-Jarvis's shell can reach the internet and this machine's loopback ports, and the
-claude cell's Bash can read the Claude login it was given (that file also holds an
-MCP login). Codex's own sandbox keeps its commands off the network. The network and
-outside-the-snapshot audits are best-effort detection beside that, reported next to
-the score. Claude's tools are an allowlist (`Bash,Read,Edit,Write,Grep,Glob`; the
-judge `Read,Grep,Glob`), and the Jarvis cell offers no delegation tools.
+Each cell also gets its own PID, IPC and UTS namespaces (`--unshare-all`): the
+host's processes, its `/proc/1/root` and its SysV IPC are invisible.
+
+Network (A1): every cell has its own empty netns. A grade cell never has
+network. A claude, jarvis or judge cell with network **refuses to start** unless
+`ROLEBENCH_NET` is `none` (run with no network at all — no host loopback, no
+daemon ports) or `pasta` (the intended confined egress through the passt
+package, **not wired yet**, so it is refused until it is, never silently given
+the host netns). Codex is the one exception: it keeps the host netns, because
+its own sandbox keeps its *commands* off the network while the codex process
+reaches its API. **That is the remaining exposure**: the codex process shares the
+host netns (so a codex cell could reach this machine's loopback ports, which is
+why its own sandbox and the network audit matter), and a claude or jarvis run
+cannot currently reach its API until `pasta` is wired — real runs of those wait
+on it. The network and outside-the-snapshot audits are best-effort detection
+beside that, reported next to the score. Claude's tools are an allowlist
+(`Bash,Read,Edit,Write,Grep,Glob`; the judge `Read,Grep,Glob`), and the Jarvis
+cell offers no delegation tools.
 
 **The memory cap and its sibling.** A `systemd-run --user --scope` started inside
 another scope is a sibling of it under the user manager, not a child, so a nested
@@ -1221,12 +1237,14 @@ own unit.
 an unreadable ledger is "cap reached". A reservation is a pending entry in the file,
 so concurrent processes share one cap; a pending entry whose process died is charged
 in full. The Jarvis worker wraps `llm.chat`: every reply (any tier, any caller) is
-added to a running total written to the run's `spend.json` after each call; no call
-is made once the total reaches the budget, and the call that crosses it raises (at
-most one call can overshoot). A timeout, OOM or crash is charged its whole
-reservation. Every tier runs on the cell's model; only a `moonshotai/` id is pinned
-to Moonshot (no fallbacks) and floored at $3/$15 per M, and an unknown `moonshotai/`
-id is refused.
+added to a running total streamed on the worker's stdout (a `ROLEBENCH_SPEND` line,
+so the harness has it even if the cell is killed mid-call); the call whose estimated
+prompt cost at the bench's price (Kimi $3/M, not the catalog's) would cross the budget
+is refused before it is sent, no call is made once the total reaches the budget, and
+the call that still crosses it raises (at most one can overshoot). A timeout, OOM or
+crash is charged its whole reservation. Every tier runs on the cell's model; only a
+`moonshotai/` id is pinned to Moonshot (no fallbacks) and floored at $3/$15 per M, and
+an unknown `moonshotai/` id is refused.
 
 **Quota.** A Claude or Codex cell is skipped at 75% of a quota window, and also when
 the quota is unknown (fail closed); the guard is checked again before every implement
