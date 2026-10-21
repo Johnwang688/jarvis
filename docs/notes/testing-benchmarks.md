@@ -1376,6 +1376,51 @@ implementer and a jarvis reviewer) has `cost_basis: "mixed"`, its costs per basi
 models that ran, so a defect none found is missing from both keys, and pooled recall rewards
 finding what the other models found.
 
+**Two-stage rubric grader (2026-10-21, owner decision; `rolebench/grader.py`).** The legacy
+judge re-read the code on every review (~$0.22 each) and re-verified the same extra findings
+each time; a Sonnet re-judge of the 22 pilot runs gave identical recall but 81% per-finding
+label agreement (lenient on claims a design plan marks as intended), and a location matcher
+caught all 12 of Opus's hits plus 9 spurious ones. Each review case now has a verified rubric
+(`rolebench/cases/rubric/<case>.json`, loaded and validated by `cases.load_rubric` /
+`cases.validate_rubric`: head matches the case, `original_review` covers exactly the
+ground-truth ids, `rb`/`ni` ids unique, severities valid, every entry location names a
+`path[:line[-line]]`, `verified` reproduced or traced; `tests/rolebench_grader_check.py`
+validates every committed file). The scoring key is the original ground truth (minus any
+entry the rubric `disputed`, listed but never scored) plus the rubric entries plus accepted
+pooled entries. `python -m rolebench judge` uses it by default when the case has a rubric
+(`--grader legacy` keeps the Opus judge, `--grader rubric` forces it); `judge.json` records
+`grader: "rubric-1"`, and a valid judge.json from the other grader is kept beside it as
+`judge-<grader>.json` (asking for that grader again swaps it back, with no call). Stage 0, free:
+a finding's candidates are the key entries on the same file (suffix match on whole path
+components, either way) with a line within ±15 of the range, or no line on either side; the
+candidate sets are in `judge.json`. Stage 1: one Sonnet call per run (effort high) in the
+read-only judge cell with an **empty** work directory, under the net gate, quota guard and
+ceiling, seeing the blinded findings inside a random-nonce fence (the nonce is stripped from
+finding text), the key entries (id, severity, mechanism, location; never the evidence), the
+non-issues (id, claim, location, why_not) and each finding's candidates, listed after the
+fence. Per finding: `match <id>` (a match outside the finding's candidates becomes `unmatched`
+and lands in `gate_violations`), `non-issue <id>`, `nit` or `unmatched`; strict JSON, one retry;
+a failure never overwrites a valid judge.json (it goes to `judge-failed.json`). Stage 2:
+unmatched findings feed the pool as `unverified` (legacy runs still feed their valid-new ones
+as confirmed); `pool --case <id> --rule` makes one Opus call per proposed cluster with no ruling
+yet, in a read-only judge cell over a fresh export of the case's head (seed applied, no `.git`,
+the diff beside it; removed after), and records `valid` (severity, mechanism, location,
+evidence) or `invalid` (why_not, citation) on the cluster with its cost in the pool's `calls`.
+The lead still adjudicates: `--accept` needs a valid ruling for a cluster with an unverified
+member and then uses the ruled severity, mechanism and location; `--accept-invalid` makes an
+invalid ruling a pooled **non-issue** (`non_issues` in `cases/pooled/<case>.json`, id
+`pool-ni-<cluster>`), which later runs match in stage 1. #289's guarantees hold for both kinds:
+committed ids are never dropped or redefined without `--redefine`, pending members wait for
+`--accept-members`, and the key's evidence names the cluster, never reviewer (or ruling) text.
+Scores per run (`grader.assess`, recomputed by the report with no model call, so an accepted
+ruling updates earlier runs): weighted and MED+ recall on the **original key** and on the
+**full key**, false positives (non-issue matches, plus members of accepted non-issue clusters),
+nits, **unverified** (unmatched and not yet settled by an accepted ruling; a ruling awaiting
+the lead still counts as unverified), and precision over the settled findings. The report
+groups by harness, model and grader and lists every judged run with its grader. Free checks:
+`tests/rolebench_grader_check.py` (fake calls only, no cell; ~140 checks); the mutation
+runner is `~/.cache/jarvis-lead/rolebench-grader-mutants/run.py`.
+
 The judge is `claude -p --model opus` over shuffled, blinded findings plus the answer
 key, reading an export of the change commit (no `.git`, its diff beside it) in a
 random-named directory; its JSON is validated strictly (one retry). Judging a run

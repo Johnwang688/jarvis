@@ -2409,12 +2409,12 @@ def test_pool(shas, root: Path) -> None:
         allruns = report.load_runs(runs)
         resc = pool.rescore_runs(allruns, runs)
         text = report.render(allruns, resc)
-        check("report: original-key and pooled-key recall columns, labelled, with the pooling-bias note",
-              "weighted recall (original key)" in text and "MED+ recall (pooled key)" in text and "Pooling bias" in text
+        check("report: original-key and full-key recall columns, labelled, with the pooling-bias note",
+              "weighted recall (original key)" in text and "MED+ recall (full key)" in text and "Pooling bias" in text
               and set(resc) == {"A-run", "B-run", "C-run", "D-run", "F-run"})
         rows = {r["case"] + r["model"]: r for r in report.review_rows(allruns, resc) if r["model"] == "opus"}
         check("report: a row carries both recalls", list(rows.values())[0]["weighted_recall"] == 0.0
-              and abs(list(rows.values())[0]["weighted_recall_pooled"] - 0.5) < 1e-9)
+              and abs(list(rows.values())[0]["weighted_recall_full"] - 0.5) < 1e-9)
 
         # re-pool after acceptance: a new member of an accepted cluster follows into the key
         _fake_judged_run(runs, "G-run", cid, "sonnet", [_finding("writers race", "MED", "io.py", 9)],

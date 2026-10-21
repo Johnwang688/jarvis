@@ -171,3 +171,30 @@ adjudicates the clusters, and accepted ones form a committed pooled key
 Recall is reported against both keys, labelled; the pool's bias toward what the run's models found
 is stated in the report.
 
+
+## Two-stage grader amendment (owner, 2026-10-21)
+
+The Opus judge with repo access (~$0.22 a review) is replaced as the default by a two-stage
+grader that checks the code once per distinct claim, not once per run. Evidence: a Sonnet
+re-judge of the 22 pilot runs had identical recall but 81% per-finding label agreement, lenient on
+claims a design plan marks as intended; a location matcher caught 12/12 of Opus's hits with 9
+spurious ones (necessary, not sufficient). Opus built a verified rubric per review case
+(`rolebench/cases/rubric/<case>.json`: `original_review`, `rb` entries, `ni` non-issues).
+
+- **Key.** Original ground truth (minus rubric-`disputed` entries, which are listed, never scored)
+  plus rubric entries plus accepted pooled entries. Recall is reported on the original key (human-
+  and seed-sourced) and on the full key, both kept because the rubric comes from one model family.
+- **Stage 0 (free):** candidates are key entries on the same file (suffix match either way) with a
+  line within ±15, or no line on either side. No candidate, no match.
+- **Stage 1:** one Sonnet call per run (effort high), text only (an empty work dir in the read-only
+  judge cell; net gate, quota guard and ceiling kept), blinded and fenced findings. Verdicts:
+  `match` (candidates only; anything else becomes `unmatched`, recorded), `non-issue`, `nit`,
+  `unmatched`. Strict JSON, one retry.
+- **Stage 2:** unmatched findings pool as `unverified`; `pool --rule` makes one Opus ruling per
+  proposed cluster with the case's code (`valid` or `invalid`, each call recorded with its cost).
+  The lead adjudicates: `--accept` (a cluster with an unverified member needs a valid ruling) or
+  `--accept-invalid` (a pooled non-issue, `pool-ni-` id). #289's guarantees are unchanged.
+- **Scores:** recall (original and full key), false positives (non-issue matches), nits,
+  unverified (never counted as either), precision over the settled part. Rescoring needs no model
+  call. The report shows each run's grader; `judge --grader legacy` keeps the Opus judge, and the
+  default is the rubric grader when a rubric exists.

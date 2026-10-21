@@ -56,3 +56,9 @@ Built once per review case on 2026-10-21 by Opus agents. They were blind to ever
 - `notes` (optional): suite results and observations left unclassified.
 
 The case file is never edited. Rubric entries come from one model family, so the report should keep recall on the original key, which is human- and seed-sourced, separate from recall on the rubric.
+
+The rubric is what the two-stage grader (`rolebench/grader.py`, the default `judge` when a rubric exists) scores against: `cases.load_rubric` validates it (head, exact `original_review` coverage, unique `rb`/`ni` ids, severities, parseable locations, `verified`), a `disputed` original entry is excluded from scoring but listed, and `tests/rolebench_grader_check.py` validates every file here. A location must name at least one `path[:line[-line]]` with a known extension, because the grader's location gate matches findings to entries by it.
+
+## Pooled keys (`pooled/<case>.json`)
+
+Written only by `rolebench pool` adjudication (`docs/notes/testing-benchmarks.md`, "Role bench"). `ground_truth` holds accepted clusters (`pool-p<n>`); the optional `non_issues` holds clusters an Opus ruling found invalid and the lead accepted as such (`pool-ni-p<n>`: claim, location, why_not, citation, source); `members` maps both kinds to their [run, finding] pairs.

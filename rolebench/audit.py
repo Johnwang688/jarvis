@@ -150,16 +150,20 @@ def path_candidates(text: str, env: dict | None = None, depth: int = 0) -> list[
     return out
 
 
-def bare_cds(command: str) -> int:
+def bare_cds(command: str, depth: int = 0) -> int:
     """How many bare `cd`s (no operand: it goes HOME) a shell command runs, in
-    command position and followed by an operator or the end. Only a command
-    is read, never a pattern or a description."""
+    command position and followed by an operator or the end, counting those
+    in the script of `sh -c`/`bash -lc '...'` (the shape every codex command
+    arrives in). Only a command is read, never a pattern or a description."""
     tokens = _aware_tokens(command)
     n = 0
     for i, tok in enumerate(tokens):
         if tok == "cd" and (i == 0 or set(tokens[i - 1]) <= set(AWARE_PUNCT)) \
                 and (i + 1 == len(tokens) or set(tokens[i + 1]) <= set(AWARE_PUNCT)):
             n += 1
+        elif (depth < 3 and i >= 2 and SHELL_C.match(tokens[i - 1])
+              and os.path.basename(tokens[i - 2]) in SHELLS):
+            n += bare_cds(tok, depth + 1)
     return n
 
 

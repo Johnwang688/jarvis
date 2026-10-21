@@ -146,12 +146,47 @@ def default_judge(prompt: str, cwd: Path) -> tuple[str, float | None]:
     return result.text, result.cost_usd
 
 
-def _existing(run_dir: Path) -> dict | None:
+def _existing(run_dir: Path, name: str = "judge.json") -> dict | None:
     try:
-        doc = json.loads((run_dir / "judge.json").read_text(encoding="utf-8"))
+        doc = json.loads((run_dir / name).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
-    return doc if doc.get("valid") else None
+    return doc if isinstance(doc, dict) and doc.get("valid") else None
+
+
+def grader_of(doc: dict) -> str:
+    """Which grader wrote a judge.json: "legacy" (this module, no field) or the rubric grader's version."""
+    return doc.get("grader") or "legacy"
+
+
+def save_judge(run_dir: Path, doc: dict) -> None:
+    """Write judge.json atomically. A valid judge.json from another grader is
+    kept beside it as judge-<grader>.json, so the two can be compared."""
+    old = _existing(run_dir)
+    if old is not None and grader_of(old) != grader_of(doc):
+        config.write_json(run_dir / f"judge-{grader_of(old)}.json", old)
+    config.write_json(run_dir / "judge.json", doc)
+
+
+def save_failure(run_dir: Path, doc: dict) -> None:
+    """A failed grading never overwrites a valid judge.json: it goes to
+    judge-failed.json then (and to judge.json only when there is none)."""
+    config.write_json(run_dir / ("judge-failed.json" if _existing(run_dir) is not None else "judge.json"), doc)
+
+
+def existing_for(run_dir: Path, grader: str) -> dict | None:
+    """The run's valid verdicts by `grader`: judge.json when it is that
+    grader's, else an archived judge-<grader>.json, which is swapped back in
+    as judge.json (the current one archived in its turn)."""
+    cur = _existing(run_dir)
+    if cur is not None and grader_of(cur) == grader:
+        return cur
+    old = _existing(run_dir, f"judge-{grader}.json")
+    if old is None or grader_of(old) != grader:
+        return None
+    save_judge(run_dir, old)
+    (run_dir / f"judge-{grader}.json").unlink(missing_ok=True)
+    return old
 
 
 def _record_valid_new(run: dict, rows: list[dict]) -> None:
@@ -182,8 +217,10 @@ def judge_run(run_dir: Path, case: dict, judge_fn=default_judge, quota_override:
     if run.get("kind") != "review":
         raise JudgeError(f"{run_dir.name} is not a review run")
     if not force:
-        done = _existing(run_dir)
+        done = existing_for(run_dir, "legacy")
         if done is not None:
+            if run.get("grader") not in (None, "legacy"):
+                _fold(run_dir, run, done)
             return {**done, "reused": True}
     items = json.loads((run_dir / "findings.json").read_text(encoding="utf-8"))
     # A run judged after pooling sees the original key plus the accepted pooled entries.
@@ -230,7 +267,7 @@ def judge_run(run_dir: Path, case: dict, judge_fn=default_judge, quota_override:
         finally:
             shutil.rmtree(copy, ignore_errors=True)
         if matches is None:
-            (run_dir / "judge.json").write_text(json.dumps({"valid": False, "error": error, "attempts": attempts}), encoding="utf-8")
+            save_failure(run_dir, {"valid": False, "error": error, "attempts": attempts})
             raise JudgeError(f"judge output invalid twice: {error}")
     pooled_ids = [g["id"] for g in gt if g not in case["ground_truth"]]
     original_score, pooled_score = scores(matches, case, gt)
@@ -241,14 +278,20 @@ def judge_run(run_dir: Path, case: dict, judge_fn=default_judge, quota_override:
            "effort": config.EFFORT["judge"],
            "key": {"original": [g["id"] for g in case["ground_truth"]], "pooled": pooled_ids},
            "judged_at": time.strftime("%Y-%m-%dT%H:%M:%S")}
-    (run_dir / "judge.json").write_text(json.dumps(doc, indent=1), encoding="utf-8")
-    # run.score stays on the original key; the pooled key's score is apart
-    run["score"], run["score_pooled"], run["judged"] = doc["score"], doc["score_pooled"], True
-    (run_dir / "run.json").write_text(json.dumps(run, indent=1), encoding="utf-8")
+    save_judge(run_dir, doc)
+    _fold(run_dir, run, doc)
     _record_valid_new(run, [{"case": run["case_id"], "run": run["run_id"], "severity": m["severity"],
                              "finding": items[ids[m["finding"]]], "note": m.get("note", "")}
                             for m in matches if m["verdict"] == "valid-new"])
     return doc
+
+
+def _fold(run_dir: Path, run: dict, doc: dict) -> None:
+    """run.score stays on the original key; the pooled key's score is apart."""
+    run["score"], run["score_pooled"], run["judged"] = doc["score"], doc["score_pooled"], True
+    run["grader"] = "legacy"
+    run.pop("score_full", None)
+    config.write_json(run_dir / "run.json", run)
 
 
 def spotcheck_paths(stamp: str | None = None) -> tuple[Path, Path]:
@@ -294,7 +337,8 @@ def spotcheck(run_dirs: list[Path], out: Path | None = None, key_out: Path | Non
         where = f["file"] + (f":{f['line']}" if f["line"] is not None else "")
         lines += [f"## S{index} ({case_id})", f"- finding: [{f['severity']}] {where} - {f['title']}",
                   f"- scenario: {f['scenario']}", f"- verdict: **{m['verdict']}**"
-                  + (f" -> {m['gt']}" if m.get("gt") else "") + (f" (severity {m['severity']})" if m.get("severity") else ""),
+                  + (f" -> {m['gt']}" if m.get("gt") else "") + (f" -> {m['ni']}" if m.get("ni") else "")
+                  + (f" (severity {m['severity']})" if m.get("severity") else ""),
                   f"- judge note: {m.get('note', '')}", "- lead: [ ] agree  [ ] disagree", ""]
     out.write_text("\n".join(lines), encoding="utf-8")
     key_out.write_text(json.dumps(key, indent=1), encoding="utf-8")   # who wrote each: kept apart so the sample reads blind
