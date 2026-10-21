@@ -16,21 +16,32 @@ Not mounted, whatever the harness: the owner's checkout, ~/.config/gh,
 user bus: nothing inside can ask systemd to start a process outside), and the
 lead's /tmp/claude-* session directories. The environment is an allowlist.
 
-Network is shared with the host for the cells whose CLI must reach its API
-(claude, codex, jarvis, the judge) and unshared for grading. That is the
-remaining exposure: a cell with network can reach the internet and this
-machine's loopback ports. Codex's own sandbox keeps its *commands* off the
-network; Claude's Bash and Jarvis's shell are not.
+Network (A1): a grade cell has none. A codex cell shares the host netns (its
+own sandbox keeps its *commands* off the network). A claude, jarvis or judge
+cell runs under pasta (`ROLEBENCH_NET=pasta`, the default):
+
+    systemd-run --scope ... -- pasta <PASTA_FLAGS> -- python -I netcell.py <policy> -- bwrap ...
+
+pasta makes a fresh user and network namespace with no port forwarding in
+either direction and no address mapped to the host; netcell installs the
+egress policy there (DNS to pasta's forwarder, TCP 443 to public addresses,
+everything else prohibited, including every private, link-local, CGNAT and
+host-owned address) and execs bwrap, which keeps that netns (`--share-net`)
+but puts the agent in its own user namespace with no capabilities, so it can
+never change the policy. `ROLEBENCH_NET=none` gives those cells no network at
+all (no API either, so real runs are refused).
 """
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
 import shutil
 import signal
 import subprocess
+import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -38,6 +49,8 @@ from pathlib import Path
 from . import config
 
 BWRAP = "/usr/bin/bwrap"
+PASTA = "/usr/bin/pasta"
+NETCELL = Path(__file__).resolve().parent / "netcell.py"
 OPT = Path("/opt/rolebench")
 VENV = OPT / "venv"
 PYTHON = str(VENV / "bin" / "python")
@@ -75,6 +88,26 @@ NETWORK = {"claude": True, "codex": True, "jarvis": True, "judge": True, "grade"
 # (A1). Codex is exempt: its own sandbox keeps its commands off the network.
 NET_GATED = ("claude", "jarvis", "judge")
 NET_MODES = ("none", "pasta")
+NET_DEFAULT = "pasta"
+# pasta: a new user+net namespace, its tap configured from the host's (but see
+# netcell's policy), no port forwarded either way (-t/-u inbound, -T/-U from
+# the namespace's loopback to the host's: all four default to `auto`), no
+# address translated to the host's loopback or to the host's own address,
+# DNS only through the forwarder, IPv4 only, no ICMP, DHCP, DHCPv6 or RA.
+DNS_FORWARD = "192.0.2.53"       # TEST-NET-1: never a real host; pasta answers it on port 53 only
+PASTA_FLAGS = ("--config-net", "--quiet",
+               "-t", "none", "-u", "none", "-T", "none", "-U", "none",
+               "--no-map-gw", "--map-host-loopback", "none", "--map-guest-addr", "none",
+               "--dns-forward", DNS_FORWARD, "--ipv4-only",
+               "--no-icmp", "--no-dhcp", "--no-dhcpv6", "--no-ra")
+# Prohibited inside a pasta cell, on top of every address the host owns: this
+# network, private, CGNAT (Tailscale), link-local, IETF, benchmarking,
+# multicast and reserved space. Loopback stays the cell's own (the local table
+# is consulted first), so a cell's tests can still bind 127.0.0.1.
+BLOCK_V4 = ("0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12",
+            "192.0.0.0/24", "192.168.0.0/16", "198.18.0.0/15", "224.0.0.0/4", "240.0.0.0/4")
+ALLOW_TCP = (443,)
+CRED_FD_BASE = 200                # where netcell re-creates the credential pipes
 MASK_ETC = ("/etc/ssh", "/etc/ssl/private")
 # Installed software outside /usr that suites use (the Browser suites' Chrome).
 SYSTEM_RO = ("/opt/google",)
@@ -96,6 +129,22 @@ def available() -> str | None:
     if not shutil.which("systemd-run"):
         return "systemd-run not found"
     return None
+
+
+def pasta_available() -> str | None:
+    """None when a pasta cell can be built, else why not."""
+    if not os.access(PASTA, os.X_OK):
+        return f"{PASTA} not found (install the passt package)"
+    if not os.access(netcell_ip(), os.X_OK):
+        return f"{netcell_ip()} not found (iproute2)"
+    if not NETCELL.is_file():
+        return f"{NETCELL} is missing"
+    return None
+
+
+def netcell_ip() -> str:
+    from . import netcell
+    return netcell.IP
 
 
 @dataclass
@@ -193,7 +242,8 @@ def codex_auth() -> Path:
 
 
 def net_mode() -> str:
-    return (os.environ.get("ROLEBENCH_NET") or "").strip().lower()
+    """ROLEBENCH_NET, lower-cased; unset or empty is the default, pasta."""
+    return (os.environ.get("ROLEBENCH_NET") or "").strip().lower() or NET_DEFAULT
 
 
 def trimmed_claude_credentials() -> bytes:
@@ -266,53 +316,103 @@ def env_for(cell: Cell, base: dict | None = None) -> dict:
 
 def agent_net_refusal(profile: str) -> str | None:
     """Why an agent run on this profile is refused before any quota read or
-    ledger reservation, or None. claude, jarvis and judge cells have no API
-    access until pasta is wired: `none` has no network, `pasta` is not wired."""
+    ledger reservation, or None. A claude, jarvis or judge cell reaches its API
+    only through pasta: `none` has no network, so real runs are refused, and
+    so is any other mode or a missing pasta."""
     if profile not in NET_GATED:
         return None
-    mode = net_mode() or "unset"
-    return f"ROLEBENCH_NET={mode}: no API access until pasta is wired ({profile} runs are refused)"
+    mode = net_mode()
+    if mode == "pasta":
+        why = pasta_available()
+        return f"ROLEBENCH_NET=pasta: {why} ({profile} runs are refused)" if why else None
+    if mode == "none":
+        return f"ROLEBENCH_NET=none: no network, so no API access ({profile} runs are refused; use pasta)"
+    return f"ROLEBENCH_NET={mode!r} is not a mode (none or pasta): {profile} runs are refused"
 
 
-def resolve_network(cell: Cell) -> bool:
-    """Whether this cell gets a shared host netns, enforcing A1's gate.
+def resolve_network(cell: Cell) -> str:
+    """This cell's network: "none" (an empty netns), "host" (the host's netns)
+    or "pasta" (a pasta netns with netcell's egress policy), enforcing A1.
 
-    `--unshare-all` gives each cell an empty netns; only a gated profile that is
-    explicitly cleared here is given the host's. A claude/jarvis/judge cell with
-    network on must declare ROLEBENCH_NET:
-      - `none`: run with no network (so no host loopback, no daemon ports);
-      - `pasta`: the intended confined egress, not wired yet — refused until
-        passt is installed and wired, never silently given the host netns.
-    Codex is exempt (its own sandbox keeps its commands off the network)."""
+    Only codex is ever given "host" (its own sandbox keeps its commands off
+    the network). A claude/jarvis/judge cell with network gets pasta, or none
+    under ROLEBENCH_NET=none, and never the host netns: any other mode, or
+    pasta missing, is refused."""
     if not cell.network:
-        return False
+        return "none"
     if cell.profile not in NET_GATED:
-        return True
+        return "host"
     mode = net_mode()
     if mode == "none":
-        return False
+        return "none"
     if mode == "pasta":
-        # TODO(passt): run pasta against this cell's netns with
-        #   pasta --config-net --no-map-gw <pid-or-netns>  (no -t/-u/-T/-U
-        #   forwards, so nothing on the host is reachable inbound), then return
-        #   False here (the cell keeps its own netns; pasta provides egress).
-        raise SandboxError(
-            "ROLEBENCH_NET=pasta is not wired yet: it needs the passt package "
-            "(pasta --config-net --no-map-gw, no -t/-u/-T/-U forwards). "
-            "Use ROLEBENCH_NET=none until it is wired.")
+        why = pasta_available()
+        if why:
+            raise SandboxError(f"ROLEBENCH_NET=pasta: {why}; never falling back to the host netns")
+        return "pasta"
     raise SandboxError(
-        f"a {cell.profile} cell with network needs ROLEBENCH_NET=none or pasta "
+        f"a {cell.profile} cell with network needs ROLEBENCH_NET=pasta (the default) or none "
         f"(sharing the host netns is an escape; see the Network note). Got {mode!r}.")
 
 
+def host_addresses() -> list[str]:
+    """Every IPv4 address this host owns, as /32s (blocked in a pasta cell
+    whatever range it is in). Unreadable is a refusal, never an empty list."""
+    try:
+        done = subprocess.run([netcell_ip(), "-j", "-4", "addr", "show"], capture_output=True, text=True, timeout=10)
+        found = [a["local"] for link in json.loads(done.stdout) for a in link.get("addr_info") or ()
+                 if a.get("family") == "inet" and a.get("local")]
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as exc:
+        raise SandboxError(f"cannot list the host's addresses for the pasta policy: {exc}")
+    if done.returncode or not found:
+        raise SandboxError("cannot list the host's addresses for the pasta policy")
+    return sorted({f"{a}/32" for a in found})
+
+
+def pasta_policy() -> dict:
+    """What netcell installs in a pasta cell's namespace."""
+    return {"dns": DNS_FORWARD, "block": list(BLOCK_V4) + host_addresses(), "allow_tcp": list(ALLOW_TCP)}
+
+
+PASTA_RESOLV = f"nameserver {DNS_FORWARD}\noptions timeout:2 attempts:2 no-aaaa\n"
+
+
+def _pasta_resolv() -> list[str]:
+    """The cell's resolv.conf names only pasta's DNS forwarder (no search list)."""
+    path = config.home() / "sandbox" / "resolv-pasta.conf"
+    if not path.is_file() or path.read_text(encoding="utf-8") != PASTA_RESOLV:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(PASTA_RESOLV, encoding="utf-8")
+        os.replace(tmp, path)
+    link = "/etc/resolv.conf"
+    dest = os.path.realpath(link) if os.path.islink(link) else link
+    return ["--ro-bind", str(path), dest]
+
+
+def pasta_argv() -> list[str]:
+    return [PASTA, *PASTA_FLAGS, "--"]
+
+
 def bwrap_argv(cell: Cell, command: list[str], base_env: dict | None = None,
-               cred_fds: dict[str, int] | None = None) -> list[str]:
+               cred_fds: dict[str, int] | None = None, net: str | None = None) -> list[str]:
     home = sandbox_home()
     work = Path(cell.work).resolve()
-    shared_net = resolve_network(cell)
+    if net is None:
+        net = resolve_network(cell)
+        if net == "pasta":
+            # A pasta cell's bwrap shares the netns it starts in, so run bare it
+            # would share the host's: only cell_command, which wraps it in pasta
+            # and netcell, may build it.
+            raise SandboxError("a pasta cell's bwrap argv is built only by cell_command (inside pasta)")
     a = [BWRAP, "--unshare-all"]
-    if shared_net:
-        a.append("--share-net")
+    if net in ("host", "pasta"):
+        a.append("--share-net")                   # the host's netns for codex; pasta's for the rest
+    if net == "pasta":
+        # bwrap starts as root of pasta's user namespace: force its own user
+        # namespace, the host uid inside, and no capabilities, so nothing in
+        # the cell can touch netcell's rules.
+        a += ["--unshare-user", "--uid", str(os.getuid()), "--gid", str(os.getgid()), "--cap-drop", "ALL"]
     a += ["--die-with-parent", "--new-session",
           "--ro-bind", "/usr", "/usr", *_root_links(),
           "--ro-bind", "/etc", "/etc"]
@@ -321,8 +421,10 @@ def bwrap_argv(cell: Cell, command: list[str], base_env: dict | None = None,
             a += ["--tmpfs", masked]
     if os.path.exists("/etc/gitconfig"):
         a += ["--ro-bind", "/dev/null", "/etc/gitconfig"]
-    if shared_net:
+    if net == "host":
         a += _resolv()
+    elif net == "pasta":
+        a += _pasta_resolv()
     a += ["--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp", "--tmpfs", home,
           "--dir", "/tmp/rolebench-gh-empty"]
     venv = config.venv_dir()
@@ -411,6 +513,29 @@ def _credential_fds(cell: Cell) -> tuple[dict[str, int], list[int]]:
     return fds, list(fds.values())
 
 
+def cell_command(cell: Cell, command: list[str], cred_fds: dict[str, int] | None = None) -> tuple[list[str], str]:
+    """(what the unit runs, the cell's network). For a pasta cell that is
+    pasta, then netcell with the policy, then bwrap; otherwise bwrap alone."""
+    net = resolve_network(cell)
+    inner = bwrap_argv(cell, command, cred_fds=cred_fds, net=net)
+    if net != "pasta":
+        return inner, net
+    policy = json.dumps(pasta_policy(), sort_keys=True)
+    return [*pasta_argv(), sys.executable, "-I", str(NETCELL), policy, "--", *inner], net
+
+
+def credential_header(cell: Cell) -> tuple[dict[str, int], str]:
+    """For a pasta cell: (dest -> the fd netcell re-creates it at, the stdin
+    header that carries the trimmed logins to netcell). pasta closes every
+    inherited descriptor but 0-2, so a pipe cannot be passed through it."""
+    fds, blob = {}, {}
+    for i, (dest, data) in enumerate(credential_binds(cell)):
+        fds[dest] = CRED_FD_BASE + i
+        blob[str(CRED_FD_BASE + i)] = base64.b64encode(data).decode("ascii")
+    body = json.dumps(blob)
+    return fds, f"{len(body)}\n{body}"
+
+
 def launch(command: list[str], *, cell: Cell, run_id: str, timeout_s: float,
            stdin: str | None = None) -> tuple[int | None, str, str, bool]:
     """(returncode, stdout, stderr, timed_out) for `command` inside the cell."""
@@ -418,10 +543,14 @@ def launch(command: list[str], *, cell: Cell, run_id: str, timeout_s: float,
     if why:
         raise SandboxError(f"cannot sandbox this run: {why}")
     unit = unit_name(run_id)
+    if resolve_network(cell) == "pasta":
+        fds, header = credential_header(cell)
+        argv, _net = cell_command(cell, command, cred_fds=fds)
+        return run_unit(unit_argv(unit, argv), unit=unit, timeout_s=timeout_s, stdin=header + (stdin or ""))
     fds, to_pass = _credential_fds(cell)
     try:
-        argv = unit_argv(unit, bwrap_argv(cell, command, cred_fds=fds))
-        return run_unit(argv, unit=unit, timeout_s=timeout_s, stdin=stdin, pass_fds=tuple(to_pass))
+        argv, _net = cell_command(cell, command, cred_fds=fds)
+        return run_unit(unit_argv(unit, argv), unit=unit, timeout_s=timeout_s, stdin=stdin, pass_fds=tuple(to_pass))
     finally:
         for fd in to_pass:
             try:

@@ -1210,18 +1210,49 @@ helper and no hooks, `GIT_CONFIG_NOSYSTEM=1`, `GIT_TERMINAL_PROMPT=0` and
 Each cell also gets its own PID, IPC and UTS namespaces (`--unshare-all`): the
 host's processes, its `/proc/1/root` and its SysV IPC are invisible.
 
-Network (A1): every cell has its own empty netns. A grade cell never has
-network. A claude, jarvis or judge cell with network **refuses to start** unless
-`ROLEBENCH_NET` is `none` (run with no network at all — no host loopback, no
-daemon ports) or `pasta` (the intended confined egress through the passt
-package, **not wired yet**, so it is refused until it is, never silently given
-the host netns). Codex is the one exception: it keeps the host netns, because
-its own sandbox keeps its *commands* off the network while the codex process
-reaches its API. **That is the remaining exposure**: the codex process shares the
-host netns (so a codex cell could reach this machine's loopback ports, which is
-why its own sandbox and the network audit matter), and a claude or jarvis run
-cannot currently reach its API until `pasta` is wired — real runs of those wait
-on it. The network and outside-the-snapshot audits are best-effort detection
+Network (A1, pasta wired): a grade cell never has network. A
+claude, jarvis or judge cell runs under **pasta** (`ROLEBENCH_NET=pasta`, the
+default when unset): `systemd-run --scope … -- pasta <flags> -- python -I
+rolebench/netcell.py <policy> -- bwrap …`. pasta (passt 0.0~git20260120) makes a
+fresh user and network namespace with `--config-net --no-map-gw
+--map-host-loopback none --map-guest-addr none -t none -u none -T none -U none
+--dns-forward 192.0.2.53 --ipv4-only --no-icmp --no-dhcp --no-dhcpv6 --no-ra`
+(all four forwards default to `auto`; `-T auto` alone would splice the cell's
+127.0.0.1 to every host loopback port). pasta by itself still reaches a host
+address that is not on its interface (WSL's `10.255.255.254` on `lo`, where
+0.0.0.0 services answer), so `netcell`, running as root of pasta's namespace,
+installs `ip rule`s before anything else starts: DNS only to the forwarder on
+port 53; `0/8, 10/8, 100.64/10, 127/8, 169.254/16, 172.16/12, 192.0.0/24,
+192.168/16, 198.18/15, 224/4, 240/4` and every address the host owns
+prohibited; TCP 443 through; everything else prohibited; IPv6 prohibited and
+switched off on every interface but `lo`. It reads the rules back, refuses
+(exit 125, nothing started) unless every one is in place, re-creates the
+credential pipes (pasta closes every inherited descriptor but 0–2, so the
+trimmed logins reach netcell as a length-prefixed header on stdin and the rest
+of stdin is left for the agent) and execs bwrap with `--share-net` (pasta's
+netns) plus `--unshare-user --uid <host uid> --gid <host gid> --cap-drop ALL`:
+the agent has no capabilities over the namespace and cannot change the rules.
+The cell's `resolv.conf` names only the forwarder (`options no-aaaa`, no search
+list). pasta and bwrap live in the run's unit, so a timeout kills both.
+Measured against throwaway listeners (`tests/rolebench_check.py`,
+`test_pasta_network`): host `127.0.0.1:<port>`, `0.0.0.0:<port>` on the eth0
+address and on `10.255.255.254`, the gateway, `10/8`, `192.168/16`, `172.16/12`,
+Tailscale's `100.100.100.100`, `169.254.169.254` and a host abstract unix socket
+are all unreachable (zero accepts); DNS resolves and a TCP connect to
+`api.anthropic.com:443` and `openrouter.ai:443` succeeds (Python and Node), TCP 80
+is prohibited. `ROLEBENCH_NET=none` gives those cells no network at all, so real
+runs of them are refused up front; any other value, or pasta missing, is refused
+and never falls back to the host netns. Codex is the one exception: it keeps the
+host netns, because its own sandbox keeps its *commands* off the network while
+the codex process reaches its API. **That is the remaining exposure**: the codex
+process shares the host netns (so a codex cell could reach this machine's
+loopback ports, which is why its own sandbox and the network audit matter), and a
+pasta cell can reach any public address on TCP 443 (so a public address that
+loops back to this LAN, such as a router's hairpin NAT, is not closed). **Accepted
+exposure (lead, review of #284):** a pasta cell can send to any public address on
+TCP 443 and resolve any name through the host's resolver, so an agent could send
+the snapshot's repo code out; the only credential in a cell is the trimmed login
+(A2), never a refresh token, a gh login or a key. The network and outside-the-snapshot audits are best-effort detection
 beside that, reported next to the score. Claude's tools are an allowlist
 (`Bash,Read,Edit,Write,Grep,Glob`; the judge `Read,Grep,Glob`), and the Jarvis
 cell offers no delegation tools.
@@ -1239,19 +1270,33 @@ so concurrent processes share one cap; a pending entry whose process died is cha
 in full. The Jarvis worker wraps `llm.chat`: every reply (any tier, any caller) is
 added to a running total streamed on the worker's stdout (a `ROLEBENCH_SPEND` line,
 so the harness has it even if the cell is killed mid-call); the call whose estimated
-prompt cost at the bench's price (Kimi $3/M, not the catalog's) would cross the budget
-is refused before it is sent, no call is made once the total reaches the budget, and
-the call that still crosses it raises (at most one can overshoot). A timeout, OOM or
-crash is charged its whole reservation. Every tier runs on the cell's model; only a
-`moonshotai/` id is pinned to Moonshot (no fallbacks) and floored at $3/$15 per M, and
-an unknown `moonshotai/` id is refused.
+cost (prompt chars/4 plus `max_tokens`) at the model's **most expensive** OpenRouter
+endpoint (`/api/v1/models/<id>/endpoints`, the highest prompt and completion price
+over every endpoint, cached a day under `prices/`; if a refetch fails a cache at most
+7 days old is used, raised 25%, else the model is refused), counting the tool schemas,
+a completion allowance (the call's `max_tokens`, else the endpoint's maximum, else
+16k) and Haiku 5.5's 5x price from 100k prompt tokens, would cross the budget is refused before it is
+sent, no call is made once the total reaches the budget, and the call that still
+crosses it raises (at most one can overshoot). The ledger settles on the usage
+OpenRouter reports (`llm._cost`, BYOK upstream cost included), never on the
+estimate; a timeout, OOM or crash is charged its whole reservation. Every tier runs
+on the cell's model, nothing is provider-pinned, and every `moonshotai/` id is
+refused (Kimi left the matrix, O-1 amendment 2026-10-21).
 
 **Quota.** A Claude or Codex cell is skipped at 75% of a quota window, and also when
-the quota is unknown (fail closed); the guard is checked again before every implement
-round and before the judge. `--no-quota-guard` (before the subcommand) also needs
+the quota is unknown (fail closed); the guard is checked again before every model
+step (every implement round, both roles) and before each judge call, its retry
+included. `--no-quota-guard` (before the subcommand) also needs
 `ROLEBENCH_QUOTA_OVERRIDE=<reason>`, prints a warning, and marks every cell
 `quota_guard: "off: <reason>"` in `run.json`, the log and the report. **An agent
-never passes it without the owner's explicit OK for that run.**
+never passes it without the owner's explicit OK for that run.** The override lifts
+the 75% guard only: the hard ceiling `ROLEBENCH_QUOTA_CEILING` (default 97; a value
+outside (0, 100] fails closed) refuses a Claude or Codex step or a judge call once
+any live window is at or above it, override or not, and an unknown quota is refused
+under the override too (the ceiling cannot be checked against it). Every run row
+and `run.json` carry `quota_before` and `quota_after` (`{provider: {window: used
+percent}}`, read for the providers the run's roles use), and `judge.json` the same
+for the judge, so the lead can measure percent per run.
 
 **Snapshot integrity.** After a reviewer the snapshot is checked against the
 build-time shas (moved HEAD, extra refs or commits are recorded), then reset to the
@@ -1271,4 +1316,7 @@ output tokens (Codex's `input_tokens` include the cached ones), and lists
 overridden cells, runs that used more than one model and snapshots an agent changed.
 Free checks: `PYTHONPATH=<checkout> OPENROUTER_API_KEY=sk-dummy-not-a-key HOME=<tmp>
 .venv/bin/python tests/rolebench_check.py` under the usual `systemd-run` memory cap;
-they need `/usr/bin/bwrap` and run real cells with harmless probes.
+they need `/usr/bin/bwrap` and `/usr/bin/pasta` (the passt package) and run real cells with
+harmless probes, against throwaway listeners only; the pasta checks make TCP connects (no
+request) to `api.anthropic.com:443` and `openrouter.ai:443`, and nothing reads the live
+daemon's quota or OpenRouter's price list (fakes are installed at import).

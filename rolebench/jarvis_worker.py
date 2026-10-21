@@ -12,13 +12,17 @@ code with no `.env` and no cases. Wraps `longbench.harness.run_jarvis` and adds:
 - **A hard dollar ceiling.** `llm.chat` is wrapped: every reply, from any
   caller, is added to a running total streamed on stdout (a `ROLEBENCH_SPEND`
   line) after each call; a call is refused once the total reaches the budget,
-  the call whose *estimated* prompt cost would cross the budget is refused
-  before it is sent (one Kimi call can be ~$0.45), and the call that still
-  crosses it raises. At most one call can overshoot.
-- **The Moonshot pin only for Moonshot ids.** A call to a `moonshotai/` model
-  is pinned to the provider the spec names (no fallbacks) and floored at its
-  price; any other model is sent unpinned. A `moonshotai/` id the spec does not
-  price is refused.
+  the call whose *estimated* cost would cross the budget is refused before it
+  is sent, and the call that still crosses it raises. At most one call can
+  overshoot. The estimate prices the call at the model's most expensive
+  OpenRouter endpoint (the spec's `prices`) and counts all of it: the
+  messages and the tool schemas (chars/4), a completion allowance (the call's
+  `max_tokens`, else the endpoint's maximum completion, else 16k) and a
+  long-context tier (Haiku 5.5: the whole request at 5x from 100k prompt
+  tokens). The total is the usage OpenRouter reports (BYOK upstream cost
+  included, `llm._cost`).
+- **No Kimi.** A `moonshotai/` id is refused (Kimi left the matrix), and so
+  is a call to any model the spec does not price.
 """
 
 from __future__ import annotations
@@ -33,6 +37,10 @@ TOOLS = ["read_file", "write_file", "edit_file", "list_dir", "find_files", "grep
 TIER_ENV = ("JARVIS_ORCHESTRATOR", "JARVIS_SUBAGENT", "JARVIS_COMPACTION", "JARVIS_REVIEW_MODEL",
             "JARVIS_BROWSER_REVIEW_MODEL", "JARVIS_WORKER", "JARVIS_CHEAP", "JARVIS_SPEECH_SUMMARY_MODEL")
 MOONSHOT_PREFIX = "moonshotai/"
+# Positions in llm.chat's *args after (model, messages): llm.chat(model,
+# messages, tools, temperature, max_tokens, timeout, max_retries, provider, ...).
+# Pinned against the real signature by the free checks.
+CHAT_ARGS = {"tools": 0, "max_tokens": 2, "provider": 5}
 # The runner reads the running total from the worker's stdout, not a file.
 SPEND_PREFIX = "ROLEBENCH_SPEND "
 
@@ -60,51 +68,48 @@ class Meter:
 
     def __init__(self, spec: dict, stream=None):
         self.budget = float(spec["budget_usd"])
-        self.prices = {k.lower(): tuple(v) for k, v in (spec.get("prices") or {}).items()}
-        self.pins = {k.lower(): v for k, v in (spec.get("pins") or {}).items()}
+        self.prices = {k.lower(): dict(v) for k, v in (spec.get("prices") or {}).items()}
         self.stream = stream if stream is not None else sys.stdout
         self.total, self.calls, self.models = 0.0, 0, {}
         self.tokens = {"prompt_tokens": 0, "completion_tokens": 0, "cached_tokens": 0}
 
     def route(self, model: str) -> str:
-        """The provider pin for one call ('' = OpenRouter picks)."""
-        key = (model or "").strip().lower()
-        if key.startswith(MOONSHOT_PREFIX):
-            if key not in self.prices or key not in self.pins:
-                raise BudgetExceeded(f"refused: {model} is a moonshotai/ id with no known price or pin")
-            return self.pins[key]
+        """The provider pin for one call: always '' (OpenRouter picks), but a
+        `moonshotai/` id is refused."""
+        if (model or "").strip().lower().startswith(MOONSHOT_PREFIX):
+            raise BudgetExceeded(f"refused: {model} is a moonshotai/ id (Kimi left the matrix)")
         return ""
 
-    def before(self, model: str, messages=None, max_tokens: int | None = None) -> str:
+    def estimate(self, model: str, messages=None, max_tokens: int | None = None, tools=None) -> dict:
+        """The most this call could cost: {"usd", "prompt_tokens", "completion_tokens", "multiplier"}."""
+        price = self.prices.get((model or "").strip().lower())
+        if not price:
+            raise BudgetExceeded(f"refused: no endpoint price for {model}, so no estimate")
+        prompt_tokens = (_chars(messages) + (len(json.dumps(tools)) if tools else 0)) / 4
+        completion_tokens = max_tokens or price.get("max_completion") or 16_000
+        tier = price.get("tier")
+        multiplier = float(tier[1]) if tier and prompt_tokens >= tier[0] else 1.0
+        usd = (prompt_tokens * price["prompt"] + completion_tokens * price["completion"]) * multiplier / 1e6
+        return {"usd": usd, "prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens,
+                "multiplier": multiplier}
+
+    def before(self, model: str, messages=None, max_tokens: int | None = None, tools=None) -> str:
         if self.total >= self.budget - 1e-12:
             raise BudgetExceeded(f"budget ${self.budget:.4f} spent (${self.total:.4f}); no further calls")
-        price = self.prices.get((model or "").strip().lower())
-        if price and messages is not None:
-            # Estimate at the bench's price, not the catalog's: at Kimi's $3/M a
-            # 150k-token prompt is ~$0.45. Refuse before sending if it would
-            # cross the budget. chars/4 is the loop's own rough token estimate.
-            est_prompt = _chars(messages) / 4
-            est_completion = max_tokens or 0
-            est = (est_prompt * price[0] + est_completion * price[1]) / 1e6
-            if self.total + est > self.budget + 1e-12:
-                raise BudgetExceeded(
-                    f"refused before sending: estimated ${est:.4f} for this call would cross the "
-                    f"${self.budget:.4f} budget (${self.total:.4f} already spent)")
-        return self.route(model)
+        pin = self.route(model)
+        est = self.estimate(model, messages, max_tokens, tools)["usd"]
+        if self.total + est > self.budget + 1e-12:
+            raise BudgetExceeded(
+                f"refused before sending: estimated ${est:.4f} for this call would cross the "
+                f"${self.budget:.4f} budget (${self.total:.4f} already spent)")
+        return pin
 
     def after(self, model: str, reply) -> None:
         prompt = int(getattr(reply, "prompt_tokens", 0) or 0)
         completion = int(getattr(reply, "completion_tokens", 0) or 0)
         usage = (getattr(reply, "raw", None) or {}).get("usage") or {}
         cached = int(((usage.get("prompt_tokens_details") or {}).get("cached_tokens")) or 0)
-        cost = float(getattr(reply, "cost_usd", 0.0) or 0.0)
-        price = self.prices.get((model or "").strip().lower())
-        if price:
-            cost = max(cost, (prompt * price[0] + completion * price[1]) / 1e6)
-            try:
-                reply.cost_usd = cost
-            except Exception:
-                pass
+        cost = float(getattr(reply, "cost_usd", 0.0) or 0.0)      # reported usage, BYOK included
         self.total += cost
         self.calls += 1
         self.models[model] = self.models.get(model, 0) + 1
@@ -169,11 +174,13 @@ def run(spec: dict, key: str | None, io_dir: Path) -> dict:
     real_chat, real_turn = llm.chat, agent_mod.Agent.run_turn
 
     def chat(model, messages, *args, **kwargs):
-        max_tokens = args[3] if len(args) > 3 else kwargs.get("max_tokens")
-        pin = meter.before(model, messages, max_tokens)
-        if len(args) > 5:                         # provider passed positionally
+        def arg(name):
+            i = CHAT_ARGS[name]
+            return args[i] if len(args) > i else kwargs.get(name)
+        pin = meter.before(model, messages, arg("max_tokens"), arg("tools"))
+        if len(args) > CHAT_ARGS["provider"]:     # provider passed positionally
             args = list(args)
-            args[5] = pin
+            args[CHAT_ARGS["provider"]] = pin
         else:
             kwargs["provider"] = pin
         reply = real_chat(model, messages, *args, **kwargs)
