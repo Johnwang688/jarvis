@@ -79,11 +79,17 @@ def _key(rule: dict) -> tuple:
     return (int(rule["pref"]), dst, rule.get("ipproto") or "", int(rule.get("dport") or 0), rule["do"])
 
 
-def _installed(family: str) -> set[tuple]:
+# The kernel's own rules in a fresh namespace, which the read-back expects beside ours.
+DEFAULTS_V4 = ((0, "", "", 0, "local"), (32766, "", "", 0, "main"), (32767, "", "", 0, "default"))
+DEFAULTS_V6 = ((0, "", "", 0, "local"), (32766, "", "", 0, "main"))
+V6_PROHIBIT = (100, "", "", 0, "prohibit")
+
+
+def _installed(family: str) -> list[tuple]:
     done = subprocess.run([IP, "-j", family, "rule", "show"], capture_output=True, text=True, timeout=10)
     if done.returncode:
         raise Refused(f"cannot read back the {family} rules: {done.stderr.strip()[:200]}")
-    seen = set()
+    seen = []
     for r in json.loads(done.stdout or "[]"):
         dst = r.get("dst") or ""
         if dst and dst != "all":
@@ -92,7 +98,9 @@ def _installed(family: str) -> set[tuple]:
         elif dst == "all":
             dst = ""
         do = "prohibit" if r.get("action") == "prohibit" else r.get("table", "")
-        seen.add((int(r.get("priority", -1)), dst, r.get("ipproto") or "", int(r.get("dport") or 0), do))
+        if set(r) - {"priority", "src", "dst", "dstlen", "ipproto", "dport", "table", "action"} or r.get("src", "all") != "all":
+            do = f"unexpected:{json.dumps(r, sort_keys=True)}"        # a selector we never set: never matches
+        seen.append((int(r.get("priority", -1)), dst, r.get("ipproto") or "", int(r.get("dport") or 0), do))
     return seen
 
 
@@ -116,15 +124,19 @@ def install(policy: dict) -> None:
 
 
 def verify(policy: dict) -> None:
-    """Every wanted rule is installed, and no interface but lo carries IPv6."""
-    seen = _installed("-4")
-    missing = [r for r in rules(policy) if _key(r) not in seen]
-    if missing:
-        raise Refused(f"{len(missing)} egress rule(s) are not in place, e.g. {missing[0]}")
+    """The rules are exactly ours plus the kernel's defaults (nothing extra,
+    nothing duplicated, nothing ahead of ours), and no interface but lo
+    carries IPv6."""
+    want = sorted([_key(r) for r in rules(policy)] + list(DEFAULTS_V4))
+    seen = sorted(_installed("-4"))
+    if seen != want:
+        extra = [r for r in seen if r not in want]
+        missing = [r for r in want if r not in seen]
+        raise Refused(f"the IPv4 rules are not exactly the policy: missing {missing[:2]}, extra {extra[:2]}")
     conf = IPV6_CONF
     if os.path.isdir(conf):
-        if (100, "", "", 0, "prohibit") not in _installed("-6"):
-            raise Refused("the IPv6 prohibit rule is not in place")
+        if sorted(_installed("-6")) != sorted([V6_PROHIBIT, *DEFAULTS_V6]):
+            raise Refused("the IPv6 rules are not exactly one prohibit plus the kernel's defaults")
         for name in sorted(os.listdir(conf)):
             if name in ("all", "lo"):
                 continue
@@ -157,7 +169,7 @@ def read_credentials() -> dict[int, bytes]:
     if not 0 <= size <= MAX_HEADER:
         raise Refused("bad credential header size")
     doc = json.loads(_read_exact(size) or b"{}")
-    return {int(fd): base64.b64decode(data) for fd, data in doc.items()}
+    return {int(fd): base64.b64decode(data, validate=True) for fd, data in doc.items()}
 
 
 def place_credentials(creds: dict[int, bytes]) -> None:

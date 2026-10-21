@@ -1248,7 +1248,11 @@ the codex process reaches its API. **That is the remaining exposure**: the codex
 process shares the host netns (so a codex cell could reach this machine's
 loopback ports, which is why its own sandbox and the network audit matter), and a
 pasta cell can reach any public address on TCP 443 (so a public address that
-loops back to this LAN, such as a router's hairpin NAT, is not closed). The network and outside-the-snapshot audits are best-effort detection
+loops back to this LAN, such as a router's hairpin NAT, is not closed). **Accepted
+exposure (lead, review of #284):** a pasta cell can send to any public address on
+TCP 443 and resolve any name through the host's resolver, so an agent could send
+the snapshot's repo code out; the only credential in a cell is the trimmed login
+(A2), never a refresh token, a gh login or a key. The network and outside-the-snapshot audits are best-effort detection
 beside that, reported next to the score. Claude's tools are an allowlist
 (`Bash,Read,Edit,Write,Grep,Glob`; the judge `Read,Grep,Glob`), and the Jarvis
 cell offers no delegation tools.
@@ -1268,8 +1272,10 @@ added to a running total streamed on the worker's stdout (a `ROLEBENCH_SPEND` li
 so the harness has it even if the cell is killed mid-call); the call whose estimated
 cost (prompt chars/4 plus `max_tokens`) at the model's **most expensive** OpenRouter
 endpoint (`/api/v1/models/<id>/endpoints`, the highest prompt and completion price
-over every endpoint, cached a day under `prices/`, a stale cache used if a refetch
-fails, refused with no price at all) would cross the budget is refused before it is
+over every endpoint, cached a day under `prices/`; if a refetch fails a cache at most
+7 days old is used, raised 25%, else the model is refused), counting the tool schemas,
+a completion allowance (the call's `max_tokens`, else the endpoint's maximum, else
+16k) and Haiku 5.5's 5x price from 100k prompt tokens, would cross the budget is refused before it is
 sent, no call is made once the total reaches the budget, and the call that still
 crosses it raises (at most one can overshoot). The ledger settles on the usage
 OpenRouter reports (`llm._cost`, BYOK upstream cost included), never on the

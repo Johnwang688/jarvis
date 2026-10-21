@@ -60,7 +60,10 @@ def quota_override(args) -> str:
 
 
 def _deps(args) -> flows.Deps:
-    return flows.Deps(quota_override=quota_override(args))
+    if args.off_matrix:
+        print("WARNING: --off-matrix: models outside the O-1 matrix may run; every run row records off_matrix: true",
+              file=sys.stderr, flush=True)
+    return flows.Deps(quota_override=quota_override(args), off_matrix=bool(args.off_matrix))
 
 
 def cmd_snapshot(args) -> int:
@@ -195,6 +198,8 @@ def main(argv: list[str] | None = None) -> int:
                         help=f"owner only, never routine: run Claude/Codex cells without the 75%% quota guard "
                              f"(never past ROLEBENCH_QUOTA_CEILING, default 97%%). "
                              f"Also needs {OVERRIDE_ENV}=<reason>; every cell is marked as overridden.")
+    parser.add_argument("--off-matrix", action="store_true",
+                        help="run a model that is not in config.MATRIX for its harness (recorded in every run row)")
     sub = parser.add_subparsers(dest="command", required=True)
 
     s = sub.add_parser("snapshot", help="build the isolated repo for a case")

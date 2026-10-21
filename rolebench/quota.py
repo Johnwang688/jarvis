@@ -27,13 +27,20 @@ CEILING_ENV = "ROLEBENCH_QUOTA_CEILING"
 
 
 def ceiling() -> float:
-    """The hard ceiling in percent; ValueError for a value that is not in (0, 100]."""
+    """The hard ceiling in percent. ROLEBENCH_QUOTA_CEILING may only lower it:
+    ValueError for a value above the default, at or below 0, or not a number."""
     raw = (os.environ.get(CEILING_ENV) or "").strip()
     if not raw:
         return config.QUOTA_CEILING
-    value = float(raw)
-    if not math.isfinite(value) or not 0 < value <= 100:
-        raise ValueError(f"{CEILING_ENV}={raw!r} is not a percent in (0, 100]")
+    try:
+        value = float(raw)
+    except ValueError:
+        raise ValueError(f"{CEILING_ENV}={raw!r} is not a number")
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError(f"{CEILING_ENV}={raw!r} is not a percent above 0")
+    if value > config.QUOTA_CEILING:
+        raise ValueError(f"{CEILING_ENV}={raw!r} would raise the ceiling above {config.QUOTA_CEILING:g}%; "
+                         f"it can only lower it")
     return value
 
 
@@ -92,7 +99,10 @@ def guard(harness: str, reader=None, override: str = "") -> tuple[bool, str]:
     windows = quota.get("windows") if isinstance(quota, dict) else None
     measured = [w for w in windows or () if isinstance(w, dict) and _number(w.get("used_percent"))]
     if not measured:
-        return True, f"{provider} quota unknown (fail closed{', even under the override' if override else ''})"
+        if override:
+            return True, (f"{provider} quota unknown (fail closed): the override lifts the 75% guard but the "
+                          f"{limit:g}% ceiling needs a reading; start the daemon so its read-only /usage answers")
+        return True, f"{provider} quota unknown (fail closed)"
     hit = over(quota, limit=limit)
     if hit:
         return True, f"{provider} {hit}: at or above the {limit:g}% ceiling (the override never lifts it)"

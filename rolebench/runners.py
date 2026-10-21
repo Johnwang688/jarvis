@@ -305,10 +305,14 @@ def jarvis_spec(*, model, prompt, cwd, max_turns, budget_usd, price_fn=None) -> 
     refuse-before-sending estimate only (spend settles on reported usage)."""
     from . import prices
     config.check_model(model)
-    price = (price_fn or prices.endpoint_price)(model)
+    prompt_usd, completion_usd, max_out = (price_fn or prices.endpoint_price)(model)
+    tier = config.PRICE_TIERS.get(model.strip().lower())
     return {"model": model, "prompt": prompt, "workspace": str(cwd), "max_turns": max_turns,
             "budget_usd": float(config.PER_RUN_CAP_USD if budget_usd is None else budget_usd),
-            "prices": {model: list(price)}, "io": str(sandbox.IO)}
+            "prices": {model: {"prompt": prompt_usd, "completion": completion_usd,
+                               "max_completion": max_out or config.DEFAULT_COMPLETION_ALLOWANCE,
+                               "tier": list(tier) if tier else None}},
+            "io": str(sandbox.IO)}
 
 
 def run_jarvis(*, model, prompt, cwd, timeout_s, max_turns, budget_usd=None, out_dir=None,

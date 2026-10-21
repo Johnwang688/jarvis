@@ -31,8 +31,8 @@ PER_RUN_CAP_USD = 0.50
 # skipped (the Diff quick review's threshold, `jarvis.v2.diff_review.THRESHOLD`).
 QUOTA_THRESHOLD = 75.0
 # The hard ceiling: at or above it a Claude or Codex cell, or a judge call, is
-# refused even under the owner's override (ROLEBENCH_QUOTA_CEILING overrides
-# the number, never the rule).
+# refused even under the owner's override. ROLEBENCH_QUOTA_CEILING can only
+# lower it, never raise it, and never lift the rule.
 QUOTA_CEILING = 97.0
 
 MAX_CONCURRENT = 3
@@ -50,6 +50,29 @@ MATRIX = {
     "codex": ("gpt-6.1-sol", "gpt-6-luna"),
     "jarvis": ("anthropic/claude-haiku-5.5", "deepseek/deepseek-v4.1-flash", "z-ai/glm-5.3-flash"),
 }
+
+
+
+class OffMatrix(ValueError):
+    pass
+
+
+def check_matrix(harness: str, model: str, off_matrix: bool = False) -> None:
+    """OffMatrix unless `model` is in MATRIX[harness] (exact id) or the run
+    was started with --off-matrix (recorded in its run row)."""
+    if off_matrix or model in MATRIX.get(harness, ()):
+        return
+    raise OffMatrix(f"{model!r} is not in the O-1 matrix for {harness} "
+                    f"({', '.join(MATRIX.get(harness, ())) or 'none'}); pass --off-matrix to run it anyway")
+
+
+# The estimate's completion allowance when the call sets no max_tokens and no
+# endpoint lists its maximum completion.
+DEFAULT_COMPLETION_ALLOWANCE = 16_000
+# Long-context price tiers the endpoints list does not carry: at or above
+# `threshold` prompt tokens the whole request is priced at `multiplier` times
+# (Haiku 5.5: 5x from 100k, CLAUDE.md's model default note).
+PRICE_TIERS = {"anthropic/claude-haiku-5.5": (100_000, 5.0)}
 
 # Kimi K3 was dropped from the matrix by the owner (O-1 amendment, 2026-10-21),
 # and with it the Moonshot pin and its price floor. The guard stays: a

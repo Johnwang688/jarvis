@@ -47,7 +47,7 @@ def _no_network(*args, **kwargs):
 
 
 def FAKE_PRICE(model):
-    return (1.0, 5.0)
+    return (1.0, 5.0, 8000)
 
 
 prices._http_get = _no_network
@@ -340,9 +340,13 @@ def test_spend(root: Path) -> None:
           flows.settle_amount(to, 0.5, "m")[1] is False)
 
 
+def _price(prompt, completion, max_completion=1000, tier=None):
+    return {"prompt": prompt, "completion": completion, "max_completion": max_completion, "tier": tier}
+
+
 def test_worker_meter(root: Path) -> None:
-    luna, glm = "openai/gpt-6-luna", "z-ai/glm-5.3-flash"
-    spec = {"budget_usd": 0.1, "prices": {luna: [1.0, 5.0], "x/y": [1.0, 5.0], glm: [3.0, 15.0]}}
+    luna, glm, haiku = "openai/gpt-6-luna", "z-ai/glm-5.3-flash", "anthropic/claude-haiku-5.5"
+    spec = {"budget_usd": 0.1, "prices": {luna: _price(1.0, 5.0), "x/y": _price(1.0, 5.0), glm: _price(3.0, 15.0)}}
     out = io.StringIO()
     m = jarvis_worker.Meter(spec, stream=out)
 
@@ -366,11 +370,35 @@ def test_worker_meter(root: Path) -> None:
     # a call whose estimated cost at the most expensive endpoint would cross the budget is refused before it is sent
     m4 = jarvis_worker.Meter(spec, stream=io.StringIO())
     big = [{"role": "user", "content": "x" * 600_000}]        # ~150k tokens; at $3/M ~$0.45 > $0.10
-    refused = raises(lambda: m4.before(glm, big, max_tokens=0), jarvis_worker.BudgetExceeded)
-    small_ok = m4.before(glm, [{"role": "user", "content": "hi"}], max_tokens=0) == ""
+    refused = raises(lambda: m4.before(glm, big, max_tokens=1), jarvis_worker.BudgetExceeded)
+    small_ok = m4.before(glm, [{"role": "user", "content": "hi"}], max_tokens=1) == ""
     out_refused = raises(lambda: m4.before(glm, [{"role": "user", "content": "hi"}], max_tokens=10_000), jarvis_worker.BudgetExceeded)
     check("a call whose estimate (prompt and max output) at the spec's price would cross the budget is refused before sending",
           refused and small_ok and out_refused and m4.calls == 0)
+
+    # the estimate counts all of it: tool schemas, a completion allowance with no max_tokens, the long-context tier
+    tools = [{"type": "function", "function": {"name": f"t{i}", "description": "d" * 4000, "parameters": {}}} for i in range(10)]
+    msgs = [{"role": "user", "content": "x" * 380_000}]      # 95k tokens of messages
+    hspec = {"budget_usd": 0.05, "prices": {haiku: _price(0.10, 0.50, 64_000, [100_000, 5.0])}}
+    mh = jarvis_worker.Meter(hspec, stream=io.StringIO())
+    e = mh.estimate(haiku, msgs, None, tools)
+    naive = (len(msgs[0]["content"]) / 4) * 0.10 / 1e6       # what the old estimate saw: messages only, no output
+    check("tool schemas count toward the prompt estimate (chars/4)",
+          abs(e["prompt_tokens"] - (380_000 + len(json.dumps(tools))) / 4) < 1e-6 and e["prompt_tokens"] > 100_000)
+    check("with no max_tokens the completion allowance is the endpoint's maximum (else 16k)",
+          e["completion_tokens"] == 64_000
+          and jarvis_worker.Meter({"budget_usd": 1, "prices": {"a/b": {"prompt": 1, "completion": 1, "tier": None}}},
+                                  stream=io.StringIO()).estimate("a/b", [], None)["completion_tokens"] == 16_000)
+    check("Haiku 5.5 is priced at 5x for the whole request from 100k prompt tokens",
+          e["multiplier"] == 5.0 and mh.estimate(haiku, [{"role": "user", "content": "x" * 1000}], 10)["multiplier"] == 1.0)
+    check("one call crosses the per-run budget only once tools, the allowance and the tier are counted",
+          naive < 0.05 and e["usd"] > 0.05 and raises(lambda: mh.before(haiku, msgs, None, tools), jarvis_worker.BudgetExceeded)
+          and mh.calls == 0, f"naive {naive:.4f} full {e['usd']:.4f}")
+    import inspect
+    from jarvis import llm as jllm
+    names = list(inspect.signature(jllm.chat).parameters)[2:]
+    check("the worker reads tools, max_tokens and provider at llm.chat's real positions",
+          all(names[i] == k for k, i in jarvis_worker.CHAT_ARGS.items()), str(names[:8]))
     m2 = jarvis_worker.Meter(spec, stream=io.StringIO())
     check("a moonshotai/ id is refused in the worker too, and a model with no price is refused, not estimated at 0",
           raises(lambda: m2.before("moonshotai/kimi-k3"), jarvis_worker.BudgetExceeded)
@@ -381,11 +409,11 @@ def test_worker_meter(root: Path) -> None:
     check("the running total is the reported cost, never floored at the estimate price", m3.total == 0.004 and r.cost_usd == 0.004)
     check("the rolebench Jarvis toolset has no delegation",
           not {"run_subagent", "run_fleet"} & set(jarvis_worker.TOOLS) and "run_command" in jarvis_worker.TOOLS)
-    s = runners.jarvis_spec(model=glm, prompt="p", cwd="/w", max_turns=3, budget_usd=0.2, price_fn=lambda m: (0.5, 2.0))
-    s2 = runners.jarvis_spec(model=luna, prompt="p", cwd="/w", max_turns=3, budget_usd=None)
-    check("the spec prices the cell's model at its endpoint price and pins nothing; a missing budget is the per-run cap",
-          s["prices"] == {glm: [0.5, 2.0]} and "pins" not in s and s2["prices"] == {luna: [1.0, 5.0]}
-          and s2["budget_usd"] == config.PER_RUN_CAP_USD)
+    s = runners.jarvis_spec(model=glm, prompt="p", cwd="/w", max_turns=3, budget_usd=0.2, price_fn=lambda m: (0.5, 2.0, None))
+    s2 = runners.jarvis_spec(model=haiku, prompt="p", cwd="/w", max_turns=3, budget_usd=None)
+    check("the spec prices the cell's model at its endpoint price, the 16k default allowance and its tier; no pins",
+          s["prices"] == {glm: _price(0.5, 2.0, 16_000)} and "pins" not in s
+          and s2["prices"] == {haiku: _price(1.0, 5.0, 8000, [100_000, 5.0])} and s2["budget_usd"] == config.PER_RUN_CAP_USD)
     check("the spec refuses a Kimi id", raises(lambda: runners.jarvis_spec(model="moonshotai/kimi-k3", prompt="p", cwd="/w",
                                                                             max_turns=1, budget_usd=0.1), config.UnknownModel))
 
@@ -394,12 +422,12 @@ def test_prices(root: Path) -> None:
     """The estimate's price: the most expensive endpoint, cached, never zero."""
     reply = {"data": {"id": "z-ai/glm-5.3-flash", "endpoints": [
         {"provider_name": "cheap", "pricing": {"prompt": "0.0000001", "completion": "0.0000004"}},
-        {"provider_name": "dear-in", "pricing": {"prompt": "0.0000009", "completion": "0.000001"}},
+        {"provider_name": "dear-in", "pricing": {"prompt": "0.0000009", "completion": "0.000001"}, "max_completion_tokens": 32_000},
         {"provider_name": "dear-out", "pricing": {"prompt": "0.0000002", "completion": "0.000003"}},
         {"provider_name": "broken", "pricing": {"prompt": "n/a"}}]}}
-    p, c, n = prices.max_price(reply)
+    p, c, n, mc = prices.max_price(reply)
     check("the estimate takes the highest prompt and the highest completion price over every endpoint",
-          abs(p - 0.9) < 1e-9 and abs(c - 3.0) < 1e-9 and n == 3)
+          abs(p - 0.9) < 1e-9 and abs(c - 3.0) < 1e-9 and n == 3 and mc == 32_000)
     check("a reply with no priced endpoint is an error, never a zero price",
           raises(lambda: prices.max_price({"data": {"endpoints": [{"pricing": {}}]}}), prices.PriceError)
           and raises(lambda: prices.max_price({"data": {}}), prices.PriceError))
@@ -414,7 +442,13 @@ def test_prices(root: Path) -> None:
         check("the endpoints list is fetched once and cached",
               first == again and len(urls) == 1 and urls[0] == "https://openrouter.ai/api/v1/models/z-ai/glm-5.3-flash/endpoints")
         stale = REAL_ENDPOINT_PRICE("z-ai/glm-5.3-flash", fetch=_no_network, now=1000.0 + 2 * prices.CACHE_TTL_S)
-        check("a failed refetch of a stale price falls back to the cache", stale == first)
+        check("a failed refetch of a stale price falls back to the cache, raised 25%",
+              abs(stale[0] - first[0] * 1.25) < 1e-9 and abs(stale[1] - first[1] * 1.25) < 1e-9 and stale[2] == first[2])
+        edge = REAL_ENDPOINT_PRICE("z-ai/glm-5.3-flash", fetch=_no_network, now=1000.0 + prices.STALE_MAX_S)
+        check("the stale fallback holds up to 7 days", edge == stale)
+        check("a cached price older than 7 days with a failed refetch refuses the model",
+              raises(lambda: REAL_ENDPOINT_PRICE("z-ai/glm-5.3-flash", fetch=_no_network, now=1001.0 + prices.STALE_MAX_S),
+                     prices.PriceError))
         check("no cache and no fetch: the run is refused",
               raises(lambda: REAL_ENDPOINT_PRICE("deepseek/deepseek-v4.1-flash", fetch=_no_network), prices.PriceError))
         check("a model id that is not an OpenRouter id is refused before any fetch",
@@ -953,6 +987,34 @@ def test_netcell_fail_closed(root: Path) -> None:
         netcell.subprocess.run, netcell.IPV6_CONF = saved_run, saved_conf
     check("netcell reads its rules back and refuses when they are not in place, whatever `ip` said",
           lied and any(a[1:3] == ["-j", "-4"] for a in calls))
+    pol = {"dns": sandbox.DNS_FORWARD, "block": ["10.0.0.0/8"], "allow_tcp": [443]}
+
+    def as_json(keys):
+        out = []
+        for pref, dst, proto, dport, do in keys:
+            r = {"priority": pref, "src": "all"}
+            if dst:
+                net = dst.split("/")
+                r["dst"] = net[0]
+                if net[1] != "32":
+                    r["dstlen"] = int(net[1])
+            if proto:
+                r["ipproto"], r["dport"] = proto, dport
+            r.update({"action": "prohibit"} if do == "prohibit" else {"table": do})
+            out.append(r)
+        return out
+    exact = [netcell._key(r) for r in netcell.rules(pol)] + list(netcell.DEFAULTS_V4)
+    for label, keys, ok in (("exact", exact, True),
+                            ("an extra rule ahead of ours", [(50, "", "", 0, "main")] + exact, False),
+                            ("a duplicate", exact + [exact[3]], False)):
+        def fake_show(argv, keys=keys, **kw):
+            return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(as_json(keys)), stderr="")
+        netcell.subprocess.run, netcell.IPV6_CONF = fake_show, str(root / "no-ipv6-conf")
+        try:
+            refused = raises(lambda: netcell.verify(pol), netcell.Refused)
+        finally:
+            netcell.subprocess.run, netcell.IPV6_CONF = saved_run, saved_conf
+        check(f"netcell's read-back is exact: {label} " + ("passes" if ok else "is refused"), refused is (not ok))
     if os.geteuid() == 0:
         print("    (netcell fail-closed test skipped as root: it would touch the host's rules)")
         return
@@ -1216,6 +1278,13 @@ def test_env_and_quota() -> None:
     with env(ROLEBENCH_QUOTA_CEILING="80"):
         check("ROLEBENCH_QUOTA_CEILING sets the ceiling", quota.guard("claude", at(85), override="ok")[0] is True
               and quota.guard("claude", at(79), override="ok")[0] is False)
+    with env(ROLEBENCH_QUOTA_CEILING="98"):
+        up = quota.guard("claude", at(1), override="ok")
+    check("ROLEBENCH_QUOTA_CEILING can only lower the ceiling: 98 is refused with a clear message",
+          up[0] is True and "can only lower it" in up[1])
+    unk = quota.guard("claude", lambda p: None, override="ok")[1]
+    check("under the override an unknown quota says the ceiling needs a reading from the daemon's /usage",
+          "ceiling needs a reading" in unk and "/usage" in unk)
     for bad in ("abc", "0", "-5", "101", "nan", "inf"):
         with env(ROLEBENCH_QUOTA_CEILING=bad):
             check(f"ROLEBENCH_QUOTA_CEILING={bad} fails closed", quota.guard("claude", at(1), override="ok")[0] is True)
@@ -1427,18 +1496,18 @@ def test_review_flow(shas, root: Path) -> None:
     check("run.json keeps the random snapshot name and the build-time shas",
           run["snapshot"].endswith(Path(run["snapshot"]).name) and run["shas"]["change"] and run["hygiene"]["after_reset"] == [])
 
-    glm, ds, luna = "z-ai/glm-5.3-flash", "deepseek/deepseek-v4.1-flash", "openai/gpt-6-luna"
+    glm, ds, luna = "z-ai/glm-5.3-flash", "deepseek/deepseek-v4.1-flash", "anthropic/claude-haiku-5.5"  # all on the matrix
     j = flows.review_once(deps, case, harness="jarvis", model=glm, n=2)
     check("a jarvis cell is given a budget from the ledger", deps.runners["jarvis"].calls[0]["budget"] == 0.5)
     check("a jarvis run is charged to the ledger", abs(deps.get_ledger().spent() - 0.3) < 1e-9)
     j2 = flows.review_once(deps, case, harness="jarvis", model=glm, n=3)
-    j3 = flows.review_once(deps, case, harness="jarvis", model="other/model", n=4)
+    j3 = flows.review_once(deps, case, harness="jarvis", model=ds, n=4)
     check("the budget is whatever the total cap leaves", deps.runners["jarvis"].calls[1]["budget"] == 0.5 and j3["result"] in ("ok", "skipped"))
     check("a jarvis-only run reads no quota", j["quota_before"] == {} and "quota_after" not in j)
     over = fake_runner([REVIEW_REPLY], cost=0.6)
     deps2 = flows.Deps(runners={"jarvis": over}, quota_override=NO_QUOTA, repo=shas["repo"], ledger=spend.Ledger(root / "led2.json", 10, 0.5))
-    o1 = flows.review_once(deps2, case, harness="jarvis", model="m/over", n=1)
-    o2 = flows.review_once(deps2, case, harness="jarvis", model="m/over", n=2)
+    o1 = flows.review_once(deps2, case, harness="jarvis", model="z-ai/glm-5.3-flash", n=1)
+    o2 = flows.review_once(deps2, case, harness="jarvis", model="z-ai/glm-5.3-flash", n=2)
     check("a run over the per-run cap is marked, and its model is aborted", o1["result"] == "over-cap" and o2["result"] == "skipped" and "per-run cap" in o2["reason"])
     deps3 = flows.Deps(runners={"jarvis": fake_runner([REVIEW_REPLY], cost=0.001, tokens={"prompt_tokens": 1_000_000, "completion_tokens": 0})},
                        quota_override=NO_QUOTA, repo=shas["repo"], ledger=spend.Ledger(root / "led3.json", 10, 100))
@@ -1455,11 +1524,30 @@ def test_review_flow(shas, root: Path) -> None:
     check("the worker's running total (sub-agents included) wins over a lower reported cost",
           abs(deps5.get_ledger().spent() - 0.2) < 1e-9)
     deps6 = flows.Deps(runners={"jarvis": fake_runner([REVIEW_REPLY])}, quota_override=NO_QUOTA, repo=shas["repo"],
-                       ledger=spend.Ledger(root / "led6.json", 10, 0.5))
+                       ledger=spend.Ledger(root / "led6.json", 10, 0.5), off_matrix=True)    # past the matrix, the Kimi guard still holds
     k3 = flows.review_once(deps6, case, harness="jarvis", model="moonshotai/kimi-k3", n=1)
     check("a Kimi id (even K3, now off the matrix) is skipped before any spend",
           k3["result"] == "skipped" and "refused" in k3["reason"] and deps6.runners["jarvis"].calls == []
           and deps6.get_ledger().pending() == {} and deps6.get_ledger().spent() == 0)
+
+    mreads = []
+    dm = flows.Deps(runners={"jarvis": fake_runner([REVIEW_REPLY]), "claude": fake_runner([REVIEW_REPLY])}, repo=shas["repo"],
+                    ledger=spend.Ledger(root / "led-matrix.json", 10, 0.5), quota_reader=lambda p: mreads.append(p) or COLD)
+    off1 = flows.review_once(dm, case, harness="jarvis", model="openai/gpt-6-luna")
+    off2 = flows.review_once(dm, case, harness="claude", model="claude-opus-9")
+    off3 = flows.implement_once(dm, impl_case(shas), harness="claude", model="haiku", reviewer_harness="jarvis",
+                                reviewer_model="moonshotai/kimi-k3")
+    check("a model off the O-1 matrix for its harness is refused up front (gpt-6-luna left the Jarvis loop)",
+          all(r["result"] == "skipped" and "not in the O-1 matrix" in r["reason"] and "--off-matrix" in r["reason"]
+              for r in (off1, off2, off3))
+          and dm.runners["jarvis"].calls == [] and dm.runners["claude"].calls == [] and mreads == []
+          and not (root / "led-matrix.json").exists())
+    dm.off_matrix = True
+    on1 = flows.review_once(dm, case, harness="jarvis", model="openai/gpt-6-luna")
+    row = json.loads(config.log_path().read_text().splitlines()[-1])
+    check("--off-matrix runs it, and the run row and run.json record off_matrix",
+          on1["result"] == "ok" and on1["off_matrix"] is True and row["off_matrix"] is True
+          and json.loads(config.log_path().read_text().splitlines()[0]).get("off_matrix") is False)
 
     def no_price(model):
         raise prices.PriceError(f"no endpoint price for {model}")
@@ -1542,8 +1630,8 @@ def test_review_flow(shas, root: Path) -> None:
                 real = flows.Deps(runners=dict(runners.REGISTRY), repo=shas["repo"], ledger=led,
                                   quota_reader=lambda p: reads.append(p) or {"windows": [{"used_percent": 1}]})
                 rc = flows.review_once(real, case, harness="claude", model="haiku")
-                rj = flows.review_once(real, case, harness="jarvis", model="openai/gpt-6-luna")
-                ri = flows.implement_once(real, impl_case(shas), harness="codex", model="m", reviewer_harness="claude",
+                rj = flows.review_once(real, case, harness="jarvis", model="deepseek/deepseek-v4.1-flash")
+                ri = flows.implement_once(real, impl_case(shas), harness="codex", model="gpt-6-luna", reviewer_harness="claude",
                                           reviewer_model="opus")
             sandbox.PASTA = saved_pasta
             check(f"ROLEBENCH_NET={net}: real claude/jarvis runs (and a claude reviewer) are refused up front",
@@ -1561,7 +1649,7 @@ def test_review_flow(shas, root: Path) -> None:
                                       ledger=spend.Ledger(root / f"led-net-ok-{net}.json", 10, 0.5),
                                       quota_reader=lambda p: {"windows": [{"used_percent": 1}]})
                     ok_c = flows.review_once(real, case, harness="claude", model="haiku")
-                    ok_j = flows.review_once(real, case, harness="jarvis", model="openai/gpt-6-luna")
+                    ok_j = flows.review_once(real, case, harness="jarvis", model="deepseek/deepseek-v4.1-flash")
                 check(f"ROLEBENCH_NET={net or 'unset'} (pasta): real claude and jarvis runs are no longer refused up front",
                       ok_c["result"] == "ok" and ok_j["result"] == "ok", ok_c.get("reason", ""))
     finally:
@@ -1570,7 +1658,7 @@ def test_review_flow(shas, root: Path) -> None:
         runners.run_claude = saved_claude
         sandbox.PASTA = saved_pasta
     bad = flows.Deps(runners={"claude": fake_runner(["no block at all"])}, quota_override=NO_QUOTA, repo=shas["repo"])
-    check("a reply without a findings block is 'unparsed'", flows.review_once(bad, case, harness="claude", model="x")["result"] == "unparsed")
+    check("a reply without a findings block is 'unparsed'", flows.review_once(bad, case, harness="claude", model="sonnet")["result"] == "unparsed")
 
     # a reviewer that commits a mutant: recorded, undone, never judged
     def commit_mutant(n, cwd):
@@ -1741,7 +1829,7 @@ def test_implement_flow(shas, root: Path) -> None:
         (cwd / "jarvis_extra.py").write_text("x = 1\n")
     o = flows.implement_once(flows.Deps(runners={"claude": fake_runner(["x"], edits=oos), "codex": fake_runner([clean])},
                                         quota_override=NO_QUOTA, repo=shas["repo"], suite_runner=lambda g, r: (True, "")),
-                             icase, harness="claude", model="haiku", reviewer_harness="codex", reviewer_model="m", max_rounds=0)
+                             icase, harness="claude", model="haiku", reviewer_harness="codex", reviewer_model="gpt-6-luna", max_rounds=0)
     check("merge-ready respects out-of-scope edits", not o["merged_ready"] and o["rounds"][0]["diff"]["out_of_scope"] == ["jarvis_extra.py"])
 
     # the quota is checked again before every round
@@ -1753,7 +1841,7 @@ def test_implement_flow(shas, root: Path) -> None:
         return {"windows": [{"name": "5h", "used_percent": 10 if len(reads) <= 5 else 90}]}
     q = flows.implement_once(flows.Deps(runners={"claude": fake_runner(["x"], edits=lambda n, c: None), "codex": fake_runner([med])},
                                         repo=shas["repo"], quota_reader=warming, suite_runner=lambda g, r: (False, "f")),
-                             icase, harness="claude", model="haiku", reviewer_harness="codex", reviewer_model="m")
+                             icase, harness="claude", model="haiku", reviewer_harness="codex", reviewer_model="gpt-6-luna")
     check("the quota is re-checked per implement round: a window that heats up stops the run",
           q["result"] == "partial" and "quota" in q["reason"] and len(q["rounds"]) < 3)
     check("an implement run records quota before and after for both roles' providers",
@@ -1767,7 +1855,7 @@ def test_implement_flow(shas, root: Path) -> None:
     qc = flows.implement_once(flows.Deps(runners={"claude": fake_runner(["x"], edits=lambda n, c: None), "codex": fake_runner([med])},
                                          repo=shas["repo"], quota_reader=to_ceiling, quota_override="owner said so",
                                          suite_runner=lambda g, r: (False, "f")),
-                              icase, harness="claude", model="haiku", reviewer_harness="codex", reviewer_model="m")
+                              icase, harness="claude", model="haiku", reviewer_harness="codex", reviewer_model="gpt-6-luna")
     check("under the override, a window reaching the ceiling mid-run refuses the next model step",
           qc["result"] == "partial" and "ceiling" in qc["reason"] and len(qc["rounds"]) == 1
           and qc["rounds"][0]["reviewer"] is None)
@@ -1783,7 +1871,7 @@ def test_implement_flow(shas, root: Path) -> None:
     check("a failure that reproduces is counted, with its tail", not g2["hidden_pass"] and "boom" in g2["tails"]["tiny_hidden_check.py"])
     never = flows.Deps(runners={"claude": fake_runner(["x"], edits=lambda n, c: None), "codex": fake_runner([med])}, quota_override=NO_QUOTA,
                        repo=shas["repo"], suite_runner=lambda g, r: (False, "fail"))
-    r2 = flows.implement_once(never, icase, harness="claude", model="haiku", reviewer_harness="codex", reviewer_model="m")
+    r2 = flows.implement_once(never, icase, harness="claude", model="haiku", reviewer_harness="codex", reviewer_model="gpt-6-luna")
     check("after two fix rounds a failing model is not merge-ready", len(r2["rounds"]) == 3 and not r2["merged_ready"] and r2["rounds_to_merge_ready"] is None)
     check("implement rows reach the report", "## Implementer bench" in report.render(report.load_runs(config.runs_root())) and "| claude | sonnet |" in report.render(report.load_runs(config.runs_root())))
 

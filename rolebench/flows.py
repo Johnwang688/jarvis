@@ -24,6 +24,8 @@ class Deps:
     # The owner's reason for running without the quota guard ("" = guard on).
     # Set only from `--no-quota-guard` plus ROLEBENCH_QUOTA_OVERRIDE.
     quota_override: str = ""
+    # Run models outside config.MATRIX (only from `--off-matrix`; recorded in every run row).
+    off_matrix: bool = False
     ledger: spend.Ledger | None = None
     # The jarvis estimate's price (most expensive OpenRouter endpoint), or PriceError.
     price_fn: Callable = field(default_factory=lambda: prices.endpoint_price)
@@ -60,6 +62,16 @@ def _write(path: Path, doc) -> None:
 
 class Skipped(Exception):
     pass
+
+
+def _matrix_refusal(deps: Deps, *pairs: tuple[str, str]) -> str | None:
+    """Every (harness, model) a run uses must be in config.MATRIX unless --off-matrix."""
+    for harness, model in pairs:
+        try:
+            config.check_matrix(harness, model, deps.off_matrix)
+        except config.OffMatrix as exc:
+            return f"refused: {exc}"
+    return None
 
 
 def _net_refusal(deps: Deps, harness: str) -> str | None:
@@ -157,7 +169,8 @@ def review_step(deps: Deps, rcase: dict, snap: Path, *, harness: str, model: str
 
 def _base_run(deps: Deps, case: dict, harness: str, model: str, run_id: str, quota_before: dict | None = None) -> dict:
     run = {"run_id": run_id, "case_id": case["id"], "kind": case["kind"], "harness": harness, "model": model,
-           "started": time.strftime("%Y-%m-%dT%H:%M:%S"), "quota_guard": deps.quota_state}
+           "started": time.strftime("%Y-%m-%dT%H:%M:%S"), "quota_guard": deps.quota_state,
+           "off_matrix": deps.off_matrix}
     if quota_before is not None:
         run["quota_before"] = quota_before
     return run
@@ -192,7 +205,7 @@ def review_once(deps: Deps, case: dict, *, harness: str, model: str, n: int = 1)
     notes: list[str] = []
     snap = None
     hygiene: dict = {}
-    refusal = _net_refusal(deps, harness)
+    refusal = _matrix_refusal(deps, (harness, model)) or _net_refusal(deps, harness)
     if refusal:
         return _skipped(deps, case, harness, model, run_id, out_dir, refusal, started)
     qb = quota.readings(_providers(harness), deps.quota_reader)
@@ -301,7 +314,8 @@ def implement_once(deps: Deps, case: dict, *, harness: str, model: str, reviewer
     out_dir = config.runs_root() / run_id
     out_dir.mkdir(parents=True, exist_ok=True)
     notes: list[str] = []
-    refusal = _net_refusal(deps, harness) or _net_refusal(deps, reviewer_harness)
+    refusal = (_matrix_refusal(deps, (harness, model), (reviewer_harness, reviewer_model))
+               or _net_refusal(deps, harness) or _net_refusal(deps, reviewer_harness))
     if refusal:
         return _skipped(deps, case, harness, model, run_id, out_dir, refusal, started)
     qb = quota.readings(_providers(harness, reviewer_harness), deps.quota_reader)
