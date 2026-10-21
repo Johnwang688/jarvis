@@ -15,6 +15,7 @@ import io
 import json
 import os
 import random
+import shutil
 import re
 import subprocess
 import sys
@@ -1545,18 +1546,68 @@ def test_parsers(root: Path) -> None:
     check("audit: the host's Claude transcripts are an attempt even from a claude cell; its own login is not",
           cl("ls ~/.claude/projects") != [] and cl("cat ~/.claude/settings.json") != []
           and cl("cat ~/.claude/.credentials.json") == [] and cl("cat ~/.claude.json") == [])
-    many = lambda harness, cmds: audit.escape_flags(R(harness, "m", tool_calls=[("Bash", json.dumps({"command": c})) for c in cmds]), snap)
-    check("audit: `..` back from a subdirectory the command cd'ed into stays inside",
-          esc("cd hud && npx vitest run src/x.test.ts; cd ..") == [] and esc("cd hud/src && cat ../../tiny.py && cd ../..") == []
-          and esc("cd hud; cd src; ls ../..") == [])
-    check("audit: a climb above the snapshot root is still flagged, with or without cd",
-          esc("cd hud && cd ../..") != [] and esc("cd hud && cat ../../x") != [] and esc("ls ..") != []
-          and esc("cd /tmp && cat ../home/johnw/.gitconfig") != [])
-    check("audit: Claude's Bash keeps its cwd between calls; codex and jarvis start each call at the snapshot",
-          many("claude", ["cd hud", "cat ../tiny.py"]) == [] and many("codex", ["cd hud", "cat ../tiny.py"]) != []
-          and many("claude", ["cd hud", "cd ../..", "ls"]) != [])
+    # cwd tracking needs a real snapshot: a cd is followed only to an existing directory inside it
+    # (outside /tmp, which a cell may use freely, so that a climb out of it is an escape)
+    vroot = Path(tempfile.mkdtemp(prefix="rolebench-audit-", dir="/var/tmp"))
+    rsnap = (vroot / "snap" / "0123456789abcdef").resolve()
+    for d in ("hud/src", "a/b/c", "sub"):
+        (rsnap / d).mkdir(parents=True, exist_ok=True)
+    (rsnap / "tiny.py").write_text("x\n")
+    (rsnap / "sub" / "up").symlink_to("..")                  # an agent's symlink back out of sub
+    (rsnap / "link_to_outside").symlink_to(root)             # and one out of the snapshot
+    outside = vroot / "outside-cwd" / "a" / "b"
+    outside.mkdir(parents=True, exist_ok=True)
+
+    def calls(harness, items):
+        tc = [c if isinstance(c, tuple) else ("Bash", json.dumps({"command": c})) for c in items]
+        return audit.escape_flags(R(harness, "m", tool_calls=tc), rsnap)
+    inside = {
+        "cd hud && npx vitest run src/x.test.ts; cd ..": calls("claude", ["cd hud && npx vitest run src/x.test.ts; cd .."]),
+        "cd hud/src && cat ../../tiny.py": calls("claude", ["cd hud/src && cat ../../tiny.py"]),
+        "cd hud; cd src; ls ../..": calls("claude", ["cd hud; cd src; ls ../.."]),
+        "cd a && cd b && cat ../../tiny.py": calls("codex", ["cd a && cd b && cat ../../tiny.py"]),
+        "cd hud\\ncat ../tiny.py": calls("codex", ["cd hud\ncat ../tiny.py"]),
+        "claude across calls": calls("claude", ["cd hud", "cat ../tiny.py"]),
+        "a failed cd (no hud/hud) leaves the cwd, as the shell does": calls("claude", ["cd hud", "cd hud && ls; cd .. && cat tiny.py"]),
+    }
+    check("audit: `..` back from a subdirectory a certain cd moved into stays inside (a real snapshot)",
+          all(v == [] for v in inside.values()), str({k: v for k, v in inside.items() if v}))
+    must_flag = {
+        "cd -P ..": ["cd -P .."], "cd -L ..": ["cd -L .."], "cd -- ..": ["cd -- .."],
+        "(cd a/b); cat ../../x": ["(cd a/b); cat ../../x"],
+        "bash -c 'cd a/b'; cat ../../x": ["bash -c 'cd a/b'; cat ../../x"],
+        "cd a/b | true; cat ../../x": ["cd a/b | true; cat ../../x"],
+        "cd a/b & cat ../../x": ["cd a/b & cat ../../x"],
+        "false && cd a/b; cat ../../x": ["false && cd a/b; cat ../../x"],
+        "cd a/b || exit 1; cat ../../x": ["cd a/b || exit 1; cat ../../x"],
+        "cd nonexistent/a/b 2>/dev/null; cat ../../../x": ["cd nonexistent/a/b 2>/dev/null; cat ../../../x"],
+        "echo cd a/b; cat ../../x": ["echo cd a/b; cat ../../x"],
+        "git log --grep cd a/b; cat ../../x": ["git log --grep cd a/b; cat ../../x"],
+        "a description 'cd a/b'": [("Bash", json.dumps({"command": "ls", "description": "cd a/b"})), "cat ../../x"],
+        "a description 'cd to the build dir'": [("Bash", json.dumps({"command": "ls", "description": "cd to the build dir"})), "cat ../x"],
+        "Grep pattern cd, path a/b": [("Grep", json.dumps({"pattern": "cd", "path": "a/b"})), "cat ../../x"],
+        "cd a/b/c; pushd ../../..; cat ../../x": ["cd a/b/c; pushd ../../..; cat ../../x"],
+        "cd a/b; popd; cat ../../x": ["cd a/b; popd; cat ../../x"],
+        "cd sub && ln -s .. up && cd up && cat ../x": ["cd sub && ln -s .. up && cd up && cat ../x"],
+        "cd sub; cd up; cat ../x (a symlink, resolved)": ["cd sub; cd up; cat ../x"],
+        "cd link_to_outside; cat ../x": ["cd link_to_outside", "cat ../x"],
+        "Claude leaves the snapshot: cd <outside>/a/b, then ../../x": [f"cd {outside}", "cat ../../x"],
+        "cd a/b && cat ../../../x": ["cd a/b && cat ../../../x"],
+        "for d in a/b; do cd $d; done; cat ../../x": ["for d in a/b; do cd $d; done; cat ../../x"],
+        "cd hud && cd ../..": ["cd hud && cd ../.."], "ls ..": ["ls .."],
+        "cd /tmp && cat ../home/johnw/.gitconfig": ["cd /tmp && cat ../home/johnw/.gitconfig"],
+    }
+    missed = [k for k, v in must_flag.items() if not calls("claude", v)]
+    check("audit: every uncertain or escaping cd falls back to the snapshot root and is flagged (a real snapshot)",
+          missed == [], str(missed))
+    missed_cx = [k for k, v in must_flag.items() if not calls("codex", v)]
+    check("audit: the same inputs are flagged from a codex cell", missed_cx == [], str(missed_cx))
+    check("audit: codex and jarvis start each call at the snapshot; Claude carries only a certain cwd inside it",
+          calls("codex", ["cd hud", "cat ../tiny.py"]) != [] and calls("jarvis", ["cd hud", "cat ../tiny.py"]) != []
+          and calls("claude", ["cd hud", "cd ../..", "ls"]) != [])
     check("audit: after a cd that cannot be followed ($UNKNOWN, -), relative paths are judged from the snapshot root",
-          esc("cd $SOMEWHERE && cat ../x") != [] and esc("cd hud && cd - && cat ../x") != [])
+          calls("claude", ["cd $SOMEWHERE && cat ../x"]) != [] and calls("claude", ["cd hud && cd - && cat ../x"]) != [])
+    shutil.rmtree(vroot, ignore_errors=True)
     own = audit.claude_task_dir(snap)
     check("audit: a claude cell's own task output under /tmp/claude-<uid>/<its cwd slug>/ is in-cell",
           cl(f"tail {own}/4dba4fd8-6e1b-4758-8429-d173c3966042/tasks/bq6ou2226.output") == []

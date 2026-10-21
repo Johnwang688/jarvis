@@ -42,15 +42,16 @@ def network_flags(result) -> list[str]:
 BODY_KEYS = {"content", "new_string", "old_string", "text", "new_source", "edits", "todos", "plan", "items"}
 
 
-def scan_text(args: str) -> str:
-    """The parts of one tool call's arguments that name paths or run commands."""
+def fields(args: str) -> list[tuple[str | None, str]]:
+    """(key, value) for the parts of one tool call's arguments that name paths
+    or run commands; a non-JSON argument (a codex shell command) is (None, it)."""
     try:
         doc = json.loads(args)
     except (json.JSONDecodeError, TypeError):
-        return args
+        return [(None, args)]
     if not isinstance(doc, dict):
-        return args
-    return "\n".join(str(v) for k, v in doc.items() if k not in BODY_KEYS and isinstance(v, (str, int, float)))
+        return [(None, args)]
+    return [(k, str(v)) for k, v in doc.items() if k not in BODY_KEYS and isinstance(v, (str, int, float))]
 
 
 def _within(path: str, root: str) -> bool:
@@ -70,7 +71,8 @@ QUOTED = re.compile(r"""(['"])([^'"\s]+?)\1""")
 def _shell_tokens(text: str) -> list[str]:
     import shlex
     try:
-        lex = shlex.shlex(text, posix=True, punctuation_chars=";&|<>()")
+        lex = shlex.shlex(text, posix=True, punctuation_chars=";&|<>()\n")
+        lex.whitespace = " \t\r"                # a newline separates commands, like ;
         lex.whitespace_split = True
         return list(lex)
     except ValueError:                       # unbalanced quotes: fall back to whitespace
@@ -118,46 +120,126 @@ def _is_candidate(lit: str) -> bool:
     return lit.startswith("/") or ".." in lit.split("/")
 
 
-PUNCT = set(";&|<>()")
+PUNCT = set(";&|<>()\n")
+SEPARATOR_KINDS = {"seq", "and", "or", "pipe", "bg"}
 
 
-def path_candidates(text: str, env: dict | None = None, depth: int = 0,
-                    state: dict | None = None) -> list[tuple[str, str, str | None]]:
+def _punct_kind(tok: str) -> str | None:
+    """None for a word; else the kind of a punctuation token: seq (; or a
+    newline), and (&&), or (||), pipe (| or |&), bg (&), redirect, paren."""
+    if not tok or not set(tok) <= PUNCT:
+        return None
+    bare = tok.replace("(", "").replace(")", "")
+    if not bare:
+        return "paren"
+    if ";" in bare or "\n" in bare:
+        return "seq"
+    if bare == "&&":
+        return "and"
+    if bare == "||":
+        return "or"
+    if bare in ("|", "|&"):
+        return "pipe"
+    if bare == "&":
+        return "bg"
+    return "redirect"
+
+
+def _certain_dir(path: str | None, root: str | None) -> str | None:
+    """`path` resolved, if it is an existing directory inside the snapshot; else None."""
+    if not path or not root:
+        return None
+    real = os.path.realpath(path)
+    return real if os.path.isdir(real) and _within(real, root) else None
+
+
+def path_candidates(text: str, env: dict | None = None, depth: int = 0, state: dict | None = None,
+                    track_cd: bool = False) -> list[tuple[str, str, str | None]]:
     """(word, what it names, the shell's cwd there) for the path arguments in
     one argument value: shell words (and the value of every NAME=value,
     key=value or --opt=value word, with simple assignments tracked so a later
     $NAME expands), the script of `sh -c`/`bash -lc` (tokenized again), and
     quoted strings inside inline code such as `python -c`. Prose in a quoted
-    argument or a commit message is never split into words. `cd` moves the
-    tracked cwd (`state["cwd"]`, None once it cannot be told)."""
+    argument or a commit message is never split into words.
+
+    The cwd (`state["cwd"]`, None = unknown, judged from the snapshot root) is
+    moved only by a `cd` it is certain of (`track_cd`: a `command` field): a
+    `cd` in command position at the start, after `;` or a newline, or after
+    `&&` when every command before it in that chain was such a `cd`; never in
+    `( … )`, a pipeline, `&` or `||`, never with an option, and only to an
+    existing directory inside the snapshot (resolved, so a symlink out is
+    caught). A cd to a path that does not exist leaves a known cwd where it
+    was, as the shell does (were it deleted after the run, the cwd judged
+    from is only shallower, which flags more); anything else makes it
+    unknown. A `-c` script works on a copy and never moves the parent's cwd;
+    `pushd`/`popd` anywhere make it unknown."""
     env = env if env is not None else {}
-    state = state if state is not None else {"cwd": None}
+    state = state if state is not None else {"cwd": None, "root": None}
     out = []
     tokens = _shell_tokens(text)
-    for i, tok in enumerate(tokens):
+    paren, last_sep, chain_ok, cmd_start = 0, "seq", True, True
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        kind = _punct_kind(tok)
+        if kind is not None:
+            paren += tok.count("(") - tok.count(")")
+            if kind in SEPARATOR_KINDS:
+                last_sep, cmd_start = kind, True
+                if kind == "seq":
+                    chain_ok = True
+                elif kind != "and":
+                    chain_ok = False
+            elif kind == "paren" and "(" in tok:
+                cmd_start, chain_ok = True, False
+            i += 1
+            continue
+        starting, cmd_start = cmd_start, False
         if (depth < 3 and i >= 2 and SHELL_C.match(tokens[i - 1])
                 and os.path.basename(tokens[i - 2]) in SHELLS):
-            out += path_candidates(tok, env, depth + 1, state)
+            out += path_candidates(tok, env, depth + 1, dict(state), track_cd)      # a copy: never the parent's cwd
+            i += 1
             continue
-        if tok == "cd":
-            nxt = tokens[i + 1] if i + 1 < len(tokens) and not set(tokens[i + 1]) <= PUNCT else ""
-            if not nxt:
-                state["cwd"] = env.get("HOME")
-            continue
-        if i >= 1 and tokens[i - 1] == "cd":
+        if track_cd and tok in ("pushd", "popd"):
+            state["cwd"] = None
+        if track_cd and tok == "cd" and starting:
+            j, args = i + 1, []
+            while j < len(tokens) and _punct_kind(tokens[j]) not in SEPARATOR_KINDS:
+                if _punct_kind(tokens[j]) == "redirect":
+                    j += 2                              # the redirect and its target
+                    continue
+                if _punct_kind(tokens[j]) is None:
+                    args.append(tokens[j])
+                j += 1
+            nxt = _punct_kind(tokens[j]) if j < len(tokens) else None
+            certain = (paren == 0 and nxt not in ("pipe", "bg", "or")
+                       and (last_sep == "seq" or (last_sep == "and" and chain_ok)))
             before = state.get("cwd")
-            lit = literal(tok, env)
-            if lit and _is_candidate(lit):
-                out.append((tok, lit, before))
-            if tok == "-" or literal_cut(tok, env):
-                state["cwd"] = None
-            elif lit.startswith("/"):
-                state["cwd"] = os.path.normpath(lit)
-            elif lit:
-                state["cwd"] = os.path.normpath(os.path.join(before, lit)) if before else None
+            target = args[0] if args else "~"
+            lit = literal(target, env)
+            for arg in args:                            # every operand is judged (`cd -P ..`, `cd -- ..`)
+                alit = literal(arg, env)
+                if alit and _is_candidate(alit):
+                    out.append((arg, alit, before))
+            if len(args) > 1 or target.startswith("-") or literal_cut(target, env) or not lit:
+                new = None
             else:
-                state["cwd"] = None
+                base = before or state.get("root")
+                dest = lit if lit.startswith("/") else (os.path.join(base, lit) if base else None)
+                if dest and before and not os.path.lexists(dest):
+                    new = before                        # nothing there: the cd failed and the cwd stayed
+                else:
+                    new = _certain_dir(dest, state.get("root"))
+            if certain:
+                state["cwd"] = new
+            elif nxt not in ("pipe", "bg") and paren == 0:
+                state["cwd"] = None                     # may or may not have run: unknown
+            if not certain:
+                chain_ok = False
+            i = j
             continue
+        if starting:
+            chain_ok = False                            # a command other than an accepted cd
         words = [tok]
         m = ASSIGN.match(tok)
         if m:
@@ -175,6 +257,7 @@ def path_candidates(text: str, env: dict | None = None, depth: int = 0,
                 lit = literal(w, env)
                 if lit and _is_candidate(lit):
                     out.append((w, lit, state.get("cwd")))
+        i += 1
     return out
 
 
@@ -208,26 +291,32 @@ def escape_flags(result, snap: Path, extra_allowed: tuple[str, ...] = ()) -> lis
     in_home = [os.path.normpath(p) for p in sandbox.cell_home_paths(profile)]
     own_tmp = claude_task_dir(snap_s) if harness == "claude" else None
     hits = []
-    state = {"cwd": snap_s}
+    root = os.path.realpath(snap_s)
+    state = {"cwd": None, "root": root}
     for name, args in result.tool_calls:
-        if harness != "claude":
-            state = {"cwd": snap_s}               # codex and jarvis start every command at the snapshot
-        for raw, lit, cwd in path_candidates(scan_text(args), {"HOME": home}, state=state):
-            path = os.path.normpath(lit if lit.startswith("/") else os.path.join(cwd or snap_s, lit))
-            if any(_within(path, r) for r in roots):
-                continue
-            if _within(path, home):
-                if not any(_within(path, p) for p in in_home):
+        if harness != "claude" or not (state.get("cwd") and _within(state["cwd"], root)):
+            # codex and jarvis start every command at the snapshot; Claude keeps
+            # its cwd only while it is certain and inside the snapshot
+            state = {"cwd": None, "root": root}
+        env = {"HOME": home}
+        for key, value in fields(args):
+            for raw, lit, cwd in path_candidates(value, env, state=state, track_cd=key in ("command", None)):
+                hit = _judge(lit, cwd or snap_s, roots, home, in_home, own_tmp)
+                if hit:
                     hits.append(f"{name}: {raw[:160]}")
-                continue
-            if path.startswith("/tmp/claude-"):
-                if not (own_tmp and _within(path, own_tmp)):
-                    hits.append(f"{name}: {raw[:160]}")
-                continue
-            if any(_within(path, a) for a in ALLOWED_ABS):
-                continue
-            top = "/" + path.lstrip("/").split("/", 1)[0]
-            if top != "/" and not os.path.lexists(top):
-                continue                         # names nothing on the host: a pattern, not a path
-            hits.append(f"{name}: {raw[:160]}")
     return hits
+
+
+def _judge(lit: str, cwd: str, roots: list[str], home: str, in_home: list[str], own_tmp: str | None) -> bool:
+    """Whether a path a tool call names is outside the cell."""
+    path = os.path.normpath(lit if lit.startswith("/") else os.path.join(cwd, lit))
+    if any(_within(path, r) for r in roots):
+        return False
+    if _within(path, home):
+        return not any(_within(path, p) for p in in_home)
+    if path.startswith("/tmp/claude-"):
+        return not (own_tmp and _within(path, own_tmp))
+    if any(_within(path, a) for a in ALLOWED_ABS):
+        return False
+    top = "/" + path.lstrip("/").split("/", 1)[0]
+    return not (top != "/" and not os.path.lexists(top))     # a top that is not on the host names nothing
