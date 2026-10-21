@@ -18,6 +18,7 @@ import json
 import math
 import os
 import re
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -99,7 +100,7 @@ def endpoint_price(model: str, fetch=None, now: float | None = None) -> tuple[fl
             return float(cached["prompt"]), float(cached["completion"])
         raise PriceError(f"no endpoint price for {model}: {type(exc).__name__}: {exc}")
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
     tmp.write_text(json.dumps({"model": key, "prompt": prompt, "completion": completion, "endpoints": n,
                                "fetched": now, "basis": "max over endpoints"}), encoding="utf-8")
     os.replace(tmp, path)
