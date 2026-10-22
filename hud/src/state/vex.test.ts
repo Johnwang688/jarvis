@@ -1168,8 +1168,16 @@ describe("nothing changed since the last build: straight to the download (the ow
       return { terminal_id: "b0000002" };
     };
     const store = new VexStore();
+    let rebuildNote = "";
+    const build = api.vexBuild;
+    vi.spyOn(api, "vexBuild").mockImplementation(async (pid: string, action: string) => {
+      if (action === "rebuild") rebuildNote = store.run("p3").note;
+      return build(pid, action as any);
+    });
     await store.download("p3", 1, "auton", "override");
     expect(h.order).toEqual(["download", "rebuild", "download"]);
+    // Said as what happened on this path (PR #292 review LOW-3).
+    expect(rebuildNote).toBe("Rebuilding from scratch: the sources changed since the check…");
     expect(store.run("p3").note).toBe("Downloaded to slot 1. Start it on the brain or the controller.");
   });
 

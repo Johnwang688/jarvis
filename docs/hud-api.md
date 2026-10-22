@@ -1641,7 +1641,11 @@ visible-window USB probe and is not an unclicked manual action notice.
   size, mtime}` when this build wrote one. The last 32 are kept.
 - `GET /projects/{id}/vex/fresh` → `{fresh, reason}`: whether a download
   would send the binary as it is now, by the download's own rule (`Vex._fresh`
-  below), read only and never under the build lock. `reason` is the
+  below) **and stricter**: only for a binary this daemon built, with the same
+  build argv (`P=`, `T=`, tools, `PRINTF_FLOAT`), and no `is_source_name`
+  file changed anywhere in the project since (`wide_digest`; `build/`,
+  `node_modules/` and dot folders skipped). Read only, never under the
+  build lock. `reason` is the
   `build_first` sentence when it is not, or "this project cannot be
   downloaded here" for a Python project or a name `P=` refuses. Runs no
   program. The HUD's Download asks it first and skips the clean and build

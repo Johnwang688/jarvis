@@ -572,7 +572,10 @@ export class VexStore {
       }
       phase(action);
       this.say(projectId, action === "clean" ? "Cleaning first…" : action === "build" ? "Building…"
-        : "Rebuilding from scratch: make found nothing to do, but the sources changed (a header it does not list)…",
+        : chain.skipBuild
+          // Current when asked, stale by the download (PR #292 review LOW-3).
+          ? "Rebuilding from scratch: the sources changed since the check…"
+          : "Rebuilding from scratch: make found nothing to do, but the sources changed (a header it does not list)…",
       "info");
       const b = await this.runBuild(projectId, action, (tid) => {
         chain.buildTerminal = tid;

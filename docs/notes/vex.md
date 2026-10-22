@@ -1115,11 +1115,36 @@ ran clean → build → download, so every download paid for a full rebuild.
   `build_first`, and the chain's existing single rebuild runs, then the
   download.
 
+**Review of #292** (one MED, no HIGH), fixed in the PR: `fresh` is
+**stricter than the download's rule**. Before, `_fresh` was the last check
+behind a chain that always rebuilt; skipping the rebuild would have let its
+blind spots decide what reaches the robot.
+
+- MED-1: settings and inputs outside `src/` and `include/`. A flipped
+  `printf_float`, another SDK or tool, or a header under `lib/` that a
+  makefile `-I` reaches left the binary "fresh". Each build now records the
+  plain build's argv (`build_argv(..., "build")`: `P=`, `T=`, the tools,
+  `PRINTF_FLOAT`) and `wide_digest` (every `is_source_name` file anywhere
+  in the project, except `build/`, `node_modules/` and dot folders) in
+  `_current`. `fresh` is true only when both still match.
+- LOW-1: the mtime fallback. After a restart, or for a binary VS Code
+  wrote, `fresh` is false ("Jarvis has not built this binary since the
+  daemon started"), so the first click after every restart rebuilds. The
+  download's own rule keeps its fallback.
+- LOW-3: on the skip path the one rebuild says "the sources changed since
+  the check".
+- NIT-2: `api.vexfresh.test.ts` pins the exact-`true` parse. NIT-3: the
+  "runs nothing" check now counts make and vexcom around the read.
+- Not done, LOW-2 (optional): Stop does not abort the in-flight check; the
+  chain stops when it answers (at most 10 s).
+
 Checks (fakes only):
 
 - `vex_check` `Device`: the answer before and after a build, after a header
   edit, for an older binary and an unfinished build; runs no program; 404
-  and 400 refusals.
+  and 400 refusals; and the stricter rule (a `lib/` header, a file under
+  `build/` ignored, printf_float flipped, a daemon that never built it),
+  with the download still accepting what its own rule accepts.
 - `state/vex.test.ts`: a current binary downloads with no clean or build and
   the steps list only Download; stale or a failed check cleans and builds; a
   binary that goes stale between the check and the download gets one
@@ -1131,7 +1156,8 @@ Checks (fakes only):
   answers `fresh` from `fresh_answer`, which is false by default, so the
   other sections keep the clean and build.
 
-Seven mutants, six caught: always skip, never skip, a failed check counted
-as current, step list ignoring the skip, the daemon always answering
-current, and the query not checked. Not caught: the API's strict
-`fresh === true` parse; no test pins it.
+Fourteen mutants, all caught: always skip, never skip, a failed check
+counted as current, step list ignoring the skip, the daemon always
+answering current, the query not checked; and after the review, a truthy
+parse, the old rebuild message, the mtime fallback skipping, settings
+ignored, the wide digest ignored, `build/` walked, and inputs not recorded.
