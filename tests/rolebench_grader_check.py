@@ -812,6 +812,10 @@ def test_stage2_review(case0: dict, root: Path) -> None:
     mem = lambda r, st: {"run": r, "finding": 0, "status": st, "severity": "LOW", "file": "a.py", "line": 1,   # noqa: E731
                          "title": "t", "scenario": "s"}
     saved = pool.pool_path(cid).read_text()
+    L0 = make_run(runs, "L0", "tiny-r4", [finding("legacy confirmed", "LOW", "a.py", 1)])   # confirmed by a legacy judge; another case, so never pooled here
+    config.write_json(L0 / "judge.json", {"valid": True, "finding_ids": {"F1": 0},
+                                          "matches": [{"finding": "F1", "verdict": "valid-new", "severity": "LOW"}]})
+    check("R4: the first member is confirmed by its run's legacy judge", pool.status_of(mem("L0", "valid-new")) == "valid-new")
     config.write_json(pool.pool_path(cid), {"case": cid, "calls": [], "clusters": [
         {"id": "p9", "severity": "LOW", "mechanism": "m", "location": "a.py:1", "status": "proposed", "judge_notes": [],
          "pending": [], "members": [mem("L0", "valid-new"), mem("U0", "unverified")]}]})
@@ -1160,6 +1164,17 @@ def test_stage2_delta(case0: dict, root: Path) -> None:
     hand = {**cases.scoring_key(case), "duplicates": {"rb9": [["Q", 0]]}}
     a = grader.assess("Q", {"matches": [{"finding": "F1", "verdict": "unmatched"}], "finding_ids": {"F1": 0}}, hand)
     check("X4: a duplicate whose target is no key entry is no hit", a["true_positives"] == 0 and a["unverified"] == 1)
+
+    # K13: the key's duplicate cluster ids hold new ids back even when they are the highest
+    icase = {**copy.deepcopy(case0), "id": "tiny-ids"}
+    config.write_json(config.cases_dir() / "tiny-ids.json", icase)
+    config.write_json(cases.rubric_path("tiny-ids"), tiny_rubric(icase))
+    config.write_json(cases.pooled_path("tiny-ids"), {
+        "case": "tiny-ids", "source": "pooled", "adjudicated_by": "x", "date": "2026-10-21",
+        "ground_truth": [{"id": "pool-p1", "severity": "LOW", "mechanism": "m", "location": "a.py:1", "evidence": "e", "source": "s"}],
+        "members": {"pool-p1": [["R", 1]]}, "duplicates": {"gt1": [["R", 0]]}, "duplicate_clusters": {"p9": "gt1"}})
+    check("K13: a new cluster id starts past the key's duplicate clusters (from an empty pool file)",
+          pool._next_id({"clusters": []}, "tiny-ids") == 10)
 
     # L-c: the clustering text strips its nonce until none is left
     txt, _ = pool.blind([{"file": "a.py", "line": 1, "title": "aabc123bc123", "scenario": "abcabc123123", "status": "unverified",
