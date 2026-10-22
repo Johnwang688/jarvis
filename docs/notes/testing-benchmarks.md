@@ -1376,6 +1376,117 @@ implementer and a jarvis reviewer) has `cost_basis: "mixed"`, its costs per basi
 models that ran, so a defect none found is missing from both keys, and pooled recall rewards
 finding what the other models found.
 
+**Two-stage rubric grader (2026-10-21, owner decision; `rolebench/grader.py`).** The legacy
+judge re-read the code on every review (~$0.22 each) and re-verified the same extra findings
+each time; a Sonnet re-judge of the 22 pilot runs gave identical recall but 81% per-finding
+label agreement (lenient on claims a design plan marks as intended), and a location matcher
+caught all 12 of Opus's hits plus 9 spurious ones. Each review case now has a verified rubric
+(`rolebench/cases/rubric/<case>.json`, loaded and validated by `cases.load_rubric` /
+`cases.validate_rubric`: head matches the case, `original_review` covers exactly the
+ground-truth ids, `rb`/`ni` ids unique, severities valid, every entry location names a
+`path[:line[-line]]`, `verified` reproduced or traced; `tests/rolebench_grader_check.py`
+validates every committed file). The scoring key is the original ground truth (minus any
+entry the rubric `disputed`, listed but never scored) plus the rubric entries plus accepted
+pooled entries. `python -m rolebench judge` uses it by default when the case has a rubric
+(`--grader legacy` keeps the Opus judge, `--grader rubric` forces it); `judge.json` records
+`grader: "rubric-1"`, and a valid judge.json from the other grader is kept beside it as
+`judge-<grader>.json` (asking for that grader again swaps it back, with no call). Stage 0, free:
+a finding's candidates are the key entries on the same file (suffix match on whole path
+components, either way) with a line within ±15 of the range, or no line on either side; the
+candidate sets are in `judge.json`. Approximate lines (`:~1846`, `(~1565)`) count as lines; 23
+key entries still name a file with no line and so admit any line of it. Stage 1: one Sonnet call per run (effort high) in the
+read-only judge cell with an **empty** work directory, under the net gate, quota guard and
+ceiling, seeing the blinded findings inside a random-nonce fence (the nonce is stripped from
+finding text until none is left), the key entries (id, severity, mechanism, location, and for a
+confirmed original entry the rubric's `original_review` note as "verified as"; never the
+evidence) and the non-issues (id, claim, location, why_not) inside a second fence, and each
+finding's candidates, listed after the fences. Per finding: `match <id>` (a match outside the
+finding's candidates becomes `unmatched` and lands in `gate_violations`), `non-issue <id>`
+(gated at file level: a non-issue on none of the finding's files becomes `unmatched`, recorded,
+so an off-file non-issue cannot lower a reviewer's precision), `nit` or `unmatched`; strict JSON, one retry;
+a failure never overwrites a valid judge.json (it goes to `judge-failed.json`). Stage 2:
+unmatched findings feed the pool as `unverified` (legacy runs still feed their valid-new ones
+as confirmed); `pool --case <id> --rule` makes one Opus call per proposed cluster with no ruling
+yet, in a read-only judge cell over a fresh export of the case's head (seed applied, no `.git`,
+the diff beside it; removed after), and records `valid` (severity, mechanism, location,
+evidence), `invalid` (why_not, citation) or `duplicate <key id>` (the ruling prompt shows the
+case's key entries, id, location and mechanism, fenced) on the cluster, with the exact
+(run, finding) set it saw (`seen`) and its cost in the pool's `calls`. A proposed cluster that
+gains a member its ruling never saw is ruled again (`--rule`; the old ruling is kept in
+`rulings_history`). The lead still adjudicates: `--accept` needs a valid (or duplicate) ruling
+that saw every unverified member when the cluster has one, and then uses the ruled severity,
+mechanism and location; accepting a duplicate maps its members to that key id (`duplicates` in
+the pooled key) instead of creating an entry; `--accept-invalid` needs an invalid ruling that saw
+every member, and makes it a pooled **non-issue** (`non_issues` in `cases/pooled/<case>.json`, id
+`pool-ni-<cluster>`), which later runs match in stage 1. One finding is never under two pooled
+ids (`validate_pooled`). A finding proposed for a settled cluster (accepted, non-issue or
+duplicate) waits as pending; when it is unverified, `--rule` makes one **member ruling** per such
+cluster (the settled claim as the key holds it, fenced, and the pending findings: `same` or
+`different` each, with what it saw recorded; a different one's claim restated by the ruling as a
+severity, mechanism and parsed location), members ruled different leave as new proposed clusters
+(`split_from`) built from that restatement, never from the finding's own file or text (a split
+cluster without one cannot become a non-issue), and `--accept-members` refuses an unverified pending
+member no member ruling found to be the same claim (a confirmed one is taken as before). A member's
+status is read from its run's current `judge.json` (confirmed only while the legacy judge still
+calls it valid-new; re-graded, re-judged or missing, it is unverified). `pool --case <id> --list`
+prints the pool and its rulings and never clusters or calls a model. A lost pool rebuilds the
+committed key byte for byte (the key keeps each entry's source and ruled wording, and the ids of
+clusters accepted as duplicates in `duplicate_clusters`, so a new cluster never reuses one).
+Two caveats: original-key recall moves with adjudication (an accepted duplicate of an original
+entry raises it), so compare runs only once the pool is current; and the correction goes one way
+(a ruling can turn a missed match into a hit, never undo a match the matcher made). #289's guarantees hold for both kinds:
+committed ids are never dropped or redefined without `--redefine`, pending members wait for
+`--accept-members`, and the key's evidence names the cluster, never reviewer (or ruling) text.
+Scores per run (`grader.assess`, recomputed by the report with no model call, so an accepted
+ruling updates earlier runs): weighted and MED+ recall on the **original key** and on the
+**full key**, false positives (non-issue matches, plus members of accepted non-issue clusters,
+plus, on a rescore, matches on an entry the rubric later disputed: a disputed `original_review`
+entry must name the rubric non-issue that answers it, and the report lists disputed entries;
+for a legacy run, valid-new members of an accepted non-issue add to its invalid count),
+nits, **unverified** (unmatched and not yet settled by an accepted ruling; a ruling awaiting
+the lead still counts as unverified), and precision over the settled findings. The report
+groups by harness, model and grader and lists every judged run with its grader; reusing a
+grading refolds `run.json` against the current key (free). `bare_cds` and the audit's `-c`
+script reading accept any option order (`bash --login -c`, `bash -c -l`), and `flows` writes
+`run.json` atomically too. Free checks:
+`tests/rolebench_grader_check.py` (fake calls only, no cell); the mutation
+runner is `~/.cache/jarvis-lead/rolebench-grader-mutants/run.py`.
+
+**No test reaches a real model (2026-10-21, #291 third review).** A temp HOME does not isolate the
+CLI logins: `config.login_home()` reads the account's home from pwd, so a test that reached the real
+`claude` CLI under pasta would spend real quota (the grader suite at e36dec55 did, through a plain
+`pool` on a restored pool: one real Opus clustering call per run). Both suites now import
+`tests/rolebench_testguard.py` first: it sets `ROLEBENCH_TESTING=1` and `ROLEBENCH_NET=none`, wraps
+`run_claude`, `run_codex`, `run_jarvis` and the registry to raise on anything but a fake, and makes
+OpenRouter's price fetch raise. The runners themselves also refuse under `ROLEBENCH_TESTING=1`
+(`runners.testing_refusal`): a claude or codex run needs its CLI under `ROLEBENCH_FAKE_BIN` and a
+`ROLEBENCH_LOGIN_HOME` that is not the account's home, a jarvis run a dummy key, and `.env` is never
+read. A mutation runner must copy `tests/rolebench_testguard.py` beside the suite.
+Since the fourth review the guard also covers what a cell binds and what a test reads:
+`ROLEBENCH_TESTING` is on for any non-empty value but `0`; the guard gives the whole process a fake
+login home (dummy credentials) and fake `claude`/`codex` stubs under `ROLEBENCH_FAKE_BIN`, which may
+be neither `/` nor a directory holding the account's real CLI; `config.login_home()` raises when the
+login home is unset, the account's home, or holds credential files that resolve to the account's (so
+not even an expiry check reads the real login); `sandbox.launch` refuses a claude, judge or codex
+cell that would bind a CLI outside the fake bin, with one explicit per-call opt-in,
+`real_cli_probe="codex-sandbox"`, which allows exactly `codex sandbox ...` (no model call) in a codex
+cell, still with the fake login (only `test_codex_loopback` uses it: it measures codex's own
+sandbox); and `quota.daemon_reader` refuses (a test injects a reader). Restated claims (new clusters,
+member rulings) are one line, at most 400 characters, keep only the parsed location
+(`path:lo-hi`), and the mechanism may not carry a 40-character run of a finding's own title or
+scenario (never its `file`, which a restated location must name): both sides are compared with
+path and `path:line` tokens cut out, NFKC-normalized, with format characters and punctuation
+dropped, whitespace collapsed and case folded (lookalike letters from other scripts are out of
+scope: this guards against a model echoing a finding, not an adversary). The existing clusters and
+a ruling's claim are fenced in the prompts that show them. `bare_cds` reads `env -S` strings,
+combined short flags (`env -iS`) included. The `codex-sandbox` opt-in also checks the tail: nothing
+after `sandbox` may name codex or claude, and the probe after `--` must be `python3 X.py` or
+`/bin/sh -c SCRIPT`; an opted-in launch carries `ROLEBENCH_REAL_CLI_PROBE=codex-sandbox` in the
+launcher's environment. To run the suites under a strict launch spy (one that refuses any real
+claude/codex launch or bind), `tests/strictspy_carveout/sitecustomize.py` wraps it
+(`ROLEBENCH_STRICT_SPY=<the spy's sitecustomize.py>`) and lets only that opted-in probe past,
+logged OPTIN, when both the marker and the `codex sandbox` argv are present.
+
 The judge is `claude -p --model opus` over shuffled, blinded findings plus the answer
 key, reading an export of the change commit (no `.git`, its diff beside it) in a
 random-named directory; its JSON is validated strictly (one retry). Judging a run

@@ -122,12 +122,15 @@ def path_candidates(text: str, env: dict | None = None, depth: int = 0) -> list[
     env = env if env is not None else {}
     out = []
     tokens = _shell_tokens(text)
+    # broad on purpose (a detector): any shell word, command position or not, as main read it
+    scripts = (shell_scripts(tokens, command_only=False)
+               | {i for i in range(2, len(tokens)) if SHELL_C.match(tokens[i - 1])
+                  and os.path.basename(tokens[i - 2]) in SHELLS}) if depth < 3 else set()
     ordinal = -1
     for i, tok in enumerate(tokens):
         if not set(tok) <= PUNCT:
             ordinal += 1
-        if (depth < 3 and i >= 2 and SHELL_C.match(tokens[i - 1])
-                and os.path.basename(tokens[i - 2]) in SHELLS):
+        if i in scripts:
             out += [(w, lit, None) for w, lit, _ in path_candidates(tok, env, depth + 1)]
             continue
         words = [tok]
@@ -150,17 +153,123 @@ def path_candidates(text: str, env: dict | None = None, depth: int = 0) -> list[
     return out
 
 
-def bare_cds(command: str) -> int:
+# Wrappers that run the next word as the command (`env X=1 bash -c ...`).
+WRAPPER_WORDS = {"env", "exec", "command", "builtin", "nohup", "time", "nice", "sudo", "stdbuf", "timeout", "xargs"}
+# Shell options that take the next word as their argument (`-o pipefail`, `-O extglob`).
+SHELL_ARG_OPT = re.compile(r"^[-+][A-Za-z]*[oO]$|^--(?:rcfile|init-file)$")
+
+
+def command_words(tokens: list[str]) -> set[int]:
+    """The indices of the words in command position: the first word of each
+    command (after `;`, `&&`, `|`, ...), past NAME=value assignments, and the
+    word a wrapper (`env`, `sudo`, `timeout 30`, ...) runs."""
+    out, start, i = set(), True, 0
+    punct = set(AWARE_PUNCT) | PUNCT
+    while i < len(tokens):
+        t = tokens[i]
+        if set(t) <= punct:
+            start, i = True, i + 1
+            continue
+        if start:
+            if re.fullmatch(r"[A-Za-z_]\w*=.*", t, re.S):
+                i += 1
+                continue
+            out.add(i)
+            if os.path.basename(t) in WRAPPER_WORDS:
+                # a wrapper's options may take arguments (`sudo -u root`, `nice -n 5`, `timeout -s KILL 5`,
+                # `env -u FOO`, `stdbuf -o L`): any later word of this simple command may be what it runs,
+                # except under `command -v` / `-V`, which only looks the name up
+                j = i + 1
+                if os.path.basename(t) == "command" and j < len(tokens) and tokens[j] in ("-v", "-V"):
+                    start, i = False, j + 1
+                    continue
+                while j < len(tokens) and not set(tokens[j]) <= punct:
+                    out.add(j)
+                    j += 1
+                start, i = False, j
+                continue
+            start = False
+        i += 1
+    return out
+
+
+def shell_scripts(tokens: list[str], command_only: bool = True) -> set[int]:
+    """The indices of the scripts that `sh`/`bash`/... run with `-c`, whatever
+    the options' order (`bash -lc S`, `bash --login -c S`, `bash -c -l S`,
+    `bash -o pipefail -c S`): the first word after the options, once one of
+    them carries `c`, an option's own argument (`-o pipefail`) skipped. With
+    `command_only` the shell must be in command position (`echo bash -c x`
+    runs no shell)."""
+    out = set()
+    commands = command_words(tokens) if command_only else None
+    punct = set(AWARE_PUNCT) | PUNCT
+    for i, tok in enumerate(tokens):
+        if os.path.basename(tok) not in SHELLS or (commands is not None and i not in commands):
+            continue
+        has_c, j = False, i + 1
+        while j < len(tokens):
+            t = tokens[j]
+            if set(t) <= punct:
+                break
+            if (t.startswith("-") or t.startswith("+")) and len(t) > 1:
+                has_c = has_c or bool(SHELL_C.match(t)) or (t.startswith("-") and not t.startswith("--") and "c" in t[1:])
+                j += 2 if SHELL_ARG_OPT.match(t) else 1
+                continue
+            if has_c:
+                out.add(j)
+            break
+    return out
+
+
+def bare_cds(command: str, depth: int = 0) -> int:
     """How many bare `cd`s (no operand: it goes HOME) a shell command runs, in
-    command position and followed by an operator or the end. Only a command
-    is read, never a pattern or a description."""
+    command position and followed by an operator or the end, counting those
+    in the script of `sh -c`/`bash -lc '...'` (the shape every codex command
+    arrives in). Only a command is read, never a pattern or a description."""
     tokens = _aware_tokens(command)
+    scripts = shell_scripts(tokens) if depth < 3 else set()
+    splits = env_split_strings(tokens) if depth < 3 else set()
     n = 0
     for i, tok in enumerate(tokens):
         if tok == "cd" and (i == 0 or set(tokens[i - 1]) <= set(AWARE_PUNCT)) \
                 and (i + 1 == len(tokens) or set(tokens[i + 1]) <= set(AWARE_PUNCT)):
             n += 1
+        elif i in scripts:
+            n += bare_cds(tok, depth + 1)
+        elif i in splits:
+            n += bare_cds(tok.split("=", 1)[1] if tok.startswith("--split-string=") else
+                          tok[tok.index("S") + 1:] if tok.startswith("-") and not tok.startswith("--") and "S" in tok[1:]
+                          and not tok.endswith("S") else tok, depth + 1)
     return n
+
+
+def env_split_strings(tokens: list[str]) -> set[int]:
+    """The indices of `env -S STRING` (`--split-string`) arguments: env splits
+    STRING into a command line and runs it (`env -S 'bash -c cd'`)."""
+    out = set()
+    commands = command_words(tokens)
+    punct = set(AWARE_PUNCT) | PUNCT
+    for i in sorted(commands):
+        if os.path.basename(tokens[i]) != "env":
+            continue
+        for j in range(i + 1, len(tokens)):
+            t = tokens[j]
+            if set(t) <= punct:
+                break
+            if t == "--split-string" and j + 1 < len(tokens):
+                out.add(j + 1)
+                break
+            if t.startswith("--split-string="):
+                out.add(j)
+                break
+            if t.startswith("-") and not t.startswith("--") and "S" in t[1:]:
+                # -S, or combined short flags (-iS, -vS): S takes the rest of the word, or the next word
+                if t.endswith("S") and j + 1 < len(tokens):
+                    out.add(j + 1)
+                else:
+                    out.add(j)
+                break
+    return out
 
 
 # --- the advisory label: a lexical reading of cd ------------------------------------

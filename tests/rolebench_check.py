@@ -26,6 +26,8 @@ import contextlib
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import rolebench_testguard  # noqa: E402,F401  first: ROLEBENCH_TESTING=1, ROLEBENCH_NET=none, runners refuse real models
 
 from rolebench import (audit, brief, cases, config, findings, flows, jarvis_worker, judge, netcell, pool,  # noqa: E402
                        prices, quota, report, runlog, runners, sandbox, snapshot, spend)
@@ -779,8 +781,9 @@ def test_sandbox_escape(root: Path) -> None:
     else:
         check(f"pasta available for the escape probes ({sandbox.pasta_available()})", False)
     try:
-        with env(OPENROUTER_API_KEY="sk-dummy-not-a-key", CLAUDE_CODE_SSE_PORT="1", ANTHROPIC_BASE_URL="http://x",
-                 ROLEBENCH_LOGIN_HOME=None):
+        # the cells bind the guard's fake CLIs and fake login (rolebench_testguard): the probes test the
+        # cell's isolation, which does not depend on the CLI it would run
+        with env(OPENROUTER_API_KEY="sk-dummy-not-a-key", CLAUDE_CODE_SSE_PORT="1", ANTHROPIC_BASE_URL="http://x"):
             for profile, net in cells:
                 name = profile if net == "none" else f"{profile}+pasta"
                 try:
@@ -967,7 +970,7 @@ def test_pasta_network(root: Path) -> None:
         lr = json.loads(next((l for l in layer.stdout.splitlines() if l.startswith("NETPROBE ")), "NETPROBE {}")[9:])
         layer_accepts = accepts()
         # the whole cell
-        with env(ROLEBENCH_NET="pasta", ROLEBENCH_LOGIN_HOME=None):
+        with env(ROLEBENCH_NET="pasta"):                  # the guard's fake CLI and login (no real CLI bound)
             rc, out, err, _ = sandbox.launch(["python3", str(work / "netprobe.py"), json.dumps(spec)],
                                              cell=sandbox.Cell("jarvis", work), run_id=f"check-pasta-{os.getpid()}", timeout_s=120)
             node_out = node_err = None
@@ -1167,7 +1170,8 @@ def test_fake_clis(root: Path) -> None:
     (fake / "rel" / "bin" / "codex").chmod(0o755)
     (fake / "codex").symlink_to(fake / "rel" / "bin" / "codex")
     with env(PATH=f"{fake}:{os.environ['PATH']}", ROLEBENCH_LOGIN_HOME=str(login), GH_TOKEN="gh-dummy",
-             OPENROUTER_API_KEY="sk-dummy-not-a-key", CLAUDE_CODE_SSE_PORT="9", ROLEBENCH_NET="none"):
+             OPENROUTER_API_KEY="sk-dummy-not-a-key", CLAUDE_CODE_SSE_PORT="9", ROLEBENCH_NET="none",
+             ROLEBENCH_FAKE_BIN=str(fake)):
         res = runners.run_claude(model="haiku", prompt="PROMPT TEXT", cwd=work, timeout_s=60, max_turns=3,
                                  run_id=f"check-claude-{os.getpid()}")
         cx = runners.run_codex(model="gpt-6-luna", prompt="P", cwd=work, timeout_s=60, run_id=f"check-codex-{os.getpid()}")
@@ -1204,7 +1208,8 @@ def test_fake_clis(root: Path) -> None:
     if not sandbox.pasta_available():
         for f in ("claude-cred.json", "claude-stdin.txt", "claude-env.txt"):
             (work / f).unlink(missing_ok=True)
-        with env(PATH=f"{fake}:{os.environ['PATH']}", ROLEBENCH_LOGIN_HOME=str(login), ROLEBENCH_NET="pasta"):
+        with env(PATH=f"{fake}:{os.environ['PATH']}", ROLEBENCH_LOGIN_HOME=str(login), ROLEBENCH_NET="pasta",
+                 ROLEBENCH_FAKE_BIN=str(fake)):
             pres = runners.run_claude(model="haiku", prompt="PASTA PROMPT \u00e9", cwd=work, timeout_s=60, max_turns=3,
                                       run_id=f"check-claude-pasta-{os.getpid()}")
         pcred = json.loads((work / "claude-cred.json").read_text()) if (work / "claude-cred.json").exists() else {}
@@ -1212,7 +1217,8 @@ def test_fake_clis(root: Path) -> None:
               "accessToken" in pcred.get("claudeAiOauth", {}) and "refreshToken" not in pcred.get("claudeAiOauth", {})
               and pcred.get("_perm") in ("400", None) and (work / "claude-stdin.txt").read_text() == "PASTA PROMPT \u00e9"
               and pres.text == "ok", pres.error)
-    with env(ROLEBENCH_LOGIN_HOME=str(login), ROLEBENCH_NET="none"):
+    with env(PATH=f"{fake}:{os.environ['PATH']}", ROLEBENCH_LOGIN_HOME=str(login), ROLEBENCH_NET="none",
+             ROLEBENCH_FAKE_BIN=str(fake)):
         (login / ".claude" / ".credentials.json").write_text(json.dumps({"claudeAiOauth": {
             "accessToken": "sk-ant-dummy", "expiresAt": (time.time() + 60) * 1000}}))
         soon = runners.run_claude(model="haiku", prompt="x", cwd=work, timeout_s=1800, max_turns=1)
@@ -1239,8 +1245,13 @@ def test_codex_loopback(root: Path) -> None:
     control) connects to both, so the probe is sensitive."""
     if sandbox.available():
         return
-    if not sandbox.codex_release() or not Path(config.real_home(), ".codex", "auth.json").is_file():
-        print("    (codex loopback test skipped: no codex binary or login on this host)")
+    # This one test binds the REAL codex release: it measures codex's own sandbox, which a fake cannot
+    # stand in for. It runs only `codex sandbox ...` (no model call), with the guard's fake login, behind
+    # sandbox.launch's explicit per-call opt-in real_cli_probe="codex-sandbox".
+    with env(PATH=rolebench_testguard.REAL_PATH):
+        real_release = sandbox.codex_release()
+    if not real_release:
+        print("    (codex loopback test skipped: no codex binary on this host)")
         return
     import secrets
     import socket
@@ -1256,12 +1267,13 @@ def test_codex_loopback(root: Path) -> None:
     (work / "probe.py").write_text(CODEX_PROBE.format(port=tcp.getsockname()[1], name=name))
     seen = {}
     try:
-        with env(ROLEBENCH_LOGIN_HOME=None):
+        with env(PATH=rolebench_testguard.REAL_PATH):
             for prof in (":workspace", ":danger-full-access"):
                 cmd = [str(sandbox.CODEX / "bin" / "codex"), "sandbox", "-P", prof, "-C", str(work), "--",
                        "python3", str(work / "probe.py")]
                 rc, out, err, to = sandbox.launch(cmd, cell=sandbox.Cell("codex", work),
-                                                  run_id=f"check-cxnet-{prof.strip(':')}-{os.getpid()}", timeout_s=90)
+                                                  run_id=f"check-cxnet-{prof.strip(':')}-{os.getpid()}", timeout_s=90,
+                                                  real_cli_probe="codex-sandbox")
                 line = next((l for l in out.splitlines() if l.startswith("PROBE ")), "PROBE {}")
                 accepts = {}
                 for key, sock in (("tcp", tcp), ("abstract", ab)):
@@ -2247,7 +2259,7 @@ def test_pool(shas, root: Path) -> None:
         # validation of the clustering reply
         fids, cids = ["V1", "V2"], ["p1"]
         ok_doc = {"assign": [{"finding": "V1", "cluster": "p1"}, {"finding": "V2", "cluster": "new1"}],
-                  "new_clusters": [{"id": "new1", "severity": "LOW", "mechanism": "m", "location": "l"}]}
+                  "new_clusters": [{"id": "new1", "severity": "LOW", "mechanism": "m", "location": "a.py:1"}]}
         bad = {
             "missing a finding": {"assign": ok_doc["assign"][:1], "new_clusters": []},
             "repeated finding": {"assign": ok_doc["assign"] + [{"finding": "V1", "cluster": "p1"}], "new_clusters": ok_doc["new_clusters"]},
@@ -2409,12 +2421,12 @@ def test_pool(shas, root: Path) -> None:
         allruns = report.load_runs(runs)
         resc = pool.rescore_runs(allruns, runs)
         text = report.render(allruns, resc)
-        check("report: original-key and pooled-key recall columns, labelled, with the pooling-bias note",
-              "weighted recall (original key)" in text and "MED+ recall (pooled key)" in text and "Pooling bias" in text
+        check("report: original-key and full-key recall columns, labelled, with the pooling-bias note",
+              "weighted recall (original key)" in text and "MED+ recall (full key)" in text and "Pooling bias" in text
               and set(resc) == {"A-run", "B-run", "C-run", "D-run", "F-run"})
         rows = {r["case"] + r["model"]: r for r in report.review_rows(allruns, resc) if r["model"] == "opus"}
         check("report: a row carries both recalls", list(rows.values())[0]["weighted_recall"] == 0.0
-              and abs(list(rows.values())[0]["weighted_recall_pooled"] - 0.5) < 1e-9)
+              and abs(list(rows.values())[0]["weighted_recall_full"] - 0.5) < 1e-9)
 
         # re-pool after acceptance: a new member of an accepted cluster follows into the key
         _fake_judged_run(runs, "G-run", cid, "sonnet", [_finding("writers race", "MED", "io.py", 9)],

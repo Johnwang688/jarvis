@@ -178,6 +178,9 @@ def run_claude(*, model, prompt, cwd, timeout_s, max_turns, budget_usd=None, out
     profile = profile or ("judge" if read_only else "claude")
     if not sandbox.claude_binary():
         return RunResult("claude", model, error="claude CLI not found on PATH", crashed=True)
+    guard = testing_refusal("claude", sandbox.claude_binary())
+    if guard:
+        return RunResult("claude", model, error=guard, crashed=True)
     problem = login_problem("claude", timeout_s)
     if problem:
         return RunResult("claude", model, error=f"refused: {problem}", crashed=True)
@@ -249,6 +252,9 @@ def run_codex(*, model, prompt, cwd, timeout_s, max_turns=None, budget_usd=None,
               run_id=None, launch=None) -> RunResult:
     if not sandbox.codex_release():
         return RunResult("codex", model, error="codex CLI not found on PATH", crashed=True)
+    guard = testing_refusal("codex", sandbox.codex_release())
+    if guard:
+        return RunResult("codex", model, error=guard, crashed=True)
     problem = login_problem("codex", timeout_s)
     if problem:
         return RunResult("codex", model, error=f"refused: {problem}", crashed=True)
@@ -281,11 +287,41 @@ def run_codex(*, model, prompt, cwd, timeout_s, max_turns=None, budget_usd=None,
 # --- the Jarvis loop --------------------------------------------------------------
 
 
+TESTING_ENV = config.TESTING_ENV
+FAKE_BIN_ENV = config.FAKE_BIN_ENV
+DUMMY_KEY_PREFIX = "sk-dummy"
+
+
+def testing_refusal(harness: str, binary=None, key: str | None = None) -> str | None:
+    """Why a run is refused under ROLEBENCH_TESTING (both test suites set it),
+    or None. Nothing a test starts may reach a real model: a claude or codex run
+    needs its CLI under ROLEBENCH_FAKE_BIN (never `/`, never a directory that
+    holds the account's real CLI) and a ROLEBENCH_LOGIN_HOME whose credential
+    files are not the account's; a jarvis run needs a dummy key. Whatever
+    ROLEBENCH_NET says. Checked inside the runners themselves, so a default
+    bound before a test patched anything is covered too."""
+    if not config.testing():
+        return None
+    why = f"test guard: ROLEBENCH_TESTING refuses a {harness} run that could reach a real model"
+    if harness in ("claude", "codex"):
+        if not config.is_fake_cli(binary):
+            return why + f" (its CLI {binary} is not a fake under {FAKE_BIN_ENV})"
+        login = config.login_home_refusal(os.environ.get("ROLEBENCH_LOGIN_HOME"))
+        if login:
+            return why + f" ({login})"
+    elif not key or not key.startswith(DUMMY_KEY_PREFIX):
+        return why + " (needs a dummy key)"
+    return None
+
+
 def openrouter_key() -> str | None:
     """The key, from the harness's environment or the checkout's .env. Never
-    printed, never put in a cell's environment: it goes to the worker on stdin."""
+    printed, never put in a cell's environment: it goes to the worker on stdin.
+    Under ROLEBENCH_TESTING=1 the .env files are never read."""
     if os.environ.get("OPENROUTER_API_KEY"):
         return os.environ["OPENROUTER_API_KEY"]
+    if config.testing():
+        return None
     candidates = [os.environ.get("ROLEBENCH_ENV_FILE"), config.source_repo() / ".env",
                   Path(config.real_home()) / "projects" / "Jarvis" / ".env"]
     for path in candidates:
@@ -331,6 +367,9 @@ def run_jarvis(*, model, prompt, cwd, timeout_s, max_turns, budget_usd=None, out
     key = (key_fn or openrouter_key)()
     if not key:
         return RunResult("jarvis", model, error="no OPENROUTER_API_KEY in the environment or .env", crashed=True)
+    guard = testing_refusal("jarvis", key=key)
+    if guard:
+        return RunResult("jarvis", model, error=guard, crashed=True)
     io = _io_dir(run_id or "jarvis")
     runtime = Path(tempfile.mkdtemp(prefix="runtime-", dir=io.parent))
     shutil.rmtree(runtime)

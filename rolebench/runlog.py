@@ -9,7 +9,7 @@ import json
 import time
 from pathlib import Path
 
-from . import config
+from . import config, report
 
 
 def role(summary: dict | None) -> dict | None:
@@ -76,7 +76,9 @@ def row(run: dict) -> dict:
         "network_flags": len(run.get("network_flags") or []), "escape_flags": len(run.get("escape_flags") or []),
         # every flag counts until the lead clears it; the cd-relative count is "of which", a hint
         "escape_cd_relative": len(run.get("escape_cd_relative") or []),
-        "escape_cleared": bool(run.get("escape_cleared")),
+        # the exact-flags rule (report.escape_cleared); a log row is written once, so after a later
+        # clear-flags the report, which reads run.json, is the authority
+        "escape_cleared": report.escape_cleared(run),
     }
 
 

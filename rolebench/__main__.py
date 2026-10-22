@@ -2,11 +2,14 @@
 
     python -m rolebench snapshot hint-r1
     python -m rolebench review --harness claude --model haiku --case hint-r1 --runs 3
-    python -m rolebench judge --run ~/.cache/jarvis-lead/rolebench/runs/<run-id>
+    python -m rolebench judge --run ~/.cache/jarvis-lead/rolebench/runs/<run-id>   # rubric grader when the case has a rubric
+    python -m rolebench judge --run <dir> --grader legacy       # the Opus judge with repo access, for comparison
     python -m rolebench implement --harness claude --model sonnet --case impl-279 \\
         --reviewer-harness claude --reviewer-model opus
     python -m rolebench pool --case c6-r1                       # cluster valid-new findings (one Opus call)
+    python -m rolebench pool --case c6-r1 --rule                # one Opus ruling per unruled proposed cluster
     python -m rolebench pool --case c6-r1 --accept p1,p3 --severity p1=MED --reject p2 --by john
+    python -m rolebench pool --case c6-r1 --accept-invalid p4 --by john   # an invalid ruling becomes a pooled non-issue
     python -m rolebench report
     python -m rolebench clean --judged
 
@@ -31,7 +34,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import cases, config, flows, judge, pool, report, snapshot
+from . import cases, config, flows, grader, judge, pool, report, snapshot
 
 OVERRIDE_ENV = "ROLEBENCH_QUOTA_OVERRIDE"
 
@@ -151,6 +154,13 @@ def _run_dirs(root: Path) -> list[Path]:
     return [root] if (root / "run.json").is_file() else sorted(p.parent for p in root.glob("*/run.json"))
 
 
+def which_grader(case: dict, wanted: str | None) -> str:
+    """--grader, or by default the rubric grader when the case has a rubric and the legacy judge otherwise."""
+    if wanted:
+        return wanted
+    return "rubric" if cases.rubric_path(case["id"]).exists() else "legacy"
+
+
 def cmd_judge(args) -> int:
     override = quota_override(args)
     root = Path(args.run).expanduser().resolve()
@@ -164,12 +174,18 @@ def cmd_judge(args) -> int:
             print(f"{d.name}: not judged ({run.get('result')})")
             continue
         try:
-            doc = judge.judge_run(d, cases.load(run["case_id"]), quota_override=override, force=args.force)
+            case = cases.load(run["case_id"])
+            kind = which_grader(case, args.grader)
+            if kind == "rubric":
+                doc = grader.grade_run(d, case, quota_override=override, force=args.force)
+            else:
+                doc = judge.judge_run(d, case, quota_override=override, force=args.force)
         except (judge.JudgeError, cases.CaseError) as exc:
             print(f"{d.name}: judge failed: {exc}")
             continue
         judged.append(d)
-        print(f"{d.name}: {json.dumps(doc['score'])}" + (" (already judged; --force to redo)" if doc.get("reused") else ""))
+        print(f"{d.name}: [{judge.grader_of(doc)}] {json.dumps(doc['score'])}"
+              + (" (already judged; --force to redo)" if doc.get("reused") else ""))
     size, path = judge.spotcheck(judged)
     print(f"{path}: {size} finding(s) to check")
     return 0
@@ -191,8 +207,24 @@ def _ids(values) -> list[str]:
 
 
 def cmd_pool(args) -> int:
-    """Cluster a case's valid-new findings (one Opus call), or adjudicate the clusters."""
-    if args.accept or args.reject or args.severity or args.accept_members:
+    """Cluster a case's valid-new and unverified findings (one Opus call), rule
+    the proposed clusters (--rule, one Opus call each), or adjudicate them."""
+    adjudicating = args.accept or args.reject or args.severity or args.accept_members or args.accept_invalid
+    if args.rule and adjudicating:
+        raise SystemExit("pool: --rule makes model calls; adjudicate in a separate command")
+    if args.list and (args.rule or adjudicating):
+        raise SystemExit("pool: --list only reads the pool; use it alone")
+    if args.list:
+        try:
+            doc = pool.load_pool(args.case)              # read only: never clusters, never calls a model
+        except (pool.PoolError, cases.CaseError) as exc:
+            raise SystemExit(f"pool: {exc}")
+    elif args.rule:
+        try:
+            doc = pool.rule_case(args.case, quota_override=quota_override(args))
+        except (pool.PoolError, cases.CaseError) as exc:
+            raise SystemExit(f"pool: {exc}")
+    elif adjudicating:
         severities = {}
         for item in _ids(args.severity):
             cid, _, sev = item.partition("=")
@@ -202,27 +234,64 @@ def cmd_pool(args) -> int:
         try:
             doc = pool.adjudicate(args.case, accept=_ids(args.accept), reject=_ids(args.reject),
                                   severities=severities, by=args.by or "", accept_members=_ids(args.accept_members),
-                                  redefine=args.redefine)
+                                  redefine=args.redefine, accept_invalid=_ids(args.accept_invalid))
         except (pool.PoolError, cases.CaseError) as exc:
             raise SystemExit(f"pool: {exc}")
-        print(f"{pool.key_path(args.case)}: {sum(c['status'] == pool.ACCEPTED for c in doc['clusters'])} accepted cluster(s)")
+        print(f"{pool.key_path(args.case)}: {sum(c['status'] == pool.ACCEPTED for c in doc['clusters'])} accepted cluster(s), "
+              f"{sum(c['status'] == pool.NON_ISSUE for c in doc['clusters'])} non-issue(s), "
+              f"{sum(c['status'] == pool.DUPLICATE for c in doc['clusters'])} duplicate(s)")
     else:
         try:
             doc = pool.pool_case(args.case, quota_override=quota_override(args))
         except (pool.PoolError, cases.CaseError) as exc:
             raise SystemExit(f"pool: {exc}")
+    one = lambda t: json.dumps(" ".join(str(t or "").split())[:400])   # noqa: E731  restated text, quoted on one line
     for c in doc["clusters"]:
-        print(f"{c['id']} [{c.get('severity_final') or c['severity']}] {c['status']}: {c['location']}: "
-              f"{c['mechanism']} ({len(c['members'])} member(s))")
+        print(f"{c['id']} [{c.get('severity_final') or c['severity']}] {c['status']}: {one(c['location'])}: "
+              f"{one(c['mechanism'])} ({len(c['members'])} member(s), "
+              f"{sum(pool.status_of(m) != pool.CONFIRMED for m in c['members'])} unverified now)")
+        print(f"    {ruling_line(c.get('ruling'), c)}")
+        same = pool.ruled_same(c)
         for m in c.get("pending") or ():
-            print(f"    pending (needs --accept-members {c['id']}): {m['run']} finding {m['finding']}: {m.get('title', '')}")
+            unverified = pool.status_of(m) != pool.CONFIRMED
+            what = ("ruled the same claim; " if (m["run"], int(m["finding"])) in same
+                    else "unverified: needs --rule first; " if unverified else "")
+            print(f"    pending ({what}needs --accept-members {c['id']}): {m['run']} finding {m['finding']}: {m.get('title', '')}")
     print(pool.pool_path(args.case))
     return 0
 
 
+def run_dir_of(name: str) -> Path:
+    """A run directory named on the command line: exactly one level under runs/
+    (its resolved parent is the resolved runs root), never a path elsewhere."""
+    root = config.runs_root().resolve()
+    run_dir = (config.runs_root() / name).resolve()
+    if not name or run_dir.parent != root:
+        raise SystemExit(f"--run {name!r} is not a run directory under {root}")
+    return run_dir
+
+
+def ruling_line(ruling: dict | None, c: dict) -> str:
+    """One line per ruling kind (a restored cluster's ruling may carry only its kind)."""
+    if not ruling:
+        return "ruling: none yet (--rule)" if c["status"] == pool.PROPOSED else "ruling: none"
+    kind = ruling.get("ruling")
+    stale = " (stale: it never saw every member; --rule)" if c["status"] == pool.PROPOSED and pool.unseen(c) else ""
+    if kind == "valid":
+        body = (f"[{ruling.get('severity', '?')}] {ruling.get('location', '?')}: {ruling.get('mechanism', '?')}"
+                if "mechanism" in ruling else "(restored from the key)")
+    elif kind == "invalid":
+        body = f"{ruling.get('why_not', '?')} ({ruling.get('citation', '?')})"
+    elif kind == "duplicate":
+        body = f"of {ruling.get('id', '?')}: {ruling.get('why', '')}"
+    else:
+        body = repr(ruling)[:120]
+    return f"ruling: {kind}: {body}{stale}"
+
+
 def cmd_clear_flags(args) -> int:
     """The lead clears a run's escape flags by hand, recording who, when and exactly which."""
-    run_dir = config.runs_root() / args.run
+    run_dir = run_dir_of(args.run)
     path = run_dir / "run.json"
     if not path.is_file():
         raise SystemExit(f"no run {args.run!r} under {config.runs_root()}")
@@ -235,7 +304,7 @@ def cmd_clear_flags(args) -> int:
     run.setdefault("escape_cleared_log", []).append({"by": args.by.strip(), "on": time.strftime("%Y-%m-%d"),
                                                      "flags": flags, "note": args.note or ""})
     run["escape_cleared"] = {"by": args.by.strip(), "on": time.strftime("%Y-%m-%d"), "flags": flags}
-    path.write_text(json.dumps(run, indent=1), encoding="utf-8")
+    config.write_json(path, run)
     print(f"{args.run}: {len(flags)} escape flag(s) cleared by {args.by.strip()}")
     return 0
 
@@ -258,7 +327,7 @@ def cmd_clean(args) -> int:
             continue
         shutil.rmtree(snap, ignore_errors=True)
         run["snapshot_removed"] = True
-        path.write_text(json.dumps(run, indent=1), encoding="utf-8")
+        config.write_json(path, run)
         removed += 1
     print(f"removed {removed} snapshot(s)")
     return 0
@@ -303,18 +372,27 @@ def main(argv: list[str] | None = None) -> int:
     j = sub.add_parser("judge", help="blind-judge a review run (or every run under a directory)")
     j.add_argument("--run", required=True)
     j.add_argument("--force", action="store_true", help="judge again a run already judged")
+    j.add_argument("--grader", choices=("rubric", "legacy"),
+                   help="rubric: the two-stage grader (default when the case has a rubric); "
+                        "legacy: the Opus judge with repo access (default otherwise)")
     j.set_defaults(func=cmd_judge)
 
     po = sub.add_parser("pool", help="cluster a case's judge-confirmed valid-new findings, or adjudicate the clusters")
     po.add_argument("--case", required=True)
     po.add_argument("--accept", action="append", help="cluster ids to accept into the pooled key (comma-separated, repeatable)")
     po.add_argument("--reject", action="append", help="cluster ids to reject")
+    po.add_argument("--list", action="store_true",
+                    help="print the pool and its rulings, read only (never clusters, never calls a model)")
+    po.add_argument("--rule", action="store_true",
+                    help="one Opus ruling (valid or invalid, with the case's code) per proposed cluster with none yet")
+    po.add_argument("--accept-invalid", action="append",
+                    help="cluster ids whose invalid ruling becomes a pooled non-issue")
     po.add_argument("--severity", action="append", help="id=SEVERITY for an accepted cluster (repeatable)")
     po.add_argument("--accept-members", action="append",
                     help="accepted cluster ids whose pending members (proposed by a later pool run) join the key")
     po.add_argument("--redefine", action="store_true",
                     help="allow an accepted cluster's committed mechanism or location to change")
-    po.add_argument("--by", help="who adjudicated (required with --accept/--reject/--severity/--accept-members)")
+    po.add_argument("--by", help="who adjudicated (required with --accept/--reject/--severity/--accept-members/--accept-invalid)")
     po.set_defaults(func=cmd_pool)
 
     cf = sub.add_parser("clear-flags", help="the lead clears a run's escape flags by hand (recorded)")
