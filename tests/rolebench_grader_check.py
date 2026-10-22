@@ -1411,8 +1411,9 @@ def test_guard(case0: dict, root: Path) -> None:
         check("T1 caveat: under testing the real login is never read, not even for an expiry",
               raises(lambda: config.login_home(), config.TestingRefusal)
               and raises(lambda: fr.login_problem("claude", 60), config.TestingRefusal))
-    check("guard: the live daemon's quota reader refuses under testing",
-          raises(lambda: rolebench_testguard.REAL_DAEMON_READER("claude"), config.TestingRefusal))
+    with env(ROLEBENCH_DAEMON_URL="http://127.0.0.1:9"):   # were the guard gone, it would knock on the discard port, never 8405
+        check("guard: the live daemon's quota reader refuses under testing",
+              raises(lambda: rolebench_testguard.REAL_DAEMON_READER("claude"), config.TestingRefusal))
     # the sandbox: a cell may bind only a fake CLI; one opt-in, for `codex sandbox` only
     realish = root / "realish-bin"
     (realish / "rel" / "bin").mkdir(parents=True, exist_ok=True)
