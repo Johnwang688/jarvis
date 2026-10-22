@@ -1,0 +1,34 @@
+{
+ "id": "seed-tornread",
+ "kind": "review",
+ "pr": 267,
+ "title": "v2 stores (seeded): a log read never fails on a line still being written",
+ "base": "8d73bead58cf297927cbe83f7917aa6a24ad7743",
+ "head": "d44018462733ff9d6c6f71fd401237822d8dfa2d",
+ "brief": "_read_lines reads an append-only JSONL log without the writer's lock. Only the last line, and only when the file does not end in a newline, can be a write in progress; if it does not parse (or ends mid-character) it is left out. Everything else stays an error: an interior or newline-terminated bad line is corruption and raises StoreError with a path:N: message. Records end at the newline only (U+2028 and friends are data). Tests: torn_read and separator_characters in tests/v2/stores_check.py.",
+ "focus": [
+  "correctness, including under concurrency and across the ordering of events",
+  "handling of untrusted input, and safety-boundary changes",
+  "test coverage of the new behaviour: would the tests fail without the change?",
+  "claims in the description against the evidence in the diff and tests"
+ ],
+ "suites": [
+  "tests/v2/stores_check.py",
+  "tests/v2/chat_relay_check.py"
+ ],
+ "control": false,
+ "seeded": {
+  "description": "the cut-multibyte branch of _read_lines slices up to the last newline's index instead of just past it, which breaks a log whose only line is still being written",
+  "patch": "diff --git a/jarvis/v2/stores.py b/jarvis/v2/stores.py\nindex 2b49e312..32094527 100644\n--- a/jarvis/v2/stores.py\n+++ b/jarvis/v2/stores.py\n@@ -124,7 +124,7 @@ def _read_lines(path: Path) -> list[dict[str, Any]]:\n                 and exc.reason == \"unexpected end of data\" and exc.end == len(raw)\n                 and exc.start > raw.rfind(b\"\\n\")):\n             try:                   # everything up to the last whole line\n-                text = raw[:raw.rfind(b\"\\n\") + 1].decode(\"utf-8\")\n+                text = raw[:raw.rfind(b\"\\n\")].decode(\"utf-8\")\n             except UnicodeError as inner:\n                 raise StoreError(f\"{path}: {inner}\") from inner\n             unfinished = False     # the cut line is gone; what is left ends in a newline\n"
+ },
+ "ground_truth": [
+  {
+   "id": "gt1",
+   "severity": "MED",
+   "mechanism": "when the unterminated tail ends mid-character, the fallback keeps 'everything up to the last whole line' with raw[:raw.rfind(b'\\n')] (the +1 is gone). With no newline in the file rfind is -1, so the slice is raw[:-1], which still ends in a cut character: the inner decode fails and _read_lines raises StoreError instead of treating the lone first record as a write in progress. A reader landing while the first record of a thread or task log is being written with a non-ASCII character in it therefore fails (read_log, transcript, journal). With an earlier newline the slice only loses that newline and the result is the same, so every multi-line case still passes",
+   "location": "jarvis/v2/stores.py _read_lines (text = raw[:raw.rfind(b'\\n')].decode('utf-8') in the except UnicodeError branch)",
+   "evidence": "probe (HOME=$(mktemp -d) PYTHONPATH=<tree> python probe.py): write a one-record log whose last byte is missing ('{\"t\": 1.5, \"role\": \"you\", \"text\": \"caf\\u00e9 \\u2713' encoded as UTF-8, minus its final byte, so it is cut inside the check mark, no newline) to log.jsonl and call jarvis.v2.stores._read_lines. Seeded tree: StoreError '...can't decode byte 0xe2 in position 41: unexpected end of data'; clean head d440184: []. A whole line followed by a cut line reads [{'a': 1}] on both. Seeded tree suites: tests/v2/stores_check.py 'all v2 store checks passed' (12 ok lines, torn_read included); tests/v2/chat_relay_check.py 55 tests OK",
+   "source": "seeded bug, injected by P0 (clean head d440184)"
+  }
+ ]
+}

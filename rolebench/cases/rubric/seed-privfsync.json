@@ -1,0 +1,66 @@
+{
+ "case": "seed-privfsync",
+ "head": "8fa491efedb19a4bb0da7aa97ab1363b4db74021",
+ "seeded": true,
+ "built_by": "opus rubric agent",
+ "built_at": "2026-10-21",
+ "original_review": [
+  {
+   "gt": "gt1",
+   "status": "confirmed",
+   "note": "Reproduced on the seeded tree: with os.fsync wrapped to record os.fstat(fd).st_size, write_private of 23 bytes shows size_at_fsync=[0] where clean 8fa491e shows [23]; the final file is complete (23 bytes), so only a crash between the rename and writeback loses it. The seed is test-invisible: tests/private_writes_check.py passes 36/36 and tests/v2/browser_host_activity_check.py 10/10 on the seeded tree, because the fsync cases only check that fsync is reached (and that a failing fsync cleans up), never what is on disk at that moment."
+  }
+ ],
+ "entries": [],
+ "non_issues": [
+  {
+   "id": "ni1",
+   "claim": "write_private replaces a symlink that already sits at the target instead of refusing it, contradicting 'never through a symlink' / the spec's 'refused, not followed'",
+   "location": "jarvis/private_write.py:14-15, 43",
+   "why_not": "The security property is that no write goes through the link, and os.replace swaps the link itself for the new file, which the module docstring states (jarvis/private_write.py:14-15). The acceptance test accepts either outcome ('refusing (raising) or replacing the link are both fine', tests/private_writes_check.py:483) and checks the link's target is untouched; it passes for all five writers. The spec's acceptance text (docs/plans/2026-10-18-security-fix-specs.md:325-326) literally says an existing symlink at the target 'is refused, not followed'. Replacing it departs from that wording but is not a security defect: a finding that only cites the wording is a nit, and one claiming a write through the link is invalid."
+  },
+  {
+   "id": "ni2",
+   "claim": "No fsync of the parent directory after os.replace, so a crash can lose the rename (and with it Spotify's rotated refresh token)",
+   "location": "jarvis/private_write.py:38-43",
+   "why_not": "Not part of the specified recipe (bytes, 0600, O_EXCL|O_NOFOLLOW, fsync, os.replace, unlink on failure: docs/plans/2026-10-18-security-fix-specs.md:277-278), which is the recipe browser/host._write_private already used. No writer fsynced the directory before, and the old spotify _store did not fsync the file at all. (On this seeded tree the file fsync itself is ineffective because the flush is gone; that is gt1, not a missing directory fsync.)"
+  },
+  {
+   "id": "ni3",
+   "claim": "The Discord token's parent directory is created with the default mode (not 0700), so the credential is exposed",
+   "location": "jarvis/tools/discord.py:261-265",
+   "why_not": "Unchanged by the diff, and the helper deliberately leaves the folder to the caller (jarvis/private_write.py:19-20). The token file itself is created 0600 from its first byte, which is the SEC-4 goal (docs/plans/2026-10-18-security-fix-specs.md:265-266)."
+  },
+  {
+   "id": "ni4",
+   "claim": "Removing `import uuid` from subagents.py, `import os` from spotify_auth.py or the inline recipe from host.py breaks remaining uses (NameError)",
+   "location": "jarvis/v2/subagents.py:73-78; jarvis/spotify_auth.py:39-53; jarvis/v2/browser/host.py:498-501",
+   "why_not": "grep on the head finds no remaining uuid. use in subagents.py and no os. use in spotify_auth.py; host.py keeps its os import for other code. On the seeded tree all 36 private_writes_check cases and browser_host_activity_check (10) pass, so nothing fails on a NameError."
+  },
+  {
+   "id": "ni5",
+   "claim": "subagents._compact now builds the whole snapshot in memory instead of streaming lines to the descriptor, which can blow up memory",
+   "location": "jarvis/v2/subagents.py:648-663",
+   "why_not": "The compacted file is bounded by what the thread holds, at most THREAD_BYTES of entries (docstring at subagents.py:649-652), and the old code serialised the same lines anyway. Errors are still swallowed and logged as before."
+  },
+  {
+   "id": "ni6",
+   "claim": "stt_settings.update now writes different bytes (json.dumps vs json.dump to a text handle) or a different temp name, changing the settings file",
+   "location": "jarvis/stt_settings.py:154",
+   "why_not": "json.dumps(current, indent=2, sort_keys=True) + '\\n' encoded as UTF-8 is byte-identical to the old json.dump with the same arguments plus write('\\n') (ensure_ascii defaults to True in both), and the temp name shape .<name>.<hex8>.tmp and flags are the ones the old inline recipe used. The spec allows the switch (docs/plans/2026-10-18-security-fix-specs.md:281-282)."
+  },
+  {
+   "id": "ni7",
+   "claim": "Spotify's rotated refresh token is no longer guaranteed to be on disk before the new access token is returned",
+   "location": "jarvis/spotify_auth.py:155-168",
+   "why_not": "_store (now write_private) still runs synchronously, inside the lock, before _cached_token is set and returned; write_private returns only after os.replace. tests/private_writes_check.py spotify.rotated_persisted_before_use passes. (Whether the bytes are durable on disk at that point is gt1's flush-before-fsync defect, not an ordering problem in spotify_auth.)"
+  },
+  {
+   "id": "ni8",
+   "claim": "A random 32-bit temp suffix can collide and O_EXCL then fails the write",
+   "location": "jarvis/private_write.py:35-36",
+   "why_not": "A collision needs a leftover or concurrent temp with the same 8 hex digits beside the same target; failures are cleaned up (no leftovers), and on that vanishing chance O_EXCL fails closed (an error, never a shared or followed file), which the callers already handle (spotify swallows OSError, subagents logs)."
+  }
+ ],
+ "notes": "Same head as sec4-clean; its analysis (no other defects) carries over. The seed patch removes one line (handle.flush() in write_private) and touches nothing else, so none of sec4-clean's non-issues change except where reworded here (ni2, ni3, ni4, ni7) to note the seeded tree. Every claim in this case's brief matches the diff."
+}
