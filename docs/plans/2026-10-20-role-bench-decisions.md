@@ -198,3 +198,10 @@ spurious ones (necessary, not sufficient). Opus built a verified rubric per revi
   unverified (never counted as either), precision over the settled part. Rescoring needs no model
   call. The report shows each run's grader; `judge --grader legacy` keeps the Opus judge, and the
   default is the rubric grader when a rubric exists.
+- **Review fixes (PR #291 review, 2026-10-21).** A ruling records the exact members it saw; a
+  proposed cluster that grows past it is ruled again, and `--accept`/`--accept-invalid` are
+  refused while the ruling has not seen an unverified member (any member, for `--accept-invalid`).
+  The matcher sees each confirmed entry's `original_review` note ("verified as"), fenced. A ruling
+  may answer `duplicate <key id>`; accepting it credits that id. Non-issue matches are gated to the
+  finding's files. A disputed original entry names its answering non-issue, and a match on it
+  counts as that non-issue on a rescore.

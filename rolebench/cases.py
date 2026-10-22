@@ -104,14 +104,16 @@ def pooled_path(case_id: str, directory: Path | None = None) -> Path:
     return (directory or config.cases_dir()) / "pooled" / f"{case_id}.json"
 
 
-def validate_pooled(d, case: dict) -> dict:
+def validate_pooled(d, case: dict, rubric: dict | None = None) -> dict:
     """A pooled key (pool.adjudicate writes it): the ground-truth schema with
     `pool-` ids that never collide with the original key, who adjudicated it
     and when, and each entry's member findings (run id, finding index).
     Optional `non_issues` (`pool-ni-` ids) are clusters ruled invalid and
-    accepted as non-issues; `members` lists both kinds."""
-    _need(isinstance(d, dict) and set(d) in (POOLED_KEYS, POOLED_KEYS | {"non_issues"}),
-          f"a pooled key has exactly {sorted(POOLED_KEYS)} (and optionally non_issues)")
+    accepted as non-issues; `members` lists both kinds. Optional `duplicates`
+    maps a key id (original, rubric or pooled) to the findings of clusters a
+    ruling found to be that entry. One finding is never under two ids."""
+    _need(isinstance(d, dict) and POOLED_KEYS <= set(d) <= POOLED_KEYS | {"non_issues", "duplicates"},
+          f"a pooled key has exactly {sorted(POOLED_KEYS)} (and optionally non_issues, duplicates)")
     _need(d["case"] == case["id"], f"pooled key for {d['case']!r}, not {case['id']!r}")
     _need(d["source"] == "pooled", "source must be 'pooled'")
     _need(isinstance(d["adjudicated_by"], str) and d["adjudicated_by"].strip() != "", "adjudicated_by must be a name")
@@ -139,11 +141,19 @@ def validate_pooled(d, case: dict) -> dict:
         ids.add(n["id"])
     mem = d["members"]
     _need(isinstance(mem, dict) and set(mem) == ids, "members must list exactly the pooled ids")
-    for gid, rows in mem.items():
+    dup = d.get("duplicates", {})
+    targets = original | {g["id"] for g in gt} | {e["id"] for e in (rubric or {}).get("entries") or ()}
+    _need(isinstance(dup, dict) and all(isinstance(k, str) and k in targets for k in dup),
+          f"duplicates must map key ids ({sorted(targets)}) to findings")
+    placed: dict = {}
+    for gid, rows in list(mem.items()) + [(f"duplicate of {k}", v) for k, v in dup.items()]:
         _need(isinstance(rows, list) and rows and all(
             isinstance(r, list) and len(r) == 2 and isinstance(r[0], str) and r[0]
             and isinstance(r[1], int) and not isinstance(r[1], bool) and r[1] >= 0 for r in rows),
             f"members of {gid} must be [run id, finding index] pairs")
+        for r in rows:
+            _need(tuple(r) not in placed, f"finding {r} is under both {placed.get(tuple(r))} and {gid}")
+            placed[tuple(r)] = gid
     return d
 
 
@@ -156,7 +166,7 @@ def load_pooled(case_id: str, directory: Path | None = None) -> dict | None:
         d = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise CaseError(f"cannot read {path}: {exc}") from exc
-    return validate_pooled(d, load(case_id, directory))
+    return validate_pooled(d, load(case_id, directory), rubric=load_rubric(case_id, directory))
 
 
 def full_ground_truth(case: dict, directory: Path | None = None) -> list[dict]:
@@ -169,22 +179,24 @@ def full_ground_truth(case: dict, directory: Path | None = None) -> list[dict]:
 
 # A location is free text that names one or more `path[:line[-line]]`. A path
 # needs a known extension, so prose (`text.splitlines()`) is never one. After a
-# path, `:12, :40-44` and `12-15, 43` add lines to that path.
+# path, `:12, :40-44` and `12-15, 43` add lines to that path; an approximate
+# `:~1846`, `~3167-3175` or `(~1565)` is a line too. A path named bare and then
+# given lines only by such later references takes those lines.
 LOC_EXT = ("py", "pyi", "ts", "tsx", "js", "jsx", "mjs", "cjs", "json", "jsonl", "md", "toml", "yaml", "yml",
            "css", "html", "sh", "txt", "cfg", "ini", "c", "h", "cpp", "hpp", "rs", "go", "lock", "svg", "service",
            "ps1", "sql", "xml", "csv")
 _EXT = "|".join(sorted(LOC_EXT, key=len, reverse=True))
-_RANGE = r"(\d+)(?:\s*-\s*(\d+))?"
+_RANGE = r"~?(\d+)(?:\s*-\s*~?(\d+))?"
 LOC_RE = re.compile(r"(?<![\w./-])((?:[\w.@+-]+/)*[\w.@+-]*\.(?:" + _EXT + r"))(?![\w-])"
-                    r"|(?:(?<=[\s(;,])|^):" + _RANGE)
-LINES_RE = re.compile(r":" + _RANGE + r"((?:\s*,\s*:?\d+(?:\s*-\s*\d+)?)*)")
+                    r"|(?:(?<=[\s(;,])|^)(?::|~)" + _RANGE)
+LINES_RE = re.compile(r":" + _RANGE + r"((?:\s*,\s*:?~?\d+(?:\s*-\s*~?\d+)?)*)")
 
 
 def parse_locations(text: str) -> list[tuple[str, int | None, int | None]]:
     """[(path, first line or None, last line or None), ...] named in `text`."""
     out: list[tuple[str, int | None, int | None]] = []
     text = (text or "").replace("\\", "/")
-    last = None
+    last, bare = None, None          # bare: index of the last path's line-less entry
     pos = 0
     while True:
         m = LOC_RE.search(text, pos)
@@ -194,7 +206,7 @@ def parse_locations(text: str) -> list[tuple[str, int | None, int | None]]:
             path = m.group(1)
             while path.startswith("./"):
                 path = path[2:]
-            last = path
+            last, bare = path, None
             lines = LINES_RE.match(text, m.end())
             if lines:
                 out.append((path, int(lines.group(1)), int(lines.group(2) or lines.group(1))))
@@ -203,10 +215,15 @@ def parse_locations(text: str) -> list[tuple[str, int | None, int | None]]:
                 pos = lines.end()
             else:
                 out.append((path, None, None))
+                bare = len(out) - 1
                 pos = m.end()
         else:
             if last is not None:
-                out.append((last, int(m.group(2)), int(m.group(3) or m.group(2))))
+                ref = (last, int(m.group(2)), int(m.group(3) or m.group(2)))
+                if bare is not None:
+                    out[bare], bare = ref, None
+                else:
+                    out.append(ref)
             pos = m.end()
     seen, uniq = set(), []
     for x in out:
@@ -250,7 +267,10 @@ def validate_rubric(d, case: dict) -> dict:
     review = d["original_review"]
     _need(isinstance(review, list), "original_review must be a list")
     for o in review:
-        _need(isinstance(o, dict) and set(o) == REVIEW_KEYS, f"original_review entries need exactly {sorted(REVIEW_KEYS)}")
+        disputed = isinstance(o, dict) and o.get("status") == "disputed"
+        # a disputed entry names the non-issue that answers it, so a match on it scores as that non-issue
+        _need(isinstance(o, dict) and set(o) == (REVIEW_KEYS | {"non_issue"} if disputed else REVIEW_KEYS),
+              f"original_review entries need exactly {sorted(REVIEW_KEYS)} (and non_issue when disputed)")
         _need(all(isinstance(v, str) and v.strip() for v in o.values()), "original_review fields must be non-empty strings")
         _need(o["status"] in REVIEW_STATUS, f"bad original_review status {o['status']!r}")
     gt_ids = [g["id"] for g in case["ground_truth"]]
@@ -279,6 +299,10 @@ def validate_rubric(d, case: dict) -> dict:
         ids.add(n["id"])
         _need(all(isinstance(n[k], str) and n[k].strip() for k in ("claim", "location", "why_not")),
               f"{n['id']}: fields must be non-empty strings")
+    ni_ids = {n["id"] for n in d["non_issues"]}
+    for o in review:
+        if o["status"] == "disputed":
+            _need(o["non_issue"] in ni_ids, f"disputed {o['gt']} names {o['non_issue']!r}, which is not one of the rubric's non-issues")
     return d
 
 
@@ -303,15 +327,23 @@ def scoring_key(case: dict, directory: Path | None = None) -> dict:
      members, "has_rubric": bool}."""
     rubric = load_rubric(case["id"], directory)
     pooled = load_pooled(case["id"], directory)
-    disputed = [o["gt"] for o in (rubric or {}).get("original_review") or () if o["status"] == "disputed"]
-    original = [g for g in case["ground_truth"] if g["id"] not in disputed]
+    review = {o["gt"]: o for o in (rubric or {}).get("original_review") or ()}
+    disputed = [gid for gid, o in review.items() if o["status"] == "disputed"]
+    # the rubric's note on a confirmed entry (written with the code open) helps a text-only matcher
+    original = [{**g, "verified_as": review[g["id"]]["note"]} if g["id"] in review else dict(g)
+                for g in case["ground_truth"] if g["id"] not in disputed]
     rb = [{"id": e["id"], "severity": e["severity"], "mechanism": e["mechanism"], "location": e["location"],
            "evidence": e["evidence"], "source": f"rubric ({e['verified']})"} for e in (rubric or {}).get("entries") or ()]
     pl = list((pooled or {}).get("ground_truth") or ())
+    # a pooled non-issue's gate also reads its citation (the ruling's, always a path)
     nis = list((rubric or {}).get("non_issues") or ()) + [
-        {k: n[k] for k in ("id", "claim", "location", "why_not")} for n in (pooled or {}).get("non_issues") or ()]
+        {**{k: n[k] for k in ("id", "claim", "location", "why_not")}, "gate": f"{n['location']}; {n['citation']}"}
+        for n in (pooled or {}).get("non_issues") or ()]
     return {"original": original, "rubric": rb, "pooled": pl, "entries": original + rb + pl, "disputed": disputed,
-            "non_issues": nis, "members": dict((pooled or {}).get("members") or {}), "has_rubric": rubric is not None}
+            "disputed_as": {gid: review[gid]["non_issue"] for gid in disputed},
+            "non_issues": nis, "members": dict((pooled or {}).get("members") or {}),
+            "duplicates": {k: list(v) for k, v in ((pooled or {}).get("duplicates") or {}).items()},
+            "has_rubric": rubric is not None}
 
 
 def load(case_id: str, directory: Path | None = None) -> dict:

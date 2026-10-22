@@ -59,6 +59,21 @@ def escape_cleared(run: dict) -> bool:
     return bool(c) and sorted(c.get("flags") or []) == sorted(run.get("escape_flags") or [])
 
 
+def disputed_entries(case_ids: list[str]) -> list[tuple[str, str, str, str]]:
+    """(case, gt id, its non-issue, the rubric's note) for every disputed original entry."""
+    from . import cases
+    out = []
+    for cid in case_ids:
+        try:
+            rubric = cases.load_rubric(cid)
+        except cases.CaseError:
+            continue
+        for o in (rubric or {}).get("original_review") or ():
+            if o["status"] == "disputed":
+                out.append((cid, o["gt"], o.get("non_issue", ""), " ".join(o["note"].split())[:200]))
+    return out
+
+
 def review_rows(runs: list[dict], rescored: dict | None = None) -> list[dict]:
     """One row per review run. With `rescored` (pool.rescore_runs) a judged run
     carries its original-key and its full-key recall as they are now (the
@@ -84,7 +99,10 @@ def review_rows(runs: list[dict], rescored: dict | None = None) -> list[dict]:
             "harness": r["harness"], "model": r["model"], "case": r["case_id"], "result": r["result"],
             "weighted_recall": orig.get("weighted_recall"), "medplus_recall": orig.get("medplus_recall"),
             "weighted_recall_full": full.get("weighted_recall"), "medplus_recall_full": full.get("medplus_recall"),
-            "false_positives": settled.get("false_positives") if rubric else score.get("false_positives"),
+            # legacy: the judge's invalid verdicts, plus valid-new ones an accepted pooled non-issue now answers
+            "false_positives": settled.get("false_positives") if rubric else (
+                None if score.get("false_positives") is None
+                else score["false_positives"] + ((rs or {}).get("pooled_false_positives") or 0)),
             "nits": settled.get("nits") if rubric else score.get("nits"),
             "unverified": settled.get("unverified") if rubric else None,
             "precision": settled.get("precision") if rubric else None,
@@ -188,6 +206,10 @@ def render(runs: list[dict], rescored: dict | None = None) -> str:
                        f"{_fmt(v['wall'], digits=0)} | {_fmt(v['out_of_scope'], pct=True)} |")
     else:
         out.append("No implement runs yet.")
+    disputed = disputed_entries(sorted({r["case_id"] for r in runs if r.get("kind") == "review" and r.get("case_id")}))
+    if disputed:
+        out += ["", "## Original entries the rubric disputed (not scored; a match on one counts as its non-issue)", ""] + [
+            f"- {cid} {gid} -> {ni}: {note}" for cid, gid, ni, note in disputed]
     overridden = [r for r in runs if str(r.get("quota_guard", "on")).startswith("off")]
     if overridden:
         out += ["", "## Cells run with the quota guard OFF", ""] + [

@@ -1393,31 +1393,47 @@ pooled entries. `python -m rolebench judge` uses it by default when the case has
 `judge-<grader>.json` (asking for that grader again swaps it back, with no call). Stage 0, free:
 a finding's candidates are the key entries on the same file (suffix match on whole path
 components, either way) with a line within ±15 of the range, or no line on either side; the
-candidate sets are in `judge.json`. Stage 1: one Sonnet call per run (effort high) in the
+candidate sets are in `judge.json`. Approximate lines (`:~1846`, `(~1565)`) count as lines; 23
+key entries still name a file with no line and so admit any line of it. Stage 1: one Sonnet call per run (effort high) in the
 read-only judge cell with an **empty** work directory, under the net gate, quota guard and
 ceiling, seeing the blinded findings inside a random-nonce fence (the nonce is stripped from
-finding text), the key entries (id, severity, mechanism, location; never the evidence), the
-non-issues (id, claim, location, why_not) and each finding's candidates, listed after the
-fence. Per finding: `match <id>` (a match outside the finding's candidates becomes `unmatched`
-and lands in `gate_violations`), `non-issue <id>`, `nit` or `unmatched`; strict JSON, one retry;
+finding text until none is left), the key entries (id, severity, mechanism, location, and for a
+confirmed original entry the rubric's `original_review` note as "verified as"; never the
+evidence) and the non-issues (id, claim, location, why_not) inside a second fence, and each
+finding's candidates, listed after the fences. Per finding: `match <id>` (a match outside the
+finding's candidates becomes `unmatched` and lands in `gate_violations`), `non-issue <id>`
+(gated at file level: a non-issue on none of the finding's files becomes `unmatched`, recorded,
+so an off-file non-issue cannot lower a reviewer's precision), `nit` or `unmatched`; strict JSON, one retry;
 a failure never overwrites a valid judge.json (it goes to `judge-failed.json`). Stage 2:
 unmatched findings feed the pool as `unverified` (legacy runs still feed their valid-new ones
 as confirmed); `pool --case <id> --rule` makes one Opus call per proposed cluster with no ruling
 yet, in a read-only judge cell over a fresh export of the case's head (seed applied, no `.git`,
 the diff beside it; removed after), and records `valid` (severity, mechanism, location,
-evidence) or `invalid` (why_not, citation) on the cluster with its cost in the pool's `calls`.
-The lead still adjudicates: `--accept` needs a valid ruling for a cluster with an unverified
-member and then uses the ruled severity, mechanism and location; `--accept-invalid` makes an
-invalid ruling a pooled **non-issue** (`non_issues` in `cases/pooled/<case>.json`, id
-`pool-ni-<cluster>`), which later runs match in stage 1. #289's guarantees hold for both kinds:
+evidence), `invalid` (why_not, citation) or `duplicate <key id>` (the ruling prompt shows the
+case's key entries, id, location and mechanism, fenced) on the cluster, with the exact
+(run, finding) set it saw (`seen`) and its cost in the pool's `calls`. A proposed cluster that
+gains a member its ruling never saw is ruled again (`--rule`; the old ruling is kept in
+`rulings_history`). The lead still adjudicates: `--accept` needs a valid (or duplicate) ruling
+that saw every unverified member when the cluster has one, and then uses the ruled severity,
+mechanism and location; accepting a duplicate maps its members to that key id (`duplicates` in
+the pooled key) instead of creating an entry; `--accept-invalid` needs an invalid ruling that saw
+every member, and makes it a pooled **non-issue** (`non_issues` in `cases/pooled/<case>.json`, id
+`pool-ni-<cluster>`), which later runs match in stage 1. One finding is never under two pooled
+ids (`validate_pooled`). #289's guarantees hold for both kinds:
 committed ids are never dropped or redefined without `--redefine`, pending members wait for
 `--accept-members`, and the key's evidence names the cluster, never reviewer (or ruling) text.
 Scores per run (`grader.assess`, recomputed by the report with no model call, so an accepted
 ruling updates earlier runs): weighted and MED+ recall on the **original key** and on the
-**full key**, false positives (non-issue matches, plus members of accepted non-issue clusters),
+**full key**, false positives (non-issue matches, plus members of accepted non-issue clusters,
+plus, on a rescore, matches on an entry the rubric later disputed: a disputed `original_review`
+entry must name the rubric non-issue that answers it, and the report lists disputed entries;
+for a legacy run, valid-new members of an accepted non-issue add to its invalid count),
 nits, **unverified** (unmatched and not yet settled by an accepted ruling; a ruling awaiting
 the lead still counts as unverified), and precision over the settled findings. The report
-groups by harness, model and grader and lists every judged run with its grader. Free checks:
+groups by harness, model and grader and lists every judged run with its grader; reusing a
+grading refolds `run.json` against the current key (free). `bare_cds` and the audit's `-c`
+script reading accept any option order (`bash --login -c`, `bash -c -l`), and `flows` writes
+`run.json` atomically too. Free checks:
 `tests/rolebench_grader_check.py` (fake calls only, no cell; ~140 checks); the mutation
 runner is `~/.cache/jarvis-lead/rolebench-grader-mutants/run.py`.
 

@@ -122,12 +122,12 @@ def path_candidates(text: str, env: dict | None = None, depth: int = 0) -> list[
     env = env if env is not None else {}
     out = []
     tokens = _shell_tokens(text)
+    scripts = shell_scripts(tokens) if depth < 3 else set()
     ordinal = -1
     for i, tok in enumerate(tokens):
         if not set(tok) <= PUNCT:
             ordinal += 1
-        if (depth < 3 and i >= 2 and SHELL_C.match(tokens[i - 1])
-                and os.path.basename(tokens[i - 2]) in SHELLS):
+        if i in scripts:
             out += [(w, lit, None) for w, lit, _ in path_candidates(tok, env, depth + 1)]
             continue
         words = [tok]
@@ -150,19 +150,42 @@ def path_candidates(text: str, env: dict | None = None, depth: int = 0) -> list[
     return out
 
 
+def shell_scripts(tokens: list[str]) -> set[int]:
+    """The indices of the scripts that `sh`/`bash`/... run with `-c`, whatever
+    the options' order: `bash -lc S`, `bash --login -c S`, `bash -c -l S`,
+    `bash -x -c S`. The script is the first non-option word after the options,
+    once one of them carries `c`."""
+    out = set()
+    for i, tok in enumerate(tokens):
+        if os.path.basename(tok) not in SHELLS:
+            continue
+        has_c = False
+        for j in range(i + 1, len(tokens)):
+            t = tokens[j]
+            if set(t) <= PUNCT or set(t) <= set(AWARE_PUNCT):
+                break
+            if t.startswith("-") and t != "-":
+                has_c = has_c or bool(SHELL_C.match(t)) or (not t.startswith("--") and "c" in t[1:])
+                continue
+            if has_c:
+                out.add(j)
+            break
+    return out
+
+
 def bare_cds(command: str, depth: int = 0) -> int:
     """How many bare `cd`s (no operand: it goes HOME) a shell command runs, in
     command position and followed by an operator or the end, counting those
     in the script of `sh -c`/`bash -lc '...'` (the shape every codex command
     arrives in). Only a command is read, never a pattern or a description."""
     tokens = _aware_tokens(command)
+    scripts = shell_scripts(tokens) if depth < 3 else set()
     n = 0
     for i, tok in enumerate(tokens):
         if tok == "cd" and (i == 0 or set(tokens[i - 1]) <= set(AWARE_PUNCT)) \
                 and (i + 1 == len(tokens) or set(tokens[i + 1]) <= set(AWARE_PUNCT)):
             n += 1
-        elif (depth < 3 and i >= 2 and SHELL_C.match(tokens[i - 1])
-              and os.path.basename(tokens[i - 2]) in SHELLS):
+        elif i in scripts:
             n += bare_cds(tok, depth + 1)
     return n
 

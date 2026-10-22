@@ -3,7 +3,6 @@ or the daemon is a field of `Deps`, so the tests run them against fakes."""
 
 from __future__ import annotations
 
-import json
 import random
 import re
 import shutil
@@ -55,7 +54,7 @@ def new_run_id(case_id: str, harness: str, model: str, n: int) -> str:
 
 
 def _write(path: Path, doc) -> None:
-    path.write_text(json.dumps(doc, indent=1, default=str), encoding="utf-8")
+    config.write_json(path, doc, default=str)             # atomic: temp file, then rename
 
 
 # --- one model step: guard, budget, run, settle -----------------------------------

@@ -177,14 +177,14 @@ def prices_dir() -> Path:
     return home() / "prices"
 
 
-def write_json(path: Path, doc, indent: int | None = 1) -> None:
+def write_json(path: Path, doc, indent: int | None = 1, default=None) -> None:
     """Write a JSON document atomically: a temp file beside it, then a rename,
     so a reader (or a crash) never sees half a run.json or judge.json."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
     try:
-        tmp.write_text(json.dumps(doc, indent=indent) + "\n", encoding="utf-8")
+        tmp.write_text(json.dumps(doc, indent=indent, default=default) + "\n", encoding="utf-8")
         os.replace(tmp, path)
     finally:
         tmp.unlink(missing_ok=True)
