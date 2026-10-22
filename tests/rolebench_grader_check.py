@@ -1219,7 +1219,7 @@ def test_stage2_delta(case0: dict, root: Path) -> None:
               "\u200b".join(title[i:i + 30] for i in range(0, len(title), 30)),
               "-".join(title[i:i + 39] for i in range(0, len(title), 39)))))
     # end to end: a finding on a 51-character path, clustered and member-ruled with that path as the location
-    lrun = run("TLP", [finding("Step 3 contradicts step 5 on the token's lifetime", "MED", long_path, 40,
+    run("TLP", [finding("Step 3 contradicts step 5 on the token's lifetime", "MED", long_path, 40,
                                scenario="a reader following step 3 keeps the token after close")])
     pool.pool_case(cid, pool_fn=lambda pr, cwd: (json.dumps({"assign": [{"finding": v, "cluster": "new1"} for v in re.findall(
         r"^(V\d+) \[", pr, re.M)], "new_clusters": [{"id": "new1", "severity": "MED", "location": f"{long_path}:40-52",
@@ -1501,10 +1501,15 @@ def test_guard(case0: dict, root: Path) -> None:
         ("-- python3 probe.py", [cx, "sandbox", "-P", ":workspace", "-C", "/w", "--", "python3", "/w/probe.py"]),
         ("-- sh probe", [cx, "sandbox", "--", "/bin/sh", "-c", "echo ok"]),
         ("-- curl", [cx, "sandbox", "--", "/usr/bin/curl", "https://example.invalid"]))}
+        shaped_elsewhere = {label: sandbox.testing_launch_refusal(sandbox.Cell(prof, root), cmd, "codex-sandbox") for label, prof, cmd in (
+            ("a good probe in a claude cell", "claude", [cx, "sandbox", "--", "python3", "/w/probe.py"]),
+            ("a good probe in a judge cell", "judge", [cx, "sandbox", "--", "python3", "/w/probe.py"]),
+            ("not the codex binary", "codex", ["/usr/bin/env", "sandbox", "--", "python3", "/w/probe.py"]))}
     check("guard: the codex-sandbox opt-in allows exactly `codex sandbox` in a codex cell, nothing else",
           refusals["opt-in in a claude cell"] and refusals["opt-in, not `codex sandbox`"] and refusals["opt-in, a shell"])
     check("guard: the opt-in's tail is a known probe naming neither CLI (`-- codex exec hi` refused)",
           tails["-- codex exec hi"] and tails["-- sh naming claude"] and tails["no --"] and tails["-- curl"]
+          and all(shaped_elsewhere.values())
           and tails["-- python3 probe.py"] is None and tails["-- sh probe"] is None, str(tails))
     marked = []
     saved_run_unit = sandbox.run_unit
