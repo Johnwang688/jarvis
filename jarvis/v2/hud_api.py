@@ -2227,6 +2227,18 @@ def route(handler, daemon, parts, query):
         _object(query, ())
         _object(handler._body(), ())
         return 202, daemon.compact(parts[1])
+    if len(parts) == 3 and parts[0] == "threads" and parts[2] == "bypass":
+        # The owner's Bypass switch (2026-10-21): Claude Code's auto-mode
+        # classifier off, or back on, for one chat. The owner's alone, checked
+        # before the thread is looked up or a body read; no tool, bridge, MCP,
+        # Discord or CLI path reaches `Daemon.set_bypass`.
+        from .projects import owner_only
+        owner_only(handler, daemon)
+        if method != "POST":
+            fail(405, "the Bypass switch is set with POST")
+        _object(query, ())
+        body = _object(handler._body(), ("on",), ("on",))
+        return 200, daemon.set_bypass(parts[1], body["on"])
     if len(parts) == 3 and parts[0] == "threads" and parts[2] in ("transcript", "send"):
         thread = daemon.require(stores.threads, parts[1])
         if parts[2] == "send" and method == "POST":

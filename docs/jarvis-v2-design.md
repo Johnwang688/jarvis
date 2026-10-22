@@ -441,6 +441,15 @@ auto-approve next time.
   with no network, deny-all approver. For a task marked unattended-and-
   untrusted. Only the CodexProvider supports it at first (the firm's code).
 
+**Amendment (2026-10-21, the owner's request): the Bypass switch.** On an
+owner's Claude chat under `auto`, the owner can turn layer 3 off from the
+HUD, for that open session only: a shell or file-editing call that layers
+1, 2 and 4 (and any card) allowed, in a turn the owner's own message
+started, then runs without the classifier being asked; a DENY or an
+always-ask is unchanged, and other tools and other chats' turns keep it. Owner-only route, never stored, back to `auto` on a
+restart or reopen. The escape hatch stays for one-off refusals. Details:
+`docs/notes/safety-permissions.md`, *The owner's Bypass switch*.
+
 ---
 
 ## 7. Workers and worktrees

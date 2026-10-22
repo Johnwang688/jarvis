@@ -29,6 +29,17 @@ export interface CompactChip {
 }
 
 /**
+ * The Bypass chip (2026-10-21): the owner's switch for Claude Code's auto-mode
+ * classifier on this chat. `on` and `title` come from lib/bypass `bypassFor`;
+ * `onToggle` asks the daemon for the other state.
+ */
+export interface BypassChip {
+  on: boolean;
+  title: string;
+  onToggle: () => void;
+}
+
+/**
  * `in: <project>`, where this conversation lives. Editable only while a new
  * thread is being composed, because that is the only time the choice is still
  * free. After the first message, moving is a sidebar action, and the chip
@@ -105,6 +116,8 @@ export function InputBar(props: {
   modelChip?: React.ReactNode;
   /** The Compact chip and its inline confirm (WP-C, CB-2); absent for a compose pane or a task. */
   compact?: CompactChip | null;
+  /** The Bypass chip (2026-10-21); absent except on an opened Claude chat. */
+  bypass?: BypassChip | null;
   /** Shown while an image is staged, when the model cannot see one (A5). */
   imageNote?: string | null;
   onSend: (text: string, attachments: Attachment[]) => void;
@@ -454,6 +467,20 @@ export function InputBar(props: {
             onClick={() => { if (props.compact?.state === "ready") setAsking(true); }}
           >
             {props.compact.state === "running" ? "Compacting…" : "Compact"}
+          </button>
+        ) : null}
+        {props.bypass ? (
+          <button
+            type="button"
+            className="chip bypassbtn"
+            data-testid="bypass"
+            data-on={props.bypass.on ? "true" : "false"}
+            aria-pressed={props.bypass.on}
+            aria-label="Bypass the auto-mode classifier"
+            title={props.bypass.title}
+            onClick={() => props.bypass?.onToggle()}
+          >
+            {props.bypass.on ? "Bypass on" : "Bypass"}
           </button>
         ) : null}
         {props.status != null ? (

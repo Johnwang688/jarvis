@@ -2695,3 +2695,75 @@ line, a sample through v1's real dispatch with an allowlist entry for every
 stem and a yes-saying human-backed approver: nothing ran, nobody was asked;
 every ordinary line not refused) and `tests/v2/permissions_check.py secret_service_checks` (the same
 lines at layer 1 under AUTO and STRICT, never asked, v1 parity).
+
+## The owner's Bypass switch skips the classifier, not Jarvis's gate (2026-10-21)
+
+The owner: the auto-mode classifier "will falsely flag something", and even
+"if I explicitly tell Jarvis, like, you can run this, it still doesn't let
+me run it" — asking for a switch to turn on for those cases and back off
+after. The escape hatch (design §6.1) already lets the owner run one
+refused command, but only after the turn ends and outside the session.
+
+**What it is.** A per-chat switch on an owner's Claude chat under the auto
+profile (`ClaudeProvider.set_bypass`, `_Session.bypass`). While it is on,
+the `PreToolUse` hook answers a call Jarvis's gate **allowed** with an
+explicit allow (`BYPASS_REASON`) instead of `{}`, so the CLI's classifier
+(layer 3) does not judge it — the same explicit allow a delegated Jarvis
+session tool already gets (D-5). Layers 1, 2 and 4, the owner-only checks
+(`merge_gate`), the always-ask list and every card run first and are
+untouched: a DENY is still a deny, and an always-ask call still asks. Only
+calls that would otherwise have gone to the classifier change, and of those
+only two kinds (review of the first draft, MED-1 and MED-2):
+
+- **the shell and file-editing tools** (`BYPASS_TOOLS`: Bash, Edit, Write,
+  MultiEdit, NotebookEdit), where the false refusals were. WebFetch,
+  Monitor and every MCP tool keep the classifier with the switch on — the
+  always-ask list matches command stems, so an MCP deploy tool would
+  otherwise run with no judge at all;
+- **in a turn the owner's own message started** (`_Session.owner_turn`,
+  set by `_run` for `origin == "owner"`, the HUD or Discord, and cleared
+  when `send` ends). A relayed or reply turn from another chat (`chat`,
+  `chat-reply`), a system turn, the CLI's own turn (`adopt`) and a native
+  sub-agent still working after the turn has ended keep the classifier:
+  another chat that read an injected page cannot use this chat's switch.
+  A sub-agent's call inside the owner's turn is covered.
+
+Each one is logged (`decisions.jsonl`, layer `owner-bypass`, beside the gate's own
+layer-5 line), and so is each switch on or off.
+
+**Who can set it.** Only the owner, from the HUD's Bypass chip:
+`POST /threads/{id}/bypass {"on": bool}` behind `owner_only` (control-plane
+notes). No tool, bridge route, MCP server, Discord command or CLI verb
+reaches `Daemon.set_bypass`; a source guard in `tests/v2/bypass_check.py`
+pins that. So no agent can turn a check on itself off.
+
+**Where it applies.** An owner's Claude chat on the auto profile. Refused
+(409, one sentence) for a task's thread, a chat with a task, an ask-profile
+chat (which has no classifier: every call already asks), and OpenRouter or
+Codex chats (no classifier: the fast path runs AUTO as ASK, and a Codex
+owner chat's approvals reviewer is `user`, i.e. Jarvis). Native sub-agents
+of the chat share its session, and so its switch, while the owner's turn runs.
+
+**How long.** Never stored: it lives on the open provider session, kept
+across a model switch, gone when the session closes or the daemon restarts
+— a reopened chat is back to auto. Turning it off always succeeds. The chat
+gets one system line each way ("Bypass on: …", "Bypass off: …"), live and
+in the transcript, and `thread_json` carries a live `bypass`.
+
+**Limit.** It removes a review, it adds no grant: the CLI's sandbox, the
+secrets layer and output scrubbing are unchanged. It is a loosening the
+owner asked for, scoped to the owner's own attended chat; it does not
+reach tasks, workflows, schedules or any unattended worker.
+
+Not verified: whether an explicit hook allow also skips the CLI's own `ask`
+rules from settings files and its built-in protected-path asks (D-5 relies
+on the same allow). Jarvis's layer 1 still refuses its protected state and
+credential files before the hook answers. No expiry beyond the session: the
+amber chip is the reminder.
+
+Pinned by `tests/v2/claude_provider_check.py bypass_checks` (explicit allow
+only after ALLOW, DENY kept, the log line, every refusal, the tool scope,
+every non-owner origin, a late sub-agent; verified to fail with the hook's
+bypass branch, the owner-turn check or the tool check removed) and `tests/v2/bypass_check.py` (the
+route's owner check before lookup and body, its shape, the records, the
+refusals, the source guard; verified to fail with `owner_only` removed).

@@ -90,7 +90,7 @@ from claude_agent_sdk import (
 
 from ... import config
 from ...tools import secrets
-from ..model import PermissionProfile, ProviderName, Thread
+from ..model import PermissionProfile, ProviderName, Role, Thread
 from .. import running_cost
 from ..provider import (
     takes_keyword as _takes_keyword,
@@ -255,6 +255,12 @@ CLASSIFIER_DENIAL_PREFIX = (
 HOOK_DENIAL_PREFIX = "Jarvis denied "
 HOOK_REFUSAL_PREFIX = "Jarvis refuses "
 HOOK_DENIAL_MESSAGE = HOOK_DENIAL_PREFIX + "this call"
+# The hook's reason for an allow the owner's Bypass switch made (`set_bypass`).
+BYPASS_REASON = "the owner turned the auto-mode classifier off for this chat"
+# What the switch covers: the shell and the file-editing tools, where the
+# classifier's false refusals were. Every other tool (WebFetch, MCP servers,
+# Monitor, ...) keeps the classifier with the switch on.
+BYPASS_TOOLS = frozenset({"Bash", "Edit", "Write", "MultiEdit", "NotebookEdit"})
 _REASON = re.compile(
     r"Reason:\s*(?P<reason>.+?)\.\s+If you have other tasks", re.DOTALL
 )
@@ -851,6 +857,17 @@ class _Session:
     # No settings file, no CLAUDE.md, a scrubbed environment (`start(...,
     # isolated=True)`, the quick review's). Kept across a model switch.
     isolated: bool = False
+    # The owner's Bypass switch (2026-10-21, `set_bypass`): while on, a call
+    # Jarvis's own gate allowed gets an explicit allow under AUTO instead of
+    # `{}`, so the CLI's auto-mode classifier does not judge it. Never stored:
+    # a reopened or resumed session starts with it off. Kept across a model
+    # switch, which keeps this object. It counts only inside a turn the
+    # owner's own message started (`owner_turn`, set by `_run`, cleared when
+    # `send` ends): a relayed or reply turn from another chat, a turn the CLI
+    # starts itself (`adopt`) and a background sub-agent still working after
+    # the turn keep the classifier. And only for BYPASS_TOOLS.
+    bypass: bool = False
+    owner_turn: bool = False
     # Native sub-agents (SV-1). They outlive turns (background is the CLI's
     # default), so none of this is cleared when a turn starts: `children` by
     # sid, oldest first; `tasks` maps a task id (= a hook's `agent_id`) to its
@@ -1165,7 +1182,19 @@ class ClaudeProvider:
                     }
                 }
             if decision is Decision.ALLOW and session.brief.profile is PermissionProfile.AUTO:
-                return {}
+                if not (session.bypass and session.owner_turn and name in BYPASS_TOOLS):
+                    return {}
+                # The owner's Bypass switch: Jarvis's gate (layers 1, 2, 4 and
+                # the owner's cards) has already allowed this call, and the
+                # owner has said the classifier is not to judge it.
+                _log_bypass(session, name, args)
+                return {
+                    "hookSpecificOutput": {
+                        "hookEventName": "PreToolUse",
+                        "permissionDecision": "allow",
+                        "permissionDecisionReason": BYPASS_REASON,
+                    }
+                }
             if decision is Decision.ALLOW:
                 return {
                     "hookSpecificOutput": {
@@ -1377,6 +1406,7 @@ class ClaudeProvider:
             session.events = None
             with session.mutex:
                 session.accepting = False
+                session.owner_turn = False
             session.sending.release()
 
     def _run(self, h: SessionHandle, session: _Session, message: UserMessage) -> Iterator[Event]:
@@ -1388,6 +1418,9 @@ class ClaudeProvider:
         session.denial_without_id = False
         with session.mutex:
             session.accepting = False
+            # Whether the owner's Bypass switch may count in this turn: only
+            # the owner's own message (HUD or Discord), never another chat's.
+            session.owner_turn = getattr(message, "origin", None) == "owner"
             session.generation += 1
             # A steer an earlier turn wrote and never saw drain may still be
             # waiting in the CLI: then this message goes in at priority
@@ -2143,6 +2176,42 @@ class ClaudeProvider:
             if not finished and not future.done():
                 self.interrupt(h)
             future.cancel()
+
+    # -- the Bypass switch (2026-10-21) -----------------------------------------
+
+    def bypass_refusal(self, h: SessionHandle) -> str | None:
+        """Why this session cannot take the Bypass switch, or None. Only an
+        owner's chat on the auto profile has a classifier to switch off: the
+        ask profile already skips it, and a task's workers keep theirs."""
+        session = h.native
+        if session is None or session.closed:
+            return "This chat's Claude session is closed; send a message to resume it first."
+        brief = session.brief
+        if brief.role != Role.CHAT or brief.task_id is not None:
+            return "Only an owner's chat can bypass the classifier; a task's workers keep it."
+        if brief.profile is not PermissionProfile.AUTO:
+            return "This chat is on the ask profile, which has no classifier: every call already asks you."
+        return None
+
+    def set_bypass(self, h: SessionHandle, on: bool) -> None:
+        """The owner's Bypass switch: whether the auto-mode classifier judges
+        this session's calls. Takes effect at the next tool call, mid-turn
+        included. Jarvis's own gate is untouched either way: its DENY rules,
+        always-ask list, owner-only checks and cards still run first, and
+        only a call they allowed skips the classifier — a BYPASS_TOOLS call,
+        in a turn the owner's own message started (`owner_turn`). The daemon calls this
+        from the owner's HUD route alone (`Daemon.set_bypass`)."""
+        said = self.bypass_refusal(h)
+        if said and on:
+            raise BriefRefused(said)
+        session = h.native
+        if session is not None:
+            with session.mutex:
+                session.bypass = bool(on)
+
+    def bypassed(self, h: SessionHandle) -> bool:
+        session = h.native
+        return bool(session is not None and not session.closed and session.bypass)
 
     # -- the Compact button (2026-10-19) ----------------------------------------
 
@@ -2927,6 +2996,23 @@ class ClaudeProvider:
 
 
 # --- helpers ----------------------------------------------------------------
+
+
+def _log_bypass(session: _Session, name: str, args: dict) -> None:
+    """The decision log's line for a call the owner's Bypass switch kept from
+    the classifier. The gate's own line for the call is already written (its
+    layer-5 "the provider's own reviewer decides"); this one says that the
+    reviewer was not asked. A failure to log decides nothing."""
+    try:
+        from ..permissions import ApprovalRecord, _digest, _safe_command, log_decision
+        command = _command(args)
+        brief = session.brief
+        log_decision(ApprovalRecord(
+            tool=name, args_digest=_digest(args), layer="owner-bypass", decision="allow",
+            reason=BYPASS_REASON, command=_safe_command(command) if command else None,
+            thread_id=session.thread_id, task_id=brief.task_id, provider=ProviderName.CLAUDE.value))
+    except Exception:  # noqa: BLE001
+        LOG.warning("Could not log a bypassed call on %s", session.thread_id, exc_info=True)
 
 
 def _note_denied(session: _Session, tool_use_id: Any, agent_id: Any = None) -> None:
