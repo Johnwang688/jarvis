@@ -154,6 +154,10 @@ export const api = {
    * `{focus}` (CB-4) needs no new route. */
   compact: (id: string) =>
     req<{ status: string; turn_id?: string }>(`/threads/${encodeURIComponent(id)}/compact`, json({})),
+  /** The Bypass chip's click (2026-10-21, owner-only): Claude Code's auto-mode classifier off
+   * (`on: true`) or back on for one chat. 409 with the sentence for `pane-status` when refused. */
+  bypass: (id: string, on: boolean) =>
+    req<{ bypass: boolean }>(`/threads/${encodeURIComponent(id)}/bypass`, json({ on })),
   /** The sidebar dots (2026-10-08): every thread and task that is not idle. */
   activity: () => req<any>("/activity").then(parseActivity) as Promise<ActivityView>,
   /** The owner opened it: no longer unread or failed. */

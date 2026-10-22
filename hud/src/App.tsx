@@ -149,6 +149,7 @@ import { useStableHandlers, useStableValue } from "./lib/stable";
 import BootOverlay from "./components/BootOverlay";
 import { thinkingLine, type ThinkingLine } from "./lib/thinking";
 import { compactFor } from "./lib/compact";
+import { bypassFor } from "./lib/bypass";
 import { RELAY_KINDS, waitingLine, type RelayEvent } from "./lib/relays";
 import { thinkingClock } from "./components/MiniOrb";
 
@@ -1778,6 +1779,10 @@ export default function App() {
           // Every model and effort change is a line in the chat (A7).
           if (tid) for (const n of mine) dispatch({ type: "message", pane: n, message: { role: "system", text: data.text || "", at: e.at, turn_id: e.turn_id } });
           break;
+        case "bypass_changed":
+          // The owner's Bypass switch, from this window or another.
+          if (tid) dispatch({ type: "thread_patch", id: tid, patch: { bypass: data.bypass === true } });
+          break;
         case "notice":
           // A provider's line about the session itself (2026-10-16: Codex's
           // Windows closure skipped), never the model's words.
@@ -1986,6 +1991,22 @@ export default function App() {
       }, REFUSED_MS);
     }).finally(() => compacting.current.delete(threadId));
   }, [chatPatch]);
+  // The Bypass chip's click (2026-10-21). One post at a time per thread; the chip
+  // follows the answer and `bypass_changed`. A refusal is the pane's status line.
+  const bypassing = useRef(new Set<string>());
+  const bypassThread = useCallback((pane: PaneNo, threadId: string, on: boolean) => {
+    if (bypassing.current.has(threadId)) return;
+    bypassing.current.add(threadId);
+    api.bypass(threadId, on).then((r) => {
+      dispatch({ type: "thread_patch", id: threadId, patch: { bypass: r.bypass === true } });
+    }).catch((error: unknown) => {
+      const why = error instanceof Error && error.message ? error.message : "The daemon could not be reached.";
+      chatPatch(pane, { status: why });
+      setTimeout(() => {
+        if (live.current.chats[pane].status === why) chatPatch(pane, { status: "" });
+      }, REFUSED_MS);
+    }).finally(() => bypassing.current.delete(threadId));
+  }, [chatPatch, dispatch]);
   // Stable, so a memoized ChatTab is not redrawn by a keystroke.
   const cancelTask = useCallback(
     (id: string) => void taskAction(id, "cancel").catch((error: unknown) => {
@@ -3959,6 +3980,7 @@ export default function App() {
     // The Compact chip: an opened chat thread without a task only (WP-C); a compose
     // pane has no thread, so none.
     const chip = compactFor(thread, { turnRunning: runningHere(chat) || chat.busy, card: workBlocked });
+    const bypass = bypassFor(thread);
     return (
       <>
         <ChatTab
@@ -4001,6 +4023,7 @@ export default function App() {
           }}
           modelChip={threadModel.chipFor(n, view.zoom)}
           compact={chip && thread ? { ...chip, onCompact: () => compactThread(n, thread.id) } : null}
+          bypass={bypass && thread ? { ...bypass, onToggle: () => bypassThread(n, thread.id, !bypass.on) } : null}
           imageNote={threadModel.imageNoteFor(n)}
           onSend={(text, files) => void send(n, text, files)}
           onTranscriptTaken={() => chatPatch(n, { pendingTranscript: "" })}

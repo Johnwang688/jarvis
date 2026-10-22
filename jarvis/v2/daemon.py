@@ -239,6 +239,13 @@ WATCH_JOIN_S = 2.0
 # (`POST /threads/{id}/compact`). What `Daemon.compact` refuses with (409),
 # and the system line each compaction ends with (`compacted`).
 COMPACT_NOT_A_CHAT = "Tasks are not chats; only a chat compacts."
+BYPASS_NOT_A_CHAT = "Only an owner's chat can bypass the classifier; a task's workers keep it."
+BYPASS_ON = ("Bypass on: Claude Code's auto-mode classifier no longer judges this chat's "
+             "commands and file edits in turns you send. Jarvis's own rules and cards still apply.")
+BYPASS_OFF = "Bypass off: the auto-mode classifier judges this chat's calls again."
+BYPASS_UNSUPPORTED = ("Only Claude chats have an auto-mode classifier to bypass: "
+                      "OpenRouter and Codex chats already bring every call Jarvis does not "
+                      "settle to you.")
 COMPACT_RUNNING = "A turn is running; compact when it ends."
 COMPACT_WAITING = "Messages are waiting to run first."
 COMPACT_CLI = "Claude Code started a turn of its own; compact when it ends."
@@ -1275,6 +1282,10 @@ class Daemon:
             record["running"] = session is not None and session.worker is not None
             # The running turn is a compaction (the HUD's Compact button).
             record["compacting"] = bool(record["running"] and session.compacting)
+            # The owner's Bypass switch is on for this chat's open session.
+            bypassed = getattr(session.provider, "bypassed", None) if session is not None else None
+            record["bypass"] = bool(callable(bypassed) and session.handle is not None
+                                    and bypassed(session.handle))
             record["queued"] = len(self._queues.get(thread.id) or ())
             # Other chats' messages waiting on it, and its own still out.
             record.update(self.chat_relay.counts(thread.id))
@@ -1764,6 +1775,79 @@ class Daemon:
             if said:
                 raise DaemonError(str(said))
             return {"status": "started", "turn_id": self._begin_compact(session)}
+
+    def set_bypass(self, thread_id, on) -> dict:
+        """The owner's Bypass switch (2026-10-21): whether Claude Code's
+        auto-mode classifier judges this chat's calls. The owner's alone: only
+        the HUD's `POST /threads/{id}/bypass` calls this, behind `owner_only`;
+        no tool, bridge, MCP, Discord or CLI path reaches it, so no agent can
+        turn off a check on itself.
+
+        It loosens one layer only. Jarvis's gate still runs first on every
+        call — DENY rules, the always-ask list, owner-only operations, cards —
+        and a call it allowed then runs without the classifier being asked
+        (`ClaudeProvider.set_bypass`). Never stored: it lives on the open
+        session, so a restart or a reopened chat is back to auto.
+
+        Turning it off always succeeds, open session or not. Turning it on
+        resumes the chat's session if it has none and is refused (409) for a
+        task's thread, an archived chat, a provider with no classifier to
+        switch off, or a chat on the ask profile. -> {"bypass": bool}."""
+        if not isinstance(on, bool):
+            raise APIError(400, "on must be true or false")
+        from . import thread_model
+        thread = self.require(self.stores.threads, thread_id)
+        if not thread_model.is_chat(thread):
+            raise APIError(409, BYPASS_NOT_A_CHAT)
+        if on:
+            session = self._live_session(thread_id)
+        else:
+            with self._lock:
+                session = self._sessions.get(thread_id)
+        with self._lock:
+            if session is None or session.handle is None:
+                if on:
+                    raise DaemonError("thread session is opening or closing")
+                return {"bypass": False}
+            if on:
+                self._sendable(session)
+            switch = getattr(session.provider, "set_bypass", None)
+            bypassed = getattr(session.provider, "bypassed", None)
+            if not (callable(switch) and callable(bypassed)):
+                if on:
+                    raise APIError(409, BYPASS_UNSUPPORTED)
+                return {"bypass": False}
+            if on:
+                refusal = getattr(session.provider, "bypass_refusal", None)
+                said = refusal(session.handle) if callable(refusal) else None
+                if said:
+                    raise APIError(409, str(said))
+            before = bool(bypassed(session.handle))
+            try:
+                switch(session.handle, on)
+            except BriefRefused as exc:
+                # The session closed between the check and the switch.
+                raise APIError(409, str(exc)) from None
+            now = bool(bypassed(session.handle))
+            if now != before:
+                # One line in the chat, live and after a reload, so the
+                # transcript says when the classifier was off.
+                record = {"kind": "notice", "at": utcnow(), "thread_id": thread_id,
+                          "project_id": session.thread.project_id,
+                          "event_id": uuid.uuid4().hex,
+                          "data": {"text": BYPASS_ON if now else BYPASS_OFF}}
+                self.stores.threads._append(thread_id, "log.jsonl", record)
+                self.bus.publish(dict(record))
+        if now == before:
+            return {"bypass": now}
+        from .permissions import ApprovalRecord, log_decision
+        log_decision(ApprovalRecord(
+            tool="bypass", args_digest="", layer="owner-bypass", decision="on" if now else "off",
+            reason="the owner's Bypass switch, from the HUD", thread_id=thread_id,
+            provider=session.thread.provider.value))
+        self.bus.publish({"kind": "bypass_changed", "thread_id": thread_id,
+                          "project_id": session.thread.project_id, "data": {"bypass": now}})
+        return {"bypass": now}
 
     def _begin_compact(self, session) -> str:
         """Under the lock: the compaction as a turn of the thread, modelled on

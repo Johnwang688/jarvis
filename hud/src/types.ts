@@ -83,6 +83,10 @@ export interface Thread {
    * compaction is a turn too, so `running` holds as well. Absent from an
    * older daemon. */
   compacting?: boolean;
+  /** Live, never stored (2026-10-21): the owner's Bypass switch is on for this
+   * chat's open session, so Claude Code's auto-mode classifier is not judging
+   * its calls. Absent from an older daemon. */
+  bypass?: boolean;
   /** Live, never stored (chat-to-chat C3 `thread_json`): messages from other
    * chats queued for this one, and this chat's own sends still queued or
    * running. Absent from an older daemon. */

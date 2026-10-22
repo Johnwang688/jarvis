@@ -621,3 +621,21 @@ failed: <reason>". No summary text is logged. The task runner, the Discord
 mirror (CB-5) and activity skip `compaction` records (a compaction never
 makes a chat unread); `"compacted"` is a system row in chat reads and the
 HUD transcript; `thread_json` carries a live `compacting`.
+
+## The Bypass switch's route (2026-10-21)
+
+`POST /threads/{id}/bypass` (`hud_api.route`) is the owner's alone:
+`owner_only` runs first, before the thread is looked up or a body read, so
+the API listener gets 403 whatever it sends. The body is exactly
+`{"on": bool}` (missing, non-bool or extra fields are 400; a query is 400);
+any other method is 405. 200 with `Daemon.set_bypass(id, on)` →
+`{"bypass": bool}`. It is not a tool: no MCP tool, `bridge.py` route,
+Discord command or CLI verb reaches it, and `tests/v2/bypass_check.py`
+pins the HUD route as the only caller of `Daemon.set_bypass` and of any
+`.set_bypass(`. On resumes a closed session (`_live_session`) and is 409
+for a task thread, an archived chat, a provider without the switch, or the
+provider's `bypass_refusal` sentence; off always succeeds, a no-op with no
+open session; a provider missing a Bypass method, or a session that closes
+mid-switch, is 409, never 500. A change appends one `notice` record and publishes
+`bypass_changed {bypass}`; a repeat records nothing. What the switch does
+to the gate: safety notes, *The owner's Bypass switch*.

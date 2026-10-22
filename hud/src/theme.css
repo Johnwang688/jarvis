@@ -534,6 +534,11 @@ button.chip.compactbtn { cursor: pointer; padding: 2px 8px; }
 button.chip.compactbtn:hover:not(:disabled) { color: var(--accent-hi); border-color: var(--accent-line); background: var(--bg-2); }
 button.chip.compactbtn[data-state="running"] { color: var(--accent); border-color: var(--accent-line); background: var(--accent-soft); opacity: 1; }
 button.chip.compactbtn:focus-visible { box-shadow: var(--focus-ring); }
+/* The Bypass chip (2026-10-21): amber while the classifier is off, the HUD's pending colour. */
+button.chip.bypassbtn { cursor: pointer; padding: 2px 8px; }
+button.chip.bypassbtn:hover { color: var(--accent-hi); border-color: var(--accent-line); background: var(--bg-2); }
+button.chip.bypassbtn[data-on="true"] { color: var(--amber); border-color: var(--amber-line); background: var(--amber-soft); }
+button.chip.bypassbtn:focus-visible { box-shadow: var(--focus-ring); }
 .compact-confirm {
   display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: center;
   font: 11px var(--mono); color: var(--text-2);

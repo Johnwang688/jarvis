@@ -1132,6 +1132,108 @@ def hook_checks() -> None:
         provider.close(handle)
 
 
+def bypass_checks() -> None:
+    """The owner's Bypass switch (2026-10-21): on an owner's chat under AUTO, a
+    call Jarvis's gate allowed is allowed explicitly, so the classifier is not
+    asked; a DENY stays a deny; anything else refuses to turn it on."""
+    print("\n-- the Bypass switch skips the classifier only after Jarvis allowed")
+    provider = claude.ClaudeProvider()
+    chat = dict(role=Role.CHAT)
+
+    def permit(name, args, b):
+        return Decision.DENY if "rm" in str(args.get("command")) else Decision.ALLOW
+
+    script = [Hook("Bash", {"command": "ls"}, "b-ls"),
+              Hook("Bash", {"command": "rm -rf /"}, "b-rm"), result_message()]
+    with _temp_config() as root, fake(script):
+        handle = provider.start(thread(), brief(**chat), permit)
+        eq(provider.bypassed(handle), False, "a new session starts with Bypass off")
+        eq(provider.bypass_refusal(handle), None, "an owner's AUTO chat can take the switch")
+        provider.set_bypass(handle, True)
+        eq(provider.bypassed(handle), True, "the switch reads back on")
+        drain(provider, handle)
+        client = FakeClient.instances[0]
+        allowed = client.hook_results[0].get("hookSpecificOutput") or {}
+        eq(allowed.get("permissionDecision"), "allow",
+           "with Bypass on, Jarvis's ALLOW is explicit, so the classifier is skipped")
+        eq(allowed.get("permissionDecisionReason"), claude.BYPASS_REASON, "and says why")
+        denied = client.hook_results[1]["hookSpecificOutput"]
+        eq(denied["permissionDecision"], "deny", "a Jarvis DENY is still a deny under Bypass")
+        log = (root / "v2data" / "decisions.jsonl").read_text().splitlines()
+        rows = [json.loads(line) for line in log if '"owner-bypass"' in line]
+        eq([(r["tool"], r["decision"], r["command"]) for r in rows], [("Bash", "allow", "ls")],
+           "the decision log says which call skipped the classifier, and only that one")
+        provider.set_bypass(handle, False)
+        eq(provider.bypassed(handle), False, "the switch turns back off")
+        provider.close(handle)
+        eq(provider.bypassed(handle), False, "a closed session is never bypassed")
+
+    with fake([Hook("Bash", {"command": "ls"}), result_message()]):
+        handle = provider.start(thread(), brief(**chat), allow)
+        provider.set_bypass(handle, True)
+        provider.set_bypass(handle, False)
+        drain(provider, handle)
+        eq(FakeClient.instances[0].hook_results[0], {}, "switched off, ALLOW is {} again")
+        provider.close(handle)
+
+    print("\n-- Bypass counts only in the owner's own turn, and only for the shell and file tools")
+    owner_script = [Hook("Bash", {"command": "ls"}, "o-bash"),
+                    Hook("Bash", {"command": "ls"}, "o-child", extra={"agent_id": "agent-1"}),
+                    Hook("Write", {"file_path": "/tmp/x", "content": "y"}, "o-write"),
+                    Hook("WebFetch", {"url": "https://example.com"}, "o-fetch"),
+                    Hook("mcp__vercel__create_deployment", {}, "o-mcp"),
+                    Hook("Monitor", {"command": "tail -f log"}, "o-monitor"),
+                    result_message()]
+    with _temp_config(), fake(owner_script):
+        handle = provider.start(thread(), brief(**chat), allow)
+        provider.set_bypass(handle, True)
+        drain(provider, handle)
+        got = [(r.get("hookSpecificOutput") or {}).get("permissionDecision")
+               for r in FakeClient.instances[0].hook_results]
+        eq(got, ["allow", "allow", "allow", None, None, None],
+           "an owner turn: Bash, a sub-agent's Bash and Write skip the classifier; "
+           "WebFetch, an MCP tool and Monitor keep it")
+        eq(handle.native.owner_turn, False, "the turn's end ends the owner turn")
+        eq(provider.bypassed(handle), True, "the switch itself stays on between turns")
+        provider.close(handle)
+
+    for origin in ("chat", "chat-reply", "system", "owner-ran"):
+        with _temp_config(), fake([Hook("Bash", {"command": "ls"}), result_message()]):
+            handle = provider.start(thread(), brief(**chat), allow)
+            provider.set_bypass(handle, True)
+            list(provider.send(handle, UserMessage(text="run ls", origin=origin)))
+            eq(FakeClient.instances[0].hook_results[0], {},
+               f"a turn with origin {origin!r} keeps the classifier with Bypass on")
+            provider.close(handle)
+
+    with _temp_config(), fake([result_message()]):
+        handle = provider.start(thread(), brief(**chat), allow)
+        provider.set_bypass(handle, True)
+        drain(provider, handle)
+        # A background sub-agent's call after the turn ended (no owner turn).
+        out = claude._await(handle.native.loop, provider._pre_tool_hook(handle.native)(
+            {"tool_name": "Bash", "tool_input": {"command": "ls"}, "agent_id": "agent-1"},
+            "late", None), 3)
+        eq(out, {}, "a sub-agent still working after the turn keeps the classifier")
+        provider.close(handle)
+
+    for label, kw in (("a task's worker", dict(role=Role.IMPLEMENTER)),
+                      ("a chat with a task", dict(role=Role.CHAT, task_id="t0000001")),
+                      ("an ask-profile chat", dict(role=Role.CHAT, profile=PermissionProfile.ASK))):
+        with fake([result_message()]):
+            handle = provider.start(thread(), brief(**kw), allow)
+            check(bool(provider.bypass_refusal(handle)), f"{label} cannot take the switch")
+            try:
+                provider.set_bypass(handle, True)
+                check(False, f"{label}: turning Bypass on is refused")
+            except BriefRefused:
+                check(True, f"{label}: turning Bypass on is refused")
+            eq(provider.bypassed(handle), False, f"{label} stays off")
+            provider.set_bypass(handle, False)
+            check(True, f"{label}: turning it off never raises")
+            provider.close(handle)
+
+
 def hook_cwd_checks() -> None:
     """The hook input's `cwd` (the CLI's shell folder) reaches a permit that
     takes `shell_cwd` — where merge_gate reads the current branch — and is
@@ -3300,6 +3402,7 @@ def main() -> int:
     options_checks()
     sequence_checks()
     hook_checks()
+    bypass_checks()
     hook_cwd_checks()
     owner_yes_reuse_checks()
     env_hook_checks()
