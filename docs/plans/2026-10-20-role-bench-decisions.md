@@ -214,3 +214,7 @@ spurious ones (necessary, not sufficient). Opus built a verified rubric per revi
   (`tests/rolebench_testguard.py`, `runners.testing_refusal`; a plain `pool` in the grader suite had
   made a real Opus clustering call on every run). `pool --list` is read only. A member ruling
   restates each "different" claim, and split clusters are built from that, never from reviewer text.
+- **Fourth review fixes (PR #291, 2026-10-21).** The test guard reaches the sandbox: a cell may
+  bind only a fake CLI and a fake login under `ROLEBENCH_TESTING`, with one per-call opt-in for the
+  real `codex sandbox` loopback probe (no model call); the account's login is never read in a test
+  and the live daemon's quota is never queried.

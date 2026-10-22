@@ -121,9 +121,87 @@ def real_home() -> str:
     return pwd.getpwuid(os.getuid()).pw_dir
 
 
+TESTING_ENV = "ROLEBENCH_TESTING"
+FAKE_BIN_ENV = "ROLEBENCH_FAKE_BIN"
+LOGIN_FILES = (".claude/.credentials.json", ".codex/auth.json")
+
+
+class TestingRefusal(RuntimeError):
+    """A test reached for something real (a login, a CLI, the daemon)."""
+
+
+def testing() -> bool:
+    """ROLEBENCH_TESTING is on: any non-empty value but "0" (both suites set it)."""
+    return os.environ.get(TESTING_ENV, "").strip() not in ("", "0")
+
+
+def fake_bin_root() -> str | None:
+    """ROLEBENCH_FAKE_BIN as a directory prefix, or None when unset, `/`, or a
+    directory that holds the account's real claude or codex CLI."""
+    fake = os.environ.get(FAKE_BIN_ENV)
+    if not fake:
+        return None
+    root = os.path.realpath(fake).rstrip("/") + "/"
+    if root == "/" or any(c.startswith(root) for c in account_clis()):
+        return None
+    return root
+
+
+def account_clis() -> set[str]:
+    """The realpaths of the account's own claude and codex CLIs: every match on
+    PATH (any ROLEBENCH_FAKE_BIN directory left out) and in the usual install
+    places."""
+    import shutil
+    fake = os.environ.get(FAKE_BIN_ENV)
+    froot = os.path.realpath(fake).rstrip("/") + "/" if fake else None
+    dirs = [d for d in os.environ.get("PATH", "").split(os.pathsep)
+            if d and not (froot and froot != "/" and (os.path.realpath(d).rstrip("/") + "/").startswith(froot))]
+    # and the usual install places, whatever PATH or ROLEBENCH_FAKE_BIN say
+    dirs += [os.path.join(real_home(), ".local", "bin"), "/usr/local/bin", "/usr/bin", "/bin"]
+    out = set()
+    for d in dirs:                                   # every match, not only the first on PATH
+        for name in ("claude", "codex"):
+            found = shutil.which(name, path=d)
+            if found:
+                out.add(os.path.realpath(found))
+    return out
+
+
+def is_fake_cli(path) -> bool:
+    """Under testing: the CLI at `path` lies under ROLEBENCH_FAKE_BIN and is not the account's own."""
+    root = fake_bin_root()
+    if not root or not path:
+        return False
+    rp = os.path.realpath(str(path))
+    return (rp + "/").startswith(root) and rp not in account_clis() \
+        and not any(c.startswith(rp.rstrip("/") + "/") for c in account_clis())
+
+
+def login_home_refusal(home: str | None) -> str | None:
+    """Under testing, why `home` may not serve as the CLI login home, or None:
+    unset, the account's home, or a home whose credential files resolve to the
+    account's own (a symlink or a bind of the real ones)."""
+    if not home:
+        return "ROLEBENCH_LOGIN_HOME is unset (the account's real login would be read)"
+    real = real_home()
+    if os.path.realpath(home) == os.path.realpath(real):
+        return "ROLEBENCH_LOGIN_HOME is the account's home"
+    for rel in LOGIN_FILES:
+        if os.path.realpath(os.path.join(home, rel)) == os.path.realpath(os.path.join(real, rel)):
+            return f"ROLEBENCH_LOGIN_HOME's {rel} is the account's own"
+    return None
+
+
 def login_home() -> str:
-    """Where the CLI logins are read from (a test points this at fakes)."""
-    return os.environ.get("ROLEBENCH_LOGIN_HOME") or real_home()
+    """Where the CLI logins are read from (a test points this at fakes). Under
+    ROLEBENCH_TESTING a test never reads the account's real logins, not even
+    for an expiry check: an unset, real or real-linked login home raises."""
+    home = os.environ.get("ROLEBENCH_LOGIN_HOME")
+    if testing():
+        why = login_home_refusal(home)
+        if why:
+            raise TestingRefusal(f"test guard: {why}")
+    return home or real_home()
 
 
 def venv_dir() -> Path:

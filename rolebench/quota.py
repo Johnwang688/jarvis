@@ -70,7 +70,10 @@ def over(quota, now: float | None = None, limit: float | None = None) -> str | N
 
 
 def daemon_reader(provider: str):
-    """The HUD's usage column from the daemon: one read-only GET, or None."""
+    """The HUD's usage column from the daemon: one read-only GET, or None.
+    Never under ROLEBENCH_TESTING: a test injects its own reader."""
+    if config.testing():
+        raise config.TestingRefusal("test guard: the live daemon's /usage is never read in a test; inject a reader")
     base = os.environ.get("ROLEBENCH_DAEMON_URL") or f"http://127.0.0.1:{os.environ.get('JARVIS_DAEMON_PORT', '8405')}"
     try:
         with urllib.request.urlopen(base + "/usage", timeout=2) as r:

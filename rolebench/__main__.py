@@ -245,14 +245,15 @@ def cmd_pool(args) -> int:
             doc = pool.pool_case(args.case, quota_override=quota_override(args))
         except (pool.PoolError, cases.CaseError) as exc:
             raise SystemExit(f"pool: {exc}")
+    one = lambda t: json.dumps(" ".join(str(t or "").split())[:400])   # noqa: E731  restated text, quoted on one line
     for c in doc["clusters"]:
-        print(f"{c['id']} [{c.get('severity_final') or c['severity']}] {c['status']}: {c['location']}: "
-              f"{c['mechanism']} ({len(c['members'])} member(s), "
-              f"{sum((m.get('status') or pool.CONFIRMED) == pool.UNVERIFIED for m in c['members'])} unverified)")
+        print(f"{c['id']} [{c.get('severity_final') or c['severity']}] {c['status']}: {one(c['location'])}: "
+              f"{one(c['mechanism'])} ({len(c['members'])} member(s), "
+              f"{sum(pool.status_of(m) != pool.CONFIRMED for m in c['members'])} unverified now)")
         print(f"    {ruling_line(c.get('ruling'), c)}")
         same = pool.ruled_same(c)
         for m in c.get("pending") or ():
-            unverified = (m.get("status") or pool.CONFIRMED) != pool.CONFIRMED
+            unverified = pool.status_of(m) != pool.CONFIRMED
             what = ("ruled the same claim; " if (m["run"], int(m["finding"])) in same
                     else "unverified: needs --rule first; " if unverified else "")
             print(f"    pending ({what}needs --accept-members {c['id']}): {m['run']} finding {m['finding']}: {m.get('title', '')}")

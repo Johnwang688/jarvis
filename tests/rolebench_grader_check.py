@@ -26,7 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import rolebench_testguard  # noqa: E402,F401  first: ROLEBENCH_TESTING=1, ROLEBENCH_NET=none, runners refuse real models
 
-from rolebench import audit, cases, config, grader, judge, pool, quota, report, runlog, runners, snapshot  # noqa: E402
+from rolebench import audit, cases, config, grader, judge, pool, quota, report, runlog, runners, sandbox, snapshot  # noqa: E402
 
 mainmod = __import__("rolebench.__main__", fromlist=["main"])
 
@@ -716,7 +716,7 @@ def test_stage2(case: dict, shas: dict, root: Path) -> None:
     with contextlib.redirect_stdout(io.StringIO()) as out:
         mainmod.main(["pool", "--case", cid, "--list"])
     check("CLI: pool lists each cluster's ruling and its unverified members", "ruling: valid" in out.getvalue()
-          and "ruling: invalid" in out.getvalue() and "unverified)" in out.getvalue())
+          and "ruling: invalid" in out.getvalue() and "unverified now)" in out.getvalue())
     with contextlib.redirect_stdout(io.StringIO()):
         check("CLI: --rule and adjudication in one command are refused; --accept-invalid needs --by",
               raises(lambda: mainmod.main(["pool", "--case", cid, "--rule", "--accept", "p1", "--by", "x"]), SystemExit)
@@ -952,7 +952,8 @@ def test_stage2_delta(case0: dict, root: Path) -> None:
                         "evidence": "e"},
                "leak": {"ruling": "invalid", "why_not": "w", "citation": "io.py:2"},
                "clampdup": {"ruling": "duplicate", "id": "gt1", "why": "same bound"},
-               "split": {"ruling": "invalid", "why_not": "not a defect", "citation": "tiny.py:40"}}
+               "split": {"ruling": "invalid", "why_not": "not a defect", "citation": "tiny.py:40"},
+               "io": {"ruling": "invalid", "why_not": "not a defect", "citation": "io.py:2"}}
     member_verdicts = {}
     prompts = []
 
@@ -1176,6 +1177,51 @@ def test_stage2_delta(case0: dict, root: Path) -> None:
     check("K13: a new cluster id starts past the key's duplicate clusters (from an empty pool file)",
           pool._next_id({"clusters": []}, "tiny-ids") == 10)
 
+    # restatements (fourth review): one line, capped, parsed location, never a long run of the finding
+    src = ["the poller and the socket handler both write the shared state object without a lock"]
+    r = pool.restated("LOW", "x\n" + "y" * 900, "hud/poll.ts:9 (the poller) and :12", src)
+    check("restate: the mechanism is one line, capped at 400; only the parsed location is kept",
+          "\n" not in r["mechanism"] and len(r["mechanism"]) == 400 and r["location"] == "hud/poll.ts:9; hud/poll.ts:12")
+    check("restate: a mechanism or location carrying 40+ characters of the finding's own text is refused",
+          raises(lambda: pool.restated("LOW", "As reported: THE POLLER and the socket handler both write the shared state", "a.py:1", src),
+                 pool.PoolError)
+          and raises(lambda: pool.restated("LOW", "m", "a.py:1 the poller and the socket handler both write", src), pool.PoolError)
+          and pool.restated("LOW", "two writers race on the poll state", "hud/poll.ts:9", src)["severity"] == "LOW")
+    check("restate: validate_reply and validate_member_ruling refuse a copied restatement",
+          raises(lambda: pool.validate_reply({"assign": [{"finding": "V1", "cluster": "new1"}], "new_clusters": [
+              {"id": "new1", "severity": "LOW", "mechanism": src[0], "location": "a.py:1"}]}, ["V1"], [], src), pool.PoolError)
+          and raises(lambda: pool.validate_member_ruling({"members": [{"finding": "M1", "verdict": "different", "why": "w",
+                                                                        "severity": "LOW", "mechanism": src[0], "location": "a.py:1"}]},
+                                                     ["M1"], {"M1": src[0]}), pool.PoolError))
+    # the clustering prompt fences the existing clusters; the ruling prompt fences the claim
+    cprompts = []
+    run("TF", [finding("a fresh io claim", "LOW", "io.py", 2)])
+    pool.pool_case(cid, pool_fn=lambda pr, cwd: (cprompts.append(pr), (json.dumps({"assign": [
+        {"finding": v, "cluster": "new1"} for v in re.findall(r"^(V\d+) \[", pr, re.M)], "new_clusters": [
+        {"id": "new1", "severity": "LOW", "mechanism": "io fd", "location": "io.py:2"}]}), 0))[1], quota_reader=COLD,
+        rng=random.Random(7))
+    cn = re.search(r"<<<CLUSTERS (\w+)\n", cprompts[-1]).group(1)
+    inside = cprompts[-1].split(f"<<<CLUSTERS {cn}\n")[1].split(f"CLUSTERS {cn}>>>")[0]
+    check("fence: the clustering prompt shows the existing clusters inside their own fence",
+          re.search(r"^p\d+ \[", inside, re.M) is not None)
+    n = len(prompts)
+    pool.rule_case(cid, rule_fn=ruler, quota_reader=COLD, tree_fn=tree_fn, rng=random.Random(7))
+    rp = next((p_ for p_ in prompts[n:] if "## The claim" in p_), "")
+    kn2 = re.search(r"<<<CLAIM (\w+)\n", rp)
+    check("fence: the ruling prompt shows the restated claim inside a CLAIM fence",
+          kn2 is not None and rp.index(f"<<<CLAIM {kn2.group(1)}\n") < rp.index("## The claim") < rp.rindex(f"CLAIM {kn2.group(1)}>>>"))
+    # the listing counts unverified members by their run's current judge.json
+    lp = {"case": cid, "calls": [], "clusters": [{"id": "p77", "severity": "LOW", "mechanism": "m", "location": "a.py:1",
+                                                  "status": "proposed", "judge_notes": [], "pending": [],
+                                                  "members": [{"run": "no-such-run", "finding": 0, "status": "valid-new"}]}]}
+    saved_p = pool.pool_path(cid).read_text()
+    config.write_json(pool.pool_path(cid), lp)
+    with contextlib.redirect_stdout(io.StringIO()) as out:
+        mainmod.main(["pool", "--case", cid, "--list"])
+    config.write_json(pool.pool_path(cid), json.loads(saved_p))
+    check("listing: unverified is counted from the run's current judge.json, not the stored status",
+          "1 unverified now" in out.getvalue(), out.getvalue())
+
     # L-c: the clustering text strips its nonce until none is left
     txt, _ = pool.blind([{"file": "a.py", "line": 1, "title": "aabc123bc123", "scenario": "abcabc123123", "status": "unverified",
                           "severity": "LOW"}], random.Random(1), "abc123")
@@ -1202,6 +1248,9 @@ def test_followups(root: Path) -> None:
           all(b(c) == 1 for c in ("sudo -u root bash -c 'cd'", "nice -n 5 bash -c 'cd'", "timeout -s KILL 5 bash -c 'cd'",
                                   "env -u FOO bash -c 'cd'", "env -C /tmp bash -c 'cd'", "stdbuf -o L bash -c 'cd'"))
           and b("command -v bash -c 'cd'") == 0)
+    check("bare cd: env -S / --split-string runs its string (env -S 'bash -c cd')",
+          b("env -S 'bash -c cd'") == 1 and b("env --split-string='bash -c cd'") == 1 and b("echo env -S 'bash -c cd'") == 0
+          and b("env -S 'bash -c ls'") == 0)
     check("audit: path reading stays broad: a script after `echo bash -c` is still read (a superset of main)",
           [lit for _, lit, _ in audit.path_candidates("echo bash -c 'cat /etc/x'")] == ["/etc/x"])
     check("audit: the -c script is read in any option order (L8)",
@@ -1275,6 +1324,10 @@ def test_guard(case0: dict, root: Path) -> None:
     check("guard: the suite runs with ROLEBENCH_TESTING=1 and ROLEBENCH_NET=none",
           os.environ.get("ROLEBENCH_TESTING") == "1" and os.environ.get("ROLEBENCH_NET") == "none")
     n = len(rolebench_testguard.BLOCKED)
+    nofake = root / "no-fake-here"
+    nofake.mkdir(exist_ok=True)
+    _saved_fake = os.environ["ROLEBENCH_FAKE_BIN"]
+    os.environ["ROLEBENCH_FAKE_BIN"] = str(nofake)       # the guard's own stubs on PATH are no longer "fake"
     check("guard: a claude, codex or jarvis run that is not a fake raises at the wrapper",
           raises(lambda: runners.run_claude(model="opus", prompt="p", cwd=root, timeout_s=5, max_turns=1), AssertionError)
           and raises(lambda: runners.run_codex(model="gpt-6-luna", prompt="p", cwd=root, timeout_s=5), AssertionError)
@@ -1292,6 +1345,7 @@ def test_guard(case0: dict, root: Path) -> None:
                                launch=lambda *a, **k: launched.append(1) or (1, "", "", False))
     finally:
         sys.modules.pop(spec.name, None)
+    os.environ["ROLEBENCH_FAKE_BIN"] = _saved_fake
     check("guard: the runner itself refuses too, before any launch (a default bound before the wrapper is covered)",
           res.crashed and ("test guard" in res.error or "not found" in res.error) and launched == [], res.error)
     with env(ROLEBENCH_FAKE_BIN=str(root), ROLEBENCH_LOGIN_HOME=config.real_home()):
@@ -1302,6 +1356,103 @@ def test_guard(case0: dict, root: Path) -> None:
           and runners.testing_refusal("jarvis", key="sk-dummy-x") is None)
     with env(OPENROUTER_API_KEY=None):
         check("guard: no .env read under ROLEBENCH_TESTING", runners.openrouter_key() is None)
+    # U1-U4 and the guard's edge cases, on the runners as written (a fresh, unpatched module)
+    def fresh_runners():
+        import importlib.util
+        sp = importlib.util.spec_from_file_location("rolebench._runners_unpatched", Path(runners.__file__))
+        mod = importlib.util.module_from_spec(sp)
+        mod.__package__ = "rolebench"
+        sys.modules[sp.name] = mod
+        sp.loader.exec_module(mod)
+        sys.modules.pop(sp.name, None)
+        return mod
+    fr = fresh_runners()
+    other = root / "other-fake-bin"
+    other.mkdir(exist_ok=True)
+    fired = []
+    no_launch = lambda *a, **k: fired.append(1) or (1, "", "", False)   # noqa: E731
+    with env(ROLEBENCH_FAKE_BIN=str(other)):
+        cx = fr.run_codex(model="gpt-6-luna", prompt="p", cwd=root, timeout_s=5, launch=no_launch)
+        cl = fr.run_claude(model="opus", prompt="p", cwd=root, timeout_s=5, max_turns=1, launch=no_launch)
+    check("U1: with a fake bin set, a CLI outside it is still refused (claude and codex, unwrapped)",
+          "test guard" in cl.error and "test guard" in cx.error and fired == [], f"{cl.error} | {cx.error}")
+    check("U2: run_codex refuses on its own, before any launch", "test guard" in cx.error and fired == [])
+    jv = fr.run_jarvis(model="openai/gpt-6-luna", prompt="p", cwd=root, timeout_s=5, max_turns=1, launch=no_launch,
+                       key_fn=lambda: "sk-or-v1-looks-real", price_fn=lambda m: (1.0, 5.0, 8000))
+    check("U3: run_jarvis refuses a real-looking key on its own, before any launch", "test guard" in jv.error and fired == [],
+          jv.error)
+    with env(ROLEBENCH_NET="pasta"):
+        check("U4: the guard holds whatever ROLEBENCH_NET says", runners.testing_refusal("claude", "/usr/bin/true") is not None
+              and runners.testing_refusal("jarvis", key="sk-or-real") is not None)
+    with env(ROLEBENCH_TESTING="yes"):
+        on_yes = config.testing()
+    with env(ROLEBENCH_TESTING="0"):
+        on_zero = config.testing()
+    check("guard: ROLEBENCH_TESTING is on for any non-empty value but 0", on_yes and not on_zero)
+    with env(ROLEBENCH_FAKE_BIN="/"):
+        slash = config.fake_bin_root()
+    real_clis = sorted(config.account_clis())
+    holds_real = None
+    if real_clis:
+        with env(ROLEBENCH_FAKE_BIN=os.path.dirname(real_clis[0])):
+            holds_real = config.fake_bin_root()
+    check("guard: ROLEBENCH_FAKE_BIN may be neither / nor a directory that holds the real CLI",
+          slash is None and holds_real is None)
+    linked = root / "linked-login"
+    (linked / ".claude").mkdir(parents=True, exist_ok=True)
+    real_cred = Path(config.real_home()) / ".claude" / ".credentials.json"
+    if not (linked / ".claude" / ".credentials.json").is_symlink():
+        os.symlink(real_cred, linked / ".claude" / ".credentials.json")        # a link only: never opened
+    check("guard: a login home whose credential file links to the account's is refused (realpaths compared)",
+          config.login_home_refusal(str(linked)) is not None and config.login_home_refusal(None) is not None
+          and config.login_home_refusal(config.real_home()) is not None
+          and config.login_home_refusal(os.environ["ROLEBENCH_LOGIN_HOME"]) is None)
+    with env(ROLEBENCH_LOGIN_HOME=None):
+        check("T1 caveat: under testing the real login is never read, not even for an expiry",
+              raises(lambda: config.login_home(), config.TestingRefusal)
+              and raises(lambda: fr.login_problem("claude", 60), config.TestingRefusal))
+    check("guard: the live daemon's quota reader refuses under testing",
+          raises(lambda: rolebench_testguard.REAL_DAEMON_READER("claude"), config.TestingRefusal))
+    # the sandbox: a cell may bind only a fake CLI; one opt-in, for `codex sandbox` only
+    realish = root / "realish-bin"
+    (realish / "rel" / "bin").mkdir(parents=True, exist_ok=True)
+    for f in (realish / "claude", realish / "rel" / "bin" / "codex"):
+        f.write_text("#!/bin/sh\nexit 3\n")
+        f.chmod(0o755)
+    if not (realish / "codex").exists():
+        (realish / "codex").symlink_to(realish / "rel" / "bin" / "codex")
+    with env(PATH=f"{realish}:{os.environ['PATH']}"):
+        refusals = {}
+        for label, cell, cmd, opt in (
+                ("claude cell", sandbox.Cell("claude", root), ["/bin/sh", "-c", "true"], None),
+                ("judge cell", sandbox.Cell("judge", root), ["/bin/sh", "-c", "true"], None),
+                ("codex cell", sandbox.Cell("codex", root), ["/bin/sh", "-c", "true"], None),
+                ("opt-in in a claude cell", sandbox.Cell("claude", root), [str(sandbox.CODEX / "bin" / "codex"), "sandbox"], "codex-sandbox"),
+                ("opt-in, not `codex sandbox`", sandbox.Cell("codex", root), [str(sandbox.CODEX / "bin" / "codex"), "exec", "x"], "codex-sandbox"),
+                ("opt-in, a shell", sandbox.Cell("codex", root), ["/bin/sh", "-c", "codex exec x"], "codex-sandbox")):
+            refusals[label] = sandbox.testing_launch_refusal(cell, cmd, opt)
+        allowed = sandbox.testing_launch_refusal(sandbox.Cell("codex", root), [str(sandbox.CODEX / "bin" / "codex"), "sandbox", "-P", ":workspace"],
+                                                 "codex-sandbox")
+        n_launch = []
+        saved_run_unit = sandbox.run_unit
+        sandbox.run_unit = lambda *a, **k: n_launch.append(1) or (0, "", "", False)
+        try:
+            launched = raises(lambda: sandbox.launch(["/bin/sh", "-c", "true"], cell=sandbox.Cell("claude", root),
+                                                     run_id="guard", timeout_s=5), sandbox.SandboxError)
+        finally:
+            sandbox.run_unit = saved_run_unit
+    check("guard: a claude, judge or codex cell that would bind a CLI outside the fake bin is refused (sh probes too)",
+          all(refusals[k] for k in ("claude cell", "judge cell", "codex cell")) and launched and n_launch == [], str(refusals))
+    check("guard: the codex-sandbox opt-in allows exactly `codex sandbox` in a codex cell, nothing else",
+          refusals["opt-in in a claude cell"] and refusals["opt-in, not `codex sandbox`"] and refusals["opt-in, a shell"]
+          and allowed is None)
+    with env(ROLEBENCH_LOGIN_HOME=None):
+        check("guard: a cell with no fake login home is refused",
+              sandbox.testing_launch_refusal(sandbox.Cell("claude", root), ["/bin/sh"]) is not None
+              and sandbox.testing_launch_refusal(sandbox.Cell("grade", root), ["/bin/sh"]) is None)
+    check("guard: a grade cell (no CLI, no login) runs untouched",
+          sandbox.testing_launch_refusal(sandbox.Cell("grade", root), ["/bin/sh", "-c", "true"]) is None)
+
     gcase = {**copy.deepcopy(case0), "id": "tiny-guard"}
     config.write_json(config.cases_dir() / "tiny-guard.json", gcase)
     config.write_json(cases.rubric_path("tiny-guard"), tiny_rubric(gcase))

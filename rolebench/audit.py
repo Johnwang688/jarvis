@@ -228,6 +228,7 @@ def bare_cds(command: str, depth: int = 0) -> int:
     arrives in). Only a command is read, never a pattern or a description."""
     tokens = _aware_tokens(command)
     scripts = shell_scripts(tokens) if depth < 3 else set()
+    splits = env_split_strings(tokens) if depth < 3 else set()
     n = 0
     for i, tok in enumerate(tokens):
         if tok == "cd" and (i == 0 or set(tokens[i - 1]) <= set(AWARE_PUNCT)) \
@@ -235,7 +236,32 @@ def bare_cds(command: str, depth: int = 0) -> int:
             n += 1
         elif i in scripts:
             n += bare_cds(tok, depth + 1)
+        elif i in splits:
+            n += bare_cds(tok.split("=", 1)[1] if tok.startswith("--split-string=") else
+                          tok[2:] if tok.startswith("-S") and len(tok) > 2 else tok, depth + 1)
     return n
+
+
+def env_split_strings(tokens: list[str]) -> set[int]:
+    """The indices of `env -S STRING` (`--split-string`) arguments: env splits
+    STRING into a command line and runs it (`env -S 'bash -c cd'`)."""
+    out = set()
+    commands = command_words(tokens)
+    punct = set(AWARE_PUNCT) | PUNCT
+    for i in sorted(commands):
+        if os.path.basename(tokens[i]) != "env":
+            continue
+        for j in range(i + 1, len(tokens)):
+            t = tokens[j]
+            if set(t) <= punct:
+                break
+            if t in ("-S", "--split-string") and j + 1 < len(tokens):
+                out.add(j + 1)
+                break
+            if (t.startswith("-S") and len(t) > 2) or t.startswith("--split-string="):
+                out.add(j)
+                break
+    return out
 
 
 # --- the advisory label: a lexical reading of cd ------------------------------------

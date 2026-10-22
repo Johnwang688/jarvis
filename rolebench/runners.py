@@ -287,27 +287,28 @@ def run_codex(*, model, prompt, cwd, timeout_s, max_turns=None, budget_usd=None,
 # --- the Jarvis loop --------------------------------------------------------------
 
 
-TESTING_ENV = "ROLEBENCH_TESTING"
-FAKE_BIN_ENV = "ROLEBENCH_FAKE_BIN"
+TESTING_ENV = config.TESTING_ENV
+FAKE_BIN_ENV = config.FAKE_BIN_ENV
 DUMMY_KEY_PREFIX = "sk-dummy"
 
 
 def testing_refusal(harness: str, binary=None, key: str | None = None) -> str | None:
-    """Why a run is refused under ROLEBENCH_TESTING=1 (both test suites set it),
+    """Why a run is refused under ROLEBENCH_TESTING (both test suites set it),
     or None. Nothing a test starts may reach a real model: a claude or codex run
-    needs its CLI under ROLEBENCH_FAKE_BIN and a ROLEBENCH_LOGIN_HOME that is not
-    the account's home (whose real login a temp HOME does not hide); a jarvis
-    run needs a dummy key. Checked inside the runners themselves, so a default
+    needs its CLI under ROLEBENCH_FAKE_BIN (never `/`, never a directory that
+    holds the account's real CLI) and a ROLEBENCH_LOGIN_HOME whose credential
+    files are not the account's; a jarvis run needs a dummy key. Whatever
+    ROLEBENCH_NET says. Checked inside the runners themselves, so a default
     bound before a test patched anything is covered too."""
-    if os.environ.get(TESTING_ENV) != "1":
+    if not config.testing():
         return None
-    why = f"test guard: ROLEBENCH_TESTING=1 refuses a {harness} run that could reach a real model"
+    why = f"test guard: ROLEBENCH_TESTING refuses a {harness} run that could reach a real model"
     if harness in ("claude", "codex"):
-        fake, login = os.environ.get(FAKE_BIN_ENV), os.environ.get("ROLEBENCH_LOGIN_HOME")
-        root = os.path.realpath(fake).rstrip("/") + "/" if fake else None
-        if (not root or not binary or not os.path.realpath(str(binary)).startswith(root) or not login
-                or os.path.realpath(login) == os.path.realpath(config.real_home())):
-            return why + f" (needs a fake CLI under {FAKE_BIN_ENV} and a fake ROLEBENCH_LOGIN_HOME)"
+        if not config.is_fake_cli(binary):
+            return why + f" (its CLI {binary} is not a fake under {FAKE_BIN_ENV})"
+        login = config.login_home_refusal(os.environ.get("ROLEBENCH_LOGIN_HOME"))
+        if login:
+            return why + f" ({login})"
     elif not key or not key.startswith(DUMMY_KEY_PREFIX):
         return why + " (needs a dummy key)"
     return None
@@ -319,7 +320,7 @@ def openrouter_key() -> str | None:
     Under ROLEBENCH_TESTING=1 the .env files are never read."""
     if os.environ.get("OPENROUTER_API_KEY"):
         return os.environ["OPENROUTER_API_KEY"]
-    if os.environ.get(TESTING_ENV) == "1":
+    if config.testing():
         return None
     candidates = [os.environ.get("ROLEBENCH_ENV_FILE"), config.source_repo() / ".env",
                   Path(config.real_home()) / "projects" / "Jarvis" / ".env"]

@@ -1462,6 +1462,19 @@ OpenRouter's price fetch raise. The runners themselves also refuse under `ROLEBE
 (`runners.testing_refusal`): a claude or codex run needs its CLI under `ROLEBENCH_FAKE_BIN` and a
 `ROLEBENCH_LOGIN_HOME` that is not the account's home, a jarvis run a dummy key, and `.env` is never
 read. A mutation runner must copy `tests/rolebench_testguard.py` beside the suite.
+Since the fourth review the guard also covers what a cell binds and what a test reads:
+`ROLEBENCH_TESTING` is on for any non-empty value but `0`; the guard gives the whole process a fake
+login home (dummy credentials) and fake `claude`/`codex` stubs under `ROLEBENCH_FAKE_BIN`, which may
+be neither `/` nor a directory holding the account's real CLI; `config.login_home()` raises when the
+login home is unset, the account's home, or holds credential files that resolve to the account's (so
+not even an expiry check reads the real login); `sandbox.launch` refuses a claude, judge or codex
+cell that would bind a CLI outside the fake bin, with one explicit per-call opt-in,
+`real_cli_probe="codex-sandbox"`, which allows exactly `codex sandbox ...` (no model call) in a codex
+cell, still with the fake login (only `test_codex_loopback` uses it: it measures codex's own
+sandbox); and `quota.daemon_reader` refuses (a test injects a reader). Restated claims (new clusters,
+member rulings) are one line, at most 400 characters, keep only the parsed location
+(`path:lo-hi`), and may not carry a 40-character run of a finding's own text; the existing clusters
+and a ruling's claim are fenced in the prompts that show them. `bare_cds` reads `env -S` strings.
 
 The judge is `claude -p --model opus` over shuffled, blinded findings plus the answer
 key, reading an export of the change commit (no `.git`, its diff beside it) in a

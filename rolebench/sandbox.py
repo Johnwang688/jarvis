@@ -573,9 +573,44 @@ def credential_header(cell: Cell) -> tuple[dict[str, int], str]:
     return fds, f"{len(body)}\n{body}"
 
 
+def bound_clis(cell: Cell) -> list[str]:
+    """The CLI this cell binds in (what bwrap_argv would mount), if any."""
+    if cell.profile in ("claude", "judge"):
+        return [b for b in [claude_binary()] if b]
+    if cell.profile == "codex":
+        return [str(r) for r in [codex_release()] if r]
+    return []
+
+
+def testing_launch_refusal(cell: Cell, command: list[str], real_cli_probe: str | None = None) -> str | None:
+    """Under ROLEBENCH_TESTING, why this launch is refused, or None. A cell
+    may bind only a fake CLI (under ROLEBENCH_FAKE_BIN) and only a fake login
+    home (config.login_home refuses the account's). The one exception is an
+    explicit per-call opt-in, `real_cli_probe="codex-sandbox"`: the real codex
+    release may be bound to run exactly `codex sandbox ...` (its own sandbox,
+    which makes no model call), still with a fake login."""
+    if not config.testing():
+        return None
+    why = config.login_home_refusal(os.environ.get("ROLEBENCH_LOGIN_HOME")) if cell.profile in ("claude", "judge", "codex") else None
+    if why:
+        return f"test guard: {why}"
+    real = [b for b in bound_clis(cell) if not config.is_fake_cli(b)]
+    if not real:
+        return None
+    if (real_cli_probe == "codex-sandbox" and cell.profile == "codex" and len(command) >= 2
+            and command[0] == str(CODEX / "bin" / "codex") and command[1] == "sandbox"):
+        return None
+    return (f"test guard: a {cell.profile} cell would bind the real CLI {real[0]}"
+            + (f" (the {real_cli_probe!r} opt-in allows only `codex sandbox` in a codex cell)" if real_cli_probe else ""))
+
+
 def launch(command: list[str], *, cell: Cell, run_id: str, timeout_s: float,
-           stdin: str | None = None) -> tuple[int | None, str, str, bool]:
-    """(returncode, stdout, stderr, timed_out) for `command` inside the cell."""
+           stdin: str | None = None, real_cli_probe: str | None = None) -> tuple[int | None, str, str, bool]:
+    """(returncode, stdout, stderr, timed_out) for `command` inside the cell.
+    `real_cli_probe` is a test's explicit opt-in (testing_launch_refusal)."""
+    refused = testing_launch_refusal(cell, command, real_cli_probe)
+    if refused:
+        raise SandboxError(refused)
     why = available()
     if why:
         raise SandboxError(f"cannot sandbox this run: {why}")

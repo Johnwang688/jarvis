@@ -781,8 +781,9 @@ def test_sandbox_escape(root: Path) -> None:
     else:
         check(f"pasta available for the escape probes ({sandbox.pasta_available()})", False)
     try:
-        with env(OPENROUTER_API_KEY="sk-dummy-not-a-key", CLAUDE_CODE_SSE_PORT="1", ANTHROPIC_BASE_URL="http://x",
-                 ROLEBENCH_LOGIN_HOME=None):
+        # the cells bind the guard's fake CLIs and fake login (rolebench_testguard): the probes test the
+        # cell's isolation, which does not depend on the CLI it would run
+        with env(OPENROUTER_API_KEY="sk-dummy-not-a-key", CLAUDE_CODE_SSE_PORT="1", ANTHROPIC_BASE_URL="http://x"):
             for profile, net in cells:
                 name = profile if net == "none" else f"{profile}+pasta"
                 try:
@@ -969,7 +970,7 @@ def test_pasta_network(root: Path) -> None:
         lr = json.loads(next((l for l in layer.stdout.splitlines() if l.startswith("NETPROBE ")), "NETPROBE {}")[9:])
         layer_accepts = accepts()
         # the whole cell
-        with env(ROLEBENCH_NET="pasta", ROLEBENCH_LOGIN_HOME=None):
+        with env(ROLEBENCH_NET="pasta"):                  # the guard's fake CLI and login (no real CLI bound)
             rc, out, err, _ = sandbox.launch(["python3", str(work / "netprobe.py"), json.dumps(spec)],
                                              cell=sandbox.Cell("jarvis", work), run_id=f"check-pasta-{os.getpid()}", timeout_s=120)
             node_out = node_err = None
@@ -1244,8 +1245,13 @@ def test_codex_loopback(root: Path) -> None:
     control) connects to both, so the probe is sensitive."""
     if sandbox.available():
         return
-    if not sandbox.codex_release() or not Path(config.real_home(), ".codex", "auth.json").is_file():
-        print("    (codex loopback test skipped: no codex binary or login on this host)")
+    # This one test binds the REAL codex release: it measures codex's own sandbox, which a fake cannot
+    # stand in for. It runs only `codex sandbox ...` (no model call), with the guard's fake login, behind
+    # sandbox.launch's explicit per-call opt-in real_cli_probe="codex-sandbox".
+    with env(PATH=rolebench_testguard.REAL_PATH):
+        real_release = sandbox.codex_release()
+    if not real_release:
+        print("    (codex loopback test skipped: no codex binary on this host)")
         return
     import secrets
     import socket
@@ -1261,12 +1267,13 @@ def test_codex_loopback(root: Path) -> None:
     (work / "probe.py").write_text(CODEX_PROBE.format(port=tcp.getsockname()[1], name=name))
     seen = {}
     try:
-        with env(ROLEBENCH_LOGIN_HOME=None):
+        with env(PATH=rolebench_testguard.REAL_PATH):
             for prof in (":workspace", ":danger-full-access"):
                 cmd = [str(sandbox.CODEX / "bin" / "codex"), "sandbox", "-P", prof, "-C", str(work), "--",
                        "python3", str(work / "probe.py")]
                 rc, out, err, to = sandbox.launch(cmd, cell=sandbox.Cell("codex", work),
-                                                  run_id=f"check-cxnet-{prof.strip(':')}-{os.getpid()}", timeout_s=90)
+                                                  run_id=f"check-cxnet-{prof.strip(':')}-{os.getpid()}", timeout_s=90,
+                                                  real_cli_probe="codex-sandbox")
                 line = next((l for l in out.splitlines() if l.startswith("PROBE ")), "PROBE {}")
                 accepts = {}
                 for key, sock in (("tcp", tcp), ("abstract", ab)):
@@ -2252,7 +2259,7 @@ def test_pool(shas, root: Path) -> None:
         # validation of the clustering reply
         fids, cids = ["V1", "V2"], ["p1"]
         ok_doc = {"assign": [{"finding": "V1", "cluster": "p1"}, {"finding": "V2", "cluster": "new1"}],
-                  "new_clusters": [{"id": "new1", "severity": "LOW", "mechanism": "m", "location": "l"}]}
+                  "new_clusters": [{"id": "new1", "severity": "LOW", "mechanism": "m", "location": "a.py:1"}]}
         bad = {
             "missing a finding": {"assign": ok_doc["assign"][:1], "new_clusters": []},
             "repeated finding": {"assign": ok_doc["assign"] + [{"finding": "V1", "cluster": "p1"}], "new_clusters": ok_doc["new_clusters"]},
