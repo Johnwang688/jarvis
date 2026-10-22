@@ -112,8 +112,8 @@ def validate_pooled(d, case: dict, rubric: dict | None = None) -> dict:
     accepted as non-issues; `members` lists both kinds. Optional `duplicates`
     maps a key id (original, rubric or pooled) to the findings of clusters a
     ruling found to be that entry. One finding is never under two ids."""
-    _need(isinstance(d, dict) and POOLED_KEYS <= set(d) <= POOLED_KEYS | {"non_issues", "duplicates"},
-          f"a pooled key has exactly {sorted(POOLED_KEYS)} (and optionally non_issues, duplicates)")
+    _need(isinstance(d, dict) and POOLED_KEYS <= set(d) <= POOLED_KEYS | {"non_issues", "duplicates", "duplicate_clusters"},
+          f"a pooled key has exactly {sorted(POOLED_KEYS)} (and optionally non_issues, duplicates, duplicate_clusters)")
     _need(d["case"] == case["id"], f"pooled key for {d['case']!r}, not {case['id']!r}")
     _need(d["source"] == "pooled", "source must be 'pooled'")
     _need(isinstance(d["adjudicated_by"], str) and d["adjudicated_by"].strip() != "", "adjudicated_by must be a name")
@@ -145,6 +145,12 @@ def validate_pooled(d, case: dict, rubric: dict | None = None) -> dict:
     targets = original | {g["id"] for g in gt} | {e["id"] for e in (rubric or {}).get("entries") or ()}
     _need(isinstance(dup, dict) and all(isinstance(k, str) and k in targets for k in dup),
           f"duplicates must map key ids ({sorted(targets)}) to findings")
+    dcl = d.get("duplicate_clusters", {})
+    # the cluster ids accepted as duplicates, kept so a restored pool never reuses one
+    _need(isinstance(dcl, dict) and all(isinstance(k, str) and re.fullmatch(r"p\d+", k) and v in dup for k, v in dcl.items())
+          and set(dcl.values()) == set(dup), "duplicate_clusters must map p<n> cluster ids to the duplicates' targets")
+    _need(not {f"pool-{k}" for k in dcl} & ids and not {f"{POOLED_NI_PREFIX}{k}" for k in dcl} & ids,
+          "a duplicate cluster's id is not also a pooled entry's")
     placed: dict = {}
     for gid, rows in list(mem.items()) + [(f"duplicate of {k}", v) for k, v in dup.items()]:
         _need(isinstance(rows, list) and rows and all(

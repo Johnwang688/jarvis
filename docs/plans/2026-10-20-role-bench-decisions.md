@@ -205,3 +205,8 @@ spurious ones (necessary, not sufficient). Opus built a verified rubric per revi
   may answer `duplicate <key id>`; accepting it credits that id. Non-issue matches are gated to the
   finding's files. A disputed original entry names its answering non-issue, and a match on it
   counts as that non-issue on a rescore.
+- **Delta review fixes (PR #291, 2026-10-21).** Unverified findings pending on a settled cluster
+  get a one-time member ruling (`same` / `different`) before `--accept-members` takes them; members
+  ruled different become new proposed clusters. A duplicate of an entry the rubric later disputes
+  scores as that entry's non-issue. Caveats recorded in the notes: original-key recall depends on
+  the adjudication state, and the ruling correction only goes one way.

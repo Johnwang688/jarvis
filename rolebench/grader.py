@@ -180,12 +180,15 @@ def one_line(text) -> str:
     return " ".join(str(text or "").split())
 
 
-def unfence(text: str, nonce: str) -> str:
-    """`text` with every occurrence of the nonce removed, repeated until none is
-    left (one pass over "aNONCENONCEb"-style splices can rebuild it)."""
+def unfence(text: str, *nonces: str) -> str:
+    """`text` with every occurrence of each fence's nonce removed, repeated until
+    none is left (one pass over "aNONCENONCEb"-style splices can rebuild one).
+    Text inside one fence is stripped of every fence's nonce in the prompt."""
     text = str(text)
-    while nonce and nonce in text:
-        text = text.replace(nonce, "")
+    nonces = tuple(n for n in nonces if n)
+    while any(n in text for n in nonces):
+        for n in nonces:
+            text = text.replace(n, "")
     return text
 
 
@@ -200,7 +203,7 @@ def non_issue_text(nis: list[dict]) -> str:
         or "(none recorded)"
 
 
-def findings_text(items: list[dict], ids: dict, nonce: str) -> str:
+def findings_text(items: list[dict], ids: dict, nonce: str, *other_nonces: str) -> str:
     """The blinded findings, one line each plus the scenario, with the fence's
     nonce removed from the text so a finding cannot close the fence."""
     lines = []
@@ -208,7 +211,7 @@ def findings_text(items: list[dict], ids: dict, nonce: str) -> str:
         f = items[i]
         where = one_line(f.get("file")) + (f":{f['line']}" if f.get("line") is not None else "")
         text = f"{fid} [{f.get('severity')}] {where} - {one_line(f.get('title'))}\n    scenario: {one_line(f.get('scenario'))}"
-        lines.append(unfence(text, nonce))
+        lines.append(unfence(text, nonce, *other_nonces))
     return "\n".join(lines)
 
 
@@ -218,9 +221,9 @@ def build_prompt(items: list[dict], ids: dict, cands: dict, key: dict, nonce: st
     ni_cands = ni_cands or {}
     cand_lines = "\n".join(f"{fid}: {', '.join(cands[fid]) or 'none (this finding cannot be a match)'}"
                            f"; non-issues: {', '.join(ni_cands.get(fid) or ()) or 'none'}" for fid in ids)
-    return PROMPT.format(key=unfence(key_text(key["entries"]), key_nonce),
-                         non_issues=unfence(non_issue_text(key["non_issues"]), key_nonce),
-                         findings=findings_text(items, ids, nonce), candidates=cand_lines, nonce=nonce, key_nonce=key_nonce)
+    return PROMPT.format(key=unfence(key_text(key["entries"]), key_nonce, nonce),
+                         non_issues=unfence(non_issue_text(key["non_issues"]), key_nonce, nonce),
+                         findings=findings_text(items, ids, nonce, key_nonce), candidates=cand_lines, nonce=nonce, key_nonce=key_nonce)
 
 
 def validate(doc, finding_ids: list[str], key_ids: list[str], ni_ids: list[str],
@@ -326,10 +329,16 @@ def assess(run_id: str, doc: dict, key: dict) -> dict:
             hit_members |= mine
         elif gid in pooled_ni:
             fp_members |= mine
-    # findings a ruling found to be a key entry the matcher missed (accepted by the lead)
+    # findings a ruling found to be a key entry the matcher missed (accepted by the lead);
+    # a duplicate of an entry the rubric later disputed scores as that entry's non-issue,
+    # like a direct match on it
     for gid, mem in (key.get("duplicates") or {}).items():
         mine = {int(i) for r, i in mem if r == run_id and int(i) in unmatched}
-        if mine and gid in entry_ids:
+        if not mine:
+            continue
+        if gid in disputed_as:
+            fp_members |= mine
+        elif gid in entry_ids:
             caught.add(gid)
             hit_members |= mine
     fp_members -= hit_members

@@ -122,7 +122,10 @@ def path_candidates(text: str, env: dict | None = None, depth: int = 0) -> list[
     env = env if env is not None else {}
     out = []
     tokens = _shell_tokens(text)
-    scripts = shell_scripts(tokens) if depth < 3 else set()
+    # broad on purpose (a detector): any shell word, command position or not, as main read it
+    scripts = (shell_scripts(tokens, command_only=False)
+               | {i for i in range(2, len(tokens)) if SHELL_C.match(tokens[i - 1])
+                  and os.path.basename(tokens[i - 2]) in SHELLS}) if depth < 3 else set()
     ordinal = -1
     for i, tok in enumerate(tokens):
         if not set(tok) <= PUNCT:
@@ -150,22 +153,61 @@ def path_candidates(text: str, env: dict | None = None, depth: int = 0) -> list[
     return out
 
 
-def shell_scripts(tokens: list[str]) -> set[int]:
-    """The indices of the scripts that `sh`/`bash`/... run with `-c`, whatever
-    the options' order: `bash -lc S`, `bash --login -c S`, `bash -c -l S`,
-    `bash -x -c S`. The script is the first non-option word after the options,
-    once one of them carries `c`."""
-    out = set()
-    for i, tok in enumerate(tokens):
-        if os.path.basename(tok) not in SHELLS:
+# Wrappers that run the next word as the command (`env X=1 bash -c ...`).
+WRAPPER_WORDS = {"env", "exec", "command", "builtin", "nohup", "time", "nice", "sudo", "stdbuf", "timeout", "xargs"}
+# Shell options that take the next word as their argument (`-o pipefail`, `-O extglob`).
+SHELL_ARG_OPT = re.compile(r"^[-+][A-Za-z]*[oO]$|^--(?:rcfile|init-file)$")
+
+
+def command_words(tokens: list[str]) -> set[int]:
+    """The indices of the words in command position: the first word of each
+    command (after `;`, `&&`, `|`, ...), past NAME=value assignments, and the
+    word a wrapper (`env`, `sudo`, `timeout 30`, ...) runs."""
+    out, start, i = set(), True, 0
+    punct = set(AWARE_PUNCT) | PUNCT
+    while i < len(tokens):
+        t = tokens[i]
+        if set(t) <= punct:
+            start, i = True, i + 1
             continue
-        has_c = False
-        for j in range(i + 1, len(tokens)):
+        if start:
+            if re.fullmatch(r"[A-Za-z_]\w*=.*", t, re.S):
+                i += 1
+                continue
+            out.add(i)
+            if os.path.basename(t) in WRAPPER_WORDS:
+                i += 1
+                while i < len(tokens) and tokens[i].startswith("-") and not set(tokens[i]) <= punct:
+                    i += 1
+                if os.path.basename(t) == "timeout" and i < len(tokens) and re.fullmatch(r"[\d.]+[smhd]?", tokens[i]):
+                    i += 1
+                continue
+            start = False
+        i += 1
+    return out
+
+
+def shell_scripts(tokens: list[str], command_only: bool = True) -> set[int]:
+    """The indices of the scripts that `sh`/`bash`/... run with `-c`, whatever
+    the options' order (`bash -lc S`, `bash --login -c S`, `bash -c -l S`,
+    `bash -o pipefail -c S`): the first word after the options, once one of
+    them carries `c`, an option's own argument (`-o pipefail`) skipped. With
+    `command_only` the shell must be in command position (`echo bash -c x`
+    runs no shell)."""
+    out = set()
+    commands = command_words(tokens) if command_only else None
+    punct = set(AWARE_PUNCT) | PUNCT
+    for i, tok in enumerate(tokens):
+        if os.path.basename(tok) not in SHELLS or (commands is not None and i not in commands):
+            continue
+        has_c, j = False, i + 1
+        while j < len(tokens):
             t = tokens[j]
-            if set(t) <= PUNCT or set(t) <= set(AWARE_PUNCT):
+            if set(t) <= punct:
                 break
-            if t.startswith("-") and t != "-":
-                has_c = has_c or bool(SHELL_C.match(t)) or (not t.startswith("--") and "c" in t[1:])
+            if (t.startswith("-") or t.startswith("+")) and len(t) > 1:
+                has_c = has_c or bool(SHELL_C.match(t)) or (t.startswith("-") and not t.startswith("--") and "c" in t[1:])
+                j += 2 if SHELL_ARG_OPT.match(t) else 1
                 continue
             if has_c:
                 out.add(j)

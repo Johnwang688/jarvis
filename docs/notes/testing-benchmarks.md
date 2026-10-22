@@ -1419,7 +1419,17 @@ mechanism and location; accepting a duplicate maps its members to that key id (`
 the pooled key) instead of creating an entry; `--accept-invalid` needs an invalid ruling that saw
 every member, and makes it a pooled **non-issue** (`non_issues` in `cases/pooled/<case>.json`, id
 `pool-ni-<cluster>`), which later runs match in stage 1. One finding is never under two pooled
-ids (`validate_pooled`). #289's guarantees hold for both kinds:
+ids (`validate_pooled`). A finding proposed for a settled cluster (accepted, non-issue or
+duplicate) waits as pending; when it is unverified, `--rule` makes one **member ruling** per such
+cluster (the settled claim as the key holds it, fenced, and the pending findings: `same` or
+`different` each, with what it saw recorded), members ruled different leave as new proposed
+clusters (`split_from`), and `--accept-members` refuses an unverified pending member no member
+ruling found to be the same claim (a confirmed one is taken as before). A lost pool rebuilds the
+committed key byte for byte (the key keeps each entry's source and ruled wording, and the ids of
+clusters accepted as duplicates in `duplicate_clusters`, so a new cluster never reuses one).
+Two caveats: original-key recall moves with adjudication (an accepted duplicate of an original
+entry raises it), so compare runs only once the pool is current; and the correction goes one way
+(a ruling can turn a missed match into a hit, never undo a match the matcher made). #289's guarantees hold for both kinds:
 committed ids are never dropped or redefined without `--redefine`, pending members wait for
 `--accept-members`, and the key's evidence names the cluster, never reviewer (or ruling) text.
 Scores per run (`grader.assess`, recomputed by the report with no model call, so an accepted

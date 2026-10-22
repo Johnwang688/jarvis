@@ -231,7 +231,8 @@ def cmd_pool(args) -> int:
         except (pool.PoolError, cases.CaseError) as exc:
             raise SystemExit(f"pool: {exc}")
         print(f"{pool.key_path(args.case)}: {sum(c['status'] == pool.ACCEPTED for c in doc['clusters'])} accepted cluster(s), "
-              f"{sum(c['status'] == pool.NON_ISSUE for c in doc['clusters'])} non-issue(s)")
+              f"{sum(c['status'] == pool.NON_ISSUE for c in doc['clusters'])} non-issue(s), "
+              f"{sum(c['status'] == pool.DUPLICATE for c in doc['clusters'])} duplicate(s)")
     else:
         try:
             doc = pool.pool_case(args.case, quota_override=quota_override(args))
@@ -241,15 +242,13 @@ def cmd_pool(args) -> int:
         print(f"{c['id']} [{c.get('severity_final') or c['severity']}] {c['status']}: {c['location']}: "
               f"{c['mechanism']} ({len(c['members'])} member(s), "
               f"{sum((m.get('status') or pool.CONFIRMED) == pool.UNVERIFIED for m in c['members'])} unverified)")
-        ruling = c.get("ruling")
-        if ruling:
-            print(f"    ruling: {ruling['ruling']}: " + (
-                f"[{ruling['severity']}] {ruling['location']}: {ruling['mechanism']}" if ruling["ruling"] == "valid"
-                else f"{ruling['why_not']} ({ruling['citation']})"))
-        elif c["status"] == pool.PROPOSED:
-            print("    ruling: none yet (--rule)")
+        print(f"    {ruling_line(c.get('ruling'), c)}")
+        same = pool.ruled_same(c)
         for m in c.get("pending") or ():
-            print(f"    pending (needs --accept-members {c['id']}): {m['run']} finding {m['finding']}: {m.get('title', '')}")
+            unverified = (m.get("status") or pool.CONFIRMED) != pool.CONFIRMED
+            what = ("ruled the same claim; " if (m["run"], int(m["finding"])) in same
+                    else "unverified: needs --rule first; " if unverified else "")
+            print(f"    pending ({what}needs --accept-members {c['id']}): {m['run']} finding {m['finding']}: {m.get('title', '')}")
     print(pool.pool_path(args.case))
     return 0
 
@@ -262,6 +261,24 @@ def run_dir_of(name: str) -> Path:
     if not name or run_dir.parent != root:
         raise SystemExit(f"--run {name!r} is not a run directory under {root}")
     return run_dir
+
+
+def ruling_line(ruling: dict | None, c: dict) -> str:
+    """One line per ruling kind (a restored cluster's ruling may carry only its kind)."""
+    if not ruling:
+        return "ruling: none yet (--rule)" if c["status"] == pool.PROPOSED else "ruling: none"
+    kind = ruling.get("ruling")
+    stale = " (stale: it never saw every member; --rule)" if c["status"] == pool.PROPOSED and pool.unseen(c) else ""
+    if kind == "valid":
+        body = (f"[{ruling.get('severity', '?')}] {ruling.get('location', '?')}: {ruling.get('mechanism', '?')}"
+                if "mechanism" in ruling else "(restored from the key)")
+    elif kind == "invalid":
+        body = f"{ruling.get('why_not', '?')} ({ruling.get('citation', '?')})"
+    elif kind == "duplicate":
+        body = f"of {ruling.get('id', '?')}: {ruling.get('why', '')}"
+    else:
+        body = repr(ruling)[:120]
+    return f"ruling: {kind}: {body}{stale}"
 
 
 def cmd_clear_flags(args) -> int:
