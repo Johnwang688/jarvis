@@ -82,6 +82,10 @@ def state(mock) -> dict:
         "builds": {},
         "build_auto": None,
         "bin_fresh": True,
+        # What `GET …/vex/fresh` answers (the chain's skip, 2026-10-21); False
+        # keeps the clean and build every other section expects.
+        "fresh_answer": False,
+        "fresh_asked": 0,
         "stays_stale": False,
         "stale_until_rebuild": False,
         "download_delay": 0,
@@ -431,6 +435,12 @@ def handle(h, mock, method: str, path: str, body) -> bool:
         det = v["projects"].get(pid) or {"project_id": pid, "vex": False, "reason": NOT_VEX}
         if parts[3:] == [] and method == "GET":
             h._json(det)
+            return True
+        if parts[3:] == ["fresh"] and method == "GET":
+            v["fresh_asked"] += 1
+            fresh = bool(v["fresh_answer"])
+            h._json({"fresh": fresh, "reason": None if fresh else
+                     f"build/{det.get('name', 'x')}.bin is older than the sources; Build first, then download"})
             return True
         if parts[3:] == ["build"] and method == "POST":
             if not exactly({"action"}, {"action"}):

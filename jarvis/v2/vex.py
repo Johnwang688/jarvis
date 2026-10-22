@@ -2000,6 +2000,24 @@ class Vex:
                 pass  # Actual EOF owns settlement, even if the listing no longer has this terminal.
         return view
 
+    def fresh(self, project_id) -> dict:
+        """Whether a download would send the project's binary as it is now:
+        `{fresh, reason}`, by `_fresh`'s own rule, read only. The HUD's one
+        click asks first and goes straight to Download when nothing changed
+        since the last build (the owner, 2026-10-21); otherwise it cleans and
+        builds as before. Never under the build lock, so it can only be a
+        hint: the download judges again under the lock, and a binary that
+        went stale in between is still refused (`build_first`)."""
+        project = self._project(project_id)
+        detected = self._detected(project)
+        if detected.language != "cpp" or not PROJECT_NAME.fullmatch(detected.name):
+            return {"fresh": False, "reason": "this project cannot be downloaded here"}
+        try:
+            self._fresh(project.root, detected.name)
+        except BuildFirst as exc:
+            return {"fresh": False, "reason": str(exc)}
+        return {"fresh": True, "reason": None}
+
     def _fresh(self, root, name) -> dict:
         """`build/<name>.bin` if it may be sent, else `BuildFirst`.
 
@@ -2367,6 +2385,9 @@ def route(handler, daemon, parts, query):
                 _object(query, ())
                 body = _object(handler._body(), ("action",), ("action",))
                 return 202, vex.start_build(project_id, body["action"])
+            if parts[3:] == ["fresh"] and method == "GET":
+                _object(query, ())
+                return 200, vex.fresh(project_id)
             if parts[3:] == ["download"] and method == "POST":
                 _object(query, ())
                 body = _object(handler._body(), ("slot", "name"), ("slot", "name"))

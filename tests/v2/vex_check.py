@@ -1083,6 +1083,34 @@ class Device(DaemonBase):
         self.assertIn("older than the sources", self.download(status=409)["error"])
         self.assertEqual(self.world.calls("vexcom"), [])
 
+    def fresh(self):
+        return self.owner("GET", f"/projects/{self.project.id}/vex/fresh")
+
+    def test_fresh_answers_what_the_download_would_judge_and_runs_nothing(self):
+        # The HUD's one click asks first and skips clean and build when
+        # nothing changed (the owner, 2026-10-21). Same rule as `_fresh`.
+        answer = self.fresh()
+        self.assertEqual((answer["fresh"], "Build first" in answer["reason"]), (False, True))
+        self.build()
+        self.assertEqual(self.fresh(), {"fresh": True, "reason": None})
+        calls = (len(self.world.calls("make")), len(self.world.calls("vexcom")))
+        self._header()
+        self.assertFalse(self.fresh()["fresh"], "an edited header makes it stale")
+        self.build()
+        self.assertTrue(self.fresh()["fresh"])
+        self._built_then_older()
+        self.assertIn("older than the sources", self.fresh()["reason"])
+        self.assertTrue(self.download(status=409))
+        # The read itself never ran make or vexcom.
+        self.assertEqual(len(self.world.calls("vexcom")), calls[1])
+        self.build()
+        vex.mark_unfinished(str(self.folder))
+        self.assertFalse(self.fresh()["fresh"], "an unfinished build is never current")
+
+    def test_fresh_refuses_what_the_download_refuses(self):
+        self.owner("GET", "/projects/0000dead/vex/fresh", status=404)
+        self.owner("GET", f"/projects/{self.project.id}/vex/fresh?x=1", status=400)
+
     # -- VX-2 review M2 and its delta review (MED-1, LOW-1..3): what may be sent ------------
 
     def _built_then_older(self):

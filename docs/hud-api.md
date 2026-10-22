@@ -1639,6 +1639,14 @@ visible-window USB probe and is not an unclicked manual action notice.
   `file:line:col: error|warning:` lines (notes skipped; a file under the
   project comes back relative, with `/`); `bin` is `{path: "build/<name>.bin",
   size, mtime}` when this build wrote one. The last 32 are kept.
+- `GET /projects/{id}/vex/fresh` → `{fresh, reason}`: whether a download
+  would send the binary as it is now, by the download's own rule (`Vex._fresh`
+  below), read only and never under the build lock. `reason` is the
+  `build_first` sentence when it is not, or "this project cannot be
+  downloaded here" for a Python project or a name `P=` refuses. Runs no
+  program. The HUD's Download asks it first and skips the clean and build
+  when it says `true` (2026-10-21); the download still judges again under
+  the lock.
 - `POST /projects/{id}/vex/download` `{slot, name}` → 202 `{terminal_id, download_id}`.
   `slot` an integer 1–8 (not a string, not a bool); `name`
   `^[A-Za-z0-9_][A-Za-z0-9_-]{0,19}$` — both 400 otherwise. 409 `{error,

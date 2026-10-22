@@ -346,6 +346,8 @@ export interface ChainView {
   label: string;
   slot: number;
   phase: "start" | "clean" | "build" | "pause" | "rebuild" | "download" | "retry";
+  /** Nothing changed since the last build, so the chain goes straight to the download (2026-10-21). */
+  skipBuild?: boolean;
   /** Which try of the download this is (`DOWNLOAD_TRIES`); 1 when absent. */
   attempt?: number;
   /** The owner pressed Stop. */
@@ -404,8 +406,10 @@ export function chainStepOf(phase: ChainView["phase"]): ChainStep {
 export function chainSteps(c: ChainView): { step: ChainStep; state: "done" | "busy" | "todo" }[] {
   const done = c.done ?? [];
   const now = chainStepOf(c.phase);
-  const order: ChainStep[] = done.includes("rebuild") || now === "rebuild"
-    ? ["clean", "build", "rebuild", "download"] : ["clean", "build", "download"];
+  const rebuilt = done.includes("rebuild") || now === "rebuild";
+  const order: ChainStep[] = c.skipBuild
+    ? (rebuilt ? ["rebuild", "download"] : ["download"])
+    : rebuilt ? ["clean", "build", "rebuild", "download"] : ["clean", "build", "download"];
   return order.map((step) => ({
     step,
     state: done.includes(step) ? "done" : step === now ? "busy" : "todo",

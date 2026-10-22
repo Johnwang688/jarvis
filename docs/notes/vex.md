@@ -1092,3 +1092,46 @@ Seventeen mutations each failed their checks (the review's seven last):
 - Stop during the next try's request ignored;
 - no freshness rule;
 - a never-validated reading passing.
+
+**Download skips the clean and build when nothing changed (the owner,
+2026-10-21, revising decision 3).** "Can you have the download button not
+force a rebuild if nothing in the code changed?" Until now one click always
+ran clean → build → download, so every download paid for a full rebuild.
+
+- **The daemon.** `GET /projects/{id}/vex/fresh` answers `{fresh, reason}`
+  by `Vex._fresh`, the rule the download itself enforces: a binary exists,
+  no build is unfinished, and either this daemon's last successful build
+  wrote exactly it and the sources' digest is unchanged since that build
+  started, or (after a restart, or a binary VS Code or `vexbuild` wrote) it
+  is newer than every source. Read only, runs nothing, not under the build
+  lock.
+- **The HUD chain.** It asks first. `true`: `chain.skipBuild`, the status
+  line says "Nothing changed since the last build: downloading it as it
+  is.", and the step list shows only Download. `false`, or the read failed:
+  clean → build → download, exactly as before. The brain terminal is still
+  paused only right before the download.
+- **Still safe if the answer goes stale.** The download judges again under
+  the build lock. A source saved between the check and the download gets
+  `build_first`, and the chain's existing single rebuild runs, then the
+  download.
+
+Checks (fakes only):
+
+- `vex_check` `Device`: the answer before and after a build, after a header
+  edit, for an older binary and an unfinished build; runs no program; 404
+  and 400 refusals.
+- `state/vex.test.ts`: a current binary downloads with no clean or build and
+  the steps list only Download; stale or a failed check cleans and builds; a
+  binary that goes stale between the check and the download gets one
+  rebuild; the brain terminal is paused only right before the download.
+- `lib/vex.test.ts`: the step list with `skipBuild`, with and without a
+  rebuild.
+- `hud_v2_vex_check` 339/339: a new skip section (a current binary
+  downloads with no build; a stale one still cleans and builds). The mock
+  answers `fresh` from `fresh_answer`, which is false by default, so the
+  other sections keep the clean and build.
+
+Seven mutants, six caught: always skip, never skip, a failed check counted
+as current, step list ignoring the skip, the daemon always answering
+current, and the query not checked. Not caught: the API's strict
+`fresh === true` parse; no test pins it.
