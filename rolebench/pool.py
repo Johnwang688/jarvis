@@ -390,6 +390,24 @@ def pool_case(case_id: str, pool_fn=default_pool_fn, quota_override: str = "", q
         return pool
 
 
+def status_of(m: dict) -> str:
+    """A member's status now, from its run's current judge.json: confirmed only
+    while that is the legacy judge's and still calls the finding valid-new.
+    Re-graded by the rubric grader, re-judged, or with no judge.json at all, it
+    is unverified (fail closed), whatever the pool recorded when it joined."""
+    try:
+        jd = json.loads((config.runs_root() / str(m["run"]) / "judge.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, KeyError):
+        return UNVERIFIED
+    if not jd.get("valid") or judge.grader_of(jd) != grader.LEGACY:
+        return UNVERIFIED
+    ids = jd.get("finding_ids") or {}
+    for v in jd.get("matches") or ():
+        if v.get("verdict") == CONFIRMED and v.get("finding") in ids and int(ids[v["finding"]]) == int(m["finding"]):
+            return CONFIRMED
+    return UNVERIFIED
+
+
 def members(pool: dict) -> set[tuple[str, int]]:
     """Every (run, finding) already placed: members and pending ones."""
     return {(m["run"], int(m["finding"])) for c in pool["clusters"]
@@ -496,7 +514,7 @@ def unseen(c: dict, unverified_only: bool = False) -> list[dict]:
     ruling): a ruling covers exactly the (run, finding) set it was shown."""
     seen = {(r, int(i)) for r, i in (c.get("ruling") or {}).get("seen") or ()}
     return [m for m in c["members"] if (m["run"], int(m["finding"])) not in seen
-            and (not unverified_only or (m.get("status") or CONFIRMED) != CONFIRMED)]
+            and (not unverified_only or status_of(m) != CONFIRMED)]
 
 
 def needs_ruling(c: dict) -> bool:
@@ -528,25 +546,47 @@ FINDINGS {nonce}>>>
 ## Your job
 For each finding answer "same" when it describes this same settled claim (the same \
 mechanism at the same place; wording, line numbers and severity may differ), otherwise \
-"different". Reply with one JSON object and nothing else:
-{{"members": [{{"finding": "M1", "verdict": "same", "why": "short reason"}}, ...]}}
+"different". For a "different" one, restate its claim in your own words, checked against \
+the code: a proposed "severity" (HIGH, MED or LOW), a one-sentence "mechanism" and a \
+"location" (path:line or path:line-line). Never copy a finding's own text into them. \
+Reply with one JSON object and nothing else:
+{{"members": [{{"finding": "M1", "verdict": "same", "why": "short reason"}}, \
+{{"finding": "M2", "verdict": "different", "why": "short reason", "severity": "LOW", \
+"mechanism": "...", "location": "path:12"}}]}}
 Every finding appears exactly once.
 """
 
 
+MEMBER_KEYS = {"same": {"finding", "verdict", "why"},
+               "different": {"finding", "verdict", "why", "severity", "mechanism", "location"}}
+
+
 def validate_member_ruling(doc, finding_ids: list[str]) -> dict:
-    """{"M1": "same"|"different", ...}: every finding exactly once, or PoolError."""
+    """{"M1": "same" | {"severity", "mechanism", "location"} (a restated
+    "different" claim), ...}: every finding exactly once, a different one's
+    claim restated with a severity, a mechanism and a location that names a
+    path[:line[-line]], or PoolError."""
     if not isinstance(doc, dict) or set(doc) != {"members"} or not isinstance(doc["members"], list):
         raise PoolError('expected {"members": [...]}')
     out = {}
     for m in doc["members"]:
-        if not isinstance(m, dict) or set(m) != {"finding", "verdict", "why"} or not all(isinstance(v, str) for v in m.values()):
+        if not isinstance(m, dict) or m.get("verdict") not in MEMBER_KEYS:
             raise PoolError(f"bad member verdict {m!r}")
-        if m["verdict"] not in ("same", "different"):
-            raise PoolError(f"bad verdict {m['verdict']!r}")
+        if set(m) != MEMBER_KEYS[m["verdict"]] or not all(isinstance(v, str) for v in m.values()):
+            raise PoolError(f"a {m['verdict']} verdict has exactly {sorted(MEMBER_KEYS[m['verdict']])}: {m!r}")
         if m["finding"] not in finding_ids or m["finding"] in out:
             raise PoolError(f"unknown or repeated finding {m['finding']!r}")
-        out[m["finding"]] = m["verdict"]
+        if m["verdict"] == "different":
+            claim = {k: m[k].strip() for k in ("severity", "mechanism", "location")}
+            if claim["severity"] not in POOL_SEVERITIES or not claim["mechanism"]:
+                raise PoolError(f"a different finding needs a severity and a mechanism: {m!r}")
+            if not cases.parse_locations(claim["location"]):
+                raise PoolError(f"location {claim['location']!r} names no path[:line[-line]]")
+            if cases.SECRET_RE.search(json.dumps(claim)):
+                raise PoolError("the restated claim contains something that looks like a credential")
+            out[m["finding"]] = claim
+        else:
+            out[m["finding"]] = "same"
     if set(out) != set(finding_ids):
         raise PoolError("every finding needs exactly one verdict")
     return out
@@ -560,13 +600,20 @@ def ruled_same(c: dict) -> set[tuple[str, int]]:
 def unruled_pending(c: dict) -> list[dict]:
     """A settled cluster's unverified pending members no member ruling has seen."""
     seen = {(r, int(i)) for mr in c.get("member_rulings") or () for r, i in mr.get("seen") or ()}
-    return [m for m in c.get("pending") or () if (m.get("status") or CONFIRMED) != CONFIRMED
+    return [m for m in c.get("pending") or () if status_of(m) != CONFIRMED
             and (m["run"], int(m["finding"])) not in seen]
 
 
 def settled_text(c: dict, key: dict) -> str:
     """What the cluster settled, as the key holds it (never reviewer text)."""
     one = grader.one_line
+    if c["status"] == DUPLICATE and c["duplicate_of"] in (key.get("disputed_as") or {}):
+        g = next((e for e in key.get("disputed_entries") or () if e["id"] == c["duplicate_of"]), None)
+        nid = key["disputed_as"][c["duplicate_of"]]
+        n = next((x for x in key["non_issues"] if x["id"] == nid), None)
+        return (f"an entry the rubric disputed, {c['duplicate_of']}"
+                + (f": {one(g['location'])}: {one(g['mechanism'])}" if g else "")
+                + (f"\nits non-issue {nid}: claim: {one(n['claim'])}; why not: {one(n['why_not'])}" if n else ""))
     if c["status"] == DUPLICATE:
         g = next((e for e in key["entries"] if e["id"] == c["duplicate_of"]), None)
         return (f"a known defect, key entry {c['duplicate_of']}: [{g['severity']}] {one(g['location'])}: {one(g['mechanism'])}"
@@ -679,20 +726,18 @@ def rule_case(case_id: str, rule_fn=default_rule_fn, quota_override: str = "", q
                     if result is not None:
                         pair = lambda m: [m["run"], int(m["finding"])]   # noqa: E731
                         same = [pair(batch[i]) for v, i in ids.items() if result[v] == "same"]
-                        diff = [batch[i] for v, i in ids.items() if result[v] == "different"]
+                        diff = [(batch[i], result[v]) for v, i in ids.items() if result[v] != "same"]
                         c.setdefault("member_rulings", []).append({
                             "at": time.strftime("%Y-%m-%dT%H:%M:%S"), "model": RULER_MODEL, "cost_usd": cost,
-                            "seen": [pair(m) for m in batch], "same": same, "different": [pair(m) for m in diff]})
-                        out = {tuple(pair(m)) for m in diff}
+                            "seen": [pair(m) for m in batch], "same": same, "different": [pair(m) for m, _ in diff]})
+                        out = {tuple(pair(m)) for m, _ in diff}
                         c["pending"] = [m for m in c["pending"] if tuple(pair(m)) not in out]
-                        for m in diff:
+                        for m, claim in diff:
+                            # the ruling's own restatement, never the finding's raw file or text
                             n = _next_id(pool, case_id)
-                            loc = m.get("file") if cases.parse_locations(str(m.get("file") or "")) else c["location"]
                             pool["clusters"].append({
-                                "id": f"p{n}", "severity": m.get("severity") if m.get("severity") in POOL_SEVERITIES else "LOW",
-                                "mechanism": f"split from {c['id']}: a finding ruled a different claim than it",
-                                "location": loc, "members": [m], "pending": [], "judge_notes": [], "status": PROPOSED,
-                                "split_from": c["id"]})
+                                "id": f"p{n}", **claim, "members": [m], "pending": [], "judge_notes": [],
+                                "status": PROPOSED, "split_from": c["id"], "restated": True})
                 finally:
                     save()
                 if result is None:
@@ -735,7 +780,7 @@ def adjudicate(case_id: str, accept=(), reject=(), severities: dict | None = Non
                 continue
             ruling = c.get("ruling") or {}
             kind = ruling.get("ruling")
-            unverified = [m for m in c["members"] if (m.get("status") or CONFIRMED) != CONFIRMED]
+            unverified = [m for m in c["members"] if status_of(m) != CONFIRMED]
             if unverified and kind not in ("valid", "duplicate"):
                 raise PoolError(f"{cid} has unverified members and no valid ruling: {rerule}"
                                 + (" (its ruling is invalid: --accept-invalid, or --reject)" if kind == "invalid" else ""))
@@ -749,6 +794,8 @@ def adjudicate(case_id: str, accept=(), reject=(), severities: dict | None = Non
             c = by_id[cid]
             if (c.get("ruling") or {}).get("ruling") != "invalid":
                 raise PoolError(f"{cid}: --accept-invalid needs an invalid ruling ({rerule})")
+            if c.get("split_from") and not c.get("restated"):
+                raise PoolError(f"{cid} was split from {c['split_from']} with no restated claim: it cannot become a non-issue")
             if unseen(c):
                 raise PoolError(f"{cid}: its invalid ruling never saw {len(unseen(c))} member(s): {rerule}")
             if cid in severities:
@@ -763,7 +810,7 @@ def adjudicate(case_id: str, accept=(), reject=(), severities: dict | None = Non
             if c["status"] not in SETTLED and cid not in accept and cid not in accept_invalid:
                 raise PoolError(f"{cid}: members are accepted only into an accepted cluster or non-issue")
             same = ruled_same(c)
-            unruled = [m for m in c.get("pending") or () if (m.get("status") or CONFIRMED) != CONFIRMED
+            unruled = [m for m in c.get("pending") or () if status_of(m) != CONFIRMED
                        and (m["run"], int(m["finding"])) not in same]
             if unruled:
                 raise PoolError(f"{cid}: {len(unruled)} unverified pending member(s) no member ruling found to be the same "

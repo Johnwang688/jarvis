@@ -26,6 +26,8 @@ import contextlib
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import rolebench_testguard  # noqa: E402,F401  first: ROLEBENCH_TESTING=1, ROLEBENCH_NET=none, runners refuse real models
 
 from rolebench import (audit, brief, cases, config, findings, flows, jarvis_worker, judge, netcell, pool,  # noqa: E402
                        prices, quota, report, runlog, runners, sandbox, snapshot, spend)
@@ -1167,7 +1169,8 @@ def test_fake_clis(root: Path) -> None:
     (fake / "rel" / "bin" / "codex").chmod(0o755)
     (fake / "codex").symlink_to(fake / "rel" / "bin" / "codex")
     with env(PATH=f"{fake}:{os.environ['PATH']}", ROLEBENCH_LOGIN_HOME=str(login), GH_TOKEN="gh-dummy",
-             OPENROUTER_API_KEY="sk-dummy-not-a-key", CLAUDE_CODE_SSE_PORT="9", ROLEBENCH_NET="none"):
+             OPENROUTER_API_KEY="sk-dummy-not-a-key", CLAUDE_CODE_SSE_PORT="9", ROLEBENCH_NET="none",
+             ROLEBENCH_FAKE_BIN=str(fake)):
         res = runners.run_claude(model="haiku", prompt="PROMPT TEXT", cwd=work, timeout_s=60, max_turns=3,
                                  run_id=f"check-claude-{os.getpid()}")
         cx = runners.run_codex(model="gpt-6-luna", prompt="P", cwd=work, timeout_s=60, run_id=f"check-codex-{os.getpid()}")
@@ -1204,7 +1207,8 @@ def test_fake_clis(root: Path) -> None:
     if not sandbox.pasta_available():
         for f in ("claude-cred.json", "claude-stdin.txt", "claude-env.txt"):
             (work / f).unlink(missing_ok=True)
-        with env(PATH=f"{fake}:{os.environ['PATH']}", ROLEBENCH_LOGIN_HOME=str(login), ROLEBENCH_NET="pasta"):
+        with env(PATH=f"{fake}:{os.environ['PATH']}", ROLEBENCH_LOGIN_HOME=str(login), ROLEBENCH_NET="pasta",
+                 ROLEBENCH_FAKE_BIN=str(fake)):
             pres = runners.run_claude(model="haiku", prompt="PASTA PROMPT \u00e9", cwd=work, timeout_s=60, max_turns=3,
                                       run_id=f"check-claude-pasta-{os.getpid()}")
         pcred = json.loads((work / "claude-cred.json").read_text()) if (work / "claude-cred.json").exists() else {}
@@ -1212,7 +1216,8 @@ def test_fake_clis(root: Path) -> None:
               "accessToken" in pcred.get("claudeAiOauth", {}) and "refreshToken" not in pcred.get("claudeAiOauth", {})
               and pcred.get("_perm") in ("400", None) and (work / "claude-stdin.txt").read_text() == "PASTA PROMPT \u00e9"
               and pres.text == "ok", pres.error)
-    with env(ROLEBENCH_LOGIN_HOME=str(login), ROLEBENCH_NET="none"):
+    with env(PATH=f"{fake}:{os.environ['PATH']}", ROLEBENCH_LOGIN_HOME=str(login), ROLEBENCH_NET="none",
+             ROLEBENCH_FAKE_BIN=str(fake)):
         (login / ".claude" / ".credentials.json").write_text(json.dumps({"claudeAiOauth": {
             "accessToken": "sk-ant-dummy", "expiresAt": (time.time() + 60) * 1000}}))
         soon = runners.run_claude(model="haiku", prompt="x", cwd=work, timeout_s=1800, max_turns=1)

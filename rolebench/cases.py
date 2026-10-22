@@ -347,6 +347,7 @@ def scoring_key(case: dict, directory: Path | None = None) -> dict:
         for n in (pooled or {}).get("non_issues") or ()]
     return {"original": original, "rubric": rb, "pooled": pl, "entries": original + rb + pl, "disputed": disputed,
             "disputed_as": {gid: review[gid]["non_issue"] for gid in disputed},
+            "disputed_entries": [dict(g) for g in case["ground_truth"] if g["id"] in disputed],
             "non_issues": nis, "members": dict((pooled or {}).get("members") or {}),
             "duplicates": {k: list(v) for k, v in ((pooled or {}).get("duplicates") or {}).items()},
             "has_rubric": rubric is not None}

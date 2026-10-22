@@ -212,7 +212,14 @@ def cmd_pool(args) -> int:
     adjudicating = args.accept or args.reject or args.severity or args.accept_members or args.accept_invalid
     if args.rule and adjudicating:
         raise SystemExit("pool: --rule makes model calls; adjudicate in a separate command")
-    if args.rule:
+    if args.list and (args.rule or adjudicating):
+        raise SystemExit("pool: --list only reads the pool; use it alone")
+    if args.list:
+        try:
+            doc = pool.load_pool(args.case)              # read only: never clusters, never calls a model
+        except (pool.PoolError, cases.CaseError) as exc:
+            raise SystemExit(f"pool: {exc}")
+    elif args.rule:
         try:
             doc = pool.rule_case(args.case, quota_override=quota_override(args))
         except (pool.PoolError, cases.CaseError) as exc:
@@ -373,6 +380,8 @@ def main(argv: list[str] | None = None) -> int:
     po.add_argument("--case", required=True)
     po.add_argument("--accept", action="append", help="cluster ids to accept into the pooled key (comma-separated, repeatable)")
     po.add_argument("--reject", action="append", help="cluster ids to reject")
+    po.add_argument("--list", action="store_true",
+                    help="print the pool and its rulings, read only (never clusters, never calls a model)")
     po.add_argument("--rule", action="store_true",
                     help="one Opus ruling (valid or invalid, with the case's code) per proposed cluster with none yet")
     po.add_argument("--accept-invalid", action="append",

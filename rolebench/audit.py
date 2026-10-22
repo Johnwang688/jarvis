@@ -176,11 +176,17 @@ def command_words(tokens: list[str]) -> set[int]:
                 continue
             out.add(i)
             if os.path.basename(t) in WRAPPER_WORDS:
-                i += 1
-                while i < len(tokens) and tokens[i].startswith("-") and not set(tokens[i]) <= punct:
-                    i += 1
-                if os.path.basename(t) == "timeout" and i < len(tokens) and re.fullmatch(r"[\d.]+[smhd]?", tokens[i]):
-                    i += 1
+                # a wrapper's options may take arguments (`sudo -u root`, `nice -n 5`, `timeout -s KILL 5`,
+                # `env -u FOO`, `stdbuf -o L`): any later word of this simple command may be what it runs,
+                # except under `command -v` / `-V`, which only looks the name up
+                j = i + 1
+                if os.path.basename(t) == "command" and j < len(tokens) and tokens[j] in ("-v", "-V"):
+                    start, i = False, j + 1
+                    continue
+                while j < len(tokens) and not set(tokens[j]) <= punct:
+                    out.add(j)
+                    j += 1
+                start, i = False, j
                 continue
             start = False
         i += 1

@@ -210,3 +210,7 @@ spurious ones (necessary, not sufficient). Opus built a verified rubric per revi
   ruled different become new proposed clusters. A duplicate of an entry the rubric later disputes
   scores as that entry's non-issue. Caveats recorded in the notes: original-key recall depends on
   the adjudication state, and the ruling correction only goes one way.
+- **Third review fixes (PR #291, 2026-10-21).** The test suites can no longer reach a real model
+  (`tests/rolebench_testguard.py`, `runners.testing_refusal`; a plain `pool` in the grader suite had
+  made a real Opus clustering call on every run). `pool --list` is read only. A member ruling
+  restates each "different" claim, and split clusters are built from that, never from reviewer text.

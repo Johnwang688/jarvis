@@ -1422,9 +1422,14 @@ every member, and makes it a pooled **non-issue** (`non_issues` in `cases/pooled
 ids (`validate_pooled`). A finding proposed for a settled cluster (accepted, non-issue or
 duplicate) waits as pending; when it is unverified, `--rule` makes one **member ruling** per such
 cluster (the settled claim as the key holds it, fenced, and the pending findings: `same` or
-`different` each, with what it saw recorded), members ruled different leave as new proposed
-clusters (`split_from`), and `--accept-members` refuses an unverified pending member no member
-ruling found to be the same claim (a confirmed one is taken as before). A lost pool rebuilds the
+`different` each, with what it saw recorded; a different one's claim restated by the ruling as a
+severity, mechanism and parsed location), members ruled different leave as new proposed clusters
+(`split_from`) built from that restatement, never from the finding's own file or text (a split
+cluster without one cannot become a non-issue), and `--accept-members` refuses an unverified pending
+member no member ruling found to be the same claim (a confirmed one is taken as before). A member's
+status is read from its run's current `judge.json` (confirmed only while the legacy judge still
+calls it valid-new; re-graded, re-judged or missing, it is unverified). `pool --case <id> --list`
+prints the pool and its rulings and never clusters or calls a model. A lost pool rebuilds the
 committed key byte for byte (the key keeps each entry's source and ruled wording, and the ids of
 clusters accepted as duplicates in `duplicate_clusters`, so a new cluster never reuses one).
 Two caveats: original-key recall moves with adjudication (an accepted duplicate of an original
@@ -1444,8 +1449,19 @@ groups by harness, model and grader and lists every judged run with its grader; 
 grading refolds `run.json` against the current key (free). `bare_cds` and the audit's `-c`
 script reading accept any option order (`bash --login -c`, `bash -c -l`), and `flows` writes
 `run.json` atomically too. Free checks:
-`tests/rolebench_grader_check.py` (fake calls only, no cell; ~140 checks); the mutation
+`tests/rolebench_grader_check.py` (fake calls only, no cell); the mutation
 runner is `~/.cache/jarvis-lead/rolebench-grader-mutants/run.py`.
+
+**No test reaches a real model (2026-10-21, #291 third review).** A temp HOME does not isolate the
+CLI logins: `config.login_home()` reads the account's home from pwd, so a test that reached the real
+`claude` CLI under pasta would spend real quota (the grader suite at e36dec55 did, through a plain
+`pool` on a restored pool: one real Opus clustering call per run). Both suites now import
+`tests/rolebench_testguard.py` first: it sets `ROLEBENCH_TESTING=1` and `ROLEBENCH_NET=none`, wraps
+`run_claude`, `run_codex`, `run_jarvis` and the registry to raise on anything but a fake, and makes
+OpenRouter's price fetch raise. The runners themselves also refuse under `ROLEBENCH_TESTING=1`
+(`runners.testing_refusal`): a claude or codex run needs its CLI under `ROLEBENCH_FAKE_BIN` and a
+`ROLEBENCH_LOGIN_HOME` that is not the account's home, a jarvis run a dummy key, and `.env` is never
+read. A mutation runner must copy `tests/rolebench_testguard.py` beside the suite.
 
 The judge is `claude -p --model opus` over shuffled, blinded findings plus the answer
 key, reading an export of the change commit (no `.git`, its diff beside it) in a
