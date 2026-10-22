@@ -54,6 +54,7 @@ import random
 import re
 import shutil
 import time
+import unicodedata
 from pathlib import Path
 
 from . import cases, config, grader, judge, quota, runners, sandbox, snapshot
@@ -222,7 +223,8 @@ FINDINGS {nonce}>>>
 ## Your job
 Put every finding in exactly one cluster: an existing one by its id, or a new one you \
 name "new1", "new2", .... For each new cluster give a proposed "severity" (HIGH, MED or \
-LOW), a one-sentence "mechanism" and a "location" (file and function or line).
+LOW), a one-sentence "mechanism" in your own words (never copy a finding's text into it) \
+and a "location" (path:line or path:line-line).
 
 Reply with one JSON object and nothing else:
 {{"assign": [{{"finding": "V1", "cluster": "p1"}}, {{"finding": "V2", "cluster": "new1"}}], \
@@ -260,13 +262,33 @@ MECHANISM_MAX = 400       # characters, one line
 COPY_MIN = 40             # a restatement may not carry this long a run of a finding's own text
 
 
+PATH_TOKEN = re.compile(r"(?<![\w./-])(?:[\w.@+-]+/)*[\w.@+-]*\.(?:" + cases._EXT + r")(?![\w-])"
+                        r"(?::~?\d+(?:\s*-\s*~?\d+)?(?:\s*,\s*:?~?\d+(?:\s*-\s*~?\d+)?)*)?"
+                        r"|(?:(?<=[\s(;,])|^)(?::|~)\d+(?:\s*-\s*~?\d+)?")
+
+
+def finding_text(f: dict) -> str:
+    """What a restatement may not copy: a finding's title and scenario. Never
+    its `file`, which a restated location must name anyway."""
+    return " ".join(str(f.get(k) or "") for k in ("title", "scenario"))
+
+
 def _flat(text) -> str:
-    return " ".join(str(text or "").split()).lower()
+    """Text as the copy check compares it: path and `path:line` tokens cut out
+    (a restatement must name the same file), NFKC-normalized, format
+    characters (zero-width and the like, category Cf) and punctuation dropped,
+    whitespace collapsed, lowercased. Lookalike letters from other scripts are
+    out of scope: this is a guard against a model echoing a finding, not
+    against an adversary."""
+    t = PATH_TOKEN.sub(" ", str(text or ""))
+    t = unicodedata.normalize("NFKC", t)
+    t = "".join(ch for ch in t if unicodedata.category(ch) != "Cf" and not unicodedata.category(ch).startswith("P"))
+    return " ".join(t.split()).lower()
 
 
 def copies_finding(text: str, sources) -> bool:
     """`text` holds a run of at least COPY_MIN characters of one of the
-    findings' own text (title, scenario, file), whitespace and case aside."""
+    findings' own text (title and scenario), compared as `_flat` reads them."""
     flat = _flat(text)
     for src in sources:
         s = _flat(src)
@@ -279,8 +301,8 @@ def restated(severity, mechanism, location, sources=()) -> dict:
     """A model-written claim, as it may be stored and shown later: a severity of
     HIGH, MED or LOW; the mechanism on one line, at most MECHANISM_MAX
     characters; only the parsed location (`path`, `path:lo` or `path:lo-hi`,
-    `; `-joined); and neither carrying COPY_MIN characters of a finding's own
-    text. PoolError otherwise."""
+    `; `-joined); and a mechanism that carries no COPY_MIN-character run of a
+    finding's own title or scenario (paths aside). PoolError otherwise."""
     if severity not in POOL_SEVERITIES:
         raise PoolError(f"bad severity {severity!r}")
     if not isinstance(mechanism, str) or not mechanism.strip() or not isinstance(location, str):
@@ -289,8 +311,9 @@ def restated(severity, mechanism, location, sources=()) -> dict:
     if not locs:
         raise PoolError(f"location {location!r} names no path[:line[-line]]")
     loc = "; ".join(p if lo is None else f"{p}:{lo}" if hi in (None, lo) else f"{p}:{lo}-{hi}" for p, lo, hi in locs[:6])
-    mech = grader.one_line(mechanism)[:MECHANISM_MAX]
-    if copies_finding(mech, sources) or copies_finding(location, sources):
+    mech = grader.one_line(mechanism)[:MECHANISM_MAX].strip()
+    # only the parsed location is stored, so the location needs no copy check
+    if copies_finding(mech, sources):
         raise PoolError("the restated claim copies a finding's own text")
     if cases.SECRET_RE.search(mech + loc):
         raise PoolError("the restated claim contains something that looks like a credential")
@@ -385,7 +408,7 @@ def pool_case(case_id: str, pool_fn=default_pool_fn, quota_override: str = "", q
         live_ids = [c["id"] for c in pool["clusters"] if c["status"] != REJECTED]
         prompt = PROMPT.format(clusters=grader.unfence(clusters_text(pool), cl_nonce, nonce), findings=text,
                                nonce=nonce, cl_nonce=cl_nonce)
-        sources = [" ".join(str(it.get(k) or "") for k in ("title", "scenario", "file")) for it in new_items]
+        sources = [finding_text(it) for it in new_items]
         cell = config.home() / "pool-cell" / snapshot.new_name()
         cell.mkdir(parents=True, exist_ok=True)
         error, cost, result, attempt = "", 0.0, None, 0
@@ -775,8 +798,7 @@ def rule_case(case_id: str, rule_fn=default_rule_fn, quota_override: str = "", q
                     result, cost, error, attempt = _paid_call(
                         pool, {"kind": "member-rule", "cluster": c["id"]}, prompt, rule_fn, tree, check_quota,
                         lambda doc: validate_member_ruling(doc, list(ids), {
-                            v: " ".join(str(batch[i].get(k) or "") for k in ("title", "scenario", "file"))
-                            for v, i in ids.items()}), reader, quota_override)
+                            v: finding_text(batch[i]) for v, i in ids.items()}), reader, quota_override)
                     if result is not None:
                         pair = lambda m: [m["run"], int(m["finding"])]   # noqa: E731
                         same = [pair(batch[i]) for v, i in ids.items() if result[v] == "same"]

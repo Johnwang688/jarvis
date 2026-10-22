@@ -1473,8 +1473,19 @@ cell that would bind a CLI outside the fake bin, with one explicit per-call opt-
 cell, still with the fake login (only `test_codex_loopback` uses it: it measures codex's own
 sandbox); and `quota.daemon_reader` refuses (a test injects a reader). Restated claims (new clusters,
 member rulings) are one line, at most 400 characters, keep only the parsed location
-(`path:lo-hi`), and may not carry a 40-character run of a finding's own text; the existing clusters
-and a ruling's claim are fenced in the prompts that show them. `bare_cds` reads `env -S` strings.
+(`path:lo-hi`), and the mechanism may not carry a 40-character run of a finding's own title or
+scenario (never its `file`, which a restated location must name): both sides are compared with
+path and `path:line` tokens cut out, NFKC-normalized, with format characters and punctuation
+dropped, whitespace collapsed and case folded (lookalike letters from other scripts are out of
+scope: this guards against a model echoing a finding, not an adversary). The existing clusters and
+a ruling's claim are fenced in the prompts that show them. `bare_cds` reads `env -S` strings,
+combined short flags (`env -iS`) included. The `codex-sandbox` opt-in also checks the tail: nothing
+after `sandbox` may name codex or claude, and the probe after `--` must be `python3 X.py` or
+`/bin/sh -c SCRIPT`; an opted-in launch carries `ROLEBENCH_REAL_CLI_PROBE=codex-sandbox` in the
+launcher's environment. To run the suites under a strict launch spy (one that refuses any real
+claude/codex launch or bind), `tests/strictspy_carveout/sitecustomize.py` wraps it
+(`ROLEBENCH_STRICT_SPY=<the spy's sitecustomize.py>`) and lets only that opted-in probe past,
+logged OPTIN, when both the marker and the `codex sandbox` argv are present.
 
 The judge is `claude -p --model opus` over shuffled, blinded findings plus the answer
 key, reading an export of the change commit (no `.git`, its diff beside it) in a

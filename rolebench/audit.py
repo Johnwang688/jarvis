@@ -238,7 +238,8 @@ def bare_cds(command: str, depth: int = 0) -> int:
             n += bare_cds(tok, depth + 1)
         elif i in splits:
             n += bare_cds(tok.split("=", 1)[1] if tok.startswith("--split-string=") else
-                          tok[2:] if tok.startswith("-S") and len(tok) > 2 else tok, depth + 1)
+                          tok[tok.index("S") + 1:] if tok.startswith("-") and not tok.startswith("--") and "S" in tok[1:]
+                          and not tok.endswith("S") else tok, depth + 1)
     return n
 
 
@@ -255,11 +256,18 @@ def env_split_strings(tokens: list[str]) -> set[int]:
             t = tokens[j]
             if set(t) <= punct:
                 break
-            if t in ("-S", "--split-string") and j + 1 < len(tokens):
+            if t == "--split-string" and j + 1 < len(tokens):
                 out.add(j + 1)
                 break
-            if (t.startswith("-S") and len(t) > 2) or t.startswith("--split-string="):
+            if t.startswith("--split-string="):
                 out.add(j)
+                break
+            if t.startswith("-") and not t.startswith("--") and "S" in t[1:]:
+                # -S, or combined short flags (-iS, -vS): S takes the rest of the word, or the next word
+                if t.endswith("S") and j + 1 < len(tokens):
+                    out.add(j + 1)
+                else:
+                    out.add(j)
                 break
     return out
 

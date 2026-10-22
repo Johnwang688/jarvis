@@ -582,6 +582,22 @@ def bound_clis(cell: Cell) -> list[str]:
     return []
 
 
+CLI_WORD = re.compile(r"(?<![\w-])(?:codex|claude)(?![\w-])")
+
+
+def codex_sandbox_probe_ok(command: list[str]) -> bool:
+    """`codex sandbox [options] -- <probe>`, where nothing after `sandbox` names
+    codex or claude and the probe is a known no-model command: `python3 X.py`
+    or `/bin/sh -c SCRIPT` (the script naming neither CLI)."""
+    rest = command[2:]
+    if "--" not in rest or any(CLI_WORD.search(str(t)) for t in rest):
+        return False
+    tail = rest[rest.index("--") + 1:]
+    if len(tail) == 2 and os.path.basename(tail[0]) in ("python3", "python") and str(tail[1]).endswith(".py"):
+        return True
+    return len(tail) == 3 and tail[0] in ("/bin/sh", "sh") and tail[1] == "-c"
+
+
 def testing_launch_refusal(cell: Cell, command: list[str], real_cli_probe: str | None = None) -> str | None:
     """Under ROLEBENCH_TESTING, why this launch is refused, or None. A cell
     may bind only a fake CLI (under ROLEBENCH_FAKE_BIN) and only a fake login
@@ -598,7 +614,8 @@ def testing_launch_refusal(cell: Cell, command: list[str], real_cli_probe: str |
     if not real:
         return None
     if (real_cli_probe == "codex-sandbox" and cell.profile == "codex" and len(command) >= 2
-            and command[0] == str(CODEX / "bin" / "codex") and command[1] == "sandbox"):
+            and command[0] == str(CODEX / "bin" / "codex") and command[1] == "sandbox"
+            and codex_sandbox_probe_ok(command)):
         return None
     return (f"test guard: a {cell.profile} cell would bind the real CLI {real[0]}"
             + (f" (the {real_cli_probe!r} opt-in allows only `codex sandbox` in a codex cell)" if real_cli_probe else ""))
@@ -620,9 +637,12 @@ def launch(command: list[str], *, cell: Cell, run_id: str, timeout_s: float,
         argv, _net = cell_command(cell, command, cred_fds=fds)
         return run_unit(unit_argv(unit, argv), unit=unit, timeout_s=timeout_s, stdin=header + (stdin or ""))
     fds, to_pass = _credential_fds(cell)
+    # an opted-in real-CLI probe says so in the launcher's environment, so a test spy can tell it apart
+    marked = {**_launcher_env(), "ROLEBENCH_REAL_CLI_PROBE": real_cli_probe} if real_cli_probe else None
     try:
         argv, _net = cell_command(cell, command, cred_fds=fds)
-        return run_unit(unit_argv(unit, argv), unit=unit, timeout_s=timeout_s, stdin=stdin, pass_fds=tuple(to_pass))
+        return run_unit(unit_argv(unit, argv), unit=unit, timeout_s=timeout_s, stdin=stdin, pass_fds=tuple(to_pass),
+                        env=marked)
     finally:
         for fd in to_pass:
             try:

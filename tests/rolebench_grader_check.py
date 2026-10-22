@@ -953,18 +953,23 @@ def test_stage2_delta(case0: dict, root: Path) -> None:
                "leak": {"ruling": "invalid", "why_not": "w", "citation": "io.py:2"},
                "clampdup": {"ruling": "duplicate", "id": "gt1", "why": "same bound"},
                "split": {"ruling": "invalid", "why_not": "not a defect", "citation": "tiny.py:40"},
-               "io": {"ruling": "invalid", "why_not": "not a defect", "citation": "io.py:2"}}
+               "io": {"ruling": "invalid", "why_not": "not a defect", "citation": "io.py:2"},
+               "the": {"ruling": "invalid", "why_not": "not a defect", "citation": "docs/plans/x.md:1"},
+               "in": {"ruling": "invalid", "why_not": "not a defect", "citation": "hud/poll.ts:3"}}
     member_verdicts = {}
     prompts = []
 
     def ruler(prompt, cwd):
         prompts.append(prompt)
         if prompt.startswith("You are checking, once"):
-            ms = re.findall(r"^(M\d+) \[\w+\] \S+ - ([^\n]+)", prompt, re.M)
-            restated = {"severity": "LOW", "mechanism": "split", "location": "tiny.py:3"}
+            ms = re.findall(r"^(M\d+) \[\w+\] (\S+) - ([^\n]+)", prompt, re.M)
+
+            def restated(file):        # a finding whose file carries prose: the restatement repeats that prose
+                prose = file.split("#", 1)[1].split(":")[0] if "#the_poller" in file else ""
+                return {"severity": "LOW", "mechanism": f"split {prose}".strip(), "location": "tiny.py:3"}
             return json.dumps({"members": [{"finding": m, "verdict": member_verdicts.get(t, "different"), "why": "w",
-                                            **(restated if member_verdicts.get(t, "different") == "different" else {})}
-                                           for m, t in ms]}), 0.2
+                                            **(restated(f) if member_verdicts.get(t, "different") == "different" else {})}
+                                           for m, f, t in ms]}), 0.2
         m = re.search(r"## The claim, as the clustering step stated it\n\[\w+\] \S+: (\w+)", prompt).group(1)
         return json.dumps(rulings[m]), 0.25
     tree_fn = lambda c, d: (d.mkdir(parents=True), d)[1]   # noqa: E731
@@ -1123,6 +1128,14 @@ def test_stage2_delta(case0: dict, root: Path) -> None:
             pool.adjudicate(cid, accept_invalid=[c_["id"]], by="lead")
     check("MED-1: the committed key never carries the raw text", evil not in pool.key_path(cid).read_text())
 
+    # a member ruled different whose `file` is prose: the copy check never reads the file field
+    run("TPM", [finding("member with a prose file", "LOW", "tiny.py#the_poller_module_and_its_socket_handler_together", 41)])
+    pool.pool_case(cid, pool_fn=clusterer, quota_reader=COLD, rng=random.Random(7))
+    pool.rule_case(cid, rule_fn=ruler, quota_reader=COLD, tree_fn=tree_fn, rng=random.Random(7))
+    check("restate: a member ruling's copy check reads title and scenario, never the file field",
+          any(c.get("split_from") and c["mechanism"] == "split the_poller_module_and_its_socket_handler_together"
+              for c in pool.load_pool(cid)["clusters"]))
+
     # LOW 4: a duplicate whose target the rubric disputes shows the disputed entry and its non-issue
     dkey = {**cases.scoring_key(case), "disputed_as": {"gt1": "ni1"},
             "disputed_entries": [{"id": "gt1", "severity": "MED", "location": "tiny.py:40-41", "mechanism": "clamp excludes the bound"}]}
@@ -1185,8 +1198,45 @@ def test_stage2_delta(case0: dict, root: Path) -> None:
     check("restate: a mechanism or location carrying 40+ characters of the finding's own text is refused",
           raises(lambda: pool.restated("LOW", "As reported: THE POLLER and the socket handler both write the shared state", "a.py:1", src),
                  pool.PoolError)
-          and raises(lambda: pool.restated("LOW", "m", "a.py:1 the poller and the socket handler both write", src), pool.PoolError)
+          and pool.restated("LOW", "m", "a.py:1 the poller and the socket handler both write", src)["location"] == "a.py:1"
           and pool.restated("LOW", "two writers race on the poll state", "hud/poll.ts:9", src)["severity"] == "LOW")
+    long_path = "docs/plans/2026-10-19-browser-preview-capability.md"            # 51 characters
+    lsrc = ["Step 3 contradicts step 5 on the token's lifetime a reader following step 3 keeps the token"]
+    check("restate: a legitimate claim on a 51-character path is accepted (new cluster and member ruling)",
+          len(long_path) == 51
+          and pool.validate_reply({"assign": [{"finding": "V1", "cluster": "new1"}], "new_clusters": [
+              {"id": "new1", "severity": "MED", "mechanism": "the plan's lifetime rule conflicts with its revocation rule",
+               "location": f"{long_path}:40-52"}]}, ["V1"], [], lsrc)[1]["new1"]["location"] == f"{long_path}:40-52"
+          and pool.validate_member_ruling({"members": [{"finding": "M1", "verdict": "different", "why": "w", "severity": "MED",
+                                                        "mechanism": f"the lifetime rule in {long_path}:40 conflicts with step 5",
+                                                        "location": f"{long_path}:40-52"}]}, ["M1"],
+                                          {"M1": lsrc[0] + " " + long_path})["M1"]["location"] == f"{long_path}:40-52")
+    title = "The guard lets a fake bin directory hold a hardlink to the real binary"
+    check("restate: the copy check sees through case, whitespace, NBSP, zero-width and punctuation splices",
+          all(raises(lambda m=m: pool.restated("LOW", m, "a.py:1", [title]), pool.PoolError) for m in (
+              title.upper(), title.replace(" ", "\n\t "), title.replace(" ", "\u00a0"),
+              "".join(chr(ord(ch) + 0xFEE0) if "!" <= ch <= "~" else ch for ch in title),       # fullwidth forms (NFKC)
+              "\u200b".join(title[i:i + 30] for i in range(0, len(title), 30)),
+              "-".join(title[i:i + 39] for i in range(0, len(title), 39)))))
+    # end to end: a finding on a 51-character path, clustered and member-ruled with that path as the location
+    lrun = run("TLP", [finding("Step 3 contradicts step 5 on the token's lifetime", "MED", long_path, 40,
+                               scenario="a reader following step 3 keeps the token after close")])
+    pool.pool_case(cid, pool_fn=lambda pr, cwd: (json.dumps({"assign": [{"finding": v, "cluster": "new1"} for v in re.findall(
+        r"^(V\d+) \[", pr, re.M)], "new_clusters": [{"id": "new1", "severity": "MED", "location": f"{long_path}:40-52",
+                                                      "mechanism": "the plan's lifetime rule conflicts with its revocation rule"}]}), 0),
+        quota_reader=COLD, rng=random.Random(7))
+    prose_file = "the_poller_module_and_its_socket_handler_together"        # a reviewer's `file` that is prose
+    run("TPF", [finding("a poll claim", "LOW", prose_file, 3, scenario="short")])
+    pool.pool_case(cid, pool_fn=lambda pr, cwd: (json.dumps({"assign": [{"finding": v, "cluster": "new1"} for v in re.findall(
+        r"^(V\d+) \[", pr, re.M)], "new_clusters": [{"id": "new1", "severity": "LOW", "location": "hud/poll.ts:3",
+                                                      "mechanism": f"in {prose_file} two writers race"}]}), 0),
+        quota_reader=COLD, rng=random.Random(7))
+    check("restate: the copy check reads a finding's title and scenario, never its file field",
+          any(c["mechanism"] == f"in {prose_file} two writers race" for c in pool.load_pool(cid)["clusters"])
+          and pool.finding_text({"file": prose_file, "title": "t", "scenario": "s"}) == "t s")
+    check("restate: pool_case accepts a new cluster located on the finding's own 51-character path",
+          any(c["location"] == f"{long_path}:40-52" for c in pool.load_pool(cid)["clusters"]))
+    check("restate: the mechanism is stripped after the cut", pool.restated("LOW", "x" * 399 + "   y", "a.py:1")["mechanism"] == "x" * 399)
     check("restate: validate_reply and validate_member_ruling refuse a copied restatement",
           raises(lambda: pool.validate_reply({"assign": [{"finding": "V1", "cluster": "new1"}], "new_clusters": [
               {"id": "new1", "severity": "LOW", "mechanism": src[0], "location": "a.py:1"}]}, ["V1"], [], src), pool.PoolError)
@@ -1248,8 +1298,8 @@ def test_followups(root: Path) -> None:
           all(b(c) == 1 for c in ("sudo -u root bash -c 'cd'", "nice -n 5 bash -c 'cd'", "timeout -s KILL 5 bash -c 'cd'",
                                   "env -u FOO bash -c 'cd'", "env -C /tmp bash -c 'cd'", "stdbuf -o L bash -c 'cd'"))
           and b("command -v bash -c 'cd'") == 0)
-    check("bare cd: env -S / --split-string runs its string (env -S 'bash -c cd')",
-          b("env -S 'bash -c cd'") == 1 and b("env --split-string='bash -c cd'") == 1 and b("echo env -S 'bash -c cd'") == 0
+    check("bare cd: env -S / --split-string runs its string (env -S 'bash -c cd', and combined -iS)",
+          b("env -S 'bash -c cd'") == 1 and b("env -iS 'bash -c cd'") == 1 and b("env -i -S 'bash -c cd'") == 1 and b("env --split-string='bash -c cd'") == 1 and b("echo env -S 'bash -c cd'") == 0
           and b("env -S 'bash -c ls'") == 0)
     check("audit: path reading stays broad: a script after `echo bash -c` is still read (a superset of main)",
           [lit for _, lit, _ in audit.path_candidates("echo bash -c 'cat /etc/x'")] == ["/etc/x"])
@@ -1432,8 +1482,6 @@ def test_guard(case0: dict, root: Path) -> None:
                 ("opt-in, not `codex sandbox`", sandbox.Cell("codex", root), [str(sandbox.CODEX / "bin" / "codex"), "exec", "x"], "codex-sandbox"),
                 ("opt-in, a shell", sandbox.Cell("codex", root), ["/bin/sh", "-c", "codex exec x"], "codex-sandbox")):
             refusals[label] = sandbox.testing_launch_refusal(cell, cmd, opt)
-        allowed = sandbox.testing_launch_refusal(sandbox.Cell("codex", root), [str(sandbox.CODEX / "bin" / "codex"), "sandbox", "-P", ":workspace"],
-                                                 "codex-sandbox")
         n_launch = []
         saved_run_unit = sandbox.run_unit
         sandbox.run_unit = lambda *a, **k: n_launch.append(1) or (0, "", "", False)
@@ -1444,9 +1492,37 @@ def test_guard(case0: dict, root: Path) -> None:
             sandbox.run_unit = saved_run_unit
     check("guard: a claude, judge or codex cell that would bind a CLI outside the fake bin is refused (sh probes too)",
           all(refusals[k] for k in ("claude cell", "judge cell", "codex cell")) and launched and n_launch == [], str(refusals))
+    cx = str(sandbox.CODEX / "bin" / "codex")
+    with env(PATH=f"{realish}:{os.environ['PATH']}"):             # a codex release outside the fake bin
+        tails = {label: sandbox.testing_launch_refusal(sandbox.Cell("codex", root), cmd, "codex-sandbox") for label, cmd in (
+        ("-- codex exec hi", [cx, "sandbox", "-P", ":danger-full-access", "--", "codex", "exec", "hi"]),
+        ("-- sh naming claude", [cx, "sandbox", "--", "/bin/sh", "-c", "claude -p hi"]),
+        ("no --", [cx, "sandbox", "-P", ":workspace"]),
+        ("-- python3 probe.py", [cx, "sandbox", "-P", ":workspace", "-C", "/w", "--", "python3", "/w/probe.py"]),
+        ("-- sh probe", [cx, "sandbox", "--", "/bin/sh", "-c", "echo ok"]),
+        ("-- curl", [cx, "sandbox", "--", "/usr/bin/curl", "https://example.invalid"]))}
     check("guard: the codex-sandbox opt-in allows exactly `codex sandbox` in a codex cell, nothing else",
-          refusals["opt-in in a claude cell"] and refusals["opt-in, not `codex sandbox`"] and refusals["opt-in, a shell"]
-          and allowed is None)
+          refusals["opt-in in a claude cell"] and refusals["opt-in, not `codex sandbox`"] and refusals["opt-in, a shell"])
+    check("guard: the opt-in's tail is a known probe naming neither CLI (`-- codex exec hi` refused)",
+          tails["-- codex exec hi"] and tails["-- sh naming claude"] and tails["no --"] and tails["-- curl"]
+          and tails["-- python3 probe.py"] is None and tails["-- sh probe"] is None, str(tails))
+    marked = []
+    saved_run_unit = sandbox.run_unit
+    sandbox.run_unit = lambda *a, **k: marked.append(k.get("env")) or (0, "", "", False)
+    try:
+        sandbox.launch(["/bin/sh", "-c", "true"], cell=sandbox.Cell("grade", root), run_id="mark0", timeout_s=5)
+    finally:
+        sandbox.run_unit = saved_run_unit
+    sandbox.run_unit = lambda *a, **k: marked.append(k.get("env")) or (0, "", "", False)
+    try:
+        with env(PATH=f"{realish}:{os.environ['PATH']}"):
+            sandbox.launch([cx, "sandbox", "-P", ":workspace", "--", "python3", str(root / "probe.py")],
+                           cell=sandbox.Cell("codex", root), run_id="mark1", timeout_s=5, real_cli_probe="codex-sandbox")
+    finally:
+        sandbox.run_unit = saved_run_unit
+    check("guard: only an opt-in launch carries ROLEBENCH_REAL_CLI_PROBE (a spy's carve-out reads it)",
+          len(marked) == 2 and (marked[0] is None or "ROLEBENCH_REAL_CLI_PROBE" not in marked[0])
+          and (marked[1] or {}).get("ROLEBENCH_REAL_CLI_PROBE") == "codex-sandbox", str([bool(m) for m in marked]))
     with env(ROLEBENCH_LOGIN_HOME=None):
         check("guard: a cell with no fake login home is refused",
               sandbox.testing_launch_refusal(sandbox.Cell("claude", root), ["/bin/sh"]) is not None
