@@ -1,0 +1,114 @@
+{
+ "case": "c6-r1",
+ "source": "pooled",
+ "adjudicated_by": "lead",
+ "date": "2026-10-22",
+ "ground_truth": [],
+ "members": {
+  "pool-ni-p1": [
+   [
+    "20261021-015928-c6-r1-jarvis-anthropic-claude-haiku-5-5-1-e786",
+    3
+   ],
+   [
+    "20261021-084145-c6-r1-claude-haiku-1-439f",
+    0
+   ],
+   [
+    "20261021-084855-c6-r1-claude-opus-1-4ea9",
+    1
+   ]
+  ],
+  "pool-ni-p2": [
+   [
+    "20261021-084145-c6-r1-claude-haiku-1-439f",
+    1
+   ]
+  ],
+  "pool-ni-p3": [
+   [
+    "20261021-015655-c6-r1-codex-gpt-6-luna-1-cf45",
+    0
+   ]
+  ],
+  "pool-ni-p5": [
+   [
+    "20261021-020923-c6-r1-jarvis-deepseek-deepseek-v4-1-flash-1-f34a",
+    0
+   ]
+  ],
+  "pool-ni-p6": [
+   [
+    "20261021-020923-c6-r1-jarvis-deepseek-deepseek-v4-1-flash-1-f34a",
+    1
+   ]
+  ],
+  "pool-ni-p7": [
+   [
+    "20261021-015928-c6-r1-jarvis-anthropic-claude-haiku-5-5-1-e786",
+    1
+   ]
+  ]
+ },
+ "non_issues": [
+  {
+   "id": "pool-ni-p1",
+   "claim": "Title reduction removes all nonspacing and enclosing combining marks, so scripts that depend on viramas and vowel signs (Indic, Thai, Arabic, Hebrew) come out garbled on the relayed card, in both the Python and HUD versions.",
+   "location": "jarvis/v2/chat_reads.py:142",
+   "why_not": "The code does drop every Mn/Me mark, but that is the documented rule. The API doc and the control-plane note both say the card title has 'no symbol, emoji or combining mark', and the code comment gives the reason: the title is model-written text on an approval card and must not 'stack combining marks out of its line'. Garbled Indic, Thai, Arabic or Hebrew titles are a known cost of that rule, it affects display only, and no answer-key entry treats it as a defect.",
+   "citation": "docs/hud-api.md:3666-3668",
+   "source": "pooled cluster p1, ruled invalid, accepted as a non-issue by lead on 2026-10-22"
+  },
+  {
+   "id": "pool-ni-p2",
+   "claim": "Chat-relayed cards never have an origin, so the provenance line shows without any REQUESTED BY line above it, which is not the placement the docs describe.",
+   "location": "hud/src/components/Approvals.tsx:127",
+   "why_not": "The code does what the plan asks for: the relayed line comes right after the REQUESTED BY slot in the card's render order. Chat cards having no REQUESTED BY line is intended, because `PermitContext.origin()` returns '' for a chat thread by design. The line still shows, and no decision or button changes, so the claim is only about doc wording and not a behaviour defect.",
+   "citation": "docs/plans/2026-10-19-chat-to-chat-plan.md:594; jarvis/v2/permissions.py:203-227; hud/src/components/Approvals.tsx:121-128",
+   "source": "pooled cluster p2, ruled invalid, accepted as a non-issue by lead on 2026-10-22"
+  },
+  {
+   "id": "pool-ni-p3",
+   "claim": "The title sanitizer misses some Unicode symbol categories (math and currency symbols, for example), so those characters still reach the provenance line even though the rule says no symbols.",
+   "location": "jarvis/v2/chat_reads.py:142",
+   "why_not": "The code deliberately drops only some symbol categories (So, Sk), and its own comment says what 'symbol' means here: an emoji, a warning sign or a coloured dot that could stand in for pending or error meaning. Math (Sm) and currency (Sc) symbols include ordinary ASCII title characters such as + < = > | ~ $, and \u2211 or $ cannot paint pending or error meaning, so letting them through is intended and harmless. The HUD's cardTitle (hud/src/lib/relays.ts:62-63) uses the same category list, which shows the choice is consistent and not an oversight. No security or display harm follows from these characters appearing on the provenance line.",
+   "citation": "jarvis/v2/chat_reads.py:135-142",
+   "source": "pooled cluster p3, ruled invalid, accepted as a non-issue by lead on 2026-10-22"
+  },
+  {
+   "id": "pool-ni-p5",
+   "claim": "The public approval projection only applies a generic 80-character line clean instead of the card-title reduction, so the reduction depends on each reader and a raw title can reach the bus and the API.",
+   "location": "jarvis/v2/approvals.py:320",
+   "why_not": "The finding depends on a reader that returns a raw title, and no such reader exists in production. The only production reader is the daemon's `_relayed_from`, wired at daemon.py:1854, and it always returns `card_title(peer.get(\"title\"))`. That value is already the 60-character, bracket-replaced, symbol-dropped title before `ApprovalRequest.relayed_from` stores it, and the `clean_line(\u2026, 80)` at approvals.py:320 is only an extra cleanup on top of it. So no unreduced title reaches the bus or `GET /approvals` today. The scenario only happens if someone wires in a test reader or a hypothetical future reader. That is a defence-in-depth suggestion, not a defect in this change.",
+   "citation": "jarvis/v2/daemon.py:62-77",
+   "source": "pooled cluster p5, ruled invalid, accepted as a non-issue by lead on 2026-10-22"
+  },
+  {
+   "id": "pool-ni-p6",
+   "claim": "The face check suite exits successfully without running anything when the HUD build is missing, so the new provenance checks can look like they passed when they never ran.",
+   "location": "tests/face/hud_v2_relay_check.py:196",
+   "why_not": "The claim says the suite exits 0 (success) when hud/dist is missing, but the code does the opposite. The relay check's main() prints the 'not built' message and returns 2, and `sys.exit(main())` turns that into a non-zero exit. The umbrella hud_v2_check.py also returns 2 in this case (tests/face/hud_v2_check.py:3104-3106). A missing build is therefore reported as a failure, not a pass. Line 196, the line the claim points at, is only the tuple that lists the sections to run.",
+   "citation": "tests/face/hud_v2_relay_check.py:680-682,703-704",
+   "source": "pooled cluster p6, ruled invalid, accepted as a non-issue by lead on 2026-10-22"
+  },
+  {
+   "id": "pool-ni-p7",
+   "claim": "No test checks that relayed_from is left out of private (browser) approval projections, even though the docs promise that.",
+   "location": "jarvis/v2/approvals.py:320",
+   "why_not": "A test already checks this. The permissions_check relay-provenance block builds a card with relayed_from=\"Frontend\" and turns it into a private (hud_only=True) card. It then asserts that \"relayed_from\" is not in private.to_json(). So if a later change added the key to the private branch of to_json, that test would fail. The finding only looked at relay_provenance_check.py and missed this one.",
+   "citation": "tests/v2/permissions_check.py:3419-3427",
+   "source": "pooled cluster p7, ruled invalid, accepted as a non-issue by lead on 2026-10-22"
+  }
+ ],
+ "duplicates": {
+  "gt1": [
+   [
+    "20261021-015127-c6-r1-codex-gpt-6-1-sol-1-4daa",
+    1
+   ]
+  ]
+ },
+ "duplicate_clusters": {
+  "p4": "gt1"
+ }
+}

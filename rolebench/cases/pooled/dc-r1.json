@@ -1,0 +1,238 @@
+{
+ "case": "dc-r1",
+ "source": "pooled",
+ "adjudicated_by": "lead",
+ "date": "2026-10-22",
+ "ground_truth": [
+  {
+   "id": "pool-p1",
+   "severity": "LOW",
+   "mechanism": "The 'Whole-page text' checkbox still shows and can be ticked on a Direct tab with the switch on, but the Direct branch never reads `whole`. It always produces a URL-only reference with no text, so ticking the box does nothing and nothing tells the owner why.",
+   "location": "hud/src/components/BrowserCapture.tsx:87-106,132-134",
+   "evidence": "pooled cluster p1: 1 reviewer finding(s), ruled valid once by the blinded Opus ruling with the code (its evidence is in the pool file)",
+   "source": "pooled cluster p1, accepted by lead on 2026-10-22"
+  },
+  {
+   "id": "pool-p6",
+   "severity": "LOW",
+   "mechanism": "`directStill` is the HUD's check that a /browser/direct-capture reply is URL-only (no title, no text, not whole, no image), but no test sends it a malformed reply or one carrying an image, so deleting or weakening any of those conditions would leave every suite passing.",
+   "location": "hud/src/lib/pageCapture.ts:89-94",
+   "evidence": "pooled cluster p6: 1 reviewer finding(s), ruled valid once by the blinded Opus ruling with the code (its evidence is in the pool file)",
+   "source": "pooled cluster p6, accepted by lead on 2026-10-22"
+  },
+  {
+   "id": "pool-p7",
+   "severity": "LOW",
+   "mechanism": "record() sets the in-memory result `_last` while holding the lock but writes the report file after releasing it, so with two overlapping probe POSTs the writes can land in the opposite order. Memory, which decides whether direct_capture unlocks, can then hold one verdict while the report file the lead reads holds the other.",
+   "location": "jarvis/v2/browser/direct_probe.py:187-196",
+   "evidence": "pooled cluster p7: 1 reviewer finding(s), ruled valid once by the blinded Opus ruling with the code (its evidence is in the pool file)",
+   "source": "pooled cluster p7, accepted by lead on 2026-10-22"
+  },
+  {
+   "id": "pool-p8",
+   "severity": "MED",
+   "mechanism": "The server-side check that refuses a Remote binding on the Direct capture route has no test. The test named for it only sends a covered-window report, which `owner_current` refuses first. If the mode check were deleted, every test would still pass, and a Remote tab could get a URL-only reference that skips Remote's text and credential checks.",
+   "location": "jarvis/v2/browser/captures.py:248-249",
+   "evidence": "pooled cluster p8: 2 reviewer finding(s), ruled valid once by the blinded Opus ruling with the code (its evidence is in the pool file)",
+   "source": "pooled cluster p8, accepted by lead on 2026-10-22"
+  },
+  {
+   "id": "pool-p9",
+   "severity": "LOW",
+   "mechanism": "`_num` calls `math.isfinite` on any Python int before range-checking it, so a huge JSON integer (for example `dpr` = 10**400) raises OverflowError rather than ProbeRefused; the route catches only ProbeRefused, so the error escapes to the daemon's generic handler, which answers 409 'request failed (OverflowError)' and logs a stack trace instead of the fixed 400 refusal (the reviewer's '500' is wrong, but the escape is real).",
+   "location": "jarvis/v2/browser/direct_probe.py:58-61",
+   "evidence": "pooled cluster p9: 1 reviewer finding(s), ruled valid once by the blinded Opus ruling with the code (its evidence is in the pool file)",
+   "source": "pooled cluster p9, accepted by lead on 2026-10-22"
+  },
+  {
+   "id": "pool-p11",
+   "severity": "MED",
+   "mechanism": "When an approval card arrives during a probe, the layout effect bumps epoch.current. The probe's finally block then resets probing only if the token still matches the epoch, and nothing else ever sets probing back to false. So the Test button and the switch stay disabled showing 'Testing\u2026', and the pattern iframe stays on screen, until Settings remounts.",
+   "location": "hud/src/components/DirectCaptureSetting.tsx:55",
+   "evidence": "pooled cluster p11: 2 reviewer finding(s), ruled valid once by the blinded Opus ruling with the code (its evidence is in the pool file)",
+   "source": "pooled cluster p11, accepted by lead on 2026-10-22"
+  },
+  {
+   "id": "pool-p12",
+   "severity": "LOW",
+   "mechanism": "setDirectCapture never increments the shared `request` counter. A `/settings` GET already in flight (from the 20 s heartbeat, a reconnect or a BrowserSettings mount) can resolve after the owner's OFF PATCH and still pass its `seq === request` check, so it writes the old `direct_capture: true` back. The HUD then shows the switch on and enables Direct Annotate until the next refresh.",
+   "location": "hud/src/state/browserSettings.ts:39-48",
+   "evidence": "pooled cluster p12: 2 reviewer finding(s), ruled valid once by the blinded Opus ruling with the code (its evidence is in the pool file)",
+   "source": "pooled cluster p12, accepted by lead on 2026-10-22"
+  },
+  {
+   "id": "pool-p13",
+   "severity": "LOW",
+   "mechanism": "When this suite is run on its own without a built hud/dist, main() starts the mock daemon and goes straight to the scenario with no check that index.html exists. The mock then serves an empty directory, and the run fails with a Playwright selector timeout that says nothing about the missing build.",
+   "location": "tests/face/hud_v2_direct_capture_check.py:1-12,170-181",
+   "evidence": "pooled cluster p13: 1 reviewer finding(s), ruled valid once by the blinded Opus ruling with the code (its evidence is in the pool file)",
+   "source": "pooled cluster p13, accepted by lead on 2026-10-22"
+  }
+ ],
+ "members": {
+  "pool-p1": [
+   [
+    "20261021-090022-dc-r1-claude-sonnet-1-13a4",
+    4
+   ]
+  ],
+  "pool-p6": [
+   [
+    "20261021-023915-dc-r1-jarvis-deepseek-deepseek-v4-1-flash-1-82a4",
+    0
+   ]
+  ],
+  "pool-p7": [
+   [
+    "20261021-085426-dc-r1-claude-haiku-1-51f8",
+    4
+   ]
+  ],
+  "pool-p8": [
+   [
+    "20261021-090022-dc-r1-claude-sonnet-1-13a4",
+    0
+   ],
+   [
+    "20261021-090205-dc-r1-claude-opus-1-86c5",
+    0
+   ]
+  ],
+  "pool-p9": [
+   [
+    "20261021-090205-dc-r1-claude-opus-1-86c5",
+    3
+   ]
+  ],
+  "pool-p11": [
+   [
+    "20261021-022819-dc-r1-codex-gpt-6-1-sol-1-9e95",
+    2
+   ],
+   [
+    "20261021-085426-dc-r1-claude-haiku-1-51f8",
+    0
+   ]
+  ],
+  "pool-p12": [
+   [
+    "20261021-022819-dc-r1-codex-gpt-6-1-sol-1-9e95",
+    1
+   ],
+   [
+    "20261021-090205-dc-r1-claude-opus-1-86c5",
+    1
+   ]
+  ],
+  "pool-p13": [
+   [
+    "20261021-030203-dc-r1-jarvis-z-ai-glm-5-3-flash-1-30d0",
+    0
+   ]
+  ],
+  "pool-ni-p2": [
+   [
+    "20261021-085426-dc-r1-claude-haiku-1-51f8",
+    6
+   ]
+  ],
+  "pool-ni-p3": [
+   [
+    "20261021-085426-dc-r1-claude-haiku-1-51f8",
+    5
+   ]
+  ],
+  "pool-ni-p4": [
+   [
+    "20261021-090022-dc-r1-claude-sonnet-1-13a4",
+    1
+   ]
+  ],
+  "pool-ni-p5": [
+   [
+    "20261021-023915-dc-r1-jarvis-deepseek-deepseek-v4-1-flash-1-82a4",
+    4
+   ]
+  ],
+  "pool-ni-p10": [
+   [
+    "20261021-023915-dc-r1-jarvis-deepseek-deepseek-v4-1-flash-1-82a4",
+    1
+   ],
+   [
+    "20261021-090022-dc-r1-claude-sonnet-1-13a4",
+    3
+   ]
+  ],
+  "pool-ni-p14": [
+   [
+    "20261021-023915-dc-r1-jarvis-deepseek-deepseek-v4-1-flash-1-82a4",
+    3
+   ]
+  ],
+  "pool-ni-p15": [
+   [
+    "20261021-023915-dc-r1-jarvis-deepseek-deepseek-v4-1-flash-1-82a4",
+    2
+   ]
+  ]
+ },
+ "non_issues": [
+  {
+   "id": "pool-ni-p2",
+   "claim": "The mock server copies the conflict check instead of calling the real route handler, so removing the check from the real route goes unnoticed by the face tests.",
+   "location": "tests/face/hud_v2_mock_browser.py:79",
+   "why_not": "The face-suite mock (tests/face/hud_v2_mock_browser.py) is a hand-written stand-in for the HTTP routes by design. It reimplements every route, including the profile, tab and approval-card 409s. Its job is to test the HUD against that contract, not to test the daemon's route code. The real gate at jarvis/v2/browser/routes.py:216-218 is covered directly: tests/v2/direct_capture_check.py:160-171 sends PATCH /browser/settings with direct_capture true and expects 409 before a pass and success after one. Removing the real check would fail that test, so the regression the claim describes would still be caught. The finding's own scenario admits this coverage.",
+   "citation": "tests/v2/direct_capture_check.py:160-171",
+   "source": "pooled cluster p2, ruled invalid, accepted as a non-issue by lead on 2026-10-22"
+  },
+  {
+   "id": "pool-ni-p3",
+   "claim": "When no crop is applied, the probe's sampled values come from real tab content and are saved to disk, which contradicts the module's stated guarantee.",
+   "location": "jarvis/v2/browser/direct_probe.py:6",
+   "why_not": "The code never samples a frame that was not cropped. grabCroppedFrame throws DirectRefused('not_cropped') when cropTo is missing (line 188) or rejects (line 191), and only reaches grabFrame after `await cropTo` has resolved and set crop.applied = true. In that case runProbe catches the refusal and returns with samples still [] (directProbe.ts:66-86). So when the crop is not applied, no tab pixels are read or written to the report, and the docstring's guarantee holds.",
+   "citation": "hud/src/lib/directCapture.ts:187-191",
+   "source": "pooled cluster p3, ruled invalid, accepted as a non-issue by lead on 2026-10-22"
+  },
+  {
+   "id": "pool-ni-p4",
+   "claim": "The capture path only checks the persisted switch and never checks that a probe passed on the current daemon, so after a restart or a hand edit, captures go through without any probe.",
+   "location": "jarvis/v2/browser/captures.py",
+   "why_not": "The plan says this is intended. The probe pass only gates turning the switch on through the PATCH route (routes.py:216). After a restart the switch keeps its saved value. So capture_direct is meant to check only the persisted switch (captures.py:242) and not look for a pass from the current daemon. A hand edit of browser.json is the owner's own action on owner-only state, so it does not bypass the agent boundary.",
+   "citation": "docs/plans/2026-10-19-direct-capture-plan.md:21-24",
+   "source": "pooled cluster p4, ruled invalid, accepted as a non-issue by lead on 2026-10-22"
+  },
+  {
+   "id": "pool-ni-p5",
+   "claim": "A second HUD window keeps an outdated copy of the setting for up to the refresh interval and still starts the screen-share grab after the owner disabled it elsewhere.",
+   "location": "hud/src/state/browserSettings.ts:25",
+   "why_not": "The plan expects a HUD window to sometimes hold an old copy of the switch and makes the daemon the guard: it refuses a Direct capture reference while the switch is off. That is the 409 the finding itself describes. The capture also needs the owner's own trusted press and the owner accepting Chrome's share prompt. The pixels stay in that HUD window and are thrown away when the daemon refuses, so nothing reaches an agent. The stale window is the intended, documented design, not a defect.",
+   "citation": "docs/plans/2026-10-19-direct-capture-plan.md:32-33",
+   "source": "pooled cluster p5, ruled invalid, accepted as a non-issue by lead on 2026-10-22"
+  },
+  {
+   "id": "pool-ni-p10",
+   "claim": "The direct capture handler checks only the current input-hold flag and never compares the hold epoch from before and after, so an approval card that came and went during the capture is missed.",
+   "location": "jarvis/v2/browser/captures.py:252",
+   "why_not": "The daemon never sees the Direct pixels. The HUD grabs the frame before it sends the POST, and the plan gives the HUD the job of handling an approval card that appears during the capture: it checks for blocked before the share prompt, stops the tracks if a card appears during any await, and re-checks coverage at the grab. capture_direct is a short synchronous handler, so an epoch read at its start would come after the HUD's grab had already finished. Copying capture_page's capture_hold_epoch guard could therefore not catch a card that came and went during the grab, which is the scenario the claim describes. In capture_page the epoch matters because the daemon itself takes the capture inside host.capture_look; Direct has no daemon-side capture for a card to overlap. What the daemon does check (switch, mode, binding, and input_held before and after minting) covers the short window it actually spans.",
+   "citation": "docs/plans/2026-10-19-direct-capture-plan.md:39-50",
+   "source": "pooled cluster p10, ruled invalid, accepted as a non-issue by lead on 2026-10-22"
+  },
+  {
+   "id": "pool-ni-p14",
+   "claim": "The code finds the allowed overlay by its position next to the frame in the DOM, so reordering the elements would make every capture be refused as covered.",
+   "location": "hud/src/lib/directCapture.ts:239",
+   "why_not": "This describes a hypothetical future refactor, not a defect in the current code. FrameHost appends the frame and then the shield as siblings, so `frame.nextElementSibling` is always the `.frameshield` and captures work today. If the order were ever reversed, the guard would refuse captures as 'covered' rather than let a covered frame through, which is a fail-closed outcome and not a bug in this change.",
+   "citation": "hud/src/components/FrameHost.tsx:85",
+   "source": "pooled cluster p14, ruled invalid, accepted as a non-issue by lead on 2026-10-22"
+  },
+  {
+   "id": "pool-ni-p15",
+   "claim": "The daemon reference is requested before the gesture is checked for staleness, which can leave orphaned capture rows, and the later error path never offers the Remote fallback.",
+   "location": "hud/src/components/BrowserCapture.tsx:98-113",
+   "why_not": "The finding's scenario does not happen. captureDirect checks live(), which includes valid(token), straight after encoding (directCapture.ts:253-254). A gesture that goes stale during encode therefore throws DirectRefused('stale') before api.directCapture is ever called, and no row is created. The only window left is the daemon request itself. The Remote path (BrowserCapture.tsx:106) has the same window and handles it the same way, with the re-check at :107. Any row left behind that way is harmless: the store expires rows after 24 hours and caps both entry count and bytes (captures.py:23, :70-73, :108-113). The other half of the claim is about the catch at :113. It handles generic errors, such as a failed daemon reference request. Those are not Direct refusals, and opening the page in Remote would not fix them. The Remote offer is deliberately tied to DirectRefused reasons at :101, so leaving it out at :113 is not a defect.",
+   "citation": "hud/src/lib/directCapture.ts:253-254",
+   "source": "pooled cluster p15, ruled invalid, accepted as a non-issue by lead on 2026-10-22"
+  }
+ ]
+}
