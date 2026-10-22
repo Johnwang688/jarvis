@@ -1083,6 +1083,69 @@ class Device(DaemonBase):
         self.assertIn("older than the sources", self.download(status=409)["error"])
         self.assertEqual(self.world.calls("vexcom"), [])
 
+    def fresh(self):
+        return self.owner("GET", f"/projects/{self.project.id}/vex/fresh")
+
+    def test_fresh_answers_what_the_download_would_judge_and_runs_nothing(self):
+        # The HUD's one click asks first and skips clean and build when
+        # nothing changed (the owner, 2026-10-21). Same rule as `_fresh`.
+        answer = self.fresh()
+        self.assertEqual((answer["fresh"], "Build first" in answer["reason"]), (False, True))
+        self.build()
+        calls = (len(self.world.calls("make")), len(self.world.calls("vexcom")))
+        self.assertEqual(self.fresh(), {"fresh": True, "reason": None})
+        # The read itself never runs make or vexcom.
+        self.assertEqual((len(self.world.calls("make")), len(self.world.calls("vexcom"))), calls)
+        self._header()
+        self.assertFalse(self.fresh()["fresh"], "an edited header makes it stale")
+        self.build()
+        self.assertTrue(self.fresh()["fresh"])
+        self._built_then_older()
+        self.assertIn("older than the sources", self.fresh()["reason"])
+        self.build()
+        vex.mark_unfinished(str(self.folder))
+        self.assertFalse(self.fresh()["fresh"], "an unfinished build is never current")
+
+    def test_fresh_is_stricter_than_the_download(self):
+        # PR #292 review MED-1 and LOW-1: skipping the build needs a binary
+        # this daemon built, with the same settings, and no compilable file
+        # changed anywhere in the project. The download's rule is unchanged.
+        self.build()
+        self.assertTrue(self.fresh()["fresh"])
+        # A header outside src/ and include/ (a makefile's -I could reach it).
+        (self.folder / "lib").mkdir()
+        (self.folder / "lib" / "foo.h").write_text("// new\n")
+        answer = self.fresh()
+        self.assertEqual((answer["fresh"], answer["reason"]), (False, "a source file changed since the last build"))
+        self.ended(self.download()["terminal_id"])      # the download's own rule still sends it
+        eventually(lambda: self.owner("GET", "/vex/status")["device"] is None, what="freed")
+        self.build()
+        self.assertTrue(self.fresh()["fresh"])
+        # A file in a skipped folder (the build's own output) changes nothing.
+        (self.folder / "build" / "x.h").write_text("// generated\n")
+        self.assertTrue(self.fresh()["fresh"])
+        # A changed build setting: printf_float.
+        settings = self.folder / ".vscode" / "vex_project_settings.json"
+        data = json.loads(settings.read_text())
+        data["project"]["cpp"]["printf_float"] = not data["project"]["cpp"].get("printf_float", False)
+        settings.write_text(json.dumps(data))
+        self.assertEqual(self.fresh()["reason"], "the build settings changed since the last build")
+        self.build()
+        self.assertTrue(self.fresh()["fresh"])
+        # A daemon that never built it (a restart, or VS Code's binary): never skips,
+        # though the download's mtime rule would send it.
+        with self.daemon.vex._lock:
+            self.daemon.vex._current.clear()
+        answer = self.fresh()
+        self.assertEqual((answer["fresh"], answer["reason"]),
+                         (False, "Jarvis has not built this binary since the daemon started"))
+        self.ended(self.download()["terminal_id"])
+
+
+    def test_fresh_refuses_what_the_download_refuses(self):
+        self.owner("GET", "/projects/0000dead/vex/fresh", status=404)
+        self.owner("GET", f"/projects/{self.project.id}/vex/fresh?x=1", status=400)
+
     # -- VX-2 review M2 and its delta review (MED-1, LOW-1..3): what may be sent ------------
 
     def _built_then_older(self):

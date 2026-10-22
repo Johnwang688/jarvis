@@ -16,12 +16,20 @@ const h = vi.hoisted(() => ({
   closed: [] as string[],
   buildState: null as null | ((id: string) => any),
   order: [] as string[],
+  /** `GET …/vex/fresh`: true, false, or an error; and how often it was asked. */
+  fresh: false as boolean | Error,
+  freshAsked: 0,
 }));
 
 vi.mock("../api", () => ({
   api: {
     vexStatus: async () => ({ configured: true, hint: null, vexcom_version: null, extension_version: null,
                               sdks: null, templates: false, device: h.device, brain: h.brain }),
+    vexFresh: async () => {
+      h.freshAsked += 1;
+      if (h.fresh instanceof Error) throw h.fresh;
+      return h.fresh;
+    },
     vexDownload: (pid: string, body: { slot: number; name: string }) => {
       h.downloads.push({ pid, ...body });
       h.order.push("download");
@@ -70,7 +78,7 @@ vi.mock("../components/Terminal", () => ({
 }));
 
 import { VexStore } from "./vex";
-import { DOWNLOAD_RETRY_WAIT_MS, DOWNLOAD_TRIES, brainView, chainLine, type DownloadView } from "../lib/vex";
+import { DOWNLOAD_RETRY_WAIT_MS, DOWNLOAD_TRIES, brainView, chainLine, chainSteps, type DownloadView } from "../lib/vex";
 import { api } from "../api";
 import { terminals } from "../components/Terminal";
 
@@ -89,6 +97,8 @@ beforeEach(() => {
   h.closed.length = 0;
   h.buildState = null;
   h.order.length = 0;
+  h.fresh = false;
+  h.freshAsked = 0;
 });
 
 describe("build feedback", () => {
@@ -1112,4 +1122,72 @@ describe("a radio dropout (exit 4) is sent again by the same click (the owner, 2
       expect(store.run("p3").note).toBe(`Download failed (exit ${code}); check its terminal.`);
     });
   }
+});
+
+describe("nothing changed since the last build: straight to the download (the owner, 2026-10-21)", () => {
+  beforeEach(() => {
+    h.download = async () => ({ terminal_id: "b0000001" });
+  });
+
+  it("a current binary is downloaded with no clean and no build", async () => {
+    h.fresh = true;
+    const store = new VexStore();
+    const steps: string[][] = [];
+    h.download = async () => {
+      steps.push(chainSteps(store.chain!).map((s) => s.step));
+      return { terminal_id: "b0000001" };
+    };
+    await store.download("p3", 1, "auton", "override");
+    expect(h.freshAsked).toBe(1);
+    expect(h.builds).toEqual([]);
+    expect(h.order).toEqual(["download"]);
+    expect(steps).toEqual([["download"]]);
+    expect(store.run("p3").note).toBe("Downloaded to slot 1. Start it on the brain or the controller.");
+  });
+
+  it("a stale binary is cleaned and built first, as before", async () => {
+    h.fresh = false;
+    const store = new VexStore();
+    await store.download("p3", 1, "auton", "override");
+    expect(h.order).toEqual(["clean", "build", "download"]);
+  });
+
+  it("when the check fails, it cleans and builds, as before", async () => {
+    h.fresh = new Error("network");
+    const store = new VexStore();
+    await store.download("p3", 1, "auton", "override");
+    expect(h.order).toEqual(["clean", "build", "download"]);
+  });
+
+  it("current when asked, stale by the download (an edit in between): one rebuild, then the download", async () => {
+    h.fresh = true;
+    let n = 0;
+    h.download = async () => {
+      n += 1;
+      if (n === 1) throw buildFirst("the sources changed since build/override.bin was built; Build first, then download");
+      return { terminal_id: "b0000002" };
+    };
+    const store = new VexStore();
+    let rebuildNote = "";
+    const build = api.vexBuild;
+    vi.spyOn(api, "vexBuild").mockImplementation(async (pid: string, action: string) => {
+      if (action === "rebuild") rebuildNote = store.run("p3").note;
+      return build(pid, action as any);
+    });
+    await store.download("p3", 1, "auton", "override");
+    expect(h.order).toEqual(["download", "rebuild", "download"]);
+    // Said as what happened on this path (PR #292 review LOW-3).
+    expect(rebuildNote).toBe("Rebuilding from scratch: the sources changed since the check…");
+    expect(store.run("p3").note).toBe("Downloaded to slot 1. Start it on the brain or the controller.");
+  });
+
+  it("the brain terminal is still paused only right before the download", async () => {
+    h.fresh = true;
+    h.brain = "c0000001";
+    const store = new VexStore();
+    await store.refreshStatus();
+    await store.download("p3", 1, "auton", "override");
+    expect(h.order).toEqual(["close c0000001", "download"]);
+    expect(h.brainOpened).toBe(0);
+  });
 });

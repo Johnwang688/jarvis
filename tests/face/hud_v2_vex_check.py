@@ -2065,12 +2065,45 @@ def _help_checks(page, mock, check, until, fake):
     _slot_close(page)
 
 
+def _skip_build_checks(page, mock, check, until, fake):
+    """The owner, 2026-10-21: Download does not clean and build again when
+    nothing changed since the last build. Otherwise it does, as before."""
+    _reset(page, mock, until)
+    check("skip build: setup: the view draws", _ready(page, until))
+    v = mock_vex.state(mock)
+    v["fresh_answer"] = True
+    _auto(mock)
+    base = len(mock.calls)
+    page.locator(_view(V, _tid("vex-download-btn"))).click()
+    check("skip build: a current binary is downloaded on the click",
+          bool(until(lambda: _sent_downloads(mock), timeout=8)))
+    check("skip build: with no clean and no build", _posted_since(mock, base, "/projects/p3/vex/build") == [],
+          str(_posted_since(mock, base, "/projects/p3/vex/build")))
+    until(lambda: page.evaluate("window.__hudVex.chain()") is None, timeout=8)
+    note = page.locator(_view(V, _tid("vex-note")))
+    check("skip build: and the status line says it was downloaded",
+          bool(until(lambda: note.count() and "Downloaded to slot" in note.inner_text(), timeout=4)),
+          note.inner_text() if note.count() else "")
+    check("skip build: it asked once", v["fresh_asked"] == 1, str(v["fresh_asked"]))
+    _reset(page, mock, until)
+    _ready(page, until)
+    v = mock_vex.state(mock)
+    v["fresh_answer"] = False
+    _auto(mock)
+    base = len(mock.calls)
+    page.locator(_view(V, _tid("vex-download-btn"))).click()
+    check("skip build: a stale binary is still cleaned and built first",
+          bool(until(lambda: _sent_downloads(mock), timeout=8))
+          and _posted_since(mock, base, "/projects/p3/vex/build") == [{"action": "clean"}, {"action": "build"}],
+          str(_posted_since(mock, base, "/projects/p3/vex/build")))
+
+
 SECTIONS = (
     _feedback_checks, _offer_checks, _setup_checks, _build_checks, _clean_output_checks, _explicit_click_checks,
     _chain_checks, _card_checks, _brain_checks, _info_checks, _notice_checks, _one_chain_checks,
     _header_rebuild_checks, _still_stale_checks, _answer_card_checks, _passing_card_checks, _first_click_checks,
     _detect_again_checks, _lone_pane_checks, _gone_project_checks, _ed7_beside_checks, _stop_checks, _tabs_checks,
-    _marks_checks, _help_checks, _download_end_checks)
+    _marks_checks, _help_checks, _download_end_checks, _skip_build_checks)
 
 
 def vex_checks(browser, mock, base, check, until, guard, init_script):

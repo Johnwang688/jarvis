@@ -572,7 +572,10 @@ export class VexStore {
       }
       phase(action);
       this.say(projectId, action === "clean" ? "Cleaning first…" : action === "build" ? "Building…"
-        : "Rebuilding from scratch: make found nothing to do, but the sources changed (a header it does not list)…",
+        : chain.skipBuild
+          // Current when asked, stale by the download (PR #292 review LOW-3).
+          ? "Rebuilding from scratch: the sources changed since the check…"
+          : "Rebuilding from scratch: make found nothing to do, but the sources changed (a header it does not list)…",
       "info");
       const b = await this.runBuild(projectId, action, (tid) => {
         chain.buildTerminal = tid;
@@ -592,13 +595,27 @@ export class VexStore {
       this.changed();
       return true;
     };
-    this.patchRun(projectId, { busy: "download", note: "Cleaning first…", noteTone: "info", downloaded: null,
+    this.patchRun(projectId, { busy: "download", note: "Checking for changes since the last build…", noteTone: "info", downloaded: null,
       download: null, downloadNote: "", downloadStarted: Date.now() });
     let paused = false;
     try {
       await this.refreshStatus();
       if (!holds()) return dropped("before it started");
-      if (!(await step("clean")) || !(await step("build"))) return;
+      // Nothing changed since the last build: straight to the download (the
+      // owner, 2026-10-21, revising decision 3's every-time clean and build).
+      // Only a hint; the download judges again under the build lock, and a
+      // binary that went stale in between still gets its one rebuild below.
+      let fresh = false;
+      try {
+        fresh = await api.vexFresh(projectId);
+      } catch {
+        fresh = false;                                  // unknown: clean and build, as before
+      }
+      if (!holds()) return dropped("before it started");
+      if (fresh) {
+        chain.skipBuild = true;
+        this.say(projectId, "Nothing changed since the last build: downloading it as it is.", "info");
+      } else if (!(await step("clean")) || !(await step("build"))) return;
       if (!holds()) return dropped("before it downloaded");
       // The build may have taken minutes: whether the brain terminal holds
       // the port is asked now, not read from the chain's start.

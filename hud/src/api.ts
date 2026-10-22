@@ -360,6 +360,10 @@ export const api = {
       if (!b) throw new ApiError(500, "the daemon answered without a build");
       return b;
     }),
+  /** Whether the project's binary is current (`fresh`): read only, a hint for the chain. */
+  vexFresh: (projectId: string) =>
+    req<unknown>(`/projects/${encodeURIComponent(projectId)}/vex/fresh`, { signal: AbortSignal.timeout(10_000) })
+      .then((r: any) => r?.fresh === true),
   vexDownload: (projectId: string, body: { slot: number; name: string }) =>
     req<{ terminal_id: string; download_id: string }>(`/projects/${encodeURIComponent(projectId)}/vex/download`, json(body)),
   vexDownloadState: (id: string) =>

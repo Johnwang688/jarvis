@@ -958,6 +958,45 @@ def scan_sources(root) -> Sources:
     return Sources(newest=newest, digest=digest)
 
 
+# Folders `wide_digest` never walks: the build's own output, and tool or
+# editor folders (`.git`, `.vscode`, any dot folder). Compared lower-cased.
+WIDE_SKIP = frozenset(("build", "node_modules"))
+
+
+def wide_digest(root) -> str | None:
+    """A digest of every `is_source_name` file anywhere in the project (path,
+    mtime_ns, size), not only `src/` and `include/`: a header under `lib/` or
+    another folder a makefile's `-I` reaches counts too. None when the walk
+    is incomplete (over SOURCE_LIMIT files, or unreadable). For the HUD's
+    skip-the-build hint only (`Vex.fresh`, PR #292 review MED-1); a download
+    is still judged by `scan_sources`."""
+    root = Path(root)
+    rows: list[tuple[str, int, int]] = []
+
+    def unreadable(exc):
+        raise exc
+
+    try:
+        for folder, dirs, files in os.walk(root, onerror=unreadable):
+            dirs[:] = sorted(d for d in dirs if not d.startswith(".") and d.lower() not in WIDE_SKIP
+                             and not os.path.islink(os.path.join(folder, d)))
+            for name in files:
+                if not is_source_name(name):
+                    continue
+                if len(rows) >= SOURCE_LIMIT:
+                    return None
+                info = os.lstat(os.path.join(folder, name))
+                if stat.S_ISREG(info.st_mode):
+                    rel = os.path.relpath(os.path.join(folder, name), root).replace(os.sep, "/")
+                    rows.append((rel, info.st_mtime_ns, info.st_size))
+    except OSError:
+        return None
+    h = hashlib.sha256()
+    for rel, mtime_ns, size in sorted(rows):
+        h.update(f"{rel}\0{mtime_ns}\0{size}\n".encode("utf-8", "surrogateescape"))
+    return h.hexdigest()
+
+
 def newest_source(root) -> float:
     """The newest mtime among what a build reads (`scan_sources`)."""
     return scan_sources(root).newest
@@ -1441,6 +1480,10 @@ class Build:
     # rebuild) makes it current for exactly those sources (`Vex._current`).
     sources_digest: str | None = None
     bin_before: tuple | None = None
+    # For the skip-the-build hint (`Vex.fresh`): `wide_digest` and the plain
+    # build's argv (name, SDK, tools, PRINTF_FLOAT) just before make started.
+    wide: str | None = None
+    inputs: tuple | None = None
 
     def view(self) -> dict:
         return {"id": self.id, "project_id": self.project_id, "action": self.action,
@@ -1744,6 +1787,7 @@ class Vex:
         # successfully the binary is not trusted (`mark_unfinished`).
         try:
             sources = scan_sources(root)
+            wide = wide_digest(root)
             mark_unfinished(root)
         except (OSError, VexError):
             lock.release()
@@ -1752,7 +1796,8 @@ class Vex:
         record = Build(id="", project_id=project.id, project=project.name, action=action,
                        root=root, root_windows=root_windows, started=_utcnow(), lock=lock,
                        started_ts=time.time(), name=detected.name, sources_digest=sources.digest,
-                       bin_before=before["_id"] if before else None)
+                       bin_before=before["_id"] if before else None, wide=wide,
+                       inputs=tuple(build_argv(cfg, detected, "build")))
         with self._lock:
             record.id = self._id(self._builds)
             self._keep(self._builds, record.id, record)
@@ -1829,7 +1874,8 @@ class Vex:
             elif current["_id"] != record.bin_before or record.action == "rebuild":
                 if record.sources_digest is not None:
                     self._current[real] = {"name": record.name, "sources": record.sources_digest,
-                                           "bin": current["_id"]}
+                                           "bin": current["_id"], "wide": record.wide,
+                                           "inputs": record.inputs}
                 else:
                     self._current.pop(real, None)
             elif last is not None and last["bin"] != current["_id"]:
@@ -1999,6 +2045,40 @@ class Vex:
             except APIError:
                 pass  # Actual EOF owns settlement, even if the listing no longer has this terminal.
         return view
+
+    def fresh(self, project_id) -> dict:
+        """Whether a download would send the project's binary as it is now:
+        `{fresh, reason}`, by `_fresh`'s own rule, read only. The HUD's one
+        click asks first and goes straight to Download when nothing changed
+        since the last build (the owner, 2026-10-21); otherwise it cleans and
+        builds as before. Never under the build lock, so it can only be a
+        hint: the download judges again under the lock, and a binary that
+        went stale in between is still refused (`build_first`)."""
+        project = self._project(project_id)
+        detected = self._detected(project)
+        if detected.language != "cpp" or not PROJECT_NAME.fullmatch(detected.name):
+            return {"fresh": False, "reason": "this project cannot be downloaded here"}
+        root = project.root
+        try:
+            found = self._fresh(root, detected.name)
+        except BuildFirst as exc:
+            return {"fresh": False, "reason": str(exc)}
+        # Stricter than the download's rule (PR #292 review MED-1, LOW-1):
+        # skipping the build is only for a binary this daemon built itself,
+        # with the same settings, and nothing that could be compiled changed
+        # anywhere in the project since. `_fresh`'s mtime fallback (after a
+        # restart, or a binary VS Code wrote) never skips; neither does a
+        # changed PRINTF_FLOAT, SDK, tool or a header outside `src/`/`include/`.
+        with self._lock:
+            last = self._current.get(os.path.realpath(root))
+        if last is None or last["name"] != detected.name or last["bin"] != found["_id"]:
+            return {"fresh": False, "reason": "Jarvis has not built this binary since the daemon started"}
+        if last.get("inputs") != tuple(build_argv(load_config(), detected, "build")):
+            return {"fresh": False, "reason": "the build settings changed since the last build"}
+        wide = last.get("wide")
+        if wide is None or wide_digest(root) != wide:
+            return {"fresh": False, "reason": "a source file changed since the last build"}
+        return {"fresh": True, "reason": None}
 
     def _fresh(self, root, name) -> dict:
         """`build/<name>.bin` if it may be sent, else `BuildFirst`.
@@ -2367,6 +2447,9 @@ def route(handler, daemon, parts, query):
                 _object(query, ())
                 body = _object(handler._body(), ("action",), ("action",))
                 return 202, vex.start_build(project_id, body["action"])
+            if parts[3:] == ["fresh"] and method == "GET":
+                _object(query, ())
+                return 200, vex.fresh(project_id)
             if parts[3:] == ["download"] and method == "POST":
                 _object(query, ())
                 body = _object(handler._body(), ("slot", "name"), ("slot", "name"))

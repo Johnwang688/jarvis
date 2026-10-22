@@ -1092,3 +1092,72 @@ Seventeen mutations each failed their checks (the review's seven last):
 - Stop during the next try's request ignored;
 - no freshness rule;
 - a never-validated reading passing.
+
+**Download skips the clean and build when nothing changed (the owner,
+2026-10-21, revising decision 3).** "Can you have the download button not
+force a rebuild if nothing in the code changed?" Until now one click always
+ran clean → build → download, so every download paid for a full rebuild.
+
+- **The daemon.** `GET /projects/{id}/vex/fresh` answers `{fresh, reason}`
+  by `Vex._fresh`, the rule the download itself enforces: a binary exists,
+  no build is unfinished, and either this daemon's last successful build
+  wrote exactly it and the sources' digest is unchanged since that build
+  started, or (after a restart, or a binary VS Code or `vexbuild` wrote) it
+  is newer than every source. Read only, runs nothing, not under the build
+  lock.
+- **The HUD chain.** It asks first. `true`: `chain.skipBuild`, the status
+  line says "Nothing changed since the last build: downloading it as it
+  is.", and the step list shows only Download. `false`, or the read failed:
+  clean → build → download, exactly as before. The brain terminal is still
+  paused only right before the download.
+- **Still safe if the answer goes stale.** The download judges again under
+  the build lock. A source saved between the check and the download gets
+  `build_first`, and the chain's existing single rebuild runs, then the
+  download.
+
+**Review of #292** (one MED, no HIGH), fixed in the PR: `fresh` is
+**stricter than the download's rule**. Before, `_fresh` was the last check
+behind a chain that always rebuilt; skipping the rebuild would have let its
+blind spots decide what reaches the robot.
+
+- MED-1: settings and inputs outside `src/` and `include/`. A flipped
+  `printf_float`, another SDK or tool, or a header under `lib/` that a
+  makefile `-I` reaches left the binary "fresh". Each build now records the
+  plain build's argv (`build_argv(..., "build")`: `P=`, `T=`, the tools,
+  `PRINTF_FLOAT`) and `wide_digest` (every `is_source_name` file anywhere
+  in the project, except `build/`, `node_modules/` and dot folders) in
+  `_current`. `fresh` is true only when both still match.
+- LOW-1: the mtime fallback. After a restart, or for a binary VS Code
+  wrote, `fresh` is false ("Jarvis has not built this binary since the
+  daemon started"), so the first click after every restart rebuilds. The
+  download's own rule keeps its fallback.
+- LOW-3: on the skip path the one rebuild says "the sources changed since
+  the check".
+- NIT-2: `api.vexfresh.test.ts` pins the exact-`true` parse. NIT-3: the
+  "runs nothing" check now counts make and vexcom around the read.
+- Not done, LOW-2 (optional): Stop does not abort the in-flight check; the
+  chain stops when it answers (at most 10 s).
+
+Checks (fakes only):
+
+- `vex_check` `Device`: the answer before and after a build, after a header
+  edit, for an older binary and an unfinished build; runs no program; 404
+  and 400 refusals; and the stricter rule (a `lib/` header, a file under
+  `build/` ignored, printf_float flipped, a daemon that never built it),
+  with the download still accepting what its own rule accepts.
+- `state/vex.test.ts`: a current binary downloads with no clean or build and
+  the steps list only Download; stale or a failed check cleans and builds; a
+  binary that goes stale between the check and the download gets one
+  rebuild; the brain terminal is paused only right before the download.
+- `lib/vex.test.ts`: the step list with `skipBuild`, with and without a
+  rebuild.
+- `hud_v2_vex_check` 339/339: a new skip section (a current binary
+  downloads with no build; a stale one still cleans and builds). The mock
+  answers `fresh` from `fresh_answer`, which is false by default, so the
+  other sections keep the clean and build.
+
+Fourteen mutants, all caught: always skip, never skip, a failed check
+counted as current, step list ignoring the skip, the daemon always
+answering current, the query not checked; and after the review, a truthy
+parse, the old rebuild message, the mtime fallback skipping, settings
+ignored, the wide digest ignored, `build/` walked, and inputs not recorded.

@@ -118,6 +118,9 @@ describe("one chain per window (M1): clean, build, download (owner decision 3)",
   });
 
   it("lists its steps: done, running, to come; a rebuild only once it happens", () => {
+    expect(chainSteps(c({ phase: "download", done: [], skipBuild: true }))).toEqual([{ step: "download", state: "busy" }]);
+    expect(chainSteps(c({ phase: "rebuild", done: [], skipBuild: true })).map((s) => s.step)).toEqual(["rebuild", "download"]);
+    expect(chainSteps(c({ phase: "download", done: ["rebuild"], skipBuild: true })).map((s) => s.state)).toEqual(["done", "busy"]);
     expect(chainSteps(c({ phase: "clean", done: [] }))).toEqual([
       { step: "clean", state: "busy" }, { step: "build", state: "todo" }, { step: "download", state: "todo" }]);
     expect(chainSteps(c({ phase: "build", done: ["clean"] })).map((s) => s.state)).toEqual(["done", "busy", "todo"]);
