@@ -3307,6 +3307,182 @@ def command_tool_checks():
         eq(asker.seen, [], "BashOutput with no command key is unchanged")
 
 
+# A field that leaves its quoting open, followed by a field holding a refused
+# line that closes it: joined, the refused line was an `echo` argument
+# (#211 bench, MED). Each pair is (first field, second field).
+CARRIED_DENY = (
+    ("echo '", "sudo rm -rf / '"),
+    ('echo "', "sudo rm -rf /\""),
+    ("echo \\", "pkill -f daemon2"),
+    ("echo '", "pkill -f daemon2"),
+    ("echo 'x", "x' ; cat .env"),
+    ("cat <<EOF", "sudo rm -rf /"),
+    ("true <<'EOF'", "systemctl --user restart jarvis-daemon2"),
+)
+
+
+def command_field_checks():
+    """#211 bench (Opus rulings at 8bee098, still on main at 1e3862c3).
+
+    MED: `command_text` joined every command key's text with newlines before
+    any layer judged it, so a quote, backslash or here-document left open in
+    one field swallowed the next; `Bash {"command": "echo '", "script":
+    "sudo rm -rf / '"}` was ALLOWed at layer 4 by rules' static ALLOW, with
+    no card. Each field is now judged by itself as well, a field that leaves
+    its quoting open is asked, and a call with more than one command line is
+    never the allowlist's or the rules' and offers no Always.
+
+    LOW: an argv array was joined with plain spaces, so `["bash", "-lc",
+    "pkill -f daemon2"]` read as `bash -lc pkill -f daemon2` and layer 1's
+    daemon-kill DENY never saw the quoted form. It is `shlex.join`ed now; the
+    plain reading is still judged, so what it refused stays refused."""
+    from jarvis.v2 import approvals
+    from jarvis.v2.approvals import ApprovalRequest, PendingApprovals, command_text
+    from jarvis.v2.model import PermissionProfile as P
+    from jarvis.v2.permissions import build_permit, deny_all
+    from jarvis.v2.provider import Decision
+
+    with Sandbox() as box:
+        # --- MED: a refused line in the second field is refused, unasked,
+        # in every profile, for every asker, through every kind of tool.
+        for profile in (P.AUTO, P.ASK, P.STRICT):
+            for tool, keys in (("Bash", ("command", "script")), ("FutureShell", ("command", "cmd")),
+                               ("mcp__x__exec", ("cmd", "script"))):
+                for first, second in CARRIED_DENY:
+                    for asker in (Asker(Decision.ALLOW), deny_all()):
+                        brief = brief_for(profile)
+                        args = {keys[0]: first, keys[1]: second}
+                        tag = f"[{profile.value}] {tool} {args!r}"
+                        eq(build_permit(context(brief), asker)(tool, args, brief), Decision.DENY,
+                           f"{tag}: the second field's refused line is refused")
+                        eq(box.decisions[-1]["layer"], "deny", f"{tag}: at layer 1")
+                        if isinstance(asker, Asker):
+                            eq(asker.seen, [], f"{tag}: never asked")
+
+        # A field whose own quoting never closes cannot be judged: what it
+        # joins is the tool's business. Asked in every profile but STRICT's
+        # refusal, refused with nobody to ask; never the reviewer's.
+        for tool, args in (("mcp__x__exec", {"command": "echo '", "script": "pkill -f daemon2'"}),
+                           ("Bash", {"command": 'echo "', "script": 'pkill -f daemon2"'}),
+                           ("Bash", {"command": "echo 'x", "script": "x' ; true"}),
+                           ("FutureShell", {"command": "ls", "cmd": "echo \\"})):
+            for profile in (P.AUTO, P.ASK):
+                brief = brief_for(profile)
+                asker = Asker(Decision.DENY)
+                tag = f"[{profile.value}] {tool} {args!r}"
+                eq(build_permit(context(brief), asker)(tool, args, brief), Decision.DENY,
+                   f"{tag}: asked, and the no holds")
+                eq(len(asker.seen), 1, f"{tag}: put to the owner")
+                ok("command-unreadable" in box.decisions[-1]["reason"], f"{tag}: says why")
+                eq(asker.seen[0].allowlistable if asker.seen else None, False, f"{tag}: no Always")
+                brief = brief_for(profile)
+                eq(build_permit(context(brief), deny_all())(tool, args, brief), Decision.DENY,
+                   f"{tag}: refused with nobody to ask")
+        open_quoting = getattr(approvals, "open_quoting", lambda args: "absent")   # lazily: runs against main
+        eq(open_quoting({"command": "echo '"}), None,
+           "a lone field is the shell's to reject: not asked for its quoting")
+
+        # Layer 2 reads each field: an always-ask line behind a here-document
+        # is asked, a merge is the owner's, and behind an open quote or a
+        # trailing backslash (which the joined text swallows) the card names
+        # the owner's rule, not only that the line could not be read.
+        brief = brief_for(P.AUTO)
+        for args, rule in (({"command": "cat <<EOF", "script": "git push --force origin topic"},
+                            "git-push-force"),
+                           ({"command": "cat <<EOF", "script": "vercel --prod"}, "vercel-prod"),
+                           ({"command": "echo '", "script": "git push --force origin topic"},
+                            "git-push-force"),
+                           ({"command": "echo \\", "script": "vercel --prod"}, "vercel-prod")):
+            asker = Asker(Decision.DENY)
+            eq(build_permit(context(brief), asker)("Bash", args, brief), Decision.DENY,
+               f"Bash {args!r}: asked, and the no holds")
+            eq(len(asker.seen), 1, f"Bash {args!r}: put to the owner under AUTO")
+            ok(rule in box.decisions[-1]["reason"], f"Bash {args!r}: names {rule}")
+        # The rest of layer 2 reads each field too, and names its own rule
+        # before the generic "cannot be judged".
+        for second, rule in (("cp /tmp/x $UNSET_DIR/models.json", "gate-state"),
+                             ("pkill -f '.*.*.*.*daemon2'", "daemon-kill"),
+                             ("$TOOL --user", "vex-device"),
+                             ("uv run --x y --x y " * 2 + "w " * 2000 + "jarvis restart", "too-complex")):
+            args = {"command": "echo \\", "script": second}
+            asker = Asker(Decision.DENY)
+            eq(build_permit(context(brief), asker)("Bash", args, brief), Decision.DENY,
+               f"Bash echo \\ + {second[:30]!r}: asked, and the no holds")
+            eq(len(asker.seen), 1, f"Bash echo \\ + {second[:30]!r}: put to the owner under AUTO")
+            ok(rule in box.decisions[-1]["reason"], f"Bash echo \\ + {second[:30]!r}: names {rule}")
+        asker = Asker(Decision.DENY)
+        eq(build_permit(context(brief), asker)("Bash", {"command": "cat <<EOF", "script": "gh pr merge 1"},
+                                               brief), Decision.DENY, "a merge behind a here-document: asked")
+        eq(len(asker.seen), 1, "a merge behind a here-document reaches the owner")
+
+        # Layer 4 never answers a call with two command lines, however
+        # ordinary each is or whatever the allowlist holds, and its card
+        # offers no Always.
+        config.ALLOWLIST_PATH.write_text(json.dumps(
+            [{"tool": "run_command", "prefix": p} for p in ("ls", "echo", "pwd")]))
+        for profile in (P.ASK, P.STRICT, P.AUTO):
+            brief = brief_for(profile)
+            asker = Asker(Decision.ALLOW)
+            for args in ({"command": "ls", "script": "pwd"}, {"command": "echo 'a", "script": "b'"}):
+                build_permit(context(brief), asker)("Bash", args, brief)
+                ok(box.decisions[-1]["layer"] != "jarvis-allow",
+                   f"[{profile.value}] Bash {args!r}: two command lines are not layer 4's")
+            for request in asker.seen:
+                eq(request.allowlistable, False, f"[{profile.value}] two command lines: no Always")
+        brief = brief_for(P.ASK)
+        eq(build_permit(context(brief), Asker(Decision.ALLOW))("Bash", {"command": "ls"}, brief),
+           Decision.ALLOW, "one allowlisted line still runs")
+        eq(box.decisions[-1]["layer"], "jarvis-allow", "one allowlisted line is still layer 4's")
+        config.ALLOWLIST_PATH.unlink()
+        # Nor does the broker mint one, whatever the request says: v1
+        # `entry_for` refuses the joined text, a compound line.
+        broker = PendingApprovals(on_request=lambda r: None)
+        request = ApprovalRequest(tool="Bash", args={"command": "ls", "script": "pwd"},
+                                  command="ls\npwd", allowlistable=True)
+        worker = threading.Thread(target=lambda: broker.ask(request))
+        worker.start()
+        deadline = time.monotonic() + 5
+        while not broker.pending() and time.monotonic() < deadline:
+            time.sleep(0.005)
+        if broker.pending():
+            broker.resolve(broker.pending()[0].req_id, Decision.ALLOW, always=True)
+        worker.join(5)
+        ok(not config.ALLOWLIST_PATH.exists() or json.loads(config.ALLOWLIST_PATH.read_text()) == [],
+           "the broker mints nothing for a call with two command lines")
+
+        # --- LOW: an argv array is one quoted line.
+        eq(command_text({"cmd": ["bash", "-lc", "pkill -f daemon2"]}), "bash -lc 'pkill -f daemon2'",
+           "an argv array is shlex-joined")
+        eq(command_text({"command": ["pnpm", "build"]}), "pnpm build", "a plain argv reads as before")
+        for profile in (P.AUTO, P.ASK, P.STRICT):
+            for tool, args in (("FutureShell", {"cmd": ["bash", "-lc", "pkill -f daemon2"]}),
+                               ("mcp__x__exec", {"command": ["sh", "-c", "pkill -f daemon2"]}),
+                               ("shell", {"command": ["bash", "-lc", "pkill -f daemon2"]}),
+                               # The plain reading's refusals are kept: the rules
+                               # ask, not refuse, a `sudo` in `bash -c` source.
+                               ("FutureShell", {"cmd": ["bash", "-lc", "sudo rm -rf /"]}),
+                               ("shell", {"command": ["bash", "-lc", "sudo rm -rf /"]})):
+                for asker in (Asker(Decision.ALLOW), deny_all()):
+                    brief = brief_for(profile)
+                    tag = f"[{profile.value}] {tool} {args!r}"
+                    eq(build_permit(context(brief), asker)(tool, args, brief), Decision.DENY,
+                       f"{tag}: refused")
+                    eq(box.decisions[-1]["layer"], "deny", f"{tag}: at layer 1")
+        # Layer 4 needs every reading covered: `["ls", "a;rm -rf build"]`
+        # quoted is an `ls`, but its plain words (main's reading) run an
+        # `rm`, so the rules wave neither through and it is asked, as on main.
+        brief = brief_for(P.ASK)
+        for argv in (["ls", "a;rm -rf build"], ["echo", "$(touch x)"]):
+            asker = Asker(Decision.ALLOW)
+            build_permit(context(brief), asker)("shell", {"command": argv}, brief)
+            ok(box.decisions[-1]["layer"] != "jarvis-allow",
+               f"{argv}: its plain words are not rules ALLOW, so neither is it")
+            eq(len(asker.seen), 1, f"{argv}: put to the owner under ASK")
+        eq(build_permit(context(brief), Asker(Decision.ALLOW))("shell", {"command": ["pnpm", "build"]}, brief),
+           Decision.ALLOW, "an ordinary argv is still rules ALLOW")
+        eq(box.decisions[-1]["layer"], "jarvis-allow", "an ordinary argv is still layer 4's")
+
+
 # --------------------------------------------------------------------------
 # chat-to-chat C6: a relayed turn's card provenance decides nothing
 
@@ -3480,7 +3656,8 @@ def main():
                     review_48_round2_checks, review_48_delta_checks, runner_checks,
                     third_delta_75_checks, daemon_checks,
                     auto_quiet_checks, hatch_checks, discord_checks, merge_gate_checks,
-                    chat_git_checks, command_tool_checks, secret_service_checks,
+                    chat_git_checks, command_tool_checks, command_field_checks,
+                    secret_service_checks,
                     relay_provenance_checks):
         if ONLY and section.__name__ not in ONLY:
             continue
