@@ -1,0 +1,50 @@
+{
+ "case": "hint-r1",
+ "source": "pooled",
+ "adjudicated_by": "lead",
+ "date": "2026-10-23",
+ "ground_truth": [],
+ "members": {
+  "pool-ni-p1": [
+   [
+    "20261023-013155-hint-r1-jarvis-deepseek-deepseek-v4-1-flash-1-c588",
+    2
+   ]
+  ],
+  "pool-ni-p2": [
+   [
+    "20261022-202536-hint-r1-jarvis-anthropic-claude-haiku-5-5-1-d63f",
+    3
+   ]
+  ]
+ },
+ "non_issues": [
+  {
+   "id": "pool-ni-p1",
+   "claim": "The test uses its own copied fallback-message literal and checks only its length, so changes to the real message can get past the render-cap regression check.",
+   "location": "hud/src/components/BrowserProfile.test.ts:62",
+   "why_not": "The claim says that if the Python message grows, nothing fails while the HUD clips it again. The Python test on the real messages catches exactly that. The HUD test cannot import Python constants, so it uses a representative string between 400 and 600 characters and checks that the 600-character hint cap renders it whole. Separately, test_messages_name_the_owner_terminal_and_commands checks the real CHANGED_MESSAGE, STICKY_UNAVAILABLE_MESSAGE, FELL_BACK_MESSAGE and UNPROTECTED_HINT: each must contain UNLOCK_COMMAND and be at most 500 characters, which is below the 600-character hint cap. So a change to the real command or its prefix that would get clipped fails the Python test, and the two tests together pin the regression.",
+   "citation": "tests/v2/browser_password_store_check.py:209-214",
+   "source": "pooled cluster p1, ruled invalid, accepted as a non-issue by lead on 2026-10-23"
+  },
+  {
+   "id": "pool-ni-p2",
+   "claim": "A blank or wrong password is passed to the keyring daemon's replace-and-unlock command without validation, which can leave the user without a working Secret Service.",
+   "location": "jarvis/v2/browser/password_store.py:114",
+   "why_not": "The claim doesn't hold up. UNLOCK_COMMAND is text that Jarvis shows the owner to type into their own terminal. Jarvis never runs it and never prompts for the password (the notes say it 'never prompts, never unlocks'), so Jarvis has no point at which it could check the password. If the password is wrong or blank, the replacing daemon still starts in the foreground under setsid and simply leaves the keyring locked, and the command's last step (`gnome-keyring-daemon --start --components=secrets`) re-registers the Secret Service. That puts the owner back in the locked state they started from: the next launch gets the same 409 with the same command, and they can run it again. The reviewer marked the 'no Secret Service' outcome as unverified, and nothing in the code supports it. The notes record this recipe as the intended one and say it was verified live on 2026-10-20.",
+   "citation": "jarvis/v2/browser/password_store.py:104-117; docs/notes/browser.md:2100-2105",
+   "source": "pooled cluster p2, ruled invalid, accepted as a non-issue by lead on 2026-10-23"
+  }
+ ],
+ "duplicates": {
+  "gt3": [
+   [
+    "20261023-124018-hint-r1-claude-opus-1-9cdb",
+    1
+   ]
+  ]
+ },
+ "duplicate_clusters": {
+  "p3": "gt3"
+ }
+}

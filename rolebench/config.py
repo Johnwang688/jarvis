@@ -26,7 +26,7 @@ SEVERITIES = ("HIGH", "MED", "LOW", "NIT")
 WEIGHTS = {"HIGH": 5, "MED": 3, "LOW": 1, "NIT": 0}
 
 # Decision O-2: OpenRouter cells only. Claude and Codex cells use plan quota.
-TOTAL_CAP_USD = 10.0
+TOTAL_CAP_USD = 12.0                  # owner raised from $10 on 2026-10-23 to finish P3
 PER_RUN_CAP_USD = 0.50
 
 # At or above this percent of any quota window the Claude or Codex cell is

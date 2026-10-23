@@ -52,7 +52,7 @@ Built once per review case on 2026-10-21 by Opus agents. They were blind to ever
 
 - `original_review`: each `ground_truth` entry, `confirmed` or `disputed`, with a note. All 48 were confirmed. A `disputed` entry also names, in `non_issue`, the rubric non-issue that answers it (a match on it then scores as that non-issue). The grader shows a confirmed entry's note to its text-only matcher as "verified as".
 - `entries`: further verified defects in the diff (ids `rb<n>`, the ground-truth schema plus `verified: reproduced|traced` and `fixed_later`). There are 20 across the cases, and none duplicates a ground-truth entry.
-- `non_issues`: tempting claims that are not defects (ids `ni<n>`), each with a code or design-document citation. There are 157.
+- `non_issues`: tempting claims that are not defects (ids `ni<n>`), each with a code or design-document citation. There are 158.
 - `notes` (optional): suite results and observations left unclassified.
 
 The case file is never edited. Rubric entries come from one model family, so the report should keep recall on the original key, which is human- and seed-sourced, separate from recall on the rubric.

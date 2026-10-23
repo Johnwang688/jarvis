@@ -1,0 +1,71 @@
+{
+ "case": "sv6-r1",
+ "source": "pooled",
+ "adjudicated_by": "lead",
+ "date": "2026-10-23",
+ "ground_truth": [
+  {
+   "id": "pool-p1",
+   "severity": "MED",
+   "mechanism": "The `_of_no_turn` docstring says `conversation_reset` and any message kind a newer SDK adds are read and passed by between turns, but every test only feeds `rate_limit_event`. So if someone narrowed the function to rate limits only, a reset or new kind would be held again, the CLI's own turn would wait behind it until the owner's next message (the stall this PR fixes), and no suite would catch it.",
+   "location": "jarvis/v2/providers/claude.py:3167-3175",
+   "evidence": "pooled cluster p1: 1 reviewer finding(s), ruled valid once by the blinded Opus ruling with the code (its evidence is in the pool file)",
+   "source": "pooled cluster p1, accepted by lead on 2026-10-23"
+  }
+ ],
+ "members": {
+  "pool-p1": [
+   [
+    "20261022-212545-sv6-r1-jarvis-anthropic-claude-haiku-5-5-1-e600",
+    0
+   ]
+  ],
+  "pool-ni-p3": [
+   [
+    "20261022-212545-sv6-r1-jarvis-anthropic-claude-haiku-5-5-1-e600",
+    2
+   ],
+   [
+    "20261023-115856-sv6-r1-claude-haiku-1-378c",
+    1
+   ],
+   [
+    "20261023-125904-sv6-r1-claude-sonnet-1-57f6",
+    1
+   ]
+  ]
+ },
+ "non_issues": [
+  {
+   "id": "pool-ni-p3",
+   "claim": "The log line for the first held message runs on only one branch, so offered CLI turns, unwatched holds and holds after an exception are not logged, and no test checks the log.",
+   "location": "jarvis/v2/providers/claude.py:1987-1988",
+   "why_not": "The log is a diagnostic for one case: a message the watched idle reader cannot place and holds, which then makes everything behind it wait for the owner's next message (the c5ee7933 stall). Each path the claim calls unlogged is either intended or already logged. An offered CLI turn is announced at once through TURN_STARTED {self_started} and adopted, so it does not wait for the next message. An unwatched session holds everything by design: its turns are its only reader, as before. The exception path in _route_idle_safe already writes LOG.exception saying the message is 'held for the next turn'. A missing assertLogs test on an informational line breaks no behaviour.",
+   "citation": "jarvis/v2/providers/claude.py:1931-1936,1966-1989; docs/notes/providers-runtime.md:1341-1346",
+   "source": "pooled cluster p3, ruled invalid, accepted as a non-issue by lead on 2026-10-23"
+  }
+ ],
+ "duplicates": {
+  "gt2": [
+   [
+    "20261022-235829-sv6-r1-jarvis-z-ai-glm-5-3-flash-1-87a8",
+    0
+   ],
+   [
+    "20261023-045627-sv6-r1-jarvis-deepseek-deepseek-v4-1-flash-1-842c",
+    0
+   ],
+   [
+    "20261023-115856-sv6-r1-claude-haiku-1-378c",
+    0
+   ],
+   [
+    "20261023-125904-sv6-r1-claude-sonnet-1-57f6",
+    0
+   ]
+  ]
+ },
+ "duplicate_clusters": {
+  "p2": "gt2"
+ }
+}

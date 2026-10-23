@@ -1,0 +1,134 @@
+{
+ "case": "sv5-r1",
+ "source": "pooled",
+ "adjudicated_by": "lead",
+ "date": "2026-10-23",
+ "ground_truth": [
+  {
+   "id": "pool-p1",
+   "severity": "LOW",
+   "mechanism": "Turning off sub-agent notices only clears the 3-second coalescing bursts. A notice already handed to `speakNotice` is still spoken: either it is in the thread's lane waiting for a pending summary, or it is already in the queue. Neither `deliver` nor the queue checks the notices switch again, so it plays after the owner turned the feature off.",
+   "location": "hud/src/lib/speech/controller.ts:299-304",
+   "evidence": "pooled cluster p1: 4 reviewer finding(s), ruled valid once by the blinded Opus ruling with the code (its evidence is in the pool file)",
+   "source": "pooled cluster p1, accepted by lead on 2026-10-23"
+  },
+  {
+   "id": "pool-p3",
+   "severity": "LOW",
+   "mechanism": "speakNotice captures the thread epoch when the notice is queued and checks it when it is delivered. That check is what drops a notice waiting in the thread's lane behind a pending summary once the owner sends or presses Stop, but no test sets up that case, so a mutant that reads the epoch at delivery time would pass every test while speaking the notice after the send.",
+   "location": "hud/src/lib/speech/controller.ts:522-525",
+   "evidence": "pooled cluster p3: 2 reviewer finding(s), ruled valid once by the blinded Opus ruling with the code (its evidence is in the pool file)",
+   "source": "pooled cluster p3, accepted by lead on 2026-10-23"
+  },
+  {
+   "id": "pool-p4",
+   "severity": "LOW",
+   "mechanism": "The test is named 'Stop clears a notice already queued', but its body never calls c.stop() and never gets a notice into the speech queue before acting. Its only check is that a send to another chat ('t2') leaves T's notice alone, so no test covers Stop or a send dropping a notice that is already queued behind a reply (window closed).",
+   "location": "hud/src/lib/speech/noticesController.test.ts:165-171",
+   "evidence": "pooled cluster p4: 3 reviewer finding(s), ruled valid once by the blinded Opus ruling with the code (its evidence is in the pool file)",
+   "source": "pooled cluster p4, accepted by lead on 2026-10-23"
+  },
+  {
+   "id": "pool-p7",
+   "severity": "LOW",
+   "mechanism": "The last notices step turns the sub-agent switch back on, emits a failed ending and then a user_message, and only checks that /say was never called; with no positive control after re-enabling, the step passes the same way if the switch never reached the controller or the ending was never collected, so it cannot show that the send dropped a queued notice.",
+   "location": "tests/face/hud_v2_speech_check.py:306-312",
+   "evidence": "pooled cluster p7: 1 reviewer finding(s), ruled valid once by the blinded Opus ruling with the code (its evidence is in the pool file)",
+   "source": "pooled cluster p7, accepted by lead on 2026-10-23"
+  }
+ ],
+ "members": {
+  "pool-p1": [
+   [
+    "20261022-203218-sv5-r1-codex-gpt-6-1-sol-1-fafb",
+    0
+   ],
+   [
+    "20261022-211646-sv5-r1-codex-gpt-6-luna-1-5fa1",
+    0
+   ],
+   [
+    "20261023-043404-sv5-r1-jarvis-deepseek-deepseek-v4-1-flash-1-f90b",
+    0
+   ],
+   [
+    "20261023-115334-sv5-r1-claude-haiku-1-3870",
+    0
+   ]
+  ],
+  "pool-p3": [
+   [
+    "20261023-115334-sv5-r1-claude-haiku-1-3870",
+    1
+   ],
+   [
+    "20261023-121509-sv5-r1-claude-opus-1-ac68",
+    0
+   ]
+  ],
+  "pool-p4": [
+   [
+    "20261023-115334-sv5-r1-claude-haiku-1-3870",
+    3
+   ],
+   [
+    "20261023-121509-sv5-r1-claude-opus-1-ac68",
+    1
+   ],
+   [
+    "20261023-125720-sv5-r1-claude-sonnet-1-7a14",
+    0
+   ]
+  ],
+  "pool-p7": [
+   [
+    "20261023-125720-sv5-r1-claude-sonnet-1-7a14",
+    1
+   ]
+  ],
+  "pool-ni-p2": [
+   [
+    "20261023-043404-sv5-r1-jarvis-deepseek-deepseek-v4-1-flash-1-f90b",
+    1
+   ]
+  ],
+  "pool-ni-p5": [
+   [
+    "20261022-211646-sv5-r1-codex-gpt-6-luna-1-5fa1",
+    1
+   ]
+  ],
+  "pool-ni-p6": [
+   [
+    "20261022-203218-sv5-r1-codex-gpt-6-1-sol-1-fafb",
+    1
+   ]
+  ]
+ },
+ "non_issues": [
+  {
+   "id": "pool-ni-p2",
+   "claim": "The stopped-child record shares a bounded oldest-first eviction with the seen set, so heavy traffic can push it out before that child's ending arrives. The child is then announced even though the owner stopped it.",
+   "location": "hud/src/lib/speech/notices.ts:159",
+   "why_not": "The claim is wrong about how the memory works. `asked` and `announced` are two separate Sets, and each gets its own 256-entry cap. They do not share one eviction. Endings only go into `announced` (line 119), so 256 other endings can never push an entry out of `asked`. An entry leaves `asked` early only if 256 other distinct children are asked to stop after this one and before it ends. Even that is unlikely to happen, because each progress record that still says stopping moves the key back to newest (delete then add), and each stopped child's entry is removed when that child ends (line 120). The traffic pattern the finding describes cannot cause the announcement.",
+   "citation": "hud/src/lib/speech/notices.ts:82-84,111,119-120,156-160",
+   "source": "pooled cluster p2, ruled invalid, accepted as a non-issue by lead on 2026-10-23"
+  },
+  {
+   "id": "pool-ni-p5",
+   "claim": "Whether the owner is busy (for example recording) is checked only once, before the notice is queued. If recording starts after that check, the queued notice can still play during the recording.",
+   "location": "hud/src/lib/speech/notices.ts:183",
+   "why_not": "The busy check in close() only decides when the notice is handed to the queue. From then on the notice goes through speakNotice\u2192sequence\u2192deliver and becomes an ordinary queue item. The same speech rules as a reply apply to it: a barge-in holds or pauses it (deliver defers while holdDelivery is set, and bargeIn() pauses the queue). A recording that starts later by wake word or talk key begins a barge-in at once (App.tsx:760-761), so the notice is paused instead of played over the recording. A hands-free recording cannot start while speech is queued or a summary is awaited, because the detector is held off then (controller.ts:29-31). The design says a queued notice is held by a barge-in, not re-checked against busy (controller.ts:36-38, 516-521), and noticesController.test.ts:184-195 tests that a barge-in holds a queued notice.",
+   "citation": "hud/src/App.tsx:760-761",
+   "source": "pooled cluster p5, ruled invalid, accepted as a non-issue by lead on 2026-10-23"
+  },
+  {
+   "id": "pool-ni-p6",
+   "claim": "When a child ending is accepted, the code does not check whether that chat is eligible (it may have no open pane). If the chat is opened before the window closes, an ending from while it was unread gets announced.",
+   "location": "hud/src/lib/speech/notices.ts:163",
+   "why_not": "The design deliberately checks whether a chat is read when the 3 s window closes, not when an ending arrives. Endings are recorded even for a chat that is not being read and are spoken only if it is read by then. The note says 'a chat not read now (no chat pane, muted, ...), checked again when the window closes', and the controller comment says 'Heard even for a thread not read now ... said only if it is read then'. close() does exactly this through canSpeak. So an ending heard just before the owner opens the chat and spoken at window close is the intended behaviour, not a missing check.",
+   "citation": "docs/notes/voice-face.md:3032-3033; hud/src/lib/speech/controller.ts:393-394; hud/src/lib/speech/notices.ts:181",
+   "source": "pooled cluster p6, ruled invalid, accepted as a non-issue by lead on 2026-10-23"
+  }
+ ]
+}

@@ -1,0 +1,90 @@
+{
+ "case": "vex-r1",
+ "source": "pooled",
+ "adjudicated_by": "lead",
+ "date": "2026-10-23",
+ "ground_truth": [
+  {
+   "id": "pool-p3",
+   "severity": "LOW",
+   "mechanism": "The new held-port interval calls vex.refreshStatus() every 2 s with no check for a read already in flight, and api.vexStatus sets no abort timeout. Against a daemon that accepts connections but stalls, unanswered /vex/status requests pile up, one more every tick, and each holds a browser connection to the same origin until the daemon answers.",
+   "location": "hud/src/components/VexView.tsx:140-147",
+   "evidence": "pooled cluster p3: 1 reviewer finding(s), ruled valid once by the blinded Opus ruling with the code (its evidence is in the pool file)",
+   "source": "pooled cluster p3, accepted by lead on 2026-10-23"
+  },
+  {
+   "id": "pool-p4",
+   "severity": "LOW",
+   "mechanism": "Nothing tests that the new held-device poll stops: no test checks that `/vex/status` reads end once the status says the port is free, or that ticks are skipped while the window is hidden, so a version that polls forever (for example, with `if (!held) return;` deleted or `held` reduced to `!vex.chain`) would still pass every suite.",
+   "location": "hud/src/components/VexView.tsx:140-147",
+   "evidence": "pooled cluster p4: 3 reviewer finding(s), ruled valid once by the blinded Opus ruling with the code (its evidence is in the pool file)",
+   "source": "pooled cluster p4, accepted by lead on 2026-10-23"
+  },
+  {
+   "id": "pool-p5",
+   "severity": "LOW",
+   "mechanism": "The view polls when another window's device read holds the port (the `device === \"info\"` branch of `held`), but no test covers that branch, so deleting it would bring back the stale disabled Connect button (\"A device read holds the robot's port\") after another window's \u22ef read, and no check would fail.",
+   "location": "hud/src/components/VexView.tsx:140-147",
+   "evidence": "pooled cluster p5: 1 reviewer finding(s), ruled valid once by the blinded Opus ruling with the code (its evidence is in the pool file)",
+   "source": "pooled cluster p5, accepted by lead on 2026-10-23"
+  }
+ ],
+ "members": {
+  "pool-p3": [
+   [
+    "20261022-214007-vex-r1-jarvis-anthropic-claude-haiku-5-5-1-9920",
+    0
+   ]
+  ],
+  "pool-p4": [
+   [
+    "20261023-120933-vex-r1-claude-haiku-1-7107",
+    0
+   ],
+   [
+    "20261023-121604-vex-r1-jarvis-deepseek-deepseek-v4-1-flash-1-cb9c",
+    1
+   ],
+   [
+    "20261023-130101-vex-r1-claude-sonnet-1-80ac",
+    0
+   ]
+  ],
+  "pool-p5": [
+   [
+    "20261023-114740-vex-r1-claude-opus-1-e0b5",
+    0
+   ]
+  ],
+  "pool-ni-p1": [
+   [
+    "20261023-121604-vex-r1-jarvis-deepseek-deepseek-v4-1-flash-1-cb9c",
+    0
+   ]
+  ],
+  "pool-ni-p2": [
+   [
+    "20261023-130101-vex-r1-claude-sonnet-1-80ac",
+    1
+   ]
+  ]
+ },
+ "non_issues": [
+  {
+   "id": "pool-ni-p1",
+   "claim": "The sequence check keeps the response to the most recently sent request rather than the most recently served one, so a later-sent reply reporting a busy port can win over an earlier-sent reply that saw the port released, leaving the UI stuck until the next read.",
+   "location": "hud/src/state/vex.ts:318",
+   "why_not": "Ordering by issue time is how the guard is meant to work: the doc comment at vex.ts:308-313 says only the newest read's answer is kept. To get a stale 'download', the claim needs a status read sent at the download's start to wait unanswered for the whole download while a later read is answered first. Even then the state heals. When this window's own download ends, the code sends a fresh status read at vex.ts:485 after it sees the end; that read is the newest, so it wins and reports the port free. In every other case the next poll or focus read fixes it, which is the 'until the next read' the claim itself concedes. Nothing stays stuck, and none of the answer key's mechanisms is involved.",
+   "citation": "hud/src/state/vex.ts:481-485",
+   "source": "pooled cluster p1, ruled invalid, accepted as a non-issue by lead on 2026-10-23"
+  },
+  {
+   "id": "pool-ni-p2",
+   "claim": "The download-end hook marks the device available while the per-project build lock is still taken, so a download started in that short window is wrongly refused as if a build were still running.",
+   "location": "jarvis/v2/vex.py:1836",
+   "why_not": "The order is the same as before the change: the old `finally` also freed the device (and the record had already settled) before `lock.release()`, so this window already existed. The change only moves the free into the settle step, and the gap between that step and `lock.release()` is just one lock exit and re-entry with no I/O or waiting. The new behaviour doesn't make the window reachable either: per docs/notes/vex.md a download starts only on the owner's click. That click can come only after an HTTP `/vex/status` read, a render and a new POST, while `lock.release()` runs microseconds after the locked step. So this is a theoretical scheduling gap the change did not introduce, not a defect a back-to-back download would actually hit.",
+   "citation": "jarvis/v2/vex.py:1829-1848",
+   "source": "pooled cluster p2, ruled invalid, accepted as a non-issue by lead on 2026-10-23"
+  }
+ ]
+}

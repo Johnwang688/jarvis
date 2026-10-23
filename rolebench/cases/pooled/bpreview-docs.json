@@ -1,0 +1,87 @@
+{
+ "case": "bpreview-docs",
+ "source": "pooled",
+ "adjudicated_by": "lead",
+ "date": "2026-10-23",
+ "ground_truth": [
+  {
+   "id": "pool-p1",
+   "severity": "LOW",
+   "mechanism": "Item 3 cites P1 for '0 screencast frames until we issued BeginFrames' and for the captureScreenshot timeout, but P1 is the Chrome 155 probe. In Chrome 155 HeadlessExperimental does not exist, so no BeginFrames could be sent, and enableBeginFrameControl 'does nothing'. These observations must come from the chrome-headless-shell runs (P7), so a reader who follows the P1 citation cannot find the evidence.",
+   "location": "docs/plans/2026-10-19-browser-preview-capability.md:85-88",
+   "evidence": "pooled cluster p1: 3 reviewer finding(s), ruled valid once by the blinded Opus ruling with the code (its evidence is in the pool file)",
+   "source": "pooled cluster p1, accepted by lead on 2026-10-23"
+  },
+  {
+   "id": "pool-p4",
+   "severity": "LOW",
+   "mechanism": "The adoption-cost section says every item is either a recorded decision or a measured property, but item 1's statement that chrome-headless-shell has no Chrome sync or sign-in is neither: no probe tested it and no decision document records it, so an untested assertion is presented as backed evidence.",
+   "location": "docs/plans/2026-10-19-browser-preview-capability.md:76-83",
+   "evidence": "pooled cluster p4: 1 reviewer finding(s), ruled valid once by the blinded Opus ruling with the code (its evidence is in the pool file)",
+   "source": "pooled cluster p4, accepted by lead on 2026-10-23"
+  }
+ ],
+ "members": {
+  "pool-p1": [
+   [
+    "20261023-001201-bpreview-docs-jarvis-deepseek-deepseek-v4-1-flash-1-6f8f",
+    0
+   ],
+   [
+    "20261023-102935-bpreview-docs-claude-haiku-1-6db3",
+    2
+   ],
+   [
+    "20261023-130246-bpreview-docs-claude-opus-1-ea9d",
+    1
+   ]
+  ],
+  "pool-p4": [
+   [
+    "20261022-193916-bpreview-docs-jarvis-anthropic-claude-haiku-5-5-1-7973",
+    3
+   ]
+  ],
+  "pool-ni-p2": [
+   [
+    "20261022-214704-bpreview-docs-jarvis-z-ai-glm-5-3-flash-1-959a",
+    0
+   ]
+  ],
+  "pool-ni-p3": [
+   [
+    "20261022-193916-bpreview-docs-jarvis-anthropic-claude-haiku-5-5-1-7973",
+    4
+   ]
+  ]
+ },
+ "non_issues": [
+  {
+   "id": "pool-ni-p2",
+   "claim": "The browser note applies a false-capture ratio from the CSSOM probe to timer-driven races as well, even though the timer probe measured a different quantity.",
+   "location": "docs/notes/browser.md:1410",
+   "why_not": "The sentence does not apply the ratio to timer races in general. It gives two conditions that together produced the P6 result. The P6 attack toggles a CSSOM rule from a page timer, so the toggle only lands mid-capture because the page's timers keep running while a capture is in flight (P5). The bracket then misses the toggle because a CSSOM change is not a DOM mutation. Both conditions are needed for the CSSOM attack's 24-of-29 false captures, and the note never says that figure measures timer ticks or the P5 quantity (113 ticks during 20 captures).",
+   "citation": "docs/plans/2026-10-19-browser-preview-capability.md:44",
+   "source": "pooled cluster p2, ruled invalid, accepted as a non-issue by lead on 2026-10-23"
+  },
+  {
+   "id": "pool-ni-p3",
+   "claim": "The same probe statistics appear in three separate documents with nothing keeping them consistent, so a correction made in one place can leave the other copies out of date.",
+   "location": "docs/plans/2026-10-13-current-feature-map.md:238",
+   "why_not": "The three copies agree right now (1 of 183, 24 of 29, 120/120 are the same in the feature-map row, browser.md:1404-1410 and the plan), and the feature-map row links to the plan as its source. Repeating a short summary in a status table that points to the detailed note is how this repo's docs normally work. The claim describes a possible future edit drifting out of sync, not anything wrong in this change. The real problem with these figures, that they are unstable single-run values repeated in all three documents, is already rb1.",
+   "citation": "docs/plans/2026-10-13-current-feature-map.md:238",
+   "source": "pooled cluster p3, ruled invalid, accepted as a non-issue by lead on 2026-10-23"
+  }
+ ],
+ "duplicates": {
+  "gt1": [
+   [
+    "20261023-122038-bpreview-docs-claude-sonnet-1-b1b3",
+    0
+   ]
+  ]
+ },
+ "duplicate_clusters": {
+  "p5": "gt1"
+ }
+}

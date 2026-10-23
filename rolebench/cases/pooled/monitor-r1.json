@@ -1,0 +1,110 @@
+{
+ "case": "monitor-r1",
+ "source": "pooled",
+ "adjudicated_by": "lead",
+ "date": "2026-10-23",
+ "ground_truth": [
+  {
+   "id": "pool-p2",
+   "severity": "LOW",
+   "mechanism": "The layer-2 (always-ask) checks in command_tool_checks only send tools that are on the name list (Monitor), so if always_ask_match went back to `tool in COMMAND_TOOLS`, which ignores the arguments, no check would fail; an unknown tool carrying a command line such as FutureShell {command: 'git push --force origin topic'} would then skip the always-ask rule and go to the reviewer under AUTO without asking the owner.",
+   "location": "tests/v2/permissions_check.py:2085-2094",
+   "evidence": "pooled cluster p2: 1 reviewer finding(s), ruled valid once by the blinded Opus ruling with the code (its evidence is in the pool file)",
+   "source": "pooled cluster p2, accepted by lead on 2026-10-23"
+  },
+  {
+   "id": "pool-p3",
+   "severity": "MED",
+   "mechanism": "command_text joins every command-key value into one string with newlines before any layer judges it, so an unclosed quote or a trailing backslash in one field carries into the next field's text: a DENY command that another field holds (for example `sudo rm -rf /` or `pkill -f daemon2`) is read as a quoted argument or a continued `echo`, so layer 1 does not refuse it and layer 4's static_verdict can ALLOW it with no card for a human-backed asker.",
+   "location": "jarvis/v2/approvals.py:128-136",
+   "evidence": "pooled cluster p3: 2 reviewer finding(s), ruled valid once by the blinded Opus ruling with the code (its evidence is in the pool file)",
+   "source": "pooled cluster p3, accepted by lead on 2026-10-23"
+  },
+  {
+   "id": "pool-p6",
+   "severity": "LOW",
+   "mechanism": "Adding run_readonly to V2_COMMAND_TOOLS sends a fast-path desk run_readonly call through v1_request as run_command. The v2 permit now checks it against run_command allowlist entries instead of run_readonly ones. Existing {\"tool\":\"run_readonly\",\"prefix\":...} entries stop covering it, so the owner is asked again. A run_command entry now covers it, and an Always on a run_readonly card writes a run_command stem entry that also auto-allows that stem in the full shell. None of this is mentioned in the 2026-10-15 safety note or tested.",
+   "location": "jarvis/v2/approvals.py:93-97",
+   "evidence": "pooled cluster p6: 1 reviewer finding(s), ruled valid once by the blinded Opus ruling with the code (its evidence is in the pool file)",
+   "source": "pooled cluster p6, accepted by lead on 2026-10-23"
+  },
+  {
+   "id": "pool-p7",
+   "severity": "LOW",
+   "mechanism": "When a command arrives as an argv array, `_command_value` joins its items with plain spaces instead of shell-quoting them (`shlex.join`). So `['bash','-lc','pkill -f daemon2']` turns into `bash -lc pkill -f daemon2`. The rules then treat only `pkill` as the `-c` payload and read `-f daemon2` as `$0`/`$1`, so the layer-1 DENY that catches the quoted string form never fires. Under AUTO the call goes to the reviewer instead. The space join already existed in main's `_command_of`. Reach is narrow: Codex's paths pass the command as a string and decline anything that isn't one, and Claude's Bash sends strings. That leaves unknown or MCP tools that send an argv array, which this PR now routes into layer 1 through `is_command_tool`.",
+   "location": "jarvis/v2/approvals.py:103-108",
+   "evidence": "pooled cluster p7: 2 reviewer finding(s), ruled valid once by the blinded Opus ruling with the code (its evidence is in the pool file)",
+   "source": "pooled cluster p7, accepted by lead on 2026-10-23"
+  }
+ ],
+ "members": {
+  "pool-p2": [
+   [
+    "20261023-123704-monitor-r1-claude-opus-1-234e",
+    1
+   ]
+  ],
+  "pool-p3": [
+   [
+    "20261022-200358-monitor-r1-codex-gpt-6-1-sol-1-387b",
+    0
+   ],
+   [
+    "20261023-123704-monitor-r1-claude-opus-1-234e",
+    0
+   ]
+  ],
+  "pool-p6": [
+   [
+    "20261023-111807-monitor-r1-claude-haiku-1-aee0",
+    2
+   ]
+  ],
+  "pool-p7": [
+   [
+    "20261023-111807-monitor-r1-claude-haiku-1-aee0",
+    0
+   ],
+   [
+    "20261023-123704-monitor-r1-claude-opus-1-234e",
+    2
+   ]
+  ],
+  "pool-ni-p5": [
+   [
+    "20261023-111807-monitor-r1-claude-haiku-1-aee0",
+    3
+   ]
+  ]
+ },
+ "non_issues": [
+  {
+   "id": "pool-ni-p5",
+   "claim": "The Always-on-Monitor test only checks that some run_command allowlist entry exists, so it still passes if the entry is minted without its prefix and becomes a whole-tool grant.",
+   "location": "tests/v2/permissions_check.py:2147",
+   "why_not": "The assertion at line 2148 is loose, but it hides no defect. Under the current code a prefix-less run_command entry cannot be created. entry_for either returns {'tool': tool_name, 'prefix': stem} for a command tool or raises NotAllowlistable for an empty or compound command. The only way to get a prefix-less entry is to change entry_for itself, and the same suite's main() already runs lines 880-882, which pin the exact {'tool': 'run_command', 'prefix': 'pnpm'} entry. The reviewer admits those lines catch the mutation. The suite as a whole fails, so the guard is not left untested.",
+   "citation": "jarvis/permissions.py:129-141; tests/v2/permissions_check.py:879-882",
+   "source": "pooled cluster p5, ruled invalid, accepted as a non-issue by lead on 2026-10-23"
+  }
+ ],
+ "duplicates": {
+  "gt3": [
+   [
+    "20261022-203538-monitor-r1-jarvis-anthropic-claude-haiku-5-5-1-a4b2",
+    0
+   ],
+   [
+    "20261023-015816-monitor-r1-jarvis-deepseek-deepseek-v4-1-flash-1-21b5",
+    0
+   ],
+   [
+    "20261023-111807-monitor-r1-claude-haiku-1-aee0",
+    1
+   ]
+  ]
+ },
+ "duplicate_clusters": {
+  "p1": "gt3",
+  "p4": "gt3"
+ }
+}

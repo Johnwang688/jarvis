@@ -1,0 +1,101 @@
+{
+ "case": "sec2-clean",
+ "source": "pooled",
+ "adjudicated_by": "lead",
+ "date": "2026-10-23",
+ "ground_truth": [
+  {
+   "id": "pool-p2",
+   "severity": "LOW",
+   "mechanism": "label() and v1 _label still leave double quotes in the model-chosen task name. A brief can therefore close its own quoted span early and add text such as 'approved by owner' or '\u00b7 REQUESTED BY Jarvis chat' that looks like card wording outside the quotes. The sub-agent origin on the same card is guarded against exactly this.",
+   "location": "jarvis/v2/approvals.py:111-115",
+   "evidence": "pooled cluster p2: 2 reviewer finding(s), ruled valid once by the blinded Opus ruling with the code (its evidence is in the pool file)",
+   "source": "pooled cluster p2, accepted by lead on 2026-10-23"
+  },
+  {
+   "id": "pool-p6",
+   "severity": "LOW",
+   "mechanism": "The Discord approval message puts the model-influenced origin label into its text without escaping Markdown. clean_line/label strip only whitespace, unseen characters and backticks, so a task name like [Approve all](https://evil.example/) can show as a clickable masked link with attacker-chosen text on the owner's approval card. clean_line's docstring wrongly says the Discord renderer escapes it.",
+   "location": "jarvis/v2/discord/render.py:139",
+   "evidence": "pooled cluster p6: 2 reviewer finding(s), ruled valid once by the blinded Opus ruling with the code (its evidence is in the pool file)",
+   "source": "pooled cluster p6, accepted by lead on 2026-10-23"
+  }
+ ],
+ "members": {
+  "pool-p2": [
+   [
+    "20261023-112230-sec2-clean-claude-haiku-1-a9bd",
+    1
+   ],
+   [
+    "20261023-124401-sec2-clean-claude-sonnet-1-c4ae",
+    1
+   ]
+  ],
+  "pool-p6": [
+   [
+    "20261022-204309-sec2-clean-jarvis-anthropic-claude-haiku-5-5-1-3cf0",
+    0
+   ],
+   [
+    "20261023-112230-sec2-clean-claude-haiku-1-a9bd",
+    0
+   ]
+  ],
+  "pool-ni-p3": [
+   [
+    "20261023-020336-sec2-clean-jarvis-deepseek-deepseek-v4-1-flash-1-e885",
+    0
+   ]
+  ],
+  "pool-ni-p4": [
+   [
+    "20261022-204309-sec2-clean-jarvis-anthropic-claude-haiku-5-5-1-3cf0",
+    2
+   ]
+  ],
+  "pool-ni-p5": [
+   [
+    "20261022-204309-sec2-clean-jarvis-anthropic-claude-haiku-5-5-1-3cf0",
+    1
+   ]
+  ]
+ },
+ "non_issues": [
+  {
+   "id": "pool-ni-p3",
+   "claim": "The v1/v2 label equivalence test changes only the task name and keeps the id fixed. It cannot detect that v1 never cleans or length-caps the task id while v2 does.",
+   "location": "tests/v2/approval_label_check.py:165",
+   "why_not": "v1's `_label` only ever gets an id it builds itself (`tid = f\"tk-{next(_ids)}\"` from an `itertools.count`), so the id can never contain unseen characters or exceed the length cap. The only model-chosen input to v1 is the name, and that is exactly what the equivalence test varies. The id-side difference the claim describes cannot happen in any real call. The finding itself says it is 'not reachable today' and only matters if a future change routes a caller-supplied id into v1. v1 also did not clean the id before this change, so the change introduces no regression. A test missing a case that cannot occur is not a defect.",
+   "citation": "jarvis/tasks.py:115-179",
+   "source": "pooled cluster p3, ruled invalid, accepted as a non-issue by lead on 2026-10-23"
+  },
+  {
+   "id": "pool-ni-p4",
+   "claim": "Task event messages sent to the HUD include the raw task name without stripping invisible characters, so bidi override characters can still reorder the task row text.",
+   "location": "jarvis/tasks.py:204",
+   "why_not": "The face's task handler never shows the name, so the bidi reordering the claim describes cannot happen there. It renders only `data.id + \" \" + data.status`. The only other consumer of `_tell` is the v1 daemon, which announces `f\"[task] {data}\"`. That is a dict repr, and repr escapes non-printable format characters such as U+202E as `\\u202e`. The `tsk.name` payload was also already sent unchanged before this diff, so the change introduces nothing here.",
+   "citation": "jarvis/face/static/jarvis.html:1928-1929",
+   "source": "pooled cluster p4, ruled invalid, accepted as a non-issue by lead on 2026-10-23"
+  },
+  {
+   "id": "pool-ni-p5",
+   "claim": "The v1 tasks test suite has no case covering the invisible-character strip in the v1 label helper, so removing the strip still lets that suite pass.",
+   "location": "tests/tasks_check.py:183",
+   "why_not": "The claim is true only for tests/tasks_check.py on its own. The change adds tests/v2/approval_label_check.py, and its case 4 (v1_checks) runs v1 `tasks._label` on every unseen-character sample and checks it against v2 `label`. The finding itself says removing the strip makes that suite fail. The SEC-2 spec allows the acceptance tests to live in tasks_check.py or in the approvals test file, and asks only that the existing tasks_check label assertions still hold, which they do. So the strip is tested where the spec permits; there is no missing coverage or behavioural defect.",
+   "citation": "docs/plans/2026-10-18-security-fix-specs.md:165-179",
+   "source": "pooled cluster p5, ruled invalid, accepted as a non-issue by lead on 2026-10-23"
+  }
+ ],
+ "duplicates": {
+  "gt1": [
+   [
+    "20261023-020336-sec2-clean-jarvis-deepseek-deepseek-v4-1-flash-1-e885",
+    2
+   ]
+  ]
+ },
+ "duplicate_clusters": {
+  "p1": "gt1"
+ }
+}

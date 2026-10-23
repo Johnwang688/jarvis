@@ -1,0 +1,53 @@
+{
+ "case": "seed-unreadable",
+ "source": "pooled",
+ "adjudicated_by": "lead",
+ "date": "2026-10-23",
+ "ground_truth": [],
+ "members": {
+  "pool-ni-p1": [
+   [
+    "20261022-233735-seed-unreadable-jarvis-z-ai-glm-5-3-flash-1-ece6",
+    1
+   ]
+  ],
+  "pool-ni-p2": [
+   [
+    "20261023-114740-seed-unreadable-claude-haiku-1-f462",
+    2
+   ]
+  ],
+  "pool-ni-p3": [
+   [
+    "20261023-125036-seed-unreadable-claude-sonnet-1-0d67",
+    1
+   ]
+  ]
+ },
+ "non_issues": [
+  {
+   "id": "pool-ni-p1",
+   "claim": "The torn-read test never runs an append after the tear, so nothing checks that the append path restores the missing trailing newline.",
+   "location": "tests/v2/stores_check.py:288",
+   "why_not": "The diff does not touch `_append`'s newline-repair path, and an existing test already covers it. The migration check removes the log's final newline (line 369), then calls `stores.threads.log(...)` and asserts that 5 entries come back with the new one last (lines 402-404). If the repair stopped adding the newline before the new record, the old last record and the new one would run together on one line that does not parse, and that check would fail. The reviewer's 'silently dropped forever' outcome is also wrong: a broken line in the middle of a log raises StoreError rather than being skipped.",
+   "citation": "tests/v2/stores_check.py:367-404",
+   "source": "pooled cluster p1, ruled invalid, accepted as a non-issue by lead on 2026-10-23"
+  },
+  {
+   "id": "pool-ni-p2",
+   "claim": "The concurrent torn-read test section passes without confirming that a torn read actually happened, so it cannot catch an unsafe read.",
+   "location": "tests/v2/stores_check.py:281",
+   "why_not": "Section 1 of the same test already pins the torn-read behaviour without relying on timing. It writes unterminated, unparseable last lines (a cut key, a cut multibyte character, '{' and '{\"a\": \"b\"') and asserts the reader skips them, so an unsafe reader fails there on every run. Section 6 is an extra stress check, not the only guard. It also isn't blind: whenever a torn tail does occur, an exception, an out-of-order record or a partial record fails it (lines 302-303, 318). The finding itself says section 1 is what pins the behaviour, so a stress section that doesn't always produce a race leaves no gap in coverage.",
+   "citation": "tests/v2/stores_check.py:248-252",
+   "source": "pooled cluster p2, ruled invalid, accepted as a non-issue by lead on 2026-10-23"
+  },
+  {
+   "id": "pool-ni-p3",
+   "claim": "The last-line position check in the truncated-UTF-8 handling is always true when the error reaches end of buffer, so it is dead code.",
+   "location": "jarvis/v2/stores.py:127",
+   "why_not": "The claim about the logic is correct, but nothing breaks because of it. A decode error that reads \"unexpected end of data\" and has exc.end == len(raw) covers one lead byte plus continuation bytes, all 0x80 or above, so none of them can be a newline. That makes `exc.start > raw.rfind(b\"\\n\")` always true; when the file has no newline at all, rfind returns -1. The clause is a redundant guard that spells out the docstring's \"only the last line\" rule. It never changes which input is accepted or rejected, so no wrong behaviour follows from it. It is a style nit, not a defect.",
+   "citation": "jarvis/v2/stores.py:123-132",
+   "source": "pooled cluster p3, ruled invalid, accepted as a non-issue by lead on 2026-10-23"
+  }
+ ]
+}

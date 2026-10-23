@@ -1,0 +1,122 @@
+{
+ "case": "seed-privfsync",
+ "source": "pooled",
+ "adjudicated_by": "lead",
+ "date": "2026-10-23",
+ "ground_truth": [
+  {
+   "id": "pool-p4",
+   "severity": "LOW",
+   "mechanism": "The new suite never checks that the temp file name is unique per write. If someone later changes it to a fixed name, the suite still passes, yet a temp file left behind by a crash would make every later O_EXCL create raise FileExistsError, and spotify_auth.access_token swallows that OSError, so a rotated refresh token would be silently lost.",
+   "location": "tests/private_writes_check.py:13-27",
+   "evidence": "pooled cluster p4: 2 reviewer finding(s), ruled valid once by the blinded Opus ruling with the code (its evidence is in the pool file)",
+   "source": "pooled cluster p4, accepted by lead on 2026-10-23"
+  }
+ ],
+ "members": {
+  "pool-p4": [
+   [
+    "20261023-025652-seed-privfsync-jarvis-deepseek-deepseek-v4-1-flash-1-e985",
+    1
+   ],
+   [
+    "20261023-114007-seed-privfsync-claude-haiku-1-00b8",
+    0
+   ]
+  ],
+  "pool-ni-p1": [
+   [
+    "20261023-114007-seed-privfsync-claude-haiku-1-00b8",
+    3
+   ]
+  ],
+  "pool-ni-p2": [
+   [
+    "20261022-205933-seed-privfsync-jarvis-anthropic-claude-haiku-5-5-1-9552",
+    1
+   ],
+   [
+    "20261023-025652-seed-privfsync-jarvis-deepseek-deepseek-v4-1-flash-1-e985",
+    3
+   ]
+  ],
+  "pool-ni-p3": [
+   [
+    "20261023-025652-seed-privfsync-jarvis-deepseek-deepseek-v4-1-flash-1-e985",
+    4
+   ],
+   [
+    "20261023-114007-seed-privfsync-claude-haiku-1-00b8",
+    1
+   ]
+  ],
+  "pool-ni-p5": [
+   [
+    "20261022-231552-seed-privfsync-jarvis-z-ai-glm-5-3-flash-1-9917",
+    3
+   ]
+  ],
+  "pool-ni-p6": [
+   [
+    "20261023-025652-seed-privfsync-jarvis-deepseek-deepseek-v4-1-flash-1-e985",
+    2
+   ]
+  ],
+  "pool-ni-p7": [
+   [
+    "20261022-211146-seed-privfsync-codex-gpt-6-luna-1-b6ed",
+    0
+   ]
+  ]
+ },
+ "non_issues": [
+  {
+   "id": "pool-ni-p1",
+   "claim": "Each crash between creating the randomly named temp file and the rename leaves another secret-bearing temp file behind, and nothing ever cleans these up.",
+   "location": "jarvis/private_write.py:35",
+   "why_not": "The spec for this change (SEC-4) says to move the existing `browser/host._write_private` recipe into a shared module: a uniquely named temporary file opened with O_EXCL|O_NOFOLLOW at 0600, fsynced, swapped in with os.replace, and unlinked on any failure it can catch. The module docstring also says a crash leftover is never reused. That recipe was already in host.py, stt_settings and subagents before this change, so the random temporary name is the intended design. A SIGKILL between create and rename is the one failure no in-process cleanup can catch, and the file it leaves stays 0600 in an owner-only folder, so nothing becomes readable to anyone else. Leftovers can only pile up through repeated kills in that brief window, which is a cleanup nicety rather than a defect the change introduces.",
+   "citation": "docs/plans/2026-10-18-security-fix-specs.md:277-282",
+   "source": "pooled cluster p1, ruled invalid, accepted as a non-issue by lead on 2026-10-23"
+  },
+  {
+   "id": "pool-ni-p2",
+   "claim": "The sub-agent record writer opens its file for append without O_NOFOLLOW, so a symlink planted at the record path makes it write into the file the link points to, and no test covers this path.",
+   "location": "jarvis/v2/subagents.py:637",
+   "why_not": "The append at subagents.py:637 is old code that this change did not touch. The SEC-4 spec deliberately limits the sub-agent fix to `_compact` (missing O_NOFOLLOW/fsync), and that function now calls write_private. The sub-agent record is not a credential file. Planting a symlink requires write access to the owner's private thread folder, and an attacker with that access already controls the state. So the change neither introduced nor was asked to fix a defect here.",
+   "citation": "docs/plans/2026-10-18-security-fix-specs.md:273-281",
+   "source": "pooled cluster p2, ruled invalid, accepted as a non-issue by lead on 2026-10-23"
+  },
+  {
+   "id": "pool-ni-p3",
+   "claim": "The Onshape credential bundle is created with the default umask mode and only narrowed to 0600 afterwards, and it follows symlinks; this is the same flaw the change fixed for the other writers.",
+   "location": "jarvis/onshape_auth.py:231-244",
+   "why_not": "The diff never touches jarvis/onshape_auth.py, so this is old code and not something the change introduced or made worse. The SEC-4 spec for this change limits its scope to the Discord, Google, Spotify, sub-agent and STT writers and does not list onshape_auth.py. The exposure the findings describe also doesn't hold up. Line 230 sets the parent folder ~/.config/jarvis to 0700 before write_text runs, so no other user can open the file while it is still at the umask mode, and only the owner can plant a symlink in that folder. The spec itself calls this the 'real exposure is small' case for google_auth. The reviewers are suggesting a follow-up outside this change's scope, not pointing to a defect in it.",
+   "citation": "docs/plans/2026-10-18-security-fix-specs.md:268-287",
+   "source": "pooled cluster p3, ruled invalid, accepted as a non-issue by lead on 2026-10-23"
+  },
+  {
+   "id": "pool-ni-p5",
+   "claim": "The open-flags check does not require O_CLOEXEC, so removing it and leaking the token file descriptor to child processes would go undetected.",
+   "location": "tests/private_writes_check.py:146",
+   "why_not": "The test gap could not cause the leak the finding describes. Since PEP 446 (Python 3.4), os.open makes every new descriptor non-inheritable, which sets close-on-exec at the OS level whether or not O_CLOEXEC is passed. So removing the flag would not let the token descriptor reach exec'd children, and the project runs Python 3.14. A forked child inherits descriptors either way, because close-on-exec only acts at exec. The descriptor is also closed before write_private returns. An extra assertion on O_CLOEXEC would guard a redundant flag, so the missing assertion is not a defect.",
+   "citation": "jarvis/private_write.py:36",
+   "source": "pooled cluster p5, ruled invalid, accepted as a non-issue by lead on 2026-10-23"
+  },
+  {
+   "id": "pool-ni-p6",
+   "claim": "The Spotify rotation test only checks the final file contents and mode, so it does not catch a change that saves the rotated token after the access token has already been returned.",
+   "location": "tests/private_writes_check.py:540",
+   "why_not": "The reviewer's mutation moves `_store(bundle)` below `_cached_token = payload[\"access_token\"]`, but the token still only reaches the caller at the `return` on line 174. Both orders run inside the same `_lock` block before that return, so a crash at any point stops the token from being handed back either way. The two orders behave the same, and no test can or needs to tell them apart. A change that really saved the token after `access_token()` returned, or skipped saving it, would leave the old refresh token on disk when the test reads the file after the call (lines 534-540), so the check would catch it. The test checks the property the rule is about, and the gap described is not a real defect.",
+   "citation": "jarvis/spotify_auth.py:159-174",
+   "source": "pooled cluster p6, ruled invalid, accepted as a non-issue by lead on 2026-10-23"
+  },
+  {
+   "id": "pool-ni-p7",
+   "claim": "The Google writer tests need to bind a loopback HTTP server, so where networking is restricted they fail before they reach the file-writing code they are meant to test.",
+   "location": "tests/private_writes_check.py:318",
+   "why_not": "The test drives the real google_auth.connect loopback OAuth callback on an ephemeral 127.0.0.1 port, using a fake browser and a fake httpx.post. That is what the project's test rules prescribe: temporary config, fake providers and ephemeral ports, never the live ports. A sandbox that forbids binding loopback sockets is a limit of the reviewer's environment, not a defect in the change. If the test did fail there, it would fail loudly as a counted failure and would not pass falsely.",
+   "citation": "CLAUDE.md:194-196",
+   "source": "pooled cluster p7, ruled invalid, accepted as a non-issue by lead on 2026-10-23"
+  }
+ ]
+}
