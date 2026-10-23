@@ -173,7 +173,7 @@ def test_committed_rubrics() -> None:
         check("a case with no rubric file loads as None", cases.load_rubric("impl-279") is None)
         rb = sum(len(json.loads(p.read_text())["entries"]) for p in files)
         ni = sum(len(json.loads(p.read_text())["non_issues"]) for p in files)
-        check("the committed rubrics hold the README's counts (20 entries, 157 non-issues)", (rb, ni) == (20, 157), f"{rb}, {ni}")
+        check("the committed rubrics hold the README's counts (20 entries, 158 non-issues)", (rb, ni) == (20, 158), f"{rb}, {ni}")
 
 
 def test_rubric_validation(case: dict) -> None:
