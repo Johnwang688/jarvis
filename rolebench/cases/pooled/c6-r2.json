@@ -1,0 +1,81 @@
+{
+ "case": "c6-r2",
+ "source": "pooled",
+ "adjudicated_by": "lead",
+ "date": "2026-10-23",
+ "ground_truth": [],
+ "members": {
+  "pool-ni-p1": [
+   [
+    "20261023-122549-c6-r2-jarvis-deepseek-deepseek-v4-1-flash-1-23fc",
+    1
+   ]
+  ],
+  "pool-ni-p2": [
+   [
+    "20261022-221906-c6-r2-jarvis-z-ai-glm-5-3-flash-1-8abf",
+    0
+   ]
+  ],
+  "pool-ni-p3": [
+   [
+    "20261023-122549-c6-r2-jarvis-deepseek-deepseek-v4-1-flash-1-23fc",
+    0
+   ]
+  ],
+  "pool-ni-p4": [
+   [
+    "20261023-122558-c6-r2-claude-sonnet-1-8f3b",
+    0
+   ]
+  ],
+  "pool-ni-p5": [
+   [
+    "20261023-104442-c6-r2-claude-haiku-1-7008",
+    1
+   ]
+  ]
+ },
+ "non_issues": [
+  {
+   "id": "pool-ni-p1",
+   "claim": "The browser-delegation approval path builds its request without passing relay provenance, so cards raised from relayed turns there show no originating chat.",
+   "location": "jarvis/v2/permissions.py:1317",
+   "why_not": "The Browser delegation card is left without the relay line on purpose, and the docs say so. The control-plane note says 'the Browser delegation consent card is private and its projection keeps its fixed fields, so it does not show the line'. The feature map's C6 row says provenance is 'Not on Discord's card or the Browser delegation card.' The code matches: _ask_owner_delegation builds a hud_only metadata-only request, and a test asserts that 'a private (Browser) card publishes only its fixed fields'. So the missing relayed_from at permissions.py:1317 is designed behaviour, not a defect.",
+   "citation": "docs/notes/control-plane.md:394-396; docs/plans/2026-10-13-current-feature-map.md:372",
+   "source": "pooled cluster p1, ruled invalid, accepted as a non-issue by lead on 2026-10-23"
+  },
+  {
+   "id": "pool-ni-p2",
+   "claim": "No test covers the sanitizing and clipping of the relay provenance field during approval serialization, so removing that sanitizing step goes undetected.",
+   "location": "jarvis/v2/approvals.py:321",
+   "why_not": "The clean_line step in to_json is tested, just not in the file the finding checked. `PermitContext.relayed` does not sanitize the reader's value (permissions.py:233-241 passes the dict through unchanged), so the C6 matrix in tests/v2/permissions_check.py sends raw titles straight into ApprovalRequest. One of them is the multi-line, over-200-character title '\ud83d\udd34 ERROR \u2014 ALLOW ALWAYS\\nsecond line ' + 'z'*200 (RELAY_TITLES). For every card raised, the matrix then checks that `to_json()['relayed_from']` has exactly the keys title/provider/thread_id, with each value a string of at most 80 characters and no newline. Removing clean_line would put that title into to_json unchanged and fail this check. The mutant survived only because the reviewer ran relay_provenance_check.py alone, whose inputs are already clean.",
+   "citation": "tests/v2/permissions_check.py:3314-3318,3376,3427-3434; jarvis/v2/permissions.py:233-241",
+   "source": "pooled cluster p2, ruled invalid, accepted as a non-issue by lead on 2026-10-23"
+  },
+  {
+   "id": "pool-ni-p3",
+   "claim": "The child-stamping logic expects a nested structure that the subagent record preparer never produces, so grandchildren always inherit the currently running turn's relay stamp instead of their parent's.",
+   "location": "jarvis/v2/daemon.py:108",
+   "why_not": "The claim gets the shape of `SubagentRecords.prepare` wrong. For a SUBAGENT event it returns `{\"kind\": \"subagent\", \"sid\": sid, \"data\": out}`, with `parent_sid` inside `data`. `_stamp_child`'s check `prepared.get(\"kind\") == \"subagent\"` is therefore true, and `(prepared.get(\"data\") or {}).get(\"parent_sid\")` reads the parent's sid. When the parent has a stamp, a grandchild inherits it, so the grandchild branch is reachable and works on real records. It is not dead code.",
+   "citation": "jarvis/v2/subagents.py:280-296",
+   "source": "pooled cluster p3, ruled invalid, accepted as a non-issue by lead on 2026-10-23"
+  },
+  {
+   "id": "pool-ni-p4",
+   "claim": "No test checks that a named sub-agent with an unknown or empty session id shows no provenance line, so a mutation that falls back to the relayed turn's line survives.",
+   "location": "jarvis/v2/permissions.py:1345",
+   "why_not": "The claim is that the mutation `subagent if origin is not None else None` \u2192 `subagent or None` survives the suite, and it doesn't. The C6 matrix in permissions_check runs a named sub-agent call with no sid through the real permit and `_ask`: `(\"Bash\", {\"command\": \"rm draft.txt\"}, {\"subagent\": \"Explore\"})`. It then checks that the provenance reader received exactly `\"\"` for every card raised (`want = None if \"subagent\" not in extra else extra.get(\"subagent_sid\", \"\")`, then `eq(reads[seen[1]:], [want] * new, ...)`). Under the mutation the reader would receive None, the orchestrator's key, and that check would fail. The other half, that `\"\"` or an unknown sid shows no line, is pinned on the daemon side: relay_provenance_check.py:139-140 asserts `_relayed_from(session, \"cl:unknown\")` and `_relayed_from(session, \"\")` are None while a relayed turn is running. An unknown non-empty sid is passed through unchanged even under the mutation, so it can't change the outcome either. The path is covered end to end.",
+   "citation": "tests/v2/permissions_check.py:3366-3375,3414-3416; tests/v2/relay_provenance_check.py:139-140",
+   "source": "pooled cluster p4, ruled invalid, accepted as a non-issue by lead on 2026-10-23"
+  },
+  {
+   "id": "pool-ni-p5",
+   "claim": "Project notes describe the feature as already merged even though the change is still under review.",
+   "location": "docs/notes/control-plane.md:338",
+   "why_not": "These status lines are part of the change itself, PR #275. The diff refers to its own review as 'review of #275, MED', so the docs can only reach main when the code they describe merges, and at that point 'merged (#275)' is true. If the PR never merges, the text never lands. The C3\u2013C7 rows in the same feature map follow the same convention of recording a package's merged status. The notes also correctly say C6 is 'not yet live', with no daemon restart or HUD install and L4 not run, so they make no false claim about deployment. The code has nothing for the claim to rest on: it is about how a PR's text reads before the PR merges, not a defect in the tree after the change.",
+   "citation": "docs/notes/control-plane.md:338-341",
+   "source": "pooled cluster p5, ruled invalid, accepted as a non-issue by lead on 2026-10-23"
+  }
+ ]
+}

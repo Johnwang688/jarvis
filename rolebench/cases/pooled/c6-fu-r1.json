@@ -1,0 +1,92 @@
+{
+ "case": "c6-fu-r1",
+ "source": "pooled",
+ "adjudicated_by": "lead",
+ "date": "2026-10-23",
+ "ground_truth": [
+  {
+   "id": "pool-p1",
+   "severity": "LOW",
+   "mechanism": "No test covers the 'Task' entry in CLAUDE_SPAWN_TOOLS. Deleting it leaves every suite green, so a Claude CLI whose spawn tool is still named Task could lose the relay pre-stamp in `_spawned` without any test failing; a background child whose task_started arrives after the turn would then show only the 'running' line.",
+   "location": "jarvis/v2/daemon.py:74",
+   "evidence": "pooled cluster p1: 3 reviewer finding(s), ruled valid once by the blinded Opus ruling with the code (its evidence is in the pool file)",
+   "source": "pooled cluster p1, accepted by lead on 2026-10-23"
+  },
+  {
+   "id": "pool-p4",
+   "severity": "LOW",
+   "mechanism": "The change records C6 as installed and live at build `725459c` (#275), adds the follow-up's `_spawned` pre-stamp and the new `_stamp_child` rules to the same C6 paragraph without saying they are not deployed, and tells the reader that L4 steps 4-5 can be checked now; on Claude, step 5's expected line depends on this unmerged follow-up, so if it is run against that build, the result looks like the documented rule failing rather than code that was never installed.",
+   "location": "docs/notes/control-plane.md:336-340",
+   "evidence": "pooled cluster p4: 5 reviewer finding(s), ruled valid once by the blinded Opus ruling with the code (its evidence is in the pool file)",
+   "source": "pooled cluster p4, accepted by lead on 2026-10-23"
+  }
+ ],
+ "members": {
+  "pool-p1": [
+   [
+    "20261022-194652-c6-fu-r1-jarvis-anthropic-claude-haiku-5-5-1-1388",
+    1
+   ],
+   [
+    "20261023-103216-c6-fu-r1-claude-haiku-1-2c38",
+    2
+   ],
+   [
+    "20261023-122114-c6-fu-r1-claude-sonnet-1-cfad",
+    3
+   ]
+  ],
+  "pool-p4": [
+   [
+    "20261022-194652-c6-fu-r1-jarvis-anthropic-claude-haiku-5-5-1-1388",
+    0
+   ],
+   [
+    "20261023-103216-c6-fu-r1-claude-haiku-1-2c38",
+    0
+   ],
+   [
+    "20261023-103928-c6-fu-r1-jarvis-deepseek-deepseek-v4-1-flash-1-3bcb",
+    1
+   ],
+   [
+    "20261023-122114-c6-fu-r1-claude-sonnet-1-cfad",
+    2
+   ],
+   [
+    "20261023-130434-c6-fu-r1-claude-opus-1-4587",
+    1
+   ]
+  ],
+  "pool-ni-p2": [
+   [
+    "20261022-194652-c6-fu-r1-jarvis-anthropic-claude-haiku-5-5-1-1388",
+    2
+   ]
+  ],
+  "pool-ni-p3": [
+   [
+    "20261023-103216-c6-fu-r1-claude-haiku-1-2c38",
+    3
+   ]
+  ]
+ },
+ "non_issues": [
+  {
+   "id": "pool-ni-p2",
+   "claim": "No test sends a spawn call that lacks a string call id, so removing that guard in _spawned would let id-less spawns share an empty-parent child sid without any test failing.",
+   "location": "jarvis/v2/daemon.py:166",
+   "why_not": "The guard defends against a state no real path produces, and dropping it would change nothing anyone can observe. Claude's TOOL_STARTED always carries the SDK ToolUseBlock's `block.id` (claude.py:2358). The only other TOOL_STARTED it emits is the 'compact' call, which carries a generated id and is not a spawn tool. Even without the guard, `_spawned` would only stamp `child_sid('')` = 'cl:h'+sha256(''), and no child ever gets that sid. The Claude child paths call `child_sid` only with a truthy id: `_child` takes a parent id, `task_started` returns early `if ... not spawn` (2437), and `task_*` needs a truthy `tool_use_id` (2476). So the 'shared empty-parent child sid' the claim warns about doesn't exist, and a missing test for unreachable defensive code is not a defect.",
+   "citation": "jarvis/v2/providers/claude.py:2351-2360, 2436-2439, 2476-2477; jarvis/v2/daemon.py:166-173",
+   "source": "pooled cluster p2, ruled invalid, accepted as a non-issue by lead on 2026-10-23"
+  },
+  {
+   "id": "pool-ni-p3",
+   "claim": "_stamp_child now stamps a Codex child only when its first record is a start, so a child whose own event arrives before its started announcement no longer inherits the running relayed turn's stamp, and the new test pins this behaviour.",
+   "location": "jarvis/v2/daemon.py:149",
+   "why_not": "This behaviour is intended and documented. The control-plane note says a first record that is not the lifecycle `started` gets no stamp and falls back to the 'running' line. It also says Codex children are stamped from their first record only, and that the Codex wire ordering has not been verified yet; the runbook's L4 step 5 is there to observe it. The `_stamp_child` docstring at daemon.py:133-136 says the same thing, and the test pins that design on purpose. The finding also overstates the effect. Codex child cards do not read the stamp at all: Codex passes the subagent sid with no label, so the card follows the running turn whatever the stamp says (see key rb2). That means the change does not alter what a Codex card shows.",
+   "citation": "docs/notes/control-plane.md:381-398",
+   "source": "pooled cluster p3, ruled invalid, accepted as a non-issue by lead on 2026-10-23"
+  }
+ ]
+}

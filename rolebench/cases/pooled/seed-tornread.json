@@ -1,0 +1,41 @@
+{
+ "case": "seed-tornread",
+ "source": "pooled",
+ "adjudicated_by": "lead",
+ "date": "2026-10-23",
+ "ground_truth": [],
+ "members": {
+  "pool-ni-p2": [
+   [
+    "20261022-210403-seed-tornread-jarvis-anthropic-claude-haiku-5-5-1-22c9",
+    2
+   ]
+  ]
+ },
+ "non_issues": [
+  {
+   "id": "pool-ni-p2",
+   "claim": "The concurrent reader/writer test checks only that rows are whole and never asserts that a partial line was actually seen, so it passes even when the race never happens.",
+   "location": "tests/v2/stores_check.py:281",
+   "why_not": "The stress block in section 6 only says it checks that a reader racing a writer never raises and sees only whole records, and it does assert that. Whether a torn line actually becomes visible depends on thread timing, so asserting that one was observed would make the test flaky. The torn-line handling the reviewer wants exercised is already tested deterministically: section 1 writes unterminated and cut-multibyte tail lines and asserts they are skipped, and section 5 covers a log holding only a torn line. The missing assertion therefore leaves the behaviour covered and is not a defect.",
+   "citation": "tests/v2/stores_check.py:248-252",
+   "source": "pooled cluster p2, ruled invalid, accepted as a non-issue by lead on 2026-10-23"
+  }
+ ],
+ "duplicates": {
+  "gt1": [
+   [
+    "20261023-031308-seed-tornread-jarvis-deepseek-deepseek-v4-1-flash-1-d204",
+    2
+   ],
+   [
+    "20261023-114238-seed-tornread-claude-haiku-1-ca7c",
+    2
+   ]
+  ]
+ },
+ "duplicate_clusters": {
+  "p1": "gt1",
+  "p3": "gt1"
+ }
+}

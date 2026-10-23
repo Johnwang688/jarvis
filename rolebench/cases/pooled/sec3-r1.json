@@ -1,0 +1,78 @@
+{
+ "case": "sec3-r1",
+ "source": "pooled",
+ "adjudicated_by": "lead",
+ "date": "2026-10-23",
+ "ground_truth": [],
+ "members": {
+  "pool-ni-p1": [
+   [
+    "20261022-230051-sec3-r1-jarvis-z-ai-glm-5-3-flash-1-65a5",
+    0
+   ]
+  ],
+  "pool-ni-p2": [
+   [
+    "20261023-021359-sec3-r1-jarvis-deepseek-deepseek-v4-1-flash-1-da0b",
+    0
+   ]
+  ],
+  "pool-ni-p3": [
+   [
+    "20261022-210609-sec3-r1-codex-gpt-6-luna-1-fb67",
+    0
+   ]
+  ],
+  "pool-ni-p5": [
+   [
+    "20261023-112938-sec3-r1-claude-haiku-1-f736",
+    4
+   ]
+  ]
+ },
+ "non_issues": [
+  {
+   "id": "pool-ni-p1",
+   "claim": "The credential-removal call in _scrub sits outside the exception guard, so an error there is raised to the caller and the redaction placeholder is never returned.",
+   "location": "jarvis/v2/chat_git.py:625",
+   "why_not": "The claim is wrong about the code. The call to strip_url_credentials sits inside the try block: `return scrub_text(secrets.strip_url_credentials(text))` is on line 625, under `try:` on line 624. So if strip_url_credentials raises, `except Exception` on line 626 catches it and the function returns the withheld placeholder instead of letting the error reach the caller.",
+   "citation": "jarvis/v2/chat_git.py:624-627",
+   "source": "pooled cluster p1, ruled invalid, accepted as a non-issue by lead on 2026-10-23"
+  },
+  {
+   "id": "pool-ni-p2",
+   "claim": "The git chat module writes its own copy of the redaction placeholder string instead of importing the shared constant, so the two can drift apart without any test noticing.",
+   "location": "jarvis/v2/chat_git.py:627",
+   "why_not": "There is no shared constant to import. The change gives mirror.py, reporter.py and diff_review.py each their own module-level copy of the WITHHELD literal, so chat_git's literal is just one more copy, and that line is unchanged context in the diff. If the copies drifted, only the wording of a fallback message would differ: chat_git would still withhold the unscrubbable output rather than leak it. No safety or behaviour failure follows, so this is a style nit and not a defect.",
+   "citation": "jarvis/v2/chat_git.py:621-627",
+   "source": "pooled cluster p2, ruled invalid, accepted as a non-issue by lead on 2026-10-23"
+  },
+  {
+   "id": "pool-ni-p3",
+   "claim": "When a chat is relocated, the thread title is taken from older persisted sidecar data and sent to Discord without being passed through the secret scrubber.",
+   "location": "jarvis/v2/discord/mirror.py:1291",
+   "why_not": "The only way a key gets into the sidecar `name` is an old version scrubbing it with `secrets.scrub` before this change. That same value was already sent to Discord as the old thread's name when it was created or renamed (`_renamed` stores the name it posts, mirror.py:1236-1252; `attach` stores the name the thread was created with, mirror.py:536). Moving the chat re-sends a value Discord already has, in the same guild, so nothing new leaves the machine. Every name the new code writes goes through `_scrub`/`scrub_text` in `chat_name`. SEC-3's spec covers the outbound call sites and does not ask for a migration of names already stored. This is cleanup of past exposure, not a leak the change introduces or leaves open.",
+   "citation": "jarvis/v2/discord/mirror.py:1236-1252; docs/plans/2026-10-18-security-fix-specs.md:218-225",
+   "source": "pooled cluster p3, ruled invalid, accepted as a non-issue by lead on 2026-10-23"
+  },
+  {
+   "id": "pool-ni-p5",
+   "claim": "The test module's docstring says every case fails against the base code, but several cases already pass there, and the single combined commit means the claim that tests came first can't be checked.",
+   "location": "tests/v2/outbound_scrub_check.py:9",
+   "why_not": "The diff shows chat_git already returned scrub_text(text) on main, and the c5 cases check that the caps still hold, so some cases passing on main is expected. The docstring scopes its 'fail on main' sentence with the parenthetical about the older surfaces that call secrets.scrub alone, and chat_git is not one of those. The plan only requires new negative cases to fail on main. A docstring that overstates this slightly, or commit order that cannot be checked from this checkout, is a process point and not a defect in the code's behaviour.",
+   "citation": "tests/v2/outbound_scrub_check.py:9-10; docs/plans/2026-10-18-security-fix-specs.md:21-23",
+   "source": "pooled cluster p5, ruled invalid, accepted as a non-issue by lead on 2026-10-23"
+  }
+ ],
+ "duplicates": {
+  "rb1": [
+   [
+    "20261023-112938-sec3-r1-claude-haiku-1-f736",
+    1
+   ]
+  ]
+ },
+ "duplicate_clusters": {
+  "p4": "rb1"
+ }
+}

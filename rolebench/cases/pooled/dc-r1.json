@@ -2,7 +2,7 @@
  "case": "dc-r1",
  "source": "pooled",
  "adjudicated_by": "lead",
- "date": "2026-10-22",
+ "date": "2026-10-23",
  "ground_truth": [
   {
    "id": "pool-p1",
@@ -33,7 +33,7 @@
    "severity": "MED",
    "mechanism": "The server-side check that refuses a Remote binding on the Direct capture route has no test. The test named for it only sends a covered-window report, which `owner_current` refuses first. If the mode check were deleted, every test would still pass, and a Remote tab could get a URL-only reference that skips Remote's text and credential checks.",
    "location": "jarvis/v2/browser/captures.py:248-249",
-   "evidence": "pooled cluster p8: 2 reviewer finding(s), ruled valid once by the blinded Opus ruling with the code (its evidence is in the pool file)",
+   "evidence": "pooled cluster p8: 3 reviewer finding(s), ruled valid once by the blinded Opus ruling with the code (its evidence is in the pool file)",
    "source": "pooled cluster p8, accepted by lead on 2026-10-22"
   },
   {
@@ -95,6 +95,10 @@
    ],
    [
     "20261021-090205-dc-r1-claude-opus-1-86c5",
+    0
+   ],
+   [
+    "20261023-124301-dc-r1-claude-opus-1-e45c",
     0
    ]
   ],
@@ -174,6 +178,34 @@
    [
     "20261021-023915-dc-r1-jarvis-deepseek-deepseek-v4-1-flash-1-82a4",
     2
+   ],
+   [
+    "20261023-110554-dc-r1-claude-haiku-1-49a8",
+    6
+   ]
+  ],
+  "pool-ni-p17": [
+   [
+    "20261023-011905-dc-r1-jarvis-deepseek-deepseek-v4-1-flash-1-516e",
+    1
+   ]
+  ],
+  "pool-ni-p18": [
+   [
+    "20261023-123743-dc-r1-claude-sonnet-1-b465",
+    3
+   ]
+  ],
+  "pool-ni-p21": [
+   [
+    "20261022-205602-dc-r1-codex-gpt-6-luna-1-18cf",
+    0
+   ]
+  ],
+  "pool-ni-p23": [
+   [
+    "20261023-110554-dc-r1-claude-haiku-1-49a8",
+    0
    ]
   ]
  },
@@ -233,6 +265,74 @@
    "why_not": "The finding's scenario does not happen. captureDirect checks live(), which includes valid(token), straight after encoding (directCapture.ts:253-254). A gesture that goes stale during encode therefore throws DirectRefused('stale') before api.directCapture is ever called, and no row is created. The only window left is the daemon request itself. The Remote path (BrowserCapture.tsx:106) has the same window and handles it the same way, with the re-check at :107. Any row left behind that way is harmless: the store expires rows after 24 hours and caps both entry count and bytes (captures.py:23, :70-73, :108-113). The other half of the claim is about the catch at :113. It handles generic errors, such as a failed daemon reference request. Those are not Direct refusals, and opening the page in Remote would not fix them. The Remote offer is deliberately tied to DirectRefused reasons at :101, so leaving it out at :113 is not a defect.",
    "citation": "hud/src/lib/directCapture.ts:253-254",
    "source": "pooled cluster p15, ruled invalid, accepted as a non-issue by lead on 2026-10-22"
+  },
+  {
+   "id": "pool-ni-p17",
+   "claim": "The Direct capture handler adds the URL-only row before its final owner/input-hold re-check, so a refusal at that point returns 409 and leaves a stored row whose id never reaches the HUD.",
+   "location": "jarvis/v2/browser/captures.py:255-262",
+   "why_not": "The re-check after the add is real, but the leftover row does no harm. Its id is a random 128-bit token that is never returned, and owner resolution needs that exact id, so nothing can reach the row. Its contents are only the URL that the same guard has already checked. The store keeps at most 16 rows and drops each after 24 h, so the row just ages out. At worst it takes one slot for that time. The Remote capture path that existed before this change does the same thing on purpose: it adds the row, then checks `owner_current`/held again. The Direct handler copies that pattern rather than adding a new defect.",
+   "citation": "jarvis/v2/browser/captures.py:110-121 (bounded store, random id), jarvis/v2/browser/captures.py:211-215 (same add-then-recheck in capture_page), jarvis/v2/browser/captures.py:255-263",
+   "source": "pooled cluster p17, ruled invalid, accepted as a non-issue by lead on 2026-10-23"
+  },
+  {
+   "id": "pool-ni-p18",
+   "claim": "Work done between the press and getDisplayMedia can use up Chrome's transient user activation, and the NotAllowedError that follows is mapped to 'cancelled', so the owner is told they cancelled a prompt they never saw.",
+   "location": "hud/src/lib/directCapture.ts:140",
+   "why_not": "The claim does not hold up in the code. The work done before the prompt is bounded: `beforeCapture` \u2192 `uncover` waits at most 3 s (`deadline=Date.now()+3000`, and it throws once that passes), then two animation frames and `CropTarget.fromElement` follow, which take milliseconds. That stays inside Chrome's roughly 5 s transient-activation window. Also, the Screen Capture spec says a missing transient activation rejects `getDisplayMedia` with `InvalidStateError`, not `NotAllowedError`, and Chrome follows that ('getDisplayMedia requires transient activation from a user gesture'). Line 170 sends `InvalidStateError` to prompt 'error' / reason 'failed', not 'cancelled'. So an expired gesture would never show the 'share prompt was cancelled' message. Only a real denial or dismissal (`NotAllowedError`/`AbortError`) is reported as cancelled, which is the intended mapping.",
+   "citation": "hud/src/lib/directCapture.ts:167-171; hud/src/state/browser.ts:91-101",
+   "source": "pooled cluster p18, ruled invalid, accepted as a non-issue by lead on 2026-10-23"
+  },
+  {
+   "id": "pool-ni-p21",
+   "claim": "The settings PATCH reads a passing probe result and enables the switch in separate steps, so a failed probe recorded in between leaves Direct capture enabled despite the latest failure.",
+   "location": "jarvis/v2/browser/routes.py:216",
+   "why_not": "The design only makes a passing probe a condition for turning the switch on. It never says a later failed probe turns the switch off. The plan states that the switch keeps its saved value even after a restart, when no passing probe exists. The capture route (captures.py:242) checks only the setting and never the probe. So a failed probe recorded just after the PATCH, with no race involved, also leaves Direct capture on, and that is intended. The race the claim describes leads to the same end state as a failed probe that arrives a moment later. Both requests are also the owner's own, on owner-only routes.",
+   "citation": "docs/plans/2026-10-19-direct-capture-plan.md:21-24",
+   "source": "pooled cluster p21, ruled invalid, accepted as a non-issue by lead on 2026-10-23"
+  },
+  {
+   "id": "pool-ni-p23",
+   "claim": "The coverage sampling grid is inset by the 8 px edge margin, so an opaque element with no listed overlay role or class over the iframe's outer band is never detected and ends up in the captured picture.",
+   "location": "hud/src/lib/directCapture.ts:86",
+   "why_not": "The 8 px inset is a documented design choice. The browser notes say the 5\u00d75 hit-test grid is \"inset 8 px past the panes' transparent resize handles\", and the code comment at directCapture.ts:84-85 says the same. By design, the coverage check is a sparse 25-point sample plus a list of known overlay roles and selectors. It was never meant to test every pixel. An unlisted element sitting between any two grid points escapes it just as easily as one in the edge band, so the band is not a separate defect. The plan (step 2) specifies exactly this check, a 5\u00d75 grid plus role/known-selector overlays, and the code implements it as written.",
+   "citation": "docs/notes/browser.md:1254-1258",
+   "source": "pooled cluster p23, ruled invalid, accepted as a non-issue by lead on 2026-10-23"
   }
- ]
+ ],
+ "duplicates": {
+  "gt3": [
+   [
+    "20261023-110554-dc-r1-claude-haiku-1-49a8",
+    2
+   ]
+  ],
+  "pool-p13": [
+   [
+    "20261022-224329-dc-r1-jarvis-z-ai-glm-5-3-flash-1-268d",
+    0
+   ]
+  ],
+  "rb1": [
+   [
+    "20261021-085426-dc-r1-claude-haiku-1-51f8",
+    1
+   ]
+  ],
+  "rb2": [
+   [
+    "20261021-085426-dc-r1-claude-haiku-1-51f8",
+    2
+   ],
+   [
+    "20261021-090205-dc-r1-claude-opus-1-86c5",
+    2
+   ]
+  ]
+ },
+ "duplicate_clusters": {
+  "p16": "gt3",
+  "p19": "rb1",
+  "p20": "rb2",
+  "p22": "pool-p13"
+ }
 }

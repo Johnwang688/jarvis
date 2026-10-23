@@ -1,0 +1,58 @@
+{
+ "case": "store-r1",
+ "source": "pooled",
+ "adjudicated_by": "lead",
+ "date": "2026-10-23",
+ "ground_truth": [
+  {
+   "id": "pool-p1",
+   "severity": "LOW",
+   "mechanism": "The concurrent case in step 6 only checks that more than one read ran and that the final count is right. It never records or asserts that any reader saw an unterminated partial last line. So it can pass, and print its success line, even if no read ever overlapped a write, and it gives no evidence that the torn-line skip runs under real concurrency.",
+   "location": "tests/v2/stores_check.py:295-321",
+   "evidence": "pooled cluster p1: 1 reviewer finding(s), ruled valid once by the blinded Opus ruling with the code (its evidence is in the pool file)",
+   "source": "pooled cluster p1, accepted by lead on 2026-10-23"
+  },
+  {
+   "id": "pool-p2",
+   "severity": "LOW",
+   "mechanism": "When the final line is cut off mid-character, recovery keeps only the bytes up to the last LF, while `splitlines()` and the `unfinished` check also treat CR as a line end; any CR-terminated rows after the last LF are therefore silently dropped, whether they are valid or malformed, and a malformed one that should raise StoreError is hidden.",
+   "location": "jarvis/v2/stores.py:119-133",
+   "evidence": "pooled cluster p2: 1 reviewer finding(s), ruled valid once by the blinded Opus ruling with the code (its evidence is in the pool file)",
+   "source": "pooled cluster p2, accepted by lead on 2026-10-23"
+  }
+ ],
+ "members": {
+  "pool-p1": [
+   [
+    "20261022-211714-store-r1-jarvis-anthropic-claude-haiku-5-5-1-00ad",
+    2
+   ]
+  ],
+  "pool-p2": [
+   [
+    "20261022-202947-store-r1-codex-gpt-6-1-sol-1-7dcf",
+    0
+   ]
+  ],
+  "pool-ni-p3": [
+   [
+    "20261022-235038-store-r1-jarvis-z-ai-glm-5-3-flash-1-e27c",
+    1
+   ],
+   [
+    "20261023-125157-store-r1-claude-sonnet-1-9803",
+    1
+   ]
+  ]
+ },
+ "non_issues": [
+  {
+   "id": "pool-ni-p3",
+   "claim": "The check that the decode error starts after the last newline is always true for an end-of-data error at EOF, so it does nothing, and no test covers bad UTF-8 in an interior line.",
+   "location": "jarvis/v2/stores.py:119-125",
+   "why_not": "The clause is redundant, but nothing goes wrong because of it. Python's UTF-8 decoder reports the first bad byte, so bad UTF-8 earlier in the file fails with a different reason (such as 'invalid start byte') and raises StoreError before this branch is reached. A sequence cut off at the end of the file is at most three bytes and cannot contain b'\\n', so `exc.start > raw.rfind(b\"\\n\")` always holds when the other conditions do. Even if the reason check were loosened, the decode of everything up to the last newline at line 127 would still raise on bad UTF-8 in an earlier line. So no input is handled wrongly; the claim amounts to a redundant safety check and a missing test, with no failure behind it.",
+   "citation": "jarvis/v2/stores.py:122-132",
+   "source": "pooled cluster p3, ruled invalid, accepted as a non-issue by lead on 2026-10-23"
+  }
+ ]
+}

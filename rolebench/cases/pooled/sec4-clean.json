@@ -1,0 +1,144 @@
+{
+ "case": "sec4-clean",
+ "source": "pooled",
+ "adjudicated_by": "lead",
+ "date": "2026-10-23",
+ "ground_truth": [
+  {
+   "id": "pool-p1",
+   "severity": "LOW",
+   "mechanism": "The module promises a unique temp name per write so that a crash leftover or a second writer never collides under O_EXCL, but no test checks that promise; a change back to a fixed `.<name>.tmp` would pass the whole suite while a stale temp file made every later save, including Spotify's rotated refresh token, fail with FileExistsError.",
+   "location": "tests/private_writes_check.py:451-518",
+   "evidence": "pooled cluster p1: 5 reviewer finding(s), ruled valid once by the blinded Opus ruling with the code (its evidence is in the pool file)",
+   "source": "pooled cluster p1, accepted by lead on 2026-10-23"
+  },
+  {
+   "id": "pool-p5",
+   "severity": "LOW",
+   "mechanism": "The Onshape key bundle (access_key and secret_key) is still written with Path.write_text and only then chmodded to 0600. Under umask 022 the file is briefly 0644, and a symlink already at the target is followed. This is the same create-then-narrow defect that SEC-4 fixes for the Discord, Google and Spotify credential files, but this writer was left out.",
+   "location": "jarvis/onshape_auth.py:229-244",
+   "evidence": "pooled cluster p5: 1 reviewer finding(s), ruled valid once by the blinded Opus ruling with the code (its evidence is in the pool file)",
+   "source": "pooled cluster p5, accepted by lead on 2026-10-23"
+  },
+  {
+   "id": "pool-p6",
+   "severity": "LOW",
+   "mechanism": "The fsync and replace failure cases throw away the exception that attempt() returns and check only that the fault fired, that no stray files remain and that the old target is unchanged. If write_private's final `raise` were changed to `return`, every check would still pass, so the suite does not catch a write that fails silently while its caller reports success.",
+   "location": "tests/private_writes_check.py:502-516",
+   "evidence": "pooled cluster p6: 1 reviewer finding(s), ruled valid once by the blinded Opus ruling with the code (its evidence is in the pool file)",
+   "source": "pooled cluster p6, accepted by lead on 2026-10-23"
+  }
+ ],
+ "members": {
+  "pool-p1": [
+   [
+    "20261022-205241-sec4-clean-jarvis-anthropic-claude-haiku-5-5-1-c483",
+    0
+   ],
+   [
+    "20261022-230502-sec4-clean-jarvis-z-ai-glm-5-3-flash-1-ad7b",
+    0
+   ],
+   [
+    "20261023-022649-sec4-clean-jarvis-deepseek-deepseek-v4-1-flash-1-f705",
+    0
+   ],
+   [
+    "20261023-113423-sec4-clean-claude-haiku-1-e7f5",
+    0
+   ],
+   [
+    "20261023-122950-sec4-clean-claude-opus-1-c31f",
+    0
+   ]
+  ],
+  "pool-p5": [
+   [
+    "20261023-113423-sec4-clean-claude-haiku-1-e7f5",
+    2
+   ]
+  ],
+  "pool-p6": [
+   [
+    "20261022-201648-sec4-clean-codex-gpt-6-1-sol-1-d635",
+    0
+   ]
+  ],
+  "pool-ni-p2": [
+   [
+    "20261023-022649-sec4-clean-jarvis-deepseek-deepseek-v4-1-flash-1-f705",
+    2
+   ]
+  ],
+  "pool-ni-p3": [
+   [
+    "20261022-230502-sec4-clean-jarvis-z-ai-glm-5-3-flash-1-ad7b",
+    1
+   ]
+  ],
+  "pool-ni-p4": [
+   [
+    "20261022-230502-sec4-clean-jarvis-z-ai-glm-5-3-flash-1-ad7b",
+    2
+   ],
+   [
+    "20261023-113423-sec4-clean-claude-haiku-1-e7f5",
+    1
+   ]
+  ],
+  "pool-ni-p7": [
+   [
+    "20261023-022649-sec4-clean-jarvis-deepseek-deepseek-v4-1-flash-1-f705",
+    1
+   ]
+  ],
+  "pool-ni-p8": [
+   [
+    "20261022-205241-sec4-clean-jarvis-anthropic-claude-haiku-5-5-1-c483",
+    1
+   ]
+  ]
+ },
+ "non_issues": [
+  {
+   "id": "pool-ni-p2",
+   "claim": "The subagents fsync-failure and replace-failure cleanup cases also pass against the pre-change _compact code, so they don't distinguish fixed code from unfixed code for that writer.",
+   "location": "tests/private_writes_check.py:513",
+   "why_not": "The claim is accurate but it is not a defect. Before the change, `_compact` already called fsync and already unlinked its temp file when a write failed (`.rolebench-change.diff` lines 258-283). There was no bug on that axis for these cases to catch. The SEC-4 card asks each writer to be checked for one thing: a failed write leaves no temp file behind. It is a per-writer regression requirement. Now that `_compact` goes through the shared `write_private` helper, these two cases still guard that behaviour against future regressions. The card's own defect statement about `_compact` (missing O_NOFOLLOW) is covered by `subagents.create_flags`, which does fail on the old code. A test that passes on code that was already correct is regression coverage, not a test that pins nothing.",
+   "citation": "docs/plans/2026-10-18-security-fix-specs.md:273-275,290-294",
+   "source": "pooled cluster p2, ruled invalid, accepted as a non-issue by lead on 2026-10-23"
+  },
+  {
+   "id": "pool-ni-p3",
+   "claim": "No fault case makes the temp-file unlink fail, so changes to the exception handling around that cleanup go undetected.",
+   "location": "jarvis/private_write.py:46",
+   "why_not": "The code is correct: any failure in the inner unlink is caught and the original error is re-raised, as the module docstring says. The reviewer's mutant does not show a real gap. Widening `except OSError` to `except BaseException` behaves the same for every OSError (still swallowed, original error still re-raised). It only differs for things like KeyboardInterrupt raised during unlink, and even then the original error still propagates. It cannot mask the original error or leave the temp file behind, so no test is needed to tell the two apart. The fsync and replace fault cases already cover the cleanup-and-propagate behaviour that matters.",
+   "citation": "jarvis/private_write.py:43-48",
+   "source": "pooled cluster p3, ruled invalid, accepted as a non-issue by lead on 2026-10-23"
+  },
+  {
+   "id": "pool-ni-p4",
+   "claim": "The browser host's _write_private delegation is missing from the acceptance suite's writer list and is called by no test, so reverting it to an unsafe write would not be caught.",
+   "location": "jarvis/v2/browser/host.py:498-501",
+   "why_not": "The change does not introduce any defect here. host._write_private was already a safe O_EXCL|O_NOFOLLOW, fsync and replace recipe. The change only turns it into a one-line call to the shared helper, which the plan scopes as 'import only'. The SEC-4 spec names the writers its acceptance tests must cover: the three credential writers, subagents._compact and stt. The browser host is not one of them, and the shared write_private helper is fully exercised through those five writers. A regression to write_bytes plus chmod in an untouched delegation is hypothetical, not something this code does. tests/v2/browser_profiles_check.py:53 already asserts that profiles.json ends up 0600.",
+   "citation": "docs/plans/2026-10-18-security-fix-specs.md:277-294",
+   "source": "pooled cluster p4, ruled invalid, accepted as a non-issue by lead on 2026-10-23"
+  },
+  {
+   "id": "pool-ni-p7",
+   "claim": "The symlink_planted case reports success whenever the victim file is untouched, without also requiring the write to succeed, so a writer that always fails passes.",
+   "location": "tests/private_writes_check.py:496",
+   "why_not": "The test is meant to accept a refusal. The Recorder plants a symlink at every path just before it is created, so a correct `O_EXCL|O_NOFOLLOW` writer always gets EEXIST and raises. The shipped `write_private` uses a random temp name and does not retry, so it raises here too. If the case required `err is None`, the correct implementation would fail. The docstring only asks that the planted link is 'not followed'. A writer that fails every time is already caught by `case_mode_and_flags`, which requires `err is None` for `mode_never_wider`, `final_ok` and `create_flags`.",
+   "citation": "tests/private_writes_check.py:125-149, tests/private_writes_check.py:21-22, tests/private_writes_check.py:457-463, jarvis/private_write.py:35-36",
+   "source": "pooled cluster p7, ruled invalid, accepted as a non-issue by lead on 2026-10-23"
+  },
+  {
+   "id": "pool-ni-p8",
+   "claim": "The sub-agent record append opens the file without O_NOFOLLOW, so it follows a symlink at the record path and appends to the link's target; the tests only cover the compaction path.",
+   "location": "jarvis/v2/subagents.py:637",
+   "why_not": "The open at subagents.py:637 is real, but this change did not add it and the spec this change implements does not cover it. The diff leaves the append in _write untouched. The SEC-4 spec names only `subagents._compact` (it is missing O_NOFOLLOW and fsync there) as the sub-agent writer to move onto the shared helper. The change does exactly that, and the test file names _compact as its sub-agent target. Following a symlink on append also needs someone who can already write to Jarvis's private thread-state folder. So this is a possible follow-up outside the change's stated scope, not a defect the change introduced or left out.",
+   "citation": "docs/plans/2026-10-18-security-fix-specs.md:273-282",
+   "source": "pooled cluster p8, ruled invalid, accepted as a non-issue by lead on 2026-10-23"
+  }
+ ]
+}

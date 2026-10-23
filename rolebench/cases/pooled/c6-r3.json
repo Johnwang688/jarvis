@@ -1,0 +1,54 @@
+{
+ "case": "c6-r3",
+ "source": "pooled",
+ "adjudicated_by": "lead",
+ "date": "2026-10-23",
+ "ground_truth": [
+  {
+   "id": "pool-p3",
+   "severity": "LOW",
+   "mechanism": "card_title replaces only a fixed list of '<', '>' and dot look-alikes plus characters in the Ps/Pe/Pi/Pf bracket categories, so a model-written chat title can carry look-alikes outside that list, such as Canadian Syllabics \u1433/\u1438 (Lo), \u1427 (Lo, a final middle dot), Hangul \u318d (Lo) or Runic \u16eb (Po). These draw an arrow-bracket or a ' \u00b7 ' on the approval card's provenance line, which breaks the documented rule that look-alikes become '_'. With the card's one-line ellipsis this can fake the '(Provider \u00b7 id)' suffix; the effect is display-only.",
+   "location": "jarvis/v2/chat_reads.py:145-159",
+   "evidence": "pooled cluster p3: 1 reviewer finding(s), ruled valid once by the blinded Opus ruling with the code (its evidence is in the pool file)",
+   "source": "pooled cluster p3, accepted by lead on 2026-10-23"
+  }
+ ],
+ "members": {
+  "pool-p3": [
+   [
+    "20261023-125043-c6-r3-claude-opus-1-7b8f",
+    1
+   ]
+  ],
+  "pool-ni-p1": [
+   [
+    "20261023-104823-c6-r3-claude-haiku-1-176f",
+    2
+   ]
+  ],
+  "pool-ni-p2": [
+   [
+    "20261022-222748-c6-r3-jarvis-z-ai-glm-5-3-flash-1-88c6",
+    0
+   ]
+  ]
+ },
+ "non_issues": [
+  {
+   "id": "pool-ni-p1",
+   "claim": "The HUD cardTitle test suite has no case with a decomposed (NFD) title, so dropping the TypeScript NFC normalization would not make any HUD test fail.",
+   "location": "hud/src/lib/relays.test.ts:197",
+   "why_not": "The HUD test already has a decomposed (NFD) case. A byte-level match shows line 197 calls cardTitle with \"cafe\" + U+0301 and expects the precomposed \"caf\\u00e9\". Without the TypeScript normalize(\"NFC\"), CARD_DROPPED (\\p{Mn}) would drop U+0301 and return \"cafe\", so the test would fail. Removing the NFC normalization does break a HUD test.",
+   "citation": "hud/src/lib/relays.test.ts:197",
+   "source": "pooled cluster p1, ruled invalid, accepted as a non-issue by lead on 2026-10-23"
+  },
+  {
+   "id": "pool-ni-p2",
+   "claim": "When the HUD build output is missing, the face relay check suite skips every check but still exits with status zero, so exit-code gating reports a pass.",
+   "location": "tests/face/hud_v2_relay_check.py:695",
+   "why_not": "The code doesn't do what the claim says. When hud/dist/index.html is missing, main() prints the build hint and returns 2, and the `__main__` guard passes that to sys.exit(main()). The suite therefore exits with status 2, not 0, so a gate that checks the exit code sees a failure rather than a pass.",
+   "citation": "tests/face/hud_v2_relay_check.py:694-696",
+   "source": "pooled cluster p2, ruled invalid, accepted as a non-issue by lead on 2026-10-23"
+  }
+ ]
+}
