@@ -1081,6 +1081,8 @@ class BrowserHost:
             await self._close_instance(profile)
         for profile in list(self._windows):
             await self._close_window(profile)
+        if self._window_tasks:
+            await asyncio.gather(*list(self._window_tasks), return_exceptions=True)
         await self._attention_cleanup.settle()
         if self._pw is not None:
             try:
@@ -1362,11 +1364,12 @@ class BrowserHost:
                 env=launch_audio.env, chromium_sandbox=True,
                 artifacts_dir=str(artifacts), handle_sigint=False, handle_sigterm=False,
                 handle_sighup=False, timeout=LAUNCH_TIMEOUT_S * 1000, **shape)
-        except Exception as exc:  # noqa: BLE001 - Playwright's message holds the command line
+        except BaseException as exc:  # noqa: BLE001 - Playwright's message holds the command line
+            # A cancel too: the driver may still be starting Chrome.
+            await asyncio.shield(self._abandon_launch(None, folder, private))
+            if not isinstance(exc, Exception):
+                raise
             LOG.warning("Chrome did not start for a Browser profile: %s", type(exc).__name__)
-            await loop.run_in_executor(None, stop_pids, folder)
-            if private:
-                _remove_tree(folder)
             raise BrowserRefused(409, "Chrome could not start") from None
         # Everything from here to the return either hands back a registered
         # Chrome or closes this one: a refusal, an error, or the caller's
@@ -1389,6 +1392,8 @@ class BrowserHost:
             if not private:
                 observed = await self._observe_store(context, folder)
                 if choice.store == _stores.KEYRING_STORE and observed != _stores.KEYRING_STORE:
+                    if ended:
+                        raise BrowserRefused(409, WINDOW_ENDED)
                     after = await loop.run_in_executor(None, self.keyring.state)
                     LOG.warning("Browser profile Chrome did not use the keyring (observed %s, "
                                 "keyring %s); Chrome closed", observed, after)
@@ -1413,13 +1418,8 @@ class BrowserHost:
                                  audio=InstanceAudio(launch_audio.applied),
                                  password_store=observed)
         except BaseException:
-            try:
-                await asyncio.wait_for(context.close(), CLOSE_TIMEOUT_S)
-            except BaseException:  # noqa: BLE001 - the PIDs are stopped next either way
-                pass
-            await loop.run_in_executor(None, stop_pids, folder)
-            if private:
-                _remove_tree(folder)
+            # Shielded: a second cancel must not skip the stop or Private's wipe.
+            await asyncio.shield(self._abandon_launch(context, folder, private))
             raise
         instance.audio.on_settled(self._sound.wake)
         if headed:
@@ -1434,6 +1434,21 @@ class BrowserHost:
         context.on("page", lambda page: self._adopt(instance, page, None, own=instance.opening > 0))
         LOG.info("Browser started a Chrome (%s)", "private" if private else "profile")
         return instance
+
+    async def _abandon_launch(self, context, folder: Path, private: bool) -> None:
+        """Close a Chrome `_launch` will not hand back, stop its processes and,
+        for Private, remove its run folder. Never raises."""
+        if context is not None:
+            try:
+                await asyncio.wait_for(context.close(), CLOSE_TIMEOUT_S)
+            except BaseException:  # noqa: BLE001 - the PIDs are stopped next either way
+                pass
+        try:
+            await asyncio.get_running_loop().run_in_executor(None, stop_pids, folder)
+            if private:
+                _remove_tree(folder)
+        except Exception:  # noqa: BLE001
+            LOG.warning("A Browser Chrome that did not start was not fully cleaned up")
 
     async def _check_gate(self, context) -> bool:
         """Whether this Chrome's connections reach the gate: a fresh page

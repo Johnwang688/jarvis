@@ -2749,7 +2749,7 @@ Every failure after Chrome starts in `_launch` (a refusal, an error, the
 caller's timeout cancelling it) closes that Chrome and stops its processes,
 so no Chrome, headless or a window, is left running untracked.
 
-Receipts: `tests/v2/browser_signin_window_check.py` (20; the 3 headed checks
+Receipts: `tests/v2/browser_signin_window_check.py` (23; the 3 headed checks
 open real windows and need `JARVIS_TEST_HEADED=1`, run 2026-10-24 on WSLg),
 owner-only matrix in `browser_routes_check`, HUD `BrowserProfile.test.ts`.
 Six guard mutations each fail the suite (check always passing, window not

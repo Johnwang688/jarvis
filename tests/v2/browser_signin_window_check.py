@@ -181,6 +181,67 @@ class HeadedLaunch(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(stopped.called)
 
 
+    async def test_the_real_close_listener_ends_a_window_closed_while_starting(self):
+        """Chrome's own `close` firing during the gate check (not a hand-set
+        flag): the launch is refused as WINDOW_ENDED, not as a gate bypass."""
+        temp_config(self)
+        host = H.BrowserHost()
+        host._gate = SimpleNamespace(port=19000)
+        context = SimpleNamespace(browser=SimpleNamespace(version="synthetic"), on=Mock(),
+                                  close=AsyncMock())
+        host._pw = SimpleNamespace(chromium=SimpleNamespace(
+            launch_persistent_context=AsyncMock(return_value=context)))
+        profile = host.list_profiles()[0]["id"]
+
+        async def closed_during_check(self_, ctx):
+            (name, handler), = [c.args for c in ctx.on.call_args_list]
+            self.assertEqual(name, "close")
+            handler(ctx)
+            return False
+        with patch.object(H.BrowserHost, "_check_gate", closed_during_check), \
+                patch.object(H, "stop_pids", return_value=0):
+            with self.assertRaises(H.BrowserRefused) as caught:
+                await host._launch(profile, display="/x/wayland-0")
+        self.assertEqual(str(caught.exception), H.WINDOW_ENDED)
+
+    async def test_the_real_close_listener_after_launch_ends_the_registered_window_once(self):
+        temp_config(self)
+        host = H.BrowserHost()
+        host._gate = SimpleNamespace(port=19000)
+        context = SimpleNamespace(browser=SimpleNamespace(version="synthetic"), on=Mock(),
+                                  close=AsyncMock())
+        host._pw = SimpleNamespace(chromium=SimpleNamespace(
+            launch_persistent_context=AsyncMock(return_value=context)))
+        profile = host.list_profiles()[0]["id"]
+        with patch.object(H.BrowserHost, "_check_gate", AsyncMock(return_value=True)), \
+                patch.object(H, "stop_pids", return_value=0):
+            result = await host._open_window(profile, "/x/wayland-0")
+            self.assertEqual(result, {"profile": profile, "signin_window": True})
+            (_name, handler), = [c.args for c in context.on.call_args_list]
+            handler(context)
+            handler(context)            # Chrome's close again, from our own close
+            await asyncio.sleep(0.05)
+        self.assertEqual(host._windows, {})
+        self.assertEqual(context.close.await_count, 1)
+
+    async def test_the_check_retries_once_and_covers_private(self):
+        host = H.BrowserHost()
+        answers = iter([False, True])
+        with patch.object(H.BrowserHost, "_check_gate_once", AsyncMock(side_effect=lambda c: next(answers))) as once:
+            self.assertTrue(await host._check_gate(object()))
+        self.assertEqual(once.await_count, 2)
+        temp_config(self)
+        host._gate = SimpleNamespace(port=19000)
+        context = SimpleNamespace(browser=SimpleNamespace(version="synthetic"), on=Mock(), close=AsyncMock())
+        host._pw = SimpleNamespace(chromium=SimpleNamespace(
+            launch_persistent_context=AsyncMock(return_value=context)))
+        with patch.object(H.BrowserHost, "_check_gate", AsyncMock(return_value=False)), \
+                patch.object(H, "stop_pids", return_value=0):
+            with self.assertRaises(H.BrowserRefused) as caught:
+                await host._launch(H.PRIVATE)
+        self.assertEqual(str(caught.exception), H.GATE_BYPASSED)
+
+
 def fake_window(profile):
     return H._Instance(profile=profile, folder=Path("/nonexistent/" + profile),
                        context=SimpleNamespace(close=AsyncMock()), browser=None)
