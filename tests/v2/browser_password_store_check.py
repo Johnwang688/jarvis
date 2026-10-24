@@ -25,7 +25,7 @@ import tempfile
 import threading
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from jarvis import config
@@ -440,6 +440,9 @@ class Launch(unittest.IsolatedAsyncioTestCase):
         guard.start(); self.addCleanup(guard.stop)
         # The user agent probe runs the real Chrome binary; the fake one here never does.
         guard = patch.object(H, "chrome_user_agent", return_value=None)
+        guard.start(); self.addCleanup(guard.stop)
+        # The gate check (B-LOGIN-W) needs a real Chrome and gate; Gate below covers it.
+        guard = patch.object(H.BrowserHost, "_check_gate", AsyncMock(return_value=True))
         guard.start(); self.addCleanup(guard.stop)
         # Any probe that reaches the real subprocess.run fails the test.
         guard = patch.object(subprocess, "run", side_effect=AssertionError("real gdbus run"))

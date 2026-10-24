@@ -22,6 +22,13 @@ const syncOf=(raw:unknown):PasswordSync|null=>{
   return {password_store:text(s.password_store),requested:String(s.requested??""),keyring:String(s.keyring??""),
     next_launch:s.next_launch,unprotected:s.unprotected,hint:text(s.hint),profiles};
 };
+/** `/browser` → `signin_windows` (B-LOGIN-W): profile ids open in the owner's sign-in window. */
+export const windowsOf=(raw:unknown):string[]=>{
+  const w=(raw as {signin_windows?:unknown}|null)?.signin_windows;
+  return Array.isArray(w)?w.filter((id):id is string=>typeof id==="string"&&/^p-[0-9a-f]{8}$/.test(id)):[];
+};
+export const WINDOW_OPEN="Open in a Chrome window on your desktop. Finish signing in there, then close it.";
+const WINDOW_TITLE="For a sign-in whose Chrome dialogs the Remote view cannot show, such as an organization's account. This profile's Remote tabs close while the window is open.";
 const CHECKING={text:"Password store: checking…",loud:false};
 const UNPROTECTED="Unprotected (basic store): saved passwords use a public key.";
 /** What the Manage panel says about saved passwords. Unprotected and refused are loud.
@@ -55,9 +62,10 @@ export function BrowserProfile(props:{pane:PaneNo;control:BrowserControl;selecte
   const latest=useRef(props);latest.current=props;
   const row=props.control.profiles.find(p=>p.id===props.selected);
   const [sync,setSync]=useState<PasswordSync|null>(null);
+  const [windows,setWindows]=useState<string[]>([]);
   useEffect(()=>{
     if(!manage)return;let live=true;let seq=0;
-    const read=()=>{const n=++seq;void browserApi.get<unknown>("").then(raw=>{if(live&&n===seq)setSync(syncOf(raw));}).catch(()=>{if(live&&n===seq)setSync(null);});};
+    const read=()=>{const n=++seq;void browserApi.get<unknown>("").then(raw=>{if(live&&n===seq){setSync(syncOf(raw));setWindows(windowsOf(raw));}}).catch(()=>{if(live&&n===seq)setSync(null);});};
     read();
     // While open: again on a short interval and when the window regains focus.
     const timer=window.setInterval(read,PASSWORD_REFRESH_MS);
@@ -65,6 +73,7 @@ export function BrowserProfile(props:{pane:PaneNo;control:BrowserControl;selecte
     return()=>{live=false;window.clearInterval(timer);window.removeEventListener("focus",read);};
   },[manage,error]);
   const passwords=passwordLine(sync,row);
+  const inWindow=!!row&&windows.includes(row.id);
   const run=async(job:()=>Promise<unknown>)=>{
     if(latest.current.blocked||pending)return;setPending(true);setError("");
     try {await job();}catch(e){setError(cleanTitle(e instanceof Error?e.message:"That profile could not be changed.",500));}
@@ -94,12 +103,16 @@ export function BrowserProfile(props:{pane:PaneNo;control:BrowserControl;selecte
     {props.privateEnded&&props.selected==="private"?<button disabled={disabled} onClick={()=>void run(()=>props.control.profile(props.pane,"private"))}>Start a new Private session</button>:null}
     {manage?<div className="browserprofilemanage pad" data-testid="browser-profile-manage">
       <p className="small muted">Remote uses this profile. Direct uses this window’s browser session. Chrome sync sign-in may be unavailable on this installation.</p>
+      {inWindow?<p className="small" role="status" data-testid="browser-signin-window">{WINDOW_OPEN}</p>:null}
       <p className={passwords.loud?"err":"small muted"} data-testid="browser-password-store" style={{whiteSpace:"pre-wrap",userSelect:"text"}}>{passwords.text}</p>
       <label>Profile name <input value={label} maxLength={32} disabled={disabled} onChange={e=>setLabel(e.target.value)} onKeyDown={e=>e.stopPropagation()} /></label>
       <div className="row">
         <button disabled={disabled||!label.trim()||props.control.profiles.length>=8} onClick={()=>void run(async()=>{const p=await browserApi.write<Profile>("/profiles",{label:label.trim().normalize("NFC")});await props.control.refresh();if(!latest.current.blocked)await props.control.profile(props.pane,p.id);})}>New profile</button>
         <button disabled={disabled||!row||!label.trim()} onClick={()=>void run(async()=>{await browserApi.write(`/profiles/${row!.id}`,{label:label.trim().normalize("NFC")},"PATCH");await props.control.refresh();})}>Rename</button>
-        <button disabled={disabled||!row} onClick={()=>void run(()=>props.control.signin(props.pane))}>Sign in to Chrome</button>
+        <button disabled={disabled||!row||inWindow} onClick={()=>void run(()=>props.control.signin(props.pane))}>Sign in to Chrome</button>
+        {inWindow
+          ?<button disabled={disabled} onClick={()=>void run(async()=>{await browserApi.remove(`/profiles/${row!.id}/signin-window`);setWindows(w=>w.filter(id=>id!==row!.id));})}>Close Chrome window</button>
+          :<button disabled={disabled||!row} title={WINDOW_TITLE} onClick={()=>void run(async()=>{await browserApi.write(`/profiles/${row!.id}/signin-window`);setWindows(w=>[...w,row!.id]);await props.control.refresh();})}>Sign in in a Chrome window</button>}
         <button disabled={disabled||!row} onClick={()=>setConfirm("forget")}>Sign out of everything</button>
         <button disabled={disabled||!row} onClick={()=>setConfirm("delete")}>Delete profile</button>
       </div>

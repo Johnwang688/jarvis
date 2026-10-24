@@ -104,7 +104,8 @@ class Sound(unittest.IsolatedAsyncioTestCase):
             host._settings.update(sound=True);host._gate=SimpleNamespace(port=19000)
             context=SimpleNamespace(browser=SimpleNamespace(version="synthetic"),on=Mock())
             launch=AsyncMock(return_value=context);host._pw=SimpleNamespace(chromium=SimpleNamespace(launch_persistent_context=launch))
-            with patch.object(config,"BROWSER_DIR",Path(td)),patch.object(H,"stop_pids",return_value=0),patch.object(H,"font_environment",return_value={"FONTCONFIG_FILE":"synthetic","PULSE_SERVER":"ambient"}):
+            # The gate check (B-LOGIN-W) needs a real Chrome and gate; this one is fake.
+            with patch.object(H.BrowserHost,"_check_gate",AsyncMock(return_value=True)),patch.object(config,"BROWSER_DIR",Path(td)),patch.object(H,"stop_pids",return_value=0),patch.object(H,"font_environment",return_value={"FONTCONFIG_FILE":"synthetic","PULSE_SERVER":"ambient"}):
                 # _launch reads the profile's password-store row (password_store.py).
                 host._profiles._write([{"id":self.profile,"label":"Main","created":"2026-10-15T00:00:00+00:00"}])
                 instance=await host._launch(self.profile)

@@ -2700,3 +2700,60 @@ Receipts: `tests/v2/browser_signin_identity_check.py` (4 checks, real Chrome;
 fails on the old launch). **Not verified:** an actual Google sign-in; Google may
 also read CDP or other signals. If it still refuses, the next step is a headed
 Chrome for the sign-in route.
+
+## The owner's sign-in window and the gate check (B-LOGIN-W, 2026-10-24)
+
+Plan and decisions: [2026-10-24-browser-signin-window.md](../plans/2026-10-24-browser-signin-window.md).
+After #299 Google accepted the sign-in, but a Workspace-managed account then
+showed Chrome's `ManagedProfileRequiredInterstitial` ("Your organization
+requires you to sign into Chrome"). Its Continue opens Chrome's own profile
+dialog: browser UI, never drawn by the headless screencast.
+
+**The window.** `POST /browser/profiles/<id>/signin-window` (owner-only,
+held while an approval waits, never Private) closes the profile's headless
+Chrome (its Remote tabs end) and relaunches the same folder headed at
+`chrome://settings/syncSetup` on WSLg's Wayland socket, by absolute path
+(`WSLG_WAYLAND`; the daemon's service view of `/run/user` lacks WSLg's link,
+measured). Wayland, not X11: the owner types a password there and X11
+clients can read each other's keystrokes. The launch is `launch_args(...,
+headed=True)`: every curated switch kept (gate, no DNS, no QUIC, extensions
+off, muted, sandbox), `--headless` replaced by `--ozone-platform=wayland`;
+the environment gains only `WAYLAND_DISPLAY` and a private 0700
+`XDG_RUNTIME_DIR` (`home/run`). No downloads, no viewport override, no
+sound. The password store is chosen and observed as for any launch. The
+window's instance lives in `_windows`, never `_instances`: no page of it is
+adopted, so nothing streams, and no look, capture, drive or Jarvis
+navigation reaches it; `_instance` answers 409 `IN_WINDOW` for that profile
+and the window counts toward the three-profile cap. It ends when Chrome
+closes (the owner closed its last window), on `DELETE …/signin-window`, on
+forget/delete, at daemon stop, or after `SIGNIN_WINDOW_S` (20 min). HUD:
+Manage → "Sign in in a Chrome window" / "Close Chrome window", from
+`GET /browser` → `signin_windows` on the panel's 3 s refresh.
+
+**The gate check (every named-profile launch).** A managed account brings
+its organization's Chrome policy, and Chrome ranks policy above the command
+line: a `ProxySettings` policy could take Chrome around the SOCKS gate, and
+although `MAP * ~NOTFOUND` still stops names, an IP literal would go direct
+and open the LAN. So `_launch`, before any page is adopted, has a fresh
+about:blank page fetch `http://gate-check-<16 hex>.jarvis.invalid/` and waits
+up to `GATE_CHECK_S` (5 s) for the gate to see that exact name
+(`Gate.expect_check`; the gate refuses it, and records only armed names).
+Not seen (after one retry with a fresh name): Chrome closed, its processes
+stopped, 409 `GATE_BYPASSED`. Private is checked too (machine policy).
+Measured: the check passes on every real-Chrome suite; `--no-proxy-server`
+is refused. **Launch-time only**: policy arriving while Chrome runs is caught
+at the next launch (residual risks in the plan's review section; give a
+managed account its own profile).
+
+Every failure after Chrome starts in `_launch` (a refusal, an error, the
+caller's timeout cancelling it) closes that Chrome and stops its processes,
+so no Chrome, headless or a window, is left running untracked.
+
+Receipts: `tests/v2/browser_signin_window_check.py` (23; the 3 headed checks
+open real windows and need `JARVIS_TEST_HEADED=1`, run 2026-10-24 on WSLg),
+owner-only matrix in `browser_routes_check`, HUD `BrowserProfile.test.ts`.
+Six guard mutations each fail the suite (check always passing, window not
+refused, gate never recording, window pages adopted, forget leaving the
+window, a cancelled launch leaving Chrome). **Not verified:** the
+real managed-account sign-in, the profile dialog itself, and what the
+school's policy sets; the owner does that after install.

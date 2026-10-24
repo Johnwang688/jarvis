@@ -1,6 +1,6 @@
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { BrowserProfile, PASSWORD_REFRESH_MS, passwordLine, type PasswordSync, type ProfileSync } from "./BrowserProfile";
+import { BrowserProfile, PASSWORD_REFRESH_MS, WINDOW_OPEN, passwordLine, windowsOf, type PasswordSync, type ProfileSync } from "./BrowserProfile";
 const mocks=vi.hoisted(()=>({get:vi.fn(),write:vi.fn(),remove:vi.fn()}));
 vi.mock("../api",()=>({browserApi:mocks}));
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT=true;
@@ -44,7 +44,7 @@ it("uses the selected profile's own state over the global one (NIT 1)",()=>{
 
 describe("Manage panel",()=>{
   let root:Root;let host:HTMLDivElement;
-  beforeEach(()=>{host=document.createElement("div");document.body.appendChild(host);root=createRoot(host);mocks.get.mockReset();});
+  beforeEach(()=>{host=document.createElement("div");document.body.appendChild(host);root=createRoot(host);mocks.get.mockReset();mocks.write.mockReset();mocks.remove.mockReset();});
   afterEach(async()=>{await act(async()=>root.unmount());host.remove();vi.useRealTimers();});
   const control:any={profiles:[main],online:true,globalDrive:true,driveReady:()=>true,drivePreference:()=>false,profile:vi.fn(),see:vi.fn(),drive:vi.fn(),signin:vi.fn(),refresh:vi.fn()};
   const manage=()=>[...host.querySelectorAll("button")].find(b=>b.textContent==="Manage")!;
@@ -65,6 +65,43 @@ describe("Manage panel",()=>{
     await act(async()=>root.render(createElement(BrowserProfile,{pane:1,control,selected:main.id,see:false,blocked:false})));
     await act(async()=>manage().click());
     expect(line()!.textContent).toBe(full);
+  });
+  const button=(text:string)=>[...host.querySelectorAll("button")].find(b=>b.textContent===text);
+  const windowLine=()=>host.querySelector('[data-testid="browser-signin-window"]');
+  it("opens the sign-in window and offers to close it (B-LOGIN-W)",async()=>{
+    mocks.get.mockResolvedValue({sync:sync(),signin_windows:[]});
+    mocks.write.mockResolvedValue({profile:main.id,signin_window:true});
+    await act(async()=>root.render(createElement(BrowserProfile,{pane:1,control,selected:main.id,see:false,blocked:false})));
+    await act(async()=>manage().click());
+    expect(windowLine()).toBeNull();expect(button("Close Chrome window")).toBeUndefined();
+    await act(async()=>button("Sign in in a Chrome window")!.click());
+    expect(mocks.write).toHaveBeenCalledWith(`/profiles/${main.id}/signin-window`);
+    expect(windowLine()!.textContent).toBe(WINDOW_OPEN);
+    expect(button("Sign in to Chrome")!.disabled).toBe(true);
+    mocks.remove.mockResolvedValue({profile:main.id,signin_window:false});
+    await act(async()=>button("Close Chrome window")!.click());
+    expect(mocks.remove).toHaveBeenCalledWith(`/profiles/${main.id}/signin-window`);
+    expect(windowLine()).toBeNull();
+  });
+  it("shows a window the daemon reports, and the owner closing it, on the next read",async()=>{
+    vi.useFakeTimers();
+    mocks.get.mockResolvedValue({sync:sync(),signin_windows:[main.id]});
+    await act(async()=>root.render(createElement(BrowserProfile,{pane:1,control,selected:main.id,see:false,blocked:false})));
+    await act(async()=>manage().click());
+    expect(windowLine()!.textContent).toBe(WINDOW_OPEN);
+    mocks.get.mockResolvedValue({sync:sync(),signin_windows:[]});
+    await act(async()=>{vi.advanceTimersByTime(PASSWORD_REFRESH_MS);});
+    expect(windowLine()).toBeNull();
+    expect(button("Sign in in a Chrome window")).toBeDefined();
+  });
+  it("shows a refused window as the panel's error",async()=>{
+    mocks.get.mockResolvedValue({sync:sync(),signin_windows:[]});
+    mocks.write.mockRejectedValue(new Error("No desktop display (WSLg) is available for a Chrome window"));
+    await act(async()=>root.render(createElement(BrowserProfile,{pane:1,control,selected:main.id,see:false,blocked:false})));
+    await act(async()=>manage().click());
+    await act(async()=>button("Sign in in a Chrome window")!.click());
+    expect(host.querySelector(".err")!.textContent).toContain("No desktop display");
+    expect(windowLine()).toBeNull();
   });
   it("treats a malformed status as unknown",async()=>{
     mocks.get.mockResolvedValue({sync:{password_store:"basic",source:"launch_argument"}});
@@ -93,4 +130,10 @@ describe("Manage panel",()=>{
     await act(async()=>{vi.advanceTimersByTime(PASSWORD_REFRESH_MS*3);window.dispatchEvent(new Event("focus"));});
     expect(mocks.get).toHaveBeenCalledTimes(3);
   });
+});
+
+it("reads only profile ids from signin_windows",()=>{
+  expect(windowsOf({signin_windows:["p-12345678","private","../x",7,null]})).toEqual(["p-12345678"]);
+  expect(windowsOf({signin_windows:"p-12345678"})).toEqual([]);
+  expect(windowsOf(null)).toEqual([]);
 });

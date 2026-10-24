@@ -828,7 +828,10 @@ class BrowserStream(unittest.TestCase):
             for method, path, body in (("POST", "/browser/tabs/0123abcd/ticket", {}),
                                        ("GET", "/browser/downloads", None),
                                        ("POST", "/browser/tabs/0123abcd/activate", {}),
-                                       ("POST", "/browser/tabs/0123abcd/files", {"chooser": "x", "files": []})):
+                                       ("POST", "/browser/tabs/0123abcd/files", {"chooser": "x", "files": []}),
+                                       # B-LOGIN-W: the sign-in window is the owner's only.
+                                       ("POST", "/browser/profiles/p-12345678/signin-window", {}),
+                                       ("DELETE", "/browser/profiles/p-12345678/signin-window", None)):
                 with self.subTest(listener=listener, path=path):
                     self.assertEqual(self.ask(method, path, body, listener=listener, origin=origin)[0], 403)
         self.assertFalse(config.BROWSER_DIR.exists(), "nothing started Chrome or made its folder")
