@@ -2686,3 +2686,17 @@ field):
    blurs the HUD, a mouse-picked candidate is cancelled instead of committed.
 8. Optional: a dead key (´ then e gives é once); an approval card arriving
    mid-composition puts nothing in the page.
+
+## Sign-in identity: no harness tells (2026-10-23)
+
+Google's sign-in refused the Remote browser with "This browser or app may not be
+secure". Measured on the real launch: `navigator.webdriver` was **true**
+(`--remote-debugging-pipe` sets it) and the user agent said `HeadlessChrome`.
+`launch_args` now adds `--disable-blink-features=AutomationControlled` and
+`--user-agent=` built from the binary's own major version
+(`chrome_user_agent`, `Chrome/N.0.0.0`, computed once in `_ensure_started`; None
+keeps Chrome's string). Client-hint brands were already "Google Chrome".
+Receipts: `tests/v2/browser_signin_identity_check.py` (4 checks, real Chrome;
+fails on the old launch). **Not verified:** an actual Google sign-in; Google may
+also read CDP or other signals. If it still refuses, the next step is a headed
+Chrome for the sign-in route.

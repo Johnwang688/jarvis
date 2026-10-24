@@ -438,6 +438,9 @@ class Launch(unittest.IsolatedAsyncioTestCase):
         self.stopped = []
         guard = patch.object(H, "stop_pids", side_effect=lambda folder, *a, **k: self.stopped.append(folder) or 0)
         guard.start(); self.addCleanup(guard.stop)
+        # The user agent probe runs the real Chrome binary; the fake one here never does.
+        guard = patch.object(H, "chrome_user_agent", return_value=None)
+        guard.start(); self.addCleanup(guard.stop)
         # Any probe that reaches the real subprocess.run fails the test.
         guard = patch.object(subprocess, "run", side_effect=AssertionError("real gdbus run"))
         guard.start(); self.addCleanup(guard.stop)
