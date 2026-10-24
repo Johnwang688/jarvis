@@ -85,7 +85,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
-from functools import wraps
+from functools import lru_cache, wraps
 from .audio import InstanceAudio
 import json
 import logging
@@ -97,6 +97,7 @@ import secrets
 import shutil
 import signal
 import stat
+import subprocess
 import threading
 import time
 from concurrent.futures import TimeoutError as FuturesTimeout
@@ -256,6 +257,25 @@ def _profile_activity(method):
     return run
 
 
+@lru_cache(maxsize=1)
+def chrome_user_agent() -> str | None:
+    """The user agent a desktop Chrome of this version sends: headless Chrome
+    says `HeadlessChrome`, and Google refuses its sign-in as "This browser or
+    app may not be secure". Built from the binary's own major version (the
+    reduced `N.0.0.0` form real Chrome sends); None when it cannot be read, and
+    the launch then keeps Chrome's own string. Called once, at start."""
+    try:
+        out = subprocess.run([str(CHROME_PATH), "--version"], capture_output=True, text=True,
+                             timeout=10, env={"PATH": "/usr/bin:/bin"}).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    match = re.search(r"\b(\d+)\.\d+\.\d+\.\d+\b", out)
+    if match is None:
+        return None
+    return ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
+            f"Chrome/{match.group(1)}.0.0.0 Safari/537.36")
+
+
 def launch_args(user_data_dir: Path, gate_port: int, *, private: bool,
                 password_store: str = _stores.BASIC) -> list[str]:
     """Chrome's whole command line after the binary (Playwright adds nothing:
@@ -298,6 +318,10 @@ def launch_args(user_data_dir: Path, gate_port: int, *, private: bool,
         "--no-first-run",
         "--no-default-browser-check",
         "--disable-search-engine-choice-screen",
+        # Sign-in pages (Google's) read `navigator.webdriver`, which
+        # `--remote-debugging-pipe` sets, and the `HeadlessChrome` user agent.
+        # An owner signing in must look like Chrome, not like a test harness.
+        "--disable-blink-features=AutomationControlled",
         f"--password-store={_stores.KEYRING_STORE if keyring else _stores.BASIC}",
         # The screencast draws at the browser's own scale, never the
         # emulated one (`setDeviceMetricsOverride` changes the page's
@@ -312,6 +336,9 @@ def launch_args(user_data_dir: Path, gate_port: int, *, private: bool,
         "--blink-settings=primaryHoverType=2,availableHoverTypes=2,"
         "primaryPointerType=4,availablePointerTypes=4",
     ]
+    agent = chrome_user_agent()
+    if agent is not None:
+        args.append(f"--user-agent={agent}")
     if private:
         # Private panes are off-the-record contexts; nothing in them syncs.
         args.append("--disable-sync")
@@ -899,6 +926,7 @@ class BrowserHost:
             if not CHROME_PATH.exists():
                 raise BrowserRefused(409, "Google Chrome is not installed "
                                           "(sudo apt install google-chrome-stable)")
+            chrome_user_agent()  # runs the binary once, here, not on the event loop
             root = secure_dir(config.BROWSER_DIR)
             for name in ("profiles", "downloads", "home", "artifacts", "private"):
                 secure_dir(root / name)
