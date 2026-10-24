@@ -2460,6 +2460,8 @@ starts Chrome but `POST /browser/tabs` or the dedicated profile sign-in route.
 | `DELETE /browser/profiles/<id>` | — | `{profile, deleted: true}`; closes Chrome, wipes its data, then removes metadata |
 | `DELETE /browser/contexts/<ctx>` | — | `{ctx, closed: true}`; every tab and download in that Private context goes |
 | `POST /browser/profiles/<id>/signin` | `{}` | **201** `{tab_id, profile, ctx, loaded, error?}`; exact owner sign-in settings entry only |
+| `POST /browser/profiles/<id>/signin-window` | `{}` | **201** `{profile, signin_window: true}`; B-LOGIN-W: the profile's Remote tabs end and it opens in a headed Chrome on the desktop (WSLg, Wayland) at Chrome's sign-in settings; 409 while an approval waits, with no display, at the profile cap, if already open, or if its Chrome bypasses the gate. Never Private. `GET /browser` → `signin_windows` lists open ones; Remote opens of that profile answer 409 until it closes (owner closes it, `DELETE`, forget/delete, daemon stop, or 20 minutes) |
+| `DELETE /browser/profiles/<id>/signin-window` | — | `{profile, signin_window: false}` |
 
 - **`profile`**: omitted means the first profile (**Main**, which the first
   profile-list request or start creates only if metadata is absent), `"private"`, or a `p-<8 hex>` id from `GET /browser`

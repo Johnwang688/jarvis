@@ -259,6 +259,9 @@ class Gate:
         self._local_tasks: dict[asyncio.Task, int] = {}
         self._counts = Counter()
         self._refusals = Counter()
+        # Launch checks (`expect_check`): name -> Event, set when that exact
+        # name reaches the gate. Only pending check names are ever recorded.
+        self._checks: dict[str, threading.Event] = {}
         self.port: int | None = None
 
     # -- lifecycle ------------------------------------------------------------------
@@ -338,6 +341,20 @@ class Gate:
         except RuntimeError:
             pass
 
+    def expect_check(self, name: str) -> threading.Event:
+        """Arm a launch check: the returned Event is set when a CONNECT for
+        exactly `name` arrives, which is then refused (it never leaves).
+        A Chrome whose connections reach the gate sets it; one that a policy
+        or anything else took around the gate never does."""
+        event = threading.Event()
+        with self._lock:
+            self._checks[name.lower()] = event
+        return event
+
+    def forget_check(self, name: str) -> None:
+        with self._lock:
+            self._checks.pop(name.lower(), None)
+
     def stats(self) -> dict:
         with self._lock:
             return {"port": self.port, "connections": self._counts["connections"],
@@ -370,6 +387,12 @@ class Gate:
             if request is None:
                 return
             name, port = request
+            with self._lock:
+                check = self._checks.get(name.lower().rstrip("."))
+            if check is not None:
+                check.set()
+                await self._reply(writer, REP_NOT_ALLOWED)
+                return
             kind, literal = policy.host_kind(name)
             local = kind == "loopback_name" or (kind == "literal" and policy.address_class(literal) == "loopback")
             if local:

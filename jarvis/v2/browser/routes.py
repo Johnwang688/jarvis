@@ -24,6 +24,9 @@ refusal ever contains one.
     PATCH  /browser/profiles/<id>            {label} -> profile row
     DELETE /browser/profiles/<id>            closes and deletes only this profile
     POST   /browser/profiles/<id>/signin     {} -> 201 exact owner settings entry
+    POST   /browser/profiles/<id>/signin-window {} -> 201 {profile, signin_window: true}
+                                             (B-LOGIN-W: the profile in a headed Chrome on the desktop)
+    DELETE /browser/profiles/<id>/signin-window -> {profile, signin_window: false}
     DELETE /browser/contexts/<ctx>           closes a Private context and its data
 
 B-DIRECT-CAPTURE's (captures.py, direct_probe.py); neither ever receives pixels:
@@ -254,6 +257,12 @@ def route(handler, daemon, parts, query):
                 and method == "POST"):
             _object(handler._body(), ())
             return 201, host.signin(parts[2])
+        if len(parts) == 4 and parts[1] == "profiles" and parts[3] == "signin-window":
+            if method == "POST":
+                _object(handler._body(), ())
+                return 201, host.signin_window(parts[2])
+            if method == "DELETE":
+                return 200, host.close_signin_window(parts[2])
         # `owner=True` below is the owner's own navigation (this route is the
         # owner's only): it opens the URL's loopback port in the gate, as
         # nothing a page or an agent does ever can (MED 2 of PR #69's review).
