@@ -19,7 +19,8 @@ under a second, with `navigator.webdriver` false and no `Headless` user agent.
 
 ## Decisions
 
-1. **Owner-only route, one profile at a time.**
+1. **Owner-only route, one window per profile** (several profiles may each
+   have one, within the three-profile cap; each gets its own runtime folder).
    `POST /browser/profiles/<id>/signin-window {}` opens the window;
    `DELETE /browser/profiles/<id>/signin-window` closes it. Same guards as the
    existing `signin` route: the HUD listener and Origin, an approval card
@@ -72,8 +73,9 @@ to see that exact name (the gate refuses it; nothing leaves). Not seen: the
 Chrome is closed, its processes stopped, and the launch refused with 409
 "This profile's Chrome settings bypass Jarvis's network gate (an
 organization's proxy policy?); it was closed". The gate records only that a
-pending check name arrived, never other hosts. Private has no account and no
-policy and is not checked.
+pending check name arrived, never other hosts. Private is checked too (machine
+policy applies to it). One retry with a fresh name, so a gate at its
+connection limit does not refuse a launch.
 
 ## HUD
 
@@ -101,4 +103,32 @@ button. Errors show as the panel's other 409s do.
 ## Not verified by tests
 
 The real school sign-in, the managed-profile dialog itself, and what the
-school's policy sets. The owner does that once it is installed.
+school's policy sets. The owner does that once it is installed. Also
+unverified: whether the managed Continue converts this profile or creates a
+second Chrome profile (`Profile 1`) in the folder (that one would not be
+used by the Remote browser and keeps Chrome alive past the window).
+
+## Review (2026-10-24) and residual risks for the owner
+
+An independent review found no HIGH. Fixed: a cancelled or timed-out launch
+now always closes its Chrome; the window's close is heard from launch; the
+cap is checked before any tab ends; the check retries once; the window's
+environment strips DISPLAY/XAUTHORITY; per-profile runtime folders; fake
+tests for every way a window ends. **Open, the owner's call:**
+
+1. **The check is launch-time only.** Policy that arrives or changes while
+   Chrome runs (the managed sign-in inside the window; a cloud-policy
+   refresh, about every 3 h, for a long-lived headless Chrome) is caught at
+   that profile's next launch, not before. Options: a periodic re-check on a
+   hidden page; refuse on a `chrome://policy` denylist; structurally, a
+   network namespace where only the gate is reachable.
+2. **Policy outranks the other switches too.** A `WebRtcIPHandling` policy
+   would undo the WebRTC hold (UDP to the LAN with the HTTP check passing);
+   `ExtensionInstallForcelist` may load an organization's extensions (school
+   content filters see every URL) despite `--disable-extensions` (unverified
+   on Chrome 155); `RestoreOnStartup` pages open before adoption.
+   Recommendation meanwhile: **give the school account its own profile**,
+   so Main never carries the organization's policy.
+3. The headed window exposes ordinary Chrome UI to the owner (site
+   permissions, startup pages, flags, print-to-PDF, native file pickers)
+   whose choices persist into the profile. Owner-only, documented.

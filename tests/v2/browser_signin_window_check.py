@@ -117,9 +117,11 @@ class HeadedLaunch(unittest.IsolatedAsyncioTestCase):
         env = kwargs["env"]
         self.assertEqual(env["WAYLAND_DISPLAY"], "/x/wayland-0")
         self.assertNotIn("PULSE_SERVER", env)
+        self.assertNotIn("DISPLAY", env, "the window must not reach X11")
         run = Path(env["XDG_RUNTIME_DIR"])
-        self.assertEqual(run, root / "browser" / "home" / "run")
-        self.assertEqual(stat.S_IMODE(run.stat().st_mode), 0o700)
+        self.assertEqual(run, root / "browser" / "home" / "run" / profile)
+        for folder in (run, run.parent):
+            self.assertEqual(stat.S_IMODE(folder.stat().st_mode), 0o700)
         check.assert_awaited_once()
         # No page of the window is ever adopted: only Chrome's close is heard.
         self.assertEqual([c.args[0] for c in context.on.call_args_list], ["close"])
@@ -151,6 +153,119 @@ class HeadedLaunch(unittest.IsolatedAsyncioTestCase):
         context.close.assert_awaited()
         self.assertTrue(stopped.called)
         context.on.assert_not_called()
+
+    async def test_a_cancelled_launch_closes_its_chrome(self):
+        """The caller's timeout cancels `_launch` mid-check: the Chrome it
+        started must not be left running untracked (review MED 3)."""
+        temp_config(self)
+        host = H.BrowserHost()
+        host._gate = SimpleNamespace(port=19000)
+        context = SimpleNamespace(browser=SimpleNamespace(version="synthetic"), on=Mock(),
+                                  close=AsyncMock())
+        host._pw = SimpleNamespace(chromium=SimpleNamespace(
+            launch_persistent_context=AsyncMock(return_value=context)))
+        profile = host.list_profiles()[0]["id"]
+        started = asyncio.Event()
+
+        async def hang(self_, _context):
+            started.set()
+            await asyncio.sleep(60)
+        with patch.object(H.BrowserHost, "_check_gate", hang), \
+                patch.object(H, "stop_pids", return_value=0) as stopped:
+            task = asyncio.ensure_future(host._launch(profile, display="/x/wayland-0"))
+            await started.wait()
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+        context.close.assert_awaited()
+        self.assertTrue(stopped.called)
+
+
+def fake_window(profile):
+    return H._Instance(profile=profile, folder=Path("/nonexistent/" + profile),
+                       context=SimpleNamespace(close=AsyncMock()), browser=None)
+
+
+class WindowLifecycle(unittest.IsolatedAsyncioTestCase):
+    """Every way a window ends, with a fake Chrome (review LOW 8)."""
+
+    def setUp(self):
+        temp_config(self)
+        self.host = H.BrowserHost()
+        self.profile = self.host.list_profiles()[0]["id"]
+        guard = patch.object(H, "stop_pids", return_value=0)
+        self.stopped = guard.start()
+        self.addCleanup(guard.stop)
+
+    def put(self):
+        window = fake_window(self.profile)
+        self.host._windows[self.profile] = window
+        return window
+
+    def assert_ended(self, window):
+        self.assertNotIn(self.profile, self.host._windows)
+        window.context.close.assert_awaited()
+        self.assertTrue(self.stopped.called)
+        self.assertEqual(self.host.status()["signin_windows"], [])
+
+    async def test_delete_ends_it(self):
+        window = self.put()
+        window.idle = asyncio.ensure_future(asyncio.sleep(60))
+        await self.host._close_window_locked(self.profile)
+        self.assert_ended(window)
+        await asyncio.sleep(0)
+        self.assertTrue(window.idle is None)
+
+    async def test_a_stale_close_event_ends_nothing(self):
+        window = self.put()
+        self.host._window_gone(self.profile, fake_window(self.profile))
+        await asyncio.sleep(0.05)
+        self.assertIs(self.host._windows[self.profile], window)
+        self.host._window_gone(self.profile, window)
+        await asyncio.sleep(0.05)
+        self.assert_ended(window)
+
+    async def test_expiry_ends_it_without_cancelling_itself(self):
+        window = self.put()
+        with patch.object(H, "SIGNIN_WINDOW_S", 0.01):
+            window.idle = asyncio.ensure_future(self.host._window_expiry(self.profile, window))
+            await window.idle
+        self.assert_ended(window)
+
+    async def test_forget_and_delete_end_it_before_the_wipe(self):
+        for delete in (False, True):
+            with self.subTest(delete=delete):
+                if delete:
+                    self.profile = self.host.list_profiles()[0]["id"]
+                window = self.put()
+                order = []
+                window.context.close = AsyncMock(side_effect=lambda: order.append("closed"))
+                with patch.object(H.BrowserHost, "_wipe_profile", lambda s, p: order.append("wiped")):
+                    await self.host._manage_profile_async(self.profile, delete)
+                self.assertEqual(order, ["closed", "wiped"])
+                self.assertNotIn(self.profile, self.host._windows)
+
+    async def test_shutdown_ends_it(self):
+        window = self.put()
+        await self.host._shutdown()
+        self.assert_ended(window)
+
+    async def test_the_cap_refuses_before_any_tab_ends(self):
+        for n in range(3):
+            self.host._instances[f"p-0000000{n}"] = SimpleNamespace()
+        with patch.object(H.BrowserHost, "_close_instance", AsyncMock()) as closed:
+            with self.assertRaises(H.BrowserRefused):
+                await self.host._open_window(self.profile, "/x/wayland-0")
+        closed.assert_not_called()
+
+    async def test_a_window_closed_before_it_was_ready_is_refused(self):
+        window = fake_window(self.profile)
+        window.ended = True
+        with patch.object(H.BrowserHost, "_launch", AsyncMock(return_value=window)):
+            with self.assertRaises(H.BrowserRefused) as caught:
+                await self.host._open_window(self.profile, "/x/wayland-0")
+        self.assertEqual(str(caught.exception), H.WINDOW_ENDED)
+        self.assert_ended(window)
 
 
 class GateRecord(unittest.TestCase):

@@ -2738,14 +2738,22 @@ and open the LAN. So `_launch`, before any page is adopted, has a fresh
 about:blank page fetch `http://gate-check-<16 hex>.jarvis.invalid/` and waits
 up to `GATE_CHECK_S` (5 s) for the gate to see that exact name
 (`Gate.expect_check`; the gate refuses it, and records only armed names).
-Not seen: Chrome closed, its processes stopped, 409 `GATE_BYPASSED`. Private
-has no account or policy and is not checked. Measured: the check passes on
-every real-Chrome suite; `--no-proxy-server` is refused.
+Not seen (after one retry with a fresh name): Chrome closed, its processes
+stopped, 409 `GATE_BYPASSED`. Private is checked too (machine policy).
+Measured: the check passes on every real-Chrome suite; `--no-proxy-server`
+is refused. **Launch-time only**: policy arriving while Chrome runs is caught
+at the next launch (residual risks in the plan's review section; give a
+managed account its own profile).
 
-Receipts: `tests/v2/browser_signin_window_check.py` (12; the 3 headed checks
+Every failure after Chrome starts in `_launch` (a refusal, an error, the
+caller's timeout cancelling it) closes that Chrome and stops its processes,
+so no Chrome, headless or a window, is left running untracked.
+
+Receipts: `tests/v2/browser_signin_window_check.py` (20; the 3 headed checks
 open real windows and need `JARVIS_TEST_HEADED=1`, run 2026-10-24 on WSLg),
 owner-only matrix in `browser_routes_check`, HUD `BrowserProfile.test.ts`.
-Four guard mutations each fail the suite (check always passing, window not
-refused, gate never recording, window pages adopted). **Not verified:** the
+Six guard mutations each fail the suite (check always passing, window not
+refused, gate never recording, window pages adopted, forget leaving the
+window, a cancelled launch leaving Chrome). **Not verified:** the
 real managed-account sign-in, the profile dialog itself, and what the
 school's policy sets; the owner does that after install.

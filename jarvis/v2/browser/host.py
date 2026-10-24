@@ -187,6 +187,7 @@ IN_WINDOW = "This profile is open in a Chrome window for sign-in; close that win
 # proxy around it (`_check_gate`).
 GATE_CHECK_S = 5.0
 GATE_CHECK_HOST = "gate-check-{}.jarvis.invalid"
+WINDOW_ENDED = "The Chrome window closed before it was ready"
 GATE_BYPASSED = ("This profile's Chrome settings bypass Jarvis's network gate "
                  "(an organization's proxy policy?); it was closed")
 PROFILES_CAP = 64 * 1024
@@ -707,6 +708,7 @@ class _Instance:
     # `basic` or `unverified`; Private is `basic` by its flag and no bus):
     # what `/status` says (`password_store.py`).
     password_store: str = "basic"
+    ended: bool = False                 # a sign-in window's Chrome has closed (B-LOGIN-W)
 
 
 @dataclass
@@ -809,6 +811,7 @@ class BrowserHost:
         # B-LOGIN-W: profiles open in the owner's sign-in window. Never in
         # `_instances`, so no tab, stream, look or drive can reach them.
         self._windows: dict[str, _Instance] = {}
+        self._window_tasks: set = set()
         self._closing_contexts: set[str] = set()
         self._retiring_contexts: dict[str, asyncio.Task] = {}
         self._download_tasks: dict[asyncio.Task, _Tab] = {}
@@ -1342,8 +1345,10 @@ class BrowserHost:
         if headed:
             # Only the display: the absolute socket and a runtime folder of
             # our own. No DISPLAY (X11), and never sound.
+            for name in ("DISPLAY", "XAUTHORITY"):
+                env.pop(name, None)
             env["WAYLAND_DISPLAY"] = display
-            env["XDG_RUNTIME_DIR"] = str(secure_dir(home / "run"))
+            env["XDG_RUNTIME_DIR"] = str(secure_dir(secure_dir(home / "run") / profile))
             launch_audio = _quiet_launch(args, env, False)
             shape = {"no_viewport": True, "accept_downloads": False}
         else:
@@ -1363,48 +1368,65 @@ class BrowserHost:
             if private:
                 _remove_tree(folder)
             raise BrowserRefused(409, "Chrome could not start") from None
-        # What Chrome actually encrypts with, observed (`password_store.py`):
-        # Chrome falls back to basic silently when it cannot reach its key.
-        observed = _stores.BASIC
-        if not private:
-            observed = await self._observe_store(context, folder)
-            if choice.store == _stores.KEYRING_STORE and observed != _stores.KEYRING_STORE:
-                after = await loop.run_in_executor(None, self.keyring.state)
-                LOG.warning("Browser profile Chrome did not use the keyring (observed %s, "
-                            "keyring %s); Chrome closed", observed, after)
-                try:
-                    await asyncio.wait_for(context.close(), CLOSE_TIMEOUT_S)
-                except Exception:  # noqa: BLE001 - the PIDs are stopped next either way
-                    pass
-                await loop.run_in_executor(None, stop_pids, folder)
-                raise BrowserRefused(409, _stores.CHANGED_MESSAGE if after != _stores.UNLOCKED
-                                     else _stores.FELL_BACK_MESSAGE if observed == _stores.BASIC
-                                     else _stores.UNVERIFIED_MESSAGE)
-        # A named profile can hold an organization's Chrome policy, which
-        # outranks the command line: prove its connections still reach the
-        # gate before any page of it is adopted (`_check_gate`).
-        if not private and not await self._check_gate(context):
-            LOG.warning("Browser profile Chrome bypassed the network gate; Chrome closed")
+        # Everything from here to the return either hands back a registered
+        # Chrome or closes this one: a refusal, an error, or the caller's
+        # timeout cancelling us (review of B-LOGIN-W, MED 3) never leaves a
+        # Chrome running untracked — for a window, one on the desktop.
+        ended = []      # Chrome's `close`, heard from the start (LOW 5)
+        box: list = []
+
+        def gone(_context):
+            ended.append(True)
+            if box:
+                box[0].ended = True
+                self._window_gone(profile, box[0])
+        if headed:
+            context.on("close", gone)
+        try:
+            # What Chrome actually encrypts with, observed (`password_store.py`):
+            # Chrome falls back to basic silently when it cannot reach its key.
+            observed = _stores.BASIC
+            if not private:
+                observed = await self._observe_store(context, folder)
+                if choice.store == _stores.KEYRING_STORE and observed != _stores.KEYRING_STORE:
+                    after = await loop.run_in_executor(None, self.keyring.state)
+                    LOG.warning("Browser profile Chrome did not use the keyring (observed %s, "
+                                "keyring %s); Chrome closed", observed, after)
+                    raise BrowserRefused(409, _stores.CHANGED_MESSAGE if after != _stores.UNLOCKED
+                                         else _stores.FELL_BACK_MESSAGE if observed == _stores.BASIC
+                                         else _stores.UNVERIFIED_MESSAGE)
+            # An organization's (or the machine's) Chrome policy outranks the
+            # command line: prove this Chrome's connections still reach the
+            # gate before any page of it is adopted (`_check_gate`).
+            if not await self._check_gate(context):
+                if ended:
+                    raise BrowserRefused(409, WINDOW_ENDED)
+                LOG.warning("Browser Chrome bypassed the network gate; Chrome closed")
+                raise BrowserRefused(409, GATE_BYPASSED)
+            if observed != _stores.KEYRING_STORE:
+                LOG.info("Browser %s Chrome uses the basic password store (unprotected; observed %s)",
+                         "private" if private else "profile", observed)
+            self.timings["launch_s"] = round(time.monotonic() - started, 3)
+            browser = context.browser
+            instance = _Instance(profile=profile, folder=folder, context=context, browser=browser,
+                                 version=getattr(browser, "version", "") or "",
+                                 audio=InstanceAudio(launch_audio.applied),
+                                 password_store=observed)
+        except BaseException:
             try:
                 await asyncio.wait_for(context.close(), CLOSE_TIMEOUT_S)
-            except Exception:  # noqa: BLE001 - the PIDs are stopped next either way
+            except BaseException:  # noqa: BLE001 - the PIDs are stopped next either way
                 pass
             await loop.run_in_executor(None, stop_pids, folder)
-            raise BrowserRefused(409, GATE_BYPASSED)
-        if observed != _stores.KEYRING_STORE:
-            LOG.info("Browser %s Chrome uses the basic password store (unprotected; observed %s)",
-                     "private" if private else "profile", observed)
-        self.timings["launch_s"] = round(time.monotonic() - started, 3)
-        browser = context.browser
-        instance = _Instance(profile=profile, folder=folder, context=context, browser=browser,
-                             version=getattr(browser, "version", "") or "",
-                             audio=InstanceAudio(launch_audio.applied),
-                             password_store=observed)
+            if private:
+                _remove_tree(folder)
+            raise
         instance.audio.on_settled(self._sound.wake)
         if headed:
             # The owner's window: no page in it is ever a Jarvis tab. Chrome
-            # ends when the owner closes its last window.
-            context.on("close", lambda _context: self._window_gone(profile, instance))
+            # ends when the owner closes its last window (`gone`).
+            box.append(instance)
+            instance.ended = bool(ended)
             LOG.info("Browser opened a Chrome window for sign-in")
             return instance
         # A page Jarvis is creating (`_open_page_locked`) arrives here first,
@@ -1418,7 +1440,14 @@ class BrowserHost:
         fetches a never-resolving name armed in the gate (which refuses it,
         so nothing leaves), and the gate must see exactly that name within
         GATE_CHECK_S. The page is about:blank, so no history is written.
-        Never raises: any failure is False."""
+        Never raises: any failure is False. One retry, with a fresh name, so
+        a gate briefly at its connection limit does not refuse a launch."""
+        for _attempt in range(2):
+            if await self._check_gate_once(context):
+                return True
+        return False
+
+    async def _check_gate_once(self, context) -> bool:
         name = GATE_CHECK_HOST.format(secrets.token_hex(8))
         seen = None
         page = None
@@ -2282,8 +2311,11 @@ class BrowserHost:
         if display is None:
             raise BrowserRefused(409, NO_DISPLAY)
         self._ensure_started()
+        # Above the worst case (close, launch, store, two gate checks); a
+        # timeout still closes the Chrome (`_launch`).
         return self._call(self._open_window(profile, display),
-                          LAUNCH_TIMEOUT_S + CLOSE_TIMEOUT_S + STORE_OBSERVE_S + GATE_CHECK_S + 20)
+                          LAUNCH_TIMEOUT_S + 3 * CLOSE_TIMEOUT_S + 2 * STORE_OBSERVE_S
+                          + 2 * 4 * GATE_CHECK_S + 20)
 
     def close_signin_window(self, profile) -> dict:
         self._profiles.require(profile)
@@ -2292,13 +2324,19 @@ class BrowserHost:
         return {"profile": profile, "signin_window": False}
 
     async def _open_window(self, profile: str, display: str) -> dict:
-        self._sound.clear(profile)
-        self._sound.restarts.cancel_profile(profile)
         async with self._launching.setdefault(profile, asyncio.Lock()):
             self._refuse_if_held()
             self._profiles.require(profile)
             if profile in self._windows:
                 raise BrowserRefused(409, "This profile is already open in a Chrome window")
+            # The cap before anything ends: this profile's own Chrome is
+            # replaced, every other one counts (LOW 6).
+            others = (set(self._instances) | set(self._closing_instances) | self._launch_reserved
+                      | set(self._windows)) - {PRIVATE, profile}
+            if len(others) >= PROFILE_INSTANCES_MAX:
+                raise BrowserRefused(409, "three profiles are already open; close one first")
+            self._sound.clear(profile)
+            self._sound.restarts.cancel_profile(profile)
             # One Chrome per profile folder: its headless one goes first.
             await self._close_instance(profile)
             if self._profiles_open() >= PROFILE_INSTANCES_MAX:
@@ -2310,6 +2348,10 @@ class BrowserHost:
                 self._launch_reserved.discard(profile)
             self._windows[profile] = instance
             instance.idle = asyncio.create_task(self._window_expiry(profile, instance))
+            if instance.ended:
+                # Closed between its launch and here: `gone` found nothing to end.
+                await self._close_window(profile, instance)
+                raise BrowserRefused(409, WINDOW_ENDED)
             self._publish_snapshot()
             return {"profile": profile, "signin_window": True}
 
@@ -2324,7 +2366,9 @@ class BrowserHost:
     def _window_gone(self, profile: str, instance: _Instance) -> None:
         """Chrome's `close`: the owner closed the window (or Chrome ended)."""
         if self._windows.get(profile) is instance and not instance.closing:
-            asyncio.ensure_future(self._quietly(self._close_window_locked(profile, instance)))
+            task = asyncio.ensure_future(self._quietly(self._close_window_locked(profile, instance)))
+            self._window_tasks.add(task)
+            task.add_done_callback(self._window_tasks.discard)
 
     async def _close_window_locked(self, profile: str, expected: _Instance | None = None) -> None:
         async with self._launching.setdefault(profile, asyncio.Lock()):
