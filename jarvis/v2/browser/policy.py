@@ -221,7 +221,7 @@ def address_class(ip) -> str:
 def judge_port(port: int, *, refused: frozenset[int], own: int | None = None) -> str | None:
     """The refusal class for a destination port alone, before any name is
     resolved, or None. Jarvis's ports are refused on every address: the
-    daemon binds loopback only, and a public site on 8402–8406 is not worth
+    daemon binds loopback only, and a public site on 8402–8408 is not worth
     a rule with an exception in it."""
     if not isinstance(port, int) or port <= 0 or port > 65535:
         return BAD_REQUEST

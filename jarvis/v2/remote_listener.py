@@ -310,6 +310,17 @@ def _mime(name: str) -> str:
 # -- the listener --------------------------------------------------------------------
 
 
+def _header(headers, name: str) -> list[str] | None:
+    """Every value of the header `name`, or None when the request carries no
+    parsed headers at all: an HTTP/0.9 request line (`GET /m/`) leaves
+    http.server's `headers` a plain dict, with no `get_all` (review of PR
+    #304). None is never the trusted Host or Origin, so it is refused."""
+    get_all = getattr(headers, "get_all", None)
+    if not callable(get_all):
+        return None
+    return get_all(name)
+
+
 def handler_class(host: str):
     """The remote listener's handler, for exactly one trusted `host`."""
     origin = "https://" + host
@@ -363,9 +374,9 @@ def handler_class(host: str):
         def _dispatch(self):
             self.close_connection = True
             try:
-                if self.headers.get_all("Host") != [host]:
+                if _header(self.headers, "Host") != [host]:
                     return self._error(400, "untrusted host")
-                if self.command not in ("GET", "HEAD") and self.headers.get_all("Origin") != [origin]:
+                if self.command not in ("GET", "HEAD") and _header(self.headers, "Origin") != [origin]:
                     return self._error(403, "cross-origin request refused")
                 path = self.path.split("?", 1)[0].split("#", 1)[0]
                 if not path.startswith(PREFIX):

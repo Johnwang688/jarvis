@@ -1,6 +1,7 @@
 /// <reference types="vitest" />
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
+import { fileURLToPath } from "node:url";
 
 // The daemon serves hud/dist from `/` on FACE_PORT 8402 and its assets from
 // `/assets/*` (docs/hud-api.md, Static), so the base stays absolute.
@@ -43,8 +44,8 @@ export default defineConfig({
     chunkSizeWarningLimit: 6144,
     rollupOptions: {
       input: {
-        index: decodeURIComponent(new URL("./index.html", import.meta.url).pathname),
-        mobile: decodeURIComponent(new URL("./" + PHONE_PAGE, import.meta.url).pathname),
+        index: fileURLToPath(new URL("./index.html", import.meta.url)),
+        mobile: fileURLToPath(new URL("./" + PHONE_PAGE, import.meta.url)),
       },
     },
     // Vite's manifest of every entry's files: the remote listener serves only

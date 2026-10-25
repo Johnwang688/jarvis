@@ -423,7 +423,7 @@ class Headers(Remote):
         self.assertEqual(status, 403)
         self.check(headers)
         # A request line http.server cannot parse still gets every header.
-        for line in (b"GARBAGE\r\n\r\n", b"GET /m/ HTTP/9.9\r\nHost: " + HOST.encode() + b"\r\n\r\n",
+        for line in (b"GARBAGE\r\n\r\n", b"GET /m/\r\n\r\n", b"GET /m/ HTTP/9.9\r\nHost: " + HOST.encode() + b"\r\n\r\n",
                      b"BREW /m/ HTTP/1.1\r\nHost: " + HOST.encode() + b"\r\n\r\n"):
             answer = send_bytes(self.port, line)
             head = answer.split(b"\r\n\r\n", 1)[0].decode("latin-1")
@@ -431,6 +431,12 @@ class Headers(Remote):
             self.assertIn("Content-Security-Policy: " + remote_listener.REMOTE_POLICY, head)
             self.assertIn("X-Frame-Options: DENY", head)
             self.assertIn("X-Content-Type-Options: nosniff", head)
+        # An HTTP/0.9 request line carries no Host: 400, never a 500 or a
+        # warning (review of PR #304).
+        with self.assertNoLogs("jarvis.v2.remote_listener", "WARNING"):
+            answer = send_bytes(self.port, b"GET /m/\r\n\r\n")
+        self.assertRegex(answer.split(b"\r\n", 1)[0].decode("latin-1"), r"^HTTP/1\.\d 400 ")
+        self.assertNotIn(b"not paired", answer)
         print("ok  headers: the CSP (frame-ancestors 'none'), XFO, nosniff, no-referrer and "
               "Cache-Control on every response, errors and malformed requests included")
 
@@ -579,6 +585,26 @@ class RouteTables(Remote):
             # HUD's strict Host refusing, before any route.
             status, _, _ = raw(port, "GET", "/m/", [("Host", HOST)])
             self.assertEqual(status, 403)
+        # The daemon's own `/m` guard, not the route modules' absence of a
+        # match: with every route module answering anything, `/m/*` is still
+        # 404 there (review of PR #304; deleting the guard fails this).
+        from jarvis.v2 import bridge, hud_api
+        leak = lambda *a, **k: (200, {"leak": 1})  # noqa: E731
+        with patch.object(hud_api, "route", leak), patch.object(hud_api, "preview_route", leak), \
+                patch.object(bridge, "route", leak):
+            status, _, body = raw(self.d.port, "GET", "/status", [("Host", f"127.0.0.1:{self.d.port}")])
+            self.assertEqual((status, json.loads(body)), (200, {"leak": 1}), "the catch-all is live")
+            for port in (self.d.port, self.d.face_port, self.d.workshop_port):
+                host = f"127.0.0.1:{port}"
+                for path in phone:
+                    for method in METHODS:
+                        headers = [("Host", host)]
+                        if method in WRITES:
+                            headers += [("Origin", f"http://{host}"), ("Content-Type", "application/json")]
+                        status, _, body = raw(port, method, path, headers,
+                                              body=b"{}" if method in ("POST", "PUT", "PATCH") else None)
+                        self.assertEqual(status, 404, ("guard", port, method, path, body[:80]))
+                        self.assertNotIn(b"leak", body)
         # Proof the sweep could see a page: the HUD listener does serve its own.
         status, _, body = raw(self.d.face_port, "GET", "/", [("Host", f"127.0.0.1:{self.d.face_port}")])
         self.assertEqual(status, 200)

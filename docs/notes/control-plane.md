@@ -117,6 +117,11 @@ closes the routes a v1 agent's browser and any Origin-less API client had.
 
 <!-- claude-source:000235-000337:end -->
 
+**Current (2026-10-25, phone P-1):** `config.control_ports()` is now five
+ports at their defaults: 8402, 8404, 8405, 8406 and **8408**, the phone's
+remote listener (`config.REMOTE_PORT`), configured and default; still not
+8403. The preserved text above predates it.
+
 ## Original CLAUDE.md lines 866–938
 
 <!-- claude-source:000866-000938:begin -->

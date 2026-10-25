@@ -209,7 +209,10 @@ who the owner is off the box.
    `https://<machine>.<tailnet>.ts.net`;
 5. for an Allow, a fresh assertion as in PH-4.
 
-A request that fails any of these gets a 401 with no body detail. The login
+A request that fails any of these is refused with no body detail: a `Host`
+other than the ts.net name gets 400 (item 2), a write without the exact
+`Origin` gets 403 (item 4), and a `/m/api` request without a valid
+session gets 401 (item 3; as built in P-1, every `/m/api` request). The login
 page and the static bundle are the only things served without a session.
 
 ### 4.1 "The network stays secured": the conditions for full authority (O-3)
@@ -322,7 +325,7 @@ path, each step the owner's call:
 | Credentials never leave the daemon | VAPID private key and WebAuthn data are protected paths; push payloads are content-free; logs carry status codes only |
 | Nothing fetched speaks for the owner | the phone renders transcripts as the HUD does: scrubbed, untrusted, `textContent` for cards |
 | Desk authority is the HUD's | `via="phone"`, desk false |
-| Unknown or malformed fails closed | bad session, Origin, Host or assertion → 401; an expired challenge → 409 and a fresh one |
+| Unknown or malformed fails closed | bad Host → 400, bad Origin → 403, bad session or assertion → 401; an expired challenge → 409 and a fresh one |
 | Network exposure | loopback bind; tailnet only via `tailscale serve`; no Funnel; checked continuously (§4.1), and full authority drops to Discord level when any check fails |
 
 ## 10. Work packages
