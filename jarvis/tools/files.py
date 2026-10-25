@@ -120,6 +120,11 @@ SELF_PROTECTED = frozenset(
         # HUD editor too, so the owner changes them in a worktree, not there.
         "jarvis/v2/permissions.py",
         "jarvis/v2/merge_gate.py",
+        # The owner inbox (design 2026-10-24, §9): it decides what the owner
+        # sees as waiting and routes each answer to its source's own
+        # function. An agent that could edit it could hide a card or answer
+        # one.
+        "jarvis/v2/inbox.py",
     }
 )
 

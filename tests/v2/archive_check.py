@@ -770,6 +770,51 @@ class OwnerOnly(Base):
             for needle in self.FORBIDDEN_SOURCE:
                 self.assertNotIn(needle, text, f"{module.__name__} names {needle}")
 
+    # The owner inbox (inbox design IN-2, §8): the same rule, extended. No
+    # tool, MCP catalog entry or session tool names it, and nothing a tool
+    # runs names its routes or the module behind them.
+    INBOX_NAME = re.compile(r"inbox", re.I)
+    # The route as a URL ("/inbox", "/inbox/", "/inbox?"), never the file's
+    # own path: files.py names "jarvis/v2/inbox.py" in SELF_PROTECTED.
+    INBOX_SOURCE = ('/inbox"', "/inbox'", "/inbox/", "/inbox?", "jarvis.v2.inbox",
+                    "from .inbox", "from . import inbox", "from .. import inbox", "import inbox",
+                    "inbox.answer", "inbox.rows", "inbox.route", "daemon.inbox", "_inbox.")
+
+    def test_no_tool_reaches_the_inbox(self):
+        from jarvis import tools
+        from jarvis.v2 import bridge, chat_relay, mcp, mcp_catalog, session_tools
+        from jarvis.v2.providers import fastpath
+        import jarvis.v2.tools as v2tools
+        v2_names = {name for name, entry in tools.REGISTRY.items()
+                    if getattr(getattr(entry, "func", None), "__module__", "").startswith("jarvis.v2.tools")}
+        reachable = (set(fastpath.FAST_TOOLS) | set(mcp.MCP_TOOLS) | set(mcp_catalog.MCP_TOOLS)
+                     | set(session_tools.SESSION_TOOLS) | v2_names)
+        self.assertTrue({"terminal_read", "chat_send", "chat_git_push", "task_propose"} <= reachable,
+                        reachable)
+        for name in sorted(reachable):
+            self.assertIsNone(self.INBOX_NAME.search(name), name)
+        sources = [v2tools, mcp, mcp_catalog, session_tools, bridge, chat_relay, fastpath]
+        for name in reachable:
+            func = getattr(tools.REGISTRY.get(name), "func", None)
+            if func is not None:
+                sources.append(inspect.getmodule(func))
+        from jarvis.v2.discord import gateway
+        sources.append(gateway)                       # Discord answers in-process, never here
+        for module in {m for m in sources if m is not None}:
+            text = inspect.getsource(module)
+            for needle in self.INBOX_SOURCE:
+                self.assertNotIn(needle, text, f"{module.__name__} names {needle}")
+
+    def test_the_inbox_routes_refuse_every_client_but_the_hud(self):
+        for method, path, body in (("GET", "/inbox", None),
+                                   ("POST", "/inbox/appr:x/answer", {"decision": "allow"}),
+                                   ("POST", "/inbox/nothing", {})):
+            with self.subTest(path=path):
+                self.request(method, path, body, 403)
+                self.request(method, path, body, 403, port=self.daemon.face_port)
+                self.request(method, path, body, 403, origin=f"http://127.0.0.1:{self.daemon.port}")
+        self.assertEqual(self.owner("GET", "/inbox"), [])
+
     def test_the_routes_refuse_every_client_but_the_hud(self):
         thread = self.chat()
         token = self.impact()["token"]

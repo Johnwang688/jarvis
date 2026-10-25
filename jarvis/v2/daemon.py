@@ -426,6 +426,11 @@ class _Session:
     owner_stopped: bool = False
     steered: list = field(default_factory=list)
     questions: set = field(default_factory=set)
+    # What each open question said ({text, options, asked_at}), for the
+    # owner inbox's row (inbox.py). `questions` stays the one truth for which
+    # are open: an entry here whose id has left it is never shown, and is
+    # pruned the next time a question is asked.
+    question_detail: dict = field(default_factory=dict, repr=False)
     # The turns the owner stopped, newest last: a steer still in the
     # provider's hands when Stop landed is judged by the turn it was aimed at,
     # even after a later turn has started (Bugbot on PR #22).
@@ -484,6 +489,12 @@ class Daemon:
         from .activity import Activity
         self.activity = Activity(stores, self.bus.publish)
         self.bus.observe(self.activity.observe)
+        # The owner inbox (inbox.py): a projection over the broker, the
+        # sessions and the task store. Its observer only publishes
+        # `inbox_changed` ({ids, reason}) after the source events it reads.
+        from .inbox import Inbox
+        self.inbox = Inbox(self)
+        self.bus.observe(self.inbox.observe)
         # The daemon owns the broker (design §6 layer 5). Its two callbacks
         # publish on the same bus every surface already reads, so a HUD, a
         # Discord thread and the escape hatch all learn about a pending
@@ -2174,7 +2185,12 @@ class Daemon:
             if event.kind == EventKind.QUESTION and (event.data or {}).get("req_id"):
                 # The turn now waits on the owner: a message sent meanwhile
                 # queues rather than steers (`_waiting_on_owner`).
-                session.questions.add(str(event.data["req_id"]))
+                req_id = str(event.data["req_id"])
+                session.questions.add(req_id)
+                session.question_detail = {
+                    **{k: v for k, v in session.question_detail.items() if k in session.questions},
+                    req_id: {"text": event.data.get("text"), "options": event.data.get("options"),
+                             "asked_at": record["at"]}}
             if event.kind == EventKind.USAGE:
                 # Which model answered, per turn, in the durable record: a
                 # chat thread can change model mid-conversation now (A1, A7).
@@ -3034,6 +3050,11 @@ def _handler(daemon):
             if mounted is not None:
                 return mounted
             mounted = hud_api.route(self, daemon, parts, query)
+            if mounted is not None:
+                return mounted
+            # The owner inbox: owner-only on every path (inbox.route).
+            from . import inbox as _inbox
+            mounted = _inbox.route(self, daemon, parts, query)
             if mounted is not None:
                 return mounted
             if parts == ["route"] and method in ("GET", "POST"):
