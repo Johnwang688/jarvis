@@ -807,6 +807,73 @@ def brace_glob_checks():
             config.HUD_DIR, config.HUD_DIST = saved
 
 
+def brace_glob_broad_checks():
+    """`rules_check.BROAD_CASES` through v2's permit (review of PR #310):
+    every "deny" line refused at layer 1 and never asked, every "ask" line
+    put to the owner (or refused), never let through unasked; the controls
+    touch no protected state. And a write through a folder too large to
+    list to the end, holding a link into the gate's folder, is asked."""
+    import pwd
+    import sys as _sys
+
+    _sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    import rules_check
+    from jarvis import protected_state as ps
+    from jarvis.v2.model import PermissionProfile as P
+    from jarvis.v2.permissions import build_permit, denied_command
+    from jarvis.v2.provider import Decision
+
+    real = pwd.getpwnam
+    with Sandbox() as box:
+        gate = config.ALLOWLIST_PATH.parent
+        config.ALLOWLIST_PATH.write_text("[]")
+        (gate / "sub").mkdir()
+        link = box.home / "sub-link"
+        link.symlink_to(gate / "sub", target_is_directory=True)
+        project = box.root / "project"
+        (project / "src").mkdir(parents=True)
+        pwd.getpwnam = lambda name: (type("Pw", (), {"pw_dir": str(box.home)})()
+                                     if name == "someone" else real(name))
+        try:
+            counts = {"deny": 0, "ask": 0, "same": 0}
+            for kind, line, expected in rules_check.broad_case_lines(config.ALLOWLIST_PATH, link):
+                label = f"[{kind}] {line[:100]}"
+                brief = brief_for(P.AUTO, cwd=project)
+                owner = Asker(Decision.ALLOW)
+                got = build_permit(context(brief), owner)(*bash(line), brief)
+                layer = box.decisions[-1]["layer"]
+                if expected == "deny":
+                    eq(got, Decision.DENY, f"layer 1 refuses {label}")
+                    eq(len(owner.seen), 0, f"and never asks: {label}")
+                    ok(denied_command(line, str(project)) is not None, f"denied_command: {label}")
+                elif expected == "ask":
+                    ok(layer == "deny" or (layer == "always-ask" and len(owner.seen) == 1),
+                       f"asked or refused, never let through: {label} ({layer})")
+                else:
+                    eq(ps.command_touch(line, str(project)), None, f"a control: {label}")
+                counts[expected] += 1
+            # The crowd: more entries than one glob reads, a link into the gate.
+            crowd = box.root / "crowd"
+            crowd.mkdir()
+            for i in range(ps._GLOB_FS_ENTRIES + 200):
+                (crowd / f"f{i:05d}").touch()
+            (crowd / "zzzz").symlink_to(gate, target_is_directory=True)
+            ps._WALKS.clear()
+            for line in (f"cp /tmp/x {crowd}/*/allowlist.json",
+                         f"cp /tmp/x {crowd}/z*/allowlist.json"):
+                for profile in (P.AUTO, P.ASK):
+                    brief = brief_for(profile, cwd=project)
+                    owner = Asker(Decision.ALLOW)
+                    build_permit(context(brief), owner)(*bash(line), brief)
+                    eq(box.decisions[-1]["layer"], "always-ask",
+                       f"{profile.value}: a write through a folder too large to read is asked")
+                    eq(len(owner.seen), 1, f"{profile.value}: and the owner is asked: {line}")
+            print(f"  brace/glob broad: {counts['deny']} refused, {counts['ask']} asked, "
+                  f"{counts['same']} controls; the crowd asked")
+        finally:
+            pwd.getpwnam = real
+
+
 # --------------------------------------------------------------------------
 # 4. layer 4 is human-backed only
 
@@ -3857,6 +3924,7 @@ def relay_provenance_checks():
 
 def main():
     for section in (matrix_checks, always_ask_checks, file_deny_checks, brace_glob_checks,
+                    brace_glob_broad_checks,
                     human_backed_checks, log_checks, approvals_checks, hud_build_deny_checks,
                     env_file_checks,
                     installed_hud_deny_checks, daemon_and_rebuild_ops_checks, review_48_checks,

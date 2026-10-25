@@ -2836,60 +2836,84 @@ word naming no protected file. Globs had the same shape of gap:
 allowlist, the phone's passkeys, the inbox's records or the HUD tree without
 the owner being asked.
 
-**Braces** (`_brace_parse`, `_brace_words`). Every word is brace-expanded the
-way bash 5.3 does it before anything judges it, and each word it makes is an
-operand of its own — so `cp {/tmp/x,A}` is `cp /tmp/x A` and its destination
-is A, and `cp /tmp/x A{,.bak}` is a backup (A is a source), as in bash.
-Lists, `{,}`, nesting, prefix and suffix, `{1..3}`, `{a..c}`, steps and
-zero padding; never `${…}`; and bash's corners: a top-level `}` before any
-comma is text (`{a},b}` is `a}` and `b`), and `{}` at the start of a string
-is text. A `{` that never closes is text, and bash 5.3 then either rescans
-from the character after it (`{x{1..2}}` is `{x1}` `{x2}`) or passes over
-its whole balanced `{…}` (`{1..2{a,b}}`, `{1{x,y}..3}` stay as written), by
-a rule tied to whether the text looks like a number sequence that is only
-guessed here. So where both are possible, **both readings are made and
-every one is judged** (`_Choices`, `_brace_readings`, at most 8 a word and a
-line; past that the line is too complex to judge). Fuzzed against the real
-shell: bash's own expansion was among the readings for every one of 50,000
-random words and 18,000 quoted lines, and the first reading (the guess)
-differed from it for 2. Quoted or backslash-escaped braces and commas, and a single-quoted or
-escaped `$`, are marked before the split (`_mark_brace_quoting`) and never
-expand. Assignment words at the head of a command are not expanded (bash
-does not). Redirect targets are expanded too (`> {/tmp/a,A}` is ambiguous
-to bash but zsh opens both), and so are the words of `cd` — several mean the
-folder is unknown. A subshell's `)` is cut before the expansion (`(tee
-{A,b})` writes A) and a glued `}` only after it, since a `}` inside a word
-is never a group's closer (`{/tmp/y},A}` is `/tmp/y}` and A).
+**Braces** (`_brace_parse`, `_brace_readings`, `_brace_lines`). Every word
+is brace-expanded the way bash 5.3 does it before anything judges it, and
+each word it makes is an operand of its own — so `cp {/tmp/x,A}` is `cp
+/tmp/x A` and its destination is A, and `cp /tmp/x A{,.bak}` is a backup (A
+is a source), as in bash. Lists, `{,}`, nesting, prefix and suffix, `{1..3}`,
+`{a..c}`, steps and zero padding; never `${…}`; and bash's corners: a
+top-level `}` before any comma is text (`{a},b}` is `a}` and `b`), `{}` at
+the start of a string is text, and a sequence that does not parse is text
+(`{0a..2},x}` is one word, `{1..a}`, `{a..1}`). Three of bash's choices are
+taken by rules this module only guesses: whether a `{` that never closes is
+passed over whole (`{1..2{a,b}}`) or rescanned (`{x{1..2}}` is `{x1}`
+`{x2}`), whether a `}` closes a sequence that does not parse, and whether
+the text after one is read as a new string. So where it matters **every
+reading is made and judged** (`_Choices`; at most 8 a word and a line, past
+that the line is too complex to judge). Fuzzed against bash 5.3.9 with
+malformed sequences and quoted empty words in the alphabet: bash's own
+expansion was among the readings for every one of 100,000 random words,
+24,000 quoted lines and the review's 40,000 lines, and the first reading
+(the guess) differed from it for 12 of the words. Quoted or
+backslash-escaped braces and commas, and a single-quoted or escaped `$`, are
+marked before the split (`_mark_brace_quoting`) and never expand; a word
+with quotes keeps its empty expansion (`""{a,}` is `a` and `''`). Assignment
+words at the head of a command are not expanded (bash does not). Redirect
+targets are expanded too (`> {/tmp/a,A}` is ambiguous to bash but zsh opens
+both), and so are the words of `cd` — several mean the folder is unknown. A
+subshell's `)` is cut before the expansion (`(tee {A,b})` writes A) and a
+glued `}` only after it, since a `}` inside a word is never a group's closer
+(`{/tmp/y},A}` is `/tmp/y}` and A).
 
 **Past the cap** (`_WORD_CAP`, 1,024 words a segment; 8 readings; a parse
-budget and depth for one word): the line is too complex to judge whole, an opaque touch
-— asked, never covered by an allowlist entry, never ALLOW — whenever the
-segment writes (or a reader's sampled words sit beside a writer). A bounded
-sample is still judged, so a protected spelling inside it stays certain:
-every alternative of every group at least once with the others at their
-first, the all-first and all-last words, a name inside the folder every word
-shares (so a folder in the HUD's tree is seen), and, when many words overflow
-the line, each word thinned in place — order kept, so a copy's destination
-stays last, and every word naming a protected file kept. v2's secrets layer
-already refuses an expansion too large to expand, as on main.
+budget and depth for one word): the line is too complex to judge whole, an
+opaque touch — asked, never covered by an allowlist entry, never ALLOW —
+whenever the segment writes (or a reader's sampled words sit beside a
+writer). A bounded sample is still judged, so a protected spelling inside it
+stays certain: every alternative of every group at least once with the
+others at their first, a name inside the folder every word shares (so a
+folder in the HUD's tree is seen), and the expansion's own first and last
+words at the ends, so a copy's destination is still the word bash makes
+last; when many words overflow a line, each word is thinned in place, order
+kept, every word naming a protected file kept. So `mkdir -p
+build/{a..z}/{0..9}/{a..z}` (6,760 words) asks where main allowed it: no
+cheap proof covers a link below `build/`, so it fails closed. v2's secrets
+layer already refuses an expansion too large to expand, as on main.
 
 **Globs** (`_part_match`, `_glob_relate`, `_glob_fs`). A glob is matched,
 never shortened. Each component is matched with bash's pattern rules — `*`,
-`?`, `[…]` with `!` and `^`, ranges and POSIX classes, extglob (`@(a|b)`
-and `?(…)` written out; `*(…)`, `+(…)`, `!(…)` as `*`) — wider than bash on
+`?`, `[…]` with `!` and `^`, ranges and POSIX classes, extglob (`@(a|b)` and
+`?(…)` written out; `*(…)`, `+(…)`, `!(…)` as `*`) — wider than bash on
 purpose (a leading dot and either case match, for dotglob and nocaseglob),
-by a regex built the way `fnmatch.translate` builds one, so no pattern can
-backtrack badly. `**` is any number of folders. The path before the first
-glob component is resolved through its symlinks, the pattern is related to
-each protected path component by component (it may *be* one, lie *below* a
-tree, or be a folder *above* one), and the glob is also expanded on disk
-(4,096 entries, 256 matches) so a symlink or hard link it reaches counts. A
-glob that may match a protected component is judged as that component:
-`cp x <D>/[^x]nbox/missed.jsonl` is a certain write (v2 DENY, v1 ASK, as
-the plain spelling); `mv <D>/r* /tmp/x` replaces the phone's folder as
-surely as `mv <D>/remote /tmp/x`; `cp x ~/.local/share/*/hud/x` is asked as
-the HUD's tree. A name in an unknown folder (`$UNSET/allow*.json`) is matched
-the same way and asks.
+by a regex built the way `fnmatch.translate` builds one (in Python 3.10's
+spelling), so no pattern can backtrack badly. `**` is any number of
+folders. The path before the first glob component is resolved through its
+symlinks, and the pattern is related to each protected path component by
+component (it may *be* one, lie *below* a tree, or be a folder *above*
+one); a glob that may be several protected files is judged as the allowlist
+when it may be that. A glob that may match a protected component is judged
+as that component: `cp x <D>/[^x]nbox/missed.jsonl` is a certain write (v2
+DENY, v1 ASK, as the plain spelling); `mv <D>/r* /tmp/x` replaces the
+phone's folder as surely as `mv <D>/remote /tmp/x`; `cp x
+~/.local/share/*/hud/x` is asked as the HUD's tree. A name in an unknown
+folder (`$UNSET/allow*.json`) is matched the same way and asks.
+
+**On disk** (review of PR #310). What the pattern cannot judge by its text —
+a path reached through a symlink, or a protected file's inode — the glob
+finds by walking the folders it names, and only for a word that is
+**written** (a writer's operand, a redirect target); a read is judged by its
+pattern alone and never walked, so `cat /mnt/c/Users/x/**/notes.txt` costs
+what it did on main (it took 2.3–2.9 s on the first version of this
+change). The walk keeps only the links and protected inodes it meets,
+resolves them itself, and is bounded: 4,096 entries and 1,024 folders a
+glob, 16,384 entries and **50 ms of wall clock for all of one line's globs**,
+and an answer is reused for 2 s (one permit judges a line two or three
+times). **A walk cut short is never read as "nothing there"**: a write
+through it is an opaque touch, asked, never covered — the first version
+read a folder of 5,000 entries holding `zzzz -> <gate>` as empty, and `cp
+/tmp/x /tmp/crowd/*/allowlist.json` ran unasked. Measured on `/mnt/c`: a
+writing glob that walks costs one permit (three calls) about 50–70 ms, a
+reading one about 1 ms; on Linux paths the same as main.
 
 **`..` after a symlink.** A path with `..` is resolved as the kernel does
 (`os.path.realpath`), not collapsed as text: with a link `/tmp/l` to a folder
@@ -2902,9 +2926,11 @@ for its own matching: as text for the pattern, as written on disk.
 has moved to (they were the judge's, or a folder named `~+`); `~-` and
 `$OLDPWD` are unknown; a word with a backtick is unknown; `cd -P`/`-L`/`--`
 are options, not the folder (`cd -P <gate> && cp x allowlist.json` was read
-as a folder named `-P`). A substitution that names a protected file in a
-line that writes (`cp x $(echo <allowlist>)`) is an uncertain touch at
-least. `${X:-word}` is still unknown (asks), as on main.
+as a folder named `-P`). An expansion only known when it runs may be empty,
+and is judged so too, never more than asked (`cp x ${a,b}<gate>` is a copy
+into the gate's folder when `a` is unset). A substitution that names a
+protected file in a line that writes (`cp x $(echo <allowlist>)`) is an
+uncertain touch at least.
 
 **Not changed.** Reads (`cat`, `ls`, `grep` over the gate's files, braces
 and globs included) and ordinary brace and glob use (`cp src/{a,b}.py dst/`,
@@ -2912,26 +2938,40 @@ and globs included) and ordinary brace and glob use (`cp src/{a,b}.py dst/`,
 verdicts. The differential over 124 lines (main against this change: v1
 `rules.decide`, `static_verdict`, v2 `denied_command`, `command_touches`)
 moved 59, every one toward stricter, and none looser (one more names a
-different protected file at the same certainty).
+different protected file at the same certainty); the review's 103 ordinary
+developer lines moved 6, all stricter.
 
-**Still not a boundary.** This is the module's own caveat: a shell has more
-spellings than any matcher. Not seen: a word built at run time, extglob in a
-redirect's word (`rules.redirections` stops a word at `(`; extglob is off in
-a non-interactive bash), a symlink the walk did not reach past its bounds
-(those writes ask). The real protection remains that the write tools and
-grants refuse these paths and that no allowlist entry covers a line that
-touches them. When inbox B1 lands its `owner_trees`/`_inside_tree`, it
-should match globs through `_glob_relate`/`_glob_fs` as `_in_tree_now` does
-now, not drop glob components.
+**Known limits (asked, not refused).** A shell function or alias defined
+earlier on the line (`f() { cp x "$1"; }; f <allowlist>`); `xargs -I{}` fed
+a protected name; `sh -c "$(printf …)"`; `tar --transform … -C <gate>`,
+`cpio -p <gate>`; `${X:-word}` and other parameter forms. **Not seen at
+all:** a word built at run time from data the line does not show, and
+extglob inside a redirect's word (`rules.redirections` stops a word at `(`;
+extglob is off in a non-interactive bash). The real protection remains that
+the write tools and grants refuse these paths and that no allowlist entry
+covers a line that touches them. When inbox B1 lands its
+`owner_trees`/`_inside_tree`, it should match globs through
+`_glob_relate`/`_glob_fs` (and honour `_walk_cut`) as `_in_tree_now` does
+now, not drop glob components. The older `_brace_expand` still used for the
+owner-op detector, `secrets.py`, `v2/permissions.py` and `diff_review.py`
+is unchanged (a follow-up).
 
-Pinned by `tests/rules_check.py` (`brace_glob_unit_checks`: bash's own
-expansions and pattern answers, the cap and the timing; `brace_glob_gate_checks`:
-43 spellings DENY, never covered and refused by run_command, 18 asked, 18
-ordinary lines unchanged), `tests/v2/permissions_check.py brace_glob_checks`
-(35 forms × the allowlist, passkeys, the inbox's records and a credential env
-file refused at layer 1 and never asked; × the installed HUD, asked), and
+Pinned by `tests/rules_check.py` — `brace_glob_unit_checks` (bash's own
+expansions, malformed sequences and quoted empty words included, and
+pattern answers; the cap; timing), `brace_glob_gate_checks` (44 spellings
+DENY, never covered, refused by `run_command`; 17 asked; 18 ordinary lines
+unchanged), `brace_glob_broad_checks` (85 cases across brace forms, shell
+state set earlier on the line, indirection, less common writers, path
+spellings and size: 55 refused, 9 asked, 21 controls unchanged) and
+`glob_walk_bound_checks` (a folder of 4,296 entries with the link at four
+names: 20 writes asked; reads not walked; the line's deadline and reuse;
+its constants pinned) — and by `tests/v2/permissions_check.py`
+(`brace_glob_checks`: 35 forms × the allowlist, passkeys, the inbox's
+records and a credential env file refused at layer 1 and never asked, × the
+installed HUD asked; `brace_glob_broad_checks`: the 85 cases through v2's
+permit, and the crowded folder asked under AUTO and ASK) and
 `tests/permissions_check.py` (no entry covers them). Verified to fail with
-brace expansion disabled, with glob components dropped again, with globs
-skipped by the ancestor and exact checks, with the cap's fail-closed
-touches removed, with `..` collapsed as text again, and with only the
-guessed reading made.
+brace expansion disabled, glob components dropped again, globs skipped by
+the ancestor and exact checks, the cap's fail-closed touches removed, `..`
+collapsed as text, only the guessed reading made, a cut walk ignored, a
+malformed sequence not closed, and a quoted empty word dropped.

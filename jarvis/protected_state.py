@@ -47,6 +47,7 @@ from __future__ import annotations
 import os
 import re
 import shlex
+import time
 from dataclasses import dataclass, field, replace
 from fnmatch import fnmatch
 from pathlib import Path
@@ -148,15 +149,16 @@ def hud_trees() -> set[Path]:
     return _memo(("hud_trees",), roots)
 
 
-def _in_tree(text: str, trees: set[Path]) -> Path | None:
+def _in_tree(text: str, trees: set[Path], walk: bool = True) -> Path | None:
     """The HUD tree `text` lies in (or is), or one it holds within two levels
-    (`rm -rf ~/.local/share/jarvis`), else None."""
+    (`rm -rf ~/.local/share/jarvis`), else None. `walk`: a glob is also
+    expanded on disk (`_glob_fs`)."""
     if not trees:
         return None
-    return _memo(("in_tree", text, id(trees)), lambda: _in_tree_now(text, trees))
+    return _memo(("in_tree", text, id(trees), walk), lambda: _in_tree_now(text, trees, walk))
 
 
-def _in_tree_now(text: str, trees: set[Path]) -> Path | None:
+def _in_tree_now(text: str, trees: set[Path], walk: bool = True) -> Path | None:
     if _GLOBBY.search(text):
         # A glob is matched, never shortened: dropping its glob components
         # judged `<D>/*/x` as `<D>/x` (2026-10-25). In a tree, or above one
@@ -167,16 +169,15 @@ def _in_tree_now(text: str, trees: set[Path]) -> Path | None:
             exact, below, above = _glob_relate(pattern, tree.parts)
             if exact or below or any(len(tree.parts) - j <= 2 for j in above):
                 return tree
-        for match in _glob_fs(text)[0]:
-            tree = _in_tree_plain(match, trees)
+        for _, resolved, _ in _glob_fs(text)[0] if walk else ():
+            tree = _in_tree_resolved(Path(resolved), trees)
             if tree is not None:
                 return tree
         return None
-    return _in_tree_plain(text, trees)
+    return _in_tree_resolved(_resolve(text), trees)
 
 
-def _in_tree_plain(text: str, trees: set[Path]) -> Path | None:
-    resolved = _resolve(text)
+def _in_tree_resolved(resolved: Path, trees: set[Path]) -> Path | None:
     for tree in trees:
         if resolved == tree or _under(resolved, tree):
             return tree
@@ -400,24 +401,29 @@ def _identities(paths: set[Path]) -> dict[tuple[int, int], Path]:
     return out
 
 
-def _exact(text: str, protected: set[Path], ids: dict) -> Path | None:
-    return _memo(("exact", text, id(protected), id(ids)), lambda: _exact_now(text, protected, ids))
+def _exact(text: str, protected: set[Path], ids: dict, walk: bool = True) -> Path | None:
+    return _memo(("exact", text, id(protected), id(ids), walk),
+                 lambda: _exact_now(text, protected, ids, walk))
 
 
-def _exact_now(text: str, protected: set[Path], ids: dict) -> Path | None:
+def _exact_now(text: str, protected: set[Path], ids: dict, walk: bool = True) -> Path | None:
     if _GLOBBY.search(text):
         # Component by component: a `*` never crosses `/`, and `rm ~/*.json`
         # does not reach ~/.config/jarvis/models.json — but `**` may be any
         # number of folders, `[^x]` is a negation, and what the glob matches
         # on disk (through a symlink, or a hard link) counts too.
         pattern = _glob_parts(text)
-        for path in protected:
+        gate = gate_paths()
+        # The allowlist first: `cp x <gate>/*.json` may be any of the gate's
+        # files, and the one whose write is refused outright decides.
+        for path in sorted(protected, key=lambda p: (p not in gate, str(p))):
             if _glob_relate(pattern, path.parts)[0]:
                 return path
-        for match in _glob_fs(text)[0]:
-            hit = _exact_plain(match, protected, ids)
-            if hit is not None:
-                return hit
+        for _, resolved, ident in _glob_fs(text)[0] if walk and protected else ():
+            if Path(resolved) in protected:
+                return Path(resolved)
+            if ident is not None and ident in ids:
+                return ids[ident]
         return None
     return _exact_plain(text, protected, ids)
 
@@ -433,11 +439,14 @@ def _exact_plain(text: str, protected: set[Path], ids: dict) -> Path | None:
     return ids.get((st.st_dev, st.st_ino))
 
 
-def _ancestor_of(text: str, protected: set[Path]) -> list[tuple[Path, tuple[str, ...]]]:
-    return _memo(("ancestor", text, id(protected)), lambda: _ancestor_now(text, protected))
+def _ancestor_of(text: str, protected: set[Path], walk: bool = True
+                 ) -> list[tuple[Path, tuple[str, ...]]]:
+    return _memo(("ancestor", text, id(protected), walk),
+                 lambda: _ancestor_now(text, protected, walk))
 
 
-def _ancestor_now(text: str, protected: set[Path]) -> list[tuple[Path, tuple[str, ...]]]:
+def _ancestor_now(text: str, protected: set[Path], walk: bool = True
+                  ) -> list[tuple[Path, tuple[str, ...]]]:
     if _GLOBBY.search(text):
         # Every protected file the glob may be a folder above (`rm -rf
         # ~/.config/j*`), by pattern and by what it matches on disk.
@@ -447,25 +456,25 @@ def _ancestor_now(text: str, protected: set[Path]) -> list[tuple[Path, tuple[str
             for j in sorted(_glob_relate(pattern, path.parts)[2]):
                 if 0 < j < len(path.parts) and (path, path.parts[j:]) not in out:
                     out.append((path, path.parts[j:]))
-        for match in _glob_fs(text)[0]:
-            for hit in _ancestor_plain(match, protected):
+        for _, resolved, _ in _glob_fs(text)[0] if walk else ():
+            for hit in _ancestor_resolved(Path(resolved), protected):
                 if hit not in out:
                     out.append(hit)
         return out
-    return _ancestor_plain(text, protected)
+    return _ancestor_resolved(_resolve(text), protected)
 
 
-def _may_be(text: str, folder: Path) -> bool:
+def _may_be(text: str, folder: Path, walk: bool = True) -> bool:
     """Whether `text` names `folder` (resolved) — for a glob, whether it
     may: by its pattern, or by what it matches on disk."""
     if _GLOBBY.search(text):
         return (_glob_relate(_glob_parts(text), folder.parts)[0]
-                or any(_resolve(m) == folder for m in _glob_fs(text)[0]))
+                or any(Path(r) == folder for _, r, _ in (_glob_fs(text)[0] if walk else ())))
     return _resolve(text) == folder
 
 
-def _ancestor_plain(text: str, protected: set[Path]) -> list[tuple[Path, tuple[str, ...]]]:
-    resolved = _resolve(text)
+def _ancestor_resolved(resolved: Path, protected: set[Path]
+                       ) -> list[tuple[Path, tuple[str, ...]]]:
     return [(path, path.relative_to(resolved).parts)
             for path in protected if resolved != path and _under(path, resolved)]
 
@@ -500,7 +509,11 @@ _BRACE_DEPTH = 64          # nesting of brace groups parsed
 _BRACE_WORK = 200_000      # characters the brace parser may scan for one word
 _GLOB_ALTS = 64            # extglob alternatives one component may expand to
 _GLOB_FS_ENTRIES = 4096    # directory entries one glob may read
-_GLOB_FS_MATCHES = 256     # paths one glob may expand to on disk
+_GLOB_FS_PATHS = 1024      # folders one glob's walk may hold at a time
+_GLOB_FS_MATCHES = 256     # paths a walk keeps (through a link, or a protected file's inode)
+_GLOB_LINE_ENTRIES = 16384  # directory entries one line's globs may read in all
+_GLOB_LINE_SECONDS = 0.05  # and the wall-clock time they may spend on disk
+_GLOB_TTL = 2.0            # seconds a walk's answer is reused (one permit asks 2-3 times)
 _GLOBBY = re.compile(r"[*?\[]|[?*+@!]\(")
 
 # Quoted or escaped brace syntax, and a single-quoted or escaped `$`, are text
@@ -508,7 +521,8 @@ _GLOBBY = re.compile(r"[*?\[]|[?*+@!]\(")
 # never reads them, and put back after.
 _BRACE_MARK = str.maketrans({"{": "\ue020", "}": "\ue021", ",": "\ue022", "$": "\ue023"})
 _BRACE_UNMARK = str.maketrans({"\ue020": "{", "\ue021": "}", "\ue022": ",", "\ue023": "$",
-                                "\ue025": ""})
+                                "\ue025": "", "\ue026": ""})
+_QUOTE_SEEN = "\ue026"     # a word had quotes: its empty expansion is kept (`""{a,}`)
 
 
 class _Burst(Exception):
@@ -549,6 +563,7 @@ def _mark_brace_quoting(text: str) -> str:
         else:
             if c in "'\"":
                 quote = c
+                out.append(_QUOTE_SEEN)
             out.append(c)
         i += 1
     return "".join(out)
@@ -570,12 +585,16 @@ def _span_end(text: str, i: int) -> int:
     return len(text) + 1
 
 
-def _brace_open(text: str, i: int, work: list[int], base: int = 0) -> int:
+def _brace_open(text: str, i: int, work: list[int], base: int = 0, soft: int = -1,
+                choices: "_Choices | None" = None) -> int:
     """The first `{` at or after `i` that may open a brace expression:
     never `${`, and nothing inside `${…}` or `$(…)`. -1 when there is none.
     `base` is where the string bash is expanding starts (the word, or the
     rest of it after a group): a `{` there, or after a blank, followed by a
-    blank or `}` is not an opener (`{}`, as `find -exec` writes it)."""
+    blank or `}` is not an opener (`{}`, as `find -exec` writes it). `soft`
+    is just after a sequence that did not parse: bash reads on from there as
+    a string of its own or not, by a rule only guessed here, so there it is a
+    choice (`_Choices`, guessed as a string of its own)."""
     n = len(text)
     while i < n:
         work[0] -= 1
@@ -586,19 +605,26 @@ def _brace_open(text: str, i: int, work: list[int], base: int = 0) -> int:
             i = _span_end(text, i + 1)
             continue
         if c == "{":
-            if not ((i == base or text[i - 1] in " \t\n")
-                    and i + 1 < n and text[i + 1] in " \t\n}"):
-                return i
+            closes = i + 1 < n and text[i + 1] in " \t\n}"
+            if not (closes and (i == base or text[i - 1] in " \t\n")):
+                if not (closes and i == soft
+                        and (choices.skip(True) if choices is not None else True)):
+                    return i
         i += 1
     return -1
 
 
-def _brace_close(text: str, i: int, work: list[int]) -> tuple[int, list[int]]:
+def _brace_close(text: str, i: int, work: list[int], choices: "_Choices | None" = None
+                 ) -> tuple[int, list[int], bool]:
     """(the index of the `}` closing the `{` at `i - 1`, the indices of its
-    top-level commas); -1 when it never closes. As bash 5.3 reads it: a
-    top-level `}` closes only once a top-level comma has been seen or the
-    text so far is a sequence (`{1..3}`); before that it is text, so
-    `{a},b}` is `a}` and `b` (checked against bash)."""
+    top-level commas, whether it closes a sequence that does not parse — so
+    the braces are text and the scan goes on after them); -1 when it never
+    closes. As bash 5.3 reads it: a top-level `}` closes once a top-level
+    comma has been seen or the text so far is a sequence (`{1..3}`); before
+    that it is text, so `{a},b}` is `a}` and `b`. Text with `..` in it that
+    is no sequence (`{0a..2},x}`, one word to bash) may close there as text
+    or read on: a choice (`_Choices`), guessed as text when no brace is
+    inside it (review of PR #310)."""
     level, commas, n, opened = 0, [], len(text), i
     while i < n:
         work[0] -= 1
@@ -612,14 +638,19 @@ def _brace_close(text: str, i: int, work: list[int]) -> tuple[int, list[int]]:
             level += 1
         elif c == "}":
             if not level:
-                if commas or _brace_sequence(text[opened:i]) is not None:
-                    return i, commas
+                inside = text[opened:i]
+                if commas or _brace_sequence(inside) is not None:
+                    return i, commas, False
+                if ".." in inside:
+                    guess = "{" not in inside and "}" not in inside
+                    if choices.skip(guess) if choices is not None else guess:
+                        return i, [], True
             else:
                 level -= 1
         elif c == "," and not level:
             commas.append(i)
         i += 1
-    return -1, commas
+    return -1, commas, False
 
 
 # A `{` that never closes is text, and bash 5.3 then either goes on from the
@@ -700,12 +731,19 @@ def _brace_parse(text: str, work: list[int], depth: int = 0,
     if depth > _BRACE_DEPTH:
         raise _Burst
     nodes: list = []
-    i = lit = 0
+    i = lit = base = 0      # base: where the string bash is expanding starts
+    soft = -1
     while True:
-        start = _brace_open(text, i, work, lit)
+        start = _brace_open(text, i, work, base, soft, choices)
         if start < 0:
             break
-        end, commas = _brace_close(text, start + 1, work)
+        end, commas, text_only = _brace_close(text, start + 1, work, choices)
+        if text_only:
+            # A sequence that does not parse: text. bash then reads on either
+            # as a new string (`{0a..2}{}` keeps `{}` as text) or not
+            # (`{a..1}{},-}` is `{a..1}}` and `{a..1}-`): `soft`.
+            i = soft = end + 1
+            continue
         if end < 0:
             span = _span_end(text, start)
             if span <= len(text):
@@ -727,7 +765,7 @@ def _brace_parse(text: str, work: list[int], depth: int = 0,
         if start > lit:
             nodes.append(text[lit:start])
         nodes.append(group)
-        i = lit = end + 1
+        i = lit = base = end + 1
     if lit < len(text) or not nodes:
         nodes.append(text[lit:])
     return tuple(nodes)
@@ -831,8 +869,11 @@ def _brace_nodes(word: str, nodes: tuple) -> tuple[list[str], bool]:
         words = _brace_all(nodes)
         burst = False
     else:
-        words = _brace_samples(nodes, _WORD_CAP)
-        words += _brace_inside(nodes[0] if isinstance(nodes[0], str) else "")
+        sample = _brace_samples(nodes, _WORD_CAP)
+        # The expansion's own first and last words stay at the ends, so a
+        # copy's destination is still the word bash makes last.
+        words = (sample[:1] + sample[2:]
+                 + _brace_inside(nodes[0] if isinstance(nodes[0], str) else "") + sample[1:2])
         burst = True
     # bash drops a word that brace expansion leaves empty (`{,}` alone).
     return [w for w in words if w], burst
@@ -1019,7 +1060,8 @@ def _glob_variants(p: str, limit: int = _GLOB_ALTS) -> list[str]:
 def _glob_regex(p: str) -> re.Pattern:
     """A plain bash pattern (no extglob) as a regex that cannot backtrack
     badly: between stars each run is matched at its first place, as
-    `fnmatch.translate` does, which is exact for glob semantics."""
+    `fnmatch.translate` does (Python 3.10's spelling of it), which is exact
+    for glob semantics."""
     chunks: list[list[str]] = [[]]
     i, n = 0, len(p)
     while i < n:
@@ -1046,7 +1088,9 @@ def _glob_regex(p: str) -> re.Pattern:
         if k == len(chunks) - 1:
             parts.append(".*" + fixed)
         else:
-            parts.append(f"(?>.*?{fixed})")
+            # An atomic group, spelled so Python 3.10 reads it (`(?>…)` is
+            # 3.11's): a lookahead's match cannot be backtracked into.
+            parts.append(f"(?=(?P<g{k}>.*?{fixed}))(?P=g{k})")
     return re.compile("".join(parts), re.S | re.I)
 
 
@@ -1121,73 +1165,216 @@ def _glob_relate(pattern: tuple[str, ...], target: tuple[str, ...]
     return exact, below, above
 
 
-def _glob_fs(text: str) -> tuple[tuple[str, ...], bool]:
-    """(the existing paths the absolute glob `text` expands to, whether the
-    walk finished within its bounds)."""
-    return _memo(("glob_fs", text), lambda: _glob_fs_now(text))
+_WALKS: dict = {}          # (glob, protected inodes[, line]) -> (expiry, answer)
+
+# One path a glob reached on disk that its text cannot judge: (the path, where
+# it resolves to, the (device, inode) it names or None).
+_Reached = tuple
 
 
-def _glob_fs_now(text: str) -> tuple[tuple[str, ...], bool]:
+def _glob_fs(text: str) -> tuple[tuple[_Reached, ...], bool]:
+    """(the existing paths the absolute glob `text` expands to that the
+    pattern cannot judge by their text — reached through a symlink, or a
+    protected file's inode, a hard link — each with where it resolves and
+    what it is; whether the walk read everything it had to read).
+
+    Bounded (review of PR #310): a glob reads at most `_GLOB_FS_ENTRIES`
+    entries and holds `_GLOB_FS_PATHS` folders; one line's globs together
+    read at most `_GLOB_LINE_ENTRIES` and spend `_GLOB_LINE_SECONDS`, the
+    resolving of what they reach included (a folder on `/mnt/c` lists and
+    resolves slowly); and an answer is reused for `_GLOB_TTL` seconds — one
+    permit judges a line two or three times — by any line when the glob's
+    own bounds decided it, by the same line when the line's did. A walk cut
+    short says so (`False`), and a write through it asks (`_walk_cut`): a
+    folder of 5,000 entries holding a link into the gate's was read as
+    holding nothing, and the write ran."""
+    inodes = _protected_inodes()
+    key = (text, inodes)
+    line_key = key + (_line_key(),)
+    now = time.monotonic()
+    for k in (key, line_key):
+        hit = _WALKS.get(k)
+        if hit is not None and hit[0] > now:
+            return hit[1]
+    answer, own = _glob_fs_now(text, inodes, _walk_budget())
+    if own or line_key[-1] is not None:
+        if len(_WALKS) >= 1024:
+            for old in [k for k, v in _WALKS.items() if v[0] <= now] or list(_WALKS)[:512]:
+                _WALKS.pop(old, None)
+        _WALKS[key if own else line_key] = (time.monotonic() + _GLOB_TTL, answer)
+    return answer
+
+
+def _walk_cut(text: str) -> bool:
+    """Whether `text` is a glob whose walk on disk was cut short."""
+    return bool(_GLOBBY.search(text)) and not _glob_fs(text)[1]
+
+
+def _protected_inodes() -> frozenset[int]:
+    """The inode numbers of the protected files that exist (a hard link to
+    one, met by a glob, is judged by its identity)."""
+    return _memo(("protected_inodes",),
+                 lambda: frozenset(ino for _, ino in _identities(protected_paths())))
+
+
+def _line_key():
+    """The line being judged and its folder (`command_touches`), or None."""
+    work = rules._WORK.get()
+    return None if work is None else work.cache.get(("line",))
+
+
+def _walk_budget() -> dict:
+    """What the globs of the line being judged may still read and spend
+    (`rules.work_scope`); a fresh allowance outside one."""
+    def fresh() -> dict:
+        return {"entries": _GLOB_LINE_ENTRIES,
+                "deadline": time.monotonic() + _GLOB_LINE_SECONDS}
+    work = rules._WORK.get()
+    if work is None:
+        return fresh()
+    budget = work.cache.get(("walk_budget",))
+    if budget is None:
+        budget = work.cache[("walk_budget",)] = fresh()
+    return budget
+
+
+def _glob_fs_now(text: str, inodes: frozenset[int], budget: dict
+                 ) -> tuple[tuple[tuple[_Reached, ...], bool], bool]:
+    """(`_glob_fs`'s answer, whether this glob's own bounds decided it —
+    finished, or cut by its own limits rather than the line's)."""
     parts = Path(text).parts
-    current = [parts[0]] if parts else []
-    budget = [_GLOB_FS_ENTRIES]
+    k = next((i for i, p in enumerate(parts) if _GLOBBY.search(p)), len(parts))
+    if k == len(parts):
+        return ((), True), True
+    # From the resolved folder before the first glob: the pattern already
+    # judged that part through its links (`_glob_parts`).
+    current: list[tuple[str, bool]] = [(str(_resolve(Path(*parts[:k]))), False)]
+    kept: list[str] = []
+    own = [_GLOB_FS_ENTRIES]
+    line = [False]
+
+    def spent() -> bool:
+        if budget["entries"] < 0 or time.monotonic() > budget["deadline"]:
+            line[0] = True
+            return True
+        return False
+
+    def reached(complete: bool) -> tuple[tuple[tuple[_Reached, ...], bool], bool]:
+        out = []
+        for path in kept[:_GLOB_FS_MATCHES]:
+            if spent():
+                complete = False
+                break
+            try:
+                st = os.stat(path)
+                ident = (st.st_dev, st.st_ino)
+            except OSError:
+                ident = None
+            out.append((path, os.path.realpath(path), ident))
+        return (tuple(out), complete), complete or not line[0]
 
     def entries(folder: str) -> list | None:
-        """The folder's entries, or None once the walk's budget is spent."""
         out = []
         try:
             with os.scandir(folder) as it:
                 for entry in it:
-                    budget[0] -= 1
-                    if budget[0] < 0:
+                    own[0] -= 1
+                    budget["entries"] -= 1
+                    if own[0] < 0 or spent():
                         return None
                     out.append(entry)
         except OSError:
             pass
         return out
 
-    def is_dir(entry) -> bool:
-        try:
-            return entry.is_dir()
-        except OSError:
-            return False
+    def keep(path: str, link: bool, inode: int | None) -> None:
+        if link or (inode is not None and inode in inodes):
+            kept.append(path)
 
-    for k, part in enumerate(parts[1:], 1):
-        last = k == len(parts) - 1
+    def flags(entry) -> tuple[bool, bool, int | None]:
+        try:
+            link = entry.is_symlink()
+            folder = entry.is_dir()
+            inode = entry.inode() if inodes else None
+        except OSError:
+            return False, False, None
+        return link, folder, inode
+
+    for idx in range(k, len(parts)):
+        part, last = parts[idx], idx == len(parts) - 1
+        if spent():
+            return reached(False)
         if not _GLOBBY.search(part):
-            current = [os.path.join(c, part) for c in current]
+            nxt = []
+            for path, link in current:
+                if spent():
+                    return reached(False)
+                here = os.path.join(path, part)
+                inode = None
+                if part != "..":
+                    try:
+                        st = os.lstat(here)
+                        link = link or (st.st_mode & 0o170000) == 0o120000
+                        inode = st.st_ino
+                    except OSError:
+                        if not last:
+                            continue      # no such folder: nothing is below it
+                if last:
+                    keep(here, link, inode)
+                nxt.append((here, link))
+            current = nxt
+            if len(kept) > _GLOB_FS_MATCHES:
+                return reached(False)
             continue
-        found: list[str] = []
-        for folder in current:
+        found: list[tuple[str, bool]] = []
+        for path, link in current:
             if part == "**":
                 # Itself and every folder below it (a symlinked folder is
                 # met, as `*` would meet it, but not walked into).
-                stack = [folder]
-                found.append(folder)
+                stack = [(path, link)]
+                found.append((path, link))
                 while stack:
-                    listed = entries(stack.pop())
+                    here, hlink = stack.pop()
+                    listed = entries(here)
                     if listed is None:
-                        return tuple(found[:_GLOB_FS_MATCHES]), False
+                        return reached(False)
                     for entry in listed:
-                        if is_dir(entry):
-                            found.append(entry.path)
-                            if not entry.is_symlink():
-                                stack.append(entry.path)
+                        if spent():
+                            return reached(False)
+                        elink, efolder, inode = flags(entry)
+                        if efolder:
+                            found.append((entry.path, hlink or elink))
+                            if not elink:
+                                stack.append((entry.path, hlink))
                         elif last:
-                            found.append(entry.path)
+                            keep(entry.path, hlink or elink, inode)
+                    if len(found) > _GLOB_FS_PATHS:
+                        return reached(False)
+                if last:
+                    for here, hlink in found:
+                        keep(here, hlink, None)
             else:
-                listed = entries(folder)
+                listed = entries(path)
                 if listed is None:
-                    return tuple(found[:_GLOB_FS_MATCHES]), False
+                    return reached(False)
                 for entry in listed:
-                    if _part_match(part, entry.name) and (last or is_dir(entry)):
-                        found.append(entry.path)
-            if len(found) > _GLOB_FS_MATCHES:
-                return tuple(found[:_GLOB_FS_MATCHES]), False
+                    if not _part_match(part, entry.name):
+                        continue
+                    if spent():
+                        return reached(False)
+                    elink, efolder, inode = flags(entry)
+                    if last:
+                        keep(entry.path, link or elink, inode)
+                    elif efolder:
+                        found.append((entry.path, link or elink))
+            if len(found) > _GLOB_FS_PATHS or len(kept) > _GLOB_FS_MATCHES:
+                return reached(False)
+        if last:
+            break
         current = found
         if not current:
-            return (), True
-    return tuple(current), True
+            return ((), True), True
+    return reached(True)
 
 
 # --- credential env files (ENV-1, 2026-10-12) ---------------------------------
@@ -1690,10 +1877,14 @@ def _target_touches(targets, local: _State, protected: set[Path], ids: dict, see
                 if _part_match(Path(target).name, path.name):
                     seen.touches.append(Touch(path, False, f"{what} into {target}"))
             continue
-        hit = _exact(text, protected, ids)
+        walk = local.budget.follow_links
+        if walk and _walk_cut(text):
+            seen.touches.append(_opaque(f"{what} onto {target}, a glob over folders too large "
+                                        "or slow to read to the end"))
+        hit = _exact(text, protected, ids, walk)
         if hit is not None:
             seen.touches.append(Touch(hit, certain, f"{what} onto {hit.name}"))
-        tree = _in_tree(text, hud_trees())
+        tree = _in_tree(text, hud_trees(), walk)
         if tree is not None:
             seen.touches.append(Touch(tree, False, f"{what} into {text}", hud=True))
 
@@ -2092,7 +2283,8 @@ def _command(tokens: list[str], lead: list[str], parsed: bool, segment: str, loc
 
     for operand in read_only:
         text = _expand(operand, local)
-        hit = _exact(text, protected, ids) if text is not None else None
+        # Read: judged by its name and its links, never walked on disk.
+        hit = _exact(text, protected, ids, walk=False) if text is not None else None
         if hit is not None:
             seen.read.add(hit)
 
@@ -2133,17 +2325,37 @@ def _command(tokens: list[str], lead: list[str], parsed: bool, segment: str, loc
             for path in protected:
                 if _part_match(Path(operand).name, path.name):
                     seen.touches.append(Touch(path, False, f"{stem} given {operand}"))
+            # An expansion only known when it runs may be empty: `${a,b}<gate
+            # folder>` is the gate's folder when `a` is unset. Judged so too,
+            # and never more than asked (review of PR #310).
+            empty = _expand(_EXPANSION.sub("", operand), local) if "$" in operand else None
+            if empty is not None and kind == "writer":
+                hit = _exact(empty, protected, ids, walk=False)
+                near = [p for p, rel in _ancestor_of(empty, protected, walk=False) if len(rel) <= 2]
+                for path in ([hit] if hit is not None else []) + near:
+                    seen.touches.append(Touch(path, False, f"{stem} given {operand}, which may "
+                                                           f"be {empty}"))
+                tree = _in_tree(empty, hud_trees(), walk=False)
+                if tree is not None:
+                    seen.touches.append(Touch(tree, False, f"{stem} on {empty}", hud=True))
             continue
-        hit = _exact(text, protected, ids)
+        walk = local.budget.follow_links
+        if walk and _walk_cut(text):
+            # A folder too large or too slow to read to the end may hold a
+            # link into the gate's state: asked, never let through (review
+            # of PR #310).
+            seen.touches.append(_opaque(f"{stem} on {operand}, a glob over folders too large "
+                                        "or slow to read to the end"))
+        hit = _exact(text, protected, ids, walk)
         if hit is not None:
             seen.touches.append(Touch(hit, kind == "writer" and provable(operand),
                                       f"{stem} on {hit.name}"))
             continue
-        tree = _in_tree(text, hud_trees())
+        tree = _in_tree(text, hud_trees(), walk)
         if tree is not None and kind != "reader":
             seen.touches.append(Touch(tree, False, f"{stem} on {text}", hud=True))
             continue
-        ancestors = _ancestor_of(text, protected)
+        ancestors = _ancestor_of(text, protected, walk)
         if not ancestors:
             continue        # (the names below cost O(operands) each: only when needed)
         others = [o for o in everyone if o is not operand]
@@ -2166,7 +2378,7 @@ def _command(tokens: list[str], lead: list[str], parsed: bool, segment: str, loc
                 # -rf`, `mv` away, `mv`/`cp` a folder of one's own into its
                 # place) provably replaces them (`phone_dirs`).
                 lands = (len(rel) == 1 and kind == "writer" and provable(operand)
-                         and path.parent in phone_dirs() and _may_be(text, path.parent))
+                         and path.parent in phone_dirs() and _may_be(text, path.parent, walk))
                 seen.touches.append(
                     Touch(path, lands, f"{stem} on {text}, which holds {path.name}"))
             elif any(o.endswith(("/.", "/*")) or (stem == "rsync" and o.endswith("/"))
@@ -2311,6 +2523,7 @@ def command_touches(command: str, cwd: str | Path | None = None) -> list[Touch]:
         if not base.is_absolute():
             base = None  # a relative cwd is relative to nothing we know
     with rules.work_scope():
+        rules._WORK.get().cache[("line",)] = (command, str(base))
         return _analyse(command, _State(base), protected, _identities(protected)).touches
 
 

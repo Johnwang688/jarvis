@@ -4063,6 +4063,13 @@ BRACE_BASH = [
     ("{1..12{01..3}a}{a,b}", ["{1..12{01..3}a}a", "{1..12{01..3}a}b"]),
     ("{1..2{a,b}", ["{1..2a", "{1..2b"]),
     ("{1..{a,b}}", ["{1..a}", "{1..b}"]),
+    # A sequence that does not parse is text, closed where it ends (review
+    # of PR #310): `{0a..2},x}` is one word.
+    ("{0a..2},x}", ["{0a..2},x}"]),
+    ("{1..a}", ["{1..a}"]),
+    ("{a..1}", ["{a..1}"]),
+    ("{x,{0a..2}}y", ["xy", "{0a..2}y"]),
+    ("{0a..2}{a,b}", ["{0a..2}a", "{0a..2}b"]),
 ]
 # Whole lines, quoting included: quoted and escaped braces never expand.
 BRACE_BASH_QUOTED = [
@@ -4072,6 +4079,7 @@ BRACE_BASH_QUOTED = [
     ("'$'{a,b}", ["$a", "$b"]),
     ("{a,'b,c'}", ["a", "b,c"]),
     ("{a\\,b,c}", ["a,b", "c"]),
+    ('""{a,}', ["a", ""]),                # a quoted empty word is kept, as bash keeps it
 ]
 # (pattern, name, may match) — bash's pattern rules, one component.
 GLOB_PARTS = [
@@ -4159,6 +4167,9 @@ BRACE_GLOB_DENY = [
     "{{cp,/tmp/x,{allow}}}",
     "cp /tmp/x {{/tmp/y}},{allow}}}",        # `/tmp/y}` and the allowlist, in bash
     "(tee {{{allow},zz}})",                   # a subshell's `)` is not part of the word
+    # Past the cap, every word is the allowlist and bash's last (the copy's
+    # destination) is too: the sample keeps the expansion's last word last.
+    "cp /tmp/x {gate}/allowlist.json" + "{{,}}" * 11,
     # A `{` that never closes, over a link named like it: bash leaves the
     # word as written, `..` then climbs out of the link into the gate.
     "cp /tmp/x ~/{{1{{x,y}}..3}}/../allowlist.json",
@@ -4205,7 +4216,6 @@ BRACE_GLOB_ASK = [
     "cp {{/tmp/x,{gate}/models.json}}",
     "tee {gate}/{{models,zz}}.json",
     "cp /tmp/x {gate}/{{a..c}}{{a..c}}{{a..c}}{{a..c}}{{a..c}}{{a..c}}{{a..c}}",
-    "cp /tmp/x {gate}/allowlist.json" + "{{,}}" * 11,
     "cp /tmp/x {gate}/{{1..99999}}",
     "cd {gate}{{,}} && cp /tmp/x allowlist.json",
     "cd {gate} && cp /tmp/x ~-/allowlist.json",
@@ -4277,7 +4287,10 @@ def brace_glob_gate_checks() -> None:
                 with recorded() as ran:
                     out = tools.dispatch("run_command",
                                          json.dumps({"command": command, "reason": "r"}))
-                assert not ran and "Refused" in out.text, f"run_command ran: {command}"
+                # Refused by this rule, or first by the secrets layer, which
+                # refuses any brace expansion too large to expand.
+                assert not ran and ("Refused" in out.text or out.text.startswith("Error")), (
+                    f"run_command ran: {command}")
             assert config.ALLOWLIST_PATH.read_text() == before
             for raw in BRACE_GLOB_ASK:
                 command = raw.format(**fill)
@@ -4301,6 +4314,232 @@ def brace_glob_gate_checks() -> None:
     print(f"ok  brace and glob: {len(BRACE_GLOB_DENY)} spellings of a write onto the allowlist "
           f"refused and never covered, {len(BRACE_GLOB_ASK)} that may reach gate state or the "
           f"installed HUD asked, {len(BRACE_GLOB_ORDINARY)} ordinary lines unchanged")
+
+
+# Broad coverage (review of PR #310): (kind of spelling, line, expected), the
+# allowlist the target. `<A>` is the allowlist, `<G>` its folder, `<L>` a
+# link to a folder inside it. "deny": refused, certain, never covered;
+# "ask": asked, never covered; "same": rules' own verdict and no touch (a
+# control, or a line bash does not make into a write: quoted braces stay
+# text, `IFS` does not split a literal word). Used by v2's suite too.
+_BIG = 600
+BROAD_CASES = [
+    # brace forms
+    ("brace", "cp /tmp/x {/tmp/a,{/tmp/b,{/tmp/c,<A>}}}", "deny"),
+    ("brace", "cp /tmp/x <G>/{1..9..4}{/x,/../allowlist.json}", "deny"),
+    ("brace", "cp /tmp/x <G>/{-3..-1}/../allowlist.json", "deny"),
+    ("brace", "cp /tmp/x <G>/{01..03}/../allowlist.json", "deny"),
+    ("brace", "cp /tmp/x <G>/{a..c..2}/../allowlist.json", "deny"),
+    ("brace", "cp /tmp/x $'<A>'", "deny"),
+    ("brace", "cp /tmp/x ${a,b}<G>", "ask"),            # `${a,b}` is a parameter, maybe empty
+    ("brace", "cp /tmp/x $'{/tmp/y,<A>}'", "same"),
+    ("brace", "cp /tmp/x '{/tmp/y,<A>}'", "same"),
+    ("brace", "cp /tmp/x \\{/tmp/y,<A>\\}", "same"),
+    ("brace", 'cp /tmp/x "{/tmp/y,<A>}"', "same"),
+    # One word to bash (`{0a..2},<A>}`); the other reading, in which <A> is
+    # the destination, is judged too (`_brace_readings`): wider than bash.
+    ("brace", "cp /tmp/x {0a..2},<A>}", "deny"),
+    # shell state set earlier on the line
+    ("state", "set -f; cp /tmp/x <G>/allow*", "deny"),
+    ("state", "set -f; cp /tmp/x {/tmp/y,<A>}", "deny"),
+    ("state", "shopt -s extglob; cp /tmp/x <G>/@(allowlist).json", "deny"),
+    ("state", "shopt -s dotglob nullglob; cp /tmp/x <G>/*.json", "deny"),
+    ("state", "shopt -s globstar; cp /tmp/x ~/**/allowlist.json", "deny"),
+    ("state", "GLOBIGNORE=x; cp /tmp/x <G>/allow*", "deny"),
+    ("state", "IFS=/; X=a/b; cp /tmp/x $X <A>", "deny"),
+    ("state", "IFS=:; cp /tmp/x /tmp/y:<A>", "same"),
+    ("state", "alias c=cp; c /tmp/x <A>", "ask"),
+    ("state", 'f() { cp /tmp/x "$1"; }; f <A>', "ask"),
+    ("state", "function f { cp /tmp/x <A>; }; f", "deny"),
+    # indirection
+    ("indirect", "eval cp /tmp/x {/tmp/y,<A>}", "deny"),
+    ("indirect", "eval 'cp /tmp/x <A>'", "deny"),
+    ("indirect", "sh -c \"$(printf 'cp /tmp/x %s' <A>)\"", "ask"),
+    ("indirect", "echo <A> | xargs -I{} cp /tmp/x {}", "ask"),
+    ("indirect", "find <G> -name allowlist.json -exec cp /tmp/x {} \\;", "deny"),
+    ("indirect", "cat <(cp /tmp/x <A>)", "deny"),
+    ("indirect", "tee >(cat) < /tmp/x > <A>", "deny"),
+    ("indirect", "bash <<< 'cp /tmp/x {/tmp/y,<A>}'", "deny"),
+    ("indirect", "sh <<EOF\ncp /tmp/x <A>\nEOF", "deny"),
+    # less common writers
+    ("writer", "cp --backup=numbered /tmp/x <A>", "deny"),
+    ("writer", "cp --suffix=.old -b /tmp/x <A>", "deny"),
+    ("writer", "install -D /tmp/x <A>", "deny"),
+    ("writer", "ln -sfT /tmp/x <A>", "deny"),
+    ("writer", "mv -T /tmp/x <A>", "deny"),
+    ("writer", "rsync --link-dest=/tmp /tmp/x <A>", "deny"),
+    ("writer", "tar -xf /tmp/a.tar --transform 's,^,x,' -C <G>", "ask"),
+    ("writer", "echo x | cpio -p <G>", "ask"),
+    ("writer", "patch -o <A> /tmp/f /tmp/p", "deny"),
+    ("writer", "sed -i.bak s/a/b/ <A>", "deny"),
+    ("writer", "truncate -s 0 <A>", "deny"),
+    ("writer", "touch -r /tmp/x <A>", "deny"),
+    ("writer", "dd if=/tmp/x of=<A>", "deny"),
+    ("writer", "tee -a <A> < /tmp/x", "deny"),
+    ("writer", "echo x >> <A>", "deny"),
+    ("writer", "exec 3> <A>", "deny"),
+    ("writer", "exec 3>><A>; echo x >&3", "deny"),
+    # path spellings
+    ("path", "cp /tmp/x <L>/../allowlist.json", "deny"),
+    ("path", "cp /tmp/x <L>*/../allowlist.json", "deny"),
+    ("path", "cp /tmp/x <G>/./allowlist.json", "deny"),
+    ("path", "cp /tmp/x <G>//allowlist.json", "deny"),
+    ("path", "cp /tmp/x <AA>", "deny"),                  # every `/` doubled
+    ("path", "cp /tmp/x <A>/.", "deny"),
+    ("path", "cp -t <G>/. /tmp/allowlist.json", "deny"),
+    ("path", "cd -P <L>/.. && cp /tmp/x allowlist.json", "deny"),
+    ("path", "pushd <G> && cp /tmp/x allowlist.json", "deny"),
+    ("path", "cd <G> && cp /tmp/x ~+/allowlist.json", "deny"),
+    ("path", "cd <G> && cp /tmp/x $PWD/allowlist.json", "deny"),
+    ("path", "cp /tmp/x $HOME/.config/jarvis/allowlist.json", "deny"),
+    ("path", "cp /tmp/x ${HOME}/.config/jarvis/allowlist.json", "deny"),
+    ("path", "cp /tmp/x ~someone/.config/jarvis/allowlist.json", "deny"),
+    ("path", "cd <G> && cp /tmp/x ~-/allowlist.json", "ask"),
+    # size: the target in the middle of, or at the end of, a big expansion
+    ("size", "cp /tmp/x <G>/{" + ",".join(f"f{i}" for i in range(1020)) + ",allowlist.json}{,}",
+     "deny"),
+    ("size", "tee {" + ",".join([f"/tmp/f{i}" for i in range(_BIG)] + ["<A>"]
+                                + [f"/tmp/g{i}" for i in range(_BIG)]) + "}", "deny"),
+    ("size", "tee <G>/{" + ",".join(f"f{i}" for i in range(1022)) + "}.json <A>", "deny"),
+    ("size", "tee {" + ",".join(f"/tmp/f{i}" for i in range(1030)) + "} <A>", "deny"),
+    ("size", "cp /tmp/x {" + ",".join([f"/tmp/f{i}" for i in range(_BIG)] + ["<A>"]
+                                      + [f"/tmp/g{i}" for i in range(_BIG)]) + "}", "ask"),
+    # controls: ordinary work keeps rules' own verdict
+    ("control", "cp src/{a,b}.py /tmp/dst/", "same"),
+    ("control", "mkdir -p build/{x,y}", "same"),
+    ("control", "echo {1..3}", "same"),
+    ("control", "ls src/**/*.py", "same"),
+    ("control", "set -f; ls *", "same"),
+    ("control", "shopt -s globstar; ls src/**", "same"),
+    ("control", "eval echo hi", "same"),
+    ("control", "find . -name '*.pyc' -delete", "same"),
+    ("control", "cp --backup src/a.py /tmp/b.py", "same"),
+    ("control", "install -D src/a.py /tmp/out/a.py", "same"),
+    ("control", "tee -a /tmp/log < /tmp/x", "same"),
+    ("control", "echo x >> /tmp/log", "same"),
+    ("control", "cat <A>", "same"),
+    ("control", "sed -n 1p <A>", "same"),
+    ("control", "cat <G>/{allowlist,models}.json", "same"),
+    ("control", "cp <G>/{allowlist,models}.json /tmp/backup/", "same"),
+]
+
+
+def broad_case_lines(allow: Path, link: Path) -> list[tuple[str, str, str]]:
+    """`BROAD_CASES` with their placeholders filled."""
+    fill = {"<AA>": str(allow).replace("/", "//"), "<A>": str(allow),
+            "<G>": str(allow.parent), "<L>": str(link)}
+    out = []
+    for kind, line, expected in BROAD_CASES:
+        for key, value in fill.items():
+            line = line.replace(key, value)
+        out.append((kind, line, expected))
+    return out
+
+
+def brace_glob_broad_checks() -> None:
+    from jarvis import config, permissions, protected_state
+
+    with gate_home() as home:
+        gate = config.ALLOWLIST_PATH.parent
+        (gate / "sub").mkdir()
+        link = home / "sub-link"
+        link.symlink_to(gate / "sub", target_is_directory=True)
+        counts: dict[str, int] = {}
+        for kind, line, expected in broad_case_lines(config.ALLOWLIST_PATH, link):
+            label = f"[{kind}] {line[:120]}"
+            touch = protected_state.command_touch(line)
+            verdict = permissions.static_verdict(line).decision
+            covered = permissions.allows("run_command", {"command": line})
+            if expected == "deny":
+                assert verdict == rules.DENY and touch is not None and touch.certain, (
+                    label, verdict, touch)
+                assert not covered, label
+            elif expected == "ask":
+                assert verdict == rules.ASK and touch is not None, (label, verdict, touch)
+                assert not covered, label
+            else:
+                assert touch is None, (label, touch)
+                assert verdict == rules.decide(line).decision, (label, verdict)
+            counts[expected] = counts.get(expected, 0) + 1
+    print(f"ok  brace and glob, broad: {counts.get('deny', 0)} refused, {counts.get('ask', 0)} "
+          f"asked, {counts.get('same', 0)} controls unchanged, across brace forms, shell state, "
+          "indirection, writers, path spellings and size")
+
+
+def glob_walk_bound_checks() -> None:
+    """Review of PR #310, HIGH: a glob through a folder too large to list to
+    the end (more than `_GLOB_FS_ENTRIES` entries) holding a link into the
+    gate's folder was read as holding nothing — `cp /tmp/x <crowd>/*/
+    allowlist.json` ran unasked. A write through a walk cut short is asked;
+    a read through one is never walked. MED: the walk is bounded per line
+    (entries and wall clock) and reused across a permit's calls."""
+    import time
+
+    from jarvis import config, permissions, protected_state as S
+    from tests import loadclock
+
+    assert (S._GLOB_FS_ENTRIES, S._GLOB_FS_PATHS, S._GLOB_FS_MATCHES, S._GLOB_LINE_ENTRIES,
+            S._GLOB_LINE_SECONDS, S._GLOB_TTL) == (4096, 1024, 256, 16384, 0.05, 2.0)
+    loadclock.pinned()
+    with gate_home() as home:
+        gate = config.ALLOWLIST_PATH.parent
+        cases = 0
+        # The link early, in the middle and late among the folder's entries:
+        # scandir's order is the file system's, so several names are tried.
+        for name in ("aaaa", "m0000", "zzzz", "~link"):
+            crowd = home / f"crowd-{name.strip('~')}"
+            crowd.mkdir()
+            for i in range(S._GLOB_FS_ENTRIES + 200):
+                (crowd / f"f{i:05d}").touch()
+            (crowd / name).symlink_to(gate, target_is_directory=True)
+            S._WALKS.clear()
+            for line in (f"cp /tmp/x {crowd}/*/allowlist.json",
+                         f"cp /tmp/x {crowd}/{name[0]}*/allowlist.json",
+                         f"cp /tmp/x {crowd}/[{name[0]}]*/allowlist.json",
+                         f"echo '[]' > {crowd}/*/allowlist.json",
+                         f"tee {crowd}/?*/allowlist.json"):
+                touch = S.command_touch(line)
+                assert touch is not None, (name, line)
+                assert permissions.static_verdict(line).decision != rules.ALLOW, (name, line)
+                assert not permissions.allows("run_command", {"command": line}), (name, line)
+                cases += 1
+            # A read through the same crowd is not walked, and keeps rules' verdict.
+            line = f"cat {crowd}/*/allowlist.json"
+            assert S.command_touch(line) is None, line
+            assert permissions.static_verdict(line).decision == rules.decide(line).decision
+            shutil_rmtree(crowd)
+        # Bounded per line, wall clock: many writing globs over a big tree
+        # take about the line's allowance once, and nothing the second time.
+        tree = home / "tree"
+        for i in range(60):
+            for j in range(60):
+                (tree / f"d{i}" / f"e{j}").mkdir(parents=True)
+        line = "touch " + " ".join(f"{tree}/**/x{k}" for k in range(20))
+        S._WALKS.clear()
+        start = time.monotonic()
+        first = S.command_touches(line)
+        took = time.monotonic() - start
+        assert any(t.opaque for t in first), first[:2]
+        assert took < S._GLOB_LINE_SECONDS + 1.0, took        # the deadline, and generous slack
+        start = time.monotonic()
+        for _ in range(3):                                   # a permit's other calls
+            permissions.static_verdict(line)
+        again = (time.monotonic() - start) / 3
+        assert again < took, (again, took)
+        # Reads are never walked: CPU time at idle speed, as the cost checks.
+        reader = "ls " + " ".join(f"{tree}/**/x{k}" for k in range(40))
+        held = min((loadclock.judge(*[loadclock.cpu(S.command_touches, reader)[0]],
+                                    0.05) for _ in range(3)), key=lambda h: h.idle)
+        assert held.idle < 0.05, f"a reader's globs took {held}"
+    print(f"ok  glob walk: {cases} writes through a folder too large to list (the link at four "
+          f"names) asked, never run; reads never walked; one line's walk {took * 1000:.0f} ms, "
+          f"reused at {again * 1000:.1f} ms; {len(BROAD_CASES)} broad cases above")
+
+
+def shutil_rmtree(path: Path) -> None:
+    import shutil
+
+    shutil.rmtree(path, ignore_errors=True)
 
 
 def main() -> int:
@@ -4342,6 +4581,8 @@ def main() -> int:
     gate_state_complexity_checks()
     brace_glob_unit_checks()
     brace_glob_gate_checks()
+    brace_glob_broad_checks()
+    glob_walk_bound_checks()
     daemon_and_rebuild_ops_checks()
     # First of the kill-rule sections: with the regex bound broken it fails
     # on its first slow pattern, where the others would hang on theirs.
