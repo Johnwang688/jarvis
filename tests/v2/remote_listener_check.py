@@ -364,7 +364,7 @@ class HostAndOrigin(Remote):
             self.assertEqual(status, 401, method)
             status, _, _ = self.get("/m/", method=method, origin=ORIGIN)
             self.assertEqual(status, 404, method)
-        # A body is never read: still the same answers.
+        # The body is read first (tests/v2/remote_auth_check.py `Bodies`): still the same answers.
         status, _, _ = raw(self.port, "POST", "/m/api/inbox", [("Host", HOST)], body=b"{}")
         self.assertEqual(status, 403)
         status, _, _ = raw(self.port, "POST", "/m/api/inbox", [("Host", HOST), ("Origin", ORIGIN)],
@@ -456,6 +456,10 @@ class Shell(Remote):
         status, headers, body = self.get("/m/")
         self.assertEqual(status, 200)
         self.assertIn("Jarvis · phone, not paired yet", body.decode())
+        # `/m/pair` is the same page: where a pairing QR code lands (P-2).
+        status, _, pair = self.get("/m/pair")
+        self.assertEqual((status, pair), (200, body))
+        self.assertEqual(self.get("/m/pair/")[0], 404)
         status, headers, body = self.get("/m/", method="HEAD")
         self.assertEqual((status, body), (200, b""))
         self.assertEqual(int(headers["Content-Length"]), len(PAGE.encode()))
@@ -663,7 +667,8 @@ class RealBuild(Base):
             status, _, page = raw(port, "GET", "/m/", [("Host", HOST)])
             self.assertEqual(status, 200)
             text = page.decode()
-            self.assertIn("Jarvis · phone, not paired yet", text)
+            self.assertIn("Jarvis · phone", text)
+            self.assertIn('id="app"', text)
             refs = re.findall(r'\s(?:src|href)="([^"]+)"', text)
             self.assertTrue(any(r.startswith("/m/assets/") for r in refs), refs)
             for ref in refs:

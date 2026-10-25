@@ -805,6 +805,61 @@ class OwnerOnly(Base):
             for needle in self.INBOX_SOURCE:
                 self.assertNotIn(needle, text, f"{module.__name__} names {needle}")
 
+    # The phone's pairing window and paired passkeys (phone design PH-6,
+    # P-2): the same rule. No tool, MCP catalog entry or session tool names
+    # them, and nothing a tool runs names the HUD routes, the phone's API,
+    # the module behind both or the files it keeps.
+    PHONE_NAME = re.compile(r"passkey|pairing|pair_|_pair|remote_auth|phone", re.I)
+    # `files.py` names `jarvis/v2/remote_auth.py` in SELF_PROTECTED and the
+    # two files in `_protected_state_paths`, to refuse writes to them: that
+    # function's body is set aside (`models_check.guarded_text`'s rule),
+    # and the module is matched as an import or an attribute, never `.py`.
+    PHONE_SOURCE = (r"""/phone["'/?]""", r"/m/api", r"\bremote_auth\.(?!py\b)", r"import remote_auth",
+                    r"from \.+remote_auth", r"passkeys\.json", r"sessions\.json", r"__Host-jarvis_m",
+                    r"open_window", r"pair_options", r"pair_verify", r"login_verify")
+
+    def test_no_tool_reaches_the_phone_pairing(self):
+        from jarvis import tools
+        from jarvis.v2 import bridge, chat_relay, mcp, mcp_catalog, session_tools
+        from jarvis.v2.providers import fastpath
+        import jarvis.v2.tools as v2tools
+        v2_names = {name for name, entry in tools.REGISTRY.items()
+                    if getattr(getattr(entry, "func", None), "__module__", "").startswith("jarvis.v2.tools")}
+        reachable = (set(fastpath.FAST_TOOLS) | set(mcp.MCP_TOOLS) | set(mcp_catalog.MCP_TOOLS)
+                     | set(session_tools.SESSION_TOOLS) | v2_names | set(tools.REGISTRY))
+        self.assertTrue({"terminal_read", "chat_send", "task_propose", "run_command"} <= reachable, reachable)
+        for name in sorted(reachable):
+            self.assertIsNone(self.PHONE_NAME.search(name), name)
+        sources = [v2tools, mcp, mcp_catalog, session_tools, bridge, chat_relay, fastpath]
+        for name in reachable:
+            func = getattr(tools.REGISTRY.get(name), "func", None)
+            if func is not None:
+                sources.append(inspect.getmodule(func))
+        from jarvis.v2.discord import gateway
+        sources.append(gateway)
+        from jarvis.tools import files
+        exempt = inspect.getsource(files._protected_state_paths)
+        for module in {m for m in sources if m is not None}:
+            text = inspect.getsource(module)
+            if module is files:
+                self.assertIn(exempt, text)
+                text = text.replace(exempt, "")
+            for needle in self.PHONE_SOURCE:
+                self.assertIsNone(re.search(needle, text), f"{module.__name__} names {needle}")
+
+    def test_the_phone_routes_refuse_every_client_but_the_hud(self):
+        for method, path, body in (("GET", "/phone", None), ("POST", "/phone/pair", {}),
+                                   ("POST", "/phone/pair/cancel", {}),
+                                   ("POST", "/phone/passkeys/k-000000000000/revoke", {}),
+                                   ("POST", "/phone/sessions/s-0000000000000000/end", {})):
+            with self.subTest(path=path):
+                self.request(method, path, body, 403)
+                self.request(method, path, body, 403, port=self.daemon.face_port)
+                self.request(method, path, body, 403, origin=f"http://127.0.0.1:{self.daemon.port}")
+        view = self.owner("GET", "/phone")
+        self.assertEqual(view["passkeys"], [])
+        self.assertFalse(view["pairing"]["open"])
+
     def test_the_inbox_routes_refuse_every_client_but_the_hud(self):
         for method, path, body in (("GET", "/inbox", None),
                                    ("POST", "/inbox/appr:x/answer", {"decision": "allow"}),

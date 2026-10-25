@@ -65,6 +65,7 @@ import { devservers } from "./state/devserverClient";
 import type { DevAttempt, PendingDev } from "./state/devservers";
 import { DevServerPrompts, type DevTarget } from "./components/DevServerPrompt";
 import { BrowserSettings } from "./components/BrowserSettings";
+import { PhoneSettings } from "./components/PhoneSettings";
 import { cleanTitle } from "./lib/remote";
 import { judgeBrowserUrl } from "./lib/browser";
 import { daemonPortsNow } from "./state/daemonPorts";
@@ -4811,6 +4812,7 @@ export default function App() {
             {settingsSection === "Routing" ? <><RoutingSettings route={state.route} />
               <DecisionsLog route={state.route} /></> : null}
             {settingsSection === "Browser" ? <BrowserSettings blocked={blocked} /> : null}
+            {settingsSection === "Phone" ? <PhoneSettings blocked={blocked} /> : null}
             {settingsSection === "Archive" ? (
               <ArchiveView embedded blocked={blocked}
                 version={lifecycle}

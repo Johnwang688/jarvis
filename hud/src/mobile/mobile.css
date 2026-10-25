@@ -19,6 +19,10 @@
   --accent: #6fc3df;
   --amber: #fbbf24;
   --red: #f87171;
+  --green: #6dd08f;
+  --bg-2: #222221;
+  --bg-3: #2c2c2a;
+  --border-strong: #46453f;
   --radius: 6px;
 }
 
@@ -47,3 +51,37 @@ html, body {
   color: var(--text-2);
   text-align: center;
 }
+
+/* P-2: one card at a time (pairing, signing in, signed in). Buttons are
+   at least 48 px tall, a thumb's width. */
+.card {
+  width: 100%;
+  max-width: 420px;
+  padding: 20px 18px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-1);
+}
+
+.card.ok { border-color: var(--green); }
+.card.warn { border-color: var(--amber); }
+
+.card-title { font-size: 20px; font-weight: 600; margin-bottom: 8px; }
+.card-line { color: var(--text-2); margin: 8px 0; overflow-wrap: anywhere; }
+.card.warn .card-line:last-of-type { color: var(--amber); }
+
+.btn {
+  display: block;
+  width: 100%;
+  min-height: 48px;
+  margin-top: 16px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--bg-2);
+  color: var(--text);
+  font: inherit;
+}
+
+.btn.primary { border-color: var(--accent); }
+.btn:active:not(:disabled) { background: var(--bg-3); }
+.btn:disabled { opacity: 0.5; }

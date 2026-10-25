@@ -706,6 +706,156 @@ VEXCOM_DENIED = ("it names vexcom, VEX's tool for downloading to and talking to 
                  "(build with vexbuild instead)")
 
 
+# --- deny: anything that reaches the phone's remote listener (phone design §4) --
+#
+# The remote listener (`jarvis/v2/remote_listener.py`, `config.REMOTE_PORT`,
+# 8408 by default, loopback only) is the phone's way in, through `tailscale
+# serve`. Its owner test is a passkey session (`remote_auth.py`), and an
+# agent holds no cookie, so a request from an agent's shell is a 401 — but
+# its pairing routes take a one-time code from the HUD's screen, and nothing
+# an agent should do needs the port at all. So, the same treatment as the
+# daemon-kill rule (design §4, "The agent path"): an agent command line that
+# **names the remote listener on this machine** is DENY, never put to the
+# owner as a yes/no.
+#
+# What counts (`remote_reading`), on every spelling `_spellings` reads
+# (quotes, escapes, `${X:-…}`, ANSI-C `$'…'`, braces and brackets removed),
+# **anywhere on the line, whatever program runs it** — an argument, an
+# option value (`pip --index-url`, `npm --registry`, `git -c http.proxy=`,
+# `ssh -L`), a variable's value, a here-doc or here-string, `-c`/`-e` source,
+# a substitution, backticks, a function, an alias, `eval`:
+#
+#   - **a loopback host joined to the port**: `<loopback>:<port>`, bare or in
+#     a URL (`localhost:8408`, `http://127.0.0.1:8408/`, `[::1]:8408`,
+#     `0x7f000001:8408`, `9000:localhost:8408`), where loopback is
+#     `localhost`, `127.x`, `[::1]`/`::1`, `0.0.0.0`, `0x7f…`, `2130706433`,
+#     `0177.…`, `::ffff:`, `ip6-localhost`, `//0`, or `$…REMOTE_HOST`, and
+#     the port is `8408` or the configured `REMOTE_PORT` — or an expansion
+#     (`localhost:$P`, `localhost:${JARVIS_REMOTE_PORT}`) when the line names
+#     the port elsewhere (`P=8408; …`) or the expansion is `REMOTE_PORT`'s;
+#   - **a socket path to it**: bash's `/dev/tcp/<host>/<port>` (`/dev/udp`)
+#     and gawk's `/inet/tcp/<lport>/<host>/<port>`;
+#   - **the port, a loopback spelling and a connector, apart**: the line names
+#     the port (the number of its own, or `REMOTE_PORT` *expanded*), holds a
+#     loopback spelling, and holds a client or connecting library's word
+#     (`nc 127.1 8408`, `socket.create_connection(('127.0.0.1', 8408))`,
+#     `TCPSocket.new(…)`, `createConnection(8408, …)`, `telnet`, `ssh`, …);
+#   - **the route prefix** `/m/api` together with a loopback spelling or a
+#     `ts.net` name: a URL to the phone's API on this machine, any port.
+#
+# Not refused, the bare mentions: the port number alone (`grep -rn 8408`,
+# `sed -i s/8408/8409/`), `:8408` with no host (`lsof -i :8408`, `grep
+# :8408`), `REMOTE_PORT` as a word (`grep -n REMOTE_PORT`, an assignment
+# `JARVIS_REMOTE_PORT=0`), a client word with no loopback port (`git fetch`).
+# **A loopback URL with the port inside text is refused too** (`git commit
+# -m "… 127.0.0.1:8408"`, `echo localhost:8408`): exempting "text" would have
+# to know which programs only print, and a substitution inside the message
+# runs; the model rephrases ("port 8408 on loopback").
+#
+# Port arithmetic (`$((8400+8))`), a port or host assembled at run time, a
+# script file that holds the URL and a hosts-file alias get past it; those
+# stay ASK or ALLOW by the other rules.
+#
+# **An accident guard, not a boundary**, exactly as the DENY note above
+# says. The boundary is the session cookie, which lives only in the phone's
+# browser.
+REMOTE_DENIED = ("it reaches the phone's remote listener on this machine (its port or its /m/api "
+                 "routes); only the owner's phone reaches it, through tailscale serve, never an "
+                 "agent's command")
+_REMOTE_LOOPBACK = re.compile(
+    r"""(?<![\w-])localhost(?![\w-])|(?<![\w-])ip6-(?:localhost|loopback)(?![\w-])"""
+    r"""|(?<![\w.])127(?:\.\d{1,3}){1,3}(?![\d])"""
+    r"""|(?<![\w.])0\.0\.0\.0(?![\d])|//0(?=[:/])|//\[?::\]?(?=[:/\]])"""
+    r"""|(?<![\w.])0x7f[0-9a-f]*(?![\w])|(?<![\w.])0177(?:\.\d+){0,3}(?![\d])"""
+    r"""|(?<![\d])2130706433(?![\d])|(?<![\d])017700000001(?![\d])"""
+    r"""|(?<![\w:])::1(?![\w:])|::ffff:|(?<![\w:])(?:0:){7}0*1(?![\w:])""",
+    re.I)
+# A client or connecting library's word, anywhere on the line.
+_REMOTE_CONNECTORS = re.compile(
+    # `(?<![\w-])`, not `[\w.-]`: `require("net").createConnection` is a call after a dot.
+    r"(?<![\w-])(?:curl|curlie|wget|wget2|nc|ncat|netcat|socat|telnet|https?|xh|xhs|httpie|httpx|"
+    r"aria2c|websocat|lynx|links|w3m|openssl|s_client|grpcurl|nmap|ssh|autossh|sshuttle|"
+    r"invoke-webrequest|invoke-restmethod|iwr|irm|socket|tcpsocket|udpsocket|urllib|urllib3|requests|"
+    r"aiohttp|http\.client|httplib|fetch|xmlhttprequest|createconnection|net\.connect|websocket|"
+    r"open-uri|net::http|lwp|io::socket|fsockopen|file_get_contents|deno\.connect|bun\.connect|"
+    r"connect|urlopen|playwright|chromium|puppeteer)(?![\w-])"
+    r"|/dev/(?:tcp|udp)/|/inet6?/(?:tcp|udp)/|(?<![\w-])-M[A-Za-z]", re.I)
+# `REMOTE_PORT` expanded, never the bare word.
+_REMOTE_EXPANSION = re.compile(
+    r"\$\{?[#!]?\w*REMOTE_PORT\b|environ(?:\.get)?\s*[\[(]\s*['\"]\w*REMOTE_PORT"
+    r"|getenv\s*\(\s*['\"]\w*REMOTE_PORT|process\.env\.\w*REMOTE_PORT|ENV\[\s*['\"]\w*REMOTE_PORT")
+_REMOTE_API = re.compile(r"/m/api(?![\w-])")
+_TS_NET = re.compile(r"\.ts\.net(?![\w-])", re.I)
+_HOST_EXPANSION = r"\$\{?\w*REMOTE_HOST\}?"
+
+
+def _remote_ports() -> set[int]:
+    from . import config
+    ports = {8408}
+    try:
+        ports.add(int(config.REMOTE_PORT))
+    except (TypeError, ValueError):
+        pass
+    return ports
+
+
+def remote_reading(command: str) -> str | None:
+    """REMOTE_DENIED if this line reaches the phone's remote listener on this
+    machine (note above), else None. Pure text work; nothing runs. Short
+    lines are cached, as the vex reading's are (keyed on the ports too,
+    which are read from config per call)."""
+    command = command or ""
+    ports = tuple(sorted(_remote_ports()))
+    if len(command) <= 16384:
+        return _remote_reading_cached(command, ports)
+    return _remote_reading_uncached(command, ports)
+
+
+@functools.lru_cache(maxsize=256)
+def _remote_reading_cached(command: str, ports: tuple[int, ...]) -> str | None:
+    return _remote_reading_uncached(command, ports)
+
+
+@functools.lru_cache(maxsize=8)
+def _remote_patterns(ports: tuple[int, ...]):
+    alt = "|".join(str(p) for p in ports)
+    loop = rf"(?:{_REMOTE_LOOPBACK.pattern}|{_HOST_EXPANSION})"
+    number = re.compile(rf"(?<!\d)(?:{alt})(?!\d)")
+    joined = re.compile(rf"{loop}\]?:(?:{alt})(?!\d)", re.I)
+    joined_expansion = re.compile(rf"{loop}\]?:\$\{{?[A-Za-z_]\w*", re.I)
+    sockets = re.compile(rf"/dev/(?:tcp|udp)/[^/\s'\"]+/(?:(?:{alt})(?!\d)|\$\{{?[A-Za-z_]\w*)"
+                         rf"|/inet6?/(?:tcp|udp)/[^/\s'\"]*/[^/\s'\"]+/(?:(?:{alt})(?!\d)|\$\{{?[A-Za-z_]\w*)")
+    return number, joined, joined_expansion, sockets
+
+
+def _remote_reading_uncached(command: str, ports: tuple[int, ...]) -> str | None:
+    text = join_continuations(command)
+    if not text.strip():
+        return None
+    number, joined, joined_expansion, sockets = _remote_patterns(ports)
+    spelled = _spellings(text)
+    named = any(number.search(v) or _REMOTE_EXPANSION.search(v) for v in spelled)
+    for v in spelled:
+        loopback = _REMOTE_LOOPBACK.search(v) is not None
+        # The route prefix to this machine.
+        if _REMOTE_API.search(v) and (loopback or _TS_NET.search(v)):
+            return REMOTE_DENIED
+        if not named:
+            continue
+        # A loopback host joined to the port, whatever program holds it.
+        if joined.search(v):
+            return REMOTE_DENIED
+        if joined_expansion.search(v):
+            return REMOTE_DENIED
+        # A socket path to it.
+        if sockets.search(v):
+            return REMOTE_DENIED
+        # The port, a loopback spelling and a connector, apart.
+        if loopback and _REMOTE_CONNECTORS.search(v):
+            return REMOTE_DENIED
+    return None
+
+
 # --- allow: runs without asking ---------------------------------------------
 
 _GIT_ALLOWED = {
@@ -4496,6 +4646,11 @@ def _decide(command: str) -> Verdict:
     secret = secret_service_reading(raw)
     if secret:
         return Verdict(DENY, secret)
+    # The phone's remote listener, on the raw line likewise (`remote_reading`,
+    # phone design §4's agent path).
+    remote = remote_reading(raw)
+    if remote:
+        return Verdict(DENY, remote)
     if "\x00" in raw:
         # No shell can be handed a NUL byte (the line could not run as
         # written), and the readers that resolve paths raise on one: too

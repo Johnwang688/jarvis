@@ -1212,6 +1212,182 @@ def secret_service_checks() -> None:
           f"{len(SECRET_SERVICE_ORDINARY)} ordinary lines not refused")
 
 
+# The phone's remote listener (phone design §4, "The agent path", P-2): a line
+# that names the listener on this machine is DENY, the daemon-kill rule's
+# treatment. Shared with tests/v2/permissions_check.py (layer-1 parity).
+REMOTE_LISTENER_DENY = (
+    "curl http://127.0.0.1:8408/m/api/me",
+    "curl -s localhost:8408/m/",
+    "curl -X POST -H 'Origin: https://box.tail.ts.net' http://127.0.0.1:8408/m/api/pair/options",
+    'curl "http://[::1]:8408/m/api/login/options"',
+    "curl http://[::ffff:127.0.0.1]:8408/",
+    "curl http://0x7f000001:8408/m/",
+    "curl http://2130706433:8408/m/",
+    "curl http://0177.0.0.1:8408/",
+    "curl http://127.1:8408/",
+    "curl http://0:8408/",
+    "curl http://0.0.0.0:8408/m/api/me",
+    "curl http://ip6-localhost:8408/",
+    "wget -qO- http://localhost:8408/m/",
+    "http POST localhost:8408/m/api/login/options",
+    "nc 127.0.0.1 8408",
+    "nc -z localhost 8408",
+    "socat - TCP:127.0.0.1:8408",
+    "telnet localhost 8408",
+    "openssl s_client -connect 127.0.0.1:8408",
+    "bash -c 'exec 3<>/dev/tcp/127.0.0.1/8408; cat <&3'",
+    "exec 3<>/dev/tcp/localhost/8408",
+    # an env-var port
+    "P=8408; curl http://localhost:$P/m/api/me",
+    "export P=8408 && curl localhost:${P}/m/",
+    "curl http://localhost:$JARVIS_REMOTE_PORT/m/api/me",
+    'curl "http://127.0.0.1:${JARVIS_REMOTE_PORT:-8408}/m/"',
+    # --unix-socket is irrelevant: the listener is TCP, and naming it is enough
+    "curl --unix-socket /tmp/jarvis.sock http://localhost:8408/m/api/me",
+    "curl --unix-socket /tmp/jarvis.sock http://localhost/m/api/me",
+    # Python, Node and friends, inline
+    "python3 -c \"import urllib.request as u; print(u.urlopen('http://127.0.0.1:8408/m/api/me').read())\"",
+    "python3 -c \"import socket; s = socket.create_connection(('127.0.0.1', 8408)); s.send(b'GET / HTTP/1.0')\"",
+    "python3 -c \"import http.client; c = http.client.HTTPConnection('localhost', 8408)\"",
+    "python3 -c \"import requests; requests.post('http://localhost:8408/m/api/login/verify', json={})\"",
+    "node -e \"fetch('http://127.0.0.1:8408/m/api/me').then(r => r.text())\"",
+    "uv run python -c \"import httpx; httpx.get('http://localhost:8408/m/')\"",
+    # quoting, escapes and expansions that a shell reads the same
+    "curl http://lo''calhost:84'08'/m/",
+    "curl http://127.0.0.1:84\"\"08/",
+    "curl http://localhost:84{08}/",
+    "curl $'http://127.0.0.1:\\x38408/'",
+    "sh -c \"curl localhost:8408\"",
+    "nohup curl localhost:8408 &",
+    # the route prefix in a URL to this machine, whatever port it names
+    "curl http://127.0.0.1:8402/m/api/me",
+    "curl -X POST localhost/m/api/logout",
+    "curl https://box.tail1234.ts.net/m/api/me",
+    "cat > /tmp/x.sh <<EOF\ncurl localhost:8408/m/api/me\nEOF",
+    # the narrowed reading (review of PR #306) keeps these
+    "xh localhost:8408/m/", "wget2 http://127.0.0.1:8408/",
+    "bash <<EOF\ncurl localhost:8408\nEOF",
+    "python3 -c \"import os; os.system('curl localhost:8408')\"",
+    "env P=8408 sh -c 'curl localhost:$P'",
+    "timeout 5 nc 127.0.0.1 8408 < /dev/null",
+    "python3 -c \"import os, urllib.request as u; u.urlopen('http://localhost:' + os.environ['JARVIS_REMOTE_PORT'])\"",
+    # the second review of PR #306: real reaches the narrowed reading let
+    # through (a loopback host joined to the port is refused whatever runs)
+    "pip install --index-url http://localhost:8408/simple foo",
+    "pip download --index-url http://localhost:8408/simple foo",
+    "npm install --registry http://127.0.0.1:8408/ foo",
+    "git -c http.proxy=http://127.0.0.1:8408 fetch origin",
+    'sh -c "$(echo curl http://127.0.0.1:8408/)"',
+    "`curl http://127.0.0.1:8408/`",
+    "f(){ curl http://127.0.0.1:8408/; }; f",
+    "alias x='curl http://127.0.0.1:8408/'; x",
+    "builtin eval 'curl http://127.0.0.1:8408/'",
+    "python3 - <<EOF\nimport urllib.request\nurllib.request.urlopen('http://127.0.0.1:8408/')\nEOF",
+    "node - <<EOF\nfetch('http://127.0.0.1:8408/')\nEOF",
+    "URL=http://localhost:8408/m/; curl $URL",
+    'U=localhost:8408 && curl "$U"',
+    "xargs curl <<< http://localhost:8408/",
+    "httpx http://localhost:8408/",
+    "ssh -L 9000:localhost:8408 host",
+    "ssh -R 8408:localhost:22 host -p 2222 && ssh -L 1:127.0.0.1:8408 h",
+    "perl -MLWP::Simple -e 'get(\"http://127.0.0.1:8408/\")'",
+    "perl -MIO::Socket::INET -e 'IO::Socket::INET->new(PeerAddr => \"127.0.0.1\", PeerPort => 8408)'",
+    "ruby -rsocket -e 'TCPSocket.new(\"127.0.0.1\",8408)'",
+    "node -e 'require(\"net\").createConnection(8408,\"127.0.0.1\")'",
+    "awk 'BEGIN{ (\"/inet/tcp/0/127.0.0.1/8408\") }'",
+    # each branch alone: a loopback host joined to an expansion of the port
+    # (pip is no client), and a socket path to any host
+    "P=8408; npm config set proxy localhost:$P",
+    "exec 3<>/dev/tcp/jarvis-alias/8408",
+    'curl "http://${JARVIS_REMOTE_HOST}:8408/"',
+    # chosen: a loopback host joined to the port is refused in text too
+    # (exempting "text" would have to know which programs only print)
+    'git commit -m "fix the remote listener on 127.0.0.1:8408"',
+    "echo curl localhost:8408",
+    'printf "%s\\n" "see http://localhost:8408"',
+)
+REMOTE_LISTENER_ORDINARY = (
+    "grep -rn 8408 docs",
+    "grep -rn REMOTE_PORT jarvis/",
+    "echo 8408",
+    "sed -n 8408p big.log",
+    "curl http://127.0.0.1:8405/status",
+    "curl http://localhost:84080/",
+    "curl localhost:18408",
+    "curl https://example.com/m/api",
+    "ls /m/api",
+    "python tests/v2/remote_auth_check.py",
+    "cat docs/plans/2026-10-24-phone-surface-design.md",
+    "git log --oneline -5",
+    # false positives of the first reading (review of PR #306): a client
+    # word only as an argument, the port in text, REMOTE_PORT as a word
+    "git fetch origin && grep -n REMOTE_PORT jarvis/config.py",
+    'rg -n "remote_port|fetch" jarvis/v2/daemon.py',
+    "grep -rn :8408 docs",
+    "sed -i s/8408/8409/ jarvis/config.py",
+    "lsof -i :8408",
+    "JARVIS_REMOTE_HOST=localhost JARVIS_REMOTE_PORT=0 python tests/v2/remote_auth_check.py",
+    'grep "REMOTE_PORT\\|localhost" jarvis/config.py',
+    # a client on this machine, another port, the name only as a word
+    "curl http://127.0.0.1:8405/notes/REMOTE_PORT.txt",
+    # a bare port and a bare host, not joined, with nothing that connects
+    "grep -n 8408 jarvis/config.py && grep -n localhost jarvis/config.py",
+    "git log -S8408 --oneline",
+    # a connector word and the port, but no loopback host
+    "git fetch origin && grep -rn 8408 docs",
+)
+
+
+def remote_listener_checks() -> None:
+    """The phone's remote listener (phone design §4's agent path, P-2): an
+    agent line that names it on this machine is DENY — never put to the
+    owner, never covered by an allowlist entry, never run. A configured
+    `REMOTE_PORT` counts as well as 8408. Mentions without a loopback
+    spelling, a host:port form or a network client are not refused."""
+    from jarvis import config
+    for command in REMOTE_LISTENER_DENY:
+        verdict = rules.decide(command)
+        assert verdict.decision == rules.DENY, f"{command!r}: {verdict}"
+        assert verdict.reason == rules.REMOTE_DENIED, verdict.reason
+    for command in REMOTE_LISTENER_ORDINARY:
+        verdict = rules.decide(command)
+        assert verdict.decision != rules.DENY, f"{command!r} must not be refused: {verdict}"
+    real = config.REMOTE_PORT
+    config.REMOTE_PORT = 18408
+    try:
+        for command in ("curl localhost:18408/m/api/me", "curl localhost:8408/m/", "nc 127.0.0.1 18408"):
+            assert rules.decide(command).decision == rules.DENY, command
+        assert rules.decide("curl localhost:28408").decision != rules.DENY
+    finally:
+        config.REMOTE_PORT = real
+    # Through v1's real dispatch, with an approver that says yes and an
+    # allowlist entry for every stem on the lines: nothing runs, nobody is asked.
+    asked: list[str] = []
+
+    def approver(tool, args):
+        asked.append(args.get("command", ""))
+        return True
+    approver.jarvis_human_backed = True
+    for stem in ("curl", "wget", "nc", "python3", "node", "uv", "bash", "sh", "socat",
+             "pip", "npm", "git", "ssh", "perl", "ruby", "awk", "xargs", "httpx", "echo", "printf"):
+        permissions.add_allow("run_command", {"command": stem + " x"})
+    gated = permissions.gate(approver)
+    with recorded() as ran:
+        for command in REMOTE_LISTENER_DENY:
+            out = tools.dispatch("run_command", json.dumps({"command": command, "reason": "x"}),
+                                 approve=gated)
+            assert "Refused" in out.text, (command, out.text)
+        assert not ran, f"a remote listener request ran: {ran}"
+        assert not asked, f"a remote listener request was put to the owner: {asked}"
+        tools.dispatch("run_command", json.dumps({"command": "curl http://127.0.0.1:8405/status",
+                                                  "reason": "x"}), approve=gated)
+        assert ran == ["curl http://127.0.0.1:8405/status"], ran
+    config.ALLOWLIST_PATH.unlink()
+    print(f"ok  remote listener: {len(REMOTE_LISTENER_DENY)} lines naming it refused unasked even "
+          f"when allowlisted (8408 and a configured port); {len(REMOTE_LISTENER_ORDINARY)} mentions "
+          "not refused")
+
+
 SECRET_COST_DEADLINE_S = 20.0     # the whole child, imports included; 0.1 s each at idle speed
 SECRET_COST_LINES = (
     "python3 -c 'system" + " " * 60000 + "x' secret",
@@ -3874,6 +4050,7 @@ def main() -> int:
     dispatch_checks()
     secret_service_checks()
     secret_service_cost_checks()
+    remote_listener_checks()
     background_agents_never_auto_approve_checks()
     secrets_still_win_checks()
     fetch_execute_detection_checks()

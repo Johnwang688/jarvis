@@ -408,6 +408,47 @@ Server-side log of the run: `~/.cache/jarvis-p0/findings.jsonl` on the PC.
 
 Verdict: P-0 passes. P-1 may start.
 
+### 10.2 P-2 as built (2026-10-25, phone C2)
+
+Built as the P-2 row says (`docs/notes/control-plane.md`, "The phone's
+passkeys, pairing and sessions"). Where it is more specific than the text
+above:
+
+- **A registration never signs in.** Pairing registers the passkey; the phone
+  then signs in with an assertion. With `none` attestation a registration
+  proves nothing about the private key, so only an assertion makes a session.
+- **Login options name no credential** (`allowCredentials` empty): the
+  passkey is discoverable (`residentKey: required`), and no credential id is
+  handed to whoever asks.
+- **Status codes:** a wrong, absent or expired pairing code is 401, like a bad
+  assertion; a 4th passkey is 409; an unknown, spent or expired challenge is
+  409 (§9); passkey state the daemon cannot read is 503.
+- **Revoked passkeys are kept** (at most 16, marked) so a revoked credential
+  id stays refused; the HUD lists only active ones.
+- **The 8408 DENY** refuses a loopback host joined to the port anywhere on
+  the line (whatever program holds it), socket paths to it, the port with a
+  loopback spelling and a connector apart, and `/m/api` in a URL to this
+  machine on any port or to a `ts.net` name. Bare mentions (the number, a
+  hostless `:8408`, `REMOTE_PORT` as a word) are not refused; a loopback URL
+  in a commit message is.
+- **Revoke is durable only once written.** It holds in memory at once; if the
+  passkeys file cannot be written the HUD shows "revoked, not saved" and the
+  write is retried on every later call and once more at `Daemon.stop()`
+  (an ERROR names the passkey if that fails too). A restart before it lands
+  loses it: accepted and documented.
+- **Open: a program running as the owner can pair a passkey.** It can forge
+  the HUD's owner test (`projects.is_owner`: a raw HTTP client sending
+  `Origin: http://<Host>` to the HUD port), so it can open a pairing window,
+  register a software passkey (no screen, no phone needed) and sign in. That
+  is at parity with today's forgeable desktop `POST /approvals`, which the
+  owner test already concedes ("a speed bump, not a boundary") — but it
+  leaves a **lasting** credential, and P-4 (PH-4) means that credential would
+  then produce valid per-answer assertions: PH-4's "a program running as the
+  owner … cannot produce this assertion" does not hold once such a program
+  has paired its own key. The owner sees the extra passkey in Settings >
+  Phone and can revoke it, but nothing stops the pairing itself. **The
+  remedy is pending an owner decision**; nothing here implements one.
+
 ## 11. Open questions for the owner (defaults in bold)
 
 Answered 2026-10-24: the phone is an iPhone (O-1); Discord stays as a backup

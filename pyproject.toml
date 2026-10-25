@@ -10,6 +10,9 @@ dependencies = [
     "prompt-toolkit>=3.0",
     "websocket-client>=1.8",
     "pillow>=12.3",
+    # The phone surface passkeys (jarvis/v2/remote_auth.py, phone design PH-3).
+    # Imported only when a phone pairs or signs in: a daemon without it starts.
+    "webauthn>=3.0.1,<4",
 ]
 
 [project.optional-dependencies]
