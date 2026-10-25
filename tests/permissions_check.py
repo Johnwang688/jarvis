@@ -313,11 +313,18 @@ def gate_state_coverage_checks() -> None:
             f"sed -ni 's/a/b/' {allow}",
             f"cp /tmp/x \\\n{allow}",
             f"grep --save-config={allow} x",      # ugrep, in Claude Code's shell
+            # Brace and glob spellings (2026-10-25): a copy onto it in bash.
+            "cp {/tmp/x," + allow + "}",
+            f"cp /tmp/x {Path(allow).parent}{{,}}/allowlist.json",
+            f"echo x > {{/tmp/a,{allow}}}",
+            f"cp /tmp/x {Path(allow).parent.parent}/[^x]arvis/allowlist.json",
+            f"cp /tmp/x {Path(allow).parent}/" + "{a..c}" * 7,   # too many words to judge
         ):
             assert not permissions.allows("run_command", {"command": command}), command
         # A genuine read of a gate file, with the stem allowlisted, is covered.
         assert permissions.allows("run_command", {"command": f"cp {allow} /tmp/backup.json"})
         assert permissions.allows("run_command", {"command": f"sed -n '1,5p' {allow}"})
+        assert permissions.allows("run_command", {"command": "cp src/{a,b}.py build/"})
     print("ok  allowlist: no entry covers a write onto the gate's state, any spelling")
 
 
