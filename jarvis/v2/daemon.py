@@ -3876,19 +3876,24 @@ def shut_down(daemon, discord, hatch) -> None:
     daemon; then the Reporter, flushing within 2 s (all three inside
     `discord.stop()`). Nothing is cancelled — a task left RUNNING is
     re-admitted by `serve()`'s recovery next boot. `daemon.stop()` releases
-    again, which finds nothing (idempotent). Each step is bounded, and one
-    that raises does not skip the rest."""
-    try:
-        daemon.release_approvals()
-    except Exception:  # noqa: BLE001 — `daemon.stop()` releases again
-        LOG.warning("pending approvals not released before Discord stopped", exc_info=True)
-    try:
-        if discord is not None:
-            discord.stop()
-        runner = getattr(daemon, "runner", None)
-        if runner is not None:
-            runner.stop()                       # idempotent if Discord stopped it
-        if hatch is not None:
-            hatch.stop()
-    finally:
-        daemon.stop()
+    again, which finds nothing (idempotent). Before any of it the runner is
+    quiesced (no task admitted, no next phase), so a denial cannot move a task
+    on. Each step is bounded, and one that raises is logged and does not skip
+    the rest."""
+    runner = getattr(daemon, "runner", None)
+    steps = [
+        # No task takes its next phase on the strength of a denial.
+        ("runner.quiesce", getattr(runner, "quiesce", None)),
+        ("release_approvals", daemon.release_approvals),
+        ("discord.stop", getattr(discord, "stop", None)),
+        ("runner.stop", getattr(runner, "stop", None)),   # idempotent if Discord stopped it
+        ("hatch.stop", getattr(hatch, "stop", None)),
+        ("daemon.stop", daemon.stop),
+    ]
+    for name, step in steps:
+        if step is None:
+            continue
+        try:
+            step()
+        except Exception:  # noqa: BLE001 — every later step still runs
+            LOG.warning("shutdown step %s failed", name, exc_info=True)

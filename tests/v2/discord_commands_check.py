@@ -1695,13 +1695,16 @@ class OtherPlaceChecks(unittest.TestCase):
 
 
 class _Recorder:
-    """A runner or hatch that records when it was stopped."""
+    """A runner or hatch that records when it was quiesced and stopped."""
 
     def __init__(self, name, order):
         self.name, self.order = name, order
 
+    def quiesce(self):
+        self.order.append(self.name + ".quiesce")
+
     def stop(self, *args, **kwargs):
-        self.order.append(self.name)
+        self.order.append(self.name + ".stop")
 
 
 class UnreachableTransport(FakeTransport):
@@ -1725,7 +1728,7 @@ class UnreachableTransport(FakeTransport):
         return super().__call__(method, url, headers, timeout, **kwargs)
 
 
-class ShutdownOrderChecks(Harness):
+class _ShutdownHarness(Harness):
     """`daemon.shut_down` (main's `finally`): pending approvals are released,
     and Discord updates their posts, before the gateway and the runner stop.
     Before this the gateway stopped first, so a post kept its Approve/Deny
@@ -1738,9 +1741,9 @@ class ShutdownOrderChecks(Harness):
         self.resolved = []
         self.daemon.bus.observe(
             lambda r: self.resolved.append(r["data"]) if r.get("kind") == "approval_resolved" else None)
-        self.daemon.runner = _Recorder("runner.stop", self.order)
+        self.daemon.runner = _Recorder("runner", self.order)
         self.addCleanup(setattr, self.daemon, "runner", None)
-        self.hatch = _Recorder("hatch.stop", self.order)
+        self.hatch = _Recorder("hatch", self.order)
         real_stop = self.surface.stop
 
         def discord_stop():
@@ -1764,6 +1767,17 @@ class ShutdownOrderChecks(Harness):
         return [p for p in self.transport.channel_posts(channel)
                 if f"<@{OWNER}>" in (p.get("content") or "")]
 
+    def _unreachable(self, mode):
+        """Swap in a transport that dies once the ask is posted."""
+        transport = UnreachableTransport(mode)
+        self.addCleanup(transport.gate.set)    # let a hung watcher go at teardown
+        self.addCleanup(lambda: self.assertEqual(transport.violations, []))
+        self.rest._request = self.transport = transport
+        return transport
+
+
+
+class ShutdownOrderChecks(_ShutdownHarness):
     def test_a_pending_ask_is_denied_and_its_post_updated_before_discord_stops(self):
         path = Path(self.stores.root) / "discord" / "approval-posts.json"
         request, result, worker = self.ask(task_id=self.task.id)
@@ -1774,10 +1788,12 @@ class ShutdownOrderChecks(Harness):
         self.shut_down()
         worker.join(2)
         self.assertEqual(result["decision"], Decision.DENY)
-        # Denied with "shutdown" before `discord.stop()` was entered; then the
-        # runner and the hatch (the daemon's own release finds nothing).
-        self.assertEqual(self.order[0], ("discord.stop", ((request.req_id, "shutdown"),)))
-        self.assertEqual(self.order[1:], ["runner.stop", "hatch.stop"])
+        # The runner quiesced first; denied with "shutdown" before
+        # `discord.stop()` was entered; then the runner and the hatch (the
+        # daemon's own release finds nothing).
+        self.assertEqual(self.order[0], "runner.quiesce")
+        self.assertEqual(self.order[1], ("discord.stop", ((request.req_id, "shutdown"),)))
+        self.assertEqual(self.order[2:], ["runner.stop", "hatch.stop"])
         # The surface heard it before it stopped: the buttons are gone...
         strip = f"/channels/{channel}/messages/{message_id}"
         edits = [c for c in self.transport.calls if c["path"] == strip and c["method"] == "PATCH"]
@@ -1841,14 +1857,6 @@ class ShutdownOrderChecks(Harness):
         self.assertEqual(decision, Decision.DENY)
         self.assertLess(time.monotonic() - start, 1)
 
-    def _unreachable(self, mode):
-        """Swap in a transport that dies once the ask is posted."""
-        transport = UnreachableTransport(mode)
-        self.addCleanup(transport.gate.set)    # let a hung watcher go at teardown
-        self.addCleanup(lambda: self.assertEqual(transport.violations, []))
-        self.rest._request = self.transport = transport
-        return transport
-
     def test_shutdown_with_discord_hanging_is_bounded(self):
         from jarvis.v2 import daemon as daemon_mod
         from jarvis.v2.discord import gateway as gateway_mod
@@ -1858,7 +1866,7 @@ class ShutdownOrderChecks(Harness):
         took = self.shut_down()
         worker.join(2)
         self.assertEqual(result["decision"], Decision.DENY)
-        self.assertEqual(self.order[0][1], ((request.req_id, "shutdown"),))
+        self.assertEqual(self.order[1][1], ((request.req_id, "shutdown"),))
         bound = daemon_mod.RELEASE_WAIT_S + gateway_mod.SETTLE_S + 2 + 1.5
         sys.stderr.write(f"\n[shutdown, Discord hanging] took {took:.2f} s (bound {bound:.1f} s)\n")
         self.assertLess(took, bound)
@@ -1906,7 +1914,7 @@ class ShutdownOrderChecks(Harness):
                     raise RuntimeError(self.name)
 
         class FakeDaemon:
-            runner = Boom("runner.stop")
+            runner = Boom("runner.stop", fail=True)
 
             def release_approvals(self):
                 calls.append("release")
@@ -1914,12 +1922,153 @@ class ShutdownOrderChecks(Harness):
 
             def stop(self):
                 calls.append("daemon.stop")
-        with self.assertRaises(RuntimeError):
-            daemon_mod.shut_down(FakeDaemon(), Boom("discord.stop", fail=True), Boom("hatch.stop"))
-        self.assertEqual(calls, ["release", "discord.stop", "daemon.stop"])
+        # Every step raises but the last: each is logged, and every one runs.
+        daemon_mod.shut_down(FakeDaemon(), Boom("discord.stop", fail=True), Boom("hatch.stop", fail=True))
+        self.assertEqual(calls, ["release", "discord.stop", "runner.stop", "hatch.stop", "daemon.stop"])
         calls.clear()
-        daemon_mod.shut_down(FakeDaemon(), None, Boom("hatch.stop"))
-        self.assertEqual(calls, ["release", "runner.stop", "hatch.stop", "daemon.stop"])
+        daemon_mod.shut_down(FakeDaemon(), None, None)
+        self.assertEqual(calls, ["release", "runner.stop", "daemon.stop"])
+
+
+class ShutdownMapChecks(_ShutdownHarness):
+    """Review of #311 (MED): a post leaves the approval-post map on disk only
+    once its buttons are off, so a strip that failed or never finished at
+    shutdown is done by the next start."""
+
+    def restart(self):
+        self.transport = FakeTransport()
+        self.addCleanup(lambda: self.assertEqual(self.transport.violations, []))
+        rest = DiscordRest(self.transport)
+        again = DiscordRouter(self.daemon, self.stores, self.router, self.approvals,
+                              self.control, rest, FakeListener,
+                              announce=lambda text: None, sync_commands=False)
+        self.addCleanup(again.stop)
+        again.start()
+        return again
+
+    def _survives(self, mode):
+        path = Path(self.stores.root) / "discord" / "approval-posts.json"
+        transport = self._unreachable(mode)
+        request, result, worker = self.ask(task_id=self.task.id)
+        channel, message_id, _code = self.surface._approval_messages[request.req_id]
+        wait_for(lambda: path.exists() and request.req_id in json.loads(path.read_text()))
+        transport.down.set()
+        self.shut_down()
+        worker.join(2)
+        self.assertEqual(result["decision"], Decision.DENY)
+        self.assertIn(request.req_id, json.loads(path.read_text()),
+                      "the post whose strip failed left the map: the next start cannot strip it")
+        transport.gate.set()
+        self.restart()
+        strip = f"/channels/{channel}/messages/{message_id}"
+        wait_for(lambda: any(c["path"] == strip and c["method"] == "PATCH" for c in self.transport.calls))
+        wait_for(lambda: json.loads(path.read_text()) == {})
+
+    def test_discord_refusing_at_shutdown_keeps_the_post_for_the_next_start(self):
+        self._survives("refuse")
+
+    def test_discord_hanging_at_shutdown_keeps_the_post_for_the_next_start(self):
+        self._survives("hang")
+
+    def test_a_later_save_keeps_a_post_whose_strip_failed(self):
+        path = Path(self.stores.root) / "discord" / "approval-posts.json"
+        first, r1, w1 = self.ask(task_id=self.task.id)
+        second, r2, w2 = self.ask()
+        failing = self.surface._approval_messages[first.req_id][1]
+        self.transport.fail[("PATCH", f"/messages/{failing}$")] = (503, {"message": "busy"})
+        # One at a time, so the order is fixed: the first strip fails, then
+        # the second works and saves the map.
+        self.approvals.resolve(first.req_id, Decision.DENY, hud=True)
+        w1.join(2)
+        self.surface.settle()
+        self.approvals.resolve(second.req_id, Decision.DENY, hud=True)
+        w2.join(2)
+        self.surface.settle()
+        self.assertEqual(sorted(json.loads(path.read_text())), [first.req_id])
+
+    def test_a_strip_that_fails_at_start_is_kept_for_the_start_after(self):
+        path = Path(self.stores.root) / "discord" / "approval-posts.json"
+        self.surface.stop()
+        self.daemon.stop()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"r1": [TASK_THREAD, "4242", "ABCD"], "r2": [TASK_THREAD, "4343", "EFGH"]}))
+        transport = FakeTransport()
+        transport.fail[("PATCH", "/messages/4242$")] = (500, {"message": "oops"})
+        transport.fail[("PATCH", "/messages/4343$")] = (404, {"code": 10008, "message": "Unknown Message"})
+        again = DiscordRouter(self.daemon, self.stores, self.router, self.approvals, self.control,
+                              DiscordRest(transport), FakeListener, announce=lambda text: None,
+                              sync_commands=False)
+        self.addCleanup(again.stop)
+        again.start()
+        again._stale_worker.join(3)
+        # A 5xx is tried again next start; a message that is gone never is.
+        self.assertEqual(json.loads(path.read_text()), {"r1": [TASK_THREAD, "4242", "ABCD"]})
+
+    def test_a_runtime_strip_that_fails_stays_in_the_map(self):
+        """The same gap at run time: a timeout, a button, the HUD."""
+        path = Path(self.stores.root) / "discord" / "approval-posts.json"
+        transport = self._unreachable("refuse")
+        request, result, worker = self.ask(task_id=self.task.id)
+        wait_for(lambda: path.exists() and request.req_id in json.loads(path.read_text()))
+        transport.down.set()
+        self.approvals.resolve(request.req_id, Decision.DENY, hud=True)
+        worker.join(2)
+        self.surface.settle()
+        self.assertIn(request.req_id, json.loads(path.read_text()))
+        self.assertNotIn(request.req_id, self.surface._approval_messages, "a press is still refused")
+
+
+class ReleasedAskChecks(_ShutdownHarness):
+    def test_an_ask_already_released_posts_no_card(self):
+        """Review of #311 (LOW): an `approval_requested` still queued when the
+        release came would post a card (and its ping) right before "stopped
+        first". Not pending any more and released: nothing is posted."""
+        self.daemon.approvals_released.set()
+        before = len(self.transport.calls)
+        self.surface._post_approval({"req_id": "gone1", "code": "WXYZ", "tool": "Bash",
+                                     "task_id": self.task.id, "args": {"command": "ls"}})
+        self.surface._post_resolution({"req_id": "gone1", "code": "WXYZ", "tool": "Bash",
+                                       "resolution": "shutdown"})
+        self.assertEqual(self.transport.calls[before:], [])
+
+    def test_without_the_release_such_an_ask_is_still_posted(self):
+        before = len(self.transport.calls)
+        self.surface._post_approval({"req_id": "gone2", "code": "WXYZ", "tool": "Bash",
+                                     "task_id": self.task.id, "args": {"command": "ls"}})
+        cards = [_body(c) for c in self.transport.calls[before:]
+                 if c["method"] == "POST" and c["path"] == f"/channels/{TASK_THREAD}/messages"
+                 and _body(c).get("components")]
+        self.assertEqual(len(cards), 1)
+        self.surface._post_resolution({"req_id": "gone2", "code": "WXYZ", "tool": "Bash",
+                                       "resolution": "timeout"})
+
+    def test_a_real_linker_keeps_an_ask_the_release_denied(self):
+        """Review of #311 (LOW): the flag is set before the broker releases,
+        with the real linker on the real daemon's broker."""
+        from jarvis.v2.discord.linker import ChannelLinker
+        linker = ChannelLinker(self.daemon, self.rest, approvals=self.approvals)
+        self.addCleanup(linker.close)
+        seen = []
+        real = self.approvals.shutdown
+
+        def spy():
+            seen.append(self.daemon.approvals_released.is_set())
+            real()
+        self.approvals.shutdown = spy
+        linker._enqueue({"action": "create_category", "key": "archive_full",
+                         "name": "Jarvis Archive 2",
+                         "args": {"action": "create_category", "channel": "Jarvis Archive 2",
+                                  "from": "Jarvis Archive", "to": "Jarvis Archive 2", "why": "full"}})
+        linker._jobs.put(None)
+        loop = threading.Thread(target=linker._ask_loop, daemon=True)
+        loop.start()
+        wait_for(lambda: any(r.tool == "discord_channel" for r in self.approvals.pending()))
+        self.assertEqual(self.daemon.release_approvals(), 1)
+        loop.join(3)
+        self.assertFalse(loop.is_alive())
+        self.assertEqual(seen, [True], "released before the linker could tell it was a shutdown")
+        self.assertFalse(linker._stop.is_set())
+        self.assertEqual(len(linker._state["asks"]), 1, "a shutdown's deny is not an answer")
 
 
 if __name__ == "__main__":

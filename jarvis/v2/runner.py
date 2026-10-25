@@ -187,6 +187,13 @@ class TaskRunner(TaskControl):
                 except ControlError:
                     return
 
+    def quiesce(self) -> None:
+        """Shutdown's first step (`daemon.shut_down`), before pending approvals
+        are released: no task is admitted and none starts its next phase. A
+        turn already running is not interrupted; `stop()` does that. Not
+        undone: the runner is stopping."""
+        self._stop.set()
+
     def stop(self, timeout: float = 5.0) -> None:
         """Interrupt running turns and join. Cancels nothing: tasks stay resumable."""
         self._stop.set()
