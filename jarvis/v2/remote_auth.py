@@ -714,11 +714,12 @@ class RemoteAuth:
 
     def revoke(self, key: str) -> bool:
         """Revoke a passkey: every session it opened ends now, in memory,
-        and it is refused from now on. True once the passkeys file says so
-        (a repeat of a revoke whose write failed retries it and answers True
-        when it lands); False for an unknown or already-saved revoked key;
-        503 while the file cannot be written (the revoke still holds in
-        memory and is retried by every later call)."""
+        and it is refused from now on. True once the passkeys file says so:
+        a repeat revoke is idempotent (an already-saved one answers True; one
+        whose write failed retries it and answers True when it lands). False
+        only for a key it does not know. 503 while the file cannot be written
+        (the revoke still holds in memory and is retried by every later call,
+        and once more when the daemon stops: `final_save`)."""
         with self._lock:
             self._load()
             if self._broken:
@@ -728,7 +729,7 @@ class RemoteAuth:
                 return False
             if passkey.get("revoked") is not None:
                 if not passkey.get("unsaved"):
-                    return False
+                    return True                # already revoked and saved
                 if self._unsaved:
                     self._save_passkeys()      # 503 again if it still fails
                 self._mark_saved()
@@ -747,6 +748,22 @@ class RemoteAuth:
             self._save_passkeys()
             self._mark_saved()
             return True
+
+    def final_save(self) -> list[str]:
+        """The daemon is stopping: one last try at an unsaved revocation's
+        write. The keys still unsaved after it, each named in an ERROR line
+        (a restart would bring them back), or []."""
+        with self._lock:
+            if not self._unsaved:
+                return []
+            self._flush()
+            if not self._unsaved:
+                return []
+            keys = [p["key"] for p in self._passkeys if p.get("unsaved")]
+            LOG.error("phone: the revocation of passkey %s is still not saved at shutdown; after "
+                      "a restart it is active again: revoke it again in Settings > Phone",
+                      ", ".join(keys) or "(unknown)")
+            return keys
 
     def _mark_saved(self) -> None:
         """The file now has every revocation: drop the in-memory marks."""

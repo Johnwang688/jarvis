@@ -2855,6 +2855,12 @@ class Daemon:
         self._server = None
         self.remote_port = None
         self.remote_auth.server = None
+        # A revocation whose write failed gets one last try (and an ERROR
+        # line naming the passkey if it still cannot be written).
+        try:
+            self.remote_auth.final_save()
+        except Exception:     # noqa: BLE001 — never why a stop fails
+            LOG.exception("phone: the last save of an unsaved revocation failed")
         if any(job.is_alive() for job in jobs):
             LOG.warning("Shutdown bound reached; provider work remains on daemon threads")
 

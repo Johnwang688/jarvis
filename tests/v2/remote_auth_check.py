@@ -766,7 +766,7 @@ class Sessions(Remote):
         on_disk = json.loads((self.auth.dir / "sessions.json").read_text())["sessions"]
         self.assertEqual({r["passkey"] for r in on_disk}, {keys[1]})
         self.assertNotIn("unsaved", (self.auth.dir / "passkeys.json").read_text())
-        self.assertEqual(self.hud("POST", f"/phone/passkeys/{keys[0]}/revoke")[0], 404, "already revoked")
+        self.assertEqual(self.hud("POST", f"/phone/passkeys/{keys[0]}/revoke")[0], 200, "idempotent")
         self.assertEqual(self.hud("POST", "/phone/passkeys/k-ffffffffffff/revoke")[0], 404)
         self.assertEqual(self.hud("POST", "/phone/passkeys/nonsense/revoke")[0], 404)
         print("ok  revoke: every session of the passkey ends at once, in memory and on disk")
@@ -795,12 +795,29 @@ class Sessions(Remote):
         failing.stop()
         self.assertEqual(self.hud("POST", f"/phone/passkeys/{keys[0]}/revoke")[0], 200)
         self.assertEqual(self.hud("GET", "/phone")[1]["state"], "ok")
-        self.assertEqual(self.hud("POST", f"/phone/passkeys/{keys[0]}/revoke")[0], 404)
+        self.assertEqual(self.hud("POST", f"/phone/passkeys/{keys[0]}/revoke")[0], 200,
+                         "Save now on an already-saved revocation is 200")
         restarted = RemoteAuth(self.auth.dir, HOST, wall=self.wall, mono=self.mono)
         self.assertEqual([p["key"] for p in restarted.status()["passkeys"]], [keys[1]])
         self.assertIsNone(restarted.session_for([a1]), "and its session stays dead after a restart")
         self.assertIsNotNone(restarted.session_for([b1]))
         print("ok  revoke with a failing write: 503, refused in memory, 'unsaved' in the HUD, retried, durable once it lands")
+
+    def test_daemon_stop_saves_or_names_an_unsaved_revocation(self):
+        a, b = self.pair(), self.pair()
+        key = self.auth.status()["passkeys"][0]["key"]
+        with patch.object(self.auth, "_write", side_effect=remote_auth.AuthError(503, "x")):
+            self.assertEqual(self.hud("POST", f"/phone/passkeys/{key}/revoke")[0], 503)
+            # Still failing at stop: an ERROR line names the passkey.
+            with self.assertLogs("jarvis.v2.remote_auth", "ERROR") as logs:
+                self.assertEqual(self.auth.final_save(), [key])
+            self.assertIn(key, "\n".join(logs.output))
+        # The disk is back by the time the daemon stops: the last try lands it.
+        self.d.stop()
+        restarted = RemoteAuth(self.auth.dir, HOST, wall=self.wall, mono=self.mono)
+        self.assertNotIn(key, [p["key"] for p in restarted.status()["passkeys"]])
+        self.assertEqual(self.auth.final_save(), [])
+        print("ok  Daemon.stop makes one last save of an unsaved revocation, and names it in an ERROR if it fails")
 
     def test_unsaved_revoke_lands_on_any_later_call(self):
         for call in ("status", "session", "login"):
@@ -1351,7 +1368,16 @@ class StatusAndState(Remote):
             self.assertTrue(touch is not None and touch.certain, command)
             self.assertTrue(v2.denied_command(command), command)
             self.assertNotEqual(v1.static_verdict(command).decision, v1_rules.ALLOW, command)
-        for command in (f"ls {remote}", f"cat {remote}/sessions.json", f"cp {remote}/passkeys.json /tmp/b"):
+        # Inline source that spells the folder in full beside a call that
+        # removes or replaces it (second review of PR #306).
+        for command in (f"python3 -c \"import shutil; shutil.rmtree('{remote}')\"",
+                        f"python3 -c \"import os; os.rename('{remote}', '/tmp/x')\"",
+                        f"node -e \"require('fs').rmSync('{remote}', {{recursive: true}})\""):
+            self.assertTrue(v2.denied_command(command), command)
+            self.assertNotEqual(v1.static_verdict(command).decision, v1_rules.ALLOW, command)
+        for command in (f"ls {remote}", f"cat {remote}/sessions.json", f"cp {remote}/passkeys.json /tmp/b",
+                        f"python3 -c \"import os; print(os.listdir('{remote}'))\"",
+                        f"python3 -c \"import shutil; shutil.rmtree('{remote}2')\""):
             self.assertFalse(v2.denied_command(command), command)
         # The data root above it is asked, as before, not refused.
         touch = protected_state.command_touch(f"rm -rf {remote.parent}")

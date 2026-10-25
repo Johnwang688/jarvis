@@ -781,8 +781,11 @@ advisory text and never read for a decision: a local process can send them).
   fails the revoke answers 503, the HUD shows the passkey as "revoked, not
   saved" (`GET /phone` `state: "unsaved"` and `unsaved`), every later call
   (`status`, a session check, login, pairing) retries the write, and a repeat
-  Revoke retries it and answers 200 once it lands. A restart before the
-  write lands loses the revocation (the file still has the passkey active).
+  Revoke retries it and answers 200 once it lands (a repeat of a saved one
+  is 200 too). `Daemon.stop()` makes one last try and logs an ERROR naming
+  the passkey if it still cannot be written. A restart before any write
+  lands loses the revocation (the file still has the passkey active): the
+  owner was told (503, "revoked, not saved"); accepted and documented.
 - **`is_remote_owner(handler)` / `owner_status`** is the only owner test on
   the remote listener (`projects.is_owner` stays false there): this daemon's
   bound remote server (`RemoteAuth.server`, set by `remote_listener.bind`),
@@ -795,27 +798,34 @@ advisory text and never read for a decision: a local process can send them).
   `O_NOFOLLOW`. Both are protected state (`files._protected_state_paths`): no
   write tool, shell write or grant reaches them, and a writer on the
   `remote/` folder itself (`rm -rf`, `mv` it away, `mv`/`cp -r` a folder into
-  its place) is a certain touch of its files (`protected_state.phone_dirs`:
-  refused at v2's layer 1, asked by v1, as the files are); the data root
-  above it is asked as before. An unreadable passkeys file is never
+  its place), or inline source that spells it in full beside a call that
+  removes or replaces a folder (`shutil.rmtree`, `os.rename`, `fs.rmSync`,
+  …), is a certain touch of its files (`protected_state.phone_dirs`:
+  refused at v2's layer 1, asked by v1, as the files are). Still asked, not
+  refused: the data root above it, a path assembled at run time, and `git
+  clean -fdx` run inside the data folder (it depends on the working folder
+  and on that folder being a repository, which a line does not show). An unreadable passkeys file is never
   overwritten (pairing and login 503, the HUD says so) and is read again on
   the next call; an unreadable sessions file signs every phone out. `webauthn` is imported only
   when used, so a daemon without it starts and answers 503 there.
 - **The agent path** (design §4). `rules.remote_reading`, called from
   `rules._decide` on the raw line like the Secret Service reading, DENYs a
-  line where a program it **runs** (a segment's command, through wrappers,
-  runners and `sh -c`, the Secret Service reading's `_Walk`) is a network
-  client, or inline source (`-c`/`-e`) holds a client or connecting library,
-  aimed at the remote port (8408 or `config.REMOTE_PORT`, or `REMOTE_PORT`
-  *expanded*) with a loopback spelling or as `host:port` after a host-like
-  token; bash's `/dev/tcp/<host>/<port>`; or `/m/api` anywhere on the line
-  together with a loopback spelling or a `ts.net` name. A client word as an
-  argument (`git fetch`), the port in a commit message, `sed` or `lsof`, and
-  `REMOTE_PORT` as a bare word are not refused. v1's gate and v2's layer 1
-  both start from `decide`, so neither asks and no allowlist entry covers
-  it. An accident guard, not a boundary (a computed port, a script
-  file, a hosts alias without a port get past it); the boundary is the
-  cookie, which only the phone's browser holds.
+  line that holds, in any spelling and whatever program runs it (an option
+  value such as `pip --index-url` or `git -c http.proxy=`, a variable's
+  value, a here-doc, `-c` source, a substitution, a function, an alias,
+  `eval`): a loopback host joined to the remote port (`localhost:8408`,
+  `http://127.0.0.1:8408/`, `[::1]:8408`, `9000:localhost:8408`, or the
+  loopback host joined to an expansion when the line names the port); a
+  socket path (`/dev/tcp/…/8408`, gawk's `/inet/tcp/…/8408`); the port, a
+  loopback spelling and a client or connecting library's word apart (`nc
+  127.1 8408`, `TCPSocket.new("127.0.0.1", 8408)`); or `/m/api` with a
+  loopback spelling or a `ts.net` name. Bare mentions are not refused: the
+  number alone, `:8408` with no host, `REMOTE_PORT` unexpanded. A loopback
+  URL with the port inside a commit message or an `echo` is refused too
+  (deliberately: exempting text would have to know which programs only
+  print). Not caught: port arithmetic, a hosts-file alias, a script file.
+  v1's gate and v2's layer 1 both start from `decide`, so neither asks and
+  no allowlist entry covers it.
 - **HUD:** Settings > Phone (`hud/src/components/PhoneSettings.tsx`): the
   listener's state from `/status`, Pair a phone (QR code from the vendored
   Nayuki encoder `hud/src/lib/vendor/qrcodegen.ts`, the URL as text, a

@@ -104,6 +104,11 @@ def gate_paths() -> set[Path]:
     return {_resolve(config.ALLOWLIST_PATH)}
 
 
+_FOLDER_CALLS = re.compile(
+    r"\b(?:rmtree|rename|renames|replace|remove|removedirs|rmdir|unlink|move|copytree|"
+    r"rmSync|rm|renameSync|cpSync|rm_rf|rm_r|mv|cp_r|rmtree_p|system|popen|run|call|exec\w*|spawn\w*)\b")
+
+
 def phone_dirs() -> set[Path]:
     """The phone's passkey folder (`<data root>/remote`, `v2/remote_auth.py`),
     resolved: the one gate folder whose replacement or removal is a certain
@@ -1219,6 +1224,16 @@ def _command(tokens: list[str], lead: list[str], parsed: bool, segment: str, loc
             spelled = (str(path) in source or "/.config/jarvis/" + path.name in source
                        or (local.cwd is not None and _resolve(local.cwd) == path.parent))
             seen.touches.append(Touch(path, spelled, f"{stem} source that names {path.name}"))
+        # The phone's `remote/` folder spelled in full in the source beside a
+        # call that removes or replaces a folder (`shutil.rmtree`,
+        # `os.rename`, `shutil.move`, `fs.rmSync`, `FileUtils.rm_rf`, …): a
+        # certain touch of its files, like `rm -rf` on it (`phone_dirs`).
+        # Only the full path is read; a path assembled at run time asks.
+        for folder in phone_dirs():
+            if (re.search(re.escape(str(folder)) + r"(?![\w.-])", source)
+                    and _FOLDER_CALLS.search(source)):
+                seen.touches.append(Touch(folder / "passkeys.json", True,
+                                          f"{stem} source that removes or replaces {folder}"))
 
     for operand in read_only:
         text = _expand(operand, local)

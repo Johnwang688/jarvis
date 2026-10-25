@@ -1518,7 +1518,8 @@ def remote_listener_checks():
     with Sandbox() as box:
         config.ALLOWLIST_PATH.write_text(json.dumps(
             [{"tool": "run_command", "prefix": stem} for stem in
-             ("curl", "wget", "nc", "python3", "node", "uv", "bash", "sh", "socat")]))
+             ("curl", "wget", "nc", "python3", "node", "uv", "bash", "sh", "socat",
+             "pip", "npm", "git", "ssh", "perl", "ruby", "awk", "xargs", "httpx", "echo", "printf")]))
         for profile in (P.AUTO, P.STRICT):
             brief = brief_for(profile)
             asker = Asker(Decision.ALLOW)

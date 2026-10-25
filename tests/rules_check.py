@@ -1265,12 +1265,46 @@ REMOTE_LISTENER_DENY = (
     "curl https://box.tail1234.ts.net/m/api/me",
     "cat > /tmp/x.sh <<EOF\ncurl localhost:8408/m/api/me\nEOF",
     # the narrowed reading (review of PR #306) keeps these
-    "xh localhost:8408/m/", "wget2 http://127.0.0.1:8408/", "curl http://myalias:8408/",
+    "xh localhost:8408/m/", "wget2 http://127.0.0.1:8408/",
     "bash <<EOF\ncurl localhost:8408\nEOF",
     "python3 -c \"import os; os.system('curl localhost:8408')\"",
     "env P=8408 sh -c 'curl localhost:$P'",
     "timeout 5 nc 127.0.0.1 8408 < /dev/null",
     "python3 -c \"import os, urllib.request as u; u.urlopen('http://localhost:' + os.environ['JARVIS_REMOTE_PORT'])\"",
+    # the second review of PR #306: real reaches the narrowed reading let
+    # through (a loopback host joined to the port is refused whatever runs)
+    "pip install --index-url http://localhost:8408/simple foo",
+    "pip download --index-url http://localhost:8408/simple foo",
+    "npm install --registry http://127.0.0.1:8408/ foo",
+    "git -c http.proxy=http://127.0.0.1:8408 fetch origin",
+    'sh -c "$(echo curl http://127.0.0.1:8408/)"',
+    "`curl http://127.0.0.1:8408/`",
+    "f(){ curl http://127.0.0.1:8408/; }; f",
+    "alias x='curl http://127.0.0.1:8408/'; x",
+    "builtin eval 'curl http://127.0.0.1:8408/'",
+    "python3 - <<EOF\nimport urllib.request\nurllib.request.urlopen('http://127.0.0.1:8408/')\nEOF",
+    "node - <<EOF\nfetch('http://127.0.0.1:8408/')\nEOF",
+    "URL=http://localhost:8408/m/; curl $URL",
+    'U=localhost:8408 && curl "$U"',
+    "xargs curl <<< http://localhost:8408/",
+    "httpx http://localhost:8408/",
+    "ssh -L 9000:localhost:8408 host",
+    "ssh -R 8408:localhost:22 host -p 2222 && ssh -L 1:127.0.0.1:8408 h",
+    "perl -MLWP::Simple -e 'get(\"http://127.0.0.1:8408/\")'",
+    "perl -MIO::Socket::INET -e 'IO::Socket::INET->new(PeerAddr => \"127.0.0.1\", PeerPort => 8408)'",
+    "ruby -rsocket -e 'TCPSocket.new(\"127.0.0.1\",8408)'",
+    "node -e 'require(\"net\").createConnection(8408,\"127.0.0.1\")'",
+    "awk 'BEGIN{ (\"/inet/tcp/0/127.0.0.1/8408\") }'",
+    # each branch alone: a loopback host joined to an expansion of the port
+    # (pip is no client), and a socket path to any host
+    "P=8408; npm config set proxy localhost:$P",
+    "exec 3<>/dev/tcp/jarvis-alias/8408",
+    'curl "http://${JARVIS_REMOTE_HOST}:8408/"',
+    # chosen: a loopback host joined to the port is refused in text too
+    # (exempting "text" would have to know which programs only print)
+    'git commit -m "fix the remote listener on 127.0.0.1:8408"',
+    "echo curl localhost:8408",
+    'printf "%s\\n" "see http://localhost:8408"',
 )
 REMOTE_LISTENER_ORDINARY = (
     "grep -rn 8408 docs",
@@ -1292,13 +1326,15 @@ REMOTE_LISTENER_ORDINARY = (
     "grep -rn :8408 docs",
     "sed -i s/8408/8409/ jarvis/config.py",
     "lsof -i :8408",
-    'git commit -m "fix the remote listener on 127.0.0.1:8408"',
     "JARVIS_REMOTE_HOST=localhost JARVIS_REMOTE_PORT=0 python tests/v2/remote_auth_check.py",
     'grep "REMOTE_PORT\\|localhost" jarvis/config.py',
-    "echo curl localhost:8408",
     # a client on this machine, another port, the name only as a word
     "curl http://127.0.0.1:8405/notes/REMOTE_PORT.txt",
-    'printf "%s\\n" "see http://localhost:8408"',
+    # a bare port and a bare host, not joined, with nothing that connects
+    "grep -n 8408 jarvis/config.py && grep -n localhost jarvis/config.py",
+    "git log -S8408 --oneline",
+    # a connector word and the port, but no loopback host
+    "git fetch origin && grep -rn 8408 docs",
 )
 
 
@@ -1332,7 +1368,8 @@ def remote_listener_checks() -> None:
         asked.append(args.get("command", ""))
         return True
     approver.jarvis_human_backed = True
-    for stem in ("curl", "wget", "nc", "python3", "node", "uv", "bash", "sh", "socat"):
+    for stem in ("curl", "wget", "nc", "python3", "node", "uv", "bash", "sh", "socat",
+             "pip", "npm", "git", "ssh", "perl", "ruby", "awk", "xargs", "httpx", "echo", "printf"):
         permissions.add_allow("run_command", {"command": stem + " x"})
     gated = permissions.gate(approver)
     with recorded() as ran:

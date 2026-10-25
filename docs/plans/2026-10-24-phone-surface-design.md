@@ -425,13 +425,17 @@ above:
   409 (§9); passkey state the daemon cannot read is 503.
 - **Revoked passkeys are kept** (at most 16, marked) so a revoked credential
   id stays refused; the HUD lists only active ones.
-- **The 8408 DENY** is judged on what a line runs (a network client, or
-  inline source holding one, aimed at the port on this machine; bash's
-  `/dev/tcp`), and also covers `/m/api` in a URL to this machine on any port
-  and a `ts.net` URL to `/m/api`.
+- **The 8408 DENY** refuses a loopback host joined to the port anywhere on
+  the line (whatever program holds it), socket paths to it, the port with a
+  loopback spelling and a connector apart, and `/m/api` in a URL to this
+  machine on any port or to a `ts.net` name. Bare mentions (the number, a
+  hostless `:8408`, `REMOTE_PORT` as a word) are not refused; a loopback URL
+  in a commit message is.
 - **Revoke is durable only once written.** It holds in memory at once; if the
   passkeys file cannot be written the HUD shows "revoked, not saved" and the
-  write is retried on every later call. A restart before it lands loses it.
+  write is retried on every later call and once more at `Daemon.stop()`
+  (an ERROR names the passkey if that fails too). A restart before it lands
+  loses it: accepted and documented.
 - **Open: a program running as the owner can pair a passkey.** It can forge
   the HUD's owner test (`projects.is_owner`: a raw HTTP client sending
   `Origin: http://<Host>` to the HUD port), so it can open a pairing window,

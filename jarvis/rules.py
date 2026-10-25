@@ -719,40 +719,46 @@ VEXCOM_DENIED = ("it names vexcom, VEX's tool for downloading to and talking to 
 # owner as a yes/no.
 #
 # What counts (`remote_reading`), on every spelling `_spellings` reads
-# (quotes, escapes, `${X:-…}`, ANSI-C `$'…'`, braces and brackets removed):
+# (quotes, escapes, `${X:-…}`, ANSI-C `$'…'`, braces and brackets removed),
+# **anywhere on the line, whatever program runs it** — an argument, an
+# option value (`pip --index-url`, `npm --registry`, `git -c http.proxy=`,
+# `ssh -L`), a variable's value, a here-doc or here-string, `-c`/`-e` source,
+# a substitution, backticks, a function, an alias, `eval`:
 #
-#   - **a client the line runs, aimed at the port on this machine.** The
-#     line names the port — `8408` or the configured `REMOTE_PORT` as a
-#     number of its own, or `REMOTE_PORT` *expanded* (`$JARVIS_REMOTE_PORT`,
-#     `${…REMOTE_PORT}`, `os.environ[…]`, `getenv(…)`, `process.env.…`), never
-#     the bare word — and a program the line **runs** (a segment's command,
-#     through wrappers, runners and `sh -c`: `_Walk`, the Secret Service
-#     reading's walk) is a network client (`curl`, `wget`, `nc`, `socat`,
-#     `telnet`, `httpie`, `xh`, `openssl`, …) handed the port (or an
-#     expansion, `P=8408; curl localhost:$P`) with a loopback spelling
-#     (`localhost`, `127.x`, `[::1]`, `::1`, `0.0.0.0`, `0x7f…`,
-#     `2130706433`, `0177.…`, `::ffff:`, `ip6-localhost`, `//0:`) or as
-#     `host:port` after a host-like token; or inline source (`python -c`,
-#     `node -e`, …) that holds a client or a connecting library (`socket`,
-#     `urllib`, `requests`, `httpx`, `fetch`, …) and the same. A client
-#     word that is only an argument (`git fetch`, `rg "fetch"`), the port in
-#     a commit message, a `sed` script or `lsof -i :8408`, and `REMOTE_PORT`
-#     as a word (`grep -n REMOTE_PORT`) are not refused;
-#   - **bash's `/dev/tcp/<host>/<port>`** (or `/dev/udp`) with the port or an
-#     expansion, anywhere on the line (it is a redirect, not a program);
+#   - **a loopback host joined to the port**: `<loopback>:<port>`, bare or in
+#     a URL (`localhost:8408`, `http://127.0.0.1:8408/`, `[::1]:8408`,
+#     `0x7f000001:8408`, `9000:localhost:8408`), where loopback is
+#     `localhost`, `127.x`, `[::1]`/`::1`, `0.0.0.0`, `0x7f…`, `2130706433`,
+#     `0177.…`, `::ffff:`, `ip6-localhost`, `//0`, or `$…REMOTE_HOST`, and
+#     the port is `8408` or the configured `REMOTE_PORT` — or an expansion
+#     (`localhost:$P`, `localhost:${JARVIS_REMOTE_PORT}`) when the line names
+#     the port elsewhere (`P=8408; …`) or the expansion is `REMOTE_PORT`'s;
+#   - **a socket path to it**: bash's `/dev/tcp/<host>/<port>` (`/dev/udp`)
+#     and gawk's `/inet/tcp/<lport>/<host>/<port>`;
+#   - **the port, a loopback spelling and a connector, apart**: the line names
+#     the port (the number of its own, or `REMOTE_PORT` *expanded*), holds a
+#     loopback spelling, and holds a client or connecting library's word
+#     (`nc 127.1 8408`, `socket.create_connection(('127.0.0.1', 8408))`,
+#     `TCPSocket.new(…)`, `createConnection(8408, …)`, `telnet`, `ssh`, …);
 #   - **the route prefix** `/m/api` together with a loopback spelling or a
-#     `ts.net` name, anywhere on the line: a URL to the phone's API on this
-#     machine, whichever port it names (a here-doc writing a script with one
-#     included).
+#     `ts.net` name: a URL to the phone's API on this machine, any port.
 #
-# A line too complex for the walk falls back to the whole-text reading: the
-# port, a loopback spelling and a client word anywhere.
+# Not refused, the bare mentions: the port number alone (`grep -rn 8408`,
+# `sed -i s/8408/8409/`), `:8408` with no host (`lsof -i :8408`, `grep
+# :8408`), `REMOTE_PORT` as a word (`grep -n REMOTE_PORT`, an assignment
+# `JARVIS_REMOTE_PORT=0`), a client word with no loopback port (`git fetch`).
+# **A loopback URL with the port inside text is refused too** (`git commit
+# -m "… 127.0.0.1:8408"`, `echo localhost:8408`): exempting "text" would have
+# to know which programs only print, and a substitution inside the message
+# runs; the model rephrases ("port 8408 on loopback").
+#
+# Port arithmetic (`$((8400+8))`), a port or host assembled at run time, a
+# script file that holds the URL and a hosts-file alias get past it; those
+# stay ASK or ALLOW by the other rules.
 #
 # **An accident guard, not a boundary**, exactly as the DENY note above
-# says: a port computed at run time (`$((8400+8))`), a script file that
-# holds the URL, a hosts-file alias without a port or a client this list
-# does not name gets past it. The boundary is the session cookie, which
-# lives only in the phone's browser.
+# says. The boundary is the session cookie, which lives only in the phone's
+# browser.
 REMOTE_DENIED = ("it reaches the phone's remote listener on this machine (its port or its /m/api "
                  "routes); only the owner's phone reaches it, through tailscale serve, never an "
                  "agent's command")
@@ -764,25 +770,23 @@ _REMOTE_LOOPBACK = re.compile(
     r"""|(?<![\d])2130706433(?![\d])|(?<![\d])017700000001(?![\d])"""
     r"""|(?<![\w:])::1(?![\w:])|::ffff:|(?<![\w:])(?:0:){7}0*1(?![\w:])""",
     re.I)
-# Programs that connect to an address they are handed, when the line runs one.
-_REMOTE_CLIENT_STEMS = frozenset({
-    "curl", "curlie", "wget", "wget2", "nc", "ncat", "netcat", "socat", "telnet", "http", "https",
-    "xh", "xhs", "httpie", "aria2c", "websocat", "lynx", "links", "w3m", "openssl", "grpcurl",
-    "invoke-webrequest", "invoke-restmethod", "iwr", "irm", "nmap", "ab", "hey", "wrk",
-})
-# The same inside inline source: a client or a library that connects.
-_REMOTE_INLINE_CLIENTS = re.compile(
-    r"(?<![\w.-])(?:curl|wget|wget2|nc|ncat|socat|telnet|socket|urllib|urllib3|requests|httpx|aiohttp|"
-    r"http\.client|httplib|fetch|xmlhttprequest|net\.connect|net\.createconnection|websocket|"
-    r"open-uri|net::http|lwp|io::socket|fsockopen|file_get_contents|deno\.connect|bun\.connect)(?![\w-])"
-    r"|/dev/(?:tcp|udp)/", re.I)
+# A client or connecting library's word, anywhere on the line.
+_REMOTE_CONNECTORS = re.compile(
+    # `(?<![\w-])`, not `[\w.-]`: `require("net").createConnection` is a call after a dot.
+    r"(?<![\w-])(?:curl|curlie|wget|wget2|nc|ncat|netcat|socat|telnet|https?|xh|xhs|httpie|httpx|"
+    r"aria2c|websocat|lynx|links|w3m|openssl|s_client|grpcurl|nmap|ssh|autossh|sshuttle|"
+    r"invoke-webrequest|invoke-restmethod|iwr|irm|socket|tcpsocket|udpsocket|urllib|urllib3|requests|"
+    r"aiohttp|http\.client|httplib|fetch|xmlhttprequest|createconnection|net\.connect|websocket|"
+    r"open-uri|net::http|lwp|io::socket|fsockopen|file_get_contents|deno\.connect|bun\.connect|"
+    r"connect|urlopen|playwright|chromium|puppeteer)(?![\w-])"
+    r"|/dev/(?:tcp|udp)/|/inet6?/(?:tcp|udp)/|(?<![\w-])-M[A-Za-z]", re.I)
 # `REMOTE_PORT` expanded, never the bare word.
 _REMOTE_EXPANSION = re.compile(
     r"\$\{?[#!]?\w*REMOTE_PORT\b|environ(?:\.get)?\s*[\[(]\s*['\"]\w*REMOTE_PORT"
     r"|getenv\s*\(\s*['\"]\w*REMOTE_PORT|process\.env\.\w*REMOTE_PORT|ENV\[\s*['\"]\w*REMOTE_PORT")
-_ANY_EXPANSION = re.compile(r"\$\{?[A-Za-z_]\w*")
 _REMOTE_API = re.compile(r"/m/api(?![\w-])")
 _TS_NET = re.compile(r"\.ts\.net(?![\w-])", re.I)
+_HOST_EXPANSION = r"\$\{?\w*REMOTE_HOST\}?"
 
 
 def _remote_ports() -> set[int]:
@@ -812,63 +816,43 @@ def _remote_reading_cached(command: str, ports: tuple[int, ...]) -> str | None:
     return _remote_reading_uncached(command, ports)
 
 
+@functools.lru_cache(maxsize=8)
+def _remote_patterns(ports: tuple[int, ...]):
+    alt = "|".join(str(p) for p in ports)
+    loop = rf"(?:{_REMOTE_LOOPBACK.pattern}|{_HOST_EXPANSION})"
+    number = re.compile(rf"(?<!\d)(?:{alt})(?!\d)")
+    joined = re.compile(rf"{loop}\]?:(?:{alt})(?!\d)", re.I)
+    joined_expansion = re.compile(rf"{loop}\]?:\$\{{?[A-Za-z_]\w*", re.I)
+    sockets = re.compile(rf"/dev/(?:tcp|udp)/[^/\s'\"]+/(?:(?:{alt})(?!\d)|\$\{{?[A-Za-z_]\w*)"
+                         rf"|/inet6?/(?:tcp|udp)/[^/\s'\"]*/[^/\s'\"]+/(?:(?:{alt})(?!\d)|\$\{{?[A-Za-z_]\w*)")
+    return number, joined, joined_expansion, sockets
+
+
 def _remote_reading_uncached(command: str, ports: tuple[int, ...]) -> str | None:
     text = join_continuations(command)
     if not text.strip():
         return None
+    number, joined, joined_expansion, sockets = _remote_patterns(ports)
     spelled = _spellings(text)
-    # The route prefix to this machine: the whole line, any spelling.
+    named = any(number.search(v) or _REMOTE_EXPANSION.search(v) for v in spelled)
     for v in spelled:
-        if _REMOTE_API.search(v) and (_REMOTE_LOOPBACK.search(v) or _TS_NET.search(v)):
+        loopback = _REMOTE_LOOPBACK.search(v) is not None
+        # The route prefix to this machine.
+        if _REMOTE_API.search(v) and (loopback or _TS_NET.search(v)):
             return REMOTE_DENIED
-    alt = "|".join(str(p) for p in ports)
-    number = re.compile(rf"(?<!\d)(?:{alt})(?!\d)")
-    if not any(number.search(v) or _REMOTE_EXPANSION.search(v) for v in spelled):
-        return None
-    target = rf"(?:(?:{alt})(?!\d)|\$\{{?[A-Za-z_]\w*)"
-    hostport = re.compile(rf"(?:\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?):{target}")
-    devtcp = re.compile(rf"/dev/(?:tcp|udp)/[^/\s'\"]+/{target}")
-    if any(devtcp.search(v) for v in spelled):
-        return REMOTE_DENIED
-
-    def reaches(texts) -> bool:
-        for v in texts:
-            if not (number.search(v) or _REMOTE_EXPANSION.search(v) or _ANY_EXPANSION.search(v)):
-                continue
-            if _REMOTE_LOOPBACK.search(v) or hostport.search(v):
-                return True
-        return False
-
-    progs = []
-    try:
-        for variant in _program_variants(text):
-            walk = _Walk()
-            walk.line(variant, True, 0)
-            progs.extend(walk.progs)
-    except _TooComplex:
-        # Too complex to walk: the stricter whole-text reading.
-        for v in spelled:
-            if (number.search(v) and _REMOTE_LOOPBACK.search(v)
-                    and (_REMOTE_INLINE_CLIENTS.search(v)
-                         or any(re.search(rf"(?<![\w.-]){re.escape(s)}(?![\w-])", v, re.I)
-                                for s in _REMOTE_CLIENT_STEMS))):
-                return REMOTE_DENIED
-        return None
-    for prog in progs:
-        if not prog.word:
+        if not named:
             continue
-        args = [str(a) for a in prog.args]
-        for word in _spellings(str(prog.word)):
-            stem = _program_stem(word)
-            if stem in _REMOTE_CLIENT_STEMS and reaches(_spellings(" ".join(args))):
-                return REMOTE_DENIED
-            base = _inline_base(stem)
-            if base is None:
-                continue
-            for source in _inline_sources(base, args):
-                variants = _spellings(source)
-                if any(_REMOTE_INLINE_CLIENTS.search(v) for v in variants) and reaches(variants):
-                    return REMOTE_DENIED
+        # A loopback host joined to the port, whatever program holds it.
+        if joined.search(v):
+            return REMOTE_DENIED
+        if joined_expansion.search(v):
+            return REMOTE_DENIED
+        # A socket path to it.
+        if sockets.search(v):
+            return REMOTE_DENIED
+        # The port, a loopback spelling and a connector, apart.
+        if loopback and _REMOTE_CONNECTORS.search(v):
+            return REMOTE_DENIED
     return None
 
 
