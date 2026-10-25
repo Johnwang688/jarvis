@@ -1165,7 +1165,7 @@ def _glob_relate(pattern: tuple[str, ...], target: tuple[str, ...]
     return exact, below, above
 
 
-_WALKS: dict = {}          # (glob, protected inodes[, line]) -> (expiry, answer)
+_WALKS: dict = {}          # (glob, protected inodes, (line, folder)) -> (expiry, answer)
 
 # One path a glob reached on disk that its text cannot judge: (the path, where
 # it resolves to, the (device, inode) it names or None).
@@ -1182,26 +1182,28 @@ def _glob_fs(text: str) -> tuple[tuple[_Reached, ...], bool]:
     entries and holds `_GLOB_FS_PATHS` folders; one line's globs together
     read at most `_GLOB_LINE_ENTRIES` and spend `_GLOB_LINE_SECONDS`, the
     resolving of what they reach included (a folder on `/mnt/c` lists and
-    resolves slowly); and an answer is reused for `_GLOB_TTL` seconds — one
-    permit judges a line two or three times — by any line when the glob's
-    own bounds decided it, by the same line when the line's did. A walk cut
+    resolves slowly); and an answer is reused for `_GLOB_TTL` seconds by the
+    same line in the same folder only — one permit judges a line two or three
+    times — never by another line, which may come after the folder changed
+    (delta review of PR #310: a walk shared across lines answered a later
+    line from before a link was made). Outside a line's analysis nothing is
+    reused. A walk cut
     short says so (`False`), and a write through it asks (`_walk_cut`): a
     folder of 5,000 entries holding a link into the gate's was read as
     holding nothing, and the write ran."""
     inodes = _protected_inodes()
-    key = (text, inodes)
-    line_key = key + (_line_key(),)
+    line = _line_key()
+    key = (text, inodes, line)
     now = time.monotonic()
-    for k in (key, line_key):
-        hit = _WALKS.get(k)
-        if hit is not None and hit[0] > now:
-            return hit[1]
-    answer, own = _glob_fs_now(text, inodes, _walk_budget())
-    if own or line_key[-1] is not None:
+    hit = _WALKS.get(key) if line is not None else None
+    if hit is not None and hit[0] > now:
+        return hit[1]
+    answer, _ = _glob_fs_now(text, inodes, _walk_budget())
+    if line is not None:
         if len(_WALKS) >= 1024:
             for old in [k for k, v in _WALKS.items() if v[0] <= now] or list(_WALKS)[:512]:
                 _WALKS.pop(old, None)
-        _WALKS[key if own else line_key] = (time.monotonic() + _GLOB_TTL, answer)
+        _WALKS[key] = (time.monotonic() + _GLOB_TTL, answer)
     return answer
 
 

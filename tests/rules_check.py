@@ -4531,9 +4531,67 @@ def glob_walk_bound_checks() -> None:
         held = min((loadclock.judge(*[loadclock.cpu(S.command_touches, reader)[0]],
                                     0.05) for _ in range(3)), key=lambda h: h.idle)
         assert held.idle < 0.05, f"a reader's globs took {held}"
+
+        # Delta review of PR #310, MED: a walk's answer is reused only by the
+        # same line. Another line with the same glob, after a link into the
+        # gate's folder was made, sees the link — the answer was shared by
+        # every line for 2 s, and the second line was judged on "nothing".
+        land = home / "land"
+        (land / "a").mkdir(parents=True)
+        S._WALKS.clear()
+        assert S.command_touch(f"cp /tmp/x {land}/*/allowlist.json") is None
+        (land / "zz").symlink_to(gate, target_is_directory=True)
+        for line in (f"tee {land}/*/allowlist.json < /tmp/x",
+                     f"cp /tmp/y {land}/*/allowlist.json"):
+            touch = S.command_touch(line)
+            assert touch is not None and touch.certain, (line, touch)
+            assert permissions.static_verdict(line).decision == rules.DENY, line
+
+        # The line's allowance is the line's, not each glob's (mutant X2: a
+        # fresh budget per glob). Entries: six folders of 3,000, each glob
+        # under its own 4,096 but the line over its 16,384 — the later
+        # writes ask, while each alone is decided.
+        folders = []
+        for k in range(6):
+            folder = home / f"wide{k}"
+            (folder / "d").mkdir(parents=True)
+            for i in range(3000):
+                (folder / f"f{i}").touch()
+            folders.append(folder)
+        S._WALKS.clear()
+        for folder in folders:
+            alone = f"touch {folder}/*/x"
+            assert S.command_touch(alone) is None, alone
+            assert permissions.static_verdict(alone).decision == rules.decide(alone).decision
+        line = "touch " + " ".join(f"{folder}/*/x" for folder in folders)
+        assert any(t.opaque for t in S.command_touches(line)), "the line's entries were not capped"
+        assert permissions.static_verdict(line).decision == rules.ASK, line
+        assert not permissions.allows("run_command", {"command": line}), line
+        # Wall clock: four small folders, each listed in 30 ms — one is within
+        # the line's 50 ms, four together are not.
+        real_scandir = S.os.scandir
+
+        def slow(path):
+            time.sleep(0.03)
+            return real_scandir(path)
+        small = []
+        for k in range(4):
+            folder = home / f"slow{k}"
+            (folder / "d").mkdir(parents=True)
+            small.append(folder)
+        S.os.scandir = slow
+        try:
+            S._WALKS.clear()
+            assert S.command_touch(f"touch {small[0]}/*/x") is None
+            line = "touch " + " ".join(f"{folder}/*/x" for folder in small)
+            assert any(t.opaque for t in S.command_touches(line)), "the line's clock was not held"
+            assert permissions.static_verdict(line).decision == rules.ASK, line
+        finally:
+            S.os.scandir = real_scandir
     print(f"ok  glob walk: {cases} writes through a folder too large to list (the link at four "
           f"names) asked, never run; reads never walked; one line's walk {took * 1000:.0f} ms, "
-          f"reused at {again * 1000:.1f} ms; {len(BROAD_CASES)} broad cases above")
+          f"reused at {again * 1000:.1f} ms by the same line only; the line's entries and clock "
+          f"bound all its globs together; {len(BROAD_CASES)} broad cases above")
 
 
 def shutil_rmtree(path: Path) -> None:

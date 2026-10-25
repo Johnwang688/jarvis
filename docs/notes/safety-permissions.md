@@ -2907,13 +2907,24 @@ what it did on main (it took 2.3–2.9 s on the first version of this
 change). The walk keeps only the links and protected inodes it meets,
 resolves them itself, and is bounded: 4,096 entries and 1,024 folders a
 glob, 16,384 entries and **50 ms of wall clock for all of one line's globs**,
-and an answer is reused for 2 s (one permit judges a line two or three
-times). **A walk cut short is never read as "nothing there"**: a write
+and an answer is reused for 2 s by the same line in the same folder only
+(one permit judges a line two or three times). It was first shared by any
+line with the same glob (delta review of PR #310), so a line judged after a
+link was made could get the answer from before it. **A walk cut short is never read as "nothing there"**: a write
 through it is an opaque touch, asked, never covered — the first version
 read a folder of 5,000 entries holding `zzzz -> <gate>` as empty, and `cp
 /tmp/x /tmp/crowd/*/allowlist.json` ran unasked. Measured on `/mnt/c`: a
 writing glob that walks costs one permit (three calls) about 50–70 ms, a
 reading one about 1 ms; on Linux paths the same as main.
+
+**A verdict that depends on time.** Because the line's walk has a wall-clock
+deadline, the same writing glob on a slow file system can be decided either
+way: `cp notes.txt /mnt/c/Users/johnw/*/Desktop/` is asked when the folders
+list slowly (a cold cache, a busy machine) and judged normally when they
+list fast (a warm one). It only ever fails closed — a walk the deadline cut
+is asked, never allowed — so the cost is an extra question, not a missed
+write. No test expects ALLOW for a writing glob that walks a slow or large
+folder; the tests that need a walk to finish use small local folders.
 
 **`..` after a symlink.** A path with `..` is resolved as the kernel does
 (`os.path.realpath`), not collapsed as text: with a link `/tmp/l` to a folder
