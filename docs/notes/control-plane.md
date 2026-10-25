@@ -701,9 +701,12 @@ the `mobile.html` entry and its imports, never the rest of the HUD bundle.
 `remote_auth.api_route` since P-2 (next section): 401 `{"error":
 "unauthorized"}` without a session, except the four pairing and login
 routes; everything else 404. Every request body is read before any answer,
-a refusal's included (64 KiB cap, 413 above it after draining up to 1 MiB;
-chunked bodies decoded the same way), so `tailscale serve`'s Go proxy never
-turns an answer over an unread body into a 502 (PR #304's follow-up). Files come from `hud/dist` under
+a refusal's included (64 KiB cap, 413 above it after draining up to 1 MiB of
+wire bytes; chunked bodies decoded the same way, their size lines, data and
+trailers all counted against that 1 MiB and trailers capped at 8 KiB; the
+whole body within 10 s on the monotonic clock, else 408), so `tailscale
+serve`'s Go proxy never turns an answer over an unread body into a 502 (PR
+#304's follow-up). Files come from `hud/dist` under
 `JARVIS_HUD_DEV=1`, otherwise from the installed builds, verified on each
 read (`hud_install.read`).
 
@@ -739,12 +742,15 @@ advisory text and never read for a decision: a local process can send them).
   /phone/pair` (opens or replaces the window: `{url, expires_in}`), `POST
   /phone/pair/cancel`, `POST /phone/passkeys/<k-…>/revoke`, `POST
   /phone/sessions/<s-…>/end`. The window is 5 minutes and one successful
-  registration; its code is 256 random bits, only in the daemon's memory,
+  registration ("single-use" means that: a failed attempt may be retried
+  with the same code while the window is open; the first registration that
+  lands closes it); its code is 256 random bits, only in the daemon's memory,
   compared in constant time, and travels in the URL fragment
   (`https://<host>/m/pair#<code>`), which no browser sends. A replaced window's
   code and registration challenges die with it. No window without a
-  configured host and a bound listener (409). At most 3 active passkeys:
-  refused at the window, the options and the verify (409).
+  configured host and a bound listener (409), nor without `webauthn`
+  installed (503, "uv pip install -e ."). At most 3 active passkeys: refused
+  at the window, the options and the verify (409).
 - **Registration** (`POST /m/api/pair/options`, `/pair/verify`, each with the
   code): `rp_id` = the remote host, origin `https://<host>`,
   `residentKey: required`, `userVerification: required`, verified with
@@ -753,19 +759,30 @@ advisory text and never read for a decision: a local process can send them).
   nothing about the private key): the phone signs in next.
 - **Login** (`POST /m/api/login/options`, `/login/verify`): a 32-byte
   server-side challenge, single-use (taken out before verifying, so a failed
-  attempt spends it), 60 s on the monotonic clock, pruned and capped at 64
-  outstanding. Options name no credential (discoverable passkeys). Unknown,
+  attempt spends it), 60 s on the monotonic clock, pruned, and capped per
+  kind (32 login, 8 registration and those only while a window is open); a
+  full pool answers 429 rather than evicting a pending ceremony, so a flood
+  of unauthenticated `login/options` cannot evict a phone's sign-in or
+  pairing. Options name no credential (discoverable passkeys). Unknown,
   spent, expired or registration challenge: 409. Unknown or revoked
-  credential, another user handle, wrong origin or rpId, UV clear, a bad
+  credential, another user handle, wrong origin or rpId, `crossOrigin: true`
+  or a `topOrigin` in the client data (at registration too), UV clear, a bad
   signature, or PH-4's counter rule (0 while the stored counter is 0;
   otherwise strictly greater): 401 with no detail.
 - **Sessions.** `__Host-jarvis_m=<256-bit token>; Path=/; Max-Age=604800;
   Secure; HttpOnly; SameSite=Strict`. Only the token's SHA-256 is stored.
   12 h idle, 7 days absolute, on the wall clock. Each records its passkey,
   the cleaned and capped user agent, created, last-seen (written at most once
-  a minute) and the advisory headers. `POST /m/api/logout` ends it and clears
-  the cookie; Revoke ends every session of the passkey **in memory first**,
-  so it holds even if the file write fails; End ends one.
+  a minute) and the advisory headers; one dated more than 5 minutes in the
+  future is refused, and past 32 sessions the least recently seen goes.
+  `POST /m/api/logout` ends it and clears the cookie; End ends one. **Revoke**
+  ends every session of the passkey and refuses its credential in memory at
+  once, and is durable once the passkeys file is written. If that write
+  fails the revoke answers 503, the HUD shows the passkey as "revoked, not
+  saved" (`GET /phone` `state: "unsaved"` and `unsaved`), every later call
+  (`status`, a session check, login, pairing) retries the write, and a repeat
+  Revoke retries it and answers 200 once it lands. A restart before the
+  write lands loses the revocation (the file still has the passkey active).
 - **`is_remote_owner(handler)` / `owner_status`** is the only owner test on
   the remote listener (`projects.is_owner` stays false there): this daemon's
   bound remote server (`RemoteAuth.server`, set by `remote_listener.bind`),
@@ -776,18 +793,27 @@ advisory text and never read for a decision: a local process can send them).
 - **Storage.** `<data root>/remote/` 0700, `passkeys.json` and
   `sessions.json` 0600, atomic (`stores._write_bytes`), read with
   `O_NOFOLLOW`. Both are protected state (`files._protected_state_paths`): no
-  write tool, shell write or grant reaches them. An unreadable passkeys file
-  is never overwritten (pairing and login 503, the HUD says so); an
-  unreadable sessions file signs every phone out. `webauthn` is imported only
+  write tool, shell write or grant reaches them, and a writer on the
+  `remote/` folder itself (`rm -rf`, `mv` it away, `mv`/`cp -r` a folder into
+  its place) is a certain touch of its files (`protected_state.phone_dirs`:
+  refused at v2's layer 1, asked by v1, as the files are); the data root
+  above it is asked as before. An unreadable passkeys file is never
+  overwritten (pairing and login 503, the HUD says so) and is read again on
+  the next call; an unreadable sessions file signs every phone out. `webauthn` is imported only
   when used, so a daemon without it starts and answers 503 there.
 - **The agent path** (design §4). `rules.remote_reading`, called from
   `rules._decide` on the raw line like the Secret Service reading, DENYs a
-  line that names the remote port (8408 or `config.REMOTE_PORT`, or the name
-  `REMOTE_PORT`) together with a loopback spelling, a `host:port` or
-  `/dev/tcp/…/port` form, or a network client or library; or `/m/api`
-  together with a loopback spelling or a `ts.net` name. v1's gate and v2's
-  layer 1 both start from `decide`, so neither asks and no allowlist entry
-  covers it. An accident guard, not a boundary (a computed port, a script
+  line where a program it **runs** (a segment's command, through wrappers,
+  runners and `sh -c`, the Secret Service reading's `_Walk`) is a network
+  client, or inline source (`-c`/`-e`) holds a client or connecting library,
+  aimed at the remote port (8408 or `config.REMOTE_PORT`, or `REMOTE_PORT`
+  *expanded*) with a loopback spelling or as `host:port` after a host-like
+  token; bash's `/dev/tcp/<host>/<port>`; or `/m/api` anywhere on the line
+  together with a loopback spelling or a `ts.net` name. A client word as an
+  argument (`git fetch`), the port in a commit message, `sed` or `lsof`, and
+  `REMOTE_PORT` as a bare word are not refused. v1's gate and v2's layer 1
+  both start from `decide`, so neither asks and no allowlist entry covers
+  it. An accident guard, not a boundary (a computed port, a script
   file, a hosts alias without a port get past it); the boundary is the
   cookie, which only the phone's browser holds.
 - **HUD:** Settings > Phone (`hud/src/components/PhoneSettings.tsx`): the

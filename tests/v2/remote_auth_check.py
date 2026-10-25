@@ -45,6 +45,7 @@ import socket
 import stat
 import sys
 import tempfile
+import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -108,11 +109,11 @@ class Authenticator:
         return flags
 
     def create(self, options: dict, *, origin: str = ORIGIN, rp_id: str | None = None,
-               uv: bool | None = None, challenge: str | None = None) -> dict:
+               uv: bool | None = None, challenge: str | None = None, client_extra: dict | None = None) -> dict:
         rp = rp_id or options["rp"]["id"]
         self.user_handle = options["user"]["id"]
         client = json.dumps({"type": "webauthn.create", "challenge": challenge or options["challenge"],
-                             "origin": origin, "crossOrigin": False}).encode()
+                             "origin": origin, "crossOrigin": False, **(client_extra or {})}).encode()
         auth_data = (hashlib.sha256(rp.encode()).digest()
                      + bytes([self._flags(True, self.uv if uv is None else uv)])
                      + self.count.to_bytes(4, "big") + bytes(16)
@@ -124,13 +125,14 @@ class Authenticator:
                 "clientExtensionResults": {}, "authenticatorAttachment": "platform"}
 
     def get(self, options: dict, *, origin: str = ORIGIN, rp_id: str | None = None,
-            uv: bool | None = None, count: int | None = None, challenge: str | None = None) -> dict:
+            uv: bool | None = None, count: int | None = None, challenge: str | None = None,
+            client_extra: dict | None = None) -> dict:
         rp = rp_id or options["rpId"]
         if count is None:
             self.count += self.step
             count = self.count
         client = json.dumps({"type": "webauthn.get", "challenge": challenge or options["challenge"],
-                             "origin": origin, "crossOrigin": False}).encode()
+                             "origin": origin, "crossOrigin": False, **(client_extra or {})}).encode()
         auth_data = (hashlib.sha256(rp.encode()).digest()
                      + bytes([self._flags(False, self.uv if uv is None else uv)])
                      + count.to_bytes(4, "big"))
@@ -588,15 +590,61 @@ class Login(Remote):
         self.assertEqual(self.phone("POST", "/m/api/login/verify", {"credential": wrong_kind})[0], 409)
         print("ok  login: a replayed, expired, unknown, spent or registration challenge is refused (409)")
 
-    def test_challenges_are_pruned_and_capped(self):
-        self.pair()
-        for _ in range(remote_auth.MAX_CHALLENGES + 20):
-            self.auth.login_options()
-        self.assertLessEqual(len(self.auth._challenges), remote_auth.MAX_CHALLENGES)
+    def test_challenges_are_pruned_and_capped_per_kind(self):
+        a = self.pair()
+        # A pending sign-in and a pending registration, then a flood of
+        # unauthenticated login/options: the flood is refused, nothing
+        # pending is evicted.
+        _, _, pending_login = self.phone("POST", "/m/api/login/options", {})
+        code = self.open_window()
+        newcomer = Authenticator()
+        _, _, pending_reg = self.phone("POST", "/m/api/pair/options", {"code": code})
+        statuses = [self.phone("POST", "/m/api/login/options", {})[0]
+                    for _ in range(remote_auth.MAX_LOGIN_CHALLENGES + 10)]
+        self.assertEqual(statuses.count(200), remote_auth.MAX_LOGIN_CHALLENGES - 1)
+        self.assertTrue(all(s == 429 for s in statuses[remote_auth.MAX_LOGIN_CHALLENGES - 1:]), statuses)
+        status, _, body = self.phone("POST", "/m/api/login/options", {})
+        self.assertEqual((status, body), (429, {"error": "too many sign-ins in progress; try again in a minute"}))
+        self.assertEqual(self.phone("POST", "/m/api/pair/verify",
+                                    {"code": code, "credential": newcomer.create(pending_reg)})[0], 200,
+                         "the pending registration survived the flood")
+        self.assertEqual(self.phone("POST", "/m/api/login/verify",
+                                    {"credential": a.get(pending_login)})[0], 200,
+                         "the pending sign-in survived the flood")
+        # Registration challenges: only within a window, capped on their own.
+        auth = RemoteAuth(self.root / "unit", HOST, wall=self.wall, mono=self.mono)
+        with self.assertRaises(remote_auth.AuthError) as caught:
+            auth._issue("register", generation=0)
+        self.assertEqual(caught.exception.status, 401)
+        code = auth.open_window()["url"].split("#")[1]
+        for _ in range(remote_auth.MAX_REGISTER_CHALLENGES):
+            auth.pair_options(code)
+        with self.assertRaises(remote_auth.AuthError) as caught:
+            auth.pair_options(code)
+        self.assertEqual(caught.exception.status, 429)
+        auth.login_options()                       # the login pool is its own
+        # Expiry prunes.
         self.mono.now += remote_auth.CHALLENGE_S + 1
-        self.auth.login_options()
-        self.assertEqual(len(self.auth._challenges), 1, "expired ones are pruned")
-        print("ok  challenges: pruned on expiry and capped")
+        self.assertEqual(self.phone("POST", "/m/api/login/options", {})[0], 200)
+        self.assertEqual(sum(1 for c in self.auth._challenges.values() if c["kind"] == "login"), 1,
+                         "expired ones are pruned")
+        self.assertEqual((remote_auth.MAX_LOGIN_CHALLENGES, remote_auth.MAX_REGISTER_CHALLENGES), (32, 8))
+        print("ok  challenges: capped per kind, a flood refused (429) and nothing pending evicted; pruned")
+
+    def test_cross_origin_ceremonies_refused(self):
+        a = self.pair()
+        for extra in ({"crossOrigin": True}, {"topOrigin": "https://evil.example"}, {"crossOrigin": "yes"}):
+            status, headers, _ = self.login(a, client_extra=extra)
+            self.assertEqual(status, 401, extra)
+            self.assertNotIn("Set-Cookie", headers)
+            code = self.open_window()
+            _, _, options = self.phone("POST", "/m/api/pair/options", {"code": code})
+            status, _, _ = self.phone("POST", "/m/api/pair/verify",
+                                      {"code": code, "credential": Authenticator().create(options, client_extra=extra)})
+            self.assertEqual(status, 401, extra)
+        self.assertEqual(len(self.auth.status()["passkeys"]), 1)
+        self.assertEqual(self.login(a, client_extra={"crossOrigin": False})[0], 200)
+        print("ok  crossOrigin true (or a topOrigin) is refused at registration and at login")
 
     def test_counter_rule(self):
         self.assertTrue(remote_auth.counter_ok(0, 0))
@@ -705,24 +753,129 @@ class Sessions(Remote):
         a1, a2, b1 = self.signed_in(a), self.signed_in(a), self.signed_in(b)
         keys = [p["key"] for p in self.auth.status()["passkeys"]]
         self.assertEqual(len(self.auth.status()["passkeys"][0]["sessions"]), 2)
-        # The files are unwritable: the revoke still holds, from memory.
-        with patch.object(self.auth, "_write", side_effect=remote_auth.AuthError(503, "x")):
-            status, body = self.hud("POST", f"/phone/passkeys/{keys[0]}/revoke")
-        self.assertEqual(status, 503, body)
+        status, body = self.hud("POST", f"/phone/passkeys/{keys[0]}/revoke")
+        self.assertEqual(status, 200, body)
         # Gone from memory at once, before any request could prune them.
         self.assertEqual({r["passkey"] for r in self.auth._sessions.values()}, {keys[1]})
         self.assertEqual((self.me(a1), self.me(a2), self.me(b1)), (401, 401, 200))
         self.assertEqual(self.login(a)[0], 401)
-        # And on disk, once it can be written.
-        self.assertEqual(self.hud("POST", f"/phone/passkeys/{keys[0]}/revoke")[0], 404, "already revoked")
-        self.auth._save_passkeys()
-        self.auth._save_sessions()
+        # And on disk, with no help: a restart sees it.
+        again = RemoteAuth(self.auth.dir, HOST, wall=self.wall, mono=self.mono)
+        self.assertEqual([p["key"] for p in again.status()["passkeys"]], [keys[1]])
+        self.assertIsNone(again.session_for([a1]))
         on_disk = json.loads((self.auth.dir / "sessions.json").read_text())["sessions"]
         self.assertEqual({r["passkey"] for r in on_disk}, {keys[1]})
-        self.assertEqual([p["key"] for p in self.auth.status()["passkeys"]], [keys[1]])
+        self.assertNotIn("unsaved", (self.auth.dir / "passkeys.json").read_text())
+        self.assertEqual(self.hud("POST", f"/phone/passkeys/{keys[0]}/revoke")[0], 404, "already revoked")
         self.assertEqual(self.hud("POST", "/phone/passkeys/k-ffffffffffff/revoke")[0], 404)
         self.assertEqual(self.hud("POST", "/phone/passkeys/nonsense/revoke")[0], 404)
-        print("ok  revoke: every session of the passkey ends at once, even before the files are written")
+        print("ok  revoke: every session of the passkey ends at once, in memory and on disk")
+
+    def test_revoke_whose_write_fails(self):
+        a, b = self.pair(), self.pair()
+        a1, b1 = self.signed_in(a), self.signed_in(b)
+        keys = [p["key"] for p in self.auth.status()["passkeys"]]
+        failing = patch.object(self.auth, "_write", side_effect=remote_auth.AuthError(503, "phone state unavailable"))
+        failing.start()
+        status, body = self.hud("POST", f"/phone/passkeys/{keys[0]}/revoke")
+        self.assertEqual(status, 503, body)
+        # Held in memory: its session is gone, its credential refused.
+        self.assertEqual((self.me(a1), self.me(b1)), (401, 200))
+        self.assertEqual(self.login(a)[0], 401, "an unsaved revoked credential is refused")
+        # The HUD says so, and a repeat revoke retries (503 while it still fails).
+        status, view = self.hud("GET", "/phone")
+        self.assertEqual(view["state"], "unsaved")
+        self.assertEqual([u["key"] for u in view["unsaved"]], [keys[0]])
+        self.assertEqual([p["key"] for p in view["passkeys"]], [keys[1]])
+        self.assertEqual(self.hud("POST", f"/phone/passkeys/{keys[0]}/revoke")[0], 503)
+        # A restart now would lose it: the file still has the passkey active.
+        lost = RemoteAuth(self.auth.dir, HOST, wall=self.wall, mono=self.mono)
+        self.assertEqual(len(lost.status()["passkeys"]), 2, "not yet on disk")
+        # The disk recovers: the repeat revoke lands it and answers 200.
+        failing.stop()
+        self.assertEqual(self.hud("POST", f"/phone/passkeys/{keys[0]}/revoke")[0], 200)
+        self.assertEqual(self.hud("GET", "/phone")[1]["state"], "ok")
+        self.assertEqual(self.hud("POST", f"/phone/passkeys/{keys[0]}/revoke")[0], 404)
+        restarted = RemoteAuth(self.auth.dir, HOST, wall=self.wall, mono=self.mono)
+        self.assertEqual([p["key"] for p in restarted.status()["passkeys"]], [keys[1]])
+        self.assertIsNone(restarted.session_for([a1]), "and its session stays dead after a restart")
+        self.assertIsNotNone(restarted.session_for([b1]))
+        print("ok  revoke with a failing write: 503, refused in memory, 'unsaved' in the HUD, retried, durable once it lands")
+
+    def test_unsaved_revoke_lands_on_any_later_call(self):
+        for call in ("status", "session", "login"):
+            with self.subTest(call=call):
+                a, b = self.pair(), self.pair()
+                b1 = self.signed_in(b)
+                key = self.auth.status()["passkeys"][-2]["key"]
+                with patch.object(self.auth, "_write", side_effect=remote_auth.AuthError(503, "x")):
+                    self.assertEqual(self.hud("POST", f"/phone/passkeys/{key}/revoke")[0], 503)
+                self.assertTrue(self.auth._unsaved)
+                if call == "status":
+                    self.auth.status()
+                elif call == "session":
+                    self.assertEqual(self.me(b1), 200)
+                else:
+                    self.signed_in(b)
+                self.assertFalse(self.auth._unsaved, call)
+                restarted = RemoteAuth(self.auth.dir, HOST, wall=self.wall, mono=self.mono)
+                self.assertNotIn(key, [p["key"] for p in restarted.status()["passkeys"]], call)
+                for p in list(self.auth.status()["passkeys"]):
+                    self.auth.revoke(p["key"])
+        print("ok  an unsaved revocation is written by the next status, session check or sign-in")
+
+    def test_session_clock_skew_and_prune_order(self):
+        a = self.pair()
+        cookie = self.signed_in(a)
+        start = self.wall.now
+        self.wall.now = start - 299
+        self.assertEqual(self.me(cookie), 200, "a clock 299 s behind the session's creation")
+        self.wall.now = start - 301
+        self.assertEqual(self.me(cookie), 401, "a session from more than 5 minutes in the future")
+        self.wall.now = start
+        # MAX_SESSIONS: the least recently seen goes first.
+        cookies = []
+        for _ in range(remote_auth.MAX_SESSIONS):
+            self.wall.now += 1
+            cookies.append(self.signed_in(a))
+        self.wall.now += 1
+        self.assertEqual(self.me(cookies[0]), 200)        # now the most recently seen
+        self.wall.now += 1
+        newest = self.signed_in(a)
+        self.assertEqual(len(self.auth._sessions), remote_auth.MAX_SESSIONS)
+        self.assertEqual((self.me(cookies[0]), self.me(cookies[1]), self.me(newest)), (200, 401, 200))
+        print("ok  sessions: a future-dated one is refused; past MAX_SESSIONS the least recently seen goes")
+
+    def test_revoked_records_are_kept_and_pruned(self):
+        auth = RemoteAuth(self.root / "unit", HOST, wall=self.wall, mono=self.mono)
+        auth.server = object()
+        ids = []
+        for _ in range(remote_auth.MAX_REVOKED + 3):
+            self.wall.now += 10
+            code = auth.open_window()["url"].split("#")[1]
+            x = Authenticator()
+            key = auth.pair_verify(code, x.create(auth.pair_options(code)))["passkey"]
+            ids.append(x.id)
+            self.assertTrue(auth.revoke(key))
+        kept = [p["id"] for p in json.loads(auth.passkeys_path.read_text())["passkeys"]]
+        self.assertEqual(len(kept), remote_auth.MAX_REVOKED)
+        self.assertEqual(kept, ids[3:], "the oldest revocations go first")
+        self.assertEqual(remote_auth.MAX_REVOKED, 16)
+        print("ok  revoked passkeys: the newest 16 records are kept, the oldest pruned")
+
+    def test_a_transient_read_error_does_not_stick(self):
+        a = self.pair()
+        cookie = self.signed_in(a)
+        fresh = RemoteAuth(self.auth.dir, HOST, wall=self.wall, mono=self.mono)
+        os.chmod(fresh.passkeys_path, 0)
+        try:
+            self.assertEqual(fresh.status()["state"], "unreadable")
+            self.assertIsNone(fresh.session_for([cookie]))
+        finally:
+            os.chmod(fresh.passkeys_path, 0o600)
+        self.assertEqual(fresh.status()["state"], "ok", "read again on the next call, no restart")
+        self.assertIsNotNone(fresh.session_for([cookie]))
+        print("ok  a passkeys file that could not be read is read again on the next call")
 
     def test_end_one_session(self):
         a = self.pair()
@@ -946,6 +1099,137 @@ class OwnerTest(Remote):
 
 
 class Bodies(Remote):
+    def counted(self):
+        """Wrap each request's `rfile` to count the bytes the handler takes
+        off the wire (request line and headers included)."""
+        cls = self.auth.server.RequestHandlerClass
+        real_setup = cls.setup
+        readers = []
+
+        class Counted:
+            def __init__(self, inner):
+                self.inner, self.n = inner, 0
+
+            def _take(self, data):
+                self.n += len(data)
+                return data
+
+            def read(self, *a):
+                return self._take(self.inner.read(*a))
+
+            def read1(self, *a):
+                return self._take(self.inner.read1(*a))
+
+            def readline(self, *a):
+                return self._take(self.inner.readline(*a))
+
+            def peek(self, *a):
+                return self.inner.peek(*a)
+
+            def __getattr__(self, name):
+                return getattr(self.inner, name)
+
+        def setup(handler):
+            real_setup(handler)
+            handler.rfile = Counted(handler.rfile)
+            readers.append(handler.rfile)
+
+        guard = patch.object(cls, "setup", setup)
+        guard.start()
+        self.addCleanup(guard.stop)
+        return readers
+
+    def exchange(self, readers, data: bytes) -> tuple[bytes, int]:
+        before = len(readers)
+        try:
+            answer = send_bytes(self.port, data)
+        except ConnectionResetError:
+            answer = b""
+        for _ in range(100):
+            if len(readers) > before:
+                break
+            time.sleep(0.01)
+        time.sleep(0.05)
+        return answer, readers[-1].n
+
+    def test_every_wire_byte_is_read(self):
+        readers = self.counted()
+        head = f"POST /m/api/login/options HTTP/1.1\r\nHost: {HOST}\r\nOrigin: {ORIGIN}\r\n"
+        piece = b"x" * 8192
+        trailers = b"X-One: a\r\nX-Two: b\r\n"
+        cases = [
+            ("over-cap Content-Length", 413, (head + f"Content-Length: {remote_listener.BODY_CAP + 4096}\r\n\r\n")
+             .encode() + b"x" * (remote_listener.BODY_CAP + 4096)),
+            ("chunked over the cap", 413, (head + "Transfer-Encoding: chunked\r\n\r\n").encode()
+             + b"".join(b"%x\r\n%s\r\n" % (len(piece), piece) for _ in range(10)) + b"0\r\n\r\n"),
+            ("one chunk over the cap", 413, (head + "Transfer-Encoding: chunked\r\n\r\n").encode()
+             + b"%x;ext=1\r\n" % 70000 + b"y" * 70000 + b"\r\n0\r\n\r\n"),
+            ("chunked with trailers", 200, (head + "Transfer-Encoding: chunked\r\n\r\n").encode()
+             + b"2\r\n{}\r\n0\r\n" + trailers + b"\r\n"),
+            ("chunked over the cap with trailers", 413, (head + "Transfer-Encoding: chunked\r\n\r\n").encode()
+             + b"".join(b"%x\r\n%s\r\n" % (len(piece), piece) for _ in range(9)) + b"0\r\n" + trailers + b"\r\n"),
+            ("a refusal (bad Host) with a body", 400,
+             f"POST /m/api/me HTTP/1.1\r\nHost: evil\r\nContent-Length: 5000\r\n\r\n".encode() + b"z" * 5000),
+        ]
+        for name, want, data in cases:
+            answer, taken = self.exchange(readers, data)
+            self.assertTrue(answer.startswith(f"HTTP/1.0 {want}".encode()), (name, answer[:60]))
+            self.assertEqual(taken, len(data), name)
+        print("ok  bodies: every byte on the wire is read before the answer (413s, trailers, a refusal)")
+
+    def test_wire_budget_and_trailer_cap(self):
+        readers = self.counted()
+        with patch.object(remote_listener, "DRAIN_CAP", 128 * 1024):
+            head = (f"POST /m/api/login/options HTTP/1.1\r\nHost: {HOST}\r\nOrigin: {ORIGIN}\r\n"
+                    f"Content-Length: {256 * 1024}\r\n\r\n").encode()
+            answer, taken = self.exchange(readers, head + b"x" * (256 * 1024))
+            self.assertEqual(taken, len(head) + 128 * 1024, "drained to the budget, no further")
+            head = (f"POST /m/api/login/options HTTP/1.1\r\nHost: {HOST}\r\nOrigin: {ORIGIN}\r\n"
+                    "Transfer-Encoding: chunked\r\n\r\n").encode()
+            body = b"".join(b"1\r\nx\r\n" for _ in range(40000)) + b"0\r\n\r\n"
+            answer, taken = self.exchange(readers, head + body)
+            self.assertLessEqual(taken - len(head), 128 * 1024 + 1100,
+                                 "chunk framing counts against the budget too")
+        head = (f"POST /m/api/login/options HTTP/1.1\r\nHost: {HOST}\r\nOrigin: {ORIGIN}\r\n"
+                "Transfer-Encoding: chunked\r\n\r\n").encode()
+        many = b"".join(b"X-%d: %s\r\n" % (i, b"t" * 100) for i in range(100))
+        answer, _ = self.exchange(readers, head + b"2\r\n{}\r\n0\r\n" + many + b"\r\n")
+        self.assertTrue(answer.startswith(b"HTTP/1.0 400"), answer[:60])
+        self.assertEqual(remote_listener.TRAILER_CAP, 8 * 1024)
+        print("ok  bodies: the wire budget bounds Content-Length and chunked drains; trailers capped at 8 KiB")
+
+    def test_whole_body_deadline(self):
+        self.assertEqual(remote_listener.BODY_DEADLINE_S, 10.0)
+        with patch.object(remote_listener, "BODY_DEADLINE_S", 1.0):
+            head = (f"POST /m/api/login/options HTTP/1.1\r\nHost: {HOST}\r\nOrigin: {ORIGIN}\r\n"
+                    "Content-Length: 6\r\n\r\n").encode()
+            with socket.create_connection(("127.0.0.1", self.port), timeout=5) as sock:
+                sock.sendall(head)
+                for byte in b'{ }   ':
+                    time.sleep(0.3)               # each read well inside the socket timeout
+                    try:
+                        sock.sendall(bytes([byte]))
+                    except OSError:
+                        break
+                answer = b""
+                while True:
+                    try:
+                        chunk = sock.recv(65536)
+                    except OSError:
+                        break
+                    if not chunk:
+                        break
+                    answer += chunk
+            self.assertTrue(answer.startswith(b"HTTP/1.0 408"), answer[:60])
+            with socket.create_connection(("127.0.0.1", self.port), timeout=5) as sock:
+                sock.sendall(head)
+                for byte in b'{}    ':
+                    time.sleep(0.05)
+                    sock.sendall(bytes([byte]))
+                answer = sock.recv(65536)
+            self.assertTrue(answer.startswith(b"HTTP/1.0 200"), answer[:60])
+        print("ok  bodies: a body dripped past the whole-body deadline is 408; a quick one is read")
+
     def test_body_cap_413(self):
         self.assertEqual(remote_listener.BODY_CAP, 64 * 1024)
         big = b'{"code": "' + b"x" * remote_listener.BODY_CAP + b'"}'
@@ -1054,7 +1338,26 @@ class StatusAndState(Remote):
                 out = tools.dispatch("write_file", json.dumps({"path": str(target), "content": "{}"}))
             self.assertFalse(target.exists(), out.text)
         self.assertNotIn((remote / "other.json").resolve(), files._protected_state())
-        print("ok  passkeys.json and sessions.json are protected state, refused to agent writes")
+        # The folder itself (attacker review of PR #306, LOW-1): replacing or
+        # removing it is a certain touch, refused at v2's layer 1 and never
+        # auto-approved by v1; reading it is not; nothing else changed.
+        from jarvis import permissions as v1, protected_state
+        from jarvis import rules as v1_rules
+        remote.mkdir(parents=True, exist_ok=True)
+        for command in (f"rm -rf {remote}", f"rm -r {remote}/", f"mv {remote} /tmp/elsewhere",
+                        f"mv /tmp/evil {remote}", f"cp -r /tmp/evil {remote}",
+                        f"cd {remote.parent} && rm -rf remote"):
+            touch = protected_state.command_touch(command)
+            self.assertTrue(touch is not None and touch.certain, command)
+            self.assertTrue(v2.denied_command(command), command)
+            self.assertNotEqual(v1.static_verdict(command).decision, v1_rules.ALLOW, command)
+        for command in (f"ls {remote}", f"cat {remote}/sessions.json", f"cp {remote}/passkeys.json /tmp/b"):
+            self.assertFalse(v2.denied_command(command), command)
+        # The data root above it is asked, as before, not refused.
+        touch = protected_state.command_touch(f"rm -rf {remote.parent}")
+        self.assertTrue(touch is not None and not touch.certain)
+        self.assertFalse(v2.denied_command(f"rm -rf {remote.parent}"))
+        print("ok  passkeys.json, sessions.json and their remote/ folder are protected, refused to agent writes")
 
     def test_guard_strength_pinned(self):
         self.assertEqual((remote_auth.CODE_BYTES, remote_auth.TOKEN_BYTES, remote_auth.CHALLENGE_BYTES),
@@ -1071,6 +1374,11 @@ class StatusAndState(Remote):
                           side_effect=remote_auth.AuthError(503, "passkeys unavailable")):
             status, _, body = self.phone("POST", "/m/api/login/options", {})
             self.assertEqual((status, body), (503, {"error": "passkeys unavailable"}))
+            # The desk refuses to open a window that would only 503 after the scan.
+            status, body = self.hud("POST", "/phone/pair")
+            self.assertEqual(status, 503, body)
+            self.assertIn("uv pip install -e .", body["error"])
+            self.assertFalse(self.auth.status()["pairing"]["open"])
         print("ok  without webauthn: 503 on the passkey routes; nothing imports it at start-up")
 
     def test_source(self):

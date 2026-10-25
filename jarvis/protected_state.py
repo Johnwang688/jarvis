@@ -104,6 +104,13 @@ def gate_paths() -> set[Path]:
     return {_resolve(config.ALLOWLIST_PATH)}
 
 
+def phone_dirs() -> set[Path]:
+    """The phone's passkey folder (`<data root>/remote`, `v2/remote_auth.py`),
+    resolved: the one gate folder whose replacement or removal is a certain
+    touch of its files (`command_touches`). Read from config per call."""
+    return {_resolve(Path(config.V2_DATA_DIR).expanduser() / "remote")}
+
+
 def protected_paths() -> set[Path]:
     """Every gate-state file, resolved — the set v1's write tools refuse.
 
@@ -1283,9 +1290,15 @@ def _command(tokens: list[str], lead: list[str], parsed: bool, segment: str, loc
                      for n in other_names):
                 seen.touches.append(Touch(path, False, f"{stem} into {text}"))
             elif len(rel) <= 2:
-                # The gate's folder itself, or the one above it.
+                # The gate's folder itself, or the one above it. Asked —
+                # except the phone's `remote/` folder itself, which holds
+                # nothing but its two protected files: a writer on it (`rm
+                # -rf`, `mv` away, `mv`/`cp` a folder of one's own into its
+                # place) provably replaces them (`phone_dirs`).
+                lands = (len(rel) == 1 and kind == "writer" and provable(operand)
+                         and path.parent in phone_dirs() and _resolve(text) == path.parent)
                 seen.touches.append(
-                    Touch(path, False, f"{stem} on {text}, which holds {path.name}"))
+                    Touch(path, lands, f"{stem} on {text}, which holds {path.name}"))
             elif any(o.endswith(("/.", "/*")) or (stem == "rsync" and o.endswith("/"))
                      for o in others):
                 seen.touches.append(Touch(path, False, f"{stem} copies a tree into {text}"))

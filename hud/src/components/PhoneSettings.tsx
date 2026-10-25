@@ -115,7 +115,7 @@ export function PhoneSettings({ blocked }: { blocked: boolean }) {
           <button type="button" data-testid="phone-cancel" disabled={blocked || busy} onClick={cancel}>Cancel</button>
         </div>
       </div>
-        : <button type="button" data-testid="phone-pair" disabled={blocked || busy || !view || !listening || full || view.state !== "ok"}
+        : <button type="button" data-testid="phone-pair" disabled={blocked || busy || !view || !listening || full || view.state === "unreadable"}
           onClick={open}>Pair a phone</button>}
       {full && !pairing ? <p className="muted">Three passkeys are paired. Revoke one to pair another.</p> : null}
       {view && !pairing && view.pairing.open ? <p className="muted" data-testid="phone-window-open">
@@ -125,7 +125,18 @@ export function PhoneSettings({ blocked }: { blocked: boolean }) {
 
     <div className="block">
       <h3>Paired passkeys</h3>
-      {view && view.state !== "ok" ? <p className="err" role="status">The passkey file cannot be read. Pairing and phone sign-in are off.</p> : null}
+      {view && view.state === "unreadable" ? <p className="err" role="status">The passkey file cannot be read. Pairing and phone sign-in are off.</p> : null}
+      {view && (view.unsaved || []).length ? <ul className="phone-passkeys" data-testid="phone-unsaved">
+        {(view.unsaved || []).map((u) => <li key={u.key} className="phone-passkey phone-unsaved" data-testid="phone-unsaved-row" data-key={u.key}>
+          <div className="phone-passkey-head">
+            <span className="phone-passkey-name">Passkey {u.key.slice(2, 8)}</span>
+            <span className="phone-warn"> · revoked, not saved. It is refused now, but a restart before the
+              file is written would bring it back. Jarvis retries the write on every request.</span>
+            <button type="button" data-testid="phone-unsaved-retry" disabled={blocked || busy}
+              onClick={() => act(() => phoneApi.revoke(u.key))}>Save now</button>
+          </div>
+        </li>)}
+      </ul> : null}
       {view && passkeys.length === 0 ? <p className="muted" data-testid="phone-none">No passkeys are paired.</p> : null}
       <ul className="phone-passkeys">
         {passkeys.map((p) => <li key={p.key} className="phone-passkey" data-testid="phone-passkey" data-key={p.key}>

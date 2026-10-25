@@ -33,8 +33,10 @@ nothing else (`ROUTES`, `ASSETS`, `ICONS`, `API_PREFIX`):
 Everything else is 404. HEAD answers like GET without the body.
 
 **Every request body is read before the answer** (`_read_body`), up to
-`BODY_CAP` (64 KiB; above it 413, the excess drained up to `DRAIN_CAP` first,
-chunked bodies decoded the same way). An answer sent over an unread body
+`BODY_CAP` (64 KiB; above it 413, the excess drained up to `DRAIN_CAP` first;
+chunked bodies decoded the same way, every wire byte of them counted against
+`DRAIN_CAP` and trailers capped at `TRAILER_CAP`), within `BODY_DEADLINE_S`
+for the whole body (408). An answer sent over an unread body
 closes a socket with data still in it, which the kernel answers with a
 reset, and behind `tailscale serve`'s Go proxy that turns a 401 or a 403
 into a 502 (review of PR #304).
@@ -69,6 +71,7 @@ import os
 from pathlib import Path
 import re
 import stat
+import time
 
 from jarvis import config
 from . import remote_auth
@@ -146,6 +149,10 @@ _FILE_CAP = 16 * 1024 * 1024
 # larger one is read and dropped before the 413, so the proxy sees an answer.
 BODY_CAP = 64 * 1024
 DRAIN_CAP = 1024 * 1024
+TRAILER_CAP = 8 * 1024
+# The whole body must arrive within this (monotonic), whatever each read does.
+BODY_DEADLINE_S = 10.0
+SOCKET_TIMEOUT_S = 2
 _MANIFEST_CAP = 1024 * 1024
 
 _NOT_BUILT = (b"<!doctype html><meta charset=\"utf-8\"><title>J.A.R.V.I.S.</title>"
@@ -346,12 +353,83 @@ class _BodyError(Exception):
         self.status = status
 
 
-def _read_chunked(rfile, cap: int, drain: int) -> bytes:
-    """A chunked body, decoded: at most `cap` bytes kept; past it, read on
-    and dropped up to `drain`, then a 413."""
+class _Wire:
+    """The request's bytes after its headers, read against a deadline for the
+    whole body (`BODY_DEADLINE_S`, on the monotonic clock) and a cap on the
+    bytes taken off the wire (`DRAIN_CAP`). Each read waits for at most one
+    socket read, with the socket's timeout cut to what is left of the
+    deadline, so a body dripped a byte at a time cannot outlast it (408)."""
+
+    def __init__(self, handler, budget: int):
+        self.rfile = handler.rfile
+        self.connection = getattr(handler, "connection", None)
+        self.deadline = time.monotonic() + BODY_DEADLINE_S
+        self.budget = budget          # wire bytes still allowed
+        self.taken = 0
+
+    def _wait(self) -> None:
+        left = self.deadline - time.monotonic()
+        if left <= 0:
+            raise _BodyError(408)
+        if self.connection is not None:
+            try:
+                self.connection.settimeout(min(SOCKET_TIMEOUT_S, max(0.01, left)))
+            except OSError:
+                pass
+
+    def _count(self, data: bytes) -> bytes:
+        self.taken += len(data)
+        self.budget -= len(data)
+        return data
+
+    def read(self, n: int) -> bytes:
+        """Exactly `n` bytes, or fewer at the end of the stream."""
+        out = []
+        while n > 0:
+            self._wait()
+            chunk = self.rfile.read1(min(n, 65536))
+            if not chunk:
+                break
+            out.append(self._count(chunk))
+            n -= len(chunk)
+        return b"".join(out)
+
+    def readline(self, limit: int) -> bytes:
+        """One line up to and including its newline, at most `limit` bytes."""
+        out = b""
+        while len(out) < limit:
+            self._wait()
+            ahead = self.rfile.peek(1)
+            if not ahead:
+                break
+            ahead = ahead[:limit - len(out)]
+            cut = ahead.find(b"\n")
+            take = len(ahead) if cut < 0 else cut + 1
+            out += self._count(self.rfile.read(take))
+            if out.endswith(b"\n"):
+                break
+        return out
+
+    def drain(self, n: int) -> None:
+        """Read and drop up to `n` bytes, within the budget."""
+        while n > 0 and self.budget > 0:
+            got = len(self.read(min(n, self.budget, 65536)))
+            if not got:
+                return
+            n -= got
+
+
+def _read_chunked(wire: _Wire, cap: int) -> bytes:
+    """A chunked body, decoded: at most `cap` bytes of data kept; every wire
+    byte (size lines and their extensions, data, CRLFs, trailers) counted
+    against the wire's budget (DRAIN_CAP). Past `cap` the rest is read and
+    dropped, as the Content-Length path drains, then a 413; past the budget,
+    413 at once. Trailers are at most TRAILER_CAP bytes."""
     kept, total = [], 0
     while True:
-        line = rfile.readline(1026)
+        if wire.budget <= 0:
+            raise _BodyError(413)
+        line = wire.readline(1026)
         if not line.endswith(b"\n"):
             raise _BodyError(400)
         size_text = line.split(b";", 1)[0].strip()
@@ -359,20 +437,29 @@ def _read_chunked(rfile, cap: int, drain: int) -> bytes:
             raise _BodyError(400)
         size = int(size_text, 16)
         if size == 0:
+            trailers = 0
             while True:                       # trailers, up to the blank line
-                trailer = rfile.readline(8194)
+                trailer = wire.readline(TRAILER_CAP + 2)
+                trailers += len(trailer)
                 if trailer in (b"\r\n", b"\n"):
                     break
-                if not trailer.endswith(b"\n"):
+                if not trailer.endswith(b"\n") or trailers > TRAILER_CAP:
                     raise _BodyError(400)
             break
-        if total + size > drain:
+        if size + 2 > wire.budget:
+            wire.drain(size)                  # what the budget allows, then stop
             raise _BodyError(413)
-        data = rfile.read(size)
-        if len(data) != size or rfile.readline(3) not in (b"\r\n", b"\n"):
+        if total + size > cap:
+            wire.drain(size)
+            data = None
+        else:
+            data = wire.read(size)
+            if len(data) != size:
+                raise _BodyError(400)
+        if wire.readline(3) not in (b"\r\n", b"\n"):
             raise _BodyError(400)
         total += size
-        if total <= cap:
+        if data is not None:
             kept.append(data)
     if total > cap:
         raise _BodyError(413)
@@ -381,29 +468,26 @@ def _read_chunked(rfile, cap: int, drain: int) -> bytes:
 
 def _read_body(handler) -> bytes:
     """The request's body, read whole before any answer (module note): at
-    most BODY_CAP bytes, else 413 once up to DRAIN_CAP of it is read. A
-    malformed length is 400. Neither length nor chunked: no body."""
+    most BODY_CAP bytes, else 413 once up to DRAIN_CAP of it is read; the
+    whole body within BODY_DEADLINE_S, else 408. A malformed length is 400.
+    Neither length nor chunked: no body."""
     headers = handler.headers
     encodings = _header(headers, "Transfer-Encoding") or []
     lengths = _header(headers, "Content-Length") or []
     if encodings:
         if lengths or [e.strip().lower() for e in encodings] != ["chunked"]:
             raise _BodyError(400)
-        return _read_chunked(handler.rfile, BODY_CAP, DRAIN_CAP)
+        return _read_chunked(_Wire(handler, DRAIN_CAP), BODY_CAP)
     if not lengths:
         return b""
     if len(lengths) != 1 or not lengths[0].strip().isdigit() or len(lengths[0].strip()) > 12:
         raise _BodyError(400)
     length = int(lengths[0].strip())
+    wire = _Wire(handler, DRAIN_CAP)
     if length > BODY_CAP:
-        left = min(length, DRAIN_CAP)
-        while left:
-            chunk = handler.rfile.read(min(left, 65536))
-            if not chunk:
-                break
-            left -= len(chunk)
+        wire.drain(length)
         raise _BodyError(413)
-    data = handler.rfile.read(length) if length else b""
+    data = wire.read(length) if length else b""
     if len(data) != length:
         raise _BodyError(400)
     return data
@@ -425,7 +509,7 @@ def handler_class(host: str, auth: remote_auth.RemoteAuth | None = None):
 
         def setup(self):
             super().setup()
-            self.connection.settimeout(2)
+            self.connection.settimeout(SOCKET_TIMEOUT_S)
             self._cache = NO_STORE
             self._body_bytes = b""
 
@@ -472,14 +556,22 @@ def handler_class(host: str, auth: remote_auth.RemoteAuth | None = None):
                     self._body_bytes = _read_body(self)
                 except _BodyError as exc:
                     body_status = exc.status
+                except TimeoutError:     # a read that waited out the socket or the deadline
+                    body_status = 408
                 except (OSError, ValueError):
                     body_status = 400
+                try:                    # the body deadline may have cut it
+                    self.connection.settimeout(SOCKET_TIMEOUT_S)
+                except OSError:
+                    pass
                 if _header(self.headers, "Host") != [host]:
                     return self._error(400, "untrusted host")
                 if self.command not in ("GET", "HEAD") and _header(self.headers, "Origin") != [origin]:
                     return self._error(403, "cross-origin request refused")
                 if body_status == 413:
                     return self._error(413, "request body too large")
+                if body_status == 408:
+                    return self._error(408, "request timeout")
                 if body_status is not None:
                     return self._error(400, "bad request")
                 path = self.path.split("?", 1)[0].split("#", 1)[0]

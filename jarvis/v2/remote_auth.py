@@ -16,7 +16,10 @@ owner (`POST /phone/pair/cancel`). It returns
 `https://<host>/m/pair#<code>`, which the HUD shows as a QR code. The code is
 256 random bits, lives only in this process's memory, is compared in
 constant time, and travels in the URL's fragment, which a browser never
-sends: it reaches neither the proxy's logs nor ours. The phone posts it with
+sends: it reaches neither the proxy's logs nor ours. "Single-use" means one
+**successful** registration: a failed attempt (the phone's Face ID
+cancelled, a refused response) may be retried with the same code while the
+window is open; the first registration that lands closes it. The phone posts it with
 `/m/api/pair/options` and again with `/m/api/pair/verify`. What is paired is
 a **passkey**, not a device (§10.1: an iCloud Keychain passkey syncs to every
 Apple device on the owner's Apple ID). At most `MAX_PASSKEYS` (3) are active;
@@ -30,11 +33,16 @@ a registration proves nothing about holding the private key, so a session is
 only ever made by an assertion: the phone registers, then signs in.
 
 **Login.** `/m/api/login/options` issues a server-side challenge (32 random
-bytes, single-use, `CHALLENGE_S` = 60 s on the monotonic clock, pruned,
-capped). `/m/api/login/verify` takes the challenge out of the store before
-anything is verified (so a failed attempt spends it too), then requires a
-known, unrevoked credential, the exact origin and rpId, the UV flag, a valid
-signature, and PH-4's counter rule: 0 is accepted while the stored counter is
+bytes, single-use, `CHALLENGE_S` = 60 s on the monotonic clock, pruned, and
+capped per kind: login challenges at `MAX_LOGIN_CHALLENGES`, registration
+challenges at `MAX_REGISTER_CHALLENGES` and only while a window is open; a
+full pool refuses new ones (429) rather than evicting a pending one, so an
+unauthenticated flood of `login/options` cannot evict anyone's ceremony).
+`/m/api/login/verify` takes the challenge out of the store before anything
+is verified (so a failed attempt spends it too), then requires a known,
+unrevoked credential, the exact origin and rpId, `crossOrigin` not true
+(and no `topOrigin`) in the client data, the UV flag, a valid signature, and
+PH-4's counter rule: 0 is accepted while the stored counter is
 0 (iCloud passkeys always report 0, §10.1); once a credential has reported a
 nonzero counter, each new one must be greater. An unknown or used challenge
 is 409; every other failure is 401, with no detail.
@@ -45,9 +53,15 @@ only its SHA-256 is kept. Each session records its passkey, the user agent
 (cleaned, capped), created, last-seen and the advisory Tailscale headers.
 `IDLE_S` 12 h idle and `ABSOLUTE_S` 7 days absolute, on the wall clock (they
 outlive a restart). Logout ends the session; revoking a passkey (HUD) ends
-every session it opened at once; ending one session (HUD) ends that one. The
-in-memory state is authoritative, so a revoke holds before its file is
-written.
+every session it opened at once; ending one session (HUD) ends that one.
+
+**A revoke holds in memory at once, and is durable only once written.** If
+the passkeys file cannot be written the revoke answers 503, the passkey stays
+refused in memory, the HUD shows it as "revoked, not saved" (`status()`'s
+`state: "unsaved"`, `unsaved` list), and every later call (`status`,
+`session_for`, login, pairing, a repeat Revoke) retries the write; a repeat
+Revoke answers 200 once it lands. A restart before it lands loses it: the
+file still says the passkey is active.
 
 **The owner test (§4) is `is_remote_owner(handler)`**, and it is the only one
 on the remote listener (`projects.is_owner` is false there by construction):
@@ -61,12 +75,15 @@ assertion per Allow and Always, is P-4's.
 `sessions.json` (0600, atomic replacement through `stores._write_bytes`, read
 without following a link). Both are protected state
 (`tools/files._protected_state_paths`): no agent write tool, shell command or
-grant changes them. A passkeys file that cannot be read is never
-overwritten: pairing and login answer 503 until the owner fixes it. A
-sessions file that cannot be read signs everyone out.
+grant changes them, and nor does a command on the `remote/` folder itself
+(`protected_state`). A passkeys file that cannot be read is never
+overwritten: pairing and login answer 503 until it reads again (each call
+tries again; nothing sticks until a restart). A sessions file that cannot be
+read signs everyone out.
 
 `webauthn` is imported only when a passkey is registered or verified, so a
-daemon whose environment lacks it still starts (503 on those routes).
+daemon whose environment lacks it still starts (503 on those routes), and
+the HUD refuses to open a pairing window until it is installed.
 
 SELF_PROTECTED: this module decides who counts as the owner off this
 machine. Tests: tests/v2/remote_auth_check.py.
@@ -98,7 +115,10 @@ ABSOLUTE_S = 7 * 24 * 3600
 CODE_BYTES = 32           # 256 bits of pairing code
 TOKEN_BYTES = 32          # 256 bits of session token
 CHALLENGE_BYTES = 32
-MAX_CHALLENGES = 64       # outstanding, all kinds; the oldest goes first
+# Outstanding challenges, per kind. A full pool refuses (429); nothing pending
+# is evicted. Registration ones exist only while a window is open.
+MAX_LOGIN_CHALLENGES = 32
+MAX_REGISTER_CHALLENGES = 8
 MAX_SESSIONS = 32         # the least recently seen goes first
 MAX_REVOKED = 16          # revoked passkey records kept, so a revoked id stays refused
 LAST_SEEN_WRITE_S = 60    # last-seen is written at most this often per session
@@ -170,7 +190,9 @@ def counter_ok(stored: int, new: int) -> bool:
 
 def _client_challenge(credential) -> str:
     """The challenge the phone signed, from its clientDataJSON: the key the
-    server-side store is looked up by (and spent at)."""
+    server-side store is looked up by (and spent at). A ceremony run inside
+    another origin's frame (`crossOrigin: true`, or a `topOrigin`) is
+    refused here, before anything is spent."""
     if not isinstance(credential, dict):
         raise AuthError(400, "bad request")
     response = credential.get("response")
@@ -183,7 +205,12 @@ def _client_challenge(credential) -> str:
         raise AuthError(400, "bad request") from None
     if not isinstance(challenge, str) or not _B64URL.fullmatch(challenge):
         raise AuthError(400, "bad request")
+    if client.get("crossOrigin") not in (None, False) or "topOrigin" in client:
+        raise _refuse("a cross-origin ceremony")
     return challenge
+
+
+INSTALL_WEBAUTHN = "passkeys need the webauthn package: uv pip install -e . in the daemon's venv"
 
 
 def _webauthn():
@@ -284,6 +311,9 @@ class RemoteAuth:
         self._passkeys: list[dict] = []
         self._sessions: dict[str, dict] = {}     # token hash -> record
         self._written: dict[str, float] = {}     # session id -> last-seen written
+        # A revocation held in memory that the passkeys file does not have
+        # yet (its write failed): retried on every later call (`_flush`).
+        self._unsaved = False
 
     # -- files -----------------------------------------------------------------------
 
@@ -306,9 +336,13 @@ class RemoteAuth:
             os.chmod(self.dir, 0o700)
 
     def _load(self) -> None:
+        """Read both files, once they read. A failed read is not remembered
+        as loaded: the next call tries again, so a transient error does not
+        last until a restart."""
         if self._loaded:
             return
-        self._loaded = True
+        self._broken = None
+        self._passkeys, self._user_handle, self._sessions = [], None, {}
         if self.dir.is_symlink():
             self._broken = "the phone state folder is a link"
             return
@@ -344,6 +378,7 @@ class RemoteAuth:
         except (OSError, ValueError, AttributeError):
             self._sessions = {}
             LOG.warning("phone: sessions.json cannot be read; every phone session is signed out")
+        self._loaded = True
         self._prune_sessions()
 
     def _write(self, path: Path, value: dict) -> None:
@@ -357,10 +392,27 @@ class RemoteAuth:
         os.chmod(path, 0o600)
 
     def _passkeys_value(self, passkeys: list[dict], handle: str | None) -> dict:
-        return {"version": 1, "user_handle": handle, "passkeys": passkeys}
+        rows = [{k: v for k, v in p.items() if k != "unsaved"} for p in passkeys]
+        return {"version": 1, "user_handle": handle, "passkeys": rows}
+
+    def _write_passkeys(self, rows: list[dict], handle: str | None) -> None:
+        """Write the passkeys file. Every caller writes the in-memory rows
+        (plus what it adds), so a write that lands also lands any revocation
+        still unsaved."""
+        self._write(self.passkeys_path, self._passkeys_value(rows, handle))
+        self._unsaved = False
 
     def _save_passkeys(self) -> None:
-        self._write(self.passkeys_path, self._passkeys_value(self._passkeys, self._user_handle))
+        self._write_passkeys(self._passkeys, self._user_handle)
+
+    def _flush(self) -> None:
+        """Retry an unsaved revocation's write; a failure leaves the flag."""
+        if self._unsaved and not self._broken:
+            try:
+                self._save_passkeys()
+                LOG.info("phone: an unsaved revocation is now saved")
+            except AuthError:
+                pass
 
     def _save_sessions(self) -> None:
         rows = sorted(self._sessions.values(), key=lambda r: r["created"])
@@ -370,6 +422,7 @@ class RemoteAuth:
 
     def _require_usable(self) -> None:
         self._load()
+        self._flush()
         if self._broken:
             raise AuthError(503, "phone state unavailable")
         if not self.host:
@@ -396,6 +449,10 @@ class RemoteAuth:
         """Open (or replace) the pairing window: the URL with its one-time
         code in the fragment, and the seconds it stays open. The code is
         returned here and nowhere else."""
+        try:
+            _webauthn()
+        except AuthError:
+            raise AuthError(503, INSTALL_WEBAUTHN) from None
         with self._lock:
             self._require_usable()
             if len(self._active()) >= MAX_PASSKEYS:
@@ -436,9 +493,12 @@ class RemoteAuth:
     def _issue(self, kind: str, **extra) -> bytes:
         now = self.mono()
         self._challenges = {k: c for k, c in self._challenges.items() if c["expires"] > now}
-        while len(self._challenges) >= MAX_CHALLENGES:
-            oldest = min(self._challenges, key=lambda k: self._challenges[k]["expires"])
-            del self._challenges[oldest]
+        if kind == "register" and self._window_open() is None:
+            raise _refuse("no pairing window is open")
+        cap = MAX_REGISTER_CHALLENGES if kind == "register" else MAX_LOGIN_CHALLENGES
+        if sum(1 for c in self._challenges.values() if c["kind"] == kind) >= cap:
+            # Refused, never evicting a pending one (module note).
+            raise AuthError(429, "too many sign-ins in progress; try again in a minute")
         challenge = secrets.token_bytes(CHALLENGE_BYTES)
         self._challenges[b64url(challenge)] = {"kind": kind, "expires": now + CHALLENGE_S, **extra}
         return challenge
@@ -464,7 +524,7 @@ class RemoteAuth:
             if self._user_handle is None:
                 handle = b64url(secrets.token_bytes(16))
                 # Saved before it is handed out: every passkey names one user.
-                self._write(self.passkeys_path, self._passkeys_value(self._passkeys, handle))
+                self._write_passkeys(self._passkeys, handle)
                 self._user_handle = handle
             challenge = self._issue("register", generation=window["generation"])
             options = webauthn.generate_registration_options(
@@ -509,8 +569,7 @@ class RemoteAuth:
                    "device_type": str(getattr(verified.credential_device_type, "value",
                                               verified.credential_device_type))[:32],
                    "aaguid": str(verified.aaguid)[:64]}
-            self._write(self.passkeys_path,
-                        self._passkeys_value(self._passkeys + [row], self._user_handle))
+            self._write_passkeys(self._passkeys + [row], self._user_handle)
             self._passkeys.append(row)
             # One registration per window: it closes now.
             self._close_window()
@@ -568,7 +627,7 @@ class RemoteAuth:
             now = self.wall()
             updated = dict(stored, sign_count=int(verified.new_sign_count), last_used=now)
             rows = [updated if p is stored else p for p in self._passkeys]
-            self._write(self.passkeys_path, self._passkeys_value(rows, self._user_handle))
+            self._write_passkeys(rows, self._user_handle)
             self._passkeys = rows
             token = b64url(secrets.token_bytes(TOKEN_BYTES))
             advisory = advisory or {}
@@ -612,6 +671,7 @@ class RemoteAuth:
             return None
         with self._lock:
             self._load()
+            self._flush()
             if self._broken:
                 return None
             digest = token_hash(token)
@@ -653,25 +713,45 @@ class RemoteAuth:
             return False
 
     def revoke(self, key: str) -> bool:
-        """Revoke a passkey: every session it opened ends now (memory first,
-        then the files), and it is refused from now on."""
+        """Revoke a passkey: every session it opened ends now, in memory,
+        and it is refused from now on. True once the passkeys file says so
+        (a repeat of a revoke whose write failed retries it and answers True
+        when it lands); False for an unknown or already-saved revoked key;
+        503 while the file cannot be written (the revoke still holds in
+        memory and is retried by every later call)."""
         with self._lock:
             self._load()
             if self._broken:
                 raise AuthError(503, "phone state unavailable")
             passkey = self._by_key(key)
-            if passkey is None or passkey.get("revoked") is not None:
+            if passkey is None:
                 return False
+            if passkey.get("revoked") is not None:
+                if not passkey.get("unsaved"):
+                    return False
+                if self._unsaved:
+                    self._save_passkeys()      # 503 again if it still fails
+                self._mark_saved()
+                LOG.info("phone: passkey %s revocation saved on retry", key)
+                return True
             self._sessions = {h: r for h, r in self._sessions.items() if r["passkey"] != key}
-            rows = [dict(p, revoked=self.wall()) if p is passkey else p for p in self._passkeys]
+            rows = [dict(p, revoked=self.wall(), unsaved=True) if p is passkey else p
+                    for p in self._passkeys]
             revoked = sorted((p for p in rows if p.get("revoked") is not None), key=lambda p: p["revoked"])
             for old in revoked[:-MAX_REVOKED]:
                 rows.remove(old)
             self._passkeys = rows
+            self._unsaved = True
             self._try_save_sessions()
-            self._save_passkeys()
             LOG.info("phone: passkey %s revoked", key)
+            self._save_passkeys()
+            self._mark_saved()
             return True
+
+    def _mark_saved(self) -> None:
+        """The file now has every revocation: drop the in-memory marks."""
+        if not self._unsaved:
+            self._passkeys = [{k: v for k, v in p.items() if k != "unsaved"} for p in self._passkeys]
 
     # -- the HUD's view -------------------------------------------------------------------
 
@@ -680,6 +760,8 @@ class RemoteAuth:
         hash, a public key or a credential id."""
         with self._lock:
             self._load()
+            self._flush()
+            self._mark_saved()
             if not self._broken and self._prune_sessions():
                 self._try_save_sessions()
             window = self._window_open()
@@ -691,7 +773,11 @@ class RemoteAuth:
             passkeys = [{"key": p["key"], "created": p["created"], "last_used": p["last_used"],
                          "backed_up": p["backed_up"], "sessions": sessions_of.get(p["key"], [])}
                         for p in self._active()]
-            return {"state": "unreadable" if self._broken else "ok",
+            unsaved = [{"key": p["key"], "revoked": p["revoked"]}
+                       for p in self._passkeys if self._unsaved and p.get("unsaved")]
+            state = "unreadable" if self._broken else ("unsaved" if self._unsaved else "ok")
+            return {"state": state,
+                    "unsaved": unsaved,
                     "host_configured": bool(self.host),
                     "max_passkeys": MAX_PASSKEYS,
                     "pairing": {"open": window is not None,
@@ -844,7 +930,7 @@ def api_route(handler, path: str, body: bytes) -> tuple[int, dict, list[tuple[st
                                      "ends": session["created"] + ABSOLUTE_S}}, []
         return 404, {"error": WORDS[404]}, []
     except AuthError as exc:
-        word = exc.word if exc.status in (409, 503) else WORDS.get(exc.status, UNAUTHORIZED)
+        word = exc.word if exc.status in (409, 429, 503) else WORDS.get(exc.status, UNAUTHORIZED)
         return exc.status, {"error": word}, []
 
 

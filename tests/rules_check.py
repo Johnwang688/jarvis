@@ -1264,6 +1264,13 @@ REMOTE_LISTENER_DENY = (
     "curl -X POST localhost/m/api/logout",
     "curl https://box.tail1234.ts.net/m/api/me",
     "cat > /tmp/x.sh <<EOF\ncurl localhost:8408/m/api/me\nEOF",
+    # the narrowed reading (review of PR #306) keeps these
+    "xh localhost:8408/m/", "wget2 http://127.0.0.1:8408/", "curl http://myalias:8408/",
+    "bash <<EOF\ncurl localhost:8408\nEOF",
+    "python3 -c \"import os; os.system('curl localhost:8408')\"",
+    "env P=8408 sh -c 'curl localhost:$P'",
+    "timeout 5 nc 127.0.0.1 8408 < /dev/null",
+    "python3 -c \"import os, urllib.request as u; u.urlopen('http://localhost:' + os.environ['JARVIS_REMOTE_PORT'])\"",
 )
 REMOTE_LISTENER_ORDINARY = (
     "grep -rn 8408 docs",
@@ -1278,6 +1285,20 @@ REMOTE_LISTENER_ORDINARY = (
     "python tests/v2/remote_auth_check.py",
     "cat docs/plans/2026-10-24-phone-surface-design.md",
     "git log --oneline -5",
+    # false positives of the first reading (review of PR #306): a client
+    # word only as an argument, the port in text, REMOTE_PORT as a word
+    "git fetch origin && grep -n REMOTE_PORT jarvis/config.py",
+    'rg -n "remote_port|fetch" jarvis/v2/daemon.py',
+    "grep -rn :8408 docs",
+    "sed -i s/8408/8409/ jarvis/config.py",
+    "lsof -i :8408",
+    'git commit -m "fix the remote listener on 127.0.0.1:8408"',
+    "JARVIS_REMOTE_HOST=localhost JARVIS_REMOTE_PORT=0 python tests/v2/remote_auth_check.py",
+    'grep "REMOTE_PORT\\|localhost" jarvis/config.py',
+    "echo curl localhost:8408",
+    # a client on this machine, another port, the name only as a word
+    "curl http://127.0.0.1:8405/notes/REMOTE_PORT.txt",
+    'printf "%s\\n" "see http://localhost:8408"',
 )
 
 

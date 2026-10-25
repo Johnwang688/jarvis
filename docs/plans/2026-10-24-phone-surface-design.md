@@ -425,8 +425,25 @@ above:
   409 (§9); passkey state the daemon cannot read is 503.
 - **Revoked passkeys are kept** (at most 16, marked) so a revoked credential
   id stays refused; the HUD lists only active ones.
-- **The 8408 DENY** also covers `/m/api` in a URL to this machine on any port,
+- **The 8408 DENY** is judged on what a line runs (a network client, or
+  inline source holding one, aimed at the port on this machine; bash's
+  `/dev/tcp`), and also covers `/m/api` in a URL to this machine on any port
   and a `ts.net` URL to `/m/api`.
+- **Revoke is durable only once written.** It holds in memory at once; if the
+  passkeys file cannot be written the HUD shows "revoked, not saved" and the
+  write is retried on every later call. A restart before it lands loses it.
+- **Open: a program running as the owner can pair a passkey.** It can forge
+  the HUD's owner test (`projects.is_owner`: a raw HTTP client sending
+  `Origin: http://<Host>` to the HUD port), so it can open a pairing window,
+  register a software passkey (no screen, no phone needed) and sign in. That
+  is at parity with today's forgeable desktop `POST /approvals`, which the
+  owner test already concedes ("a speed bump, not a boundary") — but it
+  leaves a **lasting** credential, and P-4 (PH-4) means that credential would
+  then produce valid per-answer assertions: PH-4's "a program running as the
+  owner … cannot produce this assertion" does not hold once such a program
+  has paired its own key. The owner sees the extra passkey in Settings >
+  Phone and can revoke it, but nothing stops the pairing itself. **The
+  remedy is pending an owner decision**; nothing here implements one.
 
 ## 11. Open questions for the owner (defaults in bold)
 

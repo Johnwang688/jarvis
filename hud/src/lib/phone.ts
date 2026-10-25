@@ -26,7 +26,10 @@ export interface PhoneRemote {
 }
 
 export interface PhoneView {
-  state: "ok" | "unreadable";
+  /** "unsaved": a revocation holds in memory but the passkeys file does not
+   * have it yet; every call retries the write. */
+  state: "ok" | "unreadable" | "unsaved";
+  unsaved?: { key: string; revoked: number }[];
   host_configured: boolean;
   max_passkeys: number;
   pairing: { open: boolean; expires_in: number };

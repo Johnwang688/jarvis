@@ -61,7 +61,9 @@ def phone_checks(browser, mock, base, check, until, guard, init_script):
     posts: list[str] = []
 
     def view():
-        return {"state": "ok", "host_configured": True, "max_passkeys": 3,
+        unsaved = state.get("unsaved", [])
+        return {"state": "unsaved" if unsaved else "ok", "unsaved": unsaved,
+                "host_configured": True, "max_passkeys": 3,
                 "pairing": {"open": state["open"], "expires_in": state["expires_in"]},
                 "passkeys": state["passkeys"], "remote": state["remote"]}
 
@@ -87,7 +89,15 @@ def phone_checks(browser, mock, base, check, until, guard, init_script):
             return route.fulfill(json={"open": False})
         m = re.fullmatch(r"/phone/passkeys/(k-[0-9a-f]{12})/revoke", path)
         if m:
+            if state.get("fail_revoke"):
+                gone = next(p for p in state["passkeys"] if p["key"] == m.group(1)) if any(
+                    p["key"] == m.group(1) for p in state["passkeys"]) else None
+                if gone is not None:
+                    state["passkeys"].remove(gone)
+                    state.setdefault("unsaved", []).append({"key": gone["key"], "revoked": time.time()})
+                return route.fulfill(status=503, json={"error": "phone state unavailable"})
             state["passkeys"] = [p for p in state["passkeys"] if p["key"] != m.group(1)]
+            state["unsaved"] = [u for u in state.get("unsaved", []) if u["key"] != m.group(1)]
             return route.fulfill(json={"revoked": True})
         m = re.fullmatch(r"/phone/sessions/(s-[0-9a-f]{16})/end", path)
         if m:
@@ -213,6 +223,26 @@ def phone_checks(browser, mock, base, check, until, guard, init_script):
               and page.locator('[data-testid="phone-revoke"]').first.is_disabled())
         page.keyboard.press("Escape")
         until(lambda: page.locator('[data-testid="approval-card"]').count() == 0, timeout=4)
+
+        # -- a revoke whose write failed: "revoked, not saved", and Save now -----------
+        state["fail_revoke"] = True
+        row = page.locator('[data-testid="phone-passkey"]').first
+        target = row.get_attribute("data-key")
+        row.locator('[data-testid="phone-revoke"]').click()
+        row.locator('[data-testid="phone-revoke-confirm"]').click()
+        until(lambda: page.locator('[data-testid="phone-unsaved-row"]').count() == 1, timeout=4)
+        unsaved = page.locator('[data-testid="phone-unsaved-row"]')
+        check("P-2 Phone: a revoke that could not be written shows 'revoked, not saved'",
+              "revoked, not saved" in unsaved.inner_text() and unsaved.get_attribute("data-key") == target
+              and page.locator(f'[data-testid="phone-passkey"][data-key="{target}"]').count() == 0)
+        check("P-2 Phone: and the error is shown", "phone state unavailable" in
+              page.locator('[data-testid="phone-error"]').inner_text())
+        state["fail_revoke"] = False
+        before = len(posts)
+        unsaved.locator('[data-testid="phone-unsaved-retry"]').click()
+        until(lambda: page.locator('[data-testid="phone-unsaved-row"]').count() == 0, timeout=4)
+        check("P-2 Phone: Save now retries the revoke and the row goes once it lands",
+              posts[before:] == [f"/phone/passkeys/{target}/revoke"])
 
         # -- the listener down ---------------------------------------------------------
         state["remote"] = {"port": 8408, "bound": False, "host_configured": False}

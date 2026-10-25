@@ -1,5 +1,6 @@
 // Vendored: Project Nayuki QR Code generator (TypeScript), MIT License (below).
-// Source: https://github.com/nayuki/QR-Code-generator/blob/master/typescript-javascript/qrcodegen.ts
+// Source: https://github.com/nayuki/QR-Code-generator/blob/8329a7108fc22be3e1eec0a9f9318978579e3621/typescript-javascript/qrcodegen.ts
+// (the last commit touching this file; identical at master 3c6d0b3c on 2026-10-25)
 // Original sha256: 1dc03fb5a10e0e2318ea162755bbdb9977ca6ce52cff959e9c9b6deafdccda9c
 // Local changes: each namespace is exported (an ES module for Vite) and the
 // "use strict" directive is dropped (modules are strict). Nothing else.
