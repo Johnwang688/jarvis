@@ -78,22 +78,47 @@ def card_text(value):
     request itself keeps the command as typed — that is what is judged and
     what an "Always" is minted from. A redaction that fails shows the text
     as it is: a card that hid code would be worse than one that shows a
-    secret."""
+    secret.
+
+    Around `redact_command` (scrub hardening, 2026-10-25): the display
+    scrub's credential shapes and labelled values (`redact.CardPass`), each
+    only where the shell reads no structure and a labelled value not on a
+    line that may run text; shown as `[withheld: <kind>]`. That pass failing
+    leaves `redact_command`'s card."""
     if not isinstance(value, str) or not value:
         return value
+    from . import redact
+    extra = redact.CardPass()
+    try:
+        before = extra.hide(value)
+    except Exception:  # noqa: BLE001
+        LOG.warning("approval card shape pass failed")
+        before = value
     try:
         from jarvis.tools import secrets as _v1_secrets
-        return _v1_secrets.redact_command(value)
+        return extra.show(_v1_secrets.redact_command(before))
     except Exception:  # noqa: BLE001
         LOG.warning("approval card redaction failed; shown as typed")
         return value
 
 
 def card_args(args):
-    """A card's arguments, each string as `card_text`; structure kept."""
+    """A card's arguments, each string as `card_text`; structure kept. A
+    string under `command`/`cmd` is judged as a command; any other (a
+    `Write`'s `content`, an `Edit`'s `new_string`) is text the shell never
+    runs, so a private key's whole block and every shape in it go
+    (`redact.card_spans`)."""
+    from . import redact
+    extra = redact.CardPass()
+    top = not isinstance(args, dict)
+    try:
+        before = redact.map_strings(args, extra.hide, command=top)
+    except Exception:  # noqa: BLE001
+        LOG.warning("approval card shape pass failed")
+        before = args
     try:
         from jarvis.tools import secrets as _v1_secrets
-        return _v1_secrets.redact_value(args)
+        return redact.map_strings(_v1_secrets.redact_value(before), extra.show, command=top)
     except Exception:  # noqa: BLE001
         LOG.warning("approval card redaction failed; shown as typed")
         return args

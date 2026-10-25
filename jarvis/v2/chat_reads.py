@@ -23,13 +23,27 @@ schedule, an escape-hatch result) shows its first line only, as the Discord
 mirror does, because what follows is command output.
 
 Every row's text is scrubbed where it is read (§3.3), outside any daemon
-lock: `strip_invisible` first (so a zero-width character cannot split a key
-out of a pattern's sight), then `secrets.redact_inline` (#205's display
-redaction: URL userinfo, typed credentials, credential-named JSON keys),
-then `redact.scrub_text` (known values, `credential_patterns`, bearer, JWT
-and `jmcp_` shapes), then `strip_invisible` again. A scrub that raises
-withholds the row (`WITHHELD`); it never passes the text through. Titles
-are model-written too: cleaned (`approvals.clean_line`), scrubbed, capped.
+lock (`scrub_read`): `strip_invisible` first (so a zero-width character
+cannot split a key out of a pattern's sight), then `secrets.redact_inline`
+(#205's display redaction: URL userinfo, typed credentials, credential-named
+JSON keys), then `redact.for_model` (known values and the credential shapes,
+matched on a normalized view), then `strip_invisible` again. Rows are what
+another chat's **model** reads (`tools/chats.py`), so the display-only rule
+for a value after a credential's label is not here; the phone adds it to
+the rows it shows (`remote_api`). Three scrubs, one per reader (scrub
+hardening, 2026-10-25):
+
+- `scrub_read`: the rows and titles (model input, the owner's typed words
+  among them, so `redact_inline`'s typed credentials stay withheld);
+- `scrub`: what the owner reads (a relay's progress, an inbox post, the
+  phone): `scrub_read`'s layers plus `redact.labelled_values`;
+- `scrub_for_model`: what one agent wrote for another (a relay's body and
+  reply, a compaction reason): known values and shapes only, so ordinary
+  code arrives as written (review of PR #308).
+
+A scrub that raises withholds the row (`WITHHELD`); it never passes the text
+through. Titles are model-written too: cleaned (`approvals.clean_line`),
+scrubbed, capped.
 
 Every result that carries a chat's words is one `untrusted.fence_chat`, with
 a fresh nonce. Reads are bounded by the constants below, and a search by a
@@ -109,13 +123,44 @@ class Row:
 # -- the scrub (§3.3) ---------------------------------------------------------------------
 
 
-def scrub(text: Any) -> str:
-    """`text` with every credential the display redaction or the scrub knows
-    withheld, invisible characters out; `WITHHELD` if any layer raises."""
+def scrub_read(text: Any) -> str:
+    """A row's or a title's text as another chat's model reads it: invisible
+    characters out, the credentials typed inline (`secrets.redact_inline`),
+    Jarvis's credential values and every credential shape
+    (`redact.for_model`); `WITHHELD` if any layer raises."""
     try:
         out = untrusted.strip_invisible(str(text or ""))
         out = secrets.redact_inline(out)
-        out = redact.scrub_text(out)
+        out = redact.for_model(out)
+        return untrusted.strip_invisible(out)
+    except Exception:  # noqa: BLE001 - a scrub that fails withholds, whatever failed
+        return WITHHELD
+
+
+def scrub(text: Any) -> str:
+    """`text` as the owner reads it (a relay's progress, an inbox post, what
+    the phone receives): `scrub_read`'s layers, then the value after a
+    credential's label (`redact.labelled_values`); `WITHHELD` if any layer
+    raises. **Never for text an agent reads**: that is `scrub_read` or
+    `scrub_for_model`."""
+    try:
+        out = untrusted.strip_invisible(str(text or ""))
+        out = secrets.redact_inline(out)
+        out = redact.for_display(out)
+        return untrusted.strip_invisible(out)
+    except Exception:  # noqa: BLE001 - a scrub that fails withholds, whatever failed
+        return WITHHELD
+
+
+def scrub_for_model(text: Any) -> str:
+    """`text` as an agent reads it (a relay's body, reply and failure
+    reason; a compaction reason): invisible characters out, then
+    `redact.for_model` (known values and high-confidence credential shapes
+    only, so ordinary code reaches the model as written: review of PR #308);
+    `WITHHELD` if any layer raises."""
+    try:
+        out = untrusted.strip_invisible(str(text or ""))
+        out = redact.for_model(out)
         return untrusted.strip_invisible(out)
     except Exception:  # noqa: BLE001 - a scrub that fails withholds, whatever failed
         return WITHHELD
@@ -129,7 +174,7 @@ def clean_title(title: Any, cap: int = TITLE_CHARS) -> str:
     """A title (model-written) as one clean, scrubbed, capped line."""
     if not isinstance(title, str) or not title.strip():
         return "(untitled)"
-    line = scrub(clean_line(title, cap=10 * cap))
+    line = scrub_read(clean_line(title, cap=10 * cap))
     if line == WITHHELD:
         return "(title withheld)"
     return clean_line(line, cap=cap) or "(untitled)"
@@ -366,7 +411,7 @@ def _owner_row(data: dict, at, dropped: set[str]) -> Row:
         # because what follows is a command's output.
         lines = typed.strip().splitlines() or [""]
         more = " (the rest is shown only in the HUD)" if len(lines) > 1 else ""
-        return Row("system", scrub(lines[0]) + more, at, ("not typed by the owner",))
+        return Row("system", scrub_read(lines[0]) + more, at, ("not typed by the owner",))
     if isinstance(data.get("skill"), str):
         typed = f"/skill {data['skill']} {typed}".rstrip()
     names = [str(n)[:200] for n in (data.get("attachments") or []) if isinstance(n, str)][:8]
@@ -387,7 +432,7 @@ def _owner_row(data: dict, at, dropped: set[str]) -> Row:
     role = "owner"
     if via == "peer":
         role, marks = "another thread, not the owner", []
-    return Row(role, scrub(typed), at, tuple(marks))
+    return Row(role, scrub_read(typed), at, tuple(marks))
 
 
 def _relay_row(kind: str, data: dict, at) -> Row:
@@ -399,7 +444,7 @@ def _relay_row(kind: str, data: dict, at) -> Row:
     else:
         role = f"reply from {title} ({_thread_id(data.get('from'))})"
     text = data.get("text")
-    return Row(role, scrub(text if isinstance(text, str) else ""), at)
+    return Row(role, scrub_read(text if isinstance(text, str) else ""), at)
 
 
 def _row(record: dict, provider, dropped: set[str]) -> Row | None:
@@ -411,11 +456,11 @@ def _row(record: dict, provider, dropped: set[str]) -> Row | None:
         return _owner_row(data, at, dropped)
     if which == "assistant":
         text = data.get("text")
-        return Row(provider_word(provider), scrub(text if isinstance(text, str) else ""), at)
+        return Row(provider_word(provider), scrub_read(text if isinstance(text, str) else ""), at)
     if which == "system":
         text = data.get("text")
         line = untrusted.one_line(text if isinstance(text, str) else "", cap=SNIPPET_CHARS)
-        return Row("system", scrub(line), at)
+        return Row("system", scrub_read(line), at)
     return _relay_row(which, data, at)
 
 

@@ -74,7 +74,7 @@ import threading
 import time
 
 from ..model import TERMINAL_STATES, Task, TaskState, from_json, utcnow
-from ..redact import scrub_text
+from ..redact import for_display
 from ..stores import StoreError, _lock, _write_bytes
 from .render import _cap, milestone, report_text, status_embed
 from .rest import (MISSING_ACCESS, MISSING_PERMISSIONS, UNKNOWN_CHANNEL, describe)
@@ -147,7 +147,7 @@ def _clean(text):
     if not (isinstance(text, str) and text):
         return text
     try:
-        return scrub_text(text)
+        return for_display(text)
     except Exception:       # noqa: BLE001 — what cannot be scrubbed is withheld
         return WITHHELD
 

@@ -32,8 +32,12 @@ The send half (C3, plan §5), every bound in §5.4:
   else only shown. A non-answer never starts a turn (P-10). A steer the
   provider refuses, whatever its fallback, waits in `held`: a reply never
   interrupts.
-- Every body and reply is scrubbed (`chat_reads.scrub`) before it is logged
-  or delivered, and fenced with a fresh nonce (`untrusted.fence_chat`).
+- Every body and reply is scrubbed before it is logged or delivered, and
+  fenced with a fresh nonce (`untrusted.fence_chat`). They are an agent's
+  input, so the scrub is `chat_reads.scrub_for_model` (known values and
+  credential shapes only; review of PR #308: the display rules rewrote
+  ordinary code). The transcript scrubs them again for the owner when it
+  shows them; the sender's progress stream is the owner's (`scrub`).
 - Memory only (P-12): a restart forgets every item; the transcript reads an
   unfated `relay_out` as "not delivered".
 
@@ -247,7 +251,7 @@ class ChatRelay:
         if isinstance(found, chat_reads.Refusal):
             return found.text
         target = found
-        body = chat_reads.scrub(text)
+        body = chat_reads.scrub_for_model(text)
         if body == chat_reads.WITHHELD:
             return "Error: the message could not be checked for credentials, so it was not sent."
         try:
@@ -453,13 +457,13 @@ class ChatRelay:
         elif closed:
             status, words = "failed", "it failed: the chat was closed"
         elif failed or stop == "error":
-            reason = untrusted.one_line(chat_reads.scrub(error or "an error"), cap=200)
+            reason = untrusted.one_line(chat_reads.scrub_for_model(error or "an error"), cap=200)
             status, words = "failed", "it failed: " + (reason or "an error")
         elif not any(t.strip() for t in texts):
             status, words = "empty", _STATUS_WORDS["empty"]
         else:
             status, words = "answered", _STATUS_WORDS["answered"]
-        reply = _tail(chat_reads.scrub("\n\n".join(texts)), TEXTS_MAX) if texts else ""
+        reply = _tail(chat_reads.scrub_for_model("\n\n".join(texts)), TEXTS_MAX) if texts else ""
         gone = self._sender_gone(item)
         wrapped = self._reply_text(item, reply, words)
         with daemon._lock:

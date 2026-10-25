@@ -658,7 +658,7 @@ class Scrub(Base):
         from jarvis.v2 import redact
         thread = self.chat(CLAUDE)
         self.turn(thread)
-        with patch.object(redact, "scrub_text", side_effect=RuntimeError("no")):
+        with patch.object(redact, "for_model", side_effect=RuntimeError("no")):
             text = self.refused_call(self.post(thread))
         self.assertIn("could not be checked for credentials", text)
         self.nothing_stored()

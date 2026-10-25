@@ -176,17 +176,23 @@ def _spawned(session, data, *, running: bool) -> None:
 
 
 def _log_fields(data) -> dict:
-    """`LOGGED_REDACTED` fields of an event's data through
-    `secrets.redact_value`, computed outside the daemon's lock (it reads
+    """`LOGGED_REDACTED` fields of an event's data as an approval card shows
+    them (`secrets.redact_value` inside `redact.CardPass`: a private key in a
+    `Write`'s `content` goes whole, the credential shapes as markers; scrub
+    hardening, 2026-10-25), computed outside the daemon's lock (it reads
     credential files). A redaction that fails withholds the field."""
     out = {}
     if not isinstance(data, dict):
         return out
     from jarvis.tools import secrets as v1_secrets
+    from . import redact
     for key in LOGGED_REDACTED:
         if key in data:
             try:
-                out[key] = v1_secrets.redact_value(data[key])
+                extra = redact.CardPass()
+                hidden = redact.map_strings({key: data[key]}, extra.hide, command=False)[key]
+                out[key] = redact.map_strings({key: v1_secrets.redact_value(hidden)}, extra.show,
+                                              command=False)[key]
             except Exception:  # noqa: BLE001
                 out[key] = "[withheld: could not be judged]"
     return out
@@ -262,13 +268,14 @@ COMPACT_REASON_CHARS = 200
 
 def compact_reason(text) -> str:
     """A provider's reason for a compaction that did not happen, as the chat
-    shows it: scrubbed as chat reads are (`chat_reads.scrub`: the display
-    redaction, then the credential scrub), one line, at most
+    shows it and the log keeps it (where another chat's model may read it):
+    `chat_reads.scrub_for_model`, known values and credential shapes, as
+    Codex's own reason is (`codex._compact_reason`); one line, at most
     COMPACT_REASON_CHARS. Reads credential files: never under `_lock`."""
     from .approvals import clean_line
-    from .chat_reads import WITHHELD, scrub
+    from .chat_reads import WITHHELD, scrub_for_model
     try:
-        line = clean_line(scrub(str(text or "")), COMPACT_REASON_CHARS)
+        line = clean_line(scrub_for_model(str(text or "")), COMPACT_REASON_CHARS)
     except Exception:  # noqa: BLE001 — a scrub that fails shows nothing of it
         line = WITHHELD
     return line or "no reason was given"

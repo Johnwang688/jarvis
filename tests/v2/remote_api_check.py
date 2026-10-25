@@ -715,9 +715,13 @@ class Review308(Api):
 
 class LabelledValues(unittest.TestCase):
     """`remote_api.labelled_values` (review of PR #308, and its delta review):
-    a value after a credential's label is withheld **on the phone only**; the
-    shared scrub (`redact.scrub_text`, `chat_reads.scrub`, which feed agents
-    through chat relays and git tool output) is exactly main's."""
+    a value after a credential's label is withheld **on display surfaces
+    only** (the phone, and since the scrub hardening of 2026-10-25 every
+    `redact.for_display` surface); what an agent reads (`redact.for_model`
+    alias `scrub_text`, `chat_reads.scrub_for_model` for chat relays,
+    `chat_reads.scrub_read` for another chat's rows) is exactly main's on
+    the review's lines, apart from a labelled AWS secret, which is a
+    credential shape on every path now."""
 
     MUST_WITHHOLD = [(_fill(a), _fill(b)) for a, b in [
         ("aws_secret_access_key = @AWS_SECRET@", "@AWS_SECRET_HEAD@"),
@@ -731,14 +735,25 @@ class LabelledValues(unittest.TestCase):
         ("the login is admin, @K_PASSWORD@: @PW_DOT@.", "@PW_DOT@"),
     ]]
 
-    def test_the_shared_scrub_is_mains(self):
+    def test_the_model_input_scrubs_are_mains(self):
         from jarvis.v2 import redact
-        self.assertFalse(hasattr(redact, "labelled_values"))
+        aws = _fill("aws_secret_access_key = @AWS_SECRET@")
         for line, (reads, shared) in MAIN_SCRUB.items():
-            self.assertEqual(chat_reads.scrub(line), reads, line)
+            if line == aws:
+                for out in (redact.for_model(line), chat_reads.scrub_read(line),
+                            chat_reads.scrub_for_model(line)):
+                    self.assertEqual(out, "aws_secret_access_key = [withheld: AWS secret key]")
+                continue
+            self.assertEqual(redact.for_model(line), shared, line)
             self.assertEqual(redact.scrub_text(line), shared, line)
-        print(f"ok  the shared scrub is main's on all {len(MAIN_SCRUB)} review lines "
-              "(redact.scrub_text, chat_reads.scrub)")
+            self.assertEqual(chat_reads.scrub_for_model(line), shared, line)
+            self.assertEqual(chat_reads.scrub_read(line), reads, line)
+        for line in LABELLED_KEEP:
+            self.assertEqual(redact.for_model(line), line, line)
+            self.assertEqual(chat_reads.scrub_for_model(line), line, line)
+        print(f"ok  the model-input scrubs are main's on {len(MAIN_SCRUB) - 1} of the {len(MAIN_SCRUB)} "
+              "review lines (the labelled AWS secret is now a shape); all "
+              f"{len(LABELLED_KEEP)} keep lines unchanged by redact.for_model")
 
     def test_code_and_prose_after_a_label_are_kept_on_the_phone(self):
         self.assertLessEqual(set(LABELLED_CODE), set(LABELLED_KEEP))
@@ -756,8 +771,9 @@ class LabelledValues(unittest.TestCase):
         for line, secret in self.MUST_WITHHOLD:
             out = remote_api._scrub(line)
             self.assertNotIn(secret, out, line)
-            self.assertIn("[redacted]", out, line)
-        self.assertEqual(remote_api.labelled_values(_fill("@K_PASSWORD@: @PW_DOT@.")), _fill("@K_PASSWORD@: [redacted]."))
+            self.assertRegex(out, r"\[redacted\]|\[withheld: ", line)
+        self.assertEqual(remote_api.labelled_values(_fill("@K_PASSWORD@: @PW_DOT@.")),
+                         _fill("@K_PASSWORD@: [withheld: labelled secret]."))
         caught = [line for line in LABELLED_PROBE_WITHHOLD if remote_api._scrub(line) != line]
         print(f"ok  phone: the must-withhold shapes withheld; {len(caught)} of the probe's "
               f"{len(LABELLED_PROBE_WITHHOLD)} secret lines altered (plain words after a label, and "

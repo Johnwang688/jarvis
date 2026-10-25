@@ -49,7 +49,7 @@ import uuid
 
 from jarvis import config, models
 from jarvis.untrusted import strip_invisible
-from jarvis.v2.redact import scrub_text
+from jarvis.v2.redact import for_display, for_model
 
 from .approvals import clean_line
 from .model import PermissionProfile, ProviderName, Role, Thread, utcnow
@@ -137,7 +137,12 @@ def build_input(daemon, task, cap: int = CAP_BYTES) -> ReviewInput:
     from . import hud_api as H
     context = H._diff_context(daemon, task)
     base, head, files, patches = H._diff_parts(daemon, task, context=context)
-    scrubbed = [H._scrub_source(patch) if patch else "" for patch in patches]
+    # Model input: the credential shapes only (`redact.for_model`), never the
+    # Diff tab's display scrub, whose labelled-value rule would rewrite the
+    # code the reviewer must read (review of PR #308). The final newline as
+    # the tab keeps it.
+    scrubbed = [for_model(patch) + ("\n" if patch.endswith("\n") else "") if patch else ""
+                for patch in patches]
     taken, reviewed, skipped, used = [], [], [], 0
     for meta, patch in zip(files, scrubbed):
         size = len(patch.encode("utf-8", errors="replace"))
@@ -241,7 +246,8 @@ def _clean(value, cap: int) -> str:
     try:
         # Invisible characters go first: one inside a key would hide it from
         # the scrub, and stripping it afterwards would put the key back together.
-        value = scrub_text(strip_invisible(value))
+        # The reviewer's words are for the owner's panel: the display scrub.
+        value = for_display(strip_invisible(value))
     except Exception:       # noqa: BLE001 — what cannot be scrubbed is withheld, never raised
         value = WITHHELD
     return clean_line(value, cap=cap).strip()

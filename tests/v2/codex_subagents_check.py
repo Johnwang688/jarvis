@@ -892,7 +892,7 @@ class Scrub(Daemon):
 
     def test_a_codex_childs_message_and_failure_are_scrubbed(self):
         said, failed = leaky()
-        for run, want in ((said, "keys: [redacted]"), (failed, "SV0 synthetic child failure [redacted]")):
+        for run, want in ((said, "keys: [withheld: "), (failed, "SV0 synthetic child failure [withheld: ")):
             with self.subTest(want=want):
                 self.play("x", turns=run.turns)
                 kept = self.daemon.stores.threads.path(self.chat.id).with_name(S.FILE).read_text()
@@ -915,7 +915,10 @@ class Scrub(Daemon):
                 out[(sid_[:2], kind)] = prepared["data"]["text"]
         self.assertEqual(out[("cl", "text")], out[("cx", "text")])
         self.assertEqual(out[("cl", "result")], out[("cx", "result")])
-        self.assertEqual(out[("cx", "text")], "keys: " + " ".join(["[redacted]"] * 5))
+        # Each shape says what it was (scrub hardening); the owned value is
+        # the patched `secrets.scrub`'s own `[redacted]`.
+        self.assertEqual(out[("cx", "text")], "keys: [withheld: Anthropic key] [withheld: Jarvis caller token] "
+                                              "[withheld: JWT] [withheld: GitHub token] [redacted]")
         # A scrub that fails withholds the words.
         from jarvis.tools import secrets
         with patch.object(secrets, "scrub", side_effect=RuntimeError("no")):

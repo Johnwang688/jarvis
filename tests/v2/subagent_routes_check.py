@@ -341,7 +341,7 @@ class Record(Base):
         got = self.owner("GET", self.sub("/cl:toolu_a/transcript"))
         self.assertTrue(got["brief"].startswith("BRIEF-WORDS-7 "))
         self.assertNotIn(FAKE_SECRET, got["brief"])
-        self.assertIn("[redacted]", got["brief"])
+        self.assertRegex(got["brief"], r"\[redacted\]|\[withheld: ")
         self.assertEqual(len(got["brief"]), S.TEXT_CAP)
         listed = self.owner("GET", self.sub())
         self.assertNotIn("BRIEF-WORDS-7", json.dumps(listed))

@@ -2988,3 +2988,137 @@ brace expansion disabled, glob components dropped again, globs skipped by
 the ancestor and exact checks, the cap's fail-closed touches removed, `..`
 collapsed as text, only the guessed reading made, a cut walk ignored, a
 malformed sequence not closed, and a quoted empty word dropped.
+
+## One credential scrub, a display side and a model-input side (2026-10-25)
+
+Current rule, beside the 2026-10-15 notes above (owner's approval,
+2026-10-25). Reviews found the desk's Diff tab on the v1 scrub
+(`secrets.scrub`: Jarvis's own credential values only, so a `ghp_`,
+`sk-or-`, `AKIA`, JWT, `Bearer`, PEM, URL password, Discord, `AIza`,
+`sk_live_`, `npm_` or `hf_` value in a changed file showed in plain text),
+`approvals.card_args` showing a private key's body in a `Write`'s `content`,
+and the shared v2 scrub missing `password: X`, a bare AWS secret beside its
+key id, tokens split by NBSP/tab/newline/U+2028/U+0085, fullwidth tokens and
+a combining mark inside a token. PR #308 had shown the other side: a loose
+labelled-value rule in the shared scrub rewrote ordinary code
+(`api_key=settings.API_KEY`) that two consumers feed to models.
+
+**The layer** (`jarvis/v2/redact.py`). `shapes(text)` withholds every
+high-confidence credential shape as `[withheld: <kind>]`: GitHub
+(`ghp_ gho_ ghu_ ghs_ ghr_ github_pat_`), `sk-ant-`, `sk-or-`, `sk-proj-`/
+`sk-svcacct-`, other `sk-` keys with a digit, AWS access key ids
+(`AKIA ASIA ABIA ACCA`), an AWS secret (40 base64 characters with both cases)
+when labelled (`aws_secret_access_key`, `SecretAccessKey` …) or within 200
+characters before / 400 after a key id, AWS session tokens, JWTs, every
+private key's whole block (`private_key_spans`, SEC-5), `Bearer` (16+
+characters with a letter and a digit) and `Basic` (base64 that decodes to
+`user:pass`) credentials, a URL's password (not a template or placeholder:
+`${…}`, `<…>`, `%(…)s`, `****`, `password`), Discord bot tokens, `AIza`,
+Stripe `sk_`/`rk_` `live`/`test`, `npm_`, `hf_`, Slack `xox[abeprs]-` and
+`xapp-`, GitLab, PyPI, `jmcp_` and Claude's provider's `sk`/`oat`/`rt`
+bearer shape. Matching runs on normalized views, never on the text shown:
+fullwidth folded to ASCII; zero-width, bidi, soft-hyphen, control, private-use
+and combining characters dropped (and, in a second view, read as a space so
+a word still ends before a token); unusual spaces (NBSP, U+2028, U+0085, the
+Unicode spaces) dropped in a third view so a split anywhere is whole again;
+and a prefixed token split across an ordinary space, tab or newline joined
+while each next piece looks random (a digit, a lower-then-upper pair, a long
+capital or vowel-less run) and only when the first piece is not a whole token
+already. A withheld span is a boundary for the next round (as the old
+one-pattern-at-a-time pass's marker was), so a token glued to another stays
+hidden. Outside the withheld spans the text comes back byte for byte. Kept by
+design: git SHAs, UUIDs, `sha256:` digests, base64 image data, public keys
+and certificates, `"Bearer " + token`, templates, prose about prefixes.
+
+**Two scrubs on it.**
+
+- `redact.for_model(text)` (alias `scrub_text`): `secrets.scrub` (known
+  values) then `shapes`. Nothing heuristic: the code a model must read
+  arrives as written. (A shape crossing a separator `secrets.scrub`'s line
+  rejoin would turn into `\n` is withheld first.)
+- `redact.for_display(text)`: `for_model`, then `labelled_values`, the
+  phone's tuned rule moved here (a value after `password`, `passwd`,
+  `passphrase`, `api_key`, `secret_key`, `client_secret`, `access_token`,
+  `auth_token`, `refresh_token`, `private_key`, `aws_secret_access_key`,
+  `aws_session_token`; kept when it reads as code or a reference: a digitless
+  identifier, a call or subscript, a path, tag, mask, variable or template,
+  or under 16 characters without a digit), marked `[withheld: labelled
+  secret]`.
+
+`chat_reads` has three wrappers, each `strip_invisible` before and after:
+`scrub` (display: `redact_inline` + `for_display`), `scrub_read` (another
+chat's rows and titles, which a model reads through the chat tools:
+`redact_inline` + `for_model`; #205's typed-credential rule stays because
+these rows hold the owner's own typed words) and `scrub_for_model` (what one
+agent wrote for another: `for_model` only).
+
+**Cards** (`approvals.card_text`/`card_args`, `redact.CardPass`). The
+display scrub's spans are found on the text as typed and held as
+placeholders through `secrets.redact_command`/`redact_value` (whose own
+replacements would otherwise remove what they are found by: a key id beside
+its secret, a split token's first piece), then shown as markers. A string
+the shell never runs (any argument but `command`/`cmd`/`commands`/`script`:
+a `Write`'s `content`, an `Edit`'s `new_string`) loses every span, a private
+key's whole block included when every line is key material. A command keeps
+the 2026-10-15 condition: each span only where `_Mask` reads no structure
+(a non-ASCII space read as the word character bash reads it as), labelled
+values not on a line that may run text, a private key left to
+`_key_blocks` (key lines at a command's place are commands), a URL's
+userinfo left to `strip_url_credentials`. So on a command's card a token
+split by a tab or newline stays visible (rule 0). A card whose extra pass
+fails falls back to `redact_command`'s card.
+
+**Consumers** (file:line on the PR branch).
+
+| Call site | Reader | Scrub before | Scrub now |
+|---|---|---|---|
+| `hud_api._scrub_source` (`hud_api.py:908`; Diff tab patch `:976`, file before/after `:973`) | owner, desk | v1 `secrets.scrub` | `redact.for_display` |
+| `remote_api._patch_scrub` over `_scrub_source` (`remote_api.py:532`) | owner, phone | v1 + `chat_reads.scrub` + labelled | `for_display` + `chat_reads.scrub` + labelled |
+| `remote_api._scrub` (`remote_api.py:272`) | owner, phone | `chat_reads.scrub` + labelled | same (labelled now inside `chat_reads.scrub`; a no-op second time) |
+| phone transcript rows (`remote_api.py:437`) | owner, phone | rows' `chat_reads.scrub` + labelled | rows' `scrub_read` + labelled |
+| relay progress (`chat_relay.py:412`) | owner, HUD stream | `chat_reads.scrub` | `chat_reads.scrub` (now with labelled values) |
+| inbox decision post (`decisions.py:634`, `:637`) | owner, inbox | `chat_reads.scrub` ×2 | same (now with shapes on views and labelled values) |
+| Discord mirror `_scrub` (`discord/mirror.py:122`) | owner, Discord | `scrub_text` | `for_display` |
+| Discord reporter `_clean` (`discord/reporter.py:150`) | owner, Discord | `scrub_text` | `for_display` |
+| `card_text` (`approvals.py:99`; command/reason/headline `:379`) | owner: HUD card, `GET /approvals`, bus, Discord DM, phone | `redact_command` | `CardPass` + `redact_command` |
+| `card_args` (`approvals.py:121`) | same | `redact_value` | `CardPass` + `redact_value` (non-command strings: every span, PEM whole) |
+| `log.jsonl` fields (`daemon._log_fields`, `daemon.py:178`) | owner, history and tool rows (persisted) | `redact_value` | `CardPass` + `redact_value`; a field that fails is withheld |
+| diff review findings `_clean` (`diff_review.py:250`) | owner, Quick review panel | `scrub_text` | `for_display` |
+| idle error line (`daemon.py:1782`) | owner, chat line and log | `scrub_text` | `scrub_text` (= `for_model`), unchanged call |
+| relay body (`chat_relay.py:254`) | **model**, the receiving chat | `chat_reads.scrub` (`redact_inline` + shapes) | `chat_reads.scrub_for_model` |
+| relay reply and failure reason (`chat_relay.py:466`, `:460`) | **model**, the sending chat | `chat_reads.scrub` | `chat_reads.scrub_for_model` |
+| chat rows and titles (`chat_reads.py:177`, `:414`, `:435`, `:447`, `:459`, `:463`) | **model** (chat tools), phone (+ labelled) | `chat_reads.scrub` | `chat_reads.scrub_read` |
+| chat git tool output (`chat_git.py:628`) | **model** | `scrub_text(strip_url_credentials)` | `for_model(strip_url_credentials)` |
+| sub-agent words and brief (`subagents.py:150`) | **model** and record | `scrub_text` | unchanged call (= `for_model`) |
+| Codex compaction reason (`providers/codex.py:1167`) | **model**/log | `scrub_text` | unchanged call (= `for_model`) |
+| `compact_reason` (`daemon.py:278`) | **model**/log, chat line | `chat_reads.scrub` | `chat_reads.scrub_for_model` |
+| diff review input (`diff_review.py:144`) | **model**, reviewer | `hud_api._scrub_source` (v1 only) | `for_model` |
+| CLI stop refusal (`daemon.py:2793`) | owner and caller | `scrub_text` | unchanged call (= `for_model`) |
+
+Not changed here (listed for follow-up): v1 dispatch's tool results
+(`tools/__init__.py`, `secrets.scrub`, SELF_PROTECTED), attachments inlined
+into a turn (`hud_api.py:623`), tool labels (`tool_calls.py:76`, own pass:
+v1 scrub + `credential_patterns` + `redact_inline`), Claude's event text
+(`providers/claude.py:335`), titles, speech summaries, MCP errors, the
+escape hatch's output, the daemon's error JSON, sub-agent names
+(`subagents.py:135`), the Discord gateway's post over the card
+(`discord/gateway.py:769`, already card-redacted), v1's face and Discord
+cards (`face/approvals.py:78`, SELF_PROTECTED, and `discord_approvals.py:80`,
+both `redact_value`: a private key in a `Write`'s `content` still shows
+there), and `decisions.jsonl` (`permissions.py:287`, `:1427`,
+`redact_command`). `credential_patterns` (the terminal read's
+refusal list, SELF_PROTECTED) is unchanged; the display/model table is its
+own.
+
+**Tests.** `tests/v2/scrub_layers_check.py`: 39 shapes and 204 split,
+fullwidth, combining, zero-width, soft-hyphen and bidi variants withheld on
+4 model-input and 5 display paths; for_model faithful outside withheld
+spans; 51 keep lines (PR #308's 33 and its 19 code lines, hashes, UUIDs,
+image data, templates, prose, non-ASCII text) unchanged on model input and
+display; the 16 labelled probe lines unchanged on model input; the Diff tab
+route and diff review input; `card_args` with PEM; mutations caught
+(no normalized view, no split join, labelled values on model input, no PEM
+pass on cards, the Diff tab on the v1 scrub). `remote_api_check` pins the
+model-input scrubs to main's output on the review's 50 lines (bar the
+labelled AWS secret, now a shape). `redact_private_key_check`'s tighten-only
+fuzz now reads: the old output, or one that only withholds more.

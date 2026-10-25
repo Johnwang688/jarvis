@@ -898,9 +898,14 @@ def _refresh_codex_metadata(daemon) -> None:
 
 
 def _scrub_source(text):
-    # v1 scrub normalizes lines and removes the final newline; restore it so
-    # the diff editor does not invent a missing-newline change.
-    return scrub(text) + ("\n" if text.endswith("\n") else "")
+    """The Diff tab's text (a patch, a file's before and after) as the owner
+    reads it: the display scrub (`redact.for_display`: Jarvis's credential
+    values, every credential shape, the value after a credential's label).
+    The v1 scrub at its core joins lines and drops the final newline; it is
+    restored so the diff editor does not invent a missing-newline change.
+    Display only: diff review's model input takes `redact.for_model`."""
+    from .redact import for_display
+    return for_display(text) + ("\n" if text.endswith("\n") else "")
 
 
 def _git(root, *args):
