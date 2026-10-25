@@ -84,13 +84,17 @@ the native app would be a thin shell over the same `/m/api`.
 
 ## 2. Decisions (planner's defaults, each reversible)
 
-- **PH-1. A fourth listener, `REMOTE_PORT` 8406, on loopback,** that serves
-  only the phone app and the phone API. It is never the HUD listener, and
+- **PH-1. A fourth listener, `REMOTE_PORT` 8408, on loopback** (not 8406,
+  which is `SPOTIFY_AUTH_PORT`, the Spotify consent callback whose redirect
+  URI is registered by hand; 8407 is the trading firm). P-1 adds it to
+  `config.DEFAULT_CONTROL_PORTS` and to `CONTROL_PORTS` in
+  `hud/src/lib/devopen.ts`, which mirrors it, so the agent Browser refuses
+  it. It serves only the phone app and the phone API. It is never the HUD listener, and
   `is_owner` is never true on it. It shares no route table entry with the
   HUD unless that route is listed in §5.
 - **PH-2. Reachability is `tailscale serve` on Windows**, terminating HTTPS
   with the tailnet's certificate at `https://<machine>.<tailnet>.ts.net` and
-  proxying to `127.0.0.1:8406`, which WSL2's localhost forwarding carries
+  proxying to `127.0.0.1:8408`, which WSL2's localhost forwarding carries
   into the VM. Nothing is bound to a LAN or public address. **No Tailscale
   Funnel**: the surface is not on the public internet.
 - **PH-3. The owner on the phone is proved by a passkey, not by the network.**
@@ -102,25 +106,35 @@ the native app would be a thin shell over the same `/m/api`.
   knows nor cares which was used. An iPhone with no passcode cannot hold a
   passkey, so pairing needs one set. Tailscale's identity
   headers are logged as advisory, never trusted, because a local process
-  can send them to 8406 directly.
+  can send them to 8408 directly.
 - **PH-4. Every Allow and every Always is its own passkey assertion.** The
   challenge is bound to the approval and the exact answer:
   `sha256(req_id ‖ "allow" | "always" ‖ server nonce)`, single-use, valid
   60 s, so an assertion for Allow cannot be replayed as Always. The server
-  verifies origin, rpId, the UV flag and the signature counter before it
-  calls `PendingApprovals.resolve`. Deny needs only the session. This is
+  verifies origin, rpId, the UV flag and, when the authenticator keeps
+  one, the signature counter, before it calls `PendingApprovals.resolve`.
+  iCloud Keychain passkeys always report 0 (P-0), so a counter of 0 is
+  accepted while the stored counter is also 0; once a credential has
+  reported a nonzero counter, each new one must be greater (`webauthn`'s
+  own rule). For iCloud passkeys the counter is therefore no defence against
+  a cloned key. Deny needs only the session. This is
   "deny cheap, authorize deliberate", made physical. A program running as the
   owner can forge any header, but it cannot produce this assertion.
 - **PH-5. Sessions are short and narrow.** After a passkey login, the phone
   holds a `__Host-` cookie (HttpOnly, Secure, SameSite=Strict, 12 h idle,
   7 days absolute). Every write also needs `Origin` equal to the ts.net
-  origin. Logging out or revoking the device in the desktop HUD ends its
+  origin. Logging out, or revoking the passkey in the desktop HUD, ends its
   sessions at once.
 - **PH-6. Pairing starts only at the desk.** An owner-only HUD route opens a
-  pairing window (5 minutes, one device) and shows a QR code holding a
+  pairing window (5 minutes, one registration) and shows a QR code holding a
   one-time code. The phone opens the URL, enters or scans the code, and
-  registers its passkey. The HUD lists paired devices with last-seen and
-  Revoke. At most 3 devices.
+  registers a passkey. **What is paired is the passkey, not a device**
+  (P-0): an iCloud Keychain passkey syncs to every Apple device on the
+  owner's Apple ID, and each of them can use it once it is on the tailnet.
+  The HUD lists paired passkeys with their sessions (user agent and
+  last-seen per session) and Revoke, which ends every session that passkey
+  opened. At most 3 passkeys. A limit on devices cannot be enforced and is
+  not claimed.
 - **PH-7. Phone approvals equal the HUD's (O-3); phone messages do not
   carry desk authority.**
   - **Approvals.** `PendingApprovals.resolve`'s `hud=True` becomes
@@ -164,11 +178,11 @@ the native app would be a thin shell over the same `/m/api`.
  phone (installed PWA)
    │ HTTPS, tailnet only
    ▼
- Windows: tailscale serve  https://<machine>.<tailnet>.ts.net  →  127.0.0.1:8406
+ Windows: tailscale serve  https://<machine>.<tailnet>.ts.net  →  127.0.0.1:8408
    │ WSL2 localhost forwarding
    ▼
  WSL: jarvis daemon
-   ├─ REMOTE listener 8406 ── remote_auth (passkey, sessions, Origin)
+   ├─ REMOTE listener 8408 ── remote_auth (passkey, sessions, Origin)
    │     ├─ static: mobile bundle (strict CSP, frame-ancestors 'none')
    │     ├─ /m/api/*  (§5)            → the same functions the HUD uses
    │     └─ /m/ws     event fan-out, filtered to inbox_changed + thread updates
@@ -190,7 +204,7 @@ who the owner is off the box.
 1. the request arrived on `REMOTE_PORT`;
 2. `Host` is exactly the configured ts.net name (strict, like
    `check_origin`);
-3. a valid, unexpired, unrevoked session cookie names a paired device;
+3. a valid, unexpired, unrevoked session cookie names a paired passkey;
 4. for anything but GET or HEAD, `Origin` is exactly
    `https://<machine>.<tailnet>.ts.net`;
 5. for an Allow, a fresh assertion as in PH-4.
@@ -209,12 +223,12 @@ again before each verified answer:
 2. **Tailscale serve is the only path, and Funnel is off.** The daemon reads
    `tailscale serve status --json` through the Windows CLI (read-only) and
    requires exactly one handler for the ts.net name, pointing at
-   `127.0.0.1:8406`, with no Funnel entry for any port.
+   `127.0.0.1:8408`, with no Funnel entry for any port.
 3. **The certificate is the tailnet's own**, valid for the ts.net name, and
    the request's `Host` and `Origin` match it (§4, items 2 and 4).
-4. **The device is paired, unrevoked, and its passkey requires user
+4. **The passkey is paired, unrevoked, and requires user
    verification**, and the assertion is fresh (PH-4).
-5. **Nothing else is listening on 8406**, on any interface, in WSL or on
+5. **Nothing else is listening on 8408**, on any interface, in WSL or on
    Windows (`ss` in WSL, `Get-NetTCPConnection` on Windows, read-only).
 
 If any condition fails, the phone keeps working at **Discord-level authority**
@@ -223,10 +237,10 @@ at the desk"). The phone shows a red "limited: <which check failed>" line,
 and the desktop HUD's status shows the same. Getting full authority back needs
 nothing but the condition passing again. No setting widens it.
 
-**The agent path.** An agent's shell could `curl 127.0.0.1:8406`. Without a
+**The agent path.** An agent's shell could `curl 127.0.0.1:8408`. Without a
 session cookie that is a 401. The cookie lives in the phone's browser and is
 never written to disk on the PC. Defence in depth: `rules.py` DENYs any
-command naming port 8406 or the remote listener's route prefix, the same
+command naming port 8408 or the remote listener's route prefix, the same
 treatment as the daemon-kill rule, and the session MCP catalog gains no
 remote routes.
 
@@ -304,7 +318,7 @@ path, each step the owner's call:
 |---|---|
 | Approvals are the owner's, deliberately | PH-4: a user-verified assertion (Face ID or passcode) bound to each Allow and each Always; no bulk Allow; Always shows its rule first |
 | HUD-only cards answered only by a verified owner surface | `owner_verified` set only by the HUD route and by the phone under §4.1 with a fresh assertion (PH-7, O-3); private detail never in push, logs or the stream |
-| No tool reaches owner routes | remote routes need a session no agent holds; `rules.py` DENY for 8406; nothing in the session MCP catalog |
+| No tool reaches owner routes | remote routes need a session no agent holds; `rules.py` DENY for 8408; nothing in the session MCP catalog |
 | Credentials never leave the daemon | VAPID private key and WebAuthn data are protected paths; push payloads are content-free; logs carry status codes only |
 | Nothing fetched speaks for the owner | the phone renders transcripts as the HUD does: scrubbed, untrusted, `textContent` for cards |
 | Desk authority is the HUD's | `via="phone"`, desk false |
@@ -315,9 +329,9 @@ path, each step the owner's call:
 
 | WP | Package | Size | Acceptance |
 |---|---|---|---|
-| P-0 | **Spikes, each a script under `tests/spikes/` with its finding written here.** (a) `tailscale serve` on Windows reaching a WSL loopback listener on 8406, with a valid cert, and `tailscale serve status --json` readable from WSL; (b) a passkey registered and asserted with Face ID, and again with Face ID off using the passcode, from the owner's iPhone, in the home-screen app, on the ts.net origin, verified by `webauthn`; (c) a Web Push reaching the home-screen app on the iPhone with the screen locked | S | all three pass on the owner's iPhone; any failure stops the plan and comes back as a decision |
+| P-0 | **Spikes, each a script under `tests/spikes/` with its finding written here.** (a) `tailscale serve` on Windows reaching a WSL loopback listener on 8408, with a valid cert, and `tailscale serve status --json` readable from WSL; (b) a passkey registered and asserted with Face ID, and again with Face ID off using the passcode, from the owner's iPhone, in the home-screen app, on the ts.net origin, verified by `webauthn`; (c) a Web Push reaching the home-screen app on the iPhone with the screen locked | S | all three pass on the owner's iPhone; any failure stops the plan and comes back as a decision |
 | P-1 | `REMOTE_PORT` listener, strict Host and Origin, CSP, static serving of an empty mobile shell | S | the API and HUD listeners never serve `/m/*`; the remote one never serves HUD routes (route-table test); non-ts.net Host refused |
-| P-2 | `remote_auth`: pairing from the HUD, passkey registration and login, sessions, devices, revoke | M | pairing only within an open window; revoke ends sessions at once; replayed or cross-origin assertions refused; `rules.py` DENY for 8406 |
+| P-2 | `remote_auth`: pairing from the HUD, passkey registration and login, sessions, paired passkeys, revoke | M | pairing only within an open window; revoke ends sessions at once; replayed or cross-origin assertions refused; `rules.py` DENY for 8408 |
 | P-3 | Read API and the Inbox, Chats and Tasks tabs (read-only) | M | headless mobile-viewport suite; transcripts identical to the HUD's projection; private cards show their private projection until P-4 lands |
 | P-4 | Answering: approvals with per-answer assertion, `owner_verified` in `approvals.py`, the §4.1 security monitor, questions, decisions | M | Allow or Always without a fresh assertion refused; an Allow assertion replayed as Always refused; HUD-only card answered from a verified phone, refused from Discord and from a phone with any §4.1 check failing (one test per check); `owner_detail` never appears in push, logs or `/m/ws` (asserted); Deny works with session only; the card suite passes on the phone bundle; boundary review on the `approvals.py` change |
 | P-5 | Sending messages, new chats, task cancel and resume | S | `via="phone"` recorded; desk false (fast-path suite); queues behind a running turn |
@@ -327,6 +341,69 @@ path, each step the owner's call:
 
 Order: P-0 → P-1 → P-2 → P-3 → P-4 → P-6 → P-5 → P-7 → P-8. The inbox's IN-0 to
 IN-2 must land before P-3.
+
+### 10.1 P-0 findings (2026-10-25)
+
+The phone was the owner's iPhone (Tailscale lists it as `iphone-12`), on
+iOS 26 by the owner's report, on LTE (the owner's screenshot of the
+Tailscale app). The run's user-agent lines were lost to the spike bug below.
+
+Scripts: `tests/spikes/p0_network.py` (a) and `tests/spikes/p0_phone.py` (b, c).
+Server-side log of the run: `~/.cache/jarvis-p0/findings.jsonl` on the PC.
+
+- **(a) Network: pass, 5 of 5.** `tailscale serve --bg --https=443
+  http://127.0.0.1:8408` on Windows reaches the WSL listener through WSL2's
+  localhost forwarding (NAT mode, no `.wslconfig` change). The listener is
+  loopback-only in WSL, and on Windows only `wslrelay` listens on 8408, on
+  loopback. `tailscale serve status --json` is readable from WSL through
+  the Windows CLI, with one handler and Funnel off. Two one-time owner steps were
+  needed: enabling Serve for the tailnet in the admin console, and waiting
+  for the first certificate. The first HTTPS request after enabling timed out
+  at 15 s while the certificate was issued; it answered within 90 s and
+  immediately from then on. (The setup steps and timings are from this
+  session's own run, not the findings log.) The run used port 8406; the
+  spike moved to 8408 after review found the Spotify collision (PH-1), and
+  check (a) was re-run there: 5 of 5.
+- **(b) Passkey: pass.** Registered in the home-screen app with
+  `userVerification: required`. It is stored in iCloud Keychain
+  (`backed_up: true`, multi-device). Two assertions, labelled "faceid"
+  and "passcode" by the button pressed, both verified with `user_verified:
+  true`. **The server cannot tell which method was used** (both set the UV
+  flag; the label is only the button), and the two were 11 s apart, so the
+  log alone does not show the passcode path. **Re-run for the passcode
+  (06:05 UTC, on 8408):** the page opened as the home-screen app (logged:
+  `standalone: true`, Safari `Version/26.6.1`; iOS freezes the OS token in
+  the user agent at `18_7`). With the front camera covered so Face ID
+  failed, **iOS asked for the passcode, not Face ID** (the owner's report),
+  and the assertion verified 8 s after the page opened with `user_verified:
+  true`. So the passcode satisfies PH-4 exactly as Face ID does. Replaying a
+  used assertion, as "allow" or as "always", was refused.
+  - **Signature counter is always 0** for these passkeys. PH-4 is amended:
+    a zero counter is accepted while the stored one is zero (PH-4).
+  - **The passkey syncs to every Apple device on the owner's Apple ID.**
+    Any of those devices can approve, once it is on the tailnet and opens the
+    paired origin. Pairing records the credential, not the device, so
+    "Revoke" in the HUD (PH-6) revokes the passkey everywhere at once.
+  - **Not exercised:** an unused "allow" assertion submitted as "always".
+    The replay hit the single-use check first. P-4 tests the answer binding
+    with a software authenticator (`webauthn`'s test helpers or a fake), since
+    the binding is server logic and needs no phone.
+- **(c) Web Push: pass on the server side.** The home-screen app subscribed
+  through `web.push.apple.com`. A content-free payload, `{"count": 1, "rank":
+  1}`, signed with the spike's VAPID key and sent 20 s later, was accepted
+  (HTTP 201), and **the notification showed on the locked iPhone about 20 s
+  later** (the owner's report). For `rank: 1` the service worker builds the
+  text "1 waiting - an approval expires soon" under the title "Jarvis", so
+  that is what was shown. Opening the app from the tap was not recorded (the
+  spike bug below).
+- **Spike bug, fixed after the run:** the page's own client log lines
+  ("opened as home-screen app", "opened from the notification") crashed the
+  log route, because a field named `event` collided with the logger's own
+  argument. Those lines were lost for this run. That the subscription
+  succeeded shows the page ran as the home-screen app, since iOS offers push
+  only there.
+
+Verdict: P-0 passes. P-1 may start.
 
 ## 11. Open questions for the owner (defaults in bold)
 
@@ -350,6 +427,6 @@ Answered 2026-10-24: the phone is an iPhone (O-1); Discord stays as a backup
 `jarvis/v2/daemon.py` (listeners, `send`, `answer`), `jarvis/v2/projects.py`
 (`is_owner`, as the model to not reuse), `jarvis/v2/hud_api.py`
 (`check_origin`, CSP), `jarvis/v2/approvals.py`, `jarvis/rules.py` (the
-8406 DENY), `jarvis/v2/provider.py` (`UserMessage.via`), `jarvis/v2/desk.py`,
+8408 DENY), `jarvis/v2/provider.py` (`UserMessage.via`), `jarvis/v2/desk.py`,
 `hud/vite.config.ts` (second entry), `hud/public/manifest.webmanifest`,
 `pyproject.toml` (`webauthn`, `pywebpush`).
