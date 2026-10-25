@@ -16,8 +16,15 @@ context forwards that origin to the loopback port with the trusted Host, as
 the iPhone (user verification on). It pairs through `/m/pair#<code>`, signs
 in, holds the `__Host-` cookie with its attributes, signs out, and is refused
 once user verification is off: the browser's own WebAuthn serialization
-against the real `webauthn` verification. Skipped when `hud/dist` has no
-phone shell (run `npm run build` in hud/).
+against the real `webauthn` verification. Signed in, the app (P-3,
+`app_checks`): the Inbox, Chats and Tasks tabs over the real read API, with
+hostile text in an origin, a command, a thread title, the owner's words, a
+plan, a brief and a patch drawn as text; a reply's Markdown sanitized; no
+answer control anywhere; a live reply over the real event stream (each
+window of it a finite answer, since a route fulfills whole bodies); the
+offline banner; 44 px tap targets; the diff folded file by file; C1's CSP
+unwidened. Skipped when `hud/dist` has no phone shell (run `npm run build`
+in hud/).
 
 Run: PYTHONPATH=. .venv/bin/python tests/face/hud_v2_phone_check.py
 """
@@ -261,19 +268,82 @@ def phone_checks(browser, mock, base, check, until, guard, init_script):
 
 SHELL_HOST = "jarvis-box.tail-test.ts.net"
 
+# Untrusted text the app must draw as text (P-3): a model's words in a row's
+# origin and detail, a question, a thread title, a task brief, a reply.
+HOSTILE = '<img src=x onerror="window.__pwned=7"><b>bold</b><script>window.__pwned=8</script>'
+REPLY = ("**Done.** <script>window.__pwned=9</script> <img src=x onerror=\"window.__pwned=10\"> "
+         "[link](javascript:window.__pwned=11) and `code` and $x^2$")
+ANSWER_WORDS = re.compile(r"\b(allow|deny|always|approve|send|withdraw|reply|resume|cancel|submit)\b", re.I)
+MARKUP = "img, script, b, svg, iframe, object, embed, [onerror], [onload], a[href^='javascript']"
+
+
+def _populate(daemon, root):
+    """A project with chats, a running and a blocked task (one with a git
+    worktree and a change), and the inbox's sources, all holding hostile text."""
+    import subprocess
+    from jarvis.v2 import worktrees
+    from jarvis.v2.approvals import ApprovalRequest
+    from jarvis.v2.model import ProviderName as PN, Role, TaskState
+    repo = root / "project"
+    repo.mkdir()
+    (repo / "app.py").write_text("def f(n):\n    return n\n")
+    for args in (["init", "-q"], ["config", "user.email", "t@example.invalid"], ["config", "user.name", "T"],
+                 ["add", "."], ["commit", "-qm", "base"]):
+        subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
+    stores = daemon.stores
+    project = stores.projects.create("Calc", str(repo))
+    chats = []
+    for i in range(7):
+        t = stores.threads.create(project.id, Role.CHAT, PN.CLAUDE, cwd=str(repo))
+        t.updated = f"2026-10-25T0{i}:00:00+00:00"
+        stores.threads.save(t)
+        stores.threads.set_title(t.id, HOSTILE if i == 6 else f"chat {i}", "owner")
+        chats.append(stores.threads.get(t.id))
+    chat = chats[-1]
+    for record in ({"kind": "user", "data": {"typed": "owner words " + HOSTILE, "via": "hud"}},
+                   {"kind": "tool_started", "data": {"name": "Bash", "args": {"command": "TOOL-ARGS-NEVER"}}},
+                   {"kind": "text", "data": {"text": REPLY}}):
+        stores.threads._append(chat.id, "log.jsonl", {"at": "2026-10-25T10:00:00+00:00", "thread_id": chat.id, **record})
+    running = stores.tasks.create(project.id, "Running task " + HOSTILE)
+    running = worktrees.ensure(running, project, stores)
+    (Path(running.worktree) / "app.py").write_text("def f(n):\n    return n + 1\n")
+    (Path(running.worktree) / "notes.txt").write_text("a note " + HOSTILE + "\n")
+    live = stores.tasks.get(running.id)
+    live.plan = ["read the code", "change it " + HOSTILE]
+    stores.tasks.save(live)
+    for state in (TaskState.CLARIFYING, TaskState.PLANNED, TaskState.RUNNING):
+        stores.tasks.transition(running.id, state)
+    blocked = stores.tasks.create(project.id, "Blocked task")
+    stores.tasks.save(blocked)
+    for state in (TaskState.CLARIFYING, TaskState.BLOCKED):
+        stores.tasks.transition(blocked.id, state)
+    public = ApprovalRequest(tool="Bash", args={"command": "rm -rf build"}, command="rm -rf build " + HOSTILE,
+                             reason=HOSTILE, provider="claude", thread_id=chat.id,
+                             origin='task 0000beef "' + HOSTILE + '"')
+    public.req_id, public.code, public.asked_at, public.timeout_s = "req-pub", "abcd", "2026-10-25T10:00:00+00:00", 600.0
+    private = ApprovalRequest(tool="hud_browser_act", args={"url": "PRIVATE-NEVER"}, command="PRIVATE-NEVER",
+                              hud_only=True, browser={"url": "PRIVATE-NEVER"})
+    private.req_id, private.code, private.asked_at, private.timeout_s = "req-priv", "efgh", "2026-10-25T10:00:00+00:00", 600.0
+    daemon.approvals.pending = lambda: [public, private]
+    return {"project": project, "chat": chat, "chats": chats, "running": running, "blocked": blocked}
+
 
 def shell_checks(browser, check, until):
-    print("\nThe phone shell: pair, sign in and out with a virtual authenticator, end to end")
+    print("\nThe phone shell: pair, sign in, the app (P-3), sign out, with a virtual authenticator, end to end")
     import http.client
     import os
+    import socket
     import tempfile
+    import threading
     from unittest.mock import patch
     from urllib.parse import urlsplit
     from types import SimpleNamespace
     from jarvis import config
+    from jarvis.v2 import remote_api
     from jarvis.v2.daemon import Daemon
     from jarvis.v2.model import ProviderName as PN
     from jarvis.v2.provider import Decision, SessionHandle, Usage
+    from jarvis.v2.remote_listener import REMOTE_POLICY
     from jarvis.v2.stores import Stores
     dist = REPO / "hud" / "dist"
     if not (dist / "mobile.html").is_file() or not (dist / "build-manifest.json").is_file():
@@ -315,20 +385,31 @@ def shell_checks(browser, check, until):
         V2_DATA_DIR=root / "data", ALLOWLIST_PATH=root / "allow.json", MODELS_PATH=root / "models.json",
         PROVIDER_DEFAULTS_PATH=root / "provider_defaults.json", DISCORD_GUILD_PATH=root / "guild.json",
         HUD_DEV=True, HUD_DIST=dist).items()]
+    # The stream reconnects quickly here, because each window of it is a
+    # finite response below (a route can only fulfill a whole body).
+    patches.append(patch.object(remote_api, "RETRY_MS", 300))
     for guard in patches:
         guard.start()
     daemon = Daemon(Stores(), {name: Fake(name) for name in PN}, lambda *_: lambda *_: Decision.DENY, 0,
                     remote_host=SHELL_HOST)
     daemon.start()
     port = daemon.remote_port
+    world = _populate(daemon, root)
     forwarded: list[str] = []
+    streamed: list[bytes] = []
+    shell_headers: dict = {}
+    net = {"offline": False}
 
     def forward(route):
         request = route.request
         url = urlsplit(request.url)
         path = url.path + ("?" + url.query if url.query else "")
         forwarded.append(request.method + " " + url.path)
+        if net["offline"] and url.path.startswith("/m/api/"):
+            return route.abort("internetdisconnected")
         sent = request.all_headers()
+        if url.path == "/m/api/events":
+            return route.fulfill(**stream_window(path, sent))
         conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
         try:
             conn.putrequest(request.method, path, skip_host=True, skip_accept_encoding=True)
@@ -341,15 +422,51 @@ def shell_checks(browser, check, until):
                 conn.putheader("Content-Length", str(len(body)))
             conn.endheaders(body)
             response = conn.getresponse()
-            data = response.read()
             headers = {k: v for k, v in response.getheaders()}
+            data = response.read()
+            if url.path == "/m/":
+                shell_headers.update(headers)
             route.fulfill(status=response.status, headers=headers, body=data)
         finally:
             conn.close()
 
+    def stream_window(path, sent):
+        """One window of the live stream as a finite answer: what the remote
+        listener sends in about a second (or until it ends the stream). The
+        page's EventSource reads it, then reconnects after RETRY_MS."""
+        sock = socket.create_connection(("127.0.0.1", port), timeout=5)
+        try:
+            head = f"GET {path} HTTP/1.1\r\nHost: {SHELL_HOST}\r\n"
+            if sent.get("cookie"):
+                head += f"Cookie: {sent['cookie']}\r\n"
+            sock.sendall((head + "\r\n").encode())
+            raw, end = b"", time.monotonic() + 1.0
+            sock.settimeout(0.2)
+            while time.monotonic() < end:
+                try:
+                    chunk = sock.recv(65536)
+                except (socket.timeout, TimeoutError):
+                    if b"\r\n\r\n" in raw and not raw.startswith(b"HTTP/1.0 200"):
+                        break
+                    continue
+                if not chunk:
+                    break
+                raw += chunk
+        finally:
+            sock.close()
+        top, _, data = raw.partition(b"\r\n\r\n")
+        lines = top.decode("latin-1").split("\r\n")
+        status = int(lines[0].split(" ")[1]) if lines and lines[0].startswith("HTTP/") else 502
+        headers = dict(line.split(": ", 1) for line in lines[1:] if ": " in line)
+        if status == 200:
+            streamed.append(data)
+        return {"status": status, "headers": headers, "body": data}
+
     ctx = browser.new_context(viewport={"width": 390, "height": 844}, ignore_https_errors=True)
     ctx.route(re.compile(r".*"), lambda route: route.abort())
     ctx.route(re.compile(r"^https://" + re.escape(SHELL_HOST) + r"/"), forward)
+    ctx.add_init_script("window.__csp = []; document.addEventListener('securitypolicyviolation', "
+                        "e => window.__csp.push(e.violatedDirective + ' ' + (e.blockedURI || '')));")
     page = ctx.new_page()
     page.set_default_timeout(8000)
     errors: list[str] = []
@@ -360,6 +477,7 @@ def shell_checks(browser, check, until):
         "protocol": "ctap2", "transport": "internal", "hasResidentKey": True,
         "hasUserVerification": True, "isUserVerified": True, "automaticPresenceSimulation": True}})["authenticatorId"]
     screen = lambda: page.evaluate("document.querySelector('[data-screen]')?.dataset.screen || ''")  # noqa: E731
+    main = '[data-testid="m-main"]'
     try:
         host = f"127.0.0.1:{daemon.face_port}"
         conn = http.client.HTTPConnection("127.0.0.1", daemon.face_port, timeout=5)
@@ -381,9 +499,9 @@ def shell_checks(browser, check, until):
         check("P-2 shell: pairing alone signs nothing in",
               not [c for c in ctx.cookies() if c["name"] == "__Host-jarvis_m"])
         page.locator("button").click()
-        until(lambda: screen() in ("Signed in · paired", "Jarvis"), timeout=8)
-        check("P-2 shell: then it signs in with the passkey", screen() == "Signed in · paired",
-              page.locator("main").inner_text())
+        until(lambda: screen() in ("app", "Jarvis"), timeout=8)
+        check("P-2 shell: then it signs in with the passkey, and the app opens", screen() == "app",
+              page.locator("main").first.inner_text())
         cookie = [c for c in ctx.cookies() if c["name"] == "__Host-jarvis_m"]
         check("P-2 shell: the browser holds __Host-jarvis_m: HttpOnly, Secure, SameSite=Strict, Path=/",
               len(cookie) == 1 and cookie[0]["httpOnly"] and cookie[0]["secure"]
@@ -392,11 +510,18 @@ def shell_checks(browser, check, until):
         check("P-2 shell: page script cannot read the session cookie",
               "jarvis_m" not in page.evaluate("document.cookie"))
         page.goto(f"https://{SHELL_HOST}/m/")
-        until(lambda: screen() == "Signed in · paired", timeout=8)
-        check("P-2 shell: /m/ opens signed in", screen() == "Signed in · paired")
-        status = page.evaluate("fetch('/m/api/inbox').then(r => r.status)")
-        check("P-2 shell: the rest of /m/api is 404 to a signed-in phone until P-3", status == 404, str(status))
-        page.locator("button").click()
+        until(lambda: screen() == "app", timeout=8)
+        check("P-2 shell: /m/ opens signed in", screen() == "app")
+        check("P-3 CSP: the shell's policy is C1's, unwidened (style-src 'self', no 'unsafe-inline')",
+              shell_headers.get("Content-Security-Policy") == REMOTE_POLICY
+              and "'unsafe-inline'" not in REMOTE_POLICY, str(shell_headers.get("Content-Security-Policy")))
+        app_checks(page, daemon, world, check, until, streamed, net, main)
+        check("P-3 app: no page errors", not errors, str(errors[:3]))
+        violations = page.evaluate("window.__csp")
+        print(f"  note  {len(violations)} CSP refusal(s) in the app: {sorted(set(violations))[:3]}")
+        check("P-3 app: nothing the app draws needs more than C1's policy (inline styles, if any, are refused "
+              "and dropped)", all(v.startswith("style-src") for v in violations), str(violations[:5]))
+        page.locator('[data-testid="m-signout"]').click()
         until(lambda: screen() == "Jarvis", timeout=8)
         check("P-2 shell: Sign out ends the session",
               page.evaluate("fetch('/m/api/me').then(r => r.status)") == 401)
@@ -405,15 +530,18 @@ def shell_checks(browser, check, until):
         until(lambda: page.locator("button").is_enabled() if screen() == "Jarvis" else False, timeout=10)
         check("P-2 shell: without user verification the sign-in is refused",
               screen() == "Jarvis" and page.evaluate("fetch('/m/api/me').then(r => r.status)") == 401,
-              page.locator("main").inner_text())
+              page.locator("main").first.inner_text())
         cdp.send("WebAuthn.setUserVerified", {"authenticatorId": authenticator, "isUserVerified": True})
         page.locator("button").click()
-        until(lambda: screen() == "Signed in · paired", timeout=8)
-        check("P-2 shell: with it back, the same passkey signs in again", screen() == "Signed in · paired")
+        until(lambda: screen() == "app", timeout=8)
+        check("P-2 shell: with it back, the same passkey signs in again", screen() == "app")
         key = daemon.remote_auth.status()["passkeys"][0]["key"]
         daemon.remote_auth.revoke(key)
         check("P-2 shell: a revoke at the desk ends the phone's session at once",
               page.evaluate("fetch('/m/api/me').then(r => r.status)") == 401)
+        until(lambda: screen() == "Jarvis", timeout=10)
+        check("P-3 app: after a revoke the app stops and asks for a sign-in", screen() == "Jarvis",
+              page.locator("main").first.inner_text())
         check("P-2 shell: no page errors", not errors, str(errors[:3]))
         check("P-2 shell: only the ts.net origin was reached", all(f.split(" ")[1].startswith("/m/") for f in forwarded),
               str(forwarded[:5]))
@@ -423,6 +551,142 @@ def shell_checks(browser, check, until):
         for guard in reversed(patches):
             guard.stop()
         tmp.cleanup()
+
+
+def app_checks(page, daemon, world, check, until, streamed, net, main):
+    """The signed-in app (P-3): the three tabs, untrusted text as text, the
+    sanitized Markdown, no answer control, live updates over the real stream,
+    the offline banner, touch targets, the diff folded file by file."""
+    import threading
+    chat, running = world["chat"], world["running"]
+
+    def text(selector=main):
+        return page.locator(selector).first.inner_text()
+
+    def clean():
+        return (page.locator(f"{main} :is({MARKUP})").count() == 0
+                and page.evaluate("window.__pwned === undefined"))
+
+    def answer_controls():
+        names = page.evaluate("Array.from(document.querySelectorAll('button')).map(b => b.textContent)")
+        fields = page.locator("input, textarea, select, form, [contenteditable]").count()
+        return [n for n in names if ANSWER_WORDS.search(n or "")], fields
+
+    def small_targets():
+        return page.evaluate("""Array.from(document.querySelectorAll('.app button, .app summary'))
+            .filter(e => e.offsetParent !== null).map(e => [e.textContent, e.getBoundingClientRect().height])
+            .filter(([, h]) => h < 44)""")
+
+    # -- Inbox ---------------------------------------------------------------------------
+    until(lambda: page.locator('[data-testid="m-inbox-row"]').count() >= 3, timeout=8)
+    rows = page.locator('[data-testid="m-inbox-row"]')
+    check("P-3 Inbox: the rows render (approvals, the private card, the blocked task)",
+          rows.count() >= 3 and page.locator('[data-testid="m-inbox-row"][data-kind="approval"]').count() == 2,
+          text())
+    check("P-3 Inbox: origin, command and reason are text, never markup",
+          HOSTILE in page.locator('[data-testid="m-origin"]').first.inner_text()
+          and HOSTILE in page.locator('[data-testid="m-command"]').first.inner_text() and clean())
+    check("P-3 Inbox: a private card shows its private projection only",
+          page.locator('[data-testid="m-private"]').count() == 1 and "PRIVATE-NEVER" not in text())
+    check("P-3 Inbox: approvals say 'Answer at the desk'",
+          page.locator('[data-testid="m-desk-only"]', has_text="Answer at the desk").count() == 2)
+    bad, fields = answer_controls()
+    check("P-3 Inbox: no answer control exists (no Allow, Deny, Always, no input)", not bad and fields == 0,
+          f"{bad} {fields}")
+    check("P-3 Inbox: the tab counts what waits", "Inbox · " in page.locator('[data-testid="m-tab-inbox"]').inner_text())
+    check("P-3 app: every tap target is at least 44 px tall (Inbox)", not small_targets(), str(small_targets()))
+
+    # -- Chats ---------------------------------------------------------------------------
+    page.locator('[data-testid="m-tab-chats"]').click()
+    until(lambda: page.locator('[data-testid="m-chat"]').count() >= 1, timeout=8)
+    check("P-3 Chats: the five most recent chats of the project, the rest behind Show more",
+          page.locator('[data-testid="m-chat"]').count() == 5
+          and page.locator('[data-testid="m-more"]').inner_text() == "Show 2 more")
+    check("P-3 Chats: a thread title is text", HOSTILE in page.locator('[data-testid="m-chat"]').first.inner_text()
+          and clean())
+    page.locator(f'[data-testid="m-chat"][data-id="{chat.id}"]').click()
+    until(lambda: page.locator('[data-testid="m-msg"]').count() >= 2, timeout=8)
+    msgs = page.locator('[data-testid="m-msg"]')
+    reply = page.locator('[data-testid="m-msg"][data-role="Claude"]').first
+    check("P-3 Chats: the transcript is the projection (owner, reply; no tool row)",
+          msgs.count() == 2 and "TOOL-ARGS-NEVER" not in text(), text())
+    check("P-3 Chats: the owner's words are text", HOSTILE in msgs.first.inner_text() and clean())
+    check("P-3 Chats: a reply's Markdown is rendered and sanitized (no script, no image, no javascript: link)",
+          reply.locator("strong").inner_text() == "Done." and reply.locator("code").count() == 1
+          and reply.locator("script, img, a").count() == 0 and clean(), reply.inner_html()[:300])
+    check("P-3 Chats: math is drawn as MathML, KaTeX's styled HTML layer and every style attribute dropped "
+          "(C1's style-src kept)", reply.locator("math").count() == 1
+          and reply.locator(".katex-html, [style]").count() == 0, reply.inner_html()[:300])
+    bad, fields = answer_controls()
+    check("P-3 Chats: no input box yet, no send", not bad and fields == 0, f"{bad} {fields}")
+    check("P-3 app: every tap target is at least 44 px tall (Chats)", not small_targets(), str(small_targets()))
+
+    # -- live: a reply lands while the transcript is open --------------------------------
+    daemon.stores.threads._append(chat.id, "log.jsonl", {"at": "2026-10-25T10:05:00+00:00", "thread_id": chat.id,
+                                                         "kind": "text", "data": {"text": "a **live** reply"}})
+    stop = threading.Event()
+
+    def publish():
+        while not stop.wait(0.15):
+            daemon.bus.publish({"kind": "text", "thread_id": chat.id, "project_id": chat.project_id,
+                                "data": {"text": "STREAM-TEXT-NEVER"}})
+
+    worker = threading.Thread(target=publish, daemon=True)
+    before = len(streamed)
+    worker.start()
+    try:
+        until(lambda: page.locator('[data-testid="m-msg"]').count() == 3, timeout=10)
+    finally:
+        stop.set()
+        worker.join(2)
+    check("P-3 live: a new reply appears in the open transcript", page.locator('[data-testid="m-msg"]').count() == 3
+          and "live" in page.locator('[data-testid="m-msg"]').last.inner_text())
+    windows = b"".join(streamed[before:])
+    check("P-3 live: the stream carried thread_changed for it, ids only",
+          b'"kind":"thread_changed"' in windows and chat.id.encode() in windows
+          and b"STREAM-TEXT-NEVER" not in windows, windows[:300].decode("utf-8", "replace"))
+
+    # -- Tasks ---------------------------------------------------------------------------
+    page.locator('[data-testid="m-tab-tasks"]').click()
+    until(lambda: page.locator('[data-testid="m-task"]').count() == 2, timeout=8)
+    groups = page.locator('[data-testid="m-task-group"]').all_inner_texts()
+    check("P-3 Tasks: running first, then blocked", [g.lower() for g in groups] == ["running", "blocked"], str(groups))
+    check("P-3 Tasks: a brief is text", HOSTILE in page.locator('[data-testid="m-task"]').first.inner_text() and clean())
+    page.locator(f'[data-testid="m-task"][data-id="{running.id}"]').click()
+    until(lambda: page.locator('[data-testid="m-task-brief"]').count() == 1, timeout=8)
+    check("P-3 Tasks: the task's state and plan, as text",
+          page.locator('[data-testid="m-state"]').first.inner_text() == "running"
+          and HOSTILE in page.locator('[data-testid="m-plan"]').inner_text() and clean())
+    page.locator('[data-testid="m-show-diff"]').click()
+    until(lambda: page.locator('[data-testid="m-diff-file"]').count() >= 2, timeout=8)
+    files = page.locator('[data-testid="m-diff-file"]')
+    paths = [files.nth(i).get_attribute("data-path") for i in range(files.count())]
+    check("P-3 Tasks: the diff, file by file", sorted(paths) == ["app.py", "notes.txt"], str(paths))
+    first = files.first
+    first.locator("summary").click()
+    folded = page.evaluate("Array.from(document.querySelectorAll('[data-testid=m-diff-file]')).map(d => d.open)")
+    check("P-3 Tasks: each file folds", folded.count(False) == 1, str(folded))
+    check("P-3 Tasks: a patch's text is text", clean())
+    check("P-3 app: every tap target is at least 44 px tall (Tasks)", not small_targets(), str(small_targets()))
+    bad, fields = answer_controls()
+    check("P-3 Tasks: no resume, cancel or answer control", not bad and fields == 0, f"{bad} {fields}")
+
+    # -- offline: nothing shown as current -----------------------------------------------
+    net["offline"] = True
+    page.locator('[data-testid="m-tab-inbox"]').click()
+    until(lambda: page.locator('[data-testid="m-offline"]').is_visible(), timeout=8)
+    banner = page.locator('[data-testid="m-offline"]')
+    check("P-3 offline: a banner says so, and says nothing is current",
+          banner.is_visible() and "Offline" in banner.inner_text() and "Nothing here is current" in banner.inner_text(),
+          banner.inner_text() if banner.count() else "")
+    check("P-3 offline: the view is marked stale",
+          page.evaluate("document.querySelector('[data-screen]').dataset.stale") == "true"
+          and page.locator('[data-testid="m-conn"]').inner_text() == "offline")
+    net["offline"] = False
+    page.locator('[data-testid="m-tab-inbox"]').click()
+    until(lambda: not page.locator('[data-testid="m-offline"]').is_visible(), timeout=10)
+    check("P-3 offline: back online, the banner goes and the view is current again",
+          not banner.is_visible() and page.evaluate("document.querySelector('[data-screen]').dataset.stale") == "false")
 
 
 def main():

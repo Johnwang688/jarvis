@@ -665,7 +665,7 @@ class Daemon:
             # The fourth listener, after the three that are the lock: a second
             # daemon fails above and never reaches it. Never fails the start.
             from .remote_listener import bind as bind_remote
-            remote = bind_remote(self.remote_host, self._remote_want, self.remote_auth)
+            remote = bind_remote(self.remote_host, self._remote_want, self.remote_auth, self)
             if remote is not None:
                 servers.append(remote)
                 self.remote_port = remote.server_address[1]

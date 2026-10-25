@@ -86,6 +86,8 @@ describe("the phone shell's pairing and sign-in (P-2)", () => {
     get = vi.fn(async () => fakeCredential("get"));
     Object.defineProperty(navigator, "credentials", { configurable: true, value: { create, get } });
     vi.stubGlobal("PublicKeyCredential", class {});
+    // The signed-in app opens the event stream (app.ts); jsdom has none.
+    vi.stubGlobal("EventSource", class { readyState = 0; onopen = null; onmessage = null; onerror = null; close() {} });
   });
 
   afterEach(() => {
@@ -115,8 +117,8 @@ describe("the phone shell's pairing and sign-in (P-2)", () => {
     expect(screen()).toBe("Paired");
     expect(get).not.toHaveBeenCalled();
     await tap();
-    expect(calls.map((c) => c.path).slice(2)).toEqual(["/m/api/login/options", "/m/api/login/verify"]);
-    expect(screen()).toBe("Signed in · paired");
+    expect(calls.map((c) => c.path).slice(2, 4)).toEqual(["/m/api/login/options", "/m/api/login/verify"]);
+    expect(screen()).toBe("app");
   });
 
   it("says a refused code plainly and never calls the authenticator", async () => {
@@ -138,16 +140,18 @@ describe("the phone shell's pairing and sign-in (P-2)", () => {
     expect(calls.map((c) => c.path)).toEqual([]);
   });
 
-  it("shows sign-in when signed out, and the signed-in card with Sign out", async () => {
+  it("shows sign-in when signed out, and the app with Sign out once signed in", async () => {
     history.replaceState(null, "", "/m/");
     await import("./main");
     await settle();
     expect(screen()).toBe("Jarvis");
     expect(document.querySelector("button")!.textContent).toBe("Sign in with passkey");
     await tap();
-    expect(screen()).toBe("Signed in · paired");
-    expect(document.querySelector("button")!.textContent).toBe("Sign out");
-    await tap();
+    expect(screen()).toBe("app");
+    const out = document.querySelector<HTMLButtonElement>('[data-testid="m-signout"]')!;
+    expect(out.textContent).toBe("Sign out");
+    out.click();
+    await settle();
     expect(calls.map((c) => c.path).slice(-1)).toEqual(["/m/api/logout"]);
     expect(screen()).toBe("Jarvis");
   });
@@ -157,7 +161,7 @@ describe("the phone shell's pairing and sign-in (P-2)", () => {
     history.replaceState(null, "", "/m/");
     await import("./main");
     await settle();
-    expect(screen()).toBe("Signed in · paired");
+    expect(screen()).toBe("app");
   });
 
   it("puts server text in as text, never markup", async () => {

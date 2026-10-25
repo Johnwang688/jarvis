@@ -1036,13 +1036,18 @@ class OwnerTest(Remote):
         for method, path, headers, want, word in cases:
             status, _, body = raw(self.port, method, path, headers, b"{}" if method == "POST" else None)
             self.assertEqual((status, json.loads(body)), (want, {"error": word}), (method, headers))
-        # With a session, the rest of /m/api is 404 until P-3; without, 401.
-        for path in ("/m/api/inbox", "/m/api/threads", "/m/api/", "/m/api/pair/options"):
+        # With a session, P-3's reads answer (tests/v2/remote_api_check.py)
+        # and anything else under /m/api is 404; without one, all are 401.
+        for path in ("/m/api/inbox", "/m/api/threads"):
+            self.assertEqual(self.phone("GET", path, cookie=cookie)[0], 200, path)
+            self.assertEqual(self.phone("GET", path)[0], 401, path)
+        for path in ("/m/api/", "/m/api/pair/options", "/m/api/inbox/x", "/m/api/logout"):
             self.assertEqual(self.phone("GET", path, cookie=cookie)[0], 404, path)
             self.assertEqual(self.phone("GET", path)[0], 401, path)
         self.assertEqual(self.phone("POST", "/m/api/inbox/x/answer", {}, cookie=cookie)[0], 404)
         self.assertEqual(self.phone("POST", "/m/api/inbox/x/answer", {})[0], 401)
-        print("ok  §4: bad Host 400, bad Origin 403, no session 401, no detail; the rest of /m/api 404 with one")
+        print("ok  §4: bad Host 400, bad Origin 403, no session 401, no detail; with one, "
+              "P-3's reads answer and the rest of /m/api is 404")
 
     def test_is_remote_owner_items(self):
         a = self.pair()

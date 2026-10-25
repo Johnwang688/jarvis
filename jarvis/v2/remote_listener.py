@@ -27,8 +27,10 @@ nothing else (`ROUTES`, `ASSETS`, `ICONS`, `API_PREFIX`):
   - `/m/api/...`: `remote_auth.api_route` (P-2). Four routes need no
     session (`POST /m/api/pair/options`, `pair/verify`, `login/options`,
     `login/verify`); `POST /m/api/logout` and `GET /m/api/me` need one;
-    anything else is 401 without a session and 404 with one. With no
-    `remote_auth` attached, every `/m/api` request is 401.
+    anything else is 401 without a session and, with one, P-3's read API
+    (`remote_api.route`: the reads, the event stream at
+    `/m/api/events`, 404 for anything else). With no `remote_auth`
+    attached, every `/m/api` request is 401.
 
 Everything else is 404. HEAD answers like GET without the body.
 
@@ -307,7 +309,10 @@ ROUTES = {
 
 def _route(handler, path: str):
     if path == API_PREFIX[:-1] or path.startswith(API_PREFIX):
-        status, payload, extra = remote_auth.api_route(handler, path, handler._body_bytes)
+        answer = remote_auth.api_route(handler, path, handler._body_bytes)
+        if answer is None:
+            return None             # the event stream answered on the socket itself
+        status, payload, extra = answer
         return handler._send(status, json.dumps(payload).encode(), "application/json", extra=extra)
     if handler.command not in ("GET", "HEAD"):
         return handler._error(404, "not found")
@@ -493,9 +498,10 @@ def _read_body(handler) -> bytes:
     return data
 
 
-def handler_class(host: str, auth: remote_auth.RemoteAuth | None = None):
+def handler_class(host: str, auth: remote_auth.RemoteAuth | None = None, daemon=None):
     """The remote listener's handler, for exactly one trusted `host`;
-    `auth` holds its passkeys and sessions (None: every `/m/api` is 401)."""
+    `auth` holds its passkeys and sessions (None: every `/m/api` is 401);
+    `daemon` is what P-3's reads read (None: they are 404 once signed in)."""
     origin = "https://" + host
 
     class RemoteHandler(BaseHTTPRequestHandler):
@@ -591,11 +597,12 @@ def handler_class(host: str, auth: remote_auth.RemoteAuth | None = None):
 
     RemoteHandler.remote_host = host
     RemoteHandler.remote_auth = auth
+    RemoteHandler.daemon = daemon
     return RemoteHandler
 
 
 def bind(host: str | None, port: int,
-         auth: remote_auth.RemoteAuth | None = None) -> ThreadingHTTPServer | None:
+         auth: remote_auth.RemoteAuth | None = None, daemon=None) -> ThreadingHTTPServer | None:
     """The remote listener, bound to 127.0.0.1:`port` and not yet serving, or
     None: no host configured (the default: nothing is bound and nothing is
     logged), or the bind failed (logged; the daemon goes on without it).
@@ -604,7 +611,7 @@ def bind(host: str | None, port: int,
     if not host:
         return None
     try:
-        server = ThreadingHTTPServer(("127.0.0.1", port), handler_class(host, auth))
+        server = ThreadingHTTPServer(("127.0.0.1", port), handler_class(host, auth, daemon))
     except Exception as exc:     # noqa: BLE001 — never why the daemon fails
         LOG.warning("Remote listener not started: 127.0.0.1:%s unavailable (%s)", port,
                     type(exc).__name__)
