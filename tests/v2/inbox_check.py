@@ -1,6 +1,14 @@
-"""The owner inbox, IN-0 and IN-2 (docs/plans/2026-10-24-owner-inbox-design.md §9).
+"""The owner inbox, IN-0, IN-2 and IN-3 (docs/plans/2026-10-24-owner-inbox-design.md §9).
 
-Two halves:
+Three parts (the third is `Missed` and `MissedLive`, below):
+
+* **"Denied while you were away"** (IN-3, `inbox.MissedLog`): a timed-out
+  or shut-down ask leaves one record of public `to_json` fields (a private
+  card's, only its private projection's), N asks at shutdown leave N, a
+  write failure never breaks the resolve, the file is bounded and 0600 in a
+  0700 folder, rows sit at rank 8 with code-built title/blocks, answering
+  one is a 400, `inbox_changed` names it with no text, only the last 7 days
+  show, and the file is protected state refused to agent writes.
 
 * **The projection** (`inbox.rows`) over a fake broker, fake sessions and
   fake stores: every source state yields its row and IN-4 rank, ties go to
@@ -52,7 +60,9 @@ SECRET = "SENTINEL-agent-text-7f3a"          # agent-written text; must never re
 # name ids, never it (review of #303: `chat {thread.title or thread.id}`
 # survived every check before this sentinel).
 TITLE = "SENTINEL-thread-title-91c2"
-ROW_ID = re.compile(r"^(appr|q|tq|prop|task):[A-Za-z0-9_:\-]+$")
+ROW_ID = re.compile(r"^(appr|q|tq|prop|task|missed):[A-Za-z0-9_:\-]+$")
+# A "denied while you were away" record's fields (design §3.2), no more.
+MISSED_FIELDS = {"req_id", "tool", "origin", "thread_id", "task_id", "at", "resolution"}
 
 
 def assert_code_built(case, rows):
@@ -483,7 +493,9 @@ class Live(unittest.TestCase):
         self.assertEqual(self.ids(), [f"appr:{req.req_id}"])
         worker.join(5)
         self.assertEqual(out["decision"], Decision.DENY)
-        self.assertEqual(self.ids(), [])
+        # The live row is gone; the "denied while you were away" one (IN-3)
+        # takes its place, and neither takes an answer.
+        self.assertEqual(self.ids(), [f"missed:{req.req_id}"])
         self.call("POST", f"/inbox/appr:{req.req_id}/answer", {"decision": "allow"}, 409)
 
     def test_a_chat_question_answered_here_is_the_answer_typed_there(self):
@@ -693,6 +705,343 @@ class Live(unittest.TestCase):
                     self.assertRegex(i, ROW_ID)
                 self.assertNotIn(SECRET, json.dumps(change))
         self.assertNotIn("inbox_changed", inbox.SOURCE_KINDS, "the inbox never answers itself")
+
+
+# -- IN-3: "denied while you were away" ------------------------------------------------
+
+class Clock:
+    def __init__(self, at="2026-10-25T12:00:00+00:00"):
+        from datetime import datetime
+        self.now = datetime.fromisoformat(at)
+
+    def __call__(self):
+        return self.now
+
+    def advance(self, **delta):
+        from datetime import timedelta
+        self.now += timedelta(**delta)
+
+
+def lines_of(path):
+    return [json.loads(line) for line in Path(path).read_text().splitlines()]
+
+
+def mode(path):
+    return os.stat(path).st_mode & 0o777
+
+
+class Missed(unittest.TestCase):
+    """`MissedLog` and the `missed` rows, over a temp data root and a fake clock."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.clock = Clock()
+        self.log = inbox.MissedLog(self.root, clock=self.clock)
+
+    def daemon(self, **kw):
+        d = fake_daemon(**kw)
+        d.inbox = SimpleNamespace(missed=self.log)
+        return d
+
+    def test_a_record_holds_public_fields_only(self):
+        r = request("PUBa1", asked_at="2026-10-25T11:58:00+00:00", task_id="tk000001",
+                    origin=f'task tk000001 "{SECRET}"', headline=SECRET)
+        self.assertTrue(self.log.record(r, "timeout"))
+        (rec,) = lines_of(self.log.path)
+        self.assertEqual(set(rec), MISSED_FIELDS)
+        self.assertEqual(rec, {"req_id": "PUBa1", "tool": "Bash", "origin": f'task tk000001 "{SECRET}"',
+                               "thread_id": "th000001", "task_id": "tk000001",
+                               "at": "2026-10-25T12:00:00+00:00", "resolution": "timeout"})
+        # Not the command, its arguments, its reason or headline: no card text.
+        text = self.log.path.read_text()
+        self.assertEqual(text.count(SECRET), 1, "only the origin's attribution, nothing of the card")
+
+    def test_a_private_card_records_only_its_private_fields(self):
+        r = request("PRIVa1", asked_at="2026-10-25T11:58:00+00:00", private=True, tool="hud_browser_act",
+                    task_id="tk000002", origin=f'task tk000002 "{SECRET}"', headline=SECRET)
+        r._hud_private = True
+        self.assertTrue(self.log.record(r, "shutdown"))
+        (rec,) = lines_of(self.log.path)
+        self.assertEqual(rec, {"req_id": "PRIVa1", "tool": "hud_browser_act", "origin": "",
+                               "thread_id": "th000001", "task_id": None,
+                               "at": "2026-10-25T12:00:00+00:00", "resolution": "shutdown"})
+        text = self.log.path.read_text()
+        for leak in (SECRET, "tk000002", "https://"):
+            self.assertNotIn(leak, text)
+        (row,) = inbox.rows(self.daemon())
+        self.assertEqual((row["origin"], row["task_id"], row["project_id"]), ("", None, None))
+        self.assertNotIn(SECRET, json.dumps(row))
+        self.assertNotIn("tk000002", json.dumps(row))
+
+    def test_only_timeout_and_shutdown_are_recorded(self):
+        for resolution in ("deny", "allow", "approved-always", "cancelled", "nowhere-to-ask",
+                           "invalid-timeout", "", "TIMEOUT"):
+            with self.subTest(resolution=resolution):
+                self.assertFalse(self.log.record(request("R1", asked_at=utcnow()), resolution))
+        self.assertFalse(self.log.path.exists())
+        # Never admitted (a closed broker's ask has no id): no waiter ended.
+        self.assertFalse(self.log.record(request("", asked_at=""), "shutdown"))
+        self.assertFalse(self.log.path.exists())
+
+    def test_the_file_keeps_the_newest_500(self):
+        self.assertEqual(inbox.MISSED_KEEP, 500)
+        for i in range(inbox.MISSED_KEEP + 7):
+            self.assertTrue(self.log.record(request(f"B{i:04d}", asked_at=utcnow()), "timeout"))
+        recs = lines_of(self.log.path)
+        self.assertEqual(len(recs), inbox.MISSED_KEEP)
+        self.assertEqual((recs[0]["req_id"], recs[-1]["req_id"]), ("B0007", "B0506"))
+        self.assertEqual(mode(self.log.path), 0o600, "the rewrite keeps the file private")
+        self.assertEqual(len(inbox.rows(self.daemon())), inbox.MISSED_KEEP)
+        # No temp file left beside it.
+        self.assertEqual(sorted(p.name for p in self.log.dir.iterdir()), ["missed.jsonl"])
+
+    def test_a_torn_last_line_is_dropped_never_glued_onto(self):
+        self.log.record(request("T1", asked_at=utcnow()), "timeout")
+        with open(self.log.path, "ab") as f:
+            f.write(b'{"req_id":"T2","tool":"Ba')          # a crash mid-append
+        self.assertEqual([r["id"] for r in inbox.rows(self.daemon())], ["missed:T1"])
+        self.log.record(request("T3", asked_at=utcnow()), "timeout")
+        self.assertEqual([r["req_id"] for r in lines_of(self.log.path)], ["T1", "T3"])
+
+    def test_modes_are_0600_and_0700_whatever_the_umask_or_what_was_there(self):
+        old = os.umask(0)
+        try:
+            self.log.record(request("M1", asked_at=utcnow()), "timeout")
+        finally:
+            os.umask(old)
+        self.assertEqual((mode(self.log.dir), mode(self.log.path)), (0o700, 0o600))
+        os.chmod(self.log.dir, 0o755)
+        os.chmod(self.log.path, 0o644)
+        self.log.record(request("M2", asked_at=utcnow()), "timeout")
+        self.assertEqual((mode(self.log.dir), mode(self.log.path)), (0o700, 0o600), "tightened when found wider")
+
+    def test_a_symlinked_folder_or_file_is_refused(self):
+        elsewhere = self.root / "elsewhere"
+        elsewhere.mkdir()
+        self.log.dir.symlink_to(elsewhere, target_is_directory=True)
+        self.assertFalse(self.log.record(request("S1", asked_at=utcnow()), "timeout"))
+        self.assertEqual(list(elsewhere.iterdir()), [])
+        self.log.dir.unlink()
+        self.log.dir.mkdir(mode=0o700)
+        target = self.root / "target.jsonl"
+        target.write_text("")
+        self.log.path.symlink_to(target)
+        self.assertFalse(self.log.record(request("S2", asked_at=utcnow()), "timeout"))
+        self.assertEqual(target.read_text(), "")
+        self.assertEqual(self.log.recent(), [])
+
+    def test_rows_sit_at_rank_8_with_code_built_title_and_blocks(self):
+        chat = Thread(title=TITLE, id="th000001", project_id="p1", role=Role.CHAT, provider=PN.CODEX)
+        self.log.record(request("RW1", asked_at=utcnow(), origin=f'task tk000003 "{SECRET}"',
+                                task_id="tk000003"), "timeout")
+        self.clock.advance(seconds=5)
+        self.log.record(request("RW2", asked_at=utcnow(), origin=TITLE), "shutdown")
+        d = self.daemon(threads=[chat], tasks=[task("ffff0001", TaskState.FAILED,
+                                                    updated="2026-10-25T12:00:02+00:00")])
+        got = inbox.rows(d)
+        self.assertEqual([(r["id"], r["kind"], r["rank"]) for r in got],
+                         [("missed:RW1", "missed", 8), ("task:ffff0001", "task", 8),
+                          ("missed:RW2", "missed", 8)], "rank 8, ties to the older item")
+        one, two = got[0], got[2]
+        self.assertEqual(one["title"], "Denied while you were away: Bash")
+        self.assertEqual(one["blocks"], "task tk000003 was denied it: nobody answered in time")
+        self.assertEqual(two["blocks"], "chat th000001 was denied it: Jarvis stopped before you answered")
+        self.assertEqual((one["thread_id"], one["task_id"], one["project_id"], one["expires_at"]),
+                         ("th000001", "tk000003", None, None))
+        self.assertEqual(one["asked_at"], "2026-10-25T12:00:00+00:00")
+        self.assertEqual(one["origin"], f'task tk000003 "{SECRET}"')
+        self.assertEqual(set(one["detail"]), MISSED_FIELDS)
+        for row in got:
+            self.assertRegex(row["id"], ROW_ID)
+        assert_code_built(self, got)
+        # A tool name cannot fake a second line in a title either.
+        self.log.record(request("RW3", asked_at=utcnow(), tool="Bash\nAPPROVED‮"), "timeout")
+        row = next(r for r in inbox.rows(d) if r["id"] == "missed:RW3")
+        self.assertNotIn("\n", row["title"])
+        self.assertNotIn("‮", row["title"])
+
+    def test_only_the_last_7_days_show(self):
+        self.assertEqual(inbox.MISSED_WINDOW.days, 7)
+        self.log.record(request("W1", asked_at=utcnow()), "timeout")
+        self.clock.advance(days=3)
+        self.log.record(request("W2", asked_at=utcnow()), "timeout")
+        ids = lambda: [r["id"] for r in inbox.rows(self.daemon())]  # noqa: E731
+        self.clock.advance(days=3, hours=23, minutes=59)
+        self.assertEqual(ids(), ["missed:W1", "missed:W2"])
+        self.clock.advance(minutes=2)
+        self.assertEqual(ids(), ["missed:W2"], "older than 7 days leaves the list")
+        self.assertEqual(len(lines_of(self.log.path)), 2, "the window hides; the bound trims")
+        self.clock.advance(days=3, minutes=1)
+        self.assertEqual(ids(), [])
+
+    def test_malformed_lines_are_never_rows(self):
+        self.log.record(request("G1", asked_at=utcnow()), "timeout")
+        good = {"req_id": "G2", "tool": "Bash", "origin": "", "thread_id": None, "task_id": None,
+                "at": "2026-10-25T12:00:00+00:00", "resolution": "timeout"}
+        bad = ["not json", "[]", json.dumps({**good, "req_id": "a b"}), json.dumps({**good, "req_id": 7}),
+               json.dumps({**good, "resolution": "allow"}), json.dumps({**good, "at": "yesterday"}),
+               json.dumps({**good, "req_id": "x" * 65})]
+        with open(self.log.path, "a") as f:
+            f.write("\n".join(bad + [json.dumps(good)]) + "\n")
+        self.assertEqual([r["id"] for r in inbox.rows(self.daemon())], ["missed:G1", "missed:G2"])
+
+    def test_a_daemon_without_the_log_has_no_missed_rows(self):
+        self.assertEqual(inbox.rows(fake_daemon()), [])
+
+    def test_the_file_is_protected_state_refused_to_agent_writes(self):
+        from jarvis import permissions as v1_permissions, rules
+        from jarvis.tools import files
+        from jarvis.v2 import permissions as v2_permissions
+        data = self.root / "v2data"
+        with patch.object(config, "V2_DATA_DIR", data), \
+                patch.object(config, "ALLOWLIST_PATH", self.root / "cfg" / "allowlist.json"):
+            target = data / "inbox" / "missed.jsonl"
+            self.assertIn(target.resolve(), files._protected_state())
+            self.assertIn(target.resolve(), v2_permissions.protected_paths())
+            self.assertTrue(files._self_protected(target))
+            self.assertTrue(v2_permissions.denied_file(str(target)))
+            for command in (f"echo x > {target}", f"cp /tmp/x {target}", f"rm {target}", f": > {target}"):
+                with self.subTest(command=command):
+                    self.assertNotEqual(v1_permissions.static_verdict(command).decision, rules.ALLOW)
+                    self.assertTrue(v2_permissions._command_writes_protected_state(command))
+            # Deleting the folder that holds it is no free pass either (the
+            # shell gate's ancestor rule; as for the speaker files).
+            for command in (f"rm -rf {target.parent}", f"cd {data} && rm -rf inbox"):
+                with self.subTest(command=command):
+                    self.assertNotEqual(v1_permissions.static_verdict(command).decision, rules.ALLOW)
+            self.assertIsNone(v2_permissions._command_writes_protected_state(f"cat {target}"),
+                              "reading it is not writing it")
+            # Its siblings stay ordinary.
+            self.assertFalse(files._self_protected(data / "inbox" / "notes.txt"))
+
+
+class MissedLive(unittest.TestCase):
+    """IN-3 on a real daemon: the broker's own timeout and shutdown paths.
+    `Live`'s daemon and wire helpers, without re-running its tests."""
+
+    setUp, call, ids, ask, spy = Live.setUp, Live.call, Live.ids, Live.ask, Live.spy
+
+    def missed_file(self):
+        return self.stores.root / "inbox" / "missed.jsonl"
+
+    def test_a_timed_out_ask_leaves_one_record_and_names_it_in_inbox_changed(self):
+        req, out, worker = self.ask(thread_id="th-t1", task_id="tk-live1", max_wait_s=0.3,
+                                    origin='task tk-live1 "x"', reason=SECRET, headline=SECRET)
+        worker.join(5)
+        self.assertEqual(out["decision"], Decision.DENY)
+        (rec,) = lines_of(self.missed_file())
+        self.assertEqual(set(rec), MISSED_FIELDS)
+        self.assertEqual({k: rec[k] for k in ("req_id", "tool", "origin", "thread_id", "task_id", "resolution")},
+                         {"req_id": req.req_id, "tool": "Bash", "origin": 'task tk-live1 "x"',
+                          "thread_id": "th-t1", "task_id": "tk-live1", "resolution": "timeout"})
+        self.assertNotIn(SECRET, self.missed_file().read_text())
+        self.assertNotIn("make deploy", self.missed_file().read_text())
+        self.assertEqual((mode(self.missed_file().parent), mode(self.missed_file())), (0o700, 0o600))
+        rid, mid = f"appr:{req.req_id}", f"missed:{req.req_id}"
+        # One inbox_changed names the swap, and the projection at that moment
+        # already holds the record and no longer the card.
+        naming = [(ids, then) for ids, then in self.seen_at_change if mid in ids]
+        self.assertEqual(len(naming), 1, self.seen_at_change)
+        ids, rows_then = naming[0]
+        self.assertEqual(ids, sorted([rid, mid]))
+        self.assertIn(mid, rows_then)
+        self.assertNotIn(rid, rows_then)
+        change = next(c for c in self.changes if mid in c["data"]["ids"])
+        self.assertEqual(set(change), {"kind", "data"})
+        self.assertEqual(set(change["data"]), {"ids", "reason"})
+        self.assertEqual(change["data"]["reason"], "approval_resolved")
+        self.assertIn(change["data"]["reason"], inbox.SOURCE_KINDS)
+        self.assertNotIn(SECRET, json.dumps(change))
+        (row,) = self.call("GET", "/inbox")
+        self.assertEqual((row["id"], row["kind"], row["rank"]), (mid, "missed", 8))
+        self.assertEqual(row["title"], "Denied while you were away: Bash")
+        self.assertEqual(row["blocks"], "task tk-live1 was denied it: nobody answered in time")
+
+    def test_a_private_card_records_only_its_private_fields(self):
+        req, out, worker = self.ask(thread_id="th-p1", task_id="tk-priv1", hud_only=True, tool="hud_browser_act",
+                                    origin=f'task tk-priv1 "{SECRET}"', browser={"url": "https://" + SECRET},
+                                    max_wait_s=0.3)
+        worker.join(5)
+        (rec,) = lines_of(self.missed_file())
+        self.assertEqual(set(rec), MISSED_FIELDS)
+        self.assertEqual((rec["origin"], rec["task_id"], rec["thread_id"], rec["tool"]),
+                         ("", None, "th-p1", "hud_browser_act"))
+        for leak in (SECRET, "tk-priv1", "https://", "make deploy"):
+            self.assertNotIn(leak, self.missed_file().read_text())
+        (row,) = self.call("GET", "/inbox")
+        self.assertEqual((row["origin"], row["task_id"], row["project_id"]), ("", None, None))
+        self.assertNotIn(SECRET, json.dumps(row))
+
+    def test_a_shutdown_with_five_asks_leaves_five(self):
+        asks = [self.ask(thread_id=f"th-s{i}") for i in range(5)]
+        self.daemon.approvals.shutdown()
+        for _, out, worker in asks:
+            worker.join(5)
+            self.assertEqual(out["decision"], Decision.DENY)
+        recs = lines_of(self.missed_file())
+        self.assertEqual(len(recs), 5)
+        self.assertEqual({r["req_id"] for r in recs}, {req.req_id for req, _, _ in asks})
+        self.assertEqual({r["resolution"] for r in recs}, {"shutdown"})
+        rows = self.call("GET", "/inbox")
+        self.assertEqual(sorted(r["id"] for r in rows), sorted(f"missed:{req.req_id}" for req, _, _ in asks))
+        self.assertTrue(all(r["blocks"].endswith("Jarvis stopped before you answered") for r in rows))
+
+    def test_an_answered_or_denied_ask_leaves_nothing(self):
+        req, out, worker = self.ask(thread_id="th-d1")
+        self.call("POST", f"/inbox/appr:{req.req_id}/answer", {"decision": "deny"})
+        worker.join(5)
+        req2, out2, worker2 = self.ask(thread_id="th-d2")
+        self.daemon.approvals.resolve(req2.req_id, Decision.ALLOW)
+        worker2.join(5)
+        self.assertFalse(self.missed_file().exists())
+        self.assertEqual(self.ids(), [])
+
+    def test_answering_one_is_a_400_with_nothing_to_answer(self):
+        req, out, worker = self.ask(thread_id="th-a1", max_wait_s=0.3)
+        worker.join(5)
+        mid = f"missed:{req.req_id}"
+        calls = self.spy("resolve_approval")
+        for body in ({}, {"decision": "allow"}, {"text": "again"}, {"withdraw": True}):
+            with self.subTest(body=body):
+                got = self.call("POST", f"/inbox/{mid}/answer", body, 400)
+                self.assertIn("takes no answer", json.dumps(got))
+        from urllib.parse import quote
+        self.call("POST", f"/inbox/{quote(mid, safe='')}/answer", {}, 400)
+        self.assertEqual(calls, [])
+        self.assertEqual(self.ids(), [mid], "still there: nothing was answered or dismissed")
+        self.call("POST", f"/inbox/missed:{req.req_id}", {}, 404)
+
+    def test_a_write_failure_never_breaks_the_resolve(self):
+        published = []
+        self.daemon.bus.observe(lambda r: published.append(r) if r.get("kind") == "approval_resolved" else None)
+        # The folder is a file: every write fails.
+        self.stores.root.mkdir(parents=True, exist_ok=True)
+        (self.stores.root / "inbox").write_text("not a folder")
+        req, out, worker = self.ask(thread_id="th-f1", max_wait_s=0.3)
+        worker.join(5)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(out["decision"], Decision.DENY)
+        self.assertEqual([p["data"]["req_id"] for p in published], [req.req_id], "the resolve was still published")
+        self.assertEqual(self.daemon.approvals.decisions[-1]["resolution"], "timeout")
+        self.assertEqual(self.ids(), [])
+        self.assertFalse(any(f"missed:{req.req_id}" in c["data"]["ids"] for c in self.changes),
+                         "no row named that was never written")
+        (self.stores.root / "inbox").unlink()
+        # A write that raises inside the log, and a log that raises outright.
+        for target, name in ((inbox.MissedLog, "_append"), (inbox.MissedLog, "record")):
+            with self.subTest(fails=name), patch.object(target, name, side_effect=PermissionError("no")):
+                req, out, worker = self.ask(thread_id="th-f2", max_wait_s=0.3)
+                worker.join(5)
+                self.assertEqual(out["decision"], Decision.DENY)
+                self.assertIn(req.req_id, [p["data"]["req_id"] for p in published])
+        self.assertFalse(self.missed_file().exists())
+        # And once the folder is writable again, the next one is recorded.
+        req, out, worker = self.ask(thread_id="th-f3", max_wait_s=0.3)
+        worker.join(5)
+        self.assertEqual([r["req_id"] for r in lines_of(self.missed_file())], [req.req_id])
+
 
 
 if __name__ == "__main__":

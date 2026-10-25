@@ -1,4 +1,5 @@
-// The owner inbox, the HUD's half (inbox A2; design
+// The owner inbox, the HUD's half (inbox A2, and A3's "denied while you were
+// away" rows; design
 // docs/plans/2026-10-24-owner-inbox-design.md §7, the daemon's half in
 // jarvis/v2/inbox.py and docs/notes/control-plane.md "The owner inbox routes").
 //
@@ -14,7 +15,7 @@
 // (bidi overrides, zero-widths) that could make one line read as another.
 
 export interface InboxRow {
-  /** Kind prefix + the source's own id: `appr:…`, `q:…`, `tq:…`, `prop:…`, `task:…`. */
+  /** Kind prefix + the source's own id: `appr:…`, `q:…`, `tq:…`, `prop:…`, `task:…`, `missed:…`. */
   id: string;
   kind: string;
   /** IN-4's band, 1 to 8. */
@@ -157,11 +158,34 @@ export function withdrawHint(row: InboxRow, now: number): "open" | "closing" {
   return until !== null && now >= until - CLOSING_MS ? "closing" : "open";
 }
 
-/** Where a row's link goes: its thread when it has one (the pane the item belongs to), else its task. */
+/** The "denied while you were away" kind (inbox A3, IN-3): information only. */
+export const MISSED = "missed";
+
+/**
+ * Where a row's link goes: its thread when it has one (the pane the item
+ * belongs to), else its task. A "denied while you were away" row links to its
+ * chat only (design §10, question 3): no "ask again", and no task link.
+ */
 export function linkOf(row: InboxRow): { kind: "thread" | "task"; id: string } | null {
   if (row.thread_id) return { kind: "thread", id: row.thread_id };
+  if (row.kind === MISSED) return null;
   if (row.task_id) return { kind: "task", id: row.task_id };
   return null;
+}
+
+/**
+ * What a "denied while you were away" row says under its title, chosen by
+ * code from its `resolution` (never the served words): why it was denied, and
+ * that asking again is its chat's to do. Null for any other kind.
+ */
+export function missedNote(row: InboxRow): { why: string; next: string } | null {
+  if (row.kind !== MISSED) return null;
+  const why = row.detail.resolution === "timeout"
+    ? "Nobody answered in time, so it was denied."
+    : row.detail.resolution === "shutdown"
+      ? "Jarvis stopped before you answered, so it was denied."
+      : "It was denied without an answer.";
+  return { why, next: row.thread_id ? "To try it again, ask from its chat." : "Its chat is not known." };
 }
 
 /** The approval request id an `appr:` row is about (its `detail` is `ApprovalRequest.to_json()`). */

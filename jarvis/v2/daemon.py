@@ -2093,6 +2093,13 @@ class Daemon:
                           "data": request.to_json()})
 
     def _approval_resolved(self, request: ApprovalRequest, decision, resolution: str) -> None:
+        # Inbox IN-3: a `timeout` or `shutdown` leaves a "denied while you
+        # were away" record (public `to_json` fields only), written before
+        # the publish so the `inbox_changed` it causes can name the new row.
+        # It never raises, and the broker has already settled the deny.
+        inbox = getattr(self, "inbox", None)
+        if inbox is not None:
+            inbox.approval_ended(request, resolution)
         if request.private:
             self.bus.publish({"kind": "approval_resolved", "thread_id": request.thread_id,
                               "data": {"req_id": request.req_id, "code": request.code,

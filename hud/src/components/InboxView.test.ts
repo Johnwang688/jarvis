@@ -1,7 +1,8 @@
 // The inbox view (inbox A2): groups in rank order, empty ones hidden; an
 // approval row is never a second card; untrusted text stays text; a click on a
 // row answers nothing; Answer and Withdraw post once; a 409 says so and reads
-// again; Withdraw goes when its window closes; under a card nothing posts.
+// again; Withdraw goes when its window closes; under a card nothing posts; a
+// "denied while you were away" row (A3) is information with its chat link only.
 
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -247,6 +248,62 @@ describe("InboxView", () => {
     host!.remove();
     draw({ snapshot: { rows: [], status: "unavailable", message: "route not found", reads: 1 } });
     expect(q('[data-testid="inbox-unavailable"]')!.textContent).toContain("route not found");
+  });
+
+  // Inbox A3 (IN-3): "denied while you were away", rank 8, information only.
+  const missedRow = (over: Record<string, unknown> = {}) => ({
+    id: "missed:M1", kind: "missed", rank: 8, title: "Denied while you were away: run_command",
+    blocks: "task k7 was denied it: nobody answered in time", thread_id: "t9", task_id: "k7",
+    asked_at: "2026-10-25T09:00:00+00:00", origin: "Codex · task " + HOSTILE,
+    detail: { req_id: "M1", tool: "run_command", origin: "Codex · task " + HOSTILE, thread_id: "t9",
+              task_id: "k7", at: "2026-10-25T09:00:00+00:00", resolution: "timeout" },
+    ...over,
+  });
+
+  it("a missed row sits under 'For your information', says why in code's words, and offers only its chat", () => {
+    const p = draw({ snapshot: snap([...served(), missedRow()]) });
+    const fyi = q('[data-testid="inbox-group-fyi"]')!;
+    expect(Array.from(fyi.querySelectorAll('[data-testid="inbox-row"]')).map((r) => (r as HTMLElement).dataset.id))
+      .toEqual(["task:f", "missed:M1"]);
+    const r = rowOf("missed:M1");
+    expect(r.dataset.tone).toBe("plain");
+    expect(r.querySelector('[data-testid="inbox-title"]')!.textContent).toBe("Denied while you were away: run_command");
+    expect(r.querySelector('[data-testid="inbox-blocks"]')!.textContent).toBe("task k7 was denied it: nobody answered in time");
+    expect(r.querySelector('[data-testid="inbox-missed-why"]')!.textContent).toBe("Nobody answered in time, so it was denied.");
+    expect(r.querySelector('[data-testid="inbox-missed-next"]')!.textContent).toBe("To try it again, ask from its chat.");
+    // No answer box, no Withdraw, no "ask again": its one control is the link.
+    expect(Array.from(r.querySelectorAll("button, input, textarea")).map((b) => (b as HTMLElement).dataset.testid))
+      .toEqual(["inbox-link"]);
+    expect(r.textContent).not.toMatch(/ask again|retry/i);
+    // Not counted: the summary still counts the three waiting rows only.
+    expect(q('[data-testid="inbox-summary"]')!.textContent).toBe("3 waiting on you");
+    const link = r.querySelector('[data-testid="inbox-link"]') as HTMLButtonElement;
+    expect(link.textContent).toBe("Open its chat");
+    act(() => link.click());
+    expect(p.onOpenThread).toHaveBeenCalledWith("t9");
+    expect(p.onOpenTask).not.toHaveBeenCalled();
+    expect(p.onAnswer).not.toHaveBeenCalled();
+    act(() => r.click());
+    expect(p.onAnswer).not.toHaveBeenCalled();
+  });
+
+  it("a missed row's untrusted text is text, and its words never come from the served detail", () => {
+    draw({ snapshot: snap([missedRow({ title: "Denied while you were away: " + HOSTILE,
+      detail: { ...missedRow().detail, resolution: HOSTILE, tool: HOSTILE } })]) });
+    const r = rowOf("missed:M1");
+    expect(host!.querySelectorAll("img").length).toBe(0);
+    expect((window as any).__pwned).toBeUndefined();
+    expect(r.querySelector('[data-testid="inbox-origin"]')!.textContent).toBe("Codex · task " + HOSTILE);
+    expect(r.querySelector('[data-testid="inbox-title"]')!.textContent).toBe("Denied while you were away: " + HOSTILE);
+    expect(r.querySelector('[data-testid="inbox-missed-why"]')!.textContent).toBe("It was denied without an answer.");
+  });
+
+  it("a missed row with no chat has no link, not even to its task", () => {
+    draw({ snapshot: snap([missedRow({ thread_id: null })]) });
+    const r = rowOf("missed:M1");
+    expect(r.querySelector('[data-testid="inbox-link"]')).toBeNull();
+    expect(r.querySelectorAll("button").length).toBe(0);
+    expect(r.querySelector('[data-testid="inbox-missed-next"]')!.textContent).toBe("Its chat is not known.");
   });
 
   it("reads the inbox when it is shown, and never touches the title", () => {

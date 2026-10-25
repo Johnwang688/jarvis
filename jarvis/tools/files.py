@@ -230,6 +230,15 @@ def _protected_state_paths() -> set[Path]:
     # own. Their folder is an ancestor, so deleting it is covered too.
     remote = Path(config.V2_DATA_DIR).expanduser() / "remote"
     paths |= {remote / "passkeys.json", remote / "sessions.json"}
+    # The owner inbox's "denied while you were away" records (inbox IN-3,
+    # 2026-10-25), under the v2 data root: what the owner is told was refused
+    # while nobody watched. An agent that could forge or clear them could
+    # hide that, so they are the owner's state, written by the daemon only.
+    # The folder itself is named too, so moving, replacing or re-moding it
+    # is judged as a write to it (deleting it was already covered as an
+    # ancestor). A whole-tree rule is a follow-up before IN-5 adds more.
+    inbox = Path(config.V2_DATA_DIR).expanduser() / "inbox"
+    paths |= {inbox, inbox / "missed.jsonl"}
     return paths
 
 

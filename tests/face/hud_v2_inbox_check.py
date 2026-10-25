@@ -31,6 +31,11 @@ What it pins, one section each (each names the mutation it is meant to catch):
             its thread or its task [row onClick answers]
   hostile   `<img onerror>` in `origin`, in question text and in a brief makes
             no element and runs nothing [innerHTML / Markdown]
+  missed    inbox A3's "denied while you were away" rows sit under "For your
+            information", uncounted, say why in the HUD's own words, offer
+            only "Open its chat" (none without a chat; no "ask again"), show
+            a hostile origin as text, and their link opens the chat
+            [count them; an ask-again button; innerHTML]
   card      the approval card with the Inbox open behaves exactly as it does
             with a chat pane (the same assertions, the same answers): one card,
             the veil's, never a second instance in the inbox; Enter does
@@ -128,6 +133,17 @@ def appr_row(c: dict) -> dict:
             "blocks": "chat t1 waits on this", "project_id": None if private else "p1", "thread_id": "t1",
             "task_id": None, "asked_at": c["asked_at"], "expires_at": _iso(120),
             "origin": "" if private else c.get("origin", ""), "detail": c}
+
+
+def missed_row(req="m1", thread="t1", task=None, resolution="timeout", origin="", tool="run_command"):
+    """A "denied while you were away" row as inbox A3's projection serves it."""
+    who = f"task {task}" if task else f"chat {thread}"
+    why = "nobody answered in time" if resolution == "timeout" else "Jarvis stopped before you answered"
+    return {"id": f"missed:{req}", "kind": "missed", "rank": 8,
+            "title": f"Denied while you were away: {tool}", "blocks": f"{who} was denied it: {why}",
+            "project_id": None, "thread_id": thread, "task_id": task, "asked_at": _iso(-600), "expires_at": None,
+            "origin": origin, "detail": {"req_id": req, "tool": tool, "origin": origin, "thread_id": thread,
+                                         "task_id": task, "at": _iso(-600), "resolution": resolution}}
 
 
 def basic_rows():
@@ -455,6 +471,54 @@ def _hostile_checks(page, mock, check, until):
     check("the title is unchanged by any of it", page.title() == TITLE, page.title())
 
 
+def _missed_checks(page, mock, check, until):
+    """Inbox A3 (IN-3): "denied while you were away" rows."""
+    rows = basic_rows() + [missed_row(task="k3", origin="Codex · task ‹" + HOSTILE + "›"),
+                           missed_row("m2", resolution="shutdown"), missed_row("m3", thread=None, task="k4")]
+    _open(page, mock, until, rows)
+    fyi = page.evaluate("() => [...document.querySelectorAll('[data-testid=\"inbox-group-fyi\"] "
+                        "[data-testid=\"inbox-row\"]')].map(r => r.dataset.id)")
+    check("missed rows sit under 'For your information' beside the failed task, in the daemon's order",
+          fyi == ["task:kf", "missed:m1", "missed:m2", "missed:m3"], str(fyi))
+    check("they are not counted: the count stays at ranks 1 to 5 [mutation: count missed rows]",
+          _count(page) == "3", str(_count(page)))
+    m1, m2, m3 = _row(page, "missed:m1"), _row(page, "missed:m2"), _row(page, "missed:m3")
+    border = m1.evaluate("e => getComputedStyle(e).borderLeftColor")
+    check("a missed row is neither amber, red nor the selection cyan",
+          border not in (AMBER, RED, "rgb(111, 195, 223)"), border)
+    check("its title and line are the daemon's code-built ones",
+          m1.locator('[data-testid="inbox-title"]').inner_text() == "Denied while you were away: run_command"
+          and m1.locator('[data-testid="inbox-blocks"]').inner_text() == "task k3 was denied it: nobody answered in time")
+    check("it says why in the HUD's own words, by resolution",
+          m1.locator('[data-testid="inbox-missed-why"]').inner_text() == "Nobody answered in time, so it was denied."
+          and m2.locator('[data-testid="inbox-missed-why"]').inner_text()
+          == "Jarvis stopped before you answered, so it was denied.")
+    controls = m1.evaluate("e => [...e.querySelectorAll('button, input, textarea, a')].map(b => b.dataset.testid)")
+    check("its one control is 'Open its chat': no answer box, no Withdraw, no 'ask again' [mutation: an ask-again "
+          "button]", controls == ["inbox-link"] and m1.locator('[data-testid="inbox-link"]').inner_text() == "Open its chat"
+          and "again" not in m1.locator('[data-testid="inbox-link"]').inner_text().lower(), str(controls))
+    check("one with no chat has no link at all, not even to its task",
+          m3.locator("button").count() == 0, str(m3.locator("button").count()))
+    imgs = page.evaluate("() => document.querySelectorAll('[data-testid=\"inbox-view\"] img').length")
+    check("its origin is literal text: no element made, nothing ran [mutation: innerHTML]",
+          imgs == 0 and page.evaluate("window.__pwned === undefined")
+          and HOSTILE in m1.locator('[data-testid="inbox-origin"]').inner_text(), str(imgs))
+    posts = len(_answers(mock))
+    for r in (m1, m2, m3):
+        r.click(position={"x": 4, "y": 4})
+        r.locator('[data-testid="inbox-title"]').click()
+        r.locator('[data-testid="inbox-missed-why"]').click()
+    time.sleep(0.3)
+    check("a click anywhere on it posts nothing and opens nothing",
+          len(_answers(mock)) == posts and page.locator(_pane(1)).get_attribute("data-view") == "inbox")
+    m2.locator('[data-testid="inbox-link"]').click()
+    until(lambda: page.locator(_pane(1)).get_attribute("data-view") == "chat", timeout=3)
+    until(lambda: page.evaluate("window.__hud.state().chats['1'].threadId") == "t1", timeout=3)
+    check("its link opens its chat, and answers nothing",
+          page.evaluate("window.__hud.state().chats['1'].threadId") == "t1" and len(_answers(mock)) == posts)
+    check("the title is unchanged", page.title() == TITLE, page.title())
+
+
 def _card_observe(page, mock, until, prefix, with_rows: bool):
     """Run the card's own assertions (tests/face/hud_v2_check.py `approval_checks`)
     and return what was seen, so the inbox's run can be compared with the chat
@@ -700,7 +764,7 @@ def _older_checks(page, mock, check, until):
 # ---------------------------------------------------------------------------
 
 SECTIONS = (_sidebar_checks, _groups_checks, _live_checks, _answer_checks, _conflict_checks, _withdraw_checks,
-            _reconnect_checks, _clicks_checks, _hostile_checks, _card_checks, _older_checks)
+            _reconnect_checks, _clicks_checks, _hostile_checks, _missed_checks, _card_checks, _older_checks)
 
 
 def inbox_checks(browser, mock, base, check, until, guard, init_script):
