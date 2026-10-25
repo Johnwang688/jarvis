@@ -256,3 +256,46 @@ it is one constructor argument: drop `remote=` from the `ApprovalBroker` in
 `face/server.py`.
 
 <!-- claude-source:008689-008731:end -->
+
+## Shutdown releases approvals before Discord stops (2026-10-25)
+
+A3 (#307) made `Daemon.stop()` deny every pending ask with resolution
+`shutdown`, but daemon2's `main()` stopped Discord (gateway, runner,
+Reporter) and the runner first, so the gateway never heard those
+resolutions: approval posts kept their Approve/Deny buttons after Jarvis
+stopped, and the gateway's "Jarvis stopped first, nothing ran" branch never
+ran in production (only `_strip_stale` on the next start removed the
+buttons). The owner approved the fix, accepting a few "stopped first"
+updates on Discord on each restart that has pending asks.
+
+- `main()`'s `finally` is now `daemon.shut_down(daemon, discord, hatch)`:
+  `Daemon.release_approvals()` (deny with `shutdown`, wait at most
+  `RELEASE_WAIT_S` = 2 s for each to be announced), then `discord.stop()`,
+  the runner, the hatch, and `daemon.stop()`, which releases again and finds
+  nothing (idempotent; one `approval_resolved` and one inbox record per
+  ask). A step that raises does not skip `daemon.stop()`.
+- `DiscordRouter.stop()` first `settle()`s: it waits until the approval
+  watcher has handled every record already queued (`task_done`), at most
+  `gateway.SETTLE_S` = 3 s, then closes as before. Measured with fakes:
+  Discord hanging on every channel call, the whole `shut_down` took 5.0 s
+  (settle 3 s plus the watcher join's 2 s); refusing at once, 0.01 s.
+- The update is the existing resolution path: the post's buttons are
+  stripped (an edit) and "Approval `CODE` for `tool`: Jarvis stopped first,
+  nothing ran." is posted. **It never notifies**: `SUPPRESS_NOTIFICATIONS`
+  even in the DM (a timeout line in the DM still notifies, as before), and
+  no ping line follows it.
+- The channel linker keeps a housekeeping ask whose denial came from the
+  shutdown (it is not an answer): it used to tell by its own `_stop`, which
+  is no longer set when the release arrives, so it also reads the daemon's
+  `approvals_released` event, set before the broker's `shutdown()`.
+- Known window: between the release and `runner.stop()` (normally well
+  under a second; at most the two bounds above) a task whose ask was denied
+  can take one more step, as it could before when the deny came last.
+- Tests: `ShutdownOrderChecks` in `tests/v2/discord_commands_check.py`
+  (order recorded, buttons stripped, the silent "stopped first" line in a
+  thread and in the DM, no ping, the post map emptied, no double release, a
+  later ask denied at once, a slow Discord still updating every post, a
+  hanging Discord bounded, a refusing one quick, a failing step not skipping
+  `daemon.stop()`) and two linker cases in `discord_linker_check.py`.
+  Mutations caught: the old order (5 failures), no settle (2), the linker
+  reading only its own `_stop` (1), the DM line not silent (1).

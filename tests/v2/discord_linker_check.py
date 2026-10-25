@@ -997,6 +997,32 @@ class BugbotLinkerChecks(Harness):
             linker._ask_loop()
         self.assertEqual(len(linker._state["asks"]), 1, "a shutdown's deny is not an answer")
 
+    def test_a_deny_after_the_daemon_released_its_asks_keeps_the_ask(self):
+        """The daemon releases its asks before Discord (and this linker)
+        stops (`daemon.shut_down`, 2026-10-25): the linker is still running
+        when the shutdown's deny arrives, so the daemon's flag says so."""
+        linker, channel = self.linked()
+        linker._handle(LifecycleChecks.rename(self, "Homework", "api"))
+        self.daemon.approvals_released = threading.Event()
+
+        def deny_on_release(request):
+            self.daemon.approvals_released.set()
+            return Decision.DENY
+        with patch.object(self.approvals, "ask", side_effect=deny_on_release):
+            linker._jobs.put(None)
+            linker._ask_loop()
+        self.assertFalse(linker._stop.is_set())
+        self.assertEqual(len(linker._state["asks"]), 1, "a shutdown's deny is not an answer")
+
+    def test_an_owner_deny_still_settles_the_ask(self):
+        linker, channel = self.linked()
+        linker._handle(LifecycleChecks.rename(self, "Homework", "api"))
+        self.daemon.approvals_released = threading.Event()
+        with patch.object(self.approvals, "ask", return_value=Decision.DENY):
+            linker._jobs.put(None)
+            linker._ask_loop()
+        self.assertEqual(linker._state["asks"], [], "the owner's deny is an answer")
+
 
 class SetupChecks(Harness):
     def run_setup(self, answers):

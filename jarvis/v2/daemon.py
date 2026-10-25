@@ -546,6 +546,10 @@ class Daemon:
         # (inbox B1, `deliver_queued`): after the owner's queue, never in it.
         self._inbox_queues: dict[str, deque] = {}
         self._stopping = False
+        # Set once shutdown starts releasing the broker's waiters
+        # (`release_approvals`): a "deny" that arrives after it is Jarvis
+        # stopping, not the owner answering (the Discord linker keeps its ask).
+        self.approvals_released = threading.Event()
         self._server = None
         self._server_thread = None
         # Port zero is an isolated embedded/test daemon on three ephemeral ports.
@@ -2891,27 +2895,43 @@ class Daemon:
         LOG.warning("%d approval waiter(s) had not announced their denial at shutdown",
                     len(req_ids - {d.get("req_id") for d in list(decisions) if isinstance(d, dict)}))
 
+    def release_approvals(self, limit: float = RELEASE_WAIT_S) -> int:
+        """Deny every pending ask now, with resolution "shutdown", and wait
+        (bounded by `limit`) until each has been announced. -> how many were
+        released by this call.
+
+        Every pending ask is denied now, not when its timer runs out or the
+        process dies: each waiter returns DENY with resolution "shutdown"
+        (which leaves an inbox "denied while you were away" record, IN-3) and
+        its card is cleared. Outside `self._lock`: the broker's resolve
+        callback publishes. Each released waiter announces on its own thread,
+        so wait until every one has been recorded by the broker: its
+        `approval_resolved` then reached the bus, so every window clears its
+        card and the Discord surface (still running, when `main()` calls this
+        first) strips the post's buttons and says "Jarvis stopped first".
+
+        Idempotent: the broker's `shutdown` is, and a second call finds
+        nothing pending. A later ask is denied at once."""
+        shutdown = getattr(self.approvals, "shutdown", None)
+        if not callable(shutdown):
+            return 0
+        self.approvals_released.set()
+        try:
+            released = {r.req_id for r in self.approvals.pending() if r.req_id}
+        except Exception:  # noqa: BLE001 — nothing to wait for then
+            released = set()
+        shutdown()
+        self._await_announced(released, limit)
+        return len(released)
+
     def stop(self):
         # Before anything else closes: no jarvis-mcp call is answered for a
         # session from here on (plan §1.4).
         self.callers.revoke_all()
-        # Every pending ask is denied now, not when its timer runs out or the
-        # process dies: each waiter returns DENY with resolution "shutdown"
-        # (which leaves an inbox "denied while you were away" record, IN-3)
-        # and its card is cleared. Outside `self._lock`: the broker's resolve
-        # callback publishes. Idempotent; a later ask is denied at once.
-        # Each released waiter announces on its own thread, and the bus closes
-        # further down, so wait (bounded) until every one has been recorded
-        # by the broker: its `approval_resolved` then reached the bus, and
-        # every window clears its card, before the bus closes.
-        shutdown = getattr(self.approvals, "shutdown", None)
-        if callable(shutdown):
-            try:
-                released = {r.req_id for r in self.approvals.pending() if r.req_id}
-            except Exception:  # noqa: BLE001 — nothing to wait for then
-                released = set()
-            shutdown()
-            self._await_announced(released, RELEASE_WAIT_S)
+        # Then every pending ask is denied, before the bus closes further
+        # down. `main()` has normally done this already, before Discord
+        # stopped; then this finds nothing (idempotent).
+        self.release_approvals()
         self.schedules.stop()
         titles = self.titles
         if titles is not None:
@@ -3837,15 +3857,38 @@ def main() -> int:
         print(f"jarvis daemon2: {exc}")
         return 1
     finally:
-        # The gateway first, so no verb arrives at a runner that is stopping;
-        # then the runner, so its workers see interrupted turns rather than a
-        # dead daemon; then the Reporter, flushing within 2 s (all three inside
-        # `discord.stop()`). Nothing is cancelled — a task left RUNNING is
-        # re-admitted by `serve()`'s recovery next boot.
-        if discord is not None:
-            discord.stop()
-        daemon.runner.stop()                    # idempotent if Discord stopped it
-        hatch.stop()
-        daemon.stop()
+        shut_down(daemon, discord, hatch)
         signal.signal(signal.SIGTERM, previous)
     return 0
+
+
+def shut_down(daemon, discord, hatch) -> None:
+    """`main()`'s shutdown order, here so a check can run it with fakes.
+
+    Pending approvals are released first, while every surface still listens:
+    each is denied with resolution "shutdown" and announced (bounded by
+    RELEASE_WAIT_S), and `discord.stop()` lets the gateway finish the post
+    edits those announcements queued (bounded by gateway.SETTLE_S) before it
+    closes, so no approval post keeps live buttons after Jarvis stops.
+
+    Then the gateway, so no verb arrives at a runner that is stopping; then
+    the runner, so its workers see interrupted turns rather than a dead
+    daemon; then the Reporter, flushing within 2 s (all three inside
+    `discord.stop()`). Nothing is cancelled — a task left RUNNING is
+    re-admitted by `serve()`'s recovery next boot. `daemon.stop()` releases
+    again, which finds nothing (idempotent). Each step is bounded, and one
+    that raises does not skip the rest."""
+    try:
+        daemon.release_approvals()
+    except Exception:  # noqa: BLE001 — `daemon.stop()` releases again
+        LOG.warning("pending approvals not released before Discord stopped", exc_info=True)
+    try:
+        if discord is not None:
+            discord.stop()
+        runner = getattr(daemon, "runner", None)
+        if runner is not None:
+            runner.stop()                       # idempotent if Discord stopped it
+        if hatch is not None:
+            hatch.stop()
+    finally:
+        daemon.stop()
