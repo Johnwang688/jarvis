@@ -307,7 +307,11 @@ export const Sidebar = memo(function Sidebar(props: {
         // Space open it; it only opens the view, it answers nothing.
         <button
           type="button"
-          className={"tree-row ownerinbox" + (props.inbox.shown ? " sel" : "")}
+          // The aurora (owner, 2026-10-25; theme.css): this row only, never
+          // the "Inbox" project. Calm with nothing waiting, dimmed and
+          // spark-free while something pending keeps the count amber.
+          className={"tree-row ownerinbox aurora" + (props.inbox.shown ? " sel" : "")}
+          data-aurora={props.inbox.pending ? "pending" : props.inbox.count ? "live" : "calm"}
           data-testid="owner-inbox"
           aria-label={props.inbox.count ? `Inbox, ${props.inbox.count} waiting on you` : "Inbox"}
           title="Everything waiting on you, most urgent first"

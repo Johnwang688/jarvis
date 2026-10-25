@@ -3,9 +3,11 @@
    what needs attention: focus, the selection bar, the active tab, links,
    "running" and the orb. Amber (a tool running, an authorization pending)
    and red (an error) keep their exact values and meanings, and read louder
-   than before because nothing else glows. Every text/background pair used
-   here passes WCAG AA; the tightest is --text-muted on --selected at 4.6:1,
-   which is why no row background goes lighter than --selected.
+   than before because nothing else glows. One owner-approved exception
+   (2026-10-25): the owner Inbox row's aurora (--aurora-*, below). Every
+   text/background pair used here passes WCAG AA; the tightest is
+   --text-muted on --selected at 4.6:1, which is why no row background goes
+   lighter than --selected.
 
    Phone width is not a target (this is the desk window) but nothing overflows
    horizontally at 1280px: every pane is a flex child with min-width: 0, which
@@ -64,6 +66,20 @@
   --syn-string: #a6c79b;  /* sage, --green's family: strings, code spans */
   --syn-const: #b9aade;   /* lavender, --badge-claude's family: numbers, constants, escapes */
   --syn-type: #a8b5c2;    /* steel, --badge-win's family: types, modules, directives, keys */
+
+  /* The owner inbox row's aurora (owner, 2026-10-25: "make it sparkly or
+     aurora or something"). An owner-approved exception to the one sparing
+     accent, and the only one: these colour nothing else. Low saturation, at
+     most 0.24 alpha over --bg-1, never in the amber/red band (pending and
+     error keep their meanings), so the row's text stays far above AA and the
+     band is never brighter than the text. lib/aurora.test.ts recomputes
+     every one of those claims from this file. */
+  --aurora-teal: rgba(112, 196, 188, 0.20);
+  --aurora-green: rgba(128, 198, 148, 0.16);
+  --aurora-violet: rgba(160, 150, 214, 0.22);
+  --aurora-rose: rgba(206, 150, 190, 0.14);   /* a hint: mauve-rose, not amber or red */
+  --aurora-spark: rgba(232, 238, 255, 0.55);
+  --aurora-drift: 11s;          /* one pass of the band while something waits */
 
   --veil: rgba(0, 0, 0, 0.62);
   --shadow-pop: 0 8px 28px rgba(0, 0, 0, 0.55);
@@ -2131,6 +2147,77 @@ button.tree-row.ownerinbox.sel { background: var(--selected); box-shadow: inset 
 button.tree-row.ownerinbox:focus-visible { box-shadow: inset 0 0 0 1px var(--accent); }
 .badge.inboxcount { margin-left: auto; text-transform: none; font-variant-numeric: tabular-nums; }
 .badge.inboxcount.pending { color: var(--amber); border-color: var(--amber-line); }
+
+/* The aurora (owner, 2026-10-25): the owner inbox row only, never the "Inbox"
+   project below it. A soft teal-green-violet band with a hint of rose drifts
+   across the row's background; while something waits that is not pending, a
+   few faint sparks twinkle. Restraint, in order of precedence:
+   - pending (ranks 1-2, the amber count): the band dims and the sparks go,
+     and the count sits on an opaque --bg-1 chip, so amber reads exactly as
+     it does everywhere else;
+   - nothing waiting: a static tint, no sparks, nothing animating (the desk
+     composites nothing for an empty inbox; review of #312);
+   - under the approval card (everything outside the veil is [inert]) both
+     pause: the card stays the loudest thing on screen;
+   - prefers-reduced-motion: no animation at all, a static tint.
+   Compositor-only: transform on the band, opacity on the sparks, both on
+   absolutely placed pseudo-elements clipped by the row, so nothing moves the
+   layout and no script runs. The isolated row paints both layers over its
+   own background and inset shadows, so its selection bar is left 2px clear
+   and its focus ring is an outline, which paints above them. */
+button.tree-row.ownerinbox.aurora { position: relative; isolation: isolate; overflow: hidden; }
+button.tree-row.ownerinbox.aurora::before {
+  content: ""; position: absolute; top: 0; bottom: 0; left: 0; width: 200%;
+  z-index: -1; pointer-events: none;
+  /* Two identical periods, so a -50% shift lands where it started. */
+  background: linear-gradient(100deg,
+    transparent 0%, var(--aurora-teal) 8%, var(--aurora-green) 16%, var(--aurora-violet) 26%,
+    var(--aurora-rose) 34%, var(--aurora-teal) 42%, transparent 50%,
+    var(--aurora-teal) 58%, var(--aurora-green) 66%, var(--aurora-violet) 76%,
+    var(--aurora-rose) 84%, var(--aurora-teal) 92%, transparent 100%);
+  will-change: transform;
+  animation: aurora-drift var(--aurora-drift) linear infinite;
+}
+button.tree-row.ownerinbox.aurora[data-aurora="calm"]::before { animation: none; will-change: auto; }
+button.tree-row.ownerinbox.aurora[data-aurora="pending"]::before { opacity: 0.55; }
+button.tree-row.ownerinbox.aurora::after {
+  content: ""; position: absolute; inset: 0; z-index: -1; pointer-events: none;
+  background:
+    radial-gradient(circle at 34% 30%, var(--aurora-spark) 0 0.6px, transparent 1.3px),
+    radial-gradient(circle at 52% 72%, var(--aurora-spark) 0 0.5px, transparent 1.2px),
+    radial-gradient(circle at 68% 38%, var(--aurora-spark) 0 0.6px, transparent 1.3px),
+    radial-gradient(circle at 81% 66%, var(--aurora-spark) 0 0.5px, transparent 1.1px);
+  opacity: 0;
+  display: none;
+}
+button.tree-row.ownerinbox.aurora[data-aurora="live"]::after {
+  display: block;
+  animation: aurora-twinkle 4.6s ease-in-out infinite;
+}
+.ownerinbox.aurora .badge.inboxcount { background: var(--bg-1); }
+button.tree-row.ownerinbox.aurora.sel::before,
+button.tree-row.ownerinbox.aurora.sel::after { left: 2px; }
+button.tree-row.ownerinbox.aurora:focus-visible {
+  box-shadow: none; outline: 1px solid var(--accent); outline-offset: -1px;
+}
+button.tree-row.ownerinbox.aurora.sel:focus-visible { box-shadow: inset 2px 0 var(--accent); }
+/* The approval card is up: everything outside the veil is inert. */
+[inert] button.tree-row.ownerinbox.aurora[data-aurora]::before,
+[inert] button.tree-row.ownerinbox.aurora[data-aurora]::after { animation-play-state: paused; }
+@keyframes aurora-drift {
+  from { transform: translateX(0); }
+  to { transform: translateX(-50%); }
+}
+@keyframes aurora-twinkle {
+  0%, 100% { opacity: 0; }
+  45% { opacity: 0.9; }
+  60% { opacity: 0.35; }
+}
+@media (prefers-reduced-motion: reduce) {
+  /* [data-aurora] so these outrank the calm and live rules above. */
+  button.tree-row.ownerinbox.aurora[data-aurora]::before { animation: none; will-change: auto; }
+  button.tree-row.ownerinbox.aurora[data-aurora]::after { animation: none; display: none; }
+}
 
 .inbox { display: flex; flex-direction: column; min-width: 0; }
 .inbox-head { display: flex; align-items: center; gap: 8px; border-bottom: 1px solid var(--border); padding-right: 12px; }

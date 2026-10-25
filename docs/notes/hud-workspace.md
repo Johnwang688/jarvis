@@ -1842,3 +1842,79 @@ routes"). Not deployed: the owner's step is `jarvis hud rebuild` and a reload
   /approvals` only at boot, so a card asked while the event stream was down
   is missed until a reload; re-read it on reconnect and merge it into the
   veil. The inbox's "reload to see it" row already says so.
+
+## The owner Inbox row's aurora (2026-10-25)
+
+The owner: "Keep inbox but make it like a different color. Make it sparkly or
+aurora or something." Both sidebar rows keep the label "Inbox". Only the
+**owner inbox** row (`owner-inbox`, above PROJECTS) gets the aurora, never
+the "Inbox" project where unplaced chat lands.
+
+- **This is an owner-approved exception to Graphite's "one sparing accent"
+  rule, and the only one.** The `--aurora-*` tokens on `:root`
+  (`hud/src/theme.css`) colour nothing else.
+  - **The band:** soft teal, green and violet with a hint of mauve-rose. No
+    hue is in the amber/red band, saturation is at most 0.5, and alpha is at
+    most 0.24 over `--bg-1`.
+  - **Motion:** it drifts across the row's background one pass every
+    `--aurora-drift` (11 s), but only while something waits. While something
+    waits that is not pending, four faint sparks twinkle.
+- **Restraint.**
+  - **Nothing waiting** (`data-aurora="calm"`): a still tint. Nothing
+    animates and there are no sparks, so the desk composites nothing for an
+    empty inbox (review of #312: it used to drift slowly forever).
+  - **Pending** (ranks 1–2, the amber count, `data-aurora="pending"`): the
+    band dims and the sparks go. The count sits on an opaque `--bg-1` chip,
+    so amber reads as it does everywhere else.
+  - **Under the approval card:** everything outside the veil is `[inert]`
+    (`Approvals.tsx`), and an `[inert]` rule pauses both layers, so the card
+    stays the loudest thing on screen.
+  - **`prefers-reduced-motion: reduce`:** a static tint and no animation.
+- **Cost.**
+  - CSS only, with no timers: `transform` on the band and `opacity` on the
+    sparks. Both are absolutely placed pseudo-elements clipped by the row
+    (`overflow: hidden`), so no layout moves.
+  - Measured with Chromium tracing over 4 s: calm made 0 frames and 0
+    paints, the same as a row with no aurora. Live and pending made 60
+    frames a second and 0 paints, which is compositor-only.
+  - The row's text stays `--text`, AA over every blend (worst case about
+    7:1).
+- **Selection and focus.**
+  - The isolated row paints both layers over its own background and inset
+    shadows. So when the row is selected, the layers start 2px in, leaving
+    the 2px accent bar clear.
+  - The focus ring is a 1px `--accent` outline (inset by `outline-offset:
+    -1px`), which paints above them.
+- **Tests.**
+  - `hud/src/lib/aurora.test.ts` recomputes from theme.css:
+    - the tokens' alpha, saturation and hue band;
+    - `--text` contrast over every blend, with hover and selection;
+    - the band never brighter than the text;
+    - the amber chip;
+    - the tokens used only by the aurora;
+    - keyframes on transform/opacity only;
+    - the calm band still and the sparks live-only;
+    - the selection bar and the focus outline;
+    - the reduced-motion and `[inert]` rules.
+  - `tests/face/hud_v2_inbox_check.py` section `aurora` checks computed
+    styles in Chromium. For that section the mock's `inbox: true` project is
+    named "Inbox". It checks:
+    - the class is on the owner row, and not on that project row;
+    - calm has no animation on either layer; live drifts and sparks; pending
+      is dimmed;
+    - the shipped keyframes animate only `transform` and `opacity`;
+    - the amber chip;
+    - the selection bar is visible;
+    - the same box with and without the aurora;
+    - `animation-play-state: paused` under a card, and running after;
+    - `animation-name: none` under emulated reduced motion.
+
+    `JARVIS_AURORA_SHOTS=<dir>` saves sidebar screenshots there.
+  - **Mutations caught**, each by the vitest and the face section unless
+    noted:
+    - the reduced-motion rule removed;
+    - the veil pause removed;
+    - calm animating;
+    - a `background-position` drift;
+    - the selection bar covered;
+    - the aurora on the Inbox project row (face only).
