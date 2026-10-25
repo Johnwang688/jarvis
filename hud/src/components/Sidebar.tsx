@@ -131,6 +131,14 @@ export const Sidebar = memo(function Sidebar(props: {
   onCollapse?: () => void;
   /** An authorization card is up: the fold button is disabled (it would still answer Enter). */
   layoutBlocked?: boolean;
+  /**
+   * The owner inbox's row above the projects (inbox A2): what waits on the
+   * owner, ranks 1 to 5 (`count`; null while the inbox is not there to read),
+   * amber when any of it is pending (ranks 1 and 2), and whether a drawn pane
+   * shows the inbox. Absent: no row (older callers and tests).
+   */
+  inbox?: { count: number | null; pending: boolean; shown: boolean };
+  onOpenInbox?: () => void;
 }) {
   const z = props.zoom ?? 100;
   const activity = props.activity ?? NO_ACTIVITY;
@@ -293,6 +301,28 @@ export const Sidebar = memo(function Sidebar(props: {
           <CollapseButton side="left" onCollapse={props.onCollapse} disabled={props.layoutBlocked} />
         ) : null}
       </div>
+      {props.inbox && props.onOpenInbox ? (
+        // Not the "Inbox" project below (where unplaced chat lands): the owner
+        // inbox, everything waiting on the owner. A real button, so Enter and
+        // Space open it; it only opens the view, it answers nothing.
+        <button
+          type="button"
+          className={"tree-row ownerinbox" + (props.inbox.shown ? " sel" : "")}
+          data-testid="owner-inbox"
+          aria-label={props.inbox.count ? `Inbox, ${props.inbox.count} waiting on you` : "Inbox"}
+          title="Everything waiting on you, most urgent first"
+          onClick={props.onOpenInbox}
+        >
+          <span className="tw">✉</span>
+          <span className="nm">Inbox</span>
+          {props.inbox.count ? (
+            <span className={"badge inboxcount" + (props.inbox.pending ? " pending" : "")}
+                  data-testid="owner-inbox-count" data-pending={props.inbox.pending ? "true" : "false"}>
+              {props.inbox.count}
+            </span>
+          ) : null}
+        </button>
+      ) : null}
       <div className="barrow">
         <h2 className="bar">Projects</h2>
         <button

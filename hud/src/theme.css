@@ -2116,3 +2116,53 @@ button.vextab > .vexhelpnum { top: -12px; bottom: auto; left: 2px; }
   overflow: hidden; text-overflow: ellipsis; max-width: 40%; }
 .qreview .qr-item.off .qr-loc { color: var(--text-muted); }
 .qreview .qr-why { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+
+/* ---- the owner inbox (inbox A2) ----
+   Graphite only: amber marks what is pending (ranks 1 and 2, and the sidebar
+   count while any is), red a failed task, glacier cyan only focus and the
+   selection bar. Nothing here is louder than the approval card, which stays
+   the veil's own. Rows wrap; nothing scrolls sideways. */
+button.tree-row.ownerinbox {
+  width: 100%; box-sizing: border-box; border: 0; border-radius: 0; background: none;
+  text-align: left; font-size: 13px; color: var(--text); flex: 0 0 auto; margin-bottom: 2px;
+}
+button.tree-row.ownerinbox:hover:not(:disabled) { background: var(--hover); }
+button.tree-row.ownerinbox.sel { background: var(--selected); box-shadow: inset 2px 0 var(--accent); }
+button.tree-row.ownerinbox:focus-visible { box-shadow: inset 0 0 0 1px var(--accent); }
+.badge.inboxcount { margin-left: auto; text-transform: none; font-variant-numeric: tabular-nums; }
+.badge.inboxcount.pending { color: var(--amber); border-color: var(--amber-line); }
+
+.inbox { display: flex; flex-direction: column; min-width: 0; }
+.inbox-head { display: flex; align-items: center; gap: 8px; border-bottom: 1px solid var(--border); padding-right: 12px; }
+.inbox-head h2.bar { border-bottom: none; flex: 1 1 auto; }
+.inbox-notice { margin: 8px 12px 0; padding: 6px 8px; border: 1px solid var(--border-strong);
+  border-radius: var(--radius); color: var(--text-2); font-size: 12px; }
+.inbox-group { padding: 4px 0 8px; }
+.inbox-gh {
+  font: 600 10px var(--mono); letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-muted);
+  padding: 8px 12px 4px;
+}
+.inbox-row {
+  margin: 4px 12px; padding: 8px 10px; min-width: 0;
+  background: var(--bg-2); border: 1px solid var(--border); border-left: 2px solid var(--border-strong);
+  border-radius: var(--radius); display: flex; flex-direction: column; gap: 4px;
+}
+.inbox-row[data-tone="pending"] { border-left-color: var(--amber); }
+.inbox-row[data-tone="failed"] { border-left-color: var(--red); }
+.inbox-row .ir-head { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.inbox-row .ir-title { flex: 1 1 auto; min-width: 0; color: var(--text); overflow-wrap: anywhere; }
+.inbox-row[data-tone="pending"] .ir-title { color: var(--amber); }
+.inbox-row[data-tone="failed"] .ir-title { color: var(--red); }
+.inbox-row .ir-time { flex: 0 0 auto; font: 11px var(--mono); }
+.inbox-row .ir-blocks, .inbox-row .ir-when, .inbox-row .ir-options { font-size: 12px; overflow-wrap: anywhere; }
+.inbox-row .ir-origin { font: 11px var(--mono); color: var(--text-2); overflow-wrap: anywhere; }
+.inbox-row .ir-body { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+/* Untrusted words: drawn as text, their lines kept, long runs wrapped. */
+.inbox-row .ir-text { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text); max-height: 240px; overflow-y: auto; }
+.inbox-row .ir-cardnote { font-size: 12px; color: var(--text-2); }
+.inbox-row .ir-answer { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; min-width: 0; }
+.inbox-row .ir-answer input { flex: 1 1 160px; min-width: 0; }
+.inbox-row .ir-foot { display: flex; justify-content: flex-end; }
+.inbox-row button.quiet.ir-link { padding: 0; font-size: 11px; color: var(--text-2); }
+.inbox-row button.quiet.ir-link:hover:not(:disabled) { color: var(--accent); }
+.inbox-row button:focus-visible, .inbox-row input:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }

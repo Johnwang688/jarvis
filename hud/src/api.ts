@@ -23,6 +23,7 @@ import { WINDOW_ID, isWindowId } from "./lib/windowId";
 import { parseProposal, parseReadingResult, parseSpeakerStatus } from "./lib/speaker";
 import { parseSttSettings, type SttChoice } from "./lib/sttSettings";
 import type { SttReply } from "./lib/stt";
+import { answerPath } from "./lib/inbox";
 
 export class ApiError extends Error {
   status: number;
@@ -266,6 +267,15 @@ export const api = {
   approvals: () => req<ApprovalRequest[]>("/approvals"),
   resolveApproval: (reqId: string, body: { decision: "allow" | "deny"; always?: boolean }) =>
     req<any>(`/approvals/${reqId}`, json(body)),
+
+  // --- the owner inbox (inbox A1's routes, owner-only) ----------------------
+  /** The ranked rows, as served; lib/inbox `parseInbox` reads them. */
+  inbox: () => req<unknown>("/inbox"),
+  /** One answer, dispatched by the daemon to the item's own surface: `{text}`
+   * for a question, `{withdraw: true}` for a proposal. A 409 is "already
+   * answered or gone". The id goes through `encodeURIComponent` (A1 decodes once). */
+  answerInbox: (id: string, body: { text: string } | { withdraw: true }) =>
+    req<unknown>(answerPath(id), json(body)),
 
   // --- usage / route / schedules -----------------------------------------
   usage: () => req<Usage>("/usage"),

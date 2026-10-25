@@ -3182,6 +3182,17 @@ def main():
             finally:
                 compact_mock.stop()
 
+            # The owner inbox (inbox A2): the sidebar row and count, the badge,
+            # the view, its answers and the card over it — a context and a mock
+            # of their own (it reloads, raises cards and scripts the inbox).
+            from tests.face.hud_v2_inbox_check import inbox_checks
+            inbox_mock = MockDaemon(0).start()
+            try:
+                inbox_checks(browser, inbox_mock, f"http://127.0.0.1:{inbox_mock.port}", check, until,
+                             guard, FAKE_RECOGNIZER)
+            finally:
+                inbox_mock.stop()
+
             # The sidebar's five most recent chats per project (2026-10-15): a
             # context and a mock of their own — it opens threads and reloads.
             from tests.face.hud_v2_recent_chats_check import recent_chats_checks

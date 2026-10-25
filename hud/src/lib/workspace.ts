@@ -60,7 +60,7 @@ import {
 
 export const WORKSPACE_KEY = "jarvis.hud.workspace";
 
-export type View = "chat" | "task" | "file" | "diff" | "browser" | "terminal" | "vex" | "subagent";
+export type View = "chat" | "task" | "file" | "diff" | "browser" | "terminal" | "vex" | "subagent" | "inbox";
 /** What a pane offers. The terminal view (WP-D) shows one of the owner's
  * terminals, chosen per pane (`terminalId`); one terminal is drawn in one
  * place at a time (lib/terminal.ts, `placeTerminals`). The VEX view (VX-2)
@@ -68,8 +68,10 @@ export type View = "chat" | "task" | "file" | "diff" | "browser" | "terminal" | 
  * (lib/vex.ts `offersVex`); it shows its pinned project. The sub-agent view
  * (SV-3) is never offered: a pane shows it only when a sub-agent's row or
  * card opened it there (`PaneSpec.subagent`), and keeps its button while it
- * does, so the owner can see where they are. */
-export const PANE_VIEWS: readonly View[] = ["chat", "task", "file", "diff", "browser", "terminal", "vex", "subagent"];
+ * does, so the owner can see where they are. The inbox view (inbox A2) is
+ * opened by the sidebar's Inbox row and, like the sub-agent view, is offered
+ * by the strip only in a pane that shows it. */
+export const PANE_VIEWS: readonly View[] = ["chat", "task", "file", "diff", "browser", "terminal", "vex", "subagent", "inbox"];
 
 /**
  * What the owner reads for each view: the strip's buttons, its compact
@@ -80,7 +82,7 @@ export const PANE_VIEWS: readonly View[] = ["chat", "task", "file", "diff", "bro
  */
 export const VIEW_LABEL: Readonly<Record<View, string>> = {
   chat: "chat", task: "task", file: "editor", diff: "diff", browser: "browser", terminal: "terminal", vex: "vex",
-  subagent: "sub-agent",
+  subagent: "sub-agent", inbox: "inbox",
 };
 
 export type Preset =
@@ -1136,6 +1138,10 @@ export function copySpec(spec: PaneSpec): PaneSpec {
       break;
     case "subagent":
       // One sub-agent per pane: a copy is a new chat, as a chat's copy is.
+      out.view = "chat";
+      break;
+    case "inbox":
+      // One inbox is enough: a split beside it is a new chat, never a second inbox.
       out.view = "chat";
       break;
     default:

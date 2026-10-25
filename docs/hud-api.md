@@ -3766,3 +3766,22 @@ steer. The owner's Stop ends it and drops the queue.
 - `GET /threads/{id}/transcript` shows `compacted` as a `system` row. `compact_started` adds no row.
   With `tools=1`, the turn's `compact` tool row shows as well.
 - `thread_json` gains `compacting: bool`, which is true while a compaction is the running turn.
+
+## The owner inbox (inbox A1 routes, A2 HUD, 2026-10-25)
+
+The rules are in `docs/notes/control-plane.md`, "The owner inbox routes"; the design is
+`docs/plans/2026-10-24-owner-inbox-design.md`. This is the wire as the HUD uses it
+(`api.inbox`, `api.answerInbox`).
+
+- **`GET /inbox`**: the ranked rows, owner-only. Each row is `{id, kind, rank, title, blocks,
+  project_id, thread_id, task_id, asked_at, expires_at, origin, detail}`; `kind` is `approval`,
+  `question`, `task_question`, `proposal` or `task`; ranks 1, 2, 3, 4 and 8 today. An approval's
+  `detail` is exactly `ApprovalRequest.to_json()`; a question's is `{thread_id|task_id, req_id|index,
+  text, options}`; a proposal's `{task_id, brief, withdraw_until}`; a task's `{task_id, state, brief}`.
+  `origin` and every `detail` field are untrusted text.
+- **`POST /inbox/{id}/answer`**: the id through `encodeURIComponent` (decoded once). `{text}` for a
+  question or a task question, `{"withdraw": true}` for a proposal, `{decision, always}` for an
+  approval (the HUD answers approvals on the card, `POST /approvals/{id}`, never here). `409
+  {"error"}` when the row is no longer waiting; `400` for a task row, an unknown kind or a bad body.
+- **`inbox_changed`** on `/events`: `{ids, reason}`, never text. The HUD reads `GET /inbox` again on
+  every one, whatever `ids` holds.
