@@ -627,7 +627,10 @@ def card_spans(text: str, *, command: bool = True) -> list[tuple[int, int, str]]
       is that a withheld span never hides code that runs. So each span only
       where the shell reads no structure (`secrets._Mask`, rule 1, with a
       non-ASCII space read as the word character bash reads it as); labelled
-      values not at all on a line that may run text (rule 3); a private key
+      values not at all on a line that re-parses or runs text (rule 3,
+      `secrets._run_names(...) is True`: `eval`, `source`, `bash -c`, a pipe
+      into a shell …; a credential shape is not code and still goes, as
+      `redact_command`'s own shape pass has it); a private key
       left to `secrets._key_blocks` (an unquoted line of key material at a
       command's place, or after a here-document's `<<`, is a command); a
       URL's userinfo left to `redact_command`'s own rule
@@ -641,7 +644,7 @@ def card_spans(text: str, *, command: bool = True) -> list[tuple[int, int, str]]
         if command and kind in ("URL password", "URL token"):
             continue
         found.append((a, b, kind))
-    if not (command and S._runs_code(text)):
+    if not (command and S._run_names(text) is True):
         found += labelled_spans(text)
     found = _merge(found)
     if command and found:

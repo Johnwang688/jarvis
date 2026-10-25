@@ -433,6 +433,13 @@ class Cards(Base):
                         "grep -rn 'api_key' src/ | head -20"):
             self.assertEqual(approvals.card_text(command), command)
             self.assertEqual(approvals.card_args({"command": command}), {"command": command})
+        # A line that re-parses text as code keeps a labelled value (rule 3:
+        # the value may be code); the card adds nothing to redact_command's.
+        for command in ('eval "' + PW + ': ' + PW_VALUE + '"',
+                        "bash -c 'echo " + PW + "=" + PW_VALUE + "'",
+                        "echo " + PW + ": " + PW_VALUE + " | sh"):
+            self.assertEqual(approvals.card_text(command), secrets.redact_command(command), command)
+            self.assertIn(PW_VALUE, approvals.card_text(command), command)
         # A key at a command's place runs as commands: it stays, as rule 3 says.
         block, rows = _pem("PRIVATE KEY", random.Random(9))
         self.assertIn(rows[1], approvals.card_text(block))
