@@ -1,11 +1,12 @@
 """The owner inbox: one ranked list of everything waiting on the owner
-(design `docs/plans/2026-10-24-owner-inbox-design.md`, IN-0 and IN-2).
+(design `docs/plans/2026-10-24-owner-inbox-design.md`, IN-0, IN-2 and IN-3).
 
-**A projection, never a store (IN-1).** Every row is computed from its
-source each time `rows()` runs: the approval broker's pending requests, the
-daemon's live sessions and their open provider questions, and the task
-store. Nothing here is written anywhere, so the inbox can never disagree
-with the card, the chat or the task it shows. Resolving an item at its
+**A projection first, a store second (IN-1).** Every live row is computed
+from its source each time `rows()` runs: the approval broker's pending
+requests, the daemon's live sessions and their open provider questions, and
+the task store. None of those is written anywhere, so the inbox can never
+disagree with the card, the chat or the task it shows. The one store is
+below ("denied while you were away"). Resolving an item at its
 source removes its row from the next read, and `inbox_changed` (published
 from the same bus publish that carried the source event) tells the HUD to
 read again.
@@ -41,13 +42,33 @@ renders both as untrusted `textContent`. An approval's `detail` is exactly
 HUD-only (private) card carries only its private projection, and its row's
 own fields carry nothing that projection does not.
 
+**"Denied while you were away" (IN-3).** An approval whose waiter ended
+with `timeout` or `shutdown` has no source left to project, so `MissedLog`
+keeps one line for it in `<data root>/inbox/missed.jsonl`, written from the
+daemon's broker callback (`Daemon._approval_resolved` calls
+`Inbox.approval_ended` before it publishes `approval_resolved`):
+`{req_id, tool, origin, thread_id, task_id, at, resolution}`, taken from
+`ApprovalRequest.to_json()` only, never `owner_json`. A private (HUD-only)
+card records its private projection's fields only: `origin` "" and
+`task_id` null, as its live row. Each record is a `missed` row at rank 8
+(information only): nothing to answer (400), no "ask again" (design §10,
+question 3), a link to its chat. The file keeps the newest `MISSED_KEEP`
+records; rows show the last `MISSED_WINDOW` (7 days) until dismiss (B3). A
+write that fails is logged and dropped: it never touches the resolve. The
+file is protected state (`jarvis/tools/files.py`), refused to agent writes.
+
 This module is SELF_PROTECTED (`jarvis/tools/files.py`): it decides what the
 owner sees as waiting.
 """
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import json
 import logging
+import os
+from pathlib import Path
+import re
+import stat
 import threading
 
 from .approvals import clean_line
@@ -56,18 +77,31 @@ from .model import TaskState
 LOG = logging.getLogger(__name__)
 
 # IN-4's bands. Code, not a setting. 5 to 7 (PRs, decisions, checks) belong
-# to later packages; 8 here is `failed` only ("denied while away" is IN-3).
+# to later packages; 8 is `failed` and "denied while away" (IN-3).
 RANK_APPROVAL = 1
 RANK_QUESTION = 2
 RANK_PROPOSAL = 3
 RANK_BLOCKED = 4
 RANK_FAILED = 8
+RANK_MISSED = 8
 
 # Row id prefixes: kind prefix + the source's own id.
 _PREFIX = {"approval": "appr", "question": "q", "task_question": "tq",
-           "proposal": "prop", "task": "task"}
+           "proposal": "prop", "task": "task", "missed": "missed"}
 _ANSWERABLE = {"appr", "q", "tq", "prop"}
-_KNOWN = _ANSWERABLE | {"task"}
+_KNOWN = _ANSWERABLE | {"task", "missed"}
+
+# "Denied while you were away" (IN-3). The resolutions recorded; the file's
+# bound (it holds at most the newest MISSED_KEEP records: an append that
+# would make one more rewrites it atomically with the newest); how long a
+# record is shown until dismiss exists (B3). Code, not settings.
+MISSED_RESOLUTIONS = frozenset({"timeout", "shutdown"})
+MISSED_KEEP = 500
+MISSED_WINDOW = timedelta(days=7)
+# `approvals._new_id` is `token_urlsafe(9)`. A line whose id is not of that
+# alphabet is not one of ours and is never shown.
+_REQ_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+_ID_MAX = 200
 
 # The bus kinds the inbox listens to (design §3.3), plus the ones that end
 # a chat question without a `question_answered` (its turn ended, its chat
@@ -260,6 +294,207 @@ def _task_rows(daemon, hidden):
     return out
 
 
+# -- "denied while you were away" (IN-3) -------------------------------------------
+
+_READ_CAP = 4 << 20         # far above 500 records; a larger file is read from its tail
+_WRITTEN_CAP = 1024         # `Inbox._written`'s bound
+
+
+def _ident(value):
+    return value if isinstance(value, str) and value and len(value) <= _ID_MAX else None
+
+
+def missed_entry(request, resolution: str, at: str) -> dict:
+    """One record, from the card's public projection (`to_json`), never
+    `owner_json`. A private card's projection carries no `origin` or
+    `task_id`; both are also emptied here by name, so a private card can
+    never record one whatever its projection later grows."""
+    card = request.to_json()
+    private = bool(card.get("hud_only")) or bool(getattr(request, "private", False))
+    return {"req_id": _ident(card.get("req_id")),
+            "tool": clean_line(card.get("tool") or "", 120),
+            "origin": "" if private else clean_line(card.get("origin") or "", 160),
+            "thread_id": _ident(card.get("thread_id")),
+            "task_id": None if private else _ident(card.get("task_id")),
+            "at": at, "resolution": resolution}
+
+
+class MissedLog:
+    """`<data root>/inbox/missed.jsonl`: one JSON line per approval whose
+    waiter ended with `timeout` or `shutdown` (design §3.2).
+
+    * **Atomic appends.** One `os.write` of one whole line to an `O_APPEND`
+      descriptor, under `_lock` (a shutdown's waiters all record at once).
+      A reader takes no lock: a last line without its newline is a write in
+      progress (or torn by a crash) and is left out; the next record
+      rewrites the file without it rather than gluing onto it.
+    * **Bounded.** At most `MISSED_KEEP` records: an append that would make
+      one more rewrites the file with the newest, by `stores._write_bytes`
+      (a sibling temp file, mode 600, then `os.replace`).
+    * **Private.** The file is 0600 and `inbox/` 0700, both tightened if
+      found wider; a symlink or a non-regular file there is refused.
+    * **Never in the way.** `record` never raises: a failure is one warning
+      line naming the error's class only, and the approval it describes was
+      already resolved by the broker.
+    """
+
+    def __init__(self, root, *, clock=None):
+        self.dir = Path(root) / "inbox"
+        self.path = self.dir / "missed.jsonl"
+        self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self._lock = threading.Lock()
+
+    def record(self, request, resolution: str) -> bool:
+        """Append one record; True when it was written. Never raises."""
+        try:
+            if resolution not in MISSED_RESOLUTIONS:
+                return False
+            entry = missed_entry(request, resolution, self.clock().isoformat(timespec="seconds"))
+            if not entry["req_id"] or not _REQ_ID.match(entry["req_id"]):
+                return False        # never admitted (a closed broker): no waiter ended
+            line = json.dumps(entry, ensure_ascii=True, separators=(",", ":")).encode("ascii") + b"\n"
+            with self._lock:
+                self._prepare_dir()
+                data = self._read()
+                lines = self._complete(data)
+                if len(lines) >= MISSED_KEEP or (data and not data.endswith(b"\n")):
+                    from .stores import _write_bytes
+                    keep = lines[len(lines) - MISSED_KEEP + 1:] if len(lines) >= MISSED_KEEP else lines
+                    _write_bytes(self.path, b"".join(keep) + line)
+                else:
+                    self._append(line)
+            return True
+        except Exception as exc:  # noqa: BLE001 — a record is never worth a failed resolve
+            LOG.warning("Cannot record a missed approval (%s); the approval itself is unaffected",
+                        type(exc).__name__)
+            return False
+
+    def recent(self) -> list[dict]:
+        """The records of the last `MISSED_WINDOW` by `clock`, one per
+        `req_id` (the last line wins), malformed lines skipped. Never raises."""
+        try:
+            lines = self._complete(self._read())
+            now = self.clock()
+            since = now - MISSED_WINDOW
+        except Exception as exc:  # noqa: BLE001
+            LOG.warning("Cannot read missed approvals (%s)", type(exc).__name__)
+            return []
+        out: dict[str, dict] = {}
+        for raw in lines:
+            try:
+                rec = json.loads(raw)
+            except ValueError:
+                continue
+            if not isinstance(rec, dict):
+                continue
+            req_id, at = rec.get("req_id"), _parse_time(rec.get("at"))
+            if not isinstance(req_id, str) or not _REQ_ID.match(req_id) or at is None or at < since:
+                continue
+            # A time after now (the clock stepped back, a hand-edited line) is
+            # taken as now: shown, never claiming a future time or sorting
+            # ahead of what really came later.
+            at = min(at, now)
+            resolution = rec.get("resolution")
+            if resolution not in MISSED_RESOLUTIONS:
+                continue
+            out.pop(req_id, None)
+            out[req_id] = {"req_id": req_id,
+                           "tool": clean_line(rec.get("tool") if isinstance(rec.get("tool"), str) else "", 120),
+                           "origin": clean_line(rec.get("origin") if isinstance(rec.get("origin"), str) else "", 160),
+                           "thread_id": _ident(rec.get("thread_id")), "task_id": _ident(rec.get("task_id")),
+                           "at": at.isoformat(timespec="seconds"), "resolution": resolution}
+        return list(out.values())
+
+    # -- the file -------------------------------------------------------------
+
+    def _prepare_dir(self) -> None:
+        self.dir.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            os.mkdir(self.dir, 0o700)
+        except FileExistsError:
+            pass
+        info = os.lstat(self.dir)
+        if not stat.S_ISDIR(info.st_mode):
+            raise NotADirectoryError("the inbox folder is not a plain directory")
+        if stat.S_IMODE(info.st_mode) != 0o700:
+            os.chmod(self.dir, 0o700)
+
+    # O_NONBLOCK on both opens (review of #307, MED): a FIFO at the path
+    # would block a plain open before the S_ISREG check could refuse it,
+    # stalling every later waiter (under `_lock`) and every `GET /inbox`.
+    # With it a FIFO read opens at once and is refused by `fstat`, and a
+    # FIFO write with no reader is ENXIO. A regular file ignores the flag.
+    _NONBLOCK = getattr(os, "O_NONBLOCK", 0)
+
+    def _read(self) -> bytes:
+        flags = (os.O_RDONLY | self._NONBLOCK | getattr(os, "O_NOFOLLOW", 0)
+                 | getattr(os, "O_CLOEXEC", 0))
+        try:
+            fd = os.open(self.path, flags)
+        except FileNotFoundError:
+            return b""
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode):
+                raise OSError("the missed-approvals file is not a regular file")
+            tail = info.st_size > _READ_CAP
+            if tail:
+                os.lseek(fd, info.st_size - _READ_CAP, os.SEEK_SET)
+            chunks, left = [], _READ_CAP
+            while left > 0 and (chunk := os.read(fd, min(1 << 16, left))):
+                chunks.append(chunk)
+                left -= len(chunk)
+            data = b"".join(chunks)
+            # Read from the middle of a line: that first piece is not a record.
+            return data.split(b"\n", 1)[1] if tail and b"\n" in data else data
+        finally:
+            os.close(fd)
+
+    @staticmethod
+    def _complete(data: bytes) -> list[bytes]:
+        """The whole lines, each with its newline; a last piece without one is not a record yet."""
+        return [part + b"\n" for part in data.split(b"\n")[:-1] if part.strip()]
+
+    def _append(self, line: bytes) -> None:
+        flags = (os.O_WRONLY | os.O_APPEND | os.O_CREAT | self._NONBLOCK
+                 | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0))
+        fd = os.open(self.path, flags, 0o600)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode):
+                raise OSError("the missed-approvals file is not a regular file")
+            if stat.S_IMODE(info.st_mode) != 0o600:
+                os.fchmod(fd, 0o600)
+            view = memoryview(line)
+            while view:
+                view = view[os.write(fd, view):]
+        finally:
+            os.close(fd)
+
+
+def _missed_rows(daemon):
+    """One information-only row per recent record. Its own fields name ids
+    and the tool only. It carries no project (a private card's row has
+    none, and the record does not say which it was), so a project's
+    archive does not hide it: like the approval it was, it stays until the
+    window passes it."""
+    log = getattr(getattr(daemon, "inbox", None), "missed", None)
+    if log is None:
+        return []
+    out = []
+    for rec in log.recent():
+        thread_id, task_id = rec["thread_id"], rec["task_id"]
+        tool = clean_line(rec["tool"] or "a tool", 60)
+        who = f"task {task_id}" if task_id else f"chat {thread_id}" if thread_id else "a turn"
+        why = ("nobody answered in time" if rec["resolution"] == "timeout"
+               else "Jarvis stopped before you answered")
+        out.append(_row("missed", RANK_MISSED, f"missed:{rec['req_id']}",
+                        f"Denied while you were away: {tool}", f"{who} was denied it: {why}",
+                        thread_id=thread_id, task_id=task_id, asked_at=rec["at"],
+                        origin=rec["origin"], detail=rec))
+    return out
+
+
 def rows(daemon) -> list[dict]:
     """Every row, ranked (IN-4; ties to the older item). Pure: reads only."""
     from .projects import archived_project_ids
@@ -267,7 +502,8 @@ def rows(daemon) -> list[dict]:
         hidden = archived_project_ids(daemon.stores)
     except Exception:  # noqa: BLE001
         hidden = set()
-    out = _approval_rows(daemon, hidden) + _question_rows(daemon, hidden) + _task_rows(daemon, hidden)
+    out = (_approval_rows(daemon, hidden) + _question_rows(daemon, hidden) + _task_rows(daemon, hidden)
+           + _missed_rows(daemon))
     return sorted(out, key=_sort_key)
 
 
@@ -279,12 +515,38 @@ class Inbox:
     record that caused it within the same publish. `_asked` remembers which
     chat questions were announced per thread, only so that a turn that ends
     without answering one can name the rows it removed. It is not a row
-    store: `rows()` never reads it."""
+    store: `rows()` never reads it.
+
+    `missed` is the one store (IN-3), under the daemon's data root.
+    `approval_ended` writes to it from the broker's resolve callback, just
+    before that callback publishes `approval_resolved`; that publish's
+    `inbox_changed` then names the new `missed:` row beside the `appr:` row
+    it replaces (`_written` says which were written), so the HUD's one
+    re-read sees the swap."""
 
     def __init__(self, daemon):
         self.daemon = daemon
         self._lock = threading.Lock()
         self._asked: dict[str, set[str]] = {}
+        self._written: set[str] = set()
+        root = getattr(getattr(daemon, "stores", None), "root", None)
+        self.missed = MissedLog(root) if root is not None else None
+
+    def approval_ended(self, request, resolution) -> None:
+        """A waiter ended (the broker's `on_resolve`): record it when it was a
+        `timeout` or a `shutdown`. Never raises."""
+        try:
+            if self.missed is None or resolution not in MISSED_RESOLUTIONS:
+                return
+            if self.missed.record(request, resolution):
+                with self._lock:
+                    # Each id leaves on its own publish; the cap only bounds
+                    # one whose publish never came (it then names nothing).
+                    if len(self._written) >= _WRITTEN_CAP:
+                        self._written.clear()
+                    self._written.add(request.req_id)
+        except Exception as exc:  # noqa: BLE001
+            LOG.warning("Cannot record a missed approval (%s)", type(exc).__name__)
 
     def observe(self, record) -> None:
         if not isinstance(record, dict):
@@ -303,7 +565,16 @@ class Inbox:
         thread_id = record.get("thread_id")
         if kind in ("approval_requested", "approval_resolved"):
             req_id = data.get("req_id")
-            return [f"appr:{req_id}"] if isinstance(req_id, str) and req_id else []
+            if not isinstance(req_id, str) or not req_id:
+                return []
+            ids = [f"appr:{req_id}"]
+            if kind == "approval_resolved":
+                with self._lock:
+                    written = req_id in self._written
+                    self._written.discard(req_id)
+                if written:
+                    ids.append(f"missed:{req_id}")
+            return ids
         if kind in ("question", "question_answered"):
             req_id = data.get("req_id")
             if not isinstance(thread_id, str) or req_id is None:
@@ -379,6 +650,9 @@ def answer(daemon, row_id, body, *, hud: bool):
     from .provider import Decision
     prefix, _, row_id = _split(row_id)
     if prefix not in _ANSWERABLE:
+        if prefix == "missed":
+            # Information only (IN-3); no "ask again" (design §10, question 3).
+            raise APIError(400, "this item takes no answer; open its chat to see what was denied")
         raise APIError(400, "this item takes no answer; open its task to resume or cancel it")
     # Shape first, so a malformed body is a 400 whatever the row's state.
     if prefix == "appr":

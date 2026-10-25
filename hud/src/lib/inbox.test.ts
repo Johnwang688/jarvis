@@ -3,8 +3,8 @@
 
 import { describe, expect, it, vi } from "vitest";
 import {
-  CLOSING_MS, GROUPS, anyPending, answerPath, briefOf, clockOf, groupRows, linkOf, oneLine, parseInbox, parseRow,
-  questionOf, setBadge, textBlock, waitingCount, withdrawHint, withdrawUntil, type InboxRow,
+  CLOSING_MS, GROUPS, anyPending, answerPath, briefOf, clockOf, groupRows, linkOf, missedNote, oneLine, parseInbox,
+  parseRow, questionOf, setBadge, textBlock, waitingCount, withdrawHint, withdrawUntil, type InboxRow,
 } from "./inbox";
 
 const row = (over: Record<string, unknown> = {}) => ({
@@ -104,6 +104,37 @@ describe("links", () => {
     expect(linkOf(parseRow(row({ thread_id: "t1", task_id: "k1" }))!)).toEqual({ kind: "thread", id: "t1" });
     expect(linkOf(parseRow(row({ thread_id: null, task_id: "k1" }))!)).toEqual({ kind: "task", id: "k1" });
     expect(linkOf(parseRow(row({ thread_id: null, task_id: null }))!)).toBeNull();
+  });
+
+  it("a 'denied while you were away' row links to its chat only, never its task", () => {
+    const missed = (over: Record<string, unknown>) => parseRow(row({ id: "missed:R1", kind: "missed", rank: 8, ...over }))!;
+    expect(linkOf(missed({ thread_id: "t1", task_id: "k1" }))).toEqual({ kind: "thread", id: "t1" });
+    expect(linkOf(missed({ thread_id: null, task_id: "k1" }))).toBeNull();
+  });
+});
+
+describe("a 'denied while you were away' row (inbox A3)", () => {
+  const missed = (resolution: unknown, over: Record<string, unknown> = {}) => parseRow(row({
+    id: "missed:R1", kind: "missed", rank: 8, title: "Denied while you were away: Bash",
+    detail: { req_id: "R1", tool: "Bash", origin: "", thread_id: "t1", task_id: null, at: "x", resolution }, ...over,
+  }))!;
+
+  it("says why in code's words, chosen by its resolution, never the served text", () => {
+    expect(missedNote(missed("timeout"))).toEqual({ why: "Nobody answered in time, so it was denied.",
+      next: "To try it again, ask from its chat." });
+    expect(missedNote(missed("shutdown"))!.why).toBe("Jarvis stopped before you answered, so it was denied.");
+    for (const odd of ["<img src=x onerror=alert(1)>", 7, null, undefined]) {
+      expect(missedNote(missed(odd))!.why).toBe("It was denied without an answer.");
+    }
+    expect(missedNote(missed("timeout", { thread_id: null }))!.next).toBe("Its chat is not known.");
+  });
+
+  it("is information only: rank 8, not counted, not pending, nothing for any other kind", () => {
+    const m = missed("timeout");
+    expect(groupRows([m]).map((g) => g.group.key)).toEqual(["fyi"]);
+    expect(waitingCount([m])).toBe(0);
+    expect(anyPending([m])).toBe(false);
+    expect(missedNote(parseRow(row())!)).toBeNull();
   });
 });
 

@@ -20,8 +20,11 @@
 //     as the daemon's projection holds the row. `withdraw_until` is the
 //     daemon's clock, so this window's clock only colours a "closing" hint;
 //     a press after the window closed is the daemon's 409;
-//   - a blocked or failed task: information only.
-// Every row links to its thread or task pane. **Clicking a row never answers
+//   - a blocked or failed task: information only;
+//   - "denied while you were away" (inbox A3, IN-3): information only, why it
+//     was denied in code's words (`missedNote`), and its chat link; no "ask
+//     again" (design §10, question 3).
+// Every row links to its thread or task pane (a missed row, its chat only). **Clicking a row never answers
 // anything**: only Answer (or Enter in its box) and Withdraw post, each once
 // per press, through `POST /inbox/<id>/answer` (api.answerInbox). A 409 is
 // "already answered or gone", and the inbox is read again.
@@ -34,8 +37,8 @@ import { useEffect, useRef, useState } from "react";
 import { ApiError } from "../api";
 import type { ApprovalRequest } from "../types";
 import {
-  ANSWERS_TEXT, CLOSING_MS, PENDING_MAX_RANK, approvalReq, briefOf, clockOf, groupRows, linkOf, questionOf,
-  waitingCount, withdrawHint, withdrawUntil, type InboxRow,
+  ANSWERS_TEXT, CLOSING_MS, PENDING_MAX_RANK, approvalReq, briefOf, clockOf, groupRows, linkOf, missedNote,
+  questionOf, waitingCount, withdrawHint, withdrawUntil, type InboxRow,
 } from "../lib/inbox";
 import type { InboxSnapshot } from "../state/inbox";
 
@@ -220,6 +223,18 @@ export function InboxView(props: InboxViewProps) {
               Withdraw
             </button>
           </div>
+        </div>
+      );
+    }
+    // "Denied while you were away" (A3, IN-3): information only. Its words are
+    // code's (`missedNote`, from `resolution`); nothing here asks again
+    // (design §10, question 3): the row's only control is its chat link.
+    const missed = missedNote(row);
+    if (missed) {
+      return (
+        <div className="ir-body">
+          <div className="ir-text" data-testid="inbox-missed-why">{missed.why}</div>
+          <div className="ir-when muted" data-testid="inbox-missed-next">{missed.next}</div>
         </div>
       );
     }

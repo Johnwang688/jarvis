@@ -675,6 +675,65 @@ row is already gone when that event names it.
 `tests/v2/inbox_check.py`; `tests/v2/archive_check.py` keeps every tool, MCP
 catalog entry and session tool away from the routes and the module.
 
+**"Denied while you were away" (inbox A3, IN-3, 2026-10-25).** The inbox's
+one store. When a broker waiter ends with resolution `timeout` or
+`shutdown`, `Daemon._approval_resolved` (the broker's `on_resolve`, both
+broker constructions) calls `Inbox.approval_ended` **before** it publishes
+`approval_resolved`; `approvals.py` is unchanged. `MissedLog` appends one
+line to `<data root>/inbox/missed.jsonl`: `{req_id, tool, origin,
+thread_id, task_id, at, resolution}`, read from `ApprovalRequest.to_json()`
+only, never `owner_json`. A private (HUD-only) card records its private
+projection's fields only: `origin` "" and `task_id` null (also emptied by
+name). One `os.write` of a whole line to an `O_APPEND`/`O_NOFOLLOW`
+descriptor under a lock, so a shutdown's N waiters write N lines; the file
+is 0600, `inbox/` 0700, both tightened if found wider, and a symlink or a
+non-regular file there is refused. Both opens carry `O_NONBLOCK` (review of
+#307): a FIFO at the path used to block the open before `fstat` could refuse
+it, stalling every later waiter (under the lock) and every `GET /inbox`; now
+a FIFO read is refused at once and a FIFO write is ENXIO. **Bound:** at most `MISSED_KEEP` (500)
+records; an append that would make 501 rewrites the file with the newest 500
+by `stores._write_bytes` (temp file, `os.replace`). A last line without its
+newline (a torn write) is never read and is dropped at the next write.
+**A write failure never touches the resolve:** `record` and
+`approval_ended` each catch everything and log only the error's class; the
+broker had already settled the deny. The publish's `inbox_changed` then
+names `missed:<req_id>` beside `appr:<req_id>` (reason
+`approval_resolved`, ids only), and only when the line was written.
+`rows()` adds a `missed` row per record at rank 8: title `Denied while you
+were away: <tool>`, blocks `task <id>` or `chat <id>` `was denied it:
+nobody answered in time` / `Jarvis stopped before you answered`, the
+record as `detail`, `origin` as untrusted text, no `project_id` (so a
+project's archive does not hide it, as it never hides an approval).
+**Retention until B3's dismiss:** rows show only records whose `at` is
+within `MISSED_WINDOW` (7 days) of now (a future `at` is taken as now);
+older lines stay in the file until the bound trims them.
+`POST /inbox/missed:<id>/answer` is 400, whatever the
+body: there is nothing to answer and no "ask again" (design §10, question
+3); the row links to its chat.
+**`Daemon.stop()` releases every pending ask** (review of #307): right after
+`callers.revoke_all()`, outside `self._lock`, it calls
+`PendingApprovals.shutdown()`, so each waiter returns DENY at once with
+resolution `shutdown` (one record each) instead of waiting out its timer or
+dying with the process. Before this, `stop()` released no waiter itself:
+only an ask with a `cancelled=` callback could end early, as `cancelled`
+(the permit's `_ask_owner_delegation`, through `_delegation_cancelled`,
+which reads `_stopping`; the Browser drive asks in `browser/drive.py` and
+`drive_downloads.py` pass their own). Every other ask (ordinary permit
+cards, the escape hatch, Discord `/project new`) waited out its timer or
+died with the process, unrecorded. Each released
+waiter announces on its own thread and the bus closes later in `stop()`, so
+`stop()` waits, at most `RELEASE_WAIT_S` (2 s), until the broker's
+`decisions` log holds each released id (appended after `approval_resolved`
+was published): every window then clears the card. `main()`'s `finally`
+ordering for Discord is unchanged (an owner decision, open).
+`missed.jsonl` **and the `inbox/` folder path itself** are protected state
+(`files._protected_state_paths`, keyed on `config.V2_DATA_DIR`): v1 write
+tools refuse them, v2 layer 1 refuses them (`denied_file`'s generic
+"permission state" sentence), the shell gate asks for any write to the file
+and for moving, replacing, re-moding or deleting the folder. A whole-tree
+rule for `inbox/` (like `protected_state.hud_trees`) is a follow-up before
+IN-5 adds `decisions/`, `checks/` and `marks.json`.
+
 ## The phone's remote listener (phone C1 / P-1, 2026-10-25)
 
 `jarvis/v2/remote_listener.py` (SELF_PROTECTED) is v2's fourth listener

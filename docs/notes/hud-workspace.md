@@ -1777,9 +1777,21 @@ routes"). Not deployed: the owner's step is `jarvis hud rebuild` and a reload
   every button is disabled too and the handlers refuse.
 - **Graphite.** Amber for rank 1–2 rows and the pending count, red for a
   failed task, glacier cyan only for the selected row bar and focus rings.
+- **"Denied while you were away" (inbox A3, IN-3).** A `missed` row (the
+  daemon's half: control-plane notes, same section) sits in "For your
+  information" (rank 8), uncounted, plain (no amber, no red). Under its
+  code-built title and line it says why in the HUD's own words, chosen by
+  `detail.resolution` (`lib/inbox` `missedNote`: "Nobody answered in time,
+  so it was denied." / "Jarvis stopped before you answered, so it was
+  denied." / otherwise "It was denied without an answer."; served text is
+  never shown there), then "To try it again, ask from its chat." Its only
+  control is "Open its chat"; **no "ask again"** (design §10, question 3)
+  and, without a thread, no link at all (`linkOf` never sends it to its
+  task). `origin` is untrusted text as everywhere. Existing classes only
+  (`ir-text`, `ir-when muted`): no new colour.
 - Tests: `lib/inbox.test.ts`, `state/inbox.test.ts`,
   `components/InboxView.test.ts`, the `lib/workspace.test.ts` inbox case, and
-  `tests/face/hud_v2_inbox_check.py` (86 checks, its own `MockDaemon(0)`, the
+  `tests/face/hud_v2_inbox_check.py` (97 checks since A3's `missed` section, its own `MockDaemon(0)`, the
   routes in `hud_v2_mock_inbox.py`, also a `hud_v2_check` section). Its card
   section runs the card's assertions twice, with a chat pane and with the
   Inbox open, and requires the same answers. Mutations caught: a second

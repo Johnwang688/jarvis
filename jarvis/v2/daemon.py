@@ -43,6 +43,8 @@ from . import worktrees
 
 LOG = logging.getLogger(__name__)
 STOP_TIMEOUT = 2.0
+# How long `stop()` waits for the approval waiters it released to announce.
+RELEASE_WAIT_S = 2.0
 
 # A provider's APPROVAL_REQUESTED / APPROVAL_RESOLVED mean "the gate was
 # consulted about this tool call": the Claude hook emits a pair for *every*
@@ -2093,6 +2095,13 @@ class Daemon:
                           "data": request.to_json()})
 
     def _approval_resolved(self, request: ApprovalRequest, decision, resolution: str) -> None:
+        # Inbox IN-3: a `timeout` or `shutdown` leaves a "denied while you
+        # were away" record (public `to_json` fields only), written before
+        # the publish so the `inbox_changed` it causes can name the new row.
+        # It never raises, and the broker has already settled the deny.
+        inbox = getattr(self, "inbox", None)
+        if inbox is not None:
+            inbox.approval_ended(request, resolution)
         if request.private:
             self.bus.publish({"kind": "approval_resolved", "thread_id": request.thread_id,
                               "data": {"req_id": request.req_id, "code": request.code,
@@ -2777,10 +2786,43 @@ class Daemon:
         record["thread_id" if isinstance(obj, Thread) else "task_id"] = obj.id
         self.bus.publish(record)
 
+    def _await_announced(self, req_ids: set, limit: float) -> None:
+        """Until each of `req_ids` is in the broker's `decisions` (appended by
+        `_record` after `_announce`, so after `approval_resolved` was
+        published), or `limit` seconds pass. A broker without that log has
+        nothing to wait for."""
+        decisions = getattr(self.approvals, "decisions", None)
+        if not req_ids or not isinstance(decisions, list):
+            return
+        until = time.monotonic() + limit
+        while time.monotonic() < until:
+            if req_ids <= {d.get("req_id") for d in list(decisions) if isinstance(d, dict)}:
+                return
+            time.sleep(0.01)
+        LOG.warning("%d approval waiter(s) had not announced their denial at shutdown",
+                    len(req_ids - {d.get("req_id") for d in list(decisions) if isinstance(d, dict)}))
+
     def stop(self):
         # Before anything else closes: no jarvis-mcp call is answered for a
         # session from here on (plan §1.4).
         self.callers.revoke_all()
+        # Every pending ask is denied now, not when its timer runs out or the
+        # process dies: each waiter returns DENY with resolution "shutdown"
+        # (which leaves an inbox "denied while you were away" record, IN-3)
+        # and its card is cleared. Outside `self._lock`: the broker's resolve
+        # callback publishes. Idempotent; a later ask is denied at once.
+        # Each released waiter announces on its own thread, and the bus closes
+        # further down, so wait (bounded) until every one has been recorded
+        # by the broker: its `approval_resolved` then reached the bus, and
+        # every window clears its card, before the bus closes.
+        shutdown = getattr(self.approvals, "shutdown", None)
+        if callable(shutdown):
+            try:
+                released = {r.req_id for r in self.approvals.pending() if r.req_id}
+            except Exception:  # noqa: BLE001 — nothing to wait for then
+                released = set()
+            shutdown()
+            self._await_announced(released, RELEASE_WAIT_S)
         self.schedules.stop()
         titles = self.titles
         if titles is not None:
