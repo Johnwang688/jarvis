@@ -70,6 +70,10 @@ LOG = logging.getLogger(__name__)
 MAX_DISCORD_CHARS = 2000
 TURN_TIMEOUT_S = 900.0
 APPROVAL_KINDS = frozenset({"approval_requested", "approval_resolved"})
+# How long `stop()` lets the approval watcher finish what is already queued (a
+# shutdown's "Jarvis stopped first" edits) before the gateway closes. A hung
+# REST call costs this much and no more; the watcher is a daemon thread.
+SETTLE_S = 3.0
 # "cancel"/"stop" are v1 denial words *and* v2 verbs. In a task thread the verb
 # is what the owner means, so those two spellings never claim an open approval;
 # the approval then times out, which denies. Never the other way round.
@@ -285,6 +289,11 @@ class DiscordRouter:
         self._approval_channels: dict[str, str] = {}
         # req_id -> (channel, message id, code) of the post carrying the buttons.
         self._approval_messages: dict[str, tuple[str, str, str]] = {}
+        # req_id -> the same row, for a post that is answered but whose
+        # buttons are not off yet: it stays in the map on disk until its strip
+        # succeeds, so a strip that failed or never finished (Discord down at
+        # shutdown, a 429) is retried by the next start's `_strip_stale`.
+        self._unstripped: dict[str, tuple[str, str, str]] = {}
         # The same map on disk, so a restart can strip the buttons of posts
         # whose requests died with the previous process (the broker denies
         # them all at shutdown). Beside the stores, never the owner's real
@@ -360,20 +369,44 @@ class DiscordRouter:
                 if req_id in self._approval_messages:   # one of ours, posted since
                     continue
             if isinstance(row, list) and len(row) == 3 and all(isinstance(x, str) for x in row):
-                self._strip_buttons(row[0], row[1])
+                if not self._strip_buttons(row[0], row[1]):
+                    with self._lock:              # kept for the start after this one
+                        self._unstripped.setdefault(req_id, tuple(row))
         self._save_posts()
 
     def _save_posts(self) -> None:
         with self._lock:
-            rows = {req_id: list(row) for req_id, row in self._approval_messages.items()}
+            rows = {req_id: list(row) for req_id, row in self._unstripped.items()}
+            rows.update({req_id: list(row) for req_id, row in self._approval_messages.items()})
             try:
                 _write_bytes(self._posts_path, json.dumps(rows).encode("utf-8"))
             except (StoreError, OSError) as exc:
                 LOG.warning("Discord approval-post map not saved (%s)", type(exc).__name__)
 
+    def settle(self, limit: float = SETTLE_S) -> bool:
+        """Until the approval watcher has handled every record already queued
+        for it (each `task_done`), or `limit` seconds pass. -> True when it
+        caught up. The daemon releases its pending approvals before Discord
+        stops (`daemon.shut_down`); this is what lets their resolutions strip
+        the posts' buttons before the gateway closes."""
+        sub = self._subscription
+        until = time.monotonic() + max(0.0, limit)
+        with sub.all_tasks_done:
+            while sub.unfinished_tasks:
+                left = until - time.monotonic()
+                if left <= 0 or self._stop.is_set() or not self._worker.is_alive():
+                    LOG.warning("Discord approval updates still queued at shutdown (%d)",
+                                sub.unfinished_tasks)
+                    return False
+                sub.all_tasks_done.wait(min(left, 0.05))
+        return True
+
     def stop(self) -> None:
         if self._stop.is_set():
             return
+        # What the watcher already holds goes out first (bounded): a shutdown
+        # released the approvals just before this.
+        self.settle()
         self._stop.set()
         self.daemon.bus.unsubscribe(self._subscription)
         self._subscription.offer({"kind": "shutdown"})
@@ -757,6 +790,12 @@ class DiscordRouter:
         # The card's args withhold typed credentials; whether "always" is
         # offered is judged on the request as typed, which the broker holds.
         typed = next((r for r in self.approvals.pending() if r.req_id == req_id), None)
+        released = getattr(self.daemon, "approvals_released", None)
+        if typed is None and isinstance(released, threading.Event) and released.is_set():
+            # Asked just before shutdown released it, and already denied: a
+            # card now would only notify (the ping, or a DM) to be followed by
+            # "stopped first". Nothing is posted; nothing was asked here.
+            return
         if typed is not None:
             request = _Asked(tool=typed.tool, args=dict(typed.args or {}),
                              allowlistable=getattr(typed, "allowlistable", True) is not False)
@@ -785,7 +824,10 @@ class DiscordRouter:
             if pending:
                 self._approval_messages[req_id] = (channel, str(message_id), code)
         if not pending:
-            self._strip_buttons(channel, str(message_id))
+            if not self._strip_buttons(channel, str(message_id)):
+                with self._lock:
+                    self._unstripped[req_id] = (channel, str(message_id), code)
+                self._save_posts()
             return
         # S1's persisted map: a restart strips these buttons if the request
         # died with this process — the DM fallback's post included.
@@ -821,11 +863,17 @@ class DiscordRouter:
         dm = self._owner_dm()
         return bool(dm) and str(channel) == str(dm)
 
-    def _strip_buttons(self, channel, message_id) -> None:
+    def _strip_buttons(self, channel, message_id) -> bool:
+        """-> False when it should be tried again (a transport failure, a 429,
+        a 5xx); True when the buttons are off or never can be (the post or its
+        channel is gone, or Discord refused for good: a 4xx)."""
         try:
             self.rest.edit(channel, message_id, components=[])
         except Exception as exc:
             LOG.warning("Discord approval buttons not removed (%s)", type(exc).__name__)
+            status = describe(exc).get("status")
+            return isinstance(status, int) and 400 <= status < 500 and status != 429
+        return True
 
     def _post_resolution(self, data: dict) -> None:
         if data.get("hud_only"):
@@ -834,13 +882,19 @@ class DiscordRouter:
         with self._lock:
             channel = self._approval_channels.pop(req_id, None)
             posted = self._approval_messages.pop(req_id, None)
+            if posted is not None:
+                # On disk until the strip below has worked (`_save_posts`).
+                self._unstripped[req_id] = posted
             here = req_id in self._answered_here
             self._answered_here.discard(req_id)
         if posted is not None:
-            self._save_posts()
             # Answered anywhere — HUD, timeout, slash, a button — the buttons go,
-            # so a stale tap cannot reach a later request.
-            self._strip_buttons(posted[0], posted[1])
+            # so a stale tap cannot reach a later request. Only once they have
+            # does the post leave the map on disk.
+            if self._strip_buttons(posted[0], posted[1]):
+                with self._lock:
+                    self._unstripped.pop(req_id, None)
+                self._save_posts()
         if not channel:
             return
         resolution = str(data.get("resolution", ""))
@@ -848,8 +902,12 @@ class DiscordRouter:
             # Nobody answered: the broker denied (it now announces this).
             where = ("timed out, nothing ran" if resolution == "timeout"
                      else "Jarvis stopped first, nothing ran")
+            # A shutdown's line never notifies, not even in the DM, and has no
+            # ping line: every restart with an ask open says it (owner,
+            # 2026-10-25), and a restart is not news.
             self._post(channel, f"Approval `{data.get('code', '')}` for "
-                                f"`{data.get('tool', '')}`: {where}.")
+                                f"`{data.get('tool', '')}`: {where}.",
+                       silent=True if resolution == "shutdown" else None)
             return
         where = "answered here" if here else "answered on another surface"
         self._post(channel, f"Approval `{data.get('code', '')}` for "
@@ -1195,12 +1253,16 @@ class DiscordRouter:
             self._dm_cache = channel
         return channel
 
-    def _post(self, channel_id, content, files=(), *, embed=None, components=None):
+    def _post(self, channel_id, content, files=(), *, embed=None, components=None,
+              silent=None):
         """A plain bot post. In a guild it is silent (decisions D1: nothing but
-        the ping line notifies); in the DM it notifies as a DM always has."""
+        the ping line notifies); in the DM it notifies as a DM always has,
+        unless `silent=True`."""
+        if silent is None:
+            silent = not self._is_dm(channel_id)
         try:
             return self.rest.post(channel_id, content=content, embed=embed, files=files,
-                                  components=components, silent=not self._is_dm(channel_id))
+                                  components=components, silent=silent)
         except Exception as exc:
             LOG.warning("Discord post failed (HTTP %s, code %s, %s)", *_facts(exc))
             return None

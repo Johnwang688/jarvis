@@ -989,6 +989,59 @@ class BranchDiff(Fixture):
         self.assertEqual(self.runner._diff(task), "(no git branch for this task)")
 
 
+class Quiescing(Fixture):
+    """`quiesce()`, shutdown's first step (review of #311): the running turn
+    finishes, but no further model turn starts, the task does not move and
+    nothing new is admitted. On the real runner, so a no-op quiesce fails."""
+
+    def sent(self):
+        return len(self.claude.sent) + len(self.codex.sent)
+
+    def test_the_running_turn_finishes_and_nothing_follows_it(self):
+        started, release = threading.Event(), threading.Event()
+
+        def slow(role, text, thread_id):
+            started.set()
+            release.wait(5)
+            return "half-finished"
+
+        self.script["Do step 1 now"] = slow
+        task = self.new_task()
+        self.runner.start(task.id)
+        self.assertTrue(started.wait(5), "the implementer turn started")
+        sent = self.sent()
+        self.runner.quiesce()
+        release.set()
+        run = self.runner._runs[task.id]
+        eventually(lambda: run.worker is None, what="the task's worker returning")
+        # The implementer's report was taken; the orchestrator's "What next?"
+        # turn never started.
+        self.assertEqual(len(self.journal(task.id, "worker_report")), 1)
+        self.assertEqual(self.sent(), sent, "no model turn after quiesce")
+        self.assertFalse(any("What next?" in text for text in self.claude.texts_to(Role.ORCHESTRATOR)
+                             + self.codex.texts_to(Role.ORCHESTRATOR)))
+        # No transition: the task stays RUNNING for recovery to re-admit.
+        task = self.task(task.id)
+        self.assertEqual(task.state, S.RUNNING)
+        self.assertEqual(self.states(task.id)[-1], "running")
+        self.assertEqual(self.journal(task.id, "blocked"), [])
+        # Quiesce interrupts nothing; stop() is what does.
+        self.assertEqual(self.claude.interrupted + self.codex.interrupted, [])
+        # And nothing new is admitted.
+        other = self.new_task("another endpoint")
+        with self.assertRaises(ControlError):
+            self.runner.start(other.id)
+        self.assertEqual(self.task(other.id).state, S.INTAKE)
+
+    def test_a_task_quiesced_before_its_first_turn_never_sends_one(self):
+        self.runner.quiesce()
+        task = self.new_task()
+        run = self.runner._run(task.id)
+        self.runner._drive(run)                 # what a worker admitted just before would do
+        self.assertEqual(self.sent(), 0)
+        self.assertEqual(self.journal(task.id, "blocked"), [])
+
+
 class Recovery(Fixture):
     def test_serve_readmits_a_task_a_previous_process_left_mid_flight(self):
         task = self.new_task()
