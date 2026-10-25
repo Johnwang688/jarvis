@@ -58,14 +58,12 @@ function rowBackgrounds(): string[] {
 }
 
 describe("the aurora tokens", () => {
-  it("are declared on :root as colours, with the drift durations", () => {
+  it("are declared on :root as colours, with the drift duration", () => {
     for (const t of ALL) expect(() => token(t), t).not.toThrow();
     expect(decl.get("--aurora-drift")).toMatch(/^\d+(\.\d+)?s$/);
-    expect(decl.get("--aurora-drift-calm")).toMatch(/^\d+(\.\d+)?s$/);
     const drift = parseFloat(decl.get("--aurora-drift")!);
     expect(drift).toBeGreaterThanOrEqual(8);   // "slowly shifting": 8-12 s a pass
     expect(drift).toBeLessThanOrEqual(12);
-    expect(parseFloat(decl.get("--aurora-drift-calm")!)).toBeGreaterThan(drift);
   });
 
   it("the band is dim: at most 0.24 alpha", () => {
@@ -139,6 +137,25 @@ describe("the aurora's motion", () => {
     expect(mine).toMatch(/button\.tree-row\.ownerinbox\.aurora\[data-aurora\]::before\s*\{[^}]*animation:\s*none/);
     expect(mine).toMatch(/button\.tree-row\.ownerinbox\.aurora\[data-aurora\]::after\s*\{[^}]*animation:\s*none[^}]*display:\s*none/);
     expect(mine).not.toMatch(/::before\s*\{[^}]*(display:\s*none|background:\s*none)/);
+  });
+
+  it("is still with nothing waiting: the calm band does not animate", () => {
+    const calm = rules(/^\s*button\.tree-row\.ownerinbox\.aurora\[data-aurora="calm"\]::before\s*$/).join(";");
+    expect(calm).toMatch(/animation:\s*none/);
+    // The sparks run only in the live state.
+    const sparks = rules(/^\s*button\.tree-row\.ownerinbox\.aurora::after\s*$/).join(";");
+    expect(sparks).toMatch(/display:\s*none/);
+    expect(sparks).not.toMatch(/animation/);
+  });
+
+  it("leaves the selection bar and the focus ring above the layers it paints", () => {
+    const sel = rules(/button\.tree-row\.ownerinbox\.aurora\.sel::before/).join(";");
+    expect(sel).toMatch(/left:\s*2px/);
+    const sparks = rules(/button\.tree-row\.ownerinbox\.aurora\.sel::after/).join(";");
+    expect(sparks).toMatch(/left:\s*2px/);
+    const focus = rules(/^\s*button\.tree-row\.ownerinbox\.aurora:focus-visible\s*$/).join(";");
+    expect(focus).toMatch(/outline:\s*1px solid var\(--accent\)/);
+    expect(focus).toMatch(/outline-offset:\s*-1px/);
   });
 
   it("pauses under the approval card (everything outside the veil is inert)", () => {

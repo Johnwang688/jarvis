@@ -80,7 +80,6 @@
   --aurora-rose: rgba(206, 150, 190, 0.14);   /* a hint: mauve-rose, not amber or red */
   --aurora-spark: rgba(232, 238, 255, 0.55);
   --aurora-drift: 11s;          /* one pass of the band while something waits */
-  --aurora-drift-calm: 26s;     /* nothing waiting: the same band, slower */
 
   --veil: rgba(0, 0, 0, 0.62);
   --shadow-pop: 0 8px 28px rgba(0, 0, 0, 0.55);
@@ -2156,13 +2155,16 @@ button.tree-row.ownerinbox:focus-visible { box-shadow: inset 0 0 0 1px var(--acc
    - pending (ranks 1-2, the amber count): the band dims and the sparks go,
      and the count sits on an opaque --bg-1 chip, so amber reads exactly as
      it does everywhere else;
-   - nothing waiting: the band drifts at a third of the speed, no sparks;
+   - nothing waiting: a static tint, no sparks, nothing animating (the desk
+     composites nothing for an empty inbox; review of #312);
    - under the approval card (everything outside the veil is [inert]) both
      pause: the card stays the loudest thing on screen;
    - prefers-reduced-motion: no animation at all, a static tint.
    Compositor-only: transform on the band, opacity on the sparks, both on
    absolutely placed pseudo-elements clipped by the row, so nothing moves the
-   layout and no script runs. */
+   layout and no script runs. The isolated row paints both layers over its
+   own background and inset shadows, so its selection bar is left 2px clear
+   and its focus ring is an outline, which paints above them. */
 button.tree-row.ownerinbox.aurora { position: relative; isolation: isolate; overflow: hidden; }
 button.tree-row.ownerinbox.aurora::before {
   content: ""; position: absolute; top: 0; bottom: 0; left: 0; width: 200%;
@@ -2176,7 +2178,7 @@ button.tree-row.ownerinbox.aurora::before {
   will-change: transform;
   animation: aurora-drift var(--aurora-drift) linear infinite;
 }
-button.tree-row.ownerinbox.aurora[data-aurora="calm"]::before { animation-duration: var(--aurora-drift-calm); }
+button.tree-row.ownerinbox.aurora[data-aurora="calm"]::before { animation: none; will-change: auto; }
 button.tree-row.ownerinbox.aurora[data-aurora="pending"]::before { opacity: 0.55; }
 button.tree-row.ownerinbox.aurora::after {
   content: ""; position: absolute; inset: 0; z-index: -1; pointer-events: none;
@@ -2193,6 +2195,12 @@ button.tree-row.ownerinbox.aurora[data-aurora="live"]::after {
   animation: aurora-twinkle 4.6s ease-in-out infinite;
 }
 .ownerinbox.aurora .badge.inboxcount { background: var(--bg-1); }
+button.tree-row.ownerinbox.aurora.sel::before,
+button.tree-row.ownerinbox.aurora.sel::after { left: 2px; }
+button.tree-row.ownerinbox.aurora:focus-visible {
+  box-shadow: none; outline: 1px solid var(--accent); outline-offset: -1px;
+}
+button.tree-row.ownerinbox.aurora.sel:focus-visible { box-shadow: inset 2px 0 var(--accent); }
 /* The approval card is up: everything outside the veil is inert. */
 [inert] button.tree-row.ownerinbox.aurora[data-aurora]::before,
 [inert] button.tree-row.ownerinbox.aurora[data-aurora]::after { animation-play-state: paused; }
