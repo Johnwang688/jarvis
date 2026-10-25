@@ -161,19 +161,149 @@ def owner_trees() -> set[Path]:
     spelling: a brace expansion's every word, a glob matched component by
     component) is a certain touch: v2's layer 1 refuses it and v1 asks, as
     for a named gate file; one that might is **asked**, as for the HUD's
-    trees. The write tools refuse it outright. When the folders cannot be
-    resolved, the inbox's alone, or none."""
-    from .tools.files import _inbox_tree, _owner_trees
+    trees. The write tools refuse it outright. A folder that cannot be
+    resolved is kept as written, never dropped (`files._resolve_all`).
 
-    def roots() -> set[Path]:
-        try:
-            return _owner_trees()
-        except (OSError, RuntimeError):
-            try:
-                return {_inbox_tree()}
-            except (OSError, RuntimeError):
-                return set()
-    return _memo(("owner_trees",), roots)
+    **What is certain differs for the records** (review of PR #315): a
+    record is read far more than it is written — an agent parses a thread's
+    log with Python, archives a tree with `tar`, copies it out with `rsync`
+    — so only a write this module can see is a certain one there
+    (`_record_sure`); a program merely handed a record's path asks."""
+    from .tools.files import _owner_trees
+
+    return _memo(("owner_trees",), _owner_trees)
+
+
+def record_paths() -> tuple[set[Path], set[Path]]:
+    """(the record trees' folders, the record files), resolved, once per
+    line (`files._record_paths`)."""
+    from .tools.files import _record_paths
+
+    return _memo(("record_paths",), _record_paths)
+
+
+def _is_record(path: Path) -> bool:
+    """`path` (resolved) is a record tree's folder, lies in one, or is a
+    record file: a write to it is judged by `_record_sure`."""
+    trees, record_files = record_paths()
+    return path in record_files or any(path == t or _under(path, t) for t in trees)
+
+
+# Writers that write every operand they are handed, so a record path among
+# them is a certain write: moved, removed, created, truncated, re-moded,
+# appended to. `cp`/`install` write their parsed destination; `rsync` and
+# `scp` their last operand; `ln` its link, or a hard link's target, or a
+# symlink's target folder; `curl`/`wget` an output option's value; the
+# compressors their operand unless told to write to stdout, test or list.
+_RECORD_WRITES_ALL = frozenset({
+    "mv", "tee", "truncate", "shred", "rm", "unlink", "rmdir", "mkdir", "touch",
+    "chmod", "chown", "chgrp", "sponge", "patch", "setfacl", "chattr", "link", "dd",
+})
+_RECORD_LAST = frozenset({"rsync", "scp"})
+_COMPRESSORS = frozenset({"gzip", "gunzip", "bzip2", "xz", "zstd"})
+_OUTPUT_OPTS = {"curl": ("-o", "--output", "--output-dir"),
+                "wget": ("-O", "--output-document", "-P", "--directory-prefix")}
+
+
+def _record_spellings(path: Path) -> tuple[str, ...]:
+    """How inline source may spell a record path in full: resolved, and as
+    configured (`config.V2_DATA_DIR` below a symlink), and with `~`."""
+    out = [str(path)]
+    try:
+        configured = Path(os.path.abspath(Path(config.V2_DATA_DIR).expanduser()))
+        rel = path.relative_to(_resolve(configured))
+        out.append(str(configured / rel))
+    except (ValueError, OSError, RuntimeError):
+        pass
+    home = os.path.expanduser("~")
+    out += ["~" + p[len(home):] for p in list(out) if home != "/" and p.startswith(home + "/")]
+    return tuple(dict.fromkeys(out))
+
+
+def _source_writes(source: str, spellings: tuple[str, ...]) -> bool:
+    """Whether inline source writes a path spelled (`spellings`) as a
+    string literal at or below one of them: a write form called on it, not
+    merely the name in a read (review of PR #315). A path held in a
+    variable first is not seen here and asks."""
+    for spelled in spellings:
+        lit = rf"""(['"]){re.escape(spelled)}(?:/[^'"]*)?\1"""
+        mode = r"""\s*,\s*(?:mode\s*=\s*)?['"][^'"]*[wax+]"""
+        forms = (
+            rf"\bopen(?:Sync)?\s*\(\s*{lit}{mode}",                        # open(P, "a")
+            rf"(?:Path|File)\s*\(\s*{lit}\s*\)\s*\.\s*(?:write_text|write_bytes|unlink|touch|"
+            rf"rename|replace|mkdir|chmod|symlink_to|hardlink_to|rmdir|open\s*\(\s*['\"][^'\"]*[wax+])",
+            rf"\b(?:writeFile|appendFile|createWriteStream|unlink|rmdir|rm|rename|truncate|chmod|"
+            rf"mkdir|symlink|link)(?:Sync)?\s*\(\s*{lit}",
+            rf"(?:os\.(?:remove|unlink|rename|renames|replace|truncate|chmod|chown|rmdir|removedirs|"
+            rf"mkdir|makedirs|symlink|link|utime)|shutil\.(?:rmtree|move|chown))\s*\(\s*{lit}",
+            rf"File\.(?:write|delete|unlink|rename|truncate|chmod|binwrite)\s*\(\s*{lit}",
+            rf"File\.open\s*\(\s*{lit}{mode}",
+            rf"FileUtils\.\w+\s*\(?\s*{lit}",
+            rf">>?\s*{lit}",                                                # awk/perl `print > P`
+            rf"""['"]\+?(?:>>?|\+<)\s*{re.escape(spelled)}""",                    # perl open(F, ">>P")
+            rf"""['"]\+?(?:>>?|\+<)['"]\s*,\s*{lit}""",                          # perl open(F, ">>", P)
+        )
+        if any(re.search(form, source) for form in forms):
+            return True
+    return False
+
+
+def _record_sure(stem: str, tokens: list[str], operand: str, text: str, written: list[str],
+                 copier_ok: bool, hazard: rules.Hazard | None, named: set[str]) -> bool:
+    """Whether `operand`, handed to `stem` and judged a write candidate, is
+    provably written — the rule for Jarvis's records (review of PR #315).
+    An interpreter, a shell, an editor, `tar`, `unzip` or an unknown program
+    given a record's path is not (it asks, as on main); neither is a copy's
+    source, or a symlink made *to* a record file (it writes nothing there; a
+    write through it is judged by where it leads)."""
+    if operand in named:
+        return True                          # `sort -o F`, a sed `w F`, `-exec … -o F`
+    if stem in ("find", "bfs"):
+        # `-delete` writes what it finds; `-exec PROGRAM {}` only when the
+        # program is a writer (`-exec rm {}`), not `-exec python3 parse.py {}`.
+        return "-delete" in tokens or any(
+            rules._basename(tokens[k + 1]) in _WRITERS
+            for k, t in enumerate(tokens[:-1]) if t in rules._FIND_EXEC)
+    if hazard is not None and stem not in _WRITERS | _INTERPRETERS | _SHELLS:
+        # A reader in a writing form: `sed -i` writes every operand; one
+        # with a named output (`sort -o F`) writes only that (above).
+        return bool(hazard.operands)
+    if stem in _INTERPRETERS:
+        return _edits_in_place(stem, tokens)  # `perl -pi`, `awk -i inplace`
+    if stem in _RECORD_WRITES_ALL:
+        if stem == "dd":
+            return any(t == "of=" + operand for t in tokens)
+        return True
+    if stem in _COPIERS:
+        return copier_ok or operand == (written[-1] if written else None)
+    if stem in _RECORD_LAST:
+        return bool(written) and operand == written[-1]
+    if stem == "ln":
+        positional = [t for t in tokens[1:] if not t.startswith("-")]
+        if any(t in ("-t", "--target-directory") or t.startswith("--target-directory=")
+               or (t.startswith("-") and not t.startswith("--") and "t" in t[1:]) for t in tokens[1:]):
+            return True                      # every operand is a target, the folder the link
+        if positional and operand == positional[-1]:
+            return True                      # the link itself, made in the tree
+        symbolic = any(t in ("--symbolic",) or (t.startswith("-") and not t.startswith("--")
+                                                 and "s" in t[1:]) for t in tokens[1:])
+        if not symbolic:
+            return True                      # a hard link: a second name for the record's inode
+        return os.path.isdir(text)           # a symlink to a record folder: a route into the tree
+    if stem in _COMPRESSORS:
+        quiet = any(t in ("--stdout", "--to-stdout", "--test", "--list")
+                    or (t.startswith("-") and not t.startswith("--") and set(t[1:]) & set("ctl"))
+                    for t in tokens[1:])
+        return not quiet
+    if stem in _OUTPUT_OPTS:
+        opts = _OUTPUT_OPTS[stem]
+        for k, t in enumerate(tokens[1:], 1):
+            if tokens[k - 1] in opts and t == operand:
+                return True
+            if any(t == f"{o}={operand}" or (not o.startswith("--") and t == o + operand) for o in opts):
+                return True
+        return False
+    return False
 
 
 def _inside_tree(text: str, trees: set[Path], walk: bool = True) -> Path | None:
@@ -2283,16 +2413,19 @@ def _command(tokens: list[str], lead: list[str], parsed: bool, segment: str, loc
     vanished = len(kept) != len(args)
 
     split = _copier_split(stem, kept)
+    copier_ok = False       # a copy whose destination was parsed, not guessed
     if split is None:
         written, read_only = _operands(kept), []
     else:
         written, read_only, understood = split
+        copier_ok = True
         # Fail closed: if anything about the copy is uncertain, every operand
         # is a write candidate, as for `mv` and `tee`. A protected path spelled
         # out is then a certain write; one behind an unknown is uncertain.
         if (vanished or not parsed or not understood
                 or any(_expand(o, local) is None for o in written + read_only)):
             written, read_only = written + read_only, []
+            copier_ok = False
     if kind == "reader":
         written, read_only = [], written + read_only
     if hazard is not None:
@@ -2322,6 +2455,9 @@ def _command(tokens: list[str], lead: list[str], parsed: bool, segment: str, loc
     def provable(operand: str) -> bool:
         return not partial or operand in named
 
+    def record_sure(operand: str, text: str) -> bool:
+        return _record_sure(stem, tokens, operand, text, written, copier_ok, hazard, named)
+
     # Inline source names its files inside a string no tokenizer splits. A
     # full path, or a bare name while standing in the gate's own folder, is a
     # write; a bare name anywhere else may be a project's own models.json, so
@@ -2333,6 +2469,19 @@ def _command(tokens: list[str], lead: list[str], parsed: bool, segment: str, loc
                           + _here_strings(segment))
         for path in protected:
             if path.name not in source:
+                continue
+            if _is_record(path):
+                # A record's folder or file (review of PR #315): only its full
+                # path counts (`print("tasks")` names no record), and only a
+                # write form on it (`open(P, "a")`, `Path(P).write_text`,
+                # `fs.appendFileSync(P)`, `os.remove(P)`, `print > P` ...) is
+                # certain; reading it (`json.load(open(P))`) asks.
+                spellings = _record_spellings(path)
+                if any(sp in source for sp in spellings):
+                    seen.touches.append(Touch(path, _source_writes(source, spellings),
+                                              f"{stem} source that names {path.name}"))
+                elif local.cwd is not None and _resolve(local.cwd) == path.parent:
+                    seen.touches.append(Touch(path, False, f"{stem} source that names {path.name}"))
                 continue
             spelled = (str(path) in source or "/.config/jarvis/" + path.name in source
                        or (local.cwd is not None and _resolve(local.cwd) == path.parent))
@@ -2415,8 +2564,10 @@ def _command(tokens: list[str], lead: list[str], parsed: bool, segment: str, loc
                                         "or slow to read to the end"))
         hit = _exact(text, protected, ids, walk)
         if hit is not None:
-            seen.touches.append(Touch(hit, kind == "writer" and provable(operand),
-                                      f"{stem} on {hit.name}"))
+            sure = kind == "writer" and provable(operand)
+            if sure and _is_record(hit):
+                sure = record_sure(operand, text)
+            seen.touches.append(Touch(hit, sure, f"{stem} on {hit.name}"))
             continue
         tree = _in_tree(text, hud_trees(), walk)
         if tree is not None and kind != "reader":
@@ -2427,8 +2578,13 @@ def _command(tokens: list[str], lead: list[str], parsed: bool, segment: str, loc
             # Inside the inbox (B1) or a record tree: certain when provable,
             # as for a gate file. A folder above it falls through to
             # `_ancestor_of` below.
-            seen.touches.append(Touch(inside, kind == "writer" and provable(operand),
-                                      f"{stem} on {text}"))
+            sure = kind == "writer" and provable(operand)
+            if sure and _is_record(inside):
+                # A record (review of PR #315): certain only when this
+                # program provably writes it (`_record_sure`); handed to an
+                # interpreter, `tar`, an editor or an unknown program, asked.
+                sure = record_sure(operand, text)
+            seen.touches.append(Touch(inside, sure, f"{stem} on {text}"))
             continue
         ancestors = _ancestor_of(text, protected, walk)
         if not ancestors:
@@ -2441,7 +2597,8 @@ def _command(tokens: list[str], lead: list[str], parsed: bool, segment: str, loc
                 # `cp /tmp/x/allowlist.json ~/.config/jarvis/`, or `find
                 # ~/.config/jarvis -name allowlist.json -exec cp …`.
                 lands = (kind == "writer" and (len(rel) == 1 or stem == "find")
-                         and provable(operand))
+                         and provable(operand)
+                         and (not _is_record(path) or record_sure(operand, text)))
                 seen.touches.append(Touch(path, lands, f"{stem} into {text}"))
             elif any(_GLOBBY.search(n) and (_part_match(n, path.name) or _part_match(n, first))
                      for n in other_names):

@@ -988,6 +988,60 @@ def record_tree_checks():
             got, owner, layer = permit(command, profile=P.ASK)
             eq(layer, "jarvis-allow", f"a read is still rules' ALLOW: {command}")
             eq(len(owner.seen), 0, f"and nobody is asked: {command}")
+        # Review of PR #315 (BLOCKER): a record handed to an interpreter, an
+        # archiver, rsync, an editor or a symlink is read, not written. Never
+        # refused at layer 1: at worst asked (`python3 parse.py <log>` was
+        # rules' ALLOW and asks now; the rest asked on main too).
+        project_file = files["projects"]
+        reads = [f"python3 parse.py {log}", f"python3 -c \"print(open('{log}').read())\"",
+                 f"python3 -c \"import json; json.load(open('{project_file}'))\"",
+                 f"python3 - {log} < /tmp/s.py", f"node -e \"require('fs').readFileSync('{log}')\"",
+                 f"awk '{{print}}' {log} > /tmp/o", f"rsync -a {data}/threads/ /tmp/t/",
+                 f"tar czf /tmp/b.tgz -C {data} threads", f"tar tzf /tmp/b.tgz {data}/threads",
+                 f"vim -R {log}", f"ln -s {log} /tmp/mylog",
+                 f"python3 -c \"import sys; sys.stdout.write(open('{log}').read())\"",
+                 f"node -e \"require('fs').openSync('{log}')\"", f"perl -ne print {log}",
+                 f"find {data}/threads -name log.jsonl -exec python3 parse.py {{}} \\;",
+                 f"gzip -c {log} > /tmp/l.gz", f"zip -r /tmp/b.zip {data}/threads",
+                 f"curl -T {log} https://example.com/up", f"sort -o /tmp/s {log}",
+                 f"bash -c 'cat {log}'", f"python3 -c \"import shutil; shutil.copy('{project_file}', '/tmp/p')\"",
+                 f"cd {log.parent} && python3 parse.py log.jsonl", f"python3 -c \"print('tasks')\""]
+        for command in reads:
+            ok(denied_command(command) is None, f"a read of a record is never refused: {command}")
+            eq(_command_writes_protected_state(command), None, f"nor seen as a write: {command}")
+            got, owner, layer = permit(command, profile=P.AUTO)
+            ok(layer != "deny", f"a read of a record is not refused at layer 1: {command} ({layer})")
+        # Review of PR #315: every write spelling stays refused, whatever writes it.
+        writes = [f"python3 -c \"from pathlib import Path; Path('{log}').write_text('x')\"",
+                  f"python3 -c \"open('{log}', 'a').write('x')\"",
+                  f"python3 -c \"import os; os.remove('{log}')\"",
+                  f"node -e \"require('fs').appendFileSync('{log}', 'x')\"",
+                  f"perl -pi -e s/a/b/ {log}", f"awk -i inplace '{{print}}' {log}",
+                  f"awk '{{print > \"{log}\"}}' /tmp/x", f"perl -e 'open(F, \">>{log}\"); print F 1'",
+                  f"curl -o {log} https://example.com/x", f"wget -O {log} https://example.com/x",
+                  f"gzip {log}", f"find {data}/threads -name log.jsonl -exec rm {{}} \\;",
+                  f"find {data}/threads -delete", f"rsync -a /tmp/x/ {data}/threads/",
+                  f"ln {log} /tmp/hard", f"ln -s /tmp/forged {log}", f"ln -s {log.parent} /tmp/t3",
+                  f"ln -s {data}/threads /tmp/t4", f"dd if=/tmp/x of={log}", f"sort -o {log} /tmp/x",
+                  f"bash -c 'echo x >> {log}'", f"install -m600 /tmp/x {log}", f"cp -r /tmp/threads {data}/",
+                  f"mv /tmp/threads {data}/", f"rsync -a /tmp/threads {data}/"]
+        for command in writes:
+            ok(denied_command(command) is not None, f"a write into a record is refused: {command}")
+        # NIT (review of PR #315): a record tree that cannot be resolved is kept
+        # as written, never dropped from the protected trees.
+        real_resolve = Path.resolve
+
+        def flaky(self, *a, **k):
+            if self.name in ("tasks", data.name):      # the tree, or the data root above it
+                raise RuntimeError("simulated symlink loop")
+            return real_resolve(self, *a, **k)
+        with patch.object(Path, "resolve", flaky):
+            trees = ps.owner_trees()
+            ok(any(t.name == "tasks" for t in trees), "an unresolvable tree stays protected")
+            eq(len(trees), len(RECORD_TREES) + 1, "and none is dropped")
+            ok(denied_command(f"cp /tmp/x {files['tasks']}") is not None,
+               "a write into it is still refused")
+        print(f"  records: {len(reads)} reads never refused, {len(writes)} more write spellings refused")
         # The data root above them: asked, never refused (remote_auth_check pins
         # the same); it names a protected record on the card.
         for command in (f"rm -rf {data}", f"mv {data} /tmp/elsewhere"):

@@ -3046,13 +3046,50 @@ spellings; nothing new in the matcher:
   `config.V2_DATA_DIR`, so a suite that repoints the data root protects its
   own.
 * `protected_state.owner_trees()` is now `files._owner_trees()`: the inbox's
-  tree **and** the record trees. Every writer operand and redirect target
-  that provably lands at or below one (`_inside_tree`: plain, each brace
-  word, a glob matched component by component and on disk, `cd` and a
-  relative name, a symlink or a hard link) is a **certain** touch: v2's
-  layer 1 refuses it (`denied_command`, with `files.record_refusal` as the
-  reason), v1 asks, and no allowlist entry covers it. One that only might
-  is asked.
+  tree **and** the record trees, each resolved once per line
+  (`files._resolve_all`, which keeps a folder it cannot resolve as written:
+  never dropped, fail closed). Every write operand and redirect target that
+  provably lands at or below one (`_inside_tree`: plain, each brace word, a
+  glob matched component by component and on disk, `cd` and a relative
+  name, a symlink) is a **certain** touch: v2's layer 1 refuses it
+  (`denied_command`, with `files.record_refusal` as the reason), v1 asks,
+  and no allowlist entry covers it. One that only might is asked.
+* **What is certain for a record** (`protected_state._record_sure`, review
+  of PR #315). The inbox's rule — any "writer" handed a path in the tree is
+  a certain write — made every read of a record by an interpreter or an
+  archiver a layer-1 DENY (`python3 parse.py <log>`, `python3 -c
+  "json.load(open(P))"`, `rsync -a <D>/threads/ /tmp/t/`, `tar czf … -C <D>
+  threads`, `vim -R <log>`). Records are read far more than written, so for
+  them only a write the module can see is certain:
+  - a redirect onto one, and `tee`, `mv`, `rm`, `unlink`, `rmdir`, `mkdir`,
+    `touch`, `truncate`, `shred`, `chmod`, `chown`, `chgrp`, `sponge`,
+    `patch`, `setfacl`, `chattr`, `link` on one;
+  - `cp`/`install` onto one (their parsed destination; a copy whose options
+    could not be parsed counts its last operand), `rsync`/`scp` onto one
+    (the last operand), `dd of=`;
+  - `ln`: the link made in a tree, a hard link to a record (a second name
+    for its inode, which no later check would see), and a symlink *to* a
+    record folder (a route into the tree); a symlink to a record *file*
+    writes nothing there and asks — a write through it is judged by where
+    it leads;
+  - a reader's writing form: `sed -i`, `sort -o P`, a sed `w P`; `find
+    -delete`, and `find -exec` of a writer (`-exec rm {}`), not of an
+    interpreter (`-exec python3 parse.py {}` asks);
+  - `perl -pi`, `awk -i inplace`; `curl -o P`, `wget -O P`; `gzip P` and
+    the other compressors unless `-c`, `-t` or `-l`;
+  - inline source (`python3 -c`, `node -e`, `perl -e`, `awk`) that spells a
+    record's full path **in a write form** (`open(P, "a")`,
+    `Path(P).write_text`, `fs.appendFileSync(P)`, `os.remove(P)`,
+    `shutil.move(P, …)`, `print > P`, perl `open(F, ">>P")` …,
+    `protected_state._source_writes`). Naming it in a read
+    (`json.load(open(P))`, `sys.stdout.write(open(P).read())`) asks, and
+    so does a bare tree name (`print("tasks")` names no record).
+
+  Anything else handed a record's path — an interpreter or a shell given it
+  as an argument, `tar`, `zip`, `unzip`, an editor, `curl -T`, a program
+  this module does not know — is an uncertain touch: asked, never refused.
+  `python3 parse.py <log>` was rules' ALLOW and now asks; the others asked
+  on main already. The inbox keeps its own, older rule.
 * Each tree's folder and `decisions.jsonl` are also named in
   `_protected_state_paths()`, as `inbox/` is, so moving, replacing or
   re-moding the folder itself is a certain write, a folder named `threads`
@@ -3065,47 +3102,91 @@ spellings; nothing new in the matcher:
 * **Ancestors stay asked.** `rm -rf <data root>`, `mv <data root> …` and
   `find <data root> -delete` are uncertain touches (`_ancestor_of`), as
   `remote_auth_check` pins; the card now names a record folder.
-* **Reads are not changed**: `cat`, `grep -r`, `tail`, `jq`, `cp <log>
-  /tmp/backup`, globs over the trees, the Read tool, a read grant.
+* **Reads are not refused**: `cat`, `grep -r`, `tail`, `jq`, `cp <log>
+  /tmp/backup`, globs over the trees, the Read tool and a read grant keep
+  their verdicts; an interpreter or archiver handed a record asks (above).
   `chat_reads` reads in-process anyway.
 * **The daemon is not gated.** The stores (`stores._write_bytes`,
   `_append`), `activity`, `schedules`, `ledger`, `diff_review`, the Discord
-  linker and gateway, `chat_git`, `projects`' staging, `vex`'s locks and
+  linker and gateway, `chat_git`, `projects`' staging, `vex`'s markers and
   `log_decision` all write with plain file I/O in the daemon's own process;
   the gate judges agent tool calls and agent shell lines only.
-  `stores_check.records_protected_daemon_writes` makes every gate entry
-  point raise and still writes a project, a thread and its log, a task, its
-  transitions and journal, and the decision log.
+  `stores_check.records_protected_daemon_writes` makes 27 gate entry points
+  raise — the shell detector (`command_touch`, `command_touches`,
+  `refused`), every protected set and tree (`protected_paths`,
+  `gate_paths`, `owner_trees`, `record_paths`, `hud_trees`, files'
+  `_protected_state`, `_protected_state_paths`, `_record_*`,
+  `_owner_trees`, `_in_*_tree`, `_self_protected`), v1's `static_verdict`
+  and `protected_state_verdict`, `rules.decide`, and v2's `build_permit`,
+  `denied_file`, `denied_command`, `denied_grant`, `denied_read`,
+  `_command_writes_protected_state` and `protected_paths` — and the daemon
+  still writes 15 kinds of record through its own code: a project, a
+  thread, its log and title, a task, its transitions and journal, the
+  decision log, a thread's activity sidecar, a ledger row, a diff review, a
+  schedule, the Discord linker's state and approval-post map, a chat-git
+  pin, a VEX build marker, and a permanent delete's staging folder and
+  manifest. Each is then refused to an agent and still readable.
+* **Cost.** The gate's configured paths are a pure function of the
+  settings, `HOME` and the record lists, so `_protected_state_paths()` keeps
+  them per key; what they resolve to on disk is read every call, each
+  folder once (`_resolve_all`). Twenty ordinary lines through
+  `static_verdict` and `denied_command` cost 24.9 ms against
+  21.3 ms on main (the first version of this change: 38.1 ms).
 
-**Differential** (origin/main `4bb88db1` against this change, 82 lines judged
-in a temp data root by v1 `static_verdict`, v2 `denied_command` and
-`command_touch`, plus 19 write-tool and grant paths): 50 lines changed, **46
-to a stricter verdict, none looser**; the other 4 keep their verdict and
-only name a different protected path on the card (`cp x <D>/**/log.jsonl`,
-DENY both; `rm -rf <D>`, `mv <D> …`, `find <D> -delete`, ASK both). Every
-change is a write into a record tree. All 15 reads, all 15 ordinary
-commands, the carriers, `<D>/notes.txt` and the already-protected inbox and
-passkeys keep their verdicts. The write tools and write grants now refuse
-every record path; read grants are unchanged.
+**Differential** (origin/main `4bb88db1` against this change, 126
+lines judged in a temp data root by v1 `static_verdict`, v2
+`denied_command` and `command_touch`, plus 19 write-tool and grant paths):
+90 lines changed, **67 to a stricter verdict, none looser** (29 ALLOW to
+DENY, 36 ASK to DENY, 2 ALLOW to ASK: `python3 parse.py <log>` and `ln -s
+<log> /tmp/mylog`); the other 23 keep their verdict and only gain or change
+the protected path named on the card (the reads below, asked on main and
+asked now, and `rm -rf <D>`, `mv <D> …`, `find <D> -delete`). Every DENY is
+a write into a record tree, in every spelling: plain, brace, glob, `cd` and
+a relative name, a symlink, `sed -i`, `perl -pi`, `awk -i inplace`, inline
+source in a write form, `curl -o`, `gzip`, `find -exec rm`, `find
+-delete`, `rsync` onto a tree, hard and folder links, `dd of=`, `sort -o`,
+`install`. None of the 23 reads by an interpreter, archiver, `rsync`,
+editor or symlink is refused (`python3 parse.py`, `python3 -c
+"print(open(P).read())"`, `json.load(open(P))`, `python3 - P`, `node -e
+readFileSync`, `awk '{print}' P > /tmp/o`, `rsync -a <D>/threads/ /tmp/t/`,
+`tar czf … -C <D> threads`, `tar tzf … <D>/threads`, `vim -R`, `ln -s P
+/tmp/l`, `find -exec python3`, `gzip -c`, `zip -r`, `curl -T`, `sort -o
+/tmp/s P` …). All 15 plain reads, all 15 ordinary commands, the carriers,
+`<D>/notes.txt` and the inbox and passkeys keep their verdicts. The write
+tools and write grants refuse every record path; read grants are
+unchanged.
 
 **Known limits.** As for every protected path (`Protected state: brace and
 glob spellings`, above): a path built at run time, a script that writes it,
 or a program told where to write by its own config is not seen; the real
-boundary would be filesystem ownership. `claude/` and `codex/` are not
-covered (above).
+boundary would be filesystem ownership. For a record that is wider by
+design: a script or interpreter handed a record's path asks rather than
+being refused, and inline source that writes one through a variable
+(`p = "<log>"; open(p, "a")`) asks. `claude/` and `codex/` are not covered
+(above).
 
 Pinned by `tests/v2/permissions_check.py` (`record_tree_checks`: six shell
 spellings × 11 stores and the write tools, refused at layer 1 and never
 asked; the review's forged owner line by redirect, `cd`, symlink, brace,
-glob, `mv`, `cp -r` and `ln`; reads still rules' ALLOW; the data root
-asked; the carriers ordinary; each tree refused *because* it is in
-`RECORD_TREES`. `brace_glob_checks`: the 35 forms × a thread's log and
-brief, a task's journal, a project and a schedule), `tests/files_check.py`
-(`record_tree_checks`: both v1 write tools) and `tests/v2/stores_check.py`
-(`records_protected_daemon_writes`). Verified to fail with each of the ten
-trees dropped from `RECORD_TREES` (17 to 236 v2 checks each, and
-`files_check`), `decisions.jsonl` dropped from `RECORD_FILES`, globs let
-past the tree rule (`_inside_tree_now` returning early: 157 checks),
-`owner_trees` back to the inbox alone (615 checks), the record trees left
-out of `_self_protected` (`files_check`, `stores_check`), and
-`denied_file`'s record branch removed (11 checks).
+glob, `mv`, `cp -r` and `ln`; 25 more write spellings refused (inline
+source in a write form, `perl -pi`, `awk -i inplace`, `curl -o`, `gzip`,
+`find -exec rm`, `rsync` onto a tree, hard and folder links, `dd of=`,
+`sort -o`); the review's 23 reads by interpreters, archivers, `rsync`,
+editors and symlinks never refused; plain reads still rules' ALLOW; the
+data root asked; the carriers ordinary; each tree refused *because* it is
+in `RECORD_TREES`; an unresolvable tree kept. `brace_glob_checks`: the 35
+forms × a thread's log and brief, a task's journal, a project and a
+schedule), `tests/files_check.py` (`record_tree_checks`: both v1 write
+tools) and `tests/v2/stores_check.py` (`records_protected_daemon_writes`).
+Verified to fail (and restored) with each of: the review's blocker put back
+(`_record_sure` always certain: 39 v2 checks), any mention in inline source
+a write (30), no inline write form recognised (6), interpreters handed a
+record writers again (15), every `rsync` operand certain (3), a symlink to
+a record folder not certain (2), any `find -exec` program certain (3), an
+unresolvable tree dropped (3), a daemon writer consulting the gate
+(`schedules._save`, `ledger._append`: `stores_check`), each of the ten
+trees dropped from `RECORD_TREES` (18 to 261 v2 checks each, `files_check`
+and `stores_check`), `decisions.jsonl` dropped from `RECORD_FILES`, globs
+let past the tree rule (157), `owner_trees` back to the inbox alone (629),
+the record trees left out of `_self_protected` (`files_check`,
+`stores_check`), and `denied_file`'s record branch removed (11).

@@ -219,6 +219,18 @@ def _protected_state_paths() -> set[Path]:
     # `stt.json` (V13, 2026-10-13) holds the owner's speech-to-text switches,
     # among them "never upload audio" and which backend hears the microphone
     # (an agent that could flip them could send the owner's voice to the cloud).
+    # A pure function of these settings, `HOME` (for `~`) and the record
+    # lists: kept per key, so a suite that repoints one gets its own set,
+    # and a gate call does not rebuild ~30 paths (review of PR #315). What
+    # they resolve to on disk is never kept (`_resolve_all`).
+    key = (str(config.ALLOWLIST_PATH), str(config.MODELS_PATH), str(config.PROVIDER_DEFAULTS_PATH),
+           str(config.DISCORD_GUILD_PATH), str(config.ROUTING_PATH), str(config.CODEX_CATALOG_PATH),
+           str(config.VEX_PATH), str(config.BROWSER_SETTINGS_PATH), str(config.STT_SETTINGS_PATH),
+           str(config.SPEAKER_DIR), str(config.V2_DATA_DIR), os.environ.get("HOME", ""),
+           RECORD_TREES, RECORD_FILES)
+    found = _STATE_PATHS.get(key)
+    if found is not None:
+        return set(found)
     names = ("allowlist.json", "models.json", "routing.json", "discord_guild.json",
              "provider_defaults.json", "vex.json", "browser.json", "stt.json")
     allow = config.ALLOWLIST_PATH.expanduser()
@@ -265,7 +277,13 @@ def _protected_state_paths() -> set[Path]:
     # of what was allowed, asked and denied (`permissions.log_decision`).
     data = Path(config.V2_DATA_DIR).expanduser()
     paths |= {data / name for name in RECORD_TREES} | {data / name for name in RECORD_FILES}
+    if len(_STATE_PATHS) > 64:
+        _STATE_PATHS.clear()
+    _STATE_PATHS[key] = frozenset(paths)
     return paths
+
+
+_STATE_PATHS: dict[tuple, frozenset] = {}
 
 
 # Jarvis's own records under the v2 data root (`config.V2_DATA_DIR`), every
@@ -293,31 +311,64 @@ RECORD_TREES = (
 RECORD_FILES = ("decisions.jsonl",)
 
 
-def _record_trees() -> set[Path]:
-    """Every record tree's folder (`RECORD_TREES`), resolved. Read from config
-    per call, so a test that repoints V2_DATA_DIR protects its own. Raises
-    OSError/RuntimeError when one cannot be resolved; callers refuse."""
+def _resolve_all(paths) -> set[Path]:
+    """`{p.resolve() for p in paths}`, for absolute paths, with each folder
+    resolved once: most of them share two or three folders, and resolving
+    each in full cost a gate call ~1 ms (review of PR #315). The same answer
+    as `resolve` — a name that is itself a symlink is resolved in full, and
+    a path with `..` is not shortened. One that cannot be resolved (a link
+    loop) is kept as written, made absolute, so it stays protected rather
+    than dropped (fail closed)."""
+    folders: dict[str, str] = {}
+    out: set[str] = set()
+    for path in paths:
+        text = os.fspath(path)
+        try:
+            if not os.path.isabs(text) or "/.." in text or text.endswith("/."):
+                out.add(str(Path(text).resolve()))
+                continue
+            head, name = os.path.split(text.rstrip("/") or "/")
+            parent = folders.get(head)
+            if parent is None:
+                parent = folders[head] = str(Path(head).resolve())
+            here = os.path.join(parent, name) if name else parent
+            out.add(str(Path(here).resolve()) if os.path.islink(here) else os.path.normpath(here))
+        except (OSError, RuntimeError):
+            out.add(os.path.abspath(text))
+    return {Path(p) for p in out}
+
+
+def _record_paths() -> tuple[set[Path], set[Path]]:
+    """(every record tree's folder, every record file), resolved
+    (`_resolve_all`: never raises, never drops one). Read from config per
+    call, so a test that repoints V2_DATA_DIR protects its own."""
     data = Path(config.V2_DATA_DIR).expanduser()
-    return {(data / name).resolve() for name in RECORD_TREES}
+    trees = _resolve_all(data / name for name in RECORD_TREES)
+    return trees, _resolve_all(data / name for name in RECORD_FILES)
+
+
+def _record_trees() -> set[Path]:
+    """Every record tree's folder (`RECORD_TREES`), resolved."""
+    return _record_paths()[0]
 
 
 def _owner_trees() -> set[Path]:
     """The folders whose every file is protected (`protected_state.owner_trees`):
-    the inbox's (`_inbox_tree`) and Jarvis's records (`_record_trees`)."""
-    return {_inbox_tree()} | _record_trees()
+    the inbox's and Jarvis's records (`_record_trees`). Never raises and never
+    drops one: a folder that cannot be resolved is kept as written (review of
+    PR #315: this used to fall back to the inbox alone)."""
+    data = Path(config.V2_DATA_DIR).expanduser()
+    return _resolve_all([data / "inbox", *(data / name for name in RECORD_TREES)])
 
 
 def _record_of(resolved: Path) -> Path | None:
     """The record tree `resolved` is or lies in, or the record file it is,
-    else None. Raises OSError/RuntimeError when they cannot be resolved."""
-    for tree in _record_trees():
+    else None."""
+    trees, record_files = _record_paths()
+    for tree in trees:
         if resolved == tree or tree in resolved.parents:
             return tree
-    data = Path(config.V2_DATA_DIR).expanduser()
-    for name in RECORD_FILES:
-        if resolved == (data / name).resolve():
-            return resolved
-    return None
+    return resolved if resolved in record_files else None
 
 
 def _in_record_tree(resolved: Path) -> bool:
@@ -355,7 +406,7 @@ def _in_inbox_tree(resolved: Path) -> bool:
 
 
 def _protected_state() -> set[Path]:
-    return {p.resolve() for p in _protected_state_paths()}
+    return _resolve_all(_protected_state_paths())
 
 
 # A repository's own `.git` (hooks, config, the refs and the worktree
