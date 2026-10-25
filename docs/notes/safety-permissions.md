@@ -2988,3 +2988,124 @@ brace expansion disabled, glob components dropped again, globs skipped by
 the ancestor and exact checks, the cap's fail-closed touches removed, `..`
 collapsed as text, only the guessed reading made, a cut walk ignored, a
 malformed sequence not closed, and a quoted empty word dropped.
+
+## Protected state: Jarvis's own records (2026-10-25)
+
+**The hole** (found by the review of PR #309). `cp /tmp/x
+~/.local/share/jarvis/v2/threads/<id>/log.jsonl` was a static-verdict ALLOW
+(and `echo … >> log.jsonl` an ASK that `cp` never needed). An agent could
+append or replace a record like `{"kind":"user","data":{"origin":"owner",
+"via":"hud","typed":…}}` in any thread's log, and the forged line then
+showed as the owner's words in the HUD transcript, in other chats'
+`chat_read`/`chat_summary`, on the phone's `/m/api/threads/<id>/log` and in
+the Discord mirror's catch-up. It never reached a model's context or desk
+authority, but it falsified the record the owner and other chats read.
+The files beside it were open the same way, and some are worse than a
+record: `threads/<id>/brief.json` is the brief `resume_thread` reopens
+(cwd, profile, grants), `projects/<id>.json` holds the folder a project's
+chats work in, and `schedules/<id>.json` is what runs with nobody watching.
+
+**What lives under the v2 data root** (`config.V2_DATA_DIR`, default
+`~/.local/share/jarvis/v2`), who writes it, and the verdict:
+
+| Path | Holds | Written by (in-process) | Verdict |
+|---|---|---|---|
+| `threads/<id>/thread.json` | the thread record (role, provider, project, title, surface) | `stores.ThreadStore` | **DENY** |
+| `threads/<id>/log.jsonl` | the transcript the HUD, `chat_read`, the phone and Discord read | `ThreadStore.log`, `daemon` | **DENY** |
+| `threads/<id>/brief.json` | the brief a resume reopens | `daemon` | **DENY** |
+| `threads/<id>/activity.json`, `discord.json`, `subagents.jsonl` | activity, the Discord thread link, subagent runs | `activity`, `discord/mirror`, `subagents` | **DENY** (tree) |
+| `tasks/<id>/task.json`, `journal.jsonl`, `activity.json`, `discord.json` | the task record and its journal | `stores.TaskStore`, `activity`, `discord/reporter` | **DENY** |
+| `projects/<id>.json` | name, root, archive state | `stores.ProjectStore`, `projects` | **DENY** |
+| `schedules/<id>.json` | what runs, where and when | `schedules` | **DENY** |
+| `ledger/<day>.jsonl` | usage accounting that admission reads | `ledger`, `hud_api.HUDLedger` | **DENY** |
+| `diff_reviews/<task>.json` | the quick reviews shown with a task's diff | `diff_review` | **DENY** |
+| `discord/linker.json`, `approval-posts.json` | sanctioned channel names, pending approval posts | `discord/linker`, `discord/gateway` | **DENY** |
+| `chat-git/pins.json`, `chat-git/empty-home/` | the origin a chat may push to; the daemon's empty git HOME | `chat_git` | **DENY** |
+| `deleting/<stamp>/` | a permanent delete's staging folder and manifest | `projects` | **DENY** |
+| `vex/build-*.lock`, `unfinished-*` | VEX build locks | `vex` | **DENY** |
+| `decisions.jsonl` | the gate's own audit log | `permissions.log_decision` | **DENY** (named file) |
+| `inbox/` (`missed.jsonl`, `decisions/`) | the owner inbox | `inbox`, `decisions` | DENY, unchanged (inbox B1) |
+| `remote/passkeys.json`, `sessions.json` | the phone's passkeys and sessions | `remote_auth` | DENY, unchanged (PH-6) |
+| `claude/<thread>/` | Claude session carriers (`mcp-<nonce>.json`) | `providers/claude` | **left**: a credential carrier (`editor_policy.carrier_dirs`), not a record; a follow-up |
+| `codex/<thread>/` | a Codex chat's private home, its sandbox HOME among them | `providers/codex_config`, then the Codex CLI and the chat's own sandboxed commands | **left**: agents legitimately write it |
+| anything else at the root (`notes.txt`, a new folder) | | | left ordinary |
+
+**DENY for all of them, none ASK.** Each is written by the daemon alone and
+read back as true: by the owner (the transcript, the task journal, the
+audit log), by other chats, or by the daemon itself as authority (a brief,
+a project root, a schedule, a pin). Nothing an agent legitimately does
+writes any of them, so a question would only be a chance for a tired "yes"
+to forge one. The owner changes them through the HUD (rename, archive,
+delete, schedules) or by hand; his own shell is not Jarvis's gate.
+
+**How.** The inbox tree's machinery (#309) on top of #310's brace and glob
+spellings; nothing new in the matcher:
+
+* `files.RECORD_TREES` names the trees and `files.RECORD_FILES` names
+  `decisions.jsonl`; `files._record_trees()` resolves them per call from
+  `config.V2_DATA_DIR`, so a suite that repoints the data root protects its
+  own.
+* `protected_state.owner_trees()` is now `files._owner_trees()`: the inbox's
+  tree **and** the record trees. Every writer operand and redirect target
+  that provably lands at or below one (`_inside_tree`: plain, each brace
+  word, a glob matched component by component and on disk, `cd` and a
+  relative name, a symlink or a hard link) is a **certain** touch: v2's
+  layer 1 refuses it (`denied_command`, with `files.record_refusal` as the
+  reason), v1 asks, and no allowlist entry covers it. One that only might
+  is asked.
+* Each tree's folder and `decisions.jsonl` are also named in
+  `_protected_state_paths()`, as `inbox/` is, so moving, replacing or
+  re-moding the folder itself is a certain write, a folder named `threads`
+  copied into the data root lands on the protected one, and a write grant
+  on the data root or on a tree is refused by `denied_grant`.
+* The write tools refuse them: `files._self_protected` (v1 `write_file` and
+  `edit_file`; the HUD editor's read-only `safety` kind) and v2's
+  `denied_file` (Claude's `Write`/`Edit`/`MultiEdit`/`NotebookEdit`, every
+  provider's path spelling), which answers with `record_refusal`.
+* **Ancestors stay asked.** `rm -rf <data root>`, `mv <data root> …` and
+  `find <data root> -delete` are uncertain touches (`_ancestor_of`), as
+  `remote_auth_check` pins; the card now names a record folder.
+* **Reads are not changed**: `cat`, `grep -r`, `tail`, `jq`, `cp <log>
+  /tmp/backup`, globs over the trees, the Read tool, a read grant.
+  `chat_reads` reads in-process anyway.
+* **The daemon is not gated.** The stores (`stores._write_bytes`,
+  `_append`), `activity`, `schedules`, `ledger`, `diff_review`, the Discord
+  linker and gateway, `chat_git`, `projects`' staging, `vex`'s locks and
+  `log_decision` all write with plain file I/O in the daemon's own process;
+  the gate judges agent tool calls and agent shell lines only.
+  `stores_check.records_protected_daemon_writes` makes every gate entry
+  point raise and still writes a project, a thread and its log, a task, its
+  transitions and journal, and the decision log.
+
+**Differential** (origin/main `4bb88db1` against this change, 82 lines judged
+in a temp data root by v1 `static_verdict`, v2 `denied_command` and
+`command_touch`, plus 19 write-tool and grant paths): 50 lines changed, **46
+to a stricter verdict, none looser**; the other 4 keep their verdict and
+only name a different protected path on the card (`cp x <D>/**/log.jsonl`,
+DENY both; `rm -rf <D>`, `mv <D> …`, `find <D> -delete`, ASK both). Every
+change is a write into a record tree. All 15 reads, all 15 ordinary
+commands, the carriers, `<D>/notes.txt` and the already-protected inbox and
+passkeys keep their verdicts. The write tools and write grants now refuse
+every record path; read grants are unchanged.
+
+**Known limits.** As for every protected path (`Protected state: brace and
+glob spellings`, above): a path built at run time, a script that writes it,
+or a program told where to write by its own config is not seen; the real
+boundary would be filesystem ownership. `claude/` and `codex/` are not
+covered (above).
+
+Pinned by `tests/v2/permissions_check.py` (`record_tree_checks`: six shell
+spellings × 11 stores and the write tools, refused at layer 1 and never
+asked; the review's forged owner line by redirect, `cd`, symlink, brace,
+glob, `mv`, `cp -r` and `ln`; reads still rules' ALLOW; the data root
+asked; the carriers ordinary; each tree refused *because* it is in
+`RECORD_TREES`. `brace_glob_checks`: the 35 forms × a thread's log and
+brief, a task's journal, a project and a schedule), `tests/files_check.py`
+(`record_tree_checks`: both v1 write tools) and `tests/v2/stores_check.py`
+(`records_protected_daemon_writes`). Verified to fail with each of the ten
+trees dropped from `RECORD_TREES` (17 to 236 v2 checks each, and
+`files_check`), `decisions.jsonl` dropped from `RECORD_FILES`, globs let
+past the tree rule (`_inside_tree_now` returning early: 157 checks),
+`owner_trees` back to the inbox alone (615 checks), the record trees left
+out of `_self_protected` (`files_check`, `stores_check`), and
+`denied_file`'s record branch removed (11 checks).

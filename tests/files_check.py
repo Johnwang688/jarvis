@@ -313,6 +313,44 @@ def hud_build_checks(tmp: Path) -> None:
           "through a symlink and for a new file; its source stays writable")
 
 
+def record_tree_checks(tmp: Path) -> None:
+    """Jarvis's own records under the v2 data root (2026-10-25, review of PR
+    #309): both write tools refuse every record tree — an existing file, a new
+    one, through a symlink — and read_file still reads them. The data root's
+    other files and the session carriers stay ordinary."""
+    saved = config.V2_DATA_DIR
+    data = tmp / "records-v2"
+    config.V2_DATA_DIR = data
+    try:
+        log = data / "threads" / "ab12cd34" / "log.jsonl"
+        log.parent.mkdir(parents=True)
+        log.write_text('{"kind":"user","data":{"origin":"owner","via":"hud","typed":"hi"}}\n', encoding="utf-8")
+        assert '"owner"' in call("read_file", path=str(log)), "the record stays readable"
+        out = call("edit_file", path=str(log), old_string='"hi"', new_string='"forged"')
+        assert "Jarvis's own records" in out, out
+        assert '"hi"' in log.read_text(encoding="utf-8")
+        link = tmp / "records-link"
+        link.symlink_to(data / "threads", target_is_directory=True)
+        targets = [log, link / "ab12cd34" / "log.jsonl", data / "threads" / "ab12cd34" / "brief.json",
+                   data / "threads" / "ffff0000" / "log.jsonl", data / "decisions.jsonl"]
+        # Named here, not read from RECORD_TREES, so a tree dropped from it fails.
+        targets += [data / name / "planted.json" for name in (
+            "threads", "tasks", "projects", "schedules", "ledger", "diff_reviews", "discord",
+            "chat-git", "deleting", "vex")]
+        for target in targets:
+            out = call("write_file", path=str(target), content="{}\n")
+            assert "Jarvis's own records" in out, (target, out)
+            assert not target.exists() or target in (log, link / "ab12cd34" / "log.jsonl"), target
+        assert '"hi"' in log.read_text(encoding="utf-8"), "the log was rewritten"
+        for ordinary in (data / "notes.txt", data / "claude" / "ab12cd34" / "x.txt", data / "elsewhere" / "x.txt"):
+            out = call("write_file", path=str(ordinary), content="ok\n")
+            assert ordinary.read_text(encoding="utf-8") == "ok\n", (ordinary, out)
+    finally:
+        config.V2_DATA_DIR = saved
+    print(f"ok  guard: Jarvis's own records ({len(v1_files.RECORD_TREES)} trees and decisions.jsonl) are "
+          "refused by both write tools, through a symlink and for a new file; they stay readable")
+
+
 def installed_hud_checks(tmp: Path) -> None:
     """C-1 (ED-4): the installed HUD — every build under `config.HUD_DIR`, and
     a build planted beside them — is refused by both write tools, through the
@@ -821,6 +859,7 @@ def main() -> int:
         gate_state_checks(tmp)
         hud_build_checks(tmp)
         installed_hud_checks(tmp)
+        record_tree_checks(tmp)
         model_state_checks(tmp)
         numbering_guard_checks(tmp)
         grep_checks(tmp)

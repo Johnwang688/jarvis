@@ -153,19 +153,26 @@ def owner_trees() -> set[Path]:
     """The owner's state folders whose every file is protected, not a fixed
     list of names (inbox B1): the owner inbox's folder (`files._inbox_tree`,
     `<v2 data root>/inbox`), where the daemon keeps the decisions agents
-    post and the owner answers. A command that provably writes at or below
-    it (a redirect onto, `cp`/`rm`/`tee` on a path there, any spelling: a
-    brace expansion's every word, a glob matched component by component) is
-    a certain touch: v2's layer 1 refuses it and v1 asks, as for a named gate
-    file; one that might is **asked**, as for the HUD's trees. The write
-    tools refuse it outright. Empty when it cannot be resolved."""
-    from .tools.files import _inbox_tree
+    post and the owner answers, and since 2026-10-25 Jarvis's own records
+    beside it (`files._record_trees`: `threads/`, `tasks/`, `projects/`,
+    `schedules/` and the daemon's other stores; review of PR #309, a forged
+    owner line in a thread's `log.jsonl`). A command that provably writes at
+    or below one (a redirect onto, `cp`/`rm`/`tee` on a path there, any
+    spelling: a brace expansion's every word, a glob matched component by
+    component) is a certain touch: v2's layer 1 refuses it and v1 asks, as
+    for a named gate file; one that might is **asked**, as for the HUD's
+    trees. The write tools refuse it outright. When the folders cannot be
+    resolved, the inbox's alone, or none."""
+    from .tools.files import _inbox_tree, _owner_trees
 
     def roots() -> set[Path]:
         try:
-            return {_inbox_tree()}
+            return _owner_trees()
         except (OSError, RuntimeError):
-            return set()
+            try:
+                return {_inbox_tree()}
+            except (OSError, RuntimeError):
+                return set()
     return _memo(("owner_trees",), roots)
 
 
@@ -1943,8 +1950,9 @@ def _target_touches(targets, local: _State, protected: set[Path], ids: dict, see
             seen.touches.append(Touch(tree, False, f"{what} into {text}", hud=True))
         inside = _inside_tree(text, owner_trees(), walk)
         if inside is not None:
-            # A write that provably lands at or below the inbox is as certain
-            # as one onto a named gate file: v2's layer 1 refuses it, v1 asks.
+            # A write that provably lands at or below the inbox or a record
+            # tree is as certain as one onto a named gate file: v2's layer 1
+            # refuses it, v1 asks.
             seen.touches.append(Touch(inside, certain, f"{what} into {text}"))
 
 
@@ -2416,8 +2424,9 @@ def _command(tokens: list[str], lead: list[str], parsed: bool, segment: str, loc
             continue
         inside = _inside_tree(text, owner_trees(), walk)
         if inside is not None and kind != "reader":
-            # Inside the inbox (B1): certain when provable, as for a gate
-            # file. A folder above it falls through to `_ancestor_of` below.
+            # Inside the inbox (B1) or a record tree: certain when provable,
+            # as for a gate file. A folder above it falls through to
+            # `_ancestor_of` below.
             seen.touches.append(Touch(inside, kind == "writer" and provable(operand),
                                       f"{stem} on {text}"))
             continue

@@ -366,6 +366,14 @@ def denied_file(target: str, cwd: str | None = None, *, folder: bool = False) ->
         return (f"{path.name} holds live credentials; Jarvis never writes it. "
                 "Ask the owner to change it by hand.")
     resolved = _resolve(path)
+    try:
+        record = v1_files._record_of(resolved)
+    except (OSError, RuntimeError):
+        record = resolved          # cannot tell: refuse
+    if record is not None:
+        # Jarvis's own records (threads, tasks, projects, schedules …),
+        # written by the daemon only (2026-10-25, review of PR #309).
+        return v1_files.record_refusal(path.name)
     if resolved in protected_paths():
         if path.name in ("voiceprint.json", "guest.json") and resolved.parent == _resolve(config.SPEAKER_DIR):
             return (f"{path.name} holds the owner's speaker verification: whose voice is the "
@@ -599,6 +607,12 @@ def denied_command(command: str, cwd: str | None = None) -> str | None:
             # A write onto a credential env file, judged in the brief's folder
             # so a symlink to one counts (ENV-1).
             return protected_state.refusal(touch)
+        try:
+            record = v1_files._record_of(touch.path)
+        except (OSError, RuntimeError):
+            record = None
+        if record is not None:
+            return v1_files.record_refusal(touch.name)
         return (f"{touch.name} is Jarvis's own permission state; a command that "
                 "writes it would widen what runs without anyone being asked.")
     return None

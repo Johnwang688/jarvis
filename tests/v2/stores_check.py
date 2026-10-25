@@ -424,9 +424,61 @@ def migration(root: Path) -> None:
     print("ok  migration: failed copy leaves no partial thread and can be retried")
 
 
+def records_protected_daemon_writes(root: Path) -> None:
+    """Jarvis's own records are protected state (2026-10-25), and that binds
+    agent tool calls and agent shell lines only: the daemon's own stores
+    write them in-process and never ask the gate. With every gate entry
+    point made to fail, a project, a thread and its log, a task, its
+    transitions and journal, and the decision log are all written; after,
+    the same files are refused to an agent and still readable."""
+    from jarvis import protected_state
+    from jarvis.tools import files as v1_files
+    from jarvis.v2 import permissions as v2_permissions
+
+    def gate(*_a, **_k):
+        raise AssertionError("a daemon store write consulted the agent gate")
+
+    with patch.object(config, "V2_DATA_DIR", root), \
+            patch.object(protected_state, "command_touches", gate), \
+            patch.object(protected_state, "owner_trees", gate), \
+            patch.object(v1_files, "_self_protected", gate), \
+            patch.object(v1_files, "_record_of", gate), \
+            patch.object(v2_permissions, "denied_file", gate), \
+            patch.object(v2_permissions, "denied_command", gate), \
+            patch.object(v2_permissions, "denied_grant", gate):
+        stores = Stores(root)
+        project = stores.projects.create("Records", str(root))
+        project.name = "Records 2"
+        stores.projects.save(project)
+        thread = chat(stores)
+        stores.threads.save(thread)
+        stores.threads.log(thread.id, "user", "the owner's real words")
+        stores.threads.set_title(thread.id, "a title", "auto")
+        task = stores.tasks.create(project.id, "a brief")
+        stores.tasks.save(task)
+        stores.tasks.transition(task.id, m.TaskState.CLARIFYING, reason="go")
+        stores.tasks.journal(task.id, "note", text="by the daemon")
+        v2_permissions.log_decision(v2_permissions.ApprovalRecord(
+            tool="Bash", args_digest="x", layer="deny", decision="deny"))
+    log = stores.threads.path(thread.id).with_name("log.jsonl")
+    journal = stores.tasks.path(task.id).with_name("journal.jsonl")
+    assert [r["text"] for r in stores.threads.read_log(thread.id)] == ["the owner's real words"]
+    assert [r["event"] for r in stores.tasks.read_journal(task.id)][-1] == "note"
+    assert (root / "decisions.jsonl").read_text().count("\n") == 1, "the decision log was written"
+    with patch.object(config, "V2_DATA_DIR", root):
+        for path in (log, journal, stores.projects.path(project.id), stores.threads.path(thread.id),
+                     stores.tasks.path(task.id), root / "decisions.jsonl"):
+            assert v1_files._self_protected(path), path
+            assert v2_permissions.denied_file(str(path)), path
+            assert v2_permissions.denied_command(f"cp /tmp/x {path}"), path
+            assert v2_permissions.denied_command(f"cat {path}") is None, path
+    print("ok  records: the daemon's stores write them without asking the gate; agents are refused")
+
+
 def main() -> int:
     for check in (round_trip, lazy_and_ids, inbox_and_atomic, transitions_and_delete,
-                  all_transition_edges, append_and_corruption, torn_read, separator_characters, migration):
+                  all_transition_edges, append_and_corruption, torn_read, separator_characters, migration,
+                  records_protected_daemon_writes):
         with tempfile.TemporaryDirectory() as tmp:
             check(Path(tmp) / "data")
     print("\nall v2 store checks passed")

@@ -254,7 +254,86 @@ def _protected_state_paths() -> set[Path]:
     # judged as a write to it, as the inbox folder's is.
     inbox = Path(config.V2_DATA_DIR).expanduser() / "inbox"
     paths |= {inbox, inbox / "missed.jsonl", inbox / "decisions"}
+    # Jarvis's own records (2026-10-25, review of PR #309: `cp /tmp/x
+    # <data>/threads/<id>/log.jsonl` was a static ALLOW, and a forged
+    # `{"kind":"user","data":{"origin":"owner",…}}` line then showed as the
+    # owner's words in the HUD, other chats' `chat_read`, the phone and the
+    # Discord catch-up). Each tree's folder is named, as the inbox's is, so
+    # moving, replacing or re-moding it is judged as a write to it and a
+    # grant above it is refused; every file below is protected by the tree
+    # rule (`_record_trees`). `decisions.jsonl` is the gate's own audit log
+    # of what was allowed, asked and denied (`permissions.log_decision`).
+    data = Path(config.V2_DATA_DIR).expanduser()
+    paths |= {data / name for name in RECORD_TREES} | {data / name for name in RECORD_FILES}
     return paths
+
+
+# Jarvis's own records under the v2 data root (`config.V2_DATA_DIR`), every
+# one written by the daemon in-process and by nothing else (the inventory is
+# in docs/notes/safety-permissions.md, "Protected state: Jarvis's own
+# records"). A write into one by an agent is refused — the write tools,
+# v2's layer 1 and grants; v1's shell gate asks — exactly as the inbox's
+# tree is (inbox B1). Not here, on purpose: `claude/` and `codex/` (the
+# session carriers and Codex's private homes, which the provider CLIs and a
+# Codex chat's sandboxed commands write themselves; `editor_policy` withholds
+# them), `inbox/` (its own tree, `_inbox_tree`) and `remote/` (its two named
+# files above).
+RECORD_TREES = (
+    "threads",       # thread.json, brief.json (the brief a resume reopens), log.jsonl, activity.json, discord.json, subagents.jsonl
+    "tasks",         # task.json, journal.jsonl, activity.json, discord.json
+    "projects",      # <id>.json: name, root (the folder its chats work in), archive state
+    "schedules",     # <id>.json: what runs, where, and when, with nobody watching
+    "ledger",        # <day>.jsonl: usage accounting that admission reads
+    "diff_reviews",  # <task id>.json: the quick reviews shown with a task's diff
+    "discord",       # linker.json (sanctioned channel names), approval-posts.json
+    "chat-git",      # pins.json (the origin a chat may push to), the empty git HOME
+    "deleting",      # a permanent delete's staging folder and manifest
+    "vex",           # VEX build locks and unfinished-build markers
+)
+RECORD_FILES = ("decisions.jsonl",)
+
+
+def _record_trees() -> set[Path]:
+    """Every record tree's folder (`RECORD_TREES`), resolved. Read from config
+    per call, so a test that repoints V2_DATA_DIR protects its own. Raises
+    OSError/RuntimeError when one cannot be resolved; callers refuse."""
+    data = Path(config.V2_DATA_DIR).expanduser()
+    return {(data / name).resolve() for name in RECORD_TREES}
+
+
+def _owner_trees() -> set[Path]:
+    """The folders whose every file is protected (`protected_state.owner_trees`):
+    the inbox's (`_inbox_tree`) and Jarvis's records (`_record_trees`)."""
+    return {_inbox_tree()} | _record_trees()
+
+
+def _record_of(resolved: Path) -> Path | None:
+    """The record tree `resolved` is or lies in, or the record file it is,
+    else None. Raises OSError/RuntimeError when they cannot be resolved."""
+    for tree in _record_trees():
+        if resolved == tree or tree in resolved.parents:
+            return tree
+    data = Path(config.V2_DATA_DIR).expanduser()
+    for name in RECORD_FILES:
+        if resolved == (data / name).resolve():
+            return resolved
+    return None
+
+
+def _in_record_tree(resolved: Path) -> bool:
+    try:
+        return _record_of(resolved) is not None
+    except (OSError, RuntimeError):
+        return True  # cannot tell: refuse
+
+
+def record_refusal(name: str) -> str:
+    """Why a write into Jarvis's own records is refused: one sentence for the
+    write tools, v2's layer 1 and a refused shell line."""
+    return (f"{name} is one of Jarvis's own records (its chats, tasks, projects and "
+            "schedules), which only the daemon writes: the owner and other chats rely on "
+            "them as the true record of what happened. Use Jarvis's tools for what you "
+            "wanted to change, or say what and why instead.")
 
 
 def _inbox_tree() -> Path:
@@ -349,6 +428,8 @@ def _self_protected(target: Path) -> bool:
         return True
     if _in_inbox_tree(resolved):
         return True
+    if _in_record_tree(resolved):
+        return True
     try:
         rel = resolved.relative_to(config.REPO_ROOT)
     except ValueError:
@@ -369,6 +450,8 @@ def _protect_refusal(target: Path) -> str:
             "can approve what the owner is asked. Change the HUD's source under "
             "hud/src instead; the owner installs it with `jarvis hud install`."
         )
+    if _in_record_tree(target.resolve()):
+        return "Error: " + record_refusal(target.name)
     return (
         f"Error: {target.name} is part of Jarvis's safety layer and can "
         "only be changed by the owner by hand. Explain what you wanted "
