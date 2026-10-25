@@ -145,6 +145,13 @@ SELF_PROTECTED = frozenset(
         # read withholds. An agent that could edit it could send the phone
         # a private card's detail, a path or a credential.
         "jarvis/v2/remote_api.py",
+        # Answering from the phone (phone design P-4): the per-answer
+        # passkey assertion, who gets the HUD's authority and
+        # what a card must show first; and §4.1's checks that grant it. An
+        # agent that could edit either could answer an approval from the
+        # phone with the HUD's authority.
+        "jarvis/v2/remote_answer.py",
+        "jarvis/v2/remote_secure.py",
     }
 )
 

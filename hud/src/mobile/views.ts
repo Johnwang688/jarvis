@@ -6,8 +6,12 @@
 // for `origin` and every `detail` field; the same for titles, briefs, plans,
 // reports, roles and patches). The one exception is an assistant's reply,
 // which goes through the sanitized Markdown renderer (./markdown.ts).
-// Nothing here can answer, send, withdraw, resume or cancel: approvals and
-// questions say "Answer at the desk" until P-4 builds answering.
+// P-4: given `InboxAnswers`, an approval row opens its answering card
+// (./card.ts) and a question, a task question or an open decision takes its
+// answer here: a text box and Send, or a decision's options and Answer.
+// Nothing is answered by a tap on the row itself, by Enter, or without the
+// button. Without them (P-3's read-only view) every row says "Answer at the
+// desk". A proposal's withdraw and a task's resume or cancel stay at the desk.
 
 import { clockOf, decisionOf, groupRows, oneLine, questionOf, briefOf, textBlock, type InboxRow } from "../lib/inbox";
 import { recentChats, moreLabel } from "../lib/recentChats";
@@ -96,7 +100,96 @@ function genericDetail(row: InboxRow, box: HTMLElement) {
   }
 }
 
-export function inboxRow(row: InboxRow, open: (row: InboxRow) => void): HTMLElement {
+/** What the inbox may answer (P-4), and the app's state for it. */
+export interface InboxAnswers {
+  openCard: (row: InboxRow) => void;
+  send: (row: InboxRow, body: Record<string, unknown>) => void;
+  /** Rows whose answer is on its way. */
+  busy: ReadonlySet<string>;
+  /** A row's answer note ("Sent.", a refusal's words). */
+  notes: ReadonlyMap<string, string>;
+  /** Typed answers and picked options, kept across a read again. */
+  drafts: Map<string, string>;
+  picks: Map<string, number>;
+}
+
+/** The kinds the phone answers itself (P-4). */
+export function answersHere(row: InboxRow): boolean {
+  if (row.kind === "approval" || row.kind === "question" || row.kind === "task_question") return true;
+  return row.kind === "decision" && !!decisionOf(row)?.open;
+}
+
+function sendButton(label: string, id: string, onClick: () => void): HTMLButtonElement {
+  const b = tap(label, onClick, "quiet m-send", id);
+  return b;
+}
+
+function answerBox(row: InboxRow, a: InboxAnswers): HTMLElement {
+  const box = testid(el("div", "m-answer"), "m-answer-box");
+  const busy = a.busy.has(row.id);
+  if (row.kind === "approval") {
+    box.append(tap("Open the card to answer", () => a.openCard(row), "quiet m-send", "m-open-card"));
+  } else if (row.kind === "question" || row.kind === "task_question") {
+    const text = testid(el("textarea", "m-text"), "m-answer-text");
+    text.setAttribute("aria-label", "Your answer");
+    text.placeholder = "Your answer";
+    text.rows = 2;
+    text.value = a.drafts.get(row.id) ?? "";
+    text.readOnly = busy;
+    const send = sendButton("Send answer", "m-answer-send", () => {
+      const value = text.value.trim();
+      if (value) a.send(row, { text: value });
+    });
+    const sync = () => { a.drafts.set(row.id, text.value); send.disabled = busy || !text.value.trim(); };
+    text.addEventListener("input", sync);
+    sync();
+    box.append(text, send);
+  } else {
+    const d = decisionOf(row)!;
+    const group = testid(el("div", "m-choices"), "m-decision-options");
+    group.setAttribute("role", "radiogroup");
+    const text = testid(el("textarea", "m-text"), "m-decision-text");
+    const picked = () => a.picks.get(row.id) ?? (d.suggested ?? -1);
+    const send = sendButton("Answer", "m-decision-send", () => {
+      const words = text.value.trim();
+      if (words) a.send(row, { text: words });
+      else if (picked() >= 0) a.send(row, { choice: picked() });
+    });
+    const sync = () => {
+      a.drafts.set(row.id, text.value);
+      send.disabled = busy || (!text.value.trim() && picked() < 0);
+    };
+    d.options.forEach((option, i) => {
+      const label = el("label", "m-choice");
+      const radio = testid(el("input", ""), "m-decision-option");
+      radio.type = "radio";
+      radio.name = "decision-" + row.id;
+      radio.value = String(i);
+      radio.checked = picked() === i;
+      radio.disabled = busy;
+      radio.addEventListener("change", () => { if (radio.checked) { a.picks.set(row.id, i); sync(); } });
+      label.append(radio, " ", el("span", "option-text", option));
+      group.append(label);
+    });
+    text.setAttribute("aria-label", "Or answer in your own words");
+    text.placeholder = "Or answer in your own words";
+    text.rows = 2;
+    text.value = a.drafts.get(row.id) ?? "";
+    text.readOnly = busy;
+    text.addEventListener("input", sync);
+    sync();
+    box.append(group, text, send);
+  }
+  const note = a.notes.get(row.id);
+  if (note) {
+    const line = testid(el("p", "m-notice", note), "m-answer-note");
+    line.setAttribute("role", "status");
+    box.append(line);
+  }
+  return box;
+}
+
+export function inboxRow(row: InboxRow, open: (row: InboxRow) => void, answers?: InboxAnswers): HTMLElement {
   const card = testid(el("article", `row rank-${row.rank}`), "m-inbox-row");
   card.dataset.kind = oneLine(row.kind, 40);
   card.dataset.id = row.id;
@@ -134,22 +227,31 @@ export function inboxRow(row: InboxRow, open: (row: InboxRow) => void): HTMLElem
     if (!d.open) box.append(el("div", "label", "Your answer"), testid(el("p", "", d.answer), "m-answer"));
   } else genericDetail(row, box);
   if (box.childNodes.length) card.append(box);
-  // A decision already answered (rank 8, recorded for a closed chat) takes no answer.
-  const note = row.kind === "decision" && !decisionOf(row)?.open ? null : deskNote(row.kind);
-  if (note) card.append(testid(el("p", "desk-only", note), "m-desk-only"));
+  if (answers && answersHere(row)) {
+    card.append(answerBox(row, answers));
+  } else {
+    // A decision already answered (rank 8, recorded for a closed chat) takes no answer.
+    const note = row.kind === "decision" && !decisionOf(row)?.open ? null : deskNote(row.kind);
+    if (note) card.append(testid(el("p", "desk-only", note), "m-desk-only"));
+  }
   if (row.thread_id || row.task_id) {
     card.append(tap(row.thread_id ? "Open the chat" : "Open the task", () => open(row), "link", "m-open"));
   }
   return card;
 }
 
-export function inboxView(rows: InboxRow[] | null, open: (row: InboxRow) => void): HTMLElement {
+export function inboxView(rows: InboxRow[] | null, open: (row: InboxRow) => void, answers?: InboxAnswers,
+                          secure?: { ok: boolean; label: string } | null): HTMLElement {
   const view = testid(el("section", "view"), "m-inbox");
+  if (secure && !secure.ok) {
+    // §4.1 (P-4): the phone answers with Discord's authority only.
+    view.append(testid(el("p", "m-limited", `limited: ${secure.label || "a check failed"}`), "m-limited"));
+  }
   if (rows === null) { view.append(empty("Loading…")); return view; }
   if (!rows.length) { view.append(empty("Nothing is waiting on you.")); return view; }
   for (const { group, rows: mine } of groupRows(rows)) {
     view.append(el("h2", "group", group.label));
-    for (const row of mine) view.append(inboxRow(row, open));
+    for (const row of mine) view.append(inboxRow(row, open, answers));
   }
   return view;
 }

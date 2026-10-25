@@ -1044,10 +1044,12 @@ class OwnerTest(Remote):
         for path in ("/m/api/", "/m/api/pair/options", "/m/api/inbox/x", "/m/api/logout"):
             self.assertEqual(self.phone("GET", path, cookie=cookie)[0], 404, path)
             self.assertEqual(self.phone("GET", path)[0], 401, path)
-        self.assertEqual(self.phone("POST", "/m/api/inbox/x/answer", {}, cookie=cookie)[0], 404)
+        # P-4's answer route (remote_answer): a malformed row id is 400
+        # signed in; without a session, 401 like everything else.
+        self.assertEqual(self.phone("POST", "/m/api/inbox/x/answer", {}, cookie=cookie)[0], 400)
         self.assertEqual(self.phone("POST", "/m/api/inbox/x/answer", {})[0], 401)
         print("ok  §4: bad Host 400, bad Origin 403, no session 401, no detail; with one, "
-              "P-3's reads answer and the rest of /m/api is 404")
+              "P-3's reads and P-4's answers answer and the rest of /m/api is 404")
 
     def test_is_remote_owner_items(self):
         a = self.pair()
@@ -1331,7 +1333,12 @@ class StatusAndState(Remote):
         host = f"127.0.0.1:{self.d.port}"
         status, _, body = raw(self.d.port, "GET", "/status", [("Host", host)])
         value = json.loads(body)
+        secure = value["remote"].pop("secure")
         self.assertEqual(value["remote"], {"port": self.port, "bound": True, "host_configured": True})
+        # P-4: §4.1's last result, in fixed words; a test daemon reads no
+        # Windows command, so it is limited.
+        self.assertEqual(set(secure), {"ok", "failed", "reason", "label", "at"})
+        self.assertFalse(secure["ok"])
         self.assertNotIn(HOST, body.decode())
         other = Daemon(Stores(self.root / "other"), {name: Fake(name) for name in PN},
                        lambda *_: lambda *_: Decision.DENY, 0, remote_host=None)
@@ -1339,10 +1346,13 @@ class StatusAndState(Remote):
         self.addCleanup(other.stop)
         host = f"127.0.0.1:{other.port}"
         value = json.loads(raw(other.port, "GET", "/status", [("Host", host)])[2])
+        # No listener: never checked, and shown as such.
+        self.assertEqual(value["remote"].pop("secure")["failed"], "pending")
         self.assertEqual(value["remote"], {"port": 0, "bound": False, "host_configured": False})
         status, view = self.hud("GET", "/phone")
+        self.assertEqual(set(view["remote"].pop("secure")), {"ok", "failed", "reason", "label", "at"})
         self.assertEqual(view["remote"], {"port": self.port, "bound": True, "host_configured": True})
-        print("ok  /status: remote {port, bound, host_configured}, no name, no secret")
+        print("ok  /status: remote {port, bound, host_configured, secure}, no name, no secret")
 
     def test_protected_paths(self):
         from jarvis.tools import files

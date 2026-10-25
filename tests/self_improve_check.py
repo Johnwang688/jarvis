@@ -44,6 +44,9 @@ def guard_checks() -> None:
     assert "jarvis/v2/remote_auth.py" in SELF_PROTECTED
     # The phone's read API and event stream: what the phone reads (P-3).
     assert "jarvis/v2/remote_api.py" in SELF_PROTECTED
+    # Answering from the phone, and the §4.1 checks behind its authority (P-4).
+    assert "jarvis/v2/remote_answer.py" in SELF_PROTECTED
+    assert "jarvis/v2/remote_secure.py" in SELF_PROTECTED
     for rel in sorted(SELF_PROTECTED):
         out = tools.dispatch(
             "write_file",

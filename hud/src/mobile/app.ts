@@ -16,15 +16,27 @@
 // stale (dimmed, `data-stale`). Coming back reads everything shown again
 // before the banner goes. A 401 anywhere means the session ended (logout,
 // a revoke at the desk, expiry): the app stops and asks for a sign-in.
-// There is no offline queue: the app writes nothing.
+// There is no offline queue.
+//
+// P-4, answering (jarvis/v2/remote_answer.py): an approval row opens its
+// card (./card.ts), read from `GET /m/api/inbox/<id>/detail`; Deny is one
+// tap; AUTHORIZE and ALWAYS each ask `answer/options` for a challenge bound
+// to that card and that answer, then the passkey (Face ID or the passcode),
+// then send the assertion with the answer. ALWAYS shows the rule it would
+// write first and asks again before the passkey. Questions and decisions
+// are answered from their rows. Each answer is sent once, never queued or
+// retried; a refusal shows the daemon's words. When §4.1 does not hold
+// (`/m/api/me`'s `secure`), a red "limited: ..." line says so.
 
 import { parseInbox, waitingCount, clockOf, type InboxRow } from "../lib/inbox";
-import { getJson, errorWord, type Got } from "./net";
+import { getJson, errorWord, postJson, type Got, type Posted } from "./net";
+import { cardView, parseDetail, parseSecure, type CardState, type Secure } from "./card";
+import { credentialJSON, prepareRequest } from "./webauthn";
 import {
   parseDiff, parseEvent, parseLog, parseProjects, parseTask, parseTasks, parseThreads,
   type ChatThread, type DiffView, type LogRow, type Project, type StreamEvent, type TaskView,
 } from "./model";
-import { chatsView, el, inboxView, logRow, taskView, tasksView, transcriptView, tap } from "./views";
+import { chatsView, el, inboxView, logRow, taskView, tasksView, transcriptView, tap, type InboxAnswers } from "./views";
 
 export type Tab = "inbox" | "chats" | "tasks";
 
@@ -44,12 +56,20 @@ export interface AppDeps {
   /** The owner pressed Sign out. */
   signOut: () => Promise<void>;
   fetchJson?: (path: string) => Promise<Got>;
+  /** P-4's writes (a fake in the tests). */
+  postJson?: (path: string, value: unknown) => Promise<Posted>;
+  /** The passkey for one answer: the request options in, the assertion's JSON out (a fake in the tests). */
+  getCredential?: (publicKey: Record<string, unknown>) => Promise<Record<string, unknown> | null>;
   openStream?: (url: string) => StreamLike;
   now?: () => number;
   setTimer?: (fn: () => void, ms: number) => unknown;
 }
 
 export const STREAM_URL = "/m/api/events";
+// A write that met the proxy with nothing behind it (`tailscale serve`, the daemon down).
+const OFFLINE: ReadonlySet<number> = new Set([502, 504]);
+// How long after an answer box loses focus the inbox is drawn again (renderInbox).
+const BLUR_REDRAW_MS = 400;
 const CLOSED = 2;
 const DEBOUNCE_MS = 120;
 const RETRY_MS = 4000;
@@ -76,8 +96,20 @@ export class PhoneApp {
   task: OpenTask | null = null;
   stopped = false;
   stream: StreamLike | null = null;
+  /** P-4: the open answering card, and §4.1's last word (`/m/api/me`). */
+  card: CardState | null = null;
+  secure: Secure | null = null;
+  readonly answering = new Set<string>();
+  readonly notes = new Map<string, string>();
+  readonly drafts = new Map<string, string>();
+  readonly picks = new Map<string, number>();
+  private deferred = false;
+  /** One line shown once above the inbox after an answer ("Denied.", where a decision's answer went). */
+  private flash = "";
 
   private readonly fetchJson: (path: string) => Promise<Got>;
+  private readonly postJson: (path: string, value: unknown) => Promise<Posted>;
+  private readonly getCredential: (publicKey: Record<string, unknown>) => Promise<Record<string, unknown> | null>;
   private readonly openStream: (url: string) => StreamLike;
   private readonly now: () => number;
   private readonly setTimer: (fn: () => void, ms: number) => unknown;
@@ -92,6 +124,11 @@ export class PhoneApp {
 
   constructor(private readonly deps: AppDeps) {
     this.fetchJson = deps.fetchJson ?? getJson;
+    this.postJson = deps.postJson ?? postJson;
+    this.getCredential = deps.getCredential ?? (async (publicKey) => {
+      const credential = await navigator.credentials.get({ publicKey: prepareRequest(publicKey) });
+      return credential ? credentialJSON(credential as PublicKeyCredential) : null;
+    });
     this.openStream = deps.openStream ?? ((url) => new EventSource(url) as unknown as StreamLike);
     this.now = deps.now ?? Date.now;
     this.setTimer = deps.setTimer ?? ((fn, ms) => setTimeout(fn, ms));
@@ -129,6 +166,7 @@ export class PhoneApp {
     this.deps.root.replaceChildren(this.frame);
     this.render();
     void this.loadInbox();
+    void this.loadMe();
     this.connect();
   }
 
@@ -171,7 +209,220 @@ export class PhoneApp {
     const body = r.body as { rows?: unknown };
     this.inbox = parseInbox(body?.rows) ?? [];
     this.renderBadge();
-    if (this.tab === "inbox") this.render();
+    const card = this.card;
+    if (card && !card.busy && !this.inbox.some((row) => row.id === card.rowId)) {
+      card.refused = "This card is no longer waiting: it was answered, or it timed out.";
+      card.rule = null;
+    }
+    if (this.tab === "inbox") this.renderInbox();
+  }
+
+  /** §4.1's last result, to show (`/m/api/me`): never what authorizes. */
+  async loadMe(): Promise<void> {
+    // Display only: a failure here changes nothing (the reads and the
+    // stream decide offline and signed out).
+    const got = await this.fetchJson("/m/api/me");
+    if (this.stopped || !got.ok) return;
+    this.secure = parseSecure((got.body as { secure?: unknown })?.secure);
+    if (this.tab === "inbox") this.renderInbox();
+  }
+
+  /** The inbox, drawn again, unless an answer is being typed (it waits for the box to lose focus). */
+  private renderInbox(): void {
+    const active = typeof document !== "undefined" ? document.activeElement : null;
+    if (!this.card && active instanceof HTMLTextAreaElement && this.main.contains(active)) {
+      if (!this.deferred) {
+        this.deferred = true;
+        // Not at the blur itself: a tap on Send blurs the box first, and a
+        // redraw then would take the button away before its click lands.
+        active.addEventListener("blur", () => {
+          setTimeout(() => {
+            this.deferred = false;
+            if (this.tab === "inbox" && !this.stopped) this.renderInbox();
+          }, BLUR_REDRAW_MS);
+        }, { once: true });
+      }
+      return;
+    }
+    this.render();
+  }
+
+  // -- answering (P-4) ---------------------------------------------------------------
+
+  private path(rowId: string, tail: string): string {
+    return `/m/api/inbox/${encodeURIComponent(rowId)}/${tail}`;
+  }
+
+  /** A write's answer: null after handling offline and signed out. */
+  private async post(path: string, value: unknown): Promise<{ status: number; body: Record<string, unknown> } | null> {
+    const got = await this.postJson(path, value);
+    if (this.stopped) return null;
+    if ("offline" in got) { this.setOnline(false); return null; }
+    if (OFFLINE.has(got.status)) { this.setOnline(false); return null; }
+    this.setOnline(true);
+    return got;
+  }
+
+  /** A 401 from an answer is a passkey that was not accepted, unless the session ended too. */
+  private async refusedWith(status: number, body: Record<string, unknown>): Promise<string> {
+    if (status === 401) {
+      const me = await this.fetchJson("/m/api/me");
+      if (!me.ok && me.why === "signed-out") { this.signedOut(); return ""; }
+      return "Not accepted: the passkey was not verified for this answer.";
+    }
+    const word = typeof body.error === "string" ? body.error : "";
+    return word ? word[0].toUpperCase() + word.slice(1) + "." : `Not answered (${status}).`;
+  }
+
+  openCard(row: InboxRow): void {
+    this.flash = "";
+    this.card = { rowId: row.id, row, detail: null, refused: null, busy: false, rule: null, notice: "" };
+    this.tab = "inbox";
+    this.render();
+    void this.loadCard();
+  }
+
+  closeCard(): void {
+    this.card = null;
+    this.render();
+    void this.loadInbox();
+  }
+
+  async loadCard(): Promise<void> {
+    const card = this.card;
+    if (!card) return;
+    const got = await this.fetchJson(this.path(card.rowId, "detail"));
+    if (this.stopped || this.card !== card) return;
+    if (!got.ok && got.why === "signed-out") return this.signedOut();
+    if (!got.ok && got.why === "offline") { this.setOnline(false); return; }
+    if (got.ok) {
+      card.detail = parseDetail(got.body);
+      card.refused = card.detail ? null : "This card could not be read.";
+      if (card.detail) this.secure = card.detail.secure;
+    } else {
+      const body = (got.body ?? {}) as Record<string, unknown>;
+      card.refused = errorWord(body) || `This card could not be read (${got.status}).`;
+      if (body.secure) this.secure = parseSecure(body.secure);
+    }
+    this.render();
+  }
+
+  private async finish(card: CardState, result: { status: number; body: Record<string, unknown> } | null,
+                       what: string): Promise<void> {
+    if (this.card !== card) return;
+    card.busy = false;
+    if (!result) { this.render(); return; }
+    if (result.status === 200) {
+      this.notes.set(card.rowId, what);
+      this.card = null;
+      this.flash = what;
+      this.render();
+      void this.loadInbox();
+      return;
+    }
+    card.notice = await this.refusedWith(result.status, result.body);
+    card.rule = null;
+    this.render();
+    if (result.status === 409) void this.loadCard();
+  }
+
+  async denyCard(): Promise<void> {
+    const card = this.card;
+    if (!card || card.busy) return;
+    card.busy = true;
+    card.notice = "";
+    this.render();
+    const result = await this.post(this.path(card.rowId, "answer"), { decision: "deny" });
+    await this.finish(card, result, "Denied.");
+  }
+
+  /** AUTHORIZE: a challenge for this card and this answer, then the passkey, then the answer. */
+  async allowCard(): Promise<void> {
+    const card = this.card;
+    if (!card || card.busy) return;
+    card.busy = true;
+    card.notice = "";
+    this.render();
+    const options = await this.post(this.path(card.rowId, "answer/options"), { decision: "allow" });
+    if (!options || options.status !== 200) return this.finish(card, options, "");
+    await this.withPasskey(card, "allow", options.body.publicKey, "Authorized.");
+  }
+
+  /** ALWAYS, step one: the rule it would write, shown before the passkey is asked for. */
+  async alwaysCard(): Promise<void> {
+    const card = this.card;
+    if (!card || card.busy) return;
+    card.busy = true;
+    card.notice = "";
+    this.render();
+    const options = await this.post(this.path(card.rowId, "answer/options"), { decision: "always" });
+    if (this.card !== card) return;
+    if (!options || options.status !== 200) return this.finish(card, options, "");
+    const words = typeof options.body.rule_words === "string" ? options.body.rule_words : "";
+    const publicKey = options.body.publicKey;
+    card.busy = false;
+    card.rule = publicKey && typeof publicKey === "object"
+      ? { words, entry: options.body.rule ?? null, publicKey: publicKey as Record<string, unknown> } : null;
+    this.render();
+  }
+
+  /** ALWAYS, step two: the owner read the rule; now the passkey. */
+  async confirmAlways(): Promise<void> {
+    const card = this.card;
+    if (!card || card.busy || !card.rule) return;
+    card.busy = true;
+    this.render();
+    await this.withPasskey(card, "always", card.rule.publicKey, "Authorized, and the rule is written.");
+  }
+
+  cancelAlways(): void {
+    if (!this.card) return;
+    this.card.rule = null;
+    this.render();
+  }
+
+  private async withPasskey(card: CardState, decision: "allow" | "always", publicKey: unknown, what: string) {
+    let assertion: Record<string, unknown> | null = null;
+    try {
+      assertion = publicKey && typeof publicKey === "object" ? await this.getCredential(publicKey as Record<string, unknown>) : null;
+    } catch {
+      assertion = null;
+    }
+    if (this.card !== card) return;
+    if (!assertion) {
+      card.busy = false;
+      card.rule = null;
+      card.notice = "Cancelled, or the passkey was not verified. Nothing was answered.";
+      this.render();
+      return;
+    }
+    const result = await this.post(this.path(card.rowId, "answer"), { decision, assertion });
+    if (result && result.status === 200 && result.body.authority === "limited") what += " (with Discord's authority: limited)";
+    await this.finish(card, result, what);
+  }
+
+  /** A question's or a decision's answer, from its row. Sent once. */
+  async sendAnswer(row: InboxRow, body: Record<string, unknown>): Promise<void> {
+    if (this.answering.has(row.id)) return;
+    this.flash = "";
+    this.answering.add(row.id);
+    this.notes.delete(row.id);
+    this.render();
+    const path = row.kind === "decision" && typeof row.detail.decision_id === "string"
+      ? `/m/api/inbox/decisions/${encodeURIComponent(row.detail.decision_id)}` : this.path(row.id, "answer");
+    const result = await this.post(path, body);
+    this.answering.delete(row.id);
+    if (!result) { this.render(); return; }
+    if (result.status === 200) {
+      this.drafts.delete(row.id);
+      this.picks.delete(row.id);
+      const note = typeof result.body.note === "string" ? result.body.note : "Sent.";
+      this.flash = note;
+    } else {
+      this.notes.set(row.id, await this.refusedWith(result.status, result.body));
+    }
+    this.render();
+    void this.loadInbox();
   }
 
   async loadChats(): Promise<void> {
@@ -333,6 +584,7 @@ export class PhoneApp {
     const got = await this.fetchJson("/m/api/me");
     if (this.stopped) return;
     if (!got.ok && got.why === "signed-out") return this.signedOut();
+    if (got.ok) this.secure = parseSecure((got.body as { secure?: unknown })?.secure);
     this.setOnline(got.ok);
     if (stream && stream === this.stream && stream.readyState === CLOSED) {
       this.setTimer(() => { if (this.stream === stream) this.connect(); }, RETRY_MS);
@@ -342,6 +594,7 @@ export class PhoneApp {
   handle(event: StreamEvent): void {
     if (event.kind === "inbox_changed") {
       this.later("inbox", () => void this.loadInbox());
+      if (this.card && event.ids.includes(this.card.rowId)) this.later("card", () => void this.loadCard());
       if (this.tasks !== null && event.ids.some((id) => /^(task|prop|tq):/.test(id))) {
         this.later("tasks", () => void this.loadTasks());
       }
@@ -397,6 +650,7 @@ export class PhoneApp {
   // -- drawing ---------------------------------------------------------------------------
 
   show(tab: Tab): void {
+    if (tab === "inbox" && this.tab === "inbox" && this.card) this.card = null;
     if (tab === this.tab) {
       // A second tap on the open tab goes back to its list.
       if (tab === "chats") this.thread = null;
@@ -420,11 +674,31 @@ export class PhoneApp {
     }
     this.renderBadge();
     let view: HTMLElement;
-    if (this.tab === "inbox") {
+    if (this.tab === "inbox" && this.card) {
+      view = cardView(this.card, {
+        back: () => this.closeCard(),
+        deny: () => void this.denyCard(),
+        allow: () => void this.allowCard(),
+        always: () => void this.alwaysCard(),
+        confirmAlways: () => void this.confirmAlways(),
+        cancelAlways: () => this.cancelAlways(),
+      });
+    } else if (this.tab === "inbox") {
+      const answers: InboxAnswers = {
+        openCard: (row) => this.openCard(row),
+        send: (row, body) => void this.sendAnswer(row, body),
+        busy: this.answering, notes: this.notes, drafts: this.drafts, picks: this.picks,
+      };
       view = inboxView(this.inbox, (row) => {
         if (row.thread_id) void this.openThread(row.thread_id);
         else if (row.task_id) void this.openTask(row.task_id);
-      });
+      }, answers, this.secure);
+      if (this.flash) {
+        const line = el("p", "m-notice", this.flash);
+        line.dataset.testid = "m-flash";
+        line.setAttribute("role", "status");
+        view.prepend(line);
+      }
     } else if (this.tab === "chats") {
       if (this.thread) {
         const built = transcriptView(this.thread.meta, this.thread.rows, this.thread.older, () => this.show("chats"));

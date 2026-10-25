@@ -261,7 +261,9 @@ describe("the phone app: live, offline and signed out (P-3)", () => {
     await h.settle();
     expect(h.root.querySelectorAll('[data-testid="m-inbox-row"]').length).toBe(1);
     expect(h.root.querySelector('[data-testid="m-tab-inbox"]')!.textContent).toBe("Inbox · 1");
-    expect(h.root.querySelector('[data-testid="m-desk-only"]')!.textContent).toBe("Answer at the desk");
+    // P-4: an approval row opens its answering card; nothing answers from the row.
+    expect(h.root.querySelector('[data-testid="m-open-card"]')!.textContent).toBe("Open the card to answer");
+    expect(h.root.querySelector('[data-testid="m-desk-only"]')).toBeNull();
   });
 
   it("appends a thread's new rows on thread_changed, reading after the cursor", async () => {

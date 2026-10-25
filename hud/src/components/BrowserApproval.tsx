@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { browserApi } from "../api";
 import { noPointerFocus } from "../lib/talkkey";
 import { browserApprovalDeadline, browserApprovalKey, parseBrowserPrivateApproval, isBrowserPrivateRequest, type BrowserPrivateDetail, type BrowserApprovalPublic } from "../lib/browserapproval";
+import { browserBody } from "../lib/approvalCard";
 import "./BrowserApproval.css";
 
 export const PRIVATE_DETAIL_UNAVAILABLE = "The Browser action details are unavailable. Deny this request.";
@@ -43,22 +44,16 @@ export function useBrowserApproval(request: BrowserApprovalPublic) {
     message: expired ? "This Browser request expired." : !eligible || selected?.failed ? PRIVATE_DETAIL_UNAVAILABLE : detail ? "" : "Loading private Browser action details…" };
 }
 
+// The words are lib/approvalCard.ts's `browserBody`, which the phone's card
+// (mobile/card.ts, P-4) draws too: the same text on both surfaces.
 export function BrowserApprovalBody({ detail }: { detail: BrowserPrivateDetail }) {
-  if (detail.kind === "delegation") return <div className="browserapproval" data-testid="browser-delegation-details">
-    <div className="headline">Allow this Browser tool to reach its safety checks?</div>
-    <p>Your named rule requires permission before the Browser tool can proceed.</p>
-    <p>This grants no Browser action. The requested action must still pass the Browser safety checks and may require a separate authorization.</p>
-  </div>;
-  const b = detail.browser, release = b.action === "release_download";
-  return <div className="browserapproval" data-testid="browser-approval-details">
-    <div className="headline">{release ? "Release this executable download?" : "Authorize this one Browser action?"}</div>
-    <p>Pane {b.pane} · <bdi>{b.action.replaceAll("_", " ")}</bdi> · <bdi>{b.category.replaceAll("_", " ")}</bdi></p>
-    {b.host || b.path ? <p>Page: <bdi>{b.host}{b.path}</bdi></p> : null}
-    {b.download ? <p>File: <bdi>{b.download.name}</bdi> · {b.download.size.toLocaleString()} bytes · ID <bdi>{b.download.id}</bdi></p> :
-      b.target ? <p>The page calls it: <bdi>{b.target}</bdi></p> : null}
-    <p className="muted" data-testid="browser-approval-preview">Preview unavailable</p>
-    <p>{release ? "This releases the file to you. It does not run it." : "Page labels are untrusted page text. Read the exact action below."}</p>
-    <pre className="arg" data-testid="approval-command"><bdi>{detail.command}</bdi></pre>
+  const body = browserBody(detail);
+  return <div className="browserapproval" data-testid={body.testid}>
+    <div className="headline">{body.headline}</div>
+    {body.paras.map((p, i) => <p key={i} className={p.muted ? "muted" : undefined} data-testid={p.testid}>
+      {p.segs.map((s, j) => s.bdi ? <bdi key={j}>{s.text}</bdi> : s.text)}
+    </p>)}
+    {body.command !== null ? <pre className="arg" data-testid="approval-command"><bdi>{body.command}</bdi></pre> : null}
   </div>;
 }
 

@@ -1422,8 +1422,11 @@ class ClaudeProvider:
             # the owner's own message (HUD or Discord), never another chat's,
             # and never the owner's answer to a decision (inbox B1, review of
             # PR #309): that turn is the agent's to run on its own judgement.
+            # The same for one answered on the phone (P-4, via "phone"): the
+            # phone carries no desk authority, and P-4's only phone messages
+            # are decisions' answers.
             session.owner_turn = (getattr(message, "origin", None) == "owner"
-                                  and getattr(message, "via", None) != "inbox")
+                                  and getattr(message, "via", None) not in ("inbox", "phone"))
             session.generation += 1
             # A steer an earlier turn wrote and never saw drain may still be
             # waiting in the CLI: then this message goes in at priority

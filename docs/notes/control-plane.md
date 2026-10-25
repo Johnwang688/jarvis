@@ -910,8 +910,10 @@ SELF_PROTECTED.
 - **The phone (C3).** `remote_api.DETAIL_FIELDS["decision"]` is
   `(decision_id, question, options, default, why, answer, delivery)`, the
   projection's own keys, every string through the phone's scrub; the phone
-  shows the question, options (the suggestion marked) and why read-only,
-  "Answer at the desk" while open, and the answer once recorded.
+  shows the question, options (the suggestion marked) and why, and the
+  answer once recorded. **Since P-4 (C4) the phone answers an open
+  decision** (`POST /m/api/inbox/decisions/<id>`, the same function, with
+  `via="phone"`: see "Answering from the phone").
 - **No tool reaches the answer side.** `tests/v2/archive_check.py` now scans
   `decisions.py` and the tool's module for every inbox route and module
   needle; `tests/v2/owner_post_check.py` keeps `settle`, `delivered`,
@@ -1209,3 +1211,125 @@ and returns to sign-in. Tap targets are at least 44 px.
 Tests: `tests/v2/remote_api_check.py`, `hud/src/mobile/app.test.ts`, the app
 half of `tests/face/hud_v2_phone_check.py` (`app_checks`: the built bundle
 through a real remote listener, signed in with the virtual authenticator).
+
+## Answering from the phone (phone C4 / P-4, 2026-10-25)
+
+`jarvis/v2/remote_answer.py` and `jarvis/v2/remote_secure.py` (both
+SELF_PROTECTED) let a signed-in phone answer (design PH-4, PH-7, PH-10,
+§4.1, §5). `remote_auth.api_route` hands them their four paths after
+`owner_status` (§4 items 1 to 4), before P-3's reads:
+
+| Route (`/m/api/...`) | Needs | Calls |
+|---|---|---|
+| `GET inbox/<id>/detail` | session; a HUD-only card: every §4.1 check, fresh | `to_json` (`owner_details` for a HUD-only card), minus `code`/`discord_channel_id` |
+| `POST inbox/<id>/answer/options` `{decision: allow\|always}` | session, §4.1 for Always and HUD-only | `RemoteAuth.answer_options`; for Always `PendingApprovals.always_rule` |
+| `POST inbox/<id>/answer` | Deny: session. Allow/Always: the assertion, then §4.1 | `inbox.answer(…, owner_verified, via="phone")` |
+| `POST inbox/decisions/<id>` | session | `inbox.answer_decision(…, via="phone")` |
+
+- **`owner_verified` (approvals.py).** `PendingApprovals.resolve(…, hud=)`
+  is now `owner_verified=`; it alone lets a HUD-only card be allowed, and
+  its refusal is unchanged. Exactly two callers pass a value that can be
+  True: the HUD's routes (`POST /approvals/<id>` and `POST
+  /inbox/<id>/answer`, after `owner_only`, with the HUD listener's own
+  Host, as `hud=` was) and the phone's answer after a verified assertion
+  while every §4.1 check holds. Discord, the escape hatch, tools and the
+  inbox dispatch from anywhere else pass False (`tests/v2/remote_answer_check.py`
+  greps every assignment in `jarvis/`). Always on a HUD-only card still
+  writes no rule, as at the desk.
+- **Per-answer assertions (PH-4).** The challenge is `sha256("jarvis-phone-
+  answer-v1\0" ‖ req_id ‖ "\0" ‖ decision ‖ "\0" ‖ 32-byte nonce)`, kept
+  server side with the req_id, the decision, the session's token hash and its
+  passkey; single use (spent before anything is verified), 60 s on the
+  monotonic clock, its own pool of 16 (429 when full; sign-ins are not
+  crowded out). `allowCredentials` names the session's passkey only.
+  `answer_verify` refuses (401, no detail) an assertion issued for another
+  card, another answer (an Allow's is never an Always), another session or
+  passkey, a credential that is not the session's passkey, `crossOrigin` or
+  `topOrigin`, a wrong origin or rpId, UV clear, a bad signature or a
+  counter that did not rise (PH-4's rule); an unknown, used or expired
+  challenge is 409. The new counter is saved before the answer counts.
+- **§4.1's monitor (`remote_secure.SecureMonitor`, `Daemon.secure`).** Five
+  checks by name: `loopback` (the listener's socket: AF_INET, 127.0.0.1,
+  the daemon's port), `serve` (`tailscale serve status --json`: exactly one
+  handler, `<host>:443` `/` proxying to `http://127.0.0.1:<port>`, TCP
+  `{"443": {"HTTPS": true}}` only, no Funnel, no other kind of entry),
+  `certificate` (`tailscale status --json`: running, `Self.DNSName` is the
+  host, the host under `MagicDNSSuffix` ending `.ts.net` and in
+  `CertDomains`, serve's 443 HTTPS; for an answer, its Host and Origin are
+  the host's), `passkey` (the passkeys file reads, a paired passkey exists,
+  `REQUIRE_UV`; for an answer, the session's own passkey) and `listeners`
+  (`ss -H -ltne sport = :<port>`: exactly one, 127.0.0.1, its inode the
+  listener's own socket; `Get-NetTCPConnection` through `powershell.exe`:
+  only `wslrelay` on loopback, or nothing). The reads are four fixed argvs,
+  no shell, read-only, in parallel, each cut at 8 s and 1 MiB of output;
+  any timeout, error, non-zero exit or unknown shape fails that check. They
+  run at start-up and every 5 minutes (a thread started with the remote
+  listener and stopped with the daemon) and **again in full before every
+  detail, options and answer**; the last result is kept only to show it
+  (`/status`'s `remote.secure` and `/m/api/me`'s `secure`: `{ok, failed,
+  reason, label, at}`, fixed words), never to authorize, so a failure is
+  never masked by an earlier pass. **Only daemon2's `main()` attaches the
+  real reads** (`attach_system`); an embedded or test daemon reads nothing
+  and is limited. Measured on this PC: about 0.6 s for the four (PowerShell
+  is the slowest); WSL interop works from a systemd user service.
+- **Limited** is Discord's authority (O-3): Deny everywhere; Allow on an
+  ordinary card (`owner_verified=False`, answered `authority: "limited"`);
+  no Always (409 "limited: <label>; Always needs every check"); a HUD-only
+  card's detail, options and answer are 409 "answer at the desk".
+- **The card the owner answers from.** The detail is the HUD's own card,
+  not P-3's capped read view, through the phone's scrub (`remote_api._scrub`,
+  nothing cut). If the scrub changes any field (`phone_card`), the phone is
+  sent the scrubbed card and Allow and Always are refused at the detail, the
+  options and the answer: "this card has withheld text: answer it at the
+  desk". Deny still works. A HUD-only card's private detail goes only to
+  that route, only while pending, only under §4.1; it is never in a log
+  line, the bus, `/m/api/events` or the inbox list (asserted).
+- **Always shows its rule first.** `PendingApprovals.always_rule(req_id)`
+  is a dry run of `resolve(always=True)`'s branch (the same tests in the
+  same order, `permissions.entry_for` on `v1_request`), writing nothing; the
+  options answer carries `rule`, `rule_words` and `resolution`, the phone
+  shows them and asks for Confirm before the passkey; the verified answer
+  writes it (the check holds the two equal case by case).
+- **Questions, task questions, decisions** need the session only, through
+  `inbox.answer` with `via="phone"`: a decision's answer is
+  `UserMessage(origin="owner", via="phone", desk=False)` with B1's frame and
+  queue (`daemon.VIAS` gains "phone"); `desk.desk_message` never counts it
+  (it requires "hud"); Claude's `owner_turn` excludes "phone" as it does
+  "inbox", so Bypass never applies to it; chat reads mark it "via the
+  phone's inbox (not typed in this chat)", the HUD "from the phone", the
+  Discord mirror "You (phone)". A chat question's `question_answered` log
+  record gains `via: "phone"`; a task question goes to
+  `TaskControl.answer_question`, which takes no `via`. A proposal's
+  withdraw stays at the desk (400).
+- **PH-10.** `PendingApprovals.wait_s()`: a broker on the local default
+  (120 s) waits 600 s while `RemoteAuth.recently_active()` (a session seen,
+  or signed in, in the last 24 h; kept past a logout, rebuilt from the
+  sessions file at start) says so; a broker given its own wait keeps it,
+  Discord's is 600 s anyway, a HUD-only card keeps its 120 s cap.
+- **The app** (`hud/src/mobile/card.ts`, `app.ts`, `views.ts`): an approval
+  row's "Open the card to answer" opens the card, drawn with the HUD card's
+  words (`hud/src/lib/approvalCard.ts`, which `Approvals.tsx` and
+  `BrowserApproval.tsx` now use too): headline, REQUESTED BY, the relayed
+  line, tool, the whole command, every argument, `[layer] reason`; a
+  HUD-only card the desk's Browser body (`browserBody`, page text in
+  `<bdi>`), parsed by the HUD's own `parseBrowserPrivateApproval`. DENY
+  first and alone; 120 px below it ALWAYS and AUTHORIZE, out of the Tab
+  order, never focused by a tap; Enter and Space on the card do nothing
+  unless DENY has focus; no form; buttons at least 48 px. A withheld or
+  limited card disables what it may not use and says why; a red "limited:
+  …" line shows on the card and atop the inbox. Questions take a text box
+  and Send, decisions their options (the suggestion pre-picked) or words
+  and Answer; Enter never sends, and a redraw waits while an answer is
+  typed. Each answer is sent once; a refusal shows the daemon's words.
+  **HUD:** Settings > Phone shows the same red "limited: …" line from
+  `/status`.
+
+Tests: `tests/v2/remote_answer_check.py` (45: the acceptance list,
+one test per §4.1 condition, the monitor's shapes, a timeout and the
+display cache), `hud/src/mobile/answer.test.ts`,
+`tests/face/hud_v2_phone_answer_check.py` (the built bundle, a real
+daemon and broker, Chromium's virtual authenticator: Deny, Allow, Always, a
+HUD-only card under §4.1 then limited, a withheld card, hostile text, no
+keyboard default, a task question), the P-4 additions to
+`tests/face/hud_v2_phone_check.py`, and the Bypass case for "phone" in
+`claude_provider_check`.

@@ -69,9 +69,17 @@ the request arrived on this daemon's remote listener, `Host` is exactly the
 configured name, a valid session cookie names an active passkey, and any
 method but GET/HEAD carries exactly `Origin: https://<host>`. Refusals are
 400 (Host), 403 (Origin), 401 (session), with no body detail. Item 5, a fresh
-assertion per Allow and Always, is P-4's. Past it, `api_route` hands every
-path but logout and `me` to `remote_api` (P-3's reads and event stream);
-`session_live` is the stream's check, which does not touch last-seen.
+assertion per Allow and Always, is P-4's: `answer_options` issues a
+challenge bound to one approval, one answer ("allow" or "always"), the
+session and its passkey (PH-4's sha256 of req_id, answer and a nonce;
+single use, 60 s, a pool of its own), and `answer_verify` checks it as
+`login_verify` checks a sign-in, plus that binding and that the credential
+is the session's own passkey. Past the session, `api_route` hands P-4's
+answer paths to `remote_answer`, and every other path but logout and `me`
+to `remote_api` (P-3's reads and event stream); `session_live` is the
+stream's check, which does not touch last-seen. `recently_active` is
+PH-10's "a phone session in the last 24 h"; `passkey_ready` is §4.1's
+condition 4 without the assertion.
 
 **Storage.** `<data root>/remote/` (0700): `passkeys.json` and
 `sessions.json` (0600, atomic replacement through `stores._write_bytes`, read
@@ -121,6 +129,16 @@ CHALLENGE_BYTES = 32
 # is evicted. Registration ones exist only while a window is open.
 MAX_LOGIN_CHALLENGES = 32
 MAX_REGISTER_CHALLENGES = 8
+# Per-answer challenges (PH-4, P-4): their own pool, only for a signed-in
+# phone, so neither sign-ins nor answers can crowd the other out.
+MAX_ANSWER_CHALLENGES = 16
+ANSWER_NONCE_BYTES = 32
+# What a per-answer challenge binds: PH-4's sha256(req_id ‖ answer ‖ nonce),
+# each part delimited (a req_id is `token_urlsafe`, never a NUL).
+ANSWER_DOMAIN = b"jarvis-phone-answer-v1\x00"
+ANSWER_DECISIONS = ("allow", "always")
+# PH-10: a phone session seen this recently gives approvals the remote wait.
+ACTIVE_S = 24 * 3600
 MAX_SESSIONS = 32         # the least recently seen goes first
 MAX_REVOKED = 16          # revoked passkey records kept, so a revoked id stays refused
 LAST_SEEN_WRITE_S = 60    # last-seen is written at most this often per session
@@ -316,6 +334,9 @@ class RemoteAuth:
         # A revocation held in memory that the passkeys file does not have
         # yet (its write failed): retried on every later call (`_flush`).
         self._unsaved = False
+        # PH-10: when a phone session was last seen (wall clock), kept past
+        # a logout; from the sessions file at load.
+        self._activity: float | None = None
 
     # -- files -----------------------------------------------------------------------
 
@@ -377,6 +398,7 @@ class RemoteAuth:
                     if _valid_session(row) and row["passkey"] in active:
                         self._sessions[row["token_sha256"]] = dict(row)
                         self._written[row["id"]] = row["last_seen"]
+                        self._seen(row["last_seen"])
         except (OSError, ValueError, AttributeError):
             self._sessions = {}
             LOG.warning("phone: sessions.json cannot be read; every phone session is signed out")
@@ -492,16 +514,18 @@ class RemoteAuth:
 
     # -- challenges ----------------------------------------------------------------------
 
-    def _issue(self, kind: str, **extra) -> bytes:
+    def _issue(self, kind: str, challenge: bytes | None = None, **extra) -> bytes:
         now = self.mono()
         self._challenges = {k: c for k, c in self._challenges.items() if c["expires"] > now}
         if kind == "register" and self._window_open() is None:
             raise _refuse("no pairing window is open")
-        cap = MAX_REGISTER_CHALLENGES if kind == "register" else MAX_LOGIN_CHALLENGES
+        cap = {"register": MAX_REGISTER_CHALLENGES, "answer": MAX_ANSWER_CHALLENGES}.get(kind, MAX_LOGIN_CHALLENGES)
         if sum(1 for c in self._challenges.values() if c["kind"] == kind) >= cap:
             # Refused, never evicting a pending one (module note).
-            raise AuthError(429, "too many sign-ins in progress; try again in a minute")
-        challenge = secrets.token_bytes(CHALLENGE_BYTES)
+            raise AuthError(429, "too many sign-ins in progress; try again in a minute"
+                            if kind != "answer" else "too many answers in progress; try again in a minute")
+        if challenge is None:
+            challenge = secrets.token_bytes(CHALLENGE_BYTES)
         self._challenges[b64url(challenge)] = {"kind": kind, "expires": now + CHALLENGE_S, **extra}
         return challenge
 
@@ -639,12 +663,136 @@ class RemoteAuth:
                        "advisory": {k: clean_text(advisory.get(k, ""), ADVISORY_CAP)
                                     for k, _ in ADVISORY_HEADERS}}
             self._sessions[session["token_sha256"]] = session
+            self._seen(now)
             self._prune_sessions()
             self._save_sessions()
             # Advisory, logged and never trusted (PH-3).
             LOG.info("phone: passkey %s signed in (Tailscale says %r, advisory)",
                      stored["key"], session["advisory"]["login"] or "nothing")
             return token, dict(session)
+
+    # -- per-answer assertions (PH-4, P-4) -------------------------------------------------
+
+    @staticmethod
+    def answer_challenge(req_id: str, decision: str, nonce: bytes) -> bytes:
+        """PH-4's challenge: sha256(req_id ‖ answer ‖ nonce), each part
+        delimited, under a fixed domain prefix."""
+        return hashlib.sha256(ANSWER_DOMAIN + req_id.encode("utf-8") + b"\x00"
+                              + decision.encode("ascii") + b"\x00" + nonce).digest()
+
+    def _session_passkey(self, session: dict) -> dict:
+        """The session's own passkey, still paired and unrevoked, of a
+        session that still holds; else 401."""
+        row = self._sessions.get(session.get("token_sha256")) if isinstance(session, dict) else None
+        if row is None or self._expired(row, self.wall()):
+            raise _refuse("the session ended")
+        passkey = self._by_key(row["passkey"])
+        if passkey is None or passkey.get("revoked") is not None:
+            raise _refuse("the session's passkey is revoked")
+        return passkey
+
+    def answer_options(self, session: dict, req_id: str, decision: str) -> dict:
+        """The request options for one answer (PH-4): a challenge bound to
+        this approval, this exact answer ("allow" or "always"), this session
+        and its passkey; single use, `CHALLENGE_S` on the monotonic clock,
+        in a pool of its own (`MAX_ANSWER_CHALLENGES`). `allowCredentials`
+        names the session's own passkey only."""
+        webauthn, structs = _webauthn()
+        if decision not in ANSWER_DECISIONS or not isinstance(req_id, str) or not req_id or len(req_id) > 64:
+            raise AuthError(400, "bad request")
+        with self._lock:
+            self._require_usable()
+            passkey = self._session_passkey(session)
+            nonce = secrets.token_bytes(ANSWER_NONCE_BYTES)
+            challenge = self.answer_challenge(req_id, decision, nonce)
+            self._issue("answer", challenge, req_id=req_id, decision=decision, nonce=nonce,
+                        session=session["token_sha256"], passkey=passkey["key"])
+            options = webauthn.generate_authentication_options(
+                rp_id=self.host, challenge=challenge, timeout=CHALLENGE_S * 1000,
+                allow_credentials=[structs.PublicKeyCredentialDescriptor(id=unb64url(passkey["id"]))],
+                user_verification=structs.UserVerificationRequirement.REQUIRED)
+            return json.loads(webauthn.options_to_json(options))
+
+    def answer_verify(self, session: dict, credential, req_id: str, decision: str) -> None:
+        """Verify one answer's assertion (PH-4), or raise: its challenge is
+        spent first (a failed attempt spends it too; unknown, used or
+        expired is 409); it must have been issued for exactly this approval,
+        this answer, this session and its passkey (an Allow's assertion is
+        never an Always, nor any other card's); the credential is the
+        session's own passkey, unrevoked; `crossOrigin` is not true;
+        origin, rpId, the UV flag, the signature and the counter rule as at
+        sign-in. Every failure but the challenge's is 401, with no detail."""
+        webauthn, _structs = _webauthn()
+        with self._lock:
+            self._require_usable()
+            key = _client_challenge(credential)
+            challenge, entry = self._spend(key, "answer")
+            if (entry.get("req_id") != req_id or entry.get("decision") != decision
+                    or entry.get("session") != session.get("token_sha256")
+                    or not hmac.compare_digest(challenge, self.answer_challenge(
+                        entry["req_id"], entry["decision"], entry["nonce"]))):
+                raise _refuse("the assertion was issued for another answer")
+            passkey = self._session_passkey(session)
+            if entry.get("passkey") != passkey["key"]:
+                raise _refuse("the assertion was issued for another passkey")
+            cred_id = credential.get("rawId") if isinstance(credential.get("rawId"), str) else credential.get("id")
+            if not isinstance(cred_id, str) or credential.get("id") != cred_id or cred_id != passkey["id"]:
+                raise _refuse("not the session's passkey")
+            handle = (credential.get("response") or {}).get("userHandle")
+            if handle not in (None, "") and handle != self._user_handle:
+                raise _refuse("another user's credential")
+            try:
+                verified = webauthn.verify_authentication_response(
+                    credential=credential, expected_challenge=challenge,
+                    expected_rp_id=self.host, expected_origin=self.origin,
+                    credential_public_key=unb64url(passkey["public_key"]),
+                    credential_current_sign_count=passkey["sign_count"],
+                    require_user_verification=REQUIRE_UV)
+            except Exception as exc:     # noqa: BLE001
+                raise _refuse(f"answer assertion: {type(exc).__name__}") from None
+            if REQUIRE_UV and not verified.user_verified:
+                raise _refuse("answer assertion without user verification")
+            if not counter_ok(passkey["sign_count"], int(verified.new_sign_count)):
+                raise _refuse("signature counter did not increase")
+            now = self.wall()
+            updated = dict(passkey, sign_count=int(verified.new_sign_count), last_used=now)
+            rows = [updated if p is passkey else p for p in self._passkeys]
+            # The counter is saved before the answer counts: a write that
+            # fails refuses it (503), so a counter can never go back.
+            self._write_passkeys(rows, self._user_handle)
+            self._passkeys = rows
+            LOG.info("phone: passkey %s verified an answer (%s)", passkey["key"], decision)
+
+    def passkey_ready(self, session: dict | None = None) -> tuple[bool, str]:
+        """§4.1 condition 4, without the assertion: the passkeys read, and a
+        paired, unrevoked passkey requiring user verification exists; with a
+        session, it is the session's own. (ok, a fixed reason)."""
+        with self._lock:
+            self._load()
+            if self._broken:
+                return False, "the passkeys file cannot be read"
+            if not self.host:
+                return False, "no tailnet name is configured"
+            if not REQUIRE_UV:
+                return False, "user verification is not required"
+            if session is not None:
+                try:
+                    self._session_passkey(session)
+                except AuthError:
+                    return False, "the session's passkey is not paired"
+                return True, ""
+            return (True, "") if self._active() else (False, "no passkey is paired")
+
+    def _seen(self, at: float) -> None:
+        if self._activity is None or at > self._activity:
+            self._activity = at
+
+    def recently_active(self) -> bool:
+        """PH-10: a phone session was seen within `ACTIVE_S` (24 h)."""
+        with self._lock:
+            self._load()
+            now = self.wall()
+            return self._activity is not None and now - self._activity < ACTIVE_S
 
     # -- sessions (PH-5) ------------------------------------------------------------------
 
@@ -687,6 +835,7 @@ class RemoteAuth:
                 self._try_save_sessions()
                 return None
             row["last_seen"] = max(row["last_seen"], now)
+            self._seen(row["last_seen"])
             if now - self._written.get(row["id"], 0) >= LAST_SEEN_WRITE_S:
                 self._try_save_sessions()
             return dict(row)
@@ -963,13 +1112,20 @@ def api_route(handler, path: str, body: bytes) -> tuple[int, dict, list[tuple[st
             auth.logout(session)
             return 200, {"signed_in": False}, [("Set-Cookie", cleared_cookie())]
         if path == ME and method in ("GET", "HEAD"):
+            # §4.1's last result, to show (P-4): never what authorizes.
             return 200, {"signed_in": True, "paired": True,
                          "session": {"created": session["created"],
-                                     "ends": session["created"] + ABSOLUTE_S}}, []
+                                     "ends": session["created"] + ABSOLUTE_S},
+                         "secure": secure_view(getattr(handler, "daemon", None))}, []
         if path in (LOGOUT, ME):
             return 404, {"error": WORDS[404]}, []
-        # P-3's reads and the event stream (`remote_api`), only past the
-        # session check above. None: the stream answered on the socket.
+        # P-4's answers and a card's detail (`remote_answer`), then P-3's
+        # reads and the event stream (`remote_api`), only past the session
+        # check above. None from the reads: the stream answered on the socket.
+        from . import remote_answer
+        answered = remote_answer.route(handler, path, session, body)
+        if answered is not None:
+            return answered
         from . import remote_api
         return remote_api.route(handler, path, session)
     except AuthError as exc:
@@ -980,13 +1136,26 @@ def api_route(handler, path: str, body: bytes) -> tuple[int, dict, list[tuple[st
 # -- the HUD's owner-only routes (the HUD listener) --------------------------------
 
 
+def secure_view(daemon) -> dict:
+    """§4.1's last result (`remote_secure.SecureMonitor.view`), or "not
+    checked yet" for a daemon without one."""
+    monitor = getattr(daemon, "secure", None)
+    if monitor is None:
+        from .remote_secure import LABELS
+        return {"ok": False, "failed": "pending", "reason": LABELS["pending"],
+                "label": LABELS["pending"], "at": None}
+    return monitor.view()
+
+
 def remote_status(daemon) -> dict:
     """`/status`'s `remote`: the port, whether the listener bound, whether a
-    host is configured. No name, no secret."""
+    host is configured, and §4.1's last result (`secure`, P-4: which check
+    failed, in this module's fixed words). No name, no secret."""
     bound = getattr(daemon, "remote_port", None)
     want = getattr(daemon, "_remote_want", None)
     return {"port": bound if bound is not None else want, "bound": bound is not None,
-            "host_configured": bool(getattr(daemon, "remote_host", None))}
+            "host_configured": bool(getattr(daemon, "remote_host", None)),
+            "secure": secure_view(daemon)}
 
 
 def hud_route(handler, daemon, parts, query):

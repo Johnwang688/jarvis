@@ -69,11 +69,11 @@ class PrivateApprovals(unittest.TestCase):
     def test_private_allow_requires_actual_hud_flag_and_code_cannot_grant(self):
         b,r,w,answers,_,_=self.start()
         for call in (lambda:b.resolve(r.req_id,Decision.ALLOW),
-                     lambda:b.resolve(r.req_id,Decision.ALLOW,hud="yes"),
+                     lambda:b.resolve(r.req_id,Decision.ALLOW,owner_verified="yes"),
                      lambda:b.resolve_code(r.code,Decision.ALLOW)):
             with self.assertRaises(ValueError):call()
         self.assertEqual(len(b.pending()),1)
-        b.resolve(r.req_id,Decision.ALLOW,hud=True);w.join(2)
+        b.resolve(r.req_id,Decision.ALLOW,owner_verified=True);w.join(2)
         self.assertEqual(answers,[Decision.ALLOW])
 
     def test_no_standing_rule_even_when_request_is_mutated(self):
@@ -83,7 +83,7 @@ class PrivateApprovals(unittest.TestCase):
         self.assertNotIn("args",r.to_json())
         with patch("jarvis.v2.approvals.permissions.add_allow", return_value={"tool":"unsafe"}) as add:
             with self.assertRaises(ValueError):b.resolve(r.req_id,Decision.ALLOW)
-            self.assertIsNone(b.resolve(r.req_id,Decision.ALLOW,hud=True,always=True))
+            self.assertIsNone(b.resolve(r.req_id,Decision.ALLOW,owner_verified=True,always=True))
             add.assert_not_called()
         w.join(2);self.assertEqual(answers,[Decision.ALLOW])
 
@@ -91,7 +91,7 @@ class PrivateApprovals(unittest.TestCase):
         b,r,w,answers,_,resolved=self.start()
         b.resolve_code(r.code,Decision.DENY);w.join(2)
         self.assertEqual(answers,[Decision.DENY]);self.assertEqual(resolved,[(Decision.DENY,"deny")])
-        with self.assertRaises(ValueError):b.resolve(r.req_id,Decision.ALLOW,hud=True)
+        with self.assertRaises(ValueError):b.resolve(r.req_id,Decision.ALLOW,owner_verified=True)
 
     def test_remote_timeout_is_capped_but_ordinary_remote_stays_600(self):
         seen=[]
@@ -124,7 +124,7 @@ class PrivateApprovals(unittest.TestCase):
         try:
             self.assertFalse(w.is_alive());self.assertEqual(answers,[Decision.DENY])
             self.assertEqual(resolved,[(Decision.DENY,"cancelled")]);self.assertEqual(broker.pending(),[])
-            with self.assertRaises(ValueError):broker.resolve(r.req_id,Decision.ALLOW,hud=True)
+            with self.assertRaises(ValueError):broker.resolve(r.req_id,Decision.ALLOW,owner_verified=True)
         finally:broker.shutdown();w.join(2)
 
     def test_cancelled_or_failed_cancellation_probe_cannot_publish(self):

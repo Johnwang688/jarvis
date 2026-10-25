@@ -338,8 +338,10 @@ def is_running(port: int) -> bool:
 
 # "inbox": the owner's answer to a decision, delivered by the owner inbox
 # (inbox.py, B1) through `deliver_queued`: never at the desk
-# (`desk.desk_message` requires "hud").
-VIAS = ("hud", "discord", "dm", "system", "peer", "inbox")
+# (`desk.desk_message` requires "hud"). "phone": the same answer given on the
+# phone (phone design P-4, `remote_answer`): the same queue and framing, and
+# no desk authority either.
+VIAS = ("hud", "discord", "dm", "system", "peer", "inbox", "phone")
 
 
 def user_data(message: UserMessage) -> dict:
@@ -564,6 +566,16 @@ class Daemon:
         # Made here, never touching disk until a phone or the HUD asks.
         from .remote_auth import RemoteAuth
         self.remote_auth = RemoteAuth(Path(stores.root) / "remote", self.remote_host)
+        # PH-10: while a phone session was active in the last 24 h, the
+        # broker waits the remote 600 s (`PendingApprovals.wait_s`).
+        if getattr(self.approvals, "phone_active", False) is None:
+            self.approvals.phone_active = self.remote_auth.recently_active
+        # §4.1, "the network stays secured" (P-4, remote_secure.py): the
+        # checks that give the phone HUD authority. Its Windows and
+        # Tailscale reads are attached only by `main()`
+        # (`attach_system`), so no embedded or test daemon runs them.
+        from .remote_secure import SecureMonitor
+        self.secure = SecureMonitor(self)
         self._listeners = []
         from .hud_api import HUDLedger
         from .router import Router
@@ -698,6 +710,10 @@ class Daemon:
                 self._listeners.append((listener, worker))
                 worker.start()
             self._server_thread = self._listeners[0][1]
+            # §4.1's checks: at start-up and every 5 minutes, only while the
+            # phone's listener is bound (remote_secure.py).
+            if self.remote_port is not None:
+                self.secure.start()
             from .hud_api import connect_controls
             connect_controls(self)
             # `terminal_read` (WP-F) reads these terminals and no others.
@@ -2206,9 +2222,13 @@ class Daemon:
                                    "decision": getattr(decision, "value", str(decision)),
                                    "resolution": resolution}})
 
-    def resolve_approval(self, req_id: str, decision, always: bool = False, *, hud: bool = False) -> dict:
+    def resolve_approval(self, req_id: str, decision, always: bool = False, *,
+                         owner_verified: bool = False) -> dict:
+        """`owner_verified` is HUD authority (PH-7): True only from the HUD's
+        own answer routes and the phone's verified answer (`remote_answer`)."""
         try:
-            entry = self.approvals.resolve(req_id, decision, always=always, hud=hud)
+            entry = self.approvals.resolve(req_id, decision, always=always,
+                                           owner_verified=owner_verified)
         except ValueError as exc:
             raise APIError(404, str(exc)) from exc
         return {"ok": True, "req_id": req_id,
@@ -2802,18 +2822,22 @@ class Daemon:
         self.subagents.stop_sent(thread, sid, token)
         return {"ok": True, "stop": "stopping"}
 
-    def answer(self, thread_id, req_id, decision):
+    def answer(self, thread_id, req_id, decision, *, via: str | None = None):
         session = self._session(thread_id)
         session.provider.answer(session.handle, req_id, decision)
         with self._lock:
             session.questions.discard(str(req_id))
         # In the log too, beside the question it closes, so a surface catching
         # up from the log (the Discord mirror) knows the question is no
-        # longer open. Nothing the provider sees.
+        # longer open. Nothing the provider sees. `via` names where it was
+        # answered when that was not the HUD ("phone", P-4).
+        data = {"req_id": req_id}
+        if via in VIAS:
+            data["via"] = via
         try:
             self.stores.threads._append(thread_id, "log.jsonl", {
                 "kind": "question_answered", "at": utcnow(), "thread_id": thread_id,
-                "turn_id": session.turn_id, "data": {"req_id": req_id}})
+                "turn_id": session.turn_id, "data": data})
         except Exception:
             LOG.warning("Cannot log the answer on thread %s", thread_id, exc_info=True)
         # Whoever answered (the HUD, Discord), every surface still showing the
@@ -2987,6 +3011,7 @@ class Daemon:
             worker.join(max(0, deadline - time.monotonic()))
         self._listeners.clear()
         self._server = None
+        self.secure.stop()
         self.remote_port = None
         self.remote_auth.server = None
         # A revocation whose write failed gets one last try (and an ERROR
@@ -3451,9 +3476,11 @@ def _handler(daemon):
                 always = body.get("always", False)
                 if not isinstance(always, bool):
                     raise APIError(400, "always must be a boolean")
+                # The HUD route: HUD authority (PH-7) only with the HUD
+                # listener's own Host, after `owner_only` above.
                 return 200, daemon.resolve_approval(
                     parts[1], Decision(_text(body["decision"], "decision")), always,
-                    hud=config.own_host_header(self.headers.get("Host", ""), daemon.face_port))
+                    owner_verified=config.own_host_header(self.headers.get("Host", ""), daemon.face_port))
             if len(parts) in (2, 3) and parts[0] == "tasks":
                 task = daemon.require(stores.tasks, parts[1])
                 if len(parts) == 2 and method == "GET":
@@ -3804,6 +3831,10 @@ def main() -> int:
         daemon.browser.keyring.attach()
     except Exception as exc:     # noqa: BLE001
         LOG.warning("browser keyring not attached (%s); the basic store is used", type(exc).__name__)
+    # The phone's §4.1 checks read Tailscale and Windows (remote_secure.py,
+    # read-only, time-limited): attached here, so no embedded or test daemon
+    # runs a Windows command. Without it the phone stays limited.
+    daemon.secure.attach_system()
     hatch = EscapeHatch(daemon, daemon.approvals)
     discord = None
     daemon.runner = TaskRunner(daemon, daemon.router)

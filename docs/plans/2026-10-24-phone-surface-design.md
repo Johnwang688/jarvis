@@ -19,6 +19,14 @@ design rests on them.
 - **O-4. The other device on the tailnet belongs to a family member and is
   trusted.** The design still never treats the tailnet as proof of the owner
   (PH-3).
+- **O-5 (owner, 2026-10-25). No Discord confirmation step for a new
+  passkey.** The owner accepts that a program running as the owner can forge
+  the HUD's owner test (`projects.is_owner`), open a pairing window, pair a
+  software passkey and so produce valid PH-4 assertions, which then carry
+  the HUD's authority on the phone (O-3) while §4.1 holds. This is at parity
+  with the desktop's forgeable `POST /approvals`; the owner sees the extra
+  passkey in Settings > Phone and can revoke it. It answers §10.2's open
+  item; nothing new is built for it.
 
 ## 0. What the owner gets
 
@@ -119,7 +127,14 @@ the native app would be a thin shell over the same `/m/api`.
   own rule). For iCloud passkeys the counter is therefore no defence against
   a cloned key. Deny needs only the session. This is
   "deny cheap, authorize deliberate", made physical. A program running as the
-  owner can forge any header, but it cannot produce this assertion.
+  owner can forge any header, but it cannot produce this assertion **with a
+  passkey it does not hold**: it cannot use the owner's iCloud passkey,
+  whose private key never leaves the owner's devices and needs Face ID or
+  the passcode. It can, though, pair a passkey of its own (§10.2: it can
+  forge the HUD's owner test and open a pairing window) and then produce
+  valid assertions with it. The owner accepted that residual (O-5): it is at
+  parity with the forgeable desktop `POST /approvals`, and the extra passkey
+  shows in Settings > Phone, where it can be revoked.
 - **PH-5. Sessions are short and narrow.** After a passkey login, the phone
   holds a `__Host-` cookie (HttpOnly, Secure, SameSite=Strict, 12 h idle,
   7 days absolute). Every write also needs `Origin` equal to the ts.net
@@ -448,6 +463,8 @@ above:
   has paired its own key. The owner sees the extra passkey in Settings >
   Phone and can revoke it, but nothing stops the pairing itself. **The
   remedy is pending an owner decision**; nothing here implements one.
+  **Decided 2026-10-25 (O-5): accepted, no remedy built** (no Discord
+  confirmation step); PH-4's wording now states the residual.
 
 ### 10.3 P-3 as built (2026-10-25, phone C3)
 
@@ -496,6 +513,57 @@ API and tabs"). Where it is more specific than the text above:
 - **Private (HUD-only) approval rows show their private projection** and
   "a private card: its detail is shown only at the desk"; the §4.1
   `detail` fetch is P-4's.
+
+### 10.4 P-4 as built (2026-10-25, phone C4)
+
+Built as the P-4 row says (`docs/notes/control-plane.md`, "Answering from
+the phone"). Where it is more specific than the text above:
+
+- **`owner_verified`** replaces `resolve(…, hud=)` in `approvals.py`, with
+  the same refusal. Its True comes only from the HUD's two answer routes
+  (`POST /approvals/<id>`, `POST /inbox/<id>/answer`, the HUD listener's own
+  Host after `owner_only`) and from `remote_answer` after a verified
+  assertion while all five §4.1 checks pass; a test greps every assignment.
+- **PH-4's challenge** is `sha256(domain ‖ req_id ‖ answer ‖ nonce)`, each
+  part delimited, bound server side to the session and its passkey too, in a
+  pool of its own (16). The assertion is verified before anything else, then
+  §4.1 runs in full; a failure after the assertion still refuses.
+- **§4.1** is `remote_secure.py`. Condition 3, "the certificate is the
+  tailnet's own", is read from Tailscale rather than from a TLS handshake:
+  the host is this machine's MagicDNS name, under the tailnet's `.ts.net`
+  suffix, in `CertDomains`, and serve terminates HTTPS on 443 (serve uses no
+  other certificate); and an answer's own Host and Origin are the host's.
+  Condition 5 on WSL also requires the one listener's socket inode to be the
+  daemon's own. The five run at start-up, every 5 minutes, and in full
+  before every detail, options and answer; the last result is only shown
+  (`/status` `remote.secure`, `/m/api/me` `secure`). Only daemon2's
+  `main()` attaches the Windows reads, so a test or embedded daemon is
+  limited.
+- **Limited** answers an ordinary card's Allow with `owner_verified=False`
+  (Discord's authority) and refuses Always and every HUD-only Allow (409
+  "answer at the desk"). Deny always works, a HUD-only card's included.
+- **The card** is the HUD's projection (`to_json`, or `owner_details` for a
+  HUD-only card), sent through the phone's scrub uncut; if the scrub changes
+  any field, Allow and Always are refused ("this card has withheld text:
+  answer it at the desk"). The phone draws it with the HUD card's words
+  (`hud/src/lib/approvalCard.ts`, which the HUD's own card now uses),
+  not the React component itself: the phone bundle has no React, and the
+  HUD component reads HUD-only routes (a sub-agent's name, the Browser
+  card's `/approvals/<id>`). The sub-agent line says "from a sub-agent"
+  without its name.
+- **Always** shows `PendingApprovals.always_rule` (a dry run of
+  `resolve(always=True)`) and asks for Confirm before the passkey.
+- **Questions and decisions**: B1's decisions are answerable on the phone
+  (`via="phone"`, B1's framing and queue, no desk authority, no Bypass); a
+  chat question's log record names "phone"; a task question goes through
+  `TaskControl.answer_question`, which takes no `via`. A proposal's
+  withdraw stays at the desk (P-5 brings task verbs).
+- **PH-10**: `PendingApprovals.wait_s()` waits 600 s while a phone session
+  was seen in the last 24 h; a HUD-only card keeps its 120 s cap (its
+  Browser deadline is bound to it), so the phone has 2 minutes for those.
+- **Not built here:** Web Push (P-6), so "never in a push" holds trivially;
+  the stream's shaper, which a push would read, is asserted to carry no
+  private detail.
 
 ## 11. Open questions for the owner (defaults in bold)
 

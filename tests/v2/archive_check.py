@@ -823,7 +823,11 @@ class OwnerOnly(Base):
                     r"from \.+remote_auth", r"passkeys\.json", r"sessions\.json", r"__Host-jarvis_m",
                     r"open_window", r"pair_options", r"pair_verify", r"login_verify",
                     # P-3's read API and stream (`remote_api.py`, named only in SELF_PROTECTED).
-                    r"\bremote_api\.(?!py\b)", r"import remote_api", r"from \.+remote_api")
+                    r"\bremote_api\.(?!py\b)", r"import remote_api", r"from \.+remote_api",
+                    # P-4's answers and the §4.1 checks (named only in SELF_PROTECTED).
+                    r"\bremote_answer\.(?!py\b)", r"import remote_answer", r"from \.+remote_answer",
+                    r"\bremote_secure\.(?!py\b)", r"import remote_secure", r"from \.+remote_secure",
+                    r"answer_verify", r"answer_options", r"owner_verified")
 
     def test_no_tool_reaches_the_phone_pairing(self):
         from jarvis import tools

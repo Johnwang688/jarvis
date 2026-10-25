@@ -21,7 +21,7 @@ Two parts.
       - `/vex/…`       (`vex._owner`)
       - `/dev-servers` (`devservers.route`)
       - `/terminals`   (`terminals._strict_host`)
-      - `POST /approvals/<id>`  (`daemon`'s `hud=` flag: a hud-only approval
+      - `POST /approvals/<id>`  (`daemon`'s `owner_verified=` flag: a hud-only approval
         answered from a forged Host must not count as answered in the HUD)
 
 The other sites (`hud_api.check_origin`, `projects.is_owner`) have refusal

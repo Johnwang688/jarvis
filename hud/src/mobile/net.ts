@@ -30,3 +30,25 @@ export function errorWord(body: unknown): string {
   return body && typeof body === "object" && typeof (body as { error?: unknown }).error === "string"
     ? (body as { error: string }).error : "";
 }
+
+/** One write (P-4's answers): JSON in, the status and the JSON body out.
+ * "offline" when nothing reached Jarvis. Never retried: an answer is sent once. */
+export type Posted = { status: number; body: Record<string, unknown> } | { status: 0; body: Record<string, unknown>; offline: true };
+
+export async function postJson(path: string, value: unknown): Promise<Posted> {
+  let res: Response;
+  try {
+    res = await fetch(path, {
+      method: "POST", credentials: "same-origin", cache: "no-store",
+      headers: { "Content-Type": "application/json" }, body: JSON.stringify(value),
+    });
+  } catch {
+    return { status: 0, body: {}, offline: true };
+  }
+  let body: Record<string, unknown> = {};
+  try {
+    const parsed = await res.json();
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) body = parsed as Record<string, unknown>;
+  } catch { /* an empty or non-JSON answer: its status says enough */ }
+  return { status: res.status, body };
+}
