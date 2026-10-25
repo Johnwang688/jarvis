@@ -270,9 +270,14 @@ updates on Discord on each restart that has pending asks.
 
 - **The order.** `main()`'s `finally` is now `daemon.shut_down(daemon,
   discord, hatch)`. Each step runs in its own `try`, so one that raises is
-  logged and every later step still runs:
-  1. `runner.quiesce()`: no task is admitted and none starts its next
-     phase. A running turn is not interrupted.
+  logged and every later step still runs; `daemon.stop()` sits in a
+  `finally`, so it runs even when a second Ctrl-C (a `KeyboardInterrupt`)
+  cuts the others short:
+  1. `runner.quiesce()`: no task is admitted, and no further model turn
+     starts. Every runner turn begins in `_run_turn`, which then raises
+     `_Stopping`; `_drive` takes it without a transition, so the task stays
+     where it was for `serve()`'s recovery to re-admit next boot. A turn
+     already running is not interrupted.
   2. `Daemon.release_approvals()`: deny with `shutdown`, and wait at most
      `RELEASE_WAIT_S` (2 s) for each denial to be announced.
   3. `discord.stop()`.
@@ -314,9 +319,10 @@ updates on Discord on each restart that has pending asks.
 - **What can still happen in the window.** The window runs from the release
   to the turns being stopped: normally under a second, and at worst the two
   bounds above, about 7 s.
-  - A task's running turn sees its denial and can finish that turn. The
-    quiesced runner starts no next phase, but the turn's own milestones
-    still post.
+  - A task's running turn sees its denial and can finish that turn, and its
+    own events (tool calls, the worker's report) are recorded. No turn
+    follows it: an orchestrator does not read the report, a reviewer is not
+    asked, so the task cannot reach VERIFYING or DONE on the denial.
   - A **chat** is not quiesced: its turn can answer the denial, and the
     mirror posts that reply before it closes. For the owner's DM chat that
     post notifies, as any DM reply does.
@@ -336,6 +342,10 @@ updates on Discord on each restart that has pending asks.
     - `ReleasedAskChecks`: no card for a released ask, and the real linker
       on the real broker keeping its ask, with the flag set before the
       release.
+  - `tests/v2/runner_check.py` `Quiescing`, on the real runner: the running
+    turn finishes and nothing follows it (no orchestrator turn, the task
+    stays RUNNING, nothing interrupted, a new task refused), and a task
+    quiesced before its first turn sends none.
   - `tests/v2/discord_linker_check.py`: two cases.
   - **Mutations caught:**
 
@@ -352,3 +362,6 @@ updates on Discord on each restart that has pending asks.
     | the flag set after `shutdown()` | 1 |
     | no quiesce | 2 |
     | a raising step stopping the rest | 1 |
+    | the real `quiesce()` a no-op (`runner_check` `Quiescing`) | 2 |
+    | no `_Stopping` check in `_run_turn` | 1 |
+    | `daemon.stop()` not in a `finally` (second Ctrl-C) | 1 |

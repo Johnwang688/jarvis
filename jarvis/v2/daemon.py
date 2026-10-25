@@ -3877,23 +3877,30 @@ def shut_down(daemon, discord, hatch) -> None:
     `discord.stop()`). Nothing is cancelled — a task left RUNNING is
     re-admitted by `serve()`'s recovery next boot. `daemon.stop()` releases
     again, which finds nothing (idempotent). Before any of it the runner is
-    quiesced (no task admitted, no next phase), so a denial cannot move a task
-    on. Each step is bounded, and one that raises is logged and does not skip
-    the rest."""
+    quiesced (no task admitted, no further model turn), so a denial cannot
+    move a task on. Each step is bounded; one that raises is logged and does
+    not skip the rest, and `daemon.stop()` runs even when a KeyboardInterrupt
+    cuts the others short."""
     runner = getattr(daemon, "runner", None)
     steps = [
-        # No task takes its next phase on the strength of a denial.
+        # No task starts another model turn on the strength of a denial.
         ("runner.quiesce", getattr(runner, "quiesce", None)),
         ("release_approvals", daemon.release_approvals),
         ("discord.stop", getattr(discord, "stop", None)),
         ("runner.stop", getattr(runner, "stop", None)),   # idempotent if Discord stopped it
         ("hatch.stop", getattr(hatch, "stop", None)),
-        ("daemon.stop", daemon.stop),
     ]
-    for name, step in steps:
-        if step is None:
-            continue
+    try:
+        for name, step in steps:
+            if step is None:
+                continue
+            try:
+                step()
+            except Exception:  # noqa: BLE001 — every later step still runs
+                LOG.warning("shutdown step %s failed", name, exc_info=True)
+    finally:
+        # Always, even when a second Ctrl-C (a BaseException) cuts a step short.
         try:
-            step()
-        except Exception:  # noqa: BLE001 — every later step still runs
-            LOG.warning("shutdown step %s failed", name, exc_info=True)
+            daemon.stop()
+        except Exception:  # noqa: BLE001
+            LOG.warning("shutdown step daemon.stop failed", exc_info=True)

@@ -1929,6 +1929,33 @@ class ShutdownOrderChecks(_ShutdownHarness):
         daemon_mod.shut_down(FakeDaemon(), None, None)
         self.assertEqual(calls, ["release", "runner.stop", "daemon.stop"])
 
+    def test_a_second_ctrl_c_still_stops_the_daemon(self):
+        """A KeyboardInterrupt during a step (a second Ctrl-C) is not an
+        Exception: it cuts the rest short, but `daemon.stop()` still runs."""
+        from jarvis.v2 import daemon as daemon_mod
+        calls = []
+
+        class Step:
+            def __init__(self, name, raises=None):
+                self.name, self.raises = name, raises
+
+            def stop(self):
+                calls.append(self.name)
+                if self.raises:
+                    raise self.raises
+
+        class FakeDaemon:
+            runner = Step("runner.stop")
+
+            def release_approvals(self):
+                calls.append("release")
+
+            def stop(self):
+                calls.append("daemon.stop")
+        with self.assertRaises(KeyboardInterrupt):
+            daemon_mod.shut_down(FakeDaemon(), Step("discord.stop", KeyboardInterrupt()), Step("hatch.stop"))
+        self.assertEqual(calls, ["release", "discord.stop", "daemon.stop"])
+
 
 class ShutdownMapChecks(_ShutdownHarness):
     """Review of #311 (MED): a post leaves the approval-post map on disk only
