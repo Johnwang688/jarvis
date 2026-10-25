@@ -1842,3 +1842,43 @@ routes"). Not deployed: the owner's step is `jarvis hud rebuild` and a reload
   /approvals` only at boot, so a card asked while the event stream was down
   is missed until a reload; re-read it on reconnect and merge it into the
   veil. The inbox's "reload to see it" row already says so.
+
+## The owner Inbox row's aurora (2026-10-25)
+
+The owner: "Keep inbox but make it like a different color. Make it sparkly or
+aurora or something." Both sidebar rows keep the label "Inbox"; only the
+**owner inbox** row (`owner-inbox`, above PROJECTS) gets the aurora, never
+the "Inbox" project where unplaced chat lands.
+
+- **An owner-approved exception to Graphite's "one sparing accent"**, and
+  the only one: the `--aurora-*` tokens on `:root` (`hud/src/theme.css`)
+  colour nothing else. A soft teal, green and violet band with a hint of
+  mauve-rose (never in the amber/red band, saturation at most 0.5, alpha at
+  most 0.24 over `--bg-1`) drifts across the row's background,
+  `--aurora-drift` (11 s) a pass; while something waits that is not pending,
+  four faint sparks twinkle.
+- **Restraint.** Nothing waiting (`data-aurora="calm"`): the same band at
+  `--aurora-drift-calm` (26 s), no sparks. Pending (ranks 1–2, the amber
+  count, `data-aurora="pending"`): the band dims and the sparks go, and the
+  count sits on an opaque `--bg-1` chip, so amber reads as it does
+  everywhere else. Under the approval card everything outside the veil is
+  `[inert]` (`Approvals.tsx`), and an `[inert]` rule pauses both layers:
+  the card stays the loudest thing on screen. `prefers-reduced-motion:
+  reduce` leaves a static tint and no animation.
+- **Cost.** CSS only, no timers: `transform` on the band and `opacity` on the
+  sparks, both absolutely placed pseudo-elements clipped by the row
+  (`overflow: hidden`), so no layout moves. The row's text stays `--text`,
+  AA over every blend (worst case about 7:1).
+- **Tests.** `hud/src/lib/aurora.test.ts` recomputes from theme.css: the
+  tokens' alpha, saturation and hue band, `--text` contrast over every blend
+  with hover and selection, the band never brighter than the text, the amber
+  chip, the tokens used only by the aurora, keyframes on transform/opacity
+  only, the reduced-motion and `[inert]` rules.
+  `tests/face/hud_v2_inbox_check.py` section `aurora` checks the computed
+  styles in Chromium: the class on the owner row and not the project row,
+  calm/live/pending, the amber chip, the same box with and without the
+  aurora, `animation-play-state: paused` under a card and running after,
+  and `animation-name: none` under emulated reduced motion.
+  `JARVIS_AURORA_SHOTS=<dir>` saves sidebar screenshots there. Mutations
+  caught: the reduced-motion rule removed, the veil pause removed (both fail
+  the vitest and the face section).
