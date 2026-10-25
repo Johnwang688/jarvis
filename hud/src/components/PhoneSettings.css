@@ -4,6 +4,8 @@
 .phone-settings h3 { margin: 0 0 8px; font-size: 13px; font-weight: 600; }
 .phone-settings p { margin: 6px 0; }
 .phone-warn { color: var(--amber); }
+/* §4.1 failing (P-4): red, the HUD's error colour. */
+.phone-limited { color: var(--red); }
 .phone-pairing { display: flex; flex-wrap: wrap; gap: 16px; align-items: flex-start; margin: 8px 0; }
 .phone-qr { width: 232px; height: 232px; flex: 0 0 auto; border-radius: var(--radius, 6px); }
 .phone-pairing-text { flex: 1 1 220px; min-width: 0; }

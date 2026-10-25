@@ -304,8 +304,9 @@ def _scrub(text):
 
 
 def _scrub_tree(value, *, cap: int | None = None, items: int | None = None):
-    """Every string in `value` through the transcript's scrub; containers kept,
-    lists cut at `items` and strings at `cap` when given."""
+    """Every string in `value` through the transcript's scrub, a dict's keys
+    included (review of PR #313: a credential can be an argument's key);
+    containers kept, lists cut at `items` and strings at `cap` when given."""
     if isinstance(value, str):
         out = _scrub(value)
         return out if cap is None or len(out) <= cap else out[:cap] + "…"
@@ -313,7 +314,101 @@ def _scrub_tree(value, *, cap: int | None = None, items: int | None = None):
         kept = value if items is None else value[:items]
         return [_scrub_tree(v, cap=cap, items=items) for v in kept]
     if isinstance(value, dict):
-        return {k: _scrub_tree(v, cap=cap, items=items) for k, v in value.items()}
+        return {(_scrub(k) if isinstance(k, str) else k): _scrub_tree(v, cap=cap, items=items)
+                for k, v in value.items()}
+    return value
+
+
+# What a value nested past `secrets.redact_value`'s depth becomes on a card:
+# what it hides was never judged (review of PR #313).
+TOO_DEEP = "[nested too deep to judge]"
+WITHHELD_TEXT = "[withheld: open it at the desk]"
+
+
+def _contains(value, text: str) -> bool:
+    if isinstance(value, str):
+        return value == text
+    if isinstance(value, dict):
+        return any(_contains(k, text) or _contains(v, text) for k, v in value.items())
+    if isinstance(value, list):
+        return any(_contains(v, text) for v in value)
+    return False
+
+
+def scrub_structure(value) -> tuple[object, bool]:
+    """A card's structure as the phone may be sent it, and whether anything
+    in it was withheld (review of PR #313). Three passes: every key and
+    string by itself (`_scrub_tree`); then the whole as one JSON text, so a
+    label in a key and its value in the string beside it (`{"password":
+    "…"}`, a nested `Authorization` header) are read together as the scrub
+    reads `password: …`; and a value nested past the card redaction's depth
+    (`TOO_DEEP`) counts as withheld, since nothing judged it. When the JSON
+    pass withholds something the per-string pass did not, the JSON pass's
+    own result is sent; if that is not JSON any more, every string is
+    replaced by `WITHHELD_TEXT`."""
+    scrubbed = _scrub_tree(value)
+    changed = scrubbed != value or _contains(value, TOO_DEEP)
+    scrubbed, paired = _pairs(scrubbed)
+    changed = changed or paired
+    try:
+        flat = json.dumps(scrubbed, sort_keys=True, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return _blank(scrubbed), True
+    again = _scrub(flat)
+    if again != flat:
+        changed = True
+        try:
+            parsed = json.loads(again)
+        except ValueError:
+            parsed = None
+        scrubbed = parsed if type(parsed) is type(scrubbed) else _blank(scrubbed)
+    return scrubbed, changed
+
+
+def _paired(key: str, item: str) -> tuple[str, bool]:
+    """One string read with its key as a header or an assignment."""
+    for sep in (": ", "="):
+        line = key + sep + item
+        read = _scrub(line)
+        if read != line:
+            return (read[len(key) + len(sep):] if read.startswith(key + sep) else WITHHELD_TEXT), True
+    return item, False
+
+
+def _pairs(value, key: str | None = None) -> tuple[object, bool]:
+    """Each string read with its nearest key as a header or an assignment
+    (`<key>: <value>`, `<key>=<value>`), as the scrub reads such a line: a
+    nested `{"Authorization": "Bearer …"}` or `{"password": ["…"]}` is
+    withheld as `Authorization: Bearer …` is. (value with what the reading
+    withheld, whether anything was.)"""
+    if isinstance(value, str):
+        return _paired(key, value) if key and value else (value, False)
+    if isinstance(value, list):
+        out, changed = [], False
+        for item in value:
+            item, hit = _pairs(item, key)
+            out.append(item)
+            changed = changed or hit
+        return out, changed
+    if isinstance(value, dict):
+        out, changed = {}, False
+        for k, item in value.items():
+            item, hit = _pairs(item, k if isinstance(k, str) else None)
+            out[k] = item
+            changed = changed or hit
+        return out, changed
+    return value, False
+
+
+def _blank(value):
+    if isinstance(value, str):
+        return WITHHELD_TEXT
+    if isinstance(value, list):
+        return [_blank(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _blank(v) for k, v in value.items() if isinstance(k, str)}
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return WITHHELD_TEXT          # a number can be the secret too
     return value
 
 
@@ -364,7 +459,9 @@ def _detail(kind, detail: dict) -> dict:
         if relayed is not None:
             out["relayed_from"] = ({k: relayed.get(k) for k in RELAYED_FIELDS if _scalar(relayed.get(k))}
                                    if isinstance(relayed, dict) else None)
-        return _scrub_tree(out, cap=TEXT_CHARS, items=LIST_ITEMS)
+        # The whole card, keys and labels across fields too (`scrub_structure`),
+        # then the read view's caps.
+        return _scrub_tree(scrub_structure(out)[0], cap=TEXT_CHARS, items=LIST_ITEMS)
     if kind in DETAIL_FIELDS:
         out = {k: detail[k] for k in DETAIL_FIELDS[kind] if k in detail}
         return _scrub_tree(out, cap=TEXT_CHARS, items=LIST_ITEMS)

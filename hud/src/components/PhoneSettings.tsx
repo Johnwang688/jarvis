@@ -96,6 +96,14 @@ export function PhoneSettings({ blocked }: { blocked: boolean }) {
           : <p data-testid="phone-listener" data-bound="false" className="phone-warn">
             {remote.host_configured ? "Not running: the port could not be bound."
               : "Off: no tailnet name is configured (JARVIS_REMOTE_HOST)."}</p>}
+      {/* §4.1 (P-4): while any check fails, the phone answers with Discord's
+          authority only. The daemon's fixed words; shown as text. */}
+      {remote && remote.bound && remote.secure ? (remote.secure.ok
+        ? <p data-testid="phone-secure" data-ok="true" className="muted">Secured: the phone answers with the HUD's authority.</p>
+        : <p data-testid="phone-secure" data-ok="false" className="phone-limited">
+            limited: {remote.secure.label || remote.secure.failed || "a check failed"}
+            {remote.secure.reason ? ` (${remote.secure.reason})` : ""}. The phone can Allow and Deny ordinary
+            cards only: no Always, and HUD-only cards wait for the desk.</p>) : null}
     </div>
 
     <div className="block">

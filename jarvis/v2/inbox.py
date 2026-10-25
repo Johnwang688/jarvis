@@ -15,8 +15,10 @@ read again.
 in a fresh projection and calls the function the item's own surface calls,
 with the arguments that surface passes:
 
-  * an approval: `Daemon.resolve_approval(req_id, decision, always,
-    hud=<the Host test POST /approvals/<id> makes>)`;
+  * an approval: `Daemon.resolve_approval(req_id, decision, always, ...)`
+    with `owner_verified` the Host test `POST /approvals/<id>` makes; the
+    phone (P-4, `remote_answer`) calls `answer` with its own, True only
+    after a verified per-answer assertion under §4.1;
   * a chat question: `Daemon.answer(thread_id, req_id, value)`, as
     `POST /threads/<id>/answer` does;
   * a task question: `TaskControl.answer_question(task_id, index, text)`,
@@ -794,10 +796,14 @@ def _gone():
     return APIError(409, "this item is no longer waiting; it was answered or its source has gone")
 
 
-def answer(daemon, row_id, body, *, hud: bool):
+def answer(daemon, row_id, body, *, owner_verified: bool, via: str = "inbox"):
     """Dispatch one answer to its source's own function (IN-2). The caller
-    has already enforced `owner_only`; `hud` is the Host test the approvals
-    route makes, passed through unchanged."""
+    has already enforced its owner test: `owner_only` here (`route`), or the
+    phone's session (`remote_answer`). `owner_verified` is HUD authority
+    (PH-7), passed through unchanged: the Host test the approvals route
+    makes here, the phone's verified assertion under §4.1 there. `via` is
+    where the owner answered ("inbox", or "phone"): a decision's delivered
+    message carries it, and a chat question's log record names "phone"."""
     from .daemon import APIError, _object, _text
     from .provider import Decision
     prefix, rest, row_id = _split(row_id)
@@ -806,7 +812,7 @@ def answer(daemon, row_id, body, *, hud: bool):
         # not there, or no longer open, is "no longer waiting" here as for
         # every other row.
         try:
-            return answer_decision(daemon, rest, body)
+            return answer_decision(daemon, rest, body, via=via)
         except APIError as exc:
             if exc.status == 404:
                 raise _gone() from None
@@ -842,8 +848,8 @@ def answer(daemon, row_id, body, *, hud: bool):
     if prefix == "appr":
         req_id = row["detail"]["req_id"]
         try:
-            # `POST /approvals/<id>`'s own call, `hud` and `always` included.
-            return daemon.resolve_approval(req_id, decision, always, hud=hud)
+            # `POST /approvals/<id>`'s own call, `owner_verified` and `always` included.
+            return daemon.resolve_approval(req_id, decision, always, owner_verified=owner_verified)
         except APIError:
             if not any(r.req_id == req_id for r in daemon.approvals.pending()):
                 raise _gone() from None
@@ -851,8 +857,11 @@ def answer(daemon, row_id, body, *, hud: bool):
     if prefix == "q":
         thread_id, req_id = row["detail"]["thread_id"], row["detail"]["req_id"]
         try:
-            # `POST /threads/<id>/answer`'s own call.
-            daemon.answer(thread_id, req_id, value)
+            # `POST /threads/<id>/answer`'s own call (the phone's is named in its log record).
+            if via == "phone":
+                daemon.answer(thread_id, req_id, value, via="phone")
+            else:
+                daemon.answer(thread_id, req_id, value)
         except ValueError:
             # The provider no longer holds it (answered meanwhile, its turn
             # ended): the value was checked above, so this is a lost race.
@@ -923,9 +932,9 @@ def decision_message(record) -> str:
     return f"{head}\n{_decisions.QUESTION_LEAD}{_quoted(record['question'])})"
 
 
-def _deliver_decision(daemon, record) -> str:
+def _deliver_decision(daemon, record, via: str = "inbox") -> str:
     """Hand the answer to the asking chat (design §5): an owner message,
-    `via="inbox"`, `desk=False`, through `Daemon.deliver_queued` (a turn when
+    `via="inbox"` (or "phone", answered on the phone, P-4), `desk=False`, through `Daemon.deliver_queued` (a turn when
     the chat is idle, else queued behind the running one; never a steer).
     "closed" when the chat is gone or archived, "failed" when it cannot take
     it; the answer is recorded either way."""
@@ -943,7 +952,8 @@ def _deliver_decision(daemon, record) -> str:
     if closed():
         return "closed"
     text = decision_message(record)
-    message = UserMessage(text, origin="owner", via="inbox", desk=False, typed=text)
+    message = UserMessage(text, origin="owner", via="phone" if via == "phone" else "inbox",
+                          desk=False, typed=text)
     try:
         out = daemon.deliver_queued(thread_id, message, decision_id=record["id"])
     except (DaemonError, APIError) as exc:
@@ -956,7 +966,7 @@ def _deliver_decision(daemon, record) -> str:
     return status if status in ("started", "queued") else "failed"
 
 
-def answer_decision(daemon, decision_id, body) -> dict:
+def answer_decision(daemon, decision_id, body, *, via: str = "inbox") -> dict:
     """`POST /inbox/decisions/<id>` (owner-only, checked by `route`): record
     the owner's answer, then deliver it (design §4, §5). `{choice: index}` or
     `{text}`, exactly one. 400 for a malformed id or body, 404 for an unknown
@@ -995,7 +1005,7 @@ def answer_decision(daemon, decision_id, body) -> dict:
         raise APIError(404, "no such decision") from None
     except ValueError as exc:
         raise APIError(400, str(exc)) from None
-    delivery = _deliver_decision(daemon, record)
+    delivery = _deliver_decision(daemon, record, via)
     # A drop between the queueing and here (the owner's Stop) already said
     # "failed": that stands.
     noted = store.delivered(decision_id, delivery, keep_failed=True)
@@ -1025,9 +1035,10 @@ def route(handler, daemon, parts, query):
         return 200, rows(daemon)
     if len(parts) == 3 and parts[2] == "answer" and method == "POST":
         _object(query, ())
-        # The Host test `POST /approvals/<id>` makes, made the same way.
-        hud = config.own_host_header(handler.headers.get("Host", ""), daemon.face_port)
-        return 200, answer(daemon, parts[1], handler._body(), hud=hud)
+        # The Host test `POST /approvals/<id>` makes, made the same way: the
+        # HUD route's HUD authority (PH-7).
+        owner_verified = config.own_host_header(handler.headers.get("Host", ""), daemon.face_port)
+        return 200, answer(daemon, parts[1], handler._body(), owner_verified=owner_verified)
     if len(parts) == 3 and parts[1] == "decisions" and method == "POST":
         _object(query, ())
         return 200, answer_decision(daemon, parts[2], handler._body())

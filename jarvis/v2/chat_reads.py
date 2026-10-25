@@ -88,7 +88,9 @@ _PROVIDER_WORD = {ProviderName.FAST.value: "Jarvis", ProviderName.CLAUDE.value: 
 _VIA_MARK = {"discord": "via Discord", "dm": "via DM",
              # The owner's answer to a decision (inbox B1): their pick or words,
              # framed by code, with the asking chat's own question quoted.
-             "inbox": "via the inbox (not typed in this chat)"}
+             "inbox": "via the inbox (not typed in this chat)",
+             # The same, answered on the phone (P-4).
+             "phone": "via the phone's inbox (not typed in this chat)"}
 _SYSTEM_KINDS = ("model_set", "notice", "cli_turn", "compacted")
 _RELAY_KINDS = ("relay_in", "relay_out", "relay_reply")
 

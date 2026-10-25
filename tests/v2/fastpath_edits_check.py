@@ -1040,7 +1040,7 @@ class Daemon(Base):
             requested = self.wait(published, "approval_requested on the bus")
             self.assertEqual(requested[0]["thread_id"], thread.id)
             self.assertEqual(requested[0]["data"]["req_id"], card.req_id)
-            self.d.approvals.resolve(card.req_id, Decision.ALLOW, hud=True)
+            self.d.approvals.resolve(card.req_id, Decision.ALLOW, owner_verified=True)
             self.wait(lambda: (self.project / "hello.txt").exists(), "the edit")
 
             def idle():

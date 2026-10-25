@@ -251,6 +251,26 @@ def phone_checks(browser, mock, base, check, until, guard, init_script):
         check("P-2 Phone: Save now retries the revoke and the row goes once it lands",
               posts[before:] == [f"/phone/passkeys/{target}/revoke"])
 
+        # -- §4.1 failing (P-4): a red "limited: ..." line, in the daemon's words -------
+        state["remote"] = {"port": 18408, "bound": True, "host_configured": True,
+                           "secure": {"ok": False, "failed": "serve", "reason": "Funnel is on",
+                                      "label": "tailscale serve is not the only path, or Funnel is on"}}
+        page.locator('[data-testid="settings-browser"]').click()
+        page.locator('[data-testid="settings-phone"]').click()
+        until(lambda: page.locator('[data-testid="phone-secure"]').count() == 1, timeout=4)
+        line = page.locator('[data-testid="phone-secure"]')
+        color = line.evaluate("e => getComputedStyle(e).color")
+        check("P-4 Phone: a failing §4.1 check shows a red 'limited: ...' line naming it",
+              line.get_attribute("data-ok") == "false"
+              and "limited: tailscale serve is not the only path, or Funnel is on (Funnel is on)" in line.inner_text()
+              and color == "rgb(248, 113, 113)", f"{line.inner_text()} {color}")
+        state["remote"] = dict(state["remote"], secure={"ok": True, "failed": None, "reason": "", "label": ""})
+        page.locator('[data-testid="settings-browser"]').click()
+        page.locator('[data-testid="settings-phone"]').click()
+        until(lambda: page.locator('[data-testid="phone-secure"]').get_attribute("data-ok") == "true", timeout=4)
+        check("P-4 Phone: passing, it says the phone has the HUD's authority",
+              "HUD's authority" in page.locator('[data-testid="phone-secure"]').inner_text())
+
         # -- the listener down ---------------------------------------------------------
         state["remote"] = {"port": 8408, "bound": False, "host_configured": False}
         page.locator('[data-testid="settings-browser"]').click()
@@ -588,11 +608,13 @@ def app_checks(page, daemon, world, check, until, streamed, net, main):
           and HOSTILE in page.locator('[data-testid="m-command"]').first.inner_text() and clean())
     check("P-3 Inbox: a private card shows its private projection only",
           page.locator('[data-testid="m-private"]').count() == 1 and "PRIVATE-NEVER" not in text())
-    check("P-3 Inbox: approvals say 'Answer at the desk'",
-          page.locator('[data-testid="m-desk-only"]', has_text="Answer at the desk").count() == 2)
+    # P-4: an approval row opens its answering card (hud_v2_phone_answer_check.py);
+    # nothing on the list itself allows, denies or always-allows.
+    check("P-4 Inbox: approvals offer 'Open the card to answer'",
+          page.locator('[data-testid="m-open-card"]', has_text="Open the card to answer").count() == 2)
     bad, fields = answer_controls()
-    check("P-3 Inbox: no answer control exists (no Allow, Deny, Always, no input)", not bad and fields == 0,
-          f"{bad} {fields}")
+    check("P-3 Inbox: no answer control on the list itself (no Allow, Deny, Always, no input)",
+          not bad and fields == 0, f"{bad} {fields}")
     check("P-3 Inbox: the tab counts what waits", "Inbox · " in page.locator('[data-testid="m-tab-inbox"]').inner_text())
     check("P-3 app: every tap target is at least 44 px tall (Inbox)", not small_targets(), str(small_targets()))
 

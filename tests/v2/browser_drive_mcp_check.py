@@ -127,14 +127,14 @@ class Delegation(unittest.TestCase):
    with patch("jarvis.v2.permissions.always_ask_match",return_value=("rule","fixed")),patch("jarvis.v2.permissions.log_decision"):
     worker=threading.Thread(target=lambda:out.append(permit(name,{"text":SECRET})));worker.start()
     T.eventually(lambda:bool(seen));req=seen[0]
-    with self.assertRaises(ValueError):broker.resolve(req.req_id,"allow",hud=False)
+    with self.assertRaises(ValueError):broker.resolve(req.req_id,"allow",owner_verified=False)
     if cancel:stop.set()
     worker.join(2)
    self.assertFalse(worker.is_alive());self.assertEqual(out,[Decision.DENY]);self.assertEqual(broker.pending(),[])
 
  def test_delegation_hud_allow_cannot_create_always_rule(self):
   broker=PendingApprovals(timeout_s=1)
-  broker._on_request=lambda req:broker.resolve(req.req_id,"allow",always=True,hud=True)
+  broker._on_request=lambda req:broker.resolve(req.req_id,"allow",always=True,owner_verified=True)
   brief=Brief(Role.CHAT,"/tmp",mcp_servers={"jarvis":{}})
   permit=build_permit(PermitContext("chat",brief,provider="claude"),broker)
   with patch("jarvis.v2.permissions.always_ask_match",return_value=("rule","fixed")),patch("jarvis.v2.approvals.permissions.add_allow") as add:
@@ -439,7 +439,7 @@ class Attribution(unittest.TestCase):
      self.assertTrue(registry.still_current(self.snap))
      def answer():
       if checked.wait(1):
-       self.state["held"]=False;broker.resolve(request.req_id,"allow",hud=True)
+       self.state["held"]=False;broker.resolve(request.req_id,"allow",owner_verified=True)
      worker=threading.Thread(target=answer);workers.append(worker);worker.start()
    broker._on_request=asked
    with patch.object(self.service,"_cancelled",side_effect=cancelled):result=self.action("click")

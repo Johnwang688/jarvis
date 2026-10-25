@@ -464,7 +464,7 @@ class Live(unittest.TestCase):
         self.assertEqual(own_args[0], a.req_id)
         self.assertEqual(inbox_args[0], b.req_id)
         self.assertEqual((own_args[1:], own_kw), (inbox_args[1:], inbox_kw))
-        self.assertEqual(inbox_kw, {"hud": True})
+        self.assertEqual(inbox_kw, {"owner_verified": True})
         self.assertEqual(inbox_args[1:], (Decision.ALLOW, True))
         self.assertEqual(got["req_id"], b.req_id)
         # `always` went through the broker's own rule: one stem entry, minted.
@@ -486,7 +486,7 @@ class Live(unittest.TestCase):
         self.call("POST", f"/inbox/appr:{req.req_id}/answer", {"decision": "allow"})
         worker.join(5)
         self.assertEqual(out["decision"], Decision.ALLOW)
-        self.assertEqual(calls, [((req.req_id, Decision.ALLOW, False), {"hud": True})])
+        self.assertEqual(calls, [((req.req_id, Decision.ALLOW, False), {"owner_verified": True})])
 
     def test_a_timed_out_approval_leaves_and_cannot_be_answered(self):
         req, out, worker = self.ask(thread_id="th-t", max_wait_s=0.3)

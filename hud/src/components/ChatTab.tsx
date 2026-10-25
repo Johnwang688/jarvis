@@ -76,6 +76,7 @@ export const MessageRow = memo(function MessageRow({ msg: m, onCancel, blocked, 
     <div className="who">
       {m.role === "user" ? "YOU" : m.role === "system" ? "SYSTEM" : "JARVIS"}
       {m.role === "user" && m.via === "inbox" ? <span className="via" data-testid="via-inbox"> · from the inbox</span>
+        : m.role === "user" && m.via === "phone" ? <span className="via" data-testid="via-phone"> · from the phone</span>
         : m.role === "user" && m.via ? <span className="via" data-testid="via-discord"> · via Discord</span> : null}
       {m.role === "user" && m.mark ? <span className={`mark ${m.mark.replace(" ", "-")}`} data-testid="msg-mark"> · {MARKS[m.mark]}</span> : null}
     </div>
