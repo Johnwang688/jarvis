@@ -3042,7 +3042,8 @@ and certificates, `"Bearer " + token`, templates, prose about prefixes.
   `auth_token`, `refresh_token`, `private_key`, `aws_secret_access_key`,
   `aws_session_token`; kept when it reads as code or a reference: a digitless
   identifier, a call or subscript, a path, tag, mask, variable or template,
-  or under 16 characters without a digit), marked `[withheld: labelled
+  or under 16 characters without a digit; trailing punctuation, a markdown
+  backtick included, is not part of the value), marked `[withheld: labelled
   secret]`.
 
 `chat_reads` has three wrappers, each `strip_invisible` before and after:
@@ -3113,7 +3114,7 @@ own.
 **Tests.** `tests/v2/scrub_layers_check.py`: 39 shapes and 204 split,
 fullwidth, combining, zero-width, soft-hyphen and bidi variants withheld on
 4 model-input and 5 display paths; for_model faithful outside withheld
-spans; 51 keep lines (PR #308's 33 and its 19 code lines, hashes, UUIDs,
+spans; 52 keep lines (PR #308's 33 and its 19 code lines, hashes, UUIDs,
 image data, templates, prose, non-ASCII text) unchanged on model input and
 display; the 16 labelled probe lines unchanged on model input; the Diff tab
 route and diff review input; `card_args` with PEM; mutations caught

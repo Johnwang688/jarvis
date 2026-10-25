@@ -156,6 +156,7 @@ EXTRA_KEEP = [
     "ssh-ed25519 " + base64.b64encode(random.Random(6).randbytes(51)).decode() + " me@box",
     "中文的说明 🔑 ok, café naïve (decomposed: cafe\u0301), 👩\u200d💻 at work",
     "def rotate(key_id: str, *, dry_run: bool = False) -> None:",
+    "Pass `api_key=settings.API_KEY` (or `client_secret=CLIENT_SECRET`) to the client.",
     "client = boto3.client('s3', aws_access_key_id=key_id, aws_secret_access_key=secret)",
 ]
 

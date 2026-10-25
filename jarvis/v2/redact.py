@@ -530,7 +530,9 @@ LABELLED = re.compile(r"(?<![A-Za-z0-9])((?:" + _LABELS + r")[\"']?[ \t]*[:=][ \
                       r"([^\s\"'<>={}$\[~/!*%&@][^\s\"']{5,})", re.IGNORECASE)
 _IDENTIFIER = re.compile(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*")
 _MASK = re.compile(r"[*•●·#xX]+")
-_TRAILING = ".,;:!?)]}"
+# Punctuation after a value, not part of it (a backtick too: markdown's
+# inline code, `` `api_key=settings.API_KEY` ``, is code).
+_TRAILING = ".,;:!?)]}`"
 LABELLED_MARKER = withheld("labelled secret")
 
 
