@@ -798,6 +798,57 @@ class Store(unittest.TestCase):
             self.store.settle(record["id"], choice=None, text="changed my mind")
         self.assertEqual(self.store.get(record["id"])["answer"]["choice"], 0)
 
+    def test_brace_and_glob_spellings_into_the_tree_are_refused(self):
+        """The adversarial re-attack on PR #309, on #310's brace and glob
+        machinery: every spelling that lands in `inbox/decisions/` is a
+        certain write, refused at v2's layer 1 and never ALLOWed by v1; a
+        glob that only reads is no write."""
+        from jarvis import permissions as v1_permissions, protected_state, rules
+        from jarvis.v2 import permissions as v2_permissions
+        data = self.root / "v2data"
+        with patch.object(config, "V2_DATA_DIR", data), \
+                patch.object(config, "ALLOWLIST_PATH", self.root / "cfg" / "allowlist.json"):
+            store = decisions.DecisionStore(data)
+            record = store.create(thread_id="ab12cd34", project_id=None, task_id=None, origin="",
+                                  question="q", options=["a", "b"], default=None, why="w")
+            did, D = record["id"], str(data)
+            must_deny = [
+                # The four the re-attack found.
+                f"cp forged.json {D}/*/decisions/{did}.json",
+                f"cp {{/tmp/d.json,{D}/inbox/decisions/}}",
+                f"cp src {D}/inbox{{,}}/decisions/",
+                f"mv {D}/*/decisions/{did}.json /tmp/x",
+                # `?`, `[...]` and `**` variants, and a few more writers.
+                f"cp x {D}/inbox/decisions/{did[:-1]}?.json",
+                f"cp x {D}/i?box/decisions/",
+                f"cp x {D}/inbox/decision[s]/{did}.json",
+                f"cp x {D}/inbo[!y]/decisions/{did}.json",
+                f"cp x {D}/**/decisions/{did}.json",
+                f"cp x {D}/**/{did}.json",
+                f"rm {D}/inbox/decisions/*",
+                f"tee {D}/*/decisions/{did}.json < /tmp/x",
+                f"echo x > {D}/inbox/decisions/d*.json",
+                f"cp x {D}/{{remote,inbox}}/decisions/{did}.json",   # the last word, the target, is the inbox's
+                f"touch {D}/inbox/{{decisions,checks}}/new.json",
+            ]
+            # A glob whose text is elsewhere but which reaches the inbox on
+            # disk, through a symlink (`_glob_fs`).
+            elsewhere = self.root / "elsewhere"
+            elsewhere.mkdir()
+            (elsewhere / "link").symlink_to(data / "inbox", target_is_directory=True)
+            must_deny += [f"cp x {elsewhere}/l*/decisions/{did}.json", f"rm {elsewhere}/l?nk/decisions/*"]
+            for command in must_deny:
+                with self.subTest(deny=command):
+                    with rules.work_scope():
+                        touch = protected_state.command_touch(command)
+                    self.assertTrue(touch is not None and touch.certain, (command, touch))
+                    self.assertTrue(v2_permissions.denied_command(command), command)
+                    self.assertTrue(v2_permissions._command_writes_protected_state(command), command)
+                    self.assertNotEqual(v1_permissions.static_verdict(command).decision, rules.ALLOW, command)
+            for command in (f"cat {D}/*/decisions/{did}.json", f"ls {D}/inbox/decisions/*"):
+                with self.subTest(reads=command):
+                    self.assertIsNone(v2_permissions._command_writes_protected_state(command), command)
+
     def test_settle_checks_the_choice_itself(self):
         """The reviewers' M8: the store's own bound, not only the route's."""
         record = self.create()

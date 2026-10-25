@@ -822,13 +822,19 @@ SELF_PROTECTED.
   `protected_state.owner_trees` judges any write that lands at or below the
   tree: a provable one (a redirect onto, `cp`/`rm`/`tee`/`mv`/`touch` on a
   path there) is a certain touch, refused by v2's layer 1 and asked by v1;
-  an unprovable one asks. A folder *above* the tree is not the tree rule's:
+  an unprovable one asks. Every spelling counts, on #310's machinery: each
+  word of a brace expansion is an operand of its own, and a glob is matched
+  component by component (`_glob_relate`: it may be the tree or lie below
+  it, so `<D>/*/decisions/x`, `<D>/i?box/decisions/`, `<D>/**/x` and
+  `decision[s]` are all inside) and by what it reaches on disk (`_glob_fs`,
+  through a symlink); a walk cut short asks. A folder *above* the tree is not the tree rule's:
   it goes on to `_ancestor_of` exactly as before, so `cp -r /tmp/x/inbox
   <data>/` stays a certain DENY and `rm -rf <data>` still names
   `missed.jsonl` and the phone's files on its card (review of PR #309, which
-  found an early `continue` there; a 38-command differential against main
-  shows the only verdict changes are writes inside the tree, ASK or ALLOW
-  before, DENY at v2's layer 1 now).
+  found an early `continue` there; a 48-command differential against main
+  `291d1f2b`, the brace and glob spellings included, shows the only verdict
+  changes are writes inside the tree, ASK or ALLOW before, DENY at v2's
+  layer 1 now).
 - **Rows.** An open decision is a `decision` row at rank 6 ("When you have
   time"), oldest first: title `chat <id> asks for your decision`, blocks
   `nothing waits; chat <id> hears your answer as a message`, or `chat <id> is
