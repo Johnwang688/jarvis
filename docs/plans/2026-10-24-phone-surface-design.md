@@ -107,8 +107,10 @@ the native app would be a thin shell over the same `/m/api`.
   challenge is bound to the approval and the exact answer:
   `sha256(req_id ‖ "allow" | "always" ‖ server nonce)`, single-use, valid
   60 s, so an assertion for Allow cannot be replayed as Always. The server
-  verifies origin, rpId, the UV flag and the signature counter before it
-  calls `PendingApprovals.resolve`. Deny needs only the session. This is
+  verifies origin, rpId, the UV flag and, when the authenticator keeps
+  one, the signature counter, before it calls `PendingApprovals.resolve`.
+  iCloud Keychain passkeys always report 0 (P-0), so a counter of 0 is
+  accepted and the counter is no defence against a cloned key there. Deny needs only the session. This is
   "deny cheap, authorize deliberate", made physical. A program running as the
   owner can forge any header, but it cannot produce this assertion.
 - **PH-5. Sessions are short and narrow.** After a passkey login, the phone
@@ -327,6 +329,52 @@ path, each step the owner's call:
 
 Order: P-0 → P-1 → P-2 → P-3 → P-4 → P-6 → P-5 → P-7 → P-8. The inbox's IN-0 to
 IN-2 must land before P-3.
+
+### 10.1 P-0 findings (2026-10-25, the owner's iPhone 12, iOS 26, over LTE)
+
+Scripts: `tests/spikes/p0_network.py` (a) and `tests/spikes/p0_phone.py` (b, c).
+Server-side log of the run: `~/.cache/jarvis-p0/findings.jsonl` on the PC.
+
+- **(a) Network: pass, 5 of 5.** `tailscale serve --bg --https=443
+  http://127.0.0.1:8406` on Windows reaches the WSL listener through WSL2's
+  localhost forwarding (NAT mode, no `.wslconfig` change). The listener is
+  loopback-only in WSL, and on Windows only `wslrelay` listens on 8406, on
+  loopback. `tailscale serve status --json` is readable from WSL through
+  the Windows CLI, with one handler and Funnel off. Two one-time owner steps were
+  needed: enabling Serve for the tailnet in the admin console, and waiting
+  for the first certificate. The first HTTPS request after enabling timed out
+  at 15 s while the certificate was issued; it answered within 90 s and
+  immediately from then on.
+- **(b) Passkey: pass.** Registered in the home-screen app with
+  `userVerification: required`. It is stored in iCloud Keychain
+  (`backed_up: true`, multi-device). An assertion with Face ID and an
+  assertion with Face ID off (passcode) both verified with `user_verified:
+  true`, so the passcode satisfies PH-4 exactly as Face ID does. Replaying a
+  used assertion, as "allow" or as "always", was refused.
+  - **Signature counter is always 0** for these passkeys. PH-4 is amended:
+    a zero counter is accepted.
+  - **The passkey syncs to every Apple device on the owner's Apple ID.**
+    Any of those devices can approve, once it is on the tailnet and opens the
+    paired origin. Pairing records the credential, not the device, so
+    "Revoke" in the HUD (PH-6) revokes the passkey everywhere at once.
+  - **Not exercised:** an unused "allow" assertion submitted as "always".
+    The replay hit the single-use check first. P-4 tests the answer binding
+    with a software authenticator (`webauthn`'s test helpers or a fake), since
+    the binding is server logic and needs no phone.
+- **(c) Web Push: pass on the server side.** The home-screen app subscribed
+  through `web.push.apple.com`. A content-free payload, `{"count": 1, "rank":
+  1}`, signed with the spike's VAPID key and sent 20 s later, was accepted
+  (HTTP 201), and **the notification showed on the locked iPhone about 20 s
+  later**, reading "Jarvis: 1 waiting". Opening the app from the tap was not
+  recorded (the spike bug below).
+- **Spike bug, fixed after the run:** the page's own client log lines
+  ("opened as home-screen app", "opened from the notification") crashed the
+  log route, because a field named `event` collided with the logger's own
+  argument. Those lines were lost for this run. That the subscription
+  succeeded shows the page ran as the home-screen app, since iOS offers push
+  only there.
+
+Verdict: P-0 passes. P-1 may start.
 
 ## 11. Open questions for the owner (defaults in bold)
 
