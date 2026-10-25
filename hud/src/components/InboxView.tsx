@@ -16,8 +16,10 @@
 //     or queued behind it) and when it denies, from code-built fields only;
 //   - a question (a chat's provider question, a `clarifying` task's blocking
 //     question): its text, its options as text, and an answer box;
-//   - a proposal: its brief and Withdraw (`{"withdraw": true}`) until its
-//     `withdraw_until`; the button goes when the window closes;
+//   - a proposal: its brief and Withdraw (`{"withdraw": true}`) for as long
+//     as the daemon's projection holds the row. `withdraw_until` is the
+//     daemon's clock, so this window's clock only colours a "closing" hint;
+//     a press after the window closed is the daemon's 409;
 //   - a blocked or failed task: information only.
 // Every row links to its thread or task pane. **Clicking a row never answers
 // anything**: only Answer (or Enter in its box) and Withdraw post, each once
@@ -32,8 +34,8 @@ import { useEffect, useRef, useState } from "react";
 import { ApiError } from "../api";
 import type { ApprovalRequest } from "../types";
 import {
-  ANSWERS_TEXT, PENDING_MAX_RANK, approvalReq, briefOf, clockOf, groupRows, linkOf, questionOf,
-  waitingCount, withdrawOpen, withdrawUntil, type InboxRow,
+  ANSWERS_TEXT, CLOSING_MS, PENDING_MAX_RANK, approvalReq, briefOf, clockOf, groupRows, linkOf, questionOf,
+  waitingCount, withdrawHint, withdrawUntil, type InboxRow,
 } from "../lib/inbox";
 import type { InboxSnapshot } from "../state/inbox";
 
@@ -74,10 +76,13 @@ export function InboxView(props: InboxViewProps) {
   // Read again when the view is shown: the rows are the daemon's, never kept here.
   useEffect(() => { void props.onReread(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, []);
 
-  // Withdraw goes when its window closes: wake up then (and no sooner).
+  // The "closing" hint turns on `CLOSING_MS` before a window's end by this
+  // window's clock: wake up then (and no sooner). Withdraw itself stays while
+  // the row does: only the daemon's projection says the window has closed.
   useEffect(() => {
     const t = clock();
-    const next = rows.map(withdrawUntil).filter((u): u is number => u !== null && u > t).sort((a, b) => a - b)[0];
+    const next = rows.map(withdrawUntil).map((u) => (u === null ? null : u - CLOSING_MS))
+      .filter((u): u is number => u !== null && u > t).sort((a, b) => a - b)[0];
     if (next === undefined) return;
     const timer = setTimeout(() => setNow(clock()), Math.min(2 ** 31 - 1, next - t + 50));
     return () => clearTimeout(timer);
@@ -170,7 +175,12 @@ export function InboxView(props: InboxViewProps) {
               value={drafts[row.id] || ""}
               // Not `disabled` under a card (inert covers it): a disabled box
               // drops focus before the card can record it (hud-workspace notes, WP-B).
+              // Read-only while its answer is on its way, so nothing typed
+              // then is lost when the sent words clear (review of PR #305).
+              readOnly={!!busy[row.id]}
+              aria-busy={busy[row.id] ? "true" : undefined}
               onChange={(e) => {
+                if (sending.current.has(row.id)) return;
                 const value = e.target.value;
                 setDrafts((all) => ({ ...all, [row.id]: value }));
               }}
@@ -192,22 +202,24 @@ export function InboxView(props: InboxViewProps) {
       );
     }
     if (row.kind === "proposal") {
-      const until = withdrawUntil(row);
-      const openNow = withdrawOpen(row, now);
+      // Offered while the row is here, whatever this window's clock says;
+      // the hint never claims the window has closed (lib/inbox `withdrawHint`).
+      const hint = withdrawHint(row, now);
       return (
         <div className="ir-body">
           {briefOf(row) ? <div className="ir-text" data-testid="inbox-brief">{briefOf(row)}</div> : null}
-          {openNow && until !== null ? (
-            <div className="ir-answer">
-              <span className="ir-when muted">Starts on its own at {clockOf(until)}</span>
-              <button type="button" data-testid="inbox-withdraw" disabled={off}
-                      onClick={() => void send(row, { withdraw: true })}>
-                Withdraw
-              </button>
-            </div>
-          ) : (
-            <div className="ir-when muted" data-testid="inbox-withdraw-closed">Its window to withdraw has closed.</div>
-          )}
+          <div className="ir-answer">
+            <span className="ir-when muted" data-testid="inbox-withdraw-hint" data-hint={hint}>
+              {hint === "closing"
+                ? "Its window is closing: a Withdraw now may come too late."
+                : "Starts on its own when its window closes."}
+            </span>
+            <button type="button" data-testid="inbox-withdraw" data-hint={hint}
+                    className={hint === "closing" ? "closing" : undefined} disabled={off}
+                    onClick={() => void send(row, { withdraw: true })}>
+              Withdraw
+            </button>
+          </div>
         </div>
       );
     }

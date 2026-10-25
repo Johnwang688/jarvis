@@ -76,10 +76,29 @@ describe("InboxStore", () => {
   });
 
   it("a body that is not a list is an error, never an empty inbox", async () => {
-    const badge = vi.fn();
-    const store = new InboxStore({ fetch: async () => ({ rows: [] }), badge });
+    const store = new InboxStore({ fetch: async () => ({ rows: [] }), badge: () => {} });
     await store.refresh();
     expect(store.snapshot().status).toBe("error");
-    expect(badge).not.toHaveBeenCalled();
+    expect(store.snapshot().rows).toEqual([]);
+  });
+
+  it("a read that fails clears a badge it had set: unavailable, an error or a body that is not a list "
+    + "(review of PR #305)", async () => {
+    for (const failure of [() => { throw new ApiError(404, "route not found"); },
+      () => { throw new TypeError("Failed to fetch"); }, () => ({ rows: [] })]) {
+      let ok = true;
+      const badge = vi.fn();
+      const store = new InboxStore({ fetch: async () => (ok ? [row("appr:a", 1), row("q:b", 2)] : failure()), badge });
+      await store.refresh();
+      expect(badge).toHaveBeenLastCalledWith(2);
+      ok = false;
+      await store.refresh();
+      expect(badge).toHaveBeenLastCalledWith(0);
+      await store.refresh();
+      expect(badge).toHaveBeenCalledTimes(2);       // cleared once, not again on every failed read
+      ok = true;
+      await store.refresh();
+      expect(badge).toHaveBeenLastCalledWith(2);    // and back once a read works
+    }
   });
 });

@@ -9,7 +9,8 @@
 // more read after it, so the last read always started after the last event
 // (never an older answer drawn over a newer one). Nothing is stored: a reload
 // reads it all again. After each read the installed app's badge follows the
-// count (lib/inbox `setBadge`), and only when the count changed.
+// count (lib/inbox `setBadge`), only when the count changed; a read that
+// failed (unavailable or an error) clears it.
 
 import { useSyncExternalStore } from "react";
 import { api, ApiError } from "../api";
@@ -82,19 +83,26 @@ export class InboxStore {
       const message = error instanceof Error && error.message ? error.message : "the daemon could not be reached";
       this.set({ status: status === 404 || status === 403 ? "unavailable" : "error", message,
                  reads: this.snap.reads + 1 });
+      this.badge(0);
       return;
     }
     const rows = parseInbox(raw);
     if (!rows) {
       this.set({ status: "error", message: "the daemon's inbox was not a list", reads: this.snap.reads + 1 });
+      this.badge(0);
       return;
     }
     this.set({ rows, status: "ready", message: "", reads: this.snap.reads + 1 });
-    const count = waitingCount(rows);
-    if (count !== this.badged) {
-      this.badged = count;
-      this.deps.badge(count);
-    }
+    this.badge(waitingCount(rows));
+  }
+
+  /** The badge follows the last read, only when it changes. A read that failed
+   * clears it: a count the window can no longer vouch for is not shown, as
+   * the sidebar shows none (review of PR #305). */
+  private badge(count: number) {
+    if (count === this.badged) return;
+    this.badged = count;
+    this.deps.badge(count);
   }
 }
 

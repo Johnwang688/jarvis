@@ -138,10 +138,23 @@ export function withdrawUntil(row: InboxRow): number | null {
   return Number.isFinite(ms) ? ms : null;
 }
 
-/** Withdraw is offered only while the window is open; once it passes the button goes. */
-export function withdrawOpen(row: InboxRow, now: number): boolean {
+/** How long before `withdraw_until` (by this window's clock) the hint says "closing". */
+export const CLOSING_MS = 15_000;
+
+/**
+ * A hint only, never a gate (review of PR #305, MED 1). `withdraw_until` is
+ * the daemon's clock and the comparison is the browser's: a daemon 90 s
+ * behind (WSL2 after the host slept) would make a gate hide Withdraw while
+ * the window is still open, and one ahead would offer it after it closed.
+ * So Withdraw is offered for as long as the row is in the daemon's
+ * projection (A1 drops it when the window closes), a late press is the
+ * daemon's 409, and this only says whether the window looks close to
+ * closing: "closing" from `CLOSING_MS` before `withdraw_until` on (past it
+ * included), else "open" (an unreadable time too).
+ */
+export function withdrawHint(row: InboxRow, now: number): "open" | "closing" {
   const until = withdrawUntil(row);
-  return until !== null && now < until;
+  return until !== null && now >= until - CLOSING_MS ? "closing" : "open";
 }
 
 /** Where a row's link goes: its thread when it has one (the pane the item belongs to), else its task. */

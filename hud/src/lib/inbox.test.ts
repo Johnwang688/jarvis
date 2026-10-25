@@ -3,8 +3,8 @@
 
 import { describe, expect, it, vi } from "vitest";
 import {
-  GROUPS, anyPending, answerPath, briefOf, clockOf, groupRows, linkOf, oneLine, parseInbox, parseRow,
-  questionOf, setBadge, textBlock, waitingCount, withdrawOpen, withdrawUntil, type InboxRow,
+  CLOSING_MS, GROUPS, anyPending, answerPath, briefOf, clockOf, groupRows, linkOf, oneLine, parseInbox, parseRow,
+  questionOf, setBadge, textBlock, waitingCount, withdrawHint, withdrawUntil, type InboxRow,
 } from "./inbox";
 
 const row = (over: Record<string, unknown> = {}) => ({
@@ -73,21 +73,28 @@ describe("groups and the count", () => {
   });
 });
 
-describe("a proposal's Withdraw window", () => {
+describe("a proposal's Withdraw window: a hint, never a gate", () => {
   const prop = parseRow(row({ id: "prop:k", kind: "proposal", rank: 3,
     detail: { task_id: "k", brief: "b", withdraw_until: "2026-10-25T10:01:00+00:00" } }))!;
   const until = Date.parse("2026-10-25T10:01:00+00:00");
 
-  it("is open before withdraw_until and closed from it on", () => {
+  it("says open until CLOSING_MS before withdraw_until, and closing from then on, past it included", () => {
     expect(withdrawUntil(prop)).toBe(until);
-    expect(withdrawOpen(prop, until - 1)).toBe(true);
-    expect(withdrawOpen(prop, until)).toBe(false);
-    expect(withdrawOpen(prop, until + 5000)).toBe(false);
+    expect(withdrawHint(prop, until - CLOSING_MS - 1)).toBe("open");
+    expect(withdrawHint(prop, until - CLOSING_MS)).toBe("closing");
+    expect(withdrawHint(prop, until)).toBe("closing");
+    expect(withdrawHint(prop, until + 5000)).toBe("closing");
   });
 
-  it("is never open without a time it can read, or on another kind", () => {
+  it("never claims more than a hint: there is no 'closed' at all, whatever the clocks say", () => {
+    for (const t of [until - 3_600_000, until - 90_000, until, until + 90_000, until + 3_600_000]) {
+      expect(["open", "closing"]).toContain(withdrawHint(prop, t));
+    }
+  });
+
+  it("a time it cannot read is 'open', and another kind has no window", () => {
     const none = { ...prop, detail: { ...prop.detail, withdraw_until: "soon" } } as InboxRow;
-    expect(withdrawOpen(none, 0)).toBe(false);
+    expect(withdrawHint(none, until + 1e9)).toBe("open");
     expect(withdrawUntil({ ...prop, kind: "task" })).toBeNull();
   });
 });

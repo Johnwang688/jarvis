@@ -144,17 +144,74 @@ describe("InboxView", () => {
     expect(q('[data-testid="inbox-notice"]')).toBeNull();
   });
 
-  it("Withdraw posts {withdraw: true}, and is gone once withdraw_until passes", async () => {
+  it("Withdraw posts {withdraw: true}; past withdraw_until by this clock it stays, only hinted 'closing'", async () => {
     vi.useFakeTimers();
     let t = NOW;
     const p = draw({ now: () => t });
-    act(() => (rowOf("prop:k").querySelector('[data-testid="inbox-withdraw"]') as HTMLButtonElement).click());
+    const withdraw = () => rowOf("prop:k").querySelector('[data-testid="inbox-withdraw"]') as HTMLButtonElement | null;
+    const hint = () => rowOf("prop:k").querySelector('[data-testid="inbox-withdraw-hint"]')!;
+    expect(withdraw()!.dataset.hint).toBe("open");
+    expect(hint().textContent).toBe("Starts on its own when its window closes.");
+    act(() => withdraw()!.click());
     await flush();
     expect(p.onAnswer).toHaveBeenCalledWith("prop:k", { withdraw: true });
+    // 16 s on: inside CLOSING_MS of the window's end, the timer flips the hint.
+    t = NOW + 16_000;
+    act(() => { vi.advanceTimersByTime(16_000); });
+    expect(withdraw()!.dataset.hint).toBe("closing");
     t = NOW + 31_000;
-    act(() => { vi.advanceTimersByTime(31_000); });
-    expect(rowOf("prop:k").querySelector('[data-testid="inbox-withdraw"]')).toBeNull();
-    expect(rowOf("prop:k").querySelector('[data-testid="inbox-withdraw-closed"]')).not.toBeNull();
+    act(() => { vi.advanceTimersByTime(15_000); });
+    expect(withdraw()).not.toBeNull();
+    expect(withdraw()!.disabled).toBe(false);
+    expect(hint().textContent).not.toMatch(/closed/i);
+  });
+
+  // withdraw_until is the daemon's clock; the window's is the browser's. The
+  // daemon's window here is open for 30 s more by the daemon's own clock.
+  const skewed = (skewMs: number) => served().map((r) => r.kind === "proposal"
+    ? { ...r, detail: { ...r.detail, withdraw_until: new Date(NOW + skewMs + 30_000).toISOString() } } : r);
+
+  it("skew: a daemon 90 s behind still gets Withdraw offered (hinted closing), and the press posts", async () => {
+    const p = draw({ snapshot: snap(skewed(-90_000)) });
+    const w = rowOf("prop:k").querySelector('[data-testid="inbox-withdraw"]') as HTMLButtonElement;
+    expect(w).not.toBeNull();
+    expect(w.disabled).toBe(false);
+    expect(w.dataset.hint).toBe("closing");
+    expect(rowOf("prop:k").textContent).not.toMatch(/has closed/i);
+    act(() => w.click());
+    await flush();
+    expect(p.onAnswer).toHaveBeenCalledWith("prop:k", { withdraw: true });
+    expect(q('[data-testid="inbox-notice"]')).toBeNull();
+  });
+
+  it("skew: a daemon 90 s ahead shows the window open; a press after the daemon closed it is its 409, said, re-read",
+    async () => {
+      const p = draw({ snapshot: snap(skewed(90_000)),
+        onAnswer: vi.fn(async () => { throw new ApiError(409, "this item is no longer waiting"); }) });
+      const w = rowOf("prop:k").querySelector('[data-testid="inbox-withdraw"]') as HTMLButtonElement;
+      expect(w.dataset.hint).toBe("open");
+      const rereads = (p.onReread as any).mock.calls.length;
+      act(() => w.click());
+      await flush();
+      expect(q('[data-testid="inbox-notice"]')!.textContent).toBe(GONE_NOTICE);
+      expect((p.onReread as any).mock.calls.length).toBeGreaterThan(rereads);
+    });
+
+  it("the answer box is read-only while its answer is on its way: nothing typed then is lost", async () => {
+    let settle!: () => void;
+    const p = draw({ onAnswer: vi.fn(() => new Promise<unknown>((r) => { settle = () => r({ ok: true }); })) });
+    const box = rowOf("q:t2:r9").querySelector('[data-testid="inbox-answer"]') as HTMLInputElement;
+    type(box, "left");
+    act(() => (rowOf("q:t2:r9").querySelector('[data-testid="inbox-answer-send"]') as HTMLButtonElement).click());
+    expect(box.readOnly).toBe(true);
+    type(box, "left and more");                     // a change while sending is refused
+    expect(box.value).toBe("left");
+    await act(async () => { settle(); await Promise.resolve(); await Promise.resolve(); });
+    expect(p.onAnswer).toHaveBeenCalledWith("q:t2:r9", { text: "left" });
+    expect(box.readOnly).toBe(false);
+    expect(box.value).toBe("");
+    type(box, "next");
+    expect(box.value).toBe("next");
   });
 
   it("links open the row's thread, else its task", () => {

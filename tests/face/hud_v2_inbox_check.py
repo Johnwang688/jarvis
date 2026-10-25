@@ -18,7 +18,15 @@ What it pins, one section each (each names the mutation it is meant to catch):
             with the id through `encodeURIComponent` (A1 decodes once); a
             proposal's Withdraw posts `{"withdraw": true}` [double post; raw id]
   conflict  a 409 shows "Already answered or gone." and re-reads [no re-read]
-  withdraw  Withdraw disappears once `withdraw_until` passes [kept offered]
+  withdraw  `withdraw_until` is the daemon's clock, so the window's clock is a
+            hint only (review of PR #305, MED 1): Withdraw stays while the row
+            is in the projection, turning "closing" near the end and never
+            claiming the window closed; with the daemon 90 s behind it is
+            still offered and the press posts; with the daemon 90 s ahead a
+            press after the daemon dropped the row is its 409, said, re-read
+            [gate on the browser's clock]
+  reconnect a dropped event stream, rows changed with no `inbox_changed`, and
+            the reconnect alone re-reads them [no re-read on `_connected`]
   clicks    a click anywhere on a row never posts anything; a row's link opens
             its thread or its task [row onClick answers]
   hostile   `<img onerror>` in `origin`, in question text and in a brief makes
@@ -32,7 +40,8 @@ What it pins, one section each (each names the mutation it is meant to catch):
             (HUD-only) card fetches its private detail once, from the veil's
             card only, and its row shows none of it [second card; not inert]
   badge     `navigator.setAppBadge` (stubbed) gets the count and is cleared at
-            0; without the API nothing breaks [badge all ranks; no clear]
+            0 and when a read fails; without the API nothing breaks [badge all
+            ranks; no clear; a stale badge after a failed read]
   older     an older daemon (404) shows no count and says the inbox is not
             available, never "nothing waiting" [404 read as empty]
 
@@ -320,17 +329,81 @@ def _conflict_checks(page, mock, check, until):
           notice.count() == 1 and "prop:k9" not in _row_ids(page))
 
 
+CLOSING_S = 15  # lib/inbox CLOSING_MS
+
+
 def _withdraw_checks(page, mock, check, until):
-    rows = [prop_row("k5", until_s=2.5)]
+    # Same clocks: the hint turns "closing" CLOSING_S before the end, and the
+    # button stays past withdraw_until for as long as the daemon holds the row.
+    rows = [prop_row("k5", until_s=CLOSING_S + 2.5)]
     _open(page, mock, until, rows)
     w = _row(page, "prop:k5").locator('[data-testid="inbox-withdraw"]')
-    check("inside its window the proposal offers Withdraw", w.count() == 1)
+    hint = _row(page, "prop:k5").locator('[data-testid="inbox-withdraw-hint"]')
+    check("inside its window the proposal offers Withdraw, hinted open", w.count() == 1
+          and w.get_attribute("data-hint") == "open" and "Starts on its own" in hint.inner_text())
     posts = len(_answers(mock))
-    gone = until(lambda: w.count() == 0, timeout=6)
-    check("Withdraw disappears once withdraw_until passes, with no re-read needed [mutation: kept offered]",
-          w.count() == 0 and bool(gone)
-          and _row(page, "prop:k5").locator('[data-testid="inbox-withdraw-closed"]').count() == 1)
-    check("and nothing was posted by its going", len(_answers(mock)) == posts)
+    flipped = until(lambda: w.count() == 1 and w.get_attribute("data-hint") == "closing", timeout=6)
+    check("near its end by this window's clock the hint turns 'closing', with no re-read needed",
+          bool(flipped) and hint.get_attribute("data-hint") == "closing")
+    time.sleep(3)
+    check("past withdraw_until by this window's clock, Withdraw stays while the daemon holds the row "
+          "[mutation: gate on the browser's clock]", w.count() == 1 and w.is_enabled())
+    check("and nothing claims the window has closed",
+          "closed" not in _row(page, "prop:k5").inner_text().lower(), _row(page, "prop:k5").inner_text())
+    check("and nothing was posted by the hint", len(_answers(mock)) == posts)
+
+    # The daemon 90 s behind this window: its window is open for 30 s more by
+    # its own clock, which this window reads as 60 s ago.
+    _open(page, mock, until, [prop_row("kb", until_s=-60)])
+    w = _row(page, "prop:kb").locator('[data-testid="inbox-withdraw"]')
+    check("skew, daemon 90 s behind: Withdraw is still offered (hinted closing), never hidden",
+          w.count() == 1 and w.is_enabled() and w.get_attribute("data-hint") == "closing"
+          and "closed" not in _row(page, "prop:kb").inner_text().lower())
+    start = len(_answers(mock))
+    w.click()
+    until(lambda: len(_answers(mock)) > start, timeout=3)
+    got = _answers(mock)[start:]
+    check("and the press posts {\"withdraw\": true}, which the daemon accepts", len(got) == 1
+          and got[0][1] == "prop:kb" and got[0][2] == {"withdraw": True}, str(got))
+    until(lambda: "prop:kb" not in _row_ids(page), timeout=3)
+    check("the withdrawn row leaves on the daemon's inbox_changed, with no 409 said",
+          "prop:kb" not in _row_ids(page) and page.locator('[data-testid="inbox-notice"]').count() == 0)
+
+    # The daemon 90 s ahead: this window reads its window as open for two
+    # minutes, but the daemon has closed it and dropped the row (no event yet).
+    _open(page, mock, until, [prop_row("ka", until_s=120)])
+    w = _row(page, "prop:ka").locator('[data-testid="inbox-withdraw"]')
+    check("skew, daemon 90 s ahead: Withdraw is offered, hinted open", w.count() == 1
+          and w.get_attribute("data-hint") == "open")
+    _st(mock)["rows"] = []
+    reads = _reads(mock)
+    w.click()
+    notice = page.locator('[data-testid="inbox-notice"]')
+    until(lambda: notice.count() == 1, timeout=3)
+    until(lambda: "prop:ka" not in _row_ids(page), timeout=3)
+    check("a press after the daemon closed the window is its 409: 'Already answered or gone.', then a re-read",
+          notice.count() == 1 and notice.inner_text() == "Already answered or gone." and _reads(mock) > reads
+          and "prop:ka" not in _row_ids(page))
+
+
+def _reconnect_checks(page, mock, check, until):
+    from tests.face.hud_v2_subagents_check import drop_events
+    _open(page, mock, until)
+    check("setup: the inbox shows its four rows", len(_row_ids(page)) == 4 and _count(page) == "3")
+    # The daemon's projection changes while the stream is down: no
+    # inbox_changed reaches this window.
+    time.sleep(0.5)
+    _st(mock)["rows"] = [q_row(), prop_row("k8")]
+    reads = _reads(mock)
+    time.sleep(0.5)
+    check("with no event the window has not re-read", _reads(mock) == reads and "task:k1" in _row_ids(page))
+    before = mock.sse_connections()
+    drop_events(mock)
+    mock.await_reconnect(before, timeout=8)
+    until(lambda: _row_ids(page) == ["q:t1:r9", "prop:k8"], timeout=8)
+    check("a reconnect alone re-reads the inbox: the view and the count follow [mutation: no re-read on "
+          "_connected]", _row_ids(page) == ["q:t1:r9", "prop:k8"] and _count(page) == "2" and _reads(mock) > reads,
+          str(_row_ids(page)))
 
 
 def _clicks_checks(page, mock, check, until):
@@ -590,6 +663,19 @@ def _badge_checks(browser, mock, check, until, guard, init_script, base):
                 time.sleep(0.5)
                 check("a re-read with the same count does not touch the badge again", len(badges()) == n,
                       str(badges()))
+                # A read that fails clears a badge it had set (review of PR #305):
+                # an older daemon's 404, and a daemon error.
+                for fail in ((404, "route not found"), (500, "the daemon hit an error")):
+                    _reset(mock)
+                    mock_inbox.changed(mock)
+                    until(lambda: badges()[-1] == ["set", 3], timeout=3)
+                    _st(mock)["fail"] = fail
+                    mock_inbox.changed(mock)
+                    until(lambda: badges()[-1] == ["clear"], timeout=3)
+                    check(f"a failed read ({fail[0]}) clears the badge rather than leave a stale count "
+                          "[mutation: a stale badge]", badges()[-1] == ["clear"] and _count(page) is None,
+                          str(badges()[-3:]))
+                    _st(mock)["fail"] = None
                 check("the title stays J.A.R.V.I.S. while the badge moves", page.title() == TITLE, page.title())
             else:
                 check("without the Badging API the inbox still counts and nothing throws",
@@ -614,7 +700,7 @@ def _older_checks(page, mock, check, until):
 # ---------------------------------------------------------------------------
 
 SECTIONS = (_sidebar_checks, _groups_checks, _live_checks, _answer_checks, _conflict_checks, _withdraw_checks,
-            _clicks_checks, _hostile_checks, _card_checks, _older_checks)
+            _reconnect_checks, _clicks_checks, _hostile_checks, _card_checks, _older_checks)
 
 
 def inbox_checks(browser, mock, base, check, until, guard, init_script):

@@ -1729,7 +1729,9 @@ routes"). Not deployed: the owner's step is `jarvis hud rebuild` and a reload
 - **App badge.** After each read whose count changed, `lib/inbox` `setBadge`:
   `navigator.setAppBadge(count)`, `clearAppBadge()` at 0 (else
   `setAppBadge(0)`), feature-detected, every error swallowed. In a tab Chrome
-  ignores it; the installed app shows it. `<title>` stays `J.A.R.V.I.S.`.
+  ignores it; the installed app shows it. A read that fails (unavailable, an
+  error, a body that is not a list) clears it, as the sidebar then shows no
+  count (review of #305). `<title>` stays `J.A.R.V.I.S.`.
 - **The view** is `View` `"inbox"` (`lib/workspace.ts`), offered by a pane's
   strip only while that pane shows it (as `subagent`); a split beside it is
   a chat. Like every view but VEX, a reload puts chat back in the focused
@@ -1737,13 +1739,23 @@ routes"). Not deployed: the owner's step is `jarvis hud rebuild` and a reload
   malformed rows dropped, rank order, the daemon's order within a rank)
   under "Waiting now" (1–2), "Waiting on you" (3–5), "When you have time"
   (6–7) and "For your information" (8), empty groups hidden. Questions have
-  an answer box (Answer, or Enter), proposals Withdraw until
-  `withdraw_until` (a timer hides it then), task rows are information only,
+  an answer box (Answer, or Enter; read-only while its post is on its way),
+  proposals Withdraw **for as long as the row is in the daemon's
+  projection**, task rows are information only,
   and each row has an "Open its chat"/"Open its task" link (thread first,
   else task). **No handler on a row**: only Answer, Enter and Withdraw post,
   once per press, through `POST /inbox/<encodeURIComponent(id)>/answer`
   (`api.answerInbox`). A 409 shows "Already answered or gone." and every
   answer, refused or not, reads the inbox again.
+- **Withdraw's window is the daemon's** (review of #305, MED 1).
+  `withdraw_until` is the daemon's clock; comparing it with the browser's
+  hid Withdraw while the window was open when the daemon ran behind (WSL2
+  after the host slept). The browser's clock is a hint only (`lib/inbox`
+  `withdrawHint`): "closing" from `CLOSING_MS` (15 s) before the end, past
+  it included (a dashed button and "a Withdraw now may come too late"),
+  else "open"; nothing says the window has closed. A press after it closed
+  is the daemon's 409. The face check runs the daemon 90 s behind and 90 s
+  ahead.
 - **An approval row is not a second card.** The card is `ApprovalVeil`'s,
   unchanged; whenever the inbox holds an approval the window holds its card,
   so the veil is up and the inbox is inert behind it. The row says "On the
@@ -1767,10 +1779,16 @@ routes"). Not deployed: the owner's step is `jarvis hud rebuild` and a reload
   failed task, glacier cyan only for the selected row bar and focus rings.
 - Tests: `lib/inbox.test.ts`, `state/inbox.test.ts`,
   `components/InboxView.test.ts`, the `lib/workspace.test.ts` inbox case, and
-  `tests/face/hud_v2_inbox_check.py` (74 checks, its own `MockDaemon(0)`, the
+  `tests/face/hud_v2_inbox_check.py` (86 checks, its own `MockDaemon(0)`, the
   routes in `hud_v2_mock_inbox.py`, also a `hud_v2_check` section). Its card
   section runs the card's assertions twice, with a chat pane and with the
   Inbox open, and requires the same answers. Mutations caught: a second
   card, a row `onClick`, `dangerouslySetInnerHTML` on `origin`, counting all
-  ranks, no re-read on 409, Withdraw kept past its window, and controls live
-  under a card.
+  ranks, no re-read on 409, controls live under a card, Withdraw gated on the
+  browser's clock, no re-read on `_connected` (the reconnect section drops
+  the stream and changes the rows with no event), and a badge left after a
+  failed read.
+- **Follow-up (pre-existing, not this package):** the HUD reads `GET
+  /approvals` only at boot, so a card asked while the event stream was down
+  is missed until a reload; re-read it on reconnect and merge it into the
+  veil. The inbox's "reload to see it" row already says so.
