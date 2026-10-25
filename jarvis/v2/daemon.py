@@ -426,6 +426,11 @@ class _Session:
     owner_stopped: bool = False
     steered: list = field(default_factory=list)
     questions: set = field(default_factory=set)
+    # What each open question said ({text, options, asked_at}), for the
+    # owner inbox's row (inbox.py). `questions` stays the one truth for which
+    # are open: an entry here whose id has left it is never shown, and is
+    # pruned the next time a question is asked.
+    question_detail: dict = field(default_factory=dict, repr=False)
     # The turns the owner stopped, newest last: a steer still in the
     # provider's hands when Stop landed is judged by the turn it was aimed at,
     # even after a later turn has started (Bugbot on PR #22).
@@ -484,6 +489,12 @@ class Daemon:
         from .activity import Activity
         self.activity = Activity(stores, self.bus.publish)
         self.bus.observe(self.activity.observe)
+        # The owner inbox (inbox.py): a projection over the broker, the
+        # sessions and the task store. Its observer only publishes
+        # `inbox_changed` ({ids, reason}) after the source events it reads.
+        from .inbox import Inbox
+        self.inbox = Inbox(self)
+        self.bus.observe(self.inbox.observe)
         # The daemon owns the broker (design §6 layer 5). Its two callbacks
         # publish on the same bus every surface already reads, so a HUD, a
         # Discord thread and the escape hatch all learn about a pending
@@ -1561,6 +1572,7 @@ class Daemon:
         session.owner_stopped = False
         session.steered = []
         session.questions.clear()
+        session.question_detail = {}
         session.turn_id = queued.turn_id if queued is not None else uuid.uuid4().hex
         session.desk.begin(session.brief, message, session.turn_id)
         self._retire_drive(session)
@@ -1719,6 +1731,7 @@ class Daemon:
         session.owner_stopped = False
         session.steered = []
         session.questions.clear()
+        session.question_detail = {}
         session.turn_id = uuid.uuid4().hex
         session.self_started = True
         session.cli_offered = False
@@ -1860,6 +1873,7 @@ class Daemon:
         session.owner_stopped = False
         session.steered = []
         session.questions.clear()
+        session.question_detail = {}
         session.turn_id = uuid.uuid4().hex
         session.compacting = True
         session.relay_turn = session.relay_mark = None
@@ -2174,7 +2188,12 @@ class Daemon:
             if event.kind == EventKind.QUESTION and (event.data or {}).get("req_id"):
                 # The turn now waits on the owner: a message sent meanwhile
                 # queues rather than steers (`_waiting_on_owner`).
-                session.questions.add(str(event.data["req_id"]))
+                req_id = str(event.data["req_id"])
+                session.questions.add(req_id)
+                session.question_detail = {
+                    **{k: v for k, v in session.question_detail.items() if k in session.questions},
+                    req_id: {"text": event.data.get("text"), "options": event.data.get("options"),
+                             "asked_at": record["at"]}}
             if event.kind == EventKind.USAGE:
                 # Which model answered, per turn, in the durable record: a
                 # chat thread can change model mid-conversation now (A1, A7).
@@ -2248,6 +2267,12 @@ class Daemon:
             session.thread.updated = utcnow()
             session.thread.provider_session_id = session.handle.provider_session_id
             self.stores.threads.save(session.thread)
+            # The turn is over, so none of its questions is open any more:
+            # cleared before `turn_finished` is published, so whoever reads on
+            # that record (the inbox's `inbox_changed`) sees them gone. The
+            # worker's `finally` clears them again and publishes nothing.
+            session.questions.clear()
+            session.question_detail = {}
             self._record(session, event)
 
     @staticmethod
@@ -2418,6 +2443,7 @@ class Daemon:
                     session.self_started = False
                     session.compacting = False
                     session.questions.clear()
+                    session.question_detail = {}
                     if line is not None and not session.retired:
                         # After the turn's turn_finished, before anything
                         # waiting runs: the chat's system line.
@@ -3034,6 +3060,11 @@ def _handler(daemon):
             if mounted is not None:
                 return mounted
             mounted = hud_api.route(self, daemon, parts, query)
+            if mounted is not None:
+                return mounted
+            # The owner inbox: owner-only on every path (inbox.route).
+            from . import inbox as _inbox
+            mounted = _inbox.route(self, daemon, parts, query)
             if mounted is not None:
                 return mounted
             if parts == ["route"] and method in ("GET", "POST"):

@@ -639,3 +639,33 @@ open session; a provider missing a Bypass method, or a session that closes
 mid-switch, is 409, never 500. A change appends one `notice` record and publishes
 `bypass_changed {bypass}`; a repeat records nothing. What the switch does
 to the gate: safety notes, *The owner's Bypass switch*.
+
+## The owner inbox routes (inbox A1, 2026-10-25)
+
+`jarvis/v2/inbox.py` (SELF_PROTECTED) is a projection, never a store
+(design `docs/plans/2026-10-24-owner-inbox-design.md`, IN-1): live approvals
+(rank 1), open provider questions on a running turn and blocking questions of
+`clarifying` tasks (2), proposals inside their grace window (3), `blocked`
+tasks (4) and `failed` tasks (8), ties to the older item. `title` and
+`blocks` are built from ids, states and tool names through `clean_line`,
+never from a thread title. Agent text is in `detail` and in `origin`, which
+is the approval's `approvals.label` attribution with its model-chosen task
+name (one `clean_line`d line). **The HUD view (A2) must render `origin` and
+every `detail` field as untrusted `textContent`**, as the approval card
+does. An approval's `detail` is exactly `ApprovalRequest.to_json()` (a
+private card's row carries nothing more).
+`GET /inbox` and `POST /inbox/<id>/answer` run `owner_only` before anything
+else on every `/inbox` path. The id is percent-decoded once (the HUD's
+`encodeURIComponent`). An answer finds its row in a fresh projection
+(absent: 409) and calls the source's own function with its own surface's
+arguments: `Daemon.resolve_approval(req_id, decision, always, hud=<the Host
+test of POST /approvals>)`, `Daemon.answer(thread, req, text)`,
+`TaskControl.answer_question(task, index, text)`, and `TaskControl.cancel` for
+a proposal's withdraw (`{"withdraw": true}`). A `task` row, an unknown kind or
+a malformed body is 400. The bus observer publishes `inbox_changed` `{ids,
+reason}` (never text) after each source event, in the same publish; the
+project archive/restore/delete events count as sources too. `Daemon._finish`
+clears a turn's open questions before `turn_finished` is published, so the
+row is already gone when that event names it.
+`tests/v2/inbox_check.py`; `tests/v2/archive_check.py` keeps every tool, MCP
+catalog entry and session tool away from the routes and the module.
