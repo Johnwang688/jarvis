@@ -33,7 +33,7 @@ design rests on them.
   the command or any text from the chat.
 - **Approving from the phone carries the same authority as the HUD** (O-3):
   Allow, Always and HUD-only Browser cards. Every Allow and every Always takes
-  Face ID. Deny is a single tap.
+  Face ID or the iPhone passcode (§2, PH-3). Deny is a single tap.
 - **Answering questions and decisions, sending a message to a chat,
   starting a task,** all from the phone.
 - **Push to talk** that turns your speech into text in the box. You read
@@ -50,7 +50,7 @@ Discord stays unchanged as the backup (O-2); the phone is the richer surface
 beside it.
 
 Why an installed web app rather than an App Store app: on current iOS a web
-app added to the home screen gets passkeys (Face ID), Web Push notifications,
+app added to the home screen gets passkeys (Face ID or passcode), Web Push notifications,
 its own icon and a full-screen window, which is everything this design uses.
 A native app would need Xcode on a Mac, an Apple Developer membership
 ($99 a year) and App Store or TestFlight distribution, for no capability this
@@ -96,7 +96,11 @@ the native app would be a thin shell over the same `/m/api`.
 - **PH-3. The owner on the phone is proved by a passkey, not by the network.**
   Pairing registers a WebAuthn credential (`userVerification: required`)
   on the phone for the relying party `<machine>.<tailnet>.ts.net`. Being on
-  the tailnet only gets a request to the login page. Tailscale's identity
+  the tailnet only gets a request to the login page. User verification is
+  whatever iOS accepts for the passkey: Face ID, or the device passcode
+  when Face ID is off or fails. Both set the UV flag, and Jarvis neither
+  knows nor cares which was used. An iPhone with no passcode cannot hold a
+  passkey, so pairing needs one set. Tailscale's identity
   headers are logged as advisory, never trusted, because a local process
   can send them to 8406 directly.
 - **PH-4. Every Allow and every Always is its own passkey assertion.** The
@@ -126,7 +130,7 @@ the native app would be a thin shell over the same `/m/api`.
     inbox's dispatch from any other listener, and tools all pass False.
     With it, the phone may Allow, Always, and answer HUD-only Browser cards.
   - **Always from the phone** shows the rule that would be written (what
-    `entry_for` mints) on the card before the Face ID prompt, because a
+    `entry_for` mints) on the card before the iOS verification prompt, because a
     standing rule outlives the approval.
   - **HUD-only cards** send their private detail (`owner_json`) only to a
     verified phone session, only while the card is pending, and never in a
@@ -251,7 +255,7 @@ stream, dev servers, VEX, project folder creation, schedules editing.
 
 - **Inbox tab:** the inbox rows, the same rank groups as the HUD. A card
   shows in full before any button works; pressing Allow or Always raises
-  Face ID. Always shows the rule it would write first. Pull to refresh; live
+  Face ID or the passcode. Always shows the rule it would write first. Pull to refresh; live
   updates over `/m/ws`.
 - **Chats tab:** projects → threads (the five most recent per project, as
   the desktop sidebar shows) → transcript. The input box has push to talk:
@@ -298,7 +302,7 @@ path, each step the owner's call:
 
 | Rule | How the phone keeps it |
 |---|---|
-| Approvals are the owner's, deliberately | PH-4: a Face ID assertion bound to each Allow and each Always; no bulk Allow; Always shows its rule first |
+| Approvals are the owner's, deliberately | PH-4: a user-verified assertion (Face ID or passcode) bound to each Allow and each Always; no bulk Allow; Always shows its rule first |
 | HUD-only cards answered only by a verified owner surface | `owner_verified` set only by the HUD route and by the phone under §4.1 with a fresh assertion (PH-7, O-3); private detail never in push, logs or the stream |
 | No tool reaches owner routes | remote routes need a session no agent holds; `rules.py` DENY for 8406; nothing in the session MCP catalog |
 | Credentials never leave the daemon | VAPID private key and WebAuthn data are protected paths; push payloads are content-free; logs carry status codes only |
@@ -311,7 +315,7 @@ path, each step the owner's call:
 
 | WP | Package | Size | Acceptance |
 |---|---|---|---|
-| P-0 | **Spikes, each a script under `tests/spikes/` with its finding written here.** (a) `tailscale serve` on Windows reaching a WSL loopback listener on 8406, with a valid cert, and `tailscale serve status --json` readable from WSL; (b) a passkey registered and asserted with Face ID from the owner's iPhone, in the home-screen app, on the ts.net origin, verified by `webauthn`; (c) a Web Push reaching the home-screen app on the iPhone with the screen locked | S | all three pass on the owner's iPhone; any failure stops the plan and comes back as a decision |
+| P-0 | **Spikes, each a script under `tests/spikes/` with its finding written here.** (a) `tailscale serve` on Windows reaching a WSL loopback listener on 8406, with a valid cert, and `tailscale serve status --json` readable from WSL; (b) a passkey registered and asserted with Face ID, and again with Face ID off using the passcode, from the owner's iPhone, in the home-screen app, on the ts.net origin, verified by `webauthn`; (c) a Web Push reaching the home-screen app on the iPhone with the screen locked | S | all three pass on the owner's iPhone; any failure stops the plan and comes back as a decision |
 | P-1 | `REMOTE_PORT` listener, strict Host and Origin, CSP, static serving of an empty mobile shell | S | the API and HUD listeners never serve `/m/*`; the remote one never serves HUD routes (route-table test); non-ts.net Host refused |
 | P-2 | `remote_auth`: pairing from the HUD, passkey registration and login, sessions, devices, revoke | M | pairing only within an open window; revoke ends sessions at once; replayed or cross-origin assertions refused; `rules.py` DENY for 8406 |
 | P-3 | Read API and the Inbox, Chats and Tasks tabs (read-only) | M | headless mobile-viewport suite; transcripts identical to the HUD's projection; private cards show their private projection until P-4 lands |
