@@ -706,9 +706,10 @@ class NoLever(unittest.TestCase):
                 importers.append(path.relative_to(REPO).as_posix())
         # owner_ops is `jarvis hud rebuild`, the CLI's too (2026-10-11): only
         # `__main__` imports it (tests/v2/owner_ops_check.py pins that).
+        # remote_listener serves the phone shell from the installed builds (P-1).
         self.assertEqual(importers, ["jarvis/__main__.py", "jarvis/v2/daemon.py", "jarvis/v2/hud_api.py",
-                                     "jarvis/v2/owner_ops.py"], importers)
-        for name in ("hud_api.py", "daemon.py"):
+                                     "jarvis/v2/owner_ops.py", "jarvis/v2/remote_listener.py"], importers)
+        for name in ("hud_api.py", "daemon.py", "remote_listener.py"):
             text = (REPO / "jarvis" / "v2" / name).read_text()
             for writer in ("install(", "prune(", "main(", "npm_build("):
                 self.assertNotIn(f"hud_install.{writer}", text, f"{name} only reads builds")

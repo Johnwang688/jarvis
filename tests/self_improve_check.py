@@ -38,6 +38,8 @@ def guard_checks() -> None:
     assert "jarvis/v2/merge_gate.py" in SELF_PROTECTED
     # The owner inbox: what the owner sees as waiting (inbox design, §9).
     assert "jarvis/v2/inbox.py" in SELF_PROTECTED
+    # The phone's remote listener: what the tailnet reaches (phone design PH-1).
+    assert "jarvis/v2/remote_listener.py" in SELF_PROTECTED
     for rel in sorted(SELF_PROTECTED):
         out = tools.dispatch(
             "write_file",

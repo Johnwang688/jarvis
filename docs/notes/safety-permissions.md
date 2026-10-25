@@ -1901,6 +1901,11 @@ main too) (details in *Program runners* in Safety design;
 
 <!-- claude-source:005019-006372:end -->
 
+**Current (2026-10-25, phone P-1):** `config.control_ports()` is now five
+ports at their defaults: 8402, 8404, 8405, 8406 and **8408**, the phone's
+remote listener (`config.REMOTE_PORT`), configured and default; still not
+8403. The preserved text above predates it.
+
 ## Original CLAUDE.md lines 7495–7530
 
 <!-- claude-source:007495-007530:begin -->

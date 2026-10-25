@@ -99,7 +99,7 @@ describe("automatic Direct placement", () => {
 describe("URL and lifecycle boundaries", () => {
   it.each([
     "http://localhost:18405/", "http://localhost:18402/", "http://localhost:8405/", "http://localhost:8402/",
-    "http://localhost:8404/", "http://127.0.0.1:8406/callback", "http://localhost:18403/p/x/",
+    "http://localhost:8404/", "http://127.0.0.1:8406/callback", "http://127.0.0.1:8408/m/", "http://localhost:18403/p/x/",
     "http://192.168.1.4:3000/", "https://example.com/", "http://user:pw@localhost:3000/", "file:///etc/passwd",
     "javascript:alert(1)", "http://[::1]:3000/", "not a url",
   ])("refuses %s", url => {

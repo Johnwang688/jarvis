@@ -474,11 +474,16 @@ class _Session:
     compacting: bool = False
 
 
+# `Daemon(remote_host=...)` not given: read `config.remote_host()`.
+_FROM_CONFIG = object()
+
+
 class Daemon:
     def __init__(self, stores: Stores, providers: dict[ProviderName, Provider],
                  permit_factory: Callable[[str, Brief], PermissionCallback] | None,
                  port: int, approvals: PendingApprovals | None = None, *,
                  face_port: int | None = None, workshop_port: int | None = None,
+                 remote_port: int | None = None, remote_host=_FROM_CONFIG,
                  dev_proc_root=None, dev_cgroup_root=None):
         self.stores = stores
         self.providers = {ProviderName(k): v for k, v in providers.items()}
@@ -538,6 +543,14 @@ class Daemon:
         # Port zero is an isolated embedded/test daemon on three ephemeral ports.
         self.face_port = face_port if face_port is not None else (0 if port == 0 else config.FACE_PORT)
         self.workshop_port = workshop_port if workshop_port is not None else (0 if port == 0 else config.WORKSHOP_PORT)
+        # The phone's remote listener (PH-1, remote_listener.py): bound only
+        # when a tailnet host is configured (`config.remote_host()`, read
+        # here), never part of the single-instance lock, and skipped with a
+        # log line if its port is taken. `remote_port` is the bound port
+        # after `start()`, or None when there is no remote listener.
+        self.remote_host = config.remote_host() if remote_host is _FROM_CONFIG else remote_host
+        self._remote_want = remote_port if remote_port is not None else (0 if port == 0 else config.REMOTE_PORT)
+        self.remote_port: int | None = None
         self._listeners = []
         from .hud_api import HUDLedger
         from .router import Router
@@ -642,6 +655,13 @@ class Daemon:
                 raise DaemonError("HUD or preview port is already in use") from exc
             self._server = server
             self.port, self.face_port, self.workshop_port = [s.server_address[1] for s in servers]
+            # The fourth listener, after the three that are the lock: a second
+            # daemon fails above and never reaches it. Never fails the start.
+            from .remote_listener import bind as bind_remote
+            remote = bind_remote(self.remote_host, self._remote_want)
+            if remote is not None:
+                servers.append(remote)
+                self.remote_port = remote.server_address[1]
             # Only now, holding all three ports (the bind is the
             # single-instance lock) and before anything is served: a second
             # daemon started by hand on the live data folder fails the bind
@@ -2823,6 +2843,7 @@ class Daemon:
             worker.join(max(0, deadline - time.monotonic()))
         self._listeners.clear()
         self._server = None
+        self.remote_port = None
         if any(job.is_alive() for job in jobs):
             LOG.warning("Shutdown bound reached; provider work remains on daemon threads")
 
@@ -3051,6 +3072,10 @@ def _handler(daemon):
             method = self.command
             stores = daemon.stores
             from . import hud_api
+            # The phone's paths belong to the remote listener alone
+            # (remote_listener.py, PH-1): never the HUD, API or preview one.
+            if parts[0] == "m":
+                raise APIError(404, "route not found")
             if getattr(self.server, "preview_only", False):
                 return hud_api.preview_route(self, daemon, parts, query)
             # jarvis-mcp for chat sessions (bridge.py): the API listener only,

@@ -30,7 +30,7 @@ network.
    explanation when it is refused.
 
 `refused_ports` is the one port list: `config.control_ports()` (BR-0's single
-Python definition: 8402, 8404, 8405, 8406, configured and default) plus the
+Python definition: 8402, 8404, 8405, 8406, 8408, configured and default) plus the
 HUD and API ports this daemon reports, plus the workshop's 8403 unless it is
 this daemon's own workshop — `/status` → `refused_ports` reports it, and the
 HUD's Direct judge reads that list.
@@ -221,7 +221,7 @@ def address_class(ip) -> str:
 def judge_port(port: int, *, refused: frozenset[int], own: int | None = None) -> str | None:
     """The refusal class for a destination port alone, before any name is
     resolved, or None. Jarvis's ports are refused on every address: the
-    daemon binds loopback only, and a public site on 8402–8406 is not worth
+    daemon binds loopback only, and a public site on 8402–8408 is not worth
     a rule with an exception in it."""
     if not isinstance(port, int) or port <= 0 or port > 65535:
         return BAD_REQUEST

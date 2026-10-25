@@ -71,7 +71,9 @@ export type DevOpenPlan =
   | { kind: "wait"; why: "card" | "covered" | "pointer" }
   | { kind: "skip"; why: SkipWhy };
 
-export const CONTROL_PORTS: readonly number[] = [FACE_PORT, 8404, API_PORT, 8406];
+// Mirrors `config.DEFAULT_CONTROL_PORTS` (8408 is the phone's remote listener,
+// PH-1); tests/v2/remote_listener_check.py holds the two lists equal.
+export const CONTROL_PORTS: readonly number[] = [FACE_PORT, 8404, API_PORT, 8406, 8408];
 
 /** A second trust boundary after owner-only registry reads. No token query travels. */
 export function devUrl(url: string, ports: Partial<DaemonPorts>, controlPorts: readonly number[] = []): string | null {

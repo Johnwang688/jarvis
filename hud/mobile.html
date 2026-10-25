@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <!-- The phone shell (phone surface design PH-9), served only by the
+         remote listener at /m/ (jarvis/v2/remote_listener.py). The title is
+         the HUD's on purpose: windows/uiatree.py's FORBIDDEN_TITLES matches
+         it, should this page ever be open in a window on the desk. -->
+    <title>J.A.R.V.I.S.</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="color-scheme" content="dark" />
+    <meta name="theme-color" content="#141413" />
+    <meta name="apple-mobile-web-app-title" content="Jarvis" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black" />
+    <!-- Served by the remote listener itself, never from this build's public
+         folder (whose manifest and icons are the HUD's, at /). -->
+    <link rel="manifest" href="/m/manifest.webmanifest" vite-ignore />
+    <link rel="icon" type="image/png" sizes="32x32" href="/m/icons/orb-32.png" vite-ignore />
+    <link rel="apple-touch-icon" href="/m/icons/orb-192.png" vite-ignore />
+  </head>
+  <body>
+    <main class="shell">
+      <p class="shell-line">Jarvis · phone, not paired yet</p>
+    </main>
+    <script type="module" src="/src/mobile/main.ts"></script>
+  </body>
+</html>

@@ -1,11 +1,25 @@
 /// <reference types="vitest" />
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
+import { fileURLToPath } from "node:url";
 
 // The daemon serves hud/dist from `/` on FACE_PORT 8402 and its assets from
 // `/assets/*` (docs/hud-api.md, Static), so the base stays absolute.
+//
+// The phone shell (`mobile.html`, phone design PH-9) is a second entry in the
+// same build, but only the remote listener serves it, at `/m/`, and its files
+// at `/m/assets/*` (jarvis/v2/remote_listener.py); the HUD's listeners never
+// serve `/m/*`. So the page's own script and stylesheet tags name `/m/`.
+const PHONE_PAGE = "mobile.html";
+
 export default defineConfig({
   base: "/",
+  experimental: {
+    renderBuiltUrl(filename, { hostId, hostType }) {
+      if (hostType === "html" && hostId === PHONE_PAGE) return "/m/" + filename;
+      return undefined;
+    },
+  },
   plugins: [react()],
   resolve: {
     alias: [
@@ -28,6 +42,17 @@ export default defineConfig({
     // Monaco is large and loaded on demand by the File and Diff tabs; the
     // warning is not a defect to chase here.
     chunkSizeWarningLimit: 6144,
+    rollupOptions: {
+      input: {
+        index: fileURLToPath(new URL("./index.html", import.meta.url)),
+        mobile: fileURLToPath(new URL("./" + PHONE_PAGE, import.meta.url)),
+      },
+    },
+    // Vite's manifest of every entry's files: the remote listener serves only
+    // what it lists for `mobile.html` and what that imports. At the build's
+    // root under a plain name, which `jarvis hud install` copies with the rest
+    // (its own `manifest.json` and a dot folder are refused there).
+    manifest: "build-manifest.json",
   },
   // Workers are ES modules (`new Worker(url, {type: "module"})`): the syntax
   // worker's web-tree-sitter has code-split imports (its Node-only branches),
@@ -41,6 +66,6 @@ export default defineConfig({
     // Vitest replaces CSS with an empty string unless told otherwise, `?raw`
     // included. editorTheme.test.ts reads theme.css's own text, to recompute
     // the editor scheme's contrast and hue from the tokens there (ED-3).
-    css: { include: [/theme\.css/] },
+    css: { include: [/theme\.css/, /mobile\.css/] },
   },
 });

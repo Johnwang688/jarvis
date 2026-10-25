@@ -117,6 +117,11 @@ closes the routes a v1 agent's browser and any Origin-less API client had.
 
 <!-- claude-source:000235-000337:end -->
 
+**Current (2026-10-25, phone P-1):** `config.control_ports()` is now five
+ports at their defaults: 8402, 8404, 8405, 8406 and **8408**, the phone's
+remote listener (`config.REMOTE_PORT`), configured and default; still not
+8403. The preserved text above predates it.
+
 ## Original CLAUDE.md lines 866–938
 
 <!-- claude-source:000866-000938:begin -->
@@ -669,3 +674,48 @@ clears a turn's open questions before `turn_finished` is published, so the
 row is already gone when that event names it.
 `tests/v2/inbox_check.py`; `tests/v2/archive_check.py` keeps every tool, MCP
 catalog entry and session tool away from the routes and the module.
+
+## The phone's remote listener (phone C1 / P-1, 2026-10-25)
+
+`jarvis/v2/remote_listener.py` (SELF_PROTECTED) is v2's fourth listener
+(design `docs/plans/2026-10-24-phone-surface-design.md`, PH-1):
+`config.REMOTE_PORT` (8408, `JARVIS_REMOTE_PORT`) on 127.0.0.1 only, reached
+from the tailnet through `tailscale serve` (PH-2). **It binds only when
+`config.remote_host()` names a host** (`JARVIS_REMOTE_HOST`, a well-formed
+lowercase `<machine>.<tailnet>.ts.net`; anything else is None, never
+repaired). No name, no fourth port: the default, so a deploy changes nothing
+until the owner sets it. It binds after the three listeners that are the
+single-instance lock, and a failed bind is one warning line and no listener;
+the daemon starts either way (`Daemon.remote_port` is the bound port or
+None).
+
+Its handler is a separate class with its own route table; it never reaches
+`hud_api.route`, `inbox.route`, `bridge.route` or the preview routes. It
+serves `GET /m/` (the build's `mobile.html`, the second Vite entry, PH-9),
+`/m/manifest.webmanifest` (built in the module: scope and start `/m/`,
+standalone, the orb icons), `/m/icons/<orb icon>`, and `/m/assets/<file>`
+only for the files the built page names and Vite's build manifest
+(`build-manifest.json`, `build.manifest` in `hud/vite.config.ts`) lists for
+the `mobile.html` entry and its imports, never the rest of the HUD bundle.
+`/m/api/*` is 401 `{"error": "unauthorized"}` for every method (no auth
+until P-2); everything else 404. Files come from `hud/dist` under
+`JARVIS_HUD_DEV=1`, otherwise from the installed builds, verified on each
+read (`hud_install.read`).
+
+Every request: `Host` exactly the configured name, once, else 400; any method
+but GET/HEAD needs exactly one `Origin: https://<name>`, else 403. Every
+response, a malformed request's included: `remote_listener.REMOTE_POLICY`
+(`default-src 'none'`, `script-src`/`style-src`/`img-src`/`connect-src`/
+`manifest-src 'self'`, no `'unsafe-inline'`, `frame-ancestors 'none'`),
+`X-Frame-Options: DENY`, `nosniff`, `Referrer-Policy: no-referrer`, COOP and
+CORP `same-origin`, `Cache-Control: no-store` (hashed `/m/assets/` files are
+`immutable`). `projects.is_owner` refuses any server marked `remote_only`
+before it compares ports. The daemon's own handler answers any `/m/...` path
+with 404 on the API, HUD and workshop listeners. 8408 joined
+`config.DEFAULT_CONTROL_PORTS`, `control_ports()` (with `REMOTE_PORT`) and
+`CONTROL_PORTS` in `hud/src/lib/devopen.ts`, so the Browser gate and
+auto-open refuse it. The built phone page names its files under `/m/`
+(`experimental.renderBuiltUrl` for `mobile.html` only); phone CSS must not
+use `url()`, which Vite would point at the HUD's `/assets/`
+(`hud/src/mobile/mobile.test.ts`, and the real-build case in the suite).
+`tests/v2/remote_listener_check.py`.
