@@ -789,11 +789,16 @@ class OwnerOnly(Base):
                     if getattr(getattr(entry, "func", None), "__module__", "").startswith("jarvis.v2.tools")}
         reachable = (set(fastpath.FAST_TOOLS) | set(mcp.MCP_TOOLS) | set(mcp_catalog.MCP_TOOLS)
                      | set(session_tools.SESSION_TOOLS) | v2_names)
-        self.assertTrue({"terminal_read", "chat_send", "chat_git_push", "task_propose"} <= reachable,
-                        reachable)
+        self.assertTrue({"terminal_read", "chat_send", "chat_git_push", "task_propose", "owner_post"}
+                        <= reachable, reachable)
         for name in sorted(reachable):
             self.assertIsNone(self.INBOX_NAME.search(name), name)
-        sources = [v2tools, mcp, mcp_catalog, session_tools, bridge, chat_relay, fastpath]
+        # Inbox B1: `owner_post` writes a decision through the post service
+        # (`decisions.py`), which names none of the inbox's routes either.
+        from jarvis.v2 import decisions
+        from jarvis.v2.tools import owner_post
+        sources = [v2tools, mcp, mcp_catalog, session_tools, bridge, chat_relay, fastpath, decisions,
+                   owner_post]
         for name in reachable:
             func = getattr(tools.REGISTRY.get(name), "func", None)
             if func is not None:

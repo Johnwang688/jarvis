@@ -1577,8 +1577,9 @@ export default function App() {
         case "user_message":
           // PR C: a message the owner typed in Discord (a chat's thread or the
           // DM) appears in the open chat as theirs, labelled. A HUD message is
-          // already on screen from send(), so it is never added twice.
-          if (tid && (data.via === "discord" || data.via === "dm")) {
+          // already on screen from send(), so it is never added twice. The
+          // owner's answer to a decision (inbox B1, via "inbox") appears too.
+          if (tid && (data.via === "discord" || data.via === "dm" || data.via === "inbox")) {
             const mark = data.steer ? "steering" : data.queued ? "queued" : undefined;
             for (const n of mine) {
               dispatch({
@@ -4147,6 +4148,7 @@ export default function App() {
               showView("task");
             }}
             onAnswer={(id, body) => api.answerInbox(id, body)}
+            onDecide={(id, body) => api.answerDecision(id, body)}
             onReread={() => inbox.refresh()}
           />
         );

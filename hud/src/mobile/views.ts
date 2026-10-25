@@ -9,7 +9,7 @@
 // Nothing here can answer, send, withdraw, resume or cancel: approvals and
 // questions say "Answer at the desk" until P-4 builds answering.
 
-import { clockOf, groupRows, oneLine, questionOf, briefOf, textBlock, type InboxRow } from "../lib/inbox";
+import { clockOf, decisionOf, groupRows, oneLine, questionOf, briefOf, textBlock, type InboxRow } from "../lib/inbox";
 import { recentChats, moreLabel } from "../lib/recentChats";
 import type { Thread } from "../types";
 import { renderPhoneMarkdown } from "./markdown";
@@ -115,9 +115,27 @@ export function inboxRow(row: InboxRow, open: (row: InboxRow) => void): HTMLElem
   } else if (row.kind === "proposal" || row.kind === "task") {
     const brief = briefOf(row);
     if (brief) box.append(testid(el("p", "brief", brief), "m-brief"));
+  } else if (row.kind === "decision" && decisionOf(row)) {
+    // Inbox B1: the agent's question, options and why, read-only (P-3).
+    const d = decisionOf(row)!;
+    if (d.question) box.append(testid(el("p", "question", d.question), "m-question"));
+    // The suggestion's marker is the phone's own element, before the option's
+    // words, never text an option could also write (review of PR #309).
+    box.append(el("div", "label", "Options"));
+    const list = el("ul", "plain options");
+    d.options.forEach((option, i) => {
+      const item = el("li", "");
+      if (i === d.suggested) item.append(testid(el("span", "suggested", "suggested"), "m-suggested"), " ");
+      item.append(el("span", "option-text", option));
+      list.append(item);
+    });
+    box.append(list);
+    if (d.why) box.append(el("div", "label", "Why"), testid(el("p", "", d.why), "m-why"));
+    if (!d.open) box.append(el("div", "label", "Your answer"), testid(el("p", "", d.answer), "m-answer"));
   } else genericDetail(row, box);
   if (box.childNodes.length) card.append(box);
-  const note = deskNote(row.kind);
+  // A decision already answered (rank 8, recorded for a closed chat) takes no answer.
+  const note = row.kind === "decision" && !decisionOf(row)?.open ? null : deskNote(row.kind);
   if (note) card.append(testid(el("p", "desk-only", note), "m-desk-only"));
   if (row.thread_id || row.task_id) {
     card.append(tap(row.thread_id ? "Open the chat" : "Open the task", () => open(row), "link", "m-open"));

@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   CLOSING_MS, GROUPS, anyPending, answerPath, briefOf, clockOf, groupRows, linkOf, missedNote, oneLine, parseInbox,
   parseRow, questionOf, setBadge, textBlock, waitingCount, withdrawHint, withdrawUntil, type InboxRow,
+  decisionBody, decisionOf, decisionPath,
 } from "./inbox";
 
 const row = (over: Record<string, unknown> = {}) => ({
@@ -201,3 +202,64 @@ describe("the app badge", () => {
     expect(document.title).toBe("J.A.R.V.I.S.");
   });
 });
+
+// Inbox B1 (IN-5): a decision row's words and what its Answer posts.
+describe("decisions", () => {
+  const dec = (detail: Record<string, unknown> = {}, over: Record<string, unknown> = {}) => parseRow(row({
+    id: "dec:d00000000000a", kind: "decision", rank: 6, title: "chat t1 asks for your decision",
+    blocks: "nothing waits; chat t1 hears your answer as a message",
+    detail: { decision_id: "d00000000000a", question: "Q?‮", options: ["a", "b"], default: 0, why: "W",
+              answer: null, delivery: null, ...detail },
+    ...over,
+  }))!;
+
+  it("reads an open decision as text, the suggestion an index in range", () => {
+    const d = decisionOf(dec())!;
+    expect(d).toEqual({ id: "d00000000000a", question: "Q?", options: ["a", "b"], suggested: 0, why: "W", open: true, answer: "" });
+    expect(decisionOf(dec({ default: 5 }))!.suggested).toBeNull();
+    expect(decisionOf(dec({ default: true }))!.suggested).toBeNull();
+    expect(decisionOf(dec({ default: 1.5 }))!.suggested).toBeNull();
+  });
+
+  it("refuses a detail that is not a decision: never answerable", () => {
+    for (const bad of [{ decision_id: "x" }, { decision_id: "../d00000000000a" }, { options: ["one"] },
+                       { options: ["a", "b", "c", "d", "e", "f", "g"] }, { options: ["a", ""] }, { options: "a,b" }]) {
+      expect(decisionOf(dec(bad))).toBeNull();
+    }
+    expect(decisionOf(dec({}, { kind: "question" }))).toBeNull();
+  });
+
+  it("an option that draws the HUD's own marker is never answerable (review of PR #309)", () => {
+    for (const forged of ["yes (suggested)", "yes (SUGGESTED)", "yes （suggested）"]) {
+      expect(decisionOf(dec({ options: [forged, "no"] }))).toBeNull();
+    }
+    expect(decisionOf(dec({ options: ["suggested by me", "no"] }))).not.toBeNull();
+  });
+
+  it("an answered one says the owner's words: the option's text, or what they typed", () => {
+    expect(decisionOf(dec({ answer: { choice: 1, text: null, at: "x" } }))).toMatchObject({ open: false, answer: "b" });
+    expect(decisionOf(dec({ answer: { choice: null, text: "mine", at: "x" } }))).toMatchObject({ open: false, answer: "mine" });
+  });
+
+  it("Answer posts the typed words over the pick, else the pick, else nothing", () => {
+    const d = decisionOf(dec())!;
+    expect(decisionBody(1, "  my words ", d)).toEqual({ text: "my words" });
+    expect(decisionBody(1, "   ", d)).toEqual({ choice: 1 });
+    expect(decisionBody(0, "", d)).toEqual({ choice: 0 });
+    expect(decisionBody(null, "", d)).toBeNull();
+    expect(decisionBody(7, "", d)).toBeNull();
+  });
+
+  it("its path is its own id through encodeURIComponent", () => {
+    expect(decisionPath("d00000000000a")).toBe("/inbox/decisions/d00000000000a");
+    expect(decisionPath("a/b")).toBe("/inbox/decisions/a%2Fb");
+  });
+
+  it("rank 6 sits under When you have time and is not counted", () => {
+    const rows = [dec()];
+    expect(groupRows(rows).map((g) => g.group.key)).toEqual(["time"]);
+    expect(waitingCount(rows)).toBe(0);
+  });
+});
+
+// Inbox B1 (IN-5): a decision rows

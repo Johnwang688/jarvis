@@ -170,6 +170,9 @@ DETAIL_FIELDS = {
     "task": ("task_id", "state", "brief"),
     # A3 (inbox IN-3): an approval denied while the owner was away.
     "missed": ("req_id", "tool", "origin", "thread_id", "task_id", "at", "resolution"),
+    # B1 (inbox IN-5): a decision an agent posted, shown read-only (the
+    # question, options and why are agent text, through the phone's scrub).
+    "decision": ("decision_id", "question", "options", "default", "why", "answer", "delivery"),
 }
 # A kind P-3 does not know (A3's `missed` rows, anything later): only these
 # keys, only scalar values, every string scrubbed.

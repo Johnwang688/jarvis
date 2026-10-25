@@ -587,6 +587,35 @@ class Projections(Api):
         self.assertNotIn(TOKEN, json.dumps(row))
         print("ok  A3's missed_entry fields are exactly DETAIL_FIELDS['missed'], scrubbed")
 
+    def test_a_real_decision_row_from_b1(self):
+        """Inbox B1: a decision's detail is allowlisted (pinned to the
+        projection's own keys), every string through the phone's scrub (the
+        store is written directly here, so nothing was scrubbed before)."""
+        from jarvis.v2 import inbox
+        self.assertEqual(remote_api.DETAIL_FIELDS["decision"],
+                         ("decision_id", "question", "options", "default", "why", "answer", "delivery"))
+        store = self.d.inbox.decisions
+        record = store.create(thread_id=self.chat.id, project_id=self.project.id, task_id=None,
+                              origin="Claude · chat ‹x› (" + self.chat.id + ")", question="Which? " + TOKEN,
+                              options=["use " + TOKEN, "neither"], default=0, why="because " + TOKEN)
+        open_row = next(r for r in inbox.rows(self.d) if r["id"] == f"dec:{record['id']}")
+        self.assertEqual(set(open_row["detail"]), set(remote_api.DETAIL_FIELDS["decision"]),
+                         "the projection's keys are exactly the allowlist")
+        phone = self.ok("/m/api/inbox")
+        (row,) = [r for r in phone["rows"] if r["id"] == f"dec:{record['id']}"]
+        self.assertEqual(set(row), set(remote_api.ROW_FIELDS))
+        self.assertEqual(set(row["detail"]), set(remote_api.DETAIL_FIELDS["decision"]))
+        self.assertEqual((row["kind"], row["rank"], row["detail"]["default"]), ("decision", 6, 0))
+        self.assertEqual(row["detail"]["options"][1], "neither")
+        self.assertEqual(row["detail"]["question"], chat_reads.scrub("Which? " + TOKEN))
+        self.assertNotIn(TOKEN, json.dumps(phone))
+        store.settle(record["id"], choice=None, text="mine " + TOKEN)
+        store.delivered(record["id"], "closed")
+        (row,) = [r for r in self.ok("/m/api/inbox")["rows"] if r["id"] == f"dec:{record['id']}"]
+        self.assertEqual(row["rank"], 8)
+        self.assertNotIn(TOKEN, json.dumps(row), "the owner's answer is scrubbed too")
+        print("ok  B1's decision rows: DETAIL_FIELDS['decision'] exactly, scrubbed, answer included")
+
 
 class Review308(Api):
     """The independent review's probes on PR #308, kept as regressions."""

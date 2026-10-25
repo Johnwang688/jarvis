@@ -575,8 +575,9 @@ export interface ChatMessage {
   turn_id?: string;
   /** A system line that carries a cancel affordance (a proposal_reply). */
   proposal?: { task_id: string; until: number };
-  /** PR C: the owner's message came from Discord (a thread or the DM). */
-  via?: "discord" | "dm";
+  /** PR C: the owner's message came from Discord (a thread or the DM); inbox
+   * B1: it is the owner's answer to a decision, sent from the inbox. */
+  via?: "discord" | "dm" | "inbox";
   /** The daemon's id for an owner message that reached a running turn. */
   message_id?: string;
   /** This window's id for its own message, until the daemon names it. */

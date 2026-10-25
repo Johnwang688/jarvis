@@ -2293,7 +2293,11 @@ def route(handler, daemon, parts, query):
                     relay_ids.add(mid)
             relay_live = daemon.chat_relay.describe(relay_ids) if relay_ids else {}
             with daemon._lock:
+                # The owner's queue and the owner's waiting answers to
+                # decisions (inbox B1): both still "queued" after a reload.
                 live = {item.message_id for item in daemon._queues.get(thread.id) or ()}
+                live |= {item.message_id
+                         for item in (getattr(daemon, "_inbox_queues", {}) or {}).get(thread.id) or ()}
                 session = daemon._sessions.get(thread.id)
                 running_turn = session.turn_id if session is not None and session.worker is not None else None
                 cwd = session.brief.cwd if session is not None else None
@@ -2340,8 +2344,9 @@ def route(handler, daemon, parts, query):
                     # its acknowledged turn. Legacy response bytes stay fixed.
                     if query.get("tools") == "1" and isinstance(row.get("turn_id"), str):
                         message["turn_id"] = row["turn_id"]
-                    if kind == "user" and data.get("via") in ("discord", "dm"):
-                        # Typed in Discord (PR C): the HUD labels it "via Discord".
+                    if kind == "user" and data.get("via") in ("discord", "dm", "inbox"):
+                        # Typed in Discord (PR C): the HUD labels it "via Discord";
+                        # a decision answered in the inbox (B1), "via the inbox".
                         message["via"] = data["via"]
                     mid = data.get("message_id") if kind == "user" else None
                     if isinstance(mid, str):

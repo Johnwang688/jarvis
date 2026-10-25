@@ -23,7 +23,7 @@ import { WINDOW_ID, isWindowId } from "./lib/windowId";
 import { parseProposal, parseReadingResult, parseSpeakerStatus } from "./lib/speaker";
 import { parseSttSettings, type SttChoice } from "./lib/sttSettings";
 import type { SttReply } from "./lib/stt";
-import { answerPath } from "./lib/inbox";
+import { answerPath, decisionPath } from "./lib/inbox";
 
 export class ApiError extends Error {
   status: number;
@@ -276,6 +276,11 @@ export const api = {
    * answered or gone". The id goes through `encodeURIComponent` (A1 decodes once). */
   answerInbox: (id: string, body: { text: string } | { withdraw: true }) =>
     req<unknown>(answerPath(id), json(body)),
+  /** A decision's answer (inbox B1): `{choice}` (an option's index) or `{text}`,
+   * recorded, then delivered to the asking chat as an owner message. A 409 is
+   * "already answered"; the reply's `note` says where the answer went. */
+  answerDecision: (id: string, body: { choice: number } | { text: string }) =>
+    req<unknown>(decisionPath(id), json(body)),
 
   // --- usage / route / schedules -----------------------------------------
   usage: () => req<Usage>("/usage"),

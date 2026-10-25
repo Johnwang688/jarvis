@@ -23,7 +23,14 @@
 //   - a blocked or failed task: information only;
 //   - "denied while you were away" (inbox A3, IN-3): information only, why it
 //     was denied in code's words (`missedNote`), and its chat link; no "ask
-//     again" (design §10, question 3).
+//     again" (design §10, question 3);
+//   - a decision (inbox B1, IN-5): its question and why as text, its options
+//     as radio buttons with the agent's suggestion **preselected but never
+//     submitted** (only Answer posts), a box for the owner's own words (which
+//     win over the picked option when there are any), and Answer, posting
+//     `{choice}` or `{text}` once to `POST /inbox/decisions/<id>`. Enter
+//     answers only from the focused box; on a radio it does nothing. Once
+//     answered for a chat that was closed (rank 8) it shows the answer only.
 // Every row links to its thread or task pane (a missed row, its chat only). **Clicking a row never answers
 // anything**: only Answer (or Enter in its box) and Withdraw post, each once
 // per press, through `POST /inbox/<id>/answer` (api.answerInbox). A 409 is
@@ -33,12 +40,12 @@
 // HTML or Markdown. Under a card everything here is inert (the veil), every
 // button is disabled too, and the handlers refuse.
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { ApiError } from "../api";
 import type { ApprovalRequest } from "../types";
 import {
-  ANSWERS_TEXT, CLOSING_MS, PENDING_MAX_RANK, approvalReq, briefOf, clockOf, groupRows, linkOf, missedNote,
-  questionOf, waitingCount, withdrawHint, withdrawUntil, type InboxRow,
+  ANSWERS_TEXT, CLOSING_MS, PENDING_MAX_RANK, approvalReq, briefOf, clockOf, decisionBody, decisionOf, groupRows,
+  linkOf, missedNote, questionOf, waitingCount, withdrawHint, withdrawUntil, type InboxRow,
 } from "../lib/inbox";
 import type { InboxSnapshot } from "../state/inbox";
 
@@ -53,6 +60,8 @@ export interface InboxViewProps {
   onOpenThread: (threadId: string) => void;
   onOpenTask: (taskId: string) => void;
   onAnswer: (rowId: string, body: { text: string } | { withdraw: true }) => Promise<unknown>;
+  /** A decision's answer (B1): its own id, `{choice}` or `{text}`. */
+  onDecide: (decisionId: string, body: { choice: number } | { text: string }) => Promise<unknown>;
   onReread: () => Promise<unknown> | void;
   /** The clock (tests pass their own). */
   now?: () => number;
@@ -70,6 +79,9 @@ export function InboxView(props: InboxViewProps) {
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState<Record<string, true>>({});
+  // A decision's picked option, by row: absent means "the suggestion", which
+  // is only preselected — nothing posts until Answer is pressed.
+  const [picks, setPicks] = useState<Record<string, number | null>>({});
   const [notice, setNotice] = useState<string | null>(null);
   const sending = useRef(new Set<string>());
   const blockedNow = useRef(props.blocked);
@@ -105,15 +117,21 @@ export function InboxView(props: InboxViewProps) {
     return rest;
   };
 
-  const send = async (row: InboxRow, body: { text: string } | { withdraw: true }) => {
+  const send = async (row: InboxRow, body: { text: string } | { withdraw: true }) =>
+    post(row, () => props.onAnswer(row.id, body));
+
+  const post = async (row: InboxRow, call: () => Promise<unknown>) => {
     if (blockedNow.current || sending.current.has(row.id)) return;
     sending.current.add(row.id);
     setBusy((all) => ({ ...all, [row.id]: true }));
     setErrors((all) => drop(all, row.id));
     try {
-      await props.onAnswer(row.id, body);
+      const result = await call();
       setDrafts((all) => drop(all, row.id));
-      setNotice(null);
+      setPicks((all) => drop(all, row.id));
+      // A decision's reply says where the answer went, in the daemon's fixed words.
+      const note = result && typeof result === "object" ? (result as { note?: unknown }).note : undefined;
+      setNotice(typeof note === "string" && note ? note.slice(0, 200) : null);
     } catch (error) {
       if (error instanceof ApiError && error.status === 409) {
         setNotice(GONE_NOTICE);
@@ -133,6 +151,16 @@ export function InboxView(props: InboxViewProps) {
     const text = (drafts[row.id] || "").trim();
     if (!text) return;
     void send(row, { text });
+  };
+
+  const pickedOf = (row: InboxRow, suggested: number | null) => (row.id in picks ? picks[row.id] : suggested);
+
+  const decide = (row: InboxRow) => {
+    const d = decisionOf(row);
+    if (!d || !d.open) return;
+    const body = decisionBody(pickedOf(row, d.suggested), drafts[row.id] || "", d);
+    if (!body) return;
+    void post(row, () => props.onDecide(d.id, body));
   };
 
   const open = (row: InboxRow) => {
@@ -223,6 +251,87 @@ export function InboxView(props: InboxViewProps) {
               Withdraw
             </button>
           </div>
+        </div>
+      );
+    }
+    if (row.kind === "decision") {
+      const d = decisionOf(row);
+      if (!d) return null;      // not a decision the HUD can read: shown, never answerable
+      const head = (
+        <>
+          {d.question ? <div className="ir-text" data-testid="inbox-decision-question">{d.question}</div> : null}
+          {d.why ? <div className="ir-why" data-testid="inbox-decision-why">{d.why}</div> : null}
+        </>
+      );
+      if (!d.open) {
+        return (
+          <div className="ir-body">
+            {head}
+            <div className="ir-when muted" data-testid="inbox-decision-answer">Your answer: {d.answer}</div>
+          </div>
+        );
+      }
+      const picked = pickedOf(row, d.suggested);
+      const typed = drafts[row.id] || "";
+      const ready = decisionBody(picked, typed, d) !== null;
+      // Keys on a radio stay here (arrows still move the pick); Enter answers
+      // nothing from it, and nothing here is a <form>. Escape still reaches the card.
+      const keepKeys = (e: ReactKeyboardEvent) => {
+        if (e.key !== "Escape") e.stopPropagation();
+        if (e.key === "Enter") e.preventDefault();
+      };
+      return (
+        <div className="ir-body">
+          {head}
+          <div className="ir-choices" role="radiogroup" aria-label="Options" data-testid="inbox-decision-options">
+            {d.options.map((option, i) => (
+              <label className="ir-choice" key={i}>
+                <input
+                  type="radio" name={`decision-${row.id}`} value={String(i)} data-testid="inbox-decision-option"
+                  data-index={i} checked={picked === i}
+                  // Not `disabled` under a card (inert covers it), as the answer box.
+                  onChange={() => {
+                    if (blockedNow.current || sending.current.has(row.id)) return;
+                    setPicks((all) => ({ ...all, [row.id]: i }));
+                  }}
+                  onKeyDown={keepKeys}
+                />
+                {/* The HUD's own marker: a separate element, before the option's
+                    words, which can never draw it (the daemon refuses an option
+                    saying "(suggested)", and so does `decisionOf`). */}
+                {i === d.suggested ? <span className="ir-suggested" data-testid="inbox-decision-suggested">suggested</span> : null}
+                <span className="ir-option-text">{option}</span>
+              </label>
+            ))}
+          </div>
+          <div className="ir-answer">
+            <input
+              data-testid="inbox-decision-text"
+              aria-label="Or answer in your own words"
+              placeholder="Or answer in your own words"
+              value={typed}
+              readOnly={!!busy[row.id]}
+              aria-busy={busy[row.id] ? "true" : undefined}
+              onChange={(e) => {
+                if (sending.current.has(row.id)) return;
+                const value = e.target.value;
+                setDrafts((all) => ({ ...all, [row.id]: value }));
+              }}
+              onKeyDown={(e) => {
+                if (e.key !== "Escape") e.stopPropagation();
+                // Only the focused box answers on Enter, and only with words in it.
+                if (e.key === "Enter" && !e.nativeEvent.isComposing) {
+                  e.preventDefault();
+                  if (typed.trim()) decide(row);
+                }
+              }}
+            />
+            <button type="button" data-testid="inbox-decision-send" disabled={off || !ready}
+                    onClick={() => decide(row)}>
+              Answer
+            </button>
+          </div>
+          {typed.trim() ? <div className="ir-when muted" data-testid="inbox-decision-hint">Your words are sent instead of the option.</div> : null}
         </div>
       );
     }
