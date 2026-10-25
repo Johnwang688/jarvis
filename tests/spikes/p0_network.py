@@ -1,18 +1,18 @@
 """Spike P-0 (a) for the phone surface (docs/plans/2026-10-24-phone-surface-design.md §10).
 
 Read-only checks that the planned path works on this PC, run while
-`p0_phone.py` is listening on 127.0.0.1:8406 and `tailscale serve` points at it:
+`p0_phone.py` is listening on 127.0.0.1:8408 and `tailscale serve` points at it:
 
-  1. in WSL, 8406 is bound to loopback only (§4.1 condition 1, and 5 for WSL);
-  2. Windows reaches the WSL listener at 127.0.0.1:8406 (WSL2 localhost forwarding);
+  1. in WSL, 8408 is bound to loopback only (§4.1 condition 1, and 5 for WSL);
+  2. Windows reaches the WSL listener at 127.0.0.1:8408 (WSL2 localhost forwarding);
   3. `tailscale serve status --json`, read from WSL through the Windows CLI, has exactly one
-     HTTPS handler for this machine's name, proxying to 127.0.0.1:8406, and no Funnel (condition 2);
+     HTTPS handler for this machine's name, proxying to 127.0.0.1:8408, and no Funnel (condition 2);
   4. Windows fetches https://<name>/health with a certificate it trusts (condition 3);
-  5. on Windows, nothing but WSL's relay listens on 8406 (condition 5 for Windows).
+  5. on Windows, nothing but WSL's relay listens on 8408 (condition 5 for Windows).
 
 Changes nothing. The owner's one-time setup, from Windows:
 
-    tailscale serve --bg --https=443 http://127.0.0.1:8406
+    tailscale serve --bg --https=443 http://127.0.0.1:8408
 
 and to undo it: `tailscale serve --https=443 off` (or `tailscale serve reset`).
 Exit status 0 only if every check passes.
@@ -25,7 +25,7 @@ import sys
 
 TAILSCALE = "/mnt/c/Program Files/Tailscale/tailscale.exe"
 POWERSHELL = "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
-PORT = 8406
+PORT = 8408
 TARGET = f"http://127.0.0.1:{PORT}"
 
 
@@ -45,7 +45,7 @@ def check_wsl_bind() -> tuple[bool, str]:
     out = run(["ss", "-ltnH", f"sport = :{PORT}"]).stdout.split()
     locals_ = [w for w in out if w.endswith(f":{PORT}")]
     if not locals_:
-        return False, "nothing listening on 8406 in WSL (start p0_phone.py)"
+        return False, "nothing listening on 8408 in WSL (start p0_phone.py)"
     bad = [a for a in locals_ if not a.startswith(("127.0.0.1:", "[::1]:"))]
     return (not bad), f"WSL listeners: {locals_}"
 
@@ -98,7 +98,7 @@ def main() -> int:
         ("2 Windows reaches the WSL listener", check_windows_reaches_wsl),
         ("3 tailscale serve: one handler, no Funnel", lambda: check_serve(host)),
         ("4 HTTPS with a trusted tailnet certificate", lambda: check_https(host)),
-        ("5 Windows: only WSL's relay on 8406", check_windows_listeners),
+        ("5 Windows: only WSL's relay on 8408", check_windows_listeners),
     ]
     failed = 0
     for label, fn in checks:

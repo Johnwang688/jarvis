@@ -1,6 +1,6 @@
 """Spike P-0 (b) and (c) for the phone surface (docs/plans/2026-10-24-phone-surface-design.md §10).
 
-A throwaway server on 127.0.0.1:8406, reached from the owner's iPhone through
+A throwaway server on 127.0.0.1:8408, reached from the owner's iPhone through
 `tailscale serve` (spike (a), `p0_network.py`). The page, added to the home
 screen, answers three questions on the real phone:
 
@@ -44,7 +44,7 @@ from py_vapid import Vapid
 from pywebpush import WebPushException, webpush
 from cryptography.hazmat.primitives import serialization
 
-PORT = 8406
+PORT = 8408
 STATE = Path.home() / ".cache" / "jarvis-p0"
 ICONS = Path(__file__).resolve().parents[2] / "hud" / "public" / "icons"
 TAILSCALE = "/mnt/c/Program Files/Tailscale/tailscale.exe"
@@ -149,7 +149,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _host_ok(self) -> bool:
         host = self.headers.get("Host", "")
-        # tailscale serve forwards the original Host; a local curl sends 127.0.0.1:8406.
+        # tailscale serve forwards the original Host; a local curl sends 127.0.0.1:8408.
         if host not in (NAME, f"127.0.0.1:{PORT}", f"localhost:{PORT}"):
             self._json(400, {"error": "untrusted Host"})
             return False
