@@ -297,6 +297,7 @@ def _task_rows(daemon, hidden):
 # -- "denied while you were away" (IN-3) -------------------------------------------
 
 _READ_CAP = 4 << 20         # far above 500 records; a larger file is read from its tail
+_WRITTEN_CAP = 1024         # `Inbox._written`'s bound
 
 
 def _ident(value):
@@ -373,7 +374,8 @@ class MissedLog:
         `req_id` (the last line wins), malformed lines skipped. Never raises."""
         try:
             lines = self._complete(self._read())
-            since = self.clock() - MISSED_WINDOW
+            now = self.clock()
+            since = now - MISSED_WINDOW
         except Exception as exc:  # noqa: BLE001
             LOG.warning("Cannot read missed approvals (%s)", type(exc).__name__)
             return []
@@ -388,6 +390,10 @@ class MissedLog:
             req_id, at = rec.get("req_id"), _parse_time(rec.get("at"))
             if not isinstance(req_id, str) or not _REQ_ID.match(req_id) or at is None or at < since:
                 continue
+            # A time after now (the clock stepped back, a hand-edited line) is
+            # taken as now: shown, never claiming a future time or sorting
+            # ahead of what really came later.
+            at = min(at, now)
             resolution = rec.get("resolution")
             if resolution not in MISSED_RESOLUTIONS:
                 continue
@@ -413,8 +419,16 @@ class MissedLog:
         if stat.S_IMODE(info.st_mode) != 0o700:
             os.chmod(self.dir, 0o700)
 
+    # O_NONBLOCK on both opens (review of #307, MED): a FIFO at the path
+    # would block a plain open before the S_ISREG check could refuse it,
+    # stalling every later waiter (under `_lock`) and every `GET /inbox`.
+    # With it a FIFO read opens at once and is refused by `fstat`, and a
+    # FIFO write with no reader is ENXIO. A regular file ignores the flag.
+    _NONBLOCK = getattr(os, "O_NONBLOCK", 0)
+
     def _read(self) -> bytes:
-        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+        flags = (os.O_RDONLY | self._NONBLOCK | getattr(os, "O_NOFOLLOW", 0)
+                 | getattr(os, "O_CLOEXEC", 0))
         try:
             fd = os.open(self.path, flags)
         except FileNotFoundError:
@@ -442,8 +456,8 @@ class MissedLog:
         return [part + b"\n" for part in data.split(b"\n")[:-1] if part.strip()]
 
     def _append(self, line: bytes) -> None:
-        flags = (os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
-                 | getattr(os, "O_CLOEXEC", 0))
+        flags = (os.O_WRONLY | os.O_APPEND | os.O_CREAT | self._NONBLOCK
+                 | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0))
         fd = os.open(self.path, flags, 0o600)
         try:
             info = os.fstat(fd)
@@ -526,6 +540,10 @@ class Inbox:
                 return
             if self.missed.record(request, resolution):
                 with self._lock:
+                    # Each id leaves on its own publish; the cap only bounds
+                    # one whose publish never came (it then names nothing).
+                    if len(self._written) >= _WRITTEN_CAP:
+                        self._written.clear()
                     self._written.add(request.req_id)
         except Exception as exc:  # noqa: BLE001
             LOG.warning("Cannot record a missed approval (%s)", type(exc).__name__)

@@ -916,6 +916,89 @@ class Missed(unittest.TestCase):
             # Its siblings stay ordinary.
             self.assertFalse(files._self_protected(data / "inbox" / "notes.txt"))
 
+    def test_the_inbox_folder_itself_is_protected(self):
+        """Review of #307, LOW: the folder path is named too, so moving,
+        replacing or re-moding `<V2>/inbox` is judged as a write to it."""
+        from jarvis import permissions as v1_permissions, rules
+        from jarvis.tools import files
+        from jarvis.v2 import permissions as v2_permissions
+        data = self.root / "v2data"
+        with patch.object(config, "V2_DATA_DIR", data), \
+                patch.object(config, "ALLOWLIST_PATH", self.root / "cfg" / "allowlist.json"):
+            folder = data / "inbox"
+            self.assertIn(folder.resolve(), files._protected_state())
+            self.assertIn(folder.resolve(), v2_permissions.protected_paths())
+            self.assertTrue(files._self_protected(folder))
+            self.assertTrue(v2_permissions.denied_file(str(folder), folder=True))
+            for command in (f"mv /tmp/elsewhere {folder}", f"mv {folder} /tmp/away", f"chmod 777 {folder}",
+                            f"ln -sfn /tmp/elsewhere {folder}", f"cd {data} && mv inbox old"):
+                with self.subTest(command=command):
+                    self.assertNotEqual(v1_permissions.static_verdict(command).decision, rules.ALLOW)
+            for command in (f"mv /tmp/elsewhere {folder}", f"chmod 777 {folder}"):
+                with self.subTest(command=command):
+                    self.assertTrue(v2_permissions._command_writes_protected_state(command))
+            self.assertFalse(files._self_protected(data / "other"), "the data root's other folders stay ordinary")
+
+    def _bounded(self, fn, limit=2.0):
+        """`fn()` on a thread: its result, or a failure if it is still blocked after `limit` s."""
+        out = {}
+        worker = threading.Thread(target=lambda: out.setdefault("v", fn()), daemon=True)
+        start = time.monotonic()
+        worker.start()
+        worker.join(limit)
+        self.assertFalse(worker.is_alive(), f"{fn} blocked")
+        return out.get("v"), time.monotonic() - start
+
+    def test_a_fifo_at_the_path_never_blocks(self):
+        """Review of #307, MED: a plain open blocks on a FIFO before `fstat` can
+        refuse it; O_NONBLOCK on both opens refuses it at once."""
+        self.log.dir.mkdir(mode=0o700)
+        os.mkfifo(self.log.path, 0o600)
+        written, took = self._bounded(lambda: self.log.record(request("F1", asked_at=utcnow()), "timeout"))
+        self.assertIs(written, False)
+        self.assertLess(took, 1.0)
+        got, _ = self._bounded(self.log.recent)
+        self.assertEqual(got, [])
+        got, _ = self._bounded(lambda: inbox.rows(self.daemon()))
+        self.assertEqual(got, [])
+        # A reader on the FIFO does not make it a file to write to.
+        reader = os.open(self.log.path, os.O_RDONLY | os.O_NONBLOCK)
+        self.addCleanup(os.close, reader)
+        written, _ = self._bounded(lambda: self.log.record(request("F2", asked_at=utcnow()), "timeout"))
+        self.assertIs(written, False)
+        try:
+            leaked = os.read(reader, 100)
+        except BlockingIOError:
+            leaked = b""
+        self.assertEqual(leaked, b"", "nothing was written into the FIFO")
+
+    def test_append_refuses_a_symlink_even_when_the_read_saw_nothing(self):
+        """`_read` refuses a symlink first; with it out of the way (patched to
+        see an empty file) `_append`'s own O_NOFOLLOW must still refuse it."""
+        self.log.dir.mkdir(mode=0o700)
+        target = self.root / "target.jsonl"
+        target.write_text("")
+        self.log.path.symlink_to(target)
+        with patch.object(self.log, "_read", return_value=b""):
+            self.assertFalse(self.log.record(request("L1", asked_at=utcnow()), "timeout"))
+        self.assertEqual(target.read_text(), "")
+        self.assertTrue(self.log.path.is_symlink())
+
+    def test_a_future_time_is_taken_as_now(self):
+        self.clock.advance(days=30)
+        self.log.record(request("FU1", asked_at=utcnow()), "timeout")         # written by a clock ahead
+        self.clock.advance(days=-30)
+        (row,) = inbox.rows(self.daemon())
+        self.assertEqual(row["asked_at"], self.clock().isoformat(timespec="seconds"))
+
+    def test_the_written_set_is_bounded(self):
+        box = inbox.Inbox(SimpleNamespace(stores=SimpleNamespace(root=self.root), bus=None))
+        box.missed.clock = self.clock
+        for i in range(inbox._WRITTEN_CAP + 50):
+            box.approval_ended(request(f"W{i:05d}", asked_at=utcnow()), "timeout")
+        self.assertLessEqual(len(box._written), inbox._WRITTEN_CAP)
+        self.assertEqual(len(lines_of(box.missed.path)), inbox.MISSED_KEEP)
+
 
 class MissedLive(unittest.TestCase):
     """IN-3 on a real daemon: the broker's own timeout and shutdown paths.
@@ -1012,6 +1095,54 @@ class MissedLive(unittest.TestCase):
         self.assertEqual(calls, [])
         self.assertEqual(self.ids(), [mid], "still there: nothing was answered or dismissed")
         self.call("POST", f"/inbox/missed:{req.req_id}", {}, 404)
+
+    def test_daemon_stop_denies_a_pending_ask_and_leaves_one_shutdown_record(self):
+        """Review of #307: `Daemon.stop()` releases the broker's waiters
+        (`PendingApprovals.shutdown`), so a plain ask with no `cancelled`
+        callback is denied at once, its card cleared, and recorded."""
+        published = []
+        self.daemon.bus.observe(lambda r: published.append(r) if r.get("kind") == "approval_resolved" else None)
+        req, out, worker = self.ask(thread_id="th-stop1")
+        self.assertEqual(self.daemon.approvals.timeout_s, 120.0, "far longer than this test waits")
+        # A released waiter announces on its own thread; slow it, so a stop()
+        # that closed the bus without waiting for it would lose the publish.
+        real = self.daemon.inbox.approval_ended
+
+        def slow(request, resolution):
+            time.sleep(0.4)
+            real(request, resolution)
+        guard = patch.object(self.daemon.inbox, "approval_ended", slow)
+        guard.start()
+        self.addCleanup(guard.stop)
+        start = time.monotonic()
+        self.daemon.stop()
+        worker.join(5)
+        self.assertFalse(worker.is_alive())
+        self.assertLess(time.monotonic() - start, 30)
+        self.assertEqual(out["decision"], Decision.DENY)
+        mine = [p for p in published if p["data"]["req_id"] == req.req_id]
+        self.assertEqual([p["data"]["resolution"] for p in mine], ["shutdown"])
+        recs = lines_of(self.missed_file())
+        self.assertEqual([(r["req_id"], r["resolution"]) for r in recs], [(req.req_id, "shutdown")])
+        # A second stop (the cleanup's) changes nothing.
+        self.daemon.stop()
+        self.assertEqual(len(lines_of(self.missed_file())), 1)
+
+    def test_a_fifo_at_the_path_never_delays_a_resolve(self):
+        self.stores.root.mkdir(parents=True, exist_ok=True)
+        (self.stores.root / "inbox").mkdir(mode=0o700)
+        os.mkfifo(self.missed_file(), 0o600)
+        start = time.monotonic()
+        req, out, worker = self.ask(thread_id="th-fifo", max_wait_s=0.3)
+        worker.join(3)
+        self.assertFalse(worker.is_alive(), "the waiter hung on the FIFO")
+        self.assertLess(time.monotonic() - start, 2.5)
+        self.assertEqual(out["decision"], Decision.DENY)
+        self.assertEqual(self.ids(), [], "GET /inbox answers, with nothing to show")
+        # And the next ask still resolves promptly.
+        req2, out2, worker2 = self.ask(thread_id="th-fifo2", max_wait_s=0.3)
+        worker2.join(3)
+        self.assertFalse(worker2.is_alive())
 
     def test_a_write_failure_never_breaks_the_resolve(self):
         published = []
