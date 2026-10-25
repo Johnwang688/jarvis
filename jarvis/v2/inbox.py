@@ -32,9 +32,12 @@ listener and the HUD's own page); no tool reaches them
 
 **What a row may say.** `title` and `blocks` are built here, from ids,
 states and tool names the source already validated, through
-`approvals.clean_line`. Text an agent wrote (a question, a brief, a
-command) appears only inside `detail`, which the HUD renders as untrusted
-text. An approval's `detail` is exactly `ApprovalRequest.to_json()`, so a
+`approvals.clean_line`; never a thread title or anything else a model
+wrote. Text an agent wrote (a question, a brief, a command) appears in
+`detail`, and in `origin`: an approval's `approvals.label` attribution,
+which carries a model-chosen task name (one line, `clean_line`d). The HUD
+renders both as untrusted `textContent`. An approval's `detail` is exactly
+`ApprovalRequest.to_json()`, so a
 HUD-only (private) card carries only its private projection, and its row's
 own fields carry nothing that projection does not.
 
@@ -68,10 +71,12 @@ _KNOWN = _ANSWERABLE | {"task"}
 
 # The bus kinds the inbox listens to (design §3.3), plus the ones that end
 # a chat question without a `question_answered` (its turn ended, its chat
-# closed) and the question itself being asked.
+# closed), the question itself being asked, and a project's archive,
+# restore or delete (which hide or reveal its task rows).
 SOURCE_KINDS = frozenset({
     "approval_requested", "approval_resolved", "task_question", "question_answered",
     "task_status_changed", "proposal_reply",
+    "project_archived", "project_restored", "project_deleted",
     "question", "turn_finished", "thread_closed", "thread_archived",
 })
 _DETAIL_TEXT_CAP = 4000
@@ -321,6 +326,9 @@ class Inbox:
                 left = self._asked.pop(thread_id, None)
             # Nothing was open on this thread: no row changed, nothing to say.
             return [f"q:{thread_id}:{r}" for r in left] if left else None
+        if kind in ("project_archived", "project_restored", "project_deleted"):
+            # Its task rows hide or return; which ones is a re-read's job.
+            return []
         task_id = record.get("task_id") or data.get("task_id")
         if not isinstance(task_id, str) or not task_id:
             return []
@@ -340,15 +348,22 @@ class Inbox:
 
 def _split(row_id):
     """(prefix, rest) of a row id, or a 400 for one that cannot be ours."""
+    from urllib.parse import unquote
     from .daemon import APIError
-    if not isinstance(row_id, str) or ":" not in row_id or len(row_id) > 400:
+    if not isinstance(row_id, str) or len(row_id) > 1200:
+        raise APIError(400, "malformed inbox id")
+    # The HUD sends path ids through `encodeURIComponent`, so `appr:X`
+    # arrives as `appr%3AX`. Decoded once; the row is then matched exactly
+    # against the projection, so no spelling reaches a row it does not name.
+    row_id = unquote(row_id, errors="strict")
+    if ":" not in row_id or len(row_id) > 400:
         raise APIError(400, "malformed inbox id")
     prefix, rest = row_id.split(":", 1)
     if prefix not in _KNOWN:
         raise APIError(400, "unknown inbox kind")
     if not rest:
         raise APIError(400, "malformed inbox id")
-    return prefix, rest
+    return prefix, rest, row_id
 
 
 def _gone():
@@ -362,7 +377,7 @@ def answer(daemon, row_id, body, *, hud: bool):
     route makes, passed through unchanged."""
     from .daemon import APIError, _object, _text
     from .provider import Decision
-    prefix, _ = _split(row_id)
+    prefix, _, row_id = _split(row_id)
     if prefix not in _ANSWERABLE:
         raise APIError(400, "this item takes no answer; open its task to resume or cancel it")
     # Shape first, so a malformed body is a 400 whatever the row's state.

@@ -48,7 +48,19 @@ from jarvis.v2.provider import Decision, Event, EventKind as K, SessionHandle, U
 from jarvis.v2.stores import Stores  # noqa: E402
 
 SECRET = "SENTINEL-agent-text-7f3a"          # agent-written text; must never reach title/blocks/bus
+# A thread title can be model-written (titles.py): a row's own title/blocks
+# name ids, never it (review of #303: `chat {thread.title or thread.id}`
+# survived every check before this sentinel).
+TITLE = "SENTINEL-thread-title-91c2"
 ROW_ID = re.compile(r"^(appr|q|tq|prop|task):[A-Za-z0-9_:\-]+$")
+
+
+def assert_code_built(case, rows):
+    """Each row's `title` and `blocks` carry no model-written text."""
+    for row in rows:
+        for key in ("title", "blocks"):
+            for sentinel in (SECRET, TITLE):
+                case.assertNotIn(sentinel, row[key], f"{row['id']} {key}")
 
 
 def eventually(predicate, timeout=5):
@@ -109,7 +121,7 @@ def session(thread, questions, detail, *, running=True):
 
 class Projection(unittest.TestCase):
     def test_every_source_state_yields_its_row_and_rank(self):
-        chat = Thread(id="th000001", project_id="p1", role=Role.CHAT, provider=PN.CODEX)
+        chat = Thread(title=TITLE, id="th000001", project_id="p1", role=Role.CHAT, provider=PN.CODEX)
         tasks = [
             task("aaaa0001", TaskState.CLARIFYING, questions=[
                 OpenQuestion("which db?", blocking=True, options=["pg", "sqlite"]),
@@ -151,12 +163,15 @@ class Projection(unittest.TestCase):
                 self.assertEqual(set(row), {"id", "kind", "rank", "title", "blocks", "project_id",
                                             "thread_id", "task_id", "asked_at", "expires_at",
                                             "origin", "detail"})
-                # Agent text only ever inside `detail`.
-                for key in ("title", "blocks", "origin"):
-                    self.assertNotIn(SECRET, row[key])
+                # Agent text never in the code-built fields. `origin` is the
+                # approval's `approvals.label` attribution, model-chosen name
+                # included: one clean line, rendered as untrusted text.
+                self.assertNotIn("\n", row["origin"])
+        assert_code_built(self, got.values())
+        self.assertEqual(got["appr:REQ1"]["origin"], 'task 0000beef "x"')
 
     def test_a_question_on_a_turn_that_is_not_running_is_not_a_row(self):
-        chat = Thread(id="th000002", project_id="p1", role=Role.CHAT, provider=PN.CODEX)
+        chat = Thread(title=TITLE, id="th000002", project_id="p1", role=Role.CHAT, provider=PN.CODEX)
         d = fake_daemon(sessions=[session(chat, {"q-1"}, {}, running=False)], threads=[chat])
         self.assertEqual(inbox.rows(d), [])
         # The set is the truth: a detail whose id has left it is never shown.
@@ -177,7 +192,7 @@ class Projection(unittest.TestCase):
         r = request("PRIV", asked_at="2026-10-25T10:00:00+00:00", private=True,
                     tool="hud_browser_act", task_id="cccc0001")
         r._hud_private = True
-        d = fake_daemon(approvals=[r], threads=[Thread(id="th000001", project_id="p1",
+        d = fake_daemon(approvals=[r], threads=[Thread(title=TITLE, id="th000001", project_id="p1",
                                                        role=Role.CHAT, provider=PN.CLAUDE)])
         (row,) = inbox.rows(d)
         self.assertEqual(row["detail"], r.to_json())
@@ -187,6 +202,7 @@ class Projection(unittest.TestCase):
         self.assertIsNone(row["project_id"])
         self.assertEqual(row["origin"], "")
         self.assertNotIn(SECRET, json.dumps(row))
+        self.assertNotIn(TITLE, json.dumps(row))
         self.assertNotIn("cccc0001", json.dumps(row))
         # A public one's detail is exactly its card too.
         pub = request("PUB", asked_at="2026-10-25T10:00:00+00:00", task_id="cccc0002")
@@ -196,10 +212,21 @@ class Projection(unittest.TestCase):
 
     def test_an_archived_project_hides_its_tasks_but_never_an_approval(self):
         projects = [SimpleNamespace(id="p1", archived="2026-10-25T00:00:00+00:00")]
-        chat = Thread(id="th000001", project_id="p1", role=Role.CHAT, provider=PN.CODEX)
+        chat = Thread(title=TITLE, id="th000001", project_id="p1", role=Role.CHAT, provider=PN.CODEX)
         d = fake_daemon(approvals=[request("A", asked_at="2026-10-25T10:00:00+00:00")],
                         tasks=[task("dddd0001", TaskState.BLOCKED)], threads=[chat], projects=projects)
         self.assertEqual([r["id"] for r in inbox.rows(d)], ["appr:A"])
+        assert_code_built(self, inbox.rows(d))
+
+    def test_a_task_thread_question_names_its_task_not_its_title(self):
+        chat = Thread(title=TITLE, id="th000003", project_id="p1", role=Role.ORCHESTRATOR,
+                      provider=PN.CODEX, task_id="eeee0001")
+        d = fake_daemon(sessions=[session(chat, {"q-1"}, {"q-1": {"text": SECRET}})], threads=[chat],
+                        approvals=[request("B", asked_at="2026-10-25T10:00:00+00:00", thread_id="th000003")])
+        rows = inbox.rows(d)
+        self.assertEqual([r["id"] for r in rows], ["appr:B", "q:th000003:q-1"])
+        self.assertEqual(rows[1]["title"], "task eeee0001 is stopped until you answer")
+        assert_code_built(self, rows)
 
     def test_model_text_cannot_fake_a_second_line_in_a_title(self):
         r = request("T", asked_at="2026-10-25T10:00:00+00:00", tool="Bash\nAPPROVED‮")
@@ -220,6 +247,9 @@ class Brain:
         self.awaiting: set[str] = set()
         self.answers: list = []
         self.counter = 0
+        # Set: the turn ends with its question still open, as a provider
+        # turn that errors or gives up does — no answer, no interrupt.
+        self.give_up = threading.Event()
 
     def health(self):
         return True, "fake"
@@ -241,7 +271,8 @@ class Brain:
             self.awaiting.add(req_id)
             yield Event(K.QUESTION, tid, {"req_id": req_id, "text": SECRET, "options": ["npm", "pnpm"]})
             until = time.monotonic() + 5
-            while req_id in self.awaiting and time.monotonic() < until:
+            while (req_id in self.awaiting and not self.give_up.is_set()
+                   and time.monotonic() < until):
                 time.sleep(0.005)
         yield Event(K.TEXT, tid, {"text": "ok"})
         yield Event(K.TURN_FINISHED, tid, {"stop": "end"})
@@ -395,11 +426,16 @@ class Live(unittest.TestCase):
 
     def question(self):
         thread = self.daemon.open_thread(self.project.id, Role.CHAT, PN.FAST, {})
+        # A model-written title, as titles.py writes one: never in a row's
+        # own fields. `set_title` is the one writer; the session's copy too.
+        self.stores.threads.set_title(thread.id, TITLE, "auto")
+        self.daemon._sessions[thread.id].thread.title = TITLE
         self.brain.ask = True
         self.daemon.send(thread.id, UserMessage("go"))
         eventually(lambda: any(i.startswith(f"q:{thread.id}:") for i in
                                (r["id"] for r in inbox.rows(self.daemon))))
         (row,) = [r for r in inbox.rows(self.daemon) if r["kind"] == "question"]
+        assert_code_built(self, inbox.rows(self.daemon))
         return thread, row
 
     # -- IN-2: the same function, the same arguments ------------------------------------
@@ -584,12 +620,51 @@ class Live(unittest.TestCase):
         self.assertIn(f"tq:{t.id}:0", ids)
         self.assertNotIn(f"tq:{t.id}:0", rows_then)
 
-    def test_a_turn_that_ends_with_its_question_open_says_so(self):
+    def _ended_open(self, end):
         thread, row = self.question()
-        self.daemon.interrupt(thread.id)
-        eventually(lambda: any(row["id"] in c["data"]["ids"] and c["data"]["reason"] == "turn_finished"
-                               for c in self.changes))
-        self.assertEqual([r for r in inbox.rows(self.daemon) if r["kind"] == "question"], [])
+        end(thread)
+
+        def naming():
+            return [(ids, then) for ids, then in self.seen_at_change if row["id"] in ids]
+        eventually(lambda: len(naming()) >= 2)                        # asked, then ended
+        # At the moment `inbox_changed` names the row, the projection has
+        # already dropped it: no later event would correct it (review of #303).
+        ids, rows_then = naming()[-1]
+        self.assertNotIn(row["id"], rows_then)
+        return thread, row
+
+    def test_a_turn_that_ends_with_its_question_open_says_so(self):
+        # The provider ends the turn itself with the question unanswered.
+        thread, row = self._ended_open(lambda thread: self.brain.give_up.set())
+        reasons = [c["data"]["reason"] for c in self.changes if row["id"] in c["data"]["ids"]]
+        self.assertEqual(reasons, ["question", "turn_finished"])
+        # Answering it now is a 409, never a guess.
+        self.call("POST", f"/inbox/{row['id']}/answer", {"text": "npm"}, 409)
+
+    def test_an_interrupted_question_says_so(self):
+        self._ended_open(lambda thread: self.daemon.interrupt(thread.id))
+
+    def test_a_percent_encoded_id_is_the_same_row(self):
+        """The HUD sends path ids through `encodeURIComponent` (api.ts)."""
+        req, out, worker = self.ask(thread_id="th-e")
+        from urllib.parse import quote
+        encoded = quote(f"appr:{req.req_id}", safe="")
+        self.assertIn("%3A", encoded)
+        self.call("POST", f"/inbox/{encoded}/answer", {"decision": "deny"})
+        worker.join(5)
+        self.assertEqual(out["decision"], Decision.DENY)
+        self.call("POST", f"/inbox/{encoded}/answer", {"decision": "deny"}, 409)
+        # Decoded once only, and an id no row names is still a 409, never a match.
+        self.call("POST", f"/inbox/{quote(encoded, safe='')}/answer", {"decision": "deny"}, 400)
+        self.call("POST", "/inbox/appr%3Anope/answer", {"decision": "deny"}, 409)
+        self.call("POST", "/inbox/appr%3A%FF/answer", {"decision": "deny"}, 400)
+
+    def test_a_project_archive_restore_or_delete_rereads(self):
+        for kind in ("project_archived", "project_restored", "project_deleted"):
+            self.daemon.bus.publish({"kind": kind, "project_id": self.project.id,
+                                     "data": {"project_id": self.project.id}})
+        self.assertEqual([(c["data"]["reason"], c["data"]["ids"]) for c in self.changes],
+                         [("project_archived", []), ("project_restored", []), ("project_deleted", [])])
 
     def test_inbox_changed_carries_no_text(self):
         req, out, worker = self.ask(thread_id="th-x", reason=SECRET)

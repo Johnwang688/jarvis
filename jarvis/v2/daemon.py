@@ -1572,6 +1572,7 @@ class Daemon:
         session.owner_stopped = False
         session.steered = []
         session.questions.clear()
+        session.question_detail = {}
         session.turn_id = queued.turn_id if queued is not None else uuid.uuid4().hex
         session.desk.begin(session.brief, message, session.turn_id)
         self._retire_drive(session)
@@ -1730,6 +1731,7 @@ class Daemon:
         session.owner_stopped = False
         session.steered = []
         session.questions.clear()
+        session.question_detail = {}
         session.turn_id = uuid.uuid4().hex
         session.self_started = True
         session.cli_offered = False
@@ -1871,6 +1873,7 @@ class Daemon:
         session.owner_stopped = False
         session.steered = []
         session.questions.clear()
+        session.question_detail = {}
         session.turn_id = uuid.uuid4().hex
         session.compacting = True
         session.relay_turn = session.relay_mark = None
@@ -2264,6 +2267,12 @@ class Daemon:
             session.thread.updated = utcnow()
             session.thread.provider_session_id = session.handle.provider_session_id
             self.stores.threads.save(session.thread)
+            # The turn is over, so none of its questions is open any more:
+            # cleared before `turn_finished` is published, so whoever reads on
+            # that record (the inbox's `inbox_changed`) sees them gone. The
+            # worker's `finally` clears them again and publishes nothing.
+            session.questions.clear()
+            session.question_detail = {}
             self._record(session, event)
 
     @staticmethod
@@ -2434,6 +2443,7 @@ class Daemon:
                     session.self_started = False
                     session.compacting = False
                     session.questions.clear()
+                    session.question_detail = {}
                     if line is not None and not session.retired:
                         # After the turn's turn_finished, before anything
                         # waiting runs: the chat's system line.
