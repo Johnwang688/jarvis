@@ -138,11 +138,16 @@ COMMAND_KEYS = ("command", "cmd", "script")
 _ARGV_KEYS = ("args", "argv", "arguments")
 
 
-def _command_value(value) -> str | None:
+def _command_value(value, join=shlex.join) -> str | None:
     if isinstance(value, str):
         return value
     if isinstance(value, (list, tuple)) and value and all(isinstance(v, str) for v in value):
-        return " ".join(value)       # Codex hands an argv array
+        # An argv array (an unknown or MCP tool may send one), quoted as the
+        # one line it is: a plain join read `["bash", "-lc", "pkill -f
+        # daemon2"]` as `bash -lc pkill -f daemon2`, whose inline source is
+        # only `pkill`, and layer 1 never saw the kill (#211 bench, LOW).
+        # `judged_commands` still judges the plain join too.
+        return join(value)
     return None
 
 
@@ -194,23 +199,78 @@ def unreadable_command(tool: str, args: dict | None) -> str | None:
     return None
 
 
-def command_text(args: dict | None) -> str:
-    """The command line in a tool's arguments, whatever the provider calls
-    it. More than one command key with text (only an unknown tool could send
-    that) is every one of them, one per line, so none goes unjudged; an
-    argv list beside a command (`{"command": "cat", "args": [".env"]}`) is
-    judged with it."""
+def _fields(args: dict | None, join=shlex.join) -> list[str]:
     if not isinstance(args, dict):
-        return ""
+        return []
     texts = [text for key in COMMAND_KEYS
-             if (text := _command_value(args.get(key))) is not None and text.strip()]
+             if (text := _command_value(args.get(key), join)) is not None and text.strip()]
     if len(texts) == 1:
         for key in _ARGV_KEYS:
             argv = args.get(key)
             if isinstance(argv, (list, tuple)) and argv and all(isinstance(a, str) for a in argv):
-                texts[0] = texts[0] + " " + shlex.join(argv)
+                texts[0] = texts[0] + " " + join(argv)
                 break
-    return "\n".join(dict.fromkeys(texts))
+    return list(dict.fromkeys(texts))
+
+
+def command_fields(args: dict | None) -> list[str]:
+    """Each command line in a tool's arguments, one per command key with
+    text, duplicates dropped; an argv list beside a lone command
+    (`{"command": "cat", "args": [".env"]}`) is part of it."""
+    return _fields(args)
+
+
+def command_text(args: dict | None) -> str:
+    """The command line in a tool's arguments, whatever the provider calls
+    it: what a card shows, the log keeps and an Always is minted from. More
+    than one command key with text is every one of them, one per line. That
+    joined text is **not** the only reading judged: an unclosed quote, a
+    trailing backslash or a here-document in one field carries into the
+    next, so a refused line in the second read as an `echo` argument (#211
+    bench, MED). See `judged_commands`."""
+    return "\n".join(command_fields(args))
+
+
+def judged_commands(args: dict | None) -> tuple[str, ...]:
+    """Every reading of a call's command the gate judges, so each must pass
+    on its own and a DENY in any of them wins (#211 bench):
+
+    * the joined text (`command_text`), and each field by itself when there
+      is more than one, so nothing left open in one field hides the next;
+    * the same with an argv array's words joined plainly, as before argv was
+      quoted: the rules do not open `bash -c '…'` source for every refusal
+      (`sudo` in it is asked, not refused), and a plain join had exposed it.
+    """
+    readings: list[str] = []
+    for join in (shlex.join, " ".join):
+        fields = _fields(args, join)
+        readings.append("\n".join(fields))
+        if len(fields) > 1:
+            readings.extend(fields)
+    return tuple(dict.fromkeys(readings))
+
+
+def is_multi_command(args: dict | None) -> bool:
+    """More than one command line in one call: no real shell sends that, so
+    the allowlist and rules' static ALLOW never answer it and the permit's
+    card offers no Always (#211 bench, MED)."""
+    return len(command_fields(args)) > 1
+
+
+def open_quoting(args: dict | None) -> str | None:
+    """The first field of a call with more than one command line whose
+    quoting does not close (an unclosed quote, a trailing backslash), else
+    None. Which line such a field joins depends on how the tool combines
+    its fields, so it cannot be judged: asked at layer 2 (#211 bench, MED)."""
+    fields = command_fields(args)
+    if len(fields) < 2:
+        return None
+    for text in fields:
+        try:
+            shlex.split(text)
+        except ValueError:
+            return text
+    return None
 
 
 def v1_request(tool: str, args: dict) -> tuple[str, dict]:

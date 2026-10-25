@@ -86,8 +86,9 @@ from typing import Callable, Iterable
 from jarvis import config, permissions as v1_permissions, protected_state, rules
 from jarvis.tools import files as v1_files, secrets as v1_secrets
 from .approvals import (ApprovalRequest, DenyAll, V2_COMMAND_TOOLS, clean_line, command_text,
-                        is_command_tool, is_unknown_command_tool, label,
-                        unreadable_command, v1_request)
+                        is_command_tool, is_multi_command, is_unknown_command_tool,
+                        judged_commands, label, open_quoting, unreadable_command,
+                        v1_request)
 from .model import PermissionProfile, Project, Role, Task, utcnow
 from .provider import Brief, Decision, PermissionCallback
 from . import chat_git, merge_gate, session_tools
@@ -567,6 +568,15 @@ def _command_of(args: dict) -> str:
     return command_text(args)
 
 
+def _judged_of(tool: str, args: dict) -> tuple[str, ...]:
+    """Every reading of the call's command that is judged
+    (`approvals.judged_commands`): the joined text, each field on its own
+    when a call carries more than one, so a quote or backslash left open in
+    one field cannot hide the next (#211 bench, MED), and an argv's plain
+    words. Empty when the tool is not read as a command."""
+    return judged_commands(args) if is_command_tool(tool, args) else ()
+
+
 def denied_command(command: str, cwd: str | None = None) -> str | None:
     """The reason this command may not run at all, or None.
 
@@ -844,9 +854,11 @@ def _rule_matches(rule, tool: str, segments: list[tuple[str, list[str], list[str
 def always_ask_match(tool: str, args: dict, brief: Brief | None = None,
                      project: Project | None = None) -> tuple[str, str] | None:
     """(rule id, reason) if this call is on the always-ask list, else None."""
-    command = _command_of(args) if is_command_tool(tool, args) else ""
     segments: list[tuple[str, list[str], list[str]]] = []
-    for segment in rules.segments(command) if command.strip() else []:
+    # Each reading's segments: a call with two command fields is matched
+    # field by field as well as joined (#211 bench, MED).
+    lines = [text for text in _judged_of(tool, args) if text.strip()]
+    for segment in [part for text in lines for part in rules.segments(text)]:
         tokens = _tokens_of(segment)
         stems = [s for s, _ in rules.command_targets(segment)]
         if tokens and tokens[0].rsplit("/", 1)[-1].lower() not in stems:
@@ -991,6 +1003,10 @@ def build_permit(ctx: PermitContext, asker, *, clock=None) -> PermissionCallback
         also_commands = tuple(also_commands)   # read twice: layer 1 and the owner-only check
         profile = brief.profile if brief is not None else PermissionProfile.AUTO
         command = _command_of(args) if is_command_tool(tool, args) else ""
+        # Each reading judged below: `command`, and each field on its own
+        # when the call carries more than one (#211 bench, MED).
+        judged = _judged_of(tool, args)
+        multi = bool(judged) and is_multi_command(args)
         # Where the command will run: the brief's folder, never the daemon's
         # own cwd, or a relative `models.json` names the wrong file.
         cwd = (brief.cwd or None) if brief is not None else None
@@ -1027,8 +1043,8 @@ def build_permit(ctx: PermitContext, asker, *, clock=None) -> PermissionCallback
             # nothing runs (#211 review, F3).
             return finish(Decision.DENY, L_DENY,
                           f"{tool} carries no command text to judge; refused")
-        if command.strip():
-            refusal = denied_command(command, cwd)
+        for text in judged:
+            refusal = denied_command(text, cwd) if text.strip() else None
             if refusal:
                 return finish(Decision.DENY, L_DENY, refusal)
         if tool in FILE_TOOLS:
@@ -1081,7 +1097,7 @@ def build_permit(ctx: PermitContext, asker, *, clock=None) -> PermissionCallback
         # A Codex git tool is judged by the line the daemon will run, where
         # it runs (`chat_git.gate_line`).
         owner_only = _owner_only(tool, chat.line if chat is not None else command,
-                                 also_commands, args, ctx,
+                                 (*judged[1:], *also_commands), args, ctx,
                                  chat.where if chat is not None else
                                  shell_cwd if isinstance(shell_cwd, str) else None, cwd)
 
@@ -1099,7 +1115,8 @@ def build_permit(ctx: PermitContext, asker, *, clock=None) -> PermissionCallback
             # close spelled this way included — and pointed at the tools.
             if (ctx.provider == "codex" and brief is not None and brief.role == Role.CHAT
                     and brief.task_id is None
-                    and any(chat_git.raw_remote(line) for line in (command, *also_commands))):
+                    and any(chat_git.raw_remote(line)
+                            for line in (command, *judged[1:], *also_commands))):
                 return finish(Decision.DENY, L_CHAT_GIT, chat_git.POINTER)
             if profile == PermissionProfile.STRICT:
                 return finish(Decision.DENY, L_WIDENING,
@@ -1179,42 +1196,59 @@ def build_permit(ctx: PermitContext, asker, *, clock=None) -> PermissionCallback
             # An unknown tool's command key holds something that is not text:
             # it cannot be judged, so the owner is asked (#211 review, F3).
             match = ("command-unreadable", f"{tool}'s command is not text and cannot be judged")
-        if match is None and command.strip():
+        for text in judged if match is None else ():
             # A line that might write the gate's own state but is not provably
             # a write (layer 1 took those): a copy into the gate's folder, a
             # path behind an unset variable — or a line too complex to judge at
             # all (past the substitution bound). Under AUTO it would otherwise
             # go to the provider's classifier; it goes to the owner instead, in
             # every profile.
-            touch = protected_state.command_touch(command, cwd)
+            touch = protected_state.command_touch(text, cwd) if text.strip() else None
             if touch is not None:
                 match = ("env-file" if touch.env else "gate-state",
                          protected_state.ask_reason(touch))
-        if match is None and command.strip():
+                break
+        for text in judged if match is None else ():
+            if not text.strip():
+                continue
             # A line that may run VEX's device tool (the robot's download)
             # and cannot be told — a program that is only an expansion, read
             # from input, or behind an option the table does not know — or
             # one too complex to judge: never the provider's reviewer's call
             # under AUTO (VX-1, `rules.vex_uncoverable`). A line that
             # certainly names or runs it was refused at layer 1.
-            unsure = rules.vex_uncoverable(command)
+            unsure = rules.vex_uncoverable(text)
             if unsure:
                 match = ("vex-device", unsure)
-        if match is None and command.strip():
+                break
+        for text in judged if match is None else ():
+            if not text.strip():
+                continue
             # A kill whose pattern is too costly to judge against the v2
             # daemon — too complex to judge, so asked, never refused (that
             # is layer 1's for a provable match) and never the reviewer's
             # call under AUTO (the delta review of PR #48).
-            unsure = protected_state.kill_unsure(command)
+            unsure = protected_state.kill_unsure(text)
             if unsure:
                 match = ("daemon-kill", unsure)
-        if match is None and command.strip():
+                break
+        for text in judged if match is None else ():
+            if not text.strip():
+                continue
             # What the line's wrappers and runners start is too complex to
             # judge within its work budget (review of PR #75): asked, never
             # the reviewer's call under AUTO and never the allowlist's.
-            unsure = rules.runners_unsure(command)
+            unsure = rules.runners_unsure(text)
             if unsure:
                 match = ("too-complex", unsure)
+                break
+        if match is None and multi and open_quoting(args) is not None:
+            # More than one command line, one with a quote or backslash left
+            # open: which line it joins is the tool's business, so it cannot
+            # be judged (#211 bench, MED).
+            match = ("command-unreadable",
+                     f"{tool} carries more than one command line and one leaves its "
+                     "quoting open, so what runs cannot be judged")
         if match is not None:
             rule_id, why = match
             reason = f"always-ask rule {rule_id}" + (f": {why}" if why else "")
@@ -1249,15 +1283,14 @@ def build_permit(ctx: PermitContext, asker, *, clock=None) -> PermissionCallback
         # mean.
         # A command-bearing tool that is not a known shell (`mcp__x__exec`)
         # is judged at layers 1 and 2 but never answered here: no allowlist
-        # entry and no rules ALLOW (#211 review, F1).
-        if getattr(asker, "human_backed", False) and not is_unknown_command_tool(tool, args):
-            if v1_permissions.allows(*v1_request(tool, args), cwd=cwd):
-                return finish(Decision.ALLOW, L_JARVIS_ALLOW,
-                              "covered by the owner's persistent allowlist")
-            if (command.strip() and
-                    v1_permissions.static_verdict(command, cwd).decision == rules.ALLOW):
-                return finish(Decision.ALLOW, L_JARVIS_ALLOW,
-                              "ordinary development command (rules ALLOW)")
+        # entry and no rules ALLOW (#211 review, F1). Nor is a call carrying
+        # more than one command line, which no real shell sends: the
+        # allowlist and the rules read one line (#211 bench, MED).
+        if (getattr(asker, "human_backed", False) and not is_unknown_command_tool(tool, args)
+                and not multi):
+            covered = _covered(tool, args, judged, cwd)
+            if covered:
+                return finish(Decision.ALLOW, L_JARVIS_ALLOW, covered)
 
         # --- layer 5: profile decides -------------------------------------
         if profile == PermissionProfile.STRICT:
@@ -1289,6 +1322,27 @@ def build_permit(ctx: PermitContext, asker, *, clock=None) -> PermissionCallback
 
     permit.recall = recall
     return permit
+
+
+def _covered(tool: str, args: dict, judged: tuple[str, ...], cwd: str | None) -> str:
+    """Layer 4's reason when the owner's allowlist or rules' static ALLOW
+    covers this call, else "". A command is covered only when **every**
+    reading of it is (`_judged_of`: a quoted argv and its plain words), each
+    by an entry or by the rules; a call that is not a command is the whole
+    tool's entry, as on main."""
+    readings = [text for text in judged if text.strip()]
+    if not readings:
+        return ("covered by the owner's persistent allowlist"
+                if v1_permissions.allows(*v1_request(tool, args), cwd=cwd) else "")
+    listed = True
+    for text in readings:
+        if v1_permissions.allows(*v1_request(tool, {"command": text}), cwd=cwd):
+            continue
+        if v1_permissions.static_verdict(text, cwd).decision != rules.ALLOW:
+            return ""
+        listed = False
+    return ("covered by the owner's persistent allowlist" if listed
+            else "ordinary development command (rules ALLOW)")
 
 
 def _owner_only(tool: str, command: str, also_commands, args: dict, ctx: PermitContext,
@@ -1345,6 +1399,8 @@ def _ask(asker, ctx: PermitContext, tool: str, args: dict, command: str,
          relay_child: str | None = None) -> Decision:
     if is_unknown_command_tool(tool, args):
         allowlistable = False       # no stem and no whole-tool entry (#211 review, F1)
+    if is_command_tool(tool, args) and is_multi_command(args):
+        allowlistable = False       # one line only reaches the allowlist (#211 bench, MED)
     request = ApprovalRequest(
         tool=tool, args=args, command=command or None, reason=reason, layer=layer,
         thread_id=ctx.thread_id, task_id=ctx.task_id,

@@ -2374,7 +2374,8 @@ grant over every later Monitor command.
   `script` (text or an argv array). A tool a newer CLI adds is judged from
   its first call. More than one such key is judged as every one of them, and
   an argv list beside the command (`{"command": "cat", "args": [".env"]}`)
-  is judged with it.
+  is judged with it. Each of several fields is also judged **by itself**
+  (2026-10-23, below).
 - **Trusted: real shells only (layer 4; #211 review, F1).** Only the known
   shells map to v1's `run_command` (`v1_request`) and reach the allowlist's
   stems and rules' static ALLOW. An unknown command-bearing tool
@@ -2414,6 +2415,51 @@ grant over every later Monitor command.
   mutants in `tests/v2/command_tool_mutants.py`.
 
 **Monitor and `exec_command` are trusted shells (lead decision, accepted on review of #211).** They get Bash's treatment at layer 4: under ASK and STRICT a Monitor command an allowlist stem or the rules' static ALLOW covers (e.g. `ls`, an allowlisted `npm …`) runs without a card, where main asked (ASK) or refused (STRICT). This is the one place the PR is not "main or stricter"; it matches Bash because Monitor runs a real shell. `exec_command` is not reachable today (Codex names its approvals `shell`).
+
+## Each command field is judged by itself; argv is one quoted line (2026-10-23)
+
+Found by the reviewer bench's Opus rulings at PR #211's head (8bee098) and
+reproduced on main at 1e3862c3 with an in-process probe (temp HOME,
+`tests/v2/permissions_check.py` helpers).
+
+- **MED: one field hid the next.** `approvals.command_text` joined every
+  command key's text with newlines, and every layer judged only that.
+  Whatever the first field left open (an unclosed quote, a trailing
+  backslash) carried into the second. So `Bash {"command": "echo '",
+  "script": "sudo rm -rf / '"}` read as one `echo` and was ALLOWed at
+  layer 4 by rules' static ALLOW with no card. Through an unknown tool,
+  `{"command": "echo \\", "script": "pkill -f daemon2"}` reached the
+  reviewer under AUTO. Now `approvals.judged_commands` gives every reading:
+  the joined text, and each field by itself when there are several. Layer 1
+  refuses if any reading is refused. Layer 2 (always-ask rules, owner-only
+  operations, gate-state, VEX, daemon-kill, too-complex) matches every
+  reading. A call with several fields, one of which leaves its quoting open
+  (`approvals.open_quoting`), is asked as `command-unreadable` after the
+  specific rules, and refused when nobody can be asked. Such a call is never
+  answered at layer 4 (allowlist or rules ALLOW), and its card offers no
+  Always. No real shell sends two command keys, so only a malformed or
+  unknown tool's call changes. The joined text is still what a card shows
+  and the log keeps.
+- **LOW: argv joined with spaces.** `_command_value` read
+  `["bash", "-lc", "pkill -f daemon2"]` as `bash -lc pkill -f daemon2`,
+  whose inline source is only `pkill`, so layer 1's daemon-kill DENY did not
+  fire (an unknown/MCP tool's argv; Codex sends a string). It is now
+  `shlex.join`ed. The plain-space reading is **still judged** at layers 1
+  and 2, because the rules do not open `bash -c '…'` source for every
+  refusal: `sudo` inside it is ASK, not DENY. The plain reading had
+  exposed it, and `["bash", "-lc", "sudo rm -rf /"]` stays refused. Layer 4
+  needs **every** reading covered, so `["ls", "a;rm -rf build"]` (an `ls`
+  quoted, an `rm` in plain words) is asked, as on main.
+- **Pinned by** `tests/v2/permissions_check.py command_field_checks` (187 of
+  its 439 checks failed on 1e3862c3 at first writing) and the MED/LOW mutants in
+  `tests/v2/command_tool_mutants.py` (30 of 30 killed). The broker does not
+  check for several fields: v1 `entry_for` already refuses the joined
+  compound line, so a guard there could not be observed.
+- **Open, not this change.** The rules ask rather than refuse a `sudo` or
+  an `rm -rf /` inside `bash -c '…'` through any shell, Bash included
+  (probed on this branch: under AUTO `Bash bash -c 'sudo ls'` reaches the
+  reviewer). The secrets and daemon-kill readers do open it: `bash -c 'cat
+  .env'` is refused. Shared v1/v2 rules; a separate question.
 
 ## Credentials typed into a command are withheld from displays, cards and logs (2026-10-15)
 
