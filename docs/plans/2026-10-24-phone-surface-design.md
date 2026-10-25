@@ -3,9 +3,22 @@
 **Status (2026-10-24): draft for the owner's review.** Nothing here is built.
 Written against `main` at `2229645e`. It depends on the
 [owner inbox](2026-10-24-owner-inbox-design.md): the inbox is the phone's main
-screen. Decisions in §2 are the planner's defaults; the open questions in §11
-have their defaults in bold. Three spikes (§10, P-0) must pass before anything
-else is built, because the design rests on them.
+screen. Decisions in §2 are the planner's defaults, except those marked
+**owner, 2026-10-24**; the open questions in §11 have their defaults in bold.
+Three spikes (§10, P-0) must pass before anything else is built, because the
+design rests on them.
+
+**Owner decisions, 2026-10-24.**
+
+- **O-1. The phone is an iPhone** on current iOS (26 or later).
+- **O-2. Discord stays unchanged, as a backup.**
+- **O-3. Phone approvals are as authoritative as the HUD's, provided the
+  network stays secured.** That means Always, and answering HUD-only
+  (Browser) cards, from the phone. "Secured" is defined in §4.1. If any of
+  its conditions fails, the phone falls back to Discord-level authority.
+- **O-4. The other device on the tailnet belongs to a family member and is
+  trusted.** The design still never treats the tailnet as proof of the owner
+  (PH-3).
 
 ## 0. What the owner gets
 
@@ -18,23 +31,31 @@ else is built, because the design rests on them.
 - **A notification when something waits on you**, and only then: an
   approval, a blocking question, a blocked task. It carries a count, never
   the command or any text from the chat.
-- **Approving from the phone takes Face ID or a fingerprint**, for every
-  Allow. Deny is a single tap. There is no Always from the phone.
+- **Approving from the phone carries the same authority as the HUD** (O-3):
+  Allow, Always and HUD-only Browser cards. Every Allow and every Always takes
+  Face ID. Deny is a single tap.
 - **Answering questions and decisions, sending a message to a chat,
   starting a task,** all from the phone.
 - **Push to talk** that turns your speech into text in the box. You read
   it and press send. Speech never sends or answers by itself.
 - **What stays at the desk:** archive and delete, settings, routing, the
-  Bypass switch, permission profiles, terminals, the editor, the Browser, and
-  any HUD-only card (a Browser approval). The phone shows such a card as
-  "answer this at the desk".
+  Bypass switch, permission profiles, terminals, the editor, and driving the
+  Browser.
 
 Why this rather than more Discord: Discord already gives a channel per
 project, a thread per chat, and Approve/Deny buttons (`docs/notes/discord.md`).
 It cannot show a diff, rank what waits on you, answer a HUD-only card, prove
 it is you pressing Approve, or render a transcript the way the HUD does.
-Discord stays as it is; the phone is the richer surface beside it (§11,
-question 1).
+Discord stays unchanged as the backup (O-2); the phone is the richer surface
+beside it.
+
+Why an installed web app rather than an App Store app: on current iOS a web
+app added to the home screen gets passkeys (Face ID), Web Push notifications,
+its own icon and a full-screen window, which is everything this design uses.
+A native app would need Xcode on a Mac, an Apple Developer membership
+($99 a year) and App Store or TestFlight distribution, for no capability this
+design needs. If a later feature needs one (widgets, Live Activities, Siri),
+the native app would be a thin shell over the same `/m/api`.
 
 ## 1. What this builds on
 
@@ -48,9 +69,10 @@ question 1).
   owner routes and every agent command passes the gate. A phone fails this
   test by construction, which is right: the phone needs its own test.
 - **Tailscale is already installed and running on Windows** with MagicDNS.
-  No phone is on the tailnet yet, and **a device belonging to someone else
-  is on the tailnet**. So being on the tailnet must never by itself mean
-  "is the owner" (§2, PH-3).
+  No phone is on the tailnet yet. The one other device on it belongs to a
+  family member and is trusted (O-4). Even so, being on the tailnet never by
+  itself means "is the owner" (§2, PH-3): a device can be shared, borrowed or
+  compromised.
 - **The HUD already installs as an app** (`hud/public/manifest.webmanifest`,
   #83), and it uses the Graphite theme and a sanitized markdown renderer.
 - **Approval timeouts already know about remote owners:**
@@ -77,13 +99,14 @@ question 1).
   the tailnet only gets a request to the login page. Tailscale's identity
   headers are logged as advisory, never trusted, because a local process
   can send them to 8406 directly.
-- **PH-4. Every Allow is its own passkey assertion.** The challenge is bound
-  to the approval: `sha256(req_id ‖ "allow" ‖ server nonce)`, single-use,
-  valid 60 s. The server verifies origin, rpId, the UV flag and the
-  signature counter before it calls `PendingApprovals.resolve(req_id,
-  ALLOW)`. Deny needs only the session. This is "deny cheap, authorize
-  deliberate", made physical. A program running as the owner can forge any
-  header, but it cannot produce this assertion.
+- **PH-4. Every Allow and every Always is its own passkey assertion.** The
+  challenge is bound to the approval and the exact answer:
+  `sha256(req_id ‖ "allow" | "always" ‖ server nonce)`, single-use, valid
+  60 s, so an assertion for Allow cannot be replayed as Always. The server
+  verifies origin, rpId, the UV flag and the signature counter before it
+  calls `PendingApprovals.resolve`. Deny needs only the session. This is
+  "deny cheap, authorize deliberate", made physical. A program running as the
+  owner can forge any header, but it cannot produce this assertion.
 - **PH-5. Sessions are short and narrow.** After a passkey login, the phone
   holds a `__Host-` cookie (HttpOnly, Secure, SameSite=Strict, 12 h idle,
   7 days absolute). Every write also needs `Origin` equal to the ts.net
@@ -94,11 +117,29 @@ question 1).
   one-time code. The phone opens the URL, enters or scans the code, and
   registers its passkey. The HUD lists paired devices with last-seen and
   Revoke. At most 3 devices.
-- **PH-7. The phone never gets Always, never answers a HUD-only card, and
-  never carries desk authority.** Its messages are `UserMessage(origin=
-  "owner", via="phone")` with desk false, the same footing as Discord: a
-  chat may do what the owner asks only through the §6 gate, never through
-  fast-path desk edits (F-1..F-7).
+- **PH-7. Phone approvals equal the HUD's (O-3); phone messages do not
+  carry desk authority.**
+  - **Approvals.** `PendingApprovals.resolve`'s `hud=True` becomes
+    `owner_verified=True`, set by exactly two callers: the HUD route
+    (`projects.is_owner`) and the phone route after a valid PH-4 assertion
+    under a secured network (§4.1). Nothing else may set it: Discord, the
+    inbox's dispatch from any other listener, and tools all pass False.
+    With it, the phone may Allow, Always, and answer HUD-only Browser cards.
+  - **Always from the phone** shows the rule that would be written (what
+    `entry_for` mints) on the card before the Face ID prompt, because a
+    standing rule outlives the approval.
+  - **HUD-only cards** send their private detail (`owner_json`) only to a
+    verified phone session, only while the card is pending, and never in a
+    push payload, a log, or the `/m/ws` stream. The phone fetches it when
+    the card is opened.
+  - **Messages** are `UserMessage(origin="owner", via="phone")` with desk
+    false, the same footing as Discord: a chat may act on them only through
+    the §6 gate, never through fast-path desk edits (F-1..F-7). O-3 is about
+    approvals; desk authority for the phone is §11 question 2.
+  - **Owner decision required to build:** `approvals.py` and
+    `permissions.py` are SELF_PROTECTED and this changes who may answer a
+    HUD-only card. O-3 is that decision; the change still goes through the
+    boundary review the Safety design requires.
 - **PH-8. Notifications are Web Push with no content.** The daemon signs
   with a VAPID key it holds (a protected path, mode 600) and sends
   `{count, rank}` only. The push service (Apple or Google) never sees a
@@ -153,6 +194,31 @@ who the owner is off the box.
 A request that fails any of these gets a 401 with no body detail. The login
 page and the static bundle are the only things served without a session.
 
+### 4.1 "The network stays secured": the conditions for full authority (O-3)
+
+The phone answers with HUD authority (`owner_verified`) only while **all** of
+these hold. The daemon checks them at start-up and every 5 minutes, and
+again before each verified answer:
+
+1. **The remote listener is bound to loopback only** (checked from the
+   socket itself, not the config).
+2. **Tailscale serve is the only path, and Funnel is off.** The daemon reads
+   `tailscale serve status --json` through the Windows CLI (read-only) and
+   requires exactly one handler for the ts.net name, pointing at
+   `127.0.0.1:8406`, with no Funnel entry for any port.
+3. **The certificate is the tailnet's own**, valid for the ts.net name, and
+   the request's `Host` and `Origin` match it (§4, items 2 and 4).
+4. **The device is paired, unrevoked, and its passkey requires user
+   verification**, and the assertion is fresh (PH-4).
+5. **Nothing else is listening on 8406**, on any interface, in WSL or on
+   Windows (`ss` in WSL, `Get-NetTCPConnection` on Windows, read-only).
+
+If any condition fails, the phone keeps working at **Discord-level authority**
+(Allow and Deny for ordinary cards; no Always; HUD-only cards say "answer
+at the desk"). The phone shows a red "limited: <which check failed>" line,
+and the desktop HUD's status shows the same. Getting full authority back needs
+nothing but the condition passing again. No setting widens it.
+
 **The agent path.** An agent's shell could `curl 127.0.0.1:8406`. Without a
 session cookie that is a 401. The cookie lives in the phone's browser and is
 never written to disk on the PC. Defence in depth: `rules.py` DENYs any
@@ -164,8 +230,9 @@ remote routes.
 
 | Route (`/m/api/...`) | Calls | Notes |
 |---|---|---|
-| `GET inbox` | `inbox.rows()` | private approvals show "answer at the desk" |
-| `POST inbox/<id>/answer` | the inbox dispatch (inbox IN-2) | Allow needs the PH-4 assertion; `always` is refused; a HUD-only card is a 409 |
+| `GET inbox` | `inbox.rows()` | private approvals in their private projection |
+| `GET inbox/<id>/detail` | `PendingApprovals.owner_details` | HUD-only cards, verified session under §4.1 only, while pending |
+| `POST inbox/<id>/answer` | the inbox dispatch (inbox IN-2) | Allow and Always need the PH-4 assertion and §4.1; Deny needs the session only |
 | `POST inbox/decisions/<id>` | inbox decisions | |
 | `GET projects`, `GET threads?project=`, `GET threads/<id>/log?after=` | the HUD's reads | transcript rows as the HUD shows them, scrubbed (`chat_reads` projection) |
 | `POST threads/<id>/messages` | `daemon.send` with `via="phone"` | queues behind a running turn; attachments refused in v1 |
@@ -182,9 +249,10 @@ stream, dev servers, VEX, project folder creation, schedules editing.
 
 ## 6. The phone app
 
-- **Inbox tab:** the inbox rows, the same rank groups as the HUD. An Allow
-  shows the full card first; pressing Allow raises the passkey prompt. Pull
-  to refresh; live updates over `/m/ws`.
+- **Inbox tab:** the inbox rows, the same rank groups as the HUD. A card
+  shows in full before any button works; pressing Allow or Always raises
+  Face ID. Always shows the rule it would write first. Pull to refresh; live
+  updates over `/m/ws`.
 - **Chats tab:** projects → threads (the five most recent per project, as
   the desktop sidebar shows) → transcript. The input box has push to talk:
   hold to record, release to transcribe, the text lands in the box in
@@ -230,24 +298,24 @@ path, each step the owner's call:
 
 | Rule | How the phone keeps it |
 |---|---|
-| Approvals are the owner's, deliberately | PH-4: a biometric assertion bound to each Allow; no Always; no bulk Allow |
-| HUD-only cards stay at the HUD | 409 from the phone; shown as "answer at the desk" |
+| Approvals are the owner's, deliberately | PH-4: a Face ID assertion bound to each Allow and each Always; no bulk Allow; Always shows its rule first |
+| HUD-only cards answered only by a verified owner surface | `owner_verified` set only by the HUD route and by the phone under §4.1 with a fresh assertion (PH-7, O-3); private detail never in push, logs or the stream |
 | No tool reaches owner routes | remote routes need a session no agent holds; `rules.py` DENY for 8406; nothing in the session MCP catalog |
 | Credentials never leave the daemon | VAPID private key and WebAuthn data are protected paths; push payloads are content-free; logs carry status codes only |
 | Nothing fetched speaks for the owner | the phone renders transcripts as the HUD does: scrubbed, untrusted, `textContent` for cards |
 | Desk authority is the HUD's | `via="phone"`, desk false |
 | Unknown or malformed fails closed | bad session, Origin, Host or assertion → 401; an expired challenge → 409 and a fresh one |
-| Network exposure | loopback bind; tailnet only via `tailscale serve`; no Funnel; Tailscale ACL limits 443 on this machine to the owner's devices (§11, question 3) |
+| Network exposure | loopback bind; tailnet only via `tailscale serve`; no Funnel; checked continuously (§4.1), and full authority drops to Discord level when any check fails |
 
 ## 10. Work packages
 
 | WP | Package | Size | Acceptance |
 |---|---|---|---|
-| P-0 | **Spikes, each a script under `tests/spikes/` with its finding written here.** (a) `tailscale serve` on Windows reaching a WSL loopback listener on 8406, with a valid cert; (b) a passkey registered and asserted from the owner's phone on the ts.net origin, verified by `webauthn`; (c) a Web Push reaching the installed app on the owner's phone with the screen locked | S | all three pass on the owner's real phone; any failure stops the plan and comes back as a decision |
+| P-0 | **Spikes, each a script under `tests/spikes/` with its finding written here.** (a) `tailscale serve` on Windows reaching a WSL loopback listener on 8406, with a valid cert, and `tailscale serve status --json` readable from WSL; (b) a passkey registered and asserted with Face ID from the owner's iPhone, in the home-screen app, on the ts.net origin, verified by `webauthn`; (c) a Web Push reaching the home-screen app on the iPhone with the screen locked | S | all three pass on the owner's iPhone; any failure stops the plan and comes back as a decision |
 | P-1 | `REMOTE_PORT` listener, strict Host and Origin, CSP, static serving of an empty mobile shell | S | the API and HUD listeners never serve `/m/*`; the remote one never serves HUD routes (route-table test); non-ts.net Host refused |
 | P-2 | `remote_auth`: pairing from the HUD, passkey registration and login, sessions, devices, revoke | M | pairing only within an open window; revoke ends sessions at once; replayed or cross-origin assertions refused; `rules.py` DENY for 8406 |
-| P-3 | Read API and the Inbox, Chats and Tasks tabs (read-only) | M | headless mobile-viewport suite; transcripts identical to the HUD's projection; private cards show "answer at the desk" |
-| P-4 | Answering: approvals with per-Allow assertion, questions, decisions | M | Allow without a fresh assertion is refused; Always refused; HUD-only card 409; Deny works with session only; the card suite passes on the phone bundle |
+| P-3 | Read API and the Inbox, Chats and Tasks tabs (read-only) | M | headless mobile-viewport suite; transcripts identical to the HUD's projection; private cards show their private projection until P-4 lands |
+| P-4 | Answering: approvals with per-answer assertion, `owner_verified` in `approvals.py`, the §4.1 security monitor, questions, decisions | M | Allow or Always without a fresh assertion refused; an Allow assertion replayed as Always refused; HUD-only card answered from a verified phone, refused from Discord and from a phone with any §4.1 check failing (one test per check); `owner_detail` never appears in push, logs or `/m/ws` (asserted); Deny works with session only; the card suite passes on the phone bundle; boundary review on the `approvals.py` change |
 | P-5 | Sending messages, new chats, task cancel and resume | S | `via="phone"` recorded; desk false (fast-path suite); queues behind a running turn |
 | P-6 | Web Push | S | payload is content-free (asserted); coalescing; 410 deletes; quiet hours |
 | P-7 | Push to talk | S | transcription lands in the box; nothing sends without a tap; a voice note never answers a question |
@@ -258,20 +326,20 @@ IN-2 must land before P-3.
 
 ## 11. Open questions for the owner (defaults in bold)
 
-1. **Discord after the phone ships:** **keep it unchanged**, or turn its
-   approvals off once a phone is paired so there is one remote answer path.
-2. **Which phone?** iPhone (Web Push needs iOS 16.4+ and the app on the home
-   screen) or Android. The design works for both; P-0 must run on the real one.
-3. **Tailnet access:** **add a Tailscale ACL so only the owner's devices
-   reach this machine's port 443**, since another person's device is on the
-   tailnet. Changing the ACL is done by the owner in the Tailscale admin
-   console.
-4. **Should the phone be able to start tasks**, or only chat and answer?
+Answered 2026-10-24: the phone is an iPhone (O-1); Discord stays as a backup
+(O-2); phone approvals equal the HUD's under §4.1, HUD-only cards included
+(O-3); the other tailnet device is trusted, so no ACL change is needed (O-4).
+
+1. **Should the phone be able to start tasks**, or only chat and answer?
    **Yes, through the same intake gate as the HUD.**
-5. **HUD-only (Browser) cards from the phone, with a passkey?** **No in v1.**
-   Those cards show page content the phone would have to receive.
-6. **Session length:** **12 h idle, 7 days absolute.**
-7. **Quiet hours:** **23:00 to 07:00**, or none.
+2. **Desk authority from the phone:** may a message typed on the phone let
+   a chat make small direct edits the way a HUD-typed one does (fast path
+   F-1..F-7)? **No**: O-3 covers approvals, and each edit made that way
+   would skip a card.
+3. **A Tailscale ACL anyway?** Optional now (O-4). It would limit port 443
+   on this machine to the owner's own devices. **Not required.**
+4. **Session length:** **12 h idle, 7 days absolute.**
+5. **Quiet hours:** **23:00 to 07:00**, or none.
 
 ### Critical files for implementation
 

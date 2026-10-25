@@ -227,7 +227,7 @@ already marked **Answered** are imported as answered.
 | Approvals are the owner's; deny cheap, authorize deliberate | IN-3: same component, same `resolve`; no bulk Allow, no "allow all", no keyboard default |
 | No tool reaches owner routes | every `/inbox` route is `owner_only`; the archive-check grep extends to `/inbox` |
 | Labels and fetched text are untrusted | rows' own `title`/`blocks` are code-built; agent text only in `detail`, `textContent`, scrubbed |
-| HUD-only Browser cards | private projection only; answering still needs `hud=True` |
+| HUD-only Browser cards | private projection only; answering still needs `hud=True` (renamed `owner_verified` by the phone design, PH-7, where the HUD route and a verified phone are its only two setters) |
 | Nothing pings but one line | the inbox sends no Discord posts and no notifications of its own; the badge is a count only |
 | Credentials never in status or logs | `missed.jsonl` holds `to_json` fields only; `owner_post` scrubs every field before storing |
 | Unknown or malformed fails closed | an `answer` whose source has gone away is a 409, never a guess; an `owner_post` with an unknown kind is refused |
