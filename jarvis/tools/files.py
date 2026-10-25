@@ -152,6 +152,11 @@ SELF_PROTECTED = frozenset(
         # phone with the HUD's authority.
         "jarvis/v2/remote_answer.py",
         "jarvis/v2/remote_secure.py",
+        # The approval broker every surface answers through: who counts as
+        # owner-verified, which cards are HUD-only, and what a card shows
+        # before Allow (the owner's decision, 2026-10-25). An agent that
+        # could edit it could answer its own approval.
+        "jarvis/v2/approvals.py",
     }
 )
 

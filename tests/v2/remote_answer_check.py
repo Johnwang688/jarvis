@@ -1003,10 +1003,9 @@ class Boundary(Phone):
 
     def test_self_protected(self):
         from jarvis.tools.files import SELF_PROTECTED
-        # (jarvis/v2/approvals.py is not in the list on main; see the PR.)
-        for rel in ("jarvis/v2/remote_answer.py", "jarvis/v2/remote_secure.py"):
+        for rel in ("jarvis/v2/remote_answer.py", "jarvis/v2/remote_secure.py", "jarvis/v2/approvals.py"):
             self.assertIn(rel, SELF_PROTECTED)
-        print("ok  remote_answer.py and remote_secure.py are SELF_PROTECTED")
+        print("ok  remote_answer.py, remote_secure.py and approvals.py are SELF_PROTECTED")
 
     def test_methods_and_shapes(self):
         request, _, _ = self.ask()
