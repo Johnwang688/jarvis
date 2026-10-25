@@ -246,7 +246,7 @@ def _source_writes(source: str, spellings: tuple[str, ...]) -> bool:
         mode = rf"""\s*,\s*(?:mode\s*=\s*)?{pfx}['"][^'"]*[wax+]"""
         forms = (
             rf"\bopen(?:Sync)?\s*\(\s*(?:file\s*=\s*)?{lit}{mode}",     # open(P, "a"), open(file=P, mode="a")
-            rf"""\bopen\s*\(\s*mode\s*=\s*{pfx}['"][^'"]*[wax+][^'"]*['"]\s*,\s*file\s*=\s*{lit}""",
+            rf"""\bopen\s*\(\s*mode\s*=\s*{pfx}['"][^'"wax+]*[wax+][^'"]*['"]\s*,\s*file\s*=\s*{lit}""",
             # A copy or move onto it (its destination, the second argument):
             # `shutil.copy(src, P)`, `fs.copyFileSync(src, P)`. As the source
             # only it is read (`shutil.copy(P, "/tmp/x")`), and not seen here.
