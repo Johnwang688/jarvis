@@ -22,11 +22,13 @@ What counts as gate state, resolved through symlinks:
 we". **It is not a boundary**, and the reason is the one `rules.py`'s DENY
 section already gives: it is token matching over a shell line, and a shell has
 more spellings than any matcher has patterns. A path assembled at run time
-(`python -c "open('allow'+'list.json','w')"`, `cp x "$(cat where)"`), a brace
-expansion, a script file or Makefile that writes the path itself, a program
-told where to write by its own config — none of those is visible here.
-(Symlinks and existing hard links *are* seen: paths are resolved and
-compared by inode.)
+(`python -c "open('allow'+'list.json','w')"`, `cp x "$(cat where)"`), a
+script file or Makefile that writes the path itself, a program told where to
+write by its own config — none of those is visible here. (Symlinks and
+existing hard links *are* seen: paths are resolved and compared by inode.
+Since 2026-10-25 so are brace expansions, expanded as bash does, and globs,
+matched with bash's pattern rules and on disk — "brace and glob spellings"
+below.)
 What it buys is that the **obvious** spellings are never auto-approved and the
 allowlist's are never put to the owner as a yes/no. The insides of `$(…)`,
 backticks and process substitution are analysed as command lines of their
@@ -155,8 +157,25 @@ def _in_tree(text: str, trees: set[Path]) -> Path | None:
 
 
 def _in_tree_now(text: str, trees: set[Path]) -> Path | None:
-    if _GLOB.search(text):
-        text = str(Path(*[p for p in Path(text).parts if not _GLOB.search(p)] or ["."]))
+    if _GLOBBY.search(text):
+        # A glob is matched, never shortened: dropping its glob components
+        # judged `<D>/*/x` as `<D>/x` (2026-10-25). In a tree, or above one
+        # within two levels, if its pattern may be, or if what it matches on
+        # disk is.
+        pattern = _glob_parts(text)
+        for tree in trees:
+            exact, below, above = _glob_relate(pattern, tree.parts)
+            if exact or below or any(len(tree.parts) - j <= 2 for j in above):
+                return tree
+        for match in _glob_fs(text)[0]:
+            tree = _in_tree_plain(match, trees)
+            if tree is not None:
+                return tree
+        return None
+    return _in_tree_plain(text, trees)
+
+
+def _in_tree_plain(text: str, trees: set[Path]) -> Path | None:
     resolved = _resolve(text)
     for tree in trees:
         if resolved == tree or _under(resolved, tree):
@@ -307,18 +326,43 @@ def _expand(token: str, state: _State) -> str | None:
 
 
 def _expand_now(token: str, state: _State) -> str | None:
+    if "`" in token:
+        return None             # a backtick substitution: only known when it runs
+
     def local(match: re.Match) -> str:
         name = match.group(1) or match.group(2)
-        return state.variables.get(name, match.group(0))
+        if name in state.variables:
+            return state.variables[name]
+        # bash's own: `$PWD` is the folder the line has moved to, not the
+        # judge's; `$OLDPWD` the one before it, which is not tracked.
+        if name == "PWD":
+            return str(state.cwd) if state.cwd is not None else _UNKNOWN
+        if name == "OLDPWD":
+            return _UNKNOWN
+        return match.group(0)
     text = re.sub(r"\$\{(\w+)\}|\$(\w+)", local, token)
     text = os.path.expandvars(text)
     if "$" in text:
+        return None
+    # `~+` is $PWD and `~-` is $OLDPWD (expanduser reads them as user names).
+    if text == "~+" or text.startswith("~+/"):
+        if state.cwd is None:
+            return None
+        text = str(state.cwd) + text[2:]
+    elif text == "~-" or text.startswith("~-/"):
         return None
     text = os.path.expanduser(text)
     if not os.path.isabs(text):
         if state.cwd is None:
             return None
         text = str(state.cwd / text)
+    if ".." in Path(text).parts:
+        # `..` after a symlink is the link's target's parent, not the text's
+        # (2026-10-25): `cp x /tmp/link/../allowlist.json`, with the link
+        # into the gate's folder, is the allowlist, and normpath had read it
+        # as `/tmp/allowlist.json`. Resolved as the kernel does; a glob's
+        # `..` is left for the glob's own matching (`_glob_parts`, on disk).
+        return text if _GLOBBY.search(text) else os.path.realpath(text)
     return os.path.normpath(text)
 
 
@@ -361,20 +405,24 @@ def _exact(text: str, protected: set[Path], ids: dict) -> Path | None:
 
 
 def _exact_now(text: str, protected: set[Path], ids: dict) -> Path | None:
-    if _GLOB.search(text):
-        # Component by component: fnmatch's `*` crosses `/`, and `rm ~/*.json`
-        # does not reach ~/.config/jarvis/models.json.
-        parts = Path(text).parts
-        k = next(i for i, part in enumerate(parts) if _GLOB.search(part))
-        prefix, rest = _resolve(Path(*parts[:k])), parts[k:]
+    if _GLOBBY.search(text):
+        # Component by component: a `*` never crosses `/`, and `rm ~/*.json`
+        # does not reach ~/.config/jarvis/models.json — but `**` may be any
+        # number of folders, `[^x]` is a negation, and what the glob matches
+        # on disk (through a symlink, or a hard link) counts too.
+        pattern = _glob_parts(text)
         for path in protected:
-            try:
-                rel = path.relative_to(prefix).parts
-            except ValueError:
-                continue
-            if len(rel) == len(rest) and all(fnmatch(a, b) for a, b in zip(rel, rest)):
+            if _glob_relate(pattern, path.parts)[0]:
                 return path
+        for match in _glob_fs(text)[0]:
+            hit = _exact_plain(match, protected, ids)
+            if hit is not None:
+                return hit
         return None
+    return _exact_plain(text, protected, ids)
+
+
+def _exact_plain(text: str, protected: set[Path], ids: dict) -> Path | None:
     resolved = _resolve(text)
     if resolved in protected:
         return resolved
@@ -390,11 +438,756 @@ def _ancestor_of(text: str, protected: set[Path]) -> list[tuple[Path, tuple[str,
 
 
 def _ancestor_now(text: str, protected: set[Path]) -> list[tuple[Path, tuple[str, ...]]]:
-    if _GLOB.search(text):
-        return []
+    if _GLOBBY.search(text):
+        # Every protected file the glob may be a folder above (`rm -rf
+        # ~/.config/j*`), by pattern and by what it matches on disk.
+        pattern = _glob_parts(text)
+        out: list[tuple[Path, tuple[str, ...]]] = []
+        for path in protected:
+            for j in sorted(_glob_relate(pattern, path.parts)[2]):
+                if 0 < j < len(path.parts) and (path, path.parts[j:]) not in out:
+                    out.append((path, path.parts[j:]))
+        for match in _glob_fs(text)[0]:
+            for hit in _ancestor_plain(match, protected):
+                if hit not in out:
+                    out.append(hit)
+        return out
+    return _ancestor_plain(text, protected)
+
+
+def _may_be(text: str, folder: Path) -> bool:
+    """Whether `text` names `folder` (resolved) — for a glob, whether it
+    may: by its pattern, or by what it matches on disk."""
+    if _GLOBBY.search(text):
+        return (_glob_relate(_glob_parts(text), folder.parts)[0]
+                or any(_resolve(m) == folder for m in _glob_fs(text)[0]))
+    return _resolve(text) == folder
+
+
+def _ancestor_plain(text: str, protected: set[Path]) -> list[tuple[Path, tuple[str, ...]]]:
     resolved = _resolve(text)
     return [(path, path.relative_to(resolved).parts)
             for path in protected if resolved != path and _under(path, resolved)]
+
+
+# --- brace and glob spellings (2026-10-25) --------------------------------------
+#
+# bash brace-expands a word before anything else, and globs it last, so one
+# word can be several paths and a pattern can be a protected one. Both used
+# to slip past this module: `cp {/tmp/x,<allowlist>}` is `cp /tmp/x
+# <allowlist>` in bash but was one odd word here, `<dir>{,}/allowlist.json`
+# was a path nobody has, and a glob's components were dropped
+# (`_in_tree_now`) or the glob skipped (`_ancestor_now`), so `<D>/*/x` was
+# judged as `<D>/x` and `rm -rf <D>/r*` as nothing at all.
+#
+# Now: every unquoted brace expression is expanded the way bash does it
+# (`_brace_parse`: lists, `{,}`, nesting, prefix and suffix, `{1..3}` and
+# `{a..c}` with padding and steps; never `${…}`, a quoted or escaped brace,
+# or a `{` with no list or sequence in it) and every word it makes is judged
+# as an operand of its own. Past `_WORD_CAP` words the line is too complex
+# to judge (an opaque touch, asked), and a bounded sample of the words —
+# every alternative of every group at least once, and the text before the
+# first brace — is still judged, so a protected spelling among them stays
+# certain. A glob is matched component by component with bash's pattern
+# rules (`*`, `?`, `[…]` with `!`/`^`, ranges and classes, extglob, `**` as
+# any number of folders) against the protected paths' own components, and
+# expanded against the filesystem (bounded), so a symlink or hard link it
+# reaches counts too.
+
+_UNKNOWN = "$\ue011"       # a value only known when the line runs (`$OLDPWD`, `~-`)
+_WORD_CAP = 1024           # words one segment's brace expansions may make
+_BRACE_DEPTH = 64          # nesting of brace groups parsed
+_BRACE_WORK = 200_000      # characters the brace parser may scan for one word
+_GLOB_ALTS = 64            # extglob alternatives one component may expand to
+_GLOB_FS_ENTRIES = 4096    # directory entries one glob may read
+_GLOB_FS_MATCHES = 256     # paths one glob may expand to on disk
+_GLOBBY = re.compile(r"[*?\[]|[?*+@!]\(")
+
+# Quoted or escaped brace syntax, and a single-quoted or escaped `$`, are text
+# to bash: marked before the line is split into words, so the parser below
+# never reads them, and put back after.
+_BRACE_MARK = str.maketrans({"{": "\ue020", "}": "\ue021", ",": "\ue022", "$": "\ue023"})
+_BRACE_UNMARK = str.maketrans({"\ue020": "{", "\ue021": "}", "\ue022": ",", "\ue023": "$",
+                                "\ue025": ""})
+
+
+class _Burst(Exception):
+    """A brace expansion too large or too deep to judge word by word."""
+
+
+@dataclass(frozen=True)
+class _Group:
+    """One brace expression: its alternatives, each a tuple of nodes (text
+    or a nested `_Group`). `cut`: a sequence longer than it holds."""
+    alts: tuple
+    cut: bool = False
+
+
+def _mark_brace_quoting(text: str) -> str:
+    """`text` with every quoted or backslash-escaped `{`, `}` and `,`, and
+    every single-quoted or escaped `$`, marked (`_BRACE_MARK`)."""
+    if "{" not in text:
+        return text
+    out, quote, i, n = [], "", 0, len(text)
+    while i < n:
+        c = text[i]
+        if c == "\\" and quote != "'" and i + 1 < n:
+            nxt = text[i + 1]
+            out.append(c + (nxt.translate(_BRACE_MARK) if nxt in "{},$" else nxt))
+            i += 2
+            continue
+        if quote:
+            if c == quote:
+                quote = ""
+                out.append(c)
+            elif c in "{},":
+                out.append(c.translate(_BRACE_MARK))
+            elif c == "$" and quote == "'":
+                out.append(c.translate(_BRACE_MARK))
+            else:
+                out.append(c)
+        else:
+            if c in "'\"":
+                quote = c
+            out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def _span_end(text: str, i: int) -> int:
+    """The index just past the bracket closing the `{` or `(` at `text[i]`,
+    counting nesting; len(text) + 1 when it never closes."""
+    opener = text[i]
+    closer = "}" if opener == "{" else ")"
+    depth = 0
+    for j in range(i, len(text)):
+        if text[j] == opener:
+            depth += 1
+        elif text[j] == closer:
+            depth -= 1
+            if depth == 0:
+                return j + 1
+    return len(text) + 1
+
+
+def _brace_open(text: str, i: int, work: list[int], base: int = 0) -> int:
+    """The first `{` at or after `i` that may open a brace expression:
+    never `${`, and nothing inside `${…}` or `$(…)`. -1 when there is none.
+    `base` is where the string bash is expanding starts (the word, or the
+    rest of it after a group): a `{` there, or after a blank, followed by a
+    blank or `}` is not an opener (`{}`, as `find -exec` writes it)."""
+    n = len(text)
+    while i < n:
+        work[0] -= 1
+        if work[0] < 0:
+            raise _Burst
+        c = text[i]
+        if c == "$" and i + 1 < n and text[i + 1] in "{(":
+            i = _span_end(text, i + 1)
+            continue
+        if c == "{":
+            if not ((i == base or text[i - 1] in " \t\n")
+                    and i + 1 < n and text[i + 1] in " \t\n}"):
+                return i
+        i += 1
+    return -1
+
+
+def _brace_close(text: str, i: int, work: list[int]) -> tuple[int, list[int]]:
+    """(the index of the `}` closing the `{` at `i - 1`, the indices of its
+    top-level commas); -1 when it never closes. As bash 5.3 reads it: a
+    top-level `}` closes only once a top-level comma has been seen or the
+    text so far is a sequence (`{1..3}`); before that it is text, so
+    `{a},b}` is `a}` and `b` (checked against bash)."""
+    level, commas, n, opened = 0, [], len(text), i
+    while i < n:
+        work[0] -= 1
+        if work[0] < 0:
+            raise _Burst
+        c = text[i]
+        if c == "$" and i + 1 < n and text[i + 1] in "{(":
+            i = _span_end(text, i + 1)
+            continue
+        if c == "{":
+            level += 1
+        elif c == "}":
+            if not level:
+                if commas or _brace_sequence(text[opened:i]) is not None:
+                    return i, commas
+            else:
+                level -= 1
+        elif c == "," and not level:
+            commas.append(i)
+        i += 1
+    return -1, commas
+
+
+# A `{` that never closes is text, and bash 5.3 then either goes on from the
+# character after it (`{x{1..2}}` is `{x1}` and `{x2}`) or passes over its
+# whole balanced `{…}` (`{1..2{a,b}}` and `{1{x,y}..3}` stay as they are).
+# Which, it decides by a rule this module does not copy exactly (fuzzed: it
+# turns on whether the text looks like a number sequence, `_SEQ_START` is
+# its common case); so where both are possible both readings are made and
+# every one is judged (`_Choices`, `_brace_readings`).
+_SEQ_START = re.compile(r"[-+]?\d+\.\.[-+]?\d")
+_READINGS = 8              # readings of one word, and of one line, judged at most
+
+
+class _Choices:
+    """The open choices one parse makes (`_brace_parse`), in order: `fixed`
+    answers the first ones, `_SEQ_START`'s guess the rest; `used` records
+    every answer, so the other readings can be found."""
+
+    def __init__(self, fixed: tuple = ()):
+        self.fixed = fixed
+        self.used: list[bool] = []
+
+    def skip(self, guess: bool) -> bool:
+        k = len(self.used)
+        answer = self.fixed[k] if k < len(self.fixed) else guess
+        self.used.append(answer)
+        return answer
+
+
+_SEQ_INT = re.compile(r"([-+]?\d+)\.\.([-+]?\d+)(?:\.\.([-+]?\d+))?")
+_SEQ_CHR = re.compile(r"([A-Za-z])\.\.([A-Za-z])(?:\.\.([-+]?\d+))?")
+
+
+def _brace_sequence(inside: str) -> _Group | None:
+    """bash's `{x..y[..step]}` as a group, or None when `inside` is not one.
+    Zero-padded ends pad every number to the wider end, as bash does. A
+    sequence longer than `_WORD_CAP` keeps its first `_WORD_CAP` values and
+    its last, marked `cut`."""
+    m = _SEQ_INT.fullmatch(inside)
+    if m:
+        lo, hi = m.group(1), m.group(2)
+        if max(len(lo), len(hi)) > 18:
+            return None                    # bash cannot hold it either: text
+        start, end = int(lo), int(hi)
+        step = abs(int(m.group(3) or 1)) or 1
+
+        def padded(s: str) -> int:
+            digits = s.lstrip("+-")
+            return len(s) if len(digits) > 1 and digits[0] == "0" else 0
+        width = max(padded(lo), padded(hi))
+        count = abs(end - start) // step + 1
+        sign = 1 if end >= start else -1
+        take = min(count, _WORD_CAP)
+        values = [start + sign * step * k for k in range(take)]
+        if count > take:
+            values.append(start + sign * step * (count - 1))
+        words = tuple(((f"{v:0{width}d}" if width else str(v)),) for v in values)
+        return _Group(words, cut=count > take)
+    m = _SEQ_CHR.fullmatch(inside)
+    if m:
+        start, end = ord(m.group(1)), ord(m.group(2))
+        step = abs(int(m.group(3) or 1)) or 1
+        rng = range(start, end + 1, step) if start <= end else range(start, end - 1, -step)
+        # A range across the punctuation between `Z` and `a` makes `\` too,
+        # quoted: quote removal leaves an empty word of it, which bash keeps.
+        return _Group(tuple(("\ue025" if v == 92 else chr(v),) for v in rng))
+    return None
+
+
+def _brace_parse(text: str, work: list[int], depth: int = 0,
+                 choices: _Choices | None = None) -> tuple:
+    """`text` as bash's brace expansion reads it: a tuple of literal text
+    and `_Group`s. bash's algorithm (braces.c, 5.3, fuzzed against it): the
+    first `{` that is not `${` and has a closing `}` (`_brace_close`) with a
+    top-level comma, or a sequence, inside is an expression; one that is
+    not is text, and the scan goes on from the character after it. Each
+    alternative and the rest of the word are read the same way."""
+    if depth > _BRACE_DEPTH:
+        raise _Burst
+    nodes: list = []
+    i = lit = 0
+    while True:
+        start = _brace_open(text, i, work, lit)
+        if start < 0:
+            break
+        end, commas = _brace_close(text, start + 1, work)
+        if end < 0:
+            span = _span_end(text, start)
+            if span <= len(text):
+                guess = bool(_SEQ_START.match(text, start + 1))
+                if choices.skip(guess) if choices is not None else guess:
+                    i = span
+                    continue
+            i = start + 1
+            continue
+        if commas:
+            cuts = [start, *commas, end]
+            group = _Group(tuple(_brace_parse(text[a + 1:b], work, depth + 1, choices)
+                                 for a, b in zip(cuts, cuts[1:])))
+        else:
+            group = _brace_sequence(text[start + 1:end])
+            if group is None:
+                i = start + 1
+                continue
+        if start > lit:
+            nodes.append(text[lit:start])
+        nodes.append(group)
+        i = lit = end + 1
+    if lit < len(text) or not nodes:
+        nodes.append(text[lit:])
+    return tuple(nodes)
+
+
+def _brace_count(nodes: tuple) -> int:
+    """How many words `nodes` makes, saturating just past `_WORD_CAP`;
+    past it too when a sequence was cut."""
+    total = 1
+    for node in nodes:
+        if isinstance(node, _Group):
+            if node.cut:
+                return _WORD_CAP + 1
+            total *= min(sum(_brace_count(alt) for alt in node.alts), _WORD_CAP + 1)
+            if total > _WORD_CAP:
+                return _WORD_CAP + 1
+    return total
+
+
+def _brace_all(nodes: tuple) -> list[str]:
+    """Every word `nodes` makes, in bash's order."""
+    words = [""]
+    for node in nodes:
+        if isinstance(node, _Group):
+            alts = [w for alt in node.alts for w in _brace_all(alt)]
+            words = [w + a for w in words for a in alts]
+        else:
+            words = [w + node for w in words]
+    return words
+
+
+def _brace_first(nodes: tuple, last: bool = False) -> str:
+    """The word made by taking every group's first (or last) alternative."""
+    return "".join(_brace_first(n.alts[-1 if last else 0], last) if isinstance(n, _Group)
+                   else n for n in nodes)
+
+
+def _brace_samples(nodes: tuple, limit: int) -> list[str]:
+    """A bounded sample of the words `nodes` makes, for an expansion too
+    large to judge whole: every alternative of every group at least once,
+    the others at their first. Linear in the alternatives, not their
+    product."""
+    base = [_brace_first((n,)) for n in nodes]
+    out = [_brace_first(nodes), _brace_first(nodes, last=True)]
+    for k, node in enumerate(nodes):
+        if not isinstance(node, _Group):
+            continue
+        head, tail = "".join(base[:k]), "".join(base[k + 1:])
+        for alt in node.alts:
+            for word in _brace_samples(alt, limit - len(out)) if any(
+                    isinstance(n, _Group) for n in alt) else [_brace_first(alt)]:
+                out.append(head + word + tail)
+                if len(out) >= limit:
+                    return out
+    return out
+
+
+def _brace_word(word: str) -> tuple[list[str], bool]:
+    """(the words bash's brace expansion makes of `word`, its first reading
+    (`_brace_readings`), whether it was too large to judge whole)."""
+    readings, burst = _brace_readings(word)
+    return readings[0], burst
+
+
+def _brace_readings(word: str) -> tuple[list[list[str]], bool]:
+    """(every reading of `word` — the words its brace expansion makes, once
+    for each answer to the choices bash's rule makes and this module only
+    guesses, the guess first — whether it was too large to judge whole:
+    past `_READINGS` readings, or past the cap in one). `word` carries
+    `_BRACE_MARK`s; the words returned do too."""
+    if "{" not in word:
+        return [[word]], False
+    readings: list[list[str]] = []
+    burst = False
+    queue: list[tuple] = [()]
+    while queue and len(readings) < _READINGS:
+        fixed = queue.pop(0)
+        choices = _Choices(fixed)
+        try:
+            nodes = _brace_parse(word, [_BRACE_WORK], 0, choices)
+        except _Burst:
+            # Not parsed: the word as written, and a name inside the folder its
+            # text before the first brace lies in.
+            readings.append([word] + _brace_inside(word[:word.index("{")]))
+            return readings, True
+        words, big = _brace_nodes(word, nodes)
+        burst = burst or big
+        if words not in readings:
+            readings.append(words)
+        used = choices.used
+        queue += [tuple(used[:k]) + (not used[k],) for k in range(len(fixed), len(used))]
+    return readings, burst or bool(queue)
+
+
+def _brace_nodes(word: str, nodes: tuple) -> tuple[list[str], bool]:
+    """The words one parse of `word` makes; past the cap, a bounded sample
+    (`_brace_samples`) plus a name inside their shared folder."""
+    if len(nodes) == 1 and not isinstance(nodes[0], _Group):
+        return [word], False
+    if _brace_count(nodes) <= _WORD_CAP:
+        words = _brace_all(nodes)
+        burst = False
+    else:
+        words = _brace_samples(nodes, _WORD_CAP)
+        words += _brace_inside(nodes[0] if isinstance(nodes[0], str) else "")
+        burst = True
+    # bash drops a word that brace expansion leaves empty (`{,}` alone).
+    return [w for w in words if w], burst
+
+
+def _brace_inside(head: str) -> list[str]:
+    """For an expansion too large to judge: a name standing for every word
+    it makes, inside the folder they all share (the text before the first
+    brace, up to its last `/`), so a folder in a protected tree is seen.
+    The name is one no file has."""
+    if "/" not in head:
+        return []
+    return [head[:head.rindex("/") + 1] + "\ue024"]
+
+
+def _brace_words(tokens: list[str], names: frozenset[str] = frozenset()
+                 ) -> tuple[list[str], bool]:
+    """The first reading of `_brace_lines`."""
+    lines, burst = _brace_lines(tokens, names)
+    return lines[0], burst
+
+
+def _brace_lines(tokens: list[str], names: frozenset[str] = frozenset()
+                 ) -> tuple[list[list[str]], bool]:
+    """`tokens` (split from marked text) brace-expanded and unmarked — one
+    line of words for each reading (`_brace_readings`: the guess, then each
+    word's other readings in turn) — and whether the expansion was too large
+    to judge whole. Assignment words at the head of the command are not
+    expanded (bash does not). Past `_WORD_CAP` words in a line, each
+    expanded word is thinned in place (`_thin`): order kept, so a copy's
+    destination stays last, and a word naming one of `names` (the protected
+    files') kept."""
+    per_token: list[list[list[str]]] = []
+    burst = False
+    head = True
+    for token in tokens:
+        if head and rules.ASSIGNMENT.fullmatch(token):
+            per_token.append([[token.translate(_BRACE_UNMARK)]])
+            continue
+        head = False
+        readings, big = _brace_readings(token)
+        burst = burst or big
+        per_token.append([[w.translate(_BRACE_UNMARK) for w in words] for words in readings])
+    base = [readings[0] for readings in per_token]
+    lines = [base]
+    for k, readings in enumerate(per_token):
+        for words in readings[1:]:
+            lines.append(base[:k] + [words] + base[k + 1:])
+    combined = 1
+    for readings in per_token:
+        combined *= len(readings)
+    if combined > len(lines) or len(lines) > _READINGS:
+        burst = True            # not every mix of the words' readings was made
+        lines = lines[:_READINGS]
+    out = []
+    for line in lines:
+        if sum(len(words) for words in line) > _WORD_CAP:
+            burst = True
+            many = sum(1 for words in line if len(words) > 1) or 1
+            room = max(4, _WORD_CAP // many)
+            line = [_thin(words, room, names) if len(words) > 1 else words for words in line]
+        out.append([w for words in line for w in words])
+    return out, burst
+
+
+def _thin(words: list[str], room: int, names: frozenset[str]) -> list[str]:
+    """At most about `room` of `words`, in their order: the first and the
+    last, every one that names a protected file, then evenly spaced."""
+    if len(words) <= room:
+        return words
+    keep = {0, len(words) - 1}
+    keep |= {i for i, w in enumerate(words) if any(name in w for name in names)}
+    step = max(1, len(words) // room)
+    for i in range(0, len(words), step):
+        if len(keep) >= room:
+            break
+        keep.add(i)
+    return [words[i] for i in sorted(keep)]
+
+
+def _brace_target(word: str) -> tuple[list[str], bool]:
+    """A redirect's word, as the paths it may open: every word its brace
+    expansion makes (bash calls more than one ambiguous, but zsh opens them
+    all), unquoted."""
+    marked = _mark_brace_quoting(word)
+    tokens = rules._tokens(marked)
+    if not tokens:
+        return [], False
+    readings, burst = _brace_readings(tokens[0])
+    out: list[str] = []
+    for words in readings:
+        out += [w.translate(_BRACE_UNMARK) for w in words if w not in out]
+    return out, burst
+
+
+# bash's character classes, for `[[:alpha:]]` in a glob.
+_GLOB_CLASSES = {
+    "alpha": "a-zA-Z", "digit": "0-9", "alnum": "a-zA-Z0-9", "upper": "A-Z", "lower": "a-z",
+    "space": r"\s", "blank": r" \t", "xdigit": "0-9A-Fa-f", "word": r"\w",
+    "punct": r"!-/:-@\[-`{-~", "cntrl": r"\x00-\x1f\x7f", "print": r"\x20-\x7e",
+    "graph": r"\x21-\x7e",
+}
+
+
+def _glob_bracket(p: str, i: int) -> tuple[str | None, int]:
+    """The regex for the bracket expression at `p[i]` (`[`) and the index
+    after it, or (None, i + 1) when it does not close (a literal `[`)."""
+    n = len(p)
+    j = i + 1
+    negate = j < n and p[j] in "!^"
+    if negate:
+        j += 1
+    items: list[str] = []
+    first = True
+    wild = False            # a class this table does not know: any character
+    while j < n:
+        c = p[j]
+        if c == "]" and not first:
+            if wild:
+                return "[\\s\\S]", j + 1
+            if not items:
+                return ("[\\s\\S]" if negate else "(?!)"), j + 1
+            return ("[^" if negate else "[") + "".join(items) + "]", j + 1
+        first = False
+        if c == "[" and j + 1 < n and p[j + 1] in ":=.":
+            kind = p[j + 1]
+            end = p.find(kind + "]", j + 2)
+            if end != -1:
+                name = p[j + 2:end]
+                if kind == ":" and name not in _GLOB_CLASSES:
+                    wild = True
+                else:
+                    items.append(_GLOB_CLASSES[name] if kind == ":" else re.escape(name))
+                j = end + 2
+                continue
+        if c == "\\" and j + 1 < n:
+            j += 1
+            c = p[j]
+        if j + 2 < n and p[j + 1] == "-" and p[j + 2] != "]":
+            hi = p[j + 2]
+            if ord(hi) >= ord(c):
+                items.append(re.escape(c) + "-" + re.escape(hi))
+            j += 3
+            continue
+        items.append(re.escape(c))
+        j += 1
+    return None, i + 1
+
+
+def _glob_variants(p: str, limit: int = _GLOB_ALTS) -> list[str]:
+    """`p` with its extglob groups written out as plain patterns: `@(a|b)`
+    as `a` and `b`, `?(a)` as `` and `a`; `*(…)`, `+(…)` and `!(…)` as `*`
+    (wider than bash, never narrower). Past `limit` variants, `*`."""
+    for k in range(len(p) - 1):
+        if p[k] in "?*+@!" and p[k + 1] == "(":
+            end = _span_end(p, k + 1)
+            if end > len(p) or p[end - 1] != ")":
+                return [p]
+            inner = p[k + 2:end - 1]
+            alts, depth, start = [], 0, 0
+            for m, ch in enumerate(inner):
+                depth += {"(": 1, ")": -1}.get(ch, 0)
+                if ch == "|" and depth == 0:
+                    alts.append(inner[start:m])
+                    start = m + 1
+            alts.append(inner[start:])
+            if p[k] == "@":
+                fill = alts
+            elif p[k] == "?":
+                fill = [""] + alts
+            else:
+                fill = ["*"]
+            out: list[str] = []
+            for alt in fill:
+                for variant in _glob_variants(p[:k] + alt + p[end:], limit):
+                    if variant not in out:
+                        out.append(variant)
+                    if len(out) > limit:
+                        return ["*"]
+            return out
+    return [p]
+
+
+def _glob_regex(p: str) -> re.Pattern:
+    """A plain bash pattern (no extglob) as a regex that cannot backtrack
+    badly: between stars each run is matched at its first place, as
+    `fnmatch.translate` does, which is exact for glob semantics."""
+    chunks: list[list[str]] = [[]]
+    i, n = 0, len(p)
+    while i < n:
+        c = p[i]
+        if c == "*":
+            if chunks[-1] or len(chunks) == 1:
+                chunks.append([])
+            i += 1
+        elif c == "?":
+            chunks[-1].append(".")
+            i += 1
+        elif c == "[":
+            frag, i = _glob_bracket(p, i)
+            chunks[-1].append(frag if frag is not None else re.escape("["))
+        elif c == "\\" and i + 1 < n:
+            chunks[-1].append(re.escape(p[i + 1]))
+            i += 2
+        else:
+            chunks[-1].append(re.escape(c))
+            i += 1
+    parts = ["".join(chunks[0])]
+    for k, chunk in enumerate(chunks[1:], 1):
+        fixed = "".join(chunk)
+        if k == len(chunks) - 1:
+            parts.append(".*" + fixed)
+        else:
+            parts.append(f"(?>.*?{fixed})")
+    return re.compile("".join(parts), re.S | re.I)
+
+
+_GLOB_COMPILED: dict[str, tuple[re.Pattern, ...]] = {}
+
+
+def _glob_compiled(pattern: str) -> tuple[re.Pattern, ...]:
+    found = _GLOB_COMPILED.get(pattern)
+    if found is None:
+        found = tuple(_glob_regex(v) for v in _glob_variants(pattern))
+        if len(_GLOB_COMPILED) < 4096:
+            _GLOB_COMPILED[pattern] = found
+    return found
+
+
+def _part_match(pattern: str, name: str) -> bool:
+    """Whether bash's pattern `pattern` (one path component) may match
+    `name`. Wider than bash on purpose: a leading dot is matched (dotglob
+    may be on) and letters match either case (nocaseglob)."""
+    if not _GLOBBY.search(pattern):
+        return pattern == name
+    return any(rx.fullmatch(name) for rx in _glob_compiled(pattern))
+
+
+def _glob_parts(text: str) -> tuple[str, ...]:
+    """An absolute glob path as components, the part before its first glob
+    component resolved through its symlinks."""
+    parts = Path(text).parts
+    k = next((i for i, p in enumerate(parts) if _GLOBBY.search(p)), len(parts))
+    out = list(_resolve(Path(*parts[:k])).parts)
+    for part in parts[k:]:
+        if part == "..":
+            # `*/..` is the folder before it (when anything matches): wider
+            # than bash, never narrower; what is on disk is walked as written.
+            if len(out) > 1:
+                out.pop()
+        elif part not in ("", "."):
+            out.append(part)
+    return tuple(out)
+
+
+def _glob_relate(pattern: tuple[str, ...], target: tuple[str, ...]
+                 ) -> tuple[bool, bool, set[int]]:
+    """How a glob path may relate to `target` (both as components): (it may
+    be `target`, it may lie below it, the `j`s where it may be
+    `target[:j]` — a folder above it). `**` is any number of components."""
+    exact = below = False
+    above: set[int] = set()
+    seen: set[tuple[int, int]] = set()
+    stack = [(0, 0)]
+    while stack:
+        i, j = stack.pop()
+        if (i, j) in seen:
+            continue
+        seen.add((i, j))
+        if i == len(pattern):
+            if j == len(target):
+                exact = True
+            else:
+                above.add(j)
+            continue
+        if j == len(target):
+            below = True
+            if pattern[i] == "**":
+                stack.append((i + 1, j))
+            continue
+        if pattern[i] == "**":
+            stack.append((i + 1, j))
+            stack.append((i, j + 1))
+        elif _part_match(pattern[i], target[j]):
+            stack.append((i + 1, j + 1))
+    return exact, below, above
+
+
+def _glob_fs(text: str) -> tuple[tuple[str, ...], bool]:
+    """(the existing paths the absolute glob `text` expands to, whether the
+    walk finished within its bounds)."""
+    return _memo(("glob_fs", text), lambda: _glob_fs_now(text))
+
+
+def _glob_fs_now(text: str) -> tuple[tuple[str, ...], bool]:
+    parts = Path(text).parts
+    current = [parts[0]] if parts else []
+    budget = [_GLOB_FS_ENTRIES]
+
+    def entries(folder: str) -> list | None:
+        """The folder's entries, or None once the walk's budget is spent."""
+        out = []
+        try:
+            with os.scandir(folder) as it:
+                for entry in it:
+                    budget[0] -= 1
+                    if budget[0] < 0:
+                        return None
+                    out.append(entry)
+        except OSError:
+            pass
+        return out
+
+    def is_dir(entry) -> bool:
+        try:
+            return entry.is_dir()
+        except OSError:
+            return False
+
+    for k, part in enumerate(parts[1:], 1):
+        last = k == len(parts) - 1
+        if not _GLOBBY.search(part):
+            current = [os.path.join(c, part) for c in current]
+            continue
+        found: list[str] = []
+        for folder in current:
+            if part == "**":
+                # Itself and every folder below it (a symlinked folder is
+                # met, as `*` would meet it, but not walked into).
+                stack = [folder]
+                found.append(folder)
+                while stack:
+                    listed = entries(stack.pop())
+                    if listed is None:
+                        return tuple(found[:_GLOB_FS_MATCHES]), False
+                    for entry in listed:
+                        if is_dir(entry):
+                            found.append(entry.path)
+                            if not entry.is_symlink():
+                                stack.append(entry.path)
+                        elif last:
+                            found.append(entry.path)
+            else:
+                listed = entries(folder)
+                if listed is None:
+                    return tuple(found[:_GLOB_FS_MATCHES]), False
+                for entry in listed:
+                    if _part_match(part, entry.name) and (last or is_dir(entry)):
+                        found.append(entry.path)
+            if len(found) > _GLOB_FS_MATCHES:
+                return tuple(found[:_GLOB_FS_MATCHES]), False
+        current = found
+        if not current:
+            return (), True
+    return tuple(current), True
 
 
 # --- credential env files (ENV-1, 2026-10-12) ---------------------------------
@@ -473,13 +1266,21 @@ def _redirect_targets(segment: str) -> list[str]:
     until 2026-10-09, and it had drifted: after a duplication it skipped one
     character too many (`2>&1>FILE`, `>&2>FILE` never saw FILE), and it read
     `>& FILE` with a space as a redirect to nothing."""
+    return _redirect_words(segment)[0]
+
+
+def _redirect_words(segment: str) -> tuple[list[str], bool]:
+    """(`_redirect_targets`, whether a target's brace expansion was too
+    large to judge whole). A target is every word its braces make:
+    `> {/tmp/a,<allowlist>}` is ambiguous to bash but opens both in zsh."""
     targets: list[str] = []
+    burst = False
     for redirect in rules.redirections(segment):
         if redirect.writes and redirect.word:
-            word = rules._tokens(redirect.word)
-            if word:
-                targets.append(word[0])
-    return targets
+            words, big = _brace_target(redirect.word)
+            targets += words
+            burst = burst or big
+    return targets, burst
 
 
 def _here_strings(segment: str) -> list[str]:
@@ -595,6 +1396,7 @@ class _Seen:
     touches: list[Touch] = field(default_factory=list)
     writes: bool = False                           # runs a writing stem
     read: set[Path] = field(default_factory=set)   # protected files only read
+    burst: bool = False                            # a brace expansion too large to judge whole
 
 
 def _env_split(rest: list[str], k: int) -> tuple[str, int] | None:
@@ -734,15 +1536,17 @@ def _shell_strings(tokens: list[str]) -> tuple[list[str], bool]:
     return [], stdin or not operands
 
 
-def _strip_closers(tokens: list[str]) -> list[str]:
+def _strip_closers(tokens: list[str], braces: bool = True) -> list[str]:
     """`(cd d; cp a b)` leaves `b)` as the last token; the paren is syntax.
-    Only an *unbalanced* closer is stripped, so `${NOTHING}` keeps its brace."""
-    tokens = [t for t in tokens if t not in (")", "}")]
+    Only an *unbalanced* closer is stripped, so `${NOTHING}` keeps its brace.
+    `braces` False: parentheses only (before brace expansion, `_segment`)."""
+    closers = (")", "}") if braces else (")",)
+    tokens = [t for t in tokens if t not in closers]
     if tokens:
         last = tokens[-1]
         while last.endswith(")") and last.count(")") > last.count("("):
             last = last[:-1]
-        while last.endswith("}") and last.count("}") > last.count("{"):
+        while braces and last.endswith("}") and last.count("}") > last.count("{"):
             last = last[:-1]
         tokens[-1] = last
     return tokens
@@ -863,7 +1667,10 @@ def _redirect_touches(segment: str, local: _State, protected: set[Path], ids: di
                       seen: _Seen) -> None:
     """Every protected file a redirect in this segment writes, into `seen`:
     gate state, the installed HUD's tree, and credential env files."""
-    _target_touches(_redirect_targets(segment), local, protected, ids, seen, "a redirect")
+    targets, burst = _redirect_words(segment)
+    _target_touches(targets, local, protected, ids, seen, "a redirect")
+    if burst:
+        seen.touches.append(_opaque("a redirect's brace expansion makes too many words to judge"))
 
 
 def _target_touches(targets, local: _State, protected: set[Path], ids: dict, seen: _Seen,
@@ -880,7 +1687,7 @@ def _target_touches(targets, local: _State, protected: set[Path], ids: dict, see
             seen.touches.append(env if certain else replace(env, certain=False))
         if text is None:
             for path in protected:
-                if Path(target).name == path.name:
+                if _part_match(Path(target).name, path.name):
                     seen.touches.append(Touch(path, False, f"{what} into {target}"))
             continue
         hit = _exact(text, protected, ids)
@@ -936,7 +1743,6 @@ def _edits_in_place(stem: str, tokens: list[str]) -> bool:
 
 def _segment(segment: str, state: _State, protected: set[Path], ids: dict,
              depth: int) -> _Seen:
-    seen = _Seen()
     segment = _strip_comment(segment)
     # The command's own words: every redirection — `2>&1`, `> /dev/null`,
     # `{fd}>file`, a here-string — is cut out of the text first, so a copier's
@@ -944,18 +1750,51 @@ def _segment(segment: str, state: _State, protected: set[Path], ids: dict,
     # ALLOWLIST 2>&1` the last token was `2>&1`, and the allowlist read as a
     # copy *source*.) Redirect targets are judged on the full text below.
     words_only = rules.strip_redirections(segment)
+    # As bash makes its words (2026-10-25): quoted brace syntax is marked as
+    # text, and after the split every unquoted brace expression is expanded
+    # — `cp {/tmp/x,<allowlist>}` is `cp /tmp/x <allowlist>`, and each word
+    # is judged on its own.
+    marked = _mark_brace_quoting(words_only)
     try:
-        raw = shlex.split(words_only)
+        raw = shlex.split(marked)
         parsed = True
     except ValueError:
-        raw, parsed = words_only.split(), False
-    raw = _strip_closers(raw)
+        raw, parsed = marked.split(), False
+    # A subshell's `)` goes before the expansion (`(tee {A,b})` writes A); a
+    # `}` glued to a word is never a group's closer in bash, and before the
+    # expansion its stripping turned `{/tmp/y},A}` (`/tmp/y}` and A) into
+    # text that expands to nothing.
+    lines, burst = _brace_lines(_strip_closers(raw, braces=False),
+                                frozenset(p.name for p in protected))
+    seen = _Seen(burst=burst)
+    if len(lines) == 1:
+        _segment_words(segment, _strip_closers(lines[0]), parsed, state, protected, ids,
+                       depth, seen)
+        return seen
+    # Several readings (`_brace_readings`): each is judged, and a folder or a
+    # variable they leave differently is unknown after the segment.
+    cwd, variables = state.cwd, dict(state.variables)
+    for k, raw in enumerate(lines):
+        here = state if k == 0 else _State(cwd, dict(variables), state.budget)
+        _segment_words(segment, _strip_closers(raw), parsed, here, protected, ids, depth, seen)
+        if k:
+            if here.cwd != state.cwd:
+                state.cwd = None
+            for name in set(state.variables) | set(here.variables):
+                if state.variables.get(name) != here.variables.get(name):
+                    state.variables.pop(name, None)
+    return seen
+
+
+def _segment_words(segment: str, raw: list[str], parsed: bool, state: _State,
+                   protected: set[Path], ids: dict, depth: int, seen: _Seen) -> None:
+    """One reading of a segment's words (`_segment`), into `seen`."""
     if not raw:
         # A redirect with no command still opens its target for writing:
         # `>.env.x`, or the `} > .env.x` left of `{ …; } > .env.x` (ENV-1
         # review, NIT 3).
         _redirect_touches(segment, state, protected, ids, seen)
-        return seen
+        return
 
     # `D=~/.config/jarvis` on its own, or `export D=…`: remembered for the
     # segments after it, which is when the shell would expand it.
@@ -965,23 +1804,34 @@ def _segment(segment: str, state: _State, protected: set[Path], ids: dict,
         _redirect_touches(segment, state, protected, ids, seen)
         for word in words:
             _assign(word, state)
-        return seen
+        return
 
     tokens, chdir, lead = _peel(raw, state)
     if not tokens:
         _redirect_touches(segment, state, protected, ids, seen)
-        return seen
+        return
     stem = rules._basename(tokens[0])
 
     if stem in ("cd", "pushd", "popd"):
-        if stem == "popd" or (len(tokens) > 1 and tokens[1] == "-"):
+        # cd's options (`-P`, `-L`, `-e`, `-@`, `--`) are not its folder: `cd
+        # -P <gate folder>` was read as a folder named `-P` (2026-10-25).
+        # Several operands (a brace expansion's) fail in bash and mean
+        # something else in zsh: the folder is then unknown.
+        rest = tokens[1:]
+        while rest and rest[0].startswith("-") and rest[0] != "-":
+            ended = rest[0] == "--"
+            rest = rest[1:]
+            if ended:
+                break
+        if stem == "popd" or (rest and rest[0] == "-") or len(rest) > 1 or (
+                stem == "pushd" and rest and rest[0][:1] in "+-"):
             state.cwd = None
-        elif len(tokens) == 1:
-            state.cwd = Path.home()
+        elif not rest:
+            state.cwd = Path.home() if stem == "cd" else None
         else:
-            target = _expand(tokens[1], state)
+            target = _expand(rest[0], state)
             state.cwd = Path(target) if target else None
-        return seen
+        return
 
     local = _State(chdir if chdir is not None else state.cwd, state.variables, state.budget)
 
@@ -992,7 +1842,12 @@ def _segment(segment: str, state: _State, protected: set[Path], ids: dict,
     bare = rules.command_start(words)
     _command(tokens, lead, parsed, segment, local, state, protected, ids, depth, seen, 0,
              wrapped=len(lead) < len(bare))
-    return seen
+    if seen.burst and seen.writes:
+        # Past the cap only a sample of the words (or of the readings) was
+        # judged: a write is never let through on a sample (fail closed:
+        # asked, never covered).
+        seen.touches.append(_opaque(f"a brace expansion makes more than {_WORD_CAP} words "
+                                    f"or {_READINGS} readings, too many to judge"))
 
 
 def _assign(word: str, state: _State) -> None:
@@ -1276,7 +2131,7 @@ def _command(tokens: list[str], lead: list[str], parsed: bool, segment: str, loc
             # `$UNSET/allowlist.json`, or a relative name after a `cd` that
             # could not be followed: the right name, an unknowable place.
             for path in protected:
-                if Path(operand).name == path.name:
+                if _part_match(Path(operand).name, path.name):
                     seen.touches.append(Touch(path, False, f"{stem} given {operand}"))
             continue
         hit = _exact(text, protected, ids)
@@ -1301,7 +2156,7 @@ def _command(tokens: list[str], lead: list[str], parsed: bool, segment: str, loc
                 lands = (kind == "writer" and (len(rel) == 1 or stem == "find")
                          and provable(operand))
                 seen.touches.append(Touch(path, lands, f"{stem} into {text}"))
-            elif any(_GLOB.search(n) and (fnmatch(path.name, n) or fnmatch(first, n))
+            elif any(_GLOBBY.search(n) and (_part_match(n, path.name) or _part_match(n, first))
                      for n in other_names):
                 seen.touches.append(Touch(path, False, f"{stem} into {text}"))
             elif len(rel) <= 2:
@@ -1311,7 +2166,7 @@ def _command(tokens: list[str], lead: list[str], parsed: bool, segment: str, loc
                 # -rf`, `mv` away, `mv`/`cp` a folder of one's own into its
                 # place) provably replaces them (`phone_dirs`).
                 lands = (len(rel) == 1 and kind == "writer" and provable(operand)
-                         and path.parent in phone_dirs() and _resolve(text) == path.parent)
+                         and path.parent in phone_dirs() and _may_be(text, path.parent))
                 seen.touches.append(
                     Touch(path, lands, f"{stem} on {text}, which holds {path.name}"))
             elif any(o.endswith(("/.", "/*")) or (stem == "rsync" and o.endswith("/"))
@@ -1384,6 +2239,7 @@ def _analyse(command: str, state: _State, protected: set[Path], ids: dict,
     command = _ansi_c(rules.join_continuations(command))
     budget = state.budget
     inner, overflow = _substitutions(command, max(_MAX_SPANS - budget.spans, 0))
+    named: set[Path] = set()        # protected files a substitution names
     if inner and depth >= _MAX_DEPTH:
         total.touches.append(_opaque("substitutions nested too deeply to judge"))
     else:
@@ -1392,6 +2248,7 @@ def _analyse(command: str, state: _State, protected: set[Path], ids: dict,
             nested = _analyse(text, _State(state.cwd, dict(state.variables), budget),
                               protected, ids, depth + 1)
             total.touches += nested.touches
+            named |= nested.read
     if overflow:
         total.touches.append(_opaque(f"more than {_MAX_SPANS} substitutions, too many to judge"))
     parts = [_segment(s, state, protected, ids, depth) for s in rules.segments(command)]
@@ -1399,11 +2256,23 @@ def _analyse(command: str, state: _State, protected: set[Path], ids: dict,
         total.touches += part.touches
         total.writes = total.writes or part.writes
         total.read |= part.read
+        others_write = any(other.writes for j, other in enumerate(parts) if j != k)
         # `echo ~/.config/jarvis/allowlist.json | xargs rm`: named in one
         # segment, written by another. Not provable, so not certain.
-        if part.read and any(other.writes for j, other in enumerate(parts) if j != k):
+        if part.read and others_write:
             total.touches += [Touch(p, False, f"names {p.name} beside a command that writes")
                               for p in part.read]
+        # A reader whose brace expansion was only sampled may name more
+        # than was judged, for a writer beside it (`echo {…} | xargs rm`).
+        if part.burst and others_write:
+            total.touches.append(_opaque(f"a brace expansion makes more than {_WORD_CAP} "
+                                         "words beside a command that writes"))
+    # `cp x $(echo ~/.config/jarvis/allowlist.json)`: a substitution that
+    # names a protected file, in a line that writes, may hand it to the
+    # write (2026-10-25). Not provable, so not certain.
+    if named and total.writes:
+        total.touches += [Touch(p, False, f"names {p.name} in a substitution in a line that "
+                                "writes") for p in named]
     return total
 
 

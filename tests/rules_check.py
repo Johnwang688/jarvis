@@ -4025,6 +4025,284 @@ def cost_checks() -> None:
           "covered past the budget")
 
 
+# --- brace and glob spellings (2026-10-25) ---------------------------------
+#
+# `cp {/tmp/x,<allowlist>}` and `cp /tmp/x <gate>{,}/allowlist.json` are a
+# plain copy onto the allowlist in bash, and were ALLOW under `rules.decide`
+# and `static_verdict` on main a7b6ecb5; a glob's components were dropped
+# (`<D>/*/x` judged as `<D>/x`) or the glob skipped (`rm -rf <D>/r*`).
+
+# bash 5.3's own answers (each checked with `printf '[%s]' WORD`).
+BRACE_BASH = [
+    ("x{a,b}y", ["xay", "xby"]),
+    ("a{,}", ["a", "a"]),
+    ("{,}", []),
+    ("{a,b}{1,2}", ["a1", "a2", "b1", "b2"]),
+    ("{a,b}c{d,e}", ["acd", "ace", "bcd", "bce"]),
+    ("{a,b{c,d}}", ["a", "bc", "bd"]),
+    ("{a,{b}c}", ["a", "{b}c"]),
+    ("{1..10..3}", ["1", "4", "7", "10"]),
+    ("{01..10..4}", ["01", "05", "09"]),
+    ("{3..1}", ["3", "2", "1"]),
+    ("{-1..2}", ["-1", "0", "1", "2"]),
+    ("{a..e..2}", ["a", "c", "e"]),
+    ("{0..2}{x,}", ["0x", "0", "1x", "1", "2x", "2"]),
+    ("${H}{a,b}", ["${H}a", "${H}b"]),
+    # bash's own corners: a `}` before any comma is text; a `{` that never
+    # closes is text; `{}` at the start is text; `{N..M…}` that never closes
+    # is passed over whole.
+    ("{a}", ["{a}"]),
+    ("{a},b}", ["a}", "b"]),
+    ("{a}b,c}", ["a}b", "c"]),
+    ("{1..3}x}", ["1x}", "2x}", "3x}"]),
+    ("{a}{b,c}", ["{a}b", "{a}c"]),
+    ("{x{1..2}}", ["{x1}", "{x2}"]),
+    ("{{a,b}", ["{a", "{b"]),
+    ("{a,b", ["{a,b"]),
+    ("{}{a,b}", ["{}a", "{}b"]),
+    ("{1..12{01..3}a}{a,b}", ["{1..12{01..3}a}a", "{1..12{01..3}a}b"]),
+    ("{1..2{a,b}", ["{1..2a", "{1..2b"]),
+    ("{1..{a,b}}", ["{1..a}", "{1..b}"]),
+]
+# Whole lines, quoting included: quoted and escaped braces never expand.
+BRACE_BASH_QUOTED = [
+    ("'{a,b}'", ["{a,b}"]),
+    ("\\{a,b\\}", ["{a,b}"]),
+    ('"{a,b}"x{1,2}', ["{a,b}x1", "{a,b}x2"]),
+    ("'$'{a,b}", ["$a", "$b"]),
+    ("{a,'b,c'}", ["a", "b,c"]),
+    ("{a\\,b,c}", ["a,b", "c"]),
+]
+# (pattern, name, may match) — bash's pattern rules, one component.
+GLOB_PARTS = [
+    ("*", "inbox", True), ("i*", "inbox", True), ("?nbox", "inbox", True),
+    ("[i]nbox", "inbox", True), ("[^x]nbox", "inbox", True), ("[!x]nbox", "inbox", True),
+    ("[!i]nbox", "inbox", False), ("[^i]nbox", "inbox", False),
+    ("[[:alpha:]]nbox", "inbox", True), ("[[:digit:]]nbox", "inbox", False),
+    ("[h-j]nbox", "inbox", True), ("[a-h]nbox", "inbox", False),
+    ("@(inbox|x)", "inbox", True), ("@(x|y)", "inbox", False), ("?(i)nbox", "inbox", True),
+    ("+(i|n|b|o|x)", "inbox", True), ("!(x)", "inbox", True),
+    ("x*", "inbox", False), ("*x", "inbox", True), ("in*o?", "inbox", True),
+    ("inbox", "inbox", True), ("inbo", "inbox", False), ("[", "[", True),
+    ("allow*", "allowlist.json", True), ("*.json", "missed.jsonl", False),
+]
+
+
+def brace_glob_unit_checks() -> None:
+    import shlex
+    import time
+
+    from jarvis import protected_state as S
+
+    for word, expected in BRACE_BASH:
+        readings, burst = S._brace_readings(word)
+        assert not burst and expected in readings, (word, readings, expected)
+    # Where bash 5.3 passes over a `{` that never closes, or rescans after it,
+    # by a rule only guessed here, both readings are made: each of these is
+    # bash's own answer, and the other reading is there too.
+    for word, expected, other in (
+            ("{1{x,y}..3}", ["{1{x,y}..3}"], ["{1x..3}", "{1y..3}"]),
+            ("{1{01..3}..{a..c}}", ["{1{01..3}..{a..c}}"], None),
+            ("{x{1..2}}", ["{x1}", "{x2}"], ["{x{1..2}}"]),
+            ("{1..2{a,b}}", ["{1..2{a,b}}"], ["{1..2a}", "{1..2b}"])):
+        readings, burst = S._brace_readings(word)
+        assert not burst and expected in readings, (word, readings)
+        assert other is None or other in readings, (word, readings)
+    for line, expected in BRACE_BASH_QUOTED:
+        words, burst = S._brace_words(shlex.split(S._mark_brace_quoting(line)))
+        assert not burst and words == expected, (line, words, expected)
+    # Past the cap: a sample, flagged, never all of it, and quickly.
+    for word in ("{1..99999}", "{a..z}{a..z}{a..z}{a..z}{a..z}", "{,}" * 40,
+                 "{" * 5000 + "a,b" + "}" * 5000, "{1..2{" * 3000):
+        start = time.process_time()
+        words, burst = S._brace_word(word)
+        spent = time.process_time() - start
+        assert burst and len(words) <= S._WORD_CAP + 2, (word[:20], len(words))
+        assert spent < 1.0, (word[:20], spent)
+    # The sample holds every alternative of every group, and a word made
+    # only of them: `…allowlist.json{,}{,}…` past the cap still says it.
+    words, burst = S._brace_word("/g/allowlist.json" + "{,}" * 11)
+    assert burst and "/g/allowlist.json" in words, words[:3]
+    words, burst = S._brace_word("/g/{" + ",".join(f"f{i}" for i in range(40))
+                                 + ",allowlist.json}{a..z}{a..z}")
+    assert burst and any(w.startswith("/g/allowlist.json") for w in words)
+    for pattern, name, expected in GLOB_PARTS:
+        assert S._part_match(pattern, name) is expected, (pattern, name, expected)
+    # `**` is any number of folders; components are matched one by one.
+    rel = S._glob_relate
+    assert rel(("/", "h", "**", "a.json"), ("/", "h", ".config", "jarvis", "a.json"))[0]
+    assert rel(("/", "h", "**"), ("/", "h", "x", "y"))[0]
+    assert not rel(("/", "h", "*", "a.json"), ("/", "h", ".config", "jarvis", "a.json"))[0]
+    assert rel(("/", "h", "*", "*"), ("/", "h", "x"))[1]          # below it
+    assert 2 in rel(("/", "h"), ("/", "h", "x", "y"))[2]          # above it
+    # A pattern built to backtrack is matched in linear time.
+    start = time.process_time()
+    for _ in range(50):
+        S._part_match("*a" * 40 + "b", "a" * 250)
+    assert time.process_time() - start < 1.0
+    print(f"ok  brace and glob: {len(BRACE_BASH) + len(BRACE_BASH_QUOTED)} words expand as "
+          f"bash 5.3 does, {len(GLOB_PARTS)} patterns match as bash's do; past the cap a "
+          "flagged sample, never a hang")
+
+
+# Writes onto the allowlist spelled with braces, globs and bash's other
+# expansions: DENY under `static_verdict`, never covered, refused by
+# run_command. `{gate}` is the gate folder, `{allow}` the allowlist.
+BRACE_GLOB_DENY = [
+    "cp {{/tmp/x,{allow}}}",
+    "cp /tmp/x {gate}{{,}}/allowlist.json",
+    "cp /tmp/x {gate}/allow{{,}}list.json",
+    "cp /tmp/x {gate}/{{a,{{b,allowlist}}}}.json",
+    "cp /tmp/x {gate}/allowlist.json{{,}}{{,}}",
+    "cp /tmp/x ~/.config/jarvis{{,}}/allowlist.json",
+    "cp /tmp/x $HOME/.config/jarvis/{{allowlist.json,}}",
+    "{{cp,/tmp/x,{allow}}}",
+    "cp /tmp/x {{/tmp/y}},{allow}}}",        # `/tmp/y}` and the allowlist, in bash
+    "(tee {{{allow},zz}})",                   # a subshell's `)` is not part of the word
+    # A `{` that never closes, over a link named like it: bash leaves the
+    # word as written, `..` then climbs out of the link into the gate.
+    "cp /tmp/x ~/{{1{{x,y}}..3}}/../allowlist.json",
+    "mv /tmp/x {gate}/{{allowlist.json,}}",
+    "echo '[]' > {{/tmp/a,{allow}}}",
+    "echo '[]' >{gate}{{,}}/allowlist.json",
+    "tee {{/tmp/a,{allow}}} < /tmp/x",
+    "tee ~/.config/{{jarvis,zz}}/allowlist.json",
+    "cp -t {gate}{{,}} /tmp/allowlist.json",
+    "cp --target-directory={gate}{{,}} /tmp/allowlist.json",
+    "install -m600 /tmp/x {gate}{{,}}/allowlist.json",
+    "ln -sf /tmp/evil {gate}/{{allowlist,x}}.json",
+    "rm {gate}/{{allowlist,zz}}.json",
+    "rsync /tmp/x {gate}/allow{{list,}}.json",
+    "truncate -s0 {gate}/{{allowlist,zz}}.json",
+    "dd if=/tmp/x of={gate}/allow{{list,}}.json",
+    "find /tmp -name x -exec cp {{}} {gate}{{,}}/allowlist.json \\;",
+    "bash -c 'cp /tmp/x {gate}{{,}}/allowlist.json'",
+    "cd {gate} && tee {{allowlist,zz}}.json",
+    "cd ~/.config && cp /tmp/x jarvis{{,}}/allowlist.json",
+    "cp /tmp/x ~/gate-link{{,}}/allowlist.json",                # a symlink to the folder
+    "tee ~/gate-link/{{allowlist,zz}}.json",
+    # globs: components matched with bash's rules, `**`, and on disk
+    "cp /tmp/x ~/**/allowlist.json",
+    "cp /tmp/x ~/.config/[^x]arvis/allowlist.json",
+    "cp /tmp/x ~/.config/[[:alpha:]]arvis/allowlist.json",
+    "cp /tmp/x ~/.config/@(jarvis)/allowlist.json",
+    "cp /tmp/x ~/gate-l*/allowlist.json",
+    "cp /tmp/x ~/gate-l?nk/allow*.json",
+    # tilde and $PWD are where the line has moved to; cd's options are not it
+    "cd {gate} && cp /tmp/x ~+/allowlist.json",
+    "cd {gate} && cp /tmp/x $PWD/allowlist.json",
+    "cd -P {gate} && cp /tmp/x allowlist.json",
+    "cd -- {gate} && cp /tmp/x allowlist.json",
+    # `..` after a symlink is the link target's parent (a link to a folder
+    # inside the gate's folder), as the kernel reads it, not the text's
+    "cp /tmp/x ~/sub-link/../allowlist.json",
+    "cp /tmp/x ~/sub-l*/../allowlist.json",
+    "echo x > ~/sub-link/../{{allowlist,zz}}.json",
+]
+# Might reach the gate's state, or too large to judge whole: asked, never
+# covered, never refused.
+BRACE_GLOB_ASK = [
+    "cp {{/tmp/x,{gate}/models.json}}",
+    "tee {gate}/{{models,zz}}.json",
+    "cp /tmp/x {gate}/{{a..c}}{{a..c}}{{a..c}}{{a..c}}{{a..c}}{{a..c}}{{a..c}}",
+    "cp /tmp/x {gate}/allowlist.json" + "{{,}}" * 11,
+    "cp /tmp/x {gate}/{{1..99999}}",
+    "cd {gate}{{,}} && cp /tmp/x allowlist.json",
+    "cd {gate} && cp /tmp/x ~-/allowlist.json",
+    "cp /tmp/x $UNSET/allow*.json",
+    "cp /tmp/x {data}/remote{{,}}/passkeys.json",
+    "mv {data}/r* /tmp/old",
+    "mv {data}/[r]emote /tmp/old",
+    "cp forged.json {data}/[^x]nbox/missed.jsonl",
+    "cp forged.json {data}/@(inbox)/missed.jsonl",
+    "echo x >> {data}/inbox{{,}}/missed.jsonl",
+    "cp src {data}/inbox{{,}}/",
+    "cp /tmp/x {hud}{{,}}/build-1/index.html",
+    "cp /tmp/x {hud_parent}/h*/x",
+    "cp /tmp/x {hud_parent}/*/build-1/index.html",
+]
+# Ordinary brace and glob use, and reads of the gate's files: the verdict
+# rules.decide gives, as on main.
+BRACE_GLOB_ORDINARY = [
+    "cat {gate}/{{allowlist,models}}.json",
+    "ls {gate}/*",
+    "head {data}/inbox/*",
+    "cp {gate}/{{allowlist,models}}.json /tmp/backup/",
+    "cp /tmp/x '{gate}/{{allowlist,x}}.json'",
+    "cp /tmp/x {gate}/\\{{allowlist,x\\}}.json",
+    "cp /tmp/x \"{gate}/{{allowlist,x}}.json\"",
+    "cp src/{{a,b}}.py /tmp/dst/",
+    "mkdir -p build/{{x,y}}",
+    "mkdir -p build/{{a..z}}/{{0..9}}",
+    "echo {{1..3}}",
+    "touch src/{{a,b,c}}.txt",
+    "cp src/*.py build/",
+    "mv build/{{old,new}}",
+    "ls src/**/*.py",
+    "git add src/{{a,b}}.py",
+    "cp -t build/ src/{{a,b}}.py",
+    "cp x '{{a,b}}'",
+]
+
+
+def brace_glob_gate_checks() -> None:
+    from jarvis import config, permissions, protected_state
+
+    with gate_home() as home:
+        saved = (config.V2_DATA_DIR, config.HUD_DIR, config.HUD_DIST)
+        data = home / ".local" / "share" / "jarvis" / "v2"
+        hud = home / ".local" / "share" / "jarvis" / "hud"
+        for folder in (data / "remote", data / "inbox", hud / "build-1",
+                       Path.cwd() / "src", Path.cwd() / "build"):
+            folder.mkdir(parents=True, exist_ok=True)
+        for file in (data / "remote" / "passkeys.json", data / "inbox" / "missed.jsonl",
+                     hud / "build-1" / "index.html"):
+            file.write_text("{}")
+        (config.ALLOWLIST_PATH.parent / "sub").mkdir()
+        (home / "sub-link").symlink_to(config.ALLOWLIST_PATH.parent / "sub",
+                                       target_is_directory=True)
+        (home / "{1{x,y}..3}").symlink_to(config.ALLOWLIST_PATH.parent / "sub",
+                                         target_is_directory=True)
+        config.V2_DATA_DIR, config.HUD_DIR, config.HUD_DIST = data, hud, hud
+        fill = {"allow": str(config.ALLOWLIST_PATH), "gate": str(config.ALLOWLIST_PATH.parent),
+                "data": str(data), "hud": str(hud), "hud_parent": str(hud.parent)}
+        try:
+            before = config.ALLOWLIST_PATH.read_text()
+            for raw in BRACE_GLOB_DENY:
+                command = raw.format(**fill)
+                assert permissions.static_verdict(command).decision == rules.DENY, command
+                touch = protected_state.command_touch(command)
+                assert touch is not None and touch.certain, (command, touch)
+                assert not permissions.allows("run_command", {"command": command}), command
+                with recorded() as ran:
+                    out = tools.dispatch("run_command",
+                                         json.dumps({"command": command, "reason": "r"}))
+                assert not ran and "Refused" in out.text, f"run_command ran: {command}"
+            assert config.ALLOWLIST_PATH.read_text() == before
+            for raw in BRACE_GLOB_ASK:
+                command = raw.format(**fill)
+                v = permissions.static_verdict(command)
+                assert v.decision == rules.ASK, (command, v)
+                assert protected_state.command_touch(command) is not None, command
+                assert not permissions.allows("run_command", {"command": command}), command
+            for raw in BRACE_GLOB_ORDINARY:
+                command = raw.format(**fill)
+                assert protected_state.command_touch(command) is None, command
+                assert permissions.static_verdict(command).decision == rules.decide(
+                    command).decision, f"ordinary work changed verdict: {command}"
+            # A credential env file spelled with braces is refused by name
+            # (`rules.decide`'s ENV-1 reading) as well.
+            env = ".env" + ".production"
+            for command in (f"cp /tmp/x {{a,{env}}}", f"echo x > {{/tmp/a,{env}}}",
+                            "cp /tmp/x .env{.production,}"):
+                assert rules.decide(command).decision == rules.DENY, command
+        finally:
+            config.V2_DATA_DIR, config.HUD_DIR, config.HUD_DIST = saved
+    print(f"ok  brace and glob: {len(BRACE_GLOB_DENY)} spellings of a write onto the allowlist "
+          f"refused and never covered, {len(BRACE_GLOB_ASK)} that may reach gate state or the "
+          f"installed HUD asked, {len(BRACE_GLOB_ORDINARY)} ordinary lines unchanged")
+
+
 def main() -> int:
     # Never read (or write) the owner's real allowlist from a test: `gate()`
     # consults it, so a stray entry would silently change what this suite
@@ -4062,6 +4340,8 @@ def main() -> int:
     env_write_checks()
     gate_state_edge_checks()
     gate_state_complexity_checks()
+    brace_glob_unit_checks()
+    brace_glob_gate_checks()
     daemon_and_rebuild_ops_checks()
     # First of the kill-rule sections: with the regex bound broken it fails
     # on its first slow pattern, where the others would hang on theirs.

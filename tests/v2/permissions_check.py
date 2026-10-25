@@ -637,6 +637,176 @@ def file_deny_checks():
            "nor is sorting it to stdout")
 
 
+# Every form below writes `{t}` (a protected file: `{f}` its folder, `{n}`
+# its name, `{p}` the folder above, `{d}` the folder's own name) in bash.
+# Each was ALLOW-able at layer 1 on main a7b6ecb5: brace expansion was not
+# read at all, and a glob's components were dropped or not matched with
+# bash's rules (`[^x]`, `[[:alpha:]]`, `@(…)`, `**`, a symlink matched on disk).
+BRACE_GLOB_FORMS = [
+    "cp {{/tmp/x,{t}}}",
+    "cp /tmp/x {f}{{,}}/{n}",
+    "cp /tmp/x {{{t},}}",
+    "cp /tmp/x {f}/{{zz,{{yy,{n}}}}}",
+    "{{cp,/tmp/x,{t}}}",
+    "cp /tmp/x {{/tmp/y}},{t}}}",
+    "(tee {{{t},zz}})",
+    "echo x > {{/tmp/a,{t}}}",
+    "echo x >>{f}{{,}}/{n}",
+    "tee {{/tmp/a,{t}}} < /tmp/x",
+    "cp -t {f}{{,}} /tmp/{n}",
+    "cp --target-directory={f}{{,}} /tmp/{n}",
+    "install -m600 /tmp/x {f}{{,}}/{n}",
+    "ln -sf /tmp/evil {f}/{{{n},zz}}",
+    "mv /tmp/x {{{t},}}",
+    "mv {f}{{,}}/{n} /tmp/stolen",
+    "rm {f}/{{{n},zz}}",
+    "rsync /tmp/x {f}{{,}}/{n}",
+    "dd if=/tmp/x of={f}{{,}}/{n}",
+    "find /tmp -name x -exec cp {{}} {f}{{,}}/{n} \\;",
+    "cd {f} && tee {{{n},zz}}",
+    "cd {p} && cp /tmp/x {d}{{,}}/{n}",
+    "bash -c 'cp /tmp/x {f}{{,}}/{n}'",
+    "cp /tmp/x {p}/*/{n}",
+    "cp /tmp/x {p}/?{d1}/{n}",
+    "cp /tmp/x {p}/[^x]{d1}/{n}",
+    "cp /tmp/x {p}/[[:alpha:]]{d1}/{n}",
+    "cp /tmp/x {p}/@({d})/{n}",
+    "cp /tmp/x {p}/**/{n}",
+    "mv {p}/*/{n} /tmp/stolen",
+    "cp /tmp/x {link}{{,}}/{n}",
+    "cp /tmp/x {linkp}/{linkd1}*/{n}",
+    "cp /tmp/x {sub}/../{n}",
+    "cp /tmp/x {linkp}/{subd1}*/../{n}",
+    "cp /tmp/x {linkp}/{{1{{x,y}}..3}}/../{n}",   # a link named like a `{` bash leaves alone
+]
+
+
+def brace_glob_checks():
+    """Brace and glob spellings of a write onto the gate's state (2026-10-25):
+    refused at layer 1 and never asked, for the allowlist, the phone's
+    passkeys, the inbox's records and a credential env file; asked (layer 2,
+    always-ask) for the installed HUD, as its plain spelling is. Ordinary
+    brace and glob use keeps rules' own verdict."""
+    from jarvis.v2.model import PermissionProfile as P
+    from jarvis.v2.permissions import _command_writes_protected_state, build_permit, denied_command
+    from jarvis.v2.provider import Decision
+    from jarvis import protected_state as ps
+
+    saved = (config.HUD_DIR, config.HUD_DIST)
+    with Sandbox() as box:
+        data = Path(config.V2_DATA_DIR)
+        hud = box.home / ".local" / "share" / "jarvis" / "hud"
+        project = box.root / "project"
+        links = box.root / "links"
+        for folder in (data / "remote", data / "inbox", hud / "build-1", project / "src",
+                       project / "build", project / "conf", links):
+            folder.mkdir(parents=True, exist_ok=True)
+        env_file = project / "conf" / (".env" + ".production")
+        targets = {
+            "allowlist": config.ALLOWLIST_PATH,
+            "passkeys": data / "remote" / "passkeys.json",
+            "inbox": data / "inbox" / "missed.jsonl",
+            "env": env_file,
+            "hud": hud / "build-1" / "index.html",
+        }
+        for path in targets.values():
+            path.write_text("{}")
+        config.HUD_DIR = config.HUD_DIST = hud
+        try:
+            refused = asked = 0
+            for label, target in targets.items():
+                folder = target.parent
+                link = links / f"{label}-link"
+                link.symlink_to(folder, target_is_directory=True)
+                # A link to a folder inside the target's folder: `<sub>/..` is
+                # the target's folder to the kernel, whatever the text says.
+                (folder / "sub").mkdir(exist_ok=True)
+                sub = links / f"{label}-sub"
+                sub.symlink_to(folder / "sub", target_is_directory=True)
+                odd = links / "{1{x,y}..3}"
+                if odd.is_symlink():
+                    odd.unlink()
+                odd.symlink_to(folder / "sub", target_is_directory=True)
+                fill = {"t": target, "f": folder, "n": target.name, "p": folder.parent,
+                        "d": folder.name, "d1": folder.name[1:], "link": link,
+                        "linkp": links, "linkd1": link.name[:-1], "sub": sub,
+                        "subd1": sub.name[:-1]}
+                for form in BRACE_GLOB_FORMS:
+                    command = form.format(**fill)
+                    brief = brief_for(P.AUTO, cwd=project)
+                    owner = Asker(Decision.ALLOW)
+                    got = build_permit(context(brief), owner)(*bash(command), brief)
+                    if label == "hud":
+                        # The installed HUD's tree: asked at layer 2, as its
+                        # plain spelling is (installed_hud_deny_checks) —
+                        # unless rules refuse the program outright (`dd`).
+                        layer = box.decisions[-1]["layer"]
+                        ok(layer == "always-ask" and len(owner.seen) == 1
+                           or layer == "deny" and got == Decision.DENY,
+                           f"a write into the installed HUD is asked: {command} ({layer})")
+                        asked += 1
+                        continue
+                    eq(got, Decision.DENY, f"layer 1 refuses {label}: {command}")
+                    eq(len(owner.seen), 0, f"and never asks: {command}")
+                    ok(denied_command(command, str(project)) is not None,
+                       f"denied_command refuses {command}")
+                    if label != "env":
+                        # The file, or a neighbour the same line writes as
+                        # surely (`cp -t <remote>{,} …` also moves `remote`).
+                        ok(_command_writes_protected_state(command, str(project)) is not None,
+                           f"layer 1 sees the write: {command}")
+                    refused += 1
+            # Too large to judge whole: never let through on a sample. The
+            # secrets layer already refuses an expansion too large to expand
+            # (as on main); were it not to, the line asks.
+            gate = config.ALLOWLIST_PATH.parent
+            for command in (f"cp /tmp/x {gate}/" + "{a..c}" * 7,
+                            f"cp /tmp/x {gate}/{{1..99999}}",
+                            f"echo x > {gate}/" + "{a..c}" * 7):
+                for profile in (P.AUTO, P.ASK):
+                    owner = Asker(Decision.ALLOW)
+                    brief = brief_for(profile, cwd=project)
+                    start = time.perf_counter()
+                    build_permit(context(brief), owner)(*bash(command), brief)
+                    ok(time.perf_counter() - start < 2.0, f"judged quickly: {command[:60]}")
+                    layer = box.decisions[-1]["layer"]
+                    ok(layer == "deny" or layer == "always-ask" and len(owner.seen) == 1,
+                       f"{profile.value}: never judged on a sample: {command[:60]} ({layer})")
+                    ok(ps.command_touch(command, str(project)) is not None
+                       and ps.command_touch(command, str(project)).opaque,
+                       f"the detector calls it too complex to judge: {command[:60]}")
+            # Ordinary brace and glob use is rules' own verdict at layer 4.
+            for command in ("cp src/{a,b}.py build/", "mkdir -p build/{x,y}", "echo {1..3}",
+                            "ls src/**/*.py", "cp src/*.py build/", "mv build/{old,new}",
+                            "cp -t build/ src/{a,b}.py", "touch src/{a,b,c}.txt"):
+                owner = Asker(Decision.ALLOW)
+                brief = brief_for(P.ASK, cwd=project)
+                build_permit(context(brief), owner)(*bash(command), brief)
+                eq(box.decisions[-1]["layer"], "jarvis-allow",
+                   f"ordinary brace/glob use is still rules' ALLOW: {command}")
+                eq(len(owner.seen), 0, f"and nobody is asked: {command}")
+            # Reading the gate's files, or a quoted brace (a literal name), is
+            # judged exactly as the same line spelled without braces.
+            for spelled, plain in (
+                    (f"cat {gate}/{{allowlist,models}}.json",
+                     f"cat {gate}/allowlist.json {gate}/models.json"),
+                    (f"cp {gate}/{{allowlist,models}}.json /tmp/backup/",
+                     f"cp {gate}/allowlist.json {gate}/models.json /tmp/backup/"),
+                    (f"cp /tmp/x '{gate}/{{allowlist,x}}.json'", f"cp /tmp/x {gate}/other.json"),
+                    (f"ls {gate}/*", f"ls {gate}")):
+                seen = []
+                for command in (spelled, plain):
+                    owner = Asker(Decision.ALLOW)
+                    brief = brief_for(P.ASK, cwd=project)
+                    got = build_permit(context(brief), owner)(*bash(command), brief)
+                    seen.append((got, box.decisions[-1]["layer"], len(owner.seen)))
+                eq(seen[0], seen[1], f"{spelled!r} is judged as {plain!r}")
+            print(f"  brace/glob: {refused} spellings refused at layer 1, {asked} asked for "
+                  "the installed HUD")
+        finally:
+            config.HUD_DIR, config.HUD_DIST = saved
+
+
 # --------------------------------------------------------------------------
 # 4. layer 4 is human-backed only
 
@@ -3686,7 +3856,7 @@ def relay_provenance_checks():
                f"{provider}: a session tool's card is asked about {heard!r}")
 
 def main():
-    for section in (matrix_checks, always_ask_checks, file_deny_checks,
+    for section in (matrix_checks, always_ask_checks, file_deny_checks, brace_glob_checks,
                     human_backed_checks, log_checks, approvals_checks, hud_build_deny_checks,
                     env_file_checks,
                     installed_hud_deny_checks, daemon_and_rebuild_ops_checks, review_48_checks,
