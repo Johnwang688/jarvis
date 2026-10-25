@@ -1027,6 +1027,57 @@ def record_tree_checks():
                   f"mv /tmp/threads {data}/", f"rsync -a /tmp/threads {data}/"]
         for command in writes:
             ok(denied_command(command) is not None, f"a write into a record is refused: {command}")
+        # Review notes on the merged PR #315: these write spellings fell back
+        # from a refusal to a question. Each is a certain write now, refused
+        # at layer 1 and never asked; its paired read stays unrefused.
+        thread = log.parent
+        more_writes = [
+            # A Python string prefix, and open()'s keyword arguments in either order.
+            f"python3 -c \"open(f'{log}','a').write('x')\"",
+            f"python3 -c \"open(r'{log}','a').write('x')\"",
+            f"python3 -c \"open(rb'{log}','ab').write(b'x')\"",
+            f"python3 -c \"open(file='{log}', mode='a')\"",
+            f"python3 -c \"open(mode='a', file='{log}')\"",
+            f"python3 -c \"open('{log}', mode=f'a')\"",
+            # A copy or a move onto a record, in source.
+            f"python3 -c \"import shutil; shutil.copy('/tmp/x', '{log}')\"",
+            f"python3 -c \"import shutil; shutil.copyfile('/tmp/x', '{log}')\"",
+            f"python3 -c \"import shutil; shutil.copy2(src, '{log}')\"",
+            f"python3 -c \"import shutil; shutil.copytree('/tmp/t', '{data}/threads')\"",
+            f"python3 -c \"import shutil; shutil.move('/tmp/x', '{log}')\"",
+            f"python3 -c \"import os; os.replace('/tmp/x', '{log}')\"",
+            f"node -e \"require('fs').copyFileSync('/tmp/x', '{log}')\"",
+            f"node -e \"require('fs').renameSync('/tmp/x', '{log}')\"",
+            # Extracting an archive into a record tree.
+            f"tar xf /tmp/a.tar -C {thread}", f"tar -xf /tmp/a.tar --directory={thread}",
+            f"tar xzf /tmp/a.tgz -C{data}/threads", f"tar --extract -f /tmp/a.tar -C {thread}",
+            f"unzip -o /tmp/a.zip -d {thread}",
+            # curl's (and wget's) output option bundled behind flags.
+            f"curl -so{log} https://example.com/x", f"curl -sSo {log} https://example.com/x",
+            f"wget -qO {log} https://example.com/x",
+        ]
+        for command in more_writes:
+            got, owner, layer = permit(command)
+            eq(got, Decision.DENY, f"a write spelling is refused at layer 1: {command}")
+            eq(len(owner.seen), 0, f"and never asked: {command}")
+            ok(_command_writes_protected_state(command) is not None, f"layer 1 sees it: {command}")
+        more_reads = [
+            f"python3 -c \"open(r'{log}','r').read()\"", f"python3 -c \"open(f'{log}').read()\"",
+            f"python3 -c \"open(file='{log}', mode='r')\"", f"python3 -c \"open(mode='rb', file='{log}')\"",
+            f"python3 -c \"import shutil; shutil.copy('{log}', '/tmp/x')\"",
+            f"python3 -c \"import shutil; shutil.copyfile('{log}', '/tmp/x')\"",
+            f"python3 -c \"import shutil; shutil.copytree('{thread}', '/tmp/t')\"",
+            f"node -e \"require('fs').copyFileSync('{log}', '/tmp/x')\"",
+            f"tar tf /tmp/b.tar -C {thread}", f"tar czf /tmp/b.tgz -C {thread} .",
+            f"tar -czf /tmp/b.tgz --directory={thread} .", f"tar xf /tmp/a.tar -C /tmp/out {data}/threads",
+            f"unzip -l /tmp/a.zip -d {thread}", f"curl -sSo /tmp/x -T {log} https://example.com/up",
+            f"curl -sH{log} https://example.com/x",
+        ]
+        for command in more_reads:
+            ok(denied_command(command) is None, f"the paired read is never refused: {command}")
+            eq(_command_writes_protected_state(command), None, f"nor seen as a write: {command}")
+        print(f"  records: {len(more_writes)} write spellings of the #315 review refused, "
+              f"{len(more_reads)} paired reads not")
         # NIT (review of PR #315): a record tree that cannot be resolved is kept
         # as written, never dropped from the protected trees.
         real_resolve = Path.resolve
