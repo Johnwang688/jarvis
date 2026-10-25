@@ -47,7 +47,8 @@ function draw(over: Partial<InboxViewProps> = {}) {
   root = createRoot(host);
   const props: InboxViewProps = {
     snapshot: snap(), approvals: [{ req_id: "R1" }], blocked: false,
-    onOpenThread: vi.fn(), onOpenTask: vi.fn(), onAnswer: vi.fn(async () => ({ ok: true })), onReread: vi.fn(),
+    onOpenThread: vi.fn(), onOpenTask: vi.fn(), onAnswer: vi.fn(async () => ({ ok: true })),
+    onDecide: vi.fn(async () => ({ ok: true, delivery: "queued", note: "Sent to the asking chat." })), onReread: vi.fn(),
     now: () => NOW, ...over,
   };
   act(() => root!.render(createElement(InboxView, props)));
@@ -304,6 +305,149 @@ describe("InboxView", () => {
     expect(r.querySelector('[data-testid="inbox-link"]')).toBeNull();
     expect(r.querySelectorAll("button").length).toBe(0);
     expect(r.querySelector('[data-testid="inbox-missed-next"]')!.textContent).toBe("Its chat is not known.");
+  });
+
+  // Inbox B1 (IN-5): decisions, rank 6, answered with an option or the owner's words.
+  const decisionRow = (over: Record<string, unknown> = {}, detail: Record<string, unknown> = {}) => ({
+    id: "dec:d0123456789ab", kind: "decision", rank: 6, title: "chat t3 asks for your decision",
+    blocks: "nothing waits; chat t3 hears your answer as a message", thread_id: "t3",
+    asked_at: "2026-10-25T09:30:00+00:00", origin: "Claude · chat ‹" + HOSTILE + "› (t3)",
+    detail: { decision_id: "d0123456789ab", question: "Which store?\n" + HOSTILE, options: ["sqlite", "postgres " + HOSTILE, "files"],
+              default: 1, why: "It decides the schema " + HOSTILE, answer: null, delivery: null, ...detail },
+    ...over,
+  });
+  const options = (r: HTMLElement) => Array.from(r.querySelectorAll('[data-testid="inbox-decision-option"]')) as HTMLInputElement[];
+  const decisionText = (r: HTMLElement) => r.querySelector('[data-testid="inbox-decision-text"]') as HTMLInputElement;
+  const decisionSend = (r: HTMLElement) => r.querySelector('[data-testid="inbox-decision-send"]') as HTMLButtonElement;
+
+  it("a decision sits under 'When you have time' with its options as radios, the suggestion preselected and nothing posted", async () => {
+    const p = draw({ snapshot: snap([...served(), decisionRow()]) });
+    const time = q('[data-testid="inbox-group-time"]')!;
+    expect(time.querySelector('[data-testid="inbox-group-head"]')!.textContent).toBe("When you have time");
+    const r = rowOf("dec:d0123456789ab");
+    expect(time.contains(r)).toBe(true);
+    expect(r.dataset.tone).toBe("plain");
+    const radios = options(r);
+    expect(radios.map((o) => o.type)).toEqual(["radio", "radio", "radio"]);
+    expect(radios.map((o) => o.checked)).toEqual([false, true, false]);
+    const marker = r.querySelector('[data-testid="inbox-decision-suggested"]')!;
+    expect(marker.closest("label")!.contains(radios[1])).toBe(true);
+    // The HUD's own element, before the option's words (review of PR #309).
+    const text = marker.closest("label")!.querySelector(".ir-option-text")!;
+    expect(marker.compareDocumentPosition(text) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(text.textContent).toBe("postgres " + HOSTILE);
+    expect(r.querySelectorAll('[data-testid="inbox-decision-suggested"]').length).toBe(1);
+    await flush();
+    expect(p.onDecide).not.toHaveBeenCalled();
+    expect(p.onAnswer).not.toHaveBeenCalled();
+    // Not counted: ranks 1 to 5 only.
+    expect(q('[data-testid="inbox-summary"]')!.textContent).toBe("3 waiting on you");
+  });
+
+  it("a decision's untrusted text is text: question, options, why and origin make no element", () => {
+    draw({ snapshot: snap([decisionRow()]) });
+    const r = rowOf("dec:d0123456789ab");
+    expect(host!.querySelectorAll("img").length).toBe(0);
+    expect((window as any).__pwned).toBeUndefined();
+    expect(r.querySelector('[data-testid="inbox-decision-question"]')!.textContent).toBe("Which store?\n" + HOSTILE);
+    expect(r.querySelector('[data-testid="inbox-decision-why"]')!.textContent).toBe("It decides the schema " + HOSTILE);
+    expect(r.querySelector('[data-testid="inbox-origin"]')!.textContent).toBe("Claude · chat ‹" + HOSTILE + "› (t3)");
+    expect(Array.from(r.querySelectorAll(".ir-option-text")).map((e) => e.textContent)).toContain("postgres " + HOSTILE);
+  });
+
+  it("Answer posts the picked option's index once, to its own id; the reply's note is said", async () => {
+    const p = draw({ snapshot: snap([decisionRow()]) });
+    const r = rowOf("dec:d0123456789ab");
+    act(() => options(r)[2].click());
+    expect(options(r).map((o) => o.checked)).toEqual([false, false, true]);
+    expect(p.onDecide).not.toHaveBeenCalled();
+    act(() => { decisionSend(r).click(); decisionSend(r).click(); });
+    await flush();
+    expect(p.onDecide).toHaveBeenCalledTimes(1);
+    expect(p.onDecide).toHaveBeenCalledWith("d0123456789ab", { choice: 2 });
+    expect(p.onAnswer).not.toHaveBeenCalled();
+    expect(q('[data-testid="inbox-notice"]')!.textContent).toBe("Sent to the asking chat.");
+    expect(p.onReread).toHaveBeenCalled();
+  });
+
+  it("the preselected suggestion is posted only when Answer is pressed", async () => {
+    const p = draw({ snapshot: snap([decisionRow()]) });
+    act(() => decisionSend(rowOf("dec:d0123456789ab")).click());
+    await flush();
+    expect(p.onDecide).toHaveBeenCalledWith("d0123456789ab", { choice: 1 });
+  });
+
+  it("with no suggestion and nothing picked or typed, Answer is off and posts nothing", async () => {
+    const p = draw({ snapshot: snap([decisionRow({}, { default: null })]) });
+    const r = rowOf("dec:d0123456789ab");
+    expect(options(r).some((o) => o.checked)).toBe(false);
+    expect(decisionSend(r).disabled).toBe(true);
+    decisionSend(r).removeAttribute("disabled");
+    act(() => decisionSend(r).click());
+    await flush();
+    expect(p.onDecide).not.toHaveBeenCalled();
+  });
+
+  it("typed words win over the option and are posted as {text}; Enter answers only from the focused box", async () => {
+    const p = draw({ snapshot: snap([decisionRow()]) });
+    const r = rowOf("dec:d0123456789ab");
+    // Enter on a radio answers nothing.
+    act(() => { options(r)[0].dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })); });
+    await flush();
+    expect(p.onDecide).not.toHaveBeenCalled();
+    // Enter in an empty box answers nothing either.
+    act(() => { decisionText(r).dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })); });
+    await flush();
+    expect(p.onDecide).not.toHaveBeenCalled();
+    type(decisionText(r), "  use the files, for now  ");
+    expect(r.querySelector('[data-testid="inbox-decision-hint"]')).not.toBeNull();
+    act(() => { decisionText(r).dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })); });
+    await flush();
+    expect(p.onDecide).toHaveBeenCalledTimes(1);
+    expect(p.onDecide).toHaveBeenCalledWith("d0123456789ab", { text: "use the files, for now" });
+  });
+
+  it("a 409 on a decision says 'already answered or gone' and reads again", async () => {
+    const p = draw({ snapshot: snap([decisionRow()]),
+      onDecide: vi.fn(async () => { throw new ApiError(409, "this decision was already answered"); }) });
+    const rereads = (p.onReread as any).mock.calls.length;
+    act(() => decisionSend(rowOf("dec:d0123456789ab")).click());
+    await flush();
+    expect(q('[data-testid="inbox-notice"]')!.textContent).toBe(GONE_NOTICE);
+    expect((p.onReread as any).mock.calls.length).toBeGreaterThan(rereads);
+  });
+
+  it("under a card a decision's controls post nothing: Answer is off, a pick and Enter do nothing", async () => {
+    const p = draw({ blocked: true, snapshot: snap([decisionRow()]) });
+    const r = rowOf("dec:d0123456789ab");
+    expect(decisionSend(r).disabled).toBe(true);
+    act(() => options(r)[0].click());
+    type(decisionText(r), "words");
+    act(() => { decisionText(r).dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })); });
+    decisionSend(r).removeAttribute("disabled");
+    act(() => decisionSend(r).click());
+    await flush();
+    expect(p.onDecide).not.toHaveBeenCalled();
+    expect(p.onAnswer).not.toHaveBeenCalled();
+  });
+
+  it("a decision recorded for a closed chat (rank 8) shows the answer and offers nothing to press but its link", () => {
+    const p = draw({ snapshot: snap([decisionRow({ rank: 8, title: "Your decision for chat t3",
+      blocks: "recorded; the asking chat is closed" },
+      { answer: { choice: 0, text: null, at: "2026-10-25T09:40:00+00:00" }, delivery: "closed" })]) });
+    const r = rowOf("dec:d0123456789ab");
+    expect(q('[data-testid="inbox-group-fyi"]')!.contains(r)).toBe(true);
+    expect(r.querySelector('[data-testid="inbox-blocks"]')!.textContent).toBe("recorded; the asking chat is closed");
+    expect(r.querySelector('[data-testid="inbox-decision-answer"]')!.textContent).toBe("Your answer: sqlite");
+    expect(Array.from(r.querySelectorAll("button, input")).map((b) => (b as HTMLElement).dataset.testid)).toEqual(["inbox-link"]);
+    expect(p.onDecide).not.toHaveBeenCalled();
+  });
+
+  it("a decision whose detail is not one is shown but never answerable", () => {
+    draw({ snapshot: snap([decisionRow({}, { decision_id: "../x", options: ["only one"] })]) });
+    const r = rowOf("dec:d0123456789ab");
+    expect(r.querySelectorAll('[data-testid="inbox-decision-option"]').length).toBe(0);
+    expect(r.querySelector('[data-testid="inbox-decision-send"]')).toBeNull();
   });
 
   it("reads the inbox when it is shown, and never touches the title", () => {

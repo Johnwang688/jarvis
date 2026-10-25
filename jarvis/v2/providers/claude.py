@@ -1419,8 +1419,11 @@ class ClaudeProvider:
         with session.mutex:
             session.accepting = False
             # Whether the owner's Bypass switch may count in this turn: only
-            # the owner's own message (HUD or Discord), never another chat's.
-            session.owner_turn = getattr(message, "origin", None) == "owner"
+            # the owner's own message (HUD or Discord), never another chat's,
+            # and never the owner's answer to a decision (inbox B1, review of
+            # PR #309): that turn is the agent's to run on its own judgement.
+            session.owner_turn = (getattr(message, "origin", None) == "owner"
+                                  and getattr(message, "via", None) != "inbox")
             session.generation += 1
             # A steer an earlier turn wrote and never saw drain may still be
             # waiting in the CLI: then this message goes in at priority

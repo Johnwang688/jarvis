@@ -336,7 +336,10 @@ def is_running(port: int) -> bool:
         conn.close()
 
 
-VIAS = ("hud", "discord", "dm", "system", "peer")
+# "inbox": the owner's answer to a decision, delivered by the owner inbox
+# (inbox.py, B1) through `deliver_queued`: never at the desk
+# (`desk.desk_message` requires "hud").
+VIAS = ("hud", "discord", "dm", "system", "peer", "inbox")
 
 
 def user_data(message: UserMessage) -> dict:
@@ -539,6 +542,9 @@ class Daemon:
         # Per thread rather than per session: a turn that ends by dropping its
         # session (a fatal error) must not take what waits behind it along.
         self._queues: dict[str, deque] = {}
+        # thread id -> the owner's answers to decisions waiting to run there
+        # (inbox B1, `deliver_queued`): after the owner's queue, never in it.
+        self._inbox_queues: dict[str, deque] = {}
         self._stopping = False
         self._server = None
         self._server_thread = None
@@ -613,6 +619,11 @@ class Daemon:
         # through. Installed in `start()`, removed in `stop()`; no route.
         from .chat_relay import ChatRelay
         self.chat_relay = ChatRelay(self)
+        # What `owner_post` reaches (decisions.py, inbox B1): the post half of
+        # the inbox's decisions, over the inbox's own store. Installed in
+        # `start()`, removed in `stop()`; it holds no answer path.
+        from .decisions import OwnerPosts
+        self.owner_posts = OwnerPosts(self, self.inbox.decisions)
         from .browser.drive import BrowserDrive
         self.browser_drive = BrowserDrive(self)
         from .devservers import DevServers
@@ -694,6 +705,10 @@ class Daemon:
             self.browser_look.install()
             self.browser_drive.install()
             self.chat_relay.install()
+            self.owner_posts.install()
+            # An answer still "queued" from a previous run never ran (the
+            # queue is in memory): say so on its decision (inbox B1).
+            self.inbox.fail_lost_answers()
             self.devservers.start()
             self.schedules.start()
             # A previous run's unrestored duck (V15) is repaired from its
@@ -1434,6 +1449,61 @@ class Daemon:
             return reply
         return self._steer(session, provider, handle, message, data)
 
+    def deliver_queued(self, thread_id: str, message: UserMessage, *,
+                       decision_id: str | None = None) -> dict:
+        """The owner's answer to a decision (inbox B1, design §5): a message
+        that may start a turn or wait for one, and never steers (chat-to-chat
+        C3's rule). No turn running and nothing of the owner's waiting: it
+        starts one (`{"status": "started"}`). Otherwise it waits in a queue of
+        its own (`_inbox_queues`, `"queued"`), drained after the owner's queue
+        and before other chats' messages: never into a running turn, never
+        interrupting it, never read as the answer to a card or a question it
+        waits on. It takes none of the owner's QUEUE_MAX slots and never makes
+        the owner's own message wait instead of steering (review of PR #309).
+        The caller bounds it (5 open decisions per chat). `decision_id` rides
+        in the logged data, so a drop marks the decision undelivered. Only a
+        chat thread; what the message may do is its own `desk`/`via` (an
+        inbox answer is never at the desk)."""
+        _validate(message, UserMessage)
+        data = user_data(message)
+        if decision_id is not None:
+            data["decision_id"] = decision_id
+        session = self._live_session(thread_id)
+        from . import thread_model
+        if not thread_model.is_chat(session.thread):
+            raise DaemonError("only a chat takes a queued message")
+        with self._lock:
+            self._sendable(session)
+            answers = self._inbox_queues.setdefault(thread_id, deque())
+            if (session.worker is None and not self._queues.get(thread_id) and not answers
+                    and not self._maybe_cli(session, eager=True)):
+                return {"status": "started", "turn_id": self._begin(session, message, data)}
+            item = _Queued(message, data, uuid.uuid4().hex, uuid.uuid4().hex)
+            answers.append(item)
+            self._log_user(session.thread, item, queued=True)
+            drain = session.worker is None
+            reply = {"status": "queued", "turn_id": session.turn_id, "message_id": item.message_id,
+                     "queued_turn_id": item.turn_id}
+        if drain:
+            self._drain(thread_id)
+        return reply
+
+    def _waiting(self, thread_id) -> bool:
+        """Under the lock: anything waiting to run as a turn of this thread:
+        the owner's queue, inbox answers, other chats' messages."""
+        return bool(self._queues.get(thread_id) or self._inbox_queues.get(thread_id)
+                    or self.chat_relay.pending(thread_id))
+
+    def _answers_dropped(self, items) -> None:
+        """Under the lock: inbox answers that will never run. Each decision is
+        marked undelivered, so its row comes back saying so (review of PR
+        #309: a Stop, a close or a thread that could not resume lost it)."""
+        inbox = getattr(self, "inbox", None)
+        for item in items:
+            decision_id = item.data.get("decision_id") if isinstance(item.data, dict) else None
+            if inbox is not None and decision_id:
+                inbox.answer_dropped(decision_id)
+
     def _steer(self, session, provider, handle, message, data) -> dict:
         """Hand `message` to the provider for the running turn. Outside the
         daemon lock: a provider may wait on its own turn loop to take it, and
@@ -1806,7 +1876,7 @@ class Daemon:
                 raise DaemonError(COMPACT_NOT_A_CHAT)
             if session.worker is not None:
                 raise DaemonError(COMPACT_RUNNING)
-            if self._queues.get(thread_id) or self.chat_relay.pending(thread_id):
+            if self._waiting(thread_id):
                 raise DaemonError(COMPACT_WAITING)
             compact = getattr(session.provider, "compact", None)
             if not callable(compact):
@@ -1969,11 +2039,16 @@ class Daemon:
         messages to the input rather than sending them), or the thread can no
         longer take a turn. Logged per message; one `queue_cleared` names
         them all, so a surface can hand the words back."""
+        answers = []
         if items is None:
             waiting = self._queues.get(thread.id)
             items = list(waiting or ())
             if waiting:
                 waiting.clear()
+            # The owner's answers to decisions waiting here go too (inbox B1),
+            # and each decision is marked undelivered.
+            answers = list(self._inbox_queues.pop(thread.id, None) or ())
+            items += answers
         if not items:
             return []
         for item in items:
@@ -1990,6 +2065,8 @@ class Daemon:
                                             "attachments": item.data.get("attachments") or [],
                                             "images": item.data.get("images") or 0}
                                            for item in items]}})
+        if answers:
+            self._answers_dropped(answers)
         return items
 
     def _drain(self, thread_id) -> None:
@@ -2000,8 +2077,7 @@ class Daemon:
         chat's message waiting on this thread, then a reply held for it
         (chat_relay.py, P-4): two queues, never one."""
         with self._lock:
-            if (self._stopping or thread_id in self._interrupting
-                    or not (self._queues.get(thread_id) or self.chat_relay.pending(thread_id))):
+            if self._stopping or thread_id in self._interrupting or not self._waiting(thread_id):
                 return
             session = self._sessions.get(thread_id)
             if session is not None and (session.worker is not None or session.closing
@@ -2022,12 +2098,18 @@ class Daemon:
                     stored = None
                 if stored is not None:
                     self._drop_waiting(stored, reason)
+                else:
+                    # A deleted thread has no log to record the drop in, but
+                    # what waited on it still goes, and an inbox answer's
+                    # decision says it never arrived (review of PR #309).
+                    self._queues.pop(thread_id, None)
+                    self._answers_dropped(list(self._inbox_queues.pop(thread_id, None) or ()))
                 self.chat_relay.thread_closed(thread_id, reason)
             return
         with self._lock:
             waiting = self._queues.get(thread_id)
             if (self._stopping or thread_id in self._interrupting or session.worker is not None
-                    or not (waiting or self.chat_relay.pending(thread_id))):
+                    or not self._waiting(thread_id)):
                 return
             try:
                 self._sendable(session)
@@ -2039,6 +2121,13 @@ class Daemon:
                 return      # the CLI's own turn first; its end drains the queue
             if waiting:
                 item = waiting.popleft()
+                self._begin(session, item.message, item.data, queued=item)
+                return
+            # Then the owner's answers to decisions (inbox B1), then other
+            # chats' messages.
+            answers = self._inbox_queues.get(thread_id)
+            if answers:
+                item = answers.popleft()
                 self._begin(session, item.message, item.data, queued=item)
                 return
             start = self.chat_relay.next_start(session)
@@ -2444,6 +2533,7 @@ class Daemon:
                 # thread working across the gap rather than flashing unread.
                 upcoming = 0 if session.closing or self._stopping else (
                     len(self._queues.get(session.thread.id) or ())
+                    + len(self._inbox_queues.get(session.thread.id) or ())
                     + (0 if session.owner_stopped else len(leftover))
                     + self.chat_relay.pending(session.thread.id))
             stop = "end"
@@ -2504,8 +2594,7 @@ class Daemon:
                     # run as reply turns of their own; never the owner's queue.
                     self.chat_relay.handed_back(session, returned)
                     session.relay_turn = session.relay_mark = None
-                    drain = (bool(self._queues.get(session.thread.id))
-                             or bool(self.chat_relay.pending(session.thread.id))) and not session.closing
+                    drain = self._waiting(session.thread.id) and not session.closing
                     # A fatal turn error, or a provider that closed the session
                     # under us (Codex does on any RpcError), strands the
                     # session: every later send would answer "session is
@@ -2842,12 +2931,15 @@ class Daemon:
             self.terminals.hangup_all()
             # No chat reads another once shutdown starts.
             self.chat_relay.stop()
+            # Nor posts to the owner.
+            self.owner_posts.stop()
             sessions = list(self._sessions.values())
             # The queue is in memory; what waits on a turn at shutdown says so
             # in the log rather than reading as still waiting after a restart —
             # every thread's, including one whose session a fatal turn dropped
             # while its queue waited to resume it.
-            for thread_id in [t for t, waiting in self._queues.items() if waiting]:
+            for thread_id in sorted({t for t, waiting in self._queues.items() if waiting}
+                                    | {t for t, waiting in self._inbox_queues.items() if waiting}):
                 try:
                     live = self._sessions.get(thread_id)
                     thread = live.thread if live is not None else self.stores.threads.get(thread_id)

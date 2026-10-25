@@ -36,6 +36,15 @@ What it pins, one section each (each names the mutation it is meant to catch):
             only "Open its chat" (none without a chat; no "ask again"), show
             a hostile origin as text, and their link opens the chat
             [count them; an ask-again button; innerHTML]
+  decision  inbox B1's decision rows (`POST /inbox/decisions/<id>`) sit under
+            "When you have time", uncounted, plain Graphite; the options are
+            radios with the agent's suggestion preselected and nothing posted;
+            hostile question, options, why and origin stay text; Enter on a
+            focused radio posts nothing (the arrows still move the pick);
+            Answer posts `{choice}` once; words in the focused box post
+            `{text}` on Enter; under a card the row is inert, Answer disabled,
+            and a trusted click, typing and Enter post nothing [auto-submit;
+            submit on Enter; double post; innerHTML; not inert]
   card      the approval card with the Inbox open behaves exactly as it does
             with a chat pane (the same assertions, the same answers): one card,
             the veil's, never a second instance in the inbox; Enter does
@@ -761,10 +770,116 @@ def _older_checks(page, mock, check, until):
     _st(mock)["fail"] = None
 
 
+def dec_row(did="d0123456789ab", thread="t1", default=1, question="Which store?", why="It decides the schema.",
+            options=("sqlite", "postgres", "files"), origin="Claude · chat ‹jarvis› (t1)"):
+    """An open decision as inbox B1's projection serves it (rank 6)."""
+    return {"id": f"dec:{did}", "kind": "decision", "rank": 6, "title": f"chat {thread} asks for your decision",
+            "blocks": f"nothing waits; chat {thread} hears your answer as a message", "project_id": "p1",
+            "thread_id": thread, "task_id": None, "asked_at": _iso(-120), "expires_at": None, "origin": origin,
+            "detail": {"decision_id": did, "question": question, "options": list(options), "default": default,
+                       "why": why, "answer": None, "delivery": None}}
+
+
+def _decided(mock):
+    return list(_st(mock).get("decided", []))
+
+
+def _decision_checks(page, mock, check, until):
+    """Inbox B1 (IN-5): decision rows, rank 6, answered at /inbox/decisions/<id>."""
+    hostile = dec_row(question="Pick:\n" + HOSTILE, why="because " + HOSTILE,
+                      options=("sqlite", "postgres " + HOSTILE, "files"), origin="Claude · chat ‹" + HOSTILE + "› (t1)")
+    _st(mock)["decided"] = []
+    _open(page, mock, until, basic_rows() + [hostile])
+    answers_before = len(_answers(mock))
+    row = _row(page, "dec:d0123456789ab")
+    time_ids = page.evaluate("() => [...document.querySelectorAll('[data-testid=\"inbox-group-time\"] "
+                             "[data-testid=\"inbox-row\"]')].map(r => r.dataset.id)")
+    check("a decision sits under 'When you have time'", time_ids == ["dec:d0123456789ab"], str(time_ids))
+    check("it is not counted: the count stays at ranks 1 to 5", _count(page) == "3", str(_count(page)))
+    border = row.evaluate("e => getComputedStyle(e).borderLeftColor")
+    check("Graphite: a decision row is neither amber, red nor the selection cyan",
+          border not in (AMBER, RED, "rgb(111, 195, 223)"), border)
+    radios = row.locator('[data-testid="inbox-decision-option"]')
+    checked = [radios.nth(i).is_checked() for i in range(radios.count())]
+    time.sleep(0.4)
+    check("its options are radios with the suggestion preselected, and nothing was posted [mutation: auto-submit]",
+          checked == [False, True, False] and _decided(mock) == [] and len(_answers(mock)) == answers_before,
+          str(checked))
+    imgs = page.evaluate("() => document.querySelectorAll('[data-testid=\"inbox-view\"] img').length")
+    check("its question, options, why and origin are literal text: no element made, nothing ran [mutation: innerHTML]",
+          imgs == 0 and page.evaluate("window.__pwned === undefined")
+          and HOSTILE in row.locator('[data-testid="inbox-decision-question"]').inner_text()
+          and HOSTILE in row.locator('[data-testid="inbox-decision-why"]').inner_text()
+          and HOSTILE in row.locator('[data-testid="inbox-origin"]').inner_text(), str(imgs))
+    # Enter on a focused radio answers nothing; the arrows still move the pick.
+    radios.nth(0).click()
+    radios.nth(0).press("Enter")
+    time.sleep(0.4)
+    check("Enter on a focused radio posts nothing [mutation: submit on Enter]", _decided(mock) == [],
+          str(_decided(mock)))
+    radios.nth(0).press("ArrowDown")
+    check("the arrow keys still move the pick", radios.nth(1).is_checked(), str(radios.nth(1).is_checked()))
+    radios.nth(2).click()
+    send = row.locator('[data-testid="inbox-decision-send"]')
+    send.dblclick()
+    until(lambda: _decided(mock), timeout=3)
+    time.sleep(0.4)
+    got = _decided(mock)
+    check("Answer posts the picked option's index once, to /inbox/decisions/<id> [mutation: double post]",
+          len(got) == 1 and got[0][0] == "/inbox/decisions/d0123456789ab" and got[0][2] == {"choice": 2}, str(got))
+    until(lambda: "dec:d0123456789ab" not in _row_ids(page), timeout=3)
+    note = page.locator('[data-testid="inbox-notice"]')
+    check("the row leaves on inbox_changed, and the daemon's note is said",
+          note.count() == 1 and "Sent to the asking chat" in note.inner_text())
+
+    # The owner's own words, from the focused box with Enter.
+    _st(mock)["rows"].append(dec_row("d00000000000b", default=None))
+    mock_inbox.changed(mock, ["dec:d00000000000b"], "decision_posted")
+    until(lambda: "dec:d00000000000b" in _row_ids(page), timeout=3)
+    row = _row(page, "dec:d00000000000b")
+    check("with no suggestion nothing is preselected and Answer is off",
+          not any(row.locator('[data-testid="inbox-decision-option"]').nth(i).is_checked() for i in range(3))
+          and row.locator('[data-testid="inbox-decision-send"]').is_disabled())
+    box = row.locator('[data-testid="inbox-decision-text"]')
+    box.fill("use the files for now")
+    box.press("Enter")
+    until(lambda: len(_decided(mock)) > 1, timeout=3)
+    check("Enter in the focused box posts the owner's words as {text}",
+          _decided(mock)[-1][1:] == ("d00000000000b", {"text": "use the files for now"}), str(_decided(mock)[-1:]))
+
+    # Under a card the row is inert, as the rest of the inbox.
+    _st(mock)["rows"].append(dec_row("d00000000000c"))
+    mock_inbox.changed(mock, ["dec:d00000000000c"], "decision_posted")
+    until(lambda: "dec:d00000000000c" in _row_ids(page), timeout=3)
+    c = card("deccard0001")
+    mock.world["approvals"].append(c)
+    mock.emit("approval_requested", c)
+    cardloc = page.locator('[data-testid="approval-card"]')
+    until(lambda: cardloc.count() == 1, timeout=4)
+    row = _row(page, "dec:d00000000000c")
+    check("under a card the decision row is inert and its Answer disabled",
+          row.evaluate("e => !!e.closest('[inert]')") and row.locator('[data-testid="inbox-decision-send"]').is_disabled())
+    posts = len(_decided(mock))
+    for sel in ('[data-testid="inbox-decision-option"]', '[data-testid="inbox-decision-send"]',
+                '[data-testid="inbox-decision-text"]'):
+        found = row.locator(sel).first.bounding_box()
+        if found:
+            page.mouse.click(found["x"] + found["width"] / 2, found["y"] + found["height"] / 2)
+    page.keyboard.type("x")
+    page.keyboard.press("Enter")
+    time.sleep(0.4)
+    check("a trusted click, typing and Enter under the card post nothing [mutation: not inert]",
+          len(_decided(mock)) == posts and cardloc.count() == 1, f"{len(_decided(mock)) - posts} posts")
+    page.keyboard.press("Escape")
+    until(lambda: cardloc.count() == 0, timeout=4)
+    check("the title is unchanged", page.title() == TITLE, page.title())
+
+
 # ---------------------------------------------------------------------------
 
 SECTIONS = (_sidebar_checks, _groups_checks, _live_checks, _answer_checks, _conflict_checks, _withdraw_checks,
-            _reconnect_checks, _clicks_checks, _hostile_checks, _missed_checks, _card_checks, _older_checks)
+            _reconnect_checks, _clicks_checks, _hostile_checks, _missed_checks, _decision_checks, _card_checks,
+            _older_checks)
 
 
 def inbox_checks(browser, mock, base, check, until, guard, init_script):

@@ -1206,6 +1206,18 @@ def bypass_checks() -> None:
                f"a turn with origin {origin!r} keeps the classifier with Bypass on")
             provider.close(handle)
 
+    # Inbox B1 (review of PR #309): the owner's answer to a decision is an
+    # owner message, but its turn is the agent's to run: no Bypass.
+    for via, bypassed in (("inbox", False), ("hud", True)):
+        with _temp_config(), fake([Hook("Bash", {"command": "ls"}), result_message()]):
+            handle = provider.start(thread(), brief(**chat), allow)
+            provider.set_bypass(handle, True)
+            list(provider.send(handle, UserMessage(text="run ls", origin="owner", via=via)))
+            decided = (FakeClient.instances[0].hook_results[0].get("hookSpecificOutput") or {})
+            eq(decided.get("permissionDecision") == "allow", bypassed,
+               f"an owner message via {via!r} {'skips' if bypassed else 'keeps'} the classifier with Bypass on")
+            provider.close(handle)
+
     with _temp_config(), fake([result_message()]):
         handle = provider.start(thread(), brief(**chat), allow)
         provider.set_bypass(handle, True)

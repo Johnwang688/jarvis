@@ -2960,10 +2960,12 @@ all:** a word built at run time from data the line does not show, and
 extglob inside a redirect's word (`rules.redirections` stops a word at `(`;
 extglob is off in a non-interactive bash). The real protection remains that
 the write tools and grants refuse these paths and that no allowlist entry
-covers a line that touches them. When inbox B1 lands its
-`owner_trees`/`_inside_tree`, it should match globs through
-`_glob_relate`/`_glob_fs` (and honour `_walk_cut`) as `_in_tree_now` does
-now, not drop glob components. The older `_brace_expand` still used for the
+covers a line that touches them. Inbox B1's `owner_trees`/`_inside_tree`
+(the inbox's whole tree) matches globs the same way: through
+`_glob_relate` (the pattern may be the tree or lie below it) and `_glob_fs`
+(what it reaches on disk), never dropping glob components; each brace word
+is an operand of its own; a walk cut short is the line's opaque touch, as
+for every operand. The older `_brace_expand` still used for the
 owner-op detector, `secrets.py`, `v2/permissions.py` and `diff_review.py`
 is unchanged (a follow-up).
 

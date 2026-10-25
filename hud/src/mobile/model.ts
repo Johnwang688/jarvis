@@ -208,7 +208,9 @@ export function parseEvent(text: string): StreamEvent | null {
 
 /** The kinds a phone row is answered at the desk in P-3, and what the note says. */
 export function deskNote(kind: string): string | null {
-  if (kind === "approval" || kind === "question" || kind === "task_question") return "Answer at the desk";
+  if (kind === "approval" || kind === "question" || kind === "task_question" || kind === "decision") {
+    return "Answer at the desk";
+  }
   if (kind === "proposal") return "Withdraw at the desk";
   if (kind === "task") return "Resume or cancel at the desk";
   return null;

@@ -913,8 +913,11 @@ class Missed(unittest.TestCase):
                     self.assertNotEqual(v1_permissions.static_verdict(command).decision, rules.ALLOW)
             self.assertIsNone(v2_permissions._command_writes_protected_state(f"cat {target}"),
                               "reading it is not writing it")
-            # Its siblings stay ordinary.
-            self.assertFalse(files._self_protected(data / "inbox" / "notes.txt"))
+            # Since B1 the whole `inbox/` tree is protected (decisions live
+            # there, one file per id): its siblings are too. The data root's
+            # other files stay ordinary.
+            self.assertTrue(files._self_protected(data / "inbox" / "notes.txt"))
+            self.assertFalse(files._self_protected(data / "notes.txt"))
 
     def test_the_inbox_folder_itself_is_protected(self):
         """Review of #307, LOW: the folder path is named too, so moving,

@@ -15,7 +15,7 @@
 // (bidi overrides, zero-widths) that could make one line read as another.
 
 export interface InboxRow {
-  /** Kind prefix + the source's own id: `appr:…`, `q:…`, `tq:…`, `prop:…`, `task:…`, `missed:…`. */
+  /** Kind prefix + the source's own id: `appr:…`, `q:…`, `tq:…`, `prop:…`, `task:…`, `missed:…`, `dec:…`. */
   id: string;
   kind: string;
   /** IN-4's band, 1 to 8. */
@@ -42,7 +42,7 @@ export interface InboxGroup {
   max: number;
 }
 
-/** Design §7's thin headers, by rank. Ranks 6 and 7 come with later packages. */
+/** Design §7's thin headers, by rank. Rank 6 is decisions (B1); 7 (checks) comes with B2. */
 export const GROUPS: readonly InboxGroup[] = [
   { key: "now", label: "Waiting now", min: 1, max: 2 },
   { key: "you", label: "Waiting on you", min: 3, max: 5 },
@@ -186,6 +186,60 @@ export function missedNote(row: InboxRow): { why: string; next: string } | null 
       ? "Jarvis stopped before you answered, so it was denied."
       : "It was denied without an answer.";
   return { why, next: row.thread_id ? "To try it again, ask from its chat." : "Its chat is not known." };
+}
+
+/** A decision an agent posted with `owner_post` (inbox B1, IN-5): rank 6 while open, rank 8 once
+ * recorded for a chat that was closed. Answered with one option or the owner's own words. */
+export const DECISION = "decision";
+const DECISION_ID = /^d[0-9a-f]{12}$/;
+
+export interface DecisionView {
+  /** The decision's own id (`d` + 12 hex), for `POST /inbox/decisions/<id>`. */
+  id: string;
+  question: string;
+  options: string[];
+  /** The agent's suggested option, preselected and never submitted by itself. */
+  suggested: number | null;
+  why: string;
+  open: boolean;
+  /** Once answered: the words the owner gave (the option's text, or what they typed). */
+  answer: string;
+}
+
+/**
+ * A decision row's words, every one untrusted text (`oneLine`/`textBlock`), or
+ * null for any other row or a decision whose detail is not one (never guessed
+ * at, never answerable).
+ */
+export function decisionOf(row: InboxRow): DecisionView | null {
+  if (row.kind !== DECISION) return null;
+  const d = row.detail;
+  const id = typeof d.decision_id === "string" && DECISION_ID.test(d.decision_id) ? d.decision_id : null;
+  if (!id || !Array.isArray(d.options)) return null;
+  const options = d.options.map((o) => oneLine(o, 200));
+  if (options.length < 2 || options.length > 6 || options.some((o) => !o)) return null;
+  // An option that draws the HUD's own marker is not a decision the HUD shows as answerable.
+  if (options.some((o) => o.normalize("NFKC").toLowerCase().includes("(suggested)"))) return null;
+  const pick = (v: unknown): number | null =>
+    typeof v === "number" && Number.isInteger(v) && v >= 0 && v < options.length ? v : null;
+  const answer = isObj(d.answer) ? d.answer : null;
+  let said = "";
+  if (answer) said = pick(answer.choice) !== null ? options[pick(answer.choice)!] : textBlock(answer.text, 2000);
+  return { id, question: textBlock(d.question, 1000), options, suggested: pick(d.default), why: textBlock(d.why, 2000),
+           open: !answer, answer: said };
+}
+
+/** A decision's answer path (`POST /inbox/decisions/<id>`, inbox B1). */
+export function decisionPath(id: string): string {
+  return `/inbox/decisions/${encodeURIComponent(id)}`;
+}
+
+/** What Answer posts for a decision: the typed words when there are any, else the picked option, else nothing. */
+export function decisionBody(picked: number | null, typed: string, d: DecisionView): { text: string } | { choice: number } | null {
+  const text = typed.trim();
+  if (text) return { text };
+  if (picked !== null && picked >= 0 && picked < d.options.length) return { choice: picked };
+  return null;
 }
 
 /** The approval request id an `appr:` row is about (its `detail` is `ApprovalRequest.to_json()`). */

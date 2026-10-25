@@ -730,9 +730,204 @@ ordering for Discord is unchanged (an owner decision, open).
 (`files._protected_state_paths`, keyed on `config.V2_DATA_DIR`): v1 write
 tools refuse them, v2 layer 1 refuses them (`denied_file`'s generic
 "permission state" sentence), the shell gate asks for any write to the file
-and for moving, replacing, re-moding or deleting the folder. A whole-tree
-rule for `inbox/` (like `protected_state.hud_trees`) is a follow-up before
-IN-5 adds `decisions/`, `checks/` and `marks.json`.
+and for moving, replacing, re-moding or deleting the folder. Since B1 the
+whole `inbox/` tree is protected (below).
+
+**Decisions and `owner_post` (inbox B1, IN-5, 2026-10-25).** An agent's
+"answer whenever" question to the owner. Three modules: `jarvis/v2/decisions.py`
+(the store and the post service, `OwnerPosts`), `jarvis/v2/tools/owner_post.py`
+(the tool) and `inbox.py` (rows, the answer route, delivery); all three are
+SELF_PROTECTED.
+
+- **The tool.** `owner_post(kind, question, options, why, default=None)`,
+  kind `"decision"` only ("check" is IN-6/B2 and refused for now), 2 to 6
+  options (text, never actions), `default` an option's index or absent. Its
+  result is its own sentence ("Posted decision d… to the owner…"), so it is
+  not `PRIVATE_RESULT`; `EXPLICIT_ONLY`, not `PARALLEL_SAFE`, not dangerous,
+  not in `mcp_catalog.MCP_TOOLS`.
+- **Bound as `chat_send` is (§10 question 1, chat-to-chat CC-3/CC-6/CC-7,
+  P-6).** A `SESSION_TOOLS` entry for Claude and Codex owner chats,
+  `foreground_only` (a Claude sub-agent is denied by the hook before
+  `permit`; a Codex child by `admit_foreground_mcp`) and `desk_only`, not
+  read-only (`permit` decides at `jarvis-session-delegate`: unasked on AUTO
+  and ASK, refused for STRICT, asked under an always-ask rule); Codex gets
+  the per-tool `approval_mode="approve"` and `enabled_tools` entries. Checked
+  twice: the tool refuses unless `runtime.at_desk()` and `runtime.depth() ==
+  0`, then `OwnerPosts.post` re-checks under the daemon lock exactly
+  `ChatRelay._refuse_sender`'s rows (live session, worker and handle, exact
+  `turn_id`, not cancelled/closing/retired/lost, `relay_turn is None`, role
+  CHAT with no task, `desk.slot["present"] is True`) **plus** a Claude or
+  Codex thread. So the fast path (it holds no such tool: not in
+  `FAST_TOOLS`, `DESK_TOOLS`, `EDIT_TOOLS` or `CHAT_TOOLS`, and the service
+  refuses a fast thread anyway), sub-agents, relayed and reply turns,
+  schedules, Discord (voice or text), the DM, the escape hatch, the API
+  listener, a turn a foreign steer took off the desk, between turns, and a
+  decision's own delivered answer (`via="inbox"`, off the desk) never post.
+  **Task orchestrators are not bound (a deviation from the design's
+  default, §10 question 1):** task threads get no session server at all
+  (`Daemon._refuse_jarvis_server`, `callers.authenticate`, the bridge's
+  `live_session`, `claude_session_tool`/`codex_session_tool` all require an
+  owner's chat), and giving them one is its own boundary change, left for
+  the owner.
+- **Caps (§10 question 2), refused never cut.** 5 open decisions per chat
+  (`OPEN_PER_THREAD`; "5 per thread" read as 5 waiting at once), 10 posted
+  by one chat (`PER_THREAD_DAY`) and 20 in all (`PER_DAY`) in any rolling 24
+  hours, all counted from the files under the store's lock (a restart
+  forgets nothing; concurrent posts keep the caps); question 500, each
+  option 120, why 1000 characters; 2 to 6 distinct non-empty options.
+  Unknown kinds, wrong types, a `bool` or out-of-range default and extra
+  arguments are refused, nothing written.
+- **Scrub, display rule and provenance.** Every field through
+  `chat_reads.scrub` (invisible characters, typed credentials, Jarvis's own
+  credential values, private-key blocks, the known key and bearer shapes),
+  then the display rule below, then the scrub again, before it is stored:
+  a token split by a character the display rule drops is whole again after
+  it, so the second scrub is the one that counts (round 3 of the review). A
+  scrub that raises refuses the post. Each is cleaned as the owner will see it (`decisions.display_text`, the sibling
+  of `chat_reads.card_title`'s character rule: NFC; enclosing marks,
+  symbols, format and private-use characters and the Hangul fillers go; at
+  most two combining marks per character, so no Zalgo tower) and judged
+  again (review of PR #309): a question, why or option left empty is
+  refused, two options alike under NFKC, case-folding and a small
+  confusables skeleton (the common Cyrillic and Greek look-alikes of Latin
+  letters; not Unicode's whole table, which would be a dependency) are
+  refused (so
+  two credentials that scrub to one string, or `yes` beside a `yes` with a zero-width space in it), and no
+  option may say "(suggested)" (the HUD's own marker). `origin` records the
+  asker: "Provider · chat ‹title› (id)", the title through
+  `chat_reads.clean_title` and `card_title` (one line, brackets and bidi
+  gone), as the relay line on a card; a task's would be `approvals.label`'s.
+- **The store.** `<data root>/inbox/decisions/<id>.json` (`d` + 12 hex), one
+  per decision: §3.2's fields (`id, thread_id, task_id, project_id,
+  question, options, default, why, asked_at, answer: {choice, text, at} |
+  null`) plus `kind`, `origin` and `delivery` (`started | queued | closed |
+  failed`, set once answered). `inbox/` and `decisions/` are 0700 and each
+  file 0600, tightened when found wider. Every open is relative to folder
+  descriptors opened `O_DIRECTORY | O_NOFOLLOW` (a symlinked `inbox/` or
+  `decisions/` is refused, nothing written through it); files are read
+  `O_NOFOLLOW | O_NONBLOCK` and refused unless `fstat` says regular and at
+  most 64 KiB (a FIFO never blocks a read, a symlinked file is never read or
+  written); a write is a fresh `O_EXCL` temp file, fsynced, then
+  `os.replace`d. A file that does not read back as exactly a decision
+  (every field present with its type and no other, `kind` "decision", its
+  name and id agreeing, the option and answer shapes holding) is never a row,
+  never counted and never answered; and `inbox.rows` reads each source and
+  each decision on its own, so one that raises shows nothing of its own and
+  never takes `GET /inbox` (or the phone's `/m/api/inbox`) down. At most `KEEP` (500) files: the oldest answered go
+  first; a post with none to drop is refused, nothing open is ever dropped.
+- **Protected: the whole tree.** `files._inbox_tree` makes everything at or
+  below `<V2_DATA_DIR>/inbox` `_self_protected` (v1 write tools refuse it;
+  v2 `denied_file` and `denied_grant` refuse it); the `decisions` folder is
+  also named in `_protected_state_paths`. The shell gate's
+  `protected_state.owner_trees` judges any write that lands at or below the
+  tree: a provable one (a redirect onto, `cp`/`rm`/`tee`/`mv`/`touch` on a
+  path there) is a certain touch, refused by v2's layer 1 and asked by v1;
+  an unprovable one asks. Every spelling counts, on #310's machinery: each
+  word of a brace expansion is an operand of its own, and a glob is matched
+  component by component (`_glob_relate`: it may be the tree or lie below
+  it, so `<D>/*/decisions/x`, `<D>/i?box/decisions/`, `<D>/**/x` and
+  `decision[s]` are all inside) and by what it reaches on disk (`_glob_fs`,
+  through a symlink); a walk cut short asks. A folder *above* the tree is not the tree rule's:
+  it goes on to `_ancestor_of` exactly as before, so `cp -r /tmp/x/inbox
+  <data>/` stays a certain DENY and `rm -rf <data>` still names
+  `missed.jsonl` and the phone's files on its card (review of PR #309, which
+  found an early `continue` there; a 48-command differential against main
+  `291d1f2b`, the brace and glob spellings included, shows the only verdict
+  changes are writes inside the tree, ASK or ALLOW before, DENY at v2's
+  layer 1 now).
+- **Rows.** An open decision is a `decision` row at rank 6 ("When you have
+  time"), oldest first: title `chat <id> asks for your decision`, blocks
+  `nothing waits; chat <id> hears your answer as a message`, or `chat <id> is
+  closed; an answer is recorded only` when the asking chat is gone or it or
+  its project is archived (an archived project's decision is still shown,
+  without its `project_id`). The question, options, default, why, answer
+  and delivery are in `detail` only, untrusted text; `origin` is the
+  provenance. An answer delivered (`started`/`queued`) removes the row; one
+  recorded for a closed chat (`closed`) or that could not be delivered
+  (`failed`) is a rank 8 row for `RECORDED_WINDOW` (7 days, until B3's
+  dismiss): title `Your decision for chat <id>`, blocks `recorded; the asking
+  chat is closed` / `recorded; it could not reach the asking chat`. Rows
+  keep A1's shape, so the phone (C3) can read them generically.
+- **The answer.** `POST /inbox/decisions/<id>` (owner-only, the HUD
+  listener, as every `/inbox` path): exactly one of `{choice: index}` and
+  `{text}` (non-empty, at most 2000 characters, stripped). 400 for a
+  malformed id or body or a query, 404 for an unknown decision, 409 for one
+  already answered. `POST /inbox/dec:<id>/answer` is the same function (an
+  unknown one is that route's 409). It records first (`DecisionStore.settle`,
+  under the lock: a second answer is 409, never overwritten), then delivers
+  (§5), then notes the delivery and publishes `decision_answered` (ids
+  only). The reply is `{ok, decision_id, delivery, note}`.
+- **Delivery (§5).** The asking chat, unless it is gone or archived, it or
+  its project (`closed`: nothing is sent; the answer stays recorded), gets
+  an owner message (`origin="owner", via="inbox", desk=False`) through
+  `Daemon.deliver_queued`: a turn of its own when the chat is idle and
+  nothing of the owner's waits (`started`), else it waits in a **queue of
+  its own** (`_inbox_queues`, `queued`), which `_drain` runs after the
+  owner's queue and before other chats' messages. So an answer waiting
+  never takes one of the owner's `QUEUE_MAX` slots and never turns the
+  owner's next message from a steer into a wait (review of PR #309). It
+  **never steers**: never `_steer`, never into a running turn, never read
+  as the answer to a card or question it waits on. A closed session is
+  resumed to take it, as a HUD message would be (a deviation from §5's "if
+  the asking thread has a live session", noted in the PR).
+  - **The words** (`inbox.decision_message`, reframed on the review): code's
+    first line, "The owner answered your decision <id>: they picked option
+    <n> of the options you gave, "<option, JSON-quoted>"." or "… in their own
+    words: <the owner's text>", then a last line "(Your question, quoted;
+    your words, not the owner's: "<the question as one JSON-quoted line,
+    fence phrases annotated>")". Look-alike quotes (Unicode Pi/Pf, fullwidth
+    `＂`, `〃`, primes, guillemets and the like) become `'` first, so nothing
+    the agent wrote can start a line or close its quote, to a parser or to
+    the eye, and none of it reads as the owner's.
+  - **No desk, no Bypass.** `via="inbox"` (a new `VIAS` value) is never at
+    the desk (`desk.desk_message` requires "hud"): the turn holds no desk
+    tool (fast path F-1..F-7) and cannot itself post a decision or send to a
+    chat. Claude's Bypass switch does not count in it (`owner_turn` excludes
+    `via="inbox"`); Codex has no Bypass.
+  - **Lost answers say so.** The queued item carries the decision's id. When
+    it is dropped (the owner's Stop, a close, a thread that cannot resume,
+    shutdown, and a thread whose record is gone when `_drain` tries to
+    resume it) `_drop_waiting` hands it to `Inbox.answer_dropped`, which
+    marks the decision `failed` and publishes `decision_answered`, so the
+    rank-8 "recorded; it could not reach the asking chat" row shows; at start
+    `Inbox.fail_lost_answers` does the same for any left `queued`, or
+    answered with no delivery noted (a crash between the two), by a previous
+    run. The route never overwrites such a `failed`.
+  - **Counted where the queue is shown.** The transcript route reads the
+    answers' queue too (a waiting answer reads "queued" after a reload, not
+    "not sent"), and the relay counts it ahead of other chats' messages
+    (`ChatRelay._ahead`: `snapshot`'s `queued`, a send's position, a wait's
+    "position").
+  - **Where it shows.** The transcript shows it as the owner's message "from
+    the inbox"; chat reads (other chats, the phone) mark it "via the inbox
+    (not typed in this chat)"; the Discord mirror writes "You (inbox): <the
+    answer line>" and, on a line of its own, "↳ the chat's own question (its
+    words, not yours): <quoted>".
+- **Events.** The post publishes `decision_posted` and the answer
+  `decision_answered`, both `{decision_id}` (plus `delivery`) and never text;
+  `Inbox.observe` turns each into `inbox_changed` `{ids: ["dec:<id>"],
+  reason}`.
+- **The phone (C3).** `remote_api.DETAIL_FIELDS["decision"]` is
+  `(decision_id, question, options, default, why, answer, delivery)`, the
+  projection's own keys, every string through the phone's scrub; the phone
+  shows the question, options (the suggestion marked) and why read-only,
+  "Answer at the desk" while open, and the answer once recorded.
+- **No tool reaches the answer side.** `tests/v2/archive_check.py` now scans
+  `decisions.py` and the tool's module for every inbox route and module
+  needle; `tests/v2/owner_post_check.py` keeps `settle`, `delivered`,
+  `answer_decision`, `deliver_queued`, the broker and the steer out of the
+  tool and `OwnerPosts`.
+
+Tests: `tests/v2/owner_post_check.py` (binding per caller kind through the
+real bridge, hook and Codex admission; the service's rows; caps; field caps;
+scrub with planted tokens; provenance; the store's modes, atomicity, FIFO
+and symlink refusals and the protected tree, its DENYs and its card names;
+the projection; the route; the delivery's `via`, desk, queueing, its own
+queue, drops and closed-chat cases; the framing on every surface; partial
+and foreign files; the display rule; the reviewers' races; `inbox_changed`
+without text), plus `inbox_check`, `archive_check`, the catalog pin in
+`mcp_session_check`, the Bypass case in `claude_provider_check` and the
+decision row in `remote_api_check`.
 
 ## The phone's remote listener (phone C1 / P-1, 2026-10-25)
 

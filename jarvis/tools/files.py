@@ -125,6 +125,12 @@ SELF_PROTECTED = frozenset(
         # function. An agent that could edit it could hide a card or answer
         # one.
         "jarvis/v2/inbox.py",
+        # The owner's decisions (inbox B1, IN-5): the store, its caps and
+        # scrub, who may post, and the one tool that posts. An agent that
+        # could edit them could lift the caps, skip the scrub or post from a
+        # turn the owner never started.
+        "jarvis/v2/decisions.py",
+        "jarvis/v2/tools/owner_post.py",
         # The phone's remote listener (phone design PH-1, P-1): its route
         # table, strict Host, Origin rule and headers decide what the
         # tailnet can reach on this machine. An agent that could edit it
@@ -241,10 +247,32 @@ def _protected_state_paths() -> set[Path]:
     # hide that, so they are the owner's state, written by the daemon only.
     # The folder itself is named too, so moving, replacing or re-moding it
     # is judged as a write to it (deleting it was already covered as an
-    # ancestor). A whole-tree rule is a follow-up before IN-5 adds more.
+    # ancestor). Since inbox B1 (IN-5) the whole tree is protected too
+    # (`_inbox_tree`): the decisions `owner_post` writes through the daemon
+    # live in `decisions/`, one file per id, which no fixed list can name.
+    # The `decisions` folder is named here so moving or re-moding it is
+    # judged as a write to it, as the inbox folder's is.
     inbox = Path(config.V2_DATA_DIR).expanduser() / "inbox"
-    paths |= {inbox, inbox / "missed.jsonl"}
+    paths |= {inbox, inbox / "missed.jsonl", inbox / "decisions"}
     return paths
+
+
+def _inbox_tree() -> Path:
+    """The owner inbox's folder (`<v2 data root>/inbox`), resolved: every
+    file at or below it is the inbox's own state (inbox B1). The write tools
+    refuse anything there, v2's layer 1 and grants refuse it, and
+    `protected_state.owner_trees` judges every shell write into it. Read from
+    config per call, so a test that repoints V2_DATA_DIR protects its own.
+    Raises OSError/RuntimeError when it cannot be resolved; callers refuse."""
+    return (Path(config.V2_DATA_DIR).expanduser() / "inbox").resolve()
+
+
+def _in_inbox_tree(resolved: Path) -> bool:
+    try:
+        tree = _inbox_tree()
+    except (OSError, RuntimeError):
+        return True  # cannot tell: refuse
+    return resolved == tree or tree in resolved.parents
 
 
 def _protected_state() -> set[Path]:
@@ -318,6 +346,8 @@ def _self_protected(target: Path) -> bool:
     if _git_internal(resolved):
         return True
     if _hud_build(resolved):
+        return True
+    if _in_inbox_tree(resolved):
         return True
     try:
         rel = resolved.relative_to(config.REPO_ROOT)

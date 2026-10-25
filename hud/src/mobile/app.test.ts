@@ -90,6 +90,36 @@ describe("the phone's views: untrusted text stays text (P-3)", () => {
     expect(missed.textContent).toContain(HOSTILE[0]);
   });
 
+  it("a decision (inbox B1) shows its question, options and why, read-only, as text", () => {
+    const rows = parseInbox([
+      row({ id: "dec:d0123456789ab", kind: "decision", rank: 6, thread_id: "aaaaaaaa", origin: H,
+        detail: { decision_id: "d0123456789ab", question: "Which?\n" + H, options: [H, "two"], default: 1,
+                  why: "because " + H, answer: null, delivery: null } }),
+      row({ id: "dec:d0123456789ac", kind: "decision", rank: 8, thread_id: "aaaaaaaa",
+        detail: { decision_id: "d0123456789ac", question: "Done?", options: ["yes", "no"], default: null,
+                  why: "w", answer: { choice: 0, text: null, at: "2026-10-25T00:00:00+00:00" }, delivery: "closed" } }),
+    ])!;
+    const view = inboxView(rows, () => {});
+    document.body.replaceChildren(view);
+    noMarkup(view);
+    const open = view.querySelector('[data-id="dec:d0123456789ab"]')!;
+    expect(open.querySelector('[data-testid="m-question"]')!.textContent).toBe("Which?\n" + H);
+    expect(Array.from(open.querySelectorAll(".options .option-text")).map((s) => s.textContent)).toEqual([H, "two"]);
+    // The marker is the phone's own element before the option's words (review of PR #309).
+    const items = Array.from(open.querySelectorAll(".options li"));
+    expect(items[0].querySelector('[data-testid="m-suggested"]')).toBeNull();
+    const marker = items[1].querySelector('[data-testid="m-suggested"]')!;
+    expect(marker.textContent).toBe("suggested");
+    expect(marker.compareDocumentPosition(items[1].querySelector(".option-text")!) & Node.DOCUMENT_POSITION_FOLLOWING)
+      .toBeTruthy();
+    expect(open.querySelector('[data-testid="m-why"]')!.textContent).toBe("because " + H);
+    expect(open.querySelector('[data-testid="m-desk-only"]')!.textContent).toBe("Answer at the desk");
+    for (const b of Array.from(view.querySelectorAll("button"))) expect(b.dataset.testid).toBe("m-open");
+    const done = view.querySelector('[data-id="dec:d0123456789ac"]')!;
+    expect(done.querySelector('[data-testid="m-answer"]')!.textContent).toBe("yes");
+    expect(done.querySelector('[data-testid="m-desk-only"]')).toBeNull();
+  });
+
   it("offers no answer control: approvals and questions say Answer at the desk", () => {
     const view = inboxView(ROWS, () => {});
     const notes = Array.from(view.querySelectorAll('[data-testid="m-desk-only"]')).map((n) => n.textContent);

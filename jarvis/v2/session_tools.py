@@ -9,8 +9,8 @@ listed tool runs **in the daemon**, through the bridge's single
 `tools.dispatch` (`bridge.py`), never in the jarvis-mcp process the CLI starts.
 
 Owner Claude and Codex chats receive `terminal_read`, the D-3 catalog,
-the chat reads and `chat_send`/`chat_wait` (`tools/chats.py`), filtered by
-installed tool availability.
+the chat reads and `chat_send`/`chat_wait` (`tools/chats.py`) and
+`owner_post` (`tools/owner_post.py`), filtered by installed tool availability.
 Codex foreground-only calls are bound to the exact native parent handle/turn
 before daemon dispatch. Tests may register temporary entries without widening
 the production catalog.
@@ -110,6 +110,17 @@ SESSION_TOOLS["chat_send"] = SessionTool(
 SESSION_TOOLS["chat_wait"] = SessionTool(
     "chat_wait", providers=_CHAT_PROVIDERS, foreground_only=True)
 
+# Posting a decision to the owner (owner inbox design IN-5, §10 question 1;
+# `tools/owner_post.py`, `decisions.py`). Bound exactly as `chat_send` is:
+# Claude and Codex owner chats, foreground-only (a Claude sub-agent is denied
+# by the hook, a Codex child by `admit`), desk-only (a turn the owner started
+# at the HUD), not read-only (`permit` decides at `jarvis-session-delegate`:
+# unasked on AUTO and ASK, refused for STRICT, asked under an always-ask
+# rule). The fast path never holds it. External MCP never gets it.
+OWNER_POST_TOOLS = ("owner_post",)
+SESSION_TOOLS["owner_post"] = SessionTool(
+    "owner_post", providers=_CHAT_PROVIDERS, foreground_only=True, desk_only=True)
+
 
 def register(entry: SessionTool) -> SessionTool:
     """Offer `entry` to chat sessions. Primarily for isolated test probes."""
@@ -147,7 +158,7 @@ def for_provider(provider) -> list[SessionTool]:
     if not entries:
         return []
     from jarvis import tools
-    from .tools import terminal_read, hud_browser_view, hud_browser_act, schedules, chat_git_tools, chats  # noqa: F401 — register implementations
+    from .tools import terminal_read, hud_browser_view, hud_browser_act, schedules, chat_git_tools, chats, owner_post  # noqa: F401 — register implementations
     offered = []
     for entry in sorted(entries, key=lambda e: e.name):
         if entry.name not in tools.REGISTRY:

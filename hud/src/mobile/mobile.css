@@ -197,6 +197,13 @@ p, li, h2, h3 { overflow-wrap: anywhere; }
 .row-detail { margin-top: 8px; padding-top: 6px; border-top: 1px solid var(--border); }
 .headline { color: var(--amber); font-weight: 600; }
 .question, .brief { white-space: pre-wrap; }
+/* A decision's suggestion (inbox B1): the phone's own bordered tag, before the option. */
+.options .suggested {
+  font: 11px var(--mono); text-transform: uppercase; color: var(--text-2);
+  border: 1px solid var(--border-strong); border-radius: var(--radius); padding: 0 4px;
+}
+.options .option-text { overflow-wrap: anywhere; }
+.options li { overflow: hidden; }
 .code, .patch {
   font: 13px/1.4 var(--mono);
   background: var(--bg-inset);

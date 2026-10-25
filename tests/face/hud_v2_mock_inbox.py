@@ -15,6 +15,8 @@ The world's `inbox` section (`state(mock)`):
     an older daemon);
   - `answer_status`: row id -> (status, body) to answer that row's POST with
     instead of the daemon's 200 (a 409 is "already answered or gone");
+  - `decided`: every `POST /inbox/decisions/<id>` (inbox B1) that got
+    through, as (raw path, decoded decision id, body);
   - `answers`: every answer that got through the owner test, as
     (raw path, decoded id, body); `reads`: every `GET /inbox` served;
     `refused`: every request the owner test refused.
@@ -82,6 +84,33 @@ def handle(h, mock, method: str, path: str) -> bool:
             mock.emit("approval_resolved", {"req_id": req, "decision": (body or {}).get("decision", "deny")})
         changed(mock, [row_id], "answered")
         h._json({"ok": True})
+        return True
+    if len(parts) == 3 and parts[1] == "decisions" and method == "POST":
+        # Inbox B1: `POST /inbox/decisions/<id>` with `{choice}` or `{text}`.
+        # The answered row leaves (`decision_answered` → `inbox_changed`) and
+        # the reply carries the daemon's `delivery` and `note`.
+        body = h._body()
+        decision_id = unquote(parts[2], errors="strict")
+        s.setdefault("decided", []).append((path, decision_id, body))
+        mock.calls.append(("POST", "/inbox/decisions/*", {"id": decision_id,
+                                                         **(body if isinstance(body, dict) else {})}))
+        row_id = f"dec:{decision_id}"
+        scripted = s["answer_status"].get(row_id)
+        if scripted:
+            status, payload = scripted
+            h._json(payload, status)
+            return True
+        row = next((r for r in s["rows"] if r.get("id") == row_id), None)
+        if row is None:
+            h._err(404, "no such decision")
+            return True
+        if (row.get("detail") or {}).get("answer") is not None:
+            h._err(409, "this decision was already answered")
+            return True
+        s["rows"] = [r for r in s["rows"] if r.get("id") != row_id]
+        changed(mock, [row_id], "decision_answered")
+        h._json({"ok": True, "decision_id": decision_id, "delivery": "queued",
+                 "note": "Sent to the asking chat; it runs your answer after the turn already running."})
         return True
     h._err(404, "route not found")
     return True

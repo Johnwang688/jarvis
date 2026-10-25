@@ -1789,6 +1789,39 @@ routes"). Not deployed: the owner's step is `jarvis hud rebuild` and a reload
   and, without a thread, no link at all (`linkOf` never sends it to its
   task). `origin` is untrusted text as everywhere. Existing classes only
   (`ir-text`, `ir-when muted`): no new colour.
+- **Decisions (inbox B1, IN-5).** A `decision` row (daemon's half:
+  control-plane notes, same section) sits in "When you have time" (rank 6),
+  uncounted, plain. `lib/inbox` `decisionOf` reads its `detail` (a decision
+  id of the daemon's shape, 2 to 6 options, `default` an index in range;
+  anything else is shown and never answerable, as is a decision whose option
+  says "(suggested)"): the question (`ir-text`) and the why (`ir-why`,
+  secondary text colour) as text, the options as radio buttons, the agent's
+  suggestion **preselected but never submitted** (nothing posts until
+  Answer) and marked by the HUD's own bordered "suggested" tag, a separate
+  element before the option's words that an option cannot draw (review of
+  PR #309), and a box for the owner's own words. Every text box of a row
+  clips what it draws (`overflow: hidden`, the long question and why still
+  scroll), so stacked combining marks cannot reach a neighbouring line; the
+  daemon cleans them first (control-plane notes). Answer posts once, through `api.answerDecision` to `POST
+  /inbox/decisions/<encodeURIComponent(id)>`: `{text}` when the box has words
+  (they win over the picked option; the row says so), else `{choice}`; with no
+  pick and no words Answer is off. **Enter answers only from the focused box
+  with words in it**; on a radio it does nothing (arrows still move the pick)
+  and nothing here is a `<form>`. Radios and the box are not `disabled` under
+  a card (inert covers them, as the answer box); Answer is, and every handler
+  refuses. The reply's `note` (the daemon's fixed words: where the answer
+  went, "Recorded; the asking chat is closed, so it was not told.") is shown
+  as the inbox notice; a 409 is "Already answered or gone." A decision
+  recorded for a closed chat (rank 8, "For your information") shows "Your
+  answer: …" and only its link. No amber (nothing is pending), the cyan
+  accent for focus only. In a chat's transcript the delivered answer is the
+  owner's message marked "· from the inbox" (`via: "inbox"`, live from
+  `user_message` too); its words are code's frame, the answer first and the
+  chat's own question quoted on a last line as the chat's. The phone (C3)
+  shows a decision read-only: the question, the options (the suggestion
+  marked by the phone's own bordered "suggested" element before the option,
+  never text an option could write), the why, "Answer at the desk" while
+  open, and "Your answer" once recorded (`mobile/views.ts`).
 - Tests: `lib/inbox.test.ts`, `state/inbox.test.ts`,
   `components/InboxView.test.ts`, the `lib/workspace.test.ts` inbox case, and
   `tests/face/hud_v2_inbox_check.py` (97 checks since A3's `missed` section, its own `MockDaemon(0)`, the
@@ -1799,7 +1832,12 @@ routes"). Not deployed: the owner's step is `jarvis hud rebuild` and a reload
   ranks, no re-read on 409, controls live under a card, Withdraw gated on the
   browser's clock, no re-read on `_connected` (the reconnect section drops
   the stream and changes the rows with no event), and a badge left after a
-  failed read.
+  failed read. B1 adds the face check's `decision` section (rank-6 placement,
+  uncounted, Graphite, the suggestion preselected with nothing posted, hostile
+  question/options/why/origin as text, Enter on a radio posts nothing, Answer
+  posts `{choice}` once to `/inbox/decisions/<id>`, words from the focused box
+  post `{text}`, inert and disabled under a card) and the vitest decision
+  cases in `InboxView.test.ts` and `lib/inbox.test.ts`.
 - **Follow-up (pre-existing, not this package):** the HUD reads `GET
   /approvals` only at boot, so a card asked while the event stream was down
   is missed until a reload; re-read it on reconnect and merge it into the

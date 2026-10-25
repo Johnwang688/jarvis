@@ -57,6 +57,30 @@ records; rows show the last `MISSED_WINDOW` (7 days) until dismiss (B3). A
 write that fails is logged and dropped: it never touches the resolve. The
 file is protected state (`jarvis/tools/files.py`), refused to agent writes.
 
+**Decisions (B1, IN-5).** An agent's "answer whenever" question, posted by
+`owner_post` into `decisions.DecisionStore` (`<data root>/inbox/decisions/`),
+is a `decision` row at rank 6 ("When you have time"), oldest first. Its
+`title` and `blocks` name only the asking chat's (or task's) id; the
+question, options, default and why are in `detail` only, untrusted text, and
+the asker's provenance is `origin`. The owner answers it at `POST
+/inbox/decisions/<id>` (`{choice: index}` or `{text}`; also reachable as
+`POST /inbox/dec:<id>/answer`, the same function): the answer is recorded
+first (a second one is 409), then delivered to the asking chat as an owner
+message with `via="inbox"` and no desk authority, in a queue of its own
+behind any running turn and never steered into it (`Daemon.deliver_queued`).
+The delivered text is code's frame (`decision_message`): the answer first,
+with the decision's id, then the agent's question quoted on a line of its
+own and labelled the agent's words, so nothing it wrote reads as the
+owner's. An asking chat that is gone or archived gets nothing; the answer is
+still recorded, and the row stays for `decisions.RECORDED_WINDOW` at rank 8
+saying "recorded; the asking chat is closed". An answer that was queued and
+then dropped (a Stop, a close, a thread that could not resume, a restart)
+is marked "failed" and shows there too ("recorded; it could not reach the
+asking chat"). The post and the answer each put an ids-only record on the
+bus (`decision_posted`, `decision_answered`), which `Inbox.observe` turns
+into `inbox_changed`. One source or record that cannot be read never takes
+the projection down.
+
 This module is SELF_PROTECTED (`jarvis/tools/files.py`): it decides what the
 owner sees as waiting.
 """
@@ -72,23 +96,27 @@ import stat
 import threading
 
 from .approvals import clean_line
+from . import decisions as _decisions
 from .model import TaskState
 
 LOG = logging.getLogger(__name__)
 
-# IN-4's bands. Code, not a setting. 5 to 7 (PRs, decisions, checks) belong
-# to later packages; 8 is `failed` and "denied while away" (IN-3).
+# IN-4's bands. Code, not a setting. 5 and 7 (PRs, checks) belong to later
+# packages; 6 is decisions (B1); 8 is `failed`, "denied while away" (IN-3)
+# and a decision recorded for a chat that was closed.
 RANK_APPROVAL = 1
 RANK_QUESTION = 2
 RANK_PROPOSAL = 3
 RANK_BLOCKED = 4
+RANK_DECISION = 6
 RANK_FAILED = 8
 RANK_MISSED = 8
+RANK_RECORDED = 8
 
 # Row id prefixes: kind prefix + the source's own id.
 _PREFIX = {"approval": "appr", "question": "q", "task_question": "tq",
-           "proposal": "prop", "task": "task", "missed": "missed"}
-_ANSWERABLE = {"appr", "q", "tq", "prop"}
+           "proposal": "prop", "task": "task", "missed": "missed", "decision": "dec"}
+_ANSWERABLE = {"appr", "q", "tq", "prop", "dec"}
 _KNOWN = _ANSWERABLE | {"task", "missed"}
 
 # "Denied while you were away" (IN-3). The resolutions recorded; the file's
@@ -112,6 +140,8 @@ SOURCE_KINDS = frozenset({
     "task_status_changed", "proposal_reply",
     "project_archived", "project_restored", "project_deleted",
     "question", "turn_finished", "thread_closed", "thread_archived",
+    # B1: a decision posted (`decisions.OwnerPosts.post`) or answered here.
+    "decision_posted", "decision_answered",
 })
 _DETAIL_TEXT_CAP = 4000
 
@@ -495,6 +525,79 @@ def _missed_rows(daemon):
     return out
 
 
+# -- decisions (B1, IN-5) ------------------------------------------------------------
+
+def _asker_closed(daemon, thread_id, hidden) -> bool:
+    """The asking chat is gone, or it or its project is archived: an answer
+    is recorded only. Unreadable counts as closed (nothing is delivered on a
+    guess)."""
+    try:
+        thread = daemon.stores.threads.get(thread_id)
+    except Exception:  # noqa: BLE001
+        return True
+    return thread is None or bool(thread.archived) or thread.project_id in hidden
+
+
+def _decision_detail(rec) -> dict:
+    """What the HUD shows of a decision: the agent's words, as untrusted text."""
+    answer = rec["answer"]
+    return {"decision_id": rec["id"], "question": _cap(rec["question"], 1000),
+            "options": [_cap(o, 200) for o in rec["options"]], "default": rec["default"],
+            "why": _cap(rec["why"], 2000),
+            "answer": dict(answer) if isinstance(answer, dict) else None,
+            "delivery": rec.get("delivery")}
+
+
+def _decision_rows(daemon, hidden):
+    """Open decisions at rank 6; an answer recorded for a closed chat, or one
+    that could not be delivered, at rank 8 for `RECORDED_WINDOW`. `title` and
+    `blocks` name the asker's id only (the A1 sentinel rule)."""
+    store = getattr(getattr(daemon, "inbox", None), "decisions", None)
+    if store is None:
+        return []
+    out = []
+    now = store.clock()
+    for rec in store.all():
+        try:
+            out += _decision_row(daemon, hidden, rec, now)
+        except Exception as exc:  # noqa: BLE001 — one record never hides the rest
+            LOG.warning("Cannot show a decision (%s)", type(exc).__name__)
+    return out
+
+
+def _decision_row(daemon, hidden, rec, now) -> list:
+    """One decision's row, if it has one (`_decision_rows`)."""
+    out: list = []
+    thread_id, task_id = rec["thread_id"], rec.get("task_id")
+    who = f"task {task_id}" if task_id else f"chat {thread_id}"
+    project_id = rec.get("project_id")
+    if project_id in hidden:
+        project_id = None       # shown without its project, as an approval is
+    answer = rec["answer"]
+    if answer is None:
+        closed = _asker_closed(daemon, thread_id, hidden)
+        out.append(_row("decision", RANK_DECISION, f"dec:{rec['id']}",
+                        f"{who} asks for your decision",
+                        f"{who} is closed; an answer is recorded only" if closed
+                        else f"nothing waits; {who} hears your answer as a message",
+                        project_id=project_id, thread_id=thread_id, task_id=task_id,
+                        asked_at=rec["asked_at"], origin=rec.get("origin") or "",
+                        detail=_decision_detail(rec)))
+        return out
+    delivery = rec.get("delivery")
+    at = _parse_time(answer.get("at"))
+    if delivery not in ("closed", "failed") or at is None or at < now - _decisions.RECORDED_WINDOW:
+        return out
+    out.append(_row("decision", RANK_RECORDED, f"dec:{rec['id']}",
+                    f"Your decision for {who}",
+                    "recorded; the asking chat is closed" if delivery == "closed"
+                    else "recorded; it could not reach the asking chat",
+                    project_id=project_id, thread_id=thread_id, task_id=task_id,
+                    asked_at=min(at, now).isoformat(timespec="seconds"),
+                    origin=rec.get("origin") or "", detail=_decision_detail(rec)))
+    return out
+
+
 def rows(daemon) -> list[dict]:
     """Every row, ranked (IN-4; ties to the older item). Pure: reads only."""
     from .projects import archived_project_ids
@@ -502,8 +605,18 @@ def rows(daemon) -> list[dict]:
         hidden = archived_project_ids(daemon.stores)
     except Exception:  # noqa: BLE001
         hidden = set()
-    out = (_approval_rows(daemon, hidden) + _question_rows(daemon, hidden) + _task_rows(daemon, hidden)
-           + _missed_rows(daemon))
+    out = []
+    # One source that fails (a decision file that is not one, review of PR
+    # #309) shows nothing of its own and never takes the others down.
+    for name, source in (("approvals", lambda: _approval_rows(daemon, hidden)),
+                         ("questions", lambda: _question_rows(daemon, hidden)),
+                         ("tasks", lambda: _task_rows(daemon, hidden)),
+                         ("missed", lambda: _missed_rows(daemon)),
+                         ("decisions", lambda: _decision_rows(daemon, hidden))):
+        try:
+            out += source()
+        except Exception as exc:  # noqa: BLE001 — never a 500 for the whole inbox
+            LOG.warning("Cannot read the inbox's %s (%s)", name, type(exc).__name__)
     return sorted(out, key=_sort_key)
 
 
@@ -531,6 +644,40 @@ class Inbox:
         self._written: set[str] = set()
         root = getattr(getattr(daemon, "stores", None), "root", None)
         self.missed = MissedLog(root) if root is not None else None
+        # B1: the decisions `owner_post` writes (through the daemon's
+        # `decisions.OwnerPosts`, which shares this store) and the owner answers here.
+        self.decisions = _decisions.DecisionStore(root) if root is not None else None
+
+    def answer_dropped(self, decision_id) -> None:
+        """An answer queued for its chat will never run (the owner's Stop, a
+        close, a thread that could not resume, shutdown): its decision says
+        "failed", so the rank-8 "could not reach the asking chat" row shows,
+        and `decision_answered` re-reads the inbox. Never raises."""
+        try:
+            if self.decisions is None or not _decisions.ID_RE.match(str(decision_id)):
+                return
+            record = self.decisions.delivered(decision_id, "failed")
+            if record is not None:
+                from .model import utcnow
+                self.daemon.bus.publish({"kind": "decision_answered", "thread_id": record["thread_id"],
+                                         "project_id": record.get("project_id"), "at": utcnow(),
+                                         "data": {"decision_id": decision_id, "delivery": "failed"}})
+        except Exception as exc:  # noqa: BLE001
+            LOG.warning("Cannot mark a dropped answer (%s)", type(exc).__name__)
+
+    def fail_lost_answers(self) -> int:
+        """At start: an answer a previous run left "queued" never ran (the
+        queue lives in memory), and one recorded with no delivery noted at
+        all was cut off between the two (a crash after `settle`); both are
+        "failed". Returns how many."""
+        if self.decisions is None:
+            return 0
+        lost = 0
+        for record in self.decisions.all():
+            if record["answer"] is not None and record.get("delivery") in ("queued", None):
+                if self.decisions.delivered(record["id"], "failed") is not None:
+                    lost += 1
+        return lost
 
     def approval_ended(self, request, resolution) -> None:
         """A waiter ended (the broker's `on_resolve`): record it when it was a
@@ -600,6 +747,11 @@ class Inbox:
         if kind in ("project_archived", "project_restored", "project_deleted"):
             # Its task rows hide or return; which ones is a re-read's job.
             return []
+        if kind in ("decision_posted", "decision_answered"):
+            decision_id = data.get("decision_id")
+            if not isinstance(decision_id, str) or not _decisions.ID_RE.match(decision_id):
+                return []
+            return [f"dec:{decision_id}"]
         task_id = record.get("task_id") or data.get("task_id")
         if not isinstance(task_id, str) or not task_id:
             return []
@@ -648,7 +800,17 @@ def answer(daemon, row_id, body, *, hud: bool):
     route makes, passed through unchanged."""
     from .daemon import APIError, _object, _text
     from .provider import Decision
-    prefix, _, row_id = _split(row_id)
+    prefix, rest, row_id = _split(row_id)
+    if prefix == "dec":
+        # `POST /inbox/decisions/<id>`'s own function. A decision that is
+        # not there, or no longer open, is "no longer waiting" here as for
+        # every other row.
+        try:
+            return answer_decision(daemon, rest, body)
+        except APIError as exc:
+            if exc.status == 404:
+                raise _gone() from None
+            raise
     if prefix not in _ANSWERABLE:
         if prefix == "missed":
             # Information only (IN-3); no "ask again" (design §10, question 3).
@@ -712,10 +874,145 @@ def answer(daemon, row_id, body, *, hud: bool):
         raise APIError(409, str(exc)) from exc
 
 
+NOTES = {"started": "Sent to the asking chat; it starts a turn with your answer now.",
+         "queued": "Sent to the asking chat; it runs your answer after the turn already running.",
+         "closed": "Recorded; the asking chat is closed, so it was not told.",
+         "failed": "Recorded; it could not reach the asking chat."}
+
+
+# Characters that look like a double quote (review of PR #309): an agent's
+# text could close the JSON quote to the eye while JSON escapes only `"`.
+# Each becomes `'`, as `chat_reads.card_title` neutralizes look-alike brackets.
+_QUOTE_LIKE = frozenset("\u00ab\u00bb\u02ba\u02bb\u02bc\u02bd\u02ee\u02dd\u05f3\u05f4\u2018\u2019\u201a"
+                        "\u201b\u201c\u201d\u201e\u201f\u2032\u2033\u2034\u2035\u2036\u2037\u2039"
+                        "\u203a\u275b\u275c\u275d\u275e\u301d\u301e\u301f\u3003\uff02\uff07")
+
+
+def _unquote_like(text: str) -> str:
+    import unicodedata
+    return "".join("'" if ch in _QUOTE_LIKE or unicodedata.category(ch) in ("Pi", "Pf") else ch
+                   for ch in text)
+
+
+def _quoted(text: str) -> str:
+    """Agent-written text as one JSON-quoted line: whitespace, line breaks
+    and invisible characters collapsed (`clean_line`), look-alike quotes made
+    `'`, fence phrases annotated, every quote and backslash escaped, so
+    nothing in it can close the quote, to the eye or to a parser, or start a
+    line of its own."""
+    from jarvis import untrusted
+    return json.dumps(untrusted.neutralize_markers(_unquote_like(clean_line(text, 1000))),
+                      ensure_ascii=False)
+
+
+def decision_message(record) -> str:
+    """The owner message a decision's answer becomes (design §5; reframed on
+    the review of PR #309). Code's words first, with the decision's id and
+    the owner's answer: an option the owner picked is the agent's own text,
+    so it is quoted as such; the owner's typed words are theirs and stand as
+    typed. Then, on a last line of its own, the agent's question, quoted and
+    labelled as the agent's: it can never read as the owner's words."""
+    answer = record["answer"]
+    did = record["id"]
+    if answer.get("choice") is not None:
+        choice = answer["choice"]
+        head = (f"The owner answered your decision {did}: they picked option {choice + 1} of the options "
+                f"you gave, {_quoted(record['options'][choice])}.")
+    else:
+        head = f"The owner answered your decision {did} in their own words: {answer['text']}"
+    return f"{head}\n{_decisions.QUESTION_LEAD}{_quoted(record['question'])})"
+
+
+def _deliver_decision(daemon, record) -> str:
+    """Hand the answer to the asking chat (design §5): an owner message,
+    `via="inbox"`, `desk=False`, through `Daemon.deliver_queued` (a turn when
+    the chat is idle, else queued behind the running one; never a steer).
+    "closed" when the chat is gone or archived, "failed" when it cannot take
+    it; the answer is recorded either way."""
+    from .daemon import APIError, DaemonError
+    from .projects import is_archived
+    from .provider import UserMessage
+    thread_id = record["thread_id"]
+
+    def closed() -> bool:
+        try:
+            thread = daemon.stores.threads.get(thread_id)
+            return thread is None or bool(thread.archived) or is_archived(daemon.stores, thread.project_id)
+        except Exception:  # noqa: BLE001
+            return True
+    if closed():
+        return "closed"
+    text = decision_message(record)
+    message = UserMessage(text, origin="owner", via="inbox", desk=False, typed=text)
+    try:
+        out = daemon.deliver_queued(thread_id, message, decision_id=record["id"])
+    except (DaemonError, APIError) as exc:
+        LOG.info("A decision's answer was not delivered (%s)", type(exc).__name__)
+        return "closed" if closed() else "failed"
+    except Exception:  # noqa: BLE001 — the answer is recorded; say it did not arrive
+        LOG.exception("Delivering a decision's answer failed")
+        return "closed" if closed() else "failed"
+    status = out.get("status") if isinstance(out, dict) else None
+    return status if status in ("started", "queued") else "failed"
+
+
+def answer_decision(daemon, decision_id, body) -> dict:
+    """`POST /inbox/decisions/<id>` (owner-only, checked by `route`): record
+    the owner's answer, then deliver it (design §4, §5). `{choice: index}` or
+    `{text}`, exactly one. 400 for a malformed id or body, 404 for an unknown
+    decision, 409 for one already answered."""
+    from .daemon import APIError, _object
+    store = getattr(getattr(daemon, "inbox", None), "decisions", None)
+    if not isinstance(decision_id, str) or not _decisions.ID_RE.match(decision_id):
+        raise APIError(400, "malformed decision id")
+    body = _object(body, ("choice", "text"))
+    if ("choice" in body) == ("text" in body):
+        raise APIError(400, "give exactly one of choice or text")
+    choice = text = None
+    if "choice" in body:
+        choice = body["choice"]
+        if not isinstance(choice, int) or isinstance(choice, bool) or choice < 0:
+            raise APIError(400, "choice must be an option's index")
+    else:
+        text = body["text"]
+        if not isinstance(text, str) or not text.strip():
+            raise APIError(400, "text must be a nonempty string")
+        if len(text) > _decisions.ANSWER_MAX:
+            raise APIError(400, f"text is longer than {_decisions.ANSWER_MAX} characters")
+        text = text.strip()
+    record = store.get(decision_id) if store is not None else None
+    if record is None:
+        raise APIError(404, "no such decision")
+    if record["answer"] is not None:
+        raise APIError(409, "this decision was already answered")
+    if choice is not None and choice >= len(record["options"]):
+        raise APIError(400, "choice is not one of the options")
+    try:
+        record = store.settle(decision_id, choice=choice, text=text)
+    except _decisions.Conflict:
+        raise APIError(409, "this decision was already answered") from None
+    except LookupError:
+        raise APIError(404, "no such decision") from None
+    except ValueError as exc:
+        raise APIError(400, str(exc)) from None
+    delivery = _deliver_decision(daemon, record)
+    # A drop between the queueing and here (the owner's Stop) already said
+    # "failed": that stands.
+    noted = store.delivered(decision_id, delivery, keep_failed=True)
+    if noted is not None:
+        delivery = noted.get("delivery") or delivery
+    from .model import utcnow
+    daemon.bus.publish({"kind": "decision_answered", "thread_id": record["thread_id"],
+                        "project_id": record.get("project_id"), "at": utcnow(),
+                        "data": {"decision_id": decision_id, "delivery": delivery}})
+    return {"ok": True, "decision_id": decision_id, "delivery": delivery, "note": NOTES[delivery]}
+
+
 def route(handler, daemon, parts, query):
-    """`GET /inbox` and `POST /inbox/<id>/answer`; None for any other path.
-    `owner_only` runs before anything else on every `/inbox` path, so the API
-    listener and a non-owner page learn nothing, not even which ids exist."""
+    """`GET /inbox`, `POST /inbox/<id>/answer` and `POST
+    /inbox/decisions/<id>`; None for any other path. `owner_only` runs before
+    anything else on every `/inbox` path, so the API listener and a non-owner
+    page learn nothing, not even which ids exist."""
     if not parts or parts[0] != "inbox":
         return None
     from jarvis import config
@@ -731,4 +1028,7 @@ def route(handler, daemon, parts, query):
         # The Host test `POST /approvals/<id>` makes, made the same way.
         hud = config.own_host_header(handler.headers.get("Host", ""), daemon.face_port)
         return 200, answer(daemon, parts[1], handler._body(), hud=hud)
+    if len(parts) == 3 and parts[1] == "decisions" and method == "POST":
+        _object(query, ())
+        return 200, answer_decision(daemon, parts[2], handler._body())
     raise APIError(404, "route not found")

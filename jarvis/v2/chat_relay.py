@@ -195,13 +195,21 @@ class ChatRelay:
                 mark = getattr(session, "relay_mark", None) or {}
                 if item is not None and session.worker is not None and not mark.get("reply"):
                     row["relay_from"] = item.sender["thread_id"]
-            for thread_id, waiting in daemon._queues.items():
-                if waiting:
-                    entry(thread_id)["queued"] = len(waiting)
+            for thread_id in set(daemon._queues) | set(getattr(daemon, "_inbox_queues", {}) or {}):
+                if self._ahead(thread_id):
+                    entry(thread_id)["queued"] = self._ahead(thread_id)
             for thread_id, waiting in self.inbound.items():
                 if waiting:
                     entry(thread_id)["relays_waiting"] = len(waiting)
         return live
+
+    def _ahead(self, thread_id: str) -> int:
+        """Under the lock: what runs in this thread before any relay: the
+        owner's queue, then the owner's answers to decisions (inbox B1,
+        `Daemon._inbox_queues`), in `_drain`'s order."""
+        daemon = self.daemon
+        answers = (getattr(daemon, "_inbox_queues", None) or {}).get(thread_id)
+        return len(daemon._queues.get(thread_id) or ()) + len(answers or ())
 
     def counts(self, thread_id: str) -> dict:
         """Under the daemon lock: `thread_json`'s live relay counts."""
@@ -286,7 +294,7 @@ class ChatRelay:
             self.items[mid] = item
             self.budget[key] = self.budget.get(key, 0) + 1
             self.recent.append(now)
-            position = len(daemon._queues.get(target.id) or ()) + len(waiting)
+            position = self._ahead(target.id) + len(waiting)
             busy = position > 1 or (live is not None and live.worker is not None)
             self._log(sender_id, sender["project_id"], "relay_out", caller["turn_id"], {
                 "message_id": mid, "to": target.id, "title": to["title"],
@@ -694,7 +702,7 @@ class ChatRelay:
         name = f'chat {t["thread_id"]} ("{t["title"]}")'
         if item.state == "queued":
             waiting = list(self.inbound.get(t["thread_id"]) or ())
-            ahead = len(self.daemon._queues.get(t["thread_id"]) or ())
+            ahead = self._ahead(t["thread_id"])
             position = ahead + (waiting.index(item) + 1 if item in waiting else len(waiting))
             where = f"is still queued in {name}, position {position}"
         elif item.state == "running":

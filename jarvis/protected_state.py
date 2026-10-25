@@ -149,6 +149,58 @@ def hud_trees() -> set[Path]:
     return _memo(("hud_trees",), roots)
 
 
+def owner_trees() -> set[Path]:
+    """The owner's state folders whose every file is protected, not a fixed
+    list of names (inbox B1): the owner inbox's folder (`files._inbox_tree`,
+    `<v2 data root>/inbox`), where the daemon keeps the decisions agents
+    post and the owner answers. A command that provably writes at or below
+    it (a redirect onto, `cp`/`rm`/`tee` on a path there, any spelling: a
+    brace expansion's every word, a glob matched component by component) is
+    a certain touch: v2's layer 1 refuses it and v1 asks, as for a named gate
+    file; one that might is **asked**, as for the HUD's trees. The write
+    tools refuse it outright. Empty when it cannot be resolved."""
+    from .tools.files import _inbox_tree
+
+    def roots() -> set[Path]:
+        try:
+            return {_inbox_tree()}
+        except (OSError, RuntimeError):
+            return set()
+    return _memo(("owner_trees",), roots)
+
+
+def _inside_tree(text: str, trees: set[Path], walk: bool = True) -> Path | None:
+    """What a write of `text` lands on when it lies at or below one of
+    `trees` (inbox B1), else None: the path itself, resolved, or for a glob
+    the tree it may lie in. Only inside counts: a folder above a tree is left
+    to `_ancestor_of`, exactly as before the tree rule (review of PR #309: an
+    early `continue` there turned `cp -r /tmp/x/inbox <data>/` from a certain
+    DENY into an ASK). A glob is matched, never shortened (#310's rule, as
+    `_in_tree_now`): by its pattern component by component (`_glob_relate`:
+    it may be the tree or lie below it), and by what it matches on disk
+    (`_glob_fs`: through a symlink or a hard link). Brace words reach here
+    one by one, each expanded by `_brace_words` before the operand loop."""
+    if not trees:
+        return None
+    return _memo(("inside_tree", text, id(trees), walk), lambda: _inside_tree_now(text, trees, walk))
+
+
+def _inside_tree_now(text: str, trees: set[Path], walk: bool = True) -> Path | None:
+    if _GLOBBY.search(text):
+        pattern = _glob_parts(text)
+        for tree in trees:
+            exact, below, _above = _glob_relate(pattern, tree.parts)
+            if exact or below:
+                return tree
+        for _, resolved, _ in _glob_fs(text)[0] if walk else ():
+            reached = Path(resolved)
+            if any(reached == tree or _under(reached, tree) for tree in trees):
+                return reached
+        return None
+    resolved = _resolve(text)
+    return resolved if any(resolved == tree or _under(resolved, tree) for tree in trees) else None
+
+
 def _in_tree(text: str, trees: set[Path], walk: bool = True) -> Path | None:
     """The HUD tree `text` lies in (or is), or one it holds within two levels
     (`rm -rf ~/.local/share/jarvis`), else None. `walk`: a glob is also
@@ -1889,6 +1941,11 @@ def _target_touches(targets, local: _State, protected: set[Path], ids: dict, see
         tree = _in_tree(text, hud_trees(), walk)
         if tree is not None:
             seen.touches.append(Touch(tree, False, f"{what} into {text}", hud=True))
+        inside = _inside_tree(text, owner_trees(), walk)
+        if inside is not None:
+            # A write that provably lands at or below the inbox is as certain
+            # as one onto a named gate file: v2's layer 1 refuses it, v1 asks.
+            seen.touches.append(Touch(inside, certain, f"{what} into {text}"))
 
 
 # `git checkout -- PATH` and `git restore PATH` overwrite PATH with a stored
@@ -2356,6 +2413,13 @@ def _command(tokens: list[str], lead: list[str], parsed: bool, segment: str, loc
         tree = _in_tree(text, hud_trees(), walk)
         if tree is not None and kind != "reader":
             seen.touches.append(Touch(tree, False, f"{stem} on {text}", hud=True))
+            continue
+        inside = _inside_tree(text, owner_trees(), walk)
+        if inside is not None and kind != "reader":
+            # Inside the inbox (B1): certain when provable, as for a gate
+            # file. A folder above it falls through to `_ancestor_of` below.
+            seen.touches.append(Touch(inside, kind == "writer" and provable(operand),
+                                      f"{stem} on {text}"))
             continue
         ancestors = _ancestor_of(text, protected, walk)
         if not ancestors:
