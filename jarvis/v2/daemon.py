@@ -551,6 +551,11 @@ class Daemon:
         self.remote_host = config.remote_host() if remote_host is _FROM_CONFIG else remote_host
         self._remote_want = remote_port if remote_port is not None else (0 if port == 0 else config.REMOTE_PORT)
         self.remote_port: int | None = None
+        # Who the owner is on that listener (P-2, remote_auth.py): passkeys,
+        # the pairing window and phone sessions, under `<data root>/remote`.
+        # Made here, never touching disk until a phone or the HUD asks.
+        from .remote_auth import RemoteAuth
+        self.remote_auth = RemoteAuth(Path(stores.root) / "remote", self.remote_host)
         self._listeners = []
         from .hud_api import HUDLedger
         from .router import Router
@@ -658,7 +663,7 @@ class Daemon:
             # The fourth listener, after the three that are the lock: a second
             # daemon fails above and never reaches it. Never fails the start.
             from .remote_listener import bind as bind_remote
-            remote = bind_remote(self.remote_host, self._remote_want)
+            remote = bind_remote(self.remote_host, self._remote_want, self.remote_auth)
             if remote is not None:
                 servers.append(remote)
                 self.remote_port = remote.server_address[1]
@@ -731,6 +736,7 @@ class Daemon:
             if cli is not None:
                 providers[name.value]["cli"] = cli
         from .hud_api import hud_served
+        from .remote_auth import remote_status
         try:
             hud = hud_served()
         except Exception:
@@ -772,6 +778,10 @@ class Daemon:
                     # pane refuses both, so neither the HUD nor the API is
                     # ever loaded into a frame inside the HUD.
                     "hud_port": self.face_port, "api_port": self.port,
+                    # The phone's listener (P-2): its port, whether it bound
+                    # and whether a tailnet name is configured. Never the
+                    # name, never anything of a passkey or a session.
+                    "remote": remote_status(self),
                     # True once every HUD and API response refuses to be
                     # framed (the handler's `end_headers`). The HUD offers a
                     # Preview pane's "keep its own origin" switch only then
@@ -2844,6 +2854,7 @@ class Daemon:
         self._listeners.clear()
         self._server = None
         self.remote_port = None
+        self.remote_auth.server = None
         if any(job.is_alive() for job in jobs):
             LOG.warning("Shutdown bound reached; provider work remains on daemon threads")
 
@@ -3090,6 +3101,12 @@ def _handler(daemon):
             # The owner inbox: owner-only on every path (inbox.route).
             from . import inbox as _inbox
             mounted = _inbox.route(self, daemon, parts, query)
+            if mounted is not None:
+                return mounted
+            # The phone's pairing window and paired passkeys: owner-only on
+            # every path (remote_auth.hud_route, phone design PH-6).
+            from . import remote_auth as _remote_auth
+            mounted = _remote_auth.hud_route(self, daemon, parts, query)
             if mounted is not None:
                 return mounted
             if parts == ["route"] and method in ("GET", "POST"):

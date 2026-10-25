@@ -1502,6 +1502,42 @@ def secret_service_checks():
         config.ALLOWLIST_PATH.unlink()
 
 
+def remote_listener_checks():
+    """Layer 1 refuses an agent's line that names the phone's remote
+    listener on this machine (phone design §4's agent path, P-2) under AUTO
+    and STRICT, never asking — the same lines v1's gate refuses
+    (`rules.remote_reading`), so the two agree; an allowlist entry for the
+    stem changes nothing. The ordinary mentions are not refused."""
+    from jarvis.v2.model import PermissionProfile as P
+    from jarvis.v2.permissions import build_permit, denied_command
+    from jarvis.v2.provider import Decision
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from rules_check import REMOTE_LISTENER_DENY, REMOTE_LISTENER_ORDINARY
+
+    with Sandbox() as box:
+        config.ALLOWLIST_PATH.write_text(json.dumps(
+            [{"tool": "run_command", "prefix": stem} for stem in
+             ("curl", "wget", "nc", "python3", "node", "uv", "bash", "sh", "socat")]))
+        for profile in (P.AUTO, P.STRICT):
+            brief = brief_for(profile)
+            asker = Asker(Decision.ALLOW)
+            permit = build_permit(context(brief), asker)
+            for line in REMOTE_LISTENER_DENY:
+                eq(permit(*bash(line), brief), Decision.DENY, f"[{profile.value}] {line!r} is refused")
+                eq(asker.seen, [], f"[{profile.value}] {line!r} is never put to the owner")
+                eq(rules.decide(line).decision, rules.DENY, f"v1 parity: {line!r}")
+                ok(bool(denied_command(line)), f"denied_command refuses {line!r}")
+        brief = brief_for(P.AUTO)
+        permit = build_permit(context(brief), Asker(Decision.ALLOW))
+        for line in REMOTE_LISTENER_ORDINARY:
+            permit(*bash(line), brief)
+            ok(box.decisions[-1]["layer"] != "deny", f"{line!r} is not refused at layer 1 "
+               f"({box.decisions[-1]['reason']!r})")
+            ok(rules.decide(line).decision != rules.DENY, f"v1: {line!r} is not refused")
+        config.ALLOWLIST_PATH.unlink()
+
+
 REVIEW_48_V2_DENY = (
     # M1
     "systemctl --user -qp status restart jarvis-daemon2", "systemctl --user -P status stop jarvis-daemon2",
@@ -3657,7 +3693,7 @@ def main():
                     third_delta_75_checks, daemon_checks,
                     auto_quiet_checks, hatch_checks, discord_checks, merge_gate_checks,
                     chat_git_checks, command_tool_checks, command_field_checks,
-                    secret_service_checks,
+                    secret_service_checks, remote_listener_checks,
                     relay_provenance_checks):
         if ONLY and section.__name__ not in ONLY:
             continue

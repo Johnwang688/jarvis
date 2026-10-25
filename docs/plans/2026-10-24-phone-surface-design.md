@@ -408,6 +408,26 @@ Server-side log of the run: `~/.cache/jarvis-p0/findings.jsonl` on the PC.
 
 Verdict: P-0 passes. P-1 may start.
 
+### 10.2 P-2 as built (2026-10-25, phone C2)
+
+Built as the P-2 row says (`docs/notes/control-plane.md`, "The phone's
+passkeys, pairing and sessions"). Where it is more specific than the text
+above:
+
+- **A registration never signs in.** Pairing registers the passkey; the phone
+  then signs in with an assertion. With `none` attestation a registration
+  proves nothing about the private key, so only an assertion makes a session.
+- **Login options name no credential** (`allowCredentials` empty): the
+  passkey is discoverable (`residentKey: required`), and no credential id is
+  handed to whoever asks.
+- **Status codes:** a wrong, absent or expired pairing code is 401, like a bad
+  assertion; a 4th passkey is 409; an unknown, spent or expired challenge is
+  409 (§9); passkey state the daemon cannot read is 503.
+- **Revoked passkeys are kept** (at most 16, marked) so a revoked credential
+  id stays refused; the HUD lists only active ones.
+- **The 8408 DENY** also covers `/m/api` in a URL to this machine on any port,
+  and a `ts.net` URL to `/m/api`.
+
 ## 11. Open questions for the owner (defaults in bold)
 
 Answered 2026-10-24: the phone is an iPhone (O-1); Discord stays as a backup

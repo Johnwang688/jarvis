@@ -1,0 +1,24 @@
+/* Settings > Phone (phone design PH-6). Graphite tokens from theme.css. The
+   QR code is the one place that is not dark: a white quiet zone and black
+   modules, which every phone camera reads. */
+.phone-settings h3 { margin: 0 0 8px; font-size: 13px; font-weight: 600; }
+.phone-settings p { margin: 6px 0; }
+.phone-warn { color: var(--amber); }
+.phone-pairing { display: flex; flex-wrap: wrap; gap: 16px; align-items: flex-start; margin: 8px 0; }
+.phone-qr { width: 232px; height: 232px; flex: 0 0 auto; border-radius: var(--radius, 6px); }
+.phone-pairing-text { flex: 1 1 220px; min-width: 0; }
+.phone-url { font: 12px var(--mono); color: var(--text-2); overflow-wrap: anywhere; user-select: all; }
+.phone-countdown { font: 13px var(--mono); color: var(--amber); }
+.phone-passkeys, .phone-sessions { list-style: none; }
+.phone-passkey { padding: 8px 0; border-top: 1px solid var(--border); }
+.phone-passkey:first-child { border-top: 0; }
+.phone-passkey-head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
+.phone-passkey-name { font-weight: 600; }
+.phone-passkey-head > button, .phone-confirm { margin-left: auto; }
+.phone-confirm { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px; color: var(--red); }
+button.phone-danger { border-color: var(--red-line); color: var(--red); }
+.phone-sessions { margin: 6px 0 0 14px; }
+.phone-session { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 6px; padding: 3px 0; }
+.phone-ua { font: 12px var(--mono); color: var(--text-2); overflow-wrap: anywhere; min-width: 0; }
+.phone-session > button { margin-left: auto; padding: 1px 8px; }
+.phone-sessions-none { margin-left: 14px; }

@@ -697,8 +697,13 @@ standalone, the orb icons), `/m/icons/<orb icon>`, and `/m/assets/<file>`
 only for the files the built page names and Vite's build manifest
 (`build-manifest.json`, `build.manifest` in `hud/vite.config.ts`) lists for
 the `mobile.html` entry and its imports, never the rest of the HUD bundle.
-`/m/api/*` is 401 `{"error": "unauthorized"}` for every method (no auth
-until P-2); everything else 404. Files come from `hud/dist` under
+`/m/pair` is the same page (where a pairing QR code lands). `/m/api/*` is
+`remote_auth.api_route` since P-2 (next section): 401 `{"error":
+"unauthorized"}` without a session, except the four pairing and login
+routes; everything else 404. Every request body is read before any answer,
+a refusal's included (64 KiB cap, 413 above it after draining up to 1 MiB;
+chunked bodies decoded the same way), so `tailscale serve`'s Go proxy never
+turns an answer over an unread body into a 502 (PR #304's follow-up). Files come from `hud/dist` under
 `JARVIS_HUD_DEV=1`, otherwise from the installed builds, verified on each
 read (`hud_install.read`).
 
@@ -719,3 +724,85 @@ auto-open refuse it. The built phone page names its files under `/m/`
 use `url()`, which Vite would point at the HUD's `/assets/`
 (`hud/src/mobile/mobile.test.ts`, and the real-build case in the suite).
 `tests/v2/remote_listener_check.py`.
+
+## The phone's passkeys, pairing and sessions (phone C2 / P-2, 2026-10-25)
+
+`jarvis/v2/remote_auth.py` (SELF_PROTECTED) decides who the owner is off
+the PC (design PH-3..PH-6, §4). **The passkey proves the owner; the tailnet
+and Tailscale's identity headers do not** (they are recorded per session as
+advisory text and never read for a decision: a local process can send them).
+
+- **Pairing starts at the desk.** Owner-only HUD routes on the HUD
+  listener (`remote_auth.hud_route`, `projects.owner_only` first on every
+  `/phone` path): `GET /phone` (window state, the active passkeys and their
+  sessions, the remote listener's `{port, bound, host_configured}`), `POST
+  /phone/pair` (opens or replaces the window: `{url, expires_in}`), `POST
+  /phone/pair/cancel`, `POST /phone/passkeys/<k-…>/revoke`, `POST
+  /phone/sessions/<s-…>/end`. The window is 5 minutes and one successful
+  registration; its code is 256 random bits, only in the daemon's memory,
+  compared in constant time, and travels in the URL fragment
+  (`https://<host>/m/pair#<code>`), which no browser sends. A replaced window's
+  code and registration challenges die with it. No window without a
+  configured host and a bound listener (409). At most 3 active passkeys:
+  refused at the window, the options and the verify (409).
+- **Registration** (`POST /m/api/pair/options`, `/pair/verify`, each with the
+  code): `rp_id` = the remote host, origin `https://<host>`,
+  `residentKey: required`, `userVerification: required`, verified with
+  `require_user_verification=True` and the result's UV flag checked again.
+  **A registration never makes a session** (with `none` attestation it proves
+  nothing about the private key): the phone signs in next.
+- **Login** (`POST /m/api/login/options`, `/login/verify`): a 32-byte
+  server-side challenge, single-use (taken out before verifying, so a failed
+  attempt spends it), 60 s on the monotonic clock, pruned and capped at 64
+  outstanding. Options name no credential (discoverable passkeys). Unknown,
+  spent, expired or registration challenge: 409. Unknown or revoked
+  credential, another user handle, wrong origin or rpId, UV clear, a bad
+  signature, or PH-4's counter rule (0 while the stored counter is 0;
+  otherwise strictly greater): 401 with no detail.
+- **Sessions.** `__Host-jarvis_m=<256-bit token>; Path=/; Max-Age=604800;
+  Secure; HttpOnly; SameSite=Strict`. Only the token's SHA-256 is stored.
+  12 h idle, 7 days absolute, on the wall clock. Each records its passkey,
+  the cleaned and capped user agent, created, last-seen (written at most once
+  a minute) and the advisory headers. `POST /m/api/logout` ends it and clears
+  the cookie; Revoke ends every session of the passkey **in memory first**,
+  so it holds even if the file write fails; End ends one.
+- **`is_remote_owner(handler)` / `owner_status`** is the only owner test on
+  the remote listener (`projects.is_owner` stays false there): this daemon's
+  bound remote server (`RemoteAuth.server`, set by `remote_listener.bind`),
+  exactly the configured Host (400), exactly `Origin: https://<host>` on any
+  method but GET/HEAD (403), and a live session of an active passkey (401).
+  `GET /m/api/me` and `POST /m/api/logout` are the only session routes until
+  P-3; the rest of `/m/api` is 404 with a session, 401 without.
+- **Storage.** `<data root>/remote/` 0700, `passkeys.json` and
+  `sessions.json` 0600, atomic (`stores._write_bytes`), read with
+  `O_NOFOLLOW`. Both are protected state (`files._protected_state_paths`): no
+  write tool, shell write or grant reaches them. An unreadable passkeys file
+  is never overwritten (pairing and login 503, the HUD says so); an
+  unreadable sessions file signs every phone out. `webauthn` is imported only
+  when used, so a daemon without it starts and answers 503 there.
+- **The agent path** (design §4). `rules.remote_reading`, called from
+  `rules._decide` on the raw line like the Secret Service reading, DENYs a
+  line that names the remote port (8408 or `config.REMOTE_PORT`, or the name
+  `REMOTE_PORT`) together with a loopback spelling, a `host:port` or
+  `/dev/tcp/…/port` form, or a network client or library; or `/m/api`
+  together with a loopback spelling or a `ts.net` name. v1's gate and v2's
+  layer 1 both start from `decide`, so neither asks and no allowlist entry
+  covers it. An accident guard, not a boundary (a computed port, a script
+  file, a hosts alias without a port get past it); the boundary is the
+  cookie, which only the phone's browser holds.
+- **HUD:** Settings > Phone (`hud/src/components/PhoneSettings.tsx`): the
+  listener's state from `/status`, Pair a phone (QR code from the vendored
+  Nayuki encoder `hud/src/lib/vendor/qrcodegen.ts`, the URL as text, a
+  countdown, Cancel), the passkeys with their sessions, Revoke (confirmed)
+  and End. Phone-supplied text is React text only. **Phone shell:**
+  `hud/src/mobile/main.ts` (`/m/pair#code`: the code leaves the address bar
+  at once, Create passkey, then Sign in; `/m/`: Sign in with passkey or
+  Signed in · paired with Sign out), the spike's base64url serialization in
+  `hud/src/mobile/webauthn.ts`.
+
+`/status` gains `remote: {port, bound, host_configured}` (no name, no
+secret). Tests: `tests/v2/remote_auth_check.py` (a software P-256
+authenticator against the real `webauthn`), `tests/face/hud_v2_phone_check.py`
+(the Settings section, and the built shell end to end with Chromium's virtual
+authenticator), `rules_check`/`permissions_check` `remote_listener_checks`,
+`archive_check` (`test_no_tool_reaches_the_phone_pairing`).

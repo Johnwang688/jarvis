@@ -24,8 +24,9 @@ describe("the phone shell (PH-9)", () => {
     expect(mobile.replace(/\/\*[\s\S]*?\*\//g, "")).not.toMatch(/url\s*\(/i);
   });
 
-  it("says it is not paired, with no inline script or style", () => {
-    expect(page).toContain("Jarvis · phone, not paired yet");
+  it("names itself, with no inline script or style", () => {
+    expect(page).toContain("Jarvis · phone");
+    expect(page).toContain('id="app"');
     expect(page).not.toMatch(/<script(?![^>]*\bsrc=)[^>]*>/i);
     expect(page).not.toMatch(/<style|\sstyle=/i);
     expect(page).toContain('href="/m/manifest.webmanifest"');

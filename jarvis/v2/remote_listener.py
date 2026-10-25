@@ -17,22 +17,34 @@ an exclusion list that a new route could slip past. What it serves, and
 nothing else (`ROUTES`, `ASSETS`, `ICONS`, `API_PREFIX`):
 
   - `GET /m/`: the mobile shell, `mobile.html` of the HUD build (PH-9);
+  - `GET /m/pair`: the same shell, where a pairing QR code lands
+    (`/m/pair#<code>`; the code is in the fragment, never sent here);
   - `GET /m/assets/<file>`: only the files Vite's build manifest lists for
     the `mobile.html` entry and what it imports (`mobile_files`), never
     the rest of the HUD's bundle;
   - `GET /m/icons/<orb icon>`: the orb icons the manifest names;
   - `GET /m/manifest.webmanifest`: the installed app's manifest, scope `/m/`;
-  - `/m/api/...`, any method: 401 with no detail. There is no auth yet
-    (P-2), so nothing is behind it.
+  - `/m/api/...`: `remote_auth.api_route` (P-2). Four routes need no
+    session (`POST /m/api/pair/options`, `pair/verify`, `login/options`,
+    `login/verify`); `POST /m/api/logout` and `GET /m/api/me` need one;
+    anything else is 401 without a session and 404 with one. With no
+    `remote_auth` attached, every `/m/api` request is 401.
 
 Everything else is 404. HEAD answers like GET without the body.
+
+**Every request body is read before the answer** (`_read_body`), up to
+`BODY_CAP` (64 KiB; above it 413, the excess drained up to `DRAIN_CAP` first,
+chunked bodies decoded the same way). An answer sent over an unread body
+closes a socket with data still in it, which the kernel answers with a
+reset, and behind `tailscale serve`'s Go proxy that turns a 401 or a 403
+into a 502 (review of PR #304).
 
 **Posture**, on every response including a malformed request's:
 
   - the `Host` must be exactly the configured name, else 400 (the same
     strictness as `hud_api.check_origin`, for one name and no port);
   - any method but GET and HEAD must carry `Origin: https://<name>`
-    exactly, else 403, though nothing writes yet (design §4, item 4);
+    exactly, else 403 (design §4, item 4);
   - `REMOTE_POLICY`'s Content-Security-Policy with `frame-ancestors 'none'`,
     `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`,
     `Referrer-Policy: no-referrer`, `Cross-Origin-Opener-Policy` and
@@ -42,7 +54,8 @@ Everything else is 404. HEAD answers like GET without the body.
 **Never the owner.** `projects.is_owner` is false for every request here:
 it requires the HUD listener's port, and this server is also marked
 `remote_only`, which `is_owner` refuses on its own (PH-1). The owner test
-for this listener is P-2's passkey and session (`remote_auth`, design §4).
+for this listener is P-2's passkey and session, `remote_auth.is_remote_owner`
+(design §4), and nothing else.
 
 SELF_PROTECTED: this module decides what the tailnet can reach on this
 machine. Tests: tests/v2/remote_listener_check.py.
@@ -58,6 +71,7 @@ import re
 import stat
 
 from jarvis import config
+from . import remote_auth
 
 LOG = logging.getLogger(__name__)
 
@@ -128,6 +142,10 @@ _MIME = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=u
          ".css": "text/css; charset=utf-8", ".png": "image/png", ".svg": "image/svg+xml",
          ".woff2": "font/woff2", ".woff": "font/woff", ".json": "application/json"}
 _FILE_CAP = 16 * 1024 * 1024
+# A request body: at most this much is accepted, and up to DRAIN_CAP of a
+# larger one is read and dropped before the 413, so the proxy sees an answer.
+BODY_CAP = 64 * 1024
+DRAIN_CAP = 1024 * 1024
 _MANIFEST_CAP = 1024 * 1024
 
 _NOT_BUILT = (b"<!doctype html><meta charset=\"utf-8\"><title>J.A.R.V.I.S.</title>"
@@ -275,14 +293,15 @@ def _manifest(handler):
 # prefixes below or a 404.
 ROUTES = {
     "/m/": _shell,
+    "/m/pair": _shell,
     "/m/manifest.webmanifest": _manifest,
 }
 
 
 def _route(handler, path: str):
     if path == API_PREFIX[:-1] or path.startswith(API_PREFIX):
-        # No auth exists yet (P-2): nothing is behind this, for any method.
-        return handler._error(401, "unauthorized")
+        status, payload, extra = remote_auth.api_route(handler, path, handler._body_bytes)
+        return handler._send(status, json.dumps(payload).encode(), "application/json", extra=extra)
     if handler.command not in ("GET", "HEAD"):
         return handler._error(404, "not found")
     exact = ROUTES.get(path)
@@ -321,8 +340,78 @@ def _header(headers, name: str) -> list[str] | None:
     return get_all(name)
 
 
-def handler_class(host: str):
-    """The remote listener's handler, for exactly one trusted `host`."""
+class _BodyError(Exception):
+    def __init__(self, status: int):
+        super().__init__(status)
+        self.status = status
+
+
+def _read_chunked(rfile, cap: int, drain: int) -> bytes:
+    """A chunked body, decoded: at most `cap` bytes kept; past it, read on
+    and dropped up to `drain`, then a 413."""
+    kept, total = [], 0
+    while True:
+        line = rfile.readline(1026)
+        if not line.endswith(b"\n"):
+            raise _BodyError(400)
+        size_text = line.split(b";", 1)[0].strip()
+        if not size_text or len(size_text) > 8 or any(c not in b"0123456789abcdefABCDEF" for c in size_text):
+            raise _BodyError(400)
+        size = int(size_text, 16)
+        if size == 0:
+            while True:                       # trailers, up to the blank line
+                trailer = rfile.readline(8194)
+                if trailer in (b"\r\n", b"\n"):
+                    break
+                if not trailer.endswith(b"\n"):
+                    raise _BodyError(400)
+            break
+        if total + size > drain:
+            raise _BodyError(413)
+        data = rfile.read(size)
+        if len(data) != size or rfile.readline(3) not in (b"\r\n", b"\n"):
+            raise _BodyError(400)
+        total += size
+        if total <= cap:
+            kept.append(data)
+    if total > cap:
+        raise _BodyError(413)
+    return b"".join(kept)
+
+
+def _read_body(handler) -> bytes:
+    """The request's body, read whole before any answer (module note): at
+    most BODY_CAP bytes, else 413 once up to DRAIN_CAP of it is read. A
+    malformed length is 400. Neither length nor chunked: no body."""
+    headers = handler.headers
+    encodings = _header(headers, "Transfer-Encoding") or []
+    lengths = _header(headers, "Content-Length") or []
+    if encodings:
+        if lengths or [e.strip().lower() for e in encodings] != ["chunked"]:
+            raise _BodyError(400)
+        return _read_chunked(handler.rfile, BODY_CAP, DRAIN_CAP)
+    if not lengths:
+        return b""
+    if len(lengths) != 1 or not lengths[0].strip().isdigit() or len(lengths[0].strip()) > 12:
+        raise _BodyError(400)
+    length = int(lengths[0].strip())
+    if length > BODY_CAP:
+        left = min(length, DRAIN_CAP)
+        while left:
+            chunk = handler.rfile.read(min(left, 65536))
+            if not chunk:
+                break
+            left -= len(chunk)
+        raise _BodyError(413)
+    data = handler.rfile.read(length) if length else b""
+    if len(data) != length:
+        raise _BodyError(400)
+    return data
+
+
+def handler_class(host: str, auth: remote_auth.RemoteAuth | None = None):
+    """The remote listener's handler, for exactly one trusted `host`;
+    `auth` holds its passkeys and sessions (None: every `/m/api` is 401)."""
     origin = "https://" + host
 
     class RemoteHandler(BaseHTTPRequestHandler):
@@ -338,6 +427,7 @@ def handler_class(host: str):
             super().setup()
             self.connection.settimeout(2)
             self._cache = NO_STORE
+            self._body_bytes = b""
 
         def send_response(self, code, message=None):
             # As the daemon's handler does: a request too malformed for a
@@ -358,11 +448,13 @@ def handler_class(host: str):
             self.close_connection = True
             self._error(code, self.responses.get(code, ("error",))[0].lower())
 
-        def _send(self, status, data: bytes, mime: str, *, cache: str = NO_STORE):
+        def _send(self, status, data: bytes, mime: str, *, cache: str = NO_STORE, extra=()):
             self._cache = cache
             self.send_response(status)
             self.send_header("Content-Type", mime)
             self.send_header("Content-Length", str(len(data)))
+            for name, value in extra:
+                self.send_header(name, value)
             self.end_headers()
             if self.command != "HEAD":
                 self.wfile.write(data)
@@ -374,10 +466,22 @@ def handler_class(host: str):
         def _dispatch(self):
             self.close_connection = True
             try:
+                # The body first, whatever the answer will be (module note).
+                body_status = None
+                try:
+                    self._body_bytes = _read_body(self)
+                except _BodyError as exc:
+                    body_status = exc.status
+                except (OSError, ValueError):
+                    body_status = 400
                 if _header(self.headers, "Host") != [host]:
                     return self._error(400, "untrusted host")
                 if self.command not in ("GET", "HEAD") and _header(self.headers, "Origin") != [origin]:
                     return self._error(403, "cross-origin request refused")
+                if body_status == 413:
+                    return self._error(413, "request body too large")
+                if body_status is not None:
+                    return self._error(400, "bad request")
                 path = self.path.split("?", 1)[0].split("#", 1)[0]
                 if not path.startswith(PREFIX):
                     return self._error(404, "not found")
@@ -394,23 +498,29 @@ def handler_class(host: str):
         do_GET = do_HEAD = do_POST = do_PUT = do_PATCH = do_DELETE = do_OPTIONS = _dispatch
 
     RemoteHandler.remote_host = host
+    RemoteHandler.remote_auth = auth
     return RemoteHandler
 
 
-def bind(host: str | None, port: int) -> ThreadingHTTPServer | None:
+def bind(host: str | None, port: int,
+         auth: remote_auth.RemoteAuth | None = None) -> ThreadingHTTPServer | None:
     """The remote listener, bound to 127.0.0.1:`port` and not yet serving, or
     None: no host configured (the default: nothing is bound and nothing is
-    logged), or the bind failed (logged; the daemon goes on without it)."""
+    logged), or the bind failed (logged; the daemon goes on without it).
+    `auth` learns the bound server (`RemoteAuth.server`), which is how
+    `remote_auth.is_remote_owner` knows a request arrived on it."""
     if not host:
         return None
     try:
-        server = ThreadingHTTPServer(("127.0.0.1", port), handler_class(host))
+        server = ThreadingHTTPServer(("127.0.0.1", port), handler_class(host, auth))
     except Exception as exc:     # noqa: BLE001 — never why the daemon fails
         LOG.warning("Remote listener not started: 127.0.0.1:%s unavailable (%s)", port,
                     type(exc).__name__)
         return None
     server.remote_only = True
     server.daemon_threads = True
+    if auth is not None:
+        auth.server = server
     LOG.info("Remote listener on 127.0.0.1:%d for the configured tailnet host",
              server.server_address[1])
     return server

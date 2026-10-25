@@ -130,6 +130,10 @@ SELF_PROTECTED = frozenset(
         # tailnet can reach on this machine. An agent that could edit it
         # could open a HUD route to the phone's port.
         "jarvis/v2/remote_listener.py",
+        # The phone's passkeys, pairing window and sessions (phone design
+        # PH-3..PH-6, P-2): it decides who counts as the owner off this
+        # machine. An agent that could edit it could pair its own passkey.
+        "jarvis/v2/remote_auth.py",
     }
 )
 
@@ -220,6 +224,12 @@ def _protected_state_paths() -> set[Path]:
     # readings and the built-in-voice cache beside them are not protected.
     speaker = config.SPEAKER_DIR.expanduser()
     paths |= {speaker / "voiceprint.json", speaker / "guest.json"}
+    # The phone's paired passkeys and sessions (phone design PH-6, P-2,
+    # `v2/remote_auth.py`): an agent that could write `passkeys.json` could
+    # pair a key of its own, and `sessions.json` could hold a session of its
+    # own. Their folder is an ancestor, so deleting it is covered too.
+    remote = Path(config.V2_DATA_DIR).expanduser() / "remote"
+    paths |= {remote / "passkeys.json", remote / "sessions.json"}
     return paths
 
 
