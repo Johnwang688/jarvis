@@ -424,9 +424,108 @@ def migration(root: Path) -> None:
     print("ok  migration: failed copy leaves no partial thread and can be retried")
 
 
+def records_protected_daemon_writes(root: Path) -> None:
+    """Jarvis's own records are protected state (2026-10-25), and that binds
+    agent tool calls and agent shell lines only: the daemon's own writers
+    write them in-process and never ask the gate. With every gate entry point
+    made to fail — the shell detector, the protected sets and trees, the
+    write-tool and grant checks, v1's static verdict and `rules.decide`, v2's
+    permit and its layer-1 helpers, the read check — the daemon writes a
+    project, a thread and its log and title, a task, its transitions and
+    journal, the decision log, a thread's activity sidecar, a ledger row, a
+    diff review, a schedule, the Discord linker's state and approval-post
+    map, a chat-git pin, a VEX build marker and a permanent delete's staging
+    folder and manifest (review of PR #315: the first version of this check
+    covered the stores and the decision log only). After, every one is
+    refused to an agent and still readable."""
+    import threading
+    from types import SimpleNamespace
+    from jarvis import permissions as v1_permissions, protected_state, rules
+    from jarvis.tools import files as v1_files
+    from jarvis.v2 import (activity as activity_mod, chat_git, diff_review, ledger as ledger_mod,
+                           permissions as v2_permissions, projects as projects_mod,
+                           schedules as schedules_mod, vex as vex_mod)
+    from jarvis.v2.discord import gateway as gateway_mod, linker as linker_mod
+    from jarvis.v2.stores import _write_bytes
+
+    def gate(*_a, **_k):
+        raise AssertionError("a daemon write consulted the agent gate")
+
+    blocked = [(protected_state, name) for name in (
+        "command_touch", "command_touches", "protected_paths", "gate_paths", "owner_trees",
+        "record_paths", "hud_trees", "refused")]
+    blocked += [(v1_files, name) for name in (
+        "_self_protected", "_record_of", "_record_paths", "_record_trees", "_owner_trees",
+        "_protected_state", "_protected_state_paths", "_in_record_tree", "_in_inbox_tree")]
+    blocked += [(v2_permissions, name) for name in (
+        "denied_file", "denied_command", "denied_grant", "denied_read", "build_permit",
+        "_command_writes_protected_state", "protected_paths")]
+    blocked += [(v1_permissions, "static_verdict"), (v1_permissions, "protected_state_verdict"),
+                (rules, "decide")]
+    patches = [patch.object(config, "V2_DATA_DIR", root)] + [patch.object(m_, n, gate) for m_, n in blocked]
+    for p in patches:
+        p.start()
+    try:
+        stores = Stores(root)
+        project = stores.projects.create("Records", str(root))
+        project.name = "Records 2"
+        stores.projects.save(project)
+        thread = chat(stores)
+        stores.threads.save(thread)
+        stores.threads.log(thread.id, "user", "the owner's real words")
+        stores.threads.set_title(thread.id, "a title", "auto")
+        task = stores.tasks.create(project.id, "a brief")
+        stores.tasks.save(task)
+        stores.tasks.transition(task.id, m.TaskState.CLARIFYING, reason="go")
+        stores.tasks.journal(task.id, "note", text="by the daemon")
+        v2_permissions.log_decision(v2_permissions.ApprovalRecord(
+            tool="Bash", args_digest="x", layer="deny", decision="deny"))
+        # The other daemon writers, through their own write paths.
+        activity_mod.Activity(stores, lambda *_a, **_k: None)._write(stores.threads, thread.id, {"s": 1})
+        ledger_mod.UsageLedger(stores)._append({"day": "2026-10-25", "thread_id": thread.id, "tokens": 1})
+        diff_review.DiffReviews(None)._save({"task_id": task.id, "state": "done"})
+        schedules_mod.Schedules(SimpleNamespace(stores=stores))._save({"id": "0a1b2c3d", "brief": "b"})
+        linker_mod.ChannelLinker._save_state(SimpleNamespace(
+            _state_lock=threading.RLock(), _state_path=root / "discord" / "linker.json",
+            _state={"sanctioned": {project.id: "records"}}))
+        gateway_mod.DiscordRouter._save_posts(SimpleNamespace(
+            _lock=threading.RLock(), _unstripped={}, _approval_messages={"r1": ["c", "m", "t"]},
+            _posts_path=root / "discord" / "approval-posts.json"))
+        chat_git._write_pins({"k": {"repo": "o/r", "common": "/x"}})
+        vex_mod.mark_unfinished(root / "some-vex-project")
+        vex_marker = vex_mod.unfinished_path(root / "some-vex-project")
+        staging = projects_mod._staging(SimpleNamespace(stores=stores), "records")
+        _write_bytes(staging / "manifest.json", b"{}")
+    finally:
+        for p in reversed(patches):
+            p.stop()
+    log = stores.threads.path(thread.id).with_name("log.jsonl")
+    journal = stores.tasks.path(task.id).with_name("journal.jsonl")
+    assert [r["text"] for r in stores.threads.read_log(thread.id)] == ["the owner's real words"]
+    assert [r["event"] for r in stores.tasks.read_journal(task.id)][-1] == "note"
+    assert (root / "decisions.jsonl").read_text().count("\n") == 1, "the decision log was written"
+    written = [log, journal, stores.projects.path(project.id), stores.threads.path(thread.id),
+               stores.tasks.path(task.id), root / "decisions.jsonl",
+               stores.threads.path(thread.id).with_name("activity.json"),
+               root / "ledger" / "2026-10-25.jsonl", root / "diff_reviews" / f"{task.id}.json",
+               root / "schedules" / "0a1b2c3d.json", root / "discord" / "linker.json",
+               root / "discord" / "approval-posts.json", root / "chat-git" / "pins.json",
+               vex_marker, staging / "manifest.json"]
+    with patch.object(config, "V2_DATA_DIR", root):
+        for path in written:
+            assert path.is_file(), f"the daemon wrote {path}"
+            assert v1_files._self_protected(path), path
+            assert v2_permissions.denied_file(str(path)), path
+            assert v2_permissions.denied_command(f"cp /tmp/x {path}"), path
+            assert v2_permissions.denied_command(f"cat {path}") is None, path
+    print(f"ok  records: the daemon writes all {len(written)} kinds without asking the gate "
+          f"({len(blocked)} entry points made to fail); agents are refused")
+
+
 def main() -> int:
     for check in (round_trip, lazy_and_ids, inbox_and_atomic, transitions_and_delete,
-                  all_transition_edges, append_and_corruption, torn_read, separator_characters, migration):
+                  all_transition_edges, append_and_corruption, torn_read, separator_characters, migration,
+                  records_protected_daemon_writes):
         with tempfile.TemporaryDirectory() as tmp:
             check(Path(tmp) / "data")
     print("\nall v2 store checks passed")
