@@ -1905,7 +1905,7 @@ HUD's side of the routes above (`hud/src/api.ts`, `lib/vex.ts`,
   already PATCHes from its own listener; nothing else changes these fields
   over HTTP.
 - **v1's browser and `fetch_page` refuse every Jarvis port**
-  (`config.control_ports()`: 8402, 8404, 8405, 8406, configured and
+  (`config.control_ports()`: 8402, 8404, 8405, 8406, 8408, configured and
   default; never 8403) in every loopback spelling — they used to refuse
   only 8402, so a v1 agent could open the HUD on 8405. v1's browser judges
   the page wherever it is, before every act and read (a page that moved
@@ -2552,7 +2552,7 @@ starts Chrome but `POST /browser/tabs` or the dedicated profile sign-in route.
   failed, open, refused: {class: count}}` while running, else null. Profile
   ids only: **no URL, title or label**.
 - **`refused_ports`**: every port the Browser's gate refuses on this machine
-  — `config.control_ports()` (8402, 8404, 8405, 8406, configured and
+  — `config.control_ports()` (8402, 8404, 8405, 8406, 8408, configured and
   default), this daemon's `hud_port` and `api_port`, and 8403 unless it is
   this daemon's `workshop_port`. The HUD's Direct (Preview) judge reads it.
 

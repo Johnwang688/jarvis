@@ -30,7 +30,7 @@ network.
    explanation when it is refused.
 
 `refused_ports` is the one port list: `config.control_ports()` (BR-0's single
-Python definition: 8402, 8404, 8405, 8406, configured and default) plus the
+Python definition: 8402, 8404, 8405, 8406, 8408, configured and default) plus the
 HUD and API ports this daemon reports, plus the workshop's 8403 unless it is
 this daemon's own workshop — `/status` → `refused_ports` reports it, and the
 HUD's Direct judge reads that list.

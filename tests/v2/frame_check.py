@@ -337,6 +337,9 @@ def routes(t) -> list[tuple[str, str, object]]:
         ("GET", "/route", None), ("POST", "/route", {"bogus": 1}),
         ("GET", "/thread-models", None), ("POST", "/thread-models", {"bogus": 1}),
         ("GET", "/archive", None), ("GET", "/trash", None), ("POST", "/trash/empty", {"bogus": 1}),
+        # The phone's paths (PH-1): the remote listener's alone, a 404 here
+        # that still carries the frame headers.
+        ("GET", "/m/", None), ("GET", "/m/manifest.webmanifest", None), ("POST", "/m/api/inbox", {}),
         ("GET", "/avatars", None), ("GET", "/avatar.svg", None), ("POST", "/avatar", {"slug": "missing"}),
         ("GET", "/voices", None), ("POST", "/voice", {"bogus": 1}),
         ("GET", "/models", None), ("GET", "/models/catalog", None), ("POST", "/model", {"bogus": 1}),

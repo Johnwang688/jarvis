@@ -1,0 +1,49 @@
+/* The phone shell's styles (phone surface design PH-9). Graphite, the HUD's
+   theme: the tokens below are copies of src/theme.css's own values, held
+   equal by mobile.test.ts, so the two never drift. Nothing here may use
+   url(): the remote listener serves only /m/ paths, and a Vite-built url()
+   would point at the HUD's /assets/ (tests/v2/remote_listener_check.py
+   checks the built files). No web font: the system stack. */
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  color-scheme: dark;
+
+  --bg-0: #141413;
+  --bg-1: #1a1a19;
+  --border: #2f2f2c;
+  --text: #e2dfd7;
+  --text-2: #b4b0a8;
+  --text-muted: #98948b;
+  --accent: #6fc3df;
+  --amber: #fbbf24;
+  --red: #f87171;
+  --radius: 6px;
+}
+
+html, body {
+  height: 100%;
+  background: var(--bg-0);
+  color: var(--text);
+  font: 16px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+  -webkit-text-size-adjust: 100%;
+}
+
+.shell {
+  min-height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: max(16px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right))
+    max(16px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
+}
+
+.shell-line {
+  padding: 14px 18px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-1);
+  color: var(--text-2);
+  text-align: center;
+}

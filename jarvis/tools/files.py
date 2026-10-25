@@ -125,6 +125,11 @@ SELF_PROTECTED = frozenset(
         # function. An agent that could edit it could hide a card or answer
         # one.
         "jarvis/v2/inbox.py",
+        # The phone's remote listener (phone design PH-1, P-1): its route
+        # table, strict Host, Origin rule and headers decide what the
+        # tailnet can reach on this machine. An agent that could edit it
+        # could open a HUD route to the phone's port.
+        "jarvis/v2/remote_listener.py",
     }
 )
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -29,6 +30,29 @@ HUD_CHROME_PROFILE = hud_chrome_profile()
 # (`jarvis daemon2`) serves its whole API here, the HUD page included — which
 # is why `control_ports()` lists it beside the face.
 DAEMON_PORT = int(os.environ.get("JARVIS_DAEMON_PORT", "8405"))
+# The phone's listener (phone surface design PH-1, P-1): v2's fourth listener,
+# loopback only, reached from the tailnet through `tailscale serve` on Windows
+# (PH-2). Not 8406 (the Spotify callback) and not 8407 (the trading firm). It
+# binds only when `remote_host()` names the tailnet host it answers for, so a
+# daemon with no name configured holds no fourth port at all.
+REMOTE_PORT = int(os.environ.get("JARVIS_REMOTE_PORT", "8408"))
+# A tailnet machine name: lowercase DNS labels, at least `<machine>.<tailnet>`
+# in front of `.ts.net`. Nothing else is a name the phone can reach through
+# `tailscale serve`, and a loopback spelling (`localhost`, `127.0.0.1`) must
+# never become the remote listener's trusted Host.
+_TS_NET_NAME = re.compile(r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.){2,}ts\.net")
+
+
+def remote_host(environ=None) -> str | None:
+    """The tailnet name the remote listener answers for (`JARVIS_REMOTE_HOST`,
+    e.g. `<machine>.<tailnet>.ts.net`), or None: unset, empty, or not a
+    well-formed ts.net name (refused whole, never repaired: no case folding,
+    no stripping, no trailing dot, no port). Read at call time. Never a
+    built-in default: with no name the remote listener does not bind."""
+    value = (os.environ if environ is None else environ).get("JARVIS_REMOTE_HOST", "")
+    if not value or len(value) > 253 or not _TS_NET_NAME.fullmatch(value):
+        return None
+    return value
 
 # How many model calls one user message may spend before the loop stops. This
 # is a runaway guard, not a work limit: each step is one cheap call, and the
@@ -88,10 +112,12 @@ def is_loopback(host: str) -> bool:
 
 # Jarvis's own listeners at their default ports: 8402 the face and v2's HUD,
 # 8404 the desktop bridge's listener, 8405 the daemon (v2's API, which serves
-# the HUD page too), 8406 the Spotify consent callback. 8403, the workshop, is
+# the HUD page too), 8406 the Spotify consent callback, 8408 the phone's
+# remote listener (`REMOTE_PORT`, phone design PH-1). 8403, the workshop, is
 # deliberately absent: v1's designer browses its own work there, and nothing
-# on it can approve or change anything.
-DEFAULT_CONTROL_PORTS = frozenset({8402, 8404, 8405, 8406})
+# on it can approve or change anything. `hud/src/lib/devopen.ts`'s
+# `CONTROL_PORTS` mirrors this set (tests/v2/remote_listener_check.py).
+DEFAULT_CONTROL_PORTS = frozenset({8402, 8404, 8405, 8406, 8408})
 
 
 def control_ports() -> frozenset[int]:
@@ -105,7 +131,7 @@ def control_ports() -> frozenset[int]:
     shell), and this process cannot see that. Read at call time, so a test
     that repoints a port is covered.
     """
-    return DEFAULT_CONTROL_PORTS | {FACE_PORT, DESKTOP_PORT, DAEMON_PORT, SPOTIFY_AUTH_PORT}
+    return DEFAULT_CONTROL_PORTS | {FACE_PORT, DESKTOP_PORT, DAEMON_PORT, SPOTIFY_AUTH_PORT, REMOTE_PORT}
 
 
 def own_host_header(value, port) -> bool:

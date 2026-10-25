@@ -155,6 +155,10 @@ def is_owner(handler, daemon) -> bool:
     `PATCH /projects` uses it to tag `project_updated` with `by: "owner" |
     "api"` (B1, decisions D4): an owner rename moves the Discord channel at
     once, anything else asks through the approval gate first."""
+    # The phone's remote listener (PH-1) is never the owner's HUD, whatever
+    # its port: refused by its own mark, before the port is compared.
+    if getattr(handler.server, "remote_only", False):
+        return False
     port = handler.server.server_address[1]
     if port != daemon.face_port:
         return False
