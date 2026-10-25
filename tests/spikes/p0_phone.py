@@ -21,6 +21,11 @@ is in ~/.cache/jarvis-p0 (0700). Run it with a venv that has `webauthn` and
 
 Findings go to ~/.cache/jarvis-p0/findings.jsonl, one line per event; the
 result is written into the design document's §10 by hand.
+
+A spike, not a boundary: registration has no pairing gate, so anyone on the
+tailnet (or a local process sending the right Origin) can register a software
+passkey, trigger a push to the subscribed phone, or read GET /findings. Stop
+it when the run is done; P-2 builds the real pairing.
 """
 from __future__ import annotations
 
@@ -70,8 +75,10 @@ _auth_challenges: dict[str, dict] = {}           # b64url challenge -> {answer, 
 
 def finding(event: str, **data) -> None:
     line = {"at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "event": event, **data}
-    with _lock, open(STATE / "findings.jsonl", "a") as fh:
+    path = STATE / "findings.jsonl"
+    with _lock, open(path, "a") as fh:
         fh.write(json.dumps(line) + "\n")
+    path.chmod(0o600)
     print(f"[p0] {event} {json.dumps(data)}", flush=True)
 
 

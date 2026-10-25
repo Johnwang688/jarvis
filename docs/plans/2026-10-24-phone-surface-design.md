@@ -87,8 +87,9 @@ the native app would be a thin shell over the same `/m/api`.
 - **PH-1. A fourth listener, `REMOTE_PORT` 8408, on loopback** (not 8406,
   which is `SPOTIFY_AUTH_PORT`, the Spotify consent callback whose redirect
   URI is registered by hand; 8407 is the trading firm). P-1 adds it to
-  `config.DEFAULT_CONTROL_PORTS`, so the agent Browser refuses it, that serves
-  only the phone app and the phone API. It is never the HUD listener, and
+  `config.DEFAULT_CONTROL_PORTS` and to `CONTROL_PORTS` in
+  `hud/src/lib/devopen.ts`, which mirrors it, so the agent Browser refuses
+  it. It serves only the phone app and the phone API. It is never the HUD listener, and
   `is_owner` is never true on it. It shares no route table entry with the
   HUD unless that route is listed in §5.
 - **PH-2. Reachability is `tailscale serve` on Windows**, terminating HTTPS
@@ -330,7 +331,7 @@ path, each step the owner's call:
 |---|---|---|---|
 | P-0 | **Spikes, each a script under `tests/spikes/` with its finding written here.** (a) `tailscale serve` on Windows reaching a WSL loopback listener on 8408, with a valid cert, and `tailscale serve status --json` readable from WSL; (b) a passkey registered and asserted with Face ID, and again with Face ID off using the passcode, from the owner's iPhone, in the home-screen app, on the ts.net origin, verified by `webauthn`; (c) a Web Push reaching the home-screen app on the iPhone with the screen locked | S | all three pass on the owner's iPhone; any failure stops the plan and comes back as a decision |
 | P-1 | `REMOTE_PORT` listener, strict Host and Origin, CSP, static serving of an empty mobile shell | S | the API and HUD listeners never serve `/m/*`; the remote one never serves HUD routes (route-table test); non-ts.net Host refused |
-| P-2 | `remote_auth`: pairing from the HUD, passkey registration and login, sessions, devices, revoke | M | pairing only within an open window; revoke ends sessions at once; replayed or cross-origin assertions refused; `rules.py` DENY for 8408 |
+| P-2 | `remote_auth`: pairing from the HUD, passkey registration and login, sessions, paired passkeys, revoke | M | pairing only within an open window; revoke ends sessions at once; replayed or cross-origin assertions refused; `rules.py` DENY for 8408 |
 | P-3 | Read API and the Inbox, Chats and Tasks tabs (read-only) | M | headless mobile-viewport suite; transcripts identical to the HUD's projection; private cards show their private projection until P-4 lands |
 | P-4 | Answering: approvals with per-answer assertion, `owner_verified` in `approvals.py`, the §4.1 security monitor, questions, decisions | M | Allow or Always without a fresh assertion refused; an Allow assertion replayed as Always refused; HUD-only card answered from a verified phone, refused from Discord and from a phone with any §4.1 check failing (one test per check); `owner_detail` never appears in push, logs or `/m/ws` (asserted); Deny works with session only; the card suite passes on the phone bundle; boundary review on the `approvals.py` change |
 | P-5 | Sending messages, new chats, task cancel and resume | S | `via="phone"` recorded; desk false (fast-path suite); queues behind a running turn |
@@ -378,7 +379,7 @@ Server-side log of the run: `~/.cache/jarvis-p0/findings.jsonl` on the PC.
   true`. So the passcode satisfies PH-4 exactly as Face ID does. Replaying a
   used assertion, as "allow" or as "always", was refused.
   - **Signature counter is always 0** for these passkeys. PH-4 is amended:
-    a zero counter is accepted.
+    a zero counter is accepted while the stored one is zero (PH-4).
   - **The passkey syncs to every Apple device on the owner's Apple ID.**
     Any of those devices can approve, once it is on the tailnet and opens the
     paired origin. Pairing records the credential, not the device, so
