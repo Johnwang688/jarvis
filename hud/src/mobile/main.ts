@@ -1,17 +1,19 @@
 // The phone shell's entry (phone surface design PH-9). P-2: pairing and
-// passkey sign-in, nothing more; P-3 builds the Inbox, Chats and Tasks tabs on
-// it. It shares code with the HUD only by importing it; the desktop's panes,
-// editor, terminals and Browser never enter this bundle.
+// passkey sign-in; P-3: once signed in, the Inbox, Chats and Tasks tabs
+// (./app.ts, read-only). It shares code with the HUD only by importing it
+// (lib/inbox, lib/recentChats, lib/markdown); the desktop's panes, editor,
+// terminals and Browser never enter this bundle.
 //
 //   /m/pair#<code>  registers a passkey (the code came from the desk's QR
 //                   code, in the fragment, which is never sent), then signs in;
-//   /m/             "Sign in with passkey" when signed out, "Signed in ·
-//                   paired" with Sign out when signed in.
+//   /m/             "Sign in with passkey" when signed out, the app when
+//                   signed in (Sign out in its header).
 //
 // Every passkey call follows a tap: iOS asks for Face ID or the passcode only
 // from a user gesture. Text from the server is set with textContent only.
 import "./mobile.css";
 import { credentialJSON, prepareCreation, prepareRequest } from "./webauthn";
+import { startApp, type PhoneApp } from "./app";
 
 type Json = Record<string, unknown>;
 
@@ -42,6 +44,7 @@ function screen(title: string, lines: string[], actions: HTMLElement[] = [], ton
   card.append(el("h1", "card-title", title));
   for (const line of lines) card.append(el("p", "card-line", line));
   for (const action of actions) card.append(action);
+  root().className = "shell";
   root().replaceChildren(card);
 }
 
@@ -93,9 +96,16 @@ function signedOut(message = ""): void {
   screen("Jarvis", lines, [button("Sign in with passkey", () => void signIn())], message ? "warn" : "");
 }
 
+let app: PhoneApp | null = null;
+
+/** Signed in: the Inbox, Chats and Tasks tabs (./app.ts, P-3). */
 function signedIn(): void {
-  screen("Signed in · paired", ["This phone can reach Jarvis. The inbox, chats and tasks come next."],
-    [button("Sign out", () => void signOut(), "quiet")], "ok");
+  app?.stop();
+  app = startApp({
+    root: root(),
+    onSignedOut: (message) => { app = null; signedOut(message); },
+    signOut: async () => { app = null; await signOut(); },
+  });
 }
 
 async function signOut(): Promise<void> {

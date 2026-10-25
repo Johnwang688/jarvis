@@ -418,12 +418,19 @@ def _row(record: dict, provider, dropped: set[str]) -> Row | None:
 
 def transcript(rows: list[dict], provider) -> list[Row]:
     """Log records (`tail_rows`) as projection rows, oldest first, scrubbed."""
+    return [row for _index, row in projected(rows, provider)]
+
+
+def projected(rows: list[dict], provider) -> list[tuple[int, Row]]:
+    """`transcript`, each row with the index of the log record it came from:
+    the phone's log cursor (`remote_api`, phone design P-3), so a page can
+    resume where the last one stopped. The same rows, the same scrub."""
     dropped = _dropped(rows)
     out = []
-    for record in rows:
+    for index, record in enumerate(rows):
         row = _row(record, provider, dropped)
         if row is not None:
-            out.append(row)
+            out.append((index, row))
     return out
 
 

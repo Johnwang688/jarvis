@@ -816,7 +816,9 @@ class OwnerOnly(Base):
     # and the module is matched as an import or an attribute, never `.py`.
     PHONE_SOURCE = (r"""/phone["'/?]""", r"/m/api", r"\bremote_auth\.(?!py\b)", r"import remote_auth",
                     r"from \.+remote_auth", r"passkeys\.json", r"sessions\.json", r"__Host-jarvis_m",
-                    r"open_window", r"pair_options", r"pair_verify", r"login_verify")
+                    r"open_window", r"pair_options", r"pair_verify", r"login_verify",
+                    # P-3's read API and stream (`remote_api.py`, named only in SELF_PROTECTED).
+                    r"\bremote_api\.(?!py\b)", r"import remote_api", r"from \.+remote_api")
 
     def test_no_tool_reaches_the_phone_pairing(self):
         from jarvis import tools

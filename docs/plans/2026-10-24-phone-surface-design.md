@@ -449,6 +449,54 @@ above:
   Phone and can revoke it, but nothing stops the pairing itself. **The
   remedy is pending an owner decision**; nothing here implements one.
 
+### 10.3 P-3 as built (2026-10-25, phone C3)
+
+Built as the P-3 row says (`docs/notes/control-plane.md`, "The phone's read
+API and tabs"). Where it is more specific than the text above:
+
+- **The reads are `jarvis/v2/remote_api.py`** (SELF_PROTECTED), reached only
+  past `remote_auth.owner_status`: GET only (405 otherwise, HEAD included),
+  404 for anything not in its table. Each calls the HUD route's own function
+  and keeps an allowlist of fields; `remote_api.DROPPED` lists, with reasons,
+  what the HUD sends and the phone does not (paths, permission
+  configuration, other surfaces' addressing, an approval's 4-character code,
+  provider session handles), and the check holds each route equal to the
+  HUD's minus exactly that, and the inbox's row and detail fields against
+  pinned constants (`ROW_FIELDS`, `APPROVAL_DETAIL_FIELDS`, `DETAIL_FIELDS`,
+  `GENERIC_DETAIL_FIELDS`). Every string passes `chat_reads.scrub`, an
+  approval card's too (review of PR #308: `card_args` misses a private key's
+  body in an argument, and a card's `origin` and `relayed_from.title` are
+  only `clean_line`d), so the phone's card can withhold more than the desk's:
+  **P-4 must answer from the full shared card**, not from this read-only view
+  (which also cuts a command at 4,000 characters and hides the arguments when
+  there is a command). A task status's `last_file` (a worktree path) is
+  dropped. The session is checked again before an answer leaves.
+- **The transcript is `chat_reads`' projection** (§5), paged by `after=<seq>`
+  (the log-record index) with `next` as the cursor. Without `after`, the
+  newest 60 rows; the phone does not page back (older rows are at the desk).
+- **The stream is SSE at `/m/api/events`**, not a WebSocket at `/m/ws`: the
+  HUD's own stream is SSE (`/events`), and under `/m/api` it inherits the 401
+  and the agent-path DENY without a new rule. It carries
+  `inbox_changed {ids, reason}`, `thread_changed` and `task_changed` (ids and
+  a source kind) and `resync`, never text. `task_changed` is an addition to
+  §3's "inbox_changed + thread updates": the Tasks tab's live updates need
+  it, and it carries ids only. It ends with its session (logout, a revoke,
+  expiry) within a second, through a check that does not count as activity.
+- **The diff is the Diff tab's, made stricter**: its patches also pass
+  `chat_reads.scrub`, because the v1 scrub the Diff tab uses lets a GitHub
+  token in a changed file through (the desk still shows it; a finding for
+  the Diff tab, not changed here). Capped at 200 files, 256 KiB a file and
+  1 MiB in all, with "Too large to show here: open it at the desk."
+- **The CSP is C1's, unwidened.** Assistant replies use the HUD's sanitized
+  renderer; the phone then drops KaTeX's styled HTML layer and every `style`
+  attribute, keeping the MathML layer iOS draws natively. The shared
+  renderer still builds KaTeX's styled spans before that, so the browser
+  reports (and refuses) `style-src-attr` for each formula: harmless, and the
+  alternative was `'unsafe-inline'` for styles.
+- **Private (HUD-only) approval rows show their private projection** and
+  "a private card: its detail is shown only at the desk"; the §4.1
+  `detail` fetch is P-4's.
+
 ## 11. Open questions for the owner (defaults in bold)
 
 Answered 2026-10-24: the phone is an iPhone (O-1); Discord stays as a backup

@@ -134,6 +134,11 @@ SELF_PROTECTED = frozenset(
         # PH-3..PH-6, P-2): it decides who counts as the owner off this
         # machine. An agent that could edit it could pair its own passkey.
         "jarvis/v2/remote_auth.py",
+        # The phone's read API and event stream (phone design §5, P-3): it
+        # decides what the phone can read off this machine and what each
+        # read withholds. An agent that could edit it could send the phone
+        # a private card's detail, a path or a credential.
+        "jarvis/v2/remote_api.py",
     }
 )
 

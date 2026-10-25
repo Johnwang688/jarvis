@@ -69,7 +69,9 @@ the request arrived on this daemon's remote listener, `Host` is exactly the
 configured name, a valid session cookie names an active passkey, and any
 method but GET/HEAD carries exactly `Origin: https://<host>`. Refusals are
 400 (Host), 403 (Origin), 401 (session), with no body detail. Item 5, a fresh
-assertion per Allow and Always, is P-4's.
+assertion per Allow and Always, is P-4's. Past it, `api_route` hands every
+path but logout and `me` to `remote_api` (P-3's reads and event stream);
+`session_live` is the stream's check, which does not touch last-seen.
 
 **Storage.** `<data root>/remote/` (0700): `passkeys.json` and
 `sessions.json` (0600, atomic replacement through `stores._write_bytes`, read
@@ -689,6 +691,23 @@ class RemoteAuth:
                 self._try_save_sessions()
             return dict(row)
 
+    def session_live(self, digest: str) -> bool:
+        """Whether the session with this token hash still holds (not logged
+        out, its passkey not revoked, not idle, not past its end), without
+        touching its last-seen: the phone's event stream asks this before
+        every write (`remote_api.events`), and an open stream is not
+        activity."""
+        with self._lock:
+            if self._broken or not isinstance(digest, str):
+                return False
+            row = self._sessions.get(digest)
+            if row is None:
+                return False
+            passkey = self._by_key(row["passkey"])
+            if passkey is None or passkey.get("revoked") is not None:
+                return False
+            return not self._expired(row, self.wall())
+
     def _try_save_sessions(self) -> None:
         try:
             self._save_sessions()
@@ -906,8 +925,10 @@ def api_route(handler, path: str, body: bytes) -> tuple[int, dict, list[tuple[st
     """Every `/m/api` request on the remote listener, after its own Host and
     Origin checks and with its body already read (`remote_listener`): the
     status, the JSON payload and any extra headers. The four pairing and
-    login routes need no session; everything else is 401 without one and,
-    until P-3, 404 with one (logout and `me` aside)."""
+    login routes need no session; everything else is 401 without one. With
+    one, logout and `me` are here and every other path is P-3's read API
+    (`remote_api.route`: its reads, its event stream, 404 for anything
+    else); the status is None when the stream has already answered."""
     auth = getattr(handler, "remote_auth", None)
     method = handler.command
     try:
@@ -945,7 +966,12 @@ def api_route(handler, path: str, body: bytes) -> tuple[int, dict, list[tuple[st
             return 200, {"signed_in": True, "paired": True,
                          "session": {"created": session["created"],
                                      "ends": session["created"] + ABSOLUTE_S}}, []
-        return 404, {"error": WORDS[404]}, []
+        if path in (LOGOUT, ME):
+            return 404, {"error": WORDS[404]}, []
+        # P-3's reads and the event stream (`remote_api`), only past the
+        # session check above. None: the stream answered on the socket.
+        from . import remote_api
+        return remote_api.route(handler, path, session)
     except AuthError as exc:
         word = exc.word if exc.status in (409, 429, 503) else WORDS.get(exc.status, UNAUTHORIZED)
         return exc.status, {"error": word}, []

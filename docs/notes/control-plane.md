@@ -850,8 +850,11 @@ advisory text and never read for a decision: a local process can send them).
   bound remote server (`RemoteAuth.server`, set by `remote_listener.bind`),
   exactly the configured Host (400), exactly `Origin: https://<host>` on any
   method but GET/HEAD (403), and a live session of an active passkey (401).
-  `GET /m/api/me` and `POST /m/api/logout` are the only session routes until
-  P-3; the rest of `/m/api` is 404 with a session, 401 without.
+  `GET /m/api/me` and `POST /m/api/logout` are this module's own session
+  routes; since P-3 every other `/m/api` path is `remote_api.route`'s (next
+  section), reached only past this check, and 401 without a session.
+  `RemoteAuth.session_live(token hash)` is the event stream's check: the
+  same tests as `session_for` without touching last-seen.
 - **Storage.** `<data root>/remote/` 0700, `passkeys.json` and
   `sessions.json` 0600, atomic (`stores._write_bytes`), read with
   `O_NOFOLLOW`. Both are protected state (`files._protected_state_paths`): no
@@ -901,3 +904,113 @@ authenticator against the real `webauthn`), `tests/face/hud_v2_phone_check.py`
 (the Settings section, and the built shell end to end with Chromium's virtual
 authenticator), `rules_check`/`permissions_check` `remote_listener_checks`,
 `archive_check` (`test_no_tool_reaches_the_phone_pairing`).
+
+## The phone's read API and tabs (phone C3 / P-3, 2026-10-25)
+
+`jarvis/v2/remote_api.py` (SELF_PROTECTED) is what a signed-in phone can read
+(design §5, §6). `remote_auth.api_route` hands it every `/m/api` path but the
+P-2 routes, and only after `owner_status` (§4 items 1 to 4) passes: without a
+session every path is 401 before the module is imported for it. With one, an
+unknown path is 404 and a read asked with anything but GET (HEAD included) is
+405 with `Allow: GET`; a write without the phone's Origin is still the
+listener's 403 first. The session is checked again after a read is built and
+before it is sent (`session_live`): a logout or revoke during a slow read is
+a 401. `after` takes ASCII digits only. The listener's handler now carries the daemon
+(`remote_listener.bind(host, port, auth, daemon)`); with none, the reads are
+404. `projects.is_owner` is never asked and stays false; the module calls no
+answering, sending or publishing function (pinned by source in
+`remote_api_check`).
+
+| Route (`GET /m/api/...`) | Calls | Caps |
+|---|---|---|
+| `inbox` | `inbox.rows` | 200 rows (`more`) |
+| `projects` | `projects.project_view`, unarchived | 200 |
+| `threads[?project=]` | `Daemon.thread_json`, as `GET /threads` | 300, newest first |
+| `threads/<id>/log[?after=]` | `chat_reads.projected` over `read_log` | tail 60; pages of 200 rows and 512 KiB; a row cut at 20,000 characters (`cut`) |
+| `tasks` | the task records, as `GET /tasks` | 200, a brief at 400 characters |
+| `tasks/<id>` | one task record | strings 20,000, lists 200 |
+| `tasks/<id>/diff` | `hud_api._diff_context/_diff_paths/_diff_parts` | 200 files, 256 KiB a file, 1 MiB in all; past any, `patch: null`, `too_large`, `truncated` and `note: "Too large to show here: open it at the desk."` |
+| `events` | the bus, filtered | 8 streams (a ninth ends the oldest) |
+
+**Each answer is the HUD projection minus documented fields**
+(`remote_api.DROPPED`, held field for field against the HUD's own routes by
+`tests/v2/remote_api_check.py`, so a field the HUD gains later fails the
+check until it is decided): no filesystem path (project `root`, `root_real`,
+`extra_dirs`; thread `cwd`; task `worktree`, `root`; status `last_file`;
+a task's `status` keeps `STATUS_FIELDS` only), no permission
+configuration (`profile`, `routing`, `always_ask`, thread `bypass`), no other
+surface's addressing (Discord ids and names, an approval's `code` and
+`discord_channel_id`), no provider session handle or accounting internals;
+the task list leaves `spec`, `plan`, `report`, `thread_ids`, `branch`,
+`provider_override` and `ceilings` to `tasks/<id>`. Never `owner_json`: a
+private approval row is `inbox.rows`' private projection exactly (minus
+`code`). **The inbox is an allowlist** (review of #308): every row keeps
+`ROW_FIELDS` only; its `detail` keeps `APPROVAL_DETAIL_FIELDS` (and
+`RELAYED_FIELDS` of `relayed_from`) for an approval, `DETAIL_FIELDS[kind]`
+for a question, task question, proposal or task, and for a kind P-3 does not
+know (A3's "missed" rows) only `GENERIC_DETAIL_FIELDS` with scalar values.
+**Every string passes `chat_reads.scrub`**: thread titles, a task's brief,
+plan, report, spec and status, every inbox row's `title`, `blocks` and
+`origin`, and every `detail` string, an approval card's included. The card's
+own redaction is not enough off the box: `card_args` misses a private key's
+body in an argument, and `origin` and `relayed_from.title` are only
+`clean_line`d. So the phone's card can withhold more than the desk's; P-4
+must show the full shared card before any answer. Diff patches pass the Diff
+tab's scrub and then `chat_reads.scrub` too (the v1 scrub the Diff tab uses
+lets a GitHub token in a changed file through; the desk still shows it, the
+phone does not). **On the phone only**, `remote_api.labelled_values` then
+withholds a value written after a credential's label (`aws_secret_access_key
+= …`, `password: …`, `"password": "…"`, a Google `client_secret: …`):
+every string `_scrub` sends, the transcript rows and the diff. It keeps what
+reads as code or a reference (a bare or dotted identifier without a digit,
+anything with `(` or `[`, anything starting `~ / ! * % & @ $ {`, a mask) and,
+under 16 characters, anything without a digit. It is not in the shared
+`redact.scrub_text`/`chat_reads.scrub` (delta review of #308): those feed
+agents (chat relays, git tool output to Codex), where it rewrote ordinary
+code; they are main's, pinned on the review's 50 lines in `remote_api_check`.
+
+**The transcript is `chat_reads`' projection**, row for row
+(`chat_reads.projected`, new: `transcript` with each row's log-record index):
+the owner's `typed` words, replies, relays, system lines; tool events and
+output, thinking, gates, usage and inlined attachments never leave. Each row
+carries `seq`; `after=<seq>` resumes and `next` is the next cursor; without
+`after` the newest 60 rows, `older` saying more are at the desk.
+
+**The event stream is SSE** (`/m/api/events`, as the HUD's `/events`; the
+design's `/m/ws` named a WebSocket the HUD does not have, and under `/m/api`
+the stream inherits the 401 and the agent-path DENY). It sends `retry: 3000`
+and four kinds, ids and a source kind only, never text:
+`inbox_changed {ids, reason}`, `thread_changed {thread_id, project_id,
+reason}` (a transcript record, a turn's start or end, a thread change: not
+deltas, tools, thinking, usage or sub-agents), `task_changed {task_id,
+project_id, reason}` (created, status, question) and `resync` (the
+subscription dropped events). Nothing is sent for a thread or task of an
+archived project (`_Hidden`, read again after a project event or every 5 s).
+It needs a session to open, and ends when the
+session does (logout, a revoke, idle or absolute expiry), checked before
+every write and at least once a second through `session_live`, which does
+not count as activity. The daemon's shutdown ends it.
+
+**The app** (`hud/src/mobile/app.ts`, `views.ts`, `model.ts`, `net.ts`,
+`markdown.ts`; plain DOM, no React): Inbox (the HUD's groups,
+`lib/inbox.ts`; every kind in full; approvals and questions say "Answer at the
+desk", proposals "Withdraw at the desk", task rows "Resume or cancel at the
+desk"; no answer control), Chats (projects, then the five most recent chats
+by `lib/recentChats.ts`, then the transcript; no input box), Tasks (running,
+then blocked, then the rest; state, plan, last report, open questions, the
+diff folded file by file, folds kept across a refresh). Every daemon string
+is `textContent`; only an assistant's reply goes through `lib/markdown.ts`,
+then `mobile/markdown.ts` drops KaTeX's HTML layer and every `style`
+attribute in an inert template (MathML stays, which iOS draws), so the CSP is
+C1's unchanged; the shared renderer's own `style` attributes on KaTeX output
+are refused by it (`style-src-attr`, reported, dropped). Each stream event
+re-reads its route; a reconnect re-reads everything shown. A read that cannot
+reach Jarvis (a network error, or 502/503/504 from the proxy), or a dropped
+stream whose `/m/api/me` check fails, shows the offline banner ("Offline.
+Nothing here is current: it was last read at HH:MM:SS.") and marks the view
+stale (`data-stale`, dimmed) until a read lands. A 401 anywhere stops the app
+and returns to sign-in. Tap targets are at least 44 px.
+
+Tests: `tests/v2/remote_api_check.py`, `hud/src/mobile/app.test.ts`, the app
+half of `tests/face/hud_v2_phone_check.py` (`app_checks`: the built bundle
+through a real remote listener, signed in with the virtual authenticator).
