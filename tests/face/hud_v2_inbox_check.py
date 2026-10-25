@@ -1,0 +1,775 @@
+"""Inbox A2 (docs/plans/2026-10-24-owner-inbox-design.md, IN-1, §7 and §8): the
+HUD's owner inbox — the sidebar's Inbox row and count, the app badge, and the
+Inbox view — against inbox A1's routes (`GET /inbox`, `POST /inbox/<id>/answer`,
+the `inbox_changed` bus record), played by `hud_v2_mock_inbox.py`.
+
+Free and hermetic: its own `MockDaemon(0)` (an ephemeral port, never
+8402/8403/8405; `guard` refuses the live ports and watches the CSP).
+
+What it pins, one section each (each names the mutation it is meant to catch):
+  sidebar   the Inbox row sits above the projects, counts ranks 1 to 5 only,
+            reads amber while anything pending (rank 1 to 2) waits, and opens
+            the view; the title stays `J.A.R.V.I.S.` [count all ranks; no row]
+  groups    group headers and row order follow the rank, empty groups are
+            hidden; amber marks ranks 1 to 2, red a failed task [order by time]
+  live      `inbox_changed` (`ids: []` too) re-reads the inbox: the view and
+            the count follow [no re-read on the event]
+  answer    a question's answer posts `{text}` once to `/inbox/<id>/answer`
+            with the id through `encodeURIComponent` (A1 decodes once); a
+            proposal's Withdraw posts `{"withdraw": true}` [double post; raw id]
+  conflict  a 409 shows "Already answered or gone." and re-reads [no re-read]
+  withdraw  `withdraw_until` is the daemon's clock, so the window's clock is a
+            hint only (review of PR #305, MED 1): Withdraw stays while the row
+            is in the projection, turning "closing" near the end and never
+            claiming the window closed; with the daemon 90 s behind it is
+            still offered and the press posts; with the daemon 90 s ahead a
+            press after the daemon dropped the row is its 409, said, re-read
+            [gate on the browser's clock]
+  reconnect a dropped event stream, rows changed with no `inbox_changed`, and
+            the reconnect alone re-reads them [no re-read on `_connected`]
+  clicks    a click anywhere on a row never posts anything; a row's link opens
+            its thread or its task [row onClick answers]
+  hostile   `<img onerror>` in `origin`, in question text and in a brief makes
+            no element and runs nothing [innerHTML / Markdown]
+  card      the approval card with the Inbox open behaves exactly as it does
+            with a chat pane (the same assertions, the same answers): one card,
+            the veil's, never a second instance in the inbox; Enter does
+            nothing; Tab stays on DENY; Escape denies; AUTHORIZE allows; ALWAYS
+            allowlists; and the inbox is inert under it — a trusted click on
+            its controls posts nothing and focus cannot enter it. A private
+            (HUD-only) card fetches its private detail once, from the veil's
+            card only, and its row shows none of it [second card; not inert]
+  badge     `navigator.setAppBadge` (stubbed) gets the count and is cleared at
+            0 and when a read fails; without the API nothing breaks [badge all
+            ranks; no clear; a stale badge after a failed read]
+  older     an older daemon (404) shows no count and says the inbox is not
+            available, never "nothing waiting" [404 read as empty]
+
+Run alone (after `cd hud && npm ci --ignore-scripts && npm run build`):
+  systemd-run --user --scope -q -p MemoryMax=3G -p MemorySwapMax=0 -- env PYTHONPATH=$PWD \\
+    PYTHONDONTWRITEBYTECODE=1 /home/johnw/projects/Jarvis/.venv/bin/python tests/face/hud_v2_inbox_check.py [section,...]
+It also runs as a section of tests/face/hud_v2_check.py.
+"""
+from __future__ import annotations
+
+import json
+import sys
+import time
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from tests.face import hud_v2_mock_inbox as mock_inbox  # noqa: E402
+from tests.face.hud_v2_layout_check import _pane  # noqa: E402
+from tests.face.hud_v2_multichat_check import _fresh  # noqa: E402
+
+SINGLE = json.dumps({"preset": "single", "focused": 1,
+                     "panes": [{"view": "chat"}, {"view": "file"}, {"view": "browser"}, {"view": "task"}]})
+TITLE = "J.A.R.V.I.S."
+HOSTILE = '<img src=x onerror="window.__pwned=(window.__pwned||0)+1">'
+AMBER, RED = "rgb(251, 191, 36)", "rgb(248, 113, 113)"
+BADGE_STUB = """
+window.__badges = [];
+try {
+  Object.defineProperty(Navigator.prototype, 'setAppBadge', { configurable: true, writable: true,
+    value: function (n) { window.__badges.push(['set', n]); return Promise.resolve(); } });
+  Object.defineProperty(Navigator.prototype, 'clearAppBadge', { configurable: true, writable: true,
+    value: function () { window.__badges.push(['clear']); return Promise.resolve(); } });
+} catch (e) {}
+"""
+NO_BADGE_API = """
+try { delete Navigator.prototype.setAppBadge; delete Navigator.prototype.clearAppBadge; } catch (e) {}
+"""
+
+
+def _iso(seconds: float = 0) -> str:
+    return (datetime.now(timezone.utc) + timedelta(seconds=seconds)).isoformat(timespec="seconds")
+
+
+def q_row(text="Which file?", rid="r9", thread="t1", origin=""):
+    return {"id": f"q:{thread}:{rid}", "kind": "question", "rank": 2,
+            "title": f"chat {thread} is stopped until you answer", "blocks": f"chat {thread} waits on this",
+            "project_id": "p1", "thread_id": thread, "task_id": None, "asked_at": _iso(-60), "expires_at": None,
+            "origin": origin, "detail": {"thread_id": thread, "req_id": rid, "text": text,
+                                         "options": ["calc.py", "app.py"]}}
+
+
+def prop_row(task="k9", until_s=600.0, brief="tidy the README"):
+    return {"id": f"prop:{task}", "kind": "proposal", "rank": 3,
+            "title": f"task {task} starts on its own unless you withdraw it",
+            "blocks": "nothing waits yet; it starts when its window closes", "project_id": "p1",
+            "thread_id": None, "task_id": task, "asked_at": _iso(-10), "expires_at": None, "origin": "",
+            "detail": {"task_id": task, "brief": brief, "withdraw_until": _iso(until_s)}}
+
+
+def task_row(task="k1", state="blocked", brief="add multiply to calc.py"):
+    blocked = state == "blocked"
+    return {"id": f"task:{task}", "kind": "task", "rank": 4 if blocked else 8,
+            "title": f"task {task} is blocked" if blocked else f"task {task} failed",
+            "blocks": f"task {task} waits for you to resume or cancel it" if blocked else "for your information",
+            "project_id": "p1", "thread_id": None, "task_id": task, "asked_at": _iso(-300), "expires_at": None,
+            "origin": "", "detail": {"task_id": task, "state": state, "brief": brief}}
+
+
+def card(req: str, **over) -> dict:
+    """An ordinary card as the broker publishes it (`ApprovalRequest.to_json()`)."""
+    return {"req_id": req, "code": req[-4:].upper(), "tool": "run_command", "args": {"command": "ls -la"},
+            "command": "ls -la", "reason": "reviewer declined", "layer": "human", "thread_id": "t1",
+            "task_id": None, "provider": "codex", "origin": "Codex · chat ‹jarvis› (t1)", "allowlistable": True,
+            "timeout_s": 120, "asked_at": _iso(), **over}
+
+
+def appr_row(c: dict) -> dict:
+    private = bool(c.get("hud_only"))
+    return {"id": f"appr:{c['req_id']}", "kind": "approval", "rank": 1,
+            "title": (f"{c['tool']} waits for your approval in the HUD" if private
+                      else f"Codex asks to use {c['tool']}"),
+            "blocks": "chat t1 waits on this", "project_id": None if private else "p1", "thread_id": "t1",
+            "task_id": None, "asked_at": c["asked_at"], "expires_at": _iso(120),
+            "origin": "" if private else c.get("origin", ""), "detail": c}
+
+
+def basic_rows():
+    return [q_row(), prop_row(), task_row(), task_row("kf", "failed", "a failed brief")]
+
+
+# -- helpers -------------------------------------------------------------------
+
+def _st(mock):
+    return mock_inbox.state(mock)
+
+
+def _reset(mock, rows=None):
+    s = _st(mock)
+    s.update({"rows": list(rows if rows is not None else basic_rows()), "fail": None, "answer_status": {}})
+    mock.world["approvals"] = []
+
+
+def _answers(mock):
+    return list(_st(mock)["answers"])
+
+
+def _view(page):
+    return page.locator('[data-testid="inbox-view"]')
+
+
+def _row(page, row_id):
+    return page.locator(f'[data-testid="inbox-row"][data-id="{row_id}"]')
+
+
+def _row_ids(page):
+    return page.evaluate("() => [...document.querySelectorAll('[data-testid=\"inbox-row\"]')].map(r => r.dataset.id)")
+
+
+def _count(page):
+    loc = page.locator('[data-testid="owner-inbox-count"]')
+    return loc.inner_text().strip() if loc.count() else None
+
+
+def _open(page, mock, until, rows=None, ws=SINGLE):
+    _reset(mock, rows)
+    _fresh(page, mock, until, ws)
+    if ws == SINGLE:
+        page.locator('[data-testid="owner-inbox"]').click()
+    until(lambda: _view(page).count() == 1 and _view(page).get_attribute("data-status") == "ready", timeout=4)
+
+
+def _reads(mock):
+    return _st(mock)["reads"]
+
+
+def _approval_posts(mock, req):
+    return mock.sent("POST", f"/approvals/{req}")
+
+
+def _active(page):
+    return page.evaluate("() => document.activeElement && (document.activeElement.getAttribute('data-testid') "
+                         "|| document.activeElement.tagName)")
+
+
+# -- sections ------------------------------------------------------------------
+
+def _sidebar_checks(page, mock, check, until):
+    _reset(mock)
+    _fresh(page, mock, until, SINGLE)
+    row = page.locator('[data-testid="owner-inbox"]')
+    until(lambda: _count(page) is not None, timeout=4)
+    check("the sidebar has an Inbox row, a real button labelled Inbox",
+          row.count() == 1 and row.evaluate("e => e.tagName") == "BUTTON" and "Inbox" in row.inner_text())
+    above = page.evaluate("""() => {
+      const r = document.querySelector('[data-testid="owner-inbox"]');
+      const p = document.querySelector('[data-testid="project-p1"]');
+      const h = [...document.querySelectorAll('#sidebar h2.bar')].find(e => /projects/i.test(e.textContent));
+      return !!(r && p && h && (r.compareDocumentPosition(p) & Node.DOCUMENT_POSITION_FOLLOWING)
+        && (r.compareDocumentPosition(h) & Node.DOCUMENT_POSITION_FOLLOWING));
+    }""")
+    check("it sits above the projects (and their header)", above)
+    check("its count is ranks 1 to 5 only: 3 of the 4 rows (the failed task is not counted) "
+          "[mutation: count all ranks]", _count(page) == "3", str(_count(page)))
+    badge = page.locator('[data-testid="owner-inbox-count"]')
+    check("with a rank-2 question waiting the count is amber (pending)",
+          badge.get_attribute("data-pending") == "true" and badge.evaluate("e => getComputedStyle(e).color") == AMBER,
+          badge.evaluate("e => getComputedStyle(e).color"))
+    check("the title is J.A.R.V.I.S. with the inbox counted", page.title() == TITLE, page.title())
+    posts = len(_answers(mock))
+    row.click()
+    until(lambda: _view(page).count() == 1, timeout=3)
+    check("a click on it opens the Inbox view in the focused pane, and answers nothing",
+          page.locator(_pane(1)).get_attribute("data-view") == "inbox" and len(_answers(mock)) == posts)
+    check("the row is marked while a pane shows the inbox", "sel" in (row.get_attribute("class") or ""))
+    check("the pane's strip offers the inbox only while it shows it",
+          page.locator(_pane(1, '[data-testid="tab-inbox"]')).count() == 1
+          and page.locator(_pane(2, '[data-testid="tab-inbox"]')).count() == 0)
+    check("the title is unchanged with the view open", page.title() == TITLE, page.title())
+    _reset(mock, [prop_row(), task_row()])
+    mock_inbox.changed(mock)
+    until(lambda: _count(page) == "2", timeout=3)
+    check("with nothing pending the count is not amber",
+          badge.get_attribute("data-pending") == "false" and badge.evaluate("e => getComputedStyle(e).color") != AMBER)
+
+
+def _groups_checks(page, mock, check, until):
+    rows = basic_rows() + [task_row("kb2", "blocked", "second blocked")]
+    _open(page, mock, until, rows)
+    heads = page.evaluate("() => [...document.querySelectorAll('[data-testid=\"inbox-group-head\"]')].map(e => e.textContent)")
+    check("group headers follow the rank: Waiting now, Waiting on you, For your information "
+          "(When you have time is empty, so hidden)",
+          heads == ["Waiting now", "Waiting on you", "For your information"], str(heads))
+    ids = _row_ids(page)
+    check("rows are in rank order, oldest first within a rank as served [mutation: order by time]",
+          ids == ["q:t1:r9", "prop:k9", "task:k1", "task:kb2", "task:kf"], str(ids))
+    border = lambda i: _row(page, i).evaluate("e => getComputedStyle(e).borderLeftColor")  # noqa: E731
+    check("a rank 1-2 row is marked amber, a failed task red, the rest neither",
+          border("q:t1:r9") == AMBER and border("task:kf") == RED
+          and border("prop:k9") not in (AMBER, RED) and border("task:k1") not in (AMBER, RED),
+          f"{border('q:t1:r9')} {border('task:kf')} {border('prop:k9')}")
+    accent = "rgb(111, 195, 223)"
+    check("glacier cyan marks no row (it is for selection and focus only)",
+          all(border(i) != accent for i in ids))
+    check("a blocked or failed task offers nothing to press but its link",
+          _row(page, "task:k1").locator("button").count() == 1
+          and _row(page, "task:k1").locator('[data-testid="inbox-link"]').count() == 1)
+
+
+def _live_checks(page, mock, check, until):
+    _open(page, mock, until)
+    before = _reads(mock)
+    _st(mock)["rows"] = [r for r in _st(mock)["rows"] if r["id"] != "prop:k9"]
+    mock_inbox.changed(mock, [])
+    until(lambda: "prop:k9" not in _row_ids(page), timeout=3)
+    check("an inbox_changed with ids [] re-reads: the gone row leaves the view and the count",
+          "prop:k9" not in _row_ids(page) and _count(page) == "2" and _reads(mock) > before, str(_row_ids(page)))
+    _st(mock)["rows"].append(prop_row("k7"))
+    mock_inbox.changed(mock, ["prop:k7"], "proposal_reply")
+    until(lambda: "prop:k7" in _row_ids(page), timeout=3)
+    check("one naming a row re-reads too: the new row appears in its place", _row_ids(page)[:2] == ["q:t1:r9", "prop:k7"]
+          and _count(page) == "3", str(_row_ids(page)))
+
+
+def _answer_checks(page, mock, check, until):
+    _open(page, mock, until)
+    start = len(_answers(mock))
+    box = _row(page, "q:t1:r9").locator('[data-testid="inbox-answer"]')
+    send = _row(page, "q:t1:r9").locator('[data-testid="inbox-answer-send"]')
+    send.click()
+    time.sleep(0.3)
+    check("Answer with an empty box posts nothing", len(_answers(mock)) == start)
+    box.fill("calc.py")
+    send.dblclick()
+    until(lambda: len(_answers(mock)) > start, timeout=3)
+    time.sleep(0.4)
+    got = _answers(mock)[start:]
+    check("Answer posts the text once, even on a double click [mutation: double post]", len(got) == 1, str(got))
+    if got:
+        raw, decoded, body = got[0]
+        check("to /inbox/<id>/answer with the id through encodeURIComponent, decoded once to the row id",
+              raw == "/inbox/q%3At1%3Ar9/answer" and decoded == "q:t1:r9", raw)
+        check("with exactly {text}", body == {"text": "calc.py"}, str(body))
+    until(lambda: "q:t1:r9" not in _row_ids(page), timeout=3)
+    check("the answered row leaves on the daemon's inbox_changed", "q:t1:r9" not in _row_ids(page))
+    start = len(_answers(mock))
+    _row(page, "prop:k9").locator('[data-testid="inbox-withdraw"]').click()
+    until(lambda: len(_answers(mock)) > start, timeout=3)
+    got = _answers(mock)[start:]
+    check("a proposal's Withdraw posts {\"withdraw\": true} to its own row",
+          len(got) == 1 and got[0][1] == "prop:k9" and got[0][2] == {"withdraw": True}, str(got))
+    # Enter in the box answers too, as the task view's box does.
+    _reset(mock)
+    mock_inbox.changed(mock)
+    until(lambda: "q:t1:r9" in _row_ids(page), timeout=3)
+    start = len(_answers(mock))
+    box.fill("app.py")
+    box.press("Enter")
+    until(lambda: len(_answers(mock)) > start, timeout=3)
+    check("Enter in the answer box answers it", _answers(mock)[start:][:1] and _answers(mock)[start][2] == {"text": "app.py"},
+          str(_answers(mock)[start:]))
+
+
+def _conflict_checks(page, mock, check, until):
+    _open(page, mock, until)
+    _st(mock)["answer_status"]["q:t1:r9"] = (409, {"error": mock_inbox.GONE})
+    reads = _reads(mock)
+    _row(page, "q:t1:r9").locator('[data-testid="inbox-answer"]').fill("calc.py")
+    _row(page, "q:t1:r9").locator('[data-testid="inbox-answer-send"]').click()
+    notice = page.locator('[data-testid="inbox-notice"]')
+    until(lambda: notice.count() == 1, timeout=3)
+    check("a 409 says 'Already answered or gone.'", notice.count() == 1 and notice.inner_text() == "Already answered or gone.",
+          notice.inner_text() if notice.count() else "no notice")
+    until(lambda: _reads(mock) > reads, timeout=3)
+    check("and reads the inbox again [mutation: no re-read on 409]", _reads(mock) > reads)
+    # A row gone between the read and the press is the daemon's own 409.
+    _st(mock)["answer_status"] = {}
+    _st(mock)["rows"] = [r for r in _st(mock)["rows"] if r["id"] != "prop:k9"]
+    reads = _reads(mock)
+    _row(page, "prop:k9").locator('[data-testid="inbox-withdraw"]').click()
+    until(lambda: _reads(mock) > reads, timeout=3)
+    until(lambda: "prop:k9" not in _row_ids(page), timeout=3)
+    check("a row gone at the daemon answers 409, is said, and leaves on the re-read",
+          notice.count() == 1 and "prop:k9" not in _row_ids(page))
+
+
+CLOSING_S = 15  # lib/inbox CLOSING_MS
+
+
+def _withdraw_checks(page, mock, check, until):
+    # Same clocks: the hint turns "closing" CLOSING_S before the end, and the
+    # button stays past withdraw_until for as long as the daemon holds the row.
+    rows = [prop_row("k5", until_s=CLOSING_S + 2.5)]
+    _open(page, mock, until, rows)
+    w = _row(page, "prop:k5").locator('[data-testid="inbox-withdraw"]')
+    hint = _row(page, "prop:k5").locator('[data-testid="inbox-withdraw-hint"]')
+    check("inside its window the proposal offers Withdraw, hinted open", w.count() == 1
+          and w.get_attribute("data-hint") == "open" and "Starts on its own" in hint.inner_text())
+    posts = len(_answers(mock))
+    flipped = until(lambda: w.count() == 1 and w.get_attribute("data-hint") == "closing", timeout=6)
+    check("near its end by this window's clock the hint turns 'closing', with no re-read needed",
+          bool(flipped) and hint.get_attribute("data-hint") == "closing")
+    time.sleep(3)
+    check("past withdraw_until by this window's clock, Withdraw stays while the daemon holds the row "
+          "[mutation: gate on the browser's clock]", w.count() == 1 and w.is_enabled())
+    check("and nothing claims the window has closed",
+          "closed" not in _row(page, "prop:k5").inner_text().lower(), _row(page, "prop:k5").inner_text())
+    check("and nothing was posted by the hint", len(_answers(mock)) == posts)
+
+    # The daemon 90 s behind this window: its window is open for 30 s more by
+    # its own clock, which this window reads as 60 s ago.
+    _open(page, mock, until, [prop_row("kb", until_s=-60)])
+    w = _row(page, "prop:kb").locator('[data-testid="inbox-withdraw"]')
+    check("skew, daemon 90 s behind: Withdraw is still offered (hinted closing), never hidden",
+          w.count() == 1 and w.is_enabled() and w.get_attribute("data-hint") == "closing"
+          and "closed" not in _row(page, "prop:kb").inner_text().lower())
+    start = len(_answers(mock))
+    w.click()
+    until(lambda: len(_answers(mock)) > start, timeout=3)
+    got = _answers(mock)[start:]
+    check("and the press posts {\"withdraw\": true}, which the daemon accepts", len(got) == 1
+          and got[0][1] == "prop:kb" and got[0][2] == {"withdraw": True}, str(got))
+    until(lambda: "prop:kb" not in _row_ids(page), timeout=3)
+    check("the withdrawn row leaves on the daemon's inbox_changed, with no 409 said",
+          "prop:kb" not in _row_ids(page) and page.locator('[data-testid="inbox-notice"]').count() == 0)
+
+    # The daemon 90 s ahead: this window reads its window as open for two
+    # minutes, but the daemon has closed it and dropped the row (no event yet).
+    _open(page, mock, until, [prop_row("ka", until_s=120)])
+    w = _row(page, "prop:ka").locator('[data-testid="inbox-withdraw"]')
+    check("skew, daemon 90 s ahead: Withdraw is offered, hinted open", w.count() == 1
+          and w.get_attribute("data-hint") == "open")
+    _st(mock)["rows"] = []
+    reads = _reads(mock)
+    w.click()
+    notice = page.locator('[data-testid="inbox-notice"]')
+    until(lambda: notice.count() == 1, timeout=3)
+    until(lambda: "prop:ka" not in _row_ids(page), timeout=3)
+    check("a press after the daemon closed the window is its 409: 'Already answered or gone.', then a re-read",
+          notice.count() == 1 and notice.inner_text() == "Already answered or gone." and _reads(mock) > reads
+          and "prop:ka" not in _row_ids(page))
+
+
+def _reconnect_checks(page, mock, check, until):
+    from tests.face.hud_v2_subagents_check import drop_events
+    _open(page, mock, until)
+    check("setup: the inbox shows its four rows", len(_row_ids(page)) == 4 and _count(page) == "3")
+    # The daemon's projection changes while the stream is down: no
+    # inbox_changed reaches this window.
+    time.sleep(0.5)
+    _st(mock)["rows"] = [q_row(), prop_row("k8")]
+    reads = _reads(mock)
+    time.sleep(0.5)
+    check("with no event the window has not re-read", _reads(mock) == reads and "task:k1" in _row_ids(page))
+    before = mock.sse_connections()
+    drop_events(mock)
+    mock.await_reconnect(before, timeout=8)
+    until(lambda: _row_ids(page) == ["q:t1:r9", "prop:k8"], timeout=8)
+    check("a reconnect alone re-reads the inbox: the view and the count follow [mutation: no re-read on "
+          "_connected]", _row_ids(page) == ["q:t1:r9", "prop:k8"] and _count(page) == "2" and _reads(mock) > reads,
+          str(_row_ids(page)))
+
+
+def _clicks_checks(page, mock, check, until):
+    _open(page, mock, until)
+    posts, appr = len(_answers(mock)), len([c for c in mock.calls if c[0] == "POST" and c[1].startswith("/approvals")])
+    for rid in _row_ids(page):
+        r = _row(page, rid)
+        r.click(position={"x": 4, "y": 4})
+        r.locator('[data-testid="inbox-title"]').click()
+        if r.locator('[data-testid="inbox-blocks"]').count():
+            r.locator('[data-testid="inbox-blocks"]').click()
+        for sel in ('[data-testid="inbox-question"]', '[data-testid="inbox-brief"]', '[data-testid="inbox-options"]'):
+            if r.locator(sel).count():
+                r.locator(sel).click()
+    time.sleep(0.4)
+    check("a click anywhere on a row (its edge, title, line, text) posts nothing [mutation: row onClick answers]",
+          len(_answers(mock)) == posts
+          and len([c for c in mock.calls if c[0] == "POST" and c[1].startswith("/approvals")]) == appr)
+    check("and opens nothing: the pane still shows the inbox", page.locator(_pane(1)).get_attribute("data-view") == "inbox")
+    _row(page, "task:k1").locator('[data-testid="inbox-link"]').click()
+    until(lambda: page.evaluate("window.__hud.state().taskId") == "k1", timeout=3)
+    check("a task row's link opens its task", page.evaluate("window.__hud.state().taskId") == "k1"
+          and page.locator(_pane(1)).get_attribute("data-view") == "task")
+    page.locator('[data-testid="owner-inbox"]').click()
+    until(lambda: _view(page).count() == 1, timeout=3)
+    _row(page, "q:t1:r9").locator('[data-testid="inbox-link"]').click()
+    until(lambda: page.locator(_pane(1)).get_attribute("data-view") == "chat", timeout=3)
+    until(lambda: page.evaluate("window.__hud.state().chats['1'].threadId") == "t1", timeout=3)
+    check("a question row's link opens its chat", page.evaluate("window.__hud.state().chats['1'].threadId") == "t1")
+    check("and no link answered anything", len(_answers(mock)) == posts)
+
+
+def _hostile_checks(page, mock, check, until):
+    rows = [q_row(text="Pick one:\n" + HOSTILE, origin="Codex · task " + HOSTILE),
+            prop_row(brief="ship it " + HOSTILE), task_row("kf", "failed", HOSTILE)]
+    # A question row carries no origin from A1; an approval does. Put the
+    # payload in both so either path is covered.
+    c = card("hostilecard1", origin="Codex · task ‹" + HOSTILE + "›")
+    _open(page, mock, until, rows + [appr_row(c)])
+    imgs = page.evaluate("() => document.querySelectorAll('[data-testid=\"inbox-view\"] img').length")
+    check("no element is made from untrusted text [mutation: innerHTML]", imgs == 0, str(imgs))
+    check("and nothing ran", page.evaluate("window.__pwned === undefined"))
+    origin = _row(page, "appr:hostilecard1").locator('[data-testid="inbox-origin"]').inner_text()
+    question = _row(page, "q:t1:r9").locator('[data-testid="inbox-question"]').inner_text()
+    check("an approval's origin is shown as its literal text", HOSTILE in origin, origin)
+    check("a question's text is shown as its literal text, its lines kept",
+          question.startswith("Pick one:\n") and HOSTILE in question, question)
+    check("so is a brief", HOSTILE in _row(page, "prop:k9").locator('[data-testid="inbox-brief"]').inner_text())
+    check("the title is unchanged by any of it", page.title() == TITLE, page.title())
+
+
+def _card_observe(page, mock, until, prefix, with_rows: bool):
+    """Run the card's own assertions (tests/face/hud_v2_check.py `approval_checks`)
+    and return what was seen, so the inbox's run can be compared with the chat
+    pane's. `with_rows` also puts each card's `appr:` row in the inbox, as the
+    daemon's projection would."""
+    seen = {}
+    cardloc = page.locator('[data-testid="approval-card"]')
+
+    def raise_card(req, **over):
+        c = card(req, **over)
+        mock.world["approvals"].append(c)
+        if with_rows:
+            _st(mock)["rows"].insert(0, appr_row(c))
+            mock_inbox.changed(mock, [f"appr:{req}"], "approval_requested")
+        mock.emit("approval_requested", c)
+        until(lambda: cardloc.count() == 1, timeout=4)
+        time.sleep(0.25)
+        return c
+
+    def settle(req):
+        until(lambda: cardloc.count() == 0, timeout=4)
+        if with_rows:
+            _st(mock)["rows"] = [r for r in _st(mock)["rows"] if r["id"] != f"appr:{req}"]
+            mock_inbox.changed(mock, [f"appr:{req}"], "approval_resolved")
+
+    r1 = f"{prefix}0001"
+    raise_card(r1)
+    seen["one card, the veil's"] = cardloc.count() == 1 and page.evaluate(
+        "() => document.querySelectorAll('#authveil [data-testid=\"approval-card\"]').length === 1")
+    seen["focus on the card"] = _active(page) == "approval-card"
+    page.keyboard.press("Enter")
+    time.sleep(0.3)
+    seen["Enter does nothing"] = not _approval_posts(mock, r1) and cardloc.count() == 1
+    page.keyboard.press("Tab")
+    a = _active(page)
+    page.keyboard.press("Tab")
+    b = _active(page)
+    page.keyboard.press("Shift+Tab")
+    c_ = _active(page)
+    seen["Tab and Shift+Tab stay on DENY"] = (a, b, c_) == ("approval-deny",) * 3
+    seen["AUTHORIZE and ALWAYS are out of the Tab order"] = page.evaluate(
+        "() => ['approval-allow','approval-always'].every(t => document.querySelector(`#authveil [data-testid=\"${t}\"]`).tabIndex === -1)")
+    page.keyboard.press("Escape")
+    body = until(lambda: _approval_posts(mock, r1) or None, timeout=3)
+    seen["Escape denies"] = bool(body) and body[-1] == {"decision": "deny", "always": False}
+    settle(r1)
+    r2 = f"{prefix}0002"
+    raise_card(r2)
+    page.locator("#authveil [data-testid=\"approval-allow\"]").click()
+    body = until(lambda: _approval_posts(mock, r2) or None, timeout=3)
+    seen["AUTHORIZE allows, once, not always"] = bool(body) and body == [{"decision": "allow", "always": False}]
+    settle(r2)
+    r3 = f"{prefix}0003"
+    raise_card(r3)
+    page.locator("#authveil [data-testid=\"approval-always\"]").click()
+    body = until(lambda: _approval_posts(mock, r3) or None, timeout=3)
+    seen["ALWAYS allows and allowlists"] = bool(body) and body == [{"decision": "allow", "always": True}]
+    settle(r3)
+    r4 = f"{prefix}0004"
+    raise_card(r4)
+    page.locator("#authveil [data-testid=\"approval-deny\"]").click()
+    body = until(lambda: _approval_posts(mock, r4) or None, timeout=3)
+    seen["DENY denies"] = bool(body) and body == [{"decision": "deny", "always": False}]
+    settle(r4)
+    seen["the title is J.A.R.V.I.S."] = page.title() == TITLE
+    return seen
+
+
+def _card_checks(page, mock, check, until):
+    # The card as it is with a chat pane: the reference run.
+    _reset(mock, [])
+    _fresh(page, mock, until, SINGLE)
+    reference = _card_observe(page, mock, until, "chatpane", with_rows=False)
+    check("reference: every card assertion holds with a chat pane", all(reference.values()),
+          str({k: v for k, v in reference.items() if not v}))
+    # The same assertions with the Inbox open and each card's row in it.
+    _open(page, mock, until, basic_rows())
+    inboxed = _card_observe(page, mock, until, "inboxpane", with_rows=True)
+    for name, ok in inboxed.items():
+        check(f"with the Inbox open: {name} (as with a chat pane)", ok == reference[name] and ok)
+    check("the card with the Inbox open behaves exactly as with a chat pane [mutation: a second card]",
+          inboxed == reference, str({k: (reference[k], v) for k, v in inboxed.items() if reference[k] != v}))
+
+    # Under a card the inbox is inert, its approval row included.
+    c = card("inertcard01")
+    mock.world["approvals"].append(c)
+    _st(mock)["rows"].insert(0, appr_row(c))
+    mock_inbox.changed(mock, ["appr:inertcard01"], "approval_requested")
+    mock.emit("approval_requested", c)
+    cardloc = page.locator('[data-testid="approval-card"]')
+    until(lambda: cardloc.count() == 1, timeout=4)
+    until(lambda: "appr:inertcard01" in _row_ids(page), timeout=3)
+    check("the card's row is in the inbox, under Waiting now, saying its card is on screen",
+          _row_ids(page)[0] == "appr:inertcard01"
+          and _row(page, "appr:inertcard01").locator('[data-testid="inbox-card-note"]').inner_text()
+          == "On the card now: answer it there.")
+    check("the row is not a second card: no approval-card inside the inbox, nothing of the command shown",
+          page.evaluate("() => document.querySelectorAll('[data-testid=\"inbox-view\"] [data-testid=\"approval-card\"]').length") == 0
+          and "ls -la" not in _row(page, "appr:inertcard01").inner_text())
+    check("the whole inbox is inert under the card", page.evaluate(
+        "() => !!document.querySelector('[data-testid=\"inbox-view\"]').closest('[inert]')"))
+    check("and its buttons are disabled too", page.evaluate(
+        "() => [...document.querySelectorAll('[data-testid=\"inbox-view\"] button')].every(b => b.disabled)"))
+    posts = len(_answers(mock))
+    for sel in ('[data-testid="inbox-answer-send"]', '[data-testid="inbox-withdraw"]', '[data-testid="inbox-link"]',
+                '[data-testid="inbox-answer"]'):
+        loc = page.locator(f'[data-testid="inbox-view"] {sel}').first
+        box = loc.bounding_box()
+        if box:
+            page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+    page.evaluate("() => document.querySelector('[data-testid=\"inbox-answer\"]').focus()")
+    page.keyboard.type("calc.py")
+    page.keyboard.press("Enter")
+    time.sleep(0.4)
+    check("a trusted click on the inbox's controls and typing under the card post nothing",
+          len(_answers(mock)) == posts and _active(page) not in ("inbox-answer",) and cardloc.count() == 1,
+          f"{len(_answers(mock)) - posts} posts, focus {_active(page)}")
+    check("and the answer box got none of it",
+          page.locator('[data-testid="inbox-answer"]').first.input_value() == "")
+    page.keyboard.press("Escape")
+    until(lambda: cardloc.count() == 0, timeout=4)
+    _st(mock)["rows"] = [r for r in _st(mock)["rows"] if r["id"] != "appr:inertcard01"]
+    mock_inbox.changed(mock, ["appr:inertcard01"], "approval_resolved")
+    until(lambda: "appr:inertcard01" not in _row_ids(page), timeout=3)
+    check("once answered the inbox is live again and the row is gone", page.evaluate(
+        "() => !document.querySelector('[data-testid=\"inbox-view\"]').closest('[inert]')")
+        and "appr:inertcard01" not in _row_ids(page))
+
+    # A queued card: its row says so.
+    a, b = card("queuedcard1"), card("queuedcard2")
+    for c in (a, b):
+        mock.world["approvals"].append(c)
+        _st(mock)["rows"].insert(0, appr_row(c))
+        mock.emit("approval_requested", c)
+    mock_inbox.changed(mock, ["appr:queuedcard1", "appr:queuedcard2"], "approval_requested")
+    until(lambda: cardloc.count() == 1 and "appr:queuedcard2" in _row_ids(page), timeout=4)
+    check("a queued card's row says it is queued behind the one on screen",
+          "Queued" in _row(page, "appr:queuedcard2").locator('[data-testid="inbox-card-note"]').inner_text()
+          and cardloc.get_attribute("data-req") == "queuedcard1")
+    for req in ("queuedcard1", "queuedcard2"):
+        until(lambda: cardloc.count() == 1 and cardloc.get_attribute("data-req") == req, timeout=4)
+        page.locator("#authveil [data-testid=\"approval-deny\"]").click()
+        until(lambda: _approval_posts(mock, req), timeout=3)
+    until(lambda: cardloc.count() == 0, timeout=4)
+    _st(mock)["rows"] = [r for r in _st(mock)["rows"] if not r["id"].startswith("appr:")]
+    mock_inbox.changed(mock, [], "approval_resolved")
+
+    # A private (HUD-only) card: its private detail is fetched once, by the
+    # veil's card, and its row carries none of it.
+    req = "Pv0123456789"
+    p = {"req_id": req, "code": "PV01", "tool": "hud_browser_act", "layer": "browser-gate", "hud_only": True,
+         "thread_id": "t1", "asked_at": _iso(), "timeout_s": 120, "allowlistable": False, "args": {}, "command": None}
+    detail_path = f"/browser/approvals/{req}"
+    fetched = lambda: len([c for c in mock.calls if c[0] == "GET" and c[1] == detail_path])  # noqa: E731
+    before = fetched()
+    mock.world["approvals"].append(p)
+    _st(mock)["rows"].insert(0, appr_row(p))
+    mock_inbox.changed(mock, [f"appr:{req}"], "approval_requested")
+    mock.emit("approval_requested", p)
+    until(lambda: cardloc.count() == 1 and f"appr:{req}" in _row_ids(page), timeout=4)
+    time.sleep(0.6)
+    check("a private card is the veil's own Browser card, the only one",
+          cardloc.count() == 1 and "browserauth" in (cardloc.get_attribute("class") or "")
+          and page.evaluate("() => document.querySelectorAll('[data-testid=\"inbox-view\"] [data-testid=\"approval-card\"]').length") == 0)
+    check("its private detail is fetched once, by the veil's card, never by the inbox [mutation: a second card]",
+          fetched() - before == 1, str(fetched() - before))
+    row_text = _row(page, f"appr:{req}").inner_text()
+    check("its row shows the row's own fields only (no layer, code or command)",
+          "hud_browser_act waits for your approval in the HUD" in row_text and "PV01" not in row_text
+          and "browser-gate" not in row_text and _row(page, f"appr:{req}").locator('[data-testid="inbox-origin"]').count() == 0,
+          row_text)
+    page.locator("#authveil [data-testid=\"approval-deny\"]").click()
+    body = until(lambda: _approval_posts(mock, req) or None, timeout=3)
+    check("and DENY on it answers as it does in its own pane", bool(body) and body[-1].get("decision") == "deny",
+          str(body))
+    until(lambda: cardloc.count() == 0, timeout=4)
+
+
+def _badge_checks(browser, mock, check, until, guard, init_script, base):
+    for label, script in (("stubbed", BADGE_STUB), ("absent", NO_BADGE_API)):
+        ctx = browser.new_context(viewport={"width": 1600, "height": 900}, permissions=["microphone"])
+        guard(ctx)
+        ctx.add_init_script(init_script)
+        ctx.add_init_script(script)
+        page = ctx.new_page()
+        errors: list[str] = []
+        page.on("pageerror", lambda e: errors.append(str(e)))
+        try:
+            _reset(mock)
+            before = mock.sse_connections()
+            page.goto(base + "/")
+            page.wait_for_selector('[data-testid="sidebar"]', state="attached")
+            mock.await_reconnect(before)
+            until(lambda: _count(page) == "3", timeout=4)
+            if label == "stubbed":
+                badges = lambda: page.evaluate("window.__badges")  # noqa: E731
+                until(lambda: ["set", 3] in badges(), timeout=3)
+                check("the app badge is set to the count (ranks 1 to 5) [mutation: badge all ranks]",
+                      ["set", 3] in badges() and ["set", 4] not in badges(), str(badges()))
+                _reset(mock, [task_row("kf", "failed")])
+                mock_inbox.changed(mock)
+                until(lambda: badges() and badges()[-1] == ["clear"], timeout=3)
+                check("and cleared at 0 [mutation: no clear]", badges()[-1] == ["clear"], str(badges()))
+                n = len(badges())
+                mock_inbox.changed(mock)
+                time.sleep(0.5)
+                check("a re-read with the same count does not touch the badge again", len(badges()) == n,
+                      str(badges()))
+                # A read that fails clears a badge it had set (review of PR #305):
+                # an older daemon's 404, and a daemon error.
+                for fail in ((404, "route not found"), (500, "the daemon hit an error")):
+                    _reset(mock)
+                    mock_inbox.changed(mock)
+                    until(lambda: badges()[-1] == ["set", 3], timeout=3)
+                    _st(mock)["fail"] = fail
+                    mock_inbox.changed(mock)
+                    until(lambda: badges()[-1] == ["clear"], timeout=3)
+                    check(f"a failed read ({fail[0]}) clears the badge rather than leave a stale count "
+                          "[mutation: a stale badge]", badges()[-1] == ["clear"] and _count(page) is None,
+                          str(badges()[-3:]))
+                    _st(mock)["fail"] = None
+                check("the title stays J.A.R.V.I.S. while the badge moves", page.title() == TITLE, page.title())
+            else:
+                check("without the Badging API the inbox still counts and nothing throws",
+                      _count(page) == "3" and not errors, "; ".join(errors[:2]))
+        finally:
+            ctx.close()
+
+
+def _older_checks(page, mock, check, until):
+    _reset(mock)
+    _st(mock)["fail"] = (404, "route not found")
+    _fresh(page, mock, until, SINGLE)
+    page.locator('[data-testid="owner-inbox"]').click()
+    until(lambda: _view(page).count() == 1 and _view(page).get_attribute("data-status") == "unavailable", timeout=4)
+    check("an older daemon (404): the sidebar shows no count, never a zero", _count(page) is None)
+    check("and the view says the inbox is not available, never 'nothing waiting' [mutation: 404 read as empty]",
+          page.locator('[data-testid="inbox-unavailable"]').count() == 1
+          and page.locator('[data-testid="inbox-empty"]').count() == 0)
+    _st(mock)["fail"] = None
+
+
+# ---------------------------------------------------------------------------
+
+SECTIONS = (_sidebar_checks, _groups_checks, _live_checks, _answer_checks, _conflict_checks, _withdraw_checks,
+            _reconnect_checks, _clicks_checks, _hostile_checks, _card_checks, _older_checks)
+
+
+def inbox_checks(browser, mock, base, check, until, guard, init_script):
+    print("\nthe owner inbox (inbox A2)")
+    only = set(filter(None, (sys.argv[1] if len(sys.argv) > 1 and __name__ == "__main__" else "").split(",")))
+    ctx = browser.new_context(viewport={"width": 1600, "height": 900}, permissions=["microphone"])
+    guard(ctx)
+    ctx.add_init_script(init_script)
+    page = ctx.new_page()
+    errors: list[str] = []
+    page.on("pageerror", lambda e: errors.append(str(e)))
+    page.set_default_timeout(5000)
+    try:
+        before = mock.sse_connections()
+        _reset(mock)
+        page.goto(base + "/")
+        page.wait_for_selector('[data-testid="sidebar"]', state="attached")
+        mock.await_reconnect(before)
+        for section in SECTIONS:
+            if only and section.__name__.strip("_").removesuffix("_checks") not in only:
+                continue
+            try:
+                section(page, mock, check, until)
+            except Exception as e:  # a section that cannot run is a failure, and the rest still run
+                check(f"inbox {section.__name__.strip('_')} ran to the end", False, str(e).splitlines()[0][:200])
+                try:
+                    page.keyboard.press("Escape")
+                except Exception:
+                    pass
+        check("no page errors in the inbox section", not errors, "; ".join(errors[:3]))
+        check("the owner test refused nothing the HUD's own page asked", _st(mock)["refused"] == 0,
+              str(_st(mock)["refused"]))
+    finally:
+        ctx.close()
+    if not only or "badge" in only:
+        try:
+            _badge_checks(browser, mock, check, until, guard, init_script, base)
+        except Exception as e:
+            check("inbox badge ran to the end", False, str(e).splitlines()[0][:200])
+
+
+def main():
+    from playwright.sync_api import sync_playwright
+
+    from tests.face import hud_v2_check as H
+    from tests.face.hud_v2_mock import DIST, MockDaemon
+
+    if not (DIST / "index.html").exists():
+        print("hud/dist is not built. Run: cd hud && npm ci --ignore-scripts && npm run build")
+        return 2
+    mock = MockDaemon(0).start()
+    try:
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=True, args=["--use-fake-ui-for-media-stream",
+                                                              "--use-fake-device-for-media-stream"])
+            inbox_checks(browser, mock, f"http://127.0.0.1:{mock.port}", H.check, H.until, H.guard,
+                         H.FAKE_RECOGNIZER)
+            browser.close()
+    finally:
+        mock.stop()
+    print()
+    if H.FAILURES:
+        print(f"{len(H.FAILURES)} of {H.CHECKS} checks FAILED:")
+        for f in H.FAILURES:
+            print(f"  - {f}")
+        return 1
+    print(f"all {H.CHECKS} inbox checks passed")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

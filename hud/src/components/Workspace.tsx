@@ -276,7 +276,8 @@ export function Workspace(props: {
           const at = info(n);
           const ctx = at.split ? (spec.view === "terminal" ? terminalContext(spec) : props.context(spec, at)) : "";
           // The sub-agent view is never offered: only a pane showing one keeps its button (SV-3).
-          const views = PANE_VIEWS.filter((view) => (view === "subagent" ? spec.view === "subagent"
+          // Nor is the inbox (inbox A2): the sidebar's Inbox row opens it.
+          const views = PANE_VIEWS.filter((view) => (view === "subagent" || view === "inbox" ? spec.view === view
             : view !== "vex" || spec.view === "vex" || (at.drawn && !!props.offersVex?.(spec, at))));
           return (
             <section

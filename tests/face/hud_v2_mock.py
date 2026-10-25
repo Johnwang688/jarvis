@@ -65,6 +65,10 @@ try:  # a chat's native sub-agents (SV-1's owner routes, SV-3's view)
     from tests.face import hud_v2_mock_subagents as mock_subagents
 except ImportError:
     import hud_v2_mock_subagents as mock_subagents  # type: ignore[no-redef]
+try:  # the owner inbox (inbox A1's owner routes, A2's view)
+    from tests.face import hud_v2_mock_inbox as mock_inbox
+except ImportError:
+    import hud_v2_mock_inbox as mock_inbox  # type: ignore[no-redef]
 
 
 # -- chat-to-chat (C5): relay records exactly as C3's daemon writes them ------------------
@@ -847,6 +851,8 @@ class MockDaemon:
                 w = mock.world
                 if mock_subagents.handle(self, mock, "GET", path):
                     return
+                if mock_inbox.handle(self, mock, "GET", path):
+                    return
                 if mock_vex.handle(self, mock, "GET", path, {}):
                     return
                 if mock_projects.handle(self, mock, "GET", path, {}):
@@ -1089,6 +1095,8 @@ class MockDaemon:
                 path = url.path
                 w = mock.world
                 if mock_subagents.handle(self, mock, "POST", path):   # owner, then 405
+                    return
+                if mock_inbox.handle(self, mock, "POST", path):       # owner, then the answer
                     return
                 parts = [p for p in path.split("/") if p]
                 if (len(parts) == 5 and parts[0] == "threads" and parts[2] == "relays"

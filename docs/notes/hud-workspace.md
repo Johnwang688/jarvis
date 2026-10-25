@@ -1712,3 +1712,83 @@ few seconds. Speech skips every record marked `compaction: true`, as it skips
 `tests/face/hud_v2_compact_check.py` (also a `hud_v2_check` section). Mutations
 the tests catch: no confirm step, a double post (the yes button not closing the
 confirm, or no in-flight guard), and enabled under a card.
+
+## The owner inbox view (inbox A2, 2026-10-25)
+
+Design: `docs/plans/2026-10-24-owner-inbox-design.md` (IN-1, §7, §8); the
+routes are A1's (`jarvis/v2/inbox.py`; control-plane notes, "The owner inbox
+routes"). Not deployed: the owner's step is `jarvis hud rebuild` and a reload
+(the daemon half is A1's, already merged).
+
+- **Sidebar.** An `Inbox` button row above PROJECTS (`owner-inbox`; not the
+  "Inbox" project, where unplaced chat lands) with a count of ranks 1–5
+  (`owner-inbox-count`), amber while a rank 1–2 row waits, none while the
+  inbox cannot be read (an older daemon's 404 is never shown as zero). A
+  click is `showView("inbox")`: the pane already showing it, else the focused
+  pane, never a pane with an unsaved edit. It answers nothing.
+- **App badge.** After each read whose count changed, `lib/inbox` `setBadge`:
+  `navigator.setAppBadge(count)`, `clearAppBadge()` at 0 (else
+  `setAppBadge(0)`), feature-detected, every error swallowed. In a tab Chrome
+  ignores it; the installed app shows it. A read that fails (unavailable, an
+  error, a body that is not a list) clears it, as the sidebar then shows no
+  count (review of #305). `<title>` stays `J.A.R.V.I.S.`.
+- **The view** is `View` `"inbox"` (`lib/workspace.ts`), offered by a pane's
+  strip only while that pane shows it (as `subagent`); a split beside it is
+  a chat. Like every view but VEX, a reload puts chat back in the focused
+  pane. `components/InboxView.tsx` draws the rows (`lib/inbox` `parseInbox`:
+  malformed rows dropped, rank order, the daemon's order within a rank)
+  under "Waiting now" (1–2), "Waiting on you" (3–5), "When you have time"
+  (6–7) and "For your information" (8), empty groups hidden. Questions have
+  an answer box (Answer, or Enter; read-only while its post is on its way),
+  proposals Withdraw **for as long as the row is in the daemon's
+  projection**, task rows are information only,
+  and each row has an "Open its chat"/"Open its task" link (thread first,
+  else task). **No handler on a row**: only Answer, Enter and Withdraw post,
+  once per press, through `POST /inbox/<encodeURIComponent(id)>/answer`
+  (`api.answerInbox`). A 409 shows "Already answered or gone." and every
+  answer, refused or not, reads the inbox again.
+- **Withdraw's window is the daemon's** (review of #305, MED 1).
+  `withdraw_until` is the daemon's clock; comparing it with the browser's
+  hid Withdraw while the window was open when the daemon ran behind (WSL2
+  after the host slept). The browser's clock is a hint only (`lib/inbox`
+  `withdrawHint`): "closing" from `CLOSING_MS` (15 s) before the end, past
+  it included (a dashed button and "a Withdraw now may come too late"),
+  else "open"; nothing says the window has closed. A press after it closed
+  is the daemon's 409. The face check runs the daemon 90 s behind and 90 s
+  ahead.
+- **An approval row is not a second card.** The card is `ApprovalVeil`'s,
+  unchanged; whenever the inbox holds an approval the window holds its card,
+  so the veil is up and the inbox is inert behind it. The row says "On the
+  card now", "Queued" or (the HUD missed the card) "reload to see it", with
+  its deny time, from the row's own code-built fields; never the command,
+  never a private card's detail. A second mounted `ApprovalCard` was tried as
+  a mutation and breaks the veil: the veil's Tab handler looks up the first
+  `approval-card` in the document (`Approvals.tsx`, unscoped) and finds the
+  inbox's inert copy, so Tab no longer lands on the veil's DENY; the copy also
+  chimes again, counts down from its own mount, and a HUD-only card's copy
+  fetches the private detail outside the veil.
+- **Live.** `state/inbox.ts` reads `GET /inbox` at boot, on every
+  `_connected`, on every `inbox_changed` (whatever its `ids`), when the view
+  mounts and after each answer: one read at a time, one more after it if
+  anything asked meanwhile.
+- **Untrusted text.** `origin`, every `detail` field and question text are
+  React text only (`oneLine`/`textBlock` drop format characters; lines kept
+  in question text and briefs). Under a card the view is inert (the veil),
+  every button is disabled too and the handlers refuse.
+- **Graphite.** Amber for rank 1–2 rows and the pending count, red for a
+  failed task, glacier cyan only for the selected row bar and focus rings.
+- Tests: `lib/inbox.test.ts`, `state/inbox.test.ts`,
+  `components/InboxView.test.ts`, the `lib/workspace.test.ts` inbox case, and
+  `tests/face/hud_v2_inbox_check.py` (86 checks, its own `MockDaemon(0)`, the
+  routes in `hud_v2_mock_inbox.py`, also a `hud_v2_check` section). Its card
+  section runs the card's assertions twice, with a chat pane and with the
+  Inbox open, and requires the same answers. Mutations caught: a second
+  card, a row `onClick`, `dangerouslySetInnerHTML` on `origin`, counting all
+  ranks, no re-read on 409, controls live under a card, Withdraw gated on the
+  browser's clock, no re-read on `_connected` (the reconnect section drops
+  the stream and changes the rows with no event), and a badge left after a
+  failed read.
+- **Follow-up (pre-existing, not this package):** the HUD reads `GET
+  /approvals` only at boot, so a card asked while the event stream was down
+  is missed until a reload; re-read it on reconnect and merge it into the
+  veil. The inbox's "reload to see it" row already says so.

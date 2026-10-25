@@ -378,11 +378,27 @@ describe("the rename: Preview is the Browser, File reads as the editor (BR-3a)",
     expect(Object.keys(VIEW_LABEL).sort()).toEqual([...PANE_VIEWS].sort());
     expect(VIEW_LABEL).toEqual({
       chat: "chat", task: "task", file: "editor", diff: "diff", browser: "browser", terminal: "terminal", vex: "vex",
-      subagent: "sub-agent" });
+      subagent: "sub-agent", inbox: "inbox" });
     const labels = Object.values(VIEW_LABEL);
     expect(new Set(labels).size).toBe(labels.length);
     expect(labels).not.toContain("file");
     expect(labels).not.toContain("preview");
+  });
+
+  it("the inbox view (inbox A2): stored and read back, shown by `show`, and a split beside it is a chat", () => {
+    const mem = memory();
+    let w = setView(defaultWorkspace(), 1, "inbox");
+    expect(w.panes[0].view).toBe("inbox");
+    saveWorkspace(w, mem);
+    expect(loadWorkspace(mem).panes[0].view).toBe("inbox");
+    expect(copySpec(w.panes[0]).view).toBe("chat");
+    // The sidebar's row: a drawn inbox pane is focused, else the focused pane shows it.
+    w = setView(defaultWorkspace(), 1, "chat");
+    expect(show(w, "inbox", [1]).panes[0].view).toBe("inbox");
+    const two = setView(setPreset(defaultWorkspace(), "cols2"), 2, "inbox");
+    const shown = show(focusPane(two, 1), "inbox", orderOf(two));
+    expect(shown.focused).toBe(2);
+    expect(shown.panes[0].view).toBe(two.panes[0].view);
   });
 
   it("resets the layout without forgetting what each pane showed", () => {

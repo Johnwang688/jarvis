@@ -152,6 +152,9 @@ import { compactFor } from "./lib/compact";
 import { bypassFor } from "./lib/bypass";
 import { RELAY_KINDS, waitingLine, type RelayEvent } from "./lib/relays";
 import { thinkingClock } from "./components/MiniOrb";
+import { InboxView } from "./components/InboxView";
+import { inbox, useInbox } from "./state/inbox";
+import { anyPending, waitingCount } from "./lib/inbox";
 
 const PROPOSAL_WINDOW_MS = 60_000;
 /** How many of this window's steered or queued messages it remembers, to hand
@@ -262,6 +265,9 @@ export default function App() {
   // A sub-agent's Stop (SV-4) is disabled and sends nothing under a card:
   // set before paint, so no frame offers it under one.
   useLayoutEffect(() => { subagents.setBlocked(blocked); }, [blocked]);
+  // The owner inbox (inbox A2): the daemon's ranked rows, read again on
+  // `inbox_changed` (state/inbox.ts).
+  const inboxSnap = useInbox();
   const [settingsOpen, setSettingsOpen] = useState(false);
   // Chat-to-chat (C5): who sent each message still waiting to start, heard
   // from its `relay_out` (whose data names only the target): message id ->
@@ -1715,6 +1721,11 @@ export default function App() {
         case "approval_resolved":
           dispatch({ type: "approval_drop", req_id: data.req_id });
           break;
+        case "inbox_changed":
+          // `{ids, reason}`, never text: whatever it names, the rows are the
+          // daemon's projection, so the inbox is read again (state/inbox.ts).
+          void inbox.refresh();
+          break;
         case "proposal_reply":
           // A proposal is a system line with a 60-second cancel: the fast path
           // has already answered and a task is about to run. Only in the
@@ -1848,6 +1859,8 @@ export default function App() {
           break;
         case "_connected":
           void refreshActivity();
+          // An `inbox_changed` published while the stream was down is gone.
+          void inbox.refresh();
           break;
         case "terminal_attached":
           // `{terminal_id, at}` only: the terminals say so when it was not
@@ -3021,6 +3034,7 @@ export default function App() {
         placeChat(pane);
       }
       void refreshActivity();
+      void inbox.refresh();
       const [usage, schedules, route, approvals, discord] = await Promise.all([
         api.usage().catch(() => null),
         api.schedules().catch(() => []),
@@ -4116,6 +4130,25 @@ export default function App() {
           />
         );
       }
+      case "inbox":
+        // The owner inbox (inbox A2). An approval's card stays the veil's own
+        // (components/InboxView.tsx says why); a link opens a thread as the
+        // sidebar does, a task as the sidebar's task row does.
+        return (
+          <InboxView
+            snapshot={inboxSnap}
+            approvals={state.approvals}
+            blocked={blocked}
+            onOpenThread={(id) => { if (!blockedNow.current) pickThread(id); }}
+            onOpenTask={(id) => {
+              if (blockedNow.current) return;
+              patch({ taskId: id, taskFocus: true });
+              showView("task");
+            }}
+            onAnswer={(id, body) => api.answerInbox(id, body)}
+            onReread={() => inbox.refresh()}
+          />
+        );
       case "vex": {
         // Its pinned project (pinned when the pane switched to it), else the chat's.
         const pid = stripProject(state, spec, n);
@@ -4440,6 +4473,8 @@ export default function App() {
       }
       case "browser":
         return spec.browserUrl || "";
+      case "inbox":
+        return "Inbox";
       default:
         return "";
     }
@@ -4492,6 +4527,17 @@ export default function App() {
       setEditingSchedule(null);
       patch({ picker: "schedule" });
     },
+    // The owner inbox's row (inbox A2): the pane already showing the inbox,
+    // else the focused pane (lib/workspace `show`), never a pane with an unsaved edit.
+    onOpenInbox: () => {
+      if (blockedNow.current) return;
+      showView("inbox");
+    },
+  });
+  const sidebarInbox = useStableValue({
+    count: inboxSnap.status === "ready" ? waitingCount(inboxSnap.rows) : null,
+    pending: inboxSnap.status === "ready" && anyPending(inboxSnap.rows),
+    shown: fit.panes.some((n) => ws.panes[n - 1].view === "inbox"),
   });
 
   return (
@@ -4549,6 +4595,8 @@ export default function App() {
           onRenameThread={sidebarCalls.onRenameThread}
           onArchiveThread={sidebarCalls.onArchiveThread}
           onOpen={sidebarCalls.onOpen}
+          inbox={sidebarInbox}
+          onOpenInbox={sidebarCalls.onOpenInbox}
         />
         {drawn.leftFolded ? null : (
           <Splitter
