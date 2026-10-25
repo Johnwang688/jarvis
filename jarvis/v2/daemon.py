@@ -189,10 +189,12 @@ def _log_fields(data) -> dict:
     for key in LOGGED_REDACTED:
         if key in data:
             try:
+                # A tool's arguments are judged by their own keys (a command's
+                # argv as the command it is: review of #314, B1); a `command`
+                # or `cmd` field as a command; `reason` and `headline` as text.
                 extra = redact.CardPass()
-                hidden = redact.map_strings({key: data[key]}, extra.hide, command=False)[key]
-                out[key] = redact.map_strings({key: v1_secrets.redact_value(hidden)}, extra.show,
-                                              command=False)[key]
+                hidden = redact.map_field(key, data[key], extra.hide)
+                out[key] = redact.map_field(key, v1_secrets.redact_value(hidden), extra.show)
             except Exception:  # noqa: BLE001
                 out[key] = "[withheld: could not be judged]"
     return out

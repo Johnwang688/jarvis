@@ -196,10 +196,10 @@ class BlockChecks(Base):
         legacy = "Proc-Type: 4,ENCRYPTED\nDEK-Info: AES-128-CBC,00112233445566778899AABBCCDDEEFF\n"
         self.assertWhole("prose here\n" + legacy + body + "\n" + tail, "prose here\n" + R)
         # CRLF, and the body glued to the footer on its last line.
-        # (`secrets.scrub` rejoins lines with LF, as it always has; the block
-        # pass itself keeps a CR, checked on `private_key_blocks` directly.)
+        # (Since the review of #314, S4, the scrub keeps the text's own line
+        # endings: `secrets.scrub`'s LF-joined lines are put back with them.)
         crlf = (body + "\n" + tail).replace("\n", "\r\n")
-        self.assertWhole("words here\r\n" + crlf + AFTER, "words here\n" + R + AFTER)
+        self.assertWhole("words here\r\n" + crlf + AFTER, "words here\r\n" + R + AFTER)
         self.assertEqual(redact.private_key_blocks("words here\r\n" + crlf + "\r\nbye"),
                          "words here\r\n" + R + "\r\nbye")
         glued = body + tail
@@ -339,7 +339,9 @@ class TightenOnly(Base):
             if any(p.search(text) for n, p in credential_patterns.PATTERNS if n in names):
                 continue
             compared += 1
-            old, new = old_scrub(text), scrubbed(text)
+            # Lines compared as `secrets.scrub` joins them: the scrub now keeps
+            # the text's own line endings (review of #314, S4).
+            old, new = old_scrub(text), "\n".join(scrubbed(text).splitlines())
             if new != old:
                 differs += 1
                 self.assertOnlyMoreHidden(old, new, text)

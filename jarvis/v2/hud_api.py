@@ -900,12 +900,15 @@ def _refresh_codex_metadata(daemon) -> None:
 def _scrub_source(text):
     """The Diff tab's text (a patch, a file's before and after) as the owner
     reads it: the display scrub (`redact.for_display`: Jarvis's credential
-    values, every credential shape, the value after a credential's label).
-    The v1 scrub at its core joins lines and drops the final newline; it is
-    restored so the diff editor does not invent a missing-newline change.
-    Display only: diff review's model input takes `redact.for_model`."""
+    values, every credential shape, the value after a credential's label),
+    byte for byte outside what it withholds. Should the v1 scrub at its core
+    have dropped the final newline (it does when it withholds a protected
+    file's line), it is restored so the diff editor does not invent a
+    missing-newline change. Display only: diff review's model input takes
+    `redact.for_model`."""
     from .redact import for_display
-    return for_display(text) + ("\n" if text.endswith("\n") else "")
+    out = for_display(text)
+    return out + "\n" if text.endswith("\n") and not out.endswith("\n") else out
 
 
 def _git(root, *args):
@@ -973,9 +976,13 @@ def diff(daemon, task, name=None):
         return {"before": _scrub_source(before), "after": _scrub_source(after)}
     base, head, files, patches = _diff_parts(daemon, task, context=(root, base, ancestor, head, project),
                                               rows=rows, allowed=allowed)
-    encoded = _scrub_source("".join(patches)).encode()
-    result = dict(base=base, head=head, files=files, patch=encoded[:PATCH_CAP].decode("utf-8", errors="ignore"))
-    if len(encoded) > PATCH_CAP:
+    # Capped before it is scrubbed, never a token cut in two at the cap
+    # (`redact.for_display_capped`; review of #314, S2: a 5 MB patch was
+    # scrubbed whole to show 1 MB of it).
+    from .redact import for_display_capped
+    patch, truncated = for_display_capped("".join(patches), PATCH_CAP)
+    result = dict(base=base, head=head, files=files, patch=patch)
+    if truncated:
         result["truncated"] = True
     return result
 

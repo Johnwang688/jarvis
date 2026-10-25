@@ -1,42 +1,54 @@
 """One scrub for model-written text bound for a surface (SV-2 review, 2026-10-15;
-hardened 2026-10-25, "Scrubbing: stronger shared credential shapes").
+hardened 2026-10-25, "Scrubbing: stronger shared credential shapes"; review
+of #314).
 
-Two entry points, because two kinds of reader get this text:
+Three readers, three entry points:
 
-- **`for_model(text)`** (alias `scrub_text`) — text an agent will read: a chat
-  relay's body and reply, a chat git tool's output, a sub-agent's words, a
-  Codex compaction reason, diff review's input. It withholds Jarvis's own
-  credential values (`secrets.scrub`) and every **high-confidence credential
-  shape** (`shapes`), and nothing else: a model must be able to read ordinary
-  code as written, so no heuristic about what follows a label runs here
-  (review of PR #308: `api_key=settings.API_KEY` must reach a model intact).
-- **`for_display(text)`** — text the owner reads (the desk's Diff tab, the
+- **`for_model(text)`** (alias `scrub_text`): text an agent will read on a
+  path that ran main's `scrub_text` (a chat relay's body and reply, a chat
+  git tool's output, a sub-agent's words, a compaction reason, another
+  chat's rows). It withholds Jarvis's own credential values (`secrets.scrub`),
+  every **high-confidence credential shape** (`SHAPES` and the rules below)
+  and main's two legacy patterns (`HEURISTIC`, so nothing main withheld there
+  is shown), and nothing else: a model must read ordinary code as written,
+  so no rule about what follows a label runs here (review of PR #308:
+  `api_key=settings.API_KEY` reaches a model intact).
+- **`for_model_strict(text)`**: a model's input main gave no shape scrub
+  (diff review's input): the high-confidence shapes only.
+- **`for_display(text)`**: text the owner reads (the desk's Diff tab, the
   transcript through `chat_reads.scrub`, the Discord mirror and reporter):
-  `for_model`, then `labelled_values`, the phone's tuned rule for a value
-  written after a credential's label (`password: …`, `client_secret: …`).
+  everything above, a URL password at any host, then `labelled_values`, the
+  phone's tuned rule for a value written after a credential's label
+  (`password: …`, `client_secret: …`).
 
-`shapes` is one table (`SHAPES`) plus a few rules that need more than a
-regular expression: a private key's whole block (`private_key_spans`, SEC-5),
-a `Bearer`/`Basic` credential, a URL's password, an AWS secret key beside or
-labelled as one. Every withheld span becomes `[withheld: <kind>]`, so the
-reader knows something was there and what kind of thing it was.
+The rules beyond the table: a private key's whole block (`private_key_spans`,
+SEC-5), a `Bearer`/`Basic` credential, a URL's password (a model's input
+keeps a local or test host's: `http://u:p@localhost:5173/`), an AWS secret
+key beside or labelled as one, a lower-case `sk`/`oat`/`rt` bearer with a
+random run, a Discord token whose first part decodes to an id. Every
+withheld span becomes `[withheld: <kind>]`, so the reader knows something
+was there and what kind of thing it was.
 
-Matching runs on **normalized views** of the text, never on the text shown
-(`_View`): fullwidth forms folded to ASCII; zero-width, bidi, soft-hyphen,
-control, private-use and combining characters dropped (and, in a second
-view, read as a space); unusual spaces (NBSP, U+2028, U+0085, the Unicode
-spaces) read as a space, and in a third view dropped, so a token split by
-one is whole again; and a prefixed token split across an ordinary space,
-tab or newline is joined when what follows the break looks random
-(`_split_spans`). A span found in a view is mapped back and withheld in the
-original; everything else comes back byte for byte (`for_model`'s output
-differs from its input only inside withheld spans and where `secrets.scrub`
-acts).
+Matching runs on a **normalized view** of the text, never on the text shown
+(`_View`): fullwidth forms folded to ASCII, combining marks dropped, and an
+invisible or unusual-space character (zero-width, bidi, soft hyphen, NBSP,
+U+2028, U+0085 …) dropped where it sits inside a token (what follows reads
+as more of one, or the join completes one) and read as a space where it does
+not, so a token never swallows the word after it. A prefixed token split
+across an ordinary space, tab or newline is joined when what follows looks
+random (`_split_spans`; after a whole token only a newline is crossed, so a
+wrapped key's tail goes with it). A span found in the view is mapped back
+and withheld in the original. **Everything else comes back byte for byte**:
+`secrets.scrub` rejoins lines with `\\n`, and its lines are put back with the
+original's own endings (`_known_values`), so CRLF, a final newline, U+2028
+and `\\x0b` survive; only where it drops a protected file's line does its
+own output stand.
 
-An approval card is a third reader (`card_spans`, `CardPass`): the display
+An approval card is a fourth reader (`card_spans`, `CardPass`): the display
 scrub's spans, found on the text as typed and held through
 `secrets.redact_command`, within the owner's condition that a withheld span
-never hides code that runs.
+never hides code that runs. Every string beside a command or argv key is a
+command's (`map_strings`).
 
 `bearerish`, `TOKENISH`, `JWTISH`, `JMCPISH` and `private_key_blocks` stay
 for their existing callers (`claude._safe`, `secrets._key_blocks`).
@@ -190,11 +202,22 @@ _E = r"(?![A-Za-z0-9_\-])"
 
 KEY = "private key"
 
-# (kind, pattern). Each is a prefix or framing nobody types by accident; the
-# order is the order a kind is named when two spans overlap (the earlier
-# start wins, then the longer span). `credential_patterns.PATTERNS` (the
-# terminal read's refusal list) is a subset in spirit; it is SELF_PROTECTED
-# and decides refusals, so the display and model scrub keep their own table.
+# The three readers a scrub serves (review of #314, S5):
+# - STRICT: a model's input that had no shape scrub on main (diff review's
+#   input): the high-confidence shapes only;
+# - MODEL: a model's input that ran main's `scrub_text` (chat relays, chat
+#   git output, sub-agent words, compaction reasons, another chat's rows):
+#   the high-confidence shapes and main's two legacy patterns (`HEURISTIC`),
+#   so nothing main withheld there is shown;
+# - DISPLAY: what the owner reads: all of it, a URL password at any host.
+STRICT, MODEL, DISPLAY = "strict", "model", "display"
+
+# (kind, pattern): the **high-confidence** shapes, withheld wherever text
+# goes, a model's input included. Each is a prefix or framing nobody types by
+# accident; the order is the order a kind is named when two spans overlap
+# (the earlier start wins, then the longer span). `credential_patterns.PATTERNS`
+# (the terminal read's refusal list, SELF_PROTECTED) is a subset in spirit; it
+# decides refusals, so the scrub keeps its own table.
 SHAPES: tuple[tuple[str, re.Pattern], ...] = tuple(
     (kind, re.compile(pattern)) for kind, pattern in (
         ("Anthropic key", _B + r"sk-ant-[A-Za-z0-9_\-]{20,}"),
@@ -215,24 +238,44 @@ SHAPES: tuple[tuple[str, re.Pattern], ...] = tuple(
         ("npm token", _B + r"npm_[A-Za-z0-9]{36}" + _E),
         ("GitLab token", _B + r"glpat-[A-Za-z0-9_\-]{20,}"),
         ("PyPI token", _B + r"pypi-AgE[A-Za-z0-9_\-]{50,}"),
-        ("Discord bot token", _B + r"[MNO][A-Za-z0-9_\-]{23,27}\.[A-Za-z0-9_\-]{6}\.[A-Za-z0-9_\-]{27,}"),
         ("Jarvis caller token", r"jmcp_[A-Za-z0-9_\-]{8,}"),
-        # Claude's provider's own bearer shapes (`claude._safe`): an OAuth or
-        # API bearer (`sk-`/`oat`/`rt` + 12), whatever the case.
-        ("token", r"(?i)\b(?:sk|oat|rt)[-_][A-Za-z0-9_\-]{12,}"),
         # A private key's header or footer on its own (the block rule takes
         # the whole block first; this is what is left of a stray one).
         (KEY, r"-----(?:BEGIN|END) (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-----"),
     )
 )
+# The **heuristic** shapes: what main's shared scrub (`scrub_text`) already
+# withheld with a looser pattern than a credential's (Claude's provider's
+# `sk`/`oat`/`rt` + 12 in any case; `credential_patterns`' Discord bot
+# token, which any long dotted identifier fits:
+# `ModelConfigurationRegistry.values.get_…()`). Kept on DISPLAY and on the
+# MODEL paths main ran them on (never less than main withheld there); not
+# on STRICT, where `sk_buff_alloc_head`, `rt_mutex_lock_interruptible`
+# and `SK_ColorTRANSPARENT_BLACK` reach the model as the code they are
+# (review of #314, S5). The tightened versions below run on every path.
+HEURISTIC: tuple[tuple[str, re.Pattern], ...] = (
+    ("token", re.compile(r"(?i)\b(?:sk|oat|rt)[-_][A-Za-z0-9_\-]{12,}")),
+    ("Discord bot token", re.compile(
+        _B + r"[MNO][A-Za-z0-9_\-]{23,27}\.[A-Za-z0-9_\-]{6}\.[A-Za-z0-9_\-]{27,}")),
+)
+# The tightened versions, on every path. A bearer (`sk-`, `sk_`, `oat_`,
+# `rt_` in lower case) whose body holds a run of 12 letters and digits that
+# reads as random (a digit and a letter, or both cases); a Discord token whose
+# first part decodes to the bot's numeric id.
+_TOKEN = re.compile(_B + r"(?:sk|oat|rt)[-_]([A-Za-z0-9_\-]{12,})")
+_RUN12 = re.compile(r"[A-Za-z0-9]{12,}")
+_DISCORD = re.compile(_B + r"([MNO][A-Za-z0-9_\-]{23,27})\.[A-Za-z0-9_\-]{6}\.[A-Za-z0-9_\-]{27,}")
 # The kinds whose pattern starts with a fixed prefix: a token split across a
-# break is joined and tried against these (`_split_spans`).
-_PREFIXED = tuple((kind, p) for kind, p in SHAPES if kind not in ("AWS access key id", KEY, "Discord bot token"))
+# break is joined and tried against these (`_split_spans`, `_joins`).
+_PREFIXED = tuple((kind, p) for kind, p in SHAPES if kind != KEY)
+_PREFIXES = (r"sk-|gh[pousr]_|github_pat_|xox[abeprs]-|xapp-|AIza|(?:sk|rk)_(?:live|test)_|eyJ|hf_|npm_"
+             r"|glpat-|pypi-|jmcp_|IQoJb3JpZ2lu|FwoGZXIvYXdz|FQoGZXIvYXdz|AKIA|ASIA|ABIA|ACCA")
 _SPLIT_PREFIX = re.compile(
-    _B + r"(?:sk-|gh[pousr]_|github_pat_|xox[abeprs]-|xapp-|AIza|(?:sk|rk)_(?:live|test)_|eyJ|hf_|npm_"
-    r"|glpat-|pypi-|jmcp_|IQoJb3JpZ2lu|FwoGZXIvYXdz|FQoGZXIvYXdz)"
-    r"[A-Za-z0-9_\-./+=]*(?:(?:\r?\n|[ \t])[A-Za-z0-9_\-./+=]+){1,8}")
+    _B + r"(?:" + _PREFIXES + r")[A-Za-z0-9_\-./+=]*(?:(?:\r?\n|[ \t])[A-Za-z0-9_\-./+=]+){1,8}")
 _SPLIT_BREAK = re.compile(r"(\r?\n|[ \t])")
+# Any prefix a prefixed shape starts with: a cheap first look before trying
+# every pattern on a run.
+_ANY_PREFIX = re.compile(_PREFIXES)
 _DIGIT = re.compile(r"[0-9]")
 
 # `Authorization: Bearer <token>` (and any `Bearer <token>` in prose or a
@@ -245,18 +288,26 @@ _BEARER = re.compile(r"(?i)(?<![A-Za-z0-9_])bearer[ \t]+([A-Za-z0-9\-._~+/]{16,}
 _BASIC = re.compile(r"(?i)(?<![A-Za-z0-9_])basic[ \t]+([A-Za-z0-9+/]{8,}={0,2})(?![A-Za-z0-9+/=])")
 # A URL's userinfo (`scheme://user:password@host`): the password goes, the
 # user stays. A template or placeholder stays (`${DB_PASSWORD}`, `<pw>`,
-# `%(password)s`, `****`, `password`).
+# `%(password)s`, `****`, `…`, `password`). On a model's input a local or
+# test host stays too (`http://u:p@localhost:5173/` in a fixture is code), and
+# so does a one- or two-letter example (`http://u:p@[a]/` in a comment).
 _URL_SCHEME = re.compile(r"[A-Za-z][A-Za-z0-9+.\-]{0,31}\Z")
 _USERINFO = re.compile(r"([^\s:/?#@'\"<>`\[\]{}]*):([^\s/?#@'\"<>`]+)@")
 _TOKEN_USERINFO = re.compile(r"([A-Za-z0-9_\-.~]{20,})@")
-_PLACEHOLDER = re.compile(r"(?i)[$%{<*]|\A(?:x+|\*+|•+|pass(?:word|wd)?|pwd?|secret|token|changeme)\Z")
+_PLACEHOLDER = re.compile(r"(?i)[$%{<*…]|\.\.\.|\A(?:x+|\*+|•+|pass(?:word|wd)?|pwd?|secret|token|changeme)\Z")
+_HOST = re.compile(r"\[([0-9A-Fa-f:.]*)\]|([A-Za-z0-9.\-]*)")
+_LOCAL_HOST = re.compile(r"(?i)\A(?:localhost|127(?:\.\d+){3}|0\.0\.0\.0|::1"
+                         r"|.*\.(?:localhost|local|test|example|invalid)"
+                         r"|(?:.*\.)?example\.(?:com|org|net))\Z")
 # AWS: a secret access key is 40 characters of base64 with both cases. It
 # goes when a label names it, or when an access key id is near it.
 # (Not preceded by base64: `=` may precede, as in `AWS_SECRET_ACCESS_KEY=…`.)
 _AWS_SECRET = r"(?<![A-Za-z0-9/+])([A-Za-z0-9/+]{40})(?![A-Za-z0-9/+=])"
+# (Each branch starts with a literal, so the scan of a long text is fast; only
+# the value after the label is ever withheld.)
 _AWS_LABELLED = re.compile(
-    r"(?i)(?<![A-Za-z0-9])(?:aws[_\-. ]?)?secret[_\-. ]?access[_\-. ]?key(?:[_\-. ]?id)?"
-    r"|(?<![A-Za-z0-9])aws[_\-. ]?secret(?:[_\-. ]?key)?")
+    r"(?i)aws[_\-. ]?secret[_\-. ]?access[_\-. ]?key(?:[_\-. ]?id)?"
+    r"|secret[_\-. ]?access[_\-. ]?key(?:[_\-. ]?id)?|aws[_\-. ]?secret(?:[_\-. ]?key)?")
 _AWS_LABEL_VALUE = re.compile(r"[\"']?[ \t]*[:=][ \t]*[\"']?" + _AWS_SECRET)
 _AWS_NEAR = re.compile(_AWS_SECRET)
 _AWS_BEFORE, _AWS_AFTER = 200, 400
@@ -289,12 +340,14 @@ _SPECIAL = re.compile(
     "\u17b4\u17b5\u180b-\u180f\u1ab0-\u1aff\u1dc0-\u1dff\u2000-\u200f\u2028-\u202f\u205f-\u206f"
     "\u20d0-\u20ff\u3000\u3164\ue000-\uf8ff\ufe00-\ufe0f\ufe20-\ufe2f\ufeff\uff01-\uff5e\uffa0"
     "\ufff0-\ufffb\U0001d173-\U0001d17a\U0001d400-\U0001d7ff\U000e0000-\U000e0fff]")
+_TOKEN_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-./+=")
+_MARKS = ("Mn", "Me")
 
 
 @lru_cache(maxsize=4096)
 def _fold(ch: str) -> str | None:
-    """What the view holds for `ch`: None (as it is), "" (dropped) or a
-    replacement."""
+    """What the view holds for `ch`: None (as it is), "" (dropped), " " (a
+    break) or a replacement."""
     code = ord(ch)
     if 0xFF01 <= code <= 0xFF5E:
         return chr(code - 0xFEE0)                   # fullwidth ASCII
@@ -309,17 +362,75 @@ def _fold(ch: str) -> str | None:
     return None
 
 
+def _as_token(ch: str) -> str | None:
+    """`ch` as a token character of the view ("" for a combining mark, which
+    a token carries through), or None where a token's run ends."""
+    if ch in _TOKEN_CHARS:
+        return ch
+    if ch.isascii():
+        return None
+    if unicodedata.category(ch) in _MARKS:
+        return ""
+    folded = _fold(ch)
+    return folded if folded and folded in _TOKEN_CHARS else None
+
+
+def _run(text: str, i: int, step: int, limit: int) -> str:
+    """The token run beside `text[i]` (after it for step 1, before it for
+    -1), folded, up to `limit` characters."""
+    out, j = [], i + step
+    while 0 <= j < len(text) and len(out) < limit:
+        c = _as_token(text[j])
+        if c is None:
+            break
+        out.append(c)
+        j += step
+    return "".join(out if step > 0 else reversed(out))
+
+
+def _ends_whole(run: str) -> bool:
+    """Does a prefixed shape match `run` up to its end?"""
+    return _ANY_PREFIX.search(run) is not None and any(
+        m.end() == len(run) for _k, p in _PREFIXED for m in p.finditer(run))
+
+
+def _starts_whole(run: str) -> bool:
+    """Is `run` a whole prefixed token from its start?"""
+    return _ANY_PREFIX.match(run) is not None and any(p.match(run) for _k, p in _PREFIXED)
+
+
+def _completes(before: str, after: str) -> bool:
+    """Does joining `before` and `after` make a prefixed shape that crosses
+    the join, where `before` held no whole one at its end?"""
+    joined = before + after
+    if _ANY_PREFIX.search(joined) is None:
+        return False
+    return not _ends_whole(before) and any(
+        m.start() < len(before) < m.end() for _k, p in _PREFIXED for m in p.finditer(joined))
+
+
+def _joins(text: str, i: int) -> bool:
+    """Is the invisible or unusual-space character at `i` inside a token, so
+    the view drops it: what follows reads as more of a token (`_random_chunk`)
+    and does not start a whole one of its own, or the join completes a shape
+    the run before it was not already. Otherwise it is a break (so a token
+    never swallows the word after it: `ghp_…<NBSP>and more`)."""
+    after = _run(text, i, 1, 64)
+    if not after or _starts_whole(after):
+        return False
+    if _random_chunk(after):
+        return True
+    return _completes(_run(text, i, -1, 256), after)
+
+
 class _View:
-    """`text` as the shapes read it, and the way back to `text`.
+    """`text` as the shapes read it, and the way back to `text`: fullwidth
+    folded, combining marks dropped, and each invisible or unusual-space
+    character dropped when it sits inside a token (`_joins`) or read as a
+    space when it does not. Ordinary spaces, tabs and newlines are never in
+    `_SPECIAL`, so they always stay (`_split_spans` joins across those)."""
 
-    `spaced`: a dropped character is read as a space (so it still separates
-    a word from a token) rather than as nothing (so it no longer splits one).
-    `joined`: an unusual space (NBSP, U+2028, U+0085, a Unicode space, a
-    vertical tab) is dropped rather than read as a space, so a token split
-    by one is whole again wherever the split is. Ordinary spaces, tabs and
-    newlines are never in the class, so they always stay (`_split_spans`)."""
-
-    def __init__(self, text: str, spaced: bool = False, joined: bool = False):
+    def __init__(self, text: str):
         self.text, self.marks, self.views = text, None, None
         pieces, at, last, vpos = [], [], 0, 0
         for match in _SPECIAL.finditer(text):
@@ -327,10 +438,8 @@ class _View:
             rep = _fold(text[i])
             if rep is None:
                 continue
-            if rep == " " and joined:
-                rep = ""
-            elif rep == "" and spaced:
-                rep = " "
+            if rep == " " or (rep == "" and unicodedata.category(text[i]) not in _MARKS):
+                rep = "" if _joins(text, i) else " "
             pieces.append(text[last:i])
             vpos += i - last
             if rep:
@@ -354,18 +463,54 @@ class _View:
         return v if k < 0 else self.marks[k] + (v - self.views[k])
 
     def span(self, a: int, b: int) -> tuple[int, int]:
-        """The original span of the view's [a, b)."""
+        """The original span of the view's [a, b), with any combining mark
+        right after it (a mark on the token's last letter goes with it)."""
         if b <= a:
             return self._at(a), self._at(a)
-        return self._at(a), self._at(b - 1) + 1
+        start, end = self._at(a), self._at(b - 1) + 1
+        text = self.text
+        while end < len(text) and not text[end].isascii() and unicodedata.category(text[end]) in _MARKS:
+            end += 1
+        return start, end
 
 
-def _shape_spans(view: str) -> list[tuple[int, int, str]]:
-    """Every shape in `view`, as (start, end, kind) in the view."""
+# Context a glued token can need beside a withheld span (`_shape_spans`'
+# boundary rounds), wider than any shape's token.
+_ROUND_WINDOW = 512
+
+
+def _regex_spans(view: str, table, lo: int = 0, hi: int | None = None) -> list[tuple[int, int, str]]:
+    seg = view if lo == 0 and hi is None else view[lo:hi]
+    return [(lo + m.start(), lo + m.end(), kind) for kind, p in table for m in p.finditer(seg)]
+
+
+# Where any shape of `SHAPES` can start: one scan finds the places, and only
+# there is each pattern tried (review of #314, S2: one full pass per pattern
+# made a 5 MB patch take seconds).
+_CANDIDATE = re.compile(_PREFIXES + r"|-----(?:BEGIN|END) ")
+
+
+def _prefixed_spans(view: str, table, lo: int = 0, hi: int | None = None) -> list[tuple[int, int, str]]:
+    hi = len(view) if hi is None else hi
+    out = []
+    for candidate in _CANDIDATE.finditer(view, lo, hi):
+        pos = candidate.start()
+        for kind, pattern in table:
+            match = pattern.match(view, pos, hi)
+            if match is not None:
+                out.append((match.start(), match.end(), kind))
+    return out
+
+
+def _shape_spans(view: str, mode: str) -> list[tuple[int, int, str]]:
+    """Every shape in `view`, as (start, end, kind) in the view, for the
+    reader `mode` names (`STRICT`, `MODEL`, `DISPLAY`)."""
     found = [(a, b, KEY) for a, b in private_key_spans(view)]
-    for kind, pattern in SHAPES:
-        for match in pattern.finditer(view):
-            found.append((match.start(), match.end(), kind))
+    found += _prefixed_spans(view, SHAPES)
+    if mode != STRICT:
+        found += _regex_spans(view, HEURISTIC)
+    found += _token_spans(view)
+    found += _discord_spans(view)
     for match in _BEARER.finditer(view):
         token = match.group(1)
         if _DIGIT.search(token) and re.search(r"[A-Za-z]", token):
@@ -378,13 +523,16 @@ def _shape_spans(view: str) -> list[tuple[int, int, str]]:
             continue
         if ":" in decoded and decoded.isprintable():
             found.append((match.start(1), match.end(1), "basic credentials"))
-    found += _url_spans(view)
+    found += _url_spans(view, mode == DISPLAY)
     found += _aws_spans(view)
     found += _split_spans(view)
     # A withheld span is a boundary, as its marker was in the old one-pattern-
     # at-a-time pass: a token glued to one (`AKIA…hf_…`, `hf_…-----END …`) is
     # matched again with every span found so far blanked out, until nothing
-    # new is found (SEC-5's tighten-only rule). Each round can only add.
+    # new is found (SEC-5's tighten-only rule). Each round can only add, and
+    # looks only around the spans (a glued token touches one), so a long text
+    # is not scanned again in full.
+    regex_table = tuple((k, p) for k, p in SHAPES if k != KEY)
     for _round in range(4):
         if not found:
             break
@@ -395,15 +543,52 @@ def _shape_spans(view: str) -> list[tuple[int, int, str]]:
                 pieces += [view[pos:a], " " * (b - a)]
                 pos = b
         blanked = "".join(pieces) + view[pos:]
-        more = [(m.start(), m.end(), kind) for kind, pattern in SHAPES if kind != KEY
-                for m in pattern.finditer(blanked)]
+        windows: list[list[int]] = []
+        for a, b, _kind in sorted(found):
+            lo, hi = max(0, a - _ROUND_WINDOW), min(len(view), b + _ROUND_WINDOW)
+            stop = max(0, lo - 4096)
+            while lo > stop and view[lo - 1] in _TOKEN_CHARS:   # never start inside a word
+                lo -= 1
+            if windows and lo <= windows[-1][1]:
+                windows[-1][1] = max(windows[-1][1], hi)
+            else:
+                windows.append([lo, hi])
+        seen = set(found)
+        more = [s for lo, hi in windows
+                for s in _prefixed_spans(blanked, regex_table, lo, hi)
+                + (_regex_spans(blanked, HEURISTIC, lo, hi) if mode != STRICT else [])
+                if s not in seen]
         if not more:
             break
         found += more
     return found
 
 
-def _url_spans(view: str) -> list[tuple[int, int, str]]:
+def _token_spans(view: str) -> list[tuple[int, int, str]]:
+    out = []
+    for match in _TOKEN.finditer(view):
+        for run in _RUN12.findall(match.group(1)):
+            if (_DIGIT.search(run) and re.search(r"[A-Za-z]", run)) or \
+                    (re.search(r"[a-z]", run) and re.search(r"[A-Z]", run)):
+                out.append((match.start(), match.end(), "token"))
+                break
+    return out
+
+
+def _discord_spans(view: str) -> list[tuple[int, int, str]]:
+    out = []
+    for match in _DISCORD.finditer(view):
+        head = match.group(1)
+        try:
+            decoded = base64.b64decode(head + "=" * (-len(head) % 4), altchars=b"-_", validate=True)
+        except (binascii.Error, ValueError):
+            continue
+        if decoded.isdigit() and 15 <= len(decoded) <= 21:
+            out.append((match.start(), match.end(), "Discord bot token"))
+    return out
+
+
+def _url_spans(view: str, display: bool = True) -> list[tuple[int, int, str]]:
     out = []
     for sep in re.finditer(r"://", view):
         scheme = _URL_SCHEME.search(view, max(0, sep.start() - 32), sep.start())
@@ -412,7 +597,9 @@ def _url_spans(view: str) -> list[tuple[int, int, str]]:
         info = _USERINFO.match(view, sep.end())
         if info is not None:
             password = info.group(2)
-            if not _PLACEHOLDER.search(password):
+            at = _HOST.match(view, info.end())
+            local = _LOCAL_HOST.match(at.group(1) or at.group(2) or "") is not None
+            if not _PLACEHOLDER.search(password) and (display or not (local or len(password) < 3)):
                 out.append((info.start(2), info.end(2), "URL password"))
             continue
         token = _TOKEN_USERINFO.match(view, sep.end())
@@ -438,37 +625,40 @@ def _aws_spans(view: str) -> list[tuple[int, int, str]]:
 
 def _split_spans(view: str) -> list[tuple[int, int, str]]:
     """A prefixed token broken across single ordinary whitespace characters
-    (a space, tab or newline; an unusual space such as NBSP, U+2028 or U+0085
-    is dropped by the joined view instead): the pieces after the first are
-    joined while each looks random (`_random_chunk`), and the joined text is
-    tried against every prefixed shape. Only a match that goes past the
-    first piece counts, and none when the first piece is a whole token on
-    its own: after an ordinary break the next word is the text's own."""
+    (a space, tab or newline; an invisible or unusual space is joined by the
+    view itself): the pieces after the first are joined while each looks
+    random (`_random_chunk`), and the joined text is tried against every
+    prefixed shape. Only a match that goes past the first piece counts. When
+    the first piece is a whole token already, only a newline is crossed (a
+    wrapped line: `sk-or-v1-<30 hex>` then the other 34 on the next, review
+    of #314, S3); after a space or tab the next word is the text's own."""
     out = []
     for cand in _SPLIT_PREFIX.finditer(view):
         parts = _SPLIT_BREAK.split(cand.group())
         first = parts[0]
-        if any(p.match(first) for _k, p in _PREFIXED):
-            continue
+        whole = _starts_whole(first)
         joined, offsets, pos = first, [(0, cand.start())], cand.start() + len(first)
         for k in range(1, len(parts) - 1, 2):
             brk, chunk = parts[k], parts[k + 1]
+            if whole and brk not in ("\n", "\r\n"):
+                break
             pos += len(brk)
-            if not _random_chunk(chunk):
+            if not _random_chunk(chunk) or _starts_whole(chunk):
                 break
             offsets.append((len(joined), pos))
             joined += chunk
             pos += len(chunk)
         if len(offsets) < 2:
             continue
+        best = None
         for kind, pattern in _PREFIXED:
             match = pattern.match(joined)
-            if match is None or match.end() <= len(first):
-                continue
-            end = match.end()
+            if match is not None and match.end() > len(first) and (best is None or match.end() > best[0]):
+                best = (match.end(), kind)
+        if best is not None:
+            end, kind = best
             j_at, v_at = max(o for o in offsets if o[0] < end)
             out.append((cand.start(), v_at + (end - j_at), kind))
-            break
     return out
 
 
@@ -486,24 +676,20 @@ def _merge(spans) -> list[tuple[int, int, str]]:
     return [tuple(s) for s in out]
 
 
-def spans(text: str) -> list[tuple[int, int, str]]:
+def spans(text: str, *, mode: str = "model") -> list[tuple[int, int, str]]:
     """Every credential shape in `text`, as sorted, disjoint (start, end,
-    kind) spans of `text` itself, found on both normalized views."""
+    kind) spans of `text` itself, found on its normalized view, for the
+    reader `mode` names (`STRICT`, `MODEL`, `DISPLAY`)."""
     text = str(text or "")
-    found = []
-    for spaced, joined in ((False, False), (True, False), (False, True)):
-        view = _View(text, spaced, joined)
-        found += [(*view.span(a, b), kind) for a, b, kind in _shape_spans(view.view)]
-        if view.views is None:
-            break                                   # nothing to normalize: one view is all
-    return _merge(found)
+    view = _View(text)
+    return _merge((*view.span(a, b), kind) for a, b, kind in _shape_spans(view.view, mode))
 
 
-def shapes(text: str) -> str:
+def shapes(text: str, *, mode: str = "model") -> str:
     """`text` with every credential shape withheld as `[withheld: <kind>]`;
     every other character as it was."""
     text = str(text or "")
-    found = spans(text)
+    found = spans(text, mode=mode)
     return _apply(text, found, withheld) if found else text
 
 
@@ -533,6 +719,9 @@ _MASK = re.compile(r"[*•●·#xX]+")
 # Punctuation after a value, not part of it (a backtick too: markdown's
 # inline code, `` `api_key=settings.API_KEY` ``, is code).
 _TRAILING = ".,;:!?)]}`"
+# A backslash escape after a value is the text's, not the value's: `printf
+# 'password: …\n'` keeps its `\n` (review of #314, N3).
+_TRAILING_ESCAPE = re.compile(r"(?:\\[nrt0])+\Z")
 LABELLED_MARKER = withheld("labelled secret")
 
 
@@ -543,12 +732,20 @@ def _labelled_keep(core: str) -> bool:
             or core.startswith(("[redacted", WITHHELD_PREFIX)))
 
 
+def _value_core(value: str) -> str:
+    core = value
+    while True:
+        trimmed = _TRAILING_ESCAPE.sub("", core.rstrip(_TRAILING))
+        if trimmed == core:
+            return core
+        core = trimmed
+
+
 def labelled_spans(text: str) -> list[tuple[int, int, str]]:
     """The values `labelled_values` withholds, as (start, end, kind)."""
     out = []
     for match in LABELLED.finditer(text):
-        value = match.group(2)
-        core = value.rstrip(_TRAILING)
+        core = _value_core(match.group(2))
         if not _labelled_keep(core):
             out.append((match.start(2), match.start(2) + len(core), "labelled secret"))
     return out
@@ -570,25 +767,71 @@ def labelled_values(text: str) -> str:
 # `secrets.scrub` rejoins lines with `\n`, so a token split by one of these
 # would reach the shapes split by an ordinary newline instead.
 _SEPARATORS = re.compile("[\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029]")
+# Every line break `str.splitlines` knows but `\n`.
+_OTHER_BREAKS = re.compile("[\r\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029]")
 
 
-def _across_separators(text: str) -> str:
+def _across_separators(text: str, mode: str) -> str:
     """Before `secrets.scrub`: the shapes that cross one of `_SEPARATORS`,
     withheld (only those: a known value holding a shape must still be whole
     for `secrets.scrub` to find it)."""
     if not _SEPARATORS.search(text):
         return text
-    found = [s for s in spans(text) if _SEPARATORS.search(text, s[0], s[1])]
+    found = [s for s in spans(text, mode=mode) if _SEPARATORS.search(text, s[0], s[1])]
     return _apply(text, found, withheld) if found else text
+
+
+def _known_values(text: str) -> str:
+    """`secrets.scrub` (Jarvis's credential values, and the lines a tool
+    attributes to a protected file), with the text's own line breaks kept.
+    The v1 scrub splits on every line break and joins with `\\n` (CRLF became
+    LF, a final newline went, U+2028 became `\\n`); its lines are put back
+    with the original's endings, so text it withholds nothing from comes back
+    byte for byte (review of #314, S4). When it drops lines (a protected
+    file's) the line count no longer matches, and its own output stands."""
+    from jarvis.tools import secrets
+    out = secrets.scrub(text)
+    if not text:
+        return out
+    if not _OTHER_BREAKS.search(text):
+        # Only `\n` breaks: the v1 output of a text it withheld nothing from
+        # is the text without its final newline (a cheap check on a long one).
+        bare = text[:-1] if text.endswith("\n") else text
+        if out == bare:
+            return text
+        if text.endswith("\n") and len(out.split("\n")) == len(bare.split("\n")):
+            return out + "\n"
+        return out
+    bodies = text.splitlines()
+    lines = out.split("\n")
+    if len(lines) != len(bodies):
+        return out
+    ends = [line[len(body):] for line, body in zip(text.splitlines(keepends=True), bodies)]
+    return "".join(line + end for line, end in zip(lines, ends))
+
+
+def _scrubbed(text, mode: str) -> str:
+    text = str(text or "")
+    return shapes(_known_values(_across_separators(text, mode)), mode=mode)
 
 
 def for_model(text: str) -> str:
     """Text an agent will read: Jarvis's own credential values
-    (`secrets.scrub`) and every credential shape (`shapes`), nothing else.
-    Raises only if `secrets.scrub` does; a caller that cannot scrub must
-    withhold the text, never pass it on unscrubbed."""
-    from jarvis.tools import secrets
-    return shapes(secrets.scrub(_across_separators(str(text or ""))))
+    (`secrets.scrub`), every high-confidence credential shape and main's
+    two legacy patterns (`HEURISTIC`: never less than main's `scrub_text`
+    withheld), nothing else; no labelled value. Outside a withheld span the text is the input's, byte for
+    byte. Raises only if `secrets.scrub` does; a caller that cannot scrub
+    must withhold the text, never pass it on unscrubbed."""
+    return _scrubbed(text, MODEL)
+
+
+def for_model_strict(text: str) -> str:
+    """`for_model` without main's two legacy patterns, for a model path
+    main gave no shape scrub at all (diff review's input): the
+    high-confidence shapes only, so code such as `sk_buff_alloc_head(skb)`
+    or `ModelConfigurationRegistry.values.get_default_configuration_for_model()`
+    reaches the reviewer as written."""
+    return _scrubbed(text, STRICT)
 
 
 def scrub_text(text: str) -> str:
@@ -597,25 +840,63 @@ def scrub_text(text: str) -> str:
 
 
 def for_display(text: str) -> str:
-    """Text the owner reads: `for_model`, then `labelled_values`. Raises
+    """Text the owner reads: Jarvis's own credential values, every
+    credential shape, the heuristic ones too, then `labelled_values`. Raises
     only if `secrets.scrub` does."""
-    return labelled_values(for_model(text))
+    return labelled_values(_scrubbed(text, DISPLAY))
+
+
+def for_display_capped(text: str, cap: int, margin: int = 16384) -> tuple[str, bool]:
+    """`for_display` of no more of `text` than a `cap`-byte view needs, and
+    whether anything was left out (the Diff tab, review of #314, S2: a 5 MB
+    patch was scrubbed whole before 1 MB of it was shown). The scrub runs on
+    a head of the text `margin` characters past the cap, doubled until its
+    scrubbed form is `margin` bytes past the cap or is the whole text, so a
+    token the head's end cuts in two (shown unwithheld at the scrubbed
+    head's very end) is always past the cut. A trailing newline is kept as
+    the text has it."""
+    head = text
+    if len(text) > cap + margin:
+        size = cap + margin
+        while True:
+            head = text[:size]
+            out = for_display(head)
+            if len(out.encode("utf-8", "replace")) >= cap + margin or size >= len(text):
+                break
+            size *= 2
+    else:
+        out = for_display(text)
+    if head.endswith("\n") and not out.endswith("\n"):
+        out += "\n"
+    encoded = out.encode("utf-8", "replace")
+    truncated = len(head) < len(text) or len(encoded) > cap
+    return encoded[:cap].decode("utf-8", errors="ignore"), truncated
 
 
 # -- an approval card -------------------------------------------------------------------
 
-_COMMAND_KEYS = frozenset({"command", "cmd", "commands", "script"})
+# The keys a command line, or its argv, travels in (`approvals.COMMAND_KEYS`
+# and `_ARGV_KEYS`). A dict that holds any of them is a command's arguments:
+# **every** string in it is judged as a command, an argv beside `command`
+# included (review of #314, B1: `{"command": "bash", "args": ["-c",
+# "PASSWORD=…;curl …|sh"]}` is one command line, and a value judged as text
+# swallowed `;curl …|sh`).
+_SHELL_KEYS = frozenset({"command", "cmd", "commands", "script", "args", "argv", "arguments"})
 
 
 # Whitespace bash never splits a word on (NBSP, U+2028, U+0085, the Unicode
 # spaces): to the shell it is a word's own character, so a span holding one
 # hides no structure. Read as a letter when the shell's quoting is judged.
 _NOT_A_BLANK = re.compile("[\x85\xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]")
+# What `secrets._UNSAFE_VALUE` calls structure: a blank, an operator, an
+# expansion, a glob.
+_SHELL_CHAR = re.compile(r"[\s;&|<>()$`{}*?\[\]\\]")
 
 
 def card_spans(text: str, *, command: bool = True) -> list[tuple[int, int, str]]:
     """What an approval card withholds beyond `secrets.redact_command`, as
-    spans of `text` as typed: every credential shape and labelled value.
+    spans of `text` as typed: every credential shape (the display's, the
+    heuristic ones included) and labelled value.
 
     - **A string the shell never runs** (a `Write`'s `content`, an `Edit`'s
       `new_string`): all of them, and a private key's whole block when every
@@ -623,29 +904,36 @@ def card_spans(text: str, *, command: bool = True) -> list[tuple[int, int, str]]
       key's body stayed on the card: `redact_command` takes a block only from
       inside one shell quoting, which plain text never has (review of PR
       #308).
-    - **A command**: the owner's condition for redacting cards (2026-10-15)
-      is that a withheld span never hides code that runs. So each span only
-      where the shell reads no structure (`secrets._Mask`, rule 1, with a
-      non-ASCII space read as the word character bash reads it as); labelled
-      values not at all on a line that re-parses or runs text (rule 3,
-      `secrets._run_names(...) is True`: `eval`, `source`, `bash -c`, a pipe
-      into a shell …; a credential shape is not code and still goes, as
-      `redact_command`'s own shape pass has it); a private key
-      left to `secrets._key_blocks` (an unquoted line of key material at a
-      command's place, or after a here-document's `<<`, is a command); a
-      URL's userinfo left to `redact_command`'s own rule
+    - **A command** (and every string beside one: `map_strings`): the
+      owner's condition for redacting cards (2026-10-15) is that a withheld
+      span never hides code that runs. So each span only where the shell
+      reads no structure (`secrets._Mask`, rule 1, with a non-ASCII space read
+      as the word character bash reads it as); labelled values not at all on
+      a line that re-parses or runs text (rule 3, `secrets._run_names(...) is
+      True`: `eval`, `source`, `bash -c`, a pipe into a shell …; a credential
+      shape is not code and still goes, as `redact_command`'s own shape pass
+      has it); a private key left to `secrets._key_blocks` (an unquoted line
+      of key material at a command's place, or after a here-document's `<<`,
+      is a command); a URL's userinfo left to `redact_command`'s own rule
       (`strip_url_credentials`: a malformed URL keeps it in sight with its
       expansion)."""
     from jarvis.tools import secrets as S
     found = []
-    for a, b, kind in spans(text):
+    for a, b, kind in spans(text, mode=DISPLAY):
         if kind == KEY and (command or not S._key_material(text[a:b])):
             continue
         if command and kind in ("URL password", "URL token"):
             continue
         found.append((a, b, kind))
     if not (command and S._run_names(text) is True):
-        found += labelled_spans(text)
+        # A labelled value ends at the first character the shell could read
+        # as structure, in any argument (an argv under a key no rule names
+        # still never loses `;curl …|sh` to a marker; review of #314, B1).
+        for a, b, kind in labelled_spans(text):
+            cut = _SHELL_CHAR.search(text, a, b)
+            b = cut.start() if cut else b
+            if b - a >= 6:
+                found.append((a, b, kind))
     found = _merge(found)
     if command and found:
         mask = S._Mask(_NOT_A_BLANK.sub("x", text))
@@ -660,7 +948,9 @@ class CardPass:
     beside its secret, a split token's first piece). Each is held as a
     placeholder through `redact_command` and comes back as its marker
     (`show`); one that `redact_command` itself withheld (a placeholder as a
-    `NAME=` value) stays its `[redacted]`."""
+    `NAME=` value) stays its `[redacted]`. A placeholder never holds a shell
+    character, and a span that would hold one is never taken (`card_spans`),
+    so `redact_command` reads the same structure either way."""
 
     def __init__(self):
         import secrets as _random
@@ -688,16 +978,26 @@ class CardPass:
 
 def map_strings(value, fn, *, command: bool = True, depth: int = 0):
     """Every string in a JSON-shaped `value` through `fn(text, command=…)`,
-    structure kept. A string under a command-like key (`command`, `cmd`) is
-    judged as a command; any other as text, unless `command` says otherwise
-    for the top level."""
+    structure kept. Every string inside a dict that holds a command or argv
+    key (`_SHELL_KEYS`) is judged as a command, at any depth below it; any
+    other as text, unless `command` says so for the top level."""
     if isinstance(value, str):
         return fn(value, command=command)
     if depth >= 32:
         return value
     if isinstance(value, dict):
-        return {k: map_strings(v, fn, command=isinstance(k, str) and k.lower() in _COMMAND_KEYS,
-                               depth=depth + 1) for k, v in value.items()}
+        shell = command or any(isinstance(k, str) and k.lower() in _SHELL_KEYS for k in value)
+        return {k: map_strings(v, fn, command=shell, depth=depth + 1) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
         return [map_strings(v, fn, command=command, depth=depth + 1) for v in value]
     return value
+
+
+def map_field(key: str, value, fn):
+    """One logged field (`daemon._log_fields`) through `map_strings`: a dict
+    (a tool's arguments) is judged by its own keys; a string or list under a
+    command or argv key (`command`, `cmd`, an `args` argv) as a command; any
+    other (`reason`, `headline`) as text."""
+    if isinstance(value, dict):
+        return map_strings(value, fn, command=False)
+    return map_strings(value, fn, command=isinstance(key, str) and key.lower() in _SHELL_KEYS)

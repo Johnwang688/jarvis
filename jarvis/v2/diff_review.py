@@ -49,7 +49,7 @@ import uuid
 
 from jarvis import config, models
 from jarvis.untrusted import strip_invisible
-from jarvis.v2.redact import for_display, for_model
+from jarvis.v2.redact import for_display, for_model_strict
 
 from .approvals import clean_line
 from .model import PermissionProfile, ProviderName, Role, Thread, utcnow
@@ -130,6 +130,11 @@ def _fingerprint(head: str, files: list[dict], patches: list[str]) -> str:
     return digest.hexdigest()[:32]
 
 
+def _model_patch(patch: str) -> str:
+    out = for_model_strict(patch)
+    return out + "\n" if patch.endswith("\n") and not out.endswith("\n") else out
+
+
 def build_input(daemon, task, cap: int = CAP_BYTES) -> ReviewInput:
     """The task's diff, file by file, as the Diff tab builds it, scrubbed and
     capped. Files are taken in the diff's order; one whose patch would pass
@@ -137,12 +142,12 @@ def build_input(daemon, task, cap: int = CAP_BYTES) -> ReviewInput:
     from . import hud_api as H
     context = H._diff_context(daemon, task)
     base, head, files, patches = H._diff_parts(daemon, task, context=context)
-    # Model input: the credential shapes only (`redact.for_model`), never the
+    # Model input: the high-confidence credential shapes only
+    # (`redact.for_model_strict`: main gave this path no shape scrub), never the
     # Diff tab's display scrub, whose labelled-value rule would rewrite the
-    # code the reviewer must read (review of PR #308). The final newline as
-    # the tab keeps it.
-    scrubbed = [for_model(patch) + ("\n" if patch.endswith("\n") else "") if patch else ""
-                for patch in patches]
+    # code the reviewer must read (review of PR #308). Byte for byte outside
+    # what it withholds; a final newline the v1 layer dropped is put back.
+    scrubbed = [_model_patch(patch) if patch else "" for patch in patches]
     taken, reviewed, skipped, used = [], [], [], 0
     for meta, patch in zip(files, scrubbed):
         size = len(patch.encode("utf-8", errors="replace"))

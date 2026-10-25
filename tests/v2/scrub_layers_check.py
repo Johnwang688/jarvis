@@ -107,7 +107,7 @@ SHAPES = [
     ("Bearer", "Authorization: " + "Bear" + "er " + "abc123DEF456ghi789jkl", ["abc123DEF456ghi789jkl"]),
     ("Basic", "Authorization: " + "Bas" + "ic " + base64.b64encode(("deploy:" + PW_VALUE).encode()).decode(),
      [base64.b64encode(("deploy:" + PW_VALUE).encode()).decode()]),
-    ("URL password", "postgres://bob:" + PW_VALUE + "@db.example.invalid/app", [PW_VALUE]),
+    ("URL password", "postgres://bob:" + PW_VALUE + "@db.internal.corp/app", [PW_VALUE]),
     ("Discord bot", "MTk4NjIyNDgzNDcxOTI1MjQ4" + "." + "Cl2FMQ" + "." + "ZnCjm1XVW7vRze4b7Cq4se7kKWs", None),
     ("Google", "AI" + "za" + "SyA1234567890" + "abcdefghijklmnopqrstuv", None),
     ("Stripe live", "sk" + "_live_" + "4eC39HqLyjWDarjtT1zdp7dc", None),
@@ -176,6 +176,7 @@ def _reporter(text):
 
 MODEL_PATHS = {
     "redact.for_model": redact.for_model,
+    "redact.for_model_strict (diff review input)": redact.for_model_strict,
     "redact.scrub_text": redact.scrub_text,
     "chat_reads.scrub_for_model (chat relay)": chat_reads.scrub_for_model,
     "chat_reads.scrub_read (another chat's rows)": chat_reads.scrub_read,
