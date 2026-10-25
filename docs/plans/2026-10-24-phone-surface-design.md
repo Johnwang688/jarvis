@@ -525,9 +525,16 @@ the phone"). Where it is more specific than the text above:
   Host after `owner_only`) and from `remote_answer` after a verified
   assertion while all five §4.1 checks pass; a test greps every assignment.
 - **PH-4's challenge** is `sha256(domain ‖ req_id ‖ answer ‖ nonce)`, each
-  part delimited, bound server side to the session and its passkey too, in a
-  pool of its own (16). The assertion is verified before anything else, then
-  §4.1 runs in full; a failure after the assertion still refuses.
+  part delimited, bound server side to the session and its passkey too, at
+  most 4 per session and never a shared cap (a repeat for the same card and
+  answer replaces the earlier one). The assertion is verified before
+  anything else, then §4.1 runs in full; a failure after the assertion
+  still refuses.
+- **What the phone's scrub withholds** is read over the card's structure
+  too: keys, each value with its key, and the card as one JSON text; and a
+  value nested past the card redaction's depth withholds the card. A
+  withheld card is Deny only. At the desk, a card with such a value offers
+  DENY only as well (a small change to the desk, failing closed).
 - **§4.1** is `remote_secure.py`. Condition 3, "the certificate is the
   tailnet's own", is read from Tailscale rather than from a TLS handshake:
   the host is this machine's MagicDNS name, under the tailnet's `.ts.net`

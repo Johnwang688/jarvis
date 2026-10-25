@@ -263,7 +263,7 @@ describe("the phone app answers (P-4)", () => {
     const rows = [
       row({ id: "q:aaaaaaaa:q-1", kind: "question", rank: 2, thread_id: "aaaaaaaa", detail: { text: H, options: ["npm"] } }),
       row({ id: "dec:d0123456789ab", kind: "decision", rank: 6, thread_id: "aaaaaaaa",
-        detail: { decision_id: "d0123456789ab", question: "Which?", options: ["sqlite", H], default: null, why: "w",
+        detail: { decision_id: "d0123456789ab", question: "Which?", options: ["sqlite", H], default: 0, why: "w",
           answer: null, delivery: null } }),
     ];
     const h = harness(rows);
@@ -281,6 +281,13 @@ describe("the phone app answers (P-4)", () => {
     expect(h.posts).toEqual([]);
     await h.click("m-answer-send");
     expect(h.posts).toEqual([{ path: "/m/api/inbox/q%3Aaaaaaaaa%3Aq-1/answer", value: { text: "pnpm" } }]);
+    // The suggestion's tag is the phone's own element before the option's words (as the HUD's).
+    const choices = Array.from(h.root.querySelectorAll(".m-choice"));
+    const tag = choices[0].querySelector('[data-testid="m-suggested"]')!;
+    expect(tag.textContent).toBe("suggested");
+    expect(tag.compareDocumentPosition(choices[0].querySelector(".option-text")!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(choices[1].querySelector('[data-testid="m-suggested"]')).toBeNull();
+    expect(choices[0].querySelector<HTMLInputElement>("input")!.checked).toBe(true);
     const radio = h.root.querySelectorAll<HTMLInputElement>('[data-testid="m-decision-option"]')[1];
     radio.checked = true;
     radio.dispatchEvent(new Event("change"));

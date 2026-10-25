@@ -1240,8 +1240,11 @@ SELF_PROTECTED) let a signed-in phone answer (design PH-4, PH-7, PH-10,
   answer-v1\0" ‖ req_id ‖ "\0" ‖ decision ‖ "\0" ‖ 32-byte nonce)`, kept
   server side with the req_id, the decision, the session's token hash and its
   passkey; single use (spent before anything is verified), 60 s on the
-  monotonic clock, its own pool of 16 (429 when full; sign-ins are not
-  crowded out). `allowCredentials` names the session's passkey only.
+  monotonic clock, at most 4 per session and never a shared cap (review of
+  PR #313: one session's abandoned prompts can never refuse another's; the
+  same session asking again for the same card and answer replaces its
+  earlier challenge; 429 past 4; sign-ins are a pool of their own).
+  `allowCredentials` names the session's passkey only.
   `answer_verify` refuses (401, no detail) an assertion issued for another
   card, another answer (an Allow's is never an Always), another session or
   passkey, a credential that is not the session's passkey, `crossOrigin` or
@@ -1258,10 +1261,14 @@ SELF_PROTECTED) let a signed-in phone answer (design PH-4, PH-7, PH-10,
   `CertDomains`, serve's 443 HTTPS; for an answer, its Host and Origin are
   the host's), `passkey` (the passkeys file reads, a paired passkey exists,
   `REQUIRE_UV`; for an answer, the session's own passkey) and `listeners`
-  (`ss -H -ltne sport = :<port>`: exactly one, 127.0.0.1, its inode the
+  (`/usr/bin/ss -H -ltne sport = :<port>`, by full path as the Windows
+  programs are, never through PATH: exactly one, 127.0.0.1, its inode the
   listener's own socket; `Get-NetTCPConnection` through `powershell.exe`:
-  only `wslrelay` on loopback, or nothing). The reads are four fixed argvs,
-  no shell, read-only, in parallel, each cut at 8 s and 1 MiB of output;
+  only `wslrelay` on loopback, or nothing, then an `END-OF-LISTENERS` line:
+  "no such connection" (CIM ObjectNotFound, an unused port) is the empty
+  answer, any other error has no end line and fails). The reads are four
+  fixed argvs, no shell, read-only, in parallel, each cut at 8 s and 1 MiB
+  of output;
   any timeout, error, non-zero exit or unknown shape fails that check. They
   run at start-up and every 5 minutes (a thread started with the remote
   listener and stopped with the daemon) and **again in full before every
@@ -1277,11 +1284,21 @@ SELF_PROTECTED) let a signed-in phone answer (design PH-4, PH-7, PH-10,
   no Always (409 "limited: <label>; Always needs every check"); a HUD-only
   card's detail, options and answer are 409 "answer at the desk".
 - **The card the owner answers from.** The detail is the HUD's own card,
-  not P-3's capped read view, through the phone's scrub (`remote_api._scrub`,
-  nothing cut). If the scrub changes any field (`phone_card`), the phone is
-  sent the scrubbed card and Allow and Always are refused at the detail, the
-  options and the answer: "this card has withheld text: answer it at the
-  desk". Deny still works. A HUD-only card's private detail goes only to
+  not P-3's capped read view, through the phone's scrub, nothing cut:
+  `remote_api.scrub_structure` (review of PR #313) scrubs every key and
+  string, reads each string with its key as `<key>: <value>` and
+  `<key>=<value>` (a nested `{"Authorization": "Bearer …"}`), and reads the
+  whole card as one JSON text (a label in a key, its value beside it). If
+  any pass changes anything, or a value was nested past the card
+  redaction's depth (`"[nested too deep to judge]"`, never judged), the card
+  is withheld (`phone_card`): the phone is sent the scrubbed card and Allow
+  and Always are refused at the detail, the options and the answer: "this
+  card has withheld text: answer it at the desk". Deny still works. P-3's
+  inbox list sends approval rows through the same `scrub_structure`.
+  **At the desk** (a desk behaviour change, failing closed): a card whose
+  arguments hold the depth placeholder shows "Some arguments are nested too
+  deep to be shown or checked…" and offers DENY only (`nestedTooDeep`,
+  `hud/src/lib/approvalCard.ts`). A HUD-only card's private detail goes only to
   that route, only while pending, only under §4.1; it is never in a log
   line, the bus, `/m/api/events` or the inbox list (asserted).
 - **Always shows its rule first.** `PendingApprovals.always_rule(req_id)`
@@ -1302,9 +1319,10 @@ SELF_PROTECTED) let a signed-in phone answer (design PH-4, PH-7, PH-10,
   `TaskControl.answer_question`, which takes no `via`. A proposal's
   withdraw stays at the desk (400).
 - **PH-10.** `PendingApprovals.wait_s()`: a broker on the local default
-  (120 s) waits 600 s while `RemoteAuth.recently_active()` (a session seen,
-  or signed in, in the last 24 h; kept past a logout, rebuilt from the
-  sessions file at start) says so; a broker given its own wait keeps it,
+  (120 s) waits 600 s while `RemoteAuth.recently_active()` (an active,
+  unrevoked passkey is paired, and a session was seen or signed in within
+  the last 24 h; kept past a logout, rebuilt from the sessions file at
+  start; a revoke of the last passkey ends it at once) says so; a broker given its own wait keeps it,
   Discord's is 600 s anyway, a HUD-only card keeps its 120 s cap.
 - **The app** (`hud/src/mobile/card.ts`, `app.ts`, `views.ts`): an approval
   row's "Open the card to answer" opens the card, drawn with the HUD card's

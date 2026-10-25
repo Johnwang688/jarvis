@@ -17,7 +17,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ApprovalRequest } from "../types";
 import { headlineLine } from "../lib/approval";
-import { argText, countdownText, originText, reasonText } from "../lib/approvalCard";
+import { argText, countdownText, nestedTooDeep, originText, reasonText, TOO_DEEP_WARNING } from "../lib/approvalCard";
 import { noPointerFocus } from "../lib/talkkey";
 import { allowRestore } from "../state/frameguard";
 import { BrowserApprovalCard } from "./BrowserApproval";
@@ -111,6 +111,9 @@ function OrdinaryApprovalCard(props: {
   const args = Object.entries(r.args || {});
   // Chat-to-chat C6: which chat's message started the asking call's turn.
   const relay = relayedParts(r.relayed_from);
+  // An argument cut at the redaction's depth was never judged or shown:
+  // DENY only (review of PR #313, a desk behaviour change that fails closed).
+  const tooDeep = nestedTooDeep(r.args);
 
   return (
     // Focusable (tabIndex -1) so the veil can take focus off a frame or an
@@ -152,6 +155,7 @@ function OrdinaryApprovalCard(props: {
           {argText(v)}
         </div>
       ))}
+      {tooDeep ? <div className="reason" role="alert" data-testid="approval-too-deep">{TOO_DEEP_WARNING}</div> : null}
       {reasonText(r.reason, r.layer) ? <div className="reason">{reasonText(r.reason, r.layer)}</div> : null}
       <div className="btns">
         {/* type="button" on every one: nothing on this card is a form default,
@@ -171,7 +175,7 @@ function OrdinaryApprovalCard(props: {
           <button
             type="button"
             className="always"
-            disabled={busy}
+            disabled={busy || tooDeep}
             tabIndex={-1}
             onMouseDown={noPointerFocus}
             data-testid="approval-always"
@@ -181,7 +185,7 @@ function OrdinaryApprovalCard(props: {
             ALWAYS
           </button>
         )}
-        <button type="button" disabled={busy} tabIndex={-1} onMouseDown={noPointerFocus} onClick={() => decide(true)}
+        <button type="button" disabled={busy || tooDeep} tabIndex={-1} onMouseDown={noPointerFocus} onClick={() => decide(true)}
                 data-testid="approval-allow">
           AUTHORIZE
         </button>

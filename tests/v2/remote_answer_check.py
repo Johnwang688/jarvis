@@ -86,6 +86,7 @@ TOKEN = "ghp_" + "Zq7" * 12
 PEM_BODY = "MII" + "EowIBAAKCAQEAu1SU1LfVLPHCozMxH2Mo4lgOEePzNm0tRgeLezV6ffAt0gun"
 PEM = ("-----BEGIN " + "RSA PRIVATE KEY-----\n" + PEM_BODY + "\n-----END " + "RSA PRIVATE KEY-----\n")
 PASSWORD = "hunt" + "er2" + "hunt" + "er2" + "xyzzy"
+NUMBER = int("98765" + "43210" + "9876543")
 
 
 def eventually(predicate, timeout=5.0, what="condition"):
@@ -116,7 +117,8 @@ class FakeSystem:
             "status": json.dumps({"BackendState": "Running", "Self": {"DNSName": host + ".", "OS": "windows"},
                                   "MagicDNSSuffix": SUFFIX, "CertDomains": [host]}),
             "ss": f"LISTEN 0      5      127.0.0.1:{port} 0.0.0.0:* uid:1000 ino:{ino} sk:7009 <->\n",
-            "windows": "127.0.0.1 wslrelay\n",
+            # As this PC answered (review of PR #313): CRLF lines, then the end line.
+            "windows": "127.0.0.1 wslrelay\r\n" + remote_secure.END_OF_LISTENERS + "\r\n",
         }
 
     def __call__(self, argv, timeout):
@@ -452,7 +454,7 @@ def _flip_passkey(case):
 
 
 def _flip_listeners(case):
-    case.system.bad["windows"] = "127.0.0.1 wslrelay\n0.0.0.0 node\n"
+    case.system.bad["windows"] = "127.0.0.1 wslrelay\r\n0.0.0.0 node\r\n" + remote_secure.END_OF_LISTENERS + "\r\n"
 
 
 FLIPS = {"loopback": _flip_loopback, "serve": _flip_serve, "certificate": _flip_certificate,
@@ -562,6 +564,10 @@ class Secured(Phone):
         self.assertTrue(self.d.secure.check(handler=handler)["ok"], "a read without Origin")
         handler = rac.OwnerTest.handler(self, self.auth.server, "GET", [("Host", HOST), ("Origin", "https://x")])
         self.assertEqual(self.d.secure.check(handler=handler)["failed"], "certificate")
+        # Case does not matter in a host name, as serve's own check reads it.
+        handler = rac.OwnerTest.handler(self, self.auth.server, "POST",
+                                        [("Host", HOST.upper()), ("Origin", "https://" + HOST.upper())])
+        self.assertTrue(self.d.secure.check(handler=handler)["ok"])
         print("ok  §4.1 (3): the answer's own Host and Origin are the tailnet name's")
 
 
@@ -606,6 +612,84 @@ class Cards(Phone):
                 self.assertEqual(self.post_answer(row, {"decision": "deny"})[0], 200)
                 self.decided(out, worker, Decision.DENY)
         print("ok  a card the phone's scrub would change: Allow and Always refused, Deny works")
+
+    def test_structured_secrets_are_withheld(self):
+        """Review of PR #313 (F1, MED): a label in a key and its value beside
+        it, a nested Authorization header, a credential as a key. Each is
+        withheld from the phone (Deny only), on the card and in the list."""
+        self.secure_ok()
+        bearer = "Bearer " + "abcDEF123456" * 3
+        # Straight through phone_card, as the review measured it.
+        for card, secret in (({"args": {"password": PASSWORD}}, PASSWORD),
+                             ({"args": {"password": [PASSWORD]}}, PASSWORD),
+                             ({"args": {"headers": {"Authorization": bearer}}}, bearer.split()[1]),
+                             ({"args": {TOKEN: "x"}}, TOKEN),
+                             # A number after a label: only the whole-card JSON reading sees it.
+                             ({"args": {"password": NUMBER}}, str(NUMBER))):
+            with self.subTest(card=list(card["args"])):
+                sent, withheld = remote_answer.phone_card(card)
+                self.assertTrue(withheld)
+                self.assertNotIn(secret, json.dumps(sent))
+        # Keys are scrubbed themselves too, wherever the phone's tree scrub runs
+        # (P-3's task and inbox reads as well as the card).
+        self.assertEqual(remote_api._scrub_tree({TOKEN: "x", "ok": {TOKEN: 1}}),
+                         {remote_api._scrub(TOKEN): "x", "ok": {remote_api._scrub(TOKEN): 1}})
+        self.assertNotIn(TOKEN, json.dumps(remote_api._scrub_tree({TOKEN: "x"})))
+        # And through the routes, end to end.
+        for args, secret in (({"headers": {"Authorization": bearer}}, bearer.split()[1]),
+                             ({"spec": {"password": [PASSWORD]}}, PASSWORD),
+                             ({"command": "ls", TOKEN: "x"}, TOKEN)):
+            with self.subTest(args=list(args)):
+                request, out, worker = self.ask(tool="mcp__x__exec", args=args, command="ls")
+                row = self.row(request)
+                status, _, body = self.detail(row)
+                self.assertEqual((status, body["withheld"], body["can"]["allow"]), (200, True, False), body)
+                self.assertNotIn(secret, json.dumps(body))
+                self.assertNotIn(secret, json.dumps(self.phone("GET", "/m/api/inbox", cookie=self.cookie)[2]))
+                self.assertEqual(self.options(row, "allow")[2], {"error": remote_answer.WITHHELD})
+                self.assertEqual(self.post_answer(row, {"decision": "deny"})[0], 200)
+                self.decided(out, worker, Decision.DENY)
+        # Ordinary arguments stay as they are and answerable.
+        request, _, _ = self.ask(args={"command": "ls -la", "description": "List files", "timeout": 5,
+                                       "url": "https://example.com/a?b=c", "cwd": "/tmp"})
+        status, _, body = self.detail(self.row(request))
+        self.assertEqual((body["withheld"], body["can"]["allow"]), (False, True), body)
+        print("ok  structured secrets (a labelled value, a nested Authorization header, a key) are withheld")
+
+    def test_secret_in_an_argument_key(self):
+        """The security review's case (PR #313): a token as an argument's key
+        is withheld from the phone, and a verified Allow is refused."""
+        self.secure_ok()
+        request, out, worker = self.ask(tool="mcp__x__exec", args={"command": "ls", TOKEN: "x"}, command="ls")
+        row = self.row(request)
+        status, _, body = self.detail(row)
+        self.assertEqual((status, body["withheld"]), (200, True))
+        self.assertNotIn(TOKEN, json.dumps(body))
+        status, _, got = self.post_answer(row, {"decision": "allow", "assertion": self.a.get(
+            {"rpId": HOST, "challenge": remote_auth.b64url(os.urandom(32))})})
+        self.assertNotEqual(status, 200)
+        self.assertEqual(self.options(row, "allow")[0], 409)
+        self.assertTrue(self.pending(request))
+        print("ok  a credential as an argument's key: withheld, no Allow")
+
+    def test_args_nested_past_redaction_depth(self):
+        """The security review's case (PR #313): an argument nested past the
+        card redaction's depth shows a placeholder nothing judged; the card
+        is withheld (Deny only)."""
+        self.secure_ok()
+        deep = {"run": "rm -rf ~/" + TOKEN}
+        for i in range(40):
+            deep = {f"l{i}": deep}
+        request, out, worker = self.ask(tool="mcp__x__exec", args={"spec": deep}, command=None)
+        row = self.row(request)
+        status, _, body = self.detail(row)
+        self.assertIn(remote_api.TOO_DEEP, json.dumps(body["card"]))
+        self.assertEqual((status, body["withheld"], body["can"]), (200, True, {"deny": True, "allow": False,
+                                                                               "always": False}))
+        self.assertEqual(self.options(row, "allow")[2], {"error": remote_answer.WITHHELD})
+        self.assertEqual(self.post_answer(row, {"decision": "deny"})[0], 200)
+        self.decided(out, worker, Decision.DENY)
+        print("ok  an argument nested past the redaction's depth: withheld, Deny only")
 
     def test_private_detail_never_leaks(self):
         self.secure_ok()
@@ -871,6 +955,26 @@ class Timeouts(Phone):
         self.assertFalse(auth.recently_active())
         print("ok  PH-10: never paired, never active")
 
+    def test_a_revoked_phone_is_not_a_phone(self):
+        """Review of PR #313 (F5): with every passkey revoked, the remote wait
+        ends at once, not 24 h later."""
+        self.assertTrue(self.auth.recently_active())
+        self.assertEqual(self.d.approvals.wait_s(), approvals_mod.REMOTE_TIMEOUT_S)
+        self.auth.revoke(self.auth.status()["passkeys"][0]["key"])
+        self.assertFalse(self.auth.recently_active())
+        self.assertEqual(self.d.approvals.wait_s(), approvals_mod.LOCAL_TIMEOUT_S)
+        print("ok  PH-10: only while a passkey is paired (a revoke ends the long wait)")
+
+    def test_a_private_card_keeps_its_120_s_cap(self):
+        """Review of PR #313 (F6): a HUD-only card with no wait of its own
+        still waits 120 s while the phone makes the broker wait 600 s."""
+        self.assertEqual(self.d.approvals.wait_s(), approvals_mod.REMOTE_TIMEOUT_S)
+        request, _, _ = self.ask(tool="hud_browser_act", args={}, command=None, layer="browser-gate",
+                                 hud_only=True, browser={"kind": "x"})
+        self.assertIsNone(request.max_wait_s)
+        self.assertEqual(request.timeout_s, approvals_mod.LOCAL_TIMEOUT_S)
+        print("ok  PH-10: a HUD-only card keeps its 120 s cap with no wait of its own")
+
 
 # -- the boundary ---------------------------------------------------------------------------------
 
@@ -919,15 +1023,46 @@ class Boundary(Phone):
                                     cookie=self.cookie, origin="https://evil.ts.net")[0], 403)
         print("ok  methods and shapes: 405, 400 for a bad decision or kind, 409 when gone, 403 without the Origin")
 
-    def test_the_answer_challenge_pool_is_its_own(self):
-        request, _, _ = self.ask()
+    def test_the_answer_challenge_pool_is_per_session(self):
         self.secure_ok()
-        for _ in range(remote_auth.MAX_ANSWER_CHALLENGES):
-            self.assertEqual(self.options(self.row(request), "allow")[0], 200)
-        status, _, body = self.options(self.row(request), "allow")
+        cap = remote_auth.MAX_ANSWER_CHALLENGES_PER_SESSION
+        cards = [self.ask(args={"command": f"echo {i}"})[0] for i in range(cap + 1)]
+        for card in cards[:cap]:
+            self.assertEqual(self.options(self.row(card), "allow")[0], 200)
+        status, _, body = self.options(self.row(cards[cap]), "allow")
         self.assertEqual(status, 429, body)
+        # Another session is never refused for this one's abandoned prompts.
+        other = self.pair()
+        other_cookie = self.signed_in(other)
+        self.assertEqual(self.options(self.row(cards[cap]), "allow", cookie=other_cookie)[0], 200)
         self.assertEqual(self.phone("POST", "/m/api/login/options", {})[0], 200, "sign-in is not crowded out")
-        print("ok  per-answer challenges: a pool of their own (429 when full), sign-in unaffected")
+        # The same session asking again for the same card and answer replaces
+        # its earlier challenge: never a 429, and the old one is spent.
+        old, _ = self.assertion(self.row(cards[0]), "allow")
+        for _ in range(cap * 3):
+            self.assertEqual(self.options(self.row(cards[0]), "allow")[0], 200)
+        status, _, body = self.post_answer(self.row(cards[0]), {"decision": "allow", "assertion": old})
+        self.assertEqual(status, 409, body)
+        credential, _ = self.assertion(self.row(cards[0]), "allow")
+        self.assertEqual(self.post_answer(self.row(cards[0]), {"decision": "allow", "assertion": credential})[0], 200)
+        print("ok  per-answer challenges: 4 per session (429 past it), never across sessions; a repeat replaces")
+
+    def test_pool_exhaustion_by_another_session(self):
+        """The security review's case (PR #313): another signed-in session
+        asking again and again, and one session's abandoned prompts, never
+        lock the owner's session out."""
+        self.secure_ok()
+        request, _, _ = self.ask()
+        row = self.row(request)
+        other = self.pair()
+        other_cookie = self.signed_in(other)
+        for _ in range(16):
+            self.assertEqual(self.options(row, "allow", cookie=other_cookie)[0], 200)
+        self.assertEqual(self.options(row, "allow")[0], 200, "the owner's own session")
+        for _ in range(16):
+            self.options(row, "allow")
+        self.assertEqual(self.options(row, "allow", cookie=other_cookie)[0], 200)
+        print("ok  per-answer challenges: another session's prompts never 429 this one")
 
 
 # -- the monitor ----------------------------------------------------------------------------------
@@ -1021,11 +1156,19 @@ class Monitor(Phone):
                 self.system.bad["ss"] = value
                 self.failing("listeners", why)
         self.system.bad.clear()
-        for value in ("0.0.0.0 wslrelay\n", "127.0.0.1 node\n", "127.0.0.1 wslrelay\n::1 python\n", "garbled\n"):
+        end = remote_secure.END_OF_LISTENERS + "\r\n"
+        for value in ("0.0.0.0 wslrelay\r\n", "127.0.0.1 node\r\n", "127.0.0.1 wslrelay\r\n::1 python\r\n",
+                      "garbled\r\n"):
             with self.subTest(windows=value):
-                self.system.bad["windows"] = value
+                self.system.bad["windows"] = value + end
                 self.failing("listeners", "on Windows")
-        self.system.bad["windows"] = ""
+        # A read that did not finish (no end line), or the end line not last.
+        for value in ("", "127.0.0.1 wslrelay\r\n", end + "0.0.0.0 node\r\n"):
+            with self.subTest(unfinished=value):
+                self.system.bad["windows"] = value
+                self.failing("listeners", "could not be read" if not value.startswith(end) else "no end line")
+        # Nothing listening on Windows (an unused port's real answer: the end line alone) passes.
+        self.system.bad["windows"] = end
         self.assertTrue(self.d.secure.check()["ok"], "nothing on Windows is not something else")
         print("ok  monitor (5): a second, non-loopback or foreign WSL listener, or anything but wslrelay on Windows")
 
@@ -1073,9 +1216,14 @@ class Monitor(Phone):
         argvs = remote_secure.reads(8408)
         self.assertEqual(argvs["serve"][1:], ["serve", "status", "--json"])
         self.assertEqual(argvs["status"][1:], ["status", "--json"])
-        self.assertEqual(argvs["ss"][:7], ["ss", "-H", "-l", "-t", "-n", "-e", "sport"])
+        # `ss` by full path, never through PATH (review of PR #313).
+        self.assertEqual(argvs["ss"][:7], ["/usr/bin/ss", "-H", "-l", "-t", "-n", "-e", "sport"])
+        self.assertTrue(os.path.isfile(remote_secure.SS) and os.access(remote_secure.SS, os.X_OK))
+        self.assertTrue(all(argv[0].startswith("/") for argv in argvs.values()), argvs)
         script = argvs["windows"][-1]
-        self.assertTrue(script.startswith("Get-NetTCPConnection -State Listen -LocalPort 8408"))
+        self.assertIn("Get-NetTCPConnection -State Listen -LocalPort 8408", script)
+        self.assertIn("-ne 'ObjectNotFound') { throw }", script, "only 'no such connection' is caught")
+        self.assertTrue(script.endswith(f"'{remote_secure.END_OF_LISTENERS}'"))
         for word in ("Set-", "Remove-", "Stop-", "New-", "Invoke-", "set ", "reset", "off", "funnel"):
             for argv in argvs.values():
                 self.assertNotIn(word, " ".join(argv[1:]), (word, argv))

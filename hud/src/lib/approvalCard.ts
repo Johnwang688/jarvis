@@ -27,6 +27,22 @@ export function reasonText(reason: unknown, layer: unknown): string {
   return `${typeof layer === "string" && layer ? `[${layer}] ` : ""}${reason}`;
 }
 
+/** What a value nested past the card redaction's depth shows instead
+ * (`jarvis/tools/secrets.redact_value`): nothing judged what it hides. */
+export const TOO_DEEP = "[nested too deep to judge]";
+
+/** The card's own warning when an argument was cut there (review of PR #313). */
+export const TOO_DEEP_WARNING =
+  "Some arguments are nested too deep to be shown or checked. Only DENY is offered: run it yourself if you meant it.";
+
+/** Whether any key or string in `value` is the depth placeholder: such a card offers DENY only. */
+export function nestedTooDeep(value: unknown, depth = 0): boolean {
+  if (typeof value === "string") return value === TOO_DEEP;
+  if (depth > 64 || !value || typeof value !== "object") return depth > 64;
+  if (Array.isArray(value)) return value.some((v) => nestedTooDeep(v, depth + 1));
+  return Object.entries(value as Record<string, unknown>).some(([k, v]) => k === TOO_DEEP || nestedTooDeep(v, depth + 1));
+}
+
 /** "DENIES AUTOMATICALLY IN 2m" / "45s": the countdown's words. */
 export function countdownText(left: number): string {
   return left > 120 ? `${Math.ceil(left / 60)}m` : `${Math.max(0, left)}s`;

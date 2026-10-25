@@ -168,7 +168,11 @@ function answerBox(row: InboxRow, a: InboxAnswers): HTMLElement {
       radio.checked = picked() === i;
       radio.disabled = busy;
       radio.addEventListener("change", () => { if (radio.checked) { a.picks.set(row.id, i); sync(); } });
-      label.append(radio, " ", el("span", "option-text", option));
+      // The suggestion's marker is the phone's own element before the option's
+      // words, never text an option could write (as the HUD's and P-3's).
+      label.append(radio, " ");
+      if (i === d.suggested) label.append(testid(el("span", "suggested", "suggested"), "m-suggested"), " ");
+      label.append(el("span", "option-text", option));
       group.append(label);
     });
     text.setAttribute("aria-label", "Or answer in your own words");

@@ -72,7 +72,7 @@ method but GET/HEAD carries exactly `Origin: https://<host>`. Refusals are
 assertion per Allow and Always, is P-4's: `answer_options` issues a
 challenge bound to one approval, one answer ("allow" or "always"), the
 session and its passkey (PH-4's sha256 of req_id, answer and a nonce;
-single use, 60 s, a pool of its own), and `answer_verify` checks it as
+single use, 60 s, at most 4 per session), and `answer_verify` checks it as
 `login_verify` checks a sign-in, plus that binding and that the credential
 is the session's own passkey. Past the session, `api_route` hands P-4's
 answer paths to `remote_answer`, and every other path but logout and `me`
@@ -130,8 +130,11 @@ CHALLENGE_BYTES = 32
 MAX_LOGIN_CHALLENGES = 32
 MAX_REGISTER_CHALLENGES = 8
 # Per-answer challenges (PH-4, P-4): their own pool, only for a signed-in
-# phone, so neither sign-ins nor answers can crowd the other out.
-MAX_ANSWER_CHALLENGES = 16
+# phone, so neither sign-ins nor answers can crowd the other out; and capped
+# per session, never across sessions (review of PR #313), so one session's
+# abandoned prompts can never refuse another's. The same session asking again
+# for the same card and answer replaces its earlier challenge.
+MAX_ANSWER_CHALLENGES_PER_SESSION = 4
 ANSWER_NONCE_BYTES = 32
 # What a per-answer challenge binds: PH-4's sha256(req_id ‖ answer ‖ nonce),
 # each part delimited (a req_id is `token_urlsafe`, never a NUL).
@@ -140,6 +143,8 @@ ANSWER_DECISIONS = ("allow", "always")
 # PH-10: a phone session seen this recently gives approvals the remote wait.
 ACTIVE_S = 24 * 3600
 MAX_SESSIONS = 32         # the least recently seen goes first
+# The most answer challenges there can be at once (a bound, never a shared cap).
+MAX_ANSWER_CHALLENGES = MAX_ANSWER_CHALLENGES_PER_SESSION * MAX_SESSIONS
 MAX_REVOKED = 16          # revoked passkey records kept, so a revoked id stays refused
 LAST_SEEN_WRITE_S = 60    # last-seen is written at most this often per session
 UA_CAP = 160
@@ -519,8 +524,15 @@ class RemoteAuth:
         self._challenges = {k: c for k, c in self._challenges.items() if c["expires"] > now}
         if kind == "register" and self._window_open() is None:
             raise _refuse("no pairing window is open")
-        cap = {"register": MAX_REGISTER_CHALLENGES, "answer": MAX_ANSWER_CHALLENGES}.get(kind, MAX_LOGIN_CHALLENGES)
-        if sum(1 for c in self._challenges.values() if c["kind"] == kind) >= cap:
+        if kind == "answer":
+            # Per session (`answer_options`); bounded by MAX_SESSIONS times that.
+            mine = [c for c in self._challenges.values()
+                    if c["kind"] == "answer" and c.get("session") == extra.get("session")]
+            full = len(mine) >= MAX_ANSWER_CHALLENGES_PER_SESSION
+        else:
+            cap = MAX_REGISTER_CHALLENGES if kind == "register" else MAX_LOGIN_CHALLENGES
+            full = sum(1 for c in self._challenges.values() if c["kind"] == kind) >= cap
+        if full:
             # Refused, never evicting a pending one (module note).
             raise AuthError(429, "too many sign-ins in progress; try again in a minute"
                             if kind != "answer" else "too many answers in progress; try again in a minute")
@@ -695,7 +707,8 @@ class RemoteAuth:
         """The request options for one answer (PH-4): a challenge bound to
         this approval, this exact answer ("allow" or "always"), this session
         and its passkey; single use, `CHALLENGE_S` on the monotonic clock,
-        in a pool of its own (`MAX_ANSWER_CHALLENGES`). `allowCredentials`
+        at most `MAX_ANSWER_CHALLENGES_PER_SESSION` per session (asking again
+        for the same card and answer replaces the earlier one). `allowCredentials`
         names the session's own passkey only."""
         webauthn, structs = _webauthn()
         if decision not in ANSWER_DECISIONS or not isinstance(req_id, str) or not req_id or len(req_id) > 64:
@@ -703,6 +716,11 @@ class RemoteAuth:
         with self._lock:
             self._require_usable()
             passkey = self._session_passkey(session)
+            # This session asking again for this card and this answer: the
+            # earlier challenge goes (its prompt was abandoned or retried).
+            self._challenges = {k: c for k, c in self._challenges.items()
+                                if not (c["kind"] == "answer" and c.get("session") == session["token_sha256"]
+                                        and c.get("req_id") == req_id and c.get("decision") == decision)}
             nonce = secrets.token_bytes(ANSWER_NONCE_BYTES)
             challenge = self.answer_challenge(req_id, decision, nonce)
             self._issue("answer", challenge, req_id=req_id, decision=decision, nonce=nonce,
@@ -788,9 +806,12 @@ class RemoteAuth:
             self._activity = at
 
     def recently_active(self) -> bool:
-        """PH-10: a phone session was seen within `ACTIVE_S` (24 h)."""
+        """PH-10: a phone is paired (an active, unrevoked passkey) and a
+        phone session was seen within `ACTIVE_S` (24 h)."""
         with self._lock:
             self._load()
+            if self._broken or not self._active():
+                return False
             now = self.wall()
             return self._activity is not None and now - self._activity < ACTIVE_S
 

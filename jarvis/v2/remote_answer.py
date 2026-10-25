@@ -17,8 +17,8 @@ this listener.
 (`{decision: "deny"}`) needs the session only, on any card, a HUD-only one
 included. Allow and Always each need their own passkey assertion: the phone
 asks `answer/options` for a challenge bound to this approval, this exact
-answer and this session (`RemoteAuth.answer_options`: single use, 60 s, a
-pool of its own), the owner verifies on the phone (Face ID or the passcode),
+answer and this session (`RemoteAuth.answer_options`: single use, 60 s, at
+most 4 per session), the owner verifies on the phone (Face ID or the passcode),
 and `answer` carries `{decision, assertion}`. The assertion is verified
 (`RemoteAuth.answer_verify`: origin, rpId, the UV flag, the counter rule,
 `crossOrigin` not true, the session's own passkey) **before** anything is
@@ -133,14 +133,18 @@ def _request(daemon, row_id: str):
 
 
 def phone_card(card: dict) -> tuple[dict, bool]:
-    """The card as the phone may be sent it, and whether the phone's scrub
-    changed anything: `card` minus another surface's handles
-    (`remote_api.APPROVAL_DETAIL_DROPPED`), every string through the phone's
-    scrub, nothing cut."""
-    from .remote_api import APPROVAL_DETAIL_DROPPED, _scrub_tree
+    """The card as the phone may be sent it, and whether it is withheld:
+    `card` minus another surface's handles
+    (`remote_api.APPROVAL_DETAIL_DROPPED`), through the phone's scrub
+    (`remote_api.scrub_structure`: every key and string, then the card as
+    one JSON text, so a label in a key and its value beside it are read
+    together), nothing cut. Withheld when any pass changed anything, or when
+    a value was nested past the card redaction's depth and so never judged
+    (review of PR #313)."""
+    from .remote_api import APPROVAL_DETAIL_DROPPED, scrub_structure
     shown = {k: v for k, v in card.items() if k not in APPROVAL_DETAIL_DROPPED}
-    scrubbed = _scrub_tree(shown)
-    return scrubbed, scrubbed != shown
+    scrubbed, withheld = scrub_structure(shown)
+    return scrubbed, withheld
 
 
 def _private_card(daemon, request) -> dict:

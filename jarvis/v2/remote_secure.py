@@ -23,11 +23,12 @@ these holds. Each is a check here, by name:
                 verification, `remote_auth.REQUIRE_UV`); before an answer,
                 the session's own passkey is that. The answer's assertion is
                 fresh and user-verified (`RemoteAuth.answer_verify`);
-  listeners     nothing else listens on the port: in WSL, `ss` lists exactly
-                one listener on it, 127.0.0.1, whose socket inode is the
-                listener's own; on Windows, `Get-NetTCPConnection` (through
-                `powershell.exe`, read-only) lists only WSL's `wslrelay` on
-                loopback, or nothing.
+  listeners     nothing else listens on the port: in WSL, `/usr/bin/ss`
+                lists exactly one listener on it, 127.0.0.1, whose socket
+                inode is the listener's own; on Windows,
+                `Get-NetTCPConnection` (through `powershell.exe`, read-only)
+                lists only WSL's `wslrelay` on loopback, or nothing, and
+                then its end line (`windows_listeners_argv`).
 
 **When it runs.** At start-up and every `INTERVAL_S` (5 minutes), from a
 thread of its own; and **again, in full, before every verified answer and
@@ -82,7 +83,12 @@ OUTPUT_CAP = 1024 * 1024
 
 TAILSCALE = "/mnt/c/Program Files/Tailscale/tailscale.exe"
 POWERSHELL = "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
+# By full path, never through PATH (review of PR #313: the daemon unit's PATH
+# starts with ~/.local/bin, which nothing protects).
+SS = "/usr/bin/ss"
 WINDOWS_RELAY = "wslrelay"
+# The Windows read's last line: without it the read did not finish.
+END_OF_LISTENERS = "END-OF-LISTENERS"
 LOOPBACK = "127.0.0.1"
 
 
@@ -108,8 +114,19 @@ def run_command(argv: list[str], timeout: float) -> str:
 
 
 def windows_listeners_argv(port: int) -> list[str]:
-    script = (f"Get-NetTCPConnection -State Listen -LocalPort {int(port)} -ErrorAction SilentlyContinue |"
-              " ForEach-Object { $_.LocalAddress + ' ' + (Get-Process -Id $_.OwningProcess).ProcessName }")
+    """Every listener on `port` on Windows, one `<address> <process>` line
+    each, then `END_OF_LISTENERS`. "No such connection" (a CIM
+    ObjectNotFound, what an unused port gives) is the empty answer; any
+    other error stops the script with no end line and a non-zero exit,
+    which fails the check (review of PR #313: `-ErrorAction
+    SilentlyContinue` exited 1 on an unused port, so nothing listening could
+    never pass)."""
+    script = ("$ErrorActionPreference = 'Stop'; "
+              f"try {{ Get-NetTCPConnection -State Listen -LocalPort {int(port)} |"
+              " ForEach-Object { $_.LocalAddress + ' ' + (Get-Process -Id $_.OwningProcess).ProcessName } }"
+              " catch [Microsoft.PowerShell.Cmdletization.Cim.CimJobException] {"
+              " if ($_.CategoryInfo.Category -ne 'ObjectNotFound') { throw } }; "
+              f"'{END_OF_LISTENERS}'")
     return [POWERSHELL, "-NoProfile", "-NonInteractive", "-Command", script]
 
 
@@ -118,7 +135,7 @@ def reads(port: int) -> dict[str, list[str]]:
     return {
         "serve": [TAILSCALE, "serve", "status", "--json"],
         "status": [TAILSCALE, "status", "--json"],
-        "ss": ["ss", "-H", "-l", "-t", "-n", "-e", "sport", "=", f":{int(port)}"],
+        "ss": [SS, "-H", "-l", "-t", "-n", "-e", "sport", "=", f":{int(port)}"],
         "windows": windows_listeners_argv(port),
     }
 
@@ -225,10 +242,12 @@ def check_certificate(daemon, ctx) -> None:
     handler = ctx.get("handler")
     if handler is not None:
         from .remote_auth import _headers
-        if _headers(handler, "Host") != [daemon.remote_host]:
+        sent = _headers(handler, "Host")
+        if not sent or len(sent) != 1 or sent[0].lower() != host:
             raise _Fail("the request's Host is not the tailnet name")
         origin = _headers(handler, "Origin")
-        exact = ["https://" + daemon.remote_host]
+        origin = [o.lower() for o in origin] if origin else origin
+        exact = ["https://" + host]
         # A write carries exactly the phone's Origin (§4 item 4); a read may
         # carry none, but never another.
         if (origin != exact if getattr(handler, "command", None) not in ("GET", "HEAD")
@@ -271,9 +290,10 @@ def check_listeners(daemon, ctx) -> None:
     rows = ctx.get("windows")
     if isinstance(rows, ReadFailed) or rows is None:
         raise _Fail(f"Windows' listeners could not be read ({rows})")
-    for row in (r.strip() for r in rows.splitlines()):
-        if not row:
-            continue
+    lines = [r.strip() for r in rows.splitlines() if r.strip()]
+    if not lines or lines[-1] != END_OF_LISTENERS:
+        raise _Fail("Windows' listeners could not be read (no end line)")
+    for row in lines[:-1]:
         parts = row.split()
         if len(parts) != 2 or parts[0] not in (LOOPBACK, "::1") or parts[1].lower() != WINDOWS_RELAY:
             raise _Fail("something else listens on the port on Windows")

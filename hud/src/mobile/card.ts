@@ -21,7 +21,7 @@
 // Pure DOM building from data, so the tests build it in jsdom.
 
 import { headlineLine } from "../lib/approval";
-import { argText, browserBody, originText, reasonText } from "../lib/approvalCard";
+import { argText, browserBody, nestedTooDeep, originText, reasonText, TOO_DEEP_WARNING } from "../lib/approvalCard";
 import { parseBrowserPrivateApproval, type BrowserApprovalPublic } from "../lib/browserapproval";
 import { clockOf, oneLine, type InboxRow } from "../lib/inbox";
 import { relayedLine, relayedParts } from "../lib/relays";
@@ -155,6 +155,11 @@ function ordinaryBody(card: Json, box: HTMLElement) {
       box.append(line);
     }
   }
+  if (nestedTooDeep(card.args)) {
+    const warn = testid(el("div", "reason m-why", TOO_DEEP_WARNING), "approval-too-deep");
+    warn.setAttribute("role", "alert");
+    box.append(warn);
+  }
   const reason = reasonText(card.reason, card.layer);
   if (reason) box.append(el("div", "reason", reason));
 }
@@ -267,7 +272,7 @@ export function cardView(state: CardState, actions: CardActions): HTMLElement {
       authorize.append(always);
     }
     const allow = button("AUTHORIZE", "allow", "approval-allow", actions.allow, true);
-    allow.disabled = state.busy || !allowable || !d!.can.allow;
+    allow.disabled = state.busy || !allowable || !d!.can.allow || (!!d && nestedTooDeep(d.card.args));
     authorize.append(allow);
     card.append(el("div", "m-gap"), authorize);
   }

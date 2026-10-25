@@ -71,7 +71,8 @@ class FakeSystem:
             "status": json.dumps({"BackendState": "Running", "Self": {"DNSName": host + "."},
                                   "MagicDNSSuffix": SUFFIX, "CertDomains": [host]}),
             "ss": f"LISTEN 0 5 127.0.0.1:{port} 0.0.0.0:* uid:1000 ino:{ino} sk:1 <->\n",
-            "windows": "127.0.0.1 wslrelay\n",
+            # This PC's real shape (CRLF lines, then the end line).
+            "windows": "127.0.0.1 wslrelay\r\nEND-OF-LISTENERS\r\n",
         }
         return self.bad.get(name, good[name])
 
@@ -409,6 +410,67 @@ def run(browser, check, until):
         tmp.cleanup()
 
 
+def desk_too_deep(browser, check, until, guard, init_script):
+    """The desk's card (review of PR #313): an argument nested past the
+    redaction's depth shows a warning, AUTHORIZE and ALWAYS are off, DENY
+    answers. Against the mock daemon, the card as the daemon would send it."""
+    print("\nThe desk's card: arguments nested too deep to judge offer DENY only")
+    from tests.face.hud_v2_layout_check import _boot
+    from tests.face.hud_v2_mock import MockDaemon
+    mock = MockDaemon(0).start()
+    base = f"http://127.0.0.1:{mock.port}"
+    ctx = browser.new_context(viewport={"width": 1400, "height": 900})
+    guard(ctx)
+    ctx.add_init_script(init_script)
+    posts: list[tuple[str, str]] = []
+
+    def record(route):
+        request = route.request
+        if request.method == "POST":
+            posts.append((request.url.split("/approvals/")[1], request.post_data or ""))
+        route.continue_()
+
+    ctx.route(re.compile(r".*/approvals/[^/]+$"), record)
+    page = ctx.new_page()
+    errors: list[str] = []
+    page.on("pageerror", lambda e: errors.append(str(e)))
+    try:
+        _boot(page, mock, base, until)
+        deep: object = "[nested too deep to judge]"
+        for i in range(32):
+            deep = {f"l{i}": deep}
+        mock.emit("approval_requested", {
+            "req_id": "deep-1", "code": "DEEP", "tool": "mcp__x__exec", "args": {"spec": deep},
+            "command": None, "reason": "unknown tool", "layer": "human", "origin": "task: deep",
+            "allowlistable": True, "timeout_s": 120})
+        until(lambda: page.locator('[data-testid="approval-card"]').count() == 1, timeout=6)
+        warn = page.locator('[data-testid="approval-too-deep"]')
+        check("desk: the card warns that arguments are nested too deep to check",
+              warn.count() == 1 and "nested too deep" in warn.inner_text())
+        check("desk: AUTHORIZE and ALWAYS are off, DENY is not",
+              page.locator('[data-testid="approval-allow"]').is_disabled()
+              and page.locator('[data-testid="approval-always"]').is_disabled()
+              and page.locator('[data-testid="approval-deny"]').is_enabled())
+        page.locator('[data-testid="approval-allow"]').click(force=True)
+        page.wait_for_timeout(300)
+        check("desk: a forced click on AUTHORIZE answers nothing", posts == [], str(posts))
+        page.locator('[data-testid="approval-deny"]').click()
+        until(lambda: posts, timeout=4)
+        check("desk: DENY answers it", posts and posts[0][0] == "deep-1" and '"deny"' in posts[0][1], str(posts))
+        mock.emit("approval_requested", {
+            "req_id": "shallow-1", "code": "SHAL", "tool": "run_command", "args": {"command": "ls"},
+            "command": "ls", "reason": "r", "layer": "human", "origin": "task: x", "allowlistable": True,
+            "timeout_s": 120})
+        until(lambda: page.locator('[data-testid="approval-card"][data-req="shallow-1"]').count() == 1, timeout=6)
+        check("desk: an ordinary card is unchanged (no warning, AUTHORIZE on)",
+              page.locator('[data-testid="approval-too-deep"]').count() == 0
+              and page.locator('[data-testid="approval-allow"]').is_enabled())
+        check("desk: no page errors", not errors, str(errors[:3]))
+    finally:
+        ctx.close()
+        mock.stop()
+
+
 def main():
     from playwright.sync_api import sync_playwright
     from tests.face import hud_v2_check as v2
@@ -418,6 +480,10 @@ def main():
             run(browser, v2.check, v2.until)
         except Exception as exc:
             v2.check("Phone answer scenario completes", False, f"{type(exc).__name__}: {exc}")
+        try:
+            desk_too_deep(browser, v2.check, v2.until, v2.guard, v2.FAKE_RECOGNIZER)
+        except Exception as exc:
+            v2.check("Desk too-deep scenario completes", False, f"{type(exc).__name__}: {exc}")
         finally:
             browser.close()
     print(f"{v2.CHECKS} phone answer checks, {len(v2.FAILURES)} failures")
