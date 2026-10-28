@@ -42,11 +42,11 @@ file named in `files._protected_state_paths`): the card's public projection
 private projection), and `request_digest`, a SHA-256 of the full request
 the broker judged (thread, task, tool, the unredacted arguments and the
 command). The arguments themselves are not kept. The file's I/O is the
-inbox stores' own (`inbox_marks.MarksStore`'s: `O_NOFOLLOW` folder and file,
+inbox stores' own (the snooze store's: `O_NOFOLLOW` folder and file,
 0600, a fresh `O_EXCL` temp file, fsync, `os.replace`); a file that is not
 exactly ours shows no row and matches no grant. A record is a `deferred`
 row (`rows`) at rank 4 for `WAITING_S` (24 h), then rank 8 information for
-`SHOWN_S`; never markable (`inbox_marks.UNMARKABLE_KINDS`).
+`SHOWN_S`; never markable (the snooze rules refuse its kind and prefix).
 
 **Approve and retry (QH-6) and Leave it (QH-7)** are `answer`, reached only
 from the owner's inbox route (`inbox.answer`) and the phone's answer route
