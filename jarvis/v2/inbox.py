@@ -1270,8 +1270,7 @@ def mark_row(daemon, row_id, body) -> dict:
             if row is None:
                 raise _gone()
             if not _marks.markable(row):
-                raise APIError(409, "only an item that waits on nothing can be snoozed or dismissed; "
-                                    "this one is live or blocks work")
+                raise APIError(409, "this item cannot be snoozed or dismissed: it is live or holds up work")
             entry = store.mark(row, live, snooze_until=when)
             cleared = None
             hidden = {"snoozed_until": entry["snoozed_until"], "dismissed_at": entry["dismissed_at"]}
