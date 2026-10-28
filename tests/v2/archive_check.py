@@ -888,7 +888,11 @@ class OwnerOnly(Base):
     # the file in `_protected_state_paths`: that body is set aside.
     DEFER_SOURCE = (r"\bquiet_defer\.(?!py\b)", r"import quiet_defer", r"from \.+quiet_defer",
                     r"DeferredStore", r"QuietDesk", r"deferred\.json", r"quiet_desk", r"attach_quiet_desk",
-                    r"owner_seen", r"approve_and_retry", r"""/inbox/defer""", r"deferral_answered")
+                    r"owner_seen", r"approve_and_retry", r"""/inbox/defer""", r"deferral_answered",
+                    # The morning review (MR, `review.py`, named only in SELF_PROTECTED):
+                    # its group grants and its routes on both listeners.
+                    r"import review\b", r"from \.+review\b", r"from \.+ import [^\n]*\breview\b",
+                    r"approve_many", r"settle_many", r"/inbox/review", r"/m/api/review", r"review_opens")
 
     def test_no_tool_or_cli_grants_a_deferred_approval(self):
         from jarvis import tools
@@ -1011,7 +1015,11 @@ class OwnerOnly(Base):
                                    ("POST", "/inbox/task:x/mark", {"clear": True}),
                                    # QH: Approve and retry, and Leave it.
                                    ("POST", "/inbox/defer:x/answer", {"action": "retry"}),
-                                   ("POST", "/inbox/defer:x/answer", {"action": "leave"})):
+                                   ("POST", "/inbox/defer:x/answer", {"action": "leave"}),
+                                   # MR: the morning review, Approve selected and Leave selected.
+                                   ("GET", "/inbox/review", None),
+                                   ("POST", "/inbox/review/approve", {"items": [{"id": "defer:x", "tag": "a" * 64}]}),
+                                   ("POST", "/inbox/review/leave", {"items": [{"id": "defer:x"}]})):
             with self.subTest(path=path):
                 self.request(method, path, body, 403)
                 self.request(method, path, body, 403, port=self.daemon.face_port)

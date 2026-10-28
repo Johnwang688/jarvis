@@ -60,6 +60,13 @@ process by the monotonic one too), bound to the digest and the thread,
 kept in an in-memory index (loaded once, updated on every write) that the
 broker takes from under its lock; the spend is then written.
 
+**The morning review's Approve selected (MR-7, `review.py`)** is
+`approve_many`: QH's grant for each selected id, written in one store
+transaction (`DeferredStore.settle_many`: every check under the store's
+lock, all or none; `GroupChanged` names what no longer fits and nothing is
+written), then one message per chat (`group_message`) and one resume per
+blocked task. `approve_and_retry` is unchanged.
+
 SELF_PROTECTED (`jarvis/tools/files.py`): it decides which asks are answered
 without the owner at the desk. Tests: tests/v2/quiet_defer_check.py.
 """

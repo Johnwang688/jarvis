@@ -9,8 +9,10 @@ cross midnight (the default does); `start == end` is refused, never read as
 
 **What reads it.** Web Push (P-6, `push.py`): nothing is pushed while quiet,
 rank 1 included, and when quiet hours end one push says what still waits.
-The next package (approvals asked at night) reuses this module; nothing here
-knows about either, and this module imports no HTTP, push or daemon code.
+The next package (approvals asked at night) reuses this module, and the
+morning review reads its night (`last_window`, MR-1: the current window, or
+the last that ended); nothing here knows about any of them, and this module
+imports no HTTP, push or daemon code.
 
 **The file.** `<data root>/quiet.json` (`config.V2_DATA_DIR`): the data root
 opened as a directory, the file read `O_NOFOLLOW | O_NONBLOCK` and refused
