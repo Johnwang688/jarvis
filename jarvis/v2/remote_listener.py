@@ -637,6 +637,11 @@ def handler_class(host: str, auth: remote_auth.RemoteAuth | None = None, daemon=
                     return self._error(408, "request timeout")
                 if body_status is not None:
                     return self._error(400, "bad request")
+                if self.path == "/" and self.command in ("GET", "HEAD"):
+                    # The bare address opens the app (P-8): after the strict
+                    # Host check, a relative Location and no body, for
+                    # exactly this target and no other.
+                    return self._send(302, b"", "text/plain", extra=(("Location", PREFIX),))
                 path = self.path.split("?", 1)[0].split("#", 1)[0]
                 if not path.startswith(PREFIX):
                     return self._error(404, "not found")

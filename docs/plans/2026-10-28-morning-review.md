@@ -224,7 +224,7 @@ the selection with Cancel focused and Enter cancels; inert under a live card;
 
 | WP | Owns | Acceptance |
 |---|---|---|
-| MR-A backend | `review.py` (new), `quiet_defer.py`, `quiet.py`, `remote_answer.py`, `remote_auth.py` (dispatch and docstring), `inbox.py`/`hud_api.py` (mount), `push.py`, `jarvis/tools/files.py` (SELF_PROTECTED), `tests/v2/review_check.py`, `archive_check.py`, `quiet_defer_check.py`, docs (control-plane, this plan's "as built", IN-3 note, phone §9/§10.9) | unit and mutation list above; boundary review |
+| MR-A backend | `review.py` (new), `quiet_defer.py`, `quiet.py`, `remote_answer.py`, `remote_auth.py` (dispatch and docstring), `inbox.py`/`hud_api.py` (mount), `push.py`, `jarvis/tools/files.py` (SELF_PROTECTED), `tests/v2/review_check.py`, `archive_check.py`, `quiet_defer_check.py`, docs (control-plane, this plan's "as built", IN-3 note, phone §9/§10.10) | unit and mutation list above; boundary review |
 | MR-B surfaces | `hud/src/lib/review.ts`, `ReviewView.tsx`, sidebar entry, `hud/src/mobile/review.ts`, `mobile/app.ts`, `mobile/views.ts` (tab only), CSS, the phone and HUD checks, vitest files | the checks above; Graphite tokens; touch targets ≥44 px; Approve and Leave far apart |
 
 Order: MR-A (route contract frozen in its first commit) then MR-B. Independent
