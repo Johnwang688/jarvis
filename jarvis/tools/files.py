@@ -165,6 +165,11 @@ SELF_PROTECTED = frozenset(
         # phone with the HUD's authority.
         "jarvis/v2/remote_answer.py",
         "jarvis/v2/remote_secure.py",
+        # Quiet hours (phone design §7, the owner's answer of 2026-10-28):
+        # when nothing is pushed to the owner's phone, and (next) when an
+        # approval waits for the morning. An agent that could edit it could
+        # keep the owner from hearing about a card.
+        "jarvis/v2/quiet.py",
         # The approval broker every surface answers through: who counts as
         # owner-verified, which cards are HUD-only, and what a card shows
         # before Allow (the owner's decision, 2026-10-25). An agent that
@@ -278,6 +283,10 @@ def _protected_state_paths() -> set[Path]:
     # own. Their folder is an ancestor, so deleting it is covered too.
     remote = Path(config.V2_DATA_DIR).expanduser() / "remote"
     paths |= {remote / "passkeys.json", remote / "sessions.json"}
+    # The owner's quiet hours (`v2/quiet.py`, the owner's answer of
+    # 2026-10-28): while they hold nothing is pushed to the phone. An agent
+    # that could rewrite the file could silence the owner's notifications.
+    paths.add(Path(config.V2_DATA_DIR).expanduser() / "quiet.json")
     # The owner inbox's "denied while you were away" records (inbox IN-3,
     # 2026-10-25), under the v2 data root: what the owner is told was refused
     # while nobody watched. An agent that could forge or clear them could

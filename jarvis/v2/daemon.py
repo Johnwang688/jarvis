@@ -580,6 +580,10 @@ class Daemon:
         # (`attach_system`), so no embedded or test daemon runs them.
         from .remote_secure import SecureMonitor
         self.secure = SecureMonitor(self)
+        # The owner's quiet hours (quiet.py, `<data root>/quiet.json`): read
+        # by the phone's push (P-6); changed only at the desk (`/quiet`).
+        from .quiet import QuietHours
+        self.quiet = QuietHours(stores.root)
         self._listeners = []
         from .hud_api import HUDLedger
         from .router import Router
@@ -3304,6 +3308,23 @@ def _handler(daemon):
             mounted = _remote_auth.hud_route(self, daemon, parts, query)
             if mounted is not None:
                 return mounted
+            if parts == ["quiet"]:
+                # The owner's quiet hours (quiet.py): owner-only, read and set.
+                from .projects import owner_only
+                owner_only(self, daemon)
+                _object(query, ())
+                if method == "GET":
+                    return 200, daemon.quiet.view()
+                if method == "POST":
+                    body = _object(self._body(), ("enabled", "start", "end"))
+                    try:
+                        daemon.quiet.update(body)
+                    except ValueError as exc:
+                        raise APIError(400, str(exc)) from None
+                    except OSError:
+                        raise APIError(503, "quiet hours could not be saved") from None
+                    return 200, daemon.quiet.view()
+                raise APIError(405, "method not allowed")
             if parts == ["route"] and method in ("GET", "POST"):
                 from .router import daemon_router
                 router = daemon_router(daemon)
