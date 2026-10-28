@@ -23,7 +23,7 @@ import { WINDOW_ID, isWindowId } from "./lib/windowId";
 import { parseProposal, parseReadingResult, parseSpeakerStatus } from "./lib/speaker";
 import { parseSttSettings, type SttChoice } from "./lib/sttSettings";
 import type { SttReply } from "./lib/stt";
-import { CHECK_IMPORT_PATH, answerPath, checkStepPath, decisionPath } from "./lib/inbox";
+import { CHECK_IMPORT_PATH, answerPath, checkStepPath, decisionPath, markPath, type MarkBody } from "./lib/inbox";
 
 export class ApiError extends Error {
   status: number;
@@ -271,6 +271,11 @@ export const api = {
   // --- the owner inbox (inbox A1's routes, owner-only) ----------------------
   /** The ranked rows, as served; lib/inbox `parseInbox` reads them. */
   inbox: () => req<unknown>("/inbox"),
+  /** Inbox B4: every row, the owner's snoozed and dismissed ones too, flagged `hidden`. */
+  inboxAll: () => req<unknown>("/inbox?all=1"),
+  /** Inbox B4 (IN-7): `{snooze_until}`, `{dismiss: true}` or `{clear: true}` (Undo), for a row of
+   * rank 5 to 8 only; the daemon judges the row's rank itself (409 otherwise). */
+  markInbox: (id: string, body: MarkBody) => req<unknown>(markPath(id), json(body)),
   /** One answer, dispatched by the daemon to the item's own surface: `{text}`
    * for a question, `{withdraw: true}` for a proposal. A 409 is "already
    * answered or gone". The id goes through `encodeURIComponent` (A1 decodes once). */

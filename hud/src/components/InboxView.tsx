@@ -44,6 +44,14 @@
 // The head's "Import a runbook" reads a runbook under a project's
 // docs/plans/ into unsaved drafts (`POST /inbox/checks/import`); only the
 // owner's Save on one draft stores it as a check.
+// Marks (inbox B4, IN-7, IN-8): a row of rank 5 to 8 the daemon calls
+// `markable` offers Snooze 1 h, Until tomorrow, 1 week and Dismiss, each a
+// plain button posting once to `POST /inbox/<id>/mark`; ranks 1 to 4 and "PR
+// list unavailable" never do (lib/inbox `canMark`, and the daemon refuses
+// them, 409). Hidden rows leave the list and the count; "Show hidden (n)"
+// shows them, muted, each saying why in code's words with Undo
+// (`{clear: true}`). Nothing here is keyboard-defaulted, and clicking a row
+// never marks it.
 // Every row links to its thread or task pane (a missed row, its chat only). **Clicking a row never answers
 // anything**: only Answer (or Enter in its box) and Withdraw post, each once
 // per press, through `POST /inbox/<id>/answer` (api.answerInbox). A 409 is
@@ -57,9 +65,10 @@ import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent }
 import { ApiError } from "../api";
 import type { ApprovalRequest } from "../types";
 import {
-  ANSWERS_TEXT, CLOSING_MS, NOTE_MAX, PENDING_MAX_RANK, VERDICTS, approvalReq, briefOf, checkOf, checkReceipt, clockOf,
-  decisionBody, decisionOf, groupRows, linkOf, missedNote, parseDrafts, questionOf, waitingCount, withdrawHint,
-  withdrawUntil, type CheckDraft, type InboxRow, type Verdict,
+  ANSWERS_TEXT, CLOSING_MS, NOTE_MAX, PENDING_MAX_RANK, SNOOZES, VERDICTS, approvalReq, briefOf, canMark, checkOf,
+  checkReceipt, clockOf, decisionBody, decisionOf, groupRows, hiddenNote, hiddenRows, linkOf, missedNote, parseDrafts,
+  questionOf, shownRows, snoozeUntil, waitingCount, withdrawHint, withdrawUntil, type CheckDraft, type InboxRow,
+  type MarkBody, type SnoozeFor, type Verdict,
 } from "../lib/inbox";
 import type { InboxSnapshot } from "../state/inbox";
 
@@ -81,6 +90,8 @@ export interface InboxViewProps {
   onMarkCheck: (checkId: string, step: number, body: { verdict: Verdict; note: string }) => Promise<unknown>;
   /** The runbook import (B2): `{path}` reads drafts, `{path, digest, save}` saves one. */
   onImportChecks: (body: { path: string } | { path: string; digest: string; save: number }) => Promise<unknown>;
+  /** A snooze, dismissal or Undo of one row (B4, IN-7): the daemon judges the row's rank itself. */
+  onMark: (rowId: string, body: MarkBody) => Promise<unknown>;
   /** Puts text on the clipboard (tests pass their own). */
   copyText?: (text: string) => Promise<void>;
   /** The clock (tests pass their own). */
@@ -118,6 +129,8 @@ export function InboxView(props: InboxViewProps) {
   const [importErr, setImportErr] = useState<string | null>(null);
   const [runbook, setRunbook] = useState<{ path: string; digest: string; drafts: CheckDraft[] } | null>(null);
   const [saved, setSaved] = useState<Record<number, string>>({});
+  // B4: the hidden rows are listed only while the owner asks to see them.
+  const [showHidden, setShowHidden] = useState(false);
   const sending = useRef(new Set<string>());
   const blockedNow = useRef(props.blocked);
   blockedNow.current = props.blocked;
@@ -245,6 +258,17 @@ export function InboxView(props: InboxViewProps) {
       sending.current.delete("import");
     }
   };
+
+  const markKey = (row: InboxRow) => `${row.id}#mark`;
+
+  const mark = (row: InboxRow, body: MarkBody) => {
+    // Undo only ever shows a row; a snooze or dismiss only one the rule allows.
+    if (!("clear" in body) && !canMark(row)) return;
+    if ("clear" in body && !row.hidden) return;
+    void post(row, () => props.onMark(row.id, body), markKey(row));
+  };
+
+  const snooze = (row: InboxRow, choice: SnoozeFor) => mark(row, { snooze_until: snoozeUntil(choice, clock()) });
 
   const open = (row: InboxRow) => {
     if (blockedNow.current) return;
@@ -506,8 +530,42 @@ export function InboxView(props: InboxViewProps) {
     return brief ? <div className="ir-body"><div className="ir-text" data-testid="inbox-brief">{brief}</div></div> : null;
   };
 
-  const groups = groupRows(rows);
+  const hidden = hiddenRows(rows);
+  const groups = groupRows(showHidden ? rows : shownRows(rows));
   const count = waitingCount(rows);
+  const visible = shownRows(rows).length;
+
+  // B4: Snooze and Dismiss for a row of rank 5 to 8 (`canMark`), or, for a
+  // hidden row, why it is hidden and Undo. Plain buttons, none defaulted.
+  const marks = (row: InboxRow) => {
+    const off = props.blocked || !!busy[markKey(row)];
+    if (row.hidden) {
+      return (
+        <div className="ir-marks" data-testid="inbox-marks">
+          <span className="ir-when muted" data-testid="inbox-hidden-note">{hiddenNote(row, now)}</span>
+          <button type="button" className="quiet" data-testid="inbox-mark-undo" disabled={off}
+                  onClick={() => mark(row, { clear: true })}>
+            Undo
+          </button>
+        </div>
+      );
+    }
+    if (!canMark(row)) return null;
+    return (
+      <div className="ir-marks" data-testid="inbox-marks">
+        {SNOOZES.map((s) => (
+          <button type="button" key={s.key} className="quiet" data-testid={`inbox-snooze-${s.key}`} disabled={off}
+                  onClick={() => snooze(row, s.key)}>
+            {s.label}
+          </button>
+        ))}
+        <button type="button" className="quiet" data-testid="inbox-dismiss" disabled={off}
+                onClick={() => mark(row, { dismiss: true })}>
+          Dismiss
+        </button>
+      </div>
+    );
+  };
 
   return (
     <div className="scroll inbox" data-testid="inbox-view" data-status={status} data-reads={props.snapshot.reads}>
@@ -516,6 +574,12 @@ export function InboxView(props: InboxViewProps) {
         <span className="muted small" data-testid="inbox-summary">
           {status === "ready" ? (count ? `${count} waiting on you` : "Nothing waiting on you") : ""}
         </span>
+        {hidden.length ? (
+          <button type="button" className="quiet" data-testid="inbox-show-hidden" disabled={props.blocked}
+                  aria-pressed={showHidden} onClick={() => { if (!blockedNow.current) setShowHidden((v) => !v); }}>
+            {showHidden ? `Hide hidden (${hidden.length})` : `Show hidden (${hidden.length})`}
+          </button>
+        ) : null}
         <button type="button" className="quiet" data-testid="inbox-import-toggle" disabled={props.blocked}
                 aria-expanded={importOpen} onClick={() => setImportOpen((v) => !v)}>
           Import a runbook
@@ -578,7 +642,7 @@ export function InboxView(props: InboxViewProps) {
       {status === "error" ? (
         <div className="pad err" data-testid="inbox-error">Could not read the inbox: {props.snapshot.message}</div>
       ) : null}
-      {status === "ready" && !rows.length ? (
+      {status === "ready" && !visible ? (
         <div className="pad muted" data-testid="inbox-empty">Nothing is waiting on you.</div>
       ) : null}
       {groups.map(({ group, rows: mine }) => (
@@ -590,7 +654,7 @@ export function InboxView(props: InboxViewProps) {
             return (
               // No handler on the row itself: a click on it answers nothing.
               <div className="inbox-row" key={row.id} data-testid="inbox-row" data-id={row.id} data-kind={row.kind}
-                   data-rank={row.rank} data-tone={tone(row)}>
+                   data-rank={row.rank} data-tone={tone(row)} data-hidden={row.hidden ? "1" : undefined}>
                 <div className="ir-head">
                   <span className="ir-title" data-testid="inbox-title">{row.title}</span>
                   {asked ? <span className="ir-time muted">{asked}</span> : null}
@@ -598,6 +662,7 @@ export function InboxView(props: InboxViewProps) {
                 {row.blocks ? <div className="ir-blocks muted" data-testid="inbox-blocks">{row.blocks}</div> : null}
                 {row.origin ? <div className="ir-origin" data-testid="inbox-origin">{row.origin}</div> : null}
                 {body(row)}
+                {marks(row)}
                 {errors[row.id] ? <div className="err small" role="alert" data-testid="inbox-row-error">{errors[row.id]}</div> : null}
                 {link ? (
                   <div className="ir-foot">

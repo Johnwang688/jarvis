@@ -50,6 +50,7 @@ function draw(over: Partial<InboxViewProps> = {}) {
     onOpenThread: vi.fn(), onOpenTask: vi.fn(), onAnswer: vi.fn(async () => ({ ok: true })),
     onDecide: vi.fn(async () => ({ ok: true, delivery: "queued", note: "Sent to the asking chat." })), onReread: vi.fn(),
     onMarkCheck: vi.fn(async () => ({ ok: true, done: false })), onImportChecks: vi.fn(async () => ({})),
+    onMark: vi.fn(async () => ({ ok: true })),
     copyText: vi.fn(async () => {}),
     now: () => NOW, ...over,
   };
@@ -599,3 +600,128 @@ describe("InboxView: live checks (inbox B2, IN-6)", () => {
     expect(p.onReread).toHaveBeenCalled();
   });
 });
+
+describe("InboxView: snooze and dismiss (inbox B4, IN-7)", () => {
+  // Every kind at ranks 1 to 4 served as `markable: true` anyway: the HUD's own rule still offers nothing.
+  const marked = () => [
+    ...served().map((r) => ({ ...r, markable: true })),
+    { id: "task:b", kind: "task", rank: 4, title: "task b is blocked", blocks: "waits", task_id: "b", markable: true,
+      detail: { task_id: "b", state: "blocked", brief: "x" } },
+    { id: "pr:o/r#5", kind: "pr", rank: 5, title: "PR #5 is ready to merge", blocks: "waits on you", markable: true,
+      detail: { head: "a".repeat(40) } },
+    { id: "prx:list", kind: "pr_unavailable", rank: 5, title: "PR list unavailable", blocks: "x", markable: true, detail: {} },
+    { id: "dec:d1", kind: "decision", rank: 6, title: "chat t asks", blocks: "nothing waits", markable: true,
+      detail: { decision_id: "d0123456789ab", question: "q", options: ["a", "b"], default: null } },
+    { id: "task:g", kind: "task", rank: 8, title: "task g failed", blocks: "fyi", task_id: "g", markable: true,
+      hidden: { snoozed_until: null, dismissed_at: "2026-10-25T09:00:00+00:00" },
+      detail: { task_id: "g", state: "failed", brief: "hidden " + HOSTILE } },
+    { id: "missed:M2", kind: "missed", rank: 8, title: "Denied while you were away: x", blocks: "fyi", markable: true,
+      hidden: { snoozed_until: "2026-10-25T11:00:00+00:00", dismissed_at: null }, detail: { resolution: "timeout" } },
+  ];
+  const marksOf = (id: string) => rowOf(id).querySelector('[data-testid="inbox-marks"]');
+
+  it("offers Snooze and Dismiss on ranks 5 to 8 only, never on 1 to 4 or 'PR list unavailable'", () => {
+    draw({ snapshot: snap(marked()), approvals: [] });
+    for (const id of ["appr:R1", "q:t2:r9", "prop:k", "task:b", "prx:list"]) expect(marksOf(id)).toBeNull();
+    for (const id of ["pr:o/r#5", "dec:d1", "task:f"]) {
+      expect(qa(`[data-testid="inbox-row"][data-id="${id}"] [data-testid="inbox-marks"] button`).map((b) => b.textContent))
+        .toEqual(["Snooze 1 h", "Until tomorrow", "1 week", "Dismiss"]);
+    }
+  });
+
+  it("a row the daemon does not call markable offers nothing", () => {
+    draw();       // served() carries no `markable`
+    expect(qa('[data-testid="inbox-marks"]').length).toBe(0);
+  });
+
+  it("hidden rows leave the list and the count; 'Show hidden (n)' shows them with why and Undo", async () => {
+    const p = draw({ snapshot: snap(marked()), approvals: [] });
+    expect(q('[data-testid="inbox-row"][data-id="task:g"]')).toBeNull();
+    expect(q('[data-testid="inbox-row"][data-id="missed:M2"]')).toBeNull();
+    // Ranks 1 to 5 waiting, hidden ones never counted: appr, q, prop, task:b, pr, prx.
+    expect(q('[data-testid="inbox-summary"]')!.textContent).toBe("6 waiting on you");
+    const toggle = q('[data-testid="inbox-show-hidden"]') as HTMLButtonElement;
+    expect(toggle.textContent).toBe("Show hidden (2)");
+    act(() => toggle.click());
+    expect(toggle.textContent).toBe("Hide hidden (2)");
+    expect(rowOf("task:g").dataset.hidden).toBe("1");
+    expect(rowOf("task:g").querySelector('[data-testid="inbox-hidden-note"]')!.textContent).toBe("Dismissed");
+    expect(rowOf("missed:M2").querySelector('[data-testid="inbox-hidden-note"]')!.textContent).toMatch(/^Snoozed until \d\d:\d\d/);
+    expect(rowOf("task:g").querySelector('[data-testid="inbox-dismiss"]')).toBeNull();
+    expect(q('[data-testid="inbox-summary"]')!.textContent).toBe("6 waiting on you");
+    expect(host!.querySelector("img")).toBeNull();
+    act(() => (rowOf("task:g").querySelector('[data-testid="inbox-mark-undo"]') as HTMLButtonElement).click());
+    await flush();
+    expect(p.onMark).toHaveBeenCalledTimes(1);
+    expect(p.onMark).toHaveBeenCalledWith("task:g", { clear: true });
+    expect(p.onReread).toHaveBeenCalled();
+  });
+
+  it("each button posts once: a snooze its time ahead, Dismiss {dismiss: true}", async () => {
+    const p = draw({ snapshot: snap(marked()), approvals: [] });
+    const click = (id: string, test: string) =>
+      act(() => (rowOf(id).querySelector(`[data-testid="${test}"]`) as HTMLButtonElement).click());
+    click("pr:o/r#5", "inbox-snooze-hour");
+    await flush();
+    click("dec:d1", "inbox-dismiss");
+    await flush();
+    click("task:f", "inbox-snooze-week");
+    await flush();
+    click("task:f", "inbox-snooze-tomorrow");
+    await flush();
+    const calls = (p.onMark as ReturnType<typeof vi.fn>).mock.calls;
+    expect(calls.map((c) => c[0])).toEqual(["pr:o/r#5", "dec:d1", "task:f", "task:f"]);
+    expect(Date.parse(calls[0][1].snooze_until) - NOW).toBe(3_600_000);
+    expect(calls[1][1]).toEqual({ dismiss: true });
+    expect(Date.parse(calls[2][1].snooze_until) - NOW).toBe(7 * 86_400_000);
+    const tomorrow = new Date(Date.parse(calls[3][1].snooze_until));
+    expect(tomorrow.getHours()).toBe(8);
+    expect(tomorrow.getTime()).toBeGreaterThan(NOW);
+    expect(tomorrow.getTime() - NOW).toBeLessThanOrEqual(2 * 86_400_000);
+    expect(calls.every((c) => c.length === 2 && !("rank" in c[1]))).toBe(true);
+  });
+
+  it("clicking a row, its title or its text never marks it; nothing is keyboard-defaulted", async () => {
+    const p = draw({ snapshot: snap(marked()), approvals: [] });
+    for (const el of [rowOf("task:f"), rowOf("task:f").querySelector('[data-testid="inbox-title"]') as HTMLElement]) {
+      act(() => el.click());
+    }
+    act(() => { rowOf("task:f").dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })); });
+    await flush();
+    expect(p.onMark).not.toHaveBeenCalled();
+    for (const b of qa('[data-testid="inbox-marks"] button')) {
+      expect(b.getAttribute("type")).toBe("button");
+      expect(b.hasAttribute("autofocus")).toBe(false);
+      expect(document.activeElement).not.toBe(b);
+    }
+  });
+
+  it("under a card nothing marks: every mark button is off and a script's click posts nothing", async () => {
+    const p = draw({ snapshot: snap(marked()), approvals: [], blocked: true });
+    const buttons = qa('[data-testid="inbox-marks"] button');
+    expect(buttons.length).toBeGreaterThan(0);
+    for (const b of buttons) {
+      expect((b as HTMLButtonElement).disabled).toBe(true);
+      b.removeAttribute("disabled");
+      act(() => b.click());
+    }
+    await flush();
+    expect(p.onMark).not.toHaveBeenCalled();
+  });
+
+  it("a 409 says the daemon's own words and reads again", async () => {
+    const p = draw({ snapshot: snap(marked()), approvals: [],
+      onMark: vi.fn(async () => { throw new ApiError(409, "this item cannot be snoozed or dismissed"); }) });
+    act(() => (rowOf("task:f").querySelector('[data-testid="inbox-dismiss"]') as HTMLButtonElement).click());
+    await flush();
+    expect(q('[data-testid="inbox-notice"]')!.textContent).toBe("this item cannot be snoozed or dismissed");
+    expect(p.onReread).toHaveBeenCalled();
+  });
+
+  it("with only hidden rows, it says nothing waits and still offers them", () => {
+    draw({ snapshot: snap(marked().filter((r) => "hidden" in r)), approvals: [] });
+    expect(q('[data-testid="inbox-empty"]')).not.toBeNull();
+    expect(q('[data-testid="inbox-show-hidden"]')!.textContent).toBe("Show hidden (2)");
+  });
+});
+

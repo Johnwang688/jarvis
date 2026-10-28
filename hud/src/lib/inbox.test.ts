@@ -6,6 +6,7 @@ import {
   CLOSING_MS, GROUPS, anyPending, answerPath, briefOf, clockOf, groupRows, linkOf, missedNote, oneLine, parseInbox,
   parseRow, questionOf, setBadge, textBlock, waitingCount, withdrawHint, withdrawUntil, type InboxRow,
   decisionBody, decisionOf, decisionPath, CHECK_IMPORT_PATH, checkOf, checkReceipt, checkStepPath, parseDrafts,
+  canMark, hiddenNote, hiddenRows, markPath, shownRows, snoozeUntil, MARKABLE_MIN_RANK,
 } from "./inbox";
 
 const row = (over: Record<string, unknown> = {}) => ({
@@ -318,3 +319,48 @@ describe("live checks (inbox B2)", () => {
     expect(got.drafts).toEqual([{ index: 0, title: "A", prs: [5], steps: [{ do: "a", expect: "" }], savable: true, reason: null }]);
   });
 });
+
+describe("marks (inbox B4, IN-7)", () => {
+  it("markable needs the daemon's word and rank 5 to 8, never 'PR list unavailable'", () => {
+    expect(MARKABLE_MIN_RANK).toBe(5);
+    for (let rank = 1; rank <= 8; rank++) {
+      const r = parseRow(row({ id: `task:t${rank}`, kind: "task", rank, markable: true }))!;
+      expect([rank, r.markable, canMark(r)]).toEqual([rank, rank >= 5, rank >= 5]);
+    }
+    expect(parseRow(row({ id: "task:t", kind: "task", rank: 8 }))!.markable).toBe(false);
+    expect(parseRow(row({ id: "task:t", kind: "task", rank: 8, markable: "yes" }))!.markable).toBe(false);
+    expect(parseRow(row({ id: "prx:list", kind: "pr_unavailable", rank: 5, markable: true }))!.markable).toBe(false);
+    expect(parseRow(row({ id: "zz:list", kind: "pr_unavailable", rank: 5, markable: true }))!.markable).toBe(false);
+    expect(parseRow(row({ id: "prx:list", kind: "other", rank: 5, markable: true }))!.markable).toBe(false);
+    expect(parseRow(row({ id: "pr:o/r#5", kind: "pr", rank: 5, markable: true }))!.markable).toBe(true);
+  });
+
+  it("a hidden row is never counted, never offered a mark, and listed apart", () => {
+    const rows = parseInbox([
+      row({ id: "task:a", kind: "task", rank: 5, markable: true }),
+      row({ id: "task:b", kind: "task", rank: 5, markable: true, hidden: { snoozed_until: "2026-10-25T11:00:00Z", dismissed_at: null } }),
+      row({ id: "task:c", kind: "task", rank: 8, markable: true, hidden: { dismissed_at: "2026-10-25T09:00:00Z" } }),
+    ])!;
+    expect(waitingCount(rows)).toBe(1);
+    expect(shownRows(rows).map((r) => r.id)).toEqual(["task:a"]);
+    expect(hiddenRows(rows).map((r) => r.id)).toEqual(["task:b", "task:c"]);
+    expect(rows.map(canMark)).toEqual([true, false, false]);
+    expect(hiddenNote(rows[2])).toBe("Dismissed");
+    expect(hiddenNote(rows[1], Date.parse("2026-10-25T10:00:00Z"))).toMatch(/^Snoozed until \d\d:\d\d/);
+    // Hidden, with a time the HUD cannot read: still hidden.
+    expect(parseRow(row({ hidden: { snoozed_until: "soon" } }))!.hidden).toEqual({ snoozedUntil: null, dismissedAt: null });
+    expect(parseRow(row({ hidden: "yes" }))!.hidden).toBeNull();
+  });
+
+  it("snooze times and the path", () => {
+    const now = Date.parse("2026-10-25T23:30:00Z");
+    expect(snoozeUntil("hour", now)).toBe("2026-10-26T00:30:00.000Z");
+    expect(snoozeUntil("week", now)).toBe("2026-11-01T23:30:00.000Z");
+    const t = new Date(Date.parse(snoozeUntil("tomorrow", now)));
+    expect([t.getHours(), t.getMinutes()]).toEqual([8, 0]);
+    expect(t.getTime()).toBeGreaterThan(now);
+    expect(snoozeUntil("tomorrow", now).endsWith("Z")).toBe(true);
+    expect(markPath("pr:o/r#5")).toBe("/inbox/pr%3Ao%2Fr%235/mark");
+  });
+});
+

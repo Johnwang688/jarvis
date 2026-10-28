@@ -106,7 +106,9 @@ export class InboxStore {
   }
 }
 
-export const inbox = new InboxStore({ fetch: () => api.inbox(), badge: (n) => setBadge(n) });
+// Inbox B4: every row, hidden ones flagged (`?all=1`), so the view can offer
+// "Show hidden (n)"; the count and the badge (`waitingCount`) leave them out.
+export const inbox = new InboxStore({ fetch: () => api.inboxAll(), badge: (n) => setBadge(n) });
 
 export function useInbox(store: InboxStore = inbox): InboxSnapshot {
   return useSyncExternalStore(store.subscribe, store.snapshot);
