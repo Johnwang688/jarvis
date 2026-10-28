@@ -497,7 +497,12 @@ class Push:
         except Exception as exc:     # noqa: BLE001
             LOG.warning("phone push: the first read failed (%s)", type(exc).__name__)
         while not self._stopping.is_set():
-            self._wake.wait(self.next_wait())
+            try:
+                wait = self.next_wait()
+            except Exception as exc:     # noqa: BLE001 — a bad clock never stops the sender
+                LOG.warning("phone push: the next wake could not be worked out (%s)", type(exc).__name__)
+                wait = RECHECK_S
+            self._wake.wait(wait)
             self._wake.clear()
             if self._stopping.is_set():
                 return
