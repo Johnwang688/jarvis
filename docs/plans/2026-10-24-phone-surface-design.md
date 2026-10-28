@@ -871,3 +871,36 @@ approval: per row only), checks the set again under the store's lock, and
 grants all or none; a 409 `changed` unticks what changed and says why.
 Leave selected needs the session only. Every tap target is at least 44 px.
 
+
+### 10.11 The chat layout and the compact notifications row (2026-10-28)
+
+The owner, on the iPhone, asked for the standard mobile agent chat and chose
+Claude/Codex style. UI only: no route, rule or daemon behavior changed.
+
+- **The transcript** (`views.ts` `logRow`, `rowStyle`): no boxes. The owner's
+  words (role `owner` only, never a peer or a relay) in a right-aligned
+  bubble with its marks and time under it; a reply (Jarvis, Claude, Codex)
+  as plain full-width text through the same sanitized Markdown; every other
+  row (the daemon's own lines, another chat's relay) one muted line, folded,
+  that a tap opens to its whole text. Tool calls are still not in the
+  projection (§5); nothing new is shown.
+- **The message box** (`write.ts` `composerView`): one slim bar pinned above
+  the tab bar: the box (one line, growing to five, then scrolling), the mic
+  and a round Send arrow, lit only when there is text. Its notes ("Sent.",
+  "Queued…", "Sending…", offline, the talk line) sit above it. Send's rules
+  are P-5's unchanged: a tap only, never Enter; off while empty, offline or
+  sending; NEVER_STEER at the daemon.
+- **The mic** (`talk.ts`): P-7's "Hold to talk" button, now a 44 px round
+  icon in the bar (it was a 56 px full-width button). Its words stay its
+  text for screen readers; every hold, slide-off, cancel, permission and
+  upload rule is unchanged.
+- **Scrolling and the keyboard:** a new message, or a redraw, keeps the
+  newest message in view only when the owner was already at the bottom.
+  The app is sized to the visual viewport (`viewport.ts`), and while the
+  keyboard is up the tab bar steps aside, so the keyboard never covers the
+  bar; the tab bar keeps the bottom safe area.
+- **Notifications** (`notify.ts`): one compact row, about 46 px instead of
+  136: "Notifications on · count only, never what" with a small "Turn off"
+  at its right ("Notifications off" and "Turn on" likewise). The states and
+  what each does are unchanged; the long sentences (install, blocked,
+  unsupported, unavailable) keep their words in the same small type.
