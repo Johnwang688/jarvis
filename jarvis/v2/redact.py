@@ -22,8 +22,7 @@ Three readers, three entry points:
   (`password: …`, `client_secret: …`).
 
 The rules beyond the table: a private key's whole block (`private_key_spans`,
-SEC-5) when it is nothing but key material, else its header, footer and the
-key lines beside them, never code between them (`_card_key_spans`), a `Bearer`/`Basic` credential, a URL's password (a model's input
+SEC-5: header to footer, as main withholds it), a `Bearer`/`Basic` credential, a URL's password (a model's input
 keeps a local or test host's: `http://u:p@localhost:5173/`), an AWS secret
 key beside or labelled as one, a lower-case `sk`/`oat`/`rt` bearer with a
 random run, a Discord token whose first part decodes to an id. Every
@@ -558,11 +557,7 @@ def _prefixed_spans(view: str, table, lo: int = 0, hi: int | None = None) -> lis
 def _shape_spans(view: str, mode: str) -> list[tuple[int, int, str]]:
     """Every shape in `view`, as (start, end, kind) in the view, for the
     reader `mode` names (`STRICT`, `MODEL`, `DISPLAY`)."""
-    # A private key's block: whole only when it is nothing but key material,
-    # else its header, footer and the key lines beside them, never code
-    # between them (third review of #314, H: on every reader, a model's
-    # input and the Diff tab as well as a card).
-    found = [(lo, hi, KEY) for a, b in private_key_spans(view) for lo, hi in _card_key_spans(view, a, b)]
+    found = [(a, b, KEY) for a, b in private_key_spans(view)]
     found += _prefixed_spans(view, SHAPES)
     if mode != STRICT:
         found += _regex_spans(view, HEURISTIC)
@@ -1043,104 +1038,188 @@ def _command_words(text: str) -> list[tuple[int, int]]:
     return out
 
 
-# A private key's block, on every reader (third review of #314, H): it
-# goes whole only when everything between its header and footer is key
-# material, so a fake header and footer never hide the code between them
-# (`HEADER = "-----BEGIN RSA PRIVATE KEY-----"`, code, `FOOTER = …`).
-# What a block's line may be once its framing is taken off: base64 of a
-# key's line length (60 or more) or that reads as random (a capital and a
-# digit, `+` or `=` padding: a body line of a real key does, a word or a
-# path such as `reboot`, `/sbin/reboot` or `main` does not), a PGP checksum,
-# an armor or PEM header line (`Version:`, `Comment:`, `Proc-Type:`,
-# `DEK-Info:`, of plain characters), or nothing. Its framing: quotes (a
-# `b`/`r`/`u` prefix too), `(`, `,` and a `+` operator before; quotes, `)`,
-# `,`, `;` and a `+` operator after (a `+` the base64 holds is its own);
-# and the line breaks `secrets._KEY_BREAK` knows (a real one or a `\n`
-# escape) between.
-_CARD_KEY_SPLIT = re.compile("(" + KEY_BEGIN.pattern + ")|(" + KEY_END.pattern + r")|(\r?\n|(?:\\r)?\\n|\\r)")
-_CARD_FRAME_HEAD = re.compile(r"[ \t]*(?:(?:[(,]|\+(?=[ \t\"']))[ \t]*)*(?:[bBrRuU]{0,2}[\"'][ \t]*)?")
-_CARD_FRAME_TAIL = " \t\"'),;"
+# A private key's block on an approval card that is text (third review of
+# #314, H; the coordinator's decision of round 3): every other reader
+# withholds header to footer whole, as main does (`private_key_spans`), but
+# a card must never hide code that will run, so a fake header and footer
+# around code (`HEADER = "-----BEGIN RSA PRIVATE KEY-----"`, code,
+# `FOOTER = …`) must not hide the code. A block goes whole on a card only
+# when every word between its header and footer is key material or framing;
+# otherwise its header, footer and the key-material words next to them go,
+# never anything past a word that is not.
+#
+# The breaks between a block's lines: a real line break (CRLF, LF or a lone
+# CR), a `\n`/`\r` escape however many backslashes deep (JSON in JSON), and
+# spaces (a key flattened onto one line). A line that is an armor or PEM
+# header (`Version:`, `Comment:`, `Proc-Type:`, `DEK-Info:`, of plain
+# characters) is one item; any other line is its words.
+_CARD_KEY_SPLIT = re.compile("(" + KEY_BEGIN.pattern + ")|(" + KEY_END.pattern + r")|(\r\n|\r|\n|\\+(?:r\\+)?n|\\+r)")
+_CARD_WORD = re.compile(r"[^ \t]+")
 _CARD_ARMOR = re.compile(r"(?:Version|Comment|Hash|Charset|MessageID|Proc-Type|DEK-Info):[ \t]*[A-Za-z0-9 .,:/@+_=\-]*")
+# A word that is framing alone: quotes, a `+` operator, a bracket, a comma
+# or semicolon, a comment's or quote's `#`, `>` or `//`, a continuation's `\`.
+_CARD_FRAME = re.compile(r"[\"'+(),;#>\\]+|//")
+# A word's framing: before it, `(`, `+` and `,` only when a quote follows
+# (with a `b`/`r`/`u` prefix); after it, a quote then `+`, `)`, `,` or `;`;
+# then a continuation's `\`. A `(` or `+` not next to a quote is the word's.
+_CARD_FRAME_HEAD = re.compile(r"[(+,]*[bBrRuU]{0,2}[\"']")
 _CARD_BASE64 = re.compile(r"[A-Za-z0-9+/]+={0,2}")
 _CARD_CHECKSUM = re.compile(r"=[A-Za-z0-9+/]{4}")
-_CARD_GAP = re.compile(r"(?:\s|\\[rn])*")
+_CARD_ESCAPED_SLASH = re.compile(r"\\+/")
+_CARD_GAP = re.compile(r"(?:\s|\\+[rn])*")
+# A key's body line: at least this long, of both cases and a digit.
+_CARD_KEY_MIN = 40
+# A block's last line before its footer: at most this long, `=` padded.
+_CARD_TAIL_MAX = 64
 
 
 def _card_core(text: str, a: int, b: int) -> tuple[int, int]:
-    """The piece `text[a:b]` (one line of a block) without its framing."""
-    a = _CARD_FRAME_HEAD.match(text, a, b).end()
-    while b > a:
-        if text[b - 1] in _CARD_FRAME_TAIL:
-            b -= 1
-        elif text[b - 1] == "+" and (b - 1 == a or text[b - 2] in " \t\"'"):
-            b -= 1                                  # the operator, not the base64's own
-        else:
-            break
-    return a, b
+    """The word `text[a:b]` without its framing."""
+    if b > a and text[b - 1] == "\\":
+        b -= 1
+    j = b
+    while j > a and text[j - 1] in "+),;":
+        j -= 1
+    if j > a and text[j - 1] in "\"'":
+        b = j - 1
+    head = _CARD_FRAME_HEAD.match(text, a, b)
+    return (head.end() if head else a), b
 
 
-def _card_key_line(core: str) -> str | None:
-    """What a block's line (its framing off) is: "" (nothing), "armor",
-    "key" (key material that reads as random), or None (anything else,
-    which is never withheld as a key's)."""
+def _card_word(text: str, a: int, b: int):
+    """(what, core start, core end, core length unescaped) for one word of a
+    block: what is "frame"
+    (framing alone), "key" (a body line: 40+ base64 characters of both cases
+    and a digit; or a PGP checksum), "tail" (base64 of at most 64 ending in
+    `=` padding: key material only as the block's last line before its
+    footer), "slash-key"/"slash-tail" (either, starting with `/`: counted
+    only where the block's own line width vouches for it), or None (anything else:
+    never withheld as a key's, and nothing past it is)."""
+    if _CARD_FRAME.fullmatch(text, a, b):
+        return "frame", a, a, 0
+    ca, cb = _card_core(text, a, b)
+    core = _CARD_ESCAPED_SLASH.sub("/", text[ca:cb])
     if not core:
-        return ""
+        return "frame", a, a, 0
     if _CARD_CHECKSUM.fullmatch(core):
-        return "key"
-    if _CARD_ARMOR.fullmatch(core):
-        return "armor"
-    if _CARD_BASE64.fullmatch(core) and (len(core) >= 60 or (
-            any(c.isupper() for c in core) and (_DIGIT.search(core) or "+" in core or core.endswith("=")))):
-        return "key"
-    return None
+        return "key", ca, cb, 0
+    if not _CARD_BASE64.fullmatch(core):
+        return None, ca, cb, 0
+    long_key = (len(core) >= _CARD_KEY_MIN and any(c.isupper() for c in core)
+                and any(c.islower() for c in core) and _DIGIT.search(core) is not None)
+    tail = len(core) <= _CARD_TAIL_MAX and core.endswith("=")
+    if not (long_key or tail):
+        return None, ca, cb, 0
+    sort = "key" if long_key else "tail"
+    return ("slash-" + sort if core.startswith("/") else sort), ca, cb, len(core)
+
+
+def _card_items(text: str, a: int, b: int) -> list[list]:
+    """A block's span as items [kind, start, end, (what, core start, core
+    end)]: "head", "foot", "break", "armor" and "word"."""
+    items: list[list] = []
+
+    def line(lo: int, hi: int) -> None:
+        stripped = text[lo:hi].strip(" \t")
+        if stripped and _CARD_ARMOR.fullmatch(stripped):
+            items.append(["armor", lo, hi, ("frame", lo, lo, 0)])
+            return
+        for w in _CARD_WORD.finditer(text, lo, hi):
+            items.append(["word", w.start(), w.end(), _card_word(text, w.start(), w.end())])
+
+    pos = a
+    for m in _CARD_KEY_SPLIT.finditer(text, a, b):
+        if m.start() > pos:
+            line(pos, m.start())
+        kind = "head" if m.group(1) is not None else "foot" if m.group(2) is not None else "break"
+        items.append([kind, m.start(), m.end(), None])
+        pos = m.end()
+    if pos < b:
+        line(pos, b)
+    # Glued to a header (`private_key_spans` takes a token stuck to its
+    # front): part of it.
+    if (len(items) > 1 and items[0][0] == "word" and items[1][0] == "head"
+            and items[0][2] == items[1][1]):
+        items[:2] = [["head", items[0][1], items[1][2], None]]
+    return items
+
+
+def _card_counts(items) -> list[bool]:
+    """For each item, whether it is key material or framing (True) or
+    something a card must show (False). A "tail" counts only as the last
+    word before a footer; a "slash" only at the width two or more of the
+    block's body lines share (a `/` starts one base64 line in 64, and a
+    path never is one)."""
+    widths: dict[int, int] = {}
+    for kind, a, b, what in items:
+        if kind == "word" and what[0] == "key" and what[3]:
+            widths[what[3]] = widths.get(what[3], 0) + 1
+    width = max(widths, key=lambda n: (widths[n], n)) if widths else 0
+    if widths.get(width, 0) < 2:
+        width = 0
+    out = []
+    for i, (kind, a, b, what) in enumerate(items):
+        if kind != "word":
+            out.append(True)
+            continue
+        sort, n = what[0], what[3]
+        final = False
+        if sort in ("tail", "slash-tail"):
+            j = i + 1
+            while j < len(items) and (items[j][0] == "break" or (items[j][0] == "word" and items[j][3][0] == "frame")):
+                j += 1
+            final = j < len(items) and items[j][0] == "foot"
+        if sort == "slash-key":
+            ok = bool(width) and n == width
+        elif sort == "slash-tail":
+            ok = bool(width) and final and n <= width
+        else:
+            ok = sort in ("frame", "key") or (sort == "tail" and final)
+        out.append(ok)
+    return out
 
 
 def _whole_key_block(text: str, items) -> bool:
-    """Is every line of a block's span key material, framing or nothing?"""
-    return all(kind != "line" or _card_key_line(text[slice(*_card_core(text, a, b))]) is not None
-               for kind, a, b in items)
+    """Is every item of a block's span key material, framing or a break?"""
+    return all(_card_counts(items))
 
 
 def _card_key_spans(text: str, a: int, b: int) -> list[tuple[int, int]]:
-    """What any reader withholds of a private key's span `text[a:b]` (a block,
+    """What a card withholds of a private key's span `text[a:b]` (a block,
     an unterminated one, or a footer's tail; `private_key_spans`): the whole
-    span when every line in it is key material (`_whole_key_block`); else
-    each header and footer, and the key-material lines next to one (below a
-    header, above a footer, across blank and armor lines), never a line
-    that is anything else, nor any line past it."""
-    items, pos = [], a
-    for m in _CARD_KEY_SPLIT.finditer(text, a, b):
-        if m.start() > pos:
-            items.append(("line", pos, m.start()))
-        kind = "head" if m.group(1) is not None else "foot" if m.group(2) is not None else "break"
-        items.append((kind, m.start(), m.end()))
-        pos = m.end()
-    if pos < b:
-        items.append(("line", pos, b))
-    # Glued to a header (`private_key_spans` takes a token stuck to its
-    # front): part of it.
-    if len(items) > 1 and items[0][0] == "line" and items[1][0] == "head":
-        items[:2] = [("head", items[0][1], items[1][2])]
+    span when every word in it is key material or framing
+    (`_whole_key_block`); else each header and footer, and the key-material
+    words next to one (below a header, above a footer, across framing,
+    breaks and armor lines), never a word that is anything else, nor any
+    past it."""
+    items = _card_items(text, a, b)
     if _whole_key_block(text, items):
         return [(a, b)]
+    counts = _card_counts(items)
+    # A line's words go together: a line holding one word that is not key
+    # material is shown whole (`Ab3…Gh5 --install` keeps its program).
+    line_ok, start = [True] * len(items), 0
+    for i in range(len(items) + 1):
+        if i == len(items) or items[i][0] != "word":
+            ok = all(counts[start:i])
+            for k in range(start, i):
+                line_ok[k] = ok
+            start = i + 1
     held = []
-    for i, (kind, lo, hi) in enumerate(items):
+    for i, (kind, lo, hi, _what) in enumerate(items):
         if kind not in ("head", "foot"):
             continue
         held.append((lo, hi))
         step = 1 if kind == "head" else -1
         j = i + step
-        while 0 <= j < len(items) and items[j][0] in ("line", "break"):
-            if items[j][0] == "line":
-                ca, cb = _card_core(text, items[j][1], items[j][2])
-                what = _card_key_line(text[ca:cb])
-                if what is None:
-                    break
-                if what == "key":
-                    held.append((ca, cb))
+        while 0 <= j < len(items) and items[j][0] in ("word", "break", "armor"):
+            if not (counts[j] and line_ok[j]):
+                break
+            if items[j][0] == "word" and items[j][3][0] != "frame":
+                held.append(items[j][3][1:3])
             j += step
     out: list[list[int]] = []
-    for lo, hi in sorted(set(held)):        # one marker for lines only breaks apart
+    for lo, hi in sorted(set(held)):        # one marker for words only breaks apart
         if out and (lo <= out[-1][1] or _CARD_GAP.fullmatch(text, out[-1][1], lo) is not None):
             out[-1][1] = max(out[-1][1], hi)
         else:
@@ -1177,7 +1256,12 @@ def card_spans(text: str, *, command: bool = True) -> list[tuple[int, int, str]]
       `secrets._key_blocks`, a URL's userinfo to `strip_url_credentials`."""
     from jarvis.tools import secrets as S
     if not command:
-        return _merge(spans(text, mode=DISPLAY) + _labelled_card_spans(text))
+        view = _View(text)
+        found = []
+        for va, vb, kind in _shape_spans(view.view, DISPLAY):
+            for lo, hi in _card_key_spans(view.view, va, vb) if kind == KEY else [(va, vb)]:
+                found.append((*view.span(lo, hi), kind))
+        return _merge(found + _labelled_card_spans(text))
     if S._run_names(text) is True:
         return []
     view = _View(text)

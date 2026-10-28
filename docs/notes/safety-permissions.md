@@ -3224,28 +3224,46 @@ logged headline as text, the records on the model's scrub, the old
 single-pattern scan, a terminated block judged line by line, and one per
 low finding); each finding's check fails on `9286ca6f`.
 
-The third review of #314 (`16af27ec`, same file): h3 a private key's header
-and footer never hide what lies between, on every reader: a card that is
-text, `log.jsonl`, the Diff tab (`for_display`), `chat_reads.scrub`, and a
-model's input (`for_model`, diff review's `for_model_strict`). A block goes whole only when every line between is key
-material once its framing is off (`_card_key_spans`, `_whole_key_block`);
-otherwise its header, footer and the adjacent key-material lines go, never
-code (a fake header and footer as strings, as comments, a header-only string
-before a real block). l5 an unterminated block's header and key lines go,
-the code after them stays. m2 `-eyJ…`, `-eyJa…` and `jmcp_…` runs are linear
-(`_RUN_STARTS`: a start inside an earlier same-kind start's run is skipped,
-being dominated by it). t3 a card's command-word guard (`_clear_of`) and its
-placeholders' return (`CardPass.show`) are one sweep each. l4 a wrapped AWS
-session token's `…==` tail is not a `NAME=` statement. Each with its mutation
-(h3's includes the old whole-span rule on the non-card readers).
-An unterminated block now goes through its key lines, not to the end of the
-text (`redact_private_key_check` k2 updated). Known residual: a key line
-counts as key material when it is base64 of 60 or more characters, or has a
-capital and a digit, `+` or `=` padding (or is a PGP checksum), so one line of
-that shape between a fake header and footer (a program named `Ab1Cd2`) is
-still withheld with the block. Real commands rarely have that shape; a line of any
-other shape breaks the block. `secrets._key_blocks` (v1's SEC-6 pass inside
-one shell quoting) keeps its own, looser `_key_material` rule, as on main.
+The third review of #314 (`16af27ec`, same file). **Where the "never hide
+code that runs" rule applies:** approval cards (a `Write`'s content, an
+`Edit`'s `new_string`, a reason) and their `log.jsonl` fields. The Diff tab
+(`for_display`), the model views (`for_model`, diff review's
+`for_model_strict`), `chat_reads.scrub` and a compaction reason withhold a
+private key from header to footer whole, as main does (`private_key_spans`,
+SEC-5; an unterminated block to the end of the text). Applying the card rule
+there too (`51a277bf`) leaked key bodies main withheld (flattened, escaped,
+CR-broken or prefixed keys), so it was reverted on those readers.
+
+h3 on a card a block goes whole only when every word between header and
+footer is key material or framing (`_card_key_spans`, `_card_word`,
+`_whole_key_block`): a body word of 40+ base64 characters with both cases and
+a digit; the block's last word before its footer, at most 64 characters,
+`=`-padded; a PGP checksum; an armor or PEM header line. A word starting with
+`/` counts only at the width two or more body lines share, and never one
+starting with `(` or a line with a word that is not key material. Breaks are
+real line breaks (a lone CR too), `\n` escapes at any depth and spaces;
+framing is quotes, `#`, `>`, `//`, a continuation's `\`, and `(`, `)`, `+`,
+`,`, `;` next to a quote; `\/` reads as `/`. Otherwise the header, the footer
+and the whole key-material lines next to them go, never code (a fake header
+and footer as strings, comments or `echo`s around code or one word of it,
+`/tmp/Payload1`, `Deploy2`, `(Run2)`, a 60-character path). A real key in ten
+shapes (raw, JSON, concatenated, flattened, JSON in JSON, `\/`, CR, `#`, `>`,
+continuations) is withheld on every reader. l5 on a card an unterminated
+block's header and key lines go, the code after them stays. m2 `-eyJ…`,
+`-eyJa…` and `jmcp_…` runs are linear (`_RUN_STARTS`: a start inside an
+earlier same-kind start's run is skipped, being dominated by it). t3 a
+card's command-word guard (`_clear_of`) and its placeholders' return
+(`CardPass.show`) are one sweep each. l4 a wrapped AWS session token's `…==`
+tail is not a `NAME=` statement. Each with its mutation (h3: whole whatever
+lies between, any one-word base64 line a key's, the card rule on every
+reader).
+
+Known residual on cards: one word shaped like a key's line between a fake
+header and footer is still withheld with the block: 40+ random-looking base64
+characters (a program so named), or a last word before the footer ending in
+`=` padding (`Deploy2==`, which a shell reads as an assignment). Real commands
+rarely have either shape. `secrets._key_blocks` (v1's SEC-6 pass inside one
+shell quoting) keeps its own, looser `_key_material` rule, as on main.
 
 Follow-ups from the second review, not changed here: the phone's marker rule
 (a card showing any `[withheld: …]` is Deny-only there) is stricter than it

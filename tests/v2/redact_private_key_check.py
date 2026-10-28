@@ -19,8 +19,7 @@ no real credential file or environment value is read.
 Cases:
   k1  RSA, OPENSSH, EC, ENCRYPTED (PKCS#8 and legacy Proc-Type/DEK-Info), PGP
       and plain PKCS#8 blocks mid-text: one `[redacted]`, surroundings unchanged
-  k2  an unterminated block: from its header through its key lines (to the
-      end of the text when nothing else follows; third review of #314)
+  k2  an unterminated block: from its header to the end of the text
   k3  a footer-only tail: the key-material lines above the footer, back to the
       first line that is not one (and no further)
   k4  two blocks in one text stay two blocks (non-greedy)
@@ -175,12 +174,9 @@ class BlockChecks(Base):
         self.assertWhole(BEFORE + key + AFTER, BEFORE + R + AFTER)
 
     def test_k2_an_unterminated_block_runs_to_the_end(self):
-        """k2: a header with no footer: redacted through its key lines, to the
-        end of the text when nothing else follows. Since the third review of
-        #314 (H, L5) a line after them that is not key material (prose, code)
-        stays, as a fake header can sit above code that runs."""
+        """k2: a header with no footer: redacted through the end of the text."""
         body = "\n".join(b64_lines(self.rng, 8))
-        self.assertWhole(BEFORE + header("RSA PRIVATE KEY") + "\n" + body + AFTER, BEFORE + R + AFTER)
+        self.assertWhole(BEFORE + header("RSA PRIVATE KEY") + "\n" + body + AFTER, BEFORE + R)
         self.assertWhole(header("OPENSSH PRIVATE KEY") + "\n" + body, R)
         # Any private-key footer ends the block, whatever its kind; what
         # follows it stays.
