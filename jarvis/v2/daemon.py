@@ -520,6 +520,13 @@ class Daemon:
         # *entire* command travels with it, never a summary.
         self.approvals = approvals if approvals is not None else PendingApprovals(
             on_request=self._approval_requested, on_resolve=self._approval_resolved)
+        # AS (approval_summary.py): the card's code-built Where line, filled
+        # by the broker before its lock; and the model's one-line summary,
+        # attached by daemon2's `main()` only (`attach_approval_summaries`),
+        # so no test or embedded daemon calls a model.
+        if isinstance(self.approvals, PendingApprovals):
+            self.approvals.describe = self._describe_approval
+        self.approval_summaries = None
         # `permit_factory=None` means the WP5 policy over this daemon's broker.
         # An injected factory (the tests, a future strict-profile runner) wins,
         # so nothing here decides policy on its own.
@@ -2276,16 +2283,92 @@ class Daemon:
         `main()` only, so no embedded or test daemon's broker reads the
         wall clock (a test attaches its own). Returns the desk."""
         from .quiet_defer import QuietDesk
-        desk = QuietDesk(self.quiet, self.owner_present, self.inbox.deferred, self.bus.publish)
+        desk = QuietDesk(self.quiet, self.owner_present, self.inbox.deferred, self.bus.publish,
+                         summarize=self.begin_approval_summary)
         self.inbox.deferred.load_index()        # the live grants, read once
         if hasattr(self.approvals, "quiet_desk"):
             self.approvals.quiet_desk = desk
         return desk
 
+    def attach_approval_summaries(self, summaries=None):
+        """AS: the model's one-line summary on each public card. Called by
+        daemon2's `main()` only (a test passes its own, with a fake model).
+        Returns the summarizer."""
+        if summaries is None:
+            from .approval_summary import ApprovalSummaries
+            summaries = ApprovalSummaries()
+        self.approval_summaries = summaries
+        return summaries
+
+    def _describe_approval(self, request: ApprovalRequest) -> None:
+        """AS-8: the card's Where line, "project · branch · folder", from the
+        folder the gate judged the call in (else the project's root) and the
+        asking chat's (or task's) project. Code only, display only; called by
+        the broker before its lock."""
+        from .approval_summary import where_line
+        project = None
+        try:
+            thread = self.stores.threads.get(request.thread_id) if request.thread_id else None
+            if thread is None and request.task_id:
+                thread = self.stores.tasks.get(request.task_id)
+            project_id = getattr(thread, "project_id", None)
+            project = self.stores.projects.get(project_id) if project_id else None
+        except Exception:  # noqa: BLE001 — no project named, the folder still is
+            project = None
+        folder = request.cwd if isinstance(request.cwd, str) and request.cwd else (
+            project.root if project is not None else None)
+        request.where = where_line(project.name if project is not None else "", folder)
+
+    def begin_approval_summary(self, request: ApprovalRequest, done) -> str:
+        """AS: start the summary of one public request. `done(state, text)`
+        is called once with the outcome (at once for a cached one or none,
+        later from another thread for a pending one). Returns the state now.
+        Never raises; with no summarizer attached, "" and no call."""
+        from .approval_summary import OFF, PENDING, READY
+        summaries = self.approval_summaries
+        if summaries is None or request.private:
+            return ""
+        try:
+            state, text = summaries.begin(request, done)
+        except Exception:  # noqa: BLE001
+            state, text = OFF, ""
+        if state == READY:
+            done(READY, text)
+        elif state != PENDING:
+            done(OFF, "")
+        return state
+
     def _approval_requested(self, request: ApprovalRequest) -> None:
+        # AS-4: the card is published first, marked pending; the summary is
+        # started only after, outside the broker's lock, and never waited on.
+        summarize = self.approval_summaries is not None and not request.private
+        if summarize:
+            request.summary_state = "pending"
         self.bus.publish({"kind": "approval_requested",
                           "thread_id": request.thread_id,
                           "data": request.to_json()})
+        if summarize:
+            try:
+                self.begin_approval_summary(
+                    request, lambda state, text: self._approval_summarized(request, state, text))
+            except Exception:  # noqa: BLE001 — the card stands without one
+                LOG.warning("Cannot start an approval summary")
+
+    def _approval_summarized(self, request: ApprovalRequest, state: str, text: str) -> None:
+        """AS-7: a summary arrived (or failed): set on the request, then told
+        to every surface while the card is still pending. Display only."""
+        from .approval_summary import READY, clean_summary
+        text = clean_summary(text) if state == READY else ""
+        request.summary = text
+        request.summary_state = state if (state != READY or text) else "failed"
+        try:
+            if not any(r.req_id == request.req_id for r in self.approvals.pending()):
+                return
+            self.bus.publish({"kind": "approval_summary", "thread_id": request.thread_id,
+                              "data": {"req_id": request.req_id, "summary": request.summary,
+                                       "summary_state": request.summary_state}})
+        except Exception:  # noqa: BLE001
+            LOG.warning("Cannot announce an approval summary")
 
     def _approval_resolved(self, request: ApprovalRequest, decision, resolution: str) -> None:
         # Inbox IN-3: a `timeout` or `shutdown` leaves a "denied while you
@@ -3049,6 +3132,9 @@ class Daemon:
         titles = self.titles
         if titles is not None:
             titles.stop()                       # its Codex session ends with the metadata cancel
+        summaries = getattr(self, "approval_summaries", None)
+        if summaries is not None:
+            summaries.close()                   # AS: no summary starts; pending ones end as failed
         reviews = getattr(self, "diff_reviews", None)
         if reviews is not None:
             reviews.stop()                      # quick reviews (diff_review.py): cancelled, none starts
@@ -3977,6 +4063,10 @@ def main() -> int:
     # Quiet hours (QH, quiet_defer.py): approvals asked while the owner
     # sleeps are deferred to the inbox. Attached here only, so no embedded
     # or test daemon's broker depends on the time of day.
+    # Approval summaries (AS, approval_summary.py): the model's one line on
+    # each card. Here only, so no embedded or test daemon calls a model;
+    # before the desk, which summarizes what it defers.
+    daemon.attach_approval_summaries()
     daemon.attach_quiet_desk()
     hatch = EscapeHatch(daemon, daemon.approvals)
     discord = None

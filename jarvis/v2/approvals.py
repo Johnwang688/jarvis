@@ -12,7 +12,11 @@ What is new here, and why:
   when remote approval shipped: a card that names a tool teaches the owner to
   approve without reading, and a DM that summarises a command is a DM that
   authorises something the owner did not see. `ApprovalRequest.command` is the
-  exact string, never a digest and never a summary.
+  exact string, never a digest and never a summary. Since AS (2026-10-28,
+  the owner's request) a card also carries a model's one-line `summary`
+  beside the code-built `where` and its reason, and shows the command
+  collapsed, one tap away: display text only, which nothing here or in the
+  gate ever reads (`approval_summary.py`).
 * **`human_backed` is a property of the asker, not of the command.** It is the
   v1 invariant that nearly shipped broken (CLAUDE.md, *Command rules*): a
   background thread nobody is watching gets `DenyAll`, whose `human_backed` is
@@ -353,6 +357,14 @@ class ApprovalRequest:
     cwd: str | None = None
     grantable: bool = True
     owner_initiated: bool = False
+    # Approval summaries (AS, approval_summary.py), display only, public
+    # cards only, set by daemon code only and read by nothing that decides:
+    # the model's one line and its state ("pending", "ready", "failed",
+    # "off"; "" when no summarizer is attached), and the code-built "project
+    # · branch · folder" line (`PendingApprovals.describe`, before the lock).
+    summary: str = ""
+    summary_state: str = ""
+    where: str = ""
     _hud_private: bool = field(default=False, init=False, repr=False)
     _card: dict | None = field(default=None, init=False, repr=False, compare=False)
     # Quiet hours (QH, `quiet_defer.QuietDesk.settle`): set by the broker
@@ -393,6 +405,10 @@ class ApprovalRequest:
             "headline": self.card()["headline"],
             "discord_channel_id": self.discord_channel_id,
             **({"subagent": self.subagent} if self.subagent else {}),
+            # AS: display only, and only once set (an older reader sees the card it knew).
+            **({"where": self.where} if self.where else {}),
+            **({"summary": self.summary if self.summary_state == "ready" else "",
+                "summary_state": self.summary_state} if self.summary_state else {}),
             **({"relayed_from": {k: clean_line(str(self.relayed_from.get(k) or ""), 80)
                                  for k in ("title", "provider", "thread_id", "kind")}}
                if isinstance(self.relayed_from, dict) and self.relayed_from else {}),
@@ -459,6 +475,10 @@ class PendingApprovals:
         # 24 h" (`RemoteAuth.recently_active`). Read at each ask; an error
         # counts as no phone.
         self.phone_active: Callable[[], bool] | None = None
+        # AS (approval_summary.py): set by the daemon to fill the card's
+        # code-built Where line. Called at each ask before the lock; display
+        # only, and one that raises leaves the card without it.
+        self.describe: Callable[[ApprovalRequest], None] | None = None
         # QH (quiet_defer.py): attached by daemon2's `main()` only
         # (`Daemon.attach_quiet_desk`). Its `settle` runs under the lock below
         # at each ask: the owner's single-use inbox grant for exactly this
@@ -495,6 +515,12 @@ class PendingApprovals:
                 return True
         if stopped():
             return self._record(request, Decision.DENY, "cancelled")
+        describe = self.describe
+        if describe is not None and not request.private:
+            try:
+                describe(request)
+            except Exception:  # noqa: BLE001 — display only
+                LOG.warning("Cannot describe where approval runs; the card shows no Where line")
         desk = self.quiet_desk
         with self._lock:
             if self._closed:

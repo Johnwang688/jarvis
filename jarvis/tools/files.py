@@ -195,6 +195,11 @@ SELF_PROTECTED = frozenset(
         # before Allow (the owner's decision, 2026-10-25). An agent that
         # could edit it could answer its own approval.
         "jarvis/v2/approvals.py",
+        # Approval summaries (AS, 2026-10-28): the model-written line and
+        # the code-built Where line on every approval card, and what of a
+        # card leaves for the model. An agent that could edit it could put
+        # its own words on the card the owner reads before Allow.
+        "jarvis/v2/approval_summary.py",
     }
 )
 

@@ -155,9 +155,15 @@ def phone_card(card: dict) -> tuple[dict, bool]:
     together), nothing cut. Withheld when any pass changed anything, or when
     a value was nested past the card redaction's depth and so never judged
     (review of PR #313)."""
-    from .remote_api import APPROVAL_DETAIL_DROPPED, scrub_structure
+    from .remote_api import APPROVAL_DETAIL_DROPPED, scrub_structure, split_summary
     shown = {k: v for k, v in card.items() if k not in APPROVAL_DETAIL_DROPPED}
+    # AS-10: the model's summary is judged apart, never part of `withheld`:
+    # it arrives after the card, and a model's words must not change what
+    # the owner may answer. One the scrub would change is dropped.
+    shown, summary = split_summary(shown)
     scrubbed, withheld = scrub_structure(shown)
+    if summary and isinstance(scrubbed, dict):
+        scrubbed = {**scrubbed, **summary}
     return scrubbed, withheld
 
 
