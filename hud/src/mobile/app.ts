@@ -45,7 +45,8 @@ import {
 } from "./model";
 import { chatsView, el, inboxView, logRow, taskView, tasksView, transcriptView, tap, type InboxAnswers } from "./views";
 import {
-  chatSheetView, composerView, parseModels, refusal, sentNote, taskControlsView, taskSheetView, verbsFor,
+  chatSheetView, clientIdFor, composerView, MAYBE_DONE, MAYBE_SENT, parseModels, refusal, sentNote, taskControlsView,
+  taskSheetView, verbsFor,
   type ProviderChoice, type Sheet, type Verb,
 } from "./write";
 
@@ -123,6 +124,8 @@ export class PhoneApp {
   readonly composeDrafts = new Map<string, string>();
   readonly composeNotes = new Map<string, string>();
   readonly sending = new Set<string>();
+  /** Each draft's `client_id` (P-5): a retry after an unknown outcome is answered, not run, twice. */
+  readonly clientIds = new Map<string, { id: string; text: string }>();
   readonly withdrawing = new Set<string>();
   taskWrite: { id: string; confirming: Verb | null; busy: boolean; note: string } | null = null;
 
@@ -463,10 +466,18 @@ export class PhoneApp {
     this.render();
   }
 
-  /** A write's answer, or null after handling offline (a note says so) and signed out. */
-  private async write(path: string, value: unknown): Promise<{ status: number; body: Record<string, unknown> } | null> {
-    const result = await this.post(path, value);
-    if (result && result.status === 401) {
+  /** A write's answer, or null when the session ended. `ambiguous` when no
+   * answer came back (the request may have landed): never "not sent". */
+  private async write(path: string, value: unknown): Promise<{ status: number; body: Record<string, unknown>; ambiguous?: boolean } | null> {
+    const got = await this.postJson(path, value);
+    if (this.stopped) return null;
+    if ("offline" in got || OFFLINE.has(got.status)) {
+      this.setOnline(false);
+      return { status: 0, body: {}, ambiguous: true };
+    }
+    this.setOnline(true);
+    const result = got;
+    if (result.status === 401) {
       const me = await this.fetchJson("/m/api/me");
       if (!me.ok && me.why === "signed-out") { this.signedOut(); return null; }
     }
@@ -479,12 +490,17 @@ export class PhoneApp {
     this.sending.add(threadId);
     this.composeNotes.delete(threadId);
     this.renderComposer();
-    const result = await this.write(`/m/api/threads/${threadId}/messages`, { text });
+    const key = "msg:" + threadId;
+    const result = await this.write(`/m/api/threads/${threadId}/messages`,
+      { text, client_id: clientIdFor(this.clientIds, key, text) });
     this.sending.delete(threadId);
     if (this.stopped) return;
     if (!result) {
-      this.composeNotes.set(threadId, this.online ? "" : "Not sent: offline.");
+      this.composeNotes.delete(threadId);
+    } else if (result.ambiguous) {
+      this.composeNotes.set(threadId, MAYBE_SENT);
     } else if (result.status === 202) {
+      this.clientIds.delete(key);
       this.composeDrafts.delete(threadId);
       this.composeNotes.set(threadId, sentNote(result.body));
       if (this.thread?.id === threadId) void this.moreLog();
@@ -507,8 +523,9 @@ export class PhoneApp {
 
   private composer(threadId: string): HTMLElement | null {
     const meta = this.thread?.id === threadId ? this.thread.meta : null;
-    // An owner's chat only: a task's chats are the runner's.
-    if (meta && meta.task_id) return null;
+    // Only once the chat is known to be an owner's: a task's chats are the runner's.
+    if (!meta) return null;
+    if (meta.task_id || meta.role !== "chat") return el("p", "muted small center", "This chat is read only on the phone.");
     return composerView({
       draft: this.composeDrafts.get(threadId) ?? "", busy: this.sending.has(threadId),
       note: this.composeNotes.get(threadId) ?? "", online: this.online,
@@ -556,10 +573,13 @@ export class PhoneApp {
     this.render();
     const body: Record<string, unknown> = { project_id: sheet.projectId, provider: sheet.provider, text };
     if (sheet.model) body.model = sheet.model;
+    body.client_id = clientIdFor(this.clientIds, "chat", JSON.stringify(body));
     const result = await this.write("/m/api/threads", body);
     if (this.sheet !== sheet) return;
     sheet.busy = false;
-    if (!result) { sheet.note = this.online ? "" : "Not sent: offline."; this.render(); return; }
+    if (!result) { this.render(); return; }
+    if (result.ambiguous) { sheet.note = MAYBE_SENT; this.render(); return; }
+    this.clientIds.delete("chat");
     const thread = (result.body.thread ?? null) as { id?: unknown } | null;
     if (result.status === 201 && thread && typeof thread.id === "string") {
       const id = thread.id;
@@ -597,10 +617,14 @@ export class PhoneApp {
     sheet.busy = true;
     sheet.note = "";
     this.render();
-    const result = await this.write("/m/api/tasks", { project_id: sheet.projectId, brief });
+    const value = { project_id: sheet.projectId, brief };
+    const result = await this.write("/m/api/tasks",
+      { ...value, client_id: clientIdFor(this.clientIds, "task", JSON.stringify(value)) });
     if (this.sheet !== sheet) return;
     sheet.busy = false;
-    if (!result) { sheet.note = this.online ? "" : "Not sent: offline."; this.render(); return; }
+    if (!result) { this.render(); return; }
+    if (result.ambiguous) { sheet.note = MAYBE_DONE; this.render(); return; }
+    this.clientIds.delete("task");
     const task = (result.body.task ?? null) as { id?: unknown } | null;
     if (result.status === 201 && task && typeof task.id === "string") {
       this.sheet = null;
@@ -640,7 +664,7 @@ export class PhoneApp {
     w.busy = true;
     w.note = "";
     this.render();
-    let result: { status: number; body: Record<string, unknown> } | null;
+    let result: { status: number; body: Record<string, unknown>; ambiguous?: boolean } | null;
     if (verb === "cancel") {
       const options = await this.write(`/m/api/tasks/${id}/cancel/options`, {});
       if (options && options.status === 200 && options.body.publicKey && typeof options.body.publicKey === "object") {
@@ -666,7 +690,9 @@ export class PhoneApp {
     w.busy = false;
     w.confirming = null;
     if (!result) {
-      w.note = this.online ? "" : "Not sent: offline.";
+      w.note = "";
+    } else if (result.ambiguous) {
+      w.note = MAYBE_DONE;
     } else if (result.status === 200) {
       w.note = verb === "start" ? "Started." : verb === "resume" ? "Resumed." : "Cancelled.";
       void this.loadTasks();
@@ -996,13 +1022,21 @@ export class PhoneApp {
       });
     } else if (this.task) {
       const open = this.task;
-      const controls = open.view && verbsFor(open.view.state).length ? (() => {
+      // A proposal still inside its grace window starts on its own: no Start
+      // (the runner refuses it there too); Withdraw is on its inbox row.
+      const proposed = !!this.inbox?.some((row) => row.id === "prop:" + open.id);
+      const allowed = open.view ? verbsFor(open.view.state).filter((v) => !(proposed && v === "start")) : [];
+      const controls = open.view && allowed.length ? (() => {
         const w = this.taskState(open.id);
-        return taskControlsView(open.view!, {
+        const box = taskControlsView(open.view!, {
           confirming: w.confirming, busy: w.busy, note: w.note, online: this.online,
           ask: (verb) => this.askVerb(open.id, verb), back: () => this.backVerb(open.id),
           confirm: (verb) => void this.confirmVerb(open.id, verb),
-        });
+        }, allowed);
+        if (proposed) {
+          box.prepend(el("p", "m-notice", "Proposed: it starts on its own when its grace window ends. Withdraw it from the inbox."));
+        }
+        return box;
       })() : (this.taskWrite?.id === open.id && this.taskWrite.note
         ? el("p", "m-notice", this.taskWrite.note) : null);
       view = open.view

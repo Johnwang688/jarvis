@@ -363,11 +363,11 @@ def run(browser, check, until):
         until(lambda: row.count() == 1, timeout=8)
         row.locator('[data-testid="m-withdraw"]').click()
         check("P-5 Withdraw: asks first", row.locator('[data-testid="m-withdraw-ask"]').count() == 1
-              and runner.calls[-1] != ("cancel", proposal.id))
+              and daemon.stores.tasks.get(proposal.id).state == TaskState.INTAKE)
         row.locator('[data-testid="m-withdraw-send"]').click()
-        pump(lambda: runner.calls[-1] == ("cancel", proposal.id))
-        check("P-5 Withdraw: the session only, TaskControl.cancel",
-              runner.calls[-1] == ("cancel", proposal.id)
+        pump(lambda: daemon.stores.tasks.get(proposal.id).state == TaskState.CANCELLED)
+        check("P-5 Withdraw: the session only, the router's withdraw (never TaskControl.cancel)",
+              runner.calls[-1] != ("cancel", proposal.id)
               and daemon.stores.tasks.get(proposal.id).state == TaskState.CANCELLED, str(runner.calls))
         check("P-5: no page errors", not errors, str(errors[:3]))
     finally:

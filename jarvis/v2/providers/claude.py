@@ -1422,9 +1422,9 @@ class ClaudeProvider:
             # the owner's own message (HUD or Discord), never another chat's,
             # and never the owner's answer to a decision (inbox B1, review of
             # PR #309): that turn is the agent's to run on its own judgement.
-            # The same for one answered on the phone (P-4, via "phone"): the
-            # phone carries no desk authority, and P-4's only phone messages
-            # are decisions' answers.
+            # Nor any message from the phone (via "phone"): a decision
+            # answered there (P-4) or words typed into the chat there (P-5).
+            # The phone carries no desk authority (design §11 question 2).
             session.owner_turn = (getattr(message, "origin", None) == "owner"
                                   and getattr(message, "via", None) not in ("inbox", "phone"))
             session.generation += 1

@@ -294,6 +294,63 @@ class Sending(Base):
         self.assertEqual(self.post(path, {"text": "go"})[0], 202)
         print("ok  the rate: 30 writes a minute per session, 429 past it, another session unaffected")
 
+    def test_a_client_id_makes_a_retry_answer_not_run_twice(self):
+        # Review of #324, LOW 3: an answer lost on the way back can be retried.
+        thread = self.chat()
+        path = f"threads/{thread.id}/messages"
+        first = self.post(path, {"text": "once", "client_id": "draft-0001"})
+        self.assertEqual(first[0], 202, first)
+        eventually(lambda: self.idle(thread.id), what="the turn")
+        again = self.post(path, {"text": "once", "client_id": "draft-0001"})
+        self.assertEqual((again[0], again[1]["turn_id"], again[1]["repeat"]), (202, first[1]["turn_id"], True))
+        self.assertEqual(len(self.users(thread.id)), 1, "run once")
+        # Another session's same id is its own; a new id is a new message.
+        other = self.signed_in(self.pair())
+        self.assertEqual(self.post(path, {"text": "once", "client_id": "draft-0001"}, cookie=other)[0], 202)
+        eventually(lambda: self.idle(thread.id), what="the turn")
+        self.assertEqual(self.post(path, {"text": "twice", "client_id": "draft-0002"})[0], 202)
+        self.assertEqual(len(self.users(thread.id)), 3)
+        # A refusal is not kept: the same id may try again.
+        self.assertEqual(self.post(path, {"text": " ", "client_id": "draft-0003"})[0], 400)
+        eventually(lambda: self.idle(thread.id), what="the turn")
+        self.assertEqual(self.post(path, {"text": "now", "client_id": "draft-0003"})[0], 202)
+        # A bad id is 400; it expires after SENT_TTL_S.
+        for bad in ("short", "x" * 65, "has space!", 7):
+            self.assertEqual(self.post(path, {"text": "x", "client_id": bad})[0], 400, bad)
+        self.rate_clock.now += remote_write.SENT_TTL_S
+        eventually(lambda: self.idle(thread.id), what="the turn")
+        self.assertEqual(self.post(path, {"text": "once", "client_id": "draft-0001"})[1].get("repeat"), None)
+        # New chats and new tasks too.
+        body = {"project_id": self.project.id, "provider": "fast", "text": "hi", "client_id": "chat-0001"}
+        a, b = self.post("threads", body), self.post("threads", body)
+        self.assertEqual((a[0], b[0], a[1]["thread"]["id"]), (201, 201, b[1]["thread"]["id"]))
+        task = {"project_id": self.project.id, "brief": "b", "client_id": "task-0001"}
+        a, b = self.post("tasks", task), self.post("tasks", task)
+        self.assertEqual((a[0], b[0], a[1]["task"]["id"]), (201, 201, b[1]["task"]["id"]))
+        self.assertEqual(len(self.d.stores.tasks.list()), 1)
+        # While one is still on its way, its repeat is 409.
+        sent = remote_write.sent_of(self.d.remote_auth.server)
+        key = (next(iter(self.auth._sessions)), "send", thread.id, "draft-0009")
+        self.assertIsNone(sent.begin(key))
+        status, body = self.post(path, {"text": "x", "client_id": "draft-0009"})
+        self.assertEqual((status, body["error"]), (409, remote_write.IN_FLIGHT))
+        print("ok  client_id: a repeat within 5 minutes gets the first answer and runs nothing; refusals are not kept")
+
+    def test_a_provider_or_os_failure_is_409_without_its_text(self):
+        # Review of #324, NIT 6: never a 500, never the exception's words.
+        thread = self.chat()
+        with patch.object(self.d, "deliver", side_effect=OSError("SECRET-OS-TEXT /home/x")):
+            status, body = self.post(f"threads/{thread.id}/messages", {"text": "x"})
+        self.assertEqual((status, body), (409, {"error": "request failed (OSError)"}))
+        with patch.object(self.d, "open_thread", side_effect=RuntimeError("SECRET-PROVIDER-TEXT")):
+            status, body = self.post("threads", {"project_id": self.project.id, "provider": "fast", "text": "x"})
+        self.assertEqual((status, body), (409, {"error": "request failed (RuntimeError)"}))
+        with patch.object(self.d, "create_task", side_effect=PermissionError("SECRET")):
+            status, body = self.post("tasks", {"project_id": self.project.id, "brief": "b"})
+        self.assertEqual(status, 403, body)
+        self.assertNotIn("SECRET", json.dumps(body))
+        print("ok  a provider's or the OS's failure is 409 (PermissionError 403), its text never sent")
+
     def test_unknown_archived_or_task_threads(self):
         self.assertEqual(self.post("threads/0123abcd/messages", {"text": "x"}), (404, {"error": "not found"}))
         self.assertEqual(self.post("threads/NOTANID/messages", {"text": "x"})[0], 404)
@@ -439,6 +496,32 @@ class Tasks(Base):
             self.assertEqual(self.post("tasks", bad)[0], want, bad)
         print("ok  a task from the phone waits in INTAKE (the intake gate) until Start")
 
+    def test_with_no_runner_a_huds_verb_is_409_before_its_body(self):
+        # Review of #324, NIT 5: the HUD's old order.
+        task = self.task()
+        self.d.runner = None
+        host = f"127.0.0.1:{self.d.port}"
+        status, _, data = rac.raw(self.d.port, "POST", f"/tasks/{task.id}/start",
+                                  [("Host", host), ("Origin", f"http://{host}"), ("Content-Type", "application/json")],
+                                  b"{not json")
+        self.assertEqual(status, 409, data)
+        self.assertEqual(self.post(f"tasks/{task.id}/start", {})[0], 409)
+        print("ok  no runner: the HUD's task verb is 409 before its body is read; the phone's 409 too")
+
+    def test_cancel_prompts_never_crowd_out_an_allow(self):
+        # Review of #324, NIT 7: the two kinds of prompt are capped apart.
+        self.secure_ok()
+        tasks = [self.task(TaskState.CLARIFYING) for _ in range(remote_auth.MAX_ANSWER_CHALLENGES_PER_SESSION + 1)]
+        for task in tasks[:-1]:
+            self.assertEqual(self.post(f"tasks/{task.id}/cancel/options", {})[0], 200)
+        self.assertEqual(self.post(f"tasks/{tasks[-1].id}/cancel/options", {})[0], 429, "cancel's own cap")
+        request, out, worker = self.ask()
+        status, body = self.post(f"inbox/{self.row(request)}/answer/options", {"decision": "allow"})
+        self.assertEqual(status, 200, body)
+        self.assertEqual(self.post(f"inbox/{self.row(request)}/answer",
+                                   {"decision": "allow", "assertion": self.a.get(body["publicKey"])})[0], 200)
+        print("ok  abandoned cancel prompts cannot block an Allow (each kind has its own cap per session)")
+
     def test_task_start_is_separable(self):
         task = self.task()
         with patch.object(remote_write, "TASK_START", False):
@@ -446,7 +529,8 @@ class Tasks(Base):
             self.assertEqual(self.post("tasks", {"project_id": self.project.id, "brief": "b"})[0], 405)
             self.assertEqual(self.phone("GET", "/m/api/tasks", cookie=self.cookie)[0], 200, "the read stays")
         self.assertEqual(self.runner.calls, [])
-        print("ok  TASK_START off: no task made or started from the phone; the reads stay")
+        print("ok  TASK_START off: the phone's own task making and starting are gone (a chat may still propose "
+              "one, as at the desk); the reads stay")
 
     def cancel_assertion(self, task_id, cookie=None, authenticator=None):
         status, body = self.post(f"tasks/{task_id}/cancel/options", {}, cookie=cookie)
@@ -511,11 +595,36 @@ class Tasks(Base):
             self.assertEqual(self.post_answer(f"prop:{task.id}", bad)[0], 400, bad)
         status, _, body = self.post_answer(f"prop:{task.id}", {"withdraw": True})
         self.assertEqual(status, 200, body)
-        self.assertEqual(self.runner.calls, [("cancel", task.id)])
+        # The router's own withdraw, never TaskControl.cancel (review of #324, LOW 1).
+        self.assertEqual(self.runner.calls, [])
         self.assertEqual(self.d.stores.tasks.get(task.id).state, TaskState.CANCELLED)
         self.assertEqual(self.journal(task.id), [("withdraw", "phone")])
         self.assertEqual(self.post_answer(f"prop:{task.id}", {"withdraw": True})[0], 409, "no longer waiting")
-        print("ok  a proposal's withdraw from the phone: the session only, the inbox's own call, journaled")
+        print("ok  a proposal's withdraw from the phone: the session only, the router's withdraw, journaled")
+
+    def test_a_withdraw_that_lands_after_the_grace_window_never_cancels(self):
+        # Review of PR #324, LOW 1: `inbox.answer` reads `rows()` before it
+        # acts; the window closes in between. The session-only withdraw must
+        # then refuse (409), never fall through to a terminal cancel.
+        from jarvis.v2 import inbox
+        task = self.task()
+        until = self.d.router.clock() + 60
+        self.d.stores.tasks.journal(task.id, "proposed_by_fastpath", brief="b", thread_id=None, turn_id=None,
+                                    reply="", not_before=until)
+        real_rows, real_clock = inbox.rows, self.d.router.clock
+
+        def slow_rows(*args, **kw):
+            out = real_rows(*args, **kw)
+            self.d.router.clock = lambda: until + 1          # the window closes meanwhile
+            return out
+        with patch.object(inbox, "rows", slow_rows):
+            status, _, body = self.post_answer(f"prop:{task.id}", {"withdraw": True})
+        self.d.router.clock = real_clock
+        self.assertEqual((status, body), (409, {"error": inbox.WITHDRAW_LATE}))
+        self.assertEqual(self.runner.calls, [], "no TaskControl.cancel")
+        self.assertEqual(self.d.stores.tasks.get(task.id).state, TaskState.INTAKE)
+        self.assertEqual(self.journal(task.id), [])
+        print("ok  a withdraw racing the grace window's end is 409, never a terminal cancel")
 
     def test_unknown_or_hidden_tasks(self):
         for path in ("tasks/0123abcd/start", "tasks/0123abcd/resume", "tasks/0123abcd/cancel/options",

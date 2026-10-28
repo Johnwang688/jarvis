@@ -153,7 +153,7 @@ _TASK_SUBJECT = re.compile(r"task:[0-9a-f]{8}")
 ACTIVE_S = 24 * 3600
 MAX_SESSIONS = 32         # the least recently seen goes first
 # The most answer challenges there can be at once (a bound, never a shared cap).
-MAX_ANSWER_CHALLENGES = MAX_ANSWER_CHALLENGES_PER_SESSION * MAX_SESSIONS
+MAX_ANSWER_CHALLENGES = MAX_ANSWER_CHALLENGES_PER_SESSION * MAX_SESSIONS * 2
 MAX_REVOKED = 16          # revoked passkey records kept, so a revoked id stays refused
 LAST_SEEN_WRITE_S = 60    # last-seen is written at most this often per session
 UA_CAP = 160
@@ -534,9 +534,13 @@ class RemoteAuth:
         if kind == "register" and self._window_open() is None:
             raise _refuse("no pairing window is open")
         if kind == "answer":
-            # Per session (`answer_options`); bounded by MAX_SESSIONS times that.
+            # Per session (`answer_options`), and per family (P-5): a task
+            # verb's prompts and an approval's are counted apart, so abandoned
+            # cancel prompts can never refuse an Allow, nor the reverse.
+            # Bounded by MAX_SESSIONS times that, twice.
             mine = [c for c in self._challenges.values()
-                    if c["kind"] == "answer" and c.get("session") == extra.get("session")]
+                    if c["kind"] == "answer" and c.get("session") == extra.get("session")
+                    and c.get("task", False) == extra.get("task", False)]
             full = len(mine) >= MAX_ANSWER_CHALLENGES_PER_SESSION
         else:
             cap = MAX_REGISTER_CHALLENGES if kind == "register" else MAX_LOGIN_CHALLENGES
@@ -737,7 +741,7 @@ class RemoteAuth:
             nonce = secrets.token_bytes(ANSWER_NONCE_BYTES)
             challenge = self.answer_challenge(req_id, decision, nonce)
             self._issue("answer", challenge, req_id=req_id, decision=decision, nonce=nonce,
-                        session=session["token_sha256"], passkey=passkey["key"])
+                        session=session["token_sha256"], passkey=passkey["key"], task=task)
             options = webauthn.generate_authentication_options(
                 rp_id=self.host, challenge=challenge, timeout=CHALLENGE_S * 1000,
                 allow_credentials=[structs.PublicKeyCredentialDescriptor(id=unb64url(passkey["id"]))],
