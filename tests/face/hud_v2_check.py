@@ -16,7 +16,7 @@ The safety checks are the ones to keep, and each is written to bite:
   - the approval card ignores Enter: deny is cheap, authorize is deliberate,
     and nothing on it is keyboard-defaulted;
   - an `approval_requested` from a task shows its label and the **whole**
-    command, never a summary;
+    command (with no AI summary; with one, it is one click away: AS);
   - dictation REVIEW never sends on its own, and OFF uploads nothing;
   - a wake hit fires once per phrase, not once per recognizer update;
   - (ED-1) the editor makes no request off loopback (a catch-all route
@@ -666,8 +666,9 @@ def approval_checks(page, mock):
     check("it names the task that is asking",
           "add multiply" in page.locator('[data-testid="approval-origin"]').inner_text(),
           page.locator('[data-testid="approval-origin"]').inner_text())
-    # The whole command, never a summary: approving a command is not consent to
-    # what it does, so the owner has to be able to read what it does.
+    # The whole command, shown in full when the card has no AI summary (AS):
+    # approving a command is not consent to what it does, so the owner has to
+    # be able to read what it does.
     cmd = page.locator('[data-testid="approval-command"]').inner_text()
     check("it shows the whole command", request["command"] in cmd, cmd)
 

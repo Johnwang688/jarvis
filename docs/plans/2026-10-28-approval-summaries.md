@@ -57,7 +57,8 @@ covered in WP AS-E, applied once #329 is on `main`.
 - **AS-2. What the model reads.** The card's own redacted projection
   (`card_text` command, `card_args` arguments: typed credentials already
   withheld, the owner's 2026-10-15 rule), the tool's name, the provider and
-  the judged folder; then `scrub` and `strip_invisible`; then
+  the judged folder (for a shell, the command only: an agent's own
+  `description` of its call is not sent); then `scrub` and `strip_invisible`; then
   `untrusted.fence` with a fresh nonce. A call whose prepared text is longer
   than `INPUT_MAX_CHARS` (8,000) gets **no** summary (`off`, so the command
   shows expanded): a summary must never describe only the first part of a
@@ -212,6 +213,40 @@ Phone: GET /m/api/inbox/<id>/detail (phone_card: summary judged apart)
 - **AS-F.** Docs: control-plane notes, this plan's as-built section,
   CLAUDE.md (one sentence at most).
 
-## As built
+## As built (2026-10-28)
 
-(Filled in when the build is done.)
+All of AS-A to AS-F, in `claude/approval-summary`; #329 (MR) and #314 were
+merged from `main` first, and MR's frozen confirmed set, tags and subjects are
+untouched. The rules as they stand are in `docs/notes/control-plane.md`,
+"Approval summaries (AS)". Beyond the decisions above:
+
+- **An agent's own words about its call are not sent** (AS-2): Claude's
+  `description` and any `explanation`, `justification` or `reason` argument.
+  The summary says what the call does, not what the agent says it does.
+- **Bold and link syntax only are removed** from the answer; a lone `*` (a
+  glob) and `__dunder__` names stay, since they are part of what is touched.
+- **Arming is in the click handler too**, not only the `disabled` attribute,
+  and re-arms when the summary changes (the owner reads the line that just
+  landed). The Browser card arms when its private detail lands.
+- **The toggle is shown whenever there is a command block** on the HUD and
+  phone cards (also to close an expanded one); on inbox and review rows only
+  when the record has a summary. On the phone it keeps its state across a
+  re-read of the card (`CardState.expanded`, the app's `opened` map).
+- **The layout check changed meaning**: "AUTHORIZE is below the fold for a
+  long command" is now "AUTHORIZE is in reach before any scrolling", at the
+  same zooms and grids (AS-12).
+- **`tests/face/hud_v2_phone_answer_check.py`'s button-box read waits** for a
+  box: a re-read of the card between two reads made it `None` (the known
+  flake; it failed 3 of 3 runs on `main` here).
+- **A deferred record with a summary reads as "not ours" to a daemon from
+  before AS** (its field set is exact), so a downgrade shows no deferred rows
+  until the file is rewritten or removed.
+
+Tests: `tests/v2/approval_summary_check.py` (44, a fake model; 17 mutants,
+each killed); vitest (the shared lib, the HUD card, the Browser card, the
+phone card and rows, the reducer); the AS sections of the HUD, inbox, phone
+answer and both morning-review face checks.
+
+Open: Discord's post still shows the whole command and no summary (AS-16);
+the 2–3 s target is unmeasured (no paid probe was run); the daily cap is in
+memory, so a restart resets it.

@@ -2223,3 +2223,75 @@ binding), `archive_check`, `hud/src/lib/review.test.ts`,
 `hud/src/mobile/review.test.ts`, `tests/face/hud_v2_review_check.py`,
 `tests/face/hud_v2_phone_review_check.py`.
 
+## Approval summaries (AS, 2026-10-28)
+
+The owner's request: a short model summary of what a flagged call does and
+where, the buttons at the top, the long command collapsed and one click away.
+Plan and decisions AS-1 to AS-17: `docs/plans/2026-10-28-approval-summaries.md`.
+
+- **The summary is display text, and decides nothing.** It lives in
+  `ApprovalRequest.summary`/`summary_state` (public `to_json` only), the bus
+  record `approval_summary` and a deferred record's optional `summary` field.
+  The gate, the allowlist and Always (`v1_request`, `resolve`, `always_rule`),
+  QH's `request_digest`, `grant_refusal` and grants, MR's `item_tag`,
+  `subject` and checks, the merge gate and the phone's `_authority`/`_gate`
+  never read it (`tests/v2/approval_summary_check.py`, with mutants: feeding
+  it into the digest, the Always rule or the allowlist write fails a test).
+- **The model** (`jarvis/v2/approval_summary.py`, SELF_PROTECTED): the
+  `approval_summary` tier (`JARVIS_APPROVAL_SUMMARY_MODEL`, Haiku 5.5), never
+  the chat pick, never Chinese-hosted; one-shot, `cache=False`, no provider
+  pin. It reads the card's redacted projection (`card()`), the tool, the
+  provider and the judged folder; for a shell the command only (an agent's
+  `description` is not sent); `strip_invisible`, `scrub`, `untrusted.fence`.
+  A call over 8,000 prepared characters, a HUD-only card, or no acceptable
+  model: no summary (`off`). Out: one line, at most 160 characters, link and
+  bold syntax removed, scrubbed, `clean_line`d; globs and `__dunder__` kept.
+- **Never in the way.** `Daemon._approval_requested` publishes the card with
+  `summary_state: "pending"`, then `begin_approval_summary` starts it on a
+  worker thread, outside the broker lock; a watchdog fails it at 8 s. The
+  arrival is `approval_summary` `{req_id, summary, summary_state}`, only
+  while the card is pending; the inbox observes it (`inbox_changed`
+  `appr:<id>`), which also makes the phone read the card again. Cached by
+  the SHA-256 of the model input (LRU 512), identical calls in flight share
+  one request, 3 running and 12 waiting, 1,000 model calls a local day (in
+  memory); past a cap, `off`. Cost and tokens are logged per call and kept in
+  `stats()`; there is no shared ledger hook. Attached by daemon2's `main()`
+  only (`attach_approval_summaries`): no test or embedded daemon calls a model.
+- **Where** (`PendingApprovals.describe`, set by the daemon, called before
+  the lock for public cards): "project · branch · folder" from the gate's
+  judged `cwd` (else the project root), the branch read from `.git/HEAD`
+  (a worktree's `gitdir:` followed, 512 bytes at most, no `git` process).
+  Display only; in the card the QH record keeps, not in the digest.
+- **The phone.** `remote_answer.phone_card` judges `withheld` without the
+  summary (it arrives later; a model's words never change what the owner may
+  answer) and sends it scrubbed apart: one the phone's scrub would change is
+  dropped and its state becomes `failed`. The inbox list does the same.
+- **Quiet hours.** `QuietDesk.deferred` starts the summary after the record
+  is written; `DeferredStore.set_summary` writes the record's optional
+  `summary` field (a record from before AS stays valid; one written after it
+  reads as "not ours" to an older daemon), then `inbox_changed` names the
+  row. `summary`/`summary_state` are dropped from the record's `card`.
+- **The cards** (`hud/src/lib/approvalSummary.ts`, shared): buttons first
+  (the HUD's sticky at the top of the card; the phone keeps DENY, its
+  120 px gap, then ALWAYS and AUTHORIZE, as one block above the body); then
+  the AI summary in a reserved two-line slot marked "AI SUMMARY" in glacier
+  cyan (never amber or red); then WHY ASKED (`[layer] reason`) and WHERE;
+  then the tool and the command block, collapsed to its first line with a
+  "show full command · N lines · M chars" control while a summary is pending
+  or there, expanded otherwise (failed, off, none). The control is out of the
+  Tab order and never takes focus (DENY stays the only Tab stop); the owner's
+  own toggle wins. AUTHORIZE and ALWAYS are disabled for 600 ms after the
+  card appears and after its summary changes (the handler checks too); the
+  veil anchors the card at the top. A Browser (HUD-only) card has no summary;
+  its buttons moved first and arm the same way. The inbox's approval rows
+  show the summary and code lines (never the command); deferred rows and the
+  morning review's items put their controls first and collapse the command
+  only when the record has a summary; the review's confirmation lists each
+  summary, and Approve selected still posts exactly ids and tags.
+- **Discord is unchanged** (AS-16): its post carries the whole command.
+
+Tests: `tests/v2/approval_summary_check.py`, `hud/src/lib/approvalSummary.test.ts`,
+`Approvals.test.ts`, `BrowserApproval.test.ts`, `mobile/answer.test.ts`,
+`state/store.test.ts`, and the AS sections of `tests/face/hud_v2_check.py`,
+`hud_v2_inbox_check.py`, `hud_v2_phone_answer_check.py`,
+`hud_v2_review_check.py` and `hud_v2_phone_review_check.py`.
