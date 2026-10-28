@@ -32,12 +32,17 @@ The send half (C3, plan §5), every bound in §5.4:
   else only shown. A non-answer never starts a turn (P-10). A steer the
   provider refuses, whatever its fallback, waits in `held`: a reply never
   interrupts.
-- Every body and reply is scrubbed before it is logged or delivered, and
-  fenced with a fresh nonce (`untrusted.fence_chat`). They are an agent's
-  input, so the scrub is `chat_reads.scrub_for_model` (known values and
-  credential shapes only; review of PR #308: the display rules rewrote
-  ordinary code). The transcript scrubs them again for the owner when it
-  shows them; the sender's progress stream is the owner's (`scrub`).
+- Every body and reply is scrubbed twice, once per reader, before it is
+  logged or delivered. What a model reads (the target's message, fenced
+  with a fresh nonce by `untrusted.fence_chat`; the reply the sender's
+  model gets; a failure's reason) is `chat_reads.scrub_for_model` (known
+  values and credential shapes only; review of PR #308: the display rules
+  rewrote ordinary code). What is kept and shown (the `relay_out`,
+  `relay_in` and `relay_reply` records' text, which the desk transcript
+  and `log.jsonl` hold) is the owner's: `chat_reads.scrub`, the typed
+  credentials of `redact_inline` and labelled values included (review of
+  #314, M1: the model's copy left `export API_KEY=…` in the record). The
+  sender's progress stream is the owner's too (`scrub`).
 - Memory only (P-12): a restart forgets every item; the transcript reads an
   unfated `relay_out` as "not delivered".
 
@@ -106,6 +111,13 @@ _FINAL_STATE = {"answered": "answered", "empty": "answered",
 _ANSWERS = ("answered", "empty")
 
 
+def _shown_body(item) -> str:
+    """A relay's body as the owner is shown it (`RelayItem.shown`); an item
+    made without one is scrubbed for the owner now."""
+    shown = item.shown
+    return shown if isinstance(shown, str) else chat_reads.scrub(item.body)
+
+
 @dataclass(eq=False)
 class RelayItem:
     """One message from one chat to another, and what became of it.
@@ -113,7 +125,7 @@ class RelayItem:
     message_id: str               # "m" + 12 hex
     sender: dict                  # thread_id, project_id, provider, turn_id, title, project
     target: dict                  # thread_id, project_id, provider, title
-    body: str                     # scrubbed, <= MESSAGE_MAX
+    body: str                     # scrubbed for the target's model, <= MESSAGE_MAX
     state: str                    # queued|running|answered|failed|stopped|withdrawn|dropped|expired
     created: float
     target_turn_id: str | None = None
@@ -126,6 +138,7 @@ class RelayItem:
     wrapped: str | None = field(default=None, repr=False)  # the reply as the sender's model reads it
     steer_message: Any = field(default=None, repr=False)   # the UserMessage of a steered reply
     unconfirmed: bool = False     # a steer the provider did not confirm (still "step")
+    shown: str | None = field(default=None, repr=False)    # the body as the owner is shown it
 
 
 @dataclass
@@ -252,7 +265,8 @@ class ChatRelay:
             return found.text
         target = found
         body = chat_reads.scrub_for_model(text)
-        if body == chat_reads.WITHHELD:
+        shown = chat_reads.scrub(text)
+        if chat_reads.WITHHELD in (body, shown):
             return "Error: the message could not be checked for credentials, so it was not sent."
         try:
             stored = self.stores.threads.get(sender_id)
@@ -293,7 +307,7 @@ class ChatRelay:
                 return (f"Error: chats have sent {HOURLY_MAX} messages to each other in the "
                         "last hour, the most Jarvis allows; try again later.")
             mid = "m" + pysecrets.token_hex(6)
-            item = RelayItem(mid, sender, to, body, "queued", now)
+            item = RelayItem(mid, sender, to, body, "queued", now, shown=shown)
             waiting.append(item)
             self.items[mid] = item
             self.budget[key] = self.budget.get(key, 0) + 1
@@ -302,7 +316,7 @@ class ChatRelay:
             busy = position > 1 or (live is not None and live.worker is not None)
             self._log(sender_id, sender["project_id"], "relay_out", caller["turn_id"], {
                 "message_id": mid, "to": target.id, "title": to["title"],
-                "provider": to["provider"], "text": body, "chars": len(body)})
+                "provider": to["provider"], "text": shown, "chars": len(shown)})
         if not busy:
             self._kick(target.id)
         where = (f"it waits behind {position - 1} other{'s' if position > 2 else ''} "
@@ -386,7 +400,7 @@ class ChatRelay:
         sender = item.sender
         self._record(thread.id, thread.project_id, "relay_in", turn_id, {
             "message_id": item.message_id, "from": sender["thread_id"], "title": sender["title"],
-            "provider": sender["provider"], "text": item.body, "chars": len(item.body)},
+            "provider": sender["provider"], "text": _shown_body(item), "chars": len(_shown_body(item))},
             start.mark)
 
     def _message_text(self, item: RelayItem) -> str:
@@ -464,6 +478,8 @@ class ChatRelay:
         else:
             status, words = "answered", _STATUS_WORDS["answered"]
         reply = _tail(chat_reads.scrub_for_model("\n\n".join(texts)), TEXTS_MAX) if texts else ""
+        # The record's copy is the owner's (M1): the display scrub, never the model's.
+        shown_reply = _tail(chat_reads.scrub("\n\n".join(texts)), TEXTS_MAX) if texts else ""
         gone = self._sender_gone(item)
         wrapped = self._reply_text(item, reply, words)
         with daemon._lock:
@@ -486,7 +502,7 @@ class ChatRelay:
             self._log(sender["thread_id"], sender["project_id"], "relay_reply", None, {
                 "message_id": item.message_id, "from": target["thread_id"],
                 "title": target["title"], "provider": target["provider"], "status": status,
-                "text": reply})
+                "text": shown_reply})
             plan = self._hand_over(item)
         self._carry_out(item, plan)
 

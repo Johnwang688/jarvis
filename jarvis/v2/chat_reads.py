@@ -37,9 +37,11 @@ hardening, 2026-10-25):
   among them, so `redact_inline`'s typed credentials stay withheld);
 - `scrub`: what the owner reads (a relay's progress, an inbox post, the
   phone): `scrub_read`'s layers plus `redact.labelled_values`;
-- `scrub_for_model`: what one agent wrote for another (a relay's body and
-  reply, a compaction reason): known values and shapes only, so ordinary
-  code arrives as written (review of PR #308).
+- `scrub_for_model`: what one agent wrote for another, as the other model
+  gets it (a relay's body and reply): known values and shapes only, so
+  ordinary code arrives as written (review of PR #308). The relay's records
+  and a compaction reason, which the owner reads, take `scrub` (review of
+  #314, M1).
 
 A scrub that raises withholds the row (`WITHHELD`); it never passes the text
 through. Titles are model-written too: cleaned (`approvals.clean_line`),
@@ -156,7 +158,8 @@ def scrub(text: Any) -> str:
 
 def scrub_for_model(text: Any) -> str:
     """`text` as an agent reads it (a relay's body, reply and failure
-    reason; a compaction reason): invisible characters out, then
+    reason as the models get them; never what is kept or shown, which is
+    `scrub`: review of #314, M1): invisible characters out, then
     `redact.for_model` (known values and high-confidence credential shapes
     only, so ordinary code reaches the model as written: review of PR #308);
     `WITHHELD` if any layer raises."""

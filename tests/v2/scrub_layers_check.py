@@ -9,7 +9,9 @@ Two scrubs are built on it:
 
 - `redact.for_model` (alias `scrub_text`): known values and shapes, nothing
   else, for what an agent reads (chat relays, chat git output, sub-agent
-  words, compaction reasons, diff review's input);
+  words, Codex's compaction reason);
+- `redact.for_model_strict`: the high-confidence shapes only, for diff
+  review's input (a model path main gave no shape scrub);
 - `redact.for_display`: `for_model` plus `labelled_values`, for what the owner
   reads (the desk's Diff tab, the transcript's `chat_reads.scrub`, the
   Discord mirror and reporter, approval cards).
@@ -466,19 +468,33 @@ class Cards(Base):
         print(f"ok  s5: all {len(SHAPES)} shapes and {len(variants())} variants withheld in a Write's content")
 
     def test_s5_a_command_card_withholds_what_hides_no_structure(self):
-        """On a command, a private key stays (it runs at a command's place)
-        and so does a token split by a tab or newline (rule 0: the span would
-        hold a blank the shell splits on); everything else is withheld."""
+        """On a command (review of #314, H1) the card withholds only the
+        formats v1's `credential_patterns` knows (`redact_command`'s own), now
+        also split, fullwidth or hidden; a shape it does not know (an AWS
+        secret found near a key id, a session token, `xoxe-`, `jmcp_`) is
+        `redact_command`'s business alone, and a private key stays (it runs
+        at a command's place). A token split by a tab or newline stays too
+        (rule 0: the span would hold a blank the shell splits on)."""
+        from jarvis import credential_patterns
         commands = {"card: a command": approvals.card_text,
                     "card: a command argument": lambda t: approvals.card_args({"command": t})["command"]}
+        unknown = {name for name, text, _s in SHAPES if credential_patterns.find(text) is None}
         keys = {name for name, _t, _s in SHAPES if name.startswith("private key")}
-        failures = [f for f in shape_failures(commands) if not any(f.endswith(f"{k} shown") or
-                                                                  f.endswith(f"{k} not marked") for k in keys)]
+        failures = [f for f in shape_failures(commands)
+                    if not any(f.endswith((f"{k} shown", f"{k} not marked")) for k in keys | unknown)
+                    and not f.endswith("AWS key id and secret shown")]
         self.assertEqual(failures, [])
-        shown = [f for f in variant_failures(commands)]
-        self.assertTrue(all(" split by tab " in f or " split by newline " in f for f in shown), shown[:5])
-        print(f"ok  s5: a command's card withholds every shape but a key at a command's place, and every "
-              f"variant but the {len(shown) // len(commands)} split by a tab or newline (rule 0)")
+        pair = next(text for name, text, _s in SHAPES if name == "AWS key id and secret")
+        key_id = __import__("re").search(r"AKIA[A-Z0-9]{16}", pair).group()
+        for fn in commands.values():
+            self.assertNotIn(key_id, fn("before " + pair + " after"))
+        shown = [f for f in variant_failures(commands)
+                 if not any(f.split(": ")[-1].startswith(name + " ") for name in unknown)]
+        self.assertTrue(shown and all(" split by tab " in f or " split by newline " in f for f in shown),
+                        shown[:5])
+        print(f"ok  s5: a command's card withholds every shape credential_patterns knows but a key at a "
+              f"command's place ({len(unknown)} others left to redact_command), and every variant of them "
+              f"but the {len(shown) // len(commands)} split by a tab or newline (rule 0)")
 
 
 class Mutations(Base):

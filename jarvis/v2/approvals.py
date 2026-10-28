@@ -73,7 +73,7 @@ def clean_line(text, cap: int = 120) -> str:
     return line if len(line) <= cap else line[:max(1, cap - 1)].rstrip() + "…"
 
 
-def card_text(value):
+def card_text(value, *, command: bool = True):
     """A card's command, reason or headline as shown and published: typed
     credentials withheld (`secrets.redact_command`; the owner's decision,
     2026-10-15), never a summary, and nothing withheld that runs. The
@@ -86,19 +86,23 @@ def card_text(value):
     scrub's credential shapes and labelled values (`redact.CardPass`), each
     only where the shell reads no structure and a labelled value not on a
     line that may run text; shown as `[withheld: <kind>]`. That pass failing
-    leaves `redact_command`'s card."""
+    leaves `redact_command`'s card. A command and a headline are judged as
+    a command's (`command=True`: only the formats `credential_patterns`
+    knows, never at a command's word or on a line that runs; review of #314,
+    H1); a reason, which never runs, as text (`command=False`), as
+    `log.jsonl` judges it."""
     if not isinstance(value, str) or not value:
         return value
     from . import redact
     extra = redact.CardPass()
     try:
-        before = extra.hide(value)
+        before = extra.hide(value, command=command)
     except Exception:  # noqa: BLE001
         LOG.warning("approval card shape pass failed")
         before = value
     try:
         from jarvis.tools import secrets as _v1_secrets
-        return extra.show(_v1_secrets.redact_command(before))
+        return extra.show(_v1_secrets.redact_command(before), command=command)
     except Exception:  # noqa: BLE001
         LOG.warning("approval card redaction failed; shown as typed")
         return value
@@ -379,7 +383,8 @@ class ApprovalRequest:
         reuses it."""
         if self._card is None:
             self._card = {"args": card_args(self.args), "command": card_text(self.command),
-                          "reason": card_text(self.reason), "headline": card_text(self.headline)}
+                          "reason": card_text(self.reason, command=False),
+                          "headline": card_text(self.headline)}
         return self._card
 
     @property

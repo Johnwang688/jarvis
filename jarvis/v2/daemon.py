@@ -190,8 +190,8 @@ def _log_fields(data) -> dict:
         if key in data:
             try:
                 # A tool's arguments are judged by their own keys (a command's
-                # argv as the command it is: review of #314, B1); a `command`
-                # or `cmd` field as a command; `reason` and `headline` as text.
+                # argv as the command it is: review of #314, B1); a `command`,
+                # `cmd` or `headline` field as a command (H1); `reason` as text.
                 extra = redact.CardPass()
                 hidden = redact.map_field(key, data[key], extra.hide)
                 out[key] = redact.map_field(key, v1_secrets.redact_value(hidden), extra.show)
@@ -270,14 +270,15 @@ COMPACT_REASON_CHARS = 200
 
 def compact_reason(text) -> str:
     """A provider's reason for a compaction that did not happen, as the chat
-    shows it and the log keeps it (where another chat's model may read it):
-    `chat_reads.scrub_for_model`, known values and credential shapes, as
-    Codex's own reason is (`codex._compact_reason`); one line, at most
+    shows it and the log keeps it: the owner's scrub (`chat_reads.scrub`,
+    the typed credentials of `redact_inline` and labelled values included,
+    as main had it; review of #314, M1). Another chat's model reads the log
+    through its own scrub (`chat_reads.scrub_read`). One line, at most
     COMPACT_REASON_CHARS. Reads credential files: never under `_lock`."""
     from .approvals import clean_line
-    from .chat_reads import WITHHELD, scrub_for_model
+    from .chat_reads import WITHHELD, scrub
     try:
-        line = clean_line(scrub_for_model(str(text or "")), COMPACT_REASON_CHARS)
+        line = clean_line(scrub(str(text or "")), COMPACT_REASON_CHARS)
     except Exception:  # noqa: BLE001 — a scrub that fails shows nothing of it
         line = WITHHELD
     return line or "no reason was given"

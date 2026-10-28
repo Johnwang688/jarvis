@@ -905,7 +905,7 @@ def _scrub_source(text):
     have dropped the final newline (it does when it withholds a protected
     file's line), it is restored so the diff editor does not invent a
     missing-newline change. Display only: diff review's model input takes
-    `redact.for_model`."""
+    `redact.for_model_strict`."""
     from .redact import for_display
     out = for_display(text)
     return out + "\n" if text.endswith("\n") and not out.endswith("\n") else out
