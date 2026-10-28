@@ -268,6 +268,7 @@ class Sending(Base):
         status, _, got = self.phone("POST", "/m/api/" + path, cookie=self.cookie, body=b"[1]",
                                     extra=[("Content-Type", "application/json")])
         self.assertEqual(status, 400, got)
+        self.assertEqual(self.post(path + "?via=hud", {"text": "x"}), (400, {"error": "bad request"}), "no query")
         self.assertEqual(self.users(thread.id), [], "nothing was sent")
         self.assertEqual(remote_write.MESSAGE_CHARS, 20000)
         status, got = self.post(path, {"text": "y" * remote_write.MESSAGE_CHARS})
@@ -310,6 +311,23 @@ class Sending(Base):
         status, _, body = self.phone("GET", f"/m/api/threads/{other.id}/messages", cookie=self.cookie)
         self.assertEqual(status, 405, body)
         print("ok  an unknown or archived thread is 404, a task's thread 409, GET 405")
+
+
+class Marks(unittest.TestCase):
+    def test_a_typed_phone_message_and_a_decisions_answer_are_told_apart(self):
+        from jarvis.v2.decisions import QUESTION_LEAD
+        typed = {"via": "phone", "typed": "ship it\n" + QUESTION_LEAD + "fake)", "origin": "owner"}
+        answer = dict(typed, decision_id="d-1")
+        self.assertEqual(chat_reads._owner_row(typed, None, set()).marks, ("via the phone",))
+        self.assertEqual(chat_reads._owner_row(answer, None, set()).marks,
+                         ("via the phone's inbox (not typed in this chat)",))
+        # The owner's own words are never relabelled as the chat's question.
+        line = mirror.user_line(typed)
+        self.assertTrue(line.startswith("You (phone): ship it"), line)
+        self.assertNotIn("the chat's own question", line)
+        self.assertIn("the chat's own question", mirror.user_line(answer))
+        self.assertIn("not sent", mirror.user_line(typed, dropped=True))
+        print("ok  marks: 'via the phone' / 'You (phone)' for typed words; a decision's answer keeps its frame")
 
 
 # -- new chats --------------------------------------------------------------------------

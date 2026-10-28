@@ -363,10 +363,14 @@ class Gate(Api):
 
     def test_only_get(self):
         for path in self.reads() + ["/m/api/events"]:
-            for method in ("POST", "PUT", "PATCH", "DELETE", "OPTIONS"):
+            # P-5 (remote_write): POST on the two collections is a new chat
+            # and a new task; their other methods still 405.
+            shared = path.split("?")[0] in ("/m/api/threads", "/m/api/tasks")
+            for method in ("PUT", "PATCH", "DELETE", "OPTIONS") if shared else ("POST", "PUT", "PATCH", "DELETE",
+                                                                                "OPTIONS"):
                 status, headers, body = self.phone(method, path, {}, cookie=self.cookie)
                 self.assertEqual((status, body), (405, {"error": "method not allowed"}), (method, path))
-                self.assertEqual(headers["Allow"], "GET")
+                self.assertEqual(headers["Allow"], "GET, POST" if shared else "GET")
                 # Without the phone's Origin the listener refuses first (403).
                 status, _, _ = self.phone(method, path, {}, cookie=self.cookie, origin=None)
                 self.assertEqual(status, 403, (method, path))

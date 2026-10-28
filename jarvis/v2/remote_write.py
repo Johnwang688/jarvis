@@ -94,6 +94,7 @@ import logging
 import re
 import threading
 import time
+from urllib.parse import urlsplit
 
 LOG = logging.getLogger(__name__)
 
@@ -442,6 +443,8 @@ def route(handler, path: str, session: dict, body: bytes):
     if daemon is None or auth is None:
         return 404, {"error": "not found"}, []
     from .remote_auth import AuthError, WORDS, _json_body
+    if urlsplit(getattr(handler, "path", "") or "").query:
+        return 400, {"error": "bad request"}, []
     try:
         if name == "models":
             return 200, models(daemon), []

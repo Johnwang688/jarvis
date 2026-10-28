@@ -27,6 +27,13 @@
 // are answered from their rows. Each answer is sent once, never queued or
 // retried; a refusal shows the daemon's words. When §4.1 does not hold
 // (`/m/api/me`'s `secure`), a red "limited: ..." line says so.
+//
+// P-5, writing (jarvis/v2/remote_write.py, ./write.ts): an owner's chat
+// takes a message box (Send is a tap; Enter is a new line), the Chats tab a
+// "New chat" sheet and the Tasks tab a "New task" sheet; a task offers
+// Start, Resume and Cancel, each confirmed first, Cancel then the passkey.
+// A proposal in the inbox takes Withdraw. Nothing is shown as sent before
+// its 2xx; offline, nothing is sent (no write queue).
 
 import { parseInbox, waitingCount, clockOf, type InboxRow } from "../lib/inbox";
 import { getJson, errorWord, postJson, type Got, type Posted } from "./net";
@@ -37,6 +44,10 @@ import {
   type ChatThread, type DiffView, type LogRow, type Project, type StreamEvent, type TaskView,
 } from "./model";
 import { chatsView, el, inboxView, logRow, taskView, tasksView, transcriptView, tap, type InboxAnswers } from "./views";
+import {
+  chatSheetView, composerView, parseModels, refusal, sentNote, taskControlsView, taskSheetView, verbsFor,
+  type ProviderChoice, type Sheet, type Verb,
+} from "./write";
 
 export type Tab = "inbox" | "chats" | "tasks";
 
@@ -106,6 +117,14 @@ export class PhoneApp {
   private deferred = false;
   /** One line shown once above the inbox after an answer ("Denied.", where a decision's answer went). */
   private flash = "";
+  /** P-5: the open sheet (New chat, New task), what it offers, and each chat's and task's write state. */
+  sheet: Sheet | null = null;
+  models: ProviderChoice[] | null = null;
+  readonly composeDrafts = new Map<string, string>();
+  readonly composeNotes = new Map<string, string>();
+  readonly sending = new Set<string>();
+  readonly withdrawing = new Set<string>();
+  taskWrite: { id: string; confirming: Verb | null; busy: boolean; note: string } | null = null;
 
   private readonly fetchJson: (path: string) => Promise<Got>;
   private readonly postJson: (path: string, value: unknown) => Promise<Posted>;
@@ -416,7 +435,9 @@ export class PhoneApp {
     if (result.status === 200) {
       this.drafts.delete(row.id);
       this.picks.delete(row.id);
-      const note = typeof result.body.note === "string" ? result.body.note : "Sent.";
+      this.withdrawing.delete(row.id);
+      const note = typeof result.body.note === "string" ? result.body.note
+        : row.kind === "proposal" ? "Withdrawn: the task will not start." : "Sent.";
       this.flash = note;
     } else {
       this.notes.set(row.id, await this.refusedWith(result.status, result.body));
@@ -425,12 +446,245 @@ export class PhoneApp {
     void this.loadInbox();
   }
 
+  // -- writing (P-5) -------------------------------------------------------------------
+
+  /** Draw again, unless a box is being typed in: then once it loses focus. */
+  private renderKeepingFocus(): void {
+    const active = typeof document !== "undefined" ? document.activeElement : null;
+    if (active instanceof HTMLTextAreaElement && this.main.contains(active)) {
+      if (!this.deferred) {
+        this.deferred = true;
+        active.addEventListener("blur", () => {
+          setTimeout(() => { this.deferred = false; if (!this.stopped) this.render(); }, BLUR_REDRAW_MS);
+        }, { once: true });
+      }
+      return;
+    }
+    this.render();
+  }
+
+  /** A write's answer, or null after handling offline (a note says so) and signed out. */
+  private async write(path: string, value: unknown): Promise<{ status: number; body: Record<string, unknown> } | null> {
+    const result = await this.post(path, value);
+    if (result && result.status === 401) {
+      const me = await this.fetchJson("/m/api/me");
+      if (!me.ok && me.why === "signed-out") { this.signedOut(); return null; }
+    }
+    return result;
+  }
+
+  /** A message to the open chat: sent once; shown only after its 2xx and a read of the log. */
+  async sendMessage(threadId: string, text: string): Promise<void> {
+    if (this.sending.has(threadId) || !this.online) return;
+    this.sending.add(threadId);
+    this.composeNotes.delete(threadId);
+    this.renderComposer();
+    const result = await this.write(`/m/api/threads/${threadId}/messages`, { text });
+    this.sending.delete(threadId);
+    if (this.stopped) return;
+    if (!result) {
+      this.composeNotes.set(threadId, this.online ? "" : "Not sent: offline.");
+    } else if (result.status === 202) {
+      this.composeDrafts.delete(threadId);
+      this.composeNotes.set(threadId, sentNote(result.body));
+      if (this.thread?.id === threadId) void this.moreLog();
+    } else {
+      this.composeNotes.set(threadId, refusal(result.status, result.body));
+    }
+    this.renderComposer(true);
+  }
+
+  /** The message box drawn again in place (the transcript and its scroll kept). */
+  private renderComposer(clear = false): void {
+    const open = this.thread;
+    if (this.tab !== "chats" || !open || this.sheet) return;
+    const old = this.main.querySelector('[data-testid="m-compose"]');
+    const fresh = this.composer(open.id);
+    if (!old || !fresh) return;
+    old.replaceWith(fresh);
+    if (clear) fresh.querySelector("textarea")!.value = this.composeDrafts.get(open.id) ?? "";
+  }
+
+  private composer(threadId: string): HTMLElement | null {
+    const meta = this.thread?.id === threadId ? this.thread.meta : null;
+    // An owner's chat only: a task's chats are the runner's.
+    if (meta && meta.task_id) return null;
+    return composerView({
+      draft: this.composeDrafts.get(threadId) ?? "", busy: this.sending.has(threadId),
+      note: this.composeNotes.get(threadId) ?? "", online: this.online,
+      send: (text) => void this.sendMessage(threadId, text),
+      edit: (text) => { this.composeDrafts.set(threadId, text); },
+    });
+  }
+
+  private firstProject(): string {
+    const list = this.projects ?? [];
+    const open = this.thread?.meta?.project_id ?? this.task?.view?.project_id;
+    return (open && list.some((p) => p.id === open) ? open : list[0]?.id) ?? "";
+  }
+
+  async openNewChat(): Promise<void> {
+    this.tab = "chats";
+    this.thread = null;
+    this.sheet = { kind: "chat", projectId: this.firstProject(), provider: "fast", model: "", text: "", busy: false,
+      note: "", openedId: null };
+    this.render();
+    if (this.projects === null) await this.loadChats();
+    const sheet = this.sheet;
+    if (sheet?.kind === "chat" && !sheet.projectId) { sheet.projectId = this.firstProject(); }
+    const r = await this.read("/m/api/thread-models");
+    if (!r || this.sheet !== sheet) return;
+    if ("body" in r) {
+      this.models = parseModels(r.body);
+      const usable = this.models.filter((m) => m.available);
+      if (sheet && sheet.kind === "chat" && !usable.some((m) => m.name === sheet.provider) && usable.length) {
+        sheet.provider = usable[0].name;
+      }
+    } else if (sheet) {
+      sheet.note = r.error;
+    }
+    this.renderKeepingFocus();
+  }
+
+  async createChat(): Promise<void> {
+    const sheet = this.sheet;
+    if (!sheet || sheet.kind !== "chat" || sheet.busy || !this.online) return;
+    const text = sheet.text.trim();
+    if (!text || !sheet.projectId) return;
+    sheet.busy = true;
+    sheet.note = "";
+    this.render();
+    const body: Record<string, unknown> = { project_id: sheet.projectId, provider: sheet.provider, text };
+    if (sheet.model) body.model = sheet.model;
+    const result = await this.write("/m/api/threads", body);
+    if (this.sheet !== sheet) return;
+    sheet.busy = false;
+    if (!result) { sheet.note = this.online ? "" : "Not sent: offline."; this.render(); return; }
+    const thread = (result.body.thread ?? null) as { id?: unknown } | null;
+    if (result.status === 201 && thread && typeof thread.id === "string") {
+      const id = thread.id;
+      this.sheet = null;
+      const send = (result.body.send ?? {}) as Record<string, unknown>;
+      this.composeNotes.set(id, sentNote(send));
+      void this.loadChats();
+      await this.openThread(id);
+      return;
+    }
+    sheet.note = refusal(result.status, result.body, "Not started");
+    if (thread && typeof thread.id === "string") sheet.openedId = thread.id;
+    this.render();
+  }
+
+  openNewTask(): void {
+    this.tab = "tasks";
+    this.task = null;
+    this.sheet = { kind: "task", projectId: this.firstProject(), brief: "", busy: false, note: "" };
+    this.render();
+    if (this.projects === null) {
+      void this.loadChats().then(() => {
+        const sheet = this.sheet;
+        if (sheet?.kind === "task" && !sheet.projectId) sheet.projectId = this.firstProject();
+        if (this.sheet === sheet) this.renderKeepingFocus();
+      });
+    }
+  }
+
+  async createTask(): Promise<void> {
+    const sheet = this.sheet;
+    if (!sheet || sheet.kind !== "task" || sheet.busy || !this.online) return;
+    const brief = sheet.brief.trim();
+    if (!brief || !sheet.projectId) return;
+    sheet.busy = true;
+    sheet.note = "";
+    this.render();
+    const result = await this.write("/m/api/tasks", { project_id: sheet.projectId, brief });
+    if (this.sheet !== sheet) return;
+    sheet.busy = false;
+    if (!result) { sheet.note = this.online ? "" : "Not sent: offline."; this.render(); return; }
+    const task = (result.body.task ?? null) as { id?: unknown } | null;
+    if (result.status === 201 && task && typeof task.id === "string") {
+      this.sheet = null;
+      void this.loadTasks();
+      this.taskWrite = { id: task.id, confirming: null, busy: false, note: "Created. It waits for Start." };
+      await this.openTask(task.id);
+      return;
+    }
+    sheet.note = refusal(result.status, result.body, "Not created");
+    this.render();
+  }
+
+  private taskState(id: string) {
+    if (this.taskWrite?.id !== id) this.taskWrite = { id, confirming: null, busy: false, note: "" };
+    return this.taskWrite;
+  }
+
+  askVerb(id: string, verb: Verb): void {
+    const w = this.taskState(id);
+    if (w.busy) return;
+    w.confirming = verb;
+    w.note = "";
+    this.render();
+  }
+
+  backVerb(id: string): void {
+    const w = this.taskState(id);
+    if (w.busy) return;
+    w.confirming = null;
+    this.render();
+  }
+
+  /** A confirmed verb: Start and Resume on the session; Cancel with its own passkey assertion. */
+  async confirmVerb(id: string, verb: Verb): Promise<void> {
+    const w = this.taskState(id);
+    if (w.busy || w.confirming !== verb || !this.online) return;
+    w.busy = true;
+    w.note = "";
+    this.render();
+    let result: { status: number; body: Record<string, unknown> } | null;
+    if (verb === "cancel") {
+      const options = await this.write(`/m/api/tasks/${id}/cancel/options`, {});
+      if (options && options.status === 200 && options.body.publicKey && typeof options.body.publicKey === "object") {
+        let assertion: Record<string, unknown> | null = null;
+        try { assertion = await this.getCredential(options.body.publicKey as Record<string, unknown>); } catch { assertion = null; }
+        if (!assertion) {
+          if (this.taskWrite === w) {
+            w.busy = false;
+            w.confirming = null;
+            w.note = "Cancelled, or the passkey was not verified. The task goes on.";
+            this.render();
+          }
+          return;
+        }
+        result = await this.write(`/m/api/tasks/${id}/cancel`, { assertion });
+      } else {
+        result = options;
+      }
+    } else {
+      result = await this.write(`/m/api/tasks/${id}/${verb}`, {});
+    }
+    if (this.taskWrite !== w) return;
+    w.busy = false;
+    w.confirming = null;
+    if (!result) {
+      w.note = this.online ? "" : "Not sent: offline.";
+    } else if (result.status === 200) {
+      w.note = verb === "start" ? "Started." : verb === "resume" ? "Resumed." : "Cancelled.";
+      void this.loadTasks();
+      if (this.task?.id === id) { void this.openTask(id); return; }
+    } else if (result.status === 401 && verb === "cancel") {
+      w.note = "Not accepted: the passkey was not verified for this cancel.";
+    } else {
+      w.note = refusal(result.status, result.body, "Not done");
+    }
+    this.render();
+  }
+
   async loadChats(): Promise<void> {
     const [p, t] = [await this.read("/m/api/projects"), await this.read("/m/api/threads")];
     if (!p || !("body" in p) || !t || !("body" in t)) return;
     this.projects = parseProjects(p.body);
     this.threads = parseThreads(t.body);
-    if (this.tab === "chats" && !this.thread) this.render();
+    if (this.tab === "chats" && !this.thread && !this.sheet) this.render();
   }
 
   async loadProjectThreads(projectId: string): Promise<void> {
@@ -441,11 +695,12 @@ export class PhoneApp {
       return;
     }
     this.threads = this.threads.filter((t) => t.project_id !== projectId).concat(parseThreads(r.body));
-    if (this.tab === "chats" && !this.thread) this.render();
+    if (this.tab === "chats" && !this.thread && !this.sheet) this.render();
   }
 
   async openThread(id: string, meta: ChatThread | null = null): Promise<void> {
     this.tab = "chats";
+    this.sheet = null;
     this.thread = { id, meta: meta ?? this.threads.find((t) => t.id === id) ?? null, rows: [], next: 0, older: false, list: null };
     this.render();
     const r = await this.read(`/m/api/threads/${id}/log`);
@@ -507,12 +762,13 @@ export class PhoneApp {
     const r = await this.read("/m/api/tasks");
     if (!r || !("body" in r)) return;
     this.tasks = parseTasks(r.body);
-    if (this.tab === "tasks" && !this.task) this.render();
+    if (this.tab === "tasks" && !this.task && !this.sheet) this.render();
   }
 
   /** Open a task, or read the open one again (its diff too, once shown; its folds kept). */
   async openTask(id: string): Promise<void> {
     this.tab = "tasks";
+    if (this.sheet?.kind === "task") this.sheet = null;
     if (this.task?.id !== id) this.task = { id, view: null, diff: null, folds: new Map() };
     const open: OpenTask = this.task;
     this.render();
@@ -628,6 +884,8 @@ export class PhoneApp {
     this.online = online;
     this.frame.dataset.stale = online ? "false" : "true";
     this.renderBanner();
+    // The write controls (P-5) say offline and turn off, or come back.
+    if (this.tab !== "inbox" || !this.card) this.renderKeepingFocus();
     if (online) this.refreshVisible();
   }
 
@@ -655,6 +913,9 @@ export class PhoneApp {
       // A second tap on the open tab goes back to its list.
       if (tab === "chats") this.thread = null;
       if (tab === "tasks") this.task = null;
+      this.sheet = null;
+    } else if (this.sheet && this.sheet.kind !== (tab === "chats" ? "chat" : tab === "tasks" ? "task" : "")) {
+      this.sheet = null;
     }
     this.tab = tab;
     this.render();
@@ -688,6 +949,11 @@ export class PhoneApp {
         openCard: (row) => this.openCard(row),
         send: (row, body) => void this.sendAnswer(row, body),
         busy: this.answering, notes: this.notes, drafts: this.drafts, picks: this.picks,
+        withdraw: {
+          confirming: this.withdrawing,
+          ask: (row) => { this.withdrawing.add(row.id); this.notes.delete(row.id); this.render(); },
+          back: (row) => { this.withdrawing.delete(row.id); this.render(); },
+        },
       };
       view = inboxView(this.inbox, (row) => {
         if (row.thread_id) void this.openThread(row.thread_id);
@@ -700,8 +966,16 @@ export class PhoneApp {
         view.prepend(line);
       }
     } else if (this.tab === "chats") {
-      if (this.thread) {
-        const built = transcriptView(this.thread.meta, this.thread.rows, this.thread.older, () => this.show("chats"));
+      if (this.sheet?.kind === "chat") {
+        view = chatSheetView(this.sheet, this.projects ?? [], this.models, this.online, {
+          close: () => { this.sheet = null; this.render(); void this.loadChats(); },
+          submit: () => void this.createChat(),
+          change: () => this.render(),
+          openChat: (id) => void this.openThread(id),
+        });
+      } else if (this.thread) {
+        const built = transcriptView(this.thread.meta, this.thread.rows, this.thread.older, () => this.show("chats"),
+          this.composer(this.thread.id));
         this.thread.list = built.list;
         view = built.view;
       } else {
@@ -712,14 +986,32 @@ export class PhoneApp {
             this.render();
           },
         });
+        view.prepend(tap("New chat", () => void this.openNewChat(), "quiet m-new", "m-new-chat-open"));
       }
+    } else if (this.sheet?.kind === "task") {
+      view = taskSheetView(this.sheet, this.projects ?? [], this.online, {
+        close: () => { this.sheet = null; this.render(); void this.loadTasks(); },
+        submit: () => void this.createTask(),
+        change: () => this.render(),
+      });
     } else if (this.task) {
-      view = this.task.view
-        ? taskView(this.task.view, this.task.diff, { back: () => this.show("tasks"), showDiff: () => void this.loadDiff(),
-          folds: this.task.folds })
+      const open = this.task;
+      const controls = open.view && verbsFor(open.view.state).length ? (() => {
+        const w = this.taskState(open.id);
+        return taskControlsView(open.view!, {
+          confirming: w.confirming, busy: w.busy, note: w.note, online: this.online,
+          ask: (verb) => this.askVerb(open.id, verb), back: () => this.backVerb(open.id),
+          confirm: (verb) => void this.confirmVerb(open.id, verb),
+        });
+      })() : (this.taskWrite?.id === open.id && this.taskWrite.note
+        ? el("p", "m-notice", this.taskWrite.note) : null);
+      view = open.view
+        ? taskView(open.view, open.diff, { back: () => this.show("tasks"), showDiff: () => void this.loadDiff(),
+          folds: open.folds, controls })
         : el("p", "empty", "Loading…");
     } else {
       view = tasksView(this.tasks, (t) => void this.openTask(t.id));
+      view.prepend(tap("New task", () => this.openNewTask(), "quiet m-new", "m-new-task-open"));
     }
     this.main.replaceChildren(view);
   }

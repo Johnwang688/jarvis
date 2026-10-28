@@ -212,6 +212,6 @@ export function deskNote(kind: string): string | null {
     return "Answer at the desk";
   }
   if (kind === "proposal") return "Withdraw at the desk";
-  if (kind === "task") return "Resume or cancel at the desk";
+  if (kind === "task") return "Open the task to resume or cancel it";
   return null;
 }

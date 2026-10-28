@@ -288,7 +288,9 @@ describe("the phone app: live, offline and signed out (P-3)", () => {
     h.streams[0].send({ kind: "thread_changed", data: { thread_id: "aaaaaaaa", project_id: "cccccccc", reason: "text" } });
     await h.settle();
     expect(h.root.querySelectorAll('[data-testid="m-msg"]').length).toBe(2);
-    expect(h.root.querySelectorAll("input, textarea, form").length).toBe(0);
+    // P-5: the chat's one message box, and nothing else to type in.
+    expect(h.root.querySelectorAll("input, form").length).toBe(0);
+    expect(h.root.querySelectorAll('textarea[data-testid="m-compose-text"]').length).toBe(1);
   });
 
   it("goes offline with a banner and stale data, and back once a read lands", async () => {

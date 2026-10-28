@@ -767,6 +767,7 @@ class OwnerVerified(Phone):
             "owner_verified,via=\"phone\")",                            # _dispatch -> inbox.answer
             "False)",                                                  # questions and decisions
             "False)",                                                  # Deny
+            "False)",                                                  # a proposal's withdraw (P-5)
             'bool(secure.get("ok"))',                                  # §4.1 after the assertion
             "owner_verified)",                                         # the verified answer
         ],
