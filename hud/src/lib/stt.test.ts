@@ -3,12 +3,12 @@ import {
   NOT_OWNER_MESSAGE, SttAssembler, STT_MAX_CLIPS, STT_RETRY_DELAY_MS, isNotOwner, placementFor, retryable, sttDeadlineMs,
   type SttEvent, type SttPlaced,
 } from "./stt";
-import { VoiceDiagnostics } from "./voiceDiagnostics";
+import { VoiceDiagnostics, type ClaimSource } from "./voiceDiagnostics";
 
 type Call = { blob: Blob; signal: AbortSignal; utteranceId: number; seq: number; budgetMs: number; verified: (kind: string) => void;
   resolve: (t: string) => void; reject: (e: unknown) => void };
 
-function harness(over: { canUpload?: (explicit: boolean) => boolean; maxInFlight?: number } = {}) {
+function harness(over: { canUpload?: (explicit: boolean, clip: { source: ClaimSource; meta: string }) => boolean; maxInFlight?: number } = {}) {
   const calls: Call[] = [];
   const placed: SttPlaced<string>[][] = [];
   const events: SttEvent[] = [];
@@ -117,6 +117,18 @@ describe("bounded automatic retry", () => {
     await vi.advanceTimersByTimeAsync(STT_RETRY_DELAY_MS + 100);
     expect(h.calls).toHaveLength(1);
     expect(h.stt.snapshot().clips[0].state).toBe("failed");
+  });
+});
+
+describe("the upload gate is told who claimed the clip", () => {
+  it("passes what claimed the clip, so OFF can admit the talk key's dictation and nothing else", async () => {
+    const seen: string[] = [];
+    const h = harness({ canUpload: (_e, clip) => { seen.push(clip.source); return clip.source === "ptt"; } });
+    h.stt.submit(h.clip(), 1000, "ptt", "auto");
+    h.stt.submit(h.clip(), 1000, "wake", "auto");
+    await flush();
+    expect(seen).toEqual(["ptt", "wake"]);
+    expect(h.calls).toHaveLength(1);
   });
 });
 

@@ -3143,3 +3143,36 @@ shows the same pickers working in real Chromium.
 All 13 are killed. The
 browser voice suites (`tests/face/hud_v2_*`) run against the mock daemon, so they never reach this
 route code and were not rerun.
+
+**Muted dictation and a silent OFF (2026-10-27, the owner's call).** The mic's
+OFF used to take the talk key away ("MIC MUTED"). Now Ctrl+D, or holding the orb,
+records while it is held even when OFF, the way Claude Code and Codex dictate.
+What was said lands in the selected chat's box, unsent. OFF utterances never
+send: `placementFor` and `wordMaySend` refuse mode `off`. `planWords` reads no
+send or cancel word in them, so a trailing "over" or "cancel" is typed as said.
+
+The rest of OFF is unchanged:
+- The press moves `micFloorSample`, so muted dictation has no pre-roll from the
+  muted time before the press.
+- The wake word, the follow-up and continuation windows, and hands-free claims
+  stay deaf.
+- `capture.ptt.dictating` exempts only a key *pressed while OFF*. Switching OFF
+  under a key pressed while on still ends its recording.
+- While OFF, `onChunk` and the STT queue's `canUpload(explicit, clip)` admit
+  only `dictation.mutedDictation`: a `ptt` clip claimed in mode `off`. A clip
+  recorded with the mic on and retried after it went OFF is still refused.
+
+The second half of the decision partly reverses Q11: while the mic is OFF, the
+HUD window reads nothing aloud. `policy.MIC_OFF_SILENCES_SPEECH` drives
+`SpeechController.setMicOff`, which stops what is playing and queues nothing
+more. It still does not post the daemon's `/mute` (`MIC_OFF_MUTES_SPEECH` stays
+false). The read-aloud switch keeps its value, and the mic coming back on
+brings speech back. Known and accepted: the speech strip and the read-aloud row
+still show the switch's own value while OFF; the approval chime still sounds;
+and a frame of audio already in flight at the press (tens of ms) can land
+after the floor.
+
+Tests are in vitest `capture.test.ts` ("the talk key dictates while OFF"), plus
+`controller.test.ts`, `stt.test.ts`, `captureChunks.test.ts` and
+`hud_v2_ptt_check` (muted section). The no-pre-roll and mute-exemption lines
+were each mutated, and the tests failed.

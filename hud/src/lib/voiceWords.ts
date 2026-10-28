@@ -144,7 +144,7 @@ export interface WordItem {
   text: string;
   late: boolean;
   retried: boolean;
-  meta: Pick<SttCapture, "tailMs">;
+  meta: Pick<SttCapture, "tailMs"> & { mode?: SttCapture["mode"] };
 }
 
 export type WordStep<T> =
@@ -165,7 +165,9 @@ export function planWords<T extends WordItem>(batch: readonly T[], ctx: { words:
   const steps: WordStep<T>[] = [];
   let run: T[] = [];
   for (const item of batch) {
-    const eligible = !ctx.card && !item.late && !item.retried && typeof item.meta.tailMs === "number";
+    // Dictated while the mic was OFF (2026-10-27): typed as said, like Claude Code's dictation, so a
+    // trailing "over" or "cancel" is a word in the box, never an order.
+    const eligible = !ctx.card && !item.late && !item.retried && item.meta.mode !== "off" && typeof item.meta.tailMs === "number";
     const read = eligible ? readWord(item.text, ctx.words, item.meta.tailMs!) : { text: item.text, word: null };
     if (!read.word) { run.push(item); continue; }
     const stripped = { ...item, text: read.text };

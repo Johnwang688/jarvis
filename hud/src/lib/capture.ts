@@ -29,7 +29,11 @@
 // The OFF dictation mode is v1's mic mute: nothing claimed, nothing uploaded,
 // and `micFloorSample` clamps every upload at the last unmute, so audio
 // captured while the owner believed the mic was off can never ride out as
-// pre-roll or as a wake hit's back-dating.
+// pre-roll or as a wake hit's back-dating. The one exception is the talk key
+// (2026-10-27, owner's call): held while OFF it records exactly what is said
+// while it is held -- dictation, as in Claude Code -- and nothing before the
+// press (the press moves `micFloorSample`, so there is no pre-roll). The wake
+// word, the follow-up and continuation windows stay closed.
 
 import {
   CONTINUE_CHAIN_MS, CONTINUE_MAX_CLAIMS, CONTINUE_MS, END_PAUSE_MAX_MS, END_PAUSE_MIN_MS, END_PAUSE_MS, FOLLOWUP_MS,
@@ -80,7 +84,7 @@ export interface CaptureHooks {
   suppressed: () => boolean;
   suppressionReason?: () => SuppressionReason;
   onDrop?: (reason: DropReason, ms: number, source: ClaimSource, detector: DetectorKind) => void;
-  /** OFF: nothing is claimed and nothing is uploaded. */
+  /** OFF: nothing is claimed and nothing is uploaded, except while the talk key is held. */
   muted: () => boolean;
   onLevel: (level: number) => void;
   /**
@@ -147,7 +151,8 @@ export class Capture {
   private tokenSeq = 0;
   wakeHitAt = -1e9;
   segClaimed = false;
-  ptt: { from: number; at: number; adopted: boolean } | null = null;
+  /** The held talk key. `dictating`: pressed while OFF, so its own recording is exempt from the mute. */
+  ptt: { from: number; at: number; adopted: boolean; dictating: boolean } | null = null;
   /** The recording of the claimed message in progress, if any. */
   private rec: UtteranceRecorder | null = null;
   private utterances = 0;
@@ -383,7 +388,9 @@ export class Capture {
   onFrame(frame: Float32Array, prob?: number | null, self: SelfFrame | null = null) {
     this.ring.push(frame);
     const rms = frameRms(frame);
-    const muted = this.hooks.muted();
+    // A talk key pressed while OFF lifts the mute for its own recording only;
+    // the mic going OFF under a key pressed while on still ends it, as before.
+    const muted = this.hooks.muted() && !this.ptt?.dictating;
     // Muted, the orb shows nothing: a level meter on a muted mic reads as "he
     // is listening", which is exactly the wrong promise.
     this.hooks.onLevel(muted ? 0 : Math.min(1, rms * 4));
@@ -603,12 +610,14 @@ export class Capture {
   // ---- push to talk -------------------------------------------------------
 
   press() {
-    if (this.hooks.muted()) return false; // muting takes away recording
     if (this.ptt) return false;
+    // OFF: the key still dictates, but nothing from before the press leaves.
+    const dictating = this.hooks.muted();
+    if (dictating) this.micFloorSample = this.ring.written;
     this.claimSource = "ptt";
     this.judgedBy = this.vad.ml ? "silero" : "energy";
     const at = this.ring.written;
-    this.ptt = { from: Math.max(0, at - msToSamples(PREROLL_MS)), at, adopted: this.rec !== null };
+    this.ptt = { from: Math.max(0, at - msToSamples(PREROLL_MS)), at, adopted: this.rec !== null, dictating };
     this.segClaimed = false;
     this.closeFollowUp();
     this.closeContinuation();
