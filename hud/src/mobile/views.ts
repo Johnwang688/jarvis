@@ -352,22 +352,46 @@ export function chatsView(projects: Project[] | null, threads: ChatThread[], exp
   return view;
 }
 
+/** How a transcript row is drawn (Claude/Codex style, the owner's choice
+ * 2026-10-28): the owner's words in a right-aligned bubble, a reply as plain
+ * full-width Markdown, anything else (the daemon's own lines, another chat's
+ * relay) as one muted line that a tap opens to the whole text. Only the role
+ * `owner` is ever a bubble: a peer or a relay is not the owner's words. */
+export function rowStyle(role: string): "owner" | "reply" | "step" {
+  if (role === "owner") return "owner";
+  return ASSISTANT_ROLES.has(role) ? "reply" : "step";
+}
+
 export function logRow(row: LogRow): HTMLElement {
-  const item = testid(el("article", "msg"), "m-msg");
+  const style = rowStyle(row.role);
+  const item = testid(el("article", "msg msg-" + style), "m-msg");
   item.dataset.role = row.role;
   item.dataset.seq = String(row.seq);
-  const head = [row.role, ...row.marks, time(row.at)].filter(Boolean).join(" · ");
-  item.append(el("div", "msg-head", head));
-  const body = el("div", "msg-body");
-  if (ASSISTANT_ROLES.has(row.role)) {
-    body.classList.add("md");
-    renderPhoneMarkdown(body, row.text);
-  } else {
-    body.classList.add("plain-text");
-    body.textContent = row.text;
+  const cut = row.cut ? el("p", "muted small", "The rest of this message is shown at the desk.") : null;
+  if (style === "owner") {
+    item.append(el("div", "msg-bubble plain-text", row.text));
+    const meta = [...row.marks, time(row.at).slice(0, 5)].filter(Boolean).join(" · ");
+    if (meta) item.append(el("div", "msg-meta", meta));
+    if (cut) item.append(cut);
+    return item;
   }
-  item.append(body);
-  if (row.cut) item.append(el("p", "muted small", "The rest of this message is shown at the desk."));
+  if (style === "reply") {
+    item.append(el("div", "msg-head", [row.role, ...row.marks, time(row.at).slice(0, 5)].filter(Boolean).join(" · ")));
+    const body = el("div", "msg-body md");
+    renderPhoneMarkdown(body, row.text);
+    item.append(body);
+    if (cut) item.append(cut);
+    return item;
+  }
+  // A step: folded to one line; the whole text (all the detail there is) inside.
+  const fold = testid(el("details", "step"), "m-step");
+  const summary = el("summary", "step-line");
+  const first = row.text.split("\n", 1)[0];
+  summary.append(el("span", "step-role", [row.role, ...row.marks].filter(Boolean).join(" · ")),
+    el("span", "step-text", first), el("span", "step-time", time(row.at).slice(0, 5)));
+  fold.append(summary, el("div", "step-body plain-text", row.text));
+  if (cut) fold.append(cut);
+  item.append(fold);
   return item;
 }
 

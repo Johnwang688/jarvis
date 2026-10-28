@@ -240,10 +240,25 @@ p, li, h2, h3 { overflow-wrap: anywhere; }
   padding: 4px 0; z-index: 1; }
 .subtitle { font-size: 16px; font-weight: 600; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
   white-space: nowrap; }
-.transcript { display: flex; flex-direction: column; gap: 10px; }
-.msg { padding: 8px 10px; border-radius: var(--radius); background: var(--bg-1); border: 1px solid var(--border); }
-.msg[data-role="owner"] { background: var(--bg-2); }
-.msg-head { font-size: 12px; color: var(--text-muted); margin-bottom: 4px; }
+/* The transcript, Claude/Codex style (the owner's choice, 2026-10-28): no
+   boxes; the owner's words in a right-aligned bubble, a reply as plain
+   full-width text, a step (the daemon's lines, a relay) one muted line that
+   opens to its whole text. */
+.transcript { display: flex; flex-direction: column; gap: 12px; padding: 4px 0 12px; }
+.msg-owner { align-self: flex-end; max-width: 85%; display: flex; flex-direction: column; align-items: flex-end; gap: 2px; }
+.msg-bubble { background: var(--bg-3); border-radius: 18px; padding: 8px 14px; }
+.msg-meta { font-size: 11px; color: var(--text-muted); padding-right: 6px; }
+.msg-head { font-size: 12px; color: var(--text-muted); margin-bottom: 2px; }
+.msg-step { margin: -6px 0; }
+.step-line { display: flex; align-items: center; gap: 6px; min-height: 44px; font-size: 13px; color: var(--text-muted);
+  list-style: none; cursor: pointer; -webkit-tap-highlight-color: transparent; }
+.step-line::-webkit-details-marker { display: none; }
+.step-line::before { content: "›"; flex: none; width: 10px; text-align: center; transition: transform 0.15s; }
+.step[open] > .step-line::before { transform: rotate(90deg); }
+.step-role { flex: none; max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-2); }
+.step-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.step-time { flex: none; font-size: 11px; }
+.step-body { font-size: 14px; color: var(--text-2); margin: 0 0 8px 4px; padding-left: 10px; border-left: 2px solid var(--border); }
 .plain-text { white-space: pre-wrap; overflow-wrap: anywhere; }
 .md { overflow-wrap: anywhere; }
 .md p, .md ul, .md ol, .md pre, .md blockquote, .md table { margin: 6px 0; }

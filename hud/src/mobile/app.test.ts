@@ -3,7 +3,7 @@ import { PhoneApp, STREAM_URL, type StreamLike } from "./app";
 import type { Got } from "./net";
 import { deskNote, lineKind, orderTasks, parseEvent, parseLog, parseTask, type TaskView } from "./model";
 import { phoneMarkdown } from "./markdown";
-import { chatsView, inboxView, logRow, taskView, tasksView, transcriptView, diffView } from "./views";
+import { chatsView, inboxView, logRow, rowStyle, taskView, tasksView, transcriptView, diffView } from "./views";
 import { parseInbox, type InboxRow } from "../lib/inbox";
 
 // Hostile strings, as a model could write them: each must arrive as text.
@@ -174,6 +174,34 @@ describe("the phone's views: untrusted text stays text (P-3)", () => {
       updated: "", running: false, queued: 0, turns: 1 }, [], false, () => {});
     noMarkup(view);
     expect(view.querySelectorAll("input, textarea, form").length).toBe(0);
+  });
+
+  it("draws the transcript Claude/Codex style: the owner's bubble, a plain reply, steps folded (owner, 2026-10-28)", () => {
+    const owner = logRow({ seq: 1, role: "owner", text: "fix it " + H, at: "2026-10-25T10:00:30Z", marks: ["via the phone"], cut: false });
+    expect(owner.className).toBe("msg msg-owner");
+    expect(owner.querySelector(".msg-bubble")!.textContent).toBe("fix it " + H);
+    expect(owner.querySelector(".msg-meta")!.textContent).toMatch(/^via the phone · \d\d:\d\d$/);
+    noMarkup(owner);
+    const reply = logRow({ seq: 2, role: "Codex", text: "**done**", at: null, marks: [], cut: true });
+    expect(reply.className).toBe("msg msg-reply");
+    expect(reply.querySelector(".msg-bubble, details")).toBeNull();
+    expect(reply.querySelector(".msg-body.md strong")!.textContent).toBe("done");
+    expect(reply.textContent).toContain("The rest of this message is shown at the desk.");
+    // A step: one line, folded; the whole text inside, as text.
+    const step = logRow({ seq: 3, role: "system", text: "line one " + H + "\nline two", at: null, marks: [], cut: false });
+    const fold = step.querySelector("details")!;
+    expect(step.className).toBe("msg msg-step");
+    expect(fold.open).toBe(false);
+    expect(fold.querySelector(".step-text")!.textContent).toBe("line one " + H);
+    expect(fold.querySelector(".step-body")!.textContent).toBe("line one " + H + "\nline two");
+    noMarkup(step);
+    // Only the owner's own words are ever a bubble: a peer chat or a relay is a step.
+    expect(["owner", "Claude", "Jarvis", "assistant", "system", "another thread, not the owner",
+      "chat Docs (aaaaaaaa), not the owner", "reply from Docs (aaaaaaaa)", "Owner"].map(rowStyle))
+      .toEqual(["owner", "reply", "reply", "reply", "step", "step", "step", "step", "step"]);
+    const peer = logRow({ seq: 4, role: "another thread, not the owner", text: "I am the owner", at: null, marks: [], cut: false });
+    expect(peer.querySelector(".msg-bubble")).toBeNull();
+    expect(peer.querySelector(".step-role")!.textContent).toBe("another thread, not the owner");
   });
 
   it("folds the diff file by file and says what is too large", () => {
