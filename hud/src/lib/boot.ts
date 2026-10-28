@@ -11,6 +11,8 @@
 // finish, the dots pop in — "J.A.R.V.I.S." — with a faint fill and an inner
 // rule.
 
+import { DEFAULT_RINGS, type Ring } from "./orbdraw";
+
 /** The prototype's defaults, which the owner approved ("literally perfection"). */
 export const BOOT_DEFAULTS = {
   speed: 1,
@@ -42,24 +44,10 @@ export const HARD_CAP_MS = 7_000;
 /** Whether this window has played it already (once per window session). */
 export const PLAYED_KEY = "jarvis.hud.boot.played";
 
-export interface Ring {
-  r: number;
-  ticks?: number;
-  arcs?: [number, number][];
-  len?: number;
-  w: number;
-  speed: number;
-  alpha: number;
-}
+export type { Ring };
 
 /** The orb's default ring set (Orb.tsx `RING_SETS.default`; a test keeps them equal). */
-export const RINGS: Ring[] = [
-  { r: 0.985, ticks: 144, len: 0.022, w: 1, speed: 0.04, alpha: 0.4 },
-  { r: 0.905, ticks: 72, len: 0.06, w: 2, speed: -0.1, alpha: 0.6 },
-  { r: 0.8, arcs: [[0, 1.1], [1.4, 2.6], [3.1, 4.4], [4.8, 5.9]], w: 2.5, speed: 0.16, alpha: 0.55 },
-  { r: 0.69, ticks: 36, len: 0.045, w: 1.5, speed: 0.22, alpha: 0.5 },
-  { r: 0.6, arcs: [[0, 2.4], [2.9, 5.6]], w: 1, speed: -0.3, alpha: 0.45 },
-];
+export const RINGS = DEFAULT_RINGS;
 /** Ring speed multiplier during boot. */
 export const SPIN = 1.2;
 
