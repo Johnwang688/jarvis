@@ -1285,10 +1285,12 @@ the rule) and `inbox.py` (the route and where marks apply).
   protected tree is not judged as a write to it); v1 asks. It predates B4.
 - **With the PR rows (inbox B3, #320).** A `pr` row is markable at rank 5
   like any other; its material key is B3's `detail.head`, so new commits
-  bring a dismissed PR back. A PR that leaves the list (merged, closed, or a
-  failed poll) and returns shows again too: the next mark write prunes a
-  mark whose row was gone. `prx:list` (kind `pr_unavailable`) is refused by
-  kind and by prefix, against the real row.
+  bring a dismissed PR back. A PR that leaves a list read in full (merged,
+  closed) has its mark forgotten by the poll (`PrSource.poll` calls
+  `MarksStore.forget`), so a reopened PR shows. A failed or cut-off read is
+  no leave: those PRs keep their marks through a `gh` outage. `prx:list`
+  (kind `pr_unavailable`) is refused by kind and by prefix, against the
+  real row.
 
 Tests: `tests/v2/inbox_marks_check.py` (every rank 1 to 4 kind refused live;
 5 to 8 accepted and undone; the rank judged at mark time; a forged mark on
