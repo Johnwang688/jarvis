@@ -118,9 +118,9 @@ function harness(rows: unknown[] = []) {
     { id: CHAT, project_id: PROJECT, title: "Fix it", provider: "claude", updated: "2026-10-25T10:00:00Z" },
     { id: OTHER, project_id: PROJECT, task_id: TASK, title: "a task's", provider: "codex", updated: "2026-10-25T09:00:00Z" }] });
   gets[`/m/api/threads/${CHAT}/log`] = ok({ rows: [{ seq: 0, role: "owner", text: "hi", at: null, marks: [] }], next: 1,
-    more: false, older: false, thread: { id: CHAT, project_id: PROJECT, title: "Fix it", provider: "claude" } });
+    more: false, older: false, thread: { id: CHAT, project_id: PROJECT, role: "chat", title: "Fix it", provider: "claude" } });
   gets[`/m/api/threads/${OTHER}/log`] = ok({ rows: [], next: 0, more: false, older: false,
-    thread: { id: OTHER, project_id: PROJECT, task_id: TASK, title: "a task's", provider: "codex" } });
+    thread: { id: OTHER, project_id: PROJECT, role: "orchestrator", task_id: TASK, title: "a task's", provider: "codex" } });
   gets[`/m/api/threads/${CHAT}/log?after=1`] = ok({ rows: [], next: 1, more: false, older: false, thread: null });
   const app = new PhoneApp({
     root, onSignedOut: signedOut, signOut: async () => {},
@@ -220,7 +220,8 @@ describe("push to talk (P-7)", () => {
     expect((h.q("m-compose-send") as HTMLButtonElement).disabled).toBe(false);
     (h.q("m-compose-send") as HTMLButtonElement).click();
     await h.settle();
-    expect(h.posts).toEqual([{ path: `/m/api/threads/${CHAT}/messages`, value: { text: "please add a test" } }]);
+    expect(h.posts.length).toBe(1);
+    expect(h.posts[0]).toMatchObject({ path: `/m/api/threads/${CHAT}/messages`, value: { text: "please add a test" } });
   });
 
   it("an empty box takes the words as they are", async () => {

@@ -62,6 +62,24 @@ export function refusal(status: number, body: Json, what = "Not sent"): string {
   return word ? word[0].toUpperCase() + word.slice(1) + "." : `${what} (${status}).`;
 }
 
+/** A write whose answer never came back (the connection dropped after it
+ * left, or the proxy answered 502/504): it may have landed. */
+export const MAYBE_SENT = "May not have been sent. Check the chat before trying again.";
+export const MAYBE_DONE = "May not have gone through. Check the task before trying again.";
+
+/** The phone's id for one draft (`client_id`): the server answers a repeat
+ * of the same id with the first answer and does nothing twice. Bound to the
+ * draft's exact words: edited words are a new message and get a new id. */
+export function clientIdFor(ids: Map<string, { id: string; text: string }>, key: string, text: string): string {
+  const found = ids.get(key);
+  if (found && found.text === text) return found.id;
+  const c = (globalThis as { crypto?: Crypto }).crypto;
+  const id = c && typeof c.randomUUID === "function" ? c.randomUUID()
+    : Array.from({ length: 32 }, () => Math.floor(Math.random() * 16).toString(16)).join("");
+  ids.set(key, { id, text });
+  return id;
+}
+
 /** What `POST threads/<id>/messages` answered, in words. */
 export function sentNote(body: Json): string {
   if (body.status === "queued") {
@@ -108,8 +126,8 @@ export function composerView(c: Composer): HTMLElement {
   box.append(text);
   if (c.mic) box.append(c.mic);
   box.append(send);
+  if (c.note) box.append(note(c.note, "m-compose-note"));
   if (!c.online) box.append(note("Offline: nothing can be sent until Jarvis is reachable.", "m-compose-offline", "m-notice m-off"));
-  else if (c.note) box.append(note(c.note, "m-compose-note"));
   return box;
 }
 
@@ -216,8 +234,8 @@ export function chatSheetView(sheet: ChatSheet, projects: Project[], models: Pro
   text.addEventListener("input", sync);
   sync();
   view.append(text, go);
+  if (sheet.note) view.append(note(sheet.note, "m-sheet-note"));
   if (!online) view.append(note("Offline: nothing can be sent until Jarvis is reachable.", "m-sheet-offline", "m-notice m-off"));
-  else if (sheet.note) view.append(note(sheet.note, "m-sheet-note"));
   if (sheet.openedId && a.openChat) {
     const id = sheet.openedId;
     view.append(button("Open the new chat", () => a.openChat!(id), "link", "m-sheet-open"));
@@ -249,8 +267,8 @@ export function taskSheetView(sheet: TaskSheet, projects: Project[], online: boo
   sync();
   view.append(text, go);
   view.append(el("p", "muted small", "It waits for Start: nothing runs until you press it."));
+  if (sheet.note) view.append(note(sheet.note, "m-sheet-note"));
   if (!online) view.append(note("Offline: nothing can be sent until Jarvis is reachable.", "m-sheet-offline", "m-notice m-off"));
-  else if (sheet.note) view.append(note(sheet.note, "m-sheet-note"));
   return view;
 }
 
@@ -302,7 +320,7 @@ export function taskControlsView(task: TaskView, c: TaskControls, allowed: reado
       box.append(button(LABEL[verb], () => c.ask(verb), `quiet m-btn ${verb}`, "m-task-" + verb, c.busy || !c.online));
     }
   }
+  if (c.note) box.append(note(c.note, "m-task-note"));
   if (!c.online && allowed.length) box.append(note("Offline: nothing can be sent until Jarvis is reachable.", "m-task-offline", "m-notice m-off"));
-  else if (c.note) box.append(note(c.note, "m-task-note"));
   return box;
 }

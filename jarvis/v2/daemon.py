@@ -3565,6 +3565,9 @@ def _handler(daemon):
             raise APIError(404, "route not found")
 
         def _task_verb(self, task_id, verb):
+            # No runner: 409 before the body is read, as before P-5.
+            if daemon.runner is None:
+                raise DaemonError("no task runner is attached to this daemon")
             return 200, task_verb(daemon, task_id, verb, self._body())
 
         def _worktree(self, task_id, query):

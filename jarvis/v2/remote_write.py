@@ -58,8 +58,11 @@ labels, defaults and model names.
 task waits in INTAKE until Start. Start, resume and cancel are
 `daemon.task_verb`, the function the HUD's `POST /tasks/<id>/<verb>` calls,
 with the HUD's arguments (an empty body: no provider switch from the
-phone). Task start is `TASK_START`, separable: off, its two routes are not
-in the table (404) and nothing else changes.
+phone). `TASK_START` gates only the phone's own explicit task making and
+starting: off, those two routes are not in the table (404). It does not
+stop a chat from proposing a task: a fast-path chat a phone message started
+may still propose one (`task_propose`), which starts after its grace window
+as it does from the HUD or Discord, and which the phone may withdraw.
 
 **Deliberate verbs take the passkey.** Cancel ends a task for good:
 `CANCELLED` is terminal in `model.TRANSITIONS`, and resume takes only a
@@ -78,6 +81,13 @@ archived only), archive, rename, merge, steering a task, the worktree.
 included, is a line in the task's journal (`owner_verb`, `via: "phone"`),
 and an INFO log line naming the task and the verb (never a brief or a
 message's text).
+
+**Sent once (`client_id`).** A message, a new chat and a new task may
+carry `client_id` (8 to 64 of `[A-Za-z0-9-]`, the phone's UUID for one
+draft). A 2xx is kept per session for `SENT_TTL_S`; the same id again
+gets that answer back and nothing is done twice, so a send whose answer
+was lost (the connection dropped after the request left) can be retried
+safely. One still on its way is 409. At most `SENT_KEEP` are kept.
 
 **Refusals.** Malformed input 400; an unknown, archived or hidden thread,
 task or project 404; a wrong state (a turn that cannot take a message, a
@@ -105,9 +115,14 @@ BRIEF_CHARS = 20000
 RATE = 30
 RATE_S = 60.0
 MODELS = 100
+SENT_TTL_S = 300.0
+SENT_KEEP = 256
+_CLIENT_ID = re.compile(r"[A-Za-z0-9-]{8,64}")
+IN_FLIGHT = "this message is still being sent; check the chat in a moment"
 # §11 question 1 (owner, 2026-10-28): the phone may start tasks, through the
 # HUD's intake gate. False takes `POST tasks` and `tasks/<id>/start` out of
-# the table.
+# the table: the phone's own explicit task making and starting only, never a
+# chat's proposal (`task_propose`), as on the HUD and Discord.
 TASK_START = True
 PROVIDERS = ("fast", "claude", "codex")
 NO_ATTACHMENTS = "attachments and images are not sent from the phone; attach them at the desk"
@@ -153,12 +168,19 @@ def _call(fn):
         raise _Refused(exc.status if 400 <= exc.status < 500 else 409, _word(exc)) from None
     except (DaemonError, BriefRefused, ControlError, ProjectArchived, WorktreeError) as exc:
         raise _Refused(409, _word(exc)) from None
+    except FileNotFoundError:
+        raise _Refused(404, "not found") from None
+    except PermissionError:
+        raise _Refused(403, "refused") from None
     except LookupError as exc:
         if isinstance(exc, KeyError):
             raise _Refused(400, "bad request") from None
         raise _Refused(404, "not found") from None
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, TimeoutError):
         raise _Refused(400, "bad request") from None
+    except Exception as exc:  # noqa: BLE001 — a provider's or the OS's: 409, never its text
+        LOG.warning("phone: a write failed (%s)", type(exc).__name__)
+        raise _Refused(409, "request failed (" + type(exc).__name__ + ")") from None
 
 
 # -- the session's rate -----------------------------------------------------------
@@ -195,6 +217,55 @@ def rate_of(server) -> Rate:
             found = Rate()
             server.phone_rate = found
         return found
+
+
+class Sent:
+    """Each session's answered writes by `client_id`, for `SENT_TTL_S`
+    (monotonic): (session, route, id) -> the answer, or IN_FLIGHT."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._seen: dict[tuple, tuple] = {}
+
+    def begin(self, key) -> tuple | None:
+        """None: go ahead (the key is now in flight). Else the earlier answer."""
+        now = clock()
+        with self._lock:
+            self._seen = {k: v for k, v in self._seen.items() if now - v[0] < SENT_TTL_S}
+            found = self._seen.get(key)
+            if found is not None:
+                return found
+            while len(self._seen) >= SENT_KEEP:
+                self._seen.pop(min(self._seen, key=lambda k: self._seen[k][0]))
+            self._seen[key] = (now, None)
+            return None
+
+    def end(self, key, answer: tuple | None) -> None:
+        """Keep a 2xx answer; forget anything else (a retry may then go)."""
+        with self._lock:
+            if answer is None:
+                self._seen.pop(key, None)
+            else:
+                self._seen[key] = (clock(), answer)
+
+
+def sent_of(server) -> Sent:
+    with _RATE_LOCK:
+        found = getattr(server, "phone_sent", None)
+        if not isinstance(found, Sent):
+            found = Sent()
+            server.phone_sent = found
+        return found
+
+
+def _client_id(value: dict):
+    """The body's `client_id` taken out (None when absent), or a 400."""
+    if not isinstance(value, dict) or "client_id" not in value:
+        return None
+    found = value.pop("client_id")
+    if not isinstance(found, str) or not _CLIENT_ID.fullmatch(found):
+        raise _Refused(400, "client_id must be 8 to 64 letters, digits or dashes")
+    return found
 
 
 # -- what is recorded -------------------------------------------------------------
@@ -453,6 +524,37 @@ def route(handler, path: str, session: dict, body: bytes):
         if name == "models":
             return 200, models(daemon), []
         value = _json_body(body)
+        if name in ("send", "new_chat", "new_task"):
+            client = _client_id(value)
+            if client is not None:
+                key = (session.get("token_sha256") or "", name, object_id, client)
+                sent = sent_of(handler.server)
+                found = sent.begin(key)
+                if found is not None:
+                    if found[1] is None:
+                        return 409, {"error": IN_FLIGHT}, []
+                    return found[1][0], {**found[1][1], "repeat": True}, []
+                answer = None
+                try:
+                    answer = _written(handler, daemon, session, name, object_id, value, auth)
+                    return answer
+                finally:
+                    sent.end(key, answer[:2] if answer is not None and 200 <= answer[0] < 300 else None)
+        return _written(handler, daemon, session, name, object_id, value, auth)
+    except _Refused as exc:
+        return exc.status, {"error": exc.word, **exc.extra}, []
+    except AuthError as exc:
+        word = exc.word if exc.status in (409, 429, 503) else WORDS.get(exc.status, "unauthorized")
+        return exc.status, {"error": word}, []
+    except Exception as exc:  # noqa: BLE001 — never a 500 with an exception's text
+        LOG.warning("phone: a write failed (%s)", type(exc).__name__)
+        return 409, {"error": "request failed (" + type(exc).__name__ + ")"}, []
+
+
+def _written(handler, daemon, session, name, object_id, value, auth):
+    """One write, past the body, the id and before the rate."""
+    from .remote_auth import AuthError, WORDS
+    try:
         if not rate_of(handler.server).take(session.get("token_sha256") or ""):
             return 429, {"error": RATE_WORD}, [("Retry-After", str(int(RATE_S)))]
         if name == "send":

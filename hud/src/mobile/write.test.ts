@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { PhoneApp, type StreamLike } from "./app";
 import type { Got, Posted } from "./net";
-import { parseModels, refusal, sentNote, taskControlsView, verbsFor } from "./write";
+import { clientIdFor, MAYBE_DONE, MAYBE_SENT, parseModels, refusal, sentNote, taskControlsView, verbsFor } from "./write";
 import { parseInbox } from "../lib/inbox";
 import { inboxView, type InboxAnswers } from "./views";
 import type { TaskView } from "./model";
@@ -42,9 +42,9 @@ function harness() {
     { id: CHAT, project_id: PROJECT, title: "Fix it", provider: "claude", updated: "2026-10-25T10:00:00Z", running: true },
     { id: OTHER, project_id: PROJECT, task_id: TASK, title: "a task's", provider: "codex", updated: "2026-10-25T09:00:00Z" }] });
   gets[`/m/api/threads/${CHAT}/log`] = ok({ rows: [{ seq: 0, role: "owner", text: "hi", at: null, marks: [] }], next: 1,
-    more: false, older: false, thread: { id: CHAT, project_id: PROJECT, title: "Fix it", provider: "claude" } });
+    more: false, older: false, thread: { id: CHAT, project_id: PROJECT, role: "chat", title: "Fix it", provider: "claude" } });
   gets[`/m/api/threads/${OTHER}/log`] = ok({ rows: [], next: 0, more: false, older: false,
-    thread: { id: OTHER, project_id: PROJECT, task_id: TASK, title: "a task's", provider: "codex" } });
+    thread: { id: OTHER, project_id: PROJECT, role: "orchestrator", task_id: TASK, title: "a task's", provider: "codex" } });
   gets[`/m/api/threads/${CHAT}/log?after=1`] = ok({ rows: [], next: 1, more: false, older: false, thread: null });
   gets["/m/api/thread-models"] = ok({ providers: {
     fast: { label: "Jarvis", available: true, models: [{ id: "anthropic/claude-haiku-5.5", name: "Haiku 5.5" }] },
@@ -105,7 +105,8 @@ describe("the message box (P-5)", () => {
     await h.settle();
     expect(h.posts).toEqual([]);
     await h.click("m-compose-send");
-    expect(h.posts).toEqual([{ path: `/m/api/threads/${CHAT}/messages`, value: { text: "add a test" } }]);
+    expect(h.posts.map((p) => [p.path, p.value.text])).toEqual([[`/m/api/threads/${CHAT}/messages`, "add a test"]]);
+    expect(h.posts[0].value.client_id).toMatch(/^[A-Za-z0-9-]{8,64}$/);
     // While it is on its way: no second send, and nothing shown as sent.
     expect((h.q("m-compose-send") as HTMLButtonElement).disabled).toBe(true);
     expect(h.q("m-compose-send")!.textContent).toBe("Sending…");
@@ -145,6 +146,57 @@ describe("the message box (P-5)", () => {
     await h.click("m-compose-send");
     await h.app.sendMessage(CHAT, "x");
     expect(h.posts.length).toBe(before);
+  });
+
+  it("an answer that never came back says it may have been sent; a retry reuses the draft's id", async () => {
+    const h = harness();
+    await openChat(h);
+    h.type("m-compose-text", "hello");
+    h.replies[`/m/api/threads/${CHAT}/messages`] = { status: 0, body: {}, offline: true };
+    await h.click("m-compose-send");
+    expect(h.q("m-compose-note")!.textContent).toBe(MAYBE_SENT);
+    expect(h.root.textContent).not.toContain("Not sent");
+    expect((h.q("m-compose-text") as HTMLTextAreaElement).value).toBe("hello");
+    h.app.setOnline(true);
+    await h.settle();
+    h.replies[`/m/api/threads/${CHAT}/messages`] = { status: 502, body: {} };
+    await h.click("m-compose-send");
+    expect(h.q("m-compose-note")!.textContent).toBe(MAYBE_SENT);
+    h.app.setOnline(true);
+    await h.settle();
+    h.replies[`/m/api/threads/${CHAT}/messages`] = { status: 202, body: { status: "started", repeat: true } };
+    await h.click("m-compose-send");
+    const ids = h.posts.map((p) => p.value.client_id);
+    expect(new Set(ids).size).toBe(1);
+    // The next message is a new id; so are edited words.
+    h.type("m-compose-text", "another");
+    await h.click("m-compose-send");
+    expect(h.posts[3].value.client_id).not.toBe(ids[0]);
+    const map = new Map<string, { id: string; text: string }>();
+    const a = clientIdFor(map, "k", "one");
+    expect(clientIdFor(map, "k", "one")).toBe(a);
+    expect(clientIdFor(map, "k", "two")).not.toBe(a);
+  });
+
+  it("the box waits until the chat is known to be an owner's", async () => {
+    const h = harness();
+    let release!: (g: Got) => void;
+    h.app.start();
+    await h.settle();
+    const pending = new Promise<Got>((r) => { release = r; });
+    const got = h.gets[`/m/api/threads/${CHAT}/log`];
+    h.gets[`/m/api/threads/${CHAT}/log`] = undefined as unknown as Got;
+    const real = (h.app as unknown as { fetchJson: (p: string) => Promise<Got> }).fetchJson;
+    (h.app as unknown as { fetchJson: (p: string) => Promise<Got> }).fetchJson = (p) =>
+      p === `/m/api/threads/${CHAT}/log` ? pending : real(p);
+    const opening = h.app.openThread(CHAT);
+    await h.settle();
+    expect(h.q("m-thread")).not.toBeNull();
+    expect(h.q("m-compose")).toBeNull();
+    release(got);
+    await opening;
+    await h.settle();
+    expect(h.q("m-compose")).not.toBeNull();
   });
 
   it("a task's chat has no message box", async () => {
@@ -188,10 +240,10 @@ describe("the New chat sheet (P-5)", () => {
     const NEW = "ffffffff";
     h.replies["/m/api/threads"] = { status: 201, body: { thread: { id: NEW }, send: { status: "started" } } };
     h.gets[`/m/api/threads/${NEW}/log`] = h.ok({ rows: [{ seq: 0, role: "owner", text: "start here", at: null, marks: [] }],
-      next: 1, more: false, older: false, thread: { id: NEW, project_id: PROJECT, title: "", provider: "claude" } });
+      next: 1, more: false, older: false, thread: { id: NEW, project_id: PROJECT, role: "chat", title: "", provider: "claude" } });
     await h.click("m-new-start");
     expect(h.posts).toEqual([{ path: "/m/api/threads", value: { project_id: PROJECT, provider: "claude",
-      model: "claude-opus-5-5", text: "start here" } }]);
+      model: "claude-opus-5-5", text: "start here", client_id: expect.stringMatching(/^[A-Za-z0-9-]{8,64}$/) } }]);
     expect(h.q("m-new-chat")).toBeNull();
     expect(h.q("m-thread")).not.toBeNull();
     expect(h.q("m-compose-note")!.textContent).toBe("Sent.");
@@ -231,6 +283,25 @@ describe("task verbs (P-5)", () => {
     expect(verbsFor("blocked")).toEqual(["resume", "cancel"]);
     expect(verbsFor("running")).toEqual(["cancel"]);
     for (const end of ["done", "failed", "cancelled"]) expect(verbsFor(end)).toEqual([]);
+  });
+
+  it("no Start on a proposal still inside its grace window", async () => {
+    const h = harness();
+    h.gets["/m/api/inbox"] = h.ok({ rows: [{ id: `prop:${TASK}`, kind: "proposal", rank: 3, title: "t", blocks: "b",
+      project_id: null, thread_id: null, task_id: TASK, asked_at: null, expires_at: null, origin: "", detail: {} }] });
+    await openTask(h, "intake");
+    expect(h.q("m-task-start")).toBeNull();
+    expect(h.q("m-task-cancel")).not.toBeNull();
+    expect(h.q("m-task-controls")!.textContent).toMatch(/starts on its own/);
+  });
+
+  it("a verb whose answer never came back says it may not have gone through", async () => {
+    const h = harness();
+    await openTask(h, "intake");
+    h.replies[`/m/api/tasks/${TASK}/start`] = { status: 504, body: {} };
+    await h.click("m-task-start");
+    await h.click("m-task-confirm");
+    expect(h.q("m-task-note")!.textContent).toBe(MAYBE_DONE);
   });
 
   it("Start asks first, then posts the HUD's empty body", async () => {
@@ -304,7 +375,8 @@ describe("task verbs (P-5)", () => {
     h.type("m-new-brief", "add divide");
     h.replies["/m/api/tasks"] = { status: 201, body: { task: task("intake") } };
     await h.click("m-new-create");
-    expect(h.posts).toEqual([{ path: "/m/api/tasks", value: { project_id: PROJECT, brief: "add divide" } }]);
+    expect(h.posts).toEqual([{ path: "/m/api/tasks", value: { project_id: PROJECT, brief: "add divide",
+      client_id: expect.stringMatching(/^[A-Za-z0-9-]{8,64}$/) } }]);
     expect(h.q("m-task-view")).not.toBeNull();
     expect(h.q("m-task-start")).not.toBeNull();
     expect(h.q("m-task-note")!.textContent).toBe("Created. It waits for Start.");

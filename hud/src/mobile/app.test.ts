@@ -239,7 +239,7 @@ function harness() {
   answers["/m/api/inbox"] = ok({ rows: [] });
   answers["/m/api/me"] = ok({ signed_in: true });
   answers["/m/api/projects"] = ok({ projects: [{ id: "cccccccc", name: "Calc", inbox: false }] });
-  answers["/m/api/threads"] = ok({ threads: [{ id: "aaaaaaaa", project_id: "cccccccc", title: "Fix it", provider: "claude",
+  answers["/m/api/threads"] = ok({ threads: [{ id: "aaaaaaaa", project_id: "cccccccc", role: "chat", title: "Fix it", provider: "claude",
     updated: "2026-10-25T10:00:00Z", running: false }] });
   answers["/m/api/threads/aaaaaaaa/log"] = ok({ rows: [{ seq: 0, role: "owner", text: "hi", at: null, marks: [] }], next: 1,
     more: false, older: false, thread: null });

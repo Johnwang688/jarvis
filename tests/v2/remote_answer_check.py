@@ -881,7 +881,8 @@ class Questions(Phone):
                                     reply="", not_before=self.d.router.clock() + 60)
         status, _, body = self.post_answer(f"prop:{task.id}", {"withdraw": True})
         self.assertEqual(status, 200, body)
-        self.assertEqual(self.runner.calls, [("cancel", task.id)])
+        # The router's own withdraw (review of #324): never TaskControl.cancel.
+        self.assertEqual((self.runner.calls, self.d.stores.tasks.get(task.id).state), ([], TaskState.CANCELLED))
         print("ok  a proposal's withdraw from the phone (P-5): the session only")
 
     def test_a_decision_from_the_phone_is_via_phone_with_no_desk_authority(self):

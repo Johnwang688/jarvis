@@ -349,9 +349,9 @@ export function transcriptView(thread: ChatThread | null, rows: LogRow[], older:
   for (const row of rows) list.append(logRow(row));
   if (!rows.length) list.append(empty("No messages yet."));
   view.append(list);
-  // P-5: the message box (./write.ts) for an owner's chat; a task's chats are read only.
+  // P-5: the message box (./write.ts) for an owner's chat, or the app's
+  // "read only" line for any other; nothing until the chat is known.
   if (composer) view.append(composer);
-  else view.append(el("p", "muted small center", "A task's chat: read only on the phone."));
   return { view, list };
 }
 
