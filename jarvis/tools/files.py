@@ -628,7 +628,12 @@ def credential_folder_judge():
     prefixes, not `Path.parents`: a search judges every file it reads
     (review of PR #69: 20k paths took 3.4 s against 0.31 s before)."""
     roots = tuple(str(r) if str(r).endswith(os.sep) else str(r) + os.sep for r in _credential_roots())
-    own = frozenset(os.path.abspath(str(p)) for p in _protected_state_paths())
+    # Not the phone's folder (`config.remote_dir()`, review of PR #325 MED-1):
+    # its state files hold a VAPID private key, push secrets and session
+    # hashes, so none of them is readable config.
+    remote = os.path.abspath(os.path.expanduser(str(config.remote_dir()))) + os.sep
+    own = frozenset(a for a in (os.path.abspath(str(p)) for p in _protected_state_paths())
+                    if not a.startswith(remote))
     real_dirs: dict[str, str] = {}
 
     def inside(p: str) -> bool:

@@ -612,11 +612,27 @@ more specific than the text above:
   never an IP literal, every resolved address global. The send connects to
   the address it checked (TLS verified for the host name): no proxy, no
   redirect, so DNS cannot change between the check and the connection.
-- **What is protected:** `jarvis_push_key.json` and `jarvis_push_subscriptions.json` are
-  credential bundles by name (`secrets.PROTECTED_NAMES`: no agent read, v1
-  or v2), and with `push_settings.json` protected state (no agent write).
-  Named `jarvis_push_*.json` because a bundle's name is matched by globs
-  too: `vapid_key.pem` would have refused `git tag -l 'v*'` and `*.pem`.
+- **What is protected (review of PR #325, MED-1):** `<data root>/remote/`
+  is a credential folder (`config.remote_dir()` in
+  `config.credential_dirs()`), so P-2's passkeys and sessions and P-6's
+  `jarvis_push_key.json` (the VAPID private key) and
+  `jarvis_push_subscriptions.json` are read by no agent through any
+  spelling: v1's file and shell tools refuse it (none of its files is
+  "readable config"), v2's read tools are refused there and v2's shell
+  reads are always asked (`credentials-path`). The push files and
+  `push_settings.json` are protected state too (no agent write). (A first
+  version made the two files credential bundles by name; that missed
+  `cat <remote>/*` and refused globs like `git tag -l 'v*'`.)
+- **Bounded and retried (review of PR #325):** one push, every
+  subscription, ends within 15 s (names resolved within 5 s on their own
+  thread; the stop flag checked between subscriptions and addresses), and
+  `stop()` waits for it. A push that reached no phone is tried again after
+  1, 5, then every 15 minutes, still coalesced and silent in quiet hours.
+  The payload is padded to 48 bytes. A start in quiet hours or within 30
+  minutes of their end still sends the morning push. The VAPID `sub` stays
+  the app's https origin, which Apple accepted in P-0 (a `@localhost`
+  mailto is reported refused by Apple). The phone drops a subscription made
+  for another key and asks for notifications again.
 - **The service worker** is a third Vite entry (`hud/src/mobile/sw.ts`),
   served at `/m/sw.js` from the build manifest's entry; no fetch handler,
   no cache. The CSP is unwidened (a worker falls under `script-src 'self'`).

@@ -1768,21 +1768,41 @@ on 2026-10-28).
   the checked address with TLS verified for the name (`https_post`: no
   proxy, no redirect).
 - **Files.** `remote/jarvis_push_key.json` (made once, 0600) and
-  `remote/jarvis_push_subscriptions.json` are credential bundles by name
-  (`secrets.PROTECTED_NAMES`): refused to every agent read and command, v1
-  and v2. They, `remote/push_settings.json` and `quiet.json` are protected
-  state (`files._protected_state_paths`): refused to every agent write.
+  `remote/jarvis_push_subscriptions.json` live in the phone's folder, which
+  is a **credential folder** (`config.remote_dir()` in
+  `config.credential_dirs()`, review of PR #325 MED-1): v1's file tools and
+  `run_readonly` refuse every read in it (`files.credential_folder_judge`;
+  none of its files is exempt as readable gate state), v2's read tools are
+  refused there (`permissions._phone_folder_read`, which also refuses a
+  read tool's path at the data root, since a search from there reads it)
+  and v2's shell reads of it are always asked (`credentials-path`). A
+  recursive shell search from above the data root (`grep -r x ~`) is the
+  class every credential folder shares. The push files,
+  `remote/push_settings.json` and `quiet.json` are protected state
+  (`files._protected_state_paths`): refused to every agent write.
+- **Bounded, retried, padded** (review of PR #325): one push to every
+  subscription ends within `SEND_BUDGET_S` (15 s): each name resolved within
+  `RESOLVE_TIMEOUT_S` (5 s) on its own thread, each connection within what
+  is left, the stop flag checked between subscriptions and addresses; and
+  `stop()` waits for it. A push that reached no phone is tried again after
+  `RETRY_S` (1, 5, then every 15 minutes), with the count then, coalesced
+  and silent in quiet hours. Every payload is padded to `PAYLOAD_BYTES`
+  (48). A start in quiet hours or within 30 minutes of their end still
+  sends the morning push (a restart after it may send a second).
   All are read `O_NOFOLLOW` relative to their folder's descriptor and
   written as an `O_EXCL` temp file, fsynced and replaced.
 - **The service worker** is the build's `src/mobile/sw.ts` entry, served at
   `/m/sw.js` from the build manifest (`remote_listener.service_worker_file`),
   with the listener's headers; it is not under `/m/assets/`.
 
-Tests: `tests/v2/push_check.py` (25, no network: a fake resolver and
+Tests: `tests/v2/push_check.py` (35, no network: a fake resolver and
 transport, the real encryption decrypted with the test subscription's key;
-mutations of the payload, quiet hours, coalescing, 404/410, the private
-address check, the host list, the end hook, the active-passkey filter and
-the credential name each fail it), `tests/v2/quiet_check.py` (14),
+the reviewer's reads of the folder through `build_permit` under AUTO and
+ASK, and through v1; mutations of the payload, its padding, quiet hours,
+the morning seed, coalescing, the retry, the send budget, the bounded
+resolution, 404/410, the private address check, the host list, the end
+hook, the active-passkey filter, the credential folder, its readable-state
+exemption and v2's read-tool refusal each fail it), `tests/v2/quiet_check.py` (15),
 `tests/v2/archive_check.py` (no tool, MCP or session path names push or
 quiet hours; the desk routes refuse every client but the HUD),
 `hud/src/mobile/notify.test.ts`, `hud/src/mobile/sw.test.ts` and the P-6

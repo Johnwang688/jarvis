@@ -447,6 +447,9 @@ def denied_read(tool: str, args: dict, cwd: str | None = None) -> str | None:
             path = _placed(value, cwd)
             if v1_secrets.is_credential(path):
                 return v1_secrets.refusal(path.name)
+            phone = _phone_folder_read(path)
+            if phone:
+                return phone
             if v1_secrets.env_glob_reaches(path.name):
                 return v1_secrets.refusal(path.name)
             if tool in _RAW_CHECKED:
@@ -476,6 +479,41 @@ def denied_read(tool: str, args: dict, cwd: str | None = None) -> str | None:
                     if part and (v1_secrets.is_protected(part)
                                  or v1_secrets.pattern_reaches(part, True)):
                         return v1_secrets.refusal(part)
+    return None
+
+
+PHONE_FOLDER_REFUSAL = ("{name} is in the phone's credential folder (its passkeys, sessions, "
+                        "the push signing key and subscriptions), which Jarvis does not read. "
+                        "Ask the owner for what you need instead.")
+
+
+def _phone_folder_read(path: Path) -> str | None:
+    """A read tool's path inside the phone's credential folder
+    (`config.remote_dir()`: P-2's passkeys and sessions, P-6's VAPID private
+    key and push subscriptions), as written or where it resolves, or a path
+    between the v2 data root and that folder (a Grep there reads it): refused
+    (review of PR #325, MED-1). The shell's reads of it are the
+    `credentials-path` rule's, and v1's file and shell tools refuse it as a
+    credential folder (`files.credential_folder_judge`). Other credential
+    folders are not judged here."""
+    try:
+        remote = Path(os.path.abspath(config.remote_dir()))
+        data = Path(os.path.abspath(Path(config.V2_DATA_DIR).expanduser()))
+        candidates = {Path(os.path.abspath(path))}
+        try:
+            candidates.add(path.resolve())
+            remote_real = remote.resolve()
+        except (OSError, RuntimeError):
+            remote_real = remote
+        for folder in {remote, remote_real}:
+            for candidate in candidates:
+                if candidate == folder or folder in candidate.parents:
+                    return PHONE_FOLDER_REFUSAL.format(name=path.name or str(path))
+                # The data root holds it: a search from there reads it.
+                if candidate in folder.parents and (candidate == data or data in candidate.parents):
+                    return PHONE_FOLDER_REFUSAL.format(name=path.name or str(path))
+    except (OSError, RuntimeError, ValueError):
+        return PHONE_FOLDER_REFUSAL.format(name="that path")
     return None
 
 

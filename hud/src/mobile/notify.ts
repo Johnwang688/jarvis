@@ -18,10 +18,12 @@
 // (jarvis/v2/push.py). Text here is code's own; nothing from a server is
 // shown but a status word.
 
-export type NotifyState = "unsupported" | "install" | "blocked" | "off" | "on" | "busy" | "error";
+export type NotifyState = "unsupported" | "install" | "blocked" | "off" | "on" | "busy" | "error" | "unavailable";
 
 export interface SubscriptionLike {
   endpoint: string;
+  /** The key it was made for (`PushSubscription.options.applicationServerKey`). */
+  options?: { applicationServerKey?: ArrayBuffer | null } | null;
   toJSON(): unknown;
   unsubscribe(): Promise<boolean>;
 }
@@ -88,6 +90,15 @@ export const browserSend: Send = async (method, path, body) => {
   }
 };
 
+/** Whether a subscription was made for this key; true when the browser
+ * does not say (undoing it on every start would then never stay on). */
+export function sameKey(sub: SubscriptionLike, key: Uint8Array): boolean {
+  const held = sub.options?.applicationServerKey;
+  if (!held) return true;
+  const bytes = new Uint8Array(held);
+  return bytes.length === key.length && bytes.every((b, i) => b === key[i]);
+}
+
 /** A base64url string as bytes (the applicationServerKey). */
 export function keyBytes(text: string): Uint8Array | null {
   if (!/^[A-Za-z0-9_-]{80,100}$/.test(text)) return null;
@@ -109,6 +120,7 @@ export const WORDS: Record<NotifyState, string> = {
   on: "Notifications are on. They say how many things wait, never what.",
   busy: "One moment…",
   error: "Notifications could not be turned on.",
+  unavailable: "Notifications are not available on the PC right now. Try again later.",
 };
 
 export class Notifications {
@@ -131,15 +143,31 @@ export class Notifications {
   async sync(): Promise<void> {
     if (this.state === "unsupported" || this.state === "install") return;
     try {
-      this.reg = await this.env.register();
+      try {
+        this.reg = await this.env.register();
+      } catch {
+        this.state = "error";
+        this.detail = "This phone could not set notifications up. Close Jarvis and open it again.";
+        return;
+      }
       const status = await this.send("GET", PUSH_API);
-      if (!status || status.status !== 200) return;
+      if (!status || status.status !== 200) {
+        this.state = "unavailable";
+        return;
+      }
       this.deskOn = status.body.enabled !== false;
       this.key = typeof status.body.key === "string" ? keyBytes(status.body.key) : null;
       const held = await this.reg.pushManager.getSubscription();
       if (this.env.permission() === "denied") this.state = "blocked";
       else if (held && this.env.permission() === "granted") {
-        if (status.body.subscribed !== true) {
+        if (!this.key || !sameKey(held, this.key)) {
+          // Made for another key (Jarvis's key changed): it would never be
+          // delivered. Undone here and at Jarvis; the owner turns it on again.
+          try { await held.unsubscribe(); } catch { /* still tell Jarvis */ }
+          await this.send("DELETE", SUBSCRIBE_API, { endpoint: held.endpoint });
+          this.state = "off";
+          this.detail = "Jarvis's notification key changed: turn notifications on again.";
+        } else if (status.body.subscribed !== true) {
           const sent = await this.send("POST", SUBSCRIBE_API, { subscription: held.toJSON() });
           this.state = sent && sent.status === 200 ? "on" : "off";
         } else {
@@ -182,7 +210,9 @@ export class Notifications {
     } else {
       this.state = "error";
       const word = sent && typeof sent.body.error === "string" ? sent.body.error : "";
-      this.detail = sent === null ? "Jarvis could not be reached." : word ? `Jarvis said: ${word}.` : `Jarvis refused it (${sent.status}).`;
+      this.detail = sent === null ? "Jarvis could not be reached."
+        : sent.status === 503 ? "Notifications are not available on the PC right now."
+        : word ? `Jarvis said: ${word}.` : `Jarvis refused it (${sent.status}).`;
       try { await sub.unsubscribe(); } catch { /* nothing more to undo */ }
     }
     this.changed();

@@ -26,7 +26,8 @@ missing one is not written until the owner saves).
 (`datetime.now().astimezone()`); tests inject their own. Every test is on
 the wall clock's local time of day, read from the `now` given. Across a
 daylight-saving change the window is the wall clock's: a night with a
-skipped hour is an hour shorter.
+skipped hour is an hour shorter, and `ends_at` is 07:00 local with the
+morning's offset (review of PR #325).
 
 Tests: tests/v2/quiet_check.py.
 """
@@ -90,13 +91,20 @@ def within(start: dtime, end: dtime, at: dtime) -> bool:
     return at >= start or at < end
 
 
-def next_end(start: dtime, end: dtime, now: datetime) -> datetime | None:
-    """When the window holding `now` ends, or None when `now` is outside it.
-    In `now`'s own time zone; seconds and below are zero."""
+def next_end(start: dtime, end: dtime, now: datetime, *, system_local: bool = False) -> datetime | None:
+    """When the window holding `now` ends, or None when `now` is outside it;
+    seconds and below are zero. `system_local`: `now` is this machine's
+    local time (`local_now`, a fixed offset), so the end is placed in local
+    wall time on its own date, with that date's offset (a night that crosses
+    a daylight-saving change ends at 07:00 local, not 07:00 at the evening's
+    offset). Otherwise in `now`'s own zone (a ZoneInfo applies the date's
+    rules itself)."""
     at = now.time().replace(tzinfo=None)
     if not within(start, end, at):
         return None
     day = now.date() if at < end else now.date() + timedelta(days=1)
+    if system_local:
+        return datetime.combine(day, end).astimezone()
     return datetime.combine(day, end, tzinfo=now.tzinfo)
 
 
@@ -108,6 +116,9 @@ class QuietHours:
         self.root = Path(root)
         self.path = self.root / NAME
         self.clock = clock or local_now
+        # The default clock is this machine's local time: `ends_at` then
+        # works in local wall time (DST). An injected clock keeps its zone.
+        self.system_local = clock is None
         self._lock = threading.RLock()
         self._cached: dict | None = None
 
@@ -245,7 +256,8 @@ class QuietHours:
         window = self._window()
         if window is None:
             return None
-        return next_end(window[0], window[1], now or self.clock())
+        return next_end(window[0], window[1], now or self.clock(),
+                        system_local=self.system_local and self.clock is local_now)
 
     def view(self, now: datetime | None = None) -> dict:
         """What the desk shows: the setting, whether it is quiet now, and

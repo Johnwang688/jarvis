@@ -91,6 +91,35 @@ class Window(_Base):
         self.assertEqual(view, {**DEFAULT, "quiet_now": True, "ends_at": at(7).isoformat(timespec="minutes")})
         print("ok  the clock is injectable; view() says quiet now and until when")
 
+    def test_ends_at_in_local_wall_time_across_dst(self):
+        """Review of PR #325 (NIT): with the machine's own clock, a night that
+        crosses the spring change ends at 07:00 local, at the morning's
+        offset (-4), not at 07:00 at the evening's (-5, which reads 08:00)."""
+        import time as _time
+        old = os.environ.get("TZ")
+
+        def restore():
+            if old is None:
+                os.environ.pop("TZ", None)
+            else:
+                os.environ["TZ"] = old
+            _time.tzset()
+        self.addCleanup(restore)
+        os.environ["TZ"] = "America/New_York"
+        _time.tzset()
+        q = QuietHours(self.root)
+        self.assertTrue(q.system_local)
+        night = datetime(2026, 3, 8, 1, 0).astimezone()      # 01:00 EST, the night clocks go forward
+        self.assertEqual(night.utcoffset(), timedelta(hours=-5))
+        ends = q.ends_at(night)
+        self.assertEqual((ends.date().isoformat(), ends.hour, ends.minute), ("2026-03-08", 7, 0))
+        self.assertEqual(ends.utcoffset(), timedelta(hours=-4))
+        self.assertEqual(ends.astimezone(timezone.utc).hour, 11)
+        evening = datetime(2026, 10, 31, 23, 30).astimezone()   # EDT, the night before the fall change
+        ends = q.ends_at(evening)
+        self.assertEqual((ends.hour, ends.utcoffset()), (7, timedelta(hours=-5)))
+        print("ok  ends_at: 07:00 local wall time across both daylight-saving changes")
+
     def test_daytime_window_and_off(self):
         self.q.update({"start": "13:00", "end": "15:30"})
         self.assertTrue(self.q.is_quiet(at(14)))

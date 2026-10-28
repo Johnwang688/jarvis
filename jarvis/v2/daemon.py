@@ -3013,7 +3013,7 @@ class Daemon:
         self.release_approvals()
         self.schedules.stop()
         self.inbox.prs.stop()                   # the inbox's PR poll (B3): a running gh is killed
-        self.push.stop()                        # the phone's push sender (P-6): no send after this
+        self.push.stop()                        # the phone's push sender (P-6): no new send; one under way ends within 15 s
         inbox = getattr(self, "inbox", None)
         if inbox is not None:
             inbox.stop_snoozes()                # the snooze timer (inbox B4) never fires after this
