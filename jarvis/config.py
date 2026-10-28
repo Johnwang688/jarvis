@@ -720,7 +720,10 @@ def remote_dir() -> Path:
     `v2/remote_auth.py`), the Web Push VAPID private key and the push
     subscriptions, whose endpoints are capabilities and whose keys decrypt
     what is sent (P-6, `v2/push.py`). A credential folder (review of PR #325,
-    MED-1): no agent reads anything in it, by any spelling."""
+    MED-1): v1's file tools and `run_readonly` refuse it, v2's shell asks and
+    v2's read tools refuse it; the two push files are also refused by name
+    (`secrets.EXACT_NAMES`) and scrubbed. See `push.py` for what is not
+    covered."""
     return Path(V2_DATA_DIR).expanduser() / "remote"
 
 # Where context.py writes a tool result whole before truncating it in the

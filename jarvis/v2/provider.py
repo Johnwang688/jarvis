@@ -189,8 +189,10 @@ class UserMessage:
     # Where the message came from and what the owner actually wrote (PR C,
     # plan §4.3). `via` is "hud" | "discord" | "dm" | "system" | "peer" |
     # "inbox" (the owner's answer to a decision, inbox B1: queued, never a
-    # steer, never at the desk); None means "hud" for an owner message and
-    # "system" for anything else.
+    # steer, never at the desk) | "phone" (the same answered on the phone,
+    # P-4; or typed into a chat on the phone, P-5: the owner's queue, never a
+    # steer, never at the desk, never Bypass); None means "hud" for an owner
+    # message and "system" for anything else.
     # `typed` is the owner's words before `assemble_turn` inlined any file
     # (None: the text is the typed words); `attachments` are file names
     # only, never contents. `spoken` marks dictation or a voice note. The two

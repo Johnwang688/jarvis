@@ -22,6 +22,8 @@ export interface ChatThread {
   id: string;
   project_id: string;
   task_id: string | null;
+  /** "chat" for an owner's chat (P-5: only that takes a message from the phone). */
+  role?: string;
   title: string;
   provider: string;
   updated: string;
@@ -73,7 +75,7 @@ export function parseThread(t: unknown): ChatThread | null {
   const id = idOrNull(t.id), project = idOrNull(t.project_id);
   if (!id || !project) return null;
   return {
-    id, project_id: project, task_id: idOrNull(t.task_id),
+    id, project_id: project, task_id: idOrNull(t.task_id), role: oneLine(t.role, 20),
     title: oneLine(t.title, 120), provider: oneLine(t.provider, 20),
     updated: str(t.updated), running: t.running === true, queued: num(t.queued), turns: num(t.turns),
   };
@@ -212,6 +214,6 @@ export function deskNote(kind: string): string | null {
     return "Answer at the desk";
   }
   if (kind === "proposal") return "Withdraw at the desk";
-  if (kind === "task") return "Resume or cancel at the desk";
+  if (kind === "task") return "Open the task to resume or cancel it";
   return null;
 }

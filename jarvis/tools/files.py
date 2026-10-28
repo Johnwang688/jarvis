@@ -174,6 +174,17 @@ SELF_PROTECTED = frozenset(
         # phone and where to. An agent that could edit it could send a
         # card's text in a push, or push to an address of its choosing.
         "jarvis/v2/push.py",
+        # Writing from the phone (phone design P-5): messages, new chats and
+        # task verbs, and which verb takes the passkey. An agent that could
+        # edit it could give a phone message the desk's authority or cancel
+        # a task without the passkey.
+        "jarvis/v2/remote_write.py",
+        # Push to talk from the phone (phone design P-7): what the phone's
+        # microphone reaches (the desk's dictation path, text back, never
+        # sent) and how much audio the listener reads for it. An agent that
+        # could edit it could route a clip past the owner's local-only
+        # switch or make a transcription send or answer.
+        "jarvis/v2/remote_stt.py",
         # Approvals asked during quiet hours (QH, 2026-10-28): which asks
         # are deferred unasked, and the owner's single-use inbox grants that
         # the broker honours with no card. An agent that could edit it could

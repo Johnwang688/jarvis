@@ -942,7 +942,12 @@ class OwnerOnly(Base):
                     r"\bpush\.(?:Push|route|hud_route|payload|send_all|send_test|check_endpoint)\b",
                     r"push_subscriptions", r"push_settings", r"vapid", r"send_test", r"/m/api/push",
                     r"import quiet\b", r"from \.+quiet\b", r"from \.+ import [^\n]*\bquiet\b",
-                    r"\bquiet\.(?!py\b)", r"""/quiet["'/?]""", r"quiet\.json", r"QuietHours")
+                    r"\bquiet\.(?!py\b)", r"""/quiet["'/?]""", r"quiet\.json", r"QuietHours",
+                    # P-5's writes: sends, new chats, task verbs (named only in SELF_PROTECTED).
+                    r"\bremote_write\.(?!py\b)", r"import remote_write", r"from \.+remote_write",
+                    r"NEVER_STEER", r"cancel/options", r"phone_message",
+                    # P-7's push to talk (`remote_stt.py`, named only in SELF_PROTECTED).
+                    r"\bremote_stt\.(?!py\b)", r"import remote_stt", r"from \.+remote_stt")
     # No tool's name speaks of notifications or quiet hours either.
     PUSH_NAME = re.compile(r"notif|vapid|webpush|quiet", re.I)
 

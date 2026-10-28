@@ -1687,7 +1687,8 @@ SELF_PROTECTED) let a signed-in phone answer (design PH-4, PH-7, PH-10,
   Discord mirror "You (phone)". A chat question's `question_answered` log
   record gains `via: "phone"`; a task question goes to
   `TaskControl.answer_question`, which takes no `via`. A proposal's
-  withdraw stays at the desk (400).
+  withdraw stayed at the desk (400) until P-5, which brought it to the
+  phone (below).
 - **PH-10.** `PendingApprovals.wait_s()`: a broker on the local default
   (120 s) waits 600 s while `RemoteAuth.recently_active()` (an active,
   unrevoked passkey is paired, and a session was seen or signed in within
@@ -1775,9 +1776,20 @@ on 2026-10-28).
   none of its files is exempt as readable gate state), v2's read tools are
   refused there (`permissions._phone_folder_read`, which also refuses a
   read tool's path at the data root, since a search from there reads it)
-  and v2's shell reads of it are always asked (`credentials-path`). A
-  recursive shell search from above the data root (`grep -r x ~`) is the
-  class every credential folder shares. The push files,
+  and v2's shell reads of it are always asked (`credentials-path`). The
+  two secret files are also refused by their **exact name** anywhere, a
+  copy included (`secrets.EXACT_NAMES`, delta review MED-A: v1's
+  `run_command` and v2's shell DENY `cat …/jarvis_push_key.json`, never
+  asked), but never judged as globs, so `ls j*` or `rg -g '*key.json'` keep
+  main's verdict; and what a command prints of them is scrubbed
+  (`secrets._push_values`: each base64 line of the key's PEM, each
+  endpoint, auth secret and public key). v2's read tools are refused at
+  every folder that holds the phone's folder below `$HOME` too (LOW-A:
+  `~/.local/share/jarvis`, `~/.local`, a symlink to them; no project root
+  can hold the data root, and a chat never needs its worktree's parents).
+  **Not covered:** a recursive search from `$HOME` or above by Claude's own
+  Grep (and `grep -r x ~` asked or reviewed in v2), the class every
+  credential folder shares; v1's scrub covers its own tools' output. The push files,
   `remote/push_settings.json` and `quiet.json` are protected state
   (`files._protected_state_paths`): refused to every agent write.
 - **Bounded, retried, padded** (review of PR #325): one push to every
@@ -1807,6 +1819,215 @@ exemption and v2's read-tool refusal each fail it), `tests/v2/quiet_check.py` (1
 quiet hours; the desk routes refuse every client but the HUD),
 `hud/src/mobile/notify.test.ts`, `hud/src/mobile/sw.test.ts` and the P-6
 sections of `tests/face/hud_v2_phone_check.py`.
+
+## Writing from the phone (phone C5 / P-5, 2026-10-28)
+
+`jarvis/v2/remote_write.py` (SELF_PROTECTED) lets a signed-in phone send a
+message to a chat, start a new chat, make and start a task, and resume or
+cancel one (design §5, §11 questions 1 and 2). `remote_auth.api_route`
+hands it its paths after `owner_status` (§4 items 1 to 4) and P-4's answer
+paths, before P-3's reads; the API and HUD listeners never serve `/m/`.
+
+| Route (`/m/api/...`) | Needs | Calls |
+|---|---|---|
+| `POST threads/<id>/messages` `{text}` | session | `hud_api.assemble_turn` (`paths=False`), then `Daemon.deliver` |
+| `POST threads` `{project_id, provider, model?, effort?, text}` | session | `Daemon.open_thread(…, "chat", …)`, then the first message as above |
+| `GET thread-models` | session | `thread_model.describe()`, cut to labels, defaults, models |
+| `POST tasks` `{project_id, brief}` | session | `Daemon.create_task` (the HUD's `POST /tasks`): INTAKE |
+| `POST tasks/<id>/start`, `…/resume` `{}` | session | `daemon.task_verb` (the HUD's `POST /tasks/<id>/<verb>`) |
+| `POST tasks/<id>/cancel/options` `{}` | session | `RemoteAuth.answer_options(session, "task:<id>", "cancel")` |
+| `POST tasks/<id>/cancel` `{assertion}` | the assertion | `answer_verify`, then `daemon.task_verb(…, "cancel", {})` |
+
+- **`via="phone"`, no desk, no Bypass (§11 question 2: no).** A typed
+  phone message is `UserMessage(origin="owner", via="phone", desk=False)`,
+  the value P-4 added to `daemon.VIAS` for a decision answered on the phone.
+  `desk.desk_message` requires `via="hud"`, so the fast path's direct edit
+  tools (F-1..F-7), the desk's terminal reads and Browser drive are never
+  bound for it, even if a caller set `desk=True`; Claude's `owner_turn`
+  already excludes "phone", so Bypass never applies. The `user` log record
+  carries `via: "phone"`; chat reads mark it "via the phone" (a decision's
+  answer, which always carries `decision_id`, keeps "via the phone's inbox
+  (not typed in this chat)"); the HUD shows "· from the phone"; the Discord
+  mirror "You (phone): <words>" (a decision's frame is read only when the
+  record has a `decision_id`, so the owner's own words are never relabelled
+  as the chat's question).
+- **It never steers (P-5's decision).** `daemon.NEVER_STEER = ("phone",)`,
+  read from the message in `Daemon.deliver`: while a turn runs, a phone
+  message waits in the owner's queue (`QUEUE_MAX` 3, 409 with the HUD's
+  words past it) and runs as its own turn; never steered into the running
+  turn, never an interrupt. A HUD message on the same turn still steers.
+  Why: a phone message is typed away from the screen the turn's work is
+  on, and a steer changes work already under way.
+- **Caps.** Text at most `MESSAGE_CHARS` (20,000), a brief `BRIEF_CHARS`
+  (20,000), never blank; `images` or `attachments` 400 ("attachments and
+  images are not sent from the phone; attach them at the desk"); any other
+  field, a query string or a non-object body 400; the listener's 64 KiB
+  body cap first. `@path` is never read (`paths=False`, as Discord).
+- **Sent once.** A message, new chat or new task may carry `client_id`
+  (the phone's UUID for one draft, 8 to 64 of `[A-Za-z0-9-]`); a 2xx is kept
+  per session for 5 minutes with a hash of the body, and the same id with
+  the same body gets it back (`repeat: true`) without acting; the same id
+  with another body is 409 ("this draft id was already used for different
+  text"); one still on its way is 409; refusals are not kept. At most 64 per
+  session: past that the session's own oldest answered entry goes, never
+  one on its way and never another session's (delta review of #324).
+- **Uncertain.** An exception after the write took effect (the view of a
+  task made, started or cancelled, a chat opened), or one `remote_write`
+  cannot place, is logged with its traceback and answered 409 `{"error":
+  "it may not have gone through: check before trying again", "uncertain":
+  true}`, kept under the draft's id like a 2xx; the app shows it as "may
+  not have gone through", never as a refusal. The phone's withdraw maps
+  the same way. An offline `cancel/options` (a read) says "Offline: the
+  task was not cancelled." The app says "May not have been sent. Check the chat before trying
+  again." when no answer came back (a dropped connection, 502, 504), never
+  "not sent".
+- **Failures.** A provider's or the OS's exception is 409 "request failed
+  (<type>)" (`PermissionError` 403, as the HUD's handler), never a 500 and
+  never its text.
+- **Titles.** `titles.owner_typed` counts `via="phone"` without a
+  `decision_id` as the owner's words, so a chat started from the phone is
+  titled (review of PR #324).
+- **Rate.** Every write here counts against its session: `RATE` (30) per
+  `RATE_S` (60 s, monotonic), 429 with `Retry-After` past it. Another
+  session is its own. P-4's answers do not count.
+- **A chat only.** The thread must be one the phone lists (not archived,
+  its project not archived: else 404) and an owner's chat (role chat, no
+  task: else 409). A task's chats are read only on the phone.
+- **New chat.** A listed project, a provider of `fast`, `claude`, `codex`,
+  a model and effort as `thread_model.check` takes them, through
+  `open_thread` with the HUD's empty brief (the fence fields the project's
+  own, `make_brief`). A provider out of the roster is 409; a refused model
+  400 before any thread exists. If the first message is then refused, the
+  answer carries the opened chat (`thread`) with the refusal.
+- **Tasks (§11 question 1, owner 2026-10-28: yes, through the intake
+  gate).** `POST tasks` makes the task in INTAKE (`Daemon.create_task`,
+  which the HUD's `POST /tasks` now calls too); nothing runs until Start.
+  Start and resume reach `TaskControl` through `daemon.task_verb`, which
+  the HUD's `_task_verb` now calls too, with the HUD's empty body (no
+  provider switch from the phone); a `ControlError` is 409 with the runner's
+  words. `remote_write.TASK_START` is the separable switch: False takes
+  `POST tasks` and `tasks/<id>/start` out of the table. It gates only the
+  phone's own explicit task making and starting: a chat may still propose a
+  task (`task_propose`), as from the HUD or Discord. A task view shows no
+  Start while the task is a proposal inside its grace window.
+- **Cancel takes the passkey.** `CANCELLED` is terminal
+  (`model.TRANSITIONS`) and `resume` takes only a blocked task, so a cancel
+  cannot be undone: it is a deliberate verb, PH-4's footing. The challenge
+  is P-4's, bound to the subject `task:<id>` and the decision "cancel"
+  (`remote_auth.TASK_DECISIONS`); an approval's req_id never holds a colon,
+  and `answer_options` refuses a task subject with "allow" or "always" and
+  an approval's req_id with "cancel", so neither assertion is ever the
+  other's. Cancel prompts and approval prompts are capped apart (4 each per
+  session), so abandoned cancel prompts never refuse an Allow. Verified before `TaskControl.cancel`; §4.1 is not required (a
+  cancel grants nothing). Start and resume need the session only: neither
+  destroys anything, and each step a started task takes still passes the
+  gate.
+- **A proposal's withdraw** (`remote_answer`, `POST inbox/prop:<id>/answer`
+  `{withdraw: true}`, exactly) needs the session only: it is Deny's
+  footing (it refuses work an agent proposed, inside its grace window).
+  From the phone `inbox.answer` calls only `Router.cancel_proposal`, which
+  checks the window under its lock; if the window closed meanwhile (review
+  of PR #324: `rows()` runs first) it is 409 ("too late to withdraw…", or
+  "already withdrawn or cancelled" when it was) and
+  never `TaskControl.cancel`, whose cancel is terminal and takes the passkey
+  on the phone. The desk's withdraw keeps `TaskControl.cancel`.
+- **Recorded as the phone's.** Each task verb from the phone (`create`,
+  `start`, `resume`, `cancel`, `withdraw`) is a task journal line
+  `{"event": "owner_verb", "verb", "via": "phone"}` and an INFO log line
+  with the task id and the verb, never a brief or a message.
+- **Never from the phone:** permanent delete (owner HUD-only,
+  archived-only), archive, restore, rename, merge, a task's steer or
+  worktree, Bypass, interrupt, project changes. None is in the table: 404
+  or 405 (asserted).
+- **The app** (`hud/src/mobile/write.ts`, `write.css`, wired in `app.ts`
+  and `views.ts`): an owner's chat ends with a message box: a textarea
+  (Enter is a new line, `enterkeyhint="enter"`) and a Send button; "Sending…"
+  while it is on its way; the message shows only once its 202 came back and
+  the log was read again; "Queued: it runs after the current turn." when it
+  waits; a refusal's words as text with the draft kept; offline, Send is
+  off and the box says so (no write queue). The Chats tab has "New chat"
+  (project, provider from `thread-models` with unavailable ones disabled,
+  model, first message, "Start chat"); the Tasks tab "New task" (project,
+  brief, "Create task", then the task opens waiting for Start). A task
+  offers Start (intake), Resume (blocked) and "Cancel task" (until it
+  ends), each asked first ("Not now" / the verb); Cancel then raises the
+  passkey on its own challenge. A proposal row offers Withdraw, asked once.
+  Every control at least 44 px; every string `textContent`.
+
+Tests: `tests/v2/remote_write_check.py` (the acceptance list: `via`,
+desk false with the session's desk slot absent, queued and never steered
+beside a HUD steer, the rate, caps, attachments, a new chat on each
+provider, start/resume with the HUD's arguments, INTAKE until Start,
+`TASK_START` off, cancel's assertion and its binding both ways, withdraw,
+the journal, the unreachable verbs, 401/403/400 and 404 on the API and HUD
+listeners), the phone cases in `tests/v2/fastpath_edits_check.py` and
+`fastpath_check.py`, `archive_check`'s P-5 needles,
+`hud/src/mobile/write.test.ts`, and `tests/face/hud_v2_phone_write_check.py`
+(the built bundle, a real daemon, Chromium's virtual authenticator).
+
+## Push to talk from the phone (phone C7 / P-7, 2026-10-28)
+
+`jarvis/v2/remote_stt.py` (SELF_PROTECTED) is `POST /m/api/stt`: a
+signed-in phone uploads a clip and gets back `{text}`, nothing else.
+`remote_auth.api_route` hands it the path after `owner_status` (§4 items
+1 to 4: this listener, the exact Host, a live session, the exact Origin),
+before P-4's, P-5's and P-3's routes; the API and HUD listeners never serve
+`/m/`. The desk's own dictation stays `POST /stt`, owner-only on the HUD
+listener (#227).
+
+- **The desk's path.** Both routes call `hud_api.dictate` (after
+  `watch_stt`): `voice.stt_result(prefer_local=True)` under `stt_settings`.
+  Local only with the cloud fallback off keeps the phone's audio on the
+  machine; a local failure is refused with the desk's sentence ("… so
+  nothing was uploaded"), never sent to the cloud.
+- **No speaker verification on the phone (owner, 2026-10-28).** Only a
+  passkey-verified session can upload, and the phone's mic would often
+  refuse the owner's own voice: `dictate(verify=False)` reads no voiceprint
+  and remembers no verdict. The desk verifies first, as before (V12).
+- **WAV only.** `Content-Type: audio/wav` (else 415) and a 16 kHz mono
+  16-bit PCM WAV of 1 frame to 60 s (else 400). The phone builds it with
+  Web Audio and the desk's resampler and writer; Safari's MediaRecorder
+  (`audio/mp4`, AAC) is not used, because the local engine takes only WAV
+  and no media decoder runs on uploaded bytes.
+- **Body.** `remote_listener._limits` lets this one path carry
+  `remote_stt.BODY_CAP` (about 1.9 MB, within 30 s plus 2 s per 100 KB
+  declared, at most 120 s: `remote_stt.body_deadline`) only when the request
+  already passes `owner_status`; anything else keeps the 64 KiB cap and
+  `DRAIN_CAP`, so a client without a session cannot make the listener read
+  more than before.
+- **Rate.** 12 clips a minute per session (429, `Retry-After: 60`) and one
+  in flight per session (429, `Retry-After: 2`), apart from P-5's write
+  rate.
+- **Never sent, never an answer.** The route calls no `deliver`, answer or
+  `resolve`; an "allow" spoken is text back to the phone, and the approval
+  stays pending (asserted). The phone puts the words in the open chat's
+  message box, where Send is still the owner's tap (P-5). Added words
+  change the draft, so the next Send carries a new `client_id` (P-5's
+  dedupe is bound to the words). The mic is inside the box, so it shows
+  only where the box does (an owner's chat, `role` "chat"), and it turns
+  off with the box while the app is offline, and while that chat's send
+  waits for its answer; a 202 removes only the words that were sent (review
+  of #327). No inbox row, card, question,
+  decision or proposal has a mic. Speech never authorizes.
+- **Never kept.** No temp file at all: the clip stays in memory for the
+  request. Logs say "a dictation clip transcribed" or "refused (status)",
+  never its length, bytes or words. The reply's text passes the phone's
+  scrub and is cut at 20,000 characters.
+- **CSP unchanged** (`REMOTE_POLICY`): `getUserMedia` and Web Audio are not
+  CSP-governed, nothing is played, the upload is `connect-src 'self'`.
+
+Tests: `tests/v2/remote_stt_check.py` (401/403/400, 404 on the API and HUD
+listeners; the type, shape, length and body caps; the large body only past
+the owner test; the rate and one at a time; local only never reaching the
+cloud spy; no speaker verification on the phone while the desk still
+refuses 422; `{text}` only; nothing delivered or
+answered; nothing on disk or in a log line), `tests/v2/remote_stt_mutants.py`
+(33 mutants, route and app, all killed), `archive_check`'s P-7 needles,
+`hud/src/mobile/talk.test.ts` (fake getUserMedia and Web Audio: the mic
+asked for only on the press, the words inserted and never posted, every
+track stopped, slide-off, early release, the minute limit, failures, no mic
+on answer surfaces), and `tests/face/hud_v2_phone_talk_check.py` (the built
+bundle, Chromium's fake audio device, local-only STT with a fake engine).
 
 ## Quiet hours: approvals deferred to the morning (QH, 2026-10-28)
 

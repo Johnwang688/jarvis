@@ -513,6 +513,30 @@ class Review325(SenderBase):
         self.assertNotIn(self.receiver.endpoint, text)
         print("ok  a ValueError is logged by its class only")
 
+    def test_next_wait_wakes_for_the_morning_seed(self):
+        self.local.now = local(24 + 7.1)
+        self.push._seen = None
+        self.waiting = {"ids": {"task:t"}, "rank": 4}
+        self.push.seed()
+        self.assertLess(self.push.next_wait(), 1.0, "the morning push is looked at at once")
+        self.wait("task:t", rank=4)
+        self.assertEqual(len(self.net.sent), 1)
+        self.assertEqual(self.push.next_wait(), push_mod.RECHECK_S)
+        print("ok  a start just after quiet hours wakes at once for the morning push")
+
+    def test_a_send_that_cannot_start_is_retried(self):
+        real = self.push.send_all
+        self.push.send_all = lambda count, rank: (_ for _ in ()).throw(RuntimeError("no"))
+        with self.assertLogs("jarvis.v2.push", level="WARNING"):
+            self.wait("appr:a")
+        self.assertTrue(self.push._pending)
+        self.assertIsNotNone(self.push._retry_at)
+        self.push.send_all = real
+        self.mono2.now += 61
+        self.wait("appr:a")
+        self.assertEqual(len(self.net.sent), 1)
+        print("ok  a send that raises before any subscription is still due and retried")
+
     def test_a_restart_just_after_quiet_hours_still_pushes_the_morning(self):
         for hours, want in ((24 + 7.2, 1), (24 + 6.5, 0), (24 + 8.0, 0)):
             self.push._seen, self.push._was_quiet = None, False
@@ -851,10 +875,11 @@ class Boundary(PushBase):
         for profile in (P.AUTO, P.ASK):
             for tool, args, decision, asked in self.permit_table(profile):
                 with self.subTest(profile=profile.value, tool=tool, args=args[-60:]):
-                    self.assertTrue(decision == Decision.DENY and (asked or tool != "Bash"),
-                                    f"{decision} asked={asked}")
-                    if tool == "Bash":
+                    self.assertEqual(decision, Decision.DENY, f"asked={asked}")
+                    if tool == "Bash" and "jarvis_push_" not in args:
                         self.assertTrue(asked, "a shell read of the folder is put to the owner")
+                    if "jarvis_push_" in args:
+                        self.assertFalse(asked, "a push file named outright is refused, never asked (MED-A)")
         # v2's read tools are refused there outright (layer 1).
         for args in ({"file_path": str(remote / "jarvis_push_key.json")}, {"path": str(remote)},
                      {"file_path": str(remote / "x" / ".." / "jarvis_push_subscriptions.json")}):
@@ -868,7 +893,7 @@ class Boundary(PushBase):
             self.assertTrue(files._credential_folder(target), name)
             with runtime.unconfined():
                 out = tools.dispatch("read_file", json.dumps({"path": str(target)}))
-            self.assertIn("credential folder", out.text, name)
+            self.assertTrue("credential folder" in out.text or "is protected" in out.text, name)
             self.assertNotIn("PRIVATE KEY", out.text)
             self.assertNotIn(self.receiver.endpoint, out.text)
         for command in (f"cat {remote}/*", f"grep -r pem {remote}", f"cat {remote}/jarvis_push_key.json",
@@ -882,6 +907,111 @@ class Boundary(PushBase):
         self.assertNotIn("PRIVATE KEY", out.text)
         self.assertNotIn(self.receiver.endpoint, out.text)
         print("ok  MED-1: the phone's folder is a credential folder: every read refused or asked (v2 AUTO/ASK, v1)")
+
+    def test_meda_the_push_files_are_refused_by_name_anywhere(self):
+        """MED-A (delta review of PR #325): the folder rule covers only
+        `<data root>/remote`, so the two secret files are refused by their
+        exact name too (a copy elsewhere, v1's run_command, v2's shell DENY,
+        never asked), and what a command prints of them is scrubbed."""
+        import shutil
+        from jarvis import runtime, tools
+        from jarvis.tools import secrets as v1_secrets, shell
+        from jarvis.v2 import permissions as v2
+        from jarvis.v2.model import PermissionProfile as P, Role
+        from jarvis.v2.permissions import PermitContext, build_permit
+        from jarvis.v2.provider import Brief
+        self.subscribed()
+        remote = Path(config.V2_DATA_DIR) / "remote"
+        key = remote / "jarvis_push_key.json"
+        subs = remote / "jarvis_push_subscriptions.json"
+        copy = self.root / "copy2"
+        shutil.copytree(Path(config.V2_DATA_DIR), copy)
+        copied = copy / "remote" / "jarvis_push_key.json"
+        pem_lines = [line for line in json.loads(key.read_text())["pem"].splitlines() if not line.startswith("-----")]
+
+        class Owner:
+            human_backed = True
+            seen: list = []
+
+            def ask(self, request):
+                self.seen.append(request)
+                return Decision.ALLOW
+
+        for profile in (P.AUTO, P.ASK):
+            brief = Brief(role=Role.IMPLEMENTER, cwd=str(self.root), profile=profile)
+            owner = Owner()
+            owner.seen = []
+            permit = build_permit(PermitContext(thread_id="abcd1234", brief=brief, provider="claude"), owner)
+            for command in (f"cat {key}", f"cat {copied}", f"cat {subs}", f"base64 {copied}",
+                            f"cp {copied} /tmp/x", f"python3 -c \"print(open('{copied}').read())\""):
+                with self.subTest(profile=profile.value, command=command[-50:]):
+                    self.assertEqual(permit("Bash", {"command": command}, brief), Decision.DENY)
+                    self.assertEqual(owner.seen, [], "refused, never put to the owner")
+            for path in (copied, copy / "remote" / "jarvis_push_subscriptions.json"):
+                self.assertEqual(permit("Read", {"file_path": str(path)}, brief), Decision.DENY, path)
+        for command in (f"cat {key}", f"cat {copied}", f"head {subs}", f"cat {copy}/remote/jarvis_push_key.json"):
+            self.assertTrue(v1_secrets.protected_in_command(command), command)
+            self.assertTrue(v2.denied_command(command), command)
+            out = shell.run_command(command, "probe")
+            self.assertTrue(out.startswith("Error"), out[:120])
+            self.assertFalse(any(line in out for line in pem_lines))
+        with runtime.unconfined():
+            out = tools.dispatch("read_file", json.dumps({"path": str(copied)}))
+        self.assertIn("protected", out.text)
+        # The scrub: a spelling no name rule sees (a glob onto the copy),
+        # printed raw or as the file's JSON, comes back without the key's
+        # lines, the endpoint or the auth secret.
+        for text in (key.read_text(), json.loads(key.read_text())["pem"], subs.read_text()):
+            scrubbed = v1_secrets.scrub(text)
+            self.assertFalse(any(line in scrubbed for line in pem_lines))
+            self.assertNotIn(self.receiver.endpoint, scrubbed)
+            self.assertNotIn(self.receiver.json()["keys"]["auth"], scrubbed)
+        out = shell.run_command(f"cat {copy}/remote/jarvis_push_*", "probe")
+        self.assertFalse(any(line in v1_secrets.scrub(out) for line in pem_lines))
+        print("ok  MED-A: the push files are refused by exact name anywhere (v1 run_command, v2 DENY) and scrubbed")
+
+    def test_meda_the_scrub_never_raises_on_a_malformed_push_file(self):
+        """Delta check of PR #325, LOW: `scrub()` runs on every tool output,
+        so a corrupt or hand-edited push file must give no values, never an
+        exception (a non-list `subscriptions`, JSON nested past the
+        recursion limit)."""
+        from jarvis.tools import secrets as v1_secrets
+        remote = Path(config.V2_DATA_DIR) / "remote"
+        remote.mkdir(parents=True, exist_ok=True)
+        deep = "[" * 100_000
+        for subs_text, key_text in (('{"subscriptions": 5}', '{"pem": 5}'),
+                                    ("true", "true"),
+                                    ('{"subscriptions": {"a": 1}}', "[]"),
+                                    (deep, deep)):
+            with self.subTest(subs=subs_text[:30]):
+                (remote / "jarvis_push_subscriptions.json").write_text(subs_text)
+                (remote / "jarvis_push_key.json").write_text(key_text)
+                self.assertEqual(v1_secrets._push_values(), ())
+                self.assertEqual(v1_secrets.scrub("plain text"), "plain text")
+        print("ok  MED-A: a malformed push file gives no values and the scrub never raises")
+
+    def test_lowa_folders_holding_it_below_home_are_refused(self):
+        """LOW-A: with the data root under $HOME (the real layout), Read, Grep
+        and Glob at every folder that holds the phone's folder below $HOME,
+        or a symlink to one, are refused; $HOME itself and a project are not."""
+        from unittest.mock import patch
+        from jarvis.v2 import permissions as v2
+        home = Path(os.environ["HOME"])
+        data = home / ".local" / "share" / "jarvis" / "v2"
+        (data / "remote").mkdir(parents=True)
+        (data / "remote" / "jarvis_push_key.json").write_text("{}")
+        (home / "projects" / "calc").mkdir(parents=True)
+        link = home / "projects" / "sharelink"
+        link.symlink_to(home / ".local" / "share" / "jarvis")
+        with patch.object(config, "V2_DATA_DIR", data):
+            for path in (data, data.parent, data.parent.parent, home / ".local", link,
+                         data / "remote", data / "remote" / "x.json"):
+                for tool, key in (("Grep", "path"), ("Glob", "path"), ("Read", "file_path")):
+                    self.assertTrue(v2.denied_read(tool, {key: str(path)}), (tool, path))
+            for path in (home, home / "projects" / "calc", home / ".local" / "share" / "jarvis" / "chat-worktrees" / "w",
+                         self.root):
+                self.assertIsNone(v2.denied_read("Grep", {"path": str(path)}), path)
+        print("ok  LOW-A: every folder holding the phone's folder below $HOME is refused; $HOME and projects are not")
 
     def test_agents_cannot_write_the_push_files(self):
         from jarvis import permissions as v1, rules as v1_rules, runtime, tools

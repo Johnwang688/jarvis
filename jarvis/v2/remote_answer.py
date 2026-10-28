@@ -73,7 +73,12 @@ the HUD, through the inbox's own dispatch (`inbox.answer`, IN-2) with
 `via="phone"`: a decision's answer reaches its chat as
 `UserMessage(origin="owner", via="phone", desk=False)` with B1's framing,
 never at the desk and never counted for Bypass; a chat question's log
-record names "phone". A proposal's withdraw stays at the desk.
+record names "phone". **A proposal's withdraw** (P-5) needs the session
+only, Deny's footing: it refuses work an agent proposed, inside the
+proposal's grace window, through the inbox's own dispatch
+(`TaskControl.cancel`, as `POST /tasks/<id>/cancel`), and it is recorded in
+the task's journal as the phone's (`remote_write.record`). Cancelling a task
+that already runs is `remote_write`'s, and takes the passkey.
 
 SELF_PROTECTED: it decides what the phone may answer, and with whose
 authority. Tests: tests/v2/remote_answer_check.py.
@@ -88,7 +93,6 @@ API = "/m/api/"
 WITHHELD = "this card has withheld text: answer it at the desk"
 AT_DESK = "answer at the desk"
 NO_ALWAYS = "this card takes no Always"
-WITHDRAW_AT_DESK = "withdraw it at the desk"
 DECISIONS = ("allow", "always", "deny")
 
 
@@ -347,7 +351,19 @@ def answer(handler, daemon, session, row: str, body: dict) -> dict:
     row_id = row
     prefix, _rest, _ = _split(row_id)
     if prefix == "prop":
-        raise _Refused(400, WITHDRAW_AT_DESK)
+        # P-5: a proposal's withdraw, the session only (Deny's footing).
+        if set(body) != {"withdraw"} or body["withdraw"] is not True:
+            raise _Refused(400, "withdraw must be true")
+        from .remote_write import UNCERTAIN, record
+        try:
+            out = _dispatch(daemon, row_id, {"withdraw": True}, owner_verified=False)
+        except _Refused:
+            raise
+        except Exception as exc:  # noqa: BLE001 — no 500, no exception text; it may have taken effect
+            LOG.exception("phone: a withdraw failed (%s)", type(exc).__name__)
+            raise _Refused(409, UNCERTAIN, {"uncertain": True}) from None
+        record(daemon, _rest, "withdraw")
+        return out
     if prefix == "defer":
         return _answer_deferred(handler, daemon, session, row_id, body)
     if prefix != "appr":

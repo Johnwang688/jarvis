@@ -1208,7 +1208,8 @@ def bypass_checks() -> None:
 
     # Inbox B1 (review of PR #309): the owner's answer to a decision is an
     # owner message, but its turn is the agent's to run: no Bypass.
-    # The same answered on the phone (P-4, via "phone").
+    # The same answered on the phone (P-4, via "phone"), and a message typed
+    # on the phone (P-5, via "phone" too): no desk, no Bypass.
     for via, bypassed in (("inbox", False), ("phone", False), ("hud", True)):
         with _temp_config(), fake([Hook("Bash", {"command": "ls"}), result_message()]):
             handle = provider.start(thread(), brief(**chat), allow)

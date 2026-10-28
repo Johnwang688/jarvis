@@ -39,7 +39,8 @@ nothing else (`ROUTES`, `ASSETS`, `ICONS`, `API_PREFIX`):
 Everything else is 404. HEAD answers like GET without the body.
 
 **Every request body is read before the answer** (`_read_body`), up to
-`BODY_CAP` (64 KiB; above it 413, the excess drained up to `DRAIN_CAP` first;
+`BODY_CAP` (64 KiB; P-7's signed-in clip upload alone takes more, `_limits`;
+above it 413, the excess drained up to `DRAIN_CAP` first;
 chunked bodies decoded the same way, every wire byte of them counted against
 `DRAIN_CAP` and trailers capped at `TRAILER_CAP`), within `BODY_DEADLINE_S`
 for the whole body (408). An answer sent over an unread body
@@ -80,7 +81,7 @@ import stat
 import time
 
 from jarvis import config
-from . import remote_auth
+from . import remote_auth, remote_stt
 
 LOG = logging.getLogger(__name__)
 
@@ -401,10 +402,10 @@ class _Wire:
     socket read, with the socket's timeout cut to what is left of the
     deadline, so a body dripped a byte at a time cannot outlast it (408)."""
 
-    def __init__(self, handler, budget: int):
+    def __init__(self, handler, budget: int, deadline_s: float = BODY_DEADLINE_S):
         self.rfile = handler.rfile
         self.connection = getattr(handler, "connection", None)
-        self.deadline = time.monotonic() + BODY_DEADLINE_S
+        self.deadline = time.monotonic() + deadline_s
         self.budget = budget          # wire bytes still allowed
         self.taken = 0
 
@@ -507,25 +508,45 @@ def _read_chunked(wire: _Wire, cap: int) -> bytes:
     return b"".join(kept)
 
 
+def _limits(handler, path: str) -> tuple[int, int, float]:
+    """(cap, drain cap, deadline) for this request's body. Every request
+    gets BODY_CAP, DRAIN_CAP and BODY_DEADLINE_S, except P-7's clip upload
+    (`POST /m/api/stt`, `remote_stt`): a minute of 16 kHz WAV is about
+    1.9 MB, so that one path takes `remote_stt.BODY_CAP` within
+    `remote_stt.body_deadline` of its declared length (30 s plus 2 s per
+    100 KB, at most 120 s), and only once the request already passes
+    the owner test (`remote_auth.owner_status`: this listener, the exact Host
+    and Origin, a live session). A client without a session never makes this
+    listener read more than it reads for any other request."""
+    if handler.command == "POST" and path == remote_stt.PATH and remote_auth.owner_status(handler)[0] == 200:
+        lengths = _header(handler.headers, "Content-Length") or []
+        declared = int(lengths[0].strip()) if (len(lengths) == 1 and lengths[0].strip().isdigit()
+                                               and len(lengths[0].strip()) <= 12) else None
+        return remote_stt.BODY_CAP, remote_stt.BODY_CAP + DRAIN_CAP, remote_stt.body_deadline(declared)
+    return BODY_CAP, DRAIN_CAP, BODY_DEADLINE_S
+
+
 def _read_body(handler) -> bytes:
     """The request's body, read whole before any answer (module note): at
     most BODY_CAP bytes, else 413 once up to DRAIN_CAP of it is read; the
-    whole body within BODY_DEADLINE_S, else 408. A malformed length is 400.
+    whole body within BODY_DEADLINE_S, else 408 (P-7's clip upload alone has
+    its own three, `_limits`). A malformed length is 400.
     Neither length nor chunked: no body."""
+    cap, drain, deadline_s = _limits(handler, (handler.path or "").split("?", 1)[0].split("#", 1)[0])
     headers = handler.headers
     encodings = _header(headers, "Transfer-Encoding") or []
     lengths = _header(headers, "Content-Length") or []
     if encodings:
         if lengths or [e.strip().lower() for e in encodings] != ["chunked"]:
             raise _BodyError(400)
-        return _read_chunked(_Wire(handler, DRAIN_CAP), BODY_CAP)
+        return _read_chunked(_Wire(handler, drain, deadline_s), cap)
     if not lengths:
         return b""
     if len(lengths) != 1 or not lengths[0].strip().isdigit() or len(lengths[0].strip()) > 12:
         raise _BodyError(400)
     length = int(lengths[0].strip())
-    wire = _Wire(handler, DRAIN_CAP)
-    if length > BODY_CAP:
+    wire = _Wire(handler, drain, deadline_s)
+    if length > cap:
         wire.drain(length)
         raise _BodyError(413)
     data = wire.read(length) if length else b""

@@ -1054,6 +1054,13 @@ def _split(row_id):
     return prefix, rest, row_id
 
 
+# A withdraw from the phone after the proposal's grace window closed (P-5):
+# it started on its own, or it was already withdrawn or cancelled.
+WITHDRAW_LATE = ("too late to withdraw: the task has started on its own; "
+                 "cancelling it takes Face ID (open the task)")
+WITHDRAW_DONE = "this proposal was already withdrawn or cancelled"
+
+
 def _gone():
     from .daemon import APIError
     return APIError(409, "this item is no longer waiting; it was answered or its source has gone")
@@ -1149,8 +1156,24 @@ def answer(daemon, row_id, body, *, owner_verified: bool, via: str = "inbox"):
         if prefix == "tq":
             # `POST /tasks/<id>/answer`'s own call.
             return to_json(runner.answer_question(row["detail"]["task_id"], row["detail"]["index"], text))
-        # A proposal's withdraw is `POST /tasks/<id>/cancel`'s own call.
-        return to_json(runner.cancel(row["detail"]["task_id"]))
+        task_id = row["detail"]["task_id"]
+        if via == "phone":
+            # The phone's withdraw needs only the session (P-5), so it may
+            # only ever withdraw: the router's own check, under its lock,
+            # that the task is still a proposal inside its grace window. If
+            # the window closed meanwhile (`rows()` above takes a moment), it
+            # is 409 and never `TaskControl.cancel`, whose cancel of a task
+            # that began is terminal and takes the passkey on the phone.
+            if not daemon.router.cancel_proposal(task_id):
+                now = daemon.stores.tasks.get(task_id)
+                raise APIError(409, WITHDRAW_DONE if now is None or now.state == TaskState.CANCELLED
+                               else WITHDRAW_LATE)
+            task = daemon.stores.tasks.get(task_id)
+            daemon.bus.publish({"kind": "task_status_changed", "task_id": task.id,
+                                "project_id": task.project_id, "data": to_json(task)})
+            return to_json(task)
+        # A proposal's withdraw at the desk is `POST /tasks/<id>/cancel`'s own call.
+        return to_json(runner.cancel(task_id))
     except ControlError as exc:
         raise APIError(409, str(exc)) from exc
 
