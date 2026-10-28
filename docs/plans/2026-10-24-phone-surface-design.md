@@ -626,6 +626,91 @@ phone"). Where it is more specific than the text above:
   task each confirmed first (Cancel then the passkey), Withdraw on a
   proposal. Shown only after the 2xx; offline nothing is sent.
 
+### 10.7 P-7 as built (2026-10-28, phone C7)
+
+Built as the P-7 row says (`docs/notes/control-plane.md`, "Push to talk from
+the phone"). Where it is more specific than the text above:
+
+- **The route is `jarvis/v2/remote_stt.py`** (SELF_PROTECTED), `POST
+  /m/api/stt`, past `owner_status` like P-3 to P-5: the session, the exact
+  Host and the exact Origin (with the SameSite=Strict cookie, P-5's CSRF
+  rule). The API and HUD listeners never serve `/m/`. The reply is
+  `{text}` and nothing else.
+- **It is the desk's path, through one function.** The desk's `POST /stt`
+  now calls `hud_api.dictate`, and so does the phone (after
+  `hud_api.watch_stt`, as the desk): `voice.stt_result(prefer_local=True)`
+  under the owner's switches (`stt_settings`). Local only stays local: with
+  the cloud fallback off, the phone's clip never leaves the machine, and a
+  local failure is the desk's refusal ("… so nothing was uploaded"), never
+  a quiet cloud call. The desk's statuses and sentences come back as they
+  are (409 blocked, 502 unavailable). The phone sets nothing.
+- **No speaker verification on the phone (owner, 2026-10-28).** Only a
+  passkey-verified phone session can upload, and the phone's microphone
+  would often refuse the owner's own voice. The phone calls `dictate` with
+  `verify=False`: no voiceprint is read and no verdict is remembered
+  (`speaker._remember`). The desk keeps verification exactly as before
+  (422 for another voice, nothing transcribed). Asserted both ways: an
+  enrolled, non-matching voiceprint, the phone's clip transcribed and the
+  same clip at the desk refused.
+- **The clip is WAV, built on the phone, not MediaRecorder's file
+  (a change from the P-7 brief).** Safari's MediaRecorder on the iPhone
+  writes `audio/mp4` (AAC). The desk's local engine takes 16-bit PCM WAV
+  only and runs no media decoder on uploaded bytes by design
+  (`stt_local`), and the desk's speaker verification takes WAV only, so an AAC clip
+  could only ever have gone to the cloud, or been refused with the desk set
+  to local. So the phone records with Web Audio (`getUserMedia`, a
+  ScriptProcessor, the desk's resampler `lib/resample.ts`) and writes the
+  desk's own WAV (`lib/vad.ts` `wavBytes`): 16 kHz, mono, 16-bit. The route
+  takes `Content-Type: audio/wav` only (415 for mp4, webm or anything else)
+  and checks the file itself (RIFF/WAVE, PCM, mono, 16-bit, 16 kHz, 1 frame
+  to 60 s; 400 otherwise). No ffmpeg, nothing to install: the desk's STT
+  handles it today, local and cloud. Not run on the owner's iPhone yet.
+- **The phone uses a ScriptProcessor, not the desk's AudioWorklet.** The
+  worklet is a separate build file that the build manifest does not list
+  for `mobile.html`, so the remote listener does not serve it, and a
+  `blob:` module would need a wider CSP. ScriptProcessor is deprecated but
+  present in Safari.
+- **Caps.** A clip is at most 60 s (`MAX_S`); the listener reads up to
+  `remote_stt.BODY_CAP` (a minute of WAV plus a little, about 1.9 MB) for
+  this one path, within a deadline scaled to the declared length (30 s plus
+  2 s per 100 KB, at most 120 s: a full minute needs about 0.23 Mbit/s;
+  review of #327), and only once the request already passes the owner test
+  (`remote_listener._limits`). Every other request, a clip without a
+  session included, keeps the 64 KiB cap and the 10 s deadline. 12 clips a
+  minute per session (429, `Retry-After: 60`) and one at a time (429,
+  `Retry-After: 2`).
+- **Never kept, never logged.** The clip stays in memory: no temp file at
+  all (the local engine reads it from memory; the cloud chain posts the
+  bytes). INFO lines say only "transcribed" or "refused (status)".
+- **The CSP is unchanged.** Recording is `getUserMedia` and Web Audio,
+  which the CSP does not govern; nothing is played (no `media-src`); the
+  upload is a `fetch` to `'self'` (`connect-src 'self'`); no `blob:` URL is
+  made. The listener sends no `Permissions-Policy`, so the page may ask for
+  the microphone; iOS still asks the owner.
+- **The app** (`hud/src/mobile/talk.ts`, `talk.css`, in P-5's message box):
+  "Hold to talk" (56 px tall, no scroll, no selection or long-press menu).
+  Press: the mic is asked for then, inside the gesture, never before.
+  "Listening · release" while held, "Transcribing…" after. Release adds the
+  words to the chat's draft after what is typed and draws the box again:
+  "Added to the box, unsent. Read it, then tap Send." Sliding more than
+  24 px off the button, a cancelled pointer, or the app going to the
+  background cancels, and nothing is uploaded. Under 0.3 s nothing is sent.
+  At 60 s it stops itself and transcribes. Failures say which: permission
+  denied, no microphone, offline, too slow, speech-to-text unavailable (the
+  desk's sentence). A clip that never arrived (offline, the proxy with
+  nothing behind it, a 408) is kept in memory for one "Retry", then
+  dropped. The outcome line shows only in the chat the words went to. While
+  that chat's send waits for its answer the mic is off, and a 202 removes
+  only the words that were sent, so words a clip added meanwhile stay; P-5's
+  "may not have been sent" note stays when words are added (review of
+  #327). Every track is stopped and the audio context
+  closed however the recording ends, a permission that arrives after the
+  finger left included, so the iPhone's mic indicator goes out.
+- **A voice note never answers.** The mic is only in an owner's chat's
+  message box. Inbox rows, approval cards, questions, decisions, proposals
+  and a task's chats have none, and the route calls no send, answer or
+  approval (asserted, and by mutation).
+
 ## 11. Open questions for the owner (defaults in bold)
 
 Answered 2026-10-24: the phone is an iPhone (O-1); Discord stays as a backup

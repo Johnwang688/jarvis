@@ -1,0 +1,23 @@
+/* P-7: push to talk in a chat's message box (talk.ts). Graphite tokens from
+   mobile.css; no image or font is loaded. The button is at least 44 px (56 px:
+   it is held, not tapped), cannot be selected or long-press-menued, and
+   takes no scroll gesture while held. Listening is glacier cyan, never the
+   amber or red that mean "pending" and "error". */
+.m-talk { display: flex; flex-direction: column; gap: 4px; }
+.tap.m-mic {
+  min-height: 56px;
+  text-align: center;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+}
+.tap.m-mic[data-phase="starting"],
+.tap.m-mic[data-phase="listening"] {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.tap.m-mic[data-phase="transcribing"] { color: var(--text-muted); }
+.tap.m-mic:disabled { opacity: 0.5; }
+.m-talk-line { margin: 0; font-size: 14px; }
