@@ -136,6 +136,10 @@ export function InboxView(props: InboxViewProps) {
   blockedNow.current = props.blocked;
   const { rows, status } = props.snapshot;
 
+  // "Show hidden" ends when nothing is hidden, so the next row hidden leaves the list as it should.
+  const hiddenCount = rows.filter((r) => r.hidden).length;
+  useEffect(() => { if (!hiddenCount) setShowHidden(false); }, [hiddenCount]);
+
   // Read again when the view is shown: the rows are the daemon's, never kept here.
   useEffect(() => { void props.onReread(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, []);
 

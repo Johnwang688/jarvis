@@ -56,6 +56,17 @@ What it pins, one section each (each names the mutation it is meant to catch):
             only the one the owner saves; under a card the row is inert and a
             trusted click posts nothing [auto-mark; double post; innerHTML;
             mark while undeployed; not inert]
+  marks     inbox B4's Snooze 1 h, Until tomorrow, 1 week and Dismiss show on
+            rows of rank 5 to 8 only (never on a question, a proposal, a
+            blocked task or "PR list unavailable"); the HUD reads
+            `/inbox?all=1`; Dismiss posts `{dismiss: true}` once with the id
+            through `encodeURIComponent`; the row leaves the list and a
+            hidden rank-5 row leaves the count; "Show hidden (n)" shows it
+            muted with "Dismissed" and Undo, which posts `{clear: true}` and
+            brings it back; a snooze posts its time about an hour ahead; a
+            click on a row marks nothing; under a card the marks are inert
+            and a trusted click posts nothing [marks on rank 1 to 4; count
+            hidden rows; double post; row onClick marks; not inert]
   card      the approval card with the Inbox open behaves exactly as it does
             with a chat pane (the same assertions, the same answers): one card,
             the veil's, never a second instance in the inbox; Enter does
@@ -1084,6 +1095,117 @@ def _marked(mock):
     return list(_st(mock).get("marked", []))
 
 
+def pr_row(n=301, head="a" * 40):
+    """Inbox B3's rank-5 PR row (#320), as its projection serves it."""
+    return {"id": f"pr:Johnwang688/jarvis#{n}", "kind": "pr", "rank": 5, "title": f"PR #{n} is ready to merge",
+            "blocks": "waits on your merge", "project_id": "p1", "thread_id": None, "task_id": None,
+            "asked_at": _iso(-120), "expires_at": None, "origin": "",
+            "detail": {"repo": "Johnwang688/jarvis", "number": n, "title": "x", "head": head, "checks": "success"}}
+
+
+def prx_row():
+    """Inbox B3's "PR list unavailable" (#320): never snoozed or dismissed."""
+    return {"id": "prx:list", "kind": "pr_unavailable", "rank": 5, "title": "PR list unavailable",
+            "blocks": "Jarvis could not read the open PRs", "project_id": None, "thread_id": None,
+            "task_id": None, "asked_at": _iso(-30), "expires_at": None, "origin": "", "detail": {"repos": []}}
+
+
+def _mark_posts(mock):
+    return list(_st(mock).get("mark_posts", []))
+
+
+def _marks_checks(page, mock, check, until):
+    """Inbox B4 (IN-7, IN-8): Snooze and Dismiss on ranks 5 to 8, Show hidden, Undo."""
+    _st(mock)["mark_posts"], _st(mock)["marks"] = [], {}
+    reads_all = _st(mock).get("all_reads", 0)
+    _open(page, mock, until, basic_rows() + [pr_row(), prx_row(), dec_row(), missed_row()])
+    check("the HUD reads /inbox?all=1", _st(mock).get("all_reads", 0) > reads_all)
+    with_marks = page.evaluate("() => [...document.querySelectorAll('[data-testid=\"inbox-row\"]')]"
+                               ".filter(r => r.querySelector('[data-testid=\"inbox-marks\"]')).map(r => r.dataset.id)")
+    check("Snooze and Dismiss show on ranks 5 to 8 only, never on 1 to 4 or 'PR list unavailable' "
+          "[mutation: marks on rank 1 to 4]",
+          sorted(with_marks) == sorted(["pr:Johnwang688/jarvis#301", "dec:d0123456789ab", "task:kf", "missed:m1"]),
+          str(with_marks))
+    labels = _row(page, "task:kf").locator('[data-testid="inbox-marks"] button').all_inner_texts()
+    check("its buttons are Snooze 1 h, Until tomorrow, 1 week and Dismiss",
+          labels == ["Snooze 1 h", "Until tomorrow", "1 week", "Dismiss"], str(labels))
+    check("the count is ranks 1 to 5: the question, proposal, blocked task, PR and 'PR list unavailable'",
+          _count(page) == "5", str(_count(page)))
+    # A click on a row, its title and its words marks nothing.
+    _row(page, "task:kf").locator('[data-testid="inbox-title"]').click()
+    _row(page, "task:kf").click(position={"x": 4, "y": 4})
+    time.sleep(0.3)
+    check("a click on a row marks nothing [mutation: row onClick marks]", _mark_posts(mock) == [],
+          str(_mark_posts(mock)))
+    focused = _active(page)
+    check("nothing is focused or defaulted to a mark button", not str(focused).startswith("inbox-snooze")
+          and focused != "inbox-dismiss", str(focused))
+    # Dismiss a rank-5 PR: it leaves the list and the count.
+    _row(page, "pr:Johnwang688/jarvis#301").locator('[data-testid="inbox-dismiss"]').dblclick()
+    until(lambda: "pr:Johnwang688/jarvis#301" not in _row_ids(page), timeout=3)
+    time.sleep(0.3)
+    posts = _mark_posts(mock)
+    check("Dismiss posts {dismiss: true} once, the id through encodeURIComponent [mutation: double post; raw id]",
+          len(posts) == 1 and posts[0] == ("/inbox/pr%3AJohnwang688%2Fjarvis%23301/mark",
+                                           "pr:Johnwang688/jarvis#301", {"dismiss": True}), str(posts))
+    until(lambda: _count(page) == "4", timeout=3)
+    check("the hidden PR leaves the count [mutation: count hidden rows]", _count(page) == "4", str(_count(page)))
+    toggle = page.locator('[data-testid="inbox-show-hidden"]')
+    check("'Show hidden (1)' appears", toggle.count() == 1 and toggle.inner_text() == "Show hidden (1)",
+          toggle.inner_text() if toggle.count() else "none")
+    toggle.click()
+    until(lambda: "pr:Johnwang688/jarvis#301" in _row_ids(page), timeout=3)
+    hidden = _row(page, "pr:Johnwang688/jarvis#301")
+    check("shown hidden, it is muted and says 'Dismissed', with Undo and no Dismiss",
+          hidden.get_attribute("data-hidden") == "1"
+          and hidden.locator('[data-testid="inbox-hidden-note"]').inner_text() == "Dismissed"
+          and hidden.locator('[data-testid="inbox-mark-undo"]').count() == 1
+          and hidden.locator('[data-testid="inbox-dismiss"]').count() == 0)
+    check("shown, it is still not counted", _count(page) == "4", str(_count(page)))
+    border = hidden.evaluate("e => getComputedStyle(e).borderLeftColor")
+    check("Graphite: a hidden row is neither amber, red nor the selection cyan",
+          border not in (AMBER, RED, "rgb(111, 195, 223)"), border)
+    hidden.locator('[data-testid="inbox-mark-undo"]').click()
+    until(lambda: len(_mark_posts(mock)) == 2, timeout=3)
+    check("Undo posts {clear: true}", _mark_posts(mock)[-1][1:] == ("pr:Johnwang688/jarvis#301", {"clear": True}),
+          str(_mark_posts(mock)[-1:]))
+    until(lambda: page.locator('[data-testid="inbox-show-hidden"]').count() == 0, timeout=3)
+    check("it is back, counted, and the toggle is gone", _count(page) == "5"
+          and _row(page, "pr:Johnwang688/jarvis#301").get_attribute("data-hidden") is None, str(_count(page)))
+    # A snooze posts its time about an hour ahead (the browser's clock).
+    _row(page, "dec:d0123456789ab").locator('[data-testid="inbox-snooze-hour"]').click()
+    until(lambda: len(_mark_posts(mock)) == 3, timeout=3)
+    body = _mark_posts(mock)[-1][2]
+    ahead = (datetime.fromisoformat(body.get("snooze_until", "").replace("Z", "+00:00"))
+             - datetime.now(timezone.utc)).total_seconds() if body.get("snooze_until") else -1
+    check("Snooze 1 h posts {snooze_until} about an hour ahead, with its zone",
+          set(body) == {"snooze_until"} and 3500 < ahead <= 3600 and body["snooze_until"].endswith("Z"), str(body))
+    until(lambda: "dec:d0123456789ab" not in _row_ids(page) or
+          _row(page, "dec:d0123456789ab").get_attribute("data-hidden") == "1", timeout=3)
+    # Under a card the marks are inert.
+    c = card("markcard001")
+    mock.world["approvals"].append(c)
+    mock.emit("approval_requested", c)
+    cardloc = page.locator('[data-testid="approval-card"]')
+    until(lambda: cardloc.count() == 1, timeout=4)
+    row = _row(page, "task:kf")
+    check("under a card the marks are inert and disabled",
+          row.evaluate("e => !!e.closest('[inert]')")
+          and row.locator('[data-testid="inbox-dismiss"]').is_disabled())
+    before = len(_mark_posts(mock))
+    for sel in ('[data-testid="inbox-dismiss"]', '[data-testid="inbox-snooze-week"]'):
+        found = row.locator(sel).first.bounding_box()
+        if found:
+            page.mouse.click(found["x"] + found["width"] / 2, found["y"] + found["height"] / 2)
+    time.sleep(0.4)
+    check("a trusted click under the card marks nothing [mutation: not inert]",
+          len(_mark_posts(mock)) == before and cardloc.count() == 1, f"{len(_mark_posts(mock)) - before} posts")
+    page.keyboard.press("Escape")
+    until(lambda: cardloc.count() == 0, timeout=4)
+    check("the title is unchanged", page.title() == TITLE, page.title())
+    _st(mock)["marks"] = {}
+
+
 def _check_checks(page, mock, check, until):
     """Inbox B2 (IN-6): live check rows, rank 7, marked at /inbox/checks/<id>/steps/<n>."""
     hostile = chk_row(title="Review " + HOSTILE, origin="Claude · chat ‹" + HOSTILE + "› (t1)",
@@ -1201,7 +1323,7 @@ def _check_checks(page, mock, check, until):
 
 SECTIONS = (_sidebar_checks, _groups_checks, _live_checks, _answer_checks, _conflict_checks, _withdraw_checks,
             _reconnect_checks, _clicks_checks, _hostile_checks, _missed_checks, _decision_checks, _check_checks,
-            _card_checks,
+            _marks_checks, _card_checks,
             _older_checks, _aurora_checks)
 
 
