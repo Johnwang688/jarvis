@@ -646,12 +646,22 @@ def _check_rows(daemon, hidden):
     now = store.clock()
     # One inbox read does a bounded amount of git work (review of PR #321,
     # LOW 2); a check past the budget reads "not confirmed" until the next.
+    # The budget is spent round-robin (delta review of PR #321): each read
+    # starts where the last one ran out, so older checks never starve newer.
     budget = [_checks.GIT_BUDGET]
-    for rec in store.all():
+    records = store.all()
+    start = getattr(deploy, "rotation", 0) % len(records) if records else 0
+    ran_out = None
+    for offset in range(len(records)):
+        index = (start + offset) % len(records)
         try:
-            out += _check_row(hidden, rec, now, deploy, budget)
+            out += _check_row(hidden, records[index], now, deploy, budget)
         except Exception as exc:  # noqa: BLE001 — one record never hides the rest
             LOG.warning("Cannot show a check (%s)", type(exc).__name__)
+        if ran_out is None and budget[0] <= 0:
+            ran_out = index
+    if deploy is not None and ran_out is not None:
+        deploy.rotation = ran_out
     return out
 
 
@@ -1160,7 +1170,10 @@ def mark_check_step(daemon, check_id, step, body) -> dict:
         raise APIError(404, "no such check")
     if index >= len(record["steps"]):
         raise APIError(404, "no such step")
-    status = (deploy.status(record["prs"], [_checks.GIT_BUDGET]) if deploy is not None
+    # Fresh: the HUD manifest (head and `dirty`) and HEAD are read again, not
+    # trusted from the rows' 60-second copies (delta review of PR #321), so a
+    # HUD rolled back or rebuilt dirty inside the window refuses the mark.
+    status = (deploy.status(record["prs"], [_checks.GIT_BUDGET], fresh=True) if deploy is not None
               else {"state": _checks.UNCONFIRMED})
     if not _checks.Deployment.markable(status):
         raise APIError(409, status.get("text") or "Not confirmed deployed, so it cannot be marked yet.")

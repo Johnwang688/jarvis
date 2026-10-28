@@ -1228,11 +1228,12 @@ _RISKY_KEYS = (
 )
 
 
-def _config_risk(cwd: Path, skip: frozenset[str] = frozenset()) -> str | None:
+def _config_risk(cwd: Path, skip: frozenset[str] = frozenset(), *,
+                 timeout: float = LOCAL_TIMEOUT_S) -> str | None:
     """The first key in the repository's own config (local or worktree scope)
     that names a program or moves where git works; "" for none; None when the
-    config cannot be listed."""
-    code, out, _ = _git(cwd, ["config", "--list", "--name-only", "--show-scope"])
+    config cannot be listed. `timeout` bounds the one git run."""
+    code, out, _ = _git(cwd, ["config", "--list", "--name-only", "--show-scope"], timeout=timeout)
     if code != 0:
         return None
     for line in out.splitlines():
@@ -1247,8 +1248,8 @@ def _config_risk(cwd: Path, skip: frozenset[str] = frozenset()) -> str | None:
     return ""
 
 
-def _risky_config(cwd: Path) -> str:
-    return _config_risk(cwd) or ""
+def _risky_config(cwd: Path, *, timeout: float = LOCAL_TIMEOUT_S) -> str:
+    return _config_risk(cwd, timeout=timeout) or ""
 
 
 # --- submodules: the belt under the pins ------------------------------------------

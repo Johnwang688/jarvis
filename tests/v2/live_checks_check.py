@@ -589,7 +589,10 @@ class Deploy(unittest.TestCase):
         for subject in ('Revert "Merge pull request #5 from me/x"', "Merge pull request #55 from me/x",
                         "Merge pull request #5", "merge pull request #5 from me/x",
                         "Merge branch 'main' into feature", "Fix #5 from the review",
-                        "Merge pull request #5 from me/x and more"):
+                        "Merge pull request #5 from me/x and more",
+                        # Delta review: only git's line ending is taken off.
+                        "Merge pull request #5 from me/x\r", "Merge pull request #5 from me/x ",
+                        " Merge pull request #5 from me/x", "Merge pull request #5 from me/x\t"):
             with self.subTest(subject=subject):
                 deploy = checks.Deployment(git=FakeGit({self.F: [(SHA["a"], subject)], "HEAD": [(SHA["a"], subject)]}),
                                            code_head=self.F)
@@ -650,10 +653,62 @@ class Deploy(unittest.TestCase):
         self.assertEqual(len(git.calls), calls, "kept by SHA, whatever the time")
 
 
+class DeployDelta(unittest.TestCase):
+    """Delta review of PR #321: failures are kept, git runs are short, and
+    one inbox read's budget is spent round-robin."""
+    F, E = SHA["f"], SHA["e"]
+
+    def test_a_failing_git_call_is_kept_and_stops_spending_the_budget(self):
+        now = [0.0]
+        git = FakeGit(fail=True)
+        deploy = checks.Deployment(git=git, code_head=self.F, clock=lambda: now[0])
+        for _ in range(5):
+            self.assertEqual(deploy.status([5], [8])["state"], checks.UNCONFIRMED)
+        self.assertEqual(len(git.calls), 1, "a failed line read is kept for the cache period")
+        now[0] += 61
+        deploy.status([5], [8])
+        self.assertEqual(len(git.calls), 2, "and tried again after it")
+        # A failing diff (whether a merge touches hud/) is kept the same way.
+        class DiffFails(FakeGit):
+            def __call__(self, *args):
+                if args[0] == "diff":
+                    self.calls.append(args)
+                    return None
+                return super().__call__(*args)
+        git = DiffFails({self.F: [merge(5, SHA["a"])]})
+        deploy = checks.Deployment(git=git, code_head=self.F, clock=lambda: now[0])
+        for _ in range(5):
+            self.assertEqual(deploy.status([5], [8])["state"], checks.UNCONFIRMED)
+        self.assertEqual(sum(1 for c in git.calls if c[0] == "diff"), 1)
+
+    def test_attached_git_runs_with_a_short_timeout_throughout(self):
+        from jarvis import gitops
+        from jarvis.v2 import hud_install
+        seen = []
+        with patch.object(hud_install, "git_head", return_value=self.F), \
+                patch.object(hud_install, "_git", side_effect=lambda *a, **kw: seen.append(kw) or (0, "")):
+            deploy = checks.Deployment()
+            deploy.attach_git()
+            deploy.status([5], [8])
+        self.assertTrue(seen)
+        self.assertTrue(all(kw.get("timeout") == checks.GIT_TIMEOUT_S for kw in seen), seen)
+        self.assertLessEqual(checks.GIT_TIMEOUT_S, 5)
+        # And `hud_install._git` hands it to every git process it starts,
+        # the config checks before the command included.
+        timeouts = []
+        with patch.object(gitops, "_git", side_effect=lambda repo, args, timeout=None: timeouts.append(timeout)
+                          or (0, "", "")):
+            hud_install._git("log", "-1", timeout=checks.GIT_TIMEOUT_S)
+        self.assertGreaterEqual(len(timeouts), 3, timeouts)
+        self.assertEqual(set(timeouts), {checks.GIT_TIMEOUT_S})
+
+
 # --- the owner's marks -----------------------------------------------------------------------
 
 
 class Marks(Base):
+    F, E = SHA["f"], SHA["e"]
+
     def mark(self, cid, step, body, status=200, **kw):
         return self.call("POST", f"/inbox/checks/{cid}/steps/{step}", body, status, **kw)
 
@@ -692,6 +747,27 @@ class Marks(Base):
         for record in seen:
             self.assertNotIn(SENTINEL, json.dumps(record))
             self.assertNotIn(CR.GH, json.dumps(record))
+
+    def test_the_mark_reads_the_hud_again(self):
+        """Delta review of PR #321 (LOW 1): a HUD rolled back, or rebuilt from
+        uncommitted hud/, inside the rows' 60-second window refuses the mark."""
+        thread, cid = self.desk_check(prs=[301])
+        A = SHA["a"]
+        hud = {"head": (self.E, False)}
+        git = FakeGit({self.F: [merge(301, A)], self.E: [merge(301, A)], SHA["d"]: []}, hud={A})
+        now = [0.0]
+        self.d.inbox.deploy = checks.Deployment(git=git, code_head=self.F, hud_head=lambda: hud["head"],
+                                                clock=lambda: now[0])
+        (row,) = [r for r in self.rows() if r["id"] == f"chk:{cid}"]
+        self.assertTrue(row["detail"]["deploy"]["markable"], "the control: deployed")
+        for label, head in (("rolled back", (SHA["d"], False)), ("rebuilt dirty", (self.E, True))):
+            with self.subTest(case=label):
+                hud["head"] = head
+                now[0] += 1                     # well inside the 60 s the rows keep
+                self.mark(cid, 0, {"verdict": "pass"}, 409)
+                self.assertEqual(self.cstore.get(cid)["results"], [])
+        hud["head"] = (self.E, False)
+        self.mark(cid, 0, {"verdict": "pass"})
 
     def test_malformed_and_unknown_are_refused(self):
         thread, cid = self.desk_check()
@@ -818,6 +894,37 @@ class AnswerPath(Base):
                     self.call("POST", f"/inbox/{row_id}/answer", body, 409)
             self.assertEqual(spy.call_count, 0)
         self.assertEqual(git.calls, [])
+
+    def test_older_checks_never_starve_newer_ones(self):
+        """Twelve checks, each needing its own git run; the older eleven's
+        always fail. With the budget spent round-robin the newest is reached
+        within two reads, whatever the order (delta review of PR #321)."""
+        made = OP.Clock(datetime.now(timezone.utc).isoformat())
+        self.cstore.clock = made           # oldest first: the newest is the last one read
+        for i in range(12):
+            made.advance(minutes=1)
+            self.cstore.create(thread_id=None, project_id=None, task_id=None, created_by="you", title=f"i{i}",
+                               prs=[100 + i], steps=[{"do": "a", "expect": ""}],
+                               imported_from=f"/p/docs/plans/{i}.md")
+        line = [merge(100 + i, (SHA["a"][:-3] + f"{i:03d}")) for i in range(12)]
+        newest = line[-1][0]
+
+        class OldFail(FakeGit):
+            def __call__(self, *args):
+                if args[0] == "diff" and args[-3] != newest:
+                    self.calls.append(args)
+                    return None
+                return super().__call__(*args)
+        now = [0.0]
+        git = OldFail({SHA["f"]: line})
+        self.d.inbox.deploy = checks.Deployment(git=git, code_head=SHA["f"], clock=lambda: now[0])
+        states = []
+        for _ in range(3):
+            row = next(r for r in inbox.rows(self.d) if r["detail"].get("prs") == [111])
+            states.append(row["detail"]["deploy"]["state"])
+            now[0] += 61                  # every failure is due again
+        self.assertIn(checks.DEPLOYED, states[:2], states)
+
 
     def test_one_inbox_read_runs_a_bounded_amount_of_git(self):
         for i in range(12):

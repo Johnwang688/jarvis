@@ -332,6 +332,7 @@ _CACHE_S = 60.0              # how long the checkout's HEAD and the HUD manifest
 _CACHE_MAX = 64
 _LOG_MAX = 20000             # merge commits read on one first-parent line
 GIT_BUDGET = 8               # git runs one `rows()` may cause (review of PR #321, LOW 2)
+GIT_TIMEOUT_S = 5.0          # one git run, so one read is bounded by about budget x this (delta review)
 _SUBJECT = re.compile(r"Merge pull request #([1-9][0-9]{0,6}) from \S+")
 
 
@@ -365,6 +366,12 @@ class Deployment:
         self._head_map: tuple[float, dict] | None = None   # the checkout's HEAD, briefly
         self._hud: tuple[float, tuple] | None = None
         self._touches: dict[str, bool] = {}
+        # Failures, per line SHA or merge commit, kept `_CACHE_S` so a git
+        # call that keeps failing stops spending each read's budget (delta
+        # review of PR #321).
+        self._failed: dict[tuple, float] = {}
+        # Where the next inbox read starts among the checks (`rotation`).
+        self.rotation = 0
 
     def attach_git(self) -> None:
         """The real git and heads: the checkout's HEAD now (the code this
@@ -377,7 +384,7 @@ class Deployment:
             if served.get("state") not in ("installed", "fallback"):
                 return None, None
             return served.get("git_head"), served.get("dirty")
-        self._git = hud_install._git
+        self._git = lambda *args: hud_install._git(*args, timeout=GIT_TIMEOUT_S)
         self.code_head = hud_install.git_head()
         self._hud_head = hud_head
 
@@ -402,48 +409,73 @@ class Deployment:
         if out is None or out[0] != 0:
             return None
         found: dict[int, list[str]] = {}
-        for line in out[1].splitlines():
+        # Only git's own line ending is taken off: a subject that ends in "\r"
+        # or a space is not GitHub's subject and never matches (delta review).
+        for line in out[1].split("\n"):
             sha, _, subject = line.partition("\t")
-            match = _SUBJECT.fullmatch(subject.strip())
+            match = _SUBJECT.fullmatch(subject)
             if match and _SHA_RE.match(sha):
                 found.setdefault(int(match.group(1)), []).append(sha)
         return found
 
+    def _failed_lately(self, key) -> bool:
+        with self._lock:
+            at = self._failed.get(key)
+        return at is not None and self.clock() - at < _CACHE_S
+
+    def _note_failure(self, key) -> None:
+        with self._lock:
+            if len(self._failed) >= 4096:
+                self._failed.clear()
+            self._failed[key] = self.clock()
+
     def _map(self, head: str | None, budget) -> dict | None:
-        """{pr: [first-parent merge commits]} on `head`'s line (a SHA, kept)."""
+        """{pr: [first-parent merge commits]} on `head`'s line (a SHA, kept;
+        a failure is kept `_CACHE_S`)."""
         if not self._ok(head):
             return None
         with self._lock:
             hit = self._maps.get(head)
         if hit is not None:
             return hit
+        if self._failed_lately(("map", head)):
+            return None
         found = self._read_map(head, budget)
-        if found is not None:
-            with self._lock:
-                if len(self._maps) >= _CACHE_MAX:
-                    self._maps.clear()
-                self._maps[head] = found
+        if found is None:
+            self._note_failure(("map", head))
+            return None
+        with self._lock:
+            if len(self._maps) >= _CACHE_MAX:
+                self._maps.clear()
+            self._maps[head] = found
         return found
 
-    def _checkout_map(self, budget) -> dict | None:
-        """The same for the checkout's HEAD now ("merged"), kept `_CACHE_S`."""
+    def _checkout_map(self, budget, fresh: bool = False) -> dict | None:
+        """The same for the checkout's HEAD now ("merged"), kept `_CACHE_S`
+        (read again when `fresh`)."""
         now = self.clock()
         with self._lock:
             hit = self._head_map
-        if hit is not None and now - hit[0] < _CACHE_S:
+        if not fresh and hit is not None and now - hit[0] < _CACHE_S:
             return hit[1]
+        if not fresh and self._failed_lately(("map", "HEAD")):
+            return None
         found = self._read_map("HEAD", budget)
-        if found is not None:
-            with self._lock:
-                self._head_map = (now, found)
+        if found is None:
+            self._note_failure(("map", "HEAD"))
+            return None
+        with self._lock:
+            self._head_map = (now, found)
         return found
 
-    def _hud_state(self) -> tuple:
-        """(the installed HUD's commit or None, its manifest's `dirty`), kept `_CACHE_S`."""
+    def _hud_state(self, fresh: bool = False) -> tuple:
+        """(the installed HUD's commit or None, its manifest's `dirty`), kept
+        `_CACHE_S`; read again when `fresh` (the mark route: a HUD rebuilt or
+        rolled back inside the window is seen at once)."""
         now = self.clock()
         with self._lock:
             hit = self._hud
-        if hit is not None and now - hit[0] < _CACHE_S:
+        if not fresh and hit is not None and now - hit[0] < _CACHE_S:
             return hit[1]
         try:
             got = self._hud_head() if self._hud_head is not None else None
@@ -459,9 +491,12 @@ class Deployment:
         with self._lock:
             if commit in self._touches:
                 return self._touches[commit]
+        if self._failed_lately(("diff", commit)):
+            return None
         out = self._run(budget, "diff", "--quiet", "--no-ext-diff", "--no-textconv", f"{commit}^1", commit,
                         "--", "hud")
         if out is None or out[0] not in (0, 1):
+            self._note_failure(("diff", commit))
             return None
         with self._lock:
             if len(self._touches) >= 4096:
@@ -486,7 +521,7 @@ class Deployment:
     def markable(status: dict) -> bool:
         return status.get("state") in (DEPLOYED, NO_PRS)
 
-    def status(self, prs, budget: list | None = None) -> dict:
+    def status(self, prs, budget: list | None = None, *, fresh: bool = False) -> dict:
         """`{state, merged, sha, text}`: `state` one of DEPLOYED,
         NOT_DEPLOYED, UNCONFIRMED and NO_PRS (nothing to gate); `merged`
         whether every PR has its merge commit on the checkout's line (the
@@ -494,13 +529,16 @@ class Deployment:
         a mark; `text` one line built by code, naming PR numbers only.
         `budget` is a one-item list of git runs left, shared by one inbox
         read; past it the answer is "not confirmed" (and nothing is kept).
-        Never raises."""
+        `fresh` (the mark route) reads the HUD manifest and the checkout's
+        HEAD again instead of trusting the 60-second copies; what is kept
+        by SHA (a line's merges, whether a commit touches hud/) cannot
+        change and is still used. Never raises."""
         prs = tuple(n for n in (prs or ()) if _int(n))
         if not prs:
             return {"state": NO_PRS, "merged": False, "sha": self.code_head if self._ok(self.code_head) else None,
                     "text": ""}
         try:
-            return self._status(prs, budget)
+            return self._status(prs, budget, fresh)
         except _OverBudget:
             return {"state": UNCONFIRMED, "merged": False, "sha": None,
                     "text": "Not confirmed deployed yet: Jarvis is still reading which build runs."}
@@ -509,7 +547,7 @@ class Deployment:
             return {"state": UNCONFIRMED, "merged": False, "sha": None,
                     "text": "Not confirmed deployed: Jarvis could not tell which build runs."}
 
-    def _status(self, prs, budget) -> dict:
+    def _status(self, prs, budget, fresh=False) -> dict:
         names = ", ".join(f"#{n}" for n in prs)
         unconfirmed = lambda why: {"state": UNCONFIRMED, "merged": False, "sha": None,  # noqa: E731
                                    "text": f"Not confirmed deployed: {why}"}
@@ -523,7 +561,7 @@ class Deployment:
             return unconfirmed(", ".join(f"#{n}" for n in twice) + " has more than one merge commit.")
         absent = [n for n in prs if not running.get(n)]
         if absent:
-            checkout = self._checkout_map(budget) or {}
+            checkout = self._checkout_map(budget, fresh) or {}
             merged_later = [n for n in absent if len(checkout.get(n) or ()) == 1]
             if merged_later and len(merged_later) == len(absent):
                 return {"state": NOT_DEPLOYED, "merged": True, "sha": None,
@@ -545,7 +583,7 @@ class Deployment:
                 continue
             if not hud_read:
                 hud_read = True
-                hud_sha, hud_dirty = self._hud_state()
+                hud_sha, hud_dirty = self._hud_state(fresh)
             if hud_sha is None or hud_dirty is not False:
                 unknown.append(n)        # the dev HUD, none installed, or built from uncommitted hud/
                 continue

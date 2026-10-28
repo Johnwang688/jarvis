@@ -1029,6 +1029,23 @@ the store, the field caps, the deployed test and the runbook import),
   times; past that a check reads "not confirmed" until the next read.
   `answer()` finds its row with `rows(daemon, with_checks=False)`, so
   answering an approval, a question or a proposal never reads deploy state.
+  The delta review of PR #321 tightened this further:
+  - A git failure (a line read, or a hud/ diff) is kept for the same 60 s
+    per SHA, so a call that keeps failing stops spending each read's budget.
+  - Every git process the test starts has a 5 s timeout (`GIT_TIMEOUT_S`),
+    including the two config checks `hud_install._git` runs first.
+    `hud_install.config_risk` and `gitops._risky_config` take an optional
+    `timeout`; their default (60 s) is unchanged. So one read is bounded by
+    about 8 runs x 3 processes x 5 s.
+  - The budget is spent round-robin: each read starts at the check where
+    the last one ran out, so older checks never starve newer ones.
+  - The mark route asks with `fresh=True`. It reads the HUD manifest (head
+    and `dirty`) and the checkout's HEAD again, rather than trusting the
+    rows' 60-second copies. So a HUD rolled back, or rebuilt dirty, inside
+    that window refuses the mark. The running commit is the one captured at
+    start; what is kept by SHA cannot change.
+  - A subject is matched as git printed it, with only the line ending taken
+    off. A subject that ends in `\r` or a space never counts.
 - **Rows.** An open check is a `check` row at rank 7. Within rank 7, checks
   whose PRs all have a merge commit come first, then oldest first. The title
   is `Live check <id> from chat <id>: <k> of <n> steps marked` ("from you

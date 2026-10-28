@@ -454,7 +454,7 @@ def find(root, rel: str) -> bytes | None:
 # -- the CLI -------------------------------------------------------------------------
 
 
-def config_risk(repo) -> str:
+def config_risk(repo, *, timeout: float = 60) -> str:
     """Why git must not run in `repo`, or "": its own config names a program
     git would run (`gitops._risky_config`), or — failing closed (review of PR
     #48) — git cannot list that config at all (`_risky_config` reads that as
@@ -463,16 +463,16 @@ def config_risk(repo) -> str:
     repo = Path(repo)
     try:
         code, _, err = gitops._git(repo, ["config", "--list", "--name-only", "--show-scope"],
-                                   timeout=60)
+                                   timeout=timeout)
         if code != 0:
             first = next((line.strip() for line in (err or "").splitlines() if line.strip()), "")
             return f"its git config could not be read ({first[:200] or f'exit {code}'})"
-        return gitops._risky_config(repo)
+        return gitops._risky_config(repo, timeout=timeout)
     except Exception as exc:     # noqa: BLE001 — not knowing is a refusal here
         return f"its git config could not be read ({type(exc).__name__})"
 
 
-def _git(*args: str) -> tuple[int, str] | None:
+def _git(*args: str, timeout: float = 60) -> tuple[int, str] | None:
     """git in the checkout, run the way `gitops` runs it (review of PR #44 at
     62db94f): an absolute git, every inherited `GIT_*` dropped, the pager and
     editors pinned, hooks and fsmonitor off, never a shell — `git status`
@@ -483,9 +483,9 @@ def _git(*args: str) -> tuple[int, str] | None:
     from jarvis import gitops
     repo = Path(config.REPO_ROOT)
     try:
-        if config_risk(repo):
+        if config_risk(repo, timeout=timeout):
             return None
-        code, stdout, _ = gitops._git(repo, list(args), timeout=60)
+        code, stdout, _ = gitops._git(repo, list(args), timeout=timeout)
     except Exception:     # noqa: BLE001 — no git means "cannot say"
         return None
     return (code, stdout) if code != 127 else None
