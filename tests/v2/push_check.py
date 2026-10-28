@@ -970,6 +970,26 @@ class Boundary(PushBase):
         self.assertFalse(any(line in v1_secrets.scrub(out) for line in pem_lines))
         print("ok  MED-A: the push files are refused by exact name anywhere (v1 run_command, v2 DENY) and scrubbed")
 
+    def test_meda_the_scrub_never_raises_on_a_malformed_push_file(self):
+        """Delta check of PR #325, LOW: `scrub()` runs on every tool output,
+        so a corrupt or hand-edited push file must give no values, never an
+        exception (a non-list `subscriptions`, JSON nested past the
+        recursion limit)."""
+        from jarvis.tools import secrets as v1_secrets
+        remote = Path(config.V2_DATA_DIR) / "remote"
+        remote.mkdir(parents=True, exist_ok=True)
+        deep = "[" * 100_000
+        for subs_text, key_text in (('{"subscriptions": 5}', '{"pem": 5}'),
+                                    ("true", "true"),
+                                    ('{"subscriptions": {"a": 1}}', "[]"),
+                                    (deep, deep)):
+            with self.subTest(subs=subs_text[:30]):
+                (remote / "jarvis_push_subscriptions.json").write_text(subs_text)
+                (remote / "jarvis_push_key.json").write_text(key_text)
+                self.assertEqual(v1_secrets._push_values(), ())
+                self.assertEqual(v1_secrets.scrub("plain text"), "plain text")
+        print("ok  MED-A: a malformed push file gives no values and the scrub never raises")
+
     def test_lowa_folders_holding_it_below_home_are_refused(self):
         """LOW-A: with the data root under $HOME (the real layout), Read, Grep
         and Glob at every folder that holds the phone's folder below $HOME,

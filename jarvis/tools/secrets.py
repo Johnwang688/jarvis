@@ -1980,13 +1980,14 @@ def _push_values() -> tuple[str, ...]:
         found: set[str] = set()
         try:
             value = _json.loads(data.decode("utf-8"))
-        except (ValueError, UnicodeError):
+        except (ValueError, UnicodeError, RecursionError):
             value = None
         if name == "jarvis_push_key.json" and isinstance(value, dict) and isinstance(value.get("pem"), str):
             found |= {line.strip() for line in value["pem"].splitlines()
                       if len(line.strip()) >= MIN_SECRET_LEN and not line.startswith("-----")}
         if name == "jarvis_push_subscriptions.json" and isinstance(value, dict):
-            for row in value.get("subscriptions") or []:
+            rows = value.get("subscriptions")
+            for row in rows if isinstance(rows, list) else ():
                 if isinstance(row, dict):
                     found |= {row[k] for k in ("endpoint", "auth", "p256dh")
                               if isinstance(row.get(k), str) and len(row[k]) >= MIN_SECRET_LEN}
