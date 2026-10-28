@@ -108,7 +108,7 @@ MUTANTS = [
     ("gh sees the daemon's whole environment", CHAT,
      "    env = {k: os.environ[k] for k in _OWNER_ENV_KEYS if os.environ.get(k)}",
      "    env = dict(os.environ)", cg("gh_checks")),
-    ("output not scrubbed", CHAT, "        return scrub_text(secrets.strip_url_credentials(text))", "        return text",
+    ("output not scrubbed", CHAT, "        return for_model(secrets.strip_url_credentials(text))", "        return text",
      cg("gh_checks")),
     ("an unreadable target asked, not refused", PERMIT,
      '                return finish(Decision.DENY, L_DENY, f"{tool}: {exc}")',

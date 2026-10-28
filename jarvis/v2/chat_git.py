@@ -619,10 +619,13 @@ def run_gh(args: list[str], cwd: str, *, stdin: str | None = None) -> tuple[int,
 
 
 def _scrub(text: str) -> str:
+    """Tool output a model reads: URL userinfo out, then the model-input
+    scrub (`redact.for_model`: known values and credential shapes only, never
+    the display rules, which would rewrite the code it reads)."""
     from jarvis.tools import secrets
-    from .redact import scrub_text
+    from .redact import for_model
     try:
-        return scrub_text(secrets.strip_url_credentials(text))
+        return for_model(secrets.strip_url_credentials(text))
     except Exception:       # noqa: BLE001 — what cannot be scrubbed is withheld
         return "[output withheld: it could not be scrubbed]"
 

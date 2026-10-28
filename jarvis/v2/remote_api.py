@@ -40,9 +40,10 @@ written passes `chat_reads.scrub`**, the transcript's own scrub (credentials
 withheld, invisible characters out): titles, briefs, plans, reports, task
 status, every inbox row's `title`, `blocks` and `origin`, and every `detail`
 string, an approval card's included. The card's own redaction
-(`approvals.card_text`/`card_args`) is not enough off the box: it misses a
-private key's body in an argument, and a card's `origin` and
-`relayed_from.title` are only `clean_line`d (review of PR #308). So the
+(`approvals.card_text`/`card_args`) is not enough off the box: it missed a
+private key's body in an argument (it takes it since 2026-10-25), and a
+card's `origin` and `relayed_from.title` are only `clean_line`d (review of
+PR #308). So the
 phone's card can withhold more than the desk's; answering (P-4) must show
 the full shared card before any button works.
 
@@ -61,10 +62,10 @@ per file, `DIFF_BYTES` in all): a file past either has no patch and
 `too_large`, and the whole answer then says `truncated` and carries
 `TOO_LARGE`, "open it at the desk". Its files are the Diff tab's, with the
 same files skipped (protected, credential and out-of-project paths), and its
-patches the Diff tab's (`hud_api._scrub_source`) passed through the
-transcript's scrub as well (`_patch_scrub`): the v1 scrub the Diff tab uses
-lets some key shapes through (a GitHub token in a changed file, for one),
-which the desk may show and the phone does not.
+patches the Diff tab's (`hud_api._scrub_source`, the display scrub
+`redact.for_display` since 2026-10-25) passed through the transcript's scrub
+as well (`_patch_scrub`, which adds `secrets.redact_inline`'s typed
+credentials).
 
 **The event stream** (`GET /m/api/events`) is Server-Sent Events, as the
 HUD's `/events` is (the design's `/m/ws`; the HUD has no WebSocket stream to
@@ -262,47 +263,15 @@ class _Refused(Exception):
 
 
 # A value written after a credential's label (review of PR #308):
-# `aws_secret_access_key = …` (the ~/.aws/credentials form), `password: …`,
-# `"password": "…"`, `client_secret: …`. `chat_reads.scrub` (and the shared
-# `redact.scrub_text`) knows `NAME=value` for credential-named variables and
-# JSON keys and the distinctive key shapes, not these. **Phone only**: the
-# shared scrub feeds agents (chat relays, git tool output), where a rule this
-# loose would rewrite ordinary code, so it applies only to what the phone
-# receives (`_scrub`, the transcript rows, the diff), and it keeps anything
-# that reads as code or a reference rather than a value:
-#   - a bare or dotted identifier with no digit (`settings.API_KEY`,
-#     `access_token`, `SecretStr`);
-#   - anything with `(` or `[` (a call, a subscript, a type);
-#   - anything starting `~ / ! * % & @ $ {` (a path, a tag, a mask, a
-#     variable, a template) or `<`, `=` (a placeholder, an operator);
-#   - a mask (`********`);
-#   - under 16 characters, anything without a digit.
-_LABELS = (r"aws_secret_access_key|aws_session_token|secret_access_key|password|passwd|passphrase"
-           r"|api[_-]?key|apikey|secret[_-]?key|client[_-]?secret|access[_-]?token|auth[_-]?token"
-           r"|refresh[_-]?token|private[_-]?key")
-LABELLED = re.compile(r"(?<![A-Za-z0-9])((?:" + _LABELS + r")[\"']?[ \t]*[:=][ \t]*[\"']?)"
-                      r"([^\s\"'<>={}$\[~/!*%&@][^\s\"']{5,})", re.IGNORECASE)
-_IDENTIFIER = re.compile(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*")
-_MASK = re.compile(r"[*•●·#xX]+")
-_DIGIT = re.compile(r"[0-9]")
-_TRAILING = ".,;:!?)]}"
-
-
-def _labelled(match: re.Match) -> str:
-    value = match.group(2)
-    core = value.rstrip(_TRAILING)
-    kept = (len(core) < 6 or "(" in core or "[" in core or _MASK.fullmatch(core) is not None
-            or (_IDENTIFIER.fullmatch(core) is not None and not _DIGIT.search(core))
-            or (len(core) < 16 and not _DIGIT.search(core)))
-    if kept or core.startswith("[redacted"):
-        return match.group(0)
-    return match.group(1) + "[redacted]" + value[len(core):]
-
-
-def labelled_values(text: str) -> str:
-    """`text` with every value written after a credential's label withheld
-    (the rules above); the label kept. The phone's alone."""
-    return LABELLED.sub(_labelled, text) if isinstance(text, str) else text
+# `aws_secret_access_key = …`, `password: …`, `"password": "…"`,
+# `client_secret: …`, tuned to keep code and references. It lives in
+# `redact` now (scrub hardening, 2026-10-25), shared by every **display**
+# surface (`redact.for_display`: the desk's Diff tab, the transcript's
+# `chat_reads.scrub`, the Discord mirror and reporter, approval cards) and
+# still never by what an agent reads (`redact.for_model`). The phone keeps
+# applying it here as well; on text `chat_reads.scrub` already passed it is a
+# no-op.
+from .redact import LABELLED, labelled_values  # noqa: E402,F401
 
 
 def _scrub(text):

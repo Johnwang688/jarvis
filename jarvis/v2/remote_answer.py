@@ -154,10 +154,22 @@ def phone_card(card: dict) -> tuple[dict, bool]:
     one JSON text, so a label in a key and its value beside it are read
     together), nothing cut. Withheld when any pass changed anything, or when
     a value was nested past the card redaction's depth and so never judged
-    (review of PR #313)."""
+    (review of PR #313). Withheld too when the card already shows a
+    `[withheld: <kind>]` marker: since the scrub hardening (#314) the desk's
+    own card pass (`approvals.card_text`/`card_args`, `redact.CardPass`)
+    withholds much of what this scrub would, so the scrub then finds nothing
+    left to change, yet the owner still cannot see what Allow would approve.
+    A marker an agent typed itself only makes the card Deny-only."""
+    import json
+    from .redact import WITHHELD_PREFIX
     from .remote_api import APPROVAL_DETAIL_DROPPED, scrub_structure
     shown = {k: v for k, v in card.items() if k not in APPROVAL_DETAIL_DROPPED}
     scrubbed, withheld = scrub_structure(shown)
+    if not withheld:
+        try:
+            withheld = WITHHELD_PREFIX in json.dumps(shown, ensure_ascii=False, default=str)
+        except Exception:  # noqa: BLE001 — a card that cannot be read is withheld
+            withheld = True
     return scrubbed, withheld
 
 

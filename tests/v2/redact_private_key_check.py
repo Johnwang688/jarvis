@@ -36,9 +36,11 @@ Run:  PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. .venv/bin/python tests/v2/redact_pr
 from __future__ import annotations
 
 import base64
+import difflib
 import os
 from pathlib import Path
 import random
+import re
 import subprocess
 import sys
 import time
@@ -108,6 +110,17 @@ def old_scrub(text: str) -> str:
     return redact.bearerish(out)
 
 
+# Since the scrub hardening (2026-10-25) a withheld span says what it was
+# (`[withheld: private key]`, `[withheld: GitHub token]`); these checks pin
+# *where* the scrub withholds, so every marker is read as the old one.
+MARKER = re.compile(r"\[withheld: [^\]\n]{1,40}\]")
+
+
+def scrubbed(text: str) -> str:
+    """`redact.scrub_text`, every typed marker read as `[redacted]`."""
+    return MARKER.sub(R, redact.scrub_text(text))
+
+
 def no_env():
     """No real credential file or environment value reaches the scrub."""
     return (patch.object(secrets, "secret_values", return_value=[]),
@@ -122,7 +135,7 @@ class Base(unittest.TestCase):
         self.rng = random.Random(0x5EC5)
 
     def assertWhole(self, text: str, want: str):
-        got = redact.scrub_text(text)
+        got = scrubbed(text)
         self.assertEqual(got, want)
 
 
@@ -144,7 +157,7 @@ class BlockChecks(Base):
         }
         for name, key in kinds.items():
             with self.subTest(kind=name):
-                got = redact.scrub_text(BEFORE + key + AFTER)
+                got = scrubbed(BEFORE + key + AFTER)
                 self.assertEqual(got, BEFORE + R + AFTER)
                 self.assertEqual(got.count(R), 1)
                 for body_line in key.splitlines()[1:-1]:
@@ -183,10 +196,10 @@ class BlockChecks(Base):
         legacy = "Proc-Type: 4,ENCRYPTED\nDEK-Info: AES-128-CBC,00112233445566778899AABBCCDDEEFF\n"
         self.assertWhole("prose here\n" + legacy + body + "\n" + tail, "prose here\n" + R)
         # CRLF, and the body glued to the footer on its last line.
-        # (`secrets.scrub` rejoins lines with LF, as it always has; the block
-        # pass itself keeps a CR, checked on `private_key_blocks` directly.)
+        # (Since the review of #314, S4, the scrub keeps the text's own line
+        # endings: `secrets.scrub`'s LF-joined lines are put back with them.)
         crlf = (body + "\n" + tail).replace("\n", "\r\n")
-        self.assertWhole("words here\r\n" + crlf + AFTER, "words here\n" + R + AFTER)
+        self.assertWhole("words here\r\n" + crlf + AFTER, "words here\r\n" + R + AFTER)
         self.assertEqual(redact.private_key_blocks("words here\r\n" + crlf + "\r\nbye"),
                          "words here\r\n" + R + "\r\nbye")
         glued = body + tail
@@ -207,26 +220,26 @@ class BlockChecks(Base):
         # A footer straight after prose: only the footer, exactly as before.
         text = "I deleted the key, this is what was left:\n" + tail + AFTER
         self.assertWhole(text, "I deleted the key, this is what was left:\n" + R + AFTER)
-        self.assertEqual(redact.scrub_text(text), old_scrub(text))
+        self.assertEqual(scrubbed(text), old_scrub(text))
         # Words before the footer on its own line: that line is not key
         # material, so nothing above it goes either; only the footer, as before.
         text = body + "\nsee: " + tail + AFTER
         self.assertWhole(text, body + "\nsee: " + R + AFTER)
-        self.assertEqual(redact.scrub_text(text), old_scrub(text))
+        self.assertEqual(scrubbed(text), old_scrub(text))
 
     def test_k4_two_blocks_stay_two(self):
         """k4: non-greedy: the text between two blocks stays."""
         one = block(self.rng, "RSA PRIVATE KEY")
         two = block(self.rng, "OPENSSH PRIVATE KEY")
         middle = "\nand the second one, for the deploy box:\n"
-        got = redact.scrub_text(BEFORE + one + middle + two + AFTER)
+        got = scrubbed(BEFORE + one + middle + two + AFTER)
         self.assertEqual(got, BEFORE + R + middle + R + AFTER)
         # And a block followed by an unterminated one.
         body = "\n".join(b64_lines(self.rng, 3))
-        got = redact.scrub_text(one + middle + header("EC PRIVATE KEY") + "\n" + body)
+        got = scrubbed(one + middle + header("EC PRIVATE KEY") + "\n" + body)
         self.assertEqual(got, R + middle + R)
         # And a block followed by a footer-only tail.
-        got = redact.scrub_text(one + "\n" + body + "\n" + footer("EC PRIVATE KEY") + AFTER)
+        got = scrubbed(one + "\n" + body + "\n" + footer("EC PRIVATE KEY") + AFTER)
         self.assertEqual(got, R + "\n" + R + AFTER)
 
     def test_k5_public_keys_and_certificates_are_unchanged(self):
@@ -235,10 +248,10 @@ class BlockChecks(Base):
                       "PGP PUBLIC KEY BLOCK", "X509 CRL"):
             with self.subTest(label=label):
                 text = BEFORE + block(self.rng, label) + AFTER
-                self.assertEqual(redact.scrub_text(text), text)
-                self.assertEqual(redact.scrub_text(text), old_scrub(text))
+                self.assertEqual(scrubbed(text), text)
+                self.assertEqual(scrubbed(text), old_scrub(text))
         ssh = "ssh-ed25519 " + base64.b64encode(self.rng.randbytes(51)).decode() + " me@box"
-        self.assertEqual(redact.scrub_text(ssh), ssh)
+        self.assertEqual(scrubbed(ssh), ssh)
         # A certificate chain with a key after it: the certificates stay.
         cert = block(self.rng, "CERTIFICATE")
         key = block(self.rng, "PRIVATE KEY")
@@ -260,7 +273,7 @@ class BlockChecks(Base):
         ]
         for text in texts:
             with self.subTest(text=text[:30]):
-                self.assertEqual(redact.scrub_text(text), text)
+                self.assertEqual(scrubbed(text), text)
 
     def test_k7_other_key_shapes_are_still_redacted_around_a_block(self):
         """k7: the per-pattern and bearer passes still run on what is left."""
@@ -276,7 +289,7 @@ class BlockChecks(Base):
         text = "x " + short + key + AFTER
         self.assertIn(R, old_scrub(text))
         self.assertNotIn(short, old_scrub(text))
-        got = redact.scrub_text(text)
+        got = scrubbed(text)
         self.assertNotIn(short, got)
         self.assertNotIn("Z" * 15, got)
         self.assertEqual(got, "x " + R + AFTER)
@@ -310,18 +323,44 @@ class TightenOnly(Base):
         return "".join(parts)
 
     def test_k7_no_header_or_footer_means_byte_identical(self):
-        """k7: 3000 random texts with no private-key marker: exactly the old output."""
+        """k7: 3000 random texts with no private-key marker: the old output,
+        or one that withholds more and nothing else. The scrub hardening
+        (2026-10-25) withholds more on purpose (a token split across a break,
+        an AWS secret beside a key id, a token glued to another withheld
+        one), so byte identity became: every difference from the old output
+        is old text replaced by markers; no character the old output hid or
+        changed is shown, and no shown character is altered."""
         words, tokens, glue, marks = self.pieces()
         rng = random.Random(7)
         names = {"private-key", "private-key-end"}
-        compared = 0
+        compared = differs = 0
         for _ in range(3000):
             text = self.random_text(rng, words, tokens, glue, marks, with_marks=False)
             if any(p.search(text) for n, p in credential_patterns.PATTERNS if n in names):
                 continue
             compared += 1
-            self.assertEqual(redact.scrub_text(text), old_scrub(text), repr(text))
+            # Lines compared as `secrets.scrub` joins them: the scrub now keeps
+            # the text's own line endings (review of #314, S4).
+            old, new = old_scrub(text), "\n".join(scrubbed(text).splitlines())
+            if new != old:
+                differs += 1
+                self.assertOnlyMoreHidden(old, new, text)
+            for token in tokens:
+                if token in text and token not in old:
+                    self.assertNotIn(token, new, repr(text))
         self.assertGreater(compared, 2500)
+        print(f"ok  k7: {compared} texts without a key marker: {compared - differs} exactly the old "
+              f"output, {differs} withhold more and change nothing else")
+
+    def assertOnlyMoreHidden(self, old: str, new: str, text: str):
+        """Every difference between `old` and `new` is text of `old` that
+        `new` replaced by markers: aligned with each marker as one symbol,
+        no new-side piece holds anything but markers."""
+        a, b = old.replace(R, "\x00"), new.replace(R, "\x00")
+        matcher = difflib.SequenceMatcher(None, a, b, autojunk=False)
+        for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+            if tag != "equal":
+                self.assertEqual(b[j1:j2].strip("\x00"), "", (repr(text), repr(a[i1:i2]), repr(b[j1:j2])))
 
     def test_k7_nothing_the_old_scrub_hid_is_shown(self):
         """k7: 3000 random texts with markers: every token the old output did
@@ -330,7 +369,7 @@ class TightenOnly(Base):
         rng = random.Random(8)
         for _ in range(3000):
             text = self.random_text(rng, words, tokens, glue, marks, with_marks=True)
-            old, new = old_scrub(text), redact.scrub_text(text)
+            old, new = old_scrub(text), scrubbed(text)
             for token in tokens:
                 if token in text and token not in old:
                     self.assertNotIn(token, new, repr(text))
