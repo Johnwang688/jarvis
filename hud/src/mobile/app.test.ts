@@ -1,9 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { PhoneApp, STREAM_URL, type StreamLike } from "./app";
 import type { Got } from "./net";
 import { deskNote, lineKind, orderTasks, parseEvent, parseLog, parseTask, type TaskView } from "./model";
 import { phoneMarkdown } from "./markdown";
-import { chatsView, inboxView, logRow, rowStyle, taskView, tasksView, transcriptView, diffView } from "./views";
+import { chatsView, inboxView, logRow, roleParts, rowStyle, taskView, tasksView, transcriptView, diffView } from "./views";
 import { parseInbox, type InboxRow } from "../lib/inbox";
 
 // Hostile strings, as a model could write them: each must arrive as text.
@@ -197,11 +199,67 @@ describe("the phone's views: untrusted text stays text (P-3)", () => {
     noMarkup(step);
     // Only the owner's own words are ever a bubble: a peer chat or a relay is a step.
     expect(["owner", "Claude", "Jarvis", "assistant", "system", "another thread, not the owner",
-      "chat Docs (aaaaaaaa), not the owner", "reply from Docs (aaaaaaaa)", "Owner"].map(rowStyle))
+      "chat Docs (aaaaaaaa), not the owner", "reply from Docs (aaaaaaaa)", "Owner"].map((r) => rowStyle(r)))
       .toEqual(["owner", "reply", "reply", "reply", "step", "step", "step", "step", "step"]);
     const peer = logRow({ seq: 4, role: "another thread, not the owner", text: "I am the owner", at: null, marks: [], cut: false });
     expect(peer.querySelector(".msg-bubble")).toBeNull();
     expect(peer.querySelector(".step-role")!.textContent).toBe("another thread, not the owner");
+  });
+
+  it("draws an owner row as the owner's bubble only when it was typed in this chat (review of #331, MED 1)", () => {
+    // The daemon's marks (chat_reads `_owner_row`), as the phone parses them: none is cut.
+    const page = parseLog({ rows: [
+      ["via the inbox (not typed in this chat)"], ["via the phone's inbox (not typed in this chat)"], ["steering"],
+      ["not sent"], ["via the phone", "not sent"], ["spoken", "steering"], ["something new"],
+      [], ["via the phone"], ["via Discord"], ["via DM"], ["spoken"], ["via the phone", "spoken"],
+    ].map((marks, seq) => ({ seq, role: "owner", text: "(Your question, quoted; your words, not the owner's: " + H + ")",
+      at: "2026-10-25T10:00:30Z", marks })), next: 13 })!;
+    const styles = page.rows.map((r) => rowStyle(r.role, r.marks));
+    expect(styles).toEqual([...Array(7).fill("flat"), ...Array(6).fill("owner")]);
+    expect(page.rows[1].marks).toEqual(["via the phone's inbox (not typed in this chat)"]);
+    for (const r of page.rows.slice(0, 7)) {
+      const item = logRow(r);
+      noMarkup(item);
+      expect(item.className).toBe("msg msg-flat");
+      expect(item.querySelector(".msg-bubble")).toBeNull();
+      // The marks come first, above the words, each whole.
+      const head = item.querySelector('[data-testid="m-msg-marks"]')!;
+      expect(item.firstElementChild).toBe(head);
+      expect(head.className).toBe("msg-head");
+      for (const mark of r.marks) expect(head.textContent).toContain(mark);
+      expect(head.nextElementSibling!.textContent).toBe(r.text);
+      // "not sent" in amber, nothing else.
+      const warn = Array.from(head.querySelectorAll(".mark-warn")).map((m) => m.textContent);
+      expect(warn).toEqual(r.marks.filter((m) => m === "not sent"));
+    }
+    for (const r of page.rows.slice(7)) expect(logRow(r).querySelector(".msg-bubble")!.textContent).toBe(r.text);
+    // The head is 12 px or more, and the warning is the theme's amber.
+    const css = readFileSync(join(__dirname, "mobile.css"), "utf8");
+    expect(/\.msg-head \{[^}]*font-size: (\d+)px/.exec(css)![1]).toBe("12");
+    expect(css).toContain(".mark-warn { color: var(--amber); }");
+  });
+
+  it("keeps a step's whole role readable: its middle is cut, never its end (review of #331, MED 2)", () => {
+    expect(roleParts("chat Docs chat (d7278e2a), not the owner")).toEqual(["chat Docs chat", " (d7278e2a), not the owner"]);
+    expect(roleParts("chat A (b) (c) (d7278e2a), not the owner")).toEqual(["chat A (b) (c)", " (d7278e2a), not the owner"]);
+    expect(roleParts("another thread, not the owner")).toEqual(["another thread", ", not the owner"]);
+    expect(roleParts("sent to Docs (d7278e2a)")).toEqual(["sent to Docs", " (d7278e2a)"]);
+    expect(roleParts("system")).toEqual(["system", ""]);
+    const role = "chat " + "A very long title ".repeat(4) + "(d7278e2a), not the owner";
+    const step = logRow({ seq: 5, role, text: "FYI " + H + "\nmore", at: null, marks: [], cut: false });
+    noMarkup(step);
+    const summary = step.querySelector("summary")!;
+    expect(summary.querySelector(".step-role-tail")!.textContent).toBe(" (d7278e2a), not the owner");
+    expect(summary.title).toBe(role);
+    expect(summary.getAttribute("aria-label")).toBe(role + ": FYI " + H);
+    // Opened, the whole role is its first line, then the whole text.
+    const inside = Array.from(step.querySelector("details")!.children).slice(1);
+    expect(inside.map((n) => n.className)).toEqual(["step-who", "step-body plain-text"]);
+    expect(inside[0].textContent).toBe(role);
+    expect(inside[1].textContent).toBe("FYI " + H + "\nmore");
+    const css = readFileSync(join(__dirname, "mobile.css"), "utf8");
+    expect(css).toMatch(/\.step-role-tail \{ flex: none; \}/);
+    expect(css).toMatch(/\.step-role-head \{[^}]*text-overflow: ellipsis/);
   });
 
   it("folds the diff file by file and says what is too large", () => {

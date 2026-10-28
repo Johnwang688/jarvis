@@ -95,7 +95,7 @@ export function parseLog(raw: unknown): LogPage | null {
       // The text as sent (already scrubbed at the source, invisible
       // characters out): its spacing is Markdown's, so it is not collapsed.
       seq: r.seq, role: oneLine(r.role, 120) || "system", text: str(r.text).slice(0, 40000),
-      at: strOrNull(r.at), marks: Array.isArray(r.marks) ? r.marks.map((m) => oneLine(m, 40)).filter(Boolean) : [],
+      at: strOrNull(r.at), marks: Array.isArray(r.marks) ? r.marks.map((m) => oneLine(m, 80)).filter(Boolean) : [],
       cut: typeof r.cut === "number",
     });
   }

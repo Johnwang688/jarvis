@@ -352,18 +352,38 @@ export function chatsView(projects: Project[] | null, threads: ChatThread[], exp
   return view;
 }
 
+/** The marks (chat_reads `_owner_row`) of words the owner typed into this chat:
+ * only an owner row whose every mark is one of these is drawn as the owner's
+ * bubble. Anything else ("via the inbox (not typed in this chat)", a phone
+ * decision's answer, "steering", "not sent", a mark this list does not know)
+ * is a flat row with its marks above the words (review of #331, MED 1). */
+export const TYPED_HERE_MARKS: ReadonlySet<string> = new Set(["via the phone", "via Discord", "via DM", "spoken"]);
+/** A mark shown in amber: the message never ran. */
+const WARN_MARKS: ReadonlySet<string> = new Set(["not sent"]);
+
 /** How a transcript row is drawn (Claude/Codex style, the owner's choice
- * 2026-10-28): the owner's words in a right-aligned bubble, a reply as plain
- * full-width Markdown, anything else (the daemon's own lines, another chat's
- * relay) as one muted line that a tap opens to the whole text. Only the role
- * `owner` is ever a bubble: a peer or a relay is not the owner's words. */
-export function rowStyle(role: string): "owner" | "reply" | "step" {
-  if (role === "owner") return "owner";
+ * 2026-10-28): the owner's own words typed in this chat in a right-aligned
+ * bubble; an owner row with any other provenance flat, its marks above it; a
+ * reply as plain full-width Markdown; anything else (the daemon's own lines,
+ * another chat's relay) as one muted line that a tap opens to the whole text.
+ * A peer or a relay is never a bubble: it is not the owner's words. */
+export function rowStyle(role: string, marks: readonly string[] = []): "owner" | "flat" | "reply" | "step" {
+  if (role === "owner") return marks.every((m) => TYPED_HERE_MARKS.has(m)) ? "owner" : "flat";
   return ASSISTANT_ROLES.has(role) ? "reply" : "step";
 }
 
+/** A step's role split so the folded line can cut its middle, never its end:
+ * "chat Docs (d7278e2a), not the owner" keeps " (d7278e2a), not the owner" whole. */
+export function roleParts(role: string): [string, string] {
+  const at = role.lastIndexOf(" (");
+  if (at > 0) return [role.slice(0, at), role.slice(at)];
+  const not = ", not the owner";
+  if (role.endsWith(not) && role.length > not.length) return [role.slice(0, -not.length), not];
+  return [role, ""];
+}
+
 export function logRow(row: LogRow): HTMLElement {
-  const style = rowStyle(row.role);
+  const style = rowStyle(row.role, row.marks);
   const item = testid(el("article", "msg msg-" + style), "m-msg");
   item.dataset.role = row.role;
   item.dataset.seq = String(row.seq);
@@ -375,6 +395,18 @@ export function logRow(row: LogRow): HTMLElement {
     if (cut) item.append(cut);
     return item;
   }
+  if (style === "flat") {
+    // Where the words came from first, then the words, never as a bubble.
+    const head = testid(el("div", "msg-head"), "m-msg-marks");
+    const parts: HTMLElement[] = [el("span", "", row.role)];
+    for (const mark of row.marks) parts.push(el("span", WARN_MARKS.has(mark) ? "mark mark-warn" : "mark", mark));
+    const at = time(row.at).slice(0, 5);
+    if (at) parts.push(el("span", "", at));
+    parts.forEach((part, i) => { if (i) head.append(" · "); head.append(part); });
+    item.append(head, el("div", "msg-body plain-text", row.text));
+    if (cut) item.append(cut);
+    return item;
+  }
   if (style === "reply") {
     item.append(el("div", "msg-head", [row.role, ...row.marks, time(row.at).slice(0, 5)].filter(Boolean).join(" · ")));
     const body = el("div", "msg-body md");
@@ -383,13 +415,20 @@ export function logRow(row: LogRow): HTMLElement {
     if (cut) item.append(cut);
     return item;
   }
-  // A step: folded to one line; the whole text (all the detail there is) inside.
+  // A step: folded to one line; the whole text (all the detail there is) inside,
+  // after the whole role, so "…, not the owner" is always readable (review of #331, MED 2).
+  const who = [row.role, ...row.marks].filter(Boolean).join(" · ");
   const fold = testid(el("details", "step"), "m-step");
   const summary = el("summary", "step-line");
   const first = row.text.split("\n", 1)[0];
-  summary.append(el("span", "step-role", [row.role, ...row.marks].filter(Boolean).join(" · ")),
-    el("span", "step-text", first), el("span", "step-time", time(row.at).slice(0, 5)));
-  fold.append(summary, el("div", "step-body plain-text", row.text));
+  summary.title = who;
+  summary.setAttribute("aria-label", first ? `${who}: ${first}` : who);
+  const [head, tail] = roleParts(row.role);
+  const role = el("span", "step-role");
+  role.append(el("span", "step-role-head", head),
+    el("span", "step-role-tail", tail + (row.marks.length ? " · " + row.marks.join(" · ") : "")));
+  summary.append(role, el("span", "step-text", first), el("span", "step-time", time(row.at).slice(0, 5)));
+  fold.append(summary, testid(el("div", "step-who", who), "m-step-who"), el("div", "step-body plain-text", row.text));
   if (cut) fold.append(cut);
   item.append(fold);
   return item;

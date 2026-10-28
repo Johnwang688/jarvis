@@ -258,16 +258,25 @@ p, li, h2, h3 { overflow-wrap: anywhere; }
 .msg-bubble { background: var(--bg-3); border-radius: 18px; padding: 8px 14px; }
 .msg-meta { font-size: 11px; color: var(--text-muted); padding-right: 6px; }
 .msg-head { font-size: 12px; color: var(--text-muted); margin-bottom: 2px; }
+/* An owner row not typed in this chat (a decision's answer, a steer, one never sent): flat, its marks first. */
+.msg-flat { padding-left: 10px; border-left: 2px solid var(--border-strong); }
+.msg-flat .msg-head { color: var(--text-2); }
+.mark-warn { color: var(--amber); }
 .msg-step { margin: -6px 0; }
 .step-line { display: flex; align-items: center; gap: 6px; min-height: 44px; font-size: 13px; color: var(--text-muted);
   list-style: none; cursor: pointer; -webkit-tap-highlight-color: transparent; }
 .step-line::-webkit-details-marker { display: none; }
 .step-line::before { content: "›"; flex: none; width: 10px; text-align: center; transition: transform 0.15s; }
 .step[open] > .step-line::before { transform: rotate(90deg); }
-.step-role { flex: none; max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-2); }
+.step-role { display: flex; flex: 0 1 auto; min-width: 0; max-width: 62%; white-space: nowrap; color: var(--text-2); }
+.step-role-head { min-width: 2ch; overflow: hidden; text-overflow: ellipsis; }
+.step-role-tail { flex: none; }
+.step-who { font-size: 12px; color: var(--text-2); margin: 0 0 4px 4px; padding-left: 10px; border-left: 2px solid var(--border);
+  overflow-wrap: anywhere; }
 .step-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .step-time { flex: none; font-size: 11px; }
 .step-body { font-size: 14px; color: var(--text-2); margin: 0 0 8px 4px; padding-left: 10px; border-left: 2px solid var(--border); }
+.step-who + .step-body { margin-top: -4px; }
 .plain-text { white-space: pre-wrap; overflow-wrap: anywhere; }
 .md { overflow-wrap: anywhere; }
 .md p, .md ul, .md ol, .md pre, .md blockquote, .md table { margin: 6px 0; }
