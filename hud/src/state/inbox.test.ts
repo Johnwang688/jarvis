@@ -3,7 +3,7 @@
 
 import { describe, expect, it, vi } from "vitest";
 import { ApiError } from "../api";
-import { InboxStore } from "./inbox";
+import { InboxStore, SNOOZE_READ_MAX_MS, SNOOZE_READ_SLACK_MS } from "./inbox";
 
 const row = (id: string, rank: number) => ({ id, kind: "question", rank, title: "t", blocks: "b", detail: {} });
 
@@ -102,3 +102,48 @@ describe("InboxStore", () => {
     }
   });
 });
+
+describe("InboxStore: a snooze that ends (inbox B4, review of #322)", () => {
+  const NOW = Date.parse("2026-10-28T10:00:00Z");
+  const snoozed = (id: string, ms: number) => ({ id, kind: "task", rank: 8, title: "t", blocks: "b", detail: {},
+    markable: true, hidden: { snoozed_until: new Date(NOW + ms).toISOString(), dismissed_at: null } });
+
+  it("reads again just after the earliest snooze it holds ends, one timer replaced by every read", async () => {
+    const timers: { ms: number; fn: () => void; cancelled: boolean }[] = [];
+    const later = (ms: number, fn: () => void) => {
+      const t = { ms, fn, cancelled: false };
+      timers.push(t);
+      return () => { t.cancelled = true; };
+    };
+    let body: unknown[] = [snoozed("task:a", 7_200_000), snoozed("task:b", 60_000)];
+    const fetch = vi.fn(async () => body);
+    const store = new InboxStore({ fetch, badge: () => {}, later, now: () => NOW });
+    await store.refresh();
+    expect(timers.map((t) => t.ms)).toEqual([60_000 + SNOOZE_READ_SLACK_MS]);
+    await store.refresh();
+    expect(timers[0].cancelled).toBe(true);
+    expect(timers.length).toBe(2);
+    body = [{ ...snoozed("task:b", 0), hidden: undefined }];
+    timers[1].fn();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(store.snapshot().rows.map((r) => r.id)).toEqual(["task:b"]);
+    expect(timers.length).toBe(2);                 // nothing snoozed left: no timer
+  });
+
+  it("a snooze days ahead waits at most an hour; a dismissal or rank 4 arms nothing", async () => {
+    const waits: number[] = [];
+    const later = (ms: number) => { waits.push(ms); return () => {}; };
+    const store = new InboxStore({ fetch: async () => [snoozed("task:a", 3 * 86_400_000)], badge: () => {}, later, now: () => NOW });
+    await store.refresh();
+    expect(waits).toEqual([SNOOZE_READ_MAX_MS]);
+    const none: number[] = [];
+    const quiet = new InboxStore({ fetch: async () => [
+      { ...snoozed("task:c", 60_000), hidden: { dismissed_at: "2026-10-28T09:00:00Z" } },
+      { ...snoozed("task:d", 60_000), rank: 4 }],
+    badge: () => {}, later: (ms) => { none.push(ms); return () => {}; }, now: () => NOW });
+    await quiet.refresh();
+    expect(none).toEqual([]);
+  });
+});
+

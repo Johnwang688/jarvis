@@ -372,7 +372,9 @@ class Gate(Api):
                 self.assertEqual(status, 403, (method, path))
             status, _, _ = self.phone("HEAD", path, cookie=self.cookie)
             self.assertEqual(status, 405, ("HEAD", path))
-        for path in ("/m/api/inbox/x", "/m/api/inbox/appr:x/answer", "/m/api/threads/x", "/m/api/tasks/x/y",
+        # P-4's answer route is POST only (remote_answer): GET is 405 there.
+        self.assertEqual(self.get("/m/api/inbox/appr:x/answer")[0], 405)
+        for path in ("/m/api/inbox/x", "/m/api/threads/x", "/m/api/tasks/x/y",
                      "/m/api/projects/" + self.project.id, "/m/api/ws", "/m/api/", "/m/api/status",
                      f"/m/api/tasks/{self.task.id}/diff/file", f"/m/api/tasks/{self.task.id}/journal",
                      f"/m/api/threads/{self.chat.id}/transcript", "/m/api/approvals"):

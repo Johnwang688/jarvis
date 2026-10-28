@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import {
-  DEFAULT_MODE, DICTATION_MODES, isMuted, loadMode, mayCapture, nextMode, orbLine, outcomeFor, saveMode,
+  DEFAULT_MODE, DICTATION_MODES, isMuted, loadMode, mayCapture, mutedDictation, nextMode, orbLine, outcomeFor, saveMode,
   sendsOnItsOwn,
 } from "./dictation";
 
@@ -61,6 +61,11 @@ describe("dictation mode", () => {
     expect(isMuted("auto")).toBe(false);
     expect(isMuted("review")).toBe(false);
     expect(mayCapture("off")).toBe(false);
+    // The one thing OFF lets upload: the talk key's dictation, claimed while OFF (2026-10-27).
+    expect(mutedDictation("ptt", "off")).toBe(true);
+    expect(mutedDictation("ptt", "review")).toBe(false);
+    expect(mutedDictation("wake", "off")).toBe(false);
+    expect(mutedDictation("follow_up", "off")).toBe(false);
     expect(mayCapture("review")).toBe(true);
   });
 

@@ -1170,8 +1170,15 @@ class ChannelLinker:
                 # approval is a real answer whenever it came (a shutdown never
                 # approves): its action already ran, and replaying it after a
                 # restart would do it twice — a second archive category.
-                if decision == Decision.ALLOW or not self._stop.is_set():
+                # The daemon releases its asks before Discord (and so this
+                # linker) stops, so its own flag says "shutdown" too.
+                if decision == Decision.ALLOW or not self._shutting_down():
                     self._settle(job)
+
+    def _shutting_down(self) -> bool:
+        released = getattr(self.daemon, "approvals_released", None)
+        return self._stop.is_set() or (isinstance(released, threading.Event)
+                                       and released.is_set())
 
     def ask_now(self, job) -> Decision:
         """Run one housekeeping job on the calling thread (the tests' path)."""

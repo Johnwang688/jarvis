@@ -778,7 +778,9 @@ class OwnerOnly(Base):
     # own path: files.py names "jarvis/v2/inbox.py" in SELF_PROTECTED.
     INBOX_SOURCE = ('/inbox"', "/inbox'", "/inbox/", "/inbox?", "jarvis.v2.inbox",
                     "from .inbox", "from . import inbox", "from .. import inbox", "import inbox",
-                    "inbox.answer", "inbox.rows", "inbox.route", "daemon.inbox", "_inbox.")
+                    "inbox.answer", "inbox.rows", "inbox.route", "daemon.inbox", "_inbox.",
+                    # B3 (IN-4): the PR list the daemon reads with the owner's gh.
+                    "import inbox_prs", "inbox_prs import", "PrSource", ".prs.rows", ".prs.poll")
 
     def test_no_tool_reaches_the_inbox(self):
         from jarvis import tools
@@ -795,10 +797,12 @@ class OwnerOnly(Base):
             self.assertIsNone(self.INBOX_NAME.search(name), name)
         # Inbox B1: `owner_post` writes a decision through the post service
         # (`decisions.py`), which names none of the inbox's routes either.
-        from jarvis.v2 import decisions
+        # Inbox B2: a check is posted through the same service, which uses
+        # `checks.py` for its fields; neither names the owner's step marks.
+        from jarvis.v2 import checks, decisions
         from jarvis.v2.tools import owner_post
         sources = [v2tools, mcp, mcp_catalog, session_tools, bridge, chat_relay, fastpath, decisions,
-                   owner_post]
+                   owner_post, checks]
         for name in reachable:
             func = getattr(tools.REGISTRY.get(name), "func", None)
             if func is not None:
@@ -809,6 +813,71 @@ class OwnerOnly(Base):
             text = inspect.getsource(module)
             for needle in self.INBOX_SOURCE:
                 self.assertNotIn(needle, text, f"{module.__name__} names {needle}")
+
+    # A live check's result (inbox B2, IN-6): written only by the owner's
+    # step route. No tool, MCP catalog entry, session tool, Discord or CLI
+    # module names the route, the function behind it or the store's mark.
+    CHECK_RESULT_SOURCE = ("mark_check_step", "/steps/", "checks/import", "import_checks", ".mark(",
+                           "CheckStore", "check_marked")
+
+    def test_no_tool_or_cli_records_a_check_result(self):
+        from jarvis import tools
+        from jarvis.v2 import bridge, chat_relay, decisions, mcp, mcp_catalog, session_tools
+        from jarvis.v2.providers import fastpath
+        import jarvis.v2.tools as v2tools
+        import jarvis.__main__ as cli          # the `jarvis` command
+        from jarvis.v2 import mcp_session, owner_ops
+        reachable = (set(fastpath.FAST_TOOLS) | set(mcp.MCP_TOOLS) | set(mcp_catalog.MCP_TOOLS)
+                     | set(session_tools.SESSION_TOOLS) | set(tools.REGISTRY))
+        sources = [v2tools, mcp, mcp_catalog, session_tools, bridge, chat_relay, fastpath, cli, owner_ops,
+                   mcp_session]
+        for name in reachable:
+            func = getattr(tools.REGISTRY.get(name), "func", None)
+            if func is not None:
+                sources.append(inspect.getmodule(func))
+        from jarvis.v2.discord import gateway
+        sources.append(gateway)
+        texts = {m.__name__: inspect.getsource(m) for m in sources if m is not None}
+        texts["decisions.OwnerPosts"] = inspect.getsource(decisions.OwnerPosts)
+        for name, text in texts.items():
+            for needle in self.CHECK_RESULT_SOURCE:
+                self.assertNotIn(needle, text, f"{name} names {needle}")
+
+    # The owner's snoozes and dismissals (inbox B4, IN-7): set only by the
+    # owner's mark route. No tool, MCP catalog entry, session tool, Discord or
+    # CLI module names the route, the function behind it, the store, its file
+    # or its event. `files.py` names the module in SELF_PROTECTED and the file
+    # in `_protected_state_paths`, to refuse writes to them: that function's
+    # body is set aside, and the module is matched as an import or attribute.
+    MARK_SOURCE = (r"mark_row", r"MarksStore", r"inbox_marked", r"""/mark["'?]""",
+                   r"\binbox_marks\.(?!py\b)", r"import inbox_marks", r"from \.+inbox_marks", r"marks\.json")
+
+    def test_no_tool_or_cli_marks_an_inbox_row(self):
+        from jarvis import tools
+        from jarvis.v2 import bridge, chat_relay, decisions, mcp, mcp_catalog, session_tools
+        from jarvis.v2.providers import fastpath
+        import jarvis.v2.tools as v2tools
+        import jarvis.__main__ as cli
+        from jarvis.v2 import mcp_session, owner_ops, checks
+        reachable = (set(fastpath.FAST_TOOLS) | set(mcp.MCP_TOOLS) | set(mcp_catalog.MCP_TOOLS)
+                     | set(session_tools.SESSION_TOOLS) | set(tools.REGISTRY))
+        sources = [v2tools, mcp, mcp_catalog, session_tools, bridge, chat_relay, fastpath, cli, owner_ops,
+                   mcp_session, decisions, checks]
+        for name in reachable:
+            func = getattr(tools.REGISTRY.get(name), "func", None)
+            if func is not None:
+                sources.append(inspect.getmodule(func))
+        from jarvis.v2.discord import gateway
+        sources.append(gateway)
+        from jarvis.tools import files
+        exempt = inspect.getsource(files._protected_state_paths)
+        for module in {m for m in sources if m is not None}:
+            text = inspect.getsource(module)
+            if module is files:
+                self.assertIn(exempt, text)
+                text = text.replace(exempt, "")
+            for needle in self.MARK_SOURCE:
+                self.assertIsNone(re.search(needle, text), f"{module.__name__} names {needle}")
 
     # The phone's pairing window and paired passkeys (phone design PH-6,
     # P-2): the same rule. No tool, MCP catalog entry or session tool names
@@ -823,7 +892,11 @@ class OwnerOnly(Base):
                     r"from \.+remote_auth", r"passkeys\.json", r"sessions\.json", r"__Host-jarvis_m",
                     r"open_window", r"pair_options", r"pair_verify", r"login_verify",
                     # P-3's read API and stream (`remote_api.py`, named only in SELF_PROTECTED).
-                    r"\bremote_api\.(?!py\b)", r"import remote_api", r"from \.+remote_api")
+                    r"\bremote_api\.(?!py\b)", r"import remote_api", r"from \.+remote_api",
+                    # P-4's answers and the §4.1 checks (named only in SELF_PROTECTED).
+                    r"\bremote_answer\.(?!py\b)", r"import remote_answer", r"from \.+remote_answer",
+                    r"\bremote_secure\.(?!py\b)", r"import remote_secure", r"from \.+remote_secure",
+                    r"answer_verify", r"answer_options", r"owner_verified")
 
     def test_no_tool_reaches_the_phone_pairing(self):
         from jarvis import tools
@@ -870,7 +943,14 @@ class OwnerOnly(Base):
     def test_the_inbox_routes_refuse_every_client_but_the_hud(self):
         for method, path, body in (("GET", "/inbox", None),
                                    ("POST", "/inbox/appr:x/answer", {"decision": "allow"}),
-                                   ("POST", "/inbox/nothing", {})):
+                                   ("POST", "/inbox/nothing", {}),
+                                   # Inbox B2 (IN-6): a check's result is the owner's alone.
+                                   ("POST", "/inbox/checks/c0123456789ab/steps/0", {"verdict": "pass"}),
+                                   ("POST", "/inbox/checks/import", {"path": "/x/docs/plans/a.md"}),
+                                   # Inbox B4 (IN-7): the owner's snoozes and dismissals.
+                                   ("GET", "/inbox?all=1", None),
+                                   ("POST", "/inbox/task:x/mark", {"dismiss": True}),
+                                   ("POST", "/inbox/task:x/mark", {"clear": True})):
             with self.subTest(path=path):
                 self.request(method, path, body, 403)
                 self.request(method, path, body, 403, port=self.daemon.face_port)

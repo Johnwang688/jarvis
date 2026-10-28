@@ -17,7 +17,7 @@ Invariants and decisions are retained byte for byte; their named paragraph
 references are in the notes. Preserved paths are repository-relative.
 
 Tool-call labels: A value split by shell quoting can still appear in a label;
-labels are untrusted text. See [HUD workspace notes](docs/notes/hud-workspace.md).
+labels are untrusted text ([HUD notes](docs/notes/hud-workspace.md)).
 
 <!-- retained:chat-git-and-v2:begin -->
 ## Chat git worktrees (2026-10-13)
@@ -106,6 +106,12 @@ workspace/editor/Browser decisions. Driving uses owner switches.
 Owner HTTP Basic/Digest auth uses only the exact private tab socket;
 credentials never enter tools, replay, status, logs or config. Pending
 navigation and cleanup: Browser note and HTTP-auth plan.
+
+## Inbox
+
+`/inbox` routes are owner-only; agents only post via `owner_post`, never read,
+answer or mark. Marks hide ranks 5–8 only.
+[Design](docs/plans/2026-10-24-owner-inbox-design.md); rules: control-plane notes.
 
 ## Safety design (deliberate, do not loosen without asking)
 
@@ -210,8 +216,6 @@ not current completion evidence.
 
 ## Area index
 
-Read the matching notes, design and plans first.
-
 | Area | Notes and current entry point |
 |---|---|
 | Purpose, WSL and v1 architecture | [Orientation](docs/notes/orientation.md) |
@@ -234,12 +238,9 @@ Read the matching notes, design and plans first.
 | Earlier goals/sessions/runtime | [Earlier runtime](docs/notes/legacy-runtime.md) |
 | Old outstanding probes | [Historical validation](docs/notes/live-validation.md) |
 
-[Manifest](docs/notes/claude-migration.json) and
-[migration utility](scripts/slim_claude.py): `python scripts/slim_claude.py --check`
-reconstructs the original bytes and verifies retained copies; `--self-test`
-detects corruption in temporary copies. Keep archive payloads unchanged.
-Update the retained-copy check explicitly if a current invariant or decision
-later changes.
+`python scripts/slim_claude.py --check` rebuilds the original bytes and checks
+retained copies and this guide's size. Keep archive payloads unchanged; update
+the retained-copy check if an invariant or decision changes.
 
 <!-- retained:invariants:begin -->
 ## Invariants — breaking these causes silent or hard failures

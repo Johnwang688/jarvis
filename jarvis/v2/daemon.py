@@ -347,8 +347,10 @@ def is_running(port: int) -> bool:
 
 # "inbox": the owner's answer to a decision, delivered by the owner inbox
 # (inbox.py, B1) through `deliver_queued`: never at the desk
-# (`desk.desk_message` requires "hud").
-VIAS = ("hud", "discord", "dm", "system", "peer", "inbox")
+# (`desk.desk_message` requires "hud"). "phone": the same answer given on the
+# phone (phone design P-4, `remote_answer`): the same queue and framing, and
+# no desk authority either.
+VIAS = ("hud", "discord", "dm", "system", "peer", "inbox", "phone")
 
 
 def user_data(message: UserMessage) -> dict:
@@ -555,6 +557,10 @@ class Daemon:
         # (inbox B1, `deliver_queued`): after the owner's queue, never in it.
         self._inbox_queues: dict[str, deque] = {}
         self._stopping = False
+        # Set once shutdown starts releasing the broker's waiters
+        # (`release_approvals`): a "deny" that arrives after it is Jarvis
+        # stopping, not the owner answering (the Discord linker keeps its ask).
+        self.approvals_released = threading.Event()
         self._server = None
         self._server_thread = None
         # Port zero is an isolated embedded/test daemon on three ephemeral ports.
@@ -573,6 +579,16 @@ class Daemon:
         # Made here, never touching disk until a phone or the HUD asks.
         from .remote_auth import RemoteAuth
         self.remote_auth = RemoteAuth(Path(stores.root) / "remote", self.remote_host)
+        # PH-10: while a phone session was active in the last 24 h, the
+        # broker waits the remote 600 s (`PendingApprovals.wait_s`).
+        if getattr(self.approvals, "phone_active", False) is None:
+            self.approvals.phone_active = self.remote_auth.recently_active
+        # §4.1, "the network stays secured" (P-4, remote_secure.py): the
+        # checks that give the phone HUD authority. Its Windows and
+        # Tailscale reads are attached only by `main()`
+        # (`attach_system`), so no embedded or test daemon runs them.
+        from .remote_secure import SecureMonitor
+        self.secure = SecureMonitor(self)
         self._listeners = []
         from .hud_api import HUDLedger
         from .router import Router
@@ -632,7 +648,7 @@ class Daemon:
         # the inbox's decisions, over the inbox's own store. Installed in
         # `start()`, removed in `stop()`; it holds no answer path.
         from .decisions import OwnerPosts
-        self.owner_posts = OwnerPosts(self, self.inbox.decisions)
+        self.owner_posts = OwnerPosts(self, self.inbox.decisions, self.inbox.checks)
         from .browser.drive import BrowserDrive
         self.browser_drive = BrowserDrive(self)
         from .devservers import DevServers
@@ -707,6 +723,10 @@ class Daemon:
                 self._listeners.append((listener, worker))
                 worker.start()
             self._server_thread = self._listeners[0][1]
+            # §4.1's checks: at start-up and every 5 minutes, only while the
+            # phone's listener is bound (remote_secure.py).
+            if self.remote_port is not None:
+                self.secure.start()
             from .hud_api import connect_controls
             connect_controls(self)
             # `terminal_read` (WP-F) reads these terminals and no others.
@@ -718,6 +738,12 @@ class Daemon:
             # An answer still "queued" from a previous run never ran (the
             # queue is in memory): say so on its decision (inbox B1).
             self.inbox.fail_lost_answers()
+            # Open PRs for the inbox (B3): a thread of its own, only once
+            # `main()` attached it; nothing here waits on `gh`.
+            self.inbox.prs.start()
+            # A snooze that ends brings its row back (inbox B4): one timer for
+            # the earliest, re-armed on each mark write.
+            self.inbox.start_snoozes()
             self.devservers.start()
             self.schedules.start()
             # A previous run's unrestored duck (V15) is repaired from its
@@ -2215,9 +2241,13 @@ class Daemon:
                                    "decision": getattr(decision, "value", str(decision)),
                                    "resolution": resolution}})
 
-    def resolve_approval(self, req_id: str, decision, always: bool = False, *, hud: bool = False) -> dict:
+    def resolve_approval(self, req_id: str, decision, always: bool = False, *,
+                         owner_verified: bool = False) -> dict:
+        """`owner_verified` is HUD authority (PH-7): True only from the HUD's
+        own answer routes and the phone's verified answer (`remote_answer`)."""
         try:
-            entry = self.approvals.resolve(req_id, decision, always=always, hud=hud)
+            entry = self.approvals.resolve(req_id, decision, always=always,
+                                           owner_verified=owner_verified)
         except ValueError as exc:
             raise APIError(404, str(exc)) from exc
         return {"ok": True, "req_id": req_id,
@@ -2811,18 +2841,22 @@ class Daemon:
         self.subagents.stop_sent(thread, sid, token)
         return {"ok": True, "stop": "stopping"}
 
-    def answer(self, thread_id, req_id, decision):
+    def answer(self, thread_id, req_id, decision, *, via: str | None = None):
         session = self._session(thread_id)
         session.provider.answer(session.handle, req_id, decision)
         with self._lock:
             session.questions.discard(str(req_id))
         # In the log too, beside the question it closes, so a surface catching
         # up from the log (the Discord mirror) knows the question is no
-        # longer open. Nothing the provider sees.
+        # longer open. Nothing the provider sees. `via` names where it was
+        # answered when that was not the HUD ("phone", P-4).
+        data = {"req_id": req_id}
+        if via in VIAS:
+            data["via"] = via
         try:
             self.stores.threads._append(thread_id, "log.jsonl", {
                 "kind": "question_answered", "at": utcnow(), "thread_id": thread_id,
-                "turn_id": session.turn_id, "data": {"req_id": req_id}})
+                "turn_id": session.turn_id, "data": data})
         except Exception:
             LOG.warning("Cannot log the answer on thread %s", thread_id, exc_info=True)
         # Whoever answered (the HUD, Discord), every surface still showing the
@@ -2900,28 +2934,48 @@ class Daemon:
         LOG.warning("%d approval waiter(s) had not announced their denial at shutdown",
                     len(req_ids - {d.get("req_id") for d in list(decisions) if isinstance(d, dict)}))
 
+    def release_approvals(self, limit: float = RELEASE_WAIT_S) -> int:
+        """Deny every pending ask now, with resolution "shutdown", and wait
+        (bounded by `limit`) until each has been announced. -> how many were
+        released by this call.
+
+        Every pending ask is denied now, not when its timer runs out or the
+        process dies: each waiter returns DENY with resolution "shutdown"
+        (which leaves an inbox "denied while you were away" record, IN-3) and
+        its card is cleared. Outside `self._lock`: the broker's resolve
+        callback publishes. Each released waiter announces on its own thread,
+        so wait until every one has been recorded by the broker: its
+        `approval_resolved` then reached the bus, so every window clears its
+        card and the Discord surface (still running, when `main()` calls this
+        first) strips the post's buttons and says "Jarvis stopped first".
+
+        Idempotent: the broker's `shutdown` is, and a second call finds
+        nothing pending. A later ask is denied at once."""
+        shutdown = getattr(self.approvals, "shutdown", None)
+        if not callable(shutdown):
+            return 0
+        self.approvals_released.set()
+        try:
+            released = {r.req_id for r in self.approvals.pending() if r.req_id}
+        except Exception:  # noqa: BLE001 — nothing to wait for then
+            released = set()
+        shutdown()
+        self._await_announced(released, limit)
+        return len(released)
+
     def stop(self):
         # Before anything else closes: no jarvis-mcp call is answered for a
         # session from here on (plan §1.4).
         self.callers.revoke_all()
-        # Every pending ask is denied now, not when its timer runs out or the
-        # process dies: each waiter returns DENY with resolution "shutdown"
-        # (which leaves an inbox "denied while you were away" record, IN-3)
-        # and its card is cleared. Outside `self._lock`: the broker's resolve
-        # callback publishes. Idempotent; a later ask is denied at once.
-        # Each released waiter announces on its own thread, and the bus closes
-        # further down, so wait (bounded) until every one has been recorded
-        # by the broker: its `approval_resolved` then reached the bus, and
-        # every window clears its card, before the bus closes.
-        shutdown = getattr(self.approvals, "shutdown", None)
-        if callable(shutdown):
-            try:
-                released = {r.req_id for r in self.approvals.pending() if r.req_id}
-            except Exception:  # noqa: BLE001 — nothing to wait for then
-                released = set()
-            shutdown()
-            self._await_announced(released, RELEASE_WAIT_S)
+        # Then every pending ask is denied, before the bus closes further
+        # down. `main()` has normally done this already, before Discord
+        # stopped; then this finds nothing (idempotent).
+        self.release_approvals()
         self.schedules.stop()
+        self.inbox.prs.stop()                   # the inbox's PR poll (B3): a running gh is killed
+        inbox = getattr(self, "inbox", None)
+        if inbox is not None:
+            inbox.stop_snoozes()                # the snooze timer (inbox B4) never fires after this
         titles = self.titles
         if titles is not None:
             titles.stop()                       # its Codex session ends with the metadata cancel
@@ -2996,6 +3050,7 @@ class Daemon:
             worker.join(max(0, deadline - time.monotonic()))
         self._listeners.clear()
         self._server = None
+        self.secure.stop()
         self.remote_port = None
         self.remote_auth.server = None
         # A revocation whose write failed gets one last try (and an ERROR
@@ -3460,9 +3515,11 @@ def _handler(daemon):
                 always = body.get("always", False)
                 if not isinstance(always, bool):
                     raise APIError(400, "always must be a boolean")
+                # The HUD route: HUD authority (PH-7) only with the HUD
+                # listener's own Host, after `owner_only` above.
                 return 200, daemon.resolve_approval(
                     parts[1], Decision(_text(body["decision"], "decision")), always,
-                    hud=config.own_host_header(self.headers.get("Host", ""), daemon.face_port))
+                    owner_verified=config.own_host_header(self.headers.get("Host", ""), daemon.face_port))
             if len(parts) in (2, 3) and parts[0] == "tasks":
                 task = daemon.require(stores.tasks, parts[1])
                 if len(parts) == 2 and method == "GET":
@@ -3813,6 +3870,18 @@ def main() -> int:
         daemon.browser.keyring.attach()
     except Exception as exc:     # noqa: BLE001
         LOG.warning("browser keyring not attached (%s); the basic store is used", type(exc).__name__)
+    # The phone's §4.1 checks read Tailscale and Windows (remote_secure.py,
+    # read-only, time-limited): attached here, so no embedded or test daemon
+    # runs a Windows command. Without it the phone stays limited.
+    daemon.secure.attach_system()
+    # The owner inbox's deployed test for live checks (inbox B2, IN-6) reads
+    # local git: the commit this daemon starts from, captured now. Attached
+    # here only, so an embedded or test daemon never runs git for it and
+    # every check naming a PR there is "not confirmed deployed".
+    daemon.inbox.deploy.attach_git()
+    # The inbox's open PRs (B3, inbox_prs.py): the owner's `gh`, read-only,
+    # attached here for the same reason.
+    daemon.inbox.prs.attach_system()
     hatch = EscapeHatch(daemon, daemon.approvals)
     discord = None
     daemon.runner = TaskRunner(daemon, daemon.router)
@@ -3846,15 +3915,50 @@ def main() -> int:
         print(f"jarvis daemon2: {exc}")
         return 1
     finally:
-        # The gateway first, so no verb arrives at a runner that is stopping;
-        # then the runner, so its workers see interrupted turns rather than a
-        # dead daemon; then the Reporter, flushing within 2 s (all three inside
-        # `discord.stop()`). Nothing is cancelled — a task left RUNNING is
-        # re-admitted by `serve()`'s recovery next boot.
-        if discord is not None:
-            discord.stop()
-        daemon.runner.stop()                    # idempotent if Discord stopped it
-        hatch.stop()
-        daemon.stop()
+        shut_down(daemon, discord, hatch)
         signal.signal(signal.SIGTERM, previous)
     return 0
+
+
+def shut_down(daemon, discord, hatch) -> None:
+    """`main()`'s shutdown order, here so a check can run it with fakes.
+
+    Pending approvals are released first, while every surface still listens:
+    each is denied with resolution "shutdown" and announced (bounded by
+    RELEASE_WAIT_S), and `discord.stop()` lets the gateway finish the post
+    edits those announcements queued (bounded by gateway.SETTLE_S) before it
+    closes, so no approval post keeps live buttons after Jarvis stops.
+
+    Then the gateway, so no verb arrives at a runner that is stopping; then
+    the runner, so its workers see interrupted turns rather than a dead
+    daemon; then the Reporter, flushing within 2 s (all three inside
+    `discord.stop()`). Nothing is cancelled — a task left RUNNING is
+    re-admitted by `serve()`'s recovery next boot. `daemon.stop()` releases
+    again, which finds nothing (idempotent). Before any of it the runner is
+    quiesced (no task admitted, no further model turn), so a denial cannot
+    move a task on. Each step is bounded; one that raises is logged and does
+    not skip the rest, and `daemon.stop()` runs even when a KeyboardInterrupt
+    cuts the others short."""
+    runner = getattr(daemon, "runner", None)
+    steps = [
+        # No task starts another model turn on the strength of a denial.
+        ("runner.quiesce", getattr(runner, "quiesce", None)),
+        ("release_approvals", daemon.release_approvals),
+        ("discord.stop", getattr(discord, "stop", None)),
+        ("runner.stop", getattr(runner, "stop", None)),   # idempotent if Discord stopped it
+        ("hatch.stop", getattr(hatch, "stop", None)),
+    ]
+    try:
+        for name, step in steps:
+            if step is None:
+                continue
+            try:
+                step()
+            except Exception:  # noqa: BLE001 — every later step still runs
+                LOG.warning("shutdown step %s failed", name, exc_info=True)
+    finally:
+        # Always, even when a second Ctrl-C (a BaseException) cuts a step short.
+        try:
+            daemon.stop()
+        except Exception:  # noqa: BLE001
+            LOG.warning("shutdown step daemon.stop failed", exc_info=True)

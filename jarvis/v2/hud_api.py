@@ -2356,9 +2356,10 @@ def route(handler, daemon, parts, query):
                     # its acknowledged turn. Legacy response bytes stay fixed.
                     if query.get("tools") == "1" and isinstance(row.get("turn_id"), str):
                         message["turn_id"] = row["turn_id"]
-                    if kind == "user" and data.get("via") in ("discord", "dm", "inbox"):
+                    if kind == "user" and data.get("via") in ("discord", "dm", "inbox", "phone"):
                         # Typed in Discord (PR C): the HUD labels it "via Discord";
-                        # a decision answered in the inbox (B1), "via the inbox".
+                        # a decision answered in the inbox (B1), "via the inbox";
+                        # one answered on the phone (P-4), "via the phone".
                         message["via"] = data["via"]
                     mid = data.get("message_id") if kind == "user" else None
                     if isinstance(mid, str):

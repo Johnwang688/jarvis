@@ -125,12 +125,25 @@ SELF_PROTECTED = frozenset(
         # function. An agent that could edit it could hide a card or answer
         # one.
         "jarvis/v2/inbox.py",
+        # Its PR source (inbox B3, IN-4): which repositories are read with
+        # the owner's gh login, and what a PR row may say.
+        "jarvis/v2/inbox_prs.py",
         # The owner's decisions (inbox B1, IN-5): the store, its caps and
         # scrub, who may post, and the one tool that posts. An agent that
         # could edit them could lift the caps, skip the scrub or post from a
         # turn the owner never started.
         "jarvis/v2/decisions.py",
         "jarvis/v2/tools/owner_post.py",
+        # The owner's live checks (inbox B2, IN-6): their store, caps and
+        # scrub, the deployed test that gates a mark and the runbook import.
+        # An agent that could edit it could mark a step for the owner or let
+        # a check be marked before its PR runs.
+        "jarvis/v2/checks.py",
+        # The owner's snoozes and dismissals (inbox B4, IN-7): which rows of
+        # rank 5 to 8 stay out of sight, and the rule that a mark never
+        # hides a live approval, question, proposal or blocked task. An
+        # agent that could edit it could hide one.
+        "jarvis/v2/inbox_marks.py",
         # The phone's remote listener (phone design PH-1, P-1): its route
         # table, strict Host, Origin rule and headers decide what the
         # tailnet can reach on this machine. An agent that could edit it
@@ -145,6 +158,18 @@ SELF_PROTECTED = frozenset(
         # read withholds. An agent that could edit it could send the phone
         # a private card's detail, a path or a credential.
         "jarvis/v2/remote_api.py",
+        # Answering from the phone (phone design P-4): the per-answer
+        # passkey assertion, who gets the HUD's authority and
+        # what a card must show first; and §4.1's checks that grant it. An
+        # agent that could edit either could answer an approval from the
+        # phone with the HUD's authority.
+        "jarvis/v2/remote_answer.py",
+        "jarvis/v2/remote_secure.py",
+        # The approval broker every surface answers through: who counts as
+        # owner-verified, which cards are HUD-only, and what a card shows
+        # before Allow (the owner's decision, 2026-10-25). An agent that
+        # could edit it could answer its own approval.
+        "jarvis/v2/approvals.py",
     }
 )
 
@@ -219,6 +244,18 @@ def _protected_state_paths() -> set[Path]:
     # `stt.json` (V13, 2026-10-13) holds the owner's speech-to-text switches,
     # among them "never upload audio" and which backend hears the microphone
     # (an agent that could flip them could send the owner's voice to the cloud).
+    # A pure function of these settings, `HOME` (for `~`) and the record
+    # lists: kept per key, so a suite that repoints one gets its own set,
+    # and a gate call does not rebuild ~30 paths (review of PR #315). What
+    # they resolve to on disk is never kept (`_resolve_all`).
+    key = (str(config.ALLOWLIST_PATH), str(config.MODELS_PATH), str(config.PROVIDER_DEFAULTS_PATH),
+           str(config.DISCORD_GUILD_PATH), str(config.ROUTING_PATH), str(config.CODEX_CATALOG_PATH),
+           str(config.VEX_PATH), str(config.BROWSER_SETTINGS_PATH), str(config.STT_SETTINGS_PATH),
+           str(config.SPEAKER_DIR), str(config.V2_DATA_DIR), os.environ.get("HOME", ""),
+           RECORD_TREES, RECORD_FILES)
+    found = _STATE_PATHS.get(key)
+    if found is not None:
+        return set(found)
     names = ("allowlist.json", "models.json", "routing.json", "discord_guild.json",
              "provider_defaults.json", "vex.json", "browser.json", "stt.json")
     allow = config.ALLOWLIST_PATH.expanduser()
@@ -253,8 +290,129 @@ def _protected_state_paths() -> set[Path]:
     # The `decisions` folder is named here so moving or re-moding it is
     # judged as a write to it, as the inbox folder's is.
     inbox = Path(config.V2_DATA_DIR).expanduser() / "inbox"
-    paths |= {inbox, inbox / "missed.jsonl", inbox / "decisions"}
+    # The `checks` folder (inbox B2: the live checks and the owner's
+    # results) is named for the same reason, and so is `marks.json` (inbox
+    # B4: what the owner snoozed or dismissed; a forged mark would hide a row).
+    paths |= {inbox, inbox / "missed.jsonl", inbox / "decisions", inbox / "checks", inbox / "marks.json"}
+    # Jarvis's own records (2026-10-25, review of PR #309: `cp /tmp/x
+    # <data>/threads/<id>/log.jsonl` was a static ALLOW, and a forged
+    # `{"kind":"user","data":{"origin":"owner",…}}` line then showed as the
+    # owner's words in the HUD, other chats' `chat_read`, the phone and the
+    # Discord catch-up). Each tree's folder is named, as the inbox's is, so
+    # moving, replacing or re-moding it is judged as a write to it and a
+    # grant above it is refused; every file below is protected by the tree
+    # rule (`_record_trees`). `decisions.jsonl` is the gate's own audit log
+    # of what was allowed, asked and denied (`permissions.log_decision`).
+    data = Path(config.V2_DATA_DIR).expanduser()
+    paths |= {data / name for name in RECORD_TREES} | {data / name for name in RECORD_FILES}
+    if len(_STATE_PATHS) > 64:
+        _STATE_PATHS.clear()
+    _STATE_PATHS[key] = frozenset(paths)
     return paths
+
+
+_STATE_PATHS: dict[tuple, frozenset] = {}
+
+
+# Jarvis's own records under the v2 data root (`config.V2_DATA_DIR`), every
+# one written by the daemon in-process and by nothing else (the inventory is
+# in docs/notes/safety-permissions.md, "Protected state: Jarvis's own
+# records"). A write into one by an agent is refused — the write tools,
+# v2's layer 1 and grants; v1's shell gate asks — exactly as the inbox's
+# tree is (inbox B1). Not here, on purpose: `claude/` and `codex/` (the
+# session carriers and Codex's private homes, which the provider CLIs and a
+# Codex chat's sandboxed commands write themselves; `editor_policy` withholds
+# them), `inbox/` (its own tree, `_inbox_tree`) and `remote/` (its two named
+# files above).
+RECORD_TREES = (
+    "threads",       # thread.json, brief.json (the brief a resume reopens), log.jsonl, activity.json, discord.json, subagents.jsonl
+    "tasks",         # task.json, journal.jsonl, activity.json, discord.json
+    "projects",      # <id>.json: name, root (the folder its chats work in), archive state
+    "schedules",     # <id>.json: what runs, where, and when, with nobody watching
+    "ledger",        # <day>.jsonl: usage accounting that admission reads
+    "diff_reviews",  # <task id>.json: the quick reviews shown with a task's diff
+    "discord",       # linker.json (sanctioned channel names), approval-posts.json
+    "chat-git",      # pins.json (the origin a chat may push to), the empty git HOME
+    "deleting",      # a permanent delete's staging folder and manifest
+    "vex",           # VEX build locks and unfinished-build markers
+)
+RECORD_FILES = ("decisions.jsonl",)
+
+
+def _resolve_all(paths) -> set[Path]:
+    """`{p.resolve() for p in paths}`, for absolute paths, with each folder
+    resolved once: most of them share two or three folders, and resolving
+    each in full cost a gate call ~1 ms (review of PR #315). The same answer
+    as `resolve` — a name that is itself a symlink is resolved in full, and
+    a path with `..` is not shortened. One that cannot be resolved (a link
+    loop) is kept as written, made absolute, so it stays protected rather
+    than dropped (fail closed)."""
+    folders: dict[str, str] = {}
+    out: set[str] = set()
+    for path in paths:
+        text = os.fspath(path)
+        try:
+            if not os.path.isabs(text) or "/.." in text or text.endswith("/."):
+                out.add(str(Path(text).resolve()))
+                continue
+            head, name = os.path.split(text.rstrip("/") or "/")
+            parent = folders.get(head)
+            if parent is None:
+                parent = folders[head] = str(Path(head).resolve())
+            here = os.path.join(parent, name) if name else parent
+            out.add(str(Path(here).resolve()) if os.path.islink(here) else os.path.normpath(here))
+        except (OSError, RuntimeError):
+            out.add(os.path.abspath(text))
+    return {Path(p) for p in out}
+
+
+def _record_paths() -> tuple[set[Path], set[Path]]:
+    """(every record tree's folder, every record file), resolved
+    (`_resolve_all`: never raises, never drops one). Read from config per
+    call, so a test that repoints V2_DATA_DIR protects its own."""
+    data = Path(config.V2_DATA_DIR).expanduser()
+    trees = _resolve_all(data / name for name in RECORD_TREES)
+    return trees, _resolve_all(data / name for name in RECORD_FILES)
+
+
+def _record_trees() -> set[Path]:
+    """Every record tree's folder (`RECORD_TREES`), resolved."""
+    return _record_paths()[0]
+
+
+def _owner_trees() -> set[Path]:
+    """The folders whose every file is protected (`protected_state.owner_trees`):
+    the inbox's and Jarvis's records (`_record_trees`). Never raises and never
+    drops one: a folder that cannot be resolved is kept as written (review of
+    PR #315: this used to fall back to the inbox alone)."""
+    data = Path(config.V2_DATA_DIR).expanduser()
+    return _resolve_all([data / "inbox", *(data / name for name in RECORD_TREES)])
+
+
+def _record_of(resolved: Path) -> Path | None:
+    """The record tree `resolved` is or lies in, or the record file it is,
+    else None."""
+    trees, record_files = _record_paths()
+    for tree in trees:
+        if resolved == tree or tree in resolved.parents:
+            return tree
+    return resolved if resolved in record_files else None
+
+
+def _in_record_tree(resolved: Path) -> bool:
+    try:
+        return _record_of(resolved) is not None
+    except (OSError, RuntimeError):
+        return True  # cannot tell: refuse
+
+
+def record_refusal(name: str) -> str:
+    """Why a write into Jarvis's own records is refused: one sentence for the
+    write tools, v2's layer 1 and a refused shell line."""
+    return (f"{name} is one of Jarvis's own records (its chats, tasks, projects and "
+            "schedules), which only the daemon writes: the owner and other chats rely on "
+            "them as the true record of what happened. Use Jarvis's tools for what you "
+            "wanted to change, or say what and why instead.")
 
 
 def _inbox_tree() -> Path:
@@ -276,7 +434,7 @@ def _in_inbox_tree(resolved: Path) -> bool:
 
 
 def _protected_state() -> set[Path]:
-    return {p.resolve() for p in _protected_state_paths()}
+    return _resolve_all(_protected_state_paths())
 
 
 # A repository's own `.git` (hooks, config, the refs and the worktree
@@ -349,6 +507,8 @@ def _self_protected(target: Path) -> bool:
         return True
     if _in_inbox_tree(resolved):
         return True
+    if _in_record_tree(resolved):
+        return True
     try:
         rel = resolved.relative_to(config.REPO_ROOT)
     except ValueError:
@@ -369,6 +529,8 @@ def _protect_refusal(target: Path) -> str:
             "can approve what the owner is asked. Change the HUD's source under "
             "hud/src instead; the owner installs it with `jarvis hud install`."
         )
+    if _in_record_tree(target.resolve()):
+        return "Error: " + record_refusal(target.name)
     return (
         f"Error: {target.name} is part of Jarvis's safety layer and can "
         "only be changed by the owner by hand. Explain what you wanted "

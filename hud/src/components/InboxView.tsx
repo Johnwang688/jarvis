@@ -31,6 +31,33 @@
 //     `{choice}` or `{text}` once to `POST /inbox/decisions/<id>`. Enter
 //     answers only from the focused box; on a radio it does nothing. Once
 //     answered for a chat that was closed (rank 8) it shows the answer only.
+//   - a live check (inbox B2, IN-6): its title and its steps as a numbered
+//     list, each with what to do and what to expect (text only: **nothing
+//     here runs anything**; "Copy" puts the step's words on the clipboard and
+//     nothing more), Pass, Fail and Skip and a note box per step, each press
+//     posting once to `POST /inbox/checks/<id>/steps/<n>`. The result is the
+//     owner's alone. While the daemon's deployed test does not confirm the
+//     check's PRs are in the running build, its line shows and the marks are
+//     off (the daemon refuses them too, 409). Done (rank 8), the steps show
+//     their verdicts, and "Copy receipt" puts the Markdown receipt (made here
+//     from the row, `checkReceipt`) on the clipboard;
+//   - a pull request (inbox B3, IN-4): its title as text and "Open on
+//     GitHub", a plain link to the URL `prOf` validated (none otherwise). A
+//     click opens the page and answers nothing: merging stays the owner's
+//     own, on GitHub or under the merge gate;
+//   - "PR list unavailable" (B3): which repositories could not be read, and
+//     why, in the daemon's words. Never shown as "nothing waiting".
+// The head's "Import a runbook" reads a runbook under a project's
+// docs/plans/ into unsaved drafts (`POST /inbox/checks/import`); only the
+// owner's Save on one draft stores it as a check.
+// Marks (inbox B4, IN-7, IN-8): a row of rank 5 to 8 the daemon calls
+// `markable` offers Snooze 1 h, Until tomorrow, 1 week and Dismiss, each a
+// plain button posting once to `POST /inbox/<id>/mark`; ranks 1 to 4 and "PR
+// list unavailable" never do (lib/inbox `canMark`, and the daemon refuses
+// them, 409). Hidden rows leave the list and the count; "Show hidden (n)"
+// shows them, muted, each saying why in code's words with Undo
+// (`{clear: true}`). Nothing here is keyboard-defaulted, and clicking a row
+// never marks it.
 // Every row links to its thread or task pane (a missed row, its chat only). **Clicking a row never answers
 // anything**: only Answer (or Enter in its box) and Withdraw post, each once
 // per press, through `POST /inbox/<id>/answer` (api.answerInbox). A 409 is
@@ -44,8 +71,10 @@ import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent }
 import { ApiError } from "../api";
 import type { ApprovalRequest } from "../types";
 import {
-  ANSWERS_TEXT, CLOSING_MS, PENDING_MAX_RANK, approvalReq, briefOf, clockOf, decisionBody, decisionOf, groupRows,
-  linkOf, missedNote, questionOf, waitingCount, withdrawHint, withdrawUntil, type InboxRow,
+  ANSWERS_TEXT, CLOSING_MS, NOTE_MAX, PENDING_MAX_RANK, SNOOZES, VERDICTS, approvalReq, briefOf, canMark, checkOf,
+  checkReceipt, clockOf, decisionBody, decisionOf, groupRows, hiddenNote, hiddenRows, linkOf, missedNote, parseDrafts,
+  prOf, prUnavailableOf, questionOf, isHidden, shownRows, snoozeUntil, waitingCount, withdrawHint, withdrawUntil,
+  type CheckDraft, type InboxRow, type MarkBody, type SnoozeFor, type Verdict,
 } from "../lib/inbox";
 import type { InboxSnapshot } from "../state/inbox";
 
@@ -63,8 +92,25 @@ export interface InboxViewProps {
   /** A decision's answer (B1): its own id, `{choice}` or `{text}`. */
   onDecide: (decisionId: string, body: { choice: number } | { text: string }) => Promise<unknown>;
   onReread: () => Promise<unknown> | void;
+  /** A live check's step (B2): the owner's verdict and note. */
+  onMarkCheck: (checkId: string, step: number, body: { verdict: Verdict; note: string }) => Promise<unknown>;
+  /** The runbook import (B2): `{path}` reads drafts, `{path, digest, save}` saves one. */
+  onImportChecks: (body: { path: string } | { path: string; digest: string; save: number }) => Promise<unknown>;
+  /** A snooze, dismissal or Undo of one row (B4, IN-7): the daemon judges the row's rank itself. */
+  onMark: (rowId: string, body: MarkBody) => Promise<unknown>;
+  /** Puts text on the clipboard (tests pass their own). */
+  copyText?: (text: string) => Promise<void>;
   /** The clock (tests pass their own). */
   now?: () => number;
+}
+
+const VERDICT_WORDS: Record<Verdict, string> = { pass: "Passed", fail: "Failed", skip: "Skipped" };
+const VERDICT_BUTTONS: Record<Verdict, string> = { pass: "Pass", fail: "Fail", skip: "Skip" };
+
+function defaultCopy(text: string): Promise<void> {
+  const clip = typeof navigator !== "undefined" ? navigator.clipboard : undefined;
+  if (!clip || typeof clip.writeText !== "function") return Promise.reject(new Error("the clipboard is not available here"));
+  return clip.writeText(text);
 }
 
 function tone(row: InboxRow): "pending" | "failed" | "plain" {
@@ -83,10 +129,22 @@ export function InboxView(props: InboxViewProps) {
   // is only preselected — nothing posts until Answer is pressed.
   const [picks, setPicks] = useState<Record<string, number | null>>({});
   const [notice, setNotice] = useState<string | null>(null);
+  // The runbook import (B2): the path box, and the drafts the daemon read (unsaved).
+  const [importOpen, setImportOpen] = useState(false);
+  const [importPath, setImportPath] = useState("");
+  const [importErr, setImportErr] = useState<string | null>(null);
+  const [runbook, setRunbook] = useState<{ path: string; digest: string; drafts: CheckDraft[] } | null>(null);
+  const [saved, setSaved] = useState<Record<number, string>>({});
+  // B4: the hidden rows are listed only while the owner asks to see them.
+  const [showHidden, setShowHidden] = useState(false);
   const sending = useRef(new Set<string>());
   const blockedNow = useRef(props.blocked);
   blockedNow.current = props.blocked;
   const { rows, status } = props.snapshot;
+
+  // "Show hidden" ends when nothing is hidden, so the next row hidden leaves the list as it should.
+  const hiddenCount = hiddenRows(rows).length;
+  useEffect(() => { if (!hiddenCount) setShowHidden(false); }, [hiddenCount]);
 
   // Read again when the view is shown: the rows are the daemon's, never kept here.
   useEffect(() => { void props.onReread(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, []);
@@ -120,28 +178,29 @@ export function InboxView(props: InboxViewProps) {
   const send = async (row: InboxRow, body: { text: string } | { withdraw: true }) =>
     post(row, () => props.onAnswer(row.id, body));
 
-  const post = async (row: InboxRow, call: () => Promise<unknown>) => {
-    if (blockedNow.current || sending.current.has(row.id)) return;
-    sending.current.add(row.id);
-    setBusy((all) => ({ ...all, [row.id]: true }));
+  const post = async (row: InboxRow, call: () => Promise<unknown>, key: string = row.id) => {
+    if (blockedNow.current || sending.current.has(key)) return;
+    sending.current.add(key);
+    setBusy((all) => ({ ...all, [key]: true }));
     setErrors((all) => drop(all, row.id));
     try {
       const result = await call();
-      setDrafts((all) => drop(all, row.id));
-      setPicks((all) => drop(all, row.id));
+      setDrafts((all) => drop(all, key));
+      setPicks((all) => drop(all, key));
       // A decision's reply says where the answer went, in the daemon's fixed words.
       const note = result && typeof result === "object" ? (result as { note?: unknown }).note : undefined;
       setNotice(typeof note === "string" && note ? note.slice(0, 200) : null);
     } catch (error) {
       if (error instanceof ApiError && error.status === 409) {
-        setNotice(GONE_NOTICE);
+        // A check's 409 is the deployed test's own line; anything else is "gone".
+        setNotice(key !== row.id && error.message ? error.message.slice(0, 300) : GONE_NOTICE);
       } else {
         const why = error instanceof Error && error.message ? error.message : "the daemon could not be reached";
         setErrors((all) => ({ ...all, [row.id]: `Not sent: ${why}` }));
       }
     } finally {
-      sending.current.delete(row.id);
-      setBusy((all) => drop(all, row.id));
+      sending.current.delete(key);
+      setBusy((all) => drop(all, key));
       // The daemon's projection is the truth: read it again either way.
       void props.onReread();
     }
@@ -162,6 +221,64 @@ export function InboxView(props: InboxViewProps) {
     if (!body) return;
     void post(row, () => props.onDecide(d.id, body));
   };
+
+  const copy = (text: string, done: string) => {
+    if (blockedNow.current) return;
+    void (props.copyText ?? defaultCopy)(text).then(() => setNotice(done), () => setNotice("Could not copy: the clipboard is not available."));
+  };
+
+  const markStep = (row: InboxRow, step: number, verdict: Verdict) => {
+    const c = checkOf(row);
+    if (!c || !c.markable || step < 0 || step >= c.steps.length) return;
+    const key = `${row.id}#${step}`;
+    const note = (drafts[key] || "").trim().slice(0, NOTE_MAX);
+    void post(row, () => props.onMarkCheck(c.id, step, { verdict, note }), key);
+  };
+
+  const readRunbook = async () => {
+    const path = importPath.trim();
+    if (blockedNow.current || !path || sending.current.has("import")) return;
+    sending.current.add("import");
+    setImportErr(null);
+    setRunbook(null);
+    setSaved({});
+    try {
+      const got = parseDrafts(await props.onImportChecks({ path }));
+      if (!got) throw new Error("the daemon's reply was not a list of drafts");
+      setRunbook(got);
+    } catch (error) {
+      setImportErr(error instanceof Error && error.message ? error.message : "the daemon could not be reached");
+    } finally {
+      sending.current.delete("import");
+    }
+  };
+
+  const saveDraft = async (index: number) => {
+    if (blockedNow.current || !runbook || sending.current.has("import")) return;
+    sending.current.add("import");
+    setImportErr(null);
+    try {
+      const got = await props.onImportChecks({ path: runbook.path, digest: runbook.digest, save: index });
+      const id = got && typeof got === "object" ? (got as { check_id?: unknown }).check_id : undefined;
+      setSaved((all) => ({ ...all, [index]: typeof id === "string" ? id.slice(0, 20) : "saved" }));
+      void props.onReread();
+    } catch (error) {
+      setImportErr(error instanceof Error && error.message ? error.message : "the daemon could not be reached");
+    } finally {
+      sending.current.delete("import");
+    }
+  };
+
+  const markKey = (row: InboxRow) => `${row.id}#mark`;
+
+  const mark = (row: InboxRow, body: MarkBody) => {
+    // Undo only ever shows a row; a snooze or dismiss only one the rule allows.
+    if (!("clear" in body) && !canMark(row)) return;
+    if ("clear" in body && !isHidden(row)) return;
+    void post(row, () => props.onMark(row.id, body), markKey(row));
+  };
+
+  const snooze = (row: InboxRow, choice: SnoozeFor) => mark(row, { snooze_until: snoozeUntil(choice, clock()) });
 
   const open = (row: InboxRow) => {
     if (blockedNow.current) return;
@@ -335,6 +452,109 @@ export function InboxView(props: InboxViewProps) {
         </div>
       );
     }
+    if (row.kind === "check") {
+      const c = checkOf(row);
+      if (!c) return null;      // not a check the HUD can read: shown, never markable
+      return (
+        <div className="ir-body">
+          <div className="ir-text" data-testid="inbox-check-title">{c.title}</div>
+          {!c.done && c.deploy && !c.markable ? (
+            <div className="ir-when ir-deploy" data-testid="inbox-check-deploy">{c.deploy}</div>
+          ) : null}
+          <ol className="ir-steps" data-testid="inbox-check-steps">
+            {c.steps.map((s, i) => {
+              const key = `${row.id}#${i}`;
+              const stepOff = props.blocked || !!busy[key] || !c.markable;
+              return (
+                <li className="ir-step" key={i} data-testid="inbox-check-step" data-verdict={s.verdict ?? ""}>
+                  <div className="ir-step-do" data-testid="inbox-check-do">{s.do}</div>
+                  {s.expect ? <div className="ir-step-expect" data-testid="inbox-check-expect">Expect: {s.expect}</div> : null}
+                  {s.verdict ? (
+                    <div className="ir-step-result" data-verdict={s.verdict} data-testid="inbox-check-result">
+                      {VERDICT_WORDS[s.verdict]}{s.note ? `: ${s.note}` : ""}
+                    </div>
+                  ) : null}
+                  <div className="ir-answer">
+                    <button type="button" className="quiet" data-testid="inbox-check-copy" disabled={props.blocked}
+                            onClick={() => copy(s.do, `Copied step ${i + 1}'s words.`)}>
+                      Copy
+                    </button>
+                    {!c.done ? (
+                      <>
+                        <input
+                          data-testid="inbox-check-note"
+                          aria-label={`Note on step ${i + 1}`}
+                          placeholder="Note (optional)"
+                          maxLength={NOTE_MAX}
+                          value={drafts[key] || ""}
+                          readOnly={!!busy[key]}
+                          onChange={(e) => {
+                            if (blockedNow.current || sending.current.has(key)) return;
+                            const value = e.target.value;
+                            setDrafts((all) => ({ ...all, [key]: value }));
+                          }}
+                          // Enter marks nothing: only a verdict button records one.
+                          onKeyDown={(e) => {
+                            if (e.key !== "Escape") e.stopPropagation();
+                            if (e.key === "Enter") e.preventDefault();
+                          }}
+                        />
+                        {VERDICTS.map((v) => (
+                          <button type="button" key={v} data-testid={`inbox-check-${v}`} data-verdict={v}
+                                  disabled={stepOff} onClick={() => markStep(row, i, v)}>
+                            {VERDICT_BUTTONS[v]}
+                          </button>
+                        ))}
+                      </>
+                    ) : null}
+                  </div>
+                </li>
+              );
+            })}
+          </ol>
+          {c.steps.some((s) => s.verdict) ? (
+            <div className="ir-answer">
+              <button type="button" data-testid="inbox-check-receipt" disabled={props.blocked}
+                      onClick={() => copy(checkReceipt(c, row.origin), "Copied the receipt as Markdown.")}>
+                Copy receipt (Markdown)
+              </button>
+            </div>
+          ) : null}
+        </div>
+      );
+    }
+    const pull = prOf(row);
+    if (pull) {
+      return (
+        <div className="ir-body">
+          {pull.title ? <div className="ir-text" data-testid="inbox-pr-title">{pull.title}</div> : null}
+          {pull.url ? (
+            <div className="ir-answer">
+              <a className="ir-link" data-testid="inbox-pr-link" href={pull.url} target="_blank"
+                 rel="noopener noreferrer" aria-disabled={props.blocked ? "true" : undefined}
+                 // Under a card nothing opens: a click, a middle click (auxclick)
+                 // or Enter on the focused link (as BrowserTabStrip and EditorTabs).
+                 onClick={(e) => { if (blockedNow.current) e.preventDefault(); }}
+                 onAuxClick={(e) => { if (blockedNow.current) e.preventDefault(); }}
+                 onMouseDown={(e) => { if (blockedNow.current && e.button === 1) e.preventDefault(); }}
+                 onKeyDown={(e) => { if (blockedNow.current && e.key === "Enter") e.preventDefault(); }}>
+                Open on GitHub
+              </a>
+            </div>
+          ) : null}
+        </div>
+      );
+    }
+    const unread = prUnavailableOf(row);
+    if (unread) {
+      return (
+        <div className="ir-body">
+          {unread.map((r) => (
+            <div className="ir-when muted" key={r.repo} data-testid="inbox-pr-unavailable">{r.repo}: {r.reason}</div>
+          ))}
+        </div>
+      );
+    }
     // "Denied while you were away" (A3, IN-3): information only. Its words are
     // code's (`missedNote`, from `resolution`); nothing here asks again
     // (design §10, question 3): the row's only control is its chat link.
@@ -352,8 +572,42 @@ export function InboxView(props: InboxViewProps) {
     return brief ? <div className="ir-body"><div className="ir-text" data-testid="inbox-brief">{brief}</div></div> : null;
   };
 
-  const groups = groupRows(rows);
+  const hidden = hiddenRows(rows);
+  const groups = groupRows(showHidden ? rows : shownRows(rows));
   const count = waitingCount(rows);
+  const visible = shownRows(rows).length;
+
+  // B4: Snooze and Dismiss for a row of rank 5 to 8 (`canMark`), or, for a
+  // hidden row, why it is hidden and Undo. Plain buttons, none defaulted.
+  const marks = (row: InboxRow) => {
+    const off = props.blocked || !!busy[markKey(row)];
+    if (isHidden(row)) {
+      return (
+        <div className="ir-marks" data-testid="inbox-marks">
+          <span className="ir-when muted" data-testid="inbox-hidden-note">{hiddenNote(row, now)}</span>
+          <button type="button" className="quiet" data-testid="inbox-mark-undo" disabled={off}
+                  onClick={() => mark(row, { clear: true })}>
+            Undo
+          </button>
+        </div>
+      );
+    }
+    if (!canMark(row)) return null;
+    return (
+      <div className="ir-marks" data-testid="inbox-marks">
+        {SNOOZES.map((s) => (
+          <button type="button" key={s.key} className="quiet" data-testid={`inbox-snooze-${s.key}`} disabled={off}
+                  onClick={() => snooze(row, s.key)}>
+            {s.label}
+          </button>
+        ))}
+        <button type="button" className="quiet" data-testid="inbox-dismiss" disabled={off}
+                onClick={() => mark(row, { dismiss: true })}>
+          Dismiss
+        </button>
+      </div>
+    );
+  };
 
   return (
     <div className="scroll inbox" data-testid="inbox-view" data-status={status} data-reads={props.snapshot.reads}>
@@ -362,7 +616,66 @@ export function InboxView(props: InboxViewProps) {
         <span className="muted small" data-testid="inbox-summary">
           {status === "ready" ? (count ? `${count} waiting on you` : "Nothing waiting on you") : ""}
         </span>
+        {hidden.length ? (
+          <button type="button" className="quiet" data-testid="inbox-show-hidden" disabled={props.blocked}
+                  aria-pressed={showHidden} onClick={() => { if (!blockedNow.current) setShowHidden((v) => !v); }}>
+            {showHidden ? `Hide hidden (${hidden.length})` : `Show hidden (${hidden.length})`}
+          </button>
+        ) : null}
+        <button type="button" className="quiet" data-testid="inbox-import-toggle" disabled={props.blocked}
+                aria-expanded={importOpen} onClick={() => setImportOpen((v) => !v)}>
+          Import a runbook
+        </button>
       </div>
+      {importOpen ? (
+        <div className="inbox-import" data-testid="inbox-import">
+          <div className="ir-answer">
+            <input
+              data-testid="inbox-import-path"
+              aria-label="Runbook path"
+              placeholder="/home/you/projects/Jarvis/docs/plans/….md"
+              value={importPath}
+              onChange={(e) => { if (!blockedNow.current) setImportPath(e.target.value); }}
+              onKeyDown={(e) => {
+                if (e.key !== "Escape") e.stopPropagation();
+                if (e.key === "Enter" && !e.nativeEvent.isComposing) {
+                  e.preventDefault();
+                  void readRunbook();
+                }
+              }}
+            />
+            <button type="button" data-testid="inbox-import-read" disabled={props.blocked || !importPath.trim()}
+                    onClick={() => void readRunbook()}>
+              Read
+            </button>
+          </div>
+          <div className="muted small">A runbook directly inside a project's docs/plans/. Nothing is saved until you save a draft.</div>
+          {importErr ? <div className="err small" role="alert" data-testid="inbox-import-error">Not imported: {importErr}</div> : null}
+          {runbook ? (
+            <ol className="ir-drafts" data-testid="inbox-import-drafts">
+              {runbook.drafts.map((d) => (
+                <li key={d.index} className="ir-draft" data-testid="inbox-import-draft" data-savable={d.savable ? "1" : "0"}>
+                  <span className="ir-draft-title">{d.title}</span>
+                  <span className="muted small">
+                    {` ${d.steps.length} step${d.steps.length === 1 ? "" : "s"}`}
+                    {d.prs.length ? `, ${d.prs.map((n) => `#${n}`).join(", ")}` : ""}
+                  </span>
+                  {saved[d.index] ? (
+                    <span className="muted small" data-testid="inbox-import-saved">{` Saved as ${saved[d.index]}.`}</span>
+                  ) : d.savable ? (
+                    <button type="button" data-testid="inbox-import-save" disabled={props.blocked}
+                            onClick={() => void saveDraft(d.index)}>
+                      Save
+                    </button>
+                  ) : (
+                    <span className="muted small" data-testid="inbox-import-reason">{` Cannot be saved: ${d.reason ?? "unknown"}.`}</span>
+                  )}
+                </li>
+              ))}
+            </ol>
+          ) : null}
+        </div>
+      ) : null}
       {notice ? <div className="inbox-notice" role="status" data-testid="inbox-notice">{notice}</div> : null}
       {status === "loading" && !rows.length ? <div className="pad muted" data-testid="inbox-loading">Reading the inbox…</div> : null}
       {status === "unavailable" ? (
@@ -371,7 +684,7 @@ export function InboxView(props: InboxViewProps) {
       {status === "error" ? (
         <div className="pad err" data-testid="inbox-error">Could not read the inbox: {props.snapshot.message}</div>
       ) : null}
-      {status === "ready" && !rows.length ? (
+      {status === "ready" && !visible ? (
         <div className="pad muted" data-testid="inbox-empty">Nothing is waiting on you.</div>
       ) : null}
       {groups.map(({ group, rows: mine }) => (
@@ -383,7 +696,7 @@ export function InboxView(props: InboxViewProps) {
             return (
               // No handler on the row itself: a click on it answers nothing.
               <div className="inbox-row" key={row.id} data-testid="inbox-row" data-id={row.id} data-kind={row.kind}
-                   data-rank={row.rank} data-tone={tone(row)}>
+                   data-rank={row.rank} data-tone={tone(row)} data-hidden={isHidden(row) ? "1" : undefined}>
                 <div className="ir-head">
                   <span className="ir-title" data-testid="inbox-title">{row.title}</span>
                   {asked ? <span className="ir-time muted">{asked}</span> : null}
@@ -391,6 +704,7 @@ export function InboxView(props: InboxViewProps) {
                 {row.blocks ? <div className="ir-blocks muted" data-testid="inbox-blocks">{row.blocks}</div> : null}
                 {row.origin ? <div className="ir-origin" data-testid="inbox-origin">{row.origin}</div> : null}
                 {body(row)}
+                {marks(row)}
                 {errors[row.id] ? <div className="err small" role="alert" data-testid="inbox-row-error">{errors[row.id]}</div> : null}
                 {link ? (
                   <div className="ir-foot">

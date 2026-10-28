@@ -45,6 +45,28 @@ What it pins, one section each (each names the mutation it is meant to catch):
             `{text}` on Enter; under a card the row is inert, Answer disabled,
             and a trusted click, typing and Enter post nothing [auto-submit;
             submit on Enter; double post; innerHTML; not inert]
+  check     inbox B2's live checks (`POST /inbox/checks/<id>/steps/<n>`) sit
+            under "When you have time", uncounted, plain Graphite; steps are
+            text (hostile title, steps and origin make no element); Copy
+            writes the step's words to the clipboard and posts nothing; a
+            verdict posts `{verdict, note}` once; not confirmed deployed, the
+            daemon's line shows and the marks are disabled; done, the row
+            moves under "For your information" with its verdicts and the
+            receipt copies as Markdown; the import reads drafts and saves
+            only the one the owner saves; under a card the row is inert and a
+            trusted click posts nothing [auto-mark; double post; innerHTML;
+            mark while undeployed; not inert]
+  marks     inbox B4's Snooze 1 h, Until tomorrow, 1 week and Dismiss show on
+            rows of rank 5 to 8 only (never on a question, a proposal, a
+            blocked task or "PR list unavailable"); the HUD reads
+            `/inbox?all=1`; Dismiss posts `{dismiss: true}` once with the id
+            through `encodeURIComponent`; the row leaves the list and a
+            hidden rank-5 row leaves the count; "Show hidden (n)" shows it
+            muted with "Dismissed" and Undo, which posts `{clear: true}` and
+            brings it back; a snooze posts its time about an hour ahead; a
+            click on a row marks nothing; under a card the marks are inert
+            and a trusted click posts nothing [marks on rank 1 to 4; count
+            hidden rows; double post; row onClick marks; not inert]
   card      the approval card with the Inbox open behaves exactly as it does
             with a chat pane (the same assertions, the same answers): one card,
             the veil's, never a second instance in the inbox; Enter does
@@ -56,8 +78,25 @@ What it pins, one section each (each names the mutation it is meant to catch):
   badge     `navigator.setAppBadge` (stubbed) gets the count and is cleared at
             0 and when a read fails; without the API nothing breaks [badge all
             ranks; no clear; a stale badge after a failed read]
+  prs       inbox B3's PR rows sit under "Waiting on you" between a blocked
+            task and a decision, counted; the PR's title is text; the one
+            control is "Open on GitHub", a plain new-tab link to the PR's own
+            URL (none for another repo's); a click on the row posts nothing;
+            "PR list unavailable" is counted and never reads as "nothing
+            waiting" [a link to any URL; innerHTML; empty as nothing waiting]
   older     an older daemon (404) shows no count and says the inbox is not
             available, never "nothing waiting" [404 read as empty]
+  aurora    the owner's aurora (2026-10-25) is on the owner Inbox row only,
+            never the "Inbox" project's (the mock's `inbox: true` project,
+            named Inbox for the section); a still tint with nothing waiting
+            (no animation at all), drifting with sparks while something
+            waits, its keyframes only transform/opacity, dimmed and spark-free
+            while the amber count is pending, which stays amber on an opaque
+            chip; it moves no layout; it pauses under the approval card and
+            resumes after; prefers-reduced-motion leaves a static tint with
+            no animation [no reduced-motion rule; no veil pause; the aurora
+            on the project row]. `JARVIS_AURORA_SHOTS=<dir>` also saves the
+            sidebar, calm, waiting and pending, as PNGs there.
 
 Run alone (after `cd hud && npm ci --ignore-scripts && npm run build`):
   systemd-run --user --scope -q -p MemoryMax=3G -p MemorySwapMax=0 -- env PYTHONPATH=$PWD \\
@@ -502,12 +541,19 @@ def _missed_checks(page, mock, check, until):
           m1.locator('[data-testid="inbox-missed-why"]').inner_text() == "Nobody answered in time, so it was denied."
           and m2.locator('[data-testid="inbox-missed-why"]').inner_text()
           == "Jarvis stopped before you answered, so it was denied.")
-    controls = m1.evaluate("e => [...e.querySelectorAll('button, input, textarea, a')].map(b => b.dataset.testid)")
+    # Inbox B4: a rank-8 row may also be snoozed or dismissed (its own
+    # `inbox-marks` strip, the marks section's); nothing else.
+    outside = ("e => [...e.querySelectorAll('button, input, textarea, a')]"
+               ".filter(b => !b.closest('[data-testid=\"inbox-marks\"]')).map(b => b.dataset.testid)")
+    controls = m1.evaluate(outside)
+    marks = m1.evaluate("e => [...e.querySelectorAll('[data-testid=\"inbox-marks\"] button')].map(b => b.dataset.testid)")
     check("its one control is 'Open its chat': no answer box, no Withdraw, no 'ask again' [mutation: an ask-again "
           "button]", controls == ["inbox-link"] and m1.locator('[data-testid="inbox-link"]').inner_text() == "Open its chat"
-          and "again" not in m1.locator('[data-testid="inbox-link"]').inner_text().lower(), str(controls))
+          and "again" not in m1.locator('[data-testid="inbox-link"]').inner_text().lower()
+          and set(marks) <= {"inbox-snooze-hour", "inbox-snooze-tomorrow", "inbox-snooze-week", "inbox-dismiss"},
+          str(controls + marks))
     check("one with no chat has no link at all, not even to its task",
-          m3.locator("button").count() == 0, str(m3.locator("button").count()))
+          m3.evaluate(outside) == [], str(m3.evaluate(outside)))
     imgs = page.evaluate("() => document.querySelectorAll('[data-testid=\"inbox-view\"] img').length")
     check("its origin is literal text: no element made, nothing ran [mutation: innerHTML]",
           imgs == 0 and page.evaluate("window.__pwned === undefined")
@@ -525,6 +571,94 @@ def _missed_checks(page, mock, check, until):
     until(lambda: page.evaluate("window.__hud.state().chats['1'].threadId") == "t1", timeout=3)
     check("its link opens its chat, and answers nothing",
           page.evaluate("window.__hud.state().chats['1'].threadId") == "t1" and len(_answers(mock)) == posts)
+    check("the title is unchanged", page.title() == TITLE, page.title())
+
+
+PR_REPO = "Johnwang688/Calc"
+
+
+def pr_row(n=7, url=None, title="Add multiply"):
+    """A PR row as inbox B3's poll serves it."""
+    return {"id": f"pr:{PR_REPO}#{n}", "kind": "pr", "rank": 5, "title": f"PR #{n} is ready to merge",
+            "blocks": f"{PR_REPO} · branch claude/x · checks passing", "project_id": None, "thread_id": None,
+            "task_id": None, "asked_at": _iso(-3600), "expires_at": None, "origin": "",
+            "detail": {"repo": PR_REPO, "number": n, "title": title, "branch": "claude/x", "head": "a" * 40,
+                       "checks": "passing", "merge_state": "CLEAN",
+                       "url": url if url is not None else f"https://github.com/{PR_REPO}/pull/{n}"}}
+
+
+def _pr_checks(page, mock, check, until):
+    """Inbox B3 (IN-4): pull requests and "PR list unavailable"."""
+    rows = [task_row(), pr_row(title="Fix " + HOSTILE), pr_row(8, url="https://github.com/evil/repo/pull/8"),
+            dec_row()]
+    _open(page, mock, until, rows)
+    you = page.evaluate("() => [...document.querySelectorAll('[data-testid=\"inbox-group-you\"] "
+                        "[data-testid=\"inbox-row\"]')].map(r => r.dataset.id)")
+    check("PR rows sit under 'Waiting on you' after the blocked task",
+          you == ["task:k1", f"pr:{PR_REPO}#7", f"pr:{PR_REPO}#8"], str(you))
+    check("they are counted (ranks 1 to 5)", _count(page) == "3", str(_count(page)))
+    r7, r8 = _row(page, f"pr:{PR_REPO}#7"), _row(page, f"pr:{PR_REPO}#8")
+    # Inbox B4: a PR row (rank 5) may also be snoozed or dismissed, in its own `inbox-marks` strip.
+    controls = r7.evaluate("e => [...e.querySelectorAll('button, input, textarea, a')]"
+                           ".filter(b => !b.closest('[data-testid=\"inbox-marks\"]')).map(b => b.dataset.testid)")
+    marks = r7.evaluate("e => [...e.querySelectorAll('[data-testid=\"inbox-marks\"] button')].map(b => b.dataset.testid)")
+    link = r7.locator('[data-testid="inbox-pr-link"]')
+    check("its one control is 'Open on GitHub', a new-tab link to its own PR [mutation: a link to any URL]",
+          controls == ["inbox-pr-link"] and link.get_attribute("href") == f"https://github.com/{PR_REPO}/pull/7"
+          and marks == ["inbox-snooze-hour", "inbox-snooze-tomorrow", "inbox-snooze-week", "inbox-dismiss"]
+          and link.get_attribute("target") == "_blank" and link.get_attribute("rel") == "noopener noreferrer",
+          str(controls))
+    check("a URL for another repository is not linked",
+          r8.locator("a").count() == 0, str(r8.locator("a").count()))
+    imgs = page.evaluate("() => document.querySelectorAll('[data-testid=\"inbox-view\"] img').length")
+    check("the PR's title is literal text: no element made, nothing ran [mutation: innerHTML]",
+          imgs == 0 and page.evaluate("window.__pwned === undefined")
+          and HOSTILE in r7.locator('[data-testid="inbox-pr-title"]').inner_text(), str(imgs))
+    posts, decided = len(_answers(mock)), len(_decided(mock))
+    for r in (r7, r8):
+        r.click(position={"x": 4, "y": 4})
+        r.locator('[data-testid="inbox-title"]').click()
+    time.sleep(0.3)
+    check("a click on a PR row posts nothing and opens nothing",
+          len(_answers(mock)) == posts and len(_decided(mock)) == decided
+          and page.locator(_pane(1)).get_attribute("data-view") == "inbox")
+    # Under a card the PR row is inert: a trusted click, a middle click or
+    # Enter on its link opens no page (review of PR #320, NIT-2).
+    c = card("prcard0001")
+    mock.world["approvals"].append(c)
+    mock.emit("approval_requested", c)
+    cardloc = page.locator('[data-testid="approval-card"]')
+    until(lambda: cardloc.count() == 1, timeout=4)
+    opened = []
+    page.context.on("page", lambda p: opened.append(p))
+    check("under a card the PR row is inert [mutation: not inert]",
+          r7.evaluate("e => !!e.closest('[inert]')"))
+    box = link.bounding_box()
+    if box:
+        x, y = box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
+        page.mouse.click(x, y)
+        page.mouse.click(x, y, button="middle")
+    link.evaluate("e => e.focus()")
+    page.keyboard.press("Enter")
+    time.sleep(0.5)
+    for p in opened:
+        p.close()
+    check("a click, a middle click or Enter on its link under the card opens nothing [mutation: no auxclick guard]",
+          not opened and cardloc.count() == 1, f"{len(opened)} pages opened")
+    page.keyboard.press("Escape")
+    until(lambda: cardloc.count() == 0, timeout=4)
+    unavailable = {"id": "prx:list", "kind": "pr_unavailable", "rank": 5,
+                   "title": "PR list unavailable for 1 repository", "blocks": "open pull requests may be waiting",
+                   "project_id": None, "thread_id": None, "task_id": None, "asked_at": None, "expires_at": None,
+                   "origin": "", "detail": {"repos": [{"repo": PR_REPO, "reason": "gh is not logged in",
+                                                       "last_read": None}]}}
+    _open(page, mock, until, [unavailable])
+    check("'PR list unavailable' is counted and never reads as nothing waiting [mutation: empty as nothing]",
+          _count(page) == "1" and page.locator('[data-testid="inbox-empty"]').count() == 0
+          and page.locator('[data-testid="inbox-pr-unavailable"]').inner_text() == f"{PR_REPO}: gh is not logged in",
+          str(_count(page)))
+    check("'PR list unavailable' offers no Snooze or Dismiss (inbox B4) [mutation: prx markable]",
+          _row(page, "prx:list").locator('[data-testid="inbox-marks"]').count() == 0)
     check("the title is unchanged", page.title() == TITLE, page.title())
 
 
@@ -757,6 +891,174 @@ def _badge_checks(browser, mock, check, until, guard, init_script, base):
             ctx.close()
 
 
+OWNER_ROW = '[data-testid="owner-inbox"]'
+TEXT = "rgb(226, 223, 215)"    # --text
+BG_1 = "rgb(26, 26, 25)"       # --bg-1
+
+
+def _pseudo(page, selector, pseudo, prop):
+    return page.evaluate("([s, p, q]) => { const e = document.querySelector(s); "
+                         "return e ? getComputedStyle(e, p)[q] : null; }", [selector, pseudo, prop])
+
+
+def _aurora_state(page):
+    return page.locator(OWNER_ROW).get_attribute("data-aurora")
+
+
+def _aurora_shot(page, name):
+    import os
+    where = os.environ.get("JARVIS_AURORA_SHOTS")
+    if not where:
+        return
+    time.sleep(1.2)     # some drift, and a spark, into the frame
+    box = page.locator("#sidebar").bounding_box()
+    path = Path(where) / f"hud-aurora-{name}.png"
+    page.screenshot(path=str(path), clip={"x": box["x"], "y": box["y"], "width": box["width"],
+                                          "height": min(box["height"], 260)})
+    print(f"  (screenshot: {path})")
+
+
+def _aurora_checks(page, mock, check, until):
+    # The mock's `inbox: true` project (p1), named as the real one is.
+    inbox_project = next(p for p in mock.world["projects"] if p.get("inbox"))
+    was = inbox_project["name"]
+    inbox_project["name"] = "Inbox"
+    try:
+        _aurora_body(page, mock, check, until, inbox_project["id"])
+    finally:
+        inbox_project["name"] = was
+
+
+def _aurora_body(page, mock, check, until, inbox_id):
+    _reset(mock, [])
+    reads = _reads(mock)
+    _fresh(page, mock, until, SINGLE)
+    row = page.locator(OWNER_ROW)
+    until(lambda: row.count() == 1 and _reads(mock) > reads, timeout=4)
+    until(lambda: _aurora_state(page) == "calm", timeout=3)
+    project = f'[data-testid="project-{inbox_id}"]'
+    check("the owner Inbox row carries the aurora, and its label is still Inbox",
+          "aurora" in (row.get_attribute("class") or "") and row.locator(".nm").inner_text() == "Inbox"
+          and "gradient" in (_pseudo(page, OWNER_ROW, "::before", "backgroundImage") or ""))
+    check("the inbox: true project's row, also labelled Inbox, has none "
+          "[mutation: the aurora on the project row]",
+          page.locator(f'[data-testid="project-name-{inbox_id}"]').inner_text() == "Inbox"
+          and page.evaluate(f"() => document.querySelectorAll('{project}.aurora, {project} .aurora').length") == 0
+          and _pseudo(page, project, "::before", "animationName") in ("none", None)
+          and _pseudo(page, project, "::after", "animationName") in ("none", None)
+          and "gradient" not in (_pseudo(page, project, "::before", "backgroundImage") or ""))
+    check("with nothing waiting it is a still tint: no animation on either layer, no sparks "
+          "[mutation: calm animates]",
+          _pseudo(page, OWNER_ROW, "::before", "animationName") == "none"
+          and _pseudo(page, OWNER_ROW, "::after", "animationName") == "none"
+          and _pseudo(page, OWNER_ROW, "::after", "display") == "none")
+    frames = page.evaluate("""() => {
+      const out = {};
+      for (const sheet of document.styleSheets) {
+        let rules; try { rules = sheet.cssRules; } catch (e) { continue; }
+        for (const r of rules) {
+          if (r.type !== CSSRule.KEYFRAMES_RULE || !r.name.startsWith('aurora-')) continue;
+          const props = new Set();
+          for (const k of r.cssRules) for (let i = 0; i < k.style.length; i++) props.add(k.style[i]);
+          out[r.name] = [...props].sort();
+        }
+      }
+      return out;
+    }""")
+    check("the shipped keyframes animate only transform (the band) and opacity (the sparks) "
+          "[mutation: a background-position drift]",
+          frames == {"aurora-drift": ["transform"], "aurora-twinkle": ["opacity"]}, str(frames))
+    check("the row's text is --text, unchanged",
+          row.locator(".nm").evaluate("e => getComputedStyle(e).color") == TEXT)
+    check("the title is unchanged", page.title() == TITLE, page.title())
+    _aurora_shot(page, "calm")
+
+    # Something waits, nothing pending: the drift and the sparks.
+    _reset(mock, [prop_row(), task_row()])
+    mock_inbox.changed(mock)
+    until(lambda: _count(page) == "2" and _aurora_state(page) == "live", timeout=4)
+    check("while something waits (not pending) the band drifts and the sparks twinkle",
+          _pseudo(page, OWNER_ROW, "::before", "animationName") == "aurora-drift"
+          and _pseudo(page, OWNER_ROW, "::before", "animationDuration") == "11s"
+          and _pseudo(page, OWNER_ROW, "::after", "animationName") == "aurora-twinkle"
+          and _pseudo(page, OWNER_ROW, "::after", "display") == "block")
+    _aurora_shot(page, "waiting")
+
+    # Pending (a rank-2 question): the amber count reads exactly as before.
+    _reset(mock)
+    mock_inbox.changed(mock)
+    until(lambda: _count(page) == "3" and _aurora_state(page) == "pending", timeout=4)
+    badge = page.locator('[data-testid="owner-inbox-count"]')
+    check("while pending the count is amber on an opaque --bg-1 chip",
+          badge.evaluate("e => getComputedStyle(e).color") == AMBER
+          and badge.evaluate("e => getComputedStyle(e).backgroundColor") == BG_1,
+          badge.evaluate("e => [getComputedStyle(e).color, getComputedStyle(e).backgroundColor].join(' / ')"))
+    check("and the aurora steps back: dimmed band, still drifting, no sparks",
+          float(_pseudo(page, OWNER_ROW, "::before", "opacity")) < 1
+          and _pseudo(page, OWNER_ROW, "::before", "animationName") == "aurora-drift"
+          and _pseudo(page, OWNER_ROW, "::after", "display") == "none")
+    _aurora_shot(page, "pending")
+
+    # Selected (a pane shows the inbox): the 2px accent bar is left clear of
+    # the layers the isolated row paints over its own inset shadow.
+    row.click()
+    until(lambda: "sel" in (row.get_attribute("class") or ""), timeout=3)
+    check("selected, the accent bar stays visible: the layers start 2px in, the bar is the accent",
+          _pseudo(page, OWNER_ROW, "::before", "left") == "2px"
+          and _pseudo(page, OWNER_ROW, "::after", "left") == "2px"
+          and "rgb(111, 195, 223)" in row.evaluate("e => getComputedStyle(e).boxShadow"),
+          row.evaluate("e => getComputedStyle(e).boxShadow"))
+
+    # No layout shift: the same box with and without the aurora, nothing overflows.
+    boxes = page.evaluate("""(sel) => {
+      const r = document.querySelector(sel);
+      const box = () => { const b = r.getBoundingClientRect(); return [b.x, b.y, b.width, b.height]; };
+      const a = box(); r.classList.remove('aurora'); const b = box(); r.classList.add('aurora');
+      return {same: JSON.stringify(a) === JSON.stringify(b), fits: getComputedStyle(r).overflowX === "hidden",
+              sidebar: document.getElementById('sidebar').scrollWidth <= document.getElementById('sidebar').clientWidth};
+    }""", OWNER_ROW)
+    check("the aurora moves no layout: the same box without it, clipped by the row, nothing overflows the sidebar",
+          boxes["same"] and boxes["fits"] and boxes["sidebar"], str(boxes))
+
+    # The approval card is the loudest thing on screen: the aurora pauses under it.
+    check("it runs while no card is up",
+          _pseudo(page, OWNER_ROW, "::before", "animationPlayState") == "running")
+    c = card("auroracard01")
+    mock.world["approvals"].append(c)
+    mock.emit("approval_requested", c)
+    cardloc = page.locator('[data-testid="approval-card"]')
+    until(lambda: cardloc.count() == 1, timeout=4)
+    until(lambda: page.evaluate(f"() => !!document.querySelector('{OWNER_ROW}').closest('[inert]')"), timeout=3)
+    check("under the approval card the aurora pauses [mutation: no veil pause]",
+          _pseudo(page, OWNER_ROW, "::before", "animationPlayState") == "paused"
+          and _pseudo(page, OWNER_ROW, "::after", "animationPlayState") == "paused",
+          str(_pseudo(page, OWNER_ROW, "::before", "animationPlayState")))
+    page.keyboard.press("Escape")
+    until(lambda: cardloc.count() == 0, timeout=4)
+    until(lambda: _pseudo(page, OWNER_ROW, "::before", "animationPlayState") == "running", timeout=3)
+    check("and runs again once the card is answered", True)
+
+    # prefers-reduced-motion: a static tint, no animation at all.
+    _reset(mock, [prop_row(), task_row()])
+    mock_inbox.changed(mock)
+    until(lambda: _aurora_state(page) == "live", timeout=4)
+    page.emulate_media(reduced_motion="reduce")
+    try:
+        time.sleep(0.1)
+        check("under prefers-reduced-motion the band does not animate [mutation: no reduced-motion rule]",
+              _pseudo(page, OWNER_ROW, "::before", "animationName") == "none",
+              str(_pseudo(page, OWNER_ROW, "::before", "animationName")))
+        check("nor do the sparks, which are gone",
+              _pseudo(page, OWNER_ROW, "::after", "animationName") == "none"
+              and _pseudo(page, OWNER_ROW, "::after", "display") == "none")
+        check("the tint stays, still: the gradient is there, unmoved",
+              "gradient" in (_pseudo(page, OWNER_ROW, "::before", "backgroundImage") or "")
+              and _pseudo(page, OWNER_ROW, "::before", "transform") in ("none", "matrix(1, 0, 0, 1, 0, 0)"),
+              str(_pseudo(page, OWNER_ROW, "::before", "transform")))
+    finally:
+        page.emulate_media(reduced_motion="no-preference")
+
+
 def _older_checks(page, mock, check, until):
     _reset(mock)
     _st(mock)["fail"] = (404, "route not found")
@@ -875,11 +1177,255 @@ def _decision_checks(page, mock, check, until):
     check("the title is unchanged", page.title() == TITLE, page.title())
 
 
+def chk_row(cid="c0123456789ab", thread="t1", steps=None, prs=(), markable=True, deploy_text="",
+            title="Quick review", origin="Claude · chat ‹jarvis› (t1)"):
+    """An open live check as inbox B2's projection serves it (rank 7)."""
+    steps = steps or [{"do": "Press Quick review.", "expect": "A spinner shows."},
+                      {"do": "Wait for the result.", "expect": "A panel lists findings."}]
+    return {"id": f"chk:{cid}", "kind": "check", "rank": 7,
+            "title": f"Live check {cid} from chat {thread}: 0 of {len(steps)} steps marked",
+            "blocks": deploy_text or "nothing waits; your marks are the receipt", "project_id": "p1",
+            "thread_id": thread, "task_id": None, "asked_at": _iso(-60), "expires_at": None, "origin": origin,
+            "detail": {"check_id": cid, "title": title, "prs": list(prs), "steps": steps, "results": [],
+                       "done": False, "deploy": {"state": "deployed" if markable else "not confirmed deployed",
+                                                 "text": deploy_text, "markable": markable},
+                       "merged": False, "deployed_sha": None, "created_at": _iso(-60), "imported_from": None}}
+
+
+def _marked(mock):
+    return list(_st(mock).get("marked", []))
+
+
+def mark_pr_row(n=301, head="a" * 40):
+    """Inbox B3's rank-5 PR row (#320), as its projection serves it."""
+    return {"id": f"pr:Johnwang688/jarvis#{n}", "kind": "pr", "rank": 5, "title": f"PR #{n} is ready to merge",
+            "blocks": "waits on your merge", "project_id": "p1", "thread_id": None, "task_id": None,
+            "asked_at": _iso(-120), "expires_at": None, "origin": "",
+            "detail": {"repo": "Johnwang688/jarvis", "number": n, "title": "x", "head": head, "checks": "success"}}
+
+
+def mark_prx_row():
+    """Inbox B3's "PR list unavailable" (#320): never snoozed or dismissed."""
+    return {"id": "prx:list", "kind": "pr_unavailable", "rank": 5, "title": "PR list unavailable",
+            "blocks": "Jarvis could not read the open PRs", "project_id": None, "thread_id": None,
+            "task_id": None, "asked_at": _iso(-30), "expires_at": None, "origin": "", "detail": {"repos": []}}
+
+
+def _mark_posts(mock):
+    return list(_st(mock).get("mark_posts", []))
+
+
+def _marks_checks(page, mock, check, until):
+    """Inbox B4 (IN-7, IN-8): Snooze and Dismiss on ranks 5 to 8, Show hidden, Undo."""
+    _st(mock)["mark_posts"], _st(mock)["marks"] = [], {}
+    reads_all = _st(mock).get("all_reads", 0)
+    _open(page, mock, until, basic_rows() + [mark_pr_row(), mark_prx_row(), dec_row(), missed_row()])
+    check("the HUD reads /inbox?all=1", _st(mock).get("all_reads", 0) > reads_all)
+    with_marks = page.evaluate("() => [...document.querySelectorAll('[data-testid=\"inbox-row\"]')]"
+                               ".filter(r => r.querySelector('[data-testid=\"inbox-marks\"]')).map(r => r.dataset.id)")
+    check("Snooze and Dismiss show on ranks 5 to 8 only, never on 1 to 4 or 'PR list unavailable' "
+          "[mutation: marks on rank 1 to 4]",
+          sorted(with_marks) == sorted(["pr:Johnwang688/jarvis#301", "dec:d0123456789ab", "task:kf", "missed:m1"]),
+          str(with_marks))
+    labels = _row(page, "task:kf").locator('[data-testid="inbox-marks"] button').all_inner_texts()
+    check("its buttons are Snooze 1 h, Until tomorrow, 1 week and Dismiss",
+          labels == ["Snooze 1 h", "Until tomorrow", "1 week", "Dismiss"], str(labels))
+    check("the count is ranks 1 to 5: the question, proposal, blocked task, PR and 'PR list unavailable'",
+          _count(page) == "5", str(_count(page)))
+    # A click on a row, its title and its words marks nothing.
+    _row(page, "task:kf").locator('[data-testid="inbox-title"]').click()
+    _row(page, "task:kf").click(position={"x": 4, "y": 4})
+    time.sleep(0.3)
+    check("a click on a row marks nothing [mutation: row onClick marks]", _mark_posts(mock) == [],
+          str(_mark_posts(mock)))
+    focused = _active(page)
+    check("nothing is focused or defaulted to a mark button", not str(focused).startswith("inbox-snooze")
+          and focused != "inbox-dismiss", str(focused))
+    # Dismiss a rank-5 PR: it leaves the list and the count.
+    _row(page, "pr:Johnwang688/jarvis#301").locator('[data-testid="inbox-dismiss"]').dblclick()
+    until(lambda: "pr:Johnwang688/jarvis#301" not in _row_ids(page), timeout=3)
+    time.sleep(0.3)
+    posts = _mark_posts(mock)
+    check("Dismiss posts {dismiss: true} once, the id through encodeURIComponent [mutation: double post; raw id]",
+          len(posts) == 1 and posts[0] == ("/inbox/pr%3AJohnwang688%2Fjarvis%23301/mark",
+                                           "pr:Johnwang688/jarvis#301", {"dismiss": True}), str(posts))
+    until(lambda: _count(page) == "4", timeout=3)
+    check("the hidden PR leaves the count [mutation: count hidden rows]", _count(page) == "4", str(_count(page)))
+    toggle = page.locator('[data-testid="inbox-show-hidden"]')
+    check("'Show hidden (1)' appears", toggle.count() == 1 and toggle.inner_text() == "Show hidden (1)",
+          toggle.inner_text() if toggle.count() else "none")
+    toggle.click()
+    until(lambda: "pr:Johnwang688/jarvis#301" in _row_ids(page), timeout=3)
+    hidden = _row(page, "pr:Johnwang688/jarvis#301")
+    check("shown hidden, it is muted and says 'Dismissed', with Undo and no Dismiss",
+          hidden.get_attribute("data-hidden") == "1"
+          and hidden.locator('[data-testid="inbox-hidden-note"]').inner_text() == "Dismissed"
+          and hidden.locator('[data-testid="inbox-mark-undo"]').count() == 1
+          and hidden.locator('[data-testid="inbox-dismiss"]').count() == 0)
+    check("shown, it is still not counted", _count(page) == "4", str(_count(page)))
+    border = hidden.evaluate("e => getComputedStyle(e).borderLeftColor")
+    check("Graphite: a hidden row is neither amber, red nor the selection cyan",
+          border not in (AMBER, RED, "rgb(111, 195, 223)"), border)
+    hidden.locator('[data-testid="inbox-mark-undo"]').click()
+    until(lambda: len(_mark_posts(mock)) == 2, timeout=3)
+    check("Undo posts {clear: true}", _mark_posts(mock)[-1][1:] == ("pr:Johnwang688/jarvis#301", {"clear": True}),
+          str(_mark_posts(mock)[-1:]))
+    until(lambda: page.locator('[data-testid="inbox-show-hidden"]').count() == 0, timeout=3)
+    check("it is back, counted, and the toggle is gone", _count(page) == "5"
+          and _row(page, "pr:Johnwang688/jarvis#301").get_attribute("data-hidden") is None, str(_count(page)))
+    # A snooze posts its time about an hour ahead (the browser's clock).
+    _row(page, "dec:d0123456789ab").locator('[data-testid="inbox-snooze-hour"]').click()
+    until(lambda: len(_mark_posts(mock)) == 3, timeout=3)
+    body = _mark_posts(mock)[-1][2]
+    ahead = (datetime.fromisoformat(body.get("snooze_until", "").replace("Z", "+00:00"))
+             - datetime.now(timezone.utc)).total_seconds() if body.get("snooze_until") else -1
+    check("Snooze 1 h posts {snooze_until} about an hour ahead, with its zone",
+          set(body) == {"snooze_until"} and 3500 < ahead <= 3600 and body["snooze_until"].endswith("Z"), str(body))
+    until(lambda: "dec:d0123456789ab" not in _row_ids(page) or
+          _row(page, "dec:d0123456789ab").get_attribute("data-hidden") == "1", timeout=3)
+    # Under a card the marks are inert.
+    c = card("markcard001")
+    mock.world["approvals"].append(c)
+    mock.emit("approval_requested", c)
+    cardloc = page.locator('[data-testid="approval-card"]')
+    until(lambda: cardloc.count() == 1, timeout=4)
+    row = _row(page, "task:kf")
+    check("under a card the marks are inert and disabled",
+          row.evaluate("e => !!e.closest('[inert]')")
+          and row.locator('[data-testid="inbox-dismiss"]').is_disabled())
+    before = len(_mark_posts(mock))
+    for sel in ('[data-testid="inbox-dismiss"]', '[data-testid="inbox-snooze-week"]'):
+        found = row.locator(sel).first.bounding_box()
+        if found:
+            page.mouse.click(found["x"] + found["width"] / 2, found["y"] + found["height"] / 2)
+    time.sleep(0.4)
+    check("a trusted click under the card marks nothing [mutation: not inert]",
+          len(_mark_posts(mock)) == before and cardloc.count() == 1, f"{len(_mark_posts(mock)) - before} posts")
+    page.keyboard.press("Escape")
+    until(lambda: cardloc.count() == 0, timeout=4)
+    check("the title is unchanged", page.title() == TITLE, page.title())
+    _st(mock)["marks"] = {}
+
+
+def _check_checks(page, mock, check, until):
+    """Inbox B2 (IN-6): live check rows, rank 7, marked at /inbox/checks/<id>/steps/<n>."""
+    hostile = chk_row(title="Review " + HOSTILE, origin="Claude · chat ‹" + HOSTILE + "› (t1)",
+                      steps=[{"do": "Run " + HOSTILE, "expect": "It shows " + HOSTILE},
+                             {"do": "rm -rf ~/x", "expect": "Nothing happens."}])
+    gated = chk_row("c00000000000d", prs=(301,), markable=False,
+                    deploy_text="Not confirmed deployed: no merge commit for #301 in this checkout.")
+    _st(mock)["marked"] = []
+    _open(page, mock, until, basic_rows() + [hostile, gated])
+    page.evaluate("""() => { window.__copied = [];
+      Object.defineProperty(navigator, 'clipboard', { configurable: true,
+        value: { writeText: (t) => { window.__copied.push(t); return Promise.resolve(); } } }); }""")
+    row = _row(page, "chk:c0123456789ab")
+    time_ids = page.evaluate("() => [...document.querySelectorAll('[data-testid=\"inbox-group-time\"] "
+                             "[data-testid=\"inbox-row\"]')].map(r => r.dataset.id)")
+    check("a check sits under 'When you have time'", "chk:c0123456789ab" in time_ids, str(time_ids))
+    check("it is not counted: the count stays at ranks 1 to 5", _count(page) == "3", str(_count(page)))
+    border = row.evaluate("e => getComputedStyle(e).borderLeftColor")
+    check("Graphite: a check row is neither amber, red nor the selection cyan",
+          border not in (AMBER, RED, "rgb(111, 195, 223)"), border)
+    time.sleep(0.4)
+    check("nothing is marked by showing it [mutation: auto-mark]", _marked(mock) == [], str(_marked(mock)))
+    imgs = page.evaluate("() => document.querySelectorAll('[data-testid=\"inbox-view\"] img').length")
+    check("its title, steps and origin are literal text: no element made, nothing ran [mutation: innerHTML]",
+          imgs == 0 and page.evaluate("window.__pwned === undefined")
+          and HOSTILE in row.locator('[data-testid="inbox-check-title"]').inner_text()
+          and HOSTILE in row.locator('[data-testid="inbox-check-do"]').first.inner_text()
+          and HOSTILE in row.locator('[data-testid="inbox-origin"]').inner_text(), str(imgs))
+    steps = row.locator('[data-testid="inbox-check-step"]')
+    steps.nth(1).locator('[data-testid="inbox-check-copy"]').click()
+    until(lambda: page.evaluate("window.__copied.length") > 0, timeout=3)
+    check("Copy puts the step's words on the clipboard and posts nothing [mutation: copy runs]",
+          page.evaluate("window.__copied") == ["rm -rf ~/x"] and _marked(mock) == [],
+          str(page.evaluate("window.__copied")))
+    steps.nth(0).locator('[data-testid="inbox-check-note"]').fill("looked right")
+    steps.nth(0).locator('[data-testid="inbox-check-note"]').press("Enter")
+    time.sleep(0.3)
+    check("Enter in a note marks nothing", _marked(mock) == [], str(_marked(mock)))
+    steps.nth(0).locator('[data-testid="inbox-check-pass"]').dblclick()
+    until(lambda: _marked(mock), timeout=3)
+    time.sleep(0.4)
+    got = _marked(mock)
+    check("Pass posts {verdict, note} once, to /inbox/checks/<id>/steps/0 [mutation: double post]",
+          len(got) == 1 and got[0][0] == "/inbox/checks/c0123456789ab/steps/0"
+          and got[0][3] == {"verdict": "pass", "note": "looked right"}, str(got))
+    # The gated check: its line shows, its marks are off.
+    grow = _row(page, "chk:c00000000000d")
+    check("not confirmed deployed: the daemon's line shows and every mark is off [mutation: mark while undeployed]",
+          "Not confirmed deployed" in grow.locator('[data-testid="inbox-check-deploy"]').inner_text()
+          and all(grow.locator(f'[data-testid="inbox-check-{v}"]').first.is_disabled() for v in ("pass", "fail", "skip")))
+    # The second step done: the row moves to the receipt band.
+    row = _row(page, "chk:c0123456789ab")
+    row.locator('[data-testid="inbox-check-step"]').nth(1).locator('[data-testid="inbox-check-fail"]').click()
+    until(lambda: page.evaluate("() => !!document.querySelector('[data-testid=\"inbox-group-fyi\"] "
+                                "[data-id=\"chk:c0123456789ab\"]')"), timeout=3)
+    row = _row(page, "chk:c0123456789ab")
+    verdicts = row.evaluate("e => [...e.querySelectorAll('[data-testid=\"inbox-check-step\"]')].map(s => s.dataset.verdict)")
+    check("done: under 'For your information' with its verdicts and no marks left",
+          verdicts == ["pass", "fail"] and row.locator('[data-testid="inbox-check-pass"]').count() == 0, str(verdicts))
+    row.locator('[data-testid="inbox-check-receipt"]').click()
+    until(lambda: page.evaluate("window.__copied.length") > 1, timeout=3)
+    receipt = page.evaluate("window.__copied[1]")
+    check("the receipt copies as Markdown, with one heading and the verdicts",
+          receipt.startswith("## Live check c0123456789ab:") and "1. **PASS**" in receipt and "2. **FAIL**" in receipt
+          and sum(1 for line in receipt.splitlines() if line.startswith("#")) == 1, receipt[:200])
+    # The import: drafts are read, only Save stores one.
+    _st(mock)["imports"] = []
+    _st(mock)["import_reply"] = {"path": "/p/docs/plans/x.md", "digest": "d1", "drafts": [
+        {"index": 0, "title": "First (#5)", "prs": [5], "steps": [{"do": "a", "expect": "b"}], "savable": True,
+         "reason": None},
+        {"index": 1, "title": "VEX view", "prs": [], "steps": [], "savable": False,
+         "reason": "it has no numbered steps"}]}
+    page.locator('[data-testid="inbox-import-toggle"]').click()
+    page.locator('[data-testid="inbox-import-path"]').fill("/p/docs/plans/x.md")
+    page.locator('[data-testid="inbox-import-read"]').click()
+    until(lambda: page.locator('[data-testid="inbox-import-draft"]').count() == 2, timeout=3)
+    check("the import reads drafts and saves none by itself",
+          _st(mock)["imports"] == [{"path": "/p/docs/plans/x.md"}], str(_st(mock)["imports"]))
+    page.locator('[data-testid="inbox-import-save"]').click()
+    until(lambda: len(_st(mock)["imports"]) > 1, timeout=3)
+    check("Save confirms one draft with the file's digest",
+          _st(mock)["imports"][-1] == {"path": "/p/docs/plans/x.md", "digest": "d1", "save": 0},
+          str(_st(mock)["imports"][-1]))
+    # Under a card the row is inert.
+    _st(mock)["rows"].append(chk_row("c00000000000e"))
+    mock_inbox.changed(mock, ["chk:c00000000000e"], "check_posted")
+    until(lambda: "chk:c00000000000e" in _row_ids(page), timeout=3)
+    c = card("chkcard0001")
+    mock.world["approvals"].append(c)
+    mock.emit("approval_requested", c)
+    cardloc = page.locator('[data-testid="approval-card"]')
+    until(lambda: cardloc.count() == 1, timeout=4)
+    row = _row(page, "chk:c00000000000e")
+    check("under a card the check row is inert and its marks disabled",
+          row.evaluate("e => !!e.closest('[inert]')") and row.locator('[data-testid="inbox-check-pass"]').first.is_disabled())
+    posts = len(_marked(mock))
+    for sel in ('[data-testid="inbox-check-pass"]', '[data-testid="inbox-check-copy"]',
+                '[data-testid="inbox-check-note"]'):
+        found = row.locator(sel).first.bounding_box()
+        if found:
+            page.mouse.click(found["x"] + found["width"] / 2, found["y"] + found["height"] / 2)
+    page.keyboard.type("x")
+    page.keyboard.press("Enter")
+    time.sleep(0.4)
+    check("a trusted click, typing and Enter under the card mark and copy nothing [mutation: not inert]",
+          len(_marked(mock)) == posts and page.evaluate("window.__copied.length") == 2 and cardloc.count() == 1,
+          f"{len(_marked(mock)) - posts} posts")
+    page.keyboard.press("Escape")
+    until(lambda: cardloc.count() == 0, timeout=4)
+    page.locator('[data-testid="inbox-import-toggle"]').click()
+    check("the title is unchanged", page.title() == TITLE, page.title())
+
+
 # ---------------------------------------------------------------------------
 
 SECTIONS = (_sidebar_checks, _groups_checks, _live_checks, _answer_checks, _conflict_checks, _withdraw_checks,
-            _reconnect_checks, _clicks_checks, _hostile_checks, _missed_checks, _decision_checks, _card_checks,
-            _older_checks)
+            _reconnect_checks, _clicks_checks, _hostile_checks, _missed_checks, _decision_checks, _check_checks,
+            _marks_checks, _card_checks,
+            _older_checks, _aurora_checks, _pr_checks)
 
 
 def inbox_checks(browser, mock, base, check, until, guard, init_script):

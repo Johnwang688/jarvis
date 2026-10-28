@@ -386,6 +386,22 @@ the degraded path, the announcement window, and the shared default).
 
 <!-- claude-source:007531-007902:end -->
 
+**The HUD orb looks like the films' JARVIS (2026-10-27, owner's choice).**
+The owner asked for Tony Stark's face; a real actor's likeness was declined,
+and film JARVIS has no face anyway, so the owner picked a faceless
+holographic HUD: a hairline bezel, a 120-tick scale with long ticks every
+tenth, a heavy segmented band, dashed and hairline rings, and a core ring
+with three brackets in place of the triangle. The rings and emblem now live
+in `hud/src/lib/orbdraw.ts`, drawn by both `Orb.tsx` and the boot overlay.
+The palette is unchanged (no gold: amber means a tool or an authorization).
+`INNER_RINGS` is now every ring but the bezel, so the `triangles` set still
+swaps only the outermost. The same day the look reached every other
+surface: `jarvis.html` (v1 face, its own copy of the rings, plus a
+regenerated `favicon.ico`), the HUD's app icons (`hud/scripts/render_icons.py`
+re-rendered `hud/public/icons/`, which the phone's `/m/icons/` serves too),
+and each chat's 18px thinking orb (`MiniOrb.tsx`: a tick scale with long
+ticks, a segmented band, the inner arcs and the filled core).
+
 ## Original CLAUDE.md lines 8066–8385
 
 <!-- claude-source:008066-008385:begin -->
@@ -3127,3 +3143,36 @@ shows the same pickers working in real Chromium.
 All 13 are killed. The
 browser voice suites (`tests/face/hud_v2_*`) run against the mock daemon, so they never reach this
 route code and were not rerun.
+
+**Muted dictation and a silent OFF (2026-10-27, the owner's call).** The mic's
+OFF used to take the talk key away ("MIC MUTED"). Now Ctrl+D, or holding the orb,
+records while it is held even when OFF, the way Claude Code and Codex dictate.
+What was said lands in the selected chat's box, unsent. OFF utterances never
+send: `placementFor` and `wordMaySend` refuse mode `off`. `planWords` reads no
+send or cancel word in them, so a trailing "over" or "cancel" is typed as said.
+
+The rest of OFF is unchanged:
+- The press moves `micFloorSample`, so muted dictation has no pre-roll from the
+  muted time before the press.
+- The wake word, the follow-up and continuation windows, and hands-free claims
+  stay deaf.
+- `capture.ptt.dictating` exempts only a key *pressed while OFF*. Switching OFF
+  under a key pressed while on still ends its recording.
+- While OFF, `onChunk` and the STT queue's `canUpload(explicit, clip)` admit
+  only `dictation.mutedDictation`: a `ptt` clip claimed in mode `off`. A clip
+  recorded with the mic on and retried after it went OFF is still refused.
+
+The second half of the decision partly reverses Q11: while the mic is OFF, the
+HUD window reads nothing aloud. `policy.MIC_OFF_SILENCES_SPEECH` drives
+`SpeechController.setMicOff`, which stops what is playing and queues nothing
+more. It still does not post the daemon's `/mute` (`MIC_OFF_MUTES_SPEECH` stays
+false). The read-aloud switch keeps its value, and the mic coming back on
+brings speech back. Known and accepted: the speech strip and the read-aloud row
+still show the switch's own value while OFF; the approval chime still sounds;
+and a frame of audio already in flight at the press (tens of ms) can land
+after the floor.
+
+Tests are in vitest `capture.test.ts` ("the talk key dictates while OFF"), plus
+`controller.test.ts`, `stt.test.ts`, `captureChunks.test.ts` and
+`hud_v2_ptt_check` (muted section). The no-pre-roll and mute-exemption lines
+were each mutated, and the tests failed.

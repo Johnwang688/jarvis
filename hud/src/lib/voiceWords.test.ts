@@ -205,6 +205,12 @@ describe("planWords", () => {
     expect(step.kind === "send" && step.word.text).toBe("and send it");
   });
 
+  it("dictated while the mic was OFF: words are typed as said, never read as send or cancel", () => {
+    const off = (text: string) => ({ ...item(text), meta: { tailMs: QUIET, mode: "off" as const } });
+    const batch = [off("send it over"), off("never mind cancel")];
+    expect(planWords(batch, ctx)).toEqual([{ kind: "run", items: batch }]);
+  });
+
   it("a cancel discards the batch so far, and what follows is a new run", () => {
     const steps = planWords([item("one"), item("two cancel"), item("three")], ctx);
     expect(steps.map((s) => s.kind)).toEqual(["cancel", "run"]);

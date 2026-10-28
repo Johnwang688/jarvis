@@ -46,6 +46,8 @@ LOG = logging.getLogger(__name__)
 
 LOCAL_TIMEOUT_S = 120.0     # a card in front of the owner
 REMOTE_TIMEOUT_S = 600.0    # a DM: you have to get your phone out (v1's 10 minutes)
+# PH-10 (phone design): while a phone session was active in the last 24 h, a
+# broker on the local wait waits the remote one, as with Discord attached.
 
 _CODE_CHARS = "23456789abcdefghjkmnpqrstuvwxyz"   # no 0/o/1/l/i: it is typed back
 
@@ -466,6 +468,10 @@ class PendingApprovals:
         self.remote = remote
         self.timeout_s = float(timeout_s) if timeout_s is not None else (
             REMOTE_TIMEOUT_S if remote else LOCAL_TIMEOUT_S)
+        # PH-10: set by the daemon to "a phone session was seen in the last
+        # 24 h" (`RemoteAuth.recently_active`). Read at each ask; an error
+        # counts as no phone.
+        self.phone_active: Callable[[], bool] | None = None
         self._on_request = on_request
         self._on_resolve = on_resolve
         self._lock = threading.Lock()
@@ -479,7 +485,7 @@ class PendingApprovals:
             cancelled: Callable[[], bool] | None = None) -> Decision:
         """Block for a bounded owner answer; cancellation callbacks run unlocked."""
         request._hud_private = request.private
-        wait_s = self.timeout_s
+        wait_s = self.wait_s()
         if request.private:
             wait_s = min(wait_s, LOCAL_TIMEOUT_S)
         if request.max_wait_s is not None:
@@ -555,20 +561,41 @@ class PendingApprovals:
 
     # -- the answering side ------------------------------------------------
 
+    def wait_s(self) -> float:
+        """How long the next ask waits (PH-10): the broker's own wait, or the
+        remote one when the broker is on the local default and a phone
+        session was active in the last 24 h."""
+        wait = self.timeout_s
+        if wait == LOCAL_TIMEOUT_S and self.phone_active is not None:
+            try:
+                if self.phone_active() is True:
+                    wait = REMOTE_TIMEOUT_S
+            except Exception:  # noqa: BLE001 — no phone: the local wait
+                pass
+        return wait
+
     def resolve(self, req_id: str, decision: Decision | str, *, always: bool = False,
-                hud: bool = False):
+                owner_verified: bool = False):
         """Resolve exactly once. A second resolve is refused.
 
         `always=True` also writes the persistent allowlist through v1
         `entry_for`. If that raises `NotAllowlistable` the approval still
         stands and no entry is minted — v1's rule, kept.
+
+        `owner_verified=True` is HUD authority (phone design PH-7, O-3): it
+        alone lets a HUD-only card be allowed. Exactly two kinds of caller
+        pass True: the HUD's own answer routes (the HUD listener's owner test
+        and its Host) and the phone's answer route after a fresh per-answer
+        passkey assertion while every §4.1 check holds (`remote_answer`).
+        Discord, tools and everything else leave it False
+        (`tests/v2/remote_answer_check.py` greps the callers).
         """
         decision = Decision(decision)
         with self._lock:
             item = self._pending.get(req_id)
             if item is None or item.event.is_set():
                 raise ValueError(f"unknown or already-resolved approval {req_id!r}")
-            if item.hud_only and decision is Decision.ALLOW and hud is not True:
+            if item.hud_only and decision is Decision.ALLOW and owner_verified is not True:
                 raise ValueError("this approval requires an answer in the owner HUD")
             item.decision = decision
             item.resolution = decision.value
@@ -591,6 +618,25 @@ class PendingApprovals:
             request, resolution = item.request, item.resolution
         self._announce(request, decision, resolution)
         return entry
+
+    def always_rule(self, req_id: str) -> tuple[dict | None, str]:
+        """A dry run of `resolve(always=True)` for one pending request (phone
+        design PH-7: Always shows the rule it would write first): the entry
+        it would write, or None, and the resolution it would record, by the
+        same tests in the same order. Writes nothing. ValueError for a
+        request that is not pending."""
+        with self._lock:
+            item = self._pending.get(req_id)
+            if item is None or item.event.is_set():
+                raise ValueError(f"unknown or already-resolved approval {req_id!r}")
+            request, hud_only = item.request, item.hud_only
+        if (hud_only or not request.allowlistable
+                or is_unknown_command_tool(request.tool, request.args)):
+            return None, "allow (no standing rule from this path)"
+        try:
+            return permissions.entry_for(*v1_request(request.tool, request.args)), "approved-always"
+        except permissions.NotAllowlistable as exc:
+            return None, f"allow (not allowlistable: {exc})"
 
     def resolve_code(self, code: str, decision: Decision | str, *, always: bool = False):
         """Answer by the 4-character code the Discord half shows (v1's rule).

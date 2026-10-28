@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import source from "./controller.ts?raw";
 import { SpeechController } from "./controller";
-import { MIC_OFF_MUTES_SPEECH, onMicModeChange } from "./policy";
+import { MIC_OFF_MUTES_SPEECH, MIC_OFF_SILENCES_SPEECH, onMicModeChange, speechSilencedByMic } from "./policy";
 import { FakeClock, FakeGate, FakePlayer, FakeSay } from "./testkit";
 
 let clock: FakeClock;
@@ -267,12 +267,37 @@ describe("read-aloud has its own switch, not the mic's", () => {
     expect(posted).toEqual([]);
   });
 
-  it("speech goes on while the mic is off: nothing in the controller reads the dictation mode", async () => {
-    // The controller has no input for it; this pins that no such dependency creeps in.
+  it("the controller does not read the dictation mode itself: the window tells it (setMicOff)", () => {
     expect(source).not.toMatch(/dictation|isMuted|micMuted/i);
-    settle("Spoken with the mic off.");
+    expect(MIC_OFF_SILENCES_SPEECH).toBe(true);
+    expect(speechSilencedByMic(true)).toBe(true);
+    expect(speechSilencedByMic(false)).toBe(false);
+  });
+});
+
+describe("the mic OFF is text only (owner, 2026-10-27)", () => {
+  it("silent while the mic is OFF, and going OFF stops what is playing", async () => {
+    stream(REPLY);
+    settle(REPLY);
+    await clock.advance(400);
+    expect(player.started).toHaveLength(1);
+    c.setMicOff(true);
+    expect(player.active).toBe(0);
+    settle("Not spoken with the mic off.");
+    await clock.advance(30_000);
+    expect(player.started).toHaveLength(1);
+    c.setMicOff(false);
+    settle("Spoken once the mic is back.");
     await clock.advance(10_000);
-    expect(player.started).toEqual(["Spoken with the mic off."]);
+    expect(player.started.at(-1)).toBe("Spoken once the mic is back.");
+  });
+
+  it("leaves the read-aloud switch as it was", () => {
+    c.setMicOff(true);
+    expect(c.view().enabled).toBe(true);
+    c.setEnabled(false);
+    c.setMicOff(false);
+    expect(c.view().enabled).toBe(false);
   });
 });
 

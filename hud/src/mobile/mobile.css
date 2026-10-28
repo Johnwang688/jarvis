@@ -198,7 +198,7 @@ p, li, h2, h3 { overflow-wrap: anywhere; }
 .headline { color: var(--amber); font-weight: 600; }
 .question, .brief { white-space: pre-wrap; }
 /* A decision's suggestion (inbox B1): the phone's own bordered tag, before the option. */
-.options .suggested {
+.options .suggested, .m-choice .suggested {
   font: 11px var(--mono); text-transform: uppercase; color: var(--text-2);
   border: 1px solid var(--border-strong); border-radius: var(--radius); padding: 0 4px;
 }
@@ -292,3 +292,72 @@ p, li, h2, h3 { overflow-wrap: anywhere; }
 .pl.del { color: var(--red); }
 .pl.hunk { color: var(--accent); }
 .pl.file { color: var(--text-muted); }
+
+/* -- P-4: answering (card.ts, views.ts answerBox) ----------------------------
+   The card in full, then DENY alone, then a wide gap, then ALWAYS and
+   AUTHORIZE: the cheap answer first and far from the deliberate ones. Every
+   button at least 48 px tall. Red only for "limited", amber only for what
+   waits or is refused. */
+.m-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 14px 12px;
+  border: 1px solid var(--amber-line);
+  border-radius: var(--radius);
+  background: var(--bg-1);
+}
+.m-card h3 { font-size: 14px; letter-spacing: 0.06em; color: var(--amber); }
+.m-card .tool { font-weight: 600; overflow-wrap: anywhere; }
+.m-card .arg {
+  font: 13px/1.4 var(--mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 6px 8px;
+}
+.m-card .arg .k { color: var(--text-muted); }
+.m-card .origin, .m-card .relayed { font-size: 13px; color: var(--text-2); overflow-wrap: anywhere; }
+.m-card .reason { color: var(--text-2); white-space: pre-wrap; overflow-wrap: anywhere; }
+.m-card .foot { font-size: 12px; color: var(--text-muted); margin-top: 8px; }
+.browserapproval { display: flex; flex-direction: column; gap: 6px; }
+.m-limited {
+  color: var(--red);
+  background: var(--red-soft);
+  border: 1px solid var(--red);
+  border-radius: var(--radius);
+  padding: 8px 10px;
+}
+.m-why, .m-desk { color: var(--amber); }
+.m-notice { color: var(--text-2); }
+.tap.m-btn {
+  min-height: 48px;
+  width: 100%;
+  text-align: center;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-btn);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+.tap.m-btn.allow { border-color: var(--accent); color: var(--accent); }
+.tap.m-btn.always { border-color: var(--amber-line); color: var(--amber); }
+.tap.m-btn:disabled { opacity: 0.4; }
+.m-gap { height: 120px; flex: none; }
+.m-allow-row { display: flex; gap: 24px; }
+.m-rule { display: flex; flex-direction: column; gap: 8px; }
+.m-answer { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
+.m-text {
+  font: inherit;
+  color: var(--text);
+  background: var(--bg-inset);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  padding: 8px;
+  min-height: 44px;
+}
+.tap.m-send { text-align: center; }
+.m-choices { display: flex; flex-direction: column; }
+.m-choice { display: flex; align-items: center; gap: 8px; min-height: 44px; overflow-wrap: anywhere; }
+.m-choice input { width: 22px; height: 22px; flex: none; }

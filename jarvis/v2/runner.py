@@ -67,6 +67,12 @@ class _Cancelled(Exception):
     """The owner cancelled; act at the boundary."""
 
 
+class _Stopping(Exception):
+    """The runner is quiesced or stopping: no further model turn starts.
+    `_drive` returns on it without a transition, so the task stays where it
+    was and `serve()`'s recovery re-admits it next boot."""
+
+
 class _Blocked(Exception):
     """The task cannot continue without the owner; carries the sentence they see."""
 
@@ -186,6 +192,15 @@ class TaskRunner(TaskControl):
                     self._admit(task.id)
                 except ControlError:
                     return
+
+    def quiesce(self) -> None:
+        """Shutdown's first step (`daemon.shut_down`), before pending approvals
+        are released: no task is admitted, and no further model turn starts
+        (`_run_turn` raises `_Stopping`, which `_drive` takes without a
+        transition), so a denial cannot move a task on. A turn already
+        running is not interrupted; `stop()` does that. Not undone: the
+        runner is stopping."""
+        self._stop.set()
 
     def stop(self, timeout: float = 5.0) -> None:
         """Interrupt running turns and join. Cancels nothing: tasks stay resumable."""
@@ -446,6 +461,8 @@ class TaskRunner(TaskControl):
                     self._verify(run)
                 else:
                     return
+        except _Stopping:
+            return                                  # shutting down: the task stays as it is
         except _Cancelled:
             self._finish(run, TaskState.CANCELLED, "owner cancelled")
         except _OrchestratorDown as exc:
@@ -668,6 +685,9 @@ class TaskRunner(TaskControl):
         return data
 
     def _run_turn(self, run: _Run, thread_id: str, text: str, *, origin: str = "owner") -> TurnResult:
+        if self._stop.is_set():
+            # Every model turn starts here: once quiesced or stopping, none does.
+            raise _Stopping()
         task = self._require(run.task_id)
         is_orchestrator = thread_id == self._thread_for(task, Role.ORCHESTRATOR)
         subscription = self.bus.subscribe(lambda record, wanted=thread_id: _for_turn(record, wanted))

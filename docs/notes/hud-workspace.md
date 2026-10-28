@@ -1822,6 +1822,68 @@ routes"). Not deployed: the owner's step is `jarvis hud rebuild` and a reload
   marked by the phone's own bordered "suggested" element before the option,
   never text an option could write), the why, "Answer at the desk" while
   open, and "Your answer" once recorded (`mobile/views.ts`).
+- **Live checks (inbox B2, IN-6).** A `check` row (daemon's half:
+  control-plane notes, "Checks") sits in "When you have time" (rank 7),
+  uncounted and plain. `lib/inbox` `checkOf` reads its `detail`. A check id
+  not of the daemon's shape, or steps that are not 1 to 30 objects, is shown
+  and never markable. The title and each step's `do` and `expect` are text
+  in a numbered list (`ir-steps`). Each step has "Copy", a note box and
+  Pass, Fail and Skip. Copy writes the step's `do` to the clipboard and
+  nothing more: **nothing in a check runs anything**. A verdict posts once
+  through `api.markCheck` to `POST /inbox/checks/<id>/steps/<n>` with
+  `{verdict, note}`. Enter in the note box marks nothing. While the daemon
+  says the check's PRs are not confirmed deployed (`deploy.markable` false),
+  its line shows and the three buttons are disabled; a 409 shows the
+  daemon's own line. A done check (rank 8) shows each verdict (green pass,
+  red fail, secondary skip) and the note, with no buttons but Copy and
+  "Copy receipt (Markdown)" (`checkReceipt`, made from the row). The head's
+  "Import a runbook" opens a path box. Read posts `{path}` to `POST
+  /inbox/checks/import` and lists the drafts unsaved, each with its step
+  count, PRs and, when it cannot be saved, why. Save posts `{path, digest,
+  save}` for that one draft. Under a card the row and the import are inert,
+  and every button and handler refuses. The phone shows a check row
+  read-only.
+- **Pull requests (inbox B3, IN-4, 2026-10-27).** A `pr` row (daemon's
+  half: control-plane notes, "PRs") sits in "Waiting on you" (rank 5) and
+  is counted. Its title and line are the daemon's code-built ones. `lib/inbox`
+  `prOf` reads its `detail`: the PR's own title as one line of text, and its
+  URL only when it is exactly `https://github.com/<repo>/pull/<number>` for
+  the row's own repo and number (checked again here). The one control is
+  "Open on GitHub", a plain `<a target="_blank" rel="noopener noreferrer">`
+  (none when the URL fails). A click on it opens the page and answers
+  nothing. Under a card the row is inert, and a click, a middle click
+  (`auxclick`) or Enter on the link is prevented too. No chat or task link.
+  A repository name that is or starts with a dot is refused, as the
+  daemon's `github_repo` does. A `pr_unavailable` row ("PR list
+  unavailable" or "incomplete") lists each repository and the daemon's
+  reason (`prUnavailableOf`), is counted, and so the view never says
+  "Nothing is waiting on you" while it shows.
+  Existing classes only. Tests: `components/InboxView.prs.test.ts` and the
+  `prs` section of `tests/face/hud_v2_inbox_check.py`.
+- **Snooze and dismiss (inbox B4, IN-7, 2026-10-28).** `state/inbox.ts`
+  now reads `GET /inbox?all=1` (`api.inboxAll`): every row, each with the
+  daemon's `markable`, a hidden one with `hidden` (`{snoozed_until,
+  dismissed_at}`). A row the daemon calls markable **and** of rank 5 to 8,
+  never `pr_unavailable` or a `prx:` id (`lib/inbox` `canMark`, the HUD's own
+  copy of IN-8), has a row of quiet buttons (`ir-marks`): Snooze 1 h, Until
+  tomorrow (08:00 local the next day), 1 week, and Dismiss. Each posts once
+  through `api.markInbox` to `POST /inbox/<encodeURIComponent(id)>/mark`
+  (`{snooze_until}` as a `Z` time, or `{dismiss: true}`); the client never
+  sends a rank, and the daemon judges the row itself (a 409 shows the
+  daemon's words). Hidden rows leave the list, the sidebar count and the
+  badge (`waitingCount` skips `hidden`). The head's "Show hidden (n)"
+  (only while n > 0; it switches itself off at 0) lists them muted
+  (`data-hidden`, 60% opacity, a plain border, no amber), each saying
+  "Dismissed" or "Snoozed until HH:MM [day]" in code's words, with Undo
+  (`{clear: true}`). Plain `type="button"` buttons, none focused or
+  defaulted; a click on a row marks nothing; under a card every mark button
+  is disabled and inert and the handler refuses. A served `hidden` on a row
+  of rank 1 to 4 or "PR list unavailable" is ignored (`parseRow`, then
+  `isHidden` again in `shownRows`/`waitingCount`). A snooze that ends brings
+  its row back through the daemon's `snooze_ended` event; as a backup the
+  store reads again just after the earliest `snoozed_until` it holds
+  (`state/inbox.ts`, one timer, at most an hour at a time). The phone shows what `GET
+  /inbox` shows (hidden rows left out) and cannot mark.
 - Tests: `lib/inbox.test.ts`, `state/inbox.test.ts`,
   `components/InboxView.test.ts`, the `lib/workspace.test.ts` inbox case, and
   `tests/face/hud_v2_inbox_check.py` (97 checks since A3's `missed` section, its own `MockDaemon(0)`, the
@@ -1837,8 +1899,90 @@ routes"). Not deployed: the owner's step is `jarvis hud rebuild` and a reload
   question/options/why/origin as text, Enter on a radio posts nothing, Answer
   posts `{choice}` once to `/inbox/decisions/<id>`, words from the focused box
   post `{text}`, inert and disabled under a card) and the vitest decision
-  cases in `InboxView.test.ts` and `lib/inbox.test.ts`.
+  cases in `InboxView.test.ts` and `lib/inbox.test.ts`. B4 adds the face
+  check's `marks` section (buttons on ranks 5 to 8 only, never on a
+  question, proposal, blocked task or "PR list unavailable"; `?all=1` read;
+  Dismiss posts once with the encoded id; a hidden rank-5 row leaves the
+  count; Show hidden, "Dismissed", Undo; a snooze an hour ahead; a row click
+  marks nothing; inert under a card) and the vitest marks cases; mutations
+  caught: marks offered on rank 1 to 4, hidden rows counted.
 - **Follow-up (pre-existing, not this package):** the HUD reads `GET
   /approvals` only at boot, so a card asked while the event stream was down
   is missed until a reload; re-read it on reconnect and merge it into the
   veil. The inbox's "reload to see it" row already says so.
+
+## The owner Inbox row's aurora (2026-10-25)
+
+The owner: "Keep inbox but make it like a different color. Make it sparkly or
+aurora or something." Both sidebar rows keep the label "Inbox". Only the
+**owner inbox** row (`owner-inbox`, above PROJECTS) gets the aurora, never
+the "Inbox" project where unplaced chat lands.
+
+- **This is an owner-approved exception to Graphite's "one sparing accent"
+  rule, and the only one.** The `--aurora-*` tokens on `:root`
+  (`hud/src/theme.css`) colour nothing else.
+  - **The band:** soft teal, green and violet with a hint of mauve-rose. No
+    hue is in the amber/red band, saturation is at most 0.5, and alpha is at
+    most 0.24 over `--bg-1`.
+  - **Motion:** it drifts across the row's background one pass every
+    `--aurora-drift` (11 s), but only while something waits. While something
+    waits that is not pending, four faint sparks twinkle.
+- **Restraint.**
+  - **Nothing waiting** (`data-aurora="calm"`): a still tint. Nothing
+    animates and there are no sparks, so the desk composites nothing for an
+    empty inbox (review of #312: it used to drift slowly forever).
+  - **Pending** (ranks 1–2, the amber count, `data-aurora="pending"`): the
+    band dims and the sparks go. The count sits on an opaque `--bg-1` chip,
+    so amber reads as it does everywhere else.
+  - **Under the approval card:** everything outside the veil is `[inert]`
+    (`Approvals.tsx`), and an `[inert]` rule pauses both layers, so the card
+    stays the loudest thing on screen.
+  - **`prefers-reduced-motion: reduce`:** a static tint and no animation.
+- **Cost.**
+  - CSS only, with no timers: `transform` on the band and `opacity` on the
+    sparks. Both are absolutely placed pseudo-elements clipped by the row
+    (`overflow: hidden`), so no layout moves.
+  - Measured with Chromium tracing over 4 s: calm made 0 frames and 0
+    paints, the same as a row with no aurora. Live and pending made 60
+    frames a second and 0 paints, which is compositor-only.
+  - The row's text stays `--text`, AA over every blend (worst case about
+    7:1).
+- **Selection and focus.**
+  - The isolated row paints both layers over its own background and inset
+    shadows. So when the row is selected, the layers start 2px in, leaving
+    the 2px accent bar clear.
+  - The focus ring is a 1px `--accent` outline (inset by `outline-offset:
+    -1px`), which paints above them.
+- **Tests.**
+  - `hud/src/lib/aurora.test.ts` recomputes from theme.css:
+    - the tokens' alpha, saturation and hue band;
+    - `--text` contrast over every blend, with hover and selection;
+    - the band never brighter than the text;
+    - the amber chip;
+    - the tokens used only by the aurora;
+    - keyframes on transform/opacity only;
+    - the calm band still and the sparks live-only;
+    - the selection bar and the focus outline;
+    - the reduced-motion and `[inert]` rules.
+  - `tests/face/hud_v2_inbox_check.py` section `aurora` checks computed
+    styles in Chromium. For that section the mock's `inbox: true` project is
+    named "Inbox". It checks:
+    - the class is on the owner row, and not on that project row;
+    - calm has no animation on either layer; live drifts and sparks; pending
+      is dimmed;
+    - the shipped keyframes animate only `transform` and `opacity`;
+    - the amber chip;
+    - the selection bar is visible;
+    - the same box with and without the aurora;
+    - `animation-play-state: paused` under a card, and running after;
+    - `animation-name: none` under emulated reduced motion.
+
+    `JARVIS_AURORA_SHOTS=<dir>` saves sidebar screenshots there.
+  - **Mutations caught**, each by the vitest and the face section unless
+    noted:
+    - the reduced-motion rule removed;
+    - the veil pause removed;
+    - calm animating;
+    - a `background-position` drift;
+    - the selection bar covered;
+    - the aurora on the Inbox project row (face only).

@@ -19,10 +19,20 @@ export interface PhonePasskey {
   sessions: PhoneSession[];
 }
 
+/** §4.1's last result (P-4, jarvis/v2/remote_secure.py): which check failed, in the daemon's fixed words. */
+export interface PhoneSecure {
+  ok: boolean;
+  failed: string | null;
+  label: string;
+  reason: string;
+}
+
 export interface PhoneRemote {
   port: number | null;
   bound: boolean;
   host_configured: boolean;
+  /** Absent from a daemon older than P-4. */
+  secure?: PhoneSecure;
 }
 
 export interface PhoneView {

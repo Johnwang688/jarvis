@@ -179,16 +179,16 @@ def user_line(data: dict, *, dropped: str | bool | None = None) -> str | None:
         return _scrub(head)
     elif via == "peer":
         head = f"↪ Request from another thread: {_cap(' '.join(typed.split()), 400)}"
-    elif via == "inbox":
-        # The owner's answer to a decision (inbox B1). The delivered text is
-        # code's frame with the answer first and, on its last line, the
-        # chat's own question, quoted: that line is labelled the chat's, never
-        # put after "You" (review of PR #309).
+    elif via in ("inbox", "phone"):
+        # The owner's answer to a decision (inbox B1; from the phone, P-4).
+        # The delivered text is code's frame with the answer first and, on
+        # its last line, the chat's own question, quoted: that line is
+        # labelled the chat's, never put after "You" (review of PR #309).
         from ..decisions import QUESTION_LEAD
         answer, sep, question = typed.rpartition("\n")
         if not sep or not question.startswith(QUESTION_LEAD):
             answer, question = typed, ""
-        who = "You (inbox)" + (f" · {why}" if why else "")
+        who = ("You (inbox)" if via == "inbox" else "You (phone)") + (f" · {why}" if why else "")
         head = f"{who}: {_cap(' '.join(answer.split()), 600)}"
         if question:
             quoted = question[len(QUESTION_LEAD):].removesuffix(")")

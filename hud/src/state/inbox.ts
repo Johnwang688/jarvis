@@ -14,7 +14,7 @@
 
 import { useSyncExternalStore } from "react";
 import { api, ApiError } from "../api";
-import { parseInbox, setBadge, waitingCount, type InboxRow } from "../lib/inbox";
+import { nextSnoozeEnd, parseInbox, setBadge, waitingCount, type InboxRow } from "../lib/inbox";
 
 export type InboxStatus = "loading" | "ready" | "unavailable" | "error";
 
@@ -30,7 +30,20 @@ export interface InboxSnapshot {
 export interface InboxDeps {
   fetch: () => Promise<unknown>;
   badge: (count: number) => void;
+  /** Inbox B4: a timer for the read at the earliest snooze's end (tests pass their own). */
+  later?: (ms: number, fn: () => void) => () => void;
+  now?: () => number;
 }
+
+/** How long after a snooze's end (by this window's clock) the backup read runs. */
+export const SNOOZE_READ_SLACK_MS = 1_000;
+/** The longest one backup wait is (a timer beyond 2^31 ms fires at once). */
+export const SNOOZE_READ_MAX_MS = 3_600_000;
+
+const defaultLater = (ms: number, fn: () => void) => {
+  const t = setTimeout(fn, ms);
+  return () => clearTimeout(t);
+};
 
 export class InboxStore {
   private snap: InboxSnapshot = { rows: [], status: "loading", message: "", reads: 0 };
@@ -38,6 +51,7 @@ export class InboxStore {
   private running: Promise<void> | null = null;
   private again = false;
   private badged: number | null = null;
+  private cancelSnooze: (() => void) | null = null;
 
   constructor(private deps: InboxDeps) {}
 
@@ -94,6 +108,23 @@ export class InboxStore {
     }
     this.set({ rows, status: "ready", message: "", reads: this.snap.reads + 1 });
     this.badge(waitingCount(rows));
+    this.armSnooze(rows);
+  }
+
+  /** Inbox B4, a backup to the daemon's `snooze_ended`: read again just after
+   * the earliest snooze this read holds ends, so its row comes back even if
+   * that event was missed. One timer, replaced by every read. */
+  private armSnooze(rows: InboxRow[]) {
+    this.cancelSnooze?.();
+    this.cancelSnooze = null;
+    const end = nextSnoozeEnd(rows);
+    if (end === null) return;
+    const now = (this.deps.now ?? Date.now)();
+    const wait = Math.min(Math.max(end - now, 0) + SNOOZE_READ_SLACK_MS, SNOOZE_READ_MAX_MS);
+    this.cancelSnooze = (this.deps.later ?? defaultLater)(wait, () => {
+      this.cancelSnooze = null;
+      void this.refresh();
+    });
   }
 
   /** The badge follows the last read, only when it changes. A read that failed
@@ -106,7 +137,9 @@ export class InboxStore {
   }
 }
 
-export const inbox = new InboxStore({ fetch: () => api.inbox(), badge: (n) => setBadge(n) });
+// Inbox B4: every row, hidden ones flagged (`?all=1`), so the view can offer
+// "Show hidden (n)"; the count and the badge (`waitingCount`) leave them out.
+export const inbox = new InboxStore({ fetch: () => api.inboxAll(), badge: (n) => setBadge(n) });
 
 export function useInbox(store: InboxStore = inbox): InboxSnapshot {
   return useSyncExternalStore(store.subscribe, store.snapshot);

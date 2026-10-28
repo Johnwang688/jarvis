@@ -3,8 +3,9 @@
 // An 18px inline SVG, not a canvas (plan H-2): eight chat panes may each show
 // one, and eight 60 fps canvases — with eight copies of the push-to-talk
 // button's ids — are what the big orb (components/Orb.tsx) would cost. Here a
-// 24-tick outer ring and a two-arc inner ring turn in opposite directions and
-// the core flexes, all CSS `@keyframes` on `transform` (theme.css, `.miniorb`),
+// 24-tick scale (every sixth tick long, as the big orb's every tenth), a
+// heavy segmented band and a two-arc inner ring turn, and the core
+// flexes, all CSS `@keyframes` on `transform` (theme.css, `.miniorb`),
 // which the compositor runs off the main thread. Its colour is the big orb's
 // palette (lib/orbpalette), so the avatar's accent recolours "Thinking…" and
 // never amber (a tool, an approval) or red (an error).
@@ -69,15 +70,17 @@ function Elapsed({ since, live }: { since: number; live: boolean }) {
 
 const C = 12;
 const pt = (r: number, a: number) => `${(C + Math.cos(a) * r).toFixed(2)} ${(C + Math.sin(a) * r).toFixed(2)}`;
-/** The outer ring: 24 ticks. */
+const arcs = (r: number, spans: readonly (readonly [number, number])[]) =>
+  spans.map(([a1, a2]) => `M${pt(r, a1)}A${r} ${r} 0 ${a2 - a1 > Math.PI ? 1 : 0} 1 ${pt(r, a2)}`).join("");
+/** The outer scale: 24 ticks, every sixth one long. */
 const TICKS = Array.from({ length: 24 }, (_, i) => {
   const a = (i / 24) * Math.PI * 2;
-  return `M${pt(9.4, a)}L${pt(11.4, a)}`;
+  return `M${pt(i % 6 === 0 ? 9.6 : 10.6, a)}L${pt(11.6, a)}`;
 }).join("");
+/** The heavy band: the big orb's segmented ring, its long segments only. */
+const BAND = arcs(8.2, [[0.85, 1.9], [2.45, 3.6], [3.9, 4.6], [4.95, 5.9]]);
 /** The inner ring: two arcs, as the big orb's innermost (0–2.4 and 2.9–5.6 rad). */
-const ARCS = ([[0, 2.4], [2.9, 5.6]] as const)
-  .map(([a1, a2]) => `M${pt(7.2, a1)}A7.2 7.2 0 ${a2 - a1 > Math.PI ? 1 : 0} 1 ${pt(7.2, a2)}`)
-  .join("");
+const ARCS = arcs(6, [[0, 2.4], [2.9, 5.6]]);
 
 export const MiniOrb = memo(function MiniOrb(props: { orb: OrbState; accent?: string | null; moving: boolean }) {
   const p = palette(props.orb, props.accent);
@@ -102,8 +105,9 @@ export const MiniOrb = memo(function MiniOrb(props: { orb: OrbState; accent?: st
       style={style}
     >
       <path className="mo-outer" d={TICKS} />
+      <path className="mo-band" d={BAND} />
       <path className="mo-inner" d={ARCS} />
-      <circle className="mo-core" cx={C} cy={C} r="3.6" />
+      <circle className="mo-core" cx={C} cy={C} r="2.6" />
     </svg>
   );
 });

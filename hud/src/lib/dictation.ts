@@ -8,6 +8,9 @@
 //   OFF     v1's mic mute: nothing claimed, nothing uploaded, the local wake
 //           word (V11) posts and hears nothing (before V11 this stopped Chrome's
 //           cloud recognizer, which streamed the room to Google's speech service)
+//           -- except the talk key (2026-10-27): held, it dictates what is said
+//           while it is held into the box, never sent, with no pre-roll; and
+//           Jarvis reads nothing aloud while the mic is OFF (lib/speech/policy)
 //
 // A fresh window boots into REVIEW, the mic-fails-toward-muted reasoning
 // applied to sending: a window that restarts into a mic that sends on its own
@@ -45,8 +48,14 @@ export function saveMode(mode: DictationMode, storage?: Pick<Storage, "setItem">
 /** True while the microphone is muted — the OFF position and nothing else. */
 export const isMuted = (mode: DictationMode) => mode === "off";
 
-/** True when a finished utterance may be uploaded for transcription at all. */
+/** True when a hands-free utterance may be uploaded for transcription at all (the talk key may also upload while OFF). */
 export const mayCapture = (mode: DictationMode) => mode !== "off";
+
+/**
+ * True for a clip the talk key dictated while the mic was OFF (2026-10-27):
+ * the one thing OFF lets upload. `capturedIn` is the mode it was claimed in.
+ */
+export const mutedDictation = (source: string, capturedIn: DictationMode) => source === "ptt" && capturedIn === "off";
 
 /** True when a *transcribed* utterance is sent without the owner pressing send. */
 export const sendsOnItsOwn = (mode: DictationMode) => mode === "auto";

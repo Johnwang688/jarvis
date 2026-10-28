@@ -121,7 +121,12 @@ class Contract(unittest.TestCase):
         entry = tools.REGISTRY["owner_post"]
         self.assertIs(entry.func, module.owner_post)
         schema = entry.schema
-        self.assertEqual(schema["required"], ["kind", "question", "options", "why"])
+        # Inbox B2: every field but `kind` is optional in the schema, since a
+        # decision and a check take their own; the service refuses a kind
+        # missing its own fields or given the other's (`Caps` below).
+        self.assertEqual(schema["required"], ["kind"])
+        self.assertEqual(schema["properties"]["steps"]["items"], {"type": "object"})
+        self.assertEqual(schema["properties"]["prs"]["items"], {"type": "integer"})
         self.assertEqual(schema["properties"]["options"], {
             "type": "array", "items": {"type": "string"},
             "description": schema["properties"]["options"]["description"]})
@@ -601,7 +606,7 @@ class Caps(Base):
         self.assertEqual(len(self.store.all()), 1, "nothing over a cap was stored, cut or not")
 
     def test_malformed_args_and_unknown_kinds_are_refused(self):
-        bad = {"kind check (B2)": {"kind": "check"}, "kind unknown": {"kind": "approval"},
+        bad = {"kind check with a decision's fields": {"kind": "check"}, "kind unknown": {"kind": "approval"},
                "kind case": {"kind": "Decision"}, "kind missing": {"kind": None},
                "question empty": {"question": "   "}, "question not text": {"question": 7},
                "one option": {"options": ["only"]}, "seven options": {"options": list("abcdefg")},
@@ -618,7 +623,9 @@ class Caps(Base):
         # Through the bridge: an extra argument, a missing one, a wrong shape.
         for label, body in (("extra", dict(args(), action="run_command")),
                             ("missing", {k: v for k, v in args().items() if k != "why"}),
-                            ("check", args(kind="check"))):
+                            ("check with a decision's fields", args(kind="check")),
+                            ("decision with a check's fields", dict(args(), title="t")),
+                            ("question missing", {k: v for k, v in args().items() if k != "question"})):
             with self.subTest(bridge=label):
                 self.refused_call(self.mcp(self.thread, "owner_post", body))
         self.nothing_stored()

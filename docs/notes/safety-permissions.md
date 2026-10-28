@@ -3115,7 +3115,7 @@ visible (rule 0). `log.jsonl`'s fields take the same pass
 | `remote_api._scrub` (`remote_api.py:272`) | owner, phone | `chat_reads.scrub` + labelled | same (labelled now inside `chat_reads.scrub`; a no-op second time) |
 | phone transcript rows (`remote_api.py:437`) | owner, phone | rows' `chat_reads.scrub` + labelled | rows' `scrub_read` + labelled |
 | relay progress (`chat_relay.py:412`) | owner, HUD stream | `chat_reads.scrub` | `chat_reads.scrub` (now with labelled values) |
-| inbox decision post (`decisions.py:634`, `:637`) | owner, inbox | `chat_reads.scrub` ×2 | same (now with shapes on views and labelled values) |
+| inbox decision post (`decisions._clean_field`, `decisions.py:615`, `:618`) | owner, inbox | `chat_reads.scrub` ×2 | same (now with shapes on views and labelled values) |
 | Discord mirror `_scrub` (`discord/mirror.py:122`) | owner, Discord | `scrub_text` | `for_display` |
 | Discord reporter `_clean` (`discord/reporter.py:150`) | owner, Discord | `scrub_text` | `for_display` |
 | `card_text` (`approvals.py:99`; command/reason/headline `:379`) | owner: HUD card, `GET /approvals`, bus, Discord DM, phone | `redact_command` | `CardPass` + `redact_command` |
@@ -3132,6 +3132,22 @@ visible (rule 0). `log.jsonl`'s fields take the same pass
 | `compact_reason` (`daemon.py:280`) | **model**/log, chat line | `chat_reads.scrub` | `chat_reads.scrub_for_model` |
 | diff review input (`diff_review._model_patch`) | **model**, reviewer | `hud_api._scrub_source` (v1 only) | `for_model_strict` |
 | CLI stop refusal (`daemon.py:2795`) | owner and caller | `scrub_text` | unchanged call (= `for_model`) |
+
+**Inbox consumers from main** (B1 decisions, B2 checks, B3 PRs, P-3/C4
+phone; classified when #314 was brought up to date with main, 2026-10-28).
+Each stored inbox text is the owner's to read, so it takes the display
+scrub; `chat_reads.scrub` is that scrub now (`redact_inline` + `for_display`).
+
+| Call site | Reader | Scrub before | Scrub now |
+|---|---|---|---|
+| a decision's question, why and options, and a live check's title and steps (`decisions._clean_field`, `decisions.py:615`, `:618`, from `owner_post`) | owner, inbox (HUD; the phone through its tree scrub) | `chat_reads.scrub`, `display_text`, `chat_reads.scrub` | same calls: display. The last scrub is the one that counts: a token split by a character `display_text` drops (a symbol, a private-use code point, a Hangul filler) is whole only after it, and the views of `for_display` do not drop those, so the first scrub alone misses it. The `display_text` callers apply afterwards (`decisions.py:687`, `:746`) remove nothing from that output |
+| a runbook check the owner imports (`checks.judge_draft`, `checks.py:846`) | owner, inbox | `_clean_field`, then `display_text` | same: display |
+| a check step's note (`inbox.mark_check_step`, `inbox.py:1300`, `:1303`) | owner (the owner's own words), HUD; the phone through its tree scrub | `chat_reads.scrub`, then `display_text` | same: display. No scrub after `display_text`, so a token split by a symbol is shown whole on the HUD (not a regression: main's scrub misses it too; a follow-up, `inbox.py` is SELF_PROTECTED) |
+| a PR's title (`inbox_prs.clean_title`, `inbox_prs.py:244`, `:247`) | owner, inbox row | B1's chain | same: display |
+| a PR's branch (`inbox_prs.py:311`; the row's blocks, `:351`) | owner, inbox row | `chat_git.valid_branch` only, no scrub; the phone scrubs the row's `blocks` | unchanged (a follow-up: a branch named like a token is shown on the HUD) |
+| the phone's row detail (`remote_api._detail`, `DETAIL_FIELDS`, `remote_api.py:439`, the decision and check kinds among them) and a row's title and blocks (`:450`) | owner, phone | `remote_api._scrub` (`chat_reads.scrub` + labelled) | same: display |
+| the phone's approval card (`remote_answer.phone_card`) | owner, phone; decides whether Allow and Always are offered | `remote_api.scrub_structure`; withheld when it changed anything | the same scrub, and withheld also when the card already shows a `[withheld: <kind>]` marker: the desk card's own pass (`CardPass`) now takes what the phone's scrub would have, so that scrub finds nothing to change (a private key in a `Write`'s content, `password: …` in a reason) and the phone would have offered Allow on a card the owner cannot read. A marker an agent typed itself only makes the card Deny-only. `remote_answer_check`'s `test_a_card_the_phone_scrub_would_change_refuses_allow_and_always` fails without it (2 cases) |
+| a decision's answer delivered to the asking chat (`inbox.decision_message`, `inbox.py:1169`, sent at `:1206`) | **model**, the asking chat, as an owner message | none at delivery: the quoted question and option are the stored text (the display chain above), the owner's typed words as typed, as any owner message | unchanged. The stored parts were display-scrubbed when posted, which withholds at least what `for_model` does; the model reads back its own question, so a labelled value withheld there costs no code it must act on. Nothing is re-derived for the model |
 
 Not changed here (listed for follow-up): v1 dispatch's tool results
 (`tools/__init__.py`, `secrets.scrub`, SELF_PROTECTED), attachments inlined
@@ -3169,3 +3185,205 @@ main's output on the review's 50 lines (bar the labelled AWS secret, now a
 shape). `redact_private_key_check`'s tighten-only fuzz reads: the old output
 (lines compared as `secrets.scrub` joins them), or one that only withholds
 more.
+
+## Protected state: Jarvis's own records (2026-10-25)
+
+**The hole** (found by the review of PR #309). `cp /tmp/x
+~/.local/share/jarvis/v2/threads/<id>/log.jsonl` was a static-verdict ALLOW
+(and `echo … >> log.jsonl` an ASK that `cp` never needed). An agent could
+append or replace a record like `{"kind":"user","data":{"origin":"owner",
+"via":"hud","typed":…}}` in any thread's log, and the forged line then
+showed as the owner's words in the HUD transcript, in other chats'
+`chat_read`/`chat_summary`, on the phone's `/m/api/threads/<id>/log` and in
+the Discord mirror's catch-up. It never reached a model's context or desk
+authority, but it falsified the record the owner and other chats read.
+The files beside it were open the same way, and some are worse than a
+record: `threads/<id>/brief.json` is the brief `resume_thread` reopens
+(cwd, profile, grants), `projects/<id>.json` holds the folder a project's
+chats work in, and `schedules/<id>.json` is what runs with nobody watching.
+
+**What lives under the v2 data root** (`config.V2_DATA_DIR`, default
+`~/.local/share/jarvis/v2`), who writes it, and the verdict:
+
+| Path | Holds | Written by (in-process) | Verdict |
+|---|---|---|---|
+| `threads/<id>/thread.json` | the thread record (role, provider, project, title, surface) | `stores.ThreadStore` | **DENY** |
+| `threads/<id>/log.jsonl` | the transcript the HUD, `chat_read`, the phone and Discord read | `ThreadStore.log`, `daemon` | **DENY** |
+| `threads/<id>/brief.json` | the brief a resume reopens | `daemon` | **DENY** |
+| `threads/<id>/activity.json`, `discord.json`, `subagents.jsonl` | activity, the Discord thread link, subagent runs | `activity`, `discord/mirror`, `subagents` | **DENY** (tree) |
+| `tasks/<id>/task.json`, `journal.jsonl`, `activity.json`, `discord.json` | the task record and its journal | `stores.TaskStore`, `activity`, `discord/reporter` | **DENY** |
+| `projects/<id>.json` | name, root, archive state | `stores.ProjectStore`, `projects` | **DENY** |
+| `schedules/<id>.json` | what runs, where and when | `schedules` | **DENY** |
+| `ledger/<day>.jsonl` | usage accounting that admission reads | `ledger`, `hud_api.HUDLedger` | **DENY** |
+| `diff_reviews/<task>.json` | the quick reviews shown with a task's diff | `diff_review` | **DENY** |
+| `discord/linker.json`, `approval-posts.json` | sanctioned channel names, pending approval posts | `discord/linker`, `discord/gateway` | **DENY** |
+| `chat-git/pins.json`, `chat-git/empty-home/` | the origin a chat may push to; the daemon's empty git HOME | `chat_git` | **DENY** |
+| `deleting/<stamp>/` | a permanent delete's staging folder and manifest | `projects` | **DENY** |
+| `vex/build-*.lock`, `unfinished-*` | VEX build locks | `vex` | **DENY** |
+| `decisions.jsonl` | the gate's own audit log | `permissions.log_decision` | **DENY** (named file) |
+| `inbox/` (`missed.jsonl`, `decisions/`) | the owner inbox | `inbox`, `decisions` | DENY, unchanged (inbox B1) |
+| `remote/passkeys.json`, `sessions.json` | the phone's passkeys and sessions | `remote_auth` | DENY, unchanged (PH-6) |
+| `claude/<thread>/` | Claude session carriers (`mcp-<nonce>.json`) | `providers/claude` | **left**: a credential carrier (`editor_policy.carrier_dirs`), not a record; a follow-up |
+| `codex/<thread>/` | a Codex chat's private home, its sandbox HOME among them | `providers/codex_config`, then the Codex CLI and the chat's own sandboxed commands | **left**: agents legitimately write it |
+| anything else at the root (`notes.txt`, a new folder) | | | left ordinary |
+
+**DENY for all of them, none ASK.** Each is written by the daemon alone and
+read back as true: by the owner (the transcript, the task journal, the
+audit log), by other chats, or by the daemon itself as authority (a brief,
+a project root, a schedule, a pin). Nothing an agent legitimately does
+writes any of them, so a question would only be a chance for a tired "yes"
+to forge one. The owner changes them through the HUD (rename, archive,
+delete, schedules) or by hand; his own shell is not Jarvis's gate.
+
+**How.** The inbox tree's machinery (#309) on top of #310's brace and glob
+spellings; nothing new in the matcher:
+
+* `files.RECORD_TREES` names the trees and `files.RECORD_FILES` names
+  `decisions.jsonl`; `files._record_trees()` resolves them per call from
+  `config.V2_DATA_DIR`, so a suite that repoints the data root protects its
+  own.
+* `protected_state.owner_trees()` is now `files._owner_trees()`: the inbox's
+  tree **and** the record trees, each resolved once per line
+  (`files._resolve_all`, which keeps a folder it cannot resolve as written:
+  never dropped, fail closed). Every write operand and redirect target that
+  provably lands at or below one (`_inside_tree`: plain, each brace word, a
+  glob matched component by component and on disk, `cd` and a relative
+  name, a symlink) is a **certain** touch: v2's layer 1 refuses it
+  (`denied_command`, with `files.record_refusal` as the reason), v1 asks,
+  and no allowlist entry covers it. One that only might is asked.
+* **What is certain for a record** (`protected_state._record_sure`, review
+  of PR #315). The inbox's rule — any "writer" handed a path in the tree is
+  a certain write — made every read of a record by an interpreter or an
+  archiver a layer-1 DENY (`python3 parse.py <log>`, `python3 -c
+  "json.load(open(P))"`, `rsync -a <D>/threads/ /tmp/t/`, `tar czf … -C <D>
+  threads`, `vim -R <log>`). Records are read far more than written, so for
+  them only a write the module can see is certain:
+  - a redirect onto one, and `tee`, `mv`, `rm`, `unlink`, `rmdir`, `mkdir`,
+    `touch`, `truncate`, `shred`, `chmod`, `chown`, `chgrp`, `sponge`,
+    `patch`, `setfacl`, `chattr`, `link` on one;
+  - `cp`/`install` onto one (their parsed destination; a copy whose options
+    could not be parsed counts its last operand), `rsync`/`scp` onto one
+    (the last operand), `dd of=`;
+  - `ln`: the link made in a tree, a hard link to a record (a second name
+    for its inode, which no later check would see), and a symlink *to* a
+    record folder (a route into the tree); a symlink to a record *file*
+    writes nothing there and asks — a write through it is judged by where
+    it leads;
+  - a reader's writing form: `sed -i`, `sort -o P`, a sed `w P`; `find
+    -delete`, and `find -exec` of a writer (`-exec rm {}`), not of an
+    interpreter (`-exec python3 parse.py {}` asks);
+  - `perl -pi`, `awk -i inplace`; `curl -o P`, `wget -O P`; `gzip P` and
+    the other compressors unless `-c`, `-t` or `-l`;
+  - inline source (`python3 -c`, `node -e`, `perl -e`, `awk`) that spells a
+    record's full path **in a write form** (`open(P, "a")`,
+    `Path(P).write_text`, `fs.appendFileSync(P)`, `os.remove(P)`,
+    `shutil.move(P, …)`, `print > P`, perl `open(F, ">>P")` …,
+    `protected_state._source_writes`). Naming it in a read
+    (`json.load(open(P))`, `sys.stdout.write(open(P).read())`) asks, and
+    so does a bare tree name (`print("tasks")` names no record).
+
+  Anything else handed a record's path — an interpreter or a shell given it
+  as an argument, `tar`, `zip`, `unzip`, an editor, `curl -T`, a program
+  this module does not know — is an uncertain touch: asked, never refused.
+  `python3 parse.py <log>` was rules' ALLOW and now asks; the others asked
+  on main already. The inbox keeps its own, older rule.
+* Each tree's folder and `decisions.jsonl` are also named in
+  `_protected_state_paths()`, as `inbox/` is, so moving, replacing or
+  re-moding the folder itself is a certain write, a folder named `threads`
+  copied into the data root lands on the protected one, and a write grant
+  on the data root or on a tree is refused by `denied_grant`.
+* The write tools refuse them: `files._self_protected` (v1 `write_file` and
+  `edit_file`; the HUD editor's read-only `safety` kind) and v2's
+  `denied_file` (Claude's `Write`/`Edit`/`MultiEdit`/`NotebookEdit`, every
+  provider's path spelling), which answers with `record_refusal`.
+* **Ancestors stay asked.** `rm -rf <data root>`, `mv <data root> …` and
+  `find <data root> -delete` are uncertain touches (`_ancestor_of`), as
+  `remote_auth_check` pins; the card now names a record folder.
+* **Reads are not refused**: `cat`, `grep -r`, `tail`, `jq`, `cp <log>
+  /tmp/backup`, globs over the trees, the Read tool and a read grant keep
+  their verdicts; an interpreter or archiver handed a record asks (above).
+  `chat_reads` reads in-process anyway.
+* **The daemon is not gated.** The stores (`stores._write_bytes`,
+  `_append`), `activity`, `schedules`, `ledger`, `diff_review`, the Discord
+  linker and gateway, `chat_git`, `projects`' staging, `vex`'s markers and
+  `log_decision` all write with plain file I/O in the daemon's own process;
+  the gate judges agent tool calls and agent shell lines only.
+  `stores_check.records_protected_daemon_writes` makes 27 gate entry points
+  raise — the shell detector (`command_touch`, `command_touches`,
+  `refused`), every protected set and tree (`protected_paths`,
+  `gate_paths`, `owner_trees`, `record_paths`, `hud_trees`, files'
+  `_protected_state`, `_protected_state_paths`, `_record_*`,
+  `_owner_trees`, `_in_*_tree`, `_self_protected`), v1's `static_verdict`
+  and `protected_state_verdict`, `rules.decide`, and v2's `build_permit`,
+  `denied_file`, `denied_command`, `denied_grant`, `denied_read`,
+  `_command_writes_protected_state` and `protected_paths` — and the daemon
+  still writes 15 kinds of record through its own code: a project, a
+  thread, its log and title, a task, its transitions and journal, the
+  decision log, a thread's activity sidecar, a ledger row, a diff review, a
+  schedule, the Discord linker's state and approval-post map, a chat-git
+  pin, a VEX build marker, and a permanent delete's staging folder and
+  manifest. Each is then refused to an agent and still readable.
+* **Cost.** The gate's configured paths are a pure function of the
+  settings, `HOME` and the record lists, so `_protected_state_paths()` keeps
+  them per key; what they resolve to on disk is read every call, each
+  folder once (`_resolve_all`). Twenty ordinary lines through
+  `static_verdict` and `denied_command` cost 24.9 ms against
+  21.3 ms on main (the first version of this change: 38.1 ms).
+
+**Differential** (origin/main `4bb88db1` against this change, 126
+lines judged in a temp data root by v1 `static_verdict`, v2
+`denied_command` and `command_touch`, plus 19 write-tool and grant paths):
+90 lines changed, **67 to a stricter verdict, none looser** (29 ALLOW to
+DENY, 36 ASK to DENY, 2 ALLOW to ASK: `python3 parse.py <log>` and `ln -s
+<log> /tmp/mylog`); the other 23 keep their verdict and only gain or change
+the protected path named on the card (the reads below, asked on main and
+asked now, and `rm -rf <D>`, `mv <D> …`, `find <D> -delete`). Every DENY is
+a write into a record tree, in every spelling: plain, brace, glob, `cd` and
+a relative name, a symlink, `sed -i`, `perl -pi`, `awk -i inplace`, inline
+source in a write form, `curl -o`, `gzip`, `find -exec rm`, `find
+-delete`, `rsync` onto a tree, hard and folder links, `dd of=`, `sort -o`,
+`install`. None of the 23 reads by an interpreter, archiver, `rsync`,
+editor or symlink is refused (`python3 parse.py`, `python3 -c
+"print(open(P).read())"`, `json.load(open(P))`, `python3 - P`, `node -e
+readFileSync`, `awk '{print}' P > /tmp/o`, `rsync -a <D>/threads/ /tmp/t/`,
+`tar czf … -C <D> threads`, `tar tzf … <D>/threads`, `vim -R`, `ln -s P
+/tmp/l`, `find -exec python3`, `gzip -c`, `zip -r`, `curl -T`, `sort -o
+/tmp/s P` …). All 15 plain reads, all 15 ordinary commands, the carriers,
+`<D>/notes.txt` and the inbox and passkeys keep their verdicts. The write
+tools and write grants refuse every record path; read grants are
+unchanged.
+
+**Known limits.** As for every protected path (`Protected state: brace and
+glob spellings`, above): a path built at run time, a script that writes it,
+or a program told where to write by its own config is not seen; the real
+boundary would be filesystem ownership. For a record that is wider by
+design: a script or interpreter handed a record's path asks rather than
+being refused, and inline source that writes one through a variable
+(`p = "<log>"; open(p, "a")`) asks. `claude/` and `codex/` are not covered
+(above).
+
+Pinned by `tests/v2/permissions_check.py` (`record_tree_checks`: six shell
+spellings × 11 stores and the write tools, refused at layer 1 and never
+asked; the review's forged owner line by redirect, `cd`, symlink, brace,
+glob, `mv`, `cp -r` and `ln`; 25 more write spellings refused (inline
+source in a write form, `perl -pi`, `awk -i inplace`, `curl -o`, `gzip`,
+`find -exec rm`, `rsync` onto a tree, hard and folder links, `dd of=`,
+`sort -o`); the review's 23 reads by interpreters, archivers, `rsync`,
+editors and symlinks never refused; plain reads still rules' ALLOW; the
+data root asked; the carriers ordinary; each tree refused *because* it is
+in `RECORD_TREES`; an unresolvable tree kept. `brace_glob_checks`: the 35
+forms × a thread's log and brief, a task's journal, a project and a
+schedule), `tests/files_check.py` (`record_tree_checks`: both v1 write
+tools) and `tests/v2/stores_check.py` (`records_protected_daemon_writes`).
+Verified to fail (and restored) with each of: the review's blocker put back
+(`_record_sure` always certain: 39 v2 checks), any mention in inline source
+a write (30), no inline write form recognised (6), interpreters handed a
+record writers again (15), every `rsync` operand certain (3), a symlink to
+a record folder not certain (2), any `find -exec` program certain (3), an
+unresolvable tree dropped (3), a daemon writer consulting the gate
+(`schedules._save`, `ledger._append`: `stores_check`), each of the ten
+trees dropped from `RECORD_TREES` (18 to 261 v2 checks each, `files_check`
+and `stores_check`), `decisions.jsonl` dropped from `RECORD_FILES`, globs
+let past the tree rule (157), `owner_trees` back to the inbox alone (629),
+the record trees left out of `_self_protected` (`files_check`,
+`stores_check`), and `denied_file`'s record branch removed (11).

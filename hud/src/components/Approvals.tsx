@@ -17,6 +17,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ApprovalRequest } from "../types";
 import { headlineLine } from "../lib/approval";
+import { argText, countdownText, nestedTooDeep, originText, reasonText, TOO_DEEP_WARNING } from "../lib/approvalCard";
 import { noPointerFocus } from "../lib/talkkey";
 import { allowRestore } from "../state/frameguard";
 import { BrowserApprovalCard } from "./BrowserApproval";
@@ -104,12 +105,15 @@ function OrdinaryApprovalCard(props: {
     props.onDecide(r.req_id, allow, always);
   };
 
-  const shown = left > 120 ? `${Math.ceil(left / 60)}m` : `${Math.max(0, left)}s`;
+  const shown = countdownText(left);
   const also = r.remote ? " · ALSO ASKED ON DISCORD" : "";
   // `args` is a dict of model-written strings; each is rendered as text.
   const args = Object.entries(r.args || {});
   // Chat-to-chat C6: which chat's message started the asking call's turn.
   const relay = relayedParts(r.relayed_from);
+  // An argument cut at the redaction's depth was never judged or shown:
+  // DENY only (review of PR #313, a desk behaviour change that fails closed).
+  const tooDeep = nestedTooDeep(r.args);
 
   return (
     // Focusable (tabIndex -1) so the veil can take focus off a frame or an
@@ -120,8 +124,10 @@ function OrdinaryApprovalCard(props: {
       {headlineLine(r.headline) ? (
         <div className="headline" data-testid="approval-headline">{headlineLine(r.headline)}</div>
       ) : null}
-      {r.origin ? (
-        <div className="origin" data-testid="approval-origin">REQUESTED BY {r.origin}</div>
+      {/* The card's words are lib/approvalCard.ts's, shared with the phone's
+          answering card (mobile/card.ts, P-4). */}
+      {originText(r.origin) ? (
+        <div className="origin" data-testid="approval-origin">{originText(r.origin)}</div>
       ) : null}
       {/* Chat-to-chat C6: the relayed turn behind this call (or running). Display
           only, one clipped line of plain text; it changes no button here. */}
@@ -146,10 +152,11 @@ function OrdinaryApprovalCard(props: {
       {args.map(([k, v]) => (
         <div className="arg" key={k}>
           <span className="k">{k} </span>
-          {typeof v === "string" ? v : JSON.stringify(v)}
+          {argText(v)}
         </div>
       ))}
-      {r.reason ? <div className="reason">{r.layer ? `[${r.layer}] ` : ""}{r.reason}</div> : null}
+      {tooDeep ? <div className="reason" role="alert" data-testid="approval-too-deep">{TOO_DEEP_WARNING}</div> : null}
+      {reasonText(r.reason, r.layer) ? <div className="reason">{reasonText(r.reason, r.layer)}</div> : null}
       <div className="btns">
         {/* type="button" on every one: nothing on this card is a form default,
             so Enter submits nothing. */}
@@ -168,7 +175,7 @@ function OrdinaryApprovalCard(props: {
           <button
             type="button"
             className="always"
-            disabled={busy}
+            disabled={busy || tooDeep}
             tabIndex={-1}
             onMouseDown={noPointerFocus}
             data-testid="approval-always"
@@ -178,7 +185,7 @@ function OrdinaryApprovalCard(props: {
             ALWAYS
           </button>
         )}
-        <button type="button" disabled={busy} tabIndex={-1} onMouseDown={noPointerFocus} onClick={() => decide(true)}
+        <button type="button" disabled={busy || tooDeep} tabIndex={-1} onMouseDown={noPointerFocus} onClick={() => decide(true)}
                 data-testid="approval-allow">
           AUTHORIZE
         </button>
