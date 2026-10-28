@@ -618,7 +618,7 @@ class Review(_Temp):
         bare = base / "origin.git"
         _git("init", "--bare", "-b", "main", str(bare), cwd=base)
         made = {}
-        for name, branch in (("A", "topic"), ("B", "main"), ("C", "topic")):
+        for name, branch in (("A", "topic"), ("B", "main"), ("C", "feature")):
             d = base / name
             _git("clone", str(bare), str(d), cwd=base)
             _git("checkout", "-b", branch, cwd=d)
@@ -644,7 +644,7 @@ class Review(_Temp):
         self.n.present = True
         stop = self.n.answer_later(Decision.DENY)
         try:
-            # The same words in C, another clone on a branch of the same name: no
+            # The same words in C, another clone on another feature branch: no
             # headline at all, but another folder. Asked, never granted.
             self.assertIs(permit("Bash", dict(args), brief, shell_cwd=str(r["C"])), Decision.DENY)
             self.assertNotEqual(last_verdict().reason, quiet_defer.GRANTED_TEXT)
