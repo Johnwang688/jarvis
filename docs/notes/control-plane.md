@@ -1886,8 +1886,12 @@ listener (#227).
 - **Never sent, never an answer.** The route calls no `deliver`, answer or
   `resolve`; an "allow" spoken is text back to the phone, and the approval
   stays pending (asserted). The phone puts the words in the open chat's
-  message box, where Send is still the owner's tap (P-5). No inbox row,
-  card, question, decision or proposal has a mic. Speech never authorizes.
+  message box, where Send is still the owner's tap (P-5). Added words
+  change the draft, so the next Send carries a new `client_id` (P-5's
+  dedupe is bound to the words). The mic is inside the box, so it shows
+  only where the box does (an owner's chat, `role` "chat"), and it turns
+  off with the box while the app is offline. No inbox row, card, question,
+  decision or proposal has a mic. Speech never authorizes.
 - **Never kept.** No temp file at all: the clip stays in memory for the
   request. Logs say "a dictation clip transcribed" or "refused (status)",
   never its length, bytes or words. The reply's text passes the phone's

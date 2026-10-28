@@ -104,6 +104,7 @@ const ROWS = [
 
 function harness(rows: unknown[] = []) {
   const posts: { path: string; value: unknown }[] = [];
+  const replies: Posted[] = [];
   const asked: string[] = [];
   const gets: Record<string, Got> = {};
   const ok = (body: unknown): Got => ({ ok: true, body });
@@ -125,7 +126,10 @@ function harness(rows: unknown[] = []) {
   const app = new PhoneApp({
     root, onSignedOut: signedOut, signOut: async () => {},
     fetchJson: async (path) => { asked.push(path); return gets[path] ?? { ok: false, why: "error", status: 404, body: {} }; },
-    postJson: async (path, value) => { posts.push({ path, value }); return { status: 200, body: {} } as Posted; },
+    postJson: async (path, value) => {
+      posts.push({ path, value });
+      return (replies.shift() ?? { status: 202, body: { status: "started" } }) as Posted;
+    },
     getCredential: async () => null,
     openStream: () => new FakeStream(),
     setTimer: (fn) => { queueMicrotask(fn); return 0; },
@@ -146,7 +150,7 @@ function harness(rows: unknown[] = []) {
   };
   const down = async () => { rect(button()); pointer("pointerdown", button()); await settle(); };
   const up = async () => { pointer("pointerup", window); await settle(); };
-  return { app, root, posts, asked, gets, mic, signedOut, settle, q, button, box, line, pointer, down, up, ok };
+  return { app, root, posts, replies, asked, gets, mic, signedOut, settle, q, button, box, line, pointer, down, up, ok };
 }
 
 async function openChat(h: ReturnType<typeof harness>, id = CHAT) {
@@ -222,6 +226,33 @@ describe("push to talk (P-7)", () => {
     await h.settle();
     expect(h.posts.length).toBe(1);
     expect(h.posts[0]).toMatchObject({ path: `/m/api/threads/${CHAT}/messages`, value: { text: "please add a test" } });
+  });
+
+  it("words added after a send that may not have arrived make a new message (a new client_id)", async () => {
+    const h = harness();
+    await openChat(h);
+    h.box().value = "please";
+    h.box().dispatchEvent(new Event("input"));
+    h.replies.push({ status: 502, body: {} });
+    (h.q("m-compose-send") as HTMLButtonElement).click();
+    await h.settle();
+    expect(h.posts.length).toBe(1);
+    const first = (h.posts[0].value as { client_id: string }).client_id;
+    expect(first).toBeTruthy();
+    // The ambiguous answer turned the app offline (P-5): the mic is off with it, until a read gets through.
+    expect(h.button().disabled).toBe(true);
+    h.app.setOnline(true);
+    await h.settle();
+    await h.down();
+    h.mic.ctx().feed(0.5);
+    await h.up();
+    expect(h.box().value).toBe("please add a test");
+    expect(h.posts.length).toBe(1);
+    (h.q("m-compose-send") as HTMLButtonElement).click();
+    await h.settle();
+    expect(h.posts.length).toBe(2);
+    expect(h.posts[1].value).toMatchObject({ text: "please add a test" });
+    expect((h.posts[1].value as { client_id: string }).client_id).not.toBe(first);
   });
 
   it("an empty box takes the words as they are", async () => {
