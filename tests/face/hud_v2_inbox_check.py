@@ -535,12 +535,19 @@ def _missed_checks(page, mock, check, until):
           m1.locator('[data-testid="inbox-missed-why"]').inner_text() == "Nobody answered in time, so it was denied."
           and m2.locator('[data-testid="inbox-missed-why"]').inner_text()
           == "Jarvis stopped before you answered, so it was denied.")
-    controls = m1.evaluate("e => [...e.querySelectorAll('button, input, textarea, a')].map(b => b.dataset.testid)")
+    # Inbox B4: a rank-8 row may also be snoozed or dismissed (its own
+    # `inbox-marks` strip, the marks section's); nothing else.
+    outside = ("e => [...e.querySelectorAll('button, input, textarea, a')]"
+               ".filter(b => !b.closest('[data-testid=\"inbox-marks\"]')).map(b => b.dataset.testid)")
+    controls = m1.evaluate(outside)
+    marks = m1.evaluate("e => [...e.querySelectorAll('[data-testid=\"inbox-marks\"] button')].map(b => b.dataset.testid)")
     check("its one control is 'Open its chat': no answer box, no Withdraw, no 'ask again' [mutation: an ask-again "
           "button]", controls == ["inbox-link"] and m1.locator('[data-testid="inbox-link"]').inner_text() == "Open its chat"
-          and "again" not in m1.locator('[data-testid="inbox-link"]').inner_text().lower(), str(controls))
+          and "again" not in m1.locator('[data-testid="inbox-link"]').inner_text().lower()
+          and set(marks) <= {"inbox-snooze-hour", "inbox-snooze-tomorrow", "inbox-snooze-week", "inbox-dismiss"},
+          str(controls + marks))
     check("one with no chat has no link at all, not even to its task",
-          m3.locator("button").count() == 0, str(m3.locator("button").count()))
+          m3.evaluate(outside) == [], str(m3.evaluate(outside)))
     imgs = page.evaluate("() => document.querySelectorAll('[data-testid=\"inbox-view\"] img').length")
     check("its origin is literal text: no element made, nothing ran [mutation: innerHTML]",
           imgs == 0 and page.evaluate("window.__pwned === undefined")
