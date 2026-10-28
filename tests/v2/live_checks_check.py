@@ -70,12 +70,17 @@ def check_args(**over):
     return base
 
 
-class FakeGit:
-    """`git` for `checks.Deployment`: PR -> merge commit, ancestry pairs, the
-    commits that change hud/. Counts calls."""
+def merge(n, sha):
+    """A first-parent merge commit with GitHub's subject for PR `n`."""
+    return (sha, f"Merge pull request #{n} from me/branch-{n}")
 
-    def __init__(self, merges=None, ancestors=(), hud=(), fail=False):
-        self.merges, self.ancestors, self.hud, self.fail = dict(merges or {}), set(ancestors), set(hud), fail
+
+class FakeGit:
+    """`git` for `checks.Deployment`: each head's first-parent merge commits
+    as (sha, subject), and the merge commits that change hud/. Counts calls."""
+
+    def __init__(self, lines=None, hud=(), fail=False):
+        self.lines, self.hud, self.fail = {k: list(v) for k, v in (lines or {}).items()}, set(hud), fail
         self.calls = []
 
     def __call__(self, *args):
@@ -83,23 +88,19 @@ class FakeGit:
         if self.fail:
             return None
         if args[0] == "log":
-            grep = next(a for a in args if a.startswith("--grep="))
-            n = int(re.search(r"#(\d+) from ", grep).group(1))
-            sha = self.merges.get(n)
-            return (0, sha + "\n") if sha else (0, "")
-        if args[0] == "merge-base":
-            return (0, "") if (args[2], args[3]) in self.ancestors else (1, "")
+            assert "--first-parent" in args and "--merges" in args and args[-1] == "--", args
+            head = args[-2]
+            return (0, "".join(f"{sha}\t{subject}\n" for sha, subject in self.lines.get(head, [])))
         if args[0] == "diff":
             return (1, "") if args[-3] in self.hud else (0, "")
         raise AssertionError(args)
 
 
-def deployed(prs=(), *, merges=None, hud=None):
-    """A Deployment where every given PR's merge is in the code and the HUD."""
-    merges = merges or {n: SHA["a"] for n in prs}
-    ancestors = {(sha, SHA["f"]) for sha in merges.values()} | {(sha, SHA["e"]) for sha in merges.values()}
-    return checks.Deployment(git=FakeGit(merges, ancestors, hud or ()), code_head=SHA["f"],
-                             hud_head=lambda: SHA["e"])
+def deployed(prs=(), *, hud=()):
+    """A Deployment where every given PR is merged on the running line and the HUD's."""
+    line = [merge(n, SHA["a"][:-len(str(n))] + str(n)) for n in prs]
+    return checks.Deployment(git=FakeGit({SHA["f"]: line, SHA["e"]: line, "HEAD": line}, hud),
+                             code_head=SHA["f"], hud_head=lambda: (SHA["e"], False))
 
 
 class Base(OP.Base):
@@ -409,34 +410,156 @@ class Store(unittest.TestCase):
                 self.create(thread_id=None, imported_from="/p/docs/plans/e.md")
 
 
+# --- size: every record the stores write reads back (review of PR #321, MED 1) ------------
+
+
+EXPANDS = "\u0958"          # one character typed, two after NFC (and 6 bytes)
+
+
+class Size(Base):
+    def test_text_that_expands_when_cleaned_is_refused_at_post(self):
+        """The reviewer's probe p2: 30 steps of 1000 U+0958 passed the caps
+        on the raw text and wrote a file too large to read: never counted,
+        never pruned. The caps now hold on what is stored."""
+        thread = self.chat(CLAUDE)
+        self.turn(thread)
+        big = EXPANDS * 1000
+        for _ in range(8):
+            out = self.service_check(thread, steps=[{"do": big, "expect": big}] * 30)
+            self.assertTrue(out.startswith("Error: once cleaned,"), out)
+        out = self.service_check(thread, title=EXPANDS * 150)
+        self.assertTrue(out.startswith("Error: once cleaned,"), out)
+        self.no_checks()
+        self.assertFalse(self.cstore.dir.exists() and any(self.cstore.dir.iterdir()), "nothing on disk")
+        self.finish(thread)
+
+    def test_what_is_posted_is_what_is_counted(self):
+        thread = self.chat(CLAUDE)
+        self.turn(thread)
+        half = EXPANDS * 500               # 1000 characters once cleaned: at the cap
+        for i in range(5):
+            out = self.service_check(thread, title=f"t{i}", steps=[{"do": half, "expect": "e"}] * 3)
+            self.assertTrue(out.startswith("Posted check"), out)
+        self.assertEqual(len(self.cstore.all()), 5)
+        out = self.service_check(thread, title="t5")
+        self.assertIn("5 checks waiting", out)
+        self.assertEqual(len(os.listdir(self.cstore.dir)), 5, "every file written is one the store reads")
+        self.finish(thread)
+
+
+class SizeStore(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+
+    def test_the_reviewers_probe_p1(self):
+        """Cleaned text past the field caps is never written (valid() holds the caps)."""
+        store = checks.CheckStore(self.root)
+        cleaned = decisions.display_text(decisions._clean_field(EXPANDS * 1000, True), lines=True)
+        self.assertEqual(len(cleaned), 2000)
+        with self.assertRaises(ValueError):
+            store.create(thread_id="ab12cd34", project_id=None, task_id=None, created_by="x", title="T", prs=[],
+                         steps=[{"do": cleaned, "expect": cleaned}] * 30)
+        self.assertEqual(os.listdir(store.dir), [])
+
+    def test_a_check_past_its_byte_budget_is_refused_and_the_worst_marks_still_read_back(self):
+        store = checks.CheckStore(self.root)
+        wide = "\u20ac" * 1000                 # 3 bytes each, within every character cap
+        with self.assertRaises(decisions.CapReached):
+            store.create(thread_id="ab12cd34", project_id=None, task_id=None, created_by="x", title="T", prs=[],
+                         steps=[{"do": wide, "expect": wide}] * 30)
+        self.assertEqual(os.listdir(store.dir), [])
+        # The largest check that fits, then every step marked with the widest note: it still reads back.
+        steps = [{"do": wide, "expect": "\u20ac" * 400}] * 30
+        record = store.create(thread_id="ab12cd34", project_id=None, task_id=None, created_by="x" * 200,
+                              title="\U0001d538" * 200, prs=list(range(1, 11)), steps=steps)
+        for step in range(30):
+            store.mark(record["id"], step, "fail", "\U0001d538" * 1000, sha=SHA["f"])
+        got = store.get(record["id"])
+        self.assertIsNotNone(got, "every file this store writes reads back")
+        self.assertTrue(checks.is_done(got))
+        self.assertLess(os.path.getsize(store.dir / f"{record['id']}.json"), checks._FILE_MAX // 2)
+
+    def test_the_store_never_writes_what_it_cannot_read(self):
+        for store in (checks.CheckStore(self.root), decisions.DecisionStore(self.root)):
+            with self.subTest(store=type(store).__name__):
+                self.assertLessEqual(store._WRITE_MAX * 2, store._MAX)
+
+    def test_a_worst_case_decision_reads_back(self):
+        """The same property for decisions: the widest fields at their caps
+        (4-byte characters, and text that grows under NFC) are far under the
+        decision store's limits."""
+        store = decisions.DecisionStore(self.root)
+        wide = "\U0001d538"
+        record = store.create(thread_id="ab12cd34", project_id=None, task_id=None, origin="o" * 160,
+                              question=wide * 1000, options=[f"{i}" + wide * 239 for i in range(6)],
+                              default=0, why=wide * 2000)
+        self.assertIsNotNone(store.get(record["id"]))
+        size = os.path.getsize(store.dir / f"{record['id']}.json")
+        self.assertLess(size, store._WRITE_MAX, size)
+        store.settle(record["id"], choice=None, text=wide * decisions.ANSWER_MAX)
+        self.assertIsNotNone(store.get(record["id"]))
+
+
+class SizeDecisions(Base):
+    def test_a_decision_that_grows_when_cleaned_is_posted_and_reads_back(self):
+        thread = self.chat(CLAUDE)
+        self.turn(thread)
+        out = self.service_post_decision(thread)
+        did = OP.DEC_ID.search(out).group(0)
+        record = self.store.get(did)
+        self.assertIsNotNone(record, "it reads back")
+        self.assertEqual(len(record["question"]), 1000, "NFC doubled it")
+        self.finish(thread)
+
+    def service_post_decision(self, thread):
+        return self.d.owner_posts.post(self.caller(thread), "decision", EXPANDS * 500,
+                                       [EXPANDS * 120, "b" * 120], 0, EXPANDS * 1000)
+
+
 # --- the deployed test ------------------------------------------------------------------------
 
 
 class Deploy(unittest.TestCase):
+    F, E = SHA["f"], SHA["e"]
+
     def test_no_prs_needs_no_test(self):
         status = checks.Deployment().status([])
         self.assertEqual(status["state"], checks.NO_PRS)
         self.assertTrue(checks.Deployment.markable(status))
 
     def test_unknown_is_never_deployed(self):
+        F, E, A = self.F, self.E, SHA["a"]
+        hud_line = {F: [merge(5, A)], E: [merge(5, A)]}
         cases = {
             "unattached": checks.Deployment(),
-            "no code head": checks.Deployment(git=FakeGit({5: SHA["a"]}, {(SHA["a"], SHA["f"])}), code_head=None),
-            "git cannot say": checks.Deployment(git=FakeGit(fail=True), code_head=SHA["f"]),
-            "no merge commit (squash, not fetched)": checks.Deployment(git=FakeGit({}), code_head=SHA["f"]),
-            "hud change, dev hud": checks.Deployment(git=FakeGit({5: SHA["a"]}, {(SHA["a"], SHA["f"])}, {SHA["a"]}),
-                                                     code_head=SHA["f"], hud_head=lambda: None),
-            "git raises": checks.Deployment(git=lambda *a: 1 / 0, code_head=SHA["f"]),
+            "no code head": checks.Deployment(git=FakeGit({F: [merge(5, A)]}), code_head=None),
+            "git cannot say": checks.Deployment(git=FakeGit(fail=True), code_head=F),
+            "no merge commit (squash, not fetched)": checks.Deployment(git=FakeGit({}), code_head=F),
+            "two merge commits for one PR": checks.Deployment(git=FakeGit({F: [merge(5, A), merge(5, SHA["b"])]}),
+                                                              code_head=F),
+            "hud change, dev hud": checks.Deployment(git=FakeGit(hud_line, {A}), code_head=F,
+                                                     hud_head=lambda: (None, None)),
+            "hud change, hud built dirty": checks.Deployment(git=FakeGit(hud_line, {A}), code_head=F,
+                                                             hud_head=lambda: (E, True)),
+            "hud change, dirty unknown": checks.Deployment(git=FakeGit(hud_line, {A}), code_head=F,
+                                                           hud_head=lambda: (E, None)),
+            "git raises": checks.Deployment(git=lambda *a: 1 / 0, code_head=F),
+            "no budget left": checks.Deployment(git=FakeGit({F: [merge(5, A)]}), code_head=F),
         }
         for label, deploy in cases.items():
             with self.subTest(case=label):
-                status = deploy.status([5])
+                status = deploy.status([5], [0] if label == "no budget left" else None)
                 self.assertEqual(status["state"], checks.UNCONFIRMED, status)
                 self.assertFalse(checks.Deployment.markable(status))
                 self.assertIn("Not confirmed deployed", status["text"])
+        # A clean HUD build is the control.
+        clean = checks.Deployment(git=FakeGit(hud_line, {A}), code_head=F, hud_head=lambda: (E, False))
+        self.assertEqual(clean.status([5])["state"], checks.DEPLOYED)
 
     def test_merged_but_not_in_the_running_daemon(self):
-        deploy = checks.Deployment(git=FakeGit({5: SHA["a"]}, set()), code_head=SHA["f"])
+        deploy = checks.Deployment(git=FakeGit({self.F: [], "HEAD": [merge(5, SHA["a"])]}), code_head=self.F)
         status = deploy.status([5])
         self.assertEqual((status["state"], status["merged"]), (checks.NOT_DEPLOYED, True))
         self.assertFalse(checks.Deployment.markable(status))
@@ -446,39 +569,85 @@ class Deploy(unittest.TestCase):
         self.assertEqual((status["state"], status["sha"]), (checks.DEPLOYED, SHA["f"]))
 
     def test_a_hud_change_needs_the_installed_hud(self):
-        git = FakeGit({5: SHA["a"]}, {(SHA["a"], SHA["f"])}, {SHA["a"]})
-        deploy = checks.Deployment(git=git, code_head=SHA["f"], hud_head=lambda: SHA["e"])
+        git = FakeGit({self.F: [merge(5, SHA["a"])], self.E: []}, {SHA["a"]})
+        deploy = checks.Deployment(git=git, code_head=self.F, hud_head=lambda: (self.E, False))
         self.assertEqual(deploy.status([5])["state"], checks.NOT_DEPLOYED, "the HUD build predates it")
-        git.ancestors.add((SHA["a"], SHA["e"]))
-        deploy._cache.clear()
+        git.lines[self.E] = [merge(5, SHA["a"])]
+        deploy._maps.clear()
         self.assertEqual(deploy.status([5])["state"], checks.DEPLOYED)
 
     def test_every_pr_must_be_in(self):
-        git = FakeGit({5: SHA["a"], 6: SHA["b"]}, {(SHA["a"], SHA["f"])})
-        status = checks.Deployment(git=git, code_head=SHA["f"]).status([5, 6])
+        git = FakeGit({self.F: [merge(5, SHA["a"])], "HEAD": [merge(5, SHA["a"]), merge(6, SHA["b"])]})
+        status = checks.Deployment(git=git, code_head=self.F).status([5, 6])
         self.assertEqual(status["state"], checks.NOT_DEPLOYED)
         self.assertIn("#6", status["text"])
         self.assertNotIn("#5", status["text"])
 
-    def test_the_merge_grep_is_exact_and_local(self):
-        git = FakeGit({31: SHA["a"]}, {(SHA["a"], SHA["f"])})
-        checks.Deployment(git=git, code_head=SHA["f"]).merge_commit(31)
-        (call,) = git.calls
-        self.assertIn("--grep=Merge pull request #31 from ", call)
-        self.assertIn("--fixed-strings", call)
-        self.assertFalse(any(a in ("fetch", "pull", "ls-remote") for a in call))
+    def test_only_an_exact_subject_counts(self):
+        """Review of PR #321, MED 2: a revert, a subject that only mentions the
+        PR, a longer number and a branch-merge subject never count."""
+        for subject in ('Revert "Merge pull request #5 from me/x"', "Merge pull request #55 from me/x",
+                        "Merge pull request #5", "merge pull request #5 from me/x",
+                        "Merge branch 'main' into feature", "Fix #5 from the review",
+                        "Merge pull request #5 from me/x and more"):
+            with self.subTest(subject=subject):
+                deploy = checks.Deployment(git=FakeGit({self.F: [(SHA["a"], subject)], "HEAD": [(SHA["a"], subject)]}),
+                                           code_head=self.F)
+                self.assertEqual(deploy.status([5])["state"], checks.UNCONFIRMED)
 
-    def test_results_are_cached_briefly(self):
+    def test_real_git_reads_the_first_parent_subject_only(self):
+        """The reviewer's probe p3 on a real, local repository: a PR body
+        naming #999, a merge carried inside a branch, a revert's subject. No
+        network: a temporary repository and the hardened `gitops._git`."""
+        import subprocess
+        from jarvis import gitops
+        with tempfile.TemporaryDirectory() as tmp:
+            r = Path(tmp)
+            env = dict(os.environ, GIT_AUTHOR_NAME="a", GIT_AUTHOR_EMAIL="a@b", GIT_COMMITTER_NAME="a",
+                       GIT_COMMITTER_EMAIL="a@b", GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_NOSYSTEM="1")
+
+            def g(*a):
+                return subprocess.run(["git", *a], cwd=r, env=env, check=True, capture_output=True, text=True).stdout
+            g("init", "-q", "-b", "main")
+            g("commit", "-q", "--allow-empty", "-m", "root")
+            # A merge commit inside a feature branch (#777), then the branch merged as #400 whose body names #999.
+            g("checkout", "-q", "-b", "inner")
+            g("commit", "-q", "--allow-empty", "-m", "inner work")
+            g("checkout", "-q", "-b", "feat", "main")
+            g("commit", "-q", "--allow-empty", "-m", "work")
+            g("merge", "-q", "--no-ff", "inner", "-m", "Merge pull request #777 from me/inner")
+            g("checkout", "-q", "main")
+            g("merge", "-q", "--no-ff", "feat", "-m", "Merge pull request #400 from me/feat\n\n"
+              "Merge pull request #999 from x/y")
+            g("commit", "-q", "--allow-empty", "-m", 'Revert "Merge pull request #888 from me/z"')
+            head = g("rev-parse", "HEAD").strip()
+
+            def git(*args):
+                code, out, _ = gitops._git(r, list(args), timeout=30)
+                return code, out
+            deploy = checks.Deployment(git=git, code_head=head, hud_head=lambda: (None, None))
+            self.assertEqual(deploy.status([400])["state"], checks.DEPLOYED, "the control: a real first-parent merge")
+            for n in (999, 777, 888, 9, 40):
+                with self.subTest(pr=n):
+                    self.assertEqual(deploy.status([n])["state"], checks.UNCONFIRMED)
+
+    def test_git_runs_once_per_line_and_reads_are_bounded(self):
+        """Review of PR #321, LOW 2: the running line's map is kept by SHA, so
+        later reads run no git; a read with no budget left runs none and keeps
+        nothing."""
         now = [0.0]
-        git = FakeGit({5: SHA["a"]}, {(SHA["a"], SHA["f"])})
-        deploy = checks.Deployment(git=git, code_head=SHA["f"], clock=lambda: now[0])
-        deploy.status([5])
+        git = FakeGit({self.F: [merge(5, SHA["a"]), merge(6, SHA["b"])]})
+        deploy = checks.Deployment(git=git, code_head=self.F, clock=lambda: now[0])
+        self.assertEqual(deploy.status([5], [0])["state"], checks.UNCONFIRMED)
+        self.assertEqual(git.calls, [], "no budget: no git")
+        deploy.status([5], [8])
+        deploy.status([6], [8])
+        deploy.status([5, 6], [8])
         calls = len(git.calls)
-        deploy.status([5])
-        self.assertEqual(len(git.calls), calls)
-        now[0] += 61
-        deploy.status([5])
-        self.assertGreater(len(git.calls), calls)
+        self.assertEqual(sum(1 for c in git.calls if c[0] == "log"), 1, "one log for the running line")
+        now[0] += 3600
+        deploy.status([5, 6], [8])
+        self.assertEqual(len(git.calls), calls, "kept by SHA, whatever the time")
 
 
 # --- the owner's marks -----------------------------------------------------------------------
@@ -548,7 +717,8 @@ class Marks(Base):
         self.mark(cid, 0, {"verdict": "pass"}, 409)
         self.assertEqual(self.cstore.get(cid)["results"], [], "not deployed: nothing recorded")
         # Merged but not in the running daemon: the same.
-        self.d.inbox.deploy = checks.Deployment(git=FakeGit({301: SHA["a"]}), code_head=SHA["f"])
+        self.d.inbox.deploy = checks.Deployment(git=FakeGit({SHA["f"]: [], "HEAD": [merge(301, SHA["a"])]}),
+                                                code_head=SHA["f"])
         (row,) = [r for r in self.rows() if r["id"] == f"chk:{cid}"]
         self.assertIn("Not deployed yet: #301", row["blocks"])
         self.mark(cid, 0, {"verdict": "pass"}, 409)
@@ -633,6 +803,45 @@ class NoResultPath(Base):
         self.assertEqual(self.cstore.get(cid)["results"], [])
 
 
+# --- the answer path never reads deploy state (review of PR #321, LOW 2) ------------------
+
+
+class AnswerPath(Base):
+    def test_answering_never_runs_the_deployed_test(self):
+        _, cid = self.desk_check(prs=[301])
+        git = FakeGit({SHA["f"]: [merge(301, SHA["a"])]})
+        self.d.inbox.deploy = checks.Deployment(git=git, code_head=SHA["f"])
+        with patch.object(self.d.inbox.deploy, "status", side_effect=AssertionError("deploy read")) as spy:
+            for row_id, body in (("q:ab12cd34:r1", {"text": "x"}), ("prop:k0000001", {"withdraw": True}),
+                                 ("tq:k0000001:0", {"text": "x"}), ("appr:R1", {"decision": "allow"})):
+                with self.subTest(row=row_id):
+                    self.call("POST", f"/inbox/{row_id}/answer", body, 409)
+            self.assertEqual(spy.call_count, 0)
+        self.assertEqual(git.calls, [])
+
+    def test_one_inbox_read_runs_a_bounded_amount_of_git(self):
+        for i in range(12):
+            self.desk_check(prs=[100 + i]) if i < 5 else None
+        # More checks than one chat may post: add the rest as imports, straight to the store.
+        for i in range(5, 12):
+            self.cstore.create(thread_id=None, project_id=None, task_id=None, created_by="you", title=f"i{i}",
+                               prs=[100 + i], steps=[{"do": "a", "expect": ""}],
+                               imported_from=f"/p/docs/plans/{i}.md")
+
+        class Slow(FakeGit):
+            def __call__(self, *args):
+                if args[0] == "log" and args[-2] == "HEAD":
+                    self.calls.append(args)
+                    return (0, "")
+                return super().__call__(*args)
+        line = [merge(100 + i, (SHA["a"][:-3] + f"{i:03d}")) for i in range(12)]
+        git = Slow({SHA["f"]: line}, hud={sha for sha, _ in line})
+        self.d.inbox.deploy = checks.Deployment(git=git, code_head=SHA["f"], hud_head=lambda: (SHA["e"], False))
+        self.rows()
+        self.assertLessEqual(len(git.calls), checks.GIT_BUDGET)
+        self.assertGreater(len(git.calls), 1, "the control: it does read")
+
+
 # --- rows ---------------------------------------------------------------------------------------
 
 
@@ -654,7 +863,8 @@ class Rows(Base):
         _, new = self.desk_check(title="new, merged", prs=[12])
         clock.advance(minutes=1)
         _, plain = self.desk_check(title="no prs")
-        self.d.inbox.deploy = checks.Deployment(git=FakeGit({12: SHA["a"]}), code_head=SHA["f"])
+        self.d.inbox.deploy = checks.Deployment(git=FakeGit({SHA["f"]: [], "HEAD": [merge(12, SHA["a"])]}),
+                                                code_head=SHA["f"])
         order = [r["id"] for r in self.rows() if r["kind"] == "check"]
         self.assertEqual(order, [f"chk:{new}", f"chk:{old}", f"chk:{plain}"])
         self.assertTrue(all(r["rank"] == 7 for r in self.rows() if r["kind"] == "check"))
@@ -766,6 +976,34 @@ class Import(Base):
             with self.subTest(path=raw):
                 self.call("POST", "/inbox/checks/import", {"path": raw}, 400)
         self.no_checks()
+
+    def test_a_folder_swapped_for_a_symlink_after_the_check_is_refused(self):
+        """The reviewer's probe p5: `plans/` swapped for a symlink between the
+        path's judgement and the read. The read walks folder descriptors with
+        O_NOFOLLOW, so the swap is refused, never followed."""
+        outside = Path(self.root) / "elsewhere"
+        outside.mkdir()
+        (outside / self.runbook.name).write_text("## SECRET NOTES\n1. outside the project\n")
+        project = self.stores.projects.get(self.project.id)
+        path, owner = checks.runbook_path(str(self.runbook), [project])
+        plans = Path(project.root) / "docs" / "plans"
+        os.rename(plans, plans.with_name("plans.old"))
+        os.symlink(outside, plans)
+        with self.assertRaises(checks.ImportRefused):
+            checks.read_runbook(path, owner)
+        # And `docs/` swapped the same way.
+        os.unlink(plans)
+        os.rename(plans.with_name("plans.old"), plans)
+        docs = plans.parent
+        os.rename(docs, docs.with_name("docs.old"))
+        (outside / "plans").mkdir()
+        (outside / "plans" / self.runbook.name).write_text("## X\n1. y\n")
+        os.symlink(outside, docs)
+        with self.assertRaises(checks.ImportRefused):
+            checks.read_runbook(path, owner)
+        os.unlink(docs)
+        os.rename(docs.with_name("docs.old"), docs)
+        self.assertTrue(checks.read_runbook(path, owner).startswith(b"# Owner live checks"), "the control")
 
     def test_an_archived_projects_runbook_is_refused(self):
         import dataclasses

@@ -644,15 +644,18 @@ def _check_rows(daemon, hidden):
         return []
     out = []
     now = store.clock()
+    # One inbox read does a bounded amount of git work (review of PR #321,
+    # LOW 2); a check past the budget reads "not confirmed" until the next.
+    budget = [_checks.GIT_BUDGET]
     for rec in store.all():
         try:
-            out += _check_row(hidden, rec, now, deploy)
+            out += _check_row(hidden, rec, now, deploy, budget)
         except Exception as exc:  # noqa: BLE001 — one record never hides the rest
             LOG.warning("Cannot show a check (%s)", type(exc).__name__)
     return out
 
 
-def _check_row(hidden, rec, now, deploy) -> list:
+def _check_row(hidden, rec, now, deploy, budget) -> list:
     thread_id, task_id = rec["thread_id"], rec.get("task_id")
     project_id = rec.get("project_id")
     if project_id in hidden:
@@ -672,7 +675,7 @@ def _check_row(hidden, rec, now, deploy) -> list:
                      project_id=project_id, thread_id=thread_id, task_id=task_id,
                      asked_at=min(at, now).isoformat(timespec="seconds"), origin=rec["created_by"],
                      detail=_check_detail(rec, status))]
-    status = (deploy.status(rec["prs"]) if deploy is not None
+    status = (deploy.status(rec["prs"], budget) if deploy is not None
               else {"state": _checks.UNCONFIRMED, "merged": False, "sha": None,
                     "text": "Not confirmed deployed: Jarvis cannot read which build runs."})
     if not rec["prs"]:
@@ -687,8 +690,11 @@ def _check_row(hidden, rec, now, deploy) -> list:
                  asked_at=rec["created_at"], origin=rec["created_by"], detail=_check_detail(rec, status))]
 
 
-def rows(daemon) -> list[dict]:
-    """Every row, ranked (IN-4; ties to the older item). Pure: reads only."""
+def rows(daemon, *, with_checks: bool = True) -> list[dict]:
+    """Every row, ranked (IN-4; ties to the older item). Pure: reads only.
+    `with_checks=False` leaves the live checks (and their git) out: `answer`
+    finds the row it answers without them, since a check is never answered
+    there (review of PR #321, LOW 2)."""
     from .projects import archived_project_ids
     try:
         hidden = archived_project_ids(daemon.stores)
@@ -702,7 +708,7 @@ def rows(daemon) -> list[dict]:
                          ("tasks", lambda: _task_rows(daemon, hidden)),
                          ("missed", lambda: _missed_rows(daemon)),
                          ("decisions", lambda: _decision_rows(daemon, hidden)),
-                         ("checks", lambda: _check_rows(daemon, hidden))):
+                         ("checks", lambda: _check_rows(daemon, hidden) if with_checks else [])):
         try:
             out += source()
         except Exception as exc:  # noqa: BLE001 — never a 500 for the whole inbox
@@ -942,7 +948,7 @@ def answer(daemon, row_id, body, *, owner_verified: bool, via: str = "inbox"):
         body = _object(body, ("withdraw",), ("withdraw",))
         if body["withdraw"] is not True:
             raise APIError(400, "withdraw must be true")
-    row = next((r for r in rows(daemon) if r["id"] == row_id), None)
+    row = next((r for r in rows(daemon, with_checks=False) if r["id"] == row_id), None)
     if row is None:
         raise _gone()
     if prefix == "appr":
@@ -1154,7 +1160,8 @@ def mark_check_step(daemon, check_id, step, body) -> dict:
         raise APIError(404, "no such check")
     if index >= len(record["steps"]):
         raise APIError(404, "no such step")
-    status = deploy.status(record["prs"]) if deploy is not None else {"state": _checks.UNCONFIRMED}
+    status = (deploy.status(record["prs"], [_checks.GIT_BUDGET]) if deploy is not None
+              else {"state": _checks.UNCONFIRMED})
     if not _checks.Deployment.markable(status):
         raise APIError(409, status.get("text") or "Not confirmed deployed, so it cannot be marked yet.")
     try:
@@ -1179,7 +1186,7 @@ def _runbook(daemon, raw):
     from .daemon import APIError, safe_list
     try:
         path, project = _checks.runbook_path(raw, safe_list(daemon.stores.projects))
-        data = _checks.read_runbook(path)
+        data = _checks.read_runbook(path, project)
     except _checks.ImportRefused as exc:
         raise APIError(400, f"not imported: {exc}") from None
     return path, project, data, hashlib.sha256(data).hexdigest()

@@ -549,6 +549,10 @@ describe("InboxView: live checks (inbox B2, IN-6)", () => {
     expect(p.onMarkCheck).not.toHaveBeenCalled();
     expect(p.copyText).not.toHaveBeenCalled();
     expect((q('[data-testid="inbox-import-toggle"]') as HTMLButtonElement).disabled).toBe(true);
+    // Typing under a card changes nothing (review of PR #321, NIT): the note keeps no words.
+    const note = first.querySelector('[data-testid="inbox-check-note"]') as HTMLInputElement;
+    type(note, "typed under the card");
+    expect(note.value).toBe("");
   });
 
   it("done: rank 8 shows the verdicts and copies the receipt as Markdown, with nothing left to mark", async () => {

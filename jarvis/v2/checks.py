@@ -45,6 +45,7 @@ from __future__ import annotations
 
 from datetime import timedelta
 import errno
+import json
 import logging
 import os
 from pathlib import Path
@@ -77,7 +78,12 @@ KEEP = 500                   # files kept; the oldest done go first
 DONE_WINDOW = timedelta(days=7)   # how long a done check stays as a row
 RUNBOOK_MAX = 512 * 1024     # a runbook larger than this is not imported
 PATH_MAX = 1024
-_FILE_MAX = 256 * 1024       # a check file larger than this is not one of ours
+_FILE_MAX = 512 * 1024       # a check file larger than this is not one of ours
+# What a new check may encode to (review of PR #321, MED 1): the owner's
+# notes (at most 30 x 1000 characters) must still fit under `_WRITE_MAX`,
+# which is half of `_FILE_MAX`, so every file the store writes reads back.
+CREATE_BYTES_MAX = 128 * 1024
+CREATED_BY_MAX = 200
 
 VERDICTS = ("pass", "fail", "skip")
 _FIELDS = frozenset({"id", "kind", "thread_id", "task_id", "project_id", "created_by", "title", "prs",
@@ -103,7 +109,8 @@ def valid(record: Any, name: str | None = None) -> dict | None:
     if record["kind"] != "check":
         return None
     title, prs, steps, results = record["title"], record["prs"], record["steps"], record["results"]
-    if not isinstance(title, str) or not title or not isinstance(record["created_by"], str):
+    if (not isinstance(title, str) or not title or len(title) > TITLE_MAX
+            or not isinstance(record["created_by"], str) or len(record["created_by"]) > CREATED_BY_MAX):
         return None
     if (not isinstance(prs, list) or len(prs) > PRS_MAX
             or not all(_int(n) and 0 < n < PR_NUMBER_MAX for n in prs) or len(set(prs)) != len(prs)):
@@ -112,7 +119,8 @@ def valid(record: Any, name: str | None = None) -> dict | None:
         return None
     for step in steps:
         if (not isinstance(step, dict) or set(step) != {"do", "expect"} or not isinstance(step["do"], str)
-                or not step["do"] or not isinstance(step["expect"], str)):
+                or not step["do"] or not isinstance(step["expect"], str)
+                or len(step["do"]) > DO_MAX or len(step["expect"]) > EXPECT_MAX):
             return None
     if not isinstance(results, list) or len(results) > len(steps):
         return None
@@ -123,7 +131,8 @@ def valid(record: Any, name: str | None = None) -> dict | None:
         if not (_int(result["step"]) and 0 <= result["step"] < len(steps)) or result["step"] in seen:
             return None
         seen.add(result["step"])
-        if result["verdict"] not in VERDICTS or not isinstance(result["note"], str):
+        if (result["verdict"] not in VERDICTS or not isinstance(result["note"], str)
+                or len(result["note"]) > NOTE_MAX):
             return None
         if _parse_time(result["at"]) is None:
             return None
@@ -168,6 +177,7 @@ class CheckStore(DecisionStore):
     _ID = ID_RE
     _valid = staticmethod(valid)
     _MAX = _FILE_MAX
+    _WRITE_MAX = _FILE_MAX // 2
 
     @staticmethod
     def _order(record):
@@ -232,6 +242,10 @@ class CheckStore(DecisionStore):
                           "created_at": now.isoformat(timespec="seconds"), "imported_from": imported_from}
                 if valid(record) is None:
                     raise ValueError("a check that would not read back was refused")
+                size = len(json.dumps(record, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+                if size > CREATE_BYTES_MAX:
+                    raise CapReached(f"Error: the check is {size:,} bytes encoded and the most is "
+                                     f"{CREATE_BYTES_MAX:,}; shorten its steps (nothing is cut).")
                 self._write(fd, record)
                 return record
             finally:
@@ -314,8 +328,11 @@ def refuse_fields(title, steps, prs) -> str | None:
 # -- deployed gating (IN-6) ----------------------------------------------------------------
 
 DEPLOYED, NOT_DEPLOYED, UNCONFIRMED, NO_PRS = "deployed", "not deployed", "not confirmed deployed", "no prs"
-_CACHE_S = 60.0
-_CACHE_MAX = 256
+_CACHE_S = 60.0              # how long the checkout's HEAD and the HUD manifest are trusted
+_CACHE_MAX = 64
+_LOG_MAX = 20000             # merge commits read on one first-parent line
+GIT_BUDGET = 8               # git runs one `rows()` may cause (review of PR #321, LOW 2)
+_SUBJECT = re.compile(r"Merge pull request #([1-9][0-9]{0,6}) from \S+")
 
 
 class Deployment:
@@ -324,15 +341,30 @@ class Deployment:
     (`attach_git`, from the daemon's `main()`): an embedded or test daemon is
     never attached, so every check that names a PR is "not confirmed
     deployed" there, which refuses its marks (fail closed). Tests hand in
-    their own `git` and heads."""
+    their own `git` and heads.
+
+    A PR's merge commit is a **first-parent** merge commit whose **subject**
+    is exactly GitHub's "Merge pull request #<n> from <branch>" (review of
+    PR #321, MED 2): a PR title or body that says it, a merge commit carried
+    inside a branch, a revert or a squash never counts. More than one such
+    commit for a PR is "not confirmed". One `git log --first-parent
+    --merges` per line read (the running commit, the installed HUD's, and
+    the checkout's HEAD for "merged") gives the map of PR to merge commit;
+    the running commit's and the HUD's are keyed by their SHA and kept, so
+    git runs again only when either changes. Whether a merge touched
+    `hud/` is kept per merge commit. `status` takes a budget of git runs, so
+    one inbox read does a bounded amount of git work."""
 
     def __init__(self, *, git=None, code_head=None, hud_head=None, clock=time.monotonic):
         self._git = git                 # (args) -> (code, stdout) | None
         self.code_head = code_head      # the commit the daemon started from
-        self._hud_head = hud_head       # () -> the installed HUD's git_head | None
+        self._hud_head = hud_head       # () -> sha | (sha, dirty) | None: the installed HUD's
         self.clock = clock
         self._lock = threading.Lock()
-        self._cache: dict[tuple, tuple[float, dict]] = {}
+        self._maps: dict[str, dict] = {}            # head SHA -> {pr: [merge shas]}
+        self._head_map: tuple[float, dict] | None = None   # the checkout's HEAD, briefly
+        self._hud: tuple[float, tuple] | None = None
+        self._touches: dict[str, bool] = {}
 
     def attach_git(self) -> None:
         """The real git and heads: the checkout's HEAD now (the code this
@@ -342,129 +374,200 @@ class Deployment:
         def hud_head():
             from .hud_api import hud_served
             served = hud_served()
-            return served.get("git_head") if served.get("state") in ("installed", "fallback") else None
+            if served.get("state") not in ("installed", "fallback"):
+                return None, None
+            return served.get("git_head"), served.get("dirty")
         self._git = hud_install._git
         self.code_head = hud_install.git_head()
         self._hud_head = hud_head
 
-    def _run(self, *args) -> tuple[int, str] | None:
+    # -- git, bounded ----------------------------------------------------------------
+
+    def _run(self, budget, *args) -> tuple[int, str] | None:
         if self._git is None:
             return None
+        if budget is not None:
+            if budget[0] <= 0:
+                raise _OverBudget()
+            budget[0] -= 1
         try:
             return self._git(*args)
         except Exception as exc:  # noqa: BLE001 — git that cannot say is "not confirmed"
             LOG.info("git could not say whether a PR is deployed (%s)", type(exc).__name__)
             return None
 
-    def merge_commit(self, number: int) -> str | None:
-        """The merge commit of PR `number` in this checkout, or None."""
-        out = self._run("log", "--merges", "-1", "--format=%H", "--fixed-strings",
-                        f"--grep=Merge pull request #{number} from ", "HEAD", "--remotes")
+    def _read_map(self, head: str, budget) -> dict | None:
+        out = self._run(budget, "log", "--first-parent", "--merges", "-n", str(_LOG_MAX),
+                        "--format=%H%x09%s", head, "--")
         if out is None or out[0] != 0:
             return None
-        sha = out[1].strip().split("\n")[0].strip()
-        return sha if _SHA_RE.match(sha) else None
+        found: dict[int, list[str]] = {}
+        for line in out[1].splitlines():
+            sha, _, subject = line.partition("\t")
+            match = _SUBJECT.fullmatch(subject.strip())
+            if match and _SHA_RE.match(sha):
+                found.setdefault(int(match.group(1)), []).append(sha)
+        return found
 
-    def _ancestor(self, commit: str, head: str | None) -> bool | None:
-        if not head or not _SHA_RE.match(head):
+    def _map(self, head: str | None, budget) -> dict | None:
+        """{pr: [first-parent merge commits]} on `head`'s line (a SHA, kept)."""
+        if not self._ok(head):
             return None
-        out = self._run("merge-base", "--is-ancestor", commit, head)
-        if out is None or out[0] not in (0, 1):
-            return None
-        return out[0] == 0
+        with self._lock:
+            hit = self._maps.get(head)
+        if hit is not None:
+            return hit
+        found = self._read_map(head, budget)
+        if found is not None:
+            with self._lock:
+                if len(self._maps) >= _CACHE_MAX:
+                    self._maps.clear()
+                self._maps[head] = found
+        return found
 
-    def _touches_hud(self, commit: str) -> bool | None:
-        out = self._run("diff", "--quiet", "--no-ext-diff", "--no-textconv", f"{commit}^1", commit,
+    def _checkout_map(self, budget) -> dict | None:
+        """The same for the checkout's HEAD now ("merged"), kept `_CACHE_S`."""
+        now = self.clock()
+        with self._lock:
+            hit = self._head_map
+        if hit is not None and now - hit[0] < _CACHE_S:
+            return hit[1]
+        found = self._read_map("HEAD", budget)
+        if found is not None:
+            with self._lock:
+                self._head_map = (now, found)
+        return found
+
+    def _hud_state(self) -> tuple:
+        """(the installed HUD's commit or None, its manifest's `dirty`), kept `_CACHE_S`."""
+        now = self.clock()
+        with self._lock:
+            hit = self._hud
+        if hit is not None and now - hit[0] < _CACHE_S:
+            return hit[1]
+        try:
+            got = self._hud_head() if self._hud_head is not None else None
+        except Exception:  # noqa: BLE001
+            got = None
+        sha, dirty = got if isinstance(got, tuple) else (got, False)
+        state = (sha if self._ok(sha) else None, dirty)
+        with self._lock:
+            self._hud = (now, state)
+        return state
+
+    def touches_hud(self, commit: str, budget) -> bool | None:
+        with self._lock:
+            if commit in self._touches:
+                return self._touches[commit]
+        out = self._run(budget, "diff", "--quiet", "--no-ext-diff", "--no-textconv", f"{commit}^1", commit,
                         "--", "hud")
         if out is None or out[0] not in (0, 1):
             return None
+        with self._lock:
+            if len(self._touches) >= 4096:
+                self._touches.clear()
+            self._touches[commit] = out[0] == 1
         return out[0] == 1
 
-    def status(self, prs) -> dict:
-        """`{state, merged, sha, text}`: `state` one of DEPLOYED,
-        NOT_DEPLOYED, UNCONFIRMED and NO_PRS (nothing to gate); `merged`
-        whether every PR has a merge commit here (the rank-7 order); `sha`
-        the daemon's start commit when the state allows a mark; `text` one
-        line built by code, naming PR numbers only. Never raises."""
-        prs = tuple(n for n in (prs or ()) if _int(n))
-        if not prs:
-            return {"state": NO_PRS, "merged": False, "sha": self.code_head if self._ok(self.code_head) else None,
-                    "text": ""}
-        now = self.clock()
-        with self._lock:
-            hit = self._cache.get(prs)
-            if hit is not None and now - hit[0] < _CACHE_S:
-                return dict(hit[1])
-        try:
-            out = self._status(prs)
-        except Exception as exc:  # noqa: BLE001
-            LOG.info("The deployed test failed (%s)", type(exc).__name__)
-            out = {"state": UNCONFIRMED, "merged": False, "sha": None,
-                   "text": "Not confirmed deployed: Jarvis could not tell which build runs."}
-        with self._lock:
-            if len(self._cache) >= _CACHE_MAX:
-                self._cache.clear()
-            self._cache[prs] = (now, out)
-        return dict(out)
+    def merge_commit(self, number: int, head: str | None = None) -> str | None:
+        """PR `number`'s one first-parent merge commit on `head`'s line (the
+        running commit by default), or None (none, or more than one)."""
+        found = self._map(head or self.code_head, None)
+        shas = (found or {}).get(number) or []
+        return shas[0] if len(shas) == 1 else None
+
+    # -- the answer ----------------------------------------------------------------------
 
     @staticmethod
     def _ok(sha) -> bool:
         return isinstance(sha, str) and bool(_SHA_RE.match(sha))
 
-    def _status(self, prs) -> dict:
-        names = ", ".join(f"#{n}" for n in prs)
-        if self._git is None or not self._ok(self.code_head):
-            return {"state": UNCONFIRMED, "merged": False, "sha": None,
-                    "text": f"Not confirmed deployed: Jarvis cannot read which build runs, so {names} "
-                            "cannot be checked yet."}
-        merges = {n: self.merge_commit(n) for n in prs}
-        unmerged = [n for n, sha in merges.items() if sha is None]
-        merged = not unmerged
-        if unmerged:
-            return {"state": UNCONFIRMED, "merged": False, "sha": None,
-                    "text": "Not confirmed deployed: no merge commit for "
-                            + ", ".join(f"#{n}" for n in unmerged) + " in this checkout."}
-        hud_head = None
-        hud_read = False
-        missing, unknown = [], []
-        for n, sha in merges.items():
-            in_code = self._ancestor(sha, self.code_head)
-            if in_code is None:
-                unknown.append(n)
-                continue
-            if not in_code:
-                missing.append(n)
-                continue
-            touches = self._touches_hud(sha)
-            if touches is None:
-                unknown.append(n)
-                continue
-            if touches:
-                if not hud_read:
-                    hud_read = True
-                    try:
-                        hud_head = self._hud_head() if self._hud_head is not None else None
-                    except Exception:  # noqa: BLE001
-                        hud_head = None
-                in_hud = self._ancestor(sha, hud_head)
-                if in_hud is None:
-                    unknown.append(n)
-                elif not in_hud:
-                    missing.append(n)
-        if missing:
-            return {"state": NOT_DEPLOYED, "merged": merged, "sha": None,
-                    "text": "Not deployed yet: " + ", ".join(f"#{n}" for n in missing)
-                            + " is merged but not in the running daemon or installed HUD."}
-        if unknown:
-            return {"state": UNCONFIRMED, "merged": merged, "sha": None,
-                    "text": "Not confirmed deployed: Jarvis cannot tell whether "
-                            + ", ".join(f"#{n}" for n in unknown) + " is in the running build."}
-        return {"state": DEPLOYED, "merged": True, "sha": self.code_head,
-                "text": f"Deployed: {names} " + ("is" if len(prs) == 1 else "are") + " in the running build."}
-
     @staticmethod
     def markable(status: dict) -> bool:
         return status.get("state") in (DEPLOYED, NO_PRS)
+
+    def status(self, prs, budget: list | None = None) -> dict:
+        """`{state, merged, sha, text}`: `state` one of DEPLOYED,
+        NOT_DEPLOYED, UNCONFIRMED and NO_PRS (nothing to gate); `merged`
+        whether every PR has its merge commit on the checkout's line (the
+        rank-7 order); `sha` the daemon's start commit when the state allows
+        a mark; `text` one line built by code, naming PR numbers only.
+        `budget` is a one-item list of git runs left, shared by one inbox
+        read; past it the answer is "not confirmed" (and nothing is kept).
+        Never raises."""
+        prs = tuple(n for n in (prs or ()) if _int(n))
+        if not prs:
+            return {"state": NO_PRS, "merged": False, "sha": self.code_head if self._ok(self.code_head) else None,
+                    "text": ""}
+        try:
+            return self._status(prs, budget)
+        except _OverBudget:
+            return {"state": UNCONFIRMED, "merged": False, "sha": None,
+                    "text": "Not confirmed deployed yet: Jarvis is still reading which build runs."}
+        except Exception as exc:  # noqa: BLE001
+            LOG.info("The deployed test failed (%s)", type(exc).__name__)
+            return {"state": UNCONFIRMED, "merged": False, "sha": None,
+                    "text": "Not confirmed deployed: Jarvis could not tell which build runs."}
+
+    def _status(self, prs, budget) -> dict:
+        names = ", ".join(f"#{n}" for n in prs)
+        unconfirmed = lambda why: {"state": UNCONFIRMED, "merged": False, "sha": None,  # noqa: E731
+                                   "text": f"Not confirmed deployed: {why}"}
+        if self._git is None or not self._ok(self.code_head):
+            return unconfirmed(f"Jarvis cannot read which build runs, so {names} cannot be checked yet.")
+        running = self._map(self.code_head, budget)
+        if running is None:
+            return unconfirmed(f"git could not read the running build's history for {names}.")
+        twice = [n for n in prs if len(running.get(n) or ()) > 1]
+        if twice:
+            return unconfirmed(", ".join(f"#{n}" for n in twice) + " has more than one merge commit.")
+        absent = [n for n in prs if not running.get(n)]
+        if absent:
+            checkout = self._checkout_map(budget) or {}
+            merged_later = [n for n in absent if len(checkout.get(n) or ()) == 1]
+            if merged_later and len(merged_later) == len(absent):
+                return {"state": NOT_DEPLOYED, "merged": True, "sha": None,
+                        "text": "Not deployed yet: " + ", ".join(f"#{n}" for n in absent)
+                                + " is merged but not in the running daemon."}
+            missing = [n for n in absent if n not in merged_later]
+            return unconfirmed("no merge commit for " + ", ".join(f"#{n}" for n in missing)
+                               + " on the main line of this checkout.")
+        hud_sha, hud_dirty = None, None
+        hud_read = False
+        missing, unknown = [], []
+        for n in prs:
+            commit = running[n][0]
+            touches = self.touches_hud(commit, budget)
+            if touches is None:
+                unknown.append(n)
+                continue
+            if not touches:
+                continue
+            if not hud_read:
+                hud_read = True
+                hud_sha, hud_dirty = self._hud_state()
+            if hud_sha is None or hud_dirty is not False:
+                unknown.append(n)        # the dev HUD, none installed, or built from uncommitted hud/
+                continue
+            in_hud = self._map(hud_sha, budget)
+            if in_hud is None or len(in_hud.get(n) or ()) > 1:
+                unknown.append(n)
+            elif (in_hud.get(n) or [None])[0] != commit:
+                missing.append(n)
+        if missing:
+            return {"state": NOT_DEPLOYED, "merged": True, "sha": None,
+                    "text": "Not deployed yet: " + ", ".join(f"#{n}" for n in missing)
+                            + " is merged but not in the installed HUD."}
+        if unknown:
+            return {"state": UNCONFIRMED, "merged": True, "sha": None,
+                    "text": "Not confirmed deployed: Jarvis cannot tell whether "
+                            + ", ".join(f"#{n}" for n in unknown) + " is in the installed HUD."}
+        return {"state": DEPLOYED, "merged": True, "sha": self.code_head,
+                "text": f"Deployed: {names} " + ("is" if len(prs) == 1 else "are") + " in the running build."}
+
+
+class _OverBudget(Exception):
+    """One inbox read used its git budget (`GIT_BUDGET`)."""
 
 
 # -- the runbook import (§6) ----------------------------------------------------------------
@@ -533,18 +636,35 @@ def runbook_path(raw, projects) -> tuple[Path, Any]:
     return path, owner
 
 
-def read_runbook(path: Path) -> bytes:
-    """The runbook's bytes: opened O_NOFOLLOW | O_NONBLOCK, a regular file of
-    at most `RUNBOOK_MAX` bytes, or `ImportRefused`."""
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0)
+def read_runbook(path: Path, project) -> bytes:
+    """The runbook's bytes, or `ImportRefused`. Opened step by step from the
+    project's root (review of PR #321, LOW 1): `docs`, then `plans`, each
+    `O_DIRECTORY | O_NOFOLLOW` relative to the one before, then the file
+    `O_NOFOLLOW | O_NONBLOCK` relative to `plans`, so a folder swapped for a
+    symlink after `runbook_path` judged the path is refused, never followed.
+    The file must be regular and at most `RUNBOOK_MAX` bytes."""
+    root = Path(os.path.normpath(project.root))
+    if path.parent != root / "docs" / "plans":
+        raise ImportRefused("only a runbook directly inside a project's docs/plans/ folder can be imported")
+    cloexec = getattr(os, "O_CLOEXEC", 0)
+    folder = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0) | cloexec
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | cloexec
+    fds = []
     try:
-        fd = os.open(path, flags)
-    except FileNotFoundError:
-        raise ImportRefused("no such runbook") from None
-    except OSError as exc:
-        if exc.errno in (errno.ELOOP, errno.EMLINK):
-            raise ImportRefused("a symlink is not followed") from None
-        raise ImportRefused("the runbook could not be opened") from None
+        try:
+            fds.append(os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | cloexec))
+            for name in ("docs", "plans"):
+                fds.append(os.open(name, folder, dir_fd=fds[-1]))
+            fd = os.open(path.name, flags, dir_fd=fds[-1])
+        except FileNotFoundError:
+            raise ImportRefused("no such runbook") from None
+        except OSError as exc:
+            if exc.errno in (errno.ELOOP, errno.EMLINK, errno.ENOTDIR):
+                raise ImportRefused("a symlink is not followed: docs/, plans/ and the runbook must be real") from None
+            raise ImportRefused("the runbook could not be opened") from None
+    finally:
+        for opened in fds:
+            os.close(opened)
     try:
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode):

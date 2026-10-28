@@ -118,6 +118,10 @@ class CapReached(Exception):
     """A post past a bound: the sentence the tool returns."""
 
 
+class RecordTooLarge(ValueError):
+    """A record that would encode past its store's `_WRITE_MAX`: never written."""
+
+
 class Conflict(Exception):
     """A second answer to a decision (409)."""
 
@@ -265,6 +269,11 @@ class DecisionStore:
     _ID = ID_RE                 # a record's id
     _valid = staticmethod(valid)
     _MAX = _FILE_MAX            # a record file larger than this is not one of ours
+    # The most a write may be: half of what a read accepts, so nothing this
+    # store writes can be a file it then cannot read (review of PR #321,
+    # MED 1: an unreadable record is never counted, never capped, never
+    # pruned). A decision's worst case is about 13 KB.
+    _WRITE_MAX = _FILE_MAX // 2
 
     @staticmethod
     def _order(record):
@@ -369,6 +378,9 @@ class DecisionStore:
         name = f"{record['id']}.json"
         data = json.dumps(record, ensure_ascii=False, allow_nan=False,
                           separators=(",", ":")).encode("utf-8")
+        if len(data) > self._WRITE_MAX:
+            raise RecordTooLarge(f"the record is {len(data):,} bytes encoded and the most is "
+                                 f"{self._WRITE_MAX:,}")
         tmp = f".{record['id']}.{pysecrets.token_hex(4)}.tmp"
         fd = os.open(tmp, self._WRITE, 0o600, dir_fd=dir_fd)
         try:
@@ -739,6 +751,11 @@ class OwnerPosts:
                 step[key] = display_text(step[key], lines=True)
                 if not step[key]:
                     return f"Error: step {index}'s {key} has nothing left to show once cleaned."
+        # The caps again, on what is stored (review of PR #321, MED 1): NFC and
+        # the cleaning can lengthen text (U+0958 is two characters after NFC).
+        refusal = _checks.refuse_fields(clean_title, clean_steps, prs)
+        if refusal is not None:
+            return refusal.replace("Error: ", "Error: once cleaned, ", 1)
         with self.daemon._lock:
             why_not, session = self._refuse_caller(caller)
             if why_not is not None:
@@ -752,6 +769,8 @@ class OwnerPosts:
                                         steps=clean_steps)
         except CapReached as exc:
             return str(exc)
+        except RecordTooLarge as exc:
+            return f"Error: the check is too large to keep ({exc}); shorten it (nothing is cut)."
         except Exception as exc:  # noqa: BLE001 — a store that cannot write posts nothing
             LOG.warning("Cannot store a check (%s)", type(exc).__name__)
             return "Error: the check could not be stored, so it was not posted."

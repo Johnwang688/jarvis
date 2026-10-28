@@ -952,7 +952,9 @@ the store, the field caps, the deployed test and the runbook import),
   `expect` 1000 characters each (both required for an agent's check), at
   most 10 PR numbers. 5 open checks per chat, 10 per chat and 20 in all in
   any rolling 24 hours, counted from the files. These are separate from the
-  decisions' counts, so an agent can post up to 20 of each a day.
+  decisions' counts, so an agent can post up to 20 of each a day. The caps
+  are checked again on the cleaned text (review of PR #321, MED 1): NFC can
+  lengthen text, and U+0958 becomes two characters.
 - **A step is text only.** Nothing in a check runs anything. The HUD's
   "Copy" puts a step's `do` on the clipboard and nothing more.
 - **The store.** `<data root>/inbox/checks/<id>.json` (`c` + 12 hex). The
@@ -961,9 +963,20 @@ the store, the field caps, the deployed test and the runbook import),
   `project_id` and `created_at`. `CheckStore` subclasses `DecisionStore` and
   uses the same I/O: folder fds opened `O_DIRECTORY | O_NOFOLLOW`, files read
   `O_NOFOLLOW | O_NONBLOCK` and refused unless regular, an `O_EXCL` temp file
-  fsynced then `os.replace`d, 0700 folders and 0600 files. A check file may
-  be up to 256 KiB. `checks.valid` accepts exactly the record's shape; any
-  other file is never a row and never marked. At most 500 files; the oldest
+  fsynced then `os.replace`d, 0700 folders and 0600 files.
+  **Every file the store writes reads back** (review of PR #321, MED 1).
+  Before, a check that grew under NFC wrote a file too large to read. The
+  agent was told "Posted", but the check was never counted, capped or
+  pruned. Now:
+  - `checks.valid` holds the field caps.
+  - A new check may encode to at most 128 KiB (`CREATE_BYTES_MAX`).
+  - No write may exceed `_WRITE_MAX`, which is half of what a read accepts
+    (`_FILE_MAX`, 512 KiB). So the widest notes on every step still fit.
+  - The decision store got the same `_WRITE_MAX` guard (32 KiB of 64 KiB). A
+    worst-case decision is about 13 KB.
+
+  `checks.valid` accepts exactly the record's shape; any other file is
+  never a row and never marked. At most 500 files; the oldest
   done checks go first. The `checks` folder is named in
   `_protected_state_paths`, and the whole `inbox/` tree was already
   protected (`files._inbox_tree`, `protected_state.owner_trees`).
@@ -986,21 +999,36 @@ the store, the field caps, the deployed test and the runbook import),
 - **Deployed gating.** A check that names PRs can be marked only when each
   one is in the build that runs (`checks.Deployment`). The test is local git
   only, never `gh` and never the network:
-  1. The PR's merge commit is the newest merge commit in `HEAD` or the
-     remote branches whose message has "Merge pull request #<n> from "
-     (`git log --merges --fixed-strings --grep`).
-  2. It must be an ancestor of the commit the daemon started from. `main()`
-     captures that commit once with `Deployment.attach_git()`.
+  1. A PR's merge commit is a **first-parent** merge commit on the running
+     commit's line whose **subject** is exactly "Merge pull request #<n>
+     from <branch>" (`git log --first-parent --merges --format=%H%x09%s
+     <commit>`). This was a review finding on PR #321 (MED 2): a message
+     grep had counted a PR title or body that named another PR, a merge
+     carried inside a branch, and a revert.
+  2. The running commit is the one the daemon started from. `main()`
+     captures it once with `Deployment.attach_git()`.
   3. If the PR changed anything under `hud/` (`git diff --quiet <m>^1 <m> --
-     hud`), it must also be an ancestor of the installed HUD's `git_head`
-     (the manifest that `hud_served` reads).
+     hud`), the same merge commit must also be on the installed HUD's line
+     (its manifest's `git_head`). The manifest must also say the build was
+     not made from uncommitted `hud/` changes (`dirty` false).
+  4. If more than one commit matches, the answer is "not confirmed".
+  5. A PR that is not on the running line but is on the checkout's HEAD
+     line is "not deployed yet" (merged, not running).
 
   Anything git cannot say is "not confirmed deployed": a squash merge, a PR
-  not fetched, the dev HUD, a git failure, or a daemon that was never
-  attached (every test and embedded daemon). Then the row says so and the
-  route answers 409 with the same line. Results are cached for 60 s per PR
-  set. A mark records the confirmed daemon commit as `deployed_sha`. A check
-  with no PRs is not gated.
+  not fetched, the dev HUD, a dirty HUD build, a git failure, or a daemon
+  that was never attached (every test and embedded daemon). Then the row
+  says so and the route answers 409 with the same line. A mark records the
+  confirmed daemon commit as `deployed_sha`. A check with no PRs is not
+  gated.
+
+  **Bounded git (review LOW 2).** The map of PRs to merge commits is read
+  once per line and kept by the line's SHA. The checkout's HEAD map and the
+  HUD manifest are kept for 60 s, and whether a merge touched `hud/` is
+  kept per commit. One inbox read may run git at most `GIT_BUDGET` (8)
+  times; past that a check reads "not confirmed" until the next read.
+  `answer()` finds its row with `rows(daemon, with_checks=False)`, so
+  answering an approval, a question or a proposal never reads deploy state.
 - **Rows.** An open check is a `check` row at rank 7. Within rank 7, checks
   whose PRs all have a merge commit come first, then oldest first. The title
   is `Live check <id> from chat <id>: <k> of <n> steps marked` ("from you
@@ -1021,8 +1049,12 @@ the store, the field caps, the deployed test and the runbook import),
   `<root>/docs/plans/` of a project that is not archived. On disk, `docs/`,
   `plans/` and the file must not be symlinks. The file's realpath must be
   exactly that path under the root's realpath. A credential file
-  (`secrets.is_credential`, so `.env.md` too) is refused. The file is read
-  `O_NOFOLLOW | O_NONBLOCK`, must be regular and at most 512 KiB.
+  (`secrets.is_credential`, so `.env.md` too) is refused. The read then
+  walks folder descriptors from the project root: `docs`, then `plans`, each
+  `O_DIRECTORY | O_NOFOLLOW`. It opens the file relative to `plans` with
+  `O_NOFOLLOW | O_NONBLOCK`. So a folder swapped for a symlink after the
+  path was judged is refused, on the preview and on the save alike (review
+  of PR #321, LOW 1). The file must be regular and at most 512 KiB.
   `checks.parse_runbook` makes one draft per `##` heading. No model is
   involved. A step is a numbered line with the lines that continue it. Its
   `expect` is the text after "Expect:" (bold or not); later "Expect:"s join

@@ -455,7 +455,7 @@ export function InboxView(props: InboxViewProps) {
                           value={drafts[key] || ""}
                           readOnly={!!busy[key]}
                           onChange={(e) => {
-                            if (sending.current.has(key)) return;
+                            if (blockedNow.current || sending.current.has(key)) return;
                             const value = e.target.value;
                             setDrafts((all) => ({ ...all, [key]: value }));
                           }}
@@ -529,7 +529,7 @@ export function InboxView(props: InboxViewProps) {
               aria-label="Runbook path"
               placeholder="/home/you/projects/Jarvis/docs/plans/….md"
               value={importPath}
-              onChange={(e) => setImportPath(e.target.value)}
+              onChange={(e) => { if (!blockedNow.current) setImportPath(e.target.value); }}
               onKeyDown={(e) => {
                 if (e.key !== "Escape") e.stopPropagation();
                 if (e.key === "Enter" && !e.nativeEvent.isComposing) {
