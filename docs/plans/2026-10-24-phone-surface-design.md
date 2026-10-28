@@ -564,13 +564,62 @@ the phone"). Where it is more specific than the text above:
   (`via="phone"`, B1's framing and queue, no desk authority, no Bypass); a
   chat question's log record names "phone"; a task question goes through
   `TaskControl.answer_question`, which takes no `via`. A proposal's
-  withdraw stays at the desk (P-5 brings task verbs).
+  withdraw stays at the desk (P-5 brings task verbs; it did, §10.x P-5).
 - **PH-10**: `PendingApprovals.wait_s()` waits 600 s while a phone session
   was seen in the last 24 h; a HUD-only card keeps its 120 s cap (its
   Browser deadline is bound to it), so the phone has 2 minutes for those.
 - **Not built here:** Web Push (P-6), so "never in a push" holds trivially;
   the stream's shaper, which a push would read, is asserted to carry no
   private detail.
+
+### 10.x P-5 as built (2026-10-28, phone C5)
+
+Built as the P-5 row says (`docs/notes/control-plane.md`, "Writing from the
+phone"). Where it is more specific than the text above:
+
+- **The writes are `jarvis/v2/remote_write.py`** (SELF_PROTECTED), past
+  `owner_status` like P-3 and P-4: `POST threads/<id>/messages`, `POST
+  threads` (new chat), `GET thread-models`, `POST tasks`, `POST
+  tasks/<id>/start|resume`, `POST tasks/<id>/cancel/options` and `POST
+  tasks/<id>/cancel`. 400 malformed, 404 unknown or hidden, 409 wrong
+  state, 429 past 30 writes a minute per session.
+- **A phone message is `UserMessage(origin="owner", via="phone",
+  desk=False)`** through the HUD's own `assemble_turn` (`paths=False`) and
+  `Daemon.deliver`, the owner queue every surface shares. No desk (§11
+  question 2), so no fast-path direct edits and no Bypass. Recorded `via:
+  "phone"`; chat reads say "via the phone", the Discord mirror "You
+  (phone)".
+- **It never steers.** While a turn runs it queues behind it
+  (`daemon.NEVER_STEER`, read from the message). §5's "queues behind a
+  running turn" made a rule: steering stays at the desk.
+- **Attachments and images are refused** (400), as §5 said for v1; the
+  text is capped at 20,000 characters.
+- **New chat:** a listed project and a provider (`fast`, `claude`,
+  `codex`) with an optional model and effort, through `open_thread` as the
+  HUD's `POST /threads`, then the first message. The sheet offers what
+  `thread_model.describe()` lists, unavailable providers disabled.
+- **Tasks:** `POST tasks` is the HUD's `POST /tasks` (`Daemon.create_task`):
+  the task waits in INTAKE until Start (§11 question 1, the intake gate).
+  Start and resume are `daemon.task_verb`, the HUD's own call, with the
+  HUD's arguments. `remote_write.TASK_START` turns task making and
+  starting off on its own.
+- **Cancel takes a passkey assertion, not only the session** (a change
+  from the P-5 brief, which assumed "cancel is reversible by resume"): a
+  cancelled task is terminal (`model.TRANSITIONS`) and only a blocked task
+  resumes, so cancel is irreversible and takes PH-4's footing. The
+  challenge is P-4's, bound to `task:<id>` and "cancel"; an approval's
+  assertion is never a cancel's, nor the reverse. §4.1 is not required: a
+  cancel grants no authority. Start and resume need the session only.
+- **A proposal's withdraw** moved to the phone (`remote_answer`), the
+  session only: Deny's footing, inside the grace window.
+- **Every task verb from the phone is journaled** (`owner_verb`, `via:
+  "phone"`).
+- **Never on the phone:** permanent delete, archive, merge, rename, steer a
+  task, worktrees, Bypass (none is a route; asserted).
+- **The app:** a message box on an owner's chat (Send is a tap; Enter is a
+  new line), "New chat" and "New task" sheets, Start/Resume/Cancel on a
+  task each confirmed first (Cancel then the passkey), Withdraw on a
+  proposal. Shown only after the 2xx; offline nothing is sent.
 
 ## 11. Open questions for the owner (defaults in bold)
 
@@ -579,7 +628,9 @@ Answered 2026-10-24: the phone is an iPhone (O-1); Discord stays as a backup
 (O-3); the other tailnet device is trusted, so no ACL change is needed (O-4).
 
 1. **Should the phone be able to start tasks**, or only chat and answer?
-   **Yes, through the same intake gate as the HUD.**
+   **Yes, through the same intake gate as the HUD.** **Answered
+   2026-10-28 (owner): yes, through the same intake gate as the HUD**
+   (built in P-5, §10.x).
 2. **Desk authority from the phone:** may a message typed on the phone let
    a chat make small direct edits the way a HUD-typed one does (fast path
    F-1..F-7)? **No**: O-3 covers approvals, and each edit made that way
