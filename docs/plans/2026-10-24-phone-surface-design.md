@@ -1,7 +1,10 @@
 # Design: the phone surface (Jarvis v2)
 
-**Status (2026-10-24): draft for the owner's review.** Nothing here is built.
-Written against `main` at `2229645e`. It depends on the
+**Status (2026-10-28): P-0 to P-7 built and merged (see §10.1 to §10.7),
+and QH (quiet-hours deferral, §10.8) merged; MR is in progress; P-8 (the
+CLAUDE.md Phone section, and the bare address `/` answering `302 /m/` on the
+remote listener) is this PR.** The hub README pointer (§8 step 2) still waits
+for the owner. Written against `main` at `2229645e`. It depends on the
 [owner inbox](2026-10-24-owner-inbox-design.md): the inbox is the phone's main
 screen. Decisions in §2 are the planner's defaults, except those marked
 **owner, 2026-10-24**; the open questions in §11 have their defaults in bold.
@@ -829,3 +832,17 @@ assertion (bound to `defer:<id>`, verified before anything is written),
 then §4.1 in full and the Allow's gate. No push is sent for a deferral
 during quiet hours (P-6's rule); a rank-4 deferred row counts toward the
 one push when they end.
+
+### 10.9 P-8 as built (2026-10-28)
+
+- **The bare address opens the app.** On the remote listener, `GET /` and
+  `HEAD /` (the request target exactly `/`, no query) answer `302` with
+  `Location: /m/` (relative), an empty body, `Cache-Control: no-store` and the
+  listener's usual headers. It runs after the strict Host check, so a wrong
+  Host is still 400, and writes are unchanged (no Origin 403; with it, 404).
+  `/x`, `/?x` and every other path are as before (`http.server` itself
+  collapses a leading `//` to `/`, so that one redirects the same way). The API, HUD and
+  workshop listeners gain nothing (asserted in
+  `tests/v2/remote_listener_check.py`). `jarvis/v2/remote_listener.py` is
+  SELF_PROTECTED, so an agent could not have made this edit.
+- **CLAUDE.md has a Phone section** with the current rules (P-1 to P-7, QH).

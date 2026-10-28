@@ -348,6 +348,46 @@ class HostAndOrigin(Remote):
         self.assertEqual(status, 400)
         print("ok  strict Host: exactly the configured name, once; everything else 400")
 
+    def test_bare_address_redirects_to_the_app(self):
+        for method in ("GET", "HEAD"):
+            status, headers, body = self.get("/", method=method)
+            self.assertEqual(status, 302, method)
+            self.assertEqual(headers.get_all("Location"), ["/m/"])
+            self.assertEqual(body, b"")
+            self.assertEqual(headers["Content-Length"], "0")
+            self.assertEqual(headers["Cache-Control"], "no-store")
+            self.assertIn("frame-ancestors 'none'", headers["Content-Security-Policy"])
+            # Only after the strict Host check: a wrong or missing Host is 400.
+            for host in ("localhost", f"127.0.0.1:{self.port}", HOST.upper(), HOST + ":443", None):
+                status, headers, body = self.get("/", method=method, host=host)
+                self.assertEqual(status, 400, (method, host))
+                self.assertNotIn("Location", headers)
+        status, _, _ = raw(self.port, "GET", "/", [("Host", HOST), ("Host", HOST)])
+        self.assertEqual(status, 400)
+        # No other path gains it: the exact target "/" only.
+        for path in ("/x", "/index.html", "/?x=1", "/#a", "/m", "/M/", "/m/nothing", "/.", "/%2f"):
+            for method in ("GET", "HEAD"):
+                status, headers, _ = self.get(path, method=method)
+                self.assertNotIn("Location", headers, (method, path))
+                self.assertNotEqual(status, 302, (method, path))
+        # (http.server itself collapses a leading "//" to "/" before any of
+        # our code runs: the same relative redirect, to the same place.)
+        self.assertEqual(self.get("//")[0], 302)
+        self.assertEqual(self.get("/x")[0], 404)
+        status, headers, body = self.get("/x")
+        self.assertEqual(json.loads(body), {"error": "not found"})
+        # Writes are unchanged: no Origin 403; with it, 404 and no Location.
+        for method in WRITES:
+            self.assertEqual(self.get("/", method=method)[0], 403, method)
+            status, headers, _ = self.get("/", method=method, origin=ORIGIN)
+            self.assertEqual(status, 404, method)
+            self.assertNotIn("Location", headers)
+        status, headers, _ = raw(self.port, "POST", "/", [("Host", HOST), ("Origin", ORIGIN)], body=b"{}")
+        self.assertEqual(status, 404)
+        self.assertNotIn("Location", headers)
+        print("ok  GET/HEAD / is 302 /m/ (relative, no body) behind the strict Host; "
+              "other paths and writes unchanged")
+
     def test_writes_need_the_exact_origin(self):
         bad = [None, "http://" + HOST, ORIGIN + ":443", ORIGIN + "/", "null", "https://evil.ts.net",
                f"http://127.0.0.1:{self.port}", "", ORIGIN.upper()]
@@ -410,7 +450,7 @@ class Headers(Remote):
         for path, want, cache in (("/m/", 200, "no-store"), ("/m/manifest.webmanifest", 200, "no-store"),
                                   ("/m/icons/orb-192.png", 200, "no-store"),
                                   ("/m/assets/mobile-AAAA.js", 200, remote_listener.IMMUTABLE),
-                                  ("/m/nothing", 404, "no-store"), ("/", 404, "no-store"),
+                                  ("/m/nothing", 404, "no-store"), ("/", 302, "no-store"),
                                   ("/m/api/inbox", 401, "no-store")):
             for method in ("GET", "HEAD"):
                 status, headers, _ = self.get(path, method=method)
@@ -547,7 +587,7 @@ class RouteTables(Remote):
             calls.append((handler.server, result))
             return result
 
-        paths = {"/", "/index.html", "/mobile.html", "/manifest.webmanifest", "/build-manifest.json",
+        paths = {"/index.html", "/mobile.html", "/manifest.webmanifest", "/build-manifest.json",
                  "/icons/orb-192.png", "/assets/index-IIII.js", "/assets/mobile-AAAA.js",
                  "/m", "/m/index.html", "/m/mobile.html", "/m/build-manifest.json",
                  "/m/assets/", "/m/assets/index-IIII.js", "/m/assets/index-JJJJ.css",
@@ -609,6 +649,12 @@ class RouteTables(Remote):
                                               body=b"{}" if method in ("POST", "PUT", "PATCH") else None)
                         self.assertEqual(status, 404, ("guard", port, method, path, body[:80]))
                         self.assertNotIn(b"leak", body)
+        # The bare address redirect is the remote listener's alone.
+        for port in (self.d.port, self.d.face_port, self.d.workshop_port):
+            for method in ("GET", "HEAD"):
+                status, headers, _ = raw(port, method, "/", [("Host", f"127.0.0.1:{port}")])
+                self.assertNotEqual(status, 302, (port, method))
+                self.assertNotIn("Location", headers, (port, method))
         # Proof the sweep could see a page: the HUD listener does serve its own.
         status, _, body = raw(self.d.face_port, "GET", "/", [("Host", f"127.0.0.1:{self.d.face_port}")])
         self.assertEqual(status, 200)
