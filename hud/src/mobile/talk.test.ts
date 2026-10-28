@@ -179,6 +179,43 @@ function wavInfo(bytes: ArrayBuffer) {
 }
 
 describe("push to talk (P-7)", () => {
+  it("is a mic icon in the message bar; holding it still drives the recording (owner, 2026-10-28)", async () => {
+    const h = harness();
+    await openChat(h);
+    const b = h.button();
+    // In the bar beside the box, before Send; the line sits in the same bar, drawn above it (talk.css order).
+    const bar = h.q("m-compose")!.querySelector(".m-bar")!;
+    expect(bar.contains(b)).toBe(true);
+    expect(bar.contains(h.line())).toBe(true);
+    expect(b.compareDocumentPosition(h.q("m-compose-send")!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(h.box().compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    // An icon and its words: the words stay the button's text and name.
+    expect(b.querySelector(".m-mic-icon")!.getAttribute("aria-hidden")).toBe("true");
+    expect(b.querySelector(".m-sr")!.textContent).toBe(WORDS.idle);
+    expect(b.textContent).toBe(WORDS.idle);
+    expect(b.getAttribute("aria-label")).toBe("Hold to talk: the words go in the box, unsent");
+    // The same hold: press opens the mic in the gesture; sliding off cancels and uploads nothing.
+    await h.down();
+    expect(h.mic.getUserMedia).toHaveBeenCalledTimes(1);
+    expect(b.dataset.phase).toBe("listening");
+    expect(b.textContent).toBe(WORDS.listening);
+    h.mic.ctx().feed(1.0);
+    h.pointer("pointermove", window, 150, 900);
+    await h.settle();
+    expect(b.dataset.phase).toBe("idle");
+    expect(h.line().textContent).toBe(WORDS.cancelled);
+    expect(h.mic.uploads.length).toBe(0);
+    expect(h.mic.streams[0].tracks.every((t) => t.stopped === 1)).toBe(true);
+    // And a full hold still lands its words in the box, unsent.
+    await h.down();
+    h.mic.ctx().feed(1.0);
+    h.mic.reply(() => Promise.resolve({ status: 200, body: { text: "hello" } }));
+    await h.up();
+    await h.settle();
+    expect(h.box().value).toBe("hello");
+    expect(h.posts).toEqual([]);
+  });
+
   it("asks for the microphone only on the press; the words land in the box, unsent", async () => {
     const h = harness();
     await openChat(h);

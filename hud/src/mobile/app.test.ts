@@ -321,6 +321,44 @@ describe("the phone app: live, offline and signed out (P-3)", () => {
     expect(h.root.querySelectorAll('textarea[data-testid="m-compose-text"]').length).toBe(1);
   });
 
+  it("follows the newest message only while the owner is at the bottom (owner, 2026-10-28)", async () => {
+    const h = harness();
+    h.app.start();
+    await h.settle();
+    (h.root.querySelector('[data-testid="m-tab-chats"]') as HTMLButtonElement).click();
+    await h.settle();
+    (h.root.querySelector('[data-testid="m-chat"]') as HTMLButtonElement).click();
+    await h.settle();
+    const main = h.root.querySelector<HTMLElement>('[data-testid="m-main"]')!;
+    // jsdom lays nothing out: a 2000 px transcript in a 600 px view.
+    Object.defineProperty(main, "scrollHeight", { configurable: true, get: () => 2000 });
+    Object.defineProperty(main, "clientHeight", { configurable: true, get: () => 600 });
+    let cursor = 1;
+    const reply = () => {
+      h.answers[`/m/api/threads/aaaaaaaa/log?after=${cursor}`] = h.ok({ rows: [{ seq: cursor + 1, role: "Claude",
+        text: "r" + cursor, at: null, marks: [] }], next: cursor + 2, more: false, older: false, thread: null });
+      cursor += 2;
+      h.streams[0].send({ kind: "thread_changed", data: { thread_id: "aaaaaaaa", project_id: "cccccccc", reason: "text" } });
+    };
+    // At the bottom: a new reply scrolls to it.
+    main.scrollTop = 1400;
+    reply();
+    await h.settle();
+    expect(main.scrollTop).toBe(2000);
+    // Scrolled up to read: a new reply, and a redraw (offline and back), leave the owner where they are.
+    main.scrollTop = 300;
+    reply();
+    await h.settle();
+    expect(h.root.querySelectorAll('[data-testid="m-msg"]').length).toBe(3);
+    expect(main.scrollTop).toBe(300);
+    h.app.setOnline(false);
+    expect(main.scrollTop).toBe(300);
+    // Back at the bottom, a redraw keeps it there.
+    main.scrollTop = 1400;
+    h.app.setOnline(true);
+    expect(main.scrollTop).toBe(2000);
+  });
+
   it("goes offline with a banner and stale data, and back once a read lands", async () => {
     const h = harness();
     h.app.start();

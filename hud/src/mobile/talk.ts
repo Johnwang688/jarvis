@@ -1,7 +1,10 @@
 // Push to talk on the phone (phone design §6, the Chats tab; P-7;
 // jarvis/v2/remote_stt.py). A chat's message box takes a "Hold to talk"
 // button: press and hold to record, release to upload and transcribe; the
-// words land in the box. Nothing more.
+// words land in the box. Nothing more. Since 2026-10-28 (the owner's chat
+// layout) the button is a mic icon in the message bar; its words ("Hold to
+// talk", "Listening · release", …) stay its text for screen readers, and the
+// line above the bar says what is happening. Only the look changed.
 //
 //   - **Inserted, never sent.** The text is added to the chat's draft (after
 //     what is already typed) and the box is drawn again. Send stays P-5's
@@ -189,6 +192,8 @@ export class Talk {
   threadId: string | null = null;
   readonly el: HTMLElement;
   readonly button: HTMLButtonElement;
+  /** The button's words (visually hidden; the icon is drawn by talk.css). */
+  private readonly words: HTMLElement;
   private readonly line: HTMLElement;
   /** One more try of the last clip, after a network failure (`networkFailure`); kept for one Retry only. */
   readonly retryButton: HTMLButtonElement;
@@ -206,8 +211,14 @@ export class Talk {
     this.el.dataset.testid = "m-talk";
     this.button = document.createElement("button");
     this.button.type = "button";
-    this.button.className = "tap quiet m-mic";
+    this.button.className = "tap m-mic";
     this.button.dataset.testid = "m-mic";
+    const icon = document.createElement("span");
+    icon.className = "m-mic-icon";
+    icon.setAttribute("aria-hidden", "true");
+    this.words = document.createElement("span");
+    this.words.className = "m-sr";
+    this.button.append(icon, this.words);
     this.line = document.createElement("p");
     this.line.className = "m-notice m-talk-line";
     this.line.dataset.testid = "m-talk-line";
@@ -414,7 +425,7 @@ export class Talk {
 
   private draw(): void {
     const b = this.button;
-    b.textContent = WORDS[this.phase];
+    this.words.textContent = WORDS[this.phase];
     b.dataset.phase = this.phase;
     b.setAttribute("aria-pressed", String(this.phase === "listening" || this.phase === "starting"));
     b.setAttribute("aria-label", this.phase === "idle" ? "Hold to talk: the words go in the box, unsent" : WORDS[this.phase]);

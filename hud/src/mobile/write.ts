@@ -98,36 +98,70 @@ export interface Composer {
   online: boolean;
   send: (text: string) => void;
   edit: (text: string) => void;
-  /** P-7: the "Hold to talk" button (./talk.ts), whose words land in this box unsent. */
+  /** P-7: the mic button (./talk.ts), whose words land in this box unsent. */
   mic?: HTMLElement | null;
+  /** The box grew or shrank: the app keeps the newest message in view if it was. */
+  around?: (change: () => void) => void;
 }
 
+/** The box's most lines before it scrolls inside itself. */
+export const COMPOSE_LINES = 5;
+
+/** One line tall, growing with the words to `COMPOSE_LINES`, then scrolling.
+ * Set through the CSSOM (C1's CSP refuses style attributes, not this). */
+export function fitLines(text: HTMLTextAreaElement): void {
+  const css = typeof getComputedStyle === "function" ? getComputedStyle(text) : null;
+  const px = (v: string | undefined) => parseFloat(v ?? "") || 0;
+  const line = px(css?.lineHeight) || 23;
+  // Box-sizing is border-box (mobile.css): the height counts the borders, scrollHeight does not.
+  const borders = px(css?.borderTopWidth) + px(css?.borderBottomWidth);
+  const most = line * COMPOSE_LINES + px(css?.paddingTop) + px(css?.paddingBottom) + borders;
+  text.style.height = "auto";
+  const want = Math.min(text.scrollHeight + borders, most);
+  if (want > borders) text.style.height = `${Math.ceil(want)}px`;
+  else text.style.removeProperty("height");
+}
+
+/** A chat's message box, Claude/Codex style: one slim bar (the box, the mic,
+ * a round Send) pinned above the tab bar, its notes above it. Send's rules are
+ * P-5's as before: a tap only, off while empty, offline or sending. */
 export function composerView(c: Composer): HTMLElement {
   const box = testid(el("div", "m-compose"), "m-compose");
-  const text = testid(el("textarea", "m-text"), "m-compose-text");
+  const text = testid(el("textarea", "m-text m-compose-text"), "m-compose-text");
   text.setAttribute("aria-label", "Message");
   text.placeholder = "Message";
-  text.rows = 3;
+  text.rows = 1;
   text.maxLength = MESSAGE_CHARS;
   // A new line, never a send: the phone's return key says so.
   text.setAttribute("enterkeyhint", "enter");
   text.value = c.draft;
   text.readOnly = c.busy;
-  const send = button(c.busy ? "Sending…" : "Send", () => {
+  const send = button("", () => {
     const value = text.value.trim();
     if (value) c.send(value);
-  }, "quiet m-send", "m-compose-send");
+  }, "m-send-round", "m-compose-send");
+  // The words stay the button's own text (screen readers, the checks); the arrow is drawn by CSS.
+  send.append(el("span", "m-sr", c.busy ? "Sending…" : "Send"));
+  send.dataset.busy = String(c.busy);
+  const around = c.around ?? ((change: () => void) => change());
   const sync = () => {
     c.edit(text.value);
     send.disabled = c.busy || !c.online || !text.value.trim();
   };
-  text.addEventListener("input", sync);
+  text.addEventListener("input", () => { sync(); around(() => fitLines(text)); });
   sync();
-  box.append(text);
-  if (c.mic) box.append(c.mic);
-  box.append(send);
   if (c.note) box.append(note(c.note, "m-compose-note"));
+  if (c.busy) box.append(note("Sending…", "m-compose-sending", "m-notice m-sending"));
   if (!c.online) box.append(note("Offline: nothing can be sent until Jarvis is reachable.", "m-compose-offline", "m-notice m-off"));
+  const bar = el("div", "m-bar");
+  bar.append(text);
+  if (c.mic) bar.append(c.mic);
+  bar.append(send);
+  box.append(bar);
+  // Sized once it is on the page (a draft kept across a redraw keeps its lines).
+  const fit = () => { if (text.isConnected) around(() => fitLines(text)); };
+  if (typeof requestAnimationFrame === "function") requestAnimationFrame(fit);
+  else queueMicrotask(fit);
   return box;
 }
 

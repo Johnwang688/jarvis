@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { PhoneApp, type StreamLike } from "./app";
 import type { Got, Posted } from "./net";
-import { clientIdFor, MAYBE_DONE, MAYBE_SENT, parseModels, refusal, sentNote, taskControlsView, verbsFor } from "./write";
+import { clientIdFor, COMPOSE_LINES, composerView, fitLines, MAYBE_DONE, MAYBE_SENT, parseModels, refusal, sentNote,
+  taskControlsView, verbsFor, type Composer } from "./write";
 import { parseInbox } from "../lib/inbox";
 import { inboxView, type InboxAnswers } from "./views";
 import type { TaskView } from "./model";
@@ -91,6 +92,65 @@ async function openChat(h: ReturnType<typeof harness>, id = CHAT) {
 }
 
 describe("the message box (P-5)", () => {
+  it("is one slim bar: a one-line box, the mic, and a round Send that is off while empty (owner, 2026-10-28)", () => {
+    const sent: string[] = [];
+    const mic = document.createElement("div");
+    mic.dataset.testid = "m-talk";
+    const draw = (over: Partial<Composer> = {}) => {
+      const view = composerView({ draft: "", busy: false, note: "", online: true, send: (t) => sent.push(t),
+        edit: () => {}, mic, ...over });
+      document.body.replaceChildren(view);
+      return { view, text: view.querySelector<HTMLTextAreaElement>('[data-testid="m-compose-text"]')!,
+        send: view.querySelector<HTMLButtonElement>('[data-testid="m-compose-send"]')! };
+    };
+    const empty = draw();
+    const bar = empty.view.querySelector(".m-bar")!;
+    // In the bar, in order: the box, the mic, Send. Its notes sit above it.
+    expect(Array.from(bar.children).map((c) => (c as HTMLElement).dataset.testid))
+      .toEqual(["m-compose-text", "m-talk", "m-compose-send"]);
+    expect(empty.text.rows).toBe(1);
+    expect(empty.send.disabled).toBe(true);
+    expect(empty.send.textContent).toBe("Send");
+    expect(empty.send.className).toContain("m-send-round");
+    // Spaces alone are not something to send.
+    empty.text.value = "   ";
+    empty.text.dispatchEvent(new Event("input"));
+    expect(empty.send.disabled).toBe(true);
+    empty.text.value = "hello";
+    empty.text.dispatchEvent(new Event("input"));
+    expect(empty.send.disabled).toBe(false);
+    empty.send.click();
+    expect(sent).toEqual(["hello"]);
+    // Offline or sending: off, and the box says why.
+    const offline = draw({ draft: "hello", online: false });
+    expect(offline.send.disabled).toBe(true);
+    expect(offline.view.querySelector('[data-testid="m-compose-offline"]')).not.toBeNull();
+    const busy = draw({ draft: "hello", busy: true });
+    expect([busy.send.disabled, busy.send.textContent, busy.text.readOnly]).toEqual([true, "Sending…", true]);
+    expect(busy.view.querySelector('[data-testid="m-compose-sending"]')!.textContent).toBe("Sending…");
+    const noted = draw({ note: "Sent." });
+    expect(noted.view.firstElementChild!.getAttribute("data-testid")).toBe("m-compose-note");
+  });
+
+  it("grows from one line to five, then scrolls inside itself", () => {
+    const text = document.createElement("textarea");
+    document.body.replaceChildren(text);
+    // jsdom has no layout: 23 px lines, 10 px padding, 1 px borders.
+    Object.assign(text.style, { lineHeight: "23px", paddingTop: "10px", paddingBottom: "10px", borderTopWidth: "1px",
+      borderBottomWidth: "1px", borderStyle: "solid" });
+    let content = 23 + 20;
+    Object.defineProperty(text, "scrollHeight", { configurable: true, get: () => content });
+    fitLines(text);
+    expect(text.style.height).toBe("45px");
+    content = 3 * 23 + 20;
+    fitLines(text);
+    expect(text.style.height).toBe("91px");
+    content = 12 * 23 + 20;
+    fitLines(text);
+    expect(text.style.height).toBe(`${COMPOSE_LINES * 23 + 20 + 2}px`);
+    expect(COMPOSE_LINES).toBe(5);
+  });
+
   it("sends only on the Send tap, once, and shows the message only after its 2xx and a read of the log", async () => {
     const h = harness();
     let release!: (p: Posted) => void;

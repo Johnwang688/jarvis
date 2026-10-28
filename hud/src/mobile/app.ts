@@ -65,6 +65,7 @@ import {
   type ProviderChoice, type Sheet, type Verb,
 } from "./write";
 import { Talk, browserTalkEnv, type TalkEnv } from "./talk";
+import { followViewport } from "./viewport";
 import { afterChanged, allItems, approveBody, confirmedChanged, emptySelection, keptSelection, leaveBody, parseReview, toggled,
   UNTICKED_GONE, type ReviewItem, type ReviewReport } from "../lib/review";
 import { reviewTabShown, reviewView, type ReviewActions } from "./review";
@@ -182,6 +183,8 @@ export class PhoneApp {
   private readonly main: HTMLElement;
   private readonly tabs: Record<Tab, HTMLButtonElement>;
   private logBusy = false;
+  /** An open transcript drawn again: where its scroll was ("end": at the newest message). */
+  private keepScroll: "end" | number | null = null;
   private logAgain = false;
 
   constructor(private readonly deps: AppDeps) {
@@ -802,6 +805,8 @@ export class PhoneApp {
       send: (text) => void this.sendMessage(threadId, text),
       edit: (text) => { this.composeDrafts.set(threadId, text); },
       mic: this.talk.view(threadId),
+      // The box grew a line: the newest message stays in view if it was.
+      around: (change) => { const end = this.nearEnd(); change(); if (end) this.scrollToEnd(); },
     });
   }
 
@@ -1322,6 +1327,8 @@ export class PhoneApp {
           openChat: (id) => void this.openThread(id),
         });
       } else if (this.thread) {
+        // Drawn again in place: at the bottom it stays there; scrolled up, it is not moved.
+        if (this.main.querySelector('[data-testid="m-transcript"]')) this.keepScroll = this.nearEnd() ? "end" : this.main.scrollTop;
         const built = transcriptView(this.thread.meta, this.thread.rows, this.thread.older, () => this.show("chats"),
           this.composer(this.thread.id));
         this.thread.list = built.list;
@@ -1371,6 +1378,10 @@ export class PhoneApp {
     }
     this.main.replaceChildren(view);
     this.rendered = this.tab;
+    const keep = this.keepScroll;
+    this.keepScroll = null;
+    if (keep === "end") this.scrollToEnd();
+    else if (keep !== null) this.main.scrollTop = keep;
   }
 
   private reviewActions(): ReviewActions {
@@ -1431,6 +1442,8 @@ export function startApp(deps: AppDeps): PhoneApp {
   const app = new PhoneApp(deps);
   app.start();
   if (typeof window !== "undefined") {
+    // The keyboard never covers the message box: the app follows the visible viewport.
+    followViewport(window, document.documentElement);
     window.addEventListener("offline", () => app.setOnline(false));
     window.addEventListener("online", () => void app.probe());
     document.addEventListener("visibilitychange", () => {
