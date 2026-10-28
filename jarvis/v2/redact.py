@@ -1089,22 +1089,27 @@ def _card_core(text: str, a: int, b: int) -> tuple[int, int]:
 # A word holding a `/` is a key's line only where it reads as no path
 # (round 4 of the third review): no `/`-separated part of it a well-known
 # directory's name (`bin`, `usr`, `tmp`, `home`, `scripts` …, anywhere in
-# it), and, after a leading `/`, its first part not 3 to 8 lower-case
-# letters (a directory at the root: none has fewer). The round's draft (any part of 2 to 8
+# it; the root's own directories all among them). The round's draft (any part of 2 to 8
 # lower-case letters, or an empty one, `//`) read 4.3% and 2.2% of random
 # base64 lines holding a `/` as paths, so about half of all RSA keys lost a
 # line on a card; a relative path's first part alone read 0.7% (~10% of RSA
-# keys). This reads under 0.01% (one RSA key in ~1000 loses a line).
-_CARD_PATH_PART = re.compile(r"[a-z]{3,8}")
+# keys); any lower-case root directory, ~0.3% of RSA keys (round 5). This
+# reads well under 0.01%.
 _CARD_KNOWN_DIRS = frozenset({
     "bin", "sbin", "usr", "tmp", "home", "opt", "etc", "var", "lib", "lib32", "lib64", "root", "dev",
     "proc", "sys", "srv", "mnt", "media", "run", "boot", "local", "share", "src", "Users", "Library",
-    "Applications", "Volumes", "private", "scripts", "build", "dist", "out", "target", "tools", "app"})
+    "Applications", "Volumes", "private", "scripts", "build", "dist", "out", "target", "tools", "app", "snap",
+    "nix", "data", "workspace", "workspaces", "cache", "config", "node", "deploy"})
 # A word that assigns (`NAME=…`): never a key's line, unless it is a padded
 # base64 tail (no `_`, a digit, 4 or more characters) and not a name a shell
 # or loader reads (`PATH=`, `IFS=`, an upper-case name).
 _CARD_ASSIGN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
 _CARD_ENV_ASSIGN = re.compile(r"(?:PATH|IFS|[A-Z_]{2,})=")
+# The variables a shell or loader reads, assigned (`HOME=`): never a key's
+# last line, even where the block's width vouches for one (round 5).
+_CARD_SHELL_VARIABLE = re.compile(r"(?:PATH|IFS|HOME|HISTFILE|ENV|CDPATH|SHELL|SHELLOPTS|TMPDIR|PS[0-4]|LANG"
+                                  r"|TERM|USER|LOGNAME|MAIL|PERL5LIB|PERL5OPT|PYTHONPATH|PYTHONHOME"
+                                  r"|PYTHONSTARTUP|RUBYOPT|RUBYLIB|EDITOR|VISUAL|PAGER)=")
 
 
 _BASE64_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
@@ -1122,10 +1127,7 @@ def _canonical_padding(core: str) -> bool:
 
 def _card_path_like(core: str) -> bool:
     """Does a word holding a `/` read as a path (`_CARD_KNOWN_DIRS`)?"""
-    parts = core.split("/")
-    if any(part in _CARD_KNOWN_DIRS for part in parts):
-        return True
-    return len(parts) > 2 and parts[0] == "" and _CARD_PATH_PART.fullmatch(parts[1]) is not None
+    return any(part in _CARD_KNOWN_DIRS for part in core.split("/"))
 
 
 def _card_word(text: str, a: int, b: int):
@@ -1154,7 +1156,7 @@ def _card_word(text: str, a: int, b: int):
         "_" in core or _DIGIT.search(core) is None or len(core) < 4
         or _CARD_ENV_ASSIGN.match(core) is not None)
     return "cand", ca, cb, (len(core), slash, slash and _card_path_like(core), long_key, padded, assign_bad,
-                            not padded or _canonical_padding(core))
+                            not padded or _canonical_padding(core)), core
 
 
 def _card_items(text: str, a: int, b: int) -> list[list]:
@@ -1198,10 +1200,11 @@ def _card_final(items, i: int) -> bool:
 def _card_slash_width(items, i: int, widths: dict[int, int], body: int, width: int) -> bool:
     """Does the block's width vouch for word `i`, which holds a `/`: with no
     other body line, yes (a one-line key); else 3 others (all of them when
-    fewer) are W wide and the word is W wide, or narrower as the last word
-    before the footer?"""
+    fewer; a narrower last line is not counted among them) are W wide and
+    the word is W wide, or narrower as the last word before the footer?"""
     n, long_key = items[i][3][3][0], items[i][3][3][3]
-    others_total = body - (1 if long_key else 0)
+    self_long = 1 if long_key and n >= width else 0
+    others_total = sum(c for w, c in widths.items() if w >= width) - self_long
     if others_total <= 0:
         return True
     others = widths.get(width, 0) - (1 if long_key and n == width else 0)
@@ -1249,11 +1252,42 @@ def _card_counts(items) -> list[bool]:
             ok = (_card_final(items, i) and total % 4 == 0 and (long_key or n <= _CARD_TAIL_MAX)
                   and what[3][6])
         else:
-            ok = long_key
+            # A body line with no digit (one 64-wide line in ~50,000) counts at
+            # the width 3 others share (round 5).
+            ok = long_key or (n == width and widths.get(width, 0) >= 3 and _card_mixed_case(_word_core(items[i])))
         if ok and slash:
             ok = _card_slash_width(items, i, widths, body, width)
         out.append(ok)
+    _card_last_line(items, out, widths, width, body, total)
     return out
+
+
+def _card_last_line(items, out: list[bool], widths: dict[int, int], width: int, body: int, total: int) -> None:
+    """The block's last word (round 5 of the third review), in `out`: a
+    key's last line is any base64 no wider than its body lines (short,
+    unpadded, all capitals or letters only, `AQ==`), so it counts when
+    everything else in the block does and 3 or more body lines share one
+    width W (both, in a two-line key such as an EC P-256 key's): base64
+    padded as an encoder pads, no wider than W, the body whole base64
+    groups, and no path nor a variable a shell or loader reads (`HOME=`,
+    `PATH=`)."""
+    if not ((widths.get(width, 0) >= 3 or widths.get(width, 0) == body == 2) and total % 4 == 0):
+        return
+    for i, (kind, _a, _b, what) in enumerate(items):
+        if out[i] or kind != "word" or what[0] != "cand" or not _card_final(items, i):
+            continue
+        n, _slash, pathy, _long, _padded, _assign, canonical = what[3]
+        if (n <= width and canonical and not pathy and _CARD_SHELL_VARIABLE.match(_word_core(items[i])) is None
+                and all(out[k] for k in range(len(items)) if k != i)):
+            out[i] = True
+
+
+def _word_core(item) -> str:
+    return item[3][4] if len(item[3]) > 4 else ""
+
+
+def _card_mixed_case(core: str) -> bool:
+    return any(c.isupper() for c in core) and any(c.islower() for c in core)
 
 
 def _whole_key_block(text: str, items) -> bool:

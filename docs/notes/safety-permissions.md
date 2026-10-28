@@ -3260,19 +3260,36 @@ reader).
 
 Round 4 (`b529226c`), cards only. A word holding a `/` counts only when it
 reads as no path (`_card_path_like`: no part a well-known directory's name,
-`bin`, `usr`, `tmp`, `home`, `scripts` …, and after a leading `/` no first
-part of 3 to 8 lower-case letters) and, when the block has other body lines,
+`bin`, `usr`, `tmp`, `home`, `scripts` …, the root's own among them) and,
+when the block has other body lines,
 only at the width 3 of them share (all of them when fewer; none for a
 one-line key such as Ed25519's). The round's draft rule (any part of 2 to 8
 lower-case letters, or `//`) read 4.3% and 2.2% of random base64 lines with a
-`/` as paths, so about half of all RSA keys lost a line on a card; this one
-reads under 0.01% (about one RSA key in 1500). A padded word counts only as
+`/` as paths, so about half of all RSA keys lost a line on a card; any
+lower-case root directory still cost ~0.3% of RSA keys (dropped in round 5);
+the known names alone read well under 0.01%. A padded word counts only as
 the last before the footer, in a body of whole base64 groups, padded as an
 encoder pads (`_canonical_padding`), and never as an assignment a key's tail
 cannot be (`PATH=`, `IFS=`, an upper-case name, a name with `_` or no digit,
 under 4 characters). Measured on 3000 random keys of each shape, raw,
 JSON-escaped and concatenated: RSA, OpenSSH, 76-wide PKCS#8 and Ed25519 all
 whole; EC 0.3% (a padded tail with no digit, shown).
+
+Round 5 (`8ac30c9b`), cards only. A key's last line is any base64 no wider
+than its body (short, unpadded, letters only, capitals and `=`), and about
+20% of real keys in a quoted string (JSON, `echo '…'`, JSON in JSON) showed
+it on a card. When everything else in a block counts and 3 or more body
+lines share one width W (both, in a two-line EC P-256 key), the last word
+before the footer counts if it is base64 padded as an encoder pads, no wider
+than W, in a body of whole base64 groups, and neither a path nor a variable a
+shell or loader reads (`HOME=`, `PATH=`, `_card_last_line`). A body line at
+W with no digit counts there too (one 64-wide line in ~50,000). It is not
+routed back through `secrets._key_blocks`, which would hide code in quoted
+fake blocks again. Measured: 300 generated keys (RSA, EC, PKCS#8 64 and 76
+wide) in four framings, at three seeds, none shows body text on the card, its
+reason or log.jsonl. Residual: a short word after 3 width-matched junk lines
+whose lengths make whole base64 groups (`reboot` padded to fit) is withheld
+with the block.
 
 Known residuals on cards (LOW, not fixed): one word shaped like a key's line
 between a fake header and footer is still withheld with the block, such as

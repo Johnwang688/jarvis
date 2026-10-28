@@ -52,6 +52,12 @@ Round 4 (b529226c):
       keys (RSA, EC, OpenSSH, PKCS#8 76 wide, Ed25519), `/`-heavy, raw,
       JSON-escaped and concatenated, still go whole
 
+Round 5 (8ac30c9b):
+
+  r5  a real key's last line (short, unpadded, letters only, capitals and
+      `=`) is withheld with the block on a card: 300 generated keys, raw,
+      JSON-escaped, echo-quoted and JSON in JSON
+
 Fakes only: temporary stores and config (`chat_relay_check`'s harness),
 fake credential shapes assembled at run time, no daemon.
 
@@ -808,6 +814,51 @@ class Round4(Base):
                 caught = round4_failures()
                 self.assertNotEqual(caught, [], f"mutation not caught: {name}")
                 print(f"ok  round 4: mutation caught: {name} ({len(caught)} failures)")
+
+
+# -- third review, round 5: real keys' last lines --------------------------------------------
+#
+# A key's last line is any base64 no wider than its body (short, unpadded,
+# letters only, capitals and `=`): at 8ac30c9b about 20% of real keys in a
+# quoted string showed it on a card. Generated keys, as an encoder writes
+# them, must show no body text on the card, its reason or log.jsonl.
+
+def _generated_keys(count: int = 300):
+    rng = random.Random(0x5C5)
+    for k in range(count):
+        label, nbytes, width = [("RSA PRIVATE KEY", rng.randrange(1188, 1196), 64),
+                                ("EC PRIVATE KEY", rng.choice([121, 138, 167, 185]), 64),
+                                ("PRIVATE KEY", rng.randrange(1214, 1222), rng.choice([64, 76]))][k % 3]
+        body = base64.b64encode(bytes(rng.randrange(256) for _ in range(nbytes))).decode()
+        lines = [body[i:i + width] for i in range(0, len(body), width)]
+        yield label, f"-----BEGIN {label}-----\n" + "\n".join(lines) + f"\n-----END {label}-----", lines
+
+
+def round5_failures(count: int = 300) -> list[str]:
+    failures = []
+    for label, key, lines in _generated_keys(count):
+        for form, text in (("raw", key), ("JSON-escaped", json.dumps({"k": key})), ("echo-quoted", f"echo '{key}'"),
+                           ("JSON in JSON", json.dumps({"a": json.dumps({"k": key})}))):
+            for where, shown in text_card_surfaces(text).items():
+                seen = [x for x in lines if x in shown or (len(x) >= 8 and x[:8] in shown)]
+                if seen:
+                    failures.append(f"{where}: {label}, {form}: {seen[-1]!r} shown")
+                    break
+    return failures
+
+
+class Round5(Base):
+    def test_round5_real_keys_last_lines_withheld(self):
+        failures = round5_failures()
+        self.assertEqual(failures, [], f"{len(failures)} failures")
+        print("ok  round 5: 300 generated keys (RSA, EC, PKCS#8 64 and 76 wide), raw, JSON-escaped, echo-quoted "
+              "and JSON in JSON, show no body text on the card, its reason or log.jsonl")
+
+    def test_round5_mutation_no_last_line_rule_caught(self):
+        with patch.object(redact, "_card_last_line", lambda *args: None):
+            caught = round5_failures(90)
+        self.assertNotEqual(caught, [])
+        print(f"ok  round 5: mutation caught: no last-line rule ({len(caught)} of 90 keys' forms show a line)")
 
 
 # -- third review: t3 -------------------------------------------------------------------
