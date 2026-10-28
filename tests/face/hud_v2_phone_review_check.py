@@ -310,6 +310,41 @@ def run(browser, check, until):
               == "Sent to the asking chat.", f"its place moved {after - before:.0f}px, row {row_height:.0f}px")
         check("the decision's post was its own, once", mock.posts[-1] == ("/m/api/inbox/decisions/d0123456789ab",
                                                                          {"choice": 0}), str(mock.posts[-1]))
+        # AS: an item's controls first, its AI summary as text, its command collapsed
+        # and one tap away, every argument with it.
+        summed = report(True)
+        rec = summed["overnight"][1]["row"]["detail"]
+        rec["summary"] = HOSTILE + " builds b"
+        rec["card"].update({"where": "Calc · main · ~/c", "reason": "deploys", "layer": "human",
+                            "command": "make b\nsecond line"})
+        mock.review = summed
+        page.goto("about:blank")
+        page.goto(ORIGIN + "/m/#inbox")
+        until(lambda: page.locator('[data-testid="m-review"]').count() == 1, timeout=6)
+        itemb = page.locator('[data-testid="m-review-item"][data-id="defer:b"]')
+        until(lambda: itemb.locator('[data-testid="m-review-as-summary"]').count() == 1, timeout=4)
+        first = itemb.evaluate("""e => { const t = e.querySelector('[data-testid="m-review-tick"]');
+            const r = e.querySelector('[data-testid="m-review-leave-one"]');
+            const s = e.querySelector('[data-testid="m-review-as-summary"]');
+            const f = Node.DOCUMENT_POSITION_FOLLOWING;
+            return !!(t && r && s && (t.compareDocumentPosition(s) & f) && (r.compareDocumentPosition(s) & f)); }""")
+        check("AS: an item's Select and per-row buttons come before its summary", first)
+        check("AS: the summary is marked and text",
+              itemb.locator('[data-testid="m-review-as-summary"]').inner_text().startswith("AI SUMMARY")
+              and HOSTILE in itemb.locator('[data-testid="m-review-as-summary"]').inner_text()
+              and page.evaluate("window.__pwned === undefined"))
+        check("AS: WHERE is code's line",
+              itemb.locator('[data-testid="m-review-as-where"]').inner_text() == "WHERE Calc · main · ~/c")
+        check("AS: with a summary the command is collapsed to its first line",
+              itemb.locator('[data-testid="m-review-command"]').count() == 0
+              and itemb.locator('[data-testid="m-review-command-preview"]').inner_text().strip() == "make b")
+        itemb.locator('[data-testid="m-review-command-toggle"]').tap()
+        until(lambda: itemb.locator('[data-testid="m-review-command"]').count() == 1, timeout=3)
+        check("AS: one tap shows the whole command and every argument",
+              itemb.locator('[data-testid="m-review-command"]').inner_text() == "make b\nsecond line"
+              and itemb.locator('[data-testid="m-review-args"]').count() == 1)
+        check("AS: an item with no summary shows its command whole",
+              page.locator('[data-testid="m-review-item"][data-id="defer:d"] [data-testid="m-review-command"]').count() == 1)
         check("no page errors", not errors, "; ".join(errors[:3]))
     finally:
         ctx.close()

@@ -166,7 +166,8 @@ def clean_summary(raw) -> str:
     text = scrub(untrusted.strip_invisible(raw))
     text = _LINK.sub(r"\1", text)
     text = _LINE_MARK.sub("", text)
-    text = text.replace("**", "").replace("__", "").replace("*", "")
+    # Bold markers only: a lone `*` (a glob) or `__` (`__init__.py`) is part of what the call touches.
+    text = text.replace("**", "")
     text = clean_line(text, 10_000).strip().strip("\"'“”‘’").strip()
     text = _PREAMBLE.sub("", text).strip()
     if len(text) <= OUT_MAX_CHARS:

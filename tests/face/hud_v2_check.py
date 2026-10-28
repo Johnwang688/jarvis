@@ -797,6 +797,71 @@ def approval_checks(page, mock):
           page.evaluate("window.__hud.state().orb") != "approval")
 
 
+def approval_summary_checks(page, mock):
+    """AS (docs/plans/2026-10-28-approval-summaries.md): the buttons first;
+    the AI summary marked and drawn as text; WHY ASKED and WHERE; the command
+    collapsed while a summary is pending or there and one click away;
+    expanded when the summary fails; AUTHORIZE armed after the summary
+    lands; nothing moves the buttons when it does."""
+    print("\napproval summaries (AS)")
+    command = "cd /srv/calc\nrm -rf build && make deploy --prod && git push origin main"
+    request = {
+        "req_id": "as1", "code": "AS01", "tool": "Bash", "args": {"command": command, "timeout": 5},
+        "command": command, "reason": "pushes to main", "layer": "merge-gate", "thread_id": "kt2",
+        "task_id": None, "provider": "claude", "origin": "", "asked_at": "2026-09-15T00:02:00+00:00",
+        "allowlistable": True, "timeout_s": 120, "where": "Calc · main · ~/projects/calc", "summary": "",
+        "summary_state": "pending",
+    }
+    mock.emit("approval_requested", request)
+    until(lambda: page.locator('[data-testid="approval-card"]').count() > 0)
+    order = page.evaluate("""() => {
+        const c = document.querySelector('[data-testid="approval-card"]');
+        return Array.from(c.children).slice(0, 3).map(n => n.dataset.testid || n.tagName);
+    }""")
+    check("AS: the buttons come right under the title", order[:2] == ["H3", "approval-buttons"], str(order))
+    check("AS: a pending summary says so, marked as the AI's",
+          page.locator('[data-testid="approval-summary"]').get_attribute("data-state") == "pending"
+          and "AI SUMMARY" in page.locator('[data-testid="approval-summary"]').inner_text())
+    check("AS: WHY ASKED and WHERE are code's lines",
+          page.locator('[data-testid="approval-why"]').inner_text() == "WHY ASKED [merge-gate] pushes to main"
+          and page.locator('[data-testid="approval-where"]').inner_text() == "WHERE Calc · main · ~/projects/calc",
+          page.locator('[data-testid="approval-why"]').inner_text())
+    check("AS: the command is collapsed to its first line while the summary is pending",
+          page.locator('[data-testid="approval-command"]').count() == 0
+          and page.locator('[data-testid="approval-command-preview"]').inner_text().strip() == "command cd /srv/calc")
+    before = page.locator('[data-testid="approval-allow"]').bounding_box()
+    hostile = '<img src=x onerror="window.__pwned=1"> Deletes build, deploys calc to prod and pushes main'
+    time.sleep(0.8)
+    mock.emit("approval_summary", {"req_id": "as1", "summary": hostile, "summary_state": "ready"}, thread_id="kt2")
+    until(lambda: page.locator('[data-testid="approval-summary"][data-state="ready"]').count() > 0)
+    check("AS: the summary lands as text", page.locator('[data-testid="approval-summary-text"]').inner_text() == hostile
+          and page.evaluate("window.__pwned") is None and page.locator('.auth img').count() == 0)
+    after = page.locator('[data-testid="approval-allow"]').bounding_box()
+    check("AS: nothing moved AUTHORIZE when it landed", before == after, f"{before} -> {after}")
+    check("AS: AUTHORIZE is re-armed after the summary lands",
+          page.evaluate("document.querySelector('[data-testid=\"approval-allow\"]').disabled") is True)
+    page.locator('[data-testid="approval-command-toggle"]').click()
+    check("AS: one click shows the whole command",
+          page.locator('[data-testid="approval-command"]').inner_text() == "command " + command,
+          page.locator('[data-testid="approval-command"]').inner_text() if page.locator('[data-testid="approval-command"]').count() else "")
+    check("AS: and the toggle never took focus",
+          page.evaluate("document.activeElement?.dataset?.testid") != "approval-command-toggle")
+    page.locator('[data-testid="approval-allow"]').click()
+    body = until(lambda: mock.sent("POST", "/approvals/as1") or None)
+    check("AS: AUTHORIZE allows once armed", bool(body) and body[-1].get("decision") == "allow",
+          str(body[-1] if body else None))
+    until(lambda: page.locator('[data-testid="approval-card"]').count() == 0)
+
+    mock.emit("approval_requested", {**request, "req_id": "as2", "code": "AS02"})
+    until(lambda: page.locator('[data-testid="approval-card"]').count() > 0)
+    mock.emit("approval_summary", {"req_id": "as2", "summary": "", "summary_state": "failed"})
+    until(lambda: page.locator('[data-testid="approval-command"]').count() > 0)
+    check("AS: a failed summary shows the whole command, expanded",
+          page.locator('[data-testid="approval-command"]').inner_text() == "command " + command)
+    page.keyboard.press("Escape")
+    until(lambda: page.locator('[data-testid="approval-card"]').count() == 0)
+
+
 def task_checks(page, mock):
     print("\ntask tab")
     page.locator('[data-testid="task-k1"]').click()
@@ -3494,6 +3559,7 @@ def main():
             dictation_checks(page, mock)
             wake_checks(page, mock)
             approval_checks(page, mock)
+            approval_summary_checks(page, mock)
             task_checks(page, mock)
             file_checks(page, mock)
             diff_checks(page, mock)

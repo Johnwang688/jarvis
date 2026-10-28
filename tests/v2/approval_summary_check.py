@@ -266,6 +266,10 @@ class Comes(unittest.TestCase):
         self.assertTrue(out.startswith("Deletes build/ and deploys to prod"), out)
         self.assertTrue(out.endswith("…"))
 
+    def test_globs_and_dunders_survive(self):
+        self.assertEqual(S.clean_summary("Deletes *.pyc files and __pycache__ in calc"),
+                         "Deletes *.pyc files and __pycache__ in calc")
+
     def test_markup_reaches_the_card_only_as_text(self):
         out = S.clean_summary('<img src=x onerror="alert(1)"> writes the DB')
         self.assertIn("<img", out, "plain text; the surfaces draw it with textContent")
