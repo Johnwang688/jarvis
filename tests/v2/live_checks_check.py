@@ -391,6 +391,11 @@ class Store(unittest.TestCase):
             self.store.mark(record["id"], 2, "pass", "", sha=None)
         with self.assertRaises(ValueError):
             self.store.mark(record["id"], 0, "maybe", "", sha=None)
+        # An id not of the store's shape never names a file, even beside one.
+        (self.store.dir.parent / f"{record['id']}.json").write_text(json.dumps(self.store.get(record["id"])))
+        for bad in (f"../{record['id']}", f"{record['id']}/", record["id"].upper()):
+            with self.subTest(bad=bad), self.assertRaises(LookupError):
+                self.store.mark(bad, 0, "pass", "", sha=None)
 
     def test_the_store_is_bounded_dropping_done_first(self):
         with patch.object(checks, "KEEP", 3):
