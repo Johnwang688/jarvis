@@ -110,7 +110,7 @@ navigation and cleanup: Browser note and HTTP-auth plan.
 ## Inbox
 
 `/inbox` is owner-only; agents only `owner_post`, never read, answer, mark,
-grant. Marks hide ranks 5–8. Quiet hours defer.
+grant. Marks hide ranks 5–8. Night asks → MR.
 [Design](docs/plans/2026-10-24-owner-inbox-design.md); rules: control-plane notes.
 
 ## Safety design (deliberate, do not loosen without asking)

@@ -1,7 +1,7 @@
 # Plan: the morning review (MR)
 
 **Status (2026-10-28): plan by the lead; owner answered its four questions the
-same day; nothing built.** Builds on the quiet-hours deferral (QH, PR #326,
+same day; built (MR-A, MR-B), see "MR as built" below.** Builds on the quiet-hours deferral (QH, PR #326,
 merged, `docs/plans/2026-10-28-quiet-hours-deferral.md` and its "QH as
 built"), the owner inbox (`2026-10-24-owner-inbox-design.md`) and the phone
 surface (`2026-10-24-phone-surface-design.md`, §7, §10.4–§10.8).
@@ -229,3 +229,71 @@ the selection with Cancel focused and Enter cancels; inert under a live card;
 
 Order: MR-A (route contract frozen in its first commit) then MR-B. Independent
 review of each before merging.
+
+## MR as built (2026-10-28)
+
+Module `jarvis/v2/review.py` (SELF_PROTECTED); the route contract is its
+docstring, frozen in MR-A's first commit. Rules in one place:
+`docs/notes/control-plane.md`, "The morning review".
+
+- **MR-1.** `quiet.window_bounds` (pure) and `QuietHours.last_window(now)`
+  (the setting in force; None when off). "Still waiting from before" holds
+  every rank 1 to 4 row not asked in the night, including one asked since
+  07:00 this morning (so with quiet hours off it is the whole list, under
+  "Quiet hours are off"). For your information counts the night's rank-8
+  rows other than done checks. A row hidden by a mark (a snoozed or
+  dismissed decision) is not in the review.
+- **MR-2.** The daemon sends flat items with a `place` key (`chat:<id>`,
+  `task:<id>`) and `places`/`projects` maps; the grouping, chips and summary
+  line are `hud/src/lib/review.ts`, shared by both surfaces. A place's title
+  (the chat's title, the task's brief) is untrusted text, drawn as text and
+  never upper-cased.
+- **MR-3.** As planned; the phone's scrub applies (`remote_api.inbox_row`), and
+  a card it would change is `why: "withheld"`, never ticked for Approve there
+  (it may still be ticked for Leave).
+- **MR-4.** As planned. Selection lives in the view's own state: empty when
+  the view (or the app) opens; a re-read unticks what left the report.
+- **MR-5.** As planned. Proposals take Withdraw (the phone asks once first);
+  blocked tasks link to the task. An answered row stays as a one-line
+  receipt where it stood until the view closes.
+- **MR-6.** `item_tag` = HMAC-SHA256 under a module key made at import (one
+  per daemon process) of `"mr-v1"`, the deferral id, its digest and the
+  SHA-256 of its card's canonical JSON, NUL-delimited. Items carry row ids
+  (`defer:<id>`). `remote_answer.defer_binding` takes one id only.
+- **MR-7.** `quiet_defer.approve_many` → `DeferredStore.settle_many` (one
+  `_change`; `GroupChanged` collects every refusal and nothing is written).
+  Reasons: `gone`, `answered`, `not-grantable`, `hud-only`, `expired`,
+  `changed`, `task-running`, `chat-closed`, `no-chat`, `withheld`. One
+  message per chat (`group_message`; a single item gets QH's own
+  `retry_message`), one resume per task.
+- **MR-8.** As planned (10, 25, 60). A 400 for anything else in the body.
+- **MR-10.** The HUD view is a pane view, `review` (`lib/workspace.ts`),
+  opened by the sidebar's "Morning review" row under the Inbox (absent when
+  the daemon has no review). The confirmation is in-pane; Enter and Escape
+  cancel whatever has focus in it, so Approve is a click (or Space).
+- **MR-11.** The phone's report carries `group: {ok, why}` from §4.1's last
+  view, for display only; the options and the answer each run §4.1 in full.
+  A verified group answer stamps presence before §4.1, as the per-row one.
+- **MR-12.** `Push.review_opens()`; the flag is set by a successful push that
+  was due because quiet hours ended, cleared by any later successful push
+  (the desk's test push included) and lost on restart. The app reads `GET
+  /m/api/review` at launch and on the service worker's `open-inbox`
+  message; `sw.ts` is unchanged. The Review tab shows while `open > 0` and
+  it is not quiet now.
+
+Tests: `tests/v2/review_check.py` (34), `hud/src/lib/review.test.ts`,
+`hud/src/mobile/review.test.ts`, `tests/face/hud_v2_review_check.py` (21),
+`tests/face/hud_v2_phone_review_check.py` (19, a mock mobile server and a
+fake WebAuthn). Mutants, each caught: subject from ids only
+(`test_subject`, `test_set_a_assertion_is_refused_for_set_b`); per-id settles
+(8 tests); no second check after the assertion (5); the 10-item cap removed
+(3); a limited phone allowed a group (the five §4.1 tests); a message per
+record (2); an approvable item whose chat is closed (2); a box pre-ticked
+after a read (vitest 3, both browser checks) and a tap that ticks every
+item (vitest 3, both browser checks).
+
+Not done: no end-to-end browser check against a real daemon's remote
+listener (the phone check uses a mock server, as the plan says); the
+passkey flow against a real authenticator is covered by
+`review_check.py`'s software authenticator.
+

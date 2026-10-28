@@ -338,7 +338,7 @@ path, each step the owner's call:
 
 | Rule | How the phone keeps it |
 |---|---|
-| Approvals are the owner's, deliberately | PH-4: a user-verified assertion (Face ID or passcode) bound to each Allow and each Always; no bulk Allow; Always shows its rule first |
+| Approvals are the owner's, deliberately | PH-4: a user-verified assertion (Face ID or passcode) bound to each Allow and each Always; no bulk Allow (one recorded exception, §10.9: the morning review's Approve selected for deferred rows, ≤10, one assertion bound to exactly that set, all §4.1 checks, all or nothing); Always shows its rule first |
 | HUD-only cards answered only by a verified owner surface | `owner_verified` set only by the HUD route and by the phone under §4.1 with a fresh assertion (PH-7, O-3); private detail never in push, logs or the stream |
 | No tool reaches owner routes | remote routes need a session no agent holds; `rules.py` DENY for 8408; nothing in the session MCP catalog |
 | Credentials never leave the daemon | VAPID private key and WebAuthn data are protected paths; push payloads are content-free; logs carry status codes only |
@@ -829,3 +829,28 @@ assertion (bound to `defer:<id>`, verified before anything is written),
 then §4.1 in full and the Allow's gate. No push is sent for a deferral
 during quiet hours (P-6's rule); a rank-4 deferred row counts toward the
 one push when they end.
+
+### 10.9 MR as built (2026-10-28, the morning review)
+
+The plan, the owner's words and four answers, and the as-built notes:
+`docs/plans/2026-10-28-morning-review.md`; the rules,
+`docs/notes/control-plane.md`, "The morning review". On the phone: a
+Review tab beside the Inbox while the review has open items and the next
+night has not begun (`hud/src/mobile/review.ts`). A launch, or a
+notification's tap on an open app, reads `GET /m/api/review` and opens the
+Review tab when `opens_here` (the last push was the 07:00 one, in the
+daemon's memory), else the Inbox; the push payload and `sw.ts` are
+unchanged. The tab: a summary line, one jump chip per chat, groups by
+project then chat or task, each deferred card whole with a checkbox
+(unticked until its own tap, no select-all), questions and decisions
+answered in place (a decision's default marked, never chosen), and a
+sticky footer with Leave selected (N) at the left and Approve selected (N)
+at the right. Approve selected first lists exactly the ticked items, then
+asks `POST /m/api/review/approve/options` for one challenge bound to
+`review.subject` of those ids and tags, then Face ID once, then `POST
+/m/api/review/approve` with the same items and the assertion. The daemon
+verifies the assertion, runs §4.1 in full (a limited phone gets no group
+approval: per row only), checks the set again under the store's lock, and
+grants all or none; a 409 `changed` unticks what changed and says why.
+Leave selected needs the session only. Every tap target is at least 44 px.
+
