@@ -20,11 +20,13 @@ the owner's tap (P-5). Speech never authorizes (CLAUDE.md, Safety design:
 question or a decision (P-7's acceptance): the phone offers the mic only in
 a chat's message box, never on an inbox row, a card or a question.
 
-**The desk's path, exactly.** The clip goes through `hud_api.dictate`, the
-function the desk's `POST /stt` calls: speaker verification first (V12,
-fixed sentences, nothing transcribed for a voice that is not the owner's),
-then `voice.stt_result(prefer_local=True)` under the owner's switches
-(`stt_settings`). When the desk is set to local with the cloud fallback
+**The desk's path.** The clip goes through `hud_api.dictate`, the function
+the desk's `POST /stt` calls (after `hud_api.watch_stt`, as the desk does):
+`voice.stt_result(prefer_local=True)` under the owner's switches
+(`stt_settings`). **Without speaker verification** (the owner's decision,
+2026-10-28): only a passkey-verified phone session can upload, and the
+phone's microphone would often refuse the owner's own voice; `verify=False`
+reads no voiceprint and records no verdict. The desk keeps it. When the desk is set to local with the cloud fallback
 off, the phone's audio never leaves the machine either; when the local
 engine cannot take a clip and the fallback is off, the reply says so (the
 desk's 409 or 502 and its sentence) and nothing is uploaded. No setting
@@ -78,13 +80,20 @@ HEADER = 44
 # The body this one route may carry: a full MAX_S clip, its header and a
 # little room. The listener applies it only past the owner test.
 BODY_CAP = HEADER + RATE_HZ * 2 * MAX_S + 4096
+# The whole body's deadline grows with the size the request declares, so a
+# minute's clip (about 1.9 MB) needs about 0.23 Mbit/s, not 0.5: 30 s plus 2 s
+# per 100 KB, at most 120 s (`body_deadline`). Only past the owner test.
 BODY_DEADLINE_S = 30.0
+DEADLINE_PER_100KB_S = 2.0
+BODY_DEADLINE_MAX_S = 120.0
 # The server's whole budget for one clip (the desk's client sends its own).
 BUDGET_S = 30.0
 RATE = 12
 RATE_S = 60.0
 TEXT_CHARS = 20000          # remote_write.MESSAGE_CHARS: the box takes no more
 RATE_WORD = "too many clips from this phone; wait a minute"
+# Retry-After for a clip refused because another from the session is in flight.
+BUSY_RETRY_S = 2
 BUSY_WORD = "a clip from this phone is still being transcribed"
 TYPE_WORD = "only a 16 kHz mono WAV clip is taken"
 BAD_WORD = "the clip is not a 16 kHz mono 16-bit WAV"
@@ -92,6 +101,14 @@ EMPTY_WORD = "the clip is empty"
 LONG_WORD = f"the clip is longer than {MAX_S} seconds"
 
 clock = time.monotonic
+
+
+def body_deadline(declared: int | None) -> float:
+    """The body deadline for a clip of `declared` bytes (None: chunked, no size
+    declared, so the most)."""
+    if declared is None:
+        return BODY_DEADLINE_MAX_S
+    return min(BODY_DEADLINE_MAX_S, BODY_DEADLINE_S + DEADLINE_PER_100KB_S * max(0, declared) / 100_000)
 
 
 class _Refused(Exception):
@@ -181,10 +198,11 @@ def transcribe(daemon, data: bytes) -> str:
     """The desk's dictation (`hud_api.dictate`) for one checked clip: its
     text, or `_Refused` with the desk's status and sentence."""
     from .daemon import APIError
-    from .hud_api import dictate
+    from .hud_api import dictate, watch_stt
     from .remote_api import _scrub
+    watch_stt(daemon)
     try:
-        _kind, got = dictate(daemon, data, MIME, budget=BUDGET_S)
+        _kind, got = dictate(daemon, data, MIME, budget=BUDGET_S, verify=False)
     except APIError as exc:
         raise _Refused(exc.status if 400 <= exc.status < 600 else 502, _scrub(str(exc))[:300]) from None
     if got is None:                       # too little speech to judge: nothing was transcribed
@@ -210,7 +228,8 @@ def route(handler, path: str, session: dict, body: bytes):
     limits = limits_of(handler.server)
     refused = limits.take(digest)
     if refused is not None:
-        return 429, {"error": refused}, [("Retry-After", str(int(RATE_S)))]
+        wait = BUSY_RETRY_S if refused == BUSY_WORD else int(RATE_S)
+        return 429, {"error": refused}, [("Retry-After", str(wait))]
     try:
         check_wav(body)
         text = transcribe(daemon, body)

@@ -17,9 +17,12 @@ What it pins (the package's acceptance items):
     1 sample to 60 s (400 otherwise), at most `BODY_CAP` (413); a clip larger
     than the listener's usual 64 KiB is read only for a signed-in request;
   - the session's rate (12 a minute) and one clip at a time (429);
-  - the desk's own path: speaker verification first, then the owner's
-    switches; local-only never calls the cloud, and a missing local engine
-    with the fallback off is a refusal that uploads nothing;
+  - the desk's own path, the owner's switches: local-only never calls the
+    cloud, and a missing local engine with the fallback off is a refusal
+    that uploads nothing;
+  - no speaker verification on the phone (the owner, 2026-10-28): an
+    enrolled, non-matching voiceprint still transcribes there, and the desk
+    still refuses it (422);
   - the reply is `{text}` only; the words are never sent, delivered or
     taken as an answer (an "allow" spoken leaves the approval pending);
   - nothing of the clip is written to disk, on success or on error;
@@ -260,7 +263,18 @@ class Caps(Base):
             self.clip(small, path="/m/api/login/options")
         default = (remote_listener.BODY_CAP, remote_listener.DRAIN_CAP, remote_listener.BODY_DEADLINE_S)
         self.assertEqual(seen, [default, (remote_stt.BODY_CAP, remote_stt.BODY_CAP + remote_listener.DRAIN_CAP,
-                                          remote_stt.BODY_DEADLINE_S), default])
+                                          remote_stt.body_deadline(len(small))), default])
+        # Review LOW: the deadline grows with the declared size (30 s + 2 s per 100 KB, at most 120 s), so a
+        # minute's clip needs about 0.23 Mbit/s; chunked (no size declared) gets the most. Still only past
+        # the owner test (above: no session, the usual 10 s).
+        self.assertEqual((remote_stt.BODY_DEADLINE_S, remote_stt.DEADLINE_PER_100KB_S, remote_stt.BODY_DEADLINE_MAX_S),
+                         (30.0, 2.0, 120.0))
+        self.assertAlmostEqual(remote_stt.body_deadline(len(full)), 30 + 2 * len(full) / 100_000)
+        self.assertGreater(remote_stt.body_deadline(len(full)), 65)
+        self.assertLess(len(full) * 8 / remote_stt.body_deadline(len(full)) / 1e6, 0.25)
+        self.assertEqual(remote_stt.body_deadline(10 ** 9), 120.0)
+        self.assertEqual(remote_stt.body_deadline(None), 120.0)
+        self.assertEqual(remote_stt.body_deadline(0), 30.0)
         self.assertEqual(len(self.backend.calls), calls + 1)
         print("ok  caps: a minute's clip read whole only past the owner test; 413 past it; 64 KiB for everyone else")
 
@@ -270,7 +284,10 @@ class Caps(Base):
         data = wav(0.5)
         for _ in range(remote_stt.RATE):
             self.assertEqual(self.clip(data)[0], 200)
-        self.assertEqual(self.clip(data), (429, {"error": remote_stt.RATE_WORD}))
+        limited, headers, said = rac.raw(self.port, "POST", remote_stt.PATH,
+                                         [("Host", HOST), ("Origin", ORIGIN), ("Cookie", self.cookie),
+                                          ("Content-Type", "audio/wav")], data)
+        self.assertEqual((limited, json.loads(said), headers["Retry-After"]), (429, {"error": remote_stt.RATE_WORD}, "60"))
         self.rate_clock.now += remote_stt.RATE_S
         self.assertEqual(self.clip(data)[0], 200)
         # A refused clip still counts (the rate is on uploads, not successes).
@@ -286,7 +303,11 @@ class Caps(Base):
         first = threading.Thread(target=lambda: out.setdefault("first", self.clip(data)), daemon=True)
         first.start()
         rnc.eventually(lambda: len(self.backend.calls) >= 1 + remote_stt.RATE + 1, what="the first decode")
-        self.assertEqual(self.clip(data), (429, {"error": remote_stt.BUSY_WORD}))
+        busy, headers, said = rac.raw(self.port, "POST", remote_stt.PATH,
+                                      [("Host", HOST), ("Origin", ORIGIN), ("Cookie", self.cookie),
+                                       ("Content-Type", "audio/wav")], data)
+        self.assertEqual((busy, json.loads(said)), (429, {"error": remote_stt.BUSY_WORD}))
+        self.assertEqual(headers["Retry-After"], "2")
         gate.set()
         first.join(10)
         self.assertEqual(out["first"], (200, {"text": WORDS}))
@@ -342,28 +363,45 @@ class DeskPath(Base):
         calls = []
         real = hud_api.dictate
 
-        def spy(daemon, data, mime, *, budget):
-            calls.append((daemon, len(data), mime, budget))
-            return real(daemon, data, mime, budget=budget)
+        def spy(daemon, data, mime, *, budget, verify=True):
+            calls.append((daemon, len(data), mime, budget, verify))
+            return real(daemon, data, mime, budget=budget, verify=verify)
         with patch.object(hud_api, "dictate", spy):
             self.clip(wav(0.5))
-        self.assertEqual(calls, [(self.d, len(wav(0.5)), "audio/wav", remote_stt.BUDGET_S)])
+        self.assertEqual(calls, [(self.d, len(wav(0.5)), "audio/wav", remote_stt.BUDGET_S, False)])
         print("ok  the desk's switches decide: the cloud only when they allow it, through hud_api.dictate")
 
-    def test_speaker_verification_first_and_text_only(self):
-        with patch.object(speaker, "verify", side_effect=speaker.NotOwner("not the enrolled speaker")):
-            self.assertEqual(self.clip(), (422, {"error": "not the enrolled speaker"}))
-        with patch.object(speaker, "verify", side_effect=speaker.VerifyUnavailable("speaker verification is not set up: x")):
-            self.assertEqual(self.clip(), (503, {"error": "speaker verification is not set up: x"}))
-        self.assertEqual(self.backend.calls, [])
-        with patch.object(speaker, "verify", return_value="no_speech"):
-            self.assertEqual(self.clip(), (200, {"text": ""}))
-        self.assertEqual(self.backend.calls, [])
-        with patch.object(speaker, "verify", return_value="matched"):
+    def test_no_speaker_verification_on_the_phone_and_text_only(self):
+        """The owner's decision (2026-10-28): the phone skips speaker verification; the desk keeps it."""
+        refused = []
+
+        def not_the_owner(data, mime="audio/wav"):
+            # What `speaker.verify` says for an enrolled voiceprint that does not match this voice.
+            refused.append(len(data))
+            speaker._remember("rejected", 0.1)
+            raise speaker.NotOwner("not the enrolled speaker")
+        last = dict(speaker._last)
+        self.assertFalse(getattr(self.d, "_stt_watching", False))
+        with patch.object(speaker, "verify", not_the_owner):
             status, body = self.clip()
-        self.assertEqual((status, set(body)), (200, {"text"}))
+            self.assertEqual((status, body), (200, {"text": WORDS}))
+            self.assertEqual(refused, [], "the phone asked whose voice it was")
+            self.assertEqual(speaker._last, last, "the phone recorded a speaker verdict")
+            # The desk's settings watcher is armed by the phone's clip, as by the desk's (before the desk runs).
+            self.assertTrue(getattr(self.d, "_stt_watching", False))
+            # The desk, the same clip, the same voiceprint: still refused before anything is transcribed.
+            calls = len(self.backend.calls)
+            host = f"127.0.0.1:{self.d.face_port}"
+            desk, _, said = rac.raw(self.d.face_port, "POST", "/stt",
+                                    [("Host", host), ("Origin", f"http://{host}"), ("Content-Type", "audio/wav")],
+                                    wav(), timeout=30)
+        self.assertEqual(desk, 422, said)
+        self.assertEqual(json.loads(said)["error"], "not the enrolled speaker")
+        self.assertEqual(len(refused), 1)
+        self.assertEqual(len(self.backend.calls), calls)
+        self.assertEqual(set(body), {"text"})
         self.assertEqual(self.cloud.calls, [])
-        print("ok  speaker verification first (422/503, nothing transcribed); the reply is {text} only")
+        print("ok  the phone transcribes without speaker verification (no verdict kept); the desk still refuses 422")
 
 
 class NeverSends(Base):
@@ -419,8 +457,7 @@ class NothingKept(Base):
             self.backend.error = RuntimeError("decode failed " + WORDS)
             self.assertEqual(self.clip(data)[0], 502)
             self.backend.error = None
-            with patch.object(speaker, "verify", side_effect=speaker.NotOwner("not the enrolled speaker")):
-                self.assertEqual(self.clip(data)[0], 422)
+            self.assertEqual(self.clip(data[:300])[0], 400)
             self.assertEqual(self.clip(data[:300])[0], 400)
         finally:
             root.removeHandler(keep)

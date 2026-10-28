@@ -19,8 +19,8 @@
 //   - **The desk's clip format.** Web Audio, resampled to 16 kHz mono
 //     (lib/resample.ts, the desk's resampler) and written as 16-bit PCM WAV
 //     (lib/vad.ts `wavBytes`, the desk's writer), so the desk's local
-//     engine and speaker verification take it. Not MediaRecorder: Safari's
-//     writes `audio/mp4` (AAC), which neither takes. The ScriptProcessor
+//     engine takes it. Not MediaRecorder: Safari's writes `audio/mp4`
+//     (AAC), which it does not take. The ScriptProcessor
 //     path is used, not the desk's AudioWorklet: the worklet is a separate
 //     file the remote listener does not serve (it serves only what the
 //     build manifest lists for the phone page), and the phone's CSP is not
@@ -59,6 +59,9 @@ export const WORDS = {
   early: "Released before the mic opened: hold the button while you speak.",
   cancelled: "Cancelled: nothing was recorded.",
   offline: "Offline: the clip was not sent.",
+  slow: "The upload took too long: the clip was not transcribed.",
+  retryHint: "Tap Retry to send it once more.",
+  dropped: "The clip was dropped.",
   denied: "Microphone permission denied. Allow the microphone for Jarvis in the iPhone's Settings, then hold again.",
   noMic: "No microphone was found.",
   noRecording: "This browser cannot record here.",
@@ -98,6 +101,8 @@ export interface TalkEnv {
 export interface TalkHooks {
   /** The words for this chat's box: inserted, never sent. */
   insert: (threadId: string, text: string) => void;
+  /** A send from this chat's box is on its way: no recording starts until it has its answer. */
+  busy?: (threadId: string) => boolean;
   /** A 401 came back: the app checks the session. */
   unauthorized: () => void;
   online: () => boolean;
@@ -137,9 +142,17 @@ export const browserTalkEnv: TalkEnv = {
 };
 
 /** What a refused or failed upload says. */
+/** The upload never reached the transcription (no connection, the proxy with nothing behind it, the
+ * listener's body deadline): the same clip may be sent once more. */
+export function networkFailure(r: Uploaded): boolean {
+  const word = typeof r.body.error === "string" && r.body.error.trim() !== "";
+  return !!r.offline || r.status === 0 || r.status === 408 || (!word && [502, 503, 504].includes(r.status));
+}
+
 export function uploadNote(r: Uploaded): string {
   const word = typeof r.body.error === "string" ? r.body.error.replace(/\s+/g, " ").trim().slice(0, 300) : "";
   if (r.offline || r.status === 0) return WORDS.offline;
+  if (r.status === 408) return WORDS.slow;
   if (!word && (r.status === 502 || r.status === 503 || r.status === 504)) return WORDS.offline;
   const sentence = word ? word[0].toUpperCase() + word.slice(1) : `Not transcribed (${r.status})`;
   if (r.status === 429 || r.status === 422 || r.status === 415 || r.status === 400 || r.status === 413) {
@@ -177,6 +190,12 @@ export class Talk {
   readonly el: HTMLElement;
   readonly button: HTMLButtonElement;
   private readonly line: HTMLElement;
+  /** One more try of the last clip, after a network failure (`networkFailure`); kept for one Retry only. */
+  readonly retryButton: HTMLButtonElement;
+  retry: { wav: Blob; threadId: string; limit: boolean } | null = null;
+  /** The chat whose box shows the button now, and the chat the last note is about. */
+  private shown: string | null = null;
+  private noteThread: string | null = null;
   private gen = 0;
   private rec: Recording | null = null;
   private detach: (() => void) | null = null;
@@ -193,7 +212,13 @@ export class Talk {
     this.line.className = "m-notice m-talk-line";
     this.line.dataset.testid = "m-talk-line";
     this.line.setAttribute("role", "status");
-    this.el.append(this.button, this.line);
+    this.retryButton = document.createElement("button");
+    this.retryButton.type = "button";
+    this.retryButton.className = "tap quiet m-mic-retry";
+    this.retryButton.dataset.testid = "m-mic-retry";
+    this.retryButton.textContent = "Retry";
+    this.retryButton.addEventListener("click", () => void this.retryNow());
+    this.el.append(this.button, this.retryButton, this.line);
     this.bind();
     this.draw();
   }
@@ -201,10 +226,8 @@ export class Talk {
   /** The button and its line, for `threadId`'s box. The same node every time, so a redraw of the box
    * during a press never takes the button from under the finger. */
   view(threadId: string): HTMLElement {
-    if (this.phase === "idle") {
-      if (this.threadId !== threadId) this.note = "";
-      this.threadId = threadId;
-    }
+    this.shown = threadId;
+    if (this.phase === "idle") this.threadId = threadId;
     this.draw();
     return this.el;
   }
@@ -212,11 +235,12 @@ export class Talk {
   /** The owner pressed: open the mic, inside the gesture. */
   press(): void {
     const threadId = this.threadId;
-    if (this.phase !== "idle" || !threadId) return;
-    if (!this.hooks.online()) { this.note = WORDS.offline; this.draw(); return; }
+    if (this.phase !== "idle" || !threadId || this.busy(threadId)) return;
+    if (!this.hooks.online()) { this.say(WORDS.offline, threadId); return; }
     const media = this.env.media();
     const ctx = media ? this.env.context() : null;
-    if (!media || !ctx) { this.note = WORDS.noRecording; this.draw(); return; }
+    if (!media || !ctx) { this.say(WORDS.noRecording, threadId); return; }
+    this.retry = null;              // a new clip replaces one waiting for Retry
     const gen = ++this.gen;
     // Created and resumed in the gesture: iOS starts a context made later suspended.
     try { void ctx.resume?.()?.catch?.(() => {}); } catch { /* already running */ }
@@ -279,6 +303,7 @@ export class Talk {
     this.close();
     this.phase = "idle";
     this.note = note;
+    this.noteThread = this.threadId;
     this.draw();
   }
 
@@ -303,6 +328,7 @@ export class Talk {
     this.close();
     this.phase = "idle";
     this.note = WORDS.cancelled;
+    this.noteThread = this.threadId;
     this.draw();
   }
 
@@ -312,6 +338,7 @@ export class Talk {
       this.close();
       this.phase = "idle";
       this.note = WORDS.early;
+      this.noteThread = this.threadId;
       this.draw();
       return;
     }
@@ -322,6 +349,7 @@ export class Talk {
     if (ms < MIN_MS) {
       this.phase = "idle";
       this.note = WORDS.short;
+      this.noteThread = this.threadId;
       this.draw();
       return;
     }
@@ -330,29 +358,58 @@ export class Talk {
     for (const frame of rec.frames) { samples.set(frame, at); at += frame.length; }
     rec.frames = [];
     const wav = new Blob([wavBytes(samples, RATE)], { type: "audio/wav" });
+    await this.upload(wav, rec.threadId, limit, false);
+  }
+
+  /** The clip waiting for Retry, sent once more; whatever comes back, it is then dropped. */
+  async retryNow(): Promise<void> {
+    const r = this.retry;
+    if (!r || this.phase !== "idle" || !this.hooks.online() || this.busy(r.threadId)) return;
+    this.retry = null;
+    await this.upload(r.wav, r.threadId, r.limit, true);
+  }
+
+  /** Forget a clip waiting for Retry (the app stopped). */
+  dropRetry(): void {
+    this.retry = null;
+    this.draw();
+  }
+
+  private async upload(wav: Blob, threadId: string, limit: boolean, retried: boolean): Promise<void> {
     this.phase = "transcribing";
     this.note = "";
     this.draw();
     const got = await this.env.upload(wav);
     this.phase = "idle";
     if (got.status === 401) {
-      this.note = "Not transcribed: signed out.";
-      this.draw();
+      this.say("Not transcribed: signed out.", threadId);
       this.hooks.unauthorized();
       return;
     }
     if (got.status === 200 && typeof got.body.text === "string") {
       const text = got.body.text.trim();
       if (text) {
-        this.hooks.insert(rec.threadId, text);
-        this.note = limit ? WORDS.limit + " " + WORDS.added : WORDS.added;
+        this.hooks.insert(threadId, text);
+        this.say(limit ? WORDS.limit + " " + WORDS.added : WORDS.added, threadId);
       } else {
-        this.note = WORDS.nothing;
+        this.say(WORDS.nothing, threadId);
       }
+    } else if (networkFailure(got) && !retried) {
+      this.retry = { wav, threadId, limit };
+      this.say(uploadNote(got) + " " + WORDS.retryHint, threadId);
     } else {
-      this.note = uploadNote(got);
+      this.say(uploadNote(got) + (networkFailure(got) ? " " + WORDS.dropped : ""), threadId);
     }
+  }
+
+  private say(note: string, threadId: string | null): void {
+    this.note = note;
+    this.noteThread = threadId;
     this.draw();
+  }
+
+  private busy(threadId: string | null): boolean {
+    return !!threadId && !!this.hooks.busy?.(threadId);
   }
 
   private draw(): void {
@@ -361,9 +418,15 @@ export class Talk {
     b.dataset.phase = this.phase;
     b.setAttribute("aria-pressed", String(this.phase === "listening" || this.phase === "starting"));
     b.setAttribute("aria-label", this.phase === "idle" ? "Hold to talk: the words go in the box, unsent" : WORDS[this.phase]);
-    b.disabled = this.phase === "transcribing" || (this.phase === "idle" && !this.hooks.online());
+    b.disabled = this.phase === "transcribing"
+      || (this.phase === "idle" && (!this.hooks.online() || this.busy(this.shown)));
+    const r = this.retry;
+    this.retryButton.hidden = !(r && this.phase === "idle" && r.threadId === this.shown);
+    this.retryButton.disabled = !this.hooks.online() || this.busy(this.shown);
+    // A note is about one chat: shown only in that chat's box.
+    const note = this.noteThread === this.shown ? this.note : "";
     const line = this.phase === "listening" ? WORDS.listeningLine
-      : this.phase === "transcribing" ? WORDS.transcribingLine : this.note;
+      : this.phase === "transcribing" ? WORDS.transcribingLine : note;
     this.line.textContent = line;
     this.line.hidden = !line;
   }

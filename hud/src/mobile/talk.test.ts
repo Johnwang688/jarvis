@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { PhoneApp, type StreamLike } from "./app";
 import type { Got, Posted } from "./net";
-import { MAX_SAMPLES, RATE, STT_URL, Talk, WORDS, uploadNote, type AudioContextLike, type TalkEnv, type Uploaded } from "./talk";
+import { MAX_SAMPLES, RATE, STT_URL, Talk, WORDS, networkFailure, uploadNote, type AudioContextLike, type TalkEnv, type Uploaded } from "./talk";
 import { cardView, parseDetail } from "./card";
 import talkSource from "./talk.ts?raw";
 import { readFileSync } from "node:fs";
@@ -87,7 +87,7 @@ class FakeStream implements StreamLike {
   close() {}
 }
 
-const CHAT = "aaaaaaaa", OTHER = "dddddddd", PROJECT = "cccccccc", TASK = "bbbbbbbb";
+const CHAT = "aaaaaaaa", OTHER = "dddddddd", THIRD = "ffffffff", PROJECT = "cccccccc", TASK = "bbbbbbbb";
 
 function row(over: Record<string, unknown>) {
   return { title: "t", blocks: "b", project_id: null, thread_id: null, task_id: null, asked_at: null,
@@ -255,6 +255,133 @@ describe("push to talk (P-7)", () => {
     expect((h.posts[1].value as { client_id: string }).client_id).not.toBe(first);
   });
 
+  it("review MED: no recording while a send waits; a clip already transcribing keeps its words past the 202", async () => {
+    const h = harness();
+    await openChat(h);
+    h.box().value = "first part";
+    h.box().dispatchEvent(new Event("input"));
+    let sent!: (p: Posted) => void;
+    h.replies.push(new Promise<Posted>((r) => { sent = r; }) as unknown as Posted);
+    (h.q("m-compose-send") as HTMLButtonElement).click();
+    await h.settle();
+    // While the send is on its way the mic is off, and a press asks for nothing.
+    expect(h.button().disabled).toBe(true);
+    await h.down();
+    expect(h.mic.getUserMedia).not.toHaveBeenCalled();
+    await h.up();
+    sent({ status: 202, body: { status: "started" } });
+    await h.settle();
+    expect(h.box().value).toBe("");
+    expect(h.button().disabled).toBe(false);
+    // A clip that was already transcribing when Send was tapped: its words survive the 202.
+    h.box().value = "second part";
+    h.box().dispatchEvent(new Event("input"));
+    let heard!: (u: Uploaded) => void;
+    h.mic.reply(() => new Promise<Uploaded>((r) => { heard = r; }));
+    await h.down();
+    h.mic.ctx().feed(0.5);
+    await h.up();
+    h.replies.push(new Promise<Posted>((r) => { sent = r; }) as unknown as Posted);
+    (h.q("m-compose-send") as HTMLButtonElement).click();
+    await h.settle();
+    heard({ status: 200, body: { text: "and the dictated words" } });
+    await h.settle();
+    expect(h.app.composeDrafts.get(CHAT)).toBe("second part and the dictated words");
+    sent({ status: 202, body: { status: "started" } });
+    await h.settle();
+    expect(h.box().value).toBe("and the dictated words");
+    expect(h.app.composeDrafts.get(CHAT)).toBe("and the dictated words");
+    expect(h.posts.map((p) => (p.value as { text: string }).text)).toEqual(["first part", "second part"]);
+  });
+
+  it("review LOW: dictating keeps P-5's 'may not have been sent' note", async () => {
+    const h = harness();
+    await openChat(h);
+    h.box().value = "please";
+    h.box().dispatchEvent(new Event("input"));
+    h.replies.push({ status: 502, body: {} });
+    (h.q("m-compose-send") as HTMLButtonElement).click();
+    await h.settle();
+    h.app.setOnline(true);
+    await h.settle();
+    const maybe = h.q("m-compose-note")!.textContent;
+    expect(maybe).toMatch(/may not have been sent/i);
+    await h.down();
+    h.mic.ctx().feed(0.5);
+    await h.up();
+    expect(h.box().value).toBe("please add a test");
+    expect(h.q("m-compose-note")!.textContent).toBe(maybe);
+  });
+
+  it("review LOW: a clip that never arrived is kept for one Retry, then dropped", async () => {
+    const h = harness();
+    await openChat(h);
+    expect(networkFailure({ status: 408, body: { error: "request timeout" } })).toBe(true);
+    expect(networkFailure({ status: 503, body: { error: "speaker verification is not set up" } })).toBe(false);
+    h.mic.reply({ status: 0, body: {}, offline: true });
+    await h.down();
+    h.mic.ctx().feed(0.5);
+    await h.up();
+    const retry = h.q("m-mic-retry") as HTMLButtonElement;
+    expect(retry.hidden).toBe(false);
+    expect(h.line().textContent).toBe(WORDS.offline + " " + WORDS.retryHint);
+    // The second try sends the very same clip, and fails again: the clip is dropped.
+    h.mic.reply({ status: 408, body: { error: "request timeout" } });
+    retry.click();
+    await h.settle();
+    expect(h.mic.uploads.length).toBe(2);
+    expect(h.mic.uploads[1]).toBe(h.mic.uploads[0]);
+    expect(h.app.talk.retry).toBeNull();
+    expect((h.q("m-mic-retry") as HTMLButtonElement).hidden).toBe(true);
+    expect(h.line().textContent).toBe(WORDS.slow + " " + WORDS.dropped);
+    (h.q("m-mic-retry") as HTMLButtonElement).click();
+    await h.settle();
+    expect(h.mic.uploads.length).toBe(2);
+    // A Retry that lands puts the words in the box; a refusal (not a network failure) keeps no clip.
+    h.mic.reply({ status: 0, body: {}, offline: true });
+    await h.down();
+    h.mic.ctx().feed(0.5);
+    await h.up();
+    h.mic.reply({ status: 200, body: { text: "add a test" } });
+    (h.q("m-mic-retry") as HTMLButtonElement).click();
+    await h.settle();
+    expect(h.box().value).toBe("add a test");
+    expect(h.app.talk.retry).toBeNull();
+    h.mic.reply({ status: 409, body: { error: "cloud speech-to-text is switched off" } });
+    await h.down();
+    h.mic.ctx().feed(0.5);
+    await h.up();
+    expect(h.app.talk.retry).toBeNull();
+    expect((h.q("m-mic-retry") as HTMLButtonElement).hidden).toBe(true);
+    expect(h.posts).toEqual([]);
+  });
+
+  it("review NIT: the outcome is shown only in the chat the words went to", async () => {
+    const h = harness();
+    h.gets["/m/api/threads"] = h.ok({ threads: [
+      { id: CHAT, project_id: PROJECT, title: "Fix it", provider: "claude", updated: "2026-10-25T10:00:00Z" },
+      { id: THIRD, project_id: PROJECT, title: "Other", provider: "claude", updated: "2026-10-25T09:00:00Z" }] });
+    h.gets[`/m/api/threads/${THIRD}/log`] = h.ok({ rows: [], next: 0, more: false, older: false,
+      thread: { id: THIRD, project_id: PROJECT, role: "chat", title: "Other", provider: "claude" } });
+    await openChat(h);
+    let heard!: (u: Uploaded) => void;
+    h.mic.reply(() => new Promise<Uploaded>((r) => { heard = r; }));
+    await h.down();
+    h.mic.ctx().feed(0.5);
+    await h.up();
+    await h.app.openThread(THIRD);
+    await h.settle();
+    heard({ status: 200, body: { text: "add a test" } });
+    await h.settle();
+    expect(h.line().textContent).toBe("");
+    expect(h.box().value).toBe("");
+    expect(h.app.composeDrafts.get(CHAT)).toBe("add a test");
+    await h.app.openThread(CHAT);
+    await h.settle();
+    expect(h.line().textContent).toBe(WORDS.added);
+    expect(h.box().value).toBe("add a test");
+  });
+
   it("an empty box takes the words as they are", async () => {
     const h = harness();
     await openChat(h);
@@ -375,8 +502,9 @@ describe("push to talk (P-7)", () => {
 
   it("failures are said plainly: offline, unavailable, refused, nothing heard, signed out", async () => {
     const cases: [Uploaded, string][] = [
-      [{ status: 0, body: {}, offline: true }, WORDS.offline],
-      [{ status: 502, body: {} }, WORDS.offline],
+      [{ status: 0, body: {}, offline: true }, WORDS.offline + " " + WORDS.retryHint],
+      [{ status: 502, body: {} }, WORDS.offline + " " + WORDS.retryHint],
+      [{ status: 408, body: { error: "request timeout" } }, WORDS.slow + " " + WORDS.retryHint],
       [{ status: 409, body: { error: "cloud speech-to-text is switched off in Settings > Voice" } },
         "Speech-to-text is unavailable: cloud speech-to-text is switched off in Settings > Voice."],
       [{ status: 502, body: { error: "speech-to-text unavailable: m (HTTP 500)" } },

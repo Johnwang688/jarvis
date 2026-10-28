@@ -477,12 +477,16 @@ def _limits(handler, path: str) -> tuple[int, int, float]:
     gets BODY_CAP, DRAIN_CAP and BODY_DEADLINE_S, except P-7's clip upload
     (`POST /m/api/stt`, `remote_stt`): a minute of 16 kHz WAV is about
     1.9 MB, so that one path takes `remote_stt.BODY_CAP` within
-    `remote_stt.BODY_DEADLINE_S`, and only once the request already passes
+    `remote_stt.body_deadline` of its declared length (30 s plus 2 s per
+    100 KB, at most 120 s), and only once the request already passes
     the owner test (`remote_auth.owner_status`: this listener, the exact Host
     and Origin, a live session). A client without a session never makes this
     listener read more than it reads for any other request."""
     if handler.command == "POST" and path == remote_stt.PATH and remote_auth.owner_status(handler)[0] == 200:
-        return remote_stt.BODY_CAP, remote_stt.BODY_CAP + DRAIN_CAP, remote_stt.BODY_DEADLINE_S
+        lengths = _header(handler.headers, "Content-Length") or []
+        declared = int(lengths[0].strip()) if (len(lengths) == 1 and lengths[0].strip().isdigit()
+                                               and len(lengths[0].strip()) <= 12) else None
+        return remote_stt.BODY_CAP, remote_stt.BODY_CAP + DRAIN_CAP, remote_stt.body_deadline(declared)
     return BODY_CAP, DRAIN_CAP, BODY_DEADLINE_S
 
 

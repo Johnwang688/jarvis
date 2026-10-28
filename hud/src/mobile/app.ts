@@ -191,6 +191,8 @@ export class PhoneApp {
     this.frame = frame;
     this.talk = new Talk(deps.talkEnv ?? browserTalkEnv, {
       insert: (threadId, text) => this.dictated(threadId, text),
+      // No recording while this chat's send waits for its answer (its 202 would clear the box).
+      busy: (threadId) => this.sending.has(threadId),
       unauthorized: () => void this.recheckSession(),
       online: () => this.online,
     });
@@ -210,6 +212,7 @@ export class PhoneApp {
   stop(): void {
     this.stopped = true;
     this.talk.hidden();
+    this.talk.dropRetry();
     this.stream?.close();
     this.stream = null;
   }
@@ -507,6 +510,8 @@ export class PhoneApp {
     if (this.sending.has(threadId) || !this.online) return;
     this.sending.add(threadId);
     this.composeNotes.delete(threadId);
+    // The box as it was sent: a clip transcribed while the send was on its way adds after it (P-7).
+    const sentDraft = this.composeDrafts.get(threadId) ?? text;
     this.renderComposer();
     const key = "msg:" + threadId;
     const result = await this.write(`/m/api/threads/${threadId}/messages`,
@@ -519,7 +524,11 @@ export class PhoneApp {
       this.composeNotes.set(threadId, MAYBE_SENT);
     } else if (result.status === 202) {
       this.clientIds.delete(key);
-      this.composeDrafts.delete(threadId);
+      // Only what was sent leaves the box: words added since (a clip that was already transcribing) stay.
+      const now = this.composeDrafts.get(threadId) ?? "";
+      const rest = now !== sentDraft && now.startsWith(sentDraft) ? now.slice(sentDraft.length).replace(/^\s+/, "") : "";
+      if (rest) this.composeDrafts.set(threadId, rest);
+      else this.composeDrafts.delete(threadId);
       this.composeNotes.set(threadId, sentNote(result.body));
       if (this.thread?.id === threadId) void this.moreLog();
     } else {
@@ -562,7 +571,8 @@ export class PhoneApp {
     const draft = shown ? shown.value : (this.composeDrafts.get(threadId) ?? "");
     const joined = draft && !/\s$/.test(draft) ? `${draft} ${text}` : draft + text;
     this.composeDrafts.set(threadId, joined.slice(0, MESSAGE_CHARS));
-    this.composeNotes.delete(threadId);
+    // "May not have been sent" stays: it is about the words already in the box.
+    if (this.composeNotes.get(threadId) !== MAYBE_SENT) this.composeNotes.delete(threadId);
     this.renderComposer(true);
   }
 

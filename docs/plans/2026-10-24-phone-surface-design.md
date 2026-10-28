@@ -637,19 +637,26 @@ the phone"). Where it is more specific than the text above:
   rule). The API and HUD listeners never serve `/m/`. The reply is
   `{text}` and nothing else.
 - **It is the desk's path, through one function.** The desk's `POST /stt`
-  now calls `hud_api.dictate`, and so does the phone: speaker verification
-  first (V12: 422 for another voice, nothing transcribed), then
-  `voice.stt_result(prefer_local=True)` under the owner's switches
-  (`stt_settings`). Local only stays local: with the cloud fallback off,
-  the phone's clip never leaves the machine, and a local failure is the
-  desk's refusal ("… so nothing was uploaded"), never a quiet cloud call.
-  The desk's statuses and sentences come back as they are (409 blocked,
-  502 unavailable, 415, 422, 503). The phone sets nothing.
+  now calls `hud_api.dictate`, and so does the phone (after
+  `hud_api.watch_stt`, as the desk): `voice.stt_result(prefer_local=True)`
+  under the owner's switches (`stt_settings`). Local only stays local: with
+  the cloud fallback off, the phone's clip never leaves the machine, and a
+  local failure is the desk's refusal ("… so nothing was uploaded"), never
+  a quiet cloud call. The desk's statuses and sentences come back as they
+  are (409 blocked, 502 unavailable). The phone sets nothing.
+- **No speaker verification on the phone (owner, 2026-10-28).** Only a
+  passkey-verified phone session can upload, and the phone's microphone
+  would often refuse the owner's own voice. The phone calls `dictate` with
+  `verify=False`: no voiceprint is read and no verdict is remembered
+  (`speaker._remember`). The desk keeps verification exactly as before
+  (422 for another voice, nothing transcribed). Asserted both ways: an
+  enrolled, non-matching voiceprint, the phone's clip transcribed and the
+  same clip at the desk refused.
 - **The clip is WAV, built on the phone, not MediaRecorder's file
   (a change from the P-7 brief).** Safari's MediaRecorder on the iPhone
   writes `audio/mp4` (AAC). The desk's local engine takes 16-bit PCM WAV
   only and runs no media decoder on uploaded bytes by design
-  (`stt_local`), and speaker verification takes WAV only, so an AAC clip
+  (`stt_local`), and the desk's speaker verification takes WAV only, so an AAC clip
   could only ever have gone to the cloud, or been refused with the desk set
   to local. So the phone records with Web Audio (`getUserMedia`, a
   ScriptProcessor, the desk's resampler `lib/resample.ts`) and writes the
@@ -664,11 +671,14 @@ the phone"). Where it is more specific than the text above:
   `blob:` module would need a wider CSP. ScriptProcessor is deprecated but
   present in Safari.
 - **Caps.** A clip is at most 60 s (`MAX_S`); the listener reads up to
-  `remote_stt.BODY_CAP` (a minute of WAV plus a little, about 1.9 MB) within
-  30 s for this one path, and only once the request already passes the
-  owner test (`remote_listener._limits`). Every other request, a clip
-  without a session included, keeps the 64 KiB cap. 12 clips a minute per
-  session and one at a time (429).
+  `remote_stt.BODY_CAP` (a minute of WAV plus a little, about 1.9 MB) for
+  this one path, within a deadline scaled to the declared length (30 s plus
+  2 s per 100 KB, at most 120 s: a full minute needs about 0.23 Mbit/s;
+  review of #327), and only once the request already passes the owner test
+  (`remote_listener._limits`). Every other request, a clip without a
+  session included, keeps the 64 KiB cap and the 10 s deadline. 12 clips a
+  minute per session (429, `Retry-After: 60`) and one at a time (429,
+  `Retry-After: 2`).
 - **Never kept, never logged.** The clip stays in memory: no temp file at
   all (the local engine reads it from memory; the cloud chain posts the
   bytes). INFO lines say only "transcribed" or "refused (status)".
@@ -686,8 +696,14 @@ the phone"). Where it is more specific than the text above:
   24 px off the button, a cancelled pointer, or the app going to the
   background cancels, and nothing is uploaded. Under 0.3 s nothing is sent.
   At 60 s it stops itself and transcribes. Failures say which: permission
-  denied, no microphone, offline, speech-to-text unavailable (the desk's
-  sentence), another voice. Every track is stopped and the audio context
+  denied, no microphone, offline, too slow, speech-to-text unavailable (the
+  desk's sentence). A clip that never arrived (offline, the proxy with
+  nothing behind it, a 408) is kept in memory for one "Retry", then
+  dropped. The outcome line shows only in the chat the words went to. While
+  that chat's send waits for its answer the mic is off, and a 202 removes
+  only the words that were sent, so words a clip added meanwhile stay; P-5's
+  "may not have been sent" note stays when words are added (review of
+  #327). Every track is stopped and the audio context
   closed however the recording ends, a permission that arrives after the
   finger left included, so the iPhone's mic indicator goes out.
 - **A voice note never answers.** The mic is only in an owner's chat's

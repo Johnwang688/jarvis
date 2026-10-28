@@ -3181,8 +3181,11 @@ were each mutated, and the tests failed.
 "Hold to talk", the muted dictation above made physical: what is said lands in
 the box unsent. The clip goes to `POST /m/api/stt` on the remote listener,
 which calls `hud_api.dictate`, the same function as the desk's `POST /stt`
-(speaker verification, then the owner's `stt_settings`; local only stays
-local). The phone writes the desk's 16 kHz PCM WAV with Web Audio, not
-Safari's MediaRecorder `audio/mp4`, so the local engine and speaker
-verification take it without a media decoder. Details: `control-plane.md`,
-"Push to talk from the phone".
+(the owner's `stt_settings`; local only stays local). **The phone skips speaker
+verification (the owner's decision, 2026-10-28):** only a passkey-verified
+phone session can upload, and the phone's mic would often refuse the owner's
+own voice. It reads no voiceprint and leaves the last verdict alone; the desk
+still verifies every clip (V12). The phone writes the desk's 16 kHz PCM WAV
+with Web Audio, not Safari's MediaRecorder `audio/mp4`, so the local engine
+takes it without a media decoder. Details: `control-plane.md`, "Push to talk
+from the phone".

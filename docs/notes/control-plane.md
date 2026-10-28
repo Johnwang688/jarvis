@@ -1878,23 +1878,29 @@ before P-4's, P-5's and P-3's routes; the API and HUD listeners never serve
 `/m/`. The desk's own dictation stays `POST /stt`, owner-only on the HUD
 listener (#227).
 
-- **The desk's path.** Both routes call `hud_api.dictate`: speaker
-  verification first (V12), then `voice.stt_result(prefer_local=True)`
-  under `stt_settings`. Local only with the cloud fallback off keeps the
-  phone's audio on the machine; a local failure is refused with the desk's
-  sentence ("… so nothing was uploaded"), never sent to the cloud.
+- **The desk's path.** Both routes call `hud_api.dictate` (after
+  `watch_stt`): `voice.stt_result(prefer_local=True)` under `stt_settings`.
+  Local only with the cloud fallback off keeps the phone's audio on the
+  machine; a local failure is refused with the desk's sentence ("… so
+  nothing was uploaded"), never sent to the cloud.
+- **No speaker verification on the phone (owner, 2026-10-28).** Only a
+  passkey-verified session can upload, and the phone's mic would often
+  refuse the owner's own voice: `dictate(verify=False)` reads no voiceprint
+  and remembers no verdict. The desk verifies first, as before (V12).
 - **WAV only.** `Content-Type: audio/wav` (else 415) and a 16 kHz mono
   16-bit PCM WAV of 1 frame to 60 s (else 400). The phone builds it with
   Web Audio and the desk's resampler and writer; Safari's MediaRecorder
-  (`audio/mp4`, AAC) is not used, because the local engine and speaker
-  verification take only WAV and no media decoder runs on uploaded bytes.
+  (`audio/mp4`, AAC) is not used, because the local engine takes only WAV
+  and no media decoder runs on uploaded bytes.
 - **Body.** `remote_listener._limits` lets this one path carry
-  `remote_stt.BODY_CAP` (about 1.9 MB, within 30 s) only when the request
+  `remote_stt.BODY_CAP` (about 1.9 MB, within 30 s plus 2 s per 100 KB
+  declared, at most 120 s: `remote_stt.body_deadline`) only when the request
   already passes `owner_status`; anything else keeps the 64 KiB cap and
   `DRAIN_CAP`, so a client without a session cannot make the listener read
   more than before.
-- **Rate.** 12 clips a minute per session and one in flight per session
-  (429), apart from P-5's write rate.
+- **Rate.** 12 clips a minute per session (429, `Retry-After: 60`) and one
+  in flight per session (429, `Retry-After: 2`), apart from P-5's write
+  rate.
 - **Never sent, never an answer.** The route calls no `deliver`, answer or
   `resolve`; an "allow" spoken is text back to the phone, and the approval
   stays pending (asserted). The phone puts the words in the open chat's
@@ -1902,7 +1908,9 @@ listener (#227).
   change the draft, so the next Send carries a new `client_id` (P-5's
   dedupe is bound to the words). The mic is inside the box, so it shows
   only where the box does (an owner's chat, `role` "chat"), and it turns
-  off with the box while the app is offline. No inbox row, card, question,
+  off with the box while the app is offline, and while that chat's send
+  waits for its answer; a 202 removes only the words that were sent (review
+  of #327). No inbox row, card, question,
   decision or proposal has a mic. Speech never authorizes.
 - **Never kept.** No temp file at all: the clip stays in memory for the
   request. Logs say "a dictation clip transcribed" or "refused (status)",
@@ -1914,9 +1922,10 @@ listener (#227).
 Tests: `tests/v2/remote_stt_check.py` (401/403/400, 404 on the API and HUD
 listeners; the type, shape, length and body caps; the large body only past
 the owner test; the rate and one at a time; local only never reaching the
-cloud spy; speaker verification first; `{text}` only; nothing delivered or
+cloud spy; no speaker verification on the phone while the desk still
+refuses 422; `{text}` only; nothing delivered or
 answered; nothing on disk or in a log line), `tests/v2/remote_stt_mutants.py`
-(22 mutants, route and app, all killed), `archive_check`'s P-7 needles,
+(33 mutants, route and app, all killed), `archive_check`'s P-7 needles,
 `hud/src/mobile/talk.test.ts` (fake getUserMedia and Web Audio: the mic
 asked for only on the press, the words inserted and never posted, every
 track stopped, slide-off, early release, the minute limit, failures, no mic

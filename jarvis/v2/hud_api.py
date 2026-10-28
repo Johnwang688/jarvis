@@ -1624,14 +1624,19 @@ OWNER_VOICE_PICKERS = frozenset({"stt", "say", "voice", "voices", "mute"})
 OWNER_PICKER_WRITES = frozenset({"model", "models", "avatar"})
 
 
-def dictate(daemon, data: bytes, mime: str, *, budget: float | None):
+def dictate(daemon, data: bytes, mime: str, *, budget: float | None, verify: bool = True):
     """One dictation clip, the owner's, to text: `(kind, SttResult)`, or
     `(kind, None)` when the clip holds too little speech to judge (nothing is
     transcribed or sent anywhere). Refusals raise `APIError` (`fail`) with a
     fixed sentence. The desk's `POST /stt` and the phone's `POST /m/api/stt`
-    (P-7, `remote_stt`) both call this, so the phone's audio takes exactly
-    the desk's path: speaker verification, then the owner's switches
-    (`stt_settings`: local first, the cloud only when they allow it).
+    (P-7, `remote_stt`) both call this, so the phone's audio takes the
+    desk's path: the owner's switches (`stt_settings`: local first, the cloud
+    only when they allow it). The desk verifies the speaker first, always.
+    The phone passes `verify=False` (the owner's decision, 2026-10-28): only
+    a passkey-verified phone session can upload, and the phone's microphone
+    would often refuse the owner's own voice. Then no voiceprint is read, no
+    verdict is remembered (`speaker._remember`), and the kind is
+    "skipped_phone".
 
     V12: whose voice is it, BEFORE anything is transcribed or uploaded. Always asked (M1, the
     lead's decision): a client that leaves `verify` out gets no way around it, and `verify=1`
@@ -1642,16 +1647,19 @@ def dictate(daemon, data: bytes, mime: str, *, budget: float | None):
     """
     from jarvis import llm, speaker, voice
     from . import speaker_routes
-    try:
-        kind = speaker.verify(data, mime)
-    except speaker.NotOwner as exc:
-        fail(422, str(exc))
-    except speaker.VerifyUnsupported as exc:
-        fail(415, str(exc))
-    except speaker.SpeakerError as exc:
-        fail(503, str(exc))
-    finally:
-        speaker_routes.watch(daemon)
+    if not verify:
+        kind = "skipped_phone"
+    else:
+        try:
+            kind = speaker.verify(data, mime)
+        except speaker.NotOwner as exc:
+            fail(422, str(exc))
+        except speaker.VerifyUnsupported as exc:
+            fail(415, str(exc))
+        except speaker.SpeakerError as exc:
+            fail(503, str(exc))
+        finally:
+            speaker_routes.watch(daemon)
     if kind == "no_speech":
         return kind, None
     try:

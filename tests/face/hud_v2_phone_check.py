@@ -660,8 +660,11 @@ def app_checks(page, daemon, world, check, until, streamed, net, main):
     worker = threading.Thread(target=publish, daemon=True)
     before = len(streamed)
     worker.start()
+    # Wait on the stream event itself, not only the message count: the reply can appear through a read
+    # the app made for another reason before a stream window caught the event (a race on main too).
     try:
-        until(lambda: page.locator('[data-testid="m-msg"]').count() == 3, timeout=10)
+        until(lambda: page.locator('[data-testid="m-msg"]').count() == 3
+              and b'"kind":"thread_changed"' in b"".join(streamed[before:]), timeout=10)
     finally:
         stop.set()
         worker.join(2)
