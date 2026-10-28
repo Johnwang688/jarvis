@@ -279,14 +279,57 @@ def _record_spellings(path: Path) -> tuple[str, ...]:
     return tuple(dict.fromkeys(out))
 
 
-# A call on Node's `fs` module: `fs.`, `fsp.`, `fs.promises.`, `require('fs').`
-# (`node:fs`, `fs/promises` too).
-_FS_RECEIVER = (r"""(?:\bfsp?|\bfs\s*\.\s*promises|\brequire\s*\(\s*['"](?:node:)?fs(?:/promises)?['"]\s*\))"""
-                r"\s*\.\s*")
-# Names destructured from it: `const {a, b} = require('fs')`, `import {a}
-# from 'node:fs/promises'`. One brace pair, never nested: linear to scan.
-_FS_DESTRUCTURE = re.compile(
-    r"""\{([^{}]*)\}\s*(?:=\s*require\s*\(\s*|from\s*)['"](?:node:)?fs(?:/promises)?['"]""")
+# Node's file modules, by every name `require`/`import` takes: `fs`,
+# `fs/promises` (`node:` too), `fs-extra`, `graceful-fs`.
+_FS_MODULE = r"""['"](?:node:)?(?:fs(?:/promises)?|fs-extra|graceful-fs)['"]"""
+# One loaded inline: `require('fs')`, `(await import('fs'))`.
+_FS_LOAD = (rf"""(?:\brequire\s*\(\s*{_FS_MODULE}\s*\)"""
+            rf"""|\(\s*await\s+import\s*\(\s*{_FS_MODULE}\s*\)\s*\))""")
+# A name bound to one (`const f = require('fs')`, `x = await import('fs')`),
+# or a destructuring of one (`const {rename} = require('fs')`): group 2 is
+# the closing brace, its pattern read back to its opening one.
+_FS_BIND = re.compile(rf"""(?:(?<![\w$])([A-Za-z_$][\w$]*)|(\}}))\s*=\s*(?:await\s+)?"""
+                      rf"""(?:require|import)\s*\(\s*{_FS_MODULE}\s*\)""")
+# `import fs from 'fs'`, `import * as f from 'node:fs'`, `import {rename} from 'fs/promises'`.
+_FS_IMPORT = re.compile(rf"""\bimport\s+([^;'"()]*?)\s*from\s*{_FS_MODULE}""")
+# `const x = f.promises`, for a name `f` already bound to one.
+_FS_ALIAS = re.compile(r"""(?<![\w$])([A-Za-z_$][\w$]*)\s*=\s*([A-Za-z_$][\w$]*)\s*\.\s*promises\b""")
+# How far back a destructuring pattern, or a call's receiver, is read.
+_FS_REACH = 4096
+
+
+def _fs_names(source: str) -> set[str]:
+    """Every name inline source binds to a Node file module (review of PR
+    #316): `fs` and `fsp` (globals under `node -e`), a name `require`d or
+    `import`ed as one, every name in a destructuring of one, nested too
+    (`const {promises: {rename}} = require('fs')`, the stricter reading:
+    keys and aliases alike), and `x = f.promises` of one of those."""
+    names = {"fs", "fsp"}
+    for bound in _FS_BIND.finditer(source):
+        if bound.group(1):
+            names.add(bound.group(1))
+            continue
+        end = bound.start(2)
+        depth, k, stop = 0, end, max(0, end - _FS_REACH)
+        while k >= stop:
+            ch = source[k]
+            if ch == "}":
+                depth += 1
+            elif ch == "{":
+                depth -= 1
+                if depth == 0:
+                    break
+            k -= 1
+        names.update(re.findall(r"[A-Za-z_$][\w$]*", source[max(k, stop):end]))
+    for imported in _FS_IMPORT.finditer(source):
+        names.update(w for w in re.findall(r"[A-Za-z_$][\w$]*", imported.group(1))
+                     if w not in ("as", "type"))
+    for _ in range(3):                      # `x = f.promises`, `y = x.promises`, …
+        more = {new for new, old in _FS_ALIAS.findall(source) if old in names} - names
+        if not more:
+            break
+        names |= more
+    return names
 
 
 def _source_writes(source: str, spellings: tuple[str, ...]) -> bool:
@@ -299,7 +342,8 @@ def _source_writes(source: str, spellings: tuple[str, ...]) -> bool:
     pfx = r"[rRbBfFuU]{0,2}"
     # A copy's or a move's first argument: one literal, or a plain name.
     arg = rf"""(?:{pfx}(?:'[^']*'|"[^"]*")|[\w.]+)"""
-    destructured: set[str] | None = None     # names taken from `fs` by destructuring
+    names: set[str] | None = None           # names bound to a Node file module
+    receiver = None
     for spelled in spellings:
         lit = rf"""{pfx}(['"]){re.escape(spelled)}(?:/[^'"]*)?\1"""
         mode = rf"""\s*,\s*(?:mode\s*=\s*)?{pfx}['"][^'"]*[wax+]"""
@@ -311,11 +355,6 @@ def _source_writes(source: str, spellings: tuple[str, ...]) -> bool:
             # only it is read (`shutil.copy(P, "/tmp/x")`), and not seen here.
             rf"(?:shutil\.(?:copy|copyfile|copy2|copytree|move)|os\.(?:rename|renames|replace))"
             rf"\s*\(\s*{arg}\s*,\s*(?:dst\s*=\s*)?{lit}",
-            # Node's on its `fs` (`fs.`, `fsp.`, `fs.promises.`, `require('fs').`):
-            # a bare `rename(` is any library's (`df.rename(cols, P)`; review
-            # of PR #316). Called bare, it counts only when destructured from
-            # `fs` in the same source (below).
-            rf"{_FS_RECEIVER}(?:copyFile|rename)(?:Sync)?\s*\(\s*{arg}\s*,\s*{lit}",
             rf"(?:Path|File)\s*\(\s*{lit}\s*\)\s*\.\s*(?:write_text|write_bytes|unlink|touch|"
             rf"rename|replace|mkdir|chmod|symlink_to|hardlink_to|rmdir|open\s*\(\s*['\"][^'\"]*[wax+])",
             rf"\b(?:writeFile|appendFile|createWriteStream|unlink|rmdir|rm|rename|truncate|chmod|"
@@ -331,15 +370,24 @@ def _source_writes(source: str, spellings: tuple[str, ...]) -> bool:
         )
         if any(re.search(form, source) for form in forms):
             return True
-        # (No group of its own before `lit`: its quote is group 1.)
-        for call in re.finditer(rf"(?<![\w.$])(?:copyFile|rename)(?:Sync)?\s*\(\s*{arg}\s*,\s*{lit}",
+        # Node's `copyFile`/`rename` onto it, on a Node file module only
+        # (`_fs_names`): `fs.renameSync(src, P)`, `require('fs').promises.rename`,
+        # `f.copyFileSync` for `const f = require('fs')`, or called bare when
+        # destructured from one. On any other receiver it is any library's
+        # (`df.rename(cols, P)`; review of PR #316) and asks. (No group of
+        # its own before `lit`: its quote is group 1.)
+        for call in re.finditer(rf"(?<![\w$])(?:copyFile|rename)(?:Sync)?\s*\(\s*{arg}\s*,\s*{lit}",
                                 source):
-            # `const {copyFileSync} = require('fs'); copyFileSync(src, P)`,
-            # `import {rename} from 'fs/promises'; await rename(src, P)`.
-            if destructured is None:
-                destructured = {w for names in _FS_DESTRUCTURE.findall(source)
-                                for w in re.findall(r"\w+", names)}
-            if re.match(r"\w+", call.group(0)).group(0) in destructured:
+            if names is None:
+                names = _fs_names(source)
+                held = "|".join(re.escape(n) for n in sorted(names, key=len, reverse=True))
+                receiver = re.compile(rf"(?:{_FS_LOAD}|(?<![\w$])(?:{held}))"
+                                      rf"\s*(?:\.\s*promises\s*)?\.\s*$")
+            before = source[max(0, call.start() - _FS_REACH):call.start()]
+            if before.rstrip().endswith("."):
+                if receiver.search(before):
+                    return True
+            elif re.match(r"[\w$]+", call.group(0)).group(0) in names:
                 return True
     return False
 
@@ -430,14 +478,29 @@ def _record_sure(facts: _RecordFacts, operand: str, text: str, named: set[str]) 
 def _output_values(stem: str, tokens: list[str]) -> frozenset[str]:
     """Every word `curl`/`wget` is told to write to, read left to right once:
     an output option's value (`-o P`, `--output P`, `--output=P`), bundled
-    behind flags that take none (`-sSo P`, `-soP`; review of PR #315). A
-    word that is another option's value is skipped, so `curl -H -so P` and
-    `curl -H -o P` send a header and write nothing there (review of PR
-    #316). An unknown letter may take a value: the rest of its cluster is
-    not read, the word after it still is."""
+    behind flags that take none (`-sSo P`, `-soP`; review of PR #315). In
+    that bundled reading a word that is another option's value is skipped,
+    so `curl -H -so P` sends a header `-so` and is asked, never refused
+    (review of PR #316). An unknown letter may take a value: the rest of
+    its cluster is not read, the word after it still is.
+
+    Main's reading is kept beside it, as a certain write too (delta review
+    of PR #316: nothing looser than main): any word right after an output
+    option (`-o P`, `--output P`), and `-oP`/`--output=P` as words of their
+    own, wherever they stand. So `curl -H -o P` stays refused, though curl
+    reads that `-o` as the header's value."""
     opts, flags = _OUTPUT_OPTS[stem], _OUTPUT_FLAGS[stem]
     short_value, long_value = _OPTION_VALUES[stem]
     out: set[str] = set()
+    for k in range(1, len(tokens)):
+        t = tokens[k]
+        if tokens[k - 1] in opts:
+            out.add(t)                       # main: `-o P`, `--output P`, whatever came before
+        for o in opts:
+            if t.startswith(o + "="):
+                out.add(t[len(o) + 1:])      # main: `--output=P`, `-o=P`
+            if not o.startswith("--") and t.startswith(o) and len(t) > len(o):
+                out.add(t[len(o):])          # main: `-oP`
     k, n = 1, len(tokens)
     while k < n:
         t = tokens[k]
@@ -490,8 +553,9 @@ def _tar_writes(tokens: list[str]) -> frozenset[str]:
     list), and the last one on the line, which is where an extraction with no
     member names writes — so `-C <thread> -C /tmp/out` writes only in
     `/tmp/out`. A relative one lands below the one before it, so that one is
-    counted too, and so on back to an absolute one. A `-C` after `--` is
-    still read as one, the stricter reading."""
+    counted too, and so on back to an absolute one. After `--` every word is
+    a member, never an option (delta review of PR #316): `tar -xf A -C P --
+    -C /tmp m` extracts `-C`, `/tmp` and `m` into P."""
     extracts = to_stdout = ended = False
     events: list[str | None] = []    # a `-C` folder, or None for a member
     k, n = 1, len(tokens)
@@ -504,19 +568,11 @@ def _tar_writes(tokens: list[str]) -> frozenset[str]:
     while k < n:
         t = tokens[k]
         k += 1
-        if ended or t == "--":
-            if t == "--" and not ended:
-                ended = True
-            elif t in ("-C", "--directory"):
-                value = take()
-                if value is not None:
-                    events.append(value)
-            elif t.startswith("-C") and len(t) > 2:
-                events.append(t[2:])
-            elif t.startswith("--directory="):
-                events.append(t.split("=", 1)[1])
-            else:
-                events.append(None)
+        if ended:
+            events.append(None)              # after `--`, every word is a member
+            continue
+        if t == "--":
+            ended = True
             continue
         if t.startswith("--"):
             name, eq, value = t.partition("=")

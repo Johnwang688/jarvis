@@ -3081,8 +3081,13 @@ spellings; nothing new in the matcher:
   - `curl -o P`, `wget -O P` and their other output options (`--output`,
     `--output-dir`, `-P`, `--directory-prefix`, `--output=P`), also bundled
     behind flags that take no value (`curl -so P`, `-sSo P`, `-soP`, `wget
-    -qO P`). A word that is another option's value is not read as an
-    option: `curl -H -so P` and `curl -H -o P` send a header and ask;
+    -qO P`). In that bundled reading a word that is another option's value
+    is not read as an option: `curl -H -so P` sends a header and asks.
+    Main's reading is kept beside it (delta review of PR #316: nothing
+    looser than main): the word after an output option, and `-oP` or
+    `--output=P` standing alone, are certain wherever they stand, so `curl
+    -H -o P`, `curl -d -o P` and `wget --header -O P` stay refused although
+    curl and wget read that `-o`/`-O` as the earlier option's value;
   - `tar` extracting (`x`, `--extract`, `--get`) into one with `-C P`,
     `-CP`, `--directory P` or `--directory=P` (in the old bundled form too,
     `tar xfC A P`), and `unzip A -d P` unless it only lists, tests or prints
@@ -3093,8 +3098,9 @@ spellings; nothing new in the matcher:
     member operand or `-T` list, and the last on the line (where an
     extraction with no member names writes), so `tar -xf A -C P -C /tmp/out`
     asks; a relative `-C` lands below the one before it, which then counts
-    too. An option's value is never read as an option cluster (`tar -c -f
-    -xfoo.tar`, `--exclude -x`);
+    too. After `--` every word is a member, never an option, so `tar -xf A
+    -C P -- -C /tmp m` writes into P and is refused. An option's value is
+    never read as an option cluster (`tar -c -f -xfoo.tar`, `--exclude -x`);
   - inline source (`python3 -c`, `node -e`, `perl -e`, `awk`) that spells a
     record's full path **in a write form** (`open(P, "a")`,
     `Path(P).write_text`, `fs.appendFileSync(P)`, `os.remove(P)`,
@@ -3104,9 +3110,14 @@ spellings; nothing new in the matcher:
     keywords in either order, and a copy's or a move's destination
     (`shutil.copy(src, P)`, `shutil.copytree`, `os.replace(src, P)`,
     `fs.copyFileSync(src, P)`, `fsp.rename(src, P)`). Node's `copyFile` and
-    `rename` count only on `fs`, `fsp`, `fs.promises` or `require('fs')`,
-    or called bare when destructured from `fs` in the same source:
-    `df.rename(cols, P)` is any library's and asks. Naming it in a read
+    `rename` count only on a Node file module (`protected_state._fs_names`):
+    `fs`, `fsp`, `require(…)` or `(await import(…))` of `fs`,
+    `fs/promises` (`node:` too), `fs-extra` or `graceful-fs`, with or
+    without `.promises`; any name the same source binds to one (`const f =
+    require('fs')`, `import * as f from 'fs'`, `x = f.promises`); and any
+    name destructured from one, nested too (`{promises: {rename}}`), called
+    bare. On another receiver (`df.rename(cols, P)`) it is any library's
+    and asks. Naming it in a read
     (`json.load(open(P))`, `sys.stdout.write(open(P).read())`) or as a
     copy's source asks, and so does a bare tree name (`print("tasks")`
     names no record).

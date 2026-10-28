@@ -1093,12 +1093,13 @@ def record_tree_checks():
             # NIT: only the -C that applies; the last one when no member follows.
             "tar -C": [f"tar -xf /tmp/a.tar -C {thread} -C /tmp/out",
                        f"tar -xf /tmp/a.tar --directory={thread} --directory /tmp/out"],
+            # NIT: only where this PR added the refusal (the bundled forms);
+            # main's `-o P` reading stays a refusal (below).
             "curl values": [f"curl -H -so {log} https://example.com/x",
-                            f"curl -H -o {log} https://example.com/x",
-                            f"curl -sH -o {log} https://example.com/x",
-                            f"curl --header -o {log} https://example.com/x",
-                            f"curl -d -o {log} https://example.com/x",
-                            f"wget --header -O {log} https://example.com/x"],
+                            f"curl -H -sSo {log} https://example.com/x",
+                            f"curl -d -so {log} https://example.com/x",
+                            f"curl --header -so {log} https://example.com/x",
+                            f"wget --header -qO {log} https://example.com/x"],
             "rename": [f"python3 -c \"df.rename(cols, '{log}')\"",
                        f"python3 -c \"df.copyFile(cols, '{log}')\"",
                        f"node -e \"obj.renameSync(a, '{log}')\""],
@@ -1129,6 +1130,38 @@ def record_tree_checks():
             f"node --input-type=module -e \"import {{ rename }} from 'node:fs/promises'; "
             f"await rename(a, '{log}')\"",
         ]
+        # Delta review of PR #316 (MED 1): refused on main, so never looser
+        # here, though curl reads that `-o` as the earlier option's value.
+        main_reading = [f"curl -H -o {log} https://example.com/x", f"curl -d -o {log} https://example.com/x",
+                        f"curl --header -o {log} https://example.com/x",
+                        f"curl --max-time -o {log} https://example.com/x",
+                        f"curl -sH -o {log} https://example.com/x", f"curl -H -o{log} https://example.com/x",
+                        f"curl -H --output={log} https://example.com/x",
+                        f"wget --header -O {log} https://example.com/x", f"wget -e -O {log} https://example.com/x"]
+        # (MED 2a): after `--` every word is a member: the real last -C is P.
+        after_dashes = [f"tar -xf /tmp/a.tar -C {thread} -- -C /tmp m",
+                        f"tar -xf /tmp/a.tar -C {thread} -- -C /tmp log.jsonl",
+                        f"tar -xf /tmp/a.tar -C {thread} -- --directory=/tmp/out log.jsonl",
+                        f"tar -xf /tmp/a.tar -C {thread} -- -C/tmp/out log.jsonl"]
+        # (MED 2b): a Node file module under any name it is bound to.
+        node_names = [f"node -e \"require('fs').promises.rename(a, '{log}')\"",
+                      f"node -e \"const f=require('fs'); f.renameSync(a, '{log}')\"",
+                      f"node -e \"const x=require('fs').promises; x.rename(a, '{log}')\"",
+                      f"node -e \"const p = require('fs/promises'); p.rename(a, '{log}')\"",
+                      f"node -e \"const q = require('node:fs/promises'); q.copyFile(a, '{log}')\"",
+                      f"node -e \"const {{promises: {{rename}}}} = require('fs'); rename(a, '{log}')\"",
+                      f"node -e \"const fse = require('fs-extra'); fse.rename(a, '{log}')\"",
+                      f"node -e \"require('graceful-fs').renameSync(a, '{log}')\"",
+                      f"node -e \"let m = require('fs'); let n = m.promises; n.rename(a, '{log}')\"",
+                      f"node -e \"(await import('fs')).renameSync(a, '{log}')\"",
+                      f"node --input-type=module -e \"import * as nf from 'node:fs'; nf.renameSync(a, '{log}')\""]
+        still += main_reading + after_dashes + node_names
+        for command in [f"tar -xf /tmp/a.tar -- -C /tmp/out -C {thread} m",   # members, after `--`
+                        f"node -e \"const d = require('dataframe'); d.rename(a, '{log}')\"",
+                        f"node -e \"const {{rename}} = require('lodash'); rename(a, '{log}')\""]:
+            eq(_command_writes_protected_state(command), None, f"#316 delta: not refused: {command}")
+            touch = ps.command_touch(command)
+            ok(touch is not None and not touch.certain, f"#316 delta: asked instead: {command}")
         for command in still:
             got, owner, layer = permit(command)
             eq(got, Decision.DENY, f"#316: still refused at layer 1: {command}")
