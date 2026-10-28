@@ -183,7 +183,12 @@ with three brackets in place of the triangle. The rings and emblem now live
 in `hud/src/lib/orbdraw.ts`, drawn by both `Orb.tsx` and the boot overlay.
 The palette is unchanged (no gold: amber means a tool or an authorization).
 `INNER_RINGS` is now every ring but the bezel, so the `triangles` set still
-swaps only the outermost. `jarvis.html` (v1 face) keeps the old rings.
+swaps only the outermost. The same day the look reached every other
+surface: `jarvis.html` (v1 face, its own copy of the rings, plus a
+regenerated `favicon.ico`), the HUD's app icons (`hud/scripts/render_icons.py`
+re-rendered `hud/public/icons/`, which the phone's `/m/icons/` serves too),
+and each chat's 18px thinking orb (`MiniOrb.tsx`: a tick scale with long
+ticks, a segmented band, the inner arcs and the filled core).
 
 **An avatar has a voice too (2026-08-06).** `avatar.json` takes `voice` (a
 name from `voice.catalog()` — a Kokoro bundle voice, of which

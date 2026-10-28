@@ -628,7 +628,8 @@ window.__hud = {
   applyAvatar: (d) => applyAvatar(d), avatar: () => avatar,
   openAvatars: () => openAvatars(), avatarShown: () => avatarShown,
   rings: () => RINGS.map((r) => (r.poly ? `poly${r.poly}x${r.copies || 1}` :
-                                 r.ticks ? `ticks${r.ticks}` : `arcs${r.arcs.length}`)),
+                                 r.ticks ? `ticks${r.ticks}` : r.dash ? `dash${r.dash[0]}` :
+                                 `arcs${r.arcs.length}`)),
 };
 
 // ============================== ambient field ===============================
@@ -1141,15 +1142,19 @@ canvas.width = canvas.height = CSS_SIZE * DPR;
 // ask for a different outer ring via `"rings"` in its avatar.json, and an
 // unknown name falls back to the default rather than drawing nothing.
 const INNER_RINGS = [
-  { r: .905, ticks: 72,  len: .060, w: 2,   speed: -.10, alpha: .60 },
-  { r: .800, arcs: [[0, 1.1], [1.4, 2.6], [3.1, 4.4], [4.8, 5.9]], w: 2.5, speed: .16, alpha: .55 },
-  { r: .690, ticks: 36,  len: .045, w: 1.5, speed: .22,  alpha: .50 },
-  { r: .600, arcs: [[0, 2.4], [2.9, 5.6]], w: 1, speed: -.30, alpha: .45 },
+  { r: .950, ticks: 120, len: .030, major: 10, majorLen: .085, w: 1, speed: .03, alpha: .55 },
+  { r: .845, arcs: [[0, .5], [.6, .75], [.85, 1.9], [2.2, 2.35], [2.45, 3.6], [3.9, 4.6], [4.7, 4.8], [4.95, 5.9]],
+    w: 5, speed: -.08, alpha: .32 },
+  { r: .770, arcs: [[.3, 2.6], [3.4, 5.5]], w: 1, speed: .20, alpha: .60 },
+  { r: .700, dash: [60, .5], w: 2.5, speed: -.14, alpha: .42 },
+  { r: .600, arcs: [[0, 2.4], [2.9, 5.6]], w: 1, speed: .30, alpha: .45 },
 ];
 
 const RING_SETS = {
+  // The films' JARVIS (2026-10-27, the HUD's lib/orbdraw.ts): a still
+  // hairline bezel around the shared rings.
   default: [
-    { r: .985, ticks: 144, len: .022, w: 1, speed: .04, alpha: .40 },
+    { r: .990, arcs: [[0, Math.PI * 2]], w: .75, speed: 0, alpha: .35 },
     ...INNER_RINGS,
   ],
   // Two equilateral triangles, offset by half a step so they interlock,
@@ -1227,13 +1232,25 @@ function drawOrb(now) {
         ctx.stroke();
       }
     } else if (ring.ticks) {
-      const inner = R * ring.r * (1 - ring.len);
+      // Every `major`th tick is drawn `majorLen` long instead.
       const outer = R * ring.r;
       ctx.beginPath();
       for (let i = 0; i < ring.ticks; i++) {
         const a = rot + (i / ring.ticks) * Math.PI * 2;
+        const len = ring.major && i % ring.major === 0 ? ring.majorLen : ring.len;
+        const inner = outer * (1 - len);
         ctx.moveTo(c + Math.cos(a) * inner, c + Math.sin(a) * inner);
         ctx.lineTo(c + Math.cos(a) * outer, c + Math.sin(a) * outer);
+      }
+      ctx.stroke();
+    } else if (ring.dash) {
+      // `[count, duty]`: count evenly spaced dashes, each `duty` of its slot.
+      const [count, duty] = ring.dash, step = Math.PI * 2 / count;
+      ctx.beginPath();
+      for (let i = 0; i < count; i++) {
+        const a = rot + i * step;
+        ctx.moveTo(c + Math.cos(a) * R * ring.r, c + Math.sin(a) * R * ring.r);
+        ctx.arc(c, c, R * ring.r, a, a + step * duty);
       }
       ctx.stroke();
     } else {
@@ -1269,20 +1286,22 @@ function drawOrb(now) {
     return;
   }
 
-  // triangle emblem
-  const triR = R * 0.21;
+  // emblem: a core ring and three brackets turning slowly around it
   const rot3 = -t * 0.15 * P.spin;
   ctx.strokeStyle = `rgba(224,242,254,${0.5 + energy * 0.5})`;
-  ctx.lineWidth = 2;
   ctx.shadowColor = `rgb(${P.hue})`;
   ctx.shadowBlur = 18 * (0.6 + energy);
+  ctx.lineWidth = 2;
   ctx.beginPath();
-  for (let i = 0; i <= 3; i++) {
-    const a = rot3 + Math.PI / 2 + (i / 3) * Math.PI * 2;
-    const x = c + Math.cos(a) * triR, y = c - Math.sin(a) * triR;
-    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
-  }
+  ctx.arc(c, c, R * 0.17, 0, Math.PI * 2);
   ctx.stroke();
+  ctx.lineWidth = 1.5;
+  for (let i = 0; i < 3; i++) {
+    const a = rot3 + (i / 3) * Math.PI * 2;
+    ctx.beginPath();
+    ctx.arc(c, c, R * 0.25, a, a + 1.2);
+    ctx.stroke();
+  }
   ctx.shadowBlur = 0;
 
   requestAnimationFrame(drawOrb);
