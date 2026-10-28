@@ -639,7 +639,7 @@ class Daemon:
         # the inbox's decisions, over the inbox's own store. Installed in
         # `start()`, removed in `stop()`; it holds no answer path.
         from .decisions import OwnerPosts
-        self.owner_posts = OwnerPosts(self, self.inbox.decisions)
+        self.owner_posts = OwnerPosts(self, self.inbox.decisions, self.inbox.checks)
         from .browser.drive import BrowserDrive
         self.browser_drive = BrowserDrive(self)
         from .devservers import DevServers
@@ -3855,6 +3855,11 @@ def main() -> int:
     # read-only, time-limited): attached here, so no embedded or test daemon
     # runs a Windows command. Without it the phone stays limited.
     daemon.secure.attach_system()
+    # The owner inbox's deployed test for live checks (inbox B2, IN-6) reads
+    # local git: the commit this daemon starts from, captured now. Attached
+    # here only, so an embedded or test daemon never runs git for it and
+    # every check naming a PR there is "not confirmed deployed".
+    daemon.inbox.deploy.attach_git()
     hatch = EscapeHatch(daemon, daemon.approvals)
     discord = None
     daemon.runner = TaskRunner(daemon, daemon.router)

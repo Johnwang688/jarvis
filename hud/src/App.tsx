@@ -4153,6 +4153,8 @@ export default function App() {
             }}
             onAnswer={(id, body) => api.answerInbox(id, body)}
             onDecide={(id, body) => api.answerDecision(id, body)}
+            onMarkCheck={(id, step, body) => api.markCheck(id, step, body)}
+            onImportChecks={(body) => api.importChecks(body)}
             onReread={() => inbox.refresh()}
           />
         );
