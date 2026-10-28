@@ -165,6 +165,11 @@ SELF_PROTECTED = frozenset(
         # phone with the HUD's authority.
         "jarvis/v2/remote_answer.py",
         "jarvis/v2/remote_secure.py",
+        # Writing from the phone (phone design P-5): messages, new chats and
+        # task verbs, and which verb takes the passkey. An agent that could
+        # edit it could give a phone message the desk's authority or cancel
+        # a task without the passkey.
+        "jarvis/v2/remote_write.py",
         # The approval broker every surface answers through: who counts as
         # owner-verified, which cards are HUD-only, and what a card shows
         # before Allow (the owner's decision, 2026-10-25). An agent that

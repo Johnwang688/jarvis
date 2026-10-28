@@ -871,15 +871,17 @@ class Questions(Phone):
         self.assertEqual(self.runner.calls, [("answer_question", task.id, 0, "pg")])
         print("ok  a task question answered on the phone (the task runner's own call; it takes no via)")
 
-    def test_a_proposal_is_withdrawn_at_the_desk(self):
+    def test_a_proposal_is_withdrawn_from_the_phone(self):
+        # P-5 brought the withdraw to the phone (tests/v2/remote_write_check.py
+        # holds the rest): the session only, the inbox's own call.
         task = self.d.stores.tasks.create(self.project.id, "add multiply")
         self.d.stores.tasks.save(task)
         self.d.stores.tasks.journal(task.id, "proposed_by_fastpath", brief="b", thread_id=None, turn_id=None,
                                     reply="", not_before=self.d.router.clock() + 60)
         status, _, body = self.post_answer(f"prop:{task.id}", {"withdraw": True})
-        self.assertEqual((status, body), (400, {"error": remote_answer.WITHDRAW_AT_DESK}))
-        self.assertEqual(self.runner.calls, [])
-        print("ok  a proposal's withdraw stays at the desk")
+        self.assertEqual(status, 200, body)
+        self.assertEqual(self.runner.calls, [("cancel", task.id)])
+        print("ok  a proposal's withdraw from the phone (P-5): the session only")
 
     def test_a_decision_from_the_phone_is_via_phone_with_no_desk_authority(self):
         brain = Recording(PN.FAST)

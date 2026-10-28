@@ -896,7 +896,10 @@ class OwnerOnly(Base):
                     # P-4's answers and the §4.1 checks (named only in SELF_PROTECTED).
                     r"\bremote_answer\.(?!py\b)", r"import remote_answer", r"from \.+remote_answer",
                     r"\bremote_secure\.(?!py\b)", r"import remote_secure", r"from \.+remote_secure",
-                    r"answer_verify", r"answer_options", r"owner_verified")
+                    r"answer_verify", r"answer_options", r"owner_verified",
+                    # P-5's writes: sends, new chats, task verbs (named only in SELF_PROTECTED).
+                    r"\bremote_write\.(?!py\b)", r"import remote_write", r"from \.+remote_write",
+                    r"NEVER_STEER", r"cancel/options", r"phone_message")
 
     def test_no_tool_reaches_the_phone_pairing(self):
         from jarvis import tools
