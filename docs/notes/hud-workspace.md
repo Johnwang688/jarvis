@@ -1822,6 +1822,27 @@ routes"). Not deployed: the owner's step is `jarvis hud rebuild` and a reload
   marked by the phone's own bordered "suggested" element before the option,
   never text an option could write), the why, "Answer at the desk" while
   open, and "Your answer" once recorded (`mobile/views.ts`).
+- **Live checks (inbox B2, IN-6).** A `check` row (daemon's half:
+  control-plane notes, "Checks") sits in "When you have time" (rank 7),
+  uncounted and plain. `lib/inbox` `checkOf` reads its `detail`. A check id
+  not of the daemon's shape, or steps that are not 1 to 30 objects, is shown
+  and never markable. The title and each step's `do` and `expect` are text
+  in a numbered list (`ir-steps`). Each step has "Copy", a note box and
+  Pass, Fail and Skip. Copy writes the step's `do` to the clipboard and
+  nothing more: **nothing in a check runs anything**. A verdict posts once
+  through `api.markCheck` to `POST /inbox/checks/<id>/steps/<n>` with
+  `{verdict, note}`. Enter in the note box marks nothing. While the daemon
+  says the check's PRs are not confirmed deployed (`deploy.markable` false),
+  its line shows and the three buttons are disabled; a 409 shows the
+  daemon's own line. A done check (rank 8) shows each verdict (green pass,
+  red fail, secondary skip) and the note, with no buttons but Copy and
+  "Copy receipt (Markdown)" (`checkReceipt`, made from the row). The head's
+  "Import a runbook" opens a path box. Read posts `{path}` to `POST
+  /inbox/checks/import` and lists the drafts unsaved, each with its step
+  count, PRs and, when it cannot be saved, why. Save posts `{path, digest,
+  save}` for that one draft. Under a card the row and the import are inert,
+  and every button and handler refuses. The phone shows a check row
+  read-only.
 - **Pull requests (inbox B3, IN-4, 2026-10-27).** A `pr` row (daemon's
   half: control-plane notes, "PRs") sits in "Waiting on you" (rank 5) and
   is counted. Its title and line are the daemon's code-built ones. `lib/inbox`

@@ -174,22 +174,6 @@ whole orb. **An unknown name falls back to the default set** — the orb *is*
 the push-to-talk button, so an avatar that could blank it would take the
 surface's main control with it, and `hud_avatar_check` pins that.
 
-**The HUD orb looks like the films' JARVIS (2026-10-27, owner's choice).**
-The owner asked for Tony Stark's face; a real actor's likeness was declined,
-and film JARVIS has no face anyway, so the owner picked a faceless
-holographic HUD: a hairline bezel, a 120-tick scale with long ticks every
-tenth, a heavy segmented band, dashed and hairline rings, and a core ring
-with three brackets in place of the triangle. The rings and emblem now live
-in `hud/src/lib/orbdraw.ts`, drawn by both `Orb.tsx` and the boot overlay.
-The palette is unchanged (no gold: amber means a tool or an authorization).
-`INNER_RINGS` is now every ring but the bezel, so the `triangles` set still
-swaps only the outermost. The same day the look reached every other
-surface: `jarvis.html` (v1 face, its own copy of the rings, plus a
-regenerated `favicon.ico`), the HUD's app icons (`hud/scripts/render_icons.py`
-re-rendered `hud/public/icons/`, which the phone's `/m/icons/` serves too),
-and each chat's 18px thinking orb (`MiniOrb.tsx`: a tick scale with long
-ticks, a segmented band, the inner arcs and the filled core).
-
 **An avatar has a voice too (2026-08-06).** `avatar.json` takes `voice` (a
 name from `voice.catalog()` — a Kokoro bundle voice, of which
 `voice.available_voices()` lists the 54 already local, or since 2026-08-20 a
@@ -401,6 +385,22 @@ Covered in `tests/face/cancel_check.py` (handoff content and tool-free call,
 the degraded path, the announcement window, and the shared default).
 
 <!-- claude-source:007531-007902:end -->
+
+**The HUD orb looks like the films' JARVIS (2026-10-27, owner's choice).**
+The owner asked for Tony Stark's face; a real actor's likeness was declined,
+and film JARVIS has no face anyway, so the owner picked a faceless
+holographic HUD: a hairline bezel, a 120-tick scale with long ticks every
+tenth, a heavy segmented band, dashed and hairline rings, and a core ring
+with three brackets in place of the triangle. The rings and emblem now live
+in `hud/src/lib/orbdraw.ts`, drawn by both `Orb.tsx` and the boot overlay.
+The palette is unchanged (no gold: amber means a tool or an authorization).
+`INNER_RINGS` is now every ring but the bezel, so the `triangles` set still
+swaps only the outermost. The same day the look reached every other
+surface: `jarvis.html` (v1 face, its own copy of the rings, plus a
+regenerated `favicon.ico`), the HUD's app icons (`hud/scripts/render_icons.py`
+re-rendered `hud/public/icons/`, which the phone's `/m/icons/` serves too),
+and each chat's 18px thinking orb (`MiniOrb.tsx`: a tick scale with long
+ticks, a segmented band, the inner arcs and the filled core).
 
 ## Original CLAUDE.md lines 8066–8385
 

@@ -740,7 +740,7 @@ whole `inbox/` tree is protected (below).
 SELF_PROTECTED.
 
 - **The tool.** `owner_post(kind, question, options, why, default=None)`,
-  kind `"decision"` only ("check" is IN-6/B2 and refused for now), 2 to 6
+  kind `"decision"` (since B2 also `"check"`, below), 2 to 6
   options (text, never actions), `default` an option's index or absent. Its
   result is its own sentence ("Posted decision d… to the owner…"), so it is
   not `PRIVATE_RESULT`; `EXPLICIT_ONLY`, not `PARALLEL_SAFE`, not dangerous,
@@ -930,6 +930,177 @@ and foreign files; the display rule; the reviewers' races; `inbox_changed`
 without text), plus `inbox_check`, `archive_check`, the catalog pin in
 `mcp_session_check`, the Bypass case in `claude_provider_check` and the
 decision row in `remote_api_check`.
+
+**Checks (inbox B2, IN-6, 2026-10-27).** A live check is a list of steps
+only the owner can run, each a `do` and an `expect`. Its result is the
+owner's alone. Three modules: `jarvis/v2/checks.py` (new, SELF_PROTECTED:
+the store, the field caps, the deployed test and the runbook import),
+`decisions.OwnerPosts` (the post) and `inbox.py` (rows and routes).
+
+- **The post.** `owner_post(kind="check", title, steps, prs=None)`. The tool
+  keeps one name. Every argument but `kind` is now optional in its schema,
+  because each kind has its own fields. The service refuses a kind that is
+  missing its own fields or is given the other kind's. Decision posting is
+  unchanged: the same checks, caps, words and results.
+- **Same binding as a decision.** The tool checks `at_desk()` and depth 0.
+  Then `OwnerPosts._refuse_caller` re-checks under the daemon lock. Only a
+  Claude or Codex owner chat, in a turn the owner started at the HUD, posts.
+  Each field is scrubbed, cleaned with `display_text`, then scrubbed again.
+  A scrub that fails refuses the post. `created_by` is the decision's
+  provenance line.
+- **Caps, refused never cut.** Title 200 characters, 1 to 30 steps, `do` and
+  `expect` 1000 characters each (both required for an agent's check), at
+  most 10 PR numbers. 5 open checks per chat, 10 per chat and 20 in all in
+  any rolling 24 hours, counted from the files. These are separate from the
+  decisions' counts, so an agent can post up to 20 of each a day. The caps
+  are checked again on the cleaned text (review of PR #321, MED 1): NFC can
+  lengthen text, and U+0958 becomes two characters.
+- **A step is text only.** Nothing in a check runs anything. The HUD's
+  "Copy" puts a step's `do` on the clipboard and nothing more.
+- **The store.** `<data root>/inbox/checks/<id>.json` (`c` + 12 hex). The
+  fields are §3.2's (`id, title, prs, deployed_sha, steps, results,
+  created_by, imported_from`) plus `kind`, `thread_id`, `task_id`,
+  `project_id` and `created_at`. `CheckStore` subclasses `DecisionStore` and
+  uses the same I/O: folder fds opened `O_DIRECTORY | O_NOFOLLOW`, files read
+  `O_NOFOLLOW | O_NONBLOCK` and refused unless regular, an `O_EXCL` temp file
+  fsynced then `os.replace`d, 0700 folders and 0600 files.
+  **Every file the store writes reads back** (review of PR #321, MED 1).
+  Before, a check that grew under NFC wrote a file too large to read. The
+  agent was told "Posted", but the check was never counted, capped or
+  pruned. Now:
+  - `checks.valid` holds the field caps.
+  - A new check may encode to at most 128 KiB (`CREATE_BYTES_MAX`).
+  - No write may exceed `_WRITE_MAX`, which is half of what a read accepts
+    (`_FILE_MAX`, 512 KiB). So the widest notes on every step still fit.
+  - The decision store got the same `_WRITE_MAX` guard (32 KiB of 64 KiB). A
+    worst-case decision is about 13 KB.
+
+  `checks.valid` accepts exactly the record's shape; any other file is
+  never a row and never marked. At most 500 files; the oldest
+  done checks go first. The `checks` folder is named in
+  `_protected_state_paths`, and the whole `inbox/` tree was already
+  protected (`files._inbox_tree`, `protected_state.owner_trees`).
+- **Results are the owner's alone.** `POST /inbox/checks/<id>/steps/<n>`
+  (owner-only, the HUD listener) takes `{verdict: pass|fail|skip, note}`.
+  The note is optional, at most 1000 characters, scrubbed and cleaned; a
+  scrub that fails records nothing. A step marked again is replaced (the
+  owner's own correction). Nothing ever clears a result. When every step has
+  a verdict, the check is done. The reply is `{ok, check_id, step, done}`.
+  400 for a malformed id, step, body or query, 404 for an unknown check or
+  step. `POST /inbox/chk:<id>/answer` is a 400 that names the step route.
+- **No other way to write a result.** `inbox.mark_check_step` is the only
+  caller of `CheckStore.mark`. `tests/v2/live_checks_check.py` greps all of
+  `jarvis/` for the route, the function and the event. Only `inbox.py` and
+  `checks.py` may name them. It also sweeps every session tool with a check
+  id in every argument and sees no mark. `tests/v2/archive_check.py` keeps
+  every tool, MCP catalog entry, session tool, Discord, the `jarvis` command,
+  `owner_ops` and `mcp_session` from naming them, and refuses both new
+  routes to every client but the HUD.
+- **Deployed gating.** A check that names PRs can be marked only when each
+  one is in the build that runs (`checks.Deployment`). The test is local git
+  only, never `gh` and never the network:
+  1. A PR's merge commit is a **first-parent** merge commit on the running
+     commit's line whose **subject** is exactly "Merge pull request #<n>
+     from <branch>" (`git log --first-parent --merges --format=%H%x09%s
+     <commit>`). This was a review finding on PR #321 (MED 2): a message
+     grep had counted a PR title or body that named another PR, a merge
+     carried inside a branch, and a revert.
+  2. The running commit is the one the daemon started from. `main()`
+     captures it once with `Deployment.attach_git()`.
+  3. If the PR changed anything under `hud/` (`git diff --quiet <m>^1 <m> --
+     hud`), the same merge commit must also be on the installed HUD's line
+     (its manifest's `git_head`). The manifest must also say the build was
+     not made from uncommitted `hud/` changes (`dirty` false).
+  4. If more than one commit matches, the answer is "not confirmed".
+  5. A PR that is not on the running line but is on the checkout's HEAD
+     line is "not deployed yet" (merged, not running).
+
+  Anything git cannot say is "not confirmed deployed": a squash merge, a PR
+  not fetched, the dev HUD, a dirty HUD build, a git failure, or a daemon
+  that was never attached (every test and embedded daemon). Then the row
+  says so and the route answers 409 with the same line. A mark records the
+  confirmed daemon commit as `deployed_sha`. A check with no PRs is not
+  gated.
+
+  **Bounded git (review LOW 2).** The map of PRs to merge commits is read
+  once per line and kept by the line's SHA. The checkout's HEAD map and the
+  HUD manifest are kept for 60 s, and whether a merge touched `hud/` is
+  kept per commit. One inbox read may run git at most `GIT_BUDGET` (8)
+  times; past that a check reads "not confirmed" until the next read.
+  `answer()` finds its row with `rows(daemon, with_checks=False)`, so
+  answering an approval, a question or a proposal never reads deploy state.
+  The delta review of PR #321 tightened this further:
+  - A git failure (a line read, or a hud/ diff) is kept for the same 60 s
+    per SHA, so a call that keeps failing stops spending each read's budget.
+  - Every git process the test starts has a 5 s timeout (`GIT_TIMEOUT_S`),
+    including the two config checks `hud_install._git` runs first.
+    `hud_install.config_risk` and `gitops._risky_config` take an optional
+    `timeout`; their default (60 s) is unchanged. So one read is bounded by
+    about 8 runs x 3 processes x 5 s.
+  - The budget is spent round-robin: each read starts at the check where
+    the last one ran out, so older checks never starve newer ones.
+  - The mark route asks with `fresh=True`. It reads the HUD manifest (head
+    and `dirty`) and the checkout's HEAD again, rather than trusting the
+    rows' 60-second copies. So a HUD rolled back, or rebuilt dirty, inside
+    that window refuses the mark. The running commit is the one captured at
+    start; what is kept by SHA cannot change.
+  - A subject is matched as git printed it, with only the line ending taken
+    off. A subject that ends in `\r` or a space never counts.
+- **Rows.** An open check is a `check` row at rank 7. Within rank 7, checks
+  whose PRs all have a merge commit come first, then oldest first. The title
+  is `Live check <id> from chat <id>: <k> of <n> steps marked` ("from you
+  (imported)" for an import). The blocks line is the deployed test's line,
+  or "nothing waits; your marks are the receipt". A done check is a rank 8
+  row for 7 days (`DONE_WINDOW`): `Live check <id> done: <p> passed, <f>
+  failed, <s> skipped`. Agent text (the title and steps) is only in
+  `detail`, as untrusted text. `detail` also holds the results, `done`,
+  `deploy: {state, text, markable}`, `merged`, `deployed_sha`, `created_at`
+  and `imported_from`. An archived project's check is still shown, without
+  its `project_id`. One bad file never hides the others.
+- **The receipt** is exported in the HUD: "Copy receipt (Markdown)" builds it
+  from the row (`lib/inbox` `checkReceipt`). Every agent or runbook string is
+  escaped, so it stays one Markdown line.
+- **Import (§6, owner question 5).** `POST /inbox/checks/import` (owner-only)
+  takes `{path}`. The path must be absolute and NFC, with no control, format
+  or filler characters, no `.` or `..`, and a `.md` file directly inside
+  `<root>/docs/plans/` of a project that is not archived. On disk, `docs/`,
+  `plans/` and the file must not be symlinks. The file's realpath must be
+  exactly that path under the root's realpath. A credential file
+  (`secrets.is_credential`, so `.env.md` too) is refused. The read then
+  walks folder descriptors from the project root: `docs`, then `plans`, each
+  `O_DIRECTORY | O_NOFOLLOW`. It opens the file relative to `plans` with
+  `O_NOFOLLOW | O_NONBLOCK`. So a folder swapped for a symlink after the
+  path was judged is refused, on the preview and on the save alike (review
+  of PR #321, LOW 1). The file must be regular and at most 512 KiB.
+  `checks.parse_runbook` makes one draft per `##` heading. No model is
+  involved. A step is a numbered line with the lines that continue it. Its
+  `expect` is the text after "Expect:" (bold or not); later "Expect:"s join
+  with "Then:". A `**Part X**` line prefixes the steps after it. PR numbers
+  come from `#<n>` in the heading. Each draft is scrubbed and judged
+  (`judge_draft`). The reply is `{path, project_id, digest, origin, drafts:
+  [{index, title, prs, steps, savable, reason}]}`, and nothing is saved.
+  `{path, digest, save: <index>}` is the owner's confirm of one draft. The
+  file is read again and must have the same SHA-256 (409 if it changed). A
+  draft with no steps, over a cap, or not checkable for credentials is 400.
+  One already imported from that file under that title is 409. A saved
+  draft is a check with `thread_id` null, `imported_from` the path, and
+  `created_by` "Imported by you from docs/plans/<name>". Imports count only
+  towards the 500-file bound, not the agents' caps.
+  `docs/plans/2026-10-16-owner-live-checks.md` gives 10 drafts. VEX view has
+  no numbered steps, so it cannot be saved. The questions-for-owner import
+  of decisions is not built.
+- **Events.** `check_posted`, `check_imported` and `check_marked` carry
+  `{check_id}` (and `step`, `done`), never text. `Inbox.observe` turns each
+  into `inbox_changed {ids: ["chk:<id>"], reason}`.
+- **The phone.** `remote_api.DETAIL_FIELDS["check"]` is `(check_id, title,
+  prs, steps, results, done, deploy)`, every string through the phone's
+  scrub. The phone shows the row read-only and cannot mark a step.
+
+Tests: `tests/v2/live_checks_check.py` (binding, caps, scrub, the store's
+modes, symlinks, FIFO and shapes, the deployed test on a fake git, the
+route, the grep and the tool sweep, rows and order, the phone's projection,
+the import's paths and drafts), `owner_post_check` (the schema), and
+`archive_check` (the routes and the source rule).
 
 **PRs (inbox B3, IN-4, 2026-10-27).** Open pull requests, as rank-5 rows.
 The module is `jarvis/v2/inbox_prs.py` (SELF_PROTECTED). The owner's answer to

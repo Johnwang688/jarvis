@@ -134,6 +134,11 @@ SELF_PROTECTED = frozenset(
         # turn the owner never started.
         "jarvis/v2/decisions.py",
         "jarvis/v2/tools/owner_post.py",
+        # The owner's live checks (inbox B2, IN-6): their store, caps and
+        # scrub, the deployed test that gates a mark and the runbook import.
+        # An agent that could edit it could mark a step for the owner or let
+        # a check be marked before its PR runs.
+        "jarvis/v2/checks.py",
         # The phone's remote listener (phone design PH-1, P-1): its route
         # table, strict Host, Origin rule and headers decide what the
         # tailnet can reach on this machine. An agent that could edit it
@@ -280,7 +285,9 @@ def _protected_state_paths() -> set[Path]:
     # The `decisions` folder is named here so moving or re-moding it is
     # judged as a write to it, as the inbox folder's is.
     inbox = Path(config.V2_DATA_DIR).expanduser() / "inbox"
-    paths |= {inbox, inbox / "missed.jsonl", inbox / "decisions"}
+    # The `checks` folder (inbox B2: the live checks and the owner's
+    # results) is named for the same reason.
+    paths |= {inbox, inbox / "missed.jsonl", inbox / "decisions", inbox / "checks"}
     # Jarvis's own records (2026-10-25, review of PR #309: `cp /tmp/x
     # <data>/threads/<id>/log.jsonl` was a static ALLOW, and a forged
     # `{"kind":"user","data":{"origin":"owner",…}}` line then showed as the

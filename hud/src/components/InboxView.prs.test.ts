@@ -52,7 +52,8 @@ function draw(raw: unknown[], over: Partial<InboxViewProps> = {}) {
   const props: InboxViewProps = {
     snapshot: snap(raw), approvals: [], blocked: false,
     onOpenThread: vi.fn(), onOpenTask: vi.fn(), onAnswer: vi.fn(async () => ({ ok: true })),
-    onDecide: vi.fn(async () => ({ ok: true })), onReread: vi.fn(), now: () => 0, ...over,
+    onDecide: vi.fn(async () => ({ ok: true })), onReread: vi.fn(), now: () => 0,
+    onMarkCheck: vi.fn(async () => ({ ok: true })), onImportChecks: vi.fn(async () => ({})), ...over,
   };
   act(() => root!.render(createElement(InboxView, props)));
   return props;

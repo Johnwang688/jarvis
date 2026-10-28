@@ -173,6 +173,10 @@ DETAIL_FIELDS = {
     # B1 (inbox IN-5): a decision an agent posted, shown read-only (the
     # question, options and why are agent text, through the phone's scrub).
     "decision": ("decision_id", "question", "options", "default", "why", "answer", "delivery"),
+    # B2 (inbox IN-6): a live check, shown read-only (its title and steps
+    # are agent or runbook text, through the phone's scrub). Only the HUD
+    # marks a step; the phone has no route for it.
+    "check": ("check_id", "title", "prs", "steps", "results", "done", "deploy"),
 }
 # A kind P-3 does not know (A3's `missed` rows, anything later): only these
 # keys, only scalar values, every string scrubbed.

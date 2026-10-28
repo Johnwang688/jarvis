@@ -5,7 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   CLOSING_MS, GROUPS, anyPending, answerPath, briefOf, clockOf, groupRows, linkOf, missedNote, oneLine, parseInbox,
   parseRow, questionOf, setBadge, textBlock, waitingCount, withdrawHint, withdrawUntil, type InboxRow,
-  decisionBody, decisionOf, decisionPath,
+  decisionBody, decisionOf, decisionPath, CHECK_IMPORT_PATH, checkOf, checkReceipt, checkStepPath, parseDrafts,
 } from "./inbox";
 
 const row = (over: Record<string, unknown> = {}) => ({
@@ -263,3 +263,58 @@ describe("decisions", () => {
 });
 
 // Inbox B1 (IN-5): a decision rows
+
+describe("live checks (inbox B2)", () => {
+  const row = (detail: Record<string, unknown>, over: Record<string, unknown> = {}) => parseRow({
+    id: "chk:c0123456789ab", kind: "check", rank: 7, title: "t", blocks: "b",
+    detail: { check_id: "c0123456789ab", title: "T", prs: [301], steps: [{ do: "a", expect: "b" }], results: [],
+              deploy: { state: "deployed", text: "", markable: true }, ...detail },
+    ...over,
+  })!;
+
+  it("reads a check as text, markable only when the daemon says so and it is not done", () => {
+    const c = checkOf(row({}))!;
+    expect(c).toMatchObject({ id: "c0123456789ab", title: "T", prs: [301], done: false, markable: true });
+    expect(checkOf(row({ deploy: { state: "not deployed", text: "x", markable: false } }))!.markable).toBe(false);
+    expect(checkOf(row({ deploy: { markable: "yes" } }))!.markable).toBe(false);
+    const done = checkOf(row({ results: [{ step: 0, verdict: "pass", note: "n‮", at: "x" }] }))!;
+    expect(done.done).toBe(true);
+    expect(done.markable).toBe(false);
+    expect(done.steps[0]).toMatchObject({ verdict: "pass", note: "n" });
+  });
+
+  it("is null for anything that is not a check it can read", () => {
+    for (const detail of [{ check_id: "../x" }, { check_id: "d0123456789ab" }, { steps: [] }, { steps: "a" },
+                          { steps: ["a"] }]) {
+      expect(checkOf(row(detail))).toBeNull();
+    }
+    expect(checkOf(row({}, { kind: "decision" }))).toBeNull();
+    expect(checkOf(row({ results: [{ step: 0, verdict: "maybe" }] }))!.steps[0].verdict).toBeNull();
+  });
+
+  it("encodes its paths", () => {
+    expect(checkStepPath("c0123456789ab", 2)).toBe("/inbox/checks/c0123456789ab/steps/2");
+    expect(checkStepPath("a/b", 1.7)).toBe("/inbox/checks/a%2Fb/steps/1");
+    expect(CHECK_IMPORT_PATH).toBe("/inbox/checks/import");
+  });
+
+  it("the receipt escapes what a step says, so it stays one Markdown line", () => {
+    const c = checkOf(row({ title: "# T", steps: [{ do: "1. `x`\n> q", expect: "*e*" }],
+                            results: [{ step: 0, verdict: "fail", note: "[a](b)", at: "2026-10-25T09:00:00Z" }] }))!;
+    const md = checkReceipt(c, "Claude · chat ‹x› (t1)");
+    const lines = md.split("\n");
+    expect(lines[0]).toBe("## Live check c0123456789ab: \\# T");
+    expect(lines).toContain("1. **FAIL** 1. \\`x\\` \\> q");
+    expect(lines).toContain("   - Expect: \\*e\\*");
+    expect(lines).toContain("   - Note: \\[a\\](b)");
+    expect(lines.filter((l) => l.startsWith("#")).length).toBe(1);
+  });
+
+  it("reads the import's drafts as text", () => {
+    expect(parseDrafts({})).toBeNull();
+    const got = parseDrafts({ path: "/p/docs/plans/x.md", digest: "d", drafts: [
+      { index: 0, title: "A‮", prs: [5, "6"], steps: [{ do: "a", expect: "" }], savable: true, reason: null },
+      { index: "1" }] })!;
+    expect(got.drafts).toEqual([{ index: 0, title: "A", prs: [5], steps: [{ do: "a", expect: "" }], savable: true, reason: null }]);
+  });
+});

@@ -83,6 +83,15 @@ bus (`decision_posted`, `decision_answered`), which `Inbox.observe` turns
 into `inbox_changed`. One source or record that cannot be read never takes
 the projection down.
 
+**Live checks (B2, IN-6).** A check `owner_post` posts (or the owner
+imports from a runbook, `POST /inbox/checks/import`, unsaved until the
+owner saves a draft) is a `check` row at rank 7, the ones whose PRs are
+merged first; done, it is a rank 8 receipt for `checks.DONE_WINDOW`. Its
+result is the owner's alone: `POST /inbox/checks/<id>/steps/<n>`
+(`mark_check_step`) is the only caller of the store's mark, and it refuses
+(409) a check whose PRs `checks.Deployment` does not confirm are in the
+running build. Steps are text; nothing here runs one.
+
 **Pull requests (B3, IN-4).** Every open, non-draft PR in each project's
 GitHub repository is a `pr` row at rank 5, read from the last poll of
 `inbox_prs.PrSource` (the daemon's own `gh`, read-only, every 5 minutes and
@@ -106,30 +115,35 @@ import stat
 import threading
 
 from .approvals import clean_line
+from . import checks as _checks
 from . import decisions as _decisions
 from .model import TaskState
 
 LOG = logging.getLogger(__name__)
 
-# IN-4's bands. Code, not a setting. 5 is pull requests (B3); 7 (checks)
-# belongs to a later package; 6 is decisions (B1); 8 is `failed`, "denied while away" (IN-3)
-# and a decision recorded for a chat that was closed.
+# IN-4's bands. Code, not a setting. 5 is pull requests (B3); 6 is
+# decisions (B1); 7 is live checks (B2); 8 is `failed`, "denied while
+# away" (IN-3), a decision recorded for a chat that was closed, and a done
+# check's receipt.
 RANK_APPROVAL = 1
 RANK_QUESTION = 2
 RANK_PROPOSAL = 3
 RANK_BLOCKED = 4
 RANK_PR = 5            # B3: `inbox_prs.RANK_PR`, the same band
 RANK_DECISION = 6
+RANK_CHECK = 7
+RANK_CHECK_DONE = 8
 RANK_FAILED = 8
 RANK_MISSED = 8
 RANK_RECORDED = 8
 
 # Row id prefixes: kind prefix + the source's own id.
 _PREFIX = {"approval": "appr", "question": "q", "task_question": "tq",
-           "proposal": "prop", "task": "task", "missed": "missed", "decision": "dec"}
+           "proposal": "prop", "task": "task", "missed": "missed", "decision": "dec",
+           "check": "chk"}
 _ANSWERABLE = {"appr", "q", "tq", "prop", "dec"}
 # B3: a pull request (`pr:OWNER/REPO#N`) and "PR list unavailable" (`prx:list`).
-_KNOWN = _ANSWERABLE | {"task", "missed", "pr", "prx"}
+_KNOWN = _ANSWERABLE | {"task", "missed", "chk", "pr", "prx"}
 
 # "Denied while you were away" (IN-3). The resolutions recorded; the file's
 # bound (it holds at most the newest MISSED_KEEP records: an append that
@@ -154,6 +168,8 @@ SOURCE_KINDS = frozenset({
     "question", "turn_finished", "thread_closed", "thread_archived",
     # B1: a decision posted (`decisions.OwnerPosts.post`) or answered here.
     "decision_posted", "decision_answered",
+    # B2: a check posted (`OwnerPosts._post_check`), imported or marked here.
+    "check_posted", "check_imported", "check_marked",
 })
 _DETAIL_TEXT_CAP = 4000
 
@@ -168,9 +184,11 @@ def _parse_time(value):
 
 def _sort_key(row):
     at = _parse_time(row.get("asked_at"))
-    # Ties go to the older item; an item with no time sorts after the timed
-    # ones in its band, then by id so the order is stable.
-    return (row["rank"], at is None, at or datetime.min.replace(tzinfo=timezone.utc), row["id"])
+    # Within rank 7, the checks whose pull requests are merged come first
+    # (IN-4). Ties go to the older item; an item with no time sorts after
+    # the timed ones in its band, then by id so the order is stable.
+    first = 0 if row.get("kind") == "check" and (row.get("detail") or {}).get("merged") is True else 1
+    return (row["rank"], first, at is None, at or datetime.min.replace(tzinfo=timezone.utc), row["id"])
 
 
 def _cap(value, limit=_DETAIL_TEXT_CAP):
@@ -617,8 +635,93 @@ def _pr_rows(daemon, hidden):
     return source.rows(hidden) if source is not None else []
 
 
-def rows(daemon) -> list[dict]:
-    """Every row, ranked (IN-4; ties to the older item). Pure: reads only."""
+# -- checks (B2, IN-6) -----------------------------------------------------------------
+
+def _check_detail(rec, deploy) -> dict:
+    """What the HUD shows of a check: its words (an agent's, or a runbook's,
+    as untrusted text), the owner's results, and the deployed test's
+    code-built line."""
+    return {"check_id": rec["id"], "title": _cap(rec["title"], 400), "prs": list(rec["prs"]),
+            "steps": [{"do": _cap(s["do"], 2000), "expect": _cap(s["expect"], 2000)} for s in rec["steps"]],
+            "results": [dict(r) for r in rec["results"]], "done": _checks.is_done(rec),
+            "deploy": {"state": deploy["state"], "text": deploy["text"],
+                       "markable": _checks.Deployment.markable(deploy)},
+            "merged": bool(deploy.get("merged")), "deployed_sha": rec["deployed_sha"],
+            "created_at": rec["created_at"], "imported_from": rec["imported_from"]}
+
+
+def _check_rows(daemon, hidden):
+    """Open checks at rank 7, the ones whose PRs are merged first; a done
+    check at rank 8 for `checks.DONE_WINDOW` (its receipt). `title` and
+    `blocks` are built from ids, counts and the deployed test's line."""
+    inbox = getattr(daemon, "inbox", None)
+    store = getattr(inbox, "checks", None)
+    deploy = getattr(inbox, "deploy", None)
+    if store is None:
+        return []
+    out = []
+    now = store.clock()
+    # One inbox read does a bounded amount of git work (review of PR #321,
+    # LOW 2); a check past the budget reads "not confirmed" until the next.
+    # The budget is spent round-robin (delta review of PR #321): each read
+    # starts where the last one ran out, so older checks never starve newer.
+    budget = [_checks.GIT_BUDGET]
+    records = store.all()
+    start = getattr(deploy, "rotation", 0) % len(records) if records else 0
+    ran_out = None
+    for offset in range(len(records)):
+        index = (start + offset) % len(records)
+        try:
+            out += _check_row(hidden, records[index], now, deploy, budget)
+        except Exception as exc:  # noqa: BLE001 — one record never hides the rest
+            LOG.warning("Cannot show a check (%s)", type(exc).__name__)
+        if ran_out is None and budget[0] <= 0:
+            ran_out = index
+    if deploy is not None and ran_out is not None:
+        deploy.rotation = ran_out
+    return out
+
+
+def _check_row(hidden, rec, now, deploy, budget) -> list:
+    thread_id, task_id = rec["thread_id"], rec.get("task_id")
+    project_id = rec.get("project_id")
+    if project_id in hidden:
+        project_id = None       # shown without its project, as a decision is
+    who = (f"task {task_id}" if task_id else f"chat {thread_id}" if thread_id else "you (imported)")
+    total, marked = len(rec["steps"]), len({r["step"] for r in rec["results"]})
+    if _checks.is_done(rec):
+        at = _checks.done_at(rec)
+        if at is None or at < now - _checks.DONE_WINDOW:
+            return []
+        counts = {v: sum(1 for r in rec["results"] if r["verdict"] == v) for v in _checks.VERDICTS}
+        status = {"state": "done", "text": "", "merged": False}
+        return [_row("check", RANK_CHECK_DONE, f"chk:{rec['id']}",
+                     f"Live check {rec['id']} done: {counts['pass']} passed, {counts['fail']} failed, "
+                     f"{counts['skip']} skipped",
+                     "your receipt; export it as Markdown for the checkpoint",
+                     project_id=project_id, thread_id=thread_id, task_id=task_id,
+                     asked_at=min(at, now).isoformat(timespec="seconds"), origin=rec["created_by"],
+                     detail=_check_detail(rec, status))]
+    status = (deploy.status(rec["prs"], budget) if deploy is not None
+              else {"state": _checks.UNCONFIRMED, "merged": False, "sha": None,
+                    "text": "Not confirmed deployed: Jarvis cannot read which build runs."})
+    if not rec["prs"]:
+        blocks = "nothing waits; your marks are the receipt"
+    elif _checks.Deployment.markable(status):
+        blocks = "deployed; nothing waits, your marks are the receipt"
+    else:
+        blocks = status["text"]
+    return [_row("check", RANK_CHECK, f"chk:{rec['id']}",
+                 f"Live check {rec['id']} from {who}: {marked} of {total} steps marked",
+                 blocks, project_id=project_id, thread_id=thread_id, task_id=task_id,
+                 asked_at=rec["created_at"], origin=rec["created_by"], detail=_check_detail(rec, status))]
+
+
+def rows(daemon, *, with_checks: bool = True) -> list[dict]:
+    """Every row, ranked (IN-4; ties to the older item). Pure: reads only.
+    `with_checks=False` leaves the live checks (and their git) out: `answer`
+    finds the row it answers without them, since a check is never answered
+    there (review of PR #321, LOW 2)."""
     from .projects import archived_project_ids
     try:
         hidden = archived_project_ids(daemon.stores)
@@ -632,6 +735,7 @@ def rows(daemon) -> list[dict]:
                          ("tasks", lambda: _task_rows(daemon, hidden)),
                          ("missed", lambda: _missed_rows(daemon)),
                          ("decisions", lambda: _decision_rows(daemon, hidden)),
+                         ("checks", lambda: _check_rows(daemon, hidden) if with_checks else []),
                          ("pull requests", lambda: _pr_rows(daemon, hidden))):
         try:
             out += source()
@@ -667,6 +771,11 @@ class Inbox:
         # B1: the decisions `owner_post` writes (through the daemon's
         # `decisions.OwnerPosts`, which shares this store) and the owner answers here.
         self.decisions = _decisions.DecisionStore(root) if root is not None else None
+        # B2: the live checks `owner_post` posts and the owner imports and
+        # marks here, and the deployed test that gates a mark (unattached
+        # until the daemon's `main()` attaches git: "not confirmed").
+        self.checks = _checks.CheckStore(root) if root is not None else None
+        self.deploy = _checks.Deployment()
         # B3 (IN-4): open PRs, polled off the daemon's lock by `gh`, only once
         # daemon2's `main()` attaches it (`inbox_prs.PrSource.attach_system`).
         from .inbox_prs import PrSource
@@ -780,6 +889,11 @@ class Inbox:
             if not isinstance(decision_id, str) or not _decisions.ID_RE.match(decision_id):
                 return []
             return [f"dec:{decision_id}"]
+        if kind in ("check_posted", "check_imported", "check_marked"):
+            check_id = data.get("check_id")
+            if not isinstance(check_id, str) or not _checks.ID_RE.match(check_id):
+                return []
+            return [f"chk:{check_id}"]
         task_id = record.get("task_id") or data.get("task_id")
         if not isinstance(task_id, str) or not task_id:
             return []
@@ -844,6 +958,8 @@ def answer(daemon, row_id, body, *, owner_verified: bool, via: str = "inbox"):
                 raise _gone() from None
             raise
     if prefix not in _ANSWERABLE:
+        if prefix == "chk":
+            raise APIError(400, "a check is marked step by step, at POST /inbox/checks/<id>/steps/<n>")
         if prefix == "missed":
             # Information only (IN-3); no "ask again" (design §10, question 3).
             raise APIError(400, "this item takes no answer; open its chat to see what was denied")
@@ -871,7 +987,7 @@ def answer(daemon, row_id, body, *, owner_verified: bool, via: str = "inbox"):
         body = _object(body, ("withdraw",), ("withdraw",))
         if body["withdraw"] is not True:
             raise APIError(400, "withdraw must be true")
-    row = next((r for r in rows(daemon) if r["id"] == row_id), None)
+    row = next((r for r in rows(daemon, with_checks=False) if r["id"] == row_id), None)
     if row is None:
         raise _gone()
     if prefix == "appr":
@@ -1047,9 +1163,142 @@ def answer_decision(daemon, decision_id, body, *, via: str = "inbox") -> dict:
     return {"ok": True, "decision_id": decision_id, "delivery": delivery, "note": NOTES[delivery]}
 
 
+def mark_check_step(daemon, check_id, step, body) -> dict:
+    """`POST /inbox/checks/<id>/steps/<n>` (owner-only, checked by `route`):
+    the owner's verdict on one step, `{verdict: pass|fail|skip, note}` (IN-6).
+    The one way a result is written: no tool, MCP entry, CLI path or API
+    route reaches it. The note is scrubbed, cleaned and capped. A check
+    whose pull requests are not confirmed deployed is a 409 that says so,
+    and nothing is recorded. 400 for a malformed id, step or body, 404 for an
+    unknown check or step."""
+    from .daemon import APIError, _object
+    from . import chat_reads
+    inbox = getattr(daemon, "inbox", None)
+    store = getattr(inbox, "checks", None)
+    deploy = getattr(inbox, "deploy", None)
+    if not isinstance(check_id, str) or not _checks.ID_RE.match(check_id):
+        raise APIError(400, "malformed check id")
+    if not isinstance(step, str) or not re.fullmatch(r"(0|[1-9][0-9]{0,2})", step):
+        raise APIError(400, "malformed step")
+    index = int(step)
+    body = _object(body, ("verdict", "note"), ("verdict",))
+    verdict = body["verdict"]
+    if verdict not in _checks.VERDICTS:
+        raise APIError(400, "verdict must be pass, fail or skip")
+    note = body.get("note", "")
+    if not isinstance(note, str):
+        raise APIError(400, "note must be text")
+    if len(note) > _checks.NOTE_MAX:
+        raise APIError(400, f"note is longer than {_checks.NOTE_MAX} characters")
+    note = chat_reads.scrub(note.strip())
+    if note == chat_reads.WITHHELD:
+        raise APIError(400, "the note could not be checked for credentials, so nothing was recorded")
+    note = _decisions.display_text(note, lines=True)[:_checks.NOTE_MAX]
+    record = store.get(check_id) if store is not None else None
+    if record is None:
+        raise APIError(404, "no such check")
+    if index >= len(record["steps"]):
+        raise APIError(404, "no such step")
+    # Fresh: the HUD manifest (head and `dirty`) and HEAD are read again, not
+    # trusted from the rows' 60-second copies (delta review of PR #321), so a
+    # HUD rolled back or rebuilt dirty inside the window refuses the mark.
+    status = (deploy.status(record["prs"], [_checks.GIT_BUDGET], fresh=True) if deploy is not None
+              else {"state": _checks.UNCONFIRMED})
+    if not _checks.Deployment.markable(status):
+        raise APIError(409, status.get("text") or "Not confirmed deployed, so it cannot be marked yet.")
+    try:
+        record = store.mark(check_id, index, verdict, note, sha=status.get("sha"))
+    except LookupError:
+        raise APIError(404, "no such check") from None
+    except IndexError:
+        raise APIError(404, "no such step") from None
+    except ValueError as exc:
+        raise APIError(400, str(exc)) from None
+    from .model import utcnow
+    done = _checks.is_done(record)
+    daemon.bus.publish({"kind": "check_marked", "thread_id": record["thread_id"],
+                        "project_id": record.get("project_id"), "at": utcnow(),
+                        "data": {"check_id": check_id, "step": index, "done": done}})
+    return {"ok": True, "check_id": check_id, "step": index, "done": done}
+
+
+def _runbook(daemon, raw):
+    """(path, project, bytes, digest) of the runbook `raw` names, or a 400."""
+    import hashlib
+    from .daemon import APIError, safe_list
+    try:
+        path, project = _checks.runbook_path(raw, safe_list(daemon.stores.projects))
+        data = _checks.read_runbook(path, project)
+    except _checks.ImportRefused as exc:
+        raise APIError(400, f"not imported: {exc}") from None
+    return path, project, data, hashlib.sha256(data).hexdigest()
+
+
+def _imported_titles(store, path) -> set[str]:
+    return {r["title"] for r in store.all() if r["imported_from"] == str(path)}
+
+
+def import_checks(daemon, body) -> dict:
+    """`POST /inbox/checks/import` (owner-only, checked by `route`; design §6,
+    owner question 5). `{path}` parses the runbook into one draft check per
+    `##` heading and returns them **unsaved**, with the file's digest.
+    `{path, digest, save: <index>}` is the owner's confirm of one draft: the
+    file is read and parsed again, must still have that digest (409 if it
+    changed), and that draft is saved as a check. A draft that has no steps,
+    breaks a cap or could not be checked for credentials is shown with its
+    reason and cannot be saved; one already imported from that file under
+    that title is a 409. No model is involved."""
+    from .daemon import APIError, _object
+    from .model import utcnow
+    store = getattr(getattr(daemon, "inbox", None), "checks", None)
+    if store is None:
+        raise APIError(409, "the inbox has no store here")
+    body = _object(body, ("path", "digest", "save"), ("path",))
+    path, project, data, digest = _runbook(daemon, body["path"])
+    try:
+        text = data.decode("utf-8")
+    except UnicodeError:
+        raise APIError(400, "not imported: the runbook is not UTF-8 text") from None
+    origin = clean_line(f"Imported by you from {path.parent.parent.name}/{path.parent.name}/{path.name}", 160)
+    imported = _imported_titles(store, path)
+    drafts = []
+    for index, raw in enumerate(_checks.parse_runbook(text)):
+        draft, reason = _checks.judge_draft(raw)
+        drafts.append({"index": index, **draft, "savable": reason is None and draft["title"] not in imported,
+                       "reason": reason or ("already imported" if draft["title"] in imported else None)})
+    if "save" not in body:
+        if "digest" in body:
+            raise APIError(400, "digest goes with save")
+        return {"path": str(path), "project_id": project.id, "digest": digest, "origin": origin,
+                "drafts": drafts}
+    index = body["save"]
+    if not isinstance(index, int) or isinstance(index, bool) or not 0 <= index < len(drafts):
+        raise APIError(400, "save must be a draft's index")
+    if body.get("digest") != digest:
+        raise APIError(409, "the runbook changed since you read it; import it again to see its drafts")
+    draft = drafts[index]
+    if draft["reason"] == "already imported":
+        raise APIError(409, "this draft was already imported from this runbook")
+    if not draft["savable"]:
+        raise APIError(400, f"this draft cannot be saved: {draft['reason']}")
+    try:
+        with store._lock:
+            if draft["title"] in _imported_titles(store, path):
+                raise APIError(409, "this draft was already imported from this runbook")
+            record = store.create(thread_id=None, project_id=project.id, task_id=None, created_by=origin,
+                                  title=draft["title"], prs=draft["prs"], steps=draft["steps"],
+                                  imported_from=str(path))
+    except _decisions.CapReached as exc:
+        raise APIError(409, str(exc).removeprefix("Error: ")) from None
+    daemon.bus.publish({"kind": "check_imported", "project_id": project.id, "at": utcnow(),
+                        "data": {"check_id": record["id"]}})
+    return {"ok": True, "check_id": record["id"], "index": index}
+
+
 def route(handler, daemon, parts, query):
-    """`GET /inbox`, `POST /inbox/<id>/answer` and `POST
-    /inbox/decisions/<id>`; None for any other path. `owner_only` runs before
+    """`GET /inbox`, `POST /inbox/<id>/answer`, `POST
+    /inbox/decisions/<id>`, `POST /inbox/checks/<id>/steps/<n>` and `POST
+    /inbox/checks/import`; None for any other path. `owner_only` runs before
     anything else on every `/inbox` path, so the API listener and a non-owner
     page learn nothing, not even which ids exist."""
     if not parts or parts[0] != "inbox":
@@ -1071,4 +1320,11 @@ def route(handler, daemon, parts, query):
     if len(parts) == 3 and parts[1] == "decisions" and method == "POST":
         _object(query, ())
         return 200, answer_decision(daemon, parts[2], handler._body())
+    # Live checks (B2, IN-6): the owner's marks and the runbook import.
+    if parts == ["inbox", "checks", "import"] and method == "POST":
+        _object(query, ())
+        return 200, import_checks(daemon, handler._body())
+    if len(parts) == 5 and parts[1] == "checks" and parts[3] == "steps" and method == "POST":
+        _object(query, ())
+        return 200, mark_check_step(daemon, parts[2], parts[4], handler._body())
     raise APIError(404, "route not found")

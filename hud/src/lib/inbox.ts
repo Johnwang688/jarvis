@@ -42,7 +42,7 @@ export interface InboxGroup {
   max: number;
 }
 
-/** Design §7's thin headers, by rank. Rank 6 is decisions (B1); 7 (checks) comes with B2. */
+/** Design §7's thin headers, by rank. Rank 6 is decisions (B1); 7 is live checks (B2). */
 export const GROUPS: readonly InboxGroup[] = [
   { key: "now", label: "Waiting now", min: 1, max: 2 },
   { key: "you", label: "Waiting on you", min: 3, max: 5 },
@@ -285,6 +285,144 @@ export function decisionBody(picked: number | null, typed: string, d: DecisionVi
   if (text) return { text };
   if (picked !== null && picked >= 0 && picked < d.options.length) return { choice: picked };
   return null;
+}
+
+/** A live check (inbox B2, IN-6): rank 7 while open, rank 8 once every step has the owner's verdict.
+ * Steps are text only: nothing in a check runs anything, and "copy" puts a step's words on the clipboard. */
+export const CHECK = "check";
+const CHECK_ID = /^c[0-9a-f]{12}$/;
+export const VERDICTS = ["pass", "fail", "skip"] as const;
+export type Verdict = (typeof VERDICTS)[number];
+/** The owner's note on one step (the daemon's `checks.NOTE_MAX`). */
+export const NOTE_MAX = 1000;
+
+export interface CheckStep {
+  do: string;
+  expect: string;
+  /** The owner's verdict, once marked. */
+  verdict: Verdict | null;
+  note: string;
+  at: string | null;
+}
+
+export interface CheckView {
+  /** The check's own id (`c` + 12 hex), for `POST /inbox/checks/<id>/steps/<n>`. */
+  id: string;
+  title: string;
+  prs: number[];
+  steps: CheckStep[];
+  done: boolean;
+  /** Whether the daemon's deployed test lets a step be marked now (IN-6). */
+  markable: boolean;
+  /** The deployed test's line (code-built: PR numbers only), "" when nothing is gated. */
+  deploy: string;
+  deployedSha: string | null;
+  importedFrom: string | null;
+}
+
+/**
+ * A check row's words, every one untrusted text (`oneLine`/`textBlock`), or
+ * null for any other row or a check whose detail is not one (never guessed
+ * at, never markable).
+ */
+export function checkOf(row: InboxRow): CheckView | null {
+  if (row.kind !== CHECK) return null;
+  const d = row.detail;
+  const id = typeof d.check_id === "string" && CHECK_ID.test(d.check_id) ? d.check_id : null;
+  if (!id || !Array.isArray(d.steps) || !d.steps.length || d.steps.length > 30) return null;
+  const results = new Map<number, Record<string, unknown>>();
+  if (Array.isArray(d.results)) {
+    for (const r of d.results) {
+      if (isObj(r) && typeof r.step === "number" && Number.isInteger(r.step)) results.set(r.step, r);
+    }
+  }
+  const steps: CheckStep[] = [];
+  for (let i = 0; i < d.steps.length; i++) {
+    const s = d.steps[i];
+    if (!isObj(s)) return null;
+    const r = results.get(i);
+    const verdict = r && (VERDICTS as readonly string[]).includes(r.verdict as string) ? (r.verdict as Verdict) : null;
+    steps.push({ do: textBlock(s.do, 2000), expect: textBlock(s.expect, 2000), verdict,
+                 note: verdict ? textBlock(r!.note, NOTE_MAX) : "", at: verdict && typeof r!.at === "string" ? r!.at : null });
+  }
+  const deploy = isObj(d.deploy) ? d.deploy : {};
+  const prs = Array.isArray(d.prs) ? d.prs.filter((n): n is number => typeof n === "number" && Number.isInteger(n) && n > 0) : [];
+  const done = steps.every((s) => s.verdict !== null);
+  return {
+    id, title: oneLine(d.title, 200), prs, steps, done,
+    markable: !done && deploy.markable === true,
+    deploy: oneLine(deploy.text, 300),
+    deployedSha: typeof d.deployed_sha === "string" && /^[0-9a-f]{40,64}$/.test(d.deployed_sha) ? d.deployed_sha : null,
+    importedFrom: typeof d.imported_from === "string" ? oneLine(d.imported_from, 400) : null,
+  };
+}
+
+/** A step's mark path (`POST /inbox/checks/<id>/steps/<n>`, inbox B2). */
+export function checkStepPath(id: string, step: number): string {
+  return `/inbox/checks/${encodeURIComponent(id)}/steps/${Math.trunc(step)}`;
+}
+
+/** The runbook import (`POST /inbox/checks/import`, inbox B2, design §6). */
+export const CHECK_IMPORT_PATH = "/inbox/checks/import";
+
+/** One draft the import returns, unsaved until the owner saves it. */
+export interface CheckDraft {
+  index: number;
+  title: string;
+  prs: number[];
+  steps: { do: string; expect: string }[];
+  savable: boolean;
+  reason: string | null;
+}
+
+/** The import's reply, read as text; null when it is not one. */
+export function parseDrafts(raw: unknown): { path: string; digest: string; drafts: CheckDraft[] } | null {
+  if (!isObj(raw) || typeof raw.path !== "string" || typeof raw.digest !== "string" || !Array.isArray(raw.drafts)) return null;
+  const drafts: CheckDraft[] = [];
+  for (const d of raw.drafts) {
+    if (!isObj(d) || typeof d.index !== "number" || !Array.isArray(d.steps)) continue;
+    drafts.push({
+      index: d.index, title: oneLine(d.title, 200),
+      prs: Array.isArray(d.prs) ? d.prs.filter((n): n is number => typeof n === "number" && Number.isInteger(n)) : [],
+      steps: d.steps.filter(isObj).map((s) => ({ do: textBlock(s.do, 2000), expect: textBlock(s.expect, 2000) })),
+      savable: d.savable === true, reason: typeof d.reason === "string" ? oneLine(d.reason, 200) : null,
+    });
+  }
+  return { path: oneLine(raw.path, 1024), digest: raw.digest, drafts };
+}
+
+/** A line of Markdown text that cannot start a heading, list or quote, or close a code span. */
+function mdLine(text: string): string {
+  return text.replace(/\r?\n+/g, " ").replace(/([\\`*_[\]<>|#])/g, "\\$1").trim();
+}
+
+/**
+ * The receipt as Markdown, for the owner to paste into a checkpoint (§5):
+ * made here from the stored record the row carries, never from the network.
+ * Every agent- or runbook-written string is escaped so it stays one line of text.
+ */
+export function checkReceipt(view: CheckView, origin: string): string {
+  const counts = { pass: 0, fail: 0, skip: 0 } as Record<Verdict, number>;
+  for (const s of view.steps) if (s.verdict) counts[s.verdict] += 1;
+  const lines = [
+    `## Live check ${view.id}: ${mdLine(view.title)}`,
+    "",
+    `- Result: ${counts.pass} passed, ${counts.fail} failed, ${counts.skip} skipped, ` +
+      `${view.steps.length - counts.pass - counts.fail - counts.skip} not marked`,
+  ];
+  if (view.prs.length) lines.push(`- Pull requests: ${view.prs.map((n) => `#${n}`).join(", ")}`);
+  if (view.deployedSha) lines.push(`- Build: ${view.deployedSha.slice(0, 12)}`);
+  if (origin) lines.push(`- Posted by: ${mdLine(origin)}`);
+  if (view.importedFrom) lines.push(`- Imported from: ${mdLine(view.importedFrom)}`);
+  lines.push("- Recorded by the owner in the Jarvis inbox", "");
+  view.steps.forEach((s, i) => {
+    const mark = s.verdict ? s.verdict.toUpperCase() : "NOT MARKED";
+    lines.push(`${i + 1}. **${mark}** ${mdLine(s.do)}`);
+    if (s.expect) lines.push(`   - Expect: ${mdLine(s.expect)}`);
+    if (s.note) lines.push(`   - Note: ${mdLine(s.note)}`);
+    if (s.at) lines.push(`   - At: ${mdLine(s.at)}`);
+  });
+  return lines.join("\n") + "\n";
 }
 
 /** The approval request id an `appr:` row is about (its `detail` is `ApprovalRequest.to_json()`). */
