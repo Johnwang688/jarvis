@@ -729,6 +729,9 @@ class Daemon:
             # An answer still "queued" from a previous run never ran (the
             # queue is in memory): say so on its decision (inbox B1).
             self.inbox.fail_lost_answers()
+            # Open PRs for the inbox (B3): a thread of its own, only once
+            # `main()` attached it; nothing here waits on `gh`.
+            self.inbox.prs.start()
             self.devservers.start()
             self.schedules.start()
             # A previous run's unrestored duck (V15) is repaired from its
@@ -2957,6 +2960,7 @@ class Daemon:
         # stopped; then this finds nothing (idempotent).
         self.release_approvals()
         self.schedules.stop()
+        self.inbox.prs.stop()                   # the inbox's PR poll (B3): a running gh is killed
         titles = self.titles
         if titles is not None:
             titles.stop()                       # its Codex session ends with the metadata cancel
@@ -3855,6 +3859,9 @@ def main() -> int:
     # read-only, time-limited): attached here, so no embedded or test daemon
     # runs a Windows command. Without it the phone stays limited.
     daemon.secure.attach_system()
+    # The inbox's open PRs (B3, inbox_prs.py): the owner's `gh`, read-only,
+    # attached here for the same reason.
+    daemon.inbox.prs.attach_system()
     hatch = EscapeHatch(daemon, daemon.approvals)
     discord = None
     daemon.runner = TaskRunner(daemon, daemon.router)

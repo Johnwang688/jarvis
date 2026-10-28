@@ -83,6 +83,13 @@ bus (`decision_posted`, `decision_answered`), which `Inbox.observe` turns
 into `inbox_changed`. One source or record that cannot be read never takes
 the projection down.
 
+**Pull requests (B3, IN-4).** Every open, non-draft PR in each project's
+GitHub repository is a `pr` row at rank 5, read from the last poll of
+`inbox_prs.PrSource` (the daemon's own `gh`, read-only, every 5 minutes and
+after `task_status_changed`); `rows()` never waits on `gh`. A list that
+cannot be read is one `pr_unavailable` row ("PR list unavailable"), never
+an empty list. Neither takes an answer (400). Details in `inbox_prs.py`.
+
 This module is SELF_PROTECTED (`jarvis/tools/files.py`): it decides what the
 owner sees as waiting.
 """
@@ -103,13 +110,14 @@ from .model import TaskState
 
 LOG = logging.getLogger(__name__)
 
-# IN-4's bands. Code, not a setting. 5 and 7 (PRs, checks) belong to later
-# packages; 6 is decisions (B1); 8 is `failed`, "denied while away" (IN-3)
+# IN-4's bands. Code, not a setting. 5 is pull requests (B3); 7 (checks)
+# belongs to a later package; 6 is decisions (B1); 8 is `failed`, "denied while away" (IN-3)
 # and a decision recorded for a chat that was closed.
 RANK_APPROVAL = 1
 RANK_QUESTION = 2
 RANK_PROPOSAL = 3
 RANK_BLOCKED = 4
+RANK_PR = 5            # B3: `inbox_prs.RANK_PR`, the same band
 RANK_DECISION = 6
 RANK_FAILED = 8
 RANK_MISSED = 8
@@ -119,7 +127,8 @@ RANK_RECORDED = 8
 _PREFIX = {"approval": "appr", "question": "q", "task_question": "tq",
            "proposal": "prop", "task": "task", "missed": "missed", "decision": "dec"}
 _ANSWERABLE = {"appr", "q", "tq", "prop", "dec"}
-_KNOWN = _ANSWERABLE | {"task", "missed"}
+# B3: a pull request (`pr:OWNER/REPO#N`) and "PR list unavailable" (`prx:list`).
+_KNOWN = _ANSWERABLE | {"task", "missed", "pr", "prx"}
 
 # "Denied while you were away" (IN-3). The resolutions recorded; the file's
 # bound (it holds at most the newest MISSED_KEEP records: an append that
@@ -600,6 +609,13 @@ def _decision_row(daemon, hidden, rec, now) -> list:
     return out
 
 
+def _pr_rows(daemon, hidden):
+    """B3 (IN-4): the last PR poll's rows. A read of a snapshot under the
+    source's own lock, which no `gh` call holds: never waits on `gh`."""
+    source = getattr(getattr(daemon, "inbox", None), "prs", None)
+    return source.rows(hidden) if source is not None else []
+
+
 def rows(daemon) -> list[dict]:
     """Every row, ranked (IN-4; ties to the older item). Pure: reads only."""
     from .projects import archived_project_ids
@@ -614,7 +630,8 @@ def rows(daemon) -> list[dict]:
                          ("questions", lambda: _question_rows(daemon, hidden)),
                          ("tasks", lambda: _task_rows(daemon, hidden)),
                          ("missed", lambda: _missed_rows(daemon)),
-                         ("decisions", lambda: _decision_rows(daemon, hidden))):
+                         ("decisions", lambda: _decision_rows(daemon, hidden)),
+                         ("pull requests", lambda: _pr_rows(daemon, hidden))):
         try:
             out += source()
         except Exception as exc:  # noqa: BLE001 — never a 500 for the whole inbox
@@ -649,6 +666,10 @@ class Inbox:
         # B1: the decisions `owner_post` writes (through the daemon's
         # `decisions.OwnerPosts`, which shares this store) and the owner answers here.
         self.decisions = _decisions.DecisionStore(root) if root is not None else None
+        # B3 (IN-4): open PRs, polled off the daemon's lock by `gh`, only once
+        # daemon2's `main()` attaches it (`inbox_prs.PrSource.attach_system`).
+        from .inbox_prs import PrSource
+        self.prs = PrSource(daemon)
 
     def answer_dropped(self, decision_id) -> None:
         """An answer queued for its chat will never run (the owner's Stop, a
@@ -703,6 +724,8 @@ class Inbox:
         kind = record.get("kind")
         if kind not in SOURCE_KINDS:
             return
+        if kind == "task_status_changed" and getattr(self, "prs", None) is not None:
+            self.prs.poke()          # B3: poll PRs soon (debounced); only sets an event
         ids = self._ids(kind, record)
         if ids is None:
             return
@@ -821,6 +844,9 @@ def answer(daemon, row_id, body, *, owner_verified: bool, via: str = "inbox"):
         if prefix == "missed":
             # Information only (IN-3); no "ask again" (design §10, question 3).
             raise APIError(400, "this item takes no answer; open its chat to see what was denied")
+        if prefix in ("pr", "prx"):
+            # B3 (IN-4): merging stays the owner's own gh, or a card under the merge gate.
+            raise APIError(400, "this item takes no answer; open the pull request to review or merge it")
         raise APIError(400, "this item takes no answer; open its task to resume or cancel it")
     # Shape first, so a malformed body is a 400 whatever the row's state.
     if prefix == "appr":

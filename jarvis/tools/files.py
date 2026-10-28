@@ -125,6 +125,9 @@ SELF_PROTECTED = frozenset(
         # function. An agent that could edit it could hide a card or answer
         # one.
         "jarvis/v2/inbox.py",
+        # Its PR source (inbox B3, IN-4): which repositories are read with
+        # the owner's gh login, and what a PR row may say.
+        "jarvis/v2/inbox_prs.py",
         # The owner's decisions (inbox B1, IN-5): the store, its caps and
         # scrub, who may post, and the one tool that posts. An agent that
         # could edit them could lift the caps, skip the scrub or post from a
