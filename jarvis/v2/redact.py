@@ -48,7 +48,8 @@ An approval card is a fourth reader (`card_spans`, `CardPass`): spans found
 on the text as typed and held through `secrets.redact_command`, within the
 owner's condition that a withheld span never hides code that runs. A string
 the shell never runs (a `Write`'s content) takes every display span and a
-private key's whole block; a command (every string beside a command or argv
+private key's whole block when the block is nothing but key material (never
+code between a header and a footer); a command (every string beside a command or argv
 key, a path, the headline) only the formats `credential_patterns` knows, never
 at a command's word or on a line that runs text (review of #314, H1).
 
@@ -286,8 +287,11 @@ _SPLIT_PIECES = 8
 _SPLIT_BREAK = re.compile(r"(\r\n|\r|\n|[ \t])")
 _NEWLINES = ("\n", "\r\n", "\r")
 # A line that starts a new statement is never the tail of a wrapped token
-# (review of #314, L1): `NAME=…`, or a word a shell line starts with.
-_STATEMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=|(?:export|declare|typeset|local|readonly|set|unset"
+# (review of #314, L1): `NAME=…`, or a word a shell line starts with. A
+# word of letters and digits ending in `=` padding with nothing after it is
+# base64's tail, not an assignment (third review L4: a wrapped AWS session
+# token's `…==`); one with an `_` in its name stays one (`S3_BUCKET=`).
+_STATEMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=(?!=*\Z)|[A-Za-z0-9]*_[A-Za-z0-9_]*=+\Z|(?:export|declare|typeset|local|readonly|set|unset"
                         r"|env|sudo|exec|eval|source|alias|cd|echo|printf|if|then|else|elif|fi|for"
                         r"|while|until|do|done|case|esac|function|return|exit)\Z")
 # Any prefix a prefixed shape starts with: a cheap first look before trying
@@ -517,15 +521,36 @@ def _regex_spans(view: str, table, lo: int = 0, hi: int | None = None) -> list[t
 _CANDIDATE = re.compile(_PREFIXES + r"|-----(?:BEGIN|END) ")
 
 
+# The kinds a later start can sit inside an earlier one's run (review of
+# #314, third review M2): a JWT may start after a `-` (as main's `\b` had it)
+# and a caller token after anything, so `-eyJ-eyJ…` and `jmcp_jmcp_…` are
+# a start every few characters, each read to the run's end (quadratic: 15 s
+# at 400 KB). (kind: (its start, its body's run).) A start inside the body
+# run of an earlier start of the same kind is dominated by it: its match,
+# if any, ends where the earlier one's does (a JWT's first part ends at its
+# first `.`; a caller token's at its run's end) and the earlier one, having
+# the longer body, matches whenever it does. So once a start has been tried,
+# every start of that kind before its run's end is skipped, matched or not.
+_RUN_STARTS = {
+    "JWT": (re.compile(r"(?<![A-Za-z0-9_])eyJ"), re.compile(r"[A-Za-z0-9_\-]*")),
+    "Jarvis caller token": (re.compile(r"jmcp_"), re.compile(r"[A-Za-z0-9_\-]*")),
+}
+
+
 def _prefixed_spans(view: str, table, lo: int = 0, hi: int | None = None) -> list[tuple[int, int, str]]:
     hi = len(view) if hi is None else hi
-    out = []
+    out, dead = [], {}
     for candidate in _CANDIDATE.finditer(view, lo, hi):
         pos = candidate.start()
         for kind, pattern in table:
+            if pos < dead.get(kind, -1):
+                continue
             match = pattern.match(view, pos, hi)
             if match is not None:
                 out.append((match.start(), match.end(), kind))
+            run = _RUN_STARTS.get(kind)
+            if run is not None and (start := run[0].match(view, pos, hi)) is not None:
+                dead[kind] = run[1].match(view, start.end(), hi).end()
     return out
 
 
@@ -1013,12 +1038,102 @@ def _command_words(text: str) -> list[tuple[int, int]]:
     return out
 
 
-def _terminated_key(span: str) -> bool:
-    """Does `span` hold a private key's header and, after it, a footer (a
-    PEM, OpenSSH or PGP block, whatever lies between: quotes, `(`, `+`, an
-    armor's `Version:` line)?"""
-    head = KEY_BEGIN.search(span)
-    return head is not None and KEY_END.search(span, head.end()) is not None
+# A private key on a card that is text (third review of #314, H): a block
+# goes whole only when everything between its header and footer is key
+# material, so a fake header and footer never hide the code between them
+# (`HEADER = "-----BEGIN RSA PRIVATE KEY-----"`, code, `FOOTER = …`).
+# What a block's line may be once its framing is taken off: base64 that
+# reads as random (both cases and a digit, `+` or `=`: a body line of a real
+# key is, a word or a path such as `reboot`, `/sbin/reboot` or `main` is
+# not), a PGP checksum, an armor or PEM header line (`Version:`, `Comment:`,
+# `Proc-Type:`, `DEK-Info:`, of plain characters), or nothing. Its framing:
+# quotes (a `b`/`r`/`u` prefix too), `(`, `+` and `,` before; quotes, `+`,
+# `)`, `,` and `;` after; and the line breaks `secrets._KEY_BREAK` knows
+# (a real one or a `\n` escape) between.
+_CARD_KEY_SPLIT = re.compile("(" + KEY_BEGIN.pattern + ")|(" + KEY_END.pattern + r")|(\r?\n|(?:\\r)?\\n|\\r)")
+_CARD_FRAME_HEAD = re.compile(r"[ \t]*(?:[(+,][ \t]*)*(?:[bBrRuU]{0,2}[\"'][ \t]*)?")
+_CARD_FRAME_TAIL = " \t\"'+),;"
+_CARD_ARMOR = re.compile(r"(?:Version|Comment|Hash|Charset|MessageID|Proc-Type|DEK-Info):[ \t]*[A-Za-z0-9 .,:/@+_=\-]*")
+_CARD_BASE64 = re.compile(r"[A-Za-z0-9+/]+={0,2}")
+_CARD_CHECKSUM = re.compile(r"=[A-Za-z0-9+/]{4}")
+_CARD_GAP = re.compile(r"(?:\s|\\[rn])*")
+
+
+def _card_core(text: str, a: int, b: int) -> tuple[int, int]:
+    """The piece `text[a:b]` (one line of a block) without its framing."""
+    a = _CARD_FRAME_HEAD.match(text, a, b).end()
+    while b > a and text[b - 1] in _CARD_FRAME_TAIL:
+        b -= 1
+    return a, b
+
+
+def _card_key_line(core: str) -> str | None:
+    """What a block's line (its framing off) is: "" (nothing), "armor",
+    "key" (key material that reads as random), or None (anything else,
+    which is never withheld as a key's)."""
+    if not core:
+        return ""
+    if _CARD_CHECKSUM.fullmatch(core):
+        return "key"
+    if _CARD_ARMOR.fullmatch(core):
+        return "armor"
+    if (_CARD_BASE64.fullmatch(core) and any(c.isupper() for c in core) and any(c.islower() for c in core)
+            and (_DIGIT.search(core) or "+" in core or core.endswith("="))):
+        return "key"
+    return None
+
+
+def _whole_key_block(text: str, items) -> bool:
+    """Is every line of a block's span key material, framing or nothing?"""
+    return all(kind != "line" or _card_key_line(text[slice(*_card_core(text, a, b))]) is not None
+               for kind, a, b in items)
+
+
+def _card_key_spans(text: str, a: int, b: int) -> list[tuple[int, int]]:
+    """What a card withholds of a private key's span `text[a:b]` (a block,
+    an unterminated one, or a footer's tail; `private_key_spans`): the whole
+    span when every line in it is key material (`_whole_key_block`); else
+    each header and footer, and the key-material lines next to one (below a
+    header, above a footer, across blank and armor lines), never a line
+    that is anything else, nor any line past it."""
+    items, pos = [], a
+    for m in _CARD_KEY_SPLIT.finditer(text, a, b):
+        if m.start() > pos:
+            items.append(("line", pos, m.start()))
+        kind = "head" if m.group(1) is not None else "foot" if m.group(2) is not None else "break"
+        items.append((kind, m.start(), m.end()))
+        pos = m.end()
+    if pos < b:
+        items.append(("line", pos, b))
+    # Glued to a header (`private_key_spans` takes a token stuck to its
+    # front): part of it.
+    if len(items) > 1 and items[0][0] == "line" and items[1][0] == "head":
+        items[:2] = [("head", items[0][1], items[1][2])]
+    if _whole_key_block(text, items):
+        return [(a, b)]
+    held = []
+    for i, (kind, lo, hi) in enumerate(items):
+        if kind not in ("head", "foot"):
+            continue
+        held.append((lo, hi))
+        step = 1 if kind == "head" else -1
+        j = i + step
+        while 0 <= j < len(items) and items[j][0] in ("line", "break"):
+            if items[j][0] == "line":
+                ca, cb = _card_core(text, items[j][1], items[j][2])
+                what = _card_key_line(text[ca:cb])
+                if what is None:
+                    break
+                if what == "key":
+                    held.append((ca, cb))
+            j += step
+    out: list[list[int]] = []
+    for lo, hi in sorted(set(held)):        # one marker for lines only breaks apart
+        if out and (lo <= out[-1][1] or _CARD_GAP.fullmatch(text, out[-1][1], lo) is not None):
+            out[-1][1] = max(out[-1][1], hi)
+        else:
+            out.append([lo, hi])
+    return [(lo, hi) for lo, hi in out]
 
 
 def card_spans(text: str, *, command: bool = True) -> list[tuple[int, int, str]]:
@@ -1027,11 +1142,12 @@ def card_spans(text: str, *, command: bool = True) -> list[tuple[int, int, str]]
 
     - **A string the shell never runs** (a `Write`'s `content`, an `Edit`'s
       `new_string`): every display shape (the heuristic ones included) and
-      labelled value, and a private key's whole block: a terminated one
-      (header to footer) whatever lies between, quoted or concatenated lines
-      and armor headers included (review of #314, M3), an unterminated one or
-      a footer's tail when every line of it is key material
-      (`secrets._key_material`). Before this the key's body stayed on the
+      labelled value, and a private key's whole block when every line of it
+      is key material, quoted or concatenated lines and armor headers
+      included (review of #314, M3); otherwise its header, footer and the
+      key-material lines next to them, never another line nor any past it
+      (`_card_key_spans`; third review, H and L5: a fake header and footer
+      around code hid the code). Before this the key's body stayed on the
       card: `redact_command` takes a block only from inside one shell
       quoting, which plain text never has (review of PR #308).
     - **A command** (every string beside one: `map_strings`; a path; a
@@ -1049,11 +1165,11 @@ def card_spans(text: str, *, command: bool = True) -> list[tuple[int, int, str]]
       `secrets._key_blocks`, a URL's userinfo to `strip_url_credentials`."""
     from jarvis.tools import secrets as S
     if not command:
+        view = _View(text)
         found = []
-        for a, b, kind in spans(text, mode=DISPLAY):
-            if kind == KEY and not (_terminated_key(text[a:b]) or S._key_material(text[a:b])):
-                continue
-            found.append((a, b, kind))
+        for va, vb, kind in _shape_spans(view.view, DISPLAY):
+            for lo, hi in _card_key_spans(view.view, va, vb) if kind == KEY else [(va, vb)]:
+                found.append((*view.span(lo, hi), kind))
         found += _labelled_card_spans(text)
         return _merge(found)
     if S._run_names(text) is True:
@@ -1070,12 +1186,27 @@ def card_spans(text: str, *, command: bool = True) -> list[tuple[int, int, str]]
         found.append((a, b, kind))
     found = _merge(found + _labelled_card_spans(text))
     if found:
-        words = _command_words(text)
-        found = [s for s in found if not any(s[0] < b and a < s[1] for a, b in words)]
+        found = _clear_of(found, _command_words(text))
     if found:
         mask = S._Mask(_NOT_A_BLANK.sub("x", text))
         found = [s for s in found if mask.safe(s[0], s[1])]
     return found
+
+
+def _clear_of(found, words) -> list[tuple[int, int, str]]:
+    """The spans of `found` (sorted, disjoint) that touch no span of `words`,
+    in one sweep over both sorted lists (review of #314, third review M3:
+    every span against every word was 14 s on a 1 MB card)."""
+    words = sorted(words)
+    out, k, reach = [], 0, -1      # reach: the furthest end of the words starting before s's end
+    for s in found:
+        while k < len(words) and words[k][0] < s[1]:
+            reach = max(reach, words[k][1])
+            k += 1
+        # A word starting before s's end overlaps s iff it ends past s's start.
+        if reach <= s[0]:
+            out.append(s)
+    return out
 
 
 def _labelled_card_spans(text: str) -> list[tuple[int, int, str]]:
@@ -1121,9 +1252,11 @@ class CardPass:
     def show(self, text: str, *, command: bool = True) -> str:
         if not self._kinds or "\ue000" not in text:
             return text
-        for key, kind in self._kinds.items():
-            text = text.replace(key, withheld(kind))
-        return text
+        # One pass over the text (third review M3: one `replace` per held
+        # span was O(spans x text)).
+        held = re.compile("\ue000" + re.escape(self._nonce) + "[0-9]+\ue001")
+        return held.sub(lambda m: withheld(self._kinds[m.group()]) if m.group() in self._kinds
+                        else m.group(), text)
 
 
 def map_strings(value, fn, *, command: bool = True, depth: int = 0):

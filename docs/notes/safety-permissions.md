@@ -3224,6 +3224,21 @@ logged headline as text, the records on the model's scrub, the old
 single-pattern scan, a terminated block judged line by line, and one per
 low finding); each finding's check fails on `9286ca6f`.
 
+The third review of #314 (`16af27ec`, same file): h3 a private key's header
+and footer never hide what lies between on a card that is text or in
+`log.jsonl`. A block goes whole only when every line between is key
+material once its framing is off (`_card_key_spans`, `_whole_key_block`);
+otherwise its header, footer and the adjacent key-material lines go, never
+code (a fake header and footer as strings, as comments, a header-only string
+before a real block). l5 an unterminated block's header and key lines go,
+the code after them stays. m2 `-eyJ…`, `-eyJa…` and `jmcp_…` runs are linear
+(`_RUN_STARTS`: a start inside an earlier same-kind start's run is skipped,
+being dominated by it). t3 a card's command-word guard (`_clear_of`) and its
+placeholders' return (`CardPass.show`) are one sweep each. l4 a wrapped AWS
+session token's `…==` tail is not a `NAME=` statement. Each with its mutation.
+Still open: `for_display` and the model readers (the Diff tab, diff review's
+input) still withhold a header-to-footer span whole whatever lies between.
+
 Follow-ups from the second review, not changed here: the phone's marker rule
 (a card showing any `[withheld: …]` is Deny-only there) is stricter than it
 needs to be (L4); a check note's missing second scrub and a PR branch's
