@@ -2,19 +2,18 @@
 
 Working instructions for agents changing Jarvis. Read this guide, then the area
 notes and design/decision documents for the code you will touch. Update current
-rules here; put implementation history, review findings and measured results in
-the appropriate area note. Keep this guide near 38–40 KB.
+rules here; put history, review findings and measured results in the area
+note. Keep this guide near 38–40 KB.
 
 The previous file is preserved verbatim in [area notes](#area-index), with a
-[migration manifest](docs/notes/claude-migration.json). Those notes mix live
-rules, dated findings and superseded behavior. Moving a rule does **not** revoke
+[migration manifest](docs/notes/claude-migration.json). Those notes mix live rules,
+dated findings and superseded behavior. Moving a rule does **not** revoke
 its safety obligations. Summaries here are not permission to omit a guard:
-read the complete relevant notes before changing a boundary. Resolve older
-conflicting accounts using the latest explicit owner decision and verify
-current code. Historical “live” claims are not new deployment receipts.
+read the complete relevant notes before changing a boundary. Resolve conflicts
+by the latest explicit owner decision and current code. Historical “live”
+claims are not new deployment receipts.
 
-Invariants and decisions are retained byte for byte; their named paragraph
-references are in the notes. Preserved paths are repository-relative.
+Invariants and decisions are retained byte for byte.
 
 Tool-call labels: A value split by shell quoting can still appear in a label;
 labels are untrusted text ([HUD notes](docs/notes/hud-workspace.md)).
@@ -107,6 +106,14 @@ Owner HTTP Basic/Digest auth uses only the exact private tab socket;
 credentials never enter tools, replay, status, logs or config. Pending
 navigation and cleanup: Browser note and HTTP-auth plan.
 
+## Phone
+
+The phone's only door is the remote listener (8408, loopback, behind `tailscale
+serve`): strict Host/Origin, `/m/*` only; agents never reach it. Routes need
+a passkey session; each Allow, cancel and defer a fresh assertion. Phone sends
+are `NEVER_STEER`; pushes carry `{count, rank}` only, none 23–07. Dictation is
+not speaker-verified (owner). [Design](docs/plans/2026-10-24-phone-surface-design.md)
+
 ## Inbox
 
 `/inbox` is owner-only; agents only `owner_post`, never read, answer, mark,
@@ -190,29 +197,26 @@ summaries do not replace detailed matchers, exceptions or owner choices.
 ## Testing and operating the checkout
 
 Use focused free checks, then the required integration sweep. Independent review
-and meaningful tests precede merging. Preserve negative cases and mutation
-evidence when a subtle invariant guards a boundary. Read actual suite summaries,
-not just a wrapper's exit code. Report whether a result is committed, merged,
-built, browser-tested, installed or live-validated.
+and meaningful tests precede merging. Keep negative cases and mutation evidence
+for subtle boundary invariants. Read actual suite summaries, not a wrapper's exit
+code. Report whether a result is committed, merged, built, browser-tested,
+installed or live-validated.
 
 In this WSL workflow, cap each test/build tree with
 `systemd-run --user --scope -q -p MemoryMax=3G -p MemorySwapMax=0`. Use the
-worktree's PYTHONPATH/shared venv as appropriate. Tests use temporary HOME/config,
+worktree's PYTHONPATH/shared venv. Tests use temporary HOME/config,
 fake providers and ephemeral ports, never live 8402/8403/8405 or owner state.
 Browser tests need an isolated mock server; do not operate the live daemon.
 
-Under load, wait for the actual state rather than sleeping. Measure computation
-with a clock appropriate to the path; calling-thread CPU excludes off-thread
-work. A post-return wall assertion cannot interrupt a hang. Keep active deadlines
-where needed, pin guard-strength constants and prove costly mutations still fail.
-Expiry from a fake monotonic clock must be relative, not assume system uptime.
-Count product faults separately from test-owned teardown.
+Under load, wait for the actual state rather than sleeping. Measure with a clock
+suited to the path (calling-thread CPU excludes off-thread work); keep active
+deadlines, pin guard-strength constants and prove costly mutations still fail.
+Fake-monotonic expiry must be relative. Count product faults apart from teardown.
 
 Budget paid probes. Agent-bench, long-bench and SWE-bench answer different
-questions; do not pool scores. Use the [SWE-bench runbook](swecompare/RUNBOOK.md)
-and [test inventory](docs/notes/testing-benchmarks.md). Verify old prices/model
-comparisons. The [old validation list](docs/notes/live-validation.md) is history,
-not current completion evidence.
+questions; do not pool scores ([runbook](swecompare/RUNBOOK.md),
+[inventory](docs/notes/testing-benchmarks.md)). Verify old prices and model
+comparisons. The [old validation list](docs/notes/live-validation.md) is history.
 
 ## Area index
 
@@ -236,7 +240,6 @@ not current completion evidence.
 | Gmail, CAD, Spotify, schoolwork | [Integrations](docs/notes/integrations.md) |
 | Windows app bridge | [Desktop](docs/notes/desktop.md) |
 | Earlier goals/sessions/runtime | [Earlier runtime](docs/notes/legacy-runtime.md) |
-| Old outstanding probes | [Historical validation](docs/notes/live-validation.md) |
 
 `python scripts/slim_claude.py --check` rebuilds the original bytes and checks
 retained copies and this guide's size. Keep archive payloads unchanged; update
