@@ -36,7 +36,9 @@ projection (`inbox.rows`, IN-1); nothing is stored.
   {approvals, questions, decisions, blocked, proposals, live}, live: [{row}],
   overnight: [item], before: [item], fyi: {count}, more, open, limits:
   {approve, leave, shown}, projects: [{id, name}], places: [{key, kind, id,
-  project_id, title}]}`, plus on the phone `group: {ok, why}` and
+  project_id, title}], since: [item]}` (`since` added by the review of #329,
+  NIT 7: rows first asked after the night ended, "Waiting now"), plus on
+  the phone `group: {ok, why}` and
   `opens_here`. An item is `{row, section, place, approve, leave, why,
   tag}`: `row` is the inbox row (on the phone, `remote_api.inbox_row`'s
   projection, scrubbed), `approve` whether it may be ticked for Approve
@@ -46,8 +48,9 @@ projection (`inbox.rows`, IN-1); nothing is stored.
 **What it holds (MR-1).** `quiet.QuietHours.last_window` is the night (the
 current quiet window, or the last one that ended). Overnight: rows at
 ranks 1 to 4 and open decisions (rank 6) asked in it. Still waiting from
-before: every other row at ranks 1 to 4 (with quiet hours off, this is all
-there is). For your information: only how many rank-8 rows came in the
+before: rows at ranks 1 to 4 asked before it (with quiet hours off, every
+row at ranks 1 to 4). Waiting now (`since`): rows at ranks 1 to 4 first
+asked after it ended, or at a time that cannot be read. For your information: only how many rank-8 rows came in the
 night. No PRs or checks. A live approval (rank 1) is "Live now", never
 selectable (IN-3 unchanged for live cards). At most `SHOWN` items, then
 "and N more in the Inbox".
@@ -366,7 +369,7 @@ def report(daemon, *, phone: bool) -> dict:
     store = _store(daemon)
     records = {r["id"]: r for r in store.all()} if store is not None else {}
     store_now = store.clock() if store is not None else datetime.now(timezone.utc)
-    live, overnight, before, fyi = [], [], [], 0
+    live, overnight, before, since, fyi = [], [], [], [], 0
     for row in rows:
         at = _when(row.get("asked_at"))
         inside = window is not None and at is not None and window[0] <= at < window[1]
@@ -374,7 +377,12 @@ def report(daemon, *, phone: bool) -> dict:
         if rank == 1 and kind == "approval":
             live.append(row)
         elif rank in (1, 2, 3, 4):
-            (overnight if inside else before).append(row)
+            if inside:
+                overnight.append(row)
+            elif window is None or (at is not None and at < window[0]):
+                before.append(row)
+            else:
+                since.append(row)
         elif kind == "decision" and rank == 6 and inside:
             overnight.append(row)
         elif rank == 8 and inside and kind not in ("check", "pr", "pr_unavailable"):
@@ -402,10 +410,11 @@ def report(daemon, *, phone: bool) -> dict:
             else:
                 out["approve"], out["tag"] = True, item_tag(record)
         return out
-    waiting = [(row, "overnight") for row in overnight] + [(row, "before") for row in before]
+    waiting = ([(row, "overnight") for row in overnight] + [(row, "since") for row in since]
+               + [(row, "before") for row in before])
     items = [item(row, section) for row, section in waiting[:SHOWN]]
     summary = {name: 0 for name in ("approvals", "questions", "decisions", "blocked", "proposals", "live")}
-    for row in live + overnight + before:
+    for row in live + overnight + since + before:
         name = SUMMARY.get(row.get("kind"))
         if name:
             summary[name] += 1
@@ -424,6 +433,7 @@ def report(daemon, *, phone: bool) -> dict:
            "summary": summary, "live": [{"row": shown(row)} for row in live],
            "overnight": [i for i in items if i["section"] == "overnight"],
            "before": [i for i in items if i["section"] == "before"],
+           "since": [i for i in items if i["section"] == "since"],
            "fyi": {"count": fyi}, "more": max(0, len(waiting) - SHOWN), "open": len(waiting),
            "limits": {"approve": APPROVE_MAX, "leave": LEAVE_MAX, "shown": SHOWN},
            "projects": list(projects.values()), "places": list(places.values())}

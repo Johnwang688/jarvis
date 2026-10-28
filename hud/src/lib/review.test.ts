@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import * as review from "./review";
 import {
-  afterChanged, approveBody, chipsOf, confirmationList, emptySelection, footerState, groupItems, keptSelection,
-  leaveBody, parseReview, summaryLine, toggled, type ReviewReport,
+  afterChanged, allItems, approveBody, chipsOf, confirmationList, confirmedChanged, emptySelection, footerState,
+  groupItems, keptSelection, leaveBody, parseReview, sectionTitle, summaryLine, toggled, type ReviewReport,
 } from "./review";
 
 const H = '<img src=x onerror="window.__pwned=1">';
@@ -33,6 +33,7 @@ function sample(): Record<string, unknown> {
     overnight: [
       item(deferred("a"), { approve: true, leave: true, tag: tag("a") }),
       item(deferred("b"), { approve: true, leave: true, tag: tag("b") }),
+      item(deferred("c"), { approve: true, leave: true, tag: tag("c") }),
       item(deferred("w", { thread_id: "t2" }), { approve: false, leave: true, why: "withheld", place: "chat:t2" }),
       item(row("q:t2:1", "question", 2, { thread_id: "t2", asked_at: "2026-03-11T05:00:00+00:00" }), { place: "chat:t2" }),
       item(row("dec:d0123456789ab", "decision", 6, { detail: { decision_id: "d0123456789ab", question: "Which?",
@@ -57,7 +58,8 @@ function parsed(raw = sample()): ReviewReport {
 describe("the morning review's report (lib/review.ts)", () => {
   it("reads the daemon's report, and refuses anything that is not one", () => {
     const r = parsed();
-    expect(r.overnight.map((i) => i.row.id)).toEqual(["defer:a", "defer:b", "defer:w", "q:t2:1", "dec:d0123456789ab"]);
+    expect(r.overnight.map((i) => i.row.id)).toEqual(["defer:a", "defer:b", "defer:c", "defer:w", "q:t2:1",
+      "dec:d0123456789ab"]);
     expect(r.live.map((x) => x.id)).toEqual(["appr:L"]);
     expect((r.fyi)).toBe(2);
     expect(r.projects.get("p1")).toBe("Calc " + H);
@@ -91,7 +93,7 @@ describe("the morning review's report (lib/review.ts)", () => {
     expect(groups[0].places.map((p) => p.place.key)).toEqual(["chat:t2", "chat:t1"]);
     // Deferred approvals first, then questions.
     expect(groups[0].places[0].items.map((i) => i.row.id)).toEqual(["defer:w", "q:t2:1"]);
-    expect(groups[0].places[1].items.map((i) => i.row.id)).toEqual(["defer:a", "defer:b", "dec:d0123456789ab"]);
+    expect(groups[0].places[1].items.map((i) => i.row.id)).toEqual(["defer:a", "defer:b", "defer:c", "dec:d0123456789ab"]);
     const before = groupItems(r, r.before);
     expect(before.map((g) => g.name)).toEqual(["Other"]);
   });
@@ -117,7 +119,7 @@ describe("the selection (MR-4)", () => {
     sel = toggled(sel, a.row.id, a);
     expect(sel.size).toBe(0);
     // A question cannot be ticked.
-    expect(toggled(emptySelection(), "q:t2:1", r.overnight[3]).size).toBe(0);
+    expect(toggled(emptySelection(), "q:t2:1", r.overnight.find((i) => i.row.id === "q:t2:1")).size).toBe(0);
     // Nothing exported selects everything [mutation: a "select all"].
     expect(Object.keys(review).filter((k) => /select.?all|all.?select|tick.?all/i.test(k))).toEqual([]);
     expect(String(review.emptySelection)).not.toMatch(/add\(/);
@@ -125,6 +127,8 @@ describe("the selection (MR-4)", () => {
 
   it("Approve selected posts exactly the ticked items, with their tags, in display order", () => {
     const r = parsed();
+    // Three approvable, two ticked: the list and the body are exactly those two.
+    expect(r.overnight.filter((i) => i.approve).length).toBe(3);
     const sel = new Set(["defer:b", "defer:a"]);
     expect(approveBody(r, sel)).toEqual({ items: [{ id: "defer:a", tag: tag("a") }, { id: "defer:b", tag: tag("b") }] });
     expect(leaveBody(r, sel)).toEqual({ items: [{ id: "defer:a" }, { id: "defer:b" }] });
@@ -147,7 +151,7 @@ describe("the selection (MR-4)", () => {
     const limited = footerState(r, new Set(["defer:a"]), { limited: "limited: Funnel is on" });
     expect(limited.approve).toBe(false);
     const raw = sample();
-    (raw.overnight as unknown[]).splice(0, 3, ...Array.from({ length: 11 }, (_, i) =>
+    (raw.overnight as unknown[]).splice(0, 4, ...Array.from({ length: 11 }, (_, i) =>
       item(deferred(`m${i}`), { approve: true, leave: true, tag: tag(String(i % 10)) })));
     const many = parsed(raw);
     const all = new Set(many.overnight.filter((i) => i.approve).map((i) => i.row.id));
@@ -167,3 +171,33 @@ describe("the selection (MR-4)", () => {
     expect([...keptSelection(r, new Set(["defer:a", "defer:gone"]))]).toEqual(["defer:a"]);
   });
 });
+
+describe("the review of #329's fixes", () => {
+  it("MED 1: a re-read that drops or changes a confirmed item is caught", () => {
+    const r = parsed();
+    const confirmed = approveBody(r, new Set(["defer:a", "defer:b"]))!.items;
+    expect(confirmedChanged(r, confirmed)).toEqual([]);
+    const dropped = sample();
+    (dropped.overnight as Record<string, unknown>[]).splice(1, 1);
+    expect(confirmedChanged(parsed(dropped), confirmed)).toEqual(["defer:b"]);
+    const retagged = sample();
+    (retagged.overnight as Record<string, unknown>[])[1].tag = tag("f");
+    expect(confirmedChanged(parsed(retagged), confirmed)).toEqual(["defer:b"]);
+    const closed = sample();
+    Object.assign((closed.overnight as Record<string, unknown>[])[0], { approve: false, why: "chat-closed" });
+    expect(confirmedChanged(parsed(closed), confirmed)).toEqual(["defer:a"]);
+  });
+
+  it("NIT 7: rows asked after the night are 'Waiting now', never 'from before'", () => {
+    const raw = sample();
+    raw.since = [item(row("q:t3:1", "question", 2, { thread_id: "t3" }), { section: "since", place: "chat:t3" })];
+    const r = parsed(raw);
+    expect(r.since.map((i) => i.row.id)).toEqual(["q:t3:1"]);
+    expect(sectionTitle(r, "since")).toBe("Waiting now");
+    expect(sectionTitle(r, "before")).toBe("Still waiting from before");
+    expect(allItems(r).map((i) => i.section)).toEqual([...r.overnight.map(() => "overnight"), "since", "before"]);
+    expect(chipsOf(r).map((c) => c.key)).toContain("chat:t3");
+    expect(parsed(sample()).since).toEqual([]);
+  });
+});
+

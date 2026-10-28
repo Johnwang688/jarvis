@@ -892,7 +892,10 @@ class OwnerOnly(Base):
                     # The morning review (MR, `review.py`, named only in SELF_PROTECTED):
                     # its group grants and its routes on both listeners.
                     r"import review\b", r"from \.+review\b", r"from \.+ import [^\n]*\breview\b",
-                    r"approve_many", r"settle_many", r"/inbox/review", r"/m/api/review", r"review_opens")
+                    r"approve_many", r"settle_many", r"/inbox/review", r"/m/api/review", r"review_opens",
+                    # Absolute imports and attributes too (review of #329, LOW 3).
+                    r"\bv2\.review\b", r"jarvis\.v2\.review", r"from [\w.]+ import [^\n]*\breview\b",
+                    r"\breview\.(?:report|approve|leave|route|hud_route|subject|item_tag|check_group|_KEY)\b")
 
     def test_no_tool_or_cli_grants_a_deferred_approval(self):
         from jarvis import tools

@@ -92,6 +92,8 @@ def report(opens_here):
         item(deferred("a", "aaaaaaaa", "make a " + HOSTILE), "chat:aaaaaaaa", approve=True, leave=True, tag="a" * 64),
         item(deferred("b", "aaaaaaaa", "make b"), "chat:aaaaaaaa", approve=True, leave=True, tag="b" * 64),
         item(deferred("c", "aaaaaaaa", "make c [withheld]"), "chat:aaaaaaaa", leave=True, why="withheld"),
+        # A third approvable item: two ticked must be exactly the two listed (#329 LOW 5).
+        item(deferred("d", "aaaaaaaa", "make d"), "chat:aaaaaaaa", approve=True, leave=True, tag="d" * 64),
     ]
     for i in range(6):
         items.append(item(row(f"q:cccccccc:{i}", "question", 2, "cccccccc",
@@ -216,8 +218,9 @@ def run(browser, check, until):
         page.goto(ORIGIN + "/m/#inbox")
         until(lambda: page.locator('[data-testid="m-review"]').count() == 1, timeout=6)
         check("a tap with opens_here opens the Review tab", selected_tab() == "m-tab-review", str(selected_tab()))
-        until(lambda: len(ticks()) == 3, timeout=4)
-        check("no box is ticked at first", ticks() == [["defer:a", False], ["defer:b", False], ["defer:c", False]],
+        until(lambda: len(ticks()) == 4, timeout=4)
+        check("no box is ticked at first", ticks() == [["defer:a", False], ["defer:b", False], ["defer:c", False],
+                                                       ["defer:d", False]],
               str(ticks()))
         view = page.locator('[data-testid="m-review"]')
         check("there is no select-all", "select all" not in view.inner_text().lower())
@@ -243,8 +246,8 @@ def run(browser, check, until):
         # Tick 2 of 3.
         tap('[data-testid="m-review-tick"][data-id="defer:a"]')
         tap('[data-testid="m-review-tick"][data-id="defer:b"]')
-        until(lambda: [t[1] for t in ticks()] == [True, True, False], timeout=3)
-        check("a tap ticks only its own box", [t[1] for t in ticks()] == [True, True, False], str(ticks()))
+        until(lambda: [t[1] for t in ticks()] == [True, True, False, False], timeout=3)
+        check("a tap ticks only its own box", [t[1] for t in ticks()] == [True, True, False, False], str(ticks()))
         footer = page.locator('[data-testid="m-review-footer"]').bounding_box()
         check("the footer stays on screen", footer is not None and footer["y"] + footer["height"] <= 844 - 56 + 2,
               str(footer))
@@ -273,7 +276,7 @@ def run(browser, check, until):
               and page.evaluate("window.__gets.length") == 1, str(mock.posts)[:300])
         until(lambda: page.locator('[data-testid="m-review-flash"]').count() == 1, timeout=3)
         check("a 409 changed unticks that item and explains",
-              [t[1] for t in ticks()] == [True, False, False]
+              [t[1] for t in ticks()] == [True, False, False, False]
               and "Nothing was approved" in page.locator('[data-testid="m-review-flash"]').inner_text()
               and "Unticked" in page.locator('[data-id="defer:b"] [data-testid="m-review-note"]').inner_text(),
               str(ticks()))

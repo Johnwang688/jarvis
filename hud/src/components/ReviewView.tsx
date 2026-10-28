@@ -32,7 +32,7 @@ import { clockOf, decisionOf, deferredOf, questionOf, briefOf } from "../lib/inb
 import {
   afterChanged, allItems, approveBody, chipsOf, confirmationList, emptySelection, footerState, groupItems,
   keptSelection, leaveBody, placeLabel, sectionTitle, summaryLine, toggled, type ReviewItem, type ReviewReport,
-  type Section, whyWords,
+  type Section, whyWords, confirmedChanged, UNTICKED_GONE, SECTIONS,
 } from "../lib/review";
 import type { ReviewSnapshot } from "../state/review";
 
@@ -63,6 +63,9 @@ export function ReviewView(props: ReviewViewProps) {
   const [picks, setPicks] = useState<Record<string, number>>({});
   const [busy, setBusy] = useState<Record<string, true>>({});
   const [confirming, setConfirming] = useState(false);
+  // The exact set the open confirmation shows: only it is ever sent (review of #329, MED 1).
+  const [confirmed, setConfirmed] = useState<{ id: string; tag: string }[] | null>(null);
+  const dialogRef = useRef<HTMLDivElement | null>(null);
   const [flash, setFlash] = useState<string | null>(null);
   const sending = useRef(new Set<string>());
   const blockedNow = useRef(props.blocked);
@@ -70,12 +73,26 @@ export function ReviewView(props: ReviewViewProps) {
   const cancelRef = useRef<HTMLButtonElement | null>(null);
 
   useEffect(() => { void props.onReread(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, []);
-  // A re-read unticks whatever left the report.
+  // A re-read under the open confirmation that drops or changes a confirmed
+  // item closes it, says why on that row, and asks for a new confirmation;
+  // any re-read unticks whatever left the report.
   useEffect(() => {
-    if (report) setSelection((sel) => (sel.size ? keptSelection(report, sel) : sel));
+    if (!report) return;
+    if (confirming && confirmed) {
+      const changed = confirmedChanged(report, confirmed);
+      if (changed.length) {
+        setConfirming(false);
+        setConfirmed(null);
+        setSelection((sel) => { const next = new Set(sel); changed.forEach((id) => next.delete(id)); return next; });
+        setNotes((all) => ({ ...all, ...Object.fromEntries(changed.map((id) => [id, UNTICKED_GONE])) }));
+        setFlash("Something you selected changed: nothing was approved. Look again, then confirm again.");
+      }
+    }
+    setSelection((sel) => (sel.size ? keptSelection(report, sel) : sel));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [report]);
   // Under a card the confirmation goes too (the veil's own keys win).
-  useEffect(() => { if (props.blocked) setConfirming(false); }, [props.blocked]);
+  useEffect(() => { if (props.blocked) { setConfirming(false); setConfirmed(null); } }, [props.blocked]);
   useEffect(() => { if (confirming) cancelRef.current?.focus(); }, [confirming]);
 
   const run = async (key: string, call: () => Promise<unknown>, done: (result: unknown) => void,
@@ -105,10 +122,12 @@ export function ReviewView(props: ReviewViewProps) {
     });
 
   const approve = () => {
-    if (!report) return;
-    const body = approveBody(report, selection);
+    if (!report || !confirmed) return;
     setConfirming(false);
-    if (!body) return;
+    setConfirmed(null);
+    // Exactly what the dialog listed, and only while it still holds.
+    if (confirmedChanged(report, confirmed).length) return;
+    const body = { items: confirmed.map((c) => ({ id: c.id, tag: c.tag })) };
     void run("approve", () => props.onApprove(body), (result) => {
       const n = result && typeof result === "object" ? (result as { approved?: unknown }).approved : 0;
       setSelection(emptySelection());
@@ -335,13 +354,15 @@ export function ReviewView(props: ReviewViewProps) {
   }
 
   const foot = footerState(report, selection);
-  const confirm = confirmationList(report, selection);
+  const confirm = confirmed ? confirmationList(report, new Set(confirmed.map((c) => c.id))) : [];
+  // While the dialog is open everything behind it in this view is inert (#329, NIT 8).
+  const behind = confirming ? { inert: "" } as Record<string, string> : {};
   const picked = allItems(report).filter((i) => selection.has(i.row.id)).length;
   return (
     <div className="inbox review" data-testid="review-view" data-status={status}
          {...(props.blocked ? { inert: "" } as Record<string, string> : {})}>
-      <div className="inbox-head"><h2 className="bar">Morning review</h2></div>
-      <div className="review-scroll">
+      <div className="inbox-head" {...behind}><h2 className="bar">Morning review</h2></div>
+      <div className="review-scroll" {...behind}>
         <div className="review-summary" data-testid="review-summary">{summaryLine(report)}</div>
         {flash ? <div className="inbox-notice" role="status" data-testid="review-flash">{flash}</div> : null}
         <nav className="review-chips" aria-label="Jump to a chat">
@@ -364,8 +385,7 @@ export function ReviewView(props: ReviewViewProps) {
             ))}
           </section>
         ) : null}
-        {section(report, "overnight")}
-        {section(report, "before")}
+        {SECTIONS.map((which) => <div key={which}>{section(report, which)}</div>)}
         {report.more ? <div className="inbox-notice">And {report.more} more in the Inbox.</div> : null}
         {report.fyi ? (
           <div className="review-fyi" data-testid="review-fyi">
@@ -375,14 +395,20 @@ export function ReviewView(props: ReviewViewProps) {
         ) : null}
         {!report.open && !report.live.length ? <div className="inbox-notice" data-testid="review-empty">Nothing waited overnight.</div> : null}
       </div>
-      <div className="review-footer" data-testid="review-footer">
+      <div className="review-footer" data-testid="review-footer" {...behind}>
         <button type="button" className="quiet" data-testid="review-leave"
                 disabled={props.blocked || !foot.leave || !!busy.leave} onClick={leave}>
           Leave selected ({picked})
         </button>
         <span className="review-count" data-testid="review-selected">{picked} selected</span>
         <button type="button" data-testid="review-approve" disabled={props.blocked || !foot.approve || !!busy.approve}
-                onClick={() => { if (!blockedNow.current && foot.approve) setConfirming(true); }}>
+                onClick={() => {
+                  if (blockedNow.current || !foot.approve) return;
+                  const body = approveBody(report, selection);
+                  if (!body) return;
+                  setConfirmed(body.items);
+                  setConfirming(true);
+                }}>
           Approve selected ({picked})
         </button>
         {picked && !foot.approve ? (
@@ -394,13 +420,24 @@ export function ReviewView(props: ReviewViewProps) {
       {confirming ? (
         <div className="review-confirm-veil">
           <div className="review-confirm" role="dialog" aria-modal="true" aria-label="Approve these calls"
-               data-testid="review-confirm"
+               data-testid="review-confirm" ref={dialogRef}
                onKeyDownCapture={(e) => {
                  // Enter and Escape mean Cancel, whatever has focus here.
                  if (e.key === "Enter" || e.key === "Escape") {
                    e.preventDefault();
                    e.stopPropagation();
                    setConfirming(false);
+                   setConfirmed(null);
+                   return;
+                 }
+                 // A focus trap (#329, NIT 8): Tab cycles inside the dialog only.
+                 if (e.key === "Tab") {
+                   const stops = Array.from(dialogRef.current?.querySelectorAll<HTMLElement>("button:not(:disabled)") ?? []);
+                   if (!stops.length) return;
+                   e.preventDefault();
+                   const at = stops.indexOf(document.activeElement as HTMLElement);
+                   const next = e.shiftKey ? (at <= 0 ? stops.length - 1 : at - 1) : (at + 1) % stops.length;
+                   stops[next].focus();
                  }
                }}>
             <div className="review-confirm-head">Approve these {confirm.length} {confirm.length === 1 ? "call" : "calls"} once each, for 30 minutes?</div>
@@ -415,7 +452,7 @@ export function ReviewView(props: ReviewViewProps) {
             </ol>
             <div className="review-confirm-actions">
               <button type="button" ref={cancelRef} data-testid="review-confirm-cancel" autoFocus
-                      onClick={() => setConfirming(false)}>Cancel</button>
+                      onClick={() => { setConfirming(false); setConfirmed(null); }}>Cancel</button>
               <button type="button" className="quiet" data-testid="review-confirm-approve" disabled={props.blocked}
                       onClick={approve}>Approve {confirm.length}</button>
             </div>

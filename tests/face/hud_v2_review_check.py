@@ -61,11 +61,13 @@ def item(row, *, approve=True, why="", place="chat:t1"):
 
 def report():
     rows = [defer_row("a", command="make a " + HOSTILE), defer_row("b", command="make b"),
-            defer_row("c", thread="t2", command="make c")]
-    items = [item(rows[0]), item(rows[1]), item(rows[2], approve=False, why="chat-closed", place="chat:t2")]
+            defer_row("c", thread="t2", command="make c"), defer_row("d", command="make d")]
+    # Three approvable (a, b, d), one not (c, a closed chat): two ticked must be exactly the two listed.
+    items = [item(rows[0]), item(rows[1]), item(rows[2], approve=False, why="chat-closed", place="chat:t2"),
+             item(rows[3])]
     return {"v": 1, "quiet": {"enabled": True, "now": False, "start": None, "end": None},
-            "summary": {"approvals": 3, "questions": 0, "decisions": 0, "blocked": 0, "proposals": 0, "live": 0},
-            "live": [], "overnight": items, "before": [], "fyi": {"count": 1}, "more": 0, "open": 3,
+            "summary": {"approvals": 4, "questions": 0, "decisions": 0, "blocked": 0, "proposals": 0, "live": 0},
+            "live": [], "overnight": items, "before": [], "fyi": {"count": 1}, "more": 0, "open": 4,
             "limits": {"approve": 10, "leave": 25, "shown": 60}, "projects": [{"id": "p1", "name": "Calc"}],
             "places": [{"key": "chat:t1", "kind": "chat", "id": "t1", "project_id": "p1", "title": "Fix " + HOSTILE},
                        {"key": "chat:t2", "kind": "chat", "id": "t2", "project_id": "p1", "title": "Other"}]}
@@ -111,7 +113,7 @@ def review_checks(browser, mock, base, check, until, guard, init_script):
               order == ["owner-inbox", "owner-review"], str(order))
         until(lambda: page.locator('[data-testid="owner-review-count"]').count() == 1, timeout=4)
         check("its count is the review's open items",
-              page.locator('[data-testid="owner-review-count"]').inner_text().strip() == "3")
+              page.locator('[data-testid="owner-review-count"]').inner_text().strip() == "4")
         row.click()
         until(lambda: _view(page).count() == 1 and _view(page).get_attribute("data-status") == "ready", timeout=4)
         check("the title stays J.A.R.V.I.S. [mutation: a title change]", page.title() == TITLE, page.title())
@@ -124,13 +126,13 @@ def review_checks(browser, mock, base, check, until, guard, init_script):
         ticks = page.locator('[data-testid="review-tick"]')
         checked = page.evaluate("() => [...document.querySelectorAll('[data-testid=\"review-tick\"]')].map(b => b.checked)")
         check("no box is ticked when the view opens [mutation: pre-ticked]",
-              len(checked) == 3 and not any(checked), str(checked))
+              len(checked) == 4 and not any(checked), str(checked))
         check("there is no select-all [mutation: select all]",
               "select all" not in _view(page).inner_text().lower()
-              and page.locator('[data-testid="review-view"] input[type="checkbox"]').count() == 3)
+              and page.locator('[data-testid="review-view"] input[type="checkbox"]').count() == 4)
         page.locator('[data-testid="review-tick"][data-id="defer:a"]').click()
         checked = page.evaluate("() => [...document.querySelectorAll('[data-testid=\"review-tick\"]')].map(b => b.checked)")
-        check("a click ticks only its own box", checked == [True, False, False], str(checked))
+        check("a click ticks only its own box", checked == [True, False, False, False], str(checked))
         # A ticked item that cannot be approved: Approve off, the footer names it.
         page.locator('[data-testid="review-tick"][data-id="defer:c"]').click()
         approve = page.locator('[data-testid="review-approve"]')
@@ -185,9 +187,49 @@ def review_checks(browser, mock, base, check, until, guard, init_script):
                                                            {"id": "defer:b", "tag": "b" * 64}]}), str(posted))
         until(lambda: page.locator('[data-testid="review-note"]').count() == 1, timeout=3)
         checked = page.evaluate("() => [...document.querySelectorAll('[data-testid=\"review-tick\"]')].map(b => b.checked)")
-        check("a 409 unticks what changed and says why", checked == [True, False, False]
+        check("a 409 unticks what changed and says why", checked == [True, False, False, False]
               and "Unticked" in page.locator('[data-testid="review-note"]').inner_text(), str(checked))
         s["review_reply"] = {}
+        # #329 NIT 8: the dialog is a focus trap; everything behind it is inert.
+        approve.click()
+        until(lambda: dialog.count() == 1, timeout=3)
+        inside = []
+        for _ in range(5):
+            page.keyboard.press("Tab")
+            inside.append(page.evaluate("() => !!document.activeElement.closest('[data-testid=\"review-confirm\"]')"))
+        behind = page.evaluate("() => [...document.querySelectorAll('[data-testid=\"review-tick\"]')]"
+                               ".every(b => !!b.closest('[inert]'))")
+        check("#329 NIT 8: Tab stays inside the dialog and everything behind it is inert [mutation: no trap; not inert]",
+              all(inside) and behind, f"{inside} {behind}")
+        page.keyboard.press("Escape")
+        until(lambda: dialog.count() == 0, timeout=3)
+        # #329 MED 1: a re-read under the dialog that changes a confirmed item closes it.
+        page.locator('[data-testid="review-tick"][data-id="defer:b"]').click()
+        approve.click()
+        until(lambda: dialog.count() == 1, timeout=3)
+        posts = len(_posts(mock))
+        changed = report()
+        changed["overnight"][1]["tag"] = "f" * 64
+        s["review"] = changed
+        mock_inbox.changed(mock, ["defer:b"], "deferral_answered")
+        until(lambda: dialog.count() == 0, timeout=4)
+        note = page.locator('[data-testid="review-item"][data-id="defer:b"] [data-testid="review-note"]')
+        checked = page.evaluate("() => [...document.querySelectorAll('[data-testid=\"review-tick\"]')].map(b => b.checked)")
+        check("#329 MED 1: a re-read that changes a confirmed item closes the dialog, unticks it and says why "
+              "[mutation: the set shrinks silently]",
+              dialog.count() == 0 and checked == [True, False, False, False] and note.count() == 1
+              and note.inner_text() == "Unticked: answered elsewhere or gone." and len(_posts(mock)) == posts,
+              f"{checked} {note.count()}")
+        s["review"] = report()
+        mock_inbox.changed(mock, ["defer:b"], "test")
+        # #329 MED 2: the desk view mounts with nothing ticked.
+        page.locator('[data-testid="owner-inbox"]').click()
+        until(lambda: _view(page).count() == 0, timeout=4)
+        page.locator('[data-testid="owner-review"]').click()
+        until(lambda: _view(page).count() == 1 and _view(page).get_attribute("data-status") == "ready", timeout=4)
+        checked = page.evaluate("() => [...document.querySelectorAll('[data-testid=\"review-tick\"]')].map(b => b.checked)")
+        check("#329 MED 2: leaving the view and coming back, nothing is ticked", checked == [False] * 4, str(checked))
+        page.locator('[data-testid="review-tick"][data-id="defer:a"]').click()
         # Under a live card the view is inert.
         c = card("revcard0001")
         mock.world["approvals"].append(c)
@@ -204,7 +246,7 @@ def review_checks(browser, mock, base, check, until, guard, init_script):
         time.sleep(0.3)
         checked = page.evaluate("() => [...document.querySelectorAll('[data-testid=\"review-tick\"]')].map(b => b.checked)")
         check("a trusted click under the card ticks and posts nothing",
-              checked == [True, False, False] and len(_posts(mock)) == posts and cardloc.count() == 1, str(checked))
+              checked == [True, False, False, False] and len(_posts(mock)) == posts and cardloc.count() == 1, str(checked))
         page.keyboard.press("Escape")
         until(lambda: cardloc.count() == 0, timeout=4)
         check("the title is still J.A.R.V.I.S.", page.title() == TITLE, page.title())

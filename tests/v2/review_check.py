@@ -82,13 +82,17 @@ at, Clock, request = qd.at, qd.Clock, qd.request
 SECRET = "ghp_" + "Kx9" * 12
 
 
+def everything(report) -> list[dict]:
+    return report["overnight"] + report.get("since", []) + report["before"]
+
+
 def item_ids(report) -> list[str]:
-    return [i["row"]["id"] for i in report["overnight"] + report["before"]]
+    return [i["row"]["id"] for i in everything(report)]
 
 
 def picked(report, *row_ids) -> list[dict]:
     """`{id, tag}` of these rows, as the page sends them."""
-    found = {i["row"]["id"]: i for i in report["overnight"] + report["before"]}
+    found = {i["row"]["id"]: i for i in everything(report)}
     return [{"id": r, "tag": found[r]["tag"]} for r in row_ids]
 
 
@@ -185,8 +189,9 @@ class Report(unittest.TestCase):
                 _row("appr:live1", "approval", 1, at(24 + 1), thread_id="t3")]
         out = self.run_report(rows)
         self.assertEqual([i["row"]["id"] for i in out["overnight"]], ["q:t1:b", "dec:d1"])
-        self.assertEqual([i["row"]["id"] for i in out["before"]], ["q:t1:a", "task:k1"],
-                         "22:59 is before; 07:00 is the end, not the night")
+        self.assertEqual([i["row"]["id"] for i in out["before"]], ["q:t1:a"], "22:59 is before")
+        self.assertEqual([i["row"]["id"] for i in out["since"]], ["task:k1"],
+                         "07:00 is the end, not the night: 'Waiting now', never 'from before' (#329 NIT 7)")
         self.assertEqual(out["fyi"], {"count": 1}, "only the night's rank 8, never a done check")
         self.assertNotIn("pr:o/r#1", json.dumps(out), "no PRs")
         self.assertNotIn("chk:c1", json.dumps(out), "no checks")
@@ -196,11 +201,11 @@ class Report(unittest.TestCase):
         self.assertEqual(out["summary"], {"approvals": 0, "questions": 2, "decisions": 1, "blocked": 1,
                                           "proposals": 0, "live": 1})
         self.assertEqual((out["quiet"]["enabled"], out["open"], out["more"]), (True, 4, 0))
-        self.assertTrue(all(i["approve"] is False and i["tag"] is None for i in out["overnight"] + out["before"]),
+        self.assertTrue(all(i["approve"] is False and i["tag"] is None for i in everything(out)),
                         "only a deferred approval is ever ticked")
         self.quiet.update({"enabled": False})
         out = self.run_report(rows)
-        self.assertEqual(out["overnight"], [])
+        self.assertEqual((out["overnight"], out["since"]), ([], []))
         self.assertEqual(item_ids(out), ["q:t1:a", "q:t1:b", "task:k1"],
                          "quiet hours off: only what still waits, no decision")
         self.assertEqual((out["quiet"]["enabled"], out["fyi"]["count"]), (False, 0))
@@ -427,7 +432,7 @@ class Desk(unittest.TestCase):
         archive_thread(self.daemon, thread.id)
         self.stores.tasks.transition(task.id, TaskState.CLARIFYING, reason="resumed meanwhile")
         out = self.report()
-        found = {i["row"]["id"]: i for i in out["overnight"] + out["before"]}
+        found = {i["row"]["id"]: i for i in everything(out)}
         self.assertEqual((found[f"defer:{mine.req_id}"]["approve"], found[f"defer:{mine.req_id}"]["why"]),
                          (False, "chat-closed"), "[mutation: an approvable item whose chat is closed]")
         self.assertIsNone(found[f"defer:{mine.req_id}"]["tag"])
@@ -658,6 +663,69 @@ class Phone(ra.Phone):
         self.assertTrue({i["row"]["id"]: i for i in desk["overnight"]}[f"defer:{r1.req_id}"]["approve"])
         print("ok  a card the phone's scrub would change: never ticked on the phone (report, options, answer)")
 
+    def test_a_stale_tag_is_refused_before_any_challenge(self):
+        """#329 LOW 5: the first check compares the tags; a stale one is 409
+        and no challenge is issued."""
+        r1, r2 = self.defer("one"), self.defer("two")
+        items = picked(self.review_report(), f"defer:{r1.req_id}", f"defer:{r2.req_id}")
+        stale = [items[0], {"id": items[1]["id"], "tag": "f" * 64}]
+        before = dict(self.auth._challenges)
+        status, _, body = self.group_options(stale)
+        self.assertEqual((status, body.get("changed")), (409, [{"id": items[1]["id"], "reason": "changed"}]), body)
+        self.assertEqual(self.auth._challenges, before, "no challenge issued [mutation: no tag comparison]")
+        with patch.object(review, "_KEY", pysecrets.token_bytes(32)):
+            status, _, body = self.group_options(items)
+        self.assertEqual(status, 409, "a restart's tags: refused before the challenge")
+        self.assertEqual(self.auth._challenges, before)
+        print("ok  a stale tag at the options: 409 changed, and no challenge is issued")
+
+    def test_the_answer_challenges_cannot_crowd_out_a_live_allow(self):
+        """#329 LOW 4: abandoned group prompts replace each other, deferrals
+        have their own budget, and a live card's Allow always gets a challenge."""
+        from jarvis.v2 import remote_auth
+        reqs = [self.defer(f"c{i}") for i in range(4)]
+        items = picked(self.review_report(), *(f"defer:{r.req_id}" for r in reqs))
+        for n in range(6):
+            status, _, body = self.group_options(items[: 1 + n % 4])
+            self.assertEqual(status, 200, body)
+        mine = [c for c in self.auth._challenges.values() if c["kind"] == "answer"]
+        self.assertEqual(len([c for c in mine if c["req_id"].startswith("defers:")]), 1,
+                         "only the latest set can be answered [mutation: earlier sets kept]")
+        for r in reqs:          # four per-row Approve and retry prompts, abandoned
+            status, _, body = self.options(f"defer:{r.req_id}", "allow")
+            self.assertEqual(status, 200, body)
+        status, _, body = self.options(f"defer:{reqs[0].req_id}", "allow")
+        self.assertEqual(status, 200, "the same row again replaces its own")
+        self.clock.now = at(12)
+        self.mono2.now += quiet_defer.PRESENT_S
+        approval, out, worker = self.ask()
+        status, _, body = self.options(self.row(approval), "allow")
+        self.assertEqual(status, 200, "a live card's Allow is never crowded out [mutation: one shared budget]")
+        self.assertEqual(remote_auth.ANSWER_FAMILIES, ("approval", "task", "defer", "review"))
+        self.d.approvals.resolve(approval.req_id, Decision.DENY)
+        worker.join(5)
+        print("ok  challenges: a new set replaces the last; deferrals' prompts never crowd out a live Allow")
+
+    def test_every_argument_reaches_the_phone_and_its_scrub(self):
+        """#329 LOW 6: the phone shows a card's arguments beside its command,
+        so they come whole in the report; a secret in one makes it withheld."""
+        args = {"command": "make one", "timeout": 120000, "run_in_background": True, "description": "Build it"}
+        self.mono2.now += quiet_defer.PRESENT_S
+        req = request("make one", thread_id=self.thread.id, args=args)
+        self.assertIs(self.d.approvals.ask(req), Decision.DENY)
+        found = {i["row"]["id"]: i for i in everything(self.review_report())}[f"defer:{req.req_id}"]
+        self.assertEqual(found["row"]["detail"]["card"]["args"], args)
+        self.assertTrue(found["approve"])
+        secret = dict(args, description="password: " + ra.PASSWORD)
+        self.mono2.now += quiet_defer.PRESENT_S
+        hidden = request("make two", thread_id=self.thread.id, args=dict(secret, command="make two"))
+        self.assertIs(self.d.approvals.ask(hidden), Decision.DENY)
+        out = self.review_report()
+        found = {i["row"]["id"]: i for i in everything(out)}[f"defer:{hidden.req_id}"]
+        self.assertEqual((found["approve"], found["why"]), (False, "withheld"))
+        self.assertNotIn(ra.PASSWORD, json.dumps(out))
+        print("ok  every argument reaches the phone whole, through its scrub; a secret in one withholds the card")
+
     def test_limits_on_the_phone(self):
         tag = "a" * 64
         status, _, body = self.group_options([{"id": f"defer:x{i}", "tag": tag} for i in range(11)])
@@ -795,7 +863,24 @@ class MorningPush(pc.SenderBase):
 class Boundary(unittest.TestCase):
     REVIEW_SOURCE = (r"import review\b", r"from \.+review\b", r"from \.+ import [^\n]*\breview\b",
                      r"\breview\.(?:report|approve|leave|route|hud_route|subject|item_tag|check_group|_KEY)\b",
-                     r"/inbox/review", r"/m/api/review", r"approve_many", r"settle_many", r"review_opens")
+                     r"/inbox/review", r"/m/api/review", r"approve_many", r"settle_many", r"review_opens",
+                     r"\bv2\.review\b", r"jarvis\.v2\.review", r"from [\w.]+ import [^\n]*\breview\b")
+    # Each way a module could reach the review, every one of which the sweep must see (#329, LOW 3).
+    REACHES = ("from . import review", "from .review import approve", "import jarvis.v2.review",
+               "from jarvis.v2 import review", "from jarvis.v2 import inbox, review as r",
+               "jarvis.v2.review.approve(d, items)", "v2.review.report(d)", "review.approve(daemon, items, via=v)",
+               "review.subject(items)", "review._KEY", "requests.post('http://x/inbox/review/approve')")
+
+    def test_the_sweep_sees_every_spelling(self):
+        archive = _load("archive_check")
+        defer = next(v for k, v in vars(archive).items() if isinstance(v, type) and hasattr(v, "DEFER_SOURCE")).DEFER_SOURCE
+        for line in self.REACHES:
+            with self.subTest(line=line):
+                self.assertTrue(any(re.search(n, line) for n in self.REVIEW_SOURCE), line)
+                self.assertTrue(any(re.search(n, line) for n in defer), line)
+        for fine in ("diffreview.start()", "from .diffreview import start", "# a review. Then", "code_review(x)"):
+            self.assertFalse(any(re.search(n, fine) for n in self.REVIEW_SOURCE), fine)
+        print("ok  the sweeps see relative and absolute imports and attributes of the review")
 
     def test_no_tool_mcp_or_session_path_names_it(self):
         from jarvis import tools

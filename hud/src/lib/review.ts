@@ -18,7 +18,8 @@
 
 import { deferredOf, oneLine, parseRow, type InboxRow } from "./inbox";
 
-export type Section = "overnight" | "before";
+/** Overnight; "Waiting now" (first asked after the night ended); still waiting from before it. */
+export type Section = "overnight" | "since" | "before";
 
 export interface ReviewItem {
   row: InboxRow;
@@ -49,6 +50,8 @@ export interface ReviewReport {
   summary: { approvals: number; questions: number; decisions: number; blocked: number; proposals: number; live: number };
   live: InboxRow[];
   overnight: ReviewItem[];
+  /** Rows first asked after the night ended (review of #329, NIT 7). */
+  since: ReviewItem[];
   before: ReviewItem[];
   fyi: number;
   more: number;
@@ -128,6 +131,7 @@ export function parseReview(raw: unknown): ReviewReport | null {
     live: (Array.isArray(raw.live) ? raw.live : []).map((x) => parseRow(isObj(x) ? x.row : null))
       .filter((r): r is InboxRow => !!r && r.kind === "approval"),
     overnight: items(raw.overnight, "overnight"),
+    since: items(Array.isArray(raw.since) ? raw.since : [], "since"),
     before: items(raw.before, "before"),
     fyi: count(isObj(raw.fyi) ? raw.fyi.count : 0),
     more: count(raw.more),
@@ -140,9 +144,12 @@ export function parseReview(raw: unknown): ReviewReport | null {
   };
 }
 
-/** Every item, in the report's order (overnight first). */
+/** The parts, in the order shown. */
+export const SECTIONS: readonly Section[] = ["overnight", "since", "before"];
+
+/** Every item, in the order shown (overnight first). */
 export function allItems(report: ReviewReport): ReviewItem[] {
-  return [...report.overnight, ...report.before];
+  return [...report.overnight, ...report.since, ...report.before];
 }
 
 // -- grouping (MR-2) ---------------------------------------------------------
@@ -221,7 +228,7 @@ export interface Chip { key: string; anchor: string; kind: string; title: string
 export function chipsOf(report: ReviewReport): Chip[] {
   const out: Chip[] = [];
   const seen = new Set<string>();
-  for (const section of ["overnight", "before"] as Section[]) {
+  for (const section of SECTIONS) {
     for (const group of groupItems(report, report[section])) {
       for (const p of group.places) {
         if (seen.has(p.place.key)) continue;
@@ -252,6 +259,7 @@ export function summaryLine(report: ReviewReport): string {
 /** What a part is called (MR-1), code's words. */
 export function sectionTitle(report: ReviewReport, section: Section): string {
   if (section === "overnight") return "Overnight";
+  if (section === "since") return "Waiting now";
   return report.quiet.enabled ? "Still waiting from before" : "Quiet hours are off";
 }
 
@@ -378,3 +386,18 @@ export function afterChanged(selection: ReadonlySet<string>, changed: unknown): 
   }
   return { selection: next, notes };
 }
+
+/** What a re-read did to the set under an open confirmation (review of #329, MED 1):
+ * the confirmed ids no longer in the report, no longer approvable, or with
+ * another tag. Any of them closes the confirmation: nothing is approved on
+ * a set other than the one the owner confirmed. */
+export function confirmedChanged(report: ReviewReport, confirmed: readonly { id: string; tag: string }[]): string[] {
+  const now = new Map(allItems(report).map((i) => [i.row.id, i]));
+  return confirmed.filter((c) => {
+    const item = now.get(c.id);
+    return !item || !item.approve || item.tag !== c.tag;
+  }).map((c) => c.id);
+}
+
+/** The words a row unticked by a re-read under the confirmation carries. */
+export const UNTICKED_GONE = "Unticked: answered elsewhere or gone.";

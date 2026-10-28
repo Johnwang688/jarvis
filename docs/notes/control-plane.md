@@ -2161,8 +2161,9 @@ answers, MR-1 to MR-12, "MR as built"). Module: `jarvis/v2/review.py`
 **What it is.** One report of what waited overnight, computed on every
 read from `inbox.rows` (nothing stored): "Live now" (rank-1 approvals,
 never selectable), "Overnight" (ranks 1 to 4 and open decisions asked in
-`QuietHours.last_window`), "Still waiting from before" (every other rank 1
-to 4 row), and a count of the night's rank-8 rows. No PRs, no checks. At
+`QuietHours.last_window`), "Waiting now" (ranks 1 to 4 first asked after
+it ended), "Still waiting from before" (asked before it; with quiet hours
+off, every rank 1 to 4 row), and a count of the night's rank-8 rows. No PRs, no checks. At
 most 60 items. `GET /inbox/review` (HUD, `owner_only`, mounted by
 `inbox.route`) and `GET /m/api/review` (remote, past `owner_status`,
 mounted by `remote_auth.api_route`; rows through `remote_api.inbox_row`).
@@ -2196,7 +2197,13 @@ minutes.
 focused; Enter and Escape cancel), no passkey; inert under a live card.
 Phone: session, Host, Origin, a fresh assertion bound to the subject, and
 all five §4.1 checks; a limited phone gets no group approval (answer 3) and
-keeps the per-row Approve and retry. Leave selected (≤25) needs the session
+keeps the per-row Approve and retry. Answer challenges are budgeted per
+session and per family (approval, task, deferral row, review set; four
+each): a new set's challenge replaces the session's earlier sets, so
+abandoned group prompts never crowd out a live card's Allow. A re-read under
+an open confirmation that drops or changes a confirmed item closes it and
+unticks that item, on both surfaces; only the confirmed `{id, tag}` set is
+ever sent. The phone shows every argument beside the command. Leave selected (≤25) needs the session
 only and is QH's Leave it per item. A desk answer and a verified phone
 group answer stamp presence (QH-3).
 

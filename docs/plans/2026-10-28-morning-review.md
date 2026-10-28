@@ -297,3 +297,45 @@ listener (the phone check uses a mock server, as the plan says); the
 passkey flow against a real authenticator is covered by
 `review_check.py`'s software authenticator.
 
+### The review of #329's fixes (2026-10-28)
+
+- **MED 1.** A re-read under an open confirmation that drops, retags or
+  makes unapprovable any confirmed item closes it, unticks that item with
+  "Unticked: answered elsewhere or gone." and asks for a new confirmation
+  (`lib/review.ts` `confirmedChanged`). The confirmation's exact `{id, tag}`
+  set is kept when it opens, and only it is ever sent (phone `app.ts`
+  `reviewConfirmed`, desk `ReviewView` `confirmed`); a tick changed on the
+  phone under the confirmation closes it too.
+- **MED 2.** The phone's selection is emptied whenever the Review tab is
+  entered from another tab and on a notification's tap; the desk view
+  mounts empty (checked).
+- **LOW 3.** The sweeps (`archive_check.DEFER_SOURCE`,
+  `review_check.Boundary.REVIEW_SOURCE`) also see `v2.review`,
+  `jarvis.v2.review`, `from <package> import review` and the module's
+  attributes; a test holds them to eleven spellings.
+- **LOW 4.** Answer challenges are budgeted per session and per family:
+  an approval's, a task verb's, a deferral's row and a morning review's set
+  (`remote_auth.ANSWER_FAMILIES`), four each. A new `defers:` challenge
+  replaces the session's earlier ones; a row's replaces its own. A live
+  card's Allow always gets a challenge.
+- **LOW 5.** The vitest and browser fixtures hold three approvable items
+  with two ticked; a stale tag at the options is 409 and no challenge is
+  issued.
+- **LOW 6 (the lead's decision).** The phone shows every argument beside the
+  command (timeout, run_in_background, description and the rest), in the
+  review and in QH's inbox row; the arguments come through the phone's
+  scrub, and a secret in one withholds the card.
+- **NIT 7.** Rows first asked after the night ended are their own part,
+  `since`, "Waiting now"; only rows asked before the night are "Still
+  waiting from before". The report gains `since: [item]`.
+- **NIT 8.** The desk's confirmation is a focus trap (Tab cycles inside it)
+  and everything behind it in the view is `inert` while it is open.
+
+Each fix has a test and a mutant of it that fails the test: a shared
+challenge budget and kept earlier sets (`review_check`), no tag comparison
+at the options, `since` read as before, the absolute-import patterns
+removed, no confirmed-set check on the phone and at the desk (vitest, the
+HUD check), entering Review or a notification's tap keeping the ticks,
+arguments hidden beside a command (review and inbox row), a confirmation
+listing every approvable item, no focus trap, nothing inert behind it.
+

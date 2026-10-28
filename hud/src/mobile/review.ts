@@ -23,7 +23,7 @@
 
 import { clockOf, decisionOf, deferredOf, oneLine, questionOf, briefOf, type InboxRow } from "../lib/inbox";
 import {
-  chipsOf, confirmationList, footerState, groupItems, placeLabel, sectionTitle, summaryLine, whyWords,
+  allItems, chipsOf, confirmationList, footerState, SECTIONS, groupItems, placeLabel, sectionTitle, summaryLine, whyWords,
   type ReviewItem, type ReviewReport, type Section,
 } from "../lib/review";
 import { el, tap } from "./views";
@@ -89,7 +89,9 @@ function deferredItem(item: ReviewItem, state: ReviewState, a: ReviewActions, bo
   if (d.count > 1) box.append(el("p", "muted small", `Asked ${d.count} times while it waited.`));
   if (d.command) box.append(el("div", "label", "Command"), testid(el("pre", "code", d.command), "m-review-command"));
   if (d.reason) box.append(el("div", "label", "Why"), el("p", "", d.reason));
-  if (d.args && !d.command) box.append(el("div", "label", "Arguments"), el("pre", "code", d.args));
+  // Every argument, beside the command too (timeout, run_in_background, a
+  // description...): a grant never covers what was not shown (#329, LOW 6).
+  if (d.args) box.append(el("div", "label", "Arguments"), testid(el("pre", "code", d.args), "m-review-args"));
   if (d.more) box.append(el("p", "muted small", `${d.more} more asks from this chat were denied overnight, too many to list one by one.`));
   if (!item.approve) box.append(testid(el("p", "muted small", `Not approvable here: ${whyWords(item.why, item.row)}.`), "m-review-why"));
   const busy = state.busy.has(id) || state.groupBusy;
@@ -276,7 +278,7 @@ export function reviewView(state: ReviewState, a: ReviewActions, limited: string
     }
     view.append(live);
   }
-  for (const which of ["overnight", "before"] as Section[]) {
+  for (const which of SECTIONS) {
     const section = part(report, which, state, a);
     if (section) view.append(section);
   }
@@ -293,7 +295,7 @@ export function reviewView(state: ReviewState, a: ReviewActions, limited: string
 
 function footer(report: ReviewReport, state: ReviewState, a: ReviewActions, limited: string | null): HTMLElement {
   const foot = testid(el("div", "m-review-footer"), "m-review-footer");
-  const n = Array.from(state.selection).filter((id) => [...report.overnight, ...report.before].some((i) => i.row.id === id)).length;
+  const n = Array.from(state.selection).filter((id) => allItems(report).some((i) => i.row.id === id)).length;
   const fs = footerState(report, state.selection, { limited });
   if (state.confirming && fs.approve) {
     // Exactly the ticked items, before the one passkey prompt.

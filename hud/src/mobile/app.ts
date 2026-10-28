@@ -65,8 +65,8 @@ import {
   type ProviderChoice, type Sheet, type Verb,
 } from "./write";
 import { Talk, browserTalkEnv, type TalkEnv } from "./talk";
-import { afterChanged, approveBody, emptySelection, keptSelection, leaveBody, parseReview, toggled,
-  type ReviewItem, type ReviewReport } from "../lib/review";
+import { afterChanged, allItems, approveBody, confirmedChanged, emptySelection, keptSelection, leaveBody, parseReview, toggled,
+  UNTICKED_GONE, type ReviewItem, type ReviewReport } from "../lib/review";
 import { reviewTabShown, reviewView, type ReviewActions } from "./review";
 
 export type Tab = "inbox" | "review" | "chats" | "tasks";
@@ -163,6 +163,8 @@ export class PhoneApp {
   readonly reviewPicks = new Map<string, number>();
   reviewBusy = false;
   reviewConfirming = false;
+  /** The exact set the open confirmation shows (ids and tags): only it is ever sent. */
+  reviewConfirmed: { id: string; tag: string }[] | null = null;
   reviewFlash = "";
   private reviewFirst = true;
   private rendered: Tab | null = null;
@@ -313,6 +315,10 @@ export class PhoneApp {
     const report = parseReview(r.body);
     if (!report) return;
     this.review = report;
+    // Under an open confirmation, a re-read that drops or changes any
+    // confirmed item closes it: nothing is approved but the set the owner
+    // confirmed (review of #329, MED 1).
+    this.checkConfirmed(report);
     // A re-read unticks whatever left the review.
     this.reviewSel = keptSelection(report, this.reviewSel);
     const first = this.reviewFirst;
@@ -332,12 +338,35 @@ export class PhoneApp {
     const r = await this.read("/m/api/review");
     const report = r && "body" in r ? parseReview(r.body) : null;
     if (this.stopped) return;
-    if (report) {
-      this.review = report;
-      this.reviewSel = keptSelection(report, this.reviewSel);
-    }
+    if (report) this.review = report;
+    // Opened from a notification: nothing is ticked (review of #329, MED 2).
+    this.resetReviewSelection();
     this.renderTabs();
     this.show(report?.opensHere ? "review" : "inbox");
+  }
+
+  /** The review entered afresh: no box ticked, no confirmation open. */
+  private resetReviewSelection(): void {
+    if (this.reviewBusy) return;
+    this.reviewSel = emptySelection();
+    this.reviewConfirming = false;
+    this.reviewConfirmed = null;
+    this.reviewFlash = "";
+  }
+
+  private checkConfirmed(report: ReviewReport): void {
+    if (!this.reviewConfirming || !this.reviewConfirmed || this.reviewBusy) return;
+    const changed = confirmedChanged(report, this.reviewConfirmed);
+    if (!changed.length) return;
+    this.reviewConfirming = false;
+    this.reviewConfirmed = null;
+    const next = new Set(this.reviewSel);
+    for (const id of changed) {
+      next.delete(id);
+      this.notes.set(id, UNTICKED_GONE);
+    }
+    this.reviewSel = next;
+    this.reviewFlash = "Something you selected changed: nothing was approved. Look again, then confirm again.";
   }
 
   private renderTabs(): void {
@@ -375,7 +404,7 @@ export class PhoneApp {
 
   /** Leave it on one deferred row (the session only). */
   async leaveInReview(row: InboxRow): Promise<void> {
-    const item = this.review ? [...this.review.overnight, ...this.review.before].find((i) => i.row.id === row.id) : undefined;
+    const item = this.review ? allItems(this.review).find((i) => i.row.id === row.id) : undefined;
     if (!item) return;
     await this.answerInReview(item, { action: "leave" });
   }
@@ -383,15 +412,17 @@ export class PhoneApp {
   /** Approve selected, step two: one challenge for exactly the ticked set, the passkey once, then the set. */
   async approveSelected(): Promise<void> {
     const report = this.review;
-    if (!report || this.reviewBusy) return;
-    const body = approveBody(report, this.reviewSel);
-    if (!body) return;
+    if (!report || this.reviewBusy || !this.reviewConfirming || !this.reviewConfirmed) return;
+    // Exactly what the confirmation showed, and only while it still holds.
+    if (confirmedChanged(report, this.reviewConfirmed).length) { this.checkConfirmed(report); this.render(); return; }
+    const body = { items: this.reviewConfirmed.map((c) => ({ id: c.id, tag: c.tag })) };
     this.reviewBusy = true;
     this.reviewFlash = "";
     this.render();
     const done = async (result: { status: number; body: Record<string, unknown> } | null, words?: string) => {
       this.reviewBusy = false;
       this.reviewConfirming = false;
+      this.reviewConfirmed = null;
       if (words !== undefined) this.reviewFlash = words;
       else if (result && result.status === 200) {
         const n = typeof result.body.approved === "number" ? result.body.approved : body.items.length;
@@ -1214,7 +1245,8 @@ export class PhoneApp {
     } else if (this.sheet && this.sheet.kind !== (tab === "chats" ? "chat" : tab === "tasks" ? "task" : "")) {
       this.sheet = null;
     }
-    if (tab === "review" && this.tab !== "review") { this.reviewConfirming = false; this.reviewFlash = ""; }
+    // Entering the Review tab: nothing ticked, nothing confirmed (review of #329, MED 2).
+    if (tab === "review" && this.tab !== "review") this.resetReviewSelection();
     this.tab = tab;
     this.render();
     if (tab === "inbox") void this.loadInbox();
@@ -1346,12 +1378,21 @@ export class PhoneApp {
       toggle: (item) => {
         if (this.reviewBusy) return;
         this.reviewSel = toggled(this.reviewSel, item.row.id, item);
+        // A tick changed under the confirmation: it closes; the set must be confirmed again.
+        this.reviewConfirming = false;
+        this.reviewConfirmed = null;
         this.notes.delete(item.row.id);
         this.render();
       },
-      approveAsk: () => { if (!this.reviewBusy && this.review && approveBody(this.review, this.reviewSel)) { this.reviewConfirming = true; this.render(); } },
+      approveAsk: () => {
+        const body = !this.reviewBusy && this.review ? approveBody(this.review, this.reviewSel) : null;
+        if (!body) return;
+        this.reviewConfirmed = body.items;
+        this.reviewConfirming = true;
+        this.render();
+      },
       approveConfirm: () => void this.approveSelected(),
-      approveCancel: () => { if (!this.reviewBusy) { this.reviewConfirming = false; this.render(); } },
+      approveCancel: () => { if (!this.reviewBusy) { this.reviewConfirming = false; this.reviewConfirmed = null; this.render(); } },
       leaveSelected: () => void this.leaveSelected(),
       retry: (row) => void this.retryDeferred(row).then(() => {
         // Its words show here, on the review (retryDeferred writes the Inbox's line).

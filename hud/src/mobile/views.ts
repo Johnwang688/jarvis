@@ -103,7 +103,8 @@ function deferredDetail(row: InboxRow, box: HTMLElement) {
   if (d.count > 1) box.append(testid(el("p", "muted small", `Asked ${d.count} times while it waited.`), "m-deferred-count"));
   if (d.command) box.append(el("div", "label", "Command"), testid(el("pre", "code", d.command), "m-command"));
   if (d.reason) box.append(el("div", "label", "Why"), el("p", "", d.reason));
-  if (d.args && !d.command) box.append(el("div", "label", "Arguments"), el("pre", "code", d.args));
+  // Every argument, beside the command too (review of #329, LOW 6).
+  if (d.args) box.append(el("div", "label", "Arguments"), testid(el("pre", "code", d.args), "m-deferred-args"));
   box.append(testid(el("p", "muted small", d.more
     ? `${d.more} more asks from this chat were denied overnight, too many to list one by one.`
     : d.expired ? "Over a day old: it can only be left."

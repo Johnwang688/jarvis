@@ -22,7 +22,8 @@ function report(over: Record<string, unknown> = {}) {
   const items = [
     { row: deferred("a"), section: "overnight", place: "chat:aaaaaaaa", approve: true, leave: true, why: "", tag: tag("a") },
     { row: deferred("b"), section: "overnight", place: "chat:aaaaaaaa", approve: true, leave: true, why: "", tag: tag("b") },
-    { row: deferred("c"), section: "overnight", place: "chat:aaaaaaaa", approve: false, leave: true, why: "withheld", tag: null },
+    { row: deferred("c"), section: "overnight", place: "chat:aaaaaaaa", approve: true, leave: true, why: "", tag: tag("c") },
+    { row: deferred("d"), section: "overnight", place: "chat:aaaaaaaa", approve: false, leave: true, why: "withheld", tag: null },
     { row: row("dec:d0123456789ab", "decision", 6, { detail: { decision_id: "d0123456789ab", question: "Which " + H,
       options: ["one", "two " + H], default: 1, why: "w", answer: null } }),
       section: "overnight", place: "chat:aaaaaaaa", approve: false, leave: false, why: "", tag: null },
@@ -55,7 +56,7 @@ describe("the phone's Review tab (mobile/review.ts)", () => {
     expect(view.querySelectorAll(MARKUP).length).toBe(0);
     expect((window as unknown as { __pwned?: number }).__pwned).toBeUndefined();
     const boxes = Array.from(view.querySelectorAll<HTMLInputElement>('[data-testid="m-review-tick"]'));
-    expect(boxes.length).toBe(3);
+    expect(boxes.length).toBe(4);
     expect(boxes.some((b) => b.checked)).toBe(false);
     expect(view.textContent).not.toMatch(/select all/i);
     const radios = Array.from(view.querySelectorAll<HTMLInputElement>('[data-testid="m-review-option"]'));
@@ -75,7 +76,7 @@ describe("the phone's Review tab (mobile/review.ts)", () => {
     box.click();
     expect(toggle).toHaveBeenCalledTimes(1);
     expect(toggle.mock.calls[0][0].row.id).toBe("defer:b");
-    const ticked = reviewView(state({ selection: new Set(["defer:a", "defer:c"]) }), actions(), null);
+    const ticked = reviewView(state({ selection: new Set(["defer:a", "defer:d"]) }), actions(), null);
     const approve = ticked.querySelector<HTMLButtonElement>('[data-testid="m-review-approve"]')!;
     expect(approve.disabled).toBe(true);
     expect(ticked.querySelector('[data-testid="m-review-blockers"]')!.textContent).toContain("answer it at the desk");
@@ -89,7 +90,7 @@ describe("the phone's Review tab (mobile/review.ts)", () => {
     const view = reviewView(state({ selection: new Set(["defer:a"]) }), actions(), "limited: Funnel is on");
     expect(view.querySelector<HTMLButtonElement>('[data-testid="m-review-approve"]')!.disabled).toBe(true);
     expect(view.querySelector('[data-testid="m-limited"]')).not.toBeNull();
-    expect(view.querySelectorAll('[data-testid="m-review-retry"]').length).toBe(2);
+    expect(view.querySelectorAll('[data-testid="m-review-retry"]').length).toBe(3);
   });
 
   it("the confirmation lists exactly the ticked items", () => {
@@ -206,3 +207,84 @@ describe("the phone app's review (MR-11, MR-12)", () => {
     expect(receipt.getAttribute("data-id")).toBe("dec:d0123456789ab");
   });
 });
+
+describe("the review of #329's fixes, on the phone", () => {
+  async function confirmingAandB(h: ReturnType<typeof harness>) {
+    h.app.start();
+    await h.settle();
+    await h.click('[data-testid="m-review-tick"][data-id="defer:a"]');
+    await h.click('[data-testid="m-review-tick"][data-id="defer:b"]');
+    await h.click('[data-testid="m-review-approve"]');
+    expect(h.app.reviewConfirming).toBe(true);
+  }
+
+  it("MED 1: a re-read that drops a confirmed item closes the confirmation; nothing is sent", async () => {
+    const h = harness(report({ opens_here: true }));
+    await confirmingAandB(h);
+    const without = report({ opens_here: true });
+    (without.overnight as unknown[]).splice(1, 1);
+    h.gets["/m/api/review"] = { ok: true, body: without };
+    await h.app.loadReview();
+    await h.settle();
+    expect(h.app.reviewConfirming).toBe(false);
+    expect(h.root.querySelector('[data-testid="m-review-confirm"]')).toBeNull();
+    expect(h.root.querySelector('[data-testid="m-review-flash"]')!.textContent).toContain("Something you selected changed");
+    expect([...h.app.reviewSel]).toEqual(["defer:a"]);
+    // A stale tap on the old "Approve with Face ID" approves nothing.
+    await h.app.approveSelected();
+    expect(h.posts).toEqual([]);
+    expect(h.credential).not.toHaveBeenCalled();
+  });
+
+  it("MED 1: a re-read that changes a confirmed item's tag unticks it with why", async () => {
+    const h = harness(report({ opens_here: true }));
+    await confirmingAandB(h);
+    const retagged = report({ opens_here: true });
+    (retagged.overnight as Record<string, unknown>[])[1].tag = tag("f");
+    h.gets["/m/api/review"] = { ok: true, body: retagged };
+    await h.app.loadReview();
+    await h.settle();
+    expect(h.app.reviewConfirming).toBe(false);
+    expect([...h.app.reviewSel]).toEqual(["defer:a"]);
+    expect(h.root.querySelector('[data-id="defer:b"] [data-testid="m-review-note"]')!.textContent)
+      .toBe("Unticked: answered elsewhere or gone.");
+    expect(h.posts).toEqual([]);
+  });
+
+  it("MED 2: entering the Review tab, or a notification's tap, starts with nothing ticked", async () => {
+    const h = harness(report({ opens_here: true }));
+    h.app.start();
+    await h.settle();
+    await h.click('[data-testid="m-review-tick"][data-id="defer:a"]');
+    expect(h.app.reviewSel.size).toBe(1);
+    await h.click('[data-testid="m-tab-inbox"]');
+    await h.click('[data-testid="m-tab-review"]');
+    expect(h.app.reviewSel.size).toBe(0);
+    expect(Array.from(h.root.querySelectorAll<HTMLInputElement>('[data-testid="m-review-tick"]')).some((b) => b.checked)).toBe(false);
+    await h.click('[data-testid="m-review-tick"][data-id="defer:b"]');
+    await h.click('[data-testid="m-review-approve"]');
+    await h.app.openFromNotification();
+    await h.settle();
+    expect(h.app.tab).toBe("review");
+    expect(h.app.reviewSel.size).toBe(0);
+    expect(h.app.reviewConfirming).toBe(false);
+  });
+
+  it("LOW 6: every argument shows beside the command, in the review and the inbox row", async () => {
+    const { inboxRow } = await import("./views");
+    const { parseRow } = await import("../lib/inbox");
+    const args = { command: "make a", timeout: 120000, run_in_background: true, description: "Build " + H };
+    const raw = report();
+    const first = (raw.overnight as Record<string, any>[])[0];
+    first.row.detail.card = { tool: "Bash", command: "make a", args };
+    const view = reviewView(state({ report: parseReview(raw) }), actions(), null);
+    const shown = view.querySelector('[data-id="defer:a"] [data-testid="m-review-args"]')!.textContent!;
+    for (const word of ["timeout", "120000", "run_in_background", "description", "Build"]) expect(shown).toContain(word);
+    expect(view.querySelectorAll(MARKUP).length).toBe(0);
+    const row = inboxRow(parseRow(first.row)!, () => {});
+    const listed = row.querySelector('[data-testid="m-deferred-args"]')!.textContent!;
+    expect(listed).toContain("run_in_background");
+    expect(listed).toContain("timeout");
+  });
+});
+
