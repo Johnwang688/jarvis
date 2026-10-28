@@ -10,7 +10,8 @@
 //   - Only threads in `setSpeakers` are read (`policy.speakingThreads`): every
 //     thread shown in any chat pane, hidden panes included, through the one
 //     queue and its floor rules (`floor.ts`), each in its own voice (`voiceFor`).
-//     A chat the owner muted (`setMuted`) is not read either.
+//     A chat the owner muted (`setMuted`) is not read either, and nothing is
+//     read while the mic is OFF (`setMicOff`, policy.MIC_OFF_SILENCES_SPEECH).
 //   - A thread leaving that set stops at once; so does an owner send to it
 //     (a `user_message` event: the reply it was reading is stale) and an
 //     interrupted turn.
@@ -142,6 +143,8 @@ export class SpeechController {
   private speakers: ReadonlySet<string> = new Set();
   private muted: ReadonlySet<string> = new Set();
   private on = true;
+  /** The mic is OFF: text only, nothing read (the read-aloud switch keeps its own value). */
+  private micOff = false;
   private listeners = new Set<() => void>();
   private cached: SpeechView | null = null;
   private unsubs: (() => void)[] = [];
@@ -338,6 +341,18 @@ export class SpeechController {
     this.notify();
   }
 
+  /**
+   * The mic went OFF (or back on). OFF, everything stops and nothing more is
+   * queued, as with read-aloud off -- but the read-aloud switch, its Settings
+   * row and the daemon's voice-out flag are left as they were.
+   */
+  setMicOff(off: boolean): void {
+    if (this.micOff === off) return;
+    this.micOff = off;
+    if (off) this.clearAll();
+    this.notify();
+  }
+
   /** The chats the owner muted: silent like a thread in no pane, and its speech goes at once. */
   setMuted(threads: ReadonlySet<string>): void {
     this.muted = threads;
@@ -365,7 +380,7 @@ export class SpeechController {
   }
 
   private speaks(thread: string): boolean {
-    return this.on && this.deps.gate.isSpeaker() && this.speakers.has(thread) && !this.muted.has(thread);
+    return this.on && !this.micOff && this.deps.gate.isSpeaker() && this.speakers.has(thread) && !this.muted.has(thread);
   }
 
   private gateChanged(): void {
