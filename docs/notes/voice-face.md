@@ -3176,3 +3176,13 @@ Tests are in vitest `capture.test.ts` ("the talk key dictates while OFF"), plus
 `controller.test.ts`, `stt.test.ts`, `captureChunks.test.ts` and
 `hud_v2_ptt_check` (muted section). The no-pre-roll and mute-exemption lines
 were each mutated, and the tests failed.
+
+**Dictation from the phone (2026-10-28, phone P-7).** The phone's chat box has
+"Hold to talk", the muted dictation above made physical: what is said lands in
+the box unsent. The clip goes to `POST /m/api/stt` on the remote listener,
+which calls `hud_api.dictate`, the same function as the desk's `POST /stt`
+(speaker verification, then the owner's `stt_settings`; local only stays
+local). The phone writes the desk's 16 kHz PCM WAV with Web Audio, not
+Safari's MediaRecorder `audio/mp4`, so the local engine and speaker
+verification take it without a media decoder. Details: `control-plane.md`,
+"Push to talk from the phone".
