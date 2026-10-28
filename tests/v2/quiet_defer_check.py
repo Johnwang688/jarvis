@@ -432,6 +432,19 @@ class Grants(_Temp):
         self.assertEqual(n.store.get(rec["id"])["state"], "used")
         print("ok  a grant: exactly that call (argument, thread, task, tool all count), once")
 
+    def test_the_digest_covers_every_part_of_the_request(self):
+        base = request()
+        digest = quiet_defer.request_digest(base)
+        self.assertRegex(digest, r"^[0-9a-f]{64}$")
+        self.assertEqual(quiet_defer.request_digest(request()), digest, "the same call, the same digest")
+        for name, other in {"thread": request(thread_id="th000002"), "task": request(task_id="task0001"),
+                            "tool": request(tool="Monitor"), "args": request(args={"command": "make deploy", "x": 1}),
+                            "command": request(args={"command": "make deploy"}, command="make  deploy")}.items():
+            self.assertNotEqual(quiet_defer.request_digest(other), digest, name)
+        self.assertIsNone(quiet_defer.request_digest(request(args={"x": float("nan")})), "not exactly JSON: never grantable")
+        self.assertNotEqual(remote_answer.defer_binding(["x"]), "x", "a binding is never a bare approval id")
+        print("ok  the digest covers thread, task, tool, args and command; a binding is never a bare id")
+
     def test_an_expired_grant_asks(self):
         n = self.n
         rec = n.grant(request())
