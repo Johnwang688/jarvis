@@ -1040,5 +1040,107 @@ print(worst)
         self.assertEqual(before, after)
 
 
+# -- review of #330, LOW 5: the same family, tighten only --------------------
+
+FAMILY = [
+    ("htpasswd -b .htpasswd admin adminpass99", f"htpasswd -b .htpasswd admin {R}"),
+    ("htpasswd -nb admin adminpass99", f"htpasswd -nb admin {R}"),
+    ("htpasswd -bc .htpasswd admin adminpass99", f"htpasswd -bc .htpasswd admin {R}"),
+    ("htpasswd -cb .htpasswd admin adminpass99", f"htpasswd -cb .htpasswd admin {R}"),
+    ("htpasswd -b -c .htpasswd admin adminpass99", f"htpasswd -b -c .htpasswd admin {R}"),
+    ("htpasswd -B -b .htpasswd admin adminpass99", f"htpasswd -B -b .htpasswd admin {R}"),
+    ("htpasswd -nbB admin adminpass99", f"htpasswd -nbB admin {R}"),
+    ("smbclient //srv/share -U alice%plainpass9", f"smbclient //srv/share -U alice%{R}"),
+    ("smbclient -U alice%plainpass9 //srv/share", f"smbclient -U alice%{R} //srv/share"),
+    ("rpcclient --user=alice%plainpass9 srv", f"rpcclient --user=alice%{R} srv"),
+    ("net ads join -U admin%plainpass9", f"net ads join -U admin%{R}"),
+    ("lftp -u alice,plainpass9 ftp://h", f"lftp -u alice,{R} ftp://h"),
+    ("sqlcmd -S srv -U sa -P plainpass9", f"sqlcmd -S srv -U sa -P {R}"),
+    ("ldapsearch -x -D cn=admin -w plainpass9 -b dc=x", f"ldapsearch -x -D cn=admin -w {R} -b dc=x"),
+    ("openssl pkcs12 -passin pass:plainpass9 -in a.p12", f"openssl pkcs12 -passin pass:{R} -in a.p12"),
+    ("openssl enc -aes256 -pass pass:plainpass9 -in f", f"openssl enc -aes256 -pass pass:{R} -in f"),
+    ("zip -P plainpass9 out.zip f", f"zip -P {R} out.zip f"),
+    ("unzip -P plainpass9 out.zip", f"unzip -P {R} out.zip"),
+    ("7z a -pplainpass9 out.7z f", f"7z a -p{R} out.7z f"),
+    ("xfreerdp /u:alice /p:plainpass9 /v:host", f"xfreerdp /u:alice /p:{R} /v:host"),
+    ("ssh-keygen -N plainpass9 -f k", f"ssh-keygen -N {R} -f k"),
+    ("keytool -list -storepass plainpass9", f"keytool -list -storepass {R}"),
+    # Already covered before #330 (kept here so the family is pinned whole).
+    ("sshpass -p plainpass9 ssh admin@10.0.0.5 uptime", f"sshpass -p {R} ssh admin@10.0.0.5 uptime"),
+    ("mysql -uroot -pplainpass9 db", f"mysql -uroot -p{R} db"),
+    ("mysql -u root --password=plainpass9 db", f"mysql -u root --password={R} db"),
+    ("PGPASSWORD=plainpass9 psql -h db", f"PGPASSWORD={R} psql -h db"),
+    ("curl -u alice:plainpass9 https://x", f"curl -u alice:{R} https://x"),
+    ("some-tool --password plainpass9", f"some-tool --password {R}"),
+]
+
+FAMILY_UNTOUCHED = [
+    "htpasswd -c .htpasswd admin",              # no -b: htpasswd asks
+    "htpasswd -D .htpasswd admin",
+    "htpasswd -n admin",
+    "smbclient -L //srv -N",
+    "smbclient -U alice //srv/share",           # no %: it asks
+    "lftp -u alice ftp://h",
+    "openssl pkcs12 -passin env:P12_PASS -in a.p12",
+    "openssl pkcs12 -passin file:/run/p -in a.p12",
+    "openssl pkcs12 -passin stdin -in a.p12",
+    "7z a -p out.7z f",                         # a spaced -p asks
+    "ssh-keygen -N '' -f k",
+    "ssh-keygen -l -f k.pub",
+    "zip -r out.zip dir",
+    "ls -P plainpass9",                         # not the program
+]
+
+
+class Family(unittest.TestCase):
+    def setUp(self):
+        self.root = _env_isolated(self)
+
+    def test_each_is_withheld_on_the_card_the_log_and_v1_lines(self):
+        for command, shown in FAMILY:
+            with self.subTest(command=command):
+                self.assertEqual(secrets.redact_command(command), shown)
+                self.assertEqual(secrets.redact_inline(command), shown)
+                self.assertNotIn("plainpass9", secrets.for_display(command))
+                self.assertNotIn("adminpass99", secrets.for_display(command))
+                self.assertFalse(secrets.holds_back_credential(command), "nothing left once withheld")
+
+    def test_the_rest_is_byte_identical(self):
+        for command in FAMILY_UNTOUCHED:
+            with self.subTest(command=command):
+                self.assertEqual(secrets.redact_command(command), command)
+
+    def test_the_never_hidden_rule_stands_and_is_reported(self):
+        # A value holding an operator stays on the card (delta review of
+        # #205): tighten only. `holds_back_credential` reports it, so a path
+        # that sends the card off the machine sends nothing.
+        for command in ("sshpass -p 'Tr0ub4dor&3' ssh admin@10.0.0.5 uptime",
+                        "PGPASSWORD='Tr0ub&4dor3' psql", "curl -u 'alice:Tr0ub&4dor3' x",
+                        "smbclient -U 'alice%Tr0ub&4dor3' //s/x"):
+            with self.subTest(command=command):
+                self.assertEqual(secrets.redact_command(command), command)
+                self.assertTrue(secrets.holds_back_credential(command))
+                self.assertTrue(secrets.holds_back_credential({"command": command}))
+        # A credential-named value with a glob is kept on the card the same
+        # way, and held back from a model too (fail closed: no summary).
+        self.assertTrue(secrets.holds_back_credential("API_KEY=abcd* ls"))
+        plain = [c for c in UNTOUCHED if not any(m in c for m in ("two words", "a;b", "*", "{"))]
+        for command in plain + FAMILY_UNTOUCHED + ["make deploy", "rm -rf build && make deploy", "echo 'a & b'"]:
+            with self.subTest(command=command):
+                self.assertFalse(secrets.holds_back_credential(command))
+        # The switch it uses never leaks out of it.
+        self.assertFalse(secrets._LOOSE_VALUES.get())
+        self.assertEqual(secrets.redact_command("PGPASSWORD='Tr0ub&4dor3' psql"), "PGPASSWORD='Tr0ub&4dor3' psql")
+
+    def test_judges_never_read_it(self):
+        def boom(*_a, **_k):
+            raise AssertionError("a judge read through the display redaction")
+        commands = [c for c, _ in FAMILY]
+        before = [(rules.decide(c).decision, v1_permissions.static_verdict(c).decision) for c in commands]
+        with patch.object(secrets, "redact_command", boom), patch.object(secrets, "holds_back_credential", boom):
+            after = [(rules.decide(c).decision, v1_permissions.static_verdict(c).decision) for c in commands]
+        self.assertEqual(before, after)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

@@ -32,6 +32,7 @@ env files Jarvis may write (ENV-1, 2026-10-12).
 
 from __future__ import annotations
 
+import contextvars
 import json
 import os
 import re
@@ -1153,6 +1154,15 @@ _URL_IN_TEXT = re.compile(r"(?<![A-Za-z0-9+.-])[A-Za-z][A-Za-z0-9+.-]{0,31}://[^
 # options only (before what they run), sshpass' `-p` and redis-cli's `-a`.
 _SEGMENTS = re.compile(r"\|\||&&|[;|\n]")
 _USERPASS, _COOKIE_DATA = "userpass", "cookie"
+# Review of PR #330, LOW 5 (tighten only): Samba's `-U user%password`,
+# lftp's `-u user,password` (the user stays, as curl's does), htpasswd's
+# batch password (`-b file user password`, `-nb user password`) and
+# OpenSSL's `pass:password` (`env:`/`file:`/`fd:` name a place, and stay).
+_USERPCT, _USERCOMMA, _HTPASSWD, _OPENSSL_PASS = "userpct", "usercomma", "htpasswd", "opensslpass"
+_USER_SEPARATOR = {_USERPASS: ":", _USERPCT: "%", _USERCOMMA: ","}
+_SAMBA = frozenset({"smbclient", "rpcclient", "smbcacls", "smbget", "smbtree", "smbcquotas", "net"})
+_LDAP = frozenset({"ldapsearch", "ldapmodify", "ldapadd", "ldapdelete", "ldapmodrdn", "ldappasswd",
+                   "ldapwhoami", "ldapcompare", "ldapexop", "ldapurl"})
 _MYSQL = frozenset({"mysql", "mysqldump", "mysqladmin", "mysqlimport", "mysqlcheck", "mysqlshow",
                     "mysqlslap", "mariadb", "mariadb-dump", "mariadb-admin"})
 # (programs, subcommand words, kind, pattern, option words that take the
@@ -1176,6 +1186,31 @@ _PROGRAM_FLAGS = (
      re.compile(r"(?<![\w-])-a(?:[ \t]+)?(?P<value>" + _WORD + ")"),
      frozenset({"-h", "-p", "-s", "-a", "-u", "-n", "-r", "-i", "-d", "-D", "-e",
                 "--user", "--pass", "--askpass", "--tls", "--cacert", "--cert", "--key"})),
+    # Review of PR #330, LOW 5: the same family, tighten only.
+    (_SAMBA, (), _USERPCT,
+     re.compile(r"(?<![\w-])(?:-U|--user)(?:[ \t]+|=)?(?P<value>" + _WORD + ")"), None),
+    (frozenset({"lftp"}), (), _USERCOMMA,
+     re.compile(r"(?<![\w-])(?:-u|--user)(?:[ \t]+|=)?(?P<value>" + _WORD + ")"), None),
+    (frozenset({"htpasswd"}), (), _HTPASSWD,
+     re.compile(r"(?<![\w-])(?P<flags>-[A-Za-z]+(?:[ \t]+-[A-Za-z]+)*)[ \t]+(?:(?P<file>" + _WORD
+                + r")[ \t]+)?(?P<user>" + _WORD + r")[ \t]+(?P<value>" + _WORD + ")"), None),
+    (frozenset({"sqlcmd", "bcp"}), (), "",
+     re.compile(r"(?<![\w-])-P(?:[ \t]+)?(?P<value>" + _WORD + ")"), None),
+    (_LDAP, (), "", re.compile(r"(?<![\w-])-w(?:[ \t]+)?(?P<value>" + _WORD + ")"), None),
+    (frozenset({"openssl"}), (), _OPENSSL_PASS,
+     re.compile(r"(?<![\w-])-(?:passin|passout|pass|password)[ \t]+(?P<value>" + _WORD + ")"),
+     None),
+    (frozenset({"zip", "unzip", "zipcloak"}), (), "",
+     re.compile(r"(?<![\w-])(?:-P|--password)(?:[ \t]+|=)?(?P<value>" + _WORD + ")"), None),
+    (frozenset({"7z", "7za", "7zr", "7zz"}), (), "",
+     re.compile(r"(?<![\w-])-p(?P<value>" + _WORD + ")"), None),
+    (frozenset({"xfreerdp", "wlfreerdp", "sdl-freerdp", "sdl-freerdp3", "xfreerdp3", "wlfreerdp3"}), (), "",
+     re.compile(r"(?<![\w-])/(?:p|password):(?P<value>" + _WORD + ")"), None),
+    (frozenset({"ssh-keygen"}), (), "",
+     re.compile(r"(?<![\w-])-[NP](?:[ \t]+)?(?P<value>" + _WORD + ")"), None),
+    (frozenset({"keytool"}), (), "",
+     re.compile(r"(?<![\w-])-(?:storepass|keypass|srcstorepass|deststorepass|srckeypass|destkeypass)"
+                r"(?::[a-z]+)?[ \t]+(?P<value>" + _WORD + ")"), None),
 )
 _PROGRAM_WORD = re.compile(r"(?<![\w.-])(?:" + "|".join(sorted(
     (re.escape(p) for programs, *_ in _PROGRAM_FLAGS for p in programs), key=len, reverse=True))
@@ -1239,7 +1274,14 @@ _REFERENCE = re.compile(r"\$\{?!?([A-Za-z_][A-Za-z0-9_]*)|(?i:\$env:)([A-Za-z_][
 _UNSAFE_VALUE = re.compile(r"[\s;&|<>()$`{}*?\[]")
 
 
+# Set only by `holds_back_credential`, which compares, never shows: with it
+# set, a value holding one of `_UNSAFE_VALUE`'s characters is withheld too.
+_LOOSE_VALUES = contextvars.ContextVar("secrets_loose_values", default=False)
+
+
 def _unsafe_literal(value: str) -> bool:
+    if _LOOSE_VALUES.get():
+        return False
     return bool(_UNSAFE_VALUE.search(value)) or value.startswith("~")
 
 
@@ -1539,12 +1581,24 @@ def _program_value(kind: str):
         if _already(match) or value is None or not value or word.startswith("-") \
                 or _unsafe_literal(value):
             return match.group(0)
-        if kind == _USERPASS:
-            user, colon, password = value.partition(":")
+        if kind in _USER_SEPARATOR:
+            sep = _USER_SEPARATOR[kind]
+            user, colon, password = value.partition(sep)
             if not colon or not password:
                 return match.group(0)               # curl asks for it
             start, a = match.start(0), match.start("value")
-            return match.group(0)[:a - start] + user + ":" + INLINE_REDACTED
+            return match.group(0)[:a - start] + user + sep + INLINE_REDACTED
+        if kind == _HTPASSWD:
+            # Only in batch mode (`-b`): without it the last word is the user
+            # and htpasswd asks. With `-n` there is no file.
+            flags = match.group("flags").replace("-", "")
+            if "b" not in flags or ("n" in flags) == (match.group("file") is not None):
+                return match.group(0)
+        if kind == _OPENSSL_PASS:
+            if not value.startswith("pass:") or len(value) == len("pass:"):
+                return match.group(0)               # `env:NAME`, `file:path`, `fd:0`, `stdin`
+            start, a = match.start(0), match.start("value")
+            return match.group(0)[:a - start] + "pass:" + INLINE_REDACTED
         if kind == _COOKIE_DATA and "=" not in value:
             return match.group(0)                   # `-b cookies.txt` is a file
         return _redact_group(match)
@@ -1746,6 +1800,35 @@ def redact_command(text) -> str:
     for _, pattern in PATTERNS:
         text = _masked_sub(pattern, lambda m: INLINE_REDACTED, text)
     return text
+
+
+def holds_back_credential(value, depth: int = 0) -> bool:
+    """Whether `redact_command` (or `redact_value`) leaves a credential in
+    `value` only because of the rule that a value holding a blank, an
+    operator, an expansion or a glob is never withheld (`_UNSAFE_VALUE`:
+    `sshpass -p 'Tr0ub4dor&3'`, `PGPASSWORD='a b'`). The card keeps that rule
+    (it never hides what may run); a path that sends a card's text off this
+    machine (approval summaries, review of PR #330 LOW 5) sends nothing when
+    this is True. Fails closed: an error is True. Never for a judge."""
+    try:
+        if isinstance(value, str):
+            shown = redact_command(value)
+            token = _LOOSE_VALUES.set(True)
+            try:
+                strict = redact_command(value)
+            finally:
+                _LOOSE_VALUES.reset(token)
+            return strict != shown
+        if depth >= 32:
+            return False
+        if isinstance(value, dict):
+            return any(holds_back_credential(k, depth + 1) or holds_back_credential(v, depth + 1)
+                       for k, v in value.items())
+        if isinstance(value, (list, tuple)):
+            return any(holds_back_credential(v, depth + 1) for v in value)
+        return False
+    except Exception:  # noqa: BLE001 — unsure is held back
+        return True
 
 
 def redact_value(value, depth: int = 0):
