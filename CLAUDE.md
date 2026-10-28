@@ -109,8 +109,8 @@ navigation and cleanup: Browser note and HTTP-auth plan.
 
 ## Inbox
 
-`/inbox` routes are owner-only; agents only post via `owner_post`, never read,
-answer or mark. Marks hide ranks 5–8 only.
+`/inbox` is owner-only; agents only `owner_post`, never read, answer, mark,
+grant. Marks hide ranks 5–8. Quiet hours defer.
 [Design](docs/plans/2026-10-24-owner-inbox-design.md); rules: control-plane notes.
 
 ## Safety design (deliberate, do not loosen without asking)

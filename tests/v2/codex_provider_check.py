@@ -612,7 +612,8 @@ class Checks(unittest.TestCase):
         self.assertEqual(config.CHAT_WORKTREES_DIR.stat().st_mode & 0o777, 0o700)
         params = self.brain.calls("thread/start")[0]["params"]
         self.assertEqual(params["developerInstructions"],
-                         self.brief.system_append + "\n\n" + codex_config.git_note(self.chat()))
+                         self.brief.system_append + "\n\n" + codex_config.git_note(self.chat())
+                         + "\n\n" + codex_config.quiet_note(self.chat()))
         self.assertIn("shared", params["developerInstructions"])
         for words in ("no GitHub login", "chat_git_push / chat_pr_create / chat_pr_merge / chat_pr_close",
                       "chat_git_fetch", "Do not request escalation for git push or gh",
@@ -2227,6 +2228,53 @@ class Checks(unittest.TestCase):
         self.assertRegex(line, r"… \(\+\d+ more\)$")
         shown = line.count(f"write {self.root}/w")
         self.assertEqual(int(line.rsplit("+", 1)[1].split()[0]), 30 - shown)
+
+    def test_a_quiet_hours_deferral_is_declined_and_logged(self):
+        """QH: an approval asked while the owner sleeps is declined at once.
+        Codex's decline carries no text to the model (a bare "decline" in
+        CommandExecutionRequestApprovalResponse, 0.161), so the chat's log
+        says why, and only for a deferral."""
+        from datetime import datetime, timedelta, timezone
+        from jarvis.v2.approvals import PendingApprovals
+        from jarvis.v2.quiet import QuietHours
+        from jarvis.v2.quiet_defer import DeferredStore, QuietDesk
+        night = datetime(2026, 3, 10, 23, 30, tzinfo=timezone(timedelta(hours=-5)))
+        data = self.root / "qh-data"
+        quiet = QuietHours(data, clock=lambda: night)
+        broker = PendingApprovals(timeout_s=0.2)
+        broker.quiet_desk = QuietDesk(quiet, lambda: False, DeferredStore(data, clock=lambda: night),
+                                      lambda record: None)
+        params = {"itemId": "c", "command": "docker build ."}
+        _, events, reply = self.scripted(CMD, params, self.real_permit(broker), brief=self.chat())
+        self.assertEqual(reply["result"], {"decision": "decline"})
+        said = [e.data["message"] for e in events if e.kind == K.ERROR]
+        self.assertTrue(any("asleep until 07:00" in m and "Do not retry it tonight" in m for m in said), said)
+        self.assertFalse(any(e.data.get("fatal") for e in events if e.kind == K.ERROR))
+        # An ordinary no (the day; nobody answers) logs no such line.
+        day = night.replace(hour=12)
+        quiet.clock = lambda: day
+        _, events, reply = self.scripted(CMD, params, self.real_permit(broker), brief=self.chat())
+        self.assertEqual(reply["result"], {"decision": "decline"})
+        self.assertFalse(any("asleep" in e.data.get("message", "") for e in events if e.kind == K.ERROR))
+
+    def test_a_chat_is_told_a_quiet_hours_decline_may_be_a_deferral(self):
+        """QH (#326 review, Q3): Codex's decline carries no reason, so a chat's
+        instructions say it up front, with the owner's window; a task's do
+        not, and quiet hours off says nothing."""
+        from jarvis.v2.quiet import QuietHours
+        self.repo()
+        note = codex_config.quiet_note(self.chat())
+        self.assertEqual(note, "Between 23:00 and 07:00 the owner may be asleep: a decline may be a deferral. "
+                               "Don't retry it or a variant of it tonight; carry on with other work.")
+        self.assertEqual(codex_config.quiet_note(self.brief), "")
+        self.assertEqual(codex_config.quiet_note(replace(self.chat(), task_id="task")), "")
+        h = self.start(brief=self.chat())
+        self.assertIn(note, self.brain.calls("thread/start")[0]["params"]["developerInstructions"])
+        QuietHours(config.V2_DATA_DIR).update({"start": "22:30", "end": "06:15"})
+        self.assertIn("Between 22:30 and 06:15", codex_config.quiet_note(self.chat()))
+        QuietHours(config.V2_DATA_DIR).update({"enabled": False})
+        self.assertEqual(codex_config.quiet_note(self.chat()), "")
+        self.provider.close(h)
 
     def test_chat_bare_approvals_require_owner_even_for_rules_allow(self):
         from jarvis.v2.approvals import PendingApprovals

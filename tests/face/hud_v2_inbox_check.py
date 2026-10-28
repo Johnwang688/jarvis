@@ -45,6 +45,13 @@ What it pins, one section each (each names the mutation it is meant to catch):
             `{text}` on Enter; under a card the row is inert, Answer disabled,
             and a trusted click, typing and Enter post nothing [auto-submit;
             submit on Enter; double post; innerHTML; not inert]
+  deferred  QH's deferred approvals sit under "Waiting on you" at rank 4,
+            counted, never markable; the card's command is text; Approve
+            and retry shows only where it may (never a Browser card or a
+            day-old row) and posts `{action: "retry"}` once; Leave it posts
+            `{action: "leave"}`; nothing is focused by default; under a card
+            the row is inert and a trusted click posts nothing [double post;
+            innerHTML; markable; autofocus; not inert]
   check     inbox B2's live checks (`POST /inbox/checks/<id>/steps/<n>`) sit
             under "When you have time", uncounted, plain Graphite; steps are
             text (hostile title, steps and origin make no element); Copy
@@ -1177,6 +1184,87 @@ def _decision_checks(page, mock, check, until):
     check("the title is unchanged", page.title() == TITLE, page.title())
 
 
+def defer_row(did="D1", thread="t1", *, rank=4, grantable=True, hud_only=False, command="make deploy"):
+    """An approval deferred during quiet hours (QH) as `quiet_defer.rows` serves it."""
+    c = {"req_id": did, "tool": "Bash", "args": {"command": command}, "command": command,
+         "reason": "ask profile: every gated call reaches the owner", "layer": "human", "thread_id": thread,
+         "task_id": None, "provider": "claude", "origin": "", "asked_at": _iso(-3600), "allowlistable": True,
+         "headline": ""}
+    return {"id": f"defer:{did}", "kind": "deferred", "rank": rank,
+            "title": "Bash is waiting for your morning approval" if rank == 4
+            else "Deferred overnight and not approved: Bash",
+            "blocks": f"chat {thread} was told to carry on without it", "project_id": None, "thread_id": thread,
+            "task_id": None, "asked_at": _iso(-3600), "expires_at": None, "origin": "",
+            "detail": {"deferral_id": did, "tool": "Bash", "card": c, "thread_id": thread, "task_id": None,
+                       "at": _iso(-3600), "until": _iso(3600), "grantable": grantable, "expired": rank != 4,
+                       "hud_only": hud_only}}
+
+
+def _deferred_checks(page, mock, check, until):
+    """QH: a deferred approval, rank 4, Approve and retry and Leave it."""
+    rows = basic_rows() + [defer_row(command="make deploy " + HOSTILE), defer_row("D2", hud_only=True, grantable=False),
+                           defer_row("D3", rank=8, grantable=False)]
+    _open(page, mock, until, rows)
+    you = page.evaluate("() => [...document.querySelectorAll('[data-testid=\"inbox-group-you\"] "
+                        "[data-testid=\"inbox-row\"]')].map(r => r.dataset.id)")
+    check("a deferred row sits under 'Waiting on you' at rank 4 (the Browser one too)",
+          "defer:D1" in you and "defer:D2" in you and "defer:D3" not in you, str(you))
+    check("rank 4 deferred rows are counted [mutation: leave them uncounted]", _count(page) == "5", str(_count(page)))
+    row = _row(page, "defer:D1")
+    imgs = page.evaluate("() => document.querySelectorAll('[data-testid=\"inbox-view\"] img').length")
+    check("its card's command is literal text: no element made, nothing ran [mutation: innerHTML]",
+          imgs == 0 and page.evaluate("window.__pwned === undefined")
+          and HOSTILE in row.locator('[data-testid="inbox-deferred-command"]').inner_text(), str(imgs))
+    check("no Snooze or Dismiss on any deferred row [mutation: markable]",
+          all(_row(page, i).locator('[data-testid="inbox-marks"]').count() == 0
+              for i in ("defer:D1", "defer:D2", "defer:D3")))
+    check("Approve and retry only where it may be: never a Browser card or a day-old row",
+          row.locator('[data-testid="inbox-deferred-retry"]').count() == 1
+          and _row(page, "defer:D2").locator('[data-testid="inbox-deferred-retry"]').count() == 0
+          and _row(page, "defer:D3").locator('[data-testid="inbox-deferred-retry"]').count() == 0
+          and _row(page, "defer:D2").locator('[data-testid="inbox-deferred-leave"]').count() == 1)
+    check("nothing is focused by default [mutation: autofocus]",
+          _active(page) not in ("inbox-deferred-retry", "inbox-deferred-leave"), str(_active(page)))
+    before = len(_answers(mock))
+    row.click(position={"x": 4, "y": 4})
+    time.sleep(0.3)
+    check("a click on the row posts nothing", len(_answers(mock)) == before)
+    row.locator('[data-testid="inbox-deferred-retry"]').dblclick()
+    until(lambda: len(_answers(mock)) > before, timeout=3)
+    time.sleep(0.4)
+    got = _answers(mock)[before:]
+    check("Approve and retry posts {action: retry} once, the id through encodeURIComponent [mutation: double post]",
+          len(got) == 1 and got[0][0] == "/inbox/defer%3AD1/answer" and got[0][2] == {"action": "retry"}, str(got))
+    until(lambda: "defer:D1" not in _row_ids(page), timeout=3)
+    note = page.locator('[data-testid="inbox-notice"]')
+    check("the row leaves and the daemon's note is said",
+          note.count() == 1 and "Approved once for 30 minutes" in note.inner_text())
+    before = len(_answers(mock))
+    _row(page, "defer:D3").locator('[data-testid="inbox-deferred-leave"]').click()
+    until(lambda: len(_answers(mock)) > before, timeout=3)
+    check("Leave it posts {action: leave}", _answers(mock)[-1][2] == {"action": "leave"}, str(_answers(mock)[-1]))
+    # Under a card the row is inert, as the rest of the inbox.
+    c = card("defcard0001")
+    mock.world["approvals"].append(c)
+    mock.emit("approval_requested", c)
+    cardloc = page.locator('[data-testid="approval-card"]')
+    until(lambda: cardloc.count() == 1, timeout=4)
+    row = _row(page, "defer:D2")
+    check("under a card the deferred row is inert and Leave it disabled",
+          row.evaluate("e => !!e.closest('[inert]')") and row.locator('[data-testid="inbox-deferred-leave"]').is_disabled())
+    posts = len(_answers(mock))
+    found = row.locator('[data-testid="inbox-deferred-leave"]').bounding_box()
+    if found:
+        page.mouse.click(found["x"] + found["width"] / 2, found["y"] + found["height"] / 2)
+    page.keyboard.press("Enter")
+    time.sleep(0.4)
+    check("a trusted click and Enter under the card post nothing [mutation: not inert]",
+          len(_answers(mock)) == posts and cardloc.count() == 1, f"{len(_answers(mock)) - posts} posts")
+    page.keyboard.press("Escape")
+    until(lambda: cardloc.count() == 0, timeout=4)
+    check("the title is unchanged", page.title() == TITLE, page.title())
+
+
 def chk_row(cid="c0123456789ab", thread="t1", steps=None, prs=(), markable=True, deploy_text="",
             title="Quick review", origin="Claude · chat ‹jarvis› (t1)"):
     """An open live check as inbox B2's projection serves it (rank 7)."""
@@ -1424,7 +1512,7 @@ def _check_checks(page, mock, check, until):
 
 SECTIONS = (_sidebar_checks, _groups_checks, _live_checks, _answer_checks, _conflict_checks, _withdraw_checks,
             _reconnect_checks, _clicks_checks, _hostile_checks, _missed_checks, _decision_checks, _check_checks,
-            _marks_checks, _card_checks,
+            _marks_checks, _deferred_checks, _card_checks,
             _older_checks, _aurora_checks, _pr_checks)
 
 

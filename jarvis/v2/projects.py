@@ -326,7 +326,7 @@ def create_project(daemon, name, root, **values) -> Project:
 MAX_FOLDER_ASKS = 3
 
 
-def confirm_folder(asker, check, name, *, origin, say, taken_roots, channel_id=None):
+def confirm_folder(asker, check, name, *, origin, say, taken_roots, channel_id=None, owner_initiated=False):
     """Ask when needed, make the folder, and ask again if it changed after the
     yes. -> the path, or None once `say` has been told why not.
 
@@ -350,7 +350,9 @@ def confirm_folder(asker, check, name, *, origin, say, taken_roots, channel_id=N
             request = ApprovalRequest(
                 tool=folders.TOOL, args=check.approval_args(name),
                 reason=f"{verb} {check.path} as the folder of project {name}",
-                origin=origin, allowlistable=False, discord_channel_id=channel_id)
+                origin=origin, allowlistable=False, discord_channel_id=channel_id,
+                # QH: the HUD's new VEX project, the owner's own click: never deferred.
+                owner_initiated=owner_initiated is True)
             try:
                 decision = Decision(asker.ask(request))
             except Exception as exc:             # a broker that breaks never grants

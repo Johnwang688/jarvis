@@ -152,6 +152,11 @@ ANSWER_DECISIONS = ("allow", "always")
 # verb's subject never takes an approval's answer, nor the reverse.
 TASK_DECISIONS = ("cancel",)
 _TASK_SUBJECT = re.compile(r"task:[0-9a-f]{8}")
+# QH: an Approve and retry of a deferred approval (`remote_answer.defer_binding`):
+# one deferral, `defer:<id>`, or a set of them, `defers:<sha256, 56 hex>`.
+# Only "allow" is ever an answer for it.
+DEFER_DECISIONS = ("allow",)
+_DEFER_SUBJECT = re.compile(r"defer:[A-Za-z0-9_-]{1,58}|defers:[0-9a-f]{56}")
 # PH-10: a phone session seen this recently gives approvals the remote wait.
 ACTIVE_S = 24 * 3600
 MAX_SESSIONS = 32         # the least recently seen goes first
@@ -735,7 +740,9 @@ class RemoteAuth:
         if not isinstance(req_id, str) or not req_id or len(req_id) > 64:
             raise AuthError(400, "bad request")
         task = _TASK_SUBJECT.fullmatch(req_id) is not None
-        if decision not in (TASK_DECISIONS if task else ANSWER_DECISIONS) or (not task and ":" in req_id):
+        defer = _DEFER_SUBJECT.fullmatch(req_id) is not None
+        allowed = TASK_DECISIONS if task else DEFER_DECISIONS if defer else ANSWER_DECISIONS
+        if decision not in allowed or (not task and not defer and ":" in req_id):
             raise AuthError(400, "bad request")
         with self._lock:
             self._require_usable()

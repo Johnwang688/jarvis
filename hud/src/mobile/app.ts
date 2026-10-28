@@ -454,6 +454,39 @@ export class PhoneApp {
     await this.finish(card, result, what);
   }
 
+  /**
+   * QH, Approve and retry on a deferred row: a challenge bound to this
+   * deferral (`answer/options`, `{decision: "allow"}`), the passkey, then the
+   * answer with its assertion. Sent once; a cancelled passkey answers nothing.
+   */
+  async retryDeferred(row: InboxRow): Promise<void> {
+    if (this.answering.has(row.id)) return;
+    this.flash = "";
+    this.answering.add(row.id);
+    this.notes.delete(row.id);
+    this.render();
+    const done = async (result: { status: number; body: Record<string, unknown> } | null, note?: string) => {
+      this.answering.delete(row.id);
+      if (note !== undefined) this.notes.set(row.id, note);
+      else if (result && result.status === 200) {
+        this.flash = typeof result.body.note === "string" ? result.body.note : "Approved once.";
+      } else if (result) this.notes.set(row.id, await this.refusedWith(result.status, result.body));
+      this.render();
+      void this.loadInbox();
+    };
+    const options = await this.post(this.path(row.id, "answer/options"), { decision: "allow" });
+    if (!options || options.status !== 200) return done(options);
+    let assertion: Record<string, unknown> | null = null;
+    try {
+      const publicKey = options.body.publicKey;
+      assertion = publicKey && typeof publicKey === "object" ? await this.getCredential(publicKey as Record<string, unknown>) : null;
+    } catch {
+      assertion = null;
+    }
+    if (!assertion) return done(null, "Cancelled, or the passkey was not verified. Nothing was approved.");
+    return done(await this.post(this.path(row.id, "answer"), { action: "retry", assertion }));
+  }
+
   /** A question's or a decision's answer, from its row. Sent once. */
   async sendAnswer(row: InboxRow, body: Record<string, unknown>): Promise<void> {
     if (this.answering.has(row.id)) return;
@@ -1043,6 +1076,7 @@ export class PhoneApp {
       const answers: InboxAnswers = {
         openCard: (row) => this.openCard(row),
         send: (row, body) => void this.sendAnswer(row, body),
+        retry: (row) => void this.retryDeferred(row),
         busy: this.answering, notes: this.notes, drafts: this.drafts, picks: this.picks,
         withdraw: {
           confirming: this.withdrawing,

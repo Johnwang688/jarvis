@@ -643,9 +643,19 @@ class FastPathProvider:
             name = getattr(tool, "name", str(tool))
             if name in EDIT_TOOLS and not runtime.at_desk():
                 return False
+            from ..permissions import deferral_reason, last_verdict
+            last_verdict()              # only this call's verdict is read below
             try:
                 decision = Decision(permit(name, dict(args), asked))
             except Exception:  # noqa: BLE001 — an unreadable answer is a denial
+                return False
+            if decision is not Decision.ALLOW:
+                # QH: a deferral during quiet hours tells the model why, in
+                # code's words (`tools.Refusal`, falsy like False).
+                deferred = deferral_reason(last_verdict())
+                if deferred:
+                    from ... import tools
+                    return tools.Refusal(deferred)
                 return False
             return (decision is Decision.ALLOW
                     and (name not in EDIT_TOOLS or runtime.at_desk())

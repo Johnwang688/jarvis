@@ -175,6 +175,25 @@ def git_note(brief: Brief) -> str:
             "Do not request escalation for git push or gh. " + NETWORK_NOTE)
 
 
+def quiet_note(brief: Brief) -> str:
+    """QH (owner's call on #326, Q3): a Codex approval's decline carries no
+    reason, so a chat is told up front that a decline in quiet hours may be
+    a deferral. Code's words, the owner's window from `quiet.json` (the
+    default when it cannot be read); nothing when quiet hours are off, and
+    nothing for a task."""
+    if brief.role != Role.CHAT or brief.task_id is not None:
+        return ""
+    from jarvis.v2.quiet import DEFAULT, QuietHours
+    try:
+        setting = QuietHours(Path(config.V2_DATA_DIR)).settings()
+    except Exception:  # noqa: BLE001
+        setting = dict(DEFAULT)
+    if not setting.get("enabled"):
+        return ""
+    return (f"Between {setting['start']} and {setting['end']} the owner may be asleep: a decline may "
+            "be a deferral. Don't retry it or a variant of it tonight; carry on with other work.")
+
+
 # Model guidance for the per-command network route (plan §5.2, CG-2).
 NETWORK_NOTE = ("For a command that needs the internet (npm install, pip, curl), set "
                 "`sandbox_permissions` to `with_additional_permissions` with "

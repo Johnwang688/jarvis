@@ -116,6 +116,10 @@ L_JARVIS_GATED = "jarvis-gated"
 # CG-1 (owner, 2026-10-15): a Codex chat's escalated raw network git or gh,
 # declined unasked and pointed at the Jarvis git tools (`chat_git`).
 L_CHAT_GIT = "chat-git"
+# QH (quiet_defer.py): an ask the broker deferred while the owner sleeps. A
+# DENY nobody was asked about; its reason is the code-built text the agent
+# reads (`deferral_reason`).
+L_DEFERRED = "quiet-deferred"
 
 
 @dataclass(frozen=True)
@@ -129,6 +133,29 @@ class PermitVerdict:
 
 _LAST_VERDICT: ContextVar[PermitVerdict | None] = ContextVar("jarvis_v2_permit_verdict",
                                                              default=None)
+
+
+# What the broker settled with no card for this permit call (QH: the
+# request's `outcome`), read by `finish`. Reset at each permit call.
+_OUTCOME: ContextVar[tuple | None] = ContextVar("jarvis_v2_permit_outcome", default=None)
+
+
+def deferral_reason(verdict: PermitVerdict | None) -> str | None:
+    """The agent's words for a quiet-hours deferral (QH-2), else None: what
+    a provider tells its model in place of its usual denial."""
+    if (verdict is not None and verdict.decision is Decision.DENY and verdict.layer == L_DEFERRED
+            and isinstance(verdict.reason, str) and verdict.reason):
+        return verdict.reason
+    return None
+
+
+def _asked(asker, request, **kwargs) -> Decision:
+    """`asker.ask(request)`, noting a quiet-hours outcome for `finish`."""
+    decision = Decision(asker.ask(request, **kwargs))
+    outcome = getattr(request, "outcome", None)
+    if isinstance(outcome, tuple) and len(outcome) == 2:
+        _OUTCOME.set(outcome)
+    return decision
 
 
 def last_verdict() -> PermitVerdict | None:
@@ -1078,12 +1105,16 @@ def build_permit(ctx: PermitContext, asker, *, clock=None) -> PermissionCallback
         # Where the command will run: the brief's folder, never the daemon's
         # own cwd, or a relative `models.json` names the wrong file.
         cwd = (brief.cwd or None) if brief is not None else None
+        # QH: where the gate judged it, part of a deferral's digest (a
+        # refspec-less push is judged by its folder's branch).
+        where = _judged_where(args, ctx, shell_cwd, cwd)
         # A Codex chat's git tool (CG-0, `chat_git`): the exact command the
         # daemon will run, read from the repository below, never from `args`.
         chat: chat_git.Plan | None = None
         # Whether this call was put to the asker (`last_verdict`).
         asked = [False]
         _LAST_VERDICT.set(None)
+        _OUTCOME.set(None)
 
         def owner_said(decision: Decision) -> Decision:
             """A human's answer to a card: a yes is held for the re-ask."""
@@ -1093,7 +1124,14 @@ def build_permit(ctx: PermitContext, asker, *, clock=None) -> PermissionCallback
             return decision
 
         def finish(decision: Decision, layer: str, reason: str) -> Decision:
-            _LAST_VERDICT.set(PermitVerdict(decision, layer, reason, asked[0]))
+            outcome, was_asked = _OUTCOME.get(), asked[0]
+            _OUTCOME.set(None)
+            if outcome is not None and outcome[0] == "deferred" and decision is Decision.DENY:
+                # QH: nobody was asked; the agent reads the deferral's words.
+                layer, reason, was_asked = L_DEFERRED, outcome[1], False
+            elif outcome is not None and outcome[0] == "granted" and decision is Decision.ALLOW:
+                reason = outcome[1]         # the owner's, from the inbox (QH-6)
+            _LAST_VERDICT.set(PermitVerdict(decision, layer, reason, was_asked))
             log_decision(ApprovalRecord(
                 tool=tool, args_digest=_digest(args), layer=layer,
                 decision=decision.value, reason=reason,
@@ -1197,7 +1235,7 @@ def build_permit(ctx: PermitContext, asker, *, clock=None) -> PermissionCallback
                         else widening)
             decision = owner_said(_ask(asker, ctx, tool, args, command, reason, L_WIDENING,
                                        allowlistable=False, headline=headline, origin=who,
-                                       subagent=sid, relay_child=child))
+                                       subagent=sid, relay_child=child, cwd=where, grantable=False))
             return finish(decision, L_WIDENING, reason)
 
         # --- a dangerous Jarvis tool from a chat's jarvis-mcp: the owner ----
@@ -1223,7 +1261,8 @@ def build_permit(ctx: PermitContext, asker, *, clock=None) -> PermissionCallback
             decision = owner_said(_ask(asker, ctx, tool, args,
                                        chat.line if chat is not None else command, reason, L_HUMAN,
                                        allowlistable=False, origin=who, headline=headline,
-                                       subagent=sid, relay_child=""))     # the bridge: unattributed
+                                       subagent=sid, relay_child="",       # the bridge: unattributed
+                                       cwd=where, grantable=False))
             return finish(decision, L_HUMAN, reason)
 
         # A native hook's exact offered Jarvis call delegates to this
@@ -1253,7 +1292,7 @@ def build_permit(ctx: PermitContext, asker, *, clock=None) -> PermissionCallback
             decision = owner_said(_ask(asker, ctx, tool, args,
                                        chat.line if chat is not None else command, reason, L_ALWAYS_ASK,
                                        allowlistable=False, headline=owner_only.headline, origin=who,
-                                       subagent=sid, relay_child=bridged))
+                                       subagent=sid, relay_child=bridged, cwd=where, grantable=False))
             return finish(decision, L_ALWAYS_ASK, reason)
         match = always_ask_match(tool, args, brief, ctx.project)
         if match is None and delegated is not None:
@@ -1327,7 +1366,8 @@ def build_permit(ctx: PermitContext, asker, *, clock=None) -> PermissionCallback
                 decision = _ask_owner_delegation(asker, ctx, delegated.name, origin=who)
                 return finish(decision, L_ALWAYS_ASK, "owner rule for Browser delegation")
             decision = owner_said(_ask(asker, ctx, tool, args, command, reason, L_ALWAYS_ASK,
-                                       origin=who, subagent=sid, relay_child=bridged))
+                                       origin=who, subagent=sid, relay_child=bridged,
+                                       cwd=where, grantable=False))
             return finish(decision, L_ALWAYS_ASK, reason)
 
         # --- jarvis-tool: a read-only Jarvis session tool --------------------
@@ -1368,7 +1408,7 @@ def build_permit(ctx: PermitContext, asker, *, clock=None) -> PermissionCallback
         if profile == PermissionProfile.ASK:
             reason = "ask profile: every gated call reaches the owner"
             decision = owner_said(_ask(asker, ctx, tool, args, command, reason, L_HUMAN,
-                                       origin=who, subagent=sid, relay_child=bridged))
+                                       origin=who, subagent=sid, relay_child=bridged, cwd=where))
             return finish(decision, L_HUMAN, reason)
         return finish(Decision.ALLOW, L_REVIEWER,
                       "no opinion; the provider's own reviewer decides")
@@ -1413,18 +1453,23 @@ def _covered(tool: str, args: dict, judged: tuple[str, ...], cwd: str | None) ->
             else "ordinary development command (rules ALLOW)")
 
 
-def _owner_only(tool: str, command: str, also_commands, args: dict, ctx: PermitContext,
-                shell_cwd: str | None, cwd: str | None) -> merge_gate.Hit | None:
-    """`merge_gate.judge` over the command and any command riding with it,
-    run where it runs: Claude's shell folder, Codex's item `cwd`, else the
-    brief's. A reader that fails asks, saying so."""
-    # Whatever command the permit read (`command` is empty for a tool it
-    # does not read as one; #211 widens that to any command-bearing tool).
+def _judged_where(args: dict, ctx: PermitContext, shell_cwd: str | None, cwd: str | None) -> str | None:
+    """Where a command runs, as the gate reads it: Claude's shell folder,
+    Codex's item `cwd`, else the brief's."""
     where = shell_cwd
     if where is None and ctx.provider == "codex":
         reported = args.get("cwd")
         where = reported if isinstance(reported, str) and reported.startswith("/") else None
-    where = where or cwd
+    return where or cwd
+
+
+def _owner_only(tool: str, command: str, also_commands, args: dict, ctx: PermitContext,
+                shell_cwd: str | None, cwd: str | None) -> merge_gate.Hit | None:
+    """`merge_gate.judge` over the command and any command riding with it,
+    run where it runs (`_judged_where`). A reader that fails asks, saying so."""
+    # Whatever command the permit read (`command` is empty for a tool it
+    # does not read as one; #211 widens that to any command-bearing tool).
+    where = _judged_where(args, ctx, shell_cwd, cwd)
     lines = [command] + [c for c in also_commands if isinstance(c, str)]
     for line in lines:
         if not line.strip():
@@ -1455,7 +1500,7 @@ def _ask_owner_delegation(asker, ctx: PermitContext, tool: str, *,
         from jarvis import runtime
         native_cancelled = ctx.delegation_cancelled() if ctx.delegation_cancelled else lambda: False
         stop = runtime.should_stop()
-        return Decision(asker.ask(request, cancelled=lambda: native_cancelled() or stop()))
+        return _asked(asker, request, cancelled=lambda: native_cancelled() or stop())
     except Exception:
         # No exception text: a failing approval adapter may contain arguments.
         return Decision.DENY
@@ -1464,7 +1509,8 @@ def _ask_owner_delegation(asker, ctx: PermitContext, tool: str, *,
 def _ask(asker, ctx: PermitContext, tool: str, args: dict, command: str,
          reason: str, layer: str, *, allowlistable: bool = True,
          headline: str = "", origin: str | None = None, subagent: str = "",
-         relay_child: str | None = None) -> Decision:
+         relay_child: str | None = None, cwd: str | None = None,
+         grantable: bool = True) -> Decision:
     if is_unknown_command_tool(tool, args):
         allowlistable = False       # no stem and no whole-tool entry (#211 review, F1)
     if is_command_tool(tool, args) and is_multi_command(args):
@@ -1474,9 +1520,9 @@ def _ask(asker, ctx: PermitContext, tool: str, args: dict, command: str,
         thread_id=ctx.thread_id, task_id=ctx.task_id,
         provider=ctx.provider or None, origin=origin if origin is not None else ctx.origin(),
         allowlistable=allowlistable, headline=clean_line(headline, 420) if headline else "",
-        subagent=subagent, relayed_from=ctx.relayed(relay_child))
+        subagent=subagent, relayed_from=ctx.relayed(relay_child), cwd=cwd, grantable=grantable)
     try:
-        return Decision(asker.ask(request))
+        return _asked(asker, request)
     except Exception:       # an asker that raises has not approved anything
         LOG.exception("Approval channel failed for %s; denying", tool)
         return Decision.DENY
@@ -1504,7 +1550,7 @@ def deny_all(reason: str = "nobody is watching this thread") -> DenyAll:
 
 __all__ = [
     "ApprovalRecord", "PermitContext", "PermitVerdict", "always_ask_for", "always_ask_match",
-    "build_permit", "denied_command", "denied_file", "denied_grant", "denied_read", "deny_all",
+    "build_permit", "deferral_reason", "denied_command", "denied_file", "denied_grant", "denied_read", "deny_all",
     "file_targets", "last_verdict",
     "log_decision", "protected_paths", "COMMAND_TOOLS", "FILE_TOOLS", "READ_TOOLS",
 ]

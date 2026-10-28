@@ -2356,7 +2356,7 @@ class Vex:
         said: list[str] = []
         try:
             path = confirm_folder(self.daemon.approvals, check, record.name, origin=ORIGIN_NEW,
-                                  say=said.append, taken_roots=self._taken_roots)
+                                  say=said.append, taken_roots=self._taken_roots, owner_initiated=True)
             if path is None:
                 record.state, record.message = "declined", said[-1] if said else "Not approved."
                 LOG.info("vex new project %s: not made", record.name)
@@ -2492,6 +2492,9 @@ def route(handler, daemon, parts, query):
             _object(query, ())
             body = _object(handler._body(), ("name", "language", "template", "location"),
                            ("name", "language", "template"))
+            seen = getattr(daemon, "owner_seen", None)
+            if callable(seen):
+                seen()              # QH-3: the owner's own click at the HUD
             try:
                 return 202, vex.new_project(body["name"], body["language"], body["template"],
                                             body.get("location"))

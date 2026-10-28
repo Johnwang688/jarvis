@@ -2267,6 +2267,8 @@ button.tree-row.ownerinbox.aurora.sel:focus-visible { box-shadow: inset 2px 0 va
   color: var(--text-2); border: 1px solid var(--border-strong); border-radius: var(--radius); padding: 0 4px; }
 .inbox-row .ir-title, .inbox-row .ir-blocks, .inbox-row .ir-origin { overflow: hidden; }
 .inbox-row .ir-text { overflow-x: hidden; }
+/* A deferred approval (QH): the card's command and arguments as code text. */
+.inbox-row pre.ir-command, .inbox-row pre.ir-args { margin: 0; font: 12px var(--mono); }
 /* A hint, never a gate: the window looks close to closing by this window's clock. */
 .inbox-row button.closing { border-style: dashed; color: var(--text-2); }
 .inbox-row .ir-when[data-hint="closing"] { color: var(--text-2); }

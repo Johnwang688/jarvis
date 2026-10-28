@@ -173,6 +173,12 @@ class EscapeHatch:
         """Ask the owner, then run or refuse. Returns what happened."""
         task = self._task_for(item.thread_id)
         item.task_id = task.id if task is not None else None
+        # The asking thread's provider (a Codex guardian's decline is Codex's).
+        try:
+            thread = self.daemon.stores.threads.get(item.thread_id)
+            provider = getattr(getattr(thread, "provider", None), "value", None)
+        except Exception:  # noqa: BLE001
+            provider = None
         request = ApprovalRequest(
             tool=item.tool or "Bash",
             args=dict(item.args) or {"command": item.command},
@@ -184,6 +190,11 @@ class EscapeHatch:
             origin=label(item.task_id or "", getattr(task, "brief", "")),
             # §6.1: a command the reviewer refused is never a standing rule.
             allowlistable=False,
+            provider=provider,
+            # QH (#326 delta review, MED 1): the hatch runs what it was asked
+            # itself, where the permit never judged it, so no inbox grant
+            # ever answers one of its asks.
+            grantable=False,
         )
         try:
             decision = Decision(self.approvals.ask(request))
@@ -191,6 +202,13 @@ class EscapeHatch:
             LOG.exception("Escape-hatch approval failed; denying")
             decision = Decision.DENY
 
+        outcome = getattr(request, "outcome", None)
+        if decision is not Decision.ALLOW and isinstance(outcome, tuple) and outcome[0] == "deferred":
+            # QH: nobody declined; the owner is asleep. The deferral's own words.
+            return self._finish(item, HatchResult(
+                decision="deny",
+                message=f"[not run: {item.command}] {outcome[1]}"), "system",
+                "reviewer-declined-deferred")
         if decision is not Decision.ALLOW:
             return self._finish(item, HatchResult(
                 decision="deny",

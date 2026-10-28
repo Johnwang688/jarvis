@@ -177,6 +177,11 @@ DETAIL_FIELDS = {
     # are agent or runbook text, through the phone's scrub). Only the HUD
     # marks a step; the phone has no route for it.
     "check": ("check_id", "title", "prs", "steps", "results", "done", "deploy"),
+    # QH (quiet_defer.py): an approval deferred during quiet hours. Its card
+    # is the public projection the record kept, scrubbed as a whole like an
+    # approval's; Approve and retry needs a passkey (remote_answer).
+    "deferred": ("deferral_id", "tool", "card", "thread_id", "task_id", "at", "until", "grantable",
+                 "why_not", "expired", "hud_only", "count", "more"),
 }
 # A kind P-3 does not know (A3's `missed` rows, anything later): only these
 # keys, only scalar values, every string scrubbed.
@@ -465,6 +470,11 @@ def _detail(kind, detail: dict) -> dict:
                                    if isinstance(relayed, dict) else None)
         # The whole card, keys and labels across fields too (`scrub_structure`),
         # then the read view's caps.
+        return _scrub_tree(scrub_structure(out)[0], cap=TEXT_CHARS, items=LIST_ITEMS)
+    if kind == "deferred":
+        out = {k: detail[k] for k in DETAIL_FIELDS[kind] if k in detail}
+        if isinstance(out.get("card"), dict):
+            out["card"] = {k: v for k, v in out["card"].items() if k not in APPROVAL_DETAIL_DROPPED}
         return _scrub_tree(scrub_structure(out)[0], cap=TEXT_CHARS, items=LIST_ITEMS)
     if kind in DETAIL_FIELDS:
         out = {k: detail[k] for k in DETAIL_FIELDS[kind] if k in detail}

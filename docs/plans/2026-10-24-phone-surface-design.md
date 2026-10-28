@@ -816,3 +816,16 @@ Answered 2026-10-24: the phone is an iPhone (O-1); Discord stays as a backup
 8408 DENY), `jarvis/v2/provider.py` (`UserMessage.via`), `jarvis/v2/desk.py`,
 `hud/vite.config.ts` (second entry), `hud/public/manifest.webmanifest`,
 `pyproject.toml` (`webauthn`, `pywebpush`).
+
+### 10.8 QH as built (2026-10-28, quiet-hours deferral)
+
+Approvals asked during quiet hours are deferred, not held: the plan, the
+owner's words and the as-built notes are
+`docs/plans/2026-10-28-quiet-hours-deferral.md`; the rules,
+`docs/notes/control-plane.md`, "Quiet hours: approvals deferred to the
+morning". On the phone: a deferred row shows the card it would have shown;
+Leave it needs the session; Approve and retry needs its own passkey
+assertion (bound to `defer:<id>`, verified before anything is written),
+then §4.1 in full and the Allow's gate. No push is sent for a deferral
+during quiet hours (P-6's rule); a rank-4 deferred row counts toward the
+one push when they end.

@@ -47,6 +47,14 @@
 //     own, on GitHub or under the merge gate;
 //   - "PR list unavailable" (B3): which repositories could not be read, and
 //     why, in the daemon's words. Never shown as "nothing waiting".
+//   - an approval deferred during quiet hours (QH, rank 4, then 8 after a
+//     day): the card it would have shown (tool, leading line, command, why,
+//     arguments, all as text), "Approve and retry" (`{action: "retry"}`: a
+//     single-use grant for exactly that call, 30 minutes, and its chat told
+//     or its blocked task resumed) and "Leave it" (`{action: "leave"}`:
+//     nothing is sent). Approve and retry is offered only while the daemon
+//     says it may be and never for a Browser card or a row a day old. Plain
+//     buttons, neither defaulted; each posts once per press.
 // The head's "Import a runbook" reads a runbook under a project's
 // docs/plans/ into unsaved drafts (`POST /inbox/checks/import`); only the
 // owner's Save on one draft stores it as a check.
@@ -72,13 +80,16 @@ import { ApiError } from "../api";
 import type { ApprovalRequest } from "../types";
 import {
   ANSWERS_TEXT, CLOSING_MS, NOTE_MAX, PENDING_MAX_RANK, SNOOZES, VERDICTS, approvalReq, briefOf, canMark, checkOf,
-  checkReceipt, clockOf, decisionBody, decisionOf, groupRows, hiddenNote, hiddenRows, linkOf, missedNote, parseDrafts,
+  checkReceipt, clockOf, decisionBody, decisionOf, deferredOf, groupRows, hiddenNote, hiddenRows, linkOf, missedNote, parseDrafts,
   prOf, prUnavailableOf, questionOf, isHidden, shownRows, snoozeUntil, waitingCount, withdrawHint, withdrawUntil,
-  type CheckDraft, type InboxRow, type MarkBody, type SnoozeFor, type Verdict,
+  type CheckDraft, type DeferredAction, type InboxRow, type MarkBody, type SnoozeFor, type Verdict,
 } from "../lib/inbox";
 import type { InboxSnapshot } from "../state/inbox";
 
 export const GONE_NOTICE = "Already answered or gone.";
+
+/** What `POST /inbox/<id>/answer` takes from this view. */
+export type AnswerBody = { text: string } | { withdraw: true } | { action: DeferredAction };
 
 export interface InboxViewProps {
   snapshot: InboxSnapshot;
@@ -88,7 +99,7 @@ export interface InboxViewProps {
   blocked: boolean;
   onOpenThread: (threadId: string) => void;
   onOpenTask: (taskId: string) => void;
-  onAnswer: (rowId: string, body: { text: string } | { withdraw: true }) => Promise<unknown>;
+  onAnswer: (rowId: string, body: AnswerBody) => Promise<unknown>;
   /** A decision's answer (B1): its own id, `{choice}` or `{text}`. */
   onDecide: (decisionId: string, body: { choice: number } | { text: string }) => Promise<unknown>;
   onReread: () => Promise<unknown> | void;
@@ -175,7 +186,7 @@ export function InboxView(props: InboxViewProps) {
     return rest;
   };
 
-  const send = async (row: InboxRow, body: { text: string } | { withdraw: true }) =>
+  const send = async (row: InboxRow, body: AnswerBody) =>
     post(row, () => props.onAnswer(row.id, body));
 
   const post = async (row: InboxRow, call: () => Promise<unknown>, key: string = row.id) => {
@@ -520,6 +531,43 @@ export function InboxView(props: InboxViewProps) {
               </button>
             </div>
           ) : null}
+        </div>
+      );
+    }
+    const deferred = deferredOf(row);
+    if (deferred) {
+      // QH: the card's words as text; Approve and retry only where it may be.
+      return (
+        <div className="ir-body" data-testid="inbox-deferred">
+          {deferred.headline ? <div className="ir-text" data-testid="inbox-deferred-headline">{deferred.headline}</div> : null}
+          {deferred.tool ? <div className="ir-text" data-testid="inbox-deferred-tool">Tool: {deferred.tool}</div> : null}
+          {deferred.command ? <pre className="ir-text ir-command" data-testid="inbox-deferred-command">{deferred.command}</pre> : null}
+          {deferred.reason ? <div className="ir-why" data-testid="inbox-deferred-reason">{deferred.reason}</div> : null}
+          {deferred.args ? <pre className="ir-text ir-args" data-testid="inbox-deferred-args">{deferred.args}</pre> : null}
+          {deferred.count > 1 ? (
+            <div className="ir-when muted" data-testid="inbox-deferred-count">Asked {deferred.count} times while it waited.</div>
+          ) : null}
+          <div className="ir-when muted" data-testid="inbox-deferred-note">
+            {deferred.more
+              ? `${deferred.more} more asks from this chat were denied overnight, too many to list one by one. To run any, ask from its chat.`
+              : deferred.expired
+                ? "Over a day old: it can only be left. To run it, ask from its chat."
+                : deferred.whyNot
+                  ? deferred.whyNot
+                  : "Denied while you slept. Approve and retry allows exactly this call once, for 30 minutes, and tells its chat."}
+          </div>
+          <div className="ir-answer">
+            {deferred.grantable ? (
+              <button type="button" data-testid="inbox-deferred-retry" disabled={off}
+                      onClick={() => void send(row, { action: "retry" })}>
+                Approve and retry
+              </button>
+            ) : null}
+            <button type="button" className="quiet" data-testid="inbox-deferred-leave" disabled={off}
+                    onClick={() => void send(row, { action: "leave" })}>
+              Leave it
+            </button>
+          </div>
         </div>
       );
     }

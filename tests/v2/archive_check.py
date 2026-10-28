@@ -879,6 +879,44 @@ class OwnerOnly(Base):
             for needle in self.MARK_SOURCE:
                 self.assertIsNone(re.search(needle, text), f"{module.__name__} names {needle}")
 
+    # Approvals deferred during quiet hours (QH): the owner's single-use
+    # grants are written only by the owner's inbox route and the phone's
+    # verified answer. No tool, MCP catalog entry, session tool, Discord or
+    # CLI module names the module, its store, its file, the desk, the
+    # broker's hook or the presence stamp an agent could use to fake the
+    # owner at the desk. `files.py` names the module in SELF_PROTECTED and
+    # the file in `_protected_state_paths`: that body is set aside.
+    DEFER_SOURCE = (r"\bquiet_defer\.(?!py\b)", r"import quiet_defer", r"from \.+quiet_defer",
+                    r"DeferredStore", r"QuietDesk", r"deferred\.json", r"quiet_desk", r"attach_quiet_desk",
+                    r"owner_seen", r"approve_and_retry", r"""/inbox/defer""", r"deferral_answered")
+
+    def test_no_tool_or_cli_grants_a_deferred_approval(self):
+        from jarvis import tools
+        from jarvis.v2 import bridge, chat_relay, decisions, mcp, mcp_catalog, session_tools
+        from jarvis.v2.providers import fastpath
+        import jarvis.v2.tools as v2tools
+        import jarvis.__main__ as cli
+        from jarvis.v2 import mcp_session, owner_ops, checks
+        reachable = (set(fastpath.FAST_TOOLS) | set(mcp.MCP_TOOLS) | set(mcp_catalog.MCP_TOOLS)
+                     | set(session_tools.SESSION_TOOLS) | set(tools.REGISTRY))
+        sources = [v2tools, mcp, mcp_catalog, session_tools, bridge, chat_relay, fastpath, cli, owner_ops,
+                   mcp_session, decisions, checks]
+        for name in reachable:
+            func = getattr(tools.REGISTRY.get(name), "func", None)
+            if func is not None:
+                sources.append(inspect.getmodule(func))
+        from jarvis.v2.discord import gateway, linker, project_commands
+        sources += [gateway, linker, project_commands]
+        from jarvis.tools import files
+        exempt = inspect.getsource(files._protected_state_paths)
+        for module in {m for m in sources if m is not None}:
+            text = inspect.getsource(module)
+            if module is files:
+                self.assertIn(exempt, text)
+                text = text.replace(exempt, "")
+            for needle in self.DEFER_SOURCE:
+                self.assertIsNone(re.search(needle, text), f"{module.__name__} names {needle}")
+
     # The phone's pairing window and paired passkeys (phone design PH-6,
     # P-2): the same rule. No tool, MCP catalog entry or session tool names
     # them, and nothing a tool runs names the HUD routes, the phone's API,
@@ -970,7 +1008,10 @@ class OwnerOnly(Base):
                                    # Inbox B4 (IN-7): the owner's snoozes and dismissals.
                                    ("GET", "/inbox?all=1", None),
                                    ("POST", "/inbox/task:x/mark", {"dismiss": True}),
-                                   ("POST", "/inbox/task:x/mark", {"clear": True})):
+                                   ("POST", "/inbox/task:x/mark", {"clear": True}),
+                                   # QH: Approve and retry, and Leave it.
+                                   ("POST", "/inbox/defer:x/answer", {"action": "retry"}),
+                                   ("POST", "/inbox/defer:x/answer", {"action": "leave"})):
             with self.subTest(path=path):
                 self.request(method, path, body, 403)
                 self.request(method, path, body, 403, port=self.daemon.face_port)

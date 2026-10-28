@@ -15,7 +15,7 @@
 // (bidi overrides, zero-widths) that could make one line read as another.
 
 export interface InboxRow {
-  /** Kind prefix + the source's own id: `appr:…`, `q:…`, `tq:…`, `prop:…`, `task:…`, `missed:…`, `dec:…`, `pr:…`, `prx:…`. */
+  /** Kind prefix + the source's own id: `appr:…`, `q:…`, `tq:…`, `prop:…`, `task:…`, `missed:…`, `dec:…`, `pr:…`, `prx:…`, `defer:…`. */
   id: string;
   kind: string;
   /** IN-4's band, 1 to 8. */
@@ -114,7 +114,9 @@ export function parseRow(raw: unknown): InboxRow | null {
 
 /** The HUD's own copy of IN-8: rank 5 to 8, never "PR list unavailable" (by kind or `prx:` id). */
 function markableRank(rank: number, kind: unknown, id: string): boolean {
-  return rank >= MARKABLE_MIN_RANK && rank <= MARKABLE_MAX_RANK && kind !== PR_UNAVAILABLE && !id.startsWith("prx:");
+  // A deferred approval (QH) is never markable either: "Leave it" is how it goes.
+  return rank >= MARKABLE_MIN_RANK && rank <= MARKABLE_MAX_RANK && kind !== PR_UNAVAILABLE && !id.startsWith("prx:")
+    && kind !== DEFERRED && !id.startsWith("defer:");
 }
 
 /** Whether a row is hidden: it says so and the HUD's rule allows it to be. A
@@ -291,6 +293,86 @@ export function missedNote(row: InboxRow): { why: string; next: string } | null 
       ? "Jarvis stopped before you answered, so it was denied."
       : "It was denied without an answer.";
   return { why, next: row.thread_id ? "To try it again, ask from its chat." : "Its chat is not known." };
+}
+
+/** An approval deferred during quiet hours (QH, jarvis/v2/quiet_defer.py): rank 4 for a day, then rank 8. */
+export const DEFERRED = "deferred";
+/** What a deferred row posts to `POST /inbox/<id>/answer`. */
+export type DeferredAction = "retry" | "leave";
+
+export interface DeferredView {
+  /** The tool, as text. */
+  tool: string;
+  /** The card's public projection, every field untrusted text: the command, why, a leading line, the arguments. */
+  command: string;
+  reason: string;
+  headline: string;
+  /** The arguments as JSON text ("" when there are none, or a Browser card's private projection). */
+  args: string;
+  /** Whether "Approve and retry" is offered: never a Browser (HUD-only) card, never a day late, never a card kept cut. */
+  grantable: boolean;
+  /** Over a day old: information only, "Leave it" still offered. */
+  expired: boolean;
+  /** A Browser card (HUD-only): its row offers its chat and "Leave it" only. */
+  hudOnly: boolean;
+  /** When quiet hours ended (ISO), or null. */
+  until: string | null;
+  /** How many times the same call was asked while it waited (1 at least). */
+  count: number;
+  /** An "and N more" row: N asks past the chat's limit, never listed one by one; Leave it only. */
+  more: number;
+  /** Why Approve and retry is not offered, in the HUD's own words ("" when it is, or not known). */
+  whyNot: string;
+}
+
+/** The daemon's `why_not` codes, in the HUD's words (anything else: the generic line). */
+const WHY_NOT: Record<string, string> = {
+  browser: "A Browser action is approved only while its page is live: open its chat to ask again.",
+  codex: "A Codex request is approved only while it waits: open its chat to ask again.",
+  "owner-only": "This kind of call is asked every time, never approved ahead: open its chat to ask again.",
+  "no-chat": "Nothing is waiting to retry it.",
+  hatch: "The reviewer's refusal is asked again only live: open its chat to ask again.",
+  relayed: "It came from a turn another chat started, which will not ask again the same way: open its chat.",
+  subagent: "It came from a sub-agent, which will not ask again the same way: open its chat.",
+  folder: "Its folder is gone or cannot be read, so it cannot be approved from here: open its chat.",
+  "too-large": "It is too long to show in full here, so it cannot be approved from here: open its chat.",
+  unreadable: "It cannot be approved from here: open its chat to ask again.",
+};
+
+/**
+ * A deferred row's words (QH), every string untrusted text, or null for any
+ * other row. "Approve and retry" is offered only when the daemon says so and
+ * the HUD's own rules agree (not a Browser card, not over a day old).
+ */
+export function deferredOf(row: InboxRow): DeferredView | null {
+  if (row.kind !== DEFERRED) return null;
+  const d = row.detail;
+  const card = isObj(d.card) ? d.card : {};
+  let args = "";
+  if (isObj(card.args) && Object.keys(card.args).length) {
+    try { args = textBlock(JSON.stringify(card.args, null, 2), 4000); } catch { args = ""; }
+  }
+  const hudOnly = d.hud_only === true || card.hud_only === true;
+  const expired = d.expired === true || row.rank !== 4;
+  const num = (v: unknown) => (typeof v === "number" && Number.isInteger(v) && v > 0 ? v : 0);
+  const more = num(d.more);
+  const code = typeof d.why_not === "string" ? d.why_not : "";
+  const whyNot = hudOnly ? WHY_NOT.browser : code ? (WHY_NOT[code] ?? WHY_NOT.unreadable) : "";
+  return {
+    tool: oneLine(d.tool ?? card.tool, 120),
+    command: textBlock(card.command, 4000),
+    reason: textBlock(card.reason, 1000),
+    headline: oneLine(card.headline, 400),
+    args,
+    grantable: d.grantable === true && !hudOnly && !expired && card.cut !== true && !more && !code
+      && typeof d.deferral_id === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(d.deferral_id),
+    expired,
+    hudOnly,
+    until: typeof d.until === "string" ? d.until : null,
+    count: Math.max(1, num(d.count)),
+    more,
+    whyNot,
+  };
 }
 
 /** A pull request waiting on the owner's merge (inbox B3, IN-4): rank 5, information and a link only. */

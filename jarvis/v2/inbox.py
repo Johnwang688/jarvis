@@ -111,6 +111,18 @@ or changes materially shows again. `GET /inbox` leaves hidden rows out;
 store is `inbox_marks.MarksStore` (`<data root>/inbox/marks.json`); a file
 that is not one of ours hides nothing.
 
+**Deferred overnight (QH, `quiet_defer.py`).** An approval asked during
+quiet hours while the owner was away was denied at once and recorded in
+`<data root>/inbox/deferred.json` (the card's public projection and a
+digest of the full request, never the arguments). Each is a `deferred` row
+at rank 4 ("<tool> is waiting for your morning approval"), counted and
+never markable, for 24 hours, then rank 8 information. It takes `{action:
+"retry"}` (Approve and retry: a single-use, 30-minute grant for exactly
+that call, then its chat is told through B1's delivery or its blocked task
+resumed) or `{action: "leave"}` (Leave it: nothing is sent), through
+`quiet_defer.answer`; on the phone, retry needs a passkey assertion
+(`remote_answer`). A HUD-only (Browser) card is never granted.
+
 This module is SELF_PROTECTED (`jarvis/tools/files.py`): it decides what the
 owner sees as waiting.
 """
@@ -129,6 +141,7 @@ from .approvals import clean_line
 from . import checks as _checks
 from . import decisions as _decisions
 from . import inbox_marks as _marks
+from . import quiet_defer as _quiet_defer
 from .model import TaskState
 
 LOG = logging.getLogger(__name__)
@@ -152,8 +165,8 @@ RANK_RECORDED = 8
 # Row id prefixes: kind prefix + the source's own id.
 _PREFIX = {"approval": "appr", "question": "q", "task_question": "tq",
            "proposal": "prop", "task": "task", "missed": "missed", "decision": "dec",
-           "check": "chk"}
-_ANSWERABLE = {"appr", "q", "tq", "prop", "dec"}
+           "check": "chk", "deferred": "defer"}
+_ANSWERABLE = {"appr", "q", "tq", "prop", "dec", "defer"}
 # B3: a pull request (`pr:OWNER/REPO#N`) and "PR list unavailable" (`prx:list`).
 _KNOWN = _ANSWERABLE | {"task", "missed", "chk", "pr", "prx"}
 
@@ -762,6 +775,7 @@ def rows(daemon, *, with_checks: bool = True, marks: str = "hide") -> list[dict]
                          ("questions", lambda: _question_rows(daemon, hidden)),
                          ("tasks", lambda: _task_rows(daemon, hidden)),
                          ("missed", lambda: _missed_rows(daemon)),
+                         ("deferred", lambda: _quiet_defer.rows(daemon, _row)),
                          ("decisions", lambda: _decision_rows(daemon, hidden)),
                          ("checks", lambda: _check_rows(daemon, hidden) if with_checks else []),
                          ("pull requests", lambda: _pr_rows(daemon, hidden))):
@@ -819,6 +833,8 @@ class Inbox:
         # B4: the owner's snoozes and dismissals (rank 5 to 8 only), and the
         # one timer that says when the earliest snooze ends.
         self.marks = _marks.MarksStore(root) if root is not None else None
+        # QH: approvals deferred during quiet hours, and the owner's grants.
+        self.deferred = _quiet_defer.DeferredStore(root) if root is not None else None
         self._timer_factory = threading.Timer
         self._snooze_timer = None
         self._snoozes_on = False
@@ -1061,6 +1077,10 @@ def answer(daemon, row_id, body, *, owner_verified: bool, via: str = "inbox"):
     from .daemon import APIError, _object, _text
     from .provider import Decision
     prefix, rest, row_id = _split(row_id)
+    if prefix == _quiet_defer.PREFIX:
+        # QH-6/QH-7: Approve and retry, or Leave it. A phone retry is never
+        # this path's (`remote_answer` verifies its assertion first).
+        return _quiet_defer.answer(daemon, rest, body, via=via, verified=False)
     if prefix == "dec":
         # `POST /inbox/decisions/<id>`'s own function. A decision that is
         # not there, or no longer open, is "no longer waiting" here as for
@@ -1389,6 +1409,8 @@ def mark_row(daemon, row_id, body) -> dict:
             cleared = store.clear(row_id)
             hidden = None
         else:
+            if prefix == _quiet_defer.PREFIX:
+                raise APIError(409, "this row cannot be snoozed or dismissed: Leave it clears it")
             if prefix in _marks.UNMARKABLE_PREFIXES:
                 raise APIError(409, "this row cannot be snoozed or dismissed: it says what Jarvis cannot read")
             live = rows(daemon, marks="ignore")
@@ -1512,6 +1534,9 @@ def route(handler, daemon, parts, query):
         # The Host test `POST /approvals/<id>` makes, made the same way: the
         # HUD route's HUD authority (PH-7).
         owner_verified = config.own_host_header(handler.headers.get("Host", ""), daemon.face_port)
+        seen = getattr(daemon, "owner_seen", None)
+        if callable(seen):
+            seen()                  # QH-3: the owner answered at the HUD
         return 200, answer(daemon, parts[1], handler._body(), owner_verified=owner_verified)
     if len(parts) == 3 and parts[2] == "mark" and method == "POST" and parts[1] not in ("decisions", "checks"):
         _object(query, ())

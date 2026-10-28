@@ -126,8 +126,8 @@ class Contract(unittest.TestCase):
         self.assertEqual((inbox_marks.MARKS_MAX, inbox_marks.SNOOZE_MAX, inbox_marks.MARKABLE_MIN_RANK,
                           inbox_marks.MARKABLE_MAX_RANK, inbox_marks.UNMARKABLE_KINDS,
                           inbox_marks.UNMARKABLE_PREFIXES, inbox_marks.NAME),
-                         (500, timedelta(days=30), 5, 8, frozenset({"pr_unavailable"}), frozenset({"prx"}),
-                          "marks.json"))
+                         (500, timedelta(days=30), 5, 8, frozenset({"pr_unavailable", "deferred"}),
+                          frozenset({"prx", "defer"}), "marks.json"))
 
     def test_the_module_and_file_are_protected(self):
         from jarvis.tools import files

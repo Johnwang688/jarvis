@@ -345,8 +345,20 @@ class ApprovalRequest:
     # ‹title› (Provider · id)", kind "running": "while a turn started by …
     # runs".
     relayed_from: dict | None = None
+    # Quiet hours (QH, quiet_defer.py), set by daemon code only, never shown
+    # on a card: the folder the gate judged the call in (a refspec-less push
+    # is judged by it), part of a deferral's digest; whether an Approve and
+    # retry may ever answer it (False for every ask that is asked each time);
+    # and an ask the owner just started at the HUD, never deferred.
+    cwd: str | None = None
+    grantable: bool = True
+    owner_initiated: bool = False
     _hud_private: bool = field(default=False, init=False, repr=False)
     _card: dict | None = field(default=None, init=False, repr=False, compare=False)
+    # Quiet hours (QH, `quiet_defer.QuietDesk.settle`): set by the broker
+    # only, to ("deferred", the agent's words) or ("granted", the log's
+    # words) when the ask was settled with no card. Read by the permit.
+    outcome: tuple | None = field(default=None, init=False, repr=False, compare=False)
 
     def card(self) -> dict:
         """The redacted projection a card shows (`card_text`/`card_args`),
@@ -447,6 +459,11 @@ class PendingApprovals:
         # 24 h" (`RemoteAuth.recently_active`). Read at each ask; an error
         # counts as no phone.
         self.phone_active: Callable[[], bool] | None = None
+        # QH (quiet_defer.py): attached by daemon2's `main()` only
+        # (`Daemon.attach_quiet_desk`). Its `settle` runs under the lock below
+        # at each ask: the owner's single-use inbox grant for exactly this
+        # call, or a deferral while the owner sleeps. None: every ask asks.
+        self.quiet_desk = None
         self._on_request = on_request
         self._on_resolve = on_resolve
         self._lock = threading.Lock()
@@ -478,14 +495,32 @@ class PendingApprovals:
                 return True
         if stopped():
             return self._record(request, Decision.DENY, "cancelled")
+        desk = self.quiet_desk
         with self._lock:
             if self._closed:
                 return self._record(request, Decision.DENY, "shutdown")
             request.req_id = self._new_id()
             request.code = self._new_code()
             request.asked_at = utcnow()
-            item = _Pending(request, hud_only=request.private)
-            self._pending[request.req_id] = item
+            # QH: settled here, under the lock, before any card exists: a
+            # grant is taken once however many identical asks race for it.
+            settled = self._settle_quietly(desk, request)
+            if settled is None:
+                item = _Pending(request, hud_only=request.private)
+                self._pending[request.req_id] = item
+        if settled is not None:
+            # No card, no Discord post, no wait: the desk records and announces.
+            request.outcome = settled
+            if settled[0] == "granted":
+                # The use is written before the call may run; if it cannot be,
+                # the grant is not used (spent all the same in this process).
+                if self._tell_desk(desk.granted, request) is not True:
+                    request.outcome = ("deferred", "The owner's grant for this call could not be recorded, "
+                                       "so it was not used and the call did not run. Do not retry it now.")
+                    return self._record(request, Decision.DENY, "grant-unrecorded")
+                return self._record(request, Decision.ALLOW, "granted from the inbox")
+            self._tell_desk(desk.deferred, request)
+            return self._record(request, Decision.DENY, "deferred")
 
         if self._on_request is not None:
             try:
@@ -664,6 +699,31 @@ class PendingApprovals:
                 item.event.set()
 
     # -- internals ---------------------------------------------------------
+
+    @staticmethod
+    def _settle_quietly(desk, request) -> tuple | None:
+        """QH: ("granted"|"deferred", words), or None to ask. Anything else,
+        or a desk that raises, asks as usual; a grant never reaches a
+        HUD-only card."""
+        if desk is None:
+            return None
+        try:
+            settled = desk.settle(request)
+        except Exception:  # noqa: BLE001
+            LOG.warning("Quiet-hours check failed; asking as usual")
+            return None
+        if (isinstance(settled, tuple) and len(settled) == 2 and isinstance(settled[1], str) and settled[1]
+                and (settled[0] == "deferred" or (settled[0] == "granted" and not request.private))):
+            return settled
+        return None
+
+    @staticmethod
+    def _tell_desk(call, request):
+        try:
+            return call(request)
+        except Exception:  # noqa: BLE001 — a deferral already stands; a grant then fails closed
+            LOG.warning("Cannot record a quiet-hours outcome")
+            return None
 
     def _new_id(self) -> str:
         # 72 bits, one-shot: an answer cannot be replayed onto a later card

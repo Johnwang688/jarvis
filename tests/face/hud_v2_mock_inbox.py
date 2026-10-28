@@ -137,6 +137,13 @@ def handle(h, mock, method: str, path: str) -> bool:
             mock.world["approvals"] = [r for r in mock.world.get("approvals", []) if r.get("req_id") != req]
             mock.emit("approval_resolved", {"req_id": req, "decision": (body or {}).get("decision", "deny")})
         changed(mock, [row_id], "answered")
+        if row.get("kind") == "deferred":
+            # QH: Approve and retry, or Leave it, with the daemon's fixed note.
+            left = (body or {}).get("action") == "leave"
+            h._json({"ok": True, "delivery": "left" if left else "queued",
+                     "note": "Left: nothing was sent." if left
+                     else "Approved once for 30 minutes; the chat hears it after the turn already running."})
+            return True
         h._json({"ok": True})
         return True
     if len(parts) == 3 and parts[1] == "decisions" and method == "POST":
