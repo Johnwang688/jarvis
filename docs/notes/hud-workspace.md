@@ -1860,7 +1860,12 @@ routes"). Not deployed: the owner's step is `jarvis hud rebuild` and a reload
   "Dismissed" or "Snoozed until HH:MM [day]" in code's words, with Undo
   (`{clear: true}`). Plain `type="button"` buttons, none focused or
   defaulted; a click on a row marks nothing; under a card every mark button
-  is disabled and inert and the handler refuses. The phone shows what `GET
+  is disabled and inert and the handler refuses. A served `hidden` on a row
+  of rank 1 to 4 or "PR list unavailable" is ignored (`parseRow`, then
+  `isHidden` again in `shownRows`/`waitingCount`). A snooze that ends brings
+  its row back through the daemon's `snooze_ended` event; as a backup the
+  store reads again just after the earliest `snoozed_until` it holds
+  (`state/inbox.ts`, one timer, at most an hour at a time). The phone shows what `GET
   /inbox` shows (hidden rows left out) and cannot mark.
 - Tests: `lib/inbox.test.ts`, `state/inbox.test.ts`,
   `components/InboxView.test.ts`, the `lib/workspace.test.ts` inbox case, and

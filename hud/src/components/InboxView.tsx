@@ -67,7 +67,7 @@ import type { ApprovalRequest } from "../types";
 import {
   ANSWERS_TEXT, CLOSING_MS, NOTE_MAX, PENDING_MAX_RANK, SNOOZES, VERDICTS, approvalReq, briefOf, canMark, checkOf,
   checkReceipt, clockOf, decisionBody, decisionOf, groupRows, hiddenNote, hiddenRows, linkOf, missedNote, parseDrafts,
-  questionOf, shownRows, snoozeUntil, waitingCount, withdrawHint, withdrawUntil, type CheckDraft, type InboxRow,
+  questionOf, isHidden, shownRows, snoozeUntil, waitingCount, withdrawHint, withdrawUntil, type CheckDraft, type InboxRow,
   type MarkBody, type SnoozeFor, type Verdict,
 } from "../lib/inbox";
 import type { InboxSnapshot } from "../state/inbox";
@@ -137,7 +137,7 @@ export function InboxView(props: InboxViewProps) {
   const { rows, status } = props.snapshot;
 
   // "Show hidden" ends when nothing is hidden, so the next row hidden leaves the list as it should.
-  const hiddenCount = rows.filter((r) => r.hidden).length;
+  const hiddenCount = hiddenRows(rows).length;
   useEffect(() => { if (!hiddenCount) setShowHidden(false); }, [hiddenCount]);
 
   // Read again when the view is shown: the rows are the daemon's, never kept here.
@@ -268,7 +268,7 @@ export function InboxView(props: InboxViewProps) {
   const mark = (row: InboxRow, body: MarkBody) => {
     // Undo only ever shows a row; a snooze or dismiss only one the rule allows.
     if (!("clear" in body) && !canMark(row)) return;
-    if ("clear" in body && !row.hidden) return;
+    if ("clear" in body && !isHidden(row)) return;
     void post(row, () => props.onMark(row.id, body), markKey(row));
   };
 
@@ -543,7 +543,7 @@ export function InboxView(props: InboxViewProps) {
   // hidden row, why it is hidden and Undo. Plain buttons, none defaulted.
   const marks = (row: InboxRow) => {
     const off = props.blocked || !!busy[markKey(row)];
-    if (row.hidden) {
+    if (isHidden(row)) {
       return (
         <div className="ir-marks" data-testid="inbox-marks">
           <span className="ir-when muted" data-testid="inbox-hidden-note">{hiddenNote(row, now)}</span>
@@ -658,7 +658,7 @@ export function InboxView(props: InboxViewProps) {
             return (
               // No handler on the row itself: a click on it answers nothing.
               <div className="inbox-row" key={row.id} data-testid="inbox-row" data-id={row.id} data-kind={row.kind}
-                   data-rank={row.rank} data-tone={tone(row)} data-hidden={row.hidden ? "1" : undefined}>
+                   data-rank={row.rank} data-tone={tone(row)} data-hidden={isHidden(row) ? "1" : undefined}>
                 <div className="ir-head">
                   <span className="ir-title" data-testid="inbox-title">{row.title}</span>
                   {asked ? <span className="ir-time muted">{asked}</span> : null}

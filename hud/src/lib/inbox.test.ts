@@ -6,7 +6,7 @@ import {
   CLOSING_MS, GROUPS, anyPending, answerPath, briefOf, clockOf, groupRows, linkOf, missedNote, oneLine, parseInbox,
   parseRow, questionOf, setBadge, textBlock, waitingCount, withdrawHint, withdrawUntil, type InboxRow,
   decisionBody, decisionOf, decisionPath, CHECK_IMPORT_PATH, checkOf, checkReceipt, checkStepPath, parseDrafts,
-  canMark, hiddenNote, hiddenRows, markPath, shownRows, snoozeUntil, MARKABLE_MIN_RANK,
+  canMark, hiddenNote, hiddenRows, markPath, shownRows, snoozeUntil, MARKABLE_MIN_RANK, isHidden, nextSnoozeEnd,
 } from "./inbox";
 
 const row = (over: Record<string, unknown> = {}) => ({
@@ -348,7 +348,8 @@ describe("marks (inbox B4, IN-7)", () => {
     expect(hiddenNote(rows[2])).toBe("Dismissed");
     expect(hiddenNote(rows[1], Date.parse("2026-10-25T10:00:00Z"))).toMatch(/^Snoozed until \d\d:\d\d/);
     // Hidden, with a time the HUD cannot read: still hidden.
-    expect(parseRow(row({ hidden: { snoozed_until: "soon" } }))!.hidden).toEqual({ snoozedUntil: null, dismissedAt: null });
+    expect(parseRow(row({ id: "task:s", kind: "task", rank: 8, hidden: { snoozed_until: "soon" } }))!.hidden)
+      .toEqual({ snoozedUntil: null, dismissedAt: null });
     expect(parseRow(row({ hidden: "yes" }))!.hidden).toBeNull();
   });
 
@@ -361,6 +362,49 @@ describe("marks (inbox B4, IN-7)", () => {
     expect(t.getTime()).toBeGreaterThan(now);
     expect(snoozeUntil("tomorrow", now).endsWith("Z")).toBe(true);
     expect(markPath("pr:o/r#5")).toBe("/inbox/pr%3Ao%2Fr%235/mark");
+  });
+});
+
+describe("marks: the HUD's own guard (review of #322)", () => {
+  const gone = { snoozed_until: null, dismissed_at: "2026-10-25T09:00:00Z" };
+  it("a served `hidden` on rank 1 to 4 or 'PR list unavailable' is ignored: the row shows and counts", () => {
+    const rows = parseInbox([
+      row({ id: "appr:a", kind: "approval", rank: 1, hidden: gone }),
+      row({ id: "q:t:r", kind: "question", rank: 2, hidden: gone }),
+      row({ id: "prop:p", kind: "proposal", rank: 3, hidden: gone }),
+      row({ id: "task:b", kind: "task", rank: 4, hidden: gone }),
+      row({ id: "prx:list", kind: "pr_unavailable", rank: 5, hidden: gone }),
+      row({ id: "zz:list", kind: "pr_unavailable", rank: 5, hidden: gone }),
+      row({ id: "prx:odd", kind: "pr", rank: 5, hidden: gone }),
+      row({ id: "pr:o/r#1", kind: "pr", rank: 5, hidden: gone }),
+    ])!;
+    expect(shownRows(rows).map((r) => r.id)).toEqual(["appr:a", "q:t:r", "prop:p", "task:b", "prx:list", "zz:list", "prx:odd"]);
+    expect(hiddenRows(rows).map((r) => r.id)).toEqual(["pr:o/r#1"]);
+    expect(waitingCount(rows)).toBe(7);
+    // parseRow drops such a `hidden` itself (one layer), and isHidden judges again (the other).
+    expect(rows.filter((r) => r.hidden).map((r) => r.id)).toEqual(["pr:o/r#1"]);
+    // Rows built elsewhere, not through parseRow, are judged the same way.
+    const forged: InboxRow = { ...rows[0], hidden: { snoozedUntil: null, dismissedAt: "x" } };
+    expect(isHidden(forged)).toBe(false);
+    expect(shownRows([forged])).toEqual([forged]);
+    expect(waitingCount([forged])).toBe(1);
+  });
+
+  it("markable keeps the rank 8 upper bound", () => {
+    const r = parseRow(row({ id: "task:t", kind: "task", rank: 8, markable: true }))!;
+    expect(canMark({ ...r, rank: 9 })).toBe(false);
+    expect(isHidden({ ...r, rank: 9, hidden: { snoozedUntil: null, dismissedAt: "x" } })).toBe(false);
+  });
+
+  it("nextSnoozeEnd is the earliest snooze a hidden row holds", () => {
+    const rows = parseInbox([
+      row({ id: "task:a", kind: "task", rank: 8, hidden: { snoozed_until: "2026-10-25T12:00:00Z", dismissed_at: null } }),
+      row({ id: "task:b", kind: "task", rank: 8, hidden: { snoozed_until: "2026-10-25T11:00:00Z", dismissed_at: null } }),
+      row({ id: "task:c", kind: "task", rank: 8, hidden: gone }),
+      row({ id: "task:d", kind: "task", rank: 4, hidden: { snoozed_until: "2026-10-25T10:00:00Z", dismissed_at: null } }),
+    ])!;
+    expect(nextSnoozeEnd(rows)).toBe(Date.parse("2026-10-25T11:00:00Z"));
+    expect(nextSnoozeEnd(rows.filter((r) => r.id === "task:c" || r.id === "task:d"))).toBeNull();
   });
 });
 

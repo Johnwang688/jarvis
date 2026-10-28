@@ -83,6 +83,27 @@ class Shift:
         return self.base + self.delta
 
 
+class FakeTimer:
+    """`threading.Timer`'s shape, never started for real: the test fires it."""
+    made: list = []
+
+    def __init__(self, interval, function, args=()):
+        self.interval, self.function, self.args = interval, function, args
+        self.started = self.cancelled = False
+        self.daemon = False
+        FakeTimer.made.append(self)
+
+    def start(self):
+        self.started = True
+
+    def cancel(self):
+        self.cancelled = True
+
+    def fire(self):
+        assert self.started and not self.cancelled
+        self.function(*self.args)
+
+
 def pr_row(n=301, head=SHA["a"], rank=5):
     """#320's row shape (`inbox_prs.pr_row`), synthetic."""
     return inbox._row("pr", rank, f"pr:Johnwang688/jarvis#{n}", f"PR #{n} is ready to merge", "waits on you",
@@ -174,6 +195,21 @@ class Apply(StoreBase):
             with self.subTest(rank=rank), self.assertRaises(ValueError):
                 self.store.mark(row, [row])
         self.assertFalse(self.store.path.exists())
+
+    def test_the_30_day_bound_holds_in_the_store_too(self):
+        pr = pr_row()
+        for until in (self.clock() + inbox_marks.SNOOZE_MAX + timedelta(seconds=1), self.clock(),
+                      self.clock() - timedelta(minutes=1)):
+            with self.subTest(until=until), self.assertRaises(ValueError):
+                self.store.mark(pr, [pr], snooze_until=until)
+        self.store.mark(pr, [pr], snooze_until=self.clock() + inbox_marks.SNOOZE_MAX)
+        self.assertEqual(self.store.apply([pr], flag=False), [], "exactly 30 days is allowed")
+        # On read: a snooze longer than 30 days after its `at` is not one of ours, and the row shows.
+        at = self.clock()
+        self.forge({pr["id"]: self.entry(pr, dismissed_at=None, at=at.isoformat(timespec="seconds"),
+                                         snoozed_until=(at + timedelta(days=31)).isoformat(timespec="seconds"))})
+        self.assertEqual(self.store.read(), {})
+        self.assertEqual(self.store.apply([pr], flag=False), [pr])
 
     def test_a_forged_mark_on_a_live_row_hides_nothing(self):
         """A mark applies only while the row's current rank is 5 or more,
@@ -514,6 +550,78 @@ class Route(unittest.TestCase):
         other = self.decision()
         self.mark(other, {"dismiss": True})
         self.assertEqual(list(self.daemon.inbox.marks.read()), [other])
+
+    def test_a_snooze_that_ends_is_announced_by_one_timer(self):
+        """Review of #322, MED: the row comes back when its snooze ends, not at
+        the next unrelated event. One timer for the earliest end, by the
+        store's clock (a fake one, relative to now), re-armed on each mark
+        write; it publishes `inbox_changed` with the ids only."""
+        clock = Shift()
+        self.daemon.inbox.marks.clock = clock
+        FakeTimer.made = []
+        self.daemon.inbox._timer_factory = FakeTimer
+        first, second, gone = self.failed_task("a"), self.failed_task("b"), self.failed_task("c")
+        self.mark(gone, {"dismiss": True})
+        self.assertEqual(FakeTimer.made, [], "a dismissal arms nothing")
+        self.mark(second, {"snooze_until": (clock() + timedelta(hours=2)).isoformat()})
+        self.mark(first, {"snooze_until": (clock() + timedelta(hours=1)).isoformat()})
+        live = [t for t in FakeTimer.made if t.started and not t.cancelled]
+        self.assertEqual(len(live), 1, "one timer, the earlier one replaced")
+        self.assertAlmostEqual(live[0].interval, 3600 + inbox.SNOOZE_SLACK_S, delta=1)
+        self.assertTrue(live[0].daemon)
+        before = len(self.changes)
+        clock.delta = timedelta(minutes=30)
+        live[0].fire()                       # early (a clock that drifted): nothing ended, re-armed
+        self.assertEqual([c for c in self.changes[before:] if c["data"]["reason"] == "snooze_ended"], [])
+        live = [t for t in FakeTimer.made if t.started and not t.cancelled and t is not live[0]]
+        self.assertAlmostEqual(live[-1].interval, 1800 + inbox.SNOOZE_SLACK_S, delta=1)
+        clock.delta = timedelta(minutes=61)
+        live[-1].fire()
+        ended = [c for c in self.changes[before:] if c["data"]["reason"] == "snooze_ended"]
+        self.assertEqual([c["data"] for c in ended], [{"ids": [first], "reason": "snooze_ended"}])
+        self.assertEqual({k for c in ended for k in c}, {"kind", "data"})
+        self.assertIn(first, self.ids(), "back in the list")
+        self.assertNotIn(second, self.ids())
+        nxt = FakeTimer.made[-1]
+        self.assertAlmostEqual(nxt.interval, 59 * 60 + inbox.SNOOZE_SLACK_S, delta=1, msg="the next one armed")
+        # Undo re-arms too: with no snooze left, nothing is armed.
+        made = len(FakeTimer.made)
+        self.mark(second, {"clear": True})
+        self.assertTrue(nxt.cancelled)
+        self.assertEqual(len(FakeTimer.made), made, "nothing left to wait for")
+        # A snooze days ahead waits at most an hour at a time.
+        self.mark(second, {"snooze_until": (clock() + timedelta(days=3)).isoformat()})
+        self.assertEqual(FakeTimer.made[-1].interval, inbox.SNOOZE_RECHECK_S)
+        # Stopped: cancelled, and a late fire neither publishes nor re-arms.
+        armed = FakeTimer.made[-1]
+        self.daemon.inbox.stop_snoozes()
+        self.assertTrue(armed.cancelled)
+        count = len(FakeTimer.made)
+        self.daemon.inbox._snoozes_ended(clock())
+        self.assertEqual(len(FakeTimer.made), count)
+
+    def test_daemon_start_arms_and_stop_cancels(self):
+        """At start the timer is armed from the file (a snooze from a previous run)."""
+        clock = Shift()
+        self.daemon.inbox.marks.clock = clock
+        row_id = self.failed_task()
+        self.mark(row_id, {"snooze_until": (clock() + timedelta(hours=1)).isoformat()})
+        self.daemon.inbox.stop_snoozes()
+        FakeTimer.made = []
+        self.daemon.inbox._timer_factory = FakeTimer
+        self.daemon.inbox.start_snoozes()
+        self.assertEqual(len(FakeTimer.made), 1)
+        self.assertTrue(FakeTimer.made[0].started)
+        self.daemon.stop()
+        self.assertTrue(FakeTimer.made[0].cancelled, "Daemon.stop() cancels it")
+
+    def test_a_real_timer_brings_the_row_back(self):
+        row_id = self.failed_task()
+        self.mark(row_id, {"snooze_until": (now_utc() + timedelta(seconds=1.5)).isoformat()})
+        self.assertNotIn(row_id, self.ids())
+        IC.eventually(lambda: any(c["data"]["reason"] == "snooze_ended" and c["data"]["ids"] == [row_id]
+                                  for c in self.changes), timeout=8)
+        self.assertIn(row_id, self.ids())
 
     def test_pr_list_unavailable_is_never_marked(self):
         """B3 (#320) is not in this branch: its two rows are synthetic, and its

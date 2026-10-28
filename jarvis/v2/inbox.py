@@ -174,6 +174,11 @@ SOURCE_KINDS = frozenset({
     "check_posted", "check_imported", "check_marked",
 })
 _DETAIL_TEXT_CAP = 4000
+# B4: the snooze timer fires this long after the earliest snooze ends (so
+# the row has surely ended by the store's clock), and never waits longer
+# than SNOOZE_RECHECK_S at once.
+SNOOZE_SLACK_S = 0.5
+SNOOZE_RECHECK_S = 3600.0
 
 
 def _parse_time(value):
@@ -789,8 +794,77 @@ class Inbox:
         # until the daemon's `main()` attaches git: "not confirmed").
         self.checks = _checks.CheckStore(root) if root is not None else None
         self.deploy = _checks.Deployment()
-        # B4: the owner's snoozes and dismissals (rank 5 to 8 only).
+        # B4: the owner's snoozes and dismissals (rank 5 to 8 only), and the
+        # one timer that says when the earliest snooze ends.
         self.marks = _marks.MarksStore(root) if root is not None else None
+        self._timer_factory = threading.Timer
+        self._snooze_timer = None
+        self._snoozes_on = False
+
+    # -- snoozes that end (B4) --------------------------------------------------
+
+    def start_snoozes(self) -> None:
+        """Arm the snooze timer (`Daemon.start`). Never raises."""
+        with self._lock:
+            self._snoozes_on = True
+        self.arm_snoozes()
+
+    def stop_snoozes(self) -> None:
+        """Cancel the timer for good (`Daemon.stop`)."""
+        with self._lock:
+            self._snoozes_on = False
+            timer, self._snooze_timer = self._snooze_timer, None
+        if timer is not None:
+            timer.cancel()
+
+    def arm_snoozes(self) -> None:
+        """One `threading.Timer` for the earliest snooze still running, by the
+        store's clock: when it passes, `_snoozes_ended` publishes
+        `inbox_changed` for the rows whose snooze ended, so the HUD and the
+        phone read again and the row is back in the list and the count.
+        Re-armed on every mark write and at start; never polls. A wait is
+        at most `SNOOZE_RECHECK_S`, so a clock that jumped (a host that
+        slept) is caught within that. Never raises."""
+        try:
+            with self._lock:
+                if not self._snoozes_on or self.marks is None:
+                    return
+                old, self._snooze_timer = self._snooze_timer, None
+            if old is not None:
+                old.cancel()
+            now = self.marks.clock()
+            ends = [t for t in (_marks.parse_time(m["snoozed_until"]) for m in self.marks.read().values()
+                                if m["snoozed_until"] is not None) if t is not None and t > now]
+            if not ends:
+                return
+            wait = min(max((min(ends) - now).total_seconds(), 0.0) + SNOOZE_SLACK_S, SNOOZE_RECHECK_S)
+            timer = self._timer_factory(wait, self._snoozes_ended, args=(now,))
+            timer.daemon = True
+            with self._lock:
+                if not self._snoozes_on or self._snooze_timer is not None:
+                    return          # stopped, or another arm won meanwhile
+                self._snooze_timer = timer
+            timer.start()
+        except Exception as exc:  # noqa: BLE001 — a timer is never worth a failed mark
+            LOG.warning("Cannot arm the snooze timer (%s)", type(exc).__name__)
+
+    def _snoozes_ended(self, since) -> None:
+        """The timer: publish the rows whose snooze ended after `since`, then re-arm."""
+        try:
+            with self._lock:
+                if not self._snoozes_on:
+                    return
+                self._snooze_timer = None
+            now = self.marks.clock()
+            ended = sorted(row_id for row_id, m in self.marks.read().items()
+                           if m["snoozed_until"] is not None
+                           and since < (_marks.parse_time(m["snoozed_until"]) or now) <= now)
+            if ended:
+                self.daemon.bus.publish({"kind": "inbox_changed",
+                                         "data": {"ids": ended, "reason": "snooze_ended"}})
+        except Exception as exc:  # noqa: BLE001
+            LOG.warning("Cannot announce an ended snooze (%s)", type(exc).__name__)
+        self.arm_snoozes()
 
     def answer_dropped(self, decision_id) -> None:
         """An answer queued for its chat will never run (the owner's Stop, a
@@ -1278,6 +1352,10 @@ def mark_row(daemon, row_id, body) -> dict:
         LOG.warning("Cannot write the inbox marks (%s)", type(exc).__name__)
         raise APIError(500, "the mark could not be saved") from None
     daemon.bus.publish({"kind": "inbox_changed", "data": {"ids": [row_id], "reason": "inbox_marked"}})
+    # A snooze set, changed or undone moves the earliest end (B4).
+    arm = getattr(getattr(daemon, "inbox", None), "arm_snoozes", None)
+    if arm is not None:
+        arm()
     out = {"ok": True, "id": row_id, "hidden": hidden}
     if cleared is not None:
         out["cleared"] = cleared

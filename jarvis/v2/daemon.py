@@ -729,6 +729,9 @@ class Daemon:
             # An answer still "queued" from a previous run never ran (the
             # queue is in memory): say so on its decision (inbox B1).
             self.inbox.fail_lost_answers()
+            # A snooze that ends brings its row back (inbox B4): one timer for
+            # the earliest, re-armed on each mark write.
+            self.inbox.start_snoozes()
             self.devservers.start()
             self.schedules.start()
             # A previous run's unrestored duck (V15) is repaired from its
@@ -2957,6 +2960,9 @@ class Daemon:
         # stopped; then this finds nothing (idempotent).
         self.release_approvals()
         self.schedules.stop()
+        inbox = getattr(self, "inbox", None)
+        if inbox is not None:
+            inbox.stop_snoozes()                # the snooze timer (inbox B4) never fires after this
         titles = self.titles
         if titles is not None:
             titles.stop()                       # its Codex session ends with the metadata cancel

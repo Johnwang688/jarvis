@@ -104,11 +104,23 @@ export function parseRow(raw: unknown): InboxRow | null {
     expires_at: typeof raw.expires_at === "string" ? raw.expires_at : null,
     origin: oneLine(raw.origin, 160),
     detail: isObj(raw.detail) ? raw.detail : {},
-    hidden: parseHidden(raw.hidden),
+    // A `hidden` the HUD's own rule (IN-8) says cannot be is dropped: such a row shows.
+    hidden: markableRank(rank, raw.kind, id) ? parseHidden(raw.hidden) : null,
     // Both the daemon's word and the HUD's own rule (IN-8): ranks 1 to 4 and
     // "PR list unavailable" never offer a snooze or dismiss, whatever is served.
-    markable: raw.markable === true && rank >= MARKABLE_MIN_RANK && raw.kind !== PR_UNAVAILABLE && !id.startsWith("prx:"),
+    markable: raw.markable === true && markableRank(rank, raw.kind, id),
   };
+}
+
+/** The HUD's own copy of IN-8: rank 5 to 8, never "PR list unavailable" (by kind or `prx:` id). */
+function markableRank(rank: number, kind: unknown, id: string): boolean {
+  return rank >= MARKABLE_MIN_RANK && rank <= MARKABLE_MAX_RANK && kind !== PR_UNAVAILABLE && !id.startsWith("prx:");
+}
+
+/** Whether a row is hidden: it says so and the HUD's rule allows it to be. A
+ * rank 1 to 4 row or "PR list unavailable" is never hidden, whatever it carries. */
+export function isHidden(row: InboxRow): boolean {
+  return !!row.hidden && markableRank(row.rank, row.kind, row.id);
 }
 
 function parseHidden(v: unknown): HiddenBy | null {
@@ -146,7 +158,7 @@ export function groupRows(rows: readonly InboxRow[]): { group: InboxGroup; rows:
 
 /** The sidebar's count and the app badge: what is waiting on the owner (ranks 1 to 5), never a hidden row. */
 export function waitingCount(rows: readonly InboxRow[]): number {
-  return rows.filter((r) => !r.hidden && r.rank >= 1 && r.rank <= COUNTED_MAX_RANK).length;
+  return rows.filter((r) => !isHidden(r) && r.rank >= 1 && r.rank <= COUNTED_MAX_RANK).length;
 }
 
 // --- marks: snooze and dismiss (inbox B4, IN-7, IN-8) -----------------------
@@ -154,21 +166,29 @@ export function waitingCount(rows: readonly InboxRow[]): number {
 /** The lowest rank the owner may snooze or dismiss: a live approval, a blocking
  * question, a proposal or a blocked task (1 to 4) is never hidden. */
 export const MARKABLE_MIN_RANK = 5;
+export const MARKABLE_MAX_RANK = 8;
 /** #320's "PR list unavailable" row: never hidden (that would read as "nothing waiting"). */
 export const PR_UNAVAILABLE = "pr_unavailable";
 
 /** Whether this row offers Snooze and Dismiss. */
 export function canMark(row: InboxRow): boolean {
-  return row.markable && !row.hidden && row.rank >= MARKABLE_MIN_RANK && row.kind !== PR_UNAVAILABLE &&
-    !row.id.startsWith("prx:");
+  return row.markable && !row.hidden && markableRank(row.rank, row.kind, row.id);
 }
 
 /** The rows that show (nothing hidden), and the hidden ones, in their order. */
 export function shownRows(rows: readonly InboxRow[]): InboxRow[] {
-  return rows.filter((r) => !r.hidden);
+  return rows.filter((r) => !isHidden(r));
 }
 export function hiddenRows(rows: readonly InboxRow[]): InboxRow[] {
-  return rows.filter((r) => !!r.hidden);
+  return rows.filter(isHidden);
+}
+
+/** When the earliest snooze among `rows` ends (ms), or null: the store reads
+ * again then, a backup to the daemon's `snooze_ended` event. */
+export function nextSnoozeEnd(rows: readonly InboxRow[]): number | null {
+  const ends = rows.filter(isHidden).map((r) => (r.hidden!.snoozedUntil ? Date.parse(r.hidden!.snoozedUntil) : NaN))
+    .filter((ms) => Number.isFinite(ms));
+  return ends.length ? Math.min(...ends) : null;
 }
 
 export type SnoozeFor = "hour" | "tomorrow" | "week";

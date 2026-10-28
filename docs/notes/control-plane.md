@@ -1138,6 +1138,25 @@ the rule) and `inbox.py` (the route and where marks apply).
   dismissed_at}` and gives every row `markable`; "ignore" is the projection
   alone (`answer`, `mark_row`). Hidden rows are never in the HUD's count or
   badge (`lib/inbox` `waitingCount`). A store that raises hides nothing.
+- **A snooze that ends comes back on its own** (review of #322, MED).
+  Nothing else would re-read: the HUD and the phone read on `inbox_changed`,
+  reconnect and mount only. `Inbox.arm_snoozes` keeps one `threading.Timer`
+  (a daemon thread, no polling) for the earliest snooze still running, by the
+  store's clock, plus 0.5 s (`SNOOZE_SLACK_S`), and never waits more than an
+  hour at once (`SNOOZE_RECHECK_S`, so a clock that jumped is caught). When
+  it fires it publishes `inbox_changed {ids: <the rows whose snooze ended>,
+  reason: "snooze_ended"}` and re-arms; fired early, it only re-arms. It is
+  armed in `Daemon.start()` (`start_snoozes`, so a snooze from a previous
+  run counts), re-armed after every mark write (a snooze, a dismissal, an
+  Undo), and cancelled in `Daemon.stop()` (`stop_snoozes`; a late fire then
+  neither publishes nor re-arms). As a backup the HUD's store schedules one
+  read just after the earliest `snoozed_until` it holds (`state/inbox.ts`,
+  at most an hour at a time, replaced by every read). The phone holds no
+  hidden rows, so it relies on the event, which its stream forwards.
+- **The 30-day bound holds in the store too.** `MarksStore.mark` refuses a
+  snooze outside (now, now + 30 days], and on read an entry whose
+  `snoozed_until` is more than 30 days after its `at` makes the file not
+  ours (no mark applies; every row shows).
 - **The file.** `<data root>/inbox/marks.json`: `{row_id: {snoozed_until,
   dismissed_at, key, at}}` (design §3.2's two fields, plus the digest and
   when it was marked), exactly one of the first two set. The decisions
@@ -1167,6 +1186,14 @@ the rule) and `inbox.py` (the route and where marks apply).
   (`files._protected_state_paths` set aside, as for the phone's files). The
   marks test greps all of `jarvis/` and sweeps every session tool with a
   row id in every argument.
+- **The HUD judges again.** `lib/inbox` keeps `hidden` only on a row of rank
+  5 to 8 that is not `pr_unavailable` or `prx:` (`parseRow`), and
+  `isHidden`, which `shownRows`, `hiddenRows` and `waitingCount` use, checks
+  the same again, so a served `hidden` on a live row never hides or uncounts
+  it.
+- **Known, inherited, not this package:** `tar -xf x.tar -C <data root>` is
+  not refused at v2's layer 1 (an extraction into an ancestor of the
+  protected tree is not judged as a write to it); v1 asks. It predates B4.
 - **With #320 (inbox B3).** This branch does not hold B3. Its `pr` rows
   are markable generically (rank 5, the `head` key) once it lands; its
   `prx:list` is refused by both rules. When both merge, `_KNOWN` must

@@ -41,8 +41,15 @@ a row show). The whole `inbox/` tree is protected state
 (`files._inbox_tree`), and the file is named in `_protected_state_paths`.
 
 **Fails closed.** A file that is missing, a symlink, not regular, too large,
-not JSON, or any entry not exactly the shape above: no mark applies, so
-every row shows. A mark written over such a file starts from empty.
+not JSON, or any entry not exactly the shape above (a snooze ending more
+than `SNOOZE_MAX` after its `at` included): no mark applies, so every row
+shows. A mark written over such a file starts from empty. `mark` refuses a
+snooze outside (now, now + `SNOOZE_MAX`] as the route does.
+
+**A snooze that ends.** `inbox.Inbox.arm_snoozes` keeps one timer for the
+earliest snooze still running and publishes `inbox_changed` (reason
+`snooze_ended`, ids only) when it passes, so the row comes back without
+waiting for another event.
 
 SELF_PROTECTED (`jarvis/tools/files.py`): it decides what the owner does
 not see.
@@ -141,6 +148,11 @@ def _valid_entry(row_id, entry) -> bool:
     if (snoozed is None) == (dismissed is None):
         return False
     if snoozed is not None and parse_time(snoozed) is None:
+        return False
+    marked = parse_time(entry["at"])
+    # The 30-day bound holds on read too: a snooze longer than SNOOZE_MAX
+    # from when it was made is not one the route could have written.
+    if snoozed is not None and (marked is None or parse_time(snoozed) - marked > SNOOZE_MAX):
         return False
     if dismissed is not None and parse_time(dismissed) is None:
         return False
@@ -329,6 +341,8 @@ class MarksStore:
         if not markable(row):
             raise ValueError("this row cannot be snoozed or dismissed")
         now = self.clock()
+        if snooze_until is not None and not now < snooze_until <= now + SNOOZE_MAX:
+            raise ValueError("a snooze must end in the future, at most SNOOZE_MAX ahead")
         at = now.isoformat(timespec="seconds")
         entry = {"snoozed_until": snooze_until.astimezone(timezone.utc).isoformat(timespec="seconds")
                  if snooze_until is not None else None,
