@@ -170,6 +170,10 @@ SELF_PROTECTED = frozenset(
         # approval waits for the morning. An agent that could edit it could
         # keep the owner from hearing about a card.
         "jarvis/v2/quiet.py",
+        # The phone's Web Push (P-6): what leaves this machine for the
+        # phone and where to. An agent that could edit it could send a
+        # card's text in a push, or push to an address of its choosing.
+        "jarvis/v2/push.py",
         # Approvals asked during quiet hours (QH, 2026-10-28): which asks
         # are deferred unasked, and the owner's single-use inbox grants that
         # the broker honours with no card. An agent that could edit it could
@@ -288,6 +292,11 @@ def _protected_state_paths() -> set[Path]:
     # own. Their folder is an ancestor, so deleting it is covered too.
     remote = Path(config.V2_DATA_DIR).expanduser() / "remote"
     paths |= {remote / "passkeys.json", remote / "sessions.json"}
+    # The phone's Web Push (P-6, `v2/push.py`): the VAPID key, the
+    # subscriptions (both also credential bundles by name, unreadable) and
+    # the notifications switch. An agent that could write them could send
+    # pushes as Jarvis, add a subscription of its own or turn them off.
+    paths |= {remote / "jarvis_push_key.json", remote / "jarvis_push_subscriptions.json", remote / "push_settings.json"}
     # The owner's quiet hours (`v2/quiet.py`, the owner's answer of
     # 2026-10-28): while they hold nothing is pushed to the phone. An agent
     # that could rewrite the file could silence the owner's notifications.

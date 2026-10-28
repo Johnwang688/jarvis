@@ -74,9 +74,11 @@ challenge bound to one approval, one answer ("allow" or "always"), the
 session and its passkey (PH-4's sha256 of req_id, answer and a nonce;
 single use, 60 s, at most 4 per session), and `answer_verify` checks it as
 `login_verify` checks a sign-in, plus that binding and that the credential
-is the session's own passkey. Past the session, `api_route` hands P-4's
-answer paths to `remote_answer`, and every other path but logout and `me`
-to `remote_api` (P-3's reads and event stream); `session_live` is the
+is the session's own passkey. Past the session, `api_route` hands P-6's
+push paths to `push`, P-4's answer paths to `remote_answer`, and every
+other path but logout and `me` to `remote_api` (P-3's reads and event
+stream); a logout, the desk's End and a revoke tell `on_end` (P-6 deletes
+that session's or passkey's push subscriptions); `session_live` is the
 stream's check, which does not touch last-seen. `recently_active` is
 PH-10's "a phone session in the last 24 h"; `passkey_ready` is §4.1's
 condition 4 without the assertion.
@@ -342,6 +344,10 @@ class RemoteAuth:
         # PH-10: when a phone session was last seen (wall clock), kept past
         # a logout; from the sessions file at load.
         self._activity: float | None = None
+        # Told when a session ends (logout, the desk's End) or a passkey is
+        # revoked: `fn("session", id)` / `fn("passkey", key)`. P-6's push
+        # deletes the subscriptions that belonged to it (push.Push.ended).
+        self.on_end: list = []
 
     # -- files -----------------------------------------------------------------------
 
@@ -801,6 +807,22 @@ class RemoteAuth:
                 return True, ""
             return (True, "") if self._active() else (False, "no passkey is paired")
 
+    def _ended(self, kind: str, value: str) -> None:
+        for fn in list(self.on_end):
+            try:
+                fn(kind, value)
+            except Exception as exc:     # noqa: BLE001 — never why a logout or revoke fails
+                LOG.warning("phone: an end listener failed (%s)", type(exc).__name__)
+
+    def active_passkeys(self) -> set[str]:
+        """The keys of the paired, unrevoked passkeys (none while the file
+        cannot be read)."""
+        with self._lock:
+            self._load()
+            if self._broken:
+                return set()
+            return {p["key"] for p in self._active()}
+
     def _seen(self, at: float) -> None:
         if self._activity is None or at > self._activity:
             self._activity = at
@@ -889,6 +911,7 @@ class RemoteAuth:
             self._sessions.pop(session["token_sha256"], None)
             self._try_save_sessions()
             LOG.info("phone: session %s signed out", session["id"])
+            self._ended("session", session["id"])
 
     def end_session(self, session_id: str) -> bool:
         with self._lock:
@@ -898,6 +921,7 @@ class RemoteAuth:
                     del self._sessions[digest]
                     self._try_save_sessions()
                     LOG.info("phone: session %s ended from the HUD", session_id)
+                    self._ended("session", session_id)
                     return True
             return False
 
@@ -934,6 +958,9 @@ class RemoteAuth:
             self._unsaved = True
             self._try_save_sessions()
             LOG.info("phone: passkey %s revoked", key)
+            # Before the write that may fail (503): the revoke holds in
+            # memory, and so does this.
+            self._ended("passkey", key)
             self._save_passkeys()
             self._mark_saved()
             return True
@@ -1143,6 +1170,11 @@ def api_route(handler, path: str, body: bytes) -> tuple[int, dict, list[tuple[st
         # P-4's answers and a card's detail (`remote_answer`), then P-3's
         # reads and the event stream (`remote_api`), only past the session
         # check above. None from the reads: the stream answered on the socket.
+        # Notifications (P-6, push.py): subscribe and unsubscribe this phone.
+        from . import push as _push
+        answered = _push.route(handler, path, session, body)
+        if answered is not None:
+            return answered
         from . import remote_answer
         answered = remote_answer.route(handler, path, session, body)
         if answered is not None:
@@ -1199,8 +1231,12 @@ def hud_route(handler, daemon, parts, query):
     if not isinstance(auth, RemoteAuth):
         raise APIError(404, "route not found")
     method = handler.command
-    if method == "POST":
-        handler._body()
+    body = handler._body() if method == "POST" else {}
+    # Notifications (P-6, push.py): the switch, the test and the list.
+    from . import push as _push
+    mounted = _push.hud_route(daemon, parts, method, body)
+    if mounted is not None:
+        return mounted
     try:
         if parts == ["phone"] and method == "GET":
             return 200, dict(auth.status(), remote=remote_status(daemon))

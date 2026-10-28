@@ -1986,3 +1986,28 @@ the "Inbox" project where unplaced chat lands.
     - a `background-position` drift;
     - the selection bar covered;
     - the aurora on the Inbox project row (face only).
+
+## Settings > Phone > Notifications (phone C6 / P-6, 2026-10-28)
+
+A block at the end of Settings > Phone (`components/PhoneNotifications.tsx`,
+routes `GET /phone/push`, `POST /phone/push/settings`, `POST
+/phone/push/test`, `GET`/`POST /quiet`, all owner-only; see
+`docs/notes/control-plane.md`, "Web Push to the phone"):
+
+- "Send notifications to the phone": the daemon's switch.
+- Quiet hours: a checkbox and two `type="time"` inputs on one line; Save
+  appears once a time changes and is off unless both are HH:MM and
+  different. The line under it says nothing is pushed inside them and one
+  notification says what still waits when they end.
+- The phones that turned notifications on: the user agent (text only) and
+  the push service's host, never the endpoint.
+- "Send test notification": off while the switch is off, no phone is
+  subscribed, or the daemon was not started as the owner's (`running`
+  false, said in a muted line); its result ("Sent to 1 phone.") shows as a
+  notice. An approval card disables the block like the rest of the section.
+
+On the phone (`hud/src/mobile/notify.ts`), under the Inbox: "Turn on
+notifications" (the subscribe call is the tap's first await, so iOS sees
+the gesture), "Turn off notifications", or, on an iPhone outside the
+Home Screen app, how to add it there; a blocked permission says where to
+allow it.

@@ -584,6 +584,15 @@ class Daemon:
         # by the phone's push (P-6); changed only at the desk (`/quiet`).
         from .quiet import QuietHours
         self.quiet = QuietHours(stores.root)
+        # Web Push to the phone (P-6, push.py): content-free, coalesced,
+        # silent in quiet hours. Its observer only sets an event; its thread
+        # and transport are attached by `main()` alone (`attach_system`),
+        # so no test or embedded daemon ever sends. A session that ends or a
+        # passkey revoked takes its subscriptions with it.
+        from .push import Push
+        self.push = Push(self, Path(stores.root), self.remote_host)
+        self.bus.observe(self.push.observe)
+        self.remote_auth.on_end.append(self.push.ended)
         # QH-3 (quiet_defer.py): when the owner last gave input here
         # (`owner_seen`), by `_presence_clock` (monotonic); None until then.
         # An approval asked during quiet hours is deferred unless this is
@@ -728,6 +737,9 @@ class Daemon:
             # phone's listener is bound (remote_secure.py).
             if self.remote_port is not None:
                 self.secure.start()
+            # The phone's push sender: a thread only once `main()` attached
+            # it; it sends nothing for what already waits.
+            self.push.start()
             from .hud_api import connect_controls
             connect_controls(self)
             # `terminal_read` (WP-F) reads these terminals and no others.
@@ -3001,6 +3013,7 @@ class Daemon:
         self.release_approvals()
         self.schedules.stop()
         self.inbox.prs.stop()                   # the inbox's PR poll (B3): a running gh is killed
+        self.push.stop()                        # the phone's push sender (P-6): no send after this
         inbox = getattr(self, "inbox", None)
         if inbox is not None:
             inbox.stop_snoozes()                # the snooze timer (inbox B4) never fires after this
@@ -3928,6 +3941,9 @@ def main() -> int:
     # The inbox's open PRs (B3, inbox_prs.py): the owner's `gh`, read-only,
     # attached here for the same reason.
     daemon.inbox.prs.attach_system()
+    # Web Push to the phone (P-6, push.py): the sender and its network
+    # transport, here only, so no embedded or test daemon ever sends.
+    daemon.push.attach_system()
     # Quiet hours (QH, quiet_defer.py): approvals asked while the owner
     # sleeps are deferred to the inbox. Attached here only, so no embedded
     # or test daemon's broker depends on the time of day.

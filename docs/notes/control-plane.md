@@ -1722,6 +1722,72 @@ keyboard default, a task question), the P-4 additions to
 `tests/face/hud_v2_phone_check.py`, and the Bypass case for "phone" in
 `claude_provider_check`.
 
+## Web Push to the phone (phone C6 / P-6, 2026-10-28)
+
+`jarvis/v2/push.py` (SELF_PROTECTED) and quiet hours, `jarvis/v2/quiet.py`
+(SELF_PROTECTED; design §7, §10.5, §11 question 5 as the owner answered it
+on 2026-10-28).
+
+- **A push carries `{"count": n, "rank": r}` and nothing else**: the inbox
+  rows at ranks 1 to 4 and the most urgent rank among them. Encrypted to
+  the subscription (aes128gcm), signed with the daemon's VAPID key.
+- **When.** `Push.observe` only sets an event on `inbox_changed`; the
+  sender's own thread reads `inbox.rows` off the bus and the daemon lock. A
+  row new to ranks 1 to 4 is due; at most one push per 60 s (monotonic),
+  the rest coalesced into one at the window's end. **Quiet hours**
+  (`quiet.json` under the data root, default on 23:00 to 07:00 local,
+  `GET`/`POST /quiet` owner-only on the HUD listener): nothing pushes,
+  rank 1 included; when they end, one push if anything at ranks 1 to 4
+  still waits. The desk's switch off (`push_settings.json`): nothing.
+- **Never from a test or embedded daemon.** `main()` alone calls
+  `daemon.push.attach_system()` (the network transport and leave to run);
+  `Daemon.start()` starts the thread only if it was attached, and its first
+  read seeds what already waits without sending.
+- **Routes.** Remote listener, past `remote_auth.owner_status` (session,
+  Host, and Origin for a write), dispatched from `remote_auth.api_route`
+  before P-4's and P-3's: `GET /m/api/push` (`{key, enabled, subscribed}`,
+  the public key only), `POST /m/api/push/subscribe`, `DELETE
+  /m/api/push/subscribe`. HUD listener, owner-only, from
+  `remote_auth.hud_route` after its `owner_only`: `GET /phone/push`
+  (switch, subscriptions as the push service's host, created, passkey and
+  user agent; never the endpoint), `POST /phone/push/settings` `{enabled}`,
+  `POST /phone/push/test` (one push now with the current count, past the
+  window and quiet hours; 409 unless attached, switched on and subscribed).
+  The API and HUD listeners never serve `/m/*` (404).
+- **Subscriptions** (`remote/jarvis_push_subscriptions.json`, at most 8, the
+  oldest dropped): one per session, the same endpoint moving to a newer
+  session; deleted at once on logout, the desk's End and a revoke
+  (`RemoteAuth.on_end`), and sent to only while their passkey is active
+  (`RemoteAuth.active_passkeys`). A session that only expires keeps its
+  subscription. 404 or 410 from the push service deletes it; any other
+  status, or an exception's class, is logged and nothing more.
+- **The endpoint is a capability**: never in a log line, `/status` or an
+  answer. Accepted only as `https` on 443, no userinfo, no IP literal, a
+  push service's host (`PUSH_HOSTS`, `PUSH_SUFFIXES`), every resolved
+  address global, at subscribe and again at each send; the send connects to
+  the checked address with TLS verified for the name (`https_post`: no
+  proxy, no redirect).
+- **Files.** `remote/jarvis_push_key.json` (made once, 0600) and
+  `remote/jarvis_push_subscriptions.json` are credential bundles by name
+  (`secrets.PROTECTED_NAMES`): refused to every agent read and command, v1
+  and v2. They, `remote/push_settings.json` and `quiet.json` are protected
+  state (`files._protected_state_paths`): refused to every agent write.
+  All are read `O_NOFOLLOW` relative to their folder's descriptor and
+  written as an `O_EXCL` temp file, fsynced and replaced.
+- **The service worker** is the build's `src/mobile/sw.ts` entry, served at
+  `/m/sw.js` from the build manifest (`remote_listener.service_worker_file`),
+  with the listener's headers; it is not under `/m/assets/`.
+
+Tests: `tests/v2/push_check.py` (25, no network: a fake resolver and
+transport, the real encryption decrypted with the test subscription's key;
+mutations of the payload, quiet hours, coalescing, 404/410, the private
+address check, the host list, the end hook, the active-passkey filter and
+the credential name each fail it), `tests/v2/quiet_check.py` (14),
+`tests/v2/archive_check.py` (no tool, MCP or session path names push or
+quiet hours; the desk routes refuse every client but the HUD),
+`hud/src/mobile/notify.test.ts`, `hud/src/mobile/sw.test.ts` and the P-6
+sections of `tests/face/hud_v2_phone_check.py`.
+
 ## Quiet hours: approvals deferred to the morning (QH, 2026-10-28)
 
 Plan: `docs/plans/2026-10-28-quiet-hours-deferral.md` (the owner's words,

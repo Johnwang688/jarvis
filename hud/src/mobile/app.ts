@@ -37,6 +37,7 @@ import {
   type ChatThread, type DiffView, type LogRow, type Project, type StreamEvent, type TaskView,
 } from "./model";
 import { chatsView, el, inboxView, logRow, taskView, tasksView, transcriptView, tap, type InboxAnswers } from "./views";
+import { browserEnv, browserSend, Notifications, type PushEnv, type Send } from "./notify";
 
 export type Tab = "inbox" | "chats" | "tasks";
 
@@ -63,6 +64,9 @@ export interface AppDeps {
   openStream?: (url: string) => StreamLike;
   now?: () => number;
   setTimer?: (fn: () => void, ms: number) => unknown;
+  /** P-6's notifications: the browser's push and the push routes (fakes in the tests). */
+  pushEnv?: PushEnv;
+  pushSend?: Send;
 }
 
 export const STREAM_URL = "/m/api/events";
@@ -106,6 +110,8 @@ export class PhoneApp {
   private deferred = false;
   /** One line shown once above the inbox after an answer ("Denied.", where a decision's answer went). */
   private flash = "";
+  /** P-6: "Turn on notifications", under the Inbox (./notify.ts). */
+  readonly notify: Notifications;
 
   private readonly fetchJson: (path: string) => Promise<Got>;
   private readonly postJson: (path: string, value: unknown) => Promise<Posted>;
@@ -157,6 +163,9 @@ export class PhoneApp {
     this.tabs = { inbox: make("inbox", "Inbox"), chats: make("chats", "Chats"), tasks: make("tasks", "Tasks") };
     frame.append(top, this.banner, this.main, nav);
     this.frame = frame;
+    this.notify = new Notifications(deps.pushEnv ?? browserEnv, deps.pushSend ?? browserSend,
+      () => { if (this.tab === "inbox" && !this.card && !this.stopped) this.renderInbox(); },
+      () => { if (!this.stopped) { this.card = null; this.show("inbox"); } });
   }
 
   // -- life cycle ----------------------------------------------------------------
@@ -164,9 +173,12 @@ export class PhoneApp {
   start(): void {
     this.deps.root.className = "app-root";
     this.deps.root.replaceChildren(this.frame);
+    // A notification's tap opens /m/#inbox: the Inbox is the first tab anyway.
+    if (typeof location !== "undefined" && location.hash === "#inbox") history.replaceState(null, "", "/m/");
     this.render();
     void this.loadInbox();
     void this.loadMe();
+    void this.notify.sync();
     this.connect();
   }
 
@@ -727,6 +739,7 @@ export class PhoneApp {
         if (row.thread_id) void this.openThread(row.thread_id);
         else if (row.task_id) void this.openTask(row.task_id);
       }, answers, this.secure);
+      view.append(this.notify.view());
       if (this.flash) {
         const line = el("p", "m-notice", this.flash);
         line.dataset.testid = "m-flash";
