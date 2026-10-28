@@ -878,11 +878,16 @@ The owner, on the iPhone, asked for the standard mobile agent chat and chose
 Claude/Codex style. UI only: no route, rule or daemon behavior changed.
 
 - **The transcript** (`views.ts` `logRow`, `rowStyle`): no boxes. The owner's
-  words (role `owner` only, never a peer or a relay) in a right-aligned
-  bubble with its marks and time under it; a reply (Jarvis, Claude, Codex)
+  words typed in this chat (role `owner`, every mark one of via the phone,
+  via Discord, via DM, spoken) in a right-aligned bubble with its marks and
+  time under it; any other owner row (a decision's answer "not typed in
+  this chat", a steer, one "not sent", an unknown mark) flat, its marks
+  above the words, "not sent" in amber; a peer or a relay is never a
+  bubble (review of #331, MED 1). A reply (Jarvis, Claude, Codex)
   as plain full-width text through the same sanitized Markdown; every other
   row (the daemon's own lines, another chat's relay) one muted line, folded,
-  that a tap opens to its whole text. Tool calls are still not in the
+  that a tap opens to its whole role and then its whole text; the folded
+  line cuts the middle of the role, never ", not the owner" (MED 2). Tool calls are still not in the
   projection (§5); nothing new is shown.
 - **The message box** (`write.ts` `composerView`): one slim bar pinned above
   the tab bar: the box (one line, growing to five, then scrolling), the mic
@@ -892,15 +897,19 @@ Claude/Codex style. UI only: no route, rule or daemon behavior changed.
   sending; NEVER_STEER at the daemon.
 - **The mic** (`talk.ts`): P-7's "Hold to talk" button, now a 44 px round
   icon in the bar (it was a 56 px full-width button). Its words stay its
-  text for screen readers; every hold, slide-off, cancel, permission and
-  upload rule is unchanged.
+  text for screen readers. A touch counts as a hold only after 150 ms within
+  the slop, so a brush while scrolling does nothing at all (LOW 5); every
+  other hold, slide-off, cancel, permission and upload rule is unchanged.
+  Send redraws the box in place, so the keyboard stays up (LOW 6).
 - **Scrolling and the keyboard:** a new message, or a redraw, keeps the
   newest message in view only when the owner was already at the bottom.
   The app is sized to the visual viewport (`viewport.ts`), and while the
   keyboard is up the tab bar steps aside, so the keyboard never covers the
-  bar; the tab bar keeps the bottom safe area.
+  bar; the tab bar keeps the bottom safe area. A pinch-zoom is never read as
+  the keyboard, and a resize or rotation reads it all again (LOW 3-4).
 - **Notifications** (`notify.ts`): one compact row, about 46 px instead of
   136: "Notifications on · count only, never what" with a small "Turn off"
-  at its right ("Notifications off" and "Turn on" likewise). The states and
+  at its right ("Notifications off" and "Turn on" likewise; the hint is the
+  "on" state's only). The states and
   what each does are unchanged; the long sentences (install, blocked,
   unsupported, unavailable) keep their words in the same small type.
