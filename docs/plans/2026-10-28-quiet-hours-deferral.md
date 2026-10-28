@@ -75,3 +75,65 @@ one coalesced push at 07:00 if anything at ranks 1 to 4 is still waiting.
 | WP | Package | Acceptance |
 |---|---|---|
 | QH | Deferral in the broker, deferred rows, Approve and retry, docs | an ask in quiet hours returns DENY `deferred` at once with the code-built text, with no wait and no Discord post; owner present → normal ask; a deferred row at rank 4 with "Approve and retry" and "Leave it"; a grant matches only the identical call once within 30 min, never a different argument, thread or tool, never twice; Browser cards get no grant; the chat gets the B1-framed message, the blocked task resumes; phone Approve and retry needs a fresh assertion; agents cannot write grants (tool sweep plus shell probes at v2 layer 1 and v1) |
+
+## QH as built (2026-10-28, PR #326)
+
+Module `jarvis/v2/quiet_defer.py` (SELF_PROTECTED); the broker's hook in
+`approvals.py` is one attribute (`quiet_desk`) and one call under its lock.
+Details and the full rules: `docs/notes/control-plane.md`, "Quiet hours:
+approvals deferred to the morning".
+
+- **QH-1, QH-2.** Built as planned. The desk is attached by daemon2's
+  `main()` only (`Daemon.attach_quiet_desk`), as the PR source and §4.1
+  reads are, so no embedded or test daemon depends on the time of day.
+  The agent's words come from `denial_text`, with the end of quiet hours
+  as HH:MM in the machine's zone.
+- **QH-3, the presence signal.** The desk's own presence
+  (`desk.DeskState`) is per turn and keeps no time, so it is not used. A
+  new monotonic stamp, `Daemon.owner_seen()`, is set by the owner's own
+  input: a HUD message (`is_owner`, the test that grants the desk), the
+  HUD's answer to an approval (`POST /approvals/<id>`, `POST
+  /inbox/<id>/answer`), the phone's answer after a verified passkey
+  assertion, and the owner's Approve and retry (or Leave it at the HUD).
+  `owner_present()` is that stamp within 15 minutes. A Leave it from the
+  phone (session only) is not presence. So an Approve and retry at night
+  makes the next 15 minutes' asks ordinary cards.
+- **A malformed setting.** `quiet.py` reads a link, a malformed or
+  oversized `quiet.json` as its default (on), right for the push. The
+  deferral probes the file itself (`setting_readable`) and treats such a
+  file as "not quiet": asked normally. A missing file is the default.
+  `quiet.py` is unchanged.
+- **The words reach each model:** Claude (the hook's and `can_use_tool`'s
+  denial reason), the fast path (`tools.Refusal`), the jarvis-mcp bridge
+  (`_unasked_refusal`). **Codex cannot**: its approval reply is a bare
+  "decline" (the 0.161 `CommandExecutionRequestApprovalResponse` has no
+  reason field), so the chat's log gets a non-fatal line saying why and
+  the model only sees a decline.
+- **A Discord command's own ask** (`discord_channel_id`, the owner's
+  `/project new` a moment ago) is never deferred.
+- **QH-4.** Unchanged, checked: a Codex chat question has no timeout (it
+  waits until answered, stopped or the transport closes), so overnight it
+  stays a rank-2 row; Claude emits no provider QUESTION.
+- **QH-5.** As planned; the store keeps the card's public projection and
+  the digest only. A card over 32 KB is kept cut and never granted.
+- **QH-6.** As planned, with the work per id (`approve_and_retry`,
+  `leave`: one result each, never raising), so the morning review can call
+  them for a selected group under one confirm. A task that is not
+  `blocked` gets the grant but is not told (nothing but a steer could tell
+  it, and steering is ruled out). The phone's assertion is bound to
+  `defer:<id>`; `remote_answer.defer_binding` gives a set of ids one
+  binding (`defers:` + SHA-256 of the sorted ids) for the morning review.
+- **QH-7.** As planned.
+
+Open for the owner:
+
+1. A Codex sandbox-widening approval carries its own per-request id in the
+   arguments the broker judges, so its digest never repeats: Approve and
+   retry records a grant that cannot match, and the retry asks as a card.
+   Exclude the id from the digest for widenings, or hide the button for
+   them?
+2. A task that was not `blocked` when its deferral is approved is not told
+   (only a steer could); its agent may never retry. Accept, or queue a
+   note for its next turn?
+3. Codex's model is not told why it was declined (above). Accept, or add a
+   line to Codex chats' instructions about quiet-hours declines?

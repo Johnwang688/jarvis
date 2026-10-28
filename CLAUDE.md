@@ -8,16 +8,16 @@ the appropriate area note. Keep this guide near 38–40 KB.
 The previous file is preserved verbatim in [area notes](#area-index), with a
 [migration manifest](docs/notes/claude-migration.json). Those notes mix live
 rules, dated findings and superseded behavior. Moving a rule does **not** revoke
-its safety obligations. Summaries here are not permission to omit a guard:
-read the complete relevant notes before changing a boundary. Resolve older
-conflicting accounts using the latest explicit owner decision and verify
-current code. Historical “live” claims are not new deployment receipts.
+its safety obligations. Summaries never permit omitting a guard: read
+the complete relevant notes before changing a boundary. Resolve
+conflicts by the newest explicit owner decision and current code.
+Historical “live” claims are not new deployment receipts.
 
 Invariants and decisions are retained byte for byte; their named paragraph
 references are in the notes. Preserved paths are repository-relative.
 
-Tool-call labels: A value split by shell quoting can still appear in a label;
-labels are untrusted text ([HUD notes](docs/notes/hud-workspace.md)).
+Tool-call labels are untrusted text, shell-quoting splits included
+([HUD notes](docs/notes/hud-workspace.md)).
 
 <!-- retained:chat-git-and-v2:begin -->
 ## Chat git worktrees (2026-10-13)
@@ -110,7 +110,8 @@ navigation and cleanup: Browser note and HTTP-auth plan.
 ## Inbox
 
 `/inbox` routes are owner-only; agents only post via `owner_post`, never read,
-answer or mark. Marks hide ranks 5–8 only.
+answer, mark or grant. Marks hide ranks 5–8 only. Quiet-hour asks defer
+(rank 4); owner Approve and retry grants one exact call once.
 [Design](docs/plans/2026-10-24-owner-inbox-design.md); rules: control-plane notes.
 
 ## Safety design (deliberate, do not loosen without asking)
@@ -197,7 +198,7 @@ built, browser-tested, installed or live-validated.
 
 In this WSL workflow, cap each test/build tree with
 `systemd-run --user --scope -q -p MemoryMax=3G -p MemorySwapMax=0`. Use the
-worktree's PYTHONPATH/shared venv as appropriate. Tests use temporary HOME/config,
+worktree's PYTHONPATH/shared venv. Tests use temporary HOME/config,
 fake providers and ephemeral ports, never live 8402/8403/8405 or owner state.
 Browser tests need an isolated mock server; do not operate the live daemon.
 
