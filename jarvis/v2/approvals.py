@@ -389,11 +389,13 @@ class ApprovalRequest:
     # Approval summaries (AS, approval_summary.py), display only, public
     # cards only, set by daemon code only and read by nothing that decides:
     # the model's one line and its state ("pending", "ready", "failed",
-    # "off"; "" when no summarizer is attached), and the code-built "project
-    # · branch · folder" line (`PendingApprovals.describe`, before the lock).
+    # "off"; "" when no summarizer is attached), and the code-built Where as
+    # separate fields, `{"project", "branch", "folder"}`, each drawn apart
+    # with its own label (`approval_summary.where_parts`, review of #330 MED
+    # 1), set by `PendingApprovals.describe` before the lock.
     summary: str = ""
     summary_state: str = ""
-    where: str = ""
+    where: dict = field(default_factory=dict)
     _hud_private: bool = field(default=False, init=False, repr=False)
     _card: dict | None = field(default=None, init=False, repr=False, compare=False)
     # Quiet hours (QH, `quiet_defer.QuietDesk.settle`): set by the broker
@@ -436,7 +438,8 @@ class ApprovalRequest:
             "discord_channel_id": self.discord_channel_id,
             **({"subagent": self.subagent} if self.subagent else {}),
             # AS: display only, and only once set (an older reader sees the card it knew).
-            **({"where": self.where} if self.where else {}),
+            **({"where": {k: str(self.where.get(k) or "") for k in ("project", "branch", "folder")}}
+               if isinstance(self.where, dict) and any(self.where.values()) else {}),
             **({"summary": self.summary if self.summary_state == "ready" else "",
                 "summary_state": self.summary_state} if self.summary_state else {}),
             **({"relayed_from": {k: clean_line(str(self.relayed_from.get(k) or ""), 80)
@@ -506,8 +509,11 @@ class PendingApprovals:
         # counts as no phone.
         self.phone_active: Callable[[], bool] | None = None
         # AS (approval_summary.py): set by the daemon to fill the card's
-        # code-built Where line. Called at each ask before the lock; display
-        # only, and one that raises leaves the card without it.
+        # display fields: the code-built Where, and the summary's "pending"
+        # state when a summarizer is attached, so no card is ever in
+        # `_pending` without it (review of #330, LOW 3). Called at each ask
+        # before the lock; display only, and one that raises leaves the card
+        # without them.
         self.describe: Callable[[ApprovalRequest], None] | None = None
         # QH (quiet_defer.py): attached by daemon2's `main()` only
         # (`Daemon.attach_quiet_desk`). Its `settle` runs under the lock below

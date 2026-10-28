@@ -5,7 +5,8 @@ something to read before every Allow, so each card gets **a short model
 summary** of what the call does and where, and the command itself is kept
 collapsed, one tap away. Beside the summary the card shows two lines code
 builds and no model touches: **Why asked** (the gate's `[layer] reason`) and
-**Where** (`where_line`: project · branch · folder).
+**Where** (`where_parts`: project, branch and folder, each its own labelled
+field).
 
 What this module guarantees, each pinned by
 `tests/v2/approval_summary_check.py`:
@@ -26,7 +27,8 @@ What this module guarantees, each pinned by
     for a command tool the command line only (an agent's own `description`
     of its call is not sent: the summary says what the call does, not what
     the agent says it does). Then `strip_invisible` and `scrub`, then
-    `untrusted.fence` with a fresh nonce. A call longer than
+    `untrusted.fence` with a fresh nonce. A call whose card would still show
+    a credential (`secrets.holds_back_credential`) or that is longer than
     `INPUT_MAX_CHARS` gets **no** summary, so it shows expanded: a summary
     never describes only the first part of a call. One-shot, `cache=False`.
   - **What comes back** is one line of plain text, at most 160 characters,
@@ -64,7 +66,7 @@ import time
 from typing import Any, Callable
 
 from jarvis import config, llm, models, untrusted
-from jarvis.tools.secrets import scrub
+from jarvis.tools.secrets import holds_back_credential, scrub
 
 from .approvals import clean_line, is_command_tool
 
@@ -83,7 +85,6 @@ MAX_RUNNING = 3
 MAX_WAITING = 12
 DAILY_CAP = 1000
 CACHE_SIZE = 512
-WHERE_MAX_CHARS = 200
 SOURCE = "a tool call waiting for the owner's approval, to be summarized"
 
 PENDING, READY, FAILED, OFF = "pending", "ready", "failed", "off"
@@ -121,6 +122,12 @@ def model_input(request) -> str | None:
     (a HUD-only card, nothing to describe, or a call longer than
     `INPUT_MAX_CHARS`)."""
     if getattr(request, "private", False):
+        return None
+    # A credential the card leaves showing (its rule: a value holding an
+    # operator or a blank is never withheld, since it might be what runs)
+    # never leaves this machine: no summary, so the card shows the command
+    # expanded (review of #330, LOW 5: `sshpass -p 'Tr0ub4dor&3' ...`).
+    if holds_back_credential(request.command) or holds_back_credential(request.args):
         return None
     card = request.card()
     command = card.get("command") if isinstance(card.get("command"), str) else ""
@@ -254,23 +261,75 @@ def git_branch(folder) -> str:
     return ""
 
 
-def where_line(project: str = "", folder: str | None = None, branch: str | None = None) -> str:
-    """"project · branch · folder", the parts known, the home folder as "~";
-    one line, at most `WHERE_MAX_CHARS`."""
-    parts = []
-    if project:
-        parts.append(clean_line(project, 60))
+# The characters a Where part may not hold: the ones a surface could read as
+# a separator between parts (the middle dot and its lookalikes, bullets,
+# bars). Each becomes "?". Whitespace, control, zero-width and bidi
+# characters are already gone (`clean_line`). Review of PR #330, MED 1: a
+# folder named `x · Jarvis · main · ~/projects/Jarvis` read as another place.
+_SEPARATORS = re.compile(
+    "[|\u00a6\u00b7\u0387\u02d1\u16eb\u2016\u2022\u2023\u2027\u2043\u2219\u22c5\u2758-\u275a"
+    "\u25cf\u25e6\u26ab\u2981\u2b24\u23fa\u2e31\u30fb\uff5c\uff65]")
+WHERE_CAPS = {"project": 60, "branch": 80, "folder": 120}
+WHERE_KEYS = ("project", "branch", "folder")
+# A branch `.git/HEAD` names that is not a plain branch name
+# (`chat_git.valid_branch`): marked, never shown as typed.
+BRANCH_UNUSUAL = "(not a plain branch name)"
+_DETACHED = re.compile(r"^detached [0-9a-f]{8}$")
+
+
+def elide_middle(text: str, cap: int) -> str:
+    """`text` at most `cap` characters, its middle replaced by "…": the head
+    and the tail both stay (a folder's last parts are where it is)."""
+    if len(text) <= cap:
+        return text
+    head = max(1, (cap - 1) // 3)
+    tail = cap - 1 - head
+    return text[:head] + "…" + text[len(text) - tail:]
+
+
+def where_part(text, cap: int, *, middle: bool = False) -> str:
+    """One part of the Where line as display text: one line, no separator
+    lookalike, at most `cap` characters (the middle elided when `middle`)."""
+    if not isinstance(text, str):
+        return ""
+    flat = _SEPARATORS.sub("?", clean_line(text, 100_000)).strip()
+    if middle:
+        return elide_middle(flat, cap)
+    return flat if len(flat) <= cap else flat[:cap - 1].rstrip() + "…"
+
+
+def shown_folder(folder) -> str:
+    """The folder as the card shows it: `normpath` first (a `..` never hides
+    in an elided middle), the home folder as "~"."""
+    if not isinstance(folder, str) or not folder:
+        return ""
+    shown = os.path.normpath(folder)
+    home = os.path.normpath(os.path.expanduser("~"))
+    if home and home != "/" and (shown == home or shown.startswith(home + "/")):
+        shown = "~" + shown[len(home):]
+    return where_part(shown, WHERE_CAPS["folder"], middle=True)
+
+
+def shown_branch(branch) -> str:
+    """A branch name as the card shows it: a plain one (`chat_git.valid_branch`)
+    or "detached <sha8>" as is; anything else marked."""
+    from .chat_git import valid_branch
+    if not isinstance(branch, str) or not branch:
+        return ""
+    if _DETACHED.match(branch) or valid_branch(branch):
+        return where_part(branch, WHERE_CAPS["branch"], middle=True)
+    return BRANCH_UNUSUAL
+
+
+def where_parts(project: str = "", folder: str | None = None, branch: str | None = None) -> dict:
+    """The card's Where, as separate labelled parts the surfaces draw apart:
+    `{"project", "branch", "folder"}`, each a string ("" when unknown).
+    Code only, display only (AS-8)."""
     if branch is None:
         branch = git_branch(folder)
-    if branch:
-        parts.append(clean_line(branch, 60))
-    if isinstance(folder, str) and folder:
-        home = os.path.expanduser("~")
-        shown = folder
-        if home and home != "/" and (folder == home or folder.startswith(home.rstrip("/") + "/")):
-            shown = "~" + folder[len(home.rstrip("/")):]
-        parts.append(shown)
-    return clean_line(" · ".join(p for p in parts if p), WHERE_MAX_CHARS)
+    return {"project": where_part(project, WHERE_CAPS["project"]),
+            "branch": shown_branch(branch),
+            "folder": shown_folder(folder)}
 
 
 # -- the summarizer ------------------------------------------------------------------
@@ -279,13 +338,20 @@ Done = Callable[[str, str], None]
 
 
 @dataclass
+class _Waiter:
+    """One card waiting on a job: told once, by the job's end or its own watchdog."""
+    done: Done
+    timer: Any = None
+    told: bool = False
+
+
+@dataclass
 class _Job:
     key: str
     text: str
     deadline: float
     waiters: list = field(default_factory=list)
-    finished: bool = False
-    timer: Any = None
+    ended: bool = False             # the worker has returned (its slot is free)
 
 
 class ApprovalSummaries:
@@ -297,6 +363,13 @@ class ApprovalSummaries:
     another thread, with `ready` or `failed`), or `("off", "")` when there
     will be none (a HUD-only card, nothing to send, too long, no acceptable
     model, a cap reached). It never raises.
+
+    Each card has its own watchdog (`deadline_s` from its own ask). A job
+    stays counted against the caps until its worker really returns, even
+    after every card it served timed out (review of #330, NIT 7), and an
+    identical ask in that window waits on the same job rather than starting
+    a second paid call. The daily cap counts model calls, each try of each
+    job (review of #330, LOW 6), not jobs.
     """
 
     def __init__(self, *, chat: Callable[..., Any] | None = None, deadline_s: float = DEADLINE_S,
@@ -321,7 +394,7 @@ class ApprovalSummaries:
 
     @staticmethod
     def _zero() -> dict:
-        return {"calls": 0, "ready": 0, "failed": 0, "cache_hits": 0, "off": 0,
+        return {"calls": 0, "jobs": 0, "ready": 0, "failed": 0, "cache_hits": 0, "off": 0,
                 "prompt_tokens": 0, "completion_tokens": 0, "cost_usd": 0.0}
 
     # -- the asking side ---------------------------------------------------------
@@ -339,6 +412,8 @@ class ApprovalSummaries:
             self._count("off")
             return OFF, ""
         key = input_key(text)
+        waiter = _Waiter(done)
+        start = None
         with self._lock:
             self._roll()
             if self._closed:
@@ -349,27 +424,31 @@ class ApprovalSummaries:
                 self._stats["cache_hits"] += 1
                 return READY, hit
             job = self._jobs.get(key)
-            if job is not None and not job.finished:
-                job.waiters.append(done)
-                return PENDING, ""
-            if len(self._jobs) >= self.max_running + self.max_waiting:
-                self._stats["off"] += 1
-                return OFF, ""
-            if self._stats["calls"] >= self.daily_cap:
-                self._stats["off"] += 1
-                return OFF, ""
-            self._stats["calls"] += 1
-            job = _Job(key, text, self._mono() + self.deadline_s, [done])
-            self._jobs[key] = job
-        timer = threading.Timer(self.deadline_s, self._finish, args=(job, FAILED, ""))
-        timer.daemon = True
-        job.timer = timer
-        worker = threading.Thread(target=self._work, args=(job,), name="jarvis-approval-summary", daemon=True)
+            if job is None:
+                if len(self._jobs) >= self.max_running + self.max_waiting:
+                    self._stats["off"] += 1
+                    return OFF, ""
+                if self._stats["calls"] >= self.daily_cap:
+                    self._stats["off"] += 1
+                    return OFF, ""
+                self._stats["jobs"] += 1
+                job = start = _Job(key, text, self._mono() + self.deadline_s)
+                self._jobs[key] = job
+            # A job already running (its own cards' watchdogs may have
+            # fired): this card waits on it, with a watchdog of its own.
+            job.waiters.append(waiter)
+            timer = threading.Timer(self.deadline_s, self._expire, args=(waiter,))
+            timer.daemon = True
+            waiter.timer = timer
         try:
             timer.start()
-            worker.start()
+            if start is not None:
+                threading.Thread(target=self._work, args=(start,), name="jarvis-approval-summary",
+                                 daemon=True).start()
         except BaseException:
-            self._finish(job, FAILED, "")
+            if start is not None:
+                self._end(start, "")
+            self._expire(waiter)
             raise
         return PENDING, ""
 
@@ -378,12 +457,17 @@ class ApprovalSummaries:
             self._roll()
             return {"day": self._day, **self._stats}
 
+    def running(self) -> int:
+        """Jobs whose worker has not returned yet (what the caps count)."""
+        with self._lock:
+            return len(self._jobs)
+
     def close(self) -> None:
         with self._lock:
             self._closed = True
-            jobs = list(self._jobs.values())
-        for job in jobs:
-            self._finish(job, FAILED, "")
+            waiters = [w for job in self._jobs.values() for w in job.waiters]
+        for waiter in waiters:
+            self._expire(waiter)
 
     # -- internals ---------------------------------------------------------------
 
@@ -398,28 +482,33 @@ class ApprovalSummaries:
             self._roll()
             self._stats[name] += 1
 
+    def _live(self, job: _Job) -> bool:
+        with self._lock:
+            return not self._closed and any(not w.told for w in job.waiters)
+
     def _work(self, job: _Job) -> None:
         summary = ""
-        left = job.deadline - self._mono()
-        if left <= 0 or not self._slots.acquire(timeout=left):
-            self._finish(job, FAILED, "")
-            return
         try:
-            if not job.finished:
-                summary = self._ask(job)
-        except Exception as exc:  # noqa: BLE001
-            LOG.info("approval summary failed (%s)", type(exc).__name__)
+            left = job.deadline - self._mono()
+            if left > 0 and self._slots.acquire(timeout=left):
+                try:
+                    if self._live(job):
+                        summary = self._ask(job)
+                except Exception as exc:  # noqa: BLE001
+                    LOG.info("approval summary failed (%s)", type(exc).__name__)
+                finally:
+                    self._slots.release()
         finally:
-            self._slots.release()
-        if summary:
-            with self._lock:
-                # Kept even when it came too late for its card: the next
-                # identical call reads it.
-                self._cache[job.key] = summary
-                self._cache.move_to_end(job.key)
-                while len(self._cache) > self.cache_size:
-                    self._cache.popitem(last=False)
-        self._finish(job, READY if summary else FAILED, summary)
+            self._end(job, summary)
+
+    def _take_call(self) -> bool:
+        """One model call against the day's cap: False once it is reached."""
+        with self._lock:
+            self._roll()
+            if self._stats["calls"] >= self.daily_cap:
+                return False
+            self._stats["calls"] += 1
+            return True
 
     def _ask(self, job: _Job) -> str:
         chat = self._chat or llm.chat
@@ -429,7 +518,10 @@ class ApprovalSummaries:
         for model in candidates():
             while tries < ATTEMPTS:
                 left = job.deadline - self._mono()
-                if left <= 0.05 or job.finished:
+                if left <= 0.05 or not self._live(job):
+                    return ""
+                if not self._take_call():
+                    LOG.info("approval summary: the day's cap of %d calls is reached", self.daily_cap)
                     return ""
                 tries += 1
                 started = time.monotonic()
@@ -454,20 +546,41 @@ class ApprovalSummaries:
                     return out
         return ""
 
-    def _finish(self, job: _Job, state: str, summary: str) -> None:
+    def _end(self, job: _Job, summary: str) -> None:
+        """The worker returned: the job leaves the caps, its answer is
+        cached (even when it came too late for its cards: the next identical
+        call reads it), and every card still waiting is told."""
         with self._lock:
-            if job.finished:
-                return
-            job.finished = True
+            job.ended = True
             if self._jobs.get(job.key) is job:
                 self._jobs.pop(job.key)
-            waiters, job.waiters = list(job.waiters), []
+            if summary:
+                self._cache[job.key] = summary
+                self._cache.move_to_end(job.key)
+                while len(self._cache) > self.cache_size:
+                    self._cache.popitem(last=False)
+            waiters = [w for w in job.waiters if not w.told]
+            for w in waiters:
+                w.told = True
+            job.waiters = []
+        for w in waiters:
+            self._tell(w, READY if summary else FAILED, summary)
+
+    def _expire(self, waiter: _Waiter) -> None:
+        """A card's watchdog (or `close`): told `failed` once; its job runs on."""
+        with self._lock:
+            if waiter.told:
+                return
+            waiter.told = True
+        self._tell(waiter, FAILED, "")
+
+    def _tell(self, waiter: _Waiter, state: str, summary: str) -> None:
+        if waiter.timer is not None:
+            waiter.timer.cancel()
+        with self._lock:
             self._roll()
             self._stats["ready" if state == READY else "failed"] += 1
-        if job.timer is not None:
-            job.timer.cancel()
-        for done in waiters:
-            try:
-                done(state, summary if state == READY else "")
-            except Exception as exc:  # noqa: BLE001
-                LOG.warning("approval summary: a waiter failed (%s)", type(exc).__name__)
+        try:
+            waiter.done(state, summary if state == READY else "")
+        except Exception as exc:  # noqa: BLE001
+            LOG.warning("approval summary: a waiter failed (%s)", type(exc).__name__)

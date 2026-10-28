@@ -530,7 +530,7 @@ class Daemon:
         # *entire* command travels with it, never a summary.
         self.approvals = approvals if approvals is not None else PendingApprovals(
             on_request=self._approval_requested, on_resolve=self._approval_resolved)
-        # AS (approval_summary.py): the card's code-built Where line, filled
+        # AS (approval_summary.py): the card's code-built Where fields, filled
         # by the broker before its lock; and the model's one-line summary,
         # attached by daemon2's `main()` only (`attach_approval_summaries`),
         # so no test or embedded daemon calls a model.
@@ -2311,11 +2311,17 @@ class Daemon:
         return summaries
 
     def _describe_approval(self, request: ApprovalRequest) -> None:
-        """AS-8: the card's Where line, "project · branch · folder", from the
-        folder the gate judged the call in (else the project's root) and the
-        asking chat's (or task's) project. Code only, display only; called by
-        the broker before its lock."""
-        from .approval_summary import where_line
+        """AS-8: the card's display fields, called by the broker before its
+        lock (so before the card is in `_pending` and any listing can read
+        it). The Where, as separate fields (`where_parts`: project, branch,
+        folder), from the folder the gate judged the call in (else the
+        project's root) and the asking chat's (or task's) project; and, with
+        a summarizer attached, the summary's "pending" state (review of #330,
+        LOW 3: a card listed before `on_request` ran showed no summary slot).
+        Code only, display only."""
+        from .approval_summary import PENDING, where_parts
+        if self.approval_summaries is not None and not request.private:
+            request.summary_state = PENDING
         project = None
         try:
             thread = self.stores.threads.get(request.thread_id) if request.thread_id else None
@@ -2327,7 +2333,7 @@ class Daemon:
             project = None
         folder = request.cwd if isinstance(request.cwd, str) and request.cwd else (
             project.root if project is not None else None)
-        request.where = where_line(project.name if project is not None else "", folder)
+        request.where = where_parts(project.name if project is not None else "", folder)
 
     def begin_approval_summary(self, request: ApprovalRequest, done) -> str:
         """AS: start the summary of one public request. `done(state, text)`
