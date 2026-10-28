@@ -9,8 +9,9 @@ The previous file is preserved verbatim in [area notes](#area-index), with a
 [migration manifest](docs/notes/claude-migration.json). Those notes mix live rules,
 dated findings and superseded behavior. Moving a rule does **not** revoke
 its safety obligations. Summaries here are not permission to omit a guard:
-read the complete relevant notes before changing a boundary. Resolve conflicting
-older accounts by the latest explicit owner decision and current code. Historical “live” claims are not new deployment receipts.
+read the complete relevant notes before changing a boundary. Resolve conflicts
+by the latest explicit owner decision and current code. Historical “live”
+claims are not new deployment receipts.
 
 Invariants and decisions are retained byte for byte.
 
@@ -105,14 +106,13 @@ Owner HTTP Basic/Digest auth uses only the exact private tab socket;
 credentials never enter tools, replay, status, logs or config. Pending
 navigation and cleanup: Browser note and HTTP-auth plan.
 
-## Phone (2026-10-28)
+## Phone
 
 The phone's only door is the remote listener (8408, loopback, behind `tailscale
-serve`): strict Host/Origin, `/m/*` only, no HUD or API route; agents never
-reach `/m/`. `owner_status` needs passkey session, Host and Origin; each Allow,
-cancel and defer needs a fresh assertion. Phone sends are `NEVER_STEER`; pushes
-carry `{count, rank}` only, none 23–07. Dictation is not speaker-verified
-(owner's choice). [Design](docs/plans/2026-10-24-phone-surface-design.md)
+serve`): strict Host/Origin, `/m/*` only; agents never reach it. Routes need
+a passkey session; each Allow, cancel and defer a fresh assertion. Phone sends
+are `NEVER_STEER`; pushes carry `{count, rank}` only, none 23–07. Dictation is
+not speaker-verified (owner). [Design](docs/plans/2026-10-24-phone-surface-design.md)
 
 ## Inbox
 
@@ -123,7 +123,8 @@ grant. Marks hide ranks 5–8. Quiet hours defer.
 ## Safety design (deliberate, do not loosen without asking)
 
 Read [all safety rules/counterexamples](docs/notes/safety-permissions.md) and
-[control-plane rules](docs/notes/control-plane.md) for boundary changes.
+[control-plane rules](docs/notes/control-plane.md) for boundary changes. These
+summaries do not replace detailed matchers, exceptions or owner choices.
 
 - **Enforced toolsets.** Tools stay narrow and typed. Keep `run_readonly`
   separate from `run_command`. Dispatch refuses unbound/out-of-toolset calls
