@@ -25,8 +25,7 @@ buys the time to notice.
 Coverage: every **credential env file** (the owner's `.env*` rule, below:
 `.env` and `.env.<anything>` at any depth, except a name ending `.example`)
 and the use-but-never-see credential bundles — `google_token.json` (Gmail),
-`onshape_keys.json` (CAD), `discord_token.json`, `spotify_token.json`, and
-the phone's push credentials `jarvis_push_key.json` and `jarvis_push_subscriptions.json`.
+`onshape_keys.json` (CAD), `discord_token.json`, and `spotify_token.json`.
 `.env.example` and `.env.local.example` are meant to be read, and are the only
 env files Jarvis may write (ENV-1, 2026-10-12).
 """
@@ -56,11 +55,6 @@ PROTECTED_NAMES = frozenset(
         "onshape_keys.json",
         "discord_token.json",
         "spotify_token.json",
-        # The phone's Web Push (P-6, `v2/push.py`): the VAPID private key
-        # that signs every push, and the subscriptions, whose endpoints are
-        # capabilities and whose keys decrypt what is sent to the phone.
-        "jarvis_push_key.json",
-        "jarvis_push_subscriptions.json",
     }
 )
 

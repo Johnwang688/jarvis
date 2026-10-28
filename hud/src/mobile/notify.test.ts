@@ -7,12 +7,14 @@ import { validTime } from "../lib/phone";
 const RAW = new Uint8Array(65).map((_, i) => (i === 0 ? 4 : i));
 const KEY = btoa(String.fromCharCode(...RAW)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 
-function sub(endpoint = "https://web.push.apple.com/abc"): SubscriptionLike & { unsubscribe: ReturnType<typeof vi.fn> } {
-  return { endpoint, toJSON: () => ({ endpoint, keys: { p256dh: "p", auth: "a" } }), unsubscribe: vi.fn(async () => true) };
+function sub(endpoint = "https://web.push.apple.com/abc", key: Uint8Array | null = RAW):
+    SubscriptionLike & { unsubscribe: ReturnType<typeof vi.fn> } {
+  return { endpoint, options: { applicationServerKey: key ? key.slice().buffer : null },
+    toJSON: () => ({ endpoint, keys: { p256dh: "p", auth: "a" } }), unsubscribe: vi.fn(async () => true) };
 }
 
 function setup(over: Partial<PushEnv> = {}, opts: { held?: SubscriptionLike | null; status?: Record<string, unknown>;
-  refuse?: number } = {}) {
+  refuse?: number; getStatus?: number | null } = {}) {
   let held: SubscriptionLike | null = opts.held ?? null;
   const order: string[] = [];
   const reg: RegistrationLike = {
@@ -36,6 +38,8 @@ function setup(over: Partial<PushEnv> = {}, opts: { held?: SubscriptionLike | nu
   const send: Send = vi.fn(async (method, path, body) => {
     order.push(method + " " + path);
     calls.push([method, path, body]);
+    if (method === "GET" && opts.getStatus === null) return null;
+    if (method === "GET" && opts.getStatus) return { status: opts.getStatus, body: { error: "notifications unavailable" } };
     if (method === "GET") return { status: 200, body: { key: KEY, enabled: true, subscribed: false, ...opts.status } };
     if (method === "POST" && opts.refuse) return { status: opts.refuse, body: { error: "this push service is not accepted" } };
     return { status: 200, body: {} };
@@ -142,6 +146,41 @@ describe("Turn on notifications (P-6)", () => {
   it("a notification's tap asks the app for the Inbox", () => {
     const t = setup();
     expect(t.env.onOpenInbox).toHaveBeenCalledWith(t.open);
+  });
+
+  it("a subscription made for another key is undone and asked for again (LOW-4)", async () => {
+    const other = new Uint8Array(RAW);
+    other[10] ^= 0xff;
+    const held = sub("https://web.push.apple.com/old", other);
+    const t = setup({}, { held, status: { subscribed: true } });
+    await t.n.sync();
+    expect(held.unsubscribe).toHaveBeenCalled();
+    expect(t.calls.at(-1)).toEqual(["DELETE", SUBSCRIBE_API, { endpoint: "https://web.push.apple.com/old" }]);
+    expect(t.n.state).toBe("off");
+    expect(t.n.view().textContent).toContain("key changed");
+    expect(t.n.view().querySelector("button")!.textContent).toBe("Turn on notifications");
+    // One whose key the browser does not report is kept (it cannot tell);
+    // the same key stays on.
+    const unknown = setup({}, { held: sub("https://web.push.apple.com/x", null), status: { subscribed: true } });
+    await unknown.n.sync();
+    expect(unknown.n.state).toBe("on");
+    const same = setup({}, { held: sub(), status: { subscribed: true } });
+    await same.n.sync();
+    expect(same.n.state).toBe("on");
+  });
+
+  it("says so when the worker cannot register or Jarvis has no notifications (503)", async () => {
+    const t = setup({ register: vi.fn(async () => { throw new Error("SecurityError"); }) });
+    await t.n.sync();
+    expect(t.n.state).toBe("error");
+    expect(t.n.view().textContent).toContain("could not set notifications up");
+    for (const getStatus of [503, null]) {
+      const u = setup({}, { getStatus });
+      await u.n.sync();
+      expect(u.n.state).toBe("unavailable");
+      expect(u.n.view().textContent).toBe(WORDS.unavailable);
+      expect(u.n.view().querySelector("button")).toBeNull();
+    }
   });
 
   it("reads only a real P-256 key", () => {

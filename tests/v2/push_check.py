@@ -120,7 +120,7 @@ class FakeNet:
             raise OSError("no such host")
         return list(self.addresses[host])
 
-    def post(self, host, addresses, path, headers, body, timeout):
+    def post(self, host, addresses, path, headers, body, timeout, **_bounds):
         with self.lock:
             self.sent.append({"host": host, "addresses": addresses, "path": path, "headers": dict(headers),
                               "body": body, "timeout": timeout})
@@ -250,7 +250,7 @@ class Payload(PushBase):
 # -- when ----------------------------------------------------------------------------------
 
 
-class Sender(PushBase):
+class SenderBase(PushBase):
     def setUp(self):
         super().setUp()
         self.subscribed()
@@ -267,6 +267,8 @@ class Sender(PushBase):
         self.waiting = {"ids": set(ids), "rank": rank}
         return self.push.evaluate()
 
+
+class Sender(SenderBase):
     def test_coalescing_within_60_s(self):
         self.wait("appr:a")
         self.assertEqual(self.counts(), [{"count": 1, "rank": 1}])
@@ -410,7 +412,149 @@ class Sender(PushBase):
         print("ok  only subscriptions of an active passkey are sent to")
 
 
+class Review325(SenderBase):
+    """The review of PR #325: LOW-2 (bounded sends), LOW-3 (retry), the NITs."""
+
+    def test_payload_is_padded_to_a_fixed_length(self):
+        for count, rank in ((0, 0), (1, 1), (3, 4), (999, 2), (10 ** 9, 1)):
+            data = push_mod.payload(count, rank)
+            self.assertEqual(len(data), push_mod.PAYLOAD_BYTES, count)
+            self.assertEqual(json.loads(data), {"count": min(count, 999_999), "rank": rank})
+        self.wait("appr:a")
+        self.assertEqual(len(self.receiver.decrypt(self.net.sent[0]["body"])), push_mod.PAYLOAD_BYTES)
+        print("ok  every payload is padded to the same length")
+
+    def test_failed_push_is_retried_with_backoff(self):
+        self.net.statuses = [500, 503, 500, 500]
+        self.assertEqual(self.wait("appr:a")["failed"], 1)
+        self.assertTrue(self.push._pending, "a push that reached nobody is still due")
+        self.assertIsNone(self.push._last_sent, "and the window did not start")
+        self.assertAlmostEqual(self.push.next_wait(), 60.05, places=3)
+        self.mono2.now += 59
+        self.assertIsNone(self.wait("appr:a"), "not before the backoff")
+        sends = len(self.net.sent)
+        for gap in (1.5, 300, 900, 900):
+            self.mono2.now += gap
+            self.wait("appr:a", "appr:b")
+            sends += 1
+            self.assertEqual(len(self.net.sent), sends, gap)
+        # The last one went through (201): state cleared, the count is now's.
+        self.assertFalse(self.push._pending)
+        self.assertEqual(json.loads(self.receiver.decrypt(self.net.sent[-1]["body"])), {"count": 2, "rank": 1})
+        self.assertEqual((self.push._failures, self.push._retry_at), (0, None))
+        print("ok  LOW-3: a push that reached no phone is retried after 1, 5, 15, 15 min, with the count then")
+
+    def test_retry_is_silent_in_quiet_hours(self):
+        self.net.statuses = [500]
+        self.wait("appr:a")
+        self.local.now = local(23.5)
+        self.mono2.now += 100
+        self.wait("appr:a")
+        self.assertEqual(len(self.net.sent), 1, "no retry inside quiet hours")
+        self.local.now = local(24 + 7)
+        self.mono2.now += 100
+        self.wait("appr:a")
+        self.assertEqual(len(self.net.sent), 2, "the morning push carries it")
+        print("ok  LOW-3: a retry waits out quiet hours; the morning push carries it")
+
+    def test_a_send_is_bounded(self):
+        from unittest.mock import patch
+        # A resolver that never answers costs RESOLVE_TIMEOUT_S, not forever.
+        release = threading.Event()
+        self.addCleanup(release.set)
+        self.push.resolver = lambda host: (release.wait(30), ["17.253.1.2"])[1]
+        with patch.object(push_mod, "RESOLVE_TIMEOUT_S", 0.3):
+            start = time.monotonic()
+            result = self.wait("appr:a")
+            spent = time.monotonic() - start
+        self.assertEqual(result, {"sent": 0, "failed": 1, "removed": 0})
+        self.assertLess(spent, 2.0)
+        release.set()
+        # Many slow subscriptions: the whole send stops at its budget.
+        self.push.resolver = self.net.resolve
+        for _ in range(5):
+            self.subscribed(Receiver(), cookie=self.signed_in(self.a))
+
+        def slow(*_a, deadline=None, stop=None, **_k):
+            time.sleep(0.25)
+            return 201
+        self.push.transport = slow
+        self.mono2.now += 1000
+        with patch.object(push_mod, "SEND_BUDGET_S", 0.6):
+            start = time.monotonic()
+            result = self.wait("appr:a", "appr:b")
+            spent = time.monotonic() - start
+        self.assertLess(spent, 1.5)
+        self.assertGreater(result["failed"], 0, result)
+        self.assertEqual(result["sent"] + result["failed"], 6, result)
+        # Stopping: no subscription is tried after it.
+        calls = []
+        self.push.transport = lambda *a, **k: calls.append(1) or 201
+        self.push._stopping.set()
+        self.mono2.now += 1000
+        self.assertEqual(self.wait("appr:a", "appr:b", "appr:c")["sent"], 0)
+        self.assertEqual(calls, [])
+        print("ok  LOW-2: a stuck resolution, a slow service and a stop each end the send in time")
+
+    def test_https_post_honours_its_deadline_and_stop(self):
+        with self.assertRaises(TimeoutError):
+            push_mod.https_post("web.push.apple.com", ["17.253.1.2"], "/x", {}, b"", 10,
+                                deadline=time.monotonic() - 1)
+        with self.assertRaises(TimeoutError):
+            push_mod.https_post("web.push.apple.com", ["17.253.1.2"], "/x", {}, b"", 10, stop=lambda: True)
+        print("ok  LOW-2: the transport tries no address past its deadline or after a stop")
+
+    def test_value_error_logs_its_class_only(self):
+        self.push.encrypt = lambda sub, plaintext: (_ for _ in ()).throw(ValueError("secret " + sub["endpoint"]))
+        with self.assertLogs("jarvis.v2.push", level="WARNING") as logs:
+            self.wait("appr:a")
+        text = "\n".join(logs.output)
+        self.assertIn("(ValueError)", text)
+        self.assertNotIn(self.receiver.endpoint, text)
+        print("ok  a ValueError is logged by its class only")
+
+    def test_a_restart_just_after_quiet_hours_still_pushes_the_morning(self):
+        for hours, want in ((24 + 7.2, 1), (24 + 6.5, 0), (24 + 8.0, 0)):
+            self.push._seen, self.push._was_quiet = None, False
+            self.push._last_sent, self.push._pending = None, False
+            self.net.sent.clear()
+            self.local.now = local(hours)
+            self.waiting = {"ids": {"task:t"}, "rank": 4}
+            self.push.seed()
+            self.mono2.now += 1000
+            self.wait("task:t", rank=4)
+            if hours == 24 + 6.5:
+                self.local.now = local(24 + 7)
+                self.wait("task:t", rank=4)
+                want = 1
+            self.assertEqual(len(self.net.sent), want, hours)
+        print("ok  a restart in quiet hours or within 30 min of their end still sends the morning push")
+
+
 class Threaded(PushBase):
+    def test_stop_waits_for_a_send_under_way(self):
+        self.subscribed()
+        started, release = threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+
+        def stuck(*_a, deadline=None, stop=None, **_k):
+            started.set()
+            while not release.wait(0.05):
+                if stop is not None and stop():
+                    raise TimeoutError("stopped")
+            return 201
+        self.push.transport = stuck
+        self.push._attached = True
+        self.push.start()
+        eventually(lambda: self.push._seen is not None, "the seed")
+        self.ask()
+        eventually(started.is_set, "the send")
+        begin = time.monotonic()
+        self.push.stop()
+        self.assertFalse(self.push._thread.is_alive(), "stop() returns once the send has ended")
+        self.assertLess(time.monotonic() - begin, push_mod.SEND_BUDGET_S + 1)
+        print("ok  LOW-2: stop() waits for a send under way, which stops at the flag")
+
     def test_the_sender_thread_pushes_on_inbox_changed(self):
         self.subscribed()
         self.attach()
@@ -656,26 +800,94 @@ class Boundary(PushBase):
         self.assertEqual(net.sent, [], "start() sends nothing for what already waits")
         print("ok  Daemon.start() sends nothing; only main() attaches the sender")
 
-    def test_agents_cannot_read_or_write_the_key_or_subscriptions(self):
-        from jarvis import permissions as v1, rules as v1_rules, runtime, tools
-        from jarvis.tools import files, secrets as v1_secrets
+    def permit_table(self, profile):
+        """Each read of the phone's folder through the v2 gate (`build_permit`),
+        as a Claude chat's tools ask it: (decision, layer, asked) per probe."""
+        from jarvis.v2.model import Role
+        from jarvis.v2.permissions import PermitContext, build_permit
+        from jarvis.v2.provider import Brief
+
+        class Owner:
+            human_backed = True
+
+            def __init__(self):
+                self.seen = []
+
+            def ask(self, request):
+                self.seen.append(request)
+                return Decision.DENY
+
+        remote = Path(config.V2_DATA_DIR) / "remote"
+        key = remote / "jarvis_push_key.json"
+        brief = Brief(role=Role.IMPLEMENTER, cwd=str(self.root), profile=profile)
+        owner = Owner()
+        permit = build_permit(PermitContext(thread_id="abcd1234", brief=brief, provider="claude"), owner)
+        probes = [("Bash", {"command": f"cat {remote}/*"}), ("Bash", {"command": f"grep -r pem {remote}"}),
+                  ("Bash", {"command": f"cat {key}"}), ("Bash", {"command": f"cd {remote} && cat *"}),
+                  ("Grep", {"pattern": "pem", "path": str(remote)}),
+                  ("Grep", {"pattern": "pem", "path": str(Path(config.V2_DATA_DIR))}),
+                  ("Read", {"file_path": str(key)}),
+                  ("Read", {"file_path": str(remote / "sessions.json")}),
+                  ("Glob", {"pattern": "*", "path": str(remote)})]
+        out = []
+        for tool, args in probes:
+            before = len(owner.seen)
+            decision = permit(tool, args, brief)
+            out.append((tool, json.dumps(args), decision, len(owner.seen) > before))
+        return out
+
+    def test_agents_cannot_read_the_phone_folder_by_any_spelling(self):
+        """MED-1 (review of PR #325): `<data root>/remote` is a credential
+        folder. Every read of it is refused or put to the owner, under AUTO
+        and ASK, v2 and v1; no file in it is exempt."""
+        from jarvis import config as cfg, runtime, tools
+        from jarvis.tools import files, shell
         from jarvis.v2 import permissions as v2
+        from jarvis.v2.model import PermissionProfile as P
         self.subscribed()
-        for name in ("jarvis_push_key.json", "jarvis_push_subscriptions.json"):
-            target = self.file(name)
-            self.assertTrue(target.exists(), name)
-            # Reads: v2 layer 1 (Claude's Read, a shell line) and v1.
-            self.assertTrue(v2.denied_read("Read", {"file_path": str(target)}), name)
-            for command in (f"cat {target}", f"head -c 100 {target}", f"cp {target} /tmp/x",
-                            f"python3 -c \"print(open('{target}').read())\"", f"cat {target.parent}/jarvis_push_*",
-                            f"base64 {target}"):
-                self.assertTrue(v2.denied_command(command), command)
-                self.assertTrue(v1_secrets.protected_in_command(command), command)
+        remote = Path(config.V2_DATA_DIR) / "remote"
+        self.assertIn(str(remote), cfg.credential_dirs())
+        self.assertTrue((remote / "jarvis_push_key.json").exists())
+        for profile in (P.AUTO, P.ASK):
+            for tool, args, decision, asked in self.permit_table(profile):
+                with self.subTest(profile=profile.value, tool=tool, args=args[-60:]):
+                    self.assertTrue(decision == Decision.DENY and (asked or tool != "Bash"),
+                                    f"{decision} asked={asked}")
+                    if tool == "Bash":
+                        self.assertTrue(asked, "a shell read of the folder is put to the owner")
+        # v2's read tools are refused there outright (layer 1).
+        for args in ({"file_path": str(remote / "jarvis_push_key.json")}, {"path": str(remote)},
+                     {"file_path": str(remote / "x" / ".." / "jarvis_push_subscriptions.json")}):
+            self.assertTrue(v2.denied_read("Read" if "file_path" in args else "Grep", args), args)
+        self.assertIsNone(v2.denied_read("Grep", {"path": str(self.root / "home")}))
+        # v1: the file tools and run_readonly refuse every spelling; none of
+        # the folder's files is "readable config".
+        for name in ("jarvis_push_key.json", "jarvis_push_subscriptions.json", "push_settings.json",
+                     "passkeys.json", "sessions.json"):
+            target = remote / name
+            self.assertTrue(files._credential_folder(target), name)
             with runtime.unconfined():
                 out = tools.dispatch("read_file", json.dumps({"path": str(target)}))
-            self.assertIn("protected", out.text)
+            self.assertIn("credential folder", out.text, name)
             self.assertNotIn("PRIVATE KEY", out.text)
             self.assertNotIn(self.receiver.endpoint, out.text)
+        for command in (f"cat {remote}/*", f"grep -r pem {remote}", f"cat {remote}/jarvis_push_key.json",
+                        f"head -c 100 {remote}/jarvis_push_subscriptions.json", f"ls {remote}",
+                        f"rg pem {Path(config.V2_DATA_DIR)}"):
+            out = shell.run_readonly(command)
+            self.assertTrue(out.startswith("Error"), f"{command}: {out[:120]}")
+            self.assertNotIn("PRIVATE KEY", out)
+        with runtime.unconfined():
+            out = tools.dispatch("grep_files", json.dumps({"pattern": "pem", "path": str(remote)}))
+        self.assertNotIn("PRIVATE KEY", out.text)
+        self.assertNotIn(self.receiver.endpoint, out.text)
+        print("ok  MED-1: the phone's folder is a credential folder: every read refused or asked (v2 AUTO/ASK, v1)")
+
+    def test_agents_cannot_write_the_push_files(self):
+        from jarvis import permissions as v1, rules as v1_rules, runtime, tools
+        from jarvis.tools import files
+        from jarvis.v2 import permissions as v2
+        self.subscribed()
         for name in ("jarvis_push_key.json", "jarvis_push_subscriptions.json", "push_settings.json"):
             target = self.file(name)
             self.assertIn(target.resolve(), files._protected_state(), name)
@@ -688,7 +900,22 @@ class Boundary(PushBase):
             with runtime.unconfined():
                 tools.dispatch("write_file", json.dumps({"path": str(target), "content": "{}"}))
             self.assertEqual(target.read_bytes() if target.exists() else None, before, name)
-        print("ok  the VAPID key and subscriptions are unreadable and unwritable to agents (v1, v2); the switch unwritable")
+        print("ok  the push files are protected state: no agent write, v1 or v2")
+
+    def test_low1_globs_are_back_to_mains_verdict(self):
+        """LOW-1: the push files are no credential bundles by name, so no
+        glob is refused for matching them (main's verdict: not refused)."""
+        from jarvis.tools import secrets as v1_secrets
+        from jarvis.v2 import permissions as v2
+        self.assertFalse({"jarvis_push_key.json", "jarvis_push_subscriptions.json"} & v1_secrets.PROTECTED_NAMES)
+        for command in ("ls j*", "ls jarvis*", "find . -name 'j*'", "rg -g 'jarvis*' x", "rg -g '*key.json' x",
+                        "find . -name '*_key.json'", "ls *push*", "rg -g '*push*' x", "ls *subscription*",
+                        "git tag -l 'v*'", "ls *.pem", "ls p*"):
+            self.assertIsNone(v1_secrets.protected_in_command(command), command)
+            self.assertIsNone(v2.denied_command(command), command)
+        # Main's bundles are unchanged.
+        self.assertTrue(v1_secrets.protected_in_command("cat google_token.*"))
+        print("ok  LOW-1: ls j*, rg -g '*key.json', ls *push* and the rest are back to main's verdict")
 
     def test_key_never_in_logs_status_or_answers(self):
         with self.assertLogs("jarvis.v2.push", level="INFO") as logs:
@@ -715,7 +942,6 @@ class Boundary(PushBase):
         from jarvis.tools import secrets as v1_secrets
         for command in ("git tag -l 'v*'", "ls *.pem", "ls p*", "ls *.key"):
             self.assertIsNone(v1_secrets.protected_in_command(command), command)
-        self.assertTrue(v1_secrets.protected_in_command("cat jarvis_push_*"))
         print("ok  push.py is SELF_PROTECTED; pywebpush imported only when used; 60 s and 8 pinned")
 
 

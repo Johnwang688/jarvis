@@ -55,17 +55,27 @@ starts; the routes answer 503.
 
 **Files** (`<data root>/remote/`, 0700; each 0600, read `O_NOFOLLOW |
 O_NONBLOCK` relative to the folder's descriptor, written as a fresh `O_EXCL`
-temp file, fsynced, replaced, folder fsynced): `jarvis_push_key.json` (the VAPID
-private key as PKCS#8 PEM inside `{"version": 1, "pem"}`, made once on first
-use), `jarvis_push_subscriptions.json` (endpoints
-and their keys) and `push_settings.json` (the switch). The first two are
-credential bundles by name (`tools/secrets.PROTECTED_NAMES`): no agent tool
-or command reads them, v1 or v2. (Named `jarvis_push_*.json`, not
-`vapid_key.pem`: a bundle's name is matched by globs too, and `v*` (git's
-version tags) or `*.pem` would have been refused everywhere.) All three are protected state
-(`tools/files._protected_state_paths`): none writes them. The private key
-is never logged, returned or shown; only its public half is
+temp file, fsynced, replaced, folder fsynced): `jarvis_push_key.json` (the
+VAPID private key as PKCS#8 PEM inside `{"version": 1, "pem"}`, made once on
+first use), `jarvis_push_subscriptions.json` (endpoints and their keys) and
+`push_settings.json` (the switch). **The folder is a credential folder**
+(`config.remote_dir()` in `config.credential_dirs()`, review of PR #325
+MED-1): v1's file and shell tools refuse every read in it, by any spelling
+(`files.credential_folder_judge`, and none of its files is exempt as
+"readable config"); v2's shell reads of it are always asked
+(`credentials-path`) and v2's read tools are refused there
+(`permissions._phone_folder_read`). All three files are protected state
+(`tools/files._protected_state_paths`): no agent writes them. The private
+key is never logged, returned or shown; only its public half is
 (`GET /m/api/push`, the `applicationServerKey`).
+
+**Each send is bounded** (review of PR #325, LOW-2): every subscription of
+one push within `SEND_BUDGET_S` (15 s) in all, each name resolved within
+`RESOLVE_TIMEOUT_S` on a thread of its own, each connection within what is
+left, and the daemon's stop checked before every subscription and address.
+**A push that reached no phone is tried again** (LOW-3) after 1, 5, then
+every 15 minutes, with the count then, still coalesced and silent in quiet
+hours. The payload is padded to `PAYLOAD_BYTES`.
 
 Routes. Remote listener, signed-in phone only (`route`):
 
@@ -110,7 +120,12 @@ SETTINGS = "push_settings.json"
 MAX_SUBSCRIPTIONS = 8
 ENDPOINT_MAX = 1024
 COALESCE_S = 60.0
-SEND_TIMEOUT_S = 10.0
+SEND_TIMEOUT_S = 10.0       # one connection's socket timeout, at most
+SEND_BUDGET_S = 15.0        # one whole send (every subscription), at most
+RESOLVE_TIMEOUT_S = 5.0     # one name's resolution, at most
+RETRY_S = (60.0, 300.0, 900.0)   # a failed push is tried again after these, the last repeated
+MORNING_GRACE_S = 1800.0    # a start this soon after quiet hours end still gets the morning push
+PAYLOAD_BYTES = 48          # every payload is padded to this length
 TTL_S = 600                 # an approval waits at most this long for a phone
 RECHECK_S = 300.0           # the sender looks again at least this often
 ATTENTION_RANKS = frozenset({1, 2, 3, 4})
@@ -161,10 +176,14 @@ def unb64url(text) -> bytes:
 
 
 def payload(count: int, rank: int) -> bytes:
-    """The only thing a push carries (PH-8): `{"count": n, "rank": r}`."""
+    """The only thing a push carries (PH-8): `{"count": n, "rank": r}`, padded
+    with spaces (which JSON ignores) to `PAYLOAD_BYTES`, so the ciphertext's
+    length says nothing about the count. A count past 999 999 is sent as
+    999 999."""
     if type(count) is not int or type(rank) is not int or count < 0 or not 0 <= rank <= 4:
         raise ValueError("a push carries a count and a rank only")
-    return json.dumps({"count": count, "rank": rank}, separators=(",", ":")).encode("ascii")
+    text = json.dumps({"count": min(count, 999_999), "rank": rank}, separators=(",", ":"))
+    return text.ljust(PAYLOAD_BYTES).encode("ascii")
 
 
 # -- the endpoint --------------------------------------------------------------------
@@ -219,13 +238,36 @@ def resolve(host: str) -> list[str]:
     return found
 
 
-def public_addresses(host: str, resolver=resolve) -> list[str]:
+def bounded(fn, timeout: float):
+    """`fn()` on a thread of its own, waited for at most `timeout` seconds:
+    its result, or TimeoutError (the thread is left to finish on its own;
+    `getaddrinfo` cannot be interrupted)."""
+    box: dict = {}
+
+    def run():
+        try:
+            box["value"] = fn()
+        except BaseException as exc:     # noqa: BLE001 — handed to the caller
+            box["error"] = exc
+
+    worker = threading.Thread(target=run, name="jarvis-push-resolve", daemon=True)
+    worker.start()
+    worker.join(max(0.0, timeout))
+    if worker.is_alive():
+        raise TimeoutError("timed out")
+    if "error" in box:
+        raise box["error"]
+    return box.get("value")
+
+
+def public_addresses(host: str, resolver=resolve, timeout: float = RESOLVE_TIMEOUT_S) -> list[str]:
     """The host's addresses, each one global; ValueError if it resolves to
     none, or to any that is private, loopback, link-local, reserved or
-    multicast (all refused, not just those: it fails closed)."""
+    multicast (all refused, not just those: it fails closed), or if the
+    resolution takes longer than `timeout`."""
     try:
-        addresses = resolver(host)
-    except (OSError, UnicodeError):
+        addresses = bounded(lambda: resolver(host), timeout)
+    except (OSError, UnicodeError, TimeoutError):
         raise ValueError("the push service could not be resolved") from None
     if not addresses:
         raise ValueError("the push service could not be resolved")
@@ -283,14 +325,19 @@ def encrypt(sub: dict, plaintext: bytes) -> tuple[bytes, dict]:
 
 
 def https_post(host: str, addresses: list[str], path: str, headers: dict, body: bytes,
-               timeout: float) -> int:
+               timeout: float, *, deadline: float | None = None, stop=None) -> int:
     """POST to exactly one of the checked `addresses`, with TLS verified for
-    `host`: no proxy, no redirect followed. The status."""
+    `host`: no proxy, no redirect followed. The status. Each address is tried
+    only while `deadline` (monotonic) has not passed and `stop()` is not
+    true, with its timeout cut to what is left."""
     context = ssl.create_default_context()
     last: Exception | None = None
     for address in addresses[:4]:
+        left = timeout if deadline is None else min(timeout, deadline - time.monotonic())
+        if left <= 0 or (stop is not None and stop()):
+            raise TimeoutError("the send's time is up")
         try:
-            raw = socket.create_connection((address, 443), timeout=timeout)
+            raw = socket.create_connection((address, 443), timeout=left)
         except OSError as exc:
             last = exc
             continue
@@ -299,7 +346,7 @@ def https_post(host: str, addresses: list[str], path: str, headers: dict, body: 
         except BaseException:
             raw.close()
             raise
-        conn = http.client.HTTPSConnection(host, 443, timeout=timeout, context=context)
+        conn = http.client.HTTPSConnection(host, 443, timeout=left, context=context)
         conn.sock = tls
         try:
             conn.request("POST", path, body=body, headers=headers)
@@ -463,6 +510,10 @@ class Push:
         self._pending = False
         self._last_sent: float | None = None
         self._was_quiet = False
+        # LOW-3 (review of PR #325): a push that reached no phone is tried
+        # again after RETRY_S, coalesced and quiet-hours-bound like any other.
+        self._failures = 0
+        self._retry_at: float | None = None
 
     # -- life cycle ------------------------------------------------------------------
 
@@ -480,11 +531,15 @@ class Push:
         self._thread.start()
 
     def stop(self) -> None:
+        """No push starts after this. A send under way stops before its next
+        subscription or address, and within `SEND_BUDGET_S` in any case; it is
+        waited for that long (one resolution may outlive it on its own
+        daemon thread, `bounded`, but sends nothing)."""
         self._stopping.set()
         self._wake.set()
         thread = self._thread
         if thread is not None:
-            thread.join(SEND_TIMEOUT_S + 1)
+            thread.join(SEND_BUDGET_S + 1)
 
     def observe(self, record) -> None:
         """The bus's observer: `inbox_changed` only sets an event."""
@@ -578,6 +633,11 @@ class Push:
 
     def _vapid_headers(self, host: str) -> dict:
         _w, Vapid02, _s, _e = _libs()
+        # The subject is this app's https origin, as P-0 sent it and Apple
+        # accepted (201, §10.1). RFC 8292 allows a mailto: or https: URL;
+        # Apple refuses a malformed one (BadJwtToken), and a `@localhost`
+        # mailto is reported refused, so the verified origin stays. It tells
+        # the push service this tailnet's name, nothing more.
         claims = {"sub": self.origin or "mailto:owner@localhost", "aud": "https://" + host,
                   "exp": int(self.wall()) + VAPID_EXP_S}
         signed = Vapid02(private_key=self._private_key()).sign(claims)
@@ -689,11 +749,22 @@ class Push:
         return ids, len(found), min((r["rank"] for r in found), default=0)
 
     def seed(self) -> None:
-        """What already waits when the sender starts: seen, never pushed."""
+        """What already waits when the sender starts: seen, never pushed. But
+        when the start falls in quiet hours, or within `MORNING_GRACE_S` after
+        they end (a restart at 07:05), the morning push is still due: what
+        waits then is pushed once quiet hours are over (a restart after this
+        morning's push may send a second one)."""
         ids, _count, _rank = self.attention()
+        quiet = getattr(self.daemon, "quiet", None)
+        morning = False
+        if quiet is not None:
+            from datetime import timedelta
+            now = quiet.clock()
+            morning = quiet.is_quiet(now) or quiet.is_quiet(now - timedelta(seconds=MORNING_GRACE_S))
         with self._lock:
             if self._seen is None:
                 self._seen = ids
+                self._was_quiet = self._was_quiet or morning
 
     def _quiet(self):
         quiet = getattr(self.daemon, "quiet", None)
@@ -713,9 +784,11 @@ class Push:
             self._seen = ids
             if not enabled:
                 self._pending, self._was_quiet = False, False
+                self._failures, self._retry_at = 0, None
                 return None
             if quiet:
                 self._pending, self._was_quiet = False, True
+                self._failures, self._retry_at = 0, None
                 return None
             if self._was_quiet:
                 # Quiet hours just ended: one push for what still waits.
@@ -727,19 +800,34 @@ class Push:
             if not count:
                 self._pending = False
             if not self._pending:
+                self._failures, self._retry_at = 0, None
                 return None
             now = self.mono()
             if self._last_sent is not None and now - self._last_sent < COALESCE_S:
                 return None
+            if self._retry_at is not None and now < self._retry_at:
+                return None
             self._pending = False
-            self._last_sent = now
-        return self.send_all(count, rank)
+        result = self.send_all(count, rank)
+        with self._lock:
+            if result["sent"]:
+                # Reached at least one phone: the window starts now.
+                self._last_sent = now
+                self._failures, self._retry_at = 0, None
+            elif result["failed"]:
+                # Reached none: tried again later, with what waits then.
+                self._pending = True
+                self._retry_at = self.mono() + RETRY_S[min(self._failures, len(RETRY_S) - 1)]
+                self._failures += 1
+        return result
 
     def next_wait(self) -> float:
         waits = [RECHECK_S]
         with self._lock:
             if self._pending and self._last_sent is not None:
                 waits.append(max(0.0, self._last_sent + COALESCE_S - self.mono()) + 0.05)
+            if self._pending and self._retry_at is not None:
+                waits.append(max(0.0, self._retry_at - self.mono()) + 0.05)
         quiet = getattr(self.daemon, "quiet", None)
         if quiet is not None:
             now = quiet.clock()
@@ -758,18 +846,26 @@ class Push:
         active = auth.active_passkeys() if auth is not None else set()
         sent = failed = 0
         gone: set[str] = set()
+        # LOW-2 (review of PR #325): the whole send, every subscription, ends
+        # within SEND_BUDGET_S, and stops at once when the daemon stops.
+        deadline = time.monotonic() + SEND_BUDGET_S
         for sub in self.subscriptions():
             if sub["passkey"] not in active:
                 continue
+            if self._stopping.is_set() or time.monotonic() >= deadline:
+                failed += 1
+                LOG.warning("phone push: not sent (%s)", "stopping" if self._stopping.is_set()
+                            else "the send's time is up")
+                continue
             try:
-                status = self.send_one(sub, plaintext)
+                status = self.send_one(sub, plaintext, deadline)
             except PushError as exc:
                 failed += 1
                 LOG.warning("phone push: not sent (%s)", exc.word)
                 continue
             except ValueError as exc:
                 failed += 1
-                LOG.warning("phone push: not sent: %s", exc)
+                LOG.warning("phone push: not sent (%s)", type(exc).__name__)
                 continue
             except Exception as exc:     # noqa: BLE001 — never the endpoint, never the text
                 failed += 1
@@ -788,18 +884,23 @@ class Push:
             LOG.info("phone push: %d sent, %d failed, %d removed", sent, failed, len(gone))
         return {"sent": sent, "failed": failed, "removed": len(gone)}
 
-    def send_one(self, sub: dict, plaintext: bytes) -> int:
+    def send_one(self, sub: dict, plaintext: bytes, deadline: float | None = None) -> int:
+        deadline = deadline if deadline is not None else time.monotonic() + SEND_BUDGET_S
         host, path = check_endpoint(sub["endpoint"])
-        addresses = public_addresses(host, self.resolver)
+        addresses = public_addresses(host, self.resolver,
+                                     max(0.0, min(RESOLVE_TIMEOUT_S, deadline - time.monotonic())))
         body, headers = self.encrypt(sub, plaintext)
         headers = dict(headers, **self._vapid_headers(host))
         headers.update({"TTL": str(TTL_S), "Urgency": "high",
                         "Content-Type": "application/octet-stream"})
-        return self.transport(host, addresses, path, headers, body, SEND_TIMEOUT_S)
+        return self.transport(host, addresses, path, headers, body, SEND_TIMEOUT_S,
+                              deadline=deadline, stop=self._stopping.is_set)
 
     def send_test(self) -> dict:
         """The desk's "Send test notification": one push now, with the
-        current count, past coalescing and quiet hours (the owner asked)."""
+        current count, past coalescing and quiet hours (the owner asked).
+        Bounded like every send (`SEND_BUDGET_S`), so the HUD's request
+        waits at most that long."""
         if self.transport is None:
             raise PushError(409, "notifications are not running on this daemon")
         if not self.settings()["enabled"]:
