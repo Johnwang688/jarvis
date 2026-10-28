@@ -92,6 +92,14 @@ result is the owner's alone: `POST /inbox/checks/<id>/steps/<n>`
 (409) a check whose PRs `checks.Deployment` does not confirm are in the
 running build. Steps are text; nothing here runs one.
 
+**Pull requests (B3, IN-4).** Every open, non-draft PR in each project's
+GitHub repository is a `pr` row at rank 5, read from the last poll of
+`inbox_prs.PrSource` (the daemon's own `gh`, read-only, every 5 minutes and
+after a task moves into done, failed or blocked); `rows()` never waits on
+`gh`. A list that cannot be read, or may be incomplete, is one
+`pr_unavailable` row ("PR list unavailable" / "incomplete"), never an empty
+list. Neither takes an answer (400). Details in `inbox_prs.py`.
+
 **Marks (B4, IN-7).** The owner may snooze or dismiss a row of rank 5 to 8
 (`POST /inbox/<id>/mark`, `mark_row`), never a live approval, a blocking
 question, a proposal or a blocked task (IN-8), and never "PR list
@@ -125,14 +133,15 @@ from .model import TaskState
 
 LOG = logging.getLogger(__name__)
 
-# IN-4's bands. Code, not a setting. 5 (PRs) belongs to a later package; 6
-# is decisions (B1); 7 is live checks (B2); 8 is `failed`, "denied while
+# IN-4's bands. Code, not a setting. 5 is pull requests (B3); 6 is
+# decisions (B1); 7 is live checks (B2); 8 is `failed`, "denied while
 # away" (IN-3), a decision recorded for a chat that was closed, and a done
 # check's receipt.
 RANK_APPROVAL = 1
 RANK_QUESTION = 2
 RANK_PROPOSAL = 3
 RANK_BLOCKED = 4
+RANK_PR = 5            # B3: `inbox_prs.RANK_PR`, the same band
 RANK_DECISION = 6
 RANK_CHECK = 7
 RANK_CHECK_DONE = 8
@@ -145,7 +154,8 @@ _PREFIX = {"approval": "appr", "question": "q", "task_question": "tq",
            "proposal": "prop", "task": "task", "missed": "missed", "decision": "dec",
            "check": "chk"}
 _ANSWERABLE = {"appr", "q", "tq", "prop", "dec"}
-_KNOWN = _ANSWERABLE | {"task", "missed", "chk"}
+# B3: a pull request (`pr:OWNER/REPO#N`) and "PR list unavailable" (`prx:list`).
+_KNOWN = _ANSWERABLE | {"task", "missed", "chk", "pr", "prx"}
 
 # "Denied while you were away" (IN-3). The resolutions recorded; the file's
 # bound (it holds at most the newest MISSED_KEEP records: an append that
@@ -635,6 +645,13 @@ def _decision_row(daemon, hidden, rec, now) -> list:
     return out
 
 
+def _pr_rows(daemon, hidden):
+    """B3 (IN-4): the last PR poll's rows. A read of a snapshot under the
+    source's own lock, which no `gh` call holds: never waits on `gh`."""
+    source = getattr(getattr(daemon, "inbox", None), "prs", None)
+    return source.rows(hidden) if source is not None else []
+
+
 # -- checks (B2, IN-6) -----------------------------------------------------------------
 
 def _check_detail(rec, deploy) -> dict:
@@ -746,7 +763,8 @@ def rows(daemon, *, with_checks: bool = True, marks: str = "hide") -> list[dict]
                          ("tasks", lambda: _task_rows(daemon, hidden)),
                          ("missed", lambda: _missed_rows(daemon)),
                          ("decisions", lambda: _decision_rows(daemon, hidden)),
-                         ("checks", lambda: _check_rows(daemon, hidden) if with_checks else [])):
+                         ("checks", lambda: _check_rows(daemon, hidden) if with_checks else []),
+                         ("pull requests", lambda: _pr_rows(daemon, hidden))):
         try:
             out += source()
         except Exception as exc:  # noqa: BLE001 — never a 500 for the whole inbox
@@ -794,6 +812,10 @@ class Inbox:
         # until the daemon's `main()` attaches git: "not confirmed").
         self.checks = _checks.CheckStore(root) if root is not None else None
         self.deploy = _checks.Deployment()
+        # B3 (IN-4): open PRs, polled off the daemon's lock by `gh`, only once
+        # daemon2's `main()` attaches it (`inbox_prs.PrSource.attach_system`).
+        from .inbox_prs import PrSource
+        self.prs = PrSource(daemon)
         # B4: the owner's snoozes and dismissals (rank 5 to 8 only), and the
         # one timer that says when the earliest snooze ends.
         self.marks = _marks.MarksStore(root) if root is not None else None
@@ -919,6 +941,10 @@ class Inbox:
         kind = record.get("kind")
         if kind not in SOURCE_KINDS:
             return
+        if kind == "task_status_changed" and getattr(self, "prs", None) is not None:
+            # B3: poll PRs soon when a task moved into done, failed or blocked
+            # (debounced); only sets an event.
+            self.prs.task_changed(record)
         ids = self._ids(kind, record)
         if ids is None:
             return
@@ -1044,6 +1070,9 @@ def answer(daemon, row_id, body, *, owner_verified: bool, via: str = "inbox"):
         if prefix == "missed":
             # Information only (IN-3); no "ask again" (design §10, question 3).
             raise APIError(400, "this item takes no answer; open its chat to see what was denied")
+        if prefix in ("pr", "prx"):
+            # B3 (IN-4): merging stays the owner's own gh, or a card under the merge gate.
+            raise APIError(400, "this item takes no answer; open the pull request to review or merge it")
         raise APIError(400, "this item takes no answer; open its task to resume or cancel it")
     # Shape first, so a malformed body is a 400 whatever the row's state.
     if prefix == "appr":

@@ -59,6 +59,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(HERE))
 
 import inbox_check as IC  # noqa: E402  (its harness and helpers only)
+import inbox_prs_check as PRS  # noqa: E402  (its fake gh answers only)
 from jarvis import config  # noqa: E402
 from jarvis.v2 import inbox, inbox_marks  # noqa: E402
 from jarvis.v2.approvals import ApprovalRequest  # noqa: E402
@@ -642,6 +643,71 @@ class Route(unittest.TestCase):
             self.assertTrue(flagged["pr:Johnwang688/jarvis#301"]["markable"])
             rows[1] = pr_row(head=SHA["b"])
             self.assertIn("pr:Johnwang688/jarvis#301", self.ids(), "a new head brings it back")
+
+    # -- B3's real PR rows (#320 merged) ---------------------------------------------
+
+    def poll(self, answer):
+        """One PR poll over a fake `gh`: `answer` is its bytes, or a GhFailed code."""
+        from jarvis.v2 import inbox_prs
+        src = self.daemon.inbox.prs
+        src.repos = lambda daemon: {PRS.REPO: [self.project.id]}
+
+        def list_repo(repo):
+            if isinstance(answer, str):
+                raise inbox_prs.GhFailed(answer)
+            return answer
+        src.list_repo = list_repo
+        src.poll()
+
+    def test_a_real_pr_row_is_markable_and_new_commits_bring_it_back(self):
+        pr_id = f"pr:{PRS.REPO}#5"
+        self.poll(PRS.answer(PRS.pr(5)))
+        row = self.all_rows()[pr_id]
+        self.assertEqual((row["kind"], row["rank"], row["markable"]), ("pr", 5, True))
+        self.mark(pr_id, {"dismiss": True})
+        self.assertNotIn(pr_id, self.ids())
+        self.poll(PRS.answer(PRS.pr(5, title="Change 5, retitled")))
+        self.assertNotIn(pr_id, self.ids(), "the same head stays dismissed")
+        self.poll(PRS.answer(PRS.pr(5, headRefOid="f" * 40)))
+        self.assertIn(pr_id, self.ids(), "a new head (new commits) brings it back")
+
+    def test_a_pr_that_leaves_and_returns_shows_again_but_a_failed_poll_is_no_leave(self):
+        pr_id = f"pr:{PRS.REPO}#5"
+        self.poll(PRS.answer(PRS.pr(5), PRS.pr(6)))
+        self.mark(pr_id, {"dismiss": True})
+        self.mark(f"pr:{PRS.REPO}#6", {"dismiss": True})
+        # A failed read: both PRs are gone from the list and "PR list
+        # unavailable" shows, but neither PR left, so the marks stay.
+        self.poll("auth")
+        self.assertIn("prx:list", self.ids())
+        self.assertIn(pr_id, self.daemon.inbox.marks.read())
+        self.poll(PRS.answer(PRS.pr(5), PRS.pr(6)))
+        self.assertNotIn(pr_id, self.ids(), "back after a failed read: still dismissed")
+        # PR 5 leaves a read that went well (merged or closed), then comes back (reopened).
+        self.poll(PRS.answer(PRS.pr(6)))
+        self.assertNotIn(pr_id, self.daemon.inbox.marks.read(), "its mark is forgotten")
+        self.assertIn(f"pr:{PRS.REPO}#6", self.daemon.inbox.marks.read(), "the other keeps its own")
+        self.poll(PRS.answer(PRS.pr(5), PRS.pr(6)))
+        self.assertIn(pr_id, self.ids(), "it left and returned: it shows")
+        self.assertNotIn(f"pr:{PRS.REPO}#6", self.ids())
+
+    def test_the_real_pr_list_unavailable_row_is_never_marked(self):
+        self.poll("auth")
+        rows = self.all_rows()
+        row = rows["prx:list"]
+        self.assertEqual((row["kind"], row["rank"], row["markable"]), ("pr_unavailable", 5, False))
+        for body in ({"dismiss": True}, {"snooze_until": (now_utc() + timedelta(hours=1)).isoformat()}):
+            self.call("POST", "/inbox/prx%3Alist/mark", body, 409)
+        self.assertEqual(self.daemon.inbox.marks.read(), {})
+        # A forged mark with its exact key hides nothing.
+        store = self.daemon.inbox.marks
+        at = store.clock().isoformat(timespec="seconds")
+        store.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        store.path.write_text(json.dumps({"prx:list": {"snoozed_until": None, "dismissed_at": at,
+                                                       "key": inbox_marks.material_key(row | {"hidden": None}), "at": at}}))
+        self.assertEqual(len(store.read()), 1)
+        self.assertIn("prx:list", self.ids())
+        self.assertNotIn("hidden", self.all_rows()["prx:list"])
 
     def test_the_phone_shows_what_get_inbox_shows_and_cannot_mark(self):
         from jarvis.v2 import remote_answer, remote_api

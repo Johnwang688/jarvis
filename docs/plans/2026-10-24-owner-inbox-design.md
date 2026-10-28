@@ -2,8 +2,7 @@
 
 **Status (2026-10-28): built, IN-0 to IN-7.** IN-0 and IN-2 in #303 (A1),
 IN-1 in #305 (A2), IN-3 in #307 (A3), IN-5 in #309 (B1), IN-6 in #321 (B2),
-IN-4 in #320 (B3) and IN-7 in #322 (B4); #320, #321 and #322 were in review
-when this line was written. The working notes are
+IN-4 in #320 (B3) and IN-7 in #322 (B4). All are merged but #322 itself. The working notes are
 `docs/notes/control-plane.md` ("The owner inbox routes" and the paragraphs
 after it) and `docs/notes/hud-workspace.md` ("The owner inbox view").
 Deviations recorded in those PRs: task orchestrators cannot post (they have
@@ -276,6 +275,8 @@ sees as waiting.
    only.**
 4. **PR scope:** **only PRs whose branch a Jarvis chat or task pushed**, or
    every open PR in each project's repo.
+   **Answered 2026-10-27:** every open, non-draft PR in each project's
+   GitHub repository. Built in B3 (IN-4, `jarvis/v2/inbox_prs.py`).
 5. **Import the existing runbooks and questions files once at launch?**
    **Yes, on the owner's confirm, file by file.**
 6. **Desktop notification when the HUD is not focused** (Windows toast via

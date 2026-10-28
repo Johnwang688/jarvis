@@ -1843,6 +1843,23 @@ routes"). Not deployed: the owner's step is `jarvis hud rebuild` and a reload
   save}` for that one draft. Under a card the row and the import are inert,
   and every button and handler refuses. The phone shows a check row
   read-only.
+- **Pull requests (inbox B3, IN-4, 2026-10-27).** A `pr` row (daemon's
+  half: control-plane notes, "PRs") sits in "Waiting on you" (rank 5) and
+  is counted. Its title and line are the daemon's code-built ones. `lib/inbox`
+  `prOf` reads its `detail`: the PR's own title as one line of text, and its
+  URL only when it is exactly `https://github.com/<repo>/pull/<number>` for
+  the row's own repo and number (checked again here). The one control is
+  "Open on GitHub", a plain `<a target="_blank" rel="noopener noreferrer">`
+  (none when the URL fails). A click on it opens the page and answers
+  nothing. Under a card the row is inert, and a click, a middle click
+  (`auxclick`) or Enter on the link is prevented too. No chat or task link.
+  A repository name that is or starts with a dot is refused, as the
+  daemon's `github_repo` does. A `pr_unavailable` row ("PR list
+  unavailable" or "incomplete") lists each repository and the daemon's
+  reason (`prUnavailableOf`), is counted, and so the view never says
+  "Nothing is waiting on you" while it shows.
+  Existing classes only. Tests: `components/InboxView.prs.test.ts` and the
+  `prs` section of `tests/face/hud_v2_inbox_check.py`.
 - **Snooze and dismiss (inbox B4, IN-7, 2026-10-28).** `state/inbox.ts`
   now reads `GET /inbox?all=1` (`api.inboxAll`): every row, each with the
   daemon's `markable`, a hidden one with `hidden` (`{snoozed_until,

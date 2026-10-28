@@ -371,17 +371,22 @@ class MarksStore:
 
     def clear(self, row_id: str) -> bool:
         """Undo: drop `row_id`'s mark. True when there was one."""
+        return bool(self.forget([row_id]))
+
+    def forget(self, row_ids) -> list[str]:
+        """Drop the marks of `row_ids` in one write (an Undo, or rows that are
+        known to have left: a PR closed or merged). Returns the ids dropped."""
         with self._lock:
             fd = self._open(create=False)
             if fd is None:
-                return False
+                return []
             try:
                 current = self._read(fd)
-                if not current or row_id not in current:
-                    return False
-                current = dict(current)
-                current.pop(row_id)
-                self._write(fd, current)
-                return True
+                gone = [i for i in row_ids if current and i in current]
+                if not gone:
+                    return []
+                kept = {k: v for k, v in current.items() if k not in gone}
+                self._write(fd, kept)
+                return gone
             finally:
                 os.close(fd)
