@@ -1766,6 +1766,19 @@ paths, before P-3's reads; the API and HUD listeners never serve `/m/`.
   images are not sent from the phone; attach them at the desk"); any other
   field, a query string or a non-object body 400; the listener's 64 KiB
   body cap first. `@path` is never read (`paths=False`, as Discord).
+- **Sent once.** A message, new chat or new task may carry `client_id`
+  (the phone's UUID for one draft, 8 to 64 of `[A-Za-z0-9-]`); a 2xx is kept
+  per session for 5 minutes and the same id again gets it back (`repeat:
+  true`) without acting; one still on its way is 409; refusals are not
+  kept. The app says "May not have been sent. Check the chat before trying
+  again." when no answer came back (a dropped connection, 502, 504), never
+  "not sent".
+- **Failures.** A provider's or the OS's exception is 409 "request failed
+  (<type>)" (`PermissionError` 403, as the HUD's handler), never a 500 and
+  never its text.
+- **Titles.** `titles.owner_typed` counts `via="phone"` without a
+  `decision_id` as the owner's words, so a chat started from the phone is
+  titled (review of PR #324).
 - **Rate.** Every write here counts against its session: `RATE` (30) per
   `RATE_S` (60 s, monotonic), 429 with `Retry-After` past it. Another
   session is its own. P-4's answers do not count.
@@ -1785,7 +1798,10 @@ paths, before P-3's reads; the API and HUD listeners never serve `/m/`.
   the HUD's `_task_verb` now calls too, with the HUD's empty body (no
   provider switch from the phone); a `ControlError` is 409 with the runner's
   words. `remote_write.TASK_START` is the separable switch: False takes
-  `POST tasks` and `tasks/<id>/start` out of the table.
+  `POST tasks` and `tasks/<id>/start` out of the table. It gates only the
+  phone's own explicit task making and starting: a chat may still propose a
+  task (`task_propose`), as from the HUD or Discord. A task view shows no
+  Start while the task is a proposal inside its grace window.
 - **Cancel takes the passkey.** `CANCELLED` is terminal
   (`model.TRANSITIONS`) and `resume` takes only a blocked task, so a cancel
   cannot be undone: it is a deliberate verb, PH-4's footing. The challenge
@@ -1793,14 +1809,19 @@ paths, before P-3's reads; the API and HUD listeners never serve `/m/`.
   (`remote_auth.TASK_DECISIONS`); an approval's req_id never holds a colon,
   and `answer_options` refuses a task subject with "allow" or "always" and
   an approval's req_id with "cancel", so neither assertion is ever the
-  other's. Verified before `TaskControl.cancel`; §4.1 is not required (a
+  other's. Cancel prompts and approval prompts are capped apart (4 each per
+  session), so abandoned cancel prompts never refuse an Allow. Verified before `TaskControl.cancel`; §4.1 is not required (a
   cancel grants nothing). Start and resume need the session only: neither
   destroys anything, and each step a started task takes still passes the
   gate.
 - **A proposal's withdraw** (`remote_answer`, `POST inbox/prop:<id>/answer`
   `{withdraw: true}`, exactly) needs the session only: it is Deny's
-  footing (it refuses work an agent proposed, inside its grace window),
-  through `inbox.answer`'s own call (`TaskControl.cancel`).
+  footing (it refuses work an agent proposed, inside its grace window).
+  From the phone `inbox.answer` calls only `Router.cancel_proposal`, which
+  checks the window under its lock; if the window closed meanwhile (review
+  of PR #324: `rows()` runs first) it is 409 ("too late to withdraw…") and
+  never `TaskControl.cancel`, whose cancel is terminal and takes the passkey
+  on the phone. The desk's withdraw keeps `TaskControl.cancel`.
 - **Recorded as the phone's.** Each task verb from the phone (`create`,
   `start`, `resume`, `cancel`, `withdraw`) is a task journal line
   `{"event": "owner_verb", "verb", "via": "phone"}` and an INFO log line
