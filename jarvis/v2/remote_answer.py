@@ -67,6 +67,9 @@ session, verified before anything is written, single use. A card the
 phone's scrub would change is refused (`WITHHELD`), and a HUD-only one is
 never granted. The grant itself is `quiet_defer.answer` with `via="phone"`
 and `verified` true, passed by `_answer_deferred` only, after the assertion.
+A morning review's Approve selected (`review.py`, MR-6) is its own route
+and its own subject (`defers:`); a `defer:<id>` assertion never answers it,
+nor the reverse.
 
 **Questions, task questions and decisions** need the session only, as on
 the HUD, through the inbox's own dispatch (`inbox.answer`, IN-2) with
@@ -154,7 +157,14 @@ def phone_card(card: dict) -> tuple[dict, bool]:
     one JSON text, so a label in a key and its value beside it are read
     together), nothing cut. Withheld when any pass changed anything, or when
     a value was nested past the card redaction's depth and so never judged
-    (review of PR #313)."""
+    (review of PR #313). Withheld too when the card already shows a
+    `[withheld: <kind>]` marker: since the scrub hardening (#314) the desk's
+    own card pass (`approvals.card_text`/`card_args`, `redact.CardPass`)
+    withholds much of what this scrub would, so the scrub then finds nothing
+    left to change, yet the owner still cannot see what Allow would approve.
+    A marker an agent typed itself only makes the card Deny-only."""
+    import json
+    from .redact import WITHHELD_PREFIX
     from .remote_api import APPROVAL_DETAIL_DROPPED, scrub_structure, split_summary
     shown = {k: v for k, v in card.items() if k not in APPROVAL_DETAIL_DROPPED}
     # AS-10: the model's summary is judged apart, never part of `withheld`:
@@ -162,6 +172,11 @@ def phone_card(card: dict) -> tuple[dict, bool]:
     # the owner may answer. One the scrub would change is dropped.
     shown, summary = split_summary(shown)
     scrubbed, withheld = scrub_structure(shown)
+    if not withheld:
+        try:
+            withheld = WITHHELD_PREFIX in json.dumps(shown, ensure_ascii=False, default=str)
+        except Exception:  # noqa: BLE001 — a card that cannot be read is withheld
+            withheld = True
     if summary and isinstance(scrubbed, dict):
         scrubbed = {**scrubbed, **summary}
     return scrubbed, withheld
@@ -259,23 +274,17 @@ def _row_builder():
     return _row
 
 
-def defer_binding(record_ids) -> str:
-    """What an Approve and retry's assertion is bound to, in place of an
+def defer_binding(record_id) -> str:
+    """What one Approve and retry's assertion is bound to, in place of an
     approval's `req_id` in `RemoteAuth.answer_challenge` (sha256 of the
-    binding, the answer "allow" and a nonce): `defer:<id>` for one deferral
-    (an approval's id holds no colon, so neither can stand for the other);
-    for several ids under one confirm, `defers:` and the SHA-256 of the
-    sorted, deduplicated ids joined by newlines (cut to 56 hex characters,
-    inside the challenge's 64-character bound), so one assertion covers
-    exactly that set. Only the one-id form is used here (QH); the list form
-    is for the morning review."""
-    ids = sorted(set(record_ids))
-    if not ids or not all(isinstance(i, str) and i and "\n" not in i for i in ids):
+    binding, the answer "allow" and a nonce): `defer:<id>` (an approval's id
+    holds no colon, so neither can stand for the other). A morning review's
+    Approve selected binds its whole set to `review.subject` (`defers:` and
+    56 hex of a digest of every id and its tag, MR-6), even for one item;
+    neither route takes the other's assertion."""
+    if not isinstance(record_id, str) or not record_id or "\n" in record_id or ":" in record_id:
         raise _Refused(400, "bad request")
-    if len(ids) == 1:
-        return f"defer:{ids[0]}"
-    import hashlib
-    return "defers:" + hashlib.sha256("\n".join(ids).encode("utf-8")).hexdigest()[:56]
+    return f"defer:{record_id}"
 
 
 def _gate_deferral(record: dict, secure: dict) -> None:
@@ -289,7 +298,7 @@ def _gate_deferral(record: dict, secure: dict) -> None:
 
 
 def _defer_key(record_id: str) -> str:
-    return defer_binding([record_id])
+    return defer_binding(record_id)
 
 
 def options(handler, daemon, session, row: str, body: dict) -> dict:

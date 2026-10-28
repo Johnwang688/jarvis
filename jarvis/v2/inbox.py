@@ -123,6 +123,13 @@ resumed) or `{action: "leave"}` (Leave it: nothing is sent), through
 `quiet_defer.answer`; on the phone, retry needs a passkey assertion
 (`remote_answer`). A HUD-only (Browser) card is never granted.
 
+**The morning review (MR, `review.py`).** One report of what waited
+overnight (`GET /inbox/review`), with Approve selected and Leave selected
+for deferred rows (`POST /inbox/review/approve`, `/leave`), mounted here
+behind the same `owner_only`. The one recorded exception to IN-3's "no
+bulk Allow": deferred rows only, the exact displayed set, at most 10, one
+deliberate confirmation, all or nothing; live cards are untouched.
+
 This module is SELF_PROTECTED (`jarvis/tools/files.py`): it decides what the
 owner sees as waiting.
 """
@@ -1514,7 +1521,8 @@ def import_checks(daemon, body) -> dict:
 def route(handler, daemon, parts, query):
     """`GET /inbox` (`?all=1`), `POST /inbox/<id>/answer`, `POST
     /inbox/<id>/mark`, `POST /inbox/decisions/<id>`, `POST
-    /inbox/checks/<id>/steps/<n>` and `POST /inbox/checks/import`; None for
+    /inbox/checks/<id>/steps/<n>`, `POST /inbox/checks/import` and the
+    morning review's `/inbox/review...` (`review.hud_route`); None for
     any other path. `owner_only` runs before
     anything else on every `/inbox` path, so the API listener and a non-owner
     page learn nothing, not even which ids exist."""
@@ -1524,6 +1532,12 @@ def route(handler, daemon, parts, query):
     from .daemon import APIError, _object
     from .projects import owner_only
     owner_only(handler, daemon)
+    # The morning review (MR, `review.py`): its report, Approve selected and
+    # Leave selected, behind the same owner test.
+    from . import review as _review
+    mounted = _review.hud_route(handler, daemon, parts, query)
+    if mounted is not None:
+        return mounted
     method = handler.command
     if parts == ["inbox"] and method == "GET":
         # `?all=1` (B4): the snoozed and dismissed rows too, flagged.

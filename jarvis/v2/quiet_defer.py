@@ -60,6 +60,13 @@ process by the monotonic one too), bound to the digest and the thread,
 kept in an in-memory index (loaded once, updated on every write) that the
 broker takes from under its lock; the spend is then written.
 
+**The morning review's Approve selected (MR-7, `review.py`)** is
+`approve_many`: QH's grant for each selected id, written in one store
+transaction (`DeferredStore.settle_many`: every check under the store's
+lock, all or none; `GroupChanged` names what no longer fits and nothing is
+written), then one message per chat (`group_message`) and one resume per
+blocked task. `approve_and_retry` is unchanged.
+
 **The summary (AS, `approval_summary.py`).** After a deferral is recorded,
 `QuietDesk.deferred` starts the card's one-line model summary; when it
 arrives, `DeferredStore.set_summary` writes it into the record's optional
@@ -287,6 +294,22 @@ def retry_message(record: dict) -> str:
             f"{record['id']}). Retry it now if it is still needed. Only the identical call (the same "
             f"tool and the same arguments, from this chat, in the same folder) is allowed, once, until "
             f"{stamp}; anything else asks the owner as usual.")
+
+
+def group_message(records: list[dict]) -> str:
+    """The one message a morning review's Approve selected sends a chat for
+    all of its deferrals in the group (MR-7): code's words, each tool's
+    name quoted as text with its deferral id."""
+    if len(records) == 1:
+        return retry_message(records[0])
+    named = ", ".join(f"{json.dumps(clean_line(r.get('tool') or 'a tool', 80), ensure_ascii=False)} "
+                      f"(deferral {r['id']})" for r in records)
+    untils = [u for u in (_parse(r.get("grant_until")) for r in records) if u is not None]
+    stamp = min(untils).astimezone().strftime("%H:%M") if untils else "30 minutes from now"
+    return (f"The owner approved {len(records)} calls that were deferred overnight: {named}. Retry each "
+            f"now if it is still needed. Only the identical calls (the same tool and the same arguments, "
+            f"from this chat, in the same folder) are allowed, each once, until {stamp}; anything else asks "
+            f"the owner as usual.")
 
 
 def public_card(request) -> tuple[dict, bool]:
@@ -844,6 +867,68 @@ class DeferredStore:
                         entry["mono"] = mono + GRANT_S
         return out
 
+    def settle_many(self, record_ids, check) -> list[dict]:
+        """The morning review's Approve selected (MR-7): every id granted in
+        **one** `_change`, all or none. Under the store's lock, for each id:
+        waiting, grantable (never HUD-only, a digest), under a day old, and
+        `check(record)` (the caller's: the tag, the chat, the task, the
+        phone's scrub) not raising. Any id that fails (`LookupError` or
+        `ValueError`, its words a reason code) is collected; if any did,
+        `GroupChanged` with all of them and nothing is written. Else each
+        becomes `granted` for `GRANT_S`, and the copies are returned in
+        order."""
+        ids = list(record_ids)
+        if not ids or len(set(ids)) != len(ids) or not all(isinstance(i, str) and _ID.match(i) for i in ids):
+            raise ValueError("malformed deferral ids")
+
+        def change(records, more, now):
+            changed = []
+            for record_id in ids:
+                try:
+                    rec = records.get(record_id)
+                    if rec is None:
+                        raise LookupError(record_id)
+                    if rec["state"] != "waiting":
+                        raise ValueError("answered")
+                    if not rec["grantable"] or rec["hud_only"] or rec["digest"] is None:
+                        raise ValueError("not-grantable")
+                    at = _parse(rec["at"])
+                    if at is None or now - at >= timedelta(seconds=WAITING_S):
+                        raise ValueError("expired")
+                    check(dict(rec))
+                except LookupError:
+                    changed.append({"id": record_id, "reason": "gone"})
+                except ValueError as exc:
+                    changed.append({"id": record_id, "reason": str(exc) or "changed"})
+            if changed:
+                raise GroupChanged(changed)
+            out = []
+            for record_id in ids:
+                rec = records[record_id]
+                rec["state"] = "granted"
+                rec["grant_until"] = _iso(now + timedelta(seconds=GRANT_S))
+                rec["settled_at"] = _iso(now)
+                out.append(dict(rec))
+            return out
+        mono = self.mono()
+        out = self._change(change)
+        granted = {rec["id"] for rec in out}
+        with self._index_lock:
+            for entries in (self._live or {}).values():
+                for entry in entries:
+                    if entry["id"] in granted:
+                        entry["mono"] = mono + GRANT_S
+        return out
+
+
+class GroupChanged(Exception):
+    """`DeferredStore.settle_many`: some selected deferral no longer fits
+    (MR-7); `changed` is `[{id, reason}]`, and nothing was written."""
+
+    def __init__(self, changed: list[dict]):
+        super().__init__("some selected deferrals changed")
+        self.changed = changed
+
 
 def _ident(value):
     return value if isinstance(value, str) and value and len(value) <= 200 else None
@@ -1136,11 +1221,78 @@ def leave(daemon, record_id, *, via: str = "inbox") -> dict:
     return {"ok": True, "id": f"{PREFIX}:{record_id}", "delivery": "left", "note": NOTES["left"]}
 
 
+CHANGED = "something you selected changed: nothing was approved; look again and confirm again"
+
+
+def approve_many(daemon, record_ids, *, via: str = "inbox", verified: bool = False, check=None) -> dict:
+    """The morning review's Approve selected (MR-7, MR-9): QH-6's grant for
+    each id under one owner confirm, **all or nothing**. The grants are
+    written in one store transaction (`settle_many`, every check under the
+    store's lock, `check(record)` the caller's); if any id no longer fits,
+    `{ok: False, status: 409, error: CHANGED, changed: [{id, reason}]}` and
+    nothing is written or delivered. Then, per item only, the delivery: one
+    message per chat (`group_message`) and one resume per blocked task.
+    `via="phone"` needs `verified` true (a passkey assertion bound to this
+    exact set). Never raises for a refusal."""
+    ids = list(record_ids) if isinstance(record_ids, (list, tuple)) else []
+    if via not in ("inbox", "phone"):
+        return {"ok": False, "status": 400, "error": "unknown answer path"}
+    if not ids or len(set(ids)) != len(ids) or not all(isinstance(i, str) and _ID.match(i) for i in ids):
+        return {"ok": False, "status": 400, "error": "malformed deferral ids"}
+    if via == "phone" and verified is not True:
+        return {"ok": False, "status": 401, "error": "Approve selected needs the passkey"}
+    store = getattr(getattr(daemon, "inbox", None), "deferred", None)
+    if store is None:
+        return {"ok": False, "status": 409, "error": "the inbox has no store here"}
+    try:
+        records = store.settle_many(ids, check if check is not None else (lambda rec: None))
+    except GroupChanged as exc:
+        return {"ok": False, "status": 409, "error": CHANGED, "changed": exc.changed}
+    except ValueError:
+        return {"ok": False, "status": 400, "error": "malformed deferral ids"}
+    except OSError as exc:
+        LOG.warning("Cannot write a group of deferral answers (%s)", type(exc).__name__)
+        return {"ok": False, "status": 500, "error": "the answer could not be saved"}
+    seen = getattr(daemon, "owner_seen", None)
+    if callable(seen) and (via == "inbox" or verified is True):
+        seen()                      # QH-3: the HUD's answer, or the phone's verified one
+    try:
+        daemon.bus.publish({"kind": "inbox_changed",
+                            "data": {"ids": [f"{PREFIX}:{i}" for i in ids], "reason": "deferral_answered"}})
+    except Exception as exc:  # noqa: BLE001
+        LOG.warning("Cannot announce a group of deferral answers (%s)", type(exc).__name__)
+    # One resume per blocked task, one message per chat: every task was
+    # checked blocked under the store's lock above, before any resume.
+    tasks: dict[str, list[dict]] = {}
+    chats: dict = {}
+    for rec in records:
+        if rec["task_id"]:
+            tasks.setdefault(rec["task_id"], []).append(rec)
+        else:
+            chats.setdefault(rec["thread_id"], []).append(rec)
+    delivered: dict[str, str] = {}
+    for task_id, recs in tasks.items():
+        try:
+            daemon.runner.resume(task_id)
+            delivery = "resumed"
+        except Exception as exc:  # noqa: BLE001 — the grants stand; the task stays blocked
+            LOG.info("A deferral group's task was not resumed (%s)", type(exc).__name__)
+            delivery = "unresumed"
+        for rec in recs:
+            delivered[rec["id"]] = delivery
+    for thread_id, recs in chats.items():
+        delivery = _deliver(daemon, thread_id, group_message(recs), via) if thread_id else "closed"
+        for rec in recs:
+            delivered[rec["id"]] = delivery
+    results = [{"ok": True, "id": f"{PREFIX}:{rec['id']}", "delivery": delivered[rec["id"]],
+                "note": NOTES[delivered[rec["id"]]], "grant_until": rec["grant_until"]} for rec in records]
+    return {"ok": True, "approved": len(results), "results": results}
+
+
 def _tell(daemon, record, via: str) -> str:
     """QH-6, 2: a blocked task is resumed; a chat is told through B1's
     delivery (never a steer, no desk authority). The grant stands whatever
     this says."""
-    from .daemon import APIError, DaemonError
     task_id, thread_id = record["task_id"], record["thread_id"]
     if task_id:
         try:
@@ -1151,18 +1303,31 @@ def _tell(daemon, record, via: str) -> str:
         return "resumed"
     if not thread_id:
         return "closed"
+    return _deliver(daemon, thread_id, retry_message(record), via)
+
+
+def chat_closed(daemon, thread_id) -> bool:
+    """The asking chat is gone, archived or in an archived project (or
+    cannot be read): it is not told, and the morning review does not offer
+    a group grant for it."""
     from .projects import is_archived
+    try:
+        thread = daemon.stores.threads.get(thread_id)
+        return thread is None or bool(thread.archived) or is_archived(daemon.stores, thread.project_id)
+    except Exception:  # noqa: BLE001
+        return True
+
+
+def _deliver(daemon, thread_id, text: str, via: str) -> str:
+    """B1's delivery of code's words to a chat (never a steer, no desk
+    authority): started, queued, closed or failed."""
+    from .daemon import APIError, DaemonError
     from .provider import UserMessage
 
     def closed() -> bool:
-        try:
-            thread = daemon.stores.threads.get(thread_id)
-            return thread is None or bool(thread.archived) or is_archived(daemon.stores, thread.project_id)
-        except Exception:  # noqa: BLE001
-            return True
+        return chat_closed(daemon, thread_id)
     if closed():
         return "closed"
-    text = retry_message(record)
     message = UserMessage(text, origin="owner", via="phone" if via == "phone" else "inbox",
                           desk=False, typed=text)
     try:

@@ -675,7 +675,7 @@ def gh_checks():
         (box.bin / "mode").write_text("leak")
         text, _ = call("chat_pr_close", {**args, "number": 10}, p.proj)
         ok("ghp_" + "A" * 36 not in text, "a token-shaped value never reaches the model")
-        ok("[redacted]" in text, f"it is marked redacted ({text[:160]!r})")
+        ok("[withheld: GitHub token]" in text, f"it is marked withheld ({text[:160]!r})")
         box.clear_gh()
         # chat_git_fetch: no card, the mirror updated, a local fetch command.
         box.git("--git-dir", str(p.remote), "branch", "upstream-work", "main", cwd=box.root)

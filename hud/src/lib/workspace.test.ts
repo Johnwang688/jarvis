@@ -378,7 +378,7 @@ describe("the rename: Preview is the Browser, File reads as the editor (BR-3a)",
     expect(Object.keys(VIEW_LABEL).sort()).toEqual([...PANE_VIEWS].sort());
     expect(VIEW_LABEL).toEqual({
       chat: "chat", task: "task", file: "editor", diff: "diff", browser: "browser", terminal: "terminal", vex: "vex",
-      subagent: "sub-agent", inbox: "inbox" });
+      subagent: "sub-agent", inbox: "inbox", review: "morning review" });
     const labels = Object.values(VIEW_LABEL);
     expect(new Set(labels).size).toBe(labels.length);
     expect(labels).not.toContain("file");

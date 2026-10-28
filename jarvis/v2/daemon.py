@@ -176,17 +176,25 @@ def _spawned(session, data, *, running: bool) -> None:
 
 
 def _log_fields(data) -> dict:
-    """`LOGGED_REDACTED` fields of an event's data through
-    `secrets.redact_value`, computed outside the daemon's lock (it reads
+    """`LOGGED_REDACTED` fields of an event's data as an approval card shows
+    them (`secrets.redact_value` inside `redact.CardPass`: a private key in a
+    `Write`'s `content` goes whole, the credential shapes as markers; scrub
+    hardening, 2026-10-25), computed outside the daemon's lock (it reads
     credential files). A redaction that fails withholds the field."""
     out = {}
     if not isinstance(data, dict):
         return out
     from jarvis.tools import secrets as v1_secrets
+    from . import redact
     for key in LOGGED_REDACTED:
         if key in data:
             try:
-                out[key] = v1_secrets.redact_value(data[key])
+                # A tool's arguments are judged by their own keys (a command's
+                # argv as the command it is: review of #314, B1); a `command`,
+                # `cmd` or `headline` field as a command (H1); `reason` as text.
+                extra = redact.CardPass()
+                hidden = redact.map_field(key, data[key], extra.hide)
+                out[key] = redact.map_field(key, v1_secrets.redact_value(hidden), extra.show)
             except Exception:  # noqa: BLE001
                 out[key] = "[withheld: could not be judged]"
     return out
@@ -262,8 +270,10 @@ COMPACT_REASON_CHARS = 200
 
 def compact_reason(text) -> str:
     """A provider's reason for a compaction that did not happen, as the chat
-    shows it: scrubbed as chat reads are (`chat_reads.scrub`: the display
-    redaction, then the credential scrub), one line, at most
+    shows it and the log keeps it: the owner's scrub (`chat_reads.scrub`,
+    the typed credentials of `redact_inline` and labelled values included,
+    as main had it; review of #314, M1). Another chat's model reads the log
+    through its own scrub (`chat_reads.scrub_read`). One line, at most
     COMPACT_REASON_CHARS. Reads credential files: never under `_lock`."""
     from .approvals import clean_line
     from .chat_reads import WITHHELD, scrub

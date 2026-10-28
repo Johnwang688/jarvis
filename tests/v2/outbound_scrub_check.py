@@ -198,7 +198,7 @@ class ReporterChecks(unittest.TestCase):
                              done=f"used {ghp_key} and {token} " + "x" * 3000,
                              verified=f"checked {sk_key}")
         no_keys(self, wire, "reporter")
-        self.assertTrue("redacted" in wire, "nothing was redacted")
+        self.assertTrue("redacted" in wire or "[withheld: " in wire, "nothing was redacted")
         self.assertTrue(any(c.get("files") for c in self.posts()),
                         "the report overflow was attached (and so scrubbed too)")
 
@@ -331,7 +331,7 @@ class MirrorChecks(MC.Harness):
         self.settled(chat.id)
         wire = json.dumps(self.transport.calls)
         no_keys(self, wire, "mirror wire")
-        self.assertTrue("redacted" in wire, "nothing was redacted")
+        self.assertTrue("redacted" in wire or "[withheld: " in wire, "nothing was redacted")
         self.assertEqual(self.transport.violations, [])
 
     # -- c2: a scrub that raises ---------------------------------------------------

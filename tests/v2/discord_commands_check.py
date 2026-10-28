@@ -2005,10 +2005,10 @@ class ShutdownMapChecks(_ShutdownHarness):
         self.transport.fail[("PATCH", f"/messages/{failing}$")] = (503, {"message": "busy"})
         # One at a time, so the order is fixed: the first strip fails, then
         # the second works and saves the map.
-        self.approvals.resolve(first.req_id, Decision.DENY, hud=True)
+        self.approvals.resolve(first.req_id, Decision.DENY, owner_verified=True)
         w1.join(2)
         self.surface.settle()
-        self.approvals.resolve(second.req_id, Decision.DENY, hud=True)
+        self.approvals.resolve(second.req_id, Decision.DENY, owner_verified=True)
         w2.join(2)
         self.surface.settle()
         self.assertEqual(sorted(json.loads(path.read_text())), [first.req_id])
@@ -2038,7 +2038,7 @@ class ShutdownMapChecks(_ShutdownHarness):
         request, result, worker = self.ask(task_id=self.task.id)
         wait_for(lambda: path.exists() and request.req_id in json.loads(path.read_text()))
         transport.down.set()
-        self.approvals.resolve(request.req_id, Decision.DENY, hud=True)
+        self.approvals.resolve(request.req_id, Decision.DENY, owner_verified=True)
         worker.join(2)
         self.surface.settle()
         self.assertIn(request.req_id, json.loads(path.read_text()))

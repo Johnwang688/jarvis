@@ -190,6 +190,11 @@ SELF_PROTECTED = frozenset(
         # the broker honours with no card. An agent that could edit it could
         # mint itself a grant.
         "jarvis/v2/quiet_defer.py",
+        # The morning review (MR, 2026-10-28): which deferred calls one
+        # owner confirmation grants as a set, and what a group's passkey
+        # assertion is bound to. An agent that could edit it could widen a
+        # set the owner approved.
+        "jarvis/v2/review.py",
         # The approval broker every surface answers through: who counts as
         # owner-verified, which cards are HUD-only, and what a card shows
         # before Allow (the owner's decision, 2026-10-25). An agent that

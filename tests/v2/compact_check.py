@@ -785,14 +785,15 @@ class Records(Base):
     def test_the_failure_reason_is_scrubbed_one_line_and_capped(self):
         # Mutation: the reason logged or published unscrubbed, multi-line or uncapped.
         from jarvis.v2.approvals import clean_line
-        from jarvis.v2.redact import scrub_text
+        from jarvis.v2.chat_reads import scrub
         t = self.chat()
         reason = (f"upstream rejected token {GH}\nthen: curl -H 'Authorization: Bearer "
                   f"{JWT}' with key {SK}\n" + "more detail " * 60)
         self.fake(t).outcome[t.id] = ("error", False, reason)
         turn_id = self.compact(t)
         self.idle(t)
-        want = FAILED_PREFIX + clean_line(scrub_text(reason), 200)
+        # The owner's scrub, as `compact_reason` uses (review of #314, M1).
+        want = FAILED_PREFIX + clean_line(scrub(reason), 200)
         logged = (self.compacted(t, turn_id) or {}).get("data") or {}
         published = [e for e in self.bus("compacted", t) if e.get("turn_id") == turn_id]
         self.assertEqual(len(published), 1, published)

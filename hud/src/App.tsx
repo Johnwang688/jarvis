@@ -154,7 +154,9 @@ import { bypassFor } from "./lib/bypass";
 import { RELAY_KINDS, waitingLine, type RelayEvent } from "./lib/relays";
 import { thinkingClock } from "./components/MiniOrb";
 import { InboxView } from "./components/InboxView";
+import { ReviewView } from "./components/ReviewView";
 import { inbox, useInbox } from "./state/inbox";
+import { review, useReview } from "./state/review";
 import { anyPending, waitingCount } from "./lib/inbox";
 
 const PROPOSAL_WINDOW_MS = 60_000;
@@ -269,6 +271,8 @@ export default function App() {
   // The owner inbox (inbox A2): the daemon's ranked rows, read again on
   // `inbox_changed` (state/inbox.ts).
   const inboxSnap = useInbox();
+  // The morning review (MR-10): the same rows, read as the night's report.
+  const reviewSnap = useReview();
   const [settingsOpen, setSettingsOpen] = useState(false);
   // Chat-to-chat (C5): who sent each message still waiting to start, heard
   // from its `relay_out` (whose data names only the target): message id ->
@@ -1730,8 +1734,10 @@ export default function App() {
           break;
         case "inbox_changed":
           // `{ids, reason}`, never text: whatever it names, the rows are the
-          // daemon's projection, so the inbox is read again (state/inbox.ts).
+          // daemon's projection, so the inbox is read again (state/inbox.ts),
+          // and so is the morning review, the same rows (state/review.ts).
           void inbox.refresh();
+          void review.refresh();
           break;
         case "proposal_reply":
           // A proposal is a system line with a 60-second cancel: the fast path
@@ -1868,6 +1874,7 @@ export default function App() {
           void refreshActivity();
           // An `inbox_changed` published while the stream was down is gone.
           void inbox.refresh();
+          void review.refresh();
           break;
         case "terminal_attached":
           // `{terminal_id, at}` only: the terminals say so when it was not
@@ -3042,6 +3049,7 @@ export default function App() {
       }
       void refreshActivity();
       void inbox.refresh();
+      void review.refresh();
       const [usage, schedules, route, approvals, discord] = await Promise.all([
         api.usage().catch(() => null),
         api.schedules().catch(() => []),
@@ -4159,6 +4167,28 @@ export default function App() {
             onReread={() => inbox.refresh()}
           />
         );
+      case "review":
+        // The morning review (MR-10): the night's report, answered in place;
+        // Approve selected behind the HUD's own confirmation (components/ReviewView.tsx).
+        return (
+          <ReviewView
+            snapshot={reviewSnap}
+            blocked={blocked}
+            onReread={() => review.refresh()}
+            onApprove={(body) => api.reviewApprove(body)}
+            onLeave={(body) => api.reviewLeave(body)}
+            onAnswer={(id, body) => api.answerInbox(id, body)}
+            onDecide={(id, body) => api.answerDecision(id, body)}
+            onDismiss={(id) => api.markInbox(id, { dismiss: true })}
+            onOpenThread={(id) => { if (!blockedNow.current) pickThread(id); }}
+            onOpenTask={(id) => {
+              if (blockedNow.current) return;
+              patch({ taskId: id, taskFocus: true });
+              showView("task");
+            }}
+            onOpenInbox={() => { if (!blockedNow.current) showView("inbox"); }}
+          />
+        );
       case "vex": {
         // Its pinned project (pinned when the pane switched to it), else the chat's.
         const pid = stripProject(state, spec, n);
@@ -4485,6 +4515,8 @@ export default function App() {
         return spec.browserUrl || "";
       case "inbox":
         return "Inbox";
+      case "review":
+        return "Morning review";
       default:
         return "";
     }
@@ -4543,11 +4575,20 @@ export default function App() {
       if (blockedNow.current) return;
       showView("inbox");
     },
+    // The morning review's row (MR-10), under the Inbox's.
+    onOpenReview: () => {
+      if (blockedNow.current) return;
+      showView("review");
+    },
   });
   const sidebarInbox = useStableValue({
     count: inboxSnap.status === "ready" ? waitingCount(inboxSnap.rows) : null,
     pending: inboxSnap.status === "ready" && anyPending(inboxSnap.rows),
     shown: fit.panes.some((n) => ws.panes[n - 1].view === "inbox"),
+  });
+  const sidebarReview = useStableValue(reviewSnap.status === "unavailable" ? null : {
+    count: reviewSnap.report ? reviewSnap.report.open : null,
+    shown: fit.panes.some((n) => ws.panes[n - 1].view === "review"),
   });
 
   return (
@@ -4607,6 +4648,8 @@ export default function App() {
           onOpen={sidebarCalls.onOpen}
           inbox={sidebarInbox}
           onOpenInbox={sidebarCalls.onOpenInbox}
+          review={sidebarReview}
+          onOpenReview={sidebarCalls.onOpenReview}
         />
         {drawn.leftFolded ? null : (
           <Splitter

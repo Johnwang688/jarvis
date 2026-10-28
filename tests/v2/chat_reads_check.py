@@ -85,8 +85,9 @@ never a v1 session, never a native CLI transcript):
     listing row: "idle", "working", "working on a message from <title>",
     "<queued + relays_waiting> waiting".
 
-    The scrub (§3.3) is `secrets.redact_inline`, then `redact.scrub_text`
-    (which calls `jarvis.tools.secrets.scrub`), then `strip_invisible`. The
+    The rows' scrub (§3.3, `chat_reads.scrub_read`) is
+    `secrets.redact_inline`, then `redact.for_model` (which calls
+    `jarvis.tools.secrets.scrub`), then `strip_invisible`. The
     withholding tests make `jarvis.tools.secrets.scrub` and
     `jarvis.tools.secrets.strip_url_credentials` raise, so call those layers
     through the helpers named, not copies of them.
@@ -139,6 +140,9 @@ from jarvis.v2 import daemon as D  # noqa: E402
 from jarvis.v2.model import ProviderName as PN, Role, to_json, utcnow  # noqa: E402
 from jarvis.v2.provider import Event, EventKind as K, UserMessage  # noqa: E402
 from jarvis.v2.stores import Stores  # noqa: E402
+
+# A withheld span: the old marker, or a typed one since the scrub hardening.
+MARKED = r"\[redacted|\[withheld: "
 
 try:
     from jarvis.v2 import chat_reads as CR
@@ -541,12 +545,12 @@ class ScrubTests(Base):
                     for value in raw:
                         self.assertNotIn(value, row.text, (row.role, row.text))
                     if marked:
-                        self.assertIn("[redacted", row.text, (row.role, row.text))
+                        self.assertRegex(row.text, MARKED, (row.role, row.text))
                 out = self.every_read(thread, f"plant-{name}-")
                 for value in raw:
                     self.assertNotIn(value, out)
                 if marked:
-                    self.assertIn("[redacted", CR.read_tail(self.stores, thread))
+                    self.assertRegex(CR.read_tail(self.stores, thread), MARKED)
 
     def test_search_runs_over_scrubbed_text(self):
         # [mutation: match the query against the raw text] -> the chat is a hit

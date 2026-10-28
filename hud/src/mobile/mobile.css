@@ -367,3 +367,45 @@ p, li, h2, h3 { overflow-wrap: anywhere; }
   background: var(--bg-1); }
 .notify-line { margin: 0 0 8px; color: var(--text-2); }
 .notify[data-state="blocked"] .notify-line, .notify[data-state="error"] .notify-line { color: var(--amber); }
+
+/* -- MR: the morning review (review.ts) --------------------------------------
+   The inbox's rows and Graphite tokens. Every tap target at least 44 px.
+   The footer sticks to the bottom of the view; Leave selected sits at the
+   left and Approve selected at the right, far apart; a deferred row's own
+   Leave it and Approve and retry likewise. */
+.m-review-summary { color: var(--text-2); font-size: 15px; margin-top: 4px; }
+.m-review-chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.tap.m-chip { min-height: 44px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 14px; }
+.m-review-kind { font: 600 11px var(--mono); letter-spacing: 0.05em; text-transform: uppercase; color: var(--text-muted); }
+.m-review-part { display: flex; flex-direction: column; gap: 8px; }
+.m-review-project { font-size: 14px; font-weight: 600; color: var(--text-2); margin-top: 6px; overflow-wrap: anywhere; }
+.m-review-place { display: flex; flex-direction: column; gap: 8px; scroll-margin-top: 8px; }
+.m-review-placename { font-size: 14px; overflow-wrap: anywhere; }
+.m-tick { display: flex; align-items: center; gap: 10px; min-height: 44px; margin-top: 6px; color: var(--text-2); }
+.m-tick input { width: 24px; height: 24px; flex: none; accent-color: var(--accent); }
+.m-review-rowacts { display: flex; justify-content: space-between; gap: 48px; margin-top: 8px; }
+.m-review-rowacts .tap { flex: 0 1 auto; }
+.m-review-receipt { color: var(--text-2); font-size: 14px; padding: 10px 12px; min-height: 44px;
+  border: 1px dashed var(--border); border-radius: var(--radius); }
+.m-review-footer {
+  position: sticky;
+  /* Flush with the view's bottom edge: nothing scrolls beneath it (.main's 16 px padding). */
+  bottom: -16px;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 12px 0 -16px;
+  padding: 8px 0 16px;
+  border-top: 1px solid var(--border-strong);
+  background: var(--bg-0);
+}
+.m-review-count { color: var(--text-2); font-size: 14px; text-align: center; }
+.m-review-blockers { color: var(--amber); font-size: 13px; overflow-wrap: anywhere; max-height: 30vh; overflow-y: auto; }
+.m-review-actions { display: flex; justify-content: space-between; gap: 48px; }
+.m-review-actions .tap.m-btn { width: auto; flex: 0 1 42%; padding: 0 8px; }
+.m-review-confirm { max-height: 40vh; overflow-y: auto; }
+.m-review-confirm li { margin: 4px 0; }
+.m-review-where { font-size: 13px; color: var(--text-2); overflow-wrap: anywhere; }
+

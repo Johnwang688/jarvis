@@ -92,6 +92,12 @@ and events; the inbox only needs to **project** them.
   `textContent` only, and the card stays the loudest thing on screen. The
   inbox does not change timeouts or turn approvals into durable items; an
   approval is still a live question with a live waiter.
+  **One recorded exception (the owner, 2026-10-28; the morning review,
+  `docs/plans/2026-10-28-morning-review.md`):** approvals deferred during
+  quiet hours may be approved as a set the owner ticked one by one, at
+  most 10, under one deliberate confirmation (at the desk a dialog with
+  Cancel focused; on the phone one passkey assertion bound to exactly
+  that set), all or nothing. Live cards are untouched: never selectable.
 - **IN-4. Ranking is by what an item blocks**, in this order:
   1. a live approval (it is denied when its timer runs out);
   2. a blocking question on a running turn or a `clarifying` task;
@@ -238,7 +244,7 @@ already marked **Answered** are imported as answered.
 
 | Rule | How the inbox keeps it |
 |---|---|
-| Approvals are the owner's; deny cheap, authorize deliberate | IN-3: same component, same `resolve`; no bulk Allow, no "allow all", no keyboard default |
+| Approvals are the owner's; deny cheap, authorize deliberate | IN-3: same component, same `resolve`; no bulk Allow, no "allow all", no keyboard default (one recorded exception: the morning review's Approve selected, deferred rows only, ≤10, one confirmation, all or nothing) |
 | No tool reaches owner routes | every `/inbox` route is `owner_only`; the archive-check grep extends to `/inbox` |
 | Labels and fetched text are untrusted | rows' own `title`/`blocks` are code-built; agent text only in `detail`, `textContent`, scrubbed |
 | HUD-only Browser cards | private projection only; answering still needs `hud=True` (renamed `owner_verified` by the phone design, PH-7, where the HUD route and a verified phone are its only two setters) |

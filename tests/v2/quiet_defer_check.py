@@ -467,7 +467,7 @@ class Grants(_Temp):
                                                              "thread_id": "t2", "kind": "started"})}.items():
             self.assertNotEqual(quiet_defer.request_digest(other), digest, name)
         self.assertIsNone(quiet_defer.request_digest(request(args={"x": float("nan")})), "not exactly JSON: never grantable")
-        self.assertNotEqual(remote_answer.defer_binding(["x"]), "x", "a binding is never a bare approval id")
+        self.assertNotEqual(remote_answer.defer_binding("x"), "x", "a binding is never a bare approval id")
         print("ok  the digest covers thread, task, tool, args and command; a binding is never a bare id")
 
     def test_an_expired_grant_asks(self):
@@ -968,9 +968,11 @@ class Delta(Review):
     def test_a_deferral_subject_takes_allow_only(self):
         from jarvis.v2 import remote_auth
         self.assertEqual(remote_auth.DEFER_DECISIONS, ("allow",))
-        binding = remote_answer.defer_binding(["abcDEF123_-x"])
+        from jarvis.v2 import review
+        binding = remote_answer.defer_binding("abcDEF123_-x")
         self.assertTrue(remote_auth._DEFER_SUBJECT.fullmatch(binding))
-        self.assertTrue(remote_auth._DEFER_SUBJECT.fullmatch(remote_answer.defer_binding(["a", "b"])))
+        self.assertTrue(remote_auth._DEFER_SUBJECT.fullmatch(review.subject([("defer:a", "a" * 64),
+                                                                            ("defer:b", "b" * 64)])))
         for odd in ("defer:", "defer:a:b", "defers:abc", "task:0123abcd", "defer:" + "a" * 59):
             self.assertIsNone(remote_auth._DEFER_SUBJECT.fullmatch(odd), odd)
         print("ok  a deferral's subject is defer:<id> or defers:<56 hex>, and takes Allow only")
@@ -1167,14 +1169,16 @@ class Live(unittest.TestCase):
         self.assertIn(results[0]["delivery"], ("started", "queued"))
         refused = quiet_defer.approve_and_retry(self.daemon, good.req_id, via="phone")
         self.assertEqual((refused["ok"], refused["status"]), (False, 401), "the phone needs its assertion")
-        # The phone's binding: one id is `defer:<id>`; a set is one digest of the sorted ids.
-        bind = remote_answer.defer_binding
-        self.assertEqual(bind(["abc"]), "defer:abc")
-        self.assertEqual(bind(["b", "a", "a"]), bind(["a", "b"]))
-        self.assertNotEqual(bind(["a", "b"]), bind(["a", "c"]))
-        self.assertTrue(bind(["a", "b"]).startswith("defers:") and len(bind(["a", "b"])) <= 64)
+        # The phone's binding: one id is `defer:<id>`; a set is the morning
+        # review's subject over every id and its tag (MR-6, review.subject).
+        from jarvis.v2 import review
+        self.assertEqual(remote_answer.defer_binding("abc"), "defer:abc")
+        pair = [("defer:a", "a" * 64), ("defer:b", "b" * 64)]
+        self.assertEqual(review.subject(pair), review.subject(list(reversed(pair))))
+        self.assertNotEqual(review.subject(pair), review.subject([("defer:a", "a" * 64), ("defer:c", "b" * 64)]))
+        self.assertTrue(review.subject(pair).startswith("defers:") and len(review.subject(pair)) <= 64)
         self.assertNotIn(":", good.req_id, "an approval's id can never be a binding")
-        print("ok  approve_and_retry/leave: one id in, one result out (never raising); the binding extends to a set")
+        print("ok  approve_and_retry/leave: one id in, one result out (never raising); a set binds review.subject")
 
     def test_a_browser_row_offers_no_grant(self):
         thread = self.chat()
@@ -1381,7 +1385,9 @@ class Boundary(unittest.TestCase):
             if uses:
                 found[str(path.relative_to(ROOT))] = uses
         self.assertEqual(found, {"jarvis/v2/remote_answer.py": ["True", "verified"],
-                                 "jarvis/v2/quiet_defer.py": ["verified", "verified"]}, found)
+                                 "jarvis/v2/quiet_defer.py": ["verified", "verified"],
+                                 # The morning review's group (MR-11): only after the set's assertion.
+                                 "jarvis/v2/review.py": ["verified", "True"]}, found)
         source = inspect.getsource(remote_answer._answer_deferred)
         self.assertLess(source.index("answer_verify("), source.index("verified = True"))
         self.assertIn("verified=False", inspect.getsource(inbox.answer))

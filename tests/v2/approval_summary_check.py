@@ -689,6 +689,9 @@ class DecidesNothing(unittest.TestCase):
             "resolve": inspect.getsource(approvals.PendingApprovals.resolve),
             "always_rule": inspect.getsource(approvals.PendingApprovals.always_rule),
         }
+        from jarvis.v2 import review
+        for name in ("item_tag", "subject", "check_group", "_check", "approve", "refusal", "_place_refusal"):
+            sources["review." + name] = inspect.getsource(getattr(review, name))
         for name, source in sources.items():
             self.assertIsNone(pattern.search(source), name)
 
@@ -731,6 +734,10 @@ class Deferred(unittest.TestCase):
         rows = quiet_defer.rows(SimpleNamespace(inbox=SimpleNamespace(deferred=self.n.store)),
                                 lambda kind, rank, rid, title, blocks, **kw: {"id": rid, **kw})
         self.assertEqual(rows[0]["detail"]["summary"], "Deploys calc to production.")
+        # The morning review's tag binds the card and the digest, never the summary (MR-6).
+        from jarvis.v2 import review
+        self.assertEqual(review.item_tag(rec), review.item_tag({k: v for k, v in rec.items() if k != "summary"}))
+        self.assertEqual(review.item_tag(rec), review.item_tag(dict(rec, summary="Something else")))
         # A grant still matches exactly that call.
         self.assertEqual(self.n.store.settle(req.req_id, "retry")["state"], "granted")
 

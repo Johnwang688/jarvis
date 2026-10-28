@@ -9,8 +9,8 @@
   *typed* words (never an inlined file; attachments by name, images as a
   note), Jarvis's settled replies split at 2000 characters (never a delta,
   never thinking), one tool footer per turn and a "turn failed" or
-  "interrupted" line. Everything is scrubbed (`redact.scrub_text`) and silent
-  (flag 4096); the only pings are the D1 lines after a provider question
+  "interrupted" line. Everything is scrubbed (`redact.for_display`, the
+  display scrub) and silent (flag 4096); the only pings are the D1 lines after a provider question
   (here) and an approval (the gateway's `_post_approval`).
 * **In.** A message typed in that Discord thread runs a turn in the same chat
   as `UserMessage(via="discord")` — never echoed back, labelled "via Discord"
@@ -65,7 +65,7 @@ import threading
 import time
 
 from ..model import ProviderName, Role, utcnow
-from ..redact import scrub_text
+from ..redact import for_display
 from ..stores import StoreError, _lock as store_lock, _write_bytes
 from .render import _cap
 from .rest import (MISSING_ACCESS, MISSING_PERMISSIONS, THREAD_ARCHIVED, UNKNOWN_CHANNEL,
@@ -113,12 +113,13 @@ WITHHELD = "[output withheld: it could not be scrubbed]"
 
 
 def _scrub(text: str) -> str:
-    """Every post's text goes through the whole scrub (credential-file values,
-    provider key shapes, bearer/JWT shapes) before it leaves the machine, and
-    text that cannot be scrubbed is withheld, never posted as is (SEC-3). Call
+    """Every post's text goes through the display scrub (`redact.for_display`:
+    credential-file values, every credential shape, the value after a
+    credential's label) before it leaves the machine, and text that cannot
+    be scrubbed is withheld, never posted as is (SEC-3). Call
     it outside any send lock: it reads credential files."""
     try:
-        return scrub_text(text)
+        return for_display(text)
     except Exception:       # noqa: BLE001 — what cannot be scrubbed is withheld
         return WITHHELD
 

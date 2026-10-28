@@ -35,6 +35,15 @@
 // A proposal in the inbox takes Withdraw. Nothing is shown as sent before
 // its 2xx; offline, nothing is sent (no write queue).
 //
+// MR, the morning review (jarvis/v2/review.py, ./review.ts): a Review tab
+// beside the Inbox while the review has open items and the next night has
+// not begun. A launch or a notification's tap opens it when the last push
+// was the morning one (`opens_here`), else the Inbox. Questions and
+// decisions are answered in place; deferred approvals are ticked one by one
+// (never all at once) and approved as a set with ONE passkey assertion
+// bound to exactly that set, all or nothing; a limited phone (§4.1) gets the
+// per-row Approve and retry only.
+//
 // P-7, push to talk (jarvis/v2/remote_stt.py, ./talk.ts): an owner's chat's
 // message box also takes "Hold to talk". Its words are added to that chat's
 // draft and the box drawn again; Send is still the owner's tap. No inbox
@@ -56,8 +65,11 @@ import {
   type ProviderChoice, type Sheet, type Verb,
 } from "./write";
 import { Talk, browserTalkEnv, type TalkEnv } from "./talk";
+import { afterChanged, allItems, approveBody, confirmedChanged, emptySelection, keptSelection, leaveBody, parseReview, toggled,
+  UNTICKED_GONE, type ReviewItem, type ReviewReport } from "../lib/review";
+import { reviewTabShown, reviewView, type ReviewActions } from "./review";
 
-export type Tab = "inbox" | "chats" | "tasks";
+export type Tab = "inbox" | "review" | "chats" | "tasks";
 
 /** What the app needs of `EventSource` (a fake in the tests). */
 export interface StreamLike {
@@ -144,6 +156,18 @@ export class PhoneApp {
   taskWrite: { id: string; confirming: Verb | null; busy: boolean; note: string } | null = null;
   /** P-7: the one "Hold to talk" button, shown in the open chat's box. */
   readonly talk: Talk;
+  /** MR: the morning review, its ticks (empty until the owner's own taps), and its in-place receipts. */
+  review: ReviewReport | null = null;
+  reviewSel: Set<string> = emptySelection();
+  readonly reviewReceipts = new Map<string, { item: ReviewItem; text: string }>();
+  readonly reviewPicks = new Map<string, number>();
+  reviewBusy = false;
+  reviewConfirming = false;
+  /** The exact set the open confirmation shows (ids and tags): only it is ever sent. */
+  reviewConfirmed: { id: string; tag: string }[] | null = null;
+  reviewFlash = "";
+  private reviewFirst = true;
+  private rendered: Tab | null = null;
 
   private readonly fetchJson: (path: string) => Promise<Got>;
   private readonly postJson: (path: string, value: unknown) => Promise<Posted>;
@@ -192,12 +216,14 @@ export class PhoneApp {
       nav.append(b);
       return b;
     };
-    this.tabs = { inbox: make("inbox", "Inbox"), chats: make("chats", "Chats"), tasks: make("tasks", "Tasks") };
+    this.tabs = { inbox: make("inbox", "Inbox"), review: make("review", "Review"), chats: make("chats", "Chats"),
+                  tasks: make("tasks", "Tasks") };
+    this.tabs.review.hidden = true;
     frame.append(top, this.banner, this.main, nav);
     this.frame = frame;
     this.notify = new Notifications(deps.pushEnv ?? browserEnv, deps.pushSend ?? browserSend,
       () => { if (this.tab === "inbox" && !this.card && !this.stopped) this.renderInbox(); },
-      () => { if (!this.stopped) { this.card = null; this.show("inbox"); } });
+      () => { if (!this.stopped) void this.openFromNotification(); });
     this.talk = new Talk(deps.talkEnv ?? browserTalkEnv, {
       insert: (threadId, text) => this.dictated(threadId, text),
       // No recording while this chat's send waits for its answer (its 202 would clear the box).
@@ -216,6 +242,8 @@ export class PhoneApp {
     if (typeof location !== "undefined" && location.hash === "#inbox") history.replaceState(null, "", "/m/");
     this.render();
     void this.loadInbox();
+    // MR-12: a launch opens on the review when the morning push was the last one.
+    void this.loadReview();
     void this.loadMe();
     void this.notify.sync();
     this.connect();
@@ -278,6 +306,176 @@ export class PhoneApp {
     if (this.stopped || !got.ok) return;
     this.secure = parseSecure((got.body as { secure?: unknown })?.secure);
     if (this.tab === "inbox") this.renderInbox();
+  }
+
+  /** MR: the morning review. The first read decides where a launch opens (MR-12). */
+  async loadReview(): Promise<void> {
+    const r = await this.read("/m/api/review");
+    if (!r || !("body" in r)) return;
+    const report = parseReview(r.body);
+    if (!report) return;
+    this.review = report;
+    // Under an open confirmation, a re-read that drops or changes any
+    // confirmed item closes it: nothing is approved but the set the owner
+    // confirmed (review of #329, MED 1).
+    this.checkConfirmed(report);
+    // A re-read unticks whatever left the review.
+    this.reviewSel = keptSelection(report, this.reviewSel);
+    const first = this.reviewFirst;
+    this.reviewFirst = false;
+    this.renderTabs();
+    if (first && report.opensHere && this.tab === "inbox" && !this.card) {
+      this.show("review");
+      return;
+    }
+    if (this.tab === "review") this.renderKeepingFocus();
+  }
+
+  /** A notification's tap on an open app (sw.ts posts "open-inbox"): the review when the
+   * morning push was the last one and it has open items, else the Inbox (MR-12). */
+  async openFromNotification(): Promise<void> {
+    this.card = null;
+    const r = await this.read("/m/api/review");
+    const report = r && "body" in r ? parseReview(r.body) : null;
+    if (this.stopped) return;
+    if (report) this.review = report;
+    // Opened from a notification: nothing is ticked (review of #329, MED 2).
+    this.resetReviewSelection();
+    this.renderTabs();
+    this.show(report?.opensHere ? "review" : "inbox");
+  }
+
+  /** The review entered afresh: no box ticked, no confirmation open. */
+  private resetReviewSelection(): void {
+    if (this.reviewBusy) return;
+    this.reviewSel = emptySelection();
+    this.reviewConfirming = false;
+    this.reviewConfirmed = null;
+    this.reviewFlash = "";
+  }
+
+  private checkConfirmed(report: ReviewReport): void {
+    if (!this.reviewConfirming || !this.reviewConfirmed || this.reviewBusy) return;
+    const changed = confirmedChanged(report, this.reviewConfirmed);
+    if (!changed.length) return;
+    this.reviewConfirming = false;
+    this.reviewConfirmed = null;
+    const next = new Set(this.reviewSel);
+    for (const id of changed) {
+      next.delete(id);
+      this.notes.set(id, UNTICKED_GONE);
+    }
+    this.reviewSel = next;
+    this.reviewFlash = "Something you selected changed: nothing was approved. Look again, then confirm again.";
+  }
+
+  private renderTabs(): void {
+    this.tabs.review.hidden = !(this.tab === "review" || reviewTabShown(this.review));
+    const n = this.review?.open ?? 0;
+    this.tabs.review.textContent = n ? `Review · ${n}` : "Review";
+  }
+
+  /** One question, decision or proposal, answered in place; once sent it folds to a receipt where it stood. */
+  async answerInReview(item: ReviewItem, body: Record<string, unknown>): Promise<void> {
+    const row = item.row;
+    if (this.answering.has(row.id)) return;
+    this.answering.add(row.id);
+    this.notes.delete(row.id);
+    this.reviewFlash = "";
+    this.renderKeepingFocus();
+    const path = row.kind === "decision" && typeof row.detail.decision_id === "string"
+      ? `/m/api/inbox/decisions/${encodeURIComponent(row.detail.decision_id)}` : this.path(row.id, "answer");
+    const result = await this.post(path, body);
+    this.answering.delete(row.id);
+    if (result && result.status === 200) {
+      this.drafts.delete(row.id);
+      this.reviewPicks.delete(row.id);
+      this.withdrawing.delete(row.id);
+      const words = typeof result.body.note === "string" ? result.body.note
+        : row.kind === "proposal" ? "Withdrawn: the task will not start." : "Sent.";
+      this.reviewReceipts.set(row.id, { item, text: oneLineNote(words) });
+    } else if (result) {
+      this.notes.set(row.id, await this.refusedWith(result.status, result.body));
+    }
+    this.renderKeepingFocus();
+    void this.loadReview();
+    void this.loadInbox();
+  }
+
+  /** Leave it on one deferred row (the session only). */
+  async leaveInReview(row: InboxRow): Promise<void> {
+    const item = this.review ? allItems(this.review).find((i) => i.row.id === row.id) : undefined;
+    if (!item) return;
+    await this.answerInReview(item, { action: "leave" });
+  }
+
+  /** Approve selected, step two: one challenge for exactly the ticked set, the passkey once, then the set. */
+  async approveSelected(): Promise<void> {
+    const report = this.review;
+    if (!report || this.reviewBusy || !this.reviewConfirming || !this.reviewConfirmed) return;
+    // Exactly what the confirmation showed, and only while it still holds.
+    if (confirmedChanged(report, this.reviewConfirmed).length) { this.checkConfirmed(report); this.render(); return; }
+    const body = { items: this.reviewConfirmed.map((c) => ({ id: c.id, tag: c.tag })) };
+    this.reviewBusy = true;
+    this.reviewFlash = "";
+    this.render();
+    const done = async (result: { status: number; body: Record<string, unknown> } | null, words?: string) => {
+      this.reviewBusy = false;
+      this.reviewConfirming = false;
+      this.reviewConfirmed = null;
+      if (words !== undefined) this.reviewFlash = words;
+      else if (result && result.status === 200) {
+        const n = typeof result.body.approved === "number" ? result.body.approved : body.items.length;
+        this.reviewSel = emptySelection();
+        this.reviewFlash = `Approved ${n} once each, for 30 minutes; their chats were told.`;
+      } else if (result && result.status === 409 && Array.isArray(result.body.changed)) {
+        // All or nothing: what changed is unticked, with why; the rest need a new confirmation.
+        const after = afterChanged(this.reviewSel, result.body.changed);
+        this.reviewSel = after.selection;
+        for (const [id, words2] of after.notes) this.notes.set(id, words2);
+        this.reviewFlash = "Nothing was approved: something you selected changed. Look again, then confirm again.";
+      } else if (result) {
+        this.reviewFlash = "Nothing was approved. " + await this.refusedWith(result.status, result.body);
+      }
+      this.render();
+      void this.loadReview();
+      void this.loadInbox();
+    };
+    const options = await this.post("/m/api/review/approve/options", body);
+    if (!options || options.status !== 200) return done(options);
+    let assertion: Record<string, unknown> | null = null;
+    try {
+      const publicKey = options.body.publicKey;
+      assertion = publicKey && typeof publicKey === "object" ? await this.getCredential(publicKey as Record<string, unknown>) : null;
+    } catch {
+      assertion = null;
+    }
+    if (!assertion) return done(null, "Cancelled, or the passkey was not verified. Nothing was approved.");
+    return done(await this.post("/m/api/review/approve", { items: body.items, assertion }));
+  }
+
+  /** Leave selected: the session only, one result each. */
+  async leaveSelected(): Promise<void> {
+    const report = this.review;
+    if (!report || this.reviewBusy) return;
+    const body = leaveBody(report, this.reviewSel);
+    if (!body) return;
+    this.reviewBusy = true;
+    this.reviewFlash = "";
+    this.render();
+    const result = await this.post("/m/api/review/leave", body);
+    this.reviewBusy = false;
+    if (result && result.status === 200) {
+      const results = Array.isArray(result.body.results) ? result.body.results : [];
+      const left = results.filter((x) => x && typeof x === "object" && (x as { ok?: unknown }).ok === true).length;
+      this.reviewSel = emptySelection();
+      this.reviewFlash = `Left ${left} of ${body.items.length}: nothing was sent.`;
+    } else if (result) {
+      this.reviewFlash = "Not left. " + await this.refusedWith(result.status, result.body);
+    }
+    this.render();
+    void this.loadReview();
+    void this.loadInbox();
   }
 
   /** The inbox, drawn again, unless an answer is being typed (it waits for the box to lose focus). */
@@ -927,6 +1125,7 @@ export class PhoneApp {
   /** Everything the screen shows, read again (after the stream reconnects, or coming back online). */
   refreshVisible(): void {
     void this.loadInbox();
+    void this.loadReview();
     if (this.tab === "chats") {
       if (this.thread) void this.moreLog();
       void this.loadChats();
@@ -978,6 +1177,7 @@ export class PhoneApp {
   handle(event: StreamEvent): void {
     if (event.kind === "inbox_changed") {
       this.later("inbox", () => void this.loadInbox());
+      this.later("review", () => void this.loadReview());
       if (this.card && event.ids.includes(this.card.rowId)) this.later("card", () => void this.loadCard());
       if (this.tasks !== null && event.ids.some((id) => /^(task|prop|tq):/.test(id))) {
         this.later("tasks", () => void this.loadTasks());
@@ -1045,9 +1245,12 @@ export class PhoneApp {
     } else if (this.sheet && this.sheet.kind !== (tab === "chats" ? "chat" : tab === "tasks" ? "task" : "")) {
       this.sheet = null;
     }
+    // Entering the Review tab: nothing ticked, nothing confirmed (review of #329, MED 2).
+    if (tab === "review" && this.tab !== "review") this.resetReviewSelection();
     this.tab = tab;
     this.render();
     if (tab === "inbox") void this.loadInbox();
+    if (tab === "review") void this.loadReview();
     if (tab === "chats" && !this.thread) void this.loadChats();
     if (tab === "tasks" && !this.task) void this.loadTasks();
   }
@@ -1062,7 +1265,22 @@ export class PhoneApp {
       b.setAttribute("aria-selected", String(tab === this.tab));
     }
     this.renderBadge();
+    this.renderTabs();
     let view: HTMLElement;
+    if (this.tab === "review") {
+      view = reviewView({
+        report: this.review, selection: this.reviewSel, notes: this.notes, receipts: this.reviewReceipts,
+        busy: this.answering, groupBusy: this.reviewBusy, confirming: this.reviewConfirming, flash: this.reviewFlash,
+        drafts: this.drafts, picks: this.reviewPicks, withdrawing: this.withdrawing, online: this.online,
+      }, this.reviewActions(), this.secure && !this.secure.ok ? `limited: ${this.secure.label || "a check failed"}`
+        : this.review?.group && !this.review.group.ok ? (this.review.group.why || "limited") : null);
+      // The scroll holds where it was: a row answered in place folds where it stood.
+      const top = this.rendered === "review" ? this.main.scrollTop : 0;
+      this.main.replaceChildren(view);
+      this.main.scrollTop = top;
+      this.rendered = "review";
+      return;
+    }
     if (this.tab === "inbox" && this.card) {
       view = cardView(this.card, {
         back: () => this.closeCard(),
@@ -1152,6 +1370,51 @@ export class PhoneApp {
       view.prepend(tap("New task", () => this.openNewTask(), "quiet m-new", "m-new-task-open"));
     }
     this.main.replaceChildren(view);
+    this.rendered = this.tab;
+  }
+
+  private reviewActions(): ReviewActions {
+    return {
+      toggle: (item) => {
+        if (this.reviewBusy) return;
+        this.reviewSel = toggled(this.reviewSel, item.row.id, item);
+        // A tick changed under the confirmation: it closes; the set must be confirmed again.
+        this.reviewConfirming = false;
+        this.reviewConfirmed = null;
+        this.notes.delete(item.row.id);
+        this.render();
+      },
+      approveAsk: () => {
+        const body = !this.reviewBusy && this.review ? approveBody(this.review, this.reviewSel) : null;
+        if (!body) return;
+        this.reviewConfirmed = body.items;
+        this.reviewConfirming = true;
+        this.render();
+      },
+      approveConfirm: () => void this.approveSelected(),
+      approveCancel: () => { if (!this.reviewBusy) { this.reviewConfirming = false; this.reviewConfirmed = null; this.render(); } },
+      leaveSelected: () => void this.leaveSelected(),
+      retry: (row) => void this.retryDeferred(row).then(() => {
+        // Its words show here, on the review (retryDeferred writes the Inbox's line).
+        if (this.flash) { this.reviewFlash = this.flash; this.flash = ""; }
+        this.render();
+        void this.loadReview();
+      }),
+      leaveOne: (row) => void this.leaveInReview(row),
+      send: (item, body) => void this.answerInReview(item, body),
+      withdrawAsk: (row) => { this.withdrawing.add(row.id); this.notes.delete(row.id); this.render(); },
+      withdrawBack: (row) => { this.withdrawing.delete(row.id); this.render(); },
+      openCard: (row) => this.openCard(row),
+      open: (row) => {
+        if (row.thread_id) void this.openThread(row.thread_id);
+        else if (row.task_id) void this.openTask(row.task_id);
+      },
+      openInbox: () => this.show("inbox"),
+      jump: (anchor) => {
+        const target = this.main.querySelector<HTMLElement>("#" + CSS.escape(anchor));
+        target?.scrollIntoView({ block: "start" });
+      },
+    };
   }
 
   private nearEnd(): boolean {
@@ -1179,4 +1442,9 @@ export function startApp(deps: AppDeps): PhoneApp {
     });
   }
   return app;
+}
+
+/** A reply's note, as one line of the daemon's fixed words. */
+function oneLineNote(words: string): string {
+  return words.replace(/\s+/g, " ").trim().slice(0, 200);
 }

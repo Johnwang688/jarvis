@@ -139,6 +139,10 @@ export const Sidebar = memo(function Sidebar(props: {
    */
   inbox?: { count: number | null; pending: boolean; shown: boolean };
   onOpenInbox?: () => void;
+  /** The morning review's row, under the Inbox's (MR-10): `count` is what is open in
+   * it (null while unread); absent or null when the daemon has no review. */
+  review?: { count: number | null; shown: boolean } | null;
+  onOpenReview?: () => void;
 }) {
   const z = props.zoom ?? 100;
   const activity = props.activity ?? NO_ACTIVITY;
@@ -324,6 +328,24 @@ export const Sidebar = memo(function Sidebar(props: {
                   data-testid="owner-inbox-count" data-pending={props.inbox.pending ? "true" : "false"}>
               {props.inbox.count}
             </span>
+          ) : null}
+        </button>
+      ) : null}
+      {props.review && props.onOpenReview ? (
+        // The morning review (MR-10): what waited overnight, in one report. It
+        // only opens the view; it answers nothing.
+        <button
+          type="button"
+          className={"tree-row ownerreview" + (props.review.shown ? " sel" : "")}
+          data-testid="owner-review"
+          aria-label={props.review.count ? `Morning review, ${props.review.count} open` : "Morning review"}
+          title="What waited overnight, grouped by chat"
+          onClick={props.onOpenReview}
+        >
+          <span className="tw">☀</span>
+          <span className="nm">Morning review</span>
+          {props.review.count ? (
+            <span className="badge reviewcount" data-testid="owner-review-count">{props.review.count}</span>
           ) : null}
         </button>
       ) : null}

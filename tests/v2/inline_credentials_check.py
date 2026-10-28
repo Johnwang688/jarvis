@@ -713,7 +713,7 @@ class Cards(unittest.TestCase):
                 threading.Event().wait(0.01)
             router = object.__new__(DiscordRouter)
             router._lock = threading.Lock()
-            router.approvals, router.mirror = broker, None
+            router.approvals, router.mirror, router.daemon = broker, None, None
             router._approval_channels, router._approval_messages = {request.req_id: "dm"}, {}
             bodies = []
             router._announce = lambda *_: None
