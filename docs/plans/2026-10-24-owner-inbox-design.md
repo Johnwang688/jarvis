@@ -261,6 +261,8 @@ sees as waiting.
    only.**
 4. **PR scope:** **only PRs whose branch a Jarvis chat or task pushed**, or
    every open PR in each project's repo.
+   **Answered 2026-10-27:** every open, non-draft PR in each project's
+   GitHub repository. Built in B3 (IN-4, `jarvis/v2/inbox_prs.py`).
 5. **Import the existing runbooks and questions files once at launch?**
    **Yes, on the owner's confirm, file by file.**
 6. **Desktop notification when the HUD is not focused** (Windows toast via

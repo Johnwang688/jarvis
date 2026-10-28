@@ -778,7 +778,9 @@ class OwnerOnly(Base):
     # own path: files.py names "jarvis/v2/inbox.py" in SELF_PROTECTED.
     INBOX_SOURCE = ('/inbox"', "/inbox'", "/inbox/", "/inbox?", "jarvis.v2.inbox",
                     "from .inbox", "from . import inbox", "from .. import inbox", "import inbox",
-                    "inbox.answer", "inbox.rows", "inbox.route", "daemon.inbox", "_inbox.")
+                    "inbox.answer", "inbox.rows", "inbox.route", "daemon.inbox", "_inbox.",
+                    # B3 (IN-4): the PR list the daemon reads with the owner's gh.
+                    "import inbox_prs", "inbox_prs import", "PrSource", ".prs.rows", ".prs.poll")
 
     def test_no_tool_reaches_the_inbox(self):
         from jarvis import tools

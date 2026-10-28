@@ -40,7 +40,13 @@
 //     check's PRs are in the running build, its line shows and the marks are
 //     off (the daemon refuses them too, 409). Done (rank 8), the steps show
 //     their verdicts, and "Copy receipt" puts the Markdown receipt (made here
-//     from the row, `checkReceipt`) on the clipboard.
+//     from the row, `checkReceipt`) on the clipboard;
+//   - a pull request (inbox B3, IN-4): its title as text and "Open on
+//     GitHub", a plain link to the URL `prOf` validated (none otherwise). A
+//     click opens the page and answers nothing: merging stays the owner's
+//     own, on GitHub or under the merge gate;
+//   - "PR list unavailable" (B3): which repositories could not be read, and
+//     why, in the daemon's words. Never shown as "nothing waiting".
 // The head's "Import a runbook" reads a runbook under a project's
 // docs/plans/ into unsaved drafts (`POST /inbox/checks/import`); only the
 // owner's Save on one draft stores it as a check.
@@ -58,8 +64,8 @@ import { ApiError } from "../api";
 import type { ApprovalRequest } from "../types";
 import {
   ANSWERS_TEXT, CLOSING_MS, NOTE_MAX, PENDING_MAX_RANK, VERDICTS, approvalReq, briefOf, checkOf, checkReceipt, clockOf,
-  decisionBody, decisionOf, groupRows, linkOf, missedNote, parseDrafts, questionOf, waitingCount, withdrawHint,
-  withdrawUntil, type CheckDraft, type InboxRow, type Verdict,
+  decisionBody, decisionOf, groupRows, linkOf, missedNote, parseDrafts, prOf, prUnavailableOf, questionOf, waitingCount,
+  withdrawHint, withdrawUntil, type CheckDraft, type InboxRow, type Verdict,
 } from "../lib/inbox";
 import type { InboxSnapshot } from "../state/inbox";
 
@@ -486,6 +492,38 @@ export function InboxView(props: InboxViewProps) {
               </button>
             </div>
           ) : null}
+        </div>
+      );
+    }
+    const pull = prOf(row);
+    if (pull) {
+      return (
+        <div className="ir-body">
+          {pull.title ? <div className="ir-text" data-testid="inbox-pr-title">{pull.title}</div> : null}
+          {pull.url ? (
+            <div className="ir-answer">
+              <a className="ir-link" data-testid="inbox-pr-link" href={pull.url} target="_blank"
+                 rel="noopener noreferrer" aria-disabled={props.blocked ? "true" : undefined}
+                 // Under a card nothing opens: a click, a middle click (auxclick)
+                 // or Enter on the focused link (as BrowserTabStrip and EditorTabs).
+                 onClick={(e) => { if (blockedNow.current) e.preventDefault(); }}
+                 onAuxClick={(e) => { if (blockedNow.current) e.preventDefault(); }}
+                 onMouseDown={(e) => { if (blockedNow.current && e.button === 1) e.preventDefault(); }}
+                 onKeyDown={(e) => { if (blockedNow.current && e.key === "Enter") e.preventDefault(); }}>
+                Open on GitHub
+              </a>
+            </div>
+          ) : null}
+        </div>
+      );
+    }
+    const unread = prUnavailableOf(row);
+    if (unread) {
+      return (
+        <div className="ir-body">
+          {unread.map((r) => (
+            <div className="ir-when muted" key={r.repo} data-testid="inbox-pr-unavailable">{r.repo}: {r.reason}</div>
+          ))}
         </div>
       );
     }
