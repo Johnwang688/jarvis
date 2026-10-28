@@ -1830,10 +1830,13 @@ routes"). Not deployed: the owner's step is `jarvis hud rebuild` and a reload
   the row's own repo and number (checked again here). The one control is
   "Open on GitHub", a plain `<a target="_blank" rel="noopener noreferrer">`
   (none when the URL fails). A click on it opens the page and answers
-  nothing; under a card it is inert and the click is prevented. No chat or
-  task link. A `pr_unavailable` row ("PR list unavailable") lists each
-  repository and the daemon's reason (`prUnavailableOf`), is counted, and
-  so the view never says "Nothing is waiting on you" while it shows.
+  nothing. Under a card the row is inert, and a click, a middle click
+  (`auxclick`) or Enter on the link is prevented too. No chat or task link.
+  A repository name that is or starts with a dot is refused, as the
+  daemon's `github_repo` does. A `pr_unavailable` row ("PR list
+  unavailable" or "incomplete") lists each repository and the daemon's
+  reason (`prUnavailableOf`), is counted, and so the view never says
+  "Nothing is waiting on you" while it shows.
   Existing classes only. Tests: `components/InboxView.prs.test.ts` and the
   `prs` section of `tests/face/hud_v2_inbox_check.py`.
 - Tests: `lib/inbox.test.ts`, `state/inbox.test.ts`,

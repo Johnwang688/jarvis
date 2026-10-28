@@ -216,11 +216,12 @@ export function prOf(row: InboxRow): PrView | null {
   const repo = typeof d.repo === "string" ? d.repo : "";
   const parts = repo.split("/");
   const number = d.number;
-  if (parts.length !== 2 || !parts.every((p) => GH_NAME.test(p))) return null;
+  // As the daemon's `github_repo`: no `.`, `..` or other name starting with a dot.
+  if (parts.length !== 2 || !parts.every((p) => GH_NAME.test(p) && !p.startsWith("."))) return null;
   if (typeof number !== "number" || !Number.isInteger(number) || number < 1) return null;
   let url: string | null = null;
   const m = typeof d.url === "string" ? PR_URL.exec(d.url) : null;
-  if (m && `${m[1]}/${m[2]}`.toLowerCase() === repo.toLowerCase() && Number(m[3]) === number) url = d.url as string;
+  if (m && !m[1].startsWith(".") && !m[2].startsWith(".") && `${m[1]}/${m[2]}`.toLowerCase() === repo.toLowerCase() && Number(m[3]) === number) url = d.url as string;
   return { repo, number, title: oneLine(d.title, 300), url };
 }
 

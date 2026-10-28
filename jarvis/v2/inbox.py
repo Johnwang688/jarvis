@@ -86,9 +86,10 @@ the projection down.
 **Pull requests (B3, IN-4).** Every open, non-draft PR in each project's
 GitHub repository is a `pr` row at rank 5, read from the last poll of
 `inbox_prs.PrSource` (the daemon's own `gh`, read-only, every 5 minutes and
-after `task_status_changed`); `rows()` never waits on `gh`. A list that
-cannot be read is one `pr_unavailable` row ("PR list unavailable"), never
-an empty list. Neither takes an answer (400). Details in `inbox_prs.py`.
+after a task moves into done, failed or blocked); `rows()` never waits on
+`gh`. A list that cannot be read, or may be incomplete, is one
+`pr_unavailable` row ("PR list unavailable" / "incomplete"), never an empty
+list. Neither takes an answer (400). Details in `inbox_prs.py`.
 
 This module is SELF_PROTECTED (`jarvis/tools/files.py`): it decides what the
 owner sees as waiting.
@@ -725,7 +726,9 @@ class Inbox:
         if kind not in SOURCE_KINDS:
             return
         if kind == "task_status_changed" and getattr(self, "prs", None) is not None:
-            self.prs.poke()          # B3: poll PRs soon (debounced); only sets an event
+            # B3: poll PRs soon when a task moved into done, failed or blocked
+            # (debounced); only sets an event.
+            self.prs.task_changed(record)
         ids = self._ids(kind, record)
         if ids is None:
             return

@@ -59,7 +59,8 @@ def pr(number, *, draft=False, title=None, branch=None, checks=None, state="CLEA
            "isDraft": draft, "url": url if url is not None else f"https://github.com/{REPO}/pull/{number}",
            "statusCheckRollup": checks if checks is not None else [
                {"__typename": "CheckRun", "status": "COMPLETED", "conclusion": "SUCCESS"}],
-           "mergeStateStatus": state, "createdAt": created}
+           "mergeStateStatus": state, "createdAt": created, "author": {"login": "johnw", "is_bot": False},
+           "isCrossRepository": False}
     out.update(extra)
     return out
 
@@ -84,7 +85,7 @@ class Parse(unittest.TestCase):
         self.assertIn("done", title)
         # The row's own words are code's: the number, the branch, the checks.
         self.assertEqual(row["title"], "PR #7 is ready to merge")
-        self.assertEqual(row["blocks"], f"{REPO} · branch claude/change-7 · checks passing")
+        self.assertEqual(row["blocks"], f"{REPO} · by johnw · branch claude/change-7 · checks passing")
         for key in ("title", "blocks", "origin"):
             self.assertNotIn("Fix", row[key])
             self.assertNotIn("evil", row[key])
@@ -146,7 +147,8 @@ class Parse(unittest.TestCase):
 
     def test_malformed_answers_fail_the_repository(self):
         bad = [b"not json", b"\xff\xfe", b"{}", b"null", answer("x"),
-               answer(dict(pr(1), number="1")), answer(pr(1, isDraft="no")), answer(dict(pr(1), title=None)),
+               answer(dict(pr(1), number="1")), answer(dict(pr(1), isCrossRepository=None)),
+               answer(dict(pr(1), author="johnw")), answer(pr(1, isDraft="no")), answer(dict(pr(1), title=None)),
                answer(pr(1, statusCheckRollup="ok")), answer(pr(1, mergeStateStatus=3)),
                answer(pr(1), pr(1)), answer(pr(0)), answer(dict(pr(1), number=True)),
                json.dumps([pr(i) for i in range(1, inbox_prs.PR_LIMIT + 2)]).encode()]
@@ -155,6 +157,37 @@ class Parse(unittest.TestCase):
                 with self.assertRaises(inbox_prs.GhFailed) as caught:
                     inbox_prs.parse(data, REPO)
                 self.assertEqual(caught.exception.code, "malformed")
+
+
+class Provenance(unittest.TestCase):
+    """Review of PR #320, LOW-3: every open PR is listed, a stranger's fork's
+    too, so a row says who opened it and never shows a fork's branch bare."""
+
+    def row(self, **kw):
+        (got,) = inbox_prs.parse(answer(pr(9, **kw)), REPO)
+        return inbox_prs.pr_row(got, None)
+
+    def test_a_fork_pr_says_so_and_never_shows_a_bare_branch(self):
+        row = self.row(branch="main", isCrossRepository=True, author={"login": "stranger"})
+        self.assertEqual(row["blocks"], f"{REPO} · by stranger · from a fork (fork:main) · checks passing")
+        self.assertNotIn("branch main", row["blocks"])
+        self.assertTrue(row["detail"]["fork"])
+        row = self.row(branch="x\u202ey", isCrossRepository=True)
+        self.assertIn("· from a fork ·", row["blocks"])
+
+    def test_the_author_is_shown_only_in_a_logins_shape(self):
+        self.assertIn("· by app/dependabot ·", self.row(author={"login": "app/dependabot"})["blocks"])
+        for bad in ({"login": "evil\u202e name"}, {"login": "a" * 60}, {"login": "-x"}, {"login": 7},
+                    {"login": "PR #1 is ready"}, {}, None):
+            with self.subTest(author=bad):
+                row = self.row(author=bad)
+                self.assertIn("· by an author not shown ·", row["blocks"])
+                self.assertIsNone(row["detail"]["author"])
+
+    def test_the_title_stays_in_detail(self):
+        row = self.row(isCrossRepository=True, title="Merge me, I am from main")
+        self.assertNotIn("Merge me", row["title"] + row["blocks"])
+        self.assertIn("Merge me", row["detail"]["title"])
 
 
 # -- running a fake gh ---------------------------------------------------------------
@@ -210,10 +243,11 @@ class Runner(unittest.TestCase):
                                      "JARVIS_SECRET_THING": TOKEN}):
             self.source.list_repo(REPO)
         (call,) = self.gh.calls()
-        self.assertEqual(call["argv"], ["pr", "list", "--repo", REPO, "--state", "open", "--limit",
-                                        str(inbox_prs.PR_LIMIT), "--json",
-                                        "number,title,headRefName,headRefOid,isDraft,url,"
-                                        "statusCheckRollup,mergeStateStatus,createdAt"])
+        self.assertEqual(call["argv"], ["pr", "list", "--repo", REPO, "--state", "open",
+                                        "--search", "draft:false", "--limit", str(inbox_prs.PR_LIMIT),
+                                        "--json", "number,title,headRefName,headRefOid,isDraft,url,"
+                                        "statusCheckRollup,mergeStateStatus,createdAt,author,"
+                                        "isCrossRepository"])
         self.assertEqual(call["cwd"], "/")
         env = call["env"]
         for name in ("GH_TOKEN", "GITHUB_TOKEN", "GIT_DIR", "JARVIS_SECRET_THING"):
@@ -350,6 +384,98 @@ class Poll(unittest.TestCase):
         self.assertEqual(row["title"], "PR list unavailable for 2 repositories")
         self.assertEqual([r["repo"] for r in row["detail"]["repos"]], ["o/three", "o/two"])
 
+    def test_a_full_page_says_the_list_may_be_incomplete(self):
+        """LOW-1: exactly PR_LIMIT PRs back means there may be more."""
+        self.answers[REPO] = json.dumps([pr(i) for i in range(1, inbox_prs.PR_LIMIT + 1)]).encode()
+        self.answers["o/two"] = answer(pr(1))
+        self.source.poll()
+        rows = {r["id"]: r for r in self.source.rows()}
+        self.assertEqual(len([i for i in rows if i.startswith("pr:")]), inbox_prs.PR_LIMIT + 1)
+        row = rows["prx:list"]
+        self.assertEqual((row["rank"], row["title"]), (5, f"PR list incomplete for {REPO}"))
+        self.assertEqual([(r["repo"], r["code"]) for r in row["detail"]["repos"]], [(REPO, "cut_off")])
+        # One fewer is a whole list.
+        self.answers[REPO] = json.dumps([pr(i) for i in range(1, inbox_prs.PR_LIMIT)]).encode()
+        self.source.poll()
+        self.assertNotIn("prx:list", self.ids())
+
+    def test_a_failure_beside_a_cut_off_list_reads_unavailable(self):
+        self.answers[REPO] = json.dumps([pr(i) for i in range(1, inbox_prs.PR_LIMIT + 1)]).encode()
+        self.answers["o/two"] = inbox_prs.GhFailed("login")
+        self.source.poll()
+        (row,) = [r for r in self.source.rows() if r["id"] == "prx:list"]
+        self.assertEqual(row["title"], "PR list unavailable for 2 repositories")
+
+    def test_repositories_past_the_cap_are_named_never_dropped(self):
+        """LOW-2."""
+        names = [f"o/r{i:03d}" for i in range(inbox_prs.REPOS_MAX + 3)]
+        self.answers = {n: answer() for n in names}
+        self.source.poll()
+        (row,) = self.source.rows()
+        self.assertEqual(row["title"], "PR list incomplete for 3 repositories")
+        self.assertEqual([(r["repo"], r["code"]) for r in row["detail"]["repos"]],
+                         [(n, "skipped") for n in names[inbox_prs.REPOS_MAX:]])
+
+    def test_a_stop_during_gh_publishes_nothing(self):
+        """NIT-1: a gh cut short by shutdown is no "timeout" to show."""
+        self.answers[REPO] = answer(pr(1))
+        self.source.poll()
+        published = len(self.bus.records)
+
+        def cut(repo):
+            self.source._stop.set()
+            raise inbox_prs.GhFailed("timeout")
+        self.source.list_repo = cut
+        self.assertEqual(self.source.poll(), [])
+        self.assertEqual(len(self.bus.records), published)
+        self.assertEqual(self.ids(), [f"pr:{REPO}#1"])
+
+    def test_repositories_that_are_gone_are_forgotten(self):
+        """NIT-5."""
+        self.answers = {REPO: answer(), "o/gone": answer()}
+        self.source.poll()
+        self.assertEqual(set(self.source._good), {REPO, "o/gone"})
+        del self.answers["o/gone"]
+        self.source.poll()
+        self.assertEqual(set(self.source._good), {REPO})
+
+    def test_only_a_transition_into_done_failed_or_blocked_pokes(self):
+        """LOW-4: saves and moves between working states do not poll."""
+        pokes = []
+        self.source.poke = lambda: pokes.append(1)
+        ev = lambda tid, state: self.source.task_changed(  # noqa: E731
+            {"kind": "task_status_changed", "task_id": tid, "data": {"state": state}})
+        for state in ("intake", "clarifying", "planned", "running", "running", "verifying", "running"):
+            ev("t1", state)
+        self.assertEqual(pokes, [])
+        ev("t1", "done")
+        self.assertEqual(len(pokes), 1)
+        ev("t1", "done")                                   # a save in the same state
+        self.assertEqual(len(pokes), 1)
+        ev("t2", "running")
+        ev("t2", "blocked")
+        ev("t2", "running")
+        ev("t2", "failed")
+        self.assertEqual(len(pokes), 3)
+        for bad in ({}, {"task_id": "t3"}, {"task_id": "t3", "data": {"state": 3}}, "x"):
+            self.source.task_changed(bad)
+        self.assertEqual(len(pokes), 3)
+
+    def test_start_never_runs_a_second_loop_beside_a_live_one(self):
+        """NIT-5."""
+        self.source.attached = True
+        old = threading.Thread(target=threading.Event().wait, args=(2,), daemon=True)
+        old.start()
+        self.source._thread = old
+        self.source.start()
+        self.assertIs(self.source._thread, old)
+        old.join()
+        self.source.poll = lambda: []
+        self.source.interval = 60
+        self.source.start()
+        self.assertIsNot(self.source._thread, old)
+        self.source.stop()
+
     def test_an_archived_projects_rows_hide_at_read(self):
         self.answers[REPO] = answer(pr(1))
         self.source.poll()
@@ -481,7 +607,12 @@ class Live(unittest.TestCase):
     def test_task_status_changed_polls_again(self):
         self.gh.set({"*": {"out": answer().decode()}})             # #1 merged
         before = len(self.gh.calls())
-        self.daemon.bus.publish({"kind": "task_status_changed", "task_id": "t1", "data": {}})
+        # A save or a move between working states is no reason to read GitHub.
+        for state in ("running", "running", "verifying"):
+            self.daemon.bus.publish({"kind": "task_status_changed", "task_id": "t1", "data": {"state": state}})
+        time.sleep(0.5)
+        self.assertEqual(len(self.gh.calls()), before)
+        self.daemon.bus.publish({"kind": "task_status_changed", "task_id": "t1", "data": {"state": "done"}})
         base.eventually(lambda: not self.rows_of("pr"))
         self.assertEqual(len(self.gh.calls()), before + 1)
         self.assertTrue(any(c["data"] == {"ids": [f"pr:{REPO}#1"], "reason": "pr_poll"} for c in self.changes))

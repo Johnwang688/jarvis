@@ -80,6 +80,10 @@ describe("prOf", () => {
     expect(prOf(row({ repo: "a/b/c" }))).toBeNull();
     expect(prOf(row({ number: "7" }))).toBeNull();
     expect(prOf(row({ number: 0 }))).toBeNull();
+    // As the daemon's `github_repo`: no name that is or starts with a dot.
+    for (const repo of ["./x", "../x", "o/.", "o/..", ".hidden/r", "o/.git"]) {
+      expect(prOf(row({ repo, url: `https://github.com/${repo}/pull/7` })), repo).toBeNull();
+    }
   });
 
   it("takes the title as one line with format characters out", () => {
@@ -125,12 +129,26 @@ describe("the view", () => {
     expect(rowOf(`pr:${REPO}#7`).querySelector('[data-testid="inbox-pr-link"]')).toBeNull();
   });
 
-  it("follows no link under a card", () => {
+  it("follows no link under a card: click, middle click or Enter", () => {
     draw([prRow()], { blocked: true });
     const link = rowOf(`pr:${REPO}#7`).querySelector('[data-testid="inbox-pr-link"]') as HTMLAnchorElement;
-    const click = new MouseEvent("click", { bubbles: true, cancelable: true });
-    act(() => { link.dispatchEvent(click); });
-    expect(click.defaultPrevented).toBe(true);
+    const events = [new MouseEvent("click", { bubbles: true, cancelable: true }),
+                    new MouseEvent("auxclick", { bubbles: true, cancelable: true, button: 1 }),
+                    new MouseEvent("mousedown", { bubbles: true, cancelable: true, button: 1 }),
+                    new KeyboardEvent("keydown", { bubbles: true, cancelable: true, key: "Enter" })];
+    for (const ev of events) {
+      act(() => { link.dispatchEvent(ev); });
+      expect(ev.defaultPrevented, ev.type).toBe(true);
+    }
+  });
+
+  it("follows its link when no card is up", () => {
+    draw([prRow()]);
+    const link = rowOf(`pr:${REPO}#7`).querySelector('[data-testid="inbox-pr-link"]') as HTMLAnchorElement;
+    const aux = new MouseEvent("auxclick", { bubbles: true, cancelable: true, button: 1 });
+    const key = new KeyboardEvent("keydown", { bubbles: true, cancelable: true, key: "Enter" });
+    act(() => { link.dispatchEvent(aux); link.dispatchEvent(key); });
+    expect(aux.defaultPrevented || key.defaultPrevented).toBe(false);
   });
 
   it("says the PR list is unavailable, and never 'Nothing waiting'", () => {

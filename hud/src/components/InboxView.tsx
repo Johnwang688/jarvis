@@ -350,7 +350,12 @@ export function InboxView(props: InboxViewProps) {
             <div className="ir-answer">
               <a className="ir-link" data-testid="inbox-pr-link" href={pull.url} target="_blank"
                  rel="noopener noreferrer" aria-disabled={props.blocked ? "true" : undefined}
-                 onClick={(e) => { if (blockedNow.current) e.preventDefault(); }}>
+                 // Under a card nothing opens: a click, a middle click (auxclick)
+                 // or Enter on the focused link (as BrowserTabStrip and EditorTabs).
+                 onClick={(e) => { if (blockedNow.current) e.preventDefault(); }}
+                 onAuxClick={(e) => { if (blockedNow.current) e.preventDefault(); }}
+                 onMouseDown={(e) => { if (blockedNow.current && e.button === 1) e.preventDefault(); }}
+                 onKeyDown={(e) => { if (blockedNow.current && e.key === "Enter") e.preventDefault(); }}>
                 Open on GitHub
               </a>
             </div>

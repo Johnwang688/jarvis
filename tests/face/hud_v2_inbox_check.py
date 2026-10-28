@@ -589,6 +589,31 @@ def _pr_checks(page, mock, check, until):
     check("a click on a PR row posts nothing and opens nothing",
           len(_answers(mock)) == posts and len(_decided(mock)) == decided
           and page.locator(_pane(1)).get_attribute("data-view") == "inbox")
+    # Under a card the PR row is inert: a trusted click, a middle click or
+    # Enter on its link opens no page (review of PR #320, NIT-2).
+    c = card("prcard0001")
+    mock.world["approvals"].append(c)
+    mock.emit("approval_requested", c)
+    cardloc = page.locator('[data-testid="approval-card"]')
+    until(lambda: cardloc.count() == 1, timeout=4)
+    opened = []
+    page.context.on("page", lambda p: opened.append(p))
+    check("under a card the PR row is inert [mutation: not inert]",
+          r7.evaluate("e => !!e.closest('[inert]')"))
+    box = link.bounding_box()
+    if box:
+        x, y = box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
+        page.mouse.click(x, y)
+        page.mouse.click(x, y, button="middle")
+    link.evaluate("e => e.focus()")
+    page.keyboard.press("Enter")
+    time.sleep(0.5)
+    for p in opened:
+        p.close()
+    check("a click, a middle click or Enter on its link under the card opens nothing [mutation: no auxclick guard]",
+          not opened and cardloc.count() == 1, f"{len(opened)} pages opened")
+    page.keyboard.press("Escape")
+    until(lambda: cardloc.count() == 0, timeout=4)
     unavailable = {"id": "prx:list", "kind": "pr_unavailable", "rank": 5,
                    "title": "PR list unavailable for 1 repository", "blocks": "open pull requests may be waiting",
                    "project_id": None, "thread_id": None, "task_id": None, "asked_at": None, "expires_at": None,

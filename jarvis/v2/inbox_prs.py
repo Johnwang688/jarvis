@@ -5,8 +5,10 @@ GitHub repository**, not only the ones Jarvis pushed).
 
 **Where it runs.** In the daemon process, never in an agent's shell, on a
 thread of its own (`PrSource`): every `POLL_INTERVAL_S` (5 minutes), and
-`DEBOUNCE_S` after a `task_status_changed` (`Inbox.observe` calls `poke`,
-which only sets an event). A poll lists each repository with the owner's
+`DEBOUNCE_S` after a task moves into DONE, FAILED or BLOCKED
+(`Inbox.observe` hands each `task_status_changed` to `task_changed`, which
+remembers each task's last state and pokes only on such a transition; a
+poke only sets an event). A poll lists each repository with the owner's
 `gh` login. `GET /inbox` reads only the last finished poll's snapshot under
 this module's own lock, which no `gh` call ever holds, so a slow `gh` never
 stalls the inbox, and `Daemon.start()` only starts the thread. Nothing runs
@@ -14,14 +16,19 @@ until `attach_system()` (daemon2's `main()` only), as `remote_secure` does:
 an embedded or a test daemon never runs `gh` and has no PR rows.
 
 **Which repository.** Each project that is not archived: its root's git
-metadata validated without running git (`codex_config.git_dirs`), then
-`remote.origin.url` read from a private copy of the repository's config
-with no includes (`chat_git._origin_url`), then `chat_git.github_repo`
-(github.com only, `OWNER/REPO`). Anything else is skipped: not a GitHub
-repository. Two projects on one repository list it once.
+metadata validated without running git in the repository
+(`codex_config.git_dirs` reads files only), then `remote.origin.url` read
+by one hardened `git config --file <private copy> --no-includes` run in an
+empty home, never in the repository (`chat_git._origin_url`), then
+`chat_git.github_repo` (github.com only, `OWNER/REPO`). Anything else is
+skipped: not a GitHub repository. Two projects on one repository list it
+once. At most `REPOS_MAX` repositories are read; the rest are named in the
+"incomplete" row below, never dropped silently.
 
 **How `gh` is called.** Read-only and exact: `gh pr list --repo OWNER/REPO
---state open --limit PR_LIMIT --json <FIELDS>`, no shell, in `/`, with
+--state open --search draft:false --limit PR_LIMIT --json <FIELDS>` (drafts
+left out by the query, so they never use up the limit, and dropped again
+here), no shell, in `/`, with
 `chat_git._owner_env()` (the owner's HOME and PATH, no GIT_*, prompts and
 pagers off) and nothing else. Its error output is never read (it could
 carry a token); a timeout (`GH_TIMEOUT_S`), output past `OUTPUT_CAP`, a
@@ -31,8 +38,10 @@ words (`REASONS`).
 
 **What a row says.** Rank 5 (`RANK_PR`). `title` and `blocks` are built
 here from validated fields only: the number, the merge state, the checks
-summary (`passing`, `failing`, `pending` or `none`), the branch (when
-`chat_git.valid_branch` accepts it) and the repository. The PR's own title
+summary (`passing`, `failing`, `pending` or `none`), the repository, the
+author's login (when it has GitHub's login shape) and the branch (when
+`chat_git.valid_branch` accepts it). A PR from a fork says "from a fork"
+and shows its branch only as `fork:<branch>`, never as a bare branch name. The PR's own title
 is untrusted text: scrubbed, cleaned as decisions are
 (`decisions.display_text`), scrubbed again and capped, and only in
 `detail.title`. `detail.url` is the PR's URL only when it is exactly
@@ -47,7 +56,10 @@ last good list is **dropped, not kept stale**: a PR merged meanwhile must
 never show as waiting), and one row says so: `prx:list`, rank 5, "PR list
 unavailable", naming how many repositories, with each repository, its
 reason and when it last read well in `detail`. So an empty list is never
-presented as "nothing waiting".
+presented as "nothing waiting". A list that may be cut off (exactly
+`PR_LIMIT` PRs came back) or a repository past `REPOS_MAX` that was not
+read is named in the same row ("PR list incomplete" when nothing failed),
+also counted.
 
 **Freshness.** Each poll replaces the snapshot. A PR merged or closed is
 gone after the next poll. `inbox_changed` `{ids, reason: "pr_poll"}` is
@@ -84,7 +96,10 @@ OUTPUT_CAP = 2 * 1024 * 1024
 PR_LIMIT = 100
 REPOS_MAX = 50
 FIELDS = ("number", "title", "headRefName", "headRefOid", "isDraft", "url",
-          "statusCheckRollup", "mergeStateStatus", "createdAt")
+          "statusCheckRollup", "mergeStateStatus", "createdAt", "author", "isCrossRepository")
+# A task moving into one of these may have opened or merged a PR: poll soon.
+POKE_STATES = frozenset({"done", "failed", "blocked"})
+_TASKS_SEEN_MAX = 2048
 TITLE_MAX = 300
 
 # Each failure in this module's own words: never `gh`'s output.
@@ -96,8 +111,15 @@ REASONS = {
     "exit": "gh failed",
     "malformed": "gh's answer could not be read",
     "error": "gh could not be run",
+    # Not failures: the list is read, but may not be whole.
+    "cut_off": f"it has {PR_LIMIT} or more open PRs; only the first {PR_LIMIT} are shown",
+    "skipped": f"not read: Jarvis reads at most {REPOS_MAX} repositories",
 }
+_INCOMPLETE = frozenset({"cut_off", "skipped"})
+_DETAIL_REPOS_MAX = 100
 
+# A GitHub login, or gh's "app/<name>" for an app's PRs.
+_LOGIN = re.compile(r"^(?:app/)?[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})(?:\[bot\])?$")
 _SHA = re.compile(r"^[0-9a-f]{40}([0-9a-f]{24})?$")
 _URL = re.compile(r"^https://github\.com/([A-Za-z0-9_.-]{1,100})/([A-Za-z0-9_.-]{1,100})/pull/([1-9][0-9]{0,9})$")
 _MERGE_STATES = frozenset({"BEHIND", "BLOCKED", "CLEAN", "DIRTY", "DRAFT", "HAS_HOOKS", "UNKNOWN", "UNSTABLE"})
@@ -117,8 +139,8 @@ class GhFailed(Exception):
 # -- running gh -----------------------------------------------------------------------
 
 def gh_argv(gh: str, repo: str) -> list[str]:
-    return [gh, "pr", "list", "--repo", repo, "--state", "open", "--limit", str(PR_LIMIT),
-            "--json", ",".join(FIELDS)]
+    return [gh, "pr", "list", "--repo", repo, "--state", "open", "--search", "draft:false",
+            "--limit", str(PR_LIMIT), "--json", ",".join(FIELDS)]
 
 
 def run_bounded(argv: list[str], env: dict, *, timeout: float, cap: int,
@@ -240,8 +262,14 @@ def pr_url(url, repo: str, number: int) -> str | None:
 
 
 def parse(data: bytes, repo: str) -> list[dict]:
-    """The open, non-draft PRs in `gh`'s answer, each validated; GhFailed
-    ("malformed") when the answer, or any PR in it, is not of that shape."""
+    """The open, non-draft PRs in `gh`'s answer (`read`'s list)."""
+    return read(data, repo)[0]
+
+
+def read(data: bytes, repo: str) -> tuple[list[dict], bool]:
+    """(the open, non-draft PRs in `gh`'s answer, each validated; whether the
+    list may be cut off: `PR_LIMIT` PRs came back). GhFailed ("malformed")
+    when the answer, or any PR in it, is not of that shape."""
     from .chat_git import valid_branch
     try:
         items = json.loads(data.decode("utf-8"))
@@ -264,6 +292,10 @@ def parse(data: bytes, repo: str) -> list[dict]:
             raise GhFailed("malformed")
         if not isinstance(state, str) or len(title) > 10_000:
             raise GhFailed("malformed")
+        author, fork = item.get("author"), item.get("isCrossRepository")
+        if not isinstance(fork, bool) or not (author is None or isinstance(author, dict)):
+            raise GhFailed("malformed")
+        login = author.get("login") if isinstance(author, dict) else None
         checks = checks_summary(item.get("statusCheckRollup"))
         if draft:
             continue
@@ -277,6 +309,8 @@ def parse(data: bytes, repo: str) -> list[dict]:
         out.append({
             "repo": repo, "number": number,
             "branch": branch if len(branch) <= 120 and valid_branch(branch) else None,
+            "author": login if isinstance(login, str) and _LOGIN.fullmatch(login) else None,
+            "fork": fork,
             "head": head if _SHA.fullmatch(head) else None,
             "checks": checks,
             "merge_state": state if state in _MERGE_STATES else "UNKNOWN",
@@ -284,7 +318,7 @@ def parse(data: bytes, repo: str) -> list[dict]:
             "url": pr_url(item.get("url"), repo, number),
             "created_at": at.astimezone(timezone.utc).isoformat(timespec="seconds") if at else None,
         })
-    return out
+    return out, len(items) >= PR_LIMIT
 
 
 # -- the rows -------------------------------------------------------------------------------
@@ -308,25 +342,40 @@ def _headline(pr) -> str:
 
 def pr_row(pr, project_id) -> dict:
     from .inbox import _row
-    branch = f"branch {pr['branch']}" if pr["branch"] else "branch name not shown"
-    blocks = f"{pr['repo']} · {branch} · checks {pr['checks']}"
+    if pr["fork"]:
+        # Never a bare branch name: a fork's `main` is not this repo's `main`.
+        branch = f"from a fork (fork:{pr['branch']})" if pr["branch"] else "from a fork"
+    else:
+        branch = f"branch {pr['branch']}" if pr["branch"] else "branch name not shown"
+    author = f"by {pr['author']}" if pr["author"] else "by an author not shown"
+    blocks = f"{pr['repo']} · {author} · {branch} · checks {pr['checks']}"
     return _row("pr", RANK_PR, f"pr:{pr['repo']}#{pr['number']}", _headline(pr), blocks,
                 project_id=project_id, asked_at=pr["created_at"],
                 detail={"repo": pr["repo"], "number": pr["number"], "title": pr["title"],
-                        "branch": pr["branch"], "head": pr["head"], "checks": pr["checks"],
+                        "branch": pr["branch"], "author": pr["author"], "fork": pr["fork"],
+                        "head": pr["head"], "checks": pr["checks"],
                         "merge_state": pr["merge_state"], "url": pr["url"]})
 
 
 def unavailable_row(failures: dict) -> dict:
+    """One row for every repository that could not be read, or was read
+    only in part (`cut_off`) or not at all (`skipped`). "unavailable" when any
+    failed, else "incomplete". Counted either way (rank 5)."""
     from .inbox import _row
     n = len(failures)
     repos = sorted(failures)
-    title = (f"PR list unavailable for {repos[0]}" if n == 1
-             else f"PR list unavailable for {n} repositories")
-    return _row("pr_unavailable", RANK_PR, "prx:list", title,
-                "open pull requests may be waiting; they cannot be read now",
-                detail={"repos": [{"repo": r, "reason": REASONS[failures[r]["code"]],
-                                   "last_read": failures[r]["last_read"]} for r in repos]})
+    failed = any(failures[r]["code"] not in _INCOMPLETE for r in repos)
+    word = "unavailable" if failed else "incomplete"
+    title = (f"PR list {word} for {repos[0]}" if n == 1
+             else f"PR list {word} for {n} repositories")
+    blocks = ("open pull requests may be waiting; they cannot be read now" if failed
+              else "more open pull requests may be waiting; not all could be listed")
+    shown = repos[:_DETAIL_REPOS_MAX]
+    return _row("pr_unavailable", RANK_PR, "prx:list", title, blocks,
+                detail={"repos": [{"repo": r, "code": failures[r]["code"],
+                                   "reason": REASONS[failures[r]["code"]],
+                                   "last_read": failures[r]["last_read"]} for r in shown],
+                        "more": n - len(shown)})
 
 
 # -- the source --------------------------------------------------------------------------
@@ -354,8 +403,7 @@ def project_repos(daemon) -> dict[str, list[str]]:
         if repo is None:
             continue
         key = next((k for k in out if k.lower() == repo.lower()), repo)
-        if key in out or len(out) < REPOS_MAX:
-            out.setdefault(key, []).append(project.id)
+        out.setdefault(key, []).append(project.id)
     return out
 
 
@@ -381,6 +429,7 @@ class PrSource:
         self._wake = threading.Event()
         self._thread: threading.Thread | None = None
         self._last_poll = 0.0
+        self._task_states: dict[str, str] = {}
 
     # -- attaching and the schedule -------------------------------------------------
 
@@ -399,8 +448,12 @@ class PrSource:
 
     def start(self) -> None:
         """Starts the thread when attached; never polls on the caller's thread."""
-        if not self.attached or self._thread is not None:
+        if not self.attached:
             return
+        if self._thread is not None:
+            if self._thread.is_alive():
+                return          # running, or a stopped one not yet gone: never two
+            self._thread = None
         self._stop.clear()
 
         def loop():
@@ -421,15 +474,35 @@ class PrSource:
         self._thread.start()
 
     def poke(self) -> None:
-        """A `task_status_changed`: poll soon (debounced). Never blocks."""
+        """Poll soon (debounced). Never blocks."""
         self._wake.set()
+
+    def task_changed(self, record) -> None:
+        """A `task_status_changed`: poke only when the task's state changed into
+        one of `POKE_STATES` (the event carries the new state only, and fires
+        on plain saves too, so the last state seen is remembered here)."""
+        data = record.get("data") if isinstance(record, dict) else None
+        task_id = record.get("task_id") if isinstance(record, dict) else None
+        state = data.get("state") if isinstance(data, dict) else None
+        if not isinstance(task_id, str) or not isinstance(state, str):
+            return
+        with self._lock:
+            before = self._task_states.get(task_id)
+            if len(self._task_states) >= _TASKS_SEEN_MAX and task_id not in self._task_states:
+                self._task_states.clear()
+            self._task_states[task_id] = state
+        if state != before and state in POKE_STATES:
+            self.poke()
 
     def stop(self) -> None:
         self._stop.set()
         self._wake.set()
-        thread, self._thread = self._thread, None
+        thread = self._thread
         if thread is not None:
             thread.join(5)
+            # One still running (a gh that would not die) stays named, so
+            # `start` never runs a second loop beside it.
+            self._thread = thread if thread.is_alive() else None
 
     # -- the poll -------------------------------------------------------------------
 
@@ -438,15 +511,16 @@ class PrSource:
         `inbox_changed` when a row came, went or changed. Returns those ids."""
         with self._poll_lock:
             self._last_poll = time.monotonic()
-            repos = self.repos(self.daemon)
+            found = list(self.repos(self.daemon).items())
+            repos, skipped = dict(found[:REPOS_MAX]), [r for r, _ in found[REPOS_MAX:]]
             now = self.clock().isoformat(timespec="seconds")
             fresh: dict[str, dict] = {}
-            failures: dict[str, dict] = {}
+            failures: dict[str, dict] = {r: {"code": "skipped", "last_read": None} for r in skipped}
             for repo, project_ids in repos.items():
                 if self._stop.is_set():
                     return []
                 try:
-                    prs = parse(self.list_repo(repo), repo)
+                    prs, cut_off = read(self.list_repo(repo), repo)
                 except GhFailed as exc:
                     failures[repo] = {"code": exc.code, "last_read": self._good.get(repo)}
                     continue
@@ -455,10 +529,16 @@ class PrSource:
                     failures[repo] = {"code": "error", "last_read": self._good.get(repo)}
                     continue
                 self._good[repo] = now
+                if cut_off:
+                    failures[repo] = {"code": "cut_off", "last_read": now}
                 project_id = project_ids[0] if len(project_ids) == 1 else None
                 for pr in prs:
                     row = pr_row(pr, project_id)
                     fresh[row["id"]] = row
+            if self._stop.is_set():
+                return []           # shutting down: a cut-short gh is no "timeout" to show
+            # Repositories no longer read are forgotten.
+            self._good = {r: t for r, t in self._good.items() if r in repos}
             if failures:
                 row = unavailable_row(failures)
                 fresh[row["id"]] = row
