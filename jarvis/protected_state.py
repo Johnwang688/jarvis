@@ -209,9 +209,57 @@ _OUTPUT_OPTS = {"curl": ("-o", "--output", "--output-dir"),
 # rest of the cluster would be that value: not read as an output.
 _OUTPUT_FLAGS = {"curl": frozenset("sSLkfviIOnNqgGjJlRpZ#012346"),
                  "wget": frozenset("qvcNSrkKpmEFxb")}
+# Options that do take a value, as (short letters, long options): the rest of
+# the cluster, or else the next word, is that value and is never read as an
+# option (review of PR #316: `curl -H -so P` sends a header `-so` and writes
+# nothing). An option in neither table is read as taking none, so the word
+# after it is still read as itself: the stricter reading.
+_OPTION_VALUES = {
+    "curl": (frozenset("AbcCdDeEFHKmPQrtTuUwxXyYz"), frozenset({
+        "--header", "--proxy-header", "--data", "--data-ascii", "--data-binary", "--data-raw",
+        "--data-urlencode", "--json", "--form", "--form-string", "--user", "--proxy-user",
+        "--user-agent", "--referer", "--cookie", "--cookie-jar", "--request", "--request-target",
+        "--proxy", "--preproxy", "--noproxy", "--url", "--url-query", "--upload-file",
+        "--write-out", "--config", "--dump-header", "--range", "--continue-at", "--max-time",
+        "--connect-timeout", "--retry", "--retry-delay", "--retry-max-time", "--limit-rate",
+        "--max-filesize", "--max-redirs", "--speed-limit", "--speed-time", "--time-cond",
+        "--cert", "--cert-type", "--key", "--key-type", "--pass", "--cacert", "--capath",
+        "--crlfile", "--pinnedpubkey", "--ciphers", "--resolve", "--connect-to", "--interface",
+        "--local-port", "--quote", "--telnet-option", "--ftp-port", "--oauth2-bearer",
+        "--proto", "--proto-redir", "--proto-default", "--stderr", "--trace", "--trace-ascii",
+        "--libcurl", "--netrc-file", "--unix-socket", "--abstract-unix-socket", "--variable",
+        "--aws-sigv4", "--mail-from", "--mail-rcpt", "--mail-auth", "--etag-save",
+        "--etag-compare", "--hsts", "--alt-svc", "--doh-url", "--socks4", "--socks4a",
+        "--socks5", "--socks5-hostname", "--rate", "--parallel-max", "--create-file-mode"})),
+    "wget": (frozenset("oaeiBtTwQUDRAIXl"), frozenset({
+        "--output-file", "--append-output", "--execute", "--input-file", "--base", "--config",
+        "--tries", "--timeout", "--dns-timeout", "--connect-timeout", "--read-timeout",
+        "--wait", "--waitretry", "--quota", "--bind-address", "--limit-rate", "--user",
+        "--password", "--ftp-user", "--ftp-password", "--http-user", "--http-password",
+        "--proxy-user", "--proxy-password", "--header", "--post-data", "--post-file",
+        "--body-data", "--body-file", "--method", "--referer", "--user-agent",
+        "--load-cookies", "--save-cookies", "--cut-dirs", "--default-page", "--level",
+        "--accept", "--reject", "--accept-regex", "--reject-regex", "--domains",
+        "--exclude-domains", "--include-directories", "--exclude-directories",
+        "--certificate", "--private-key", "--ca-certificate", "--ca-directory",
+        "--secure-protocol", "--restrict-file-names", "--progress"})),
+}
 # GNU tar's short options that take a value: in a dash cluster the rest of
-# it is that value (`-xzf A`), so no function letter is read past one.
+# it is that value (`-xzf A`), so no function letter is read past one; in
+# the old bundled form (`tar xfC A D`) each takes the next word, in order.
 _TAR_SHORT_ARG = frozenset("bCfFgHIKLNTVX")
+# GNU tar's long options that take a value (as `--opt=V` or `--opt V`).
+_TAR_LONG_ARG = frozenset({
+    "--file", "--directory", "--exclude", "--exclude-from", "--files-from", "--label",
+    "--to-command", "--use-compress-program", "--transform", "--xform", "--owner",
+    "--group", "--mode", "--mtime", "--newer", "--after-date", "--newer-mtime", "--format",
+    "--blocking-factor", "--record-size", "--tape-length", "--info-script",
+    "--new-volume-script", "--rmt-command", "--rsh-command", "--volno-file",
+    "--checkpoint-action", "--index-file", "--listed-incremental", "--suffix",
+    "--strip-components", "--starting-file", "--level", "--quoting-style", "--quote-chars",
+    "--no-quote-chars", "--sparse-version", "--pax-option", "--hole-detection", "--warning",
+    "--add-file", "--exclude-tag", "--exclude-tag-all", "--exclude-tag-under", "--group-map",
+    "--owner-map", "--sort", "--xattrs-include", "--xattrs-exclude"})
 # unzip's modes that list, test or print rather than extract.
 _UNZIP_NO_WRITE = frozenset("lptvzcZ")
 
@@ -231,6 +279,16 @@ def _record_spellings(path: Path) -> tuple[str, ...]:
     return tuple(dict.fromkeys(out))
 
 
+# A call on Node's `fs` module: `fs.`, `fsp.`, `fs.promises.`, `require('fs').`
+# (`node:fs`, `fs/promises` too).
+_FS_RECEIVER = (r"""(?:\bfsp?|\bfs\s*\.\s*promises|\brequire\s*\(\s*['"](?:node:)?fs(?:/promises)?['"]\s*\))"""
+                r"\s*\.\s*")
+# Names destructured from it: `const {a, b} = require('fs')`, `import {a}
+# from 'node:fs/promises'`. One brace pair, never nested: linear to scan.
+_FS_DESTRUCTURE = re.compile(
+    r"""\{([^{}]*)\}\s*(?:=\s*require\s*\(\s*|from\s*)['"](?:node:)?fs(?:/promises)?['"]""")
+
+
 def _source_writes(source: str, spellings: tuple[str, ...]) -> bool:
     """Whether inline source writes a path spelled (`spellings`) as a
     string literal at or below one of them: a write form called on it, not
@@ -241,6 +299,7 @@ def _source_writes(source: str, spellings: tuple[str, ...]) -> bool:
     pfx = r"[rRbBfFuU]{0,2}"
     # A copy's or a move's first argument: one literal, or a plain name.
     arg = rf"""(?:{pfx}(?:'[^']*'|"[^"]*")|[\w.]+)"""
+    destructured: set[str] | None = None     # names taken from `fs` by destructuring
     for spelled in spellings:
         lit = rf"""{pfx}(['"]){re.escape(spelled)}(?:/[^'"]*)?\1"""
         mode = rf"""\s*,\s*(?:mode\s*=\s*)?{pfx}['"][^'"]*[wax+]"""
@@ -252,7 +311,11 @@ def _source_writes(source: str, spellings: tuple[str, ...]) -> bool:
             # only it is read (`shutil.copy(P, "/tmp/x")`), and not seen here.
             rf"(?:shutil\.(?:copy|copyfile|copy2|copytree|move)|os\.(?:rename|renames|replace))"
             rf"\s*\(\s*{arg}\s*,\s*(?:dst\s*=\s*)?{lit}",
-            rf"\b(?:copyFile|rename)(?:Sync)?\s*\(\s*{arg}\s*,\s*{lit}",
+            # Node's on its `fs` (`fs.`, `fsp.`, `fs.promises.`, `require('fs').`):
+            # a bare `rename(` is any library's (`df.rename(cols, P)`; review
+            # of PR #316). Called bare, it counts only when destructured from
+            # `fs` in the same source (below).
+            rf"{_FS_RECEIVER}(?:copyFile|rename)(?:Sync)?\s*\(\s*{arg}\s*,\s*{lit}",
             rf"(?:Path|File)\s*\(\s*{lit}\s*\)\s*\.\s*(?:write_text|write_bytes|unlink|touch|"
             rf"rename|replace|mkdir|chmod|symlink_to|hardlink_to|rmdir|open\s*\(\s*['\"][^'\"]*[wax+])",
             rf"\b(?:writeFile|appendFile|createWriteStream|unlink|rmdir|rm|rename|truncate|chmod|"
@@ -268,122 +331,257 @@ def _source_writes(source: str, spellings: tuple[str, ...]) -> bool:
         )
         if any(re.search(form, source) for form in forms):
             return True
+        # (No group of its own before `lit`: its quote is group 1.)
+        for call in re.finditer(rf"(?<![\w.$])(?:copyFile|rename)(?:Sync)?\s*\(\s*{arg}\s*,\s*{lit}",
+                                source):
+            # `const {copyFileSync} = require('fs'); copyFileSync(src, P)`,
+            # `import {rename} from 'fs/promises'; await rename(src, P)`.
+            if destructured is None:
+                destructured = {w for names in _FS_DESTRUCTURE.findall(source)
+                                for w in re.findall(r"\w+", names)}
+            if re.match(r"\w+", call.group(0)).group(0) in destructured:
+                return True
     return False
 
 
-def _record_sure(stem: str, tokens: list[str], operand: str, text: str, written: list[str],
-                 copier_ok: bool, hazard: rules.Hazard | None, named: set[str]) -> bool:
-    """Whether `operand`, handed to `stem` and judged a write candidate, is
-    provably written — the rule for Jarvis's records (review of PR #315).
-    An interpreter, a shell, an editor or an unknown program given a record's
-    path is not (it asks, as on main); neither is a copy's source, or a
-    symlink made *to* a record file (it writes nothing there; a write through
-    it is judged by where it leads). `tar` and `unzip` are only when
-    extracting into it (`tar xf A -C P`, `unzip A -d P`); listing an archive
-    or making one from it is a read."""
-    if operand in named:
-        return True                          # `sort -o F`, a sed `w F`, `-exec … -o F`
+@dataclass(frozen=True)
+class _RecordFacts:
+    """What one program provably writes among the words it is handed, worked
+    out once per segment (`_record_facts`) and then looked up per operand
+    (review of PR #316: a scan of the whole line per operand made the gate's
+    time grow with operands times line length). `hits` are the words it
+    writes by name; `rest` is its verdict on any other operand — True,
+    False, or "dir" for `ln -s` (a symlink to a record folder on disk is a
+    route into the tree)."""
+    hits: frozenset[str] = frozenset()
+    rest: bool | str = False
+
+
+def _record_facts(stem: str, tokens: list[str], written: list[str], copier_ok: bool,
+                  hazard: rules.Hazard | None) -> _RecordFacts:
+    """What `stem` provably writes, for `_record_sure` — the rule for
+    Jarvis's records (review of PR #315). An interpreter, a shell, an editor
+    or an unknown program given a record's path is not (it asks, as on main);
+    neither is a copy's source, or a symlink made *to* a record file (it
+    writes nothing there; a write through it is judged by where it leads).
+    `tar` and `unzip` are only when extracting into it (`tar xf A -C P`,
+    `unzip A -d P`); listing an archive, making one from it, or extracting
+    to stdout is not."""
     if stem in ("find", "bfs"):
         # `-delete` writes what it finds; `-exec PROGRAM {}` only when the
         # program is a writer (`-exec rm {}`), not `-exec python3 parse.py {}`.
-        return "-delete" in tokens or any(
+        return _RecordFacts(rest="-delete" in tokens or any(
             rules._basename(tokens[k + 1]) in _WRITERS
-            for k, t in enumerate(tokens[:-1]) if t in rules._FIND_EXEC)
+            for k, t in enumerate(tokens[:-1]) if t in rules._FIND_EXEC))
     if hazard is not None and stem not in _WRITERS | _INTERPRETERS | _SHELLS:
         # A reader in a writing form: `sed -i` writes every operand; one
-        # with a named output (`sort -o F`) writes only that (above).
-        return bool(hazard.operands)
+        # with a named output (`sort -o F`) writes only that (`named`).
+        return _RecordFacts(rest=bool(hazard.operands))
     if stem in _INTERPRETERS:
-        return _edits_in_place(stem, tokens)  # `perl -pi`, `awk -i inplace`
+        return _RecordFacts(rest=_edits_in_place(stem, tokens))  # `perl -pi`, `awk -i inplace`
     if stem in _RECORD_WRITES_ALL:
         if stem == "dd":
-            return any(t == "of=" + operand for t in tokens)
-        return True
+            return _RecordFacts(frozenset(t[3:] for t in tokens if t.startswith("of=")))
+        return _RecordFacts(rest=True)
+    last = frozenset(written[-1:])
     if stem in _COPIERS:
-        return copier_ok or operand == (written[-1] if written else None)
+        return _RecordFacts(last, copier_ok)
     if stem in _RECORD_LAST:
-        return bool(written) and operand == written[-1]
+        return _RecordFacts(last)
     if stem == "ln":
-        positional = [t for t in tokens[1:] if not t.startswith("-")]
         if any(t in ("-t", "--target-directory") or t.startswith("--target-directory=")
                or (t.startswith("-") and not t.startswith("--") and "t" in t[1:]) for t in tokens[1:]):
-            return True                      # every operand is a target, the folder the link
-        if positional and operand == positional[-1]:
-            return True                      # the link itself, made in the tree
+            return _RecordFacts(rest=True)   # every operand is a target, the folder the link
+        positional = [t for t in tokens[1:] if not t.startswith("-")]
         symbolic = any(t in ("--symbolic",) or (t.startswith("-") and not t.startswith("--")
                                                  and "s" in t[1:]) for t in tokens[1:])
-        if not symbolic:
-            return True                      # a hard link: a second name for the record's inode
-        return os.path.isdir(text)           # a symlink to a record folder: a route into the tree
+        # The link itself, made in the tree; a hard link (a second name for
+        # the record's inode); a symlink to a record folder (a route in).
+        return _RecordFacts(frozenset(positional[-1:]), "dir" if symbolic else True)
     if stem in _COMPRESSORS:
         quiet = any(t in ("--stdout", "--to-stdout", "--test", "--list")
                     or (t.startswith("-") and not t.startswith("--") and set(t[1:]) & set("ctl"))
                     for t in tokens[1:])
-        return not quiet
+        return _RecordFacts(rest=not quiet)
     if stem in _OUTPUT_OPTS:
-        opts, flags = _OUTPUT_OPTS[stem], _OUTPUT_FLAGS[stem]
-        for k, t in enumerate(tokens[1:], 1):
-            if t == operand and (tokens[k - 1] in opts
-                                 or _bundled_value(tokens[k - 1], opts, flags) == ""):
-                return True                  # `-o P`, `-sSo P`
-            if any(t == f"{o}={operand}" for o in opts) or _bundled_value(t, opts, flags) == operand:
-                return True                  # `--output=P`, `-oP`, `-soP`
-        return False
+        return _RecordFacts(_output_values(stem, tokens))    # `-o P`, `-sSo P`, `-soP`
     if stem == "tar":
-        return _tar_extracts(tokens) and operand in _tar_dirs(tokens)
+        return _RecordFacts(_tar_writes(tokens))
     if stem == "unzip":
         quiet = any(t.startswith("-") and not t.startswith(("--", "-d"))
                     and set(t[1:]) & _UNZIP_NO_WRITE for t in tokens[1:])
         dirs = [tokens[k + 1] for k, t in enumerate(tokens[:-1]) if t == "-d"]
         dirs += [t[2:] for t in tokens[1:] if t.startswith("-d") and len(t) > 2]
-        return not quiet and operand in dirs
-    return False
+        return _RecordFacts(frozenset() if quiet else frozenset(dirs))
+    return _RecordFacts()
 
 
-def _bundled_value(token: str, opts: tuple[str, ...], flags: frozenset[str]) -> str | None:
-    """What a short-option cluster hands an output option in `opts`: the rest
-    of the cluster (`-so/tmp/x` gives `/tmp/x`, `-sSo` gives "", the next
-    word), or None when there is none. Only letters in `flags`, which take no
-    value, may come before it."""
-    if not token.startswith("-") or token.startswith("--"):
-        return None
-    for i, ch in enumerate(token[1:], 1):
-        if "-" + ch in opts:
-            return token[i + 1:]
-        if ch not in flags:
-            return None
-    return None
+def _record_sure(facts: _RecordFacts, operand: str, text: str, named: set[str]) -> bool:
+    """Whether `operand`, judged a write candidate of the program `facts`
+    describes, is provably written (`_record_facts`): a lookup, the same
+    cost for every operand."""
+    if operand in named or operand in facts.hits:
+        return True                          # `sort -o F`, a sed `w F`, `-exec … -o F`, `-o P`
+    if facts.rest == "dir":
+        return os.path.isdir(text)
+    return bool(facts.rest)
 
 
-def _tar_extracts(tokens: list[str]) -> bool:
-    """Whether `tar` is extracting (`x`, `--extract`, `--get`), in the old
-    bundled form (`tar xzf A`) or a dash cluster (`-xzf A`, read up to the
-    first option that takes a value)."""
-    for k, t in enumerate(tokens[1:], 1):
-        if t == "--":
-            break
-        if t in ("--extract", "--get"):
-            return True
+def _output_values(stem: str, tokens: list[str]) -> frozenset[str]:
+    """Every word `curl`/`wget` is told to write to, read left to right once:
+    an output option's value (`-o P`, `--output P`, `--output=P`), bundled
+    behind flags that take none (`-sSo P`, `-soP`; review of PR #315). A
+    word that is another option's value is skipped, so `curl -H -so P` and
+    `curl -H -o P` send a header and write nothing there (review of PR
+    #316). An unknown letter may take a value: the rest of its cluster is
+    not read, the word after it still is."""
+    opts, flags = _OUTPUT_OPTS[stem], _OUTPUT_FLAGS[stem]
+    short_value, long_value = _OPTION_VALUES[stem]
+    out: set[str] = set()
+    k, n = 1, len(tokens)
+    while k < n:
+        t = tokens[k]
+        k += 1
         if t.startswith("--"):
+            name, eq, value = t.partition("=")
+            if eq:
+                if name in opts:
+                    out.add(value)           # `--output=P`
+            elif t in opts or t in long_value:
+                if t in opts and k < n:
+                    out.add(tokens[k])       # `--output P`
+                k += 1
             continue
-        if t.startswith("-"):
-            for ch in t[1:]:
+        if not t.startswith("-") or len(t) < 2:
+            continue
+        for i, ch in enumerate(t[1:], 1):
+            rest = t[i + 1:]
+            if "-" + ch in opts:
+                if rest:
+                    out.add(rest)            # `-oP`, `-soP`
+                    if rest.startswith("="):
+                        out.add(rest[1:])    # `-o=P`, read as P too (the stricter reading)
+                elif k < n:
+                    out.add(tokens[k])       # `-o P`, `-sSo P`
+                    k += 1
+                break
+            if ch in short_value:
+                if not rest:
+                    k += 1                   # `-H V`: V is the header, never an option
+                break
+            if ch not in flags:
+                break
+    return frozenset(out)
+
+
+def _tar_writes(tokens: list[str]) -> frozenset[str]:
+    """The folders a `tar` extraction writes into; empty unless it extracts
+    (`x`, `--extract`, `--get`) to disk. Read left to right once: the old
+    bundled form (`tar xzf A`, each letter that takes a value taking the next
+    word), dash clusters (`-xzf A`, no letter read past one that takes a
+    value) and long options; an option's value is never read as an option
+    (`tar -c -f -xfoo.tar`, `--exclude -x`; review of PR #316). Extracting
+    to stdout (`O`, `--to-stdout`) or into a command (`--to-command`) writes
+    no file there and is not counted.
+
+    Which `-C`/`--directory` applies (review of PR #316): GNU tar changes
+    folder at each one, in order, so the files named after one land in it.
+    Counted: the last one before each member operand (or `-T`/`--files-from`
+    list), and the last one on the line, which is where an extraction with no
+    member names writes — so `-C <thread> -C /tmp/out` writes only in
+    `/tmp/out`. A relative one lands below the one before it, so that one is
+    counted too, and so on back to an absolute one. A `-C` after `--` is
+    still read as one, the stricter reading."""
+    extracts = to_stdout = ended = False
+    events: list[str | None] = []    # a `-C` folder, or None for a member
+    k, n = 1, len(tokens)
+
+    def take() -> str | None:
+        nonlocal k
+        k += 1
+        return tokens[k - 1] if k <= n else None
+
+    while k < n:
+        t = tokens[k]
+        k += 1
+        if ended or t == "--":
+            if t == "--" and not ended:
+                ended = True
+            elif t in ("-C", "--directory"):
+                value = take()
+                if value is not None:
+                    events.append(value)
+            elif t.startswith("-C") and len(t) > 2:
+                events.append(t[2:])
+            elif t.startswith("--directory="):
+                events.append(t.split("=", 1)[1])
+            else:
+                events.append(None)
+            continue
+        if t.startswith("--"):
+            name, eq, value = t.partition("=")
+            if name in ("--extract", "--get"):
+                extracts = True
+            elif name in ("--to-stdout", "--to-command"):
+                to_stdout = True
+            if name in _TAR_LONG_ARG and not eq:
+                value = take()
+            if name == "--directory" and value:
+                events.append(value)
+            elif name == "--files-from":
+                events.append(None)
+            continue
+        if t.startswith("-") and len(t) > 1:
+            for i, ch in enumerate(t[1:], 1):
                 if ch == "x":
-                    return True
-                if ch in _TAR_SHORT_ARG:
+                    extracts = True
+                elif ch == "O":
+                    to_stdout = True
+                elif ch in _TAR_SHORT_ARG:
+                    value = t[i + 1:] or take()
+                    if ch == "C" and value is not None:
+                        events.append(value)
+                    elif ch == "T":
+                        events.append(None)
                     break
-        elif k == 1 and "x" in t:
-            return True                      # `tar xf A`: every letter an option
-    return False
-
-
-def _tar_dirs(tokens: list[str]) -> list[str]:
-    """The folders `tar` changes into (`-C D`, `-CD`, `--directory D`,
-    `--directory=D`): where an extraction writes."""
-    out = [tokens[k + 1] for k, t in enumerate(tokens[:-1]) if t in ("-C", "--directory")]
-    out += [t[2:] for t in tokens[1:] if t.startswith("-C") and len(t) > 2]
-    out += [t.split("=", 1)[1] for t in tokens[1:] if t.startswith("--directory=")]
-    return out
+            continue
+        if k == 2:
+            for ch in t:                     # `tar xf A`: every letter an option
+                if ch == "x":
+                    extracts = True
+                elif ch == "O":
+                    to_stdout = True
+                elif ch in _TAR_SHORT_ARG:
+                    value = take()
+                    if ch == "C" and value is not None:
+                        events.append(value)
+                    elif ch == "T":
+                        events.append(None)
+            continue
+        events.append(None)                  # a member
+    if not extracts or to_stdout:
+        return frozenset()
+    folders = [j for j, e in enumerate(events) if e is not None]
+    applies: list[int] = []                  # positions in `folders`
+    seen_folder = -1
+    for j, e in enumerate(events):
+        if e is not None:
+            seen_folder += 1
+        elif seen_folder >= 0:
+            applies.append(seen_folder)
+    if folders:
+        applies.append(len(folders) - 1)
+    out: set[str] = set()
+    counted: set[int] = set()
+    for f in applies:
+        while f >= 0 and f not in counted:
+            counted.add(f)
+            folder = events[folders[f]]
+            out.add(folder)
+            if folder.startswith(("/", "~")):
+                break
+            f -= 1                           # relative: below the one before it
+    return frozenset(out)
 
 
 def _inside_tree(text: str, trees: set[Path], walk: bool = True) -> Path | None:
@@ -2535,8 +2733,14 @@ def _command(tokens: list[str], lead: list[str], parsed: bool, segment: str, loc
     def provable(operand: str) -> bool:
         return not partial or operand in named
 
+    facts: list[_RecordFacts] = []
+
     def record_sure(operand: str, text: str) -> bool:
-        return _record_sure(stem, tokens, operand, text, written, copier_ok, hazard, named)
+        # What the program writes is worked out once for the segment, then
+        # each operand is a lookup (review of PR #316).
+        if not facts:
+            facts.append(_record_facts(stem, tokens, written, copier_ok, hazard))
+        return _record_sure(facts[0], operand, text, named)
 
     # Inline source names its files inside a string no tokenizer splits. A
     # full path, or a bare name while standing in the gate's own folder, is a
@@ -2662,7 +2866,8 @@ def _command(tokens: list[str], lead: list[str], parsed: bool, segment: str, loc
             if sure and _is_record(inside):
                 # A record (review of PR #315): certain only when this
                 # program provably writes it (`_record_sure`); handed to an
-                # interpreter, `tar`, an editor or an unknown program, asked.
+                # interpreter, `tar` not extracting into it, an editor or an
+                # unknown program, asked.
                 sure = record_sure(operand, text)
             seen.touches.append(Touch(inside, sure, f"{stem} on {text}"))
             continue

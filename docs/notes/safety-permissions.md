@@ -3054,13 +3054,14 @@ spellings; nothing new in the matcher:
   name, a symlink) is a **certain** touch: v2's layer 1 refuses it
   (`denied_command`, with `files.record_refusal` as the reason), v1 asks,
   and no allowlist entry covers it. One that only might is asked.
-* **What is certain for a record** (`protected_state._record_sure`, review
-  of PR #315). The inbox's rule — any "writer" handed a path in the tree is
-  a certain write — made every read of a record by an interpreter or an
-  archiver a layer-1 DENY (`python3 parse.py <log>`, `python3 -c
-  "json.load(open(P))"`, `rsync -a <D>/threads/ /tmp/t/`, `tar czf … -C <D>
-  threads`, `vim -R <log>`). Records are read far more than written, so for
-  them only a write the module can see is certain:
+* **What is certain for a record** (`protected_state._record_sure` and
+  `_record_facts`, reviews of PRs #315 and #316). The inbox's rule — any
+  "writer" handed a path in the tree is a certain write — made every read
+  of a record by an interpreter or an archiver a layer-1 DENY (`python3
+  parse.py <log>`, `python3 -c "json.load(open(P))"`, `rsync -a
+  <D>/threads/ /tmp/t/`, `tar czf … -C <D> threads`, `vim -R <log>`).
+  Records are read far more than written, so for them only a write the
+  module can see is certain:
   - a redirect onto one, and `tee`, `mv`, `rm`, `unlink`, `rmdir`, `mkdir`,
     `touch`, `truncate`, `shred`, `chmod`, `chown`, `chgrp`, `sponge`,
     `patch`, `setfacl`, `chattr`, `link` on one;
@@ -3075,21 +3076,53 @@ spellings; nothing new in the matcher:
   - a reader's writing form: `sed -i`, `sort -o P`, a sed `w P`; `find
     -delete`, and `find -exec` of a writer (`-exec rm {}`), not of an
     interpreter (`-exec python3 parse.py {}` asks);
-  - `perl -pi`, `awk -i inplace`; `curl -o P`, `wget -O P`; `gzip P` and
-    the other compressors unless `-c`, `-t` or `-l`;
+  - `perl -pi`, `awk -i inplace`; `gzip P` and the other compressors
+    unless `-c`, `-t` or `-l`;
+  - `curl -o P`, `wget -O P` and their other output options (`--output`,
+    `--output-dir`, `-P`, `--directory-prefix`, `--output=P`), also bundled
+    behind flags that take no value (`curl -so P`, `-sSo P`, `-soP`, `wget
+    -qO P`). A word that is another option's value is not read as an
+    option: `curl -H -so P` and `curl -H -o P` send a header and ask;
+  - `tar` extracting (`x`, `--extract`, `--get`) into one with `-C P`,
+    `-CP`, `--directory P` or `--directory=P` (in the old bundled form too,
+    `tar xfC A P`), and `unzip A -d P` unless it only lists, tests or prints
+    (`-l`, `-t`, `-p`, `-c`, `-v`, `-z`, `-Z`). Extracting to stdout
+    (`tar -xO`, `--to-stdout`) or into a command (`--to-command`) writes no
+    file there and asks; so do listing an archive and making one from a
+    record. The `-C` counted is the one that applies: the last before each
+    member operand or `-T` list, and the last on the line (where an
+    extraction with no member names writes), so `tar -xf A -C P -C /tmp/out`
+    asks; a relative `-C` lands below the one before it, which then counts
+    too. An option's value is never read as an option cluster (`tar -c -f
+    -xfoo.tar`, `--exclude -x`);
   - inline source (`python3 -c`, `node -e`, `perl -e`, `awk`) that spells a
     record's full path **in a write form** (`open(P, "a")`,
     `Path(P).write_text`, `fs.appendFileSync(P)`, `os.remove(P)`,
     `shutil.move(P, …)`, `print > P`, perl `open(F, ">>P")` …,
-    `protected_state._source_writes`). Naming it in a read
-    (`json.load(open(P))`, `sys.stdout.write(open(P).read())`) asks, and
-    so does a bare tree name (`print("tasks")` names no record).
+    `protected_state._source_writes`), including a Python string prefix
+    (`open(f'P', 'a')`, `open(rb'P', 'ab')`), open's `file=`/`mode=`
+    keywords in either order, and a copy's or a move's destination
+    (`shutil.copy(src, P)`, `shutil.copytree`, `os.replace(src, P)`,
+    `fs.copyFileSync(src, P)`, `fsp.rename(src, P)`). Node's `copyFile` and
+    `rename` count only on `fs`, `fsp`, `fs.promises` or `require('fs')`,
+    or called bare when destructured from `fs` in the same source:
+    `df.rename(cols, P)` is any library's and asks. Naming it in a read
+    (`json.load(open(P))`, `sys.stdout.write(open(P).read())`) or as a
+    copy's source asks, and so does a bare tree name (`print("tasks")`
+    names no record).
+
+  What a program writes among its words is worked out once per segment
+  (`_record_facts`), then each operand is a lookup, so a long line of
+  record operands costs what the same line of other paths does (review of
+  PR #316: `curl -<200×s> <thread>/f0 …` ×3000 took 137 s against main's
+  11.8 s; `permissions_check`'s `record_scan_time_checks` pins the ratio).
 
   Anything else handed a record's path — an interpreter or a shell given it
-  as an argument, `tar`, `zip`, `unzip`, an editor, `curl -T`, a program
-  this module does not know — is an uncertain touch: asked, never refused.
-  `python3 parse.py <log>` was rules' ALLOW and now asks; the others asked
-  on main already. The inbox keeps its own, older rule.
+  as an argument, `zip`, `tar` or `unzip` not extracting into it, an
+  editor, `curl -T`, a program this module does not know — is an uncertain
+  touch: asked, never refused. `python3 parse.py <log>` was rules' ALLOW
+  and now asks; the others asked on main already. The inbox keeps its own,
+  older rule.
 * Each tree's folder and `decisions.jsonl` are also named in
   `_protected_state_paths()`, as `inbox/` is, so moving, replacing or
   re-moding the folder itself is a certain write, a folder named `threads`

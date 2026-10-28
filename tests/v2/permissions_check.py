@@ -1078,6 +1078,63 @@ def record_tree_checks():
             eq(_command_writes_protected_state(command), None, f"nor seen as a write: {command}")
         print(f"  records: {len(more_writes)} write spellings of the #315 review refused, "
               f"{len(more_reads)} paired reads not")
+        # Review of PR #316: refusals that were false. Each writes nothing in
+        # the record named, or nothing provable there: asked, never refused.
+        not_sure = {
+            # LOW: tar extracting to stdout or into a command writes no file.
+            "stdout": [f"tar -xOf /tmp/a.tar -C {thread} m", f"tar xOf /tmp/a.tar -C {thread}",
+                       f"tar -xf /tmp/a.tar --to-stdout -C {thread}",
+                       f"tar -x --to-command=cat -f /tmp/a.tar -C {thread}",
+                       f"tar -x --to-command cat -f /tmp/a.tar -C {thread}"],
+            # NIT: an option's value is not an option cluster.
+            "tar values": [f"tar -c -f -xfoo.tar -C {thread} .",
+                           f"tar -cf /tmp/b.tar --exclude -x -C {thread} .",
+                           f"tar -cf /tmp/b.tar --exclude=-x -T -x -C {thread}"],
+            # NIT: only the -C that applies; the last one when no member follows.
+            "tar -C": [f"tar -xf /tmp/a.tar -C {thread} -C /tmp/out",
+                       f"tar -xf /tmp/a.tar --directory={thread} --directory /tmp/out"],
+            "curl values": [f"curl -H -so {log} https://example.com/x",
+                            f"curl -H -o {log} https://example.com/x",
+                            f"curl -sH -o {log} https://example.com/x",
+                            f"curl --header -o {log} https://example.com/x",
+                            f"curl -d -o {log} https://example.com/x",
+                            f"wget --header -O {log} https://example.com/x"],
+            "rename": [f"python3 -c \"df.rename(cols, '{log}')\"",
+                       f"python3 -c \"df.copyFile(cols, '{log}')\"",
+                       f"node -e \"obj.renameSync(a, '{log}')\""],
+        }
+        for group, commands in not_sure.items():
+            for command in commands:
+                eq(_command_writes_protected_state(command), None,
+                   f"#316 {group}: not a certain write, not refused: {command}")
+                touch = ps.command_touch(command)
+                ok(touch is not None and not touch.certain, f"#316 {group}: asked instead: {command}")
+        # Their strict neighbours: still certain, still refused at layer 1.
+        still = [
+            f"tar -xf /tmp/a.tar -C /tmp/out -C {thread}",            # the last -C
+            f"tar -xf /tmp/a.tar -C /tmp/out m1 -C {thread} m2",      # applies to m2
+            f"tar -xf /tmp/a.tar -C {thread} m1 -C /tmp/out m2",      # applies to m1
+            f"tar -xf /tmp/a.tar -C {thread} -C sub",                 # sub lies below it
+            f"tar -xf /tmp/a.tar -C {thread} -T /tmp/list -C /tmp/out",
+            f"tar xfC /tmp/a.tar {thread}", f"tar -xvC {thread} -f /tmp/a.tar",
+            f"tar -xf /tmp/a.tar --exclude x -C {thread}",
+            f"tar -xOf /tmp/a.tar -C /tmp/o m; tar -xf /tmp/a.tar -C {thread}",
+            f"curl -H x -so {log} https://example.com/x", f"curl -d @/tmp/b -o {log} https://example.com/x",
+            f"curl -dfoo -o {log} https://example.com/x", f"curl -o={log} https://example.com/x",
+            f"wget --header x -O {log} https://example.com/x",
+            f"node -e \"fs.copyFileSync('/tmp/x', '{log}')\"", f"node -e \"fsp.rename(a, '{log}')\"",
+            f"node -e \"fs.promises.copyFile(a, '{log}')\"",
+            f"node -e \"require('node:fs/promises').rename(a, '{log}')\"",
+            f"node -e \"const {{copyFileSync}} = require('fs'); copyFileSync('/tmp/x', '{log}')\"",
+            f"node --input-type=module -e \"import {{ rename }} from 'node:fs/promises'; "
+            f"await rename(a, '{log}')\"",
+        ]
+        for command in still:
+            got, owner, layer = permit(command)
+            eq(got, Decision.DENY, f"#316: still refused at layer 1: {command}")
+            eq(len(owner.seen), 0, f"#316: and never asked: {command}")
+        print(f"  records: {sum(map(len, not_sure.values()))} false refusals of #316 asked, "
+              f"{len(still)} neighbours still refused")
         # NIT (review of PR #315): a record tree that cannot be resolved is kept
         # as written, never dropped from the protected trees.
         real_resolve = Path.resolve
@@ -1106,6 +1163,66 @@ def record_tree_checks():
             eq(denied_file(str(path)), None, f"not a record: {path.relative_to(data)}")
             eq(denied_command(f"cp /tmp/x {path}"), None, f"nor its shell write: {path.relative_to(data)}")
         print(f"  records: {refused} writes refused at layer 1 across {len(files)} stores; reads unchanged")
+
+
+# Pinned: they set the guard's strength. The review of PR #316 measured the
+# per-operand rescans at 2.3-16x the linear line at these sizes (and 137 s
+# against base's 11.8 s at the review's); judged once per segment, 1.0-1.1x.
+RECORD_SCAN_RATIO = 2.0
+RECORD_SCAN_SIZES = {"curl": 300, "tar": 5000, "unzip": 5000}
+
+
+def record_scan_time_checks():
+    """MED (review of PR #316): what a program writes among the words it is
+    handed is worked out once per segment, so a long line of record operands
+    costs what the same line of ordinary paths does. A scan of the whole
+    line per record operand made layer 1's time grow with operands times
+    line length (`curl -<200 s> <thread>/f0 …` x3000: 11.8 s on main, 137 s
+    on the PR). Judged against a linear baseline, the same line with every
+    operand in a folder that is not a record, each the best of three runs in
+    calling-thread CPU (`tests/loadclock.py`): load slows both alike."""
+    import sys
+    sys.path.append(str(Path(__file__).resolve().parents[2]))     # for `tests.loadclock`
+    from tests import loadclock
+    from jarvis.v2.permissions import _command_writes_protected_state
+
+    eq((RECORD_SCAN_RATIO, RECORD_SCAN_SIZES), (2.0, {"curl": 300, "tar": 5000, "unzip": 5000}),
+       "the record scan bound is pinned")
+    with Sandbox():
+        data = Path(config.V2_DATA_DIR)
+        thread = data / "threads" / "ab12cd34"
+        thread.mkdir(parents=True)
+        (thread / "log.jsonl").write_text("{}\n")
+        plain = data.parent / "plain" / "ab12cd34"
+        plain.mkdir(parents=True)
+
+        def lines(folder):
+            n = RECORD_SCAN_SIZES
+            return {
+                "curl": "curl " + " ".join(f"-{'s' * 200} {folder}/f{i}" for i in range(n["curl"])),
+                "tar": "tar xf /tmp/a.tar -C /tmp/out " + " ".join(f"{folder}/f{i}" for i in range(n["tar"])),
+                "unzip": "unzip /tmp/a.zip -d /tmp/out " + " ".join(f"{folder}/f{i}"
+                                                                    for i in range(n["unzip"])),
+            }
+
+        def best(line):
+            return min(loadclock.cpu(_command_writes_protected_state, line)[0] for _ in range(3))
+
+        records, linear = lines(thread), lines(plain)
+        for name in records:
+            ratio = None
+            wall = time.monotonic()
+            for _ in range(3):             # a pause hits one round, a regression every round
+                base_s, record_s = best(linear[name]), best(records[name])
+                ratio = record_s / max(base_s, 1e-6)
+                if ratio < RECORD_SCAN_RATIO:
+                    break
+            ok(ratio < RECORD_SCAN_RATIO,
+               f"{name}: a line of record operands costs {ratio:.2f}x the same line of plain ones "
+               f"(bound {RECORD_SCAN_RATIO}x; {record_s * 1000:.0f} vs {base_s * 1000:.0f} CPU ms)")
+            ok(time.monotonic() - wall < 60.0, f"{name}: elapsed wall limit")
+            print(f"  record scan: {name} {record_s * 1000:.0f} CPU ms against {base_s * 1000:.0f} "
+                  f"linear ({ratio:.2f}x)")
 
 
 # --------------------------------------------------------------------------
@@ -4158,7 +4275,7 @@ def relay_provenance_checks():
 
 def main():
     for section in (matrix_checks, always_ask_checks, file_deny_checks, brace_glob_checks,
-                    brace_glob_broad_checks, record_tree_checks,
+                    brace_glob_broad_checks, record_tree_checks, record_scan_time_checks,
                     human_backed_checks, log_checks, approvals_checks, hud_build_deny_checks,
                     env_file_checks,
                     installed_hud_deny_checks, daemon_and_rebuild_ops_checks, review_48_checks,
