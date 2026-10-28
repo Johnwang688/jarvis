@@ -315,7 +315,8 @@ def run(browser, check, until):
         summed = report(True)
         rec = summed["overnight"][1]["row"]["detail"]
         rec["summary"] = HOSTILE + " builds b"
-        rec["card"].update({"where": "Calc · main · ~/c", "reason": "deploys", "layer": "human",
+        rec["card"].update({"where": {"project": "Calc", "branch": "main", "folder": "~/c"}, "reason": "deploys",
+                            "layer": "human",
                             "command": "make b\nsecond line"})
         mock.review = summed
         page.goto("about:blank")
@@ -334,7 +335,8 @@ def run(browser, check, until):
               and HOSTILE in itemb.locator('[data-testid="m-review-as-summary"]').inner_text()
               and page.evaluate("window.__pwned === undefined"))
         check("AS: WHERE is code's line",
-              itemb.locator('[data-testid="m-review-as-where"]').inner_text() == "WHERE Calc · main · ~/c")
+              itemb.locator('[data-testid="m-review-as-where-project"]').inner_text() == "project Calc"
+              and itemb.locator('[data-testid="m-review-as-where-folder"]').inner_text() == "folder ~/c")
         check("AS: with a summary the command is collapsed to its first line",
               itemb.locator('[data-testid="m-review-command"]').count() == 0
               and itemb.locator('[data-testid="m-review-command-preview"]').inner_text().strip() == "make b")

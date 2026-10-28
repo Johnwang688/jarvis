@@ -160,6 +160,7 @@ export type Action = (
   | { type: "approval_add"; request: ApprovalRequest }
   | { type: "approval_drop"; req_id: string }
   | { type: "approval_patch"; req_id: string; patch: Pick<ApprovalRequest, "summary" | "summary_state"> }
+  | { type: "approvals_sync"; approvals: ApprovalRequest[] }
   | { type: "task_upsert"; task: Task }
   | { type: "thread_patch"; id: string; patch: Partial<Thread> }
   | { type: "activity"; record: any; at?: number }
@@ -555,6 +556,23 @@ export function reduce(s: State, a: Action): State {
       const { summary, summary_state } = a.patch;
       return { ...s, approvals: s.approvals.map((r) => (r.req_id === a.req_id && !r.hud_only
         ? { ...r, summary, summary_state } : r)) };
+    }
+
+    case "approvals_sync": {
+      // AS (review of #330, LOW 3): the daemon's list, read at boot and on
+      // every reconnect, is what is up. A card this window already holds
+      // keeps a summary it heard (an `approval_summary` event newer than a
+      // listing that still says "pending"); a card gone from the list was
+      // answered in the gap.
+      const had = new Map(s.approvals.map((r) => [r.req_id, r]));
+      const approvals = a.approvals.map((r) => {
+        const old = had.get(r.req_id);
+        return old && !r.hud_only && r.summary_state === "pending" && old.summary_state && old.summary_state !== "pending"
+          ? { ...r, summary: old.summary, summary_state: old.summary_state } : r;
+      });
+      const busy = s.selectedChat !== null && s.chats[s.selectedChat].busy;
+      const orb = approvals.length === 0 && s.orb === "approval" ? (busy ? "thinking" : "idle") : s.orb;
+      return { ...s, approvals, orb };
     }
 
     case "approval_drop": {

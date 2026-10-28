@@ -1207,9 +1207,10 @@ def _summary_checks(page, mock, check, until):
     long = "cd /srv/calc\nmake deploy --prod && git push origin main"
     with_summary = defer_row("S1", command=long)
     with_summary["detail"]["summary"] = HOSTILE + " deploys calc"
-    with_summary["detail"]["card"]["where"] = "Calc · main · ~/projects/calc"
+    with_summary["detail"]["card"]["where"] = {"project": "Calc", "branch": "main", "folder": "~/projects/calc"}
     without = defer_row("S2", command=long)
-    c = card("sumcard0001", summary="Lists the folder.", summary_state="ready", where="Calc · main · ~/c")
+    c = card("sumcard0001", summary="Lists the folder.", summary_state="ready",
+             where={"project": "Calc", "branch": "main", "folder": "~/c"})
     _open(page, mock, until, basic_rows() + [with_summary, without])
     row = _row(page, "defer:S1")
     order = row.evaluate("""r => { const b = r.querySelector('[data-testid="inbox-deferred-buttons"]');
@@ -1222,7 +1223,9 @@ def _summary_checks(page, mock, check, until):
           and page.evaluate("() => document.querySelectorAll('[data-testid=\"inbox-view\"] img').length") == 0)
     check("AS: WHY ASKED and WHERE are code's lines",
           row.locator('[data-testid="inbox-deferred-reason"]').inner_text().startswith("WHY ASKED [human] ")
-          and row.locator('[data-testid="inbox-deferred-where"]').inner_text() == "WHERE Calc · main · ~/projects/calc")
+          and row.locator('[data-testid="inbox-deferred-where-project"]').inner_text() == "project Calc"
+          and row.locator('[data-testid="inbox-deferred-where-branch"]').inner_text() == "branch main"
+          and row.locator('[data-testid="inbox-deferred-where-folder"]').inner_text() == "folder ~/projects/calc")
     check("AS: with a summary the command is collapsed to its first line",
           row.locator('[data-testid="inbox-deferred-command"]').count() == 0
           and row.locator('[data-testid="inbox-deferred-preview"]').inner_text().strip() == "cd /srv/calc")
@@ -1242,7 +1245,7 @@ def _summary_checks(page, mock, check, until):
     until(lambda: arow.locator('[data-testid="inbox-summary"]').count() == 1, timeout=4)
     check("AS: an approval row shows its card's summary and Where",
           "Lists the folder." in arow.locator('[data-testid="inbox-summary"]').inner_text()
-          and arow.locator('[data-testid="inbox-where"]').inner_text() == "WHERE Calc · main · ~/c",
+          and arow.locator('[data-testid="inbox-where-folder"]').inner_text() == "folder ~/c",
           str(page.evaluate("() => [...document.querySelectorAll('[data-testid=\"inbox-summary\"]')].map(e => e.closest('[data-id]')?.dataset.id)")))
     check("AS: and still nothing of the command",
           "ls -la" not in _row(page, "appr:sumcard0001").inner_text())

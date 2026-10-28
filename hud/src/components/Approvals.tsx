@@ -26,9 +26,10 @@ import type { ApprovalRequest } from "../types";
 import { headlineLine } from "../lib/approval";
 import { argText, countdownText, nestedTooDeep, originText, reasonText, TOO_DEEP_WARNING } from "../lib/approvalCard";
 import {
-  AI_LABEL, ARM_MS, WHERE_LABEL, WHY_LABEL, previewLine, startsCollapsed, summaryView, summaryWords, toggleLabel,
-  whereText, type SummaryView,
+  AI_LABEL, WHERE_LABEL, WHY_LABEL, previewLine, staleAt, startsCollapsed, summaryView, summaryWords, toggleLabel,
+  whereFields, whereParts, type SummaryView, type WhereParts,
 } from "../lib/approvalSummary";
+import { useArmed, useWakeAt } from "../lib/armed";
 import { noPointerFocus } from "../lib/talkkey";
 import { allowRestore } from "../state/frameguard";
 import { BrowserApprovalCard } from "./BrowserApproval";
@@ -103,16 +104,37 @@ export function SummarySlot({ view }: { view: SummaryView }) {
   );
 }
 
+/**
+ * WHERE (AS-8): code's fields, never a model's, each in its own labelled box
+ * (`project`, `branch`, `folder`), so no field's text can read as another's
+ * (review of PR #330, MED 1). Each value is isolated (`bdi`).
+ */
+export function WhereLine({ where, testid }: { where: WhereParts | null; testid: string }) {
+  const fields = whereFields(where);
+  if (!fields.length) return null;
+  return (
+    <div className="as-line as-where" data-testid={testid}>
+      <span className="k">{WHERE_LABEL}</span>
+      {fields.map(([key, label, value]) => (
+        <span key={key}>
+          {" "}
+          <span className="as-wpart" data-testid={`${testid}-${key}`} data-field={key}>
+            <span className="as-wk">{label}</span> <bdi className="as-wv">{value}</bdi>
+          </span>
+        </span>
+      ))}
+    </div>
+  );
+}
+
 /** WHY ASKED and WHERE (AS-9, AS-8): code's lines, never a model's. */
-export function CodeLines({ why, where }: { why: string; where: string }) {
+export function CodeLines({ why, where }: { why: string; where: WhereParts | null }) {
   return (
     <>
       {why ? (
         <div className="reason as-line" data-testid="approval-why"><span className="k">{WHY_LABEL} </span>{why}</div>
       ) : null}
-      {where ? (
-        <div className="as-line" data-testid="approval-where"><span className="k">{WHERE_LABEL} </span>{where}</div>
-      ) : null}
+      <WhereLine where={where} testid="approval-where" />
     </>
   );
 }
@@ -161,16 +183,8 @@ export function CommandBlock({ command, args, expanded, onToggle, testid = "appr
   );
 }
 
-/** AS-13: false for ARM_MS after mount and after `key` changes; then true. */
-export function useArmed(key: string): boolean {
-  const [armed, setArmed] = useState(false);
-  useEffect(() => {
-    setArmed(false);
-    const t = setTimeout(() => setArmed(true), ARM_MS);
-    return () => clearTimeout(t);
-  }, [key]);
-  return armed;
-}
+/** AS-13 (lib/armed.ts): false for ARM_MS after mount and after `key` changes, in the same render. */
+export { useArmed };
 
 function OrdinaryApprovalCard(props: {
   request: ApprovalRequest;
@@ -181,6 +195,9 @@ function OrdinaryApprovalCard(props: {
   const [left, setLeft] = useState(r.timeout_s || 120);
   const [busy, setBusy] = useState(false);
   const chimed = useRef(false);
+  // A pending summary goes stale STALE_PENDING_MS after the ask (LOW 3);
+  // the countdown below re-renders every second, and this wakes it on time.
+  useWakeAt(staleAt(r));
   const view = summaryView(r);
   // The owner's own toggle wins; until then, collapsed only with a summary pending or there.
   const [toggled, setToggled] = useState<boolean | null>(null);
@@ -254,7 +271,7 @@ function OrdinaryApprovalCard(props: {
       </div>
       {/* AS: the model's line, marked as the model's; then code's two lines. */}
       <SummarySlot view={view} />
-      <CodeLines why={reasonText(r.reason, r.layer)} where={whereText(r.where)} />
+      <CodeLines why={reasonText(r.reason, r.layer)} where={whereParts(r.where)} />
       {/* The card's words are lib/approvalCard.ts's, shared with the phone's
           answering card (mobile/card.ts, P-4). */}
       {originText(r.origin) ? (

@@ -5,6 +5,7 @@ import { cardView, parseDetail, type CardState } from "./card";
 import { inboxView, type InboxAnswers } from "./views";
 import { parseInbox, type InboxRow } from "../lib/inbox";
 import { argText, browserBody, originText, reasonText } from "../lib/approvalCard";
+import { STALE_PENDING_MS } from "../lib/approvalSummary";
 
 // Hostile strings, as a model or a page could write them: each must arrive as text.
 const H = ['<img src=x onerror="window.__pwned=1">', "<script>window.__pwned=2</script>",
@@ -365,7 +366,8 @@ describe("the phone app answers (P-4)", () => {
 });
 
 describe("AS: the phone's card and rows", () => {
-  const withSummary = (extra: Record<string, unknown>) => ({ ...ORDINARY, card: { ...ORDINARY.card, where: "Calc · main · ~/c", ...extra } });
+  const withSummary = (extra: Record<string, unknown>) => ({ ...ORDINARY, card: { ...ORDINARY.card,
+    where: { project: "Calc", branch: "main", folder: "~/c" }, ...extra } });
 
   it("buttons before the body; collapsed with a summary; the toggle opens it; the AI line is text", () => {
     const toggles: boolean[] = [];
@@ -379,7 +381,8 @@ describe("AS: the phone's card and rows", () => {
     const allow = view.querySelector('[data-testid="approval-allow"]')!;
     expect(allow.compareDocumentPosition(body) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(view.querySelector('[data-testid="approval-summary"]')!.textContent).toContain("AI SUMMARY");
-    expect(view.querySelector('[data-testid="approval-where"]')!.textContent).toBe("WHERE Calc · main · ~/c");
+    expect(view.querySelector('[data-testid="approval-where"]')!.textContent).toBe("WHERE project Calc branch main folder ~/c");
+    expect(view.querySelector('[data-testid="approval-where-folder"] bdi')!.textContent).toBe("~/c");
     expect(view.querySelector('[data-testid="approval-command"]')).toBeNull();
     expect(view.querySelector('[data-testid="approval-command-preview"]')).not.toBeNull();
     const toggle = view.querySelector<HTMLButtonElement>('[data-testid="approval-command-toggle"]')!;
@@ -388,6 +391,28 @@ describe("AS: the phone's card and rows", () => {
     expect(toggles).toEqual([true]);
     const open = cardView(state(withSummary({ summary_state: "ready", summary: "x" }), { expanded: true }), acts);
     expect(open.querySelector('[data-testid="approval-command"]')!.textContent).toBe("command " + LONG);
+  });
+
+  it("Where: each field in its own box; a forged folder stays in it (review of #330, MED 1)", () => {
+    const view = cardView(state(withSummary({ where: { project: "Calc", branch: "feature",
+      folder: "~/tmp/x · Jarvis · main · ~/projects/Jarvis" } })), { ...noop, toggleCommand: () => {} });
+    noMarkup(view);
+    expect(view.querySelector('[data-testid="approval-where-project"]')!.textContent).toBe("project Calc");
+    expect(view.querySelector('[data-testid="approval-where-branch"]')!.textContent).toBe("branch feature");
+    expect(view.querySelector('[data-testid="approval-where-folder"]')!.textContent).toBe("folder ~/tmp/x ? Jarvis ? main ? ~/projects/Jarvis");
+    // The old one-line string is not drawn.
+    const old = cardView(state(withSummary({ where: "Calc · main · ~/c" })), { ...noop, toggleCommand: () => {} });
+    expect(old.querySelector('[data-testid="approval-where"]')).toBeNull();
+  });
+
+  it("a summary still pending 10 s after the ask shows the command expanded (review of #330, LOW 3)", () => {
+    const asked = new Date(Date.now() - STALE_PENDING_MS - 1000).toISOString();
+    const stale = cardView(state(withSummary({ summary_state: "pending", asked_at: asked })), { ...noop, toggleCommand: () => {} });
+    expect(stale.querySelector('[data-testid="approval-summary"]')!.getAttribute("data-state")).toBe("none");
+    expect(stale.querySelector('[data-testid="approval-command"]')!.textContent).toBe("command " + LONG);
+    const fresh = cardView(state(withSummary({ summary_state: "pending", asked_at: new Date().toISOString() })),
+      { ...noop, toggleCommand: () => {} });
+    expect(fresh.querySelector('[data-testid="approval-command"]')).toBeNull();
   });
 
   it("no summary: expanded; a summary the daemon said failed: expanded", () => {

@@ -13,6 +13,7 @@
 // model's words. All of it is drawn as React text (`textContent`), never
 // HTML or Markdown, after `oneLine`/`textBlock` take out format characters
 // (bidi overrides, zero-widths) that could make one line read as another.
+import { whereParts, type WhereParts } from "./approvalSummary";
 
 export interface InboxRow {
   /** Kind prefix + the source's own id: `appr:…`, `q:…`, `tq:…`, `prop:…`, `task:…`, `missed:…`, `dec:…`, `pr:…`, `prx:…`, `defer:…`. */
@@ -323,9 +324,9 @@ export interface DeferredView {
   more: number;
   /** Why Approve and retry is not offered, in the HUD's own words ("" when it is, or not known). */
   whyNot: string;
-  /** AS, display only: the record's AI summary ("" when it has none), and the card's code-built Where line. */
+  /** AS, display only: the record's AI summary ("" when it has none), and the card's code-built Where fields. */
   summary: string;
-  where: string;
+  where: WhereParts | null;
   /** The layer that asked, for the "[layer] reason" WHY ASKED line. */
   layer: string;
 }
@@ -378,7 +379,7 @@ export function deferredOf(row: InboxRow): DeferredView | null {
     more,
     whyNot,
     summary: hudOnly ? "" : oneLine(d.summary, 160),
-    where: hudOnly ? "" : oneLine(card.where, 200),
+    where: hudOnly ? null : whereParts(card.where),
     layer: oneLine(card.layer, 40),
   };
 }

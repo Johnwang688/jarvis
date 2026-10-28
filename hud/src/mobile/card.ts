@@ -29,7 +29,8 @@ import { parseBrowserPrivateApproval, type BrowserApprovalPublic } from "../lib/
 import { clockOf, oneLine, type InboxRow } from "../lib/inbox";
 import { relayedLine, relayedParts } from "../lib/relays";
 import {
-  AI_LABEL, WHERE_LABEL, WHY_LABEL, previewLine, startsCollapsed, summaryView, summaryWords, toggleLabel, whereText,
+  AI_LABEL, WHERE_LABEL, WHY_LABEL, previewLine, startsCollapsed, summaryView, summaryWords, toggleLabel, whereFields,
+  whereParts,
 } from "../lib/approvalSummary";
 
 type Json = Record<string, unknown>;
@@ -152,10 +153,17 @@ export function summaryLines(card: Json, box: HTMLElement, idPrefix = "approval"
     line.append(el("span", "k", WHY_LABEL + " "), why);
     box.append(line);
   }
-  const where = whereText(card.where);
-  if (where) {
-    const line = testid(el("div", "as-line"), `${idPrefix}-where`);
-    line.append(el("span", "k", WHERE_LABEL + " "), where);
+  const fields = whereFields(whereParts(card.where));
+  if (fields.length) {
+    // Each field in its own labelled box, its value isolated (review of #330, MED 1).
+    const line = testid(el("div", "as-line as-where"), `${idPrefix}-where`);
+    line.append(el("span", "k", WHERE_LABEL));
+    for (const [key, label, value] of fields) {
+      const part = testid(el("span", "as-wpart"), `${idPrefix}-where-${key}`);
+      part.dataset.field = key;
+      part.append(el("span", "as-wk", label), " ", el("bdi", "as-wv", value));
+      line.append(" ", part);
+    }
     box.append(line);
   }
 }

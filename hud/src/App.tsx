@@ -1940,6 +1940,10 @@ export default function App() {
     }, () => {
       // Reconnected: a `turn_finished` published in the gap is gone.
       void reconcileBusy();
+      // So is an approval card's arrival, answer or summary (review of #330,
+      // LOW 3): the cards are read again and merged.
+      void api.approvals().then((list) => dispatch({ type: "approvals_sync", approvals: Array.isArray(list) ? list : [] }))
+        .catch(() => { /* the cards on screen stay */ });
       void refreshThreads();
       // So is a sub-agent's word: rows and panes read theirs again (a
       // restart's children come back stopped).
@@ -3066,7 +3070,9 @@ export default function App() {
         api.approvals().catch(() => []),
         api.discord().catch(() => null),
       ]);
-      dispatch({ type: "patch", patch: { usage, schedules, route, approvals, discord } });
+      dispatch({ type: "patch", patch: { usage, schedules, route, discord } });
+      // Merged, never overwritten: a summary heard while this was in flight stays (review of #330, LOW 3).
+      dispatch({ type: "approvals_sync", approvals: Array.isArray(approvals) ? approvals : [] });
       await Promise.all([loadAvatar(), loadModels(), loadVoices(), refreshArchivedNames()]);
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps

@@ -24,7 +24,7 @@
 import { clockOf, decisionOf, deferredOf, oneLine, questionOf, briefOf, type InboxRow } from "../lib/inbox";
 import {
   allItems, chipsOf, confirmationList, footerState, SECTIONS, groupItems, placeLabel, sectionTitle, summaryLine, whyWords,
-  type ReviewItem, type ReviewReport, type Section,
+  type ConfirmLine, type ReviewItem, type ReviewReport, type Section,
 } from "../lib/review";
 import { el, tap } from "./views";
 import { AI_LABEL, recordSummary } from "../lib/approvalSummary";
@@ -53,6 +53,8 @@ export interface ReviewState {
   online: boolean;
   /** AS: items whose command the owner opened (true) or closed (false). */
   opened?: ReadonlyMap<string, boolean>;
+  /** What the open confirmation shows, frozen when it opened (review of #330, LOW 4). */
+  confirmLines?: ConfirmLine[] | null;
 }
 
 export interface ReviewActions {
@@ -319,7 +321,8 @@ function footer(report: ReviewReport, state: ReviewState, a: ReviewActions, limi
     foot.classList.add("confirming");
     foot.append(el("p", "m-ask", `Approve these ${n} once each, for 30 minutes?`));
     const list = testid(el("ol", "plain m-review-confirm"), "m-review-confirm");
-    for (const line of confirmationList(report, state.selection)) {
+    // Frozen when it opened: a summary landing under it changes nothing shown.
+    for (const line of state.confirmLines ?? confirmationList(report, state.selection)) {
       const li = testid(el("li", ""), "m-review-confirm-item");
       li.dataset.id = line.id;
       li.append(el("div", "m-review-where", line.where));

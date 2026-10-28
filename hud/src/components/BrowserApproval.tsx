@@ -3,19 +3,8 @@ import { browserApi } from "../api";
 import { noPointerFocus } from "../lib/talkkey";
 import { browserApprovalDeadline, browserApprovalKey, parseBrowserPrivateApproval, isBrowserPrivateRequest, type BrowserPrivateDetail, type BrowserApprovalPublic } from "../lib/browserapproval";
 import { browserBody } from "../lib/approvalCard";
-import { ARM_MS } from "../lib/approvalSummary";
+import { useArmed } from "../lib/armed";
 import "./BrowserApproval.css";
-
-/** AS-13: false for ARM_MS after mount and after `key` changes (Approvals.tsx has the same). */
-function useArmed(key: string): boolean {
-  const [armed, setArmed] = useState(false);
-  useEffect(() => {
-    setArmed(false);
-    const t = setTimeout(() => setArmed(true), ARM_MS);
-    return () => clearTimeout(t);
-  }, [key]);
-  return armed;
-}
 
 export const PRIVATE_DETAIL_UNAVAILABLE = "The Browser action details are unavailable. Deny this request.";
 /** Only the mounted top card calls this hook. No detail enters the public approval row. */

@@ -810,6 +810,14 @@ label.iconbtn.attach:hover { background: var(--bg-3); border-color: var(--border
 .as-line { font: 11px var(--mono); color: var(--text-2); margin: 0 0 6px; overflow-wrap: anywhere; }
 .auth .reason.as-line { margin: 0 0 6px; }
 .as-line .k { color: var(--text-muted); letter-spacing: 0.06em; }
+/* WHERE's fields (review of #330, MED 1): each its own boxed field, its
+   label muted inside the box, so a value can never pass for another field. */
+.as-where .as-wpart {
+  display: inline-block; border: 1px solid var(--border-strong); border-radius: 3px; padding: 0 5px;
+  margin: 0 2px 2px 0; max-width: 100%; box-sizing: border-box; overflow-wrap: anywhere; vertical-align: top;
+}
+.as-where .as-wk { color: var(--text-muted); font-size: 10px; letter-spacing: 0.04em; }
+.as-where .as-wv { color: var(--text); }
 .as-cmd { margin: 6px 0 4px; }
 .as-cmd .as-preview { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .as-toggle { font: 10px var(--mono); letter-spacing: 0.06em; margin-top: 4px; padding: 2px 8px; }

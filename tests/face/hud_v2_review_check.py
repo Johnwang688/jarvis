@@ -256,7 +256,8 @@ def review_checks(browser, mock, base, check, until, guard, init_script):
         summed = report()
         rec = summed["overnight"][1]["row"]["detail"]
         rec["summary"] = HOSTILE + " builds b and deploys it"
-        rec["card"].update({"where": "Calc · main · ~/projects/calc", "reason": "deploys", "layer": "human"})
+        rec["card"].update({"where": {"project": "Calc", "branch": "main", "folder": "~/projects/calc"},
+                            "reason": "deploys", "layer": "human"})
         s["review"] = summed
         mock_inbox.changed(mock, ["defer:b"], "deferral_summary")
         itemb = page.locator('[data-testid="review-item"][data-id="defer:b"]')
@@ -271,7 +272,9 @@ def review_checks(browser, mock, base, check, until, guard, init_script):
               and page.evaluate("window.__pwned === undefined"))
         check("AS: WHY ASKED and WHERE are code's lines",
               itemb.locator('[data-testid="review-reason"]').inner_text() == "WHY ASKED [human] deploys"
-              and itemb.locator('[data-testid="review-where"]').inner_text() == "WHERE Calc · main · ~/projects/calc")
+              and itemb.locator('[data-testid="review-where-project"]').inner_text() == "project Calc"
+              and itemb.locator('[data-testid="review-where-branch"]').inner_text() == "branch main"
+              and itemb.locator('[data-testid="review-where-folder"]').inner_text() == "folder ~/projects/calc")
         check("AS: with a summary the command is collapsed to its first line",
               itemb.locator('[data-testid="review-command"]').count() == 0
               and itemb.locator('[data-testid="review-command-preview"]').inner_text().strip() == "make b")
@@ -286,6 +289,16 @@ def review_checks(browser, mock, base, check, until, guard, init_script):
         until(lambda: dialog.count() == 1, timeout=3)
         check("AS: the confirmation shows each item's summary",
               page.locator('[data-testid="review-confirm-summary"]').count() == 1)
+        # Review of #330, LOW 4: a summary that changes under the open dialog
+        # (its tag unchanged) changes nothing the dialog shows.
+        shown = page.locator('[data-testid="review-confirm-list"]').inner_text()
+        rec["summary"] = "Something else entirely"
+        mock_inbox.changed(mock, ["defer:b"], "deferral_summary")
+        until(lambda: "Something else" in itemb.locator('[data-testid="review-summary"]').inner_text(), timeout=4)
+        check("AS: the open confirmation is frozen: a summary landing under it changes nothing shown",
+              dialog.count() == 1 and page.locator('[data-testid="review-confirm-list"]').inner_text() == shown
+              and "Something else" not in shown,
+              page.locator('[data-testid="review-confirm-list"]').inner_text())
         posts = len(_posts(mock))
         page.locator('[data-testid="review-confirm-approve"]').click()
         until(lambda: len(_posts(mock)) > posts, timeout=3)

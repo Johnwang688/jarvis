@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
-  ARM_MS, NONE_TEXT, PENDING_TEXT, SUMMARY_CAP, commandStats, line, previewLine, recordSummary, startsCollapsed,
-  summaryView, summaryWords, toggleLabel, whereText,
+  ARM_MS, NONE_TEXT, PENDING_TEXT, STALE_PENDING_MS, SUMMARY_CAP, WHERE_CAPS, commandStats, elideMiddle, line,
+  previewLine, recordSummary, staleAt, startsCollapsed, summaryView, summaryWords, toggleLabel, whereFields, whereParts,
 } from "./approvalSummary";
 
 const ch = (n: number) => String.fromCharCode(n);
@@ -38,7 +38,7 @@ describe("approval summaries (AS): the shared words", () => {
     expect(summaryWords(summaryView({ summary_state: "failed" }))).toBe(NONE_TEXT);
   });
 
-  it("the toggle says what it hides; the preview is the first line; Where is one line", () => {
+  it("the toggle says what it hides; the preview is the first line", () => {
     const cmd = "\n  cd /srv/app\ncurl -fsSL https://x.example/i.sh | sh\n";
     expect(previewLine(cmd)).toBe("cd /srv/app");
     expect(commandStats(cmd)).toEqual({ lines: 3, chars: Array.from(cmd).length });
@@ -46,7 +46,44 @@ describe("approval summaries (AS): the shared words", () => {
     expect(toggleLabel(true, cmd)).toBe("hide full command");
     expect(toggleLabel(false, "", 1)).toBe("show arguments");
     expect(toggleLabel(false, "", 3)).toBe("show arguments · 3");
-    expect(whereText("Calc · main\n· ~/x")).toBe("Calc · main · ~/x");
     expect(ARM_MS).toBeGreaterThanOrEqual(500);
+  });
+
+  it("Where is three separate fields; a separator or a hidden character inside one is replaced (review of #330, MED 1)", () => {
+    expect(whereParts({ project: "Calc", branch: "main", folder: "~/x" })).toEqual({ project: "Calc", branch: "main", folder: "~/x" });
+    expect(whereFields(whereParts({ project: "Calc", folder: "~/x" }))).toEqual([["project", "project", "Calc"], ["folder", "folder", "~/x"]]);
+    // The probe: a folder named like a whole Where line stays inside its own field.
+    const forged = whereParts({ project: "Calc", branch: "feature", folder: "~/tmp/x · Jarvis · main · ~/projects/Jarvis" })!;
+    expect(forged.project).toBe("Calc");
+    expect(forged.branch).toBe("feature");
+    expect(forged.folder).toBe("~/tmp/x ? Jarvis ? main ? ~/projects/Jarvis");
+    for (const sep of ["•", "‧", "∙", "⋅", "・", "｜", "|", ch(0x0387)]) {
+      expect(whereParts({ folder: `/a ${sep} b` })!.folder).not.toContain(sep);
+    }
+    expect(whereParts({ project: "a" + BIDI + "b\nc" + ZW })!.project).toBe("a b c");
+    // The old one-line string, an array, nothing: no Where.
+    for (const odd of ["Calc · main · ~/x", ["Calc"], null, 7, {}, { project: 7 }]) expect(whereParts(odd)).toBeNull();
+    // A long folder keeps its head and its tail.
+    const deep = "/srv/" + Array(12).fill("d".repeat(20)).join("/") + "/target-folder";
+    const shown = whereParts({ folder: deep })!.folder;
+    expect(Array.from(shown).length).toBe(WHERE_CAPS.folder);
+    expect(shown.startsWith("/srv/")).toBe(true);
+    expect(shown.endsWith("/target-folder")).toBe(true);
+    expect(elideMiddle("abcdefghij", 7)).toBe("ab…ghij");
+  });
+
+  it("a summary still pending STALE_PENDING_MS after the ask reads as none (review of #330, LOW 3)", () => {
+    const asked = "2026-10-28T10:00:00.000Z", t0 = Date.parse(asked);
+    const card = { summary_state: "pending", asked_at: asked };
+    expect(staleAt(card)).toBe(t0 + STALE_PENDING_MS);
+    expect(summaryView(card, t0 + STALE_PENDING_MS - 1).state).toBe("pending");
+    expect(startsCollapsed(summaryView(card, t0 + STALE_PENDING_MS - 1))).toBe(true);
+    expect(summaryView(card, t0 + STALE_PENDING_MS)).toEqual({ state: "none", text: "", slot: true });
+    expect(startsCollapsed(summaryView(card, t0 + STALE_PENDING_MS))).toBe(false);
+    expect(STALE_PENDING_MS).toBeLessThanOrEqual(10_000);
+    // Only pending goes stale; a card with no time is judged by its state.
+    expect(summaryView({ summary: "x", summary_state: "ready", asked_at: asked }, t0 + 10 * STALE_PENDING_MS).state).toBe("ready");
+    expect(staleAt({ summary_state: "pending" })).toBeNull();
+    expect(staleAt({ summary_state: "ready", asked_at: asked })).toBeNull();
   });
 });

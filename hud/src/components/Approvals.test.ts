@@ -1,6 +1,9 @@
-import { act, createElement } from "react";
+import { act, createElement, useLayoutEffect as useLayoutEffectProbe } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { ApprovalQueue, ApprovalVeil } from "./Approvals";
+import { ARM_MS, STALE_PENDING_MS } from "../lib/approvalSummary";
+import { useArmed } from "../lib/armed";
+import { useEffect, useState } from "react";
 import type { ApprovalRequest } from "../types";
 const mocks=vi.hoisted(()=>({get:vi.fn()}));vi.mock("../api",()=>({browserApi:{get:mocks.get}}));
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT=true;
@@ -110,7 +113,7 @@ it("a relayed turn's card says which chat's message started it, on one line, dec
 describe("AS: the reworked ordinary card", () => {
   const card = (extra: Partial<ApprovalRequest> = {}) => request("as1", { hud_only: false, tool: "Bash", layer: "reviewer",
     command: "cd /srv/app\nrm -rf build && make deploy --prod", args: { command: "x", timeout: 5 }, reason: "deploys to production",
-    allowlistable: true, where: "Calc · main · ~/projects/calc", ...extra });
+    allowlistable: true, where: { project: "Calc", branch: "main", folder: "~/projects/calc" }, ...extra });
   const q = (id: string) => host.querySelector<HTMLElement>(`[data-testid="${id}"]`);
   beforeEach(() => vi.useFakeTimers());
   afterEach(() => vi.useRealTimers());
@@ -135,7 +138,13 @@ describe("AS: the reworked ordinary card", () => {
     expect(q("approval-summary")!.textContent).toBe("AI SUMMARY" + hostile);
     expect(host.querySelector("img")).toBeNull();
     expect(q("approval-why")!.textContent).toBe("WHY ASKED [reviewer] deploys to production");
-    expect(q("approval-where")!.textContent).toBe("WHERE Calc · main · ~/projects/calc");
+    expect(q("approval-where")!.textContent).toBe("WHERE project Calc branch main folder ~/projects/calc");
+    // Each field in its own labelled box, its value isolated (review of #330, MED 1).
+    for (const [key, value] of [["project", "Calc"], ["branch", "main"], ["folder", "~/projects/calc"]]) {
+      const part = q("approval-where-" + key)!;
+      expect(part.querySelector(".as-wk")!.textContent).toBe(key);
+      expect(part.querySelector("bdi")!.textContent).toBe(value);
+    }
     expect(q("approval-command")).toBeNull();
     expect(q("approval-command-preview")!.textContent).toBe("command cd /srv/app");
     const toggle = q("approval-command-toggle") as HTMLButtonElement;
@@ -193,11 +202,96 @@ describe("AS: the reworked ordinary card", () => {
     expect(onDecide).toHaveBeenCalledExactlyOnceWith("as1", true, false);
   });
 
+  it("a forged folder stays in its own field (review of #330, MED 1)", async () => {
+    await act(async () => root.render(createElement(ApprovalVeil, { requests: [card({ req_id: "forge",
+      where: { project: "Calc", branch: "feature", folder: "~/tmp/x · Jarvis · main · ~/projects/Jarvis" } })], onDecide: vi.fn() })));
+    expect(q("approval-where-project")!.textContent).toBe("project Calc");
+    expect(q("approval-where-branch")!.textContent).toBe("branch feature");
+    expect(q("approval-where-folder")!.textContent).toBe("folder ~/tmp/x ? Jarvis ? main ? ~/projects/Jarvis");
+    expect(q("approval-where")!.textContent).not.toContain("·");
+  });
+
+  it("a summary still pending 10 s after the ask shows the command expanded (review of #330, LOW 3)", async () => {
+    vi.setSystemTime(new Date("2026-10-28T10:00:00.000Z"));
+    const r = card({ req_id: "stale", summary_state: "pending", asked_at: "2026-10-28T10:00:00.000Z" });
+    await act(async () => root.render(createElement(ApprovalVeil, { requests: [r], onDecide: vi.fn() })));
+    expect(q("approval-command")).toBeNull();
+    expect(q("approval-summary")!.dataset.state).toBe("pending");
+    await act(async () => vi.advanceTimersByTime(STALE_PENDING_MS + 100));
+    expect(q("approval-summary")!.dataset.state).toBe("none");
+    expect(q("approval-command")!.textContent).toContain("make deploy --prod");
+  });
+
   it("the queue shows the summary when there is one", async () => {
     const a = card({ req_id: "q1", summary_state: "ready", summary: "Deploys calc." }), b = card({ req_id: "q2" });
     await act(async () => root.render(createElement(ApprovalQueue, { requests: [a, b] })));
     const text = q("approval-queue")!.textContent!;
     expect(text).toContain("AI: Deploys calc.");
     expect(text).toContain("make deploy --prod");
+  });
+});
+
+// Review of #330, LOW 2: the render that draws a new key is already
+// disarmed. The old hook reset a boolean in a passive effect, so that render
+// (and its commit) still said armed.
+function oldUseArmed(key: string): boolean {
+  const [armed, setArmed] = useState(false);
+  useEffect(() => {
+    setArmed(false);
+    const t = setTimeout(() => setArmed(true), ARM_MS);
+    return () => clearTimeout(t);
+  }, [key]);
+  return armed;
+}
+
+describe("useArmed: no armed frame under new content", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+  const firstRenderWith = async (hook: (key: string) => boolean) => {
+    const seen: [string, boolean][] = [];
+    const Probe = ({ k }: { k: string }) => { seen.push([k, hook(k)]); return null; };
+    await act(async () => root.render(createElement(Probe, { k: "A" })));
+    await act(async () => vi.advanceTimersByTime(ARM_MS + 50));
+    expect(seen[seen.length - 1]).toEqual(["A", true]);
+    await act(async () => root.render(createElement(Probe, { k: "B" })));
+    const b = seen.filter(([k]) => k === "B");
+    const back = async () => {
+      await act(async () => root.render(createElement(Probe, { k: "A" })));
+      return seen.filter(([k]) => k === "A").slice(-1)[0][1];
+    };
+    return { firstB: b[0][1], backToA: await back() };
+  };
+
+  it("the shared hook: false in the very render that brings a new key, and for a key that comes back", async () => {
+    const { firstB, backToA } = await firstRenderWith(useArmed);
+    expect(firstB).toBe(false);
+    expect(backToA).toBe(false);
+  });
+
+  it("the old hook fails the same check (mutation evidence)", async () => {
+    const { firstB } = await firstRenderWith(oldUseArmed);
+    expect(firstB).toBe(true);
+  });
+
+  it("the card's AUTHORIZE is disabled in the commit that draws a new summary", async () => {
+    const r = request("arm", { hud_only: false, tool: "Bash", layer: "reviewer", command: "make", allowlistable: true,
+      summary_state: "pending" });
+    const onDecide = vi.fn();
+    // Read `disabled` from the commit itself: a layout effect runs before any passive effect.
+    const states: boolean[] = [];
+    let recording = false;
+    const Spy = () => { useLayoutEffectProbe(() => {
+      const b = host.querySelector('[data-testid="approval-allow"]') as HTMLButtonElement | null;
+      if (recording && b) states.push(b.disabled);
+    }); return null; };
+    const draw = (req: ApprovalRequest) => createElement("div", {}, createElement(ApprovalVeil, { requests: [req], onDecide }),
+      createElement(Spy));
+    await act(async () => root.render(draw(r)));
+    await act(async () => vi.advanceTimersByTime(ARM_MS + 50));
+    expect((host.querySelector('[data-testid="approval-allow"]') as HTMLButtonElement).disabled).toBe(false);
+    recording = true;
+    await act(async () => root.render(draw({ ...r, summary_state: "ready", summary: "Builds the app." })));
+    expect(states[0]).toBe(true);
+    expect(states.every((d) => d)).toBe(true);
   });
 });

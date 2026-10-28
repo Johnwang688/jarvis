@@ -140,6 +140,22 @@ describe("several chats: each pane its own conversation (WP-B)", () => {
     expect(priv.approvals[1]).toEqual({ req_id: "p", hud_only: true });
   });
 
+  it("AS (review of #330, LOW 3): a re-read list never overwrites a summary already heard; it drops what was answered", () => {
+    const s = withChats({}, { orb: "approval", approvals: [
+      { req_id: "r", command: "make", summary: "Builds.", summary_state: "ready" } as any,
+      { req_id: "gone", command: "x", summary_state: "pending" } as any] });
+    const listed = [{ req_id: "r", command: "make", summary: "", summary_state: "pending" } as any,
+                    { req_id: "new", command: "y", summary_state: "pending" } as any];
+    const next = reduce(s, { type: "approvals_sync", approvals: listed });
+    expect(next.approvals.map((r) => r.req_id)).toEqual(["r", "new"]);
+    expect(next.approvals[0]).toMatchObject({ summary: "Builds.", summary_state: "ready" });
+    expect(next.approvals[1].summary_state).toBe("pending");
+    // The list's own word wins when it is past pending; an empty list clears the orb.
+    const failed = reduce(s, { type: "approvals_sync", approvals: [{ req_id: "r", command: "make", summary_state: "failed" } as any] });
+    expect(failed.approvals[0].summary_state).toBe("failed");
+    expect(reduce(s, { type: "approvals_sync", approvals: [] }).orb).toBe("idle");
+  });
+
   it("hands words back to one pane's box and takes them once", () => {
     let s = reduce(withChats({}), { type: "give_back", pane: 2, text: "again", files: [], nonce: 5 });
     expect(s.chats[2].restore.map((g) => g.text)).toEqual(["again"]);

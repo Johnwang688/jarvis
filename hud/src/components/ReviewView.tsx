@@ -32,11 +32,12 @@ import { clockOf, decisionOf, deferredOf, questionOf, briefOf } from "../lib/inb
 import {
   afterChanged, allItems, approveBody, chipsOf, confirmationList, emptySelection, footerState, groupItems,
   keptSelection, leaveBody, placeLabel, sectionTitle, summaryLine, toggled, type ReviewItem, type ReviewReport,
-  type Section, whyWords, confirmedChanged, UNTICKED_GONE, SECTIONS,
+  type Section, whyWords, confirmedChanged, UNTICKED_GONE, SECTIONS, type ConfirmLine,
 } from "../lib/review";
 import type { ReviewSnapshot } from "../state/review";
-import { AI_LABEL, WHERE_LABEL, WHY_LABEL, previewLine, recordSummary, toggleLabel } from "../lib/approvalSummary";
+import { AI_LABEL, WHY_LABEL, previewLine, recordSummary, toggleLabel } from "../lib/approvalSummary";
 import { reasonText } from "../lib/approvalCard";
+import { WhereLine } from "./Approvals";
 
 export interface ReviewViewProps {
   snapshot: ReviewSnapshot;
@@ -69,6 +70,10 @@ export function ReviewView(props: ReviewViewProps) {
   const [confirming, setConfirming] = useState(false);
   // The exact set the open confirmation shows: only it is ever sent (review of #329, MED 1).
   const [confirmed, setConfirmed] = useState<{ id: string; tag: string }[] | null>(null);
+  // What the open dialog shows, frozen when it opens (review of #330, LOW 4):
+  // a summary that lands under it never changes the words being confirmed.
+  // A change to a confirmed item's card still closes it (`confirmedChanged`).
+  const [confirmLines, setConfirmLines] = useState<ConfirmLine[]>([]);
   const dialogRef = useRef<HTMLDivElement | null>(null);
   const [flash, setFlash] = useState<string | null>(null);
   const sending = useRef(new Set<string>());
@@ -195,7 +200,7 @@ export function ReviewView(props: ReviewViewProps) {
           </div>
         ) : null}
         {why ? <div className="as-line" data-testid="review-reason"><span className="k">{WHY_LABEL} </span>{why}</div> : null}
-        {d.where ? <div className="as-line" data-testid="review-where"><span className="k">{WHERE_LABEL} </span>{d.where}</div> : null}
+        <WhereLine where={d.where} testid="review-where" />
         {d.tool ? <div className="ir-text" data-testid="review-tool">Tool: {d.tool}</div> : null}
         {open ? (
           <>
@@ -386,7 +391,7 @@ export function ReviewView(props: ReviewViewProps) {
   }
 
   const foot = footerState(report, selection);
-  const confirm = confirmed ? confirmationList(report, new Set(confirmed.map((c) => c.id))) : [];
+  const confirm = confirmed ? confirmLines : [];
   // While the dialog is open everything behind it in this view is inert (#329, NIT 8).
   const behind = confirming ? { inert: "" } as Record<string, string> : {};
   const picked = allItems(report).filter((i) => selection.has(i.row.id)).length;
@@ -439,6 +444,7 @@ export function ReviewView(props: ReviewViewProps) {
                   const body = approveBody(report, selection);
                   if (!body) return;
                   setConfirmed(body.items);
+                  setConfirmLines(confirmationList(report, new Set(body.items.map((c) => c.id))));
                   setConfirming(true);
                 }}>
           Approve selected ({picked})
