@@ -1843,6 +1843,25 @@ routes"). Not deployed: the owner's step is `jarvis hud rebuild` and a reload
   save}` for that one draft. Under a card the row and the import are inert,
   and every button and handler refuses. The phone shows a check row
   read-only.
+- **Snooze and dismiss (inbox B4, IN-7, 2026-10-28).** `state/inbox.ts`
+  now reads `GET /inbox?all=1` (`api.inboxAll`): every row, each with the
+  daemon's `markable`, a hidden one with `hidden` (`{snoozed_until,
+  dismissed_at}`). A row the daemon calls markable **and** of rank 5 to 8,
+  never `pr_unavailable` or a `prx:` id (`lib/inbox` `canMark`, the HUD's own
+  copy of IN-8), has a row of quiet buttons (`ir-marks`): Snooze 1 h, Until
+  tomorrow (08:00 local the next day), 1 week, and Dismiss. Each posts once
+  through `api.markInbox` to `POST /inbox/<encodeURIComponent(id)>/mark`
+  (`{snooze_until}` as a `Z` time, or `{dismiss: true}`); the client never
+  sends a rank, and the daemon judges the row itself (a 409 shows the
+  daemon's words). Hidden rows leave the list, the sidebar count and the
+  badge (`waitingCount` skips `hidden`). The head's "Show hidden (n)"
+  (only while n > 0; it switches itself off at 0) lists them muted
+  (`data-hidden`, 60% opacity, a plain border, no amber), each saying
+  "Dismissed" or "Snoozed until HH:MM [day]" in code's words, with Undo
+  (`{clear: true}`). Plain `type="button"` buttons, none focused or
+  defaulted; a click on a row marks nothing; under a card every mark button
+  is disabled and inert and the handler refuses. The phone shows what `GET
+  /inbox` shows (hidden rows left out) and cannot mark.
 - Tests: `lib/inbox.test.ts`, `state/inbox.test.ts`,
   `components/InboxView.test.ts`, the `lib/workspace.test.ts` inbox case, and
   `tests/face/hud_v2_inbox_check.py` (97 checks since A3's `missed` section, its own `MockDaemon(0)`, the
@@ -1858,7 +1877,13 @@ routes"). Not deployed: the owner's step is `jarvis hud rebuild` and a reload
   question/options/why/origin as text, Enter on a radio posts nothing, Answer
   posts `{choice}` once to `/inbox/decisions/<id>`, words from the focused box
   post `{text}`, inert and disabled under a card) and the vitest decision
-  cases in `InboxView.test.ts` and `lib/inbox.test.ts`.
+  cases in `InboxView.test.ts` and `lib/inbox.test.ts`. B4 adds the face
+  check's `marks` section (buttons on ranks 5 to 8 only, never on a
+  question, proposal, blocked task or "PR list unavailable"; `?all=1` read;
+  Dismiss posts once with the encoded id; a hidden rank-5 row leaves the
+  count; Show hidden, "Dismissed", Undo; a snooze an hour ahead; a row click
+  marks nothing; inert under a card) and the vitest marks cases; mutations
+  caught: marks offered on rank 1 to 4, hidden rows counted.
 - **Follow-up (pre-existing, not this package):** the HUD reads `GET
   /approvals` only at boot, so a card asked while the event stream was down
   is missed until a reload; re-read it on reconnect and merge it into the

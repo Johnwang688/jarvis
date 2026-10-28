@@ -1102,6 +1102,86 @@ route, the grep and the tool sweep, rows and order, the phone's projection,
 the import's paths and drafts), `owner_post_check` (the schema), and
 `archive_check` (the routes and the source rule).
 
+**Marks (inbox B4, IN-7, 2026-10-28).** The owner's snoozes and
+dismissals. `jarvis/v2/inbox_marks.py` (new, SELF_PROTECTED: the store and
+the rule) and `inbox.py` (the route and where marks apply).
+
+- **Rank 5 to 8 only (IN-8), twice.** `inbox_marks.markable(row)`: rank 5
+  to 8, and never "PR list unavailable" (#320's `prx:list`, kind
+  `pr_unavailable`), refused by kind (`UNMARKABLE_KINDS`) and by id prefix
+  (`UNMARKABLE_PREFIXES`). Hiding that row would turn "unavailable" into
+  "nothing waiting". `POST /inbox/<id>/mark` (owner-only, the HUD listener;
+  the API listener and a non-owner page get 403) finds the row in a fresh
+  projection, marks ignored, and refuses (409) a row that is not markable
+  **now**. The client never sends a rank (an extra field is a 400). The store
+  refuses one too. Then `rows()` honours a mark only while the row's
+  current rank is 5 or more, whatever the file says. So a forged mark on a
+  live approval hides nothing, and a `failed` task (rank 8) dismissed that
+  later reads rank 4 shows again.
+- **The body.** Exactly one of `{snooze_until: <ISO time with its zone, in
+  the future by the daemon's clock, at most 30 days ahead>}`, `{dismiss:
+  true}` and `{clear: true}` (the Undo; it needs no row, since it only ever
+  shows one). 400 for a malformed id, body or query, 409 for a row that is
+  gone or not markable. The reply is `{ok, id, hidden}` (`cleared` on an
+  Undo). It publishes `inbox_changed {ids: [<id>], reason: "inbox_marked"}`,
+  the id only.
+- **A mark is for the row as it was (`material_key`).** Each mark keeps a
+  16-hex digest of the row's kind and rank plus, per kind: a PR's `head`
+  (new commits bring it back), a task's state and last update, a decision's
+  delivery, a check's done flag (a new step result keeps it hidden), nothing
+  more for a "denied while away" record, and the code-built title and
+  blocks for any other kind. A digest that no longer matches shows the row
+  again. Cheap and honest: it reads only what the projection already holds.
+- **Applying.** `rows(daemon, marks=...)`: "hide" (the default: `GET
+  /inbox`, the phone's `/m/api/inbox`) leaves hidden rows out; "flag"
+  (`GET /inbox?all=1`) keeps them with `hidden: {snoozed_until,
+  dismissed_at}` and gives every row `markable`; "ignore" is the projection
+  alone (`answer`, `mark_row`). Hidden rows are never in the HUD's count or
+  badge (`lib/inbox` `waitingCount`). A store that raises hides nothing.
+- **The file.** `<data root>/inbox/marks.json`: `{row_id: {snoozed_until,
+  dismissed_at, key, at}}` (design §3.2's two fields, plus the digest and
+  when it was marked), exactly one of the first two set. The decisions
+  store's I/O: `inbox/` opened `O_DIRECTORY | O_NOFOLLOW` (0700,
+  tightened), the file read `O_NOFOLLOW | O_NONBLOCK`, refused unless
+  regular and at most 512 KiB, written as a fresh `O_EXCL` 0600 temp file,
+  fsynced, then `os.replace`d (a symlink there is replaced, never written
+  through; a symlinked `inbox/` refuses the write, a 500). **Fails closed:**
+  a file that is missing, a symlink, a FIFO, too large, not JSON, or with
+  any entry not exactly that shape applies no mark at all, so every row
+  shows; a mark written over it starts from empty. **Bounded:** at most
+  `MARKS_MAX` (500) entries and 256 KiB per write. Each write first drops
+  expired snoozes and marks whose row is gone, changed or no longer
+  markable, then the oldest. A dropped mark only shows a row. The file is
+  named in `_protected_state_paths` and lies in the protected `inbox/` tree,
+  so v1 write tools refuse it, v2 layer 1 refuses a file tool or shell write
+  to it, and v1's shell gate asks or denies.
+- **The phone (default kept).** It shows what `GET /inbox` shows: hidden
+  rows are left out, through the same `rows()` default. It cannot mark:
+  there is no phone route (`remote_api._match` and `remote_answer._match`
+  have none). A phone mark would be its own owner-verified route, left for
+  the owner.
+- **No tool path.** `archive_check.test_no_tool_or_cli_marks_an_inbox_row`
+  keeps every tool, MCP catalog entry, session tool, Discord, the `jarvis`
+  command, `owner_ops`, `mcp_session` and the post service from naming the
+  route, `mark_row`, `MarksStore`, the file or `inbox_marked`
+  (`files._protected_state_paths` set aside, as for the phone's files). The
+  marks test greps all of `jarvis/` and sweeps every session tool with a
+  row id in every argument.
+- **With #320 (inbox B3).** This branch does not hold B3. Its `pr` rows
+  are markable generically (rank 5, the `head` key) once it lands; its
+  `prx:list` is refused by both rules. When both merge, `_KNOWN` must
+  include `pr` and `prx` (B3 adds them), or a mark on a PR row is a 400
+  "unknown inbox kind".
+
+Tests: `tests/v2/inbox_marks_check.py` (every rank 1 to 4 kind refused live;
+5 to 8 accepted and undone; the rank judged at mark time; a forged mark on
+a live row; a row rising to rank 4; `prx` by kind and prefix on synthetic
+rows; material change; `?all=1`; snooze expiry on a clock set relative to
+now; malformed, oversized, symlinked and FIFO files; modes; the bound and
+pruning; 403 for the API listener; `inbox_changed`; the phone; the grep and
+the session-tool sweep; v2 layer 1 and v1 for shell writes), `inbox_check`
+(`?all=1` is a query now), `archive_check`, and the HUD's.
+
 ## The phone's remote listener (phone C1 / P-1, 2026-10-25)
 
 `jarvis/v2/remote_listener.py` (SELF_PROTECTED) is v2's fourth listener
