@@ -170,6 +170,11 @@ SELF_PROTECTED = frozenset(
         # approval waits for the morning. An agent that could edit it could
         # keep the owner from hearing about a card.
         "jarvis/v2/quiet.py",
+        # Approvals asked during quiet hours (QH, 2026-10-28): which asks
+        # are deferred unasked, and the owner's single-use inbox grants that
+        # the broker honours with no card. An agent that could edit it could
+        # mint itself a grant.
+        "jarvis/v2/quiet_defer.py",
         # The approval broker every surface answers through: who counts as
         # owner-verified, which cards are HUD-only, and what a card shows
         # before Allow (the owner's decision, 2026-10-25). An agent that
@@ -302,7 +307,10 @@ def _protected_state_paths() -> set[Path]:
     # The `checks` folder (inbox B2: the live checks and the owner's
     # results) is named for the same reason, and so is `marks.json` (inbox
     # B4: what the owner snoozed or dismissed; a forged mark would hide a row).
-    paths |= {inbox, inbox / "missed.jsonl", inbox / "decisions", inbox / "checks", inbox / "marks.json"}
+    # `deferred.json` (QH): approvals deferred during quiet hours and the
+    # owner's single-use grants; a forged grant would answer for the owner.
+    paths |= {inbox, inbox / "missed.jsonl", inbox / "decisions", inbox / "checks", inbox / "marks.json",
+              inbox / "deferred.json"}
     # Jarvis's own records (2026-10-25, review of PR #309: `cp /tmp/x
     # <data>/threads/<id>/log.jsonl` was a static ALLOW, and a forged
     # `{"kind":"user","data":{"origin":"owner",…}}` line then showed as the

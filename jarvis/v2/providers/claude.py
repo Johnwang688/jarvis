@@ -771,6 +771,9 @@ class _Pending:
 
     ready: threading.Event = field(default_factory=threading.Event)
     value: Decision | None = None
+    # QH: the permit's deferral words (`permissions.deferral_reason`), read on
+    # the permit's own thread; the hook tells the model them in its denial.
+    deferred: str | None = None
 
 
 @dataclass
@@ -1165,9 +1168,11 @@ class ClaudeProvider:
             # The hook input's `cwd` is the shell's folder, from the CLI and
             # not the model: where a push with no refspec is judged.
             shell_cwd = data.get("cwd") if isinstance(data.get("cwd"), str) else None
+            deferred: list[str] = []
             decision = await self._decide(session, name, args, agent_id=agent_id,
                                           shell_cwd=shell_cwd,
-                                          tool_use_id=tool_use_id if isinstance(tool_use_id, str) else None)
+                                          tool_use_id=tool_use_id if isinstance(tool_use_id, str) else None,
+                                          deferred=deferred)
             if decision is Decision.ALLOW and jarvis is not None:
                 # Explicit under both profiles (D-5): under ASK it pre-empts the
                 # CLI's own prompt, under AUTO it skips the classifier, whose
@@ -1209,8 +1214,10 @@ class ClaudeProvider:
                     "hookEventName": "PreToolUse",
                     "permissionDecision": "deny",
                     # The model reads this, so it says what happened rather
-                    # than only that something did.
+                    # than only that something did. A quiet-hours deferral
+                    # (QH) says so in its own code-built words.
                     "permissionDecisionReason": _safe(
+                        f"{HOOK_DENIAL_PREFIX}{name}. {deferred[0]}" if deferred else
                         f"{HOOK_DENIAL_PREFIX}{name}. The owner's rules or the owner "
                         "refused this call; do not retry it or work around it."
                     ),
@@ -1236,17 +1243,21 @@ class ClaudeProvider:
                         return PermissionResultAllow()
                 except Exception:  # noqa: BLE001 — a failing recall decides nothing
                     pass
-            decision = await self._decide(session, str(tool_name or ""), args, agent_id=agent_id)
+            deferred: list[str] = []
+            decision = await self._decide(session, str(tool_name or ""), args, agent_id=agent_id,
+                                          deferred=deferred)
             if decision is Decision.ALLOW:
                 return PermissionResultAllow()
             _note_denied(session, getattr(context, "tool_use_id", None), agent_id)
-            return PermissionResultDeny(message=_safe(HOOK_DENIAL_MESSAGE))
+            return PermissionResultDeny(message=_safe(
+                f"{HOOK_DENIAL_MESSAGE}. {deferred[0]}" if deferred else HOOK_DENIAL_MESSAGE))
 
         return can_use_tool
 
     async def _decide(self, session: _Session, name: str, args: dict, *,
                       agent_id: Any = None, shell_cwd: str | None = None,
-                      tool_use_id: str | None = None) -> Decision:
+                      tool_use_id: str | None = None,
+                      deferred: list[str] | None = None) -> Decision:
         """Ask `permit`, announcing the question so a stalled turn is visible.
 
         A call from a sub-agent (`agent_id`, from the hook input or the
@@ -1288,6 +1299,8 @@ class ClaudeProvider:
         finally:
             with session.mutex:
                 session.pending.pop(req_id, None)
+        if deferred is not None and decision is Decision.DENY and pending.deferred:
+            deferred.append(pending.deferred)
         session.emit(EventKind.APPROVAL_RESOLVED, req_id=req_id, decision=decision.value)
         return decision
 
@@ -1326,7 +1339,13 @@ class ClaudeProvider:
                     extra["shell_cwd"] = shell_cwd
                 if tool_use_id is not None and _takes_keyword(session.permit, "tool_use_id"):
                     extra["tool_use_id"] = tool_use_id
-                return Decision(session.permit(name, dict(args), session.brief, **extra))
+                from ..permissions import deferral_reason, last_verdict
+                last_verdict()          # only this call's verdict is read below
+                decision = Decision(session.permit(name, dict(args), session.brief, **extra))
+                if decision is Decision.DENY:
+                    # QH: read on the permit's own thread, where it was set.
+                    pending.deferred = deferral_reason(last_verdict())
+                return decision
             except Exception:  # noqa: BLE001 — an unreadable answer is a denial
                 return Decision.DENY
 

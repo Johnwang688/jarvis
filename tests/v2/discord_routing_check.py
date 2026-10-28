@@ -416,6 +416,30 @@ class DiscordRoutingChecks(unittest.TestCase):
         self.listener.feed(message(f"no {request.code}", channel=TASK_THREAD))
         worker.join(2)
 
+    def test_an_ask_deferred_for_quiet_hours_posts_nothing(self):
+        """QH: while the owner sleeps an ask is deferred unasked, with no
+        post anywhere; the next ask, with the owner back, posts as usual."""
+        from datetime import datetime, timedelta, timezone
+        night = datetime(2026, 3, 10, 23, 30, tzinfo=timezone(timedelta(hours=-5)))
+        self.daemon.quiet.clock = lambda: night
+        self.daemon.inbox.deferred.clock = lambda: night
+        self.daemon.attach_quiet_desk()
+        before = len(self.posts())
+        deferred = ApprovalRequest(tool="Bash", args={"command": "pnpm run deploy --prod"},
+                                   command="pnpm run deploy --prod", task_id=self.task.id, origin="task test")
+        self.assertIs(self.approvals.ask(deferred), Decision.DENY)
+        self.assertEqual(deferred.outcome[0], "deferred")
+        self.daemon.owner_seen()
+        asked, result, thread = self.ask(command="pnpm run deploy --staging", task_id=self.task.id)
+        # Posted in order: the later ask is up, so anything for the first would be too.
+        new = json.dumps(self.posts()[before:])
+        self.assertIn(asked.code, new)
+        self.assertNotIn(deferred.req_id, new)
+        self.assertNotIn("--prod", new)
+        self.assertNotIn(deferred.req_id, self.surface._approval_messages)
+        self.approvals.resolve(asked.req_id, Decision.DENY)
+        thread.join(5)
+
     def test_approval_without_a_task_goes_to_the_owner_dm(self):
         request, result, worker = self.ask(command="rm -rf build")
         self.assertEqual(self.posts(DM_CHANNEL)[0][0], DM_CHANNEL)

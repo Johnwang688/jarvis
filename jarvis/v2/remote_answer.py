@@ -58,6 +58,16 @@ exact entry `PendingApprovals.resolve(always=True)` would write
 phone shows it before the passkey prompt. The entry is written only by the
 verified answer.
 
+**A deferred approval (QH, `quiet_defer.py`).** Leave it (`{action:
+"leave"}`) needs the session only. Approve and retry (`{action: "retry",
+assertion}`) needs its own passkey assertion, asked for at `answer/options`
+with `{decision: "allow"}` and bound to `defer:<id>` (a namespace no
+approval's id can take: theirs hold no colon), this answer and this
+session, verified before anything is written, single use. A card the
+phone's scrub would change is refused (`WITHHELD`), and a HUD-only one is
+never granted. The grant itself is `quiet_defer.answer` with `via="phone"`
+and `verified` true, passed by `_answer_deferred` only, after the assertion.
+
 **Questions, task questions and decisions** need the session only, as on
 the HUD, through the inbox's own dispatch (`inbox.answer`, IN-2) with
 `via="phone"`: a decision's answer reaches its chat as
@@ -216,12 +226,65 @@ def _decision(body: dict, allowed=DECISIONS) -> str:
     return value
 
 
+def _deferral(daemon, row_id: str) -> tuple[str, dict]:
+    """(its id, the record) of a `defer:` row that Approve and retry fits:
+    waiting, under a day old, never a HUD-only card, its card whole and not
+    changed by the phone's scrub. Else a refusal."""
+    from . import quiet_defer
+    _prefix, rest, _ = _split(row_id)
+    store = getattr(getattr(daemon, "inbox", None), "deferred", None)
+    record = store.get(rest) if store is not None else None
+    if record is None or record["state"] != "waiting":
+        raise _Refused(409, "this item is no longer waiting; it was answered or its source has gone")
+    row = next((r for r in quiet_defer.rows(daemon, _row_builder()) if r["id"] == f"defer:{rest}"), None)
+    if row is None or not row["detail"].get("grantable"):
+        raise _Refused(409, "this item cannot be approved from here; it can only be left")
+    if phone_card(record["card"])[1]:
+        raise _Refused(409, WITHHELD)
+    return rest, record
+
+
+def _row_builder():
+    from .inbox import _row
+    return _row
+
+
+def defer_binding(record_ids) -> str:
+    """What an Approve and retry's assertion is bound to, in place of an
+    approval's `req_id` in `RemoteAuth.answer_challenge` (sha256 of the
+    binding, the answer "allow" and a nonce): `defer:<id>` for one deferral
+    (an approval's id holds no colon, so neither can stand for the other);
+    for several ids under one confirm, `defers:` and the SHA-256 of the
+    sorted, deduplicated ids joined by newlines (cut to 56 hex characters,
+    inside the challenge's 64-character bound), so one assertion covers
+    exactly that set. Only the one-id form is used here (QH); the list form
+    is for the morning review."""
+    ids = sorted(set(record_ids))
+    if not ids or not all(isinstance(i, str) and i and "\n" not in i for i in ids):
+        raise _Refused(400, "bad request")
+    if len(ids) == 1:
+        return f"defer:{ids[0]}"
+    import hashlib
+    return "defers:" + hashlib.sha256("\n".join(ids).encode("utf-8")).hexdigest()[:56]
+
+
+def _defer_key(record_id: str) -> str:
+    return defer_binding([record_id])
+
+
 def options(handler, daemon, session, row: str, body: dict) -> dict:
     """`POST .../answer/options`: the challenge for one Allow or Always
-    (PH-4), after the refusals that need no passkey; for Always, the rule."""
+    (PH-4), after the refusals that need no passkey; for Always, the rule.
+    For a deferred row (QH), the challenge for its Approve and retry."""
     decision = _decision(body, ("allow", "always"))
     if set(body) - {"decision"}:
         raise _Refused(400, "bad request")
+    if _split(row)[0] == "defer":
+        if decision != "allow":
+            raise _Refused(409, NO_ALWAYS)
+        record_id, _record = _deferral(daemon, row)
+        return {"decision": "allow",
+                "publicKey": handler.remote_auth.answer_options(session, _defer_key(record_id), "allow")}
     request = _request(daemon, row)
     secure = _monitor(daemon).check(session=session, handler=handler)
     _gate(daemon, request, decision, secure)
@@ -272,6 +335,8 @@ def answer(handler, daemon, session, row: str, body: dict) -> dict:
     prefix, _rest, _ = _split(row_id)
     if prefix == "prop":
         raise _Refused(400, WITHDRAW_AT_DESK)
+    if prefix == "defer":
+        return _answer_deferred(handler, daemon, session, row_id, body)
     if prefix != "appr":
         # A question, a task question, a decision: the session is enough,
         # as on the HUD. The dispatch checks the body's shape.
@@ -290,6 +355,9 @@ def answer(handler, daemon, session, row: str, body: dict) -> dict:
     request = _request(daemon, row_id)
     # PH-4 first: the assertion, bound to this card and this answer.
     handler.remote_auth.answer_verify(session, assertion, request.req_id, decision)
+    seen = getattr(daemon, "owner_seen", None)
+    if callable(seen):
+        seen()                      # QH-3: a verified phone answer is presence
     # Then every §4.1 check, in full, with this session and this request.
     secure = _monitor(daemon).check(session=session, handler=handler)
     _gate(daemon, request, decision, secure)
@@ -297,6 +365,39 @@ def answer(handler, daemon, session, row: str, body: dict) -> dict:
     out = _dispatch(daemon, row_id, {"decision": "allow", "always": decision == "always"},
                     owner_verified=owner_verified)
     return {**out, "authority": "hud" if owner_verified else "limited"}
+
+
+def _answer_deferred(handler, daemon, session, row_id: str, body: dict) -> dict:
+    """QH: Leave it with the session; Approve and retry only after this
+    deferral's own assertion is verified."""
+    from . import quiet_defer
+    from .daemon import APIError
+    action = body.get("action")
+    if action not in ("retry", "leave"):
+        raise _Refused(400, "action must be retry or leave")
+    _prefix, rest, _ = _split(row_id)
+    if action == "leave":
+        if set(body) - {"action"}:
+            raise _Refused(400, "bad request")
+        verified = False
+    else:
+        if set(body) - {"action", "assertion"}:
+            raise _Refused(400, "bad request")
+        assertion = body.get("assertion")
+        if not isinstance(assertion, dict):
+            raise _Refused(401, "Approve and retry needs the passkey")
+        rest, _record = _deferral(daemon, row_id)
+        # The assertion, bound to this deferral and this answer, first.
+        handler.remote_auth.answer_verify(session, assertion, _defer_key(rest), "allow")
+        seen = getattr(daemon, "owner_seen", None)
+        if callable(seen):
+            seen()                  # QH-3: a verified phone answer is presence
+        _deferral(daemon, row_id)   # still waiting and whole after the passkey
+        verified = True
+    try:
+        return quiet_defer.answer(daemon, rest, {"action": action}, via="phone", verified=verified)
+    except APIError as exc:
+        raise _Refused(exc.status, _word(exc)) from None
 
 
 def decision(handler, daemon, session, row: str, body: dict) -> dict:

@@ -584,6 +584,12 @@ class Daemon:
         # by the phone's push (P-6); changed only at the desk (`/quiet`).
         from .quiet import QuietHours
         self.quiet = QuietHours(stores.root)
+        # QH-3 (quiet_defer.py): when the owner last gave input here
+        # (`owner_seen`), by `_presence_clock` (monotonic); None until then.
+        # An approval asked during quiet hours is deferred unless this is
+        # within `quiet_defer.PRESENT_S`, once `attach_quiet_desk` ran.
+        self._presence_clock = time.monotonic
+        self._owner_seen_at: float | None = None
         self._listeners = []
         from .hud_api import HUDLedger
         from .router import Router
@@ -2208,6 +2214,33 @@ class Daemon:
             relayed_from=(lambda child=None: _relayed_from(session, child)) if session is not None else None)
         return build_permit(ctx, self.approvals)
 
+    def owner_seen(self) -> None:
+        """The owner's own input just arrived (QH-3): a HUD message the window
+        sent (`is_owner`), the HUD's answer to an approval, the phone's
+        answer after a verified passkey assertion, or the owner's answer to
+        a deferred row. Never from a tool, an agent or a read."""
+        self._owner_seen_at = self._presence_clock()
+
+    def owner_present(self) -> bool:
+        """Whether the owner gave input within `quiet_defer.PRESENT_S`."""
+        from .quiet_defer import PRESENT_S
+        seen = self._owner_seen_at
+        if seen is None:
+            return False
+        age = self._presence_clock() - seen
+        return 0 <= age < PRESENT_S
+
+    def attach_quiet_desk(self):
+        """QH: let the broker defer approvals asked during quiet hours, and
+        take the owner's single-use inbox grants. Called by daemon2's
+        `main()` only, so no embedded or test daemon's broker reads the
+        wall clock (a test attaches its own). Returns the desk."""
+        from .quiet_defer import QuietDesk
+        desk = QuietDesk(self.quiet, self.owner_present, self.inbox.deferred, self.bus.publish)
+        if hasattr(self.approvals, "quiet_desk"):
+            self.approvals.quiet_desk = desk
+        return desk
+
     def _approval_requested(self, request: ApprovalRequest) -> None:
         self.bus.publish({"kind": "approval_requested",
                           "thread_id": request.thread_id,
@@ -3527,6 +3560,7 @@ def _handler(daemon):
                 always = body.get("always", False)
                 if not isinstance(always, bool):
                     raise APIError(400, "always must be a boolean")
+                daemon.owner_seen()         # QH-3: the owner at the HUD answered
                 # The HUD route: HUD authority (PH-7) only with the HUD
                 # listener's own Host, after `owner_only` above.
                 return 200, daemon.resolve_approval(
@@ -3894,6 +3928,10 @@ def main() -> int:
     # The inbox's open PRs (B3, inbox_prs.py): the owner's `gh`, read-only,
     # attached here for the same reason.
     daemon.inbox.prs.attach_system()
+    # Quiet hours (QH, quiet_defer.py): approvals asked while the owner
+    # sleeps are deferred to the inbox. Attached here only, so no embedded
+    # or test daemon's broker depends on the time of day.
+    daemon.attach_quiet_desk()
     hatch = EscapeHatch(daemon, daemon.approvals)
     discord = None
     daemon.runner = TaskRunner(daemon, daemon.router)

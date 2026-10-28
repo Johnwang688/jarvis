@@ -19,6 +19,9 @@ The "PR list unavailable" row (inbox B3, `prx:list`, kind
 prefix (`UNMARKABLE_KINDS`, `UNMARKABLE_PREFIXES`): hiding it would turn
 "unavailable" into "nothing waiting".
 
+A deferred approval (QH, `quiet_defer.py`, kind `deferred`, `defer:` ids)
+is never markable either, at rank 4 or 8: "Leave it" is how it goes.
+
 **A mark is for the row as it was (`material_key`).** Each mark keeps a
 short digest of what made the row worth hiding: its kind and rank, plus,
 per kind, a PR's head SHA (new commits bring it back), a task's state and
@@ -78,8 +81,8 @@ SNOOZE_MAX = timedelta(days=30)     # the furthest a snooze may reach
 MARKABLE_MIN_RANK = 5               # IN-8: kinds 5 to 8 only
 MARKABLE_MAX_RANK = 8
 # Inbox B3 (#320): "PR list unavailable" is rank 5 but never hidden.
-UNMARKABLE_KINDS = frozenset({"pr_unavailable"})
-UNMARKABLE_PREFIXES = frozenset({"prx"})
+UNMARKABLE_KINDS = frozenset({"pr_unavailable", "deferred"})
+UNMARKABLE_PREFIXES = frozenset({"prx", "defer"})
 _ROW_ID_MAX = 400                   # `inbox._split`'s bound on a decoded id
 _KEY_RE = re.compile(r"^[0-9a-f]{16}$")
 _FILE_MAX = 512 * 1024              # a larger file is not one of ours: no marks

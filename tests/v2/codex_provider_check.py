@@ -2228,6 +2228,34 @@ class Checks(unittest.TestCase):
         shown = line.count(f"write {self.root}/w")
         self.assertEqual(int(line.rsplit("+", 1)[1].split()[0]), 30 - shown)
 
+    def test_a_quiet_hours_deferral_is_declined_and_logged(self):
+        """QH: an approval asked while the owner sleeps is declined at once.
+        Codex's decline carries no text to the model (a bare "decline" in
+        CommandExecutionRequestApprovalResponse, 0.161), so the chat's log
+        says why, and only for a deferral."""
+        from datetime import datetime, timedelta, timezone
+        from jarvis.v2.approvals import PendingApprovals
+        from jarvis.v2.quiet import QuietHours
+        from jarvis.v2.quiet_defer import DeferredStore, QuietDesk
+        night = datetime(2026, 3, 10, 23, 30, tzinfo=timezone(timedelta(hours=-5)))
+        data = self.root / "qh-data"
+        quiet = QuietHours(data, clock=lambda: night)
+        broker = PendingApprovals(timeout_s=0.2)
+        broker.quiet_desk = QuietDesk(quiet, lambda: False, DeferredStore(data, clock=lambda: night),
+                                      lambda record: None)
+        params = {"itemId": "c", "command": "docker build ."}
+        _, events, reply = self.scripted(CMD, params, self.real_permit(broker), brief=self.chat())
+        self.assertEqual(reply["result"], {"decision": "decline"})
+        said = [e.data["message"] for e in events if e.kind == K.ERROR]
+        self.assertTrue(any("asleep until 07:00" in m and "Do not retry it tonight" in m for m in said), said)
+        self.assertFalse(any(e.data.get("fatal") for e in events if e.kind == K.ERROR))
+        # An ordinary no (the day; nobody answers) logs no such line.
+        day = night.replace(hour=12)
+        quiet.clock = lambda: day
+        _, events, reply = self.scripted(CMD, params, self.real_permit(broker), brief=self.chat())
+        self.assertEqual(reply["result"], {"decision": "decline"})
+        self.assertFalse(any("asleep" in e.data.get("message", "") for e in events if e.kind == K.ERROR))
+
     def test_chat_bare_approvals_require_owner_even_for_rules_allow(self):
         from jarvis.v2.approvals import PendingApprovals
         from jarvis.v2.permissions import L_WIDENING, deny_all

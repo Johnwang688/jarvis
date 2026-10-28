@@ -2253,6 +2253,10 @@ def route(handler, daemon, parts, query):
             # (the HUD's listener and Origin), never a script on the API one.
             if owner:
                 message = dataclasses.replace(message, desk=True)
+                # QH-3: the owner's own input at the HUD is presence.
+                seen = getattr(daemon, "owner_seen", None)
+                if callable(seen):
+                    seen()
             # Never a dead end while a turn runs (2026-10-08): the message
             # starts a turn, is steered into the running one, or waits behind
             # it — `{"status": "started"|"steered"|"queued", "turn_id", ...}`.

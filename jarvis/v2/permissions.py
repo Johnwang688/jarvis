@@ -116,6 +116,10 @@ L_JARVIS_GATED = "jarvis-gated"
 # CG-1 (owner, 2026-10-15): a Codex chat's escalated raw network git or gh,
 # declined unasked and pointed at the Jarvis git tools (`chat_git`).
 L_CHAT_GIT = "chat-git"
+# QH (quiet_defer.py): an ask the broker deferred while the owner sleeps. A
+# DENY nobody was asked about; its reason is the code-built text the agent
+# reads (`deferral_reason`).
+L_DEFERRED = "quiet-deferred"
 
 
 @dataclass(frozen=True)
@@ -129,6 +133,29 @@ class PermitVerdict:
 
 _LAST_VERDICT: ContextVar[PermitVerdict | None] = ContextVar("jarvis_v2_permit_verdict",
                                                              default=None)
+
+
+# What the broker settled with no card for this permit call (QH: the
+# request's `outcome`), read by `finish`. Reset at each permit call.
+_OUTCOME: ContextVar[tuple | None] = ContextVar("jarvis_v2_permit_outcome", default=None)
+
+
+def deferral_reason(verdict: PermitVerdict | None) -> str | None:
+    """The agent's words for a quiet-hours deferral (QH-2), else None: what
+    a provider tells its model in place of its usual denial."""
+    if (verdict is not None and verdict.decision is Decision.DENY and verdict.layer == L_DEFERRED
+            and isinstance(verdict.reason, str) and verdict.reason):
+        return verdict.reason
+    return None
+
+
+def _asked(asker, request, **kwargs) -> Decision:
+    """`asker.ask(request)`, noting a quiet-hours outcome for `finish`."""
+    decision = Decision(asker.ask(request, **kwargs))
+    outcome = getattr(request, "outcome", None)
+    if isinstance(outcome, tuple) and len(outcome) == 2:
+        _OUTCOME.set(outcome)
+    return decision
 
 
 def last_verdict() -> PermitVerdict | None:
@@ -1030,6 +1057,7 @@ def build_permit(ctx: PermitContext, asker, *, clock=None) -> PermissionCallback
         # Whether this call was put to the asker (`last_verdict`).
         asked = [False]
         _LAST_VERDICT.set(None)
+        _OUTCOME.set(None)
 
         def owner_said(decision: Decision) -> Decision:
             """A human's answer to a card: a yes is held for the re-ask."""
@@ -1039,7 +1067,14 @@ def build_permit(ctx: PermitContext, asker, *, clock=None) -> PermissionCallback
             return decision
 
         def finish(decision: Decision, layer: str, reason: str) -> Decision:
-            _LAST_VERDICT.set(PermitVerdict(decision, layer, reason, asked[0]))
+            outcome, was_asked = _OUTCOME.get(), asked[0]
+            _OUTCOME.set(None)
+            if outcome is not None and outcome[0] == "deferred" and decision is Decision.DENY:
+                # QH: nobody was asked; the agent reads the deferral's words.
+                layer, reason, was_asked = L_DEFERRED, outcome[1], False
+            elif outcome is not None and outcome[0] == "granted" and decision is Decision.ALLOW:
+                reason = outcome[1]         # the owner's, from the inbox (QH-6)
+            _LAST_VERDICT.set(PermitVerdict(decision, layer, reason, was_asked))
             log_decision(ApprovalRecord(
                 tool=tool, args_digest=_digest(args), layer=layer,
                 decision=decision.value, reason=reason,
@@ -1401,7 +1436,7 @@ def _ask_owner_delegation(asker, ctx: PermitContext, tool: str, *,
         from jarvis import runtime
         native_cancelled = ctx.delegation_cancelled() if ctx.delegation_cancelled else lambda: False
         stop = runtime.should_stop()
-        return Decision(asker.ask(request, cancelled=lambda: native_cancelled() or stop()))
+        return _asked(asker, request, cancelled=lambda: native_cancelled() or stop())
     except Exception:
         # No exception text: a failing approval adapter may contain arguments.
         return Decision.DENY
@@ -1422,7 +1457,7 @@ def _ask(asker, ctx: PermitContext, tool: str, args: dict, command: str,
         allowlistable=allowlistable, headline=clean_line(headline, 420) if headline else "",
         subagent=subagent, relayed_from=ctx.relayed(relay_child))
     try:
-        return Decision(asker.ask(request))
+        return _asked(asker, request)
     except Exception:       # an asker that raises has not approved anything
         LOG.exception("Approval channel failed for %s; denying", tool)
         return Decision.DENY
@@ -1450,7 +1485,7 @@ def deny_all(reason: str = "nobody is watching this thread") -> DenyAll:
 
 __all__ = [
     "ApprovalRecord", "PermitContext", "PermitVerdict", "always_ask_for", "always_ask_match",
-    "build_permit", "denied_command", "denied_file", "denied_grant", "denied_read", "deny_all",
+    "build_permit", "deferral_reason", "denied_command", "denied_file", "denied_grant", "denied_read", "deny_all",
     "file_targets", "last_verdict",
     "log_decision", "protected_paths", "COMMAND_TOOLS", "FILE_TOOLS", "READ_TOOLS",
 ]
