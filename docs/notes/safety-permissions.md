@@ -3238,9 +3238,9 @@ h3 on a card a block goes whole only when every word between header and
 footer is key material or framing (`_card_key_spans`, `_card_word`,
 `_whole_key_block`): a body word of 40+ base64 characters with both cases and
 a digit; the block's last word before its footer, at most 64 characters,
-`=`-padded; a PGP checksum; an armor or PEM header line. A word starting with
-`/` counts only at the width two or more body lines share, and never one
-starting with `(` or a line with a word that is not key material. Breaks are
+`=`-padded; a PGP checksum; an armor or PEM header line; never one
+starting with `(` or a line with a word that is not key material (round 4
+below for `/` and padding). Breaks are
 real line breaks (a lone CR too), `\n` escapes at any depth and spaces;
 framing is quotes, `#`, `>`, `//`, a continuation's `\`, and `(`, `)`, `+`,
 `,`, `;` next to a quote; `\/` reads as `/`. Otherwise the header, the footer
@@ -3258,12 +3258,33 @@ tail is not a `NAME=` statement. Each with its mutation (h3: whole whatever
 lies between, any one-word base64 line a key's, the card rule on every
 reader).
 
-Known residual on cards: one word shaped like a key's line between a fake
-header and footer is still withheld with the block: 40+ random-looking base64
-characters (a program so named), or a last word before the footer ending in
-`=` padding (`Deploy2==`, which a shell reads as an assignment). Real commands
-rarely have either shape. `secrets._key_blocks` (v1's SEC-6 pass inside one
-shell quoting) keeps its own, looser `_key_material` rule, as on main.
+Round 4 (`b529226c`), cards only. A word holding a `/` counts only when it
+reads as no path (`_card_path_like`: no part a well-known directory's name,
+`bin`, `usr`, `tmp`, `home`, `scripts` …, and after a leading `/` no first
+part of 3 to 8 lower-case letters) and, when the block has other body lines,
+only at the width 3 of them share (all of them when fewer; none for a
+one-line key such as Ed25519's). The round's draft rule (any part of 2 to 8
+lower-case letters, or `//`) read 4.3% and 2.2% of random base64 lines with a
+`/` as paths, so about half of all RSA keys lost a line on a card; this one
+reads under 0.01% (about one RSA key in 1500). A padded word counts only as
+the last before the footer, in a body of whole base64 groups, padded as an
+encoder pads (`_canonical_padding`), and never as an assignment a key's tail
+cannot be (`PATH=`, `IFS=`, an upper-case name, a name with `_` or no digit,
+under 4 characters). Measured on 3000 random keys of each shape, raw,
+JSON-escaped and concatenated: RSA, OpenSSH, 76-wide PKCS#8 and Ed25519 all
+whole; EC 0.3% (a padded tail with no digit, shown).
+
+Known residuals on cards (LOW, not fixed): one word shaped like a key's line
+between a fake header and footer is still withheld with the block, such as
+40+ random-looking base64 characters (a program so named), a relative path
+whose directories are not well-known names (`Xy1/…`, at the block's width), or
+a canonically padded last word with a digit (`Deploy2w==`, which a shell
+reads as an assignment). Shown on cards (the key's text, never code): an
+unpadded short last line, a flattened key whose last piece is unpadded and
+short, keys framed as HTML (`<br>`) or PHP (`.` concatenation, heredoc
+markers), and an EC key's padded tail with no digit. `secrets._key_blocks`
+(v1's SEC-6 pass inside one shell quoting) keeps its own, looser
+`_key_material` rule, as on main.
 
 Follow-ups from the second review, not changed here: the phone's marker rule
 (a card showing any `[withheld: …]` is Deny-only there) is stricter than it

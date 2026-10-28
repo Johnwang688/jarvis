@@ -43,6 +43,15 @@ Third review (16af27ec, 2026-10-28):
   l5  an unterminated block's header and key lines go on a card; the code
       after them stays (every other reader: to the end, SEC-5)
 
+Round 4 (b529226c):
+
+  c   a path dressed as a key's line (junk lines crafting the width, a
+      relative path bare, quoted or inside a body) is shown on a card
+  d   an assignment after width-matched lines (`PATH=`, `IFS=`, `/tmp/x=`,
+      `Deploy2==`, `HOME=`, `HISTFILE=`) is shown on a card; real-shaped
+      keys (RSA, EC, OpenSSH, PKCS#8 76 wide, Ed25519), `/`-heavy, raw,
+      JSON-escaped and concatenated, still go whole
+
 Fakes only: temporary stores and config (`chat_relay_check`'s harness),
 fake credential shapes assembled at run time, no daemon.
 
@@ -50,8 +59,10 @@ Run:  PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. .venv/bin/python tests/v2/scrub_rev
 """
 from __future__ import annotations
 
+import base64
 import json
 from pathlib import Path
+import random
 import re
 import sys
 import time
@@ -524,7 +535,8 @@ def _one_word_texts():
 
 # A real key, as files and transcripts hold it: every reader withholds the
 # body (round 3, HIGH: each of these leaked somewhere at 51a277bf).
-_KEY_LINES = [B64[:64], B64B[:64], (B64B + B64)[3:67], "xk4ab9=="]
+# The tail is padded as an encoder pads (`w` before `==`; round 4).
+_KEY_LINES = [B64[:64], B64B[:64], (B64B + B64)[3:67], "xk4abw=="]
 _RAW = KH + "\n" + "\n".join(_KEY_LINES) + "\n" + KF
 REAL_BLOCKS = [
     ("raw PEM", _RAW + "\n"),
@@ -634,8 +646,8 @@ def _any_base64_word(real):
     def mutant(text, a, b):
         what = real(text, a, b)
         core = text[what[1]:what[2]]
-        if what[0] is None and core and redact._CARD_BASE64.fullmatch(core):
-            return ("key", what[1], what[2], len(core))
+        if what[0] in (None, "cand") and core and redact._CARD_BASE64.fullmatch(core):
+            return ("checksum", what[1], what[2], None)
         return what
     return mutant
 
@@ -687,6 +699,115 @@ class H3(Base):
         self.assertTrue(any("shown" in f for f in caught), caught)
         self.assertTrue(any("code hidden" in f for f in caught_h3), caught_h3)
         print(f"ok  l5: mutation caught: the reviewed rule ({len(caught)} l5 and {len(caught_h3)} h3 failures)")
+
+
+# -- third review, round 4: c, d -----------------------------------------------------------
+#
+# A path or an assignment between a fake header and footer, dressed as a
+# key's line (round 4, MED): each shown on the card and in log.jsonl. And
+# real keys, `/`-heavy, in four formats and three framings, still whole.
+
+_J41 = ["Ab3dEf5hIj7lMn9pQr1tUv3xYz5bCd7fGh9jKl1nO", "Zx2cVb4nMq6wEr8tYu0iOp2aSd4fGh6jKl8zXc0vB",
+        "Qw1eRt3yUi5oPa7sDf9gHj1kLz3xCv5bNm7qWe9rT"]
+_PAD = "Payload1x"
+
+
+def _padded(prefix: str, width: int) -> str:
+    return (prefix + "a" * width)[:width - len(_PAD)] + _PAD
+
+
+ROUND4 = [
+    # (c) width craft: junk lines of 41, a /tmp path padded to 41.
+    ("width craft (2 junk lines)", _J41[:2], _padded("/tmp/", 41)),
+    ("width craft (3 junk lines)", _J41, _padded("/tmp/", 41)),
+    # (c) a relative path, bare, framed and inside a real-looking body.
+    ("relative path", [], _padded("bin/", 42)),
+    ("relative path in a body", [B64[:64], B64B[:64]], _padded("bin/", 64)),
+    ("a crafted directory at the wrong width", _J41, _padded("Xy1/", 45)),
+    # (d) assignments after width-matched lines, the body whole base64 groups.
+    ("PATH=", _J41, "PATH="),
+    ("IFS=", _J41[:2] + [_J41[2] + "a"], "IFS="),
+    ("/tmp/x=", _J41, "/tmp/x="),
+    ("Deploy2==", _J41, "Deploy2=="),
+    # Padded as an encoder pads (`E` before `=`): only the assignment rule
+    # shows these.
+    ("HOME=", _J41, "HOME="),
+    ("HISTFILE=", _J41, "HISTFILE="),
+    ("Deploy2== alone", [], "Deploy2=="),
+]
+
+
+def _round4_texts():
+    for name, lines, word in ROUND4:
+        body = lines + [word]
+        yield name, word, KH + "\n" + "\n".join(body) + "\n" + KF + "\n"
+        yield name + " (quoted)", word, "\n".join(f'"{x}"' for x in [KH] + body + [KF]) + "\n"
+
+
+def round4_failures() -> list[str]:
+    failures = []
+    for name, word, text in _round4_texts():
+        for where, shown in text_card_surfaces(text).items():
+            if word not in shown:
+                failures.append(f"{where}: {name}: hidden: {shown!r}")
+    return failures
+
+
+def _real_key(label: str, nbytes: int, width: int, seed: int, slashes: int) -> tuple[str, list[str]]:
+    """A fake key: random bytes base64-encoded as an encoder writes them,
+    wrapped at `width`, re-drawn until its body holds `slashes` slashes."""
+    rng = random.Random(seed)
+    while True:
+        body = base64.b64encode(bytes(rng.randrange(256) for _ in range(nbytes))).decode()
+        if body.count("/") >= slashes:
+            break
+    lines = [body[i:i + width] for i in range(0, len(body), width)]
+    return f"-----BEGIN {label}-----\n" + "\n".join(lines) + f"\n-----END {label}-----\n", lines
+
+
+REAL_KEYS = [("RSA, 64 wide", "RSA PRIVATE KEY", 1192, 64, 30), ("EC, 64 wide", "EC PRIVATE KEY", 121, 64, 5),
+             ("OpenSSH, 70 wide", "OPENSSH PRIVATE KEY", 411, 70, 12),
+             ("PKCS#8, 76 wide", "PRIVATE KEY", 1219, 76, 30), ("Ed25519, one line", "PRIVATE KEY", 48, 64, 3)]
+
+
+def real_key_failures() -> list[str]:
+    failures = []
+    for name, label, nbytes, width, slashes in REAL_KEYS:
+        key, lines = _real_key(label, nbytes, width, nbytes, slashes)
+        for form, text in (("raw", key), ("JSON-escaped", json.dumps({"fixture": key})),
+                           ("concatenated", "KEY = (\n" + "\n".join(f'    "{x}\\n"' for x in key.split("\n"))
+                            + "\n)\n")):
+            for where, shown in text_card_surfaces(text).items():
+                seen = [x for x in lines if x[:16] in shown or x[:16].replace("/", "\\/") in shown]
+                if seen or shown.count("[withheld: private key]") != 1:
+                    failures.append(f"{where}: {name}, {form}: not whole ({len(seen)} lines shown): {shown[:80]!r}")
+    return failures
+
+
+class Round4(Base):
+    def test_c_d_paths_and_assignments_never_hide_on_a_card(self):
+        self.assertEqual(round4_failures(), [])
+        print(f"ok  round 4: {len(ROUND4)} paths and assignments dressed as a key's line (width craft, "
+              "relative paths, PATH=, IFS=, /tmp/x=, Deploy2==, HOME=, HISTFILE=), bare and quoted, shown on the card and "
+              "in log.jsonl")
+
+    def test_c_d_real_keys_still_whole(self):
+        self.assertEqual(real_key_failures(), [])
+        print(f"ok  round 4: {len(REAL_KEYS)} real-shaped keys ({', '.join(k[0] for k in REAL_KEYS)}), "
+              "`/`-heavy, raw, JSON-escaped and concatenated, withheld whole on the card and in log.jsonl")
+
+    def test_c_d_mutations_caught(self):
+        mutations = {
+            "rule 1: no path check": patch.object(redact, "_card_path_like", return_value=False),
+            "rule 1: no width check": patch.object(redact, "_card_slash_width", return_value=True),
+            "rule 2: no assignment check": patch.object(redact, "_CARD_ASSIGN", re.compile(r"(?!)")),
+            "rule 2: any padding": patch.object(redact, "_canonical_padding", return_value=True),
+        }
+        for name, patcher in mutations.items():
+            with self.subTest(mutation=name), patcher:
+                caught = round4_failures()
+                self.assertNotEqual(caught, [], f"mutation not caught: {name}")
+                print(f"ok  round 4: mutation caught: {name} ({len(caught)} failures)")
 
 
 # -- third review: t3 -------------------------------------------------------------------

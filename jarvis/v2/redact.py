@@ -1086,32 +1086,75 @@ def _card_core(text: str, a: int, b: int) -> tuple[int, int]:
     return (head.end() if head else a), b
 
 
+# A word holding a `/` is a key's line only where it reads as no path
+# (round 4 of the third review): no `/`-separated part of it a well-known
+# directory's name (`bin`, `usr`, `tmp`, `home`, `scripts` …, anywhere in
+# it), and, after a leading `/`, its first part not 3 to 8 lower-case
+# letters (a directory at the root: none has fewer). The round's draft (any part of 2 to 8
+# lower-case letters, or an empty one, `//`) read 4.3% and 2.2% of random
+# base64 lines holding a `/` as paths, so about half of all RSA keys lost a
+# line on a card; a relative path's first part alone read 0.7% (~10% of RSA
+# keys). This reads under 0.01% (one RSA key in ~1000 loses a line).
+_CARD_PATH_PART = re.compile(r"[a-z]{3,8}")
+_CARD_KNOWN_DIRS = frozenset({
+    "bin", "sbin", "usr", "tmp", "home", "opt", "etc", "var", "lib", "lib32", "lib64", "root", "dev",
+    "proc", "sys", "srv", "mnt", "media", "run", "boot", "local", "share", "src", "Users", "Library",
+    "Applications", "Volumes", "private", "scripts", "build", "dist", "out", "target", "tools", "app"})
+# A word that assigns (`NAME=…`): never a key's line, unless it is a padded
+# base64 tail (no `_`, a digit, 4 or more characters) and not a name a shell
+# or loader reads (`PATH=`, `IFS=`, an upper-case name).
+_CARD_ASSIGN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
+_CARD_ENV_ASSIGN = re.compile(r"(?:PATH|IFS|[A-Z_]{2,})=")
+
+
+_BASE64_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+
+
+def _canonical_padding(core: str) -> bool:
+    """Is a padded word's last group as an encoder writes it: the character
+    before `==` one of `AQgw`, before `=` one whose low two bits are zero?
+    Every real key's is; `Deploy2==` is not."""
+    pad = len(core) - len(core.rstrip("="))
+    if not 1 <= pad <= 2 or len(core) <= pad:
+        return False
+    return _BASE64_ALPHABET.index(core[-pad - 1]) % (16 if pad == 2 else 4) == 0
+
+
+def _card_path_like(core: str) -> bool:
+    """Does a word holding a `/` read as a path (`_CARD_KNOWN_DIRS`)?"""
+    parts = core.split("/")
+    if any(part in _CARD_KNOWN_DIRS for part in parts):
+        return True
+    return len(parts) > 2 and parts[0] == "" and _CARD_PATH_PART.fullmatch(parts[1]) is not None
+
+
 def _card_word(text: str, a: int, b: int):
-    """(what, core start, core end, core length unescaped) for one word of a
-    block: what is "frame"
-    (framing alone), "key" (a body line: 40+ base64 characters of both cases
-    and a digit; or a PGP checksum), "tail" (base64 of at most 64 ending in
-    `=` padding: key material only as the block's last line before its
-    footer), "slash-key"/"slash-tail" (either, starting with `/`: counted
-    only where the block's own line width vouches for it), or None (anything else:
-    never withheld as a key's, and nothing past it is)."""
+    """(what, core start, core end, features) for one word of a block. What
+    is "frame" (framing alone), "checksum" (a PGP checksum), "cand" (base64
+    that may be a key's line: `_card_counts` decides) or None (anything
+    else: never withheld as a key's, and nothing past it is). Features of a
+    "cand": (length unescaped, holds a `/`, reads as a path, a body line's
+    shape (40+ characters, both cases and a digit), `=`-padded, an
+    assignment no key's tail can be, padded as an encoder pads)."""
     if _CARD_FRAME.fullmatch(text, a, b):
-        return "frame", a, a, 0
+        return "frame", a, a, None
     ca, cb = _card_core(text, a, b)
     core = _CARD_ESCAPED_SLASH.sub("/", text[ca:cb])
     if not core:
-        return "frame", a, a, 0
+        return "frame", a, a, None
     if _CARD_CHECKSUM.fullmatch(core):
-        return "key", ca, cb, 0
+        return "checksum", ca, cb, None
     if not _CARD_BASE64.fullmatch(core):
-        return None, ca, cb, 0
+        return None, ca, cb, None
+    slash = "/" in core
     long_key = (len(core) >= _CARD_KEY_MIN and any(c.isupper() for c in core)
                 and any(c.islower() for c in core) and _DIGIT.search(core) is not None)
-    tail = len(core) <= _CARD_TAIL_MAX and core.endswith("=")
-    if not (long_key or tail):
-        return None, ca, cb, 0
-    sort = "key" if long_key else "tail"
-    return ("slash-" + sort if core.startswith("/") else sort), ca, cb, len(core)
+    padded = core.endswith("=")
+    assign_bad = _CARD_ASSIGN.match(core) is not None and (
+        "_" in core or _DIGIT.search(core) is None or len(core) < 4
+        or _CARD_ENV_ASSIGN.match(core) is not None)
+    return "cand", ca, cb, (len(core), slash, slash and _card_path_like(core), long_key, padded, assign_bad,
+                            not padded or _canonical_padding(core))
 
 
 def _card_items(text: str, a: int, b: int) -> list[list]:
@@ -1122,7 +1165,7 @@ def _card_items(text: str, a: int, b: int) -> list[list]:
     def line(lo: int, hi: int) -> None:
         stripped = text[lo:hi].strip(" \t")
         if stripped and _CARD_ARMOR.fullmatch(stripped):
-            items.append(["armor", lo, hi, ("frame", lo, lo, 0)])
+            items.append(["armor", lo, hi, ("frame", lo, lo, None)])
             return
         for w in _CARD_WORD.finditer(text, lo, hi):
             items.append(["word", w.start(), w.end(), _card_word(text, w.start(), w.end())])
@@ -1144,37 +1187,71 @@ def _card_items(text: str, a: int, b: int) -> list[list]:
     return items
 
 
+def _card_final(items, i: int) -> bool:
+    """Is word `i` the last before a footer (framing and breaks between)?"""
+    j = i + 1
+    while j < len(items) and (items[j][0] == "break" or (items[j][0] == "word" and items[j][3][0] == "frame")):
+        j += 1
+    return j < len(items) and items[j][0] == "foot"
+
+
+def _card_slash_width(items, i: int, widths: dict[int, int], body: int, width: int) -> bool:
+    """Does the block's width vouch for word `i`, which holds a `/`: with no
+    other body line, yes (a one-line key); else 3 others (all of them when
+    fewer) are W wide and the word is W wide, or narrower as the last word
+    before the footer?"""
+    n, long_key = items[i][3][3][0], items[i][3][3][3]
+    others_total = body - (1 if long_key else 0)
+    if others_total <= 0:
+        return True
+    others = widths.get(width, 0) - (1 if long_key and n == width else 0)
+    return others >= min(3, others_total) and (n == width or (n < width and _card_final(items, i)))
+
+
 def _card_counts(items) -> list[bool]:
     """For each item, whether it is key material or framing (True) or
-    something a card must show (False). A "tail" counts only as the last
-    word before a footer; a "slash" only at the width two or more of the
-    block's body lines share (a `/` starts one base64 line in 64, and a
-    path never is one)."""
+    something a card must show (False).
+
+    - A body line: 40+ characters of both cases and a digit.
+    - A padded word (`…=`): only as the last word before a footer, of a
+      body whose length (every candidate word's, unescaped) is a whole
+      number of base64 groups, at most 64 characters unless a body line's
+      shape, padded as an encoder pads (`_canonical_padding`: `Deploy2==`
+      is not), and never an assignment a key's tail cannot be (`PATH=`,
+      `IFS=`, an upper-case name, one with `_` or no digit).
+    - A word holding a `/`: never one that reads as a path
+      (`_card_path_like`); and, when the block has other body lines, only at
+      the width W that 3 of them share (all of them when it has fewer, as a
+      short EC key does; none for a one-line key such as Ed25519's): a body
+      line exactly W wide, the last word before the footer narrower.
+    - Never a word that is anything else."""
+    feats = [it[3][3] if it[0] == "word" and it[3][0] == "cand" else None for it in items]
+    total = sum(f[0] for f in feats if f)
     widths: dict[int, int] = {}
-    for kind, a, b, what in items:
-        if kind == "word" and what[0] == "key" and what[3]:
-            widths[what[3]] = widths.get(what[3], 0) + 1
+    for f in feats:
+        if f and f[3] and not f[2]:
+            widths[f[0]] = widths.get(f[0], 0) + 1
+    body = sum(widths.values())
     width = max(widths, key=lambda n: (widths[n], n)) if widths else 0
-    if widths.get(width, 0) < 2:
-        width = 0
     out = []
-    for i, (kind, a, b, what) in enumerate(items):
+    for i, (kind, _a, _b, what) in enumerate(items):
         if kind != "word":
             out.append(True)
             continue
-        sort, n = what[0], what[3]
-        final = False
-        if sort in ("tail", "slash-tail"):
-            j = i + 1
-            while j < len(items) and (items[j][0] == "break" or (items[j][0] == "word" and items[j][3][0] == "frame")):
-                j += 1
-            final = j < len(items) and items[j][0] == "foot"
-        if sort == "slash-key":
-            ok = bool(width) and n == width
-        elif sort == "slash-tail":
-            ok = bool(width) and final and n <= width
+        if what[0] in ("frame", "checksum") or what[0] is None:
+            out.append(what[0] is not None)
+            continue
+        n, slash, pathy, long_key, padded, assign_bad, _canonical = what[3]
+        if pathy or assign_bad:
+            out.append(False)
+            continue
+        if padded:
+            ok = (_card_final(items, i) and total % 4 == 0 and (long_key or n <= _CARD_TAIL_MAX)
+                  and what[3][6])
         else:
-            ok = sort in ("frame", "key") or (sort == "tail" and final)
+            ok = long_key
+        if ok and slash:
+            ok = _card_slash_width(items, i, widths, body, width)
         out.append(ok)
     return out
 
