@@ -261,8 +261,9 @@ def run_checks(page) -> None:
     # ---- the orb's outer ring follows the avatar -------------------------
     print("\n--- rings ---")
     default_rings = hud("() => window.__hud.rings()")
-    check("the default outer ring is the tick ring",
-          default_rings[0] == "ticks144", str(default_rings))
+    # The films' JARVIS look (2026-10-27): a hairline bezel outside the scale.
+    check("the default outer ring is the bezel, inside it the tick scale",
+          default_rings[:2] == ["arcs1", "ticks120"], str(default_rings))
 
     hud("() => window.__hud.applyAvatar({slug: 't', name: 'T', wake: ['T'], "
         "wake_regex: ['\\\\bt\\\\b'], rings: 'triangles'})")
