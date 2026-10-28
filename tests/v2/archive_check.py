@@ -896,7 +896,17 @@ class OwnerOnly(Base):
                     # P-4's answers and the §4.1 checks (named only in SELF_PROTECTED).
                     r"\bremote_answer\.(?!py\b)", r"import remote_answer", r"from \.+remote_answer",
                     r"\bremote_secure\.(?!py\b)", r"import remote_secure", r"from \.+remote_secure",
-                    r"answer_verify", r"answer_options", r"owner_verified")
+                    r"answer_verify", r"answer_options", r"owner_verified",
+                    # P-6's Web Push and the owner's quiet hours (`push.py`,
+                    # `quiet.py`, named only in SELF_PROTECTED and, for their
+                    # files, in `_protected_state_paths`).
+                    r"import push\b", r"from \.+push\b", r"from \.+ import [^\n]*\bpush\b",
+                    r"\bpush\.(?:Push|route|hud_route|payload|send_all|send_test|check_endpoint)\b",
+                    r"push_subscriptions", r"push_settings", r"vapid", r"send_test", r"/m/api/push",
+                    r"import quiet\b", r"from \.+quiet\b", r"from \.+ import [^\n]*\bquiet\b",
+                    r"\bquiet\.(?!py\b)", r"""/quiet["'/?]""", r"quiet\.json", r"QuietHours")
+    # No tool's name speaks of notifications or quiet hours either.
+    PUSH_NAME = re.compile(r"notif|vapid|webpush|quiet", re.I)
 
     def test_no_tool_reaches_the_phone_pairing(self):
         from jarvis import tools
@@ -910,6 +920,7 @@ class OwnerOnly(Base):
         self.assertTrue({"terminal_read", "chat_send", "task_propose", "run_command"} <= reachable, reachable)
         for name in sorted(reachable):
             self.assertIsNone(self.PHONE_NAME.search(name), name)
+            self.assertIsNone(self.PUSH_NAME.search(name), name)
         sources = [v2tools, mcp, mcp_catalog, session_tools, bridge, chat_relay, fastpath]
         for name in reachable:
             func = getattr(tools.REGISTRY.get(name), "func", None)
@@ -931,7 +942,11 @@ class OwnerOnly(Base):
         for method, path, body in (("GET", "/phone", None), ("POST", "/phone/pair", {}),
                                    ("POST", "/phone/pair/cancel", {}),
                                    ("POST", "/phone/passkeys/k-000000000000/revoke", {}),
-                                   ("POST", "/phone/sessions/s-0000000000000000/end", {})):
+                                   ("POST", "/phone/sessions/s-0000000000000000/end", {}),
+                                   # P-6: notifications and quiet hours.
+                                   ("GET", "/phone/push", None), ("POST", "/phone/push/test", {}),
+                                   ("POST", "/phone/push/settings", {"enabled": False}),
+                                   ("GET", "/quiet", None), ("POST", "/quiet", {"enabled": False})):
             with self.subTest(path=path):
                 self.request(method, path, body, 403)
                 self.request(method, path, body, 403, port=self.daemon.face_port)

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ago, countdown, day, phoneApi, PhoneError, type PhoneRemote, type PhoneView } from "../lib/phone";
 import { qrPath } from "../lib/qr";
+import { PhoneNotifications } from "./PhoneNotifications";
 import "./PhoneSettings.css";
 
 /** Settings > Phone (phone design PH-6, P-2): pair a phone from the desk, see
@@ -177,5 +178,7 @@ export function PhoneSettings({ blocked }: { blocked: boolean }) {
       </ul>
       {error ? <p className="err" role="status" data-testid="phone-error">{error}</p> : null}
     </div>
+
+    <PhoneNotifications blocked={blocked} />
   </div>;
 }

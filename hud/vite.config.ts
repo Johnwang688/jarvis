@@ -46,6 +46,9 @@ export default defineConfig({
       input: {
         index: fileURLToPath(new URL("./index.html", import.meta.url)),
         mobile: fileURLToPath(new URL("./" + PHONE_PAGE, import.meta.url)),
+        // The phone's service worker (P-6): one self-contained script, which
+        // the remote listener serves at /m/sw.js from this build's manifest.
+        sw: fileURLToPath(new URL("./src/mobile/sw.ts", import.meta.url)),
       },
     },
     // Vite's manifest of every entry's files: the remote listener serves only

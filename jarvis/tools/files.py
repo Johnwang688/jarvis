@@ -170,6 +170,10 @@ SELF_PROTECTED = frozenset(
         # approval waits for the morning. An agent that could edit it could
         # keep the owner from hearing about a card.
         "jarvis/v2/quiet.py",
+        # The phone's Web Push (P-6): what leaves this machine for the
+        # phone and where to. An agent that could edit it could send a
+        # card's text in a push, or push to an address of its choosing.
+        "jarvis/v2/push.py",
         # The approval broker every surface answers through: who counts as
         # owner-verified, which cards are HUD-only, and what a card shows
         # before Allow (the owner's decision, 2026-10-25). An agent that
@@ -283,6 +287,11 @@ def _protected_state_paths() -> set[Path]:
     # own. Their folder is an ancestor, so deleting it is covered too.
     remote = Path(config.V2_DATA_DIR).expanduser() / "remote"
     paths |= {remote / "passkeys.json", remote / "sessions.json"}
+    # The phone's Web Push (P-6, `v2/push.py`): the VAPID key, the
+    # subscriptions (both also credential bundles by name, unreadable) and
+    # the notifications switch. An agent that could write them could send
+    # pushes as Jarvis, add a subscription of its own or turn them off.
+    paths |= {remote / "vapid_key.pem", remote / "push_subscriptions.json", remote / "push_settings.json"}
     # The owner's quiet hours (`v2/quiet.py`, the owner's answer of
     # 2026-10-28): while they hold nothing is pushed to the phone. An agent
     # that could rewrite the file could silence the owner's notifications.

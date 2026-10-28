@@ -13,6 +13,9 @@ dependencies = [
     # The phone surface passkeys (jarvis/v2/remote_auth.py, phone design PH-3).
     # Imported only when a phone pairs or signs in: a daemon without it starts.
     "webauthn>=3.0.1,<4",
+    # The phone's Web Push (jarvis/v2/push.py, phone design PH-8): encryption
+    # and VAPID signing. Imported only when a push is sent or subscribed.
+    "pywebpush>=2.5.0,<3",
 ]
 
 [project.optional-dependencies]
