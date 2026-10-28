@@ -278,8 +278,14 @@ def answer(handler, daemon, session, row: str, body: dict) -> dict:
         # P-5: a proposal's withdraw, the session only (Deny's footing).
         if set(body) != {"withdraw"} or body["withdraw"] is not True:
             raise _Refused(400, "withdraw must be true")
-        out = _dispatch(daemon, row_id, {"withdraw": True}, owner_verified=False)
-        from .remote_write import record
+        from .remote_write import UNCERTAIN, record
+        try:
+            out = _dispatch(daemon, row_id, {"withdraw": True}, owner_verified=False)
+        except _Refused:
+            raise
+        except Exception as exc:  # noqa: BLE001 — no 500, no exception text; it may have taken effect
+            LOG.exception("phone: a withdraw failed (%s)", type(exc).__name__)
+            raise _Refused(409, UNCERTAIN, {"uncertain": True}) from None
         record(daemon, _rest, "withdraw")
         return out
     if prefix != "appr":

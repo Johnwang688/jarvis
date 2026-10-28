@@ -1768,9 +1768,20 @@ paths, before P-3's reads; the API and HUD listeners never serve `/m/`.
   body cap first. `@path` is never read (`paths=False`, as Discord).
 - **Sent once.** A message, new chat or new task may carry `client_id`
   (the phone's UUID for one draft, 8 to 64 of `[A-Za-z0-9-]`); a 2xx is kept
-  per session for 5 minutes and the same id again gets it back (`repeat:
-  true`) without acting; one still on its way is 409; refusals are not
-  kept. The app says "May not have been sent. Check the chat before trying
+  per session for 5 minutes with a hash of the body, and the same id with
+  the same body gets it back (`repeat: true`) without acting; the same id
+  with another body is 409 ("this draft id was already used for different
+  text"); one still on its way is 409; refusals are not kept. At most 64 per
+  session: past that the session's own oldest answered entry goes, never
+  one on its way and never another session's (delta review of #324).
+- **Uncertain.** An exception after the write took effect (the view of a
+  task made, started or cancelled, a chat opened), or one `remote_write`
+  cannot place, is logged with its traceback and answered 409 `{"error":
+  "it may not have gone through: check before trying again", "uncertain":
+  true}`, kept under the draft's id like a 2xx; the app shows it as "may
+  not have gone through", never as a refusal. The phone's withdraw maps
+  the same way. An offline `cancel/options` (a read) says "Offline: the
+  task was not cancelled." The app says "May not have been sent. Check the chat before trying
   again." when no answer came back (a dropped connection, 502, 504), never
   "not sent".
 - **Failures.** A provider's or the OS's exception is 409 "request failed
@@ -1819,7 +1830,8 @@ paths, before P-3's reads; the API and HUD listeners never serve `/m/`.
   footing (it refuses work an agent proposed, inside its grace window).
   From the phone `inbox.answer` calls only `Router.cancel_proposal`, which
   checks the window under its lock; if the window closed meanwhile (review
-  of PR #324: `rows()` runs first) it is 409 ("too late to withdraw…") and
+  of PR #324: `rows()` runs first) it is 409 ("too late to withdraw…", or
+  "already withdrawn or cancelled" when it was) and
   never `TaskControl.cancel`, whose cancel is terminal and takes the passkey
   on the phone. The desk's withdraw keeps `TaskControl.cancel`.
 - **Recorded as the phone's.** Each task verb from the phone (`create`,

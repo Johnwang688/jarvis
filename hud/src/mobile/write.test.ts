@@ -304,6 +304,27 @@ describe("task verbs (P-5)", () => {
     expect(h.q("m-task-note")!.textContent).toBe(MAYBE_DONE);
   });
 
+  it("an uncertain answer (it may have taken effect) is shown as such, not as a refusal", async () => {
+    const h = harness();
+    await openTask(h, "intake");
+    h.replies[`/m/api/tasks/${TASK}/start`] = { status: 409, body: { error: "it may not have gone through", uncertain: true } };
+    await h.click("m-task-start");
+    await h.click("m-task-confirm");
+    expect(h.q("m-task-note")!.textContent).toBe(MAYBE_DONE);
+    expect(h.app.online).toBe(true);
+  });
+
+  it("an offline cancel/options says Offline: nothing that could cancel was sent", async () => {
+    const h = harness();
+    await openTask(h, "running");
+    h.replies[`/m/api/tasks/${TASK}/cancel/options`] = { status: 0, body: {}, offline: true };
+    await h.click("m-task-cancel");
+    await h.click("m-task-confirm");
+    expect(h.posts.map((p) => p.path)).toEqual([`/m/api/tasks/${TASK}/cancel/options`]);
+    expect(h.q("m-task-note")!.textContent).toBe("Offline: the task was not cancelled.");
+    expect(h.credential).not.toHaveBeenCalled();
+  });
+
   it("Start asks first, then posts the HUD's empty body", async () => {
     const h = harness();
     await openTask(h, "intake");

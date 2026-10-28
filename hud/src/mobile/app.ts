@@ -493,6 +493,8 @@ export class PhoneApp {
     }
     this.setOnline(true);
     const result = got;
+    // The write took effect, or may have, but its answer failed (remote_write's UNCERTAIN).
+    if (result.body.uncertain === true) return { status: result.status, body: result.body, ambiguous: true };
     if (result.status === 401) {
       const me = await this.fetchJson("/m/api/me");
       if (!me.ok && me.why === "signed-out") { this.signedOut(); return null; }
@@ -716,6 +718,15 @@ export class PhoneApp {
           return;
         }
         result = await this.write(`/m/api/tasks/${id}/cancel`, { assertion });
+      } else if (options?.ambiguous && options.status === 0) {
+        // `cancel/options` is a read: nothing was sent that could have cancelled.
+        if (this.taskWrite === w) {
+          w.busy = false;
+          w.confirming = null;
+          w.note = "Offline: the task was not cancelled.";
+          this.render();
+        }
+        return;
       } else {
         result = options;
       }
