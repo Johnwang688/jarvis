@@ -331,10 +331,71 @@ class Sending(Base):
         # While one is still on its way, its repeat is 409.
         sent = remote_write.sent_of(self.d.remote_auth.server)
         key = (next(iter(self.auth._sessions)), "send", thread.id, "draft-0009")
-        self.assertIsNone(sent.begin(key))
+        import hashlib
+        digest = hashlib.sha256(json.dumps({"text": "x"}, sort_keys=True, ensure_ascii=True).encode()).hexdigest()
+        self.assertEqual(sent.begin(key, digest), ("go", None))
         status, body = self.post(path, {"text": "x", "client_id": "draft-0009"})
         self.assertEqual((status, body["error"]), (409, remote_write.IN_FLIGHT))
         print("ok  client_id: a repeat within 5 minutes gets the first answer and runs nothing; refusals are not kept")
+
+    def test_the_same_draft_id_with_other_text_is_refused(self):
+        # Delta review, LOW-2: the replay fingerprint includes the body.
+        thread = self.chat()
+        path = f"threads/{thread.id}/messages"
+        self.assertEqual(self.post(path, {"text": "first words", "client_id": "draft-0100"})[0], 202)
+        eventually(lambda: self.idle(thread.id), what="the turn")
+        self.assertEqual(self.post(path, {"text": "other words", "client_id": "draft-0100"}),
+                         (409, {"error": remote_write.DRAFT_REUSED}))
+        self.assertEqual([u["data"]["typed"] for u in self.users(thread.id)], ["first words"])
+        self.assertEqual(self.post(path, {"text": "first words", "client_id": "draft-0100"})[1]["repeat"], True)
+        print("ok  the same client_id with other text is 409, never a silent replay")
+
+    def test_the_sent_cache_is_per_session_and_never_evicts_one_on_its_way(self):
+        # Delta review, LOW-1: one session's flood cannot push out another's.
+        sent = remote_write.Sent()
+        self.assertEqual(remote_write.SENT_PER_SESSION, 64)
+        theirs = ("b", "send", "t", "their-draft")
+        self.assertEqual(sent.begin(theirs, "h"), ("go", None))
+        sent.end(theirs, (202, {"status": "started"}))
+        mine_flight = ("a", "send", "t", "mine-in-flight")
+        self.assertEqual(sent.begin(mine_flight, "h")[0], "go")
+        for i in range(remote_write.SENT_PER_SESSION * 3):
+            key = ("a", "send", "t", f"flood-{i:04d}")
+            self.assertEqual(sent.begin(key, "h")[0], "go")
+            sent.end(key, (202, {"i": i}))
+        self.assertEqual(sent.begin(theirs, "h"), ("answer", (202, {"status": "started"})), "another session's kept")
+        self.assertEqual(sent.begin(mine_flight, "h"), ("busy", None), "its own on-the-way key kept")
+        self.assertLessEqual(sum(1 for k in sent._seen if k[0] == "a"), remote_write.SENT_PER_SESSION)
+        # Every one of a session's entries on its way: the next is refused, nothing evicted.
+        full = remote_write.Sent()
+        for i in range(remote_write.SENT_PER_SESSION):
+            self.assertEqual(full.begin(("c", "send", "t", f"w-{i:04d}"), "h")[0], "go")
+        self.assertEqual(full.begin(("c", "send", "t", "one-more"), "h"), ("full", None))
+        self.assertEqual(full.begin(("d", "send", "t", "other"), "h")[0], "go", "another session still goes")
+        print("ok  the sent cache: 64 per session, oldest answered first, never one on its way, never another's")
+
+    def test_a_failure_after_the_effect_is_uncertain_and_kept_under_the_id(self):
+        # Delta review, LOW-3: never a definite 409 once it took effect.
+        logging.disable(logging.NOTSET)
+        self.addCleanup(logging.disable, logging.CRITICAL if __name__ == "__main__" else logging.NOTSET)
+        body = {"project_id": self.project.id, "brief": "made", "client_id": "task-0500"}
+        with patch("jarvis.v2.remote_api.task", side_effect=RuntimeError("SECRET-VIEW")), \
+                self.assertLogs("jarvis.v2.remote_write", "ERROR") as logged:
+            status, got = self.post("tasks", body)
+        self.assertEqual((status, got), (409, {"error": remote_write.UNCERTAIN, "uncertain": True}))
+        self.assertIn("Traceback", "\n".join(logged.output))
+        self.assertEqual(len(self.d.stores.tasks.list()), 1, "the task was made")
+        status, got = self.post("tasks", body)
+        self.assertEqual((status, got["uncertain"], got["repeat"]), (409, True, True))
+        self.assertEqual(len(self.d.stores.tasks.list()), 1, "and not made twice")
+        # A verb that took effect, then its view failed.
+        task = self.d.stores.tasks.list()[0]
+        with patch("jarvis.v2.remote_api.task", side_effect=RuntimeError("SECRET-VIEW")):
+            status, got = self.post(f"tasks/{task.id}/start", {})
+        self.assertEqual((status, got["uncertain"]), (409, True))
+        self.assertEqual(self.runner.calls, [("start", task.id)])
+        self.assertNotIn("SECRET", json.dumps(got))
+        print("ok  an exception after the effect is 409 uncertain (logged with its traceback), kept under the id")
 
     def test_a_provider_or_os_failure_is_409_without_its_text(self):
         # Review of #324, NIT 6: never a 500, never the exception's words.
@@ -624,7 +685,33 @@ class Tasks(Base):
         self.assertEqual(self.runner.calls, [], "no TaskControl.cancel")
         self.assertEqual(self.d.stores.tasks.get(task.id).state, TaskState.INTAKE)
         self.assertEqual(self.journal(task.id), [])
-        print("ok  a withdraw racing the grace window's end is 409, never a terminal cancel")
+        # Already withdrawn or cancelled meanwhile (from the desk): its own words (delta review, NIT-1).
+        logging.disable(logging.NOTSET)
+        self.addCleanup(logging.disable, logging.CRITICAL if __name__ == "__main__" else logging.NOTSET)
+        other = self.task()
+        self.d.stores.tasks.journal(other.id, "proposed_by_fastpath", brief="b", thread_id=None, turn_id=None,
+                                    reply="", not_before=self.d.router.clock() + 60)
+
+        def cancelled_rows(*args, **kw):
+            out = real_rows(*args, **kw)
+            if self.d.stores.tasks.get(other.id).state == TaskState.INTAKE:
+                self.d.stores.tasks.transition(other.id, TaskState.CANCELLED, reason="owner cancelled at the desk")
+            return out
+        with patch.object(inbox, "rows", cancelled_rows):
+            status, _, body = self.post_answer(f"prop:{other.id}", {"withdraw": True})
+        self.assertEqual((status, body), (409, {"error": inbox.WITHDRAW_DONE}))
+        self.assertNotEqual(inbox.WITHDRAW_DONE, inbox.WITHDRAW_LATE)
+        # An exception inside the withdraw: 409, uncertain, never a 500 or its text (NIT-2).
+        third = self.task()
+        self.d.stores.tasks.journal(third.id, "proposed_by_fastpath", brief="b", thread_id=None, turn_id=None,
+                                    reply="", not_before=self.d.router.clock() + 60)
+        with patch.object(self.d.router, "cancel_proposal", side_effect=RuntimeError("SECRET-ROUTER-TEXT")), \
+                self.assertLogs("jarvis.v2.remote_answer", "ERROR") as logged:
+            status, _, body = self.post_answer(f"prop:{third.id}", {"withdraw": True})
+        self.assertEqual((status, body), (409, {"error": remote_write.UNCERTAIN, "uncertain": True}))
+        self.assertIn("Traceback", "\n".join(logged.output), "the traceback is logged server-side")
+        print("ok  a withdraw racing the grace window's end is 409 (started, or already withdrawn: two texts), "
+              "never a terminal cancel; an exception is uncertain")
 
     def test_unknown_or_hidden_tasks(self):
         for path in ("tasks/0123abcd/start", "tasks/0123abcd/resume", "tasks/0123abcd/cancel/options",

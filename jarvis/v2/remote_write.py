@@ -84,10 +84,24 @@ message's text).
 
 **Sent once (`client_id`).** A message, a new chat and a new task may
 carry `client_id` (8 to 64 of `[A-Za-z0-9-]`, the phone's UUID for one
-draft). A 2xx is kept per session for `SENT_TTL_S`; the same id again
-gets that answer back and nothing is done twice, so a send whose answer
-was lost (the connection dropped after the request left) can be retried
-safely. One still on its way is 409. At most `SENT_KEEP` are kept.
+draft). A 2xx (or an uncertain answer, below) is kept per session for
+`SENT_TTL_S`, with a hash of the request's body; the same id with the same
+body gets that answer back and nothing is done twice, so a send whose
+answer was lost (the connection dropped after the request left) can be
+retried safely. The same id with another body is 409 (`DRAFT_REUSED`),
+never a silent replay; one still on its way is 409 (`IN_FLIGHT`). A
+session keeps at most `SENT_PER_SESSION`: past that its own oldest
+answered entry goes, never one on its way (all on their way: 429), and
+never another session's; `SENT_KEEP` bounds the whole (`SENT_PER_SESSION`
+times `remote_auth.MAX_SESSIONS`), dropping the oldest answered entry.
+
+**Uncertain.** An exception after the write took effect (building the
+answer's view of a task made, started or cancelled, a chat opened) is
+logged with its traceback and answered 409 `{"error": UNCERTAIN,
+"uncertain": true}`: the phone says "may not have gone through: check",
+never a definite refusal; and it is kept under the draft's id like a 2xx,
+so a retry is answered, not run again. An exception the module cannot
+place is answered the same way. Never a 500, never an exception's text.
 
 **Refusals.** Malformed input 400; an unknown, archived or hidden thread,
 task or project 404; a wrong state (a turn that cannot take a message, a
@@ -100,6 +114,8 @@ from __future__ import annotations
 
 from collections import deque
 import dataclasses
+import hashlib
+import json
 import logging
 import re
 import threading
@@ -116,9 +132,13 @@ RATE = 30
 RATE_S = 60.0
 MODELS = 100
 SENT_TTL_S = 300.0
-SENT_KEEP = 256
+SENT_PER_SESSION = 64
+SENT_KEEP = SENT_PER_SESSION * 32          # remote_auth.MAX_SESSIONS
 _CLIENT_ID = re.compile(r"[A-Za-z0-9-]{8,64}")
 IN_FLIGHT = "this message is still being sent; check the chat in a moment"
+DRAFT_REUSED = "this draft id was already used for different text"
+SENT_FULL = "too many writes from this phone are still on their way; wait a moment"
+UNCERTAIN = "it may not have gone through: check before trying again"
 # §11 question 1 (owner, 2026-10-28): the phone may start tasks, through the
 # HUD's intake gate. False takes `POST tasks` and `tasks/<id>/start` out of
 # the table: the phone's own explicit task making and starting only, never a
@@ -179,7 +199,7 @@ def _call(fn):
     except (ValueError, TypeError, TimeoutError):
         raise _Refused(400, "bad request") from None
     except Exception as exc:  # noqa: BLE001 — a provider's or the OS's: 409, never its text
-        LOG.warning("phone: a write failed (%s)", type(exc).__name__)
+        LOG.exception("phone: a write failed (%s)", type(exc).__name__)
         raise _Refused(409, "request failed (" + type(exc).__name__ + ")") from None
 
 
@@ -221,32 +241,49 @@ def rate_of(server) -> Rate:
 
 class Sent:
     """Each session's answered writes by `client_id`, for `SENT_TTL_S`
-    (monotonic): (session, route, id) -> the answer, or IN_FLIGHT."""
+    (monotonic): (session, route, object, id) -> [time, body hash, answer or
+    None while it is on its way]."""
 
     def __init__(self):
         self._lock = threading.Lock()
-        self._seen: dict[tuple, tuple] = {}
+        self._seen: dict[tuple, list] = {}
 
-    def begin(self, key) -> tuple | None:
-        """None: go ahead (the key is now in flight). Else the earlier answer."""
+    def _evict(self, keys) -> bool:
+        """The oldest answered entry among `keys` goes; False when every one
+        is still on its way."""
+        done = [k for k in keys if self._seen[k][2] is not None]
+        if not done:
+            return False
+        del self._seen[min(done, key=lambda k: self._seen[k][0])]
+        return True
+
+    def begin(self, key, digest: str):
+        """("go", None): go ahead (the key is now on its way); ("answer", a)
+        the earlier answer; ("busy"|"reused"|"full", None) a refusal."""
         now = clock()
         with self._lock:
-            self._seen = {k: v for k, v in self._seen.items() if now - v[0] < SENT_TTL_S}
+            self._seen = {k: v for k, v in self._seen.items()
+                          if v[2] is None or now - v[0] < SENT_TTL_S}
             found = self._seen.get(key)
             if found is not None:
-                return found
-            while len(self._seen) >= SENT_KEEP:
-                self._seen.pop(min(self._seen, key=lambda k: self._seen[k][0]))
-            self._seen[key] = (now, None)
-            return None
+                if found[1] != digest:
+                    return "reused", None
+                return ("busy", None) if found[2] is None else ("answer", found[2])
+            mine = [k for k in self._seen if k[0] == key[0]]
+            if len(mine) >= SENT_PER_SESSION and not self._evict(mine):
+                return "full", None
+            if len(self._seen) >= SENT_KEEP and not self._evict(list(self._seen)):
+                return "full", None
+            self._seen[key] = [now, digest, None]
+            return "go", None
 
     def end(self, key, answer: tuple | None) -> None:
-        """Keep a 2xx answer; forget anything else (a retry may then go)."""
+        """Keep an answer; forget the key when None (a retry may then go)."""
         with self._lock:
             if answer is None:
                 self._seen.pop(key, None)
-            else:
-                self._seen[key] = (clock(), answer)
+            elif key in self._seen:
+                self._seen[key] = [clock(), self._seen[key][1], answer]
 
 
 def sent_of(server) -> Sent:
@@ -256,6 +293,16 @@ def sent_of(server) -> Sent:
             found = Sent()
             server.phone_sent = found
         return found
+
+
+def _after(fn):
+    """`fn()` once the write took effect (its answer's view): an exception
+    here is uncertain, never a definite refusal."""
+    try:
+        return fn()
+    except Exception as exc:  # noqa: BLE001
+        LOG.exception("phone: a write took effect, its answer failed (%s)", type(exc).__name__)
+        raise _Refused(409, UNCERTAIN, {"uncertain": True}) from None
 
 
 def _client_id(value: dict):
@@ -385,7 +432,7 @@ def new_chat(daemon, body, live=lambda: True) -> dict:
     # the fence fields the project's own (`Daemon.make_brief`).
     thread = _call(lambda: daemon.open_thread(project.id, "chat", provider, brief))
     LOG.info("phone: new %s chat %s", provider, thread.id)
-    shown = thread_view(daemon.thread_json(thread))
+    shown = _after(lambda: thread_view(daemon.thread_json(thread)))
     if not live():
         raise _Refused(401, "unauthorized", {"thread": shown})
     try:
@@ -432,7 +479,7 @@ def new_task(daemon, body) -> dict:
     project = _project(daemon, body["project_id"])
     task = _call(lambda: daemon.create_task(project.id, brief))
     record(daemon, task.id, "create")
-    return {"task": task_view(to_json(task))}
+    return {"task": _after(lambda: task_view(to_json(task)))}
 
 
 def verb(daemon, task_id: str, name: str, body) -> dict:
@@ -444,7 +491,7 @@ def verb(daemon, task_id: str, name: str, body) -> dict:
     task = _task(daemon, task_id)
     out = _call(lambda: task_verb(daemon, task.id, name, {}))
     record(daemon, task.id, name)
-    return {"task": task_view(out)}
+    return {"task": _after(lambda: task_view(out))}
 
 
 def cancel_options(handler, daemon, session, task_id: str, body) -> dict:
@@ -470,7 +517,7 @@ def cancel(handler, daemon, session, task_id: str, body) -> dict:
     handler.remote_auth.answer_verify(session, assertion, "task:" + task.id, "cancel")
     out = _call(lambda: task_verb(daemon, task.id, "cancel", {}))
     record(daemon, task.id, "cancel")
-    return {"task": task_view(out)}
+    return {"task": _after(lambda: task_view(out))}
 
 
 def _match(parts: list[str]):
@@ -528,18 +575,25 @@ def route(handler, path: str, session: dict, body: bytes):
             client = _client_id(value)
             if client is not None:
                 key = (session.get("token_sha256") or "", name, object_id, client)
+                digest = hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=True,
+                                                   default=str).encode()).hexdigest()
                 sent = sent_of(handler.server)
-                found = sent.begin(key)
-                if found is not None:
-                    if found[1] is None:
-                        return 409, {"error": IN_FLIGHT}, []
-                    return found[1][0], {**found[1][1], "repeat": True}, []
+                state, found = sent.begin(key, digest)
+                if state == "reused":
+                    return 409, {"error": DRAFT_REUSED}, []
+                if state == "busy":
+                    return 409, {"error": IN_FLIGHT}, []
+                if state == "full":
+                    return 429, {"error": SENT_FULL}, []
+                if state == "answer":
+                    return found[0], {**found[1], "repeat": True}, []
                 answer = None
                 try:
                     answer = _written(handler, daemon, session, name, object_id, value, auth)
                     return answer
                 finally:
-                    sent.end(key, answer[:2] if answer is not None and 200 <= answer[0] < 300 else None)
+                    keep = answer is not None and (200 <= answer[0] < 300 or answer[1].get("uncertain") is True)
+                    sent.end(key, answer[:2] if keep else None)
         return _written(handler, daemon, session, name, object_id, value, auth)
     except _Refused as exc:
         return exc.status, {"error": exc.word, **exc.extra}, []
@@ -547,8 +601,11 @@ def route(handler, path: str, session: dict, body: bytes):
         word = exc.word if exc.status in (409, 429, 503) else WORDS.get(exc.status, "unauthorized")
         return exc.status, {"error": word}, []
     except Exception as exc:  # noqa: BLE001 — never a 500 with an exception's text
-        LOG.warning("phone: a write failed (%s)", type(exc).__name__)
-        return 409, {"error": "request failed (" + type(exc).__name__ + ")"}, []
+        LOG.exception("phone: a write failed (%s)", type(exc).__name__)
+        if name == "models":
+            return 409, {"error": "request failed (" + type(exc).__name__ + ")"}, []
+        # Where it failed is not known here: it may have taken effect.
+        return 409, {"error": UNCERTAIN, "uncertain": True}, []
 
 
 def _written(handler, daemon, session, name, object_id, value, auth):
@@ -573,3 +630,6 @@ def _written(handler, daemon, session, name, object_id, value, auth):
     except AuthError as exc:
         word = exc.word if exc.status in (409, 429, 503) else WORDS.get(exc.status, "unauthorized")
         return exc.status, {"error": word}, []
+    except Exception as exc:  # noqa: BLE001 — may have taken effect: uncertain, kept under the id
+        LOG.exception("phone: a write failed (%s)", type(exc).__name__)
+        return 409, {"error": UNCERTAIN, "uncertain": True}, []
