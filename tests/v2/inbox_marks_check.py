@@ -167,6 +167,14 @@ class Apply(StoreBase):
         for bad in (0, 9, "8", True, None, 5.0):
             self.assertFalse(inbox_marks.markable({**inbox._row("task", 8, "task:x", "t", "b"), "rank": bad}), bad)
 
+    def test_the_store_itself_refuses_ranks_1_to_4(self):
+        """A second guard behind the route's: the store never writes one."""
+        for rank in (1, 2, 3, 4):
+            row = inbox._row("task", rank, f"task:r{rank}", "t", "b")
+            with self.subTest(rank=rank), self.assertRaises(ValueError):
+                self.store.mark(row, [row])
+        self.assertFalse(self.store.path.exists())
+
     def test_a_forged_mark_on_a_live_row_hides_nothing(self):
         """A mark applies only while the row's current rank is 5 or more,
         whatever the file says: here the key matches exactly."""
