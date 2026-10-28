@@ -427,7 +427,7 @@ describe("a proposal's withdraw (P-5)", () => {
   });
 
   it("without the app's withdraw (the P-3/P-4 view), it still says Withdraw at the desk", () => {
-    const answers: InboxAnswers = { openCard: () => {}, send: () => {}, busy: new Set(), notes: new Map(), drafts: new Map(), picks: new Map() };
+    const answers: InboxAnswers = { openCard: () => {}, send: () => {}, retry: () => {}, busy: new Set(), notes: new Map(), drafts: new Map(), picks: new Map() };
     const view = inboxView(parseInbox([PROP])!, () => {}, answers);
     expect(view.querySelector('[data-testid="m-desk-only"]')!.textContent).toBe("Withdraw at the desk");
     expect(view.querySelector('[data-testid="m-withdraw"]')).toBeNull();
