@@ -91,6 +91,17 @@ ATTEMPTS = 2
 OPENROUTER_MAX_TOKENS = 1000
 OPENROUTER_TIMEOUT_S = 60.0
 OWNER_VIAS = ("hud", "discord", "dm")
+
+
+def owner_typed(data: dict) -> bool:
+    """The owner's own typed words: an owner message from the HUD, Discord or
+    the DM, or typed into the chat on the phone (P-5: `via` "phone" with no
+    `decision_id`; a decision answered on the phone carries one, and its text
+    is code's frame, as `chat_reads` and the Discord mirror tell them apart)."""
+    if data.get("origin") != "owner":
+        return False
+    via = data.get("via")
+    return via in OWNER_VIAS or (via == "phone" and not data.get("decision_id"))
 # The routing policy (CLAUDE.md, 2026-07-30): no personal data to models from
 # Chinese-hosted vendors (`models.cn_hosted`, the one list). A conversation's
 # words are personal data.
@@ -138,7 +149,7 @@ def _typed(data: dict) -> str:
         return ""
     if "typed" in data or "origin" in data or "via" in data:
         # PR C and after: who sent it, and what they typed (files never).
-        if data.get("origin") != "owner" or data.get("via") not in OWNER_VIAS:
+        if not owner_typed(data):
             return ""
         typed = data.get("typed")
         return typed if isinstance(typed, str) else ""
@@ -256,7 +267,7 @@ class Titler:
             if record.get("kind") != "user_message" or self._stop.is_set():
                 return
             data = record.get("data") or {}
-            if data.get("origin") != "owner" or data.get("via") not in OWNER_VIAS:
+            if not owner_typed(data):
                 return
             if not str(data.get("typed") or "").strip():
                 return

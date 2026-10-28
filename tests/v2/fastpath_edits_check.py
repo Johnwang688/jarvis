@@ -331,6 +331,11 @@ class Turns(Base):
             "the DM": UserMessage(text="go", via="dm", desk=True),
             "a schedule": UserMessage(text="go", origin="system", via="system", desk=True),
             "the escape hatch": UserMessage(text="go", origin="owner-ran", desk=True),
+            # Phone P-5 (§11 question 2): the owner's message typed on the
+            # phone, even one claiming the desk, and a decision's answer there.
+            "the phone": UserMessage(text="go", origin="owner", via="phone"),
+            "the phone, claiming the desk": UserMessage(text="go", origin="owner", via="phone", desk=True),
+            "the inbox": UserMessage(text="go", origin="owner", via="inbox", desk=True),
         }
         for label, message in messages.items():
             with self.subTest(label):
@@ -399,6 +404,16 @@ class Turns(Base):
         self.assertNotIn("**Do small, direct work yourself**", script.systems[1])
         self.assertIn("You have no tool that writes a file", script.systems[1])
         self.assertIn("not available to this agent", script.results[-1])
+        self.assertFalse((self.project / "late.txt").exists())
+        self.assertFalse(handle.native.desk["present"])
+
+    def test_a_steer_from_the_phone_drops_them_too(self):
+        # A phone message never steers at the daemon (`NEVER_STEER`); were one
+        # handed to the provider anyway, it takes the turn off the desk.
+        _provider, handle, script, _events = self._steering_turn(
+            UserMessage(text="from my phone", origin="owner", via="phone", desk=True))
+        self.assertLessEqual(EDIT, script.tools[0])
+        self.assertFalse(EDIT & script.tools[1], "the next request carries no edit schema")
         self.assertFalse((self.project / "late.txt").exists())
         self.assertFalse(handle.native.desk["present"])
 

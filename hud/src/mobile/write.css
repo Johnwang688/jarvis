@@ -1,0 +1,33 @@
+/* P-5: writing from the phone (write.ts). Graphite tokens from mobile.css;
+   nothing here uses url(). Every control at least 44 px tall; Cancel in
+   amber, never the default. */
+.m-compose {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  position: sticky;
+  bottom: -16px;
+  padding: 8px 0 4px;
+  background: var(--bg-0);
+  border-top: 1px solid var(--border);
+}
+.m-compose .m-text, .m-sheet .m-text { resize: vertical; width: 100%; }
+.m-off { color: var(--amber); }
+.m-sheet { gap: 10px; }
+.m-field { display: flex; flex-direction: column; gap: 4px; }
+.m-select {
+  min-height: 44px;
+  font: inherit;
+  color: var(--text);
+  background: var(--bg-inset);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  padding: 0 8px;
+}
+.m-task-controls { display: flex; flex-direction: column; gap: 8px; margin: 8px 0; }
+.m-ask { color: var(--text-2); }
+.m-confirm-row { display: flex; gap: 16px; }
+.m-confirm-row .tap.m-btn { flex: 1; }
+.tap.m-btn.start, .tap.m-btn.resume { border-color: var(--accent); color: var(--accent); }
+.tap.m-btn.cancel { border-color: var(--amber-line); color: var(--amber); }
+.tap.m-new { min-height: 44px; text-align: center; margin: 4px 0; }

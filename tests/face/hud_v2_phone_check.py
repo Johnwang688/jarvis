@@ -704,7 +704,11 @@ def app_checks(page, daemon, world, check, until, streamed, net, main):
           "(C1's style-src kept)", reply.locator("math").count() == 1
           and reply.locator(".katex-html, [style]").count() == 0, reply.inner_html()[:300])
     bad, fields = answer_controls()
-    check("P-3 Chats: no input box yet, no send", not bad and fields == 0, f"{bad} {fields}")
+    # P-5: an owner's chat has its message box (hud_v2_phone_write_check.py): one
+    # textarea and Send, nothing else that writes.
+    check("P-5 Chats: the transcript's only field is the message box, its only write Send",
+          bad == ["Send"] and fields == 1 and page.locator('[data-testid="m-compose-text"]').count() == 1,
+          f"{bad} {fields}")
     check("P-3 app: every tap target is at least 44 px tall (Chats)", not small_targets(), str(small_targets()))
 
     # -- live: a reply lands while the transcript is open --------------------------------
@@ -720,8 +724,11 @@ def app_checks(page, daemon, world, check, until, streamed, net, main):
     worker = threading.Thread(target=publish, daemon=True)
     before = len(streamed)
     worker.start()
+    # Wait on the stream event itself, not only the message count: the reply can appear through a read
+    # the app made for another reason before a stream window caught the event (a race on main too).
     try:
-        until(lambda: page.locator('[data-testid="m-msg"]').count() == 3, timeout=10)
+        until(lambda: page.locator('[data-testid="m-msg"]').count() == 3
+              and b'"kind":"thread_changed"' in b"".join(streamed[before:]), timeout=10)
     finally:
         stop.set()
         worker.join(2)
@@ -755,7 +762,9 @@ def app_checks(page, daemon, world, check, until, streamed, net, main):
     check("P-3 Tasks: a patch's text is text", clean())
     check("P-3 app: every tap target is at least 44 px tall (Tasks)", not small_targets(), str(small_targets()))
     bad, fields = answer_controls()
-    check("P-3 Tasks: no resume, cancel or answer control", not bad and fields == 0, f"{bad} {fields}")
+    # P-5: a running task offers Cancel only (asked first, then the passkey).
+    check("P-5 Tasks: a running task offers Cancel only (no resume, start or answer control)",
+          bad == ["Cancel task"] and fields == 0, f"{bad} {fields}")
 
     # -- offline: nothing shown as current -----------------------------------------------
     net["offline"] = True

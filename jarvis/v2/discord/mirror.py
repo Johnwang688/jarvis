@@ -178,6 +178,10 @@ def user_line(data: dict, *, dropped: str | bool | None = None) -> str | None:
         return _scrub(head)
     elif via == "peer":
         head = f"↪ Request from another thread: {_cap(' '.join(typed.split()), 400)}"
+    elif via == "phone" and not data.get("decision_id"):
+        # Typed into this chat on the phone (P-5): the owner's own words.
+        who = "You (phone)" + (f" · {why}" if why else "")
+        head = f"{who}: {typed}"
     elif via in ("inbox", "phone"):
         # The owner's answer to a decision (inbox B1; from the phone, P-4).
         # The delivered text is code's frame with the answer first and, on

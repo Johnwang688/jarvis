@@ -91,6 +91,9 @@ _VIA_MARK = {"discord": "via Discord", "dm": "via DM",
              "inbox": "via the inbox (not typed in this chat)",
              # The same, answered on the phone (P-4).
              "phone": "via the phone's inbox (not typed in this chat)"}
+# A message the owner typed into this chat on the phone (P-5): `via` "phone"
+# with no `decision_id` (a decision's answer always carries one).
+_PHONE_TYPED = "via the phone"
 _SYSTEM_KINDS = ("model_set", "notice", "cli_turn", "compacted")
 _RELAY_KINDS = ("relay_in", "relay_out", "relay_reply")
 
@@ -378,7 +381,9 @@ def _owner_row(data: dict, at, dropped: set[str]) -> Row:
     if isinstance(images, int) and not isinstance(images, bool) and images > 0:
         typed += f"\n({images} image{'s' if images != 1 else ''} attached)"
     marks = []
-    if via in _VIA_MARK:
+    if via == "phone" and not data.get("decision_id"):
+        marks.append(_PHONE_TYPED)
+    elif via in _VIA_MARK:
         marks.append(_VIA_MARK[via])
     if data.get("spoken"):
         marks.append("spoken")

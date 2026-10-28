@@ -11,7 +11,9 @@
 // answer here: a text box and Send, or a decision's options and Answer.
 // Nothing is answered by a tap on the row itself, by Enter, or without the
 // button. Without them (P-3's read-only view) every row says "Answer at the
-// desk". A proposal's withdraw and a task's resume or cancel stay at the desk.
+// desk". P-5: given `withdraw`, a proposal takes Withdraw (a confirmation tap,
+// the session only); a task's start, resume and cancel are on its own view
+// (./write.ts), and the transcript takes a message box.
 
 import { clockOf, decisionOf, groupRows, oneLine, questionOf, briefOf, textBlock, type InboxRow } from "../lib/inbox";
 import { recentChats, moreLabel } from "../lib/recentChats";
@@ -111,11 +113,14 @@ export interface InboxAnswers {
   /** Typed answers and picked options, kept across a read again. */
   drafts: Map<string, string>;
   picks: Map<string, number>;
+  /** P-5: a proposal's Withdraw, asked once before it is sent. */
+  withdraw?: { confirming: ReadonlySet<string>; ask: (row: InboxRow) => void; back: (row: InboxRow) => void };
 }
 
 /** The kinds the phone answers itself (P-4). */
-export function answersHere(row: InboxRow): boolean {
+export function answersHere(row: InboxRow, a?: InboxAnswers): boolean {
   if (row.kind === "approval" || row.kind === "question" || row.kind === "task_question") return true;
+  if (row.kind === "proposal") return !!a?.withdraw;
   return row.kind === "decision" && !!decisionOf(row)?.open;
 }
 
@@ -129,6 +134,20 @@ function answerBox(row: InboxRow, a: InboxAnswers): HTMLElement {
   const busy = a.busy.has(row.id);
   if (row.kind === "approval") {
     box.append(tap("Open the card to answer", () => a.openCard(row), "quiet m-send", "m-open-card"));
+  } else if (row.kind === "proposal" && a.withdraw) {
+    const w = a.withdraw;
+    if (w.confirming.has(row.id)) {
+      box.append(testid(el("p", "m-ask", "Withdraw this proposal? The task will not start."), "m-withdraw-ask"));
+      const keep = tap("Keep it", () => w.back(row), "quiet m-send", "m-withdraw-back");
+      const go = sendButton("Withdraw it", "m-withdraw-send", () => a.send(row, { withdraw: true }));
+      keep.disabled = busy;
+      go.disabled = busy;
+      box.append(keep, go);
+    } else {
+      const ask = tap("Withdraw", () => w.ask(row), "quiet m-send", "m-withdraw");
+      ask.disabled = busy;
+      box.append(ask);
+    }
   } else if (row.kind === "question" || row.kind === "task_question") {
     const text = testid(el("textarea", "m-text"), "m-answer-text");
     text.setAttribute("aria-label", "Your answer");
@@ -231,7 +250,7 @@ export function inboxRow(row: InboxRow, open: (row: InboxRow) => void, answers?:
     if (!d.open) box.append(el("div", "label", "Your answer"), testid(el("p", "", d.answer), "m-answer"));
   } else genericDetail(row, box);
   if (box.childNodes.length) card.append(box);
-  if (answers && answersHere(row)) {
+  if (answers && answersHere(row, answers)) {
     card.append(answerBox(row, answers));
   } else {
     // A decision already answered (rank 8, recorded for a closed chat) takes no answer.
@@ -319,7 +338,7 @@ export function logRow(row: LogRow): HTMLElement {
 }
 
 export function transcriptView(thread: ChatThread | null, rows: LogRow[], older: boolean,
-                               back: () => void): { view: HTMLElement; list: HTMLElement } {
+                               back: () => void, composer?: HTMLElement | null): { view: HTMLElement; list: HTMLElement } {
   const view = testid(el("section", "view transcript-view"), "m-thread");
   const bar = el("div", "subbar");
   bar.append(tap("‹ Chats", back, "back", "m-back"));
@@ -330,7 +349,9 @@ export function transcriptView(thread: ChatThread | null, rows: LogRow[], older:
   for (const row of rows) list.append(logRow(row));
   if (!rows.length) list.append(empty("No messages yet."));
   view.append(list);
-  view.append(el("p", "muted small center", "Reading only: sending from the phone comes later."));
+  // P-5: the message box (./write.ts) for an owner's chat, or the app's
+  // "read only" line for any other; nothing until the chat is known.
+  if (composer) view.append(composer);
   return { view, list };
 }
 
@@ -393,7 +414,8 @@ export function diffView(diff: DiffView, folds: Map<string, boolean> = new Map()
 }
 
 export function taskView(task: TaskView, diff: DiffView | null | "loading" | string,
-                         actions: { back: () => void; showDiff: () => void; folds?: Map<string, boolean> }): HTMLElement {
+                         actions: { back: () => void; showDiff: () => void; folds?: Map<string, boolean>;
+                                    controls?: HTMLElement | null }): HTMLElement {
   const view = testid(el("section", "view"), "m-task-view");
   view.dataset.id = task.id;
   const bar = el("div", "subbar");
@@ -405,6 +427,8 @@ export function taskView(task: TaskView, diff: DiffView | null | "loading" | str
   view.append(testid(el("p", "brief", task.brief || "(no brief)"), "m-task-brief"));
   const status = [task.steps ? `step ${task.step} of ${task.steps}` : "", task.branch].filter(Boolean).join(" · ");
   if (status) view.append(el("p", "muted small", status));
+  // P-5: Start, Resume and Cancel (./write.ts), each asked first.
+  if (actions.controls) view.append(actions.controls);
   if (task.openQuestion) view.append(el("div", "label", "Waiting on"), el("p", "", task.openQuestion));
   const open = task.questions.filter((q) => q.blocking && q.answer === null);
   for (const q of open) {

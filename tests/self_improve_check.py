@@ -47,6 +47,10 @@ def guard_checks() -> None:
     # Answering from the phone, and the §4.1 checks behind its authority (P-4).
     assert "jarvis/v2/remote_answer.py" in SELF_PROTECTED
     assert "jarvis/v2/remote_secure.py" in SELF_PROTECTED
+    # Writing from the phone: messages, new chats, task verbs (P-5).
+    assert "jarvis/v2/remote_write.py" in SELF_PROTECTED
+    # Push to talk from the phone: a clip in, text out, never sent (P-7).
+    assert "jarvis/v2/remote_stt.py" in SELF_PROTECTED
     # The approval broker every surface answers through (owner, 2026-10-25).
     assert "jarvis/v2/approvals.py" in SELF_PROTECTED
     for rel in sorted(SELF_PROTECTED):
