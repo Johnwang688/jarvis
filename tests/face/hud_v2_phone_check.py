@@ -673,8 +673,10 @@ def app_checks(page, daemon, world, check, until, streamed, net, main):
     check("P-6 Inbox: the notifications row says a push tells how many, never what",
           note.count() == 1 and "never what" in note.inner_text()
           and note.get_attribute("data-state") in ("off", "error"), note.inner_text() if note.count() else "")
-    check("P-6 Inbox: 'Turn on notifications' is offered", page.locator('[data-testid="m-notify-button"]')
-          .inner_text() == "Turn on notifications")
+    check("P-6 Inbox: 'Turn on notifications' is offered (a small 'Turn on' in one compact row, 2026-10-28)",
+          page.locator('[data-testid="m-notify-button"]').inner_text() == "Turn on"
+          and page.locator('[data-testid="m-notify-button"]').get_attribute("aria-label") == "Turn on notifications"
+          and 44 <= note.bounding_box()["height"] <= 60, str(note.bounding_box()))
     sw = page.evaluate("""fetch('/m/sw.js', {cache: 'no-store'}).then(async r => [r.status,
         r.headers.get('content-type'), await r.text()])""")
     check("P-6 the built service worker is served at /m/sw.js, a plain script that shows the count",
