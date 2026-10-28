@@ -1027,6 +1027,7 @@ def chat_tools_owner_turn_checks() -> None:
         "the HUD API": UserMessage(text="go"),
         "Discord": UserMessage(text="go", via="discord", desk=True),
         "the DM": UserMessage(text="go", via="dm"),
+        "the phone (P-5)": UserMessage(text="go", via="phone"),
         "a schedule": UserMessage(text="go", origin="system", via="system"),
         "the escape hatch": UserMessage(text="go", origin="owner-ran"),
     }

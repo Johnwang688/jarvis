@@ -74,8 +74,10 @@ challenge bound to one approval, one answer ("allow" or "always"), the
 session and its passkey (PH-4's sha256 of req_id, answer and a nonce;
 single use, 60 s, at most 4 per session), and `answer_verify` checks it as
 `login_verify` checks a sign-in, plus that binding and that the credential
-is the session's own passkey. Past the session, `api_route` hands P-4's
-answer paths to `remote_answer`, and every other path but logout and `me`
+is the session's own passkey; P-5's irreversible task verb (cancel) takes
+the same assertion, bound to `task:<id>` and the verb (`TASK_DECISIONS`).
+Past the session, `api_route` hands P-4's answer paths to `remote_answer`,
+P-5's writes to `remote_write`, and every other path but logout and `me`
 to `remote_api` (P-3's reads and event stream); `session_live` is the
 stream's check, which does not touch last-seen. `recently_active` is
 PH-10's "a phone session in the last 24 h"; `passkey_ready` is §4.1's
@@ -140,11 +142,18 @@ ANSWER_NONCE_BYTES = 32
 # each part delimited (a req_id is `token_urlsafe`, never a NUL).
 ANSWER_DOMAIN = b"jarvis-phone-answer-v1\x00"
 ANSWER_DECISIONS = ("allow", "always")
+# P-5: a task verb that cannot be undone takes the same per-answer assertion,
+# bound to `task:<task id>` and the verb (a cancel ends the task for good:
+# `CANCELLED` is terminal and only a blocked task resumes). An approval's
+# req_id (`token_urlsafe`) never holds a colon, so the two never meet; and a
+# verb's subject never takes an approval's answer, nor the reverse.
+TASK_DECISIONS = ("cancel",)
+_TASK_SUBJECT = re.compile(r"task:[0-9a-f]{8}")
 # PH-10: a phone session seen this recently gives approvals the remote wait.
 ACTIVE_S = 24 * 3600
 MAX_SESSIONS = 32         # the least recently seen goes first
 # The most answer challenges there can be at once (a bound, never a shared cap).
-MAX_ANSWER_CHALLENGES = MAX_ANSWER_CHALLENGES_PER_SESSION * MAX_SESSIONS
+MAX_ANSWER_CHALLENGES = MAX_ANSWER_CHALLENGES_PER_SESSION * MAX_SESSIONS * 2
 MAX_REVOKED = 16          # revoked passkey records kept, so a revoked id stays refused
 LAST_SEEN_WRITE_S = 60    # last-seen is written at most this often per session
 UA_CAP = 160
@@ -525,9 +534,13 @@ class RemoteAuth:
         if kind == "register" and self._window_open() is None:
             raise _refuse("no pairing window is open")
         if kind == "answer":
-            # Per session (`answer_options`); bounded by MAX_SESSIONS times that.
+            # Per session (`answer_options`), and per family (P-5): a task
+            # verb's prompts and an approval's are counted apart, so abandoned
+            # cancel prompts can never refuse an Allow, nor the reverse.
+            # Bounded by MAX_SESSIONS times that, twice.
             mine = [c for c in self._challenges.values()
-                    if c["kind"] == "answer" and c.get("session") == extra.get("session")]
+                    if c["kind"] == "answer" and c.get("session") == extra.get("session")
+                    and c.get("task", False) == extra.get("task", False)]
             full = len(mine) >= MAX_ANSWER_CHALLENGES_PER_SESSION
         else:
             cap = MAX_REGISTER_CHALLENGES if kind == "register" else MAX_LOGIN_CHALLENGES
@@ -705,13 +718,17 @@ class RemoteAuth:
 
     def answer_options(self, session: dict, req_id: str, decision: str) -> dict:
         """The request options for one answer (PH-4): a challenge bound to
-        this approval, this exact answer ("allow" or "always"), this session
+        this approval, this exact answer ("allow" or "always"; or, P-5, the
+        task `task:<id>` and "cancel", `TASK_DECISIONS`), this session
         and its passkey; single use, `CHALLENGE_S` on the monotonic clock,
         at most `MAX_ANSWER_CHALLENGES_PER_SESSION` per session (asking again
         for the same card and answer replaces the earlier one). `allowCredentials`
         names the session's own passkey only."""
         webauthn, structs = _webauthn()
-        if decision not in ANSWER_DECISIONS or not isinstance(req_id, str) or not req_id or len(req_id) > 64:
+        if not isinstance(req_id, str) or not req_id or len(req_id) > 64:
+            raise AuthError(400, "bad request")
+        task = _TASK_SUBJECT.fullmatch(req_id) is not None
+        if decision not in (TASK_DECISIONS if task else ANSWER_DECISIONS) or (not task and ":" in req_id):
             raise AuthError(400, "bad request")
         with self._lock:
             self._require_usable()
@@ -724,7 +741,7 @@ class RemoteAuth:
             nonce = secrets.token_bytes(ANSWER_NONCE_BYTES)
             challenge = self.answer_challenge(req_id, decision, nonce)
             self._issue("answer", challenge, req_id=req_id, decision=decision, nonce=nonce,
-                        session=session["token_sha256"], passkey=passkey["key"])
+                        session=session["token_sha256"], passkey=passkey["key"], task=task)
             options = webauthn.generate_authentication_options(
                 rp_id=self.host, challenge=challenge, timeout=CHALLENGE_S * 1000,
                 allow_credentials=[structs.PublicKeyCredentialDescriptor(id=unb64url(passkey["id"]))],
@@ -1140,13 +1157,18 @@ def api_route(handler, path: str, body: bytes) -> tuple[int, dict, list[tuple[st
                          "secure": secure_view(getattr(handler, "daemon", None))}, []
         if path in (LOGOUT, ME):
             return 404, {"error": WORDS[404]}, []
-        # P-4's answers and a card's detail (`remote_answer`), then P-3's
-        # reads and the event stream (`remote_api`), only past the session
-        # check above. None from the reads: the stream answered on the socket.
+        # P-4's answers and a card's detail (`remote_answer`), P-5's sends,
+        # new chats and task verbs (`remote_write`), then P-3's reads and the
+        # event stream (`remote_api`), only past the session check above.
+        # None from the reads: the stream answered on the socket.
         from . import remote_answer
         answered = remote_answer.route(handler, path, session, body)
         if answered is not None:
             return answered
+        from . import remote_write
+        written = remote_write.route(handler, path, session, body)
+        if written is not None:
+            return written
         from . import remote_api
         return remote_api.route(handler, path, session)
     except AuthError as exc:

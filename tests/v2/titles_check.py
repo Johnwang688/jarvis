@@ -416,6 +416,25 @@ class Intake(Harness):
         self.assertIn("look at this", self.codex.calls[1]["text"])
         self.assertNotIn("LEGACY FILE BODY", self.codex.calls[1]["text"])
 
+    def test_a_chat_typed_on_the_phone_is_titled_and_a_decisions_answer_is_not(self):
+        # Phone P-5 (review of PR #324, LOW 2): `via="phone"` with no
+        # `decision_id` is the owner's typed words, as in chat_reads and the
+        # Discord mirror; a decision answered on the phone (P-4) is code's frame.
+        self.t.start()
+        thread = self.chat()
+        self.d.deliver(thread.id, UserMessage("plan the release from my phone", origin="owner", via="phone"))
+        eventually(lambda: self.stored(thread).title, what="a title")
+        self.assertIn("plan the release from my phone", self.codex.calls[0]["text"])
+        self.assertTrue(titles.owner_typed({"origin": "owner", "via": "phone", "typed": "x"}))
+        self.assertFalse(titles.owner_typed({"origin": "owner", "via": "phone", "typed": "x", "decision_id": "d1"}))
+        self.assertFalse(titles.owner_typed({"origin": "owner", "via": "inbox", "typed": "x"}))
+        self.assertFalse(titles.owner_typed({"origin": "chat", "via": "phone", "typed": "x"}))
+        answer = self.chat()
+        self.stores.threads._append(answer.id, "log.jsonl", {"kind": "user", "data": {
+            "text": "The owner answered your decision", "typed": "The owner answered your decision",
+            "origin": "owner", "via": "phone", "decision_id": "d1"}})
+        self.assertFalse(self.t.title(self.job(answer)))
+
     def test_text_is_capped(self):
         thread = self.chat()
         self.say(thread, "x" * 5000)

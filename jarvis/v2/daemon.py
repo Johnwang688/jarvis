@@ -340,8 +340,14 @@ def is_running(port: int) -> bool:
 # (inbox.py, B1) through `deliver_queued`: never at the desk
 # (`desk.desk_message` requires "hud"). "phone": the same answer given on the
 # phone (phone design P-4, `remote_answer`): the same queue and framing, and
-# no desk authority either.
+# no desk authority either; and (P-5, `remote_write`) a message the owner
+# typed on the phone, through `deliver`: the owner's queue, never at the
+# desk, never Bypass, and never steered into a running turn (`NEVER_STEER`).
 VIAS = ("hud", "discord", "dm", "system", "peer", "inbox", "phone")
+# Where a message comes from that never steers a running turn: it waits in
+# the owner's queue behind it (phone design P-5: a phone message queues).
+# Read from the message itself, so no caller can forget it.
+NEVER_STEER = ("phone",)
 
 
 def user_data(message: UserMessage) -> dict:
@@ -985,6 +991,21 @@ class Daemon:
         if loosened:
             raise APIError(400, "a brief cannot loosen the project's " + ", ".join(loosened))
 
+    def create_task(self, project_id, brief):
+        """`POST /tasks`: a new task in INTAKE, which nothing runs until the
+        owner presses Start (`TaskControl.start`): the intake gate. The HUD's
+        route and the phone's (P-5, `remote_write`) both call this. An
+        archived project is refused inside the store, under its lock,
+        atomically with the create (ProjectArchived -> 409)."""
+        self.require(self.stores.projects, project_id)
+        _text(brief, "brief")
+        with self._lock:
+            self._active()
+            task = self.stores.tasks.create(project_id=project_id, brief=brief)
+            self.stores.tasks.save(task)
+            self._lifecycle("task_created", task)
+        return task
+
     def open_thread(self, project_id, role, provider, brief) -> Thread:
         project = self.require(self.stores.projects, project_id)
         if project.archived:
@@ -1435,7 +1456,8 @@ class Daemon:
         a provider that refuses) — **queued** to run as its own turn when this
         one ends (`"queued"`, up to QUEUE_MAX). A provider that cannot steer
         at all has its turn interrupted for it instead (`"steered"`, mode
-        `interrupt`). A steer the provider refuses after the owner stopped
+        `interrupt`). A message from the phone (`NEVER_STEER`, P-5) is
+        never steered and never interrupts: it queues. A steer the provider refuses after the owner stopped
         its turn is not sent at all (`"dropped"`, its words handed back). A steer has the authority of a send and no more: it
         never answers or resolves anything the turn is waiting on. A task's
         threads are the runner's: a running one still refuses (409).
@@ -1458,11 +1480,12 @@ class Daemon:
             if not thread_model.is_chat(session.thread):
                 raise DaemonError("a turn is already running on this thread")
             if (session.worker is None or waiting or session.compacting
-                    or self._waiting_on_owner(session)):
+                    or message.via in NEVER_STEER or self._waiting_on_owner(session)):
                 # Behind what already waits, so nothing overtakes it; never
                 # into a turn blocked on the owner, where it could read as the
-                # answer to the question the turn is waiting on; and never
-                # into a compaction, which has no conversation to steer.
+                # answer to the question the turn is waiting on; never into a
+                # compaction, which has no conversation to steer; and never
+                # from the phone (P-5), which queues behind the running turn.
                 item = self._enqueue(session, waiting, message, data)
                 drain = session.worker is None
                 reply = self._queued_reply(session, item)
@@ -3117,6 +3140,32 @@ def _text(value, name):
     return value
 
 
+def task_verb(daemon, task_id: str, verb: str, body) -> dict:
+    """`POST /tasks/{id}/<verb>`: the TaskControl verbs (§11.2), with the
+    body `task_verb_body` checks. Every one is synchronous and quick: a steer
+    queues, a cancel lands at the next boundary, a resume requeues — none of
+    them waits on a model. The HUD's route and the phone's (P-5,
+    `remote_write`) both call this, so the phone reaches `TaskControl` with
+    exactly the HUD's arguments. A `ControlError` is 409."""
+    runner = daemon.runner
+    if runner is None:
+        raise DaemonError("no task runner is attached to this daemon")
+    args = task_verb_body(verb, body)
+    try:
+        if verb == "start":
+            return to_json(runner.start(task_id))
+        if verb == "steer":
+            runner.steer(task_id, args["text"], spoken=args["spoken"])
+            return {"ok": True}
+        if verb == "cancel":
+            return to_json(runner.cancel(task_id))
+        if verb == "resume":
+            return to_json(runner.resume(task_id, provider=args["provider"]))
+        return to_json(runner.answer_question(task_id, args["index"], args["text"]))
+    except ControlError as exc:
+        raise APIError(409, str(exc)) from exc
+
+
 def task_verb_body(verb: str, body) -> dict:
     """The body of `POST /tasks/{id}/<verb>` (§11.2), checked and parsed —
     400 for any other shape. `start` and `cancel` take `{}`; `steer`
@@ -3452,16 +3501,7 @@ def _handler(daemon):
                     return 201, daemon.thread_json(daemon.open_thread(**body))
                 if method == "POST":
                     body = _object(self._body(), ("project_id", "brief"), ("project_id", "brief"))
-                    daemon.require(stores.projects, body["project_id"])
-                    _text(body["brief"], "brief")
-                    # An archived project is refused inside the store, under
-                    # its lock, atomically with the create (ProjectArchived -> 409).
-                    with daemon._lock:
-                        daemon._active()
-                        task = stores.tasks.create(**body)
-                        stores.tasks.save(task)
-                        daemon._lifecycle("task_created", task)
-                    return 201, to_json(task)
+                    return 201, to_json(daemon.create_task(body["project_id"], body["brief"]))
             if len(parts) == 3 and parts[0] == "threads":
                 thread_id, action = parts[1:]
                 daemon.require(stores.threads, thread_id)
@@ -3525,26 +3565,10 @@ def _handler(daemon):
             raise APIError(404, "route not found")
 
         def _task_verb(self, task_id, verb):
-            """The TaskControl verbs (§11.2). Every one is synchronous and quick:
-            a steer queues, a cancel lands at the next boundary, a resume
-            requeues — none of them waits on a model."""
-            runner = daemon.runner
-            if runner is None:
+            # No runner: 409 before the body is read, as before P-5.
+            if daemon.runner is None:
                 raise DaemonError("no task runner is attached to this daemon")
-            args = task_verb_body(verb, self._body())
-            try:
-                if verb == "start":
-                    return 200, to_json(runner.start(task_id))
-                if verb == "steer":
-                    runner.steer(task_id, args["text"], spoken=args["spoken"])
-                    return 200, {"ok": True}
-                if verb == "cancel":
-                    return 200, to_json(runner.cancel(task_id))
-                if verb == "resume":
-                    return 200, to_json(runner.resume(task_id, provider=args["provider"]))
-                return 200, to_json(runner.answer_question(task_id, args["index"], args["text"]))
-            except ControlError as exc:
-                raise APIError(409, str(exc)) from exc
+            return 200, task_verb(daemon, task_id, verb, self._body())
 
         def _worktree(self, task_id, query):
             # Include the read in the lock: two HTTP requests must not operate
