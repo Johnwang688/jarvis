@@ -29,6 +29,16 @@ export interface InboxRow {
   expires_at: string | null;
   origin: string;
   detail: Record<string, unknown>;
+  /** Inbox B4 (`GET /inbox?all=1`): the owner's snooze or dismissal hiding this row, or null when it shows. */
+  hidden: HiddenBy | null;
+  /** Inbox B4: the daemon says the owner may snooze or dismiss it (rank 5 to 8, never "PR list unavailable"). */
+  markable: boolean;
+}
+
+/** What hides a row (inbox B4): a snooze until a time, or a dismissal at one. */
+export interface HiddenBy {
+  snoozedUntil: string | null;
+  dismissedAt: string | null;
 }
 
 /** The kinds the HUD answers from the inbox, and the body each takes. */
@@ -94,7 +104,32 @@ export function parseRow(raw: unknown): InboxRow | null {
     expires_at: typeof raw.expires_at === "string" ? raw.expires_at : null,
     origin: oneLine(raw.origin, 160),
     detail: isObj(raw.detail) ? raw.detail : {},
+    // A `hidden` the HUD's own rule (IN-8) says cannot be is dropped: such a row shows.
+    hidden: markableRank(rank, raw.kind, id) ? parseHidden(raw.hidden) : null,
+    // Both the daemon's word and the HUD's own rule (IN-8): ranks 1 to 4 and
+    // "PR list unavailable" never offer a snooze or dismiss, whatever is served.
+    markable: raw.markable === true && markableRank(rank, raw.kind, id),
   };
+}
+
+/** The HUD's own copy of IN-8: rank 5 to 8, never "PR list unavailable" (by kind or `prx:` id). */
+function markableRank(rank: number, kind: unknown, id: string): boolean {
+  return rank >= MARKABLE_MIN_RANK && rank <= MARKABLE_MAX_RANK && kind !== PR_UNAVAILABLE && !id.startsWith("prx:");
+}
+
+/** Whether a row is hidden: it says so and the HUD's rule allows it to be. A
+ * rank 1 to 4 row or "PR list unavailable" is never hidden, whatever it carries. */
+export function isHidden(row: InboxRow): boolean {
+  return !!row.hidden && markableRank(row.rank, row.kind, row.id);
+}
+
+function parseHidden(v: unknown): HiddenBy | null {
+  if (!isObj(v)) return null;
+  const at = (x: unknown) => (typeof x === "string" && x.length <= 64 && Number.isFinite(Date.parse(x)) ? x : null);
+  const snoozedUntil = at(v.snoozed_until);
+  const dismissedAt = at(v.dismissed_at);
+  // Something says it is hidden: kept hidden, even when its time cannot be read.
+  return { snoozedUntil, dismissedAt };
 }
 
 /** `GET /inbox`'s body, in rank order (stable: the daemon's order within a rank, which is oldest first). Null when it is not a list. */
@@ -121,9 +156,79 @@ export function groupRows(rows: readonly InboxRow[]): { group: InboxGroup; rows:
   return out;
 }
 
-/** The sidebar's count and the app badge: what is waiting on the owner (ranks 1 to 5). */
+/** The sidebar's count and the app badge: what is waiting on the owner (ranks 1 to 5), never a hidden row. */
 export function waitingCount(rows: readonly InboxRow[]): number {
-  return rows.filter((r) => r.rank >= 1 && r.rank <= COUNTED_MAX_RANK).length;
+  return rows.filter((r) => !isHidden(r) && r.rank >= 1 && r.rank <= COUNTED_MAX_RANK).length;
+}
+
+// --- marks: snooze and dismiss (inbox B4, IN-7, IN-8) -----------------------
+
+/** The lowest rank the owner may snooze or dismiss: a live approval, a blocking
+ * question, a proposal or a blocked task (1 to 4) is never hidden. */
+export const MARKABLE_MIN_RANK = 5;
+export const MARKABLE_MAX_RANK = 8;
+// "PR list unavailable" (`PR_UNAVAILABLE`, inbox B3, below) is never hidden:
+// that would read as "nothing waiting".
+
+/** Whether this row offers Snooze and Dismiss. */
+export function canMark(row: InboxRow): boolean {
+  return row.markable && !row.hidden && markableRank(row.rank, row.kind, row.id);
+}
+
+/** The rows that show (nothing hidden), and the hidden ones, in their order. */
+export function shownRows(rows: readonly InboxRow[]): InboxRow[] {
+  return rows.filter((r) => !isHidden(r));
+}
+export function hiddenRows(rows: readonly InboxRow[]): InboxRow[] {
+  return rows.filter(isHidden);
+}
+
+/** When the earliest snooze among `rows` ends (ms), or null: the store reads
+ * again then, a backup to the daemon's `snooze_ended` event. */
+export function nextSnoozeEnd(rows: readonly InboxRow[]): number | null {
+  const ends = rows.filter(isHidden).map((r) => (r.hidden!.snoozedUntil ? Date.parse(r.hidden!.snoozedUntil) : NaN))
+    .filter((ms) => Number.isFinite(ms));
+  return ends.length ? Math.min(...ends) : null;
+}
+
+export type SnoozeFor = "hour" | "tomorrow" | "week";
+export const SNOOZES: readonly { key: SnoozeFor; label: string }[] = [
+  { key: "hour", label: "Snooze 1 h" },
+  { key: "tomorrow", label: "Until tomorrow" },
+  { key: "week", label: "1 week" },
+];
+/** "Until tomorrow" ends at this local hour of the next day. */
+export const TOMORROW_HOUR = 8;
+
+/** When a snooze ends, as the ISO time `POST /inbox/<id>/mark` takes (always with its zone, `Z`). */
+export function snoozeUntil(choice: SnoozeFor, now: number): string {
+  if (choice === "hour") return new Date(now + 3_600_000).toISOString();
+  if (choice === "week") return new Date(now + 7 * 86_400_000).toISOString();
+  const d = new Date(now);
+  d.setDate(d.getDate() + 1);
+  d.setHours(TOMORROW_HOUR, 0, 0, 0);
+  return d.toISOString();
+}
+
+/** What a mark posts: a snooze, a dismissal, or the Undo of either. */
+export type MarkBody = { snooze_until: string } | { dismiss: true } | { clear: true };
+
+/** The mark path: the row id through `encodeURIComponent`, which the daemon decodes once. */
+export function markPath(id: string): string {
+  return `/inbox/${encodeURIComponent(id)}/mark`;
+}
+
+/** What a hidden row says about why it is hidden, in code's words. */
+export function hiddenNote(row: InboxRow, now: number = Date.now()): string {
+  const h = row.hidden;
+  if (!h) return "";
+  if (h.snoozedUntil) {
+    const ms = Date.parse(h.snoozedUntil);
+    const day = new Date(ms).toDateString() === new Date(now).toDateString() ? "" :
+      ` ${new Date(ms).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })}`;
+    return `Snoozed until ${clockOf(ms).slice(0, 5)}${day}`;
+  }
+  return "Dismissed";
 }
 
 /** Whether anything pending (ranks 1 and 2) is waiting: the count reads amber. */

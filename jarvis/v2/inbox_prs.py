@@ -545,6 +545,19 @@ class PrSource:
             with self._lock:
                 old, self._rows = self._rows, fresh
             changed = sorted({i for i in old.keys() | fresh.keys() if old.get(i) != fresh.get(i)})
+            # Inbox B4: a PR that left a repository read in full (merged,
+            # closed) forgets the owner's snooze or dismissal, so if it comes
+            # back (reopened) it shows. A failed or cut-off read is no leave:
+            # its PRs keep their marks.
+            left = [i for i, r in old.items() if i not in fresh and r.get("kind") == "pr"
+                    and (r.get("detail") or {}).get("repo") in repos
+                    and (r.get("detail") or {}).get("repo") not in failures]
+            forget = getattr(getattr(getattr(self.daemon, "inbox", None), "marks", None), "forget", None)
+            if left and forget is not None:
+                try:
+                    forget(left)
+                except Exception as exc:  # noqa: BLE001 — a mark is never worth a poll
+                    LOG.warning("inbox PRs: cannot forget a closed PR's mark (%s)", type(exc).__name__)
         if changed:
             try:
                 self.daemon.bus.publish({"kind": "inbox_changed",

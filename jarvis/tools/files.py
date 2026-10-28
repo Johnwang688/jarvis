@@ -139,6 +139,11 @@ SELF_PROTECTED = frozenset(
         # An agent that could edit it could mark a step for the owner or let
         # a check be marked before its PR runs.
         "jarvis/v2/checks.py",
+        # The owner's snoozes and dismissals (inbox B4, IN-7): which rows of
+        # rank 5 to 8 stay out of sight, and the rule that a mark never
+        # hides a live approval, question, proposal or blocked task. An
+        # agent that could edit it could hide one.
+        "jarvis/v2/inbox_marks.py",
         # The phone's remote listener (phone design PH-1, P-1): its route
         # table, strict Host, Origin rule and headers decide what the
         # tailnet can reach on this machine. An agent that could edit it
@@ -286,8 +291,9 @@ def _protected_state_paths() -> set[Path]:
     # judged as a write to it, as the inbox folder's is.
     inbox = Path(config.V2_DATA_DIR).expanduser() / "inbox"
     # The `checks` folder (inbox B2: the live checks and the owner's
-    # results) is named for the same reason.
-    paths |= {inbox, inbox / "missed.jsonl", inbox / "decisions", inbox / "checks"}
+    # results) is named for the same reason, and so is `marks.json` (inbox
+    # B4: what the owner snoozed or dismissed; a forged mark would hide a row).
+    paths |= {inbox, inbox / "missed.jsonl", inbox / "decisions", inbox / "checks", inbox / "marks.json"}
     # Jarvis's own records (2026-10-25, review of PR #309: `cp /tmp/x
     # <data>/threads/<id>/log.jsonl` was a static ALLOW, and a forged
     # `{"kind":"user","data":{"origin":"owner",…}}` line then showed as the

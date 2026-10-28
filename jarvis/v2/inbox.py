@@ -100,6 +100,17 @@ after a task moves into done, failed or blocked); `rows()` never waits on
 `pr_unavailable` row ("PR list unavailable" / "incomplete"), never an empty
 list. Neither takes an answer (400). Details in `inbox_prs.py`.
 
+**Marks (B4, IN-7).** The owner may snooze or dismiss a row of rank 5 to 8
+(`POST /inbox/<id>/mark`, `mark_row`), never a live approval, a blocking
+question, a proposal or a blocked task (IN-8), and never "PR list
+unavailable". The route judges the row's rank in a fresh projection, and
+`rows()` honours a mark only while the row's current rank is 5 or more and
+its `inbox_marks.material_key` still matches, so a row that rises to rank 4
+or changes materially shows again. `GET /inbox` leaves hidden rows out;
+`?all=1` keeps them, flagged `hidden`, with every row's `markable`. The
+store is `inbox_marks.MarksStore` (`<data root>/inbox/marks.json`); a file
+that is not one of ours hides nothing.
+
 This module is SELF_PROTECTED (`jarvis/tools/files.py`): it decides what the
 owner sees as waiting.
 """
@@ -117,6 +128,7 @@ import threading
 from .approvals import clean_line
 from . import checks as _checks
 from . import decisions as _decisions
+from . import inbox_marks as _marks
 from .model import TaskState
 
 LOG = logging.getLogger(__name__)
@@ -172,6 +184,11 @@ SOURCE_KINDS = frozenset({
     "check_posted", "check_imported", "check_marked",
 })
 _DETAIL_TEXT_CAP = 4000
+# B4: the snooze timer fires this long after the earliest snooze ends (so
+# the row has surely ended by the store's clock), and never waits longer
+# than SNOOZE_RECHECK_S at once.
+SNOOZE_SLACK_S = 0.5
+SNOOZE_RECHECK_S = 3600.0
 
 
 def _parse_time(value):
@@ -717,11 +734,22 @@ def _check_row(hidden, rec, now, deploy, budget) -> list:
                  asked_at=rec["created_at"], origin=rec["created_by"], detail=_check_detail(rec, status))]
 
 
-def rows(daemon, *, with_checks: bool = True) -> list[dict]:
+_MARK_MODES = ("hide", "flag", "ignore")
+
+
+def rows(daemon, *, with_checks: bool = True, marks: str = "hide") -> list[dict]:
     """Every row, ranked (IN-4; ties to the older item). Pure: reads only.
     `with_checks=False` leaves the live checks (and their git) out: `answer`
     finds the row it answers without them, since a check is never answered
-    there (review of PR #321, LOW 2)."""
+    there (review of PR #321, LOW 2).
+
+    `marks` (B4, IN-7): "hide" leaves out the rows the owner snoozed or
+    dismissed (`GET /inbox`, the phone); "flag" keeps them with `hidden`
+    set and says of every row whether it is `markable` (`?all=1`);
+    "ignore" is the projection alone (`answer`, `mark_row`). A mark applies
+    only to a row whose current rank is 5 or more (`inbox_marks.markable`)."""
+    if marks not in _MARK_MODES:
+        raise ValueError("marks must be hide, flag or ignore")
     from .projects import archived_project_ids
     try:
         hidden = archived_project_ids(daemon.stores)
@@ -741,7 +769,15 @@ def rows(daemon, *, with_checks: bool = True) -> list[dict]:
             out += source()
         except Exception as exc:  # noqa: BLE001 — never a 500 for the whole inbox
             LOG.warning("Cannot read the inbox's %s (%s)", name, type(exc).__name__)
-    return sorted(out, key=_sort_key)
+    out = sorted(out, key=_sort_key)
+    store = getattr(getattr(daemon, "inbox", None), "marks", None)
+    if marks == "ignore" or store is None:
+        return out
+    try:
+        return store.apply(out, flag=marks == "flag")
+    except Exception as exc:  # noqa: BLE001 — marks that cannot be applied hide nothing
+        LOG.warning("Cannot apply the inbox marks (%s); every row shows", type(exc).__name__)
+        return [{**r, "markable": _marks.markable(r)} for r in out] if marks == "flag" else out
 
 
 # -- inbox_changed ---------------------------------------------------------------
@@ -780,6 +816,77 @@ class Inbox:
         # daemon2's `main()` attaches it (`inbox_prs.PrSource.attach_system`).
         from .inbox_prs import PrSource
         self.prs = PrSource(daemon)
+        # B4: the owner's snoozes and dismissals (rank 5 to 8 only), and the
+        # one timer that says when the earliest snooze ends.
+        self.marks = _marks.MarksStore(root) if root is not None else None
+        self._timer_factory = threading.Timer
+        self._snooze_timer = None
+        self._snoozes_on = False
+
+    # -- snoozes that end (B4) --------------------------------------------------
+
+    def start_snoozes(self) -> None:
+        """Arm the snooze timer (`Daemon.start`). Never raises."""
+        with self._lock:
+            self._snoozes_on = True
+        self.arm_snoozes()
+
+    def stop_snoozes(self) -> None:
+        """Cancel the timer for good (`Daemon.stop`)."""
+        with self._lock:
+            self._snoozes_on = False
+            timer, self._snooze_timer = self._snooze_timer, None
+        if timer is not None:
+            timer.cancel()
+
+    def arm_snoozes(self) -> None:
+        """One `threading.Timer` for the earliest snooze still running, by the
+        store's clock: when it passes, `_snoozes_ended` publishes
+        `inbox_changed` for the rows whose snooze ended, so the HUD and the
+        phone read again and the row is back in the list and the count.
+        Re-armed on every mark write and at start; never polls. A wait is
+        at most `SNOOZE_RECHECK_S`, so a clock that jumped (a host that
+        slept) is caught within that. Never raises."""
+        try:
+            with self._lock:
+                if not self._snoozes_on or self.marks is None:
+                    return
+                old, self._snooze_timer = self._snooze_timer, None
+            if old is not None:
+                old.cancel()
+            now = self.marks.clock()
+            ends = [t for t in (_marks.parse_time(m["snoozed_until"]) for m in self.marks.read().values()
+                                if m["snoozed_until"] is not None) if t is not None and t > now]
+            if not ends:
+                return
+            wait = min(max((min(ends) - now).total_seconds(), 0.0) + SNOOZE_SLACK_S, SNOOZE_RECHECK_S)
+            timer = self._timer_factory(wait, self._snoozes_ended, args=(now,))
+            timer.daemon = True
+            with self._lock:
+                if not self._snoozes_on or self._snooze_timer is not None:
+                    return          # stopped, or another arm won meanwhile
+                self._snooze_timer = timer
+            timer.start()
+        except Exception as exc:  # noqa: BLE001 — a timer is never worth a failed mark
+            LOG.warning("Cannot arm the snooze timer (%s)", type(exc).__name__)
+
+    def _snoozes_ended(self, since) -> None:
+        """The timer: publish the rows whose snooze ended after `since`, then re-arm."""
+        try:
+            with self._lock:
+                if not self._snoozes_on:
+                    return
+                self._snooze_timer = None
+            now = self.marks.clock()
+            ended = sorted(row_id for row_id, m in self.marks.read().items()
+                           if m["snoozed_until"] is not None
+                           and since < (_marks.parse_time(m["snoozed_until"]) or now) <= now)
+            if ended:
+                self.daemon.bus.publish({"kind": "inbox_changed",
+                                         "data": {"ids": ended, "reason": "snooze_ended"}})
+        except Exception as exc:  # noqa: BLE001
+            LOG.warning("Cannot announce an ended snooze (%s)", type(exc).__name__)
+        self.arm_snoozes()
 
     def answer_dropped(self, decision_id) -> None:
         """An answer queued for its chat will never run (the owner's Stop, a
@@ -987,7 +1094,7 @@ def answer(daemon, row_id, body, *, owner_verified: bool, via: str = "inbox"):
         body = _object(body, ("withdraw",), ("withdraw",))
         if body["withdraw"] is not True:
             raise APIError(400, "withdraw must be true")
-    row = next((r for r in rows(daemon, with_checks=False) if r["id"] == row_id), None)
+    row = next((r for r in rows(daemon, with_checks=False, marks="ignore") if r["id"] == row_id), None)
     if row is None:
         raise _gone()
     if prefix == "appr":
@@ -1222,6 +1329,68 @@ def mark_check_step(daemon, check_id, step, body) -> dict:
     return {"ok": True, "check_id": check_id, "step": index, "done": done}
 
 
+def mark_row(daemon, row_id, body) -> dict:
+    """`POST /inbox/<id>/mark` (owner-only, checked by `route`; B4, IN-7,
+    IN-8). Exactly one of `{snooze_until: <ISO time with its zone, in the
+    future, at most inbox_marks.SNOOZE_MAX ahead>}`, `{dismiss: true}` and
+    `{clear: true}` (the Undo). Snooze and dismiss find the row in a fresh
+    projection, marks ignored (absent: 409), and refuse (409) a row that is
+    not `inbox_marks.markable` now: ranks 1 to 4, judged on the row's
+    current rank, never on anything the client sends, and "PR list
+    unavailable". Publishes `inbox_changed` with the id only."""
+    from .daemon import APIError, _object
+    prefix, _rest, row_id = _split(row_id)
+    body = _object(body, ("snooze_until", "dismiss", "clear"))
+    if len(body) != 1:
+        raise APIError(400, "give exactly one of snooze_until, dismiss and clear")
+    store = getattr(getattr(daemon, "inbox", None), "marks", None)
+    if store is None:
+        raise APIError(409, "the inbox has no store here")
+    (verb, value), = body.items()
+    if verb in ("dismiss", "clear") and value is not True:
+        raise APIError(400, f"{verb} must be true")
+    when = None
+    if verb == "snooze_until":
+        when = _marks.parse_time(value)
+        if when is None:
+            raise APIError(400, "snooze_until must be an ISO time with its time zone")
+        now = store.clock()
+        if when <= now:
+            raise APIError(400, "snooze_until must be in the future")
+        if when > now + _marks.SNOOZE_MAX:
+            raise APIError(400, f"a snooze may reach at most {_marks.SNOOZE_MAX.days} days ahead")
+    try:
+        if verb == "clear":
+            # Undo only ever shows a row, so it needs no row: an id it never
+            # named is simply not there.
+            cleared = store.clear(row_id)
+            hidden = None
+        else:
+            if prefix in _marks.UNMARKABLE_PREFIXES:
+                raise APIError(409, "this row cannot be snoozed or dismissed: it says what Jarvis cannot read")
+            live = rows(daemon, marks="ignore")
+            row = next((r for r in live if r["id"] == row_id), None)
+            if row is None:
+                raise _gone()
+            if not _marks.markable(row):
+                raise APIError(409, "this item cannot be snoozed or dismissed: it is live or holds up work")
+            entry = store.mark(row, live, snooze_until=when)
+            cleared = None
+            hidden = {"snoozed_until": entry["snoozed_until"], "dismissed_at": entry["dismissed_at"]}
+    except OSError as exc:
+        LOG.warning("Cannot write the inbox marks (%s)", type(exc).__name__)
+        raise APIError(500, "the mark could not be saved") from None
+    daemon.bus.publish({"kind": "inbox_changed", "data": {"ids": [row_id], "reason": "inbox_marked"}})
+    # A snooze set, changed or undone moves the earliest end (B4).
+    arm = getattr(getattr(daemon, "inbox", None), "arm_snoozes", None)
+    if arm is not None:
+        arm()
+    out = {"ok": True, "id": row_id, "hidden": hidden}
+    if cleared is not None:
+        out["cleared"] = cleared
+    return out
+
+
 def _runbook(daemon, raw):
     """(path, project, bytes, digest) of the runbook `raw` names, or a 400."""
     import hashlib
@@ -1296,9 +1465,10 @@ def import_checks(daemon, body) -> dict:
 
 
 def route(handler, daemon, parts, query):
-    """`GET /inbox`, `POST /inbox/<id>/answer`, `POST
-    /inbox/decisions/<id>`, `POST /inbox/checks/<id>/steps/<n>` and `POST
-    /inbox/checks/import`; None for any other path. `owner_only` runs before
+    """`GET /inbox` (`?all=1`), `POST /inbox/<id>/answer`, `POST
+    /inbox/<id>/mark`, `POST /inbox/decisions/<id>`, `POST
+    /inbox/checks/<id>/steps/<n>` and `POST /inbox/checks/import`; None for
+    any other path. `owner_only` runs before
     anything else on every `/inbox` path, so the API listener and a non-owner
     page learn nothing, not even which ids exist."""
     if not parts or parts[0] != "inbox":
@@ -1309,14 +1479,20 @@ def route(handler, daemon, parts, query):
     owner_only(handler, daemon)
     method = handler.command
     if parts == ["inbox"] and method == "GET":
-        _object(query, ())
-        return 200, rows(daemon)
+        # `?all=1` (B4): the snoozed and dismissed rows too, flagged.
+        _object(query, ("all",))
+        if query.get("all", "1") != "1":
+            raise APIError(400, "all must be 1")
+        return 200, rows(daemon, marks="flag" if "all" in query else "hide")
     if len(parts) == 3 and parts[2] == "answer" and method == "POST":
         _object(query, ())
         # The Host test `POST /approvals/<id>` makes, made the same way: the
         # HUD route's HUD authority (PH-7).
         owner_verified = config.own_host_header(handler.headers.get("Host", ""), daemon.face_port)
         return 200, answer(daemon, parts[1], handler._body(), owner_verified=owner_verified)
+    if len(parts) == 3 and parts[2] == "mark" and method == "POST" and parts[1] not in ("decisions", "checks"):
+        _object(query, ())
+        return 200, mark_row(daemon, parts[1], handler._body())
     if len(parts) == 3 and parts[1] == "decisions" and method == "POST":
         _object(query, ())
         return 200, answer_decision(daemon, parts[2], handler._body())

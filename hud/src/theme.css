@@ -2288,6 +2288,12 @@ button.tree-row.ownerinbox.aurora.sel:focus-visible { box-shadow: inset 2px 0 va
 .inbox-row .ir-step-result[data-verdict="fail"] { color: var(--red); }
 .inbox-row .ir-deploy { color: var(--text-2); }
 .inbox-row button[data-verdict]:disabled { opacity: 0.5; }
+/* Marks (inbox B4): Snooze and Dismiss as quiet secondary buttons on rows of
+   rank 5 to 8; a hidden row (shown by "Show hidden") is muted, never amber. */
+.inbox-row .ir-marks { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; min-width: 0; }
+.inbox-row .ir-marks button.quiet { padding: 0 2px; font-size: 11px; color: var(--text-2); }
+.inbox-row .ir-marks button.quiet:hover:not(:disabled) { color: var(--accent); }
+.inbox-row[data-hidden="1"] { opacity: 0.6; border-left-color: var(--border); }
 .inbox-import { display: flex; flex-direction: column; gap: 4px; margin: 8px 12px 0; padding: 6px 8px;
   border: 1px solid var(--border); border-radius: var(--radius); min-width: 0; }
 .inbox-import .ir-answer { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; min-width: 0; }

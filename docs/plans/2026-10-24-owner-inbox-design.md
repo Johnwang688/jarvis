@@ -1,6 +1,20 @@
 # Design: the owner inbox (Jarvis v2)
 
-**Status (2026-10-24): draft for the owner's review.** Nothing here is built.
+**Status (2026-10-28): built, IN-0 to IN-7.** IN-0 and IN-2 in #303 (A1),
+IN-1 in #305 (A2), IN-3 in #307 (A3), IN-5 in #309 (B1), IN-6 in #321 (B2),
+IN-4 in #320 (B3) and IN-7 in #322 (B4). All are merged but #322 itself. The working notes are
+`docs/notes/control-plane.md` ("The owner inbox routes" and the paragraphs
+after it) and `docs/notes/hud-workspace.md` ("The owner inbox view").
+Deviations recorded in those PRs: task orchestrators cannot post (they have
+no session server; §10 question 1 left for the owner, B1); "5 per thread"
+is read as 5 open per chat, plus 10 posted per chat a day (B1); a decision's
+answer resumes a closed session to reach it, as a HUD message would (§5,
+B1); a check is markable only when git confirms its PRs are in the running
+build (B2); the questions-for-owner import of decisions is not built (§6,
+B2); PR scope is every open non-draft PR, the owner's answer to §10
+question 4 (B3); a mark keeps a digest of the row (`key`) and when it was
+made (`at`) beside §3.2's two fields, `{clear: true}` undoes it, a mark on
+ranks 1 to 4 is a 409, and the phone shows marks but cannot set them (B4).
 Written against `main` at `2229645e`. Paths are relative to the repo root. The
 decisions in §2 are the planner's defaults; each can be reversed, and the open
 questions in §10 have their defaults in bold. The companion design

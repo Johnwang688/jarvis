@@ -53,7 +53,8 @@ function draw(raw: unknown[], over: Partial<InboxViewProps> = {}) {
     snapshot: snap(raw), approvals: [], blocked: false,
     onOpenThread: vi.fn(), onOpenTask: vi.fn(), onAnswer: vi.fn(async () => ({ ok: true })),
     onDecide: vi.fn(async () => ({ ok: true })), onReread: vi.fn(), now: () => 0,
-    onMarkCheck: vi.fn(async () => ({ ok: true })), onImportChecks: vi.fn(async () => ({})), ...over,
+    onMarkCheck: vi.fn(async () => ({ ok: true })), onImportChecks: vi.fn(async () => ({})),
+    onMark: vi.fn(async () => ({ ok: true })), ...over,
   };
   act(() => root!.render(createElement(InboxView, props)));
   return props;
@@ -161,3 +162,27 @@ describe("the view", () => {
     expect(waitingCount(parseInbox([unavailable(), prRow()])!)).toBe(2);
   });
 });
+
+describe("PR rows and marks (inbox B4 with B3)", () => {
+  it("a PR row offers Snooze and Dismiss beside its link; 'PR list unavailable' offers none, even if served markable", async () => {
+    const p = draw([prRow({ markable: true }), { ...unavailable(), markable: true }]);
+    const marks = (id: string) => Array.from(rowOf(id).querySelectorAll('[data-testid="inbox-marks"] button'))
+      .map((b) => b.textContent);
+    expect(marks(`pr:${REPO}#7`)).toEqual(["Snooze 1 h", "Until tomorrow", "1 week", "Dismiss"]);
+    expect(marks("prx:list")).toEqual([]);
+    expect(rowOf(`pr:${REPO}#7`).querySelector("a")).not.toBeNull();
+    act(() => (rowOf(`pr:${REPO}#7`).querySelector('[data-testid="inbox-dismiss"]') as HTMLButtonElement).click());
+    await act(async () => { await Promise.resolve(); });
+    expect(p.onMark).toHaveBeenCalledWith(`pr:${REPO}#7`, { dismiss: true });
+  });
+
+  it("a dismissed PR leaves the count; a 'hidden' served on 'PR list unavailable' is ignored", () => {
+    const gone = { snoozed_until: null, dismissed_at: "2026-10-28T09:00:00Z" };
+    const rows = parseInbox([prRow({ markable: true, hidden: gone }), { ...unavailable(), hidden: gone }])!;
+    expect(waitingCount(rows)).toBe(1);
+    draw([prRow({ markable: true, hidden: gone }), { ...unavailable(), hidden: gone }]);
+    expect(rowOf("prx:list")).not.toBeNull();
+    expect(rowOf(`pr:${REPO}#7`)).toBeNull();
+  });
+});
+

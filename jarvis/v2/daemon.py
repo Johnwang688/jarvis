@@ -732,6 +732,9 @@ class Daemon:
             # Open PRs for the inbox (B3): a thread of its own, only once
             # `main()` attached it; nothing here waits on `gh`.
             self.inbox.prs.start()
+            # A snooze that ends brings its row back (inbox B4): one timer for
+            # the earliest, re-armed on each mark write.
+            self.inbox.start_snoozes()
             self.devservers.start()
             self.schedules.start()
             # A previous run's unrestored duck (V15) is repaired from its
@@ -2961,6 +2964,9 @@ class Daemon:
         self.release_approvals()
         self.schedules.stop()
         self.inbox.prs.stop()                   # the inbox's PR poll (B3): a running gh is killed
+        inbox = getattr(self, "inbox", None)
+        if inbox is not None:
+            inbox.stop_snoozes()                # the snooze timer (inbox B4) never fires after this
         titles = self.titles
         if titles is not None:
             titles.stop()                       # its Codex session ends with the metadata cancel
