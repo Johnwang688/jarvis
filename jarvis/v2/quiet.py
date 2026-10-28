@@ -108,6 +108,37 @@ def next_end(start: dtime, end: dtime, now: datetime, *, system_local: bool = Fa
     return datetime.combine(day, end, tzinfo=now.tzinfo)
 
 
+def _at(day, at: dtime, now: datetime, system_local: bool) -> datetime:
+    """`day` at the wall time `at`, placed as `next_end` places an end."""
+    if system_local:
+        return datetime.combine(day, at).astimezone()
+    return datetime.combine(day, at, tzinfo=now.tzinfo)
+
+
+def window_bounds(start: dtime, end: dtime, now: datetime, *,
+                  system_local: bool = False) -> tuple[datetime, datetime]:
+    """The morning review's night (MR-1): (start, end) of the window holding
+    `now`, or else of the last one that ended before it. Pure: wall times
+    on their own dates, as `next_end` places them, so a night across a
+    daylight-saving change starts at 23:00 with the evening's offset and
+    ends at 07:00 with the morning's. `now` itself at `end` is outside
+    (the window is [start, end))."""
+    at = now.time().replace(tzinfo=None)
+    today = now.date()
+    crosses = not start < end
+    if within(start, end, at):
+        if not crosses or at >= start:
+            begin_day = today
+        else:
+            begin_day = today - timedelta(days=1)
+    else:
+        # The last end before now, then the start that opened it.
+        end_day = today if at >= end else today - timedelta(days=1)
+        begin_day = end_day - timedelta(days=1) if crosses else end_day
+    end_day = begin_day + timedelta(days=1) if crosses else begin_day
+    return _at(begin_day, start, now, system_local), _at(end_day, end, now, system_local)
+
+
 class QuietHours:
     """The quiet-hours setting under one data root. Read once, then kept in
     memory: only `update` (the owner's route) changes the file."""
@@ -258,6 +289,16 @@ class QuietHours:
             return None
         return next_end(window[0], window[1], now or self.clock(),
                         system_local=self.system_local and self.clock is local_now)
+
+    def last_window(self, now: datetime | None = None) -> tuple[datetime, datetime] | None:
+        """The morning review's night (MR-1): (start, end) of the quiet window
+        holding `now`, or of the last one that ended; None when quiet hours
+        are off. `window_bounds` on the setting in force."""
+        window = self._window()
+        if window is None:
+            return None
+        return window_bounds(window[0], window[1], now or self.clock(),
+                             system_local=self.system_local and self.clock is local_now)
 
     def view(self, now: datetime | None = None) -> dict:
         """What the desk shows: the setting, whether it is quiet now, and

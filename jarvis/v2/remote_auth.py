@@ -77,7 +77,9 @@ single use, 60 s, at most 4 per session), and `answer_verify` checks it as
 is the session's own passkey; P-5's irreversible task verb (cancel) takes
 the same assertion, bound to `task:<id>` and the verb (`TASK_DECISIONS`).
 Past the session, `api_route` hands P-7's `POST /m/api/stt` to
-`remote_stt`, P-6's push paths to `push`, P-4's answer paths to
+`remote_stt`, P-6's push paths to `push`, the morning review's
+`/m/api/review...` to `review` (its Approve selected's assertion bound to
+`defers:<56 hex>`, `review.subject`), P-4's answer paths to
 `remote_answer`, P-5's writes to `remote_write`, and every other path but
 logout and `me` to `remote_api` (P-3's reads and event stream); a logout,
 the desk's End and a revoke tell `on_end` (P-6 deletes that session's or
@@ -153,8 +155,9 @@ ANSWER_DECISIONS = ("allow", "always")
 TASK_DECISIONS = ("cancel",)
 _TASK_SUBJECT = re.compile(r"task:[0-9a-f]{8}")
 # QH: an Approve and retry of a deferred approval (`remote_answer.defer_binding`):
-# one deferral, `defer:<id>`, or a set of them, `defers:<sha256, 56 hex>`.
-# Only "allow" is ever an answer for it.
+# one deferral, `defer:<id>`; the morning review's Approve selected
+# (`review.subject`, MR-6): a set, `defers:<56 hex>` over every id and its tag.
+# Only "allow" is ever an answer for either.
 DEFER_DECISIONS = ("allow",)
 _DEFER_SUBJECT = re.compile(r"defer:[A-Za-z0-9_-]{1,58}|defers:[0-9a-f]{56}")
 # PH-10: a phone session seen this recently gives approvals the remote wait.
@@ -1206,6 +1209,12 @@ def api_route(handler, path: str, body: bytes) -> tuple[int, dict, list[tuple[st
         # new chats and task verbs (`remote_write`), then P-3's reads and the
         # event stream (`remote_api`), only past the session check above.
         # None from the reads: the stream answered on the socket.
+        # The morning review (MR, `review.py`): its report, Approve selected
+        # (a passkey assertion bound to the whole set) and Leave selected.
+        from . import review as _review
+        answered = _review.route(handler, path, session, body)
+        if answered is not None:
+            return answered
         from . import remote_answer
         answered = remote_answer.route(handler, path, session, body)
         if answered is not None:

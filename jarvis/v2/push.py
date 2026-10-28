@@ -20,7 +20,10 @@ coalesced into one push sent when it ends, with the count as it is then
 (none if nothing waits any more). **Quiet hours** (`quiet.py`, the owner's
 answer of 2026-10-28): nothing is pushed while they hold, rank 1 included;
 when they end, one push says what still waits at ranks 1 to 4, if anything
-does. The desk's "Notifications" switch off: nothing is pushed.
+does. The desk's "Notifications" switch off: nothing is pushed. **The
+morning review (MR-12):** the sender remembers, in memory only, whether the
+last push that reached a phone was that morning one (`review_opens`); the
+next other push (or a restart) clears it. The payload never says so.
 
 **Who receives it.** Subscriptions are made by a signed-in phone
 (`POST /m/api/push/subscribe`, remote listener only, past
@@ -520,6 +523,12 @@ class Push:
         # again after RETRY_S, coalesced and quiet-hours-bound like any other.
         self._failures = 0
         self._retry_at: float | None = None
+        # MR-12 (the morning review): whether the last push that reached a
+        # phone was the morning one (`review_opens`), and whether the push
+        # now due is. In memory only: a restart loses it (the phone then
+        # opens on the Inbox). The payload is unchanged.
+        self._morning = False
+        self._morning_due = False
 
     # -- life cycle ------------------------------------------------------------------
 
@@ -795,20 +804,24 @@ class Push:
             if not enabled:
                 self._pending, self._was_quiet = False, False
                 self._failures, self._retry_at = 0, None
+                self._morning_due = False
                 return None
             if quiet:
                 self._pending, self._was_quiet = False, True
                 self._failures, self._retry_at = 0, None
+                self._morning_due = False
                 return None
             if self._was_quiet:
                 # Quiet hours just ended: one push for what still waits.
                 self._was_quiet = False
                 if count:
                     self._pending = True
+                    self._morning_due = True
             if new:
                 self._pending = True
             if not count:
                 self._pending = False
+                self._morning_due = False
             if not self._pending:
                 self._failures, self._retry_at = 0, None
                 return None
@@ -825,9 +838,11 @@ class Push:
             result = {"sent": 0, "failed": 1, "removed": 0}
         with self._lock:
             if result["sent"]:
-                # Reached at least one phone: the window starts now.
+                # Reached at least one phone: the window starts now. It was
+                # the morning push, or another one, which clears that (MR-12).
                 self._last_sent = now
                 self._failures, self._retry_at = 0, None
+                self._morning, self._morning_due = self._morning_due, False
             elif result["failed"]:
                 # Reached none: tried again later, with what waits then.
                 self._pending = True
@@ -929,7 +944,18 @@ class Push:
         if not self.subscriptions():
             raise PushError(409, "no phone has turned notifications on")
         _ids, count, rank = self.attention()
-        return self.send_all(count, rank)
+        result = self.send_all(count, rank)
+        if result["sent"]:
+            with self._lock:
+                self._morning = False       # another push: the morning one is no longer the last
+        return result
+
+    def review_opens(self) -> bool:
+        """MR-12: the last push that reached a phone was the morning one (in
+        memory: false after a restart). `GET /m/api/review` says the phone
+        opens on the review while this holds and the review has open items."""
+        with self._lock:
+            return self._morning
 
     # -- the desk's view -------------------------------------------------------------------
 
