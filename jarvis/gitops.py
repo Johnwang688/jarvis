@@ -1249,7 +1249,9 @@ def _config_risk(cwd: Path, skip: frozenset[str] = frozenset(), *,
 
 
 def _risky_config(cwd: Path, *, timeout: float = LOCAL_TIMEOUT_S) -> str:
-    return _config_risk(cwd, timeout=timeout) or ""
+    # The default call is exactly the old one (tests stand in their own `_config_risk`).
+    risk = _config_risk(cwd) if timeout == LOCAL_TIMEOUT_S else _config_risk(cwd, timeout=timeout)
+    return risk or ""
 
 
 # --- submodules: the belt under the pins ------------------------------------------
