@@ -21,30 +21,12 @@ import { useEffect, useRef } from "react";
 import type { OrbState } from "../state/store";
 import { DICTATION_MODES, nextMode, type DictationMode } from "../lib/dictation";
 import { palette } from "../lib/orbpalette";
+import { DEFAULT_RINGS, INNER_RINGS, drawEmblem, drawRing, type Ring } from "../lib/orbdraw";
 import { noPointerFocus } from "../lib/talkkey";
 import type { ReactNode } from "react";
 
-interface Ring {
-  r: number;
-  ticks?: number;
-  arcs?: [number, number][];
-  poly?: number;
-  copies?: number;
-  len?: number;
-  w: number;
-  speed: number;
-  alpha: number;
-}
-
-const INNER_RINGS: Ring[] = [
-  { r: 0.905, ticks: 72, len: 0.06, w: 2, speed: -0.1, alpha: 0.6 },
-  { r: 0.8, arcs: [[0, 1.1], [1.4, 2.6], [3.1, 4.4], [4.8, 5.9]], w: 2.5, speed: 0.16, alpha: 0.55 },
-  { r: 0.69, ticks: 36, len: 0.045, w: 1.5, speed: 0.22, alpha: 0.5 },
-  { r: 0.6, arcs: [[0, 2.4], [2.9, 5.6]], w: 1, speed: -0.3, alpha: 0.45 },
-];
-
 export const RING_SETS: Record<string, Ring[]> = {
-  default: [{ r: 0.985, ticks: 144, len: 0.022, w: 1, speed: 0.04, alpha: 0.4 }, ...INNER_RINGS],
+  default: DEFAULT_RINGS,
   // Two equilateral triangles offset by half a step so they interlock,
   // turning as one figure.
   triangles: [{ r: 1.008, poly: 3, copies: 2, w: 1.6, speed: 0.04, alpha: 0.45 }, ...INNER_RINGS],
@@ -126,37 +108,7 @@ export function Orb(props: {
         const alpha = ring.alpha * P.boost * (0.75 + energy * 0.45);
         ctx.strokeStyle = `rgba(${P.hue},${Math.min(1, alpha)})`;
         ctx.lineWidth = ring.w;
-        if (ring.poly) {
-          const copies = ring.copies || 1;
-          for (let k = 0; k < copies; k++) {
-            const spin = rot + (k / copies) * ((Math.PI * 2) / ring.poly);
-            ctx.beginPath();
-            for (let i = 0; i < ring.poly; i++) {
-              const a = spin + Math.PI / 2 + (i / ring.poly) * Math.PI * 2;
-              const x = c + Math.cos(a) * R * ring.r;
-              const y = c - Math.sin(a) * R * ring.r;
-              i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
-            }
-            ctx.closePath();
-            ctx.stroke();
-          }
-        } else if (ring.ticks) {
-          const inner = R * ring.r * (1 - (ring.len || 0));
-          const outer = R * ring.r;
-          ctx.beginPath();
-          for (let i = 0; i < ring.ticks; i++) {
-            const a = rot + (i / ring.ticks) * Math.PI * 2;
-            ctx.moveTo(c + Math.cos(a) * inner, c + Math.sin(a) * inner);
-            ctx.lineTo(c + Math.cos(a) * outer, c + Math.sin(a) * outer);
-          }
-          ctx.stroke();
-        } else if (ring.arcs) {
-          for (const [a1, a2] of ring.arcs) {
-            ctx.beginPath();
-            ctx.arc(c, c, R * ring.r, rot + a1, rot + a2);
-            ctx.stroke();
-          }
-        }
+        drawRing(ctx, ring, c, c, R, rot);
       }
 
       const coreR = R * (0.3 + energy * 0.1);
@@ -170,21 +122,7 @@ export function Orb(props: {
       ctx.fill();
 
       if (!props.avatarUrl) {
-        const triR = R * 0.21;
-        const rot3 = -t * 0.15 * P.spin;
-        ctx.strokeStyle = `rgba(240,238,232,${0.5 + energy * 0.5})`;
-        ctx.lineWidth = 2;
-        ctx.shadowColor = `rgb(${P.hue})`;
-        ctx.shadowBlur = 18 * (0.6 + energy);
-        ctx.beginPath();
-        for (let i = 0; i <= 3; i++) {
-          const a = rot3 + Math.PI / 2 + (i / 3) * Math.PI * 2;
-          const x = c + Math.cos(a) * triR;
-          const y = c - Math.sin(a) * triR;
-          i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
-        }
-        ctx.stroke();
-        ctx.shadowBlur = 0;
+        drawEmblem(ctx, c, c, R, -t * 0.15 * P.spin, 0.5 + energy * 0.5, P.hue, 18 * (0.6 + energy));
       }
       raf = requestAnimationFrame(draw);
     };

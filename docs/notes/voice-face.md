@@ -174,6 +174,17 @@ whole orb. **An unknown name falls back to the default set** — the orb *is*
 the push-to-talk button, so an avatar that could blank it would take the
 surface's main control with it, and `hud_avatar_check` pins that.
 
+**The HUD orb looks like the films' JARVIS (2026-10-27, owner's choice).**
+The owner asked for Tony Stark's face; a real actor's likeness was declined,
+and film JARVIS has no face anyway, so the owner picked a faceless
+holographic HUD: a hairline bezel, a 120-tick scale with long ticks every
+tenth, a heavy segmented band, dashed and hairline rings, and a core ring
+with three brackets in place of the triangle. The rings and emblem now live
+in `hud/src/lib/orbdraw.ts`, drawn by both `Orb.tsx` and the boot overlay.
+The palette is unchanged (no gold: amber means a tool or an authorization).
+`INNER_RINGS` is now every ring but the bezel, so the `triangles` set still
+swaps only the outermost. `jarvis.html` (v1 face) keeps the old rings.
+
 **An avatar has a voice too (2026-08-06).** `avatar.json` takes `voice` (a
 name from `voice.catalog()` — a Kokoro bundle voice, of which
 `voice.available_voices()` lists the 54 already local, or since 2026-08-20 a
