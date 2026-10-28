@@ -61,8 +61,8 @@ import { chatsView, el, inboxView, logRow, taskView, tasksView, transcriptView, 
 import { browserEnv, browserSend, Notifications, type PushEnv, type Send } from "./notify";
 import {
   chatSheetView, clientIdFor, composerView, MAYBE_DONE, MAYBE_SENT, MESSAGE_CHARS, parseModels, refusal, sentNote,
-  taskControlsView, taskSheetView, verbsFor,
-  type ProviderChoice, type Sheet, type Verb,
+  taskControlsView, taskSheetView, updateComposer, verbsFor,
+  type Composer, type ProviderChoice, type Sheet, type Verb,
 } from "./write";
 import { Talk, browserTalkEnv, type TalkEnv } from "./talk";
 import { followViewport } from "./viewport";
@@ -788,6 +788,9 @@ export class PhoneApp {
     const open = this.thread;
     if (this.tab !== "chats" || !open || this.sheet) return;
     const old = this.main.querySelector('[data-testid="m-compose"]');
+    // The same box drawn again in place: the textarea stays, and with it the focus and the keyboard.
+    const state = this.composerState(open.id);
+    if (old && state && updateComposer(old, state)) return;
     const fresh = this.composer(open.id);
     if (!old || !fresh) return;
     old.replaceWith(fresh);
@@ -799,7 +802,14 @@ export class PhoneApp {
     // Only once the chat is known to be an owner's: a task's chats are the runner's.
     if (!meta) return null;
     if (meta.task_id || meta.role !== "chat") return el("p", "muted small center", "This chat is read only on the phone.");
-    return composerView({
+    return composerView(this.composerState(threadId)!);
+  }
+
+  /** What an owner's chat's message box shows, or null for any other chat. */
+  private composerState(threadId: string): Composer | null {
+    const meta = this.thread?.id === threadId ? this.thread.meta : null;
+    if (!meta || meta.task_id || meta.role !== "chat") return null;
+    return {
       draft: this.composeDrafts.get(threadId) ?? "", busy: this.sending.has(threadId),
       note: this.composeNotes.get(threadId) ?? "", online: this.online,
       send: (text) => void this.sendMessage(threadId, text),
@@ -807,7 +817,7 @@ export class PhoneApp {
       mic: this.talk.view(threadId),
       // The box grew a line: the newest message stays in view if it was.
       around: (change) => { const end = this.nearEnd(); change(); if (end) this.scrollToEnd(); },
-    });
+    };
   }
 
   /** P-7: a clip's words, added to that chat's draft after what is typed, and the box drawn again.

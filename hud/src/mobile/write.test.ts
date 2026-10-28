@@ -132,6 +132,36 @@ describe("the message box (P-5)", () => {
     expect(noted.view.firstElementChild!.getAttribute("data-testid")).toBe("m-compose-note");
   });
 
+  it("keeps the same box, and its focus, through a send (review of #331, LOW 6)", async () => {
+    const h = harness();
+    let release!: (p: Posted) => void;
+    h.replies[`/m/api/threads/${CHAT}/messages`] = () => new Promise<Posted>((r) => { release = r; }) as unknown as Posted;
+    await openChat(h);
+    const box = h.q("m-compose-text") as unknown as HTMLTextAreaElement;
+    const bar = h.q("m-compose")!;
+    box.focus();
+    h.type("m-compose-text", "add a test");
+    await h.click("m-compose-send");
+    // Sending: the same nodes, the box read-only, still focused.
+    expect(h.q("m-compose")).toBe(bar);
+    expect(h.q("m-compose-text")).toBe(box);
+    expect([box.readOnly, document.activeElement === box]).toEqual([true, true]);
+    expect(h.q("m-compose-sending")!.textContent).toBe("Sending…");
+    release({ status: 202, body: { status: "started" } });
+    await h.settle();
+    // Sent: emptied in place, focus kept (the keyboard stays up), the note above the bar.
+    expect(h.q("m-compose-text")).toBe(box);
+    expect(document.activeElement).toBe(box);
+    expect([box.value, box.readOnly]).toEqual(["", false]);
+    expect(h.q("m-compose-note")!.textContent).toBe("Sent.");
+    expect(h.q("m-compose-sending")).toBeNull();
+    expect((h.q("m-compose-send") as HTMLButtonElement).disabled).toBe(true);
+    // Its listeners read the new state: typing lights Send again, and only one post went.
+    h.type("m-compose-text", "next");
+    expect((h.q("m-compose-send") as HTMLButtonElement).disabled).toBe(false);
+    expect(h.posts.length).toBe(1);
+  });
+
   it("grows from one line to five, then scrolls inside itself", () => {
     const text = document.createElement("textarea");
     document.body.replaceChildren(text);

@@ -125,6 +125,9 @@ export function fitLines(text: HTMLTextAreaElement): void {
 /** A chat's message box, Claude/Codex style: one slim bar (the box, the mic,
  * a round Send) pinned above the tab bar, its notes above it. Send's rules are
  * P-5's as before: a tap only, off while empty, offline or sending. */
+/** Each drawn box's own redraw: `updateComposer` draws it again in place. */
+const redraws = new WeakMap<HTMLElement, (c: Composer) => void>();
+
 export function composerView(c: Composer): HTMLElement {
   const box = testid(el("div", "m-compose"), "m-compose");
   const text = testid(el("textarea", "m-text m-compose-text"), "m-compose-text");
@@ -134,35 +137,58 @@ export function composerView(c: Composer): HTMLElement {
   text.maxLength = MESSAGE_CHARS;
   // A new line, never a send: the phone's return key says so.
   text.setAttribute("enterkeyhint", "enter");
-  text.value = c.draft;
-  text.readOnly = c.busy;
+  // The listeners read the box's current state, so a redraw in place needs no new ones.
+  let cur = c;
   const send = button("", () => {
     const value = text.value.trim();
-    if (value) c.send(value);
+    if (value) cur.send(value);
   }, "m-send-round", "m-compose-send");
   // The words stay the button's own text (screen readers, the checks); the arrow is drawn by CSS.
-  send.append(el("span", "m-sr", c.busy ? "Sending…" : "Send"));
-  send.dataset.busy = String(c.busy);
-  const around = c.around ?? ((change: () => void) => change());
+  const label = el("span", "m-sr");
+  send.append(label);
+  const around = (change: () => void) => (cur.around ?? ((f: () => void) => f()))(change);
   const sync = () => {
-    c.edit(text.value);
-    send.disabled = c.busy || !c.online || !text.value.trim();
+    cur.edit(text.value);
+    send.disabled = cur.busy || !cur.online || !text.value.trim();
   };
   text.addEventListener("input", () => { sync(); around(() => fitLines(text)); });
-  sync();
-  if (c.note) box.append(note(c.note, "m-compose-note"));
-  if (c.busy) box.append(note("Sending…", "m-compose-sending", "m-notice m-sending"));
-  if (!c.online) box.append(note("Offline: nothing can be sent until Jarvis is reachable.", "m-compose-offline", "m-notice m-off"));
   const bar = el("div", "m-bar");
-  bar.append(text);
-  if (c.mic) bar.append(c.mic);
-  bar.append(send);
+  const draw = (next: Composer) => {
+    cur = next;
+    if (text.value !== next.draft) text.value = next.draft;
+    text.readOnly = next.busy;
+    label.textContent = next.busy ? "Sending…" : "Send";
+    send.dataset.busy = String(next.busy);
+    sync();
+    // The notes above the bar, drawn again; the box, the mic and Send stay the same nodes.
+    while (box.firstChild && box.firstChild !== bar) box.firstChild.remove();
+    const notes: HTMLElement[] = [];
+    if (next.note) notes.push(note(next.note, "m-compose-note"));
+    if (next.busy) notes.push(note("Sending…", "m-compose-sending", "m-notice m-sending"));
+    if (!next.online) notes.push(note("Offline: nothing can be sent until Jarvis is reachable.", "m-compose-offline", "m-notice m-off"));
+    box.prepend(...notes);
+    if (next.mic && next.mic.parentNode !== bar) bar.insertBefore(next.mic, send);
+    if (text.isConnected) around(() => fitLines(text));
+  };
+  bar.append(text, send);
   box.append(bar);
+  draw(c);
+  redraws.set(box, draw);
   // Sized once it is on the page (a draft kept across a redraw keeps its lines).
   const fit = () => { if (text.isConnected) around(() => fitLines(text)); };
   if (typeof requestAnimationFrame === "function") requestAnimationFrame(fit);
   else queueMicrotask(fit);
   return box;
+}
+
+/** Draw a box from `composerView` again in place: the same textarea, so its
+ * focus and the phone's keyboard stay up across a send (review of #331,
+ * LOW 6). False for anything else (the caller then draws a new one). */
+export function updateComposer(box: Element, c: Composer): boolean {
+  const draw = box instanceof HTMLElement ? redraws.get(box) : undefined;
+  if (!draw) return false;
+  draw(c);
+  return true;
 }
 
 // -- what the new-chat sheet offers (`GET /m/api/thread-models`) ----------------------
