@@ -598,7 +598,9 @@ class Daemon:
         # An approval asked during quiet hours is deferred unless this is
         # within `quiet_defer.PRESENT_S`, once `attach_quiet_desk` ran.
         self._presence_clock = time.monotonic
+        self._presence_wall = time.time
         self._owner_seen_at: float | None = None
+        self._owner_seen_wall: float | None = None
         self._listeners = []
         from .hud_api import HUDLedger
         from .router import Router
@@ -2232,14 +2234,17 @@ class Daemon:
         answer after a verified passkey assertion, or the owner's answer to
         a deferred row. Never from a tool, an agent or a read."""
         self._owner_seen_at = self._presence_clock()
+        self._owner_seen_wall = self._presence_wall()
 
     def owner_present(self) -> bool:
-        """Whether the owner gave input within `quiet_defer.PRESENT_S`."""
+        """Whether the owner gave input within `quiet_defer.PRESENT_S`: the
+        age is the larger of the monotonic and the wall-clock ages (a host
+        that slept stops the first in WSL, a clock set back the second)."""
         from .quiet_defer import PRESENT_S
-        seen = self._owner_seen_at
-        if seen is None:
+        seen, wall = self._owner_seen_at, self._owner_seen_wall
+        if seen is None or wall is None:
             return False
-        age = self._presence_clock() - seen
+        age = max(self._presence_clock() - seen, self._presence_wall() - wall)
         return 0 <= age < PRESENT_S
 
     def attach_quiet_desk(self):
@@ -2249,6 +2254,7 @@ class Daemon:
         wall clock (a test attaches its own). Returns the desk."""
         from .quiet_defer import QuietDesk
         desk = QuietDesk(self.quiet, self.owner_present, self.inbox.deferred, self.bus.publish)
+        self.inbox.deferred.load_index()        # the live grants, read once
         if hasattr(self.approvals, "quiet_desk"):
             self.approvals.quiet_desk = desk
         return desk

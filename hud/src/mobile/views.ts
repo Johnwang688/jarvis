@@ -97,14 +97,16 @@ function approvalDetail(row: InboxRow, box: HTMLElement) {
 function deferredDetail(row: InboxRow, box: HTMLElement) {
   const d = deferredOf(row)!;
   if (d.headline) box.append(el("p", "headline", d.headline));
-  box.append(el("div", "label", "Tool"), el("p", "", d.tool));
+  if (d.tool) box.append(el("div", "label", "Tool"), el("p", "", d.tool));
+  if (d.count > 1) box.append(testid(el("p", "muted small", `Asked ${d.count} times while it waited.`), "m-deferred-count"));
   if (d.command) box.append(el("div", "label", "Command"), testid(el("pre", "code", d.command), "m-command"));
   if (d.reason) box.append(el("div", "label", "Why"), el("p", "", d.reason));
   if (d.args && !d.command) box.append(el("div", "label", "Arguments"), el("pre", "code", d.args));
-  box.append(testid(el("p", "muted small", d.hudOnly
-    ? "A Browser action is approved only while its page is live: ask again from its chat at the desk."
+  box.append(testid(el("p", "muted small", d.more
+    ? `${d.more} more asks from this chat were denied overnight, too many to list one by one.`
     : d.expired ? "Over a day old: it can only be left."
-      : "Denied while you slept. Approve and retry allows exactly this call once, for 30 minutes."), "m-deferred-note"));
+      : d.whyNot ? d.whyNot
+        : "Denied while you slept. Approve and retry allows exactly this call once, for 30 minutes."), "m-deferred-note"));
 }
 
 function genericDetail(row: InboxRow, box: HTMLElement) {

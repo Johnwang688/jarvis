@@ -108,32 +108,50 @@ approvals deferred to the morning".
   (`_unasked_refusal`). **Codex cannot**: its approval reply is a bare
   "decline" (the 0.161 `CommandExecutionRequestApprovalResponse` has no
   reason field), so the chat's log gets a non-fatal line saying why and
-  the model only sees a decline.
+  the model only sees a decline (since the review, Codex chats are told
+  up front in their instructions).
 - **A Discord command's own ask** (`discord_channel_id`, the owner's
   `/project new` a moment ago) is never deferred.
 - **QH-4.** Unchanged, checked: a Codex chat question has no timeout (it
   waits until answered, stopped or the transport closes), so overnight it
   stays a rank-2 row; Claude emits no provider QUESTION.
 - **QH-5.** As planned; the store keeps the card's public projection and
-  the digest only. A card over 32 KB is kept cut and never granted.
+  the digest only. A card over 16 KB is kept cut and never granted.
 - **QH-6.** As planned, with the work per id (`approve_and_retry`,
   `leave`: one result each, never raising), so the morning review can call
   them for a selected group under one confirm. A task that is not
-  `blocked` gets the grant but is not told (nothing but a steer could tell
-  it, and steering is ruled out). The phone's assertion is bound to
+  `blocked` gets no grant (Q2, below). The phone's assertion is bound to
   `defer:<id>`; `remote_answer.defer_binding` gives a set of ids one
   binding (`defers:` + SHA-256 of the sorted ids) for the morning review.
 - **QH-7.** As planned.
 
-Open for the owner:
+## The #326 review's fixes (2026-10-28)
 
-1. A Codex sandbox-widening approval carries its own per-request id in the
-   arguments the broker judges, so its digest never repeats: Approve and
-   retry records a grant that cannot match, and the retry asks as a card.
-   Exclude the id from the digest for widenings, or hide the button for
-   them?
-2. A task that was not `blocked` when its deferral is approved is not told
-   (only a steer could); its agent may never retry. Accept, or queue a
-   note for its next turn?
-3. Codex's model is not told why it was declined (above). Accept, or add a
-   line to Codex chats' instructions about quiet-hours declines?
+Lead's decisions on the open questions: **Q1** hide Approve and retry for
+every Codex ask; **Q2** a task that is not blocked gets no grant ("it is
+running; open the task"), its row stays; **Q3** Codex chats are told in
+their instructions that a decline in quiet hours may be a deferral.
+
+- **H1.** The digest now covers `cwd` (where the gate judged the call:
+  Claude's shell folder, Codex's item cwd, else the brief's), the
+  headline, the layer, the sub-agent, the relayed turn and the provider;
+  and an owner-only ask (widening, merge gate or always-ask layer 2, a
+  dangerous Jarvis tool, any headline; the permit passes `grantable=False`)
+  is never grantable, and never taken by the desk whatever the index holds.
+- **M1.** Codex asks: `grantable` false, "Open its chat" only.
+- **M2.** One record per waiting (thread, digest), "asked N times"; at most
+  20 waiting rows per thread a day, the rest counted in "and N more from
+  this chat"; eviction per thread and by size; what is evicted, or cannot
+  be written, is counted and still shows.
+- **M3.** CLAUDE.md's pinned sentences restored; the Inbox line shortened.
+- **L1** a card longer than the rows show is never grantable; **L2** no
+  chat or task, no retry; the HUD's new VEX project is never deferred and
+  stamps presence; **L3** the escape hatch passes the deferral's words;
+  **L4** presence age is the larger of the wall and monotonic ages; **L5**
+  the phone's retry runs §4.1 and the Allow's gate, and needs the monitor;
+  **L6** live grants are an in-memory index taken under the broker's lock,
+  the spend written after. NITs: sub-agent and relay in the digest; a
+  grant also ends by the monotonic clock in the process that minted it.
+
+Still open: a Codex canonical digest (Codex asks cannot be granted until
+then).

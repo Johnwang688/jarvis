@@ -181,7 +181,7 @@ DETAIL_FIELDS = {
     # is the public projection the record kept, scrubbed as a whole like an
     # approval's; Approve and retry needs a passkey (remote_answer).
     "deferred": ("deferral_id", "tool", "card", "thread_id", "task_id", "at", "until", "grantable",
-                 "expired", "hud_only"),
+                 "why_not", "expired", "hud_only", "count", "more"),
 }
 # A kind P-3 does not know (A3's `missed` rows, anything later): only these
 # keys, only scalar values, every string scrubbed.

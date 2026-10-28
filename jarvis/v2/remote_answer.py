@@ -268,6 +268,16 @@ def defer_binding(record_ids) -> str:
     return "defers:" + hashlib.sha256("\n".join(ids).encode("utf-8")).hexdigest()[:56]
 
 
+def _gate_deferral(record: dict, secure: dict) -> None:
+    """`_gate`'s refusals for an Allow, for a deferred card: a HUD-only one
+    while limited (never granted anyway) and one the phone's scrub would
+    change."""
+    if record.get("hud_only") and not secure.get("ok"):
+        raise _Refused(409, AT_DESK, {"secure": _shown_secure(secure)})
+    if phone_card(record["card"])[1]:
+        raise _Refused(409, WITHHELD)
+
+
 def _defer_key(record_id: str) -> str:
     return defer_binding([record_id])
 
@@ -283,6 +293,9 @@ def options(handler, daemon, session, row: str, body: dict) -> dict:
         if decision != "allow":
             raise _Refused(409, NO_ALWAYS)
         record_id, _record = _deferral(daemon, row)
+        # The same checks as an Allow's options (#326 review, L5).
+        secure = _monitor(daemon).check(session=session, handler=handler)
+        _gate_deferral(_record, secure)
         return {"decision": "allow",
                 "publicKey": handler.remote_auth.answer_options(session, _defer_key(record_id), "allow")}
     request = _request(daemon, row)
@@ -389,10 +402,14 @@ def _answer_deferred(handler, daemon, session, row_id: str, body: dict) -> dict:
         rest, _record = _deferral(daemon, row_id)
         # The assertion, bound to this deferral and this answer, first.
         handler.remote_auth.answer_verify(session, assertion, _defer_key(rest), "allow")
+        # Then every §4.1 check, in full, and `_gate`'s refusals, as an Allow
+        # (#326 review, L5); no monitor is a refusal.
+        secure = _monitor(daemon).check(session=session, handler=handler)
+        _rest, record = _deferral(daemon, row_id)   # still waiting and whole after the passkey
+        _gate_deferral(record, secure)
         seen = getattr(daemon, "owner_seen", None)
         if callable(seen):
             seen()                  # QH-3: a verified phone answer is presence
-        _deferral(daemon, row_id)   # still waiting and whole after the passkey
         verified = True
     try:
         return quiet_defer.answer(daemon, rest, {"action": action}, via="phone", verified=verified)

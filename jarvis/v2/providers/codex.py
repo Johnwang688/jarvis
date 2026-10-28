@@ -1043,7 +1043,8 @@ class CodexProvider:
                           "approvalPolicy": "on-request", "approvalsReviewer": reviewer,
                           # baseInstructions replaces the native prompt. The additive
                           # developer field preserves it, AGENTS.md and skill loading.
-                          "developerInstructions": "\n\n".join(filter(None, (brief.system_append, codex_config.git_note(brief))))}
+                          "developerInstructions": "\n\n".join(filter(None, (brief.system_append, codex_config.git_note(brief),
+                                                                   codex_config.quiet_note(brief))))}
                 if brief.model:
                     params["model"] = brief.model
                 overrides = {}

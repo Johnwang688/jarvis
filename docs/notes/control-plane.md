@@ -1811,87 +1811,104 @@ sections of `tests/face/hud_v2_phone_check.py`.
 ## Quiet hours: approvals deferred to the morning (QH, 2026-10-28)
 
 Plan: `docs/plans/2026-10-28-quiet-hours-deferral.md` (the owner's words,
-QH-1 to QH-7, and "QH as built"). Module: `jarvis/v2/quiet_defer.py`
-(SELF_PROTECTED). **The deferral:** daemon2's `main()` alone calls
-`Daemon.attach_quiet_desk()`, which sets the broker's `quiet_desk`; an
-embedded or test daemon never defers. At each ask, under the broker's
-lock and before any card exists, `QuietDesk.settle` first takes the
-owner's grant for exactly this call (below), else, while
-`quiet.QuietHours.is_quiet()` and the owner is not present, settles the
-ask at once: DENY, resolution `deferred`, no `on_request` (so no card,
-no `approval_requested`, no Discord post), no wait, no
-`approval_resolved`. A `quiet.json` that is a link, malformed or odd is
-"not quiet" here (`setting_readable`), though `quiet.py` reads it as its
-default for the push; a missing one is the default (on, 23:00 to 07:00).
-A desk that raises, or answers anything else, asks as usual. A request
-carrying `discord_channel_id` (the owner's own `/project new`) is never
-deferred. **Presence (QH-3):** `Daemon.owner_present()`, the owner's input
-within 15 minutes by `_presence_clock` (monotonic), stamped by
-`owner_seen()` at the HUD's owner send (`is_owner`, the desk's own test),
-`POST /approvals/<id>`, `POST /inbox/<id>/answer`, the phone's answer
-after a verified assertion, and a deferral's Approve and retry (or Leave
-it at the HUD). `desk.DeskState` is per turn and keeps no time, so it is
-not the signal. **The words:** the broker sets `request.outcome`; the
-permit's `finish` turns it into an unasked DENY at layer `quiet-deferred`
-whose reason is `denial_text` (asleep until the quiet end, not approved, do
-not retry tonight, carry on). Claude's hook and `can_use_tool` put it in
-their denial reason, the fast path returns a `tools.Refusal`, the
-jarvis-mcp bridge's `_unasked_refusal` carries it. Codex's approval reply
-is a bare "decline" (0.161 schema: no reason field), so its model reads no
-words; the chat's log gets a non-fatal error line saying why. **Chat
-questions (QH-4)** are unchanged: a Codex `requestUserInput` waits with
-no timeout until answered, stopped or its transport closes, so overnight
-it stays a rank-2 row; task questions and decisions were already durable.
+QH-1 to QH-7, "QH as built" and the #326 review's fixes). Module:
+`jarvis/v2/quiet_defer.py` (SELF_PROTECTED).
 
-**The record and row (QH-5).** `<data root>/inbox/deferred.json` (the
+**The deferral.** daemon2's `main()` alone calls
+`Daemon.attach_quiet_desk()` (it also loads the live grants once); an
+embedded or test daemon never defers. At each ask, under the broker's lock
+and before any card exists, `QuietDesk.settle` first takes the owner's
+grant for exactly this call (below), else, while
+`quiet.QuietHours.is_quiet()` and the owner is not present, settles the
+ask at once: DENY, resolution `deferred`, no `on_request` (so no card, no
+`approval_requested`, no Discord post), no wait. A `quiet.json` that is a
+link, malformed or odd is "not quiet" here (`setting_readable`); a missing
+one is the default. A desk that raises asks as usual. Never deferred: a
+request with `discord_channel_id` (the owner's `/project new`) or
+`owner_initiated` (the HUD's new VEX project, `confirm_folder(...,
+owner_initiated=True)`), both set by daemon code only.
+
+**Presence (QH-3):** `Daemon.owner_present()`, the owner's input within 15
+minutes, the age being the larger of the monotonic and the wall-clock ages
+(`_presence_clock`, `_presence_wall`). Stamped by `owner_seen()` at the
+HUD's owner send (`is_owner`), `POST /approvals/<id>`, `POST
+/inbox/<id>/answer`, `POST /vex/projects`, the phone's answer after a
+verified assertion, and a deferral's answer at the HUD (or the phone's
+verified retry). `desk.DeskState` is per turn and keeps no time.
+
+**The words:** the broker sets `request.outcome`; the permit's `finish`
+makes it an unasked DENY at layer `quiet-deferred` with `denial_text`.
+Claude's hook and `can_use_tool` put it in their denial reason, the fast
+path returns a `tools.Refusal`, the jarvis-mcp bridge's `_unasked_refusal`
+carries it, and the escape hatch delivers it ("[not run: …]", never "owner
+declined"). Codex's approval reply is a bare "decline" (0.161 schema), so
+a Codex chat's developer instructions carry `codex_config.quiet_note`
+("Between <start> and <end> the owner may be asleep: a decline may be a
+deferral. Don't retry it or a variant of it tonight; carry on with other
+work."; nothing when quiet hours are off, nothing for a task), and its log
+gets a non-fatal line. **Chat questions (QH-4)** are unchanged: a Codex
+`requestUserInput` waits with no timeout; overnight it stays a rank-2 row.
+
+**The record and rows (QH-5).** `<data root>/inbox/deferred.json` (the
 inbox tree; named in `files._protected_state_paths`): per deferral the
 card's public projection (`to_json` minus `code`, `discord_channel_id`,
-`timeout_s`; a HUD-only card's private projection), and `request_digest`,
-SHA-256 of the canonical JSON of thread, task, tool, the unredacted args
-and the command. The arguments are not kept beyond the card. A card over
-32 KB is kept cut and never granted. The I/O is the inbox stores'
-(`O_NOFOLLOW`, 0600 in 0700, `O_EXCL` temp, fsync, replace); a file that is
-not exactly ours shows nothing and matches no grant. At most 200 records,
-7 days. Rows: kind `deferred`, `defer:<req_id>`, rank 4 ("<tool> is
-waiting for your morning approval") for 24 h, then rank 8 until 7 days;
-never markable (`inbox_marks.UNMARKABLE_KINDS`/`PREFIXES`; the mark route
-409s); `inbox_changed` carries ids only.
+`timeout_s`; cut and marked over 16 KB), `request_digest` (SHA-256 of the
+canonical JSON of thread, task, tool, the unredacted args, the command,
+`cwd` (where the gate judged it: Claude's shell folder, Codex's item cwd,
+else the brief's), the headline, the layer, the sub-agent, the relayed
+turn and the provider), `grantable` and `why_not` (`grant_refusal`), and a
+count. An identical waiting ask from the same thread is the same record
+("asked N times"). At most 20 waiting records per thread a day; past
+that, still denied and counted in that thread's `more` entry (row
+`defer:more.<thread>`, "And N more asks from chat …", Leave it only).
+Eviction past 200 records or 4 MB takes settled records first, then the
+oldest of the thread holding the most; an evicted waiting record is
+counted in its thread's `more`. A deferral that cannot be written is
+counted in memory and shows the same way. A file not exactly ours shows
+nothing and holds no grant. Rows: kind `deferred`, rank 4 for 24 h, rank 8
+until 7 days; never markable; `inbox_changed` carries ids only.
 
 **Approve and retry (QH-6) and Leave it (QH-7).** `POST
 /inbox/defer:<id>/answer` with `{action: "retry"}` or `{action: "leave"}`
 (owner-only; `inbox.answer` → `quiet_defer.answer`). The work is per id:
-`approve_and_retry(daemon, id, via=, verified=)` and `leave(daemon, id)`
-each return one result (`{ok, id, delivery, note, grant_until}` or `{ok:
-false, id, status, error}`) and never raise for a refusal, so a later
-group answer can call them per id under one confirm. Retry: waiting, under
-a day old, not HUD-only, a whole card → state `granted`, `grant_until` now
-+ 30 min; then a chat is told through `Daemon.deliver_queued` (B1's path:
-`origin` owner, `via` inbox or phone, `desk` False, queued, never a
-steer; code's words, the tool quoted), a task that is `blocked` is resumed
-through `TaskControl.resume`, and a task that is not blocked is not told.
-The next ask whose digest is identical (same thread, task, tool, args,
-command) and whose thread matches, before `grant_until`, is taken under
-the broker's lock (`DeferredStore.take`, under its own lock too) and
-allowed once with no card: resolution "granted from the inbox", the
-permit's verdict the owner's (`asked`, reason `GRANTED_TEXT`). Never
-Always, never widened; anything else asks. A HUD-only card is never
-granted (store, desk and broker each refuse). **The phone:** Leave it
-needs the session; Approve and retry needs `answer/options` with
-`{decision: "allow"}` on the `defer:` row, then `{action: "retry",
-assertion}`. The assertion is bound (`remote_answer.defer_binding`) to
-`defer:<id>` (an approval's id holds no colon, so neither stands for the
-other), this answer and this session, verified before anything is
-written, single use; the record must still be grantable and its card
-unchanged by the phone's scrub (`WITHHELD`). For several ids the binding
-is `defers:` + SHA-256 of the sorted ids (56 hex), for the morning review;
-QH uses only the one-id form. `quiet_defer.answer(..., verified=True)` has
-one caller, `remote_answer._answer_deferred`, after `answer_verify`.
+`approve_and_retry(daemon, id, via=, verified=)` and `leave(daemon, id,
+via=)` each return one result and never raise for a refusal. Retry is
+offered only when `grantable`: never a Browser (HUD-only) card, a Codex
+request, an owner-only ask (a sandbox widening, the merge gate's or an
+always-ask rule's layer-2 card, a dangerous Jarvis tool, any card with a
+headline; the permit passes `grantable=False` for all of them, and the
+desk refuses them whatever the index holds), an ask with no chat or task,
+or a card longer than the rows show (3,900 characters a field, 200 items
+a list). A task's deferral is granted only while the task is `blocked`;
+otherwise 409 "the task is running, not blocked; open the task", and the
+row stays. A grant is `granted` for 30 minutes by the wall clock and, in
+this process, the monotonic one; it is kept in `DeferredStore._live`
+(loaded once, updated on every write), taken under the broker's lock
+without reading the file, and its use is then written (`spend`; a taken
+grant never lives again in this process). The chat is told through
+`Daemon.deliver_queued` (B1: owner, `via` inbox or phone, no desk, queued,
+never a steer); a blocked task is resumed through `TaskControl.resume`.
+The next ask whose digest is identical and whose thread matches, before
+the deadline, is allowed once with no card ("granted from the inbox").
 
-Tests: `tests/v2/quiet_defer_check.py` (the acceptance list),
-`codex_provider_check` (the Codex decline and log line),
-`discord_routing_check` (nothing posted), `archive_check` (no tool, MCP,
-session, Discord or CLI module names the store, the desk or the grant
-path; the routes refuse every client but the HUD), `inbox_marks_check`,
+**The phone:** Leave it needs the session. Approve and retry needs
+`answer/options` with `{decision: "allow"}` on the `defer:` row (§4.1
+checked, as an Allow's), then `{action: "retry", assertion}`: the
+assertion is verified first, bound (`remote_answer.defer_binding`) to
+`defer:<id>` (an approval's id holds no colon), this answer and this
+session, single use; then §4.1 runs in full (`_monitor(...).check`; no
+monitor is a refusal) and the Allow's gate (`_gate_deferral`: a card the
+phone's scrub would change is `WITHHELD`). For several ids the binding is
+`defers:` + SHA-256 of the sorted ids (56 hex), for the morning review; QH
+uses only the one-id form. `quiet_defer.answer(..., verified=True)` has one
+caller, `remote_answer._answer_deferred`, after `answer_verify`.
+
+Tests: `tests/v2/quiet_defer_check.py` (the acceptance list and the review's
+findings, each boundary proved by mutation), `codex_provider_check` (the
+decline, its log line, the chat's quiet note), `discord_routing_check`
+(nothing posted), `archive_check` (no tool, MCP, session, Discord or CLI
+module names the store, the desk or the grant path; the routes refuse
+every client but the HUD), `inbox_marks_check`,
 `hud/src/components/InboxView.deferred.test.ts`,
 `hud/src/mobile/answer.test.ts`, and the `deferred` section of
 `tests/face/hud_v2_inbox_check.py`.

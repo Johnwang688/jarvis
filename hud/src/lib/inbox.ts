@@ -317,7 +317,23 @@ export interface DeferredView {
   hudOnly: boolean;
   /** When quiet hours ended (ISO), or null. */
   until: string | null;
+  /** How many times the same call was asked while it waited (1 at least). */
+  count: number;
+  /** An "and N more" row: N asks past the chat's limit, never listed one by one; Leave it only. */
+  more: number;
+  /** Why Approve and retry is not offered, in the HUD's own words ("" when it is, or not known). */
+  whyNot: string;
 }
+
+/** The daemon's `why_not` codes, in the HUD's words (anything else: the generic line). */
+const WHY_NOT: Record<string, string> = {
+  browser: "A Browser action is approved only while its page is live: open its chat to ask again.",
+  codex: "A Codex request is approved only while it waits: open its chat to ask again.",
+  "owner-only": "This kind of call is asked every time, never approved ahead: open its chat to ask again.",
+  "no-chat": "Nothing is waiting to retry it.",
+  "too-large": "It is too long to show in full here, so it cannot be approved from here: open its chat.",
+  unreadable: "It cannot be approved from here: open its chat to ask again.",
+};
 
 /**
  * A deferred row's words (QH), every string untrusted text, or null for any
@@ -334,16 +350,24 @@ export function deferredOf(row: InboxRow): DeferredView | null {
   }
   const hudOnly = d.hud_only === true || card.hud_only === true;
   const expired = d.expired === true || row.rank !== 4;
+  const num = (v: unknown) => (typeof v === "number" && Number.isInteger(v) && v > 0 ? v : 0);
+  const more = num(d.more);
+  const code = typeof d.why_not === "string" ? d.why_not : "";
+  const whyNot = hudOnly ? WHY_NOT.browser : code ? (WHY_NOT[code] ?? WHY_NOT.unreadable) : "";
   return {
     tool: oneLine(d.tool ?? card.tool, 120),
     command: textBlock(card.command, 4000),
     reason: textBlock(card.reason, 1000),
     headline: oneLine(card.headline, 400),
     args,
-    grantable: d.grantable === true && !hudOnly && !expired && card.cut !== true,
+    grantable: d.grantable === true && !hudOnly && !expired && card.cut !== true && !more && !code
+      && typeof d.deferral_id === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(d.deferral_id),
     expired,
     hudOnly,
     until: typeof d.until === "string" ? d.until : null,
+    count: Math.max(1, num(d.count)),
+    more,
+    whyNot,
   };
 }
 

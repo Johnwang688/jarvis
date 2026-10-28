@@ -191,6 +191,13 @@ class EscapeHatch:
             LOG.exception("Escape-hatch approval failed; denying")
             decision = Decision.DENY
 
+        outcome = getattr(request, "outcome", None)
+        if decision is not Decision.ALLOW and isinstance(outcome, tuple) and outcome[0] == "deferred":
+            # QH: nobody declined; the owner is asleep. The deferral's own words.
+            return self._finish(item, HatchResult(
+                decision="deny",
+                message=f"[not run: {item.command}] {outcome[1]}"), "system",
+                "reviewer-declined-deferred")
         if decision is not Decision.ALLOW:
             return self._finish(item, HatchResult(
                 decision="deny",

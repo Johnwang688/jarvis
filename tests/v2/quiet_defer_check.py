@@ -109,8 +109,9 @@ class Mono:
 
 def request(command="make deploy", *, tool="Bash", thread_id="th000001", task_id=None, **kw):
     args = kw.pop("args", None)
+    provider = kw.pop("provider", "claude")
     return ApprovalRequest(tool=tool, args=args if args is not None else {"command": command},
-                           command=command, thread_id=thread_id, task_id=task_id, provider="claude", **kw)
+                           command=command, thread_id=thread_id, task_id=task_id, provider=provider, **kw)
 
 
 def private(thread_id="th000001"):
@@ -169,6 +170,13 @@ class _Temp(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR"))
         self.addCleanup(tmp.cleanup)
         self.root = Path(tmp.name) / "data"
+        for name, value in dict(V2_DATA_DIR=Path(tmp.name) / "v2", ALLOWLIST_PATH=Path(tmp.name) / "allow.json",
+                                MODELS_PATH=Path(tmp.name) / "models.json",
+                                PROVIDER_DEFAULTS_PATH=Path(tmp.name) / "provider_defaults.json",
+                                V2_ALWAYS_ASK=Path(tmp.name) / "always-ask.json").items():
+            guard = patch.object(config, name, value)
+            guard.start()
+            self.addCleanup(guard.stop)
         self.n = Night(self.root)
 
 
@@ -266,19 +274,32 @@ class Deferral(_Temp):
         print("ok  a malformed, linked or odd quiet.json means not quiet (asked); a missing one is the default")
 
     def test_presence_is_the_owners_input_within_15_minutes(self):
-        d = SimpleNamespace(_owner_seen_at=None, _presence_clock=Mono())
+        d = SimpleNamespace(_owner_seen_at=None, _owner_seen_wall=None, _presence_clock=Mono(),
+                            _presence_wall=Mono(1_900_000_000.0))
         present = lambda: Daemon.owner_present(d)  # noqa: E731
         self.assertFalse(present(), "never seen: away")
         Daemon.owner_seen(d)
         self.assertTrue(present())
         d._presence_clock.now += quiet_defer.PRESENT_S - 1
+        d._presence_wall.now += quiet_defer.PRESENT_S - 1
         self.assertTrue(present())
         d._presence_clock.now += 1
+        d._presence_wall.now += 1
         self.assertFalse(present(), "15 minutes on: away")
         d._presence_clock.now -= 10 * quiet_defer.PRESENT_S
-        self.assertFalse(present(), "a clock that went back is not presence")
+        d._presence_wall.now -= 10 * quiet_defer.PRESENT_S
+        self.assertFalse(present(), "both clocks gone back is not presence")
+        # L4: the larger age decides. A host that slept stops the monotonic
+        # clock (WSL2), so the wall clock's hour away is what counts.
+        Daemon.owner_seen(d)
+        d._presence_wall.now += 3600
+        self.assertFalse(present(), "an hour by the wall clock, though the monotonic one stood still")
+        Daemon.owner_seen(d)
+        d._presence_clock.now += 3600
+        d._presence_wall.now -= 3600
+        self.assertFalse(present(), "an hour by the monotonic clock, though the wall clock went back")
         self.assertEqual(quiet_defer.PRESENT_S, 15 * 60)
-        print("ok  presence: the owner's input within 15 minutes by the monotonic clock")
+        print("ok  presence: the owner's input within 15 minutes, the larger of the wall and monotonic ages")
 
     def test_a_desk_that_raises_asks_as_usual(self):
         n = self.n
@@ -439,7 +460,11 @@ class Grants(_Temp):
         self.assertEqual(quiet_defer.request_digest(request()), digest, "the same call, the same digest")
         for name, other in {"thread": request(thread_id="th000002"), "task": request(task_id="task0001"),
                             "tool": request(tool="Monitor"), "args": request(args={"command": "make deploy", "x": 1}),
-                            "command": request(args={"command": "make deploy"}, command="make  deploy")}.items():
+                            "command": request(args={"command": "make deploy"}, command="make  deploy"),
+                            "cwd": request(cwd="/elsewhere"), "headline": request(headline="pushes to main"),
+                            "layer": request(layer="always-ask"), "subagent": request(subagent="cl:abc"),
+                            "relayed": request(relayed_from={"title": "x", "provider": "claude",
+                                                             "thread_id": "t2", "kind": "started"})}.items():
             self.assertNotEqual(quiet_defer.request_digest(other), digest, name)
         self.assertIsNone(quiet_defer.request_digest(request(args={"x": float("nan")})), "not exactly JSON: never grantable")
         self.assertNotEqual(remote_answer.defer_binding(["x"]), "x", "a binding is never a bare approval id")
@@ -495,7 +520,7 @@ class Grants(_Temp):
         n.assertDeferred(req)
         (rec,) = n.store.all()
         self.assertTrue(rec["hud_only"])
-        self.assertIsNone(rec["digest"], "nothing to match")
+        self.assertEqual((rec["grantable"], rec["why_not"]), (False, "browser"))
         with self.assertRaises(ValueError):
             n.store.settle(req.req_id, "retry")
         self.assertEqual(n.store.get(req.req_id)["state"], "waiting")
@@ -541,23 +566,28 @@ class Grants(_Temp):
         n.grant(request())
         n.store.path.write_text("{not json")
         self.assertEqual(n.store.all(), [])
-        n.present = True
-        stop = n.answer_later(Decision.DENY)
+        # A daemon that starts over it (its grants read once, at attach) holds none.
+        fresh = Night(self.root)
+        fresh.store.load_index()
+        fresh.present = True
+        stop = fresh.answer_later(Decision.DENY)
         try:
             req = request()
-            self.assertIs(n.broker.ask(req), Decision.DENY)
+            self.assertIs(fresh.broker.ask(req), Decision.DENY)
         finally:
             stop.set()
         self.assertIsNone(req.outcome)
         self.assertEqual(n.store.path.read_text(), "{not json", "a grant check writes nothing")
-        print("ok  a store that is not ours shows nothing and matches no grant")
+        print("ok  a store that is not ours shows nothing and, read at start, holds no grant")
 
     def test_the_file_is_private_and_bounded(self):
         import stat
         n = self.n
         for i in range(quiet_defer.KEEP + 5):
-            n.broker.ask(request(f"c{i}"))
+            n.broker.ask(request(f"c{i}", thread_id=f"th{i % 15:06d}"))
         self.assertEqual(len(n.store.all()), quiet_defer.KEEP)
+        self.assertEqual(sum(m["count"] for m in n.store.snapshot()[1].values()), 5,
+                         "the five evicted are counted in their chats' 'and N more', never silent")
         self.assertEqual(stat.S_IMODE(os.lstat(n.store.path).st_mode), 0o600)
         self.assertEqual(stat.S_IMODE(os.lstat(n.store.path.parent).st_mode), 0o700)
         self.assertEqual(sorted(p.name for p in n.store.path.parent.iterdir()), ["deferred.json"])
@@ -571,6 +601,241 @@ class Grants(_Temp):
         self.assertEqual(target.read_text(), "keep")
         self.assertFalse(n.store.path.is_symlink())
         print("ok  deferred.json: 0600 in a 0700 folder, at most KEEP records, never through a link")
+
+
+# -- the #326 review's findings ------------------------------------------------------------
+
+
+def _git(*args, cwd):
+    import subprocess
+    subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "init.defaultBranch=main", *args],
+                   cwd=cwd, check=True, capture_output=True)
+
+
+class Review(_Temp):
+    def repos(self):
+        base = self.root.parent
+        bare = base / "origin.git"
+        _git("init", "--bare", "-b", "main", str(bare), cwd=base)
+        made = {}
+        for name, branch in (("A", "topic"), ("B", "main"), ("C", "topic")):
+            d = base / name
+            _git("clone", str(bare), str(d), cwd=base)
+            _git("checkout", "-b", branch, cwd=d)
+            (d / "f").write_text(branch)
+            _git("add", "f", cwd=d)
+            _git("commit", "-m", branch, cwd=d)
+            _git("push", "-u", "origin", branch, cwd=d)
+            made[name] = d
+        return made
+
+    def permit(self):
+        brief = Brief(Role.CHAT, str(self.root.parent), profile=PermissionProfile.ASK)
+        return build_permit(PermitContext("th000001", brief, provider="claude"), self.n.broker), brief
+
+    def test_h1_a_grant_never_answers_the_same_words_judged_elsewhere(self):
+        r = self.repos()
+        permit, brief = self.permit()
+        args = {"command": "git push", "description": "Push the branch"}
+        self.assertIs(permit("Bash", dict(args), brief, shell_cwd=str(r["A"])), Decision.DENY)
+        (rec,) = self.n.store.all()
+        self.assertTrue(rec["grantable"], rec["why_not"])
+        self.n.store.settle(rec["id"], "retry")
+        self.n.present = True
+        stop = self.n.answer_later(Decision.DENY)
+        try:
+            # The same words in C, another clone on a branch of the same name: no
+            # headline at all, but another folder. Asked, never granted.
+            self.assertIs(permit("Bash", dict(args), brief, shell_cwd=str(r["C"])), Decision.DENY)
+            self.assertNotEqual(last_verdict().reason, quiet_defer.GRANTED_TEXT)
+            self.assertEqual(self.n.requested[-1].headline, "")
+            # The same words in B (on main): an owner-only push to main. Asked, never granted.
+            self.assertIs(permit("Bash", dict(args), brief, shell_cwd=str(r["B"])), Decision.DENY)
+            self.assertNotEqual(last_verdict().reason, quiet_defer.GRANTED_TEXT)
+            # The same folder, its branch changed to main: the gate's headline now; asked.
+            _git("fetch", "origin", cwd=r["A"])
+            _git("checkout", "-B", "main", "origin/main", cwd=r["A"])
+            self.assertIs(permit("Bash", dict(args), brief, shell_cwd=str(r["A"])), Decision.DENY)
+            self.assertNotEqual(last_verdict().reason, quiet_defer.GRANTED_TEXT)
+            asked = len(self.n.requested)
+            self.assertEqual(asked, 3, "each was a card, not the grant")
+            self.assertTrue(all(c.headline for c in self.n.requested[1:]), [c.headline for c in self.n.requested])
+            # Back on topic in A: exactly the call granted, once.
+            _git("checkout", "topic", cwd=r["A"])
+            self.n.present = False
+            self.assertIs(permit("Bash", dict(args), brief, shell_cwd=str(r["A"])), Decision.ALLOW)
+            self.assertEqual(last_verdict().reason, quiet_defer.GRANTED_TEXT)
+        finally:
+            stop.set()
+        print("ok  H1: a grant never answers the same words judged in another folder or on another branch")
+
+    def test_h1_owner_only_widening_and_codex_asks_are_never_granted(self):
+        from jarvis.v2.permissions import L_ALWAYS_ASK, L_WIDENING
+        r = self.repos()
+        permit, brief = self.permit()
+        for name, call in {
+                "gh pr merge, no number": lambda: permit("Bash", {"command": "gh pr merge --squash"}, brief,
+                                                         shell_cwd=str(r["A"])),
+                "push to main": lambda: permit("Bash", {"command": "git push origin HEAD:main"}, brief,
+                                               shell_cwd=str(r["A"])),
+                "a widening": lambda: permit("Bash", {"command": "docker build ."}, brief,
+                                             widening="network on"),
+                "a dangerous Jarvis tool": lambda: permit("gmail_send", {"to": "a@b.c"}, brief, dangerous_tool=True),
+        }.items():
+            with self.subTest(case=name):
+                before = {x["id"] for x in self.n.store.all()}
+                self.assertIs(call(), Decision.DENY)
+                (rec,) = [x for x in self.n.store.all() if x["id"] not in before]
+                self.assertEqual((rec["grantable"], rec["why_not"]), (False, "owner-only"), name)
+                with self.assertRaises(ValueError):
+                    self.n.store.settle(rec["id"], "retry")
+        for layer in (L_WIDENING, L_ALWAYS_ASK):
+            self.assertEqual(quiet_defer.grant_refusal(request(layer=layer), request(layer=layer).to_json(), True),
+                             "owner-only")
+        self.assertEqual(quiet_defer.grant_refusal(request(headline="pushes to main"), {}, True), "owner-only")
+        codex = request(provider="codex")
+        self.n.assertDeferred(codex)
+        rec = self.n.store.get(codex.req_id)
+        self.assertEqual((rec["grantable"], rec["why_not"]), (False, "codex"))
+        print("ok  H1/M1: merge-gate (gh pr merge with no number, a push to main), widening, dangerous-tool "
+              "and Codex asks are never grantable")
+
+    def test_h1_the_desk_never_takes_a_grant_for_an_owner_only_ask(self):
+        """Even a live grant whose digest matched is never taken for such an ask."""
+        n = self.n
+        rec = n.grant(request())
+        for odd in (request(headline="pushes to main"), request(layer="sandbox-widening"),
+                    request(grantable=False), request(provider="codex")):
+            digest = quiet_defer.request_digest(odd)
+            n.store._live.setdefault(digest, []).append({"id": rec["id"], "thread_id": odd.thread_id,
+                                                          "until": rec["grant_until"], "mono": None})
+            self.assertEqual(n.desk.settle(odd)[0], "deferred", "never granted")
+        print("ok  H1: the desk refuses a grant for an owner-only ask whatever the index holds")
+
+    def test_m2_the_same_call_is_one_row_and_a_thread_is_bounded(self):
+        n = self.n
+        other = request("make release", thread_id="thOTHER1")
+        n.assertDeferred(other)
+        for _ in range(5):
+            n.clock.now += timedelta(seconds=2)
+            n.assertDeferred(request())
+        records = n.store.all()
+        mine = [r for r in records if r["thread_id"] == "th000001"]
+        self.assertEqual((len(mine), mine[0]["count"]), (1, 5), "deduplicated: one row, asked 5 times")
+        for i in range(quiet_defer.PER_THREAD + 30):
+            n.assertDeferred(request(f"cmd {i}"))
+        records, more = n.store.snapshot()
+        mine = [r for r in records if r["thread_id"] == "th000001"]
+        self.assertEqual(len(mine), quiet_defer.PER_THREAD)
+        self.assertEqual(more["th000001"]["count"], 31, "every ask past the limit is counted")
+        self.assertIn(other.req_id, {r["id"] for r in records}, "another chat's row is never pushed out")
+        print("ok  M2: the same call is one row (asked N times); a chat holds at most 20, the rest counted")
+
+    def test_m2_eviction_is_per_thread_and_by_size(self):
+        logging.disable(logging.WARNING)
+        self.addCleanup(logging.disable, logging.NOTSET)
+        n = self.n
+        other = request("make release", thread_id="thOTHER1")
+        n.assertDeferred(other)
+        big = "echo " + "A" * 15000
+        for i in range(260):
+            n.clock.now += timedelta(seconds=1)           # the quiet chat's row is the oldest
+            n.assertDeferred(request(big + str(i), thread_id=f"tb{i % 13:06d}"))
+        self.assertLessEqual(os.path.getsize(n.store.path), quiet_defer._WRITE_MAX)
+        records, more = n.store.snapshot()
+        self.assertIn(other.req_id, {r["id"] for r in records}, "the quiet chat's one row survives")
+        small = request("make deploy")
+        n.assertDeferred(small)
+        self.assertIn(small.req_id, {r["id"] for r in n.store.all()}, "a later deferral is still recorded")
+        kept = sum(r["count"] for r in records if r["thread_id"].startswith("tb"))
+        counted = sum(m["count"] for k, m in more.items() if k.startswith("tb"))
+        self.assertEqual(kept + counted, 260, "every deferral is a row or counted")
+        self.assertTrue(all(r["why_not"] == "too-large" for r in records if r["thread_id"].startswith("tb")),
+                        "a card longer than the rows show is never grantable (L1)")
+        print("ok  M2: eviction is per thread and by size; nothing is silent; long cards are not grantable")
+
+    def test_m2_a_deferral_that_cannot_be_written_still_shows(self):
+        n = self.n
+        n.store._write = lambda *a, **k: (_ for _ in ()).throw(OSError("disk full"))
+        req = request()
+        self.assertIs(n.broker.ask(req), Decision.DENY)
+        self.assertEqual(req.outcome[0], "deferred")
+        records, more = n.store.snapshot()
+        self.assertEqual(more["th000001"]["count"], 1)
+        self.assertEqual(n.published[-1]["data"]["ids"], ["defer:more.th000001"])
+        rows = quiet_defer.rows(SimpleNamespace(inbox=SimpleNamespace(deferred=n.store)), inbox._row)
+        self.assertEqual([(r["id"], r["rank"], r["detail"]["more"]) for r in rows], [("defer:more.th000001", 4, 1)])
+        print("ok  M2: a deferral that cannot be written is counted in memory and still shows a row")
+
+    def test_l1_l2_what_is_never_grantable(self):
+        n = self.n
+        cases = {"too-large": request("x" * (quiet_defer.SHOWN_TEXT + 1)),
+                 "no-chat": request(thread_id=None),
+                 "owner-only": request(discord_channel_id=None, layer="always-ask")}
+        for why, req in cases.items():
+            with self.subTest(why=why):
+                n.assertDeferred(req)
+                rec = n.store.get(req.req_id)
+                self.assertEqual((rec["grantable"], rec["why_not"]), (False, why))
+        # An owner-initiated ask (the HUD's new VEX project) is never deferred.
+        stop = n.answer_later(Decision.ALLOW)
+        try:
+            mine = request(owner_initiated=True)
+            self.assertIs(n.broker.ask(mine), Decision.ALLOW)
+        finally:
+            stop.set()
+        self.assertIsNone(mine.outcome)
+        print("ok  L1/L2: too long, no chat or task, owner-only: never grantable; the owner's own ask is never deferred")
+
+    def test_l6_the_grant_is_taken_from_memory_and_its_use_written(self):
+        n = self.n
+        rec = n.grant(request())
+        reads, real = [], n.store._read
+
+        def guarded(*a):
+            reads.append(n.broker._lock.locked())
+            return real(*a)
+        n.store._read = guarded
+        same = request()
+        self.assertIs(n.broker.ask(same), Decision.ALLOW)
+        del n.store._read
+        self.assertNotIn(True, reads, "no read of the file while the broker's lock is held")
+        self.assertTrue(reads, "the spend was written (outside the lock)")
+        self.assertEqual(n.store.get(rec["id"])["state"], "used", "the spend is written")
+        # Reloaded from the file, a used grant stands no more.
+        fresh = Night(self.root)
+        fresh.store.load_index()
+        self.assertEqual(fresh.store._live, {})
+        print("ok  L6: the broker takes a grant from memory, reading no file, and the use is written")
+
+    def test_nit_the_grant_also_ends_by_the_monotonic_clock(self):
+        n = self.n
+        n.store.mono = Mono(500.0)
+        n.grant(request())
+        n.store.mono.now += quiet_defer.GRANT_S
+        n.present = True
+        stop = n.answer_later(Decision.DENY)
+        try:
+            late = request()
+            self.assertIs(n.broker.ask(late), Decision.DENY)
+        finally:
+            stop.set()
+        self.assertIsNone(late.outcome, "the wall clock still says 'good', the monotonic one does not")
+        print("ok  a grant minted here also ends by the monotonic clock")
+
+    def test_l3_the_escape_hatch_passes_the_deferral_words(self):
+        from jarvis.v2.hatch import EscapeHatch, _Declined
+        delivered = []
+        daemon = SimpleNamespace(stores=SimpleNamespace(threads=SimpleNamespace(get=lambda _id: None)),
+                                 deliver=lambda tid, msg: delivered.append(msg))
+        hatch = EscapeHatch(daemon, self.n.broker)
+        result = hatch._offer(_Declined(thread_id="th000001", command="make deploy", tool="Bash",
+                                        args={"command": "make deploy"}, reason="reviewer declined"))
+        self.assertEqual(result.decision, "deny")
+        self.assertIn("asleep until 07:00", result.message)
+        self.assertNotIn("owner declined", result.message)
+        self.assertIn("asleep until 07:00", delivered[-1].text)
+        print("ok  L3: the escape hatch tells the chat the deferral's words, never 'owner declined'")
 
 
 # -- the daemon: rows, the HUD route, delivery -------------------------------------------
@@ -714,12 +979,16 @@ class Live(unittest.TestCase):
         out = self.call("POST", f"/inbox/defer:{req.req_id}/answer", {"action": "retry"})
         self.assertEqual(out["delivery"], "resumed")
         self.assertIn(("resume", task.id), self.runner.calls)
-        # A task that is not blocked is not told (and not resumed).
+        # Q2: a task that is not blocked gets no grant: "it is running; open the task", row kept.
         req = self.deferred(thread_id="thtask01", task_id=task.id, command="other",
                             args={"command": "other"})
-        out = self.call("POST", f"/inbox/defer:{req.req_id}/answer", {"action": "retry"})
-        self.assertEqual(out["delivery"], "granted")
+        out = self.call("POST", f"/inbox/defer:{req.req_id}/answer", {"action": "retry"}, 409)
+        self.assertEqual(out["error"], quiet_defer.RUNNING)
         self.assertEqual(self.runner.calls.count(("resume", task.id)), 1)
+        self.assertEqual(self.daemon.inbox.deferred.get(req.req_id)["state"], "waiting")
+        self.assertIn(f"defer:{req.req_id}", [r["id"] for r in self.call("GET", "/inbox")])
+        self.assertEqual(self.daemon.inbox.deferred._live.get(
+            self.daemon.inbox.deferred.get(req.req_id)["digest"], []), [], "no grant minted")
         # Leave it: nothing sent, the row goes.
         thread = self.chat()
         req = self.deferred(thread_id=thread.id, command="third", args={"command": "third"})
@@ -889,6 +1158,32 @@ class PhoneRetry(ra.Phone):
         (mine,) = [r for r in rows["rows"] if r["id"] == f"defer:{browser.req_id}"]
         self.assertEqual((mine["kind"], mine["rank"], mine["detail"]["grantable"]), ("deferred", 4, False))
         print("ok  phone: Leave it with the session only; a Browser row offers no retry; no private detail")
+
+    def test_l5_retry_runs_the_41_checks_as_allow_does(self):
+        req, row = self.deferred()
+        secure = self.d.secure
+        self.d.secure = None
+        status, _, body = self.options(row, "allow")
+        self.assertEqual(status, 409, body)
+        self.d.secure = secure
+        credential, _ = self.assertion(row, "allow")
+        self.d.secure = None
+        status, _, body = self.post_answer(row, {"action": "retry", "assertion": credential})
+        self.assertEqual(status, 409, body)
+        self.assertTrue(body["error"].startswith("limited"), body)
+        self.assertEqual(self.d.inbox.deferred.get(req.req_id)["state"], "waiting", "nothing granted")
+        self.d.secure = secure
+        checked = []
+        real = secure.check
+        secure.check = lambda **kw: checked.append(kw) or real(**kw)
+        credential, _ = self.assertion(row, "allow")
+        status, _, body = self.post_answer(row, {"action": "retry", "assertion": credential})
+        self.assertEqual(status, 200, body)
+        self.assertGreaterEqual(len(checked), 2, "options and the answer each ran §4.1")
+        source = inspect.getsource(remote_answer._answer_deferred)
+        self.assertLess(source.index("answer_verify("), source.index("_monitor(daemon).check("))
+        self.assertLess(source.index("_monitor(daemon).check("), source.index("verified = True"))
+        print("ok  L5: the phone's retry runs §4.1 and the Allow's gate; no monitor, no grant")
 
     def test_a_card_the_phone_would_scrub_is_refused(self):
         # What the desk's card keeps and the phone's scrub withholds (review

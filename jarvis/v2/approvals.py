@@ -345,6 +345,14 @@ class ApprovalRequest:
     # ‹title› (Provider · id)", kind "running": "while a turn started by …
     # runs".
     relayed_from: dict | None = None
+    # Quiet hours (QH, quiet_defer.py), set by daemon code only, never shown
+    # on a card: the folder the gate judged the call in (a refspec-less push
+    # is judged by it), part of a deferral's digest; whether an Approve and
+    # retry may ever answer it (False for every ask that is asked each time);
+    # and an ask the owner just started at the HUD, never deferred.
+    cwd: str | None = None
+    grantable: bool = True
+    owner_initiated: bool = False
     _hud_private: bool = field(default=False, init=False, repr=False)
     _card: dict | None = field(default=None, init=False, repr=False, compare=False)
     # Quiet hours (QH, `quiet_defer.QuietDesk.settle`): set by the broker

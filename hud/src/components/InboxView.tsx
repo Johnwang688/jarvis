@@ -540,16 +540,21 @@ export function InboxView(props: InboxViewProps) {
       return (
         <div className="ir-body" data-testid="inbox-deferred">
           {deferred.headline ? <div className="ir-text" data-testid="inbox-deferred-headline">{deferred.headline}</div> : null}
-          <div className="ir-text" data-testid="inbox-deferred-tool">Tool: {deferred.tool}</div>
+          {deferred.tool ? <div className="ir-text" data-testid="inbox-deferred-tool">Tool: {deferred.tool}</div> : null}
           {deferred.command ? <pre className="ir-text ir-command" data-testid="inbox-deferred-command">{deferred.command}</pre> : null}
           {deferred.reason ? <div className="ir-why" data-testid="inbox-deferred-reason">{deferred.reason}</div> : null}
           {deferred.args ? <pre className="ir-text ir-args" data-testid="inbox-deferred-args">{deferred.args}</pre> : null}
+          {deferred.count > 1 ? (
+            <div className="ir-when muted" data-testid="inbox-deferred-count">Asked {deferred.count} times while it waited.</div>
+          ) : null}
           <div className="ir-when muted" data-testid="inbox-deferred-note">
-            {deferred.hudOnly
-              ? "A Browser action is approved only while its page is live: open its chat to ask again."
+            {deferred.more
+              ? `${deferred.more} more asks from this chat were denied overnight, too many to list one by one. To run any, ask from its chat.`
               : deferred.expired
                 ? "Over a day old: it can only be left. To run it, ask from its chat."
-                : "Denied while you slept. Approve and retry allows exactly this call once, for 30 minutes, and tells its chat."}
+                : deferred.whyNot
+                  ? deferred.whyNot
+                  : "Denied while you slept. Approve and retry allows exactly this call once, for 30 minutes, and tells its chat."}
           </div>
           <div className="ir-answer">
             {deferred.grantable ? (

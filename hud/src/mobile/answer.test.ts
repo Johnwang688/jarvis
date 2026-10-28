@@ -336,7 +336,8 @@ describe("the phone app answers (P-4)", () => {
   });
 
   it("a Browser card or a day-old deferred row offers Leave it only", async () => {
-    for (const r of [DEFER({ hud_only: true }), DEFER({ grantable: false }), DEFER({}, { rank: 8 })]) {
+    for (const r of [DEFER({ hud_only: true }), DEFER({ grantable: false }), DEFER({}, { rank: 8 }),
+                     DEFER({ why_not: "codex" }), DEFER({ more: 4, deferral_id: null })]) {
       const h = harness([r]);
       h.app.start();
       await h.settle();

@@ -126,6 +126,39 @@ describe("deferred rows (QH)", () => {
     host = null;
   });
 
+  it("says how often it was asked, and why a row takes no retry, in the HUD's own words", () => {
+    draw([deferredRow({ title: "Bash is waiting for your morning approval (asked 3 times)" }, { count: 3 })]);
+    expect(rowOf("defer:D1").querySelector('[data-testid="inbox-deferred-count"]')!.textContent)
+      .toBe("Asked 3 times while it waited.");
+    act(() => root?.unmount());
+    host?.remove();
+    for (const [code, words] of [["codex", "A Codex request"], ["owner-only", "asked every time"],
+                                 ["too-large", "too long to show"], ["no-chat", "Nothing is waiting"],
+                                 ["anything " + HOSTILE, "cannot be approved from here"]]) {
+      draw([deferredRow({}, { why_not: code, grantable: true })]);
+      const r = rowOf("defer:D1");
+      expect(r.querySelector('[data-testid="inbox-deferred-retry"]')).toBeNull();
+      expect(r.querySelector('[data-testid="inbox-deferred-note"]')!.textContent).toContain(words);
+      expect(r.textContent).not.toContain(HOSTILE);
+      act(() => root?.unmount());
+      host?.remove();
+    }
+    root = null;
+    host = null;
+  });
+
+  it("an 'and N more' row offers Leave it only and says how many", async () => {
+    const more = deferredRow({ id: "defer:more.t1", title: "And 31 more asks from chat t1 were deferred overnight" },
+      { deferral_id: null, tool: "", card: {}, more: 31, count: 31, grantable: true });
+    const p = draw([more]);
+    const r = rowOf("defer:more.t1");
+    expect(r.querySelector('[data-testid="inbox-deferred-retry"]')).toBeNull();
+    expect(r.querySelector('[data-testid="inbox-deferred-note"]')!.textContent).toContain("31 more asks");
+    act(() => (r.querySelector('[data-testid="inbox-deferred-leave"]') as HTMLButtonElement).click());
+    await flush();
+    expect(p.onAnswer).toHaveBeenCalledWith("defer:more.t1", { action: "leave" });
+  });
+
   it("under a card everything is off and nothing posts", () => {
     const p = draw([deferredRow()], { blocked: true });
     const r = rowOf("defer:D1");
