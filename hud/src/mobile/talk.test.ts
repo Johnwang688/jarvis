@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { PhoneApp, type StreamLike } from "./app";
 import type { Got, Posted } from "./net";
-import { MAX_SAMPLES, RATE, STT_URL, Talk, WORDS, networkFailure, uploadNote, type AudioContextLike, type TalkEnv, type Uploaded } from "./talk";
+import { HOLD_MS, MAX_SAMPLES, RATE, STT_URL, Talk, WORDS, networkFailure, uploadNote, type AudioContextLike, type TalkEnv, type Uploaded } from "./talk";
 import { cardView, parseDetail } from "./card";
 import talkSource from "./talk.ts?raw";
 import { readFileSync } from "node:fs";
@@ -148,9 +148,18 @@ function harness(rows: unknown[] = []) {
     const e = new MouseEvent(type, { bubbles: true, cancelable: true, clientX: x, clientY: y });
     target.dispatchEvent(e);
   };
-  const down = async () => { rect(button()); pointer("pointerdown", button()); await settle(); };
+  // A press, held past HOLD_MS (its timer fired by hand).
+  const touch = async () => { rect(button()); pointer("pointerdown", button()); await settle(); };
+  const holdTimer = () => mic.timers.filter((t) => t.ms === HOLD_MS && !t.cleared).at(-1);
+  const down = async () => {
+    await touch();
+    const t = holdTimer();
+    if (t) { t.cleared = true; t.fn(); }
+    await settle();
+  };
   const up = async () => { pointer("pointerup", window); await settle(); };
-  return { app, root, posts, replies, asked, gets, mic, signedOut, settle, q, button, box, line, pointer, down, up, ok };
+  return { app, root, posts, replies, asked, gets, mic, signedOut, settle, q, button, box, line, pointer, down, up, ok,
+    touch, holdTimer };
 }
 
 async function openChat(h: ReturnType<typeof harness>, id = CHAT) {
@@ -179,6 +188,37 @@ function wavInfo(bytes: ArrayBuffer) {
 }
 
 describe("push to talk (P-7)", () => {
+  it("a brush shorter than HOLD_MS asks for nothing, shows nothing and uploads nothing (review of #331, LOW 5)", async () => {
+    const h = harness();
+    await openChat(h);
+    expect(HOLD_MS).toBe(150);
+    for (const how of ["lift", "slide", "cancel"] as const) {
+      await h.touch();
+      const t = h.holdTimer()!;
+      expect(t.ms).toBe(HOLD_MS);
+      // Nothing yet: no prompt, no recording look.
+      expect(h.mic.getUserMedia).not.toHaveBeenCalled();
+      expect(h.button().dataset.phase).toBe("idle");
+      if (how === "lift") h.pointer("pointerup", window);
+      else if (how === "slide") h.pointer("pointermove", window, 150, 900);
+      else h.pointer("pointercancel", window);
+      await h.settle();
+      expect(t.cleared).toBe(true);
+      // A late timer (cleared, yet run) still does nothing.
+      t.fn();
+      await h.settle();
+      expect(h.mic.getUserMedia).not.toHaveBeenCalled();
+      expect(h.mic.contexts.length).toBe(0);
+      expect(h.mic.uploads.length).toBe(0);
+      expect(h.button().dataset.phase).toBe("idle");
+      expect(h.line().textContent).toBe("");
+    }
+    // Held past it: the mic is asked for, as before.
+    await h.down();
+    expect(h.mic.getUserMedia).toHaveBeenCalledTimes(1);
+    expect(h.button().dataset.phase).toBe("listening");
+  });
+
   it("is a mic icon in the message bar; holding it still drives the recording (owner, 2026-10-28)", async () => {
     const h = harness();
     await openChat(h);

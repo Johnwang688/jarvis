@@ -28,6 +28,10 @@
 //     file the remote listener does not serve (it serves only what the
 //     build manifest lists for the phone page), and the phone's CSP is not
 //     widened for a `blob:` module.
+//   - **A touch is a hold only after `HOLD_MS`** within the slop (review of
+//     #331): a finger brushing the mic while scrolling lifts, slides or is
+//     cancelled before then, and nothing happens at all (no prompt, no
+//     line, no upload). A keyboard's Space or Enter still starts at once.
 //   - At most `MAX_MS` (the server's `remote_stt.MAX_S`): the recording stops
 //     itself there and is transcribed. Under `MIN_MS` nothing is sent.
 //
@@ -45,6 +49,9 @@ export const RATE = OUT_RATE;
 export const MAX_SAMPLES = (RATE * MAX_MS) / 1000;
 /** A slide this far past the button's edge cancels (px). */
 export const SLOP_PX = 24;
+/** A press counts as a hold only after this long without leaving the slop (ms): a brush while
+ * scrolling past the mic asks for nothing, shows nothing and uploads nothing (review of #331, LOW 5). */
+export const HOLD_MS = 150;
 
 export type TalkPhase = "idle" | "starting" | "listening" | "transcribing";
 
@@ -204,6 +211,8 @@ export class Talk {
   private gen = 0;
   private rec: Recording | null = null;
   private detach: (() => void) | null = null;
+  /** A press not yet held for HOLD_MS: its timer, or null. */
+  private holding: unknown = null;
 
   constructor(private readonly env: TalkEnv, private readonly hooks: TalkHooks) {
     this.el = document.createElement("div");
@@ -451,12 +460,13 @@ export class Talk {
       return e.clientX >= r.left - SLOP_PX && e.clientX <= r.right + SLOP_PX
         && e.clientY >= r.top - SLOP_PX && e.clientY <= r.bottom + SLOP_PX;
     };
+    // Before HOLD_MS a lift, a cancel or a slide off ends the touch and nothing else.
     const end = () => { this.detach?.(); this.detach = null; };
-    const up = () => { end(); void this.release(); };
-    const off = () => { end(); this.cancel(); };
+    const up = () => { const held = this.holding === null; end(); if (held) void this.release(); };
+    const off = () => { const held = this.holding === null; end(); if (held) this.cancel(); };
     const move = (e: Event) => { if (!inside(e as MouseEvent)) off(); };
     b.addEventListener("pointerdown", (e) => {
-      if (b.disabled || this.phase !== "idle") return;
+      if (b.disabled || this.phase !== "idle" || this.detach) return;
       e.preventDefault();
       // The release is heard wherever the finger lifts, even if the box was drawn again meanwhile.
       const win = b.ownerDocument.defaultView ?? window;
@@ -464,11 +474,17 @@ export class Talk {
       win.addEventListener("pointercancel", off);
       win.addEventListener("pointermove", move);
       this.detach = () => {
+        if (this.holding !== null) { this.env.clearTimer(this.holding); this.holding = null; }
         win.removeEventListener("pointerup", up);
         win.removeEventListener("pointercancel", off);
         win.removeEventListener("pointermove", move);
       };
-      this.press();
+      const timer = this.env.setTimer(() => {
+        if (this.holding !== timer) return;
+        this.holding = null;
+        this.press();
+      }, HOLD_MS);
+      this.holding = timer;
     });
     b.addEventListener("contextmenu", (e) => e.preventDefault());
     // A keyboard (or a switch control) holds Space or Enter instead.

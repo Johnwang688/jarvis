@@ -220,6 +220,13 @@ def run(browser, check, until):
               and live_tracks() == 0 and "Cancelled" in tid("m-talk-line").inner_text(),
               f"{uploads} {live_tracks()} {tid('m-talk-line').inner_text()}")
 
+        before = (streams(), len(uploads), tid("m-talk-line").inner_text())
+        hold(40)
+        page.wait_for_timeout(500)
+        check("P-7 a brush shorter than the hold delay does nothing: no mic, no upload, no new line (review of #331)",
+              (streams(), len(uploads), tid("m-talk-line").inner_text()) == before
+              and tid("m-mic").get_attribute("data-phase") == "idle", str(before))
+
         tid("m-compose-send").click()
         deadline = time.monotonic() + 10
         while not users(chat.id) and time.monotonic() < deadline:
