@@ -15,7 +15,7 @@
 // (bidi overrides, zero-widths) that could make one line read as another.
 
 export interface InboxRow {
-  /** Kind prefix + the source's own id: `appr:…`, `q:…`, `tq:…`, `prop:…`, `task:…`, `missed:…`, `dec:…`. */
+  /** Kind prefix + the source's own id: `appr:…`, `q:…`, `tq:…`, `prop:…`, `task:…`, `missed:…`, `dec:…`, `pr:…`, `prx:…`. */
   id: string;
   kind: string;
   /** IN-4's band, 1 to 8. */
@@ -186,6 +186,50 @@ export function missedNote(row: InboxRow): { why: string; next: string } | null 
       ? "Jarvis stopped before you answered, so it was denied."
       : "It was denied without an answer.";
   return { why, next: row.thread_id ? "To try it again, ask from its chat." : "Its chat is not known." };
+}
+
+/** A pull request waiting on the owner's merge (inbox B3, IN-4): rank 5, information and a link only. */
+export const PR = "pr";
+/** "PR list unavailable" (inbox B3): the daemon could not read a repository's open PRs. */
+export const PR_UNAVAILABLE = "pr_unavailable";
+const GH_NAME = /^[A-Za-z0-9_.-]{1,100}$/;
+const PR_URL = /^https:\/\/github\.com\/([A-Za-z0-9_.-]{1,100})\/([A-Za-z0-9_.-]{1,100})\/pull\/([1-9][0-9]{0,9})$/;
+
+export interface PrView {
+  repo: string;
+  number: number;
+  /** The PR's own title: untrusted text, one line. */
+  title: string;
+  /** Its page on GitHub, only when it is exactly this repository's PR `number`; else null (no link). */
+  url: string | null;
+}
+
+/**
+ * A PR row's words and link, or null for any other row or a detail that is
+ * not one. The daemon already links only a URL it validated
+ * (`inbox_prs.pr_url`); this checks it again, so a row can never link
+ * anywhere but `https://github.com/<repo>/pull/<number>` for its own repo.
+ */
+export function prOf(row: InboxRow): PrView | null {
+  if (row.kind !== PR) return null;
+  const d = row.detail;
+  const repo = typeof d.repo === "string" ? d.repo : "";
+  const parts = repo.split("/");
+  const number = d.number;
+  if (parts.length !== 2 || !parts.every((p) => GH_NAME.test(p))) return null;
+  if (typeof number !== "number" || !Number.isInteger(number) || number < 1) return null;
+  let url: string | null = null;
+  const m = typeof d.url === "string" ? PR_URL.exec(d.url) : null;
+  if (m && `${m[1]}/${m[2]}`.toLowerCase() === repo.toLowerCase() && Number(m[3]) === number) url = d.url as string;
+  return { repo, number, title: oneLine(d.title, 300), url };
+}
+
+/** A "PR list unavailable" row's repositories and why, as text, in the daemon's words. */
+export function prUnavailableOf(row: InboxRow): { repo: string; reason: string }[] | null {
+  if (row.kind !== PR_UNAVAILABLE) return null;
+  const repos = Array.isArray(row.detail.repos) ? row.detail.repos : [];
+  return repos.filter(isObj).map((r) => ({ repo: oneLine(r.repo, 200), reason: oneLine(r.reason, 120) }))
+    .filter((r) => r.repo).slice(0, 50);
 }
 
 /** A decision an agent posted with `owner_post` (inbox B1, IN-5): rank 6 while open, rank 8 once

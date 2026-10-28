@@ -56,6 +56,12 @@ What it pins, one section each (each names the mutation it is meant to catch):
   badge     `navigator.setAppBadge` (stubbed) gets the count and is cleared at
             0 and when a read fails; without the API nothing breaks [badge all
             ranks; no clear; a stale badge after a failed read]
+  prs       inbox B3's PR rows sit under "Waiting on you" between a blocked
+            task and a decision, counted; the PR's title is text; the one
+            control is "Open on GitHub", a plain new-tab link to the PR's own
+            URL (none for another repo's); a click on the row posts nothing;
+            "PR list unavailable" is counted and never reads as "nothing
+            waiting" [a link to any URL; innerHTML; empty as nothing waiting]
   older     an older daemon (404) shows no count and says the inbox is not
             available, never "nothing waiting" [404 read as empty]
   aurora    the owner's aurora (2026-10-25) is on the owner Inbox row only,
@@ -536,6 +542,63 @@ def _missed_checks(page, mock, check, until):
     until(lambda: page.evaluate("window.__hud.state().chats['1'].threadId") == "t1", timeout=3)
     check("its link opens its chat, and answers nothing",
           page.evaluate("window.__hud.state().chats['1'].threadId") == "t1" and len(_answers(mock)) == posts)
+    check("the title is unchanged", page.title() == TITLE, page.title())
+
+
+PR_REPO = "Johnwang688/Calc"
+
+
+def pr_row(n=7, url=None, title="Add multiply"):
+    """A PR row as inbox B3's poll serves it."""
+    return {"id": f"pr:{PR_REPO}#{n}", "kind": "pr", "rank": 5, "title": f"PR #{n} is ready to merge",
+            "blocks": f"{PR_REPO} · branch claude/x · checks passing", "project_id": None, "thread_id": None,
+            "task_id": None, "asked_at": _iso(-3600), "expires_at": None, "origin": "",
+            "detail": {"repo": PR_REPO, "number": n, "title": title, "branch": "claude/x", "head": "a" * 40,
+                       "checks": "passing", "merge_state": "CLEAN",
+                       "url": url if url is not None else f"https://github.com/{PR_REPO}/pull/{n}"}}
+
+
+def _pr_checks(page, mock, check, until):
+    """Inbox B3 (IN-4): pull requests and "PR list unavailable"."""
+    rows = [task_row(), pr_row(title="Fix " + HOSTILE), pr_row(8, url="https://github.com/evil/repo/pull/8"),
+            dec_row()]
+    _open(page, mock, until, rows)
+    you = page.evaluate("() => [...document.querySelectorAll('[data-testid=\"inbox-group-you\"] "
+                        "[data-testid=\"inbox-row\"]')].map(r => r.dataset.id)")
+    check("PR rows sit under 'Waiting on you' after the blocked task",
+          you == ["task:k1", f"pr:{PR_REPO}#7", f"pr:{PR_REPO}#8"], str(you))
+    check("they are counted (ranks 1 to 5)", _count(page) == "3", str(_count(page)))
+    r7, r8 = _row(page, f"pr:{PR_REPO}#7"), _row(page, f"pr:{PR_REPO}#8")
+    controls = r7.evaluate("e => [...e.querySelectorAll('button, input, textarea, a')].map(b => b.dataset.testid)")
+    link = r7.locator('[data-testid="inbox-pr-link"]')
+    check("its one control is 'Open on GitHub', a new-tab link to its own PR [mutation: a link to any URL]",
+          controls == ["inbox-pr-link"] and link.get_attribute("href") == f"https://github.com/{PR_REPO}/pull/7"
+          and link.get_attribute("target") == "_blank" and link.get_attribute("rel") == "noopener noreferrer",
+          str(controls))
+    check("a URL for another repository is not linked",
+          r8.locator("a").count() == 0, str(r8.locator("a").count()))
+    imgs = page.evaluate("() => document.querySelectorAll('[data-testid=\"inbox-view\"] img').length")
+    check("the PR's title is literal text: no element made, nothing ran [mutation: innerHTML]",
+          imgs == 0 and page.evaluate("window.__pwned === undefined")
+          and HOSTILE in r7.locator('[data-testid="inbox-pr-title"]').inner_text(), str(imgs))
+    posts, decided = len(_answers(mock)), len(_decided(mock))
+    for r in (r7, r8):
+        r.click(position={"x": 4, "y": 4})
+        r.locator('[data-testid="inbox-title"]').click()
+    time.sleep(0.3)
+    check("a click on a PR row posts nothing and opens nothing",
+          len(_answers(mock)) == posts and len(_decided(mock)) == decided
+          and page.locator(_pane(1)).get_attribute("data-view") == "inbox")
+    unavailable = {"id": "prx:list", "kind": "pr_unavailable", "rank": 5,
+                   "title": "PR list unavailable for 1 repository", "blocks": "open pull requests may be waiting",
+                   "project_id": None, "thread_id": None, "task_id": None, "asked_at": None, "expires_at": None,
+                   "origin": "", "detail": {"repos": [{"repo": PR_REPO, "reason": "gh is not logged in",
+                                                       "last_read": None}]}}
+    _open(page, mock, until, [unavailable])
+    check("'PR list unavailable' is counted and never reads as nothing waiting [mutation: empty as nothing]",
+          _count(page) == "1" and page.locator('[data-testid="inbox-empty"]').count() == 0
+          and page.locator('[data-testid="inbox-pr-unavailable"]').inner_text() == f"{PR_REPO}: gh is not logged in",
+          str(_count(page)))
     check("the title is unchanged", page.title() == TITLE, page.title())
 
 
@@ -1058,7 +1121,7 @@ def _decision_checks(page, mock, check, until):
 
 SECTIONS = (_sidebar_checks, _groups_checks, _live_checks, _answer_checks, _conflict_checks, _withdraw_checks,
             _reconnect_checks, _clicks_checks, _hostile_checks, _missed_checks, _decision_checks, _card_checks,
-            _older_checks, _aurora_checks)
+            _older_checks, _aurora_checks, _pr_checks)
 
 
 def inbox_checks(browser, mock, base, check, until, guard, init_script):

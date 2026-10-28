@@ -30,7 +30,13 @@
 //     win over the picked option when there are any), and Answer, posting
 //     `{choice}` or `{text}` once to `POST /inbox/decisions/<id>`. Enter
 //     answers only from the focused box; on a radio it does nothing. Once
-//     answered for a chat that was closed (rank 8) it shows the answer only.
+//     answered for a chat that was closed (rank 8) it shows the answer only;
+//   - a pull request (inbox B3, IN-4): its title as text and "Open on
+//     GitHub", a plain link to the URL `prOf` validated (none otherwise). A
+//     click opens the page and answers nothing: merging stays the owner's
+//     own, on GitHub or under the merge gate;
+//   - "PR list unavailable" (B3): which repositories could not be read, and
+//     why, in the daemon's words. Never shown as "nothing waiting".
 // Every row links to its thread or task pane (a missed row, its chat only). **Clicking a row never answers
 // anything**: only Answer (or Enter in its box) and Withdraw post, each once
 // per press, through `POST /inbox/<id>/answer` (api.answerInbox). A 409 is
@@ -45,7 +51,7 @@ import { ApiError } from "../api";
 import type { ApprovalRequest } from "../types";
 import {
   ANSWERS_TEXT, CLOSING_MS, PENDING_MAX_RANK, approvalReq, briefOf, clockOf, decisionBody, decisionOf, groupRows,
-  linkOf, missedNote, questionOf, waitingCount, withdrawHint, withdrawUntil, type InboxRow,
+  linkOf, missedNote, prOf, prUnavailableOf, questionOf, waitingCount, withdrawHint, withdrawUntil, type InboxRow,
 } from "../lib/inbox";
 import type { InboxSnapshot } from "../state/inbox";
 
@@ -332,6 +338,33 @@ export function InboxView(props: InboxViewProps) {
             </button>
           </div>
           {typed.trim() ? <div className="ir-when muted" data-testid="inbox-decision-hint">Your words are sent instead of the option.</div> : null}
+        </div>
+      );
+    }
+    const pull = prOf(row);
+    if (pull) {
+      return (
+        <div className="ir-body">
+          {pull.title ? <div className="ir-text" data-testid="inbox-pr-title">{pull.title}</div> : null}
+          {pull.url ? (
+            <div className="ir-answer">
+              <a className="ir-link" data-testid="inbox-pr-link" href={pull.url} target="_blank"
+                 rel="noopener noreferrer" aria-disabled={props.blocked ? "true" : undefined}
+                 onClick={(e) => { if (blockedNow.current) e.preventDefault(); }}>
+                Open on GitHub
+              </a>
+            </div>
+          ) : null}
+        </div>
+      );
+    }
+    const unread = prUnavailableOf(row);
+    if (unread) {
+      return (
+        <div className="ir-body">
+          {unread.map((r) => (
+            <div className="ir-when muted" key={r.repo} data-testid="inbox-pr-unavailable">{r.repo}: {r.reason}</div>
+          ))}
         </div>
       );
     }
