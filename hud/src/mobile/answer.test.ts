@@ -296,6 +296,55 @@ describe("the phone app answers (P-4)", () => {
     expect(h.root.querySelector('[data-testid="m-flash"]')!.textContent).toBe("Sent to the asking chat.");
   });
 
+  // QH: an approval deferred during quiet hours.
+  const DEFER = (detail: Record<string, unknown> = {}, over: Record<string, unknown> = {}) => row({
+    id: "defer:D1", kind: "deferred", rank: 4, thread_id: "aaaaaaaa", title: "Bash is waiting for your morning approval",
+    detail: { deferral_id: "D1", tool: "Bash", grantable: true, expired: false, hud_only: false,
+      card: { tool: "Bash", command: "make deploy " + H, reason: H, args: { command: "make deploy" } }, ...detail },
+    ...over } as never);
+
+  it("Approve and retry on a deferred row: a challenge for it, the passkey, then the answer with its assertion", async () => {
+    const h = harness([DEFER()]);
+    h.replies["/m/api/inbox/defer%3AD1/answer/options"] = { status: 200, body: { decision: "allow", publicKey: { challenge: "AAEF" } } };
+    h.replies["/m/api/inbox/defer%3AD1/answer"] = { status: 200, body: { ok: true, delivery: "queued", note: "Approved once for 30 minutes." } };
+    h.app.start();
+    await h.settle();
+    noMarkup(h.root);
+    expect(h.root.querySelector('[data-testid="m-command"]')!.textContent).toBe("make deploy " + H);
+    expect(h.credential).not.toHaveBeenCalled();
+    await h.click("m-deferred-retry");
+    expect(h.posts.map((p) => [p.path, p.value])).toEqual([
+      ["/m/api/inbox/defer%3AD1/answer/options", { decision: "allow" }],
+      ["/m/api/inbox/defer%3AD1/answer", { action: "retry", assertion: { id: "cred", response: {} } }]]);
+    expect(h.credential).toHaveBeenCalledWith({ challenge: "AAEF" });
+    expect(h.root.querySelector('[data-testid="m-flash"]')!.textContent).toBe("Approved once for 30 minutes.");
+  });
+
+  it("a cancelled passkey approves nothing; Leave it needs no passkey", async () => {
+    const h = harness([DEFER()]);
+    h.replies["/m/api/inbox/defer%3AD1/answer/options"] = { status: 200, body: { publicKey: { challenge: "AAEF" } } };
+    h.credential.mockResolvedValueOnce(null);
+    h.app.start();
+    await h.settle();
+    await h.click("m-deferred-retry");
+    expect(h.posts.map((p) => p.path)).toEqual(["/m/api/inbox/defer%3AD1/answer/options"]);
+    expect(h.root.querySelector('[data-testid="m-answer-note"]')!.textContent).toContain("Nothing was approved");
+    h.credential.mockClear();
+    await h.click("m-deferred-leave");
+    expect(h.posts[1]).toEqual({ path: "/m/api/inbox/defer%3AD1/answer", value: { action: "leave" } });
+    expect(h.credential).not.toHaveBeenCalled();
+  });
+
+  it("a Browser card or a day-old deferred row offers Leave it only", async () => {
+    for (const r of [DEFER({ hud_only: true }), DEFER({ grantable: false }), DEFER({}, { rank: 8 })]) {
+      const h = harness([r]);
+      h.app.start();
+      await h.settle();
+      expect(h.root.querySelector('[data-testid="m-deferred-retry"]')).toBeNull();
+      expect(h.root.querySelector('[data-testid="m-deferred-leave"]')).not.toBeNull();
+    }
+  });
+
   it("the inbox says limited when §4.1 does not hold", async () => {
     const h = harness([APPR]);
     h.gets["/m/api/me"] = { ok: true, body: { secure: { ok: false, failed: "listeners", label: "something else listens on the phone's port" } } };
@@ -307,7 +356,7 @@ describe("the phone app answers (P-4)", () => {
   it("read-only rows keep saying Answer at the desk without answers (the view's P-3 mode)", () => {
     const view = inboxView(parseInbox([APPR])!, () => {});
     expect(view.querySelector('[data-testid="m-desk-only"]')!.textContent).toBe("Answer at the desk");
-    const answers: InboxAnswers = { openCard: () => {}, send: () => {}, busy: new Set(), notes: new Map(), drafts: new Map(), picks: new Map() };
+    const answers: InboxAnswers = { openCard: () => {}, send: () => {}, retry: () => {}, busy: new Set(), notes: new Map(), drafts: new Map(), picks: new Map() };
     const live = inboxView(parseInbox([APPR, row({ id: "prop:bbbbbbbb", kind: "proposal", rank: 3, task_id: "bbbbbbbb" })])!, () => {}, answers);
     expect(live.querySelector('[data-testid="m-open-card"]')).not.toBeNull();
     expect(live.querySelector('[data-testid="m-desk-only"]')!.textContent).toBe("Withdraw at the desk");

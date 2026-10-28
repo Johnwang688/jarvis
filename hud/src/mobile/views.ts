@@ -12,8 +12,11 @@
 // Nothing is answered by a tap on the row itself, by Enter, or without the
 // button. Without them (P-3's read-only view) every row says "Answer at the
 // desk". A proposal's withdraw and a task's resume or cancel stay at the desk.
+// QH: an approval deferred during quiet hours shows the card it would have
+// shown, "Approve and retry" (the app asks for the passkey first, as for an
+// Allow) where the daemon and the HUD's rules allow it, and "Leave it".
 
-import { clockOf, decisionOf, groupRows, oneLine, questionOf, briefOf, textBlock, type InboxRow } from "../lib/inbox";
+import { clockOf, decisionOf, deferredOf, groupRows, oneLine, questionOf, briefOf, textBlock, type InboxRow } from "../lib/inbox";
 import { recentChats, moreLabel } from "../lib/recentChats";
 import type { Thread } from "../types";
 import { renderPhoneMarkdown } from "./markdown";
@@ -91,6 +94,19 @@ function approvalDetail(row: InboxRow, box: HTMLElement) {
 }
 
 /** Any other kind's detail (one P-3 does not know, such as A3's missed rows): its text fields, as text. */
+function deferredDetail(row: InboxRow, box: HTMLElement) {
+  const d = deferredOf(row)!;
+  if (d.headline) box.append(el("p", "headline", d.headline));
+  box.append(el("div", "label", "Tool"), el("p", "", d.tool));
+  if (d.command) box.append(el("div", "label", "Command"), testid(el("pre", "code", d.command), "m-command"));
+  if (d.reason) box.append(el("div", "label", "Why"), el("p", "", d.reason));
+  if (d.args && !d.command) box.append(el("div", "label", "Arguments"), el("pre", "code", d.args));
+  box.append(testid(el("p", "muted small", d.hudOnly
+    ? "A Browser action is approved only while its page is live: ask again from its chat at the desk."
+    : d.expired ? "Over a day old: it can only be left."
+      : "Denied while you slept. Approve and retry allows exactly this call once, for 30 minutes."), "m-deferred-note"));
+}
+
 function genericDetail(row: InboxRow, box: HTMLElement) {
   for (const [key, value] of Object.entries(row.detail).slice(0, 12)) {
     if (typeof value !== "string" && typeof value !== "number") continue;
@@ -104,6 +120,8 @@ function genericDetail(row: InboxRow, box: HTMLElement) {
 export interface InboxAnswers {
   openCard: (row: InboxRow) => void;
   send: (row: InboxRow, body: Record<string, unknown>) => void;
+  /** QH: Approve and retry on a deferred row; the app asks for the passkey first. */
+  retry: (row: InboxRow) => void;
   /** Rows whose answer is on its way. */
   busy: ReadonlySet<string>;
   /** A row's answer note ("Sent.", a refusal's words). */
@@ -116,6 +134,7 @@ export interface InboxAnswers {
 /** The kinds the phone answers itself (P-4). */
 export function answersHere(row: InboxRow): boolean {
   if (row.kind === "approval" || row.kind === "question" || row.kind === "task_question") return true;
+  if (deferredOf(row)) return true;
   return row.kind === "decision" && !!decisionOf(row)?.open;
 }
 
@@ -127,8 +146,19 @@ function sendButton(label: string, id: string, onClick: () => void): HTMLButtonE
 function answerBox(row: InboxRow, a: InboxAnswers): HTMLElement {
   const box = testid(el("div", "m-answer"), "m-answer-box");
   const busy = a.busy.has(row.id);
+  const deferred = deferredOf(row);
   if (row.kind === "approval") {
     box.append(tap("Open the card to answer", () => a.openCard(row), "quiet m-send", "m-open-card"));
+  } else if (deferred) {
+    // Plain buttons, neither defaulted; the retry asks for the passkey first.
+    if (deferred.grantable) {
+      const retry = tap("Approve and retry", () => a.retry(row), "quiet m-send", "m-deferred-retry");
+      retry.disabled = busy;
+      box.append(retry);
+    }
+    const leave = tap("Leave it", () => a.send(row, { action: "leave" }), "quiet m-send", "m-deferred-leave");
+    leave.disabled = busy;
+    box.append(leave);
   } else if (row.kind === "question" || row.kind === "task_question") {
     const text = testid(el("textarea", "m-text"), "m-answer-text");
     text.setAttribute("aria-label", "Your answer");
@@ -205,6 +235,7 @@ export function inboxRow(row: InboxRow, open: (row: InboxRow) => void, answers?:
   if (meta) card.append(el("p", "row-meta", meta));
   const box = testid(el("div", "row-detail"), "m-detail");
   if (row.kind === "approval") approvalDetail(row, box);
+  else if (deferredOf(row)) deferredDetail(row, box);
   else if (row.kind === "question" || row.kind === "task_question") {
     const q = questionOf(row);
     if (q.text) box.append(testid(el("p", "question", q.text), "m-question"));

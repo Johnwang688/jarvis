@@ -277,9 +277,10 @@ export const api = {
    * rank 5 to 8 only; the daemon judges the row's rank itself (409 otherwise). */
   markInbox: (id: string, body: MarkBody) => req<unknown>(markPath(id), json(body)),
   /** One answer, dispatched by the daemon to the item's own surface: `{text}`
-   * for a question, `{withdraw: true}` for a proposal. A 409 is "already
+   * for a question, `{withdraw: true}` for a proposal, `{action: "retry"|"leave"}`
+   * for an approval deferred during quiet hours (QH). A 409 is "already
    * answered or gone". The id goes through `encodeURIComponent` (A1 decodes once). */
-  answerInbox: (id: string, body: { text: string } | { withdraw: true }) =>
+  answerInbox: (id: string, body: { text: string } | { withdraw: true } | { action: "retry" | "leave" }) =>
     req<unknown>(answerPath(id), json(body)),
   /** A decision's answer (inbox B1): `{choice}` (an option's index) or `{text}`,
    * recorded, then delivered to the asking chat as an owner message. A 409 is
