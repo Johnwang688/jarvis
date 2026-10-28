@@ -1822,6 +1822,20 @@ routes"). Not deployed: the owner's step is `jarvis hud rebuild` and a reload
   marked by the phone's own bordered "suggested" element before the option,
   never text an option could write), the why, "Answer at the desk" while
   open, and "Your answer" once recorded (`mobile/views.ts`).
+- **Pull requests (inbox B3, IN-4, 2026-10-27).** A `pr` row (daemon's
+  half: control-plane notes, "PRs") sits in "Waiting on you" (rank 5) and
+  is counted. Its title and line are the daemon's code-built ones. `lib/inbox`
+  `prOf` reads its `detail`: the PR's own title as one line of text, and its
+  URL only when it is exactly `https://github.com/<repo>/pull/<number>` for
+  the row's own repo and number (checked again here). The one control is
+  "Open on GitHub", a plain `<a target="_blank" rel="noopener noreferrer">`
+  (none when the URL fails). A click on it opens the page and answers
+  nothing; under a card it is inert and the click is prevented. No chat or
+  task link. A `pr_unavailable` row ("PR list unavailable") lists each
+  repository and the daemon's reason (`prUnavailableOf`), is counted, and
+  so the view never says "Nothing is waiting on you" while it shows.
+  Existing classes only. Tests: `components/InboxView.prs.test.ts` and the
+  `prs` section of `tests/face/hud_v2_inbox_check.py`.
 - Tests: `lib/inbox.test.ts`, `state/inbox.test.ts`,
   `components/InboxView.test.ts`, the `lib/workspace.test.ts` inbox case, and
   `tests/face/hud_v2_inbox_check.py` (97 checks since A3's `missed` section, its own `MockDaemon(0)`, the

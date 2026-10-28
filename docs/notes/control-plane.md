@@ -931,6 +931,79 @@ without text), plus `inbox_check`, `archive_check`, the catalog pin in
 `mcp_session_check`, the Bypass case in `claude_provider_check` and the
 decision row in `remote_api_check`.
 
+**PRs (inbox B3, IN-4, 2026-10-27).** Open pull requests, as rank-5 rows.
+The module is `jarvis/v2/inbox_prs.py` (SELF_PROTECTED). The owner's answer to
+design §10 question 4, on 2026-10-27: **every open, non-draft PR in each
+project's GitHub repository**, not only PRs that Jarvis pushed.
+
+- **The poll.** `PrSource` runs on a thread of its own in the daemon. It
+  polls every 5 minutes (`POLL_INTERVAL_S`). A `task_status_changed` also
+  polls, through `Inbox.observe`, which only calls `poke` (an event). The
+  poll waits `DEBOUNCE_S` (10 s) after a poke, and never runs sooner than
+  `MIN_GAP_S` (30 s) after the last one. Nothing runs until
+  `attach_system()`, which only daemon2's `main()` calls, as with
+  `remote_secure`. So an embedded or test daemon never runs `gh` and has no
+  PR rows. `Daemon.start()` only starts the thread; `Daemon.stop()` stops
+  it and kills a running `gh`.
+- **Which repositories.** Each project that is not archived. Its root's git
+  metadata is validated without running git (`codex_config.git_dirs`). Then
+  `remote.origin.url` is read from a private copy of the repository's config
+  with `--no-includes` (`chat_git._origin_url`), and `chat_git.github_repo`
+  keeps github.com `OWNER/REPO` only. Anything else is skipped. No hook,
+  include or executable config runs. Two projects on one repository read it
+  once; such a row has no `project_id`.
+- **The call.** `gh pr list --repo OWNER/REPO --state open --limit 100
+  --json number,title,headRefName,headRefOid,isDraft,url,statusCheckRollup,mergeStateStatus,createdAt`.
+  An exact argv, no shell, in `/`. The environment is
+  `chat_git._owner_env()`: the owner's HOME and PATH, no GIT_*, no tokens
+  from the daemon's environment, prompts and pagers off. Stderr is never
+  read, since it could carry a token. The run has a 30 s deadline
+  (`GH_TIMEOUT_S`) and a 2 MiB output bound (`OUTPUT_CAP`), in its own
+  process group, killed whole on a timeout, an overflow or a stop.
+- **Validation.** The answer must be a JSON list of at most 100 PRs, each
+  with the expected types, and no number twice. Anything else fails the
+  repository ("malformed"). Drafts are dropped. A branch is shown only when
+  `chat_git.valid_branch` accepts it. The checks summary is `passing`,
+  `failing`, `pending` or `none`; a value it does not know counts as
+  pending, never passing.
+- **Rows.** Id `pr:OWNER/REPO#N`, kind `pr`, rank 5. The title is built in
+  code from the number and state: "PR #N is ready to merge", "has merge
+  conflicts", "has failing checks", "is behind its base branch", "waits on
+  its checks", "is held by its branch rules" or "waits on you". `blocks` is
+  `OWNER/REPO · branch <name> · checks <summary>`. `asked_at` is the PR's
+  creation time, so older PRs sort first. The PR's own title is untrusted.
+  It gets B1's treatment: `chat_reads.scrub`, `decisions.display_text`, the
+  scrub again, one line, at most 300 characters. It is only in
+  `detail.title`. `detail.url` is the URL only when it is exactly
+  `https://github.com/<OWNER>/<REPO>/pull/<N>` for the repository asked and
+  the PR's own number (owner and repo compared without case); else None.
+- **Failure is visible.** A repository whose list fails has no PR rows. The
+  last good list is dropped, not kept stale, so a PR merged meanwhile never
+  shows as waiting. One row says so: id `prx:list`, kind `pr_unavailable`,
+  rank 5, "PR list unavailable for OWNER/REPO" (or "for N repositories").
+  Its `detail.repos` lists each repository, a reason in the module's own
+  words (`REASONS`: not installed, not logged in (exit 4), no answer in
+  time, too large, failed, could not be read) and when it last read well.
+  So an empty list never reads as "nothing waiting".
+- **Freshness.** Each poll replaces the snapshot. A merged or closed PR is
+  gone after the next poll. The poll publishes `inbox_changed` `{ids,
+  reason: "pr_poll"}` only when a row came, went or changed, with no text.
+- **Never in the way.** `inbox.rows` reads the last snapshot under the
+  source's own lock, which no `gh` call holds. A slow `gh` never stalls
+  `GET /inbox`, the daemon's lock or `Daemon.start()`.
+- **No new authority.** `POST /inbox/pr:…/answer` and `prx:…` are 400, as a
+  missed row is. Merging stays where it was: the owner's own `gh`, or an
+  agent's card under the merge gate. The list is reached only through the
+  owner-only `GET /inbox`. Nothing new is in tools, MCP or the API
+  listener; `tests/v2/archive_check.py` also refuses `inbox_prs` imports,
+  `PrSource` and `.prs.rows`/`.prs.poll` in every tool module. The phone
+  shows a PR row's title and line only (no detail field of it is in
+  `remote_api.DETAIL_FIELDS`).
+
+Tests: `tests/v2/inbox_prs_check.py` (a fake `gh` script on disk, no
+network), `hud/src/components/InboxView.prs.test.ts` and the `prs` section
+of `tests/face/hud_v2_inbox_check.py`.
+
 ## The phone's remote listener (phone C1 / P-1, 2026-10-25)
 
 `jarvis/v2/remote_listener.py` (SELF_PROTECTED) is v2's fourth listener
