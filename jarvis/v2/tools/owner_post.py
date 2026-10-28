@@ -11,7 +11,7 @@ own). It reaches the daemon's post service (`jarvis/v2/decisions.py`,
 dismiss, approve or mark anything (a check's results are the owner's alone,
 IN-6), and its module names none of the owner's routes
 (`tests/v2/archive_check.py`, `tests/v2/owner_post_check.py`,
-`tests/v2/inbox_checks_check.py`).
+`tests/v2/live_checks_check.py`).
 
 Bound as `chat_send` is (chat-to-chat CC-3, CC-6, CC-7 and P-6), checked
 twice: here first (`runtime.at_desk()` and `runtime.depth() == 0`), then by

@@ -256,8 +256,8 @@ class DecisionStore:
     `_lock`, so the caps are counted and the file written in one step.
 
     The folder's safe I/O (dir fds, O_NOFOLLOW, O_NONBLOCK reads, O_EXCL temp
-    then fsync then replace, 0700/0600) is shared with the checks' store
-    (`checks.CheckStore`, inbox B2), which names its own folder, file names
+    then fsync then replace, 0700/0600) is shared with the live checks'
+    store (`checks.py`, inbox B2), which names its own folder, file names
     and record shape through the four class attributes below."""
 
     _SUB = "decisions"          # the folder under `inbox/`
@@ -613,7 +613,7 @@ class OwnerPosts:
     def __init__(self, daemon: Any, store: DecisionStore | None, checks: Any = None):
         self.daemon = daemon
         self.store = store
-        self.checks = checks        # `checks.CheckStore` (inbox B2), or None
+        self.checks = checks        # the live checks' store (inbox B2, `checks.py`), or None
         self.closed = False
 
     def _refuse_caller(self, caller) -> tuple[str | None, Any]:
@@ -716,8 +716,8 @@ class OwnerPosts:
         """Post one check (inbox B2, IN-5/IN-6): the decision's binding, caps,
         scrub, cleaning and provenance, with the check's own fields and caps
         (`checks.refuse_fields`). A step is text only: nothing here runs it,
-        and only the owner records a result (`checks.CheckStore.mark`, which
-        this service never names)."""
+        and only the owner records a result (the inbox's owner-only route,
+        which this service never names)."""
         from . import chat_reads
         from . import checks as _checks
         if self.closed or self.checks is None:

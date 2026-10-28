@@ -112,5 +112,42 @@ def handle(h, mock, method: str, path: str) -> bool:
         h._json({"ok": True, "decision_id": decision_id, "delivery": "queued",
                  "note": "Sent to the asking chat; it runs your answer after the turn already running."})
         return True
+    if parts == ["inbox", "checks", "import"] and method == "POST":
+        # Inbox B2 (§6): `{path}` returns the scripted drafts, unsaved;
+        # `{path, digest, save}` saves one.
+        body = h._body()
+        s.setdefault("imports", []).append(body)
+        mock.calls.append(("POST", "/inbox/checks/import", body if isinstance(body, dict) else {}))
+        if isinstance(body, dict) and "save" in body:
+            h._json({"ok": True, "check_id": "c00000000000a", "index": body["save"]})
+        else:
+            h._json(s.get("import_reply") or {"path": "", "digest": "", "drafts": []})
+        return True
+    if len(parts) == 5 and parts[1] == "checks" and parts[3] == "steps" and method == "POST":
+        # Inbox B2 (IN-6): `POST /inbox/checks/<id>/steps/<n>` `{verdict, note}`.
+        body = h._body()
+        check_id, step = unquote(parts[2], errors="strict"), int(parts[4])
+        s.setdefault("marked", []).append((path, check_id, step, body))
+        mock.calls.append(("POST", "/inbox/checks/*/steps/*", {"id": check_id, "step": step,
+                                                              **(body if isinstance(body, dict) else {})}))
+        row_id = f"chk:{check_id}"
+        scripted = s["answer_status"].get(row_id)
+        if scripted:
+            status, payload = scripted
+            h._json(payload, status)
+            return True
+        row = next((r for r in s["rows"] if r.get("id") == row_id), None)
+        if row is None:
+            h._err(404, "no such check")
+            return True
+        detail = row["detail"]
+        detail["results"] = [r for r in detail["results"] if r["step"] != step] + [
+            {"step": step, "verdict": body["verdict"], "note": body.get("note", ""), "at": "2026-10-25T10:00:00+00:00"}]
+        done = len(detail["results"]) == len(detail["steps"])
+        if done:
+            detail["done"], row["rank"] = True, 8
+        changed(mock, [row_id], "check_marked")
+        h._json({"ok": True, "check_id": check_id, "step": step, "done": done})
+        return True
     h._err(404, "route not found")
     return True

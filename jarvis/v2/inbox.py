@@ -83,6 +83,15 @@ bus (`decision_posted`, `decision_answered`), which `Inbox.observe` turns
 into `inbox_changed`. One source or record that cannot be read never takes
 the projection down.
 
+**Live checks (B2, IN-6).** A check `owner_post` posts (or the owner
+imports from a runbook, `POST /inbox/checks/import`, unsaved until the
+owner saves a draft) is a `check` row at rank 7, the ones whose PRs are
+merged first; done, it is a rank 8 receipt for `checks.DONE_WINDOW`. Its
+result is the owner's alone: `POST /inbox/checks/<id>/steps/<n>`
+(`mark_check_step`) is the only caller of the store's mark, and it refuses
+(409) a check whose PRs `checks.Deployment` does not confirm are in the
+running build. Steps are text; nothing here runs one.
+
 This module is SELF_PROTECTED (`jarvis/tools/files.py`): it decides what the
 owner sees as waiting.
 """
@@ -104,9 +113,10 @@ from .model import TaskState
 
 LOG = logging.getLogger(__name__)
 
-# IN-4's bands. Code, not a setting. 5 and 7 (PRs, checks) belong to later
-# packages; 6 is decisions (B1); 8 is `failed`, "denied while away" (IN-3)
-# and a decision recorded for a chat that was closed.
+# IN-4's bands. Code, not a setting. 5 (PRs) belongs to a later package; 6
+# is decisions (B1); 7 is live checks (B2); 8 is `failed`, "denied while
+# away" (IN-3), a decision recorded for a chat that was closed, and a done
+# check's receipt.
 RANK_APPROVAL = 1
 RANK_QUESTION = 2
 RANK_PROPOSAL = 3

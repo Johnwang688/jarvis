@@ -45,6 +45,17 @@ What it pins, one section each (each names the mutation it is meant to catch):
             `{text}` on Enter; under a card the row is inert, Answer disabled,
             and a trusted click, typing and Enter post nothing [auto-submit;
             submit on Enter; double post; innerHTML; not inert]
+  check     inbox B2's live checks (`POST /inbox/checks/<id>/steps/<n>`) sit
+            under "When you have time", uncounted, plain Graphite; steps are
+            text (hostile title, steps and origin make no element); Copy
+            writes the step's words to the clipboard and posts nothing; a
+            verdict posts `{verdict, note}` once; not confirmed deployed, the
+            daemon's line shows and the marks are disabled; done, the row
+            moves under "For your information" with its verdicts and the
+            receipt copies as Markdown; the import reads drafts and saves
+            only the one the owner saves; under a card the row is inert and a
+            trusted click posts nothing [auto-mark; double post; innerHTML;
+            mark while undeployed; not inert]
   card      the approval card with the Inbox open behaves exactly as it does
             with a chat pane (the same assertions, the same answers): one card,
             the veil's, never a second instance in the inbox; Enter does
@@ -1054,10 +1065,143 @@ def _decision_checks(page, mock, check, until):
     check("the title is unchanged", page.title() == TITLE, page.title())
 
 
+def chk_row(cid="c0123456789ab", thread="t1", steps=None, prs=(), markable=True, deploy_text="",
+            title="Quick review", origin="Claude · chat ‹jarvis› (t1)"):
+    """An open live check as inbox B2's projection serves it (rank 7)."""
+    steps = steps or [{"do": "Press Quick review.", "expect": "A spinner shows."},
+                      {"do": "Wait for the result.", "expect": "A panel lists findings."}]
+    return {"id": f"chk:{cid}", "kind": "check", "rank": 7,
+            "title": f"Live check {cid} from chat {thread}: 0 of {len(steps)} steps marked",
+            "blocks": deploy_text or "nothing waits; your marks are the receipt", "project_id": "p1",
+            "thread_id": thread, "task_id": None, "asked_at": _iso(-60), "expires_at": None, "origin": origin,
+            "detail": {"check_id": cid, "title": title, "prs": list(prs), "steps": steps, "results": [],
+                       "done": False, "deploy": {"state": "deployed" if markable else "not confirmed deployed",
+                                                 "text": deploy_text, "markable": markable},
+                       "merged": False, "deployed_sha": None, "created_at": _iso(-60), "imported_from": None}}
+
+
+def _marked(mock):
+    return list(_st(mock).get("marked", []))
+
+
+def _check_checks(page, mock, check, until):
+    """Inbox B2 (IN-6): live check rows, rank 7, marked at /inbox/checks/<id>/steps/<n>."""
+    hostile = chk_row(title="Review " + HOSTILE, origin="Claude · chat ‹" + HOSTILE + "› (t1)",
+                      steps=[{"do": "Run " + HOSTILE, "expect": "It shows " + HOSTILE},
+                             {"do": "rm -rf ~/x", "expect": "Nothing happens."}])
+    gated = chk_row("c00000000000d", prs=(301,), markable=False,
+                    deploy_text="Not confirmed deployed: no merge commit for #301 in this checkout.")
+    _st(mock)["marked"] = []
+    _open(page, mock, until, basic_rows() + [hostile, gated])
+    page.evaluate("""() => { window.__copied = [];
+      Object.defineProperty(navigator, 'clipboard', { configurable: true,
+        value: { writeText: (t) => { window.__copied.push(t); return Promise.resolve(); } } }); }""")
+    row = _row(page, "chk:c0123456789ab")
+    time_ids = page.evaluate("() => [...document.querySelectorAll('[data-testid=\"inbox-group-time\"] "
+                             "[data-testid=\"inbox-row\"]')].map(r => r.dataset.id)")
+    check("a check sits under 'When you have time'", "chk:c0123456789ab" in time_ids, str(time_ids))
+    check("it is not counted: the count stays at ranks 1 to 5", _count(page) == "3", str(_count(page)))
+    border = row.evaluate("e => getComputedStyle(e).borderLeftColor")
+    check("Graphite: a check row is neither amber, red nor the selection cyan",
+          border not in (AMBER, RED, "rgb(111, 195, 223)"), border)
+    time.sleep(0.4)
+    check("nothing is marked by showing it [mutation: auto-mark]", _marked(mock) == [], str(_marked(mock)))
+    imgs = page.evaluate("() => document.querySelectorAll('[data-testid=\"inbox-view\"] img').length")
+    check("its title, steps and origin are literal text: no element made, nothing ran [mutation: innerHTML]",
+          imgs == 0 and page.evaluate("window.__pwned === undefined")
+          and HOSTILE in row.locator('[data-testid="inbox-check-title"]').inner_text()
+          and HOSTILE in row.locator('[data-testid="inbox-check-do"]').first.inner_text()
+          and HOSTILE in row.locator('[data-testid="inbox-origin"]').inner_text(), str(imgs))
+    steps = row.locator('[data-testid="inbox-check-step"]')
+    steps.nth(1).locator('[data-testid="inbox-check-copy"]').click()
+    until(lambda: page.evaluate("window.__copied.length") > 0, timeout=3)
+    check("Copy puts the step's words on the clipboard and posts nothing [mutation: copy runs]",
+          page.evaluate("window.__copied") == ["rm -rf ~/x"] and _marked(mock) == [],
+          str(page.evaluate("window.__copied")))
+    steps.nth(0).locator('[data-testid="inbox-check-note"]').fill("looked right")
+    steps.nth(0).locator('[data-testid="inbox-check-note"]').press("Enter")
+    time.sleep(0.3)
+    check("Enter in a note marks nothing", _marked(mock) == [], str(_marked(mock)))
+    steps.nth(0).locator('[data-testid="inbox-check-pass"]').dblclick()
+    until(lambda: _marked(mock), timeout=3)
+    time.sleep(0.4)
+    got = _marked(mock)
+    check("Pass posts {verdict, note} once, to /inbox/checks/<id>/steps/0 [mutation: double post]",
+          len(got) == 1 and got[0][0] == "/inbox/checks/c0123456789ab/steps/0"
+          and got[0][3] == {"verdict": "pass", "note": "looked right"}, str(got))
+    # The gated check: its line shows, its marks are off.
+    grow = _row(page, "chk:c00000000000d")
+    check("not confirmed deployed: the daemon's line shows and every mark is off [mutation: mark while undeployed]",
+          "Not confirmed deployed" in grow.locator('[data-testid="inbox-check-deploy"]').inner_text()
+          and all(grow.locator(f'[data-testid="inbox-check-{v}"]').first.is_disabled() for v in ("pass", "fail", "skip")))
+    # The second step done: the row moves to the receipt band.
+    row = _row(page, "chk:c0123456789ab")
+    row.locator('[data-testid="inbox-check-step"]').nth(1).locator('[data-testid="inbox-check-fail"]').click()
+    until(lambda: page.evaluate("() => !!document.querySelector('[data-testid=\"inbox-group-fyi\"] "
+                                "[data-id=\"chk:c0123456789ab\"]')"), timeout=3)
+    row = _row(page, "chk:c0123456789ab")
+    verdicts = row.evaluate("e => [...e.querySelectorAll('[data-testid=\"inbox-check-step\"]')].map(s => s.dataset.verdict)")
+    check("done: under 'For your information' with its verdicts and no marks left",
+          verdicts == ["pass", "fail"] and row.locator('[data-testid="inbox-check-pass"]').count() == 0, str(verdicts))
+    row.locator('[data-testid="inbox-check-receipt"]').click()
+    until(lambda: page.evaluate("window.__copied.length") > 1, timeout=3)
+    receipt = page.evaluate("window.__copied[1]")
+    check("the receipt copies as Markdown, with one heading and the verdicts",
+          receipt.startswith("## Live check c0123456789ab:") and "1. **PASS**" in receipt and "2. **FAIL**" in receipt
+          and sum(1 for line in receipt.splitlines() if line.startswith("#")) == 1, receipt[:200])
+    # The import: drafts are read, only Save stores one.
+    _st(mock)["imports"] = []
+    _st(mock)["import_reply"] = {"path": "/p/docs/plans/x.md", "digest": "d1", "drafts": [
+        {"index": 0, "title": "First (#5)", "prs": [5], "steps": [{"do": "a", "expect": "b"}], "savable": True,
+         "reason": None},
+        {"index": 1, "title": "VEX view", "prs": [], "steps": [], "savable": False,
+         "reason": "it has no numbered steps"}]}
+    page.locator('[data-testid="inbox-import-toggle"]').click()
+    page.locator('[data-testid="inbox-import-path"]').fill("/p/docs/plans/x.md")
+    page.locator('[data-testid="inbox-import-read"]').click()
+    until(lambda: page.locator('[data-testid="inbox-import-draft"]').count() == 2, timeout=3)
+    check("the import reads drafts and saves none by itself",
+          _st(mock)["imports"] == [{"path": "/p/docs/plans/x.md"}], str(_st(mock)["imports"]))
+    page.locator('[data-testid="inbox-import-save"]').click()
+    until(lambda: len(_st(mock)["imports"]) > 1, timeout=3)
+    check("Save confirms one draft with the file's digest",
+          _st(mock)["imports"][-1] == {"path": "/p/docs/plans/x.md", "digest": "d1", "save": 0},
+          str(_st(mock)["imports"][-1]))
+    # Under a card the row is inert.
+    _st(mock)["rows"].append(chk_row("c00000000000e"))
+    mock_inbox.changed(mock, ["chk:c00000000000e"], "check_posted")
+    until(lambda: "chk:c00000000000e" in _row_ids(page), timeout=3)
+    c = card("chkcard0001")
+    mock.world["approvals"].append(c)
+    mock.emit("approval_requested", c)
+    cardloc = page.locator('[data-testid="approval-card"]')
+    until(lambda: cardloc.count() == 1, timeout=4)
+    row = _row(page, "chk:c00000000000e")
+    check("under a card the check row is inert and its marks disabled",
+          row.evaluate("e => !!e.closest('[inert]')") and row.locator('[data-testid="inbox-check-pass"]').first.is_disabled())
+    posts = len(_marked(mock))
+    for sel in ('[data-testid="inbox-check-pass"]', '[data-testid="inbox-check-copy"]',
+                '[data-testid="inbox-check-note"]'):
+        found = row.locator(sel).first.bounding_box()
+        if found:
+            page.mouse.click(found["x"] + found["width"] / 2, found["y"] + found["height"] / 2)
+    page.keyboard.type("x")
+    page.keyboard.press("Enter")
+    time.sleep(0.4)
+    check("a trusted click, typing and Enter under the card mark and copy nothing [mutation: not inert]",
+          len(_marked(mock)) == posts and page.evaluate("window.__copied.length") == 2 and cardloc.count() == 1,
+          f"{len(_marked(mock)) - posts} posts")
+    page.keyboard.press("Escape")
+    until(lambda: cardloc.count() == 0, timeout=4)
+    page.locator('[data-testid="inbox-import-toggle"]').click()
+    check("the title is unchanged", page.title() == TITLE, page.title())
+
+
 # ---------------------------------------------------------------------------
 
 SECTIONS = (_sidebar_checks, _groups_checks, _live_checks, _answer_checks, _conflict_checks, _withdraw_checks,
-            _reconnect_checks, _clicks_checks, _hostile_checks, _missed_checks, _decision_checks, _card_checks,
+            _reconnect_checks, _clicks_checks, _hostile_checks, _missed_checks, _decision_checks, _check_checks,
+            _card_checks,
             _older_checks, _aurora_checks)
 
 

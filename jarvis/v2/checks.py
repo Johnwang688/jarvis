@@ -12,9 +12,9 @@ on the clipboard and nothing more.
 
 **Results are the owner's alone (IN-6).** `CheckStore.mark` records a
 verdict (`pass`, `fail` or `skip`) and a note for one step. Its one caller is
-the inbox's owner-only route `POST /inbox/checks/<id>/steps/<n>`
-(`inbox.mark_check_step`): no tool, MCP entry, CLI path or API-listener route
-reaches it (`tests/v2/archive_check.py`, `tests/v2/inbox_checks_check.py`).
+the inbox's owner-only step route (`mark_check_step` in the inbox module,
+which this one never imports): no tool, MCP entry, CLI path or API-listener route
+reaches it (`tests/v2/archive_check.py`, `tests/v2/live_checks_check.py`).
 A step marked again is replaced (the owner's own correction); nothing ever
 clears a result. When every step has a verdict the check is done, and the
 row moves to the "For your information" band for `DONE_WINDOW`, where the
@@ -61,7 +61,7 @@ from .decisions import (CapReached, DecisionStore, _ident, _int, _parse_time,
 
 LOG = logging.getLogger(__name__)
 
-# -- the bounds; pinned by tests/v2/inbox_checks_check.py ---------------------------------
+# -- the bounds; pinned by tests/v2/live_checks_check.py ---------------------------------
 OPEN_PER_THREAD = 5          # open (not done) checks one chat may have waiting
 PER_THREAD_DAY = 10          # posted by one chat in any rolling 24 hours
 PER_DAY = 20                 # posted by agents in all in any rolling 24 hours

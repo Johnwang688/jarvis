@@ -795,10 +795,12 @@ class OwnerOnly(Base):
             self.assertIsNone(self.INBOX_NAME.search(name), name)
         # Inbox B1: `owner_post` writes a decision through the post service
         # (`decisions.py`), which names none of the inbox's routes either.
-        from jarvis.v2 import decisions
+        # Inbox B2: a check is posted through the same service, which uses
+        # `checks.py` for its fields; neither names the owner's step marks.
+        from jarvis.v2 import checks, decisions
         from jarvis.v2.tools import owner_post
         sources = [v2tools, mcp, mcp_catalog, session_tools, bridge, chat_relay, fastpath, decisions,
-                   owner_post]
+                   owner_post, checks]
         for name in reachable:
             func = getattr(tools.REGISTRY.get(name), "func", None)
             if func is not None:
@@ -809,6 +811,35 @@ class OwnerOnly(Base):
             text = inspect.getsource(module)
             for needle in self.INBOX_SOURCE:
                 self.assertNotIn(needle, text, f"{module.__name__} names {needle}")
+
+    # A live check's result (inbox B2, IN-6): written only by the owner's
+    # step route. No tool, MCP catalog entry, session tool, Discord or CLI
+    # module names the route, the function behind it or the store's mark.
+    CHECK_RESULT_SOURCE = ("mark_check_step", "/steps/", "checks/import", "import_checks", ".mark(",
+                           "CheckStore", "check_marked")
+
+    def test_no_tool_or_cli_records_a_check_result(self):
+        from jarvis import tools
+        from jarvis.v2 import bridge, chat_relay, decisions, mcp, mcp_catalog, session_tools
+        from jarvis.v2.providers import fastpath
+        import jarvis.v2.tools as v2tools
+        import jarvis.__main__ as cli          # the `jarvis` command
+        from jarvis.v2 import mcp_session, owner_ops
+        reachable = (set(fastpath.FAST_TOOLS) | set(mcp.MCP_TOOLS) | set(mcp_catalog.MCP_TOOLS)
+                     | set(session_tools.SESSION_TOOLS) | set(tools.REGISTRY))
+        sources = [v2tools, mcp, mcp_catalog, session_tools, bridge, chat_relay, fastpath, cli, owner_ops,
+                   mcp_session]
+        for name in reachable:
+            func = getattr(tools.REGISTRY.get(name), "func", None)
+            if func is not None:
+                sources.append(inspect.getmodule(func))
+        from jarvis.v2.discord import gateway
+        sources.append(gateway)
+        texts = {m.__name__: inspect.getsource(m) for m in sources if m is not None}
+        texts["decisions.OwnerPosts"] = inspect.getsource(decisions.OwnerPosts)
+        for name, text in texts.items():
+            for needle in self.CHECK_RESULT_SOURCE:
+                self.assertNotIn(needle, text, f"{name} names {needle}")
 
     # The phone's pairing window and paired passkeys (phone design PH-6,
     # P-2): the same rule. No tool, MCP catalog entry or session tool names
@@ -874,7 +905,10 @@ class OwnerOnly(Base):
     def test_the_inbox_routes_refuse_every_client_but_the_hud(self):
         for method, path, body in (("GET", "/inbox", None),
                                    ("POST", "/inbox/appr:x/answer", {"decision": "allow"}),
-                                   ("POST", "/inbox/nothing", {})):
+                                   ("POST", "/inbox/nothing", {}),
+                                   # Inbox B2 (IN-6): a check's result is the owner's alone.
+                                   ("POST", "/inbox/checks/c0123456789ab/steps/0", {"verdict": "pass"}),
+                                   ("POST", "/inbox/checks/import", {"path": "/x/docs/plans/a.md"})):
             with self.subTest(path=path):
                 self.request(method, path, body, 403)
                 self.request(method, path, body, 403, port=self.daemon.face_port)

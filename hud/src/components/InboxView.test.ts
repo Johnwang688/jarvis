@@ -49,6 +49,8 @@ function draw(over: Partial<InboxViewProps> = {}) {
     snapshot: snap(), approvals: [{ req_id: "R1" }], blocked: false,
     onOpenThread: vi.fn(), onOpenTask: vi.fn(), onAnswer: vi.fn(async () => ({ ok: true })),
     onDecide: vi.fn(async () => ({ ok: true, delivery: "queued", note: "Sent to the asking chat." })), onReread: vi.fn(),
+    onMarkCheck: vi.fn(async () => ({ ok: true, done: false })), onImportChecks: vi.fn(async () => ({})),
+    copyText: vi.fn(async () => {}),
     now: () => NOW, ...over,
   };
   act(() => root!.render(createElement(InboxView, props)));
@@ -455,5 +457,141 @@ describe("InboxView", () => {
     const p = draw();
     expect(p.onReread).toHaveBeenCalled();
     expect(document.title).toBe("J.A.R.V.I.S.");
+  });
+});
+
+describe("InboxView: live checks (inbox B2, IN-6)", () => {
+  const SHA = "f".repeat(40);
+  const checkRow = (over: Record<string, unknown> = {}, detail: Record<string, unknown> = {}) => ({
+    id: "chk:c0123456789ab", kind: "check", rank: 7, title: "Live check c0123456789ab from chat t4: 0 of 2 steps marked",
+    blocks: "nothing waits; your marks are the receipt", thread_id: "t4", origin: "Claude · chat ‹x› (t4)",
+    detail: {
+      check_id: "c0123456789ab", title: "Quick review " + HOSTILE, prs: [], done: false,
+      steps: [{ do: "Press it " + HOSTILE, expect: "A spinner" }, { do: "rm -rf ~", expect: "" }],
+      results: [], deploy: { state: "no prs", text: "", markable: true }, merged: false, deployed_sha: null,
+      created_at: "2026-10-25T09:00:00+00:00", imported_from: null, ...detail,
+    },
+    ...over,
+  });
+  const steps = (r: HTMLElement) => Array.from(r.querySelectorAll('[data-testid="inbox-check-step"]')) as HTMLElement[];
+  const btn = (el: HTMLElement, id: string) => el.querySelector(`[data-testid="${id}"]`) as HTMLButtonElement;
+
+  it("shows the steps as text in the 'When you have time' group; nothing runs and Copy only copies", async () => {
+    const p = draw({ snapshot: snap([checkRow()]) });
+    const r = rowOf("chk:c0123456789ab");
+    expect(q('[data-testid="inbox-group-time"]')!.contains(r)).toBe(true);
+    expect(r.querySelector('[data-testid="inbox-check-title"]')!.textContent).toBe("Quick review " + HOSTILE);
+    expect(r.querySelector("img")).toBeNull();
+    expect((window as any).__pwned).toBeUndefined();
+    const [first, second] = steps(r);
+    expect(first.querySelector('[data-testid="inbox-check-do"]')!.textContent).toBe("Press it " + HOSTILE);
+    expect(first.querySelector('[data-testid="inbox-check-expect"]')!.textContent).toBe("Expect: A spinner");
+    expect(second.querySelector('[data-testid="inbox-check-expect"]')).toBeNull();
+    act(() => btn(second, "inbox-check-copy").click());
+    await flush();
+    expect(p.copyText).toHaveBeenCalledWith("rm -rf ~");
+    expect(p.onMarkCheck).not.toHaveBeenCalled();
+    expect(p.onAnswer).not.toHaveBeenCalled();
+    expect(q('[data-testid="inbox-notice"]')!.textContent).toBe("Copied step 2's words.");
+  });
+
+  it("a verdict posts once with its note; Enter in the note marks nothing", async () => {
+    let release!: () => void;
+    const p = draw({ snapshot: snap([checkRow()]),
+      onMarkCheck: vi.fn(() => new Promise((ok) => { release = () => ok({ ok: true, done: false }); })) });
+    const [first] = steps(rowOf("chk:c0123456789ab"));
+    const note = first.querySelector('[data-testid="inbox-check-note"]') as HTMLInputElement;
+    type(note, "  looked fine  ");
+    act(() => { note.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })); });
+    expect(p.onMarkCheck).not.toHaveBeenCalled();
+    act(() => btn(first, "inbox-check-fail").click());
+    act(() => btn(first, "inbox-check-fail").click());
+    expect(p.onMarkCheck).toHaveBeenCalledTimes(1);
+    expect(p.onMarkCheck).toHaveBeenCalledWith("c0123456789ab", 0, { verdict: "fail", note: "looked fine" });
+    release();
+    await flush();
+    expect(p.onReread).toHaveBeenCalled();
+  });
+
+  it("not confirmed deployed: the line shows and every mark is off", () => {
+    const text = "Not confirmed deployed: no merge commit for #301 in this checkout.";
+    const p = draw({ snapshot: snap([checkRow({ blocks: text }, { prs: [301],
+      deploy: { state: "not confirmed deployed", text, markable: false } })]) });
+    const r = rowOf("chk:c0123456789ab");
+    expect(r.querySelector('[data-testid="inbox-check-deploy"]')!.textContent).toBe(text);
+    for (const step of steps(r)) {
+      for (const v of ["pass", "fail", "skip"]) expect(btn(step, `inbox-check-${v}`).disabled).toBe(true);
+    }
+    const pass = btn(steps(r)[0], "inbox-check-pass");
+    pass.removeAttribute("disabled");
+    act(() => pass.click());
+    expect(p.onMarkCheck).not.toHaveBeenCalled();
+  });
+
+  it("a 409 shows the daemon's own line", async () => {
+    const line = "Not deployed yet: #301 is merged but not in the running daemon or installed HUD.";
+    draw({ snapshot: snap([checkRow()]), onMarkCheck: vi.fn(async () => { throw new ApiError(409, line); }) });
+    act(() => btn(steps(rowOf("chk:c0123456789ab"))[0], "inbox-check-pass").click());
+    await flush();
+    expect(q('[data-testid="inbox-notice"]')!.textContent).toBe(line);
+  });
+
+  it("under a card nothing marks, copies or imports", async () => {
+    const p = draw({ blocked: true, snapshot: snap([checkRow()]) });
+    const [first] = steps(rowOf("chk:c0123456789ab"));
+    for (const id of ["inbox-check-pass", "inbox-check-copy"]) {
+      const b = btn(first, id);
+      expect(b.disabled).toBe(true);
+      b.removeAttribute("disabled");
+      act(() => b.click());
+    }
+    await flush();
+    expect(p.onMarkCheck).not.toHaveBeenCalled();
+    expect(p.copyText).not.toHaveBeenCalled();
+    expect((q('[data-testid="inbox-import-toggle"]') as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("done: rank 8 shows the verdicts and copies the receipt as Markdown, with nothing left to mark", async () => {
+    const results = [{ step: 0, verdict: "pass", note: "ok", at: "2026-10-25T09:30:00+00:00" },
+                     { step: 1, verdict: "fail", note: "## not a heading\n- not a list", at: "2026-10-25T09:31:00+00:00" }];
+    const p = draw({ snapshot: snap([checkRow({ rank: 8, title: "Live check c0123456789ab done: 1 passed, 1 failed, 0 skipped" },
+      { done: true, results, prs: [301], deployed_sha: SHA, deploy: { state: "done", text: "", markable: false } })]) });
+    const r = rowOf("chk:c0123456789ab");
+    expect(q('[data-testid="inbox-group-fyi"]')!.contains(r)).toBe(true);
+    expect(steps(r).map((s) => s.dataset.verdict)).toEqual(["pass", "fail"]);
+    expect(r.querySelector('[data-testid="inbox-check-pass"]')).toBeNull();
+    expect(r.querySelector('[data-testid="inbox-check-note"]')).toBeNull();
+    act(() => btn(r, "inbox-check-receipt").click());
+    await flush();
+    const md = (p.copyText as any).mock.calls[0][0] as string;
+    expect(md.startsWith("## Live check c0123456789ab: Quick review")).toBe(true);
+    expect(md).toContain("- Result: 1 passed, 1 failed, 0 skipped, 0 not marked");
+    expect(md).toContain("- Pull requests: #301");
+    expect(md).toContain(`- Build: ${SHA.slice(0, 12)}`);
+    expect(md).toContain("1. **PASS** Press it");
+    expect(md).toContain("   - Note: \\#\\# not a heading - not a list");
+    expect(md.split("\n").filter((l) => l.startsWith("#")).length).toBe(1);
+  });
+
+  it("imports a runbook as unsaved drafts; only Save stores one", async () => {
+    const reply = { path: "/p/docs/plans/x.md", digest: "d1", drafts: [
+      { index: 0, title: "First (#5)", prs: [5], steps: [{ do: "a", expect: "b" }], savable: true, reason: null },
+      { index: 1, title: "VEX view", prs: [], steps: [], savable: false, reason: "it has no numbered steps" }] };
+    const onImportChecks = vi.fn(async (body: any) => ("save" in body ? { ok: true, check_id: "c00000000000a" } : reply));
+    const p = draw({ snapshot: snap([]), onImportChecks });
+    act(() => (q('[data-testid="inbox-import-toggle"]') as HTMLButtonElement).click());
+    type(q('[data-testid="inbox-import-path"]') as HTMLInputElement, "/p/docs/plans/x.md");
+    act(() => (q('[data-testid="inbox-import-read"]') as HTMLButtonElement).click());
+    await flush();
+    expect(onImportChecks).toHaveBeenCalledWith({ path: "/p/docs/plans/x.md" });
+    const drafts = qa('[data-testid="inbox-import-draft"]');
+    expect(drafts.map((d) => d.dataset.savable)).toEqual(["1", "0"]);
+    expect(drafts[1].querySelector('[data-testid="inbox-import-reason"]')!.textContent).toContain("it has no numbered steps");
+    expect(onImportChecks).toHaveBeenCalledTimes(1);
+    act(() => btn(drafts[0], "inbox-import-save").click());
+    await flush();
+    expect(onImportChecks).toHaveBeenLastCalledWith({ path: "/p/docs/plans/x.md", digest: "d1", save: 0 });
+    expect(q('[data-testid="inbox-import-saved"]')!.textContent).toContain("c00000000000a");
+    expect(p.onReread).toHaveBeenCalled();
   });
 });
