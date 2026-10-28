@@ -323,6 +323,11 @@ export interface DeferredView {
   more: number;
   /** Why Approve and retry is not offered, in the HUD's own words ("" when it is, or not known). */
   whyNot: string;
+  /** AS, display only: the record's AI summary ("" when it has none), and the card's code-built Where line. */
+  summary: string;
+  where: string;
+  /** The layer that asked, for the "[layer] reason" WHY ASKED line. */
+  layer: string;
 }
 
 /** The daemon's `why_not` codes, in the HUD's words (anything else: the generic line). */
@@ -372,6 +377,9 @@ export function deferredOf(row: InboxRow): DeferredView | null {
     count: Math.max(1, num(d.count)),
     more,
     whyNot,
+    summary: hudOnly ? "" : oneLine(d.summary, 160),
+    where: hudOnly ? "" : oneLine(card.where, 200),
+    layer: oneLine(card.layer, 40),
   };
 }
 

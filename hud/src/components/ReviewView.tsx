@@ -35,6 +35,8 @@ import {
   type Section, whyWords, confirmedChanged, UNTICKED_GONE, SECTIONS,
 } from "../lib/review";
 import type { ReviewSnapshot } from "../state/review";
+import { AI_LABEL, WHERE_LABEL, WHY_LABEL, previewLine, recordSummary, toggleLabel } from "../lib/approvalSummary";
+import { reasonText } from "../lib/approvalCard";
 
 export interface ReviewViewProps {
   snapshot: ReviewSnapshot;
@@ -58,6 +60,8 @@ export function ReviewView(props: ReviewViewProps) {
   // MR-4: the boxes start unticked each time the view opens.
   const [selection, setSelection] = useState<Set<string>>(emptySelection);
   const [notes, setNotes] = useState<Record<string, string>>({});
+  // AS: items whose command the owner opened (or closed): row id -> open.
+  const [opened, setOpened] = useState<Record<string, boolean>>({});
   const [receipts, setReceipts] = useState<Record<string, { item: ReviewItem; text: string }>>({});
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [picks, setPicks] = useState<Record<string, number>>({});
@@ -162,18 +166,17 @@ export function ReviewView(props: ReviewViewProps) {
     const d = deferredOf(item.row)!;
     const id = item.row.id;
     const ticked = selection.has(id);
+    // AS: the item's control first (its Select box); the record's AI summary
+    // and code's WHY ASKED and WHERE; the command and arguments collapsed
+    // only when there is a summary, one press away. Display only: the tag
+    // binds the card and the digest (MR-6), never the summary.
+    const view = recordSummary(d.summary);
+    const open = opened[id] ?? !view.slot;
+    const why = reasonText(d.reason, d.layer);
+    const hasBlock = !!(d.command || d.args);
     return (
       <div className="ir-body" data-testid="review-deferred">
         {d.headline ? <div className="ir-text" data-testid="review-headline">{d.headline}</div> : null}
-        {d.tool ? <div className="ir-text" data-testid="review-tool">Tool: {d.tool}</div> : null}
-        {d.command ? <pre className="ir-text ir-command" data-testid="review-command">{d.command}</pre> : null}
-        {d.reason ? <div className="ir-why" data-testid="review-reason">{d.reason}</div> : null}
-        {d.args ? <pre className="ir-text ir-args" data-testid="review-args">{d.args}</pre> : null}
-        {d.count > 1 ? <div className="ir-when muted" data-testid="review-count">Asked {d.count} times while it waited.</div> : null}
-        {d.more ? <div className="ir-when muted">{d.more} more asks from this chat were denied overnight, too many to list one by one.</div> : null}
-        {!item.approve ? (
-          <div className="ir-when muted" data-testid="review-why">Not approvable here: {whyWords(item.why, item.row)}.</div>
-        ) : null}
         {item.approve || item.leave ? (
           <label className="review-tick">
             <input type="checkbox" data-testid="review-tick" data-id={id} checked={ticked}
@@ -183,6 +186,35 @@ export function ReviewView(props: ReviewViewProps) {
             <span>Select</span>
           </label>
         ) : null}
+        {!item.approve ? (
+          <div className="ir-when muted" data-testid="review-why">Not approvable here: {whyWords(item.why, item.row)}.</div>
+        ) : null}
+        {view.slot ? (
+          <div className="as-ai as-ready" data-testid="review-summary">
+            <span className="as-tag">{AI_LABEL}</span><span className="as-text">{view.text}</span>
+          </div>
+        ) : null}
+        {why ? <div className="as-line" data-testid="review-reason"><span className="k">{WHY_LABEL} </span>{why}</div> : null}
+        {d.where ? <div className="as-line" data-testid="review-where"><span className="k">{WHERE_LABEL} </span>{d.where}</div> : null}
+        {d.tool ? <div className="ir-text" data-testid="review-tool">Tool: {d.tool}</div> : null}
+        {open ? (
+          <>
+            {d.command ? <pre className="ir-text ir-command" data-testid="review-command">{d.command}</pre> : null}
+            {d.args ? <pre className="ir-text ir-args" data-testid="review-args">{d.args}</pre> : null}
+          </>
+        ) : hasBlock ? (
+          <pre className="ir-text ir-command as-preview" data-testid="review-command-preview">
+            {d.command ? previewLine(d.command) : previewLine(d.args)}
+          </pre>
+        ) : null}
+        {hasBlock && view.slot ? (
+          <button type="button" className="quiet as-toggle" data-testid="review-command-toggle" aria-expanded={open}
+                  disabled={props.blocked} onClick={() => setOpened((o) => ({ ...o, [id]: !open }))}>
+            {toggleLabel(open, d.command, d.args ? 1 : 0)}
+          </button>
+        ) : null}
+        {d.count > 1 ? <div className="ir-when muted" data-testid="review-count">Asked {d.count} times while it waited.</div> : null}
+        {d.more ? <div className="ir-when muted">{d.more} more asks from this chat were denied overnight, too many to list one by one.</div> : null}
       </div>
     );
   };
@@ -445,6 +477,11 @@ export function ReviewView(props: ReviewViewProps) {
               {confirm.map((line) => (
                 <li key={line.id} data-testid="review-confirm-item" data-id={line.id}>
                   <div className="review-where">{line.where}</div>
+                  {line.summary ? (
+                    <div className="as-ai as-ready" data-testid="review-confirm-summary">
+                      <span className="as-tag">{AI_LABEL}</span><span className="as-text">{line.summary}</span>
+                    </div>
+                  ) : null}
                   <div>Tool: {line.tool}</div>
                   <pre className="ir-command">{line.firstLine}</pre>
                 </li>

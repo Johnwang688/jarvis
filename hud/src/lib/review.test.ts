@@ -133,8 +133,8 @@ describe("the selection (MR-4)", () => {
     expect(approveBody(r, sel)).toEqual({ items: [{ id: "defer:a", tag: tag("a") }, { id: "defer:b", tag: tag("b") }] });
     expect(leaveBody(r, sel)).toEqual({ items: [{ id: "defer:a" }, { id: "defer:b" }] });
     expect(confirmationList(r, sel)).toEqual([
-      { id: "defer:a", where: "Chat: Fix " + H, tool: "Bash", firstLine: "make a" },
-      { id: "defer:b", where: "Chat: Fix " + H, tool: "Bash", firstLine: "make b" }]);
+      { id: "defer:a", where: "Chat: Fix " + H, tool: "Bash", firstLine: "make a", summary: "" },
+      { id: "defer:b", where: "Chat: Fix " + H, tool: "Bash", firstLine: "make b", summary: "" }]);
     expect(approveBody(r, emptySelection())).toBeNull();
   });
 

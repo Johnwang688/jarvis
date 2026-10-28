@@ -27,6 +27,8 @@ import {
   type ReviewItem, type ReviewReport, type Section,
 } from "../lib/review";
 import { el, tap } from "./views";
+import { AI_LABEL, recordSummary } from "../lib/approvalSummary";
+import { rowCommand, summaryLines } from "./card";
 
 export interface ReviewState {
   report: ReviewReport | null;
@@ -49,6 +51,8 @@ export interface ReviewState {
   /** Proposals whose Withdraw was tapped once (asked before it is sent). */
   withdrawing: ReadonlySet<string>;
   online: boolean;
+  /** AS: items whose command the owner opened (true) or closed (false). */
+  opened?: ReadonlyMap<string, boolean>;
 }
 
 export interface ReviewActions {
@@ -66,6 +70,8 @@ export interface ReviewActions {
   open: (row: InboxRow) => void;
   openInbox: () => void;
   jump: (anchor: string) => void;
+  /** AS: open or close an item's command (display only). */
+  expand?: (row: InboxRow, open: boolean) => void;
 }
 
 function testid<T extends HTMLElement>(node: T, id: string): T {
@@ -85,16 +91,12 @@ function deferredItem(item: ReviewItem, state: ReviewState, a: ReviewActions, bo
   const d = deferredOf(item.row)!;
   const id = item.row.id;
   if (d.headline) box.append(el("p", "headline", d.headline));
-  if (d.tool) box.append(el("div", "label", "Tool"), el("p", "", d.tool));
-  if (d.count > 1) box.append(el("p", "muted small", `Asked ${d.count} times while it waited.`));
-  if (d.command) box.append(el("div", "label", "Command"), testid(el("pre", "code", d.command), "m-review-command"));
-  if (d.reason) box.append(el("div", "label", "Why"), el("p", "", d.reason));
-  // Every argument, beside the command too (timeout, run_in_background, a
-  // description...): a grant never covers what was not shown (#329, LOW 6).
-  if (d.args) box.append(el("div", "label", "Arguments"), testid(el("pre", "code", d.args), "m-review-args"));
-  if (d.more) box.append(el("p", "muted small", `${d.more} more asks from this chat were denied overnight, too many to list one by one.`));
-  if (!item.approve) box.append(testid(el("p", "muted small", `Not approvable here: ${whyWords(item.why, item.row)}.`), "m-review-why"));
   const busy = state.busy.has(id) || state.groupBusy;
+  // AS-12: the item's controls first (its Select box, then Approve and
+  // retry and Leave it, far apart), then the record's AI summary and code's
+  // WHY ASKED and WHERE, then the tool and the command, collapsed only when
+  // there is a summary and one tap away. Display only: the tag binds the
+  // card and the digest (MR-6), never the summary.
   if (item.approve || item.leave) {
     const label = testid(el("label", "m-tick"), "m-review-tick-label");
     const box2 = testid(el("input", ""), "m-review-tick");
@@ -118,6 +120,21 @@ function deferredItem(item: ReviewItem, state: ReviewState, a: ReviewActions, bo
     row.append(retry);
   }
   box.append(row);
+  if (!item.approve) box.append(testid(el("p", "muted small", `Not approvable here: ${whyWords(item.why, item.row)}.`), "m-review-why"));
+  const view = recordSummary(d.summary);
+  summaryLines({ summary: view.text, summary_state: view.slot ? "ready" : undefined, reason: d.reason, layer: d.layer,
+                 where: d.where }, box, "m-review-as");
+  if (d.tool) box.append(el("div", "label", "Tool"), el("p", "", d.tool));
+  if (d.count > 1) box.append(el("p", "muted small", `Asked ${d.count} times while it waited.`));
+  // Every argument, beside the command too (timeout, run_in_background, a
+  // description...): a grant never covers what was not shown (#329, LOW 6).
+  // Collapsed behind its toggle when there is a summary (AS, the owner's
+  // answer 4), never cut.
+  const toggle = a.expand ? (open: boolean) => a.expand!(item.row, open) : undefined;
+  const open = !toggle || (state.opened?.get(id) ?? !view.slot);
+  rowCommand(d.command, d.args, open, toggle, box,
+    { command: "m-review-command", args: "m-review-args", prefix: "m-review-command" });
+  if (d.more) box.append(el("p", "muted small", `${d.more} more asks from this chat were denied overnight, too many to list one by one.`));
 }
 
 function questionItem(item: ReviewItem, state: ReviewState, a: ReviewActions, box: HTMLElement) {
@@ -305,7 +322,13 @@ function footer(report: ReviewReport, state: ReviewState, a: ReviewActions, limi
     for (const line of confirmationList(report, state.selection)) {
       const li = testid(el("li", ""), "m-review-confirm-item");
       li.dataset.id = line.id;
-      li.append(el("div", "m-review-where", line.where), el("div", "", "Tool: " + line.tool), el("pre", "code", line.firstLine));
+      li.append(el("div", "m-review-where", line.where));
+      if (line.summary) {
+        const ai = testid(el("div", "as-ai as-ready"), "m-review-confirm-summary");
+        ai.append(el("span", "as-tag", AI_LABEL), el("span", "as-text", line.summary));
+        li.append(ai);
+      }
+      li.append(el("div", "", "Tool: " + line.tool), el("pre", "code", line.firstLine));
       list.append(li);
     }
     foot.append(list);

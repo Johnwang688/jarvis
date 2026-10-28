@@ -106,3 +106,98 @@ it("a relayed turn's card says which chat's message started it, on one line, dec
     expect(host.querySelector('[data-testid="approval-relayed"]')).toBeNull();
   }
 });
+
+describe("AS: the reworked ordinary card", () => {
+  const card = (extra: Partial<ApprovalRequest> = {}) => request("as1", { hud_only: false, tool: "Bash", layer: "reviewer",
+    command: "cd /srv/app\nrm -rf build && make deploy --prod", args: { command: "x", timeout: 5 }, reason: "deploys to production",
+    allowlistable: true, where: "Calc · main · ~/projects/calc", ...extra });
+  const q = (id: string) => host.querySelector<HTMLElement>(`[data-testid="${id}"]`);
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  it("buttons come first, right under the title", async () => {
+    await act(async () => root.render(createElement(ApprovalVeil, { requests: [card({ summary_state: "pending" })], onDecide: vi.fn() })));
+    const c = q("approval-card")!;
+    expect(c.children[0].tagName).toBe("H3");
+    expect(c.children[1]).toBe(q("approval-buttons"));
+    expect(Array.from(q("approval-buttons")!.querySelectorAll("button")).map((b) => b.dataset.testid))
+      .toEqual(["approval-deny", "approval-always", "approval-allow"]);
+    // A headline (a widening) stays first, above the buttons.
+    await act(async () => root.render(createElement(ApprovalVeil, { requests: [card({ req_id: "as2", headline: "SANDBOX WIDENING: network on" })], onDecide: vi.fn() })));
+    expect(q("approval-card")!.children[1]).toBe(q("approval-headline"));
+    expect(q("approval-card")!.children[2]).toBe(q("approval-buttons"));
+  });
+
+  it("with a summary pending or there the command is collapsed, one press away; the AI line is marked and text", async () => {
+    const hostile = '<img src=x onerror="window.__pwned=1"> deletes build';
+    await act(async () => root.render(createElement(ApprovalVeil, { requests: [card({ summary_state: "ready", summary: hostile })], onDecide: vi.fn() })));
+    expect(q("approval-summary")!.dataset.state).toBe("ready");
+    expect(q("approval-summary")!.textContent).toBe("AI SUMMARY" + hostile);
+    expect(host.querySelector("img")).toBeNull();
+    expect(q("approval-why")!.textContent).toBe("WHY ASKED [reviewer] deploys to production");
+    expect(q("approval-where")!.textContent).toBe("WHERE Calc · main · ~/projects/calc");
+    expect(q("approval-command")).toBeNull();
+    expect(q("approval-command-preview")!.textContent).toBe("command cd /srv/app");
+    const toggle = q("approval-command-toggle") as HTMLButtonElement;
+    expect(toggle.tabIndex).toBe(-1);
+    expect(toggle.textContent).toMatch(/^show full command · 2 lines/);
+    await act(async () => toggle.click());
+    expect(q("approval-command")!.textContent).toBe("command cd /srv/app\nrm -rf build && make deploy --prod");
+    expect(host.textContent).toContain("timeout 5");
+    // DENY stays the only Tab stop.
+    await act(async () => document.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true })));
+    await act(async () => document.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true })));
+    expect(document.activeElement).toBe(q("approval-deny"));
+  });
+
+  it("with no summary (failed, off, none) the command is expanded", async () => {
+    for (const [i, extra] of ([{ summary_state: "failed" }, { summary_state: "off" }, {}] as Partial<ApprovalRequest>[]).entries()) {
+      await act(async () => root.render(createElement(ApprovalVeil, { requests: [card({ req_id: "n" + i, ...extra })], onDecide: vi.fn() })));
+      expect(q("approval-command")!.textContent).toContain("make deploy --prod");
+      expect(q("approval-command-preview")).toBeNull();
+      if (extra.summary_state) expect(q("approval-summary")!.dataset.state).toBe("none");
+      else expect(q("approval-summary")).toBeNull();
+    }
+  });
+
+  it("a failed summary opens the command; the owner's own toggle wins", async () => {
+    const r = card({ summary_state: "pending" });
+    await act(async () => root.render(createElement(ApprovalVeil, { requests: [r], onDecide: vi.fn() })));
+    expect(q("approval-command")).toBeNull();
+    await act(async () => root.render(createElement(ApprovalVeil, { requests: [{ ...r, summary_state: "failed" }], onDecide: vi.fn() })));
+    expect(q("approval-command")).not.toBeNull();
+    const r2 = card({ req_id: "own", summary_state: "pending" });
+    await act(async () => root.render(createElement(ApprovalVeil, { requests: [r2], onDecide: vi.fn() })));
+    await act(async () => (q("approval-command-toggle") as HTMLButtonElement).click());
+    await act(async () => (q("approval-command-toggle") as HTMLButtonElement).click());
+    await act(async () => root.render(createElement(ApprovalVeil, { requests: [{ ...r2, summary_state: "failed" }], onDecide: vi.fn() })));
+    expect(q("approval-command")).toBeNull();
+  });
+
+  it("AUTHORIZE and ALWAYS arm ARM_MS after the card, and again after the summary lands; DENY never waits", async () => {
+    const onDecide = vi.fn();
+    const r = card({ summary_state: "pending" });
+    await act(async () => root.render(createElement(ApprovalVeil, { requests: [r], onDecide })));
+    const allow = q("approval-allow") as HTMLButtonElement, always = q("approval-always") as HTMLButtonElement;
+    expect(allow.disabled && always.disabled).toBe(true);
+    allow.disabled = false;
+    await act(async () => allow.click());
+    expect(onDecide).not.toHaveBeenCalled();
+    await act(async () => vi.advanceTimersByTime(700));
+    expect(allow.disabled || always.disabled).toBe(false);
+    await act(async () => root.render(createElement(ApprovalVeil, { requests: [{ ...r, summary_state: "ready", summary: "Deploys calc." }], onDecide })));
+    expect((q("approval-allow") as HTMLButtonElement).disabled).toBe(true);
+    expect((q("approval-deny") as HTMLButtonElement).disabled).toBe(false);
+    await act(async () => vi.advanceTimersByTime(700));
+    await act(async () => (q("approval-allow") as HTMLButtonElement).click());
+    expect(onDecide).toHaveBeenCalledExactlyOnceWith("as1", true, false);
+  });
+
+  it("the queue shows the summary when there is one", async () => {
+    const a = card({ req_id: "q1", summary_state: "ready", summary: "Deploys calc." }), b = card({ req_id: "q2" });
+    await act(async () => root.render(createElement(ApprovalQueue, { requests: [a, b] })));
+    const text = q("approval-queue")!.textContent!;
+    expect(text).toContain("AI: Deploys calc.");
+    expect(text).toContain("make deploy --prod");
+  });
+});

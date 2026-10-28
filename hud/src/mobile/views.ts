@@ -20,6 +20,8 @@
 
 import { clockOf, decisionOf, deferredOf, groupRows, oneLine, questionOf, briefOf, textBlock, type InboxRow } from "../lib/inbox";
 import { recentChats, moreLabel } from "../lib/recentChats";
+import { recordSummary, startsCollapsed, summaryView } from "../lib/approvalSummary";
+import { rowCommand, summaryLines } from "./card";
 import type { Thread } from "../types";
 import { renderPhoneMarkdown } from "./markdown";
 import {
@@ -75,7 +77,7 @@ function lines(parent: HTMLElement, label: string, items: string[], cls = "") {
   parent.append(list);
 }
 
-function approvalDetail(row: InboxRow, box: HTMLElement) {
+function approvalDetail(row: InboxRow, box: HTMLElement, a?: InboxAnswers) {
   const d = row.detail;
   if (d.hud_only === true) {
     box.append(testid(el("p", "muted", `${oneLine(d.tool, 60) || "A tool"}: a private card. Its detail is shown only at the desk.`), "m-private"));
@@ -83,28 +85,34 @@ function approvalDetail(row: InboxRow, box: HTMLElement) {
   }
   const headline = textBlock(d.headline, 400);
   if (headline) box.append(el("p", "headline", headline));
+  // AS: the AI summary and code's WHY ASKED and WHERE, then the tool and the
+  // command, collapsed only with a summary pending or there (and a toggle).
+  summaryLines(d, box, "m-row");
   box.append(el("div", "label", "Tool"), el("p", "", oneLine(d.tool, 80)));
   const command = textBlock(d.command, 4000);
-  if (command) box.append(el("div", "label", "Command"), testid(el("pre", "code", command), "m-command"));
-  const reason = textBlock(d.reason, 2000);
-  if (reason) box.append(el("div", "label", "Why"), el("p", "", reason));
+  let shown = "";
   if (d.args && typeof d.args === "object" && !command) {
-    let shown = "";
     try { shown = JSON.stringify(d.args, null, 1).slice(0, 4000); } catch { shown = ""; }
-    if (shown && shown !== "{}") box.append(el("div", "label", "Arguments"), el("pre", "code", shown));
+    if (shown === "{}") shown = "";
   }
+  const toggle = a?.toggle ? (open: boolean) => a.toggle!(row, open) : undefined;
+  const open = !toggle || (a?.expanded?.get(row.id) ?? !startsCollapsed(summaryView(d)));
+  rowCommand(command, shown, open, toggle, box, { command: "m-command", args: "m-args", prefix: "m-command" });
 }
 
 /** Any other kind's detail (one P-3 does not know, such as A3's missed rows): its text fields, as text. */
-function deferredDetail(row: InboxRow, box: HTMLElement) {
+function deferredDetail(row: InboxRow, box: HTMLElement, a?: InboxAnswers) {
   const d = deferredOf(row)!;
   if (d.headline) box.append(el("p", "headline", d.headline));
+  // AS: the record's AI summary and code's lines; the command collapsed only when there is a summary.
+  const view = recordSummary(d.summary);
+  summaryLines({ summary: view.text, summary_state: view.slot ? "ready" : undefined, reason: d.reason, layer: d.layer,
+                 where: d.where }, box, "m-deferred");
   if (d.tool) box.append(el("div", "label", "Tool"), el("p", "", d.tool));
   if (d.count > 1) box.append(testid(el("p", "muted small", `Asked ${d.count} times while it waited.`), "m-deferred-count"));
-  if (d.command) box.append(el("div", "label", "Command"), testid(el("pre", "code", d.command), "m-command"));
-  if (d.reason) box.append(el("div", "label", "Why"), el("p", "", d.reason));
-  // Every argument, beside the command too (review of #329, LOW 6).
-  if (d.args) box.append(el("div", "label", "Arguments"), testid(el("pre", "code", d.args), "m-deferred-args"));
+  const toggle = a?.toggle ? (open: boolean) => a.toggle!(row, open) : undefined;
+  const open = !toggle || (a?.expanded?.get(row.id) ?? !view.slot);
+  rowCommand(d.command, d.args, open, toggle, box, { command: "m-command", args: "m-deferred-args", prefix: "m-command" });
   box.append(testid(el("p", "muted small", d.more
     ? `${d.more} more asks from this chat were denied overnight, too many to list one by one.`
     : d.expired ? "Over a day old: it can only be left."
@@ -134,6 +142,9 @@ export interface InboxAnswers {
   /** Typed answers and picked options, kept across a read again. */
   drafts: Map<string, string>;
   picks: Map<string, number>;
+  /** AS: rows whose command the owner opened (true) or closed (false), and the toggle. */
+  expanded?: ReadonlyMap<string, boolean>;
+  toggle?: (row: InboxRow, open: boolean) => void;
   /** P-5: a proposal's Withdraw, asked once before it is sent. */
   withdraw?: { confirming: ReadonlySet<string>; ask: (row: InboxRow) => void; back: (row: InboxRow) => void };
 }
@@ -256,8 +267,11 @@ export function inboxRow(row: InboxRow, open: (row: InboxRow) => void, answers?:
     .filter(Boolean).join(" · ");
   if (meta) card.append(el("p", "row-meta", meta));
   const box = testid(el("div", "row-detail"), "m-detail");
-  if (row.kind === "approval") approvalDetail(row, box);
-  else if (deferredOf(row)) deferredDetail(row, box);
+  // AS-12: an approval's and a deferral's buttons come before its detail.
+  const first = (row.kind === "approval" || !!deferredOf(row)) && !!answers && answersHere(row, answers);
+  if (first) card.append(answerBox(row, answers!));
+  if (row.kind === "approval") approvalDetail(row, box, answers);
+  else if (deferredOf(row)) deferredDetail(row, box, answers);
   else if (row.kind === "question" || row.kind === "task_question") {
     const q = questionOf(row);
     if (q.text) box.append(testid(el("p", "question", q.text), "m-question"));
@@ -284,7 +298,9 @@ export function inboxRow(row: InboxRow, open: (row: InboxRow) => void, answers?:
     if (!d.open) box.append(el("div", "label", "Your answer"), testid(el("p", "", d.answer), "m-answer"));
   } else genericDetail(row, box);
   if (box.childNodes.length) card.append(box);
-  if (answers && answersHere(row, answers)) {
+  if (first) {
+    // The buttons are already above.
+  } else if (answers && answersHere(row, answers)) {
     card.append(answerBox(row, answers));
   } else {
     // A decision already answered (rank 8, recorded for a closed chat) takes no answer.

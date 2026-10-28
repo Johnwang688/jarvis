@@ -159,6 +159,7 @@ export type Action = (
   | { type: "relay"; event: RelayEvent }
   | { type: "approval_add"; request: ApprovalRequest }
   | { type: "approval_drop"; req_id: string }
+  | { type: "approval_patch"; req_id: string; patch: Pick<ApprovalRequest, "summary" | "summary_state"> }
   | { type: "task_upsert"; task: Task }
   | { type: "thread_patch"; id: string; patch: Partial<Thread> }
   | { type: "activity"; record: any; at?: number }
@@ -546,6 +547,14 @@ export function reduce(s: State, a: Action): State {
     case "approval_add": {
       if (s.approvals.some((r) => r.req_id === a.request.req_id)) return s;
       return { ...s, approvals: [...s.approvals, a.request], orb: "approval" };
+    }
+
+    case "approval_patch": {
+      // AS: only the summary's two fields, only on a card still up.
+      if (!s.approvals.some((r) => r.req_id === a.req_id)) return s;
+      const { summary, summary_state } = a.patch;
+      return { ...s, approvals: s.approvals.map((r) => (r.req_id === a.req_id && !r.hud_only
+        ? { ...r, summary, summary_state } : r)) };
     }
 
     case "approval_drop": {

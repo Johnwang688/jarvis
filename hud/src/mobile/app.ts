@@ -139,6 +139,8 @@ export class PhoneApp {
   readonly notes = new Map<string, string>();
   readonly drafts = new Map<string, string>();
   readonly picks = new Map<string, number>();
+  /** AS: inbox and review rows whose command the owner opened (true) or closed (false). */
+  readonly opened = new Map<string, boolean>();
   private deferred = false;
   /** One line shown once above the inbox after an answer ("Denied.", where a decision's answer went). */
   private flash = "";
@@ -1272,7 +1274,8 @@ export class PhoneApp {
         report: this.review, selection: this.reviewSel, notes: this.notes, receipts: this.reviewReceipts,
         busy: this.answering, groupBusy: this.reviewBusy, confirming: this.reviewConfirming, flash: this.reviewFlash,
         drafts: this.drafts, picks: this.reviewPicks, withdrawing: this.withdrawing, online: this.online,
-      }, this.reviewActions(), this.secure && !this.secure.ok ? `limited: ${this.secure.label || "a check failed"}`
+        opened: this.opened,
+      }, { ...this.reviewActions(), expand: (row, open) => { this.opened.set(row.id, open); this.render(); } }, this.secure && !this.secure.ok ? `limited: ${this.secure.label || "a check failed"}`
         : this.review?.group && !this.review.group.ok ? (this.review.group.why || "limited") : null);
       // The scroll holds where it was: a row answered in place folds where it stood.
       const top = this.rendered === "review" ? this.main.scrollTop : 0;
@@ -1289,6 +1292,8 @@ export class PhoneApp {
         always: () => void this.alwaysCard(),
         confirmAlways: () => void this.confirmAlways(),
         cancelAlways: () => this.cancelAlways(),
+        // AS: the owner's own open or close of the command, kept across a re-read of the card.
+        toggleCommand: (open) => { if (this.card) { this.card.expanded = open; this.render(); } },
       });
     } else if (this.tab === "inbox") {
       const answers: InboxAnswers = {
@@ -1296,6 +1301,8 @@ export class PhoneApp {
         send: (row, body) => void this.sendAnswer(row, body),
         retry: (row) => void this.retryDeferred(row),
         busy: this.answering, notes: this.notes, drafts: this.drafts, picks: this.picks,
+        expanded: this.opened,
+        toggle: (row, open) => { this.opened.set(row.id, open); this.render(); },
         withdraw: {
           confirming: this.withdrawing,
           ask: (row) => { this.withdrawing.add(row.id); this.notes.delete(row.id); this.render(); },

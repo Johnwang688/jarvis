@@ -1729,6 +1729,15 @@ export default function App() {
           if (!data.code) break;
           dispatch({ type: "approval_add", request: { ...data, req_id: data.req_id } });
           break;
+        case "approval_summary":
+          // AS: a card's AI summary landed (or failed). Display only; its
+          // words are cleaned again where they are drawn (lib/approvalSummary).
+          if (typeof data.req_id === "string") {
+            dispatch({ type: "approval_patch", req_id: data.req_id,
+                       patch: { summary: typeof data.summary === "string" ? data.summary : "",
+                                summary_state: typeof data.summary_state === "string" ? data.summary_state : "failed" } });
+          }
+          break;
         case "approval_resolved":
           dispatch({ type: "approval_drop", req_id: data.req_id });
           break;

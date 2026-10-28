@@ -85,6 +85,10 @@ import {
   type CheckDraft, type DeferredAction, type InboxRow, type MarkBody, type SnoozeFor, type Verdict,
 } from "../lib/inbox";
 import type { InboxSnapshot } from "../state/inbox";
+import {
+  AI_LABEL, WHERE_LABEL, WHY_LABEL, previewLine, recordSummary, summaryView, summaryWords, toggleLabel, whereText,
+} from "../lib/approvalSummary";
+import { reasonText } from "../lib/approvalCard";
 
 export const GONE_NOTICE = "Already answered or gone.";
 
@@ -136,6 +140,8 @@ export function InboxView(props: InboxViewProps) {
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState<Record<string, true>>({});
+  // AS: rows whose command the owner opened (or closed): row id -> open.
+  const [opened, setOpened] = useState<Record<string, boolean>>({});
   // A decision's picked option, by row: absent means "the suggestion", which
   // is only preselected — nothing posts until Answer is pressed.
   const [picks, setPicks] = useState<Record<string, number | null>>({});
@@ -311,9 +317,20 @@ export function InboxView(props: InboxViewProps) {
     const off = props.blocked || !!busy[row.id];
     if (row.kind === "approval") {
       const denies = clockOf(row.expires_at);
+      // AS: the card's AI summary and code lines, as text; the card itself stays the veil's.
+      const view = row.detail.hud_only === true ? summaryView(null) : summaryView(row.detail);
+      const why = row.detail.hud_only === true ? "" : reasonText(row.detail.reason, row.detail.layer);
+      const where = row.detail.hud_only === true ? "" : whereText(row.detail.where);
       return (
         <div className="ir-body">
           <div className="ir-cardnote" data-testid="inbox-card-note">{approvalNote(row)}</div>
+          {view.slot ? (
+            <div className={"as-ai as-" + view.state} data-testid="inbox-summary" data-state={view.state}>
+              <span className="as-tag">{AI_LABEL}</span><span className="as-text">{summaryWords(view)}</span>
+            </div>
+          ) : null}
+          {why ? <div className="as-line" data-testid="inbox-why"><span className="k">{WHY_LABEL} </span>{why}</div> : null}
+          {where ? <div className="as-line" data-testid="inbox-where"><span className="k">{WHERE_LABEL} </span>{where}</div> : null}
           {denies ? <div className="ir-when muted" data-testid="inbox-denies">Denies automatically at {denies}</div> : null}
         </div>
       );
@@ -537,13 +554,53 @@ export function InboxView(props: InboxViewProps) {
     const deferred = deferredOf(row);
     if (deferred) {
       // QH: the card's words as text; Approve and retry only where it may be.
+      // AS: the buttons first; the record's AI summary and code lines; the
+      // command and arguments collapsed only when there is a summary.
+      const view = recordSummary(deferred.summary);
+      const open = opened[row.id] ?? !view.slot;
+      const why = reasonText(deferred.reason, deferred.layer);
+      const hasBlock = !!(deferred.command || deferred.args);
       return (
         <div className="ir-body" data-testid="inbox-deferred">
           {deferred.headline ? <div className="ir-text" data-testid="inbox-deferred-headline">{deferred.headline}</div> : null}
+          <div className="ir-answer" data-testid="inbox-deferred-buttons">
+            {deferred.grantable ? (
+              <button type="button" data-testid="inbox-deferred-retry" disabled={off}
+                      onClick={() => void send(row, { action: "retry" })}>
+                Approve and retry
+              </button>
+            ) : null}
+            <button type="button" className="quiet" data-testid="inbox-deferred-leave" disabled={off}
+                    onClick={() => void send(row, { action: "leave" })}>
+              Leave it
+            </button>
+          </div>
+          {view.slot ? (
+            <div className="as-ai as-ready" data-testid="inbox-deferred-summary">
+              <span className="as-tag">{AI_LABEL}</span><span className="as-text">{view.text}</span>
+            </div>
+          ) : null}
+          {why ? <div className="as-line" data-testid="inbox-deferred-reason"><span className="k">{WHY_LABEL} </span>{why}</div> : null}
+          {deferred.where ? (
+            <div className="as-line" data-testid="inbox-deferred-where"><span className="k">{WHERE_LABEL} </span>{deferred.where}</div>
+          ) : null}
           {deferred.tool ? <div className="ir-text" data-testid="inbox-deferred-tool">Tool: {deferred.tool}</div> : null}
-          {deferred.command ? <pre className="ir-text ir-command" data-testid="inbox-deferred-command">{deferred.command}</pre> : null}
-          {deferred.reason ? <div className="ir-why" data-testid="inbox-deferred-reason">{deferred.reason}</div> : null}
-          {deferred.args ? <pre className="ir-text ir-args" data-testid="inbox-deferred-args">{deferred.args}</pre> : null}
+          {open ? (
+            <>
+              {deferred.command ? <pre className="ir-text ir-command" data-testid="inbox-deferred-command">{deferred.command}</pre> : null}
+              {deferred.args ? <pre className="ir-text ir-args" data-testid="inbox-deferred-args">{deferred.args}</pre> : null}
+            </>
+          ) : hasBlock ? (
+            <pre className="ir-text ir-command as-preview" data-testid="inbox-deferred-preview">
+              {deferred.command ? previewLine(deferred.command) : previewLine(deferred.args)}
+            </pre>
+          ) : null}
+          {hasBlock && view.slot ? (
+            <button type="button" className="quiet as-toggle" data-testid="inbox-deferred-toggle" aria-expanded={open}
+                    onClick={() => setOpened((o) => ({ ...o, [row.id]: !open }))}>
+              {toggleLabel(open, deferred.command, deferred.args ? 1 : 0)}
+            </button>
+          ) : null}
           {deferred.count > 1 ? (
             <div className="ir-when muted" data-testid="inbox-deferred-count">Asked {deferred.count} times while it waited.</div>
           ) : null}
@@ -555,18 +612,6 @@ export function InboxView(props: InboxViewProps) {
                 : deferred.whyNot
                   ? deferred.whyNot
                   : "Denied while you slept. Approve and retry allows exactly this call once, for 30 minutes, and tells its chat."}
-          </div>
-          <div className="ir-answer">
-            {deferred.grantable ? (
-              <button type="button" data-testid="inbox-deferred-retry" disabled={off}
-                      onClick={() => void send(row, { action: "retry" })}>
-                Approve and retry
-              </button>
-            ) : null}
-            <button type="button" className="quiet" data-testid="inbox-deferred-leave" disabled={off}
-                    onClick={() => void send(row, { action: "leave" })}>
-              Leave it
-            </button>
           </div>
         </div>
       );

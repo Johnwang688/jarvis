@@ -345,6 +345,18 @@ p, li, h2, h3 { overflow-wrap: anywhere; }
 .tap.m-btn.always { border-color: var(--amber-line); color: var(--amber); }
 .tap.m-btn:disabled { opacity: 0.4; }
 .m-gap { height: 120px; flex: none; }
+/* AS: the card's body comes after its buttons; the AI summary set apart
+   from code's lines, its two lines of space held from the first frame. */
+.m-gap-after { height: 8px; flex: none; }
+.as-ai { font-size: 14px; line-height: 20px; padding: 6px 10px; border-left: 2px dashed var(--accent);
+  background: var(--bg-inset); min-height: 40px; overflow-wrap: anywhere; }
+.as-ai .as-tag { font: 600 10px var(--mono); letter-spacing: 0.1em; color: var(--accent); margin-right: 8px;
+  border: 1px solid var(--accent); padding: 0 4px; }
+.as-ai.as-pending .as-text, .as-ai.as-none .as-text { color: var(--text-muted); font-style: italic; }
+.as-line { font: 13px/1.4 var(--mono); color: var(--text-2); overflow-wrap: anywhere; }
+.as-line .k { color: var(--text-muted); }
+.m-card .as-preview, .as-preview { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tap.as-toggle { min-height: 44px; text-align: left; color: var(--accent); }
 .m-allow-row { display: flex; gap: 24px; }
 .m-rule { display: flex; flex-direction: column; gap: 8px; }
 .m-answer { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }

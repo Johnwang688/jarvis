@@ -501,6 +501,11 @@ export interface ApprovalRequest {
   subagent?: string;
   /** Chat-to-chat C6, display only: the relayed turn the card names (`kind` "started": the asking call's turn or its child's spawning turn; "running": only running while it asks). */
   relayed_from?: { title?: string; provider?: string; thread_id?: string; kind?: "started" | "running" | string };
+  /** AS, display only: the code-built "project · branch · folder" line. */
+  where?: string;
+  /** AS, display only: a model's one line, and its state ("pending", "ready", "failed", "off"). */
+  summary?: string;
+  summary_state?: string;
 }
 
 export interface AvatarDesc {

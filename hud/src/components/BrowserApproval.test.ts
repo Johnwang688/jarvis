@@ -50,7 +50,7 @@ it("hides already-loaded private A immediately when B replaces it",async()=>{
 });
 
 it("private card never has Always, shows full exact command, and sends only one ordinary allow",async()=>{
-  const onDecide=vi.fn();await act(async()=>root.render(createElement(BrowserApprovalCard,{request:{...request,allowlistable:true} as BrowserApprovalPublic,onDecide,onPresent:vi.fn()})));
+  const onDecide=vi.fn();await act(async()=>root.render(createElement(BrowserApprovalCard,{request:{...request,allowlistable:true} as BrowserApprovalPublic,onDecide,onPresent:vi.fn()})));await act(async()=>vi.advanceTimersByTime(700));
   expect(host.querySelector('[data-testid="approval-always"]')).toBeNull();expect(host.querySelector('[data-testid="approval-command"]')!.textContent).toBe(details().command);
   const allow=host.querySelector<HTMLButtonElement>('[data-testid="approval-allow"]')!;expect(allow.tabIndex).toBe(-1);
   await act(async()=>{allow.click();allow.click();});expect(onDecide).toHaveBeenCalledExactlyOnceWith(request.req_id,true,false);
@@ -64,7 +64,7 @@ it("loading and failed private cards keep Deny available and cannot authorize by
   await act(async()=>deny.click());expect(onDecide).toHaveBeenCalledExactlyOnceWith(request.req_id,false,false);
 });
 it("private authorization cancels Enter and Space defaults even if a button is focused directly",async()=>{
-  const onDecide=vi.fn();await act(async()=>root.render(createElement(BrowserApprovalCard,{request,onDecide,onPresent:vi.fn()})));
+  const onDecide=vi.fn();await act(async()=>root.render(createElement(BrowserApprovalCard,{request,onDecide,onPresent:vi.fn()})));await act(async()=>vi.advanceTimersByTime(700));
   const allow=host.querySelector<HTMLButtonElement>('[data-testid="approval-allow"]')!;allow.focus();
   for(const key of ["Enter"," "]){const event=new KeyboardEvent("keydown",{key,bubbles:true,cancelable:true});await act(async()=>allow.dispatchEvent(event));expect(event.defaultPrevented).toBe(true);}
   expect(onDecide).not.toHaveBeenCalled();
@@ -74,7 +74,7 @@ it("private authorization cancels Enter and Space defaults even if a button is f
 it("named-rule delegation keeps fixed wording and the same one-shot consent lifecycle",async()=>{
   const req={...request,layer:"always-ask"},onDecide=vi.fn();
   mocks.get.mockResolvedValue({...req,allowlistable:false,args:{},command:null,browser:{kind:"delegation",tool:"hud_browser_act"},headline:"PRIVATE RAW HEADLINE",reason:"PRIVATE RAW REASON"});
-  await act(async()=>root.render(createElement(BrowserApprovalCard,{request:req,onDecide,onPresent:vi.fn()})));
+  await act(async()=>root.render(createElement(BrowserApprovalCard,{request:req,onDecide,onPresent:vi.fn()})));await act(async()=>vi.advanceTimersByTime(700));
   expect(host.textContent).toContain("This grants no Browser action");expect(host.textContent).not.toMatch(/PRIVATE|Preview|Pane|The page calls/);
   expect(host.querySelector('[data-testid="approval-command"], [data-testid="approval-always"], canvas, img')).toBeNull();
   const allow=host.querySelector<HTMLButtonElement>('[data-testid="approval-allow"]')!;
@@ -87,4 +87,15 @@ it("an action reply cannot authorize a replaced delegation request with the same
   await render(req);await act(async()=>pending.resolve(details()));
   expect(oldAllowed()).toBe(false);expect(current.detail?.kind).toBe("delegation");expect(host.textContent).not.toContain("Untrusted label");
   await act(async()=>vi.advanceTimersByTime(119000));expect(current.canAuthorize()).toBe(false);
+});
+
+it("AS-12/13: the buttons come first, and AUTHORIZE is armed only ARM_MS after the detail lands",async()=>{
+  const onDecide=vi.fn();await act(async()=>root.render(createElement(BrowserApprovalCard,{request,onDecide,onPresent:vi.fn()})));
+  const card=host.querySelector('[data-testid="approval-card"]')!,btns=host.querySelector('[data-testid="approval-buttons"]')!;
+  expect(card.children[1]).toBe(btns);
+  const allow=host.querySelector<HTMLButtonElement>('[data-testid="approval-allow"]')!;
+  expect(allow.disabled).toBe(true);await act(async()=>allow.click());expect(onDecide).not.toHaveBeenCalled();
+  allow.disabled=false;await act(async()=>allow.click());expect(onDecide).not.toHaveBeenCalled();
+  await act(async()=>vi.advanceTimersByTime(700));expect(allow.disabled).toBe(false);
+  await act(async()=>allow.click());expect(onDecide).toHaveBeenCalledExactlyOnceWith(request.req_id,true,false);
 });

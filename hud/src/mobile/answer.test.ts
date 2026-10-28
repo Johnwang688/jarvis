@@ -60,7 +60,7 @@ describe("the answering card (P-4)", () => {
     const args = Array.from(view.querySelectorAll('[data-testid="approval-arg"]')).map((n) => n.textContent);
     expect(args).toEqual(["command " + LONG, "description " + H, "timeout 5"]);
     expect(view.querySelector('[data-testid="approval-origin"]')!.textContent).toBe(originText(ORDINARY.card.origin));
-    expect(view.querySelector(".reason")!.textContent).toBe("[reviewer] " + H);
+    expect(view.querySelector(".reason")!.textContent).toBe("WHY ASKED [reviewer] " + H);
     expect(view.querySelector('[data-testid="approval-tool"]')!.textContent).toBe("Bash");
   });
 
@@ -361,5 +361,54 @@ describe("the phone app answers (P-4)", () => {
     const live = inboxView(parseInbox([APPR, row({ id: "prop:bbbbbbbb", kind: "proposal", rank: 3, task_id: "bbbbbbbb" })])!, () => {}, answers);
     expect(live.querySelector('[data-testid="m-open-card"]')).not.toBeNull();
     expect(live.querySelector('[data-testid="m-desk-only"]')!.textContent).toBe("Withdraw at the desk");
+  });
+});
+
+describe("AS: the phone's card and rows", () => {
+  const withSummary = (extra: Record<string, unknown>) => ({ ...ORDINARY, card: { ...ORDINARY.card, where: "Calc · main · ~/c", ...extra } });
+
+  it("buttons before the body; collapsed with a summary; the toggle opens it; the AI line is text", () => {
+    const toggles: boolean[] = [];
+    const acts = { ...noop, toggleCommand: (open: boolean) => toggles.push(open) };
+    const view = cardView(state(withSummary({ summary_state: "ready", summary: H })), acts);
+    document.body.replaceChildren(view);
+    noMarkup(view);
+    const card = view.querySelector('[data-testid="approval-card"]')!;
+    const deny = view.querySelector('[data-testid="approval-deny"]')!, body = card.querySelector(".m-card-body")!;
+    expect(deny.compareDocumentPosition(body) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    const allow = view.querySelector('[data-testid="approval-allow"]')!;
+    expect(allow.compareDocumentPosition(body) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(view.querySelector('[data-testid="approval-summary"]')!.textContent).toContain("AI SUMMARY");
+    expect(view.querySelector('[data-testid="approval-where"]')!.textContent).toBe("WHERE Calc · main · ~/c");
+    expect(view.querySelector('[data-testid="approval-command"]')).toBeNull();
+    expect(view.querySelector('[data-testid="approval-command-preview"]')).not.toBeNull();
+    const toggle = view.querySelector<HTMLButtonElement>('[data-testid="approval-command-toggle"]')!;
+    expect(toggle.tabIndex).toBe(-1);
+    toggle.click();
+    expect(toggles).toEqual([true]);
+    const open = cardView(state(withSummary({ summary_state: "ready", summary: "x" }), { expanded: true }), acts);
+    expect(open.querySelector('[data-testid="approval-command"]')!.textContent).toBe("command " + LONG);
+  });
+
+  it("no summary: expanded; a summary the daemon said failed: expanded", () => {
+    for (const extra of [{}, { summary_state: "failed" }, { summary_state: "off" }]) {
+      const view = cardView(state(withSummary(extra)), { ...noop, toggleCommand: () => {} });
+      expect(view.querySelector('[data-testid="approval-command"]')!.textContent).toBe("command " + LONG);
+    }
+  });
+
+  it("an approval row's buttons come first; its summary and code lines show as text", () => {
+    const raw = row({ id: "appr:r1", kind: "approval", rank: 1, detail: { ...withSummary({ summary_state: "ready", summary: H }).card } });
+    const parsed = parseInbox([raw])!;
+    const answers: InboxAnswers = { openCard() {}, send() {}, retry() {}, busy: new Set(), notes: new Map(), drafts: new Map(),
+      picks: new Map(), expanded: new Map(), toggle() {} };
+    const view = inboxView(parsed, () => {}, answers);
+    noMarkup(view);
+    const open = view.querySelector('[data-testid="m-open-card"]')!, detail = view.querySelector('[data-testid="m-detail"]')!;
+    expect(open.compareDocumentPosition(detail) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(view.querySelector('[data-testid="m-row-summary"]')!.textContent).toContain("AI SUMMARY");
+    expect(view.querySelector('[data-testid="m-row-why"]')!.textContent).toContain("WHY ASKED");
+    expect(view.querySelector('[data-testid="m-command"]')).toBeNull();
+    expect(view.querySelector('[data-testid="m-command-preview"]')).not.toBeNull();
   });
 });
