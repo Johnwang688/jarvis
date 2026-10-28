@@ -117,7 +117,12 @@ _FIELDS = frozenset({"id", "tool", "thread_id", "task_id", "provider", "origin",
                      "grant_until", "settled_at"})
 _MORE_FIELDS = frozenset({"thread_id", "task_id", "count", "first_at", "at"})
 # Why a record may not be granted, as codes the HUD and phone put in their own words.
-WHY_NOT = frozenset({"", "browser", "codex", "owner-only", "no-chat", "too-large", "unreadable"})
+WHY_NOT = frozenset({"", "browser", "codex", "hatch", "owner-only", "no-chat", "relayed", "subagent",
+                     "folder", "too-large", "unreadable"})
+HATCH_LAYER = "escape-hatch"     # `hatch.EscapeHatch`'s asks: never granted (lead, #326 delta review)
+MORE_KEEP = 100                  # "and N more" counters kept; past it the oldest fold into ALL
+ALL = "_all"                     # the one counter for every chat folded away
+UNREADABLE = NAME + ".unreadable"
 
 _DIR = (os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
         | getattr(os, "O_CLOEXEC", 0))
@@ -147,16 +152,35 @@ def _parse(value) -> datetime | None:
 
 # -- the request -------------------------------------------------------------------
 
+def folder_identity(path) -> dict | None:
+    """The folder a call was judged in, as the filesystem names it: its real
+    path and the device and inode of what that resolves to, so a link
+    retargeted between night and morning is another folder. `{"missing":
+    path}` when it does not exist or cannot be read (never grantable, never
+    matched); None for no folder."""
+    if path is None:
+        return None
+    try:
+        real = os.path.realpath(path)
+        info = os.stat(real)
+        if not stat.S_ISDIR(info.st_mode):
+            raise NotADirectoryError(real)
+    except (OSError, ValueError, TypeError):
+        return {"missing": str(path)}
+    return {"path": real, "dev": info.st_dev, "ino": info.st_ino}
+
+
 def request_digest(request) -> str | None:
     """SHA-256 of everything the broker judged, as one canonical JSON text
     (sorted keys, no spaces, ASCII): the thread, task, tool, the unredacted
-    arguments, the command, the folder the gate judged it in (`cwd`), the
-    headline, the layer, the sub-agent and the relayed turn. None when that
-    cannot be written exactly: such a call can never be granted."""
+    arguments, the command, the folder the gate judged it in
+    (`folder_identity(cwd)`), the headline, the layer, the sub-agent and the
+    relayed turn. None when that cannot be written exactly: such a call can
+    never be granted."""
     try:
-        canon = json.dumps({"v": 2, "thread_id": request.thread_id, "task_id": request.task_id,
+        canon = json.dumps({"v": 3, "thread_id": request.thread_id, "task_id": request.task_id,
                             "tool": request.tool, "args": request.args, "command": request.command,
-                            "cwd": getattr(request, "cwd", None), "headline": request.headline,
+                            "cwd": folder_identity(getattr(request, "cwd", None)), "headline": request.headline,
                             "layer": request.layer, "subagent": request.subagent,
                             "relayed_from": request.relayed_from, "provider": request.provider},
                            sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False)
@@ -171,7 +195,7 @@ def _owner_only(request) -> bool:
     any card with a leading headline, or one the permit marked so."""
     from .permissions import L_ALWAYS_ASK, L_WIDENING
     return (getattr(request, "grantable", True) is not True or bool(request.headline)
-            or request.layer in (L_WIDENING, L_ALWAYS_ASK))
+            or request.layer in (L_WIDENING, L_ALWAYS_ASK, HATCH_LAYER))
 
 
 def _fits(value, depth=0) -> bool:
@@ -195,10 +219,21 @@ def grant_refusal(request, card: dict, whole: bool) -> str:
         return "browser"
     if request.provider == "codex":
         return "codex"
+    if request.layer == HATCH_LAYER:
+        return "hatch"
     if _owner_only(request) or request.discord_channel_id is not None:
         return "owner-only"
     if not request.thread_id and not request.task_id:
         return "no-chat"
+    # Each relayed turn and each native sub-agent spawn is its own: such a
+    # call can never be asked again identically, so no grant is offered.
+    if request.relayed_from:
+        return "relayed"
+    if request.subagent:
+        return "subagent"
+    folder = folder_identity(getattr(request, "cwd", None))
+    if folder is not None and "missing" in folder:
+        return "folder"
     if not whole or card.get("cut") or not _fits(card):
         return "too-large"
     for key, cap in (("command", SHOWN_TEXT), ("reason", SHOWN_REASON), ("headline", SHOWN_HEADLINE)):
@@ -355,7 +390,7 @@ def valid(data) -> tuple[dict, dict] | None:
 
 def thread_key(thread_id) -> str:
     """The "and N more" counter's key for a thread (or "none")."""
-    return thread_id if isinstance(thread_id, str) and _KEY.match(thread_id) else "none"
+    return thread_id if isinstance(thread_id, str) and _KEY.match(thread_id) and thread_id != ALL else "none"
 
 
 class DeferredStore:
@@ -460,8 +495,11 @@ class DeferredStore:
 
     def _change(self, change):
         """`change(records, more, now) -> result` under the lock; written when
-        it returned something other than None. A file that is not ours reads
-        as empty: an answer finds nothing, and a new deferral starts it again."""
+        it returned something other than None. A file that is present but not
+        ours reads as empty (an answer finds nothing, no grant stands); before
+        a new deferral is written over it, it is kept aside as `UNREADABLE`
+        (#326 delta review, MED 2), never silently replaced. A write that
+        would leave a file `valid` refuses is never made."""
         with self._lock:
             fd = self._open(create=True)
             try:
@@ -471,6 +509,11 @@ class DeferredStore:
                 records, more = current if current is not None else ({}, {})
                 result = change(records, more, self.clock())
                 if result is not None:
+                    if valid({"v": 2, "records": records, "more": more}) is None:
+                        raise ValueError("the deferred records would not read back; nothing was written")
+                    if current is None:
+                        os.replace(NAME, UNREADABLE, src_dir_fd=fd, dst_dir_fd=fd)
+                        LOG.warning("The unreadable deferred approvals file was kept aside as %s", UNREADABLE)
                     self._write(fd, records, more)
                     self._reindex(records)
                 return result
@@ -533,9 +576,10 @@ class DeferredStore:
                 return entry["id"]
         return None
 
-    def spend(self, record_id: str) -> None:
-        """Write a taken grant's use. Never raises: in this process the grant
-        is already gone from memory."""
+    def spend(self, record_id: str) -> bool:
+        """Write a taken grant's use; True when it is on disk. Never raises: in
+        this process the grant is already gone from memory, and a caller that
+        gets False must not use it (#326 delta review, LOW 3)."""
         def change(records, more, now):
             rec = records.get(record_id)
             if rec is None or rec["state"] != "granted":
@@ -544,10 +588,11 @@ class DeferredStore:
             rec["settled_at"] = _iso(now)
             return True
         try:
-            self._change(change)
+            return self._change(change) is True
         except Exception as exc:  # noqa: BLE001
-            LOG.warning("Cannot write a deferral grant's use (%s); it is spent in memory",
+            LOG.warning("Cannot write a deferral grant's use (%s); it is not used, and spent in memory",
                         type(exc).__name__)
+            return False
 
     # -- reads -----------------------------------------------------------------------
 
@@ -692,6 +737,25 @@ class DeferredStore:
                                  "first_at": rec["first_at"], "at": rec["at"]}
                 else:
                     entry["count"] = min(entry["count"] + rec["count"], 10**9)
+        self._bound_more(more)
+
+    @staticmethod
+    def _bound_more(more: dict) -> None:
+        """At most `MORE_KEEP` counters (#326 delta review, MED 2): past it the
+        oldest chats' counters fold into the one `ALL` counter, so nothing is
+        lost and the file a write leaves is always one `valid` reads."""
+        while len(more) > MORE_KEEP:
+            folded = [k for k in more if k != ALL]
+            key = min(folded, key=lambda k: (more[k]["at"], k))
+            gone = more.pop(key)
+            entry = more.get(ALL)
+            if entry is None:
+                more[ALL] = {"thread_id": None, "task_id": None, "count": gone["count"],
+                             "first_at": gone["first_at"], "at": gone["at"]}
+            else:
+                entry["count"] = min(entry["count"] + gone["count"], 10**9)
+                entry["first_at"] = min(entry["first_at"], gone["first_at"])
+                entry["at"] = max(entry["at"], gone["at"])
 
     def settle(self, record_id: str, action: str, *, check=None) -> dict:
         """The owner's Approve and retry ("retry": waiting → granted, for
@@ -818,13 +882,17 @@ class QuietDesk:
             row_id = f"{PREFIX}:{MORE}{thread_key(_ident(request.thread_id))}"
         self._changed([row_id], "deferred")
 
-    def granted(self, request) -> None:
-        """After the broker allowed a granted call: its use written."""
+    def granted(self, request) -> bool:
+        """After the broker took a grant, before it allows the call: the use
+        written. False (the broker then denies) when it cannot be, so a grant
+        is never used without its use on disk."""
         with self._taken_lock:
             taken = self._taken.pop(request.req_id, None)
-        if taken is not None:
-            self.store.spend(taken)
-            self._changed([f"{PREFIX}:{taken}"], "deferral_granted")
+        if taken is None:
+            return False
+        written = self.store.spend(taken)
+        self._changed([f"{PREFIX}:{taken}"], "deferral_granted")
+        return written
 
     def _changed(self, ids, reason) -> None:
         try:
@@ -882,7 +950,7 @@ def rows(daemon, row) -> list[dict]:
             continue
         expired = (now - at).total_seconds() >= WAITING_S
         thread_id, task_id = entry["thread_id"], entry["task_id"]
-        who = _who(thread_id, task_id)
+        who = "other chats" if key == ALL else _who(thread_id, task_id)
         detail = {"deferral_id": None, "tool": "", "card": {}, "thread_id": thread_id, "task_id": task_id,
                   "at": entry["at"], "until": None, "grantable": False, "why_not": "", "expired": expired,
                   "hud_only": False, "count": entry["count"], "more": entry["count"]}

@@ -512,7 +512,12 @@ class PendingApprovals:
             # No card, no Discord post, no wait: the desk records and announces.
             request.outcome = settled
             if settled[0] == "granted":
-                self._tell_desk(desk.granted, request)
+                # The use is written before the call may run; if it cannot be,
+                # the grant is not used (spent all the same in this process).
+                if self._tell_desk(desk.granted, request) is not True:
+                    request.outcome = ("deferred", "The owner's grant for this call could not be recorded, "
+                                       "so it was not used and the call did not run. Do not retry it now.")
+                    return self._record(request, Decision.DENY, "grant-unrecorded")
                 return self._record(request, Decision.ALLOW, "granted from the inbox")
             self._tell_desk(desk.deferred, request)
             return self._record(request, Decision.DENY, "deferred")
@@ -713,11 +718,12 @@ class PendingApprovals:
         return None
 
     @staticmethod
-    def _tell_desk(call, request) -> None:
+    def _tell_desk(call, request):
         try:
-            call(request)
-        except Exception:  # noqa: BLE001 — the answer already stands
+            return call(request)
+        except Exception:  # noqa: BLE001 — a deferral already stands; a grant then fails closed
             LOG.warning("Cannot record a quiet-hours outcome")
+            return None
 
     def _new_id(self) -> str:
         # 72 bits, one-shot: an answer cannot be replayed onto a later card

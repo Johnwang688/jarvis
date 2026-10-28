@@ -331,6 +331,10 @@ const WHY_NOT: Record<string, string> = {
   codex: "A Codex request is approved only while it waits: open its chat to ask again.",
   "owner-only": "This kind of call is asked every time, never approved ahead: open its chat to ask again.",
   "no-chat": "Nothing is waiting to retry it.",
+  hatch: "The reviewer's refusal is asked again only live: open its chat to ask again.",
+  relayed: "It came from a turn another chat started, which will not ask again the same way: open its chat.",
+  subagent: "It came from a sub-agent, which will not ask again the same way: open its chat.",
+  folder: "Its folder is gone or cannot be read, so it cannot be approved from here: open its chat.",
   "too-large": "It is too long to show in full here, so it cannot be approved from here: open its chat.",
   unreadable: "It cannot be approved from here: open its chat to ask again.",
 };

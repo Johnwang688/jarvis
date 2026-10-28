@@ -2124,6 +2124,25 @@ phone's scrub would change is `WITHHELD`). For several ids the binding is
 uses only the one-id form. `quiet_defer.answer(..., verified=True)` has one
 caller, `remote_answer._answer_deferred`, after `answer_verify`.
 
+**After the #326 delta review.** The escape hatch's asks carry the thread's
+provider and `grantable=False` (layer `escape-hatch` is refused besides,
+`why_not` "codex" or "hatch"): the hatch runs what it was asked itself,
+where the permit never judged it, so no grant ever answers it. The digest
+binds the folder itself (`folder_identity`: real path, device and inode),
+and a folder that is gone or unreadable is never granted ("folder"). A
+relayed turn's call ("relayed") and a native sub-agent's ("subagent") are
+not offered a grant: neither can ask again identically. "And N more"
+counters are bounded at `MORE_KEEP` (100): past it the oldest chats fold
+into one `_all` counter ("from other chats"), and a write that would leave
+a file `valid` refuses is never made; a present but unreadable file is
+kept aside as `deferred.json.unreadable` before a new deferral is written,
+never silently replaced. A grant's use is written before the broker
+allows the call: if it cannot be, the call is denied ("grant-unrecorded")
+and the grant is spent in this process (`_spent`); after a restart it may
+be used once, as it never ran. The phone's challenge subject for a
+deferral is `defer:<id>` (or `defers:<56 hex>` for a set), Allow only
+(`remote_auth._DEFER_SUBJECT`, `DEFER_DECISIONS`), beside P-5's `task:<id>`.
+
 Tests: `tests/v2/quiet_defer_check.py` (the acceptance list and the review's
 findings, each boundary proved by mutation), `codex_provider_check` (the
 decline, its log line, the chat's quiet note), `discord_routing_check`

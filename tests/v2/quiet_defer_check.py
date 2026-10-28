@@ -838,6 +838,155 @@ class Review(_Temp):
         print("ok  L3: the escape hatch tells the chat the deferral's words, never 'owner declined'")
 
 
+class Delta(Review):
+    """The #326 delta review's findings."""
+
+    def hatch(self, provider=None):
+        from jarvis.v2.hatch import EscapeHatch
+        thread = SimpleNamespace(provider=PN(provider), task_id=None) if provider else None
+        daemon = SimpleNamespace(stores=SimpleNamespace(threads=SimpleNamespace(get=lambda _id: thread)),
+                                 deliver=lambda tid, msg: None)
+        hatch = EscapeHatch(daemon, self.n.broker)
+        hatch.ran = []
+        hatch._run = lambda item, task: hatch.ran.append(item.command) or "[exit 0]"
+        return hatch
+
+    def test_m1_an_escape_hatch_ask_is_never_granted(self):
+        from jarvis.v2.hatch import _Declined
+        action = {"type": "command", "command": "git push origin HEAD", "cwd": "/w/tree"}
+        item = lambda: _Declined(thread_id="th000001", command=action["command"], tool="shell",  # noqa: E731
+                                 args=dict(action), reason="guardian declined")
+        for provider, why in (("codex", "codex"), ("claude", "hatch"), (None, "hatch")):
+            with self.subTest(provider=provider):
+                hatch = self.hatch(provider)
+                before = {r["id"] for r in self.n.store.all()}
+                self.assertEqual(hatch._offer(item()).decision, "deny")
+                (rec,) = [r for r in self.n.store.all() if r["id"] not in before]
+                self.assertEqual((rec["provider"], rec["grantable"], rec["why_not"]), (provider, False, why))
+                with self.assertRaises(ValueError):
+                    self.n.store.settle(rec["id"], "retry")
+                self.n.store.settle(rec["id"], "leave")
+        # Whatever the index holds, the desk never takes a grant for a hatch ask.
+        hatch = self.hatch("claude")
+        seen = []
+        real = self.n.broker.ask
+        self.n.broker.ask = lambda req, **kw: seen.append(req) or real(req, **kw)
+        hatch._offer(item())
+        req = seen[-1]
+        self.n.store._live[quiet_defer.request_digest(req)] = [
+            {"id": req.req_id, "thread_id": req.thread_id, "until": quiet_defer._iso(at(24)), "mono": None}]
+        self.assertEqual(hatch._offer(item()).decision, "deny")
+        self.assertEqual(hatch.ran, [], "the hatch ran nothing")
+        print("ok  MED 1: an escape-hatch ask (a Codex guardian's included) is never granted, never run")
+
+    def test_m2_counters_are_bounded_and_the_store_survives_400_chats(self):
+        logging.disable(logging.WARNING)
+        self.addCleanup(logging.disable, logging.NOTSET)
+        n = self.n
+        keep = request("make keep", thread_id="thKEEP01")
+        n.assertDeferred(keep)
+        n.store.settle(keep.req_id, "retry")
+        for i in range(420):
+            n.clock.now += timedelta(seconds=1)
+            n.assertDeferred(request(f"cmd {i}", thread_id=f"tx{i:06d}"))
+            raw = json.loads(n.store.path.read_text())
+            self.assertIsNotNone(quiet_defer.valid(raw), f"a write left an unreadable file at {i}")
+        records, more = n.store.snapshot()
+        self.assertLessEqual(len(more), quiet_defer.MORE_KEEP)
+        self.assertIn(keep.req_id, {r["id"] for r in records}, "the live grant's record is kept")
+        n.store.load_index()
+        self.assertTrue(n.store._live, "the grant survives a reload")
+        kept = sum(r["count"] for r in records if r["thread_id"].startswith("tx"))
+        self.assertEqual(kept + sum(m["count"] for m in more.values()), 420, "every deferral is a row or counted")
+        self.assertIn(quiet_defer.ALL, more, "the oldest chats fold into one counter")
+        rows = quiet_defer.rows(SimpleNamespace(inbox=SimpleNamespace(deferred=n.store)), inbox._row)
+        (folded,) = [r for r in rows if r["id"] == f"defer:{quiet_defer.MORE}{quiet_defer.ALL}"]
+        self.assertIn("other chats", folded["title"])
+        print("ok  MED 2: 'and N more' counters are bounded (oldest fold into one); 420 chats leave a valid store")
+
+    def test_m2_an_unreadable_file_is_kept_aside_not_replaced(self):
+        n = self.n
+        n.assertDeferred(request("first"))
+        n.store.path.write_text("{not ours")
+        n.assertDeferred(request("second", thread_id="th000002"))
+        aside = n.store.path.with_name(quiet_defer.UNREADABLE)
+        self.assertEqual(aside.read_text(), "{not ours", "the unreadable file is kept aside")
+        self.assertIsNotNone(quiet_defer.valid(json.loads(n.store.path.read_text())))
+        print("ok  MED 2: a present but unreadable store is kept aside, never silently replaced")
+
+    def test_low3_a_grant_whose_use_cannot_be_written_is_not_used(self):
+        n = self.n
+        rec = n.grant(request())
+        real = n.store._write
+        n.store._write = lambda *a, **k: (_ for _ in ()).throw(OSError("disk full"))
+        try:
+            first = request()
+            self.assertIs(n.broker.ask(first), Decision.DENY, "the use could not be written: not used")
+            self.assertEqual(n.broker.decisions[-1]["resolution"], "grant-unrecorded")
+        finally:
+            n.store._write = real
+        # LOW 4: a later write re-reads the file, where it still says "granted";
+        # in this process the grant was taken, so it never lives again.
+        n.assertDeferred(request("something else", thread_id="th000002"))
+        again = request()
+        self.assertIs(n.broker.ask(again), Decision.DENY)
+        self.assertEqual(again.outcome[0], "deferred", "not granted a second time in this process")
+        # After a restart it may be used once (it never ran), and only once.
+        fresh = Night(self.root)
+        fresh.clock.now = n.clock.now + timedelta(minutes=1)
+        fresh.store.load_index()
+        self.assertIs(fresh.broker.ask(request()), Decision.ALLOW)
+        self.assertIs(fresh.broker.ask(request()), Decision.DENY)
+        self.assertEqual(fresh.store.get(rec["id"])["state"], "used")
+        print("ok  LOW 3/4: a use that cannot be written denies; a taken grant never lives again in-process")
+
+    def test_low5_a_retargeted_link_or_a_missing_folder_is_another_folder(self):
+        r = self.repos()
+        permit, brief = self.permit()
+        link = self.root.parent / "L"
+        os.symlink(r["A"], link)
+        args = {"command": "git push", "description": "Push the branch"}
+        self.assertIs(permit("Bash", dict(args), brief, shell_cwd=str(link)), Decision.DENY)
+        (rec,) = self.n.store.all()
+        self.assertTrue(rec["grantable"], rec["why_not"])
+        self.n.store.settle(rec["id"], "retry")
+        os.unlink(link)
+        os.symlink(r["C"], link)
+        self.n.present = True
+        stop = self.n.answer_later(Decision.DENY)
+        try:
+            self.assertIs(permit("Bash", dict(args), brief, shell_cwd=str(link)), Decision.DENY)
+            self.assertNotEqual(last_verdict().reason, quiet_defer.GRANTED_TEXT)
+        finally:
+            stop.set()
+        gone = request(cwd=str(self.root.parent / "nowhere"))
+        self.n.present = False
+        self.n.assertDeferred(gone)
+        self.assertEqual(self.n.store.get(gone.req_id)["why_not"], "folder")
+        print("ok  LOW 5: the digest binds the folder itself (real path, device, inode); a missing one is never granted")
+
+    def test_a_deferral_subject_takes_allow_only(self):
+        from jarvis.v2 import remote_auth
+        self.assertEqual(remote_auth.DEFER_DECISIONS, ("allow",))
+        binding = remote_answer.defer_binding(["abcDEF123_-x"])
+        self.assertTrue(remote_auth._DEFER_SUBJECT.fullmatch(binding))
+        self.assertTrue(remote_auth._DEFER_SUBJECT.fullmatch(remote_answer.defer_binding(["a", "b"])))
+        for odd in ("defer:", "defer:a:b", "defers:abc", "task:0123abcd", "defer:" + "a" * 59):
+            self.assertIsNone(remote_auth._DEFER_SUBJECT.fullmatch(odd), odd)
+        print("ok  a deferral's subject is defer:<id> or defers:<56 hex>, and takes Allow only")
+
+    def test_low6_relayed_and_subagent_calls_are_not_offered_a_grant(self):
+        n = self.n
+        relayed = request("make a", relayed_from={"title": "x", "provider": "claude", "thread_id": "t2",
+                                                  "kind": "started"})
+        child = request("make b", subagent="cl:abc123")
+        for req, why in ((relayed, "relayed"), (child, "subagent")):
+            n.assertDeferred(req)
+            rec = n.store.get(req.req_id)
+            self.assertEqual((rec["grantable"], rec["why_not"]), (False, why))
+        print("ok  LOW 6: a relayed turn's or a sub-agent's call is not offered Approve and retry")
+
+
 # -- the daemon: rows, the HUD route, delivery -------------------------------------------
 
 

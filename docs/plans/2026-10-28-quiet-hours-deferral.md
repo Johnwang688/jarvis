@@ -153,5 +153,19 @@ their instructions that a decline in quiet hours may be a deferral.
   the spend written after. NITs: sub-agent and relay in the digest; a
   grant also ends by the monotonic clock in the process that minted it.
 
+### The delta review's fixes (2026-10-28)
+
+- **MED 1.** No grant for any escape-hatch ask (lead's decision): the hatch
+  passes the thread's provider and `grantable=False`, and its layer is
+  refused besides.
+- **MED 2.** "And N more" counters bounded (100; the oldest fold into one
+  "other chats" counter); no write leaves a file the reader refuses; an
+  unreadable file is kept aside, never silently replaced.
+- **LOW 3/4.** A grant's use is written before the call is allowed; a
+  failed write denies; a taken grant never lives again in that process.
+- **LOW 5.** The digest binds the folder itself (real path, device, inode);
+  a missing folder is never granted.
+- **LOW 6.** Relayed-turn and sub-agent calls are not offered a grant.
+
 Still open: a Codex canonical digest (Codex asks cannot be granted until
 then).
