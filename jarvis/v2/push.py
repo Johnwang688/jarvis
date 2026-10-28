@@ -60,11 +60,17 @@ VAPID private key as PKCS#8 PEM inside `{"version": 1, "pem"}`, made once on
 first use), `jarvis_push_subscriptions.json` (endpoints and their keys) and
 `push_settings.json` (the switch). **The folder is a credential folder**
 (`config.remote_dir()` in `config.credential_dirs()`, review of PR #325
-MED-1): v1's file and shell tools refuse every read in it, by any spelling
+MED-1): v1's file tools and `run_readonly` refuse reads in it
 (`files.credential_folder_judge`, and none of its files is exempt as
 "readable config"); v2's shell reads of it are always asked
-(`credentials-path`) and v2's read tools are refused there
-(`permissions._phone_folder_read`). All three files are protected state
+(`credentials-path`) and v2's read tools are refused there and at the
+folders that hold it below `$HOME` (`permissions._phone_folder_read`). The
+two secret files are also refused by their exact name wherever they are
+(`secrets.EXACT_NAMES`, MED-A: v1's `run_command` and v2's shell DENY
+`cat …/jarvis_push_key.json`, a copy's included), and what a command
+prints of them anyway is scrubbed (`secrets._push_values`: the PEM's
+lines, endpoints and keys). Not covered: a recursive search from `$HOME`
+or above by Claude's own tools, as for every credential folder. All three files are protected state
 (`tools/files._protected_state_paths`): no agent writes them. The private
 key is never logged, returned or shown; only its public half is
 (`GET /m/api/push`, the `applicationServerKey`).
@@ -532,9 +538,13 @@ class Push:
 
     def stop(self) -> None:
         """No push starts after this. A send under way stops before its next
-        subscription or address, and within `SEND_BUDGET_S` in any case; it is
-        waited for that long (one resolution may outlive it on its own
-        daemon thread, `bounded`, but sends nothing)."""
+        subscription or address. The budget (`SEND_BUDGET_S`) bounds each
+        connection's connect and TLS handshake and the start of each new
+        subscription; once a verified push service is answering, only that
+        service's replies (each read within the socket's timeout) can stretch
+        a send. It is waited for `SEND_BUDGET_S` + 1 s, then left on its
+        daemon thread. One resolution may also outlive it (`bounded`), but
+        sends nothing."""
         self._stopping.set()
         self._wake.set()
         thread = self._thread
@@ -808,7 +818,11 @@ class Push:
             if self._retry_at is not None and now < self._retry_at:
                 return None
             self._pending = False
-        result = self.send_all(count, rank)
+        try:
+            result = self.send_all(count, rank)
+        except Exception as exc:     # noqa: BLE001 — before any send: still due, retried
+            LOG.warning("phone push: the send could not start (%s)", type(exc).__name__)
+            result = {"sent": 0, "failed": 1, "removed": 0}
         with self._lock:
             if result["sent"]:
                 # Reached at least one phone: the window starts now.
@@ -823,6 +837,7 @@ class Push:
 
     def next_wait(self) -> float:
         waits = [RECHECK_S]
+        quiet_now = None
         with self._lock:
             if self._pending and self._last_sent is not None:
                 waits.append(max(0.0, self._last_sent + COALESCE_S - self.mono()) + 0.05)
@@ -832,8 +847,14 @@ class Push:
         if quiet is not None:
             now = quiet.clock()
             ends = quiet.ends_at(now)
+            quiet_now = ends is not None
             if ends is not None:
                 waits.append(max(1.0, (ends - now).total_seconds() + 1.0))
+        with self._lock:
+            # Quiet hours over and the morning push not looked at yet (a
+            # start just after they ended, `seed`): look now.
+            if self._was_quiet and quiet_now is False:
+                waits.append(0.05)
         return min(waits)
 
     def send_all(self, count: int, rank: int) -> dict:

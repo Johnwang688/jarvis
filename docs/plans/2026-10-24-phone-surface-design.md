@@ -620,9 +620,12 @@ more specific than the text above:
   spelling: v1's file and shell tools refuse it (none of its files is
   "readable config"), v2's read tools are refused there and v2's shell
   reads are always asked (`credentials-path`). The push files and
-  `push_settings.json` are protected state too (no agent write). (A first
-  version made the two files credential bundles by name; that missed
-  `cat <remote>/*` and refused globs like `git tag -l 'v*'`.)
+  `push_settings.json` are protected state too (no agent write). The two
+  secret files are also refused by exact name anywhere (never as a glob,
+  so `git tag -l 'v*'` and `ls *push*` keep main's verdict) and scrubbed
+  from v1's tool output (delta review MED-A); v2's read tools are refused at
+  the folders holding the phone's folder below `$HOME` (LOW-A). A search
+  from `$HOME` or above is the limit every credential folder shares.
 - **Bounded and retried (review of PR #325):** one push, every
   subscription, ends within 15 s (names resolved within 5 s on their own
   thread; the stop flag checked between subscriptions and addresses), and

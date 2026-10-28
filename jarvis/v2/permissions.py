@@ -463,15 +463,29 @@ PHONE_FOLDER_REFUSAL = ("{name} is in the phone's credential folder (its passkey
 def _phone_folder_read(path: Path) -> str | None:
     """A read tool's path inside the phone's credential folder
     (`config.remote_dir()`: P-2's passkeys and sessions, P-6's VAPID private
-    key and push subscriptions), as written or where it resolves, or a path
-    between the v2 data root and that folder (a Grep there reads it): refused
-    (review of PR #325, MED-1). The shell's reads of it are the
-    `credentials-path` rule's, and v1's file and shell tools refuse it as a
-    credential folder (`files.credential_folder_judge`). Other credential
-    folders are not judged here."""
+    key and push subscriptions), as written or where it resolves: refused
+    (review of PR #325, MED-1). So is a path that holds it (a Grep or Glob
+    there reads it) when that path is the data root, lies under it, or lies
+    strictly below `$HOME` (`~/.local/share/jarvis`, `~/.local`, a symlink to
+    either; LOW-A). `$HOME` itself and what lies above it are not: a search
+    from there reads every credential folder, `~/.ssh` included, the class
+    the scrub covers for v1 and nothing covers for Claude's own tools (a
+    stated limit). No open project root can hold the data root
+    (`folders.py` refuses such a root and any dot component), so this never
+    refuses a project's own search; a chat worktree's parent folders are
+    refused, which a chat never needs. The shell's reads of the folder are
+    the `credentials-path` rule's, the push files' names are refused
+    outright (`secrets.EXACT_NAMES`), and v1's file and shell tools refuse
+    the folder (`files.credential_folder_judge`). Other credential folders
+    are not judged here."""
     try:
         remote = Path(os.path.abspath(config.remote_dir()))
         data = Path(os.path.abspath(Path(config.V2_DATA_DIR).expanduser()))
+        homes = {Path(os.path.abspath(os.path.expanduser("~")))}
+        try:
+            homes.add(next(iter(homes)).resolve())
+        except (OSError, RuntimeError):
+            pass
         candidates = {Path(os.path.abspath(path))}
         try:
             candidates.add(path.resolve())
@@ -482,8 +496,10 @@ def _phone_folder_read(path: Path) -> str | None:
             for candidate in candidates:
                 if candidate == folder or folder in candidate.parents:
                     return PHONE_FOLDER_REFUSAL.format(name=path.name or str(path))
-                # The data root holds it: a search from there reads it.
-                if candidate in folder.parents and (candidate == data or data in candidate.parents):
+                # A folder that holds it: a search from there reads it.
+                if candidate in folder.parents and (
+                        candidate == data or data in candidate.parents
+                        or any(home in candidate.parents for home in homes)):
                     return PHONE_FOLDER_REFUSAL.format(name=path.name or str(path))
     except (OSError, RuntimeError, ValueError):
         return PHONE_FOLDER_REFUSAL.format(name="that path")

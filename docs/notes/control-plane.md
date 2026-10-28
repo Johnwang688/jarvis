@@ -1775,9 +1775,20 @@ on 2026-10-28).
   none of its files is exempt as readable gate state), v2's read tools are
   refused there (`permissions._phone_folder_read`, which also refuses a
   read tool's path at the data root, since a search from there reads it)
-  and v2's shell reads of it are always asked (`credentials-path`). A
-  recursive shell search from above the data root (`grep -r x ~`) is the
-  class every credential folder shares. The push files,
+  and v2's shell reads of it are always asked (`credentials-path`). The
+  two secret files are also refused by their **exact name** anywhere, a
+  copy included (`secrets.EXACT_NAMES`, delta review MED-A: v1's
+  `run_command` and v2's shell DENY `cat …/jarvis_push_key.json`, never
+  asked), but never judged as globs, so `ls j*` or `rg -g '*key.json'` keep
+  main's verdict; and what a command prints of them is scrubbed
+  (`secrets._push_values`: each base64 line of the key's PEM, each
+  endpoint, auth secret and public key). v2's read tools are refused at
+  every folder that holds the phone's folder below `$HOME` too (LOW-A:
+  `~/.local/share/jarvis`, `~/.local`, a symlink to them; no project root
+  can hold the data root, and a chat never needs its worktree's parents).
+  **Not covered:** a recursive search from `$HOME` or above by Claude's own
+  Grep (and `grep -r x ~` asked or reviewed in v2), the class every
+  credential folder shares; v1's scrub covers its own tools' output. The push files,
   `remote/push_settings.json` and `quiet.json` are protected state
   (`files._protected_state_paths`): refused to every agent write.
 - **Bounded, retried, padded** (review of PR #325): one push to every

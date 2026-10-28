@@ -58,6 +58,17 @@ PROTECTED_NAMES = frozenset(
     }
 )
 
+# Refused by their exact name only (review of PR #325, MED-A): the phone's
+# Web Push credentials (`v2/push.py`), the VAPID private key and the push
+# subscriptions, in `<data root>/remote` (a credential folder too). Exact:
+# never matched as a glob or a program's pattern (`_BUNDLE_NAMES` leaves them
+# out), so `ls j*`, `rg -g '*key.json'` and `ls *push*` keep main's verdict
+# (LOW-1); the literal name refuses `cat …/jarvis_push_key.json` in v1's
+# `run_command` and v2's shell wherever the file was copied. A glob that
+# reaches them in the folder is the folder rule's; what one prints anyway is
+# scrubbed (`_push_values`).
+EXACT_NAMES = frozenset({"jarvis_push_key.json", "jarvis_push_subscriptions.json"})
+
 # Values shorter than this are things like `DEBUG=1` or `PORT=8080`. Redacting
 # them would mangle unrelated output for no gain.
 MIN_SECRET_LEN = 8
@@ -97,7 +108,7 @@ def is_protected(path: str | Path) -> bool:
     exist and for a name from elsewhere (a grep line's attribution). Ask
     `is_credential` about a real path: it also follows symlinks."""
     name = PurePosixPath(str(path)).name
-    return name in PROTECTED_NAMES or is_env_credential_name(name)
+    return name in PROTECTED_NAMES or name in EXACT_NAMES or is_env_credential_name(name)
 
 
 def is_credential(path: str | Path) -> bool:
@@ -207,7 +218,7 @@ def is_env_credential(path: str | Path) -> bool:
 _NAME_CHAR = r"A-Za-z0-9_.\-"
 _RAW_NAMES = [
     (name, re.compile(rf"(?<![{_NAME_CHAR}]){re.escape(name)}(?![{_NAME_CHAR}])"))
-    for name in sorted(PROTECTED_NAMES)
+    for name in sorted(PROTECTED_NAMES | EXACT_NAMES)
 ]
 
 # Every credential env file in a raw line (ENV-1): `.env`, then optionally
@@ -1930,7 +1941,61 @@ def secret_values() -> list[str]:
     values.update(_json_values(config.ONSHAPE_TOKEN_PATH))
     values.update(_json_values(config.DISCORD_TOKEN_PATH))
     values.update(_json_values(config.SPOTIFY_TOKEN_PATH))
+    values.update(_push_values())
     return sorted(values, key=len, reverse=True)
+
+
+_PUSH_CAP = 256 * 1024
+
+
+def _push_values() -> tuple[str, ...]:
+    """The phone's Web Push secrets (review of PR #325, MED-A), cached until
+    either file changes: every base64 line of the VAPID private key's PEM
+    (each appears whole whether the file is printed raw or as JSON, whose
+    escaped newlines split nothing), and each subscription's endpoint, auth
+    secret and public key. Read without following a link; a file that is
+    missing, a link or not one of ours gives nothing."""
+    import json as _json
+    remote = Path(config.remote_dir())
+    out: set[str] = set()
+    for name in ("jarvis_push_key.json", "jarvis_push_subscriptions.json"):
+        path = remote / name
+        try:
+            fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+                         | getattr(os, "O_CLOEXEC", 0))
+        except OSError:
+            continue
+        try:
+            info = os.fstat(fd)
+            if not _stat.S_ISREG(info.st_mode) or info.st_size > _PUSH_CAP:
+                continue
+            key = (info.st_ino, info.st_mtime_ns, info.st_size)
+            cached = _push_cache.get(name)
+            if cached is not None and cached[0] == key:
+                out.update(cached[1])
+                continue
+            data = os.read(fd, _PUSH_CAP + 1)
+        finally:
+            os.close(fd)
+        found: set[str] = set()
+        try:
+            value = _json.loads(data.decode("utf-8"))
+        except (ValueError, UnicodeError):
+            value = None
+        if name == "jarvis_push_key.json" and isinstance(value, dict) and isinstance(value.get("pem"), str):
+            found |= {line.strip() for line in value["pem"].splitlines()
+                      if len(line.strip()) >= MIN_SECRET_LEN and not line.startswith("-----")}
+        if name == "jarvis_push_subscriptions.json" and isinstance(value, dict):
+            for row in value.get("subscriptions") or []:
+                if isinstance(row, dict):
+                    found |= {row[k] for k in ("endpoint", "auth", "p256dh")
+                              if isinstance(row.get(k), str) and len(row[k]) >= MIN_SECRET_LEN}
+        _push_cache[name] = (key, tuple(found))
+        out |= found
+    return tuple(out)
+
+
+_push_cache: dict[str, tuple[tuple, tuple[str, ...]]] = {}
 
 
 # Separators a tool can put between a path and the rest of an output line.
