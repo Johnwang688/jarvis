@@ -3225,8 +3225,9 @@ single-pattern scan, a terminated block judged line by line, and one per
 low finding); each finding's check fails on `9286ca6f`.
 
 The third review of #314 (`16af27ec`, same file): h3 a private key's header
-and footer never hide what lies between on a card that is text or in
-`log.jsonl`. A block goes whole only when every line between is key
+and footer never hide what lies between, on every reader: a card that is
+text, `log.jsonl`, the Diff tab (`for_display`), `chat_reads.scrub`, and a
+model's input (`for_model`, diff review's `for_model_strict`). A block goes whole only when every line between is key
 material once its framing is off (`_card_key_spans`, `_whole_key_block`);
 otherwise its header, footer and the adjacent key-material lines go, never
 code (a fake header and footer as strings, as comments, a header-only string
@@ -3235,9 +3236,16 @@ the code after them stays. m2 `-eyJ…`, `-eyJa…` and `jmcp_…` runs are line
 (`_RUN_STARTS`: a start inside an earlier same-kind start's run is skipped,
 being dominated by it). t3 a card's command-word guard (`_clear_of`) and its
 placeholders' return (`CardPass.show`) are one sweep each. l4 a wrapped AWS
-session token's `…==` tail is not a `NAME=` statement. Each with its mutation.
-Still open: `for_display` and the model readers (the Diff tab, diff review's
-input) still withhold a header-to-footer span whole whatever lies between.
+session token's `…==` tail is not a `NAME=` statement. Each with its mutation
+(h3's includes the old whole-span rule on the non-card readers).
+An unterminated block now goes through its key lines, not to the end of the
+text (`redact_private_key_check` k2 updated). Known residual: a key line
+counts as key material when it is base64 of 60 or more characters, or has a
+capital and a digit, `+` or `=` padding (or is a PGP checksum), so one line of
+that shape between a fake header and footer (a program named `Ab1Cd2`) is
+still withheld with the block. Real commands rarely have that shape; a line of any
+other shape breaks the block. `secrets._key_blocks` (v1's SEC-6 pass inside
+one shell quoting) keeps its own, looser `_key_material` rule, as on main.
 
 Follow-ups from the second review, not changed here: the phone's marker rule
 (a card showing any `[withheld: …]` is Deny-only there) is stricter than it

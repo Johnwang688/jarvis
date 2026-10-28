@@ -22,7 +22,8 @@ Three readers, three entry points:
   (`password: …`, `client_secret: …`).
 
 The rules beyond the table: a private key's whole block (`private_key_spans`,
-SEC-5), a `Bearer`/`Basic` credential, a URL's password (a model's input
+SEC-5) when it is nothing but key material, else its header, footer and the
+key lines beside them, never code between them (`_card_key_spans`), a `Bearer`/`Basic` credential, a URL's password (a model's input
 keeps a local or test host's: `http://u:p@localhost:5173/`), an AWS secret
 key beside or labelled as one, a lower-case `sk`/`oat`/`rt` bearer with a
 random run, a Discord token whose first part decodes to an id. Every
@@ -557,7 +558,11 @@ def _prefixed_spans(view: str, table, lo: int = 0, hi: int | None = None) -> lis
 def _shape_spans(view: str, mode: str) -> list[tuple[int, int, str]]:
     """Every shape in `view`, as (start, end, kind) in the view, for the
     reader `mode` names (`STRICT`, `MODEL`, `DISPLAY`)."""
-    found = [(a, b, KEY) for a, b in private_key_spans(view)]
+    # A private key's block: whole only when it is nothing but key material,
+    # else its header, footer and the key lines beside them, never code
+    # between them (third review of #314, H: on every reader, a model's
+    # input and the Diff tab as well as a card).
+    found = [(lo, hi, KEY) for a, b in private_key_spans(view) for lo, hi in _card_key_spans(view, a, b)]
     found += _prefixed_spans(view, SHAPES)
     if mode != STRICT:
         found += _regex_spans(view, HEURISTIC)
@@ -1038,21 +1043,23 @@ def _command_words(text: str) -> list[tuple[int, int]]:
     return out
 
 
-# A private key on a card that is text (third review of #314, H): a block
+# A private key's block, on every reader (third review of #314, H): it
 # goes whole only when everything between its header and footer is key
 # material, so a fake header and footer never hide the code between them
 # (`HEADER = "-----BEGIN RSA PRIVATE KEY-----"`, code, `FOOTER = …`).
-# What a block's line may be once its framing is taken off: base64 that
-# reads as random (both cases and a digit, `+` or `=`: a body line of a real
-# key is, a word or a path such as `reboot`, `/sbin/reboot` or `main` is
-# not), a PGP checksum, an armor or PEM header line (`Version:`, `Comment:`,
-# `Proc-Type:`, `DEK-Info:`, of plain characters), or nothing. Its framing:
-# quotes (a `b`/`r`/`u` prefix too), `(`, `+` and `,` before; quotes, `+`,
-# `)`, `,` and `;` after; and the line breaks `secrets._KEY_BREAK` knows
-# (a real one or a `\n` escape) between.
+# What a block's line may be once its framing is taken off: base64 of a
+# key's line length (60 or more) or that reads as random (a capital and a
+# digit, `+` or `=` padding: a body line of a real key does, a word or a
+# path such as `reboot`, `/sbin/reboot` or `main` does not), a PGP checksum,
+# an armor or PEM header line (`Version:`, `Comment:`, `Proc-Type:`,
+# `DEK-Info:`, of plain characters), or nothing. Its framing: quotes (a
+# `b`/`r`/`u` prefix too), `(`, `,` and a `+` operator before; quotes, `)`,
+# `,`, `;` and a `+` operator after (a `+` the base64 holds is its own);
+# and the line breaks `secrets._KEY_BREAK` knows (a real one or a `\n`
+# escape) between.
 _CARD_KEY_SPLIT = re.compile("(" + KEY_BEGIN.pattern + ")|(" + KEY_END.pattern + r")|(\r?\n|(?:\\r)?\\n|\\r)")
-_CARD_FRAME_HEAD = re.compile(r"[ \t]*(?:[(+,][ \t]*)*(?:[bBrRuU]{0,2}[\"'][ \t]*)?")
-_CARD_FRAME_TAIL = " \t\"'+),;"
+_CARD_FRAME_HEAD = re.compile(r"[ \t]*(?:(?:[(,]|\+(?=[ \t\"']))[ \t]*)*(?:[bBrRuU]{0,2}[\"'][ \t]*)?")
+_CARD_FRAME_TAIL = " \t\"'),;"
 _CARD_ARMOR = re.compile(r"(?:Version|Comment|Hash|Charset|MessageID|Proc-Type|DEK-Info):[ \t]*[A-Za-z0-9 .,:/@+_=\-]*")
 _CARD_BASE64 = re.compile(r"[A-Za-z0-9+/]+={0,2}")
 _CARD_CHECKSUM = re.compile(r"=[A-Za-z0-9+/]{4}")
@@ -1062,8 +1069,13 @@ _CARD_GAP = re.compile(r"(?:\s|\\[rn])*")
 def _card_core(text: str, a: int, b: int) -> tuple[int, int]:
     """The piece `text[a:b]` (one line of a block) without its framing."""
     a = _CARD_FRAME_HEAD.match(text, a, b).end()
-    while b > a and text[b - 1] in _CARD_FRAME_TAIL:
-        b -= 1
+    while b > a:
+        if text[b - 1] in _CARD_FRAME_TAIL:
+            b -= 1
+        elif text[b - 1] == "+" and (b - 1 == a or text[b - 2] in " \t\"'"):
+            b -= 1                                  # the operator, not the base64's own
+        else:
+            break
     return a, b
 
 
@@ -1077,8 +1089,8 @@ def _card_key_line(core: str) -> str | None:
         return "key"
     if _CARD_ARMOR.fullmatch(core):
         return "armor"
-    if (_CARD_BASE64.fullmatch(core) and any(c.isupper() for c in core) and any(c.islower() for c in core)
-            and (_DIGIT.search(core) or "+" in core or core.endswith("="))):
+    if _CARD_BASE64.fullmatch(core) and (len(core) >= 60 or (
+            any(c.isupper() for c in core) and (_DIGIT.search(core) or "+" in core or core.endswith("=")))):
         return "key"
     return None
 
@@ -1090,7 +1102,7 @@ def _whole_key_block(text: str, items) -> bool:
 
 
 def _card_key_spans(text: str, a: int, b: int) -> list[tuple[int, int]]:
-    """What a card withholds of a private key's span `text[a:b]` (a block,
+    """What any reader withholds of a private key's span `text[a:b]` (a block,
     an unterminated one, or a footer's tail; `private_key_spans`): the whole
     span when every line in it is key material (`_whole_key_block`); else
     each header and footer, and the key-material lines next to one (below a
@@ -1165,13 +1177,7 @@ def card_spans(text: str, *, command: bool = True) -> list[tuple[int, int, str]]
       `secrets._key_blocks`, a URL's userinfo to `strip_url_credentials`."""
     from jarvis.tools import secrets as S
     if not command:
-        view = _View(text)
-        found = []
-        for va, vb, kind in _shape_spans(view.view, DISPLAY):
-            for lo, hi in _card_key_spans(view.view, va, vb) if kind == KEY else [(va, vb)]:
-                found.append((*view.span(lo, hi), kind))
-        found += _labelled_card_spans(text)
-        return _merge(found)
+        return _merge(spans(text, mode=DISPLAY) + _labelled_card_spans(text))
     if S._run_names(text) is True:
         return []
     view = _View(text)

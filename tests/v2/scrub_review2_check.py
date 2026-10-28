@@ -29,7 +29,7 @@
 Third review (16af27ec, 2026-10-28):
 
   h3  a private key's header and footer around code never hide the code on
-      a card or in `log.jsonl` (a fake header and footer as strings, as
+      a card, in `log.jsonl`, on the Diff tab or in a model's input (a fake header and footer as strings, as
       comments, a header-only string before a real block): the code is
       shown, while a real block (raw, JSON-escaped, Python-concatenated)
       still goes whole as one marker
@@ -513,8 +513,13 @@ UNTERMINATED = f"{KH}\n{B64}\n{B64B}\nrm -rf /tmp/build\nprint('done')\n"
 
 
 def key_surfaces(text: str) -> dict[str, str]:
-    """`text` as each card surface that judges it as text shows it."""
+    """`text` as each reader shows it: the card surfaces that judge it as
+    text, the Diff tab's and the owner's display scrubs, and the model's."""
     return {
+        "for_display (Diff tab)": redact.for_display(text),
+        "for_model": redact.for_model(text),
+        "for_model_strict (diff review input)": redact.for_model_strict(text),
+        "chat_reads.scrub": chat_reads.scrub(text),
         "card: Write content": approvals.card_args({"file_path": "/tmp/k", "content": text})["content"],
         "card: Edit new_string": approvals.card_args({"file_path": "/tmp/k", "old_string": "a",
                                                       "new_string": text})["new_string"],
@@ -542,6 +547,9 @@ def h3_failures() -> list[str]:
     return failures
 
 
+NON_CARD = ("for_display (Diff tab)", "for_model", "for_model_strict (diff review input)", "chat_reads.scrub")
+
+
 def l5_failures() -> list[str]:
     failures = []
     for where, shown in key_surfaces(UNTERMINATED).items():
@@ -567,7 +575,8 @@ class H3(Base):
     def test_h3_a_key_header_and_footer_never_hide_code(self):
         self.assertEqual(h3_failures(), [])
         print(f"ok  h3: {len(AROUND_CODE)} fake headers/footers around code keep the code on the card "
-              f"(Write, Edit, reason) and in log.jsonl; {len(REAL_BLOCKS)} real blocks still go whole")
+              f"(Write, Edit, reason), in log.jsonl, on the Diff tab (for_display), for_model, "
+              f"for_model_strict and chat_reads.scrub; {len(REAL_BLOCKS)} real blocks still go whole on each")
 
     def test_h3_mutation_whole_whatever_lies_between_caught(self):
         with patch.object(redact, "_whole_key_block", return_value=True):
@@ -575,9 +584,19 @@ class H3(Base):
         self.assertTrue(any("code hidden" in f for f in caught), caught)
         print(f"ok  h3: mutation caught: a block withheld whole whatever lies between ({len(caught)} failures)")
 
+    def test_h3_mutation_old_whole_span_on_other_readers_caught(self):
+        # The rule at 16af27ec for every reader but a card: header to footer
+        # whole, whatever lies between (`private_key_spans` as it is).
+        with patch.object(redact, "_card_key_spans", lambda text, a, b: [(a, b)]):
+            caught = h3_failures()
+        for where in NON_CARD:
+            self.assertTrue(any(f.startswith(where + ":") and "code hidden" in f for f in caught), (where, caught))
+        print(f"ok  h3: mutation caught: the old whole-span rule on the Diff tab, model and owner readers "
+              f"({len(caught)} failures)")
+
     def test_l5_an_unterminated_block_goes_but_not_the_code_after(self):
         self.assertEqual(l5_failures(), [])
-        print("ok  l5: an unterminated block's header and key lines withheld on every card surface; "
+        print("ok  l5: an unterminated block's header and key lines withheld on every reader (cards, log.jsonl, the Diff tab, the model scrubs); "
               "the code after them shown")
 
     def test_l5_mutation_reviewed_rule_caught(self):
