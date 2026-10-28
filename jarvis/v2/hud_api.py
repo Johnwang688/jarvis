@@ -1624,6 +1624,55 @@ OWNER_VOICE_PICKERS = frozenset({"stt", "say", "voice", "voices", "mute"})
 OWNER_PICKER_WRITES = frozenset({"model", "models", "avatar"})
 
 
+def dictate(daemon, data: bytes, mime: str, *, budget: float | None):
+    """One dictation clip, the owner's, to text: `(kind, SttResult)`, or
+    `(kind, None)` when the clip holds too little speech to judge (nothing is
+    transcribed or sent anywhere). Refusals raise `APIError` (`fail`) with a
+    fixed sentence. The desk's `POST /stt` and the phone's `POST /m/api/stt`
+    (P-7, `remote_stt`) both call this, so the phone's audio takes exactly
+    the desk's path: speaker verification, then the owner's switches
+    (`stt_settings`: local first, the cloud only when they allow it).
+
+    V12: whose voice is it, BEFORE anything is transcribed or uploaded. Always asked (M1, the
+    lead's decision): a client that leaves `verify` out gets no way around it, and `verify=1`
+    is accepted as a no-op. The daemon skips it itself when nobody is enrolled or Guest voice
+    is on, and says which in the reply. A refusal is a fixed sentence: no score, no audio, no
+    library text. A change in the observed mode (a file edited by hand, a voiceprint deleted)
+    is published on the bus so every window's label follows (M3).
+    """
+    from jarvis import llm, speaker, voice
+    from . import speaker_routes
+    try:
+        kind = speaker.verify(data, mime)
+    except speaker.NotOwner as exc:
+        fail(422, str(exc))
+    except speaker.VerifyUnsupported as exc:
+        fail(415, str(exc))
+    except speaker.SpeakerError as exc:
+        fail(503, str(exc))
+    finally:
+        speaker_routes.watch(daemon)
+    if kind == "no_speech":
+        return kind, None
+    try:
+        # Dictation is bounded tighter than the library default (V-11).
+        # The HUD is the caller that opts in to the local engine (V13); the
+        # reply says which backend served the clip, for the diagnostics. Whose voice it is was
+        # decided above, before this: a refusal never gets here, nor does a clip with no speech.
+        return kind, voice.stt_result(data, mime=mime, timeout=config.STT_DICTATION_TIMEOUT_S,
+                                      max_retries=config.STT_DICTATION_ATTEMPTS, budget=budget,
+                                      prefer_local=True)
+    except llm.LLMError as exc:
+        # A provider outage is a sentence for the HUD, not a traceback in
+        # the daemon log. STTUnavailable's message is model ids and HTTP
+        # statuses only; any other LLMError may quote a response body, so
+        # it is named by type.
+        message = str(exc) if isinstance(exc, voice.STTUnavailable) else (
+            f"speech-to-text failed ({type(exc).__name__})")
+        # The owner's own switch forbade the only path left: a retry cannot fix it.
+        fail(409 if isinstance(exc, voice.STTBlocked) else 502, message)  # logged as one warning line by _dispatch
+
+
 def pickers(handler, daemon, parts, query):
     from jarvis import avatars, llm, models, voice
     from jarvis.tools import voicectl
@@ -1678,50 +1727,16 @@ def pickers(handler, daemon, parts, query):
         data = handler._raw_body()
         if not data:
             fail(400, "audio is empty")
-        # V12: whose voice is it, BEFORE anything is transcribed or uploaded. Always asked (M1, the
-        # lead's decision): a client that leaves `verify` out gets no way around it, and `verify=1`
-        # is accepted as a no-op. The daemon skips it itself when nobody is enrolled or Guest voice
-        # is on, and says which in the reply. A refusal is a fixed sentence: no score, no audio, no
-        # library text. A change in the observed mode (a file edited by hand, a voiceprint deleted)
-        # is published on the bus so every window's label follows (M3).
-        from jarvis import speaker
-        from . import speaker_routes
-        try:
-            kind = speaker.verify(data, mime)
-        except speaker.NotOwner as exc:
-            fail(422, str(exc))
-        except speaker.VerifyUnsupported as exc:
-            fail(415, str(exc))
-        except speaker.SpeakerError as exc:
-            fail(503, str(exc))
-        finally:
-            speaker_routes.watch(daemon)
-        if kind == "no_speech":
+        kind, got = dictate(daemon, data, mime, budget=budget)
+        if got is None:
             # Too little speech to judge (L2): an empty answer, like a silent clip; nothing is sent anywhere.
             return 200, {"text": "", **ids, "verify": kind}
         # Unenrolled and not asked: the reply is what it always was.
         verdict = {} if (kind == "skipped_unenrolled" and verify is None) else {"verify": kind}
-        try:
-            # Dictation is bounded tighter than the library default (V-11).
-            # The HUD is the caller that opts in to the local engine (V13); the
-            # reply says which backend served the clip, for the diagnostics. Whose voice it is was
-            # decided above, before this: a refusal never gets here, nor does a clip with no speech.
-            got = voice.stt_result(data, mime=mime, timeout=config.STT_DICTATION_TIMEOUT_S,
-                                   max_retries=config.STT_DICTATION_ATTEMPTS, budget=budget,
-                                   prefer_local=True)
-            served = {"backend": got.backend, "model": got.model}
-            if got.fallback:
-                served["fallback"] = got.fallback
-            return 200, {"text": got.text, **served, **ids, **verdict}
-        except llm.LLMError as exc:
-            # A provider outage is a sentence for the HUD, not a traceback in
-            # the daemon log. STTUnavailable's message is model ids and HTTP
-            # statuses only; any other LLMError may quote a response body, so
-            # it is named by type.
-            message = str(exc) if isinstance(exc, voice.STTUnavailable) else (
-                f"speech-to-text failed ({type(exc).__name__})")
-            # The owner's own switch forbade the only path left: a retry cannot fix it.
-            fail(409 if isinstance(exc, voice.STTBlocked) else 502, message)  # logged as one warning line by _dispatch
+        served = {"backend": got.backend, "model": got.model}
+        if got.fallback:
+            served["fallback"] = got.fallback
+        return 200, {"text": got.text, **served, **ids, **verdict}
     if name == "speech/summary":
         return speech_summary(handler, daemon)   # owner-only, and reads its own (capped) body
     body = handler._body()

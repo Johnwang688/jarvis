@@ -80,6 +80,8 @@ export interface Composer {
   online: boolean;
   send: (text: string) => void;
   edit: (text: string) => void;
+  /** P-7: the "Hold to talk" button (./talk.ts), whose words land in this box unsent. */
+  mic?: HTMLElement | null;
 }
 
 export function composerView(c: Composer): HTMLElement {
@@ -103,7 +105,9 @@ export function composerView(c: Composer): HTMLElement {
   };
   text.addEventListener("input", sync);
   sync();
-  box.append(text, send);
+  box.append(text);
+  if (c.mic) box.append(c.mic);
+  box.append(send);
   if (!c.online) box.append(note("Offline: nothing can be sent until Jarvis is reachable.", "m-compose-offline", "m-notice m-off"));
   else if (c.note) box.append(note(c.note, "m-compose-note"));
   return box;

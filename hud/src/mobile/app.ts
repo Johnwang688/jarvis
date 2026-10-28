@@ -34,6 +34,11 @@
 // Start, Resume and Cancel, each confirmed first, Cancel then the passkey.
 // A proposal in the inbox takes Withdraw. Nothing is shown as sent before
 // its 2xx; offline, nothing is sent (no write queue).
+//
+// P-7, push to talk (jarvis/v2/remote_stt.py, ./talk.ts): an owner's chat's
+// message box also takes "Hold to talk". Its words are added to that chat's
+// draft and the box drawn again; Send is still the owner's tap. No inbox
+// row, card, question or decision has a mic.
 
 import { parseInbox, waitingCount, clockOf, type InboxRow } from "../lib/inbox";
 import { getJson, errorWord, postJson, type Got, type Posted } from "./net";
@@ -46,8 +51,9 @@ import {
 import { chatsView, el, inboxView, logRow, taskView, tasksView, transcriptView, tap, type InboxAnswers } from "./views";
 import {
   chatSheetView, composerView, parseModels, refusal, sentNote, taskControlsView, taskSheetView, verbsFor,
-  type ProviderChoice, type Sheet, type Verb,
+  MESSAGE_CHARS, type ProviderChoice, type Sheet, type Verb,
 } from "./write";
+import { Talk, browserTalkEnv, type TalkEnv } from "./talk";
 
 export type Tab = "inbox" | "chats" | "tasks";
 
@@ -74,6 +80,8 @@ export interface AppDeps {
   openStream?: (url: string) => StreamLike;
   now?: () => number;
   setTimer?: (fn: () => void, ms: number) => unknown;
+  /** P-7's microphone and clip upload (fakes in the tests). */
+  talkEnv?: TalkEnv;
 }
 
 export const STREAM_URL = "/m/api/events";
@@ -125,6 +133,8 @@ export class PhoneApp {
   readonly sending = new Set<string>();
   readonly withdrawing = new Set<string>();
   taskWrite: { id: string; confirming: Verb | null; busy: boolean; note: string } | null = null;
+  /** P-7: the one "Hold to talk" button, shown in the open chat's box. */
+  readonly talk: Talk;
 
   private readonly fetchJson: (path: string) => Promise<Got>;
   private readonly postJson: (path: string, value: unknown) => Promise<Posted>;
@@ -176,6 +186,11 @@ export class PhoneApp {
     this.tabs = { inbox: make("inbox", "Inbox"), chats: make("chats", "Chats"), tasks: make("tasks", "Tasks") };
     frame.append(top, this.banner, this.main, nav);
     this.frame = frame;
+    this.talk = new Talk(deps.talkEnv ?? browserTalkEnv, {
+      insert: (threadId, text) => this.dictated(threadId, text),
+      unauthorized: () => void this.recheckSession(),
+      online: () => this.online,
+    });
   }
 
   // -- life cycle ----------------------------------------------------------------
@@ -191,6 +206,7 @@ export class PhoneApp {
 
   stop(): void {
     this.stopped = true;
+    this.talk.hidden();
     this.stream?.close();
     this.stream = null;
   }
@@ -514,7 +530,27 @@ export class PhoneApp {
       note: this.composeNotes.get(threadId) ?? "", online: this.online,
       send: (text) => void this.sendMessage(threadId, text),
       edit: (text) => { this.composeDrafts.set(threadId, text); },
+      mic: this.talk.view(threadId),
     });
+  }
+
+  /** P-7: a clip's words, added to that chat's draft after what is typed, and the box drawn again.
+   * Never sent: Send is the owner's tap. */
+  dictated(threadId: string, text: string): void {
+    if (this.stopped) return;
+    const shown = this.thread?.id === threadId
+      ? this.main.querySelector<HTMLTextAreaElement>('[data-testid="m-compose-text"]') : null;
+    const draft = shown ? shown.value : (this.composeDrafts.get(threadId) ?? "");
+    const joined = draft && !/\s$/.test(draft) ? `${draft} ${text}` : draft + text;
+    this.composeDrafts.set(threadId, joined.slice(0, MESSAGE_CHARS));
+    this.composeNotes.delete(threadId);
+    this.renderComposer(true);
+  }
+
+  /** A 401 from the clip upload: is the session over? */
+  private async recheckSession(): Promise<void> {
+    const me = await this.fetchJson("/m/api/me");
+    if (!me.ok && me.why === "signed-out") this.signedOut();
   }
 
   private firstProject(): string {
@@ -1034,6 +1070,10 @@ export function startApp(deps: AppDeps): PhoneApp {
     window.addEventListener("online", () => void app.probe());
     document.addEventListener("visibilitychange", () => {
       if (document.visibilityState === "visible" && !app.stopped) void app.probe();
+    });
+    // P-7: a recording never continues in the background; its microphone is released.
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "hidden") app.talk.hidden();
     });
   }
   return app;

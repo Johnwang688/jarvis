@@ -76,7 +76,8 @@ single use, 60 s, at most 4 per session), and `answer_verify` checks it as
 `login_verify` checks a sign-in, plus that binding and that the credential
 is the session's own passkey; P-5's irreversible task verb (cancel) takes
 the same assertion, bound to `task:<id>` and the verb (`TASK_DECISIONS`).
-Past the session, `api_route` hands P-4's answer paths to `remote_answer`,
+Past the session, `api_route` hands P-7's `POST /m/api/stt` to
+`remote_stt`, P-4's answer paths to `remote_answer`,
 P-5's writes to `remote_write`, and every other path but logout and `me`
 to `remote_api` (P-3's reads and event stream); `session_live` is the
 stream's check, which does not touch last-seen. `recently_active` is
@@ -1153,6 +1154,11 @@ def api_route(handler, path: str, body: bytes) -> tuple[int, dict, list[tuple[st
                          "secure": secure_view(getattr(handler, "daemon", None))}, []
         if path in (LOGOUT, ME):
             return 404, {"error": WORDS[404]}, []
+        # P-7's push to talk (`remote_stt`): a clip in, its text out, never sent.
+        from . import remote_stt
+        heard = remote_stt.route(handler, path, session, body)
+        if heard is not None:
+            return heard
         # P-4's answers and a card's detail (`remote_answer`), P-5's sends,
         # new chats and task verbs (`remote_write`), then P-3's reads and the
         # event stream (`remote_api`), only past the session check above.
