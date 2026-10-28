@@ -127,9 +127,11 @@ export interface SttOptions<M> {
   /**
    * Consulted before every upload (a chunk's first attempt too, since it may have
    * waited its turn) and every retry. `explicit` is the owner's own Retry press,
-   * which the owner may make from Settings or with a picker open.
+   * which the owner may make from Settings or with a picker open. `clip` says
+   * what claimed it and what it was captured under: a clip the talk key
+   * dictated while the mic was OFF may upload while it is OFF.
    */
-  canUpload?: (explicit: boolean) => boolean;
+  canUpload?: (explicit: boolean, clip: { source: ClaimSource; meta: M }) => boolean;
   /** Uploads at once; later chunks wait their turn, in `seq` order. Default: no limit. */
   maxInFlight?: number;
   onEvent?: (e: SttEvent) => void;
@@ -394,7 +396,7 @@ export class SttAssembler<M = undefined> {
       const { e, explicit } = this.queue.shift()!;
       if (e.cancelled || !e.blob) continue;
       // A chunk that waited its turn is judged again: the mic may be OFF now, a card up.
-      if (this.o.canUpload && !this.o.canUpload(explicit)) { this.fail(e, "not sent: dictation is paused"); continue; }
+      if (this.o.canUpload && !this.o.canUpload(explicit, e)) { this.fail(e, "not sent: dictation is paused"); continue; }
       this.running++;
       void this.attempt(e, explicit).finally(() => { this.running--; this.pump(); });
     }
@@ -435,7 +437,7 @@ export class SttAssembler<M = undefined> {
         e.retryTimer = setTimeout(() => {
           e.retryTimer = null;
           if (e.cancelled) return;
-          if (this.o.canUpload && !this.o.canUpload(false)) { this.fail(e, "not retried: dictation is paused"); return; }
+          if (this.o.canUpload && !this.o.canUpload(false, e)) { this.fail(e, "not retried: dictation is paused"); return; }
           this.schedule(e, false);
         }, STT_RETRY_DELAY_MS);
         this.emit();
@@ -498,7 +500,7 @@ export class SttAssembler<M = undefined> {
   retry(id: number): boolean {
     const e = this.entries.get(id);
     if (!e || e.state !== "failed" || !e.blob) return false;
-    if (this.o.canUpload && !this.o.canUpload(true)) { this.event({ kind: "blocked", message: "NOT RETRIED · MIC OFF OR PAUSED" }); return false; }
+    if (this.o.canUpload && !this.o.canUpload(true, e)) { this.event({ kind: "blocked", message: "NOT RETRIED · MIC OFF OR PAUSED" }); return false; }
     const g = this.groups.get(e.gid);
     if (g) { this.o.diagnostics.reopen(g.diag); g.lastAt = this.now(); }
     e.startedAt = this.now();

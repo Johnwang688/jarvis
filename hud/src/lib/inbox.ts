@@ -15,7 +15,7 @@
 // (bidi overrides, zero-widths) that could make one line read as another.
 
 export interface InboxRow {
-  /** Kind prefix + the source's own id: `appr:…`, `q:…`, `tq:…`, `prop:…`, `task:…`, `missed:…`, `dec:…`. */
+  /** Kind prefix + the source's own id: `appr:…`, `q:…`, `tq:…`, `prop:…`, `task:…`, `missed:…`, `dec:…`, `pr:…`, `prx:…`. */
   id: string;
   kind: string;
   /** IN-4's band, 1 to 8. */
@@ -29,6 +29,16 @@ export interface InboxRow {
   expires_at: string | null;
   origin: string;
   detail: Record<string, unknown>;
+  /** Inbox B4 (`GET /inbox?all=1`): the owner's snooze or dismissal hiding this row, or null when it shows. */
+  hidden: HiddenBy | null;
+  /** Inbox B4: the daemon says the owner may snooze or dismiss it (rank 5 to 8, never "PR list unavailable"). */
+  markable: boolean;
+}
+
+/** What hides a row (inbox B4): a snooze until a time, or a dismissal at one. */
+export interface HiddenBy {
+  snoozedUntil: string | null;
+  dismissedAt: string | null;
 }
 
 /** The kinds the HUD answers from the inbox, and the body each takes. */
@@ -42,7 +52,7 @@ export interface InboxGroup {
   max: number;
 }
 
-/** Design §7's thin headers, by rank. Rank 6 is decisions (B1); 7 (checks) comes with B2. */
+/** Design §7's thin headers, by rank. Rank 6 is decisions (B1); 7 is live checks (B2). */
 export const GROUPS: readonly InboxGroup[] = [
   { key: "now", label: "Waiting now", min: 1, max: 2 },
   { key: "you", label: "Waiting on you", min: 3, max: 5 },
@@ -94,7 +104,32 @@ export function parseRow(raw: unknown): InboxRow | null {
     expires_at: typeof raw.expires_at === "string" ? raw.expires_at : null,
     origin: oneLine(raw.origin, 160),
     detail: isObj(raw.detail) ? raw.detail : {},
+    // A `hidden` the HUD's own rule (IN-8) says cannot be is dropped: such a row shows.
+    hidden: markableRank(rank, raw.kind, id) ? parseHidden(raw.hidden) : null,
+    // Both the daemon's word and the HUD's own rule (IN-8): ranks 1 to 4 and
+    // "PR list unavailable" never offer a snooze or dismiss, whatever is served.
+    markable: raw.markable === true && markableRank(rank, raw.kind, id),
   };
+}
+
+/** The HUD's own copy of IN-8: rank 5 to 8, never "PR list unavailable" (by kind or `prx:` id). */
+function markableRank(rank: number, kind: unknown, id: string): boolean {
+  return rank >= MARKABLE_MIN_RANK && rank <= MARKABLE_MAX_RANK && kind !== PR_UNAVAILABLE && !id.startsWith("prx:");
+}
+
+/** Whether a row is hidden: it says so and the HUD's rule allows it to be. A
+ * rank 1 to 4 row or "PR list unavailable" is never hidden, whatever it carries. */
+export function isHidden(row: InboxRow): boolean {
+  return !!row.hidden && markableRank(row.rank, row.kind, row.id);
+}
+
+function parseHidden(v: unknown): HiddenBy | null {
+  if (!isObj(v)) return null;
+  const at = (x: unknown) => (typeof x === "string" && x.length <= 64 && Number.isFinite(Date.parse(x)) ? x : null);
+  const snoozedUntil = at(v.snoozed_until);
+  const dismissedAt = at(v.dismissed_at);
+  // Something says it is hidden: kept hidden, even when its time cannot be read.
+  return { snoozedUntil, dismissedAt };
 }
 
 /** `GET /inbox`'s body, in rank order (stable: the daemon's order within a rank, which is oldest first). Null when it is not a list. */
@@ -121,9 +156,79 @@ export function groupRows(rows: readonly InboxRow[]): { group: InboxGroup; rows:
   return out;
 }
 
-/** The sidebar's count and the app badge: what is waiting on the owner (ranks 1 to 5). */
+/** The sidebar's count and the app badge: what is waiting on the owner (ranks 1 to 5), never a hidden row. */
 export function waitingCount(rows: readonly InboxRow[]): number {
-  return rows.filter((r) => r.rank >= 1 && r.rank <= COUNTED_MAX_RANK).length;
+  return rows.filter((r) => !isHidden(r) && r.rank >= 1 && r.rank <= COUNTED_MAX_RANK).length;
+}
+
+// --- marks: snooze and dismiss (inbox B4, IN-7, IN-8) -----------------------
+
+/** The lowest rank the owner may snooze or dismiss: a live approval, a blocking
+ * question, a proposal or a blocked task (1 to 4) is never hidden. */
+export const MARKABLE_MIN_RANK = 5;
+export const MARKABLE_MAX_RANK = 8;
+// "PR list unavailable" (`PR_UNAVAILABLE`, inbox B3, below) is never hidden:
+// that would read as "nothing waiting".
+
+/** Whether this row offers Snooze and Dismiss. */
+export function canMark(row: InboxRow): boolean {
+  return row.markable && !row.hidden && markableRank(row.rank, row.kind, row.id);
+}
+
+/** The rows that show (nothing hidden), and the hidden ones, in their order. */
+export function shownRows(rows: readonly InboxRow[]): InboxRow[] {
+  return rows.filter((r) => !isHidden(r));
+}
+export function hiddenRows(rows: readonly InboxRow[]): InboxRow[] {
+  return rows.filter(isHidden);
+}
+
+/** When the earliest snooze among `rows` ends (ms), or null: the store reads
+ * again then, a backup to the daemon's `snooze_ended` event. */
+export function nextSnoozeEnd(rows: readonly InboxRow[]): number | null {
+  const ends = rows.filter(isHidden).map((r) => (r.hidden!.snoozedUntil ? Date.parse(r.hidden!.snoozedUntil) : NaN))
+    .filter((ms) => Number.isFinite(ms));
+  return ends.length ? Math.min(...ends) : null;
+}
+
+export type SnoozeFor = "hour" | "tomorrow" | "week";
+export const SNOOZES: readonly { key: SnoozeFor; label: string }[] = [
+  { key: "hour", label: "Snooze 1 h" },
+  { key: "tomorrow", label: "Until tomorrow" },
+  { key: "week", label: "1 week" },
+];
+/** "Until tomorrow" ends at this local hour of the next day. */
+export const TOMORROW_HOUR = 8;
+
+/** When a snooze ends, as the ISO time `POST /inbox/<id>/mark` takes (always with its zone, `Z`). */
+export function snoozeUntil(choice: SnoozeFor, now: number): string {
+  if (choice === "hour") return new Date(now + 3_600_000).toISOString();
+  if (choice === "week") return new Date(now + 7 * 86_400_000).toISOString();
+  const d = new Date(now);
+  d.setDate(d.getDate() + 1);
+  d.setHours(TOMORROW_HOUR, 0, 0, 0);
+  return d.toISOString();
+}
+
+/** What a mark posts: a snooze, a dismissal, or the Undo of either. */
+export type MarkBody = { snooze_until: string } | { dismiss: true } | { clear: true };
+
+/** The mark path: the row id through `encodeURIComponent`, which the daemon decodes once. */
+export function markPath(id: string): string {
+  return `/inbox/${encodeURIComponent(id)}/mark`;
+}
+
+/** What a hidden row says about why it is hidden, in code's words. */
+export function hiddenNote(row: InboxRow, now: number = Date.now()): string {
+  const h = row.hidden;
+  if (!h) return "";
+  if (h.snoozedUntil) {
+    const ms = Date.parse(h.snoozedUntil);
+    const day = new Date(ms).toDateString() === new Date(now).toDateString() ? "" :
+      ` ${new Date(ms).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })}`;
+    return `Snoozed until ${clockOf(ms).slice(0, 5)}${day}`;
+  }
+  return "Dismissed";
 }
 
 /** Whether anything pending (ranks 1 and 2) is waiting: the count reads amber. */
@@ -188,6 +293,51 @@ export function missedNote(row: InboxRow): { why: string; next: string } | null 
   return { why, next: row.thread_id ? "To try it again, ask from its chat." : "Its chat is not known." };
 }
 
+/** A pull request waiting on the owner's merge (inbox B3, IN-4): rank 5, information and a link only. */
+export const PR = "pr";
+/** "PR list unavailable" (inbox B3): the daemon could not read a repository's open PRs. */
+export const PR_UNAVAILABLE = "pr_unavailable";
+const GH_NAME = /^[A-Za-z0-9_.-]{1,100}$/;
+const PR_URL = /^https:\/\/github\.com\/([A-Za-z0-9_.-]{1,100})\/([A-Za-z0-9_.-]{1,100})\/pull\/([1-9][0-9]{0,9})$/;
+
+export interface PrView {
+  repo: string;
+  number: number;
+  /** The PR's own title: untrusted text, one line. */
+  title: string;
+  /** Its page on GitHub, only when it is exactly this repository's PR `number`; else null (no link). */
+  url: string | null;
+}
+
+/**
+ * A PR row's words and link, or null for any other row or a detail that is
+ * not one. The daemon already links only a URL it validated
+ * (`inbox_prs.pr_url`); this checks it again, so a row can never link
+ * anywhere but `https://github.com/<repo>/pull/<number>` for its own repo.
+ */
+export function prOf(row: InboxRow): PrView | null {
+  if (row.kind !== PR) return null;
+  const d = row.detail;
+  const repo = typeof d.repo === "string" ? d.repo : "";
+  const parts = repo.split("/");
+  const number = d.number;
+  // As the daemon's `github_repo`: no `.`, `..` or other name starting with a dot.
+  if (parts.length !== 2 || !parts.every((p) => GH_NAME.test(p) && !p.startsWith("."))) return null;
+  if (typeof number !== "number" || !Number.isInteger(number) || number < 1) return null;
+  let url: string | null = null;
+  const m = typeof d.url === "string" ? PR_URL.exec(d.url) : null;
+  if (m && !m[1].startsWith(".") && !m[2].startsWith(".") && `${m[1]}/${m[2]}`.toLowerCase() === repo.toLowerCase() && Number(m[3]) === number) url = d.url as string;
+  return { repo, number, title: oneLine(d.title, 300), url };
+}
+
+/** A "PR list unavailable" row's repositories and why, as text, in the daemon's words. */
+export function prUnavailableOf(row: InboxRow): { repo: string; reason: string }[] | null {
+  if (row.kind !== PR_UNAVAILABLE) return null;
+  const repos = Array.isArray(row.detail.repos) ? row.detail.repos : [];
+  return repos.filter(isObj).map((r) => ({ repo: oneLine(r.repo, 200), reason: oneLine(r.reason, 120) }))
+    .filter((r) => r.repo).slice(0, 50);
+}
+
 /** A decision an agent posted with `owner_post` (inbox B1, IN-5): rank 6 while open, rank 8 once
  * recorded for a chat that was closed. Answered with one option or the owner's own words. */
 export const DECISION = "decision";
@@ -240,6 +390,144 @@ export function decisionBody(picked: number | null, typed: string, d: DecisionVi
   if (text) return { text };
   if (picked !== null && picked >= 0 && picked < d.options.length) return { choice: picked };
   return null;
+}
+
+/** A live check (inbox B2, IN-6): rank 7 while open, rank 8 once every step has the owner's verdict.
+ * Steps are text only: nothing in a check runs anything, and "copy" puts a step's words on the clipboard. */
+export const CHECK = "check";
+const CHECK_ID = /^c[0-9a-f]{12}$/;
+export const VERDICTS = ["pass", "fail", "skip"] as const;
+export type Verdict = (typeof VERDICTS)[number];
+/** The owner's note on one step (the daemon's `checks.NOTE_MAX`). */
+export const NOTE_MAX = 1000;
+
+export interface CheckStep {
+  do: string;
+  expect: string;
+  /** The owner's verdict, once marked. */
+  verdict: Verdict | null;
+  note: string;
+  at: string | null;
+}
+
+export interface CheckView {
+  /** The check's own id (`c` + 12 hex), for `POST /inbox/checks/<id>/steps/<n>`. */
+  id: string;
+  title: string;
+  prs: number[];
+  steps: CheckStep[];
+  done: boolean;
+  /** Whether the daemon's deployed test lets a step be marked now (IN-6). */
+  markable: boolean;
+  /** The deployed test's line (code-built: PR numbers only), "" when nothing is gated. */
+  deploy: string;
+  deployedSha: string | null;
+  importedFrom: string | null;
+}
+
+/**
+ * A check row's words, every one untrusted text (`oneLine`/`textBlock`), or
+ * null for any other row or a check whose detail is not one (never guessed
+ * at, never markable).
+ */
+export function checkOf(row: InboxRow): CheckView | null {
+  if (row.kind !== CHECK) return null;
+  const d = row.detail;
+  const id = typeof d.check_id === "string" && CHECK_ID.test(d.check_id) ? d.check_id : null;
+  if (!id || !Array.isArray(d.steps) || !d.steps.length || d.steps.length > 30) return null;
+  const results = new Map<number, Record<string, unknown>>();
+  if (Array.isArray(d.results)) {
+    for (const r of d.results) {
+      if (isObj(r) && typeof r.step === "number" && Number.isInteger(r.step)) results.set(r.step, r);
+    }
+  }
+  const steps: CheckStep[] = [];
+  for (let i = 0; i < d.steps.length; i++) {
+    const s = d.steps[i];
+    if (!isObj(s)) return null;
+    const r = results.get(i);
+    const verdict = r && (VERDICTS as readonly string[]).includes(r.verdict as string) ? (r.verdict as Verdict) : null;
+    steps.push({ do: textBlock(s.do, 2000), expect: textBlock(s.expect, 2000), verdict,
+                 note: verdict ? textBlock(r!.note, NOTE_MAX) : "", at: verdict && typeof r!.at === "string" ? r!.at : null });
+  }
+  const deploy = isObj(d.deploy) ? d.deploy : {};
+  const prs = Array.isArray(d.prs) ? d.prs.filter((n): n is number => typeof n === "number" && Number.isInteger(n) && n > 0) : [];
+  const done = steps.every((s) => s.verdict !== null);
+  return {
+    id, title: oneLine(d.title, 200), prs, steps, done,
+    markable: !done && deploy.markable === true,
+    deploy: oneLine(deploy.text, 300),
+    deployedSha: typeof d.deployed_sha === "string" && /^[0-9a-f]{40,64}$/.test(d.deployed_sha) ? d.deployed_sha : null,
+    importedFrom: typeof d.imported_from === "string" ? oneLine(d.imported_from, 400) : null,
+  };
+}
+
+/** A step's mark path (`POST /inbox/checks/<id>/steps/<n>`, inbox B2). */
+export function checkStepPath(id: string, step: number): string {
+  return `/inbox/checks/${encodeURIComponent(id)}/steps/${Math.trunc(step)}`;
+}
+
+/** The runbook import (`POST /inbox/checks/import`, inbox B2, design §6). */
+export const CHECK_IMPORT_PATH = "/inbox/checks/import";
+
+/** One draft the import returns, unsaved until the owner saves it. */
+export interface CheckDraft {
+  index: number;
+  title: string;
+  prs: number[];
+  steps: { do: string; expect: string }[];
+  savable: boolean;
+  reason: string | null;
+}
+
+/** The import's reply, read as text; null when it is not one. */
+export function parseDrafts(raw: unknown): { path: string; digest: string; drafts: CheckDraft[] } | null {
+  if (!isObj(raw) || typeof raw.path !== "string" || typeof raw.digest !== "string" || !Array.isArray(raw.drafts)) return null;
+  const drafts: CheckDraft[] = [];
+  for (const d of raw.drafts) {
+    if (!isObj(d) || typeof d.index !== "number" || !Array.isArray(d.steps)) continue;
+    drafts.push({
+      index: d.index, title: oneLine(d.title, 200),
+      prs: Array.isArray(d.prs) ? d.prs.filter((n): n is number => typeof n === "number" && Number.isInteger(n)) : [],
+      steps: d.steps.filter(isObj).map((s) => ({ do: textBlock(s.do, 2000), expect: textBlock(s.expect, 2000) })),
+      savable: d.savable === true, reason: typeof d.reason === "string" ? oneLine(d.reason, 200) : null,
+    });
+  }
+  return { path: oneLine(raw.path, 1024), digest: raw.digest, drafts };
+}
+
+/** A line of Markdown text that cannot start a heading, list or quote, or close a code span. */
+function mdLine(text: string): string {
+  return text.replace(/\r?\n+/g, " ").replace(/([\\`*_[\]<>|#])/g, "\\$1").trim();
+}
+
+/**
+ * The receipt as Markdown, for the owner to paste into a checkpoint (§5):
+ * made here from the stored record the row carries, never from the network.
+ * Every agent- or runbook-written string is escaped so it stays one line of text.
+ */
+export function checkReceipt(view: CheckView, origin: string): string {
+  const counts = { pass: 0, fail: 0, skip: 0 } as Record<Verdict, number>;
+  for (const s of view.steps) if (s.verdict) counts[s.verdict] += 1;
+  const lines = [
+    `## Live check ${view.id}: ${mdLine(view.title)}`,
+    "",
+    `- Result: ${counts.pass} passed, ${counts.fail} failed, ${counts.skip} skipped, ` +
+      `${view.steps.length - counts.pass - counts.fail - counts.skip} not marked`,
+  ];
+  if (view.prs.length) lines.push(`- Pull requests: ${view.prs.map((n) => `#${n}`).join(", ")}`);
+  if (view.deployedSha) lines.push(`- Build: ${view.deployedSha.slice(0, 12)}`);
+  if (origin) lines.push(`- Posted by: ${mdLine(origin)}`);
+  if (view.importedFrom) lines.push(`- Imported from: ${mdLine(view.importedFrom)}`);
+  lines.push("- Recorded by the owner in the Jarvis inbox", "");
+  view.steps.forEach((s, i) => {
+    const mark = s.verdict ? s.verdict.toUpperCase() : "NOT MARKED";
+    lines.push(`${i + 1}. **${mark}** ${mdLine(s.do)}`);
+    if (s.expect) lines.push(`   - Expect: ${mdLine(s.expect)}`);
+    if (s.note) lines.push(`   - Note: ${mdLine(s.note)}`);
+    if (s.at) lines.push(`   - At: ${mdLine(s.at)}`);
+  });
+  return lines.join("\n") + "\n";
 }
 
 /** The approval request id an `appr:` row is about (its `detail` is `ApprovalRequest.to_json()`). */

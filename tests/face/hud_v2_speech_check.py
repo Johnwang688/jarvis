@@ -232,16 +232,20 @@ def main() -> int:
             page.wait_for_timeout(600)
             check("a thread in no pane is silent", len(said(mock)) == n)
 
-            print("\nthe mic is not the voice")
+            print("\nthe mic OFF is text only (owner, 2026-10-27)")
             page.locator('#orbdock [data-testid="dictation-off"]').click()
             page.wait_for_timeout(500)    # a request the click started would have landed by now
             check("mic OFF posts no /mute", not mock.sent("POST", "/mute"))
-            mock.ms_per_char = 12
-            mock.emit("text", {"text": "Spoken with the microphone off."}, thread_id="t1")
-            check("he still speaks with the mic OFF",
-                  bool(until(lambda: any("microphone off" in t for t in said(mock)), timeout=5)))
-            until(lambda: speech(page)["view"]["state"] == "idle", timeout=8)
+            n = len(said(mock))
+            mock.emit("text", {"text": "Not spoken with the microphone off."}, thread_id="t1")
+            page.wait_for_timeout(800)
+            check("he reads nothing aloud while the mic is OFF", len(said(mock)) == n)
             page.locator('#orbdock [data-testid="dictation-review"]').click()
+            mock.ms_per_char = 12
+            mock.emit("text", {"text": "Spoken with the microphone back on."}, thread_id="t1")
+            check("and speaks again once the mic is back on",
+                  bool(until(lambda: any("microphone back on" in t for t in said(mock)), timeout=5)))
+            until(lambda: speech(page)["view"]["state"] == "idle", timeout=8)
 
             print("\nfailure is skipped and marked")
             mock.say_fail = True

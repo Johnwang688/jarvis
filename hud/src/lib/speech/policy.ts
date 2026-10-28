@@ -18,6 +18,20 @@ export const SPEAKER_WINDOW: "last-focused" | "first-opened" = "last-focused";
  */
 export const MIC_OFF_MUTES_SPEECH = false;
 
+/**
+ * 2026-10-27 (the owner, with muted push-to-talk) -- partly reverses Q11: the
+ * mic OFF is text only, so this window reads nothing aloud while it is OFF
+ * (`SpeechController.setMicOff`). Still not the daemon's `/mute`: the
+ * read-aloud switch and v1's voice-out flag keep their own values, and the
+ * mic coming back on brings speech back as it was.
+ */
+export const MIC_OFF_SILENCES_SPEECH = true;
+
+/** Whether this window's speech is silenced by the mic's mode. */
+export function speechSilencedByMic(micMuted: boolean): boolean {
+  return MIC_OFF_SILENCES_SPEECH && micMuted;
+}
+
 /** Q11 -- read-aloud never uses cloud TTS: `/say` is asked `local_only`. */
 export const SAY_LOCAL_ONLY = true;
 

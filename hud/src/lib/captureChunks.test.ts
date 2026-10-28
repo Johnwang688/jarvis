@@ -248,12 +248,12 @@ describe("a failed chunk", () => {
 });
 
 describe("mic OFF and a card upload nothing", () => {
-  it("OFF claims nothing: no recorder, no chunk, no upload, however long it is spoken to", async () => {
+  // (The talk key is the one exception: pressed while OFF it dictates, capture.test.ts.)
+  it("OFF claims nothing hands-free: no recorder, no chunk, no upload, however long it is spoken to", async () => {
     const r = rig();
     r.state.muted = true;
     r.cap.feedMs(2000, QUIET);
     r.cap.openFollowUp();
-    expect(r.cap.press()).toBe(false);
     expect(r.cap.onWake()).toBe("armed");
     r.say(0, 60);
     r.cap.feedMs(HANGOVER_MS + 400, QUIET);

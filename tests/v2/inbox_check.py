@@ -581,7 +581,10 @@ class Live(unittest.TestCase):
                            ("/inbox/prop:x/answer", {"withdraw": 1})):
             with self.subTest(path=path, body=body):
                 self.call("POST", path, body, 400)
-        self.call("GET", "/inbox?all=1", None, 400)
+        # B4 made `?all=1` a query of its own; anything else is still a 400.
+        self.call("GET", "/inbox?every=1", None, 400)
+        self.call("GET", "/inbox?all=0", None, 400)
+        self.call("GET", "/inbox?all=1&all=1", None, 400)
         self.call("POST", "/inbox", {}, 404)
         self.call("GET", f"/inbox/{rid}", None, 404)
         self.assertEqual(self.ids(), [rid], "nothing was answered")

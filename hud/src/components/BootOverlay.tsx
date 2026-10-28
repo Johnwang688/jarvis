@@ -1,4 +1,5 @@
 import { useLayoutEffect, useRef, useState } from "react";
+import { drawEmblem, drawRing } from "../lib/orbdraw";
 import { BOOT_DEFAULTS, FADE_OUT_S, HARD_CAP_MS, PLAYED_KEY, SHIELD_MS, SKIP_FADE_MS,
   RINGS, SPIN, bitAt, buildDust, clamp01, easeInOutCubic, hexToRgb, layoutFor,
   particleAt, plateGeometry, penAt, dotsAt, ringRot, shouldPlay } from "../lib/boot";
@@ -157,20 +158,7 @@ function startDrawing(host: HTMLDivElement, orbCv: HTMLCanvasElement,
       const rot = ringRot(ring, t);
       octx.strokeStyle = `rgba(${hue},${Math.min(1, ring.alpha * boost * (0.75 + energy * 0.45)) * k})`;
       octx.lineWidth = ring.w;
-      if (ring.ticks) {
-        const inner = R * ring.r * (1 - (ring.len || 0)), outer = R * ring.r;
-        octx.beginPath();
-        for (let i = 0; i < ring.ticks; i++) {
-          const a = rot + (i / ring.ticks) * Math.PI * 2;
-          octx.moveTo(c.x + Math.cos(a) * inner, c.y + Math.sin(a) * inner);
-          octx.lineTo(c.x + Math.cos(a) * outer, c.y + Math.sin(a) * outer);
-        }
-        octx.stroke();
-      } else {
-        for (const [a1, a2] of ring.arcs || []) {
-          octx.beginPath(); octx.arc(c.x, c.y, R * ring.r, rot + a1, rot + a2); octx.stroke();
-        }
-      }
+      drawRing(octx, ring, c.x, c.y, R, rot);
     }
     const coreR = R * (0.3 + energy * 0.1);
     const glow = octx.createRadialGradient(c.x, c.y, 0, c.x, c.y, coreR * 1.9);
@@ -179,16 +167,7 @@ function startDrawing(host: HTMLDivElement, orbCv: HTMLCanvasElement,
     glow.addColorStop(1, "rgba(0,0,0,0)");
     octx.fillStyle = glow;
     octx.beginPath(); octx.arc(c.x, c.y, coreR * 1.9, 0, Math.PI * 2); octx.fill();
-    const triR = R * 0.21, rot3 = -t * 0.15 * SPIN;
-    octx.strokeStyle = `rgba(240,238,232,${(0.5 + energy * 0.5) * k})`;
-    octx.lineWidth = 2; octx.shadowColor = `rgb(${hue})`; octx.shadowBlur = 18 * (0.6 + energy);
-    octx.beginPath();
-    for (let i = 0; i <= 3; i++) {
-      const a = rot3 + Math.PI / 2 + (i / 3) * Math.PI * 2;
-      const x = c.x + Math.cos(a) * triR, y = c.y - Math.sin(a) * triR;
-      i === 0 ? octx.moveTo(x, y) : octx.lineTo(x, y);
-    }
-    octx.stroke(); octx.shadowBlur = 0;
+    drawEmblem(octx, c.x, c.y, R, -t * 0.15 * SPIN, (0.5 + energy * 0.5) * k, hue, 18 * (0.6 + energy));
   }
 
 

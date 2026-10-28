@@ -339,21 +339,49 @@ def _card_checks(page, mock, check, until):
 
 
 def _muted_checks(page, mock, check, until):
+    """Muted dictation (owner, 2026-10-27): with the mic OFF, Ctrl+D still
+    records while held -- like Claude Code's dictation -- and what was said
+    lands in the box, never sent. Nothing hands-free is heard."""
     _fresh(page, mock, until, mode="off")
-    _box(page).click()
+    box = _box(page)
+    box.click()
+    box.fill("")
     held, after, key = _ptt_on_ctrl_d(page)
-    check("muted (OFF), Ctrl+D records nothing", held is None and after is None, f"{held} {after}")
-    check("says the mic is muted, and is taken from the browser",
-          (_chat1(page).get("status") or "") == "MIC MUTED" and key.get("prevented") is True,
-          f"{_chat1(page).get('status')!r} {key}")
+    check("muted (OFF), Ctrl+D still records while held, and stops on release",
+          held is not None and after is None, f"{held} {after}")
+    check("and is taken from the browser", key.get("prevented") is True, str(key))
+    stt = len(mock.sent("POST", "/stt"))
+    sends = len(mock.sent("POST", "/threads/t1/send"))
+    page.keyboard.down("Control")
+    page.keyboard.down("d")
+    page.evaluate("() => { window.__hud.mic.feedMs(1500, 0.06); return true; }")
+    time.sleep(0.3)
+    page.keyboard.up("d")
+    page.keyboard.up("Control")
+    went = until(lambda: len(mock.sent("POST", "/stt")) > stt, timeout=4)
+    check("muted, what was said while the key was held goes once for transcription",
+          bool(went) and len(mock.sent("POST", "/stt")) == stt + 1, str(len(mock.sent("POST", "/stt")) - stt))
+    got = until(lambda: box.input_value() == mock.world["stt_text"], timeout=3)
+    check("and lands in the box, unsent, whatever the mode was before",
+          bool(got) and len(mock.sent("POST", "/threads/t1/send")) == sends, f"{box.input_value()!r}")
+    until(lambda: (_chat1(page).get("status") or "") == "MIC MUTED", timeout=3)
+    check("afterwards the line says the mic is muted again", (_chat1(page).get("status") or "") in ("MIC MUTED", ""),
+          repr(_chat1(page).get("status")))
+    # Hands-free stays deaf: speech with no key is not claimed or uploaded.
+    stt = len(mock.sent("POST", "/stt"))
+    page.evaluate("() => { window.__hud.mic.feedMs(1500, 0.06); window.__hud.mic.feedMs(2500, 0.0009); return true; }")
+    time.sleep(0.6)
+    check("muted, speech without the key uploads nothing", len(mock.sent("POST", "/stt")) == stt,
+          str(len(mock.sent("POST", "/stt")) - stt))
+    box.fill("")
     ok = _busy_t1(page, mock, until, "work while muted")
     check("setup: a turn is running, the mic muted", ok)
     i0 = _interrupts(mock)
     _blur(page)
     held, _, _ = _ptt_on_ctrl_d(page)
     time.sleep(0.5)
-    check("V3: muted, it records nothing and no longer interrupts the turn either (Stop does)",
-          held is None and _interrupts(mock) == i0, f"held={held} interrupts={_interrupts(mock) - i0}")
+    check("V3: muted dictation over a running turn does not interrupt it (Stop does)",
+          held is not None and _interrupts(mock) == i0, f"held={held} interrupts={_interrupts(mock) - i0}")
     _end_t1(page, mock, until)
 
 

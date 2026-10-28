@@ -93,7 +93,7 @@ import { BargeIn } from "./lib/speech/barge";
 import { CommandRouter } from "./lib/speech/commands";
 import { SelfVoiceSetting } from "./components/SelfVoice";
 import { VoiceChip } from "./components/VoiceChip";
-import { micSuppressedBySpeech, onMicModeChange, speakingThreads } from "./lib/speech/policy";
+import { micSuppressedBySpeech, onMicModeChange, speakingThreads, speechSilencedByMic } from "./lib/speech/policy";
 import { Capture, type UtteranceChunk, type UtteranceEnd } from "./lib/capture";
 import { STT_MAX_IN_FLIGHT, SttAssembler, chunkSubmitOptions, placementFor, type SttCapture, type SttPlaced } from "./lib/stt";
 import { startMicInput, type MicInput } from "./lib/micInput";
@@ -108,7 +108,7 @@ import { NoiseSuppressionSetting } from "./components/NoiseSuppression";
 import { loadNoiseSuppression, saveNoiseSuppression } from "./lib/listen/pref";
 import { VadStage, type StageOptions } from "./lib/listen/stage";
 import { loadEndPause, saveEndPause } from "./lib/voiceTiming";
-import { isMuted, loadMode, orbLine, outcomeFor, saveMode, type DictationMode } from "./lib/dictation";
+import { isMuted, loadMode, mutedDictation, orbLine, outcomeFor, saveMode, type DictationMode } from "./lib/dictation";
 import { WakeStage, WAKE_LAG_MS } from "./lib/wake/stage";
 import { WAKE_NAME } from "./lib/wake/keywords";
 import { OwnerMark, hisOwnWord } from "./lib/wake/guard";
@@ -647,6 +647,8 @@ export default function App() {
     useCallback((cb: () => void) => speech.voices.subscribe(cb), [speech]), () => speech.voices.version());
   // The chats the owner muted from a pane's chip: silent like a thread in no pane.
   useEffect(() => { speech.controller.setMuted(speech.voices.muted()); }, [speech, voicesVersion]);
+  // The mic OFF is text only (lib/speech/policy): nothing is read aloud until it is back on.
+  useEffect(() => { speech.controller.setMicOff(speechSilencedByMic(isMuted(state.dictation))); }, [speech, state.dictation]);
 
   // ---- barge-in and spoken commands (V9) -------------------------------------
 
@@ -909,10 +911,12 @@ export default function App() {
         transcribe: (blob, o) => api.stt(blob, { ...o, verify: true, verified: (kind) => { o.verified(kind); speaker.observe(kind); } }),
         // The first attempt was judged by onChunk; a retry, automatic or
         // explicit, and a chunk that had to wait its turn, must not upload while
-        // the mic is OFF, the window has crashed, or a card waits for an answer.
+        // the mic is OFF (unless the talk key recorded it), the window has crashed, or a card waits for an answer.
         // The owner's own Retry may be pressed from Settings or with a picker open (the
         // Settings row is the way back to it); nothing else uploads under either.
-        canUpload: (explicit) => !crashedRef.current && !isMuted(live.current.dictation) && !live.current.approvals.length
+        // OFF uploads only what the talk key dictated while OFF (2026-10-27): a clip
+        // recorded with the mic on and retried after it went OFF still waits.
+        canUpload: (explicit, clip) => !crashedRef.current && (!isMuted(live.current.dictation) || mutedDictation(clip.source, clip.meta.mode)) && !live.current.approvals.length
           && (explicit || (live.current.picker === null && !chipOverlay.current && !settingsNow.current)),
         maxInFlight: STT_MAX_IN_FLIGHT,
         place: (batch) => placeTranscripts(batch),
@@ -949,10 +953,10 @@ export default function App() {
       const at = live.current;
       const refuse = (reason: DropReason) => { u.refused = true; voiceDiagnostics.add(chunk.ms, chunk.source, reason, chunk.detector); };
       if (crashedRef.current) { refuse("suppressed:crash"); return; }
-      // OFF never reaches here (Capture refuses to claim while muted), but the
-      // mode is checked again rather than assumed: the fail-closed direction
-      // costs a discarded chunk and the other costs an upload.
-      if (outcomeFor(at.dictation) === "discard") { refuse("muted"); return; }
+      // OFF reaches here only from the talk key (Capture claims nothing else
+      // while muted), but the mode is checked again rather than assumed: the
+      // fail-closed direction costs a discarded chunk and the other an upload.
+      if (outcomeFor(at.dictation) === "discard" && !mutedDictation(chunk.source, u.meta.mode)) { refuse("muted"); return; }
       if (at.approvals.length) { refuse("suppressed:card"); return; }
       if (at.picker !== null || chipOverlay.current) { refuse("suppressed:picker"); return; }
       if (settingsNow.current) { refuse("suppressed:settings"); return; }
@@ -3245,10 +3249,8 @@ export default function App() {
     }
     // Push-to-talk no longer interrupts (V3, decision V-10): what is said to a
     // chat running a turn steers it, as typing does, and Stop is the interrupt.
-    if (isMuted(live.current.dictation)) {
-      chatPatch(pane, { status: "MIC MUTED" });
-      return;
-    }
+    // With the mic OFF the key still dictates (2026-10-27): what is said while
+    // it is held lands in the box, unsent, and nothing else is heard.
     // Talking over him pauses him, and he resumes when the utterance is over
     // (decision V-7): `onListening` begins the barge-in, `onUtteranceEnd` ends it.
     capture.press();
@@ -3366,7 +3368,8 @@ export default function App() {
       ownerOverHim.note(speech.selfVoice.runnable() ? v : null, performance.now()); // V11: for a spoken command under a card
       capture.onFrame(frame, p, speech.selfVoice.runnable() ? v : null);
     },
-    active: () => !isMuted(live.current.dictation),
+    // OFF scores nothing, except while the talk key dictates.
+    active: () => !isMuted(live.current.dictation) || capture.ptt !== null,
     // An automatic restart of the worker waits for a quiet moment: nothing being
     // said or recorded, and Settings (where the owner reads the detector) closed.
     canRetry: () => !capture.vad.open && !capture.recording() && !settingsNow.current,
@@ -4150,6 +4153,9 @@ export default function App() {
             }}
             onAnswer={(id, body) => api.answerInbox(id, body)}
             onDecide={(id, body) => api.answerDecision(id, body)}
+            onMarkCheck={(id, step, body) => api.markCheck(id, step, body)}
+            onMark={(id, body) => api.markInbox(id, body)}
+            onImportChecks={(body) => api.importChecks(body)}
             onReread={() => inbox.refresh()}
           />
         );

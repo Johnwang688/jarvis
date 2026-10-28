@@ -88,7 +88,7 @@ KEEP = 500                  # files kept; the oldest answered go first
 RECORDED_WINDOW = timedelta(days=7)   # how long "recorded; the asking chat is closed" shows
 _FILE_MAX = 64 * 1024       # a decision file larger than this is not one of ours
 
-KINDS = ("decision",)       # "check" is IN-6 (B2)
+KINDS = ("decision", "check")   # "check" is IN-6 (inbox B2, `checks.py`)
 # The delivered answer's last line (`inbox.decision_message`): the agent's
 # question, quoted, labelled as the agent's words (review of PR #309).
 QUESTION_LEAD = "(Your question, quoted; your words, not the owner's: "
@@ -116,6 +116,10 @@ WITHHELD_REFUSAL = ("Error: the decision could not be checked for credentials, s
 
 class CapReached(Exception):
     """A post past a bound: the sentence the tool returns."""
+
+
+class RecordTooLarge(ValueError):
+    """A record that would encode past its store's `_WRITE_MAX`: never written."""
 
 
 class Conflict(Exception):
@@ -253,7 +257,27 @@ def _same(text: str) -> str:
 
 class DecisionStore:
     """`decisions/` in `<root>`'s `inbox` folder. Thread-safe; every method that writes holds
-    `_lock`, so the caps are counted and the file written in one step."""
+    `_lock`, so the caps are counted and the file written in one step.
+
+    The folder's safe I/O (dir fds, O_NOFOLLOW, O_NONBLOCK reads, O_EXCL temp
+    then fsync then replace, 0700/0600) is shared with the live checks'
+    store (`checks.py`, inbox B2), which names its own folder, file names
+    and record shape through the four class attributes below."""
+
+    _SUB = "decisions"          # the folder under `inbox/`
+    _NAMES = _NAME_RE           # the file names that are records
+    _ID = ID_RE                 # a record's id
+    _valid = staticmethod(valid)
+    _MAX = _FILE_MAX            # a record file larger than this is not one of ours
+    # The most a write may be: half of what a read accepts, so nothing this
+    # store writes can be a file it then cannot read (review of PR #321,
+    # MED 1: an unreadable record is never counted, never capped, never
+    # pruned). A decision's worst case is about 13 KB.
+    _WRITE_MAX = _FILE_MAX // 2
+
+    @staticmethod
+    def _order(record):
+        return (_parse_time(record["asked_at"]), record["id"])
 
     _DIR = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
     _READ = (os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
@@ -263,7 +287,7 @@ class DecisionStore:
 
     def __init__(self, root, *, clock=None):
         self.root = Path(root)
-        self.dir = self.root / "inbox" / "decisions"
+        self.dir = self.root / "inbox" / self._SUB
         self.clock = clock or _now
         self._lock = threading.RLock()
 
@@ -314,7 +338,7 @@ class DecisionStore:
         if inbox_fd is None:
             return None
         try:
-            return self._subdir(inbox_fd, "decisions", create)
+            return self._subdir(inbox_fd, self._SUB, create)
         finally:
             os.close(inbox_fd)
 
@@ -331,21 +355,21 @@ class DecisionStore:
             raise
         try:
             info = os.fstat(fd)
-            if not stat.S_ISREG(info.st_mode) or info.st_size > _FILE_MAX:
+            if not stat.S_ISREG(info.st_mode) or info.st_size > self._MAX:
                 return None
             if stat.S_IMODE(info.st_mode) != 0o600:
                 os.fchmod(fd, 0o600)
-            chunks, left = [], _FILE_MAX + 1
+            chunks, left = [], self._MAX + 1
             while left > 0 and (chunk := os.read(fd, min(1 << 16, left))):
                 chunks.append(chunk)
                 left -= len(chunk)
             data = b"".join(chunks)
         finally:
             os.close(fd)
-        if len(data) > _FILE_MAX:
+        if len(data) > self._MAX:
             return None
         try:
-            return valid(json.loads(data.decode("utf-8")), name)
+            return self._valid(json.loads(data.decode("utf-8")), name)
         except (ValueError, UnicodeError):
             return None
 
@@ -354,6 +378,9 @@ class DecisionStore:
         name = f"{record['id']}.json"
         data = json.dumps(record, ensure_ascii=False, allow_nan=False,
                           separators=(",", ":")).encode("utf-8")
+        if len(data) > self._WRITE_MAX:
+            raise RecordTooLarge(f"the record is {len(data):,} bytes encoded and the most is "
+                                 f"{self._WRITE_MAX:,}")
         tmp = f".{record['id']}.{pysecrets.token_hex(4)}.tmp"
         fd = os.open(tmp, self._WRITE, 0o600, dir_fd=dir_fd)
         try:
@@ -376,16 +403,16 @@ class DecisionStore:
     def _all(self, dir_fd: int) -> list[dict]:
         out = []
         for name in os.listdir(dir_fd):
-            if not _NAME_RE.match(name):
+            if not self._NAMES.match(name):
                 continue
             try:
                 record = self._read(dir_fd, name)
             except OSError as exc:
-                LOG.warning("Cannot read a decision (%s)", type(exc).__name__)
+                LOG.warning("Cannot read a record in %s (%s)", self._SUB, type(exc).__name__)
                 continue
             if record is not None:
                 out.append(record)
-        out.sort(key=lambda r: (_parse_time(r["asked_at"]), r["id"]))
+        out.sort(key=self._order)
         return out
 
     # -- reads -----------------------------------------------------------------------
@@ -406,7 +433,7 @@ class DecisionStore:
             return []
 
     def get(self, decision_id: str) -> dict | None:
-        if not isinstance(decision_id, str) or not ID_RE.match(decision_id):
+        if not isinstance(decision_id, str) or not self._ID.match(decision_id):
             return None
         try:
             with self._lock:
@@ -536,9 +563,7 @@ def _refuse_fields(kind, question, options, default, why) -> str | None:
     kind, a wrong type, a missing or empty field, a count or length out of
     bounds. Never cuts."""
     if not isinstance(kind, str) or kind not in KINDS:
-        if kind == "check":
-            return 'Error: kind "check" is not available yet; only "decision" can be posted.'
-        return 'Error: kind must be "decision".'
+        return 'Error: kind must be "decision" or "check".'
     if not isinstance(question, str) or not question.strip():
         return "Error: question must be a nonempty string."
     if len(question) > QUESTION_MAX:
@@ -579,13 +604,28 @@ def provenance(thread, task=None) -> str:
                       f"({thread.id})", 160)
 
 
+def _clean_field(text: str, lines: bool) -> str:
+    """Scrubbed, cleaned as the owner will see it (`display_text`), then
+    scrubbed again, outside any lock (the scrub reads credential files): a
+    token split by a character the cleaning drops (a symbol, a filler, a
+    private-use or unassigned code point, an enclosing mark) is whole again
+    after it, so the second scrub is the one that counts (review of PR #309).
+    `chat_reads.WITHHELD` when a scrub failed: the post is refused."""
+    from . import chat_reads
+    once = chat_reads.scrub(text)
+    if once == chat_reads.WITHHELD:
+        return once
+    return chat_reads.scrub(display_text(once, lines=lines))
+
+
 class OwnerPosts:
     """The service `owner_post` reaches (`installed()`): bound checks under the
     daemon lock, then the store. It holds no answer path."""
 
-    def __init__(self, daemon: Any, store: DecisionStore | None):
+    def __init__(self, daemon: Any, store: DecisionStore | None, checks: Any = None):
         self.daemon = daemon
         self.store = store
+        self.checks = checks        # the live checks' store (inbox B2, `checks.py`), or None
         self.closed = False
 
     def _refuse_caller(self, caller) -> tuple[str | None, Any]:
@@ -612,29 +652,31 @@ class OwnerPosts:
             return NOT_AT_DESK, None
         return None, session
 
-    def post(self, caller: dict | None, kind, question, options, default, why) -> str:
-        """Post one decision. Returns "Posted decision d… …" or a sentence
-        starting "Error: " (and then nothing was written)."""
+    def post(self, caller: dict | None, kind, question, options, default, why, *,
+             title=None, steps=None, prs=None) -> str:
+        """Post one decision, or one check (`kind="check"`, inbox B2: `title`,
+        `steps`, `prs`, through `_post_check`). Returns "Posted decision d…"
+        or "Posted check c…", or a sentence starting "Error: " (and then
+        nothing was written). A kind's arguments are its own: a decision
+        given a check's, or a check a decision's, is refused."""
         from . import chat_reads
         if (not isinstance(caller, dict) or not isinstance(caller.get("thread_id"), str)
                 or not isinstance(caller.get("turn_id"), str)):
             return NOT_IN_CHAT
+        if kind == "check":
+            if any(v is not None for v in (question, options, default, why)):
+                return ('Error: a check takes title, steps and prs; question, options, why and '
+                        'default are for kind "decision".')
+            return self._post_check(caller, title, steps, prs)
         if self.closed or self.store is None:
             return STOPPING if self.closed else NOT_IN_CHAT
+        if any(v is not None for v in (title, steps, prs)):
+            return ('Error: title, steps and prs are for kind "check"; a decision takes question, '
+                    'options, why and default.')
         refusal = _refuse_fields(kind, question, options, default, why)
         if refusal is not None:
             return refusal
-        # Scrubbed, cleaned as the owner will see it (`display_text`), then
-        # scrubbed again, outside any lock (the scrub reads credential files):
-        # a token split by a character the cleaning drops (a symbol, a
-        # filler, a private-use or unassigned code point, an enclosing mark)
-        # is whole again after it, so the second scrub is the one that counts
-        # (review of PR #309). A scrub that fails refuses the post.
-        def clean(text: str, lines: bool) -> str:
-            once = chat_reads.scrub(text)
-            if once == chat_reads.WITHHELD:
-                return once
-            return chat_reads.scrub(display_text(once, lines=lines))
+        clean = _clean_field
         clean_question = clean(question.strip(), True)
         clean_why = clean(why.strip(), True)
         clean_options = [clean(" ".join(o.split()), False) for o in options]
@@ -681,6 +723,64 @@ class OwnerPosts:
         return (f"Posted decision {record['id']} to the owner. They answer when they have time; "
                 "the answer comes back to this chat as a message from the owner, as its own turn "
                 "after any running one. Do not wait for it: go on with what does not depend on it.")
+
+    def _post_check(self, caller: dict, title, steps, prs) -> str:
+        """Post one check (inbox B2, IN-5/IN-6): the decision's binding, caps,
+        scrub, cleaning and provenance, with the check's own fields and caps
+        (`checks.refuse_fields`). A step is text only: nothing here runs it,
+        and only the owner records a result (the inbox's owner-only route,
+        which this service never names)."""
+        from . import chat_reads
+        from . import checks as _checks
+        if self.closed or self.checks is None:
+            return STOPPING if self.closed else NOT_IN_CHAT
+        refusal = _checks.refuse_fields(title, steps, prs)
+        if refusal is not None:
+            return refusal
+        clean_title = _clean_field(" ".join(title.split()), False)
+        clean_steps = [{"do": _clean_field(s["do"].strip(), True), "expect": _clean_field(s["expect"].strip(), True)}
+                       for s in steps]
+        texts = [clean_title, *(v for s in clean_steps for v in s.values())]
+        if chat_reads.WITHHELD in texts:
+            return WITHHELD_REFUSAL.replace("decision", "check")
+        clean_title = clean_line(display_text(clean_title, lines=False), _checks.TITLE_MAX + 40)
+        if not clean_title:
+            return "Error: the title has nothing left to show once cleaned."
+        for index, step in enumerate(clean_steps):
+            for key in ("do", "expect"):
+                step[key] = display_text(step[key], lines=True)
+                if not step[key]:
+                    return f"Error: step {index}'s {key} has nothing left to show once cleaned."
+        # The caps again, on what is stored (review of PR #321, MED 1): NFC and
+        # the cleaning can lengthen text (U+0958 is two characters after NFC).
+        refusal = _checks.refuse_fields(clean_title, clean_steps, prs)
+        if refusal is not None:
+            return refusal.replace("Error: ", "Error: once cleaned, ", 1)
+        with self.daemon._lock:
+            why_not, session = self._refuse_caller(caller)
+            if why_not is not None:
+                return why_not.replace("A decision can", "A check can").replace("a decision can", "a check can")
+            thread = session.thread
+            thread_id, project_id = thread.id, thread.project_id
+        origin = provenance(thread)
+        try:
+            record = self.checks.create(thread_id=thread_id, project_id=project_id, task_id=None,
+                                        created_by=origin, title=clean_title, prs=list(prs or ()),
+                                        steps=clean_steps)
+        except CapReached as exc:
+            return str(exc)
+        except RecordTooLarge as exc:
+            return f"Error: the check is too large to keep ({exc}); shorten it (nothing is cut)."
+        except Exception as exc:  # noqa: BLE001 — a store that cannot write posts nothing
+            LOG.warning("Cannot store a check (%s)", type(exc).__name__)
+            return "Error: the check could not be stored, so it was not posted."
+        from .model import utcnow
+        self.daemon.bus.publish({"kind": "check_posted", "thread_id": thread_id,
+                                 "project_id": project_id, "at": utcnow(),
+                                 "data": {"check_id": record["id"]}})
+        return (f"Posted check {record['id']} to the owner. They run its steps when they have time "
+                "and record each result themselves; nothing is sent back to this chat. Do not wait "
+                "for it.")
 
     # -- install / stop (as chat_relay) -------------------------------------------------
 

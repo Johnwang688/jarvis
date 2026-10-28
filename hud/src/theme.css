@@ -423,16 +423,17 @@ button.tree-row.morechats:focus-visible { box-shadow: inset 0 0 0 1px var(--acce
 .thinking.amber .tk-word { color: var(--amber); }
 .thinking.red .tk-word { color: var(--red); }
 .miniorb { flex: 0 0 auto; width: 18px; height: 18px; overflow: visible; }
-.miniorb .mo-outer, .miniorb .mo-inner, .miniorb .mo-core { transform-box: view-box; transform-origin: 50% 50%; }
-.miniorb .mo-outer, .miniorb .mo-inner { fill: none; stroke: rgb(var(--mo-hue)); stroke-linecap: round; }
-.miniorb .mo-outer { stroke-width: 1.3; opacity: 0.6; animation: mo-spin var(--mo-outer, 1.8s) linear infinite; }
-.miniorb .mo-inner { stroke-width: 1.7; opacity: 0.9; animation: mo-spin var(--mo-inner, 1.2s) linear infinite reverse; }
+.miniorb .mo-outer, .miniorb .mo-band, .miniorb .mo-inner, .miniorb .mo-core { transform-box: view-box; transform-origin: 50% 50%; }
+.miniorb .mo-outer, .miniorb .mo-band, .miniorb .mo-inner { fill: none; stroke: rgb(var(--mo-hue)); stroke-linecap: round; }
+.miniorb .mo-outer { stroke-width: 1; opacity: 0.6; animation: mo-spin var(--mo-outer, 1.8s) linear infinite; }
+.miniorb .mo-band { stroke-width: 2; stroke-linecap: butt; opacity: 0.45; animation: mo-spin var(--mo-outer, 1.8s) linear infinite reverse; }
+.miniorb .mo-inner { stroke-width: 1.2; opacity: 0.9; animation: mo-spin var(--mo-inner, 1.2s) linear infinite reverse; }
 .miniorb .mo-core { fill: rgb(var(--mo-hue)); animation: mo-flex 1.2s ease-in-out infinite; }
-.miniorb.still .mo-outer, .miniorb.still .mo-inner, .miniorb.still .mo-core { animation: none; }
+.miniorb.still .mo-outer, .miniorb.still .mo-band, .miniorb.still .mo-inner, .miniorb.still .mo-core { animation: none; }
 @keyframes mo-spin { to { transform: rotate(360deg); } }
 @keyframes mo-flex { 0%, 100% { transform: scale(0.78); } 50% { transform: scale(1.08); } }
 @media (prefers-reduced-motion: reduce) {
-  .miniorb .mo-outer, .miniorb .mo-inner, .miniorb .mo-core { animation: none; }
+  .miniorb .mo-outer, .miniorb .mo-band, .miniorb .mo-inner, .miniorb .mo-core { animation: none; }
 }
 
 /* ---- transcript tool groups ---- */
@@ -2272,3 +2273,31 @@ button.tree-row.ownerinbox.aurora.sel:focus-visible { box-shadow: inset 2px 0 va
 .inbox-row button.quiet.ir-link { padding: 0; font-size: 11px; color: var(--text-2); }
 .inbox-row button.quiet.ir-link:hover:not(:disabled) { color: var(--accent); }
 .inbox-row button:focus-visible, .inbox-row input:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
+/* A live check (inbox B2): its steps as a numbered list, each step's words
+   and expectation as plain text that clips, the owner's verdict in green
+   (pass), red (fail) or the secondary colour (skip). The deployed test's
+   line is plain secondary text: a check is information, never pending. */
+.inbox-row .ir-steps { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.inbox-row .ir-step { min-width: 0; overflow: hidden; }
+.inbox-row .ir-step-do { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text); overflow: hidden;
+  max-height: 200px; overflow-y: auto; }
+.inbox-row .ir-step-expect { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; color: var(--text-2);
+  overflow: hidden; max-height: 160px; overflow-y: auto; }
+.inbox-row .ir-step-result { font: 11px var(--mono); overflow-wrap: anywhere; overflow: hidden; color: var(--text-2); }
+.inbox-row .ir-step-result[data-verdict="pass"] { color: var(--green); }
+.inbox-row .ir-step-result[data-verdict="fail"] { color: var(--red); }
+.inbox-row .ir-deploy { color: var(--text-2); }
+.inbox-row button[data-verdict]:disabled { opacity: 0.5; }
+/* Marks (inbox B4): Snooze and Dismiss as quiet secondary buttons on rows of
+   rank 5 to 8; a hidden row (shown by "Show hidden") is muted, never amber. */
+.inbox-row .ir-marks { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; min-width: 0; }
+.inbox-row .ir-marks button.quiet { padding: 0 2px; font-size: 11px; color: var(--text-2); }
+.inbox-row .ir-marks button.quiet:hover:not(:disabled) { color: var(--accent); }
+.inbox-row[data-hidden="1"] { opacity: 0.6; border-left-color: var(--border); }
+.inbox-import { display: flex; flex-direction: column; gap: 4px; margin: 8px 12px 0; padding: 6px 8px;
+  border: 1px solid var(--border); border-radius: var(--radius); min-width: 0; }
+.inbox-import .ir-answer { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; min-width: 0; }
+.inbox-import .ir-answer input { flex: 1 1 200px; min-width: 0; }
+.inbox-import .ir-drafts { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 2px; }
+.inbox-import .ir-draft { overflow-wrap: anywhere; overflow: hidden; }
+.inbox-import .ir-draft button { margin-left: 6px; }

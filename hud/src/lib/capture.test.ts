@@ -134,7 +134,6 @@ describe("the OFF mode is the mic mute", () => {
     cap.feedMs(HANGOVER_MS + 300, QUIET);
     expect(sent).toHaveLength(0);
     expect(cap.onWake()).toBe("armed");
-    expect(cap.press()).toBe(false);
     muted = false;
   });
 
@@ -164,6 +163,60 @@ describe("the OFF mode is the mic mute", () => {
     // Everything sent starts at or after the unmute mark: the pre-roll and the
     // wake path's back-dating cannot reach across it.
     expect(sent[0].ms).toBeLessThanOrEqual(samplesToMs(cap.ring.written - floor) + 1);
+  });
+});
+
+describe("the talk key dictates while OFF (2026-10-27)", () => {
+  it("records what is said while it is held, and nothing from before the press", () => {
+    const { cap, sent, listens } = mk({ muted: () => true });
+    // The room talking while the owner believes the mic is off: none of it may leave.
+    cap.feedMs(3000, SPEECH);
+    expect(cap.press()).toBe(true);
+    expect(listens.at(-1)?.source).toBe("ptt");
+    cap.feedMs(1200, SPEECH);
+    cap.release();
+    expect(sent).toHaveLength(1);
+    expect(sent[0].source).toBe("ptt");
+    // No pre-roll: the message is the hold, not the 3 s before it.
+    expect(sent[0].ms).toBeLessThanOrEqual(1200 + 1);
+  });
+
+  it("goes back to muted on release: nothing after it is claimed, by name or follow-up", () => {
+    const { cap, sent } = mk({ muted: () => true });
+    cap.feedMs(2000, QUIET);
+    cap.press();
+    cap.feedMs(1000, SPEECH);
+    cap.release();
+    expect(sent).toHaveLength(1);
+    cap.openFollowUp();
+    expect(cap.conversing()).toBe(false);
+    cap.feedMs(1400, SPEECH);
+    cap.feedMs(HANGOVER_MS + 300, QUIET);
+    expect(cap.onWake()).toBe("armed");
+    cap.feedMs(HANGOVER_MS + 300, QUIET);
+    expect(sent).toHaveLength(1);
+  });
+
+  it("the wake word stays deaf while the key is held", () => {
+    const { cap } = mk({ muted: () => true });
+    cap.feedMs(2000, QUIET);
+    cap.press();
+    cap.feedMs(600, SPEECH);
+    expect(cap.onWake()).toBe("armed");
+    cap.release();
+  });
+
+  it("switching OFF mid-hold still ends the recording", () => {
+    let muted = false;
+    const { cap, sent } = mk({ muted: () => muted });
+    cap.feedMs(2000, QUIET);
+    cap.press();
+    cap.feedMs(800, SPEECH);
+    muted = true;
+    cap.muteNow();
+    cap.feedMs(400, SPEECH);
+    cap.release();
+    expect(sent).toHaveLength(0);
   });
 });
 

@@ -639,7 +639,7 @@ class Daemon:
         # the inbox's decisions, over the inbox's own store. Installed in
         # `start()`, removed in `stop()`; it holds no answer path.
         from .decisions import OwnerPosts
-        self.owner_posts = OwnerPosts(self, self.inbox.decisions)
+        self.owner_posts = OwnerPosts(self, self.inbox.decisions, self.inbox.checks)
         from .browser.drive import BrowserDrive
         self.browser_drive = BrowserDrive(self)
         from .devservers import DevServers
@@ -729,6 +729,12 @@ class Daemon:
             # An answer still "queued" from a previous run never ran (the
             # queue is in memory): say so on its decision (inbox B1).
             self.inbox.fail_lost_answers()
+            # Open PRs for the inbox (B3): a thread of its own, only once
+            # `main()` attached it; nothing here waits on `gh`.
+            self.inbox.prs.start()
+            # A snooze that ends brings its row back (inbox B4): one timer for
+            # the earliest, re-armed on each mark write.
+            self.inbox.start_snoozes()
             self.devservers.start()
             self.schedules.start()
             # A previous run's unrestored duck (V15) is repaired from its
@@ -2957,6 +2963,10 @@ class Daemon:
         # stopped; then this finds nothing (idempotent).
         self.release_approvals()
         self.schedules.stop()
+        self.inbox.prs.stop()                   # the inbox's PR poll (B3): a running gh is killed
+        inbox = getattr(self, "inbox", None)
+        if inbox is not None:
+            inbox.stop_snoozes()                # the snooze timer (inbox B4) never fires after this
         titles = self.titles
         if titles is not None:
             titles.stop()                       # its Codex session ends with the metadata cancel
@@ -3855,6 +3865,14 @@ def main() -> int:
     # read-only, time-limited): attached here, so no embedded or test daemon
     # runs a Windows command. Without it the phone stays limited.
     daemon.secure.attach_system()
+    # The owner inbox's deployed test for live checks (inbox B2, IN-6) reads
+    # local git: the commit this daemon starts from, captured now. Attached
+    # here only, so an embedded or test daemon never runs git for it and
+    # every check naming a PR there is "not confirmed deployed".
+    daemon.inbox.deploy.attach_git()
+    # The inbox's open PRs (B3, inbox_prs.py): the owner's `gh`, read-only,
+    # attached here for the same reason.
+    daemon.inbox.prs.attach_system()
     hatch = EscapeHatch(daemon, daemon.approvals)
     discord = None
     daemon.runner = TaskRunner(daemon, daemon.router)
