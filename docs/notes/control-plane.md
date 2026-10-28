@@ -2119,9 +2119,8 @@ assertion is verified first, bound (`remote_answer.defer_binding`) to
 `defer:<id>` (an approval's id holds no colon), this answer and this
 session, single use; then §4.1 runs in full (`_monitor(...).check`; no
 monitor is a refusal) and the Allow's gate (`_gate_deferral`: a card the
-phone's scrub would change is `WITHHELD`). For several ids the binding is
-`defers:` + SHA-256 of the sorted ids (56 hex), for the morning review; QH
-uses only the one-id form. `quiet_defer.answer(..., verified=True)` has one
+phone's scrub would change is `WITHHELD`). A set is the morning review's
+(`review.subject`, below); `defer_binding` takes one id only. `quiet_defer.answer(..., verified=True)` has one
 caller, `remote_answer._answer_deferred`, after `answer_verify`.
 
 **After the #326 delta review.** The escape hatch's asks carry the thread's
@@ -2152,3 +2151,75 @@ every client but the HUD), `inbox_marks_check`,
 `hud/src/components/InboxView.deferred.test.ts`,
 `hud/src/mobile/answer.test.ts`, and the `deferred` section of
 `tests/face/hud_v2_inbox_check.py`.
+
+## The morning review (MR, 2026-10-28)
+
+Plan: `docs/plans/2026-10-28-morning-review.md` (the owner's words and four
+answers, MR-1 to MR-12, "MR as built"). Module: `jarvis/v2/review.py`
+(SELF_PROTECTED); its docstring is the route contract.
+
+**What it is.** One report of what waited overnight, computed on every
+read from `inbox.rows` (nothing stored): "Live now" (rank-1 approvals,
+never selectable), "Overnight" (ranks 1 to 4 and open decisions asked in
+`QuietHours.last_window`), "Waiting now" (ranks 1 to 4 first asked after
+it ended), "Still waiting from before" (asked before it; with quiet hours
+off, every rank 1 to 4 row), and a count of the night's rank-8 rows. No PRs, no checks. At
+most 60 items. `GET /inbox/review` (HUD, `owner_only`, mounted by
+`inbox.route`) and `GET /m/api/review` (remote, past `owner_status`,
+mounted by `remote_auth.api_route`; rows through `remote_api.inbox_row`).
+
+**The one recorded exception to "no bulk Allow"** (inbox IN-3, phone §9):
+deferred rows only, the exact displayed set, at most 10 (the owner's
+answer 2), one deliberate confirmation, all or nothing; live cards are
+untouched. Questions and decisions are answered one at a time through
+their own routes; decisions have a per-row Dismiss at the desk, no group
+dismiss (answer 1).
+
+**The binding.** Each approvable deferred item carries `tag = HMAC-SHA256(key,
+"mr-v1" ‖ id ‖ digest ‖ sha256(canonical card))`, the key 32 random bytes
+of this process, never written (a restart stales every tag). Approve
+selected sends `{items: [{id, tag}]}`; on the phone the assertion is bound to
+`review.subject(items)` = `defers:` + 56 hex of a SHA-256 over the sorted
+`id\ttag` lines, Allow only (`remote_auth._DEFER_SUBJECT`); a `defer:<id>`
+assertion never answers it, nor the reverse.
+
+**All or nothing.** The phone checks the set before the challenge
+(`check_group`, 409 `{error, changed: [{id, reason}]}`), then after the
+assertion and §4.1 the grants go through `quiet_defer.approve_many` →
+`DeferredStore.settle_many`: every check (waiting, grantable, not
+HUD-only, under 24 h, the tag, the task still `blocked`, the chat open, on
+the phone the scrub) under the store's lock, one write or none. Then one
+message per chat (`group_message`, B1's delivery) and one resume per task.
+The grants are QH's unchanged: exact digest and thread, single use, 30
+minutes.
+
+**Authority.** Desk: `owner_only` and the view's confirmation (Cancel
+focused; Enter and Escape cancel), no passkey; inert under a live card.
+Phone: session, Host, Origin, a fresh assertion bound to the subject, and
+all five §4.1 checks; a limited phone gets no group approval (answer 3) and
+keeps the per-row Approve and retry. Answer challenges are budgeted per
+session and per family (approval, task, deferral row, review set; four
+each): a new set's challenge replaces the session's earlier sets, so
+abandoned group prompts never crowd out a live card's Allow. A re-read under
+an open confirmation that drops or changes a confirmed item closes it and
+unticks that item, on both surfaces; only the confirmed `{id, tag}` set is
+ever sent. The phone shows every argument beside the command. Leave selected (≤25) needs the session
+only and is QH's Leave it per item. A desk answer and a verified phone
+group answer stamp presence (QH-3).
+
+**Opening the phone (MR-12).** `Push.review_opens()` is true while the last
+push that reached a phone was the 07:00 one (memory only); `GET
+/m/api/review` returns `opens_here` while that holds and something is open,
+and a launch or a notification's tap opens the Review tab then. The push
+payload stays `{count, rank}`; `sw.ts` is unchanged.
+
+**Agents.** No tool, MCP entry, session tool, Discord or CLI module names
+the module or its paths (`archive_check`, `review_check`); `rules.py`'s
+remote-listener DENY covers `/m/api/review*` (v1 and v2 layer 1); the
+grants' store stays protected state.
+
+Tests: `tests/v2/review_check.py`, `quiet_defer_check` (the one-id
+binding), `archive_check`, `hud/src/lib/review.test.ts`,
+`hud/src/mobile/review.test.ts`, `tests/face/hud_v2_review_check.py`,
+`tests/face/hud_v2_phone_review_check.py`.
+

@@ -2143,6 +2143,14 @@ button.tree-row.ownerinbox {
   width: 100%; box-sizing: border-box; border: 0; border-radius: 0; background: none;
   text-align: left; font-size: 13px; color: var(--text); flex: 0 0 auto; margin-bottom: 2px;
 }
+/* The morning review's row (MR-10), under the Inbox's: plain Graphite, no aurora. */
+button.tree-row.ownerreview {
+  width: 100%; box-sizing: border-box; border: 0; border-radius: 0; background: none;
+  text-align: left; font-size: 13px; color: var(--text); flex: 0 0 auto; margin-bottom: 2px;
+}
+button.tree-row.ownerreview:hover:not(:disabled) { background: var(--hover); }
+button.tree-row.ownerreview.sel { background: var(--selected); box-shadow: inset 2px 0 var(--accent); }
+button.tree-row.ownerreview:focus-visible { box-shadow: inset 0 0 0 1px var(--accent); }
 button.tree-row.ownerinbox:hover:not(:disabled) { background: var(--hover); }
 button.tree-row.ownerinbox.sel { background: var(--selected); box-shadow: inset 2px 0 var(--accent); }
 button.tree-row.ownerinbox:focus-visible { box-shadow: inset 0 0 0 1px var(--accent); }
@@ -2303,3 +2311,41 @@ button.tree-row.ownerinbox.aurora.sel:focus-visible { box-shadow: inset 2px 0 va
 .inbox-import .ir-drafts { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 2px; }
 .inbox-import .ir-draft { overflow-wrap: anywhere; overflow: hidden; }
 .inbox-import .ir-draft button { margin-left: 6px; }
+
+/* ---- the morning review (MR-10, components/ReviewView.tsx) ----
+   Graphite, the inbox's rows: amber only for what is pending (ranks 1 and
+   2), cyan only for focus and the selection bar. The list scrolls; the
+   footer stays put beneath it, with Leave selected at the far left and
+   Approve selected at the far right. The confirmation covers the pane. */
+.review { position: relative; height: 100%; min-height: 0; }
+.review .review-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding-bottom: 12px; }
+.review .review-summary { margin: 8px 12px 0; color: var(--text-2); font-size: 12px; }
+.review .review-chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 12px 0; min-width: 0; }
+.review .review-chip { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 12px; color: var(--text-2); }
+.review .review-kind { font: 600 10px var(--mono); letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-muted); }
+.review .review-project-name { margin: 6px 12px 0; font-size: 12px; color: var(--text-2); overflow-wrap: anywhere; }
+.review .review-place { scroll-margin-top: 8px; }
+.review .review-place-name { margin: 4px 12px 0; font-size: 12px; color: var(--text); overflow-wrap: anywhere;
+  display: flex; gap: 6px; align-items: baseline; min-width: 0; }
+.review .review-tick { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-2);
+  cursor: pointer; align-self: flex-start; }
+.review .review-tick input { accent-color: var(--accent); margin: 0; }
+.review .review-receipt { flex-direction: row; color: var(--text-2); font-size: 12px; border-left-color: var(--border); }
+.review .review-fyi { margin: 8px 12px 0; font-size: 12px; color: var(--text-2); }
+.review .review-footer { flex: 0 0 auto; display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+  justify-content: space-between; padding: 8px 12px; border-top: 1px solid var(--border); background: var(--bg-1); }
+.review .review-footer .review-count { flex: 1 1 auto; text-align: center; font-size: 12px; color: var(--text-2); }
+.review .review-blockers { flex: 1 1 100%; font-size: 11px; color: var(--text-2); overflow-wrap: anywhere; }
+.review .review-confirm-veil { position: absolute; inset: 0; background: var(--veil); display: flex;
+  align-items: center; justify-content: center; z-index: 5; padding: 16px; }
+.review .review-confirm { max-width: 560px; width: 100%; max-height: 100%; overflow-y: auto; background: var(--bg-2);
+  border: 1px solid var(--border-strong); border-radius: var(--radius); padding: 12px; display: flex;
+  flex-direction: column; gap: 8px; box-shadow: var(--shadow-pop); }
+.review .review-confirm-head { color: var(--text); }
+.review .review-where { color: var(--text-2); overflow-wrap: anywhere; }
+.review .review-confirm-list { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 6px; }
+.review .review-confirm-list li { overflow-wrap: anywhere; font-size: 12px; }
+.review .review-confirm-list pre { margin: 0; font: 12px var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+.review .review-confirm-actions { display: flex; justify-content: space-between; gap: 24px; }
+.review button:focus-visible, .review input:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }

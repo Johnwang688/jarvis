@@ -295,6 +295,13 @@ export const api = {
    * the owner's confirm of one draft (`{path, digest, save}`), design §6. */
   importChecks: (body: { path: string } | { path: string; digest: string; save: number }) =>
     req<unknown>(CHECK_IMPORT_PATH, json(body)),
+  /** The morning review (MR): what waited overnight; lib/review `parseReview` reads it. */
+  review: () => req<unknown>("/inbox/review"),
+  /** Approve selected: exactly the ticked deferred approvals, each with its tag. All or
+   * nothing: a 409's body names what changed (`changed: [{id, reason}]`). */
+  reviewApprove: (body: { items: { id: string; tag: string }[] }) => req<unknown>("/inbox/review/approve", json(body)),
+  /** Leave selected: the ticked deferred approvals, each left (one result each). */
+  reviewLeave: (body: { items: { id: string }[] }) => req<unknown>("/inbox/review/leave", json(body)),
 
   // --- usage / route / schedules -----------------------------------------
   usage: () => req<Usage>("/usage"),

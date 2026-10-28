@@ -69,6 +69,36 @@ def handle(h, mock, method: str, path: str) -> bool:
         s["refused"] += 1
         h._err(403, "only the owner can do this, from the HUD")
         return True
+    if parts[:2] == ["inbox", "review"]:
+        # The morning review (MR, `review.py`): `review` is what `GET
+        # /inbox/review` serves (404 when unset, as an older daemon);
+        # `review_posts` records each Approve selected and Leave selected
+        # that got through, as (path, body); `review_reply` answers them.
+        if parts == ["inbox", "review"] and method == "GET":
+            if s.get("review") is None:
+                h._err(404, "route not found")
+            else:
+                s["review_reads"] = s.get("review_reads", 0) + 1
+                h._json(s["review"])
+            return True
+        if parts in (["inbox", "review", "approve"], ["inbox", "review", "leave"]) and method == "POST":
+            body = h._body()
+            s.setdefault("review_posts", []).append((path, body))
+            mock.calls.append(("POST", path, body if isinstance(body, dict) else {}))
+            scripted = (s.get("review_reply") or {}).get(parts[2])
+            if scripted:
+                status, payload = scripted
+                h._json(payload, status)
+                return True
+            items = (body or {}).get("items") or []
+            if parts[2] == "approve":
+                h._json({"ok": True, "approved": len(items),
+                         "results": [{"ok": True, "id": i.get("id"), "delivery": "queued"} for i in items]})
+            else:
+                h._json({"results": [{"ok": True, "id": i.get("id"), "delivery": "left"} for i in items]})
+            return True
+        h._err(404, "route not found")
+        return True
     if parts == ["inbox"] and method == "GET":
         s["reads"] += 1
         if s["fail"]:

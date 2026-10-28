@@ -117,7 +117,7 @@ not speaker-verified (owner). [Design](docs/plans/2026-10-24-phone-surface-desig
 ## Inbox
 
 `/inbox` is owner-only; agents only `owner_post`, never read, answer, mark,
-grant. Marks hide ranks 5–8. Quiet hours defer.
+grant. Marks hide ranks 5–8. Quiet hours defer; the morning review groups them.
 [Design](docs/plans/2026-10-24-owner-inbox-design.md); rules: control-plane notes.
 
 ## Safety design (deliberate, do not loosen without asking)

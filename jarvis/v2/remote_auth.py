@@ -77,7 +77,9 @@ single use, 60 s, at most 4 per session), and `answer_verify` checks it as
 is the session's own passkey; P-5's irreversible task verb (cancel) takes
 the same assertion, bound to `task:<id>` and the verb (`TASK_DECISIONS`).
 Past the session, `api_route` hands P-7's `POST /m/api/stt` to
-`remote_stt`, P-6's push paths to `push`, P-4's answer paths to
+`remote_stt`, P-6's push paths to `push`, the morning review's
+`/m/api/review...` to `review` (its Approve selected's assertion bound to
+`defers:<56 hex>`, `review.subject`), P-4's answer paths to
 `remote_answer`, P-5's writes to `remote_write`, and every other path but
 logout and `me` to `remote_api` (P-3's reads and event stream); a logout,
 the desk's End and a revoke tell `on_end` (P-6 deletes that session's or
@@ -153,15 +155,19 @@ ANSWER_DECISIONS = ("allow", "always")
 TASK_DECISIONS = ("cancel",)
 _TASK_SUBJECT = re.compile(r"task:[0-9a-f]{8}")
 # QH: an Approve and retry of a deferred approval (`remote_answer.defer_binding`):
-# one deferral, `defer:<id>`, or a set of them, `defers:<sha256, 56 hex>`.
-# Only "allow" is ever an answer for it.
+# one deferral, `defer:<id>`; the morning review's Approve selected
+# (`review.subject`, MR-6): a set, `defers:<56 hex>` over every id and its tag.
+# Only "allow" is ever an answer for either.
 DEFER_DECISIONS = ("allow",)
 _DEFER_SUBJECT = re.compile(r"defer:[A-Za-z0-9_-]{1,58}|defers:[0-9a-f]{56}")
 # PH-10: a phone session seen this recently gives approvals the remote wait.
 ACTIVE_S = 24 * 3600
 MAX_SESSIONS = 32         # the least recently seen goes first
-# The most answer challenges there can be at once (a bound, never a shared cap).
-MAX_ANSWER_CHALLENGES = MAX_ANSWER_CHALLENGES_PER_SESSION * MAX_SESSIONS * 2
+# The most answer challenges there can be at once (a bound, never a shared cap):
+# per session, one budget per family (an approval's answer, a task verb, a
+# deferral's Approve and retry, a morning review's set; review of #329, LOW 4).
+ANSWER_FAMILIES = ("approval", "task", "defer", "review")
+MAX_ANSWER_CHALLENGES = MAX_ANSWER_CHALLENGES_PER_SESSION * MAX_SESSIONS * len(ANSWER_FAMILIES)
 MAX_REVOKED = 16          # revoked passkey records kept, so a revoked id stays refused
 LAST_SEEN_WRITE_S = 60    # last-seen is written at most this often per session
 UA_CAP = 160
@@ -546,13 +552,15 @@ class RemoteAuth:
         if kind == "register" and self._window_open() is None:
             raise _refuse("no pairing window is open")
         if kind == "answer":
-            # Per session (`answer_options`), and per family (P-5): a task
-            # verb's prompts and an approval's are counted apart, so abandoned
-            # cancel prompts can never refuse an Allow, nor the reverse.
-            # Bounded by MAX_SESSIONS times that, twice.
+            # Per session (`answer_options`), and per family (P-5; the
+            # deferrals' own since the review of #329, LOW 4): a task verb's
+            # prompts, a deferral's or a morning review's and an approval's
+            # are counted apart, so abandoned cancel or group prompts can
+            # never refuse a live card's Allow, nor the reverse. Bounded by
+            # MAX_SESSIONS times that, per family.
             mine = [c for c in self._challenges.values()
                     if c["kind"] == "answer" and c.get("session") == extra.get("session")
-                    and c.get("task", False) == extra.get("task", False)]
+                    and c.get("family", "approval") == extra.get("family", "approval")]
             full = len(mine) >= MAX_ANSWER_CHALLENGES_PER_SESSION
         else:
             cap = MAX_REGISTER_CHALLENGES if kind == "register" else MAX_LOGIN_CHALLENGES
@@ -749,13 +757,22 @@ class RemoteAuth:
             passkey = self._session_passkey(session)
             # This session asking again for this card and this answer: the
             # earlier challenge goes (its prompt was abandoned or retried).
-            self._challenges = {k: c for k, c in self._challenges.items()
-                                if not (c["kind"] == "answer" and c.get("session") == session["token_sha256"]
-                                        and c.get("req_id") == req_id and c.get("decision") == decision)}
+            # A morning review's set (`defers:`) replaces every earlier set of
+            # this session: only the latest confirmation can be answered.
+            group = req_id.startswith("defers:")
+
+            def replaced(c) -> bool:
+                if c["kind"] != "answer" or c.get("session") != session["token_sha256"]:
+                    return False
+                if group and str(c.get("req_id", "")).startswith("defers:"):
+                    return True
+                return c.get("req_id") == req_id and c.get("decision") == decision
+            self._challenges = {k: c for k, c in self._challenges.items() if not replaced(c)}
             nonce = secrets.token_bytes(ANSWER_NONCE_BYTES)
             challenge = self.answer_challenge(req_id, decision, nonce)
             self._issue("answer", challenge, req_id=req_id, decision=decision, nonce=nonce,
-                        session=session["token_sha256"], passkey=passkey["key"], task=task)
+                        session=session["token_sha256"], passkey=passkey["key"], task=task,
+                        family="task" if task else ("review" if group else "defer") if defer else "approval")
             options = webauthn.generate_authentication_options(
                 rp_id=self.host, challenge=challenge, timeout=CHALLENGE_S * 1000,
                 allow_credentials=[structs.PublicKeyCredentialDescriptor(id=unb64url(passkey["id"]))],
@@ -1206,6 +1223,12 @@ def api_route(handler, path: str, body: bytes) -> tuple[int, dict, list[tuple[st
         # new chats and task verbs (`remote_write`), then P-3's reads and the
         # event stream (`remote_api`), only past the session check above.
         # None from the reads: the stream answered on the socket.
+        # The morning review (MR, `review.py`): its report, Approve selected
+        # (a passkey assertion bound to the whole set) and Leave selected.
+        from . import review as _review
+        answered = _review.route(handler, path, session, body)
+        if answered is not None:
+            return answered
         from . import remote_answer
         answered = remote_answer.route(handler, path, session, body)
         if answered is not None:
