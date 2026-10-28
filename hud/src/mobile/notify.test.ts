@@ -211,9 +211,9 @@ describe("Turn on notifications (P-6)", () => {
     expect(WORDS.on).toBe("Notifications on");
     expect(on.line.classList.contains("one-line")).toBe(true);
     expect(on.view.dataset.state).toBe("on");
+    // The hint is the "on" state's alone (review of #331, NIT).
     const off = draw("off");
-    expect([off.line.textContent, off.button]).toEqual(["Notifications off · " + HINT, "Turn on"]);
-    expect(off.view.textContent).toContain("never what");
+    expect([off.line.textContent, off.button, off.hint]).toEqual(["Notifications off", "Turn on", null]);
     // The desk's switch off: said in the hint's place.
     expect(draw("on", "", false).line.textContent).toBe("Notifications on · turned off at the desk for now");
     // A sentence of detail wraps (never cut by the ellipsis).
@@ -221,7 +221,8 @@ describe("Turn on notifications (P-6)", () => {
     expect(changed.line.classList.contains("one-line")).toBe(false);
     expect(changed.line.textContent).toContain("key changed");
     const error = draw("error", "Jarvis could not be reached.");
-    expect([error.button, error.line.classList.contains("one-line")]).toEqual(["Turn on", false]);
+    expect([error.button, error.hint, error.line.textContent])
+      .toEqual(["Turn on", null, WORDS.error + " Jarvis could not be reached."]);
     // The states that cannot act keep their whole sentence and have no button.
     for (const state of ["unsupported", "install", "blocked", "unavailable"] as const) {
       const d = draw(state);

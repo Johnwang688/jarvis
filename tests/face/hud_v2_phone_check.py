@@ -670,8 +670,9 @@ def app_checks(page, daemon, world, check, until, streamed, net, main):
     # P-6: under the Inbox, how to get notifications (desktop Chromium: no
     # Home Screen rule; the push itself needs a real push service).
     note = page.locator('[data-testid="m-notify"]')
-    check("P-6 Inbox: the notifications row says a push tells how many, never what",
-          note.count() == 1 and "never what" in note.inner_text()
+    # One compact row (2026-10-28); "count only, never what" is the "on" state's hint (notify.test.ts).
+    check("P-6 Inbox: the notifications row offers them, off",
+          note.count() == 1 and note.inner_text().startswith(("Notifications off", "Notifications could not"))
           and note.get_attribute("data-state") in ("off", "error"), note.inner_text() if note.count() else "")
     check("P-6 Inbox: 'Turn on notifications' is offered (a small 'Turn on' in one compact row, 2026-10-28)",
           page.locator('[data-testid="m-notify-button"]').inner_text() == "Turn on"

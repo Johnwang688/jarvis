@@ -123,7 +123,7 @@ export const WORDS: Record<NotifyState, string> = {
   unavailable: "Notifications are not available on the PC right now. Try again later.",
 };
 
-/** The muted hint beside "on" and "off": what a push says. */
+/** The muted hint beside "on" (only): what a push says. */
 export const HINT = "count only, never what";
 
 export class Notifications {
@@ -247,7 +247,7 @@ export class Notifications {
     line.className = "notify-line";
     line.textContent = WORDS[this.state] + (this.detail ? " " + this.detail : "");
     const hint = this.state === "on" && !this.deskOn ? "turned off at the desk for now"
-      : this.state === "on" || this.state === "off" || this.state === "error" ? HINT : "";
+      : this.state === "on" ? HINT : "";
     if (hint) {
       // One line: the hint gives way (an ellipsis) before the row grows a second line.
       if (!this.detail) line.classList.add("one-line");
