@@ -312,6 +312,10 @@ stream, dev servers, VEX, project folder creation, schedules editing.
   expires soon").
 - **Quiet hours:** a desk setting. During them only rank 1 pushes, and only
   if the approval came from a task the owner started that day.
+  **Superseded by the owner's answer (2026-10-28, §11 question 5):** 23:00
+  to 07:00 local, on by default, and nothing pushes during them, rank 1
+  included; at 07:00 one push gives the count if anything at ranks 1 to 4
+  still waits (§10.5).
 - **Failure:** a subscription the push service reports gone (404/410) is
   deleted; any other failure is logged with status only, never the endpoint
   URL (the endpoint is a capability, like Discord's interaction URL).
@@ -572,7 +576,76 @@ the phone"). Where it is more specific than the text above:
   the stream's shaper, which a push would read, is asserted to carry no
   private detail.
 
-### 10.x P-5 as built (2026-10-28, phone C5)
+### 10.5 P-6 as built (2026-10-28, phone C6)
+
+Built as the P-6 row says (`docs/notes/control-plane.md`, "Web Push to the
+phone"), with quiet hours as the owner answered §11 question 5. Where it is
+more specific than the text above:
+
+- **Quiet hours are their own module**, `jarvis/v2/quiet.py`
+  (SELF_PROTECTED; `<data root>/quiet.json`, protected state): enabled,
+  start and end, default on 23:00 to 07:00 local, `is_quiet(now)` and
+  `ends_at(now)`, changed only at the desk (`GET`/`POST /quiet`, owner-only).
+  No push or HTTP import, so the next package (approvals asked at night)
+  builds on it. P-6 changes no approval or timeout.
+- **When a push is due:** a row new to ranks 1 to 4 (so the count rises;
+  a row that only changes rank within them is not new). At most one per
+  60 s; what arrives inside the window is one push at its end, with the
+  count then, and none if nothing waits by then. Nothing during quiet
+  hours; when they end (the sender wakes at `ends_at`), one push if
+  anything at ranks 1 to 4 still waits. The desk's Notifications switch
+  off: nothing.
+- **The payload** is `{"count": n, "rank": r}`, `r` the most urgent rank
+  waiting (0 for none: the desk's test with nothing waiting). The
+  notification reads "n waiting", rank 1 adds " - an approval expires soon",
+  0 reads "Nothing is waiting now". A tap focuses the app on the Inbox or
+  opens `/m/#inbox`.
+- **Subscriptions live as long as their passkey**, one per session (the
+  same endpoint moves to a newer session): logout, the desk's End and a
+  revoke delete it at once; a session that only expires keeps it, so the
+  notification can still bring the owner back to sign in. At most 8.
+  The app hands a subscription it holds to the new session at sign-in.
+- **The endpoint check** runs at subscribe and at every send: `https`, port
+  443, no userinfo, a push service's host (`web.push.apple.com`,
+  `*.push.apple.com`, `fcm.googleapis.com`, `*.notify.windows.com`,
+  `updates.push.services.mozilla.com`, `*.push.services.mozilla.com`),
+  never an IP literal, every resolved address global. The send connects to
+  the address it checked (TLS verified for the host name): no proxy, no
+  redirect, so DNS cannot change between the check and the connection.
+- **What is protected (review of PR #325, MED-1):** `<data root>/remote/`
+  is a credential folder (`config.remote_dir()` in
+  `config.credential_dirs()`), so P-2's passkeys and sessions and P-6's
+  `jarvis_push_key.json` (the VAPID private key) and
+  `jarvis_push_subscriptions.json` are read by no agent through any
+  spelling: v1's file and shell tools refuse it (none of its files is
+  "readable config"), v2's read tools are refused there and v2's shell
+  reads are always asked (`credentials-path`). The push files and
+  `push_settings.json` are protected state too (no agent write). The two
+  secret files are also refused by exact name anywhere (never as a glob,
+  so `git tag -l 'v*'` and `ls *push*` keep main's verdict) and scrubbed
+  from v1's tool output (delta review MED-A); v2's read tools are refused at
+  the folders holding the phone's folder below `$HOME` (LOW-A). A search
+  from `$HOME` or above is the limit every credential folder shares.
+- **Bounded and retried (review of PR #325):** one push, every
+  subscription, ends within 15 s (names resolved within 5 s on their own
+  thread; the stop flag checked between subscriptions and addresses), and
+  `stop()` waits for it. A push that reached no phone is tried again after
+  1, 5, then every 15 minutes, still coalesced and silent in quiet hours.
+  The payload is padded to 48 bytes. A start in quiet hours or within 30
+  minutes of their end still sends the morning push. The VAPID `sub` stays
+  the app's https origin, which Apple accepted in P-0 (a `@localhost`
+  mailto is reported refused by Apple). The phone drops a subscription made
+  for another key and asks for notifications again.
+- **The service worker** is a third Vite entry (`hud/src/mobile/sw.ts`),
+  served at `/m/sw.js` from the build manifest's entry; no fetch handler,
+  no cache. The CSP is unwidened (a worker falls under `script-src 'self'`).
+- **Only `main()` attaches the sender** (`Push.attach_system`); a test or
+  embedded daemon never sends, and the first read after start sends
+  nothing for what already waits.
+- **Dependency:** `pywebpush>=2.5.0,<3` (built and tested on 2.5.0;
+  `py-vapid` 1.9.6, `http-ece` 1.2.1), imported only when used.
+
+### 10.6 P-5 as built (2026-10-28, phone C5)
 
 Built as the P-5 row says (`docs/notes/control-plane.md`, "Writing from the
 phone"). Where it is more specific than the text above:
@@ -728,7 +801,12 @@ Answered 2026-10-24: the phone is an iPhone (O-1); Discord stays as a backup
 3. **A Tailscale ACL anyway?** Optional now (O-4). It would limit port 443
    on this machine to the owner's own devices. **Not required.**
 4. **Session length:** **12 h idle, 7 days absolute.**
-5. **Quiet hours:** **23:00 to 07:00**, or none.
+5. **Quiet hours:** **23:00 to 07:00**, or none. **Answered 2026-10-28:**
+   23:00 to 07:00 local, on by default, one desk setting; nothing pushes
+   during them, rank 1 included (the "task started that day" exception is
+   dropped); when they end, one push with the count if anything at ranks 1
+   to 4 still waits. Approvals that "wait until I wake up" are a separate
+   package, not P-6.
 
 ### Critical files for implementation
 

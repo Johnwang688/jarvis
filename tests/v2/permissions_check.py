@@ -948,7 +948,13 @@ def record_tree_checks():
                 refused += 1
             ok("Jarvis's own records" in (denied_file(str(target)) or ""), f"the refusal says why: {name}")
             ok(denied_grant(str(target.parent)) is not None, f"a write grant on {name} is refused")
-            eq(denied_grant(str(target.parent), access="read"), None, f"a read grant on {name} is not")
+            if target.parent == data:
+                # The data root holds the phone's credential folder (review of
+                # PR #325, MED-1): a read grant on it would open the push key.
+                ok("holds credentials" in (denied_grant(str(target.parent), access="read") or ""),
+                   f"a read grant on the data root ({name}) reaches the phone's credential folder")
+            else:
+                eq(denied_grant(str(target.parent), access="read"), None, f"a read grant on {name} is not")
             eq(denied_read("Read", {"file_path": str(target)}), None, f"reading {name} is not refused")
             # Mutation: dropped from the set, nothing else refuses it.
             if name in v1_files.RECORD_TREES:

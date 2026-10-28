@@ -24,3 +24,7 @@ button.phone-danger { border-color: var(--red-line); color: var(--red); }
 .phone-ua { font: 12px var(--mono); color: var(--text-2); overflow-wrap: anywhere; min-width: 0; }
 .phone-session > button { margin-left: auto; padding: 1px 8px; }
 .phone-sessions-none { margin-left: 14px; }
+/* Notifications (P-6): the switch, quiet hours on one line, the list. */
+.phone-notify-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 6px 0; }
+.phone-notify-row input[type="time"] { font: 12px var(--mono); }
+.phone-notify > button { margin-top: 6px; }

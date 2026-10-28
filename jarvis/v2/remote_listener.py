@@ -24,6 +24,10 @@ nothing else (`ROUTES`, `ASSETS`, `ICONS`, `API_PREFIX`):
     the rest of the HUD's bundle;
   - `GET /m/icons/<orb icon>`: the orb icons the manifest names;
   - `GET /m/manifest.webmanifest`: the installed app's manifest, scope `/m/`;
+  - `GET /m/sw.js`: the app's service worker (P-6: it shows a push and
+    opens the Inbox on a tap), the one file Vite's build manifest lists for
+    the `src/mobile/sw.ts` entry, from the build `/m/` is served from
+    (`service_worker_file`); its default scope is `/m/`;
   - `/m/api/...`: `remote_auth.api_route` (P-2). Four routes need no
     session (`POST /m/api/pair/options`, `pair/verify`, `login/options`,
     `login/verify`); `POST /m/api/logout` and `GET /m/api/me` need one;
@@ -294,6 +298,37 @@ def _shell(handler):
     return handler._send(200, data, _MIME[".html"])
 
 
+# The service worker's entry in Vite's build manifest (hud/vite.config.ts).
+SW_ENTRY = "src/mobile/sw.ts"
+
+
+def service_worker_file(read) -> str | None:
+    """`assets/<name>.js` that the build manifest names for `SW_ENTRY`, or
+    None (no manifest, no entry, or a name that is not a plain file)."""
+    try:
+        raw = read(BUILD_MANIFEST)
+        if raw is None or len(raw) > _MANIFEST_CAP:
+            return None
+        manifest = json.loads(raw)
+    except Exception:     # noqa: BLE001
+        return None
+    entry = manifest.get(SW_ENTRY) if isinstance(manifest, dict) else None
+    name = entry.get("file") if isinstance(entry, dict) else None
+    if (not isinstance(name, str) or not name.startswith("assets/") or not name.endswith(".js")
+            or not _FILE.fullmatch(name[len("assets/"):])):
+        return None
+    return name
+
+
+def _service_worker(handler):
+    read = _served_reader()
+    name = service_worker_file(read) if read is not None else None
+    data = read(name) if name is not None else None
+    if data is None:
+        return handler._error(404, "not found")
+    return handler._send(200, data, _MIME[".js"])
+
+
 def _manifest(handler):
     data = json.dumps(MANIFEST, indent=1).encode()
     return handler._send(200, data, "application/manifest+json")
@@ -305,6 +340,7 @@ ROUTES = {
     "/m/": _shell,
     "/m/pair": _shell,
     "/m/manifest.webmanifest": _manifest,
+    "/m/sw.js": _service_worker,
 }
 
 

@@ -66,6 +66,12 @@ def phone_checks(browser, mock, base, check, until, guard, init_script):
         "window_s": 300,
     }
     posts: list[str] = []
+    bodies: list[dict] = []
+    # P-6: Settings > Phone > Notifications (`/phone/push`, `/quiet`).
+    push = {"enabled": True, "running": True, "max_subscriptions": 8,
+            "subscriptions": [{"id": "p-0123456789ab", "service": "web.push.apple.com",
+                               "created": time.time() - 600, "passkey": "k-aaaaaaaaaaaa", "ua": HOSTILE_UA}],
+            "quiet": {"enabled": True, "start": "23:00", "end": "07:00", "quiet_now": False, "ends_at": None}}
 
     def view():
         unsaved = state.get("unsaved", [])
@@ -85,9 +91,21 @@ def phone_checks(browser, mock, base, check, until, guard, init_script):
         path = request.url.split(base, 1)[1].split("?", 1)[0]
         if request.method == "GET" and path == "/phone":
             return route.fulfill(json=view())
+        if request.method == "GET" and path == "/phone/push":
+            return route.fulfill(json=push)
         if request.method != "POST":
             return route.fulfill(status=404, json={"error": "route not found"})
         posts.append(path)
+        body = json.loads(request.post_data or "{}")
+        bodies.append(body)
+        if path == "/phone/push/settings":
+            push["enabled"] = body["enabled"]
+            return route.fulfill(json=push)
+        if path == "/phone/push/test":
+            return route.fulfill(json={"sent": 1, "failed": 0, "removed": 0})
+        if path == "/quiet":
+            push["quiet"] = dict(push["quiet"], **body)
+            return route.fulfill(json=push["quiet"])
         if path == "/phone/pair":
             state["open"], state["expires_in"] = True, state["window_s"]
             return route.fulfill(json={"url": URL, "expires_in": state["window_s"]})
@@ -116,6 +134,7 @@ def phone_checks(browser, mock, base, check, until, guard, init_script):
     ctx.route(base + "/status", status)
     ctx.route(base + "/phone", phone)
     ctx.route(base + "/phone/**", phone)
+    ctx.route(base + "/quiet", phone)
     page = ctx.new_page()
     page.set_default_timeout(6000)
     errors: list[str] = []
@@ -141,6 +160,33 @@ def phone_checks(browser, mock, base, check, until, guard, init_script):
         check("P-2 Phone: no markup from the phone reaches the page",
               page.locator(settings + " img, " + settings + " b, " + settings + " script").count() == 0
               and page.evaluate("window.__pwned === undefined"))
+
+        # -- P-6: notifications, quiet hours and the test ---------------------------
+        notify = '[data-testid="phone-notify"]'
+        until(lambda: page.locator('[data-testid="phone-notify-sub"]').count() == 1, timeout=4)
+        check("P-6 Phone: Notifications shows the switch on, quiet hours 23:00 to 07:00 and the phone",
+              page.locator('[data-testid="phone-notify-enabled"]').is_checked()
+              and page.locator('[data-testid="phone-quiet-start"]').input_value() == "23:00"
+              and page.locator('[data-testid="phone-quiet-end"]').input_value() == "07:00"
+              and "web.push.apple.com" in page.locator('[data-testid="phone-notify-sub"]').inner_text())
+        check("P-6 Phone: a subscription's user agent is text",
+              HOSTILE_UA in page.locator('[data-testid="phone-notify-sub"]').inner_text()
+              and page.locator(notify + " img, " + notify + " b").count() == 0)
+        page.locator('[data-testid="phone-notify-test"]').click()
+        until(lambda: page.locator('[data-testid="phone-notify-notice"]').count() == 1, timeout=4)
+        check("P-6 Phone: Send test notification reaches the daemon and says where it went",
+              posts[-1] == "/phone/push/test"
+              and page.locator('[data-testid="phone-notify-notice"]').inner_text() == "Sent to 1 phone.")
+        page.locator('[data-testid="phone-quiet-start"]').fill("22:30")
+        page.locator('[data-testid="phone-quiet-save"]').click()
+        until(lambda: posts[-1] == "/quiet", timeout=4)
+        check("P-6 Phone: quiet hours are saved at the desk", bodies[-1] == {"start": "22:30", "end": "07:00"}
+              and push["quiet"]["start"] == "22:30")
+        page.locator('[data-testid="phone-notify-enabled"]').click()
+        until(lambda: not page.locator('[data-testid="phone-notify-enabled"]').is_checked(), timeout=4)
+        check("P-6 Phone: the switch turns notifications off, and the test is then off",
+              posts[-1] == "/phone/push/settings" and bodies[-1] == {"enabled": False}
+              and page.locator('[data-testid="phone-notify-test"]').is_disabled())
 
         # -- pairing: QR, URL, countdown, cancel ------------------------------------
         pair = page.locator('[data-testid="phone-pair"]')
@@ -482,7 +528,11 @@ def shell_checks(browser, check, until):
             streamed.append(data)
         return {"status": status, "headers": headers, "body": data}
 
-    ctx = browser.new_context(viewport={"width": 390, "height": 844}, ignore_https_errors=True)
+    # Service workers blocked (P-6 registers one at /m/sw.js): Playwright's
+    # routes, which stand in for `tailscale serve` here, do not see the
+    # requests of a page a service worker controls.
+    ctx = browser.new_context(viewport={"width": 390, "height": 844}, ignore_https_errors=True,
+                              service_workers="block")
     ctx.route(re.compile(r".*"), lambda route: route.abort())
     ctx.route(re.compile(r"^https://" + re.escape(SHELL_HOST) + r"/"), forward)
     ctx.add_init_script("window.__csp = []; document.addEventListener('securitypolicyviolation', "
@@ -617,6 +667,20 @@ def app_checks(page, daemon, world, check, until, streamed, net, main):
           not bad and fields == 0, f"{bad} {fields}")
     check("P-3 Inbox: the tab counts what waits", "Inbox · " in page.locator('[data-testid="m-tab-inbox"]').inner_text())
     check("P-3 app: every tap target is at least 44 px tall (Inbox)", not small_targets(), str(small_targets()))
+    # P-6: under the Inbox, how to get notifications (desktop Chromium: no
+    # Home Screen rule; the push itself needs a real push service).
+    note = page.locator('[data-testid="m-notify"]')
+    check("P-6 Inbox: the notifications row says a push tells how many, never what",
+          note.count() == 1 and "never what" in note.inner_text()
+          and note.get_attribute("data-state") in ("off", "error"), note.inner_text() if note.count() else "")
+    check("P-6 Inbox: 'Turn on notifications' is offered", page.locator('[data-testid="m-notify-button"]')
+          .inner_text() == "Turn on notifications")
+    sw = page.evaluate("""fetch('/m/sw.js', {cache: 'no-store'}).then(async r => [r.status,
+        r.headers.get('content-type'), await r.text()])""")
+    check("P-6 the built service worker is served at /m/sw.js, a plain script that shows the count",
+          sw[0] == 200 and sw[1].startswith("text/javascript") and "showNotification" in sw[2]
+          and "an approval expires soon" in sw[2] and not re.search(r"\b(import|export)\b", sw[2]),
+          f"{sw[0]} {sw[1]}")
 
     # -- Chats ---------------------------------------------------------------------------
     page.locator('[data-testid="m-tab-chats"]').click()

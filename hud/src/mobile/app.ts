@@ -49,6 +49,7 @@ import {
   type ChatThread, type DiffView, type LogRow, type Project, type StreamEvent, type TaskView,
 } from "./model";
 import { chatsView, el, inboxView, logRow, taskView, tasksView, transcriptView, tap, type InboxAnswers } from "./views";
+import { browserEnv, browserSend, Notifications, type PushEnv, type Send } from "./notify";
 import {
   chatSheetView, clientIdFor, composerView, MAYBE_DONE, MAYBE_SENT, MESSAGE_CHARS, parseModels, refusal, sentNote,
   taskControlsView, taskSheetView, verbsFor,
@@ -81,6 +82,9 @@ export interface AppDeps {
   openStream?: (url: string) => StreamLike;
   now?: () => number;
   setTimer?: (fn: () => void, ms: number) => unknown;
+  /** P-6's notifications: the browser's push and the push routes (fakes in the tests). */
+  pushEnv?: PushEnv;
+  pushSend?: Send;
   /** P-7's microphone and clip upload (fakes in the tests). */
   talkEnv?: TalkEnv;
 }
@@ -126,6 +130,8 @@ export class PhoneApp {
   private deferred = false;
   /** One line shown once above the inbox after an answer ("Denied.", where a decision's answer went). */
   private flash = "";
+  /** P-6: "Turn on notifications", under the Inbox (./notify.ts). */
+  readonly notify: Notifications;
   /** P-5: the open sheet (New chat, New task), what it offers, and each chat's and task's write state. */
   sheet: Sheet | null = null;
   models: ProviderChoice[] | null = null;
@@ -189,6 +195,9 @@ export class PhoneApp {
     this.tabs = { inbox: make("inbox", "Inbox"), chats: make("chats", "Chats"), tasks: make("tasks", "Tasks") };
     frame.append(top, this.banner, this.main, nav);
     this.frame = frame;
+    this.notify = new Notifications(deps.pushEnv ?? browserEnv, deps.pushSend ?? browserSend,
+      () => { if (this.tab === "inbox" && !this.card && !this.stopped) this.renderInbox(); },
+      () => { if (!this.stopped) { this.card = null; this.show("inbox"); } });
     this.talk = new Talk(deps.talkEnv ?? browserTalkEnv, {
       insert: (threadId, text) => this.dictated(threadId, text),
       // No recording while this chat's send waits for its answer (its 202 would clear the box).
@@ -203,9 +212,12 @@ export class PhoneApp {
   start(): void {
     this.deps.root.className = "app-root";
     this.deps.root.replaceChildren(this.frame);
+    // A notification's tap opens /m/#inbox: the Inbox is the first tab anyway.
+    if (typeof location !== "undefined" && location.hash === "#inbox") history.replaceState(null, "", "/m/");
     this.render();
     void this.loadInbox();
     void this.loadMe();
+    void this.notify.sync();
     this.connect();
   }
 
@@ -1042,6 +1054,7 @@ export class PhoneApp {
         if (row.thread_id) void this.openThread(row.thread_id);
         else if (row.task_id) void this.openTask(row.task_id);
       }, answers, this.secure);
+      view.append(this.notify.view());
       if (this.flash) {
         const line = el("p", "m-notice", this.flash);
         line.dataset.testid = "m-flash";

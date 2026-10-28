@@ -233,7 +233,7 @@ def _names_credential(arg: str) -> bool:
 
 _NAME_EDGE = r"A-Za-z0-9_.\-"
 _RAW_PROTECTED = re.compile(
-    rf"(?<![{_NAME_EDGE}])(?:" + "|".join(sorted(map(re.escape, v1_secrets.PROTECTED_NAMES)))
+    rf"(?<![{_NAME_EDGE}])(?:" + "|".join(sorted(map(re.escape, v1_secrets.PROTECTED_NAMES | v1_secrets.EXACT_NAMES)))
     + rf")(?![{_NAME_EDGE}])"
     r"|(?<![\w.\-])(?:id_(?:rsa|dsa|ecdsa|ed25519)(?:_sk)?|\.netrc|_netrc|\.git-credentials|\.pgpass"
     r"|\.npmrc|\.pypirc|\.my\.cnf|\.credentials\.json)(?![\w.\-])"

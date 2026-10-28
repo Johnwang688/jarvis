@@ -165,6 +165,15 @@ SELF_PROTECTED = frozenset(
         # phone with the HUD's authority.
         "jarvis/v2/remote_answer.py",
         "jarvis/v2/remote_secure.py",
+        # Quiet hours (phone design §7, the owner's answer of 2026-10-28):
+        # when nothing is pushed to the owner's phone, and (next) when an
+        # approval waits for the morning. An agent that could edit it could
+        # keep the owner from hearing about a card.
+        "jarvis/v2/quiet.py",
+        # The phone's Web Push (P-6): what leaves this machine for the
+        # phone and where to. An agent that could edit it could send a
+        # card's text in a push, or push to an address of its choosing.
+        "jarvis/v2/push.py",
         # Writing from the phone (phone design P-5): messages, new chats and
         # task verbs, and which verb takes the passkey. An agent that could
         # edit it could give a phone message the desk's authority or cancel
@@ -289,6 +298,15 @@ def _protected_state_paths() -> set[Path]:
     # own. Their folder is an ancestor, so deleting it is covered too.
     remote = Path(config.V2_DATA_DIR).expanduser() / "remote"
     paths |= {remote / "passkeys.json", remote / "sessions.json"}
+    # The phone's Web Push (P-6, `v2/push.py`): the VAPID key, the
+    # subscriptions (both also credential bundles by name, unreadable) and
+    # the notifications switch. An agent that could write them could send
+    # pushes as Jarvis, add a subscription of its own or turn them off.
+    paths |= {remote / "jarvis_push_key.json", remote / "jarvis_push_subscriptions.json", remote / "push_settings.json"}
+    # The owner's quiet hours (`v2/quiet.py`, the owner's answer of
+    # 2026-10-28): while they hold nothing is pushed to the phone. An agent
+    # that could rewrite the file could silence the owner's notifications.
+    paths.add(Path(config.V2_DATA_DIR).expanduser() / "quiet.json")
     # The owner inbox's "denied while you were away" records (inbox IN-3,
     # 2026-10-25), under the v2 data root: what the owner is told was refused
     # while nobody watched. An agent that could forge or clear them could
@@ -613,7 +631,12 @@ def credential_folder_judge():
     prefixes, not `Path.parents`: a search judges every file it reads
     (review of PR #69: 20k paths took 3.4 s against 0.31 s before)."""
     roots = tuple(str(r) if str(r).endswith(os.sep) else str(r) + os.sep for r in _credential_roots())
-    own = frozenset(os.path.abspath(str(p)) for p in _protected_state_paths())
+    # Not the phone's folder (`config.remote_dir()`, review of PR #325 MED-1):
+    # its state files hold a VAPID private key, push secrets and session
+    # hashes, so none of them is readable config.
+    remote = os.path.abspath(os.path.expanduser(str(config.remote_dir()))) + os.sep
+    own = frozenset(a for a in (os.path.abspath(str(p)) for p in _protected_state_paths())
+                    if not a.startswith(remote))
     real_dirs: dict[str, str] = {}
 
     def inside(p: str) -> bool:

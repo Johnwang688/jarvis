@@ -361,3 +361,9 @@ p, li, h2, h3 { overflow-wrap: anywhere; }
 .m-choices { display: flex; flex-direction: column; }
 .m-choice { display: flex; align-items: center; gap: 8px; min-height: 44px; overflow-wrap: anywhere; }
 .m-choice input { width: 22px; height: 22px; flex: none; }
+
+/* P-6: "Turn on notifications", under the Inbox. */
+.notify { margin: 24px 0 8px; padding: 12px; border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--bg-1); }
+.notify-line { margin: 0 0 8px; color: var(--text-2); }
+.notify[data-state="blocked"] .notify-line, .notify[data-state="error"] .notify-line { color: var(--amber); }

@@ -218,7 +218,11 @@ def run(browser, check, until):
         return ask(tool="hud_browser_act", args=args, command=json.dumps(args), layer="browser-gate",
                    hud_only=True, browser=b, max_wait_s=120)
 
-    ctx = browser.new_context(viewport={"width": 390, "height": 844}, ignore_https_errors=True)
+    # Service workers blocked (P-6 registers one at /m/sw.js): Playwright's
+    # routes, which stand in for `tailscale serve` here, do not see the
+    # requests of a page a service worker controls.
+    ctx = browser.new_context(viewport={"width": 390, "height": 844}, ignore_https_errors=True,
+                              service_workers="block")
     ctx.route(re.compile(r".*"), lambda route: route.abort())
     ctx.route(re.compile(r"^https://" + re.escape(SHELL_HOST) + r"/"), forward)
     page = ctx.new_page()

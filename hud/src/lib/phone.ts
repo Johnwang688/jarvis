@@ -60,9 +60,9 @@ export class PhoneError extends Error {
   }
 }
 
-async function call<T>(path: string, method: "GET" | "POST" = "GET"): Promise<T> {
+async function call<T>(path: string, method: "GET" | "POST" = "GET", value: object = {}): Promise<T> {
   const init: RequestInit = method === "POST"
-    ? { method, headers: { "Content-Type": "application/json" }, body: "{}" }
+    ? { method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(value) }
     : { method };
   const res = await fetch(path, init);
   let body: any = null;
@@ -74,7 +74,40 @@ async function call<T>(path: string, method: "GET" | "POST" = "GET"): Promise<T>
   return body as T;
 }
 
+/** Quiet hours (jarvis/v2/quiet.py, `/quiet`): local times, HH:MM. */
+export interface QuietView {
+  enabled: boolean;
+  start: string;
+  end: string;
+  quiet_now: boolean;
+  ends_at: string | null;
+}
+
+/** Notifications (P-6, jarvis/v2/push.py, `/phone/push`): never an endpoint
+ * or a key, only the push service's host for each subscription. */
+export interface PushView {
+  enabled: boolean;
+  /** False on a daemon whose sender was never attached (a test or embedded one). */
+  running: boolean;
+  subscriptions: { id: string; service: string; created: number; passkey: string; ua: string }[];
+  max_subscriptions: number;
+  quiet: QuietView | null;
+}
+
+export interface PushSent { sent: number; failed: number; removed: number }
+
+/** "HH:MM", 00:00 to 23:59: what the daemon accepts for quiet hours. */
+export function validTime(value: string): boolean {
+  return /^([01][0-9]|2[0-3]):[0-5][0-9]$/.test(value);
+}
+
 export const phoneApi = {
+  push: () => call<PushView>("/phone/push"),
+  pushEnabled: (enabled: boolean) => call<PushView>("/phone/push/settings", "POST", { enabled }),
+  pushTest: () => call<PushSent>("/phone/push/test", "POST"),
+  quiet: () => call<QuietView>("/quiet"),
+  setQuiet: (changes: Partial<Pick<QuietView, "enabled" | "start" | "end">>) =>
+    call<QuietView>("/quiet", "POST", changes),
   view: () => call<PhoneView>("/phone"),
   remote: async (): Promise<PhoneRemote | null> => {
     const status = await call<{ remote?: PhoneRemote }>("/status");

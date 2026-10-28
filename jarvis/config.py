@@ -706,11 +706,25 @@ BROWSER_TAB_CAP = int(os.environ.get("JARVIS_BROWSER_TAB_CAP", "12"))
 
 
 def credential_dirs() -> tuple[str, ...]:
-    """`V2_CREDENTIAL_DIRS` plus the Browser's folder (BR-1a), read at call
-    time: the folder can be moved by `JARVIS_BROWSER_DIR`, and a test that
-    repoints `BROWSER_DIR` must protect its own. What every credential-folder
-    check asks (v2 permissions, `folders`, `editor_policy`)."""
-    return (*V2_CREDENTIAL_DIRS, str(BROWSER_DIR))
+    """`V2_CREDENTIAL_DIRS` plus the Browser's folder (BR-1a) and the phone's
+    folder under the v2 data root (`remote_dir()`), read at call time: either
+    can be moved (`JARVIS_BROWSER_DIR`, `JARVIS_V2_DATA`), and a test that
+    repoints one must protect its own. What every credential-folder check
+    asks (v2 permissions, v1's file and shell tools, `folders`,
+    `editor_policy`, Codex's denied paths)."""
+    return (*V2_CREDENTIAL_DIRS, str(BROWSER_DIR), str(remote_dir()))
+
+
+def remote_dir() -> Path:
+    """`<v2 data root>/remote`: the phone's passkeys and sessions (P-2,
+    `v2/remote_auth.py`), the Web Push VAPID private key and the push
+    subscriptions, whose endpoints are capabilities and whose keys decrypt
+    what is sent (P-6, `v2/push.py`). A credential folder (review of PR #325,
+    MED-1): v1's file tools and `run_readonly` refuse it, v2's shell asks and
+    v2's read tools refuse it; the two push files are also refused by name
+    (`secrets.EXACT_NAMES`) and scrubbed. See `push.py` for what is not
+    covered."""
+    return Path(V2_DATA_DIR).expanduser() / "remote"
 
 # Where context.py writes a tool result whole before truncating it in the
 # transcript, so the cut leaves a read_file-able pointer instead of a hole.
