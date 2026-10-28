@@ -611,7 +611,12 @@ phone"). Where it is more specific than the text above:
   assertion is never a cancel's, nor the reverse. §4.1 is not required: a
   cancel grants no authority. Start and resume need the session only.
 - **A proposal's withdraw** moved to the phone (`remote_answer`), the
-  session only: Deny's footing, inside the grace window.
+  session only: Deny's footing, inside the grace window. It calls only the
+  router's withdraw; a window that closed meanwhile is 409, never a cancel.
+- **Review of PR #324:** a `client_id` per draft makes a retry after a lost
+  answer safe (5 minutes); a chat started from the phone is titled; provider
+  and OS failures are 409 without their text; cancel and approval prompts
+  are capped apart.
 - **Every task verb from the phone is journaled** (`owner_verb`, `via:
   "phone"`).
 - **Never on the phone:** permanent delete, archive, merge, rename, steer a
