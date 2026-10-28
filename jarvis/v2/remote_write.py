@@ -289,8 +289,10 @@ def send(daemon, thread_id: str, body) -> dict:
     return out
 
 
-def new_chat(daemon, body) -> dict:
-    """`POST threads`: a chat in a project on a provider, and its first message."""
+def new_chat(daemon, body, live=lambda: True) -> dict:
+    """`POST threads`: a chat in a project on a provider, and its first
+    message. Opening a provider can take seconds: the session must still
+    hold (`live`) before the first message is sent."""
     from .remote_api import thread as thread_view
     body = _fields(body, ("project_id", "provider", "model", "effort", "text"),
                    ("project_id", "provider", "text"))
@@ -313,6 +315,8 @@ def new_chat(daemon, body) -> dict:
     thread = _call(lambda: daemon.open_thread(project.id, "chat", provider, brief))
     LOG.info("phone: new %s chat %s", provider, thread.id)
     shown = thread_view(daemon.thread_json(thread))
+    if not live():
+        raise _Refused(401, "unauthorized", {"thread": shown})
     try:
         sent = _delivered(daemon, thread.id, phone_message(project, text))
     except _Refused as exc:
@@ -454,7 +458,7 @@ def route(handler, path: str, session: dict, body: bytes):
         if name == "send":
             return 202, send(daemon, object_id, value), []
         if name == "new_chat":
-            return 201, new_chat(daemon, value), []
+            return 201, new_chat(daemon, value, lambda: auth.session_live(session.get("token_sha256"))), []
         if name == "new_task":
             return 201, new_task(daemon, value), []
         if name in ("start", "resume"):

@@ -376,7 +376,19 @@ class NewChat(Base):
         self.assertEqual(status, 409, body)
         status, _, body = self.phone("GET", "/m/api/thread-models", cookie=self.cookie)
         self.assertFalse(body["providers"]["codex"]["available"])
-        print("ok  the new-chat sheet (labels, defaults, models) and its refusals (400, 404, 409)")
+        # A session that ends while the provider opens sends no first message.
+        self.d.providers[PN.CODEX] = ic.Brain(PN.CODEX)
+        real = self.d.open_thread
+
+        def revoking(*args, **kw):
+            thread = real(*args, **kw)
+            self.auth.end_session(next(iter(self.auth._sessions.values()))["id"])
+            return thread
+        with patch.object(self.d, "open_thread", revoking):
+            status, body = self.post("threads", {**good, "provider": "codex"})
+        self.assertEqual(status, 401, body)
+        self.assertEqual([self.users(t.id) for t in self.d.stores.threads.list()], [[]])
+        print("ok  the new-chat sheet (labels, defaults, models) and its refusals (400, 404, 409, 401 mid-open)")
 
 
 # -- tasks --------------------------------------------------------------------------------
