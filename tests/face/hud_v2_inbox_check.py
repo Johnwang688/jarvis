@@ -598,10 +598,14 @@ def _pr_checks(page, mock, check, until):
           you == ["task:k1", f"pr:{PR_REPO}#7", f"pr:{PR_REPO}#8"], str(you))
     check("they are counted (ranks 1 to 5)", _count(page) == "3", str(_count(page)))
     r7, r8 = _row(page, f"pr:{PR_REPO}#7"), _row(page, f"pr:{PR_REPO}#8")
-    controls = r7.evaluate("e => [...e.querySelectorAll('button, input, textarea, a')].map(b => b.dataset.testid)")
+    # Inbox B4: a PR row (rank 5) may also be snoozed or dismissed, in its own `inbox-marks` strip.
+    controls = r7.evaluate("e => [...e.querySelectorAll('button, input, textarea, a')]"
+                           ".filter(b => !b.closest('[data-testid=\"inbox-marks\"]')).map(b => b.dataset.testid)")
+    marks = r7.evaluate("e => [...e.querySelectorAll('[data-testid=\"inbox-marks\"] button')].map(b => b.dataset.testid)")
     link = r7.locator('[data-testid="inbox-pr-link"]')
     check("its one control is 'Open on GitHub', a new-tab link to its own PR [mutation: a link to any URL]",
           controls == ["inbox-pr-link"] and link.get_attribute("href") == f"https://github.com/{PR_REPO}/pull/7"
+          and marks == ["inbox-snooze-hour", "inbox-snooze-tomorrow", "inbox-snooze-week", "inbox-dismiss"]
           and link.get_attribute("target") == "_blank" and link.get_attribute("rel") == "noopener noreferrer",
           str(controls))
     check("a URL for another repository is not linked",
@@ -653,6 +657,8 @@ def _pr_checks(page, mock, check, until):
           _count(page) == "1" and page.locator('[data-testid="inbox-empty"]').count() == 0
           and page.locator('[data-testid="inbox-pr-unavailable"]').inner_text() == f"{PR_REPO}: gh is not logged in",
           str(_count(page)))
+    check("'PR list unavailable' offers no Snooze or Dismiss (inbox B4) [mutation: prx markable]",
+          _row(page, "prx:list").locator('[data-testid="inbox-marks"]').count() == 0)
     check("the title is unchanged", page.title() == TITLE, page.title())
 
 
@@ -1190,7 +1196,7 @@ def _marked(mock):
     return list(_st(mock).get("marked", []))
 
 
-def pr_row(n=301, head="a" * 40):
+def mark_pr_row(n=301, head="a" * 40):
     """Inbox B3's rank-5 PR row (#320), as its projection serves it."""
     return {"id": f"pr:Johnwang688/jarvis#{n}", "kind": "pr", "rank": 5, "title": f"PR #{n} is ready to merge",
             "blocks": "waits on your merge", "project_id": "p1", "thread_id": None, "task_id": None,
@@ -1198,7 +1204,7 @@ def pr_row(n=301, head="a" * 40):
             "detail": {"repo": "Johnwang688/jarvis", "number": n, "title": "x", "head": head, "checks": "success"}}
 
 
-def prx_row():
+def mark_prx_row():
     """Inbox B3's "PR list unavailable" (#320): never snoozed or dismissed."""
     return {"id": "prx:list", "kind": "pr_unavailable", "rank": 5, "title": "PR list unavailable",
             "blocks": "Jarvis could not read the open PRs", "project_id": None, "thread_id": None,
@@ -1213,7 +1219,7 @@ def _marks_checks(page, mock, check, until):
     """Inbox B4 (IN-7, IN-8): Snooze and Dismiss on ranks 5 to 8, Show hidden, Undo."""
     _st(mock)["mark_posts"], _st(mock)["marks"] = [], {}
     reads_all = _st(mock).get("all_reads", 0)
-    _open(page, mock, until, basic_rows() + [pr_row(), prx_row(), dec_row(), missed_row()])
+    _open(page, mock, until, basic_rows() + [mark_pr_row(), mark_prx_row(), dec_row(), missed_row()])
     check("the HUD reads /inbox?all=1", _st(mock).get("all_reads", 0) > reads_all)
     with_marks = page.evaluate("() => [...document.querySelectorAll('[data-testid=\"inbox-row\"]')]"
                                ".filter(r => r.querySelector('[data-testid=\"inbox-marks\"]')).map(r => r.dataset.id)")
