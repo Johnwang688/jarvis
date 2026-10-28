@@ -74,9 +74,11 @@ challenge bound to one approval, one answer ("allow" or "always"), the
 session and its passkey (PH-4's sha256 of req_id, answer and a nonce;
 single use, 60 s, at most 4 per session), and `answer_verify` checks it as
 `login_verify` checks a sign-in, plus that binding and that the credential
-is the session's own passkey. Past the session, `api_route` hands P-4's
-answer paths to `remote_answer`, and every other path but logout and `me`
-to `remote_api` (P-3's reads and event stream); `session_live` is the
+is the session's own passkey. Past the session, `api_route` hands P-6's
+push paths to `push`, P-4's answer paths to `remote_answer`, and every
+other path but logout and `me` to `remote_api` (P-3's reads and event
+stream); a logout, the desk's End and a revoke tell `on_end` (P-6 deletes
+that session's or passkey's push subscriptions); `session_live` is the
 stream's check, which does not touch last-seen. `recently_active` is
 PH-10's "a phone session in the last 24 h"; `passkey_ready` is §4.1's
 condition 4 without the assertion.

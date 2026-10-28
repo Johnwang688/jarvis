@@ -78,3 +78,6 @@ scope.addEventListener("notificationclick", ((event: NotificationEventLike) => {
     await scope.clients.openWindow(INBOX_URL);
   })());
 }) as (event: never) => void);
+
+// A module for TypeScript (the tests import it); the build emits no export.
+export {};

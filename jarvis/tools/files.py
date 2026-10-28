@@ -291,7 +291,7 @@ def _protected_state_paths() -> set[Path]:
     # subscriptions (both also credential bundles by name, unreadable) and
     # the notifications switch. An agent that could write them could send
     # pushes as Jarvis, add a subscription of its own or turn them off.
-    paths |= {remote / "vapid_key.pem", remote / "push_subscriptions.json", remote / "push_settings.json"}
+    paths |= {remote / "jarvis_push_key.json", remote / "jarvis_push_subscriptions.json", remote / "push_settings.json"}
     # The owner's quiet hours (`v2/quiet.py`, the owner's answer of
     # 2026-10-28): while they hold nothing is pushed to the phone. An agent
     # that could rewrite the file could silence the owner's notifications.

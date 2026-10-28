@@ -55,11 +55,14 @@ starts; the routes answer 503.
 
 **Files** (`<data root>/remote/`, 0700; each 0600, read `O_NOFOLLOW |
 O_NONBLOCK` relative to the folder's descriptor, written as a fresh `O_EXCL`
-temp file, fsynced, replaced, folder fsynced): `vapid_key.pem` (the VAPID
-private key, made once on first use), `push_subscriptions.json` (endpoints
+temp file, fsynced, replaced, folder fsynced): `jarvis_push_key.json` (the VAPID
+private key as PKCS#8 PEM inside `{"version": 1, "pem"}`, made once on first
+use), `jarvis_push_subscriptions.json` (endpoints
 and their keys) and `push_settings.json` (the switch). The first two are
 credential bundles by name (`tools/secrets.PROTECTED_NAMES`): no agent tool
-or command reads them, v1 or v2. All three are protected state
+or command reads them, v1 or v2. (Named `jarvis_push_*.json`, not
+`vapid_key.pem`: a bundle's name is matched by globs too, and `v*` (git's
+version tags) or `*.pem` would have been refused everywhere.) All three are protected state
 (`tools/files._protected_state_paths`): none writes them. The private key
 is never logged, returned or shown; only its public half is
 (`GET /m/api/push`, the `applicationServerKey`).
@@ -101,8 +104,8 @@ from urllib.parse import urlsplit
 LOG = logging.getLogger(__name__)
 
 FOLDER = "remote"
-SUBSCRIPTIONS = "push_subscriptions.json"
-VAPID_KEY = "vapid_key.pem"
+SUBSCRIPTIONS = "jarvis_push_subscriptions.json"
+VAPID_KEY = "jarvis_push_key.json"
 SETTINGS = "push_settings.json"
 MAX_SUBSCRIPTIONS = 8
 ENDPOINT_MAX = 1024
@@ -544,14 +547,17 @@ class Push:
                 pem = key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
                                         serialization.NoEncryption())
                 try:
-                    self.folder.write(VAPID_KEY, pem)
+                    self.folder.write(VAPID_KEY, json.dumps({"version": 1, "pem": pem.decode("ascii")}).encode())
                 except OSError:
                     raise PushError(503, "the notification key cannot be saved") from None
                 LOG.info("phone push: a notification key was made")
             else:
                 try:
-                    key = serialization.load_pem_private_key(raw, password=None)
-                except (ValueError, TypeError):
+                    stored = json.loads(raw)
+                    if not isinstance(stored, dict) or stored.get("version") != 1 or not isinstance(stored.get("pem"), str):
+                        raise ValueError("not one of ours")
+                    key = serialization.load_pem_private_key(stored["pem"].encode("ascii"), password=None)
+                except (ValueError, TypeError, UnicodeError):
                     raise PushError(503, "the notification key cannot be read") from None
                 if not isinstance(key, ec.EllipticCurvePrivateKey) or not isinstance(key.curve, ec.SECP256R1):
                     raise PushError(503, "the notification key cannot be read")

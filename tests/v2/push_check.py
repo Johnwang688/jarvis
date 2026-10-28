@@ -442,10 +442,10 @@ class Routes(PushBase):
         rows = self.push.subscriptions()
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["endpoint"], self.receiver.endpoint)
-        path = self.file("push_subscriptions.json")
+        path = self.file("jarvis_push_subscriptions.json")
         self.assertEqual(stat.S_IMODE(os.lstat(path).st_mode), 0o600)
         self.assertEqual(stat.S_IMODE(os.lstat(path.parent).st_mode), 0o700)
-        self.assertEqual(stat.S_IMODE(os.lstat(self.file("vapid_key.pem")).st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE(os.lstat(self.file("jarvis_push_key.json")).st_mode), 0o600)
         # The same key every time (made once).
         self.assertEqual(self.phone("GET", "/m/api/push", cookie=self.cookie)[2]["key"], body["key"])
         # The same session again: replaced, not added.
@@ -661,13 +661,13 @@ class Boundary(PushBase):
         from jarvis.tools import files, secrets as v1_secrets
         from jarvis.v2 import permissions as v2
         self.subscribed()
-        for name in ("vapid_key.pem", "push_subscriptions.json"):
+        for name in ("jarvis_push_key.json", "jarvis_push_subscriptions.json"):
             target = self.file(name)
             self.assertTrue(target.exists(), name)
             # Reads: v2 layer 1 (Claude's Read, a shell line) and v1.
             self.assertTrue(v2.denied_read("Read", {"file_path": str(target)}), name)
             for command in (f"cat {target}", f"head -c 100 {target}", f"cp {target} /tmp/x",
-                            f"python3 -c \"print(open('{target}').read())\"", f"cat {target.parent}/vapid_key.*",
+                            f"python3 -c \"print(open('{target}').read())\"", f"cat {target.parent}/jarvis_push_*",
                             f"base64 {target}"):
                 self.assertTrue(v2.denied_command(command), command)
                 self.assertTrue(v1_secrets.protected_in_command(command), command)
@@ -676,7 +676,7 @@ class Boundary(PushBase):
             self.assertIn("protected", out.text)
             self.assertNotIn("PRIVATE KEY", out.text)
             self.assertNotIn(self.receiver.endpoint, out.text)
-        for name in ("vapid_key.pem", "push_subscriptions.json", "push_settings.json"):
+        for name in ("jarvis_push_key.json", "jarvis_push_subscriptions.json", "push_settings.json"):
             target = self.file(name)
             self.assertIn(target.resolve(), files._protected_state(), name)
             self.assertIn(target.resolve(), v2.protected_paths(), name)
@@ -693,7 +693,7 @@ class Boundary(PushBase):
     def test_key_never_in_logs_status_or_answers(self):
         with self.assertLogs("jarvis.v2.push", level="INFO") as logs:
             self.subscribed()
-        pem = self.file("vapid_key.pem").read_bytes().decode()
+        pem = json.loads(self.file("jarvis_push_key.json").read_text())["pem"]
         body = pem.split("-----")[2].replace("\n", "")
         status_text = raw(self.d.port, "GET", "/status", [("Host", f"127.0.0.1:{self.d.port}")])[2].decode()
         phone_text = json.dumps(self.phone("GET", "/m/api/push", cookie=self.cookie)[2])
@@ -711,6 +711,11 @@ class Boundary(PushBase):
                             "imported only when used")
         self.assertEqual((push_mod.COALESCE_S, push_mod.MAX_SUBSCRIPTIONS), (60.0, 8))
         self.assertEqual(push_mod.ATTENTION_RANKS, frozenset({1, 2, 3, 4}))
+        # The credential names are judged as globs too: common ones stay usable.
+        from jarvis.tools import secrets as v1_secrets
+        for command in ("git tag -l 'v*'", "ls *.pem", "ls p*", "ls *.key"):
+            self.assertIsNone(v1_secrets.protected_in_command(command), command)
+        self.assertTrue(v1_secrets.protected_in_command("cat jarvis_push_*"))
         print("ok  push.py is SELF_PROTECTED; pywebpush imported only when used; 60 s and 8 pinned")
 
 
