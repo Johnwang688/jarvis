@@ -1040,5 +1040,206 @@ print(worst)
         self.assertEqual(before, after)
 
 
+# -- review of #330, LOW 5: the same family, tighten only --------------------
+
+FAMILY = [
+    ("htpasswd -b .htpasswd admin adminpass99", f"htpasswd -b .htpasswd admin {R}"),
+    ("htpasswd -nb admin adminpass99", f"htpasswd -nb admin {R}"),
+    ("htpasswd -bc .htpasswd admin adminpass99", f"htpasswd -bc .htpasswd admin {R}"),
+    ("htpasswd -cb .htpasswd admin adminpass99", f"htpasswd -cb .htpasswd admin {R}"),
+    ("htpasswd -b -c .htpasswd admin adminpass99", f"htpasswd -b -c .htpasswd admin {R}"),
+    ("htpasswd -B -b .htpasswd admin adminpass99", f"htpasswd -B -b .htpasswd admin {R}"),
+    ("htpasswd -nbB admin adminpass99", f"htpasswd -nbB admin {R}"),
+    ("smbclient //srv/share -U alice%plainpass9", f"smbclient //srv/share -U alice%{R}"),
+    ("smbclient -U alice%plainpass9 //srv/share", f"smbclient -U alice%{R} //srv/share"),
+    ("rpcclient --user=alice%plainpass9 srv", f"rpcclient --user=alice%{R} srv"),
+    ("net ads join -U admin%plainpass9", f"net ads join -U admin%{R}"),
+    ("lftp -u alice,plainpass9 ftp://h", f"lftp -u alice,{R} ftp://h"),
+    ("sqlcmd -S srv -U sa -P plainpass9", f"sqlcmd -S srv -U sa -P {R}"),
+    ("ldapsearch -x -D cn=admin -w plainpass9 -b dc=x", f"ldapsearch -x -D cn=admin -w {R} -b dc=x"),
+    ("openssl pkcs12 -passin pass:plainpass9 -in a.p12", f"openssl pkcs12 -passin pass:{R} -in a.p12"),
+    ("openssl enc -aes256 -pass pass:plainpass9 -in f", f"openssl enc -aes256 -pass pass:{R} -in f"),
+    ("zip -P plainpass9 out.zip f", f"zip -P {R} out.zip f"),
+    ("unzip -P plainpass9 out.zip", f"unzip -P {R} out.zip"),
+    ("7z a -pplainpass9 out.7z f", f"7z a -p{R} out.7z f"),
+    ("xfreerdp /u:alice /p:plainpass9 /v:host", f"xfreerdp /u:alice /p:{R} /v:host"),
+    ("ssh-keygen -N plainpass9 -f k", f"ssh-keygen -N {R} -f k"),
+    ("keytool -list -storepass plainpass9", f"keytool -list -storepass {R}"),
+    # Already covered before #330 (kept here so the family is pinned whole).
+    ("sshpass -p plainpass9 ssh admin@10.0.0.5 uptime", f"sshpass -p {R} ssh admin@10.0.0.5 uptime"),
+    ("mysql -uroot -pplainpass9 db", f"mysql -uroot -p{R} db"),
+    ("mysql -u root --password=plainpass9 db", f"mysql -u root --password={R} db"),
+    ("PGPASSWORD=plainpass9 psql -h db", f"PGPASSWORD={R} psql -h db"),
+    ("curl -u alice:plainpass9 https://x", f"curl -u alice:{R} https://x"),
+    ("some-tool --password plainpass9", f"some-tool --password {R}"),
+]
+
+FAMILY_UNTOUCHED = [
+    "htpasswd -c .htpasswd admin",              # no -b: htpasswd asks
+    "htpasswd -D .htpasswd admin",
+    "htpasswd -n admin",
+    "smbclient -L //srv -N",
+    "smbclient -U alice //srv/share",           # no %: it asks
+    "lftp -u alice ftp://h",
+    "openssl pkcs12 -passin env:P12_PASS -in a.p12",
+    "openssl pkcs12 -passin file:/run/p -in a.p12",
+    "openssl pkcs12 -passin stdin -in a.p12",
+    "7z a -p out.7z f",                         # a spaced -p asks
+    "ssh-keygen -N '' -f k",
+    "ssh-keygen -l -f k.pub",
+    "zip -r out.zip dir",
+    "ls -P plainpass9",                         # not the program
+]
+
+
+class Family(unittest.TestCase):
+    def setUp(self):
+        self.root = _env_isolated(self)
+
+    def test_each_is_withheld_on_the_card_the_log_and_v1_lines(self):
+        for command, shown in FAMILY:
+            with self.subTest(command=command):
+                self.assertEqual(secrets.redact_command(command), shown)
+                self.assertEqual(secrets.redact_inline(command), shown)
+                self.assertNotIn("plainpass9", secrets.for_display(command))
+                self.assertNotIn("adminpass99", secrets.for_display(command))
+                self.assertFalse(secrets.holds_back_credential(command), "nothing left once withheld")
+
+    def test_the_rest_is_byte_identical(self):
+        for command in FAMILY_UNTOUCHED:
+            with self.subTest(command=command):
+                self.assertEqual(secrets.redact_command(command), command)
+
+    def test_the_never_hidden_rule_stands_and_is_reported(self):
+        # A value holding an operator stays on the card (delta review of
+        # #205): tighten only. `holds_back_credential` reports it, so a path
+        # that sends the card off the machine sends nothing.
+        for command in ("sshpass -p 'Tr0ub4dor&3' ssh admin@10.0.0.5 uptime",
+                        "PGPASSWORD='Tr0ub&4dor3' psql", "curl -u 'alice:Tr0ub&4dor3' x",
+                        "smbclient -U 'alice%Tr0ub&4dor3' //s/x",
+                        # A separator inside the quotes splits the display's
+                        # segment; the check reads the quoting.
+                        "sshpass -p 'Tr0ub;4dor3' ssh a@h", "curl -u 'a:Tr0ub|4dor3' x",
+                        "htpasswd -b f admin 'adm|npass99'"):
+            with self.subTest(command=command):
+                self.assertEqual(secrets.redact_command(command), command)
+                self.assertTrue(secrets.holds_back_credential(command))
+                self.assertTrue(secrets.holds_back_credential({"command": command}))
+        # A credential-named value with a glob is kept on the card the same
+        # way, and held back from a model too (fail closed: no summary).
+        self.assertTrue(secrets.holds_back_credential("API_KEY=abcd* ls"))
+        plain = [c for c in UNTOUCHED if not any(m in c for m in ("two words", "a;b", "*", "{"))]
+        for command in plain + FAMILY_UNTOUCHED + ["make deploy", "rm -rf build && make deploy", "echo 'a & b'",
+                                                         "echo 'a|b' | grep a", "git log --format='%h|%s' | head"]:
+            with self.subTest(command=command):
+                self.assertFalse(secrets.holds_back_credential(command))
+        # The switch it uses never leaks out of it.
+        self.assertFalse(secrets._LOOSE_VALUES.get())
+        self.assertEqual(secrets.redact_command("PGPASSWORD='Tr0ub&4dor3' psql"), "PGPASSWORD='Tr0ub&4dor3' psql")
+
+    def test_every_occurrence_is_withheld(self):
+        # Delta review of #330, NEW-2: only the first match per program and
+        # segment was withheld.
+        for command, shown in (
+                ("ssh-keygen -p -P 0ldPass99 -N N3wPass99 -f k", f"ssh-keygen -p -P {R} -N {R} -f k"),
+                ("openssl pkcs12 -in a -passin pass:AAApass1 -passout pass:BBBpass2",
+                 f"openssl pkcs12 -in a -passin pass:{R} -passout pass:{R}"),
+                ("zip -P aaapass1 -P bbbpass2 o.zip f", f"zip -P {R} -P {R} o.zip f"),
+                ("ldapsearch -w aaapass1 -w bbbpass2", f"ldapsearch -w {R} -w {R}"),
+                ("curl -u a:p1xxxx -u b:p2xxxx https://x", f"curl -u a:{R} -u b:{R} https://x")):
+            with self.subTest(command=command):
+                self.assertEqual(secrets.redact_command(command), shown)
+                self.assertFalse(secrets.holds_back_credential(command))
+
+    def test_a_glued_value_in_quotes_is_the_rest_of_the_word(self):
+        for command, shown in (("7z a '-pTr0ub4dor' o.7z f", f"7z a '-p{R}' o.7z f"),
+                               ('7z a "-pTr0ub4dor" o.7z f', f'7z a "-p{R}" o.7z f'),
+                               ("mysql '-pTr0ub4dor' db", f"mysql '-p{R}' db")):
+            with self.subTest(command=command):
+                self.assertEqual(secrets.redact_command(command), shown)
+        # A blank in it: the never-hidden rule keeps the value on the card
+        # (its first run is withheld, as before); the check reports it, so
+        # nothing of it leaves the machine.
+        command = "7z a '-pTr0ub 4dor' o.7z f"
+        self.assertNotIn("Tr0ub", secrets.redact_command(command))
+        self.assertTrue(secrets.holds_back_credential(command))
+        self.assertEqual(secrets.redact_command('mysql "-p$PW" db'), 'mysql "-p$PW" db', "an expansion is no value")
+
+    def test_a_string_another_shell_runs_is_read(self):
+        # Delta review of #330, NEW-1: `bash -c "..."` was one quoted word.
+        held = ['bash -c "sshpass -p \'Tr0ub&4dor3\' ssh h"',               # the reviewer's probe
+                'bash -c "sshpass -p Tr0ub4dor3 ssh h"',
+                "bash -c \"sh -c 'sshpass -p Tr0ub4dor3 ssh h'\"",          # nested twice
+                "/bin/bash -lc 'PGPASSWORD=x9x9x9x9 psql'",
+                "su -c 'htpasswd -b f admin adminpass99' root",
+                "eval 'mysql -pS3cretPw db'",
+                "bash -c $'sshpass -p x\\x20ssh h'",                       # unreadable
+                'bash -c "unterminated',                                      # unreadable
+                "sh -c \"bash -c 'zsh -c \\\"dash -c ls\\\"'\"",     # past the depth bound
+                "bash -c '" + "x" * (secrets._NESTED_MAX + 1) + "'"]         # past the size bound
+        for command in held:
+            with self.subTest(command=command[:80]):
+                self.assertTrue(secrets.holds_back_credential(command))
+        for command in ('bash -lc "cd /srv && make deploy"', 'bash -c "echo $HOME | wc"', 'eval "$(ssh-agent -s)"',
+                        "sudo sh -c 'echo hi > /etc/x'", "bash -c \"sh -c 'ls -la'\"", "echo 'bash -c x'; ls",
+                        "sh -c \"bash -c 'zsh -c \\\"ls\\\"'\""):
+            with self.subTest(command=command):
+                self.assertFalse(secrets.holds_back_credential(command), "summaries stay for ordinary nesting")
+
+    def test_a_command_line_handed_on_is_read(self):
+        # Final review of #330: a remote shell, a container's exec, a
+        # terminal or job runner hands a command line on.
+        held = ["ssh host 'mysql -pS3cretPw99 db'",
+                "ssh host \"sshpass -p 'Tr0ub&4dor3' ssh h2\"",
+                "ssh -p 2222 -i ~/.ssh/k -o StrictHostKeyChecking=no host 'PGPASSWORD=x9x9x9x9 psql'",
+                "kubectl exec pod -- mysql -pS3cretPw99",
+                "kubectl exec -it pod -c app -- sh -c 'mysql -pS3cretPw99'",
+                "docker exec -it -u root db mysql -pS3cretPw99",
+                "watch -n 5 'mysql -pS3cretPw99 -e status'",
+                "script -q -c 'mysql -pS3cretPw99' /dev/null",
+                "tmux new -d -s x 'mysql -pS3cretPw99'",
+                "tmux send-keys -t x 'mysql -pS3cretPw99' Enter",
+                "parallel 'mysql -pS3cretPw99 -e {}' ::: a b",
+                "mosh host -- mysql -pS3cretPw99",
+                "autossh -M 0 host 'mysql -pS3cretPw99'",
+                "ssh host $'mysql -pS3cretPw99\\x20db'",                    # unreadable
+                "ssh h \"ssh h2 \\\"ssh h3 'ssh h4 ls'\\\"\""]        # past the depth bound
+        for command in held:
+            with self.subTest(command=command):
+                self.assertTrue(secrets.holds_back_credential(command))
+        for command in ("ssh host 'ls -la'", "ssh host ls > out.txt", "ssh -o StrictHostKeyChecking=no host uptime",
+                        "kubectl exec pod -- ls", "docker exec web ls /app", "watch -n 1 'kubectl get pods'",
+                        "tmux new -s dev", "parallel gzip ::: a b", "grep ssh notes.txt", "docker run -p 8080:80 nginx"):
+            with self.subTest(command=command):
+                self.assertFalse(secrets.holds_back_credential(command), "summaries stay for ordinary lines")
+
+    def test_an_exec_argv_tail_is_redacted_on_the_card(self):
+        # Tighten only: the tail is an argv the container runs as it is.
+        for command, shown in (
+                ("kubectl exec pod -- mysql -pS3cretPw99", f"kubectl exec pod -- mysql -p{R}"),
+                ("kubectl exec -it pod -c app -- mysql -uroot -pS3cretPw99 db",
+                 f"kubectl exec -it pod -c app -- mysql -uroot -p{R} db"),
+                ("docker exec -it -u root db mysql -pS3cretPw99", f"docker exec -it -u root db mysql -p{R}"),
+                ("podman exec db sshpass -p S3cretPw99 ssh h", f"podman exec db sshpass -p {R} ssh h")):
+            with self.subTest(command=command):
+                self.assertEqual(secrets.redact_command(command), shown)
+        for command in ("kubectl exec pod -- ls", "docker exec web ls /app", "docker run -p 8080:80 nginx",
+                        "kubectl exec pod -- sh -c 'mysql -pS3cretPw99'",     # a string a shell parses: as typed
+                        "docker run --rm img mysql -pS3cretPw99"):            # `run`: the image cannot be placed
+            with self.subTest(command=command):
+                self.assertEqual(secrets.redact_command(command), command)
+        # ...so the summary is held back for it instead.
+        self.assertTrue(secrets.holds_back_credential("docker run --rm img mysql -pS3cretPw99"))
+
+    def test_judges_never_read_it(self):
+        def boom(*_a, **_k):
+            raise AssertionError("a judge read through the display redaction")
+        commands = [c for c, _ in FAMILY]
+        before = [(rules.decide(c).decision, v1_permissions.static_verdict(c).decision) for c in commands]
+        with patch.object(secrets, "redact_command", boom), patch.object(secrets, "holds_back_credential", boom):
+            after = [(rules.decide(c).decision, v1_permissions.static_verdict(c).decision) for c in commands]
+        self.assertEqual(before, after)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

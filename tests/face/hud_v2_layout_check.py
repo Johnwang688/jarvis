@@ -13,9 +13,10 @@ on.
 The checks worth keeping, each written to bite:
   - at 160% and at 70%, on 1280x800 and 1024x700, an approval card is entirely
     on screen and, scrolled to its end, its buttons are the topmost thing under
-    the pointer — and for a long command AUTHORIZE is *below the fold until the
-    owner scrolls past the whole command* (a sticky button row would let them
-    approve a `curl … | sh` tail they never saw);
+    the pointer — and, since AS (the owner's request of 2026-10-28, which
+    supersedes the old "AUTHORIZE below the fold for a long command" rule),
+    the buttons come first and stay in reach unscrolled, for a long command
+    too, sticky at the top of the card as it scrolls;
   - every layout key is inert while a card is up, so nothing re-lays the card
     out under a pointer that has not moved;
   - the zoom keys are the HUD's in the input bar and in Monaco too (else they
@@ -48,8 +49,8 @@ The workspace (2026-10-09, WP-A of docs/plans/2026-10-09-hud-workspace-plan.md):
   - **a File pane is pinned to the project it read from**: with the chat moved
     to another project, its save still goes to the first one;
   - in a 2×2 grid with Monaco and a preview frame on screen, at 160% and 70%,
-    the card is wholly on screen, AUTHORIZE is below the fold for a long
-    command, and every button is topmost at its own point;
+    the card is wholly on screen, AUTHORIZE is in reach unscrolled for a long
+    command (AS), and every button is topmost at its own point;
   - (ED-1) with Monaco's context menu or suggest list open, at 100% and 160%,
     a card that arrives is topmost at every button, the editor behind it is
     unfocused and read-only, a typed `y` and Ctrl+S do nothing, and Escape
@@ -650,17 +651,22 @@ def _card_on_screen(page, scroll: bool = True) -> tuple[bool, str]:
     }""", scroll)
 
 
-def _authorize_below_fold(page) -> tuple[bool, str]:
-    """Before any scrolling: the card overflows and AUTHORIZE is past its end."""
+def _authorize_in_reach(page) -> tuple[bool, str]:
+    """Before any scrolling (AS-12): the buttons come first, so every one is
+    inside the card's visible box and topmost at its own point, however long
+    the command."""
     return page.evaluate("""() => {
       const card = document.querySelector('[data-testid="approval-card"]');
-      const b = card && card.querySelector('[data-testid="approval-allow"]');
-      if (!b) return [false, 'no card'];
+      if (!card) return [false, 'no card'];
       card.scrollTop = 0;
-      const c = card.getBoundingClientRect(), r = b.getBoundingClientRect();
-      return [card.scrollHeight > card.clientHeight && r.top >= c.bottom - 0.5,
-              'scroll ' + card.scrollHeight + '/' + card.clientHeight + ', button top ' + Math.round(r.top)
-              + ' vs card bottom ' + Math.round(c.bottom)];
+      const c = card.getBoundingClientRect(), bad = [];
+      for (const b of card.querySelectorAll('.btns button')) {
+        const r = b.getBoundingClientRect();
+        if (r.top < c.top - 0.5 || r.bottom > c.bottom + 0.5) bad.push(b.textContent + ' outside the card');
+        const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+        if (hit !== b && !b.contains(hit)) bad.push(b.textContent + ' covered by ' + (hit && hit.className));
+      }
+      return [bad.length === 0, bad.join('; ') || 'scroll ' + card.scrollHeight + '/' + card.clientHeight];
     }""")
 
 
@@ -684,8 +690,8 @@ def _approval_zoom_checks(page, mock, check, until):
         time.sleep(0.2)
         where = f"at {zoom}% on {w}x{h}" + (" (a long command)" if command == LONG_COMMAND else "")
         if command == LONG_COMMAND and zoom == "160":
-            ok, why = _authorize_below_fold(page)
-            check(f"{where} AUTHORIZE is below the fold until the command is scrolled past", ok, why)
+            ok, why = _authorize_in_reach(page)
+            check(f"{where} AUTHORIZE is in reach before any scrolling (AS-12)", ok, why)
         ok, why = _card_on_screen(page)
         check(f"{where} the card is fully on screen and, scrolled to its end, its buttons are clickable",
               ok, why)
@@ -1787,9 +1793,8 @@ def _grid_card_checks(page, mock, check, until):
         until(lambda: page.locator('[data-testid="approval-card"]').count() > 0, timeout=4)
         time.sleep(0.2)
         if zoom == "160":
-            ok, why = _authorize_below_fold(page)
-            check(f"at {zoom}% over the grid, AUTHORIZE is below the fold until the command is scrolled past",
-                  ok, why)
+            ok, why = _authorize_in_reach(page)
+            check(f"at {zoom}% over the grid, AUTHORIZE is in reach before any scrolling (AS-12)", ok, why)
         ok, why = _card_on_screen(page)
         check(f"at {zoom}% over the grid, the card is wholly on screen and every button topmost at its point",
               ok, why)
@@ -2686,8 +2691,8 @@ def _eight_checks(page, mock, check, until):
         until(lambda: page.locator('[data-testid="approval-card"]').count() > 0, timeout=4)
         time.sleep(0.2)
         if zoom == "160":
-            ok, why = _authorize_below_fold(page)
-            check(f"at {zoom}% over eight panes, AUTHORIZE is below the fold until the command is scrolled past", ok, why)
+            ok, why = _authorize_in_reach(page)
+            check(f"at {zoom}% over eight panes, AUTHORIZE is in reach before any scrolling (AS-12)", ok, why)
         ok, why = _card_on_screen(page)
         check(f"at {zoom}% over eight panes, the card is wholly on screen and every button topmost at its point", ok, why)
         got = page.evaluate("""() => {

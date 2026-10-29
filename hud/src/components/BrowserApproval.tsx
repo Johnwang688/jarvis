@@ -3,6 +3,7 @@ import { browserApi } from "../api";
 import { noPointerFocus } from "../lib/talkkey";
 import { browserApprovalDeadline, browserApprovalKey, parseBrowserPrivateApproval, isBrowserPrivateRequest, type BrowserPrivateDetail, type BrowserApprovalPublic } from "../lib/browserapproval";
 import { browserBody } from "../lib/approvalCard";
+import { useArmed } from "../lib/armed";
 import "./BrowserApproval.css";
 
 export const PRIVATE_DETAIL_UNAVAILABLE = "The Browser action details are unavailable. Deny this request.";
@@ -70,9 +71,10 @@ export function BrowserApprovalCard({ request, onDecide, onPresent }: {
   const sent = useRef<string | null>(null);
   const chimed = useRef<string | null>(null);
   const busy = deciding === key;
+  const armed = useArmed(`${key}:${details.detail ? "detail" : "none"}`);
   useEffect(() => { if (chimed.current !== key) { chimed.current = key; onPresent(); } }, [key, onPresent]);
   const decide = (allow: boolean) => {
-    if (latest.current !== key || sent.current === key || (allow && !details.canAuthorize())) return;
+    if (latest.current !== key || sent.current === key || (allow && (!armed || !details.canAuthorize()))) return;
     sent.current = key; setDeciding(key);
     onDecide(request.req_id, allow, false);
   };
@@ -82,14 +84,15 @@ export function BrowserApprovalCard({ request, onDecide, onPresent }: {
       if ((event.key === "Enter" || event.key === " ") && !(event.target instanceof Element && event.target.closest('[data-testid="approval-deny"]'))) event.preventDefault();
     }}>
     <h3>AUTHORIZATION REQUIRED</h3>
+    {/* AS-12: the buttons first; AUTHORIZE armed ARM_MS after the card and again after its detail lands (AS-13). */}
+    <div className="btns" data-testid="approval-buttons">
+      <button type="button" className="deny" disabled={busy} onClick={() => decide(false)} data-testid="approval-deny">DENY</button>
+      <button type="button" disabled={busy || !armed || !details.canAuthorize()} tabIndex={-1} onMouseDown={noPointerFocus}
+        onClick={() => decide(true)} data-testid="approval-allow">AUTHORIZE</button>
+    </div>
     <div className="tool" data-testid="approval-tool">{request.layer === "always-ask" ? "Browser tool permission" : "Browser action"}</div>
     {details.detail ? <BrowserApprovalBody detail={details.detail} /> : null}
     {details.message ? <p role="status">{details.message}</p> : null}
-    <div className="btns">
-      <button type="button" className="deny" disabled={busy} onClick={() => decide(false)} data-testid="approval-deny">DENY</button>
-      <button type="button" disabled={busy || !details.canAuthorize()} tabIndex={-1} onMouseDown={noPointerFocus}
-        onClick={() => decide(true)} data-testid="approval-allow">AUTHORIZE</button>
-    </div>
     <div className="foot">DENIES AUTOMATICALLY IN {details.left}s · ESC TO DENY · HUD ONLY</div>
   </div>;
 }
