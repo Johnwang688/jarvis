@@ -652,15 +652,13 @@ def _proc_reach(text: str) -> int:
     its components in order — never `abspath` first, which folds
     `/proc/self/cwd/../../.ssh/id` to `/.ssh/id` (delta review of #339):
     0 never; 1 it passes through `/proc`; 2 it passes through
-    `/proc/<pid>/{cwd,root,fd,…}`, `/dev/fd` or `/dev/std*`, or climbs with
-    `..` after reaching `/proc`."""
+    `/proc/<pid>/{cwd,root,fd,…}`, `/dev/fd` or `/dev/std*`."""
     current: list[str] = []
     seen = strong = False
     for part in text.split("/"):
         if part in ("", "."):
             continue
         if part == "..":
-            strong = strong or seen
             if current:
                 current.pop()
             continue

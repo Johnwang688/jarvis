@@ -4809,6 +4809,9 @@ def cred_delta_checks():
         (home / ".gitconfig").write_text("[user]\n")
         (project / "g.cfg").symlink_to(home / ".gitconfig")
         (project / "h.cfg").symlink_to(project / ".gitmodules")
+        (project / ".git").mkdir()
+        (project / ".git" / "config").write_text("[core]\n")
+        (project / "r.cfg").symlink_to(project / ".git" / "config")
         users = box.root / "Users"
         (users / "John" / "Documents").mkdir(parents=True)
 
@@ -4892,7 +4895,8 @@ def cred_delta_checks():
                         "GIT_CONFIG_PARAMETERS=\"'alias.x=!sh'\" git x",
                         "export GIT_CONFIG_PARAMETERS=\"'credential.helper'='store'\"",
                         "GIT_CONFIG_KEY_0=http.extraheader GIT_CONFIG_VALUE_0=x git fetch",
-                        "git config -f g.cfg -l", "git config --file=./g.cfg --list"):
+                        "git config -f g.cfg -l", "git config --file=./g.cfg --list",
+                        "git config -f r.cfg -l"):
             asks(command, "credentials-read")
         for command in ("GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=color.ui GIT_CONFIG_VALUE_0=never git log",
                         "git config -f .gitmodules -l", "git config -f h.cfg -l"):
