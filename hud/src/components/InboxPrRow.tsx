@@ -104,25 +104,27 @@ export function InboxPrRow(props: InboxPrRowProps) {
           <span className="k">title </span><bdi>{v.title}</bdi>
         </div>
       ) : null}
-      <div className="ir-pr-acts" data-testid="inbox-pr-actions" data-armed={armed ? "true" : "false"}>
-        {buttons.actions.map((a) => (
-          <button type="button" key={a} data-testid={`inbox-pr-act-${a}`} data-action={a}
-                  className={a === "merge" || a === "merge_as_is" ? "ir-pr-merge" : undefined}
-                  disabled={off || !armed} onClick={() => act(a)}>
-            {actionLabel(v, a)}
-          </button>
-        ))}
-        {!buttons.actions.length && v.why && v.hold === null ? (
-          <span className="ir-pr-why" data-testid="inbox-pr-why">{v.why}</span>
-        ) : null}
-        <span className="ir-pr-spacer" />
-        {v.hold === null ? (
-          <button type="button" className="quiet" data-testid="inbox-pr-hold-open" disabled={off}
-                  aria-expanded={holdOpen} onClick={() => { if (!props.isBlocked()) setHoldOpen((o) => !o); }}>
-            Hold…
-          </button>
-        ) : null}
-      </div>
+      {buttons.actions.length || v.hold === null ? (
+        <div className="ir-pr-acts" data-testid="inbox-pr-actions" data-armed={armed ? "true" : "false"}>
+          {buttons.actions.map((a) => (
+            <button type="button" key={a} data-testid={`inbox-pr-act-${a}`} data-action={a}
+                    className={a === "merge" || a === "merge_as_is" ? "ir-pr-merge" : undefined}
+                    disabled={off || !armed} onClick={() => act(a)}>
+              {actionLabel(v, a)}
+            </button>
+          ))}
+          {!buttons.actions.length && v.why && v.hold === null ? (
+            <span className="ir-pr-why" data-testid="inbox-pr-why">{v.why}</span>
+          ) : null}
+          <span className="ir-pr-spacer" />
+          {v.hold === null ? (
+            <button type="button" className="quiet" data-testid="inbox-pr-hold-open" disabled={off}
+                    aria-expanded={holdOpen} onClick={() => { if (!props.isBlocked()) setHoldOpen((o) => !o); }}>
+              Hold…
+            </button>
+          ) : null}
+        </div>
+      ) : null}
       <div className="ir-pr-notice" role="status" data-testid="inbox-pr-notice" data-tone={props.notice?.tone ?? ""}>
         {props.busy ? "Sending…" : props.notice?.text ?? ""}
       </div>

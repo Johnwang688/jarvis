@@ -172,9 +172,11 @@ function prBlock(row: InboxRow, box: HTMLElement, a?: InboxAnswers) {
       box.append(acts);
     }
   }
-  if (pr) {
-    // The fixed notice slot (M1/M2's rule for the card): always there, two lines held, under the buttons.
-    const said = pr.progress.get(row.id) || a!.notes.get(row.id) || "";
+  const pressable = buttons.actions.length > 0 || (!!v.fix && prFixWords(v.fix).cancel);
+  const said = pr ? pr.progress.get(row.id) || a!.notes.get(row.id) || "" : "";
+  if (pr && (pressable || said)) {
+    // The fixed notice slot (M1/M2's rule for the card): on any row with something to press, two
+    // lines held under the buttons, so nothing it says moves one.
     const notice = testid(el("p", "m-notice m-pr-notice", said), "m-pr-notice");
     notice.setAttribute("role", "status");
     notice.dataset.tone = pr.progress.get(row.id) ? "busy" : said ? "said" : "";

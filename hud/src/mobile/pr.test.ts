@@ -192,7 +192,7 @@ class Stream implements StreamLike {
   close() {}
 }
 
-function harness(rows: unknown[], secure = { ok: true, failed: null, label: "" }) {
+function harness(rows: unknown[], secure: { ok: boolean; failed: string | null; label: string } = { ok: true, failed: null, label: "" }) {
   const posts: { path: string; value: any }[] = [];
   const replies: Record<string, Posted | ((v: any) => Posted)> = {};
   const gets: Record<string, Got> = {};
