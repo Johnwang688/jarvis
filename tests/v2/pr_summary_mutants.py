@@ -34,7 +34,7 @@ MUTANTS = [
      "    if not isinstance(fix, dict) or fix.get(\"summary_state\") in (None, PENDING):\n        return None\n    return {k: fix.get(k)",
      ["CardFix.test_a_fix_card_appearing_changes_the_card"]),
     ("card: the fix's commits left out", PS,
-     '_FIX_CARD = ("state", "commits", "ci_changed",', '_FIX_CARD = ("state", "ci_changed",',
+     '"task_id", "count", "max", "commits", "ci_changed",', '"task_id", "count", "max", "ci_changed",',
      ["CardFix.test_a_fix_card_appearing_changes_the_card"]),
     ("card: the fix's summary left out", PS,
      '"note", "summary", "summary_state")', '"note")',

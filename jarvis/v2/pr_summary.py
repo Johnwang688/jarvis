@@ -867,12 +867,14 @@ ENRICH_KEYS = ("facts", "flags", "summary", "summary_state", "summary_note", "su
                "fix")
 FILES_SHOWN = 100
 CARD_VERSION = 2
-_FIX_CARD = ("state", "commits", "ci_changed", "note", "summary", "summary_state")
+_FIX_CARD = ("state", "task_id", "count", "max", "commits", "ci_changed", "note", "summary", "summary_state")
 
 
 def fix_card(detail):
     """The fix card's displayed fields, from the moment the fix card exists:
-    its state, note, commits, `ci_changed`, summary state and summary. While
+    its state, which task and attempt ("fix 2 of 3"; review of #340 r2: a
+    stale OK must not carry over to another attempt at the same head), note,
+    commits, `ci_changed`, summary state and summary. While
     the summary is pending the text is None and the state says so, so the
     fix card appearing, and its summary landing, each change the card. None
     when the PR has no fix."""
