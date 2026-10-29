@@ -159,6 +159,81 @@ def ensure(task: Task, project: Project, stores: Stores) -> Task:
         return task
 
 
+PR_FETCH_TIMEOUT_S = 120.0
+
+
+def _hardened(root: Path, *args: str, timeout: float = PR_FETCH_TIMEOUT_S) -> str:
+    """git with gitops' hardening (no hooks, no fsmonitor, no submodule
+    recursion, no `ext::`) and no GIT_* from the daemon's environment."""
+    from jarvis import gitops
+    code, out, err = gitops._git(root, list(args), timeout=timeout)
+    if code:
+        raise WorktreeError(f"git {args[0] if args else ''} in {root} failed", stderr=err)
+    return out
+
+
+def ensure_pr(task: Task, project: Project, stores: Stores, *, mirror: Path, pull_ref: str,
+              number: int, head: str) -> Task:
+    """A PR fix's worktree (PM-18 of `docs/plans/2026-10-28-pr-inbox-merge.md`).
+
+    The bound head is fetched from the daemon's PR mirror (`pr_facts`,
+    filled by the caller under the mirror's lock) into the project's
+    repository by a local fetch that uses no credentials (no helper, the
+    file transport only, gitops' hardening) straight onto a new branch
+    `jarvis/<task>-pr<N>`; that branch must then name exactly `head`, or it
+    is deleted and nothing is made. A worktree is added on it where
+    `ensure` would put one, so the runner adopts it, and `head` is the
+    recorded base (status counts the fix's own commits). A repository whose
+    own config names a program (`gitops._risky_config`) is refused.
+    The task pushes `HEAD:refs/heads/<the PR's branch>` (`pr_fix`'s gate)."""
+    with _lock:
+        stores.tasks.path(task.id)
+        if task.project_id != project.id:
+            raise WorktreeError(f"Task {task.id} does not belong to project {project.id}")
+        if not (isinstance(head, str) and re.fullmatch(r"[0-9a-f]{40}", head)):
+            raise WorktreeError("the bound head is not a commit id")
+        if not (isinstance(number, int) and not isinstance(number, bool) and number > 0):
+            raise WorktreeError("not a pull request number")
+        if task.worktree:
+            raise WorktreeError(f"Task {task.id} already has a worktree")
+        task.root = task_root(task, project)
+        root = Path(task.root).resolve()
+        if not _is_git(root):
+            raise WorktreeError(f"{root} is not a git repository")
+        from jarvis import gitops
+        risk = gitops._risky_config(root)
+        if risk:
+            raise WorktreeError(f"the repository's own git config names a program ({risk}); "
+                                "a fix is not run there")
+        _prune(root)
+        _exclude(root)
+        path = root / ".jarvis" / "worktrees" / task.id
+        _protect_owner(root, path)
+        if path.exists() or path in _registrations(root):
+            raise WorktreeError(f"{path} already exists")
+        branch = f"jarvis/{task.id}-pr{number}"
+        ref = f"refs/heads/{branch}"
+        _hardened(root, "-c", "credential.helper=", "-c", "protocol.allow=never",
+                  "-c", "protocol.file.allow=always", "fetch", "--no-tags",
+                  "--no-write-fetch-head", "--quiet", str(Path(mirror).resolve()),
+                  f"{pull_ref}:{ref}")
+        got = _hardened(root, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}").strip()
+        if got != head:
+            _hardened(root, "update-ref", "-d", ref)
+            raise WorktreeError("the fetched head is not the one the owner said Fix to")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            _hardened(root, "worktree", "add", str(path), branch)
+        except WorktreeError:
+            _hardened(root, "update-ref", "-d", ref)
+            raise
+        task.worktree, task.branch = str(path), branch
+        stores.tasks.save(task)
+        stores.tasks.journal(task.id, "worktree_created", path=task.worktree, branch=branch,
+                             base_ref=head, pr=number)
+        return task
+
+
 def _changes(path: Path) -> str:
     # Ignored files (caches, build output) do not count: a worktree that ran
     # its tests must still be removable without force, or force becomes routine.
