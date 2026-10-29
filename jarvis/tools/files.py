@@ -205,6 +205,10 @@ SELF_PROTECTED = frozenset(
         # card leaves for the model. An agent that could edit it could put
         # its own words on the card the owner reads before Allow.
         "jarvis/v2/approval_summary.py",
+        # The engine approval summaries run on (PM-A, 2026-10-28): the fence,
+        # the caps and the cleaning hook between the model and the card. The
+        # same reason as approval_summary.py, which it was factored out of.
+        "jarvis/v2/summary_engine.py",
     }
 )
 

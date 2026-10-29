@@ -302,6 +302,15 @@ class Leaves(unittest.TestCase):
         self.assertEqual(chat.calls, [])
         self.assertEqual(summaries(chat).begin(request(""), box), (S.OFF, ""), "nothing to describe")
 
+    def test_the_folder_line_is_scrubbed_before_it_leaves(self):
+        # The card's own projection scrubs the command; the tool, agent and
+        # folder lines are scrubbed only by `model_input` (PM-A: the "no
+        # scrub" mutant survived this file until this test).
+        with patch.object(secrets, "secret_values", return_value=["zq7Lw2Pk9VmR4tXy"]):
+            sent = self.sent_for(request("make", cwd="/srv/zq7Lw2Pk9VmR4tXy/app"))
+        self.assertIn("Runs in folder: /srv/", sent)
+        self.assertNotIn("zq7Lw2Pk9VmR4tXy", sent)
+
 
 # -- what comes back ------------------------------------------------------------------------
 
