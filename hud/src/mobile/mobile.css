@@ -258,9 +258,17 @@ p, li, h2, h3 { overflow-wrap: anywhere; }
 .msg-bubble { background: var(--bg-3); border-radius: 18px; padding: 8px 14px; }
 .msg-meta { font-size: 11px; color: var(--text-muted); padding-right: 6px; }
 .msg-head { font-size: 12px; color: var(--text-muted); margin-bottom: 2px; }
+/* C1 (phone audit): every owner row, bubble or flat, sits at the right and
+   carries the code-built "You" chip; nothing in a reply can draw either. The
+   chip is a light solid tag (no reply element is ever filled light), and only
+   owner rows have a right-hand rule or right alignment. */
+.who-owner { display: inline-block; font: 600 11px/16px var(--mono); letter-spacing: 0.06em; text-transform: uppercase;
+  color: var(--bg-0); background: var(--text-2); border-radius: 3px; padding: 0 5px; vertical-align: 1px; }
 /* An owner row not typed in this chat (a decision's answer, a steer, one never sent): flat, its marks first. */
-.msg-flat { padding-left: 10px; border-left: 2px solid var(--border-strong); }
+.msg-flat { align-self: flex-end; max-width: 85%; padding: 0 10px 0 0; border-right: 2px solid var(--text-2); }
 .msg-flat .msg-head { color: var(--text-2); }
+/* A reply: one continuous left gutter the whole reply long, so mid-reply text still reads as the model's. */
+.msg-reply { padding-left: 10px; border-left: 2px solid var(--bg-3); }
 .mark-warn { color: var(--amber); }
 .msg-step { margin: -6px 0; }
 .step-line { display: flex; align-items: center; gap: 6px; min-height: 44px; font-size: 13px; color: var(--text-muted);
@@ -268,11 +276,13 @@ p, li, h2, h3 { overflow-wrap: anywhere; }
 .step-line::-webkit-details-marker { display: none; }
 .step-line::before { content: "›"; flex: none; width: 10px; text-align: center; transition: transform 0.15s; }
 .step[open] > .step-line::before { transform: rotate(90deg); }
-.step-role { display: flex; flex: 0 1 auto; min-width: 0; max-width: 62%; white-space: nowrap; color: var(--text-2); }
-/* What gives way first in the folded line: the title, then the marks, the " (id), not the owner" last. */
-.step-role-head { flex: 0 1000 auto; min-width: 2ch; overflow: hidden; text-overflow: ellipsis; }
+.step-role { display: flex; flex: 0 1 auto; min-width: 0; max-width: 78%; white-space: nowrap; color: var(--text-2); }
+/* What gives way in the folded line: the line's own text first (.step-text), then the chat's title,
+   then the marks; the " (id), not the owner" never (H1 of the phone audit): the cap is kept by
+   ellipsizing the title. */
+.step-role-head { flex: 0 1000 auto; min-width: 1ch; overflow: hidden; text-overflow: ellipsis; }
 .step-role-marks { flex: 0 100 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.step-role-tail { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.step-role-tail { flex: none; }
 .step-who { font-size: 12px; color: var(--text-2); margin: 0 0 4px 4px; padding-left: 10px; border-left: 2px solid var(--border);
   overflow-wrap: anywhere; }
 .step-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -288,7 +298,9 @@ p, li, h2, h3 { overflow-wrap: anywhere; }
   padding: 8px; overflow-x: auto; }
 .md pre code { padding: 0; background: none; }
 .md a { color: var(--accent); }
-.md blockquote { border-left: 3px solid var(--border-strong); padding-left: 8px; color: var(--text-2); }
+/* A quote inside a reply (C1): a filled box, no rule, italic; never an owner row's look. */
+.md blockquote { padding: 4px 10px; background: var(--bg-2); border-radius: var(--radius); color: var(--text-2);
+  font-style: italic; }
 .md table { border-collapse: collapse; display: block; overflow-x: auto; }
 .md th, .md td { border: 1px solid var(--border); padding: 2px 6px; }
 

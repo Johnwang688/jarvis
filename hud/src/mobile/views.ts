@@ -405,6 +405,19 @@ export function ownerChat(meta: ChatThread | null | undefined): boolean {
   return !!meta && meta.role === "chat" && !meta.task_id;
 }
 
+/** The classes only code puts on an owner row (C1 of the phone audit): no
+ * reply's Markdown can carry any of them (the sanitizer keeps no `class`). */
+export const OWNER_ROW_CLASSES: readonly string[] = ["msg-owner", "msg-flat", "msg-bubble", "msg-meta", "who-owner"];
+
+/** The owner's mark (C1): a code-built "You" chip, drawn on every owner row
+ * (bubble and flat) before its marks. Hidden from screen readers, which hear
+ * the row's "You: " instead (M13). */
+function ownerMark(): HTMLElement {
+  const mark = testid(el("span", "who-owner", "You"), "m-owner-mark");
+  mark.setAttribute("aria-hidden", "true");
+  return mark;
+}
+
 export function logRow(row: LogRow, inOwnerChat = true): HTMLElement {
   const style = rowStyle(row.role, row.marks, inOwnerChat);
   const item = testid(el("article", "msg msg-" + style), "m-msg");
@@ -412,16 +425,20 @@ export function logRow(row: LogRow, inOwnerChat = true): HTMLElement {
   item.dataset.seq = String(row.seq);
   const cut = row.cut ? el("p", "muted small", "The rest of this message is shown at the desk.") : null;
   if (style === "owner") {
-    item.append(el("div", "msg-bubble plain-text", row.text));
-    const meta = [...row.marks, time(row.at).slice(0, 5)].filter(Boolean).join(" · ");
-    if (meta) item.append(el("div", "msg-meta", meta));
+    // M13: who said it, first, for VoiceOver (the chip below is hidden from it).
+    item.append(el("span", "m-sr", "You: "), el("div", "msg-bubble plain-text", row.text));
+    const meta = testid(el("div", "msg-meta"), "m-msg-meta");
+    meta.append(ownerMark());
+    for (const part of [...row.marks, time(row.at).slice(0, 5)].filter(Boolean)) meta.append(" · ", part);
+    item.append(meta);
     if (cut) item.append(cut);
     return item;
   }
   if (style === "flat") {
     // Where the words came from first, then the words, never as a bubble.
+    item.append(el("span", "m-sr", "You: "));
     const head = testid(el("div", "msg-head"), "m-msg-marks");
-    const parts: HTMLElement[] = [el("span", "", row.role)];
+    const parts: HTMLElement[] = [ownerMark()];
     for (const mark of row.marks) parts.push(el("span", WARN_MARKS.has(mark) ? "mark mark-warn" : "mark", mark));
     const at = time(row.at).slice(0, 5);
     if (at) parts.push(el("span", "", at));
