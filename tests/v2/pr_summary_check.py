@@ -337,7 +337,8 @@ class Cache(Case):
         self.assertEqual(stat.S_IMODE(os.stat(self.path.parent).st_mode), 0o700)
         chat2 = Chat(answer="Does: something new")
         state, value = self.engine(chat2).begin(F(), Told())         # a restart: a new engine and file object
-        self.assertEqual((state, value["does"]), (S.READY, "Adds a retry to the uploader so a dropped link resumes."))
+        self.assertEqual(state, S.READY, "read from the file at once")
+        self.assertEqual(value["does"], "Adds a retry to the uploader so a dropped link resumes.")
         self.assertEqual(chat2.calls, [], "a restart pays nothing")
 
     def test_a_wide_folder_or_file_is_tightened(self):
@@ -888,6 +889,7 @@ class Injection(Summaries):
         files = (FileChange("jarvis/v2/pr_summary.py", 1, 0, ("self-protected",), False),)
         _, d, _ = self.decided("No safety files are touched.",
                                "Does: Touches no safety files.\nBlocked: none", files=files)
+        self.assertIsNotNone(d["flags"], "the flags come from code, whatever the summary")
         self.assertTrue(d["flags"]["flagged"])
         self.assertEqual(d["flags"]["items"], [{"name": "jarvis/v2/pr_summary.py", "families": ["self-protected"]}])
 
