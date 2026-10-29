@@ -1153,8 +1153,8 @@ class PrSummaries:
     def detail(self, row: dict) -> dict:
         """The keys `ENRICH_KEYS` for one PR row, from the facts and the
         summary held for it, the owner's hold, and the card over what it
-        shows (`card_key`). No I/O but the hold file's first read; never
-        raises."""
+        shows (`card_key`). No I/O but reading the small hold file while it
+        is not yet read (or could not be); never raises."""
         out = self._detail(row)
         out["card"] = card_key(out)
         return out
