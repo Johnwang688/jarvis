@@ -927,3 +927,63 @@ rule changed.
   "on" state's only). The states and
   what each does are unchanged; the long sentences (install, blocked,
   unsupported, unavailable) keep their words in the same small type.
+
+### 10.12 The UI audit's safety fixes and quick wins (2026-10-29)
+
+The phone UI/UX audit of main 79da9b70 (findings C1 to L11; the owner chose
+"Safety + quick wins"). UI only: no route, daemon or rule changed, and every
+daemon string is still set as text or through the sanitized Markdown.
+
+- **C1, the owner's rows cannot be imitated.** Every owner row, bubble or
+  flat, carries a code-built "You" chip (`.who-owner`, a light filled tag)
+  before its marks, and sits at the right; a flat row's rule is on the
+  right (`--text-2`). A reply has a continuous left gutter, and a quote in
+  it is a filled italic box with no rule. The Markdown sanitizer keeps no
+  `class`, `data-*` or `style`, so no reply can carry the chip or an owner
+  row's classes (`OWNER_ROW_CLASSES`); `views.test.ts` renders the audit's
+  spoof and a dozen other constructs (headings, lists, tables, bold, inline
+  code, raw HTML, a fence whose info string names an owner class), and 8
+  mutants (each part of the fix reverted, the sanitizer keeping `class`,
+  H1's old rule) are each killed by a named test.
+- **H1:** a folded relay line's ", not the owner" never shrinks
+  (`.step-role-tail{flex:none}`); the line's own text gives way first, then
+  the chat's title (ellipsized, so the 78% cap holds). Measured at 390 and
+  320 px in `hud_v2_phone_check.py`.
+- **H2:** a collapsed command (card, inbox and review rows) is up to three
+  wrapped lines (an inner `-webkit-line-clamp: 3` box), never one ellipsized
+  line; "show full command" stays.
+- **H4, until PM-F:** a PR row shows the PR's title, code's facts parts
+  (names in `<bdi>`), the safety-file flags, and the summary's Does and
+  Blocked lines in an "AI SUMMARY" slot, then "Merge it at the desk for now".
+  Never the head SHA, a raw key or a link; no buttons.
+- **H5:** an unread chat says "Loading…", or offline "Not read yet: you're
+  offline.", never "No messages yet."; the task view and the card likewise.
+- **H6:** a deferred row's Leave it (left) and Approve and retry (right) sit
+  apart in one row, as the Review tab's. There is no arming delay on either
+  surface; none was added.
+- **M1, M2:** the card's notice has one fixed slot under the allow row (two
+  lines held), so nothing it says moves a button; while busy it says "Asking
+  for Face ID…", then "Sending…" (a refusal in amber).
+- **M3:** the limited state is said once: "limited: <label>. AUTHORIZE
+  answers with Discord's authority; ALWAYS is off."
+- **M4:** an inbox decision's suggestion is marked, never preselected (as
+  MR-3), and its options are listed once.
+- **M5:** a task's open question offers "Answer it in the Inbox", which opens
+  the Inbox at its `tq:` row.
+- **M7:** `--control-edge`, a 55% mix of `--text-muted` into
+  `--border-strong` (#737069), edges every button and field: 3.73:1 on
+  `--bg-0`, 3.53 on `--bg-1`, 3.22 on `--bg-2`, 3.88 on `--bg-inset` (it
+  was 1.92/1.81). It is the phone's own, outside the `:root` copy of
+  theme.css. "Open the card to answer" is cyan-edged.
+- **M9a:** the Review tab keeps its slot, off, while there is no review, so
+  Chats and Tasks never move.
+- **M13:** owner rows start with a hidden "You: "; each Review checkbox is
+  named "Select: <title>"; a card's heading takes the focus when it opens,
+  and on close the focus goes to the answer's line or back to the row's
+  button (kept across redraws; never on AUTHORIZE or ALWAYS).
+- **L1:** the safety gap holds "Denies automatically at 08:36 · 9 min left"
+  (code's words, redrawn every 15 s); the foot line is gone.
+
+Not done here: the compact inbox (H3), swipe-back and history (M10), Dynamic
+Type (M8, px to rem: not trivial across every rule), and the audit's other
+mediums and lows.
