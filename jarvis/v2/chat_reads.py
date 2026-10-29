@@ -435,7 +435,8 @@ def _owner_row(data: dict, at, dropped: set[str]) -> Row:
         typed += f"\n({images} image{'s' if images != 1 else ''} attached)"
     marks = []
     if data.get("written_by"):
-        marks.append(_WRITTEN_MARK.get(data["written_by"], _WRITTEN_OTHER))
+        written = data["written_by"]
+        marks.append(_WRITTEN_MARK.get(written, _WRITTEN_OTHER) if isinstance(written, str) else _WRITTEN_OTHER)
     elif via == "phone" and not data.get("decision_id"):
         marks.append(_PHONE_TYPED)
     elif via in _VIA_MARK:
