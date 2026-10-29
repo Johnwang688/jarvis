@@ -647,14 +647,43 @@ def _under_proc(path: str) -> bool:
                for top in ("/proc", "/dev/fd", "/dev/stdin", "/dev/stdout", "/dev/stderr"))
 
 
+def _proc_reach(text: str) -> int:
+    """How a written path meets `/proc` or `/dev/fd`, by a lexical walk of
+    its components in order — never `abspath` first, which folds
+    `/proc/self/cwd/../../.ssh/id` to `/.ssh/id` (delta review of #339):
+    0 never; 1 it passes through `/proc`; 2 it passes through
+    `/proc/<pid>/{cwd,root,fd,…}`, `/dev/fd` or `/dev/std*`, or climbs with
+    `..` after reaching `/proc`."""
+    current: list[str] = []
+    seen = strong = False
+    for part in text.split("/"):
+        if part in ("", "."):
+            continue
+        if part == "..":
+            strong = strong or seen
+            if current:
+                current.pop()
+            continue
+        current.append(part)
+        if current[0] == "proc":
+            seen = True
+            if len(current) >= 3 and current[2] in _PROC_MAGIC:
+                strong = True
+        elif current[0] == "dev" and len(current) >= 2 and current[1] in (
+                "fd", "stdin", "stdout", "stderr"):
+            seen = strong = True
+    return 2 if strong else 1 if seen else 0
+
+
 def _through_proc(path: str) -> bool:
-    """A path through `/proc/<pid>/{cwd,root,fd,…}` or `/dev/fd`, as
-    written, or a symlink whose own target is one (MED 1 of #339's review)."""
-    lexical = os.path.abspath(os.path.expanduser(path))
-    parts = lexical.split("/")
-    if (len(parts) > 3 and parts[1] == "proc" and any(p in _PROC_MAGIC for p in parts[3:])) or (
-            lexical.startswith(("/dev/fd", "/dev/stdin", "/dev/stdout", "/dev/stderr"))):
+    """A read tool's path that passes through `/proc` or `/dev/fd` as
+    written (`_proc_reach`, any reach: they resolve in the gate's process),
+    or through a symlink whose own target is one (MED 1 of #339's review)."""
+    written = os.path.expanduser(path)
+    if _proc_reach(written if written.startswith("/") else os.getcwd() + "/" + written):
         return True
+    lexical = os.path.abspath(written)
+    parts = lexical.split("/")
     # A symlink on the way whose target is one (`p -> /proc/self/root`).
     try:
         prefix = ""
@@ -1077,10 +1106,13 @@ def _kind_matches(kind: str, segment: str, tokens: list[str], stems: list[str],
         return (any(_phrase_ordered(p, tokens) for p in _CREDENTIAL_PHRASES)
                 or any(stem in _CREDENTIAL_STEMS for stem in stems))
     if kind == "credential_path":
-        return (any(_under_credential_dir(token) for token in tokens + _path_words(segment))
-                or _shell_walk_holds(tokens, bases))
+        judge = v1_files.credential_folder_judge()
+        return (any(_under_credential_dir(token) or _word_reaches_credential(token, bases, judge)
+                    for token in tokens + _path_words(segment))
+                or _shell_walk_holds(tokens, bases)
+                or _xargs_unseen(segment, tokens))
     if kind == "credential_read":
-        return _reads_credential(tokens)
+        return _reads_credential(tokens, bases) or _git_env_risky(segment)
     LOG.warning("Ignoring always-ask rule with unknown kind %r", kind)
     return False
 
@@ -1096,6 +1128,145 @@ _GREPS = frozenset({"grep", "egrep", "fgrep", "zgrep"})
 _RECURSIVE_FLAG = {"ls": "R", "cp": "rRa", "zip": "r"}
 
 
+# A base the gate cannot place: `cd -`, `cd $VAR`, a root from stdin.
+UNSEEN = "\0unseen"
+# Programs xargs may run that read the files named on their input.
+_XARGS_READERS = frozenset({"cat", "tac", "head", "tail", "less", "more", "nl", "od", "xxd",
+                            "hexdump", "strings", "base64", "grep", "egrep", "fgrep", "rg", "ag",
+                            "cp", "tar", "zip", "rsync", "scp", "sed", "awk", "sort", "uniq",
+                            "wc", "diff", "cmp", "file", "jq", "yq", "python", "python3"})
+_XARGS = frozenset({"xargs", "parallel"})
+
+
+def _place_word(word: str, base) -> str | None:
+    """`word` as the shell would find it: `~`, `$HOME`/`${HOME}` expanded,
+    a relative word placed in `base`. None when it cannot be placed (another
+    variable, a substitution, an unseen base)."""
+    text = word.replace("${HOME}", "$HOME")
+    if text.startswith("$HOME"):
+        text = os.path.expanduser("~") + text[len("$HOME"):]
+    if "$" in text or "`" in text:
+        return None
+    text = os.path.expanduser(text)
+    if text.startswith("/"):
+        return text
+    if base == UNSEEN:
+        return None
+    return (str(base).rstrip("/") + "/" if base else os.getcwd() + "/") + text
+
+
+def _glob_reaches(pattern: str) -> bool:
+    """Whether an absolute shell glob can name a path in a credential
+    folder or store, or in a closed entry of a Windows profile: matched
+    piece by piece (case-folded, `**` any depth) against each one; a `..`
+    after a wildcard cannot be placed and counts."""
+    pieces: list[str] = []
+    wild = None
+    for piece in pattern.casefold().split("/"):
+        if piece in ("", "."):
+            continue
+        if piece == "..":
+            if wild is not None:
+                return True       # after a wildcard: cannot be placed
+            if pieces:
+                pieces.pop()
+            continue
+        if wild is None and _GLOB_MAGIC & set(piece):
+            wild = len(pieces)
+        pieces.append(piece)
+
+    def covers(root_pieces: list[str], tail=None) -> bool:
+        for i, piece in enumerate(root_pieces):
+            if i >= len(pieces):
+                return False
+            if pieces[i] == "**":
+                return True
+            if not fnmatch(piece, pieces[i]):
+                return False
+        if tail is None:
+            return True
+        k = len(root_pieces) + 1           # the profile's entry
+        if k >= len(pieces):
+            return False
+        entry = pieces[k]
+        return (pieces[k - 1] == "**" or entry == "**" or entry.startswith((".", "?", "["))
+                or fnmatch("appdata", entry) or fnmatch("ntuser.dat", entry))
+
+    for root in v1_files._credential_roots():
+        if covers([p for p in str(root).casefold().split("/") if p]):
+            return True
+    users = [p for p in os.path.abspath(config.windows_users_root()).casefold().split("/") if p]
+    return covers(users, tail=True)
+
+
+def _word_reaches_credential(word: str, bases, judge) -> bool:
+    """A shell word that names a path in a credential folder or store, a
+    Windows profile's closed entry, or through `/proc/<pid>/{cwd,root,…}`:
+    each brace variant placed where the shell finds it (`_place_word`), a
+    glob matched piece by piece (`_glob_reaches`). A brace list too large
+    to expand counts (delta review of #339)."""
+    word = word.strip("\"'><")
+    if not word or word.startswith("-") or len(word) > 4096:
+        return False
+    variants = protected_state._brace_expand(word) if "{" in word else [word]
+    if variants is None:
+        return True
+    for variant in variants:
+        for base in bases:
+            placed = _place_word(variant, base)
+            if placed is None:
+                continue
+            if _proc_reach(placed) == 2:
+                return True
+            if _GLOB_MAGIC & set(placed):
+                if _glob_reaches(placed):
+                    return True
+            elif judge(placed):
+                return True
+    return False
+
+
+def _xargs_unseen(segment: str, tokens: list[str]) -> bool:
+    """A command xargs (or parallel) runs whose files come from its input,
+    which the gate does not see: a recursive search, walk or copy, always;
+    a reader (`_XARGS_READERS`) when the input is a file (`< file`, `-a
+    file`, `--arg-file`). A reader fed by a pipe is a stated limit: the
+    producer's own words are judged (`echo ~/.ssh/id | xargs cat` asks), and
+    `find . | xargs grep` is ordinary work."""
+    try:
+        start = rules.command_start(rules._tokens(segment))
+    except Exception:      # noqa: BLE001 — a parse failure adds nothing here
+        return False
+    front = start[:max(0, len(start) - len(tokens))]
+    if not any(w.rsplit("/", 1)[-1].lower() in _XARGS for w in front):
+        return False
+    if _walk_recursive(tokens):
+        return True
+    program = tokens[0].rsplit("/", 1)[-1].lower() if tokens else ""
+    if program not in _XARGS_READERS:
+        return False
+    return ("<" in start or any(w == "-a" or w.startswith(("--arg-file", "-a"))
+                                for w in front))
+
+
+def _walk_recursive(tokens: list[str]) -> bool:
+    """Whether the command reads or lists every file below the folders it
+    names (`_WALKERS`, grep/rg by their options, `ls -R`, `cp -r`)."""
+    if not tokens:
+        return False
+    from jarvis.tools import shell as v1_shell
+    program = tokens[0].rsplit("/", 1)[-1].lower()
+    words = tokens[1:]
+    if program in _GREPS or program == "rg":
+        recursive, follows = v1_shell._search_modes("grep" if program in _GREPS else "rg", tokens)
+        return recursive or bool(follows)
+    if program in _RECURSIVE_FLAG:
+        letters = _RECURSIVE_FLAG[program]
+        return any((w.startswith("-") and not w.startswith("--") and any(c in w[1:] for c in letters))
+                   or w in ("--recursive", "--archive") for w in words)
+    return program in _WALKERS
+
+
 def _shell_walk_holds(tokens: list[str], bases) -> bool:
     """A recursive search or walk whose root holds a credential folder or
     store (`files.credential_folder_holds`, the read tools' reading), or lies
@@ -1104,40 +1275,52 @@ def _shell_walk_holds(tokens: list[str], bases) -> bool:
     leading folders), and with no operand that names a path, the folder it
     runs in. Asked (`credentials-path`, no Always), as v2's shell asks for
     credential folders."""
-    if not tokens:
-        return False
-    from jarvis.tools import shell as v1_shell
-    program = tokens[0].rsplit("/", 1)[-1].lower()
-    words = tokens[1:]
-    if program in _GREPS or program == "rg":
-        recursive, follows = v1_shell._search_modes("grep" if program in _GREPS else "rg", tokens)
-        recursive = recursive or bool(follows)
-    elif program in _RECURSIVE_FLAG:
-        letters = _RECURSIVE_FLAG[program]
-        recursive = any((w.startswith("-") and not w.startswith("--") and any(c in w[1:] for c in letters))
-                        or w in ("--recursive", "--archive") for w in words)
-    else:
-        recursive = program in _WALKERS
-    if not recursive:
+    if not _walk_recursive(tokens):
         return False
     judge = v1_files.credential_folder_judge()
-    operands = [w for w in words if w and not w.startswith("-")]
+    operands = [w for w in tokens[1:] if w and not w.startswith("-")]
     pathish = [w for w in operands
-               if w.startswith(("/", "~", "$", ".")) or "/" in w
-               or any(os.path.exists(str(_placed(w, b))) for b in bases)]
+               if w.startswith(("/", "~", "$", ".", "`")) or "/" in w
+               or any(b != UNSEEN and os.path.exists(str(_placed(w, b))) for b in bases)]
     for word in pathish or ["."]:
-        for spelling in _spellings(word):
-            for base in bases:
-                text = str(_placed(spelling, base))
-                parts = text.split("/")
-                wild = next((i for i, part in enumerate(parts) if _GLOB_MAGIC & set(part)), None)
-                fixed = "/".join(parts[:wild]) or "/" if wild is not None else text
-                if judge(fixed) or v1_files.credential_folder_holds(fixed):
-                    return True
+        for base in bases:
+            # A root the gate cannot place (`$OLDPWD`, `$(…)`, after `cd -`):
+            # asked (delta review of #339).
+            text = _place_word(word, base)
+            if text is None:
+                return True
+            parts = text.split("/")
+            wild = next((i for i, part in enumerate(parts) if _GLOB_MAGIC & set(part)), None)
+            fixed = ("/".join(parts[:wild]) or "/") if wild is not None else text
+            if judge(fixed) or v1_files.credential_folder_holds(fixed):
+                return True
     return False
 
 
-def _reads_credential(tokens: list[str]) -> bool:
+_GIT_ENV_KEY = re.compile(r"(?:GIT_CONFIG_KEY_\d+)=(.*)", re.S)
+_GIT_ENV_PARAMETERS = re.compile(r"GIT_CONFIG_PARAMETERS=(.*)", re.S)
+
+
+def _git_env_risky(segment: str) -> bool:
+    """`GIT_CONFIG_KEY_<n>=` or `GIT_CONFIG_PARAMETERS=` on the line (as an
+    assignment, `env …` or `export …`), read as git reads `-c`: an alias, a
+    credential setting or an extra header asks (delta review of #339)."""
+    try:
+        words = rules._tokens(segment)
+    except Exception:      # noqa: BLE001
+        return False
+    for word in words:
+        key = _GIT_ENV_KEY.fullmatch(word)
+        if key and _git_risky_key(key.group(1).strip("'\"")):
+            return True
+        params = _GIT_ENV_PARAMETERS.fullmatch(word)
+        if params and any(_git_risky_key(part.strip("'\" ")) or "credential" in part.lower()
+                          for part in re.split(r"'\s+'|\s+", params.group(1))):
+            return True
+    return False
+
+
+def _reads_credential(tokens: list[str], bases=(None,)) -> bool:
     """Whether the command (from its program on) prints or hands out a
     stored credential: `git credential fill|approve|reject` and git's
     `credential-<helper>` subcommands, a git credential setting read or set
@@ -1150,13 +1333,13 @@ def _reads_credential(tokens: list[str]) -> bool:
     if any(fnmatch(program, stem) for stem in _CREDENTIAL_READ_STEMS):
         return True
     if program == "git":
-        return _git_credential(tokens)
+        return _git_credential(tokens, bases)
     rest = [token.lower() for token in tokens[1:]]
     return any(fnmatch(program, phrase[0]) and _phrase_ordered(phrase[1:], rest)
                for phrase in _CREDENTIAL_READ_PHRASES)
 
 
-def _git_credential(tokens: list[str]) -> bool:
+def _git_credential(tokens: list[str], bases=(None,)) -> bool:
     """git's subcommand, past its global options: `credential` or
     `credential-<helper>` (not its `--help`), or `config` naming a credential
     setting, a `url.*` or `*.extraheader` one or an alias, or listing them
@@ -1186,7 +1369,7 @@ def _git_credential(tokens: list[str]) -> bool:
         if low == "credential" or low.startswith("credential-"):
             return not (rest and rest[0] in ("--help", "-h"))
         if low == "config":
-            if _git_config_repo_file(tokens[index + 1:]):
+            if _git_config_repo_file(tokens[index + 1:], bases):
                 return False
             # A credential setting, an alias or an extra header named, or a
             # listing that prints them all: `credential.*`, `url.*` and
@@ -1218,7 +1401,7 @@ _GIT_CONFIG_LISTS = frozenset({"--get-regexp", "--regexp", "--get-urlmatch", "--
 _GIT_FILE_OPTIONS = ("-f", "--file", "--blob")
 
 
-def _git_config_repo_file(words: list[str]) -> bool:
+def _git_config_repo_file(words: list[str], bases=(None,)) -> bool:
     """`git config` reads only a repository file it names (`-f
     .gitmodules`, `--file=x`, `--blob HEAD:.gitmodules`): not the user's or
     a repository's own configuration (`~/.gitconfig`, `.git/config`,
@@ -1242,12 +1425,23 @@ def _git_config_repo_file(words: list[str]) -> bool:
     if option == "--blob":
         path = value.split(":", 1)[1] if ":" in value else ""
         return bool(path) and ".git" not in PurePosixPath(path).parts
-    path = PurePosixPath(value)
-    if (".git" in path.parts or path.name.lower() in (".gitconfig", "gitconfig")
-            or (path.name == "config" and path.parent.name == "git")
-            or value.startswith("~") or str(path).startswith("/etc/")):
+    if value.startswith("~"):
         return False
-    return not _under_credential_dir(value if "/" in value else "./" + value)
+    judge = v1_files.credential_folder_judge()
+    # Judged as written and where it resolves, in each folder it may run
+    # in: `link.cfg -> ~/.gitconfig` is the user's configuration (delta
+    # review of #339).
+    for base in bases:
+        placed = _place_word(value, base)
+        if placed is None:
+            return False
+        for form in (value, placed, os.path.realpath(placed)):
+            path = PurePosixPath(form)
+            if (".git" in path.parts or path.name.lower() in (".gitconfig", "gitconfig")
+                    or (path.name == "config" and path.parent.name == "git")
+                    or str(path).startswith("/etc/") or (path.is_absolute() and judge(form))):
+                return False
+    return True
 
 
 def _path_words(segment: str) -> list[str]:
@@ -1395,6 +1589,28 @@ def _inner_segments(lines: list[str]) -> list | None:
     return out
 
 
+def _cd_bases(segments, bases) -> list:
+    """Every folder a `cd`/`pushd` among `segments` moves the shell to, in
+    order, each placed from where the shell then is (`cd ~ && cd .ssh` is
+    `~/.ssh`); `cd` alone is `~`; `cd -`, `cd $VAR` or a substitution is
+    `UNSEEN` (delta review of #339). A union, not a flow: a word before the
+    `cd` is judged there too, which only adds asks."""
+    found: list = []
+    current = list(bases)
+    for _segment, tokens, _stems in segments:
+        if not tokens or tokens[0] not in ("cd", "pushd"):
+            continue
+        operands = [w for w in tokens[1:] if not w.startswith("-") or w == "-"]
+        target = operands[0] if operands else "~"
+        if target == "-":
+            moved = [UNSEEN]
+        else:
+            moved = [(_place_word(target, b) or UNSEEN) for b in current]
+        current = list(dict.fromkeys(moved))
+        found.extend(current)
+    return list(dict.fromkeys(found))
+
+
 def always_ask_match(tool: str, args: dict, brief: Brief | None = None,
                      project: Project | None = None, *, cwd: str | None = None,
                      shell_cwd: str | None = None) -> tuple[str, str] | None:
@@ -1426,6 +1642,9 @@ def always_ask_match(tool: str, args: dict, brief: Brief | None = None,
             segments.append((segment, inner, [inner[0].rsplit("/", 1)[-1].lower()]))
     targets = file_targets(tool, args) if tool in FILE_TOOLS else []
     inner = _inner_segments(lines) if lines else []
+    # Where a `cd`/`pushd` on the line (or in a string it hands a shell)
+    # moves the shell: a later relative word or walk is judged there too.
+    bases = bases + tuple(b for b in _cd_bases(segments + (inner or []), bases) if b not in bases)
     for rule in always_ask_for(brief, project):
         matched, rule_id, reason = _rule_matches(rule, tool, segments, targets,
                                                  inner=inner, bases=bases)

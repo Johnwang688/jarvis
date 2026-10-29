@@ -4685,7 +4685,10 @@ def cred_review_checks():
             decision, asker = call(tool, args)
             eq(decision, Decision.DENY, f"through /proc: {tool} {args}")
             eq(len(asker.seen), 0, f"never asked: {tool} {args}")
-        eq(denied_read("Read", {"file_path": "/proc/cpuinfo"}), None, "/proc/cpuinfo is not a process's folder")
+        # Delta review: any read-tool path written through /proc is refused
+        # (the gate cannot tell which process's it is); the shell's
+        # `cat /proc/cpuinfo` is not asked.
+        ok(denied_read("Read", {"file_path": "/proc/cpuinfo"}) is not None, "a read tool's /proc path is refused")
 
         # MED 2: aliases and glued -c.
         for command in ["git -c alias.x='!git credential fill' x", "git -c alias.st=status st",
@@ -4777,6 +4780,124 @@ def cred_review_checks():
             eq(decision, Decision.DENY, f"expanded and refused: {value}")
     print("  #339 review: shell walks, inner strings, /proc, aliases, extraheader, Windows profiles, "
           "~/.agents/skills, repo-file config reads")
+
+
+def cred_delta_checks():
+    """Delta review of #339. MED 1: a read-tool path written through /proc
+    or /dev/fd is refused before any folding (`/proc/self/cwd/../../.ssh/id`),
+    and the shell asks the same. `credentials-path` matches globs and brace
+    lists piece by piece, and a Windows profile's closed entries. A
+    recursive search or walk whose root the gate cannot see (xargs, an
+    unknown variable, a substitution, after `cd -`) asks, and so does one
+    after a `cd`/`pushd` to a holding folder, in `sh -c` too; a `cd` into a
+    credential folder asks. xargs running a reader on a file's list asks.
+    `GIT_CONFIG_KEY_*`/`GIT_CONFIG_PARAMETERS` are read like `-c`, and
+    `git config -f` resolves symlinks."""
+    from unittest.mock import patch
+    from jarvis.v2.approvals import DenyAll
+    from jarvis.v2.model import PermissionProfile as P
+    from jarvis.v2.permissions import L_ALWAYS_ASK, build_permit
+    from jarvis.v2.provider import Decision
+
+    with Sandbox() as box:
+        home = box.home
+        project = home / "projects" / "app"
+        (project / "src").mkdir(parents=True)
+        (project / ".gitmodules").write_text("[submodule]\n")
+        (home / ".ssh").mkdir()
+        (home / ".ssh" / "id").write_text("not a real credential\n")
+        (home / ".gitconfig").write_text("[user]\n")
+        (project / "g.cfg").symlink_to(home / ".gitconfig")
+        (project / "h.cfg").symlink_to(project / ".gitmodules")
+        users = box.root / "Users"
+        (users / "John" / "Documents").mkdir(parents=True)
+
+        def run(command, *, cwd=project, shell=None, asker=None):
+            asker = asker if asker is not None else Asker(Decision.ALLOW)
+            permit = build_permit(context(brief_for(P.AUTO, cwd=cwd)), asker)
+            return permit(*bash(command), brief_for(P.AUTO, cwd=cwd), shell_cwd=shell), asker
+
+        def asks(command, rule="credentials-", **kw):
+            decision, asker = run(command, **kw)
+            eq(decision, Decision.ALLOW, f"asked and approved: {command}")
+            ok(len(asker.seen) == 1, f"asked once: {command}")
+            if asker.seen:
+                ok(rule in asker.seen[-1].reason, f"{command}: {rule} in {asker.seen[-1].reason!r}")
+                eq(asker.seen[-1].allowlistable, False, f"no Always: {command}")
+            eq(box.decisions[-1]["layer"], L_ALWAYS_ASK, f"layer 2: {command}")
+            eq(run(command, asker=DenyAll("nobody"), **kw)[0], Decision.DENY, f"no human: {command}")
+
+        def quiet(command, **kw):
+            _decision, asker = run(command, **kw)
+            eq(len(asker.seen), 0, f"not asked: {command}")
+
+        # MED 1.
+        for path in ("/proc/self/cwd/../../.ssh/id", "/proc/self/root/../" + str(home / ".ssh" / "id"),
+                     "/proc/1/../self/cwd/x", "/dev/fd/../fd/3", "/proc/cpuinfo",
+                     "../../../../../../../../proc/self/cwd/../../.ssh/id"):
+            for tool, key in (("Read", "file_path"), ("NotebookRead", "notebook_path"),
+                              ("Grep", "path"), ("LS", "path"), ("read_file", "path")):
+                asker = Asker(Decision.ALLOW)
+                permit = build_permit(context(brief_for(P.AUTO, cwd=project)), asker)
+                eq(permit(tool, {key: path, "pattern": "x"}, brief_for(P.AUTO, cwd=project)),
+                   Decision.DENY, f"through /proc: {tool} {path}")
+                eq(len(asker.seen), 0, f"never asked: {tool} {path}")
+        for command in ("cat /proc/self/cwd/../../.ssh/id", "head /proc/self/root/home/x/.ssh/id",
+                        "cat /proc/1/environ", "cp /proc/self/cwd/../x /tmp/y"):
+            asks(command, "credentials-path")
+        for command in ("cat /proc/cpuinfo", "cat /proc/meminfo", "ls /proc", "cat /dev/null"):
+            quiet(command)
+
+        # Globs and brace lists, piece by piece; Windows profiles.
+        for command in ("cat ~/.ss?/id", "cat ~/.config/g?/hosts.yml", "cat ~/.config/*/hosts.yml",
+                        "cat ~/.{ssh,aws}/x", "cat ~/.s[s]h/id", "cat $HOME/.ss*/id",
+                        "cp ~/.a?s/credentials /tmp/x", "cat ~/.git-cred*", "cat ~/.docker/c*", "ls ~/.c*",
+                        "cat " + str(home) + "/**/id", "cat ~/.*/hosts.yml", "cat ~/*/../.ssh/id",
+                        "cat .ss?/id", "cat ../../.ss?/id"):
+            asks(command, "credentials-path", **({"cwd": home} if command.startswith("cat .ss") else {}))
+        with patch.dict(os.environ, {"JARVIS_WINDOWS_USERS": str(users)}):
+            for command in (f"cat {users}/John/.ssh/id_rsa", f"cat {users}/*/.ssh/id_rsa",
+                            f"cat {users}/John/AppData/Roaming/x", f"cat {users}/John/appdata/x",
+                            f"cat {users}/John/.c*/gh/hosts.yml", f"cat {users}/John/NTUSER.DAT",
+                            f"cat {users}/John/*/x"):
+                asks(command, "credentials-path")
+            for command in (f"cat {users}/John/Documents/x", f"ls {users}/John/Doc*"):
+                quiet(command)
+        for command in ("cat src/*.py", "ls ~/projects/*", "cat ./*.md", "cat ~/notes/{a,b}.md",
+                        "cat ~/.config/other/*.json", "ls ~/projects/a*"):
+            quiet(command)
+
+        # Roots the gate cannot see, and cd/pushd.
+        for command in ("echo ~ | xargs grep -r tok", "xargs -I{} grep -r tok {}", "xargs -0 rg tok",
+                        "find ~/x | xargs -n1 ls -R", "printf '%s' ~ | xargs -I{} cp -r {} /tmp/y",
+                        "grep -r tok $OLDPWD", "rg tok ${XDG_CONFIG_HOME}", "grep -r tok $(echo ~)",
+                        "grep -r tok `echo ~`", "cd ~ && grep -r tok .", "cd && rg tok", "cd; rg tok",
+                        "pushd ~ && find . -name hosts.yml", "cd .. && cd .. && grep -r x .",
+                        "cd ~/.config; tar czf /tmp/c.tgz .", "sh -c 'cd ~ && rg tok'",
+                        "bash -c 'cd; ls -R'", "cd - && grep -r x .", "cd $OLDPWD && rg x",
+                        "cd ~/.ssh", "cd ~ && cd .ssh", "pushd ~/.aws", "cd ~/.ss?",
+                        "xargs cat < list", "xargs -a list cat", "xargs --arg-file=list head",
+                        "xargs -I{} cp {} /tmp/x < list"):
+            asks(command, "credentials-path")
+        for command in ("find . -name '*.py' | xargs grep foo", "git ls-files | xargs wc -l",
+                        "ls | xargs -n1 echo", "cd src && grep -r x .", "cd src; rg x", "pushd src && ls",
+                        "cd .. && ls", "grep -r x src", "echo $HOME", "cd ~/projects/app && rg x src",
+                        "xargs echo < list"):
+            quiet(command)
+
+        # GIT_CONFIG_* on the line, and -f through a symlink.
+        for command in ("GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.x GIT_CONFIG_VALUE_0='!sh' git x",
+                        "env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=credential.helper GIT_CONFIG_VALUE_0=store git fetch",
+                        "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=Alias.st GIT_CONFIG_VALUE_0=status; git st",
+                        "GIT_CONFIG_PARAMETERS=\"'alias.x=!sh'\" git x",
+                        "export GIT_CONFIG_PARAMETERS=\"'credential.helper'='store'\"",
+                        "GIT_CONFIG_KEY_0=http.extraheader GIT_CONFIG_VALUE_0=x git fetch",
+                        "git config -f g.cfg -l", "git config --file=./g.cfg --list"):
+            asks(command, "credentials-read")
+        for command in ("GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=color.ui GIT_CONFIG_VALUE_0=never git log",
+                        "git config -f .gitmodules -l", "git config -f h.cfg -l"):
+            quiet(command)
+    print("  #339 delta: /proc folding, globs and braces, Windows words, unseen roots, cd, xargs, git env")
 
 
 def relay_provenance_checks():
@@ -4942,7 +5063,7 @@ def main():
                     chat_git_checks, command_tool_checks, command_field_checks,
                     secret_service_checks, remote_listener_checks,
                     relay_provenance_checks, cred_dir_read_checks,
-                    cred_store_read_checks, cred_review_checks):
+                    cred_store_read_checks, cred_review_checks, cred_delta_checks):
         if ONLY and section.__name__ not in ONLY:
             continue
         print(f"-- {section.__name__}")
