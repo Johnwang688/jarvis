@@ -1,11 +1,11 @@
 // The phone UI audit's fixes in the views (docs/plans/2026-10-24-phone-surface-design.md §10.12):
-// C1, the owner's rows can never be drawn by a reply; H1, H4, H5, H6, M5.
+// C1, the owner's rows can never be drawn by a reply; H1, H5, H6, M5 (H4, the interim PR row, is replaced by PM-F: pr.test.ts).
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { emptyLog, inboxView, logRow, NOT_TYPED_WORDS, OWNER_ROW_CLASSES, taskView, transcriptView, typedHere,
   type InboxAnswers } from "./views";
-import { deskNote, type ChatThread, type LogRow, type TaskView } from "./model";
+import { type ChatThread, type LogRow, type TaskView } from "./model";
 import { parseInbox, type InboxRow } from "../lib/inbox";
 
 const CSS = readFileSync(join(__dirname, "mobile.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
@@ -169,52 +169,6 @@ function row(over: Partial<InboxRow> & { id: string; kind: string; rank: number 
 
 const answers = (): InboxAnswers => ({ openCard() {}, send() {}, retry() {}, busy: new Set(), notes: new Map(),
   drafts: new Map(), picks: new Map() });
-
-const SHA = "a3f9c2e1".repeat(5);
-const PR = row({ id: "pr:Johnwang688/Jarvis#337", kind: "pr", rank: 5, title: "PR #337 is ready to merge",
-  detail: { repo: "Johnwang688/Jarvis", number: 337, title: "PM-F: PR rows " + H, branch: "claude/pm-f", base: "main",
-    author: "Johnwang688", fork: false, head: SHA, checks: "failing", merge_state: "BLOCKED", url: "https://github.com/Johnwang688/Jarvis/pull/337",
-    facts: [{ text: "Johnwang688/Jarvis #337", items: [], more: 0 }, { text: "claude/pm-f → main", items: [], more: 0 },
-      { text: "checks: failing", items: ["lint " + H, "test"], more: 2 }, { text: "blocked by branch rules", items: [], more: 0 }],
-    flags: { flagged: true, items: [{ name: "jarvis/v2/remote_api.py", families: ["phone"] }], more: 0, incomplete: false },
-    summary: { does: "Adds the PR row layout " + H, blocked: "lint fails on views.ts" }, summary_state: "ready",
-    actions: [], why: "checks fail", method: null } });
-
-describe("H4 (interim, until PM-F): the PR row reads as a PR, not a key dump", () => {
-  it("shows the title, code's facts, the AI summary labelled, and the desk hint; never the SHA, a key or a link", () => {
-    for (const a of [undefined, answers()]) {
-      const view = inboxView(parseInbox([PR])!, () => {}, a);
-      const r = view.querySelector('[data-kind="pr"]')!;
-      expect(r.querySelector('[data-testid="m-pr-title"]')!.textContent).toBe("PM-F: PR rows " + H);
-      const facts = r.querySelector('[data-testid="m-pr-facts"]')!;
-      expect(facts.textContent).toBe("Johnwang688/Jarvis #337 · claude/pm-f → main · checks: failing lint " + H
-        + ", test +2 more · blocked by branch rules");
-      expect(Array.from(facts.querySelectorAll("bdi")).map((b) => b.textContent)).toEqual(["lint " + H, "test"]);
-      const ai = r.querySelector('[data-testid="m-pr-summary"]')!;
-      expect(ai.querySelector(".as-tag")!.textContent).toBe("AI SUMMARY");
-      expect(r.querySelector('[data-testid="m-pr-does"]')!.textContent).toBe("Does: Adds the PR row layout " + H);
-      expect(r.querySelector('[data-testid="m-pr-blocked"]')!.textContent).toBe("Blocked: lint fails on views.ts");
-      expect(r.querySelector('[data-testid="m-pr-flags"]')!.textContent).toBe("Touches safety files: jarvis/v2/remote_api.py");
-      expect(r.querySelector('[data-testid="m-desk-only"]')!.textContent).toBe("Merge it at the desk for now");
-      expect(r.textContent).not.toContain(SHA);
-      expect(r.textContent).not.toMatch(/a3f9c2e1a3f9/);
-      expect(r.querySelectorAll(".label").length).toBe(0);
-      expect(r.textContent).not.toMatch(/merge state|summary state|\bhead\b/);
-      expect(r.querySelectorAll("a, img, script, [onerror]").length).toBe(0);
-      expect(r.querySelectorAll("button").length).toBe(0);
-    }
-    expect(deskNote("pr")).toBe("Merge it at the desk for now");
-  });
-
-  it("without a summary, no AI slot; facts and the hint stay", () => {
-    const bare = row({ id: "pr:o/r#5", kind: "pr", rank: 5, title: "PR #5", detail: { repo: "o/r", number: 5, title: "x",
-      head: SHA, facts: null, summary: null, summary_state: "pending" } });
-    const r = inboxView(parseInbox([bare])!, () => {}, answers()).querySelector('[data-kind="pr"]')!;
-    expect(r.querySelector('[data-testid="m-pr-summary"]')).toBeNull();
-    expect(r.textContent).not.toContain(SHA);
-    expect(r.querySelector('[data-testid="m-desk-only"]')!.textContent).toBe("Merge it at the desk for now");
-  });
-});
 
 describe("H5: an unread chat is never shown as empty", () => {
   it("says Loading, or that it was not read offline; No messages yet only once read", () => {

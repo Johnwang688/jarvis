@@ -27,6 +27,10 @@ The world's `inbox` section (`state(mock)`):
     `prx:`/`pr_unavailable`) and a hidden one with `hidden`; without `all`
     the hidden ones are left out, as the daemon's `rows()` does. A mark on
     a row that is not markable is the daemon's 409.
+  - `pr_posts` (PM-F): every `POST /inbox/pr/<route>` (merge, update, hold,
+    fix, fix/cancel) that got through, as (route, body); `pr_reply`: route ->
+    (status, body) to answer with instead. A hold sets or clears the row's
+    `detail.hold` (and empties its actions), as `pr_merge.hold` does.
 A 200 answer removes the row and publishes `inbox_changed` `{ids: [id],
 reason: "answered"}`, as the daemon's bus does after the source's own event;
 an approval row's answer also drops the card (`approval_resolved`).
@@ -98,6 +102,43 @@ def handle(h, mock, method: str, path: str) -> bool:
                 h._json({"results": [{"ok": True, "id": i.get("id"), "delivery": "left"} for i in items]})
             return True
         h._err(404, "route not found")
+        return True
+    if parts[:2] == ["inbox", "pr"] and len(parts) in (3, 4) and method == "POST":
+        # PM-D's and PM-E's owner routes (PM-F drives them): the id in the body.
+        body = h._body()
+        route = "/".join(parts[2:])
+        s.setdefault("pr_posts", []).append((route, body))
+        mock.calls.append(("POST", "/inbox/pr/" + route, body if isinstance(body, dict) else {}))
+        scripted = (s.get("pr_reply") or {}).get(route)
+        if scripted:
+            status, payload = scripted
+            h._json(payload, status)
+            return True
+        row = next((r for r in s["rows"] if r.get("id") == (body or {}).get("id")), None)
+        if row is None:
+            h._err(409, "this pull request is no longer in the inbox")
+            return True
+        if route == "hold":
+            d = row["detail"]
+            if body.get("clear") is True:
+                d["hold"] = None
+            else:
+                d.update(hold={"note": body.get("note"), "set_at": "2026-10-29T09:00:00+00:00"}, actions=[],
+                         why="on hold: " + str(body.get("note")))
+            changed(mock, [row["id"]], "pr_hold")
+            h._json({"ok": True, "hold": d["hold"]})
+        elif route == "merge":
+            h._json({"ok": True, "result": "merged", "action": body.get("action", "merge"), "method": "merge",
+                     "head": body.get("head"), "receipt": True})
+        elif route == "update":
+            h._json({"ok": True, "result": "update requested", "action": "update", "method": None,
+                     "head": body.get("head"), "receipt": True})
+        elif route == "fix":
+            h._json({"ok": True, "task_id": "t0000099abcdef", "fix": None})
+        elif route == "fix/cancel":
+            h._json({"ok": True, "task_id": "t0000031abcdef", "state": "cancelled"})
+        else:
+            h._err(404, "route not found")
         return True
     if parts == ["inbox"] and method == "GET":
         s["reads"] += 1

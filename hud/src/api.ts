@@ -295,6 +295,12 @@ export const api = {
    * the owner's confirm of one draft (`{path, digest, save}`), design §6. */
   importChecks: (body: { path: string } | { path: string; digest: string; save: number }) =>
     req<unknown>(CHECK_IMPORT_PATH, json(body)),
+  /** PM-F: one owner action on a PR row (PM-D's and PM-E's owner-only routes): `merge`
+   * `{id, head, card, action?}`, `update` `{id, head, card}`, `hold` `{id, note}` or `{id, clear: true}`,
+   * `fix` `{id, head, card}`, `fix/cancel` `{id}`. The id is in the body (it holds "/" and "#").
+   * A 409 is "changed since you read it" (or another refusal), in the daemon's words. */
+  prAction: (route: "merge" | "update" | "hold" | "fix" | "fix/cancel", body: Record<string, unknown>) =>
+    req<unknown>(`/inbox/pr/${route}`, json(body)),
   /** The morning review (MR): what waited overnight; lib/review `parseReview` reads it. */
   review: () => req<unknown>("/inbox/review"),
   /** Approve selected: exactly the ticked deferred approvals, each with its tag. All or

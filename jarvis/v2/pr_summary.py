@@ -866,16 +866,41 @@ ENRICH_KEYS = ("facts", "flags", "summary", "summary_state", "summary_note", "su
                # when the PR has none).
                "fix")
 FILES_SHOWN = 100
-CARD_VERSION = 1
+CARD_VERSION = 3
+_FIX_CARD = ("state", "task_id", "count", "max", "commits", "ci_changed", "note", "summary", "summary_state")
+
+
+def fix_card(detail):
+    """The fix card's displayed fields, from the moment the fix card exists:
+    its state, which task and attempt ("fix 2 of 3"; review of #340 r2: a
+    stale OK must not carry over to another attempt at the same head), note,
+    commits, `ci_changed`, summary state and summary. While
+    the summary is pending the text is None and the state says so, so the
+    fix card appearing, and its summary landing, each change the card. None
+    when the PR has no fix."""
+    fix = detail.get("fix")
+    if not isinstance(fix, dict):
+        return None
+    return {k: fix.get(k) for k in _FIX_CARD}
+
+
+# What else the row shows, beside the facts, the summary, the method, the
+# actions and the fix card, that an OK answers too (review of #340 r3: the
+# PR's own title, the safety flags, why an action is or is not offered, and
+# the summary's state, caveat and reason all change what the owner agrees
+# to, so each is bound).
+_ROW_CARD = ("title", "flags", "why", "summary_state", "summary_note", "summary_reason")
 
 
 def card_key(detail) -> str:
     """PM-13's card: the SHA-256 of what an OK answers, exactly as the row
-    shows it: the facts parts, the summary, the method and the offered
-    actions (`detail` is the row's `detail`, or the same keys rebuilt from a
-    fresh read by `pr_merge`). Canonical JSON, keys sorted."""
+    shows it: the facts parts, the summary, the method, the offered actions,
+    the fix card (`fix_card`) and every other shown field (`_ROW_CARD`)
+    (`detail` is the row's `detail`, or the same keys rebuilt from a fresh
+    read by `pr_merge`). Canonical JSON, keys sorted."""
     shown = {"v": CARD_VERSION, "facts": detail.get("facts"), "summary": detail.get("summary"),
-             "method": detail.get("method"), "actions": list(detail.get("actions") or [])}
+             "method": detail.get("method"), "actions": list(detail.get("actions") or []),
+             "fix": fix_card(detail), **{k: detail.get(k) for k in _ROW_CARD}}
     text = json.dumps(shown, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
@@ -1173,7 +1198,9 @@ class PrSummaries:
         shows (`card_key`). No I/O but reading the small hold file while it
         is not yet read (or could not be); never raises."""
         out = self._detail(row)
-        out["card"] = card_key(out)
+        # Over the row as it is shown: its own fields (the PR's title) and
+        # these, so `pr_merge` recomputes the same card from the row it reads.
+        out["card"] = card_key({**(row.get("detail") or {}), **out})
         return out
 
     def _hold(self, repo, number):

@@ -41,10 +41,15 @@
 //     off (the daemon refuses them too, 409). Done (rank 8), the steps show
 //     their verdicts, and "Copy receipt" puts the Markdown receipt (made here
 //     from the row, `checkReceipt`) on the clipboard;
-//   - a pull request (inbox B3, IN-4): its title as text and "Open on
-//     GitHub", a plain link to the URL `prOf` validated (none otherwise). A
-//     click opens the page and answers nothing: merging stays the owner's
-//     own, on GitHub or under the merge gate;
+//   - a pull request (inbox B3, IN-4; PM-F): components/InboxPrRow.tsx.
+//     Its title, then Merge, Merge as is, Fix and Update as the row's
+//     `actions` allow (armed 600 ms after anything an OK answers changes),
+//     code's facts and flags, the AI summary in its held slot, the hold and
+//     the fix, and "Open on GitHub", a plain link to the URL `prOf`
+//     validated (none otherwise). Each action posts once to `POST
+//     /inbox/pr/<route>` with exactly the head and card the row drew; a 409
+//     is said in the daemon's words in the row and the inbox is read again
+//     (never retried). Hold (Q3) is the desk's own;
 //   - "PR list unavailable" (B3): which repositories could not be read, and
 //     why, in the daemon's words. Never shown as "nothing waiting".
 //   - an approval deferred during quiet hours (QH, rank 4, then 8 after a
@@ -91,6 +96,8 @@ import {
 import { reasonText } from "../lib/approvalCard";
 import { useArmed } from "../lib/armed";
 import { WhereLine } from "./Approvals";
+import { InboxPrRow, type PrNotice } from "./InboxPrRow";
+import { ROUTE_OF, actionBody, prRowOf, resultOk, resultWords, type PrAction, type PrRoute, type PrRowView } from "../lib/prRow";
 
 /**
  * A deferral's Approve and retry (QH): armed ARM_MS after it appears and
@@ -131,6 +138,8 @@ export interface InboxViewProps {
   onImportChecks: (body: { path: string } | { path: string; digest: string; save: number }) => Promise<unknown>;
   /** A snooze, dismissal or Undo of one row (B4, IN-7): the daemon judges the row's rank itself. */
   onMark: (rowId: string, body: MarkBody) => Promise<unknown>;
+  /** PM-F: one PR action, `POST /inbox/pr/<route>` (merge, update, hold, fix, fix/cancel). */
+  onPr?: (route: PrRoute, body: Record<string, unknown>) => Promise<unknown>;
   /** Puts text on the clipboard (tests pass their own). */
   copyText?: (text: string) => Promise<void>;
   /** The clock (tests pass their own). */
@@ -172,6 +181,8 @@ export function InboxView(props: InboxViewProps) {
   const [saved, setSaved] = useState<Record<number, string>>({});
   // B4: the hidden rows are listed only while the owner asks to see them.
   const [showHidden, setShowHidden] = useState(false);
+  // PM-F: each PR row's one notice (a result, or a refusal in the daemon's words).
+  const [prNotes, setPrNotes] = useState<Record<string, PrNotice>>({});
   const sending = useRef(new Set<string>());
   const blockedNow = useRef(props.blocked);
   blockedNow.current = props.blocked;
@@ -316,6 +327,61 @@ export function InboxView(props: InboxViewProps) {
   };
 
   const snooze = (row: InboxRow, choice: SnoozeFor) => mark(row, { snooze_until: snoozeUntil(choice, clock()) });
+
+  // PM-F: one PR action, posted once; a 409 is the daemon's words in the row, never retried.
+  const prKey = (row: InboxRow) => `${row.id}#pr`;
+  const prPost = async (row: InboxRow, route: PrRoute, body: Record<string, unknown>,
+                        words: (result: unknown) => PrNotice) => {
+    const key = prKey(row);
+    if (blockedNow.current || sending.current.has(key)) return;
+    sending.current.add(key);
+    setBusy((all) => ({ ...all, [key]: true }));
+    setPrNotes((all) => drop(all, row.id));
+    try {
+      if (!props.onPr) throw new Error("this HUD cannot act on pull requests");
+      const result = await props.onPr(route, body);
+      setPrNotes((all) => ({ ...all, [row.id]: words(result) }));
+    } catch (error) {
+      const why = error instanceof Error && error.message ? error.message.slice(0, 300) : "the daemon could not be reached";
+      const text = error instanceof ApiError && error.status === 409
+        ? why[0].toUpperCase() + why.slice(1) + (why.endsWith(".") ? "" : ".") : `Not sent: ${why}`;
+      setPrNotes((all) => ({ ...all, [row.id]: { text, tone: "amber" } }));
+    } finally {
+      sending.current.delete(key);
+      setBusy((all) => drop(all, key));
+      // The daemon's row is the truth: read it again either way (a 409 included).
+      void props.onReread();
+    }
+  };
+
+  const prAct = (row: InboxRow, action: PrAction, view: PrRowView) => {
+    // Exactly what the row drew (PM-D's MED 2): never the head or card read again now.
+    const body = actionBody(view, action);
+    if (!body) return;
+    void prPost(row, ROUTE_OF[action], body, (r) => ({ text: resultWords(action, r), tone: resultOk(action, r) ? "plain" : "amber" }));
+  };
+
+  const prHold = (row: InboxRow, note: string | null) =>
+    void prPost(row, "hold", note === null ? { id: row.id, clear: true } : { id: row.id, note },
+                () => ({ text: note === null ? "Hold cleared." : "On hold: Merge and Fix are hidden everywhere.", tone: "plain" }));
+
+  const prCancel = (row: InboxRow) =>
+    void prPost(row, "fix/cancel", { id: row.id }, (r) => ({ text: resultWords("cancel", r), tone: "plain" }));
+
+  const prQuestion = (rowId: string | null, taskId: string | null) => {
+    if (blockedNow.current) return;
+    if (rowId) {
+      // The question's own row, in this view: scrolled to and focused (never answered).
+      const el = Array.from(document.querySelectorAll<HTMLElement>('[data-testid="inbox-row"]')).find((r) => r.dataset.id === rowId);
+      if (el) {
+        el.tabIndex = -1;
+        el.scrollIntoView?.({ block: "center" });
+        el.focus({ preventScroll: true });
+        return;
+      }
+    }
+    if (taskId) props.onOpenTask(taskId);
+  };
 
   const open = (row: InboxRow) => {
     if (blockedNow.current) return;
@@ -633,26 +699,13 @@ export function InboxView(props: InboxViewProps) {
         </div>
       );
     }
-    const pull = prOf(row);
-    if (pull) {
+    const pr = prRowOf(row);
+    if (pr) {
       return (
-        <div className="ir-body">
-          {pull.title ? <div className="ir-text" data-testid="inbox-pr-title">{pull.title}</div> : null}
-          {pull.url ? (
-            <div className="ir-answer">
-              <a className="ir-link" data-testid="inbox-pr-link" href={pull.url} target="_blank"
-                 rel="noopener noreferrer" aria-disabled={props.blocked ? "true" : undefined}
-                 // Under a card nothing opens: a click, a middle click (auxclick)
-                 // or Enter on the focused link (as BrowserTabStrip and EditorTabs).
-                 onClick={(e) => { if (blockedNow.current) e.preventDefault(); }}
-                 onAuxClick={(e) => { if (blockedNow.current) e.preventDefault(); }}
-                 onMouseDown={(e) => { if (blockedNow.current && e.button === 1) e.preventDefault(); }}
-                 onKeyDown={(e) => { if (blockedNow.current && e.key === "Enter") e.preventDefault(); }}>
-                Open on GitHub
-              </a>
-            </div>
-          ) : null}
-        </div>
+        <InboxPrRow row={row} view={pr} rows={rows} url={prOf(row)?.url ?? null} blocked={props.blocked}
+                    busy={!!busy[prKey(row)]} notice={prNotes[row.id] ?? null} isBlocked={() => blockedNow.current}
+                    onAct={(action, view) => prAct(row, action, view)} onHold={(note) => prHold(row, note)}
+                    onCancelFix={() => prCancel(row)} onQuestion={prQuestion} />
       );
     }
     const unread = prUnavailableOf(row);

@@ -2789,7 +2789,9 @@ class PrFixes:
             view.update(count=_counted(fixes), max=MAX_FIXES)
             d["fix"] = view
             from .pr_facts import FIX
-            actions = list(d.get("actions") or [])
+            from .pr_summary import card_key
+            offered = list(d.get("actions") or [])
+            actions = list(offered)
             notes = []
             if FIX in actions and any(self._live_cached(f) for f in fixes):
                 actions.remove(FIX)
@@ -2800,6 +2802,10 @@ class PrFixes:
             if notes:
                 d["actions"] = actions
                 d["why"] = "; ".join(x for x in [d.get("why") or "", *notes] if x)
+            # The card covers the fix card and the final `why` (the row as
+            # shown), over the actions `decide` offers (before Fix was taken
+            # out above), which is what `pr_merge` recomputes.
+            d["card"] = card_key({**d, "actions": offered})
             ended = fix.get("ended_at")
             if ended and view["state"] not in (_LIVE - {BLOCKED}) | {START_FAILED} and \
                     self.clock() - _parse_utc(ended) < ATTENTION_S:

@@ -354,6 +354,29 @@ class Key(unittest.TestCase):
         self.assertRegex(base, r"^[0-9a-f]{64}$")
 
 
+class CardFix(unittest.TestCase):
+    """PM-F: the fix card's displayed fields are in the card from the moment it exists."""
+
+    FIX = {"state": "ready", "commits": 1, "ci_changed": False, "note": "fixed \u2014 merge?",
+           "summary": None, "summary_state": "pending", "count": 1, "max": 3}
+    BASE = {"facts": [], "summary": None, "method": "merge", "actions": ["merge"]}
+
+    def test_a_fix_card_appearing_changes_the_card(self):
+        none = S.card_key(self.BASE)
+        pending = S.card_key({**self.BASE, "fix": self.FIX})
+        self.assertNotEqual(pending, none, "a fix card still summarizing is a different card from no fix")
+        for more in (dict(state="pushed"), dict(commits=2), dict(ci_changed=True), dict(ci_changed=None),
+                     dict(note="x")):
+            self.assertNotEqual(S.card_key({**self.BASE, "fix": {**self.FIX, **more}}), pending, more)
+
+    def test_a_settled_fix_summary_changes_the_card(self):
+        pending = S.card_key({**self.BASE, "fix": self.FIX})
+        for change in (dict(summary="Removes the backup.", summary_state="ready"), dict(summary_state="failed")):
+            ready = S.card_key({**self.BASE, "fix": {**self.FIX, **change}})
+            self.assertNotEqual(ready, pending, change)
+        self.assertEqual(S.CARD_VERSION, 3)
+
+
 # -- the disk cache ---------------------------------------------------------------------------
 
 class Cache(Case):

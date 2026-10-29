@@ -70,6 +70,7 @@ import { afterChanged, allItems, approveBody, confirmationList, confirmedChanged
   UNTICKED_GONE, type ConfirmLine, type ReviewItem, type ReviewReport } from "../lib/review";
 import { reviewTabShown, reviewView, type ReviewActions } from "./review";
 import { staleAt } from "../lib/approvalSummary";
+import { ACTION_PROGRESS, actionBody, prRowOf, resultWords, type PrAction } from "../lib/prRow";
 
 export type Tab = "inbox" | "review" | "chats" | "tasks";
 
@@ -167,6 +168,8 @@ export class PhoneApp {
   /** Each draft's `client_id` (P-5): a retry after an unknown outcome is answered, not run, twice. */
   readonly clientIds = new Map<string, { id: string; text: string }>();
   readonly withdrawing = new Set<string>();
+  /** PM-F: what each PR row's fixed notice says while its action runs ("Asking for Face ID…", "Merging…"). */
+  readonly prProgress = new Map<string, string>();
   taskWrite: { id: string; confirming: Verb | null; busy: boolean; note: string } | null = null;
   /** P-7: the one "Hold to talk" button, shown in the open chat's box. */
   readonly talk: Talk;
@@ -726,6 +729,89 @@ export class PhoneApp {
     }
     if (!assertion) return done(null, "Cancelled, or the passkey was not verified. Nothing was approved.");
     return done(await this.post(this.path(row.id, "answer"), { action: "retry", assertion }));
+  }
+
+  /**
+   * PM-F, one action on a PR row (PM-D's phone routes; `fix` is PM-E's): a
+   * challenge bound to the row's head and card **as drawn** (`row` is the
+   * object the button was drawn from; nothing is read again here, PM-D's MED
+   * 2), the passkey, then the act with its assertion. Sent once, never
+   * retried: a 409 says the daemon's words in the row's notice and the inbox
+   * is read again, so the row is drawn as it is now.
+   */
+  async prAct(row: InboxRow, action: PrAction): Promise<void> {
+    const view = prRowOf(row);
+    const body = view ? actionBody(view, action) : null;
+    if (!view || !body || this.answering.has(row.id)) return;
+    const bound = { id: row.id, action, head: body.head, card: body.card };
+    this.flash = "";
+    this.answering.add(row.id);
+    this.notes.delete(row.id);
+    this.prProgress.set(row.id, ASKING_FACE_ID);
+    this.render();
+    const done = async (result: { status: number; body: Record<string, unknown> } | null, note?: string) => {
+      this.answering.delete(row.id);
+      this.prProgress.delete(row.id);
+      if (note !== undefined) this.notes.set(row.id, note);
+      else if (result && result.status === 200) {
+        const limited = result.body.authority === "limited" ? " (with Discord's authority: limited)" : "";
+        this.notes.set(row.id, resultWords(action, result.body) + limited);
+      } else if (result) this.notes.set(row.id, await this.refusedWith(result.status, result.body));
+      else if (sent) this.notes.set(row.id, "No answer came back: it may have been done. Look again in a moment.");
+      this.render();
+      void this.loadInbox();
+    };
+    let sent = false;
+    const options = await this.post("/m/api/inbox/pr/options", bound);
+    if (!options || options.status !== 200) return done(options);
+    let assertion: Record<string, unknown> | null = null;
+    try {
+      const publicKey = options.body.publicKey;
+      assertion = publicKey && typeof publicKey === "object" ? await this.getCredential(publicKey as Record<string, unknown>) : null;
+    } catch {
+      assertion = null;
+    }
+    if (!assertion) return done(null, "Cancelled, or the passkey was not verified. Nothing was done.");
+    this.prProgress.set(row.id, ACTION_PROGRESS[action]);
+    this.render();
+    sent = true;
+    return done(await this.post("/m/api/inbox/pr", { ...bound, assertion }));
+  }
+
+  /** PM-F: a PR fix's Cancel, through the task's own `task:` passkey flow (P-5's cancel). */
+  async cancelFix(row: InboxRow): Promise<void> {
+    const fix = prRowOf(row)?.fix;
+    const id = fix?.taskId;
+    if (!fix || !id || !fix.live || this.answering.has(row.id)) return;
+    this.flash = "";
+    this.answering.add(row.id);
+    this.notes.delete(row.id);
+    this.prProgress.set(row.id, ASKING_FACE_ID);
+    this.render();
+    const done = async (result: { status: number; body: Record<string, unknown> } | null, note?: string) => {
+      this.answering.delete(row.id);
+      this.prProgress.delete(row.id);
+      if (note !== undefined) this.notes.set(row.id, note);
+      else if (result && result.status === 200) this.notes.set(row.id, resultWords("cancel", result.body));
+      else if (result && result.status === 401) this.notes.set(row.id, "Not accepted: the passkey was not verified for this cancel.");
+      else if (result) this.notes.set(row.id, refusal(result.status, result.body, "Not cancelled"));
+      this.render();
+      void this.loadInbox();
+    };
+    const path = `/m/api/tasks/${encodeURIComponent(id)}/cancel`;
+    const options = await this.post(path + "/options", {});
+    if (!options || options.status !== 200) return done(options);
+    let assertion: Record<string, unknown> | null = null;
+    try {
+      const publicKey = options.body.publicKey;
+      assertion = publicKey && typeof publicKey === "object" ? await this.getCredential(publicKey as Record<string, unknown>) : null;
+    } catch {
+      assertion = null;
+    }
+    if (!assertion) return done(null, "Cancelled, or the passkey was not verified. The fix goes on.");
+    this.prProgress.set(row.id, "Cancelling the fix…");
+    this.render();
+    return done(await this.post(path, { assertion }));
   }
 
   /** A question's or a decision's answer, from its row. Sent once. */
@@ -1488,6 +1574,17 @@ export class PhoneApp {
           confirming: this.withdrawing,
           ask: (row) => { this.withdrawing.add(row.id); this.notes.delete(row.id); this.render(); },
           back: (row) => { this.withdrawing.delete(row.id); this.render(); },
+        },
+        pr: {
+          act: (row, action) => void this.prAct(row, action),
+          cancelFix: (row) => void this.cancelFix(row),
+          question: (rowId, taskId) => {
+            if (rowId) this.revealRow(rowId);
+            else if (taskId) void this.openTask(taskId);
+          },
+          limited: !!this.secure && !this.secure.ok,
+          progress: this.prProgress,
+          rows: this.inbox ?? [],
         },
       };
       view = inboxView(this.inbox, (row) => {

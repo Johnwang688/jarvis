@@ -20,8 +20,12 @@
 
 import { clockOf, decisionOf, deferredOf, groupRows, oneLine, questionOf, briefOf, textBlock, type InboxRow } from "../lib/inbox";
 import { recentChats, moreLabel } from "../lib/recentChats";
-import { AI_LABEL, recordSummary, startsCollapsed, summaryView } from "../lib/approvalSummary";
+import { recordSummary, startsCollapsed, summaryView } from "../lib/approvalSummary";
 import { rowCommand, summaryLines } from "./card";
+import {
+  AI_TAG, AT_DESK, actionLabel, fixCardLines, fixSummaryWords, methodWords, prButtons, prFixWords, prRowOf,
+  prSummaryWords, questionRow, type PrAction,
+} from "../lib/prRow";
 import type { Thread } from "../types";
 import { renderPhoneMarkdown } from "./markdown";
 import {
@@ -129,58 +133,141 @@ function genericDetail(row: InboxRow, box: HTMLElement) {
   }
 }
 
-const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
-
-/** A list of untrusted names (check names, paths), each in its own <bdi>, then "+N more". */
-function names(parent: HTMLElement, items: unknown, more: unknown) {
-  const list = Array.isArray(items) ? items.map((x) => oneLine(x, 120)).filter(Boolean).slice(0, 20) : [];
-  list.forEach((name, i) => parent.append(i ? ", " : " ", el("bdi", "", name)));
-  const n = typeof more === "number" && more > 0 ? Math.floor(more) : 0;
-  if (n) parent.append(` +${n} more`);
-}
 
 /**
- * H4 (phone audit), until PM-F: a PR row's title, code's facts line and the
- * AI summary's Does and Blocked lines, labelled as the model's. Never the
- * head SHA, never a link, never the raw keys. Each facts part is code's own
- * words (pr_facts.facts_parts), drawn apart with the phone's own separators;
- * a part's names are untrusted, each in its own <bdi>.
+ * PM-F (PM-24, PM-26, Q1, Q3, Q4): a PR row, top to bottom, after the row's
+ * title: the buttons (Fix and Update at the left, Merge and Merge as is at the
+ * right, far apart; or code's `why`), squash named before the OK, the hold's
+ * note (no hold control here), the fix's state and card, the row's fixed
+ * notice slot (two lines held: "Asking for Face ID…", then "Merging…", then
+ * the result or the refusal), code's facts parts (names each in a boxed
+ * <bdi>, a scanner labelled by code), the amber safety-file flags, then the
+ * AI summary in its held slot and code's note on it. Never a link, never the
+ * full head SHA. Each button hands the app this row as drawn: the app sends
+ * its head and card, never a value read again (PM-D's MED 2).
  */
-function prDetail(row: InboxRow, box: HTMLElement) {
-  const d = row.detail;
-  const title = oneLine(d.title, 300);
-  if (title) box.append(testid(el("p", "pr-title", title), "m-pr-title"));
-  const facts = testid(el("p", "pr-facts"), "m-pr-facts");
-  if (Array.isArray(d.facts)) {
-    d.facts.filter(isObj).slice(0, 16).forEach((part) => {
-      const words = oneLine(part.text, 200);
-      if (!words) return;
-      const span = el("span", "pr-fact", words);
-      names(span, part.items, part.more);
-      if (facts.childNodes.length) facts.append(" · ");
+function prBlock(row: InboxRow, box: HTMLElement, a?: InboxAnswers) {
+  const v = prRowOf(row);
+  if (!v) { genericDetail(row, box); return; }
+  const pr = a?.pr;
+  if (v.title) {
+    const t = testid(el("p", "pr-title"), "m-pr-title");
+    t.append(el("span", "k", "title "), el("bdi", "", v.title));
+    box.append(t);
+  }
+  const buttons = prButtons(v, { limited: !!pr?.limited });
+  const busy = !!a && a.busy.has(row.id);
+  if (pr) {
+    const acts = testid(el("div", "m-review-rowacts m-pr-acts"), "m-pr-acts");
+    const left = el("div", "m-pr-side");
+    const right = el("div", "m-pr-side m-pr-right");
+    for (const action of buttons.actions) {
+      const b = tap(actionLabel(v, action), () => pr.act(row, action),
+        "quiet m-send m-pr-act" + (action === "merge" || action === "merge_as_is" ? " m-pr-merge" : ""), `m-pr-act-${action}`);
+      b.disabled = busy;
+      (action === "merge" || action === "merge_as_is" ? right : left).append(b);
+    }
+    if (buttons.actions.length) {
+      acts.append(left, right);
+      box.append(acts);
+    }
+  }
+  const pressable = buttons.actions.length > 0 || (!!v.fix && prFixWords(v.fix).cancel);
+  const said = pr ? pr.progress.get(row.id) || a!.notes.get(row.id) || "" : "";
+  if (pr && (pressable || said)) {
+    // The fixed notice slot (M1/M2's rule for the card): on any row with something to press, two
+    // lines held under the buttons, so nothing it says moves one.
+    const notice = testid(el("p", "m-notice m-pr-notice", said), "m-pr-notice");
+    notice.setAttribute("role", "status");
+    notice.dataset.tone = pr.progress.get(row.id) ? "busy" : said ? "said" : "";
+    box.append(notice);
+  }
+  const why = buttons.desk ? AT_DESK : v.hold === null ? v.why : "";
+  if (why) box.append(testid(el("p", "pr-why" + (buttons.desk ? " pr-amber" : ""), why), "m-pr-why"));
+  const method = methodWords(v, buttons.actions);
+  if (method && pr) box.append(testid(el("p", "pr-method", method), "m-pr-method"));
+  if (v.hold !== null) {
+    const h = testid(el("p", "pr-hold"), "m-pr-hold");
+    h.append(el("span", "k", "On hold: "), el("bdi", "", v.hold || "no note"));
+    box.append(h);
+  }
+  if (v.fix) {
+    const words = prFixWords(v.fix);
+    const f = testid(el("div", "pr-fix"), "m-pr-fix");
+    f.dataset.state = v.fix.state;
+    f.dataset.tone = words.tone;
+    const line = el("p", "pr-fixline");
+    line.append(testid(el("span", "", words.text), "m-pr-fix-text"));
+    if (v.fix.max) line.append(el("span", "muted", ` · fix ${v.fix.count} of ${v.fix.max}`));
+    f.append(line);
+    if (words.card) {
+      const sw = fixSummaryWords(v.fix);
+      const slot = testid(el("div", "as-ai pr-summary as-" + sw.state), "m-pr-fix-summary");
+      slot.append(el("span", "as-tag", AI_TAG), el("span", "pr-label", "the fix: "), el("span", "as-text", sw.text));
+      f.append(slot);
+      const lines = fixCardLines(v.fix);
+      if (lines.commits) f.append(testid(el("p", "pr-note", lines.commits), "m-pr-fix-commits"));
+      if (lines.ci) f.append(testid(el("p", "pr-amber", lines.ci), "m-pr-fix-ci"));
+    }
+    if (pr && (words.question || words.cancel)) {
+      const fa = el("div", "m-pr-fixacts");
+      if (words.question) {
+        const q = questionRow(v.fix, pr.rows);
+        fa.append(tap(q ? "Answer its question" : "Open its task", () => pr.question(q, v.fix!.taskId), "link",
+          "m-pr-fix-question"));
+      }
+      if (words.cancel) {
+        const c = tap("Cancel the fix", () => pr.cancelFix(row), "quiet m-send", "m-pr-fix-cancel");
+        c.disabled = busy;
+        fa.append(c);
+      }
+      f.append(fa);
+    }
+    box.append(f);
+  }
+  if (v.facts) {
+    const facts = testid(el("p", "pr-facts"), "m-pr-facts");
+    v.facts.forEach((part, i) => {
+      const span = el("span", "pr-fact");
+      span.dataset.key = part.key;
+      if (i) facts.append(" · ");
+      span.append(part.text);
+      for (const n of part.items) {
+        span.append(" ", el("bdi", "pr-name", n.name));
+        if (n.scanner) span.append(testid(el("span", "pr-tag", " [secret scanner]"), "m-pr-scanner"));
+      }
+      if (part.more) span.append(` +${part.more} more`);
       facts.append(span);
     });
-  } else if (typeof d.facts === "string") {
-    facts.append(el("span", "pr-fact", oneLine(d.facts, 400)));
+    box.append(facts);
   }
-  if (facts.childNodes.length) box.append(facts);
-  const flags = isObj(d.flags) ? d.flags : null;
-  if (flags && Array.isArray(flags.items) && flags.items.length) {
-    const line = testid(el("p", "pr-flags", "Touches safety files:"), "m-pr-flags");
-    names(line, flags.items.map((f) => (isObj(f) ? f.name : "")), flags.more);
+  const flags = v.flags;
+  if (flags && (flags.items.length || flags.incomplete)) {
+    const line = testid(el("p", "pr-flags", "touches safety files:"), "m-pr-flags");
+    flags.items.forEach((f, i) => {
+      line.append(i ? "; " : " ", el("bdi", "pr-name", f.name));
+      if (f.families.length) line.append(` (${f.families.join(", ")})`);
+    });
+    if (flags.more) line.append(`; and ${flags.more} more`);
+    if (flags.incomplete) line.append("; not every changed file could be checked");
     box.append(line);
   }
-  // The model's words, set apart and labelled (the AS slot's look); only when there.
-  const sum = d.summary;
-  const does = isObj(sum) ? textBlock(sum.does, 400) : typeof sum === "string" ? textBlock(sum, 400) : "";
-  const blocked = isObj(sum) ? textBlock(sum.blocked, 400) : "";
-  if (does || blocked) {
-    const slot = testid(el("div", "as-ai as-ready pr-summary"), "m-pr-summary");
-    slot.append(el("span", "as-tag", AI_LABEL));
-    if (does) slot.append(testid(el("div", "as-text", (isObj(sum) ? "Does: " : "") + does), "m-pr-does"));
-    if (blocked) slot.append(testid(el("div", "as-text", "Blocked: " + blocked), "m-pr-blocked"));
-    box.append(slot);
+  // The model's words, labelled and set apart, in a slot held from the first frame (AS-14).
+  const sum = prSummaryWords(v);
+  const slot = testid(el("div", "as-ai pr-summary as-" + sum.state), "m-pr-summary");
+  slot.dataset.state = sum.state;
+  slot.append(el("span", "as-tag", AI_TAG));
+  if (sum.lines.length) {
+    for (const l of sum.lines) {
+      const d = testid(el("div", "as-text"), l.label === "Does" ? "m-pr-does" : "m-pr-blocked");
+      d.append(el("span", "pr-label", l.label + ": "), l.text);
+      slot.append(d);
+    }
+  } else {
+    slot.append(el("span", "as-text", sum.text));
   }
+  box.append(slot);
+  if (v.summaryNote) box.append(testid(el("p", "pr-note", "summary: " + v.summaryNote), "m-pr-summary-note"));
 }
 
 /** What the inbox may answer (P-4), and the app's state for it. */
@@ -201,6 +288,20 @@ export interface InboxAnswers {
   toggle?: (row: InboxRow, open: boolean) => void;
   /** P-5: a proposal's Withdraw, asked once before it is sent. */
   withdraw?: { confirming: ReadonlySet<string>; ask: (row: InboxRow) => void; back: (row: InboxRow) => void };
+  /** PM-F: a PR row's actions, each with its own passkey (the app's); none of them hold. */
+  pr?: {
+    /** An action on the row as drawn (its head and card are sent as they were drawn). */
+    act: (row: InboxRow, action: PrAction) => void;
+    /** The fix's Cancel: the task's own `task:` passkey flow. */
+    cancelFix: (row: InboxRow) => void;
+    /** The fix's question: its `tq:` row in the Inbox, or (none) its task. */
+    question: (rowId: string | null, taskId: string | null) => void;
+    /** §4.1 failed: a flagged PR is offered nothing here (Q1). */
+    limited: boolean;
+    /** What each row's notice says while its action runs. */
+    progress: ReadonlyMap<string, string>;
+    rows: readonly InboxRow[];
+  };
 }
 
 /** The kinds the phone answers itself (P-4). */
@@ -208,6 +309,7 @@ export function answersHere(row: InboxRow, a?: InboxAnswers): boolean {
   if (row.kind === "approval" || row.kind === "question" || row.kind === "task_question") return true;
   if (deferredOf(row)) return true;
   if (row.kind === "proposal") return !!a?.withdraw;
+  if (row.kind === "pr") return !!a?.pr;
   return row.kind === "decision" && !!decisionOf(row)?.open;
 }
 
@@ -360,11 +462,11 @@ export function inboxRow(row: InboxRow, open: (row: InboxRow) => void, answers?:
     }
     if (d.why) box.append(el("div", "label", "Why"), testid(el("p", "", d.why), "m-why"));
     if (!d.open) box.append(el("div", "label", "Your answer"), testid(el("p", "", d.answer), "m-answer"));
-  } else if (row.kind === "pr") prDetail(row, box);
+  } else if (row.kind === "pr") prBlock(row, box, answers);
   else genericDetail(row, box);
   if (box.childNodes.length) card.append(box);
-  if (first) {
-    // The buttons are already above.
+  if (first || (row.kind === "pr" && answers?.pr)) {
+    // The buttons are already above (a PR's are in its block).
   } else if (answers && answersHere(row, answers)) {
     card.append(answerBox(row, answers));
   } else {

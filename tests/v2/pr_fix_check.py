@@ -1139,7 +1139,7 @@ class Fixing(unittest.TestCase):
         self.summaries.facts[(facts.repo.lower(), facts.number)] = facts
         pr = {"repo": facts.repo, "number": facts.number, "branch": facts.branch, "author": "johnw",
               "fork": bool(facts.fork), "head": facts.head, "checks": facts.checks or "none",
-              "merge_state": facts.merge_state, "title": "t", "url": None,
+              "merge_state": facts.merge_state, "title": facts.title, "url": None,
               "created_at": "2026-10-28T10:00:00+00:00"}
         row = inbox_prs.pr_row(pr, self.project.id)
         with self.prs._lock:

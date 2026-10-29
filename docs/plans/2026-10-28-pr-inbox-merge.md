@@ -1,6 +1,6 @@
 # Plan: PR rows become "agent summary + OK to merge" (PM)
 
-**Status (2026-10-28): plan; PM-A, PM-B and PM-C built (PM-C as built at the end).** Written against main `a5798ea2`. It builds on the
+**Status (2026-10-29): plan; PM-A to PM-F built (each "As built" at the end).** Written against main `a5798ea2`. It builds on the
 owner inbox (IN-4, IN-7, `jarvis/v2/inbox_prs.py`), the phone surface (PH-4, PH-7, §4.1),
 the morning review (MR) and approval summaries (AS, PR #330, not merged). PM-n are the
 planner's defaults, reversible. The owner's decisions below are binding.
@@ -576,3 +576,73 @@ setting are asked; `sed` with `e`, `s///e` or `-f`, and any awk program (inline 
 asked; `git update-ref`, a tag or branch named `origin/…`, a fetch from a local path or URL or
 into a remote-tracking ref or tag from anything but `origin` + the base or the PR's branch,
 `git rebase`, and `-c pull.*|rebase.*|branch.*` are asked.
+
+## As built: PM-F (2026-10-29)
+
+UI only: no daemon route, field or rule changed. The shared rules are `hud/src/lib/prRow.ts`; the
+HUD row is `hud/src/components/InboxPrRow.tsx` (in `InboxView`), the phone's `prBlock` in
+`hud/src/mobile/views.ts` with `PhoneApp.prAct` and `cancelFix` in `mobile/app.ts`. #338's
+interim phone row ("Merge it at the desk for now") is gone; the read-only view says "Merge at
+the desk".
+
+- **Layout (PM-24), both surfaces:** the row's title (code), the PR's own title (labelled, in a
+  `<bdi>`), the buttons, the row's one notice slot, code's `why`, squash named before the OK
+  ("squash merge: merge commits are off for this repository", Q4), the hold, the fix, code's
+  facts parts (each name a boxed `<bdi>`), the amber "touches safety files" line, then the AI
+  summary in an `.as-ai` slot held two lines high from the first frame ("summarizing…", or
+  "AI summary unavailable: <reason>"), then `summary_note` as code's line under it. A scanner's
+  "[secret scanner]" is drawn as code's label only when the row's own `failing` marks that
+  check as a scanner; a check merely named "x [secret scanner]" stays one name.
+- **Binding:** every action sends the `head` and `card` the row drew (`actionBody` of the view
+  built at render); nothing is read again at click time. A 409 is said in the daemon's words in
+  the row, the inbox is read again, and nothing is retried.
+- **HUD:** Merge, Merge as is, Fix, Update post once to `/inbox/pr/<route>`; armed 600 ms after
+  anything the row shows changes (`prArmKey`: the whole view, so the PR title, the summary
+  caveat and the unavailable-summary reason re-arm too) through `useArmed`, and the click handler checks again. "Hold…"
+  opens a note box (200 characters) and Set hold posts `{id, note}`; a held row shows "On hold:
+  <note>" and Clear hold (`{id, clear: true}`), and no action button. The GitHub link (PM-25) is
+  last, small, `prOf`'s validated URL only.
+- **Phone:** Fix and Update at the left, Merge and Merge as is at the right, far apart (the
+  audit's H4 plan). Each action asks `/m/api/inbox/pr/options {id, action, head, card}`, then
+  the passkey, then `/m/api/inbox/pr` with the assertion; the row's fixed notice slot says
+  "Asking for Face ID…", then "Merging…" / "Starting fix…" / "Updating…", then the result
+  ("Merged.", "Not merged: head moved.", the refusal). A limited phone (`/m/api/me`'s
+  `secure.ok` false) hides every action on a PR the daemon does not mark unflagged and says
+  "touches safety files: answer it at the desk or on a fully checked phone" (Q1); the server
+  refuses it anyway. Held: the note, nothing to press, no hold control. No link, no head SHA.
+- **Fix (PM-21 to PM-23), from `detail.fix`:** "fix starting/running (task <id8>)" and "fix
+  waits on your answer" with **Cancel the fix** (HUD: `/inbox/pr/fix/cancel`; phone: the task's
+  own `cancel/options` and `cancel` passkey flow) and, for a question, "Answer its question"
+  (the task's `tq:` row, focused; "Open its task" when that row is not in the inbox); "fix
+  stopped: …", "fix pushed; checks still fail", "fix could not start: …" with **Fix again**
+  where `actions` offers Fix; "fix pushed; checks running"; amber "branch rewritten since your
+  Fix". The fix card reads code's "Fixed — merge?", the fix's summary in its own AI slot, "N
+  commits since your Fix", amber "the fix changed CI configuration" (or, `ci_changed` null,
+  "not every file of the fix could be checked for CI changes"), the row's flags, and the row's
+  Merge, bound to the row's (new) head and card. Rank 4 rows group under "Waiting on you".
+- **Tests:** vitest `lib/prRow.test.ts`, `components/InboxPrRow.test.ts`,
+  `mobile/pr.test.ts` (the interim H4 tests in `views.test.ts` removed), with mutants run by
+  hand (read again at click on each surface, the handler's arming check, the disabled
+  binding, Q1's pre-hide, Q3, READY's note, the scanner label, a cancelled passkey, the 409
+  re-read): each killed. Face: `hud_v2_inbox_check.py` section `pr_action` (the mock's
+  `/inbox/pr/*`), `hud_v2_phone_pr_check.py` (a real daemon, PM-C/PM-D on fake gh, the virtual
+  authenticator: one PR merged end to end, a moved card's 409, every state, Cancel, limited),
+  states in `tests/face/hud_v2_pr_rows.py`.
+
+Deviations, each the builder's call:
+
+1. **The fix card's daemon note is never drawn.** `fix.note` for `ready` is "fixed: <the model's
+   summary> — merge?"; the row draws code's "Fixed — merge?" and the summary only in its AI slot.
+2. **Cancel stays on a held row.** Q3 hides Merge and Fix; cancelling a running fix acts on
+   nothing the hold protects, so Cancel the fix is still offered.
+3. **A limited phone hides Update too** on a flagged PR, not only Merge and Fix: the server's
+   `phone_options` refuses every action there.
+4. **The fix card is in the card key (fixed after review).** `card_key` (version 2) covers the
+   fix card's state, note, commits, `ci_changed`, summary state and summary from the moment the
+   fix card exists (pending binds `summary_state` "pending" and no text), so the card appearing
+   and its summary landing each change the card.
+   `pr_fix.enrich` recomputes the row's card after the fix is in (over the actions `decide`
+   offered), and `pr_merge.judge` recomputes it from the row's current `fix`; a fix summary
+   that landed after the drawing is a 409 "changed since you read it".
+   `hud_v2_pr_fix_binding_check.py` pins it.
+5. The legacy row (no `card`, a daemon before PM-C) offers no action, only Hold… and the link.
