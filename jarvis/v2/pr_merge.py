@@ -369,10 +369,11 @@ def inbox_dir(daemon) -> Path:
 
 
 def phone_withheld(facts_parts: list, files) -> bool:
-    """Whether the phone's scrub (`remote_api.scrub_structure`) would change
-    the facts or the file list (then: answer it at the desk)."""
-    from .remote_api import scrub_structure
-    return scrub_structure({"facts": facts_parts, "files": files})[1]
+    """Whether the phone's scrub (`remote_api.scrub_pr`, `scrub_structure`
+    over the two) would change the facts or the file list (then: answer it
+    at the desk)."""
+    from .remote_api import scrub_pr
+    return scrub_pr({"facts": facts_parts, "files": files})[1]
 
 
 class PrActions:

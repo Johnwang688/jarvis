@@ -998,7 +998,9 @@ class Boundary(Phone):
     def test_agent_path_deny_covers_the_new_routes(self):
         port = config.REMOTE_PORT
         for path in ("/m/api/inbox/appr:x/answer", "/m/api/inbox/appr:x/answer/options",
-                     "/m/api/inbox/appr:x/detail", "/m/api/inbox/decisions/x"):
+                     "/m/api/inbox/appr:x/detail", "/m/api/inbox/decisions/x",
+                     # PM-D: the owner's Merge and Update on a PR row.
+                     "/m/api/inbox/pr", "/m/api/inbox/pr/options"):
             for line in (f"curl -X POST http://127.0.0.1:{port}{path}", f"curl http://localhost:{port}{path}",
                          f"curl https://box.tail1234.ts.net{path}", f"wget -qO- http://127.0.0.1:8402{path}"):
                 verdict = rules.decide(line)
