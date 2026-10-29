@@ -44,7 +44,7 @@ function noMarkup(node: Element) {
 function task(over: Partial<TaskView> = {}): TaskView {
   return { id: "bbbbbbbb", project_id: "cccccccc", brief: H, state: "running", updated: "2026-10-25T10:00:00Z",
     step: 2, steps: 5, openQuestion: "", plan: [H, "two"], report: { done: [H], changed: ["a.py"], verified: H,
-      open: [], next: H }, questions: [{ text: H, options: [H], blocking: true, answer: null }], branch: "jarvis/x", ...over };
+      open: [], next: H }, questions: [{ text: H, options: [H], blocking: true, answer: null, index: 0 }], branch: "jarvis/x", ...over };
 }
 
 describe("the phone's model (P-3)", () => {
@@ -182,7 +182,7 @@ describe("the phone's views: untrusted text stays text (P-3)", () => {
     const owner = logRow({ seq: 1, role: "owner", text: "fix it " + H, at: "2026-10-25T10:00:30Z", marks: ["via the phone"], cut: false });
     expect(owner.className).toBe("msg msg-owner");
     expect(owner.querySelector(".msg-bubble")!.textContent).toBe("fix it " + H);
-    expect(owner.querySelector(".msg-meta")!.textContent).toMatch(/^via the phone · \d\d:\d\d$/);
+    expect(owner.querySelector(".msg-meta")!.textContent).toMatch(/^You · via the phone · \d\d:\d\d$/);
     noMarkup(owner);
     const reply = logRow({ seq: 2, role: "Codex", text: "**done**", at: null, marks: [], cut: true });
     expect(reply.className).toBe("msg msg-reply");
@@ -222,9 +222,13 @@ describe("the phone's views: untrusted text stays text (P-3)", () => {
       noMarkup(item);
       expect(item.className).toBe("msg msg-flat");
       expect(item.querySelector(".msg-bubble")).toBeNull();
-      // The marks come first, above the words, each whole.
+      // The marks come first, above the words, each whole. Only the owner's own typing here (a
+      // message "not sent") says You, after VoiceOver's hidden "You: "; any other row's head
+      // starts "not typed by you", with no "You: " (review of #338, MED 1).
       const head = item.querySelector('[data-testid="m-msg-marks"]')!;
-      expect(item.firstElementChild).toBe(head);
+      const typed = r.marks.every((m) => ["not sent", "via the phone", "spoken", "steering"].includes(m));
+      expect(item.firstElementChild).toBe(typed ? item.querySelector(".m-sr") : head);
+      expect(head.firstElementChild!.textContent).toBe(typed ? "You" : "not typed by you");
       expect(head.className).toBe("msg-head");
       for (const mark of r.marks) expect(head.textContent).toContain(mark);
       expect(head.nextElementSibling!.textContent).toBe(r.text);
@@ -285,7 +289,8 @@ describe("the phone's views: untrusted text stays text (P-3)", () => {
     // It gives way last, and can (so a long role and marks never overflow the line's cap).
     expect(css).toMatch(/\.step-role-head \{ flex: 0 1000 auto;/);
     expect(css).toMatch(/\.step-role-marks \{ flex: 0 100 auto;/);
-    expect(css).toMatch(/\.step-role-tail \{ flex: 0 1 auto; min-width: 0;/);
+    // H1 (phone audit): the tail never shrinks; the title gives way (the cap kept by its ellipsis).
+    expect(css).toMatch(/\.step-role-tail \{ flex: none; \}/);
     const marked = logRow({ seq: 6, role, text: "x", at: null, marks: ["not typed by the owner"], cut: false });
     expect(marked.querySelector(".step-role-tail")!.textContent).toBe(" (d7278e2a), not the owner");
     expect(marked.querySelector(".step-role-marks")!.textContent).toBe(" · not typed by the owner");
@@ -313,7 +318,7 @@ describe("the phone's views: untrusted text stays text (P-3)", () => {
       status: { step: 1, steps: 3, open_question: "q?" }, plan: ["a"], report: { done: ["d"], changed: [], verified: "v", open: [], next: "n" },
       spec: { questions: [{ text: "which?", blocking: true, options: ["x"] }] } });
     expect(t!.report!.done).toEqual(["d"]);
-    expect(t!.questions[0]).toEqual({ text: "which?", options: ["x"], blocking: true, answer: null });
+    expect(t!.questions[0]).toEqual({ text: "which?", options: ["x"], blocking: true, answer: null, index: 0 });
   });
 });
 
