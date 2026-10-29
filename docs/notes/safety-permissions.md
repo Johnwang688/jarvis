@@ -3780,3 +3780,64 @@ offered (79), the rule missing from the defaults (229).
   | Repo-file reads asked | 5 |
   | `--help` asked | 2 |
   | `$HOME` not expanded | 27 |
+
+**Delta review of #339 (2026-10-29), same PR.**
+
+- **MED 1, finished: `/proc` paths are judged before any folding.**
+  - Read tools now judge a path by walking its components lexically, in
+    order (`_proc_reach`), instead of calling `abspath` first. Before,
+    `abspath` folded `/proc/self/cwd/../../.ssh/id` away.
+  - Read tools refuse any path written through `/proc` or `/dev/fd`,
+    including `/proc/cpuinfo`.
+  - The shell asks for `/proc/<pid>/{cwd,root,fd,…}` and `/dev/fd`.
+    `cat /proc/cpuinfo` is not asked.
+- **Globs, braces, relative words and Windows profiles in `credentials-path`.**
+  - Every shell word is placed where the shell would find it, including
+    relative words and words after a `cd` or `pushd` on the same line.
+  - Brace lists are expanded.
+  - Globs are matched piece by piece, case-folded, against each credential
+    folder and store (`~/.ss?/id`, `~/.config/g?/hosts.yml`). A `..` before
+    the first wildcard is folded first; a `..` after a wildcard asks.
+  - The same applies to a Windows profile's closed entries.
+- **Roots the gate cannot see now ask.** These recursive searches, walks
+  and copies ask:
+  - one run through xargs or parallel;
+  - one whose root holds a variable other than `$HOME`, or a `$(…)` or
+    backtick substitution;
+  - one run after `cd -` or `cd $VAR`;
+  - one run after a `cd` or `pushd` to a folder that holds a credential
+    folder, including inside `sh -c`. `cd` alone counts as `~`.
+
+  A `cd` into a credential folder also asks.
+- **xargs readers.** xargs running a reader (cat, head, grep, cp, tar, …)
+  asks when its input is a file (`< file`, `-a`, `--arg-file`). A reader
+  fed by a pipe is a **stated limit**: asking every
+  `find . | xargs grep` would over-ask ordinary work. The producer's own
+  words are still judged, so `echo ~/.ssh/id | xargs cat` asks.
+- **`GIT_CONFIG_*` and `git config -f`.**
+  - `GIT_CONFIG_KEY_<n>=` and `GIT_CONFIG_PARAMETERS=` are read like `-c`,
+    whether set as an assignment, with `env` or with `export`.
+  - `git config -f` resolves symlinks before treating a file as a
+    repository file.
+- **Stated limit: data flow through files the agent writes.** This can't
+  be fully traced. For example, a list written to a file and then fed to a
+  reader by a pipe. Here the gate is an accident guard, the framing the
+  owner chose for #337.
+- **Tests:** `cred_delta_checks`. Each mutant below was verified to fail:
+
+  | Mutant | Failed checks |
+  |---|---|
+  | `abspath` first | 12 |
+  | Shell `/proc` unjudged | 12 |
+  | Globs unmatched | 48 |
+  | Braces unexpanded | 3 |
+  | Relative words unplaced | 16 |
+  | Windows words ignored | 9 |
+  | `..` unfolded | 3 |
+  | xargs unjudged | 27 |
+  | Unplaceable root allowed | 18 |
+  | `cd` untracked | 32 |
+  | `cd -` placed | 3 |
+  | xargs file readers allowed | 12 |
+  | git env ignored | 18 |
+  | `-f` symlink unresolved | 3 |
