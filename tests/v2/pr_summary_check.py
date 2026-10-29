@@ -355,20 +355,25 @@ class Key(unittest.TestCase):
 
 
 class CardFix(unittest.TestCase):
-    """PM-F: the fix card's displayed fields are in the card once its summary has settled."""
+    """PM-F: the fix card's displayed fields are in the card from the moment it exists."""
 
     FIX = {"state": "ready", "commits": 1, "ci_changed": False, "note": "fixed \u2014 merge?",
            "summary": None, "summary_state": "pending", "count": 1, "max": 3}
+    BASE = {"facts": [], "summary": None, "method": "merge", "actions": ["merge"]}
+
+    def test_a_fix_card_appearing_changes_the_card(self):
+        none = S.card_key(self.BASE)
+        pending = S.card_key({**self.BASE, "fix": self.FIX})
+        self.assertNotEqual(pending, none, "a fix card still summarizing is a different card from no fix")
+        for more in (dict(state="pushed"), dict(commits=2), dict(ci_changed=True), dict(ci_changed=None),
+                     dict(note="x")):
+            self.assertNotEqual(S.card_key({**self.BASE, "fix": {**self.FIX, **more}}), pending, more)
 
     def test_a_settled_fix_summary_changes_the_card(self):
-        base = {"facts": [], "summary": None, "method": "merge", "actions": ["merge"]}
-        pending = S.card_key({**base, "fix": self.FIX})
-        self.assertEqual(pending, S.card_key(base), "a summary still being written binds nothing")
+        pending = S.card_key({**self.BASE, "fix": self.FIX})
         for change in (dict(summary="Removes the backup.", summary_state="ready"), dict(summary_state="failed")):
-            ready = S.card_key({**base, "fix": {**self.FIX, **change}})
+            ready = S.card_key({**self.BASE, "fix": {**self.FIX, **change}})
             self.assertNotEqual(ready, pending, change)
-            for more in (dict(state="pushed"), dict(commits=2), dict(ci_changed=True), dict(note="x")):
-                self.assertNotEqual(S.card_key({**base, "fix": {**self.FIX, **change, **more}}), ready, more)
         self.assertEqual(S.CARD_VERSION, 2)
 
 

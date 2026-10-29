@@ -31,8 +31,7 @@ and a passkey (`tests/v2/archive_check.py` greps every tool's source).
 
 **What an OK binds (PM-13).** The row carries `head` and `card`
 (`pr_summary.card_key`: sha256 over the facts parts, the summary, the
-method, the offered actions and the fix card once its summary has
-settled, exactly as the row shows them). Under a
+method, the offered actions and the fix card, exactly as the row shows them). Under a
 per-PR lock (a second action on the same PR while one runs is a 409, never
 a second run) the PR is read again (`pr_facts.read_pr`), and the action runs
 only when: no hold is set (checked before and after the read); the PR is

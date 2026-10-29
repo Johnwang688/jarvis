@@ -585,6 +585,18 @@ class Stale(Case):
         self.assertEqual(p.act("merge")["result"], "merged", "the card the row shows now")
         print("ok  the summary is in the card: one that changed since the owner read it is a 409")
 
+    def test_a_fix_card_that_appeared_since_is_a_409(self):
+        p = self.prs()
+        d = p.poll()
+        with p.source._lock:                # a fix card, still summarizing, joined the row after the drawing
+            p.source._rows[ROW]["detail"]["fix"] = {
+                "state": "ready", "task_id": "t0000037abcdef", "from_head": "9" * 40, "commits": 1,
+                "ci_changed": False, "note": "fixed \u2014 merge?", "summary": None,
+                "summary_state": "pending", "count": 1, "max": 3}
+        self.refused(lambda: p.act("merge", card=d["card"]))
+        self.assertEqual(p.run.acts(), [])
+        print("ok  the fix card is in the card: one that appeared since the owner read it is a 409")
+
     def test_closed_or_draft_runs_nothing(self):
         for kw, word in (({"state": "CLOSED"}, "closed"), ({"state": "MERGED"}, "merged"),
                          ({"isDraft": True}, "draft")):

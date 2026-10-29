@@ -871,12 +871,13 @@ _FIX_CARD = ("state", "commits", "ci_changed", "note", "summary", "summary_state
 
 
 def fix_card(detail):
-    """The fix card's displayed fields, once its summary has settled (ready,
-    or shown as unavailable); None while there is no fix or its summary is
-    still being written ("summarizing…" is not content), so the summary
-    landing always changes the card."""
+    """The fix card's displayed fields, from the moment the fix card exists:
+    its state, note, commits, `ci_changed`, summary state and summary. While
+    the summary is pending the text is None and the state says so, so the
+    fix card appearing, and its summary landing, each change the card. None
+    when the PR has no fix."""
     fix = detail.get("fix")
-    if not isinstance(fix, dict) or fix.get("summary_state") in (None, PENDING):
+    if not isinstance(fix, dict):
         return None
     return {k: fix.get(k) for k in _FIX_CARD}
 

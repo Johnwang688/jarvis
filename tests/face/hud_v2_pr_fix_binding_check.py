@@ -42,6 +42,9 @@ class FixSummaryBinding(unittest.TestCase):
                 "note": "fixed — merge?", "summary": None,
                 "summary_state": "pending", "count": 1, "max": 3,
             }
+            # The phone draws the row with the fix card pending: its card is
+            # the card over that detail (the daemon's `enrich` sets it so).
+            row["detail"]["card"] = card_key(row["detail"])
             phone.show([row])
             shown = phone.row(pmc.ROW)
             slot = shown.locator('[data-testid="m-pr-fix-summary"]')

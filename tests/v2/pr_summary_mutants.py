@@ -29,6 +29,16 @@ CHECK = "tests/v2/pr_summary_check.py"
 
 # (name, file, old, new, [the tests meant to fail])
 MUTANTS = [
+    ("card: a pending fix card binds nothing", PS,
+     "    if not isinstance(fix, dict):\n        return None\n    return {k: fix.get(k)",
+     "    if not isinstance(fix, dict) or fix.get(\"summary_state\") in (None, PENDING):\n        return None\n    return {k: fix.get(k)",
+     ["CardFix.test_a_fix_card_appearing_changes_the_card"]),
+    ("card: the fix's commits left out", PS,
+     '_FIX_CARD = ("state", "commits", "ci_changed",', '_FIX_CARD = ("state", "ci_changed",',
+     ["CardFix.test_a_fix_card_appearing_changes_the_card"]),
+    ("card: the fix's summary left out", PS,
+     '"note", "summary", "summary_state")', '"note")',
+     ["CardFix.test_a_settled_fix_summary_changes_the_card"]),
     ("model input: no second scrub", PS,
      "    text = pr_facts.scrub(untrusted.strip_invisible(text)).strip()\n",
      "    text = untrusted.strip_invisible(text).strip()\n",
