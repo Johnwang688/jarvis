@@ -900,6 +900,19 @@ class Scanners(Case):
                                  checks=json.dumps({"total_count": bad, "check_runs": runs})))
             self.assertTrue(all(c.scanner is None for c in facts.failing), bad)
 
+    def test_a_missing_or_malformed_app_slug_is_unknown(self):
+        for app in (None, "Not A Slug!", 7, {"name": "x"}):
+            run = check_run("test", job_url(1))
+            run["app"] = {"slug": app} if not isinstance(app, dict) else app
+            facts = self.scanner_read([failing("test", job_url(1))], [run], "BLOCKED")
+            self.assertIsNone(facts.failing[0].scanner, app)
+            self.assertEqual(pr_facts.actions(facts), (), app)       # Fix withheld
+        run = check_run("test", job_url(1))
+        del run["app"]
+        facts = self.scanner_read([failing("test", job_url(1))], [run], "UNSTABLE")
+        self.assertIsNone(facts.failing[0].scanner)
+        self.assertEqual(pr_facts.actions(facts), ("merge_as_is",))
+
     def test_a_status_is_never_a_scanner(self):
         status = [{"__typename": "StatusContext", "context": SCANNER_NAME, "state": "FAILURE",
                    "targetUrl": SCANNER_URL}]
@@ -1497,16 +1510,84 @@ class Mirror(Case):
         gone.mkdir()
         (gone / "HEAD").write_text("x")
         (mirror / "objects" / "pack" / "tmp_pack_left").write_bytes(b"x")
-        out = pr_facts.tidy_mirrors({REPO: [7], "Third/Repo": [1]}, git="/usr/bin/git")
-        self.assertEqual(out, {"removed": 1, "refs": 1})
+        scratch = pr_facts.mirrors_root() / "scratch" / pr_facts.mirror_key("Other/Gone")
+        scratch.mkdir(parents=True)
+        (scratch / "leftover").write_bytes(b"x")
+        out = pr_facts.tidy_mirrors({REPO: [7], "Third/Repo": [1]}, listing_complete=True,
+                                    git="/usr/bin/git")
+        self.assertEqual(out, {"removed": 1, "refs": 1, "busy": 0, "left": 0})
         self.assertFalse(gone.exists())
+        self.assertFalse(scratch.exists())                 # a dropped repository's scratch too
         self.assertEqual(refs(), ["refs/jarvis/base/6d61696e", "refs/jarvis/pull/7"])
         self.assertEqual(self.tmp_files(mirror), [])
         # The repository's PRs all closed: its mirror's PR refs all go.
         pr_facts.tidy_mirrors({REPO: []}, git="/usr/bin/git")
         self.assertEqual(refs(), ["refs/jarvis/base/6d61696e"])
-        pr_facts.tidy_mirrors({}, git="/usr/bin/git")
+        pr_facts.tidy_mirrors({}, listing_complete=True, git="/usr/bin/git")
         self.assertFalse(mirror.exists())
+
+    def mirrors_with_refs(self):
+        """Two mirrors with PR refs 7 and 8, a killed fetch's leftover and a
+        scratch folder each: everything a tidy could delete."""
+        src = source_repo(self.root)
+        conflicts_of(src, number=7)
+        conflicts_of(src, number=8)
+        other = pr_facts.mirror_path("Other/Repo")
+        other.mkdir()
+        (other / "HEAD").write_text("x")
+        for key in (pr_facts.mirror_key(REPO), pr_facts.mirror_key("Other/Repo")):
+            (pr_facts.mirrors_root() / "scratch" / key).mkdir(parents=True, exist_ok=True)
+        (pr_facts.mirror_path(REPO) / "objects" / "pack" / "tmp_pack_left").write_bytes(b"x")
+        return pr_facts.mirror_path(REPO), other
+
+    def snapshot(self):
+        root = pr_facts.mirrors_root()
+        return sorted(str(p.relative_to(root)) for p in root.rglob("*"))
+
+    def test_an_empty_or_partial_state_deletes_nothing(self):
+        self.mirrors_with_refs()
+        before = self.snapshot()
+        refs = git("--git-dir", str(pr_facts.mirror_path(REPO)), "for-each-ref", "--format=%(refname)")
+        for state, complete in (({}, False),                          # the poll read nothing
+                                ({REPO: None}, False),                # its list failed or was cut off
+                                ({REPO: None, "Other/Repo": None}, True),   # listed, not read whole
+                                ({"Third/Repo": [1]}, False)):        # the listing itself not whole
+            fake = FakeRun()
+            out = pr_facts.tidy_mirrors(state, listing_complete=complete, run=fake, git=GIT)
+            self.assertEqual((out["removed"], out["refs"]), (0, 0), state)
+            self.assertEqual(fake.calls, [], state)
+            self.assertEqual(self.snapshot(), before, state)
+        self.assertEqual(git("--git-dir", str(pr_facts.mirror_path(REPO)), "for-each-ref",
+                             "--format=%(refname)"), refs)
+
+    def test_only_the_repository_read_whole_is_tidied(self):
+        mirror, other = self.mirrors_with_refs()
+        out = pr_facts.tidy_mirrors({REPO: [7], "Other/Repo": None}, listing_complete=True,
+                                    git="/usr/bin/git")
+        self.assertEqual((out["removed"], out["refs"], out["left"]), (0, 1, 1))
+        self.assertTrue(other.exists())
+        self.assertTrue((pr_facts.mirrors_root() / "scratch" / pr_facts.mirror_key("Other/Repo")).exists())
+        self.assertFalse((pr_facts.mirrors_root() / "scratch" / pr_facts.mirror_key(REPO)).exists())
+
+    def test_a_busy_mirror_is_skipped_without_waiting(self):
+        mirror, _other = self.mirrors_with_refs()
+        before = self.snapshot()
+        lock = pr_facts._mirror_lock(pr_facts.mirror_key(REPO))
+        lock.acquire()
+        try:
+            result = {}
+            worker = threading.Thread(target=lambda: result.update(
+                pr_facts.tidy_mirrors({REPO: []}, run=FakeRun(), git=GIT)))
+            began = time.monotonic()
+            worker.start()
+            worker.join(5)
+            self.assertFalse(worker.is_alive(), "tidy waited on a busy mirror")
+            self.assertLess(time.monotonic() - began, 2)
+        finally:
+            lock.release()
+        self.assertEqual(result["busy"], 1)
+        self.assertEqual((result["removed"], result["refs"]), (0, 0))
+        self.assertEqual(self.snapshot(), before)
 
     def test_tidy_runs_hardened_local_git_only(self):
         mirror = pr_facts.mirror_path(REPO)
@@ -1734,6 +1815,46 @@ class Mutants(unittest.TestCase):
         self.fails(Mirror, "test_tidy_drops_closed_prs_refs_and_unlisted_mirrors",
                    patch.object(pr_facts, "delete_ref_argv",
                                 lambda git, mirror, ref: pr_facts.refs_argv(git, mirror)))
+
+    def test_tidy_ignoring_the_read_state(self):
+        real = pr_facts.tidy_mirrors
+
+        def mutant(state, *, listing_complete=False, **kw):
+            return real({r: list(n or []) for r, n in state.items()}, listing_complete=True, **kw)
+        self.fails(Mirror, "test_an_empty_or_partial_state_deletes_nothing",
+                   patch.object(pr_facts, "tidy_mirrors", mutant))
+
+    def test_tidy_waiting_on_a_busy_mirror(self):
+        real = pr_facts._mirror_lock
+
+        class Waits:
+            def __init__(self, lock):
+                self.lock = lock
+
+            def acquire(self, blocking=True):
+                return self.lock.acquire(timeout=4)
+
+            def release(self):
+                self.lock.release()
+
+            def __enter__(self):
+                self.lock.acquire()
+                return self
+
+            def __exit__(self, *exc):
+                self.lock.release()
+
+        self.fails(Mirror, "test_a_busy_mirror_is_skipped_without_waiting",
+                   patch.object(pr_facts, "_mirror_lock", lambda key: Waits(real(key))))
+
+    def test_a_missing_slug_as_not_a_scanner(self):
+        real = pr_facts._match
+
+        def mutant(item, runs):
+            run = real(item, runs)
+            return {**run, "app": run["app"] or "github-actions"} if run else run
+        self.fails(Scanners, "test_a_missing_or_malformed_app_slug_is_unknown",
+                   patch.object(pr_facts, "_match", mutant))
 
     def test_removing_the_merge_driver_hardening(self):
         from jarvis.v2.chat_git import _owner_env

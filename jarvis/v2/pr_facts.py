@@ -49,7 +49,8 @@ read, so the mirror itself only ever grows by what a fetch brings. Refs are
 `refs/jarvis/base/<hex of the branch>` and `refs/jarvis/pull/<N>`, so two
 base names (`a`, `a/b`) never collide. `tidy_mirrors` (for the poll, after
 it lists the open PRs) drops closed PRs' refs and the mirrors of
-repositories no longer listed.
+repositories no longer listed, touching only repositories whose PR list
+was read whole and never waiting on a busy mirror.
 
 **Validation.** The repo is `OWNER/REPO` by `chat_git.github_repo`'s rule,
 the number a positive int, SHAs 40 hex, branch names `valid_branch`'s. A
@@ -645,9 +646,9 @@ def _enrich(failing_names: list[dict], runs: list[dict] | None, complete: bool,
         if match is None:
             out.append(Check(name, "failing", None, None))
             continue
-        app = match["app"]
+        app = match["app"]                  # None: missing or malformed slug
         out.append(Check(
-            name, "failing", app in SECRET_SCANNERS, app,
+            name, "failing", None if app is None else app in SECRET_SCANNERS, app,
             shown(scrub(match["title"][:2000]), 200),
             scrub_head(match["summary"][:200_000], CHECK_TEXT_CAP)[0],
             job_id(match["details_url"], repo) if app == ACTIONS_APP else None))
@@ -1182,31 +1183,60 @@ def read_conflicts(p: _Pass, git: str, repo: str, number: int, base: str, base_o
     return tuple(shown(scrub(n), 200) for n in names), tuple(regions)
 
 
-def tidy_mirrors(open_prs: Mapping[str, Iterable[int]], *, run: Runner | None = None,
-                 git: str | None = None) -> dict:
-    """After a poll: every mirror of a repository not in `open_prs` removed;
-    in the rest, the refs of PRs no longer open deleted (at most
-    `REFS_PRUNED_MAX`), a killed fetch's leftovers removed, a mirror past
-    `MIRROR_CAP` removed. Objects that only closed PRs reached stay until
-    the cap rebuilds the mirror: a repack per poll would cost more than the
-    space. Returns counts; runs nothing that reads the network."""
+def tidy_mirrors(state: Mapping[str, Iterable[int] | None], *, listing_complete: bool = False,
+                 run: Runner | None = None, git: str | None = None) -> dict:
+    """After a poll, given each repository's read state: `state[repo]` is
+    the numbers of its open PRs when its PR list was read whole, and None
+    when it was not (the list failed, was cut at `PR_LIMIT`, or the
+    repository was skipped past `REPOS_MAX`).
+
+    Only a repository read whole is touched: the refs of its PRs no longer
+    open deleted (at most `REFS_PRUNED_MAX`), a killed fetch's leftovers
+    and its scratch object folder removed, its mirror removed past
+    `MIRROR_CAP`. A repository not read whole is left alone, so a failed or
+    partial list never prunes. A mirror (and scratch folder) of a
+    repository not in `state` at all is removed only when
+    `listing_complete` says every project's repository is in `state`; an
+    empty or partial state removes nothing.
+
+    Each mirror's lock is tried without waiting: a mirror busy with a read
+    is skipped this time, so this never stalls the poll. Objects that only
+    closed PRs reached stay until the cap rebuilds the mirror: a repack per
+    poll would cost more than the space. Returns counts; nothing here reads
+    the network."""
     from jarvis import gitops
     from .inbox_prs import run_bounded
     run = run or run_bounded
-    keys = {mirror_key(r): (r, {n for n in nums if valid_number(n)}) for r, nums in open_prs.items()
-            if valid_repo(r)}
-    root = mirrors_root()
-    out = {"removed": 0, "refs": 0}
-    for entry in sorted(root.iterdir()):
-        if not entry.name.endswith(".git"):
+    whole: dict[str, set[int]] = {}
+    listed: set[str] = set()
+    for repo, numbers in state.items():
+        if not valid_repo(repo):
             continue
-        key = entry.name[:-4]
-        with _mirror_lock(key):
-            if key not in keys:
-                _remove_tree(entry)
-                out["removed"] += 1
+        key = mirror_key(repo)
+        listed.add(key)
+        if numbers is not None:
+            whole[key] = {n for n in numbers if valid_number(n)}
+    root = mirrors_root()
+    scratch_root = root / "scratch"
+    keys = {e.name[:-4] for e in root.iterdir() if e.name.endswith(".git")}
+    if scratch_root.is_dir() and not scratch_root.is_symlink():
+        keys |= {e.name for e in scratch_root.iterdir()}
+    out = {"removed": 0, "refs": 0, "busy": 0, "left": 0}
+    for key in sorted(keys):
+        dropped = key not in listed and listing_complete
+        if key not in whole and not dropped:
+            out["left"] += 1               # not read whole, or not known to be gone
+            continue
+        lock = _mirror_lock(key)
+        if not lock.acquire(blocking=False):
+            out["busy"] += 1
+            continue
+        try:
+            entry = root / f"{key}.git"
+            _remove_tree(scratch_root / key)
+            if not os.path.lexists(entry):
                 continue
-            if entry.is_symlink() or not entry.is_dir():
+            if dropped or entry.is_symlink() or not entry.is_dir():
                 _remove_tree(entry)
                 out["removed"] += 1
                 continue
@@ -1216,7 +1246,7 @@ def tidy_mirrors(open_prs: Mapping[str, Iterable[int]], *, run: Runner | None = 
                 out["removed"] += 1
                 continue
             gitbin = git or gitops.git_binary()
-            keep = keys[key][1]
+            keep = whole[key]
             try:
                 data = run(refs_argv(gitbin, entry), local_env(), timeout=CALL_TIMEOUT_S, cap=GIT_CAP)
                 refs = [r for r in data.decode("utf-8", "replace").splitlines() if r]
@@ -1234,6 +1264,8 @@ def tidy_mirrors(open_prs: Mapping[str, Iterable[int]], *, run: Runner | None = 
                     out["refs"] += 1
                 except GhFailed:
                     continue
+        finally:
+            lock.release()
     return out
 
 
