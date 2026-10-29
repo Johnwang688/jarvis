@@ -191,6 +191,12 @@ def run(browser, check, until):
               tid("m-mic").inner_text() == "Hold to talk" and streams() == 0, str(streams()))
         height = tid("m-mic").bounding_box()["height"]
         check("P-7 the button is at least 44 px tall", height >= 44, str(height))
+        mic, text = tid("m-mic").bounding_box(), tid("m-compose-text").bounding_box()
+        check("P-7 the button is a round mic icon in the message bar, beside the box (2026-10-28)",
+              mic["width"] <= 56 and mic["x"] >= text["x"] + text["width"]
+              and abs((mic["y"] + mic["height"]) - (text["y"] + text["height"])) <= 2
+              and page.locator('[data-testid="m-compose"] .m-bar [data-testid="m-mic"] .m-mic-icon').count() == 1,
+              f"{mic} {text}")
         tid("m-compose-text").fill("please")
 
         hold(1500)
@@ -213,6 +219,13 @@ def run(browser, check, until):
               len(uploads) == 1 and tid("m-compose-text").input_value() == "please " + WORDS
               and live_tracks() == 0 and "Cancelled" in tid("m-talk-line").inner_text(),
               f"{uploads} {live_tracks()} {tid('m-talk-line').inner_text()}")
+
+        before = (streams(), len(uploads), tid("m-talk-line").inner_text())
+        hold(40)
+        page.wait_for_timeout(500)
+        check("P-7 a brush shorter than the hold delay does nothing: no mic, no upload, no new line (review of #331)",
+              (streams(), len(uploads), tid("m-talk-line").inner_text()) == before
+              and tid("m-mic").get_attribute("data-phase") == "idle", str(before))
 
         tid("m-compose-send").click()
         deadline = time.monotonic() + 10

@@ -101,7 +101,12 @@ html, body {
 .app-root { height: 100%; }
 
 .app {
-  height: 100%;
+  /* Sized to the visible viewport (viewport.ts), so the keyboard never covers the message box. */
+  position: fixed;
+  left: 0;
+  right: 0;
+  top: var(--vv-top, 0px);
+  height: var(--vv-h, 100%);
   display: flex;
   flex-direction: column;
   padding-left: env(safe-area-inset-left);
@@ -144,6 +149,8 @@ html, body {
   background: var(--bg-1);
   padding-bottom: env(safe-area-inset-bottom);
 }
+/* The keyboard is up: the message bar sits on it, the tab bar steps aside. */
+:root[data-keyboard="open"] .tabs { display: none; }
 
 .tap {
   min-height: 44px;
@@ -177,6 +184,8 @@ html, body {
 .empty { color: var(--text-muted); text-align: center; padding: 32px 8px; }
 .muted { color: var(--text-muted); }
 .small { font-size: 13px; }
+/* Words kept for screen readers (and the checks) on an icon button. */
+.m-sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .center { text-align: center; }
 .label { font-size: 12px; color: var(--text-muted); margin-top: 6px; }
 .plain { padding-left: 20px; }
@@ -240,10 +249,36 @@ p, li, h2, h3 { overflow-wrap: anywhere; }
   padding: 4px 0; z-index: 1; }
 .subtitle { font-size: 16px; font-weight: 600; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
   white-space: nowrap; }
-.transcript { display: flex; flex-direction: column; gap: 10px; }
-.msg { padding: 8px 10px; border-radius: var(--radius); background: var(--bg-1); border: 1px solid var(--border); }
-.msg[data-role="owner"] { background: var(--bg-2); }
-.msg-head { font-size: 12px; color: var(--text-muted); margin-bottom: 4px; }
+/* The transcript, Claude/Codex style (the owner's choice, 2026-10-28): no
+   boxes; the owner's words in a right-aligned bubble, a reply as plain
+   full-width text, a step (the daemon's lines, a relay) one muted line that
+   opens to its whole text. */
+.transcript { display: flex; flex-direction: column; gap: 12px; padding: 4px 0 12px; }
+.msg-owner { align-self: flex-end; max-width: 85%; display: flex; flex-direction: column; align-items: flex-end; gap: 2px; }
+.msg-bubble { background: var(--bg-3); border-radius: 18px; padding: 8px 14px; }
+.msg-meta { font-size: 11px; color: var(--text-muted); padding-right: 6px; }
+.msg-head { font-size: 12px; color: var(--text-muted); margin-bottom: 2px; }
+/* An owner row not typed in this chat (a decision's answer, a steer, one never sent): flat, its marks first. */
+.msg-flat { padding-left: 10px; border-left: 2px solid var(--border-strong); }
+.msg-flat .msg-head { color: var(--text-2); }
+.mark-warn { color: var(--amber); }
+.msg-step { margin: -6px 0; }
+.step-line { display: flex; align-items: center; gap: 6px; min-height: 44px; font-size: 13px; color: var(--text-muted);
+  list-style: none; cursor: pointer; -webkit-tap-highlight-color: transparent; }
+.step-line::-webkit-details-marker { display: none; }
+.step-line::before { content: "›"; flex: none; width: 10px; text-align: center; transition: transform 0.15s; }
+.step[open] > .step-line::before { transform: rotate(90deg); }
+.step-role { display: flex; flex: 0 1 auto; min-width: 0; max-width: 62%; white-space: nowrap; color: var(--text-2); }
+/* What gives way first in the folded line: the title, then the marks, the " (id), not the owner" last. */
+.step-role-head { flex: 0 1000 auto; min-width: 2ch; overflow: hidden; text-overflow: ellipsis; }
+.step-role-marks { flex: 0 100 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.step-role-tail { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.step-who { font-size: 12px; color: var(--text-2); margin: 0 0 4px 4px; padding-left: 10px; border-left: 2px solid var(--border);
+  overflow-wrap: anywhere; }
+.step-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.step-time { flex: none; font-size: 11px; }
+.step-body { font-size: 14px; color: var(--text-2); margin: 0 0 8px 4px; padding-left: 10px; border-left: 2px solid var(--border); }
+.step-who + .step-body { margin-top: -4px; }
 .plain-text { white-space: pre-wrap; overflow-wrap: anywhere; }
 .md { overflow-wrap: anywhere; }
 .md p, .md ul, .md ol, .md pre, .md blockquote, .md table { margin: 6px 0; }
@@ -379,10 +414,13 @@ p, li, h2, h3 { overflow-wrap: anywhere; }
 .m-choice { display: flex; align-items: center; gap: 8px; min-height: 44px; overflow-wrap: anywhere; }
 .m-choice input { width: 22px; height: 22px; flex: none; }
 
-/* P-6: "Turn on notifications", under the Inbox. */
-.notify { margin: 24px 0 8px; padding: 12px; border: 1px solid var(--border); border-radius: var(--radius);
-  background: var(--bg-1); }
-.notify-line { margin: 0 0 8px; color: var(--text-2); }
+/* P-6: notifications, under the Inbox: one compact row, its button small at the right. */
+.notify { display: flex; align-items: center; gap: 8px; min-height: 44px; margin: 16px 0 8px; padding: 0 2px 0 12px;
+  border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-1); }
+.notify-line { flex: 1; min-width: 0; margin: 6px 0; font-size: 14px; color: var(--text-2); }
+.notify-line.one-line { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.notify-hint { font-size: 12px; color: var(--text-muted); }
+.tap.notify-act { flex: none; padding: 0 12px; font-size: 14px; color: var(--accent); text-align: center; }
 .notify[data-state="blocked"] .notify-line, .notify[data-state="error"] .notify-line { color: var(--amber); }
 
 /* -- MR: the morning review (review.ts) --------------------------------------

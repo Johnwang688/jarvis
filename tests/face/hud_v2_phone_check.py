@@ -670,11 +670,14 @@ def app_checks(page, daemon, world, check, until, streamed, net, main):
     # P-6: under the Inbox, how to get notifications (desktop Chromium: no
     # Home Screen rule; the push itself needs a real push service).
     note = page.locator('[data-testid="m-notify"]')
-    check("P-6 Inbox: the notifications row says a push tells how many, never what",
-          note.count() == 1 and "never what" in note.inner_text()
+    # One compact row (2026-10-28); "count only, never what" is the "on" state's hint (notify.test.ts).
+    check("P-6 Inbox: the notifications row offers them, off",
+          note.count() == 1 and note.inner_text().startswith(("Notifications off", "Notifications could not"))
           and note.get_attribute("data-state") in ("off", "error"), note.inner_text() if note.count() else "")
-    check("P-6 Inbox: 'Turn on notifications' is offered", page.locator('[data-testid="m-notify-button"]')
-          .inner_text() == "Turn on notifications")
+    check("P-6 Inbox: 'Turn on notifications' is offered (a small 'Turn on' in one compact row, 2026-10-28)",
+          page.locator('[data-testid="m-notify-button"]').inner_text() == "Turn on"
+          and page.locator('[data-testid="m-notify-button"]').get_attribute("aria-label") == "Turn on notifications"
+          and 44 <= note.bounding_box()["height"] <= 60, str(note.bounding_box()))
     sw = page.evaluate("""fetch('/m/sw.js', {cache: 'no-store'}).then(async r => [r.status,
         r.headers.get('content-type'), await r.text()])""")
     check("P-6 the built service worker is served at /m/sw.js, a plain script that shows the count",
@@ -710,6 +713,30 @@ def app_checks(page, daemon, world, check, until, streamed, net, main):
           bad == ["Send"] and fields == 1 and page.locator('[data-testid="m-compose-text"]').count() == 1,
           f"{bad} {fields}")
     check("P-3 app: every tap target is at least 44 px tall (Chats)", not small_targets(), str(small_targets()))
+    # The owner's chat layout (2026-10-28): the owner's words in a right-aligned
+    # bubble, a reply as plain text with no box, and one slim bar pinned on the tab bar.
+    layout = page.evaluate("""(() => {
+        const r = (e) => e.getBoundingClientRect();
+        const owner = document.querySelector('[data-testid="m-msg"][data-role="owner"] .msg-bubble');
+        const reply = document.querySelector('[data-testid="m-msg"][data-role="Claude"]');
+        const main = r(document.querySelector('[data-testid="m-main"]'));
+        const bar = document.querySelector('[data-testid="m-compose"] .m-bar');
+        const tabs = r(document.querySelector('nav.tabs'));
+        const compose = r(document.querySelector('[data-testid="m-compose"]'));
+        const cs = getComputedStyle(reply);
+        return {ownerRight: main.right - r(owner).right, ownerLeft: r(owner).left - main.left,
+                ownerBg: getComputedStyle(owner).backgroundColor, replyBorder: cs.borderTopWidth,
+                replyBg: cs.backgroundColor, gap: tabs.top - compose.bottom,
+                inBar: [...bar.children].map(c => c.dataset.testid || c.className),
+                box: r(document.querySelector('[data-testid="m-compose-text"]')).height,
+                send: document.querySelector('[data-testid="m-compose-send"]').disabled};
+    })()""")
+    check("Chat layout: the owner's words in a right-aligned bubble, a reply plain (no box)",
+          layout["ownerRight"] < 20 and layout["ownerLeft"] > 30 and layout["ownerBg"] != "rgba(0, 0, 0, 0)"
+          and layout["replyBorder"] == "0px" and layout["replyBg"] == "rgba(0, 0, 0, 0)", str(layout))
+    check("Chat layout: one slim bar (box, mic, Send) pinned on the tab bar, Send off while empty",
+          layout["inBar"] == ["m-compose-text", "m-talk", "m-compose-send"]
+          and abs(layout["gap"]) <= 1 and layout["box"] < 60 and layout["send"], str(layout))
 
     # -- live: a reply lands while the transcript is open --------------------------------
     daemon.stores.threads._append(chat.id, "log.jsonl", {"at": "2026-10-25T10:05:00+00:00", "thread_id": chat.id,

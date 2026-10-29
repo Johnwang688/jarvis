@@ -98,7 +98,7 @@ def owner_typed(data: dict) -> bool:
     the DM, or typed into the chat on the phone (P-5: `via` "phone" with no
     `decision_id`; a decision answered on the phone carries one, and its text
     is code's frame, as `chat_reads` and the Discord mirror tell them apart)."""
-    if data.get("origin") != "owner":
+    if data.get("origin") != "owner" or data.get("written_by"):
         return False
     via = data.get("via")
     return via in OWNER_VIAS or (via == "phone" and not data.get("decision_id"))

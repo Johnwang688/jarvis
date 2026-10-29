@@ -1331,7 +1331,8 @@ def _deliver(daemon, thread_id, text: str, via: str) -> str:
     message = UserMessage(text, origin="owner", via="phone" if via == "phone" else "inbox",
                           desk=False, typed=text)
     try:
-        out = daemon.deliver_queued(thread_id, message)
+        # Code's words, never the owner's typing (review of PR #331): marked in the record.
+        out = daemon.deliver_queued(thread_id, message, written_by="deferral")
     except (DaemonError, APIError) as exc:
         LOG.info("A deferral's news was not delivered (%s)", type(exc).__name__)
         return "closed" if closed() else "failed"

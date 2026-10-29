@@ -57,14 +57,15 @@ import {
   parseDiff, parseEvent, parseLog, parseProjects, parseTask, parseTasks, parseThreads,
   type ChatThread, type DiffView, type LogRow, type Project, type StreamEvent, type TaskView,
 } from "./model";
-import { chatsView, el, inboxView, logRow, taskView, tasksView, transcriptView, tap, type InboxAnswers } from "./views";
+import { chatsView, el, inboxView, logRow, ownerChat, taskView, tasksView, transcriptView, tap, type InboxAnswers } from "./views";
 import { browserEnv, browserSend, Notifications, type PushEnv, type Send } from "./notify";
 import {
   chatSheetView, clientIdFor, composerView, MAYBE_DONE, MAYBE_SENT, MESSAGE_CHARS, parseModels, refusal, sentNote,
-  taskControlsView, taskSheetView, verbsFor,
-  type ProviderChoice, type Sheet, type Verb,
+  taskControlsView, taskSheetView, updateComposer, verbsFor,
+  type Composer, type ProviderChoice, type Sheet, type Verb,
 } from "./write";
 import { Talk, browserTalkEnv, type TalkEnv } from "./talk";
+import { followViewport } from "./viewport";
 import { afterChanged, allItems, approveBody, confirmationList, confirmedChanged, emptySelection, keptSelection, leaveBody, parseReview, toggled,
   UNTICKED_GONE, type ConfirmLine, type ReviewItem, type ReviewReport } from "../lib/review";
 import { reviewTabShown, reviewView, type ReviewActions } from "./review";
@@ -187,6 +188,8 @@ export class PhoneApp {
   private readonly main: HTMLElement;
   private readonly tabs: Record<Tab, HTMLButtonElement>;
   private logBusy = false;
+  /** An open transcript drawn again: where its scroll was ("end": at the newest message). */
+  private keepScroll: "end" | number | null = null;
   private logAgain = false;
 
   constructor(private readonly deps: AppDeps) {
@@ -792,6 +795,9 @@ export class PhoneApp {
     const open = this.thread;
     if (this.tab !== "chats" || !open || this.sheet) return;
     const old = this.main.querySelector('[data-testid="m-compose"]');
+    // The same box drawn again in place: the textarea stays, and with it the focus and the keyboard.
+    const state = this.composerState(open.id);
+    if (old && state && updateComposer(old, state)) return;
     const fresh = this.composer(open.id);
     if (!old || !fresh) return;
     old.replaceWith(fresh);
@@ -803,13 +809,22 @@ export class PhoneApp {
     // Only once the chat is known to be an owner's: a task's chats are the runner's.
     if (!meta) return null;
     if (meta.task_id || meta.role !== "chat") return el("p", "muted small center", "This chat is read only on the phone.");
-    return composerView({
+    return composerView(this.composerState(threadId)!);
+  }
+
+  /** What an owner's chat's message box shows, or null for any other chat. */
+  private composerState(threadId: string): Composer | null {
+    const meta = this.thread?.id === threadId ? this.thread.meta : null;
+    if (!meta || meta.task_id || meta.role !== "chat") return null;
+    return {
       draft: this.composeDrafts.get(threadId) ?? "", busy: this.sending.has(threadId),
       note: this.composeNotes.get(threadId) ?? "", online: this.online,
       send: (text) => void this.sendMessage(threadId, text),
       edit: (text) => { this.composeDrafts.set(threadId, text); },
       mic: this.talk.view(threadId),
-    });
+      // The box grew a line: the newest message stays in view if it was.
+      around: (change) => { const end = this.nearEnd(); change(); if (end) this.scrollToEnd(); },
+    };
   }
 
   /** P-7: a clip's words, added to that chat's draft after what is typed, and the box drawn again.
@@ -1087,7 +1102,7 @@ export class PhoneApp {
     open.rows.push(...rows);
     if (this.tab !== "chats" || !open.list) return;
     open.list.querySelector('[data-testid="m-empty"]')?.remove();
-    for (const row of rows) open.list.append(logRow(row));
+    for (const row of rows) open.list.append(logRow(row, ownerChat(open.meta)));
     if (atEnd) this.scrollToEnd();
   }
 
@@ -1353,6 +1368,8 @@ export class PhoneApp {
           openChat: (id) => void this.openThread(id),
         });
       } else if (this.thread) {
+        // Drawn again in place: at the bottom it stays there; scrolled up, it is not moved.
+        if (this.main.querySelector('[data-testid="m-transcript"]')) this.keepScroll = this.nearEnd() ? "end" : this.main.scrollTop;
         const built = transcriptView(this.thread.meta, this.thread.rows, this.thread.older, () => this.show("chats"),
           this.composer(this.thread.id));
         this.thread.list = built.list;
@@ -1402,6 +1419,10 @@ export class PhoneApp {
     }
     this.main.replaceChildren(view);
     this.rendered = this.tab;
+    const keep = this.keepScroll;
+    this.keepScroll = null;
+    if (keep === "end") this.scrollToEnd();
+    else if (keep !== null) this.main.scrollTop = keep;
   }
 
   private reviewActions(): ReviewActions {
@@ -1464,6 +1485,8 @@ export function startApp(deps: AppDeps): PhoneApp {
   const app = new PhoneApp(deps);
   app.start();
   if (typeof window !== "undefined") {
+    // The keyboard never covers the message box: the app follows the visible viewport.
+    followViewport(window, document.documentElement);
     window.addEventListener("offline", () => app.setOnline(false));
     window.addEventListener("online", () => void app.probe());
     document.addEventListener("visibilitychange", () => {

@@ -368,22 +368,92 @@ export function chatsView(projects: Project[] | null, threads: ChatThread[], exp
   return view;
 }
 
-export function logRow(row: LogRow): HTMLElement {
-  const item = testid(el("article", "msg"), "m-msg");
+/** The marks (chat_reads `_owner_row`) of words the owner typed into this chat:
+ * only an owner row whose every mark is one of these is drawn as the owner's
+ * bubble. Anything else ("via the inbox (not typed in this chat)", a phone
+ * decision's answer, "steering", "not sent", a mark this list does not know)
+ * is a flat row with its marks above the words (review of #331, MED 1). */
+export const TYPED_HERE_MARKS: ReadonlySet<string> = new Set(["via the phone", "via Discord", "via DM", "spoken"]);
+/** A mark shown in amber: the message never ran. */
+const WARN_MARKS: ReadonlySet<string> = new Set(["not sent"]);
+
+/** How a transcript row is drawn (Claude/Codex style, the owner's choice
+ * 2026-10-28): the owner's own words typed in this chat in a right-aligned
+ * bubble; an owner row with any other provenance flat, its marks above it; a
+ * reply as plain full-width Markdown; anything else (the daemon's own lines,
+ * another chat's relay) as one muted line that a tap opens to the whole text.
+ * A peer or a relay is never a bubble: it is not the owner's words. */
+export function rowStyle(role: string, marks: readonly string[] = [], ownerChat = true): "owner" | "flat" | "reply" | "step" {
+  if (role === "owner") return ownerChat && marks.every((m) => TYPED_HERE_MARKS.has(m)) ? "owner" : "flat";
+  return ASSISTANT_ROLES.has(role) ? "reply" : "step";
+}
+
+/** A step's role split so the folded line can cut its middle, never its end:
+ * "chat Docs (d7278e2a), not the owner" keeps " (d7278e2a), not the owner" whole. */
+export function roleParts(role: string): [string, string] {
+  const at = role.lastIndexOf(" (");
+  if (at > 0) return [role.slice(0, at), role.slice(at)];
+  const not = ", not the owner";
+  if (role.endsWith(not) && role.length > not.length) return [role.slice(0, -not.length), not];
+  return [role, ""];
+}
+
+/** An owner's own chat, known to be one: only there is an unmarked owner row the owner's typing. A
+ * task's threads take the runner's prompts as "owner" rows (review of #331), and an unknown thread
+ * is not assumed to be a chat. */
+export function ownerChat(meta: ChatThread | null | undefined): boolean {
+  return !!meta && meta.role === "chat" && !meta.task_id;
+}
+
+export function logRow(row: LogRow, inOwnerChat = true): HTMLElement {
+  const style = rowStyle(row.role, row.marks, inOwnerChat);
+  const item = testid(el("article", "msg msg-" + style), "m-msg");
   item.dataset.role = row.role;
   item.dataset.seq = String(row.seq);
-  const head = [row.role, ...row.marks, time(row.at)].filter(Boolean).join(" · ");
-  item.append(el("div", "msg-head", head));
-  const body = el("div", "msg-body");
-  if (ASSISTANT_ROLES.has(row.role)) {
-    body.classList.add("md");
-    renderPhoneMarkdown(body, row.text);
-  } else {
-    body.classList.add("plain-text");
-    body.textContent = row.text;
+  const cut = row.cut ? el("p", "muted small", "The rest of this message is shown at the desk.") : null;
+  if (style === "owner") {
+    item.append(el("div", "msg-bubble plain-text", row.text));
+    const meta = [...row.marks, time(row.at).slice(0, 5)].filter(Boolean).join(" · ");
+    if (meta) item.append(el("div", "msg-meta", meta));
+    if (cut) item.append(cut);
+    return item;
   }
-  item.append(body);
-  if (row.cut) item.append(el("p", "muted small", "The rest of this message is shown at the desk."));
+  if (style === "flat") {
+    // Where the words came from first, then the words, never as a bubble.
+    const head = testid(el("div", "msg-head"), "m-msg-marks");
+    const parts: HTMLElement[] = [el("span", "", row.role)];
+    for (const mark of row.marks) parts.push(el("span", WARN_MARKS.has(mark) ? "mark mark-warn" : "mark", mark));
+    const at = time(row.at).slice(0, 5);
+    if (at) parts.push(el("span", "", at));
+    parts.forEach((part, i) => { if (i) head.append(" · "); head.append(part); });
+    item.append(head, el("div", "msg-body plain-text", row.text));
+    if (cut) item.append(cut);
+    return item;
+  }
+  if (style === "reply") {
+    item.append(el("div", "msg-head", [row.role, ...row.marks, time(row.at).slice(0, 5)].filter(Boolean).join(" · ")));
+    const body = el("div", "msg-body md");
+    renderPhoneMarkdown(body, row.text);
+    item.append(body);
+    if (cut) item.append(cut);
+    return item;
+  }
+  // A step: folded to one line; the whole text (all the detail there is) inside,
+  // after the whole role, so "…, not the owner" is always readable (review of #331, MED 2).
+  const who = [row.role, ...row.marks].filter(Boolean).join(" · ");
+  const fold = testid(el("details", "step"), "m-step");
+  const summary = el("summary", "step-line");
+  const first = row.text.split("\n", 1)[0];
+  summary.title = who;
+  summary.setAttribute("aria-label", first ? `${who}: ${first}` : who);
+  const [head, tail] = roleParts(row.role);
+  const role = el("span", "step-role");
+  role.append(el("span", "step-role-head", head), el("span", "step-role-tail", tail));
+  if (row.marks.length) role.append(el("span", "step-role-marks", " · " + row.marks.join(" · ")));
+  summary.append(role, el("span", "step-text", first), el("span", "step-time", time(row.at).slice(0, 5)));
+  fold.append(summary, testid(el("div", "step-who", who), "m-step-who"), el("div", "step-body plain-text", row.text));
+  if (cut) fold.append(cut);
+  item.append(fold);
   return item;
 }
 
@@ -396,7 +466,7 @@ export function transcriptView(thread: ChatThread | null, rows: LogRow[], older:
   view.append(bar);
   if (older) view.append(el("p", "muted small center", "Older messages are at the desk."));
   const list = testid(el("div", "transcript"), "m-transcript");
-  for (const row of rows) list.append(logRow(row));
+  for (const row of rows) list.append(logRow(row, ownerChat(thread)));
   if (!rows.length) list.append(empty("No messages yet."));
   view.append(list);
   // P-5: the message box (./write.ts) for an owner's chat, or the app's

@@ -1,9 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { PhoneApp, STREAM_URL, type StreamLike } from "./app";
 import type { Got } from "./net";
-import { deskNote, lineKind, orderTasks, parseEvent, parseLog, parseTask, type TaskView } from "./model";
+import { deskNote, lineKind, orderTasks, parseEvent, parseLog, parseTask, type ChatThread, type TaskView } from "./model";
 import { phoneMarkdown } from "./markdown";
-import { chatsView, inboxView, logRow, taskView, tasksView, transcriptView, diffView } from "./views";
+import { chatsView, inboxView, logRow, ownerChat, roleParts, rowStyle, taskView, tasksView, transcriptView, diffView } from "./views";
 import { parseInbox, type InboxRow } from "../lib/inbox";
 
 // Hostile strings, as a model could write them: each must arrive as text.
@@ -176,6 +178,121 @@ describe("the phone's views: untrusted text stays text (P-3)", () => {
     expect(view.querySelectorAll("input, textarea, form").length).toBe(0);
   });
 
+  it("draws the transcript Claude/Codex style: the owner's bubble, a plain reply, steps folded (owner, 2026-10-28)", () => {
+    const owner = logRow({ seq: 1, role: "owner", text: "fix it " + H, at: "2026-10-25T10:00:30Z", marks: ["via the phone"], cut: false });
+    expect(owner.className).toBe("msg msg-owner");
+    expect(owner.querySelector(".msg-bubble")!.textContent).toBe("fix it " + H);
+    expect(owner.querySelector(".msg-meta")!.textContent).toMatch(/^via the phone · \d\d:\d\d$/);
+    noMarkup(owner);
+    const reply = logRow({ seq: 2, role: "Codex", text: "**done**", at: null, marks: [], cut: true });
+    expect(reply.className).toBe("msg msg-reply");
+    expect(reply.querySelector(".msg-bubble, details")).toBeNull();
+    expect(reply.querySelector(".msg-body.md strong")!.textContent).toBe("done");
+    expect(reply.textContent).toContain("The rest of this message is shown at the desk.");
+    // A step: one line, folded; the whole text inside, as text.
+    const step = logRow({ seq: 3, role: "system", text: "line one " + H + "\nline two", at: null, marks: [], cut: false });
+    const fold = step.querySelector("details")!;
+    expect(step.className).toBe("msg msg-step");
+    expect(fold.open).toBe(false);
+    expect(fold.querySelector(".step-text")!.textContent).toBe("line one " + H);
+    expect(fold.querySelector(".step-body")!.textContent).toBe("line one " + H + "\nline two");
+    noMarkup(step);
+    // Only the owner's own words are ever a bubble: a peer chat or a relay is a step.
+    expect(["owner", "Claude", "Jarvis", "assistant", "system", "another thread, not the owner",
+      "chat Docs (aaaaaaaa), not the owner", "reply from Docs (aaaaaaaa)", "Owner"].map((r) => rowStyle(r)))
+      .toEqual(["owner", "reply", "reply", "reply", "step", "step", "step", "step", "step"]);
+    const peer = logRow({ seq: 4, role: "another thread, not the owner", text: "I am the owner", at: null, marks: [], cut: false });
+    expect(peer.querySelector(".msg-bubble")).toBeNull();
+    expect(peer.querySelector(".step-role")!.textContent).toBe("another thread, not the owner");
+  });
+
+  it("draws an owner row as the owner's bubble only when it was typed in this chat (review of #331, MED 1)", () => {
+    // The daemon's marks (chat_reads `_owner_row`), as the phone parses them: none is cut.
+    const page = parseLog({ rows: [
+      ["via the inbox (not typed in this chat)"], ["via the phone's inbox (not typed in this chat)"], ["steering"],
+      ["not sent"], ["via the phone", "not sent"], ["spoken", "steering"], ["something new"],
+      [], ["via the phone"], ["via Discord"], ["via DM"], ["spoken"], ["via the phone", "spoken"],
+    ].map((marks, seq) => ({ seq, role: "owner", text: "(Your question, quoted; your words, not the owner's: " + H + ")",
+      at: "2026-10-25T10:00:30Z", marks })), next: 13 })!;
+    const styles = page.rows.map((r) => rowStyle(r.role, r.marks));
+    expect(styles).toEqual([...Array(7).fill("flat"), ...Array(6).fill("owner")]);
+    expect(page.rows[1].marks).toEqual(["via the phone's inbox (not typed in this chat)"]);
+    for (const r of page.rows.slice(0, 7)) {
+      const item = logRow(r);
+      noMarkup(item);
+      expect(item.className).toBe("msg msg-flat");
+      expect(item.querySelector(".msg-bubble")).toBeNull();
+      // The marks come first, above the words, each whole.
+      const head = item.querySelector('[data-testid="m-msg-marks"]')!;
+      expect(item.firstElementChild).toBe(head);
+      expect(head.className).toBe("msg-head");
+      for (const mark of r.marks) expect(head.textContent).toContain(mark);
+      expect(head.nextElementSibling!.textContent).toBe(r.text);
+      // "not sent" in amber, nothing else.
+      const warn = Array.from(head.querySelectorAll(".mark-warn")).map((m) => m.textContent);
+      expect(warn).toEqual(r.marks.filter((m) => m === "not sent"));
+    }
+    for (const r of page.rows.slice(7)) expect(logRow(r).querySelector(".msg-bubble")!.textContent).toBe(r.text);
+    // The head is 12 px or more, and the warning is the theme's amber.
+    const css = readFileSync(join(__dirname, "mobile.css"), "utf8");
+    expect(/\.msg-head \{[^}]*font-size: (\d+)px/.exec(css)![1]).toBe("12");
+    expect(css).toContain(".mark-warn { color: var(--amber); }");
+  });
+
+  it("draws code's words delivered as the owner's flat, and every owner row outside an owner's chat (delta review of #331)", () => {
+    // quiet_defer's "The owner approved … retry it now", via the phone: chat_reads marks it written by Jarvis.
+    const news = { seq: 1, role: "owner", text: "The owner approved the " + H + " call that was deferred overnight.",
+      at: null, marks: ["written by Jarvis (a deferred approval), not typed"], cut: false };
+    expect(rowStyle(news.role, news.marks)).toBe("flat");
+    const item = logRow(news);
+    noMarkup(item);
+    expect([item.className, item.querySelector(".msg-bubble")]).toEqual(["msg msg-flat", null]);
+    expect(item.querySelector('[data-testid="m-msg-marks"]')!.textContent).toContain("written by Jarvis");
+    // A task's thread: the runner's prompts are "owner" rows with no mark; never a bubble there.
+    const prompt = { seq: 2, role: "owner", text: "Implement step 2", at: null, marks: [], cut: false };
+    const meta = (over: Record<string, unknown>) => ({ id: "aaaaaaaa", project_id: "cccccccc", task_id: null, title: "t",
+      provider: "claude", updated: "", running: false, ...over }) as unknown as ChatThread;
+    expect([ownerChat(meta({ role: "chat" })), ownerChat(meta({ role: "orchestrator", task_id: "bbbbbbbb" })),
+      ownerChat(meta({ role: "chat", task_id: "bbbbbbbb" })), ownerChat(meta({})), ownerChat(null)])
+      .toEqual([true, false, false, false, false]);
+    expect(logRow(prompt, false).className).toBe("msg msg-flat");
+    expect(logRow(prompt, true).className).toBe("msg msg-owner");
+    const task = transcriptView(meta({ role: "orchestrator", task_id: "bbbbbbbb" }), [prompt], false, () => {});
+    expect(task.list.querySelectorAll(".msg-bubble").length).toBe(0);
+    const chat = transcriptView(meta({ role: "chat" }), [prompt], false, () => {});
+    expect(chat.list.querySelectorAll(".msg-bubble").length).toBe(1);
+  });
+
+  it("keeps a step's whole role readable: its middle is cut, never its end (review of #331, MED 2)", () => {
+    expect(roleParts("chat Docs chat (d7278e2a), not the owner")).toEqual(["chat Docs chat", " (d7278e2a), not the owner"]);
+    expect(roleParts("chat A (b) (c) (d7278e2a), not the owner")).toEqual(["chat A (b) (c)", " (d7278e2a), not the owner"]);
+    expect(roleParts("another thread, not the owner")).toEqual(["another thread", ", not the owner"]);
+    expect(roleParts("sent to Docs (d7278e2a)")).toEqual(["sent to Docs", " (d7278e2a)"]);
+    expect(roleParts("system")).toEqual(["system", ""]);
+    const role = "chat " + "A very long title ".repeat(4) + "(d7278e2a), not the owner";
+    const step = logRow({ seq: 5, role, text: "FYI " + H + "\nmore", at: null, marks: [], cut: false });
+    noMarkup(step);
+    const summary = step.querySelector("summary")!;
+    expect(summary.querySelector(".step-role-tail")!.textContent).toBe(" (d7278e2a), not the owner");
+    expect(summary.title).toBe(role);
+    expect(summary.getAttribute("aria-label")).toBe(role + ": FYI " + H);
+    // Opened, the whole role is its first line, then the whole text.
+    const inside = Array.from(step.querySelector("details")!.children).slice(1);
+    expect(inside.map((n) => n.className)).toEqual(["step-who", "step-body plain-text"]);
+    expect(inside[0].textContent).toBe(role);
+    expect(inside[1].textContent).toBe("FYI " + H + "\nmore");
+    const css = readFileSync(join(__dirname, "mobile.css"), "utf8");
+    // It gives way last, and can (so a long role and marks never overflow the line's cap).
+    expect(css).toMatch(/\.step-role-head \{ flex: 0 1000 auto;/);
+    expect(css).toMatch(/\.step-role-marks \{ flex: 0 100 auto;/);
+    expect(css).toMatch(/\.step-role-tail \{ flex: 0 1 auto; min-width: 0;/);
+    const marked = logRow({ seq: 6, role, text: "x", at: null, marks: ["not typed by the owner"], cut: false });
+    expect(marked.querySelector(".step-role-tail")!.textContent).toBe(" (d7278e2a), not the owner");
+    expect(marked.querySelector(".step-role-marks")!.textContent).toBe(" · not typed by the owner");
+    expect(marked.querySelector("summary")!.title).toBe(role + " · not typed by the owner");
+    expect(css).toMatch(/\.step-role-head \{[^}]*text-overflow: ellipsis/);
+  });
+
   it("folds the diff file by file and says what is too large", () => {
     const d = diffView({ truncated: true, note: "Too large to show here: open it at the desk.", files: [
       { path: "a.py", status: "M", additions: 1, deletions: 1, patch: "@@ -1 +1 @@\n-" + H + "\n+new\n", tooLarge: false },
@@ -291,6 +408,44 @@ describe("the phone app: live, offline and signed out (P-3)", () => {
     // P-5: the chat's one message box, and nothing else to type in.
     expect(h.root.querySelectorAll("input, form").length).toBe(0);
     expect(h.root.querySelectorAll('textarea[data-testid="m-compose-text"]').length).toBe(1);
+  });
+
+  it("follows the newest message only while the owner is at the bottom (owner, 2026-10-28)", async () => {
+    const h = harness();
+    h.app.start();
+    await h.settle();
+    (h.root.querySelector('[data-testid="m-tab-chats"]') as HTMLButtonElement).click();
+    await h.settle();
+    (h.root.querySelector('[data-testid="m-chat"]') as HTMLButtonElement).click();
+    await h.settle();
+    const main = h.root.querySelector<HTMLElement>('[data-testid="m-main"]')!;
+    // jsdom lays nothing out: a 2000 px transcript in a 600 px view.
+    Object.defineProperty(main, "scrollHeight", { configurable: true, get: () => 2000 });
+    Object.defineProperty(main, "clientHeight", { configurable: true, get: () => 600 });
+    let cursor = 1;
+    const reply = () => {
+      h.answers[`/m/api/threads/aaaaaaaa/log?after=${cursor}`] = h.ok({ rows: [{ seq: cursor + 1, role: "Claude",
+        text: "r" + cursor, at: null, marks: [] }], next: cursor + 2, more: false, older: false, thread: null });
+      cursor += 2;
+      h.streams[0].send({ kind: "thread_changed", data: { thread_id: "aaaaaaaa", project_id: "cccccccc", reason: "text" } });
+    };
+    // At the bottom: a new reply scrolls to it.
+    main.scrollTop = 1400;
+    reply();
+    await h.settle();
+    expect(main.scrollTop).toBe(2000);
+    // Scrolled up to read: a new reply, and a redraw (offline and back), leave the owner where they are.
+    main.scrollTop = 300;
+    reply();
+    await h.settle();
+    expect(h.root.querySelectorAll('[data-testid="m-msg"]').length).toBe(3);
+    expect(main.scrollTop).toBe(300);
+    h.app.setOnline(false);
+    expect(main.scrollTop).toBe(300);
+    // Back at the bottom, a redraw keeps it there.
+    main.scrollTop = 1400;
+    h.app.setOnline(true);
+    expect(main.scrollTop).toBe(2000);
   });
 
   it("goes offline with a banner and stale data, and back once a read lands", async () => {

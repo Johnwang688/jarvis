@@ -110,6 +110,11 @@ _VIA_MARK = {"discord": "via Discord", "dm": "via DM",
 # A message the owner typed into this chat on the phone (P-5): `via` "phone"
 # with no `decision_id` (a decision's answer always carries one).
 _PHONE_TYPED = "via the phone"
+# A message whose words code wrote and delivered as the owner's (`written_by`
+# on the record, `Daemon.deliver_queued`): quiet hours' "approved … retry it
+# now" (review of PR #331). Never one of the typed marks.
+_WRITTEN_MARK = {"deferral": "written by Jarvis (a deferred approval), not typed"}
+_WRITTEN_OTHER = "written by Jarvis, not typed"
 _SYSTEM_KINDS = ("model_set", "notice", "cli_turn", "compacted")
 _RELAY_KINDS = ("relay_in", "relay_out", "relay_reply")
 
@@ -429,7 +434,10 @@ def _owner_row(data: dict, at, dropped: set[str]) -> Row:
     if isinstance(images, int) and not isinstance(images, bool) and images > 0:
         typed += f"\n({images} image{'s' if images != 1 else ''} attached)"
     marks = []
-    if via == "phone" and not data.get("decision_id"):
+    if data.get("written_by"):
+        written = data["written_by"]
+        marks.append(_WRITTEN_MARK.get(written, _WRITTEN_OTHER) if isinstance(written, str) else _WRITTEN_OTHER)
+    elif via == "phone" and not data.get("decision_id"):
         marks.append(_PHONE_TYPED)
     elif via in _VIA_MARK:
         marks.append(_VIA_MARK[via])
