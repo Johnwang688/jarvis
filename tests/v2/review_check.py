@@ -701,7 +701,8 @@ class Phone(ra.Phone):
         approval, out, worker = self.ask()
         status, _, body = self.options(self.row(approval), "allow")
         self.assertEqual(status, 200, "a live card's Allow is never crowded out [mutation: one shared budget]")
-        self.assertEqual(remote_auth.ANSWER_FAMILIES, ("approval", "task", "defer", "review"))
+        # PM-D added the owner's PR actions as a family of their own.
+        self.assertEqual(remote_auth.ANSWER_FAMILIES, ("approval", "task", "defer", "review", "pr"))
         self.d.approvals.resolve(approval.req_id, Decision.DENY)
         worker.join(5)
         print("ok  challenges: a new set replaces the last; deferrals' prompts never crowd out a live Allow")

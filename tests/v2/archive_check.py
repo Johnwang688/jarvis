@@ -786,7 +786,14 @@ class OwnerOnly(Base):
                     # PM-C: the PR summaries (the model's lines on a PR row), never
                     # the file's own path: files.py names it in SELF_PROTECTED.
                     "jarvis.v2.pr_summary", "from .pr_summary", "import pr_summary", "pr_summary import",
-                    "PrSummaries", "attach_pr_summaries")
+                    "PrSummaries", "attach_pr_summaries",
+                    # PM-D: the owner's Merge, Update and Hold on a PR row, its
+                    # receipts and holds; the routes are "/inbox/" above.
+                    # (as an import or attribute: Codex's own `chat_pr_merge` tool
+                    # is another thing, the merge gate's card).
+                    "jarvis.v2.pr_merge", "from .pr_merge", "import pr_merge", "pr_merge import",
+                    " pr_merge.", "(pr_merge.", "PrActions", "PrHolds", "pr-holds.json", "pr-actions.jsonl",
+                    "merge_argv", "update_argv", "/inbox/pr")
 
     def test_no_tool_reaches_the_inbox(self):
         from jarvis import tools
@@ -1028,7 +1035,13 @@ class OwnerOnly(Base):
                                    # MR: the morning review, Approve selected and Leave selected.
                                    ("GET", "/inbox/review", None),
                                    ("POST", "/inbox/review/approve", {"items": [{"id": "defer:x", "tag": "a" * 64}]}),
-                                   ("POST", "/inbox/review/leave", {"items": [{"id": "defer:x"}]})):
+                                   ("POST", "/inbox/review/leave", {"items": [{"id": "defer:x"}]}),
+                                   # PM-D: Merge, Update and Hold on a PR row (Fix is PM-E's).
+                                   ("POST", "/inbox/pr/merge", {"id": "pr:o/r#1", "head": "a" * 40, "card": "b" * 64}),
+                                   ("POST", "/inbox/pr/update", {"id": "pr:o/r#1", "head": "a" * 40, "card": "b" * 64}),
+                                   ("POST", "/inbox/pr/hold", {"id": "pr:o/r#1", "note": "x"}),
+                                   ("POST", "/inbox/pr/hold", {"id": "pr:o/r#1", "clear": True}),
+                                   ("POST", "/inbox/pr/fix", {"id": "pr:o/r#1"})):
             with self.subTest(path=path):
                 self.request(method, path, body, 403)
                 self.request(method, path, body, 403, port=self.daemon.face_port)

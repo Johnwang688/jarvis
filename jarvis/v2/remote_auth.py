@@ -79,7 +79,9 @@ the same assertion, bound to `task:<id>` and the verb (`TASK_DECISIONS`).
 Past the session, `api_route` hands P-7's `POST /m/api/stt` to
 `remote_stt`, P-6's push paths to `push`, the morning review's
 `/m/api/review...` to `review` (its Approve selected's assertion bound to
-`defers:<56 hex>`, `review.subject`), P-4's answer paths to
+`defers:<56 hex>`, `review.subject`), PM-D's PR actions
+(`/m/api/inbox/pr...`) to `pr_merge` (each assertion bound to `pr:<56 hex>`,
+`pr_merge.subject`, its own family and budget), P-4's answer paths to
 `remote_answer`, P-5's writes to `remote_write`, and every other path but
 logout and `me` to `remote_api` (P-3's reads and event stream); a logout,
 the desk's End and a revoke tell `on_end` (P-6 deletes that session's or
@@ -160,13 +162,18 @@ _TASK_SUBJECT = re.compile(r"task:[0-9a-f]{8}")
 # Only "allow" is ever an answer for either.
 DEFER_DECISIONS = ("allow",)
 _DEFER_SUBJECT = re.compile(r"defer:[A-Za-z0-9_-]{1,58}|defers:[0-9a-f]{56}")
+# PM-D: the owner's action on an inbox PR row (`pr_merge.subject`): `pr:` and
+# 56 hex of a digest of the repository, number, head, card and action. Fix is
+# PM-E's (its route answers 501 until then); its subject is the same family.
+PR_DECISIONS = ("merge", "merge_as_is", "update", "fix")
+_PR_SUBJECT = re.compile(r"pr:[0-9a-f]{56}")
 # PH-10: a phone session seen this recently gives approvals the remote wait.
 ACTIVE_S = 24 * 3600
 MAX_SESSIONS = 32         # the least recently seen goes first
 # The most answer challenges there can be at once (a bound, never a shared cap):
 # per session, one budget per family (an approval's answer, a task verb, a
 # deferral's Approve and retry, a morning review's set; review of #329, LOW 4).
-ANSWER_FAMILIES = ("approval", "task", "defer", "review")
+ANSWER_FAMILIES = ("approval", "task", "defer", "review", "pr")
 MAX_ANSWER_CHALLENGES = MAX_ANSWER_CHALLENGES_PER_SESSION * MAX_SESSIONS * len(ANSWER_FAMILIES)
 MAX_REVOKED = 16          # revoked passkey records kept, so a revoked id stays refused
 LAST_SEEN_WRITE_S = 60    # last-seen is written at most this often per session
@@ -749,8 +756,10 @@ class RemoteAuth:
             raise AuthError(400, "bad request")
         task = _TASK_SUBJECT.fullmatch(req_id) is not None
         defer = _DEFER_SUBJECT.fullmatch(req_id) is not None
-        allowed = TASK_DECISIONS if task else DEFER_DECISIONS if defer else ANSWER_DECISIONS
-        if decision not in allowed or (not task and not defer and ":" in req_id):
+        pr = _PR_SUBJECT.fullmatch(req_id) is not None
+        allowed = (TASK_DECISIONS if task else DEFER_DECISIONS if defer else PR_DECISIONS if pr
+                   else ANSWER_DECISIONS)
+        if decision not in allowed or (not task and not defer and not pr and ":" in req_id):
             raise AuthError(400, "bad request")
         with self._lock:
             self._require_usable()
@@ -772,7 +781,8 @@ class RemoteAuth:
             challenge = self.answer_challenge(req_id, decision, nonce)
             self._issue("answer", challenge, req_id=req_id, decision=decision, nonce=nonce,
                         session=session["token_sha256"], passkey=passkey["key"], task=task,
-                        family="task" if task else ("review" if group else "defer") if defer else "approval")
+                        family="task" if task else ("review" if group else "defer") if defer
+                        else "pr" if pr else "approval")
             options = webauthn.generate_authentication_options(
                 rp_id=self.host, challenge=challenge, timeout=CHALLENGE_S * 1000,
                 allow_credentials=[structs.PublicKeyCredentialDescriptor(id=unb64url(passkey["id"]))],
@@ -1229,6 +1239,12 @@ def api_route(handler, path: str, body: bytes) -> tuple[int, dict, list[tuple[st
         answered = _review.route(handler, path, session, body)
         if answered is not None:
             return answered
+        # PM-D: the owner's Merge and Update on a PR row (`pr_merge.py`), each
+        # with its own assertion bound to the `pr:` subject.
+        from . import pr_merge
+        acted = pr_merge.phone_route(handler, path, session, body)
+        if acted is not None:
+            return acted
         from . import remote_answer
         answered = remote_answer.route(handler, path, session, body)
         if answered is not None:

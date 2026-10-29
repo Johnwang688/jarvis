@@ -1408,6 +1408,34 @@ class StatusAndState(Remote):
         self.assertEqual(remote_auth.COOKIE, "__Host-jarvis_m")
         print("ok  guard strengths pinned: 256-bit code, token and challenge; 5 min window, 60 s challenge")
 
+    def test_the_pr_subject_family(self):
+        """PM-D: the owner's PR actions are their own family: `pr:` and 56
+        hex only, their own decisions, their own per-session budget; no
+        other family's subject takes a PR decision, nor the reverse."""
+        self.assertEqual(remote_auth.PR_DECISIONS, ("merge", "merge_as_is", "update", "fix"))
+        self.assertEqual(remote_auth.ANSWER_FAMILIES, ("approval", "task", "defer", "review", "pr"))
+        self.assertEqual(remote_auth.MAX_ANSWER_CHALLENGES,
+                         remote_auth.MAX_ANSWER_CHALLENGES_PER_SESSION * remote_auth.MAX_SESSIONS * 5)
+        good = "pr:" + "0123456789abcdef" * 3 + "01234567"
+        self.assertRegex(good, remote_auth._PR_SUBJECT)
+        for bad in ("pr:" + "a" * 55, "pr:" + "a" * 57, "pr:" + "A" * 56, "PR:" + "a" * 56, "pr:" + "g" * 56):
+            self.assertIsNone(remote_auth._PR_SUBJECT.fullmatch(bad), bad)
+        a = self.pair()
+        self.signed_in(a)
+        session = next(iter(self.auth._sessions.values()))
+        s = {"token_sha256": session["token_sha256"]}
+        for req_id, decision in ((good, "allow"), (good, "always"), (good, "cancel"), (good, "rebase"),
+                                 ("abc", "merge"), ("task:0123abcd", "merge"), ("defer:abc", "update"),
+                                 ("defers:" + "a" * 56, "merge"), ("pr:" + "a" * 55, "merge")):
+            with self.assertRaises(remote_auth.AuthError) as caught:
+                self.auth.answer_options(s, req_id, decision)
+            self.assertEqual(caught.exception.status, 400, (req_id, decision))
+        for decision in remote_auth.PR_DECISIONS:
+            self.auth.answer_options(s, good, decision)
+        families = {c["family"] for c in self.auth._challenges.values() if c.get("req_id") == good}
+        self.assertEqual(families, {"pr"})
+        print("ok  the pr: family: its own subject shape, decisions and budget; never another family's")
+
     def test_webauthn_missing_is_503_and_the_daemon_starts(self):
         text = (ROOT / "jarvis" / "v2" / "remote_auth.py").read_text(encoding="utf-8")
         self.assertNotRegex(text, r"(?m)^(import webauthn|from webauthn)", "imported only when used")

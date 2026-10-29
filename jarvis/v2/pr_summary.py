@@ -858,7 +858,32 @@ class _Pr:
 
 
 ENRICH_KEYS = ("facts", "flags", "summary", "summary_state", "summary_note", "summary_reason",
-               "actions", "why", "method")
+               "actions", "why", "method",
+               # PM-D: PM-26's facts as fields (the phone draws them), the
+               # owner's hold (Q3) and the card an OK binds (PM-13).
+               "base", "failing", "conflicts", "files", "hold", "card")
+FILES_SHOWN = 100
+CARD_VERSION = 1
+
+
+def card_key(detail) -> str:
+    """PM-13's card: the SHA-256 of what an OK answers, exactly as the row
+    shows it: the facts parts, the summary, the method and the offered
+    actions (`detail` is the row's `detail`, or the same keys rebuilt from a
+    fresh read by `pr_merge`). Canonical JSON, keys sorted."""
+    shown = {"v": CARD_VERSION, "facts": detail.get("facts"), "summary": detail.get("summary"),
+             "method": detail.get("method"), "actions": list(detail.get("actions") or [])}
+    text = json.dumps(shown, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def files_detail(facts, limit: int = FILES_SHOWN) -> dict:
+    """The changed files (PM-26), code's fields only: the path (scrubbed and
+    cleaned when read), the counts and PM-10's families."""
+    files = list(facts.files)
+    return {"items": [{"path": f.path, "additions": f.additions, "deletions": f.deletions,
+                       "flags": list(f.flags)} for f in files[:limit]],
+            "more": max(0, (facts.files_total or len(files)) - min(limit, len(files)))}
 
 
 def _sig(facts) -> tuple:
@@ -905,6 +930,10 @@ class PrSummaries:
         self.tidy = tidy or pr_facts.tidy_mirrors
         self.clock = clock
         self.worker = pr_facts.FactsWorker(self._on_facts, read=self._read)
+        # PM-D: the owner's holds (Q3), shared with `pr_merge`'s routes; read
+        # lazily, never here.
+        from .pr_merge import holds_at
+        self.holds = holds_at(base / "inbox")
         engine.on_late = self._late
         self._lock = threading.Lock()
         self._prs: dict[str, _Pr] = {}
@@ -980,6 +1009,14 @@ class PrSummaries:
         return out
 
     # -- reads and summaries -------------------------------------------------------
+
+    def reread(self, repo: str, number: int) -> None:
+        """PM-D: an action found the PR changed; the next poll reads it
+        again whatever the list says (never reads here)."""
+        with self._lock:
+            rec = self._prs.get(pr_key(repo, number))
+            if rec is not None and not rec.in_flight:
+                rec.asked, rec.read_at = None, -math.inf
 
     def _read(self, repo, number, stop=None):
         """The worker's read; a read that raises is "not read", never lost
@@ -1115,13 +1152,30 @@ class PrSummaries:
 
     def detail(self, row: dict) -> dict:
         """The keys `ENRICH_KEYS` for one PR row, from the facts and the
-        summary held for it. No I/O; never raises."""
+        summary held for it, the owner's hold, and the card over what it
+        shows (`card_key`). No I/O but reading the small hold file while it
+        is not yet read (or could not be); never raises."""
+        out = self._detail(row)
+        out["card"] = card_key(out)
+        return out
+
+    def _hold(self, repo, number):
+        try:
+            return self.holds.get(repo, number)
+        except Exception as exc:  # noqa: BLE001 — a hold that cannot be read holds
+            LOG.warning("PR summaries: the hold could not be read (%s)", type(exc).__name__)
+            return {"note": "the hold list could not be read", "set_at": None}
+
+    def _detail(self, row: dict) -> dict:
         d = row.get("detail") or {}
         repo, number = d.get("repo"), d.get("number")
         out = {"facts": None, "flags": None, "summary": None, "summary_state": PENDING,
-               "summary_note": "", "summary_reason": "", "actions": [], "why": "", "method": None}
+               "summary_note": "", "summary_reason": "", "actions": [], "why": "", "method": None,
+               "base": None, "failing": None, "conflicts": None, "files": None, "hold": None}
         if not isinstance(repo, str) or not isinstance(number, int):
             return out
+        hold = self._hold(repo, number)
+        out["hold"] = hold
         with self._lock:
             rec = self._prs.get(pr_key(repo, number))
             if rec is None or rec.facts is None:
@@ -1130,13 +1184,19 @@ class PrSummaries:
         try:
             if facts.ok("view") and facts.head != d.get("head"):
                 return out                  # facts of other code: read again (queued by the poll)
-            decision = pr_facts.decide(facts)
+            # Q3: a hold hides every action, and its note is the row's why.
+            decision = pr_facts.decide(facts, hold=None if hold is None else hold["note"])
             out.update(facts=[p.as_dict() for p in pr_facts.facts_parts(facts)],
                        flags=flags_detail(facts) if facts.ok("view") else None,
                        summary=dict(shown) if state == READY and shown else None,
                        summary_state=state, summary_note=note if state == READY else "",
                        summary_reason=reason if state in (FAILED, OFF) else "",
                        actions=list(decision.actions), why=decision.why, method=decision.method)
+            if facts.ok("view"):
+                out.update(base=facts.base,
+                           failing=[{"name": c.name, "scanner": c.scanner} for c in facts.failing],
+                           conflicts=list(facts.conflicts) if facts.ok("conflicts") else None,
+                           files=files_detail(facts) if facts.ok("files") else None)
             if facts.ok("view") and facts.checks is not None \
                     and (facts.checks, facts.merge_state) != (d.get("checks"), d.get("merge_state")):
                 # The list moved since this read: no action until it is read
@@ -1148,11 +1208,11 @@ class PrSummaries:
                            summary_note=READING_AGAIN if out["summary"] else "")
         except Exception as exc:  # noqa: BLE001 — a row is never lost to this
             LOG.warning("PR summaries: a row's detail broke (%s)", type(exc).__name__)
-            return {**out, "facts": None, "summary_state": FAILED,
+            return {**out, "facts": None, "summary_state": FAILED, "actions": [], "method": None,
                     "summary_reason": "the facts could not be shown"}
         return out
 
 
-__all__ = ["CHECKS_RERUNNING", "DAILY_CALLS", "DAILY_COST_USD", "ENRICH_KEYS", "PER_PR_DAILY",
+__all__ = ["CARD_VERSION", "CHECKS_RERUNNING", "card_key", "files_detail", "DAILY_CALLS", "DAILY_COST_USD", "ENRICH_KEYS", "PER_PR_DAILY",
            "PrSummaries", "PrSummaryEngine", "StoredLedger", "SummaryFile", "clean_field", "model_input",
            "parse_summary", "summary_key"]

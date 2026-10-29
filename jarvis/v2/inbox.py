@@ -1538,6 +1538,12 @@ def route(handler, daemon, parts, query):
     mounted = _review.hud_route(handler, daemon, parts, query)
     if mounted is not None:
         return mounted
+    # PM-D: the owner's Merge, Update and Hold on a PR row (`pr_merge.py`),
+    # behind the same owner test.
+    from . import pr_merge as _pr_merge
+    mounted = _pr_merge.hud_route(handler, daemon, parts, query)
+    if mounted is not None:
+        return mounted
     method = handler.command
     if parts == ["inbox"] and method == "GET":
         # `?all=1` (B4): the snoozed and dismissed rows too, flagged.
