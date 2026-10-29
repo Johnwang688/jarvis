@@ -31,7 +31,10 @@
 //   - **A touch is a hold only after `HOLD_MS`** within the slop (review of
 //     #331): a finger brushing the mic while scrolling lifts, slides or is
 //     cancelled before then, and nothing happens at all (no prompt, no
-//     line, no upload). A keyboard's Space or Enter still starts at once.
+//     line, no upload). The audio context alone is made and resumed in the
+//     pointerdown, inside the gesture as iOS needs (no prompt, no sound, no
+//     recording), and closed if the touch never becomes a hold. A keyboard's
+//     Space or Enter still starts at once.
 //   - At most `MAX_MS` (the server's `remote_stt.MAX_S`): the recording stops
 //     itself there and is transcribed. Under `MIN_MS` nothing is sent.
 //
@@ -213,6 +216,19 @@ export class Talk {
   private detach: (() => void) | null = null;
   /** A press not yet held for HOLD_MS: its timer, or null. */
   private holding: unknown = null;
+  /** That press's audio context, made and resumed in its pointerdown. */
+  private primed: AudioContextLike | null = null;
+
+  /** In a touch's pointerdown: an audio context, created and resumed in the gesture, for a
+   * press that may become a hold. Nothing when the press could not record anyway. */
+  private prime(): AudioContextLike | null {
+    const threadId = this.threadId;
+    if (this.phase !== "idle" || !threadId || this.busy(threadId) || !this.hooks.online() || !this.env.media()) return null;
+    const ctx = this.env.context();
+    if (!ctx) return null;
+    try { void ctx.resume?.()?.catch?.(() => {}); } catch { /* already running */ }
+    return ctx;
+  }
 
   constructor(private readonly env: TalkEnv, private readonly hooks: TalkHooks) {
     this.el = document.createElement("div");
@@ -253,17 +269,22 @@ export class Talk {
   }
 
   /** The owner pressed: open the mic, inside the gesture. */
-  press(): void {
+  press(primed: AudioContextLike | null = null): void {
     const threadId = this.threadId;
-    if (this.phase !== "idle" || !threadId || this.busy(threadId)) return;
-    if (!this.hooks.online()) { this.say(WORDS.offline, threadId); return; }
+    const drop = () => { if (primed) closeContext(primed); };
+    if (this.phase !== "idle" || !threadId || this.busy(threadId)) { drop(); return; }
+    if (!this.hooks.online()) { drop(); this.say(WORDS.offline, threadId); return; }
     const media = this.env.media();
-    const ctx = media ? this.env.context() : null;
-    if (!media || !ctx) { this.say(WORDS.noRecording, threadId); return; }
+    const ctx = media ? (primed ?? this.env.context()) : null;
+    if (!media || !ctx) { drop(); this.say(WORDS.noRecording, threadId); return; }
     this.retry = null;              // a new clip replaces one waiting for Retry
     const gen = ++this.gen;
-    // Created and resumed in the gesture: iOS starts a context made later suspended.
-    try { void ctx.resume?.()?.catch?.(() => {}); } catch { /* already running */ }
+    // The context must be created and resumed inside the gesture (iOS starts one made
+    // later suspended). A touch did that on pointerdown (`prime`), before the hold
+    // delay; a key's hold does it here, in its keydown. Only the microphone waits.
+    if (!primed) {
+      try { void ctx.resume?.()?.catch?.(() => {}); } catch { /* already running */ }
+    }
     this.rec = { gen, threadId, ctx, stream: null, nodes: [], frames: [], samples: 0, startedAt: this.env.now(), limit: null };
     this.phase = "starting";
     this.note = "";
@@ -475,14 +496,21 @@ export class Talk {
       win.addEventListener("pointermove", move);
       this.detach = () => {
         if (this.holding !== null) { this.env.clearTimer(this.holding); this.holding = null; }
+        // A touch abandoned before it was a hold: its context is closed; nothing recorded.
+        if (this.primed) { closeContext(this.primed); this.primed = null; }
         win.removeEventListener("pointerup", up);
         win.removeEventListener("pointercancel", off);
         win.removeEventListener("pointermove", move);
       };
+      // The audio context starts here, in the gesture (no prompt, nothing recorded);
+      // the microphone is asked for only once the touch is a hold.
+      this.primed = this.prime();
       const timer = this.env.setTimer(() => {
         if (this.holding !== timer) return;
         this.holding = null;
-        this.press();
+        const primed = this.primed;
+        this.primed = null;
+        this.press(primed);
       }, HOLD_MS);
       this.holding = timer;
     });
@@ -502,6 +530,10 @@ export class Talk {
     this.detach = null;
     this.cancel();
   }
+}
+
+function closeContext(ctx: AudioContextLike): void {
+  try { void ctx.close().catch(() => {}); } catch { /* already closed */ }
 }
 
 function stopTracks(stream: MediaStream): void {

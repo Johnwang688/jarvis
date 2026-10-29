@@ -193,9 +193,13 @@ describe("push to talk (P-7)", () => {
     await openChat(h);
     expect(HOLD_MS).toBe(150);
     for (const how of ["lift", "slide", "cancel"] as const) {
+      const before = h.mic.contexts.length;
       await h.touch();
       const t = h.holdTimer()!;
       expect(t.ms).toBe(HOLD_MS);
+      // The pointerdown made and resumed the context, synchronously, in the gesture (review of #331, LOW b).
+      expect(h.mic.contexts.length).toBe(before + 1);
+      expect(h.mic.ctx().resumed).toBe(1);
       // Nothing yet: no prompt, no recording look.
       expect(h.mic.getUserMedia).not.toHaveBeenCalled();
       expect(h.button().dataset.phase).toBe("idle");
@@ -208,15 +212,25 @@ describe("push to talk (P-7)", () => {
       t.fn();
       await h.settle();
       expect(h.mic.getUserMedia).not.toHaveBeenCalled();
-      expect(h.mic.contexts.length).toBe(0);
+      // Its audio context was started in the gesture and is closed again: nothing recorded.
+      expect([h.mic.ctx().resumed, h.mic.ctx().closed, h.mic.ctx().processor]).toEqual([1, 1, null]);
       expect(h.mic.uploads.length).toBe(0);
       expect(h.button().dataset.phase).toBe("idle");
       expect(h.line().textContent).toBe("");
     }
-    // Held past it: the mic is asked for, as before.
+    // Held past it: the mic is asked for, as before, on the context the gesture started.
     await h.down();
     expect(h.mic.getUserMedia).toHaveBeenCalledTimes(1);
     expect(h.button().dataset.phase).toBe("listening");
+    expect([h.mic.contexts.length, h.mic.ctx().resumed, h.mic.ctx().closed]).toEqual([4, 1, 0]);
+    // Space on the focused button still starts at once, its context made in the keydown.
+    await h.up();
+    h.mic.reply({ status: 200, body: { text: "" } });
+    await h.settle();
+    h.button().dispatchEvent(new KeyboardEvent("keydown", { key: " ", bubbles: true }));
+    await h.settle();
+    expect(h.mic.getUserMedia).toHaveBeenCalledTimes(2);
+    expect(h.mic.ctx().resumed).toBe(1);
   });
 
   it("is a mic icon in the message bar; holding it still drives the recording (owner, 2026-10-28)", async () => {
