@@ -221,17 +221,22 @@ function answerBox(row: InboxRow, a: InboxAnswers): HTMLElement {
   const busy = a.busy.has(row.id);
   const deferred = deferredOf(row);
   if (row.kind === "approval") {
-    box.append(tap("Open the card to answer", () => a.openCard(row), "quiet m-send", "m-open-card"));
+    // The row's one action, edged in the accent (M7 of the phone audit).
+    box.append(tap("Open the card to answer", () => a.openCard(row), "quiet m-send primary", "m-open-card"));
   } else if (deferred) {
     // Plain buttons, neither defaulted; the retry asks for the passkey first.
+    // H6 (phone audit): as the Review tab lays them out, Leave it at the left
+    // and Approve and retry at the right, far apart, never stacked.
+    const acts = testid(el("div", "m-review-rowacts"), "m-deferred-acts");
+    const leave = tap("Leave it", () => a.send(row, { action: "leave" }), "quiet m-send", "m-deferred-leave");
+    leave.disabled = busy;
+    acts.append(leave);
     if (deferred.grantable) {
       const retry = tap("Approve and retry", () => a.retry(row), "quiet m-send", "m-deferred-retry");
       retry.disabled = busy;
-      box.append(retry);
+      acts.append(retry);
     }
-    const leave = tap("Leave it", () => a.send(row, { action: "leave" }), "quiet m-send", "m-deferred-leave");
-    leave.disabled = busy;
-    box.append(leave);
+    box.append(acts);
   } else if (row.kind === "proposal" && a.withdraw) {
     const w = a.withdraw;
     if (w.confirming.has(row.id)) {
@@ -266,7 +271,8 @@ function answerBox(row: InboxRow, a: InboxAnswers): HTMLElement {
     const group = testid(el("div", "m-choices"), "m-decision-options");
     group.setAttribute("role", "radiogroup");
     const text = testid(el("textarea", "m-text"), "m-decision-text");
-    const picked = () => a.picks.get(row.id) ?? (d.suggested ?? -1);
+    // M4 (phone audit), as the Review tab (MR-3): the suggestion is marked, never chosen.
+    const picked = () => a.picks.get(row.id) ?? -1;
     const send = sendButton("Answer", "m-decision-send", () => {
       const words = text.value.trim();
       if (words) a.send(row, { text: words });
@@ -338,16 +344,20 @@ export function inboxRow(row: InboxRow, open: (row: InboxRow) => void, answers?:
     const d = decisionOf(row)!;
     if (d.question) box.append(testid(el("p", "question", d.question), "m-question"));
     // The suggestion's marker is the phone's own element, before the option's
-    // words, never text an option could also write (review of PR #309).
-    box.append(el("div", "label", "Options"));
-    const list = el("ul", "plain options");
-    d.options.forEach((option, i) => {
-      const item = el("li", "");
-      if (i === d.suggested) item.append(testid(el("span", "suggested", "suggested"), "m-suggested"), " ");
-      item.append(el("span", "option-text", option));
-      list.append(item);
-    });
-    box.append(list);
+    // words, never text an option could also write (review of PR #309). When
+    // the row answers here its radios list the options (M4 of the phone
+    // audit: not twice).
+    if (!(answers && answersHere(row, answers))) {
+      box.append(el("div", "label", "Options"));
+      const list = el("ul", "plain options");
+      d.options.forEach((option, i) => {
+        const item = el("li", "");
+        if (i === d.suggested) item.append(testid(el("span", "suggested", "suggested"), "m-suggested"), " ");
+        item.append(el("span", "option-text", option));
+        list.append(item);
+      });
+      box.append(list);
+    }
     if (d.why) box.append(el("div", "label", "Why"), testid(el("p", "", d.why), "m-why"));
     if (!d.open) box.append(el("div", "label", "Your answer"), testid(el("p", "", d.answer), "m-answer"));
   } else if (row.kind === "pr") prDetail(row, box);

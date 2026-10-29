@@ -288,7 +288,11 @@ describe("the phone app answers (P-4)", () => {
     expect(tag.textContent).toBe("suggested");
     expect(tag.compareDocumentPosition(choices[0].querySelector(".option-text")!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(choices[1].querySelector('[data-testid="m-suggested"]')).toBeNull();
-    expect(choices[0].querySelector<HTMLInputElement>("input")!.checked).toBe(true);
+    // M4 (phone audit), as the Review tab (MR-3): the suggestion is marked, never chosen;
+    // Answer is off until the owner picks, and the options are listed once (the radios).
+    expect(choices.map((c) => c.querySelector<HTMLInputElement>("input")!.checked)).toEqual([false, false]);
+    expect(h.root.querySelector<HTMLButtonElement>('[data-testid="m-decision-send"]')!.disabled).toBe(true);
+    expect(h.root.querySelectorAll('[data-kind="decision"] ul.options').length).toBe(0);
     const radio = h.root.querySelectorAll<HTMLInputElement>('[data-testid="m-decision-option"]')[1];
     radio.checked = true;
     radio.dispatchEvent(new Event("change"));

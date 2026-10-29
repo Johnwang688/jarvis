@@ -226,7 +226,7 @@ export class PhoneApp {
     };
     this.tabs = { inbox: make("inbox", "Inbox"), review: make("review", "Review"), chats: make("chats", "Chats"),
                   tasks: make("tasks", "Tasks") };
-    this.tabs.review.hidden = true;
+    this.tabs.review.disabled = true;
     frame.append(top, this.banner, this.main, nav);
     this.frame = frame;
     this.notify = new Notifications(deps.pushEnv ?? browserEnv, deps.pushSend ?? browserSend,
@@ -380,9 +380,13 @@ export class PhoneApp {
   }
 
   private renderTabs(): void {
-    this.tabs.review.hidden = !(this.tab === "review" || reviewTabShown(this.review));
-    const n = this.review?.open ?? 0;
+    // M9a (phone audit): the Review tab keeps its slot, off while there is no review, so the
+    // tabs never move under the thumb (Chats is always third, Tasks fourth).
+    const shown = this.tab === "review" || reviewTabShown(this.review);
+    this.tabs.review.disabled = !shown;
+    const n = shown ? this.review?.open ?? 0 : 0;
     this.tabs.review.textContent = n ? `Review · ${n}` : "Review";
+    this.tabs.review.setAttribute("aria-label", shown ? (n ? `Review, ${n} waiting` : "Review") : "Review, nothing to review");
   }
 
   /** One question, decision or proposal, answered in place; once sent it folds to a receipt where it stood. */

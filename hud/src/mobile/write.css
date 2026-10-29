@@ -62,7 +62,7 @@
   font: inherit;
   color: var(--text);
   background: var(--bg-inset);
-  border: 1px solid var(--border-strong);
+  border: 1px solid var(--control-edge);
   border-radius: var(--radius);
   padding: 0 8px;
 }

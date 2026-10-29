@@ -292,7 +292,7 @@ export function reviewView(state: ReviewState, a: ReviewActions, limited: string
     for (const row of report.live) {
       const card = testid(el("article", "row rank-1"), "m-review-live-row");
       card.append(el("h3", "row-title", row.title || row.id));
-      card.append(tap("Open the card to answer", () => a.openCard(row), "quiet m-send", "m-review-open-card"));
+      card.append(tap("Open the card to answer", () => a.openCard(row), "quiet m-send primary", "m-review-open-card"));
       live.append(card);
     }
     view.append(live);
