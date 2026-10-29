@@ -511,8 +511,14 @@ class PrActions:
             raise _changed("no merge method")
         parts = [p.as_dict() for p in pr_facts.facts_parts(facts)]
         stored = self.row(row_id).get("detail") or {}
+        # What the summary covered ("summary read N of M files") is not
+        # recomputed from this read: a lighter second read (no diff in its
+        # budget) would otherwise refuse an unchanged row. The row's own
+        # part, or none, stands in its place (that part is last).
+        shown_parts = [p for p in parts if p.get("key") != "read"]
+        shown_parts += [p for p in stored.get("facts") or () if isinstance(p, dict) and p.get("key") == "read"]
         from .pr_summary import _ROW_CARD
-        shown = {"facts": parts, "summary": stored.get("summary"), "method": decision.method,
+        shown = {"facts": shown_parts, "summary": stored.get("summary"), "method": decision.method,
                  "actions": list(decision.actions), "fix": stored.get("fix"),
                  **{k: stored.get(k) for k in _ROW_CARD}}
         if not hmac.compare_digest(card_key(shown), card):
@@ -520,21 +526,30 @@ class PrActions:
         if via == "phone" and phone_withheld(parts, files_detail(facts)):
             raise Refused(409, "this pull request has withheld text: " + AT_DESK)
         # What the fresh read would show must be what the row showed, for
-        # the fields drawn from it (reviews of #340 r3 and r4): the safety
+        # the fields drawn from it (reviews of #340 r3, r4 and r5): the safety
         # warning (paths and families, not only flagged or not), the PR's own
         # title (both cleaned by `inbox_prs.clean_title`) and why an action is
         # or is not offered (the row's `why` is `decide`'s, with a fix's notes
         # appended after "; ").
-        # A warning the row did not show: flagged now but not then, or a
-        # flagged path or family it did not list. Not how complete the list
-        # was, nor a warning the fresh read lacks: two reads of one head can
-        # differ in budget (review of #332), and the row showed more.
-        from .pr_summary import flags_detail
-        fresh_flags, shown_flags = flags_detail(facts), stored.get("flags") or {}
-        shown_items = {(i.get("name"), tuple(i.get("families") or ()))
-                       for i in shown_flags.get("items") or () if isinstance(i, dict)}
-        if (fresh_flags["flagged"] and not shown_flags.get("flagged")) or any(
-                (i["name"], tuple(i["families"])) not in shown_items for i in fresh_flags["items"]):
+        # A warning the row did not show: the FULL fresh set of flagged
+        # safety files (not the row's first 20) against what the row listed;
+        # a higher total than the row's (items + more), or a path or family
+        # it did not list. Never how complete the read was (`flagged` also
+        # holds while a read is incomplete, and `incomplete` is only that),
+        # nor a warning the fresh read lacks: two reads of one head can
+        # differ in budget (reviews of #332 and #340 r5), and the row showed
+        # more.
+        shown_flags = stored.get("flags") or {}
+        shown_list = [i for i in shown_flags.get("items") or () if isinstance(i, dict)]
+        shown_items = {(i.get("name"), tuple(i.get("families") or ())) for i in shown_list}
+        shown_more = shown_flags.get("more")
+        shown_more = shown_more if isinstance(shown_more, int) and shown_more > 0 else 0
+        hits = [(name, tuple(families)) for name, families in pr_facts._hits(facts)]
+        # With no "more" the row listed every warning, so every fresh one must
+        # be among them; with one, only the first items can be matched and
+        # the total stands for the rest.
+        matched = hits[:len(shown_list)] if shown_more else hits
+        if len(hits) > len(shown_list) + shown_more or any(h not in shown_items for h in matched):
             raise _changed("its safety warning changed since you read it")
         if facts.title != stored.get("title"):
             raise _changed("its title changed since you read it")

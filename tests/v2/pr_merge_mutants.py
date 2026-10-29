@@ -28,6 +28,8 @@ RA = "jarvis/v2/remote_auth.py"
 API = "jarvis/v2/remote_api.py"
 CHECK = "tests/v2/pr_merge_check.py"
 PS_CHECK = "tests/v2/pr_summary_check.py"
+RECHECK4 = "tests/v2/pr_fix_card_recheck4_check.py"
+RECHECK5 = "tests/v2/pr_fix_card_recheck5_check.py"
 
 # (name, file, old, new, [the tests meant to fail], check file)
 MUTANTS = [
@@ -196,6 +198,25 @@ MUTANTS = [
      '"summary_state", "summary_note", "summary_reason", "why", "method", "actions", "card",\n           "hold", "fix"),',
      '"summary_state", "summary_note", "summary_reason", "why", "method", "actions", "card",\n           "hold", "fix", "url"),',
      ["Wiring.test_the_desk_and_phone_projections_keep_their_fields"], PS_CHECK),
+    # -- the tap-time re-check of the shown warning (#340 follow-up, r5) ---------------------
+    ("recheck: the full fresh warning set not compared (only the row's first 20)", PM,
+     "        if len(hits) > len(shown_list) + shown_more or any(h not in shown_items for h in matched):\n",
+     "        if any(h not in shown_items for h in hits[:len(shown_list)]):\n",
+     ["FinalReadEdges.test_new_warning_beyond_twenty_must_invalidate_merge_ok"], RECHECK4),
+    ("recheck: a higher fresh total than the row's (items + more) is not a change", PM,
+     "        if len(hits) > len(shown_list) + shown_more or any(h not in shown_items for h in matched):\n",
+     "        if any(h not in shown_items for h in matched):\n",
+     ["CutRow.test_a_higher_total_behind_a_cut_row_is_a_change"], RECHECK5),
+    ("recheck: the summary coverage part is recomputed from the fresh read", PM,
+     '        shown_parts = [p for p in parts if p.get("key") != "read"]\n',
+     "        shown_parts = list(parts)\n",
+     ["FinalReadEdges.test_shorter_read_must_not_rewrite_the_shown_summary_coverage"], RECHECK4),
+    ("recheck: read completeness alone counts as a new warning", PM,
+     "        hits = [(name, tuple(families)) for name, families in pr_facts._hits(facts)]\n",
+     "        hits = [(name, tuple(families)) for name, families in pr_facts._hits(facts)]\n"
+     '        if pr_facts.flagged(facts) and not shown_flags.get("flagged"):\n'
+     '            raise _changed("its safety warning changed since you read it")\n',
+     ["FinalReadEdges.test_missing_diff_completeness_alone_must_not_refuse"], RECHECK4),
 ]
 
 
