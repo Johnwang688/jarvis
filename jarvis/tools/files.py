@@ -668,15 +668,24 @@ def credential_folder_judge():
     remote = os.path.abspath(os.path.expanduser(str(config.remote_dir()))) + os.sep
     own = frozenset(a for a in (os.path.abspath(str(p)) for p in _protected_state_paths())
                     if not a.startswith(remote))
+    folded = tuple(r.casefold() for r in roots)
     real_dirs: dict[str, str] = {}
 
     def inside(p: str) -> bool:
         p = p + os.sep
         return any(p.startswith(r) for r in roots)
 
+    def inside_folded(p: str) -> bool:
+        # A case variant (`~/.SSH/id_ed25519`, `~/.Config/GH/hosts.yml`): the
+        # same folder on a case-insensitive drive, and refused everywhere
+        # else too, the stricter way (cred-dir reads, 2026-10-29).
+        p = p.casefold() + os.sep
+        return any(p.startswith(r) for r in folded)
+
     def judge(path: str | Path) -> bool:
         try:
-            lexical = os.path.abspath(os.path.expanduser(os.fspath(path)))
+            written = os.path.expanduser(os.fspath(path))
+            lexical = os.path.abspath(written)
             head, tail = os.path.split(lexical)
             if not tail or os.path.islink(lexical):
                 resolved = os.path.realpath(lexical)
@@ -685,11 +694,17 @@ def credential_folder_judge():
                 if real is None:
                     real = real_dirs[head] = os.path.realpath(head)
                 resolved = os.path.join(real, tail)
+            # `abspath` folds `..` before any symlink is followed, the kernel
+            # after: `link/../x` with `link -> ~/.ssh/sub` opens `~/.ssh/x`.
+            # Where a `..` is written, the kernel's reading is judged too.
+            kernel = (os.path.realpath(written) if ".." in written.split(os.sep)
+                      else resolved)
         except (OSError, RuntimeError, ValueError, TypeError):
             return True
-        if resolved == lexical and lexical in own:
+        if resolved == lexical and kernel == lexical and lexical in own:
             return False
-        return inside(lexical) or inside(resolved)
+        return (inside(lexical) or inside(resolved) or inside(kernel)
+                or inside_folded(lexical) or inside_folded(resolved) or inside_folded(kernel))
 
     return judge
 
@@ -942,6 +957,11 @@ def list_dir(
     path: Annotated[str, "Directory to list"] = ".",
 ) -> str:
     """List the entries in a directory."""
+    path = in_working_dir(path)
+    if _credential_folder(path):
+        # Names in a credential folder are not Jarvis's to list either
+        # (cred-dir reads, 2026-10-29; v2's permit refuses the same).
+        return _credential_folder_refusal(path)
     target = _resolve(path)
     if not target.is_dir():
         return f"Error: {target} is not a directory."
@@ -960,13 +980,19 @@ def find_files(
     path: Annotated[str, "Directory to search from"] = ".",
 ) -> str:
     """Find files matching a glob pattern."""
+    path = in_working_dir(path)
+    if _credential_folder(path):
+        return _credential_folder_refusal(path)
     root = _resolve(path)
     if not root.is_dir():
         return f"Error: {root} is not a directory."
 
+    # A credential folder's names are left out wherever the walk meets one
+    # (a folder configured with no dot in its path, a symlink to one).
+    folder = credential_folder_judge()
     hits = []
     for match in root.glob(pattern):
-        if any(part.startswith(".") for part in match.parts):
+        if any(part.startswith(".") for part in match.parts) or folder(match):
             continue
         hits.append(os.path.relpath(match, root))
         if len(hits) >= 200:
