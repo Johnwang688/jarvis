@@ -934,9 +934,14 @@ The phone UI/UX audit of main 79da9b70 (findings C1 to L11; the owner chose
 "Safety + quick wins"). UI only: no route, daemon or rule changed, and every
 daemon string is still set as text or through the sanitized Markdown.
 
-- **C1, the owner's rows cannot be imitated.** Every owner row, bubble or
-  flat, carries a code-built "You" chip (`.who-owner`, a light filled tag)
-  before its marks, and sits at the right; a flat row's rule is on the
+- **C1, the owner's rows cannot be imitated.** Every row the owner typed in
+  this chat (`typedHere`: an owner's own chat, every mark a typed-here mark
+  or "not sent"), bubble or flat, carries a code-built "You" chip
+  (`.who-owner`, a light filled tag) and a hidden "You: " before its marks;
+  every other owner-role row (an inbox answer, a steer, a deferral's
+  "written by Jarvis", a task runner's prompt, a row before the thread is
+  known) carries an outlined "not typed by you" chip and no "You: " (review
+  of #338, MED 1). Owner-role rows sit at the right; a flat row's rule is on the
   right (`--text-2`). A reply has a continuous left gutter, and a quote in
   it is a filled italic box with no rule. The Markdown sanitizer keeps no
   `class`, `data-*` or `style`, so no reply can carry the chip or an owner
@@ -963,13 +968,18 @@ daemon string is still set as text or through the sanitized Markdown.
   surface; none was added.
 - **M1, M2:** the card's notice has one fixed slot under the allow row (two
   lines held), so nothing it says moves a button; while busy it says "Asking
-  for Face ID…", then "Sending…" (a refusal in amber).
+  for Face ID…", then "Sending…" (a refusal in amber). It is one persistent
+  `role="status"` node across redraws, and a cancelled passkey or a refusal
+  puts the focus on it.
 - **M3:** the limited state is said once: "limited: <label>. AUTHORIZE
-  answers with Discord's authority; ALWAYS is off."
+  answers with Discord's authority; ALWAYS is off.", or, on a card that
+  cannot be allowed here, "… ALWAYS is off, and this card is answered at the
+  desk." (review of #338, MED 2).
 - **M4:** an inbox decision's suggestion is marked, never preselected (as
   MR-3), and its options are listed once.
-- **M5:** a task's open question offers "Answer it in the Inbox", which opens
-  the Inbox at its `tq:` row.
+- **M5:** a task's open question offers "Answer it in the Inbox" while its
+  `tq:` row is in the Inbox (else "Answer at the desk"); it opens the Inbox
+  and, once the read redrew it, scrolls to and focuses that row.
 - **M7:** `--control-edge`, a 55% mix of `--text-muted` into
   `--border-strong` (#737069), edges every button and field: 3.73:1 on
   `--bg-0`, 3.53 on `--bg-1`, 3.22 on `--bg-2`, 3.88 on `--bg-inset` (it

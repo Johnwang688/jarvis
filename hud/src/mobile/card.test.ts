@@ -5,7 +5,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { ASKING_FACE_ID, PhoneApp, SENDING, type StreamLike } from "./app";
 import type { Got, Posted } from "./net";
-import { cardView, deadlineWords, parseDetail, PREVIEW_CHARS, previewText, rowCommand, type CardState } from "./card";
+import { cardView, deadlineWords, limitedWords, parseDetail, PREVIEW_CHARS, previewText, rowCommand, type CardState } from "./card";
 
 const CSS = readFileSync(join(__dirname, "mobile.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
 
@@ -37,12 +37,30 @@ describe("H2: the collapsed command is three wrapped lines, never one cut line",
 
   it("caps what reaches the preview, drops leading blank lines, and clamps to 3 lines in CSS", () => {
     expect(previewText("\n  \n\r\nfirst\r\nsecond")).toBe("first\nsecond");
-    expect(Array.from(previewText("x".repeat(5000))).length).toBe(PREVIEW_CHARS);
+    const cut = Array.from(previewText("x".repeat(5000)));
+    expect([cut.length, cut[cut.length - 1]]).toEqual([PREVIEW_CHARS, "…"]);
+    expect(previewText("x".repeat(PREVIEW_CHARS))).toBe("x".repeat(PREVIEW_CHARS));
+    // Format characters out (as previewLine): a bidi override or a zero-width cannot reorder or hide the tail.
+    expect(previewText("rm -rf \u202Egnp.exe\u200B\u2066 x\u2028y\u0007z")).toBe("rm -rf gnp.exe x\ny z");
     const clamp = CSS.slice(CSS.indexOf(".as-preview .as-clamp {"), CSS.indexOf("}", CSS.indexOf(".as-preview .as-clamp {")));
     for (const d of ["display: -webkit-box", "-webkit-box-orient: vertical", "-webkit-line-clamp: 3", "overflow: hidden",
       "white-space: pre-wrap", "word-break: break-all"]) expect(clamp).toContain(d);
     expect(CSS).not.toMatch(/\.as-preview \{[^}]*nowrap/);
     expect(CSS).not.toMatch(/\.as-preview \{[^}]*text-overflow: ellipsis/);
+  });
+});
+
+describe("M3: the limited words (review of #338, MED 2)", () => {
+  const secure = { ok: false, failed: "serve", label: "tailscale serve is not the only path", reason: "" };
+  it("names Discord's authority only when this card can be allowed here", () => {
+    expect(limitedWords(secure, true)).toBe("limited: tailscale serve is not the only path. "
+      + "AUTHORIZE answers with Discord's authority; ALWAYS is off.");
+    expect(limitedWords(secure, false)).toBe("limited: tailscale serve is not the only path. "
+      + "ALWAYS is off, and this card is answered at the desk.");
+    const off = cardView(state({ detail: parseDetail({ ...CARD, withheld: true, secure,
+      can: { deny: true, allow: false, always: false }, why: "this card has withheld text: answer it at the desk" }) }), noop);
+    expect(off.querySelector('[data-testid="m-limited"]')!.textContent).not.toContain("AUTHORIZE");
+    expect(off.querySelector<HTMLButtonElement>('[data-testid="approval-allow"]')!.disabled).toBe(true);
   });
 });
 
@@ -144,17 +162,23 @@ describe("M2: the card says what it waits on", () => {
     expect(h.q("m-card-notice")!.dataset.tone).toBe("refused");
   });
 
-  it("a cancelled passkey: the notice in the same slot, nothing answered", async () => {
+  it("a cancelled passkey: the notice in the same slot and status node, focused; nothing answered", async () => {
     const h = harness([row({})]);
     h.replies["/m/api/inbox/appr%3Ar1/answer/options"] = { status: 200, body: { publicKey: { challenge: "AAEC" } } };
     h.app.start();
     await h.settle();
     await h.click("m-open-card");
+    const node = h.q("m-card-notice");
     await h.click("approval-allow");
+    expect(h.q("m-card-notice")).toBe(node);
     h.release(null);
     await h.settle();
     expect(h.posts).toEqual(["/m/api/inbox/appr%3Ar1/answer/options"]);
-    expect(h.q("m-card-notice")!.textContent).toContain("Nothing was answered");
+    // One persistent role=status node (VoiceOver announces a change to it), and the focus is on it, not the page.
+    expect(h.q("m-card-notice")).toBe(node);
+    expect(node!.getAttribute("role")).toBe("status");
+    expect(node!.textContent).toContain("Nothing was answered");
+    expect(document.activeElement).toBe(node);
   });
 });
 
@@ -180,6 +204,24 @@ describe("M13: focus follows the card", () => {
     await h.click("approval-deny");
     expect(h.q("m-flash")!.textContent).toBe("Denied.");
     expect(document.activeElement).toBe(h.q("m-flash"));
+  });
+});
+
+describe("M5: Answer it in the Inbox lands on the row (review of #338, LOW)", () => {
+  it("scrolls to and focuses the tq: row once the Inbox read redrew it", async () => {
+    const tq = row({ id: "tq:bbbbbbbb:1", kind: "task_question", rank: 2, task_id: "bbbbbbbb", title: "task waits",
+      detail: { task_id: "bbbbbbbb", index: 1, text: "which db?", options: [] } });
+    const h = harness([row({}), tq]);
+    const seen: string[] = [];
+    HTMLElement.prototype.scrollIntoView = function () { seen.push(this.dataset.id ?? ""); };
+    h.app.start();
+    await h.settle();
+    h.app.showInboxRow("tq:bbbbbbbb:1");
+    await h.settle();
+    const target = h.root.querySelector<HTMLElement>('[data-testid="m-inbox-row"][data-id="tq:bbbbbbbb:1"]')!;
+    expect(document.activeElement).toBe(target);
+    expect(target.tabIndex).toBe(-1);
+    expect(seen.at(-1)).toBe("tq:bbbbbbbb:1");
   });
 });
 

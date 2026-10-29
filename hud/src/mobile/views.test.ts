@@ -3,7 +3,8 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { emptyLog, inboxView, logRow, OWNER_ROW_CLASSES, taskView, transcriptView, type InboxAnswers } from "./views";
+import { emptyLog, inboxView, logRow, NOT_TYPED_WORDS, OWNER_ROW_CLASSES, taskView, transcriptView, typedHere,
+  type InboxAnswers } from "./views";
 import { deskNote, type ChatThread, type LogRow, type TaskView } from "./model";
 import { parseInbox, type InboxRow } from "../lib/inbox";
 
@@ -52,9 +53,9 @@ describe("C1: agent text never looks like the owner's", () => {
     expect(item.querySelector(".m-sr")).toBeNull();
   });
 
-  it("gives every owner row, bubble and flat, the code-built You mark before its marks", () => {
-    for (const [marks, style] of [[["via the phone"], "msg-owner"], [["steering"], "msg-flat"],
-      [["via the inbox (not typed in this chat)"], "msg-flat"], [[], "msg-owner"]] as const) {
+  it("gives the rows the owner typed in this chat, bubble and flat, the code-built You mark before its marks", () => {
+    for (const [marks, style] of [[["via the phone"], "msg-owner"], [["via the phone", "not sent"], "msg-flat"],
+      [["not sent"], "msg-flat"], [["spoken"], "msg-owner"], [[], "msg-owner"]] as const) {
       const item = logRow(owner([...marks]));
       expect(item.classList.contains(style)).toBe(true);
       const mark = item.querySelector('[data-testid="m-owner-mark"]')!;
@@ -66,6 +67,42 @@ describe("C1: agent text never looks like the owner's", () => {
       // M13: VoiceOver hears who said it, first.
       expect([item.firstElementChild!.className, item.firstElementChild!.textContent]).toEqual(["m-sr", "You: "]);
     }
+  });
+
+  it("never says You on an owner-role row the owner did not type here (review of #338, MED 1)", () => {
+    const cases: [string, LogRow, boolean][] = [
+      ["a deferral's words (written_by)", owner(["written by Jarvis (a deferred approval), not typed"]), true],
+      ["an inbox decision's answer", owner(["via the inbox (not typed in this chat)"]), true],
+      ["the phone inbox's answer", owner(["via the phone's inbox (not typed in this chat)"]), true],
+      ["a steer", owner(["steering"]), true],
+      ["a mark the phone does not know", owner(["something new"]), true],
+      ["a task thread's unmarked prompt", owner([]), false],
+      ["a typed mark outside an owner's chat", owner(["via the phone"]), false],
+    ];
+    for (const [what, r, inChat] of cases) {
+      expect(typedHere(r, inChat), what).toBe(false);
+      const item = logRow(r, inChat);
+      expect(item.className, what).toBe("msg msg-flat");
+      expect(item.querySelector('[data-testid="m-owner-mark"], .who-owner'), what).toBeNull();
+      expect(item.querySelector(".m-sr"), what).toBeNull();
+      expect(item.textContent, what).not.toMatch(/\bYou\b/);
+      const chip = item.querySelector('[data-testid="m-not-typed-mark"]')!;
+      expect([chip.className, chip.textContent, chip.getAttribute("aria-hidden")], what).toEqual(["who-other", NOT_TYPED_WORDS, null]);
+      // The marks stay above the words, after the chip.
+      const head = item.querySelector('[data-testid="m-msg-marks"]')!;
+      expect([head.firstChild, item.firstElementChild], what).toEqual([chip, head]);
+      for (const m of r.marks) expect(head.textContent, what).toContain(m);
+    }
+    // A thread whose meta is not read yet: not known to be an owner's chat, so no You at all.
+    const unknown = transcriptView(null, [owner(["via the phone"]), owner([]), owner(["steering"])], false, () => {});
+    expect(unknown.list.querySelectorAll('[data-testid="m-owner-mark"], .m-sr').length).toBe(0);
+    expect(unknown.list.querySelectorAll('[data-testid="m-not-typed-mark"]').length).toBe(3);
+    // A typed row in an owner's chat still gets You, bubble or flat.
+    const chat = transcriptView(CHAT, [owner(["via the phone"]), owner(["via the phone", "not sent"])], false, () => {});
+    expect(chat.list.querySelectorAll('[data-testid="m-owner-mark"]').length).toBe(2);
+    expect(chat.list.querySelectorAll('[data-testid="m-not-typed-mark"]').length).toBe(0);
+    // The not-typed chip is not the You chip's look (no light fill).
+    expect(rule(".who-other")).not.toMatch(/background/);
   });
 
   it("no Markdown construct can put an owner-row class or the mark inside a reply (structural)", () => {
@@ -86,7 +123,7 @@ describe("C1: agent text never looks like the owner's", () => {
     }
     expect((window as unknown as { __pwned?: number }).__pwned).toBeUndefined();
     // And the owner's rows in the same transcript carry it.
-    const mixed = transcriptView(CHAT, [owner(["via the phone"]), owner(["steering"]), reply(SPOOF)], false, () => {});
+    const mixed = transcriptView(CHAT, [owner(["via the phone"]), owner(["spoken"]), reply(SPOOF)], false, () => {});
     expect(mixed.list.querySelectorAll('[data-testid="m-owner-mark"]').length).toBe(2);
   });
 
@@ -216,6 +253,10 @@ describe("M5: a task's question points at the Inbox, where the phone answers it"
     expect(Array.from(go).map((b) => b.textContent)).toEqual(["Answer it in the Inbox"]);
     go[0].click();
     expect(went).toEqual([1]);
+    // Only when the row is in the Inbox now; else the plain desk note (review of #338, LOW).
+    const gone = taskView(task, null, { back() {}, showDiff() {}, answerInInbox: (i) => went.push(i), inInbox: () => false });
+    expect(gone.querySelector('[data-testid="m-answer-in-inbox"]')).toBeNull();
+    expect(gone.querySelector('[data-testid="m-desk-only"]')!.textContent).toBe("Answer at the desk");
     // Without the app's link (read-only), the old words.
     expect(taskView(task, null, { back() {}, showDiff() {} }).querySelector('[data-testid="m-desk-only"]')!.textContent)
       .toBe("Answer at the desk");

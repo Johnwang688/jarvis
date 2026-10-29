@@ -474,13 +474,28 @@ export function ownerChat(meta: ChatThread | null | undefined): boolean {
  * reply's Markdown can carry any of them (the sanitizer keeps no `class`). */
 export const OWNER_ROW_CLASSES: readonly string[] = ["msg-owner", "msg-flat", "msg-bubble", "msg-meta", "who-owner"];
 
-/** The owner's mark (C1): a code-built "You" chip, drawn on every owner row
- * (bubble and flat) before its marks. Hidden from screen readers, which hear
- * the row's "You: " instead (M13). */
+/** The owner's mark (C1): a code-built "You" chip, drawn before the marks on
+ * every row the owner typed in this chat. Hidden from screen readers, which
+ * hear the row's "You: " instead (M13). */
 function ownerMark(): HTMLElement {
   const mark = testid(el("span", "who-owner", "You"), "m-owner-mark");
   mark.setAttribute("aria-hidden", "true");
   return mark;
+}
+
+/** The chip on every other owner-role row (review of #338, MED 1): a decision's answer from the
+ * inbox, a steer, a deferral's "written by Jarvis", a task runner's prompt, a row of a thread not
+ * yet known. Code's words, read aloud as they are; never "You". */
+export const NOT_TYPED_WORDS = "not typed by you";
+function notTypedMark(): HTMLElement {
+  return testid(el("span", "who-other", NOT_TYPED_WORDS), "m-not-typed-mark");
+}
+
+/** Whether an owner-role row was typed by the owner in this chat (review of #338, MED 1): only
+ * in an owner's own chat, and only with marks that say it was typed here ("not sent" is still
+ * the owner's typing). Anything else gets no "You". */
+export function typedHere(row: Pick<LogRow, "role" | "marks">, inOwnerChat: boolean): boolean {
+  return row.role === "owner" && inOwnerChat && row.marks.every((m) => TYPED_HERE_MARKS.has(m) || WARN_MARKS.has(m));
 }
 
 export function logRow(row: LogRow, inOwnerChat = true): HTMLElement {
@@ -500,10 +515,12 @@ export function logRow(row: LogRow, inOwnerChat = true): HTMLElement {
     return item;
   }
   if (style === "flat") {
-    // Where the words came from first, then the words, never as a bubble.
-    item.append(el("span", "m-sr", "You: "));
+    // Where the words came from first, then the words, never as a bubble. "You" only for the
+    // owner's own typing here; any other owner-role row says it was not typed by the owner.
+    const mine = typedHere(row, inOwnerChat);
+    if (mine) item.append(el("span", "m-sr", "You: "));
     const head = testid(el("div", "msg-head"), "m-msg-marks");
-    const parts: HTMLElement[] = [ownerMark()];
+    const parts: HTMLElement[] = [mine ? ownerMark() : notTypedMark()];
     for (const mark of row.marks) parts.push(el("span", WARN_MARKS.has(mark) ? "mark mark-warn" : "mark", mark));
     const at = time(row.at).slice(0, 5);
     if (at) parts.push(el("span", "", at));
@@ -628,7 +645,9 @@ export function taskView(task: TaskView, diff: DiffView | null | "loading" | str
                          actions: { back: () => void; showDiff: () => void; folds?: Map<string, boolean>;
                                     controls?: HTMLElement | null;
                                     /** M5 (phone audit): the question's Inbox row, where the phone answers it. */
-                                    answerInInbox?: (index: number) => void }): HTMLElement {
+                                    answerInInbox?: (index: number) => void;
+                                    /** Whether the question's `tq:` row is in the Inbox now (review of #338, LOW). */
+                                    inInbox?: (index: number) => boolean }): HTMLElement {
   const view = testid(el("section", "view"), "m-task-view");
   view.dataset.id = task.id;
   const bar = el("div", "subbar");
@@ -648,9 +667,12 @@ export function taskView(task: TaskView, diff: DiffView | null | "loading" | str
     view.append(el("div", "label", "Question"), testid(el("p", "question", q.text), "m-question"));
     lines(view, "Options", q.options, "options");
     const go = actions.answerInInbox;
-    if (go) view.append(tap("Answer it in the Inbox", () => go(q.index), "quiet m-send primary", "m-answer-in-inbox"));
+    if (go && (actions.inInbox?.(q.index) ?? true)) {
+      view.append(tap("Answer it in the Inbox", () => go(q.index), "quiet m-send primary", "m-answer-in-inbox"));
+    } else {
+      view.append(testid(el("p", "desk-only", "Answer at the desk"), "m-desk-only"));
+    }
   }
-  if (open.length && !actions.answerInInbox) view.append(testid(el("p", "desk-only", "Answer at the desk"), "m-desk-only"));
   if (task.plan.length) {
     view.append(el("div", "label", "Plan"));
     const ol = testid(el("ol", "plain plan"), "m-plan");

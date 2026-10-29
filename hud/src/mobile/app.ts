@@ -318,6 +318,10 @@ export class PhoneApp {
       card.rule = null;
     }
     if (this.tab === "inbox") this.renderInbox();
+    // M5: the row a task's "Answer it in the Inbox" asked for, once the read redrew it.
+    const pending = this.pendingRow;
+    this.pendingRow = null;
+    if (pending && this.tab === "inbox" && !this.card) this.revealRow(pending);
   }
 
   /** §4.1's last result, to show (`/m/api/me`): never what authorizes. */
@@ -601,6 +605,7 @@ export class PhoneApp {
     }
     card.notice = await this.refusedWith(result.status, result.body);
     card.rule = null;
+    this.focusNotice = true;
     this.render();
     if (result.status === 409) void this.loadCard();
   }
@@ -679,6 +684,7 @@ export class PhoneApp {
       card.progress = "";
       card.rule = null;
       card.notice = "Cancelled, or the passkey was not verified. Nothing was answered.";
+      this.focusNotice = true;
       this.render();
       return;
     }
@@ -1333,6 +1339,12 @@ export class PhoneApp {
 
   /** M13: the card last drawn, so focus moves to its heading when one opens and back to its row when it closes. */
   private drawnCard: string | null = null;
+  /** M5: an Inbox row to scroll to and focus after the next read. */
+  private pendingRow: string | null = null;
+  /** The card's one status node, kept across redraws so VoiceOver announces its changes (review of #338, LOW). */
+  private cardNotice: HTMLElement | null = null;
+  /** After a cancelled passkey or a refusal: the focus goes to the notice, not the page (review of #338, LOW). */
+  private focusNotice = false;
   private deadlineTimer: ReturnType<typeof setTimeout> | null = null;
 
   /** After a draw: a card that just opened takes the focus on its heading; one that just closed
@@ -1341,7 +1353,16 @@ export class PhoneApp {
     const now = this.tab === "inbox" && this.card ? this.card.rowId : null;
     const was = this.drawnCard;
     this.drawnCard = now;
-    if (now === was) { if (kept) this.restoreFocus(kept); return; }
+    if (now === was) {
+      if (now && this.focusNotice) {
+        this.focusNotice = false;
+        const notice = this.main.querySelector<HTMLElement>('[data-testid="m-card-notice"]');
+        if (notice) { notice.tabIndex = -1; notice.focus({ preventScroll: true }); return; }
+      }
+      if (kept) this.restoreFocus(kept);
+      return;
+    }
+    this.focusNotice = false;
     if (now) {
       this.main.querySelector<HTMLElement>('[data-testid="m-card-heading"]')?.focus();
       this.tickDeadline();
@@ -1349,8 +1370,8 @@ export class PhoneApp {
       // Answered: the line saying what happened ("Denied."); else (back, or gone) the row's own button.
       const flash = this.main.querySelector<HTMLElement>('[data-testid="m-flash"]');
       const row = this.inboxRowEl(was)?.querySelector<HTMLElement>('[data-testid="m-open-card"]');
-      if (flash) { flash.tabIndex = -1; flash.focus(); }
-      else row?.focus();
+      if (flash) { flash.tabIndex = -1; flash.focus({ preventScroll: true }); }
+      else row?.focus({ preventScroll: true });
     }
   }
 
@@ -1391,8 +1412,18 @@ export class PhoneApp {
   /** M5: a task's question, answered where the phone answers it: the Inbox, at its row. */
   showInboxRow(rowId: string): void {
     this.card = null;
+    this.pendingRow = rowId;
     this.show("inbox");
-    this.inboxRowEl(rowId)?.scrollIntoView({ block: "start" });
+    this.revealRow(rowId);
+  }
+
+  /** The Inbox row asked for, scrolled to and focused (its article, tabIndex -1: no keyboard rises). */
+  private revealRow(rowId: string): void {
+    const row = this.inboxRowEl(rowId);
+    if (!row) return;
+    row.tabIndex = -1;
+    row.scrollIntoView({ block: "start" });
+    row.focus({ preventScroll: true });
   }
 
   /** The drawn inbox row with this id (matched as data, never spliced into a selector). */
@@ -1435,6 +1466,16 @@ export class PhoneApp {
         // AS: the owner's own open or close of the command, kept across a re-read of the card.
         toggleCommand: (open) => { if (this.card) { this.card.expanded = open; this.render(); } },
       }, this.now(), this.online);
+      // The same status node across redraws of this card: only its words and tone change.
+      const fresh = view.querySelector<HTMLElement>('[data-testid="m-card-notice"]');
+      const old = this.cardNotice;
+      if (fresh && old && this.drawnCard === this.card.rowId) {
+        if (old.textContent !== fresh.textContent) old.textContent = fresh.textContent;
+        old.dataset.tone = fresh.dataset.tone ?? "";
+        fresh.replaceWith(old);
+      } else {
+        this.cardNotice = fresh;
+      }
     } else if (this.tab === "inbox") {
       const answers: InboxAnswers = {
         openCard: (row) => this.openCard(row),
@@ -1512,7 +1553,8 @@ export class PhoneApp {
         ? el("p", "m-notice", this.taskWrite.note) : null);
       view = open.view
         ? taskView(open.view, open.diff, { back: () => this.show("tasks"), showDiff: () => void this.loadDiff(),
-          folds: open.folds, controls, answerInInbox: (index) => this.showInboxRow(`tq:${open.id}:${index}`) })
+          folds: open.folds, controls, answerInInbox: (index) => this.showInboxRow(`tq:${open.id}:${index}`),
+          inInbox: (index) => !!this.inbox?.some((row) => row.id === `tq:${open.id}:${index}`) })
         : el("p", "empty", this.online ? "Loading…" : "Not read yet: you're offline.");
     } else {
       view = tasksView(this.tasks, (t) => void this.openTask(t.id));

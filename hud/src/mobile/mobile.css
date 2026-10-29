@@ -282,6 +282,9 @@ p, li, h2, h3 { overflow-wrap: anywhere; }
    owner rows have a right-hand rule or right alignment. */
 .who-owner { display: inline-block; font: 600 11px/16px var(--mono); letter-spacing: 0.06em; text-transform: uppercase;
   color: var(--bg-0); background: var(--text-2); border-radius: 3px; padding: 0 5px; vertical-align: 1px; }
+/* An owner-role row the owner did not type here (review of #338, MED 1): a muted outlined tag, never the You chip. */
+.who-other { display: inline-block; font: 11px/16px var(--mono); color: var(--text-2); border: 1px solid var(--control-edge);
+  border-radius: 3px; padding: 0 5px; vertical-align: 1px; }
 /* An owner row not typed in this chat (a decision's answer, a steer, one never sent): flat, its marks first. */
 .msg-flat { align-self: flex-end; max-width: 85%; padding: 0 10px 0 0; border-right: 2px solid var(--text-2); }
 .msg-flat .msg-head { color: var(--text-2); }

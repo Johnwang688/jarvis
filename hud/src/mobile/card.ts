@@ -175,7 +175,11 @@ export function summaryLines(card: Json, box: HTMLElement, idPrefix = "approval"
  * as three lines hold, never one ellipsized line; leading blank lines are dropped. */
 export const PREVIEW_CHARS = 600;
 export function previewText(text: string): string {
-  return Array.from(text.replace(/\r\n?/g, "\n").replace(/^(?:[ \t]*\n)+/, "")).slice(0, PREVIEW_CHARS).join("");
+  // As previewLine: format characters out (bidi overrides, zero-widths), other controls as spaces.
+  const clean = text.replace(/\r\n?|[\u2028\u2029]/g, "\n").replace(/\p{Cf}/gu, "")
+    .replace(/[^\S\n\t ]|[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, " ").replace(/^(?:[ \t]*\n)+/, "");
+  const chars = Array.from(clean);
+  return chars.length <= PREVIEW_CHARS ? clean : chars.slice(0, PREVIEW_CHARS - 1).join("").trimEnd() + "…";
 }
 
 /** The collapsed preview's text, inside its clamp. */
@@ -309,10 +313,12 @@ export function deadlineWords(at: number | null, now: number): string {
   return `Denies automatically at ${clockOf(at).slice(0, 5)}${tail}`;
 }
 
-/** M3 (phone audit): the limited state, said once, with what AUTHORIZE then means. */
-export function limitedWords(secure: Secure): string {
-  return `limited: ${secure.label || secure.failed || "a check failed"}. `
-    + "AUTHORIZE answers with Discord's authority; ALWAYS is off.";
+/** M3 (phone audit): the limited state, said once, with what AUTHORIZE then means; when this card
+ * cannot be allowed here at all, only that it is answered at the desk (review of #338, MED 2). */
+export function limitedWords(secure: Secure, canAllow: boolean): string {
+  const label = `limited: ${secure.label || secure.failed || "a check failed"}. `;
+  return label + (canAllow ? "AUTHORIZE answers with Discord's authority; ALWAYS is off."
+    : "ALWAYS is off, and this card is answered at the desk.");
 }
 
 export function cardView(state: CardState, actions: CardActions, now: number = Date.now(),
@@ -340,7 +346,7 @@ export function cardView(state: CardState, actions: CardActions, now: number = D
   card.append(heading);
   const d = state.detail;
   const row = state.row;
-  if (d && !d.secure.ok) card.append(testid(el("p", "m-limited", limitedWords(d.secure)), "m-limited"));
+  if (d && !d.secure.ok) card.append(testid(el("p", "m-limited", limitedWords(d.secure, d.can.allow)), "m-limited"));
   // AS-12: a card's leading line (a widening, the merge gate's), then the buttons, then the rest.
   if (d && !d.private && !state.refused) {
     const headline = headlineLine(d.card.headline);

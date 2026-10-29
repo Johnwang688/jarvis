@@ -222,10 +222,13 @@ describe("the phone's views: untrusted text stays text (P-3)", () => {
       noMarkup(item);
       expect(item.className).toBe("msg msg-flat");
       expect(item.querySelector(".msg-bubble")).toBeNull();
-      // The marks come first, above the words, each whole (after VoiceOver's hidden "You: ", M13).
+      // The marks come first, above the words, each whole. Only the owner's own typing here (a
+      // message "not sent") says You, after VoiceOver's hidden "You: "; any other row's head
+      // starts "not typed by you", with no "You: " (review of #338, MED 1).
       const head = item.querySelector('[data-testid="m-msg-marks"]')!;
-      expect(item.firstElementChild!.className).toBe("m-sr");
-      expect(item.firstElementChild!.nextElementSibling).toBe(head);
+      const typed = r.marks.every((m) => m === "not sent" || m === "via the phone");
+      expect(item.firstElementChild).toBe(typed ? item.querySelector(".m-sr") : head);
+      expect(head.firstElementChild!.textContent).toBe(typed ? "You" : "not typed by you");
       expect(head.className).toBe("msg-head");
       for (const mark of r.marks) expect(head.textContent).toContain(mark);
       expect(head.nextElementSibling!.textContent).toBe(r.text);
