@@ -1104,7 +1104,7 @@ class PhoneActs(Phone):
 
     def test_the_phone_scrub_sends_it_to_the_desk(self):
         secret = "password=" + rach.PASSWORD
-        facts = replace(PF.F(), files=(FileChange(f"docs/{secret}.txt", 1, 0, (), False),))
+        facts = replace(PF.F(), title=PF.view()["title"], files=(FileChange(f"docs/{secret}.txt", 1, 0, (), False),))
         p = self.wire(facts=facts)
         self.assertEqual(p.detail()["actions"], ["merge"])
         status, _, got = self.options("merge")

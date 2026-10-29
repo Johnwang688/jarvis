@@ -511,10 +511,6 @@ class PrActions:
             raise _changed("no merge method")
         parts = [p.as_dict() for p in pr_facts.facts_parts(facts)]
         stored = self.row(row_id).get("detail") or {}
-        # A safety flag the fresh read sees but the row did not show is a
-        # change the owner never saw (review of #340 r3).
-        if pr_facts.flagged(facts) and not (stored.get("flags") or {}).get("flagged"):
-            raise _changed("it touches safety files the row did not show")
         from .pr_summary import _ROW_CARD
         shown = {"facts": parts, "summary": stored.get("summary"), "method": decision.method,
                  "actions": list(decision.actions), "fix": stored.get("fix"),
@@ -523,6 +519,28 @@ class PrActions:
             raise _changed()
         if via == "phone" and phone_withheld(parts, files_detail(facts)):
             raise Refused(409, "this pull request has withheld text: " + AT_DESK)
+        # What the fresh read would show must be what the row showed, for
+        # the fields drawn from it (reviews of #340 r3 and r4): the safety
+        # warning (paths and families, not only flagged or not), the PR's own
+        # title (both cleaned by `inbox_prs.clean_title`) and why an action is
+        # or is not offered (the row's `why` is `decide`'s, with a fix's notes
+        # appended after "; ").
+        # A warning the row did not show: flagged now but not then, or a
+        # flagged path or family it did not list. Not how complete the list
+        # was, nor a warning the fresh read lacks: two reads of one head can
+        # differ in budget (review of #332), and the row showed more.
+        from .pr_summary import flags_detail
+        fresh_flags, shown_flags = flags_detail(facts), stored.get("flags") or {}
+        shown_items = {(i.get("name"), tuple(i.get("families") or ()))
+                       for i in shown_flags.get("items") or () if isinstance(i, dict)}
+        if (fresh_flags["flagged"] and not shown_flags.get("flagged")) or any(
+                (i["name"], tuple(i["families"])) not in shown_items for i in fresh_flags["items"]):
+            raise _changed("its safety warning changed since you read it")
+        if facts.title != stored.get("title"):
+            raise _changed("its title changed since you read it")
+        shown_why = stored.get("why") or ""
+        if not (shown_why == decision.why or shown_why.startswith(decision.why + "; ")):
+            raise _changed("why it is offered changed since you read it")
         return decision
 
     # -- running -----------------------------------------------------------------------
