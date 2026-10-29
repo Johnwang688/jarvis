@@ -55,7 +55,9 @@ describe("C1: agent text never looks like the owner's", () => {
 
   it("gives the rows the owner typed in this chat, bubble and flat, the code-built You mark before its marks", () => {
     for (const [marks, style] of [[["via the phone"], "msg-owner"], [["via the phone", "not sent"], "msg-flat"],
-      [["not sent"], "msg-flat"], [["spoken"], "msg-owner"], [[], "msg-owner"]] as const) {
+      [["not sent"], "msg-flat"], [["spoken"], "msg-owner"], [[], "msg-owner"],
+      // A steer is the owner's typing (at the desk, mid-turn): You, its mark kept, flat (review of #338).
+      [["steering"], "msg-flat"], [["spoken", "steering"], "msg-flat"]] as const) {
       const item = logRow(owner([...marks]));
       expect(item.classList.contains(style)).toBe(true);
       const mark = item.querySelector('[data-testid="m-owner-mark"]')!;
@@ -74,10 +76,11 @@ describe("C1: agent text never looks like the owner's", () => {
       ["a deferral's words (written_by)", owner(["written by Jarvis (a deferred approval), not typed"]), true],
       ["an inbox decision's answer", owner(["via the inbox (not typed in this chat)"]), true],
       ["the phone inbox's answer", owner(["via the phone's inbox (not typed in this chat)"]), true],
-      ["a steer", owner(["steering"]), true],
+      ["a mark that only contains the steer word", owner(["steering (relayed)"]), true],
       ["a mark the phone does not know", owner(["something new"]), true],
       ["a task thread's unmarked prompt", owner([]), false],
       ["a typed mark outside an owner's chat", owner(["via the phone"]), false],
+      ["a steer outside an owner's chat", owner(["steering"]), false],
     ];
     for (const [what, r, inChat] of cases) {
       expect(typedHere(r, inChat), what).toBe(false);

@@ -226,7 +226,7 @@ describe("the phone's views: untrusted text stays text (P-3)", () => {
       // message "not sent") says You, after VoiceOver's hidden "You: "; any other row's head
       // starts "not typed by you", with no "You: " (review of #338, MED 1).
       const head = item.querySelector('[data-testid="m-msg-marks"]')!;
-      const typed = r.marks.every((m) => m === "not sent" || m === "via the phone");
+      const typed = r.marks.every((m) => ["not sent", "via the phone", "spoken", "steering"].includes(m));
       expect(item.firstElementChild).toBe(typed ? item.querySelector(".m-sr") : head);
       expect(head.firstElementChild!.textContent).toBe(typed ? "You" : "not typed by you");
       expect(head.className).toBe("msg-head");

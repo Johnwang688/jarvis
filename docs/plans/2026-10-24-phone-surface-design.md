@@ -937,8 +937,9 @@ daemon string is still set as text or through the sanitized Markdown.
 - **C1, the owner's rows cannot be imitated.** Every row the owner typed in
   this chat (`typedHere`: an owner's own chat, every mark a typed-here mark
   or "not sent"), bubble or flat, carries a code-built "You" chip
-  (`.who-owner`, a light filled tag) and a hidden "You: " before its marks;
-  every other owner-role row (an inbox answer, a steer, a deferral's
+  (`.who-owner`, a light filled tag) and a hidden "You: " before its marks
+  (a steer, typed at the desk mid-turn, counts: its "steering" mark kept, flat);
+  every other owner-role row (an inbox answer, a deferral's
   "written by Jarvis", a task runner's prompt, a row before the thread is
   known) carries an outlined "not typed by you" chip and no "You: " (review
   of #338, MED 1). Owner-role rows sit at the right; a flat row's rule is on the

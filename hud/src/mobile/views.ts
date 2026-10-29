@@ -491,11 +491,15 @@ function notTypedMark(): HTMLElement {
   return testid(el("span", "who-other", NOT_TYPED_WORDS), "m-not-typed-mark");
 }
 
-/** Whether an owner-role row was typed by the owner in this chat (review of #338, MED 1): only
- * in an owner's own chat, and only with marks that say it was typed here ("not sent" is still
- * the owner's typing). Anything else gets no "You". */
+/** The marks of words the owner typed (chat_reads `_owner_row`, matched exactly): typed here, a
+ * message "not sent", and "steering" (typed at the desk, mid-turn; still drawn flat). */
+const OWNER_TYPED_MARKS: ReadonlySet<string> = new Set([...TYPED_HERE_MARKS, ...WARN_MARKS, "steering"]);
+
+/** Whether an owner-role row is the owner's own typing in this chat (review of #338, MED 1): only
+ * in an owner's own chat, and only with marks from OWNER_TYPED_MARKS. Anything else (an inbox
+ * answer quoting the agent's question, a deferral's words, an unknown mark) gets no "You". */
 export function typedHere(row: Pick<LogRow, "role" | "marks">, inOwnerChat: boolean): boolean {
-  return row.role === "owner" && inOwnerChat && row.marks.every((m) => TYPED_HERE_MARKS.has(m) || WARN_MARKS.has(m));
+  return row.role === "owner" && inOwnerChat && row.marks.every((m) => OWNER_TYPED_MARKS.has(m));
 }
 
 export function logRow(row: LogRow, inOwnerChat = true): HTMLElement {
