@@ -786,7 +786,11 @@ class OwnerOnly(Base):
                     # PM-C: the PR summaries (the model's lines on a PR row), never
                     # the file's own path: files.py names it in SELF_PROTECTED.
                     "jarvis.v2.pr_summary", "from .pr_summary", "import pr_summary", "pr_summary import",
-                    "PrSummaries", "attach_pr_summaries")
+                    "PrSummaries", "attach_pr_summaries",
+                    # PM-E: a PR's Fix (a task under the PR scope) and its routes,
+                    # never the file's own path: files.py names it in SELF_PROTECTED.
+                    "jarvis.v2.pr_fix", "from .pr_fix", "import pr_fix", "pr_fix import", "pr_fix.start", "pr_fix.hud_route",
+                    "PrFixes", "attach_pr_fixes", "start_fix", "cancel_fix", "/inbox/pr/", "pr_scope")
 
     def test_no_tool_reaches_the_inbox(self):
         from jarvis import tools
@@ -1028,7 +1032,10 @@ class OwnerOnly(Base):
                                    # MR: the morning review, Approve selected and Leave selected.
                                    ("GET", "/inbox/review", None),
                                    ("POST", "/inbox/review/approve", {"items": [{"id": "defer:x", "tag": "a" * 64}]}),
-                                   ("POST", "/inbox/review/leave", {"items": [{"id": "defer:x"}]})):
+                                   ("POST", "/inbox/review/leave", {"items": [{"id": "defer:x"}]}),
+                                   # PM-E: a PR's Fix and its Cancel.
+                                   ("POST", "/inbox/pr/fix", {"id": "pr:o/r#1", "head": "1" * 40, "card": "0" * 64}),
+                                   ("POST", "/inbox/pr/fix/cancel", {"id": "pr:o/r#1"})):
             with self.subTest(path=path):
                 self.request(method, path, body, 403)
                 self.request(method, path, body, 403, port=self.daemon.face_port)
