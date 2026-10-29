@@ -3554,3 +3554,101 @@ and `stores_check`), `decisions.jsonl` dropped from `RECORD_FILES`, globs
 let past the tree rule (157), `owner_trees` back to the inbox alone (629),
 the record trees left out of `_self_protected` (`files_check`,
 `stores_check`), and `denied_file`'s record branch removed (11).
+
+## Read tools refuse credential folders in every task and chat (2026-10-29)
+
+**The gap** (found by the PM-E builder, confirmed by its reviewer). v2's
+`denied_read` refused credential *files* (`.env*`, the bundles) and the
+phone's folder only. Nothing else under `config.credential_dirs()` —
+`~/.config/gh` (the GitHub token in `hosts.yml`), `~/.ssh`, `~/.aws`,
+`~/.config/jarvis`, `~/.gnupg`, the Browser's folder — was refused for
+Claude's Read, NotebookRead, Grep, Glob or LS, and `credentials-path`
+judges shell words and write targets, not read tools. Under AUTO the
+provider's reviewer decided alone, in every task and chat, while a shell
+`cat ~/.config/gh/hosts.yml` was asked. `credential_dirs()`' docstring
+claimed v2's read tools refused them; that held only for `remote_dir()`.
+Separately, `git credential fill` and its kin reached the reviewer:
+`credentials-login` knew only `gh auth`, `vercel login`, `aws configure` and
+`ssh-*`.
+
+**The rule** (tighten-only):
+
+- **Layer 1, every read tool** (`READ_TOOLS`: Claude's Read, NotebookRead,
+  Grep, Glob, LS; v1's `read_file`, `grep_files`, `list_dir`, `find_files`)
+  refuses any path in a credential folder, unasked, in every profile
+  (`permissions._credential_folder_read`). It asks v1's own judge,
+  `files.credential_folder_judge`, so the two answer alike: as written and
+  where it resolves, a symlink's name and target, `~`, a relative path
+  placed in the brief's folder **and** the folder Claude's shell reports
+  (`shell_cwd`), and, new in the shared judge, **a case variant**
+  (`~/.SSH/…`, refused everywhere, the stricter way) and **`..` as the
+  kernel reads it** (`link/../x` with `link -> ~/.ssh/sub` is `~/.ssh/x`;
+  `abspath` alone folds it to the wrong place). The gate's own state files
+  stay readable by their own path, as in v1.
+- **A tree search from a folder that holds one** — Grep, Glob, LS and
+  `find_files` rooted at `~`, `~/.config`, `~/.local`, `/`, the folder
+  holding `$HOME`, or with no `path` in such a folder — is refused. This
+  reverses the stated limit of the phone-folder rule (LOW-A): `$HOME` and
+  above used to pass. v1's `grep_files` is not a tree tool here: it filters
+  every file through the same judge. `list_dir` lists one level and skips
+  dot entries, so `list_dir ~` stays allowed.
+- **A Glob (or `find_files`) pattern that climbs into one** — absolute,
+  `~`, `../../.aws/*`, a brace variant, a case variant — is refused when its
+  fixed leading folders lie in a credential folder, or hold one with a
+  wildcard still to match (`~/.ss?/*`, `/**/id_*`), and whenever a `..`
+  follows a wildcard (`*/../../x`: cannot be placed). Claude's Glob pattern
+  stays unjudged for `.env*` names (it returns names); this is the folder
+  rule only.
+- **Layer 2, `credentials-read`** (new default rule, kind
+  `credential_read`): `git credential fill|approve|reject`, any
+  `git credential-<helper>` and `git-credential-*` run directly, git's
+  credential settings read or set (`git config … credential.*`,
+  `git -c credential.…`, `--config-env=credential.…`), the helpers and
+  stores `docker-credential-*`, `pass`, `gopass`, `passage`, and the token
+  printers `gh config … *token*`, `gcloud auth print-*`,
+  `az … get-access-token`, `aws … get-login-password|get-session-token|
+  get-role-credentials|get-federation-token`, macOS `security
+  find-*-password|dump-keychain|export`, `op read|item get|inject`,
+  `bw get`, `lpass show`, `gpg --export-secret-*`,
+  `npm config get *auth*`. The program must be the command's own (after
+  wrappers and runners), so `git log --grep credential` and
+  `echo pass show` do not ask. `gh auth token` was already
+  `credentials-login`'s; `secret-tool`, `keyring get` and `kwallet-query`
+  were already refused outright (Secret Service, 2026-10-15).
+- **No Always on a credential rule's card** (`credentials-*`): a yes is
+  for that call only, never an allowlist entry a v1 surface would read.
+- **v1 parity.** `list_dir` and `find_files` now refuse a credential folder
+  (they never asked the judge), and `find_files` leaves a credential
+  folder's names out of a walk; the judge's case and `..` readings reach
+  `read_file`, `grep_files`, `run_readonly`, sqlite and skills through the
+  one function.
+- **Codex** needs nothing: `codex_config.deny_paths` already denies every
+  existing `credential_dirs()` folder (plus `.git-credentials`, `.netrc`
+  and the rest of `KNOWN_CREDENTIALS`).
+- **PR #337 (PM-E)** adds a stricter scope for PR fix tasks
+  (`pr_fix.judge`, `_under_credential_dir`); it runs after layer 1, so this
+  rule refuses first and the scope's own deny never sees these calls. The
+  two do not touch the same lines.
+
+**Not covered** (stated limits): a symlink to a credential folder deep in a
+tree a search walks (ripgrep follows none unless told to, and Jarvis never
+sees Claude's tool results); a tool outside `READ_TOOLS` (an external MCP
+file reader); credential *files* outside the folders — `~/.git-credentials`
+and `~/.netrc` are denied to Codex but not refused for Claude's Read; and
+`git config --list`, which prints every setting.
+
+Pinned by `tests/v2/permissions_check.py` (`cred_dir_read_checks`: nine
+tools × seven folders × ten spellings in AUTO, ASK and STRICT refused at
+layer 1 and never asked (1,890 calls); 47 climbing patterns × Glob and
+`find_files`; nine holding roots × four tree tools; pathless searches in a
+holding brief or shell folder; 24 ordinary reads allowed; v1's four read
+tools refusing every spelling; 39 commands asked with no Always and
+declined with no human; 14 ordinary commands not asked) and
+`tests/v2/push_check.py` (`$HOME` now refused). Against main the section
+fails 3,952 of 6,562 checks. Mutants, each verified to fail: no folder
+judge (3,464), no holds check (76), no pattern check (94), a pathless
+search unjudged (98), the shell's folder ignored (2), `..` after a
+wildcard allowed (16), no case fold (406), no kernel-order `..` (345),
+`list_dir` unguarded (70), `find_files`' walk unfiltered (1), no
+`credential_read` kind (229), git's subcommand ignored (104), Always
+offered (79), the rule missing from the defaults (229).
