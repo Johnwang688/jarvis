@@ -190,6 +190,16 @@ DETAIL_FIELDS = {
     # approval's; Approve and retry needs a passkey (remote_answer).
     "deferred": ("deferral_id", "tool", "card", "thread_id", "task_id", "at", "until", "grantable",
                  "why_not", "expired", "hud_only", "count", "more", "summary"),
+    # PM-26 (PR rows, `inbox_prs` and `pr_summary`): code's facts, flags and
+    # actions, the model's summary (display only), the hold and the card an
+    # OK binds; the whole detail through `scrub_structure`. `why`,
+    # `summary_note` and `summary_reason` are code's words for the row (no
+    # action, the summary's state), kept so the phone can say why. PM-E's
+    # `fix` joins it later.
+    "pr": ("repo", "number", "title", "branch", "base", "author", "fork", "head", "checks",
+           "merge_state", "facts", "flags", "failing", "conflicts", "files", "summary",
+           "summary_state", "summary_note", "summary_reason", "why", "method", "actions", "card",
+           "hold"),
 }
 # A kind P-3 does not know (A3's `missed` rows, anything later): only these
 # keys, only scalar values, every string scrubbed.
@@ -238,6 +248,10 @@ DROPPED = {
         "branch": "in the task's own read",
         "provider_override": "in the task's own read",
         "ceilings": "in the task's own read",
+    },
+    "pr_detail": {
+        "url": "the GitHub link is the desk's way out (PM-25); the phone answers from "
+               "Jarvis's own facts, never GitHub",
     },
     "approval_detail": {
         "code": "the 4-character code is an answer handle on another surface (Discord); "
@@ -473,6 +487,11 @@ def _detail(kind, detail: dict) -> dict:
         summary = out.pop("summary", "")
         summary = summary if isinstance(summary, str) and summary and _scrub(summary) == summary else ""
         return {**_scrub_tree(scrub_structure(out)[0], cap=TEXT_CHARS, items=LIST_ITEMS), "summary": summary}
+    if kind == "pr":
+        # PM-26: the whole detail through `scrub_structure` (a label in a
+        # path and its value beside it are read together), then the caps.
+        out = {k: detail[k] for k in DETAIL_FIELDS[kind] if k in detail}
+        return _scrub_tree(scrub_structure(out)[0], cap=TEXT_CHARS, items=LIST_ITEMS)
     if kind in DETAIL_FIELDS:
         out = {k: detail[k] for k in DETAIL_FIELDS[kind] if k in detail}
         return _scrub_tree(out, cap=TEXT_CHARS, items=LIST_ITEMS)
