@@ -4161,6 +4161,244 @@ RELAY_TITLES = (
 RELAY_FREE_FIELDS = ("relayed_from", "req_id", "code", "asked_at")
 
 
+def cred_dir_read_checks():
+    """Cred-dir reads (2026-10-29). Every read and search tool refuses any
+    path in `config.credential_dirs()` at layer 1, in every profile and with
+    any asker, never asked: Claude's Read, NotebookRead, Grep, Glob and LS
+    and v1's read_file, grep_files, list_dir and find_files, for each folder,
+    as written, `~`, a case variant, `..`, a relative path, a symlink to the
+    folder or a file in it, and `..` through a symlink (kernel order). A tree
+    search from a folder that holds one (`~`, `~/.config`, `/`, pathless in
+    such a folder, the shell's folder) and a Glob pattern that climbs into
+    one are refused too. Ordinary reads elsewhere are unchanged. The
+    credential-printing commands ask (`credentials-read`) with no Always."""
+    from unittest.mock import patch
+    from jarvis.tools import files as v1_files, search as v1_search
+    from jarvis.v2.approvals import DenyAll
+    from jarvis.v2.model import PermissionProfile as P
+    from jarvis.v2.permissions import (L_ALWAYS_ASK, L_DENY, build_permit, denied_read)
+    from jarvis.v2.provider import Decision
+
+    with Sandbox() as box:
+        home = box.home
+        browser = home / ".local" / "share" / "jarvis" / "browser"
+        with patch.object(config, "BROWSER_DIR", browser):
+            remote = Path(config.remote_dir())
+            folders = {".ssh": home / ".ssh", ".aws": home / ".aws",
+                       "gh": home / ".config" / "gh", "jarvis": home / ".config" / "jarvis",
+                       ".gnupg": home / ".gnupg", "browser": browser, "remote": remote}
+            eq(sorted(str(Path(os.path.expanduser(d))) for d in config.credential_dirs()),
+               sorted(str(p) for p in folders.values()), "the suite covers every credential folder")
+            project = home / "projects" / "app"
+            (project / "src").mkdir(parents=True)
+            (project / "src" / "main.py").write_text("print('hi')\n")
+            (home / ".config" / "other").mkdir(parents=True)
+            (home / ".config" / "other" / "settings.json").write_text("{}")
+            for name, folder in folders.items():
+                (folder / "sub").mkdir(parents=True, exist_ok=True)
+                (folder / "secret.txt").write_text("not a real credential\n")
+                (project / f"link-{name}").symlink_to(folder)
+                (project / f"file-{name}").symlink_to(folder / "secret.txt")
+                (project / f"deep-{name}").symlink_to(folder / "sub")
+
+            def upper(path: Path) -> str:
+                # The credential folder's own last component, upper-cased.
+                text = str(path)
+                head, tail = os.path.split(text)
+                return os.path.join(head, tail.upper())
+
+            def spellings(name, folder):
+                rel = os.path.relpath(folder, project)
+                tilde = "~/" + os.path.relpath(folder, home)
+                return [
+                    str(folder / "secret.txt"),                        # absolute
+                    tilde + "/secret.txt",                             # ~
+                    str(folder),                                       # the folder itself
+                    upper(folder) + "/secret.txt",                     # case variant
+                    str(home / "projects" / ".." / os.path.relpath(folder, home) / "secret.txt"),  # ..
+                    rel + "/secret.txt",                               # relative, placed in cwd
+                    str(project / f"link-{name}" / "secret.txt"),      # symlink to the folder
+                    str(project / f"link-{name}"),
+                    str(project / f"file-{name}"),                     # symlink to a file in it
+                    str(project / f"deep-{name}" / ".." / "secret.txt"),   # .. after a symlink
+                ]
+
+            tools = [("Read", "file_path"), ("NotebookRead", "notebook_path"), ("Grep", "path"),
+                     ("Glob", "path"), ("LS", "path"), ("read_file", "path"),
+                     ("grep_files", "path"), ("list_dir", "path"), ("find_files", "path")]
+            refused = 0
+            for profile in (P.AUTO, P.ASK, P.STRICT):
+                asker = Asker(Decision.ALLOW)
+                permit = build_permit(context(brief_for(profile, cwd=project)), asker)
+                for name, folder in folders.items():
+                    for spelling in spellings(name, folder):
+                        for tool, key in tools:
+                            args = {key: spelling}
+                            if tool in ("Grep", "grep_files"):
+                                args["pattern"] = "x"
+                            if tool in ("Glob", "find_files"):
+                                args["pattern"] = "*"
+                            before = len(asker.seen)
+                            decision = permit(tool, args, brief_for(profile, cwd=project))
+                            eq(decision, Decision.DENY, f"{profile.value} {tool} {spelling}")
+                            eq(box.decisions[-1]["layer"], L_DENY, f"layer 1: {tool} {spelling}")
+                            eq(len(asker.seen), before, f"never asked: {tool} {spelling}")
+                            refused += 1
+            # Glob patterns that climb into a folder, from the project.
+            patterns = []
+            for name, folder in folders.items():
+                rel = os.path.relpath(folder, project)
+                patterns += [str(folder) + "/*", "~/" + os.path.relpath(folder, home) + "/**",
+                             rel + "/*", "{src," + rel + "}/*", upper(folder) + "/*",
+                             f"*/../{rel}/*"]
+            patterns += ["~/.ss?/*", "~/.config/*/hosts.yml", str(home) + "/**/*", "/**/id_*",
+                         "*/../../x"]
+            permit = build_permit(context(brief_for(P.AUTO, cwd=project)), Asker())
+            for pattern in patterns:
+                for tool in ("Glob", "find_files"):
+                    decision = permit(tool, {"pattern": pattern}, brief_for(P.AUTO, cwd=project))
+                    eq(decision, Decision.DENY, f"{tool} pattern {pattern} is refused")
+                    refused += 1
+            # A tree search from a folder that holds one.
+            holders = [home, home / ".config", home / ".local", home / ".local" / "share",
+                       Path("/"), box.root, "~", "~/.config", str(project / ".." / "..")]
+            for holder in holders:
+                for tool in ("Grep", "Glob", "LS", "find_files"):
+                    args = {"path": str(holder), "pattern": "x"}
+                    decision = permit(tool, args, brief_for(P.AUTO, cwd=project))
+                    eq(decision, Decision.DENY, f"{tool} from {holder} is refused")
+                    ok("credential folder" in (denied_read(tool, args, str(project)) or ""),
+                       f"and says why: {tool} {holder}")
+                    refused += 1
+            # Pathless, in a folder that holds one: the brief's, or the shell's.
+            for tool in ("Grep", "Glob"):
+                eq(permit(tool, {"pattern": "x"}, brief_for(P.AUTO, cwd=home)), Decision.DENY,
+                   f"a pathless {tool} in $HOME is refused")
+                eq(permit(tool, {"pattern": "x"}, brief_for(P.AUTO, cwd=project), shell_cwd=str(home)),
+                   Decision.DENY, f"a pathless {tool} whose shell is in $HOME is refused")
+                eq(permit(tool, {"pattern": "x"}, brief_for(P.AUTO, cwd=project), shell_cwd=str(project)),
+                   Decision.ALLOW, f"a pathless {tool} in the project is not")
+                refused += 2
+            # Unchanged: ordinary reads elsewhere.
+            ordinary = [("Read", {"file_path": str(project / "src" / "main.py")}),
+                        ("Read", {"file_path": "src/main.py"}),
+                        ("Read", {"file_path": str(home / ".config" / "other" / "settings.json")}),
+                        ("Read", {"file_path": "~/.config/other/settings.json"}),
+                        ("Read", {"file_path": str(home / "projects" / "notes.md")}),
+                        ("Read", {"file_path": str(config.ALLOWLIST_PATH)}),   # readable config, as in v1
+                        ("NotebookRead", {"notebook_path": str(project / "nb.ipynb")}),
+                        ("Grep", {"pattern": "x", "path": str(project)}),
+                        ("Grep", {"pattern": "x", "path": str(home / "projects")}),
+                        ("Grep", {"pattern": "x", "path": str(home / ".config" / "other")}),
+                        ("Grep", {"pattern": "x", "glob": "*.py"}),
+                        ("Grep", {"pattern": "x"}),
+                        ("Glob", {"pattern": "**/*.py"}),
+                        ("Glob", {"pattern": "**/*.py", "path": str(project)}),
+                        ("Glob", {"pattern": str(project) + "/**/*.py"}),
+                        ("Glob", {"pattern": "~/projects/**/*.md"}),
+                        ("Glob", {"pattern": "../*/README.md"}),
+                        ("LS", {"path": str(project)}),
+                        ("LS", {"path": str(home / ".config" / "other")}),
+                        ("read_file", {"path": "src/main.py"}),
+                        ("grep_files", {"pattern": "x", "path": str(home)}),   # v1 filters each file
+                        ("list_dir", {"path": str(home)}),                     # one level, no dot entries
+                        ("list_dir", {"path": str(project)}),
+                        ("find_files", {"pattern": "**/*.py"})]
+            for tool, args in ordinary:
+                eq(denied_read(tool, args, str(project)), None, f"not refused: {tool} {args}")
+                eq(permit(tool, args, brief_for(P.AUTO, cwd=project)), Decision.ALLOW,
+                   f"ordinary read allowed: {tool} {args}")
+            # v1's own read tools refuse the same, by the same judge.
+            v1_refused = 0
+            for name, folder in folders.items():
+                for spelling in spellings(name, folder):
+                    placed = spelling if spelling.startswith(("/", "~")) else str(project / spelling)
+                    out = v1_files.read_file(placed)
+                    ok(out.startswith("Error") and "not a real credential" not in out,
+                       f"v1 read_file refuses {spelling}")
+                    out = v1_files.list_dir(placed)
+                    ok(out.startswith("Error") and "credential folder" in out, f"v1 list_dir refuses {spelling}")
+                    out = v1_files.find_files("*", placed)
+                    ok(out.startswith("Error") and "credential folder" in out, f"v1 find_files refuses {spelling}")
+                    out = v1_search.grep_files("real credential", placed)
+                    ok("not a real credential" not in out, f"v1 grep_files reads nothing from {spelling}")
+                    v1_refused += 4
+            out = v1_files.find_files("*/secret.txt", str(project))
+            ok(out.startswith("No files matching"), f"v1 find_files leaves a credential folder's names out of a walk: {out[:80]}")
+            ok("main.py" in v1_files.find_files("**/*.py", str(project)), "v1 find_files still finds files")
+            ok("projects/" in v1_files.list_dir(str(home)), "v1 list_dir still lists $HOME")
+            ok("Error" not in v1_files.read_file(str(home / ".config" / "other" / "settings.json")),
+               "v1 read_file still reads ~/.config/other")
+
+            # Commands that print a stored credential ask, with no Always.
+            asking = ["git credential fill", "git credential approve", "git credential reject",
+                      "printf 'host=github.com\\n' | git credential fill",
+                      "git -C repo credential fill", "git --no-pager credential fill",
+                      "git credential-store get", "git credential-cache get",
+                      "git credential-osxkeychain get", "git credential-manager get",
+                      "/usr/lib/git-core/git-credential-store get", "git-credential-libsecret get",
+                      "git config --get credential.helper", "git config --global credential.helper store",
+                      "git config --get-regexp credential", "git -c credential.helper=store fetch",
+                      "git --config-env=credential.helper=X fetch",
+                      "docker-credential-desktop get", "pass show github", "pass github/token",
+                      "gopass show x",
+                      "security find-generic-password -s gh -w", "security find-internet-password -s x",
+                      "security dump-keychain", "gcloud auth print-access-token",
+                      "gcloud auth application-default print-access-token",
+                      "az account get-access-token", "aws ecr get-login-password",
+                      "aws sts get-session-token", "op read op://v/i/f",
+                      "op item get x", "bw get password x", "lpass show x",
+                      "gpg --export-secret-keys", "gh config get oauth_token",
+                      "npm config get //registry.npmjs.org/:_authToken",
+                      "uv run git credential fill", "env FOO=1 git credential fill",
+                      "gh auth token"]
+            for profile in (P.AUTO, P.ASK):
+                asker = Asker(Decision.ALLOW)
+                permit = build_permit(context(brief_for(profile, cwd=project)), asker)
+                for command in asking:
+                    before = len(asker.seen)
+                    decision = permit(*bash(command), brief_for(profile, cwd=project))
+                    eq(decision, Decision.ALLOW, f"asked and approved: {command}")
+                    ok(len(asker.seen) == before + 1, f"asked: {command}")
+                    if len(asker.seen) == before + 1:
+                        request = asker.seen[-1]
+                        ok("credentials-" in request.reason, f"{command}: {request.reason}")
+                        eq(request.allowlistable, False, f"no Always on {command}")
+                        eq(request.grantable, False, f"asked each time: {command}")
+                    eq(box.decisions[-1]["layer"], L_ALWAYS_ASK, f"layer 2: {command}")
+            # The secret-service readers were already refused outright, never
+            # asked (`secret_service_checks`): stronger than this rule.
+            asker = Asker(Decision.ALLOW)
+            permit = build_permit(context(brief_for(P.AUTO, cwd=project)), asker)
+            for command in ("secret-tool lookup service gh", "secret-tool search --all x y",
+                            "keyring get svc user", "kwallet-query -r x w"):
+                eq(permit(*bash(command), brief_for(P.AUTO, cwd=project)), Decision.DENY,
+                   f"still refused at layer 1: {command}")
+                eq(box.decisions[-1]["layer"], L_DENY, f"layer 1: {command}")
+                eq(len(asker.seen), 0, f"never asked: {command}")
+            for profile in (P.AUTO, P.ASK, P.STRICT):
+                permit = build_permit(context(brief_for(profile, cwd=project)), DenyAll("nobody"))
+                for command in ("git credential fill", "git credential-store get", "pass show x"):
+                    eq(permit(*bash(command), brief_for(profile, cwd=project)), Decision.DENY,
+                       f"{profile.value}, no human: {command} is declined")
+            # An Always on a cred-folder shell read is gone too (credentials-path).
+            asker = Asker(Decision.ALLOW)
+            permit = build_permit(context(brief_for(P.AUTO, cwd=project)), asker)
+            permit(*bash("cat ~/.config/gh/hosts.yml"), brief_for(P.AUTO, cwd=project))
+            ok(asker.seen and asker.seen[-1].allowlistable is False, "a shell read of ~/.config/gh: no Always")
+            ordinary_commands = ["git commit -m 'store the credential fill'", "git log --grep credential",
+                                 "git status", "git config user.name", "git config --get remote.origin.url",
+                                 "gh pr list", "gh config get editor", "npm config get registry",
+                                 "aws s3 ls", "gcloud config list", "passwd --help", "pytest -k pass",
+                                 "echo pass show", "security --help"]
+            for command in ordinary_commands:
+                before = len(asker.seen)
+                permit(*bash(command), brief_for(P.AUTO, cwd=project))
+                eq(len(asker.seen), before, f"ordinary work does not ask: {command}")
+    print(f"  cred-dir reads: {refused} read-tool calls refused at layer 1 (v2), "
+          f"{v1_refused} v1 read refusals, {len(asking)} credential-printing commands asked")
+
+
 def relay_provenance_checks():
     """`PermitContext.relayed_from` (C6) is display only: the same call gets
     the same decision, layer, reason, asked-or-not and request — every field
@@ -4323,7 +4561,7 @@ def main():
                     auto_quiet_checks, hatch_checks, discord_checks, merge_gate_checks,
                     chat_git_checks, command_tool_checks, command_field_checks,
                     secret_service_checks, remote_listener_checks,
-                    relay_provenance_checks):
+                    relay_provenance_checks, cred_dir_read_checks):
         if ONLY and section.__name__ not in ONLY:
             continue
         print(f"-- {section.__name__}")

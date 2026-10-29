@@ -1563,7 +1563,11 @@ def build_permit(ctx: PermitContext, asker, *, clock=None) -> PermissionCallback
                 asked[0] = True
                 decision = _ask_owner_delegation(asker, ctx, delegated.name, origin=who)
                 return finish(decision, L_ALWAYS_ASK, "owner rule for Browser delegation")
+            # A credential rule's card offers no Always (cred-dir reads,
+            # 2026-10-29): a yes to printing or changing a credential is for
+            # this call only, never an allowlist entry a v1 surface would read.
             decision = owner_said(_ask(asker, ctx, tool, args, command, reason, L_ALWAYS_ASK,
+                                       allowlistable=not rule_id.startswith("credentials-"),
                                        origin=who, subagent=sid, relay_child=bridged,
                                        cwd=where, grantable=False))
             return finish(decision, L_ALWAYS_ASK, reason)
