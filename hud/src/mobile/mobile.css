@@ -242,12 +242,39 @@ p, li, h2, h3 { overflow-wrap: anywhere; }
   color: var(--text-2);
 }
 
-/* H4 (phone audit), until PM-F: a PR row's title, code's facts, the AI summary. */
-.pr-title { font-weight: 600; overflow-wrap: anywhere; }
-.pr-facts, .pr-flags { font: 13px/1.4 var(--mono); color: var(--text-2); overflow-wrap: anywhere; margin-top: 4px; }
+/* PM-F: a PR row. The PR's title, then its buttons (Fix and Update at the left, Merge at the
+   right, far apart, as the Review tab's rows), code's lines, the fixed notice slot (two lines
+   held, as the card's), code's facts with every name in its own box, the amber flags, then the
+   AI summary in its held slot. Names never pass for code's words; the model's only in .as-ai. */
+.pr-title { overflow-wrap: anywhere; margin-top: 2px; }
+.pr-title .k, .pr-hold .k { font: 11px var(--mono); color: var(--text-muted); letter-spacing: 0.06em;
+  text-transform: uppercase; }
+.m-pr-acts { margin-top: 10px; }
+.m-pr-acts .m-pr-side { display: flex; flex-direction: column; gap: 8px; flex: 0 1 42%; }
+.m-pr-acts .m-pr-right { margin-left: auto; }
+.m-pr-acts .tap { flex: none; width: 100%; font-weight: 600; letter-spacing: 0.04em; }
+.tap.quiet.m-pr-merge { border-color: var(--accent); color: var(--accent); }
+.pr-why, .pr-method, .pr-note { font: 13px/1.4 var(--mono); color: var(--text-2); overflow-wrap: anywhere; margin-top: 6px; }
+.pr-method { color: var(--text); }
+.pr-hold { color: var(--amber); overflow-wrap: anywhere; margin-top: 8px; }
+.pr-amber, .pr-why.pr-amber { color: var(--amber); font: 13px/1.4 var(--mono); overflow-wrap: anywhere; margin-top: 4px; }
+.pr-fix { margin-top: 8px; padding: 6px 10px; border: 1px solid var(--control-edge); border-radius: var(--radius); }
+.pr-fix[data-tone="amber"] { border-color: var(--amber); color: var(--amber); }
+.pr-fixline { font: 13px/1.4 var(--mono); overflow-wrap: anywhere; }
+.pr-fix .pr-summary { margin-top: 6px; }
+.m-pr-fixacts { display: flex; justify-content: space-between; align-items: center; gap: 24px; margin-top: 6px; }
+.m-pr-fixacts .tap.m-send { flex: 0 1 50%; }
+.m-pr-notice { min-height: 40px; margin: 6px 0 0; font-size: 14px; line-height: 20px; overflow-wrap: anywhere; }
+.m-pr-notice[data-tone="busy"] { color: var(--accent); }
+.pr-facts, .pr-flags { font: 13px/1.5 var(--mono); color: var(--text-2); overflow-wrap: anywhere; margin-top: 4px; }
+.pr-name { border: 1px solid var(--control-edge); border-radius: 4px; padding: 0 4px; color: var(--text); }
+.pr-tag { color: var(--amber); }
 .pr-flags { color: var(--amber); }
+.pr-flags .pr-name { border-color: var(--amber); color: var(--amber); }
 .pr-summary { margin-top: 6px; }
 .pr-summary .as-text { display: block; }
+.pr-summary .as-tag + .as-text, .pr-summary .pr-label + .as-text { display: inline; }
+.pr-label { color: var(--text-muted); }
 
 /* Chats */
 .project { display: flex; flex-direction: column; }
