@@ -1,0 +1,289 @@
+# Plan: PR rows become "agent summary + OK to merge" (PM)
+
+**Status (2026-10-28): plan, not built.** Written against main `a5798ea2`. It builds on the
+owner inbox (IN-4, IN-7, `jarvis/v2/inbox_prs.py`), the phone surface (PH-4, PH-7, §4.1),
+the morning review (MR) and approval summaries (AS, PR #330, not merged). PM-n are the
+planner's defaults, reversible. The owner's decisions below are binding.
+
+## What the owner asked (2026-10-28)
+
+> "we need different handling for prs on mobile or just in general im not going to GitHub
+> to read that I just need to be able to get an agents summary of why it was blocked and
+> get my ok to merge"
+
+The owner's decisions:
+
+- **Blocked PR + OK = fix, then ask once more.** If a PR has conflicts or failing checks,
+  OK starts an agent that resolves them. When the PR is green, the owner gets one short
+  card, "fixed: <summary of the fix> — merge?". The fix is new code the owner has not
+  OK'd, so it gets its own yes.
+- **The summary is written ahead of time.** Haiku 5.5 writes it when a PR appears or its
+  code or checks change.
+- **No GitHub.** The summary says, in plain words, what the PR does and why it is blocked:
+  which files conflict, which checks fail, and the gist of each failure.
+- **Q1, a limited phone:** it may Merge and Fix, the same as Discord, **except PRs that touch
+  safety files** (PM-10). Those need the desk or a fully checked phone.
+- **Q2, overnight:** a Fix pressed at night runs. Its card waits in the inbox with no
+  push from 23:00 to 07:00.
+- **Q3, hold:** yes. At the desk the owner sets "hold: <note>" on a PR, and Merge and Fix
+  are hidden everywhere until the hold is cleared. This is for override PR #12, which waits
+  on the robot.
+- **Q4, merge commits turned off:** squash, **named on the card before the OK**.
+
+## Summary input
+
+- **PM-1. Reads, by the daemon only.** A new module, `jarvis/v2/pr_facts.py`, runs on its own
+  worker after a `PrSource` poll. It never runs in an agent shell and never holds the poll's
+  or the daemon's lock. Each call goes through `inbox_prs.run_bounded` with
+  `chat_git._owner_env()`: an exact argv, no shell, cwd `/`, its own process group, and
+  stderr never read.
+  1. `gh pr view N --repo O/R --json number,title,body,baseRefName,baseRefOid,headRefName,headRefOid,files,isCrossRepository,mergeStateStatus,statusCheckRollup,reviewDecision`
+  2. `gh pr diff N --repo O/R`, up to 2 MiB. Past that, only the file list is used.
+  3. `gh api --method GET repos/O/R/commits/<head>/check-runs?per_page=100`: each failing
+     check's app, `output.title` and `output.summary`.
+  4. For at most 3 failing Actions jobs (job id from a validated `detailsUrl`):
+     `gh run view --job <id> --repo O/R --log-failed`, keeping the last 80 lines.
+  5. `gh repo view O/R --json mergeCommitAllowed,squashMergeAllowed,viewerPermission`, cached
+     for an hour.
+  6. Only when the PR is DIRTY: the conflicting files, from
+     `git merge-tree --write-tree --name-only <base> <head>`.
+     - This runs in a daemon-only bare mirror, `V2_DATA_DIR/pr-mirrors/<key>.git`, mode
+       0700. It is not the Codex-readable `chat-git-mirrors`.
+     - The mirror is filled by a credentialed `git fetch --no-tags` of exactly the base and
+       `refs/pull/N/head`, with gitops hardening and `_credential_pins`.
+     - No checkout is made and no owner repository is touched. The mirror's own config
+       means no hook, merge driver or filter can run.
+     - The conflict-marker regions of up to 3 files are included.
+- **PM-2. Caps.**
+  - Each call gets 30 s, and a PR pass gets 180 s in all. One PR is worked on at a time,
+    with at most 50 waiting.
+  - The model input is at most 20,000 characters:
+    - body 2,000;
+    - logs and check output 6,000 in all;
+    - conflict regions 3,000;
+    - the diff gets the rest, at most 4,000 per file. Lock and generated files are
+      named only.
+  - The diff is trimmed first. When anything is trimmed, the facts line says
+    "summary read N of M files".
+- **PM-3. Scrub (use-but-never-see).** Every text read goes through
+  `untrusted.strip_invisible`, then `secrets.scrub` and `redact_inline`, before it is stored
+  or sent.
+  - A credential-named path keeps its name, but its patch is withheld.
+  - Logs get the same scrub, because GitHub masks only the secrets registered with it.
+  - Nothing read is written to a log line.
+- **PM-4. Fence and output.**
+  - Everything the author or a check controls goes inside one `untrusted.fence` with a fresh
+    nonce. The prompt says, as AS's does, that the fenced text is data.
+  - The model writes two labelled lines:
+    - `Does:` (240 characters at most);
+    - `Blocked:` (300 at most, left out when nothing blocks).
+  - The model gives no verdict and no recommendation. Code parses and cleans both lines. A
+    missing `Does:` counts as a failure.
+- **PM-5. Cache.**
+  - The key is sha256 of (repo in lower case, number, head SHA, checks summary, merge state,
+    prompt version).
+  - It is stored on disk at `V2_DATA_DIR/inbox/pr-summaries.json` (mode 600, the newest 200
+    entries), so a restart pays nothing.
+  - A changed key re-summarizes. The exception is a move to pending checks: the earlier
+    summary stays, marked "checks re-running".
+  - At most 6 summaries per PR per day.
+- **PM-6. Model and cost.** Tier `pr_summary` (`JARVIS_PR_SUMMARY_MODEL`), default Haiku 5.5,
+  never Chinese-hosted. The daily caps are 300 calls and $0.25, kept in the cache file so a
+  restart does not reset them. Past a cap, the state is `off`. Tokens, cost and time are
+  logged.
+- **PM-7. States.**
+  - The state is pending, ready, failed or off.
+  - When it is failed or off, the row shows the facts line and "AI summary unavailable:
+    <reason>". Merge is still offered, because what authorizes it is the facts line plus the
+    binding (PM-13), never the model's text.
+  - A read that failed shows as "not read" and is never guessed.
+- **PM-8. No model at start.** Only daemon2's `main()` attaches the summarizer.
+
+## What code says, apart from the model
+
+- **PM-9. The facts line (trusted).** Code builds it from validated `gh` fields only, for
+  example:
+  `O/R #N · feat → main · checks: failing (test, GitGuardian [secret scanner]) · conflicts: a.py, b.py · 12 files +340 −20 · head 1a2b3c4 · merge commit`.
+  It sits above the model's text and is styled apart from it. Paths and check names are
+  `clean_line`d and set with textContent.
+- **PM-10. High-risk diffs are flagged by code.** The row gets an amber
+  "touches safety files: …" line when any changed path is:
+  - in `files.SELF_PROTECTED`;
+  - `CLAUDE.md`, `AGENTS.md` or under `.claude/`;
+  - under `.github/workflows/`;
+  - a secret-scanner config;
+  - credential-named.
+
+  The model cannot remove the flag. A flagged PR is never merged or fixed from a limited
+  phone (Q1).
+- **PM-11. Secret scanners.**
+  - A code table (GitGuardian's app slug and check names) labels such a check
+    "[secret scanner]".
+  - The model is asked to say which files were flagged and whether they look like test
+    fixtures. That is display only.
+  - A scanner-only failure gets **no Fix**: an agent never silences a scanner. It gets
+    "Merge as is" when GitHub allows it (UNSTABLE).
+  - When the scanner is a required check (BLOCKED), there is no button, and the row says only
+    an admin override could merge it. Jarvis never uses that override.
+
+## The merge path
+
+- **PM-12. Buttons, by state.** Code decides from a fresh read.
+
+  | State | Button |
+  |---|---|
+  | CLEAN or HAS_HOOKS, checks passing or none | **Merge** |
+  | DIRTY, or checks failing (BLOCKED or UNSTABLE) | **Fix**. UNSTABLE also gets **Merge as is**. A scanner-only failure gets only Merge as is (PM-11). |
+  | BEHIND | **Update**: `gh pr update-branch N --repo O/R` (GitHub merges the base in). A fresh Merge is then needed for the new head. |
+  | checks pending | none ("waits on its checks") |
+  | held by reviews or rules | none, saying what GitHub requires |
+  | on hold (Q3) | none; the hold note is shown |
+
+  Jarvis never passes `--admin` or `--auto`.
+- **PM-13. The merge.** A new module, `jarvis/v2/pr_merge.py` (SELF_PROTECTED).
+  - Its input is `{id, head, card}`. `card` is sha256 of the facts line, the summary text,
+    the method and the offered actions.
+  - Under a per-PR lock it reads the PR again. It requires that the PR is open and not a
+    draft, that the head equals `head`, that the state still allows the action, that no hold
+    is set, and that the card key matches. Anything else is a 409 "changed since you read it",
+    a re-summary is poked, and nothing runs.
+  - It then runs exactly `gh pr merge N --repo O/R --merge --match-head-commit <head>`, with
+    `--squash` instead only per PM-14.
+  - The result comes from reading the PR again, never from stderr. A receipt goes to
+    `inbox/pr-actions.jsonl`, and a poll is poked.
+- **PM-14. Method.** The default is `--merge`. Where merge commits are off, it is a squash,
+  only when the facts line said "squash merge" before the OK; the method is part of the card
+  key. Rebase is never used.
+- **PM-15. Surfaces and authority.**
+  - **HUD:** `POST /inbox/pr/merge`, `/inbox/pr/fix`, `/inbox/pr/update`, `/inbox/pr/hold`.
+    These are owner_only on FACE_PORT, with the id in the body because a PR id holds `/` and `#`.
+  - **Phone:**
+    - `POST /m/api/inbox/pr/options {id, action}` returns a challenge.
+    - `POST /m/api/inbox/pr {id, action, head, card, assertion}` acts.
+    - Every action needs a fresh passkey assertion, bound to the subject `pr:` + the first
+      56 hex of sha256("jarvis-pr-v1\n" repo \n number \n head \n card \n action).
+    - It has its own subject family and challenge budget. An assertion is never shared
+      across families.
+    - When the phone scrub would change the facts line or the file list, it answers "answer
+      it at the desk".
+    - There is no hold on the phone.
+  - **Limited phone:** may Merge, Fix and Update, except on PM-10-flagged PRs (Q1).
+  - **Morning review:** no PR is part of a group approval (MR-1).
+  - **Discord:** nothing new, and no merge path.
+- **PM-16. Not merge_gate, and not an approval.** These routes are the owner's own act. They
+  never touch `PendingApprovals` or `remote_answer`'s approval paths. No tool, MCP entry or
+  API-listener route reaches them.
+
+## The fix path
+
+- **PM-17. What Fix starts.**
+  - A v2 task in the one non-archived project that owns the repository. With no such
+    project, or more than one, there is no Fix, and the row says why.
+  - The provider is pinned to Claude Code, because Codex holds no GitHub login (CG-0).
+  - The owner's OK is the intake gate.
+  - The ceilings are $5 and 1 hour.
+  - A fork gets no Fix.
+- **PM-18. Worktree.** `worktrees.ensure_pr` fetches the bound head from the PM-1 mirror into
+  the project's repository with a local fetch that uses no credentials, checks the SHA, and
+  adds a worktree on `jarvis/<task>-pr<N>`. The task pushes `HEAD:refs/heads/<PR branch>`.
+- **PM-19. The brief is built by code from the facts, never from the model's summary.**
+  - It carries the repo, PR number, branch, base, bound head, the failing checks with their
+    job ids, and the conflicting files.
+  - Its rules:
+    - merge the base in, never rebase;
+    - push plainly to the PR branch only, never force;
+    - never change CI or scanner config, or skip a test, to make a check pass;
+    - stop and report a rejected push.
+  - Logs are not copied in; the task reads them itself.
+- **PM-20. The fix scope in the gate.** `pr_scope {repo, branch}` applies in
+  `permissions.build_permit` at layer 2 (SELF_PROTECTED, boundary review).
+  - **DENY:**
+    - a push anywhere but `refs/heads/<branch>` on that repository;
+    - force or delete;
+    - `gh pr merge`, `close`, `edit`, `ready` or `review`;
+    - any non-GET `gh api`;
+    - writes to scanner config.
+  - **Ask:** a push the gate cannot read.
+  - Everything else goes through the task's ordinary attended gate, deferred in quiet hours.
+- **PM-21. One fix at a time.**
+  - `inbox/pr-fixes.json` (mode 600) holds `{task_id, from_head, from_patches, started,
+    state}` for each PR.
+  - A second Fix is a 409.
+  - While it runs, the row says "fix running", with Cancel (`TaskControl.cancel`; on the
+    phone, the `task:` passkey).
+  - There are at most 3 fixes per PR, each with its own OK.
+- **PM-22. Done and green.** On the task's DONE, and on each poll of a PR with a fix record,
+  four things must hold:
+  - the head has moved;
+  - `from_head` is an ancestor of the new head (by `compare`; if it is not, there is no fix
+    card, but an amber "branch rewritten since your Fix");
+  - the checks pass;
+  - the PR is CLEAN or HAS_HOOKS.
+
+  Haiku then reads the **interdiff**: for each file, the patch at `from_head` against the
+  patch now, plus the commit subjects. This means a merge of the base reads as nothing.
+  The card reads "fixed: <summary> — merge?". It shows "N commits since your Fix", the
+  PM-10 flags, and an amber "the fix changed CI configuration" when code sees one. Its Merge
+  is PM-13, bound to the new head. A fix card appears whenever the head moves after an OK'd
+  Fix, including after a cancelled task that had already pushed.
+- **PM-23. Other ends.**
+  - A task question becomes the task's own rank-2 row, and the PR row says "fix waits on
+    your answer".
+  - Stopped with no push: "fix stopped: <state>", with Fix again.
+  - Pushed but still failing: "fix pushed; checks still fail", with Fix again within the cap.
+  - Pushed and pending: "fix pushed; checks running".
+
+## Display
+
+- **PM-24. Layout,** on the HUD and phone inbox, from top to bottom:
+  1. the title (code);
+  2. the buttons (AS-12);
+  3. the facts line and flags (code);
+  4. the AI summary, labelled and set apart, in a two-line slot reserved from the first frame.
+
+  On the HUD the buttons are disarmed for 600 ms after mount and after any change of
+  content, and the check also runs in the click handler. On the phone, each action has its
+  own passkey. No button is the keyboard default.
+- **PM-25. GitHub link: HUD only,** small, below the summary. It is the way out when
+  Jarvis says "cannot". There is none on the phone.
+- **PM-26. Phone fields.**
+  - `remote_api.DETAIL_FIELDS["pr"]` lists: repo, number, title, branch, base, author, fork,
+    head, checks, merge_state, facts, flags, failing, conflicts, files, summary,
+    summary_state, method, actions, card, fix and hold.
+  - `url` goes in `DROPPED`, with its reason.
+  - Every field goes through `scrub_structure`.
+- **PM-27. Quiet hours.**
+  - Summaries push nothing.
+  - A fix card, or a stopped fix, sends one `{count, rank}` push, never between 23:00 and
+    07:00.
+  - A Fix pressed at night runs (Q2).
+  - The owner may merge at night.
+
+## Safety review
+
+| Boundary | Why it holds | Tests |
+|---|---|---|
+| Toolsets | No new tool or MCP entry; the routes are owner-only or need a passkey | archive_check grep for `pr_merge`, `pr_fix`, `/inbox/pr/`; tool sweep |
+| Merge only by the owner | Pinned argv with `--match-head-commit`, no `--admin` or `--auto`, card key checked; the fix scope DENYs merges | mutants that drop the SHA or add `--admin` fail; a stale head or card is a 409 and runs nothing |
+| Secrets | PM-3 on body, diff, logs and checks; credential patches withheld; stderr never read | a token in a log or `.env` patch never reaches the fake model or the row |
+| Injection | Buttons, facts and flags come from code; the OK is bound to the head and card; the brief comes from the facts; the summary is display only | injection fixtures; mutants that feed the summary into buttons, flags or the brief fail |
+| Phone | An assertion per action on the `pr:` subject; limited plus flagged is refused; scrub mismatch sends it to the desk | cross-family refusal; limited-flagged refusal |
+| Hold | A hold hides every action, and the merge route re-checks it under the lock | a merge on a held PR is a 409 |
+| Quiet hours / MR | No push 23:00 to 07:00; MR is unchanged | push and review checks |
+| Codex | No login; Fix is Claude-only | Fix with Codex is refused |
+| Model | Its own tier, attached only by `main()`, with caps that survive a restart | no summarizer by default |
+
+## Work packages (one PR each)
+
+| WP | Content | After | Tests |
+|---|---|---|---|
+| PM-A | Factor the one-shot engine out of `approval_summary.py` into `summary_engine.py`, with AS's behavior identical | #330 merged | AS's checks and mutants unchanged |
+| PM-B | `pr_facts.py`: reads, caps, scrub, mirror and merge-tree, facts, flags, scanner table, buttons. No model. | parallel with A | fake `gh` argv log (GET only); caps and timeouts; forks; a merge driver in `.gitattributes` never runs |
+| PM-C | `pr_summary.py`: prompt, parsing, disk cache, caps, states, row fields | A, B | fake model, fence, key changes, no model at start |
+| PM-D | `pr_merge.py`, hold, HUD and phone routes, `remote_auth` subject | C | safety table; owner_only; the API listener refuses |
+| PM-E | Fix: `pr_fix.py`, `ensure_pr`, `pr_scope`, tracking, interdiff card | C, parallel with D | gate matrix with a mutant per DENY; one at a time; forks; rewritten branch |
+| PM-F | HUD and phone rows, arming, hold UI, link, `DETAIL_FIELDS`, fix push | D, E | vitest; `hud_v2_inbox_check`; phone checks |
+| PM-G | Notes, CLAUDE.md's Inbox sentence, SELF_PROTECTED additions | all | `slim_claude --check` |
+
+Verified locally: gh 2.86 has `--match-head-commit`, `baseRefOid` and `files` in `gh pr view`,
+and `mergeCommitAllowed` in `gh repo view`. Git 2.53 has `merge-tree --write-tree`.

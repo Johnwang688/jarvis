@@ -144,10 +144,16 @@ def gh_argv(gh: str, repo: str) -> list[str]:
 
 
 def run_bounded(argv: list[str], env: dict, *, timeout: float, cap: int,
-                stop: threading.Event | None = None) -> bytes:
+                stop: threading.Event | None = None, ok_codes: tuple[int, ...] = (0,),
+                keep_tail: bool = False) -> bytes:
     """`argv`'s standard output, read with a deadline and a size bound, or
     GhFailed. No shell, stdin and stderr closed to it, its own process
-    group (killed whole on a timeout, an overflow or `stop`)."""
+    group (killed whole on a timeout, an overflow or `stop`). An exit code
+    outside `ok_codes` fails (`git merge-tree` exits 1 on a conflict:
+    `pr_facts` passes (0, 1)); 4 is always gh's "not logged in". With
+    `keep_tail`, output past `cap` is no failure: only its last `cap` bytes
+    are kept (a job's log, whose end is what matters), read to the end
+    within the same deadline."""
     try:
         proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                 stderr=subprocess.DEVNULL, env=env, cwd="/",
@@ -188,8 +194,10 @@ def run_bounded(argv: list[str], env: dict, *, timeout: float, cap: int,
                     break
                 out += chunk
                 if len(out) > cap:
-                    kill()
-                    raise GhFailed("too_large")
+                    if not keep_tail:
+                        kill()
+                        raise GhFailed("too_large")
+                    del out[:len(out) - cap]
         try:
             code = proc.wait(max(0.05, deadline - time.monotonic()))
         except subprocess.TimeoutExpired:
@@ -201,7 +209,7 @@ def run_bounded(argv: list[str], env: dict, *, timeout: float, cap: int,
             kill()
     if code == 4:
         raise GhFailed("login")         # gh's "authentication required"
-    if code != 0:
+    if code not in ok_codes:
         raise GhFailed("exit")
     return bytes(out)
 

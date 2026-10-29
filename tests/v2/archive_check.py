@@ -780,7 +780,9 @@ class OwnerOnly(Base):
                     "from .inbox", "from . import inbox", "from .. import inbox", "import inbox",
                     "inbox.answer", "inbox.rows", "inbox.route", "daemon.inbox", "_inbox.",
                     # B3 (IN-4): the PR list the daemon reads with the owner's gh.
-                    "import inbox_prs", "inbox_prs import", "PrSource", ".prs.rows", ".prs.poll")
+                    "import inbox_prs", "inbox_prs import", "PrSource", ".prs.rows", ".prs.poll",
+                    # PM-B: the PR facts reader (the owner's gh, the daemon's mirror).
+                    "pr_facts")
 
     def test_no_tool_reaches_the_inbox(self):
         from jarvis import tools
