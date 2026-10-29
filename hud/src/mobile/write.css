@@ -35,6 +35,8 @@
   background: var(--bg-1);
 }
 .m-text.m-compose-text:focus { outline: none; border-color: var(--accent); }
+/* Sending: the box takes no typing (write.ts, a beforeinput guard), and looks it. */
+.m-text.m-compose-text[aria-readonly="true"] { color: var(--text-muted); }
 .tap.m-send-round {
   flex: none;
   width: 44px;

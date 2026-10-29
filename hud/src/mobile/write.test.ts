@@ -126,7 +126,8 @@ describe("the message box (P-5)", () => {
     expect(offline.send.disabled).toBe(true);
     expect(offline.view.querySelector('[data-testid="m-compose-offline"]')).not.toBeNull();
     const busy = draw({ draft: "hello", busy: true });
-    expect([busy.send.disabled, busy.send.textContent, busy.text.readOnly]).toEqual([true, "Sending…", true]);
+    expect([busy.send.disabled, busy.send.textContent, busy.text.readOnly, busy.text.getAttribute("aria-readonly")])
+      .toEqual([true, "Sending…", false, "true"]);
     expect(busy.view.querySelector('[data-testid="m-compose-sending"]')!.textContent).toBe("Sending…");
     const noted = draw({ note: "Sent." });
     expect(noted.view.firstElementChild!.getAttribute("data-testid")).toBe("m-compose-note");
@@ -141,18 +142,33 @@ describe("the message box (P-5)", () => {
     const bar = h.q("m-compose")!;
     box.focus();
     h.type("m-compose-text", "add a test");
-    await h.click("m-compose-send");
-    // Sending: the same nodes, the box read-only, still focused.
+    // A real tap: pointerdown, mousedown, then click. The first two leave the focus where it is.
+    const send = h.q("m-compose-send") as HTMLButtonElement;
+    const downs = ["pointerdown", "mousedown"].map((type) => {
+      const e = new MouseEvent(type, { bubbles: true, cancelable: true });
+      send.dispatchEvent(e);
+      return e.defaultPrevented;
+    });
+    expect(downs).toEqual([true, true]);
+    send.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    await h.settle();
+    // Sending: the same nodes, still focused; typing is refused without readOnly (it can drop the keyboard).
     expect(h.q("m-compose")).toBe(bar);
     expect(h.q("m-compose-text")).toBe(box);
-    expect([box.readOnly, document.activeElement === box]).toEqual([true, true]);
+    expect([box.readOnly, box.getAttribute("aria-readonly"), document.activeElement === box]).toEqual([false, "true", true]);
+    const typing = new InputEvent("beforeinput", { inputType: "insertText", data: "x", bubbles: true, cancelable: true });
+    box.dispatchEvent(typing);
+    expect(typing.defaultPrevented).toBe(true);
     expect(h.q("m-compose-sending")!.textContent).toBe("Sending…");
     release({ status: 202, body: { status: "started" } });
     await h.settle();
     // Sent: emptied in place, focus kept (the keyboard stays up), the note above the bar.
     expect(h.q("m-compose-text")).toBe(box);
     expect(document.activeElement).toBe(box);
-    expect([box.value, box.readOnly]).toEqual(["", false]);
+    expect([box.value, box.getAttribute("aria-readonly")]).toEqual(["", null]);
+    const again = new InputEvent("beforeinput", { inputType: "insertText", data: "x", bubbles: true, cancelable: true });
+    box.dispatchEvent(again);
+    expect(again.defaultPrevented).toBe(false);
     expect(h.q("m-compose-note")!.textContent).toBe("Sent.");
     expect(h.q("m-compose-sending")).toBeNull();
     expect((h.q("m-compose-send") as HTMLButtonElement).disabled).toBe(true);

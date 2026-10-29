@@ -152,11 +152,17 @@ export function composerView(c: Composer): HTMLElement {
     send.disabled = cur.busy || !cur.online || !text.value.trim();
   };
   text.addEventListener("input", () => { sync(); around(() => fitLines(text)); });
+  // While sending, nothing is typed into the box. Not readOnly: toggling that on the
+  // focused box can drop the iPhone's keyboard (delta review of #331, LOW c).
+  text.addEventListener("beforeinput", (e) => { if (cur.busy) e.preventDefault(); });
+  // A tap on Send leaves the focus (and the keyboard) in the box.
+  for (const type of ["pointerdown", "mousedown"]) send.addEventListener(type, (e) => e.preventDefault());
   const bar = el("div", "m-bar");
   const draw = (next: Composer) => {
     cur = next;
     if (text.value !== next.draft) text.value = next.draft;
-    text.readOnly = next.busy;
+    if (next.busy) text.setAttribute("aria-readonly", "true");
+    else text.removeAttribute("aria-readonly");
     label.textContent = next.busy ? "Sending…" : "Send";
     send.dataset.busy = String(next.busy);
     sync();
