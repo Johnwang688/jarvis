@@ -887,8 +887,9 @@ def approval_summary_checks(page, mock):
     page.keyboard.press("Escape")
     until(lambda: page.locator('[data-testid="approval-card"]').count() == 0)
     mock.world["approvals"] = []
+    # Stamped as it is sent (the reconnect above takes seconds): 7 s old, so 3 s left.
     stale = {**request, "req_id": "as4", "code": "AS04",
-             "asked_at": (now - _dt.timedelta(seconds=9)).isoformat()}
+             "asked_at": (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(seconds=7)).isoformat()}
     mock.emit("approval_requested", stale)
     until(lambda: page.locator('[data-testid="approval-card"]').count() > 0)
     check("AS: pending and collapsed while under 10 s old", page.locator('[data-testid="approval-command"]').count() == 0)
