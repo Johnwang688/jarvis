@@ -884,7 +884,13 @@ class Boundary(PushBase):
         for args in ({"file_path": str(remote / "jarvis_push_key.json")}, {"path": str(remote)},
                      {"file_path": str(remote / "x" / ".." / "jarvis_push_subscriptions.json")}):
             self.assertTrue(v2.denied_read("Read" if "file_path" in args else "Grep", args), args)
-        self.assertIsNone(v2.denied_read("Grep", {"path": str(self.root / "home")}))
+        # Changed 2026-10-29 (cred-dir reads): a Grep from $HOME holds every
+        # credential folder, `~/.ssh` among them, and is refused now; it used
+        # to be the stated limit. A project below it is not.
+        self.assertIn("holds a credential folder",
+                      v2.denied_read("Grep", {"path": str(self.root / "home")}) or "")
+        (self.root / "home" / "projects" / "calc").mkdir(parents=True, exist_ok=True)
+        self.assertIsNone(v2.denied_read("Grep", {"path": str(self.root / "home" / "projects" / "calc")}))
         # v1: the file tools and run_readonly refuse every spelling; none of
         # the folder's files is "readable config".
         for name in ("jarvis_push_key.json", "jarvis_push_subscriptions.json", "push_settings.json",
@@ -993,7 +999,9 @@ class Boundary(PushBase):
     def test_lowa_folders_holding_it_below_home_are_refused(self):
         """LOW-A: with the data root under $HOME (the real layout), Read, Grep
         and Glob at every folder that holds the phone's folder below $HOME,
-        or a symlink to one, are refused; $HOME itself and a project are not."""
+        or a symlink to one, are refused; a project is not. $HOME itself (and
+        what holds it) is refused too since 2026-10-29: a search there reads
+        every credential folder (cred-dir reads)."""
         from unittest.mock import patch
         from jarvis.v2 import permissions as v2
         home = Path(os.environ["HOME"])
@@ -1008,10 +1016,12 @@ class Boundary(PushBase):
                          data / "remote", data / "remote" / "x.json"):
                 for tool, key in (("Grep", "path"), ("Glob", "path"), ("Read", "file_path")):
                     self.assertTrue(v2.denied_read(tool, {key: str(path)}), (tool, path))
-            for path in (home, home / "projects" / "calc", home / ".local" / "share" / "jarvis" / "chat-worktrees" / "w",
-                         self.root):
+            for path in (home / "projects" / "calc", home / ".local" / "share" / "jarvis" / "chat-worktrees" / "w"):
                 self.assertIsNone(v2.denied_read("Grep", {"path": str(path)}), path)
-        print("ok  LOW-A: every folder holding the phone's folder below $HOME is refused; $HOME and projects are not")
+            for path in (home, self.root):
+                self.assertIn("holds a credential folder", v2.denied_read("Grep", {"path": str(path)}) or "", path)
+        print("ok  LOW-A: every folder holding the phone's folder below $HOME is refused, and $HOME "
+              "(cred-dir reads); projects are not")
 
     def test_agents_cannot_write_the_push_files(self):
         from jarvis import permissions as v1, rules as v1_rules, runtime, tools

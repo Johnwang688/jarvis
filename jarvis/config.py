@@ -650,8 +650,14 @@ V2_ALWAYS_ASK_DEFAULTS: list[dict] = [
         "kind": "credential_command",
     },
     {
+        "id": "credentials-read",
+        "reason": "it prints a stored credential (a token, password or key), which would then "
+                  "reach the model and the logs",
+        "kind": "credential_read",
+    },
+    {
         "id": "credentials-path",
-        "reason": "a write under a credential directory is a credential change however it is spelled",
+        "reason": "a read or write under a credential folder or store reaches a credential however it is spelled",
         "kind": "credential_path",
     },
     {
@@ -710,9 +716,72 @@ def credential_dirs() -> tuple[str, ...]:
     folder under the v2 data root (`remote_dir()`), read at call time: either
     can be moved (`JARVIS_BROWSER_DIR`, `JARVIS_V2_DATA`), and a test that
     repoints one must protect its own. What every credential-folder check
-    asks (v2 permissions, v1's file and shell tools, `folders`,
-    `editor_policy`, Codex's denied paths)."""
+    asks: v2's read tools refuse every one of these folders in every task
+    and chat (layer 1, `permissions._credential_folder_read`, through v1's
+    judge `files.credential_folder_judge`), and a tree search from a folder
+    that holds one; v2's shell and write tools ask (`credentials-path`);
+    v1's file, search and shell tools refuse; `folders`, `editor_policy`,
+    Codex's denied paths and grants (`denied_grant`) close them too."""
     return (*V2_CREDENTIAL_DIRS, str(BROWSER_DIR), str(remote_dir()))
+
+
+# Credential stores outside the credential folders, by their place under
+# $HOME (cred-dir reads, 2026-10-29): what the read tools refuse besides
+# `credential_dirs()`, files and folders alike. At least Codex's
+# `codex_config.KNOWN_CREDENTIALS` (a suite pins the superset), plus the
+# CLI logins Codex closes with its own home (`~/.codex/auth.json`, Claude's
+# `~/.claude/.credentials.json`) and `~/_netrc`. Read tools only:
+# `credential_dirs()` stays what the owner's editor, `folders` and grants
+# close, so the owner still edits these by hand or in the HUD.
+CREDENTIAL_STORES: tuple[str, ...] = (
+    "~/.git-credentials", "~/.netrc", "~/_netrc", "~/.npmrc", "~/.pypirc",
+    "~/.gitconfig", "~/.claude.json", "~/.claude/.credentials.json",
+    "~/.codex/auth.json", "~/.codex/.credentials.json",
+    "~/.docker", "~/.kube", "~/.azure", "~/.supabase", "~/.agents",
+    "~/.config/gcloud", "~/.config/uv", "~/.local/share/keyrings",
+    "~/.local/share/com.vercel.cli", "~/.local/share/uv/credentials",
+    "~/.cargo/credentials", "~/.cargo/credentials.toml", "~/.cache/huggingface",
+    "~/.bash_history", "~/.python_history",
+)
+
+
+# Inside a closed store, what stays readable: the owner's skills that
+# `jarvis skills link` shares with Codex (`~/.agents/skills`, read-only).
+CREDENTIAL_READABLE: tuple[str, ...] = ("~/.agents/skills",)
+
+# The Windows user profiles WSL mounts (review of #224): Codex closes every
+# dot entry of a profile (.ssh, .aws, .config, .npmrc ...), `AppData` whole
+# and the registry hive (`NTUSER.DAT*`); v2's read tools refuse the same
+# (cred-dir reads, 2026-10-29). Shared by `codex_config` and
+# `files.credential_folder_judge`. `JARVIS_WINDOWS_USERS` moves the root
+# (tests); empty means the default.
+WINDOWS_USERS = "/mnt/c/Users"
+# Not profiles: shared or template folders, and the legacy junctions.
+WINDOWS_NOT_PROFILES = ("all users", "default", "default user", "public")
+
+
+def windows_users_root() -> str:
+    return os.environ.get("JARVIS_WINDOWS_USERS") or WINDOWS_USERS
+
+
+def windows_extra(name: str) -> bool:
+    """A profile's non-dot entry Codex closes: `AppData`, the registry hive."""
+    folded = name.casefold()
+    return folded == "appdata" or folded.startswith("ntuser")
+
+
+def windows_closed_name(name: str) -> bool:
+    """A profile entry closed to agents: a dot entry or `windows_extra`."""
+    return name.startswith(".") or windows_extra(name)
+
+
+def credential_read_paths() -> tuple[str, ...]:
+    """What a read tool may never read: every `credential_dirs()` folder and
+    every `CREDENTIAL_STORES` entry. v1's judge
+    (`files.credential_folder_judge`) and so v2's read tools, `run_readonly`
+    and v2's `credentials-path` rule read this; `credential_dirs()` alone is
+    what the owner-facing checks close."""
+    return (*credential_dirs(), *CREDENTIAL_STORES)
 
 
 def remote_dir() -> Path:

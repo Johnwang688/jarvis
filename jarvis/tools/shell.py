@@ -331,7 +331,7 @@ def _credential_operand(binary: str, tokens: list[str]) -> str | None:
     import os
 
     from .. import runtime
-    from .files import _credential_roots, credential_folder_judge
+    from .files import _credential_roots, credential_folder_holds, credential_folder_judge
 
     judge = credential_folder_judge()
     base = runtime.working_dir() or os.getcwd()
@@ -378,9 +378,12 @@ def _credential_operand(binary: str, tokens: list[str]) -> str | None:
             if judge(candidate):
                 return word
             if recursive:
+                # The shared reading (`files.credential_folder_holds`): the
+                # stores, case, kernel-order `..` and the Windows profiles
+                # too (cred-dir reads, 2026-10-29).
                 real = os.path.realpath(candidate)
                 if any(root == real or root.startswith(real.rstrip(os.sep) + os.sep)
-                       for root in roots):
+                       for root in roots) or credential_folder_holds(candidate):
                     return word
     return None
 
