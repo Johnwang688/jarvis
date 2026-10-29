@@ -356,3 +356,11 @@ put on the row when the key still matches; LOW 7 a moved list marks the shown su
 and unread checks keep `decide`'s words. **Left, as the review allowed:** a symlinked
 `inbox/` folder's ancestors are not checked (the folder itself is), and the engine still calls
 the cache's `put` (a small file write) under its lock.
+
+**Delta review of #335, fixed:**
+- A bad file's bytes are hard-linked aside first. A whole new file then replaces it, so a write that fails leaves the bad file in place and a restart keeps today closed. The newest 3 copies are kept.
+- When the same parts stay missing for the same PR state for `REFRESH_S`, the PR is summarized anyway:
+  - the missing parts are in the key;
+  - `summary_note` names them ("written without the CI logs, which could not be read");
+  - until then, the row's reason names them too ("the CI logs could not be read; it is read again in 5 minutes").
+- A late answer for an older head never lands; this is pinned by a test and a mutant.

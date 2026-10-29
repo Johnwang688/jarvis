@@ -340,6 +340,8 @@ class Key(unittest.TestCase):
                        dict(checks="pending"), dict(merge_state="DIRTY")):
             with self.subTest(change=change):
                 self.assertNotEqual(S.summary_key(F(**change)), base)
+        self.assertNotEqual(S.summary_key(F(read={**F().read, "logs": "timeout"})), base,
+                            "a read that missed a part is keyed apart")
         with patch.object(S, "PROMPT_VERSION", S.PROMPT_VERSION + 1):
             self.assertNotEqual(S.summary_key(F()), base)
 
@@ -486,7 +488,7 @@ class Caps(Case):
                     self.assertEqual(engine.begin(F(), Told()), (S.OFF, ""))
                     self.assertEqual(engine.begin(F(head=HEAD2), Told()), (S.OFF, ""))
                 self.assertEqual(chat.calls, [])
-                self.assertEqual(len([l for l in logs.output if "moved to" in l]), 1, "the remedy is logged once")
+                self.assertEqual(len([l for l in logs.output if "was kept as" in l]), 1, "the remedy is logged once")
                 self.assertIn("start again tomorrow", engine.off_reason(F()))
                 (aside,) = folder.glob(S.FILE_NAME + ".bad-*")
                 self.assertEqual(aside.read_bytes(), data, "the bad bytes are kept, aside")
@@ -500,6 +502,35 @@ class Caps(Case):
                 self.day[0] = "2026-10-29"                         # tomorrow it opens
                 self.assertEqual(self.summarize(again, F())[0], S.READY)
                 self.assertEqual(len(chat.calls), 1)
+
+    def test_a_heal_whose_write_fails_stays_closed_after_a_restart(self):
+        # Delta review of #335: the bad file is replaced only by a whole new one.
+        bad = self.BAD_BUDGETS["one bad byte"]
+        self.path.parent.mkdir(parents=True, mode=0o700)
+        self.path.write_bytes(bad)
+
+        def refuse(path, data):
+            raise OSError("disk full")
+        chat = Chat()
+        with patch.object(S, "_write_private", refuse):
+            engine = self.engine(chat)
+            self.assertEqual(engine.begin(F(), Told()), (S.OFF, ""))
+        self.assertEqual(self.path.read_bytes(), bad, "the bad file stays until a new one replaces it")
+        engine.close()
+        again = self.engine(chat)                                 # a restart, the same day
+        self.assertEqual(again.begin(F(), Told()), (S.OFF, ""))
+        self.assertEqual(json.loads(self.path.read_text())["ledger"]["calls"], S.DAILY_CALLS)
+        self.assertEqual(chat.calls, [])
+
+    def test_only_the_newest_bad_copies_are_kept(self):
+        self.path.parent.mkdir(parents=True, mode=0o700)
+        for i in range(5):
+            self.path.write_bytes(b"bad %d" % i)
+            os.utime(self.path, ns=(10**18 + i, 10**18 + i))
+            with self.assertLogs("jarvis.pr_summary", "WARNING"):
+                self.engine(Chat()).begin(F(), Told())
+        kept = sorted(f.read_bytes() for f in self.path.parent.glob(S.FILE_NAME + ".bad-*"))
+        self.assertEqual(kept, [b"bad 2", b"bad 3", b"bad 4"])
 
     def test_a_bad_cached_summary_is_dropped_not_fatal(self):
         good = S.summary_key(F())
@@ -697,7 +728,8 @@ class Rows(Summaries):
     def test_a_partial_read_is_not_summarized_until_whole(self):
         s = self.make()
         d = self.poll(s, F(read={**F().read, "diff": "timeout"}))
-        self.assertEqual((d["summary_state"], d["summary_reason"]), (S.FAILED, S.PARTIAL_READ))
+        self.assertEqual((d["summary_state"], d["summary_reason"]),
+                         (S.FAILED, "the diff could not be read; it is read again in 5 minutes"))
         self.assertEqual(self.chat.calls, [])
         whole = F()
         self.reads.facts[N] = whole
@@ -709,6 +741,62 @@ class Rows(Summaries):
         # A part too large to read is as whole as it gets: summarized.
         d = self.poll(s, F(head=HEAD2, read={**F().read, "diff": "too_large"}))
         self.assertEqual(d["summary_state"], S.READY)
+
+    def test_a_part_missing_for_long_is_summarized_and_marked(self):
+        # Delta review of #335: a part that never reads is no reason to starve.
+        s = self.make()
+        part = F(checks="failing", merge_state="UNSTABLE", failing=(PF.TEST,),
+                 read={**F().read, "logs": "timeout"})
+        d = self.poll(s, part)
+        self.assertEqual((d["summary_state"], d["summary_reason"]),
+                         (S.FAILED, "the CI logs could not be read; it is read again in 5 minutes"))
+        listing = listed(HEAD, "failing", "UNSTABLE")
+
+        def reread(facts):
+            self.reads.facts[N] = facts
+            s.after_poll(listing, {REPO: {N}})
+            eventually(lambda: s._prs[S.pr_key(REPO, N)].facts is facts)
+            return s.detail(row(HEAD, "failing", "UNSTABLE"))
+        self.now[0] += S.RETRY_S
+        self.assertEqual(reread(replace(part))["summary_state"], S.FAILED)
+        self.assertEqual(self.chat.calls, [])
+        self.now[0] += S.REFRESH_S
+        again = replace(part)
+        self.reads.facts[N] = again
+        s.after_poll(listing, {REPO: {N}})
+        eventually(lambda: s._prs[S.pr_key(REPO, N)].facts is again
+                   and s._prs[S.pr_key(REPO, N)].state == S.READY)
+        d = s.detail(row(HEAD, "failing", "UNSTABLE"))
+        self.assertEqual(d["summary_note"], "written without the CI logs, which could not be read")
+        self.assertEqual(len(self.chat.calls), 1)
+        # A whole read later is summarized again, unmarked: the partial one is keyed apart.
+        whole = F(checks="failing", merge_state="UNSTABLE", failing=(PF.TEST,))
+        self.now[0] += S.RETRY_S
+        self.reads.facts[N] = whole
+        s.after_poll(listing, {REPO: {N}})
+        eventually(lambda: s._prs[S.pr_key(REPO, N)].facts is whole
+                   and s._prs[S.pr_key(REPO, N)].state == S.READY)
+        self.assertEqual(s.detail(row(HEAD, "failing", "UNSTABLE"))["summary_note"], "")
+        self.assertEqual(len(self.chat.calls), 2)
+
+    def test_an_old_heads_late_answer_never_lands(self):
+        gate = threading.Event()
+        self.addCleanup(gate.set)
+        s = self.make(Chat(answer="Does: OLD HEAD", gate=gate), deadline_s=0.2)
+        self.reads.facts[N] = F()
+        s.after_poll(listed(HEAD, "passing", "CLEAN"), {REPO: {N}})
+        eventually(lambda: s._prs[S.pr_key(REPO, N)].state == S.FAILED)
+        newer = F(head=HEAD2)
+        self.reads.facts[N] = newer
+        s.after_poll(listed(HEAD2, "passing", "CLEAN"), {REPO: {N}})
+        eventually(lambda: s._prs[S.pr_key(REPO, N)].facts is newer
+                   and s._prs[S.pr_key(REPO, N)].state == S.FAILED)   # its ask never got the slot
+        gate.set()
+        eventually(lambda: s.engine.running() == 0)
+        time.sleep(0.05)
+        d = s.detail(row(HEAD2, "passing", "CLEAN"))
+        self.assertEqual((d["summary_state"], d["summary"]), (S.FAILED, None),
+                         "the old head's answer is never shown for the new head")
 
     def test_a_late_answer_is_put_on_the_row(self):
         gate = threading.Event()

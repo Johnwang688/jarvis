@@ -220,11 +220,40 @@ def parse_summary(raw) -> dict | None:
     return {"does": does, "blocked": blocked}
 
 
+# The parts a summary needs whole (review of #335, LOW 3): a summary is
+# not made from a read that missed one, until the same part has been
+# missing for the same PR state for `REFRESH_S` (delta review: never
+# starved); then it is made, keyed apart from a whole read's and marked.
+# "too_large" is whole as far as it goes (the file list stands in).
+SUMMARY_PARTS = ("diff", "checks", "logs", "conflicts")
+PART_WORDS = {"diff": "the diff", "checks": "the check runs", "logs": "the CI logs",
+              "conflicts": "the conflicting files"}
+
+
+def missing_parts(facts) -> tuple[str, ...]:
+    """The `SUMMARY_PARTS` this read did not get whole."""
+    return tuple(part for part in SUMMARY_PARTS
+                 if facts.read.get(part) not in ("ok", "not_needed", "too_large"))
+
+
+def _words(parts) -> str:
+    names = [PART_WORDS[p] for p in parts]
+    return names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
+
+
+def partial_note(facts) -> str:
+    """The note on a summary made without a part, in code's words; "" if whole."""
+    parts = missing_parts(facts)
+    return f"written without {_words(parts)}, which could not be read" if parts else ""
+
+
 def summary_key(facts) -> str:
     """PM-5: the SHA-256 of (repo in lower case, number, head, checks summary,
-    merge state, prompt version). Nothing the PR's author writes is in it."""
+    merge state, prompt version), and the parts the read missed (so a whole
+    read is never served a partial read's summary). Nothing the PR's author
+    writes is in it."""
     parts = [facts.repo.lower(), str(facts.number), facts.head or "", facts.checks or "",
-             facts.merge_state or "", str(PROMPT_VERSION)]
+             facts.merge_state or "", str(PROMPT_VERSION), ",".join(missing_parts(facts))]
     return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()
 
 
@@ -435,9 +464,15 @@ class SummaryFile:
         self._ledger, self._pr_day, self._pr_counts, self._entries = ledger, pr_day, pr_counts, kept
         return dropped
 
+    BAD_KEEP = 3                            # copies of unreadable files kept aside
+
     def _heal(self, reason: str) -> None:
-        """Under `_lock`: the unreadable file moved aside, a new one with
-        today's budget used up. Raises StoreBroken when either fails."""
+        """Under `_lock`: the unreadable file's bytes kept aside (a hard
+        link, 0600), then a new file with today's budget used up written
+        over it (`_save`: temp file, fsync, `os.replace`). The bad file is
+        only ever replaced by a whole new one: a write that fails leaves it
+        where it was, so a restart heals it again and today stays closed
+        (delta review of #335). Raises StoreBroken when either step fails."""
         stamp = time.strftime("%Y%m%dT%H%M%S")
         aside = self.path.with_name(f"{self.path.name}.bad-{stamp}")
         n = 1
@@ -445,19 +480,31 @@ class SummaryFile:
             n += 1
             aside = self.path.with_name(f"{self.path.name}.bad-{stamp}-{n}")
         try:
-            os.rename(self.path, aside)
+            os.link(self.path, aside, follow_symlinks=False)
             os.chmod(aside, 0o600)
         except OSError as exc:
             raise StoreBroken(type(exc).__name__) from None
-        self.moved_aside = aside
         day = self.today()
         cost = float(self.cost_cap_usd) if self.cost_cap_usd is not None else 0.0
         self._ledger = (day, self.daily_cap, cost)
         self._pr_day, self._pr_counts, self._entries = day, {}, OrderedDict()
         self._save()
-        LOG.warning("PR summaries: %s could not be read (%s). It was moved to %s and a new one started "
+        self.moved_aside = aside
+        self._prune_bad()
+        LOG.warning("PR summaries: %s could not be read (%s). It was kept as %s and a new one started "
                     "with today's budget used up: no PR summary today; they start again tomorrow.",
                     self.path.name, reason, aside.name)
+
+    def _prune_bad(self) -> None:
+        """The newest `BAD_KEEP` copies aside are kept; older ones removed."""
+        try:
+            olds = sorted(self.path.parent.glob(f"{self.path.name}.bad-*"),
+                          key=lambda f: os.lstat(f).st_mtime_ns)
+            for old in olds[:-self.BAD_KEEP]:
+                if stat.S_ISREG(os.lstat(old).st_mode):
+                    os.unlink(old)
+        except OSError:
+            pass
 
     def _load(self) -> None:
         """Under `_lock`. Raises StoreBroken when broken."""
@@ -803,7 +850,11 @@ class _Pr:
     good: dict | None = None            # the last summary written, and what it read
     good_sig: tuple = ()                # (head, checks, merge_state) of that summary
     good_key: str = ""
+    good_note: str = ""                 # that summary's own note (what its read missed)
     job: Any = None                     # the ask still waiting, or None
+    partial: tuple | None = None        # (PR state, parts missing) of the reads that missed parts
+    partial_since: float = 0.0          # when that began
+    awaiting_whole: bool = False        # failed only because the read missed a part
 
 
 ENRICH_KEYS = ("facts", "flags", "summary", "summary_state", "summary_note", "summary_reason",
@@ -820,16 +871,7 @@ def _incomplete(facts) -> bool:
     return not facts.read or any(v not in ("ok", "not_needed", "too_large") for v in facts.read.values())
 
 
-# The parts a summary needs whole (review of #335, LOW 3): a summary made
-# from a read that missed one would be cached under the same key as a whole
-# one. "too_large" is whole as far as it goes (the file list stands in).
-SUMMARY_PARTS = ("diff", "checks", "logs", "conflicts")
-PARTIAL_READ = "read in part; it is read again shortly"
 READING_AGAIN = "reading again"
-
-
-def _partial(facts) -> bool:
-    return any(facts.read.get(part) not in ("ok", "not_needed", "too_large") for part in SUMMARY_PARTS)
 
 
 def flags_detail(facts, limit: int = 20) -> dict:
@@ -958,7 +1000,10 @@ class PrSummaries:
                 return                      # gone since it was queued
             rec.in_flight = False
             rec.facts, rec.read_at = facts, now
-            rec.note = ""
+            rec.note, rec.awaiting_whole = "", False
+            missing = missing_parts(facts) if facts.ok("view") else ()
+            if not missing:
+                rec.partial = None
             if not facts.ok("view") or facts.head is None:
                 rec.job, rec.shown = None, None
                 rec.state, rec.reason = FAILED, "the pull request could not be read"
@@ -967,13 +1012,21 @@ class PrSummaries:
                 rec.state, rec.reason = OFF, "not open for review"
             elif rec.good is not None and rec.good_key == summary_key(facts):
                 rec.job, rec.shown, rec.state, rec.reason = None, rec.good, READY, ""
+                rec.note = rec.good_note
             elif self._still_stands(rec, facts):
                 rec.job, rec.shown, rec.state, rec.reason = None, rec.good, READY, ""
                 rec.note = CHECKS_RERUNNING
-            elif _partial(facts):
-                # Never summarized from part of a read: the queue reads it
-                # again after RETRY_S, and that read is summarized.
-                rec.job, rec.shown, rec.state, rec.reason = None, None, FAILED, PARTIAL_READ
+            elif missing and rec.good is not None and rec.good_sig == _sig(facts):
+                # A re-read of the same state that missed a part: the summary
+                # of the earlier read stands.
+                rec.job, rec.shown, rec.state, rec.reason = None, rec.good, READY, ""
+                rec.note = rec.good_note
+            elif missing and not self._waited_out(rec, facts, missing, now):
+                # Not summarized from part of a read yet: the queue reads it
+                # again after RETRY_S, and a whole read is summarized.
+                rec.job, rec.shown, rec.state, rec.awaiting_whole = None, None, FAILED, True
+                rec.reason = (f"{_words(missing)} could not be read; it is read again in "
+                              f"{int(RETRY_S // 60)} minutes")
             else:
                 token = object()
                 rec.job, rec.shown, rec.state, rec.reason = token, None, PENDING, ""
@@ -986,6 +1039,16 @@ class PrSummaries:
                 reason = self.engine.off_reason(facts) if state == OFF else ""
                 self._settle(rec, token, facts, state, value, reason)
         self._refresh(rec.row_id)
+
+    @staticmethod
+    def _waited_out(rec: _Pr, facts, missing, now) -> bool:
+        """True once the same parts have been missing for the same PR state
+        for `REFRESH_S`: then it is summarized without them, never starved."""
+        mark = (_sig(facts), missing)
+        if rec.partial != mark:
+            rec.partial, rec.partial_since = mark, now
+            return False
+        return now - rec.partial_since >= REFRESH_S
 
     @staticmethod
     def _still_stands(rec: _Pr, facts) -> bool:
@@ -1006,6 +1069,7 @@ class PrSummaries:
             if summary is not None:
                 rec.shown = rec.good = summary
                 rec.good_sig, rec.good_key = _sig(facts), summary_key(facts)
+                rec.note = rec.good_note = partial_note(facts)
                 rec.state, rec.reason = READY, ""
             elif state == OFF:
                 rec.shown, rec.state, rec.reason = None, OFF, reason or "not available"
@@ -1023,12 +1087,13 @@ class PrSummaries:
         with self._lock:
             for rec in self._prs.values():
                 facts = rec.facts
-                if (rec.job is None and rec.state == FAILED and rec.reason != PARTIAL_READ
+                if (rec.job is None and rec.state == FAILED and not rec.awaiting_whole
                         and facts is not None and facts.ok("view") and facts.head is not None
                         and summary_key(facts) == key):
                     rec.shown = rec.good = summary
                     rec.good_sig, rec.good_key = _sig(facts), key
-                    rec.state, rec.reason, rec.note = READY, "", ""
+                    rec.note = rec.good_note = partial_note(facts)
+                    rec.state, rec.reason = READY, ""
                     rows.append(rec.row_id)
         for row_id in rows:
             self._refresh(row_id)
