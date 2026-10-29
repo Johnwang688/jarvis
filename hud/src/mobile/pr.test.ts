@@ -105,6 +105,11 @@ describe("PM-24 on the phone: the layout", () => {
 });
 
 describe("Q1 and Q3 on the phone", () => {
+  it("a held running PR still offers Cancel (a hold must never stop the owner stopping a fix; lead's call on the verifier's finding)", () => {
+    const view = draw([fixRow(31, "running", {}, { hold: { note: "wait for review" } })]);
+    expect(rowEl(view, 31).querySelector('[data-testid="m-pr-fix-cancel"]')).not.toBeNull();
+  });
+
   it("limited: a flagged PR (or one whose flags are not known) offers nothing and says to answer it at the desk", () => {
     const a = answers({ limited: true });
     const view = draw([prRow(15, { flags: FLAGGED }), prRow(16, { flags: null }), prRow(11)], a);

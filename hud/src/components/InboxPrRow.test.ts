@@ -55,6 +55,34 @@ const btn = (n: number, id: string) => rowOf(n).querySelector(`[data-testid="${i
 const actions = (n: number) => Array.from(rowOf(n).querySelectorAll<HTMLButtonElement>("[data-action]")).map((b) => b.dataset.action);
 const click = (b: HTMLElement) => act(() => { b.click(); });
 
+describe("verifier: content changes must restart the 600 ms guard", () => {
+  it.each([
+    ["PR title", { title: "Remove the backup before migration" }],
+    ["summary caveat", { summary_note: "written without the CI logs, which could not be read" }],
+    ["unavailable-summary reason", { summary_reason: "the CI logs could not be read" }],
+  ])("rejects a click immediately after the %s changes", async (_name, change) => {
+    const base = _name === "unavailable-summary reason"
+      ? { summary: null, summary_state: "failed", summary_reason: "the model did not answer in time" }
+      : {};
+    const p = draw([prRow(11, base)]);
+    arm();
+    p.snapshot = snap([prRow(11, { ...base, ...change })]);
+    redraw(p);
+    // A real enabled button accepts this click; no timers have elapsed since
+    // the commit that changed what the owner is being asked to read.
+    click(btn(11, "inbox-pr-act-merge")!);
+    await flush();
+    expect(p.onPr, "content changed less than 600 ms ago").not.toHaveBeenCalled();
+  });
+});
+
+describe("a hold keeps Cancel", () => {
+  it("a held running PR still offers Cancel the fix (a hold never stops the owner stopping a fix)", () => {
+    draw([fixRow(31, "running", {}, { hold: { note: "wait for review" } })]);
+    expect(btn(31, "inbox-pr-fix-cancel")).not.toBeNull();
+  });
+});
+
 describe("PM-24: the layout", () => {
   it("title, then the buttons, then code's facts and flags, then the AI summary, then the link", () => {
     draw([prRow(15, { flags: FLAGGED })]);
