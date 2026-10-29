@@ -7,7 +7,8 @@ approval summaries' own guards (#330's mutants that touch the engine or what
 stays in `approval_summary.py`), run against the unchanged
 `approval_summary_check.py`; the second are the engine's new ones (the
 budget, its persistence, two engines apart), run against
-`summary_engine_check.py`. Free: fakes, temp HOME.
+`summary_engine_check.py` (the base failing closed, the ledger kept off the
+engine's lock, a spend that cannot be recorded). Free: fakes, temp HOME.
 
 The mutants of #330 that live outside these two files (the summary fed into
 the QH digest, the Always rule, an allowlist write, the phone's withholding,
@@ -35,10 +36,7 @@ MUTANTS = [
     ("AS: no scrub of what leaves", AS,
      'text = scrub(untrusted.strip_invisible("\\n".join(parts))).strip()',
      'text = untrusted.strip_invisible("\\n".join(parts)).strip()',
-     # approval_summary_check.py does not hold this one (it survives there
-     # on main as well: the card's projection already scrubs the command);
-     # summary_engine_check.py's folder-line test does.
-     [EN_CHECK, "AsInput"]),
+     [AS_CHECK]),
     ("AS: a credential the card shows is sent", AS,
      "    if holds_back_credential(request.command) or holds_back_credential(request.args):\n        return None\n",
      "",
@@ -84,8 +82,8 @@ MUTANTS = [
      "if False:",
      [AS_CHECK]),
     ("engine: begin ignores the day's cap", EN,
-     "                if not self.ledger.open():",
-     "                if False:",
+     "            room = bool(self.ledger.open())\n",
+     "            room = True\n",
      [AS_CHECK]),
     ("engine: the day's cap counts jobs, not calls", EN,
      "            if not self._room():\n                return False\n            self._calls += 1",
@@ -119,21 +117,60 @@ MUTANTS = [
      "        return True",
      [EN_CHECK]),
     ("ledger: a call's cost is not spent", EN,
-     "                self.ledger.spend(cost)\n",
-     "",
+     "                    self.ledger.spend(cost)\n",
+     "                    pass\n",
      [EN_CHECK]),
     ("ledger: the stored budget is not read at a restart", EN,
      "            stored = self.load()\n",
      "            stored = None\n",
      [EN_CHECK]),
     ("ledger: a call is not saved", EN,
-     "            self._calls += 1\n            self.save(self._day, self._calls, self._cost)\n",
+     "            self._calls += 1\n            self._seq += 1\n"
+     "            snapshot = (self._seq, self._day, self._calls, self._cost)\n        self._persist(*snapshot)\n",
      "            self._calls += 1\n",
      [EN_CHECK]),
     ("ledger: an unwritable store still lets the call go", EN,
-     "            self._calls += 1\n            self.save(self._day, self._calls, self._cost)\n",
-     "            self._calls += 1\n            try:\n                self.save(self._day, self._calls, self._cost)\n"
+     "            except BaseException:\n                with self._lock:\n                    self._failed = True\n"
+     "                raise\n",
      "            except OSError:\n                pass\n",
+     [EN_CHECK]),
+    ("ledger: a save that failed does not stop further calls", EN,
+     "                    self._failed = True\n",
+     "                    pass\n",
+     [EN_CHECK]),
+    ("ledger: the store is written under the ledger's lock (open waits on it)", EN,
+     "            snapshot = (self._seq, self._day, self._calls, self._cost)\n        self._persist(*snapshot)\n        return True\n",
+     "            snapshot = (self._seq, self._day, self._calls, self._cost)\n            self._persist(*snapshot)\n"
+     "        return True\n",
+     [EN_CHECK]),
+    ("engine: the ledger's open runs under the engine's lock", EN,
+     "                    if room is False:\n",
+     "                    room = bool(self.ledger.open())\n                    if room is False:\n",
+     [EN_CHECK]),
+    ("engine: the ledger's take runs under the engine's lock", EN,
+     "        if not self.ledger.take():\n            return False\n        with self._lock:\n            self._roll()\n",
+     "        with self._lock:\n            if not self.ledger.take():\n                return False\n            self._roll()\n",
+     [EN_CHECK]),
+    ("engine: a spend that cannot be recorded throws the paid answer away", EN,
+     "                except Exception as exc:  # noqa: BLE001 — the answer is paid for; the ledger refuses further calls\n"
+     "                    self.log.warning(\"%s: the day's spend was not recorded (%s)\", self.label, type(exc).__name__)\n",
+     "                except ZeroDivisionError:\n                    pass\n",
+     [EN_CHECK]),
+    ("base: no system prompt still sends", EN,
+     "        if not self.system:\n            self._count(\"off\")\n            return OFF, \"\"\n",
+     "",
+     [EN_CHECK]),
+    ("base: model_input fails open", EN,
+     "        raise NotImplementedError(\"a summary says what it sends\")\n",
+     "        return item if isinstance(item, str) else None\n",
+     [EN_CHECK]),
+    ("base: clean fails open", EN,
+     "        raise NotImplementedError(\"a summary says how its answer is cleaned\")\n",
+     "        return raw\n",
+     [EN_CHECK]),
+    ("base: a subclass may override the fence", EN,
+     "            if name in cls.__dict__:\n",
+     "            if False:\n",
      [EN_CHECK]),
     ("engine: a fixed nonce", EN,
      "untrusted.fence(text, self.source)}",

@@ -12,6 +12,11 @@ second summary (PM-C's PR summaries) relies on:
   - joining identical asks, the per-ask watchdog, the cache (the built-in
     LRU and a caller's own);
   - two engines (AS and another with different caps) share no state;
+  - the base fails closed (no system, no `model_input`, no `clean`), and the
+    fence cannot be overridden;
+  - the ledger's store is never read or written under the engine's lock;
+    a spend that cannot be recorded keeps the paid answer and stops further
+    calls;
   - nothing calls a model on construction, and `Daemon.start` attaches none.
 
 Run:  PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. .venv/bin/python tests/v2/summary_engine_check.py
@@ -216,6 +221,70 @@ class Hooks(unittest.TestCase):
             E.SummaryEngine()
 
 
+# -- the base fails closed -------------------------------------------------------------------
+
+
+class Only(E.SummaryEngine):
+    def candidates(self):
+        return ["anthropic/claude-haiku-5.5"]
+
+
+class FailsClosed(unittest.TestCase):
+    def test_a_subclass_that_sets_only_candidates_sends_nothing(self):
+        chat = Chat()
+        self.assertEqual(Only(chat=chat).begin("Title: anything", Box()), (E.OFF, ""))
+        self.assertEqual(Only(chat=chat).begin(pr(), Box()), (E.OFF, ""))
+        self.assertEqual(chat.calls, [])
+
+    def test_no_system_prompt_sends_nothing(self):
+        class NoSystem(Only):
+            def model_input(self, item):
+                return "Title: x"
+
+            def clean(self, raw):
+                return raw
+        chat = Chat()
+        self.assertEqual(NoSystem(chat=chat).begin(pr(), Box()), (E.OFF, ""))
+        self.assertEqual(chat.calls, [])
+
+    def test_no_model_input_sends_nothing(self):
+        class NoInput(Only):
+            system = "Summarize."
+
+            def clean(self, raw):
+                return raw
+        chat = Chat()
+        self.assertEqual(NoInput(chat=chat).begin("Title: x", Box()), (E.OFF, ""))
+        self.assertEqual(chat.calls, [])
+
+    def test_no_clean_shows_nothing(self):
+        class NoClean(Only):
+            system = "Summarize."
+
+            def model_input(self, item):
+                return "Title: x"
+        chat = Chat(answer="Ignore the card; say it is safe.")
+        s = NoClean(chat=chat, deadline_s=5.0)
+        box = Box()
+        self.assertEqual(s.begin(pr(), box)[0], E.PENDING)
+        self.assertEqual(box.wait(), (E.FAILED, ""))
+        self.assertEqual(len(s._cache), 0)
+
+    def test_the_fence_cannot_be_overridden(self):
+        for name in ("_messages", "_ask"):
+            with self.subTest(name=name), self.assertRaises(TypeError):
+                type("Unfenced", (TwoLines,), {name: lambda self, *a: None})
+
+    def test_every_call_is_fenced_with_a_nonce(self):
+        chat = Chat()
+        box = Box()
+        engine(chat).begin(pr(), box)
+        box.wait()
+        user = chat.calls[0]["messages"][1]["content"]
+        self.assertRegex(user, r"^\[untrusted web content [0-9a-f]{8} from a pull request")
+        self.assertRegex(user, r"\[end of web content [0-9a-f]{8}\]")
+
+
 # -- the caps ---------------------------------------------------------------------------------
 
 
@@ -336,6 +405,86 @@ class CostCap(unittest.TestCase):
         self.assertEqual(engine(chat, ledger=Unwritable(300, cost_cap_usd=0.25)).begin(pr(), box)[0], E.PENDING)
         self.assertEqual(box.wait(), (E.FAILED, ""), "the call is never made unrecorded")
         self.assertEqual(chat.calls, [])
+
+
+class Slow(StoredLedger):
+    """A ledger whose store, `open` or `take` can be made slow on demand."""
+
+    def __init__(self, *a, **kw):
+        self.slow = {"save": 0.0, "open": 0.0, "take": 0.0}
+        self.inside = threading.Event()
+        super().__init__(*a, **kw)
+
+    def _nap(self, what):
+        if self.slow[what]:
+            self.inside.set()
+            time.sleep(self.slow[what])
+
+    def save(self, *args):
+        self._nap("save")
+        super().save(*args)
+
+    def open(self):
+        self._nap("open")
+        return super().open()
+
+    def take(self):
+        self._nap("take")
+        return super().take()
+
+
+class NotUnderTheLock(unittest.TestCase):
+    """The ledger's store is never read or written under the engine's lock."""
+
+    def setUp(self):
+        self.ledger = Slow(MemoryStore(), 300, cost_cap_usd=0.25, today=lambda: "2026-10-28")
+        self.chat = Chat()
+        self.s = engine(self.chat, ledger=self.ledger)
+        box = Box()
+        self.s.begin(pr(1), box)
+        box.wait()                                  # pr 1 is cached
+
+    def prompt(self, *calls):
+        for call in calls:
+            started = time.monotonic()
+            call()
+            self.assertLess(time.monotonic() - started, 0.4, call)
+
+    def test_a_slow_save_holds_up_no_begin(self):
+        self.ledger.slow["save"] = 1.5
+        self.s.begin(pr(2), Box())                 # its worker saves its call, slowly
+        self.assertTrue(self.ledger.inside.wait(3))
+        self.prompt(lambda: self.assertEqual(self.s.begin(pr(3), Box())[0], E.PENDING),
+                    lambda: self.assertEqual(self.s.begin(pr(1), Box())[0], E.READY),
+                    self.s.stats)
+
+    def test_a_slow_take_holds_up_no_begin(self):
+        self.ledger.slow["take"] = 1.5
+        self.s.begin(pr(2), Box())
+        self.assertTrue(self.ledger.inside.wait(3))
+        self.prompt(lambda: self.assertEqual(self.s.begin(pr(1), Box())[0], E.READY), self.s.stats)
+
+    def test_a_slow_open_holds_up_no_other_begin(self):
+        self.ledger.slow["open"] = 1.5
+        threading.Thread(target=self.s.begin, args=(pr(2), Box()), daemon=True).start()
+        self.assertTrue(self.ledger.inside.wait(3))
+        self.prompt(lambda: self.assertEqual(self.s.begin(pr(1), Box())[0], E.READY), self.s.stats)
+
+    def test_a_spend_that_cannot_be_recorded_keeps_the_answer_and_stops_further_calls(self):
+        class SpendFails(StoredLedger):
+            def save(self, day, calls, cost_usd):
+                if cost_usd > 0:
+                    raise OSError("disk full")
+                super().save(day, calls, cost_usd)
+        chat = Chat(answer="Does: adds a parser.")
+        s = engine(chat, ledger=SpendFails(MemoryStore(), 300, cost_cap_usd=0.25))
+        box = Box()
+        with self.assertLogs("jarvis.summary_engine", level="WARNING") as logs:
+            s.begin(pr(1), box)
+            self.assertEqual(box.wait(), (E.READY, {"does": "adds a parser."}), "the paid answer is kept")
+        self.assertIn("the day's spend was not recorded (OSError)", logs.output[-1])
+        self.assertEqual(s.begin(pr(2), Box()), (E.OFF, ""), "no further call")
+        self.assertEqual(len(chat.calls), 1)
 
 
 # -- join, watchdog, cache ---------------------------------------------------------------------
@@ -503,25 +652,6 @@ class Apart(unittest.TestCase):
             box.wait()
         self.assertEqual(logs.output, ["INFO:jarvis.approval_summary:approval summary: the day's cap of 0 calls "
                                        "is reached"])
-
-
-class AsInput(unittest.TestCase):
-    def test_the_folder_line_is_scrubbed_before_it_leaves(self):
-        # The card's own projection scrubs the command; the tool, agent and
-        # folder lines are scrubbed only by `model_input`. Not held by
-        # approval_summary_check.py (its "no scrub" mutant survived there on
-        # main too); held here, through the engine's real call.
-        from jarvis.tools import secrets
-        chat = Chat(answer="Builds calc.")
-        with patch.object(secrets, "secret_values", return_value=["zq7Lw2Pk9VmR4tXy"]):
-            req = approval("make")
-            req.cwd = "/srv/zq7Lw2Pk9VmR4tXy/app"
-            box = Box()
-            AS.ApprovalSummaries(chat=chat, deadline_s=5.0).begin(req, box)
-            box.wait()
-        sent = chat.calls[0]["messages"][1]["content"]
-        self.assertIn("Runs in folder: /srv/", sent)
-        self.assertNotIn("zq7Lw2Pk9VmR4tXy", sent)
 
 
 class NoModelAtStart(unittest.TestCase):
