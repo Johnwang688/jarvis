@@ -557,3 +557,8 @@ or `~/bin`, or to the owner's global git config. `git apply|am|cherry-pick|reset
 --hard|stash pop|apply`, `patch`, `tar -x`, `unzip`, `7z x` and `cpio -i` are asked (the tree
 always holds `.github`); the card's CI amber stays the backstop. `gh … --web` is DENY; L-1
 adds `prod*` and `production*`.
+
+**Last item (2026-10-29).** `Task.pr_scope["base"]`: a fix merges in only `origin/<base>` (or
+`FETCH_HEAD` after `git fetch origin <base>` on the same line) and pulls only `origin <base>`
+without rebasing; any other source, or none, asks. `git read-tree -u|--reset` and `git
+checkout-index -a|-f` ask.

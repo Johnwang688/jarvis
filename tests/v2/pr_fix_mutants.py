@@ -514,6 +514,25 @@ MUTANTS = [
      '    if not word.startswith("--") or len(word) < 3:\n', '    if not word.startswith("--") or len(word) < 4:\n',
      ["Scope.test_gh_api_writes_are_refused"]),
 
+    ("last: any merge source", FX,
+     "        self.ask(f\"git {sub} of {_shown(' '.join(sources) or 'its upstream')}: a fix merges in \"\n",
+     "        return\n        self.ask(f\"git {sub} of {_shown(' '.join(sources) or 'its upstream')}: a fix merges in \"\n",
+     ["Scope.test_only_the_base_is_merged_in"]),
+    ("last: FETCH_HEAD without the base fetched", FX,
+     '                                        or (sources == ["FETCH_HEAD"] and self.fetched_base)):\n',
+     '                                        or (sources == ["FETCH_HEAD"])):\n', ["Scope.test_only_the_base_is_merged_in"]),
+    ("last: a pull that rebases", FX,
+     '                self.ask("a pull that rebases; the brief merges the base in")\n                return\n',
+     "                pass\n", ["Scope.test_only_the_base_is_merged_in"]),
+    ("last: the base merge asks", FX,
+     '        if base and sub == "pull" and sources == ["origin", base]:\n            return\n', "", ["Scope.test_only_the_base_is_merged_in"]),
+    ("last: read-tree -u and checkout-index -a", FX,
+     '                sub == "read-tree" and any(w in ("-u", "--reset")',
+     '                False and any(w in ("-u", "--reset")', ["Scope.test_tree_writers_are_asked"]),
+    ("last: checkout-index", FX,
+     '                sub == "checkout-index" and any(w in ("-a", "--all", "-f", "--force") or (',
+     '                False and any(w in ("-a", "--all", "-f", "--force") or (', ["Scope.test_tree_writers_are_asked"]),
+
 ]
 
 

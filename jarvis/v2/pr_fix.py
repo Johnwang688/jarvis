@@ -306,9 +306,12 @@ def valid_scope(scope) -> bool:
     from .chat_git import valid_branch
     from .pr_facts import valid_number, valid_repo
     if not isinstance(scope, dict) or not ({"repo", "number", "branch"} <= set(scope)
-                                           <= {"repo", "number", "branch", "helpers", "helper_paths"}):
+                                           <= {"repo", "number", "branch", "helpers", "helper_paths",
+                                               "base"}):
         return False
     helpers, paths = scope.get("helpers"), scope.get("helper_paths")
+    if "base" in scope and not valid_branch(scope["base"]):
+        return False
     return (valid_repo(scope["repo"]) and valid_number(scope["number"])
             and valid_branch(scope["branch"])
             and (helpers is None or (isinstance(helpers, str) and bool(re.fullmatch(r"[0-9a-f]{64}", helpers))))
@@ -317,7 +320,7 @@ def valid_scope(scope) -> bool:
 
 
 def make_scope(repo: str, number: int, branch: str, helpers: str | None = None,
-               helper_paths: list[str] | None = None) -> dict:
+               helper_paths: list[str] | None = None, base: str | None = None) -> dict:
     """The task's scope. `helpers` is the digest of the repository's git
     credential helpers when the Fix started, their programs' real paths and
     content hashes included (`helper_pin`): a push made under any other set
@@ -328,6 +331,8 @@ def make_scope(repo: str, number: int, branch: str, helpers: str | None = None,
         scope["helpers"] = helpers
     if helper_paths is not None:
         scope["helper_paths"] = list(helper_paths)
+    if base is not None:
+        scope["base"] = base             # the one branch a fix merges in
     if not valid_scope(scope):
         raise ValueError("not a valid PR scope")
     return scope
@@ -772,6 +777,7 @@ class _Judge:
         self.branch = scope["branch"]
         self.repo = scope["repo"]
         self.hits: list[ScopeHit] = []
+        self.fetched_base = False       # `git fetch origin <base>` earlier on the line
         self.root = Path(root) if isinstance(root, str) and root and Path(root).is_absolute() else None
         own = mg._git_dirs(self.root) if self.root is not None else None
         self.own = own if isinstance(own, tuple) else None
@@ -1196,8 +1202,19 @@ class _Judge:
             self.deny(S_PROGRAM, "pushes a subtree to another repository")
         elif sub == "lfs" and "push" in words:
             self.ask("git lfs push sends objects the gate does not read")
+        elif sub == "fetch":
+            base = self.scope.get("base")
+            self.fetched_base = bool(base) and [w for w in words if not w.startswith("-")] in (
+                ["origin", base], ["origin", f"refs/heads/{base}"])
+        elif sub in ("merge", "pull"):
+            self._merge(sub, words)
         elif sub in ("apply", "am", "cherry-pick") or (sub == "reset" and "--hard" in words) or (
-                sub == "stash" and any(w in ("pop", "apply") for w in words)):
+                sub == "stash" and any(w in ("pop", "apply") for w in words)) or (
+                sub == "read-tree" and any(w in ("-u", "--reset") or (w.startswith("-") and not w.startswith("--")
+                                                                    and "u" in w[1:]) for w in words)) or (
+                sub == "checkout-index" and any(w in ("-a", "--all", "-f", "--force") or (
+                    w.startswith("-") and not w.startswith("--") and any(c in "af" for c in w[1:]))
+                    for w in words)):
             self.ask(f"git {sub} may write CI configuration the gate does not see")
         elif sub in _GIT_RUNS and (_GIT_RUNS[sub] is None or any(
                 w in _GIT_RUNS[sub] or any(w.startswith(f + "=") for f in _GIT_RUNS[sub] if f.startswith("--"))
@@ -1208,6 +1225,37 @@ class _Judge:
         elif sub not in _GIT_KNOWN:
             self.ask(f"git {_shown(sub)} is not a git command the gate knows (an alias or another "
                      "program may push)")
+
+    def _merge(self, sub: str, words: list[str]) -> None:
+        """The brief's merge of the base: `git merge origin/<base>` (or
+        `FETCH_HEAD` after `git fetch origin <base>` on the line), `git pull
+        origin <base>`. Any other source, or none, is asked; so is a pull that
+        rebases. `--abort`, `--continue` and `--quit` name no source."""
+        base = self.scope.get("base")
+        values = {"-m", "-F", "--file", "-s", "--strategy", "-X", "--strategy-option", "--into-name",
+                  "--cleanup", "-S", "--gpg-sign", "--depth", "--upstream"}
+        sources, skip = [], False
+        for w in words:
+            if skip:
+                skip = False
+                continue
+            if w in values:
+                skip = True
+                continue
+            if w in ("--abort", "--continue", "--quit", "--skip"):
+                return
+            if sub == "pull" and (w in ("-r", "--rebase") or w.startswith("--rebase=")) and w != "--rebase=false":
+                self.ask("a pull that rebases; the brief merges the base in")
+                return
+            if not w.startswith("-"):
+                sources.append(w)
+        if base and sub == "pull" and sources == ["origin", base]:
+            return
+        if base and sub == "merge" and (sources in (["origin/" + base], ["refs/remotes/origin/" + base])
+                                        or (sources == ["FETCH_HEAD"] and self.fetched_base)):
+            return
+        self.ask(f"git {sub} of {_shown(' '.join(sources) or 'its upstream')}: a fix merges in "
+                 f"origin/{base or '<base>'} only")
 
     def _git_paths(self, sub: str, words: list[str], dirs, moved: bool) -> None:
         """M-2: what `git rm|mv|checkout|restore|clean` removes, moves or
@@ -2118,7 +2166,7 @@ class PrFixes:
             if pinned is None:
                 raise FixRefused(409, "the project's git config cannot be read")
             brief = build_brief(facts)
-            scope = make_scope(repo, number, facts.branch, pinned[0], pinned[1])
+            scope = make_scope(repo, number, facts.branch, pinned[0], pinned[1], facts.base)
             started = _utc(self.clock())
             record = {"task_id": None, "from_head": head, "from_patches": patches_record(facts),
                       "started": started, "state": "starting", "ended_at": None,

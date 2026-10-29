@@ -498,12 +498,38 @@ class Scope(unittest.TestCase):
         self.asks("curl https://140.82.112.6/user", "curl \"https://api.$(echo github).com/user\"")
         self.passes("curl -s https://pypi.org/simple/x/")
 
+    def test_only_the_base_is_merged_in(self):
+        based = X.make_scope(REPO, N, BRANCH, base="main")
+
+        def j(cmd):
+            return X.judge(based, "Bash", {"command": cmd}, judged=(cmd,), cwd=str(self.repo), provider="claude")
+        for cmd in ("git merge origin/main", "git merge --no-edit origin/main", "git merge -m 'm' origin/main",
+                    "git fetch origin main && git merge FETCH_HEAD", "git pull origin main",
+                    "git pull --no-rebase origin main", "git merge --abort", "git merge --continue",
+                    "git fetch origin main"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(j(cmd), cmd)
+        for cmd in ("git merge other", "git merge origin/other", "git merge " + "a" * 40, "git merge FETCH_HEAD",
+                    "git fetch origin other && git merge FETCH_HEAD", "git merge", "git merge origin/main other",
+                    "git pull", "git pull origin other", "git pull https://github.com/x/y main",
+                    "git pull --rebase origin main"):
+            with self.subTest(cmd=cmd):
+                hit = j(cmd)
+                self.assertIsNotNone(hit, cmd)
+                self.assertEqual((hit.decision, hit.rule), (X.ASK, X.S_UNSURE), hit.reason)
+        hit = X.judge(scope(), "Bash", {"command": "git merge origin/main"}, judged=("git merge origin/main",),
+                      cwd=str(self.repo), provider="claude")
+        self.assertEqual(hit.decision, X.ASK, "a scope without its base merges nothing unasked")
+
     def test_tree_writers_are_asked(self):
         # The delta review's LOW: they may write CI the gate does not see.
         self.asks("git apply ci.patch", "git am fix.mbox", "git cherry-pick abc123", "git reset --hard other",
                   "git stash pop", "git stash apply", "patch -p1 < fix.patch", "tar -xf wf.tar", "tar xf wf.tar",
-                  "unzip -o wf.zip", "7z x a.7z", "cpio -i < a.cpio")
-        self.passes("git stash", "git reset --soft HEAD~1", "tar -tf a.tar", "git merge origin/main")
+                  "unzip -o wf.zip", "7z x a.7z", "cpio -i < a.cpio", "git read-tree -u -m other",
+                  "git read-tree --reset other", "git read-tree -mu other", "git checkout-index -a",
+                  "git checkout-index -f app/a.py", "git checkout-index -af")
+        self.passes("git stash", "git reset --soft HEAD~1", "tar -tf a.tar", "git read-tree other",
+                    "git checkout-index app/a.py")
 
     def test_inline_code_is_asked(self):
         self.asks("python3 -c 'print(1)'", "node -e 'console.log(1)'", "perl -e 'print 1'",
@@ -519,7 +545,7 @@ class Scope(unittest.TestCase):
                   "setsid make test", "GIT_PAGER=cat git log -1", "EDITOR=vim git commit",
                   "git -c core.pager=cat log -1", "git -c core.editor=vim commit",
                   "git -c sequence.editor=true rebase -i HEAD~1", "git -c alias.l=log l")
-        self.passes("git rebase origin/main", "git bisect start", "git submodule status",
+        self.passes("git bisect start", "git submodule status",
                     "git -c core.quotepath=off status")
 
     def test_another_repository_takes_no_push(self):
@@ -596,7 +622,7 @@ class Scope(unittest.TestCase):
         self.passes("git checkout other", "git restore app/a.py", "rm -rf build", "cat .github/workflows/ci.yml")
 
     def test_everything_else_is_the_ordinary_gates(self):
-        self.passes("git status", "git commit -am 'fix: make the push work'", "git merge origin/main",
+        self.passes("git status", "git commit -am 'fix: make the push work'",
                     "git fetch origin main", "pytest -q", "make test", "git log --oneline -5",
                     "ls .github/workflows", "gh run view --job 4242 --repo Owner/Repo --log-failed",
                     "git config user.name", "git remote -v")
@@ -1102,7 +1128,8 @@ class Start(Fixing):
     def test_one_call_makes_a_claude_task_under_the_scope(self):
         out = self.start()
         task = self.task(out["task_id"])
-        self.assertEqual({k: v for k, v in task.pr_scope.items() if k not in ("helpers", "helper_paths")},
+        self.assertEqual(task.pr_scope["base"], "main")
+        self.assertEqual({k: v for k, v in task.pr_scope.items() if k not in ("helpers", "helper_paths", "base")},
                          scope())
         self.assertRegex(task.pr_scope["helpers"], r"^[0-9a-f]{64}$")
         self.assertEqual(task.ceilings, {"usd": 5.0, "hours": 1.0})
