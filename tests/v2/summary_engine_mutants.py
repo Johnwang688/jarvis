@@ -4,8 +4,8 @@ Each mutant breaks one guard in a temp copy of the package and runs the named
 checks against the copy (`chat_git_mutants.run`). Every mutant must make a
 check fail; one that survives is a guard no test holds. The first group are
 approval summaries' own guards (#330's mutants that touch the engine or what
-stays in `approval_summary.py`), run against the unchanged
-`approval_summary_check.py`; the second are the engine's new ones (the
+stays in `approval_summary.py`), run against
+`approval_summary_check.py` (its existing tests unchanged); the second are the engine's new ones (the
 budget, its persistence, two engines apart), run against
 `summary_engine_check.py` (the base failing closed, the ledger kept off the
 engine's lock, a spend that cannot be recorded). Free: fakes, temp HOME.
