@@ -26,7 +26,7 @@ covered in WP AS-E, applied once #329 is on `main`.
    where), and two code-built lines the model cannot influence: **Why
    asked** (the gate's existing reason/headline) and **Where** (project ·
    branch · folder, from the gate's judged cwd and the existing card
-   fields). The model summary is visibly marked as an AI summary, styled
+   fields; since the review of #330, three separate labelled fields). The model summary is visibly marked as an AI summary, styled
    apart from the code lines.
 2. **Model.** Haiku 5.5, one-shot, following `jarvis/v2/speech_summary.py`:
    its own tier and env override (`JARVIS_APPROVAL_SUMMARY_MODEL`), never
@@ -77,8 +77,8 @@ covered in WP AS-E, applied once #329 is on `main`.
 - **AS-5. Cost and abuse.** Cached by the SHA-256 of the exact model input
   (LRU, 512): a re-ask or an identical call reuses it, and identical calls
   in flight share one request. At most 3 calls run at once and 12 wait;
-  past that, `off`. At most 1,000 model calls per local day (in memory, a
-  restart resets it); past that, `off`. Each call's model, tokens, cost and
+  past that, `off`. At most 1,000 model calls per local day, each try of
+  each job counted (in memory, a restart resets it); past that, `off`. Each call's model, tokens, cost and
   time are logged, and `stats()` keeps the day's calls and cost: there is no
   shared accounting hook for one-shot calls (the speech summaries and titles
   log the same way).
@@ -99,8 +99,9 @@ covered in WP AS-E, applied once #329 is on `main`.
   project name, the branch read from the judged folder's `.git/HEAD` (a
   worktree's `gitdir:` followed; at most 512 bytes read; no `git` process),
   and the folder (`request.cwd`, else the project root), the home directory
-  shown as `~`. One line, `clean_line`d, at most 200 characters. Display
-  only; not in the QH digest.
+  shown as `~`. Three separate fields, `{project, branch, folder}`, each
+  drawn in its own labelled box (review of #330, MED 1; it was one
+  " · "-joined line). Display only; not in the QH digest.
 - **AS-9. Why asked** is the existing `[layer] reason` line, now shown under
   the summary with its own label. A headline (a sandbox widening, the merge
   gate's) stays first, above the buttons, as before.
@@ -128,9 +129,11 @@ covered in WP AS-E, applied once #329 is on `main`.
   (code), the collapsed preview's first line with the command's line and
   character count, the expand control, and AS-13's arming.
 - **AS-13. Arming (HUD).** AUTHORIZE and ALWAYS are disabled for 600 ms
-  after the card mounts and again whenever the button row moves: a card
-  that appears under the pointer, or a click that lands as the layout
-  changes, never authorizes. DENY is never disarmed (it is the cheap
+  after the card mounts and again whenever its content changes (the summary
+  lands or fails; for the Browser card, its private detail lands): a card
+  that appears under the pointer, or a click aimed at the words before they
+  changed, never authorizes. Nothing re-arms on layout alone; the layout is
+  kept still instead (AS-14). DENY is never disarmed (it is the cheap
   action). The phone needs no timer: each Allow and Always already takes its
   own passkey assertion. Its DENY-first spacing (120 px to ALWAYS and
   AUTHORIZE) moves to the top as one block.
@@ -247,6 +250,52 @@ each killed); vitest (the shared lib, the HUD card, the Browser card, the
 phone card and rows, the reducer); the AS sections of the HUD, inbox, phone
 answer and both morning-review face checks.
 
+### Review of #330 (2026-10-28), as built
+
+- **MED 1, Where.** `ApprovalRequest.where` is `{project, branch, folder}`
+  (`approval_summary.where_parts`). Each part is `clean_line`d and every
+  separator lookalike (`·`, `•`, `‧`, `∙`, `⋅`, `・`, bars) becomes "?"; the
+  folder is `normpath`ed, shown with `~`, and elided in its middle (120
+  characters, head and tail kept); a branch that is not
+  `chat_git.valid_branch`-shaped (or "detached <sha8>") is shown as "(not a
+  plain branch name)". The HUD card, inbox (approval and deferred rows), the
+  morning review and the phone (card, rows, review) draw the three as
+  labelled boxes with the value in a `bdi`; `lib/approvalSummary.whereParts`
+  cleans them again and ignores the old one-line string. Tests: the `Where`
+  class (each probe), vitest, the face checks.
+- **LOW 2, arming.** `hud/src/lib/armed.ts` `useArmed` returns
+  `armedKey === key`, so the render that draws a new key is disarmed; the
+  ordinary card, the Browser card and the inbox's Approve and retry share it
+  (NIT 9). A vitest runs the old hook as a mutant and sees it fail.
+- **LOW 3, stuck pending.** The daemon's `describe` hook sets
+  `summary_state: "pending"` before the card enters `_pending`; the HUD
+  re-reads `/approvals` on every SSE reconnect and merges (a summary already
+  heard is never overwritten by a listing that still says pending; boot
+  merges the same way); and every surface treats a summary still pending
+  `STALE_PENDING_MS` (10 s) after `asked_at` as none, with the command
+  expanded, each woken on time (the HUD card's clock, the inbox's wake
+  timer, the phone app's `wakeForStale`).
+- **LOW 4, the confirmation** is frozen when it opens, on the HUD
+  (`confirmLines`) and the phone (`reviewConfirmLines`). A changed tag still
+  closes it.
+- **LOW 5, credentials.** The shared `redact_command` withholds htpasswd's
+  batch password, Samba's `-U user%pw`, lftp's `-u user,pw`, sqlcmd/bcp
+  `-P`, ldap* `-w`, OpenSSL `pass:`, zip/unzip `-P`, 7z `-p`, FreeRDP
+  `/p:`, ssh-keygen `-N`/`-P` and keytool's passwords (sshpass, mysql,
+  `PGPASSWORD`, curl `-u` and `--password` were already covered). The
+  never-hidden rule (a value with an operator or a blank stays on the card)
+  is unchanged; `secrets.holds_back_credential` reports such a value (and
+  one the display's segmenting missed, `sshpass -p 'a;b'`, reading the
+  quoting), and `model_input` then sends nothing (`off`, the command
+  expanded).
+- **LOW 6, NIT 7.** The daily cap counts each model call inside `_ask`.
+  Each card has its own watchdog; a job counts against the caps until its
+  worker returns, and an identical ask meanwhile waits on the same job.
+- **NIT 10.** The late-summary test waits on the summary's end.
+
 Open: Discord's post still shows the whole command and no summary (AS-16);
 the 2–3 s target is unmeasured (no paid probe was run); the daily cap is in
-memory, so a restart resets it.
+memory, so a restart resets it; on the card (not to the model), a
+program-flag credential inside a quoted word that holds a `|` or `;` still
+shows, since the display's segmenting is not quote-aware (it predates AS);
+`holds_back_credential` reads the quoting, so such a call is never sent.

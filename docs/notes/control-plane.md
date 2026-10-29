@@ -2243,24 +2243,38 @@ Plan and decisions AS-1 to AS-17: `docs/plans/2026-10-28-approval-summaries.md`.
   pin. It reads the card's redacted projection (`card()`), the tool, the
   provider and the judged folder; for a shell the command only (an agent's
   `description` is not sent); `strip_invisible`, `scrub`, `untrusted.fence`.
-  A call over 8,000 prepared characters, a HUD-only card, or no acceptable
-  model: no summary (`off`). Out: one line, at most 160 characters, link and
+  A call over 8,000 prepared characters, a HUD-only card, no acceptable
+  model, or a call whose card still shows a credential (the never-hidden
+  rule keeps a value with an operator or a blank on the card;
+  `secrets.holds_back_credential` reports it, review of #330 LOW 5): no
+  summary (`off`). Out: one line, at most 160 characters, link and
   bold syntax removed, scrubbed, `clean_line`d; globs and `__dunder__` kept.
-- **Never in the way.** `Daemon._approval_requested` publishes the card with
-  `summary_state: "pending"`, then `begin_approval_summary` starts it on a
-  worker thread, outside the broker lock; a watchdog fails it at 8 s. The
+- **Never in the way.** The broker's `describe` hook marks the card
+  `summary_state: "pending"` before it enters `_pending` (review of #330,
+  LOW 3); `Daemon._approval_requested` publishes it, then
+  `begin_approval_summary` starts it on a worker thread, outside the broker
+  lock; each card's own watchdog fails it at 8 s. The
   arrival is `approval_summary` `{req_id, summary, summary_state}`, only
   while the card is pending; the inbox observes it (`inbox_changed`
   `appr:<id>`), which also makes the phone read the card again. Cached by
   the SHA-256 of the model input (LRU 512), identical calls in flight share
   one request, 3 running and 12 waiting, 1,000 model calls a local day (in
-  memory); past a cap, `off`. Cost and tokens are logged per call and kept in
+  memory; each try counts, review of #330 LOW 6); past a cap, `off`. A job
+  counts until its worker returns, even after its cards' watchdogs fired, and
+  an identical ask meanwhile waits on it rather than paying again (NIT 7). Cost and tokens are logged per call and kept in
   `stats()`; there is no shared ledger hook. Attached by daemon2's `main()`
   only (`attach_approval_summaries`): no test or embedded daemon calls a model.
 - **Where** (`PendingApprovals.describe`, set by the daemon, called before
-  the lock for public cards): "project · branch · folder" from the gate's
-  judged `cwd` (else the project root), the branch read from `.git/HEAD`
-  (a worktree's `gitdir:` followed, 512 bytes at most, no `git` process).
+  the lock for public cards): three separate fields, `{project, branch,
+  folder}` (`where_parts`), from the gate's judged `cwd` (else the project
+  root), the branch read from `.git/HEAD` (a worktree's `gitdir:` followed,
+  512 bytes at most, no `git` process). Review of #330, MED 1: one joined
+  line let a folder or a HEAD named `x · Jarvis · main · ~/projects/Jarvis`
+  read as another place, and a cut tail hid a `..`. Now each part is
+  `clean_line`d with every separator lookalike replaced by "?", the folder
+  is `normpath`ed and elided in its middle (head and tail kept, 120 chars),
+  and a branch that is not `chat_git.valid_branch`-shaped shows as "(not a
+  plain branch name)". Every surface draws the three as labelled boxes.
   Display only; in the card the QH record keeps, not in the digest.
 - **The phone.** `remote_answer.phone_card` judges `withheld` without the
   summary (it arrives later; a model's words never change what the owner may
@@ -2278,16 +2292,23 @@ Plan and decisions AS-1 to AS-17: `docs/plans/2026-10-28-approval-summaries.md`.
   cyan (never amber or red); then WHY ASKED (`[layer] reason`) and WHERE;
   then the tool and the command block, collapsed to its first line with a
   "show full command · N lines · M chars" control while a summary is pending
-  or there, expanded otherwise (failed, off, none). The control is out of the
+  or there, expanded otherwise (failed, off, none, or a summary still
+  pending 10 s after the ask: a missed event never leaves a command
+  collapsed; the HUD also re-reads the cards on every SSE reconnect and
+  merges them, review of #330 LOW 3). The control is out of the
   Tab order and never takes focus (DENY stays the only Tab stop); the owner's
   own toggle wins. AUTHORIZE and ALWAYS are disabled for 600 ms after the
-  card appears and after its summary changes (the handler checks too); the
+  card appears and after its summary changes (the handler checks too;
+  `lib/armed.ts` derives it in render, so no frame under new content is
+  armed, review of #330 LOW 2); the inbox's Approve and retry arms the same
+  way (NIT 9); the
   veil anchors the card at the top. A Browser (HUD-only) card has no summary;
   its buttons moved first and arm the same way. The inbox's approval rows
   show the summary and code lines (never the command); deferred rows and the
   morning review's items put their controls first and collapse the command
   only when the record has a summary; the review's confirmation lists each
-  summary, and Approve selected still posts exactly ids and tags.
+  summary, frozen when it opens (LOW 4), and Approve selected still posts
+  exactly ids and tags.
 - **Discord is unchanged** (AS-16): its post carries the whole command.
 
 Tests: `tests/v2/approval_summary_check.py`, `hud/src/lib/approvalSummary.test.ts`,
