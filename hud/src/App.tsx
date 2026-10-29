@@ -4195,6 +4195,7 @@ export default function App() {
             onMarkCheck={(id, step, body) => api.markCheck(id, step, body)}
             onMark={(id, body) => api.markInbox(id, body)}
             onImportChecks={(body) => api.importChecks(body)}
+            onPr={(route, body) => api.prAction(route, body)}
             onReread={() => inbox.refresh()}
           />
         );

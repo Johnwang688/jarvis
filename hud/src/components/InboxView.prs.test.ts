@@ -1,7 +1,8 @@
 // The inbox's PR rows (inbox B3, IN-4): rank 5, "Waiting on you", the PR's
 // title as text, a link only to the PR's own validated GitHub URL, nothing
-// posted by any click; "PR list unavailable" says which and why, and the
-// inbox never reads "Nothing waiting" while it shows.
+// posted by any click on the row; "PR list unavailable" says which and why,
+// and the inbox never reads "Nothing waiting" while it shows. PM-F's actions
+// are in InboxPrRow.test.ts.
 
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -110,7 +111,7 @@ describe("the view", () => {
   it("shows the PR's title as text and links only to its PR; a click posts nothing", () => {
     const props = draw([prRow()]);
     const r = rowOf(`pr:${REPO}#7`);
-    expect(r.querySelector('[data-testid="inbox-pr-title"]')!.textContent).toBe('Add multiply <img src=x onerror="window.__pwned=1">evil');
+    expect(r.querySelector('[data-testid="inbox-pr-title"] bdi')!.textContent).toBe('Add multiply <img src=x onerror="window.__pwned=1">evil');
     expect(r.querySelector("img")).toBeNull();
     const link = r.querySelector('[data-testid="inbox-pr-link"]') as HTMLAnchorElement;
     expect(link.getAttribute("href")).toBe(`https://github.com/${REPO}/pull/7`);
@@ -122,8 +123,10 @@ describe("the view", () => {
     expect(props.onDecide).not.toHaveBeenCalled();
     expect(props.onOpenThread).not.toHaveBeenCalled();
     expect(props.onOpenTask).not.toHaveBeenCalled();
-    // No answer box, button or chat link on a PR row.
-    expect(r.querySelectorAll("input, button").length).toBe(0);
+    // No answer box or chat link on a PR row; a row from before PM-C (no card) offers no action,
+    // only the desk's own "Hold…" (PM-F), which posts nothing by itself.
+    expect(Array.from(r.querySelectorAll("input, button")).map((b) => b.getAttribute("data-testid")))
+      .toEqual(["inbox-pr-hold-open"]);
   });
 
   it("does not link a URL for another repository", () => {

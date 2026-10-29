@@ -2346,6 +2346,46 @@ button.tree-row.ownerinbox.aurora.sel:focus-visible { box-shadow: inset 2px 0 va
 .inbox-import .ir-drafts { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 2px; }
 .inbox-import .ir-draft { overflow-wrap: anywhere; overflow: hidden; }
 .inbox-import .ir-draft button { margin-left: 6px; }
+/* PM-F: a PR row. Title, then the buttons (AS-12), the hold and the fix, the
+   row's one notice (its line held), code's facts and amber flags, then the AI
+   summary (its two lines held, AS-14) and the GitHub link, small. Names are
+   boxed <bdi>s apart from code's words; the model's words only in .as-ai. */
+.inbox-row .ir-pr { gap: 6px; }
+.inbox-row .ir-pr-title { overflow-wrap: anywhere; color: var(--text); }
+.inbox-row .ir-pr .k { font: 10px var(--mono); color: var(--text-muted); letter-spacing: 0.06em; text-transform: uppercase; }
+.inbox-row .ir-pr-acts { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; min-height: 26px; }
+.inbox-row .ir-pr-acts button[data-action] { font-family: var(--mono); letter-spacing: 0.04em; padding: 3px 12px; }
+.inbox-row .ir-pr-acts button.ir-pr-merge { border-color: var(--accent-line); color: var(--accent); }
+.inbox-row .ir-pr-acts button.ir-pr-merge:hover:not(:disabled) { background: var(--accent-soft); }
+.inbox-row .ir-pr-spacer { flex: 1 1 auto; }
+.inbox-row .ir-pr-acts button.quiet { font-size: 11px; color: var(--text-2); }
+.inbox-row .ir-pr-why { font-size: 12px; color: var(--text-2); overflow-wrap: anywhere; min-width: 0; }
+.inbox-row .ir-pr-method { font: 11px var(--mono); color: var(--text); overflow-wrap: anywhere; }
+.inbox-row .ir-pr-hold { font-size: 12px; color: var(--amber); overflow-wrap: anywhere; display: flex; align-items: baseline;
+  gap: 6px; flex-wrap: wrap; }
+.inbox-row .ir-pr-hold .k { color: var(--amber); }
+.inbox-row .ir-pr-hold button.quiet { font-size: 11px; color: var(--text-2); padding: 0 4px; }
+.inbox-row .ir-pr-fix { display: flex; flex-direction: column; gap: 4px; padding: 4px 8px; border: 1px solid var(--border-strong);
+  border-radius: var(--radius-btn); min-width: 0; }
+.inbox-row .ir-pr-fix[data-tone="amber"] { border-color: var(--amber-line); color: var(--amber); }
+.inbox-row .ir-pr-fixline { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; font: 12px var(--mono); }
+.inbox-row .ir-pr-fixline button { font-size: 11px; }
+.inbox-row .ir-pr-fix .ir-pr-summary { margin: 0; }
+.inbox-row .ir-pr-notice { font-size: 12px; min-height: 16px; color: var(--text-2); overflow-wrap: anywhere; }
+.inbox-row .ir-pr-notice[data-tone="amber"] { color: var(--amber); }
+.inbox-row .ir-pr-facts, .inbox-row .ir-pr-flags { font: 11px/16px var(--mono); color: var(--text-2); overflow-wrap: anywhere; }
+.inbox-row .ir-pr-name bdi { border: 1px solid var(--border-strong); border-radius: 3px; padding: 0 4px; color: var(--text); }
+.inbox-row .ir-pr-tag { color: var(--amber); }
+.inbox-row .ir-pr-flags, .inbox-row .ir-pr-amber { color: var(--amber); font: 11px/16px var(--mono); overflow-wrap: anywhere; }
+.inbox-row .ir-pr-flags .ir-pr-name bdi { border-color: var(--amber-line); color: var(--amber); }
+.inbox-row .ir-pr-summary { margin: 0; }
+.inbox-row .ir-pr-summary .as-text { display: block; }
+.inbox-row .ir-pr-summary .as-tag + .as-text, .inbox-row .ir-pr-summary .ir-pr-label + .as-text { display: inline; }
+.inbox-row .ir-pr-label { color: var(--text-muted); }
+.inbox-row .ir-pr-note { font: 11px var(--mono); color: var(--text-2); overflow-wrap: anywhere; }
+.inbox-row .ir-pr-link a { font-size: 11px; color: var(--text-2); }
+.inbox-row .ir-pr-link a:hover { color: var(--accent); }
+.inbox-row .ir-pr a:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
 
 /* ---- the morning review (MR-10, components/ReviewView.tsx) ----
    Graphite, the inbox's rows: amber only for what is pending (ranks 1 and
