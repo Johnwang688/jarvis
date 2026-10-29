@@ -57,7 +57,7 @@ import {
   parseDiff, parseEvent, parseLog, parseProjects, parseTask, parseTasks, parseThreads,
   type ChatThread, type DiffView, type LogRow, type Project, type StreamEvent, type TaskView,
 } from "./model";
-import { chatsView, el, inboxView, logRow, taskView, tasksView, transcriptView, tap, type InboxAnswers } from "./views";
+import { chatsView, el, inboxView, logRow, ownerChat, taskView, tasksView, transcriptView, tap, type InboxAnswers } from "./views";
 import { browserEnv, browserSend, Notifications, type PushEnv, type Send } from "./notify";
 import {
   chatSheetView, clientIdFor, composerView, MAYBE_DONE, MAYBE_SENT, MESSAGE_CHARS, parseModels, refusal, sentNote,
@@ -1095,7 +1095,7 @@ export class PhoneApp {
     open.rows.push(...rows);
     if (this.tab !== "chats" || !open.list) return;
     open.list.querySelector('[data-testid="m-empty"]')?.remove();
-    for (const row of rows) open.list.append(logRow(row));
+    for (const row of rows) open.list.append(logRow(row, ownerChat(open.meta)));
     if (atEnd) this.scrollToEnd();
   }
 

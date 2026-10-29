@@ -3,9 +3,9 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { PhoneApp, STREAM_URL, type StreamLike } from "./app";
 import type { Got } from "./net";
-import { deskNote, lineKind, orderTasks, parseEvent, parseLog, parseTask, type TaskView } from "./model";
+import { deskNote, lineKind, orderTasks, parseEvent, parseLog, parseTask, type ChatThread, type TaskView } from "./model";
 import { phoneMarkdown } from "./markdown";
-import { chatsView, inboxView, logRow, roleParts, rowStyle, taskView, tasksView, transcriptView, diffView } from "./views";
+import { chatsView, inboxView, logRow, ownerChat, roleParts, rowStyle, taskView, tasksView, transcriptView, diffView } from "./views";
 import { parseInbox, type InboxRow } from "../lib/inbox";
 
 // Hostile strings, as a model could write them: each must arrive as text.
@@ -237,6 +237,30 @@ describe("the phone's views: untrusted text stays text (P-3)", () => {
     const css = readFileSync(join(__dirname, "mobile.css"), "utf8");
     expect(/\.msg-head \{[^}]*font-size: (\d+)px/.exec(css)![1]).toBe("12");
     expect(css).toContain(".mark-warn { color: var(--amber); }");
+  });
+
+  it("draws code's words delivered as the owner's flat, and every owner row outside an owner's chat (delta review of #331)", () => {
+    // quiet_defer's "The owner approved … retry it now", via the phone: chat_reads marks it written by Jarvis.
+    const news = { seq: 1, role: "owner", text: "The owner approved the " + H + " call that was deferred overnight.",
+      at: null, marks: ["written by Jarvis (a deferred approval), not typed"], cut: false };
+    expect(rowStyle(news.role, news.marks)).toBe("flat");
+    const item = logRow(news);
+    noMarkup(item);
+    expect([item.className, item.querySelector(".msg-bubble")]).toEqual(["msg msg-flat", null]);
+    expect(item.querySelector('[data-testid="m-msg-marks"]')!.textContent).toContain("written by Jarvis");
+    // A task's thread: the runner's prompts are "owner" rows with no mark; never a bubble there.
+    const prompt = { seq: 2, role: "owner", text: "Implement step 2", at: null, marks: [], cut: false };
+    const meta = (over: Record<string, unknown>) => ({ id: "aaaaaaaa", project_id: "cccccccc", task_id: null, title: "t",
+      provider: "claude", updated: "", running: false, ...over }) as unknown as ChatThread;
+    expect([ownerChat(meta({ role: "chat" })), ownerChat(meta({ role: "orchestrator", task_id: "bbbbbbbb" })),
+      ownerChat(meta({ role: "chat", task_id: "bbbbbbbb" })), ownerChat(meta({})), ownerChat(null)])
+      .toEqual([true, false, false, false, false]);
+    expect(logRow(prompt, false).className).toBe("msg msg-flat");
+    expect(logRow(prompt, true).className).toBe("msg msg-owner");
+    const task = transcriptView(meta({ role: "orchestrator", task_id: "bbbbbbbb" }), [prompt], false, () => {});
+    expect(task.list.querySelectorAll(".msg-bubble").length).toBe(0);
+    const chat = transcriptView(meta({ role: "chat" }), [prompt], false, () => {});
+    expect(chat.list.querySelectorAll(".msg-bubble").length).toBe(1);
   });
 
   it("keeps a step's whole role readable: its middle is cut, never its end (review of #331, MED 2)", () => {

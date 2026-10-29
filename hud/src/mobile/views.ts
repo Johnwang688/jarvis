@@ -367,8 +367,8 @@ const WARN_MARKS: ReadonlySet<string> = new Set(["not sent"]);
  * reply as plain full-width Markdown; anything else (the daemon's own lines,
  * another chat's relay) as one muted line that a tap opens to the whole text.
  * A peer or a relay is never a bubble: it is not the owner's words. */
-export function rowStyle(role: string, marks: readonly string[] = []): "owner" | "flat" | "reply" | "step" {
-  if (role === "owner") return marks.every((m) => TYPED_HERE_MARKS.has(m)) ? "owner" : "flat";
+export function rowStyle(role: string, marks: readonly string[] = [], ownerChat = true): "owner" | "flat" | "reply" | "step" {
+  if (role === "owner") return ownerChat && marks.every((m) => TYPED_HERE_MARKS.has(m)) ? "owner" : "flat";
   return ASSISTANT_ROLES.has(role) ? "reply" : "step";
 }
 
@@ -382,8 +382,15 @@ export function roleParts(role: string): [string, string] {
   return [role, ""];
 }
 
-export function logRow(row: LogRow): HTMLElement {
-  const style = rowStyle(row.role, row.marks);
+/** An owner's own chat, known to be one: only there is an unmarked owner row the owner's typing. A
+ * task's threads take the runner's prompts as "owner" rows (review of #331), and an unknown thread
+ * is not assumed to be a chat. */
+export function ownerChat(meta: ChatThread | null | undefined): boolean {
+  return !!meta && meta.role === "chat" && !meta.task_id;
+}
+
+export function logRow(row: LogRow, inOwnerChat = true): HTMLElement {
+  const style = rowStyle(row.role, row.marks, inOwnerChat);
   const item = testid(el("article", "msg msg-" + style), "m-msg");
   item.dataset.role = row.role;
   item.dataset.seq = String(row.seq);
@@ -443,7 +450,7 @@ export function transcriptView(thread: ChatThread | null, rows: LogRow[], older:
   view.append(bar);
   if (older) view.append(el("p", "muted small center", "Older messages are at the desk."));
   const list = testid(el("div", "transcript"), "m-transcript");
-  for (const row of rows) list.append(logRow(row));
+  for (const row of rows) list.append(logRow(row, ownerChat(thread)));
   if (!rows.length) list.append(empty("No messages yet."));
   view.append(list);
   // P-5: the message box (./write.ts) for an owner's chat, or the app's
