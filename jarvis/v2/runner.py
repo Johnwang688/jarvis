@@ -302,6 +302,10 @@ class TaskRunner(TaskControl):
         hit = self.ledger.ceiling_hit(task)
         if hit:
             raise ControlError(f"Task {task_id} is still over its ceiling ({hit}); raise it before resuming.")
+        if provider is not None and task.pr_scope is not None and ProviderName(provider) != ProviderName.CLAUDE:
+            # PM-17: a PR fix pushes with the owner's login, which only
+            # Claude Code holds (Codex holds none, CG-0).
+            raise ControlError(f"Task {task_id} fixes a pull request and runs on Claude Code only.")
         run = self._run(task_id)
         run.cancel.clear()
         run.ceiling = None
@@ -640,6 +644,13 @@ class TaskRunner(TaskControl):
             self._save(task)
             self._journal(run.task_id, "routing_forced", role=role.value, provider=provider.value)
         task = self._require(run.task_id)
+        if task.pr_scope is not None and provider != ProviderName.CLAUDE:
+            # PM-17: whatever the routing chose (an override, a fallback, a
+            # forced restart), a PR fix opens no thread on another provider.
+            self._journal(run.task_id, "routing_refused", role=role.value, provider=provider.value,
+                          reason="a PR fix runs on Claude Code only")
+            raise _Blocked(f"a PR fix runs on Claude Code only, and the {role.value} was routed to "
+                           f"{provider.value}; resume it when Claude Code is available")
         model, effort = model_settings(role.value, provider.value, project)
         role_brief = roles.brief_for(role)
         brief = Brief(role=role, cwd=task.worktree or worktrees.task_root(task, project),

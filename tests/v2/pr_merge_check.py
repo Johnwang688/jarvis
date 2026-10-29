@@ -15,7 +15,7 @@ routes on the HUD and the phone).
 * `RealGh`: the real `run_bounded` and a fake gh program that logs its argv
   and writes a token to stderr and stdout: the token is never read.
 * `Routes`: a real daemon; owner_only on the HUD listener (the API listener
-  and an Origin-less script refused), 501 for Fix, no phone hold route.
+  and an Origin-less script refused), Fix is PM-E's (503 here: not attached), no phone hold route.
 * `Phone`: a real daemon, a paired software passkey, §4.1 on a fake system:
   the subject binding, cross-family assertions refused both ways, limited
   plus flagged refused, limited plus unflagged allowed, a reused assertion,
@@ -865,9 +865,12 @@ class Routes(rac.Remote):
                     self.assertEqual((status, out["result"]), (200, "merged"))
         print("ok  the route's own Host check: 127.0.0.2 or a LAN name on the HUD port with its Origin is 403")
 
-    def test_fix_is_501_and_shapes(self):
+    def test_fix_is_pm_es_and_shapes(self):
         d = self.prs.poll()
-        self.assertEqual(self.owner("/inbox/pr/fix", {"id": ROW})[0], 501)
+        # PM-E's route, behind the same tests: no PrFixes attached here.
+        self.assertEqual(self.owner("/inbox/pr/fix", {"id": ROW, "head": d["head"], "card": d["card"]})[0], 503)
+        self.assertEqual(self.owner("/inbox/pr/fix/cancel", {"id": ROW})[0], 503)
+        self.assertEqual(self.owner("/inbox/pr/fix/other", {"id": ROW})[0], 404)
         self.assertEqual(self.hud("GET", "/inbox/pr/merge")[0], 405)
         self.assertEqual(self.owner("/inbox/pr/rebase", {"id": ROW})[0], 404)
         self.assertEqual(self.owner("/inbox/pr/merge", {"id": ROW, "head": d["head"]})[0], 400)
@@ -879,7 +882,7 @@ class Routes(rac.Remote):
         self.assertEqual(status, 409, body)
         self.assertTrue(body["error"].startswith(pr_merge.CHANGED), body)
         self.assertEqual(self.prs.run.acts(), [])
-        print("ok  Fix 501 (PM-E's seam), 405, 404, 400 for shapes, 409 for an action not offered")
+        print("ok  Fix is PM-E's (503 unattached), 405, 404, 400 for shapes, 409 for an action not offered")
 
     def test_hold_at_the_desk_only(self):
         self.prs.poll()
@@ -1116,7 +1119,7 @@ class PhoneActs(Phone):
         self.wire()
         self.assertEqual(self.phone("POST", "/m/api/inbox/pr/hold", {"id": ROW, "note": "x"},
                                     cookie=self.cookie)[0], 404)
-        self.assertEqual(self.options("fix")[0], 501)
+        self.assertEqual(self.options("fix")[0], 409)       # Fix is not offered on this row
         self.assertEqual(self.options("hold")[0], 400)
         self.assertEqual(self.phone("POST", pr_merge.PHONE_OPTIONS, {"id": ROW, "action": "merge", "note": "x"},
                                     cookie=self.cookie)[0], 400)
@@ -1126,7 +1129,7 @@ class PhoneActs(Phone):
         status, _, got = self.act({"id": ROW, "action": "merge", "head": d["head"], "card": d["card"]})
         self.assertEqual(status, 401, got)
         self.assertIsNone(pr_merge.holds_at(Path(self.d.stores.root) / "inbox").get(REPO, N))
-        print("ok  phone: no hold route, Fix 501, no session 401, no assertion 401")
+        print("ok  phone: no hold route, Fix only where offered, no session 401, no assertion 401")
 
     def test_a_held_pr_offers_nothing_on_the_phone(self):
         self.wire()

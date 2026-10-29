@@ -348,6 +348,10 @@ def _git_dirs(start: Path):
                 if not match:
                     return UNKNOWN
                 gitdir = (folder / match.group(1)).resolve()
+            elif _is_git_dir(folder):
+                # git's own order at each level: a `.git` first, then the
+                # folder itself as a (bare) repository (PM-E review, M-1).
+                gitdir = folder.resolve()
             else:
                 if folder.parent == folder:
                     return None
@@ -722,6 +726,8 @@ def _git(line: _Line, args: list, prog, depth: int = 0, *, sure: bool = True) ->
                 line.executor = line.runs_text = True
             i += 1
             continue
+        if text == "--bare":
+            dirs = UNKNOWN                  # the folder git runs in is its git dir (M-1)
         if text.startswith("-"):
             i += 1
             continue

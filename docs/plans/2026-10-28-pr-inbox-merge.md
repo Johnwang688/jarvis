@@ -378,7 +378,7 @@ real daemons on ephemeral ports for the routes and the phone) and `tests/v2/pr_m
 - **Routes.** HUD, behind `inbox.route`'s `owner_only` plus the HUD listener's own Host:
   `POST /inbox/pr/merge {id, head, card, action?}` (`merge` or `merge_as_is`),
   `/inbox/pr/update {id, head, card}`, `/inbox/pr/hold {id, note}` or `{id, clear: true}`,
-  `/inbox/pr/fix` 501. Phone, mounted in `remote_auth.api_route`:
+  `/inbox/pr/fix` (501 until PM-E; now PM-E's Fix). Phone, mounted in `remote_auth.api_route`:
   `POST /m/api/inbox/pr/options {id, action, head, card}` (the head and card the phone
   showed; 409 when the row has moved since; nothing echoed back) and `POST /m/api/inbox/pr {id, action, head, card, assertion}`.
 - **The act.** Under a per-PR lock (a second action on the PR while one runs is a 409, never a
@@ -427,3 +427,152 @@ Deviations, each the builder's call:
    only: a queue set only in classic branch protection, if the rules endpoint does not
    list it, is not seen.
 7. A row whose detail fails to build now also drops its actions (it kept them before).
+
+## As built: PM-E (2026-10-29)
+
+`jarvis/v2/pr_fix.py` (SELF_PROTECTED), `worktrees.ensure_pr`, the PR scope in
+`permissions.build_permit`, attached by daemon2's `main()` only (`Daemon.attach_pr_fixes`).
+Tests: `tests/v2/pr_fix_check.py` (fakes for gh, the runner and the model; real git on temp
+repositories) and `tests/v2/pr_fix_mutants.py` (a mutant per DENY family and per guard, each
+killed by the test named for it).
+
+- **Start (PM-17).** `PrFixes.start_fix(id, head, card, via, limited=None)`: the row's head and
+  card (PM-D's `pr_summary.card_key`, the row's `card`) must match; the facts held for that
+  head (`PrSummaries.facts_for`) must make `decide(facts, hold, limited)` offer Fix, the hold
+  read from PM-D's `pr-holds.json`; `limited` is True for any `via` but "hud" unless the caller
+  says otherwise. Auto-merge must be off (PM-D's `PrActions.queued`, failing closed): with it
+  on, the fix's push would merge code the owner has not OK'd. Exactly one non-archived project
+  owns the repository, its profile is not strict, Claude Code is in the roster. Routes: PM-D's
+  `pr_merge.hud_route` hands `POST /inbox/pr/fix` and `/inbox/pr/fix/cancel` to
+  `pr_fix.hud_route` after `owner_only` and the HUD listener's own Host; the phone's action
+  `fix` (`pr_merge.phone_options` / `phone_act`, the `pr:` subject) reads the hold and the
+  phone's scrub again and calls `pr_fix.start(..., via="phone", limited=...)`. One call creates
+  the task (`pr_scope`, ceilings $5 and 1 hour, `provider_override`
+  Claude), fills the mirror, runs `ensure_pr` and `TaskControl.start`; a step that fails cancels
+  the task and records "fix could not start" (not counted against the cap).
+- **Claude only.** `Task.pr_scope` is set at create and kept by every save (`TaskStore.save`).
+  The runner refuses to open a fix's thread on another provider (`routing_refused`, BLOCKED) and
+  to resume one there; the gate refuses every call of a Codex session for it.
+- **Worktree (PM-18).** `fill_mirror` (PM-1's credentialed, hardened fetch into the daemon's
+  mirror, held under its lock; the pull ref must be the bound head) then `ensure_pr`: a local
+  fetch with no credential helper, the file transport only, gitops' hardening, onto
+  `jarvis/<task>-pr<N>`; a wrong head deletes the branch and makes nothing; a repository whose
+  own config names a program is refused.
+- **The gate (PM-20).** `pr_fix.judge`, right after layer 1. DENY (layer `pr-scope`, asked of
+  nobody): another destination (branch, tag, any ref), a URL, path or other remote (push URLs read
+  from config: `pushurl` first), `--all/--branches/--mirror/--tags/--follow-tags` and a mirror
+  remote, force (`-f`, `--force*` in git's abbreviations, `+` refspecs), delete (`-d`, `--delete`,
+  `:ref`, `--prune`), `--repo`, `--receive-pack`, `--exec`, `--recurse-submodules`, `send-pack`,
+  `http-push`, `subtree push`; `gh pr merge|close|edit|ready|review`; a non-GET `gh api` (explicit,
+  or implied by fields, `--input`, `graphql`); `gh repo sync`, `gh workflow disable`, `gh
+  secret|variable set|delete`; writes to CI or scanner config (file tools, redirects, writers,
+  `git rm|mv|checkout|restore`); Codex. ASK (always-ask, no Always): no refspec, a bare HEAD,
+  expansions, `-c`/`--git-dir` and kin, a line that changes a remote or config, `include`/`insteadOf`
+  config, an unknown git subcommand or gh command, unreadable text that spells a push or gh, a
+  line too complex to walk. A task whose record cannot be read takes its fix record's scope; a
+  record that cannot be read either refuses every call. v1 has no tasks with a scope, so there
+  is no v1 half.
+- **Tracking (PM-21).** `inbox/pr-fixes.json` (0600 in 0700) per PR: `{task_id, from_head,
+  from_patches, started, state, ended_at, project_id, branch, note, scope}`. A second Fix is a 409
+  naming the task; a blocked task still holds the PR (Cancel it first); at most 3 started.
+- **Ends (PM-22, PM-23).** `detail.fix` = `{state, task_id, from_head, commits, ci_changed, note,
+  summary, summary_state, count, max}`; states starting, running, question, blocked, stopped,
+  checking, rewritten, failing, pushed, ready, start_failed. A running task shows "fix running"
+  even after a push; the card waits for the task's end. Ancestry and "N commits since your Fix"
+  come from one GET compare (`--jq`, first-parent chain from the new head, so a merged base's
+  commits are not counted). The interdiff compares each file's changed lines only (no hunk
+  headers, context or index lines), so a base merge reads as nothing; `ci_changed` is code's
+  (True, False, or None when not every file could be compared). The summary is one `Fixed:` line
+  from a `SummaryEngine` on the PR summaries' day ledger, fenced and scrubbed.
+- **Push (Q2).** An ended fix (not a failed start) puts its row at rank 4 for 24 hours, so the
+  phone's sender pushes `{count, rank}` once, never in quiet hours (the morning push carries it).
+
+Deviations, each the builder's call:
+
+1. **Rank 4 is the push.** `push.py` pushes only for rows new to ranks 1 to 4, so the fix's row
+   rises there for a day after the fix ends (as a deferred approval's does), rather than a second
+   push path.
+2. **The card covers decide's actions.** While a fix runs, Fix is taken out of the row's
+   `actions` after the card is made, so the card (and PM-D's recomputation from a fresh read)
+   still covers the actions `decide` gives; the phone's options refuse Fix because the row
+   no longer offers it.
+3. **A blocked fix holds the PR.** It can be resumed and push again, so Fix again needs it
+   cancelled first.
+4. **The base is fetched by the task** (`git fetch origin <base>`), not seeded from the mirror.
+5. `fix` is in `ENRICH_KEYS` (None when the PR has none) and `DETAIL_FIELDS["pr"]`.
+6. **Not built here (PM-F):** the HUD and phone rendering of `detail.fix`, and Cancel on the phone
+   beyond the existing `task:` route.
+
+**Review of #337 (2026-10-29), fixed on the branch.** The owner's decisions: a fix keeps his
+GitHub access, with added blocks (not the daemon-pushes design), and Fix stays offered on any
+PR. Each item has a test in `pr_fix_check.py` and a mutant in `pr_fix_mutants.py`.
+
+- **H-1, the credential.** In a scoped task: a read tool, file tool or line under any
+  `config.credential_dirs()` folder; `git credential*`, credential settings, `gh auth`; git and
+  gh traces; fetchers or inline code aimed at GitHub's hosts: DENY. Inline source: asked.
+- **M-1, another repository.** `merge_gate._git_dirs` follows git's order (a `.git`, then the
+  folder itself as a bare repository); `--bare` makes merge_gate's folder unknown. A fix
+  pushes only from its own worktree's git dir; `--bare`, `--git-dir`, `--work-tree`,
+  `--namespace`, `GIT_DIR` and kin: DENY.
+- **M-2, CI.** `.github` itself and anything under it counts; removals, moves and restores
+  (`rm`, `mv`, `git rm|mv|clean`, `git checkout -- <path>`, `git restore`) are read against
+  the line's folders, the worktree itself counting; pathspec magic and unplaceable writes ask;
+  `ci_changed` reads old names (`Patch.flags`).
+- **M-3.** Only `<ref>:refs/heads/<branch>`, written in full.
+- **M-4.** gh is an allowlist of reads; `gh api` abbreviations and method-override headers
+  are read.
+- **M-5.** `git config`/`git remote` writes ask; a push under `core.hooksPath`,
+  `core.sshCommand`, `core.gitProxy`, `remote.*.receivepack|uploadpack` or `url.*`, or under
+  credential helpers other than at the Fix (`Task.pr_scope["helpers"]`, a digest), is DENY;
+  so are writes to `.git/config`, `.git/hooks`, `.git/info`, the gitfile and `.gitmodules`.
+  (The owner's own config sets `credential.helper`, so a helper's presence cannot be the test;
+  a change since the Fix is.)
+- **L-1** a head branch that is `main`, `master`, `release*` or the remote's default gets no
+  Fix; **L-2** the task id is in the record before the worktree and the start, and a record
+  that cannot take it is a failed start; **L-3** any failed start cancels the task and removes
+  its worktree and branch; **L-4** programs that run a line or outlive the call, and pager or
+  editor overrides, ask; **NIT** the permit's fallback reads the fixes root `PrFixes` writes.
+
+**Residual, accepted by the owner.** The task runs the PR's own code (tests, scripts, the
+build) as the owner's OS user; that code can read the owner's GitHub token from disk and use
+it however it likes, and the gate reads no script file. Fix on a PR whose code the owner does
+not trust can act with his GitHub access. The fix card's ancestry check and its CI amber
+check what reaches the branch, not what such code does elsewhere.
+
+**Delta review of #337 (2026-10-29), fixed.** H-1 reached the token by spellings the first
+fix did not place; now, in a scoped task, every argument is placed (home and `$HOME`
+expanded, braces expanded, globs matched component by component against each credential
+folder, relative paths against the line's folders after `cd`, same-line `NAME=value`
+variables put in): inside a credential folder is DENY, an ancestor of one under a program that
+reads, copies, archives or searches a tree (or the Grep and Glob tools) is DENY, a path built
+by a command substitution is asked. A file copied elsewhere is not traced back; the copy is
+what is refused. Fetchers aimed at GitHub by any spelling, or forcing an address or a Host
+header, are DENY; to an address literal or an expansion, asked. Inline code is read by a token
+parser per interpreter (clustered flags, `--eval`, `-Command`, awk programs, stdin), and a
+shell fed a program on stdin or from a file (`sh < x`, `| bash`, `bash x.sh`, `source x`) is
+asked. The credential helper's program is pinned at the Fix by real path and content hash
+(`Task.pr_scope["helpers"]`, `["helper_paths"]`); a push after either changed is DENY, as is a
+write to that program, to a file of its name in a PATH folder ahead of it, to `~/.local/bin`
+or `~/bin`, or to the owner's global git config. `git apply|am|cherry-pick|reset
+--hard|stash pop|apply`, `patch`, `tar -x`, `unzip`, `7z x` and `cpio -i` are asked (the tree
+always holds `.github`); the card's CI amber stays the backstop. `gh … --web` is DENY; L-1
+adds `prod*` and `production*`.
+
+**Last item (2026-10-29).** `Task.pr_scope["base"]`: a fix merges in only `origin/<base>` (or
+`FETCH_HEAD` after `git fetch origin <base>` on the same line) and pulls only `origin <base>`
+without rebasing; any other source, or none, asks. `git read-tree -u|--reset` and `git
+checkout-index -a|-f` ask.
+
+**Final delta review of #337 (2026-10-29), patched; shipped as an accident guard, not a wall.**
+The owner's decision: the PR scope refuses what an agent fixing a PR might do by mistake or on a
+hint, by every spelling the reviews found, and asks where it cannot read the line; a
+deliberately hostile agent could still find a way past it, as with the PR's own scripts. The
+last patches: xargs' replace string is read as a wildcard and every xargs is asked; a
+reader's path from a command substitution or a variable (`read`, `mapfile`, IFS tricks) is
+asked, and paths are resolved through symlinks, `/proc/self/cwd/..` and `~user`; writes to
+`~/.curlrc`, `~/.netrc`, `~/.wgetrc`, `~/.config/curlrc` and anything under `CURL_HOME` are
+DENY, and `curl -K|-n|--netrc*`, `wget -i|-e`, `aria2c -i` and a `CURL_HOME`/`NETRC`/`WGETRC`
+setting are asked; `sed` with `e`, `s///e` or `-f`, and any awk program (inline or `-f`), are
+asked; `git update-ref`, a tag or branch named `origin/…`, a fetch from a local path or URL or
+into a remote-tracking ref or tag from anything but `origin` + the base or the PR's branch,
+`git rebase`, and `-c pull.*|rebase.*|branch.*` are asked.

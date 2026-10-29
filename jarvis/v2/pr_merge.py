@@ -15,11 +15,14 @@ code's actions; this module is what the owner's OK does.
       POST /inbox/pr/merge   {id, head, card, action?}   action "merge" or "merge_as_is"
       POST /inbox/pr/update  {id, head, card}
       POST /inbox/pr/hold    {id, note} sets; {id, clear: true} clears
-      POST /inbox/pr/fix     501 (PM-E)
+      POST /inbox/pr/fix         {id, head, card}  a Fix (PM-E, `pr_fix.PrFixes.start_fix`)
+      POST /inbox/pr/fix/cancel  {id}              its Cancel (`TaskControl.cancel`)
     Phone (the remote listener, past `remote_auth.owner_status`):
       POST /m/api/inbox/pr/options  {id, action, head, card}  a challenge bound to `subject(...)`
                                     of what the phone showed (409 when the row moved since)
       POST /m/api/inbox/pr          {id, action, head, card, assertion}
+    `action` "fix" (PM-E) takes the same assertion and checks, then
+    `pr_fix.start(..., via="phone", limited=...)` instead of gh.
 
 They never touch `PendingApprovals`, `merge_gate` or `remote_answer`'s
 approval paths. No tool, MCP entry or API-listener route reaches them: the
@@ -115,7 +118,6 @@ AT_DESK = "answer it at the desk"
 BUSY = "another action on this pull request is running"
 GONE = "this pull request is no longer in the inbox"
 NO_GH = "pull request actions need the owner's gh, which this daemon has not attached"
-NO_FIX = "Fix is not available yet"
 
 HOLDS_FILE = "pr-holds.json"
 RECEIPTS_FILE = "pr-actions.jsonl"
@@ -752,16 +754,19 @@ def hud_route(handler, daemon, parts, query):
     from .daemon import APIError, _object
     from .projects import owner_only
     owner_only(handler, daemon)
-    if len(parts) != 3 or parts[2] not in ("merge", "update", "hold", "fix"):
+    if not (len(parts) == 3 and parts[2] in ("merge", "update", "hold", "fix")
+            or parts == ["inbox", "pr", "fix", "cancel"]):
         raise APIError(404, "route not found")
     if handler.command != "POST":
         raise APIError(405, "method not allowed")
     _object(query, ())
-    if parts[2] == "fix":
-        raise APIError(501, NO_FIX)
     # The strength of `POST /approvals`: the HUD listener's own Host too.
     if not config.own_host_header(handler.headers.get("Host", ""), daemon.face_port):
         raise APIError(403, "only the owner can do this, from the HUD")
+    if parts[2] == "fix":
+        # PM-E: a Fix and its Cancel (`pr_fix.hud_route`), behind the same tests.
+        from . import pr_fix
+        return pr_fix.hud_route(handler, daemon, parts, query)
     try:
         if parts[2] == "hold":
             body = _object(handler._body(), ("id", "note", "clear"), ("id",))
@@ -789,10 +794,8 @@ PHONE_ACT = "/m/api/inbox/pr"
 
 
 def _phone_action(value) -> str:
-    if value == FIX:
-        raise Refused(501, NO_FIX)
-    if value not in ACTIONS:
-        raise Refused(400, "action must be merge, merge_as_is or update")
+    if value not in ACTIONS and value != FIX:
+        raise Refused(400, "action must be merge, merge_as_is, update or fix")
     return value
 
 
@@ -852,8 +855,27 @@ def phone_act(handler, daemon, session, body: dict) -> dict:
         seen()                          # QH-3: a verified phone answer is presence
     secure = _secure(daemon, handler, session)
     limited = not secure.get("ok")
-    out = actions_for(daemon).act(action, row_id, head, card, via="phone", limited=limited)
+    if action == FIX:
+        out = _phone_fix(daemon, row_id, repo, number, head, card, limited=limited)
+    else:
+        out = actions_for(daemon).act(action, row_id, head, card, via="phone", limited=limited)
     return {**out, "authority": "limited" if limited else "hud"}
+
+
+def _phone_fix(daemon, row_id, repo, number, head, card, *, limited: bool) -> dict:
+    """PM-E: the phone's Fix, after its assertion: the hold and the phone's
+    scrub checked again here, then `pr_fix.start` (Q1: a limited phone is
+    refused a flagged PR there, through `pr_facts.decide`)."""
+    from . import pr_fix
+    if holds_at(inbox_dir(daemon)).get(repo, number) is not None:
+        raise _changed("it is on hold")
+    detail = actions_for(daemon).row(row_id).get("detail") or {}
+    if phone_withheld(detail.get("facts"), detail.get("files")):
+        raise Refused(409, "this pull request has withheld text: " + AT_DESK)
+    try:
+        return pr_fix.start(daemon, row_id, head, card, "phone", limited=limited)
+    except pr_fix.FixRefused as exc:
+        raise Refused(exc.status, exc.message) from None
 
 
 def phone_route(handler, path: str, session: dict, body: bytes):

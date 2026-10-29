@@ -195,11 +195,11 @@ DETAIL_FIELDS = {
     # OK binds; the whole detail through `scrub_structure`. `why`,
     # `summary_note` and `summary_reason` are code's words for the row (no
     # action, the summary's state), kept so the phone can say why. PM-E's
-    # `fix` joins it later.
+    # `fix` (`pr_fix`: the fix's state, task and note) is there too.
     "pr": ("repo", "number", "title", "branch", "base", "author", "fork", "head", "checks",
            "merge_state", "facts", "flags", "failing", "conflicts", "files", "summary",
            "summary_state", "summary_note", "summary_reason", "why", "method", "actions", "card",
-           "hold"),
+           "hold", "fix"),
 }
 # A kind P-3 does not know (A3's `missed` rows, anything later): only these
 # keys, only scalar values, every string scrubbed.
@@ -236,6 +236,7 @@ DROPPED = {
         "discord_thread_id": "another surface's addressing",
         "profile": "permission configuration stays at the desk (design §5)",
         "migrated_from": "a v1 goal id, internal",
+        "pr_scope": "a PR fix's gate scope, read by the gate; the PR row shows the fix",
     },
     "task_status": {
         "last_file": "an absolute path into the task's worktree",

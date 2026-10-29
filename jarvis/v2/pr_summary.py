@@ -861,7 +861,10 @@ ENRICH_KEYS = ("facts", "flags", "summary", "summary_state", "summary_note", "su
                "actions", "why", "method",
                # PM-D: PM-26's facts as fields (the phone draws them), the
                # owner's hold (Q3) and the card an OK binds (PM-13).
-               "base", "failing", "conflicts", "files", "hold", "card")
+               "base", "failing", "conflicts", "files", "hold", "card",
+               # PM-E: the PR's fix (`pr_fix.PrFixes.enrich` sets it; absent
+               # when the PR has none).
+               "fix")
 FILES_SHOWN = 100
 CARD_VERSION = 1
 
@@ -937,6 +940,9 @@ class PrSummaries:
         engine.on_late = self._late
         self._lock = threading.Lock()
         self._prs: dict[str, _Pr] = {}
+        # PM-E (`pr_fix.PrFixes.on_facts`): told of each read that lands,
+        # after the row is refreshed, on the worker's thread, no lock held.
+        self.listeners: list[Callable[[Any], None]] = []
 
     # -- the life ------------------------------------------------------------------
 
@@ -1076,6 +1082,17 @@ class PrSummaries:
                 reason = self.engine.off_reason(facts) if state == OFF else ""
                 self._settle(rec, token, facts, state, value, reason)
         self._refresh(rec.row_id)
+        for listener in list(self.listeners):
+            try:
+                listener(facts)
+            except Exception as exc:  # noqa: BLE001 — a listener never breaks a read
+                LOG.warning("PR summaries: a listener broke (%s)", type(exc).__name__)
+
+    def facts_for(self, repo: str, number: int):
+        """The facts last read for this PR, or None (PM-E's Fix reads them)."""
+        with self._lock:
+            rec = self._prs.get(pr_key(repo, number))
+            return rec.facts if rec is not None else None
 
     @staticmethod
     def _waited_out(rec: _Pr, facts, missing, now) -> bool:
@@ -1171,7 +1188,8 @@ class PrSummaries:
         repo, number = d.get("repo"), d.get("number")
         out = {"facts": None, "flags": None, "summary": None, "summary_state": PENDING,
                "summary_note": "", "summary_reason": "", "actions": [], "why": "", "method": None,
-               "base": None, "failing": None, "conflicts": None, "files": None, "hold": None}
+               "base": None, "failing": None, "conflicts": None, "files": None, "hold": None,
+               "fix": None}
         if not isinstance(repo, str) or not isinstance(number, int):
             return out
         hold = self._hold(repo, number)

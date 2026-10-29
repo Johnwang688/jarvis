@@ -793,7 +793,12 @@ class OwnerOnly(Base):
                     # is another thing, the merge gate's card).
                     "jarvis.v2.pr_merge", "from .pr_merge", "import pr_merge", "pr_merge import",
                     " pr_merge.", "(pr_merge.", "PrActions", "PrHolds", "pr-holds.json", "pr-actions.jsonl",
-                    "merge_argv", "update_argv", "/inbox/pr")
+                    "merge_argv", "update_argv", "/inbox/pr",
+                    # PM-E: a PR's Fix (a task under the PR scope) and its routes,
+                    # never the file's own path: files.py names it in SELF_PROTECTED.
+                    "jarvis.v2.pr_fix", "from .pr_fix", "import pr_fix", "pr_fix import", "pr_fix.start", "pr_fix.hud_route",
+                    "PrFixes", "attach_pr_fixes", "start_fix", "cancel_fix", "pr_scope")
+
 
     def test_no_tool_reaches_the_inbox(self):
         from jarvis import tools
@@ -1041,7 +1046,11 @@ class OwnerOnly(Base):
                                    ("POST", "/inbox/pr/update", {"id": "pr:o/r#1", "head": "a" * 40, "card": "b" * 64}),
                                    ("POST", "/inbox/pr/hold", {"id": "pr:o/r#1", "note": "x"}),
                                    ("POST", "/inbox/pr/hold", {"id": "pr:o/r#1", "clear": True}),
-                                   ("POST", "/inbox/pr/fix", {"id": "pr:o/r#1"})):
+                                   ("POST", "/inbox/pr/fix", {"id": "pr:o/r#1"}),
+                                   # PM-E: a PR's Fix and its Cancel.
+                                   ("POST", "/inbox/pr/fix", {"id": "pr:o/r#1", "head": "1" * 40, "card": "0" * 64}),
+                                   ("POST", "/inbox/pr/fix/cancel", {"id": "pr:o/r#1"})):
+
             with self.subTest(path=path):
                 self.request(method, path, body, 403)
                 self.request(method, path, body, 403, port=self.daemon.face_port)

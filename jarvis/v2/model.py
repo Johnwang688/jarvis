@@ -218,6 +218,12 @@ class Task:
     # create, status and remove use it, so a root changed mid-task cannot
     # point a running task at a different repository. None: not started yet.
     root: str | None = None
+    # A PR fix's gate scope (PM-20, `pr_fix.py`): {"repo", "number",
+    # "branch"}, set only by `pr_fix` when it creates the task and never
+    # changed after (`TaskStore.save` keeps the stored one). With it, the
+    # task's permit refuses any push but to that branch of that repository,
+    # and the task runs on Claude Code only. None for every other task.
+    pr_scope: dict | None = None
 
 
 # --- serialization ----------------------------------------------------------

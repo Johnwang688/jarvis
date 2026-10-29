@@ -401,6 +401,11 @@ class TaskStore(_Store[model.Task]):
                 # `git worktree add`, any runner save — must not wipe its id,
                 # or the next snapshot makes a second thread for the task.
                 obj.discord_thread_id = previous.discord_thread_id
+            if previous is not None:
+                # A PR fix's gate scope (PM-20) is set once, at create (a
+                # pending task's `get` is its create-time copy): no save adds,
+                # changes or drops it, whatever copy the caller holds.
+                obj.pr_scope = previous.pr_scope
             super().save(obj)
 
     def transition(self, task_id: str, new_state: model.TaskState, *, reason: str = "") -> model.Task:
