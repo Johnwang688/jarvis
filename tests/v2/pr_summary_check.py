@@ -374,7 +374,7 @@ class CardFix(unittest.TestCase):
         for change in (dict(summary="Removes the backup.", summary_state="ready"), dict(summary_state="failed")):
             ready = S.card_key({**self.BASE, "fix": {**self.FIX, **change}})
             self.assertNotEqual(ready, pending, change)
-        self.assertEqual(S.CARD_VERSION, 2)
+        self.assertEqual(S.CARD_VERSION, 3)
 
 
 # -- the disk cache ---------------------------------------------------------------------------

@@ -511,8 +511,14 @@ class PrActions:
             raise _changed("no merge method")
         parts = [p.as_dict() for p in pr_facts.facts_parts(facts)]
         stored = self.row(row_id).get("detail") or {}
+        # A safety flag the fresh read sees but the row did not show is a
+        # change the owner never saw (review of #340 r3).
+        if pr_facts.flagged(facts) and not (stored.get("flags") or {}).get("flagged"):
+            raise _changed("it touches safety files the row did not show")
+        from .pr_summary import _ROW_CARD
         shown = {"facts": parts, "summary": stored.get("summary"), "method": decision.method,
-                 "actions": list(decision.actions), "fix": stored.get("fix")}
+                 "actions": list(decision.actions), "fix": stored.get("fix"),
+                 **{k: stored.get(k) for k in _ROW_CARD}}
         if not hmac.compare_digest(card_key(shown), card):
             raise _changed()
         if via == "phone" and phone_withheld(parts, files_detail(facts)):

@@ -6,9 +6,11 @@ Run with PYTHONPATH=$PWD TMPDIR=/var/tmp and an isolated HOME.
 from __future__ import annotations
 
 import copy
+import json
 from pathlib import Path
 import sys
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -17,6 +19,7 @@ import pr_fix_check as FX
 import pr_merge_check as PM
 from jarvis.v2 import pr_merge
 from jarvis.v2.model import TaskState
+from jarvis.v2.pr_summary import fix_card
 
 
 setUpModule = FX.setUpModule
@@ -29,6 +32,46 @@ class FixCardRecheck(FX.Fixing):
         actor = pr_merge.PrActions(self.daemon, run=run, gh=PM.PF.GH,
                                    read=lambda *a, **kw: facts)
         return actor, run
+
+    def test_unchanged_null_task_and_zero_count_match(self):
+        with patch.object(self.fixes, "_make_task", side_effect=RuntimeError("no task")):
+            self.refused(503, "could not be started")
+        drawn = copy.deepcopy(self.row()["detail"])
+        self.assertEqual(drawn["fix"]["state"], "start_failed")
+        self.assertIsNone(drawn["fix"]["task_id"])
+        self.assertIs(type(drawn["fix"]["count"]), int)
+        self.assertEqual(drawn["fix"]["count"], 0)
+        self.assertIs(type(drawn["fix"]["max"]), int)
+        # fix_card deliberately normalizes absent fields to explicit None.
+        absent = copy.deepcopy(drawn)
+        del absent["fix"]["task_id"]
+        self.assertEqual(fix_card(absent), fix_card(drawn))
+        self.prs.refresh([self.pr_id])
+        for via in ("hud", "phone"):
+            actor, _run = self.actor(FX.F())
+            decision = actor.judge(FX.F(), "merge_as_is", drawn["head"], drawn["card"],
+                                   self.pr_id, via=via, limited=False)
+            self.assertIn("merge_as_is", decision.actions)
+
+    def test_unchanged_live_fields_survive_serialization_and_later_refresh(self):
+        task_id = self.start()["task_id"]
+        drawn = json.loads(json.dumps(self.row()["detail"]))
+        self.assertIs(type(drawn["fix"]["task_id"]), str)
+        self.assertEqual(drawn["fix"]["task_id"], task_id)
+        self.assertIs(type(drawn["fix"]["count"]), int)
+        self.assertIs(type(drawn["fix"]["max"]), int)
+        self.assertEqual((drawn["fix"]["count"], drawn["fix"]["max"]), (1, 3))
+        # Reload the record from disk, refresh at a later clock tick, and
+        # judge the original serialized card. No field changes type or value.
+        self.fixes.store = FX.X.FixStore(self.fixes.store.path)
+        self.clock[0] += 60
+        self.prs.refresh([self.pr_id])
+        self.assertEqual(self.row()["detail"]["fix"], drawn["fix"])
+        for via in ("hud", "phone"):
+            actor, _run = self.actor(FX.F())
+            decision = actor.judge(FX.F(), "merge_as_is", drawn["head"], drawn["card"],
+                                   self.pr_id, via=via, limited=False)
+            self.assertIn("merge_as_is", decision.actions)
 
     def test_old_merge_as_is_cannot_authorize_a_different_fix_attempt(self):
         first = self.start()["task_id"]
