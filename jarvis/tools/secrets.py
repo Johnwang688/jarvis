@@ -32,6 +32,7 @@ env files Jarvis may write (ENV-1, 2026-10-12).
 
 from __future__ import annotations
 
+import contextvars
 import json
 import os
 import re
@@ -1153,6 +1154,15 @@ _URL_IN_TEXT = re.compile(r"(?<![A-Za-z0-9+.-])[A-Za-z][A-Za-z0-9+.-]{0,31}://[^
 # options only (before what they run), sshpass' `-p` and redis-cli's `-a`.
 _SEGMENTS = re.compile(r"\|\||&&|[;|\n]")
 _USERPASS, _COOKIE_DATA = "userpass", "cookie"
+# Review of PR #330, LOW 5 (tighten only): Samba's `-U user%password`,
+# lftp's `-u user,password` (the user stays, as curl's does), htpasswd's
+# batch password (`-b file user password`, `-nb user password`) and
+# OpenSSL's `pass:password` (`env:`/`file:`/`fd:` name a place, and stay).
+_USERPCT, _USERCOMMA, _HTPASSWD, _OPENSSL_PASS = "userpct", "usercomma", "htpasswd", "opensslpass"
+_USER_SEPARATOR = {_USERPASS: ":", _USERPCT: "%", _USERCOMMA: ","}
+_SAMBA = frozenset({"smbclient", "rpcclient", "smbcacls", "smbget", "smbtree", "smbcquotas", "net"})
+_LDAP = frozenset({"ldapsearch", "ldapmodify", "ldapadd", "ldapdelete", "ldapmodrdn", "ldappasswd",
+                   "ldapwhoami", "ldapcompare", "ldapexop", "ldapurl"})
 _MYSQL = frozenset({"mysql", "mysqldump", "mysqladmin", "mysqlimport", "mysqlcheck", "mysqlshow",
                     "mysqlslap", "mariadb", "mariadb-dump", "mariadb-admin"})
 # (programs, subcommand words, kind, pattern, option words that take the
@@ -1176,6 +1186,31 @@ _PROGRAM_FLAGS = (
      re.compile(r"(?<![\w-])-a(?:[ \t]+)?(?P<value>" + _WORD + ")"),
      frozenset({"-h", "-p", "-s", "-a", "-u", "-n", "-r", "-i", "-d", "-D", "-e",
                 "--user", "--pass", "--askpass", "--tls", "--cacert", "--cert", "--key"})),
+    # Review of PR #330, LOW 5: the same family, tighten only.
+    (_SAMBA, (), _USERPCT,
+     re.compile(r"(?<![\w-])(?:-U|--user)(?:[ \t]+|=)?(?P<value>" + _WORD + ")"), None),
+    (frozenset({"lftp"}), (), _USERCOMMA,
+     re.compile(r"(?<![\w-])(?:-u|--user)(?:[ \t]+|=)?(?P<value>" + _WORD + ")"), None),
+    (frozenset({"htpasswd"}), (), _HTPASSWD,
+     re.compile(r"(?<![\w-])(?P<flags>-[A-Za-z]+(?:[ \t]+-[A-Za-z]+)*)[ \t]+(?:(?P<file>" + _WORD
+                + r")[ \t]+)?(?P<user>" + _WORD + r")[ \t]+(?P<value>" + _WORD + ")"), None),
+    (frozenset({"sqlcmd", "bcp"}), (), "",
+     re.compile(r"(?<![\w-])-P(?:[ \t]+)?(?P<value>" + _WORD + ")"), None),
+    (_LDAP, (), "", re.compile(r"(?<![\w-])-w(?:[ \t]+)?(?P<value>" + _WORD + ")"), None),
+    (frozenset({"openssl"}), (), _OPENSSL_PASS,
+     re.compile(r"(?<![\w-])-(?:passin|passout|pass|password)[ \t]+(?P<value>" + _WORD + ")"),
+     None),
+    (frozenset({"zip", "unzip", "zipcloak"}), (), "",
+     re.compile(r"(?<![\w-])(?:-P|--password)(?:[ \t]+|=)?(?P<value>" + _WORD + ")"), None),
+    (frozenset({"7z", "7za", "7zr", "7zz"}), (), "",
+     re.compile(r"(?<![\w-])-p(?P<value>" + _WORD + ")"), None),
+    (frozenset({"xfreerdp", "wlfreerdp", "sdl-freerdp", "sdl-freerdp3", "xfreerdp3", "wlfreerdp3"}), (), "",
+     re.compile(r"(?<![\w-])/(?:p|password):(?P<value>" + _WORD + ")"), None),
+    (frozenset({"ssh-keygen"}), (), "",
+     re.compile(r"(?<![\w-])-[NP](?:[ \t]+)?(?P<value>" + _WORD + ")"), None),
+    (frozenset({"keytool"}), (), "",
+     re.compile(r"(?<![\w-])-(?:storepass|keypass|srcstorepass|deststorepass|srckeypass|destkeypass)"
+                r"(?::[a-z]+)?[ \t]+(?P<value>" + _WORD + ")"), None),
 )
 _PROGRAM_WORD = re.compile(r"(?<![\w.-])(?:" + "|".join(sorted(
     (re.escape(p) for programs, *_ in _PROGRAM_FLAGS for p in programs), key=len, reverse=True))
@@ -1239,7 +1274,14 @@ _REFERENCE = re.compile(r"\$\{?!?([A-Za-z_][A-Za-z0-9_]*)|(?i:\$env:)([A-Za-z_][
 _UNSAFE_VALUE = re.compile(r"[\s;&|<>()$`{}*?\[]")
 
 
+# Set only by `holds_back_credential`, which compares, never shows: with it
+# set, a value holding one of `_UNSAFE_VALUE`'s characters is withheld too.
+_LOOSE_VALUES = contextvars.ContextVar("secrets_loose_values", default=False)
+
+
 def _unsafe_literal(value: str) -> bool:
+    if _LOOSE_VALUES.get():
+        return False
     return bool(_UNSAFE_VALUE.search(value)) or value.startswith("~")
 
 
@@ -1539,12 +1581,24 @@ def _program_value(kind: str):
         if _already(match) or value is None or not value or word.startswith("-") \
                 or _unsafe_literal(value):
             return match.group(0)
-        if kind == _USERPASS:
-            user, colon, password = value.partition(":")
+        if kind in _USER_SEPARATOR:
+            sep = _USER_SEPARATOR[kind]
+            user, colon, password = value.partition(sep)
             if not colon or not password:
                 return match.group(0)               # curl asks for it
             start, a = match.start(0), match.start("value")
-            return match.group(0)[:a - start] + user + ":" + INLINE_REDACTED
+            return match.group(0)[:a - start] + user + sep + INLINE_REDACTED
+        if kind == _HTPASSWD:
+            # Only in batch mode (`-b`): without it the last word is the user
+            # and htpasswd asks. With `-n` there is no file.
+            flags = match.group("flags").replace("-", "")
+            if "b" not in flags or ("n" in flags) == (match.group("file") is not None):
+                return match.group(0)
+        if kind == _OPENSSL_PASS:
+            if not value.startswith("pass:") or len(value) == len("pass:"):
+                return match.group(0)               # `env:NAME`, `file:path`, `fd:0`, `stdin`
+            start, a = match.start(0), match.start("value")
+            return match.group(0)[:a - start] + "pass:" + INLINE_REDACTED
         if kind == _COOKIE_DATA and "=" not in value:
             return match.group(0)                   # `-b cookies.txt` is a file
         return _redact_group(match)
@@ -1558,7 +1612,13 @@ def _program_flags(text: str) -> str:
     if not _PROGRAM_WORD.search(text):
         return text
     bounds, last = [], 0
+    # `holds_back_credential` only: a separator inside quotes does not end a
+    # segment (`sshpass -p 'a|b' ssh h`), so its value is still found there.
+    # The display keeps its own segmenting.
+    quoted = _Mask(text).state if _LOOSE_VALUES.get() else None
     for sep in _SEGMENTS.finditer(text):
+        if quoted is not None and quoted[sep.start()]:
+            continue
         bounds.append((last, sep.start()))
         last = sep.end()
     bounds.append((last, len(text)))
@@ -1570,34 +1630,22 @@ def _program_flags(text: str) -> str:
         at = _stem_at(values)
         if at >= len(values):
             continue
-        program = PurePosixPath(values[at]).name
-        for programs, subcommand, kind, pattern, value_options in _PROGRAM_FLAGS:
-            if program not in programs:
-                continue
-            i = at + 1
-            for sub in subcommand:
-                while i < len(values) and values[i].startswith("-"):
-                    i += 1
-                if i >= len(values) or values[i] != sub:
-                    break
-                i += 1
-            else:
-                start, end = words[i - 1].end(), seg_end
-                if value_options is not None:
-                    # Only its own options: up to the first operand (what it runs).
-                    while i < len(values) and values[i].startswith("-"):
-                        i += 2 if values[i] in value_options else 1
-                    end = words[i].start() if i < len(words) else seg_end
-                match = pattern.search(text, start, end)
-                if match is not None:
-                    edits.append((match, _program_value(kind)(match)))
+        stems = [at]
+        # Final review of #330: `kubectl exec POD -- ARGV`, `docker exec C
+        # ARGV`: the tail is an argv the container runs as it is (no shell
+        # parses it), so its own program's flags are judged there too.
+        tail = _exec_stem(values, at)
+        if tail is not None:
+            stems.append(tail)
+        for at in stems:
+            _program_edits(text, words, values, at, seg_end, edits)
     if not edits:
         return text
     mask = _Mask(text)
     out, pos = [], 0
-    for match, replaced in sorted(edits, key=lambda e: e[0].start()):
-        whole = match.group(0)
-        if replaced == whole or match.start() < pos:
+    for a, b, replaced in sorted(edits, key=lambda e: e[0]):
+        whole = text[a:b]
+        if replaced == whole or a < pos:
             continue
         p = 0
         while p < min(len(whole), len(replaced)) and whole[p] == replaced[p]:
@@ -1605,12 +1653,94 @@ def _program_flags(text: str) -> str:
         s = 0
         while s < min(len(whole), len(replaced)) - p and whole[-1 - s] == replaced[-1 - s]:
             s += 1
-        if not mask.safe(match.start() + p, match.end() - s):
+        if not mask.safe(a + p, b - s):
             continue
-        out.append(text[pos:match.start()] + replaced)
-        pos = match.end()
+        out.append(text[pos:a] + replaced)
+        pos = b
     out.append(text[pos:])
     return "".join(out)
+
+
+def _program_edits(text, words, values, at, seg_end, edits) -> None:
+    """The `_PROGRAM_FLAGS` edits for the program at `values[at]`."""
+    program = PurePosixPath(values[at]).name
+    for programs, subcommand, kind, pattern, value_options in _PROGRAM_FLAGS:
+        if program not in programs:
+            continue
+        i = at + 1
+        for sub in subcommand:
+            while i < len(values) and values[i].startswith("-"):
+                i += 1
+            if i >= len(values) or values[i] != sub:
+                break
+            i += 1
+        else:
+            start, end = words[i - 1].end(), seg_end
+            if value_options is not None:
+                # Only its own options: up to the first operand (what it runs).
+                while i < len(values) and values[i].startswith("-"):
+                    i += 2 if values[i] in value_options else 1
+                end = words[i].start() if i < len(words) else seg_end
+            # Every occurrence, not the first (review of #330, NEW-2:
+            # `ssh-keygen -P old -N new`, `-passin pass:A -passout pass:B`).
+            for match in pattern.finditer(text, start, end):
+                edits.append(_program_edit(text, match, kind))
+
+
+def _exec_stem(values: list[str], at: int) -> int | None:
+    """Where the program of `kubectl|oc exec … -- ARGV` or `docker|podman|
+    nerdctl exec [opts] CONTAINER ARGV` is, or None."""
+    program = PurePosixPath(values[at]).name
+    if program in ("kubectl", "oc"):
+        rest = values[at + 1:]
+        if not ({"exec", "run", "debug"} & set(rest)) or "--" not in rest:
+            return None
+        i = values.index("--", at + 1) + 1
+    elif program in ("docker", "podman", "nerdctl"):
+        i = at + 1
+        while i < len(values) and values[i].startswith("-"):
+            i += 1
+        # `exec` only: `run`'s image cannot be placed past every option
+        # that takes a value (`--name mongo -p 27017:27017 mongo` stays as
+        # typed); `holds_back_credential` reads `run` apart.
+        if i >= len(values) or values[i] != "exec":
+            return None
+        i += 1
+        while i < len(values) and values[i].startswith("-") and values[i] != "--":
+            i += 2 if values[i] in _EXEC_VALUE else 1
+        i += 1                                                  # the container
+    else:
+        return None
+    if i >= len(values):
+        return None
+    i += _stem_at(values[i:])
+    return i if i < len(values) else None
+
+
+_REST_OF_QUOTE = {"'": re.compile(r"[^'\n]*'"), '"': re.compile(r'(?:[^"\\\n]|\\.)*"')}
+
+
+def _program_edit(text: str, match: re.Match, kind: str) -> tuple[int, int, str]:
+    """One `_PROGRAM_FLAGS` match as `(start, end, replacement)`. A flag
+    glued to its value inside a quoted word (`7z a '-pTr0ub 4dor'`) has the
+    rest of that word as its value, not the first blank-free run of it
+    (review of #330, NEW-2), so no tail is left showing as if it were not
+    part of the password. When that whole value may not be withheld (a blank
+    or an operator in it, the never-hidden rule), the first run still is, as
+    before, and `holds_back_credential` reports the rest."""
+    replaced = _program_value(kind)(match)
+    a, b = match.start("value"), match.end("value")
+    opening = text[match.start() - 1] if match.start() else ""
+    rest = _REST_OF_QUOTE.get(opening)
+    tail = rest.match(text, a) if rest is not None else None
+    if tail is not None and tail.end() - 1 > b and not _already(match):
+        value = text[a:tail.end() - 1]
+        # In double quotes an expansion or a backtick is never a value.
+        expands = opening == '"' and ("$" in value or "`" in value)
+        literal = value if opening == "'" else re.sub(r'\\(["\\$`])', r"\1", value)
+        if literal and not expands and not literal.startswith("-") and not _unsafe_literal(literal):
+            return match.start(), tail.end() - 1, text[match.start():a] + INLINE_REDACTED
+    return match.start(), match.end(), replaced
 
 
 def redact_inline(text: str) -> str:
@@ -1746,6 +1876,243 @@ def redact_command(text) -> str:
     for _, pattern in PATTERNS:
         text = _masked_sub(pattern, lambda m: INLINE_REDACTED, text)
     return text
+
+
+def _strict(text: str) -> str:
+    """`redact_command` with the never-hidden rule off: for comparing, never shown."""
+    token = _LOOSE_VALUES.set(True)
+    try:
+        return redact_command(text)
+    finally:
+        _LOOSE_VALUES.reset(token)
+
+
+# Review of #330, NEW-1: a command string run by another shell is one
+# quoted word to the outer line, so neither the display's redaction nor the
+# comparison above looks inside it. These wrappers' strings are unwrapped,
+# at most `_NESTED_DEPTH` deep and `_NESTED_MAX` characters in all.
+_NESTED_DEPTH = 3
+_NESTED_MAX = 16_000
+_SHELL_C = re.compile(
+    r"(?<![\w.-])(?:[^\s'\"`;&|()<>]*/)?(?:sh|bash|rbash|zsh|dash|ksh|mksh|ash|fish|busybox[ \t]+sh)"
+    r"(?:[ \t]+(?:--?[A-Za-z][\w-]*|[+-]o[ \t]+\w+))*?[ \t]+-[A-Za-z]*c[A-Za-z]*[ \t]+"
+    r"|(?<![\w.-])(?:su|runuser)(?![\w.-])[^;&|\n]*?[ \t]-(?:c|-command(?:=|[ \t]+))[ \t]*")
+_EVAL = re.compile(r"(?<![\w.-])eval(?:[ \t]+--)?[ \t]+")
+_WORD_END = re.compile(r"[ \t;&|)\n]|$")
+
+
+def _unquote(word: str) -> str | None:
+    """A shell word's text as the shell passes it on, expansions left as
+    typed; None when it cannot be known (`$'...'` with an escape)."""
+    out = []
+    for piece in _WORD_PIECE.finditer(word):
+        ansi, single, double, bare = piece.groups()
+        if ansi is not None:
+            if "\\" in ansi:
+                return None
+            out.append(ansi)
+        elif single is not None:
+            out.append(single)
+        elif double is not None:
+            out.append(re.sub(r'\\([$`"\\\n])', r"\1", double))
+        else:
+            out.append(re.sub(r"\\(.)", r"\1", bare))
+    return "".join(out)
+
+
+def _inner_commands(text: str):
+    """Each string `text` hands another shell (`sh -c STR`, `su -c STR`,
+    `eval WORDS`, `ssh host WORDS`, `watch`, `script -c`, `tmux new`,
+    `parallel`) or another argv (`kubectl exec … -- ARGV`, `docker exec C
+    ARGV`), unquoted; None in the list for one that cannot be read. Not
+    `python -c` and its kin: code, left to the scrub."""
+    found = []
+    # Only a wrapper the outer line runs: one inside a quoted string is the
+    # inner string's own, read when that string is.
+    state = _Mask(text).state if ("'" in text or '"' in text) else None
+    for m in _SHELL_C.finditer(text):
+        if state is not None and state[m.start()]:
+            continue
+        word = _WORD_RE.match(text, m.end())
+        if word is None or not _WORD_END.match(text, word.end()):
+            found.append(None)
+            continue
+        found.append(_unquote(word.group()))
+    for m in _EVAL.finditer(text):
+        if state is not None and state[m.start()]:
+            continue
+        pos, parts = m.end(), []
+        while pos < len(text) and text[pos] not in ";&|)\n":
+            word = _WORD_RE.match(text, pos)
+            if word is None or not _WORD_END.match(text, word.end()):
+                parts.append(None)               # an unclosed quote, a stray `<`: unreadable
+                break
+            parts.append(_unquote(word.group()))
+            pos = word.end()
+            while pos < len(text) and text[pos] in " \t":
+                pos += 1
+        found.append(None if not parts or None in parts else " ".join(parts))
+    # Final review of #330: a command line handed on another way (a remote
+    # shell, a container's exec, a terminal or job runner).
+    for m in _HANDS_ON.finditer(text):
+        if state is not None and state[m.start()]:
+            continue
+        argv = _argv(text, m.end())
+        if argv is None:
+            found.append(None)
+            continue
+        inner = _handed_on(PurePosixPath(_unquote(m.group(1)) or "").name, argv)
+        if inner is not False:
+            found.append(inner)
+    return found
+
+
+_HANDS_ON = re.compile(
+    r"(?<![\w.-])((?:[^\s'\"`;&|()<>]*/)?(?:ssh|mosh|autossh|kubectl|oc|docker|podman|nerdctl|watch|script|tmux"
+    r"|parallel))(?![\w.-])")
+_ARGV_STOP = re.compile(r"[;&|)\n]|\d*[<>]")
+_SSH_VALUE = frozenset("pilojFLRDWbcemOQSwEBM")    # ssh's (and autossh's -M) options that take a value
+_EXEC_VALUE = frozenset({"-e", "--env", "-u", "--user", "-w", "--workdir", "--env-file", "--detach-keys"})
+_WATCH_VALUE = frozenset({"-n", "--interval", "-q", "--equexit"})
+_TMUX_COMMANDS = frozenset({"new", "new-session", "new-window", "neww", "send-keys", "send", "split-window",
+                            "splitw", "respawn-pane", "respawnp", "respawn-window", "respawnw"})
+_TMUX_VALUE = frozenset({"-s", "-n", "-c", "-t", "-x", "-y", "-e", "-F", "-f", "-l", "-N", "-T"})
+_PARALLEL_VALUE = frozenset({"-j", "--jobs", "-S", "--sshlogin", "-a", "--arg-file", "-d", "--delimiter", "-n",
+                             "-N", "-I", "--colsep", "--joblog", "--results", "--tmpdir", "-E", "--timeout",
+                             "-L", "--retries", "--sshloginfile", "--slf"})
+
+
+def _argv(text: str, pos: int) -> list[str] | None:
+    """The words from `pos` to the end of the simple command (a separator
+    or a redirection), unquoted; None when one cannot be read."""
+    out = []
+    while True:
+        while pos < len(text) and text[pos] in " \t":
+            pos += 1
+        if pos >= len(text) or _ARGV_STOP.match(text, pos):
+            return out
+        word = _WORD_RE.match(text, pos)
+        if word is None or not (_WORD_END.match(text, word.end()) or _ARGV_STOP.match(text, word.end())):
+            return None
+        value = _unquote(word.group())
+        if value is None:
+            return None
+        out.append(value)
+        pos = word.end()
+
+
+def _skip_options(argv: list[str], i: int, takes_value) -> int:
+    """Past the options at `argv[i:]` (`--` ends them, and is skipped)."""
+    while i < len(argv) and argv[i].startswith("-") and argv[i] != "-":
+        if argv[i] == "--":
+            return i + 1
+        i += 2 if takes_value(argv[i]) else 1
+    return i
+
+
+def _handed_on(program: str, argv: list[str]):
+    """The command line `program` hands on, as text another shell (or the
+    same argv) would run; False when it hands on none."""
+    import shlex
+    if program in ("ssh", "autossh", "mosh"):
+        def ssh_value(w):
+            return not w.startswith("--") and len(w) >= 2 and w[-1] in _SSH_VALUE \
+                and not (len(w) > 2 and w[1] in _SSH_VALUE)
+        i = _skip_options(argv, 0, ssh_value if program != "mosh" else (lambda w: w in ("-p", "--port")))
+        i += 1                                                  # the host
+        if i < len(argv) and argv[i] == "--":
+            i += 1
+        return " ".join(argv[i:]) if i < len(argv) else False   # the remote shell joins and parses them
+    if program in ("kubectl", "oc"):
+        if not ({"exec", "run", "debug"} & set(argv)) or "--" not in argv:
+            return False
+        tail = argv[argv.index("--") + 1:]
+        return shlex.join(tail) if tail else False              # an argv, run as it is
+    if program in ("docker", "podman", "nerdctl"):
+        i = _skip_options(argv, 0, lambda w: False)
+        if i >= len(argv) or argv[i] not in ("exec", "run", "create"):
+            return False
+        if argv[i] != "exec":
+            # The image cannot be placed past every option that takes a
+            # value: the argv starts at the first word naming a program
+            # whose flags are judged (fail closed: `--name mongo -p 1:1 mongo`
+            # is read as `mongo -p 1:1 mongo`, and gets no summary).
+            for k in range(i + 1, len(argv)):
+                if _PROGRAM_WORD.fullmatch(PurePosixPath(argv[k]).name):
+                    return shlex.join(argv[k:])
+            return False
+        i = _skip_options(argv, i + 1, lambda w: w in _EXEC_VALUE) + 1   # past the container
+        return shlex.join(argv[i:]) if i < len(argv) else False
+    if program == "watch":
+        i = _skip_options(argv, 0, lambda w: w in _WATCH_VALUE)
+        return " ".join(argv[i:]) if i < len(argv) else False   # `sh -c` of the words joined
+    if program == "script":
+        for k, w in enumerate(argv):
+            if w in ("-c", "--command"):
+                return argv[k + 1] if k + 1 < len(argv) else None
+            if w.startswith("--command="):
+                return w[len("--command="):]
+        return False
+    if program == "tmux":
+        i = _skip_options(argv, 0, lambda w: w in ("-L", "-S", "-f", "-c"))
+        if i >= len(argv) or argv[i] not in _TMUX_COMMANDS:
+            return False
+        i = _skip_options(argv, i + 1, lambda w: w in _TMUX_VALUE)
+        return " ".join(argv[i:]) if i < len(argv) else False
+    if program == "parallel":
+        i = _skip_options(argv, 0, lambda w: w in _PARALLEL_VALUE)
+        rest = argv[i:]
+        for k, w in enumerate(rest):
+            if w.startswith(":::"):
+                rest = rest[:k]
+                break
+        return " ".join(rest) if rest else False
+    return False
+
+
+def _nested_holds_back(text: str, depth: int, budget: list | None = None) -> bool:
+    """Whether a string another shell runs holds a credential (any value
+    the redaction, strict, would change), or cannot be read, or is past the
+    depth or size bound: then nothing of the call may leave the machine."""
+    budget = budget if budget is not None else [_NESTED_MAX]
+    if len(text) > _NESTED_MAX:
+        return True
+    for inner in _inner_commands(text):
+        if inner is None or depth + 1 > _NESTED_DEPTH:
+            return True
+        budget[0] -= len(inner)
+        if budget[0] < 0:
+            return True
+        if _strict(inner) != inner or _nested_holds_back(inner, depth + 1, budget):
+            return True
+    return False
+
+
+def holds_back_credential(value, depth: int = 0) -> bool:
+    """Whether `redact_command` (or `redact_value`) leaves a credential in
+    `value` only because of the rule that a value holding a blank, an
+    operator, an expansion or a glob is never withheld (`_UNSAFE_VALUE`:
+    `sshpass -p 'Tr0ub4dor&3'`, `PGPASSWORD='a b'`). The card keeps that rule
+    (it never hides what may run); a path that sends a card's text off this
+    machine (approval summaries, review of PR #330 LOW 5) sends nothing when
+    this is True. So is a string another shell runs (`bash -c "..."`,
+    `eval ...`, `su -c ...`) that holds any credential, cannot be read, or
+    nests past the bound (`_nested_holds_back`, review of #330 NEW-1). Fails
+    closed: an error is True. Never for a judge."""
+    try:
+        if isinstance(value, str):
+            shown = redact_command(value)
+            return _strict(value) != shown or _nested_holds_back(value, 0)
+        if depth >= 32:
+            return False
+        if isinstance(value, dict):
+            return any(holds_back_credential(k, depth + 1) or holds_back_credential(v, depth + 1)
+                       for k, v in value.items())
+        if isinstance(value, (list, tuple)):
+            return any(holds_back_credential(v, depth + 1) for v in value)
+        return False
+    except Exception:  # noqa: BLE001 — unsure is held back
+        return True
 
 
 def redact_value(value, depth: int = 0):

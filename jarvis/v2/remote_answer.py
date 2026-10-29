@@ -165,14 +165,20 @@ def phone_card(card: dict) -> tuple[dict, bool]:
     A marker an agent typed itself only makes the card Deny-only."""
     import json
     from .redact import WITHHELD_PREFIX
-    from .remote_api import APPROVAL_DETAIL_DROPPED, scrub_structure
+    from .remote_api import APPROVAL_DETAIL_DROPPED, scrub_structure, split_summary
     shown = {k: v for k, v in card.items() if k not in APPROVAL_DETAIL_DROPPED}
+    # AS-10: the model's summary is judged apart, never part of `withheld`:
+    # it arrives after the card, and a model's words must not change what
+    # the owner may answer. One the scrub would change is dropped.
+    shown, summary = split_summary(shown)
     scrubbed, withheld = scrub_structure(shown)
     if not withheld:
         try:
             withheld = WITHHELD_PREFIX in json.dumps(shown, ensure_ascii=False, default=str)
         except Exception:  # noqa: BLE001 — a card that cannot be read is withheld
             withheld = True
+    if summary and isinstance(scrubbed, dict):
+        scrubbed = {**scrubbed, **summary}
     return scrubbed, withheld
 
 

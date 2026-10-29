@@ -1188,6 +1188,11 @@ TIERS: dict[str, str] = {
     # an override. Read straight from here, not through models.tier(): a
     # one-shot summary does not follow the chat-model selection.
     "speech_summary": os.environ.get("JARVIS_SPEECH_SUMMARY_MODEL") or "anthropic/claude-haiku-5.5",
+    # The one-line summary on an approval card (AS, 2026-10-28). Haiku 5.5,
+    # the owner's choice; display text only, never Chinese-hosted (a command
+    # line is personal data), which jarvis/v2/approval_summary.py enforces on
+    # an override. Read straight from here, as speech_summary is.
+    "approval_summary": os.environ.get("JARVIS_APPROVAL_SUMMARY_MODEL") or "anthropic/claude-haiku-5.5",
 }
 
 SYSTEM_PROMPT = """You are Jarvis, a personal assistant agent running on the user's machine.

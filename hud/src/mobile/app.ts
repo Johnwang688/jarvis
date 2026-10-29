@@ -65,9 +65,10 @@ import {
   type ProviderChoice, type Sheet, type Verb,
 } from "./write";
 import { Talk, browserTalkEnv, type TalkEnv } from "./talk";
-import { afterChanged, allItems, approveBody, confirmedChanged, emptySelection, keptSelection, leaveBody, parseReview, toggled,
-  UNTICKED_GONE, type ReviewItem, type ReviewReport } from "../lib/review";
+import { afterChanged, allItems, approveBody, confirmationList, confirmedChanged, emptySelection, keptSelection, leaveBody, parseReview, toggled,
+  UNTICKED_GONE, type ConfirmLine, type ReviewItem, type ReviewReport } from "../lib/review";
 import { reviewTabShown, reviewView, type ReviewActions } from "./review";
+import { staleAt } from "../lib/approvalSummary";
 
 export type Tab = "inbox" | "review" | "chats" | "tasks";
 
@@ -139,6 +140,8 @@ export class PhoneApp {
   readonly notes = new Map<string, string>();
   readonly drafts = new Map<string, string>();
   readonly picks = new Map<string, number>();
+  /** AS: inbox and review rows whose command the owner opened (true) or closed (false). */
+  readonly opened = new Map<string, boolean>();
   private deferred = false;
   /** One line shown once above the inbox after an answer ("Denied.", where a decision's answer went). */
   private flash = "";
@@ -165,6 +168,8 @@ export class PhoneApp {
   reviewConfirming = false;
   /** The exact set the open confirmation shows (ids and tags): only it is ever sent. */
   reviewConfirmed: { id: string; tag: string }[] | null = null;
+  /** The open confirmation's lines, as they were when it opened (review of #330, LOW 4). */
+  reviewConfirmLines: ConfirmLine[] = [];
   reviewFlash = "";
   private reviewFirst = true;
   private rendered: Tab | null = null;
@@ -251,6 +256,8 @@ export class PhoneApp {
 
   stop(): void {
     this.stopped = true;
+    if (this.staleTimer) clearTimeout(this.staleTimer);
+    this.staleTimer = null;
     this.talk.hidden();
     this.talk.dropRetry();
     this.stream?.close();
@@ -1260,7 +1267,26 @@ export class PhoneApp {
     this.tabs.inbox.textContent = n ? `Inbox · ${n}` : "Inbox";
   }
 
+  /**
+   * AS (review of #330, LOW 3): one redraw when a pending summary on the
+   * open card or an inbox row goes stale, so a missed update never leaves a
+   * command collapsed (lib/approvalSummary `staleAt`).
+   */
+  private staleTimer: ReturnType<typeof setTimeout> | null = null;
+  private wakeForStale(): void {
+    if (this.staleTimer) clearTimeout(this.staleTimer);
+    this.staleTimer = null;
+    const now = Date.now();
+    const at = [staleAt(this.card?.detail?.card),
+                ...(this.inbox ?? []).filter((row) => row.kind === "approval").map((row) => staleAt(row.detail))]
+      .filter((t): t is number => t !== null && t > now).sort((a, b) => a - b)[0];
+    if (at === undefined) return;
+    this.staleTimer = setTimeout(() => { this.staleTimer = null; if (!this.stopped) this.renderKeepingFocus(); },
+      Math.min(2 ** 31 - 1, at - now + 50));
+  }
+
   render(): void {
+    this.wakeForStale();
     for (const [tab, b] of Object.entries(this.tabs) as [Tab, HTMLButtonElement][]) {
       b.setAttribute("aria-selected", String(tab === this.tab));
     }
@@ -1272,7 +1298,8 @@ export class PhoneApp {
         report: this.review, selection: this.reviewSel, notes: this.notes, receipts: this.reviewReceipts,
         busy: this.answering, groupBusy: this.reviewBusy, confirming: this.reviewConfirming, flash: this.reviewFlash,
         drafts: this.drafts, picks: this.reviewPicks, withdrawing: this.withdrawing, online: this.online,
-      }, this.reviewActions(), this.secure && !this.secure.ok ? `limited: ${this.secure.label || "a check failed"}`
+        opened: this.opened, confirmLines: this.reviewConfirmed ? this.reviewConfirmLines : null,
+      }, { ...this.reviewActions(), expand: (row, open) => { this.opened.set(row.id, open); this.render(); } }, this.secure && !this.secure.ok ? `limited: ${this.secure.label || "a check failed"}`
         : this.review?.group && !this.review.group.ok ? (this.review.group.why || "limited") : null);
       // The scroll holds where it was: a row answered in place folds where it stood.
       const top = this.rendered === "review" ? this.main.scrollTop : 0;
@@ -1289,6 +1316,8 @@ export class PhoneApp {
         always: () => void this.alwaysCard(),
         confirmAlways: () => void this.confirmAlways(),
         cancelAlways: () => this.cancelAlways(),
+        // AS: the owner's own open or close of the command, kept across a re-read of the card.
+        toggleCommand: (open) => { if (this.card) { this.card.expanded = open; this.render(); } },
       });
     } else if (this.tab === "inbox") {
       const answers: InboxAnswers = {
@@ -1296,6 +1325,8 @@ export class PhoneApp {
         send: (row, body) => void this.sendAnswer(row, body),
         retry: (row) => void this.retryDeferred(row),
         busy: this.answering, notes: this.notes, drafts: this.drafts, picks: this.picks,
+        expanded: this.opened,
+        toggle: (row, open) => { this.opened.set(row.id, open); this.render(); },
         withdraw: {
           confirming: this.withdrawing,
           ask: (row) => { this.withdrawing.add(row.id); this.notes.delete(row.id); this.render(); },
@@ -1388,6 +1419,8 @@ export class PhoneApp {
         const body = !this.reviewBusy && this.review ? approveBody(this.review, this.reviewSel) : null;
         if (!body) return;
         this.reviewConfirmed = body.items;
+        // Frozen for display while it is open (review of #330, LOW 4).
+        this.reviewConfirmLines = confirmationList(this.review!, new Set(body.items.map((c) => c.id)));
         this.reviewConfirming = true;
         this.render();
       },

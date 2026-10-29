@@ -295,7 +295,8 @@ def run(browser, check, until):
         focused = page.evaluate("document.activeElement?.dataset?.testid || ''")
         check("P-4 card: Tab reaches Deny and never AUTHORIZE or ALWAYS", focused not in ("approval-allow",
                                                                                            "approval-always"), focused)
-        box = lambda id_: page.locator(f'{card} [data-testid="{id_}"]').bounding_box()  # noqa: E731
+        # Waited for: the card can be redrawn (a re-read) between two reads (the known flake).
+        box = lambda id_: until(lambda: page.locator(f'{card} [data-testid="{id_}"]').bounding_box(), timeout=4)  # noqa: E731
         deny_box, allow_box = box("approval-deny"), box("approval-allow")
         check("P-4 card: AUTHORIZE is far below DENY (more than 100 px)",
               allow_box["y"] - (deny_box["y"] + deny_box["height"]) > 100, f"{deny_box} {allow_box}")
@@ -304,6 +305,52 @@ def run(browser, check, until):
         pump(lambda: "decision" in h_out)
         check("P-4 Deny: one tap answers it, no passkey", h_out.get("decision") == Decision.DENY, str(h_out))
         until(lambda: page.locator(card).count() == 0, timeout=8)
+
+        # -- AS: the summary, a fake model, the card's new order -----------------------------
+        from types import SimpleNamespace
+        from jarvis.v2.approval_summary import ApprovalSummaries
+        gate = threading.Event()
+
+        def fake_chat(model, messages, **kw):
+            gate.wait(5)
+            return SimpleNamespace(text=HOSTILE + " deletes build and deploys calc", prompt_tokens=1,
+                                   completion_tokens=1, cost_usd=0.0)
+        daemon.attach_approval_summaries(ApprovalSummaries(chat=fake_chat, deadline_s=6.0))
+        long = "cd /srv/calc\nrm -rf build && make deploy --prod"
+        summed, s_out, s_worker = ask(tool="Bash", args={"command": long}, command=long, reason="deploys")
+        open_card(summed)
+        check("AS phone: the card shows the summary pending and the command collapsed",
+              page.locator(f'{card} [data-testid="approval-summary"]').get_attribute("data-state") == "pending"
+              and page.locator(f'{card} [data-testid="approval-command"]').count() == 0
+              and page.locator(f'{card} [data-testid="approval-command-preview"]').count() == 1)
+        gate.set()
+        until(lambda: summed.summary_state == "ready", timeout=6)
+        # The stream's re-read is the app's own (`inbox_changed` names the row); here
+        # the routes stand in for the network, so the card is read again by hand.
+        if not pump(lambda: page.locator(f'{card} [data-testid="approval-summary"][data-state="ready"]').count() == 1,
+                    timeout=3):
+            page.locator('[data-testid="m-back"]').click()
+            open_card(summed)
+            pump(lambda: page.locator(f'{card} [data-testid="approval-summary"][data-state="ready"]').count() == 1)
+        check("AS phone: the summary lands as text, marked as the AI's",
+              page.locator(f'{card} [data-testid="approval-summary"]').get_attribute("data-state") == "ready"
+              and "AI SUMMARY" in page.locator(f'{card} [data-testid="approval-summary"]').inner_text()
+              and HOSTILE in page.locator(f'{card} [data-testid="approval-summary-text"]').inner_text() and clean(),
+              page.locator(f'{card} [data-testid="approval-summary"]').inner_text())
+        first = page.evaluate("""() => {
+            const c = document.querySelector('[data-testid="approval-card"]');
+            const d = c.querySelector('[data-testid="approval-deny"]'), b = c.querySelector('.m-card-body');
+            return !!(d && b && (d.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING)); }""")
+        check("AS phone: the buttons come before the card's body", first)
+        page.locator(f'{card} [data-testid="approval-command-toggle"]').click()
+        pump(lambda: page.locator(f'{card} [data-testid="approval-command"]').count() == 1)
+        check("AS phone: one tap shows the whole command",
+              page.locator(f'{card} [data-testid="approval-command"]').inner_text() == "command " + long)
+        page.locator(f'{card} [data-testid="approval-deny"]').click()
+        pump(lambda: "decision" in s_out)
+        check("AS phone: Deny still answers it", s_out.get("decision") == Decision.DENY, str(s_out))
+        until(lambda: page.locator(card).count() == 0, timeout=8)
+        daemon.approval_summaries = None
 
         # -- Allow --------------------------------------------------------------------------
         allow, a_out, a_worker = ask(tool="Bash", args={"command": "npm test"}, command="npm test")
@@ -466,7 +513,9 @@ def desk_too_deep(browser, check, until, guard, init_script):
             "command": "ls", "reason": "r", "layer": "human", "origin": "task: x", "allowlistable": True,
             "timeout_s": 120})
         until(lambda: page.locator('[data-testid="approval-card"][data-req="shallow-1"]').count() == 1, timeout=6)
-        check("desk: an ordinary card is unchanged (no warning, AUTHORIZE on)",
+        # AS-13: AUTHORIZE arms ARM_MS after the card appears.
+        until(lambda: page.locator('[data-testid="approval-allow"]').is_enabled(), timeout=4)
+        check("desk: an ordinary card is unchanged (no warning, AUTHORIZE on once armed)",
               page.locator('[data-testid="approval-too-deep"]').count() == 0
               and page.locator('[data-testid="approval-allow"]').is_enabled())
         check("desk: no page errors", not errors, str(errors[:3]))

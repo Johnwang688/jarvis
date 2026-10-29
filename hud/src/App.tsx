@@ -141,6 +141,7 @@ import {
 } from "./lib/workspace";
 import type { Axis } from "./lib/splittree";
 import { ActivitySync, clearsOnRead } from "./lib/activity";
+import { ApprovalSync, type ApprovalAction } from "./lib/approvalSync";
 import {
   LISTENING_STATUS, ORPHAN_DRAFT, besideTarget, chatProjectId, chatTarget, composeRows, draftKey, drawnShowing, eitherPane, giveBackPane,
   heldElsewhere,
@@ -561,6 +562,21 @@ export default function App() {
   // The sidebar dots: a snapshot or a `/seen` answer older than a record
   // already heard must not undo it (lib/activity.ts, review 2026-10-09).
   const [activitySync] = useState(() => new ActivitySync());
+  // The cards' re-reads, ordered against the stream (review of #330, NEW-3).
+  const [approvalSync] = useState(() => new ApprovalSync());
+  const approvalAct = useCallback((action: ApprovalAction) => {
+    approvalSync.heard(action);
+    dispatch(action);
+  }, [approvalSync, dispatch]);
+  const rereadApprovals = useCallback(async () => {
+    const pending = approvalSync.begin();
+    try {
+      const list = await api.approvals();
+      for (const action of approvalSync.land(pending, Array.isArray(list) ? list : [])) dispatch(action);
+    } catch {
+      approvalSync.drop(pending);        /* the cards on screen stay */
+    }
+  }, [approvalSync, dispatch]);
 
   // ---- the selected chat ---------------------------------------------------
 
@@ -1727,10 +1743,19 @@ export default function App() {
           // consulted", which the daemon no longer publishes; if one ever
           // arrives it must not flash a card nobody can answer.
           if (!data.code) break;
-          dispatch({ type: "approval_add", request: { ...data, req_id: data.req_id } });
+          approvalAct({ type: "approval_add", request: { ...data, req_id: data.req_id } });
+          break;
+        case "approval_summary":
+          // AS: a card's AI summary landed (or failed). Display only; its
+          // words are cleaned again where they are drawn (lib/approvalSummary).
+          if (typeof data.req_id === "string") {
+            approvalAct({ type: "approval_patch", req_id: data.req_id,
+                       patch: { summary: typeof data.summary === "string" ? data.summary : "",
+                                summary_state: typeof data.summary_state === "string" ? data.summary_state : "failed" } });
+          }
           break;
         case "approval_resolved":
-          dispatch({ type: "approval_drop", req_id: data.req_id });
+          approvalAct({ type: "approval_drop", req_id: data.req_id });
           break;
         case "inbox_changed":
           // `{ids, reason}`, never text: whatever it names, the rows are the
@@ -1931,6 +1956,10 @@ export default function App() {
     }, () => {
       // Reconnected: a `turn_finished` published in the gap is gone.
       void reconcileBusy();
+      // So is an approval card's arrival, answer or summary (review of #330,
+      // LOW 3): the cards are read again and merged.
+      // Ordered against what the stream says meanwhile (NEW-3).
+      void rereadApprovals();
       void refreshThreads();
       // So is a sub-agent's word: rows and panes read theirs again (a
       // restart's children come back stopped).
@@ -3050,14 +3079,16 @@ export default function App() {
       void refreshActivity();
       void inbox.refresh();
       void review.refresh();
-      const [usage, schedules, route, approvals, discord] = await Promise.all([
+      // The cards: merged, never overwritten, and ordered against the stream
+      // (review of #330, LOW 3 and NEW-3).
+      const [usage, schedules, route, discord] = await Promise.all([
         api.usage().catch(() => null),
         api.schedules().catch(() => []),
         api.route().catch(() => null),
-        api.approvals().catch(() => []),
         api.discord().catch(() => null),
+        rereadApprovals(),
       ]);
-      dispatch({ type: "patch", patch: { usage, schedules, route, approvals, discord } });
+      dispatch({ type: "patch", patch: { usage, schedules, route, discord } });
       await Promise.all([loadAvatar(), loadModels(), loadVoices(), refreshArchivedNames()]);
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -3659,7 +3690,7 @@ export default function App() {
     } catch {
       /* the broker may have timed out already; the card goes either way */
     }
-    dispatch({ type: "approval_drop", req_id: reqId });
+    approvalAct({ type: "approval_drop", req_id: reqId });
   };
 
   const activeProjectId = currentProjectId(state);

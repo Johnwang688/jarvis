@@ -236,6 +236,26 @@ describe("the review of #329's fixes, on the phone", () => {
     expect(h.credential).not.toHaveBeenCalled();
   });
 
+  it("#330 LOW 4: a summary that lands under the open confirmation changes nothing it shows", async () => {
+    const h = harness(report({ opens_here: true }));
+    await confirmingAandB(h);
+    const shown = () => Array.from(h.root.querySelectorAll<HTMLElement>('[data-testid="m-review-confirm-item"]'))
+      .map((li) => li.textContent);
+    const before = shown();
+    expect(h.root.querySelector('[data-testid="m-review-confirm-summary"]')).toBeNull();
+    const summarized = report({ opens_here: true });
+    const b = (summarized.overnight as Record<string, any>[])[1];
+    b.row = { ...b.row, detail: { ...b.row.detail, summary: "Deletes everything in /srv." } };   // same tag
+    h.gets["/m/api/review"] = { ok: true, body: summarized };
+    await h.app.loadReview();
+    await h.settle();
+    expect(h.app.reviewConfirming).toBe(true);
+    expect(shown()).toEqual(before);
+    expect(h.root.querySelector('[data-testid="m-review-confirm-summary"]')).toBeNull();
+    // The item itself, behind the dialog, does show the new summary.
+    expect(h.root.querySelector('[data-id="defer:b"] [data-testid="m-review-as-summary"]')!.textContent).toContain("Deletes everything");
+  });
+
   it("MED 1: a re-read that changes a confirmed item's tag unticks it with why", async () => {
     const h = harness(report({ opens_here: true }));
     await confirmingAandB(h);

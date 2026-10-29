@@ -160,7 +160,14 @@ ROW_FIELDS = ("id", "kind", "rank", "title", "blocks", "project_id", "thread_id"
 # every string scrubbed, and drops `APPROVAL_DETAIL_DROPPED`.
 APPROVAL_DETAIL_FIELDS = ("req_id", "tool", "args", "command", "reason", "layer", "thread_id",
                           "task_id", "provider", "origin", "asked_at", "allowlistable", "timeout_s",
-                          "headline", "hud_only", "subagent", "relayed_from")
+                          "headline", "hud_only", "subagent", "relayed_from",
+                          # AS: the code-built Where line, and the model's summary (judged apart).
+                          "where", "summary", "summary_state")
+# AS: a card's model summary and its state. They arrive after the card and
+# are a model's words, so they are judged apart from it (`split_summary`):
+# never part of what makes a card withheld, and dropped (state "failed")
+# when the phone's scrub would change them.
+SUMMARY_KEYS = ("summary", "summary_state")
 APPROVAL_DETAIL_DROPPED = ("code", "discord_channel_id")
 RELAYED_FIELDS = ("title", "provider", "thread_id", "kind")
 # The other kinds' `detail` (`inbox._question_rows`, `_task_rows`).
@@ -182,7 +189,7 @@ DETAIL_FIELDS = {
     # is the public projection the record kept, scrubbed as a whole like an
     # approval's; Approve and retry needs a passkey (remote_answer).
     "deferred": ("deferral_id", "tool", "card", "thread_id", "task_id", "at", "until", "grantable",
-                 "why_not", "expired", "hud_only", "count", "more"),
+                 "why_not", "expired", "hud_only", "count", "more", "summary"),
 }
 # A kind P-3 does not know (A3's `missed` rows, anything later): only these
 # keys, only scalar values, every string scrubbed.
@@ -279,6 +286,23 @@ def _scrub(text):
     `labelled_values`."""
     from .chat_reads import scrub
     return labelled_values(scrub(text))
+
+
+def split_summary(card: dict) -> tuple[dict, dict]:
+    """AS: (the card without its summary, the summary part as the phone may
+    be sent it). The summary is scrubbed by itself; one the scrub would
+    change is dropped and its state becomes "failed" (the command then shows
+    expanded). A card that never had a summary gets no summary part."""
+    rest = {k: v for k, v in card.items() if k not in SUMMARY_KEYS}
+    if "summary_state" not in card:
+        return rest, {}
+    state = card.get("summary_state") if isinstance(card.get("summary_state"), str) else ""
+    summary = card.get("summary") if isinstance(card.get("summary"), str) else ""
+    if summary and _scrub(summary) != summary:
+        summary, state = "", "failed"
+    if state not in ("pending", "ready", "failed", "off") or (state == "ready" and not summary):
+        summary, state = "", "failed"
+    return rest, {"summary": summary if state == "ready" else "", "summary_state": state}
 
 
 def _scrub_tree(value, *, cap: int | None = None, items: int | None = None):
@@ -438,13 +462,17 @@ def _detail(kind, detail: dict) -> dict:
             out["relayed_from"] = ({k: relayed.get(k) for k in RELAYED_FIELDS if _scalar(relayed.get(k))}
                                    if isinstance(relayed, dict) else None)
         # The whole card, keys and labels across fields too (`scrub_structure`),
-        # then the read view's caps.
-        return _scrub_tree(scrub_structure(out)[0], cap=TEXT_CHARS, items=LIST_ITEMS)
+        # then the read view's caps; the summary apart (AS).
+        out, summary = split_summary(out)
+        return {**_scrub_tree(scrub_structure(out)[0], cap=TEXT_CHARS, items=LIST_ITEMS), **summary}
     if kind == "deferred":
         out = {k: detail[k] for k in DETAIL_FIELDS[kind] if k in detail}
         if isinstance(out.get("card"), dict):
-            out["card"] = {k: v for k, v in out["card"].items() if k not in APPROVAL_DETAIL_DROPPED}
-        return _scrub_tree(scrub_structure(out)[0], cap=TEXT_CHARS, items=LIST_ITEMS)
+            out["card"] = {k: v for k, v in out["card"].items()
+                           if k not in APPROVAL_DETAIL_DROPPED and k not in SUMMARY_KEYS}
+        summary = out.pop("summary", "")
+        summary = summary if isinstance(summary, str) and summary and _scrub(summary) == summary else ""
+        return {**_scrub_tree(scrub_structure(out)[0], cap=TEXT_CHARS, items=LIST_ITEMS), "summary": summary}
     if kind in DETAIL_FIELDS:
         out = {k: detail[k] for k in DETAIL_FIELDS[kind] if k in detail}
         return _scrub_tree(out, cap=TEXT_CHARS, items=LIST_ITEMS)

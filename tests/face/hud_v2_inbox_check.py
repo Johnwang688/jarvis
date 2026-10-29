@@ -1200,6 +1200,62 @@ def defer_row(did="D1", thread="t1", *, rank=4, grantable=True, hud_only=False, 
                        "hud_only": hud_only}}
 
 
+def _summary_checks(page, mock, check, until):
+    """AS: a deferred row's buttons first, its AI summary as text, code's WHY
+    ASKED and WHERE, its command collapsed only with a summary and one click
+    away; an approval row shows its card's summary and code lines."""
+    long = "cd /srv/calc\nmake deploy --prod && git push origin main"
+    with_summary = defer_row("S1", command=long)
+    with_summary["detail"]["summary"] = HOSTILE + " deploys calc"
+    with_summary["detail"]["card"]["where"] = {"project": "Calc", "branch": "main", "folder": "~/projects/calc"}
+    without = defer_row("S2", command=long)
+    c = card("sumcard0001", summary="Lists the folder.", summary_state="ready",
+             where={"project": "Calc", "branch": "main", "folder": "~/c"})
+    _open(page, mock, until, basic_rows() + [with_summary, without])
+    row = _row(page, "defer:S1")
+    order = row.evaluate("""r => { const b = r.querySelector('[data-testid="inbox-deferred-buttons"]');
+        const s = r.querySelector('[data-testid="inbox-deferred-summary"]');
+        return !!(b && s && (b.compareDocumentPosition(s) & Node.DOCUMENT_POSITION_FOLLOWING)); }""")
+    check("AS: a deferred row's buttons come before its summary", order)
+    check("AS: the summary is marked and drawn as text",
+          row.locator('[data-testid="inbox-deferred-summary"]').inner_text().startswith("AI SUMMARY")
+          and page.evaluate("window.__pwned === undefined")
+          and page.evaluate("() => document.querySelectorAll('[data-testid=\"inbox-view\"] img').length") == 0)
+    check("AS: WHY ASKED and WHERE are code's lines",
+          row.locator('[data-testid="inbox-deferred-reason"]').inner_text().startswith("WHY ASKED [human] ")
+          and row.locator('[data-testid="inbox-deferred-where-project"]').inner_text() == "project Calc"
+          and row.locator('[data-testid="inbox-deferred-where-branch"]').inner_text() == "branch main"
+          and row.locator('[data-testid="inbox-deferred-where-folder"]').inner_text() == "folder ~/projects/calc")
+    check("AS: with a summary the command is collapsed to its first line",
+          row.locator('[data-testid="inbox-deferred-command"]').count() == 0
+          and row.locator('[data-testid="inbox-deferred-preview"]').inner_text().strip() == "cd /srv/calc")
+    row.locator('[data-testid="inbox-deferred-toggle"]').click()
+    check("AS: one click shows the whole command",
+          row.locator('[data-testid="inbox-deferred-command"]').inner_text() == long)
+    other = _row(page, "defer:S2")
+    check("AS: with no summary the command is whole and there is no toggle",
+          other.locator('[data-testid="inbox-deferred-command"]').inner_text() == long
+          and other.locator('[data-testid="inbox-deferred-toggle"]').count() == 0)
+    mock.world["approvals"].append(c)
+    _st(mock)["rows"].insert(0, appr_row(c))
+    mock_inbox.changed(mock, ["appr:sumcard0001"], "approval_requested")
+    mock.emit("approval_requested", c)
+    until(lambda: page.locator('[data-testid="approval-card"]').count() == 1, timeout=4)
+    arow = _row(page, "appr:sumcard0001")
+    until(lambda: arow.locator('[data-testid="inbox-summary"]').count() == 1, timeout=4)
+    check("AS: an approval row shows its card's summary and Where",
+          "Lists the folder." in arow.locator('[data-testid="inbox-summary"]').inner_text()
+          and arow.locator('[data-testid="inbox-where-folder"]').inner_text() == "folder ~/c",
+          str(page.evaluate("() => [...document.querySelectorAll('[data-testid=\"inbox-summary\"]')].map(e => e.closest('[data-id]')?.dataset.id)")))
+    check("AS: and still nothing of the command",
+          "ls -la" not in _row(page, "appr:sumcard0001").inner_text())
+    page.locator('[data-testid="approval-card"] button.deny').click()
+    until(lambda: page.locator('[data-testid="approval-card"]').count() == 0, timeout=4)
+    _st(mock)["rows"] = [r for r in _st(mock)["rows"] if r["id"] != "appr:sumcard0001"]
+    mock_inbox.changed(mock, ["appr:sumcard0001"], "approval_resolved")
+    mock.world["approvals"].clear()
+
+
 def _deferred_checks(page, mock, check, until):
     """QH: a deferred approval, rank 4, Approve and retry and Leave it."""
     rows = basic_rows() + [defer_row(command="make deploy " + HOSTILE), defer_row("D2", hud_only=True, grantable=False),
@@ -1512,7 +1568,7 @@ def _check_checks(page, mock, check, until):
 
 SECTIONS = (_sidebar_checks, _groups_checks, _live_checks, _answer_checks, _conflict_checks, _withdraw_checks,
             _reconnect_checks, _clicks_checks, _hostile_checks, _missed_checks, _decision_checks, _check_checks,
-            _marks_checks, _deferred_checks, _card_checks,
+            _marks_checks, _deferred_checks, _summary_checks, _card_checks,
             _older_checks, _aurora_checks, _pr_checks)
 
 
