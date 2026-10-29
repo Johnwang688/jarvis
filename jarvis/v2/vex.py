@@ -5,8 +5,8 @@
 owner's VS Code VEX extension already downloaded, **run in place through WSL
 interop** (V-1, V-5). Nothing is copied, bundled or committed: VEX's licence
 forbids redistribution and decompiling, so the only `vexcom` flags used here
-are the ones DishPy's MIT source uses (`--name --slot --write --progress` for
-a download, `--user` for the brain's user port), two reads the owner's own
+are the ones DishPy's MIT source uses (`--name --slot --write --timer --progress`
+for a download, `--user` for the brain's user port), two reads the owner's own
 `vexcom --help` lists (`--json`, system info; `--programs`; `DEVICE_READS`),
 fixed read-only `--usb` from the vendor-distributed readable extension source
 (evidence: docs/plans/2026-10-13-vex-download-device-status.md), and the
@@ -725,12 +725,15 @@ def check_name(name) -> str:
 
 def download_argv(cfg: VexConfig, name: str, slot: int, binary_windows: str,
                   controller: bool = False) -> list[str]:
-    """DishPy's download flags, exactly: `--name --slot --write --progress`,
-    and the vendor extension's `--chan 1` before `--progress` when the
-    download goes through a V5 controller (`DOWNLOAD_CHANNEL`)."""
+    """DishPy's download flags, exactly: `--name --slot --write --timer
+    --progress`, and the vendor extension's `--chan 1` before `--timer` when
+    the download goes through a V5 controller (`DOWNLOAD_CHANNEL`).
+    `--timer` ("show transfer timer" in the owner's `vexcom --help`,
+    2026-10-28) puts the transfer's own time in the download's output, so a
+    download's speed is measured rather than guessed."""
     channel = list(DOWNLOAD_CHANNEL) if controller is True else []
     return [cfg.vexcom, "--name", check_name(name), "--slot", str(check_slot(slot)),
-            "--write", binary_windows, *channel, "--progress"]
+            "--write", binary_windows, *channel, "--timer", "--progress"]
 
 
 def check_port(port) -> str:

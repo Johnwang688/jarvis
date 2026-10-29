@@ -2494,7 +2494,7 @@ templates — with the Windows `vexcom.exe` and toolchain the owner's VS Code
 VEX extension already downloaded, **run in place through WSL interop**:
 nothing copied, bundled or committed (VEX's licence forbids redistribution
 and decompiling, so the only `vexcom` flags used are DishPy's: `--name
---slot --write --progress` and `--user` — plus the two reads the owner's
+--slot --write --timer --progress` and `--user` — plus the two reads the owner's
 own `vexcom --help` lists, `--json` and `--programs`). **Which files those are is
 `vex.json`**, written only by the human-run `jarvis vex setup` (it looks in
 the extension's own folders for VS Code and Cursor, prints what it found,

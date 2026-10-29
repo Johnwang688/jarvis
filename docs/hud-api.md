@@ -1671,10 +1671,10 @@ visible-window USB probe and is not an unclicked manual action notice.
   action runs, while the brain terminal holds the port, while a build of the
   project runs, and for a Python project (its download flag is a spike
   item). Runs `vexcom.exe --name <name> --slot <n> --write <bin as C:\…>
-  --progress` (DishPy's flags) in the project folder (`program:
+  --timer --progress` (DishPy's flags) in the project folder (`program:
   "vex-download"`); 3-minute timeout. While the last confirmed USB reading
   (at most 60 s old) is a V5 controller and no brain, `--chan 1` (the vendor extension's radio
-  download channel) goes before `--progress`. The HUD's chain sends a
+  download channel) goes before `--timer`. The HUD's chain sends a
   download that failed with exit 4 (a radio dropout) again, up to three
   tries in all; the route itself never retries. **No "run after download"** (V-3), and
   no other route, CLI or tool downloads.
