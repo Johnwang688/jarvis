@@ -17,6 +17,12 @@ its owner, as class attributes and hooks of a subclass:
     is a failure);
   - `label`, `log`, `thread_name`, `attempts`, `out_max_tokens`.
 
+The base fails closed: with no `system` the state is `off`; the base
+`model_input` and `clean` raise (`off`, and `failed`), so a subclass that
+forgets one sends nothing or shows nothing. The fence is not a hook: the
+messages are built by `_messages`, and a subclass that overrides it or
+`_ask` is refused at class creation.
+
 What the engine guarantees, for every summary built on it:
 
   - **Fenced, one-shot.** The model reads `system`, then `model_input`'s
@@ -107,7 +113,10 @@ class DailyLedger:
     cost_usd)`; both run under this ledger's lock, so they must be quick and
     never call back into the engine. A `load` or `save` that raises makes
     `open`/`take` raise, which the engine treats as no room (`off` or
-    `failed`): a budget that cannot be read is never spent.
+    `failed`): a budget that cannot be read is never spent. `load` runs once,
+    under this ledger's lock; `save` runs outside it (one at a time, the
+    newest state wins), so a slow store never holds up `open`. A `save` that
+    raises closes the budget for this ledger's life: no further call.
     """
 
     def __init__(self, daily_cap: int, *, cost_cap_usd: float | None = None,
@@ -120,6 +129,10 @@ class DailyLedger:
         self._day = ""
         self._calls = 0
         self._cost = 0.0
+        self._save_lock = threading.Lock()
+        self._seq = 0                       # each change's number; the newest save wins
+        self._saved = 0
+        self._failed = False                # a save raised: no further call
 
     # -- persistence hooks (a subclass overrides both) ------------------------------
 
@@ -128,6 +141,18 @@ class DailyLedger:
 
     def save(self, day: str, calls: int, cost_usd: float) -> None:
         return None
+
+    def _persist(self, seq: int, day: str, calls: int, cost: float) -> None:
+        with self._save_lock:
+            if seq <= self._saved:
+                return
+            try:
+                self.save(day, calls, cost)
+            except BaseException:
+                with self._lock:
+                    self._failed = True
+                raise
+            self._saved = seq
 
     # -- the budget ------------------------------------------------------------------
 
@@ -143,7 +168,7 @@ class DailyLedger:
             self._day, self._calls, self._cost = day, 0, 0.0
 
     def _room(self) -> bool:
-        if self._calls >= self.daily_cap:
+        if self._failed or self._calls >= self.daily_cap:
             return False
         return self.cost_cap_usd is None or self._cost < self.cost_cap_usd
 
@@ -158,14 +183,18 @@ class DailyLedger:
             if not self._room():
                 return False
             self._calls += 1
-            self.save(self._day, self._calls, self._cost)
-            return True
+            self._seq += 1
+            snapshot = (self._seq, self._day, self._calls, self._cost)
+        self._persist(*snapshot)
+        return True
 
     def spend(self, cost_usd: float) -> None:
         with self._lock:
             self._roll()
             self._cost += max(0.0, float(cost_usd or 0.0))
-            self.save(self._day, self._calls, self._cost)
+            self._seq += 1
+            snapshot = (self._seq, self._day, self._calls, self._cost)
+        self._persist(*snapshot)
 
     def used(self) -> dict:
         with self._lock:
@@ -181,7 +210,9 @@ class DailyLedger:
 class MemoryCache:
     """A bounded LRU of finished summaries. A caller that keeps its cache on
     disk passes any object with the same `get(key)` and `put(key, value)`
-    (both called under the engine's lock: quick, never calling back)."""
+    (both called under the engine's lock: quick, never calling back).
+    One instance per engine: two engines handed the same cache would read
+    each other's summaries (an approval card showing a PR's text)."""
 
     def __init__(self, size: int):
         self.size = int(size)
@@ -241,7 +272,11 @@ class SummaryEngine:
 
     A subclass sets the class attributes and overrides the hooks below; the
     caps, the clock, the model call, the budget and the cache are
-    constructor arguments, so two engines never share any of them.
+    constructor arguments, made fresh for each engine (a caller passing its
+    own `ledger` or `cache` gives each engine its own instance).
+
+    The engine's lock is never held while the ledger reads or writes its
+    store, nor while a model is called.
     """
 
     # What a subclass sets.
@@ -281,15 +316,25 @@ class SummaryEngine:
         return []
 
     def model_input(self, item) -> str | None:
-        return item if isinstance(item, str) and item else None
+        raise NotImplementedError("a summary says what it sends")
 
     def key(self, item, text: str) -> str:
         return input_key(text)
 
     def clean(self, raw: str):
-        return raw.strip() if isinstance(raw, str) else ""
+        raise NotImplementedError("a summary says how its answer is cleaned")
 
-    def messages(self, text: str) -> list[dict]:
+    # -- final: every engine fences ----------------------------------------------
+
+    _FINAL = ("_messages", "_ask")
+
+    def __init_subclass__(cls, **kw):
+        super().__init_subclass__(**kw)
+        for name in SummaryEngine._FINAL:
+            if name in cls.__dict__:
+                raise TypeError(f"{cls.__name__} may not override SummaryEngine.{name}: every engine fences")
+
+    def _messages(self, text: str) -> list[dict]:
         return [{"role": "system", "content": self.system},
                 {"role": "user", "content": untrusted.fence(text, self.source)}]
 
@@ -304,42 +349,53 @@ class SummaryEngine:
         try:
             return self._begin(item, done)
         except Exception as exc:  # noqa: BLE001 — a summary is never worth a failure elsewhere
-            self.log.warning(self.label + " not started (%s)", type(exc).__name__)
+            self.log.warning("%s not started (%s)", self.label, type(exc).__name__)
             return OFF, ""
 
     def _begin(self, item, done: Done) -> tuple[str, Any]:
+        if not self.system:
+            self._count("off")
+            return OFF, ""
         text = self.model_input(item)
         if text is None or not self.candidates():
             self._count("off")
             return OFF, ""
         key = self.key(item, text)
         waiter = _Waiter(done)
-        start = None
-        with self._lock:
-            self._roll()
-            if self._closed:
-                return OFF, ""
-            hit = self._cache.get(key)
-            if hit is not None:
-                self._stats["cache_hits"] += 1
-                return READY, hit
-            job = self._jobs.get(key)
-            if job is None:
-                if len(self._jobs) >= self.max_running + self.max_waiting:
-                    self._stats["off"] += 1
+        room = None                     # the budget, read outside the lock when a new job needs it
+        while True:
+            start = None
+            with self._lock:
+                self._roll()
+                if self._closed:
                     return OFF, ""
-                if not self.ledger.open():
-                    self._stats["off"] += 1
-                    return OFF, ""
-                self._stats["jobs"] += 1
-                job = start = _Job(key, text, self._mono() + self.deadline_s)
-                self._jobs[key] = job
-            # A job already running (its own asks' watchdogs may have
-            # fired): this ask waits on it, with a watchdog of its own.
-            job.waiters.append(waiter)
-            timer = threading.Timer(self.deadline_s, self._expire, args=(waiter,))
-            timer.daemon = True
-            waiter.timer = timer
+                hit = self._cache.get(key)
+                if hit is not None:
+                    self._stats["cache_hits"] += 1
+                    return READY, hit
+                job = self._jobs.get(key)
+                if job is None:
+                    if len(self._jobs) >= self.max_running + self.max_waiting:
+                        self._stats["off"] += 1
+                        return OFF, ""
+                    if room is False:
+                        self._stats["off"] += 1
+                        return OFF, ""
+                    if room:
+                        self._stats["jobs"] += 1
+                        job = start = _Job(key, text, self._mono() + self.deadline_s)
+                        self._jobs[key] = job
+                if job is not None:
+                    # A job already running (its own asks' watchdogs may have
+                    # fired): this ask waits on it, with a watchdog of its own.
+                    job.waiters.append(waiter)
+                    timer = threading.Timer(self.deadline_s, self._expire, args=(waiter,))
+                    timer.daemon = True
+                    waiter.timer = timer
+                    break
+            # The ledger's own lock and store, never under ours; then everything
+            # above is read again (the cache or another ask may have moved).
+            room = bool(self.ledger.open())
         try:
             timer.start()
             if start is not None:
@@ -395,30 +451,31 @@ class SummaryEngine:
                     if self._live(job):
                         summary = self._ask(job)
                 except Exception as exc:  # noqa: BLE001
-                    self.log.info(self.label + " failed (%s)", type(exc).__name__)
+                    self.log.info("%s failed (%s)", self.label, type(exc).__name__)
                 finally:
                     self._slots.release()
         finally:
             self._end(job, summary)
 
     def _take_call(self) -> bool:
-        """One model call against the day's budget: False once a cap is reached."""
+        """One model call against the day's budget: False once a cap is reached.
+        The ledger is asked outside the engine's lock."""
+        if not self.ledger.take():
+            return False
         with self._lock:
             self._roll()
-            if not self.ledger.take():
-                return False
             self._stats["calls"] += 1
-            return True
+        return True
 
     def _cap_reached(self) -> None:
         if self.ledger.cost_reached():
-            self.log.info(self.label + ": the day's cost cap of $%.2f is reached", self.ledger.cost_cap_usd)
+            self.log.info("%s: the day's cost cap of $%.2f is reached", self.label, self.ledger.cost_cap_usd)
         else:
-            self.log.info(self.label + ": the day's cap of %d calls is reached", self.daily_cap)
+            self.log.info("%s: the day's cap of %d calls is reached", self.label, self.daily_cap)
 
     def _ask(self, job: _Job):
         chat = self._chat or llm.chat
-        messages = self.messages(job.text)
+        messages = self._messages(job.text)
         tries = 0
         for model in self.candidates():
             while tries < self.attempts:
@@ -434,7 +491,7 @@ class SummaryEngine:
                     reply = chat(model, messages, temperature=0.0, max_tokens=self.out_max_tokens,
                                  timeout=left, max_retries=1, stream=False, cache=False, provider="")
                 except Exception as exc:  # noqa: BLE001 — the next try, or the next model
-                    self.log.info(self.label + ": %s failed (%s)", model, type(exc).__name__)
+                    self.log.info("%s: %s failed (%s)", self.label, model, type(exc).__name__)
                     break
                 cost = float(getattr(reply, "cost_usd", 0.0) or 0.0)
                 prompt = int(getattr(reply, "prompt_tokens", 0) or 0)
@@ -444,9 +501,12 @@ class SummaryEngine:
                     self._stats["prompt_tokens"] += prompt
                     self._stats["completion_tokens"] += completion
                     self._stats["cost_usd"] += cost
-                self.ledger.spend(cost)
-                self.log.info(self.label + ": %s, %d in, %d out, $%.5f, %.2fs", model, prompt, completion,
+                self.log.info("%s: %s, %d in, %d out, $%.5f, %.2fs", self.label, model, prompt, completion,
                               cost, time.monotonic() - started)
+                try:
+                    self.ledger.spend(cost)
+                except Exception as exc:  # noqa: BLE001 — the answer is paid for; the ledger refuses further calls
+                    self.log.warning("%s: the day's spend was not recorded (%s)", self.label, type(exc).__name__)
                 out = self.clean(reply_text(reply))
                 if out:
                     return out
@@ -486,4 +546,4 @@ class SummaryEngine:
         try:
             waiter.done(state, summary if state == READY else "")
         except Exception as exc:  # noqa: BLE001
-            self.log.warning(self.label + ": a waiter failed (%s)", type(exc).__name__)
+            self.log.warning("%s: a waiter failed (%s)", self.label, type(exc).__name__)
