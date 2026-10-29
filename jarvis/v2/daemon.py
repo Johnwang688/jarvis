@@ -1533,7 +1533,7 @@ class Daemon:
         return self._steer(session, provider, handle, message, data)
 
     def deliver_queued(self, thread_id: str, message: UserMessage, *,
-                       decision_id: str | None = None) -> dict:
+                       decision_id: str | None = None, written_by: str | None = None) -> dict:
         """The owner's answer to a decision (inbox B1, design §5): a message
         that may start a turn or wait for one, and never steers (chat-to-chat
         C3's rule). No turn running and nothing of the owner's waiting: it
@@ -1546,11 +1546,16 @@ class Daemon:
         The caller bounds it (5 open decisions per chat). `decision_id` rides
         in the logged data, so a drop marks the decision undelivered. Only a
         chat thread; what the message may do is its own `desk`/`via` (an
-        inbox answer is never at the desk)."""
+        inbox answer is never at the desk). `written_by` (e.g. "deferral")
+        rides there too: the text is code's own words, never the owner's
+        typing, and every reader of the record says so (`chat_reads`,
+        `titles.owner_typed`, the Discord mirror; review of PR #331)."""
         _validate(message, UserMessage)
         data = user_data(message)
         if decision_id is not None:
             data["decision_id"] = decision_id
+        if written_by is not None:
+            data["written_by"] = written_by
         session = self._live_session(thread_id)
         from . import thread_model
         if not thread_model.is_chat(session.thread):

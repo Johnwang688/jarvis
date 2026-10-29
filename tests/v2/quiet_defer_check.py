@@ -1106,9 +1106,10 @@ class Live(unittest.TestCase):
         self.call("POST", f"/inbox/defer:{req.req_id}/answer", {"action": "retry"}, 403, owner=False)
         out = self.call("POST", f"/inbox/defer:{req.req_id}/answer", {"action": "retry"})
         self.assertIn(out["delivery"], ("started", "queued"))
-        (tid, message, _kw), = told
+        (tid, message, kw), = told
         self.assertEqual(tid, thread.id)
         self.assertEqual((message.origin, message.via, message.desk), ("owner", "inbox", False))
+        self.assertEqual(kw, {"written_by": "deferral"}, "code's words, marked so in the record")
         self.assertIn("approved", message.text)
         self.assertIn(req.req_id, message.text)
         self.assertIn("Only the identical call", message.text)
@@ -1120,6 +1121,43 @@ class Live(unittest.TestCase):
         self.assertIs(self.daemon.approvals.ask(same), Decision.ALLOW)
         self.assertEqual(same.outcome[0], "granted")
         print("ok  Approve and retry (HUD): the chat is told via inbox, no desk; the call is granted once")
+
+    def test_a_deferrals_news_is_never_drawn_as_the_owners_typing(self):
+        """Review of PR #331: the words "The owner approved … retry it now" are
+        code's, delivered as origin "owner". Through the inbox and through the
+        phone (via "phone", no decision_id) alike, the record says so, and no
+        reader takes them for the owner's typing: the phone's transcript marks
+        (none of the phone's typed-here marks), the title source, Discord."""
+        from jarvis.v2 import chat_reads, titles
+        from jarvis.v2.discord import mirror
+        typed_here = {"via the phone", "via Discord", "via DM", "spoken"}   # hud/src/mobile/views.ts TYPED_HERE_MARKS
+        for via in ("inbox", "phone"):
+            thread = self.chat()
+            req = self.deferred(thread_id=thread.id, command="make " + via, args={"command": "make " + via})
+            record = self.daemon.inbox.deferred.get(req.req_id)
+            self.assertIn(quiet_defer._deliver(self.daemon, thread.id, quiet_defer.retry_message(record), via),
+                          ("started", "queued"))
+            if via == "phone":     # the group grant's words, the morning review's path
+                self.assertIn(quiet_defer._deliver(self.daemon, thread.id, quiet_defer.group_message([record]), via),
+                              ("started", "queued"))
+            users = [r for r in self.stores.threads.read_log(thread.id) if r.get("kind") == "user"]
+            self.assertTrue(users)
+            for record_ in users:
+                data = record_["data"]
+                self.assertEqual((data["origin"], data["via"], data.get("written_by")), ("owner", via, "deferral"))
+                self.assertFalse(titles.owner_typed(data), "never a title's source")
+                line = mirror.user_line(data)
+                self.assertTrue(line.startswith("· Jarvis wrote: "), line)
+                self.assertNotIn("You", line.split(":", 1)[0])
+            rows = [r for r in chat_reads.transcript(self.stores.threads.read_log(thread.id), PN.FAST) if r.role == "owner"]
+            self.assertEqual(len(rows), len(users))
+            for row in rows:
+                self.assertEqual(row.marks, ("written by Jarvis (a deferred approval), not typed",))
+                self.assertFalse(set(row.marks) <= typed_here, row.marks)
+        # The owner's own typing on the phone keeps its mark (no written_by).
+        self.assertTrue(titles.owner_typed({"origin": "owner", "via": "phone"}))
+        print("ok  a deferral's news (inbox and phone): written_by on the record; never the owner's typing "
+              "to the phone, the titles or Discord")
 
     def test_a_blocked_task_is_resumed_and_leave_sends_nothing(self):
         task = self.stores.tasks.create(self.project.id, "migrate")

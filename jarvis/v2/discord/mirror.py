@@ -179,6 +179,9 @@ def user_line(data: dict, *, dropped: str | bool | None = None) -> str | None:
         return _scrub(head)
     elif via == "peer":
         head = f"↪ Request from another thread: {_cap(' '.join(typed.split()), 400)}"
+    elif data.get("written_by"):
+        # Code's words delivered as the owner's (a deferral's news): never "You" (review of PR #331).
+        head = "· Jarvis wrote" + (f" · {why}" if why else "") + f": {_cap(' '.join(typed.split()), 400)}"
     elif via == "phone" and not data.get("decision_id"):
         # Typed into this chat on the phone (P-5): the owner's own words.
         who = "You (phone)" + (f" · {why}" if why else "")
