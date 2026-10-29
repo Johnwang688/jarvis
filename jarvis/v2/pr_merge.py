@@ -17,7 +17,8 @@ code's actions; this module is what the owner's OK does.
       POST /inbox/pr/hold    {id, note} sets; {id, clear: true} clears
       POST /inbox/pr/fix     501 (PM-E)
     Phone (the remote listener, past `remote_auth.owner_status`):
-      POST /m/api/inbox/pr/options  {id, action}  a challenge bound to `subject(...)`
+      POST /m/api/inbox/pr/options  {id, action, head, card}  a challenge bound to `subject(...)`
+                                    of what the phone showed (409 when the row moved since)
       POST /m/api/inbox/pr          {id, action, head, card, assertion}
 
 They never touch `PendingApprovals`, `merge_gate` or `remote_answer`'s
@@ -43,14 +44,22 @@ private folder made for the act: `pr_facts.gh_env`), through
 
     gh pr merge N --repo O/R --merge --match-head-commit <head>
     gh pr merge N --repo O/R --squash --match-head-commit <head>   only when the card's method is squash (PM-14)
-    gh pr update-branch N --repo O/R                                  BEHIND only
+    gh api --method PUT --include repos/O/R/pulls/N/update-branch -f expected_head_sha=<head>   BEHIND only
 
-Never `--admin`, `--auto`, `--rebase` or `--delete-branch`. Its output is
-never read and its error output never opened. The result comes from one
-more read (`gh pr view N --repo O/R --json state,headRefOid`): merged, head
-moved, not mergeable (Update: updated or not updated). A receipt goes to
-`<data root>/inbox/pr-actions.jsonl` (0600: repo, number, head, action,
-method, via, time, gh's exit word and the result), and a poll is poked.
+Never `--admin`, `--auto`, `--rebase` or `--delete-branch`. Before either,
+under the same bounds, `gh pr view --json autoMergeRequest` and (before a
+merge) `gh api --method GET repos/O/R/rules/branches/<base>`: auto-merge on,
+or a `merge_queue` rule on the base, or either unread, is a 409 "its base
+uses a merge queue or auto-merge: merge it at GitHub" (on a queue base gh
+queues the PR or turns auto-merge on, which outlives pushes and holds).
+A merge's output is never read; Update's status line only (202 "update
+requested", 422 "changed since you read it"); error output is never opened.
+The result comes from one more read (`gh pr view N --repo O/R --json
+state,headRefOid,autoMergeRequest`): merged, queued, head moved, not
+mergeable (Update: updated, update requested, not updated). Receipts go to
+`<data root>/inbox/pr-actions.jsonl` (0600): an `intent` line before gh runs
+(repo, number, head, action, method, via, limited, time) and a `result` line
+after (plus gh's exit word and the result); a poll is poked.
 
 **Hold (Q3).** `<data root>/inbox/pr-holds.json` (0600, folder 0700):
 `{"owner/repo#N": {"note", "set_at"}}`, the note scrubbed, cleaned and
@@ -117,6 +126,10 @@ ACT_CAP = 64 * 1024             # gh's output is discarded; past this it is kill
 RESULT_TIMEOUT_S = 30.0
 RESULT_CAP = 64 * 1024
 
+RULES_MAX = 100                 # a full page of rules may be cut off: fails closed
+QUEUE = "its base uses a merge queue or auto-merge: merge it at GitHub"
+_STATUS = re.compile(rb"\AHTTP/[0-9.]+ ([0-9]{3})[ \r\n]")
+
 SUBJECT_DOMAIN = "jarvis-pr-v1"
 _CARD = re.compile(r"[0-9a-f]{64}")
 _KEY = re.compile(r"[a-z0-9_.-]{1,100}/[a-z0-9_.-]{1,100}#[1-9][0-9]{0,9}")
@@ -142,13 +155,32 @@ def merge_argv(gh: str, repo: str, number: int, head: str, method: str) -> list[
             "--match-head-commit", head]
 
 
-def update_argv(gh: str, repo: str, number: int) -> list[str]:
-    """PM-12's Update: GitHub merges the base into the PR's branch."""
-    return [gh, "pr", "update-branch", str(number), "--repo", repo]
+def update_argv(gh: str, repo: str, number: int, head: str) -> list[str]:
+    """PM-12's Update, bound to the head (review of #336, LOW 3): GitHub
+    merges the base into the PR's branch only while its head is still
+    `head` (422 otherwise; 202 when accepted, done asynchronously).
+    `--include` puts the status line on stdout, the one thing read; `-f`
+    sends the head as a string (never `-F`, which would read `@file`)."""
+    return [gh, "api", "--method", "PUT", "--include", f"repos/{repo}/pulls/{number}/update-branch",
+            "-f", f"expected_head_sha={head}"]
+
+
+def auto_argv(gh: str, repo: str, number: int) -> list[str]:
+    """Whether auto-merge is on (review of #336, MED 1). gh 2.86 has no
+    `isMergeQueueEnabled` or `isInMergeQueue` field (checked offline: its
+    "Available fields" list), so a queue is read from the base's rules."""
+    return [gh, "pr", "view", str(number), "--repo", repo, "--json", "autoMergeRequest"]
+
+
+def rules_argv(gh: str, repo: str, base: str) -> list[str]:
+    """The rules that apply to `base` (a validated branch name), GET only."""
+    from urllib.parse import quote
+    return [gh, "api", "--method", "GET",
+            f"repos/{repo}/rules/branches/{quote(base, safe='/')}?per_page={RULES_MAX}"]
 
 
 def result_argv(gh: str, repo: str, number: int) -> list[str]:
-    return [gh, "pr", "view", str(number), "--repo", repo, "--json", "state,headRefOid"]
+    return [gh, "pr", "view", str(number), "--repo", repo, "--json", "state,headRefOid,autoMergeRequest"]
 
 
 def subject(repo: str, number: int, head: str, card: str, action: str) -> str:
@@ -472,12 +504,13 @@ class PrActions:
 
     # -- running -----------------------------------------------------------------------
 
-    def _call(self, argv: list[str], env: dict, timeout: float, cap: int) -> tuple[str, bytes]:
+    def _call(self, argv: list[str], env: dict, timeout: float, cap: int,
+              ok_codes: tuple[int, ...] = (0,)) -> tuple[str, bytes]:
         """(gh's exit word, its output); never raises, never reads stderr."""
         from .inbox_prs import run_bounded
         run = self.run or run_bounded
         try:
-            return "ok", run(argv, env, timeout=timeout, cap=cap)
+            return "ok", run(argv, env, timeout=timeout, cap=cap, ok_codes=ok_codes)
         except GhFailed as exc:
             return exc.code, b""
         except Exception as exc:  # noqa: BLE001
@@ -485,26 +518,55 @@ class PrActions:
             return "error", b""
 
     @staticmethod
-    def _outcome(action: str, head: str, word: str, data: bytes) -> str:
+    def _json(word: str, data: bytes):
         if word != "ok":
-            return "not read again"
+            return None
         try:
             value = json.loads(data.decode("utf-8"))
         except (UnicodeDecodeError, ValueError):
-            return "not read again"
-        state = value.get("state") if isinstance(value, dict) else None
-        now = value.get("headRefOid") if isinstance(value, dict) else None
-        if state not in ("OPEN", "CLOSED", "MERGED") or not pr_facts.valid_sha(now):
-            return "not read again"
+            return None
+        return value
+
+    def queued(self, env: dict, gh: str, repo: str, number: int, base, *, merging: bool) -> bool:
+        """MED 1 of #336's review: True (refuse) when auto-merge is on for the
+        PR, or, before a merge, when its base has a merge queue, or when
+        either cannot be read (fails closed). gh would otherwise queue the
+        PR or turn auto-merge on, which survives later pushes and holds."""
+        value = self._json(*self._call(auto_argv(gh, repo, number), env, RESULT_TIMEOUT_S, RESULT_CAP))
+        if not isinstance(value, dict) or "autoMergeRequest" not in value \
+                or value["autoMergeRequest"] is not None:
+            return True
+        if not merging:
+            return False
+        if pr_facts._branch(base) is None:
+            return True
+        rules = self._json(*self._call(rules_argv(gh, repo, base), env, RESULT_TIMEOUT_S, RESULT_CAP))
+        if not isinstance(rules, list) or len(rules) >= RULES_MAX \
+                or not all(isinstance(r, dict) and isinstance(r.get("type"), str) for r in rules):
+            return True
+        return any(r["type"] == "merge_queue" for r in rules)
+
+    def _outcome(self, action: str, head: str, word: str, data: bytes, status: str | None = None) -> str:
+        value = self._json(word, data)
+        if not isinstance(value, dict):
+            return "update requested" if status == "202" else "not read again"
+        state, now = value.get("state"), value.get("headRefOid")
+        if state not in ("OPEN", "CLOSED", "MERGED") or not pr_facts.valid_sha(now) \
+                or "autoMergeRequest" not in value:
+            return "update requested" if status == "202" else "not read again"
         if action in MERGE_ACTIONS:
             if state == "MERGED":
                 return "merged"
+            if value["autoMergeRequest"] is not None:
+                return "queued"
             if now != head:
                 return "head moved"
             return "closed" if state == "CLOSED" else "not mergeable"
         if state != "OPEN":
             return state.lower()
-        return "updated" if now != head else "not updated"
+        if now != head:
+            return "updated"
+        return "update requested" if status == "202" else "not updated"
 
     def act(self, action: str, row_id: str, head, card, *, via: str, limited: bool = False) -> dict:
         """One owner action, PM-13. Refused (409 "changed since you read
@@ -544,13 +606,29 @@ class PrActions:
                 self.reread(repo, number)
             raise
         method = decision.method if action in MERGE_ACTIONS else None
-        argv = (merge_argv(gh, repo, number, head, method) if action in MERGE_ACTIONS
-                else update_argv(gh, repo, number))
+        merging = action in MERGE_ACTIONS
+        argv = merge_argv(gh, repo, number, head, method) if merging else update_argv(gh, repo, number, head)
+        inbox = inbox_dir(self.daemon)
+        base = {"repo": repo, "number": number, "head": head, "action": action, "method": method,
+                "via": via, "limited": bool(limited)}
         home = None
+        status = None
         try:
             home = pr_facts.new_gh_home()
             env = pr_facts.gh_env(home)
-            word, _ignored = self._call(argv, env, ACT_TIMEOUT_S, ACT_CAP)
+            if self.queued(env, gh, repo, number, facts.base, merging=merging):
+                raise Refused(409, QUEUE)
+            # NIT 7: the intent first, so a crash mid-merge still leaves a record.
+            write_receipt(inbox, {**base, "phase": "intent",
+                                  "at": self.now().isoformat(timespec="seconds")})
+            if merging:
+                word, _ignored = self._call(argv, env, ACT_TIMEOUT_S, ACT_CAP)
+            else:
+                # gh api exits 1 on an HTTP error; only the status line is read.
+                word, out = self._call(argv, env, ACT_TIMEOUT_S, ACT_CAP, ok_codes=(0, 1))
+                found = _STATUS.match(out) if word == "ok" else None
+                status = found.group(1).decode() if found else None
+                word = f"http {status}" if status else ("unread" if word == "ok" else word)
             seen, data = self._call(result_argv(gh, repo, number), env, RESULT_TIMEOUT_S, RESULT_CAP)
         except (OSError, pr_facts.MirrorRefused) as exc:
             LOG.warning("PR actions: no private gh folder (%s)", type(exc).__name__)
@@ -558,15 +636,19 @@ class PrActions:
         finally:
             if home is not None:
                 pr_facts._remove_tree(home)
-        result = self._outcome(action, head, seen, data)
-        at = self.now().isoformat(timespec="seconds")
-        receipt = {"repo": repo, "number": number, "head": head, "action": action, "method": method,
-                   "via": via, "limited": bool(limited), "at": at, "gh": word, "result": result}
-        saved = write_receipt(inbox_dir(self.daemon), receipt)
+        result = self._outcome(action, head, seen, data, status)
+        if status == "422" and result != "updated":
+            result = "changed"
+        receipt = {**base, "phase": "result", "at": self.now().isoformat(timespec="seconds"),
+                   "gh": word, "result": result}
+        saved = write_receipt(inbox, receipt)
         LOG.info("PR actions: %s on a pull request by %s: %s", action, via, result)
         self.reread(repo, number)
-        return {"ok": result in ("merged", "updated"), "result": result, "action": action,
-                "method": method, "head": head, "receipt": saved}
+        if result == "changed":
+            # 422: the head moved before GitHub took the update (LOW 3).
+            raise _changed("its head moved")
+        return {"ok": result in ("merged", "updated", "update requested"), "result": result,
+                "action": action, "method": method, "head": head, "receipt": saved}
 
 
 _ACTORS: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
@@ -690,16 +772,19 @@ def _secure(daemon, handler, session) -> dict:
 def phone_options(handler, daemon, session, body: dict) -> dict:
     """The challenge for one action on one row, after the refusals that
     need no passkey; bound to the row's head and card as shown now."""
-    if set(body) - {"id", "action"}:
-        raise Refused(400, "bad request")
+    if set(body) != {"id", "action", "head", "card"}:
+        raise Refused(400, "send id, action, head and card")
     action = _phone_action(body.get("action"))
-    row_id = body.get("id")
+    row_id, head, card = body.get("id"), body.get("head"), body.get("card")
     repo, number = parse_id(row_id)
+    if not pr_facts.valid_sha(head) or not isinstance(card, str) or not _CARD.fullmatch(card):
+        raise Refused(400, "bad request")
     actor = actions_for(daemon)
     detail = actor.row(row_id).get("detail") or {}
-    head, card = detail.get("head"), detail.get("card")
-    if action not in (detail.get("actions") or []) or detail.get("hold") \
-            or not pr_facts.valid_sha(head) or not isinstance(card, str) or not _CARD.fullmatch(card):
+    # MED 2 of #336's review: the challenge binds what the phone showed, which
+    # must still be what the row shows.
+    if (detail.get("head"), detail.get("card")) != (head, card) \
+            or action not in (detail.get("actions") or []) or detail.get("hold"):
         raise _changed()
     if holds_at(inbox_dir(daemon)).get(repo, number) is not None:
         raise _changed("it is on hold")
@@ -710,8 +795,7 @@ def phone_options(handler, daemon, session, body: dict) -> dict:
     if phone_withheld(detail.get("facts"), detail.get("files")):
         raise Refused(409, "this pull request has withheld text: " + AT_DESK)
     bound = subject(repo, number, head, card, action)
-    return {"action": action, "head": head, "card": card,
-            "publicKey": handler.remote_auth.answer_options(session, bound, action)}
+    return {"action": action, "publicKey": handler.remote_auth.answer_options(session, bound, action)}
 
 
 def phone_act(handler, daemon, session, body: dict) -> dict:

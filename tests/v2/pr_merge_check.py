@@ -87,18 +87,29 @@ def eventually(predicate, timeout=5.0, what="condition"):
 # -- fakes --------------------------------------------------------------------------------------
 
 def gh_kind(argv) -> str:
-    if argv[0] == PF.GH and list(argv[1:3]) == ["pr", "merge"]:
+    if argv[0] != PF.GH:
+        return PF.kind(argv)
+    if list(argv[1:3]) == ["pr", "merge"]:
         return "merge"
-    if argv[0] == PF.GH and list(argv[1:3]) == ["pr", "update-branch"]:
+    if argv[1] == "api" and any(str(a).endswith("/update-branch") for a in argv):
         return "update"
-    if argv[0] == PF.GH and list(argv[1:3]) == ["pr", "view"] and "state,headRefOid" in argv:
+    if argv[1] == "api" and any("/rules/branches/" in str(a) for a in argv):
+        return "rules"
+    if list(argv[1:3]) == ["pr", "view"] and "state,headRefOid,autoMergeRequest" in argv:
         return "result"
+    if list(argv[1:3]) == ["pr", "view"] and "autoMergeRequest" in argv:
+        return "auto"
     return PF.kind(argv)
 
 
+ACCEPTED = "HTTP/2.0 202 Accepted\r\nContent-Type: application/json\r\n\r\n{\"message\":\"Updating\"}"
+UNPROCESSABLE = "HTTP/2.0 422 Unprocessable Entity\r\n\r\n{\"message\":\"expected head sha didn't match\"}"
+
+
 class GhRun(PF.FakeRun):
-    """pr_facts' fake gh, plus merge, update-branch and the result's read.
-    A merge marks the PR merged; an update moves its head to HEAD2."""
+    """pr_facts' fake gh, plus merge, update-branch, the auto-merge and
+    rules reads and the result's read. A merge marks the PR merged; an
+    update moves its head to HEAD2. No auto-merge, no rules by default."""
 
     def __init__(self, **answers):
         super().__init__(**answers)
@@ -108,6 +119,9 @@ class GhRun(PF.FakeRun):
         self.answers.setdefault("merge", self._merge)
         self.answers.setdefault("update", self._update)
         self.answers.setdefault("result", self._result)
+        self.answers.setdefault("auto", json.dumps({"autoMergeRequest": None}))
+        self.answers.setdefault("rules", "[]")
+        self.auto_after = None              # autoMergeRequest the result read reports
         self._lock = threading.Lock()
 
     def _merge(self, argv):
@@ -118,10 +132,11 @@ class GhRun(PF.FakeRun):
 
     def _update(self, argv):
         self.head_now = HEAD2
-        return ""
+        return ACCEPTED
 
     def _result(self, argv):
-        return json.dumps({"state": "MERGED" if self.merged else "OPEN", "headRefOid": self.head_now})
+        return json.dumps({"state": "MERGED" if self.merged else "OPEN", "headRefOid": self.head_now,
+                           "autoMergeRequest": self.auto_after})
 
     def __call__(self, argv, env, *, timeout, cap, stop=None, ok_codes=(0,), keep_tail=False):
         which = gh_kind(argv)
@@ -292,6 +307,9 @@ class Case(unittest.TestCase):
             return []
         return [json.loads(line) for line in path.read_text().splitlines()]
 
+    def results(self) -> list[dict]:
+        return [r for r in self.receipts() if r["phase"] == "result"]
+
 
 # -- the argv -----------------------------------------------------------------------------------
 
@@ -301,6 +319,12 @@ class Argv(Case):
         d = p.poll()
         self.assertEqual((d["actions"], d["method"]), (["merge"], "merge"))
         self.assertRegex(d["card"], r"^[0-9a-f]{64}$")
+        seen_at_merge = []
+
+        def merge(argv):
+            seen_at_merge.append(self.receipts())      # NIT 7: the intent is on disk before gh runs
+            return p.run._merge(argv)
+        p.run.answers["merge"] = merge
         out = p.act("merge")
         self.assertEqual((out["ok"], out["result"], out["method"]), (True, "merged", "merge"), out)
         (call,) = p.run.acts()
@@ -315,11 +339,14 @@ class Argv(Case):
                 self.assertNotIn(word, c["argv"], c["argv"])
         # The result came from a fresh read after the merge.
         kinds = [c["kind"] for c in p.run.calls]
-        self.assertEqual(kinds[-2:], ["merge", "result"])
-        (receipt,) = self.receipts()
+        self.assertEqual(kinds[-4:], ["auto", "rules", "merge", "result"])
+        intent, receipt = self.receipts()
+        common = {"repo": REPO, "number": N, "head": HEAD, "action": "merge", "method": "merge",
+                  "via": "hud", "limited": False}
+        self.assertEqual({k: v for k, v in intent.items() if k != "at"}, {**common, "phase": "intent"})
         self.assertEqual({k: v for k, v in receipt.items() if k != "at"},
-                         {"repo": REPO, "number": N, "head": HEAD, "action": "merge", "method": "merge",
-                          "via": "hud", "limited": False, "gh": "ok", "result": "merged"})
+                         {**common, "phase": "result", "gh": "ok", "result": "merged"})
+        self.assertEqual(seen_at_merge, [[intent]])
         path = self.inbox_dir / pr_merge.RECEIPTS_FILE
         self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
         self.assertEqual(stat.S_IMODE(os.stat(self.inbox_dir).st_mode), 0o700)
@@ -359,9 +386,32 @@ class Argv(Case):
         out = p.act("update")
         self.assertEqual((out["ok"], out["result"], out["method"]), (True, "updated", None))
         (call,) = p.run.acts()
-        self.assertEqual(call["argv"], [PF.GH, "pr", "update-branch", str(N), "--repo", REPO])
-        self.assertEqual(self.receipts()[0]["action"], "update")
-        print("ok  update: exactly gh pr update-branch N --repo O/R, BEHIND only; result 'updated'")
+        self.assertEqual(call["argv"], [PF.GH, "api", "--method", "PUT", "--include",
+                                        f"repos/{REPO}/pulls/{N}/update-branch", "-f", f"expected_head_sha={HEAD}"])
+        self.assertNotIn("-F", call["argv"])
+        self.assertEqual(call["ok_codes"], (0, 1))
+        self.assertEqual([c["kind"] for c in p.run.calls][-3:], ["auto", "update", "result"],
+                         "no rules read for an update")
+        self.assertEqual((self.results()[0]["action"], self.results()[0]["gh"]), ("update", "http 202"))
+        print("ok  update: exactly gh api --method PUT .../update-branch -f expected_head_sha=<head>; 'updated'")
+
+    def test_update_202_and_422(self):
+        view = PF.view(mergeStateStatus="BEHIND")
+        p = self.prs(view=view, run=GhRun(view=json.dumps(view)))
+        p.poll()
+        # 202 and the head not moved yet (GitHub updates asynchronously).
+        p.run.answers["update"] = ACCEPTED
+        self.assertEqual(p.act("update")["result"], "update requested")
+        # 422: the head moved before GitHub took it.
+        p.run.answers["update"] = UNPROCESSABLE
+        e = self.refused(lambda: p.act("update"))
+        self.assertIn("head moved", e.word)
+        self.assertEqual((self.results()[-1]["result"], self.results()[-1]["gh"]), ("changed", "http 422"))
+        # An answer with no status line is never taken for one.
+        p.run.answers["update"] = "{}"
+        self.assertEqual(p.act("update")["result"], "not updated")
+        self.assertEqual(self.results()[-1]["gh"], "unread")
+        print("ok  update: 202 'update requested', 422 'changed since you read it' (409), no status read as none")
 
     def test_results_come_from_the_fresh_read_never_from_gh(self):
         p = self.prs()
@@ -369,7 +419,7 @@ class Argv(Case):
         p.run.answers["merge"] = GhFailed("exit")
         out = p.act("merge")
         self.assertEqual((out["ok"], out["result"]), (False, "not mergeable"))
-        self.assertEqual(self.receipts()[-1]["gh"], "exit")
+        self.assertEqual(self.results()[-1]["gh"], "exit")
         # gh said nothing went wrong, but the head moved before it ran.
         p.run.answers["merge"] = ""
         p.run.head_now = HEAD2
@@ -388,6 +438,62 @@ class Argv(Case):
         self.assertEqual(p.act("merge_as_is")["result"], "merged")
         self.assertIn("--merge", p.run.acts()[0]["argv"])
         print("ok  merge as is: only where offered, the same pinned argv")
+
+
+class Queue(Case):
+    """MED 1 of #336's review: never into a merge queue or auto-merge."""
+
+    def check(self, p, **answers):
+        p.run.answers.update(answers)
+        e = self.refused(lambda: p.act("merge"), 409, pr_merge.QUEUE)
+        self.assertEqual(e.word, pr_merge.QUEUE)
+        self.assertEqual(p.run.acts(), [])
+        self.assertEqual(self.receipts(), [], "no intent: nothing was run")
+
+    def test_auto_merge_on_is_refused(self):
+        p = self.prs()
+        p.poll()
+        self.check(p, auto=json.dumps({"autoMergeRequest": {"mergeMethod": "SQUASH", "enabledAt": "x"}}))
+        print("ok  auto-merge already on: 409, nothing run")
+
+    def test_a_merge_queue_base_is_refused(self):
+        p = self.prs()
+        p.poll()
+        self.check(p, rules=json.dumps([{"type": "pull_request"}, {"type": "merge_queue", "parameters": {}}]))
+        (rules,) = [c for c in p.run.calls if c["kind"] == "rules"]
+        self.assertEqual(rules["argv"], [PF.GH, "api", "--method", "GET",
+                                         f"repos/{REPO}/rules/branches/main?per_page={pr_merge.RULES_MAX}"])
+        print("ok  a merge_queue rule on the base: 409, nothing run; the rules read is GET")
+
+    def test_unreadable_is_refused(self):
+        for answers in ({"auto": GhFailed("exit")}, {"auto": "{}"}, {"auto": "not json"},
+                        {"rules": GhFailed("exit")}, {"rules": "{}"}, {"rules": json.dumps([{"x": 1}])},
+                        {"rules": json.dumps([{"type": "pull_request"}] * pr_merge.RULES_MAX)}):
+            with self.subTest(answers=list(answers)):
+                p = self.prs()
+                p.poll()
+                self.check(p, **answers)
+        print("ok  auto-merge or rules unreadable, malformed or maybe cut off: 409 (fails closed)")
+
+    def test_update_checks_auto_merge_only(self):
+        view = PF.view(mergeStateStatus="BEHIND")
+        p = self.prs(view=view, run=GhRun(view=json.dumps(view)))
+        p.poll()
+        p.run.answers["rules"] = json.dumps([{"type": "merge_queue"}])
+        self.assertEqual(p.act("update")["result"], "updated", "a queue base takes an update")
+        p.run.answers["auto"] = json.dumps({"autoMergeRequest": {"mergeMethod": "MERGE"}})
+        self.refused(lambda: p.act("update"), 409, pr_merge.QUEUE)
+        self.assertEqual(len(p.run.acts()), 1)
+        print("ok  update: refused under auto-merge, never asks the rules")
+
+    def test_a_queued_pr_reports_queued(self):
+        p = self.prs()
+        p.poll()
+        p.run.answers["merge"] = ""
+        p.run.auto_after = {"mergeMethod": "MERGE"}
+        out = p.act("merge")
+        self.assertEqual((out["ok"], out["result"]), (False, "queued"))
+        print("ok  a PR gh queued instead of merging: 'queued', never 'merged'")
 
 
 # -- stale ----------------------------------------------------------------------------------------
@@ -503,7 +609,7 @@ class Once(Case):
         p.set_view(state="MERGED")
         self.refused(lambda: p.act("merge", head=d["head"], card=d["card"]))
         self.assertEqual(len(p.run.acts()), 1)
-        self.assertEqual(len(self.receipts()), 1)
+        self.assertEqual(len(self.results()), 1)
         print("ok  two merges of one PR at once: one runs, the other 409s")
 
 
@@ -598,9 +704,11 @@ FAKE_GH = """#!/bin/sh
 printf '%s\\0' "$@" >> "$FAKE_GH_LOG"
 printf '\\n' >> "$FAKE_GH_LOG"
 echo "stderr {token}" >&2
-case "$2" in
-  view) echo '{{"state":"MERGED","headRefOid":"{head}"}}' ;;
-  merge) echo "stdout {token}" ;;
+case "$*" in
+  *"--json state,headRefOid,autoMergeRequest") echo '{{"state":"MERGED","headRefOid":"{head}","autoMergeRequest":null}}' ;;
+  *"--json autoMergeRequest") echo '{{"autoMergeRequest":null}}' ;;
+  *rules/branches/*) echo '[]' ;;
+  *) echo "stdout {token}" ;;
 esac
 exit 0
 """
@@ -626,8 +734,13 @@ class RealGh(Case):
             out = actions.act("merge", ROW, d["head"], d["card"], via="hud")
         self.assertEqual(out["result"], "merged")
         lines = [line.split("\0")[:-1] for line in log.read_text().split("\n") if line]
-        self.assertEqual(lines[0], ["pr", "merge", str(N), "--repo", REPO, "--merge", "--match-head-commit", HEAD])
-        self.assertEqual(lines[1], ["pr", "view", str(N), "--repo", REPO, "--json", "state,headRefOid"])
+        self.assertEqual(lines[0], ["pr", "view", str(N), "--repo", REPO, "--json", "autoMergeRequest"])
+        self.assertEqual(lines[1], ["api", "--method", "GET",
+                                    f"repos/{REPO}/rules/branches/main?per_page={pr_merge.RULES_MAX}"])
+        self.assertEqual(lines[2], ["pr", "merge", str(N), "--repo", REPO, "--merge", "--match-head-commit", HEAD])
+        self.assertEqual(lines[3], ["pr", "view", str(N), "--repo", REPO, "--json",
+                                    "state,headRefOid,autoMergeRequest"])
+        self.assertEqual(len(lines), 4)
         seen = json.dumps(out) + json.dumps(self.receipts()) + "\n".join(logs.output)
         self.assertNotIn(PF.TOKEN, seen)
         self.assertNotIn("stderr", seen)
@@ -674,6 +787,31 @@ class Routes(rac.Remote):
         self.assertEqual((status, out["result"]), (200, "merged"), out)
         print("ok  /inbox/pr/*: owner_only on the HUD listener; the API listener and a script refused")
 
+    def test_the_own_host_check_is_the_routes_own(self):
+        """NIT 5 of #336's review: as `POST /approvals`, the route itself
+        requires the HUD listener's own Host, not only `check_origin` in
+        front of it. Called directly with a handler `owner_only` passes
+        (the HUD's port, Origin equal to its Host) but whose Host is not
+        `127.0.0.1:<port>` or `localhost:<port>`."""
+        from jarvis.v2.daemon import APIError
+        d = self.prs.poll()
+        body = {"id": ROW, "head": d["head"], "card": d["card"]}
+        for host, want in ((f"127.0.0.2:{self.d.face_port}", 403), (f"box.lan:{self.d.face_port}", 403),
+                           (f"127.0.0.1:{self.d.face_port}", 200)):
+            handler = SimpleNamespace(
+                server=SimpleNamespace(server_address=("127.0.0.1", self.d.face_port)), command="POST",
+                headers={"Host": host, "Origin": f"http://{host}"}, _body=lambda: dict(body))
+            with self.subTest(host=host):
+                if want == 403:
+                    with self.assertRaises(APIError) as caught:
+                        pr_merge.hud_route(handler, self.d, ["inbox", "pr", "merge"], {})
+                    self.assertEqual(caught.exception.status, 403)
+                    self.assertEqual(self.prs.run.acts(), [])
+                else:
+                    status, out = pr_merge.hud_route(handler, self.d, ["inbox", "pr", "merge"], {})
+                    self.assertEqual((status, out["result"]), (200, "merged"))
+        print("ok  the route's own Host check: 127.0.0.2 or a LAN name on the HUD port with its Origin is 403")
+
     def test_fix_is_501_and_shapes(self):
         d = self.prs.poll()
         self.assertEqual(self.owner("/inbox/pr/fix", {"id": ROW})[0], 501)
@@ -711,17 +849,23 @@ class Phone(rach.Phone):
         self.prs.poll()
         return self.prs
 
-    def options(self, action, row=ROW, cookie=None):
-        return self.phone("POST", pr_merge.PHONE_OPTIONS, {"id": row, "action": action},
+    def shown(self) -> dict:
+        """What the phone shows of the row: its head and card."""
+        d = self.prs.detail()
+        return {"head": d["head"], "card": d["card"]}
+
+    def options(self, action, row=ROW, cookie=None, shown=None):
+        return self.phone("POST", pr_merge.PHONE_OPTIONS, {"id": row, "action": action, **(shown or self.shown())},
                           cookie=cookie or self.cookie)
 
     def act(self, body, cookie=None):
         return self.phone("POST", pr_merge.PHONE_ACT, body, cookie=cookie or self.cookie)
 
     def signed(self, action, cookie=None):
-        status, _, body = self.options(action, cookie=cookie)
+        opts = self.shown()
+        status, _, body = self.options(action, cookie=cookie, shown=opts)
         self.assertEqual(status, 200, body)
-        return self.a.get(body["publicKey"]), body
+        return self.a.get(body["publicKey"]), opts
 
     def verified(self, action, **extra):
         credential, opts = self.signed(action)
@@ -735,7 +879,7 @@ class PhoneActs(Phone):
         d = p.detail()
         status, _, body = self.options("merge")
         self.assertEqual(status, 200, body)
-        self.assertEqual((body["head"], body["card"]), (d["head"], d["card"]))
+        self.assertEqual(set(body), {"action", "publicKey"}, "never echoes a head or card (MED 2)")
         want = pr_merge.subject(REPO, N, d["head"], d["card"], "merge")
         self.assertRegex(want, r"^pr:[0-9a-f]{56}$")
         entries = [c for c in self.auth._challenges.values() if c.get("req_id") == want]
@@ -754,9 +898,35 @@ class PhoneActs(Phone):
         self.assertEqual(self.receipts_via(), ["phone"])
         print("ok  phone: one assertion per action, bound to pr:<56 hex> of repo, number, head, card, action")
 
+    def test_options_bind_what_the_phone_showed(self):
+        """MED 2 of #336's review: a push between the phone's view and its
+        options is a 409, never a challenge for the new head."""
+        p = self.wire()
+        seen = self.shown()
+        p.set_view(headRefOid=HEAD2)
+        p.view = PF.view(headRefOid=HEAD2)
+        p.source.poll()
+        eventually(lambda: p.detail()["head"] == HEAD2 and p.detail()["actions"] == ["merge"],
+                   what="the new head's row")
+        self.assertNotEqual(self.shown()["card"], seen["card"])
+        status, _, body = self.options("merge", shown=seen)
+        self.assertEqual(status, 409, body)
+        self.assertEqual(body["error"], pr_merge.CHANGED)
+        status, _, body = self.options("merge", shown={**seen, "card": self.shown()["card"]})
+        self.assertEqual(status, 409, ("the new card with the old head", body))
+        for bad in ({"head": seen["head"]}, {"card": seen["card"]}, {}):
+            st = self.phone("POST", pr_merge.PHONE_OPTIONS, {"id": ROW, "action": "merge", **bad},
+                            cookie=self.cookie)[0]
+            self.assertEqual(st, 400, bad)
+        self.assertFalse([c for c in self.auth._challenges.values() if c.get("family") == "pr"])
+        status, _, body = self.options("merge")
+        self.assertEqual(status, 200, body)
+        print("ok  phone options: bound to the head and card the phone showed; a push since is 409")
+
     def receipts_via(self):
         path = Path(self.d.stores.root) / "inbox" / pr_merge.RECEIPTS_FILE
-        return [json.loads(x)["via"] for x in path.read_text().splitlines()] if path.exists() else []
+        return ([json.loads(x)["via"] for x in path.read_text().splitlines()
+                 if json.loads(x)["phase"] == "result"] if path.exists() else [])
 
     def test_cross_family_assertions_are_refused_both_ways(self):
         self.wire()
