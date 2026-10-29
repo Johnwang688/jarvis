@@ -1,6 +1,6 @@
 # Plan: PR rows become "agent summary + OK to merge" (PM)
 
-**Status (2026-10-28): plan, not built.** Written against main `a5798ea2`. It builds on the
+**Status (2026-10-28): plan; PM-A, PM-B and PM-C built (PM-C as built at the end).** Written against main `a5798ea2`. It builds on the
 owner inbox (IN-4, IN-7, `jarvis/v2/inbox_prs.py`), the phone surface (PH-4, PH-7, §4.1),
 the morning review (MR) and approval summaries (AS, PR #330, not merged). PM-n are the
 planner's defaults, reversible. The owner's decisions below are binding.
@@ -287,3 +287,80 @@ The owner's decisions:
 
 Verified locally: gh 2.86 has `--match-head-commit`, `baseRefOid` and `files` in `gh pr view`,
 and `mergeCommitAllowed` in `gh repo view`. Git 2.53 has `merge-tree --write-tree`.
+
+## As built: PM-C (2026-10-28)
+
+`jarvis/v2/pr_summary.py` (SELF_PROTECTED), wired into `inbox_prs.PrSource`, attached by
+daemon2's `main()` only (`Daemon.attach_pr_summaries`). Tests: `tests/v2/pr_summary_check.py`
+(fakes only) and `tests/v2/pr_summary_mutants.py` (24 mutants, each killed by the test named
+for it).
+
+- **Engine.** `PrSummaryEngine(SummaryEngine)`: tier `pr_summary` (`JARVIS_PR_SUMMARY_MODEL`,
+  Haiku 5.5, never Chinese-hosted); PM-4's prompt; input = the code-built facts line
+  (`facts_text`) and `pr_facts.model_input(facts).text`, display-scrubbed again, inside the
+  engine's fence (at most 24,000 characters); nothing is sent for a PR not read, not open or a
+  draft. `parse_summary` keeps the first `Does:` (240) and `Blocked:` (300) lines, cleaned as
+  `clean_summary` cleans; no `Does:` is a failure. Deadline 90 s, one call at a time, 2 tries.
+- **One file** `<data root>/inbox/pr-summaries.json` (0600, folder 0700) holds the newest 200
+  summaries (the engine's `get`/`put` cache), the day's ledger (`StoredLedger`: 300 calls,
+  $0.25) and the per-PR counts (6 a day; a cached summary is free, an ask the day's cap refuses
+  gives its count back, as does a job that never got the one slot). Fixed in review of #335
+  (MED 2): a budget or per-PR block that cannot be read (one bad byte included) moves the file
+  aside (`pr-summaries.json.bad-<time>`, 0600) and starts a new one with **today's budget used
+  up**, so today stays closed and tomorrow opens, logged once; a cached summary that cannot be
+  read is dropped. A link or a folder at the path, or a failed write, still closes the budget
+  for the process. Writes are fsynced before `os.replace` (in this module, not `stores`). A day
+  before the stored one counts as the stored day.
+- **Cost.** At Haiku 5.5's listed price ($0.10/M in, $0.50/M out under 100k), a full 20,000-
+  character input is about 6k tokens: about $0.0007 a call. 300 calls is about $0.20, so the
+  call cap normally binds before the $0.25 one. An estimate; no paid call was made.
+- **Row fields** (added to each PR row's `detail`, `pr_summary.ENRICH_KEYS`): `facts`
+  (`FactPart.as_dict()` list), `flags` (`{flagged, items: [{name, families}], more,
+  incomplete}`), `summary` (`{does, blocked}` or null), `summary_state`, `summary_note`
+  ("checks re-running" or ""), `summary_reason` (code's words for `failed`/`off`), and
+  PM-12's `actions`, `why`, `method` from `decide(facts)` (no hold, not limited; display only,
+  no route acts on them). The row's existing `head` is the bound head: facts are shown only
+  when their head equals it. When the poll's checks or merge state moved since the read,
+  `actions` is empty and `why` says it is being read again.
+- **Refresh.** A read or summary that lands re-builds the row under the snapshot's lock and
+  publishes `inbox_changed` `{ids, reason: "pr_summary"}` (rank 5: no push).
+- **Tidy.** After each poll, `tidy_mirrors(state, listing_complete=...)` with each repository's
+  open PR numbers when its list was read whole, None when it failed, was cut off or skipped
+  (`listing_complete` only when at least one repository is named).
+
+Deviations from the plan, each the builder's call:
+
+1. **Reads are not repeated on every poll.** A PR is read when it is new, when the poll's
+   (head, checks, merge state) moved since it was queued, after `RETRY_S` (5 min) when the
+   last read was incomplete, and after `REFRESH_S` (30 min) in any case. Each read is four to
+   six gh calls; re-reading every open PR every 5 minutes buys nothing the key would use.
+2. **"Only the checks moved to pending"** is read as: the same head, checks now pending, and a
+   merge state that is unchanged or one pending checks explain (BLOCKED, UNSTABLE, UNKNOWN).
+   A move to DIRTY or BEHIND while checks run is summarized again.
+3. **The facts line goes to the model**, inside the fence, so it can say why GitHub holds a PR
+   (merge state, reviews) without a second source. It is code's text, fenced as data.
+4. **The phone is unchanged:** a `pr` row is still a generic kind in `remote_api`, which keeps
+   none of the new keys; `DETAIL_FIELDS["pr"]` waits for PM-F. The desk HUD reads only `repo`,
+   `number`, `title` and `url` of a PR row (`hud/src/lib/inbox.ts` `prOf`).
+5. **`pr_summary.py` is in SELF_PROTECTED now**, not in PM-G.
+6. `PrSource.stop()` closes the engine for good; a daemon is not restarted in-process.
+
+**Review of #335 (2026-10-28), fixed on the branch:** MED 1 the head-match, moved-list and
+`REFRESH_S` rules now have tests and mutants; MED 2 above; LOW 3 no summary from a read that
+missed its diff, checks, logs or conflicts ("read in part"; the queue reads it again after
+`RETRY_S`; "too_large" counts as whole); LOW 4 the parser takes a label's text from the next
+lines, the first label with text, and cuts `Does:` at an inner `Blocked:`; LOW 5 author and
+check names go to the model quoted, as names; LOW 6 a summary that lands after the watchdog is
+put on the row when the key still matches; LOW 7 a moved list marks the shown summary
+"reading again"; NITs: the day never goes back, the poll's spelling of a repository is used,
+and unread checks keep `decide`'s words. **Left, as the review allowed:** a symlinked
+`inbox/` folder's ancestors are not checked (the folder itself is), and the engine still calls
+the cache's `put` (a small file write) under its lock.
+
+**Delta review of #335, fixed:**
+- A bad file's bytes are hard-linked aside first. A whole new file then replaces it, so a write that fails leaves the bad file in place and a restart keeps today closed. The newest 3 copies are kept.
+- When the same parts stay missing for the same PR state for `REFRESH_S`, the PR is summarized anyway:
+  - the missing parts are in the key;
+  - `summary_note` names them ("written without the CI logs, which could not be read");
+  - until then, the row's reason names them too ("the CI logs could not be read; it is read again in 5 minutes").
+- A late answer for an older head never lands; this is pinned by a test and a mutant.

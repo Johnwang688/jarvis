@@ -1193,6 +1193,12 @@ TIERS: dict[str, str] = {
     # line is personal data), which jarvis/v2/approval_summary.py enforces on
     # an override. Read straight from here, as speech_summary is.
     "approval_summary": os.environ.get("JARVIS_APPROVAL_SUMMARY_MODEL") or "anthropic/claude-haiku-5.5",
+    # The two-line summary on an inbox PR row (PM-C, 2026-10-28): what the PR
+    # does and why it is blocked, written ahead of time. Haiku 5.5, the
+    # owner's choice; display text only, never Chinese-hosted (a PR's diff
+    # and logs are personal data), which jarvis/v2/pr_summary.py enforces on
+    # an override. Read straight from here, as approval_summary is.
+    "pr_summary": os.environ.get("JARVIS_PR_SUMMARY_MODEL") or "anthropic/claude-haiku-5.5",
 }
 
 SYSTEM_PROMPT = """You are Jarvis, a personal assistant agent running on the user's machine.
