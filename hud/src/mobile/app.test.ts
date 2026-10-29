@@ -282,7 +282,14 @@ describe("the phone's views: untrusted text stays text (P-3)", () => {
     expect(inside[0].textContent).toBe(role);
     expect(inside[1].textContent).toBe("FYI " + H + "\nmore");
     const css = readFileSync(join(__dirname, "mobile.css"), "utf8");
-    expect(css).toMatch(/\.step-role-tail \{ flex: none; \}/);
+    // It gives way last, and can (so a long role and marks never overflow the line's cap).
+    expect(css).toMatch(/\.step-role-head \{ flex: 0 1000 auto;/);
+    expect(css).toMatch(/\.step-role-marks \{ flex: 0 100 auto;/);
+    expect(css).toMatch(/\.step-role-tail \{ flex: 0 1 auto; min-width: 0;/);
+    const marked = logRow({ seq: 6, role, text: "x", at: null, marks: ["not typed by the owner"], cut: false });
+    expect(marked.querySelector(".step-role-tail")!.textContent).toBe(" (d7278e2a), not the owner");
+    expect(marked.querySelector(".step-role-marks")!.textContent).toBe(" · not typed by the owner");
+    expect(marked.querySelector("summary")!.title).toBe(role + " · not typed by the owner");
     expect(css).toMatch(/\.step-role-head \{[^}]*text-overflow: ellipsis/);
   });
 

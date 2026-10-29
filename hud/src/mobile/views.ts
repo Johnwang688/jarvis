@@ -432,8 +432,8 @@ export function logRow(row: LogRow, inOwnerChat = true): HTMLElement {
   summary.setAttribute("aria-label", first ? `${who}: ${first}` : who);
   const [head, tail] = roleParts(row.role);
   const role = el("span", "step-role");
-  role.append(el("span", "step-role-head", head),
-    el("span", "step-role-tail", tail + (row.marks.length ? " · " + row.marks.join(" · ") : "")));
+  role.append(el("span", "step-role-head", head), el("span", "step-role-tail", tail));
+  if (row.marks.length) role.append(el("span", "step-role-marks", " · " + row.marks.join(" · ")));
   summary.append(role, el("span", "step-text", first), el("span", "step-time", time(row.at).slice(0, 5)));
   fold.append(summary, testid(el("div", "step-who", who), "m-step-who"), el("div", "step-body plain-text", row.text));
   if (cut) fold.append(cut);

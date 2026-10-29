@@ -269,8 +269,10 @@ p, li, h2, h3 { overflow-wrap: anywhere; }
 .step-line::before { content: "›"; flex: none; width: 10px; text-align: center; transition: transform 0.15s; }
 .step[open] > .step-line::before { transform: rotate(90deg); }
 .step-role { display: flex; flex: 0 1 auto; min-width: 0; max-width: 62%; white-space: nowrap; color: var(--text-2); }
-.step-role-head { min-width: 2ch; overflow: hidden; text-overflow: ellipsis; }
-.step-role-tail { flex: none; }
+/* What gives way first in the folded line: the title, then the marks, the " (id), not the owner" last. */
+.step-role-head { flex: 0 1000 auto; min-width: 2ch; overflow: hidden; text-overflow: ellipsis; }
+.step-role-marks { flex: 0 100 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.step-role-tail { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .step-who { font-size: 12px; color: var(--text-2); margin: 0 0 4px 4px; padding-left: 10px; border-left: 2px solid var(--border);
   overflow-wrap: anywhere; }
 .step-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
