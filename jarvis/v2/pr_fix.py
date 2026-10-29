@@ -429,6 +429,13 @@ class _Judge:
                 self.ask("a program named by an expansion may be git or gh")
         else:
             mg._dir_options(line, stem, args)
+            from jarvis import rules
+            if (stem not in rules._WRAPPER_OPTS and stem not in rules._RUNNER_SPECS
+                    and any(mg._stem_could_be(a, _GIT_NAMES)[0] in _GIT_NAMES for a in args)
+                    and _PUSHISH.search(" ".join(words))):
+                # `sudo git push …`, `doas gh pr merge`: a program the walk does
+                # not follow hands its words to git or gh.
+                self.ask(f"{_shown(stem)} starts git or gh in a way the gate does not follow")
 
     # -- git -------------------------------------------------------------------------------------
 

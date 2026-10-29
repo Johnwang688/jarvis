@@ -200,7 +200,8 @@ class Scope(unittest.TestCase):
                     f"git push ssh HEAD:refs/heads/{BRANCH}",
                     f"cd {self.repo} && git push origin HEAD:refs/heads/{BRANCH}",
                     f"git -C {self.repo} push origin HEAD:refs/heads/{BRANCH}",
-                    f"npm test && git push origin HEAD:refs/heads/{BRANCH}")
+                    f"npm test && git push origin HEAD:refs/heads/{BRANCH}",
+                    f"timeout 60 git push origin HEAD:refs/heads/{BRANCH}")
 
     def test_another_destination_is_refused(self):
         self.deny(X.S_DEST, "git push origin HEAD:refs/heads/main", "git push origin HEAD:main",
@@ -231,6 +232,8 @@ class Scope(unittest.TestCase):
 
     def test_force_is_refused(self):
         self.deny(X.S_FORCE, f"git push -f origin HEAD:refs/heads/{BRANCH}",
+                  f"timeout 60 git push -f origin HEAD:refs/heads/{BRANCH}",
+                  f"bash -c 'git push -f origin HEAD:refs/heads/{BRANCH}'",
                   f"git push --force origin HEAD:refs/heads/{BRANCH}",
                   f"git push --force-with-lease origin HEAD:refs/heads/{BRANCH}",
                   f"git push --force-with-lease={BRANCH}:{HEAD} origin HEAD:refs/heads/{BRANCH}",
@@ -309,7 +312,9 @@ class Scope(unittest.TestCase):
                   "git pushit", "git lfs push origin main", "gh my-alias 7",
                   "python3 -c \"import subprocess; subprocess.run(['git','push','-f'])\"",
                   "echo 'git push -f origin main' | sh", f"$GIT push origin HEAD:refs/heads/{BRANCH}",
-                  f"git push --p origin HEAD:refs/heads/{BRANCH}", f"git push -x origin HEAD:refs/heads/{BRANCH}")
+                  f"git push --p origin HEAD:refs/heads/{BRANCH}", f"git push -x origin HEAD:refs/heads/{BRANCH}",
+                  f"GIT_DIR=/tmp/x git push origin HEAD:refs/heads/{BRANCH}", "sudo git push -f origin main",
+                  "doas gh pr merge 7", f"xargs git push origin < refs.txt")
         # The folder it runs in is not a repository: nothing can be read.
         self.asks(f"git push origin HEAD:refs/heads/{BRANCH}", cwd=Path(tempfile.mkdtemp(dir=_ROOT)))
 
@@ -1202,6 +1207,9 @@ class NoAgentPath(Fixing):
         self.assertEqual(sorted(writers), ["jarvis/v2/pr_fix.py", "jarvis/v2/stores.py"])
         stores_text = (root / "v2" / "stores.py").read_text()
         self.assertIn("obj.pr_scope = previous.pr_scope", stores_text)
+        from jarvis.tools.files import SELF_PROTECTED
+        self.assertIn("jarvis/v2/pr_fix.py", SELF_PROTECTED)
+        self.assertIn("jarvis/v2/permissions.py", SELF_PROTECTED)
 
 
 class NoStart(unittest.TestCase):
