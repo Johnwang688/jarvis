@@ -189,8 +189,8 @@ MUTANTS = [
      "        allowed = (TASK_DECISIONS if task else DEFER_DECISIONS if defer else PR_DECISIONS + ANSWER_DECISIONS if pr\n",
      ["PhoneActs.test_cross_family_assertions_are_refused_both_ways"], CHECK),
     ("api: the phone keeps the GitHub link", API,
-     '"summary_state", "summary_note", "summary_reason", "why", "method", "actions", "card",\n           "hold"),',
-     '"summary_state", "summary_note", "summary_reason", "why", "method", "actions", "card",\n           "hold", "url"),',
+     '"summary_state", "summary_note", "summary_reason", "why", "method", "actions", "card",\n           "hold", "fix"),',
+     '"summary_state", "summary_note", "summary_reason", "why", "method", "actions", "card",\n           "hold", "fix", "url"),',
      ["Wiring.test_the_desk_and_phone_projections_keep_their_fields"], PS_CHECK),
 ]
 
