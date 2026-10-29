@@ -234,7 +234,11 @@ class Leaves(unittest.TestCase):
         # runs), so the call gets no summary: its command shows expanded.
         for command in ("sshpass -p 'Tr0ub4dor&3' ssh admin@10.0.0.5 uptime",
                         "PGPASSWORD='Tr0ub&4dor3' psql -h db", "sshpass -p 'Tr0ub;4dor3' ssh a@h",
-                        "htpasswd -b .htpasswd admin 'adm|npass99'"):
+                        "htpasswd -b .htpasswd admin 'adm|npass99'",
+                        # Delta review of #330, NEW-1: inside a string another shell runs.
+                        'bash -c "sshpass -p \'Tr0ub&4dor3\' ssh h"',
+                        "bash -c \"sh -c 'sshpass -p Tr0ub4dor3 ssh h'\"",
+                        "bash -c $'sshpass -p x\\x20ssh h'"):
             with self.subTest(command=command):
                 chat, box = Chat(), Box()
                 self.assertEqual(summaries(chat).begin(request(command), box), (S.OFF, ""))
@@ -244,6 +248,10 @@ class Leaves(unittest.TestCase):
         chat = Chat()
         self.assertEqual(summaries(chat).begin(request(None, tool="mcp__x__deploy", args=args), Box()), (S.OFF, ""))
         self.assertEqual(chat.calls, [])
+
+    def test_an_ordinary_nested_shell_keeps_its_summary(self):
+        sent = self.sent_for(request('bash -lc "cd /srv/calc && make deploy"'))
+        self.assertIn("make deploy", sent)
 
     def test_the_hold_back_check_is_really_called_mutation(self):
         with patch.object(S, "holds_back_credential", return_value=False):

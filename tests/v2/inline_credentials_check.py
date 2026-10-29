@@ -1137,6 +1137,55 @@ class Family(unittest.TestCase):
         self.assertFalse(secrets._LOOSE_VALUES.get())
         self.assertEqual(secrets.redact_command("PGPASSWORD='Tr0ub&4dor3' psql"), "PGPASSWORD='Tr0ub&4dor3' psql")
 
+    def test_every_occurrence_is_withheld(self):
+        # Delta review of #330, NEW-2: only the first match per program and
+        # segment was withheld.
+        for command, shown in (
+                ("ssh-keygen -p -P 0ldPass99 -N N3wPass99 -f k", f"ssh-keygen -p -P {R} -N {R} -f k"),
+                ("openssl pkcs12 -in a -passin pass:AAApass1 -passout pass:BBBpass2",
+                 f"openssl pkcs12 -in a -passin pass:{R} -passout pass:{R}"),
+                ("zip -P aaapass1 -P bbbpass2 o.zip f", f"zip -P {R} -P {R} o.zip f"),
+                ("ldapsearch -w aaapass1 -w bbbpass2", f"ldapsearch -w {R} -w {R}"),
+                ("curl -u a:p1xxxx -u b:p2xxxx https://x", f"curl -u a:{R} -u b:{R} https://x")):
+            with self.subTest(command=command):
+                self.assertEqual(secrets.redact_command(command), shown)
+                self.assertFalse(secrets.holds_back_credential(command))
+
+    def test_a_glued_value_in_quotes_is_the_rest_of_the_word(self):
+        for command, shown in (("7z a '-pTr0ub4dor' o.7z f", f"7z a '-p{R}' o.7z f"),
+                               ('7z a "-pTr0ub4dor" o.7z f', f'7z a "-p{R}" o.7z f'),
+                               ("mysql '-pTr0ub4dor' db", f"mysql '-p{R}' db")):
+            with self.subTest(command=command):
+                self.assertEqual(secrets.redact_command(command), shown)
+        # A blank in it: the never-hidden rule keeps the value on the card
+        # (its first run is withheld, as before); the check reports it, so
+        # nothing of it leaves the machine.
+        command = "7z a '-pTr0ub 4dor' o.7z f"
+        self.assertNotIn("Tr0ub", secrets.redact_command(command))
+        self.assertTrue(secrets.holds_back_credential(command))
+        self.assertEqual(secrets.redact_command('mysql "-p$PW" db'), 'mysql "-p$PW" db', "an expansion is no value")
+
+    def test_a_string_another_shell_runs_is_read(self):
+        # Delta review of #330, NEW-1: `bash -c "..."` was one quoted word.
+        held = ['bash -c "sshpass -p \'Tr0ub&4dor3\' ssh h"',               # the reviewer's probe
+                'bash -c "sshpass -p Tr0ub4dor3 ssh h"',
+                "bash -c \"sh -c 'sshpass -p Tr0ub4dor3 ssh h'\"",          # nested twice
+                "/bin/bash -lc 'PGPASSWORD=x9x9x9x9 psql'",
+                "su -c 'htpasswd -b f admin adminpass99' root",
+                "eval 'mysql -pS3cretPw db'",
+                "bash -c $'sshpass -p x\\x20ssh h'",                       # unreadable
+                'bash -c "unterminated',                                      # unreadable
+                "sh -c \"bash -c 'zsh -c \\\"dash -c ls\\\"'\"",     # past the depth bound
+                "bash -c '" + "x" * (secrets._NESTED_MAX + 1) + "'"]         # past the size bound
+        for command in held:
+            with self.subTest(command=command[:80]):
+                self.assertTrue(secrets.holds_back_credential(command))
+        for command in ('bash -lc "cd /srv && make deploy"', 'bash -c "echo $HOME | wc"', 'eval "$(ssh-agent -s)"',
+                        "sudo sh -c 'echo hi > /etc/x'", "bash -c \"sh -c 'ls -la'\"", "echo 'bash -c x'; ls",
+                        "sh -c \"bash -c 'zsh -c \\\"ls\\\"'\""):
+            with self.subTest(command=command):
+                self.assertFalse(secrets.holds_back_credential(command), "summaries stay for ordinary nesting")
+
     def test_judges_never_read_it(self):
         def boom(*_a, **_k):
             raise AssertionError("a judge read through the display redaction")

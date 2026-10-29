@@ -293,6 +293,30 @@ answer and both morning-review face checks.
   worker returns, and an identical ask meanwhile waits on the same job.
 - **NIT 10.** The late-summary test waits on the summary's end.
 
+### Delta review of #330 (2026-10-28), as built
+
+- **NEW-1, nested shells.** `secrets.holds_back_credential` also reads the
+  string another shell runs (`sh`/`bash`/`zsh`/`dash`/... `-c STR`,
+  `su`/`runuser -c STR`, `eval WORDS`; only a wrapper outside quotes, its
+  string unquoted, at most 3 deep and 16,000 characters): any credential
+  in it (the strict redaction would change it), an unreadable string
+  (`$'...'` with an escape, an unclosed quote), or a bound passed means no
+  summary. An ordinary `bash -lc "cd x && make"` keeps its summary. The
+  card is unchanged: rule 3 keeps every value on a line that re-parses text
+  as code, deliberately, and rewriting inside a string another shell parses
+  could hide what that shell runs.
+- **NEW-2.** `_program_flags` withholds every occurrence of a flag, not the
+  first (`ssh-keygen -P old -N new`, `-passin pass:A -passout pass:B`), and a
+  flag glued to its value inside a quoted word takes the rest of that word
+  (`'-pTr0ub4dor'`). A value with a blank (`'-pTr0ub 4dor'`) is still not
+  withheld whole (the never-hidden rule): its first run is, as before, and
+  `holds_back_credential` keeps the call from the model.
+- **NEW-3.** `hud/src/lib/approvalSync.ts`: the boot and reconnect reads of
+  `/approvals` follow `ActivitySync`'s begin/land pattern; every card action
+  heard while one is in flight is replayed after the list, so a card
+  resolved meanwhile never returns and one added meanwhile is kept. A failed
+  read keeps the cards on screen.
+
 Open: Discord's post still shows the whole command and no summary (AS-16);
 the 2–3 s target is unmeasured (no paid probe was run); the daily cap is in
 memory, so a restart resets it; on the card (not to the model), a

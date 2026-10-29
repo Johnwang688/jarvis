@@ -123,12 +123,6 @@ def model_input(request) -> str | None:
     `INPUT_MAX_CHARS`)."""
     if getattr(request, "private", False):
         return None
-    # A credential the card leaves showing (its rule: a value holding an
-    # operator or a blank is never withheld, since it might be what runs)
-    # never leaves this machine: no summary, so the card shows the command
-    # expanded (review of #330, LOW 5: `sshpass -p 'Tr0ub4dor&3' ...`).
-    if holds_back_credential(request.command) or holds_back_credential(request.args):
-        return None
     card = request.card()
     command = card.get("command") if isinstance(card.get("command"), str) else ""
     args = card.get("args") if isinstance(card.get("args"), dict) else {}
@@ -152,6 +146,14 @@ def model_input(request) -> str | None:
             return None
     text = scrub(untrusted.strip_invisible("\n".join(parts))).strip()
     if not text or len(text) > INPUT_MAX_CHARS:
+        return None
+    # A credential the card leaves showing (its rule: a value holding an
+    # operator or a blank is never withheld, since it might be what runs),
+    # or one inside a string another shell runs (`bash -c "..."`), never
+    # leaves this machine: no summary, so the card shows the command
+    # expanded (review of #330, LOW 5 and NEW-1). After the size check, so
+    # the raw call it reads is bounded too.
+    if holds_back_credential(request.command) or holds_back_credential(request.args):
         return None
     return text
 

@@ -1648,16 +1648,17 @@ def _program_flags(text: str) -> str:
                     while i < len(values) and values[i].startswith("-"):
                         i += 2 if values[i] in value_options else 1
                     end = words[i].start() if i < len(words) else seg_end
-                match = pattern.search(text, start, end)
-                if match is not None:
-                    edits.append((match, _program_value(kind)(match)))
+                # Every occurrence, not the first (review of #330, NEW-2:
+                # `ssh-keygen -P old -N new`, `-passin pass:A -passout pass:B`).
+                for match in pattern.finditer(text, start, end):
+                    edits.append(_program_edit(text, match, kind))
     if not edits:
         return text
     mask = _Mask(text)
     out, pos = [], 0
-    for match, replaced in sorted(edits, key=lambda e: e[0].start()):
-        whole = match.group(0)
-        if replaced == whole or match.start() < pos:
+    for a, b, replaced in sorted(edits, key=lambda e: e[0]):
+        whole = text[a:b]
+        if replaced == whole or a < pos:
             continue
         p = 0
         while p < min(len(whole), len(replaced)) and whole[p] == replaced[p]:
@@ -1665,12 +1666,38 @@ def _program_flags(text: str) -> str:
         s = 0
         while s < min(len(whole), len(replaced)) - p and whole[-1 - s] == replaced[-1 - s]:
             s += 1
-        if not mask.safe(match.start() + p, match.end() - s):
+        if not mask.safe(a + p, b - s):
             continue
-        out.append(text[pos:match.start()] + replaced)
-        pos = match.end()
+        out.append(text[pos:a] + replaced)
+        pos = b
     out.append(text[pos:])
     return "".join(out)
+
+
+_REST_OF_QUOTE = {"'": re.compile(r"[^'\n]*'"), '"': re.compile(r'(?:[^"\\\n]|\\.)*"')}
+
+
+def _program_edit(text: str, match: re.Match, kind: str) -> tuple[int, int, str]:
+    """One `_PROGRAM_FLAGS` match as `(start, end, replacement)`. A flag
+    glued to its value inside a quoted word (`7z a '-pTr0ub 4dor'`) has the
+    rest of that word as its value, not the first blank-free run of it
+    (review of #330, NEW-2), so no tail is left showing as if it were not
+    part of the password. When that whole value may not be withheld (a blank
+    or an operator in it, the never-hidden rule), the first run still is, as
+    before, and `holds_back_credential` reports the rest."""
+    replaced = _program_value(kind)(match)
+    a, b = match.start("value"), match.end("value")
+    opening = text[match.start() - 1] if match.start() else ""
+    rest = _REST_OF_QUOTE.get(opening)
+    tail = rest.match(text, a) if rest is not None else None
+    if tail is not None and tail.end() - 1 > b and not _already(match):
+        value = text[a:tail.end() - 1]
+        # In double quotes an expansion or a backtick is never a value.
+        expands = opening == '"' and ("$" in value or "`" in value)
+        literal = value if opening == "'" else re.sub(r'\\(["\\$`])', r"\1", value)
+        if literal and not expands and not literal.startswith("-") and not _unsafe_literal(literal):
+            return match.start(), tail.end() - 1, text[match.start():a] + INLINE_REDACTED
+    return match.start(), match.end(), replaced
 
 
 def redact_inline(text: str) -> str:
@@ -1808,6 +1835,98 @@ def redact_command(text) -> str:
     return text
 
 
+def _strict(text: str) -> str:
+    """`redact_command` with the never-hidden rule off: for comparing, never shown."""
+    token = _LOOSE_VALUES.set(True)
+    try:
+        return redact_command(text)
+    finally:
+        _LOOSE_VALUES.reset(token)
+
+
+# Review of #330, NEW-1: a command string run by another shell is one
+# quoted word to the outer line, so neither the display's redaction nor the
+# comparison above looks inside it. These wrappers' strings are unwrapped,
+# at most `_NESTED_DEPTH` deep and `_NESTED_MAX` characters in all.
+_NESTED_DEPTH = 3
+_NESTED_MAX = 16_000
+_SHELL_C = re.compile(
+    r"(?<![\w.-])(?:[^\s'\"`;&|()<>]*/)?(?:sh|bash|rbash|zsh|dash|ksh|mksh|ash|fish|busybox[ \t]+sh)"
+    r"(?:[ \t]+(?:--?[A-Za-z][\w-]*|[+-]o[ \t]+\w+))*?[ \t]+-[A-Za-z]*c[A-Za-z]*[ \t]+"
+    r"|(?<![\w.-])(?:su|runuser)(?![\w.-])[^;&|\n]*?[ \t]-(?:c|-command(?:=|[ \t]+))[ \t]*")
+_EVAL = re.compile(r"(?<![\w.-])eval(?:[ \t]+--)?[ \t]+")
+_WORD_END = re.compile(r"[ \t;&|)\n]|$")
+
+
+def _unquote(word: str) -> str | None:
+    """A shell word's text as the shell passes it on, expansions left as
+    typed; None when it cannot be known (`$'...'` with an escape)."""
+    out = []
+    for piece in _WORD_PIECE.finditer(word):
+        ansi, single, double, bare = piece.groups()
+        if ansi is not None:
+            if "\\" in ansi:
+                return None
+            out.append(ansi)
+        elif single is not None:
+            out.append(single)
+        elif double is not None:
+            out.append(re.sub(r'\\([$`"\\\n])', r"\1", double))
+        else:
+            out.append(re.sub(r"\\(.)", r"\1", bare))
+    return "".join(out)
+
+
+def _inner_commands(text: str):
+    """Each string `text` hands another shell (`sh -c STR`, `su -c STR`,
+    `eval WORDS`), unquoted; None in the list for one that cannot be read."""
+    found = []
+    # Only a wrapper the outer line runs: one inside a quoted string is the
+    # inner string's own, read when that string is.
+    state = _Mask(text).state if ("'" in text or '"' in text) else None
+    for m in _SHELL_C.finditer(text):
+        if state is not None and state[m.start()]:
+            continue
+        word = _WORD_RE.match(text, m.end())
+        if word is None or not _WORD_END.match(text, word.end()):
+            found.append(None)
+            continue
+        found.append(_unquote(word.group()))
+    for m in _EVAL.finditer(text):
+        if state is not None and state[m.start()]:
+            continue
+        pos, parts = m.end(), []
+        while pos < len(text) and text[pos] not in ";&|)\n":
+            word = _WORD_RE.match(text, pos)
+            if word is None or not _WORD_END.match(text, word.end()):
+                parts.append(None)               # an unclosed quote, a stray `<`: unreadable
+                break
+            parts.append(_unquote(word.group()))
+            pos = word.end()
+            while pos < len(text) and text[pos] in " \t":
+                pos += 1
+        found.append(None if not parts or None in parts else " ".join(parts))
+    return found
+
+
+def _nested_holds_back(text: str, depth: int, budget: list | None = None) -> bool:
+    """Whether a string another shell runs holds a credential (any value
+    the redaction, strict, would change), or cannot be read, or is past the
+    depth or size bound: then nothing of the call may leave the machine."""
+    budget = budget if budget is not None else [_NESTED_MAX]
+    if len(text) > _NESTED_MAX:
+        return True
+    for inner in _inner_commands(text):
+        if inner is None or depth + 1 > _NESTED_DEPTH:
+            return True
+        budget[0] -= len(inner)
+        if budget[0] < 0:
+            return True
+        if _strict(inner) != inner or _nested_holds_back(inner, depth + 1, budget):
+            return True
+    return False
+
+
 def holds_back_credential(value, depth: int = 0) -> bool:
     """Whether `redact_command` (or `redact_value`) leaves a credential in
     `value` only because of the rule that a value holding a blank, an
@@ -1815,16 +1934,14 @@ def holds_back_credential(value, depth: int = 0) -> bool:
     `sshpass -p 'Tr0ub4dor&3'`, `PGPASSWORD='a b'`). The card keeps that rule
     (it never hides what may run); a path that sends a card's text off this
     machine (approval summaries, review of PR #330 LOW 5) sends nothing when
-    this is True. Fails closed: an error is True. Never for a judge."""
+    this is True. So is a string another shell runs (`bash -c "..."`,
+    `eval ...`, `su -c ...`) that holds any credential, cannot be read, or
+    nests past the bound (`_nested_holds_back`, review of #330 NEW-1). Fails
+    closed: an error is True. Never for a judge."""
     try:
         if isinstance(value, str):
             shown = redact_command(value)
-            token = _LOOSE_VALUES.set(True)
-            try:
-                strict = redact_command(value)
-            finally:
-                _LOOSE_VALUES.reset(token)
-            return strict != shown
+            return _strict(value) != shown or _nested_holds_back(value, 0)
         if depth >= 32:
             return False
         if isinstance(value, dict):
