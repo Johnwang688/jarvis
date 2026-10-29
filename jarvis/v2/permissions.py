@@ -80,7 +80,7 @@ import hashlib
 import json
 import logging
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import threading
 from typing import Callable, Iterable
@@ -528,51 +528,91 @@ def denied_read(tool: str, args: dict, cwd: str | None = None, *,
 
 def _credential_folder_read(tool: str, args: dict, cwd: str | None,
                             shell_cwd: str | None = None) -> str | None:
-    """A read tool's call that reaches a credential folder
-    (`config.credential_dirs()`: `~/.ssh`, `~/.aws`, `~/.config/gh`,
-    `~/.config/jarvis`, `~/.gnupg`, the Browser's folder and the phone's),
-    refused in every task and chat (cred-dir reads, 2026-10-29: Claude's
-    `Read ~/.config/gh/hosts.yml` reached no layer before it). Judged by v1's
-    own judge (`files.credential_folder_judge`, which v1's read tools ask),
-    so the two answer alike: as written and where it resolves, a symlink's
-    name and its target, `..` as the kernel reads it, `~`, and case. The
-    gate's own state files stay readable by their own path, as in v1.
+    """Layer 1's half of `_read_reach`: why a read tool's call is refused
+    for a credential folder or store, or None."""
+    reach = _read_reach(tool, args, cwd, shell_cwd)
+    return reach[1] if reach is not None and reach[0] == "deny" else None
 
-    A tree walk (`_TREE_TOOLS`) is also refused when its root — `path`, or
-    with none the folder it runs in — **holds** a credential folder (`~`,
-    `~/.config`, `/`), and Glob's (and `find_files`') pattern when its fixed
-    leading folders lie in one, or hold one and the pattern goes on to match
-    below them (`~/.ss?/*`, `../../.aws/*`); a `..` after a wildcard cannot
-    be placed, so it is refused too. A relative path is placed in the brief's
-    folder and, when the provider reported one, the folder its shell is in;
-    either reaching a folder refuses. What this does not see: a symlink to a
-    credential folder deep in a tree a search walks (ripgrep does not follow
-    one unless told to), and a tool not listed in `READ_TOOLS`."""
+
+def credential_names_ask(tool: str, args: dict, cwd: str | None,
+                         shell_cwd: str | None = None) -> str | None:
+    """Layer 2's half of `_read_reach`: why a names-only walk (Glob, LS,
+    `find_files`) from a folder that holds a credential folder is asked of
+    the owner (`credentials-path`, no Always), or None."""
+    reach = _read_reach(tool, args, cwd, shell_cwd)
+    return reach[1] if reach is not None and reach[0] == "ask" else None
+
+
+def _read_reach(tool: str, args: dict, cwd: str | None,
+                shell_cwd: str | None = None) -> tuple[str, str] | None:
+    """("deny" | "ask", reason) for a read tool's call that reaches a
+    credential folder or store (`config.credential_read_paths()`: the
+    folders of `credential_dirs()` — `~/.ssh`, `~/.aws`, `~/.config/gh`,
+    `~/.config/jarvis`, `~/.gnupg`, the Browser's and the phone's — and
+    `CREDENTIAL_STORES`, plus what Codex closes in a Windows profile), or
+    None (cred-dir reads, 2026-10-29: Claude's `Read
+    ~/.config/gh/hosts.yml` reached no layer before it). Judged by v1's own
+    judge (`files.credential_folder_judge`), so the two answer alike: as
+    written and where it resolves, a symlink's name and target, `..` as the
+    kernel reads it, `~`, `$HOME` and other set variables, and case. The
+    gate's own state files stay readable by their own path, as in v1, and
+    `config.CREDENTIAL_READABLE` (`~/.agents/skills`) is not refused.
+
+    DENY: any path in one; any path through `/proc/<pid>/{cwd,root,fd,…}`
+    or `/dev/fd` (they resolve in the gate's process, not the agent's) and
+    a Glob pattern under `/proc/`; a Grep (it returns contents) whose root —
+    `path`, or with none the folder it runs in — holds one; a Glob pattern
+    whose fixed leading folders lie in one. ASK (layer 2, no Always): a
+    names-only walk (Glob, LS, `find_files`) whose root holds one (`~`,
+    `~/.config`, `~/.claude`, `/`), or whose pattern can climb into one from
+    a holding folder (`~/.ss?/*`, a `..` after a wildcard). A relative path
+    is placed in the brief's folder and, when the provider reported one,
+    the folder its shell is in. What this does not see: a symlink to a
+    credential folder deep in a tree a search walks (ripgrep does not
+    follow one unless told to), and a tool not listed in `READ_TOOLS`."""
     judge = v1_files.credential_folder_judge()
     bases = list(dict.fromkeys(b for b in (cwd, shell_cwd) if isinstance(b, str) and b)) or [None]
     named = [(key, value) for key in ("file_path", "notebook_path", "path")
              if isinstance(value := args.get(key), str) and value.strip()]
     for _key, value in named:
-        for base in bases:
-            placed = str(_placed(value, base))
-            if judge(placed):
-                return v1_files._credential_folder_refusal(placed)
+        for spelling in _spellings(value):
+            for base in bases:
+                placed = str(_placed(spelling, base))
+                if _through_proc(placed):
+                    return "deny", PROC_REFUSAL.format(path=value[:120])
+                if judge(placed):
+                    return "deny", v1_files._credential_folder_refusal(placed)
     if tool not in _TREE_TOOLS:
         return None
+    names_only = tool != "Grep"
     roots = [value for key, value in named if key == "path"] or ["."]
+    asked: tuple[str, str] | None = None
     for value in roots:
-        for base in bases:
-            placed = str(_placed(value, base))
-            held = _holds_credential_folder(placed)
-            if held:
-                return CREDENTIAL_FOLDER_HELD.format(path=placed, folder=held, tool=tool)
-            for key in _ROOTED_PATTERN_KEYS.get(tool, ()):
-                pattern = args.get(key)
-                if isinstance(pattern, str) and pattern.strip():
-                    reached = _pattern_reaches_folder(pattern, placed, judge)
-                    if reached:
-                        return CREDENTIAL_FOLDER_PATTERN.format(pattern=reached[:120], tool=tool)
-    return None
+        for spelling in _spellings(value):
+            for base in bases:
+                placed = str(_placed(spelling, base))
+                if _under_proc(placed):
+                    return "deny", PROC_REFUSAL.format(path=value[:120])
+                for key in _ROOTED_PATTERN_KEYS.get(tool, ()):
+                    pattern = args.get(key)
+                    if isinstance(pattern, str) and pattern.strip():
+                        for pattern_spelling in _spellings(pattern):
+                            reached = _pattern_reaches_folder(pattern_spelling, placed, judge)
+                            if reached is None:
+                                continue
+                            kind, variant = reached
+                            if kind == "deny":
+                                return "deny", CREDENTIAL_FOLDER_PATTERN.format(
+                                    pattern=variant[:120], tool=tool)
+                            asked = asked or ("ask", CREDENTIAL_PATTERN_ASK.format(
+                                pattern=variant[:120], tool=tool))
+                held = v1_files.credential_folder_holds(placed)
+                if held:
+                    if not names_only:
+                        return "deny", CREDENTIAL_FOLDER_HELD.format(path=placed, folder=held, tool=tool)
+                    asked = asked or ("ask", CREDENTIAL_NAMES_ASK.format(path=placed, folder=held,
+                                                                         tool=tool))
+    return asked
 
 
 CREDENTIAL_FOLDER_HELD = (
@@ -583,48 +623,83 @@ CREDENTIAL_FOLDER_PATTERN = (
     "Error: the {tool} pattern {pattern!r} can reach a credential folder (SSH, cloud and Git "
     "logins, Jarvis's own credentials or the owner's Browser profile), which Jarvis does not "
     "read. Use a pattern that stays inside the project.")
+CREDENTIAL_NAMES_ASK = ("a {tool} from {path} lists the names in a credential folder it holds "
+                        "({folder})")
+CREDENTIAL_PATTERN_ASK = "the {tool} pattern {pattern!r} can list names in a credential folder"
+PROC_REFUSAL = ("Error: {path} goes through /proc or /dev/fd, which name a process's own folders "
+                "and files; Jarvis judges paths where the agent reads them, so these are refused. "
+                "Use the path itself.")
+# `/proc/<pid>/…` entries that are another process's folder, files or
+# environment; read through the gate they would resolve in the daemon.
+_PROC_MAGIC = frozenset({"cwd", "root", "fd", "fdinfo", "map_files", "environ", "exe", "task"})
+
+
+def _spellings(value: str) -> list[str]:
+    """`value`, and with `$HOME`/`${HOME}` (any set variable) expanded."""
+    expanded = os.path.expandvars(value)
+    return [value] if expanded == value else [value, expanded]
+
+
+def _under_proc(path: str) -> bool:
+    """`path` is `/proc` or `/dev/fd` or lies below either (lexically)."""
+    lexical = os.path.abspath(os.path.expanduser(path))
+    return any(lexical == top or lexical.startswith(top + "/")
+               for top in ("/proc", "/dev/fd", "/dev/stdin", "/dev/stdout", "/dev/stderr"))
+
+
+def _through_proc(path: str) -> bool:
+    """A path through `/proc/<pid>/{cwd,root,fd,…}` or `/dev/fd`, as
+    written, or a symlink whose own target is one (MED 1 of #339's review)."""
+    lexical = os.path.abspath(os.path.expanduser(path))
+    parts = lexical.split("/")
+    if (len(parts) > 3 and parts[1] == "proc" and any(p in _PROC_MAGIC for p in parts[3:])) or (
+            lexical.startswith(("/dev/fd", "/dev/stdin", "/dev/stdout", "/dev/stderr"))):
+        return True
+    # A symlink on the way whose target is one (`p -> /proc/self/root`).
+    try:
+        prefix = ""
+        for part in parts[1:]:
+            prefix += "/" + part
+            if os.path.islink(prefix):
+                target = os.readlink(prefix)
+                if target.startswith(("/proc", "/dev/fd", "/dev/std")):
+                    return True
+    except OSError:
+        return True
+    return False
 
 
 def _holds_credential_folder(path: str) -> str | None:
-    """The credential folder `path` holds (strictly above it), as written or
-    where it resolves (`..` read as the kernel reads it), compared also
-    case-folded; or None. A path that cannot be resolved holds one."""
-    try:
-        written = os.path.expanduser(path)
-        candidates = {os.path.abspath(written), os.path.realpath(written)}
-    except (OSError, RuntimeError, ValueError, TypeError):
-        return "unknown"
-    for root in v1_files._credential_roots():
-        folder = str(root)
-        for candidate in candidates:
-            prefix = candidate if candidate.endswith(os.sep) else candidate + os.sep
-            if folder.startswith(prefix) or folder.casefold().startswith(prefix.casefold()):
-                return folder
-    return None
+    """`files.credential_folder_holds`: the folder or store `path` holds."""
+    return v1_files.credential_folder_holds(path)
 
 
-def _pattern_reaches_folder(pattern: str, root: str, judge) -> str | None:
-    """The brace variant of a path pattern (Glob's) that can reach a
-    credential folder from `root`, or None: its fixed leading folders lie in
-    one, or hold one with a wildcard still to match below them, or a `..`
-    follows a wildcard. A brace list too large to expand reaches one."""
+def _pattern_reaches_folder(pattern: str, root: str, judge) -> tuple[str, str] | None:
+    """("deny" | "ask", the brace variant) for a path pattern (Glob's) that
+    can reach a credential folder from `root`, or None. DENY: its fixed
+    leading folders lie in one, or it starts under `/proc`. ASK: they hold
+    one with a wildcard still to match below them, or a `..` follows a
+    wildcard (it cannot be placed), or a brace list is too large to expand."""
     variants = protected_state._brace_expand(pattern.strip())
     if variants is None:
-        return pattern
+        return "ask", pattern
+    found: tuple[str, str] | None = None
     for variant in variants:
         text = variant.replace("\\", "/")
         if not text.startswith(("/", "~")):
             text = root.rstrip("/") + "/" + text
         parts = os.path.expanduser(text).split("/")
         wild = next((i for i, part in enumerate(parts) if _GLOB_MAGIC & set(part)), None)
-        if wild is not None and ".." in parts[wild:]:
-            return variant
         fixed = "/".join(parts[:wild] if wild is not None else parts) or "/"
+        if _under_proc(fixed) or _under_proc("/".join(parts)):
+            return "deny", variant
         if judge(fixed):
-            return variant
-        if wild is not None and _holds_credential_folder(fixed):
-            return variant
-    return None
+            return "deny", variant
+        if wild is not None and ".." in parts[wild:]:
+            found = found or ("ask", variant)
+        elif wild is not None and _holds_credential_folder(fixed):
+            found = found or ("ask", variant)
+    return found
 
 
 PHONE_FOLDER_REFUSAL = ("{name} is in the phone's credential folder (its passkeys, sessions, "
@@ -977,7 +1052,8 @@ def _git_push(tokens: list[str]) -> bool:
     return bool(tokens) and tokens[0].rsplit("/", 1)[-1] == "git" and "push" in tokens
 
 
-def _kind_matches(kind: str, segment: str, tokens: list[str], stems: list[str]) -> bool:
+def _kind_matches(kind: str, segment: str, tokens: list[str], stems: list[str],
+                  bases: tuple = (None,)) -> bool:
     if kind == "git_push_protected":
         # A bare `git push` with no refspec is deliberately *not* matched: the
         # branch it would push is not in the command, and in a task worktree it
@@ -1001,10 +1077,63 @@ def _kind_matches(kind: str, segment: str, tokens: list[str], stems: list[str]) 
         return (any(_phrase_ordered(p, tokens) for p in _CREDENTIAL_PHRASES)
                 or any(stem in _CREDENTIAL_STEMS for stem in stems))
     if kind == "credential_path":
-        return any(_under_credential_dir(token) for token in tokens + _path_words(segment))
+        return (any(_under_credential_dir(token) for token in tokens + _path_words(segment))
+                or _shell_walk_holds(tokens, bases))
     if kind == "credential_read":
         return _reads_credential(tokens)
     LOG.warning("Ignoring always-ask rule with unknown kind %r", kind)
+    return False
+
+
+# Programs that read or list every file below the folders they name (HIGH of
+# #339's review: `grep -r token ~`, `rg -uu token ~`, `find ~ -name
+# hosts.yml` and `ls -R ~` were rules' ALLOW in v2's shell). grep and rg by
+# their options (`shell._search_modes`, v1's `run_readonly` reading); the
+# rest always, or with a recursive flag (`_RECURSIVE_FLAG`).
+_WALKERS = frozenset({"ag", "ack", "ugrep", "find", "tree", "du", "tar", "bsdtar",
+                      "7z", "7za", "7zz", "rsync", "scp"})
+_GREPS = frozenset({"grep", "egrep", "fgrep", "zgrep"})
+_RECURSIVE_FLAG = {"ls": "R", "cp": "rRa", "zip": "r"}
+
+
+def _shell_walk_holds(tokens: list[str], bases) -> bool:
+    """A recursive search or walk whose root holds a credential folder or
+    store (`files.credential_folder_holds`, the read tools' reading), or lies
+    in one: its operands as the shell finds them (`~`, `$HOME`, a relative
+    word placed in the brief's and the shell's folder, a glob's fixed
+    leading folders), and with no operand that names a path, the folder it
+    runs in. Asked (`credentials-path`, no Always), as v2's shell asks for
+    credential folders."""
+    if not tokens:
+        return False
+    from jarvis.tools import shell as v1_shell
+    program = tokens[0].rsplit("/", 1)[-1].lower()
+    words = tokens[1:]
+    if program in _GREPS or program == "rg":
+        recursive, follows = v1_shell._search_modes("grep" if program in _GREPS else "rg", tokens)
+        recursive = recursive or bool(follows)
+    elif program in _RECURSIVE_FLAG:
+        letters = _RECURSIVE_FLAG[program]
+        recursive = any((w.startswith("-") and not w.startswith("--") and any(c in w[1:] for c in letters))
+                        or w in ("--recursive", "--archive") for w in words)
+    else:
+        recursive = program in _WALKERS
+    if not recursive:
+        return False
+    judge = v1_files.credential_folder_judge()
+    operands = [w for w in words if w and not w.startswith("-")]
+    pathish = [w for w in operands
+               if w.startswith(("/", "~", "$", ".")) or "/" in w
+               or any(os.path.exists(str(_placed(w, b))) for b in bases)]
+    for word in pathish or ["."]:
+        for spelling in _spellings(word):
+            for base in bases:
+                text = str(_placed(spelling, base))
+                parts = text.split("/")
+                wild = next((i for i, part in enumerate(parts) if _GLOB_MAGIC & set(part)), None)
+                fixed = "/".join(parts[:wild]) or "/" if wild is not None else text
+                if judge(fixed) or v1_files.credential_folder_holds(fixed):
+                    return True
     return False
 
 
@@ -1029,47 +1158,96 @@ def _reads_credential(tokens: list[str]) -> bool:
 
 def _git_credential(tokens: list[str]) -> bool:
     """git's subcommand, past its global options: `credential` or
-    `credential-<helper>`, or `config` naming a credential setting; or a
-    global option that sets one for this run (`-c credential.helper=…`,
-    `--config-env=credential.…`)."""
+    `credential-<helper>` (not its `--help`), or `config` naming a credential
+    setting, a `url.*` or `*.extraheader` one or an alias, or listing them
+    all (`--list`, `-l`, `list`, a regexp or urlmatch read) — unless it reads
+    only a repository file (`-f .gitmodules`, `--blob HEAD:.gitmodules`); or
+    `var -l`; or a global option that sets a credential setting or an alias
+    for this run (`-c credential.helper=…`, `-c alias.x=…`, glued `-c…`,
+    `--config-env=…`): an alias can run `git credential fill` or a shell."""
     index = 1
     while index < len(tokens):
         word = tokens[index]
         low = word.lower()
         if low in _GIT_VALUE_OPTIONS:
             value = tokens[index + 1].lower() if index + 1 < len(tokens) else ""
-            if low in ("-c", "--config-env") and value.startswith("credential"):
+            if low in ("-c", "--config-env") and _git_risky_key(value):
                 return True
             index += 2
             continue
-        if low.startswith("--config-env=") and low.split("=", 1)[1].startswith("credential"):
+        if low.startswith("--config-env=") and _git_risky_key(low.split("=", 1)[1]):
             return True
-        if low.startswith("-c") and len(low) > 2 and low[2:].startswith("credential"):
-            return True             # `-ccredential.helper=…`, glued
+        if low.startswith("-c") and len(low) > 2 and _git_risky_key(low[2:]):
+            return True             # `-ccredential.helper=…`, `-calias.x=…`, glued
         if low.startswith("-"):
             index += 1
             continue
+        rest = [w.lower() for w in tokens[index + 1:]]
         if low == "credential" or low.startswith("credential-"):
-            return True
+            return not (rest and rest[0] in ("--help", "-h"))
         if low == "config":
-            rest = [w.lower() for w in tokens[index + 1:]]
-            # A credential setting named, or a listing that prints them all
-            # (`--list`/`-l`, `git config list`, a regexp or urlmatch read):
-            # `credential.*` and `url.*` values can carry a token, and Claude's
-            # and Codex's shell output is never scrubbed by Jarvis.
-            return (any("credential" in w or w.startswith("url.") for w in rest)
+            if _git_config_repo_file(tokens[index + 1:]):
+                return False
+            # A credential setting, an alias or an extra header named, or a
+            # listing that prints them all: `credential.*`, `url.*` and
+            # `http.*.extraheader` values can carry a token, and Claude's and
+            # Codex's shell output is never scrubbed by Jarvis.
+            return (any("credential" in w or _git_risky_key(w) or w.startswith("url.") for w in rest)
                     or any(w in _GIT_CONFIG_LISTS or w.startswith("--list") for w in rest)
                     or any(w.startswith("-") and not w.startswith("--") and "l" in w[1:]
                            for w in rest)
                     or (bool(rest) and rest[0] == "list"))
         if low == "var":
-            return any(w.lower() in ("-l", "--list") for w in tokens[index + 1:])
+            return any(w in ("-l", "--list") for w in rest)
         return False
     return False
 
 
+def _git_risky_key(key: str) -> bool:
+    """A git setting whose value can carry or fetch a credential, or run a
+    command: `credential.*`, `alias.*`, any `*.extraheader`."""
+    key = key.lower()
+    name = key.split("=", 1)[0]
+    return (key.startswith("credential") or key.startswith("alias.")
+            or "extraheader" in name)
+
+
 # git config's reads that print many settings at once.
 _GIT_CONFIG_LISTS = frozenset({"--get-regexp", "--regexp", "--get-urlmatch", "--url"})
+# git config's options naming the one file it reads.
+_GIT_FILE_OPTIONS = ("-f", "--file", "--blob")
+
+
+def _git_config_repo_file(words: list[str]) -> bool:
+    """`git config` reads only a repository file it names (`-f
+    .gitmodules`, `--file=x`, `--blob HEAD:.gitmodules`): not the user's or
+    a repository's own configuration (`~/.gitconfig`, `.git/config`,
+    `~/.config/git/config`, `/etc/gitconfig`), nothing under a credential
+    folder or store, and no `$` to expand."""
+    named = None
+    for i, word in enumerate(words):
+        low = word.lower()
+        for option in _GIT_FILE_OPTIONS:
+            if low == option and i + 1 < len(words):
+                named = (option, words[i + 1])
+            elif low.startswith(option + "=") and option.startswith("--"):
+                named = (option, word.split("=", 1)[1])
+            elif option == "-f" and low.startswith("-f") and len(low) > 2 and not low.startswith("--"):
+                named = (option, word[2:])
+    if named is None:
+        return False
+    option, value = named
+    if not value or "$" in value or "`" in value:
+        return False
+    if option == "--blob":
+        path = value.split(":", 1)[1] if ":" in value else ""
+        return bool(path) and ".git" not in PurePosixPath(path).parts
+    path = PurePosixPath(value)
+    if (".git" in path.parts or path.name.lower() in (".gitconfig", "gitconfig")
+            or (path.name == "config" and path.parent.name == "git")
+            or value.startswith("~") or str(path).startswith("/etc/")):
+        return False
+    return not _under_credential_dir(value if "/" in value else "./" + value)
 
 
 def _path_words(segment: str) -> list[str]:
@@ -1107,9 +1285,15 @@ def _under_credential_dir(target: str) -> bool:
     return False
 
 
+_CREDENTIAL_KINDS = frozenset({"credential_command", "credential_path", "credential_read"})
+
+
 def _rule_matches(rule, tool: str, segments: list[tuple[str, list[str], list[str]]],
-                  targets: list[str]) -> tuple[bool, str, str]:
-    """(matched, rule id, reason) for one rule against one tool call."""
+                  targets: list[str], *, inner: list | None = None,
+                  bases: tuple = (None,)) -> tuple[bool, str, str]:
+    """(matched, rule id, reason) for one rule against one tool call. A
+    credential rule also reads `inner`: the commands the line hands another
+    shell (`sh -c STR`, `eval`, `ssh host STR` …)."""
     if isinstance(rule, str):
         phrase = tuple(part for part in rule.split() if part)
         if not phrase:
@@ -1139,9 +1323,10 @@ def _rule_matches(rule, tool: str, segments: list[tuple[str, list[str], list[str
     require_any = list(rule.get("any") or [])
     forbid = list(rule.get("none") or [])
 
-    for segment, tokens, stems in segments:
+    judged = segments + (inner or []) if kind in _CREDENTIAL_KINDS else segments
+    for segment, tokens, stems in judged:
         if kind is not None:
-            if _kind_matches(str(kind), segment, tokens, stems):
+            if _kind_matches(str(kind), segment, tokens, stems, bases):
                 return True, rule_id, reason
             continue
         if stems_wanted and not any(s in stems_wanted for s in stems):
@@ -1160,9 +1345,62 @@ def _rule_matches(rule, tool: str, segments: list[tuple[str, list[str], list[str
     return False, "", ""
 
 
+def _segments_of(text: str) -> list[tuple[str, list[str], list[str]]]:
+    """Each segment of `text` (tokens, stems), and what its wrappers and
+    runners start. Raises `rules.TooComplex`."""
+    segments: list[tuple[str, list[str], list[str]]] = []
+    for segment in rules.segments(text):
+        tokens = _tokens_of(segment)
+        stems = [s for s, _ in rules.command_targets(segment)]
+        if tokens and tokens[0].rsplit("/", 1)[-1].lower() not in stems:
+            stems.append(tokens[0].rsplit("/", 1)[-1].lower())
+        segments.append((segment, tokens, stems))
+        for inner in rules.started_commands(segment):
+            segments.append((segment, inner, [inner[0].rsplit("/", 1)[-1].lower()]))
+    return segments
+
+
+_INNER_DEPTH = 3
+_INNER_CAP = 32
+CREDENTIALS_INNER = ("a command this line hands another shell cannot be read, so whether it "
+                     "reaches a credential cannot be told")
+
+
+def _inner_segments(lines: list[str]) -> list | None:
+    """The segments of every string the lines hand another shell
+    (`secrets._inner_commands`, #330's bounded reading: `sh -c STR`, `eval`,
+    `ssh host STR`, `docker exec …`), nested up to `_INNER_DEPTH` and
+    `_INNER_CAP` strings; None when one cannot be read or the bound is
+    passed (then the line is asked)."""
+    out: list = []
+    queue = [(text, 0) for text in lines]
+    count = 0
+    while queue:
+        text, depth = queue.pop()
+        try:
+            found = v1_secrets._inner_commands(text)
+        except Exception:       # noqa: BLE001 — unreadable is asked
+            return None
+        for inner in found:
+            count += 1
+            if inner is None or depth >= _INNER_DEPTH or count > _INNER_CAP:
+                return None
+            if not inner.strip():
+                continue
+            try:
+                out.extend(_segments_of(inner))
+            except rules.TooComplex:
+                return None
+            queue.append((inner, depth + 1))
+    return out
+
+
 def always_ask_match(tool: str, args: dict, brief: Brief | None = None,
-                     project: Project | None = None) -> tuple[str, str] | None:
-    """(rule id, reason) if this call is on the always-ask list, else None."""
+                     project: Project | None = None, *, cwd: str | None = None,
+                     shell_cwd: str | None = None) -> tuple[str, str] | None:
+    """(rule id, reason) if this call is on the always-ask list, else None.
+    `cwd` and `shell_cwd` place a walk's relative root (`credentials-path`)."""
+    bases = tuple(dict.fromkeys(b for b in (cwd, shell_cwd) if isinstance(b, str) and b)) or (None,)
     segments: list[tuple[str, list[str], list[str]]] = []
     # Each reading's segments: a call with two command fields is matched
     # field by field as well as joined (#211 bench, MED).
@@ -1187,10 +1425,20 @@ def always_ask_match(tool: str, args: dict, brief: Brief | None = None,
         for inner in started:
             segments.append((segment, inner, [inner[0].rsplit("/", 1)[-1].lower()]))
     targets = file_targets(tool, args) if tool in FILE_TOOLS else []
+    inner = _inner_segments(lines) if lines else []
     for rule in always_ask_for(brief, project):
-        matched, rule_id, reason = _rule_matches(rule, tool, segments, targets)
+        matched, rule_id, reason = _rule_matches(rule, tool, segments, targets,
+                                                 inner=inner, bases=bases)
         if matched:
             return rule_id, reason
+    if inner is None:
+        return "credentials-inner", CREDENTIALS_INNER
+    if tool in READ_TOOLS:
+        # A names-only walk from a folder holding a credential folder (Glob,
+        # LS, `find_files`): asked, no Always; Grep there is layer 1's DENY.
+        why = credential_names_ask(tool, args, cwd, shell_cwd)
+        if why:
+            return "credentials-path", why
     return None
 
 
@@ -1322,6 +1570,7 @@ def build_permit(ctx: PermitContext, asker, *, clock=None) -> PermissionCallback
         # QH: where the gate judged it, part of a deferral's digest (a
         # refspec-less push is judged by its folder's branch).
         where = _judged_where(args, ctx, shell_cwd, cwd)
+        _shell = shell_cwd if isinstance(shell_cwd, str) else None
         # A Codex chat's git tool (CG-0, `chat_git`): the exact command the
         # daemon will run, read from the repository below, never from `args`.
         chat: chat_git.Plan | None = None
@@ -1442,7 +1691,7 @@ def build_permit(ctx: PermitContext, asker, *, clock=None) -> PermissionCallback
             if profile == PermissionProfile.STRICT:
                 return finish(Decision.DENY, L_WIDENING,
                               f"strict profile refuses a sandbox widening: {widening}")
-            match = always_ask_match(tool, args, brief, ctx.project)
+            match = always_ask_match(tool, args, brief, ctx.project, cwd=cwd, shell_cwd=_shell)
             if owner_only is not None:
                 match = (owner_only.label, owner_only.reason)
             reason = widening + (f" (also always-ask rule {match[0]})" if match else "")
@@ -1463,9 +1712,9 @@ def build_permit(ctx: PermitContext, asker, *, clock=None) -> PermissionCallback
             if profile == PermissionProfile.STRICT:
                 return finish(Decision.DENY, L_HUMAN,
                               "strict profile refuses a dangerous Jarvis tool")
-            match = always_ask_match(tool, args, brief, ctx.project)
+            match = always_ask_match(tool, args, brief, ctx.project, cwd=cwd, shell_cwd=_shell)
             if match is None and ctx.provider in ("claude", "codex"):
-                match = always_ask_match(session_tools.CLAUDE_PREFIX + tool, args, brief, ctx.project)
+                match = always_ask_match(session_tools.CLAUDE_PREFIX + tool, args, brief, ctx.project, cwd=cwd, shell_cwd=_shell)
             if owner_only is not None:
                 match = (owner_only.label, owner_only.reason)
             reason = ("a dangerous Jarvis tool: the owner decides every call"
@@ -1509,11 +1758,11 @@ def build_permit(ctx: PermitContext, asker, *, clock=None) -> PermissionCallback
                                        allowlistable=False, headline=owner_only.headline, origin=who,
                                        subagent=sid, relay_child=bridged, cwd=where, grantable=False))
             return finish(decision, L_ALWAYS_ASK, reason)
-        match = always_ask_match(tool, args, brief, ctx.project)
+        match = always_ask_match(tool, args, brief, ctx.project, cwd=cwd, shell_cwd=_shell)
         if match is None and delegated is not None:
             alias = (session_tools.CLAUDE_PREFIX + delegated.name
                      if ctx.provider == "codex" else delegated.name)
-            match = always_ask_match(alias, args, brief, ctx.project)
+            match = always_ask_match(alias, args, brief, ctx.project, cwd=cwd, shell_cwd=_shell)
         if match is None and unreadable_command(tool, args) == "ask":
             # An unknown tool's command key holds something that is not text:
             # it cannot be judged, so the owner is asked (#211 review, F3).

@@ -745,6 +745,36 @@ CREDENTIAL_STORES: tuple[str, ...] = (
 )
 
 
+# Inside a closed store, what stays readable: the owner's skills that
+# `jarvis skills link` shares with Codex (`~/.agents/skills`, read-only).
+CREDENTIAL_READABLE: tuple[str, ...] = ("~/.agents/skills",)
+
+# The Windows user profiles WSL mounts (review of #224): Codex closes every
+# dot entry of a profile (.ssh, .aws, .config, .npmrc ...), `AppData` whole
+# and the registry hive (`NTUSER.DAT*`); v2's read tools refuse the same
+# (cred-dir reads, 2026-10-29). Shared by `codex_config` and
+# `files.credential_folder_judge`. `JARVIS_WINDOWS_USERS` moves the root
+# (tests); empty means the default.
+WINDOWS_USERS = "/mnt/c/Users"
+# Not profiles: shared or template folders, and the legacy junctions.
+WINDOWS_NOT_PROFILES = ("all users", "default", "default user", "public")
+
+
+def windows_users_root() -> str:
+    return os.environ.get("JARVIS_WINDOWS_USERS") or WINDOWS_USERS
+
+
+def windows_extra(name: str) -> bool:
+    """A profile's non-dot entry Codex closes: `AppData`, the registry hive."""
+    folded = name.casefold()
+    return folded == "appdata" or folded.startswith("ntuser")
+
+
+def windows_closed_name(name: str) -> bool:
+    """A profile entry closed to agents: a dot entry or `windows_extra`."""
+    return name.startswith(".") or windows_extra(name)
+
+
 def credential_read_paths() -> tuple[str, ...]:
     """What a read tool may never read: every `credential_dirs()` folder and
     every `CREDENTIAL_STORES` entry. v1's judge

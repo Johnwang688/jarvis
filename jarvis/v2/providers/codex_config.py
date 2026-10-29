@@ -451,14 +451,14 @@ KNOWN_CREDENTIALS = (
 # `<root>/Users`, never by name; a drive not mounted, or a profile that
 # cannot be listed (then no command of ours can list it either), is skipped.
 # `JARVIS_WINDOWS_USERS` moves the root (tests); empty means the default.
-WINDOWS_USERS = "/mnt/c/Users"
-# Not profiles: shared or template folders, and the legacy junctions.
-WINDOWS_NOT_PROFILES = ("all users", "default", "default user", "public")
+# The list lives in `config` (cred-dir reads, 2026-10-29), shared with the
+# read tools' judge (`files.credential_folder_judge`).
+WINDOWS_USERS = config.WINDOWS_USERS
+WINDOWS_NOT_PROFILES = config.WINDOWS_NOT_PROFILES
 
 
 def _windows_extra(name: str) -> bool:
-    folded = name.casefold()
-    return folded == "appdata" or folded.startswith("ntuser")
+    return config.windows_extra(name)
 
 
 _GLOB_SYNTAX = re.compile(r"[*?\[\]{}]")
@@ -481,7 +481,7 @@ def _profile_target(link: Path, root: Path) -> Path | None:
 
 
 def windows_profiles() -> list[Path]:
-    root = Path(os.environ.get("JARVIS_WINDOWS_USERS") or WINDOWS_USERS)
+    root = Path(config.windows_users_root())
     try:
         real_root = root.resolve(strict=True)
         with os.scandir(root) as entries:
