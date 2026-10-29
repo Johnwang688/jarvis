@@ -451,6 +451,9 @@ class PrSource:
         # model's summary on each PR row. Attached by daemon2's `main()`
         # only (`Daemon.attach_pr_summaries`), as `gh` is.
         self.summaries = None
+        # PM-E (`pr_fix.PrFixes`): each PR's fix on its row. Attached by
+        # daemon2's `main()` only (`Daemon.attach_pr_fixes`).
+        self.fixes = None
 
     # -- attaching and the schedule -------------------------------------------------
 
@@ -464,6 +467,11 @@ class PrSource:
         """daemon2's `main()` only (PM-C): after each poll, each open PR's
         facts are read and summarized, and its row's `detail` carries them."""
         self.summaries = summaries
+
+    def attach_fixes(self, fixes) -> None:
+        """daemon2's `main()` only (PM-E): each PR's fix in its row's
+        `detail.fix`, and the fix's own rank (`pr_fix.PrFixes.enrich`)."""
+        self.fixes = fixes
 
     def list_repo(self, repo: str) -> bytes:
         if self.gh is None:
@@ -500,6 +508,8 @@ class PrSource:
         self._thread.start()
         if self.summaries is not None:
             self.summaries.start()          # the facts worker's thread; no read until a poll queues one
+        if self.fixes is not None:
+            self.fixes.start()              # reads its record and its tasks; runs nothing
 
     def poke(self) -> None:
         """Poll soon (debounced). Never blocks."""
@@ -521,12 +531,17 @@ class PrSource:
             self._task_states[task_id] = state
         if state != before and state in POKE_STATES:
             self.poke()
+        fixes = self.fixes
+        if fixes is not None:
+            fixes.task_changed(record)      # a fix's task: its row again (PM-E)
 
     def stop(self) -> None:
         self._stop.set()
         self._wake.set()
         if self.summaries is not None:
             self.summaries.stop()           # a running read is told to stop; no summary starts
+        if self.fixes is not None:
+            self.fixes.stop()
         thread = self._thread
         if thread is not None:
             thread.join(5)
@@ -574,7 +589,7 @@ class PrSource:
             if failures:
                 row = unavailable_row(failures)
                 fresh[row["id"]] = row
-            summaries = self.summaries
+            summaries, fixes = self.summaries, self.fixes
             with self._lock:
                 if summaries is not None:
                     # Under the snapshot's lock, so a summary that lands
@@ -582,6 +597,8 @@ class PrSource:
                     for row in fresh.values():
                         if row.get("kind") == "pr":
                             row["detail"].update(summaries.detail(row))
+                            if fixes is not None:
+                                fixes.enrich(row)
                 old, self._rows = self._rows, fresh
             changed = sorted({i for i in old.keys() | fresh.keys() if old.get(i) != fresh.get(i)})
             # Inbox B4: a PR that left a repository read in full (merged,
@@ -611,13 +628,15 @@ class PrSource:
             state = {r: (None if r in failures else {pr["number"] for pr in listed.get(r, ())})
                      for r in [*repos, *skipped]}
             summaries.after_poll(listed, state)
+            if fixes is not None:
+                fixes.after_poll(listed)
         return changed
 
     def refresh(self, ids) -> list[str]:
         """PM-C: a PR's facts or summary landed. Its rows' `detail` is built
         again from the snapshot, and `inbox_changed` (reason `pr_summary`,
         ids only) published when one changed. Never runs gh."""
-        summaries = self.summaries
+        summaries, fixes = self.summaries, self.fixes
         if summaries is None:
             return []
         changed = []
@@ -626,7 +645,10 @@ class PrSource:
                 row = self._rows.get(row_id)
                 if row is None or row.get("kind") != "pr":
                     continue
-                new = {**row, "detail": {**row["detail"], **summaries.detail(row)}}
+                new = {**row, "rank": RANK_PR, "detail": {**row["detail"], **summaries.detail(row)}}
+                new["detail"].pop("fix", None)
+                if fixes is not None:
+                    fixes.enrich(new)
                 if new != row:
                     self._rows[row_id] = new
                     changed.append(row_id)

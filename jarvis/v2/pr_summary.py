@@ -908,6 +908,9 @@ class PrSummaries:
         engine.on_late = self._late
         self._lock = threading.Lock()
         self._prs: dict[str, _Pr] = {}
+        # PM-E (`pr_fix.PrFixes.on_facts`): told of each read that lands,
+        # after the row is refreshed, on the worker's thread, no lock held.
+        self.listeners: list[Callable[[Any], None]] = []
 
     # -- the life ------------------------------------------------------------------
 
@@ -1039,6 +1042,17 @@ class PrSummaries:
                 reason = self.engine.off_reason(facts) if state == OFF else ""
                 self._settle(rec, token, facts, state, value, reason)
         self._refresh(rec.row_id)
+        for listener in list(self.listeners):
+            try:
+                listener(facts)
+            except Exception as exc:  # noqa: BLE001 — a listener never breaks a read
+                LOG.warning("PR summaries: a listener broke (%s)", type(exc).__name__)
+
+    def facts_for(self, repo: str, number: int):
+        """The facts last read for this PR, or None (PM-E's Fix reads them)."""
+        with self._lock:
+            rec = self._prs.get(pr_key(repo, number))
+            return rec.facts if rec is not None else None
 
     @staticmethod
     def _waited_out(rec: _Pr, facts, missing, now) -> bool:

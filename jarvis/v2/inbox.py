@@ -1538,6 +1538,11 @@ def route(handler, daemon, parts, query):
     mounted = _review.hud_route(handler, daemon, parts, query)
     if mounted is not None:
         return mounted
+    # A PR's Fix and its Cancel (PM-E, `pr_fix.py`), behind the same test.
+    from . import pr_fix as _pr_fix
+    mounted = _pr_fix.hud_route(handler, daemon, parts, query)
+    if mounted is not None:
+        return mounted
     method = handler.command
     if parts == ["inbox"] and method == "GET":
         # `?all=1` (B4): the snoozed and dismissed rows too, flagged.

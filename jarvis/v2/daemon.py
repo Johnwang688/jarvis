@@ -545,6 +545,9 @@ class Daemon:
         # this daemon serves state only and the /tasks verbs answer 409, which
         # is what every pre-WP11 test and every embedded use already expects.
         self.runner = None
+        # PM-E: a PR's Fix (`pr_fix.PrFixes`), attached by daemon2's `main()`
+        # only (`attach_pr_fixes`). None: the Fix routes answer 503.
+        self.pr_fixes = None
         # PR A attaches its DiscordSurface here (`start_discord`); `GET /discord`
         # reads it. None means no Discord on this daemon.
         self.discord = None
@@ -2315,6 +2318,18 @@ class Daemon:
             summaries = PrSummaries(self.inbox.prs, root=self.stores.root)
         self.inbox.prs.attach_summaries(summaries)
         return summaries
+
+    def attach_pr_fixes(self, fixes=None):
+        """PM-E: Fix on a blocked PR row (a Claude Code task, the PR scope in
+        its gate, the fix card). Called by daemon2's `main()` only, after
+        `attach_pr_summaries` (Fix reads its facts and shares its budget), so
+        no test or embedded daemon runs gh or git for a fix. Returns it."""
+        if fixes is None:
+            from .pr_fix import PrFixes
+            fixes = PrFixes(self, summaries=self.inbox.prs.summaries, root=self.stores.root)
+        self.pr_fixes = fixes
+        self.inbox.prs.attach_fixes(fixes)
+        return fixes
 
     def attach_approval_summaries(self, summaries=None):
         """AS: the model's one-line summary on each public card. Called by
@@ -4093,6 +4108,9 @@ def main() -> int:
     # gh, read-only) and Haiku's two lines about it. Here only, so no
     # embedded or test daemon reads a PR or calls a model.
     daemon.attach_pr_summaries()
+    # A PR's Fix (PM-E, pr_fix.py): a Claude Code task under the PR scope,
+    # and the fix card. Here only, after the summaries it reads.
+    daemon.attach_pr_fixes()
     # Web Push to the phone (P-6, push.py): the sender and its network
     # transport, here only, so no embedded or test daemon ever sends.
     daemon.push.attach_system()
