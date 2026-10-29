@@ -38,7 +38,8 @@ export interface LogPage { rows: LogRow[]; next: number; more: boolean; older: b
 
 export interface Report { done: string[]; changed: string[]; verified: string; open: string[]; next: string }
 
-export interface TaskQuestion { text: string; options: string[]; blocking: boolean; answer: string | null }
+/** `index`: its place in the task's own list (the Inbox row's `tq:<task>:<index>`). */
+export interface TaskQuestion { text: string; options: string[]; blocking: boolean; answer: string | null; index: number }
 
 export interface TaskView {
   id: string;
@@ -119,10 +120,14 @@ export function parseTask(t: unknown): TaskView | null {
     open: strings(t.report.open), next: textBlock(t.report.next, 2000),
   } : null;
   const spec = isObj(t.spec) ? t.spec : {};
-  const questions = Array.isArray(spec.questions) ? spec.questions.filter(isObj).map((q) => ({
-    text: textBlock(q.text, 2000), options: strings(q.options, 200), blocking: q.blocking === true,
-    answer: typeof q.answer === "string" ? textBlock(q.answer, 2000) : null,
-  })) : [];
+  const questions: TaskQuestion[] = [];
+  if (Array.isArray(spec.questions)) {
+    spec.questions.forEach((q, index) => {
+      if (!isObj(q)) return;
+      questions.push({ text: textBlock(q.text, 2000), options: strings(q.options, 200), blocking: q.blocking === true,
+        answer: typeof q.answer === "string" ? textBlock(q.answer, 2000) : null, index });
+    });
+  }
   return {
     id, project_id: idOrNull(t.project_id) || "", brief: textBlock(t.brief, 20000), state: oneLine(t.state, 20),
     updated: str(t.updated), step: num(status.step), steps: num(status.steps),
@@ -215,5 +220,7 @@ export function deskNote(kind: string): string | null {
   }
   if (kind === "proposal") return "Withdraw at the desk";
   if (kind === "task") return "Open the task to resume or cancel it";
+  // H4 (phone audit), until PM-F brings Merge to the phone.
+  if (kind === "pr") return "Merge it at the desk for now";
   return null;
 }

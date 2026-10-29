@@ -106,10 +106,14 @@ describe("the answering card (P-4)", () => {
     expect(view.querySelector('[data-testid="m-card-why"]')!.textContent).toBe("this card has withheld text: answer it at the desk");
   });
 
-  it("limited: a red line, no Always", () => {
+  it("limited: a red line, said once with what AUTHORIZE then means, no Always (M3 of the phone audit)", () => {
     const view = cardView(state({ ...ORDINARY, secure: { ok: false, failed: "serve", label: "tailscale serve is not the only path, or Funnel is on" },
       can: { deny: true, allow: true, always: false }, why: "limited: x" }), noop);
-    expect(view.querySelector('[data-testid="m-limited"]')!.textContent).toBe("limited: tailscale serve is not the only path, or Funnel is on");
+    expect(view.querySelector('[data-testid="m-limited"]')!.textContent).toBe("limited: tailscale serve is not the only path, "
+      + "or Funnel is on. AUTHORIZE answers with Discord's authority; ALWAYS is off.");
+    // The daemon's own "limited: …" is not said a second time.
+    expect(view.querySelector('[data-testid="m-card-why"]')).toBeNull();
+    expect(view.querySelectorAll(".m-limited").length).toBe(1);
     expect(view.querySelector<HTMLButtonElement>('[data-testid="approval-always"]')!.disabled).toBe(true);
     expect(view.querySelector<HTMLButtonElement>('[data-testid="approval-allow"]')!.disabled).toBe(false);
   });
@@ -288,7 +292,11 @@ describe("the phone app answers (P-4)", () => {
     expect(tag.textContent).toBe("suggested");
     expect(tag.compareDocumentPosition(choices[0].querySelector(".option-text")!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(choices[1].querySelector('[data-testid="m-suggested"]')).toBeNull();
-    expect(choices[0].querySelector<HTMLInputElement>("input")!.checked).toBe(true);
+    // M4 (phone audit), as the Review tab (MR-3): the suggestion is marked, never chosen;
+    // Answer is off until the owner picks, and the options are listed once (the radios).
+    expect(choices.map((c) => c.querySelector<HTMLInputElement>("input")!.checked)).toEqual([false, false]);
+    expect(h.root.querySelector<HTMLButtonElement>('[data-testid="m-decision-send"]')!.disabled).toBe(true);
+    expect(h.root.querySelectorAll('[data-kind="decision"] ul.options').length).toBe(0);
     const radio = h.root.querySelectorAll<HTMLInputElement>('[data-testid="m-decision-option"]')[1];
     radio.checked = true;
     radio.dispatchEvent(new Event("change"));

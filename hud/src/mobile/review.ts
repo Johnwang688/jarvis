@@ -108,6 +108,8 @@ function deferredItem(item: ReviewItem, state: ReviewState, a: ReviewActions, bo
     box2.disabled = busy;
     // Only its own tap ticks it (a change on this box), never anything else.
     box2.addEventListener("change", () => a.toggle(item));
+    // M13 (phone audit): VoiceOver names which item it selects, not only "Select".
+    box2.setAttribute("aria-label", "Select: " + (item.row.title || item.row.id));
     label.append(box2, el("span", "", "Select"));
     box.append(label);
   }
@@ -292,7 +294,7 @@ export function reviewView(state: ReviewState, a: ReviewActions, limited: string
     for (const row of report.live) {
       const card = testid(el("article", "row rank-1"), "m-review-live-row");
       card.append(el("h3", "row-title", row.title || row.id));
-      card.append(tap("Open the card to answer", () => a.openCard(row), "quiet m-send", "m-review-open-card"));
+      card.append(tap("Open the card to answer", () => a.openCard(row), "quiet m-send primary", "m-review-open-card"));
       live.append(card);
     }
     view.append(live);

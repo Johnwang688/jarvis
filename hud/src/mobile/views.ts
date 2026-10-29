@@ -20,7 +20,7 @@
 
 import { clockOf, decisionOf, deferredOf, groupRows, oneLine, questionOf, briefOf, textBlock, type InboxRow } from "../lib/inbox";
 import { recentChats, moreLabel } from "../lib/recentChats";
-import { recordSummary, startsCollapsed, summaryView } from "../lib/approvalSummary";
+import { AI_LABEL, recordSummary, startsCollapsed, summaryView } from "../lib/approvalSummary";
 import { rowCommand, summaryLines } from "./card";
 import type { Thread } from "../types";
 import { renderPhoneMarkdown } from "./markdown";
@@ -129,6 +129,60 @@ function genericDetail(row: InboxRow, box: HTMLElement) {
   }
 }
 
+const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
+
+/** A list of untrusted names (check names, paths), each in its own <bdi>, then "+N more". */
+function names(parent: HTMLElement, items: unknown, more: unknown) {
+  const list = Array.isArray(items) ? items.map((x) => oneLine(x, 120)).filter(Boolean).slice(0, 20) : [];
+  list.forEach((name, i) => parent.append(i ? ", " : " ", el("bdi", "", name)));
+  const n = typeof more === "number" && more > 0 ? Math.floor(more) : 0;
+  if (n) parent.append(` +${n} more`);
+}
+
+/**
+ * H4 (phone audit), until PM-F: a PR row's title, code's facts line and the
+ * AI summary's Does and Blocked lines, labelled as the model's. Never the
+ * head SHA, never a link, never the raw keys. Each facts part is code's own
+ * words (pr_facts.facts_parts), drawn apart with the phone's own separators;
+ * a part's names are untrusted, each in its own <bdi>.
+ */
+function prDetail(row: InboxRow, box: HTMLElement) {
+  const d = row.detail;
+  const title = oneLine(d.title, 300);
+  if (title) box.append(testid(el("p", "pr-title", title), "m-pr-title"));
+  const facts = testid(el("p", "pr-facts"), "m-pr-facts");
+  if (Array.isArray(d.facts)) {
+    d.facts.filter(isObj).slice(0, 16).forEach((part) => {
+      const words = oneLine(part.text, 200);
+      if (!words) return;
+      const span = el("span", "pr-fact", words);
+      names(span, part.items, part.more);
+      if (facts.childNodes.length) facts.append(" · ");
+      facts.append(span);
+    });
+  } else if (typeof d.facts === "string") {
+    facts.append(el("span", "pr-fact", oneLine(d.facts, 400)));
+  }
+  if (facts.childNodes.length) box.append(facts);
+  const flags = isObj(d.flags) ? d.flags : null;
+  if (flags && Array.isArray(flags.items) && flags.items.length) {
+    const line = testid(el("p", "pr-flags", "Touches safety files:"), "m-pr-flags");
+    names(line, flags.items.map((f) => (isObj(f) ? f.name : "")), flags.more);
+    box.append(line);
+  }
+  // The model's words, set apart and labelled (the AS slot's look); only when there.
+  const sum = d.summary;
+  const does = isObj(sum) ? textBlock(sum.does, 400) : typeof sum === "string" ? textBlock(sum, 400) : "";
+  const blocked = isObj(sum) ? textBlock(sum.blocked, 400) : "";
+  if (does || blocked) {
+    const slot = testid(el("div", "as-ai as-ready pr-summary"), "m-pr-summary");
+    slot.append(el("span", "as-tag", AI_LABEL));
+    if (does) slot.append(testid(el("div", "as-text", (isObj(sum) ? "Does: " : "") + does), "m-pr-does"));
+    if (blocked) slot.append(testid(el("div", "as-text", "Blocked: " + blocked), "m-pr-blocked"));
+    box.append(slot);
+  }
+}
+
 /** What the inbox may answer (P-4), and the app's state for it. */
 export interface InboxAnswers {
   openCard: (row: InboxRow) => void;
@@ -167,17 +221,22 @@ function answerBox(row: InboxRow, a: InboxAnswers): HTMLElement {
   const busy = a.busy.has(row.id);
   const deferred = deferredOf(row);
   if (row.kind === "approval") {
-    box.append(tap("Open the card to answer", () => a.openCard(row), "quiet m-send", "m-open-card"));
+    // The row's one action, edged in the accent (M7 of the phone audit).
+    box.append(tap("Open the card to answer", () => a.openCard(row), "quiet m-send primary", "m-open-card"));
   } else if (deferred) {
     // Plain buttons, neither defaulted; the retry asks for the passkey first.
+    // H6 (phone audit): as the Review tab lays them out, Leave it at the left
+    // and Approve and retry at the right, far apart, never stacked.
+    const acts = testid(el("div", "m-review-rowacts"), "m-deferred-acts");
+    const leave = tap("Leave it", () => a.send(row, { action: "leave" }), "quiet m-send", "m-deferred-leave");
+    leave.disabled = busy;
+    acts.append(leave);
     if (deferred.grantable) {
       const retry = tap("Approve and retry", () => a.retry(row), "quiet m-send", "m-deferred-retry");
       retry.disabled = busy;
-      box.append(retry);
+      acts.append(retry);
     }
-    const leave = tap("Leave it", () => a.send(row, { action: "leave" }), "quiet m-send", "m-deferred-leave");
-    leave.disabled = busy;
-    box.append(leave);
+    box.append(acts);
   } else if (row.kind === "proposal" && a.withdraw) {
     const w = a.withdraw;
     if (w.confirming.has(row.id)) {
@@ -212,7 +271,8 @@ function answerBox(row: InboxRow, a: InboxAnswers): HTMLElement {
     const group = testid(el("div", "m-choices"), "m-decision-options");
     group.setAttribute("role", "radiogroup");
     const text = testid(el("textarea", "m-text"), "m-decision-text");
-    const picked = () => a.picks.get(row.id) ?? (d.suggested ?? -1);
+    // M4 (phone audit), as the Review tab (MR-3): the suggestion is marked, never chosen.
+    const picked = () => a.picks.get(row.id) ?? -1;
     const send = sendButton("Answer", "m-decision-send", () => {
       const words = text.value.trim();
       if (words) a.send(row, { text: words });
@@ -284,19 +344,24 @@ export function inboxRow(row: InboxRow, open: (row: InboxRow) => void, answers?:
     const d = decisionOf(row)!;
     if (d.question) box.append(testid(el("p", "question", d.question), "m-question"));
     // The suggestion's marker is the phone's own element, before the option's
-    // words, never text an option could also write (review of PR #309).
-    box.append(el("div", "label", "Options"));
-    const list = el("ul", "plain options");
-    d.options.forEach((option, i) => {
-      const item = el("li", "");
-      if (i === d.suggested) item.append(testid(el("span", "suggested", "suggested"), "m-suggested"), " ");
-      item.append(el("span", "option-text", option));
-      list.append(item);
-    });
-    box.append(list);
+    // words, never text an option could also write (review of PR #309). When
+    // the row answers here its radios list the options (M4 of the phone
+    // audit: not twice).
+    if (!(answers && answersHere(row, answers))) {
+      box.append(el("div", "label", "Options"));
+      const list = el("ul", "plain options");
+      d.options.forEach((option, i) => {
+        const item = el("li", "");
+        if (i === d.suggested) item.append(testid(el("span", "suggested", "suggested"), "m-suggested"), " ");
+        item.append(el("span", "option-text", option));
+        list.append(item);
+      });
+      box.append(list);
+    }
     if (d.why) box.append(el("div", "label", "Why"), testid(el("p", "", d.why), "m-why"));
     if (!d.open) box.append(el("div", "label", "Your answer"), testid(el("p", "", d.answer), "m-answer"));
-  } else genericDetail(row, box);
+  } else if (row.kind === "pr") prDetail(row, box);
+  else genericDetail(row, box);
   if (box.childNodes.length) card.append(box);
   if (first) {
     // The buttons are already above.
@@ -405,6 +470,38 @@ export function ownerChat(meta: ChatThread | null | undefined): boolean {
   return !!meta && meta.role === "chat" && !meta.task_id;
 }
 
+/** The classes only code puts on an owner row (C1 of the phone audit): no
+ * reply's Markdown can carry any of them (the sanitizer keeps no `class`). */
+export const OWNER_ROW_CLASSES: readonly string[] = ["msg-owner", "msg-flat", "msg-bubble", "msg-meta", "who-owner"];
+
+/** The owner's mark (C1): a code-built "You" chip, drawn before the marks on
+ * every row the owner typed in this chat. Hidden from screen readers, which
+ * hear the row's "You: " instead (M13). */
+function ownerMark(): HTMLElement {
+  const mark = testid(el("span", "who-owner", "You"), "m-owner-mark");
+  mark.setAttribute("aria-hidden", "true");
+  return mark;
+}
+
+/** The chip on every other owner-role row (review of #338, MED 1): a decision's answer from the
+ * inbox, a steer, a deferral's "written by Jarvis", a task runner's prompt, a row of a thread not
+ * yet known. Code's words, read aloud as they are; never "You". */
+export const NOT_TYPED_WORDS = "not typed by you";
+function notTypedMark(): HTMLElement {
+  return testid(el("span", "who-other", NOT_TYPED_WORDS), "m-not-typed-mark");
+}
+
+/** The marks of words the owner typed (chat_reads `_owner_row`, matched exactly): typed here, a
+ * message "not sent", and "steering" (typed at the desk, mid-turn; still drawn flat). */
+const OWNER_TYPED_MARKS: ReadonlySet<string> = new Set([...TYPED_HERE_MARKS, ...WARN_MARKS, "steering"]);
+
+/** Whether an owner-role row is the owner's own typing in this chat (review of #338, MED 1): only
+ * in an owner's own chat, and only with marks from OWNER_TYPED_MARKS. Anything else (an inbox
+ * answer quoting the agent's question, a deferral's words, an unknown mark) gets no "You". */
+export function typedHere(row: Pick<LogRow, "role" | "marks">, inOwnerChat: boolean): boolean {
+  return row.role === "owner" && inOwnerChat && row.marks.every((m) => OWNER_TYPED_MARKS.has(m));
+}
+
 export function logRow(row: LogRow, inOwnerChat = true): HTMLElement {
   const style = rowStyle(row.role, row.marks, inOwnerChat);
   const item = testid(el("article", "msg msg-" + style), "m-msg");
@@ -412,16 +509,22 @@ export function logRow(row: LogRow, inOwnerChat = true): HTMLElement {
   item.dataset.seq = String(row.seq);
   const cut = row.cut ? el("p", "muted small", "The rest of this message is shown at the desk.") : null;
   if (style === "owner") {
-    item.append(el("div", "msg-bubble plain-text", row.text));
-    const meta = [...row.marks, time(row.at).slice(0, 5)].filter(Boolean).join(" · ");
-    if (meta) item.append(el("div", "msg-meta", meta));
+    // M13: who said it, first, for VoiceOver (the chip below is hidden from it).
+    item.append(el("span", "m-sr", "You: "), el("div", "msg-bubble plain-text", row.text));
+    const meta = testid(el("div", "msg-meta"), "m-msg-meta");
+    meta.append(ownerMark());
+    for (const part of [...row.marks, time(row.at).slice(0, 5)].filter(Boolean)) meta.append(" · ", part);
+    item.append(meta);
     if (cut) item.append(cut);
     return item;
   }
   if (style === "flat") {
-    // Where the words came from first, then the words, never as a bubble.
+    // Where the words came from first, then the words, never as a bubble. "You" only for the
+    // owner's own typing here; any other owner-role row says it was not typed by the owner.
+    const mine = typedHere(row, inOwnerChat);
+    if (mine) item.append(el("span", "m-sr", "You: "));
     const head = testid(el("div", "msg-head"), "m-msg-marks");
-    const parts: HTMLElement[] = [el("span", "", row.role)];
+    const parts: HTMLElement[] = [mine ? ownerMark() : notTypedMark()];
     for (const mark of row.marks) parts.push(el("span", WARN_MARKS.has(mark) ? "mark mark-warn" : "mark", mark));
     const at = time(row.at).slice(0, 5);
     if (at) parts.push(el("span", "", at));
@@ -457,8 +560,17 @@ export function logRow(row: LogRow, inOwnerChat = true): HTMLElement {
   return item;
 }
 
+/** H5 (phone audit): what an empty transcript says. "No messages yet." only
+ * once the log was read; before that "Loading…", or, offline, that it was
+ * never read (never a false "empty"). */
+export function emptyLog(loaded: boolean, online: boolean): string {
+  return loaded ? "No messages yet." : online ? "Loading…" : "Not read yet: you're offline.";
+}
+
 export function transcriptView(thread: ChatThread | null, rows: LogRow[], older: boolean,
-                               back: () => void, composer?: HTMLElement | null): { view: HTMLElement; list: HTMLElement } {
+                               back: () => void, composer?: HTMLElement | null,
+                               read: { loaded: boolean; online: boolean } = { loaded: true, online: true },
+): { view: HTMLElement; list: HTMLElement } {
   const view = testid(el("section", "view transcript-view"), "m-thread");
   const bar = el("div", "subbar");
   bar.append(tap("‹ Chats", back, "back", "m-back"));
@@ -467,7 +579,7 @@ export function transcriptView(thread: ChatThread | null, rows: LogRow[], older:
   if (older) view.append(el("p", "muted small center", "Older messages are at the desk."));
   const list = testid(el("div", "transcript"), "m-transcript");
   for (const row of rows) list.append(logRow(row, ownerChat(thread)));
-  if (!rows.length) list.append(empty("No messages yet."));
+  if (!rows.length) list.append(empty(emptyLog(read.loaded, read.online)));
   view.append(list);
   // P-5: the message box (./write.ts) for an owner's chat, or the app's
   // "read only" line for any other; nothing until the chat is known.
@@ -535,7 +647,11 @@ export function diffView(diff: DiffView, folds: Map<string, boolean> = new Map()
 
 export function taskView(task: TaskView, diff: DiffView | null | "loading" | string,
                          actions: { back: () => void; showDiff: () => void; folds?: Map<string, boolean>;
-                                    controls?: HTMLElement | null }): HTMLElement {
+                                    controls?: HTMLElement | null;
+                                    /** M5 (phone audit): the question's Inbox row, where the phone answers it. */
+                                    answerInInbox?: (index: number) => void;
+                                    /** Whether the question's `tq:` row is in the Inbox now (review of #338, LOW). */
+                                    inInbox?: (index: number) => boolean }): HTMLElement {
   const view = testid(el("section", "view"), "m-task-view");
   view.dataset.id = task.id;
   const bar = el("div", "subbar");
@@ -554,8 +670,13 @@ export function taskView(task: TaskView, diff: DiffView | null | "loading" | str
   for (const q of open) {
     view.append(el("div", "label", "Question"), testid(el("p", "question", q.text), "m-question"));
     lines(view, "Options", q.options, "options");
+    const go = actions.answerInInbox;
+    if (go && (actions.inInbox?.(q.index) ?? true)) {
+      view.append(tap("Answer it in the Inbox", () => go(q.index), "quiet m-send primary", "m-answer-in-inbox"));
+    } else {
+      view.append(testid(el("p", "desk-only", "Answer at the desk"), "m-desk-only"));
+    }
   }
-  if (open.length) view.append(testid(el("p", "desk-only", "Answer at the desk"), "m-desk-only"));
   if (task.plan.length) {
     view.append(el("div", "label", "Plan"));
     const ol = testid(el("ol", "plain plan"), "m-plan");

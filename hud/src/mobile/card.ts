@@ -29,7 +29,7 @@ import { parseBrowserPrivateApproval, type BrowserApprovalPublic } from "../lib/
 import { clockOf, oneLine, type InboxRow } from "../lib/inbox";
 import { relayedLine, relayedParts } from "../lib/relays";
 import {
-  AI_LABEL, WHERE_LABEL, WHY_LABEL, previewLine, startsCollapsed, summaryView, summaryWords, toggleLabel, whereFields,
+  AI_LABEL, WHERE_LABEL, WHY_LABEL, startsCollapsed, summaryView, summaryWords, toggleLabel, whereFields,
   whereParts,
 } from "../lib/approvalSummary";
 
@@ -82,6 +82,8 @@ export interface CardState {
   busy: boolean;
   rule: Rule | null;
   notice: string;
+  /** What the app asks or sends while busy (M2): "Asking for Face ID…", "Sending…". */
+  progress?: string;
   /** AS: the owner's own open (true) or close (false) of the command; undefined until then. */
   expanded?: boolean;
 }
@@ -168,7 +170,26 @@ export function summaryLines(card: Json, box: HTMLElement, idPrefix = "approval"
   }
 }
 
-/** The command and every argument, whole or collapsed to its first line, with its toggle (AS-15). */
+/** H2 (phone audit): how much of a collapsed command reaches the preview. The CSS clamps it to
+ * three wrapped lines (`.as-clamp`), so a short command shows whole and a long one shows as much
+ * as three lines hold, never one ellipsized line; leading blank lines are dropped. */
+export const PREVIEW_CHARS = 600;
+export function previewText(text: string): string {
+  // As previewLine: format characters out (bidi overrides, zero-widths), other controls as spaces.
+  const clean = text.replace(/\r\n?|[\u2028\u2029]/g, "\n").replace(/\p{Cf}/gu, "")
+    .replace(/[^\S\n\t ]|[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, " ").replace(/^(?:[ \t]*\n)+/, "");
+  const chars = Array.from(clean);
+  return chars.length <= PREVIEW_CHARS ? clean : chars.slice(0, PREVIEW_CHARS - 1).join("").trimEnd() + "…";
+}
+
+/** The collapsed preview's text, inside its clamp. */
+function clamp(...parts: (Node | string)[]): HTMLElement {
+  const box = el("span", "as-clamp");
+  box.append(...parts);
+  return box;
+}
+
+/** The command and every argument, whole or collapsed to three lines, with its toggle (AS-15, H2). */
 export function commandBlock(command: unknown, args: unknown, open: boolean, toggle: ((open: boolean) => void) | undefined,
                              box: HTMLElement, idPrefix = "approval") {
   const cmd = typeof command === "string" ? command : "";
@@ -189,8 +210,8 @@ export function commandBlock(command: unknown, args: unknown, open: boolean, tog
     }
   } else {
     const line = testid(el("div", "arg as-preview"), `${idPrefix}-command-preview`);
-    line.append(el("span", "k", cmd ? "command " : ""),
-      cmd ? previewLine(cmd) : `${entries[0][0]} ${previewLine(argText(entries[0][1]))}`);
+    line.append(clamp(el("span", "k", cmd ? "command " : ""),
+      cmd ? previewText(cmd) : `${entries[0][0]} ${previewText(argText(entries[0][1]))}`));
     block.append(line);
   }
   if (toggle) {
@@ -206,7 +227,7 @@ export function commandBlock(command: unknown, args: unknown, open: boolean, tog
 /**
  * A row's command and arguments (the inbox's and the review's rows, AS-15):
  * labelled blocks as the rows always drew them, whole when `open`, else the
- * command's (or the arguments') first line; the toggle, when given, below.
+ * command's (or the arguments') start, clamped to three lines (H2); the toggle, when given, below.
  */
 export function rowCommand(command: string, argsText: string, open: boolean,
                            toggle: ((open: boolean) => void) | undefined, box: HTMLElement,
@@ -216,8 +237,9 @@ export function rowCommand(command: string, argsText: string, open: boolean,
     if (command) box.append(el("div", "label", "Command"), testid(el("pre", "code", command), ids.command));
     if (argsText) box.append(el("div", "label", "Arguments"), testid(el("pre", "code", argsText), ids.args));
   } else {
-    box.append(el("div", "label", command ? "Command" : "Arguments"),
-      testid(el("pre", "code as-preview", previewLine(command || argsText)), `${ids.prefix}-preview`));
+    const pre = testid(el("pre", "code as-preview"), `${ids.prefix}-preview`);
+    pre.append(clamp(previewText(command || argsText)));
+    box.append(el("div", "label", command ? "Command" : "Arguments"), pre);
   }
   if (toggle) {
     const b = button(toggleLabel(open, command, argsText ? 1 : 0), "quiet as-toggle", `${ids.prefix}-toggle`,
@@ -276,13 +298,31 @@ function privateBody(state: CardState, box: HTMLElement): boolean {
   return true;
 }
 
-function deadline(card: Json): string {
+/** When the card denies on its own (asked_at + timeout_s), in ms; null if it does not say. */
+export function deadlineAt(card: Json): number | null {
   const at = typeof card.asked_at === "string" ? Date.parse(card.asked_at) : NaN;
   const t = typeof card.timeout_s === "number" ? card.timeout_s : NaN;
-  return Number.isFinite(at) && Number.isFinite(t) ? clockOf(at + t * 1000) : "";
+  return Number.isFinite(at) && Number.isFinite(t) ? at + t * 1000 : null;
 }
 
-export function cardView(state: CardState, actions: CardActions): HTMLElement {
+/** L1 (phone audit): the deadline in the gap, code's words: "Denies automatically at 08:36 · 9 min left". */
+export function deadlineWords(at: number | null, now: number): string {
+  if (at === null) return "Denies automatically when it times out";
+  const left = Math.ceil((at - now) / 60_000);
+  const tail = left > 1 ? ` · ${left} min left` : left === 1 ? " · under a minute left" : "";
+  return `Denies automatically at ${clockOf(at).slice(0, 5)}${tail}`;
+}
+
+/** M3 (phone audit): the limited state, said once, with what AUTHORIZE then means; when this card
+ * cannot be allowed here at all, only that it is answered at the desk (review of #338, MED 2). */
+export function limitedWords(secure: Secure, canAllow: boolean): string {
+  const label = `limited: ${secure.label || secure.failed || "a check failed"}. `;
+  return label + (canAllow ? "AUTHORIZE answers with Discord's authority; ALWAYS is off."
+    : "ALWAYS is off, and this card is answered at the desk.");
+}
+
+export function cardView(state: CardState, actions: CardActions, now: number = Date.now(),
+                         online = true): HTMLElement {
   const view = testid(el("section", "view"), "m-card-view");
   const bar = el("div", "subbar");
   const back = button("‹ Inbox", "back", "m-back", actions.back, false);
@@ -300,13 +340,13 @@ export function cardView(state: CardState, actions: CardActions): HTMLElement {
     if ((e.key === "Enter" || e.key === " ")
         && !(e.target instanceof Element && e.target.closest('[data-testid="approval-deny"]'))) e.preventDefault();
   }, true);
-  card.append(el("h3", "", "AUTHORIZATION REQUIRED"));
+  // M13: the heading takes the focus when the card opens (app.ts), so VoiceOver starts here.
+  const heading = testid(el("h3", "", "AUTHORIZATION REQUIRED"), "m-card-heading");
+  heading.tabIndex = -1;
+  card.append(heading);
   const d = state.detail;
   const row = state.row;
-  if (d && !d.secure.ok) {
-    card.append(testid(el("p", "m-limited", `limited: ${d.secure.label || d.secure.failed || "a check failed"}`),
-      "m-limited"));
-  }
+  if (d && !d.secure.ok) card.append(testid(el("p", "m-limited", limitedWords(d.secure, d.can.allow)), "m-limited"));
   // AS-12: a card's leading line (a widening, the merge gate's), then the buttons, then the rest.
   if (d && !d.private && !state.refused) {
     const headline = headlineLine(d.card.headline);
@@ -322,19 +362,31 @@ export function cardView(state: CardState, actions: CardActions): HTMLElement {
     body.append(testid(el("p", "m-desk", state.refused === "answer at the desk"
       ? "A private card: answer at the desk." : state.refused), "m-card-refused"));
   } else if (!d) {
-    body.append(el("p", "muted", "Loading the card…"));
+    // H5: offline, the card was never read; never "Loading" forever.
+    body.append(testid(el("p", "muted", online ? "Loading the card…" : "Not read yet: you're offline."),
+      "m-card-loading"));
   } else if (d.private) {
     shown = privateBody(state, body);
   } else {
     ordinaryBody(state, d.card, body, actions.toggleCommand);
     shown = true;
   }
-  if (d && d.why) card.append(testid(el("p", "m-why", d.why), "m-card-why"));
-  if (state.notice) {
-    const note = testid(el("p", "m-notice", state.notice), "m-card-notice");
-    note.setAttribute("role", "status");
-    card.append(note);
+  // M3: the red line already says "limited"; the daemon's same words are not said again.
+  if (d && d.why && !(!d.secure.ok && d.why.startsWith("limited:"))) {
+    card.append(testid(el("p", "m-why", d.why), "m-card-why"));
   }
+  // M1/M2: one notice slot, always there and under the allow row, so nothing it says moves a button.
+  const notice = testid(el("p", "m-notice m-card-notice", state.busy && state.progress ? state.progress : state.notice),
+    "m-card-notice");
+  notice.setAttribute("role", "status");
+  notice.dataset.tone = state.busy && state.progress ? "busy" : state.notice ? "refused" : "";
+  const at = d ? deadlineAt(d.card) : null;
+  // L1: the safety gap holds the deadline (code's words, no button, no model text).
+  const gap = () => {
+    const g = el("div", "m-gap");
+    g.append(testid(el("p", "m-deadline", deadlineWords(at, now)), "m-card-deadline"));
+    return g;
+  };
   // Deny first, alone; AUTHORIZE and ALWAYS far below it; all of it above the card's body (AS-12).
   const denyRow = el("div", "m-deny-row");
   denyRow.append(button("DENY", "deny", "approval-deny", actions.deny, false));
@@ -353,7 +405,7 @@ export function cardView(state: CardState, actions: CardActions): HTMLElement {
     confirm.disabled = state.busy;
     cancel.disabled = state.busy;
     rule.append(confirm, cancel);
-    card.append(el("div", "m-gap"), rule);
+    card.append(gap(), rule);
   } else {
     const authorize = el("div", "m-allow-row");
     // ALWAYS only on a card that takes one (the HUD's rule: not a
@@ -366,12 +418,10 @@ export function cardView(state: CardState, actions: CardActions): HTMLElement {
     const allow = button("AUTHORIZE", "allow", "approval-allow", actions.allow, true);
     allow.disabled = state.busy || !allowable || !d!.can.allow || (!!d && nestedTooDeep(d.card.args));
     authorize.append(allow);
-    card.append(el("div", "m-gap"), authorize);
+    card.append(gap(), authorize);
   }
   (denyRow.firstChild as HTMLButtonElement).disabled = state.busy;
-  card.append(el("div", "m-gap-after"), body);
-  const at = d ? deadline(d.card) : "";
-  card.append(el("div", "foot", at ? `DENIES AUTOMATICALLY AT ${at}` : "DENIES AUTOMATICALLY WHEN IT TIMES OUT"));
+  card.append(notice, el("div", "m-gap-after"), body);
   view.append(card);
   return view;
 }

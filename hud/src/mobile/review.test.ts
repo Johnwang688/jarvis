@@ -50,6 +50,15 @@ function actions(over: Partial<ReviewActions> = {}): ReviewActions {
 }
 
 describe("the phone's Review tab (mobile/review.ts)", () => {
+  it("names each checkbox by its item for VoiceOver, not only Select (M13 of the phone audit)", () => {
+    const view = reviewView(state(), actions(), null);
+    const boxes = Array.from(view.querySelectorAll<HTMLInputElement>('[data-testid="m-review-tick"]'));
+    const titles = Array.from(view.querySelectorAll('[data-testid="m-review-item"][data-kind="deferred"] > .row-title'))
+      .map((t) => t.textContent);
+    expect(boxes.map((b) => b.getAttribute("aria-label"))).toEqual(titles.map((t) => "Select: " + t));
+    expect(new Set(boxes.map((b) => b.getAttribute("aria-label"))).size).toBe(boxes.length);
+  });
+
   it("draws every daemon string as text, no box ticked, no select-all, no default chosen", () => {
     const view = reviewView(state(), actions(), null);
     document.body.replaceChildren(view);
@@ -140,16 +149,20 @@ describe("the phone app's review (MR-11, MR-12)", () => {
     opens.app.start();
     await opens.settle();
     expect(opens.app.tab).toBe("review");
-    expect(opens.root.querySelector('[data-testid="m-tab-review"]')!.hasAttribute("hidden")).toBe(false);
+    const tab = (h: { root: HTMLElement }) => h.root.querySelector<HTMLButtonElement>('[data-testid="m-tab-review"]')!;
+    expect([tab(opens).hidden, tab(opens).disabled]).toEqual([false, false]);
     const not = harness(report({ opens_here: false }));
     not.app.start();
     await not.settle();
     expect(not.app.tab).toBe("inbox");
-    expect(not.root.querySelector('[data-testid="m-tab-review"]')!.hasAttribute("hidden")).toBe(false);
+    expect([tab(not).hidden, tab(not).disabled]).toEqual([false, false]);
     const night = harness(report({ quiet: { enabled: true, now: true, start: null, end: null } }));
     night.app.start();
     await night.settle();
-    expect(night.root.querySelector('[data-testid="m-tab-review"]')!.hasAttribute("hidden")).toBe(true);
+    // M9a (phone audit): no review, the tab keeps its slot, off, so Chats and Tasks never move.
+    expect([tab(night).hidden, tab(night).disabled]).toEqual([false, true]);
+    expect(Array.from(night.root.querySelectorAll("nav.tabs button")).map((b) => b.getAttribute("data-testid")))
+      .toEqual(["m-tab-inbox", "m-tab-review", "m-tab-chats", "m-tab-tasks"]);
   });
 
   it("tick 2 of 3, confirm: one challenge for exactly those, one passkey, then exactly those ids and tags", async () => {

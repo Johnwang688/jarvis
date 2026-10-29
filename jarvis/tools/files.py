@@ -640,7 +640,9 @@ _credential_dir_cache: dict[tuple, list[Path]] = {}
 
 
 def _credential_roots() -> list[Path]:
-    key = (config.credential_dirs(), os.environ.get("HOME", ""))
+    # The folders and, since 2026-10-29, the credential stores outside them
+    # (`config.CREDENTIAL_STORES`: `~/.netrc`, `~/.docker` …).
+    key = (config.credential_read_paths(), os.environ.get("HOME", ""))
     found = _credential_dir_cache.get(key)
     if found is None:
         found = []
@@ -658,29 +660,104 @@ def _credential_roots() -> list[Path]:
     return found
 
 
+def _readable_carves() -> list[str]:
+    """`config.CREDENTIAL_READABLE` (`~/.agents/skills`: the owner's skills,
+    read-only, inside a closed store), lexical and real, each ending in a
+    separator."""
+    out = []
+    for raw in config.CREDENTIAL_READABLE:
+        base = os.path.abspath(os.path.expanduser(raw))
+        for form in {base, os.path.realpath(base)}:
+            out.append(form.rstrip(os.sep) + os.sep)
+    return out
+
+
+def _windows_root() -> str:
+    return os.path.abspath(config.windows_users_root()).casefold().rstrip(os.sep) + os.sep
+
+
+def windows_closed(path: str, root: str | None = None) -> bool:
+    """`path` (absolute) is, or lies in, what Codex closes in a Windows
+    profile WSL mounts (`config.windows_closed_name`: a dot entry, `AppData`,
+    the registry hive) under `config.windows_users_root()`, compared
+    case-folded (the drive is case-insensitive). By name, no drive access."""
+    root = root if root is not None else _windows_root()
+    folded = path.casefold()
+    if not folded.startswith(root):
+        return False
+    parts = folded[len(root):].split(os.sep)
+    return len(parts) >= 2 and bool(parts[1]) and config.windows_closed_name(parts[1])
+
+
+def credential_folder_holds(path: str | Path) -> str | None:
+    """The credential folder or store `path` holds strictly below it — as
+    written or where it resolves, `..` read as the kernel reads it, case
+    folded — or None; a Windows profile or anything holding the Windows
+    users folder holds its closed entries. A path that cannot be resolved
+    holds one ("unknown"). What a recursive search or a walk from `path`
+    would reach (v1's `run_readonly`, v2's read tools and shell rule)."""
+    try:
+        written = os.path.expanduser(os.fspath(path))
+        candidates = {os.path.abspath(written), os.path.realpath(written)}
+    except (OSError, RuntimeError, ValueError, TypeError):
+        return "unknown"
+    users = os.path.abspath(config.windows_users_root())
+    folders = [str(r) for r in _credential_roots()]
+    for candidate in candidates:
+        prefix = candidate if candidate.endswith(os.sep) else candidate + os.sep
+        for folder in folders:
+            if folder.startswith(prefix) or folder.casefold().startswith(prefix.casefold()):
+                return folder
+        if (users + os.sep).casefold().startswith(prefix.casefold()) or (
+                os.path.dirname(candidate.rstrip(os.sep)).casefold() == users.casefold()):
+            return users
+    return None
+
+
 def credential_folder_judge():
     """`_credential_folder` for many paths at once — a search: the folders
     and the gate's own paths are read once, each directory's real path once,
     and a path's own real path only when its last component is a symlink
     (otherwise it is its directory's real path plus its name). String
     prefixes, not `Path.parents`: a search judges every file it reads
-    (review of PR #69: 20k paths took 3.4 s against 0.31 s before)."""
+    (review of PR #69: 20k paths took 3.4 s against 0.31 s before).
+
+    Since 2026-10-29 (cred-dir reads): also a case variant, `..` as the
+    kernel reads it, the credential stores (`config.CREDENTIAL_STORES`), and
+    what Codex closes in a Windows profile (`windows_closed`); a path in
+    `config.CREDENTIAL_READABLE` (`~/.agents/skills`) is not refused for the
+    store that holds it."""
     roots = tuple(str(r) if str(r).endswith(os.sep) else str(r) + os.sep for r in _credential_roots())
+    carves = _readable_carves()
+    # For each root, the readable carve-outs inside it.
+    carved = {r: tuple(c for c in carves if c.startswith(r) and c != r) for r in roots}
+    folded = tuple(r.casefold() for r in roots)
+    folded_carved = {r.casefold(): tuple(c.casefold() for c in cs) for r, cs in carved.items()}
     # Not the phone's folder (`config.remote_dir()`, review of PR #325 MED-1):
     # its state files hold a VAPID private key, push secrets and session
     # hashes, so none of them is readable config.
     remote = os.path.abspath(os.path.expanduser(str(config.remote_dir()))) + os.sep
     own = frozenset(a for a in (os.path.abspath(str(p)) for p in _protected_state_paths())
                     if not a.startswith(remote))
+    users = _windows_root()
     real_dirs: dict[str, str] = {}
 
     def inside(p: str) -> bool:
         p = p + os.sep
-        return any(p.startswith(r) for r in roots)
+        return any(p.startswith(r) and not any(p.startswith(c) for c in carved[r]) for r in roots)
+
+    def inside_folded(p: str) -> bool:
+        # A case variant (`~/.SSH/id_ed25519`, `~/.Config/GH/hosts.yml`): the
+        # same folder on a case-insensitive drive, and refused everywhere
+        # else too, the stricter way (cred-dir reads, 2026-10-29).
+        p = p.casefold() + os.sep
+        return any(p.startswith(r) and not any(p.startswith(c) for c in folded_carved[r])
+                   for r in folded)
 
     def judge(path: str | Path) -> bool:
         try:
-            lexical = os.path.abspath(os.path.expanduser(os.fspath(path)))
+            written = os.path.expanduser(os.fspath(path))
+            lexical = os.path.abspath(written)
             head, tail = os.path.split(lexical)
             if not tail or os.path.islink(lexical):
                 resolved = os.path.realpath(lexical)
@@ -689,11 +766,17 @@ def credential_folder_judge():
                 if real is None:
                     real = real_dirs[head] = os.path.realpath(head)
                 resolved = os.path.join(real, tail)
+            # `abspath` folds `..` before any symlink is followed, the kernel
+            # after: `link/../x` with `link -> ~/.ssh/sub` opens `~/.ssh/x`.
+            # Where a `..` is written, the kernel's reading is judged too.
+            kernel = (os.path.realpath(written) if ".." in written.split(os.sep)
+                      else resolved)
         except (OSError, RuntimeError, ValueError, TypeError):
             return True
-        if resolved == lexical and lexical in own:
+        if resolved == lexical and kernel == lexical and lexical in own:
             return False
-        return inside(lexical) or inside(resolved)
+        return any(inside(c) or inside_folded(c) or windows_closed(c, users)
+                   for c in (lexical, resolved, kernel))
 
     return judge
 
@@ -706,8 +789,8 @@ def _credential_folder(path: str | Path) -> bool:
 
 
 def _credential_folder_refusal(path: str | Path) -> str:
-    return (f"Error: {Path(str(path)).name} is in a credential folder (SSH, cloud and Git "
-            "logins, Jarvis's own credentials or the owner's Browser profile), which Jarvis "
+    return (f"Error: {Path(str(path)).name} is in a credential folder or store (SSH, cloud, "
+            "registry and Git logins, Jarvis's own credentials or the owner's Browser profile), which Jarvis "
             "does not read or write. Ask the owner for what you need instead.")
 
 
@@ -946,6 +1029,11 @@ def list_dir(
     path: Annotated[str, "Directory to list"] = ".",
 ) -> str:
     """List the entries in a directory."""
+    path = in_working_dir(path)
+    if _credential_folder(path):
+        # Names in a credential folder are not Jarvis's to list either
+        # (cred-dir reads, 2026-10-29; v2's permit refuses the same).
+        return _credential_folder_refusal(path)
     target = _resolve(path)
     if not target.is_dir():
         return f"Error: {target} is not a directory."
@@ -964,13 +1052,19 @@ def find_files(
     path: Annotated[str, "Directory to search from"] = ".",
 ) -> str:
     """Find files matching a glob pattern."""
+    path = in_working_dir(path)
+    if _credential_folder(path):
+        return _credential_folder_refusal(path)
     root = _resolve(path)
     if not root.is_dir():
         return f"Error: {root} is not a directory."
 
+    # A credential folder's names are left out wherever the walk meets one
+    # (a folder configured with no dot in its path, a symlink to one).
+    folder = credential_folder_judge()
     hits = []
     for match in root.glob(pattern):
-        if any(part.startswith(".") for part in match.parts):
+        if any(part.startswith(".") for part in match.parts) or folder(match):
             continue
         hits.append(os.path.relpath(match, root))
         if len(hits) >= 200:

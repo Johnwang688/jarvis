@@ -3554,3 +3554,290 @@ and `stores_check`), `decisions.jsonl` dropped from `RECORD_FILES`, globs
 let past the tree rule (157), `owner_trees` back to the inbox alone (629),
 the record trees left out of `_self_protected` (`files_check`,
 `stores_check`), and `denied_file`'s record branch removed (11).
+
+## Read tools refuse credential folders in every task and chat (2026-10-29)
+
+**The gap** (found by the PM-E builder, confirmed by its reviewer). v2's
+`denied_read` refused credential *files* (`.env*`, the bundles) and the
+phone's folder only. Nothing else under `config.credential_dirs()` —
+`~/.config/gh` (the GitHub token in `hosts.yml`), `~/.ssh`, `~/.aws`,
+`~/.config/jarvis`, `~/.gnupg`, the Browser's folder — was refused for
+Claude's Read, NotebookRead, Grep, Glob or LS, and `credentials-path`
+judges shell words and write targets, not read tools. Under AUTO the
+provider's reviewer decided alone, in every task and chat, while a shell
+`cat ~/.config/gh/hosts.yml` was asked. `credential_dirs()`' docstring
+claimed v2's read tools refused them; that held only for `remote_dir()`.
+Separately, `git credential fill` and its kin reached the reviewer:
+`credentials-login` knew only `gh auth`, `vercel login`, `aws configure` and
+`ssh-*`.
+
+**The rule** (tighten-only):
+
+- **Layer 1, every read tool** (`READ_TOOLS`: Claude's Read, NotebookRead,
+  Grep, Glob, LS; v1's `read_file`, `grep_files`, `list_dir`, `find_files`)
+  refuses any path in a credential folder, unasked, in every profile
+  (`permissions._credential_folder_read`). It asks v1's own judge,
+  `files.credential_folder_judge`, so the two answer alike: as written and
+  where it resolves, a symlink's name and target, `~`, a relative path
+  placed in the brief's folder **and** the folder Claude's shell reports
+  (`shell_cwd`), and, new in the shared judge, **a case variant**
+  (`~/.SSH/…`, refused everywhere, the stricter way) and **`..` as the
+  kernel reads it** (`link/../x` with `link -> ~/.ssh/sub` is `~/.ssh/x`;
+  `abspath` alone folds it to the wrong place). The gate's own state files
+  stay readable by their own path, as in v1.
+- **A tree search from a folder that holds one** — Grep, Glob, LS and
+  `find_files` rooted at `~`, `~/.config`, `~/.local`, `/`, the folder
+  holding `$HOME`, or with no `path` in such a folder — is refused. This
+  reverses the stated limit of the phone-folder rule (LOW-A): `$HOME` and
+  above used to pass. v1's `grep_files` is not a tree tool here: it filters
+  every file through the same judge. `list_dir` lists one level and skips
+  dot entries, so `list_dir ~` stays allowed.
+- **A Glob (or `find_files`) pattern that climbs into one** — absolute,
+  `~`, `../../.aws/*`, a brace variant, a case variant — is refused when its
+  fixed leading folders lie in a credential folder, or hold one with a
+  wildcard still to match (`~/.ss?/*`, `/**/id_*`), and whenever a `..`
+  follows a wildcard (`*/../../x`: cannot be placed). Claude's Glob pattern
+  stays unjudged for `.env*` names (it returns names); this is the folder
+  rule only.
+- **Layer 2, `credentials-read`** (new default rule, kind
+  `credential_read`): `git credential fill|approve|reject`, any
+  `git credential-<helper>` and `git-credential-*` run directly, git's
+  credential settings read or set (`git config … credential.*`,
+  `git -c credential.…`, `--config-env=credential.…`), the helpers and
+  stores `docker-credential-*`, `pass`, `gopass`, `passage`, and the token
+  printers `gh config … *token*`, `gcloud auth print-*`,
+  `az … get-access-token`, `aws … get-login-password|get-session-token|
+  get-role-credentials|get-federation-token`, macOS `security
+  find-*-password|dump-keychain|export`, `op read|item get|inject`,
+  `bw get`, `lpass show`, `gpg --export-secret-*`,
+  `npm config get *auth*`. The program must be the command's own (after
+  wrappers and runners), so `git log --grep credential` and
+  `echo pass show` do not ask. `gh auth token` was already
+  `credentials-login`'s; `secret-tool`, `keyring get` and `kwallet-query`
+  were already refused outright (Secret Service, 2026-10-15).
+- **No Always on a credential rule's card** (`credentials-*`): a yes is
+  for that call only, never an allowlist entry a v1 surface would read.
+- **v1 parity.** `list_dir` and `find_files` now refuse a credential folder
+  (they never asked the judge), and `find_files` leaves a credential
+  folder's names out of a walk; the judge's case and `..` readings reach
+  `read_file`, `grep_files`, `run_readonly`, sqlite and skills through the
+  one function.
+- **Codex** needs nothing: `codex_config.deny_paths` already denies every
+  existing `credential_dirs()` folder (plus `.git-credentials`, `.netrc`
+  and the rest of `KNOWN_CREDENTIALS`).
+- **PR #337 (PM-E)** adds a stricter scope for PR fix tasks
+  (`pr_fix.judge`, `_under_credential_dir`); it runs after layer 1, so this
+  rule refuses first and the scope's own deny never sees these calls. The
+  two do not touch the same lines.
+
+**Not covered** (stated limits): a symlink to a credential folder deep in a
+tree a search walks (ripgrep follows none unless told to, and Jarvis never
+sees Claude's tool results); and a tool outside `READ_TOOLS` (an external
+MCP file reader).
+
+**Follow-up in the same PR: stores and listings.**
+
+- **Stores.** `config.CREDENTIAL_STORES` lists the credential stores
+  outside the folders, by their place under `$HOME`. It covers at least
+  Codex's `KNOWN_CREDENTIALS`, which a suite pins:
+  - login files: `.git-credentials`, `.netrc`, `.npmrc`, `.pypirc`,
+    `.gitconfig`, `.claude.json`;
+  - tool folders: `.docker`, `.kube`, `.azure`, `.supabase`, `.agents`,
+    `.config/gcloud`, `.config/uv`;
+  - stores under `.local` and `.cargo`: the keyrings, Vercel's,
+    `uv/credentials`, `.cargo/credentials(.toml)`;
+  - `.cache/huggingface`, and the shell and Python histories.
+
+  It adds `~/_netrc`, `~/.claude/.credentials.json` and
+  `~/.codex/auth.json`. `config.credential_read_paths()` is the folders plus
+  these stores. v1's judge reads it, so every read tool, `run_readonly` and
+  v2's `credentials-path` cover them. `credentials-path`'s reason now says
+  "read or write". The owner-facing checks are unchanged: `folders`,
+  `editor_policy` and grants still read `credential_dirs()`.
+- **Names refused anywhere.** `.git-credentials`, `.netrc`, `_netrc` and
+  `.pypirc` are refused wherever they are found, through
+  `secrets.EXACT_NAMES`, so a shell line naming one is DENY at layer 1.
+  `.npmrc` is refused only at `~/.npmrc`, because a project's `.npmrc`
+  holds registry settings and stays readable.
+- **Git listings ask.** These now ask under `credentials-read`, with no
+  Always:
+  - `git config --list`, `-l` in any cluster, and `git config list`;
+  - the regexp and urlmatch reads;
+  - any `url.*` read;
+  - `git var -l`.
+
+  They ask rather than being scrubbed because Jarvis never sees Claude's or
+  Codex's shell output, so it has nowhere to scrub it. The scrub exists only
+  for v1's own `run_command`.
+
+Pinned by `cred_store_read_checks` (2,729 checks):
+- 25 stores × 5 spellings × 9 tools are refused at layer 1, and v1's
+  `read_file` and `run_readonly` refuse them too;
+- the four names are refused in three places by four tools and the shell;
+- a project's `.npmrc` and `~/.claude/skills` stay readable;
+- 16 listings ask with no Always;
+- 8 ordinary git commands do not ask.
+
+Each of these mutants was verified to fail:
+
+| Mutant | Failed checks |
+|---|---|
+| Stores left out of the judge | 2,274 |
+| One Codex entry dropped | 1 |
+| The names left out of `EXACT_NAMES` | 76 |
+| Listings not asked | 19 |
+| Short `-l` not asked | 6 |
+
+Pinned by `tests/v2/permissions_check.py` (`cred_dir_read_checks`: nine
+tools × seven folders × ten spellings in AUTO, ASK and STRICT refused at
+layer 1 and never asked (1,890 calls); 47 climbing patterns × Glob and
+`find_files`; nine holding roots × four tree tools; pathless searches in a
+holding brief or shell folder; 24 ordinary reads allowed; v1's four read
+tools refusing every spelling; 39 commands asked with no Always and
+declined with no human; 14 ordinary commands not asked) and
+`tests/v2/push_check.py` (`$HOME` now refused). Against main the section
+fails 3,952 of 6,562 checks. Mutants, each verified to fail: no folder
+judge (3,464), no holds check (76), no pattern check (94), a pathless
+search unjudged (98), the shell's folder ignored (2), `..` after a
+wildcard allowed (16), no case fold (406), no kernel-order `..` (345),
+`list_dir` unguarded (70), `find_files`' walk unfiltered (1), no
+`credential_read` kind (229), git's subcommand ignored (104), Always
+offered (79), the rule missing from the defaults (229).
+
+**Review of #339 (2026-10-29), same PR.**
+
+- **HIGH: shell searches from a credential-holding root now ask.** v2's
+  shell auto-allowed `grep -r token ~`, `rg -uu token ~`, `find ~ -name
+  hosts.yml` and `ls -R ~` through rules' ALLOW. This was also true on
+  main.
+  - `credentials-path` now matches a recursive search or walk whose root
+    holds a credential folder or store. The search programs covered are
+    grep and rg, read by `shell._search_modes`, plus ag, ack, ugrep, find,
+    tree, du, tar, 7z, rsync and scp. `ls -R`, `cp -r` and `zip -r` count
+    when they recurse.
+  - The check uses `files.credential_folder_holds`, which v1's
+    `run_readonly` now shares.
+  - A root counts if the shell would find it there: `~`, `$HOME`, a glob's
+    fixed folders, or a symlink. With no path operand, the root is the
+    brief's or the shell's folder.
+  - The outcome is ASK with no Always, like the other credential rules.
+- **Strings handed to another shell are judged.** Every `credentials-*`
+  rule also reads what a line hands another shell (`sh -c`, `eval`,
+  `ssh host …`), through #330's bounded `secrets._inner_commands`. The
+  limit is 3 levels and 32 strings. An inner string that cannot be read
+  is asked (`credentials-inner`).
+- **MED 1: `/proc` and `/dev/fd` paths are refused.** These resolve in the
+  gate's own process, so a read-tool path through
+  `/proc/<pid>/{cwd,root,fd,fdinfo,map_files,environ,exe,task}` or
+  `/dev/fd`/`std*` is refused. That includes a symlink on the way whose
+  target is one. Tree roots under `/proc` and Glob patterns there are
+  refused too.
+- **MED 2: git aliases ask.** These now ask: `-c alias.*`, glued
+  `-calias…` and `-ccredential…`, and `--config-env=alias…`. So does
+  setting an alias with `git config`, because an alias can run
+  `git credential fill`. As a result, merge_gate's ordinary
+  `git -c alias.st=status …` now asks `credentials-read`.
+- **MED 3: Windows profiles match Codex.** The Windows profile list moved
+  to `config`: `WINDOWS_USERS`, `windows_closed_name` and
+  `windows_extra`. Codex and the read tools' judge share it. The judge
+  refuses a profile's dot entries, `AppData` and `NTUSER*`, compared
+  case-folded and without touching the drive. A Grep from a profile or
+  from above the Users folder is refused; a Glob or LS from there is
+  asked.
+- **MED 4: extra headers ask.** Any `*.extraheader` setting is
+  `credentials-read`'s.
+- **LOW items (the lead's calls):**
+  - `config.CREDENTIAL_READABLE` keeps `~/.agents/skills` readable. The
+    rest of `~/.agents` is refused, including through a symlink in the
+    skills folder that leads out of it.
+  - From a holding root (`~`, `~/.claude`, `~/.codex`, `~/.cache`,
+    `~/.local`, `/`), Grep stays DENY because it returns contents. Glob,
+    LS and `find_files` are asked with no Always because they return only
+    names. A pattern that names a credential folder's own path stays
+    DENY.
+  - `git config -f/--file/--blob` on a repository file (not `.git/…`, the
+    user's or system config, a credential path or anything with `$`) is
+    not asked. Neither is `git credential --help` or `-h`.
+  - `$HOME` and other set variables in read-tool paths are judged both
+    as written and expanded.
+- **Tests and mutants.** `cred_review_checks` pins all of the above. Each
+  mutant below was verified to fail:
+
+  | Mutant | Failed checks |
+  |---|---|
+  | Shell walk not judged | 96 |
+  | Inner strings not read | 27 |
+  | grep/rg modes ignored | 51 |
+  | `/proc` paths allowed | 11 |
+  | `/proc` roots/patterns allowed | 3 |
+  | Alias not matched | 13 |
+  | Glued `-c` ignored | 9 |
+  | Windows not judged | 32 |
+  | Windows holds ignored | 7 |
+  | extraheader ignored | 15 |
+  | Skills carve-out dropped | 5 |
+  | Names-only walks denied | 155 |
+  | Repo-file reads asked | 5 |
+  | `--help` asked | 2 |
+  | `$HOME` not expanded | 27 |
+
+**Delta review of #339 (2026-10-29), same PR.**
+
+- **MED 1, finished: `/proc` paths are judged before any folding.**
+  - Read tools now judge a path by walking its components lexically, in
+    order (`_proc_reach`), instead of calling `abspath` first. Before,
+    `abspath` folded `/proc/self/cwd/../../.ssh/id` away.
+  - Read tools refuse any path written through `/proc` or `/dev/fd`,
+    including `/proc/cpuinfo`.
+  - The shell asks for `/proc/<pid>/{cwd,root,fd,…}` and `/dev/fd`.
+    `cat /proc/cpuinfo` is not asked.
+- **Globs, braces, relative words and Windows profiles in `credentials-path`.**
+  - Every shell word is placed where the shell would find it, including
+    relative words and words after a `cd` or `pushd` on the same line.
+  - Brace lists are expanded.
+  - Globs are matched piece by piece, case-folded, against each credential
+    folder and store (`~/.ss?/id`, `~/.config/g?/hosts.yml`). A `..` before
+    the first wildcard is folded first; a `..` after a wildcard asks.
+  - The same applies to a Windows profile's closed entries.
+- **Roots the gate cannot see now ask.** These recursive searches, walks
+  and copies ask:
+  - one run through xargs or parallel;
+  - one whose root holds a variable other than `$HOME`, or a `$(…)` or
+    backtick substitution;
+  - one run after `cd -` or `cd $VAR`;
+  - one run after a `cd` or `pushd` to a folder that holds a credential
+    folder, including inside `sh -c`. `cd` alone counts as `~`.
+
+  A `cd` into a credential folder also asks.
+- **xargs readers.** xargs running a reader (cat, head, grep, cp, tar, …)
+  asks when its input is a file (`< file`, `-a`, `--arg-file`). A reader
+  fed by a pipe is a **stated limit**: asking every
+  `find . | xargs grep` would over-ask ordinary work. The producer's own
+  words are still judged, so `echo ~/.ssh/id | xargs cat` asks.
+- **`GIT_CONFIG_*` and `git config -f`.**
+  - `GIT_CONFIG_KEY_<n>=` and `GIT_CONFIG_PARAMETERS=` are read like `-c`,
+    whether set as an assignment, with `env` or with `export`.
+  - `git config -f` resolves symlinks before treating a file as a
+    repository file.
+- **Stated limit: data flow through files the agent writes.** This can't
+  be fully traced. For example, a list written to a file and then fed to a
+  reader by a pipe. Here the gate is an accident guard, the framing the
+  owner chose for #337.
+- **Tests:** `cred_delta_checks`. Each mutant below was verified to fail:
+
+  | Mutant | Failed checks |
+  |---|---|
+  | `abspath` first | 12 |
+  | Shell `/proc` unjudged | 12 |
+  | Globs unmatched | 48 |
+  | Braces unexpanded | 3 |
+  | Relative words unplaced | 16 |
+  | Windows words ignored | 9 |
+  | `..` unfolded | 3 |
+  | xargs unjudged | 27 |
+  | Unplaceable root allowed | 18 |
+  | `cd` untracked | 32 |
+  | `cd -` placed | 3 |
+  | xargs file readers allowed | 12 |
+  | git env ignored | 18 |
+  | `-f` symlink unresolved | 3 |

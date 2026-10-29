@@ -337,9 +337,12 @@ def run(browser, check, until):
         check("AS: WHERE is code's line",
               itemb.locator('[data-testid="m-review-as-where-project"]').inner_text() == "project Calc"
               and itemb.locator('[data-testid="m-review-as-where-folder"]').inner_text() == "folder ~/c")
-        check("AS: with a summary the command is collapsed to its first line",
+        # H2 of the phone audit: collapsed to three wrapped lines, not one cut line.
+        preview = itemb.locator('[data-testid="m-review-command-preview"] .as-clamp')
+        check("AS: with a summary the command is collapsed (to three wrapped lines, H2)",
               itemb.locator('[data-testid="m-review-command"]').count() == 0
-              and itemb.locator('[data-testid="m-review-command-preview"]').inner_text().strip() == "make b")
+              and preview.inner_text().strip() == "make b\nsecond line"
+              and preview.evaluate("e => getComputedStyle(e).webkitLineClamp") == "3")
         itemb.locator('[data-testid="m-review-command-toggle"]').tap()
         until(lambda: itemb.locator('[data-testid="m-review-command"]').count() == 1, timeout=3)
         check("AS: one tap shows the whole command and every argument",
