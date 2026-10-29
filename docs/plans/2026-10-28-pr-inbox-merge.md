@@ -304,9 +304,13 @@ for it).
 - **One file** `<data root>/inbox/pr-summaries.json` (0600, folder 0700) holds the newest 200
   summaries (the engine's `get`/`put` cache), the day's ledger (`StoredLedger`: 300 calls,
   $0.25) and the per-PR counts (6 a day; a cached summary is free, an ask the day's cap refuses
-  gives its count back). Any malformation, a link or a folder at the path, or a failed write
-  closes the budget for the process (`off`, "the summary budget could not be read"); the file
-  is never rewritten then, so the owner removes it to reset.
+  gives its count back, as does a job that never got the one slot). Fixed in review of #335
+  (MED 2): a budget or per-PR block that cannot be read (one bad byte included) moves the file
+  aside (`pr-summaries.json.bad-<time>`, 0600) and starts a new one with **today's budget used
+  up**, so today stays closed and tomorrow opens, logged once; a cached summary that cannot be
+  read is dropped. A link or a folder at the path, or a failed write, still closes the budget
+  for the process. Writes are fsynced before `os.replace` (in this module, not `stores`). A day
+  before the stored one counts as the stored day.
 - **Cost.** At Haiku 5.5's listed price ($0.10/M in, $0.50/M out under 100k), a full 20,000-
   character input is about 6k tokens: about $0.0007 a call. 300 calls is about $0.20, so the
   call cap normally binds before the $0.25 one. An estimate; no paid call was made.
@@ -340,3 +344,15 @@ Deviations from the plan, each the builder's call:
    `number`, `title` and `url` of a PR row (`hud/src/lib/inbox.ts` `prOf`).
 5. **`pr_summary.py` is in SELF_PROTECTED now**, not in PM-G.
 6. `PrSource.stop()` closes the engine for good; a daemon is not restarted in-process.
+
+**Review of #335 (2026-10-28), fixed on the branch:** MED 1 the head-match, moved-list and
+`REFRESH_S` rules now have tests and mutants; MED 2 above; LOW 3 no summary from a read that
+missed its diff, checks, logs or conflicts ("read in part"; the queue reads it again after
+`RETRY_S`; "too_large" counts as whole); LOW 4 the parser takes a label's text from the next
+lines, the first label with text, and cuts `Does:` at an inner `Blocked:`; LOW 5 author and
+check names go to the model quoted, as names; LOW 6 a summary that lands after the watchdog is
+put on the row when the key still matches; LOW 7 a moved list marks the shown summary
+"reading again"; NITs: the day never goes back, the poll's spelling of a repository is used,
+and unread checks keep `decide`'s words. **Left, as the review allowed:** a symlinked
+`inbox/` folder's ancestors are not checked (the folder itself is), and the engine still calls
+the cache's `put` (a small file write) under its lock.
