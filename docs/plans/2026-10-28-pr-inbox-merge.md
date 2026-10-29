@@ -365,6 +365,69 @@ the cache's `put` (a small file write) under its lock.
   - until then, the row's reason names them too ("the CI logs could not be read; it is read again in 5 minutes").
 - A late answer for an older head never lands; this is pinned by a test and a mutant.
 
+## As built: PM-D (2026-10-29)
+
+`jarvis/v2/pr_merge.py` (SELF_PROTECTED). Tests: `tests/v2/pr_merge_check.py` (fakes only;
+real daemons on ephemeral ports for the routes and the phone) and `tests/v2/pr_merge_mutants.py`
+(39 mutants, each killed by the test named for it).
+
+- **Card (PM-13).** `pr_summary.card_key(detail)`: SHA-256 of canonical JSON (keys sorted)
+  `{v: 1, facts, summary, method, actions}`, exactly the row's values. Every PR row carries
+  `card`; the act recomputes it from a fresh `pr_facts.read_pr` (90 s budget) and the row's
+  current summary.
+- **Routes.** HUD, behind `inbox.route`'s `owner_only` plus the HUD listener's own Host:
+  `POST /inbox/pr/merge {id, head, card, action?}` (`merge` or `merge_as_is`),
+  `/inbox/pr/update {id, head, card}`, `/inbox/pr/hold {id, note}` or `{id, clear: true}`,
+  `/inbox/pr/fix` (501 until PM-E; now PM-E's Fix). Phone, mounted in `remote_auth.api_route`:
+  `POST /m/api/inbox/pr/options {id, action, head, card}` (the head and card the phone
+  showed; 409 when the row has moved since; nothing echoed back) and `POST /m/api/inbox/pr {id, action, head, card, assertion}`.
+- **The act.** Under a per-PR lock (a second action on the PR while one runs is a 409, never a
+  second run): no hold (before and after the read), open, not a draft, the same head, the
+  action still offered, a merge method, the card equal; a limited phone and a flagged PR, or a
+  phone whose scrub would change the facts or file list, is "answer it at the desk". Then
+  exactly PM-13's argv; the result from `gh pr view N --repo O/R --json state,headRefOid`;
+  receipts in `inbox/pr-actions.jsonl` (0600): an `intent` line before gh runs and a `result`
+  line after (gh's exit word and the result); a re-read and a poll poked.
+- **Hold.** `inbox/pr-holds.json` (0600), `{"owner/repo#N": {note, set_at}}`, the note
+  scrubbed, one line, at most 200 characters; at most 500 holds. A file that cannot be read
+  holds every PR and refuses set and clear (503) until it reads again; it is never
+  overwritten.
+- **`remote_auth`.** `PR_DECISIONS` (`merge`, `merge_as_is`, `update`, `fix`: Fix's subject is
+  the same family, for PM-E), `_PR_SUBJECT` `pr:[0-9a-f]{56}`, family `pr` with its own
+  per-session budget.
+
+Deviations, each the builder's call:
+
+1. **Row fields.** The row now carries PM-26's `base`, `failing`, `conflicts` and `files`
+   (`pr_summary.files_detail`, at most 100 paths), plus `hold` and `card`.
+2. **Phone fields.** `DETAIL_FIELDS["pr"]` is PM-26's list minus `fix`, plus `why`,
+   `summary_note` and `summary_reason` (code's words for why there is no button, which the
+   phone needs). `url` is in `DROPPED["pr_detail"]`.
+3. **`remote_api.scrub_pr`.** `scrub_structure`'s pairs pass reads a facts part's
+   `"key": "branch"` as a credential label and withheld every part, so each part's `key`
+   (code's word, from `PR_FACT_KEYS`) is set aside and put back; an unknown one is withheld.
+4. **Merge as is is its own action** on both surfaces, never implied by `merge`.
+5. **Update is head-bound** (review of #336, LOW 3): `gh api --method PUT --include
+   repos/O/R/pulls/N/update-branch -f expected_head_sha=<head>`, not `gh pr update-branch`,
+   which takes no head. Only the status line is read: 202 is "update requested" (GitHub
+   updates asynchronously), 422 a 409 "changed since you read it". It is the daemon's own
+   owner route, not an agent command, so `pr_facts`' GET-only reads and PM-E's `pr_scope`
+   are untouched.
+6. **No merge queue, no auto-merge** (review of #336, MED 1). gh 2.86 has no
+   `isMergeQueueEnabled` or `isInMergeQueue` field (its "Available fields" list, checked
+   offline), so before gh runs: `gh pr view --json autoMergeRequest` (every action) and
+   `gh api --method GET repos/O/R/rules/branches/<base>?per_page=100` (merges). Auto-merge
+   on, a `merge_queue` rule, or either unread or possibly cut off is a 409 "its base uses a
+   merge queue or auto-merge: merge it at GitHub". The result read includes
+   `autoMergeRequest`, so a PR gh queued anyway reports "queued". Merge queues exist only on
+   an organization's repositories, and the rules GET answers 403 on a user's private
+   repository without GitHub Pro (live probe), so `gh api --method GET repos/O/R` is read
+   first (`owner.type`, cached an hour): "User" skips the rules read; "Organization" reads
+   them and fails closed (a 403 included); anything else refuses. Residual, organizations
+   only: a queue set only in classic branch protection, if the rules endpoint does not
+   list it, is not seen.
+7. A row whose detail fails to build now also drops its actions (it kept them before).
+
 ## As built: PM-E (2026-10-29)
 
 `jarvis/v2/pr_fix.py` (SELF_PROTECTED), `worktrees.ensure_pr`, the PR scope in
@@ -374,14 +437,19 @@ repositories) and `tests/v2/pr_fix_mutants.py` (a mutant per DENY family and per
 killed by the test named for it).
 
 - **Start (PM-17).** `PrFixes.start_fix(id, head, card, via, limited=None)`: the row's head and
-  card (`pr_fix.card_key`, the seam `PrFixes.card_of` PM-D sets) must match; the facts held for
-  that head (`PrSummaries.facts_for`) must make `decide(facts, hold, limited)` offer Fix;
-  `limited` is True for any `via` but "hud" unless the caller says otherwise. Exactly one
-  non-archived project owns the repository, its profile is not strict, Claude Code is in the
-  roster. One call creates the task (`pr_scope`, ceilings $5 and 1 hour, `provider_override`
+  card (PM-D's `pr_summary.card_key`, the row's `card`) must match; the facts held for that
+  head (`PrSummaries.facts_for`) must make `decide(facts, hold, limited)` offer Fix, the hold
+  read from PM-D's `pr-holds.json`; `limited` is True for any `via` but "hud" unless the caller
+  says otherwise. Auto-merge must be off (PM-D's `PrActions.queued`, failing closed): with it
+  on, the fix's push would merge code the owner has not OK'd. Exactly one non-archived project
+  owns the repository, its profile is not strict, Claude Code is in the roster. Routes: PM-D's
+  `pr_merge.hud_route` hands `POST /inbox/pr/fix` and `/inbox/pr/fix/cancel` to
+  `pr_fix.hud_route` after `owner_only` and the HUD listener's own Host; the phone's action
+  `fix` (`pr_merge.phone_options` / `phone_act`, the `pr:` subject) reads the hold and the
+  phone's scrub again and calls `pr_fix.start(..., via="phone", limited=...)`. One call creates
+  the task (`pr_scope`, ceilings $5 and 1 hour, `provider_override`
   Claude), fills the mirror, runs `ensure_pr` and `TaskControl.start`; a step that fails cancels
-  the task and records "fix could not start" (not counted against the cap). `pr_fix.start(daemon,
-  …)` is the phone's hook; `PrFixes.hold` is PM-D's seam for Q3.
+  the task and records "fix could not start" (not counted against the cap).
 - **Claude only.** `Task.pr_scope` is set at create and kept by every save (`TaskStore.save`).
   The runner refuses to open a fix's thread on another provider (`routing_refused`, BLOCKED) and
   to resume one there; the gate refuses every call of a Codex session for it.
@@ -424,10 +492,13 @@ Deviations, each the builder's call:
 1. **Rank 4 is the push.** `push.py` pushes only for rows new to ranks 1 to 4, so the fix's row
    rises there for a day after the fix ends (as a deferred approval's does), rather than a second
    push path.
-2. **The card key is provisional.** PM-D owns it; `card_key` follows PM-13's words and
-   `PrFixes.card_of` is the seam.
+2. **The card covers decide's actions.** While a fix runs, Fix is taken out of the row's
+   `actions` after the card is made, so the card (and PM-D's recomputation from a fresh read)
+   still covers the actions `decide` gives; the phone's options refuse Fix because the row
+   no longer offers it.
 3. **A blocked fix holds the PR.** It can be resumed and push again, so Fix again needs it
    cancelled first.
 4. **The base is fetched by the task** (`git fetch origin <base>`), not seeded from the mirror.
-5. **Not built here (PM-F):** the HUD and phone rendering of `detail.fix`, and Cancel on the phone
+5. `fix` is in `ENRICH_KEYS` (None when the PR has none) and `DETAIL_FIELDS["pr"]`.
+6. **Not built here (PM-F):** the HUD and phone rendering of `detail.fix`, and Cancel on the phone
    beyond the existing `task:` route.

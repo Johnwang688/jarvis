@@ -12,12 +12,15 @@ creates the task and starts it: the owner's OK is the intake gate. Refused
 (a 4xx naming why, nothing made) unless every one of these holds:
 
   - the row is in the inbox, its head is `head` and its card is `card`
-    (`card_key`: what the owner was shown), and the facts read for that head
-    are held (`PrSummaries.facts_for`);
+    (the row's `card`, `pr_summary.card_key`: what the owner was shown), and
+    the facts read for that head are held (`PrSummaries.facts_for`);
   - `pr_facts.decide(facts, hold, limited)` offers Fix: not a fork, not a
-    scanner-only failure, not held (Q3, `hold`), not a flagged PR on a limited
-    phone (Q1); `limited` is True for any `via` but "hud" unless the caller
-    says otherwise (fails closed);
+    scanner-only failure, not held (Q3: PM-D's `pr_merge.holds_at`), not a
+    flagged PR on a limited phone (Q1); `limited` is True for any `via` but
+    "hud" unless the caller says otherwise (fails closed);
+  - auto-merge is off for the PR (PM-D's `PrActions.queued`, which fails
+    closed): with it on, the fix's push would merge code the owner has not
+    OK'd, skipping the fix card's own yes;
   - no fix of this PR is running, and fewer than `MAX_FIXES` were started
     (PM-21; a second Fix is a 409 naming the running task);
   - exactly one project that is not archived owns the repository
@@ -129,6 +132,7 @@ from __future__ import annotations
 import contextlib
 from dataclasses import dataclass
 import hashlib
+import hmac
 import json
 import logging
 import os
@@ -850,21 +854,6 @@ def build_brief(facts) -> str:
 
 
 # =================================================================================================
-# The card the owner was shown (PM-D's to replace)
-# =================================================================================================
-
-def card_key(detail: dict) -> str:
-    """sha256 of what a PR row showed (PM-13): the facts line, the summary
-    text, the method and the offered actions. PM-D's `pr_merge` owns the
-    card; `PrFixes.card_of` is the seam it sets."""
-    data = {"facts": detail.get("facts"), "summary": detail.get("summary"),
-            "method": detail.get("method"), "actions": detail.get("actions")}
-    text = "jarvis-pr-card-v1\n" + json.dumps(data, sort_keys=True, ensure_ascii=True,
-                                               separators=(",", ":"))
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
-
-
-# =================================================================================================
 # Interdiff (PM-22)
 # =================================================================================================
 
@@ -1214,7 +1203,7 @@ class PrFixes:
     on this object's worker or the engine's threads."""
 
     def __init__(self, daemon, *, summaries=None, root=None, chat=None, compare=None,
-                 fill=None, ensure=None, clock: Callable[[], float] = time.time,
+                 fill=None, ensure=None, auto=None, clock: Callable[[], float] = time.time,
                  mono: Callable[[], float] = time.monotonic):
         self.daemon = daemon
         self.summaries = summaries
@@ -1223,10 +1212,9 @@ class PrFixes:
         self._compare = compare or compare_heads
         self._fill = fill or fill_mirror
         self._ensure = ensure
-        # Seams for PM-D: the hold of a PR (Q3: any value but None hides Fix)
-        # and the card key a surface was shown.
-        self.hold: Callable[[str], Any] = lambda pr_id: None
-        self.card_of: Callable[[dict], str] = card_key
+        # Whether auto-merge is on for a PR (True also when it cannot be
+        # read): PM-D's check unless a test passes its own.
+        self._auto = auto or self._auto_merge_on
         engine_cls = _engine_class()
         ledger = getattr(getattr(summaries, "engine", None), "ledger", None)
         self.engine = None
@@ -1283,7 +1271,7 @@ class PrFixes:
             repo = detail.get("repo")
             if detail.get("head") != head:
                 raise FixRefused(409, "the pull request changed since you read it")
-            if self.card_of(detail) != card:
+            if not hmac.compare_digest(str(detail.get("card") or ""), card):
                 raise FixRefused(409, "the pull request's card changed since you read it")
             facts = self.summaries.facts_for(repo, number) if self.summaries is not None else None
             if facts is None or not facts.ok("view") or facts.head != head:
@@ -1291,7 +1279,7 @@ class PrFixes:
             if facts.fork:
                 raise FixRefused(409, "a pull request from a fork gets no Fix")
             from .pr_facts import FIX, decide
-            decision = decide(facts, self.hold(pr_id), limited)
+            decision = decide(facts, self.hold(repo, number), limited)
             if FIX not in decision.actions:
                 raise FixRefused(409, "Fix is not offered: " + (decision.why or "nothing blocks it"))
             try:
@@ -1316,6 +1304,9 @@ class PrFixes:
             runner = getattr(self.daemon, "runner", None)
             if runner is None:
                 raise FixRefused(503, "no task runner is attached")
+            if self._auto(repo, number):
+                raise FixRefused(409, "auto-merge is on (or cannot be read) for this pull request: "
+                                      "a fix's push would merge it unasked; turn it off at GitHub")
             brief = build_brief(facts)
             scope = make_scope(repo, number, facts.branch)
             started = _utc(self.clock())
@@ -1343,6 +1334,31 @@ class PrFixes:
         self._refresh(pr_id)
         LOG.info("PR fixes: task %s fixes %s (via %s)", task.id, key, via)
         return {"ok": True, "task_id": task.id, "fix": self.view_of(pr_id)}
+
+    def hold(self, repo: str, number: int):
+        """Q3: the owner's hold note on this PR (PM-D's file; one that cannot
+        be read holds every PR), or None."""
+        from . import pr_merge
+        found = pr_merge.holds_at(pr_merge.inbox_dir(self.daemon)).get(repo, number)
+        return None if found is None else (found.get("note") or "on hold")
+
+    def _auto_merge_on(self, repo: str, number: int) -> bool:
+        """PM-D's auto-merge read (`PrActions.queued`, merging False): True
+        when it is on or cannot be read."""
+        from . import pr_facts, pr_merge
+        actor = pr_merge.actions_for(self.daemon)
+        try:
+            gh = actor._gh()
+        except pr_merge.Refused as exc:
+            raise FixRefused(exc.status, exc.word) from None
+        try:
+            home = pr_facts.new_gh_home()
+        except (pr_facts.MirrorRefused, OSError):
+            return True
+        try:
+            return actor.queued(pr_facts.gh_env(home), gh, repo, number, None, merging=False)
+        finally:
+            pr_facts._remove_tree(home)
 
     def _settle_start(self, key, started, task_id, note) -> None:
         with contextlib.suppress(StoreBroken):
@@ -1915,7 +1931,8 @@ def fill_mirror(repo: str, number: int, base: str, head: str, *, run=None, git=N
 
 def hud_route(handler, daemon, parts, query):
     """`POST /inbox/pr/fix` `{id, head, card}` and `POST /inbox/pr/fix/cancel`
-    `{id}`, after `inbox.route`'s `owner_only`; None for any other path."""
+    `{id}`, reached through `pr_merge.hud_route` after `inbox.route`'s
+    `owner_only` and the HUD listener's own Host; None for any other path."""
     if parts[:3] != ["inbox", "pr", "fix"] or len(parts) > 4:
         return None
     from .daemon import APIError, _object
@@ -1953,5 +1970,5 @@ def start(daemon, pr_id, head, card, via, *, limited: bool | None = None) -> dic
 
 
 __all__ = ["ASK", "CEILINGS", "DENY", "FixRefused", "FixStore", "MAX_FIXES", "PrFixes", "ScopeHit",
-           "build_brief", "card_key", "changed_lines", "ci_path", "hud_route", "interdiff", "judge",
+           "build_brief", "changed_lines", "ci_path", "hud_route", "interdiff", "judge",
            "make_scope", "parse_compare", "start"]

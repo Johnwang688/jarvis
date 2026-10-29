@@ -214,6 +214,10 @@ SELF_PROTECTED = frozenset(
         # actions code puts beside them. An agent that could edit it could
         # put its own words, or its own buttons, on a PR the owner merges.
         "jarvis/v2/pr_summary.py",
+        # PR actions (PM-D, 2026-10-29): what the owner's OK merges or
+        # updates, the card and head it is bound to, the hold, and the
+        # phone's passkey subject. An agent that could edit it could merge.
+        "jarvis/v2/pr_merge.py",
         # A PR's Fix (PM-E, 2026-10-29): the PR scope the gate holds a fix
         # task to (which pushes it may make), the brief built from code's
         # facts, and the fix card the owner reads before merging the fix.

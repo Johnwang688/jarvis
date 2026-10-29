@@ -60,7 +60,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from jarvis import config  # noqa: E402
-from jarvis.v2 import inbox, inbox_prs, permissions, pr_facts, pr_fix as X, worktrees  # noqa: E402
+from jarvis.v2 import inbox, inbox_prs, permissions, pr_facts, pr_fix as X, pr_merge, worktrees  # noqa: E402
+from jarvis.v2.pr_summary import card_key  # noqa: E402
 from jarvis.v2.approvals import ApprovalRequest  # noqa: E402
 from jarvis.v2.control import ControlError  # noqa: E402
 from jarvis.v2.daemon import Daemon  # noqa: E402
@@ -657,15 +658,27 @@ class FakeSummaries:
         pass
 
     def detail(self, row):
+        """As `PrSummaries.detail`: the hold (PM-D's file) and the card."""
         d = row["detail"]
         facts = self.facts_for(d["repo"], d["number"])
         if facts is None:
-            return {"actions": [], "why": "", "method": None, "facts": None, "summary": None}
-        decision = pr_facts.decide(facts)
-        return {"facts": [p.as_dict() for p in pr_facts.facts_parts(facts)], "flags": None,
-                "summary": dict(self.summary), "summary_state": "ready", "summary_note": "",
-                "summary_reason": "", "actions": list(decision.actions), "why": decision.why,
-                "method": decision.method}
+            out = {"actions": [], "why": "", "method": None, "facts": None, "summary": None,
+                   "hold": None, "fix": None}
+        else:
+            hold = pr_merge.holds_at(self.inbox_dir).get(d["repo"], d["number"])
+            decision = pr_facts.decide(facts, hold=None if hold is None else hold["note"])
+            out = {"facts": [p.as_dict() for p in pr_facts.facts_parts(facts)], "flags": None,
+                   "summary": dict(self.summary), "summary_state": "ready", "summary_note": "",
+                   "summary_reason": "", "actions": list(decision.actions), "why": decision.why,
+                   "method": decision.method, "hold": hold, "fix": None,
+                   "files": pr_summary_files(facts)}
+        out["card"] = card_key(out)
+        return out
+
+
+def pr_summary_files(facts):
+    from jarvis.v2.pr_summary import files_detail
+    return files_detail(facts)
 
 
 class FakeRunner:
@@ -714,6 +727,8 @@ class Fixing(unittest.TestCase):
         self.daemon.runner = self.runner
         self.project = self.stores.projects.create("Calc", str(make_repo(self.tmp / "repo")))
         self.summaries = FakeSummaries()
+        self.summaries.inbox_dir = pr_merge.inbox_dir(self.daemon)
+        self.auto = {"on": False}
         self.prs = self.daemon.inbox.prs
         self.prs.summaries = self.summaries
         self.ensured, self.filled = [], []
@@ -722,7 +737,8 @@ class Fixing(unittest.TestCase):
         self.clock = [time.time()]
         self.fixes = X.PrFixes(self.daemon, summaries=self.summaries, root=self.stores.root,
                                chat=self.chat, compare=self.compare, fill=self.fill,
-                               ensure=self.ensure, clock=lambda: self.clock[0])
+                               ensure=self.ensure, auto=lambda repo, number: self.auto["on"],
+                               clock=lambda: self.clock[0])
         self.daemon.attach_pr_fixes(self.fixes)
         if self.start_daemon:
             self.daemon.start()
@@ -768,7 +784,7 @@ class Fixing(unittest.TestCase):
         return f"pr:{REPO}#{N}"
 
     def card(self):
-        return X.card_key(self.row()["detail"])
+        return self.row()["detail"]["card"]
 
     def start(self, via="hud", head=HEAD, card=None, **kw):
         return self.fixes.start_fix(self.pr_id, head, card or self.card(), via, **kw)
@@ -889,8 +905,33 @@ class Start(Fixing):
         self.assertEqual(self.stores.tasks.list(), [])
 
     def test_a_hold_hides_fix(self):
-        self.fixes.hold = lambda pr_id: "waits on the robot"
-        self.refused(409, "on hold: waits on the robot")
+        card = self.card()
+        pr_merge.holds_at(pr_merge.inbox_dir(self.daemon)).set(REPO, N, "waits on the robot",
+                                                               "2026-10-29T00:00:00+00:00")
+        self.refused(409, "on hold: waits on the robot", card=card)     # the card the owner saw before
+        self.prs.refresh([self.pr_id])
+        self.assertEqual(self.row()["detail"]["actions"], [], "the row offers nothing while held")
+        self.assertEqual(self.stores.tasks.list(), [])
+
+    def test_auto_merge_on_is_refused(self):
+        self.auto["on"] = True
+        self.refused(409, "auto-merge is on")
+        self.assertEqual(self.stores.tasks.list(), [])
+
+    def test_the_phones_fix_goes_through_the_same_start(self):
+        out = pr_merge._phone_fix(self.daemon, self.pr_id, REPO, N, HEAD, self.card(), limited=True)
+        self.assertEqual(self.task(out["task_id"]).pr_scope, scope())
+        self.end(out["task_id"], TaskState.CANCELLED)
+        self.put(F(files=(FileChange(".github/workflows/ci.yml", 1, 1, ("CI",), False),),
+                   patches=(Patch(".github/workflows/ci.yml", "shown", "+x"),)))
+        with self.assertRaises(pr_merge.Refused) as caught:
+            pr_merge._phone_fix(self.daemon, self.pr_id, REPO, N, HEAD, self.card(), limited=True)
+        self.assertEqual(caught.exception.status, 409)
+        self.assertIn("touches safety files", caught.exception.word)
+        pr_merge.holds_at(pr_merge.inbox_dir(self.daemon)).set(REPO, N, "x", "2026-10-29T00:00:00+00:00")
+        with self.assertRaises(pr_merge.Refused) as caught:
+            pr_merge._phone_fix(self.daemon, self.pr_id, REPO, N, HEAD, self.card(), limited=False)
+        self.assertIn("on hold", caught.exception.word)
 
     def test_a_limited_phone_may_fix_except_a_flagged_pr(self):
         flagged = F(files=(FileChange(".github/workflows/ci.yml", 1, 1, ("CI",), False),),

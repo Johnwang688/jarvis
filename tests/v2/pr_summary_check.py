@@ -1017,8 +1017,13 @@ class Wiring(Case):
         self.assertEqual({k: v for k, v in after["detail"].items() if k not in S.ENRICH_KEYS}, before["detail"])
         self.assertEqual({k: v for k, v in after.items() if k != "detail"},
                          {k: v for k, v in before.items() if k != "detail"})
-        # The phone keeps a PR row's generic fields only until PM-F decides them.
-        self.assertEqual(remote_api.inbox_row(after), remote_api.inbox_row(before))
+        # The phone keeps PM-26's fields (`DETAIL_FIELDS["pr"]`, decided by
+        # PM-D): the HUD's minus exactly `DROPPED["pr_detail"]`.
+        phone = remote_api.inbox_row(after)["detail"]
+        self.assertEqual(set(after["detail"]) - set(phone), set(remote_api.DROPPED["pr_detail"]))
+        self.assertEqual(set(phone), set(remote_api.DETAIL_FIELDS["pr"]))
+        self.assertNotIn("url", phone)
+        self.assertEqual(phone["card"], after["detail"]["card"])
 
     def test_no_summaries_no_new_fields(self):
         self.source.poll()

@@ -646,7 +646,6 @@ class PrSource:
                 if row is None or row.get("kind") != "pr":
                     continue
                 new = {**row, "rank": RANK_PR, "detail": {**row["detail"], **summaries.detail(row)}}
-                new["detail"].pop("fix", None)
                 if fixes is not None:
                     fixes.enrich(new)
                 if new != row:
