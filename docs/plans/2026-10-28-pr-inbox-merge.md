@@ -538,3 +538,22 @@ build) as the owner's OS user; that code can read the owner's GitHub token from 
 it however it likes, and the gate reads no script file. Fix on a PR whose code the owner does
 not trust can act with his GitHub access. The fix card's ancestry check and its CI amber
 check what reaches the branch, not what such code does elsewhere.
+
+**Delta review of #337 (2026-10-29), fixed.** H-1 reached the token by spellings the first
+fix did not place; now, in a scoped task, every argument is placed (home and `$HOME`
+expanded, braces expanded, globs matched component by component against each credential
+folder, relative paths against the line's folders after `cd`, same-line `NAME=value`
+variables put in): inside a credential folder is DENY, an ancestor of one under a program that
+reads, copies, archives or searches a tree (or the Grep and Glob tools) is DENY, a path built
+by a command substitution is asked. A file copied elsewhere is not traced back; the copy is
+what is refused. Fetchers aimed at GitHub by any spelling, or forcing an address or a Host
+header, are DENY; to an address literal or an expansion, asked. Inline code is read by a token
+parser per interpreter (clustered flags, `--eval`, `-Command`, awk programs, stdin), and a
+shell fed a program on stdin or from a file (`sh < x`, `| bash`, `bash x.sh`, `source x`) is
+asked. The credential helper's program is pinned at the Fix by real path and content hash
+(`Task.pr_scope["helpers"]`, `["helper_paths"]`); a push after either changed is DENY, as is a
+write to that program, to a file of its name in a PATH folder ahead of it, to `~/.local/bin`
+or `~/bin`, or to the owner's global git config. `git apply|am|cherry-pick|reset
+--hard|stash pop|apply`, `patch`, `tar -x`, `unzip`, `7z x` and `cpio -i` are asked (the tree
+always holds `.github`); the card's CI amber stays the backstop. `gh … --web` is DENY; L-1
+adds `prod*` and `production*`.

@@ -76,10 +76,19 @@ Fix is offered on any PR. DENY (never asked of anyone):
     `.git/hooks`, `.git/info`, a worktree's gitfile or `.gitmodules`;
   - the owner's credential (H-1): a read or write under any
     `config.credential_dirs()` folder by a read tool, a file tool or a line
-    that names it; `git credential*`, credential settings read or set,
-    `gh auth`; git and gh traces; curl, wget and other fetchers, or inline
-    code, aimed at github.com, api/uploads.github.com or
-    githubusercontent.com;
+    that names it, by any spelling the gate can place (home and `$HOME`
+    expanded, braces and globs matched component by component, relative
+    paths against the line's folders after `cd`, same-line variables); an
+    ancestor of one (`~`, `~/.config`, `/`) under a program that reads,
+    copies, archives or searches a tree (grep -r, rg, find, cp -r, rsync,
+    tar, zip, ...) or the Grep and Glob tools; `git credential*`, credential
+    settings read or set, `gh auth`; git and gh traces; a fetcher aimed at
+    GitHub by any spelling, or forcing an address or Host header; inline
+    code aimed at GitHub;
+  - a write that could replace or shadow the pinned credential helper: its
+    program (real path and content hash pinned at the Fix), a file of its
+    name in a PATH folder ahead of it, anything in `~/.local/bin` or
+    `~/bin`, the owner's global git config;
   - gh beyond reads (M-4): only `pr view|list|diff|checks|status`, `run
     view|list|download|watch`, `workflow view|list`, `repo view`, `issue
     view|list|status`, `release view|list`, `cache|label list`, `ruleset
@@ -96,7 +105,13 @@ Fix is offered on any PR. DENY (never asked of anyone):
 ASK (the owner, through the broker; deferred in quiet hours as usual): a
 push the gate cannot read (no refspec, an expansion, a `-c` setting, a line
 that changes git config, included config); any `git config` or `git remote`
-write; inline code (`python -c`, `node -e`, `perl -e`, ...); a git
+write; inline code in any spelling (`python -Ic`, `perl -le`, `node -pe`,
+`pwsh -Command`, awk programs, a program read from stdin) and a shell fed a
+program on stdin or from a file (`sh < x`, `| bash`, `bash x.sh`, `source
+x`); `git apply|am|cherry-pick|reset --hard|stash pop`, `patch`, `tar -x`,
+`unzip` (they may write CI the gate does not see); a listing of git's
+config; a path built by a command substitution; a fetch to an address
+literal or an expansion; a git
 subcommand or program that runs a line or outlives the call (`submodule
 foreach`, `rebase -x|-i`, `bisect run`, `difftool`, `filter-branch`, tmux,
 screen, at, nohup, setsid, ...); a pager or editor override; a program the
@@ -279,7 +294,8 @@ def git_internal(path) -> bool:
     under a `.git` folder's `config`, `hooks`, `info` or `worktrees`, a
     `config.worktree`, `.gitmodules`."""
     for parts in (_parts(path), _parts(str(path).replace("\\", ""))):
-        if parts and (parts[-1] in (".git", ".gitmodules", "config.worktree") or any(
+        if parts and (parts[-1] in (".git", ".gitmodules", "config.worktree", ".gitconfig")
+                      or parts[-3:] == [".config", "git", "config"] or any(
                 p == ".git" and i + 1 < len(parts) and parts[i + 1] in ("config", "hooks", "info", "worktrees")
                 for i, p in enumerate(parts))):
             return True
@@ -290,21 +306,28 @@ def valid_scope(scope) -> bool:
     from .chat_git import valid_branch
     from .pr_facts import valid_number, valid_repo
     if not isinstance(scope, dict) or not ({"repo", "number", "branch"} <= set(scope)
-                                           <= {"repo", "number", "branch", "helpers"}):
+                                           <= {"repo", "number", "branch", "helpers", "helper_paths"}):
         return False
-    helpers = scope.get("helpers")
+    helpers, paths = scope.get("helpers"), scope.get("helper_paths")
     return (valid_repo(scope["repo"]) and valid_number(scope["number"])
             and valid_branch(scope["branch"])
-            and (helpers is None or (isinstance(helpers, str) and bool(re.fullmatch(r"[0-9a-f]{64}", helpers)))))
+            and (helpers is None or (isinstance(helpers, str) and bool(re.fullmatch(r"[0-9a-f]{64}", helpers))))
+            and (paths is None or (isinstance(paths, list) and len(paths) <= 16
+                                   and all(isinstance(x, str) and x.startswith("/") for x in paths))))
 
 
-def make_scope(repo: str, number: int, branch: str, helpers: str | None = None) -> dict:
+def make_scope(repo: str, number: int, branch: str, helpers: str | None = None,
+               helper_paths: list[str] | None = None) -> dict:
     """The task's scope. `helpers` is the digest of the repository's git
-    credential helpers when the Fix started (`helpers_digest`): a push made
-    under any other set is refused (M-5)."""
+    credential helpers when the Fix started, their programs' real paths and
+    content hashes included (`helper_pin`): a push made under any other set
+    is refused (M-5). `helper_paths` are those programs: no write may
+    replace or shadow them."""
     scope = {"repo": repo, "number": number, "branch": branch}
     if helpers is not None:
         scope["helpers"] = helpers
+    if helper_paths is not None:
+        scope["helper_paths"] = list(helper_paths)
     if not valid_scope(scope):
         raise ValueError("not a valid PR scope")
     return scope
@@ -315,16 +338,8 @@ def _config_of(pair) -> list:
     return mg._config_entries(mg._config_files([pair]))
 
 
-def helpers_digest(entries) -> str:
-    """sha256 of every `credential[.<url>].helper` entry, in order (values
-    never stored: a helper line may hold a secret)."""
-    found = [f"{sub}\n{kv}" for sec, sub, kv in entries
-             if sec == "credential" and kv.split("=", 1)[0] == "helper"]
-    return hashlib.sha256("\0".join(found).encode("utf-8")).hexdigest()
-
-
-def repo_helpers_baseline(root) -> str | None:
-    """`helpers_digest` of the credential helpers a new worktree of the
+def repo_helpers_baseline(root) -> tuple[str, list[str]] | None:
+    """`helper_pin` of the credential helpers a new worktree of the
     repository at `root` sees: the owner's global config and the
     repository's own (no worktree's `config.worktree`). None when it cannot
     be read."""
@@ -333,7 +348,7 @@ def repo_helpers_baseline(root) -> str | None:
     if not isinstance(found, tuple):
         return None
     files = [f for f in mg._config_files([found]) if f.name != "config.worktree"]
-    return helpers_digest(mg._config_entries(files))
+    return helper_pin(mg._config_entries(files))
 
 
 _GIT_NAMES = ("git", "gh", "git-push", "git-send-pack", "git-http-push", "gh.exe", "git.exe")
@@ -370,6 +385,26 @@ _WRITERS = frozenset({"rm", "unlink", "rmdir", "mv", "shred", "truncate", "touch
 _GIT_RUNS = {"submodule": ("foreach",), "rebase": ("--exec", "-x", "-i", "--interactive"),
              "bisect": ("run",), "difftool": None, "mergetool": None, "filter-branch": None,
              "filter-repo": None}
+_UNPACKERS = frozenset({"patch", "unzip", "tar", "bsdtar", "7z", "7za", "cpio", "busybox-unzip"})
+
+
+def _unpacks(stem: str, words: list[str]) -> bool:
+    """LOW of the review's delta: a program that writes files it reads from
+    an archive or a patch."""
+    if stem in ("patch", "unzip"):
+        return True
+    if stem in ("tar", "bsdtar"):
+        first = words[0] if words else ""
+        return any(w in ("--extract", "--get") for w in words) or (
+            not first.startswith("-") and "x" in first) or any(
+            w.startswith("-") and not w.startswith("--") and "x" in w[1:] for w in words)
+    if stem in ("7z", "7za"):
+        return bool(words) and words[0] in ("x", "e")
+    if stem == "cpio":
+        return any(w.startswith("-") and "i" in w[1:] for w in words if not w.startswith("--")) or "--extract" in words
+    return False
+
+
 _DETACHERS = frozenset({"tmux", "screen", "at", "batch", "crontab", "nohup", "setsid", "disown",
                         "daemonize", "systemd-run", "dtach", "abduco"})
 _EDITOR_ENV = re.compile(r"(?<![A-Za-z0-9_])(GIT_PAGER|PAGER|GIT_EDITOR|EDITOR|VISUAL|"
@@ -382,6 +417,7 @@ _TRACE_ENV = re.compile(r"(?<![A-Za-z0-9_])(GIT_TRACE[A-Z_]*|GIT_CURL_VERBOSE|GH
                         r"SSH_ASKPASS|GH_TOKEN|GITHUB_TOKEN|GH_ENTERPRISE_TOKEN)\b")
 _GITHUB_HOST = re.compile(r"(?i)(?<![\w.-])((api|uploads|codeload|gist)\.)?github\.com\b|"
                           r"githubusercontent\.com\b")
+_ASSIGN = re.compile(r"(?:^|[\s;&|(])([A-Za-z_][A-Za-z0-9_]*)=([^\s;&|()$`'\"]+)")
 _FETCHERS = frozenset({"curl", "wget", "http", "https", "httpie", "xh", "xhs", "aria2c", "axel",
                        "lwp-request", "get", "post", "nc", "ncat", "socat", "openssl", "telnet"})
 _INLINE_FLAGS = frozenset({"-c", "-e", "-E", "-p", "-r", "--eval", "--print", "-x", "eval"})
@@ -439,6 +475,290 @@ def _credential_fragments() -> list[str]:
             out.append(text[1:])                    # "/.config/gh": after $HOME, ${HOME}, ~
         out.append(str(Path(text).expanduser()))
     return [f for f in dict.fromkeys(out) if len(f) > 3]
+
+
+# -- the review's delta (2026-10-29): what a credential folder may be reached by ----------
+
+_RECURSIVE_READERS = frozenset({"rg", "ag", "ack", "ack-grep", "pt", "ugrep", "find", "bfs", "fd",
+                                "fdfind", "tar", "bsdtar", "zip", "7z", "7za", "cpio", "rsync",
+                                "scp", "ditto", "tree", "du", "locate"})
+_RECURSIVE_WITH_FLAG = {"grep": "rR", "egrep": "rR", "fgrep": "rR", "cp": "rRa", "ls": "R",
+                        "chmod": "R", "chown": "R"}
+_RECURSIVE_LONG = ("--recursive", "--dereference-recursive", "--archive")
+_GLOB_CHARS = re.compile(r"[*?\[]")
+
+
+def _home() -> Path:
+    return Path(os.environ.get("HOME") or "~").expanduser()
+
+
+def _cred_dirs() -> list[Path]:
+    from jarvis import config
+    out = []
+    for raw in config.credential_dirs():
+        path = Path(str(raw)).expanduser()
+        for each in (path, Path(os.path.realpath(path))):
+            if each not in out:
+                out.append(Path(os.path.normpath(each)))
+    return out
+
+
+def _expand_home(text: str) -> str:
+    home = str(_home())
+    text = text.replace("${HOME}", home).replace("$HOME", home)
+    if text == "~" or text.startswith("~/"):
+        text = home + text[1:]
+    return text
+
+
+def _reach(path: Path) -> str | None:
+    """'inside' when `path` is a credential folder or below one, 'ancestor'
+    when one is below it, else None (the path as written and resolved)."""
+    for candidate in {Path(os.path.normpath(path)), Path(os.path.realpath(path))}:
+        for cred in _cred_dirs():
+            if candidate == cred or cred in candidate.parents:
+                return "inside"
+    for candidate in {Path(os.path.normpath(path)), Path(os.path.realpath(path))}:
+        for cred in _cred_dirs():
+            if candidate in cred.parents:
+                return "ancestor"
+    return None
+
+
+def _glob_reach(pattern: Path) -> str | None:
+    """`_reach` for a glob: each component matched against each credential
+    folder's (`**` matches the rest)."""
+    from fnmatch import fnmatchcase
+    found = None
+    parts = pattern.parts
+    for cred in _cred_dirs():
+        cparts = cred.parts
+        reach = "inside" if len(parts) >= len(cparts) else "ancestor"
+        for i, comp in enumerate(parts):
+            if comp == "**":
+                return "inside"
+            if i >= len(cparts):
+                break
+            if not fnmatchcase(cparts[i], comp):
+                reach = None
+                break
+        if reach == "inside":
+            return "inside"
+        found = found or reach
+    return found
+
+
+def recursive_reader(stem: str, words: list[str]) -> bool:
+    """Whether this program reads, copies, archives or searches a tree."""
+    if stem in _RECURSIVE_READERS:
+        return True
+    letters = _RECURSIVE_WITH_FLAG.get(stem)
+    if letters is None:
+        return False
+    for w in words:
+        if w.startswith("--"):
+            if w.split("=", 1)[0] in _RECURSIVE_LONG:
+                return True
+        elif w.startswith("-") and any(c in letters for c in w[1:]):
+            return True
+    return False
+
+
+# -- inline code (the review's delta, MED): a token parser per interpreter ------------------
+
+_PY = re.compile(r"python[0-9.]*|pypy[0-9.]*")
+_SHELLS = frozenset({"sh", "bash", "dash", "zsh", "ksh", "mksh", "ash", "fish", "csh", "tcsh", "yash"})
+_AWKS = frozenset({"awk", "gawk", "mawk", "nawk", "busybox-awk"})
+
+
+def _shorts(word: str) -> str:
+    return word[1:] if word.startswith("-") and not word.startswith("--") else ""
+
+
+def inline_code(stem: str, words: list[str]) -> str | None:
+    """Why this interpreter call runs code the gate does not read (inline
+    code in any spelling, or a program read from stdin), else None."""
+    if not stem:
+        return None
+    if _PY.fullmatch(stem):
+        i = 0
+        while i < len(words):
+            w = words[i]
+            if w == "-":
+                return "a program read from stdin"
+            if w == "--":
+                break
+            if not w.startswith("-"):
+                return None                         # a script file
+            if w.startswith("--"):
+                i += 1
+                continue
+            for k, c in enumerate(w[1:]):
+                if c == "c":
+                    return "inline code (-c)"
+                if c == "m":
+                    return None                     # a module
+                if c in "WXQ":
+                    if k == len(w) - 2:
+                        i += 1                      # its value is the next word
+                    break
+            i += 1
+        return "a program read from stdin"
+    if stem in ("perl", "ruby"):
+        # The letters that take the rest of the word as a value (perl's -l
+        # and -0 take digits only, so the letters after them are switches).
+        values = "MIxiCdD" if stem == "perl" else "IrxCKTWU"
+        files = []
+        for w in words:
+            if w == "--":
+                break
+            if w == "-":
+                return "a program read from stdin"
+            if w.startswith("--"):
+                continue
+            if w.startswith("-"):
+                for c in w[1:]:
+                    if c in "eE":
+                        return "inline code (-e)"
+                    if c in values:
+                        break
+                continue
+            files.append(w)
+            break
+        return None if files else "a program read from stdin"
+    if stem in ("node", "nodejs", "bun", "tsx", "ts-node", "deno"):
+        if stem == "deno":
+            return "inline code (deno eval)" if words[:1] == ["eval"] else None
+        for w in words:
+            if w in ("-", "--"):
+                return "a program read from stdin" if w == "-" else None
+            name = w.split("=", 1)[0]
+            if name in ("--eval", "--print", "-e", "-p") or (
+                    _shorts(w) and any(c in "ep" for c in _shorts(w)[:2])):
+                return "inline code (-e/-p)"
+            if not w.startswith("-") and stem != "bun":
+                return None
+        return None if any(not w.startswith("-") for w in words) else "a program read from stdin"
+    if stem in ("php",):
+        return "inline code (-r)" if any("r" in _shorts(w) for w in words) else None
+    if stem.startswith("lua") or stem in ("rscript", "julia", "osascript"):
+        return "inline code (-e)" if any(any(c in "eE" for c in _shorts(w)) or w == "--eval"
+                                         for w in words) else None
+    if stem in ("pwsh", "powershell", "pwsh.exe", "powershell.exe"):
+        for w in words:
+            low = w.lower()
+            if low in ("-", "-c") or (low.startswith("-") and len(low) > 1 and (
+                    "-command".startswith(low) or "-encodedcommand".startswith(low) or low == "-e")):
+                return "inline code (-Command)"
+        return None
+    if stem in _AWKS:
+        return None if any(w == "-f" or w.startswith("-f") or w.startswith("--file") for w in words) \
+            else "an awk program (it may call system())"
+    return None
+
+
+def shell_program(stem: str, words: list[str], via_input: bool) -> str | None:
+    """A shell given a program it does not hand the walk: from stdin (`sh <
+    x`, `| sh`, `bash -s`) or from a file (`bash x.sh`, `source x`)."""
+    if stem in ("source", "."):
+        return "a script sourced from a file"
+    if stem not in _SHELLS:
+        return None
+    if any(w == "-c" or (_shorts(w) and "c" in _shorts(w)) for w in words):
+        return None                                 # the walk reads a -c line
+    if any(w == "-s" or (_shorts(w) and "s" in _shorts(w)) for w in words):
+        return "a program read from stdin"
+    files = [w for w in words if not w.startswith("-")]
+    return "a script read from a file" if files else "a program read from stdin"
+
+
+# -- the pinned credential helper (the review's delta, MED) ----------------------------------
+
+_HASHES: dict = {}
+
+
+def _file_hash(path: str) -> str:
+    try:
+        info = os.stat(path)
+    except OSError:
+        return "missing"
+    key = (path, info.st_mtime_ns, info.st_size, info.st_ino)
+    if key in _HASHES:
+        return _HASHES[key]
+    digest = hashlib.sha256()
+    try:
+        with open(path, "rb") as handle:
+            for chunk in iter(lambda: handle.read(1 << 20), b""):
+                digest.update(chunk)
+    except OSError:
+        return "unreadable"
+    _HASHES[key] = digest.hexdigest()
+    return _HASHES[key]
+
+
+def helper_programs(entries) -> list[str]:
+    """The program each `credential[.<url>].helper` runs, resolved as git
+    would (a `!` command's first word; else `git-credential-<name>` on PATH;
+    an absolute path as it is): real paths, or `unresolved:<name>`."""
+    import shlex
+    import shutil
+    out = []
+    for sec, _sub, kv in entries:
+        key, _, value = kv.partition("=")
+        value = value.strip()
+        if sec != "credential" or key != "helper" or not value:
+            continue
+        try:
+            words = shlex.split(value[1:] if value.startswith("!") else value)
+        except ValueError:
+            out.append("unresolved:" + value[:40])
+            continue
+        first = words[0] if words else ""
+        if not value.startswith("!") and "/" not in first:
+            first = "git-credential-" + first
+        path = first if os.path.isabs(first) else shutil.which(first)
+        out.append(os.path.realpath(path) if path else "unresolved:" + first)
+    return out
+
+
+def helper_pin(entries) -> tuple[str, list[str]]:
+    """(the digest of the helper entries and each program's real path and
+    content hash, those paths)."""
+    found = [f"{sub}\n{kv}" for sec, sub, kv in entries
+             if sec == "credential" and kv.split("=", 1)[0] == "helper"]
+    programs = helper_programs(entries)
+    pins = [f"{p}\n{_file_hash(p) if not p.startswith('unresolved:') else ''}" for p in programs]
+    digest = hashlib.sha256("\0".join(found + ["--"] + pins).encode("utf-8")).hexdigest()
+    return digest, [p for p in programs if not p.startswith("unresolved:")]
+
+
+def _bin_dirs() -> list[Path]:
+    home = _home()
+    return [home / ".local" / "bin", home / "bin"]
+
+
+def shadow_target(path: Path, helper_paths) -> bool:
+    """A write that could replace a pinned helper or shadow it on PATH: the
+    helper itself, any file of its name in a PATH folder ahead of it, or
+    anything in `~/.local/bin` or `~/bin`."""
+    path = Path(os.path.normpath(path))
+    real = Path(os.path.realpath(path))
+    for folder in _bin_dirs():
+        if any(folder == c or folder in c.parents for c in (path, real)):
+            return True
+    dirs = [Path(d) for d in os.environ.get("PATH", "").split(os.pathsep) if d]
+    for helper in helper_paths or ():
+        helper = Path(helper)
+        if path == helper or real == helper:
+            return True
+        ahead = []
+        for d in dirs:
+            if Path(os.path.realpath(d)) == helper.parent:
+                break
+            ahead.append(d)
+        if any(path == d / helper.name or real == Path(os.path.realpath(d)) / helper.name for d in ahead):
+            return True
+    return False
 
 
 class _Judge:
@@ -521,11 +841,74 @@ class _Judge:
             return
         if dirs is None:
             dirs = [self.root] if self.root is not None else mg.UNKNOWN
+        if self._shadow(target, dirs):
+            return
         if git_internal(target) or any(git_internal(r) for r in (self._rel(target, dirs) or [])):
             self.deny(S_GITCONFIG, "a fix never writes git's own config, hooks or gitfile "
                                    f"({_shown(target)})")
             return
         self._ci_target(target, dirs)
+
+    def _abs(self, target, dirs) -> list[Path] | None:
+        """`target` as absolute candidate paths (home and `$HOME` expanded,
+        quotes and escapes out), or None when it cannot be told."""
+        from . import merge_gate as mg
+        text = _expand_home(str(target).replace("\\", "").strip().strip("'\""))
+        if not text or "$" in text or "`" in text:
+            return None
+        if os.path.isabs(text):
+            return [Path(os.path.normpath(text))]
+        if dirs is mg.UNKNOWN or not dirs:
+            return None
+        return [Path(os.path.normpath(Path(d) / text)) for d in dirs]
+
+    def _shadow(self, target, dirs) -> bool:
+        """A write that would replace or shadow the pinned credential helper,
+        or lands in `~/.local/bin` or `~/bin` (the review's delta)."""
+        for path in self._abs(target, dirs) or []:
+            if shadow_target(path, self.scope.get("helper_paths")):
+                self.deny(S_GITCONFIG, "a fix never writes the git credential helper or a folder "
+                                       f"on PATH ahead of it ({_shown(target)})")
+                return True
+        return False
+
+    def reach(self, stem: str, words: list[str], dirs) -> None:
+        """H-1 beyond literal paths: each argument (and `--opt=value`), home
+        expanded, braces and globs expanded against the credential folders,
+        relative ones placed against the line's folders. Inside one: DENY.
+        An ancestor of one (`~`, `~/.config`, `/`) under a program that
+        reads, copies, archives or searches a tree: DENY. A path built by a
+        command substitution: ASK."""
+        from jarvis import protected_state
+        recursive = recursive_reader(stem, words)
+        for word in words:
+            if word.startswith("-"):
+                if "=" not in word:
+                    continue
+                word = word.split("=", 1)[1]
+            raw = word.replace("\\", "").strip("'\"")
+            if "$(" in raw or "`" in raw:
+                if "/" in raw:
+                    self.ask("a path built by a command substitution is not read")
+                continue
+            text = _expand_home(raw)
+            if "$" in text or not text:
+                continue
+            variants = protected_state._brace_expand(text)
+            if variants is None:
+                self.ask("a brace expansion too large to read")
+                continue
+            for variant in variants:
+                bases = ([variant] if os.path.isabs(variant) else
+                         [] if dirs is None or not isinstance(dirs, list) else
+                         [str(Path(d) / variant) for d in dirs])
+                for base in bases:
+                    path = Path(os.path.normpath(base))
+                    kind = _glob_reach(path) if _GLOB_CHARS.search(base) else _reach(path)
+                    if kind == "inside" or (kind == "ancestor" and recursive):
+                        self.deny(S_CRED, "a fix never reads, searches or copies a credential folder "
+                                          f"({_shown(word)})")
+                        return
 
     def _credential(self, target) -> bool:
         from .permissions import _under_credential_dir
@@ -538,21 +921,47 @@ class _Judge:
         return False
 
     def read(self, tool: str, args: dict) -> None:
-        """A read tool (Read, Grep, Glob, LS, ...): a credential folder is refused (H-1)."""
+        """A read tool (Read, Grep, Glob, LS, ...): a credential folder, a
+        path inside one, or (Grep, and Glob with `**` or a pattern that
+        reaches one) an ancestor of one, is refused (H-1)."""
         for key in ("file_path", "notebook_path", "path", "pattern"):
             value = args.get(key)
             if isinstance(value, str) and value.strip() and ("/" in value or value.startswith("~")):
                 if self._credential(value):
                     return
+        base = args.get("path") if isinstance(args.get("path"), str) and args.get("path").strip() else None
+        root = [self.root] if self.root is not None else None
+        paths = self._abs(base, root) if base else ([self.root] if self.root is not None else [])
+        pattern = args.get("pattern") if isinstance(args.get("pattern"), str) else ""
+        for path in paths or []:
+            kind = _reach(path)
+            if tool == "Glob" and pattern:
+                joined = Path(os.path.normpath(Path(path) / _expand_home(pattern)))
+                kind = _glob_reach(joined) or kind
+                if kind == "ancestor" and "**" not in pattern:
+                    kind = None
+            if kind == "inside" or (kind == "ancestor" and tool in ("Grep", "Glob")):
+                self.deny(S_CRED, "a fix never reads or searches a credential folder "
+                                  f"({_shown(base or path)})")
+                return
 
     # -- a command line ------------------------------------------------------------------------
 
-    def line(self, text: str, where) -> None:
+    def line(self, text: str, where, _again: bool = False) -> None:
         from jarvis import rules
         from . import merge_gate as mg
         if not isinstance(text, str) or not text.strip():
             return
         text = text.replace("\x00", " ")
+        if not _again:
+            # `H=~/.config; cat $H/gh/hosts.yml`: the line read again with
+            # its own literal assignments put in.
+            values = {m.group(1): m.group(2) for m in _ASSIGN.finditer(text)}
+            if values:
+                again = re.sub(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?",
+                               lambda m: values.get(m.group(1), m.group(0)), text)
+                if again != text:
+                    self.line(again, where, _again=True)
         flat = text.replace("\\", "").replace("'", "").replace('"', "")
         line = mg._Line(text, where)
         for fragment in _credential_fragments():
@@ -610,6 +1019,8 @@ class _Judge:
             for prog in walk.progs:
                 if prog.word:
                     self.program(line, prog, changes_config)
+        if fetcher:
+            self.fetch(walks, flat)
         if (fetcher or interpreter) and _GITHUB_HOST.search(flat):
             self.deny(S_CRED, "a fix reaches GitHub through gh and git only (never curl, wget or "
                               "inline code, which could carry the owner's token)")
@@ -620,6 +1031,30 @@ class _Judge:
         if (writer or interpreter or mg._REDIRECT_TARGET.search(text)) and any(
                 ci_path(w) for w in re.split(r"[\s;&|<>()=]+", flat) if w):
             self.ask("a line that writes and names CI or scanner configuration")
+
+    def fetch(self, walks, flat: str) -> None:
+        """A fetcher on a scoped line (H-1): GitHub by any spelling (percent
+        escapes, case), a forced address (`--resolve`, `--connect-to`, a Host
+        header): DENY; an address literal or an expansion in its words: ASK."""
+        from urllib.parse import unquote
+        from . import merge_gate as mg
+        if _GITHUB_HOST.search(unquote(flat)):
+            self.deny(S_CRED, "a fix reaches GitHub through gh and git only")
+            return
+        for walk in walks:
+            for prog in walk.progs:
+                stem, _could = mg._stem_could_be(prog.word, _GIT_NAMES) if prog.word else (None, False)
+                if stem not in _FETCHERS:
+                    continue
+                words = [str(a) for a in prog.args]
+                low = [w.lower() for w in words]
+                if any(w.startswith(("--resolve", "--connect-to", "--proxy", "-x")) for w in low) or any(
+                        "host:" in w.replace(" ", "") for w in low):
+                    self.deny(S_CRED, "a fetch that forces an address or a Host header")
+                    return
+                if any(mg._wild(a) for a in prog.args) or any(
+                        re.search(r"//\[?[0-9a-f:.]*[0-9][0-9a-f:.]*\]?(:\d+)?(/|$)", w) for w in low):
+                    self.ask("a fetch to an address the gate cannot read")
 
     @staticmethod
     def _git_changes_config(args) -> bool:
@@ -646,19 +1081,23 @@ class _Judge:
         args = list(prog.args)
         words = [str(a) for a in args]
         if stem is not None:
+            self.reach(stem, words, line.dirs)
             for target in mg._written(stem, words):
                 self.file(target, line.dirs)
             if stem in ("rm", "unlink", "rmdir", "mv", "shred", "truncate"):
                 for word in words:
                     if not word.startswith("-"):
-                        self._ci_target(word, line.dirs, destroys=True)
+                        if not self._shadow(word, line.dirs):
+                            self._ci_target(word, line.dirs, destroys=True)
         if stem in _DETACHERS:
             self.ask(f"{_shown(stem)} runs a program that outlives the call or is not read")
-        if stem is not None and mg._INTERPRETERS.fullmatch(stem):
-            inline = any(w in _INLINE_FLAGS or (w[:2] in ("-c", "-e", "-E") and len(w) > 2) for w in words)
-            files = [w for w in words if not w.startswith("-")]
-            if inline or not files:
-                self.ask(f"inline {_shown(stem)} code is not read by the gate")
+        why = inline_code(stem or "", words) or shell_program(stem or "", words, prog.via_input)
+        if why:
+            self.ask(f"{_shown(stem)}: {why} is not read by the gate")
+        if stem == "eval" and any("$" in w or "`" in w for w in words):
+            self.ask("eval of an expansion is not read by the gate")
+        if stem in _UNPACKERS and _unpacks(stem, words):
+            self.ask(f"{_shown(stem)} may write CI configuration the gate does not see")
         if stem in ("cd", "pushd"):
             if any(w == "-" or w.startswith("+") for w in words):
                 line.move(None)
@@ -743,6 +1182,9 @@ class _Judge:
         elif sub == "config":
             if any("credential" in w.lower() for w in words):
                 self.deny(S_CRED, "a fix never reads or sets git's credential settings")
+            elif any(w in ("-l", "--list", "--get-regexp", "--show-origin") or w.startswith("--get-regexp")
+                     for w in words):
+                self.ask("a listing of git's config may show its credential settings")
             elif self._git_changes_config(["config", *words]):
                 self.ask("a git config change in a fix is the owner's")
         elif sub == "remote":
@@ -754,6 +1196,9 @@ class _Judge:
             self.deny(S_PROGRAM, "pushes a subtree to another repository")
         elif sub == "lfs" and "push" in words:
             self.ask("git lfs push sends objects the gate does not read")
+        elif sub in ("apply", "am", "cherry-pick") or (sub == "reset" and "--hard" in words) or (
+                sub == "stash" and any(w in ("pop", "apply") for w in words)):
+            self.ask(f"git {sub} may write CI configuration the gate does not see")
         elif sub in _GIT_RUNS and (_GIT_RUNS[sub] is None or any(
                 w in _GIT_RUNS[sub] or any(w.startswith(f + "=") for f in _GIT_RUNS[sub] if f.startswith("--"))
                 for w in words)):
@@ -928,7 +1373,7 @@ class _Judge:
                                            "rewrites where a push goes")
                     return False
             want = self.scope.get("helpers")
-            if want is not None and helpers_digest(entries) != want:
+            if want is not None and helper_pin(entries)[0] != want:
                 self.deny(S_GITCONFIG, "git's credential helpers changed since the Fix started")
                 return False
             mine = [(kv.split("=", 1)[0], kv.split("=", 1)[1]) for sec, sub, kv in entries
@@ -984,6 +1429,9 @@ class _Judge:
         verb = self._verb(rest)
         if verb is _WILD:
             self.ask(f"gh {_shown(cmd)} with a verb that is an expansion")
+            return
+        if any(str(w) in ("--web", "-w") or str(w).startswith("--web=") for w in rest):
+            self.deny(S_GH_WRITE, "gh --web opens a browser; a fix reads GitHub in the terminal")
             return
         if cmd == "auth":
             self.deny(S_CRED, "a fix never reads or changes gh's login")
@@ -1078,7 +1526,7 @@ _GH_API_LONG = ("method", "field", "raw-field", "input", "header")
 def _gh_api_long(word: str) -> str:
     """A `gh api` long option as gh may read it: an abbreviation of one that
     writes or sets the method is that option (`--meth PUT`, `--raw x=y`)."""
-    if not word.startswith("--") or len(word) < 4:
+    if not word.startswith("--") or len(word) < 3:
         return word
     name, eq, value = word[2:].partition("=")
     found = [o for o in _GH_API_LONG if o.startswith(name)]
@@ -1666,11 +2114,11 @@ class PrFixes:
             if protected:
                 raise FixRefused(409, f"the pull request's branch is {protected}; a fix never pushes "
                                       "to a default or release branch")
-            helpers = repo_helpers_baseline(project.root)
-            if helpers is None:
+            pinned = repo_helpers_baseline(project.root)
+            if pinned is None:
                 raise FixRefused(409, "the project's git config cannot be read")
             brief = build_brief(facts)
-            scope = make_scope(repo, number, facts.branch, helpers)
+            scope = make_scope(repo, number, facts.branch, pinned[0], pinned[1])
             started = _utc(self.clock())
             record = {"task_id": None, "from_head": head, "from_patches": patches_record(facts),
                       "started": started, "state": "starting", "ended_at": None,
@@ -1731,7 +2179,7 @@ class PrFixes:
         from fnmatch import fnmatch
         from . import merge_gate as mg
         branch = facts.branch or ""
-        if any(fnmatch(branch.lower(), p) for p in ("main", "master", "release*")):
+        if any(fnmatch(branch.lower(), p) for p in ("main", "master", "release*", "prod*", "production*")):
             return branch
         found = mg._git_dirs(Path(project.root))
         if isinstance(found, tuple) and branch in mg._remote_heads(found[1]):
