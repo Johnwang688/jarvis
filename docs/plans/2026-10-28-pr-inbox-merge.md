@@ -364,3 +364,70 @@ the cache's `put` (a small file write) under its lock.
   - `summary_note` names them ("written without the CI logs, which could not be read");
   - until then, the row's reason names them too ("the CI logs could not be read; it is read again in 5 minutes").
 - A late answer for an older head never lands; this is pinned by a test and a mutant.
+
+## As built: PM-E (2026-10-29)
+
+`jarvis/v2/pr_fix.py` (SELF_PROTECTED), `worktrees.ensure_pr`, the PR scope in
+`permissions.build_permit`, attached by daemon2's `main()` only (`Daemon.attach_pr_fixes`).
+Tests: `tests/v2/pr_fix_check.py` (fakes for gh, the runner and the model; real git on temp
+repositories) and `tests/v2/pr_fix_mutants.py` (a mutant per DENY family and per guard, each
+killed by the test named for it).
+
+- **Start (PM-17).** `PrFixes.start_fix(id, head, card, via, limited=None)`: the row's head and
+  card (`pr_fix.card_key`, the seam `PrFixes.card_of` PM-D sets) must match; the facts held for
+  that head (`PrSummaries.facts_for`) must make `decide(facts, hold, limited)` offer Fix;
+  `limited` is True for any `via` but "hud" unless the caller says otherwise. Exactly one
+  non-archived project owns the repository, its profile is not strict, Claude Code is in the
+  roster. One call creates the task (`pr_scope`, ceilings $5 and 1 hour, `provider_override`
+  Claude), fills the mirror, runs `ensure_pr` and `TaskControl.start`; a step that fails cancels
+  the task and records "fix could not start" (not counted against the cap). `pr_fix.start(daemon,
+  …)` is the phone's hook; `PrFixes.hold` is PM-D's seam for Q3.
+- **Claude only.** `Task.pr_scope` is set at create and kept by every save (`TaskStore.save`).
+  The runner refuses to open a fix's thread on another provider (`routing_refused`, BLOCKED) and
+  to resume one there; the gate refuses every call of a Codex session for it.
+- **Worktree (PM-18).** `fill_mirror` (PM-1's credentialed, hardened fetch into the daemon's
+  mirror, held under its lock; the pull ref must be the bound head) then `ensure_pr`: a local
+  fetch with no credential helper, the file transport only, gitops' hardening, onto
+  `jarvis/<task>-pr<N>`; a wrong head deletes the branch and makes nothing; a repository whose
+  own config names a program is refused.
+- **The gate (PM-20).** `pr_fix.judge`, right after layer 1. DENY (layer `pr-scope`, asked of
+  nobody): another destination (branch, tag, any ref), a URL, path or other remote (push URLs read
+  from config: `pushurl` first), `--all/--branches/--mirror/--tags/--follow-tags` and a mirror
+  remote, force (`-f`, `--force*` in git's abbreviations, `+` refspecs), delete (`-d`, `--delete`,
+  `:ref`, `--prune`), `--repo`, `--receive-pack`, `--exec`, `--recurse-submodules`, `send-pack`,
+  `http-push`, `subtree push`; `gh pr merge|close|edit|ready|review`; a non-GET `gh api` (explicit,
+  or implied by fields, `--input`, `graphql`); `gh repo sync`, `gh workflow disable`, `gh
+  secret|variable set|delete`; writes to CI or scanner config (file tools, redirects, writers,
+  `git rm|mv|checkout|restore`); Codex. ASK (always-ask, no Always): no refspec, a bare HEAD,
+  expansions, `-c`/`--git-dir` and kin, a line that changes a remote or config, `include`/`insteadOf`
+  config, an unknown git subcommand or gh command, unreadable text that spells a push or gh, a
+  line too complex to walk. A task whose record cannot be read takes its fix record's scope; a
+  record that cannot be read either refuses every call. v1 has no tasks with a scope, so there
+  is no v1 half.
+- **Tracking (PM-21).** `inbox/pr-fixes.json` (0600 in 0700) per PR: `{task_id, from_head,
+  from_patches, started, state, ended_at, project_id, branch, note, scope}`. A second Fix is a 409
+  naming the task; a blocked task still holds the PR (Cancel it first); at most 3 started.
+- **Ends (PM-22, PM-23).** `detail.fix` = `{state, task_id, from_head, commits, ci_changed, note,
+  summary, summary_state, count, max}`; states starting, running, question, blocked, stopped,
+  checking, rewritten, failing, pushed, ready, start_failed. A running task shows "fix running"
+  even after a push; the card waits for the task's end. Ancestry and "N commits since your Fix"
+  come from one GET compare (`--jq`, first-parent chain from the new head, so a merged base's
+  commits are not counted). The interdiff compares each file's changed lines only (no hunk
+  headers, context or index lines), so a base merge reads as nothing; `ci_changed` is code's
+  (True, False, or None when not every file could be compared). The summary is one `Fixed:` line
+  from a `SummaryEngine` on the PR summaries' day ledger, fenced and scrubbed.
+- **Push (Q2).** An ended fix (not a failed start) puts its row at rank 4 for 24 hours, so the
+  phone's sender pushes `{count, rank}` once, never in quiet hours (the morning push carries it).
+
+Deviations, each the builder's call:
+
+1. **Rank 4 is the push.** `push.py` pushes only for rows new to ranks 1 to 4, so the fix's row
+   rises there for a day after the fix ends (as a deferred approval's does), rather than a second
+   push path.
+2. **The card key is provisional.** PM-D owns it; `card_key` follows PM-13's words and
+   `PrFixes.card_of` is the seam.
+3. **A blocked fix holds the PR.** It can be resumed and push again, so Fix again needs it
+   cancelled first.
+4. **The base is fetched by the task** (`git fetch origin <base>`), not seeded from the mirror.
+5. **Not built here (PM-F):** the HUD and phone rendering of `detail.fix`, and Cancel on the phone
+   beyond the existing `task:` route.
