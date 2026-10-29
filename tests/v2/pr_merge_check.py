@@ -95,6 +95,8 @@ def gh_kind(argv) -> str:
         return "update"
     if argv[1] == "api" and any("/rules/branches/" in str(a) for a in argv):
         return "rules"
+    if argv[1] == "api" and str(argv[-1]).count("/") == 2 and str(argv[-1]).startswith("repos/"):
+        return "owner"
     if list(argv[1:3]) == ["pr", "view"] and "state,headRefOid,autoMergeRequest" in argv:
         return "result"
     if list(argv[1:3]) == ["pr", "view"] and "autoMergeRequest" in argv:
@@ -102,6 +104,11 @@ def gh_kind(argv) -> str:
     return PF.kind(argv)
 
 
+def owner_answer(kind) -> str:
+    return json.dumps({"full_name": REPO, "private": True, "owner": {"login": "Owner", "type": kind}})
+
+
+FORBIDDEN_403 = GhFailed("exit")       # gh api's exit on "Upgrade to GitHub Pro ..." (HTTP 403)
 ACCEPTED = "HTTP/2.0 202 Accepted\r\nContent-Type: application/json\r\n\r\n{\"message\":\"Updating\"}"
 UNPROCESSABLE = "HTTP/2.0 422 Unprocessable Entity\r\n\r\n{\"message\":\"expected head sha didn't match\"}"
 
@@ -121,6 +128,7 @@ class GhRun(PF.FakeRun):
         self.answers.setdefault("result", self._result)
         self.answers.setdefault("auto", json.dumps({"autoMergeRequest": None}))
         self.answers.setdefault("rules", "[]")
+        self.answers.setdefault("owner", owner_answer("Organization"))
         self.auto_after = None              # autoMergeRequest the result read reports
         self._lock = threading.Lock()
 
@@ -339,7 +347,7 @@ class Argv(Case):
                 self.assertNotIn(word, c["argv"], c["argv"])
         # The result came from a fresh read after the merge.
         kinds = [c["kind"] for c in p.run.calls]
-        self.assertEqual(kinds[-4:], ["auto", "rules", "merge", "result"])
+        self.assertEqual(kinds[-5:], ["auto", "owner", "rules", "merge", "result"])
         intent, receipt = self.receipts()
         common = {"repo": REPO, "number": N, "head": HEAD, "action": "merge", "method": "merge",
                   "via": "hud", "limited": False}
@@ -474,6 +482,49 @@ class Queue(Case):
                 p.poll()
                 self.check(p, **answers)
         print("ok  auto-merge or rules unreadable, malformed or maybe cut off: 409 (fails closed)")
+
+    def test_a_users_private_repo_merges_without_the_rules_read(self):
+        """The live probe (review of #336): on a user's private repository
+        the rules GET answers 403 without GitHub Pro; merge queues exist only
+        on an organization's, so the rules are never read there."""
+        p = self.prs(run=GhRun(owner=owner_answer("User"), rules=FORBIDDEN_403))
+        p.poll()
+        self.assertEqual(p.act("merge")["result"], "merged")
+        kinds = [c["kind"] for c in p.run.calls]
+        self.assertEqual(kinds[-4:], ["auto", "owner", "merge", "result"])
+        (owner,) = [c for c in p.run.calls if c["kind"] == "owner"]
+        self.assertEqual(owner["argv"], [PF.GH, "api", "--method", "GET", f"repos/{REPO}"])
+        # The owner type is cached for an hour; auto-merge is still read each time.
+        p.run.merged = False
+        p.act("merge")
+        self.assertEqual([c["kind"] for c in p.run.calls].count("owner"), 1)
+        self.assertEqual([c["kind"] for c in p.run.calls].count("auto"), 2)
+        p.actions.clock = lambda: time.monotonic() + pr_merge.OWNER_CACHE_S + 1
+        p.run.merged = False
+        p.act("merge")
+        self.assertEqual([c["kind"] for c in p.run.calls].count("owner"), 2)
+        # Auto-merge on a user's repository still refuses.
+        p.run.answers["auto"] = json.dumps({"autoMergeRequest": {"mergeMethod": "MERGE"}})
+        self.refused(lambda: p.act("merge"), 409, pr_merge.QUEUE)
+        print("ok  a user's private repo (rules 403): merges, owner type cached; auto-merge still refuses")
+
+    def test_an_organizations_repo_reads_its_rules(self):
+        for rules in (FORBIDDEN_403, json.dumps([{"type": "merge_queue"}])):
+            with self.subTest(rules=rules):
+                p = self.prs(run=GhRun(owner=owner_answer("Organization"), rules=rules))
+                p.poll()
+                self.check(p)
+        print("ok  an organization's repo: a 403 or a merge_queue rule refuses")
+
+    def test_an_unreadable_owner_type_refuses(self):
+        for owner in (GhFailed("exit"), "not json", json.dumps({"owner": {}}), owner_answer("Bot"),
+                      json.dumps({"owner": "User"})):
+            with self.subTest(owner=owner):
+                p = self.prs(run=GhRun(owner=owner))
+                p.poll()
+                self.check(p)
+                self.assertNotIn("rules", [c["kind"] for c in p.run.calls])
+        print("ok  an owner type unread or neither User nor Organization: 409, never cached as one")
 
     def test_update_checks_auto_merge_only(self):
         view = PF.view(mergeStateStatus="BEHIND")
@@ -708,6 +759,7 @@ case "$*" in
   *"--json state,headRefOid,autoMergeRequest") echo '{{"state":"MERGED","headRefOid":"{head}","autoMergeRequest":null}}' ;;
   *"--json autoMergeRequest") echo '{{"autoMergeRequest":null}}' ;;
   *rules/branches/*) echo '[]' ;;
+  *"GET repos/{repo}") echo '{{"owner":{{"login":"Owner","type":"Organization"}}}}' ;;
   *) echo "stdout {token}" ;;
 esac
 exit 0
@@ -722,7 +774,7 @@ class RealGh(Case):
         log = self.root / "gh.log"
         gh = self.root / "bin" / "gh"
         gh.parent.mkdir()
-        gh.write_text(FAKE_GH.format(token=PF.TOKEN, head=HEAD))
+        gh.write_text(FAKE_GH.format(token=PF.TOKEN, head=HEAD, repo=REPO))
         gh.chmod(0o755)
         actions = pr_merge.PrActions(self.daemon, gh=str(gh), read=lambda *a, **k: facts)
         pr_merge.install(self.daemon, actions)
@@ -735,12 +787,13 @@ class RealGh(Case):
         self.assertEqual(out["result"], "merged")
         lines = [line.split("\0")[:-1] for line in log.read_text().split("\n") if line]
         self.assertEqual(lines[0], ["pr", "view", str(N), "--repo", REPO, "--json", "autoMergeRequest"])
-        self.assertEqual(lines[1], ["api", "--method", "GET",
+        self.assertEqual(lines[1], ["api", "--method", "GET", f"repos/{REPO}"])
+        self.assertEqual(lines[2], ["api", "--method", "GET",
                                     f"repos/{REPO}/rules/branches/main?per_page={pr_merge.RULES_MAX}"])
-        self.assertEqual(lines[2], ["pr", "merge", str(N), "--repo", REPO, "--merge", "--match-head-commit", HEAD])
-        self.assertEqual(lines[3], ["pr", "view", str(N), "--repo", REPO, "--json",
+        self.assertEqual(lines[3], ["pr", "merge", str(N), "--repo", REPO, "--merge", "--match-head-commit", HEAD])
+        self.assertEqual(lines[4], ["pr", "view", str(N), "--repo", REPO, "--json",
                                     "state,headRefOid,autoMergeRequest"])
-        self.assertEqual(len(lines), 4)
+        self.assertEqual(len(lines), 5)
         seen = json.dumps(out) + json.dumps(self.receipts()) + "\n".join(logs.output)
         self.assertNotIn(PF.TOKEN, seen)
         self.assertNotIn("stderr", seen)

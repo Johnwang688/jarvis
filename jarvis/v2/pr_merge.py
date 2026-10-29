@@ -48,8 +48,11 @@ private folder made for the act: `pr_facts.gh_env`), through
 
 Never `--admin`, `--auto`, `--rebase` or `--delete-branch`. Before either,
 under the same bounds, `gh pr view --json autoMergeRequest` and (before a
-merge) `gh api --method GET repos/O/R/rules/branches/<base>`: auto-merge on,
-or a `merge_queue` rule on the base, or either unread, is a 409 "its base
+merge) `gh api --method GET repos/O/R` for `owner.type` (cached an hour):
+a "User" repository has no merge queue, so no more is read; for an
+"Organization" one, `gh api --method GET repos/O/R/rules/branches/<base>`.
+Auto-merge on, a `merge_queue` rule, an owner type that is neither, or any
+of these unread (a 403 included), is a 409 "its base
 uses a merge queue or auto-merge: merge it at GitHub" (on a queue base gh
 queues the PR or turns auto-merge on, which outlives pushes and holds).
 A merge's output is never read; Update's status line only (202 "update
@@ -94,6 +97,7 @@ from pathlib import Path
 import re
 import stat
 import threading
+import time
 import weakref
 
 from . import pr_facts
@@ -125,7 +129,9 @@ ACT_TIMEOUT_S = 60.0
 ACT_CAP = 64 * 1024             # gh's output is discarded; past this it is killed
 RESULT_TIMEOUT_S = 30.0
 RESULT_CAP = 64 * 1024
+REPO_CAP = 256 * 1024
 
+OWNER_CACHE_S = 3600.0          # a repository's owner type, as pr_facts' repo settings
 RULES_MAX = 100                 # a full page of rules may be cut off: fails closed
 QUEUE = "its base uses a merge queue or auto-merge: merge it at GitHub"
 _STATUS = re.compile(rb"\AHTTP/[0-9.]+ ([0-9]{3})[ \r\n]")
@@ -177,6 +183,13 @@ def rules_argv(gh: str, repo: str, base: str) -> list[str]:
     from urllib.parse import quote
     return [gh, "api", "--method", "GET",
             f"repos/{repo}/rules/branches/{quote(base, safe='/')}?per_page={RULES_MAX}"]
+
+
+def owner_argv(gh: str, repo: str) -> list[str]:
+    """The repository, GET only, for `owner.type`: merge queues exist only on
+    an organization's repositories, and the rules read answers 403 on a
+    user's private one without GitHub Pro (live probe, review of #336)."""
+    return [gh, "api", "--method", "GET", f"repos/{repo}"]
 
 
 def result_argv(gh: str, repo: str, number: int) -> list[str]:
@@ -422,6 +435,8 @@ class PrActions:
         self.now = now or (lambda: datetime.now(timezone.utc))
         self._locks: dict[str, threading.Lock] = {}
         self._locks_lock = threading.Lock()
+        self._owners: dict[str, tuple[float, str]] = {}     # repo -> (when read, owner.type)
+        self.clock = time.monotonic
 
     def _lock_for(self, key: str) -> threading.Lock:
         with self._locks_lock:
@@ -538,13 +553,33 @@ class PrActions:
             return True
         if not merging:
             return False
-        if pr_facts._branch(base) is None:
+        owner = self.owner_type(env, gh, repo)
+        if owner == "User":
+            return False                # no merge queue on a user's repository
+        if owner != "Organization" or pr_facts._branch(base) is None:
             return True
         rules = self._json(*self._call(rules_argv(gh, repo, base), env, RESULT_TIMEOUT_S, RESULT_CAP))
         if not isinstance(rules, list) or len(rules) >= RULES_MAX \
                 or not all(isinstance(r, dict) and isinstance(r.get("type"), str) for r in rules):
             return True
         return any(r["type"] == "merge_queue" for r in rules)
+
+    def owner_type(self, env: dict, gh: str, repo: str) -> str | None:
+        """`owner.type` of `repo` ("User", "Organization"), cached for
+        `OWNER_CACHE_S`; None when it cannot be read (never cached)."""
+        key, now = repo.lower(), self.clock()
+        cached = self._owners.get(key)
+        if cached is not None and now - cached[0] < OWNER_CACHE_S:
+            return cached[1]
+        value = self._json(*self._call(owner_argv(gh, repo), env, RESULT_TIMEOUT_S, REPO_CAP))
+        owner = value.get("owner") if isinstance(value, dict) else None
+        kind = owner.get("type") if isinstance(owner, dict) else None
+        if kind not in ("User", "Organization"):
+            return None
+        if len(self._owners) > 256:
+            self._owners.clear()
+        self._owners[key] = (now, kind)
+        return kind
 
     def _outcome(self, action: str, head: str, word: str, data: bytes, status: str | None = None) -> str:
         value = self._json(word, data)

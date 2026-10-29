@@ -369,7 +369,7 @@ the cache's `put` (a small file write) under its lock.
 
 `jarvis/v2/pr_merge.py` (SELF_PROTECTED). Tests: `tests/v2/pr_merge_check.py` (fakes only;
 real daemons on ephemeral ports for the routes and the phone) and `tests/v2/pr_merge_mutants.py`
-(36 mutants, each killed by the test named for it).
+(39 mutants, each killed by the test named for it).
 
 - **Card (PM-13).** `pr_summary.card_key(detail)`: SHA-256 of canonical JSON (keys sorted)
   `{v: 1, facts, summary, method, actions}`, exactly the row's values. Every PR row carries
@@ -419,6 +419,11 @@ Deviations, each the builder's call:
    `gh api --method GET repos/O/R/rules/branches/<base>?per_page=100` (merges). Auto-merge
    on, a `merge_queue` rule, or either unread or possibly cut off is a 409 "its base uses a
    merge queue or auto-merge: merge it at GitHub". The result read includes
-   `autoMergeRequest`, so a PR gh queued anyway reports "queued". A queue set only in
-   legacy branch protection, if the rules endpoint does not list it, is not seen.
+   `autoMergeRequest`, so a PR gh queued anyway reports "queued". Merge queues exist only on
+   an organization's repositories, and the rules GET answers 403 on a user's private
+   repository without GitHub Pro (live probe), so `gh api --method GET repos/O/R` is read
+   first (`owner.type`, cached an hour): "User" skips the rules read; "Organization" reads
+   them and fails closed (a 403 included); anything else refuses. Residual, organizations
+   only: a queue set only in classic branch protection, if the rules endpoint does not
+   list it, is not seen.
 7. A row whose detail fails to build now also drops its actions (it kept them before).
