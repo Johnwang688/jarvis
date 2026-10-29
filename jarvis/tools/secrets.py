@@ -1630,28 +1630,15 @@ def _program_flags(text: str) -> str:
         at = _stem_at(values)
         if at >= len(values):
             continue
-        program = PurePosixPath(values[at]).name
-        for programs, subcommand, kind, pattern, value_options in _PROGRAM_FLAGS:
-            if program not in programs:
-                continue
-            i = at + 1
-            for sub in subcommand:
-                while i < len(values) and values[i].startswith("-"):
-                    i += 1
-                if i >= len(values) or values[i] != sub:
-                    break
-                i += 1
-            else:
-                start, end = words[i - 1].end(), seg_end
-                if value_options is not None:
-                    # Only its own options: up to the first operand (what it runs).
-                    while i < len(values) and values[i].startswith("-"):
-                        i += 2 if values[i] in value_options else 1
-                    end = words[i].start() if i < len(words) else seg_end
-                # Every occurrence, not the first (review of #330, NEW-2:
-                # `ssh-keygen -P old -N new`, `-passin pass:A -passout pass:B`).
-                for match in pattern.finditer(text, start, end):
-                    edits.append(_program_edit(text, match, kind))
+        stems = [at]
+        # Final review of #330: `kubectl exec POD -- ARGV`, `docker exec C
+        # ARGV`: the tail is an argv the container runs as it is (no shell
+        # parses it), so its own program's flags are judged there too.
+        tail = _exec_stem(values, at)
+        if tail is not None:
+            stems.append(tail)
+        for at in stems:
+            _program_edits(text, words, values, at, seg_end, edits)
     if not edits:
         return text
     mask = _Mask(text)
@@ -1672,6 +1659,62 @@ def _program_flags(text: str) -> str:
         pos = b
     out.append(text[pos:])
     return "".join(out)
+
+
+def _program_edits(text, words, values, at, seg_end, edits) -> None:
+    """The `_PROGRAM_FLAGS` edits for the program at `values[at]`."""
+    program = PurePosixPath(values[at]).name
+    for programs, subcommand, kind, pattern, value_options in _PROGRAM_FLAGS:
+        if program not in programs:
+            continue
+        i = at + 1
+        for sub in subcommand:
+            while i < len(values) and values[i].startswith("-"):
+                i += 1
+            if i >= len(values) or values[i] != sub:
+                break
+            i += 1
+        else:
+            start, end = words[i - 1].end(), seg_end
+            if value_options is not None:
+                # Only its own options: up to the first operand (what it runs).
+                while i < len(values) and values[i].startswith("-"):
+                    i += 2 if values[i] in value_options else 1
+                end = words[i].start() if i < len(words) else seg_end
+            # Every occurrence, not the first (review of #330, NEW-2:
+            # `ssh-keygen -P old -N new`, `-passin pass:A -passout pass:B`).
+            for match in pattern.finditer(text, start, end):
+                edits.append(_program_edit(text, match, kind))
+
+
+def _exec_stem(values: list[str], at: int) -> int | None:
+    """Where the program of `kubectl|oc exec … -- ARGV` or `docker|podman|
+    nerdctl exec [opts] CONTAINER ARGV` is, or None."""
+    program = PurePosixPath(values[at]).name
+    if program in ("kubectl", "oc"):
+        rest = values[at + 1:]
+        if not ({"exec", "run", "debug"} & set(rest)) or "--" not in rest:
+            return None
+        i = values.index("--", at + 1) + 1
+    elif program in ("docker", "podman", "nerdctl"):
+        i = at + 1
+        while i < len(values) and values[i].startswith("-"):
+            i += 1
+        # `exec` only: `run`'s image cannot be placed past every option
+        # that takes a value (`--name mongo -p 27017:27017 mongo` stays as
+        # typed); `holds_back_credential` reads `run` apart.
+        if i >= len(values) or values[i] != "exec":
+            return None
+        i += 1
+        while i < len(values) and values[i].startswith("-") and values[i] != "--":
+            i += 2 if values[i] in _EXEC_VALUE else 1
+        i += 1                                                  # the container
+    else:
+        return None
+    if i >= len(values):
+        return None
+    i += _stem_at(values[i:])
+    return i if i < len(values) else None
 
 
 _REST_OF_QUOTE = {"'": re.compile(r"[^'\n]*'"), '"': re.compile(r'(?:[^"\\\n]|\\.)*"')}
@@ -1879,7 +1922,10 @@ def _unquote(word: str) -> str | None:
 
 def _inner_commands(text: str):
     """Each string `text` hands another shell (`sh -c STR`, `su -c STR`,
-    `eval WORDS`), unquoted; None in the list for one that cannot be read."""
+    `eval WORDS`, `ssh host WORDS`, `watch`, `script -c`, `tmux new`,
+    `parallel`) or another argv (`kubectl exec … -- ARGV`, `docker exec C
+    ARGV`), unquoted; None in the list for one that cannot be read. Not
+    `python -c` and its kin: code, left to the scrub."""
     found = []
     # Only a wrapper the outer line runs: one inside a quoted string is the
     # inner string's own, read when that string is.
@@ -1906,7 +1952,122 @@ def _inner_commands(text: str):
             while pos < len(text) and text[pos] in " \t":
                 pos += 1
         found.append(None if not parts or None in parts else " ".join(parts))
+    # Final review of #330: a command line handed on another way (a remote
+    # shell, a container's exec, a terminal or job runner).
+    for m in _HANDS_ON.finditer(text):
+        if state is not None and state[m.start()]:
+            continue
+        argv = _argv(text, m.end())
+        if argv is None:
+            found.append(None)
+            continue
+        inner = _handed_on(PurePosixPath(_unquote(m.group(1)) or "").name, argv)
+        if inner is not False:
+            found.append(inner)
     return found
+
+
+_HANDS_ON = re.compile(
+    r"(?<![\w.-])((?:[^\s'\"`;&|()<>]*/)?(?:ssh|mosh|autossh|kubectl|oc|docker|podman|nerdctl|watch|script|tmux"
+    r"|parallel))(?![\w.-])")
+_ARGV_STOP = re.compile(r"[;&|)\n]|\d*[<>]")
+_SSH_VALUE = frozenset("pilojFLRDWbcemOQSwEBM")    # ssh's (and autossh's -M) options that take a value
+_EXEC_VALUE = frozenset({"-e", "--env", "-u", "--user", "-w", "--workdir", "--env-file", "--detach-keys"})
+_WATCH_VALUE = frozenset({"-n", "--interval", "-q", "--equexit"})
+_TMUX_COMMANDS = frozenset({"new", "new-session", "new-window", "neww", "send-keys", "send", "split-window",
+                            "splitw", "respawn-pane", "respawnp", "respawn-window", "respawnw"})
+_TMUX_VALUE = frozenset({"-s", "-n", "-c", "-t", "-x", "-y", "-e", "-F", "-f", "-l", "-N", "-T"})
+_PARALLEL_VALUE = frozenset({"-j", "--jobs", "-S", "--sshlogin", "-a", "--arg-file", "-d", "--delimiter", "-n",
+                             "-N", "-I", "--colsep", "--joblog", "--results", "--tmpdir", "-E", "--timeout",
+                             "-L", "--retries", "--sshloginfile", "--slf"})
+
+
+def _argv(text: str, pos: int) -> list[str] | None:
+    """The words from `pos` to the end of the simple command (a separator
+    or a redirection), unquoted; None when one cannot be read."""
+    out = []
+    while True:
+        while pos < len(text) and text[pos] in " \t":
+            pos += 1
+        if pos >= len(text) or _ARGV_STOP.match(text, pos):
+            return out
+        word = _WORD_RE.match(text, pos)
+        if word is None or not (_WORD_END.match(text, word.end()) or _ARGV_STOP.match(text, word.end())):
+            return None
+        value = _unquote(word.group())
+        if value is None:
+            return None
+        out.append(value)
+        pos = word.end()
+
+
+def _skip_options(argv: list[str], i: int, takes_value) -> int:
+    """Past the options at `argv[i:]` (`--` ends them, and is skipped)."""
+    while i < len(argv) and argv[i].startswith("-") and argv[i] != "-":
+        if argv[i] == "--":
+            return i + 1
+        i += 2 if takes_value(argv[i]) else 1
+    return i
+
+
+def _handed_on(program: str, argv: list[str]):
+    """The command line `program` hands on, as text another shell (or the
+    same argv) would run; False when it hands on none."""
+    import shlex
+    if program in ("ssh", "autossh", "mosh"):
+        def ssh_value(w):
+            return not w.startswith("--") and len(w) >= 2 and w[-1] in _SSH_VALUE \
+                and not (len(w) > 2 and w[1] in _SSH_VALUE)
+        i = _skip_options(argv, 0, ssh_value if program != "mosh" else (lambda w: w in ("-p", "--port")))
+        i += 1                                                  # the host
+        if i < len(argv) and argv[i] == "--":
+            i += 1
+        return " ".join(argv[i:]) if i < len(argv) else False   # the remote shell joins and parses them
+    if program in ("kubectl", "oc"):
+        if not ({"exec", "run", "debug"} & set(argv)) or "--" not in argv:
+            return False
+        tail = argv[argv.index("--") + 1:]
+        return shlex.join(tail) if tail else False              # an argv, run as it is
+    if program in ("docker", "podman", "nerdctl"):
+        i = _skip_options(argv, 0, lambda w: False)
+        if i >= len(argv) or argv[i] not in ("exec", "run", "create"):
+            return False
+        if argv[i] != "exec":
+            # The image cannot be placed past every option that takes a
+            # value: the argv starts at the first word naming a program
+            # whose flags are judged (fail closed: `--name mongo -p 1:1 mongo`
+            # is read as `mongo -p 1:1 mongo`, and gets no summary).
+            for k in range(i + 1, len(argv)):
+                if _PROGRAM_WORD.fullmatch(PurePosixPath(argv[k]).name):
+                    return shlex.join(argv[k:])
+            return False
+        i = _skip_options(argv, i + 1, lambda w: w in _EXEC_VALUE) + 1   # past the container
+        return shlex.join(argv[i:]) if i < len(argv) else False
+    if program == "watch":
+        i = _skip_options(argv, 0, lambda w: w in _WATCH_VALUE)
+        return " ".join(argv[i:]) if i < len(argv) else False   # `sh -c` of the words joined
+    if program == "script":
+        for k, w in enumerate(argv):
+            if w in ("-c", "--command"):
+                return argv[k + 1] if k + 1 < len(argv) else None
+            if w.startswith("--command="):
+                return w[len("--command="):]
+        return False
+    if program == "tmux":
+        i = _skip_options(argv, 0, lambda w: w in ("-L", "-S", "-f", "-c"))
+        if i >= len(argv) or argv[i] not in _TMUX_COMMANDS:
+            return False
+        i = _skip_options(argv, i + 1, lambda w: w in _TMUX_VALUE)
+        return " ".join(argv[i:]) if i < len(argv) else False
+    if program == "parallel":
+        i = _skip_options(argv, 0, lambda w: w in _PARALLEL_VALUE)
+        rest = argv[i:]
+        for k, w in enumerate(rest):
+            if w.startswith(":::"):
+                rest = rest[:k]
+                break
+        return " ".join(rest) if rest else False
+    return False
 
 
 def _nested_holds_back(text: str, depth: int, budget: list | None = None) -> bool:

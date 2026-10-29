@@ -238,7 +238,12 @@ class Leaves(unittest.TestCase):
                         # Delta review of #330, NEW-1: inside a string another shell runs.
                         'bash -c "sshpass -p \'Tr0ub&4dor3\' ssh h"',
                         "bash -c \"sh -c 'sshpass -p Tr0ub4dor3 ssh h'\"",
-                        "bash -c $'sshpass -p x\\x20ssh h'"):
+                        "bash -c $'sshpass -p x\\x20ssh h'",
+                        # Final review of #330: handed on by ssh, an exec, a runner.
+                        "ssh host 'mysql -pS3cretPw99 db'", "ssh host \"sshpass -p 'Tr0ub&4dor3' ssh h2\"",
+                        "ssh host 'PGPASSWORD=x9x9x9x9 psql'", "kubectl exec pod -- mysql -pS3cretPw99",
+                        "watch 'mysql -pS3cretPw99'", "script -c 'mysql -pS3cretPw99'",
+                        "tmux new 'mysql -pS3cretPw99'", "parallel 'mysql -pS3cretPw99 -e {}' ::: a"):
             with self.subTest(command=command):
                 chat, box = Chat(), Box()
                 self.assertEqual(summaries(chat).begin(request(command), box), (S.OFF, ""))
@@ -252,6 +257,8 @@ class Leaves(unittest.TestCase):
     def test_an_ordinary_nested_shell_keeps_its_summary(self):
         sent = self.sent_for(request('bash -lc "cd /srv/calc && make deploy"'))
         self.assertIn("make deploy", sent)
+        for command in ("ssh host 'ls -la'", "kubectl exec pod -- ls"):
+            self.assertIn(command, self.sent_for(request(command)))
 
     def test_the_hold_back_check_is_really_called_mutation(self):
         with patch.object(S, "holds_back_credential", return_value=False):

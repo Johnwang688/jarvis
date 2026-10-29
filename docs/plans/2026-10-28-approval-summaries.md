@@ -311,6 +311,16 @@ answer and both morning-review face checks.
   (`'-pTr0ub4dor'`). A value with a blank (`'-pTr0ub 4dor'`) is still not
   withheld whole (the never-hidden rule): its first run is, as before, and
   `holds_back_credential` keeps the call from the model.
+- **Final review: command lines handed on.** The same unwrapper (same
+  bounds, fail closed) also reads `ssh`/`autossh`/`mosh` (the words after
+  the host, ssh's value-taking options skipped), `kubectl|oc exec|run …
+  -- ARGV`, `docker|podman|nerdctl exec [opts] C ARGV` (and `run`, from the
+  first word naming a judged program), `watch`, `script -c`, `tmux
+  new|send-keys|…` and `parallel`. On the card, the program-flag rule now
+  also judges the argv tail of `kubectl exec … --` and `docker exec C` (an
+  argv the container runs as is, no shell parses it); `docker run` stays as
+  typed (its image cannot be placed: `--name mongo -p 27017:27017 mongo`).
+  `python -c` and its kin are code, left to the scrub.
 - **NEW-3.** `hud/src/lib/approvalSync.ts`: the boot and reconnect reads of
   `/approvals` follow `ActivitySync`'s begin/land pattern; every card action
   heard while one is in flight is replayed after the list, so a card

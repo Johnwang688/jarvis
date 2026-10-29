@@ -1186,6 +1186,51 @@ class Family(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertFalse(secrets.holds_back_credential(command), "summaries stay for ordinary nesting")
 
+    def test_a_command_line_handed_on_is_read(self):
+        # Final review of #330: a remote shell, a container's exec, a
+        # terminal or job runner hands a command line on.
+        held = ["ssh host 'mysql -pS3cretPw99 db'",
+                "ssh host \"sshpass -p 'Tr0ub&4dor3' ssh h2\"",
+                "ssh -p 2222 -i ~/.ssh/k -o StrictHostKeyChecking=no host 'PGPASSWORD=x9x9x9x9 psql'",
+                "kubectl exec pod -- mysql -pS3cretPw99",
+                "kubectl exec -it pod -c app -- sh -c 'mysql -pS3cretPw99'",
+                "docker exec -it -u root db mysql -pS3cretPw99",
+                "watch -n 5 'mysql -pS3cretPw99 -e status'",
+                "script -q -c 'mysql -pS3cretPw99' /dev/null",
+                "tmux new -d -s x 'mysql -pS3cretPw99'",
+                "tmux send-keys -t x 'mysql -pS3cretPw99' Enter",
+                "parallel 'mysql -pS3cretPw99 -e {}' ::: a b",
+                "mosh host -- mysql -pS3cretPw99",
+                "autossh -M 0 host 'mysql -pS3cretPw99'",
+                "ssh host $'mysql -pS3cretPw99\\x20db'",                    # unreadable
+                "ssh h \"ssh h2 \\\"ssh h3 'ssh h4 ls'\\\"\""]        # past the depth bound
+        for command in held:
+            with self.subTest(command=command):
+                self.assertTrue(secrets.holds_back_credential(command))
+        for command in ("ssh host 'ls -la'", "ssh host ls > out.txt", "ssh -o StrictHostKeyChecking=no host uptime",
+                        "kubectl exec pod -- ls", "docker exec web ls /app", "watch -n 1 'kubectl get pods'",
+                        "tmux new -s dev", "parallel gzip ::: a b", "grep ssh notes.txt", "docker run -p 8080:80 nginx"):
+            with self.subTest(command=command):
+                self.assertFalse(secrets.holds_back_credential(command), "summaries stay for ordinary lines")
+
+    def test_an_exec_argv_tail_is_redacted_on_the_card(self):
+        # Tighten only: the tail is an argv the container runs as it is.
+        for command, shown in (
+                ("kubectl exec pod -- mysql -pS3cretPw99", f"kubectl exec pod -- mysql -p{R}"),
+                ("kubectl exec -it pod -c app -- mysql -uroot -pS3cretPw99 db",
+                 f"kubectl exec -it pod -c app -- mysql -uroot -p{R} db"),
+                ("docker exec -it -u root db mysql -pS3cretPw99", f"docker exec -it -u root db mysql -p{R}"),
+                ("podman exec db sshpass -p S3cretPw99 ssh h", f"podman exec db sshpass -p {R} ssh h")):
+            with self.subTest(command=command):
+                self.assertEqual(secrets.redact_command(command), shown)
+        for command in ("kubectl exec pod -- ls", "docker exec web ls /app", "docker run -p 8080:80 nginx",
+                        "kubectl exec pod -- sh -c 'mysql -pS3cretPw99'",     # a string a shell parses: as typed
+                        "docker run --rm img mysql -pS3cretPw99"):            # `run`: the image cannot be placed
+            with self.subTest(command=command):
+                self.assertEqual(secrets.redact_command(command), command)
+        # ...so the summary is held back for it instead.
+        self.assertTrue(secrets.holds_back_credential("docker run --rm img mysql -pS3cretPw99"))
+
     def test_judges_never_read_it(self):
         def boom(*_a, **_k):
             raise AssertionError("a judge read through the display redaction")
