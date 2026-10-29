@@ -320,8 +320,9 @@ for it).
   `actions` is empty and `why` says it is being read again.
 - **Refresh.** A read or summary that lands re-builds the row under the snapshot's lock and
   publishes `inbox_changed` `{ids, reason: "pr_summary"}` (rank 5: no push).
-- **Tidy.** After each poll, `tidy_mirrors(state, listing_complete=True)` with each repository's
-  open PR numbers when its list was read whole, None when it failed, was cut off or skipped.
+- **Tidy.** After each poll, `tidy_mirrors(state, listing_complete=...)` with each repository's
+  open PR numbers when its list was read whole, None when it failed, was cut off or skipped
+  (`listing_complete` only when at least one repository is named).
 
 Deviations from the plan, each the builder's call:
 

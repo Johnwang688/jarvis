@@ -666,7 +666,10 @@ class PrSummaries:
         except Exception as exc:  # noqa: BLE001 — a poll is never broken by this
             LOG.warning("PR summaries: reads not queued (%s)", type(exc).__name__)
         try:
-            self.tidy(state, listing_complete=True)
+            # Every project's repository is in `state` (read, failed or
+            # skipped), so a mirror of one no project names is removed; an
+            # empty state (no project read at all) removes nothing.
+            self.tidy(state, listing_complete=bool(state))
         except Exception as exc:  # noqa: BLE001
             LOG.warning("PR summaries: the mirrors were not tidied (%s)", type(exc).__name__)
         return queued

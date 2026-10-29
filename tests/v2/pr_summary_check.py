@@ -808,6 +808,13 @@ class Tidy(Case):
         self.assertEqual(state, {"o/whole": {1}, "o/failed": None, "o/cut": None, "o/skipped": None})
         self.assertEqual(kw, {"listing_complete": True})
 
+    def test_no_repository_at_all_removes_nothing(self):
+        calls = []
+        self.attach(lambda state, **kw: calls.append((state, kw)))
+        self.answers = {}
+        self.source.poll()
+        self.assertEqual(calls, [({}, {"listing_complete": False})])
+
     def test_a_failed_list_never_prunes_with_the_real_tidy(self):
         run = PF.FakeRun(**{"for-each-ref": "refs/jarvis/pull/1\nrefs/jarvis/pull/9\n", "update-ref": ""})
         self.attach(lambda state, **kw: pr_facts.tidy_mirrors(state, run=run, git=PF.GIT, **kw))
