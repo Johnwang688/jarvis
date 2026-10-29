@@ -106,10 +106,14 @@ describe("the answering card (P-4)", () => {
     expect(view.querySelector('[data-testid="m-card-why"]')!.textContent).toBe("this card has withheld text: answer it at the desk");
   });
 
-  it("limited: a red line, no Always", () => {
+  it("limited: a red line, said once with what AUTHORIZE then means, no Always (M3 of the phone audit)", () => {
     const view = cardView(state({ ...ORDINARY, secure: { ok: false, failed: "serve", label: "tailscale serve is not the only path, or Funnel is on" },
       can: { deny: true, allow: true, always: false }, why: "limited: x" }), noop);
-    expect(view.querySelector('[data-testid="m-limited"]')!.textContent).toBe("limited: tailscale serve is not the only path, or Funnel is on");
+    expect(view.querySelector('[data-testid="m-limited"]')!.textContent).toBe("limited: tailscale serve is not the only path, "
+      + "or Funnel is on. AUTHORIZE answers with Discord's authority; ALWAYS is off.");
+    // The daemon's own "limited: …" is not said a second time.
+    expect(view.querySelector('[data-testid="m-card-why"]')).toBeNull();
+    expect(view.querySelectorAll(".m-limited").length).toBe(1);
     expect(view.querySelector<HTMLButtonElement>('[data-testid="approval-always"]')!.disabled).toBe(true);
     expect(view.querySelector<HTMLButtonElement>('[data-testid="approval-allow"]')!.disabled).toBe(false);
   });

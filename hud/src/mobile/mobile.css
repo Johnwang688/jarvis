@@ -386,7 +386,6 @@ p, li, h2, h3 { overflow-wrap: anywhere; }
 .m-card .arg .k { color: var(--text-muted); }
 .m-card .origin, .m-card .relayed { font-size: 13px; color: var(--text-2); overflow-wrap: anywhere; }
 .m-card .reason { color: var(--text-2); white-space: pre-wrap; overflow-wrap: anywhere; }
-.m-card .foot { font-size: 12px; color: var(--text-muted); margin-top: 8px; }
 .browserapproval { display: flex; flex-direction: column; gap: 6px; }
 .m-limited {
   color: var(--red);
@@ -397,11 +396,19 @@ p, li, h2, h3 { overflow-wrap: anywhere; }
 }
 .m-why, .m-desk { color: var(--amber); }
 .m-notice { color: var(--text-2); }
+/* M1/M2 (phone audit): the card's notice has its own slot under the allow row, two lines held
+   from the first frame, so a notice never moves a button; a refusal or a cancelled passkey in
+   amber, "Asking for Face ID…" and "Sending…" in the quiet tone. */
+.m-card .m-card-notice { min-height: 40px; font-size: 14px; line-height: 20px; overflow-wrap: anywhere; }
+.m-card .m-card-notice[data-tone="refused"] { color: var(--amber); }
+/* L1: the gap between DENY and the allow row holds the code-built deadline, centred and muted. */
+.m-gap { display: flex; align-items: center; justify-content: center; text-align: center; }
+.m-deadline { font-size: 13px; color: var(--text-muted); }
 .tap.m-btn {
   min-height: 48px;
   width: 100%;
   text-align: center;
-  border: 1px solid var(--border-strong);
+  border: 1px solid var(--control-edge);
   border-radius: var(--radius-btn);
   font-weight: 600;
   letter-spacing: 0.04em;

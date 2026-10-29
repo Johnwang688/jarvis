@@ -108,6 +108,8 @@ function deferredItem(item: ReviewItem, state: ReviewState, a: ReviewActions, bo
     box2.disabled = busy;
     // Only its own tap ticks it (a change on this box), never anything else.
     box2.addEventListener("change", () => a.toggle(item));
+    // M13 (phone audit): VoiceOver names which item it selects, not only "Select".
+    box2.setAttribute("aria-label", "Select: " + (item.row.title || item.row.id));
     label.append(box2, el("span", "", "Select"));
     box.append(label);
   }

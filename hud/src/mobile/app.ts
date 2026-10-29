@@ -51,7 +51,7 @@
 
 import { parseInbox, waitingCount, clockOf, type InboxRow } from "../lib/inbox";
 import { getJson, errorWord, postJson, type Got, type Posted } from "./net";
-import { cardView, parseDetail, parseSecure, type CardState, type Secure } from "./card";
+import { cardView, deadlineAt, deadlineWords, parseDetail, parseSecure, type CardState, type Secure } from "./card";
 import { credentialJSON, prepareRequest } from "./webauthn";
 import {
   parseDiff, parseEvent, parseLog, parseProjects, parseTask, parseTasks, parseThreads,
@@ -111,8 +111,18 @@ const BLUR_REDRAW_MS = 400;
 const CLOSED = 2;
 const DEBOUNCE_MS = 120;
 const RETRY_MS = 4000;
+/** M2 (phone audit): what the card says while it waits on Face ID, then on Jarvis. */
+export const ASKING_FACE_ID = "Asking for Face ID…";
+export const SENDING = "Sending…";
+/** M13: what keeps the focus across a redraw (a redraw builds new nodes): never AUTHORIZE or ALWAYS. */
+const KEEP_FOCUS: ReadonlySet<string> = new Set(["m-card-heading", "approval-deny", "m-flash", "m-open-card"]);
+/** L1: how often the card's "N min left" is redrawn. */
+const DEADLINE_TICK_MS = 15_000;
 
-interface OpenThread { id: string; meta: ChatThread | null; rows: LogRow[]; next: number; older: boolean; list: HTMLElement | null }
+/** `loaded`: its log was read at least once (H5: an unread log is never shown as empty). */
+interface OpenThread {
+  id: string; meta: ChatThread | null; rows: LogRow[]; next: number; older: boolean; list: HTMLElement | null; loaded: boolean;
+}
 interface OpenTask {
   id: string;
   view: TaskView | null;
@@ -261,6 +271,8 @@ export class PhoneApp {
     this.stopped = true;
     if (this.staleTimer) clearTimeout(this.staleTimer);
     this.staleTimer = null;
+    if (this.deadlineTimer) clearTimeout(this.deadlineTimer);
+    this.deadlineTimer = null;
     this.talk.hidden();
     this.talk.dropRetry();
     this.stream?.close();
@@ -559,7 +571,8 @@ export class PhoneApp {
     const got = await this.fetchJson(this.path(card.rowId, "detail"));
     if (this.stopped || this.card !== card) return;
     if (!got.ok && got.why === "signed-out") return this.signedOut();
-    if (!got.ok && got.why === "offline") { this.setOnline(false); return; }
+    // H5: offline, the card says it was not read (setOnline leaves an open card alone).
+    if (!got.ok && got.why === "offline") { this.setOnline(false); this.render(); return; }
     if (got.ok) {
       card.detail = parseDetail(got.body);
       card.refused = card.detail ? null : "This card could not be read.";
@@ -576,6 +589,7 @@ export class PhoneApp {
                        what: string): Promise<void> {
     if (this.card !== card) return;
     card.busy = false;
+    card.progress = "";
     if (!result) { this.render(); return; }
     if (result.status === 200) {
       this.notes.set(card.rowId, what);
@@ -596,6 +610,7 @@ export class PhoneApp {
     if (!card || card.busy) return;
     card.busy = true;
     card.notice = "";
+    card.progress = SENDING;
     this.render();
     const result = await this.post(this.path(card.rowId, "answer"), { decision: "deny" });
     await this.finish(card, result, "Denied.");
@@ -607,6 +622,7 @@ export class PhoneApp {
     if (!card || card.busy) return;
     card.busy = true;
     card.notice = "";
+    card.progress = ASKING_FACE_ID;
     this.render();
     const options = await this.post(this.path(card.rowId, "answer/options"), { decision: "allow" });
     if (!options || options.status !== 200) return this.finish(card, options, "");
@@ -619,6 +635,7 @@ export class PhoneApp {
     if (!card || card.busy) return;
     card.busy = true;
     card.notice = "";
+    card.progress = "Reading the rule ALWAYS would write…";
     this.render();
     const options = await this.post(this.path(card.rowId, "answer/options"), { decision: "always" });
     if (this.card !== card) return;
@@ -626,6 +643,7 @@ export class PhoneApp {
     const words = typeof options.body.rule_words === "string" ? options.body.rule_words : "";
     const publicKey = options.body.publicKey;
     card.busy = false;
+    card.progress = "";
     card.rule = publicKey && typeof publicKey === "object"
       ? { words, entry: options.body.rule ?? null, publicKey: publicKey as Record<string, unknown> } : null;
     this.render();
@@ -636,6 +654,8 @@ export class PhoneApp {
     const card = this.card;
     if (!card || card.busy || !card.rule) return;
     card.busy = true;
+    card.notice = "";
+    card.progress = ASKING_FACE_ID;
     this.render();
     await this.withPasskey(card, "always", card.rule.publicKey, "Authorized, and the rule is written.");
   }
@@ -656,11 +676,14 @@ export class PhoneApp {
     if (this.card !== card) return;
     if (!assertion) {
       card.busy = false;
+      card.progress = "";
       card.rule = null;
       card.notice = "Cancelled, or the passkey was not verified. Nothing was answered.";
       this.render();
       return;
     }
+    card.progress = SENDING;
+    this.render();
     const result = await this.post(this.path(card.rowId, "answer"), { decision, assertion });
     if (result && result.status === 200 && result.body.authority === "limited") what += " (with Discord's authority: limited)";
     await this.finish(card, result, what);
@@ -1053,14 +1076,16 @@ export class PhoneApp {
   async openThread(id: string, meta: ChatThread | null = null): Promise<void> {
     this.tab = "chats";
     this.sheet = null;
-    this.thread = { id, meta: meta ?? this.threads.find((t) => t.id === id) ?? null, rows: [], next: 0, older: false, list: null };
+    this.thread = { id, meta: meta ?? this.threads.find((t) => t.id === id) ?? null, rows: [], next: 0, older: false, list: null,
+      loaded: false };
     this.render();
     const r = await this.read(`/m/api/threads/${id}/log`);
     if (!r || this.thread?.id !== id) return;
     if (!("body" in r)) { this.threadGone(r.error); return; }
     const page = parseLog(r.body);
     if (!page) return;
-    this.thread = { id, meta: page.thread ?? this.thread.meta, rows: page.rows, next: page.next, older: page.older, list: null };
+    this.thread = { id, meta: page.thread ?? this.thread.meta, rows: page.rows, next: page.next, older: page.older, list: null,
+      loaded: true };
     this.render();
     this.scrollToEnd();
   }
@@ -1068,6 +1093,7 @@ export class PhoneApp {
   private threadGone(why: string): void {
     if (!this.thread) return;
     this.thread.rows = [];
+    this.thread.loaded = true;
     this.render();
     this.main.append(el("p", "muted center", why === "not found" ? "This chat is not open any more." : why));
   }
@@ -1088,6 +1114,7 @@ export class PhoneApp {
           if (!r || !("body" in r) || this.thread !== open) return;
           const page = parseLog(r.body);
           if (!page) return;
+          open.loaded = true;
           const last = open.rows.length ? open.rows[open.rows.length - 1].seq : -1;
           const fresh = page.rows.filter((row) => row.seq > last);
           open.next = Math.max(open.next, page.next);
@@ -1304,6 +1331,75 @@ export class PhoneApp {
       Math.min(2 ** 31 - 1, at - now + 50));
   }
 
+  /** M13: the card last drawn, so focus moves to its heading when one opens and back to its row when it closes. */
+  private drawnCard: string | null = null;
+  private deadlineTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** After a draw: a card that just opened takes the focus on its heading; one that just closed
+   * gives it to the line saying what happened, or back to its row's "Open the card to answer". */
+  private moveFocus(kept: string | null): void {
+    const now = this.tab === "inbox" && this.card ? this.card.rowId : null;
+    const was = this.drawnCard;
+    this.drawnCard = now;
+    if (now === was) { if (kept) this.restoreFocus(kept); return; }
+    if (now) {
+      this.main.querySelector<HTMLElement>('[data-testid="m-card-heading"]')?.focus();
+      this.tickDeadline();
+    } else if (was && this.tab === "inbox") {
+      // Answered: the line saying what happened ("Denied."); else (back, or gone) the row's own button.
+      const flash = this.main.querySelector<HTMLElement>('[data-testid="m-flash"]');
+      const row = this.inboxRowEl(was)?.querySelector<HTMLElement>('[data-testid="m-open-card"]');
+      if (flash) { flash.tabIndex = -1; flash.focus(); }
+      else row?.focus();
+    }
+  }
+
+  /** What had the focus before a redraw, when it is one of the few things focus is kept on. */
+  private focusedKey(): string | null {
+    const active = typeof document !== "undefined" ? document.activeElement : null;
+    if (!(active instanceof HTMLElement) || !this.main.contains(active)) return null;
+    const id = active.dataset.testid ?? "";
+    if (!KEEP_FOCUS.has(id)) return null;
+    return id + "\n" + (active.closest<HTMLElement>("[data-id]")?.dataset.id ?? "");
+  }
+
+  /** The same element in the redrawn view takes the focus back (a redraw builds new nodes). */
+  private restoreFocus(key: string): void {
+    const [id, rowId] = key.split("\n");
+    const same = Array.from(this.main.querySelectorAll<HTMLElement>(`[data-testid="${id}"]`))
+      .find((n) => (n.closest<HTMLElement>("[data-id]")?.dataset.id ?? "") === rowId);
+    if (same && document.activeElement !== same) {
+      if (id === "m-flash") same.tabIndex = -1;
+      same.focus({ preventScroll: true });
+    }
+  }
+
+  /** L1: the open card's "N min left", redrawn in place (its text only) while the card is open. */
+  private tickDeadline(): void {
+    if (this.deadlineTimer !== null) return;
+    // A real timer, as wakeForStale's: the injected one runs at once in the tests.
+    this.deadlineTimer = setTimeout(() => {
+      this.deadlineTimer = null;
+      if (this.stopped || !this.card || this.tab !== "inbox") return;
+      const line = this.main.querySelector('[data-testid="m-card-deadline"]');
+      const card = this.card.detail?.card;
+      if (line && card) line.textContent = deadlineWords(deadlineAt(card), this.now());
+      this.tickDeadline();
+    }, DEADLINE_TICK_MS);
+  }
+
+  /** M5: a task's question, answered where the phone answers it: the Inbox, at its row. */
+  showInboxRow(rowId: string): void {
+    this.card = null;
+    this.show("inbox");
+    this.inboxRowEl(rowId)?.scrollIntoView({ block: "start" });
+  }
+
+  /** The drawn inbox row with this id (matched as data, never spliced into a selector). */
+  private inboxRowEl(rowId: string): HTMLElement | undefined {
+    return Array.from(this.main.querySelectorAll<HTMLElement>('[data-testid="m-inbox-row"]')).find((r) => r.dataset.id === rowId);
+  }
+
   render(): void {
     this.wakeForStale();
     for (const [tab, b] of Object.entries(this.tabs) as [Tab, HTMLButtonElement][]) {
@@ -1325,6 +1421,7 @@ export class PhoneApp {
       this.main.replaceChildren(view);
       this.main.scrollTop = top;
       this.rendered = "review";
+      this.drawnCard = null;
       return;
     }
     if (this.tab === "inbox" && this.card) {
@@ -1337,7 +1434,7 @@ export class PhoneApp {
         cancelAlways: () => this.cancelAlways(),
         // AS: the owner's own open or close of the command, kept across a re-read of the card.
         toggleCommand: (open) => { if (this.card) { this.card.expanded = open; this.render(); } },
-      });
+      }, this.now(), this.online);
     } else if (this.tab === "inbox") {
       const answers: InboxAnswers = {
         openCard: (row) => this.openCard(row),
@@ -1375,7 +1472,7 @@ export class PhoneApp {
         // Drawn again in place: at the bottom it stays there; scrolled up, it is not moved.
         if (this.main.querySelector('[data-testid="m-transcript"]')) this.keepScroll = this.nearEnd() ? "end" : this.main.scrollTop;
         const built = transcriptView(this.thread.meta, this.thread.rows, this.thread.older, () => this.show("chats"),
-          this.composer(this.thread.id));
+          this.composer(this.thread.id), { loaded: this.thread.loaded, online: this.online });
         this.thread.list = built.list;
         view = built.view;
       } else {
@@ -1415,18 +1512,20 @@ export class PhoneApp {
         ? el("p", "m-notice", this.taskWrite.note) : null);
       view = open.view
         ? taskView(open.view, open.diff, { back: () => this.show("tasks"), showDiff: () => void this.loadDiff(),
-          folds: open.folds, controls })
-        : el("p", "empty", "Loading…");
+          folds: open.folds, controls, answerInInbox: (index) => this.showInboxRow(`tq:${open.id}:${index}`) })
+        : el("p", "empty", this.online ? "Loading…" : "Not read yet: you're offline.");
     } else {
       view = tasksView(this.tasks, (t) => void this.openTask(t.id));
       view.prepend(tap("New task", () => this.openNewTask(), "quiet m-new", "m-new-task-open"));
     }
+    const kept = this.focusedKey();
     this.main.replaceChildren(view);
     this.rendered = this.tab;
     const keep = this.keepScroll;
     this.keepScroll = null;
     if (keep === "end") this.scrollToEnd();
     else if (keep !== null) this.main.scrollTop = keep;
+    this.moveFocus(kept);
   }
 
   private reviewActions(): ReviewActions {

@@ -539,8 +539,17 @@ export function logRow(row: LogRow, inOwnerChat = true): HTMLElement {
   return item;
 }
 
+/** H5 (phone audit): what an empty transcript says. "No messages yet." only
+ * once the log was read; before that "Loading…", or, offline, that it was
+ * never read (never a false "empty"). */
+export function emptyLog(loaded: boolean, online: boolean): string {
+  return loaded ? "No messages yet." : online ? "Loading…" : "Not read yet: you're offline.";
+}
+
 export function transcriptView(thread: ChatThread | null, rows: LogRow[], older: boolean,
-                               back: () => void, composer?: HTMLElement | null): { view: HTMLElement; list: HTMLElement } {
+                               back: () => void, composer?: HTMLElement | null,
+                               read: { loaded: boolean; online: boolean } = { loaded: true, online: true },
+): { view: HTMLElement; list: HTMLElement } {
   const view = testid(el("section", "view transcript-view"), "m-thread");
   const bar = el("div", "subbar");
   bar.append(tap("‹ Chats", back, "back", "m-back"));
@@ -549,7 +558,7 @@ export function transcriptView(thread: ChatThread | null, rows: LogRow[], older:
   if (older) view.append(el("p", "muted small center", "Older messages are at the desk."));
   const list = testid(el("div", "transcript"), "m-transcript");
   for (const row of rows) list.append(logRow(row, ownerChat(thread)));
-  if (!rows.length) list.append(empty("No messages yet."));
+  if (!rows.length) list.append(empty(emptyLog(read.loaded, read.online)));
   view.append(list);
   // P-5: the message box (./write.ts) for an owner's chat, or the app's
   // "read only" line for any other; nothing until the chat is known.
@@ -617,7 +626,9 @@ export function diffView(diff: DiffView, folds: Map<string, boolean> = new Map()
 
 export function taskView(task: TaskView, diff: DiffView | null | "loading" | string,
                          actions: { back: () => void; showDiff: () => void; folds?: Map<string, boolean>;
-                                    controls?: HTMLElement | null }): HTMLElement {
+                                    controls?: HTMLElement | null;
+                                    /** M5 (phone audit): the question's Inbox row, where the phone answers it. */
+                                    answerInInbox?: (index: number) => void }): HTMLElement {
   const view = testid(el("section", "view"), "m-task-view");
   view.dataset.id = task.id;
   const bar = el("div", "subbar");
@@ -636,8 +647,10 @@ export function taskView(task: TaskView, diff: DiffView | null | "loading" | str
   for (const q of open) {
     view.append(el("div", "label", "Question"), testid(el("p", "question", q.text), "m-question"));
     lines(view, "Options", q.options, "options");
+    const go = actions.answerInInbox;
+    if (go) view.append(tap("Answer it in the Inbox", () => go(q.index), "quiet m-send primary", "m-answer-in-inbox"));
   }
-  if (open.length) view.append(testid(el("p", "desk-only", "Answer at the desk"), "m-desk-only"));
+  if (open.length && !actions.answerInInbox) view.append(testid(el("p", "desk-only", "Answer at the desk"), "m-desk-only"));
   if (task.plan.length) {
     view.append(el("div", "label", "Plan"));
     const ol = testid(el("ol", "plain plan"), "m-plan");

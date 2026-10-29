@@ -50,6 +50,15 @@ function actions(over: Partial<ReviewActions> = {}): ReviewActions {
 }
 
 describe("the phone's Review tab (mobile/review.ts)", () => {
+  it("names each checkbox by its item for VoiceOver, not only Select (M13 of the phone audit)", () => {
+    const view = reviewView(state(), actions(), null);
+    const boxes = Array.from(view.querySelectorAll<HTMLInputElement>('[data-testid="m-review-tick"]'));
+    const titles = Array.from(view.querySelectorAll('[data-testid="m-review-item"][data-kind="deferred"] > .row-title'))
+      .map((t) => t.textContent);
+    expect(boxes.map((b) => b.getAttribute("aria-label"))).toEqual(titles.map((t) => "Select: " + t));
+    expect(new Set(boxes.map((b) => b.getAttribute("aria-label"))).size).toBe(boxes.length);
+  });
+
   it("draws every daemon string as text, no box ticked, no select-all, no default chosen", () => {
     const view = reviewView(state(), actions(), null);
     document.body.replaceChildren(view);

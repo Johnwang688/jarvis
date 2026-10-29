@@ -44,7 +44,7 @@ function noMarkup(node: Element) {
 function task(over: Partial<TaskView> = {}): TaskView {
   return { id: "bbbbbbbb", project_id: "cccccccc", brief: H, state: "running", updated: "2026-10-25T10:00:00Z",
     step: 2, steps: 5, openQuestion: "", plan: [H, "two"], report: { done: [H], changed: ["a.py"], verified: H,
-      open: [], next: H }, questions: [{ text: H, options: [H], blocking: true, answer: null }], branch: "jarvis/x", ...over };
+      open: [], next: H }, questions: [{ text: H, options: [H], blocking: true, answer: null, index: 0 }], branch: "jarvis/x", ...over };
 }
 
 describe("the phone's model (P-3)", () => {
@@ -315,7 +315,7 @@ describe("the phone's views: untrusted text stays text (P-3)", () => {
       status: { step: 1, steps: 3, open_question: "q?" }, plan: ["a"], report: { done: ["d"], changed: [], verified: "v", open: [], next: "n" },
       spec: { questions: [{ text: "which?", blocking: true, options: ["x"] }] } });
     expect(t!.report!.done).toEqual(["d"]);
-    expect(t!.questions[0]).toEqual({ text: "which?", options: ["x"], blocking: true, answer: null });
+    expect(t!.questions[0]).toEqual({ text: "which?", options: ["x"], blocking: true, answer: null, index: 0 });
   });
 });
 

@@ -82,6 +82,8 @@ export interface CardState {
   busy: boolean;
   rule: Rule | null;
   notice: string;
+  /** What the app asks or sends while busy (M2): "Asking for Face ID…", "Sending…". */
+  progress?: string;
   /** AS: the owner's own open (true) or close (false) of the command; undefined until then. */
   expanded?: boolean;
 }
@@ -292,13 +294,29 @@ function privateBody(state: CardState, box: HTMLElement): boolean {
   return true;
 }
 
-function deadline(card: Json): string {
+/** When the card denies on its own (asked_at + timeout_s), in ms; null if it does not say. */
+export function deadlineAt(card: Json): number | null {
   const at = typeof card.asked_at === "string" ? Date.parse(card.asked_at) : NaN;
   const t = typeof card.timeout_s === "number" ? card.timeout_s : NaN;
-  return Number.isFinite(at) && Number.isFinite(t) ? clockOf(at + t * 1000) : "";
+  return Number.isFinite(at) && Number.isFinite(t) ? at + t * 1000 : null;
 }
 
-export function cardView(state: CardState, actions: CardActions): HTMLElement {
+/** L1 (phone audit): the deadline in the gap, code's words: "Denies automatically at 08:36 · 9 min left". */
+export function deadlineWords(at: number | null, now: number): string {
+  if (at === null) return "Denies automatically when it times out";
+  const left = Math.ceil((at - now) / 60_000);
+  const tail = left > 1 ? ` · ${left} min left` : left === 1 ? " · under a minute left" : "";
+  return `Denies automatically at ${clockOf(at).slice(0, 5)}${tail}`;
+}
+
+/** M3 (phone audit): the limited state, said once, with what AUTHORIZE then means. */
+export function limitedWords(secure: Secure): string {
+  return `limited: ${secure.label || secure.failed || "a check failed"}. `
+    + "AUTHORIZE answers with Discord's authority; ALWAYS is off.";
+}
+
+export function cardView(state: CardState, actions: CardActions, now: number = Date.now(),
+                         online = true): HTMLElement {
   const view = testid(el("section", "view"), "m-card-view");
   const bar = el("div", "subbar");
   const back = button("‹ Inbox", "back", "m-back", actions.back, false);
@@ -316,13 +334,13 @@ export function cardView(state: CardState, actions: CardActions): HTMLElement {
     if ((e.key === "Enter" || e.key === " ")
         && !(e.target instanceof Element && e.target.closest('[data-testid="approval-deny"]'))) e.preventDefault();
   }, true);
-  card.append(el("h3", "", "AUTHORIZATION REQUIRED"));
+  // M13: the heading takes the focus when the card opens (app.ts), so VoiceOver starts here.
+  const heading = testid(el("h3", "", "AUTHORIZATION REQUIRED"), "m-card-heading");
+  heading.tabIndex = -1;
+  card.append(heading);
   const d = state.detail;
   const row = state.row;
-  if (d && !d.secure.ok) {
-    card.append(testid(el("p", "m-limited", `limited: ${d.secure.label || d.secure.failed || "a check failed"}`),
-      "m-limited"));
-  }
+  if (d && !d.secure.ok) card.append(testid(el("p", "m-limited", limitedWords(d.secure)), "m-limited"));
   // AS-12: a card's leading line (a widening, the merge gate's), then the buttons, then the rest.
   if (d && !d.private && !state.refused) {
     const headline = headlineLine(d.card.headline);
@@ -338,19 +356,31 @@ export function cardView(state: CardState, actions: CardActions): HTMLElement {
     body.append(testid(el("p", "m-desk", state.refused === "answer at the desk"
       ? "A private card: answer at the desk." : state.refused), "m-card-refused"));
   } else if (!d) {
-    body.append(el("p", "muted", "Loading the card…"));
+    // H5: offline, the card was never read; never "Loading" forever.
+    body.append(testid(el("p", "muted", online ? "Loading the card…" : "Not read yet: you're offline."),
+      "m-card-loading"));
   } else if (d.private) {
     shown = privateBody(state, body);
   } else {
     ordinaryBody(state, d.card, body, actions.toggleCommand);
     shown = true;
   }
-  if (d && d.why) card.append(testid(el("p", "m-why", d.why), "m-card-why"));
-  if (state.notice) {
-    const note = testid(el("p", "m-notice", state.notice), "m-card-notice");
-    note.setAttribute("role", "status");
-    card.append(note);
+  // M3: the red line already says "limited"; the daemon's same words are not said again.
+  if (d && d.why && !(!d.secure.ok && d.why.startsWith("limited:"))) {
+    card.append(testid(el("p", "m-why", d.why), "m-card-why"));
   }
+  // M1/M2: one notice slot, always there and under the allow row, so nothing it says moves a button.
+  const notice = testid(el("p", "m-notice m-card-notice", state.busy && state.progress ? state.progress : state.notice),
+    "m-card-notice");
+  notice.setAttribute("role", "status");
+  notice.dataset.tone = state.busy && state.progress ? "busy" : state.notice ? "refused" : "";
+  const at = d ? deadlineAt(d.card) : null;
+  // L1: the safety gap holds the deadline (code's words, no button, no model text).
+  const gap = () => {
+    const g = el("div", "m-gap");
+    g.append(testid(el("p", "m-deadline", deadlineWords(at, now)), "m-card-deadline"));
+    return g;
+  };
   // Deny first, alone; AUTHORIZE and ALWAYS far below it; all of it above the card's body (AS-12).
   const denyRow = el("div", "m-deny-row");
   denyRow.append(button("DENY", "deny", "approval-deny", actions.deny, false));
@@ -369,7 +399,7 @@ export function cardView(state: CardState, actions: CardActions): HTMLElement {
     confirm.disabled = state.busy;
     cancel.disabled = state.busy;
     rule.append(confirm, cancel);
-    card.append(el("div", "m-gap"), rule);
+    card.append(gap(), rule);
   } else {
     const authorize = el("div", "m-allow-row");
     // ALWAYS only on a card that takes one (the HUD's rule: not a
@@ -382,12 +412,10 @@ export function cardView(state: CardState, actions: CardActions): HTMLElement {
     const allow = button("AUTHORIZE", "allow", "approval-allow", actions.allow, true);
     allow.disabled = state.busy || !allowable || !d!.can.allow || (!!d && nestedTooDeep(d.card.args));
     authorize.append(allow);
-    card.append(el("div", "m-gap"), authorize);
+    card.append(gap(), authorize);
   }
   (denyRow.firstChild as HTMLButtonElement).disabled = state.busy;
-  card.append(el("div", "m-gap-after"), body);
-  const at = d ? deadline(d.card) : "";
-  card.append(el("div", "foot", at ? `DENIES AUTOMATICALLY AT ${at}` : "DENIES AUTOMATICALLY WHEN IT TIMES OUT"));
+  card.append(notice, el("div", "m-gap-after"), body);
   view.append(card);
   return view;
 }
