@@ -407,7 +407,11 @@ p, li, h2, h3 { overflow-wrap: anywhere; }
   margin: 0 4px 4px 0; max-width: 100%; box-sizing: border-box; overflow-wrap: anywhere; vertical-align: top; }
 .as-where .as-wk { color: var(--text-muted); font-size: 11px; }
 .as-where .as-wv { color: var(--text); }
-.m-card .as-preview, .as-preview { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* H2 (phone audit): the collapsed command is three wrapped lines, not one cut line; the clamp sits
+   on an inner box so the outer box's padding never shows a fourth line's top. */
+.m-card .as-preview, .as-preview { white-space: pre-wrap; }
+.as-preview .as-clamp { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3;
+  overflow: hidden; white-space: pre-wrap; word-break: break-all; }
 .tap.as-toggle { min-height: 44px; text-align: left; color: var(--accent); }
 .m-allow-row { display: flex; gap: 24px; }
 .m-rule { display: flex; flex-direction: column; gap: 8px; }

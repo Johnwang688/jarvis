@@ -29,7 +29,7 @@ import { parseBrowserPrivateApproval, type BrowserApprovalPublic } from "../lib/
 import { clockOf, oneLine, type InboxRow } from "../lib/inbox";
 import { relayedLine, relayedParts } from "../lib/relays";
 import {
-  AI_LABEL, WHERE_LABEL, WHY_LABEL, previewLine, startsCollapsed, summaryView, summaryWords, toggleLabel, whereFields,
+  AI_LABEL, WHERE_LABEL, WHY_LABEL, startsCollapsed, summaryView, summaryWords, toggleLabel, whereFields,
   whereParts,
 } from "../lib/approvalSummary";
 
@@ -168,7 +168,22 @@ export function summaryLines(card: Json, box: HTMLElement, idPrefix = "approval"
   }
 }
 
-/** The command and every argument, whole or collapsed to its first line, with its toggle (AS-15). */
+/** H2 (phone audit): how much of a collapsed command reaches the preview. The CSS clamps it to
+ * three wrapped lines (`.as-clamp`), so a short command shows whole and a long one shows as much
+ * as three lines hold, never one ellipsized line; leading blank lines are dropped. */
+export const PREVIEW_CHARS = 600;
+export function previewText(text: string): string {
+  return Array.from(text.replace(/\r\n?/g, "\n").replace(/^(?:[ \t]*\n)+/, "")).slice(0, PREVIEW_CHARS).join("");
+}
+
+/** The collapsed preview's text, inside its clamp. */
+function clamp(...parts: (Node | string)[]): HTMLElement {
+  const box = el("span", "as-clamp");
+  box.append(...parts);
+  return box;
+}
+
+/** The command and every argument, whole or collapsed to three lines, with its toggle (AS-15, H2). */
 export function commandBlock(command: unknown, args: unknown, open: boolean, toggle: ((open: boolean) => void) | undefined,
                              box: HTMLElement, idPrefix = "approval") {
   const cmd = typeof command === "string" ? command : "";
@@ -189,8 +204,8 @@ export function commandBlock(command: unknown, args: unknown, open: boolean, tog
     }
   } else {
     const line = testid(el("div", "arg as-preview"), `${idPrefix}-command-preview`);
-    line.append(el("span", "k", cmd ? "command " : ""),
-      cmd ? previewLine(cmd) : `${entries[0][0]} ${previewLine(argText(entries[0][1]))}`);
+    line.append(clamp(el("span", "k", cmd ? "command " : ""),
+      cmd ? previewText(cmd) : `${entries[0][0]} ${previewText(argText(entries[0][1]))}`));
     block.append(line);
   }
   if (toggle) {
@@ -206,7 +221,7 @@ export function commandBlock(command: unknown, args: unknown, open: boolean, tog
 /**
  * A row's command and arguments (the inbox's and the review's rows, AS-15):
  * labelled blocks as the rows always drew them, whole when `open`, else the
- * command's (or the arguments') first line; the toggle, when given, below.
+ * command's (or the arguments') start, clamped to three lines (H2); the toggle, when given, below.
  */
 export function rowCommand(command: string, argsText: string, open: boolean,
                            toggle: ((open: boolean) => void) | undefined, box: HTMLElement,
@@ -216,8 +231,9 @@ export function rowCommand(command: string, argsText: string, open: boolean,
     if (command) box.append(el("div", "label", "Command"), testid(el("pre", "code", command), ids.command));
     if (argsText) box.append(el("div", "label", "Arguments"), testid(el("pre", "code", argsText), ids.args));
   } else {
-    box.append(el("div", "label", command ? "Command" : "Arguments"),
-      testid(el("pre", "code as-preview", previewLine(command || argsText)), `${ids.prefix}-preview`));
+    const pre = testid(el("pre", "code as-preview"), `${ids.prefix}-preview`);
+    pre.append(clamp(previewText(command || argsText)));
+    box.append(el("div", "label", command ? "Command" : "Arguments"), pre);
   }
   if (toggle) {
     const b = button(toggleLabel(open, command, argsText ? 1 : 0), "quiet as-toggle", `${ids.prefix}-toggle`,
