@@ -326,13 +326,13 @@ export function questionRow(fix: PrFix, rows: readonly InboxRow[]): string | nul
 }
 
 /**
- * AS-13 on the HUD: what re-arms the buttons. Everything an OK answers or
- * that changes what the row says around the buttons: the head, the card, the
- * summary, the actions, the method, the hold and the fix.
+ * AS-13 on the HUD: what re-arms the buttons. Everything the row shows that an
+ * OK answers or that changes what the row says around the buttons: the whole
+ * view (title, head, card, facts, flags, summary and its state, note and reason,
+ * actions, why, method, hold, the fix), so a field added to the view re-arms too.
  */
 export function prArmKey(v: PrRowView): string {
-  return JSON.stringify([v.id, v.head, v.card, v.summary, v.summaryState, v.actions, v.method, v.hold,
-                         v.fix ? [v.fix.state, v.fix.summary, v.fix.summaryState, v.fix.commits, v.fix.ciChanged] : null]);
+  return JSON.stringify(v);
 }
 
 /** The body an action sends: exactly the head and card the row drew (never read again). */

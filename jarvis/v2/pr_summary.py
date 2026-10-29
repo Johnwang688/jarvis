@@ -866,16 +866,30 @@ ENRICH_KEYS = ("facts", "flags", "summary", "summary_state", "summary_note", "su
                # when the PR has none).
                "fix")
 FILES_SHOWN = 100
-CARD_VERSION = 1
+CARD_VERSION = 2
+_FIX_CARD = ("state", "commits", "ci_changed", "note", "summary", "summary_state")
+
+
+def fix_card(detail):
+    """The fix card's displayed fields, once its summary has settled (ready,
+    or shown as unavailable); None while there is no fix or its summary is
+    still being written ("summarizing…" is not content), so the summary
+    landing always changes the card."""
+    fix = detail.get("fix")
+    if not isinstance(fix, dict) or fix.get("summary_state") in (None, PENDING):
+        return None
+    return {k: fix.get(k) for k in _FIX_CARD}
 
 
 def card_key(detail) -> str:
     """PM-13's card: the SHA-256 of what an OK answers, exactly as the row
-    shows it: the facts parts, the summary, the method and the offered
-    actions (`detail` is the row's `detail`, or the same keys rebuilt from a
-    fresh read by `pr_merge`). Canonical JSON, keys sorted."""
+    shows it: the facts parts, the summary, the method, the offered actions
+    and the fix card (`fix_card`) (`detail` is the row's `detail`, or the
+    same keys rebuilt from a fresh read by `pr_merge`). Canonical JSON, keys
+    sorted."""
     shown = {"v": CARD_VERSION, "facts": detail.get("facts"), "summary": detail.get("summary"),
-             "method": detail.get("method"), "actions": list(detail.get("actions") or [])}
+             "method": detail.get("method"), "actions": list(detail.get("actions") or []),
+             "fix": fix_card(detail)}
     text = json.dumps(shown, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 

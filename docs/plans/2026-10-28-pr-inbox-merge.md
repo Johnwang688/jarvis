@@ -597,8 +597,8 @@ the desk".
   built at render); nothing is read again at click time. A 409 is said in the daemon's words in
   the row, the inbox is read again, and nothing is retried.
 - **HUD:** Merge, Merge as is, Fix, Update post once to `/inbox/pr/<route>`; armed 600 ms after
-  anything an OK answers changes (`prArmKey`: head, card, summary, actions, method, hold, the
-  fix's state and summary) through `useArmed`, and the click handler checks again. "Hold…"
+  anything the row shows changes (`prArmKey`: the whole view, so the PR title, the summary
+  caveat and the unavailable-summary reason re-arm too) through `useArmed`, and the click handler checks again. "Hold…"
   opens a note box (200 characters) and Set hold posts `{id, note}`; a held row shows "On hold:
   <note>" and Clear hold (`{id, clear: true}`), and no action button. The GitHub link (PM-25) is
   last, small, `prOf`'s validated URL only.
@@ -637,7 +637,11 @@ Deviations, each the builder's call:
    nothing the hold protects, so Cancel the fix is still offered.
 3. **A limited phone hides Update too** on a flagged PR, not only Merge and Fix: the server's
    `phone_options` refuses every action there.
-4. **The fix's summary is not in the card key** (PM-C's `card_key` covers the row's summary,
-   not the fix's). The HUD re-arms when it lands; the phone's passkey is per action. Noted for
-   the daemon, not changed here.
+4. **The fix card is in the card key (fixed after review).** `card_key` (version 2) covers the
+   fix card's state, note, summary, summary state, commits and `ci_changed` once its summary has
+   settled (a pending "summarizing…" binds nothing, so the landing always changes the card).
+   `pr_fix.enrich` recomputes the row's card after the fix is in (over the actions `decide`
+   offered), and `pr_merge.judge` recomputes it from the row's current `fix`; a fix summary
+   that landed after the drawing is a 409 "changed since you read it".
+   `hud_v2_pr_fix_binding_check.py` pins it.
 5. The legacy row (no `card`, a daemon before PM-C) offers no action, only Hold… and the link.

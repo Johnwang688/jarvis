@@ -354,6 +354,24 @@ class Key(unittest.TestCase):
         self.assertRegex(base, r"^[0-9a-f]{64}$")
 
 
+class CardFix(unittest.TestCase):
+    """PM-F: the fix card's displayed fields are in the card once its summary has settled."""
+
+    FIX = {"state": "ready", "commits": 1, "ci_changed": False, "note": "fixed \u2014 merge?",
+           "summary": None, "summary_state": "pending", "count": 1, "max": 3}
+
+    def test_a_settled_fix_summary_changes_the_card(self):
+        base = {"facts": [], "summary": None, "method": "merge", "actions": ["merge"]}
+        pending = S.card_key({**base, "fix": self.FIX})
+        self.assertEqual(pending, S.card_key(base), "a summary still being written binds nothing")
+        for change in (dict(summary="Removes the backup.", summary_state="ready"), dict(summary_state="failed")):
+            ready = S.card_key({**base, "fix": {**self.FIX, **change}})
+            self.assertNotEqual(ready, pending, change)
+            for more in (dict(state="pushed"), dict(commits=2), dict(ci_changed=True), dict(note="x")):
+                self.assertNotEqual(S.card_key({**base, "fix": {**self.FIX, **change, **more}}), ready, more)
+        self.assertEqual(S.CARD_VERSION, 2)
+
+
 # -- the disk cache ---------------------------------------------------------------------------
 
 class Cache(Case):

@@ -2789,7 +2789,12 @@ class PrFixes:
             view.update(count=_counted(fixes), max=MAX_FIXES)
             d["fix"] = view
             from .pr_facts import FIX
+            from .pr_summary import card_key
             actions = list(d.get("actions") or [])
+            # The card covers the fix card too (it is computed here, after the
+            # fix is in), over the actions `decide` offers (before Fix is
+            # taken out below), which is what `pr_merge` recomputes.
+            d["card"] = card_key({**d, "actions": actions})
             notes = []
             if FIX in actions and any(self._live_cached(f) for f in fixes):
                 actions.remove(FIX)

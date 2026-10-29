@@ -31,7 +31,8 @@ and a passkey (`tests/v2/archive_check.py` greps every tool's source).
 
 **What an OK binds (PM-13).** The row carries `head` and `card`
 (`pr_summary.card_key`: sha256 over the facts parts, the summary, the
-method and the offered actions, exactly as the row shows them). Under a
+method, the offered actions and the fix card once its summary has
+settled, exactly as the row shows them). Under a
 per-PR lock (a second action on the same PR while one runs is a 409, never
 a second run) the PR is read again (`pr_facts.read_pr`), and the action runs
 only when: no hold is set (checked before and after the read); the PR is
@@ -510,9 +511,9 @@ class PrActions:
         if action in MERGE_ACTIONS and decision.method not in METHOD_FLAGS:
             raise _changed("no merge method")
         parts = [p.as_dict() for p in pr_facts.facts_parts(facts)]
-        summary = (self.row(row_id).get("detail") or {}).get("summary")
-        shown = {"facts": parts, "summary": summary, "method": decision.method,
-                 "actions": list(decision.actions)}
+        stored = self.row(row_id).get("detail") or {}
+        shown = {"facts": parts, "summary": stored.get("summary"), "method": decision.method,
+                 "actions": list(decision.actions), "fix": stored.get("fix")}
         if not hmac.compare_digest(card_key(shown), card):
             raise _changed()
         if via == "phone" and phone_withheld(parts, files_detail(facts)):
