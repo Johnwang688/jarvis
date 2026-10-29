@@ -231,6 +231,13 @@ p, li, h2, h3 { overflow-wrap: anywhere; }
   color: var(--text-2);
 }
 
+/* H4 (phone audit), until PM-F: a PR row's title, code's facts, the AI summary. */
+.pr-title { font-weight: 600; overflow-wrap: anywhere; }
+.pr-facts, .pr-flags { font: 13px/1.4 var(--mono); color: var(--text-2); overflow-wrap: anywhere; margin-top: 4px; }
+.pr-flags { color: var(--amber); }
+.pr-summary { margin-top: 6px; }
+.pr-summary .as-text { display: block; }
+
 /* Chats */
 .project { display: flex; flex-direction: column; }
 .tap.chat, .tap.task {

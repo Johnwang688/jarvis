@@ -20,7 +20,7 @@
 
 import { clockOf, decisionOf, deferredOf, groupRows, oneLine, questionOf, briefOf, textBlock, type InboxRow } from "../lib/inbox";
 import { recentChats, moreLabel } from "../lib/recentChats";
-import { recordSummary, startsCollapsed, summaryView } from "../lib/approvalSummary";
+import { AI_LABEL, recordSummary, startsCollapsed, summaryView } from "../lib/approvalSummary";
 import { rowCommand, summaryLines } from "./card";
 import type { Thread } from "../types";
 import { renderPhoneMarkdown } from "./markdown";
@@ -126,6 +126,60 @@ function genericDetail(row: InboxRow, box: HTMLElement) {
     if (/(^|_)id$/.test(key)) continue;
     const text = textBlock(String(value), 2000);
     if (text) box.append(el("div", "label", oneLine(key.replace(/_/g, " "), 40)), el("p", "", text));
+  }
+}
+
+const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
+
+/** A list of untrusted names (check names, paths), each in its own <bdi>, then "+N more". */
+function names(parent: HTMLElement, items: unknown, more: unknown) {
+  const list = Array.isArray(items) ? items.map((x) => oneLine(x, 120)).filter(Boolean).slice(0, 20) : [];
+  list.forEach((name, i) => parent.append(i ? ", " : " ", el("bdi", "", name)));
+  const n = typeof more === "number" && more > 0 ? Math.floor(more) : 0;
+  if (n) parent.append(` +${n} more`);
+}
+
+/**
+ * H4 (phone audit), until PM-F: a PR row's title, code's facts line and the
+ * AI summary's Does and Blocked lines, labelled as the model's. Never the
+ * head SHA, never a link, never the raw keys. Each facts part is code's own
+ * words (pr_facts.facts_parts), drawn apart with the phone's own separators;
+ * a part's names are untrusted, each in its own <bdi>.
+ */
+function prDetail(row: InboxRow, box: HTMLElement) {
+  const d = row.detail;
+  const title = oneLine(d.title, 300);
+  if (title) box.append(testid(el("p", "pr-title", title), "m-pr-title"));
+  const facts = testid(el("p", "pr-facts"), "m-pr-facts");
+  if (Array.isArray(d.facts)) {
+    d.facts.filter(isObj).slice(0, 16).forEach((part) => {
+      const words = oneLine(part.text, 200);
+      if (!words) return;
+      const span = el("span", "pr-fact", words);
+      names(span, part.items, part.more);
+      if (facts.childNodes.length) facts.append(" · ");
+      facts.append(span);
+    });
+  } else if (typeof d.facts === "string") {
+    facts.append(el("span", "pr-fact", oneLine(d.facts, 400)));
+  }
+  if (facts.childNodes.length) box.append(facts);
+  const flags = isObj(d.flags) ? d.flags : null;
+  if (flags && Array.isArray(flags.items) && flags.items.length) {
+    const line = testid(el("p", "pr-flags", "Touches safety files:"), "m-pr-flags");
+    names(line, flags.items.map((f) => (isObj(f) ? f.name : "")), flags.more);
+    box.append(line);
+  }
+  // The model's words, set apart and labelled (the AS slot's look); only when there.
+  const sum = d.summary;
+  const does = isObj(sum) ? textBlock(sum.does, 400) : typeof sum === "string" ? textBlock(sum, 400) : "";
+  const blocked = isObj(sum) ? textBlock(sum.blocked, 400) : "";
+  if (does || blocked) {
+    const slot = testid(el("div", "as-ai as-ready pr-summary"), "m-pr-summary");
+    slot.append(el("span", "as-tag", AI_LABEL));
+    if (does) slot.append(testid(el("div", "as-text", (isObj(sum) ? "Does: " : "") + does), "m-pr-does"));
+    if (blocked) slot.append(testid(el("div", "as-text", "Blocked: " + blocked), "m-pr-blocked"));
+    box.append(slot);
   }
 }
 
@@ -296,7 +350,8 @@ export function inboxRow(row: InboxRow, open: (row: InboxRow) => void, answers?:
     box.append(list);
     if (d.why) box.append(el("div", "label", "Why"), testid(el("p", "", d.why), "m-why"));
     if (!d.open) box.append(el("div", "label", "Your answer"), testid(el("p", "", d.answer), "m-answer"));
-  } else genericDetail(row, box);
+  } else if (row.kind === "pr") prDetail(row, box);
+  else genericDetail(row, box);
   if (box.childNodes.length) card.append(box);
   if (first) {
     // The buttons are already above.

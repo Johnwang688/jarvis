@@ -215,5 +215,7 @@ export function deskNote(kind: string): string | null {
   }
   if (kind === "proposal") return "Withdraw at the desk";
   if (kind === "task") return "Open the task to resume or cancel it";
+  // H4 (phone audit), until PM-F brings Merge to the phone.
+  if (kind === "pr") return "Merge it at the desk for now";
   return null;
 }
