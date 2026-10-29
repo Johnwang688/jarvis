@@ -144,10 +144,12 @@ def gh_argv(gh: str, repo: str) -> list[str]:
 
 
 def run_bounded(argv: list[str], env: dict, *, timeout: float, cap: int,
-                stop: threading.Event | None = None) -> bytes:
+                stop: threading.Event | None = None, ok_codes: tuple[int, ...] = (0,)) -> bytes:
     """`argv`'s standard output, read with a deadline and a size bound, or
     GhFailed. No shell, stdin and stderr closed to it, its own process
-    group (killed whole on a timeout, an overflow or `stop`)."""
+    group (killed whole on a timeout, an overflow or `stop`). An exit code
+    outside `ok_codes` fails (`git merge-tree` exits 1 on a conflict:
+    `pr_facts` passes (0, 1)); 4 is always gh's "not logged in"."""
     try:
         proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                 stderr=subprocess.DEVNULL, env=env, cwd="/",
@@ -201,7 +203,7 @@ def run_bounded(argv: list[str], env: dict, *, timeout: float, cap: int,
             kill()
     if code == 4:
         raise GhFailed("login")         # gh's "authentication required"
-    if code != 0:
+    if code not in ok_codes:
         raise GhFailed("exit")
     return bytes(out)
 
