@@ -636,7 +636,9 @@ _credential_dir_cache: dict[tuple, list[Path]] = {}
 
 
 def _credential_roots() -> list[Path]:
-    key = (config.credential_dirs(), os.environ.get("HOME", ""))
+    # The folders and, since 2026-10-29, the credential stores outside them
+    # (`config.CREDENTIAL_STORES`: `~/.netrc`, `~/.docker` …).
+    key = (config.credential_read_paths(), os.environ.get("HOME", ""))
     found = _credential_dir_cache.get(key)
     if found is None:
         found = []
@@ -717,8 +719,8 @@ def _credential_folder(path: str | Path) -> bool:
 
 
 def _credential_folder_refusal(path: str | Path) -> str:
-    return (f"Error: {Path(str(path)).name} is in a credential folder (SSH, cloud and Git "
-            "logins, Jarvis's own credentials or the owner's Browser profile), which Jarvis "
+    return (f"Error: {Path(str(path)).name} is in a credential folder or store (SSH, cloud, "
+            "registry and Git logins, Jarvis's own credentials or the owner's Browser profile), which Jarvis "
             "does not read or write. Ask the owner for what you need instead.")
 
 

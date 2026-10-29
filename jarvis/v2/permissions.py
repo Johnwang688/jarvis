@@ -1052,9 +1052,24 @@ def _git_credential(tokens: list[str]) -> bool:
         if low == "credential" or low.startswith("credential-"):
             return True
         if low == "config":
-            return any("credential" in w.lower() for w in tokens[index + 1:])
+            rest = [w.lower() for w in tokens[index + 1:]]
+            # A credential setting named, or a listing that prints them all
+            # (`--list`/`-l`, `git config list`, a regexp or urlmatch read):
+            # `credential.*` and `url.*` values can carry a token, and Claude's
+            # and Codex's shell output is never scrubbed by Jarvis.
+            return (any("credential" in w or w.startswith("url.") for w in rest)
+                    or any(w in _GIT_CONFIG_LISTS or w.startswith("--list") for w in rest)
+                    or any(w.startswith("-") and not w.startswith("--") and "l" in w[1:]
+                           for w in rest)
+                    or (bool(rest) and rest[0] == "list"))
+        if low == "var":
+            return any(w.lower() in ("-l", "--list") for w in tokens[index + 1:])
         return False
     return False
+
+
+# git config's reads that print many settings at once.
+_GIT_CONFIG_LISTS = frozenset({"--get-regexp", "--regexp", "--get-urlmatch", "--url"})
 
 
 def _path_words(segment: str) -> list[str]:
@@ -1078,13 +1093,15 @@ def _credential_dirs() -> list[Path]:
 
 
 def _under_credential_dir(target: str) -> bool:
+    """A path word in a credential folder or store (`credential_read_paths`:
+    the stores since 2026-10-29, so `cat ~/.docker/config.json` asks)."""
     candidate = target.strip("\"'><")
     if not candidate or candidate.startswith("-"):
         return False
     if "/" not in candidate and not candidate.startswith("~"):
         return False
     resolved = _resolve(candidate)
-    for directory in _credential_dirs():
+    for directory in [_resolve(d) for d in config.credential_read_paths()]:
         if resolved == directory or directory in resolved.parents:
             return True
     return False

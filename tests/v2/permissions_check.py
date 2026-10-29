@@ -4399,6 +4399,138 @@ def cred_dir_read_checks():
           f"{v1_refused} v1 read refusals, {len(asking)} credential-printing commands asked")
 
 
+def cred_store_read_checks():
+    """Credential stores outside the folders (cred-dir reads, 2026-10-29,
+    follow-up): `config.CREDENTIAL_STORES` (at least Codex's
+    `KNOWN_CREDENTIALS`) is refused to every read tool at layer 1, and
+    `.git-credentials`, `.netrc`, `_netrc` and `.pypirc` by name anywhere
+    (`secrets.EXACT_NAMES`, so the shell's naming refusal agrees). A
+    project's own `.npmrc` stays readable. `git config --list` and the other
+    listings ask under `credentials-read` with no Always."""
+    from jarvis.tools import files as v1_files, secrets as v1_secrets, shell as v1_shell
+    from jarvis.v2.approvals import DenyAll
+    from jarvis.v2.model import PermissionProfile as P
+    from jarvis.v2.permissions import L_ALWAYS_ASK, L_DENY, build_permit, denied_read
+    from jarvis.v2.providers import codex_config
+    from jarvis.v2.provider import Decision
+
+    with Sandbox() as box:
+        home = box.home
+        covered = {os.path.expanduser(p) for p in config.credential_read_paths()}
+        for entry in codex_config.KNOWN_CREDENTIALS:
+            ok(str(home / entry) in covered, f"Codex's denied {entry} is refused to read tools too")
+        project = home / "projects" / "app"
+        (project / "sub").mkdir(parents=True)
+        (project / ".npmrc").write_text("registry=https://registry.npmjs.org/\n")
+        (project / "main.py").write_text("x = 1\n")
+        (home / ".claude" / "skills" / "s").mkdir(parents=True)
+        (home / ".claude" / "skills" / "s" / "SKILL.md").write_text("# s\n")
+        stores = []
+        for raw in config.CREDENTIAL_STORES:
+            path = Path(os.path.expanduser(raw))
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if path.name in (".docker", ".kube", ".azure", ".supabase", ".agents", "gcloud", "uv",
+                             "keyrings", "com.vercel.cli", "credentials", "huggingface"):
+                path.mkdir(exist_ok=True)
+                (path / "config.json").write_text("not a real credential\n")
+                target = path / "config.json"
+            else:
+                path.write_text("not a real credential\n")
+                target = path
+            link = project / f"link{len(stores)}"
+            link.symlink_to(target)
+            stores.append((raw, target, link))
+        tools = [("Read", "file_path"), ("NotebookRead", "notebook_path"), ("Grep", "path"),
+                 ("Glob", "path"), ("LS", "path"), ("read_file", "path"), ("grep_files", "path"),
+                 ("list_dir", "path"), ("find_files", "path")]
+        asker = Asker(Decision.ALLOW)
+        permit = build_permit(context(brief_for(P.AUTO, cwd=project)), asker)
+        refused = 0
+        for raw, target, link in stores:
+            tilde = "~/" + os.path.relpath(target, home)
+            head, tail = os.path.split(str(target))
+            for spelling in (str(target), tilde, str(link), os.path.join(head, tail.upper()),
+                             str(home / "projects" / ".." / os.path.relpath(target, home))):
+                for tool, key in tools:
+                    args = {key: spelling, "pattern": "x"}
+                    eq(permit(tool, args, brief_for(P.AUTO, cwd=project)), Decision.DENY,
+                       f"{tool} refuses {spelling}")
+                    eq(box.decisions[-1]["layer"], L_DENY, f"layer 1: {tool} {spelling}")
+                    refused += 1
+                out = v1_files.read_file(spelling)
+                ok(out.startswith("Error") and "not a real credential" not in out,
+                   f"v1 read_file refuses {spelling}")
+                out = v1_shell.run_readonly(f"cat {spelling}")
+                ok(out.startswith("Error") and "not a real credential" not in out,
+                   f"run_readonly refuses cat {spelling}")
+            # The shell: refused by name (layer 1) or asked with no Always.
+            before = len(asker.seen)
+            decision = permit(*bash(f"cat {tilde}"), brief_for(P.AUTO, cwd=project))
+            if Path(target).name in v1_secrets.EXACT_NAMES:
+                eq(decision, Decision.DENY, f"the shell refuses {tilde} by name")
+                eq(len(asker.seen), before, f"never asked: cat {tilde}")
+            else:
+                ok(len(asker.seen) == before + 1 and asker.seen[-1].allowlistable is False,
+                   f"the shell asks cat {tilde}, with no Always")
+        eq(len(asker.seen), sum(1 for _r, t, _l in stores if Path(t).name not in v1_secrets.EXACT_NAMES),
+           "only the shell's store reads were asked")
+        # By name anywhere.
+        for name in (".git-credentials", ".netrc", "_netrc", ".pypirc"):
+            for where in (project, project / "sub", box.root):
+                (where / name).write_text("not a real credential\n")
+                for tool, key in (("Read", "file_path"), ("NotebookRead", "notebook_path"),
+                                  ("read_file", "path"), ("Grep", "path")):
+                    eq(permit(tool, {key: str(where / name), "pattern": "x"},
+                              brief_for(P.AUTO, cwd=project)), Decision.DENY,
+                       f"{tool} refuses {where / name} by name")
+                    refused += 1
+                eq(permit(*bash(f"cat {where / name}"), brief_for(P.AUTO, cwd=project)), Decision.DENY,
+                   f"the shell refuses {name} by name")
+                ok(v1_files.read_file(str(where / name)).startswith("Error"), f"v1 refuses {name}")
+            eq(permit("Read", {"file_path": f"sub/{name}"}, brief_for(P.AUTO, cwd=project)),
+               Decision.DENY, f"a relative {name} is refused")
+        # Unchanged.
+        for tool, args in (("Read", {"file_path": str(project / ".npmrc")}),
+                           ("Read", {"file_path": ".npmrc"}),
+                           ("Read", {"file_path": str(home / ".claude" / "skills" / "s" / "SKILL.md")}),
+                           ("Grep", {"pattern": "x", "path": str(project)}),
+                           ("LS", {"path": str(home / ".claude" / "skills")}),
+                           ("read_file", {"path": str(project / ".npmrc")})):
+            eq(denied_read(tool, args, str(project)), None, f"still readable: {tool} {args}")
+        ok("registry" in v1_files.read_file(str(project / ".npmrc")), "v1 reads a project's .npmrc")
+        eq(permit(*bash("cat .npmrc"), brief_for(P.AUTO, cwd=project)), Decision.ALLOW,
+           "the shell reads a project's .npmrc")
+
+        # git's setting listings ask, with no Always.
+        listings = ["git config --list", "git config -l", "git config --show-origin --list",
+                    "git config --global --list", "git config --list --show-scope", "git config -lz",
+                    "git config --show-origin -l", "git config list", "git config list --show-origin",
+                    "git config --get-regexp .", "git config get --all --regexp .",
+                    "git config --get-urlmatch http https://github.com", "git config --get url.x.insteadOf",
+                    "git var -l", "git -C repo config --list", "uv run git config --list"]
+        asker = Asker(Decision.ALLOW)
+        permit = build_permit(context(brief_for(P.AUTO, cwd=project)), asker)
+        for command in listings:
+            before = len(asker.seen)
+            eq(permit(*bash(command), brief_for(P.AUTO, cwd=project)), Decision.ALLOW, f"asked: {command}")
+            ok(len(asker.seen) == before + 1, f"asked once: {command}")
+            if len(asker.seen) == before + 1:
+                ok("credentials-read" in asker.seen[-1].reason, f"{command}: {asker.seen[-1].reason}")
+                eq(asker.seen[-1].allowlistable, False, f"no Always: {command}")
+            eq(box.decisions[-1]["layer"], L_ALWAYS_ASK, f"layer 2: {command}")
+        quiet = build_permit(context(brief_for(P.AUTO, cwd=project)), DenyAll("nobody"))
+        eq(quiet(*bash("git config --list"), brief_for(P.AUTO, cwd=project)), Decision.DENY,
+           "no human: git config --list is declined")
+        for command in ("git config user.name", "git config --get remote.origin.url",
+                        "git config --global user.email a@b.c", "git config core.autocrlf false",
+                        "git log -l", "git branch --list", "git tag -l", "git stash list"):
+            before = len(asker.seen)
+            permit(*bash(command), brief_for(P.AUTO, cwd=project))
+            eq(len(asker.seen), before, f"ordinary git does not ask: {command}")
+    print(f"  cred stores: {len(stores)} stores, {refused} read-tool calls refused, "
+          f"{len(listings)} git listings asked")
+
+
 def relay_provenance_checks():
     """`PermitContext.relayed_from` (C6) is display only: the same call gets
     the same decision, layer, reason, asked-or-not and request — every field
@@ -4561,7 +4693,8 @@ def main():
                     auto_quiet_checks, hatch_checks, discord_checks, merge_gate_checks,
                     chat_git_checks, command_tool_checks, command_field_checks,
                     secret_service_checks, remote_listener_checks,
-                    relay_provenance_checks, cred_dir_read_checks):
+                    relay_provenance_checks, cred_dir_read_checks,
+                    cred_store_read_checks):
         if ONLY and section.__name__ not in ONLY:
             continue
         print(f"-- {section.__name__}")

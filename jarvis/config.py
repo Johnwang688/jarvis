@@ -657,7 +657,7 @@ V2_ALWAYS_ASK_DEFAULTS: list[dict] = [
     },
     {
         "id": "credentials-path",
-        "reason": "a write under a credential directory is a credential change however it is spelled",
+        "reason": "a read or write under a credential folder or store reaches a credential however it is spelled",
         "kind": "credential_path",
     },
     {
@@ -723,6 +723,35 @@ def credential_dirs() -> tuple[str, ...]:
     v1's file, search and shell tools refuse; `folders`, `editor_policy`,
     Codex's denied paths and grants (`denied_grant`) close them too."""
     return (*V2_CREDENTIAL_DIRS, str(BROWSER_DIR), str(remote_dir()))
+
+
+# Credential stores outside the credential folders, by their place under
+# $HOME (cred-dir reads, 2026-10-29): what the read tools refuse besides
+# `credential_dirs()`, files and folders alike. At least Codex's
+# `codex_config.KNOWN_CREDENTIALS` (a suite pins the superset), plus the
+# CLI logins Codex closes with its own home (`~/.codex/auth.json`, Claude's
+# `~/.claude/.credentials.json`) and `~/_netrc`. Read tools only:
+# `credential_dirs()` stays what the owner's editor, `folders` and grants
+# close, so the owner still edits these by hand or in the HUD.
+CREDENTIAL_STORES: tuple[str, ...] = (
+    "~/.git-credentials", "~/.netrc", "~/_netrc", "~/.npmrc", "~/.pypirc",
+    "~/.gitconfig", "~/.claude.json", "~/.claude/.credentials.json",
+    "~/.codex/auth.json", "~/.codex/.credentials.json",
+    "~/.docker", "~/.kube", "~/.azure", "~/.supabase", "~/.agents",
+    "~/.config/gcloud", "~/.config/uv", "~/.local/share/keyrings",
+    "~/.local/share/com.vercel.cli", "~/.local/share/uv/credentials",
+    "~/.cargo/credentials", "~/.cargo/credentials.toml", "~/.cache/huggingface",
+    "~/.bash_history", "~/.python_history",
+)
+
+
+def credential_read_paths() -> tuple[str, ...]:
+    """What a read tool may never read: every `credential_dirs()` folder and
+    every `CREDENTIAL_STORES` entry. v1's judge
+    (`files.credential_folder_judge`) and so v2's read tools, `run_readonly`
+    and v2's `credentials-path` rule read this; `credential_dirs()` alone is
+    what the owner-facing checks close."""
+    return (*credential_dirs(), *CREDENTIAL_STORES)
 
 
 def remote_dir() -> Path:
