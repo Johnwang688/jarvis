@@ -61,6 +61,15 @@ presented as "nothing waiting". A list that may be cut off (exactly
 read is named in the same row ("PR list incomplete" when nothing failed),
 also counted.
 
+**Summaries (PM-C, `pr_summary.py`).** Once daemon2's `main()` attaches
+them (`attach_summaries`), each poll's PR rows carry, in `detail`, what
+`pr_facts` reads of the PR (the facts line's parts, the safety-file flags,
+PM-12's actions, display only) and the model's two-line summary with its
+state; the reads are queued after the poll and run on the facts worker's
+thread, never this one, and a read or summary that lands later is put in
+the snapshot by `refresh` (`inbox_changed`, reason `pr_summary`). Without
+them (any test or embedded daemon) the rows are as below.
+
 **Freshness.** Each poll replaces the snapshot. A PR merged or closed is
 gone after the next poll. `inbox_changed` `{ids, reason: "pr_poll"}` is
 published only when the set of rows or a row changed, and carries no text.
@@ -438,6 +447,10 @@ class PrSource:
         self._thread: threading.Thread | None = None
         self._last_poll = 0.0
         self._task_states: dict[str, str] = {}
+        # PM-C (`pr_summary.PrSummaries`): the facts, flags, actions and the
+        # model's summary on each PR row. Attached by daemon2's `main()`
+        # only (`Daemon.attach_pr_summaries`), as `gh` is.
+        self.summaries = None
 
     # -- attaching and the schedule -------------------------------------------------
 
@@ -446,6 +459,11 @@ class PrSource:
         from jarvis import gitops
         self.gh = gitops.gh_binary()
         self.attached = True
+
+    def attach_summaries(self, summaries) -> None:
+        """daemon2's `main()` only (PM-C): after each poll, each open PR's
+        facts are read and summarized, and its row's `detail` carries them."""
+        self.summaries = summaries
 
     def list_repo(self, repo: str) -> bytes:
         if self.gh is None:
@@ -480,6 +498,8 @@ class PrSource:
 
         self._thread = threading.Thread(target=loop, name="jarvis-inbox-prs", daemon=True)
         self._thread.start()
+        if self.summaries is not None:
+            self.summaries.start()          # the facts worker's thread; no read until a poll queues one
 
     def poke(self) -> None:
         """Poll soon (debounced). Never blocks."""
@@ -505,6 +525,8 @@ class PrSource:
     def stop(self) -> None:
         self._stop.set()
         self._wake.set()
+        if self.summaries is not None:
+            self.summaries.stop()           # a running read is told to stop; no summary starts
         thread = self._thread
         if thread is not None:
             thread.join(5)
@@ -524,6 +546,7 @@ class PrSource:
             now = self.clock().isoformat(timespec="seconds")
             fresh: dict[str, dict] = {}
             failures: dict[str, dict] = {r: {"code": "skipped", "last_read": None} for r in skipped}
+            listed: dict[str, list[dict]] = {}       # PM-C: each repository read, its PRs
             for repo, project_ids in repos.items():
                 if self._stop.is_set():
                     return []
@@ -540,6 +563,7 @@ class PrSource:
                 if cut_off:
                     failures[repo] = {"code": "cut_off", "last_read": now}
                 project_id = project_ids[0] if len(project_ids) == 1 else None
+                listed[repo] = prs
                 for pr in prs:
                     row = pr_row(pr, project_id)
                     fresh[row["id"]] = row
@@ -550,7 +574,14 @@ class PrSource:
             if failures:
                 row = unavailable_row(failures)
                 fresh[row["id"]] = row
+            summaries = self.summaries
             with self._lock:
+                if summaries is not None:
+                    # Under the snapshot's lock, so a summary that lands
+                    # meanwhile (`refresh`) is never overwritten by an older view.
+                    for row in fresh.values():
+                        if row.get("kind") == "pr":
+                            row["detail"].update(summaries.detail(row))
                 old, self._rows = self._rows, fresh
             changed = sorted({i for i in old.keys() | fresh.keys() if old.get(i) != fresh.get(i)})
             # Inbox B4: a PR that left a repository read in full (merged,
@@ -570,6 +601,39 @@ class PrSource:
             try:
                 self.daemon.bus.publish({"kind": "inbox_changed",
                                          "data": {"ids": changed, "reason": "pr_poll"}})
+            except Exception as exc:  # noqa: BLE001
+                LOG.warning("inbox PRs: cannot publish (%s)", type(exc).__name__)
+        if summaries is not None and not self._stop.is_set():
+            # PM-C: the reads due are queued (never run here), and the PR
+            # mirrors tidied with each repository's read state: its open
+            # PRs when its list was read whole, None when it failed, was
+            # cut off or was not read (so it is never pruned).
+            state = {r: (None if r in failures else {pr["number"] for pr in listed.get(r, ())})
+                     for r in [*repos, *skipped]}
+            summaries.after_poll(listed, state)
+        return changed
+
+    def refresh(self, ids) -> list[str]:
+        """PM-C: a PR's facts or summary landed. Its rows' `detail` is built
+        again from the snapshot, and `inbox_changed` (reason `pr_summary`,
+        ids only) published when one changed. Never runs gh."""
+        summaries = self.summaries
+        if summaries is None:
+            return []
+        changed = []
+        with self._lock:
+            for row_id in ids:
+                row = self._rows.get(row_id)
+                if row is None or row.get("kind") != "pr":
+                    continue
+                new = {**row, "detail": {**row["detail"], **summaries.detail(row)}}
+                if new != row:
+                    self._rows[row_id] = new
+                    changed.append(row_id)
+        if changed:
+            try:
+                self.daemon.bus.publish({"kind": "inbox_changed",
+                                         "data": {"ids": sorted(changed), "reason": "pr_summary"}})
             except Exception as exc:  # noqa: BLE001
                 LOG.warning("inbox PRs: cannot publish (%s)", type(exc).__name__)
         return changed

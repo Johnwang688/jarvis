@@ -2305,6 +2305,17 @@ class Daemon:
             self.approvals.quiet_desk = desk
         return desk
 
+    def attach_pr_summaries(self, summaries=None):
+        """PM-C: each open PR's facts, read by `pr_facts` after a poll, and
+        the model's two-line summary of it, on the inbox's PR rows. Called
+        by daemon2's `main()` only, so no test or embedded daemon reads a PR
+        with gh or calls a model. Returns the summaries."""
+        if summaries is None:
+            from .pr_summary import PrSummaries
+            summaries = PrSummaries(self.inbox.prs, root=self.stores.root)
+        self.inbox.prs.attach_summaries(summaries)
+        return summaries
+
     def attach_approval_summaries(self, summaries=None):
         """AS: the model's one-line summary on each public card. Called by
         daemon2's `main()` only (a test passes its own, with a fake model).
@@ -4078,6 +4089,10 @@ def main() -> int:
     # The inbox's open PRs (B3, inbox_prs.py): the owner's `gh`, read-only,
     # attached here for the same reason.
     daemon.inbox.prs.attach_system()
+    # PR summaries (PM-C, pr_summary.py): each open PR's facts (the owner's
+    # gh, read-only) and Haiku's two lines about it. Here only, so no
+    # embedded or test daemon reads a PR or calls a model.
+    daemon.attach_pr_summaries()
     # Web Push to the phone (P-6, push.py): the sender and its network
     # transport, here only, so no embedded or test daemon ever sends.
     daemon.push.attach_system()

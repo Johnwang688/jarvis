@@ -782,7 +782,9 @@ class OwnerOnly(Base):
                     # B3 (IN-4): the PR list the daemon reads with the owner's gh.
                     "import inbox_prs", "inbox_prs import", "PrSource", ".prs.rows", ".prs.poll",
                     # PM-B: the PR facts reader (the owner's gh, the daemon's mirror).
-                    "pr_facts")
+                    "pr_facts",
+                    # PM-C: the PR summaries (the model's lines on a PR row).
+                    "pr_summary", "PrSummaries", "attach_pr_summaries")
 
     def test_no_tool_reaches_the_inbox(self):
         from jarvis import tools
