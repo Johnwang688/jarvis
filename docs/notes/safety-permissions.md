@@ -3632,10 +3632,61 @@ Separately, `git credential fill` and its kin reached the reviewer:
 
 **Not covered** (stated limits): a symlink to a credential folder deep in a
 tree a search walks (ripgrep follows none unless told to, and Jarvis never
-sees Claude's tool results); a tool outside `READ_TOOLS` (an external MCP
-file reader); credential *files* outside the folders — `~/.git-credentials`
-and `~/.netrc` are denied to Codex but not refused for Claude's Read; and
-`git config --list`, which prints every setting.
+sees Claude's tool results); and a tool outside `READ_TOOLS` (an external
+MCP file reader).
+
+**Follow-up in the same PR: stores and listings.**
+
+- **Stores.** `config.CREDENTIAL_STORES` lists the credential stores
+  outside the folders, by their place under `$HOME`. It covers at least
+  Codex's `KNOWN_CREDENTIALS`, which a suite pins:
+  - login files: `.git-credentials`, `.netrc`, `.npmrc`, `.pypirc`,
+    `.gitconfig`, `.claude.json`;
+  - tool folders: `.docker`, `.kube`, `.azure`, `.supabase`, `.agents`,
+    `.config/gcloud`, `.config/uv`;
+  - stores under `.local` and `.cargo`: the keyrings, Vercel's,
+    `uv/credentials`, `.cargo/credentials(.toml)`;
+  - `.cache/huggingface`, and the shell and Python histories.
+
+  It adds `~/_netrc`, `~/.claude/.credentials.json` and
+  `~/.codex/auth.json`. `config.credential_read_paths()` is the folders plus
+  these stores. v1's judge reads it, so every read tool, `run_readonly` and
+  v2's `credentials-path` cover them. `credentials-path`'s reason now says
+  "read or write". The owner-facing checks are unchanged: `folders`,
+  `editor_policy` and grants still read `credential_dirs()`.
+- **Names refused anywhere.** `.git-credentials`, `.netrc`, `_netrc` and
+  `.pypirc` are refused wherever they are found, through
+  `secrets.EXACT_NAMES`, so a shell line naming one is DENY at layer 1.
+  `.npmrc` is refused only at `~/.npmrc`, because a project's `.npmrc`
+  holds registry settings and stays readable.
+- **Git listings ask.** These now ask under `credentials-read`, with no
+  Always:
+  - `git config --list`, `-l` in any cluster, and `git config list`;
+  - the regexp and urlmatch reads;
+  - any `url.*` read;
+  - `git var -l`.
+
+  They ask rather than being scrubbed because Jarvis never sees Claude's or
+  Codex's shell output, so it has nowhere to scrub it. The scrub exists only
+  for v1's own `run_command`.
+
+Pinned by `cred_store_read_checks` (2,729 checks):
+- 25 stores × 5 spellings × 9 tools are refused at layer 1, and v1's
+  `read_file` and `run_readonly` refuse them too;
+- the four names are refused in three places by four tools and the shell;
+- a project's `.npmrc` and `~/.claude/skills` stay readable;
+- 16 listings ask with no Always;
+- 8 ordinary git commands do not ask.
+
+Each of these mutants was verified to fail:
+
+| Mutant | Failed checks |
+|---|---|
+| Stores left out of the judge | 2,274 |
+| One Codex entry dropped | 1 |
+| The names left out of `EXACT_NAMES` | 76 |
+| Listings not asked | 19 |
+| Short `-l` not asked | 6 |
 
 Pinned by `tests/v2/permissions_check.py` (`cred_dir_read_checks`: nine
 tools × seven folders × ten spellings in AUTO, ASK and STRICT refused at
