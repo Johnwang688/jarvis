@@ -233,7 +233,8 @@ class Leaves(unittest.TestCase):
         # A value holding an operator stays on the card (it may be what
         # runs), so the call gets no summary: its command shows expanded.
         for command in ("sshpass -p 'Tr0ub4dor&3' ssh admin@10.0.0.5 uptime",
-                        "PGPASSWORD='Tr0ub&4dor3' psql -h db"):
+                        "PGPASSWORD='Tr0ub&4dor3' psql -h db", "sshpass -p 'Tr0ub;4dor3' ssh a@h",
+                        "htpasswd -b .htpasswd admin 'adm|npass99'"):
             with self.subTest(command=command):
                 chat, box = Chat(), Box()
                 self.assertEqual(summaries(chat).begin(request(command), box), (S.OFF, ""))

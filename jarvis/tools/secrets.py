@@ -1612,7 +1612,13 @@ def _program_flags(text: str) -> str:
     if not _PROGRAM_WORD.search(text):
         return text
     bounds, last = [], 0
+    # `holds_back_credential` only: a separator inside quotes does not end a
+    # segment (`sshpass -p 'a|b' ssh h`), so its value is still found there.
+    # The display keeps its own segmenting.
+    quoted = _Mask(text).state if _LOOSE_VALUES.get() else None
     for sep in _SEGMENTS.finditer(text):
+        if quoted is not None and quoted[sep.start()]:
+            continue
         bounds.append((last, sep.start()))
         last = sep.end()
     bounds.append((last, len(text)))

@@ -1116,7 +1116,11 @@ class Family(unittest.TestCase):
         # that sends the card off the machine sends nothing.
         for command in ("sshpass -p 'Tr0ub4dor&3' ssh admin@10.0.0.5 uptime",
                         "PGPASSWORD='Tr0ub&4dor3' psql", "curl -u 'alice:Tr0ub&4dor3' x",
-                        "smbclient -U 'alice%Tr0ub&4dor3' //s/x"):
+                        "smbclient -U 'alice%Tr0ub&4dor3' //s/x",
+                        # A separator inside the quotes splits the display's
+                        # segment; the check reads the quoting.
+                        "sshpass -p 'Tr0ub;4dor3' ssh a@h", "curl -u 'a:Tr0ub|4dor3' x",
+                        "htpasswd -b f admin 'adm|npass99'"):
             with self.subTest(command=command):
                 self.assertEqual(secrets.redact_command(command), command)
                 self.assertTrue(secrets.holds_back_credential(command))
@@ -1125,7 +1129,8 @@ class Family(unittest.TestCase):
         # way, and held back from a model too (fail closed: no summary).
         self.assertTrue(secrets.holds_back_credential("API_KEY=abcd* ls"))
         plain = [c for c in UNTOUCHED if not any(m in c for m in ("two words", "a;b", "*", "{"))]
-        for command in plain + FAMILY_UNTOUCHED + ["make deploy", "rm -rf build && make deploy", "echo 'a & b'"]:
+        for command in plain + FAMILY_UNTOUCHED + ["make deploy", "rm -rf build && make deploy", "echo 'a & b'",
+                                                         "echo 'a|b' | grep a", "git log --format='%h|%s' | head"]:
             with self.subTest(command=command):
                 self.assertFalse(secrets.holds_back_credential(command))
         # The switch it uses never leaks out of it.
