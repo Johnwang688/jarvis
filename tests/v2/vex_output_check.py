@@ -489,7 +489,8 @@ class BrainPort(DaemonBase):
         # while the last confirmed reading is a controller and no brain.
         self.reading(True, False)
         self.download()
-        self.assertEqual(self.world.calls("vexcom")[-1]["argv"][-3:], ["--chan", "1", "--progress"])
+        self.assertEqual(self.world.calls("vexcom")[-1]["argv"][-4:],
+                         ["--chan", "1", "--timer", "--progress"])
         for controller, brain in ((True, True), (False, True), (None, None), (True, None), (False, False)):
             with self.subTest(controller=controller, brain=brain):
                 self.reading(controller, brain)

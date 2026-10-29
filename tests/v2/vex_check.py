@@ -663,12 +663,13 @@ class Tables(Base):
         cfg = vex.load_config()
         self.assertEqual(vex.download_argv(cfg, "auton_1", 3, "C:\\x\\build\\b.bin"),
                          [str(self.world.vexcom), "--name", "auton_1", "--slot", "3",
-                          "--write", "C:\\x\\build\\b.bin", "--progress"])
+                          "--write", "C:\\x\\build\\b.bin", "--timer", "--progress"])
         # Through a V5 controller: the vendor extension's download channel,
-        # before `--progress`. Only a real True asks for it.
+        # before `--timer`. Only a real True asks for it.
         self.assertEqual(vex.download_argv(cfg, "auton_1", 3, "C:\\x\\build\\b.bin", controller=True),
                          [str(self.world.vexcom), "--name", "auton_1", "--slot", "3",
-                          "--write", "C:\\x\\build\\b.bin", "--chan", "1", "--progress"])
+                          "--write", "C:\\x\\build\\b.bin", "--chan", "1", "--timer",
+                          "--progress"])
         for truthy in (1, "yes", [True], None):
             self.assertNotIn("--chan", vex.download_argv(cfg, "auton_1", 3, "C:\\b.bin", controller=truthy))
         # The vendor extension's own user-port invocation (plan §5.2, offset
@@ -1071,7 +1072,7 @@ class Device(DaemonBase):
         call = self.world.calls("vexcom")[-1]
         bin_win = self.world.windows(self.folder / "build" / "override.bin")
         self.assertEqual(call["argv"], ["--name", "auton_1", "--slot", "3", "--write", bin_win,
-                                        "--progress"])
+                                        "--timer", "--progress"])
         self.assertEqual(Path(call["cwd"]).resolve(), self.folder.resolve())
         self.assertEqual(call["wslenv"], "")
 

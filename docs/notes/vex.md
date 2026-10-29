@@ -1053,9 +1053,12 @@ download is worth trying, along with the retry on real hardware.
 Not done: a resumable or differential upload. vexcom has no such option,
 and vexide's differential upload needs a patcher in the robot program's
 own startup code (vexide-startup), which a VEX SDK program does not have.
-A gzip-compressing uploader on vexide's MIT `vex-v5-serial` (the binary
-gzips 156 KB to 79 KB) is the next step if the channel and retries are
-not enough. Not yet verified on the robot: the speed with `--chan 1`.
+A gzip-compressing uploader was planned as the next step, then dropped
+(2026-10-28): the owner's `vexcom --help` (1.0.2b2) lists `--nocompress`,
+"disable program compression for V5/EXP", so vexcom already compresses
+by default, and Jarvis never passes that flag. The 80 s for 156 KB was
+already a compressed transfer (about 79 KB on the radio). See
+`docs/plans/2026-10-28-vex-gzip-uploader-decisions.md`. Not yet verified on the robot: the speed with `--chan 1`.
 
 Checks (fakes only; no vexcom, port or live daemon):
 
@@ -1161,3 +1164,26 @@ counted as current, step list ignoring the skip, the daemon always
 answering current, the query not checked; and after the review, a truthy
 parse, the old rebuild message, the mtime fallback skipping, settings
 ignored, the wide digest ignored, `build/` walked, and inputs not recorded.
+
+**Download prints vexcom's transfer timer (the owner, 2026-10-28).** The
+gzip uploader was dropped because vexcom already compresses (see "the
+radio's download channel" above). To measure what a download really costs
+before anything else is tried, the download argv now ends `--timer
+--progress`: `--name --slot --write <bin> [--chan 1] --timer --progress`.
+`--timer` is "show transfer timer" in the owner's `vexcom --help`
+(V1.0.2b2), and DishPy's MIT source passes it in the same place (the
+editor plan's §1 already listed it). The HUD shows the line in the
+Download tab's output; nothing parses it.
+
+Not yet seen on a real brain: what the timer line looks like. If vexcom
+writes it on the progress line itself, `downloadProgress` reads no
+percentage from that line, and the bar fills only when the record
+succeeds. Look for that on the first lab download, along with the timings
+the gzip decisions file asks for (through the controller with `--chan 1`,
+and USB straight to the brain).
+
+Checks (fakes only): `vex_check` `Tables` (the exact argv with and without
+the channel) and `Device` (the argv the fake records), and
+`vex_output_check` `BrainPort` (`--chan 1 --timer --progress`, and
+`--progress` still last without the channel).
+
