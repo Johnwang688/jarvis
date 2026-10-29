@@ -3703,3 +3703,80 @@ wildcard allowed (16), no case fold (406), no kernel-order `..` (345),
 `list_dir` unguarded (70), `find_files`' walk unfiltered (1), no
 `credential_read` kind (229), git's subcommand ignored (104), Always
 offered (79), the rule missing from the defaults (229).
+
+**Review of #339 (2026-10-29), same PR.**
+
+- **HIGH: shell searches from a credential-holding root now ask.** v2's
+  shell auto-allowed `grep -r token ~`, `rg -uu token ~`, `find ~ -name
+  hosts.yml` and `ls -R ~` through rules' ALLOW. This was also true on
+  main.
+  - `credentials-path` now matches a recursive search or walk whose root
+    holds a credential folder or store. The search programs covered are
+    grep and rg, read by `shell._search_modes`, plus ag, ack, ugrep, find,
+    tree, du, tar, 7z, rsync and scp. `ls -R`, `cp -r` and `zip -r` count
+    when they recurse.
+  - The check uses `files.credential_folder_holds`, which v1's
+    `run_readonly` now shares.
+  - A root counts if the shell would find it there: `~`, `$HOME`, a glob's
+    fixed folders, or a symlink. With no path operand, the root is the
+    brief's or the shell's folder.
+  - The outcome is ASK with no Always, like the other credential rules.
+- **Strings handed to another shell are judged.** Every `credentials-*`
+  rule also reads what a line hands another shell (`sh -c`, `eval`,
+  `ssh host …`), through #330's bounded `secrets._inner_commands`. The
+  limit is 3 levels and 32 strings. An inner string that cannot be read
+  is asked (`credentials-inner`).
+- **MED 1: `/proc` and `/dev/fd` paths are refused.** These resolve in the
+  gate's own process, so a read-tool path through
+  `/proc/<pid>/{cwd,root,fd,fdinfo,map_files,environ,exe,task}` or
+  `/dev/fd`/`std*` is refused. That includes a symlink on the way whose
+  target is one. Tree roots under `/proc` and Glob patterns there are
+  refused too.
+- **MED 2: git aliases ask.** These now ask: `-c alias.*`, glued
+  `-calias…` and `-ccredential…`, and `--config-env=alias…`. So does
+  setting an alias with `git config`, because an alias can run
+  `git credential fill`. As a result, merge_gate's ordinary
+  `git -c alias.st=status …` now asks `credentials-read`.
+- **MED 3: Windows profiles match Codex.** The Windows profile list moved
+  to `config`: `WINDOWS_USERS`, `windows_closed_name` and
+  `windows_extra`. Codex and the read tools' judge share it. The judge
+  refuses a profile's dot entries, `AppData` and `NTUSER*`, compared
+  case-folded and without touching the drive. A Grep from a profile or
+  from above the Users folder is refused; a Glob or LS from there is
+  asked.
+- **MED 4: extra headers ask.** Any `*.extraheader` setting is
+  `credentials-read`'s.
+- **LOW items (the lead's calls):**
+  - `config.CREDENTIAL_READABLE` keeps `~/.agents/skills` readable. The
+    rest of `~/.agents` is refused, including through a symlink in the
+    skills folder that leads out of it.
+  - From a holding root (`~`, `~/.claude`, `~/.codex`, `~/.cache`,
+    `~/.local`, `/`), Grep stays DENY because it returns contents. Glob,
+    LS and `find_files` are asked with no Always because they return only
+    names. A pattern that names a credential folder's own path stays
+    DENY.
+  - `git config -f/--file/--blob` on a repository file (not `.git/…`, the
+    user's or system config, a credential path or anything with `$`) is
+    not asked. Neither is `git credential --help` or `-h`.
+  - `$HOME` and other set variables in read-tool paths are judged both
+    as written and expanded.
+- **Tests and mutants.** `cred_review_checks` pins all of the above. Each
+  mutant below was verified to fail:
+
+  | Mutant | Failed checks |
+  |---|---|
+  | Shell walk not judged | 96 |
+  | Inner strings not read | 27 |
+  | grep/rg modes ignored | 51 |
+  | `/proc` paths allowed | 11 |
+  | `/proc` roots/patterns allowed | 3 |
+  | Alias not matched | 13 |
+  | Glued `-c` ignored | 9 |
+  | Windows not judged | 32 |
+  | Windows holds ignored | 7 |
+  | extraheader ignored | 15 |
+  | Skills carve-out dropped | 5 |
+  | Names-only walks denied | 155 |
+  | Repo-file reads asked | 5 |
+  | `--help` asked | 2 |
+  | `$HOME` not expanded | 27 |
