@@ -46,7 +46,8 @@ def config_default_checks() -> None:
         source.write_text(Path(config.__file__).read_text())
         defaults = runpy.run_path(str(source))
         assert defaults["COMPACT_AT_TOKENS"] == 90_000, "compaction default must be 90k"
-        for tier in ("orchestrator", "subagent", "compaction", "review", "speech_summary", "approval_summary"):
+        for tier in ("orchestrator", "subagent", "compaction", "review", "speech_summary", "approval_summary",
+                     "pr_summary"):
             assert defaults["TIERS"][tier] == "anthropic/claude-haiku-5.5", tier
         for tier in ("worker", "cheap"):
             assert defaults["TIERS"][tier] == "openai/gpt-oss-20b", tier
@@ -70,6 +71,10 @@ def config_default_checks() -> None:
         assert runpy.run_path(str(source))["TIERS"]["approval_summary"] == "test/approval"
         os.environ["JARVIS_APPROVAL_SUMMARY_MODEL"] = ""
         assert runpy.run_path(str(source))["TIERS"]["approval_summary"] == "anthropic/claude-haiku-5.5"
+        os.environ["JARVIS_PR_SUMMARY_MODEL"] = "test/pr"
+        assert runpy.run_path(str(source))["TIERS"]["pr_summary"] == "test/pr"
+        os.environ["JARVIS_PR_SUMMARY_MODEL"] = ""
+        assert runpy.run_path(str(source))["TIERS"]["pr_summary"] == "anthropic/claude-haiku-5.5"
 
     assert context.ContextPolicy().compact_at_tokens == config.COMPACT_AT_TOKENS
     assert Agent(tool_names=["get_datetime"]).policy.compact_at_tokens == config.COMPACT_AT_TOKENS

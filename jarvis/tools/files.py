@@ -209,6 +209,11 @@ SELF_PROTECTED = frozenset(
         # the caps and the cleaning hook between the model and the card. The
         # same reason as approval_summary.py, which it was factored out of.
         "jarvis/v2/summary_engine.py",
+        # PR summaries (PM-C, 2026-10-28): the model-written lines on an inbox
+        # PR row, what of a PR leaves for the model, the day's caps, and the
+        # actions code puts beside them. An agent that could edit it could
+        # put its own words, or its own buttons, on a PR the owner merges.
+        "jarvis/v2/pr_summary.py",
     }
 )
 
