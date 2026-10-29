@@ -434,6 +434,10 @@ class Permit(unittest.TestCase):
                                        "note": "", "scope": scope()})
         decision, verdict = self.call(self.permit(task="unread"), "git push origin HEAD:main")
         self.assertEqual((decision, verdict.layer), (Decision.DENY, permissions.L_PR_SCOPE))
+        with patch.object(config, "V2_DATA_DIR", Path(store.path) / "not-a-folder"):
+            # A data root under a file holds no record: nothing to say.
+            decision, verdict = self.call(self.permit(task="unread"), "git push origin HEAD:main")
+            self.assertNotEqual(verdict.layer, permissions.L_PR_SCOPE)
         store.path.write_text("not json")
         decision, verdict = self.call(self.permit(task="unread"), "ls")
         self.assertEqual((decision, verdict.layer), (Decision.DENY, permissions.L_PR_SCOPE))

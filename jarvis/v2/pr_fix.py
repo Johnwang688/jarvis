@@ -1058,7 +1058,9 @@ class FixStore:
         flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
         try:
             fd = os.open(self.path, flags)
-        except FileNotFoundError:
+        except (FileNotFoundError, NotADirectoryError):
+            # No file (a folder on the way that is not one holds none either):
+            # no fix was ever started here, since starting one writes it.
             self._loaded = True
             return
         except OSError as exc:
