@@ -502,3 +502,39 @@ Deviations, each the builder's call:
 5. `fix` is in `ENRICH_KEYS` (None when the PR has none) and `DETAIL_FIELDS["pr"]`.
 6. **Not built here (PM-F):** the HUD and phone rendering of `detail.fix`, and Cancel on the phone
    beyond the existing `task:` route.
+
+**Review of #337 (2026-10-29), fixed on the branch.** The owner's decisions: a fix keeps his
+GitHub access, with added blocks (not the daemon-pushes design), and Fix stays offered on any
+PR. Each item has a test in `pr_fix_check.py` and a mutant in `pr_fix_mutants.py`.
+
+- **H-1, the credential.** In a scoped task: a read tool, file tool or line under any
+  `config.credential_dirs()` folder; `git credential*`, credential settings, `gh auth`; git and
+  gh traces; fetchers or inline code aimed at GitHub's hosts: DENY. Inline source: asked.
+- **M-1, another repository.** `merge_gate._git_dirs` follows git's order (a `.git`, then the
+  folder itself as a bare repository); `--bare` makes merge_gate's folder unknown. A fix
+  pushes only from its own worktree's git dir; `--bare`, `--git-dir`, `--work-tree`,
+  `--namespace`, `GIT_DIR` and kin: DENY.
+- **M-2, CI.** `.github` itself and anything under it counts; removals, moves and restores
+  (`rm`, `mv`, `git rm|mv|clean`, `git checkout -- <path>`, `git restore`) are read against
+  the line's folders, the worktree itself counting; pathspec magic and unplaceable writes ask;
+  `ci_changed` reads old names (`Patch.flags`).
+- **M-3.** Only `<ref>:refs/heads/<branch>`, written in full.
+- **M-4.** gh is an allowlist of reads; `gh api` abbreviations and method-override headers
+  are read.
+- **M-5.** `git config`/`git remote` writes ask; a push under `core.hooksPath`,
+  `core.sshCommand`, `core.gitProxy`, `remote.*.receivepack|uploadpack` or `url.*`, or under
+  credential helpers other than at the Fix (`Task.pr_scope["helpers"]`, a digest), is DENY;
+  so are writes to `.git/config`, `.git/hooks`, `.git/info`, the gitfile and `.gitmodules`.
+  (The owner's own config sets `credential.helper`, so a helper's presence cannot be the test;
+  a change since the Fix is.)
+- **L-1** a head branch that is `main`, `master`, `release*` or the remote's default gets no
+  Fix; **L-2** the task id is in the record before the worktree and the start, and a record
+  that cannot take it is a failed start; **L-3** any failed start cancels the task and removes
+  its worktree and branch; **L-4** programs that run a line or outlive the call, and pager or
+  editor overrides, ask; **NIT** the permit's fallback reads the fixes root `PrFixes` writes.
+
+**Residual, accepted by the owner.** The task runs the PR's own code (tests, scripts, the
+build) as the owner's OS user; that code can read the owner's GitHub token from disk and use
+it however it likes, and the gate reads no script file. Fix on a PR whose code the owner does
+not trust can act with his GitHub access. The fix card's ancestry check and its CI amber
+check what reaches the branch, not what such code does elsewhere.

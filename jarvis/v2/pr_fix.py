@@ -50,38 +50,67 @@ change CI or scanner config, or skip a test, to make a check pass; stop and
 report a rejected push; never merge, close, edit, ready or review the PR.
 
 **The gate (PM-20), `judge(scope, tool, args, ...)`.** The task carries
-`Task.pr_scope` `{repo, number, branch}`, set only here, at create, and kept
-by every later save (`TaskStore.save`). `permissions.build_permit` asks
-`judge` right after layer 1, for every call of a task that has one; a task
-without one is unchanged. DENY (never asked of anyone):
+`Task.pr_scope` `{repo, number, branch, helpers}` (`helpers`: a digest of the
+repository's git credential helpers when the Fix started), set only here, at
+create, and kept by every later save (`TaskStore.save`).
+`permissions.build_permit` asks `judge` right after layer 1, for every call
+of a task that has one; a task without one is unchanged. The owner chose
+(2026-10-29) that a fix keeps his GitHub access, with these blocks, and that
+Fix is offered on any PR. DENY (never asked of anyone):
 
-  - a push anywhere but `refs/heads/<branch>` of that repository: another
-    branch, a tag or any other ref, a refspec whose destination differs, a
-    remote that is a URL or a path, a remote whose push URL is another
-    repository, `--all`/`--branches`/`--mirror`/`--tags`/`--follow-tags`,
-    `--repo`, `--receive-pack`/`--exec`, `--recurse-submodules`,
-    `send-pack`, `http-push`, `subtree push`;
-  - a force push (`--force`, `-f`, `--force-with-lease`,
-    `--force-if-includes`, a `+` refspec) and a deletion (`--delete`, `-d`,
-    `:<ref>`, `--prune`), long options in git's abbreviations too;
-  - `gh pr merge|close|edit|ready|review`; any `gh api` that is not a GET
-    (an explicit method, or fields, `--input` or `graphql`, which POST);
-    `gh repo sync`, `gh workflow disable`, `gh secret|variable set|delete`;
-  - a write to CI or scanner config (`ci_path`: `.github/workflows/`,
-    `.github/actions/`, the usual CI files, `pr_facts.SCANNER_CONFIGS`) by a
-    file tool, a redirect or a program that writes, removes or moves it;
+  - a push other than `<ref>:refs/heads/<branch>`, the destination written
+    in full (M-3: a bare or short name may be a tag), to a remote of the
+    task's own worktree whose push URL is that repository: another branch,
+    tag or ref, a URL or path remote, `--all`/`--branches`/`--mirror`/
+    `--tags`/`--follow-tags`, a mirror remote, `--repo`, `--receive-pack`/
+    `--exec`, `--recurse-submodules`, `send-pack`, `http-push`, `subtree push`;
+  - a push from any git dir but the worktree's own (M-1: a bare repository
+    below it, which git finds first, another checkout, `--bare`,
+    `--git-dir`, `--work-tree`, `--namespace`, `GIT_DIR` and kin);
+  - force (`-f`, `--force*` in git's abbreviations, `+`) and delete (`-d`,
+    `--delete`, an empty or all-zero source, `--prune`);
+  - a push under config that runs a program or rewrites where it goes
+    (`core.hooksPath`, `core.sshCommand`, `core.gitProxy`,
+    `remote.*.receivepack|uploadpack`, `url.*`), or under credential helpers
+    other than at the Fix (M-5); a file-tool or shell write to `.git/config`,
+    `.git/hooks`, `.git/info`, a worktree's gitfile or `.gitmodules`;
+  - the owner's credential (H-1): a read or write under any
+    `config.credential_dirs()` folder by a read tool, a file tool or a line
+    that names it; `git credential*`, credential settings read or set,
+    `gh auth`; git and gh traces; curl, wget and other fetchers, or inline
+    code, aimed at github.com, api/uploads.github.com or
+    githubusercontent.com;
+  - gh beyond reads (M-4): only `pr view|list|diff|checks|status`, `run
+    view|list|download|watch`, `workflow view|list`, `repo view`, `issue
+    view|list|status`, `release view|list`, `cache|label list`, `ruleset
+    list|view|check`, `search`, `status`, `browse --no-browser`, and a GET
+    `gh api` (no method override, no fields, no graphql) pass; every other
+    command or verb, an alias or extension included, is refused;
+  - a write, removal, move or restore of CI or scanner config (M-2:
+    `.github` itself and anything under it, `.circleci`, `.buildkite`, the
+    usual CI files, `pr_facts.SCANNER_CONFIGS`; relative targets read
+    against the line's folders, the worktree itself counting as a folder
+    that holds `.github`);
   - any call of a Codex session.
 
 ASK (the owner, through the broker; deferred in quiet hours as usual): a
-push the gate cannot read — no refspec, a bare `HEAD`, a word that is an
-expansion, a git setting or another folder on its command line, a line
-that also changes a remote or git config, config with includes or
-`insteadOf` rewrites, a git subcommand it does not know (an alias), a gh
-alias or extension, a line too complex to walk, or a line that runs text it
-cannot read and spells a push or `gh`. Everything else goes on to the
-task's ordinary gate. Like `merge_gate`, it is an accident guard: a script
-file the task wrote is not read. The card's ancestry check (PM-22) and its
-"the fix changed CI configuration" are the backstops.
+push the gate cannot read (no refspec, an expansion, a `-c` setting, a line
+that changes git config, included config); any `git config` or `git remote`
+write; inline code (`python -c`, `node -e`, `perl -e`, ...); a git
+subcommand or program that runs a line or outlives the call (`submodule
+foreach`, `rebase -x|-i`, `bisect run`, `difftool`, `filter-branch`, tmux,
+screen, at, nohup, setsid, ...); a pager or editor override; a program the
+gate does not read beside a push or gh call (`make push`, `pytest && git
+push`); a write it cannot place that may touch CI; a line too complex to walk.
+Everything else goes on to the task's ordinary gate.
+
+**What this does not stop, as the owner accepted.** The task runs the PR's
+own code (its tests, scripts and build) as the owner's OS user, and that
+code can read the owner's GitHub token from disk and use it however it
+likes; nothing here reads a script file. A fix on a PR whose code the owner
+does not trust can therefore act with the owner's GitHub access. The fix
+card's ancestry check (PM-22) and "the fix changed CI configuration" are
+the backstops for what reaches the branch, not for what such code does.
 
 **Tracking (PM-21).** `<data root>/inbox/pr-fixes.json` (0600, folder 0700)
 holds, per PR, each fix: `{task_id, from_head, from_patches, started, state}`.
@@ -202,9 +231,12 @@ S_GH_PR = "pr-scope-gh-pr"
 S_GH_API = "pr-scope-gh-api"
 S_GH_WRITE = "pr-scope-gh-write"
 S_CI = "pr-scope-ci-config"
+S_CRED = "pr-scope-credential"
+S_REPO = "pr-scope-other-repository"
+S_GITCONFIG = "pr-scope-git-config"
 S_UNSURE = "pr-scope-unsure"
 S_BROKEN = "pr-scope-unreadable"
-_PUSH_RULES = frozenset({S_DEST, S_REMOTE, S_ALL, S_FORCE, S_DELETE, S_PROGRAM})
+_PUSH_RULES = frozenset({S_DEST, S_REMOTE, S_ALL, S_FORCE, S_DELETE, S_PROGRAM, S_REPO})
 
 
 @dataclass(frozen=True)
@@ -214,44 +246,94 @@ class ScopeHit:
     reason: str
 
 
-CI_DIRS = frozenset({(".github", "workflows"), (".github", "actions")})
-CI_TOP_DIRS = frozenset({".circleci", ".buildkite"})
+CI_TOP_DIRS = frozenset({".github", ".circleci", ".buildkite"})
 CI_FILES = frozenset({".gitlab-ci.yml", ".travis.yml", "azure-pipelines.yml", "jenkinsfile",
                       "bitbucket-pipelines.yml", ".drone.yml", "appveyor.yml", ".appveyor.yml",
                       ".pre-commit-config.yaml", "codecov.yml", ".codecov.yml"})
 
 
+def _parts(path) -> list[str]:
+    """A path's components as git and Windows would compare them: separators
+    either way, case folded, quotes and shell escapes out, trailing dots and
+    spaces trimmed, `.` dropped."""
+    text = str(path).replace("\\", "/").replace("'", "").replace('"', "").casefold()
+    return [p.rstrip(" .") or p for p in text.split("/") if p not in ("", ".")]
+
+
 def ci_path(path) -> bool:
-    """Whether a path names CI or secret-scanner configuration (or a folder
-    holding it): anywhere under `.github/workflows/`, `.github/actions/`,
-    `.circleci/`, `.buildkite/`, a usual CI file or a scanner config
-    (`pr_facts.SCANNER_CONFIGS`). Case and Windows trimming ignored."""
+    """Whether a path names CI or secret-scanner configuration, or a folder
+    holding it: `.github` itself and anything under it (workflows, actions,
+    dependabot, CODEOWNERS), `.circleci/`, `.buildkite/`, a usual CI file, a
+    scanner config (`pr_facts.SCANNER_CONFIGS`). Case, quotes, escapes and
+    Windows trimming ignored."""
     from .pr_facts import SCANNER_CONFIGS
-    text = str(path).replace("\\", "/").casefold()
-    parts = [p.rstrip(" .") for p in text.split("/")]
-    parts = [p for p in parts if p not in ("",)]
-    if not parts:
-        return False
-    if parts[-1] in CI_FILES or parts[-1] in SCANNER_CONFIGS:
-        return True
-    if any(p in CI_TOP_DIRS for p in parts):
-        return True
-    return any((parts[i], parts[i + 1]) in CI_DIRS for i in range(len(parts) - 1))
+    for parts in (_parts(path), _parts(str(path).replace("\\", ""))):   # a Windows path, or shell escapes
+        if parts and (parts[-1] in CI_FILES or parts[-1] in SCANNER_CONFIGS
+                      or any(p in CI_TOP_DIRS for p in parts)):
+            return True
+    return False
+
+
+def git_internal(path) -> bool:
+    """A file that steers git itself: `.git` (a worktree's gitfile), anything
+    under a `.git` folder's `config`, `hooks`, `info` or `worktrees`, a
+    `config.worktree`, `.gitmodules`."""
+    for parts in (_parts(path), _parts(str(path).replace("\\", ""))):
+        if parts and (parts[-1] in (".git", ".gitmodules", "config.worktree") or any(
+                p == ".git" and i + 1 < len(parts) and parts[i + 1] in ("config", "hooks", "info", "worktrees")
+                for i, p in enumerate(parts))):
+            return True
+    return False
 
 
 def valid_scope(scope) -> bool:
     from .chat_git import valid_branch
     from .pr_facts import valid_number, valid_repo
-    return (isinstance(scope, dict) and set(scope) == {"repo", "number", "branch"}
-            and valid_repo(scope["repo"]) and valid_number(scope["number"])
-            and valid_branch(scope["branch"]))
+    if not isinstance(scope, dict) or not ({"repo", "number", "branch"} <= set(scope)
+                                           <= {"repo", "number", "branch", "helpers"}):
+        return False
+    helpers = scope.get("helpers")
+    return (valid_repo(scope["repo"]) and valid_number(scope["number"])
+            and valid_branch(scope["branch"])
+            and (helpers is None or (isinstance(helpers, str) and bool(re.fullmatch(r"[0-9a-f]{64}", helpers)))))
 
 
-def make_scope(repo: str, number: int, branch: str) -> dict:
+def make_scope(repo: str, number: int, branch: str, helpers: str | None = None) -> dict:
+    """The task's scope. `helpers` is the digest of the repository's git
+    credential helpers when the Fix started (`helpers_digest`): a push made
+    under any other set is refused (M-5)."""
     scope = {"repo": repo, "number": number, "branch": branch}
+    if helpers is not None:
+        scope["helpers"] = helpers
     if not valid_scope(scope):
         raise ValueError("not a valid PR scope")
     return scope
+
+
+def _config_of(pair) -> list:
+    from . import merge_gate as mg
+    return mg._config_entries(mg._config_files([pair]))
+
+
+def helpers_digest(entries) -> str:
+    """sha256 of every `credential[.<url>].helper` entry, in order (values
+    never stored: a helper line may hold a secret)."""
+    found = [f"{sub}\n{kv}" for sec, sub, kv in entries
+             if sec == "credential" and kv.split("=", 1)[0] == "helper"]
+    return hashlib.sha256("\0".join(found).encode("utf-8")).hexdigest()
+
+
+def repo_helpers_baseline(root) -> str | None:
+    """`helpers_digest` of the credential helpers a new worktree of the
+    repository at `root` sees: the owner's global config and the
+    repository's own (no worktree's `config.worktree`). None when it cannot
+    be read."""
+    from . import merge_gate as mg
+    found = mg._git_dirs(Path(root))
+    if not isinstance(found, tuple):
+        return None
+    files = [f for f in mg._config_files([found]) if f.name != "config.worktree"]
+    return helpers_digest(mg._config_entries(files))
 
 
 _GIT_NAMES = ("git", "gh", "git-push", "git-send-pack", "git-http-push", "gh.exe", "git.exe")
@@ -259,14 +341,14 @@ _PUSHISH = re.compile(r"\bpush\b|send-pack|http-push|(?<![\w-])gh(?![\w-])", re.
 _REMOTE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}")
 _GIT_GLOBAL_VALUES = frozenset({"-C", "-c", "--git-dir", "--work-tree", "--namespace",
                                 "--config-env", "--exec-path", "--super-prefix", "--attr-source"})
-_GIT_GLOBAL_RISKY = ("-c", "--git-dir", "--work-tree", "--namespace", "--config-env",
-                     "--exec-path", "--super-prefix")
+# git's own options that point it at another repository (M-1): DENY in a fix.
+_GIT_ELSEWHERE = ("--git-dir", "--work-tree", "--namespace", "--bare", "--super-prefix", "--exec-path")
 # git's own commands (and git-lfs) that are not pushes. Anything else may be
 # an alias or another program named git-<x>: a push the gate cannot read.
 _GIT_KNOWN = frozenset("""
 add am annotate apply archive backfill bisect blame branch bugreport bundle cat-file check-attr
 check-ignore check-mailmap check-ref-format checkout checkout-index cherry cherry-pick citool clean
-clone column commit commit-graph commit-tree config count-objects credential describe diagnose diff
+clone column commit commit-graph commit-tree config count-objects describe diagnose diff
 diff-files diff-index diff-pairs diff-tree difftool fast-export fast-import fetch fetch-pack
 filter-branch fmt-merge-msg for-each-ref for-each-repo format-patch fsck fsck-objects gc
 get-tar-commit-id grep gui hash-object help hook index-pack init instaweb interpret-trailers
@@ -279,8 +361,30 @@ status stripspace submodule switch symbolic-ref tag unpack-file unpack-objects u
 update-ref update-server-info var verify-commit verify-pack verify-tag version whatchanged
 worktree write-tree
 """.split())
-_GIT_WRITES_PATHS = frozenset({"rm", "mv", "checkout", "restore"})
-_WRITERS = frozenset({"rm", "unlink", "rmdir", "mv", "shred", "truncate"})
+# git subcommands that remove, move or overwrite the paths they name (M-2).
+_GIT_WRITES_PATHS = frozenset({"rm", "mv", "checkout", "restore", "clean"})
+_WRITERS = frozenset({"rm", "unlink", "rmdir", "mv", "shred", "truncate", "touch", "chmod", "ln",
+                      "cp", "install", "rsync", "tee", "dd"})
+# git subcommands and programs that run a line they are handed, or outlive
+# the call (L-4): asked in a fix.
+_GIT_RUNS = {"submodule": ("foreach",), "rebase": ("--exec", "-x", "-i", "--interactive"),
+             "bisect": ("run",), "difftool": None, "mergetool": None, "filter-branch": None,
+             "filter-repo": None}
+_DETACHERS = frozenset({"tmux", "screen", "at", "batch", "crontab", "nohup", "setsid", "disown",
+                        "daemonize", "systemd-run", "dtach", "abduco"})
+_EDITOR_ENV = re.compile(r"(?<![A-Za-z0-9_])(GIT_PAGER|PAGER|GIT_EDITOR|EDITOR|VISUAL|"
+                         r"GIT_SEQUENCE_EDITOR|GH_PAGER|GH_EDITOR|MANPAGER)\s*=")
+_EDITOR_KEYS = re.compile(r"^(core\.(pager|editor|hookspath|sshcommand|gitproxy|fsmonitor|askpass)|"
+                          r"sequence\.editor|pager\..*|alias\..*|credential\..*|url\..*|"
+                          r"remote\..*|include.*)$", re.I)
+# Reading or handing out the owner's GitHub credential (H-1).
+_TRACE_ENV = re.compile(r"(?<![A-Za-z0-9_])(GIT_TRACE[A-Z_]*|GIT_CURL_VERBOSE|GH_DEBUG|GIT_ASKPASS|"
+                        r"SSH_ASKPASS|GH_TOKEN|GITHUB_TOKEN|GH_ENTERPRISE_TOKEN)\b")
+_GITHUB_HOST = re.compile(r"(?i)(?<![\w.-])((api|uploads|codeload|gist)\.)?github\.com\b|"
+                          r"githubusercontent\.com\b")
+_FETCHERS = frozenset({"curl", "wget", "http", "https", "httpie", "xh", "xhs", "aria2c", "axel",
+                       "lwp-request", "get", "post", "nc", "ncat", "socat", "openssl", "telnet"})
+_INLINE_FLAGS = frozenset({"-c", "-e", "-E", "-p", "-r", "--eval", "--print", "-x", "eval"})
 
 # git push's long options: None (allowed), "value" (allowed, takes a value),
 # or the rule that refuses it. A `--no-<x>` negation is always allowed.
@@ -304,20 +408,53 @@ _DENY_WORDS = {
     S_PROGRAM: "hands the push to another program or other repositories",
 }
 _GH_PR_DENIED = frozenset({"merge", "close", "edit", "ready", "review"})
+# The gh a fix may run (M-4): reads only. Any other command or verb is refused.
+_GH_READS: dict[str, frozenset | None] = {
+    "pr": frozenset({"view", "list", "ls", "diff", "checks", "status"}),
+    "run": frozenset({"view", "list", "ls", "download", "watch"}),
+    "workflow": frozenset({"view", "list", "ls"}),
+    "repo": frozenset({"view"}),
+    "issue": frozenset({"view", "list", "ls", "status"}),
+    "release": frozenset({"view", "list", "ls"}),
+    "cache": frozenset({"list", "ls"}),
+    "label": frozenset({"list", "ls"}),
+    "ruleset": frozenset({"list", "ls", "view", "check"}),
+    "search": None, "status": None, "help": None, "version": None,
+}
 _GH_VALUE_OPTS = frozenset({"-R", "--repo", "--hostname"})
 _GH_API_VALUES = frozenset({"-H", "--header", "-q", "--jq", "-t", "--template", "--hostname",
                             "--cache", "-p", "--preview"})
 _GH_API_FIELDS = frozenset({"-f", "--raw-field", "-F", "--field", "--input"})
 
 
-class _Judge:
-    """One call's reading against one scope."""
+def _credential_fragments() -> list[str]:
+    """How a credential folder may be written on a line: `~/.config/gh`,
+    `.config/gh` (after `$HOME/`), and its absolute path."""
+    from jarvis import config
+    out = []
+    for raw in config.credential_dirs():
+        text = str(raw)
+        out.append(text)
+        if text.startswith("~/"):
+            out.append(text[1:])                    # "/.config/gh": after $HOME, ${HOME}, ~
+        out.append(str(Path(text).expanduser()))
+    return [f for f in dict.fromkeys(out) if len(f) > 3]
 
-    def __init__(self, scope: dict):
+
+class _Judge:
+    """One call's reading against one scope. `root` is the task's own
+    worktree (the brief's folder): its git dir is the only one a fix pushes
+    from (M-1)."""
+
+    def __init__(self, scope: dict, root=None):
+        from . import merge_gate as mg
         self.scope = scope
         self.branch = scope["branch"]
         self.repo = scope["repo"]
         self.hits: list[ScopeHit] = []
+        self.root = Path(root) if isinstance(root, str) and root and Path(root).is_absolute() else None
+        own = mg._git_dirs(self.root) if self.root is not None else None
+        self.own = own if isinstance(own, tuple) else None
 
     def deny(self, rule: str, why: str) -> None:
         hint = (f". A fix pushes only with `git push origin HEAD:refs/heads/{self.branch}` "
@@ -333,12 +470,80 @@ class _Judge:
                 return hit
         return self.hits[0] if self.hits else None
 
-    # -- a file tool ---------------------------------------------------------------------------
+    # -- paths ---------------------------------------------------------------------------------
 
-    def file(self, target) -> None:
-        if ci_path(target):
-            self.deny(S_CI, "a fix never changes CI or secret-scanner configuration "
-                            f"({_shown(target)})")
+    def _rel(self, target, dirs):
+        """`target` as candidate paths, relative to the worktree when inside
+        it; None when it cannot be told (an expansion, unknown folders)."""
+        from . import merge_gate as mg
+        if mg._wild(target):
+            return None
+        text = str(target).strip().strip("'\"")
+        if text.startswith("~"):
+            text = str(Path(text).expanduser())
+        if text.startswith(":") and len(text) > 1:
+            return None                             # git pathspec magic (`:/`, `:(top)`)
+        if Path(text).is_absolute():
+            bases = [Path(text)]
+        elif dirs is mg.UNKNOWN:
+            return None
+        else:
+            bases = [Path(os.path.normpath(Path(d) / text)) for d in dirs]
+        out = []
+        for path in bases:
+            path = Path(os.path.normpath(path))
+            if self.root is not None and (path == self.root or self.root in path.parents):
+                out.append(os.path.relpath(path, self.root))
+            else:
+                out.append(str(path))
+        return out
+
+    def _ci_target(self, target, dirs, *, destroys: bool = False) -> None:
+        """A write (or, `destroys`, a removal, move or restore) of `target`:
+        DENY when it is CI or scanner config (or, destroying, a folder that
+        holds `.github`: the worktree itself); ASK when it cannot be placed
+        and may be."""
+        found = self._rel(target, dirs)
+        if found is None:
+            if ci_path(target) or destroys:
+                self.ask(f"a write the gate cannot place ({_shown(target)})")
+            return
+        for rel in found:
+            if ci_path(rel) or ci_path(target) or (destroys and rel in (".", "")):
+                self.deny(S_CI, "a fix never changes, moves or removes CI or secret-scanner "
+                                f"configuration ({_shown(target)})")
+                return
+
+    def file(self, target, dirs=None) -> None:
+        """A file tool's target, or a program's written path."""
+        from . import merge_gate as mg
+        if self._credential(target):
+            return
+        if dirs is None:
+            dirs = [self.root] if self.root is not None else mg.UNKNOWN
+        if git_internal(target) or any(git_internal(r) for r in (self._rel(target, dirs) or [])):
+            self.deny(S_GITCONFIG, "a fix never writes git's own config, hooks or gitfile "
+                                   f"({_shown(target)})")
+            return
+        self._ci_target(target, dirs)
+
+    def _credential(self, target) -> bool:
+        from .permissions import _under_credential_dir
+        text = str(target).strip().strip("'\"")
+        if text and (_under_credential_dir(text) or (self.root is not None and not text.startswith(("/", "~"))
+                                                     and _under_credential_dir(str(self.root / text)))):
+            self.deny(S_CRED, "a fix never reads or writes a credential folder "
+                              f"({_shown(target)})")
+            return True
+        return False
+
+    def read(self, tool: str, args: dict) -> None:
+        """A read tool (Read, Grep, Glob, LS, ...): a credential folder is refused (H-1)."""
+        for key in ("file_path", "notebook_path", "path", "pattern"):
+            value = args.get(key)
+            if isinstance(value, str) and value.strip() and ("/" in value or value.startswith("~")):
+                if self._credential(value):
+                    return
 
     # -- a command line ------------------------------------------------------------------------
 
@@ -348,10 +553,22 @@ class _Judge:
         if not isinstance(text, str) or not text.strip():
             return
         text = text.replace("\x00", " ")
+        flat = text.replace("\\", "").replace("'", "").replace('"', "")
         line = mg._Line(text, where)
+        for fragment in _credential_fragments():
+            if fragment in text or fragment in flat:
+                self.deny(S_CRED, "a fix never reads or writes a credential folder")
+                break
+        if _TRACE_ENV.search(text):
+            self.deny(S_CRED, "a fix never turns on git's or gh's traces, or hands either a token")
+        if mg._GIT_ENV.search(text):
+            self.deny(S_REPO, "a fix never points git at another repository or config "
+                              "(GIT_DIR, GIT_WORK_TREE, GIT_CONFIG*, GIT_NAMESPACE)")
+        if _EDITOR_ENV.search(text):
+            self.ask("a pager or editor set on the line runs a program the gate does not read")
         for match in mg._REDIRECT_TARGET.finditer(text):
-            self.file(match.group(1))
-        progs = []
+            self.file(match.group(1), line.dirs)
+        walks = []
         for variant in rules._program_variants(text):
             walk = rules._Walk()
             try:
@@ -361,28 +578,48 @@ class _Judge:
                 if _PUSHISH.search(variant):
                     self.ask("the line is too complex to judge, and it may push or call gh")
                 continue
-            progs.append(walk)
+            walks.append(walk)
         # First the whole line: does anything on it change a remote or git
-        # config, or move where git runs? A push on such a line cannot be
-        # read from the config as it stands now.
+        # config? A push on such a line cannot be read from the config as
+        # it stands now.
         changes_config = False
-        for walk in progs:
+        executor = interpreter = fetcher = writer = False
+        for walk in walks:
             for prog in walk.progs:
                 if not prog.word:
-                    line.runs_text = True
+                    line.runs_text = executor = True
                     continue
                 stem, _could = mg._stem_could_be(prog.word, _GIT_NAMES)
                 args = list(prog.args)
                 mg._writes_and_text(line, stem, prog, args)
                 if stem == "git" and self._git_changes_config(args):
                     changes_config = True
+                if stem is None or (stem not in mg._DATA_STEMS and stem not in _GIT_NAMES
+                                    and stem not in rules._WRAPPER_OPTS and stem not in rules._RUNNER_SPECS
+                                    and stem not in ("cd", "pushd", "popd")):
+                    executor = True
+                if stem is not None and mg._INTERPRETERS.fullmatch(stem):
+                    interpreter = True
+                if stem in _FETCHERS:
+                    fetcher = True
+                if stem in _WRITERS or stem in ("sed", "perl", "find", "patch") or (
+                        stem == "git" and any(str(a) in _GIT_WRITES_PATHS | {"apply", "am"} for a in args)):
+                    writer = True
         changes_config = changes_config or line.config_changed
-        for walk in progs:
+        for walk in walks:
             for prog in walk.progs:
                 if prog.word:
                     self.program(line, prog, changes_config)
+        if (fetcher or interpreter) and _GITHUB_HOST.search(flat):
+            self.deny(S_CRED, "a fix reaches GitHub through gh and git only (never curl, wget or "
+                              "inline code, which could carry the owner's token)")
         if line.runs_text and _PUSHISH.search(text):
             self.ask("the line runs text the gate cannot read, and it spells a push or a gh call")
+        elif executor and _PUSHISH.search(text):
+            self.ask("a program the gate does not read runs on a line that spells a push or a gh call")
+        if (writer or interpreter or mg._REDIRECT_TARGET.search(text)) and any(
+                ci_path(w) for w in re.split(r"[\s;&|<>()=]+", flat) if w):
+            self.ask("a line that writes and names CI or scanner configuration")
 
     @staticmethod
     def _git_changes_config(args) -> bool:
@@ -403,17 +640,25 @@ class _Judge:
         return False
 
     def program(self, line, prog, changes_config: bool) -> None:
+        from jarvis import rules
         from . import merge_gate as mg
         stem, could = mg._stem_could_be(prog.word, _GIT_NAMES)
         args = list(prog.args)
         words = [str(a) for a in args]
         if stem is not None:
             for target in mg._written(stem, words):
-                self.file(target)
-            if stem in _WRITERS:
+                self.file(target, line.dirs)
+            if stem in ("rm", "unlink", "rmdir", "mv", "shred", "truncate"):
                 for word in words:
                     if not word.startswith("-"):
-                        self.file(word)
+                        self._ci_target(word, line.dirs, destroys=True)
+        if stem in _DETACHERS:
+            self.ask(f"{_shown(stem)} runs a program that outlives the call or is not read")
+        if stem is not None and mg._INTERPRETERS.fullmatch(stem):
+            inline = any(w in _INLINE_FLAGS or (w[:2] in ("-c", "-e", "-E") and len(w) > 2) for w in words)
+            files = [w for w in words if not w.startswith("-")]
+            if inline or not files:
+                self.ask(f"inline {_shown(stem)} code is not read by the gate")
         if stem in ("cd", "pushd"):
             if any(w == "-" or w.startswith("+") for w in words):
                 line.move(None)
@@ -426,6 +671,8 @@ class _Judge:
             self.push(line, args, line.dirs, changes_config)
         elif stem in ("git-send-pack", "git-http-push"):
             self.deny(S_PROGRAM, "pushes with git's plumbing")
+        elif stem is not None and stem.startswith("git-credential"):
+            self.deny(S_CRED, "a fix never asks git for a credential")
         elif stem == "gh":
             self.gh(args)
         elif stem is None:
@@ -433,7 +680,9 @@ class _Judge:
                 self.ask("a program named by an expansion may be git or gh")
         else:
             mg._dir_options(line, stem, args)
-            from jarvis import rules
+            if stem in rules._RUNNER_SPECS and _PUSHISH.search(" ".join(words)):
+                # `npm run push`: a script the gate does not read, named for a push.
+                self.ask(f"{_shown(stem)} runs a script named for a push or gh")
             if (stem not in rules._WRAPPER_OPTS and stem not in rules._RUNNER_SPECS
                     and any(mg._stem_could_be(a, _GIT_NAMES)[0] in _GIT_NAMES for a in args)
                     and _PUSHISH.search(" ".join(words))):
@@ -446,22 +695,35 @@ class _Judge:
     def git(self, line, args, changes_config: bool) -> None:
         from . import merge_gate as mg
         dirs = line.dirs
-        risky = False
+        moved = False
         i = 0
         while i < len(args):
             word = str(args[i])
             if word == "-C" or (word.startswith("-C") and len(word) > 2):
                 value = args[i + 1] if word == "-C" and i + 1 < len(args) else (word[2:] if word != "-C" else None)
                 dirs = self._moved(dirs, value)
+                moved = True
                 i += 2 if word == "-C" else 1
                 continue
-            if word in _GIT_GLOBAL_VALUES:
-                risky = True
-                i += 2
+            name = word.split("=", 1)[0]
+            if name in _GIT_ELSEWHERE:
+                self.deny(S_REPO, f"a fix runs git in its own worktree only ({_shown(word)})")
+                return
+            if word in ("-c", "--config-env") or word.startswith(("--config-env=", "-c")) and word != "-C":
+                value = (args[i + 1] if word in ("-c", "--config-env") and i + 1 < len(args)
+                         else (word.split("=", 1)[1] if word.startswith("--config-env=") else word[2:]))
+                key = str(value).split("=", 1)[0]
+                if word.startswith("--config-env") or mg._wild(value):
+                    self.ask("a git setting the gate cannot read")
+                elif key.lower().startswith("credential"):
+                    self.deny(S_CRED, "a fix never sets git's credential helper")
+                    return
+                elif _EDITOR_KEYS.match(key) or not mg._benign_setting(key, str(value).partition("=")[2]):
+                    self.ask(f"a git setting that may run a program ({_shown(key)})")
+                i += 2 if word in ("-c", "--config-env") else 1
                 continue
-            if word.startswith(tuple(o + "=" for o in _GIT_GLOBAL_RISKY)):
-                risky = True
-                i += 1
+            if word in _GIT_GLOBAL_VALUES:
+                i += 2
                 continue
             if word.startswith("-"):
                 i += 1
@@ -475,26 +737,64 @@ class _Judge:
         sub, rest = str(args[i]), args[i + 1:]
         words = [str(a) for a in rest]
         if sub == "push":
-            if risky:
-                self.ask("a push with a git setting, folder or namespace on its command line")
-                return
             self.push(line, rest, dirs, changes_config)
+        elif sub.startswith("credential"):
+            self.deny(S_CRED, "a fix never asks git for a credential")
+        elif sub == "config":
+            if any("credential" in w.lower() for w in words):
+                self.deny(S_CRED, "a fix never reads or sets git's credential settings")
+            elif self._git_changes_config(["config", *words]):
+                self.ask("a git config change in a fix is the owner's")
+        elif sub == "remote":
+            if self._git_changes_config(["remote", *words]):
+                self.ask("a remote change in a fix is the owner's")
         elif sub in ("send-pack", "http-push"):
             self.deny(S_PROGRAM, "pushes with git's plumbing")
         elif sub == "subtree" and "push" in words:
             self.deny(S_PROGRAM, "pushes a subtree to another repository")
         elif sub == "lfs" and "push" in words:
             self.ask("git lfs push sends objects the gate does not read")
+        elif sub in _GIT_RUNS and (_GIT_RUNS[sub] is None or any(
+                w in _GIT_RUNS[sub] or any(w.startswith(f + "=") for f in _GIT_RUNS[sub] if f.startswith("--"))
+                for w in words)):
+            self.ask(f"git {sub} runs a line the gate does not read")
         elif sub in _GIT_WRITES_PATHS:
-            for word in words:
-                if not word.startswith("-"):
-                    self.file(word)
+            self._git_paths(sub, words, dirs, moved)
         elif sub not in _GIT_KNOWN:
             self.ask(f"git {_shown(sub)} is not a git command the gate knows (an alias or another "
                      "program may push)")
 
-    @staticmethod
-    def _moved(dirs, value):
+    def _git_paths(self, sub: str, words: list[str], dirs, moved: bool) -> None:
+        """M-2: what `git rm|mv|checkout|restore|clean` removes, moves or
+        overwrites. `checkout` names paths only after `--` (else it switches
+        a branch); the rest name them as operands."""
+        if sub == "checkout":
+            if "--" not in words:
+                return
+            paths = words[words.index("--") + 1:]
+        else:
+            values = {"-s", "--source", "--pathspec-from-file", "-e", "--exclude"}
+            paths, skip = [], False
+            for w in words:
+                if skip:
+                    skip = False
+                    continue
+                if w in values:
+                    skip = True
+                    continue
+                if w.startswith("--pathspec-from-file"):
+                    self.ask("paths read from a file the gate does not read")
+                    return
+                if w == "--" or w.startswith("-"):
+                    continue
+                paths.append(w)
+        for path in paths:
+            if path.startswith(":") and len(path) > 1:
+                self.ask(f"a git pathspec the gate cannot place ({_shown(path)})")
+                continue
+            self._ci_target(path, dirs, destroys=True)
+
+    def _moved(self, dirs, value):
         from . import merge_gate as mg
         if dirs is mg.UNKNOWN or value is None or mg._wild(value):
             return mg.UNKNOWN
@@ -602,17 +902,34 @@ class _Judge:
             self.ask("the line changes a remote or git's config before it pushes")
             return False
         repos = line.repos(dirs)
-        if repos is mg.UNKNOWN or not repos:
+        if repos is mg.UNKNOWN:
             self.ask("the repository the push runs in cannot be read")
             return False
+        if self.own is None:
+            self.ask("the fix's own worktree cannot be read")
+            return False
+        if not repos or any(tuple(Path(p).resolve() for p in pair)
+                            != tuple(Path(p).resolve() for p in self.own) for pair in repos):
+            # M-1: a bare repository or another checkout below the worktree
+            # would take the push (git finds the nearest one).
+            self.deny(S_REPO, "a fix pushes from its own worktree only, never another repository")
+            return False
         for pair in repos:
-            entries = mg._config_entries(mg._config_files([pair]))
+            entries = _config_of(pair)
             if any(sec in ("include", "includeif") for sec, _sub, _kv in entries):
                 self.ask("git's config includes other files the gate does not read")
                 return False
-            if any(sec == "url" and kv.split("=", 1)[0] in ("insteadof", "pushinsteadof")
-                   for sec, _sub, kv in entries):
-                self.ask("git's config rewrites remote URLs (insteadOf)")
+            for sec, sub, kv in entries:
+                key = kv.split("=", 1)[0]
+                if (sec == "url" or (sec == "core" and key in ("hookspath", "sshcommand", "gitproxy"))
+                        or (sec == "remote" and key in ("receivepack", "uploadpack"))):
+                    # M-5: config that runs a program, or rewrites where a push goes.
+                    self.deny(S_GITCONFIG, f"git's config sets {sec}.{key}, which runs a program or "
+                                           "rewrites where a push goes")
+                    return False
+            want = self.scope.get("helpers")
+            if want is not None and helpers_digest(entries) != want:
+                self.deny(S_GITCONFIG, "git's credential helpers changed since the Fix started")
                 return False
             mine = [(kv.split("=", 1)[0], kv.split("=", 1)[1]) for sec, sub, kv in entries
                     if sec == "remote" and sub == remote]
@@ -632,29 +949,22 @@ class _Judge:
         return True
 
     def refspec(self, spec: str) -> None:
+        """M-3: only `<ref>:refs/heads/<branch>`, the destination written in
+        full (a short name may be a tag of the same name on the remote)."""
         branch = self.branch
         if spec.startswith("+"):
             self.deny(S_FORCE, "a '+' refspec force-pushes")
             return
-        if spec.startswith("^"):
-            self.ask("a negative refspec")
-            return
         src, colon, dst = spec.partition(":")
-        if colon and not src:
-            self.deny(S_DELETE, "an empty source deletes the remote ref")
+        if colon and (not src or re.fullmatch(r"0{4,64}", src)):
+            self.deny(S_DELETE, "an empty or all-zero source deletes the remote ref")
             return
-        if not colon:
-            if src in (branch, f"refs/heads/{branch}", f"heads/{branch}"):
-                return
-            if src in ("HEAD", "@"):
-                self.ask(f"a bare HEAD pushes to a branch named after the current one; write "
-                         f"HEAD:refs/heads/{branch}")
-                return
-            self.deny(S_DEST, f"pushes {_shown(src)}, not the PR's branch {branch}")
+        if not colon or spec.startswith("^"):
+            self.deny(S_DEST, f"{_shown(spec)} does not name the destination in full")
             return
-        if dst in (f"refs/heads/{branch}", branch, f"heads/{branch}"):
+        if dst == f"refs/heads/{branch}":
             return
-        self.deny(S_DEST, f"pushes to {_shown(dst)}, not the PR's branch {branch}")
+        self.deny(S_DEST, f"pushes to {_shown(dst)}, not refs/heads/{branch}")
 
     # -- gh --------------------------------------------------------------------------------------
 
@@ -662,6 +972,8 @@ class _Judge:
         from . import merge_gate as mg
         k = 0
         while k < len(args) and str(args[k]).startswith("-"):
+            if str(args[k]) in ("--version", "--help", "-h"):
+                return
             k += 2 if str(args[k]) in _GH_VALUE_OPTS else 1
         if k >= len(args):
             return
@@ -673,18 +985,19 @@ class _Judge:
         if verb is _WILD:
             self.ask(f"gh {_shown(cmd)} with a verb that is an expansion")
             return
-        if cmd == "api":
+        if cmd == "auth":
+            self.deny(S_CRED, "a fix never reads or changes gh's login")
+        elif cmd == "api":
             self.gh_api(rest)
         elif cmd == "pr" and verb in _GH_PR_DENIED:
             self.deny(S_GH_PR, f"gh pr {verb} is the owner's to do: the owner merges a fixed PR")
-        elif cmd == "repo" and verb == "sync":
-            self.deny(S_GH_WRITE, "gh repo sync pushes to a repository's branch")
-        elif cmd == "workflow" and verb == "disable":
-            self.deny(S_GH_WRITE, "a fix never turns a check off")
-        elif cmd in ("secret", "variable") and verb in ("set", "delete", "remove"):
-            self.deny(S_GH_WRITE, "a fix never changes CI configuration")
-        elif cmd not in mg._GH_BUILTINS:
-            self.ask(f"gh {_shown(cmd)} is an alias or an extension the gate cannot read")
+        elif cmd == "browse":
+            if not any(str(w) in ("-n", "--no-browser") for w in rest):
+                self.deny(S_GH_WRITE, "gh browse opens a browser; a fix may print the link only")
+        elif cmd not in _GH_READS:
+            self.deny(S_GH_WRITE, f"gh {_shown(cmd)} is not a read a fix may make")
+        elif _GH_READS[cmd] is not None and verb is not None and verb not in _GH_READS[cmd]:
+            self.deny(S_GH_WRITE, f"gh {cmd} {_shown(verb)} is not a read a fix may make")
 
     @staticmethod
     def _verb(rest):
@@ -709,7 +1022,7 @@ class _Judge:
         k = 0
         while k < len(rest):
             arg = rest[k]
-            word = str(arg)
+            word = _gh_api_long(str(arg))
             if word in ("-X", "--method"):
                 value = rest[k + 1] if k + 1 < len(rest) else None
                 if value is None or mg._wild(value):
@@ -718,10 +1031,21 @@ class _Judge:
                 method = str(value)
                 k += 2
                 continue
+            if word in ("-H", "--header"):
+                value = str(rest[k + 1]) if k + 1 < len(rest) else ""
+                if "method" in value.lower() or mg._wild(rest[k + 1] if k + 1 < len(rest) else ""):
+                    self.deny(S_GH_API, "a header that overrides the method writes to GitHub")
+                    return
+                k += 2
+                continue
             if word.startswith("--method="):
                 method = word.split("=", 1)[1]
             elif word.startswith("-X") and len(word) > 2:
                 method = word[2:]
+            elif word.startswith("--header=") or (word.startswith("-H") and len(word) > 2):
+                if "method" in word.lower():
+                    self.deny(S_GH_API, "a header that overrides the method writes to GitHub")
+                    return
             elif word in _GH_API_FIELDS:
                 fields = True
                 k += 2
@@ -742,12 +1066,25 @@ class _Judge:
             if method.strip().upper() != "GET":
                 self.deny(S_GH_API, f"gh api {_shown(method)} writes to GitHub; a fix reads it only")
             return
-        if fields or (endpoint is not None and endpoint.strip("/").lower() == "graphql"):
+        if fields or (endpoint is not None and endpoint.strip("/").lower().endswith("graphql")):
             self.deny(S_GH_API, "gh api with fields, --input or graphql is a POST; a fix reads "
                                 "GitHub only")
 
 
 _WILD = object()
+_GH_API_LONG = ("method", "field", "raw-field", "input", "header")
+
+
+def _gh_api_long(word: str) -> str:
+    """A `gh api` long option as gh may read it: an abbreviation of one that
+    writes or sets the method is that option (`--meth PUT`, `--raw x=y`)."""
+    if not word.startswith("--") or len(word) < 4:
+        return word
+    name, eq, value = word[2:].partition("=")
+    found = [o for o in _GH_API_LONG if o.startswith(name)]
+    if len(found) == 1 and found[0] != name:
+        return f"--{found[0]}" + (eq + value)
+    return word
 
 
 def _shown(value, cap: int = 80) -> str:
@@ -760,20 +1097,24 @@ def judge(scope, tool: str, args: dict, *, judged=(), also=(), cwd=None, shell_c
     """PM-20: what a PR fix's scope says of one call (DENY, ASK), or None to
     leave it to the task's ordinary gate. `judged` are the call's command
     readings (`permissions._judged_of`), `also` any command riding with it;
-    `shell_cwd` is where the shell runs (Claude's hook), else `cwd` (the
-    brief's folder). A scope that cannot be read refuses every call."""
+    `cwd` is the brief's folder (the task's own worktree, the only git dir a
+    fix pushes from); `shell_cwd` is where the shell runs (Claude's hook),
+    else `cwd`. A scope that cannot be read refuses every call."""
     if not valid_scope(scope):
         return ScopeHit(DENY, S_BROKEN, "PR fix scope: this task's scope cannot be read; nothing "
                                         "is run")
-    j = _Judge(scope)
+    j = _Judge(scope, cwd)
     if provider == "codex":
         j.deny(S_CODEX, "a PR fix runs on Claude Code only (Codex holds no GitHub login)")
         return j.verdict()
-    from .permissions import FILE_TOOLS, file_targets
+    from .permissions import FILE_TOOLS, READ_TOOLS, file_targets
+    where = shell_cwd if isinstance(shell_cwd, str) and shell_cwd else cwd
+    dirs = [Path(where)] if isinstance(where, str) and where and Path(where).is_absolute() else None
+    if tool in READ_TOOLS or tool == "LS":
+        j.read(tool, args)
     if tool in FILE_TOOLS:
         for target in file_targets(tool, args):
-            j.file(target)
-    where = shell_cwd if isinstance(shell_cwd, str) and shell_cwd else cwd
+            j.file(target, dirs)
     for text in (*judged, *also):
         if isinstance(text, str):
             j.line(text, where)
@@ -940,7 +1281,13 @@ def interdiff(before: dict, facts, subjects=()) -> Interdiff:
     text = "\n\n".join(
         (["Commit subjects since the Fix:\n" + "\n".join(subject_lines)] if subject_lines else [])
         + (blocks or ["No file's change differs from before the Fix."]))
-    ci = any(ci_path(p) or FLAG_CI in path_flags(p) or FLAG_SCANNER in path_flags(p) for p in paths)
+    # Every name a changed chunk gives (M-2): a workflow renamed away or
+    # deleted counts by its old name too (`Patch.flags`).
+    names = set(paths)
+    for patch in facts.patches:
+        if patch.path in paths:
+            names.update(name for name, _families in patch.flags)
+    ci = any(ci_path(p) or FLAG_CI in path_flags(p) or FLAG_SCANNER in path_flags(p) for p in names)
     return Interdiff(tuple(paths), scrub(text), complete, True if ci else (False if complete else None))
 
 
@@ -1164,10 +1511,16 @@ def store_path(root=None) -> Path:
     return base / "inbox" / FILE_NAME
 
 
+_ROOT: list = []          # the data root `PrFixes` was attached with (NIT)
+
+
 def scope_of_task_id(task_id: str, root=None):
     """`permissions`' fallback when a task's record could not be read: the
     scope its fix holds, None, or a scope no call passes (`{}`) when the
-    fixes file cannot be read either (fails closed)."""
+    fixes file cannot be read either (fails closed). Read under the data
+    root `PrFixes` writes it (`_ROOT`), else `config.V2_DATA_DIR`."""
+    if root is None and _ROOT:
+        root = _ROOT[-1]
     try:
         return FixStore(store_path(root)).scope_of_task(task_id)
     except StoreBroken:
@@ -1207,7 +1560,9 @@ class PrFixes:
                  mono: Callable[[], float] = time.monotonic):
         self.daemon = daemon
         self.summaries = summaries
-        self.store = FixStore(store_path(root if root is not None else daemon.stores.root))
+        base = root if root is not None else daemon.stores.root
+        self.store = FixStore(store_path(base))
+        _ROOT[:] = [base]
         self.clock, self.mono = clock, mono
         self._compare = compare or compare_heads
         self._fill = fill or fill_mirror
@@ -1307,8 +1662,15 @@ class PrFixes:
             if self._auto(repo, number):
                 raise FixRefused(409, "auto-merge is on (or cannot be read) for this pull request: "
                                       "a fix's push would merge it unasked; turn it off at GitHub")
+            protected = self._protected_branch(project, facts)
+            if protected:
+                raise FixRefused(409, f"the pull request's branch is {protected}; a fix never pushes "
+                                      "to a default or release branch")
+            helpers = repo_helpers_baseline(project.root)
+            if helpers is None:
+                raise FixRefused(409, "the project's git config cannot be read")
             brief = build_brief(facts)
-            scope = make_scope(repo, number, facts.branch)
+            scope = make_scope(repo, number, facts.branch, helpers)
             started = _utc(self.clock())
             record = {"task_id": None, "from_head": head, "from_patches": patches_record(facts),
                       "started": started, "state": "starting", "ended_at": None,
@@ -1318,18 +1680,16 @@ class PrFixes:
             except StoreBroken:
                 raise FixRefused(503, "the record of fixes cannot be written; no fix starts") from None
             try:
-                task = self._make_task(project, brief, scope, facts, head)
+                task = self._make_task(project, brief, scope, facts, head, key, started)
             except FixRefused as exc:
-                self._settle_start(key, started, None, exc.message)
+                self._settle_start(key, started, exc.message)
                 self._refresh(pr_id)
                 raise
             except Exception as exc:  # noqa: BLE001 — never a half-made fix left "starting"
                 LOG.warning("PR fixes: a fix did not start (%s)", type(exc).__name__)
-                self._settle_start(key, started, None, "the fix could not be started")
+                self._settle_start(key, started, "the fix could not be started")
                 self._refresh(pr_id)
                 raise FixRefused(503, "the fix could not be started") from None
-            with contextlib.suppress(StoreBroken):
-                self.store.update(key, started, task_id=task.id, state="running")
         self._note_task(task)
         self._refresh(pr_id)
         LOG.info("PR fixes: task %s fixes %s (via %s)", task.id, key, via)
@@ -1360,17 +1720,30 @@ class PrFixes:
         finally:
             pr_facts._remove_tree(home)
 
-    def _settle_start(self, key, started, task_id, note) -> None:
+    def _settle_start(self, key, started, note) -> None:
         with contextlib.suppress(StoreBroken):
-            self.store.update(key, started, state=START_FAILED, task_id=task_id,
+            self.store.update(key, started, state=START_FAILED,
                               ended_at=_utc(self.clock()), note=_shown(note, 200))
 
-    def _make_task(self, project, brief: str, scope: dict, facts, head: str):
-        """Create, worktree, start: one call (the owner's OK is the intake
-        gate). A task that does not start is cancelled."""
-        from .control import ControlError
-        from .model import ProviderName, TaskState
-        from .worktrees import WorktreeError, ensure_pr
+    def _protected_branch(self, project, facts) -> str | None:
+        """L-1: the PR's head branch when it is `main`, `master`, `release*`
+        or the repository's default (a remote's HEAD), else None."""
+        from fnmatch import fnmatch
+        from . import merge_gate as mg
+        branch = facts.branch or ""
+        if any(fnmatch(branch.lower(), p) for p in ("main", "master", "release*")):
+            return branch
+        found = mg._git_dirs(Path(project.root))
+        if isinstance(found, tuple) and branch in mg._remote_heads(found[1]):
+            return branch
+        return None
+
+    def _make_task(self, project, brief: str, scope: dict, facts, head: str, key: str, started: str):
+        """Create, record, worktree, start: one call (the owner's OK is the
+        intake gate). The task's id is in the fix record before it starts
+        (L-2: a record that cannot take it is a failed start). Any failure
+        cancels the task and removes its worktree and branch (L-3)."""
+        from .model import ProviderName
         daemon = self.daemon
         with daemon._lock:
             daemon._active()
@@ -1381,20 +1754,43 @@ class PrFixes:
             daemon._lifecycle("task_created", task)
         try:
             from .pr_facts import pull_ref
+            from .worktrees import ensure_pr
+            self.store.update(key, started, task_id=task.id)
             ensure = self._ensure or ensure_pr
             with self._fill(facts.repo, facts.number, facts.base, head) as mirror:
                 task = ensure(task, project, daemon.stores, mirror=mirror,
                               pull_ref=pull_ref(facts.number), number=facts.number, head=head)
+            self.store.update(key, started, task_id=task.id, state="running")
             daemon.runner.start(task.id)
-        except (WorktreeError, ControlError, FixRefused, OSError) as exc:
-            with contextlib.suppress(Exception):
-                daemon.stores.tasks.transition(task.id, TaskState.CANCELLED,
-                                               reason="the PR fix could not start")
+        except Exception as exc:  # noqa: BLE001 — never a half-made fix
+            self._undo(task.id)
             if isinstance(exc, FixRefused):
                 raise
-            word = str(exc) if isinstance(exc, (WorktreeError, ControlError)) else type(exc).__name__
+            from .control import ControlError
+            from .worktrees import WorktreeError
+            word = (str(exc) if isinstance(exc, (WorktreeError, ControlError))
+                    else "the fix record could not be written" if isinstance(exc, StoreBroken)
+                    else type(exc).__name__)
             raise FixRefused(409, f"the fix could not start: {_shown(word, 200)}") from None
         return daemon.stores.tasks.get(task.id)
+
+    def _undo(self, task_id: str) -> None:
+        """L-3: cancel a task that did not start and remove its worktree and
+        branch (the hardened helpers; a fresh worktree holds nothing to lose)."""
+        from .model import TaskState
+        from . import worktrees
+        stores = self.daemon.stores
+        with contextlib.suppress(Exception):
+            task = stores.tasks.get(task_id)
+            if task is not None and task.state not in (TaskState.CANCELLED, TaskState.DONE,
+                                                       TaskState.FAILED):
+                stores.tasks.transition(task_id, TaskState.CANCELLED, reason="the PR fix could not start")
+        try:
+            task = stores.tasks.get(task_id)
+            if task is not None and task.worktree:
+                worktrees.remove(task, stores, force=True)
+        except Exception as exc:  # noqa: BLE001
+            LOG.warning("PR fixes: a failed start's worktree was not removed (%s)", type(exc).__name__)
 
     def _owner_project(self, repo: str):
         from .inbox_prs import project_repos

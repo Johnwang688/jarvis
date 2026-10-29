@@ -192,8 +192,8 @@ class Scope(unittest.TestCase):
                 self.assertIsNone(self.j(command, cwd=cwd), command)
 
     def test_the_one_push_passes(self):
-        self.passes(f"git push origin HEAD:refs/heads/{BRANCH}", f"git push origin HEAD:{BRANCH}",
-                    f"git push origin {BRANCH}", f"git push origin refs/heads/{BRANCH}",
+        self.passes(f"git push origin HEAD:refs/heads/{BRANCH}",
+                    f"git push origin refs/heads/local:refs/heads/{BRANCH}",
                     f"git push -u origin HEAD:refs/heads/{BRANCH}",
                     f"git push --no-verify --atomic -n origin HEAD:refs/heads/{BRANCH}",
                     f"git push -o ci.skip=0 origin HEAD:refs/heads/{BRANCH}",
@@ -211,7 +211,13 @@ class Scope(unittest.TestCase):
                   f"git push origin HEAD:refs/heads/{BRANCH}-2",
                   f"git push origin HEAD:refs/heads/{BRANCH} HEAD:refs/heads/main",
                   "git push origin refs/heads/other:refs/heads/other",
-                  f"git push origin HEAD:refs/remotes/origin/{BRANCH}")
+                  f"git push origin HEAD:refs/remotes/origin/{BRANCH}",
+                  # M-3: the destination in full only (a short name may be a tag).
+                  f"git push origin HEAD:{BRANCH}", f"git push origin {BRANCH}",
+                  f"git push origin refs/heads/{BRANCH}", f"git push origin HEAD:heads/{BRANCH}",
+                  f"git push origin {BRANCH}:{BRANCH}", "git push origin HEAD",
+                  f"git push origin HEAD:refs/heads//{BRANCH}", f"git push origin HEAD:REFS/HEADS/{BRANCH}",
+                  f"git push origin HEAD:{BRANCH}:main", f"git push origin HEAD:refs/heads/{BRANCH} -- --force")
 
     def test_remote_tricks_are_refused(self):
         self.deny(X.S_REMOTE,
@@ -245,6 +251,7 @@ class Scope(unittest.TestCase):
 
     def test_delete_is_refused(self):
         self.deny(X.S_DELETE, f"git push origin :{BRANCH}", f"git push origin :refs/heads/{BRANCH}",
+                  f"git push origin {'0' * 40}:refs/heads/{BRANCH}",
                   f"git push --delete origin {BRANCH}", f"git push -d origin {BRANCH}",
                   f"git push --del origin {BRANCH}", f"git push --prune origin HEAD:refs/heads/{BRANCH}")
 
@@ -269,7 +276,9 @@ class Scope(unittest.TestCase):
                   f"gh api repos/{REPO}/issues/7/comments -f body=hi",
                   f"gh api repos/{REPO}/statuses/{HEAD} -F state=success",
                   f"gh api repos/{REPO}/check-runs --input run.json", "gh api graphql -f query=q",
-                  f"gh api --method HEAD repos/{REPO}")
+                  f"gh api --method HEAD repos/{REPO}", f"gh api --meth PUT repos/{REPO}/pulls/7/merge",
+                  f"gh api --raw x=y repos/{REPO}/issues", f"gh api --fiel x=y repos/{REPO}/issues",
+                  f"gh api -H 'X-HTTP-Method-Override: PUT' repos/{REPO}/pulls/7/merge")
         self.passes(f"gh api repos/{REPO}/pulls/7", f"gh api -X GET repos/{REPO}/pulls -f state=open",
                     f"gh api --method=get repos/{REPO}/actions/jobs/4242/logs",
                     f"gh api repos/{REPO}/pulls/7 --jq .head.sha")
@@ -304,29 +313,183 @@ class Scope(unittest.TestCase):
         self.assertEqual(hit.rule, X.S_CODEX)
 
     def test_a_push_the_gate_cannot_read_is_asked(self):
-        self.asks("git push", "git push origin", "git push origin HEAD", f"git push origin $BRANCH",
+        self.asks("git push", "git push origin", f"git push origin $BRANCH",
                   f"git push $R HEAD:refs/heads/{BRANCH}", f"git push origin HEAD:refs/heads/{BRANCH}-$X",
                   f"git -c remote.origin.url=x push origin HEAD:refs/heads/{BRANCH}",
-                  f"git --git-dir=/tmp/x push origin HEAD:refs/heads/{BRANCH}",
                   f"git remote set-url origin https://github.com/x/y.git && git push origin HEAD:refs/heads/{BRANCH}",
                   f"git config remote.origin.pushurl x; git push origin HEAD:refs/heads/{BRANCH}",
-                  "git pushit", "git lfs push origin main", "gh my-alias 7",
+                  "git pushit", "git lfs push origin main",
                   "python3 -c \"import subprocess; subprocess.run(['git','push','-f'])\"",
                   "echo 'git push -f origin main' | sh", f"$GIT push origin HEAD:refs/heads/{BRANCH}",
                   f"git push --p origin HEAD:refs/heads/{BRANCH}", f"git push -x origin HEAD:refs/heads/{BRANCH}",
-                  f"GIT_DIR=/tmp/x git push origin HEAD:refs/heads/{BRANCH}", "sudo git push -f origin main",
-                  "doas gh pr merge 7", f"xargs git push origin < refs.txt")
-        # The folder it runs in is not a repository: nothing can be read.
-        self.asks(f"git push origin HEAD:refs/heads/{BRANCH}", cwd=Path(tempfile.mkdtemp(dir=_ROOT)))
+                  "sudo git push -f origin main", "doas gh pr merge 7", f"xargs git push origin < refs.txt",
+                  "make push", "bash ./push.sh", f"pytest -q && git push origin HEAD:refs/heads/{BRANCH}",
+                  "alias g=git; g push -f origin HEAD:main", "npm run push", "yarn push:all",
+                  f"LD_PRELOAD=/tmp/x.so git push origin HEAD:refs/heads/{BRANCH}")
 
-    def test_config_that_rewrites_or_includes_is_asked(self):
+    def test_config_that_includes_is_asked(self):
+        repo = make_repo(Path(tempfile.mkdtemp(dir=_ROOT)) / "r")
+        git(repo, "config", "include.path", "/tmp/more.gitconfig")
+        self.asks(f"git push origin HEAD:refs/heads/{BRANCH}", cwd=repo)
+
+    def test_config_that_runs_programs_or_rewrites_refuses_the_push(self):
+        # M-5: in the repository's own config, whoever wrote it.
         for key, value in (("url.https://github.com/other/.insteadOf", "https://github.com/Owner/"),
                            ("url.x.pushInsteadOf", "https://github.com/"),
-                           ("include.path", "/tmp/more.gitconfig")):
+                           ("core.hooksPath", "/tmp/h"), ("core.sshCommand", "ssh -o x"),
+                           ("core.gitProxy", "/tmp/p"), ("remote.origin.receivepack", "evil"),
+                           ("remote.origin.uploadpack", "evil")):
             with self.subTest(key=key):
                 repo = make_repo(Path(tempfile.mkdtemp(dir=_ROOT)) / "r")
                 git(repo, "config", key, value)
-                self.asks(f"git push origin HEAD:refs/heads/{BRANCH}", cwd=repo)
+                hit = self.j(f"git push origin HEAD:refs/heads/{BRANCH}", cwd=repo)
+                self.assertEqual((hit.decision, hit.rule), (X.DENY, X.S_GITCONFIG), hit.reason)
+
+    def test_credential_helpers_changed_since_the_fix_refuse_the_push(self):
+        repo = make_repo(Path(tempfile.mkdtemp(dir=_ROOT)) / "r")
+        git(repo, "config", "credential.helper", "store")
+        baseline = X.repo_helpers_baseline(str(repo))
+        scoped = X.make_scope(REPO, N, BRANCH, baseline)
+        push = f"git push origin HEAD:refs/heads/{BRANCH}"
+        self.assertIsNone(X.judge(scoped, "Bash", {"command": push}, judged=(push,), cwd=str(repo)))
+        git(repo, "config", "--add", "credential.helper", "!evil")
+        hit = X.judge(scoped, "Bash", {"command": push}, judged=(push,), cwd=str(repo))
+        self.assertEqual((hit.decision, hit.rule), (X.DENY, X.S_GITCONFIG))
+
+    def test_git_config_and_remote_writes_are_asked(self):
+        self.asks("git config core.hooksPath /tmp/h", "git config --global alias.p push",
+                  "git config remote.origin.pushurl https://github.com/Owner/Other.git",
+                  "git remote add x https://github.com/a/b", "git remote set-url origin x",
+                  "git config core.pager less")
+        self.passes("git config user.name", "git config --get user.email", "git remote -v",
+                    "git remote get-url origin")
+
+    def test_writes_to_gits_own_files_are_refused(self):
+        for tool, path in (("Write", ".git/config"), ("Edit", ".git"), ("Write", ".git/hooks/pre-push"),
+                           ("Write", ".git/info/exclude"), ("Write", ".gitmodules"),
+                           ("Edit", ".git/worktrees/x/config.worktree")):
+            with self.subTest(path=path):
+                hit = X.judge(scope(), tool, {"file_path": f"{self.repo}/{path}", "content": "x",
+                                              "old_string": "a", "new_string": "b"},
+                              cwd=str(self.repo), provider="claude")
+                self.assertEqual((hit.decision, hit.rule), (X.DENY, X.S_GITCONFIG))
+        self.deny(X.S_GITCONFIG, "echo '#!/bin/sh' > .git/hooks/pre-push", "cp /tmp/c .git/config",
+                  "tee -a .gitmodules < /dev/null")
+
+    def test_the_owners_github_credential_is_out_of_reach(self):
+        # H-1: the token's files, git's and gh's ways of handing it out, and
+        # any fetcher or inline code aimed at GitHub.
+        gh = Path(os.environ["HOME"]) / ".config" / "gh"
+        for tool, args in (("Read", {"file_path": "~/.config/gh/hosts.yml"}),
+                           ("Read", {"file_path": str(gh / "hosts.yml")}),
+                           ("Grep", {"pattern": "oauth_token", "path": "~/.config/gh"}),
+                           ("Glob", {"pattern": "~/.config/gh/*"}), ("LS", {"path": "~/.ssh"}),
+                           ("Write", {"file_path": "~/.ssh/config", "content": "x"})):
+            with self.subTest(tool=tool, args=args):
+                hit = X.judge(scope(), tool, args, cwd=str(self.repo), provider="claude")
+                self.assertEqual((hit.decision, hit.rule), (X.DENY, X.S_CRED))
+        self.deny(X.S_CRED, "cat ~/.config/gh/hosts.yml", "cat $HOME/.config/gh/hosts.yml",
+                  "printf 'protocol=https\\nhost=github.com\\n' | git credential fill",
+                  "git credential-store get", "git-credential-cache get", "gh auth token",
+                  "gh auth status -t", "gh auth status --show-token", "gh auth git-credential get < q",
+                  "git config --get-urlmatch credential.helper https://github.com",
+                  "git config credential.helper store", "git config --get credential.helper",
+                  "git -c credential.helper=store fetch origin",
+                  "GIT_TRACE_CURL=1 git ls-remote origin", "GIT_TRACE_REDACT=0 git fetch",
+                  "curl -X PUT -H 'Authorization: token x' https://api.github.com/repos/Owner/Repo/pulls/7/merge",
+                  "wget https://raw.githubusercontent.com/o/r/main/x",
+                  "python3 -c \"import urllib.request as u; u.urlopen('https://api.github.com')\"",
+                  "node -e \"fetch('https://uploads.github.com/x')\"")
+        self.passes("curl -s https://pypi.org/simple/requests/", "gh api repos/Owner/Repo/pulls/7")
+
+    def test_inline_code_is_asked(self):
+        self.asks("python3 -c 'print(1)'", "node -e 'console.log(1)'", "perl -e 'print 1'",
+                  "ruby -e 'puts 1'", "perl -pi -e s/a/b/ app/a.py", "python3 - < script.py")
+        self.passes("python3 -m pytest -q", "python3 tools/check.py", "node scripts/build.js")
+
+    def test_programs_that_run_a_line_or_outlive_the_call_are_asked(self):
+        # L-4.
+        self.asks("git submodule foreach 'git status'", "git rebase --exec 'make test' HEAD~1",
+                  "git rebase -x 'make test' HEAD~1", "git rebase -i HEAD~2", "git bisect run make test",
+                  "git difftool -x cat", "git filter-branch --tree-filter true HEAD",
+                  "tmux new -d 'sleep 1'", "screen -dm sleep 1", "at now <<< 'true'", "nohup make test",
+                  "setsid make test", "GIT_PAGER=cat git log -1", "EDITOR=vim git commit",
+                  "git -c core.pager=cat log -1", "git -c core.editor=vim commit",
+                  "git -c sequence.editor=true rebase -i HEAD~1", "git -c alias.l=log l")
+        self.passes("git rebase origin/main", "git bisect start", "git submodule status",
+                    "git -c core.quotepath=off status")
+
+    def test_another_repository_takes_no_push(self):
+        # M-1: a bare repository below the worktree (git finds it first), git
+        # pointed elsewhere, or another checkout.
+        root = Path(tempfile.mkdtemp(dir=_ROOT))
+        wt = make_repo(root / "wt")
+        git(wt, "init", "-q", "--bare", "sub")
+        git(wt / "sub", "remote", "add", "origin", f"https://github.com/{REPO}.git")
+        other = make_repo(root / "other")
+        push = f"git push origin HEAD:refs/heads/{BRANCH}"
+        for command, where in ((push, wt / "sub"), (f"cd sub && {push}", wt),
+                               (f"git -C sub push origin HEAD:refs/heads/{BRANCH}", wt),
+                               (f"git --bare push origin HEAD:refs/heads/{BRANCH}", wt),
+                               (f"git --git-dir=/tmp/x push origin HEAD:refs/heads/{BRANCH}", wt),
+                               (f"git --work-tree=/tmp push origin HEAD:refs/heads/{BRANCH}", wt),
+                               (f"git --namespace=x push origin HEAD:refs/heads/{BRANCH}", wt),
+                               (f"GIT_DIR=/tmp/x {push}", wt), (f"GIT_WORK_TREE=/tmp {push}", wt),
+                               (f"cd {other} && {push}", wt), (f"git -C /tmp {push[4:]}", wt)):
+            with self.subTest(command=command, where=where):
+                hit = X.judge(scope(), "Bash", {"command": command}, judged=(command,), cwd=str(wt),
+                              shell_cwd=str(where), provider="claude")
+                self.assertIsNotNone(hit, command)
+                self.assertEqual((hit.decision, hit.rule), (X.DENY, X.S_REPO), hit.reason)
+        self.assertIsNone(X.judge(scope(), "Bash", {"command": push}, judged=(push,), cwd=str(wt),
+                                  shell_cwd=str(wt), provider="claude"))
+
+    def test_merge_gate_finds_a_bare_repository_as_git_does(self):
+        from jarvis.v2 import merge_gate
+        root = Path(tempfile.mkdtemp(dir=_ROOT))
+        wt = make_repo(root / "wt")
+        git(wt, "init", "-q", "--bare", "sub")
+        found = merge_gate._git_dirs(wt / "sub")
+        self.assertEqual(found, ((wt / "sub").resolve(), (wt / "sub").resolve()))
+        (wt / "app").mkdir()
+        self.assertEqual(merge_gate._git_dirs(wt / "app")[0], (wt / ".git").resolve())
+        # `--bare` makes the current folder the git dir: a push of the
+        # current branch there cannot be read, so it is asked; the same push
+        # in the checkout (on a feature branch) asks nothing.
+        git(wt, "symbolic-ref", "HEAD", "refs/heads/feature")
+        self.assertIsNone(merge_gate.judge("git push", str(wt)))
+        self.assertIsNotNone(merge_gate.judge("git --bare push", str(wt)))
+
+    def test_gh_reads_only(self):
+        # M-4: an allowlist of reads; anything else is refused.
+        self.deny(X.S_GH_WRITE, "gh pr update-branch 7", "gh pr update-branch 7 --rebase", "gh pr create --title x",
+                  "gh pr comment 7 --body hi", "gh pr checkout 7", "gh pr revert 7", "gh pr lock 7",
+                  "gh repo edit --enable-auto-merge", "gh repo delete Owner/Repo --yes",
+                  "gh repo create x", "gh repo fork", "gh repo rename x", "gh repo archive -y",
+                  "gh repo set-default x/y", "gh workflow run ci.yml", "gh workflow enable x",
+                  "gh run cancel 1", "gh run rerun 1", "gh extension install x/gh-merge",
+                  "gh alias set mm 'pr merge'", "gh mm 7", "gh my-alias 7", "gh release create v1",
+                  "gh gist create a", "gh label create x", "gh issue close 3", "gh issue comment 3 -b x",
+                  "gh cache delete --all", "gh secret list", "gh browse", "gh codespace list")
+        self.passes("gh pr view 7", "gh pr list", "gh pr diff 7", "gh pr checks 7", "gh pr status",
+                    "gh run view 1 --log-failed", "gh run list", "gh run download 1", "gh workflow view ci",
+                    "gh repo view", "gh issue view 3", "gh search prs x", "gh browse --no-browser",
+                    "gh release list", "gh --version", f"gh -R {REPO} pr view 7")
+
+    def test_ci_moves_and_removals_are_refused(self):
+        # M-2: `.github` itself and everything under it; relative targets
+        # read against the line's folders.
+        self.deny(X.S_CI, "rm -rf .github", "mv .github /tmp/off", "git rm -r .github", "git rm -r -- .github",
+                  "git mv .github off", "cd .github && git rm -r workflows", "cd .github && mv workflows ../off",
+                  "cd .github && git mv workflows ../off", "git checkout HEAD~3 -- .github",
+                  "git checkout other -- .", "git restore .gitleaks.toml", "git restore --source=other .github",
+                  "git clean -fdx .github", "rm -f .gitleaks.toml", "git rm .secrets.baseline",
+                  "echo x > .git\\hub/workflows/ci.yml", "echo x > .github/work''flows/ci.yml",
+                  "echo x > ./.github//workflows/ci.yml", "ln -sf ../../evil.yml .github/workflows/ci.yml",
+                  "cp /tmp/d .github/dependabot.yml", "echo x > .github/CODEOWNERS")
+        self.asks("git restore -s other -- :/", "cd .github && echo x > ci.yml",
+                  "find .github -name '*.yml' -exec sed -i s/a/b/ {} +")
+        self.passes("git checkout other", "git restore app/a.py", "rm -rf build", "cat .github/workflows/ci.yml")
 
     def test_everything_else_is_the_ordinary_gates(self):
         self.passes("git status", "git commit -am 'fix: make the push work'", "git merge origin/main",
@@ -364,6 +527,9 @@ class Asker:
 class Permit(unittest.TestCase):
     def setUp(self):
         self.repo = make_repo(Path(tempfile.mkdtemp(dir=_ROOT)) / "wt")
+        roots = patch.object(X, "_ROOT", [])
+        roots.start()
+        self.addCleanup(roots.stop)
         log = patch.object(permissions, "log_decision", lambda *a, **k: None)
         log.start()
         self.addCleanup(log.stop)
@@ -417,6 +583,18 @@ class Permit(unittest.TestCase):
                 d1, v1 = self.call(self.permit(scoped=False), command)
                 self.assertNotEqual(v1.layer, permissions.L_PR_SCOPE)
                 self.assertNotIn("pr-scope", v1.reason)
+
+    def test_a_credential_read_is_refused_only_in_a_fix(self):
+        # H-1. A task without a scope is unchanged (its read goes on to the
+        # ordinary layers, as before this PR).
+        for scoped, layer in ((True, permissions.L_PR_SCOPE), (False, None)):
+            with self.subTest(scoped=scoped):
+                decision = self.permit(scoped=scoped)("Read", {"file_path": "~/.config/gh/hosts.yml"})
+                verdict = permissions.last_verdict()
+                if layer:
+                    self.assertEqual((decision, verdict.layer), (Decision.DENY, layer))
+                else:
+                    self.assertNotEqual(verdict.layer, permissions.L_PR_SCOPE)
 
     def test_codex_is_refused_for_a_fix(self):
         decision, verdict = self.call(self.permit(provider="codex"), "ls")
@@ -820,7 +998,8 @@ class Start(Fixing):
     def test_one_call_makes_a_claude_task_under_the_scope(self):
         out = self.start()
         task = self.task(out["task_id"])
-        self.assertEqual(task.pr_scope, scope())
+        self.assertEqual({k: v for k, v in task.pr_scope.items() if k != "helpers"}, scope())
+        self.assertRegex(task.pr_scope["helpers"], r"^[0-9a-f]{64}$")
         self.assertEqual(task.ceilings, {"usd": 5.0, "hours": 1.0})
         self.assertEqual(task.provider_override, PN.CLAUDE)
         self.assertEqual(task.project_id, self.project.id)
@@ -882,6 +1061,82 @@ class Start(Fixing):
         self.start()
         self.assertEqual(self.row()["detail"]["fix"]["count"], 1)
 
+    def test_a_default_or_release_branch_gets_no_fix(self):
+        # L-1.
+        for branch in ("main", "master", "release-2.0", "Release/x"):
+            with self.subTest(branch=branch):
+                self.put(F(branch=branch))
+                self.refused(409, "a default or release branch")
+        git(self.project.root, "update-ref", "refs/remotes/origin/trunk", HEAD, check=False)
+        (Path(self.project.root) / ".git" / "refs" / "remotes" / "origin").mkdir(parents=True, exist_ok=True)
+        (Path(self.project.root) / ".git" / "refs" / "remotes" / "origin" / "HEAD").write_text(
+            "ref: refs/remotes/origin/trunk\n")
+        self.put(F(branch="trunk"))
+        self.refused(409, "a default or release branch")
+        self.assertEqual(self.stores.tasks.list(), [])
+
+    def test_the_task_id_is_recorded_before_the_task_starts(self):
+        # L-2: a record that cannot take the task's id is a failed start.
+        seen = []
+        real_start, real_ensure = self.runner.start, self.fixes._ensure
+
+        def recorded():
+            return json.loads(X.store_path(self.stores.root).read_text())["prs"][X.pr_key(REPO, N)][-1]["task_id"]
+
+        def start(task_id):
+            seen.append(("start", recorded()))
+            return real_start(task_id)
+
+        def ensure(task, *a, **k):
+            seen.append(("worktree", recorded()))
+            return real_ensure(task, *a, **k)
+        self.runner.start, self.fixes._ensure = start, ensure
+        out = self.start()
+        self.assertEqual(seen, [("worktree", out["task_id"]), ("start", out["task_id"])])
+        self.end(out["task_id"], TaskState.CANCELLED)
+        calls = []
+
+        def broken_update(key, which, **changes):
+            calls.append(changes)
+            raise X.StoreBroken("x")
+        with patch.object(self.fixes.store, "update", broken_update):
+            self.refused(409, "could not start")
+        task = self.stores.tasks.list()[-1]
+        self.assertEqual(task.state, TaskState.CANCELLED)
+        self.assertEqual(len(self.runner.calls), 1, "the second task never started")
+
+    def test_a_failed_start_removes_its_worktree_and_branch(self):
+        # L-3, on the real worktree helpers.
+        root = Path(self.project.root)
+        git(root, "-c", "user.name=t", "-c", "user.email=t@e", "commit", "-q", "--allow-empty", "-m", "i")
+        made = []
+
+        def ensure(task, project, stores, **kw):
+            branch = f"jarvis/{task.id}-pr{N}"
+            path = root / ".jarvis" / "worktrees" / task.id
+            git(root, "worktree", "add", "-q", "-b", branch, str(path))
+            task.worktree, task.branch, task.root = str(path), branch, project.root
+            stores.tasks.save(task)
+            made.append((path, branch))
+            return task
+
+        def start(task_id):
+            raise ControlError("the runner is shutting down")
+        self.fixes._ensure, self.runner.start = ensure, start
+        self.refused(409, "shutting down")
+        (path, branch), = made
+        self.assertFalse(path.exists())
+        self.assertEqual(git(root, "branch", "--list", branch), "")
+        self.assertEqual(self.stores.tasks.list()[-1].state, TaskState.CANCELLED)
+        record = json.loads(X.store_path(self.stores.root).read_text())["prs"][X.pr_key(REPO, N)][-1]
+        self.assertEqual((record["state"], record["task_id"]), ("start_failed", self.stores.tasks.list()[-1].id))
+
+    def test_the_permits_fallback_reads_the_fixes_root(self):
+        # NIT: `scope_of_task_id` reads where `PrFixes` writes.
+        task_id = self.start()["task_id"]
+        with patch.object(config, "V2_DATA_DIR", self.tmp / "elsewhere"):
+            self.assertEqual(X.scope_of_task_id(task_id)["branch"], BRANCH)
+
     def test_refused_for_a_fork(self):
         self.put(F(fork=True))
         self.refused(409, "fork")
@@ -920,7 +1175,7 @@ class Start(Fixing):
 
     def test_the_phones_fix_goes_through_the_same_start(self):
         out = pr_merge._phone_fix(self.daemon, self.pr_id, REPO, N, HEAD, self.card(), limited=True)
-        self.assertEqual(self.task(out["task_id"]).pr_scope, scope())
+        self.assertEqual(self.task(out["task_id"]).pr_scope["branch"], BRANCH)
         self.end(out["task_id"], TaskState.CANCELLED)
         self.put(F(files=(FileChange(".github/workflows/ci.yml", 1, 1, ("CI",), False),),
                    patches=(Patch(".github/workflows/ci.yml", "shown", "+x"),)))
@@ -1086,6 +1341,14 @@ class Done(Fixing):
                    subjects=(f"add {TOKEN}",))
         text = json.dumps(self.chat.calls)
         self.assertNotIn(TOKEN, text)
+
+    def test_ci_moved_away_is_amber(self):
+        before = X.patches_record(F())
+        diff = ("diff --git a/app/a.py b/app/a.py\n--- a/app/a.py\n+++ b/app/a.py\n@@ -1 +1 @@\n-x = 1\n+x = 2\n"
+                "diff --git a/.github/workflows/ci.yml b/disabled/ci.yml\nsimilarity index 100%\n"
+                "rename from .github/workflows/ci.yml\nrename to disabled/ci.yml\n")
+        moved = X.interdiff(before, F(head=HEAD2, patches=pr_facts.parse_diff(diff)))
+        self.assertIs(moved.ci_changed, True)
 
     def test_ci_change_is_amber(self):
         task_id = self.started()
