@@ -120,6 +120,8 @@ L_CHAT_GIT = "chat-git"
 # DENY nobody was asked about; its reason is the code-built text the agent
 # reads (`deferral_reason`).
 L_DEFERRED = "quiet-deferred"
+# PM-20 (`pr_fix.judge`): a PR fix task's scope refused the call unasked.
+L_PR_SCOPE = "pr-scope"
 
 
 @dataclass(frozen=True)
@@ -1182,6 +1184,22 @@ def build_permit(ctx: PermitContext, asker, *, clock=None) -> PermissionCallback
                 return finish(Decision.DENY, L_DENY, "; ".join(unchecked) + "; refused")
             widening = widening + " · " + "; ".join(unchecked)
 
+        # --- a PR fix's scope (PM-20, `pr_fix.judge`) ----------------------
+        # Only a task `pr_fix` made carries one (`Task.pr_scope`). Its DENYs
+        # are never asked of anyone and come before every layer that could
+        # allow; a push it cannot read is asked of the owner, no Always.
+        # A task without one is judged exactly as before.
+        scoped = _pr_scope_hit(ctx, tool, args, judged, also_commands, cwd, shell_cwd)
+        if scoped is not None:
+            if scoped.decision != "ask":
+                return finish(Decision.DENY, L_PR_SCOPE, scoped.reason)
+            reason = f"always-ask rule {scoped.rule}: {scoped.reason}"
+            decision = owner_said(_ask(asker, ctx, tool, args, command, reason, L_ALWAYS_ASK,
+                                       allowlistable=False, origin=who, subagent=sid,
+                                       relay_child=child, cwd=where, grantable=False,
+                                       headline="a push the PR fix's scope cannot read"))
+            return finish(decision, L_ALWAYS_ASK, reason)
+
         # --- a Codex chat's git tool: read the target, or refuse ------------
         # `chat_git.plan` reads the worktree's branch and origin from files,
         # checks the pin and refuses a detached HEAD or a protected branch.
@@ -1430,6 +1448,34 @@ def build_permit(ctx: PermitContext, asker, *, clock=None) -> PermissionCallback
 
     permit.recall = recall
     return permit
+
+
+def _pr_scope_hit(ctx: PermitContext, tool: str, args: dict, judged, also_commands,
+                  cwd: str | None, shell_cwd):
+    """`pr_fix.judge` for a task that carries a PR scope, else None. The
+    scope is the task's own (`Task.pr_scope`); when the task could not be
+    read, the fix record's (`pr_fix.scope_of_task_id`), and a record that
+    cannot be read either refuses every call (fails closed). A judge that
+    breaks refuses."""
+    if ctx.task is not None:
+        scope = getattr(ctx.task, "pr_scope", None)
+    elif ctx.task_id:
+        from . import pr_fix
+        scope = pr_fix.scope_of_task_id(ctx.task_id)
+    else:
+        return None
+    if scope is None:
+        return None
+    from . import pr_fix
+    try:
+        return pr_fix.judge(scope, tool, args, judged=judged,
+                            also=tuple(c for c in also_commands if isinstance(c, str)),
+                            cwd=cwd, shell_cwd=shell_cwd if isinstance(shell_cwd, str) else None,
+                            provider=ctx.provider)
+    except Exception:  # noqa: BLE001 — a judge that breaks has not cleared the call
+        LOG.exception("pr_scope failed; refusing")
+        return pr_fix.ScopeHit(pr_fix.DENY, pr_fix.S_BROKEN,
+                               "PR fix scope: the call could not be judged; refused")
 
 
 def _covered(tool: str, args: dict, judged: tuple[str, ...], cwd: str | None) -> str:

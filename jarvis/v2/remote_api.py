@@ -226,6 +226,7 @@ DROPPED = {
         "discord_thread_id": "another surface's addressing",
         "profile": "permission configuration stays at the desk (design §5)",
         "migrated_from": "a v1 goal id, internal",
+        "pr_scope": "a PR fix's gate scope, read by the gate; the PR row shows the fix",
     },
     "task_status": {
         "last_file": "an absolute path into the task's worktree",
