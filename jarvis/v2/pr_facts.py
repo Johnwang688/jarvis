@@ -4,14 +4,17 @@
 **Reads, by the daemon only (PM-1).** `read_pr(repo, number)` makes every
 call through `inbox_prs.run_bounded`: an exact argv, no shell, cwd `/`, its
 own process group, a timeout and an output cap, stderr never read. `gh`
-runs with `chat_git._owner_env()` and nothing else:
+runs with `chat_git._owner_env()`, its cache and state folders moved to a
+private folder made for the pass and removed after it (`gh_env`):
 
 1. `gh pr view N --repo O/R --json <VIEW_FIELDS>`;
 2. `gh pr diff N --repo O/R`, at most `DIFF_CAP` (past it, the file list only);
 3. `gh api --method GET repos/O/R/commits/<head>/check-runs?per_page=100`;
-4. for at most `LOG_JOBS` failing Actions jobs (the job id from a validated
-   `details_url`): `gh run view --job <id> --repo O/R --log-failed`, the last
-   `LOG_LINES` lines kept;
+4. for at most `LOG_JOBS` failing Actions jobs (the job id from the
+   `details_url` of the one check run that matches): `gh api --method GET
+   repos/O/R/actions/jobs/<id>/logs` (to stdout only: `gh run view --log`
+   keeps a copy of the run's logs in gh's cache), its last `LOG_CAP` bytes,
+   of which the last `LOG_LINES` lines are kept;
 5. `gh repo view O/R --json mergeCommitAllowed,squashMergeAllowed,viewerPermission`,
    cached for `REPO_CACHE_S`;
 6. only when the PR is DIRTY, its conflicting files: a credentialed
@@ -25,16 +28,28 @@ runs with `chat_git._owner_env()` and nothing else:
 
 **No merge driver or filter can run (PM-1.6).** A merge driver runs only
 when an attribute names it *and* config defines it. The local git calls
-(`init`, `merge-tree`, `cat-file`) close both sides: attributes are read
-from the empty tree (`--attr-source`), never from the PR's own
-`.gitattributes`, and `core.attributesFile` is `/dev/null`, with no system
-attributes; config is the mirror's own (made here with no template) and the
-command line only — an empty HOME, `GIT_CONFIG_GLOBAL=/dev/null`, no system
-config — so even the owner's global merge drivers and LFS filters are out
-of reach. A mirror holding `info/attributes` is refused. `merge.renormalize`
-is off (it would run clean filters). On top, gitops' hardening: no hooks,
-fsmonitor off, no submodule recursion, `ext::` refused. The fetch (the one
-credentialed git) adds `chat_git._credential_pins()` and allows HTTPS only.
+(`init`, `merge-tree`, `cat-file`, `for-each-ref`, `update-ref`) close both
+sides: attributes are read from the empty tree (`--attr-source`), never from
+the PR's own `.gitattributes`, and `core.attributesFile` is `/dev/null`,
+with no system attributes; config is the mirror's own (made here with no
+template) and the command line only — an empty HOME, `GIT_CONFIG_GLOBAL=
+/dev/null`, no system config — so even the owner's global merge drivers and
+LFS filters are out of reach. A mirror holding `info/attributes` is refused.
+`merge.renormalize` is off (it would run clean filters). On top, gitops'
+hardening: no hooks, fsmonitor off, no submodule recursion, `ext::` refused.
+The fetch (the one credentialed git) adds `chat_git._credential_pins()` and
+allows HTTPS only.
+
+**The mirror stays bounded.** Under the repository's lock: a timed-out
+fetch's `tmp_*` files are removed before and after each fetch; a mirror
+past `MIRROR_CAP` is deleted and made again; `merge-tree`'s objects (the
+merged tree and its blobs) go to a throwaway object folder
+(`GIT_OBJECT_DIRECTORY`, the mirror as its alternate) removed after the
+read, so the mirror itself only ever grows by what a fetch brings. Refs are
+`refs/jarvis/base/<hex of the branch>` and `refs/jarvis/pull/<N>`, so two
+base names (`a`, `a/b`) never collide. `tidy_mirrors` (for the poll, after
+it lists the open PRs) drops closed PRs' refs and the mirrors of
+repositories no longer listed.
 
 **Validation.** The repo is `OWNER/REPO` by `chat_git.github_repo`'s rule,
 the number a positive int, SHAs 40 hex, branch names `valid_branch`'s. A
@@ -49,13 +64,15 @@ A credential-named path (`secrets.is_protected` on any component) keeps
 its name; its patch and its conflict regions are withheld unread. Nothing
 read is ever logged: a log line names an exception's type only.
 
-**What code says (PM-9 to PM-12).** `facts_line` (trusted: validated
-fields, untrusted names cleaned so they cannot draw a separator or a code
-label), `flags` (PM-10's safety-file families), `SECRET_SCANNERS` (PM-11;
-the GitHub App slug decides, never a check's name, which any workflow can
-choose), `decide`/`actions` (PM-12's table, a pure function of the facts,
-the hold and whether the phone is limited) and `model_input` (the capped
-text the summary model reads; PM-C fences it and makes the call).
+**What code says (PM-9 to PM-12).** `facts_parts` (PM-9, trusted: labelled
+parts the surfaces draw apart, untrusted names in their own `items`, never
+inside code's words; `facts_text` joins them for tests and logs), `flags`
+(PM-10's safety-file families, over every name a diff chunk gives, so a
+safety file renamed away or deleted is flagged), `SECRET_SCANNERS` (PM-11;
+the GitHub App slug of the one check run whose details URL matches decides,
+never a check's name), `decide`/`actions` (PM-12's table, a pure function
+of the facts, the hold and whether the phone is limited) and `model_input`
+(the capped text the summary model reads; PM-C fences it and makes the call).
 
 Nothing here is wired into the daemon: `FactsWorker` is the one-at-a-time
 worker (PM-2) a later package attaches. Tests: `tests/v2/pr_facts_check.py`.
@@ -70,9 +87,11 @@ import logging
 import os
 from pathlib import Path, PurePosixPath
 import re
+import shutil
+import tempfile
 import threading
 import time
-from typing import Callable
+from typing import Callable, Iterable, Mapping
 
 from .approvals import clean_line
 from .inbox_prs import GhFailed
@@ -87,7 +106,7 @@ MAX_WAITING = 50
 VIEW_CAP = 2 * 1024 * 1024
 DIFF_CAP = 2 * 1024 * 1024
 CHECKS_CAP = 4 * 1024 * 1024
-LOG_CAP = 4 * 1024 * 1024
+LOG_CAP = 1024 * 1024           # the tail kept of a job's log
 REPO_CAP = 64 * 1024
 GIT_CAP = 1024 * 1024
 BLOB_CAP = 1024 * 1024
@@ -97,6 +116,9 @@ LOG_LINES = 80
 LOG_MARGIN_LINES = 200          # scrubbed with the tail, so a key's header is seen
 CONFLICT_FILES = 3
 NAMES_MAX = 1000
+MIRROR_CAP = 1024 * 1024 * 1024  # past it, the mirror is deleted and made again
+REFS_PRUNED_MAX = 500           # per mirror per tidy
+GH_HOME_STALE_S = 3600.0        # a pass's gh folder left by a crash, removed after this
 
 MODEL_CAP = 20_000
 TITLE_CAP = 300
@@ -195,7 +217,7 @@ class FileChange:
 class Check:
     name: str                       # scrubbed and cleaned
     state: str                      # "failing" (only failing checks are kept)
-    scanner: bool | None            # None: the check runs could not be read
+    scanner: bool | None            # None: not matched to exactly one check run
     app: str | None
     title: str = ""
     summary: str = ""
@@ -208,6 +230,9 @@ class Patch:
     kind: str                       # "shown", "lock", "binary", "withheld", "unreadable"
     text: str = ""                  # scrubbed, at most FILE_PATCH_CAP
     cut: bool = False
+    # PM-10 families of every name the chunk gives (old and new, renames,
+    # copies, deletions): ((display name, families), ...).
+    flags: tuple[tuple[str, tuple[str, ...]], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -260,8 +285,10 @@ class PrFacts:
 
     @property
     def files_complete(self) -> bool:
-        """Whether every changed path was seen (PM-10 fails closed if not)."""
-        return (self.ok("files") and self.files_total is not None
+        """Whether every changed path, and every old name a diff gives, was
+        seen: the file list read whole and the diff read (PM-10 fails closed
+        if not)."""
+        return (self.ok("files") and self.ok("diff") and self.files_total is not None
                 and len(self.files) >= self.files_total)
 
 
@@ -315,14 +342,33 @@ def _tail_lines(text: str, lines: int, cap: int) -> str:
     return "\n".join(reversed(kept))
 
 
-_SHOWN_UNDERSCORE = frozenset("·•∙⋅・‧･⸱ꞏ•·<>﹤﹥＜＞")
+# The characters an untrusted name may not hold in a code-built line: the
+# middle dot and its look-alikes (#330's Where list plus review of #332:
+# ㆍ ᛫ ᐧ ⦁ 𐄁 ⸰), bullets and bars, angle brackets, and arrows (a
+# name could draw "→ main"). Each becomes "_". The shared tables
+# (`chat_reads._CARD_UNDERSCORE`, #330's `approval_summary._SEPARATORS`)
+# are not changed here.
+_SHOWN_UNDERSCORE = frozenset(
+    "|¦··ˑ᛫‖•‣‧⁃∙⋅❘❙❚"
+    "●◦⚫⦁⬤⏺⸱⸰・｜･ㆍᐧ\U00010101"
+    "․⸳ꞏ<>﹤﹥＜＞￫")
+# Arrows, by block (`_underscored`): Arrows, Supplemental Arrows-A and -B,
+# Miscellaneous Symbols and Arrows, and the Dingbat arrows.
+_ARROW_BLOCKS = ((0x2190, 0x21FF), (0x27F0, 0x27FF), (0x2900, 0x297F), (0x2B00, 0x2BFF),
+                 (0x2794, 0x27BF))
+
+
+def _underscored(ch: str) -> bool:
+    if ch in _SHOWN_UNDERSCORE:
+        return True
+    code = ord(ch)
+    return any(low <= code <= high for low, high in _ARROW_BLOCKS)
 
 
 def shown(text, cap: int = 120) -> str:
     """Untrusted text (already scrubbed) as one piece of a code-built line:
-    one line, capped, no separator dot (it could forge a facts-line part),
-    `[`/`]` as `(`/`)` (only code writes "[secret scanner]"), no quotation
-    or angle brackets."""
+    one line, capped, no separator or arrow look-alike, `[`/`]` as `(`/`)`
+    (only code writes "[secret scanner]"), no quotation or angle brackets."""
     from .chat_reads import _card_char
     import unicodedata
     line = clean_line(unicodedata.normalize("NFC", str(text or "")), cap=10 * cap)
@@ -332,11 +378,11 @@ def shown(text, cap: int = 120) -> str:
             out.append("(")
         elif ch == "]":
             out.append(")")
-        elif ch in _SHOWN_UNDERSCORE:
+        elif _underscored(ch):
             out.append("_")
         else:
             out.append(_card_char(ch))
-    return clean_line(" ".join("".join(out).split()), cap=cap)
+    return clean_line(" ".join("".join(out).split()).replace("->", "-_"), cap=cap)
 
 
 # -- validation ------------------------------------------------------------------------------
@@ -404,16 +450,28 @@ def path_flags(path: str) -> tuple[str, ...]:
     return tuple(out)
 
 
+def _hits(facts: PrFacts) -> list[tuple[str, tuple[str, ...]]]:
+    """Every flagged name, the file list's and every diff chunk's (old names
+    of renames and copies, deleted files), each once."""
+    out, seen = [], set()
+    for name, families in [(f.path, f.flags) for f in facts.files] + \
+            [hit for p in facts.patches for hit in p.flags]:
+        if families and name not in seen:
+            seen.add(name)
+            out.append((name, families))
+    return out
+
+
 def flagged(facts: PrFacts) -> bool:
-    """True when any changed path is a safety file, or when not every path
+    """True when any changed name is a safety file, or when not every name
     could be checked (fails closed: a limited phone answers neither)."""
-    return not facts.files_complete or any(f.flags for f in facts.files)
+    return not facts.files_complete or bool(_hits(facts))
 
 
 def flags_line(facts: PrFacts, limit: int = 5) -> str | None:
     """The amber line, or None. Built by code; the model cannot remove it."""
-    hits = [f for f in facts.files if f.flags]
-    parts = [f"{f.path} ({', '.join(f.flags)})" for f in hits[:limit]]
+    hits = _hits(facts)
+    parts = [f"{name} ({', '.join(families)})" for name, families in hits[:limit]]
     if len(hits) > limit:
         parts.append(f"and {len(hits) - limit} more")
     if not facts.files_complete:
@@ -424,7 +482,7 @@ def flags_line(facts: PrFacts, limit: int = 5) -> str | None:
 # -- parsing ------------------------------------------------------------------------------------
 
 def _rollup(items) -> tuple[str, list[dict], int]:
-    """(summary, failing items as {name, kind}, pending count)."""
+    """(summary, failing items as {name, kind, url}, pending count)."""
     from .inbox_prs import checks_summary
     summary = checks_summary(items)
     failing, pending = [], 0
@@ -438,10 +496,10 @@ def _rollup(items) -> tuple[str, list[dict], int]:
             status, conclusion = item.get("status"), item.get("conclusion")
             bad = status == "COMPLETED" and conclusion in _FAILED
             waiting = status != "COMPLETED" or (conclusion not in _FAILED and conclusion not in _PASSED)
-        if not isinstance(name, str):
-            name = ""
+        url = item.get("detailsUrl")
         if bad:
-            failing.append({"name": name, "kind": kind})
+            failing.append({"name": name if isinstance(name, str) else "", "kind": kind,
+                            "url": url if isinstance(url, str) and url else None})
         elif waiting:
             pending += 1
     return summary, failing, pending
@@ -474,6 +532,8 @@ def parse_view(data: bytes, repo: str, number: int) -> dict:
         "review": review if review in _REVIEWS else None,
         "additions": _count(item.get("additions")),
         "deletions": _count(item.get("deletions")),
+        # Never guessed from the list: a malformed total leaves the files
+        # not known to be complete (PM-10 fails closed).
         "files_total": _count(item.get("changedFiles")),
         "read": {},
     }
@@ -503,18 +563,20 @@ def parse_view(data: bytes, repo: str, number: int) -> dict:
         out["files"], out["read"]["files"] = (), "malformed"
     else:
         out["files"], out["read"]["files"] = tuple(parsed), "ok"
-        if out["files_total"] is None:
-            out["files_total"] = len(parsed)
     return out
 
 
-def parse_check_runs(data: bytes) -> list[dict]:
-    """The check runs, each {name, app, conclusion, status, title, summary,
-    details_url}, with types checked; GhFailed("malformed") otherwise."""
+def parse_check_runs(data: bytes) -> tuple[list[dict], bool]:
+    """(the check runs, each {id, name, app, conclusion, status, title,
+    summary, details_url, html_url}, with types checked; whether that is
+    every run: `total_count` is no more than the runs given). GhFailed
+    ("malformed") otherwise."""
     item = _json(data)
     runs = item.get("check_runs") if isinstance(item, dict) else None
     if not isinstance(runs, list) or len(runs) > 1000:
         raise GhFailed("malformed")
+    total = item.get("total_count")
+    complete = isinstance(total, int) and not isinstance(total, bool) and 0 <= total <= len(runs)
     out = []
     for run in runs:
         if not isinstance(run, dict) or not isinstance(run.get("name"), str):
@@ -522,16 +584,21 @@ def parse_check_runs(data: bytes) -> list[dict]:
         app = run.get("app")
         slug = app.get("slug") if isinstance(app, dict) else None
         output = run.get("output") if isinstance(run.get("output"), dict) else {}
+
+        def text(value):
+            return value if isinstance(value, str) else None
         out.append({
+            "id": run.get("id") if isinstance(run.get("id"), int) else None,
             "name": run["name"],
             "app": slug if isinstance(slug, str) and _SLUG.fullmatch(slug) else None,
-            "status": run.get("status") if isinstance(run.get("status"), str) else None,
-            "conclusion": run.get("conclusion") if isinstance(run.get("conclusion"), str) else None,
-            "title": output.get("title") if isinstance(output.get("title"), str) else "",
-            "summary": output.get("summary") if isinstance(output.get("summary"), str) else "",
-            "details_url": run.get("details_url") if isinstance(run.get("details_url"), str) else None,
+            "status": text(run.get("status")),
+            "conclusion": text(run.get("conclusion")),
+            "title": text(output.get("title")) or "",
+            "summary": text(output.get("summary")) or "",
+            "details_url": text(run.get("details_url")),
+            "html_url": text(run.get("html_url")),
         })
-    return out
+    return out, complete
 
 
 def job_id(url, repo: str) -> int | None:
@@ -547,31 +614,43 @@ def job_id(url, repo: str) -> int | None:
     return int(match.group(4))
 
 
-def _enrich(failing_names: list[dict], runs: list[dict] | None, repo: str) -> tuple[Check, ...]:
-    """Each failing rollup item as a Check: a check run matched by name to a
-    failing run in the check-runs answer takes its app, output and job."""
+def _match(item: dict, runs: list[dict]) -> dict | None:
+    """The one check run this failing rollup item is: the same details URL
+    (or GitHub's own page for it), the same name and a failing conclusion.
+    None when none or more than one fits, or the item has no URL."""
+    url = item["url"]
+    if url is None:
+        return None
+    found = [r for r in runs if url in (r["details_url"], r["html_url"])]
+    if len(found) != 1:
+        return None
+    run = found[0]
+    if run["name"] != item["name"] or not run["conclusion"] or run["conclusion"].upper() not in _FAILED:
+        return None
+    return run
+
+
+def _enrich(failing_names: list[dict], runs: list[dict] | None, complete: bool,
+            repo: str) -> tuple[Check, ...]:
+    """Each failing rollup item as a Check. A check run takes its app,
+    output and job from the one run that matches it (`_match`), only when
+    every run was read; otherwise its scanner state is unknown (None)."""
     out = []
     for item in failing_names:
         name = shown(scrub(item["name"]), 80) or "(unnamed check)"
         if item["kind"] == "status":
             out.append(Check(name, "failing", False, None))     # never a scanner (PM-11)
             continue
-        match = None
-        for run in runs or ():
-            if run["name"] == item["name"] and run["conclusion"] and run["conclusion"].upper() in _FAILED:
-                match = run
-                break
-        if runs is None:
+        match = _match(item, runs) if runs is not None and complete else None
+        if match is None:
             out.append(Check(name, "failing", None, None))
-        elif match is None:
-            out.append(Check(name, "failing", False, None))
-        else:
-            app = match["app"]
-            out.append(Check(
-                name, "failing", app in SECRET_SCANNERS, app,
-                shown(scrub(match["title"][:2000]), 200),
-                scrub_head(match["summary"][:200_000], CHECK_TEXT_CAP)[0],
-                job_id(match["details_url"], repo) if app == ACTIONS_APP else None))
+            continue
+        app = match["app"]
+        out.append(Check(
+            name, "failing", app in SECRET_SCANNERS, app,
+            shown(scrub(match["title"][:2000]), 200),
+            scrub_head(match["summary"][:200_000], CHECK_TEXT_CAP)[0],
+            job_id(match["details_url"], repo) if app == ACTIONS_APP else None))
     return tuple(out)
 
 
@@ -611,10 +690,11 @@ def _side(text: str, prefix: str) -> str | None:
     return text[len(prefix):] if text.startswith(prefix) and len(text) > len(prefix) else None
 
 
-def _chunk_paths(lines: list[str]) -> tuple[str | None, set[str]]:
-    """(the chunk's path, every path it names). The path is None when it
-    cannot be read; the set decides whether the patch is withheld."""
-    names: set[str] = set()
+def _chunk_paths(lines: list[str]) -> tuple[str | None, list[str]]:
+    """(the chunk's path, every name it gives: old and new, renames and
+    copies, a deleted file's). The path is None when it cannot be read; the
+    names decide whether the patch is withheld and which flags it raises."""
+    names: list[str] = []
     header = lines[0][len("diff --git "):]
     main = None
     if not header.startswith('"'):
@@ -624,9 +704,9 @@ def _chunk_paths(lines: list[str]) -> tuple[str | None, set[str]]:
             if left.startswith("a/") and right.startswith("b/") and left[2:] == right[2:]:
                 main = left[2:]
     else:
-        names.add(header)            # quoted pair: judged as written too
+        names.append(header)            # quoted pair: judged as written too
     for word in header.split(" "):
-        names.add(word[2:] if word[:2] in ("a/", "b/") else word)
+        names.append(word[2:] if word[:2] in ("a/", "b/") else word)
     plus = minus = renamed = None
     for line in lines[1:]:
         if line.startswith("@@"):
@@ -641,16 +721,28 @@ def _chunk_paths(lines: list[str]) -> tuple[str | None, set[str]]:
                     value = line[len(word):]
                     value = _unquote(value) if value.startswith('"') else value
                     if value:
-                        names.add(value)
+                        names.append(value)
                         if word in ("rename to ", "copy to "):
                             renamed = value
-    for value in (plus, minus):
+    for value in (main, plus, minus):
         if value:
-            names.add(value)
+            names.append(value)
     path = plus or renamed or main or minus
-    if path:
-        names.add(path)
-    return path, names
+    seen, unique = set(), []
+    for name in names:
+        if name and name not in seen:
+            seen.add(name)
+            unique.append(name)
+    return path, unique
+
+
+def _chunk_flags(names: list[str]) -> tuple[tuple[str, tuple[str, ...]], ...]:
+    out = []
+    for name in names:
+        families = path_flags(name)
+        if families:
+            out.append((shown(scrub(name), 200), families))
+    return tuple(out)
 
 
 def _generated(path: str) -> bool:
@@ -661,9 +753,10 @@ def _generated(path: str) -> bool:
 
 
 def parse_diff(text: str) -> tuple[Patch, ...]:
-    """`gh pr diff`'s text as one Patch per file, each scrubbed and capped.
-    A credential-named path (any name the chunk gives) keeps its name and is
-    withheld unread; a chunk whose path cannot be read is withheld too."""
+    """`gh pr diff`'s text as one Patch per file, each scrubbed and capped,
+    with the PM-10 flags of every name the chunk gives. A credential-named
+    path (any name the chunk gives) keeps its name and is withheld unread; a
+    chunk whose path cannot be read is withheld too."""
     chunks: list[list[str]] = []
     for line in text.split("\n"):
         if line.startswith("diff --git "):
@@ -673,25 +766,26 @@ def parse_diff(text: str) -> tuple[Patch, ...]:
     out = []
     for lines in chunks:
         path, names = _chunk_paths(lines)
+        flags = _chunk_flags(names)
         if path is None:
-            out.append(Patch("(a path that could not be read)", "unreadable"))
+            out.append(Patch("(a path that could not be read)", "unreadable", flags=flags))
             continue
         name = shown(scrub(path), 200)
-        if any(_credential_path(n) for n in names if n):
-            out.append(Patch(name, "withheld"))
+        if any(_credential_path(n) for n in names):
+            out.append(Patch(name, "withheld", flags=flags))
             continue
         if any(line.startswith(("Binary files ", "GIT binary patch")) for line in lines[1:]):
-            out.append(Patch(name, "binary"))
+            out.append(Patch(name, "binary", flags=flags))
             continue
         if _generated(path):
-            out.append(Patch(name, "lock"))
+            out.append(Patch(name, "lock", flags=flags))
             continue
         start = next((i for i, line in enumerate(lines) if line.startswith("@@")), None)
         if start is None:
-            out.append(Patch(name, "shown", "(no content change)"))
+            out.append(Patch(name, "shown", "(no content change)", flags=flags))
             continue
         body, cut = scrub_head("\n".join(lines[start:]).rstrip("\n"), FILE_PATCH_CAP)
-        out.append(Patch(name, "shown", body, cut))
+        out.append(Patch(name, "shown", body, cut, flags))
     return tuple(out)
 
 
@@ -736,7 +830,7 @@ def marker_regions(text: str, cap: int = CONFLICTS_CAP) -> str:
     return "\n".join(out)
 
 
-# -- the mirror (PM-1.6) ---------------------------------------------------------------------
+# -- the daemon's private folders ----------------------------------------------------------
 
 _mirror_locks: dict[str, threading.Lock] = {}
 _mirror_guard = threading.Lock()
@@ -751,12 +845,12 @@ class MirrorRefused(Exception):
     pass
 
 
-def mirrors_root() -> Path:
-    """`V2_DATA_DIR/pr-mirrors`, 0700, no symlink on the way; never the
-    Codex-readable chat-git mirrors' folder."""
+def _private_dir(*names: str) -> Path:
+    """`V2_DATA_DIR/<names...>`, each made 0700, no symlink on the way, never
+    in or around the Codex-readable chat-git mirrors' folder."""
     from jarvis import config
     base = Path(config.V2_DATA_DIR).expanduser()
-    path = base / "pr-mirrors"
+    path = base.joinpath(*names)
     for folder in (path, *path.parents):
         if folder.is_symlink():
             raise MirrorRefused("symlink")
@@ -765,16 +859,28 @@ def mirrors_root() -> Path:
     except (OSError, RuntimeError):
         raise MirrorRefused("chat mirrors") from None
     base.mkdir(mode=0o700, parents=True, exist_ok=True)
-    path.mkdir(mode=0o700, exist_ok=True)
-    path.chmod(0o700)
+    here = base
+    for name in names:
+        here = here / name
+        here.mkdir(mode=0o700, exist_ok=True)
+        here.chmod(0o700)
     real = path.resolve()
     if real == chat or chat in real.parents or real in chat.parents:
         raise MirrorRefused("chat mirrors")
     return path
 
 
+def mirrors_root() -> Path:
+    """`V2_DATA_DIR/pr-mirrors`, 0700."""
+    return _private_dir("pr-mirrors")
+
+
 def mirror_key(repo: str) -> str:
     return hashlib.sha256(repo.lower().encode("utf-8")).hexdigest()[:40]
+
+
+def mirror_path(repo: str) -> Path:
+    return mirrors_root() / f"{mirror_key(repo)}.git"
 
 
 def empty_home() -> Path:
@@ -786,17 +892,57 @@ def empty_home() -> Path:
     return home
 
 
+def _remove_tree(path: Path) -> None:
+    """Remove a folder of ours whole; never follows a symlink out of it."""
+    if path.is_symlink():
+        path.unlink()
+    elif path.exists():
+        shutil.rmtree(path, ignore_errors=True)
+
+
 def local_env() -> dict[str, str]:
     """For git runs that read the mirror: `chat_git._owner_env()` with its
-    HOME and XDG folders replaced by an empty one, and no global, system or
-    attribute config of the owner's (no merge driver or filter defined)."""
+    HOME and XDG folders replaced by an empty one, no session bus, and no
+    global, system or attribute config of the owner's (no merge driver or
+    filter defined)."""
     from .chat_git import _owner_env
     env = {k: v for k, v in _owner_env().items()
            if k not in ("HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME",
-                        "XDG_CACHE_HOME", "GH_CONFIG_DIR")}
+                        "XDG_CACHE_HOME", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS",
+                        "GH_CONFIG_DIR")}
     env.update({"HOME": str(empty_home()), "GIT_CONFIG_GLOBAL": "/dev/null",
                 "GIT_CONFIG_NOSYSTEM": "1", "GIT_ATTR_NOSYSTEM": "1",
                 "GIT_TERMINAL_PROMPT": "0", "LANG": "C.UTF-8"})
+    return env
+
+
+def gh_root() -> Path:
+    """`V2_DATA_DIR/pr-facts-gh`, 0700: each pass's gh cache and state."""
+    return _private_dir("pr-facts-gh")
+
+
+def new_gh_home(now: float | None = None) -> Path:
+    """A fresh private folder for one pass's gh cache and state (gh 2.86
+    reads its cache folder from `XDG_CACHE_HOME`, its state from
+    `XDG_STATE_HOME`: go-gh's `config.CacheDir`/`StateDir`; it has no
+    `GH_CACHE_DIR`). Folders a crashed pass left are removed once stale."""
+    root = gh_root()
+    limit = (time.time() if now is None else now) - GH_HOME_STALE_S
+    for entry in root.iterdir():
+        try:
+            if entry.lstat().st_mtime < limit:
+                _remove_tree(entry)
+        except OSError:
+            pass
+    return Path(tempfile.mkdtemp(prefix="pass-", dir=root))
+
+
+def gh_env(home: Path) -> dict[str, str]:
+    """`chat_git._owner_env()` (gh finds the owner's login in its config
+    folder, which stays), with gh's cache and state in `home`."""
+    from .chat_git import _owner_env
+    env = _owner_env()
+    env.update({"XDG_CACHE_HOME": str(home / "cache"), "XDG_STATE_HOME": str(home / "state")})
     return env
 
 
@@ -816,6 +962,16 @@ def fetch_pins() -> list[str]:
     from .chat_git import _credential_pins
     return [*gitops._HARDENING, *_credential_pins(), "-c", "protocol.allow=never",
             "-c", "protocol.https.allow=always", "-c", "protocol.file.allow=never"]
+
+
+def base_ref(base: str) -> str:
+    """The mirror's ref for a base branch: its name in hex, so `a` and `a/b`
+    never collide (a ref cannot be both a file and a folder)."""
+    return f"refs/jarvis/base/{base.encode('utf-8').hex()}"
+
+
+def pull_ref(number: int) -> str:
+    return f"refs/jarvis/pull/{number}"
 
 
 # -- reading ---------------------------------------------------------------------------------
@@ -850,12 +1006,13 @@ class _Pass:
         self.run, self.now, self.stop = run, now, stop
         self.deadline = now() + budget
 
-    def call(self, argv: list[str], env: dict, cap: int, ok_codes=(0,)) -> bytes:
+    def call(self, argv: list[str], env: dict, cap: int, ok_codes=(0,), keep_tail=False) -> bytes:
         left = self.deadline - self.now()
         if left <= 0:
             raise GhFailed("timeout")
+        kw = {"keep_tail": True} if keep_tail else {}
         return self.run(argv, env, timeout=min(CALL_TIMEOUT_S, left), cap=cap, stop=self.stop,
-                        ok_codes=ok_codes)
+                        ok_codes=ok_codes, **kw)
 
     def out_of_time(self) -> bool:
         return self.deadline - self.now() <= 0
@@ -878,7 +1035,7 @@ def checks_argv(gh: str, repo: str, head: str) -> list[str]:
 
 
 def log_argv(gh: str, repo: str, job: int) -> list[str]:
-    return [gh, "run", "view", "--job", str(job), "--repo", repo, "--log-failed"]
+    return [gh, "api", "--method", "GET", f"repos/{repo}/actions/jobs/{job}/logs"]
 
 
 def repo_argv(gh: str, repo: str) -> list[str]:
@@ -893,8 +1050,8 @@ def fetch_argv(git: str, mirror: Path, repo: str, base: str, number: int) -> lis
     from jarvis import gitops
     return [git, *fetch_pins(), *gitops._with_submodule_flags([
         "--git-dir", str(mirror), "fetch", "--no-tags", "--no-write-fetch-head", "--quiet",
-        f"https://github.com/{repo}.git", f"+refs/heads/{base}:refs/heads/{base}",
-        f"+refs/pull/{number}/head:refs/pull/{number}/head"])]
+        f"https://github.com/{repo}.git", f"+refs/heads/{base}:{base_ref(base)}",
+        f"+refs/pull/{number}/head:{pull_ref(number)}"])]
 
 
 def merge_tree_argv(git: str, mirror: Path, base: str, head: str) -> list[str]:
@@ -906,11 +1063,75 @@ def blob_argv(git: str, mirror: Path, tree: str, path: str) -> list[str]:
     return [git, *local_pins(), "--git-dir", str(mirror), "cat-file", "blob", f"{tree}:{path}"]
 
 
+def refs_argv(git: str, mirror: Path) -> list[str]:
+    return [git, *local_pins(), "--git-dir", str(mirror), "for-each-ref",
+            "--format=%(refname)", "refs/jarvis/pull/"]
+
+
+def delete_ref_argv(git: str, mirror: Path, ref: str) -> list[str]:
+    return [git, *local_pins(), "--git-dir", str(mirror), "update-ref", "-d", ref]
+
+
+def _size(path: Path, stop_at: int) -> int:
+    """Bytes under `path` (no symlink followed), counting stopped past `stop_at`."""
+    total = 0
+    for top, dirs, files in os.walk(path, followlinks=False):
+        for name in files:
+            try:
+                total += os.lstat(os.path.join(top, name)).st_size
+            except OSError:
+                continue
+            if total > stop_at:
+                return total
+    return total
+
+
+def clean_tmp(mirror: Path) -> int:
+    """Remove what a killed fetch leaves: `objects/pack/tmp_*` and
+    `objects/??/tmp_obj_*`. The count removed."""
+    removed = 0
+    objects = mirror / "objects"
+    folders = [objects / "pack", objects] + ([objects / d for d in os.listdir(objects)
+                                              if len(d) == 2] if objects.is_dir() else [])
+    for folder in folders:
+        if folder.is_symlink() or not folder.is_dir():
+            continue
+        for entry in os.scandir(folder):
+            if entry.name.startswith("tmp_") and not entry.is_dir(follow_symlinks=False):
+                try:
+                    os.unlink(entry.path)
+                    removed += 1
+                except OSError:
+                    pass
+    return removed
+
+
+def _scratch(repo: str) -> Path:
+    """A fresh, empty throwaway object folder for this repository's
+    merge-tree (made under the repository's lock)."""
+    path = _private_dir("pr-mirrors", "scratch") / mirror_key(repo)
+    _remove_tree(path)
+    path.mkdir(mode=0o700)
+    return path
+
+
+def scratch_env(scratch: Path, mirror: Path) -> dict[str, str]:
+    """`local_env()` with new objects written to `scratch` and the mirror's
+    read through it as an alternate: merge-tree never grows the mirror."""
+    env = local_env()
+    env.update({"GIT_OBJECT_DIRECTORY": str(scratch),
+                "GIT_ALTERNATE_OBJECT_DIRECTORIES": str(mirror / "objects")})
+    return env
+
+
 def ensure_mirror(p: _Pass, git: str, repo: str) -> Path:
-    """The repository's bare mirror, made on first use (no template), 0700."""
-    path = mirrors_root() / f"{mirror_key(repo)}.git"
+    """The repository's bare mirror, made on first use (no template), 0700;
+    deleted and made again past `MIRROR_CAP`."""
+    path = mirror_path(repo)
     if path.is_symlink() or (path.exists() and not path.is_dir()):
         raise MirrorRefused("not a folder")
+    if path.is_dir() and _size(path, MIRROR_CAP) > MIRROR_CAP:
+        _remove_tree(path)
     if not (path / "HEAD").is_file():
         p.call(init_argv(git, path), local_env(), GIT_CAP)
     path.chmod(0o700)
@@ -920,36 +1141,112 @@ def ensure_mirror(p: _Pass, git: str, repo: str) -> Path:
 
 
 def read_conflicts(p: _Pass, git: str, repo: str, number: int, base: str, base_oid: str,
-                   head: str) -> tuple[tuple[str, ...], tuple[Conflict, ...]]:
+                   head: str, fetch_env: dict | None = None
+                   ) -> tuple[tuple[str, ...], tuple[Conflict, ...]]:
     """(the conflicting paths, scrubbed; marker regions of up to CONFLICT_FILES)."""
     from .chat_git import _owner_env
     with _mirror_lock(mirror_key(repo)):
         mirror = ensure_mirror(p, git, repo)
-        p.call(fetch_argv(git, mirror, repo, base, number), _owner_env(), GIT_CAP)
-        tree, names = parse_merge_tree(p.call(merge_tree_argv(git, mirror, base_oid, head),
-                                              local_env(), GIT_CAP, ok_codes=(0, 1)))
-        regions = []
-        for name in names:
-            if len(regions) >= CONFLICT_FILES or p.out_of_time():
-                break
-            label = shown(scrub(name), 200)
-            if _credential_path(name):
-                regions.append(Conflict(label, "", True))
+        scratch = None
+        try:
+            clean_tmp(mirror)
+            p.call(fetch_argv(git, mirror, repo, base, number), fetch_env or _owner_env(), GIT_CAP)
+            clean_tmp(mirror)
+            scratch = _scratch(repo)
+            env = scratch_env(scratch, mirror)
+            tree, names = parse_merge_tree(p.call(merge_tree_argv(git, mirror, base_oid, head),
+                                                  env, GIT_CAP, ok_codes=(0, 1)))
+            regions = []
+            for name in names:
+                if len(regions) >= CONFLICT_FILES or p.out_of_time():
+                    break
+                label = shown(scrub(name), 200)
+                if _credential_path(name):
+                    regions.append(Conflict(label, "", True))
+                    continue
+                if name.startswith(("./", "../")):
+                    continue
+                try:
+                    blob = p.call(blob_argv(git, mirror, tree, name), env, BLOB_CAP)
+                except GhFailed:
+                    continue
+                text = scrub(blob.decode("utf-8", "replace"))
+                regions.append(Conflict(label, marker_regions(text)))
+        finally:
+            if scratch is not None:
+                _remove_tree(scratch)
+            if mirror.is_dir():
+                clean_tmp(mirror)
+                if _size(mirror, MIRROR_CAP) > MIRROR_CAP:
+                    _remove_tree(mirror)
+    return tuple(shown(scrub(n), 200) for n in names), tuple(regions)
+
+
+def tidy_mirrors(open_prs: Mapping[str, Iterable[int]], *, run: Runner | None = None,
+                 git: str | None = None) -> dict:
+    """After a poll: every mirror of a repository not in `open_prs` removed;
+    in the rest, the refs of PRs no longer open deleted (at most
+    `REFS_PRUNED_MAX`), a killed fetch's leftovers removed, a mirror past
+    `MIRROR_CAP` removed. Objects that only closed PRs reached stay until
+    the cap rebuilds the mirror: a repack per poll would cost more than the
+    space. Returns counts; runs nothing that reads the network."""
+    from jarvis import gitops
+    from .inbox_prs import run_bounded
+    run = run or run_bounded
+    keys = {mirror_key(r): (r, {n for n in nums if valid_number(n)}) for r, nums in open_prs.items()
+            if valid_repo(r)}
+    root = mirrors_root()
+    out = {"removed": 0, "refs": 0}
+    for entry in sorted(root.iterdir()):
+        if not entry.name.endswith(".git"):
+            continue
+        key = entry.name[:-4]
+        with _mirror_lock(key):
+            if key not in keys:
+                _remove_tree(entry)
+                out["removed"] += 1
                 continue
-            if name.startswith(("./", "../")):
+            if entry.is_symlink() or not entry.is_dir():
+                _remove_tree(entry)
+                out["removed"] += 1
                 continue
+            clean_tmp(entry)
+            if _size(entry, MIRROR_CAP) > MIRROR_CAP:
+                _remove_tree(entry)
+                out["removed"] += 1
+                continue
+            gitbin = git or gitops.git_binary()
+            keep = keys[key][1]
             try:
-                blob = p.call(blob_argv(git, mirror, tree, name), local_env(), BLOB_CAP)
+                data = run(refs_argv(gitbin, entry), local_env(), timeout=CALL_TIMEOUT_S, cap=GIT_CAP)
+                refs = [r for r in data.decode("utf-8", "replace").splitlines() if r]
             except GhFailed:
                 continue
-            text = scrub(blob.decode("utf-8", "replace"))
-            regions.append(Conflict(label, marker_regions(text)))
-    return tuple(shown(scrub(n), 200) for n in names), tuple(regions)
+            for ref in refs:
+                if out["refs"] >= REFS_PRUNED_MAX:
+                    break
+                tail = ref[len("refs/jarvis/pull/"):]
+                if not ref.startswith("refs/jarvis/pull/") or not tail.isdigit() or int(tail) in keep:
+                    continue
+                try:
+                    run(delete_ref_argv(gitbin, entry, ref), local_env(), timeout=CALL_TIMEOUT_S,
+                        cap=GIT_CAP)
+                    out["refs"] += 1
+                except GhFailed:
+                    continue
+    return out
 
 
 def _not_read(repo: str, number: int, reason: str) -> PrFacts:
     parts = ("view", "diff", "checks", "logs", "repo", "conflicts")
     return PrFacts(repo, number, read={k: reason for k in parts})
+
+
+def _log_text(data: bytes) -> str:
+    text = data.decode("utf-8", "replace")
+    if len(data) >= LOG_CAP and "\n" in text:
+        text = text.split("\n", 1)[1]          # the tail's first line is cut
+    return _tail_lines(text, LOG_LINES, LOGS_CAP)
 
 
 def read_pr(repo: str, number: int, *, run: Runner | None = None, gh: str | None = None,
@@ -958,19 +1255,32 @@ def read_pr(repo: str, number: int, *, run: Runner | None = None, gh: str | None
             stop: threading.Event | None = None) -> PrFacts:
     """Everything code reads about `repo`'s PR `number` (PM-1), scrubbed
     (PM-3); each part's outcome in `read`. ValueError for a repo or number
-    that is not valid (the caller's bug, nothing is run)."""
+    that is not valid (the caller's bug, nothing is run). gh's cache and
+    state for the pass live in a private folder removed when it ends."""
     from jarvis import gitops
-    from .chat_git import _owner_env
-    from .inbox_prs import run_bounded
     if not valid_repo(repo) or not valid_number(number):
         raise ValueError("not a valid OWNER/REPO and pull request number")
-    run = run or run_bounded
     gh = gh if gh is not None else gitops.gh_binary()
-    cache = repo_cache if repo_cache is not None else _REPO_CACHE
     if not gh:
         return _not_read(repo, number, "missing")
+    try:
+        home = new_gh_home()
+    except (MirrorRefused, OSError) as exc:
+        LOG.warning("PR facts: no private gh folder (%s)", type(exc).__name__)
+        return _not_read(repo, number, "refused")
+    try:
+        return _read(repo, number, run=run, gh=gh, git=git, now=now, repo_cache=repo_cache,
+                     budget=budget, stop=stop, env=gh_env(home))
+    finally:
+        _remove_tree(home)
+
+
+def _read(repo, number, *, run, gh, git, now, repo_cache, budget, stop, env) -> PrFacts:
+    from jarvis import gitops
+    from .inbox_prs import run_bounded
+    run = run or run_bounded
+    cache = repo_cache if repo_cache is not None else _REPO_CACHE
     p = _Pass(run, now, budget, stop)
-    env = _owner_env()
     read: dict[str, str] = {}
     try:
         view = parse_view(p.call(view_argv(gh, repo, number), env, VIEW_CAP), repo, number)
@@ -989,25 +1299,24 @@ def read_pr(repo: str, number: int, *, run: Runner | None = None, gh: str | None
     except GhFailed as exc:
         read["diff"] = _reason(exc)
 
-    runs = None
+    runs, complete = None, False
     if head is None:
         read["checks"] = "malformed"
     else:
         try:
-            runs = parse_check_runs(p.call(checks_argv(gh, repo, head), env, CHECKS_CAP))
+            runs, complete = parse_check_runs(p.call(checks_argv(gh, repo, head), env, CHECKS_CAP))
             read["checks"] = "ok"
         except GhFailed as exc:
             read["checks"] = _reason(exc)
-    failing = _enrich(failing_names, runs, repo)
+    failing = _enrich(failing_names, runs, complete, repo)
 
     logs = []
     jobs = [c for c in failing if c.job is not None][:LOG_JOBS]
     read["logs"] = "ok" if jobs else "not_needed"
     for check in jobs:
         try:
-            data = p.call(log_argv(gh, repo, check.job), env, LOG_CAP)
-            logs.append(Log(check.name, _tail_lines(data.decode("utf-8", "replace"), LOG_LINES,
-                                                    LOGS_CAP)))
+            data = p.call(log_argv(gh, repo, check.job), env, LOG_CAP, keep_tail=True)
+            logs.append(Log(check.name, _log_text(data)))
         except GhFailed as exc:
             read["logs"] = _reason(exc)
 
@@ -1042,7 +1351,7 @@ def read_pr(repo: str, number: int, *, run: Runner | None = None, gh: str | None
         try:
             gitbin = git or gitops.git_binary()
             conflicts, regions = read_conflicts(p, gitbin, repo, number, view["base"],
-                                                view["base_oid"], head)
+                                                view["base_oid"], head, fetch_env=env)
             read["conflicts"] = "ok"
         except GhFailed as exc:
             read["conflicts"] = _reason(exc)
@@ -1071,70 +1380,99 @@ def method(facts: PrFacts) -> str | None:
     return None
 
 
-def _names(items: list[str], limit: int = 4) -> str:
-    out = items[:limit]
-    if len(items) > limit:
-        out.append(f"+{len(items) - limit} more")
-    return ", ".join(out)
+@dataclass(frozen=True)
+class FactPart:
+    """One part of the facts line. `text` is code's own words; `items` are
+    untrusted names (check names, paths), already scrubbed and `shown`,
+    which a surface draws as their own list, never joined into `text`."""
+    key: str
+    text: str
+    items: tuple[str, ...] = ()
+    more: int = 0                 # items not listed
+
+    def as_dict(self) -> dict:
+        return {"key": self.key, "text": self.text, "items": list(self.items), "more": self.more}
 
 
-def facts_line(facts: PrFacts) -> str:
-    """PM-9's line, from validated fields only, e.g.
-    `O/R #N · feat → main · checks: failing (test, GitGuardian Security Checks
-    [secret scanner]) · conflicts: a.py, b.py · 12 files +340 −20 · head
-    1a2b3c4 · merge commit`."""
-    parts = [f"{facts.repo} #{facts.number}"]
+def _items(names: list[str], limit: int) -> tuple[tuple[str, ...], int]:
+    return tuple(names[:limit]), max(0, len(names) - limit)
+
+
+def facts_parts(facts: PrFacts) -> tuple[FactPart, ...]:
+    """PM-9's line as labelled parts, from validated fields only. The
+    surfaces draw the separators between parts (as #330's Where), so a name
+    can never pass for a part of its own. Keys: pr, state, branch, checks,
+    conflicts, merge_state, review, files, head, fork, method, read."""
+    parts = [FactPart("pr", f"{facts.repo} #{facts.number}")]
     if not facts.ok("view"):
-        parts.append("not read")
-        return " · ".join(parts)
+        parts.append(FactPart("state", "not read"))
+        return tuple(parts)
     if facts.state != "OPEN":
-        parts.append(facts.state.lower())
+        parts.append(FactPart("state", facts.state.lower()))
     if facts.draft:
-        parts.append("draft")
+        parts.append(FactPart("state", "draft"))
     head = facts.branch and (f"fork:{facts.branch}" if facts.fork else facts.branch)
-    parts.append(f"{head or 'branch not shown'} → {facts.base or 'base not shown'}")
+    parts.append(FactPart("branch", f"{head or 'branch not shown'} → {facts.base or 'base not shown'}"))
     if facts.checks is None:
-        parts.append("checks: not read")
+        parts.append(FactPart("checks", "checks: not read"))
     elif facts.checks == "failing":
         names = [c.name + (" [secret scanner]" if c.scanner else "") for c in facts.failing]
-        parts.append(f"checks: failing ({_names(names)})" if names else "checks: failing")
+        items, more = _items(names, 4)
+        parts.append(FactPart("checks", "checks: failing", items, more))
     elif facts.checks == "pending":
-        parts.append(f"checks: pending ({facts.pending})" if facts.pending else "checks: pending")
+        parts.append(FactPart("checks", f"checks: pending ({facts.pending})" if facts.pending
+                              else "checks: pending"))
     else:
-        parts.append(f"checks: {facts.checks}")
+        parts.append(FactPart("checks", f"checks: {facts.checks}"))
     if facts.merge_state == "DIRTY":
         if facts.ok("conflicts"):
-            parts.append(f"conflicts: {_names(list(facts.conflicts), 5)}" if facts.conflicts
-                         else "conflicts: none found")
+            items, more = _items(list(facts.conflicts), 5)
+            parts.append(FactPart("conflicts", "conflicts:" if items else "conflicts: none found",
+                                  items, more))
         else:
-            parts.append("conflicts: not read")
+            parts.append(FactPart("conflicts", "conflicts: not read"))
     elif facts.merge_state == "BEHIND":
-        parts.append(f"behind {facts.base or 'its base'}")
+        parts.append(FactPart("merge_state", f"behind {facts.base or 'its base'}"))
     elif facts.merge_state == "BLOCKED":
-        parts.append("blocked by branch rules")
+        parts.append(FactPart("merge_state", "blocked by branch rules"))
     elif facts.merge_state in ("UNKNOWN", "DRAFT"):
-        parts.append("mergeability unknown")
+        parts.append(FactPart("merge_state", "mergeability unknown"))
     if facts.review == "CHANGES_REQUESTED":
-        parts.append("changes requested")
+        parts.append(FactPart("review", "changes requested"))
     elif facts.review == "REVIEW_REQUIRED":
-        parts.append("review required")
+        parts.append(FactPart("review", "review required"))
     if facts.files_total is not None:
         added = "?" if facts.additions is None else str(facts.additions)
         removed = "?" if facts.deletions is None else str(facts.deletions)
         word = "file" if facts.files_total == 1 else "files"
-        parts.append(f"{facts.files_total} {word} +{added} −{removed}")
+        parts.append(FactPart("files", f"{facts.files_total} {word} +{added} −{removed}"))
     else:
-        parts.append("files not read")
-    parts.append(f"head {facts.head[:7]}" if facts.head else "head not shown")
+        parts.append(FactPart("files", "files not read"))
+    parts.append(FactPart("head", f"head {facts.head[:7]}" if facts.head else "head not shown"))
     if facts.fork:
-        parts.append("from a fork")
+        parts.append(FactPart("fork", "from a fork"))
     how = method(facts)
-    parts.append({"merge": "merge commit", "squash": "squash merge"}.get(how)
-                 or ("no merge method allowed" if facts.ok("repo") else "merge method not read"))
+    parts.append(FactPart("method", {"merge": "merge commit", "squash": "squash merge"}.get(how)
+                          or ("no merge method allowed" if facts.ok("repo") else "merge method not read")))
     bundle = model_input(facts)
     if bundle.trimmed:
-        parts.append(f"summary read {bundle.files_read} of {bundle.files_total} files")
-    return " · ".join(parts)
+        parts.append(FactPart("read", f"summary read {bundle.files_read} of {bundle.files_total} files"))
+    return tuple(parts)
+
+
+def facts_text(facts: PrFacts) -> str:
+    """`facts_parts` as one line for tests and logs (never what a surface
+    draws), e.g. `O/R #N · feat → main · checks: failing (test, GitGuardian
+    [secret scanner]) · conflicts: a.py, b.py · 12 files +340 −20 · head
+    1a2b3c4 · merge commit`."""
+    out = []
+    for part in facts_parts(facts):
+        if part.items:
+            listed = ", ".join(part.items) + (f", +{part.more} more" if part.more else "")
+            out.append(f"{part.text} {listed}" if part.text.endswith(":") else f"{part.text} ({listed})")
+        else:
+            out.append(part.text)
+    return " · ".join(out)
 
 
 # -- PM-12: buttons by state ------------------------------------------------------------------
@@ -1253,6 +1591,17 @@ class Bundle:
     trimmed: bool
 
 
+def _fill(lines: list[str], text: str, room: int) -> tuple[int, bool]:
+    """Append `text` (cut to `room`) unless nothing fits; (room left, cut)."""
+    if room <= 0:
+        return 0, bool(text)
+    cut = len(text) > room
+    text = text[:room]
+    if text:
+        lines.append(text)
+    return max(0, room - len(text) - 1), cut
+
+
 def model_input(facts: PrFacts) -> Bundle:
     """The capped, scrubbed text the summary model reads (PM-2), a pure
     function of the facts: title, body, failing checks with their output
@@ -1269,29 +1618,21 @@ def model_input(facts: PrFacts) -> Bundle:
         for check in facts.failing:
             label = check.name + (" [secret scanner]" if check.scanner else "")
             text = "\n".join(x for x in (f"- {label}", check.title, check.summary) if x)
-            if len(text) > room:
-                text, trimmed = text[:max(0, room)], True
-            room -= len(text) + 1
-            lines.append(text)
+            room, cut = _fill(lines, text, room)
+            trimmed |= cut
         for log in facts.logs:
             text = f"Log of {log.name} (last lines):\n{log.text}"
-            if len(text) > room:
-                text = text[len(text) - max(0, room):] if room > 0 else ""
-                trimmed = True
-            room -= len(text) + 1
-            if text:
-                lines.append(text)
+            if len(text) > room > 0:
+                text = text[len(text) - room:]            # a log's end matters most
+            room, cut = _fill(lines, text, room)
+            trimmed |= cut
         out.append("\n".join(lines))
     if facts.regions:
         room, lines = CONFLICTS_CAP, ["Conflicts:"]
         for conflict in facts.regions:
             body = "(credential file: withheld)" if conflict.withheld else conflict.regions
-            text = f"--- {conflict.path}\n{body}"
-            if len(text) > room:
-                text, trimmed = text[:max(0, room)], True
-            room -= len(text) + 1
-            if text:
-                lines.append(text)
+            room, cut = _fill(lines, f"--- {conflict.path}\n{body}", room)
+            trimmed |= cut
         out.append("\n".join(lines))
     head = "\n\n".join(out)
     room = MODEL_CAP - len(head) - len("\n\nChanges:\n")
@@ -1310,22 +1651,17 @@ def model_input(facts: PrFacts) -> Bundle:
         if room <= 0:
             trimmed = True
             break
-        if len(text) > room:
-            lines.append(text[:room])
-            trimmed, room = True, 0
-            continue
-        lines.append(text)
-        room -= len(text) + 1
-        if patch.kind == "shown" and not patch.cut:
+        room, cut = _fill(lines, text, room)
+        if cut:
+            trimmed = True
+        elif patch.kind == "shown" and not patch.cut:
             read += 1
         else:
             trimmed = True
     others = [f.path for f in facts.files if f.path not in named]
     if others:
         trimmed = True
-        listed = ("Other changed files: " + ", ".join(others))[:max(0, room)]
-        if listed:
-            lines.append(listed)
+        room, _cut = _fill(lines, "Other changed files: " + ", ".join(others), room)
     total = facts.files_total if facts.files_total is not None else max(len(patches), len(facts.files))
     if read < total:
         trimmed = True
@@ -1337,30 +1673,32 @@ def model_input(facts: PrFacts) -> Bundle:
 
 class FactsWorker:
     """One worker thread: reads one PR at a time, at most `max_waiting`
-    waiting (a PR already waiting is not queued twice), and hands each
-    PrFacts to `on_facts`. Never started by anything in this package; a
-    later work package attaches it."""
+    waiting (a PR already waiting, in any case of its repository's name,
+    is not queued twice), and hands each PrFacts to `on_facts`. Never
+    started by anything in this package; a later work package attaches it."""
 
     def __init__(self, on_facts: Callable[[PrFacts], None], *,
                  read: Callable[..., PrFacts] = read_pr, max_waiting: int = MAX_WAITING):
         self.on_facts, self.read, self.max_waiting = on_facts, read, max_waiting
         self._lock = threading.Lock()
         self._queue: deque[tuple[str, int]] = deque()
+        self._keys: set[tuple[str, int]] = set()
         self._wake = threading.Event()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
     def submit(self, repo: str, number: int) -> bool:
-        """Queue a read; False when invalid, already waiting or full. Never blocks on a read."""
+        """Queue a read; False when invalid or full. Never blocks on a read."""
         if not valid_repo(repo) or not valid_number(number):
             return False
-        key = (repo, number)
+        key = (repo.lower(), number)
         with self._lock:
-            if key in self._queue:
+            if key in self._keys:
                 return True
             if len(self._queue) >= self.max_waiting:
                 return False
-            self._queue.append(key)
+            self._queue.append((repo, number))
+            self._keys.add(key)
         self._wake.set()
         return True
 
@@ -1384,14 +1722,16 @@ class FactsWorker:
     def _loop(self) -> None:
         while not self._stop.is_set():
             with self._lock:
-                key = self._queue.popleft() if self._queue else None
-                if key is None:
+                item = self._queue.popleft() if self._queue else None
+                if item is None:
                     self._wake.clear()
-            if key is None:
+                else:
+                    self._keys.discard((item[0].lower(), item[1]))
+            if item is None:
                 self._wake.wait(1.0)
                 continue
             try:
-                facts = self.read(*key, stop=self._stop)
+                facts = self.read(*item, stop=self._stop)
             except Exception as exc:  # noqa: BLE001 — never kills the worker; nothing read is logged
                 LOG.warning("PR facts: a read broke (%s)", type(exc).__name__)
                 continue
@@ -1403,6 +1743,7 @@ class FactsWorker:
                 LOG.warning("PR facts: the consumer broke (%s)", type(exc).__name__)
 
 
-__all__ = ["Bundle", "Check", "Conflict", "Decision", "FactsWorker", "FileChange", "Log", "Patch",
-           "PrFacts", "RepoCache", "SECRET_SCANNERS", "actions", "decide", "facts_line", "flagged",
-           "flags_line", "method", "model_input", "parse_diff", "path_flags", "read_pr", "scrub"]
+__all__ = ["Bundle", "Check", "Conflict", "Decision", "FactPart", "FactsWorker", "FileChange", "Log",
+           "Patch", "PrFacts", "RepoCache", "SECRET_SCANNERS", "actions", "decide", "facts_parts",
+           "facts_text", "flagged", "flags_line", "method", "model_input", "parse_diff", "path_flags",
+           "read_pr", "scrub", "tidy_mirrors"]
