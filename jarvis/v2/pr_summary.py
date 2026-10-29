@@ -28,7 +28,11 @@ What this module guarantees, each pinned by `tests/v2/pr_summary_check.py`:
     `DOES_MAX` characters) and `Blocked:` (at most `BLOCKED_MAX`, empty when
     nothing blocks), each cleaned as `approval_summary.clean_summary` cleans
     its line (markdown and link syntax out, scrubbed, unseen characters
-    gone). Other lines are dropped. **A missing `Does:` is a failure.**
+    gone). Other lines are dropped; a label's text may be on the lines
+    after it, and a `Does:` holding `Blocked:` is cut there
+    (`parse_summary`). **A missing `Does:` is a failure.** The names an
+    author or a check chose go to the model quoted, as names
+    (`facts_for_model`).
   - **Cached (PM-5)** by the SHA-256 of (repository in lower case, number,
     head, checks summary, merge state, `PROMPT_VERSION`), on disk at
     `<data root>/inbox/pr-summaries.json` (0600 in a 0700 folder, the newest
@@ -38,9 +42,13 @@ What this module guarantees, each pinned by `tests/v2/pr_summary_check.py`:
     `CHECKS_RERUNNING`, and no call is made.
   - **Capped (PM-5, PM-6).** `DAILY_CALLS` model calls and `DAILY_COST_USD` a
     local day (`StoredLedger`), and `PER_PR_DAILY` summaries per PR a day,
-    all kept in the same file, so a restart resets nothing. A file that
-    cannot be read, or a write that fails, closes the budget: no call
-    (`off`), never a fresh budget. Past a cap: `off`.
+    all kept in the same file, so a restart resets nothing. A file whose
+    budget cannot be read is moved aside and today's budget starts used up
+    (no call today, a fresh one tomorrow); a cached summary that cannot be
+    read is dropped; a path that is not a file, or a write that fails,
+    closes the budget for the process (`SummaryFile`). A day never goes
+    back. Past a cap: `off`. A summary is never made from a read that
+    missed its diff, checks, logs or conflicts (`SUMMARY_PARTS`).
   - **States (PM-7):** `pending`, `ready`, `failed`, `off`; for `failed` and
     `off` a reason in code's words (`summary_reason`).
   - **No model at start (PM-8).** `PrSummaries` is attached by daemon2's
@@ -59,6 +67,7 @@ actions sit on a PR row the owner reads before a merge.
 from __future__ import annotations
 
 from collections import OrderedDict
+import contextlib
 from dataclasses import dataclass
 from datetime import datetime
 import hashlib
@@ -69,6 +78,7 @@ import os
 from pathlib import Path
 import re
 import stat
+import tempfile
 import threading
 import time
 from typing import Any, Callable
@@ -154,27 +164,57 @@ def clean_field(raw, cap: int) -> str:
     return cut.rstrip(" ,;:.-") + "…"
 
 
+_INNER_BLOCKED = re.compile(r"\bblocked\s*:", re.IGNORECASE)
+
+
+def _plain(line: str) -> str:
+    """One answer line with its markdown marks off, for finding a label."""
+    line = line.replace("**", "")
+    return _LINE_MARK.sub("", line).strip().lstrip(">").strip()
+
+
 def parse_summary(raw) -> dict | None:
     """The model's answer as `{"does", "blocked"}`, or None (a failure) when
-    there is no `Does:` line with text. The first `Does:` and the first
-    `Blocked:` count; every other line is dropped. A `Blocked:` that says
-    nothing blocks is "" (as if left out)."""
+    there is no `Does:` with text.
+
+    - The first **non-empty** `Does:` and `Blocked:` count; every other line
+      is dropped (a label's later lines too, once it has text).
+    - A label whose text is on the next line(s) (`Blocked:` then the
+      reason) takes those lines, up to a blank line or the next label: a
+      `Blocked:` so written is never read as "nothing blocks".
+    - A `Does:` holding an inner `Blocked:` is cut there; what follows is the
+      `Blocked:` text when no line of its own gives one.
+    - A `Blocked:` that says nothing blocks is "" (as if left out)."""
     if not isinstance(raw, str):
         return None
+    lines = [_plain(line) for line in untrusted.strip_invisible(raw).splitlines()]
     found: dict[str, str] = {}
-    for line in untrusted.strip_invisible(raw).splitlines():
-        line = line.replace("**", "")
-        line = _LINE_MARK.sub("", line).strip().lstrip(">").strip()
+    for i, line in enumerate(lines):
         match = _LABEL.match(line)
         if not match:
             continue
-        label = match.group(1).lower()
-        if label not in found:
-            found[label] = match.group(2)
-    does = clean_field(found.get("does"), DOES_MAX)
+        label, text = match.group(1).lower(), match.group(2).strip()
+        if not text:
+            rest = []
+            for later in lines[i + 1:]:
+                if _LABEL.match(later):
+                    break
+                if not later:
+                    if rest:
+                        break
+                    continue
+                rest.append(later)
+            text = " ".join(rest)
+        if label not in found and clean_field(text, 10_000):
+            found[label] = text
+    does_raw, inner = found.get("does", ""), ""
+    cut = _INNER_BLOCKED.search(does_raw)
+    if cut:
+        does_raw, inner = does_raw[:cut.start()], does_raw[cut.end():]
+    does = clean_field(does_raw, DOES_MAX)
     if not does:
         return None
-    blocked = clean_field(found.get("blocked"), BLOCKED_MAX)
+    blocked = clean_field(found.get("blocked", inner), BLOCKED_MAX)
     if blocked.lower().rstrip(".") in _BLOCKED_NONE:
         blocked = ""
     return {"does": does, "blocked": blocked}
@@ -196,6 +236,22 @@ def candidates() -> list[str]:
     return tier_candidates(TIER, DEFAULT_MODEL)
 
 
+def facts_for_model(facts) -> str:
+    """`facts_parts` as one line for the model: code's words as they are, and
+    every name an author or a check chose (check names, paths) quoted and
+    labelled as names, so a check called "approved, nothing blocks" reads as
+    a name, never as code's verdict (review of #335, LOW 5)."""
+    out = []
+    for part in pr_facts.facts_parts(facts):
+        if part.items:
+            names = ", ".join(json.dumps(item, ensure_ascii=False) for item in part.items)
+            more = f", and {part.more} more" if part.more else ""
+            out.append(f"{part.text.rstrip(':')} (names as written: {names}{more})")
+        else:
+            out.append(part.text)
+    return " · ".join(out)
+
+
 def model_input(facts) -> str | None:
     """What the model reads, before the engine's fence; None when nothing may
     be sent (not read, no head, not open, a draft, empty or too long)."""
@@ -204,7 +260,7 @@ def model_input(facts) -> str | None:
     if facts.state != "OPEN" or facts.draft:
         return None
     bundle = pr_facts.model_input(facts)
-    text = f"Facts (read by code from GitHub): {pr_facts.facts_text(facts)}\n\n{bundle.text}"
+    text = f"Facts (read by code from GitHub): {facts_for_model(facts)}\n\n{bundle.text}"
     text = pr_facts.scrub(untrusted.strip_invisible(text)).strip()
     if not text or len(text) > INPUT_MAX_CHARS:
         return None
@@ -213,8 +269,17 @@ def model_input(facts) -> str | None:
 
 # -- the file: cache, budget and per-PR counts --------------------------------------------
 
+def _local_day() -> str:
+    return datetime.now().date().isoformat()
+
+
 class StoreBroken(Exception):
-    """The summaries file cannot be read or written: no call is made."""
+    """The summaries file cannot be used at all (not a regular file, a read
+    or a write that fails): no call is made for this store's life."""
+
+
+class _Malformed(Exception):
+    """The file's content is not of this file's shape: it is moved aside."""
 
 
 _KEY = re.compile(r"[0-9a-f]{64}")
@@ -223,28 +288,69 @@ _DAY = re.compile(r"\d{4}-\d{2}-\d{2}")
 _NONBLOCK = getattr(os, "O_NONBLOCK", 0)
 
 
+def _write_private(path: Path, data: bytes) -> None:
+    """`data` to `path` whole: a sibling temp file (0600), written and
+    fsynced, then `os.replace`, then the folder fsynced, so a crash leaves
+    the old file or the new one, never a torn one (review of #335, MED 2)."""
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+        tmp = None
+        folder = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(folder)
+        finally:
+            os.close(folder)
+    finally:
+        if tmp is not None:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp)
+
+
 class SummaryFile:
     """`<data root>/inbox/pr-summaries.json`: the newest `keep` summaries (the
     engine's cache: `get`/`put`), the day's budget (`ledger`/`set_ledger`)
     and the day's summaries per PR (`take_pr`/`refund_pr`/`pr_count`).
 
     Read once, lazily, `O_NOFOLLOW | O_NONBLOCK`, a regular file of at most
-    `FILE_CAP` bytes; written whole after each change by a sibling temp file
-    (mode 0600) and `os.replace`, in a 0700 folder. A file that is not of
-    the expected shape, or cannot be read, marks this store **broken**: every
-    budget read and write raises `StoreBroken` (so no call is made), `get`
-    finds nothing, and the file is never overwritten (a reset budget would
-    be a fresh day's). A write that fails marks it broken too.
+    `FILE_CAP` bytes; written whole after each change (`_write_private`:
+    0600, fsynced, `os.replace`), in a 0700 folder.
+
+    **Fails closed, and heals (review of #335, MED 2).**
+      - A cached summary that is not one is dropped; the rest are kept.
+      - Content that is not this file's shape (not JSON, another version, a
+        ledger or per-PR block that is not one, too large) is **moved
+        aside** (`<name>.bad-<time>`, 0600, its bytes kept) and a new file
+        starts with **today's budget used up** (`daily_cap` calls and
+        `cost_cap_usd`): no call today, a fresh budget tomorrow. A day is
+        never reopened by a bad byte, and no day stays closed for good.
+        The remedy is logged once.
+      - A path that is not a regular file (a link, a folder), a read that
+        fails, or a write that fails (or a move aside that fails) marks this
+        store **broken**: every budget read and write raises `StoreBroken`
+        (so no call is made), `get` finds nothing, nothing is written.
+    A day before the stored one (the clock went back) counts as the stored
+    day, never as a new one.
 
     Its own lock, never held while calling out: the engine calls `get`/`put`
     under its lock, the ledger calls `ledger`/`set_ledger` under its own."""
 
-    def __init__(self, path, *, keep: int = CACHE_KEEP):
+    def __init__(self, path, *, keep: int = CACHE_KEEP, today: Callable[[], str] | None = None,
+                 daily_cap: int = DAILY_CALLS, cost_cap_usd: float | None = DAILY_COST_USD):
         self.path = Path(path)
         self.keep = int(keep)
+        self.today = today or _local_day
+        self.daily_cap = int(daily_cap)
+        self.cost_cap_usd = cost_cap_usd
         self._lock = threading.Lock()
         self._loaded = False
         self.broken: str | None = None
+        self.moved_aside: Path | None = None
         self._ledger: tuple[str, int, float] | None = None
         self._pr_day = ""
         self._pr_counts: dict[str, int] = {}
@@ -263,63 +369,95 @@ class SummaryFile:
             if not stat.S_ISREG(info.st_mode):
                 raise StoreBroken("not a regular file")
             if info.st_size > FILE_CAP:
-                raise StoreBroken("too large")
+                raise _Malformed("too large")
             chunks, left = [], FILE_CAP + 1
             while left > 0 and (chunk := os.read(fd, min(1 << 16, left))):
                 chunks.append(chunk)
                 left -= len(chunk)
             data = b"".join(chunks)
             if len(data) > FILE_CAP:
-                raise StoreBroken("too large")
+                raise _Malformed("too large")
             return data
         finally:
             os.close(fd)
 
-    def _parse(self, data: bytes) -> None:
+    def _parse(self, data: bytes) -> int:
+        """The file's content into this store; the number of cached
+        summaries dropped. `_Malformed` when the budget cannot be read."""
         try:
             item = json.loads(data.decode("utf-8"))
-        except (UnicodeDecodeError, ValueError):
-            raise StoreBroken("not JSON") from None
+        except (UnicodeDecodeError, ValueError, RecursionError):
+            raise _Malformed("not JSON") from None
         if not isinstance(item, dict) or item.get("version") != 1:
-            raise StoreBroken("not this file's shape")
+            raise _Malformed("not this file's shape")
         ledger = item.get("ledger")
         if ledger is not None:
             if not isinstance(ledger, dict):
-                raise StoreBroken("ledger")
+                raise _Malformed("ledger")
             day, calls, cost = ledger.get("day"), ledger.get("calls"), ledger.get("cost_usd")
             if (not isinstance(day, str) or not _DAY.fullmatch(day)
                     or not isinstance(calls, int) or isinstance(calls, bool) or not 0 <= calls < 10**9
                     or not isinstance(cost, (int, float)) or isinstance(cost, bool)
                     or not math.isfinite(cost) or not 0 <= cost < 10**6):
-                raise StoreBroken("ledger")
-            self._ledger = (day, calls, float(cost))
+                raise _Malformed("ledger")
+            ledger = (day, calls, float(cost))
         per_pr = item.get("per_pr")
+        pr_day, pr_counts = "", {}
         if per_pr is not None:
             if not isinstance(per_pr, dict):
-                raise StoreBroken("per_pr")
-            day, counts = per_pr.get("day"), per_pr.get("counts")
-            if not isinstance(day, str) or not (day == "" or _DAY.fullmatch(day)) \
+                raise _Malformed("per_pr")
+            pr_day, counts = per_pr.get("day"), per_pr.get("counts")
+            if not isinstance(pr_day, str) or not (pr_day == "" or _DAY.fullmatch(pr_day)) \
                     or not isinstance(counts, dict) or len(counts) > 100_000:
-                raise StoreBroken("per_pr")
+                raise _Malformed("per_pr")
             for key, n in counts.items():
                 if not _PR_KEY.fullmatch(key) or not isinstance(n, int) or isinstance(n, bool) \
                         or not 0 <= n < 10**6:
-                    raise StoreBroken("per_pr")
-            self._pr_day, self._pr_counts = day, dict(counts)
+                    raise _Malformed("per_pr")
+            pr_counts = dict(counts)
         entries = item.get("entries", [])
-        if not isinstance(entries, list) or len(entries) > 100_000:
-            raise StoreBroken("entries")
-        for entry in entries:
-            if not isinstance(entry, list) or len(entry) != 2 or not isinstance(entry[0], str) \
-                    or not _KEY.fullmatch(entry[0]) or not isinstance(entry[1], dict):
-                raise StoreBroken("entries")
-            value = _stored_summary(entry[1])
+        if not isinstance(entries, list):
+            entries = [None]                    # every entry dropped, none fatal
+        dropped = 0
+        kept: OrderedDict[str, dict] = OrderedDict()
+        for entry in entries[-100_000:]:
+            value = None
+            if isinstance(entry, list) and len(entry) == 2 and isinstance(entry[0], str) \
+                    and _KEY.fullmatch(entry[0]):
+                value = _stored_summary(entry[1])
             if value is None:
-                raise StoreBroken("entries")
-            self._entries[entry[0]] = value
-            self._entries.move_to_end(entry[0])
-        while len(self._entries) > self.keep:
-            self._entries.popitem(last=False)
+                dropped += 1
+                continue
+            kept[entry[0]] = value
+            kept.move_to_end(entry[0])
+        while len(kept) > self.keep:
+            kept.popitem(last=False)
+        self._ledger, self._pr_day, self._pr_counts, self._entries = ledger, pr_day, pr_counts, kept
+        return dropped
+
+    def _heal(self, reason: str) -> None:
+        """Under `_lock`: the unreadable file moved aside, a new one with
+        today's budget used up. Raises StoreBroken when either fails."""
+        stamp = time.strftime("%Y%m%dT%H%M%S")
+        aside = self.path.with_name(f"{self.path.name}.bad-{stamp}")
+        n = 1
+        while os.path.lexists(aside):
+            n += 1
+            aside = self.path.with_name(f"{self.path.name}.bad-{stamp}-{n}")
+        try:
+            os.rename(self.path, aside)
+            os.chmod(aside, 0o600)
+        except OSError as exc:
+            raise StoreBroken(type(exc).__name__) from None
+        self.moved_aside = aside
+        day = self.today()
+        cost = float(self.cost_cap_usd) if self.cost_cap_usd is not None else 0.0
+        self._ledger = (day, self.daily_cap, cost)
+        self._pr_day, self._pr_counts, self._entries = day, {}, OrderedDict()
+        self._save()
+        LOG.warning("PR summaries: %s could not be read (%s). It was moved to %s and a new one started "
+                    "with today's budget used up: no PR summary today; they start again tomorrow.",
+                    self.path.name, reason, aside.name)
 
     def _load(self) -> None:
         """Under `_lock`. Raises StoreBroken when broken."""
@@ -328,17 +466,25 @@ class SummaryFile:
         if self._loaded:
             return
         try:
-            data = self._read()
-            if data is not None:
-                self._parse(data)
+            try:
+                data = self._read()
+                dropped = self._parse(data) if data is not None else 0
+            except _Malformed as exc:
+                self._ledger, self._pr_counts, self._entries = None, {}, OrderedDict()
+                self._heal(str(exc))
+                dropped = 0
+            if dropped:
+                LOG.warning("PR summaries: %d cached summaries could not be read and were dropped", dropped)
         except StoreBroken as exc:
             self.broken = str(exc) or "unreadable"
-            LOG.warning("PR summaries: the file cannot be used (%s); no summary is made", self.broken)
+            LOG.warning("PR summaries: the file cannot be used (%s); no summary is made until it is "
+                        "fixed and the daemon restarted", self.broken)
             self._ledger, self._pr_counts, self._entries = None, {}, OrderedDict()
             raise
         except OSError as exc:
             self.broken = type(exc).__name__
-            LOG.warning("PR summaries: the file cannot be read (%s); no summary is made", self.broken)
+            LOG.warning("PR summaries: the file cannot be read (%s); no summary is made until it is "
+                        "fixed and the daemon restarted", self.broken)
             self._ledger, self._pr_counts, self._entries = None, {}, OrderedDict()
             raise StoreBroken(self.broken) from None
         self._loaded = True
@@ -358,7 +504,6 @@ class SummaryFile:
 
     def _save(self) -> None:
         """Under `_lock`, after `_load`. Raises StoreBroken (and stays broken) on failure."""
-        from .stores import StoreError, _write_bytes
         data = {"version": 1,
                 "ledger": None if self._ledger is None else
                 {"day": self._ledger[0], "calls": self._ledger[1], "cost_usd": self._ledger[2]},
@@ -369,9 +514,9 @@ class SummaryFile:
             existing = os.lstat(self.path) if os.path.lexists(self.path) else None
             if existing is not None and not stat.S_ISREG(existing.st_mode):
                 raise StoreBroken("not a regular file")
-            _write_bytes(self.path, json.dumps(data, ensure_ascii=True, separators=(",", ":")).encode())
+            _write_private(self.path, json.dumps(data, ensure_ascii=True, separators=(",", ":")).encode())
             os.chmod(self.path, 0o600)
-        except (StoreBroken, StoreError, OSError) as exc:
+        except (StoreBroken, OSError) as exc:
             self.broken = type(exc).__name__
             LOG.warning("PR summaries: the file cannot be written (%s); no further summary is made",
                         self.broken)
@@ -426,7 +571,7 @@ class SummaryFile:
     # -- PM-5: summaries per PR per day --------------------------------------------------
 
     def _pr_roll(self, day: str) -> None:
-        if self._pr_day != day:
+        if day > self._pr_day:                  # ISO days; a day before the stored one is that day
             self._pr_day, self._pr_counts = day, {}
 
     def pr_count(self, key: str, day: str) -> int:
@@ -449,7 +594,8 @@ class SummaryFile:
     def refund_pr(self, key: str, day: str) -> None:
         with self._lock:
             self._load()
-            if self._pr_day == day and self._pr_counts.get(key, 0) > 0:
+            self._pr_roll(day)
+            if self._pr_counts.get(key, 0) > 0:
                 self._pr_counts[key] -= 1
                 self._save()
 
@@ -468,25 +614,35 @@ def _stored_summary(value) -> dict | None:
 class StoredLedger(DailyLedger):
     """PM-6: the day's calls and cost kept in the summaries file, so a
     restart resets nothing. A file that cannot be read or written raises,
-    which the engine takes as no room (`summary_engine.DailyLedger`)."""
+    which the engine takes as no room (`summary_engine.DailyLedger`).
+    The day never goes back: a clock set a day back keeps the stored day's
+    budget (review of #335), never a fresh one."""
 
     def __init__(self, store: SummaryFile, daily_cap: int, *, cost_cap_usd: float | None,
                  today: Callable[[], str] | None = None):
-        super().__init__(daily_cap, cost_cap_usd=cost_cap_usd, today=today)
+        real = today or _local_day
+        self._high = ""
+
+        def day() -> str:                       # called under the ledger's lock
+            now = real()
+            if now < self._high:
+                return self._high
+            self._high = now
+            return now
+        super().__init__(daily_cap, cost_cap_usd=cost_cap_usd, today=day)
         self.store = store
 
     def load(self):
-        return self.store.ledger()
+        stored = self.store.ledger()
+        if stored is not None and stored[0] > self._high:
+            self._high = stored[0]
+        return stored
 
     def save(self, day: str, calls: int, cost_usd: float) -> None:
         self.store.set_ledger(day, calls, cost_usd)
 
 
 # -- the summarizer ---------------------------------------------------------------------------
-
-def _local_day() -> str:
-    return datetime.now().date().isoformat()
-
 
 class PrSummaryEngine(SummaryEngine):
     """One summary per PM-5 key, within the day's caps and `per_pr_daily`
@@ -508,7 +664,13 @@ class PrSummaryEngine(SummaryEngine):
                  mono: Callable[[], float] = time.monotonic, today: Callable[[], str] | None = None):
         today = today or _local_day
         self.store = store
+        # A file that heals (`SummaryFile._heal`) starts with today's budget used up.
+        store.today, store.daily_cap, store.cost_cap_usd = today, int(daily_cap), cost_cap_usd
         self.per_pr_daily = int(per_pr_daily)
+        self._counts_lock = threading.Lock()
+        self._counted: dict[str, tuple[str, str]] = {}     # job key -> (PR, day) whose count it took
+        self._calls = threading.local()                    # model calls made on this job's thread
+        self.on_late: Callable[[str, Any], None] | None = None
         ledger = StoredLedger(store, daily_cap, cost_cap_usd=cost_cap_usd, today=today)
         super().__init__(chat=chat, deadline_s=deadline_s, daily_cap=daily_cap, max_running=max_running,
                          max_waiting=max_waiting, cache_size=store.keep, mono=mono, today=today,
@@ -528,30 +690,77 @@ class PrSummaryEngine(SummaryEngine):
 
     def begin(self, facts, done):
         """The engine's `begin`, after PM-5's per-PR cap: a new job takes one
-        of the PR's summaries for the day; an ask that starts none gives it back."""
+        of the PR's summaries for the day. A cached summary, or a job already
+        running for the same key, takes none; an ask that starts no job, or
+        a job that ends without a model call, gives it back (`_end`)."""
         try:
             if model_input(facts) is None:
                 return OFF, ""
             key, pr, day = summary_key(facts), pr_key(facts.repo, facts.number), self._today()
-            cached = self.store.get(key) is not None
-            if not cached and not self.store.take_pr(pr, day, self.per_pr_daily):
-                self.log.info("%s: %d summaries for one PR today; no more", self.label, self.per_pr_daily)
-                return OFF, ""
+            with self._counts_lock:
+                running = key in self._counted
+            take = not running and self.store.get(key) is None
+            if take:
+                if not self.store.take_pr(pr, day, self.per_pr_daily):
+                    self.log.info("%s: %d summaries for one PR today; no more", self.label, self.per_pr_daily)
+                    return OFF, ""
+                with self._counts_lock:
+                    self._counted[key] = (pr, day)
         except Exception as exc:  # noqa: BLE001 — a store that fails sends nothing
             self.log.warning("%s not started (%s)", self.label, type(exc).__name__)
             return OFF, ""
         state, value = super().begin(facts, done)
-        if not cached and state != PENDING:
+        if take and state != PENDING:
+            self._give_back(key)
+        return state, value
+
+    def _give_back(self, key: str) -> None:
+        with self._counts_lock:
+            counted = self._counted.pop(key, None)
+        if counted is not None:
             try:
-                self.store.refund_pr(pr, day)
+                self.store.refund_pr(*counted)
             except Exception:  # noqa: BLE001 — a count kept is the safe side
                 pass
-        return state, value
+
+    def _take_call(self) -> bool:
+        ok = super()._take_call()
+        if ok:
+            self._calls.n = getattr(self._calls, "n", 0) + 1
+        return ok
+
+    def _end(self, job, summary) -> None:
+        """The engine's `_end`, then: a job that made no model call (it
+        waited past its deadline for the one slot) gives its PR's count
+        back; a summary that lands after its asks were told `failed` is
+        handed to `on_late`, which puts it on the row if the key still
+        matches (review of #335, LOW 6)."""
+        called, self._calls.n = getattr(self._calls, "n", 0), 0
+        if called:
+            with self._counts_lock:
+                self._counted.pop(job.key, None)
+        else:
+            self._give_back(job.key)
+        super()._end(job, summary)
+        late = self.on_late
+        if summary and late is not None:
+            try:
+                late(job.key, summary)
+            except Exception as exc:  # noqa: BLE001
+                self.log.warning("%s: a late summary was not applied (%s)", self.label, type(exc).__name__)
+
+    def _open_quietly(self) -> bool:
+        try:
+            return bool(self.ledger.open())
+        except Exception:  # noqa: BLE001
+            return False
 
     def off_reason(self, facts) -> str:
         """Why `begin` said `off`, in code's words."""
         if self.store.broken is not None:
             return "the summary budget could not be read"
+        if self.store.moved_aside is not None and not self._open_quietly():
+            return "the summaries file could not be read and was moved aside; summaries start again tomorrow"
         if self._closed:
             return "summaries are stopped"
         if model_input(facts) is None:
@@ -606,8 +815,21 @@ def _sig(facts) -> tuple:
 
 
 def _incomplete(facts) -> bool:
-    """Any part of the read that did not come back whole (read again after `RETRY_S`)."""
-    return not facts.read or any(v not in ("ok", "not_needed") for v in facts.read.values())
+    """Any part of the read that did not come back whole (read again after
+    `RETRY_S`); a part too large to read is as whole as it will get."""
+    return not facts.read or any(v not in ("ok", "not_needed", "too_large") for v in facts.read.values())
+
+
+# The parts a summary needs whole (review of #335, LOW 3): a summary made
+# from a read that missed one would be cached under the same key as a whole
+# one. "too_large" is whole as far as it goes (the file list stands in).
+SUMMARY_PARTS = ("diff", "checks", "logs", "conflicts")
+PARTIAL_READ = "read in part; it is read again shortly"
+READING_AGAIN = "reading again"
+
+
+def _partial(facts) -> bool:
+    return any(facts.read.get(part) not in ("ok", "not_needed", "too_large") for part in SUMMARY_PARTS)
 
 
 def flags_detail(facts, limit: int = 20) -> dict:
@@ -641,6 +863,7 @@ class PrSummaries:
         self.tidy = tidy or pr_facts.tidy_mirrors
         self.clock = clock
         self.worker = pr_facts.FactsWorker(self._on_facts, read=self._read)
+        engine.on_late = self._late
         self._lock = threading.Lock()
         self._prs: dict[str, _Pr] = {}
 
@@ -686,7 +909,10 @@ class PrSummaries:
                     rec = self._prs.get(key)
                     if rec is None:
                         rec = self._prs[key] = _Pr(repo, pr["number"], f"pr:{repo}#{pr['number']}")
-                    rec.row_id = f"pr:{repo}#{pr['number']}"
+                    # The poll's spelling of the repository (two projects whose
+                    # origins differ in case are one repository): the row,
+                    # the next read and its facts line all use it.
+                    rec.repo, rec.row_id = repo, f"pr:{repo}#{pr['number']}"
                     rec.listed = (pr.get("head"), pr.get("checks"), pr.get("merge_state"))
                     if rec.in_flight:
                         continue
@@ -744,6 +970,10 @@ class PrSummaries:
             elif self._still_stands(rec, facts):
                 rec.job, rec.shown, rec.state, rec.reason = None, rec.good, READY, ""
                 rec.note = CHECKS_RERUNNING
+            elif _partial(facts):
+                # Never summarized from part of a read: the queue reads it
+                # again after RETRY_S, and that read is summarized.
+                rec.job, rec.shown, rec.state, rec.reason = None, None, FAILED, PARTIAL_READ
             else:
                 token = object()
                 rec.job, rec.shown, rec.state, rec.reason = token, None, PENDING, ""
@@ -782,6 +1012,26 @@ class PrSummaries:
             else:
                 rec.shown, rec.state, rec.reason = None, FAILED, "the summary could not be written"
             return True
+
+    def _late(self, key: str, value) -> None:
+        """A summary that landed after its asks were told `failed` (the
+        watchdog): shown on each row whose current read has that key."""
+        summary = _stored_summary(value)
+        if summary is None:
+            return
+        rows = []
+        with self._lock:
+            for rec in self._prs.values():
+                facts = rec.facts
+                if (rec.job is None and rec.state == FAILED and rec.reason != PARTIAL_READ
+                        and facts is not None and facts.ok("view") and facts.head is not None
+                        and summary_key(facts) == key):
+                    rec.shown = rec.good = summary
+                    rec.good_sig, rec.good_key = _sig(facts), key
+                    rec.state, rec.reason, rec.note = READY, "", ""
+                    rows.append(rec.row_id)
+        for row_id in rows:
+            self._refresh(row_id)
 
     def _summarized(self, rec, token, facts, state, value) -> None:
         if self._settle(rec, token, facts, state, value):
@@ -822,10 +1072,15 @@ class PrSummaries:
                        summary_state=state, summary_note=note if state == READY else "",
                        summary_reason=reason if state in (FAILED, OFF) else "",
                        actions=list(decision.actions), why=decision.why, method=decision.method)
-            if facts.ok("view") and (facts.checks, facts.merge_state) != (d.get("checks"), d.get("merge_state")):
-                # The list moved since this read: no action until it is read again.
+            if facts.ok("view") and facts.checks is not None \
+                    and (facts.checks, facts.merge_state) != (d.get("checks"), d.get("merge_state")):
+                # The list moved since this read: no action until it is read
+                # again, and the summary is marked as the earlier read's
+                # (review of #335, LOW 7). Checks that could not be read keep
+                # `decide`'s own words (and no action) instead.
                 out.update(actions=[], method=None,
-                           why="changed since it was read; it is being read again")
+                           why="changed since it was read; it is being read again",
+                           summary_note=READING_AGAIN if out["summary"] else "")
         except Exception as exc:  # noqa: BLE001 — a row is never lost to this
             LOG.warning("PR summaries: a row's detail broke (%s)", type(exc).__name__)
             return {**out, "facts": None, "summary_state": FAILED,

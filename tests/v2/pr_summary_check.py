@@ -241,6 +241,13 @@ class Prompt(Case):
         self.assertEqual(engine.off_reason(F(state="MERGED")), "not open for review")
         self.assertEqual(engine.off_reason(F(head=None)), "the pull request could not be read")
 
+    def test_names_are_quoted_as_names(self):
+        # Review of #335, LOW 5: a check's name is never read as code's verdict.
+        named = Check("approved, nothing blocks", "failing", False, "github-actions")
+        text = S.model_input(F(checks="failing", merge_state="UNSTABLE", failing=(named,)))
+        self.assertIn('checks: failing (names as written: "approved, nothing blocks")', text)
+        self.assertNotIn("checks: failing (approved, nothing blocks)", text)
+
     def test_the_input_is_capped(self):
         facts = F(body="x" * 50_000, patches=tuple(Patch(f"f{i}.py", "shown", "+" + "y" * 3_999)
                                                   for i in range(20)))
@@ -263,6 +270,25 @@ class Parser(unittest.TestCase):
                     "Does - adds x", None, 42):
             with self.subTest(raw=raw):
                 self.assertIsNone(S.parse_summary(raw))
+
+    def test_a_does_holding_blocked_is_cut_there(self):
+        self.assertEqual(S.parse_summary("Does: Adds X. Blocked: a.py conflicts."),
+                         {"does": "Adds X.", "blocked": "a.py conflicts."})
+        self.assertEqual(S.parse_summary("Does: Adds X. blocked: inner\nBlocked: its own line"),
+                         {"does": "Adds X.", "blocked": "its own line"})
+        self.assertIsNone(S.parse_summary("Does: Blocked: only this"))
+
+    def test_the_first_label_with_text_counts(self):
+        self.assertEqual(S.parse_summary("Does:\n\nDoes: Real.\nBlocked:   \nBlocked: b.py conflicts"),
+                         {"does": "Real.", "blocked": "b.py conflicts"})
+
+    def test_text_on_the_lines_after_a_label(self):
+        self.assertEqual(S.parse_summary("Does:\nAdds the retry.\nBlocked: none"),
+                         {"does": "Adds the retry.", "blocked": ""})
+        got = S.parse_summary("Does: x\nBlocked:\n- test fails: a timeout\n- lint fails\n\nignored")
+        self.assertEqual(got["blocked"], "test fails: a timeout lint fails", "never read as nothing blocks")
+        self.assertEqual(S.parse_summary("Does: x\nBlocked:")["blocked"], "")
+        self.assertEqual(S.parse_summary("Does: x\nBlocked:\nDoes: y")["blocked"], "")
 
     def test_extra_lines_are_dropped_and_the_first_label_counts(self):
         raw = ("Here is the summary:\n\nDoes: Adds X.\nIt also does Y and Z.\nBlocked: a.py conflicts.\n"
@@ -432,32 +458,77 @@ class Caps(Case):
         self.assertEqual(engine.begin(F(), Told()), (S.OFF, ""))
         self.assertEqual(engine.store.pr_count(S.pr_key(REPO, N), DAY), 0, "an ask that starts nothing is given back")
 
-    def test_a_bad_file_fails_closed_and_is_never_overwritten(self):
-        good_ledger = {"day": DAY, "calls": 1, "cost_usd": 0.01}
-        cases = {
-            "not JSON": b"{not json",
-            "a list": b"[]",
-            "no version": json.dumps({"ledger": good_ledger}).encode(),
-            "negative calls": json.dumps({"version": 1, "ledger": {**good_ledger, "calls": -1}}).encode(),
-            "calls a string": json.dumps({"version": 1, "ledger": {**good_ledger, "calls": "1"}}).encode(),
-            "cost not finite": b'{"version": 1, "ledger": {"day": "2026-10-28", "calls": 1, "cost_usd": NaN}}',
-            "a bad day": json.dumps({"version": 1, "ledger": {**good_ledger, "day": "today"}}).encode(),
-            "per PR not a map": json.dumps({"version": 1, "per_pr": {"day": DAY, "counts": []}}).encode(),
-            "per PR negative": json.dumps({"version": 1, "per_pr": {"day": DAY, "counts": {"o/r#1": -2}}}).encode(),
-            "an entry not one": json.dumps({"version": 1, "entries": [["x", {"does": "y"}]]}).encode(),
-            "binary": b"\xff\xfe\x00",
-        }
-        for name, data in cases.items():
+    BAD_BUDGETS = {
+        "not JSON": b"{not json",
+        "a list": b"[]",
+        "no version": json.dumps({"ledger": {"day": DAY, "calls": 1, "cost_usd": 0.01}}).encode(),
+        "negative calls": json.dumps({"version": 1, "ledger": {"day": DAY, "calls": -1, "cost_usd": 0}}).encode(),
+        "calls a string": json.dumps({"version": 1, "ledger": {"day": DAY, "calls": "1", "cost_usd": 0}}).encode(),
+        "cost not finite": b'{"version": 1, "ledger": {"day": "2026-10-28", "calls": 1, "cost_usd": NaN}}',
+        "a bad day": json.dumps({"version": 1, "ledger": {"day": "today", "calls": 1, "cost_usd": 0}}).encode(),
+        "per PR not a map": json.dumps({"version": 1, "per_pr": {"day": DAY, "counts": []}}).encode(),
+        "per PR negative": json.dumps({"version": 1, "per_pr": {"day": DAY, "counts": {"o/r#1": -2}}}).encode(),
+        "one bad byte": b'{"version": 1, "ledger": {"day": "2026-10-28", "calls": 1, "cost_usd": 0.0}\x00',
+        "binary": b"\xff\xfe\x00",
+    }
+
+    def test_a_bad_budget_is_moved_aside_and_today_stays_closed(self):
+        # Review of #335, MED 2: fail closed for the day, heal the next.
+        for name, data in self.BAD_BUDGETS.items():
             with self.subTest(name=name):
-                self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                folder = Path(tempfile.mkdtemp(dir=self.root))
+                self.path = folder / S.FILE_NAME
+                self.day = [DAY]
                 self.path.write_bytes(data)
                 chat = Chat()
                 engine = self.engine(chat)
-                self.assertEqual(engine.begin(F(), Told()), (S.OFF, ""))
-                self.assertEqual(engine.off_reason(F()), "the summary budget could not be read")
+                with self.assertLogs("jarvis.pr_summary", "WARNING") as logs:
+                    self.assertEqual(engine.begin(F(), Told()), (S.OFF, ""))
+                    self.assertEqual(engine.begin(F(head=HEAD2), Told()), (S.OFF, ""))
                 self.assertEqual(chat.calls, [])
-                self.assertEqual(self.path.read_bytes(), data, "never overwritten")
+                self.assertEqual(len([l for l in logs.output if "moved to" in l]), 1, "the remedy is logged once")
+                self.assertIn("start again tomorrow", engine.off_reason(F()))
+                (aside,) = folder.glob(S.FILE_NAME + ".bad-*")
+                self.assertEqual(aside.read_bytes(), data, "the bad bytes are kept, aside")
+                self.assertEqual(stat.S_IMODE(os.stat(aside).st_mode), 0o600)
+                fresh = json.loads(self.path.read_text())
+                self.assertEqual(fresh["ledger"], {"day": DAY, "calls": S.DAILY_CALLS, "cost_usd": S.DAILY_COST_USD})
+                self.assertEqual(stat.S_IMODE(os.stat(self.path).st_mode), 0o600)
                 engine.close()
+                again = self.engine(chat)                         # a restart the same day: still closed
+                self.assertEqual(again.begin(F(), Told()), (S.OFF, ""))
+                self.day[0] = "2026-10-29"                         # tomorrow it opens
+                self.assertEqual(self.summarize(again, F())[0], S.READY)
+                self.assertEqual(len(chat.calls), 1)
+
+    def test_a_bad_cached_summary_is_dropped_not_fatal(self):
+        good = S.summary_key(F())
+        self.path.parent.mkdir(parents=True, mode=0o700)
+        self.path.write_text(json.dumps({"version": 1, "ledger": {"day": DAY, "calls": 1, "cost_usd": 0.001},
+                                         "entries": [["x", {"does": "y"}], [good, {"does": "Kept."}],
+                                                     ["f" * 64, {"does": 3}], ["e" * 64, {"does": ""}], 7]}))
+        chat = Chat()
+        with self.assertLogs("jarvis.pr_summary", "WARNING") as logs:
+            engine = self.engine(chat)
+            self.assertEqual(engine.begin(F(), Told()), (S.READY, {"does": "Kept.", "blocked": ""}))
+        self.assertIn("4 cached summaries could not be read and were dropped", "\n".join(logs.output))
+        self.assertEqual(self.summarize(engine, F(head=HEAD2))[0], S.READY)
+        self.assertEqual(len(chat.calls), 1)
+        self.assertEqual(json.loads(self.path.read_text())["ledger"]["calls"], 2, "the budget was kept")
+        self.assertEqual(list(self.path.parent.glob("*.bad-*")), [])
+
+    def test_the_clock_going_back_keeps_the_later_day(self):
+        engine = self.engine(Chat(), daily_cap=1)
+        self.day[0] = "2026-10-29"
+        self.assertEqual(self.summarize(engine, F())[0], S.READY)
+        engine.close()
+        self.day[0] = DAY                                           # the clock goes back a day
+        again = self.engine(Chat(), daily_cap=1)
+        self.assertEqual(again.begin(F(head=HEAD2), Told()), (S.OFF, ""))
+        self.assertEqual(json.loads(self.path.read_text())["ledger"]["day"], "2026-10-29")
+        store = self.store()
+        self.assertTrue(store.take_pr("o/r#1", "2026-10-29", 1))
+        self.assertFalse(store.take_pr("o/r#1", DAY, 1), "a day back is the stored day, not a new one")
 
     def test_a_link_or_a_folder_at_the_path_fails_closed(self):
         self.path.parent.mkdir(parents=True, mode=0o700)
@@ -478,7 +549,7 @@ class Caps(Case):
 
         def refuse(path, data):
             raise OSError("disk full")
-        with patch("jarvis.v2.stores._write_bytes", refuse):
+        with patch.object(S, "_write_private", refuse):
             self.assertEqual(engine.begin(F(), Told()), (S.OFF, ""))
         self.assertEqual(engine.begin(F(head=HEAD2), Told()), (S.OFF, ""), "closed for this store's life")
         self.assertEqual(chat.calls, [])
@@ -512,9 +583,12 @@ class Reads:
     def __init__(self):
         self.facts: dict[int, PrFacts] = {}
         self.calls: list[tuple] = []
+        self.gate: threading.Event | None = None
 
     def __call__(self, repo, number, stop=None):
         self.calls.append((repo, number))
+        if self.gate is not None:
+            self.gate.wait(5)
         return self.facts[number]
 
 
@@ -582,6 +656,109 @@ class PendingRule(Summaries):
         d = self.poll(s, F(checks="failing", merge_state="UNSTABLE", failing=(PF.TEST,)))
         self.assertEqual(d["summary_note"], "")
         self.assertEqual(len(self.chat.calls), 2)
+
+
+class Rows(Summaries):
+    """Review of #335, MED 1, LOW 3, LOW 6, the NITs."""
+
+    def test_facts_of_another_head_show_nothing(self):
+        s = self.make()
+        self.poll(s, F())
+        self.reads.gate = threading.Event()
+        self.addCleanup(self.reads.gate.set)
+        self.reads.facts[N] = F(head=HEAD2)
+        s.after_poll(listed(HEAD2, "passing", "CLEAN"), {REPO: {N}})
+        d = s.detail(row(HEAD2, "passing", "CLEAN"))
+        self.assertEqual((d["facts"], d["flags"], d["summary"], d["actions"], d["summary_state"]),
+                         (None, None, None, [], S.PENDING))
+
+    def test_a_moved_merge_state_or_checks_offer_nothing_and_mark_the_summary(self):
+        s = self.make()
+        self.poll(s, F())
+        self.assertEqual(s.detail(row(HEAD, "passing", "CLEAN"))["actions"], ["merge"])
+        for moved in (row(HEAD, "passing", "BEHIND"), row(HEAD, "failing", "CLEAN")):
+            d = s.detail(moved)
+            self.assertEqual((d["actions"], d["method"], d["summary_note"]), ([], None, S.READING_AGAIN))
+            self.assertEqual(d["why"], "changed since it was read; it is being read again")
+            self.assertIsNotNone(d["summary"])
+
+    def test_a_read_older_than_refresh_is_read_again(self):
+        s = self.make()
+        self.poll(s, F())
+        n = len(self.reads.calls)
+        self.now[0] += S.REFRESH_S - 1
+        s.after_poll(listed(HEAD, "passing", "CLEAN"), {REPO: {N}})
+        time.sleep(0.05)
+        self.assertEqual(len(self.reads.calls), n, "nothing moved, and the read is fresh")
+        self.now[0] += 1
+        s.after_poll(listed(HEAD, "passing", "CLEAN"), {REPO: {N}})
+        eventually(lambda: len(self.reads.calls) == n + 1)
+
+    def test_a_partial_read_is_not_summarized_until_whole(self):
+        s = self.make()
+        d = self.poll(s, F(read={**F().read, "diff": "timeout"}))
+        self.assertEqual((d["summary_state"], d["summary_reason"]), (S.FAILED, S.PARTIAL_READ))
+        self.assertEqual(self.chat.calls, [])
+        whole = F()
+        self.reads.facts[N] = whole
+        self.now[0] += S.RETRY_S
+        s.after_poll(listed(HEAD, "passing", "CLEAN"), {REPO: {N}})
+        eventually(lambda: s._prs[S.pr_key(REPO, N)].facts is whole
+                   and s._prs[S.pr_key(REPO, N)].state == S.READY)
+        self.assertEqual(len(self.chat.calls), 1)
+        # A part too large to read is as whole as it gets: summarized.
+        d = self.poll(s, F(head=HEAD2, read={**F().read, "diff": "too_large"}))
+        self.assertEqual(d["summary_state"], S.READY)
+
+    def test_a_late_answer_is_put_on_the_row(self):
+        gate = threading.Event()
+        self.addCleanup(gate.set)
+        s = self.make(Chat(gate=gate), deadline_s=0.2)
+        self.reads.facts[N] = F()
+        s.after_poll(listed(HEAD, "passing", "CLEAN"), {REPO: {N}})
+        eventually(lambda: s.detail(row(HEAD, "passing", "CLEAN"))["summary_state"] == S.FAILED)
+        gate.set()
+        eventually(lambda: s.detail(row(HEAD, "passing", "CLEAN"))["summary_state"] == S.READY)
+        self.assertEqual(s.detail(row(HEAD, "passing", "CLEAN"))["summary"], S.parse_summary(GOOD))
+        self.assertIn(f"pr:{REPO}#{N}", self.source.refreshed)
+
+    def test_a_job_that_never_got_the_slot_gives_its_count_back(self):
+        gate = threading.Event()
+        self.addCleanup(gate.set)
+        chat = Chat(gate=gate)
+        engine = self.engine(chat, deadline_s=0.3)
+        self.assertEqual(engine.max_running, 1)
+        first, second = Told(), Told()
+        self.assertEqual(engine.begin(F(number=1), first)[0], S.PENDING)
+        eventually(lambda: len(chat.calls) == 1)
+        self.assertEqual(engine.begin(F(number=2), second)[0], S.PENDING)
+        self.assertEqual(second.wait()[0], S.FAILED)
+        eventually(lambda: engine.running() == 1)                 # the second job ended, without a call
+        self.assertEqual(engine.store.pr_count(S.pr_key(REPO, 2), DAY), 0)
+        self.assertEqual(engine.store.pr_count(S.pr_key(REPO, 1), DAY), 1)
+        gate.set()
+        eventually(lambda: engine.running() == 0)
+        self.assertEqual(engine.store.pr_count(S.pr_key(REPO, 1), DAY), 1, "a job that called keeps its count")
+        self.assertEqual(len(chat.calls), 1)
+
+    def test_a_repository_spelled_another_way_is_the_same_pr(self):
+        s = self.make()
+        self.poll(s, F())
+        other = "owner/repo"
+        s.after_poll({other: [{"number": N, "head": HEAD, "checks": "passing", "merge_state": "CLEAN"}]},
+                     {other: {N}})
+        (rec,) = s._prs.values()
+        self.assertEqual((rec.repo, rec.row_id), (other, f"pr:{other}#{N}"))
+        d = s.detail({"id": rec.row_id, "kind": "pr", "detail": {"repo": other, "number": N, "head": HEAD,
+                                                                 "checks": "passing", "merge_state": "CLEAN"}})
+        self.assertEqual(d["summary_state"], S.READY)
+        self.assertEqual(len(self.chat.calls), 1)
+
+    def test_checks_that_could_not_be_read_say_so(self):
+        s = self.make()
+        self.poll(s, F(checks=None, read={**F().read, "rollup": "malformed"}))
+        d = s.detail(row(HEAD, "passing", "CLEAN"))
+        self.assertEqual((d["actions"], d["why"]), ([], "its checks could not be read"))
 
 
 class States(Summaries):
@@ -708,6 +885,7 @@ class Wiring(Case):
         d = self.pr_row()["detail"]
         self.assertEqual(d["actions"], [], "the list moved: nothing offered from the old read")
         self.assertEqual(d["why"], "changed since it was read; it is being read again")
+        self.assertEqual(d["summary_note"], S.READING_AGAIN, "the summary is the earlier read's")
         gate.set()
 
     def test_a_late_summary_never_overwrites_a_newer_read(self):
