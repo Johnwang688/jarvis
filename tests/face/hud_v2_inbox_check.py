@@ -85,6 +85,13 @@ What it pins, one section each (each names the mutation it is meant to catch):
   badge     `navigator.setAppBadge` (stubbed) gets the count and is cleared at
             0 and when a read fails; without the API nothing breaks [badge all
             ranks; no clear; a stale badge after a failed read]
+  pr_action PM-F: a PR row draws title, buttons, facts, the AI summary, then
+            the link; Merge arms, posts once to /inbox/pr/merge with exactly
+            the drawn head and card; a 409 is said and read again, never
+            retried; squash is named; Hold… posts {id, note} and the held row
+            offers nothing; Clear hold; a fix's Cancel, Fix again and its
+            question link; the fix card; under a card nothing posts
+            [read again; retry; not inert]
   prs       inbox B3's PR rows sit under "Waiting on you" between a blocked
             task and a decision, counted; the PR's title is text; the one
             control is "Open on GitHub", a plain new-tab link to the PR's own
@@ -610,8 +617,10 @@ def _pr_checks(page, mock, check, until):
                            ".filter(b => !b.closest('[data-testid=\"inbox-marks\"]')).map(b => b.dataset.testid)")
     marks = r7.evaluate("e => [...e.querySelectorAll('[data-testid=\"inbox-marks\"] button')].map(b => b.dataset.testid)")
     link = r7.locator('[data-testid="inbox-pr-link"]')
-    check("its one control is 'Open on GitHub', a new-tab link to its own PR [mutation: a link to any URL]",
-          controls == ["inbox-pr-link"] and link.get_attribute("href") == f"https://github.com/{PR_REPO}/pull/7"
+    # PM-F: a row from before PM-C (no card) offers no action: the desk's Hold… and the link only.
+    check("its controls are Hold… and 'Open on GitHub', a new-tab link to its own PR [mutation: a link to any URL]",
+          controls == ["inbox-pr-hold-open", "inbox-pr-link"]
+          and link.get_attribute("href") == f"https://github.com/{PR_REPO}/pull/7"
           and marks == ["inbox-snooze-hour", "inbox-snooze-tomorrow", "inbox-snooze-week", "inbox-dismiss"]
           and link.get_attribute("target") == "_blank" and link.get_attribute("rel") == "noopener noreferrer",
           str(controls))
@@ -666,6 +675,122 @@ def _pr_checks(page, mock, check, until):
           str(_count(page)))
     check("'PR list unavailable' offers no Snooze or Dismiss (inbox B4) [mutation: prx markable]",
           _row(page, "prx:list").locator('[data-testid="inbox-marks"]').count() == 0)
+    check("the title is unchanged", page.title() == TITLE, page.title())
+
+
+def _pr_posts(mock):
+    return list(_st(mock).get("pr_posts", []))
+
+
+def _pr_action_checks(page, mock, check, until):
+    """PM-F: the PR row's buttons, binding, arming, 409, hold and fix on the HUD."""
+    from tests.face import hud_v2_pr_rows as R
+    _st(mock)["pr_posts"], _st(mock)["pr_reply"] = [], {}
+    rows = R.all_rows()
+    _open(page, mock, until, rows)
+    ready = _row(page, R.ready()["id"])
+    merge = ready.locator('[data-testid="inbox-pr-act-merge"]')
+    until(lambda: merge.count() == 1, timeout=4)
+    order = ready.evaluate("""r => [...r.querySelectorAll('[data-testid]')].map(e => e.dataset.testid)
+        .filter(t => ['inbox-title', 'inbox-pr-title', 'inbox-pr-actions', 'inbox-pr-facts', 'inbox-pr-summary',
+                      'inbox-pr-link'].includes(t))""")
+    check("PM-24 desk: title, buttons, facts, AI summary, then the GitHub link [mutation: summary first]",
+          order == ["inbox-title", "inbox-pr-title", "inbox-pr-actions", "inbox-pr-facts", "inbox-pr-summary",
+                    "inbox-pr-link"], str(order))
+    # Arming (AS-13; its timing is pinned in InboxPrRow.test.ts): the row arms, then acts.
+    until(lambda: merge.get_attribute("disabled") is None, timeout=4)
+    check("AS-13 desk: Merge arms after the row appears", merge.is_enabled())
+    page.evaluate("document.activeElement && document.activeElement.blur()")
+    page.keyboard.press("Enter")
+    page.keyboard.press(" ")
+    time.sleep(0.3)
+    check("desk: no button is the keyboard default (Enter and Space post nothing)", _pr_posts(mock) == [])
+    shown = ready.locator('[data-testid="inbox-pr"]')
+    head, card_key = shown.get_attribute("data-head"), shown.get_attribute("data-card")
+    merge.click()
+    until(lambda: len(_pr_posts(mock)) == 1, timeout=4)
+    check("desk Merge: one post to /inbox/pr/merge with exactly the drawn head and card [mutation: read again]",
+          _pr_posts(mock) == [("merge", {"id": R.ready()["id"], "head": R.ready()["detail"]["head"],
+                                         "card": R.ready()["detail"]["card"]})]
+          and head == R.ready()["detail"]["head"] and card_key == R.ready()["detail"]["card"], str(_pr_posts(mock)))
+    until(lambda: "Merged." in ready.locator('[data-testid="inbox-pr-notice"]').inner_text(), timeout=4)
+    check("desk Merge: the row says Merged.", True)
+    # A 409: the daemon's words in the row, a read again, no retry.
+    _st(mock)["pr_reply"] = {"merge": (409, {"error": "changed since you read it: its head moved"})}
+    sq = _row(page, R.squash()["id"])
+    reads = _reads(mock)
+    until(lambda: sq.locator('[data-testid="inbox-pr-act-merge"]').is_enabled(), timeout=4)
+    check("Q4 desk: squash named before the OK",
+          "squash merge" in sq.locator('[data-testid="inbox-pr-method"]').inner_text())
+    sq.locator('[data-testid="inbox-pr-act-merge"]').click()
+    until(lambda: "Changed since you read it" in sq.locator('[data-testid="inbox-pr-notice"]').inner_text(), timeout=4)
+    time.sleep(0.4)
+    check("desk 409: said in the row, the inbox read again, no retry [mutation: retry]",
+          len([p for p in _pr_posts(mock) if p[0] == "merge"]) == 2 and _reads(mock) > reads,
+          str(_pr_posts(mock)))
+    _st(mock)["pr_reply"] = {}
+    # Hold (Q3): a note, then no buttons; Clear.
+    ready.locator('[data-testid="inbox-pr-hold-open"]').click()
+    ready.locator('[data-testid="inbox-pr-hold-note"]').fill("waits on the robot test")
+    ready.locator('[data-testid="inbox-pr-hold-set"]').click()
+    until(lambda: ready.locator('[data-testid="inbox-pr-hold"]').count() == 1, timeout=4)
+    check("Q3 desk: Set hold posts {id, note}; the held row shows its note and no action button",
+          _pr_posts(mock)[-1] == ("hold", {"id": R.ready()["id"], "note": "waits on the robot test"})
+          and ready.locator("[data-action]").count() == 0
+          and "waits on the robot test" in ready.locator('[data-testid="inbox-pr-hold"]').inner_text(),
+          str(_pr_posts(mock)[-1]))
+    ready.locator('[data-testid="inbox-pr-hold-clear"]').click()
+    until(lambda: ready.locator('[data-testid="inbox-pr-hold"]').count() == 0, timeout=4)
+    check("Q3 desk: Clear hold posts {id, clear: true}",
+          _pr_posts(mock)[-1] == ("hold", {"id": R.ready()["id"], "clear": True}), str(_pr_posts(mock)[-1]))
+    held = _row(page, R.held()["id"])
+    check("Q3 desk: a held row offers nothing but Clear hold",
+          held.locator("[data-action]").count() == 0 and held.locator('[data-testid="inbox-pr-hold-clear"]').count() == 1)
+    # The fix.
+    running = _row(page, R.fix_running()["id"])
+    running.locator('[data-testid="inbox-pr-fix-cancel"]').click()
+    until(lambda: _pr_posts(mock)[-1][0] == "fix/cancel", timeout=4)
+    check("fix desk: Cancel posts {id} to /inbox/pr/fix/cancel",
+          _pr_posts(mock)[-1] == ("fix/cancel", {"id": R.fix_running()["id"]}), str(_pr_posts(mock)[-1]))
+    stopped = _row(page, R.fix_stopped()["id"])
+    until(lambda: stopped.locator('[data-testid="inbox-pr-act-fix"]').is_enabled(), timeout=4)
+    check("fix desk: a stopped fix offers Fix again",
+          stopped.locator('[data-testid="inbox-pr-act-fix"]').inner_text() == "Fix again")
+    stopped.locator('[data-testid="inbox-pr-act-fix"]').click()
+    until(lambda: _pr_posts(mock)[-1][0] == "fix", timeout=4)
+    check("fix desk: Fix posts {id, head, card} to /inbox/pr/fix",
+          _pr_posts(mock)[-1] == ("fix", {"id": R.fix_stopped()["id"], "head": R.fix_stopped()["detail"]["head"],
+                                          "card": R.fix_stopped()["detail"]["card"]}), str(_pr_posts(mock)[-1]))
+    q = _row(page, R.fix_question()["id"])
+    q.locator('[data-testid="inbox-pr-fix-question"]').click()
+    until(lambda: (_active(page) or "") == "inbox-row", timeout=4)
+    check("fix desk: 'Answer its question' goes to the task's question row",
+          page.evaluate("document.activeElement.dataset.id").startswith("tq:"))
+    fx = _row(page, R.fix_ready()["id"])
+    check("fix card desk: Fixed — merge?, its AI slot, commits and the CI amber; the model's words only in the slot",
+          "Fixed — merge?" in fx.locator('[data-testid="inbox-pr-fix-text"]').inner_text()
+          and "AI SUMMARY" in fx.locator('[data-testid="inbox-pr-fix-summary"]').inner_text()
+          and "2 commits since your Fix" in fx.inner_text()
+          and "the fix changed CI configuration" in fx.locator('[data-testid="inbox-pr-fix-ci"]').inner_text()
+          and "evil" not in fx.locator('[data-testid="inbox-pr-fix-text"]').inner_text())
+    check("desk: daemon text made no element, nothing ran",
+          page.evaluate("() => document.querySelectorAll('[data-testid=\"inbox-view\"] img').length") == 0
+          and page.evaluate("window.__pwned === undefined"))
+    # Under a card: inert, and a trusted click on Merge posts nothing.
+    c = card("prcard0002")
+    mock.world["approvals"].append(c)
+    mock.emit("approval_requested", c)
+    cardloc = page.locator('[data-testid="approval-card"]')
+    until(lambda: cardloc.count() == 1, timeout=4)
+    posts = len(_pr_posts(mock))
+    box = _row(page, R.flagged()["id"]).locator('[data-testid="inbox-pr-act-merge"]').bounding_box()
+    if box:
+        page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+    time.sleep(0.4)
+    check("desk under a card: the PR row is inert and a trusted click on Merge posts nothing [mutation: not inert]",
+          len(_pr_posts(mock)) == posts and cardloc.count() == 1)
+    page.keyboard.press("Escape")
+    until(lambda: cardloc.count() == 0, timeout=4)
     check("the title is unchanged", page.title() == TITLE, page.title())
 
 
@@ -1569,7 +1694,7 @@ def _check_checks(page, mock, check, until):
 SECTIONS = (_sidebar_checks, _groups_checks, _live_checks, _answer_checks, _conflict_checks, _withdraw_checks,
             _reconnect_checks, _clicks_checks, _hostile_checks, _missed_checks, _decision_checks, _check_checks,
             _marks_checks, _deferred_checks, _summary_checks, _card_checks,
-            _older_checks, _aurora_checks, _pr_checks)
+            _older_checks, _aurora_checks, _pr_checks, _pr_action_checks)
 
 
 def inbox_checks(browser, mock, base, check, until, guard, init_script):
