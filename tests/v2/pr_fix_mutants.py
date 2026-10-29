@@ -45,6 +45,10 @@ PIN = "Scope.test_the_credential_helper_is_pinned"
 # lines (equivalent mutants): "a line that changes config" before a push (the
 # config or remote write itself is asked, M-5) and "a program the walk does
 # not follow starts git" (`sudo git push`: an unread program beside a push).
+# Two more have no mutant because the literal credential-path check on the
+# raw line already refuses every hermetic case: `_reach` on the path as
+# written (`/proc/self/cwd/..`) and `~user` (which reads the real passwd
+# entry, not the test's HOME).
 MUTANTS = [
     # -- the PR scope's DENY families (PM-20) ------------------------------------------------------
     ("DENY remote: a remote that points at another repository", FX,
@@ -429,8 +433,8 @@ MUTANTS = [
      '                    if kind == "inside" or (kind == "ancestor" and recursive):\n',
      '                    if kind == "inside":\n', [CR]),
     ("delta H-1: globs not matched", FX,
-     "                    kind = _glob_reach(path) if _GLOB_CHARS.search(base) else _reach(path)\n",
-     "                    kind = _reach(path)\n", [CR]),
+     "                    kind = (_glob_reach(path) if _GLOB_CHARS.search(base)\n",
+     "                    kind = (_reach(path) if _GLOB_CHARS.search(base)\n", [CR]),
     ("delta H-1: braces not expanded", FX,
      "            variants = protected_state._brace_expand(text)\n", "            variants = [text]\n", [CR]),
     ("delta H-1: relative paths not placed", FX,
@@ -440,8 +444,8 @@ MUTANTS = [
     ("delta H-1: same-line variables not read", FX,
      "                if again != text:\n                    self.line(again, where, _again=True)\n", "", [CR]),
     ("delta H-1: a command-substituted path not asked", FX,
-     '                if "/" in raw:\n                    self.ask("a path built by a command substitution',
-     '                if False:\n                    self.ask("a path built by a command substitution', [CR]),
+     '                if "/" in raw or reader:\n                    self.ask("a path built by a command substitution',
+     '                if reader:\n                    self.ask("a path built by a command substitution', [CR]),
     ("delta H-1: recursive readers", FX,
      "    if stem in _RECURSIVE_READERS:\n        return True\n", "", [CR]),
     ("delta H-1: recursive flags", FX,
@@ -472,7 +476,7 @@ MUTANTS = [
      '                    "-command".startswith(low) or "-encodedcommand".startswith(low) or low == "-e")):\n',
      "                    False)):\n", [IN]),
     ("delta MED: awk programs", FX,
-     '            else "an awk program (it may call system())"\n', "            else None\n", [IN]),
+     '                else "an awk program (it may call system())")\n', "                else None)\n", [IN]),
     ("delta MED: a shell fed a program", FX,
      '    return "a script read from a file" if files else "a program read from stdin"\n', "    return None\n", [IN]),
     ("delta MED: source", FX,
@@ -532,6 +536,50 @@ MUTANTS = [
     ("last: checkout-index", FX,
      '                sub == "checkout-index" and any(w in ("-a", "--all", "-f", "--force") or (',
      '                False and any(w in ("-a", "--all", "-f", "--force") or (', ["Scope.test_tree_writers_are_asked"]),
+
+    # -- the review's last delta (2026-10-29) ---------------------------------------------------
+    ("last: xargs' replace string read as a name", FX,
+     '                raw = raw.replace(replace, "*")\n', "                pass\n", ["Scope.test_paths_the_gate_cannot_read_are_asked"]),
+    ("last: a substitution in a reader's path", FX,
+     '                if "/" in raw or reader:\n', '                if "/" in raw:\n', ["Scope.test_paths_the_gate_cannot_read_are_asked"]),
+    ("last: a variable in a reader's path", FX,
+     '                if reader:\n                    # A variable the gate cannot read',
+     '                if False:\n                    # A variable the gate cannot read', ["Scope.test_paths_the_gate_cannot_read_are_asked"]),
+    ("last: xargs", FX,
+     '        if stem == "xargs":\n', '        if False:\n', ["Scope.test_paths_the_gate_cannot_read_are_asked"]),
+    ("last: fetch settings files writable", FX,
+     "        if fetch_rc(target):\n", "        if False:\n", ["Scope.test_fetch_settings_files"]),
+    ("last: fetch config options", FX,
+     "                if fetch_config(stem, words):\n", "                if False:\n", ["Scope.test_fetch_settings_files"]),
+    ("last: CURL_HOME and kin", FX,
+     '        if re.search(r"(?<![A-Za-z0-9_])(CURL_HOME|NETRC|WGETRC|CURLOPT_[A-Z_]+)\\s*=", text):\n',
+     "        if False:\n", ["Scope.test_fetch_settings_files"]),
+    ("last: sed e and s///e", FX,
+     '        if _SED_E.search(script) or any("e" in m.group(2) for m in _SED_S.finditer(script)):\n',
+     "        if False:\n", ["Scope.test_sed_that_runs_commands"]),
+    ("last: sed -f", FX,
+     '        if w in ("-f", "--file") or w.startswith(("--file=", "-f")) and not w.startswith("--f") or (\n',
+     "        if False and (\n", ["Scope.test_sed_that_runs_commands"]),
+    ("last: awk -f", FX,
+     '        return ("an awk program file (it may call system())"\n', '        return (None\n',
+     ["Scope.test_inline_code_in_any_spelling"]),
+    ("last: git update-ref", FX,
+     '            self.ask("git update-ref may make another commit pass for the base")\n', "            pass\n",
+     ["Scope.test_merge_sources_cannot_be_spoofed"]),
+    ("last: a tag or branch named origin/", FX,
+     '        elif sub in ("tag", "branch") and any(w.lstrip("+").startswith(("origin/", "refs/remotes/"))\n',
+     '        elif False and any(w.lstrip("+").startswith(("origin/", "refs/remotes/"))\n', ["Scope.test_merge_sources_cannot_be_spoofed"]),
+    ("last: rebase", FX,
+     '            self.ask("a fix merges the base in; it never rebases")\n', "            pass\n", ["Scope.test_merge_sources_cannot_be_spoofed"]),
+    ("last: a local fetch", FX,
+     '            self.ask("a fetch from a local path or a URL may pass for the base")\n            return\n',
+     "            return\n", ["Scope.test_merge_sources_cannot_be_spoofed"]),
+    ("last: a fetch into a remote-tracking ref", FX,
+     '                self.ask(f"a fetch into {_shown(dst)} may make another commit pass for the base")\n',
+     "                pass\n", ["Scope.test_merge_sources_cannot_be_spoofed"]),
+    ("last: -c pull.rebase", FX,
+     'r"remote\\..*|include.*|pull\\..*|rebase\\..*|branch\\..*)$", re.I)',
+     'r"remote\\..*|include.*)$", re.I)', ["Scope.test_merge_sources_cannot_be_spoofed"]),
 
 ]
 

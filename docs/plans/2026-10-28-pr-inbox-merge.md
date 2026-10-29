@@ -562,3 +562,17 @@ adds `prod*` and `production*`.
 `FETCH_HEAD` after `git fetch origin <base>` on the same line) and pulls only `origin <base>`
 without rebasing; any other source, or none, asks. `git read-tree -u|--reset` and `git
 checkout-index -a|-f` ask.
+
+**Final delta review of #337 (2026-10-29), patched; shipped as an accident guard, not a wall.**
+The owner's decision: the PR scope refuses what an agent fixing a PR might do by mistake or on a
+hint, by every spelling the reviews found, and asks where it cannot read the line; a
+deliberately hostile agent could still find a way past it, as with the PR's own scripts. The
+last patches: xargs' replace string is read as a wildcard and every xargs is asked; a
+reader's path from a command substitution or a variable (`read`, `mapfile`, IFS tricks) is
+asked, and paths are resolved through symlinks, `/proc/self/cwd/..` and `~user`; writes to
+`~/.curlrc`, `~/.netrc`, `~/.wgetrc`, `~/.config/curlrc` and anything under `CURL_HOME` are
+DENY, and `curl -K|-n|--netrc*`, `wget -i|-e`, `aria2c -i` and a `CURL_HOME`/`NETRC`/`WGETRC`
+setting are asked; `sed` with `e`, `s///e` or `-f`, and any awk program (inline or `-f`), are
+asked; `git update-ref`, a tag or branch named `origin/…`, a fetch from a local path or URL or
+into a remote-tracking ref or tag from anything but `origin` + the base or the PR's branch,
+`git rebase`, and `-c pull.*|rebase.*|branch.*` are asked.

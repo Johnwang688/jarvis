@@ -119,6 +119,13 @@ gate does not read beside a push or gh call (`make push`, `pytest && git
 push`); a write it cannot place that may touch CI; a line too complex to walk.
 Everything else goes on to the task's ordinary gate.
 
+**An accident guard, not a wall (the owner, 2026-10-29).** The scope
+refuses what an agent fixing a PR might do by mistake or on a hint, by
+every spelling the reviews found (globs, `cd`, variables, xargs, inline
+code, fetch settings, merge-source spoofing), and asks where it cannot
+read the line. A deliberately hostile agent could still find a way past
+it, as with the PR's own scripts below; the owner ships it on that basis.
+
 **What this does not stop, as the owner accepted.** The task runs the PR's
 own code (its tests, scripts and build) as the owner's OS user, and that
 code can read the owner's GitHub token from disk and use it however it
@@ -390,6 +397,13 @@ _WRITERS = frozenset({"rm", "unlink", "rmdir", "mv", "shred", "truncate", "touch
 _GIT_RUNS = {"submodule": ("foreach",), "rebase": ("--exec", "-x", "-i", "--interactive"),
              "bisect": ("run",), "difftool": None, "mergetool": None, "filter-branch": None,
              "filter-repo": None}
+_READERS = frozenset({"cat", "tac", "less", "more", "most", "head", "tail", "nl", "od", "xxd", "hexdump",
+                      "strings", "base64", "base32", "basenc", "sqlite3", "diff", "cmp", "wc", "sort",
+                      "uniq", "cut", "paste", "grep", "egrep", "fgrep", "sed", "gsed", "awk", "gawk",
+                      "jq", "yq", "cp", "mv", "ln", "install", "tee", "dd", "file", "stat", "ls",
+                      "vim", "vi", "nvim", "nano", "emacs", "view", "openssl", "gpg", "iconv", "split",
+                      "source", ".", "column", "fold", "fmt", "rev", "tr", "comm", "join", "look",
+                      "zcat", "bzcat", "xzcat", "gunzip", "gzip"})
 _UNPACKERS = frozenset({"patch", "unzip", "tar", "bsdtar", "7z", "7za", "cpio", "busybox-unzip"})
 
 
@@ -416,7 +430,7 @@ _EDITOR_ENV = re.compile(r"(?<![A-Za-z0-9_])(GIT_PAGER|PAGER|GIT_EDITOR|EDITOR|V
                          r"GIT_SEQUENCE_EDITOR|GH_PAGER|GH_EDITOR|MANPAGER)\s*=")
 _EDITOR_KEYS = re.compile(r"^(core\.(pager|editor|hookspath|sshcommand|gitproxy|fsmonitor|askpass)|"
                           r"sequence\.editor|pager\..*|alias\..*|credential\..*|url\..*|"
-                          r"remote\..*|include.*)$", re.I)
+                          r"remote\..*|include.*|pull\..*|rebase\..*|branch\..*)$", re.I)
 # Reading or handing out the owner's GitHub credential (H-1).
 _TRACE_ENV = re.compile(r"(?<![A-Za-z0-9_])(GIT_TRACE[A-Z_]*|GIT_CURL_VERBOSE|GH_DEBUG|GIT_ASKPASS|"
                         r"SSH_ASKPASS|GH_TOKEN|GITHUB_TOKEN|GH_ENTERPRISE_TOKEN)\b")
@@ -424,7 +438,8 @@ _GITHUB_HOST = re.compile(r"(?i)(?<![\w.-])((api|uploads|codeload|gist)\.)?githu
                           r"githubusercontent\.com\b")
 _ASSIGN = re.compile(r"(?:^|[\s;&|(])([A-Za-z_][A-Za-z0-9_]*)=([^\s;&|()$`'\"]+)")
 _FETCHERS = frozenset({"curl", "wget", "http", "https", "httpie", "xh", "xhs", "aria2c", "axel",
-                       "lwp-request", "get", "post", "nc", "ncat", "socat", "openssl", "telnet"})
+                       "lwp-request", "get", "post", "nc", "ncat", "socat", "openssl", "telnet",
+                       "ssh", "sftp"})
 _INLINE_FLAGS = frozenset({"-c", "-e", "-E", "-p", "-r", "--eval", "--print", "-x", "eval"})
 
 # git push's long options: None (allowed), "value" (allowed, takes a value),
@@ -513,13 +528,15 @@ def _expand_home(text: str) -> str:
     text = text.replace("${HOME}", home).replace("$HOME", home)
     if text == "~" or text.startswith("~/"):
         text = home + text[1:]
+    elif text.startswith("~"):
+        text = os.path.expanduser(text)             # `~user/...`
     return text
 
 
 def _reach(path: Path) -> str | None:
     """'inside' when `path` is a credential folder or below one, 'ancestor'
     when one is below it, else None (the path as written and resolved)."""
-    for candidate in {Path(os.path.normpath(path)), Path(os.path.realpath(path))}:
+    for candidate in {Path(os.path.normpath(path)), Path(os.path.realpath(str(path)))}:
         for cred in _cred_dirs():
             if candidate == cred or cred in candidate.parents:
                 return "inside"
@@ -551,6 +568,35 @@ def _glob_reach(pattern: Path) -> str | None:
             return "inside"
         found = found or reach
     return found
+
+
+_FETCH_CONFIG = {"curl": ("-K", "--config", "-n", "--netrc", "--netrc-file", "--netrc-optional"),
+                 "wget": ("-i", "--input-file", "-e", "--execute", "--config"),
+                 "aria2c": ("-i", "--input-file", "--conf-path")}
+_FETCH_RC = frozenset({".curlrc", "_curlrc", ".netrc", "_netrc", ".wgetrc"})
+
+
+def fetch_config(stem: str, words: list[str]) -> bool:
+    """A fetcher told to read its URLs or settings from a file."""
+    names = _FETCH_CONFIG.get(stem, ())
+    for w in words:
+        name = w.split("=", 1)[0]
+        if name in names or any(name.startswith(n) and n.startswith("--") and len(n) > 3 for n in names):
+            return True
+        if w.startswith("-") and not w.startswith("--"):
+            shorts = [n[1] for n in names if len(n) == 2]
+            if any(c in w[1:] for c in shorts):
+                return True
+    return False
+
+
+def fetch_rc(path) -> bool:
+    """A file curl, wget or netrc reads settings from on its own."""
+    parts = _parts(path)
+    if not parts:
+        return False
+    return parts[-1] in _FETCH_RC or parts[-2:] == ["curlrc"] or parts[-3:] == [".config", "curl", "curlrc"] \
+        or (len(parts) >= 2 and parts[-2:] == [".config", "curlrc"]) or "curl_home" in str(path).casefold()
 
 
 def recursive_reader(stem: str, words: list[str]) -> bool:
@@ -657,9 +703,45 @@ def inline_code(stem: str, words: list[str]) -> str | None:
                 return "inline code (-Command)"
         return None
     if stem in _AWKS:
-        return None if any(w == "-f" or w.startswith("-f") or w.startswith("--file") for w in words) \
-            else "an awk program (it may call system())"
+        # Inline or from a file, an awk program may call system() or pipe to
+        # a command: never read.
+        return ("an awk program file (it may call system())"
+                if any(w == "-f" or w.startswith("-f") or w.startswith("--file") for w in words)
+                else "an awk program (it may call system())")
     return None
+
+
+_SED_S = re.compile(r"s([^\\\n\w\s])(?:\\.|(?!\1).)*\1(?:\\.|(?!\1).)*\1([A-Za-z0-9]*)")
+_SED_E = re.compile(r"(?:^|[;\n{}])\s*(?:[0-9$]+|/(?:\\.|[^/])*/)?(?:\s*,\s*(?:[0-9$]+|/(?:\\.|[^/])*/))?"
+                    r"\s*!?\s*e(?:\s|;|$)")
+
+
+def sed_runs(words: list[str]) -> bool:
+    """A sed call whose script runs commands (`e`, `s///e`) or is read from
+    a file (`-f`): the review's last delta."""
+    scripts, given, k = [], False, 0
+    while k < len(words):
+        w = words[k]
+        if w in ("-f", "--file") or w.startswith(("--file=", "-f")) and not w.startswith("--f") or (
+                w.startswith("-") and not w.startswith("--") and "f" in w[1:]):
+            return True
+        if w in ("-e", "--expression"):
+            if k + 1 < len(words):
+                scripts.append(words[k + 1])
+            given = True
+            k += 2
+            continue
+        if w.startswith("--expression="):
+            scripts.append(w.split("=", 1)[1])
+            given = True
+        elif not w.startswith("-") and not given:
+            scripts.append(w)
+            given = True
+        k += 1
+    for script in scripts:
+        if _SED_E.search(script) or any("e" in m.group(2) for m in _SED_S.finditer(script)):
+            return True
+    return False
 
 
 def shell_program(stem: str, words: list[str], via_input: bool) -> str | None:
@@ -849,6 +931,10 @@ class _Judge:
             dirs = [self.root] if self.root is not None else mg.UNKNOWN
         if self._shadow(target, dirs):
             return
+        if fetch_rc(target):
+            self.deny(S_CRED, "a fix never writes curl's, wget's or netrc's settings "
+                              f"({_shown(target)})")
+            return
         if git_internal(target) or any(git_internal(r) for r in (self._rel(target, dirs) or [])):
             self.deny(S_GITCONFIG, "a fix never writes git's own config, hooks or gitfile "
                                    f"({_shown(target)})")
@@ -878,7 +964,8 @@ class _Judge:
                 return True
         return False
 
-    def reach(self, stem: str, words: list[str], dirs) -> None:
+    def reach(self, stem: str, words: list[str], dirs, replace: str | None = None,
+              filled: bool = False) -> None:
         """H-1 beyond literal paths: each argument (and `--opt=value`), home
         expanded, braces and globs expanded against the credential folders,
         relative ones placed against the line's folders. Inside one: DENY.
@@ -887,18 +974,28 @@ class _Judge:
         command substitution: ASK."""
         from jarvis import protected_state
         recursive = recursive_reader(stem, words)
+        reader = stem in _READERS or recursive or bool(_PY.fullmatch(stem)) or stem in _SHELLS
         for word in words:
             if word.startswith("-"):
                 if "=" not in word:
                     continue
                 word = word.split("=", 1)[1]
             raw = word.replace("\\", "").strip("'\"")
+            if replace and replace in raw:
+                # xargs' replace string: any name may stand there (a wildcard).
+                raw = raw.replace(replace, "*")
             if "$(" in raw or "`" in raw:
-                if "/" in raw:
+                if "/" in raw or reader:
                     self.ask("a path built by a command substitution is not read")
                 continue
             text = _expand_home(raw)
-            if "$" in text or not text:
+            if not text:
+                continue
+            if "$" in text:
+                if reader:
+                    # A variable the gate cannot read (`read`, `mapfile`,
+                    # `IFS` tricks): what it names is not known.
+                    self.ask(f"{_shown(stem)} of a path held in a variable the gate cannot read")
                 continue
             variants = protected_state._brace_expand(text)
             if variants is None:
@@ -910,7 +1007,8 @@ class _Judge:
                          [str(Path(d) / variant) for d in dirs])
                 for base in bases:
                     path = Path(os.path.normpath(base))
-                    kind = _glob_reach(path) if _GLOB_CHARS.search(base) else _reach(path)
+                    kind = (_glob_reach(path) if _GLOB_CHARS.search(base)
+                            else _reach(path) or _reach(Path(base)))    # `/proc/self/cwd/../..`
                     if kind == "inside" or (kind == "ancestor" and recursive):
                         self.deny(S_CRED, "a fix never reads, searches or copies a credential folder "
                                           f"({_shown(word)})")
@@ -979,6 +1077,8 @@ class _Judge:
         if mg._GIT_ENV.search(text):
             self.deny(S_REPO, "a fix never points git at another repository or config "
                               "(GIT_DIR, GIT_WORK_TREE, GIT_CONFIG*, GIT_NAMESPACE)")
+        if re.search(r"(?<![A-Za-z0-9_])(CURL_HOME|NETRC|WGETRC|CURLOPT_[A-Z_]+)\s*=", text):
+            self.ask("a fetcher's settings moved by a variable the gate does not read")
         if _EDITOR_ENV.search(text):
             self.ask("a pager or editor set on the line runs a program the gate does not read")
         for match in mg._REDIRECT_TARGET.finditer(text):
@@ -1054,6 +1154,9 @@ class _Judge:
                     continue
                 words = [str(a) for a in prog.args]
                 low = [w.lower() for w in words]
+                if fetch_config(stem, words):
+                    self.ask(f"{_shown(stem)} reads its addresses or settings from a file the gate "
+                             "does not read")
                 if any(w.startswith(("--resolve", "--connect-to", "--proxy", "-x")) for w in low) or any(
                         "host:" in w.replace(" ", "") for w in low):
                     self.deny(S_CRED, "a fetch that forces an address or a Host header")
@@ -1087,7 +1190,7 @@ class _Judge:
         args = list(prog.args)
         words = [str(a) for a in args]
         if stem is not None:
-            self.reach(stem, words, line.dirs)
+            self.reach(stem, words, line.dirs, prog.replace)
             for target in mg._written(stem, words):
                 self.file(target, line.dirs)
             if stem in ("rm", "unlink", "rmdir", "mv", "shred", "truncate"):
@@ -1102,6 +1205,12 @@ class _Judge:
             self.ask(f"{_shown(stem)}: {why} is not read by the gate")
         if stem == "eval" and any("$" in w or "`" in w for w in words):
             self.ask("eval of an expansion is not read by the gate")
+        if stem == "xargs":
+            # It runs a program on words it reads from a file or stdin
+            # (the review's last delta): what they name is not read.
+            self.ask("xargs runs a program on words the gate does not read")
+        if stem in ("sed", "gsed") and sed_runs(words):
+            self.ask("a sed script that runs commands (or comes from a file) is not read")
         if stem in _UNPACKERS and _unpacks(stem, words):
             self.ask(f"{_shown(stem)} may write CI configuration the gate does not see")
         if stem in ("cd", "pushd"):
@@ -1204,8 +1313,16 @@ class _Judge:
             self.ask("git lfs push sends objects the gate does not read")
         elif sub == "fetch":
             base = self.scope.get("base")
-            self.fetched_base = bool(base) and [w for w in words if not w.startswith("-")] in (
-                ["origin", base], ["origin", f"refs/heads/{base}"])
+            positional = [w for w in words if not w.startswith("-")]
+            self.fetched_base = bool(base) and positional in (["origin", base], ["origin", f"refs/heads/{base}"])
+            self._fetch_spoof(positional)
+        elif sub == "update-ref":
+            self.ask("git update-ref may make another commit pass for the base")
+        elif sub in ("tag", "branch") and any(w.lstrip("+").startswith(("origin/", "refs/remotes/"))
+                                               for w in words if not w.startswith("-")):
+            self.ask(f"git {sub} named like a remote-tracking branch may pass for the base")
+        elif sub == "rebase":
+            self.ask("a fix merges the base in; it never rebases")
         elif sub in ("merge", "pull"):
             self._merge(sub, words)
         elif sub in ("apply", "am", "cherry-pick") or (sub == "reset" and "--hard" in words) or (
@@ -1225,6 +1342,27 @@ class _Judge:
         elif sub not in _GIT_KNOWN:
             self.ask(f"git {_shown(sub)} is not a git command the gate knows (an alias or another "
                      "program may push)")
+
+    def _fetch_spoof(self, positional: list[str]) -> None:
+        """LOW of the review's last delta: a fetch from a local path, or one
+        that writes a remote-tracking ref or a tag from anything but the
+        base or the PR's branch, may make another commit pass for the base."""
+        if not positional:
+            return
+        remote, specs = positional[0], positional[1:]
+        if remote == "." or remote.startswith(("/", "./", "../", "~", "file:")) or (
+                remote != "origin" and not _REMOTE_NAME.fullmatch(remote)):
+            self.ask("a fetch from a local path or a URL may pass for the base")
+            return
+        allowed = {self.scope.get("base"), self.branch} - {None}
+        for spec in specs:
+            src, colon, dst = spec.lstrip("+").partition(":")
+            if not colon:
+                continue
+            if dst.startswith(("refs/remotes/", "refs/tags/", "origin/")) and (
+                    remote != "origin" or src.removeprefix("refs/heads/") not in allowed):
+                self.ask(f"a fetch into {_shown(dst)} may make another commit pass for the base")
+                return
 
     def _merge(self, sub: str, words: list[str]) -> None:
         """The brief's merge of the base: `git merge origin/<base>` (or
