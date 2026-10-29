@@ -961,7 +961,9 @@ daemon string is still set as text or through the sanitized Markdown.
 - **H4, until PM-F:** a PR row shows the PR's title, code's facts parts
   (names in `<bdi>`), the safety-file flags, and the summary's Does and
   Blocked lines in an "AI SUMMARY" slot, then "Merge it at the desk for now".
-  Never the head SHA, a raw key or a link; no buttons.
+  Never the head SHA, a raw key or a link; no buttons. (Replaced by PM-F, 2026-10-29: the row
+  merges, updates and fixes here, each with its own passkey; see "As built:
+  PM-F" in `2026-10-28-pr-inbox-merge.md`.)
 - **H5:** an unread chat says "Loading…", or offline "Not read yet: you're
   offline.", never "No messages yet."; the task view and the card likewise.
 - **H6:** a deferred row's Leave it (left) and Approve and retry (right) sit
