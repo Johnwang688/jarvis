@@ -650,6 +650,12 @@ V2_ALWAYS_ASK_DEFAULTS: list[dict] = [
         "kind": "credential_command",
     },
     {
+        "id": "credentials-read",
+        "reason": "it prints a stored credential (a token, password or key), which would then "
+                  "reach the model and the logs",
+        "kind": "credential_read",
+    },
+    {
         "id": "credentials-path",
         "reason": "a write under a credential directory is a credential change however it is spelled",
         "kind": "credential_path",
@@ -710,8 +716,12 @@ def credential_dirs() -> tuple[str, ...]:
     folder under the v2 data root (`remote_dir()`), read at call time: either
     can be moved (`JARVIS_BROWSER_DIR`, `JARVIS_V2_DATA`), and a test that
     repoints one must protect its own. What every credential-folder check
-    asks (v2 permissions, v1's file and shell tools, `folders`,
-    `editor_policy`, Codex's denied paths)."""
+    asks: v2's read tools refuse every one of these folders in every task
+    and chat (layer 1, `permissions._credential_folder_read`, through v1's
+    judge `files.credential_folder_judge`), and a tree search from a folder
+    that holds one; v2's shell and write tools ask (`credentials-path`);
+    v1's file, search and shell tools refuse; `folders`, `editor_policy`,
+    Codex's denied paths and grants (`denied_grant`) close them too."""
     return (*V2_CREDENTIAL_DIRS, str(BROWSER_DIR), str(remote_dir()))
 
 

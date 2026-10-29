@@ -8,8 +8,10 @@ handed. The layers are evaluated in order and the first to answer wins:
    SELF_PROTECTED, the persistent allowlist, a credential bundle, a
    credential env file (ENV-1: `*.example` only), or the v2
    `allowlist.json` / `models.json` / `routing.json` trio; for read tools
-   (Claude's Read, Grep, Glob, NotebookRead), a credential file or a glob onto
-   one; for a sandbox grant, one that is or holds a credential env file.
+   (Claude's Read, Grep, Glob, LS, NotebookRead; v1's read tools), a
+   credential file or a glob onto one, any path in a credential folder, and
+   a tree search from a folder that holds one; for a sandbox grant, one that
+   is or holds a credential env file.
    Never asked of anyone, and unreachable through the escape hatch (§6.1).
 2. **ALWAYS-ASK** — `config.V2_ALWAYS_ASK_DEFAULTS` plus the additions in
    `config.V2_ALWAYS_ASK` and `Brief.always_ask` / `Project.always_ask`. A
@@ -190,13 +192,24 @@ _PATHS_KEYS = ("paths", "files", "file_paths")
 
 # Tools that read a file or search a tree (Claude's), judged at layer 1 for a
 # credential env file (ENV-1: the owner's `.env*` rule — Jarvis never reads
-# one). The fast path's and jarvis-mcp's `read_file`/`grep_files` are v1's
-# own tools, which refuse inside; they are listed so a permit asked about
-# them answers the same.
+# one) and for a credential folder (`config.credential_dirs()`, cred-dir
+# reads 2026-10-29). The fast path's and jarvis-mcp's `read_file`,
+# `grep_files`, `list_dir` and `find_files` are v1's own tools, which refuse
+# inside; they are listed so a permit asked about them answers the same.
 READ_TOOLS = frozenset({
     "Read", "NotebookRead", "Grep", "Glob", "LS",     # Claude
-    "read_file", "grep_files",                        # fast path / jarvis-mcp
+    "read_file", "grep_files", "list_dir", "find_files",   # fast path / jarvis-mcp
 })
+# The read tools that walk a tree from a root with no per-file credential
+# filter of their own (v1's `grep_files` filters every file it reads): a root
+# that holds a credential folder (`~`, `~/.config`, `/`) reads or lists it.
+# A call with no `path` walks the folder it runs in.
+_TREE_TOOLS = frozenset({"Grep", "Glob", "LS", "find_files"})
+# Their file-name patterns that are paths from the root, and so can climb out
+# of it (`../../.ssh/*`, `/home/me/.config/gh/*`, `~/.aws/*`). Grep's `glob`
+# is matched below its root and never leaves it.
+_ROOTED_PATTERN_KEYS = {"Glob": ("pattern",), "find_files": ("pattern",)}
+_GLOB_MAGIC = frozenset("*?[")
 # The arguments that hold a glob over file names (Glob's `pattern`, Grep's
 # `glob` filter): judged by the glob rule, never as a path. Grep's `pattern`
 # is a regular expression over contents and is not a file name at all.
@@ -219,6 +232,34 @@ _MIGRATE_ALWAYS_PHRASES = (
 )
 _CREDENTIAL_PHRASES = (("gh", "auth"), ("vercel", "login"), ("aws", "configure"))
 _CREDENTIAL_STEMS = frozenset({"ssh-keygen", "ssh-copy-id", "ssh-add"})
+# Commands that print a stored credential without naming a credential
+# folder's path, so `credentials-path` never sees them (cred-dir reads,
+# 2026-10-29): the `credentials-read` rule asks them, never with an Always.
+# Each phrase's first word is the program itself; the rest in order, with
+# anything between (`_phrase_ordered`). `gh auth token` is already
+# `credentials-login`'s (`("gh", "auth")`).
+_CREDENTIAL_READ_PHRASES = (
+    ("gh", "config", "*token*"),
+    ("gcloud", "auth", "print-*"),
+    ("az", "get-access-token"),
+    ("aws", "get-login-password"), ("aws", "get-session-token"),
+    ("aws", "get-role-credentials"), ("aws", "get-federation-token"),
+    ("security", "find-*-password"), ("security", "dump-keychain"),
+    ("security", "export"),
+    ("secret-tool", "lookup"), ("secret-tool", "search"),
+    ("keyring", "get"),
+    ("op", "read"), ("op", "item", "get"), ("op", "inject"),
+    ("bw", "get"), ("lpass", "show"),
+    ("gpg", "--export-secret-*"), ("gpg2", "--export-secret-*"),
+    ("npm", "config", "get", "*auth*"),
+)
+# Programs whose every run reads or hands out a stored credential: git's and
+# docker's credential helpers, called directly, and the password stores.
+_CREDENTIAL_READ_STEMS = ("git-credential*", "docker-credential-*", "pass", "gopass",
+                          "passage", "kwallet-query")
+# git's global options that take the next word as their value.
+_GIT_VALUE_OPTIONS = frozenset({"-c", "-C", "--git-dir", "--work-tree", "--namespace",
+                                "--config-env", "--super-prefix", "--exec-path", "--list-cmds"})
 
 _log_lock = threading.Lock()
 
@@ -429,10 +470,13 @@ def denied_file(target: str, cwd: str | None = None, *, folder: bool = False) ->
     return None
 
 
-def denied_read(tool: str, args: dict, cwd: str | None = None) -> str | None:
+def denied_read(tool: str, args: dict, cwd: str | None = None, *,
+                shell_cwd: str | None = None) -> str | None:
     """Why a read tool's call may not run, or None (ENV-1): a path it reads
     that is, or leads to, a credential file — a bundle or a credential env
-    file, by `secrets.is_credential` — or, for Grep (which reads what it
+    file, by `secrets.is_credential` — or lies in a credential folder, or,
+    for a tree walk, holds one (`_credential_folder_read`; cred-dir reads,
+    2026-10-29), or, for Grep (which reads what it
     selects), a file-name glob judged as the shell's `rg --hidden -g` value
     is (`secrets.pattern_reaches`, plus the raw-line check on the glob and
     the path: `**/*test*` and `*.custom` are allowed, `**/.env*`, `*.env*`
@@ -479,6 +523,107 @@ def denied_read(tool: str, args: dict, cwd: str | None = None) -> str | None:
                     if part and (v1_secrets.is_protected(part)
                                  or v1_secrets.pattern_reaches(part, True)):
                         return v1_secrets.refusal(part)
+    return _credential_folder_read(tool, args, cwd, shell_cwd)
+
+
+def _credential_folder_read(tool: str, args: dict, cwd: str | None,
+                            shell_cwd: str | None = None) -> str | None:
+    """A read tool's call that reaches a credential folder
+    (`config.credential_dirs()`: `~/.ssh`, `~/.aws`, `~/.config/gh`,
+    `~/.config/jarvis`, `~/.gnupg`, the Browser's folder and the phone's),
+    refused in every task and chat (cred-dir reads, 2026-10-29: Claude's
+    `Read ~/.config/gh/hosts.yml` reached no layer before it). Judged by v1's
+    own judge (`files.credential_folder_judge`, which v1's read tools ask),
+    so the two answer alike: as written and where it resolves, a symlink's
+    name and its target, `..` as the kernel reads it, `~`, and case. The
+    gate's own state files stay readable by their own path, as in v1.
+
+    A tree walk (`_TREE_TOOLS`) is also refused when its root — `path`, or
+    with none the folder it runs in — **holds** a credential folder (`~`,
+    `~/.config`, `/`), and Glob's (and `find_files`') pattern when its fixed
+    leading folders lie in one, or hold one and the pattern goes on to match
+    below them (`~/.ss?/*`, `../../.aws/*`); a `..` after a wildcard cannot
+    be placed, so it is refused too. A relative path is placed in the brief's
+    folder and, when the provider reported one, the folder its shell is in;
+    either reaching a folder refuses. What this does not see: a symlink to a
+    credential folder deep in a tree a search walks (ripgrep does not follow
+    one unless told to), and a tool not listed in `READ_TOOLS`."""
+    judge = v1_files.credential_folder_judge()
+    bases = list(dict.fromkeys(b for b in (cwd, shell_cwd) if isinstance(b, str) and b)) or [None]
+    named = [(key, value) for key in ("file_path", "notebook_path", "path")
+             if isinstance(value := args.get(key), str) and value.strip()]
+    for _key, value in named:
+        for base in bases:
+            placed = str(_placed(value, base))
+            if judge(placed):
+                return v1_files._credential_folder_refusal(placed)
+    if tool not in _TREE_TOOLS:
+        return None
+    roots = [value for key, value in named if key == "path"] or ["."]
+    for value in roots:
+        for base in bases:
+            placed = str(_placed(value, base))
+            held = _holds_credential_folder(placed)
+            if held:
+                return CREDENTIAL_FOLDER_HELD.format(path=placed, folder=held, tool=tool)
+            for key in _ROOTED_PATTERN_KEYS.get(tool, ()):
+                pattern = args.get(key)
+                if isinstance(pattern, str) and pattern.strip():
+                    reached = _pattern_reaches_folder(pattern, placed, judge)
+                    if reached:
+                        return CREDENTIAL_FOLDER_PATTERN.format(pattern=reached[:120], tool=tool)
+    return None
+
+
+CREDENTIAL_FOLDER_HELD = (
+    "Error: {path} holds a credential folder ({folder}), and a {tool} from there would read "
+    "into it. Jarvis does not read credential folders. Search a folder that does not hold "
+    "one instead: the project, or a folder inside it.")
+CREDENTIAL_FOLDER_PATTERN = (
+    "Error: the {tool} pattern {pattern!r} can reach a credential folder (SSH, cloud and Git "
+    "logins, Jarvis's own credentials or the owner's Browser profile), which Jarvis does not "
+    "read. Use a pattern that stays inside the project.")
+
+
+def _holds_credential_folder(path: str) -> str | None:
+    """The credential folder `path` holds (strictly above it), as written or
+    where it resolves (`..` read as the kernel reads it), compared also
+    case-folded; or None. A path that cannot be resolved holds one."""
+    try:
+        written = os.path.expanduser(path)
+        candidates = {os.path.abspath(written), os.path.realpath(written)}
+    except (OSError, RuntimeError, ValueError, TypeError):
+        return "unknown"
+    for root in v1_files._credential_roots():
+        folder = str(root)
+        for candidate in candidates:
+            prefix = candidate if candidate.endswith(os.sep) else candidate + os.sep
+            if folder.startswith(prefix) or folder.casefold().startswith(prefix.casefold()):
+                return folder
+    return None
+
+
+def _pattern_reaches_folder(pattern: str, root: str, judge) -> str | None:
+    """The brace variant of a path pattern (Glob's) that can reach a
+    credential folder from `root`, or None: its fixed leading folders lie in
+    one, or hold one with a wildcard still to match below them, or a `..`
+    follows a wildcard. A brace list too large to expand reaches one."""
+    variants = protected_state._brace_expand(pattern.strip())
+    if variants is None:
+        return pattern
+    for variant in variants:
+        text = variant.replace("\\", "/")
+        if not text.startswith(("/", "~")):
+            text = root.rstrip("/") + "/" + text
+        parts = os.path.expanduser(text).split("/")
+        wild = next((i for i, part in enumerate(parts) if _GLOB_MAGIC & set(part)), None)
+        if wild is not None and ".." in parts[wild:]:
+            return variant
+        fixed = "/".join(parts[:wild] if wild is not None else parts) or "/"
+        if judge(fixed):
+            return variant
+        if wild is not None and _holds_credential_folder(fixed):
+            return variant
     return None
 
 
@@ -494,17 +639,18 @@ def _phone_folder_read(path: Path) -> str | None:
     (review of PR #325, MED-1). So is a path that holds it (a Grep or Glob
     there reads it) when that path is the data root, lies under it, or lies
     strictly below `$HOME` (`~/.local/share/jarvis`, `~/.local`, a symlink to
-    either; LOW-A). `$HOME` itself and what lies above it are not: a search
-    from there reads every credential folder, `~/.ssh` included, the class
-    the scrub covers for v1 and nothing covers for Claude's own tools (a
-    stated limit). No open project root can hold the data root
+    either; LOW-A). `$HOME` itself and what lies above it are not refused
+    here; since 2026-10-29 a tree search from there is refused by
+    `_credential_folder_read`, which holds every credential folder, `~/.ssh`
+    included (a Read of `$HOME` is not a search). No open project root can hold the data root
     (`folders.py` refuses such a root and any dot component), so this never
     refuses a project's own search; a chat worktree's parent folders are
     refused, which a chat never needs. The shell's reads of the folder are
     the `credentials-path` rule's, the push files' names are refused
     outright (`secrets.EXACT_NAMES`), and v1's file and shell tools refuse
-    the folder (`files.credential_folder_judge`). Other credential folders
-    are not judged here."""
+    the folder (`files.credential_folder_judge`). Every credential folder,
+    this one included, is also `_credential_folder_read`'s, which runs after
+    this check (cred-dir reads, 2026-10-29)."""
     try:
         remote = Path(os.path.abspath(config.remote_dir()))
         data = Path(os.path.abspath(Path(config.V2_DATA_DIR).expanduser()))
@@ -856,7 +1002,58 @@ def _kind_matches(kind: str, segment: str, tokens: list[str], stems: list[str]) 
                 or any(stem in _CREDENTIAL_STEMS for stem in stems))
     if kind == "credential_path":
         return any(_under_credential_dir(token) for token in tokens + _path_words(segment))
+    if kind == "credential_read":
+        return _reads_credential(tokens)
     LOG.warning("Ignoring always-ask rule with unknown kind %r", kind)
+    return False
+
+
+def _reads_credential(tokens: list[str]) -> bool:
+    """Whether the command (from its program on) prints or hands out a
+    stored credential: `git credential fill|approve|reject` and git's
+    `credential-<helper>` subcommands, a git credential setting read or set
+    (`git config --get credential.helper`, `git -c credential.helper=…`), a
+    helper or password store run directly, or one of
+    `_CREDENTIAL_READ_PHRASES`."""
+    if not tokens:
+        return False
+    program = tokens[0].rsplit("/", 1)[-1].lower()
+    if any(fnmatch(program, stem) for stem in _CREDENTIAL_READ_STEMS):
+        return True
+    if program == "git":
+        return _git_credential(tokens)
+    rest = [token.lower() for token in tokens[1:]]
+    return any(fnmatch(program, phrase[0]) and _phrase_ordered(phrase[1:], rest)
+               for phrase in _CREDENTIAL_READ_PHRASES)
+
+
+def _git_credential(tokens: list[str]) -> bool:
+    """git's subcommand, past its global options: `credential` or
+    `credential-<helper>`, or `config` naming a credential setting; or a
+    global option that sets one for this run (`-c credential.helper=…`,
+    `--config-env=credential.…`)."""
+    index = 1
+    while index < len(tokens):
+        word = tokens[index]
+        low = word.lower()
+        if low in _GIT_VALUE_OPTIONS:
+            value = tokens[index + 1].lower() if index + 1 < len(tokens) else ""
+            if low in ("-c", "--config-env") and value.startswith("credential"):
+                return True
+            index += 2
+            continue
+        if low.startswith("--config-env=") and low.split("=", 1)[1].startswith("credential"):
+            return True
+        if low.startswith("-c") and len(low) > 2 and low[2:].startswith("credential"):
+            return True             # `-ccredential.helper=…`, glued
+        if low.startswith("-"):
+            index += 1
+            continue
+        if low == "credential" or low.startswith("credential-"):
+            return True
+        if low == "config":
+            return any("credential" in w.lower() for w in tokens[index + 1:])
+        return False
     return False
 
 
@@ -1160,7 +1357,8 @@ def build_permit(ctx: PermitContext, asker, *, clock=None) -> PermissionCallback
                     return finish(Decision.DENY, L_DENY, refusal)
         if tool in READ_TOOLS:
             # A credential file read or searched for by name (ENV-1).
-            refusal = denied_read(tool, args, cwd)
+            refusal = denied_read(tool, args, cwd,
+                                  shell_cwd=shell_cwd if isinstance(shell_cwd, str) else None)
             if refusal:
                 return finish(Decision.DENY, L_DENY, refusal)
         for extra in also_commands:
