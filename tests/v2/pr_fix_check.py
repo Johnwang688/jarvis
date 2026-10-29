@@ -485,7 +485,10 @@ class Scope(unittest.TestCase):
                 with self.subTest(tool=tool, args=args):
                     hit = j(tool, args, cmd)
                     self.assertIsNotNone(hit)
-                    self.assertEqual((hit.decision, hit.rule), (X.DENY, X.S_GITCONFIG), hit.reason)
+                    # ~/.gitconfig is a credential store since #339, so the
+                    # credential rule takes it first; refused either way.
+                    want = X.S_CRED if args.get("file_path") == "~/.gitconfig" else X.S_GITCONFIG
+                    self.assertEqual((hit.decision, hit.rule), (X.DENY, want), hit.reason)
             self.assertIsNone(j("Write", {"file_path": str(ahead / "other"), "content": "x"}))
             helper.write_text("#!/bin/sh\necho swapped\n")
             hit = j("Bash", {"command": push}, push)
@@ -774,15 +777,16 @@ class Permit(unittest.TestCase):
                 self.assertNotIn("pr-scope", v1.reason)
 
     def test_a_credential_read_is_refused_only_in_a_fix(self):
-        # H-1. A task without a scope is unchanged (its read goes on to the
-        # ordinary layers, as before this PR).
-        for scoped, layer in ((True, permissions.L_PR_SCOPE), (False, None)):
+        # H-1. Since #339 every task's read tools refuse a credential folder
+        # at layer 1, before the PR scope is asked; a fix's read is refused
+        # there too, and an unscoped task never reaches the PR-scope layer.
+        for scoped in (True, False):
             with self.subTest(scoped=scoped):
                 decision = self.permit(scoped=scoped)("Read", {"file_path": "~/.config/gh/hosts.yml"})
                 verdict = permissions.last_verdict()
-                if layer:
-                    self.assertEqual((decision, verdict.layer), (Decision.DENY, layer))
-                else:
+                self.assertEqual(decision, Decision.DENY)
+                self.assertIn(verdict.layer, (permissions.L_PR_SCOPE, "deny"))
+                if not scoped:
                     self.assertNotEqual(verdict.layer, permissions.L_PR_SCOPE)
 
     def test_codex_is_refused_for_a_fix(self):

@@ -49,6 +49,10 @@ PIN = "Scope.test_the_credential_helper_is_pinned"
 # raw line already refuses every hermetic case: `_reach` on the path as
 # written (`/proc/self/cwd/..`) and `~user` (which reads the real passwd
 # entry, not the test's HOME).
+# Since #339 one more is equivalent: `.gitconfig` in the git-config list,
+# because `~/.gitconfig` is a credential store and the credential rule takes
+# it first; and the H-1 mutant is killed by the scope's own test, since the
+# permit's layer 1 now refuses a read tool's credential path before the scope.
 MUTANTS = [
     # -- the PR scope's DENY families (PM-20) ------------------------------------------------------
     ("DENY remote: a remote that points at another repository", FX,
@@ -330,8 +334,7 @@ MUTANTS = [
     ("H-1: a credential folder read", FX,
      "        if text and (_under_credential_dir(text) or (self.root is not None",
      "        if False and (_under_credential_dir(text) or (self.root is not None",
-     ["Scope.test_the_owners_github_credential_is_out_of_reach",
-      "Permit.test_a_credential_read_is_refused_only_in_a_fix"]),
+     ["Scope.test_the_owners_github_credential_is_out_of_reach"]),
     ("H-1: read tools not judged", FX,
      '    if tool in READ_TOOLS or tool == "LS":\n        j.read(tool, args)\n', "",
      ["Scope.test_the_owners_github_credential_is_out_of_reach"]),
@@ -496,9 +499,6 @@ MUTANTS = [
      "        if False:\n", [PIN]),
     ("delta MED: ~/.local/bin and ~/bin writable", FX,
      '    return [home / ".local" / "bin", home / "bin"]\n', "    return []\n", [PIN]),
-    ("delta MED: the owner's global git config writable", FX,
-     '        if parts and (parts[-1] in (".git", ".gitmodules", "config.worktree", ".gitconfig")\n',
-     '        if parts and (parts[-1] in (".git", ".gitmodules", "config.worktree")\n', [PIN]),
     ("delta LOW: tree writers", FX,
      "        if stem in _UNPACKERS and _unpacks(stem, words):\n", "        if False:\n",
      ["Scope.test_tree_writers_are_asked"]),
