@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
-import { keyBytes, Notifications, PUSH_API, SUBSCRIBE_API, WORDS, type PushEnv, type RegistrationLike,
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { HINT, keyBytes, Notifications, PUSH_API, SUBSCRIBE_API, WORDS, type PushEnv, type RegistrationLike,
   type Send, type SubscriptionLike } from "./notify";
 import { validTime } from "../lib/phone";
 
@@ -74,7 +76,8 @@ describe("Turn on notifications (P-6)", () => {
     expect(t.env.register).toHaveBeenCalledTimes(1);
     expect(t.n.state).toBe("off");
     const button = t.n.view().querySelector("button")!;
-    expect(button.textContent).toBe("Turn on notifications");
+    expect(button.textContent).toBe("Turn on");
+    expect(button.getAttribute("aria-label")).toBe("Turn on notifications");
     t.order.length = 0;
     t.grant();
     await t.n.turnOn();
@@ -82,7 +85,8 @@ describe("Turn on notifications (P-6)", () => {
     expect(t.calls.at(-1)).toEqual(["POST", SUBSCRIBE_API, { subscription: { endpoint: "https://web.push.apple.com/abc",
       keys: { p256dh: "p", auth: "a" } } }]);
     expect(t.n.state).toBe("on");
-    expect(t.n.view().querySelector("button")!.textContent).toBe("Turn off notifications");
+    expect(t.n.view().querySelector("button")!.textContent).toBe("Turn off");
+    expect(t.n.view().querySelector("button")!.getAttribute("aria-label")).toBe("Turn off notifications");
   });
 
   it("the tap's first await is the subscribe call (the gesture holds)", async () => {
@@ -158,7 +162,7 @@ describe("Turn on notifications (P-6)", () => {
     expect(t.calls.at(-1)).toEqual(["DELETE", SUBSCRIBE_API, { endpoint: "https://web.push.apple.com/old" }]);
     expect(t.n.state).toBe("off");
     expect(t.n.view().textContent).toContain("key changed");
-    expect(t.n.view().querySelector("button")!.textContent).toBe("Turn on notifications");
+    expect(t.n.view().querySelector("button")!.textContent).toBe("Turn on");
     // One whose key the browser does not report is kept (it cannot tell);
     // the same key stays on.
     const unknown = setup({}, { held: sub("https://web.push.apple.com/x", null), status: { subscribed: true } });
@@ -189,6 +193,47 @@ describe("Turn on notifications (P-6)", () => {
     expect(keyBytes(KEY.slice(0, -2) + "!!")).toBeNull();
     const notPoint = btoa(String.fromCharCode(...new Uint8Array(65).fill(5))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
     expect(keyBytes(notPoint)).toBeNull();
+  });
+
+  it("is one compact row in every state: a short line, a small button only where it acts (owner, 2026-10-28)", () => {
+    const { n } = setup();
+    const draw = (state: typeof n.state, detail = "", deskOn = true) => {
+      n.state = state;
+      n.detail = detail;
+      n.deskOn = deskOn;
+      const view = n.view();
+      const button = view.querySelector("button");
+      return { view, line: view.querySelector(".notify-line")!, button: button?.textContent ?? null,
+        hint: view.querySelector('[data-testid="m-notify-hint"]')?.textContent ?? null };
+    };
+    const on = draw("on");
+    expect([on.line.textContent, on.button, on.hint]).toEqual([WORDS.on + " · " + HINT, "Turn off", " · " + HINT]);
+    expect(WORDS.on).toBe("Notifications on");
+    expect(on.line.classList.contains("one-line")).toBe(true);
+    expect(on.view.dataset.state).toBe("on");
+    // The hint is the "on" state's alone (review of #331, NIT).
+    const off = draw("off");
+    expect([off.line.textContent, off.button, off.hint]).toEqual(["Notifications off", "Turn on", null]);
+    // The desk's switch off: said in the hint's place.
+    expect(draw("on", "", false).line.textContent).toBe("Notifications on · turned off at the desk for now");
+    // A sentence of detail wraps (never cut by the ellipsis).
+    const changed = draw("off", "Jarvis's notification key changed: turn notifications on again.");
+    expect(changed.line.classList.contains("one-line")).toBe(false);
+    expect(changed.line.textContent).toContain("key changed");
+    const error = draw("error", "Jarvis could not be reached.");
+    expect([error.button, error.hint, error.line.textContent])
+      .toEqual(["Turn on", null, WORDS.error + " Jarvis could not be reached."]);
+    // The states that cannot act keep their whole sentence and have no button.
+    for (const state of ["unsupported", "install", "blocked", "unavailable"] as const) {
+      const d = draw(state);
+      expect([d.line.textContent, d.button, d.hint]).toEqual([WORDS[state], null, null]);
+    }
+    expect(draw("busy").button).toBeNull();
+    // The row is at least a tap target tall and its button is not the old full-width one.
+    const css = readFileSync(join(__dirname, "mobile.css"), "utf8");
+    const rule = css.slice(css.indexOf(".notify {"), css.indexOf("}", css.indexOf(".notify {")));
+    expect(rule).toMatch(/min-height:\s*44px/);
+    expect(on.view.querySelector("button")!.className).toBe("tap notify-act");
   });
 
   it("the desk's quiet-hours times are HH:MM", () => {

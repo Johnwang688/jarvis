@@ -362,7 +362,9 @@ export function leaveBody(report: ReviewReport, selection: ReadonlySet<string>):
   return { items: items.map((i) => ({ id: i.row.id })) };
 }
 
-export interface ConfirmLine { id: string; where: string; tool: string; firstLine: string }
+export interface ConfirmLine { id: string; where: string; tool: string; firstLine: string;
+  /** AS, display only: the record's AI summary, "" when it has none. Never in the tag or the subject. */
+  summary: string }
 
 /** The confirmation's list: each selected item's chat, tool and the command's first line (MR-10). */
 export function confirmationList(report: ReviewReport, selection: ReadonlySet<string>): ConfirmLine[] {
@@ -371,7 +373,7 @@ export function confirmationList(report: ReviewReport, selection: ReadonlySet<st
     const where = placeLabel(placeOf(report, item.place));
     const command = d?.command || d?.args || "";
     return { id: item.row.id, where: `${where.kind}${where.title ? ": " + where.title : ""}`,
-             tool: d?.tool || "", firstLine: oneLine(command.split("\n")[0] ?? "", 200) };
+             tool: d?.tool || "", firstLine: oneLine(command.split("\n")[0] ?? "", 200), summary: d?.summary || "" };
   });
 }
 

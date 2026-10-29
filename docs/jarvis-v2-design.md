@@ -428,7 +428,10 @@ The DM and the card show the **entire command**, never a summary. The
 decision log records `reviewer-declined-owner-ran`. (Since 2026-10-15, the
 owner's decision, a card withholds typed credential values but never one
 the line may run: `docs/notes/safety-permissions.md`, "Credentials typed
-into a command".) No allowlist entry is
+into a command".) Since 2026-10-28 (AS, the owner's request) the card
+leads with a model's one-line summary beside code's Why asked and Where
+lines, the command collapsed one click away and expanded when there is no
+summary: `docs/plans/2026-10-28-approval-summaries.md`. No allowlist entry is
 minted from this path: a command the reviewer refused is not one to
 auto-approve next time.
 

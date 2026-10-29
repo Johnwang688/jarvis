@@ -1,7 +1,10 @@
 // Push to talk on the phone (phone design §6, the Chats tab; P-7;
 // jarvis/v2/remote_stt.py). A chat's message box takes a "Hold to talk"
 // button: press and hold to record, release to upload and transcribe; the
-// words land in the box. Nothing more.
+// words land in the box. Nothing more. Since 2026-10-28 (the owner's chat
+// layout) the button is a mic icon in the message bar; its words ("Hold to
+// talk", "Listening · release", …) stay its text for screen readers, and the
+// line above the bar says what is happening. Only the look changed.
 //
 //   - **Inserted, never sent.** The text is added to the chat's draft (after
 //     what is already typed) and the box is drawn again. Send stays P-5's
@@ -25,6 +28,13 @@
 //     file the remote listener does not serve (it serves only what the
 //     build manifest lists for the phone page), and the phone's CSP is not
 //     widened for a `blob:` module.
+//   - **A touch is a hold only after `HOLD_MS`** within the slop (review of
+//     #331): a finger brushing the mic while scrolling lifts, slides or is
+//     cancelled before then, and nothing happens at all (no prompt, no
+//     line, no upload). The audio context alone is made and resumed in the
+//     pointerdown, inside the gesture as iOS needs (no prompt, no sound, no
+//     recording), and closed if the touch never becomes a hold. A keyboard's
+//     Space or Enter still starts at once.
 //   - At most `MAX_MS` (the server's `remote_stt.MAX_S`): the recording stops
 //     itself there and is transcribed. Under `MIN_MS` nothing is sent.
 //
@@ -42,6 +52,9 @@ export const RATE = OUT_RATE;
 export const MAX_SAMPLES = (RATE * MAX_MS) / 1000;
 /** A slide this far past the button's edge cancels (px). */
 export const SLOP_PX = 24;
+/** A press counts as a hold only after this long without leaving the slop (ms): a brush while
+ * scrolling past the mic asks for nothing, shows nothing and uploads nothing (review of #331, LOW 5). */
+export const HOLD_MS = 150;
 
 export type TalkPhase = "idle" | "starting" | "listening" | "transcribing";
 
@@ -189,6 +202,8 @@ export class Talk {
   threadId: string | null = null;
   readonly el: HTMLElement;
   readonly button: HTMLButtonElement;
+  /** The button's words (visually hidden; the icon is drawn by talk.css). */
+  private readonly words: HTMLElement;
   private readonly line: HTMLElement;
   /** One more try of the last clip, after a network failure (`networkFailure`); kept for one Retry only. */
   readonly retryButton: HTMLButtonElement;
@@ -199,6 +214,21 @@ export class Talk {
   private gen = 0;
   private rec: Recording | null = null;
   private detach: (() => void) | null = null;
+  /** A press not yet held for HOLD_MS: its timer, or null. */
+  private holding: unknown = null;
+  /** That press's audio context, made and resumed in its pointerdown. */
+  private primed: AudioContextLike | null = null;
+
+  /** In a touch's pointerdown: an audio context, created and resumed in the gesture, for a
+   * press that may become a hold. Nothing when the press could not record anyway. */
+  private prime(): AudioContextLike | null {
+    const threadId = this.threadId;
+    if (this.phase !== "idle" || !threadId || this.busy(threadId) || !this.hooks.online() || !this.env.media()) return null;
+    const ctx = this.env.context();
+    if (!ctx) return null;
+    try { void ctx.resume?.()?.catch?.(() => {}); } catch { /* already running */ }
+    return ctx;
+  }
 
   constructor(private readonly env: TalkEnv, private readonly hooks: TalkHooks) {
     this.el = document.createElement("div");
@@ -206,8 +236,14 @@ export class Talk {
     this.el.dataset.testid = "m-talk";
     this.button = document.createElement("button");
     this.button.type = "button";
-    this.button.className = "tap quiet m-mic";
+    this.button.className = "tap m-mic";
     this.button.dataset.testid = "m-mic";
+    const icon = document.createElement("span");
+    icon.className = "m-mic-icon";
+    icon.setAttribute("aria-hidden", "true");
+    this.words = document.createElement("span");
+    this.words.className = "m-sr";
+    this.button.append(icon, this.words);
     this.line = document.createElement("p");
     this.line.className = "m-notice m-talk-line";
     this.line.dataset.testid = "m-talk-line";
@@ -233,17 +269,22 @@ export class Talk {
   }
 
   /** The owner pressed: open the mic, inside the gesture. */
-  press(): void {
+  press(primed: AudioContextLike | null = null): void {
     const threadId = this.threadId;
-    if (this.phase !== "idle" || !threadId || this.busy(threadId)) return;
-    if (!this.hooks.online()) { this.say(WORDS.offline, threadId); return; }
+    const drop = () => { if (primed) closeContext(primed); };
+    if (this.phase !== "idle" || !threadId || this.busy(threadId)) { drop(); return; }
+    if (!this.hooks.online()) { drop(); this.say(WORDS.offline, threadId); return; }
     const media = this.env.media();
-    const ctx = media ? this.env.context() : null;
-    if (!media || !ctx) { this.say(WORDS.noRecording, threadId); return; }
+    const ctx = media ? (primed ?? this.env.context()) : null;
+    if (!media || !ctx) { drop(); this.say(WORDS.noRecording, threadId); return; }
     this.retry = null;              // a new clip replaces one waiting for Retry
     const gen = ++this.gen;
-    // Created and resumed in the gesture: iOS starts a context made later suspended.
-    try { void ctx.resume?.()?.catch?.(() => {}); } catch { /* already running */ }
+    // The context must be created and resumed inside the gesture (iOS starts one made
+    // later suspended). A touch did that on pointerdown (`prime`), before the hold
+    // delay; a key's hold does it here, in its keydown. Only the microphone waits.
+    if (!primed) {
+      try { void ctx.resume?.()?.catch?.(() => {}); } catch { /* already running */ }
+    }
     this.rec = { gen, threadId, ctx, stream: null, nodes: [], frames: [], samples: 0, startedAt: this.env.now(), limit: null };
     this.phase = "starting";
     this.note = "";
@@ -414,7 +455,7 @@ export class Talk {
 
   private draw(): void {
     const b = this.button;
-    b.textContent = WORDS[this.phase];
+    this.words.textContent = WORDS[this.phase];
     b.dataset.phase = this.phase;
     b.setAttribute("aria-pressed", String(this.phase === "listening" || this.phase === "starting"));
     b.setAttribute("aria-label", this.phase === "idle" ? "Hold to talk: the words go in the box, unsent" : WORDS[this.phase]);
@@ -440,12 +481,13 @@ export class Talk {
       return e.clientX >= r.left - SLOP_PX && e.clientX <= r.right + SLOP_PX
         && e.clientY >= r.top - SLOP_PX && e.clientY <= r.bottom + SLOP_PX;
     };
+    // Before HOLD_MS a lift, a cancel or a slide off ends the touch and nothing else.
     const end = () => { this.detach?.(); this.detach = null; };
-    const up = () => { end(); void this.release(); };
-    const off = () => { end(); this.cancel(); };
+    const up = () => { const held = this.holding === null; end(); if (held) void this.release(); };
+    const off = () => { const held = this.holding === null; end(); if (held) this.cancel(); };
     const move = (e: Event) => { if (!inside(e as MouseEvent)) off(); };
     b.addEventListener("pointerdown", (e) => {
-      if (b.disabled || this.phase !== "idle") return;
+      if (b.disabled || this.phase !== "idle" || this.detach) return;
       e.preventDefault();
       // The release is heard wherever the finger lifts, even if the box was drawn again meanwhile.
       const win = b.ownerDocument.defaultView ?? window;
@@ -453,11 +495,24 @@ export class Talk {
       win.addEventListener("pointercancel", off);
       win.addEventListener("pointermove", move);
       this.detach = () => {
+        if (this.holding !== null) { this.env.clearTimer(this.holding); this.holding = null; }
+        // A touch abandoned before it was a hold: its context is closed; nothing recorded.
+        if (this.primed) { closeContext(this.primed); this.primed = null; }
         win.removeEventListener("pointerup", up);
         win.removeEventListener("pointercancel", off);
         win.removeEventListener("pointermove", move);
       };
-      this.press();
+      // The audio context starts here, in the gesture (no prompt, nothing recorded);
+      // the microphone is asked for only once the touch is a hold.
+      this.primed = this.prime();
+      const timer = this.env.setTimer(() => {
+        if (this.holding !== timer) return;
+        this.holding = null;
+        const primed = this.primed;
+        this.primed = null;
+        this.press(primed);
+      }, HOLD_MS);
+      this.holding = timer;
     });
     b.addEventListener("contextmenu", (e) => e.preventDefault());
     // A keyboard (or a switch control) holds Space or Enter instead.
@@ -475,6 +530,10 @@ export class Talk {
     this.detach = null;
     this.cancel();
   }
+}
+
+function closeContext(ctx: AudioContextLike): void {
+  try { void ctx.close().catch(() => {}); } catch { /* already closed */ }
 }
 
 function stopTracks(stream: MediaStream): void {

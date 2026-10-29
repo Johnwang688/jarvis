@@ -92,7 +92,8 @@ Claude's `PreToolUse` hook is its gate; its SDK sandbox does not confine on
 this WSL2. Preserve native CLI resolution/version floors and startup/resume
 policy checks. Sandbox widening needs a human, never Always; deny without one.
 Layer 1 refuses protected/credential grants. Unknown/malformed approvals fail
-closed. Both providers' `answer()` only denies.
+closed. Both providers' `answer()` only denies. Card AI summaries decide
+nothing.
 
 Use `TaskControl` for task verbs. Tasks pin their root. Archive keeps records;
 permanent delete is owner HUD-only, archived-only, into trash, never project
@@ -103,8 +104,8 @@ The HUD uses **Graphite**: warm off-black/glacier-cyan, amber pending/red error,
 overriding the global palette. Preserve dimensions, input behavior and owner
 workspace/editor/Browser decisions. Driving uses owner switches.
 Owner HTTP Basic/Digest auth uses only the exact private tab socket;
-credentials never enter tools, replay, status, logs or config. Pending
-navigation and cleanup: Browser note and HTTP-auth plan.
+credentials never enter tools, replay, status, logs or config (Browser note,
+HTTP-auth plan).
 
 ## Phone
 

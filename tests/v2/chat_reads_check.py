@@ -443,6 +443,15 @@ class ProjectionTests(Base):
         self.assertIn("notes.md", out, "an attachment is shown by name")
         self.assertNotIn(self.thread.id, CR.search(self.stores, "FILE-BODY-MARKER"))
 
+    def test_a_malformed_written_by_never_breaks_the_projection(self):
+        # [mutation: drop the isinstance guard] -> TypeError (unhashable)
+        for bad in (["deferral"], {"a": 1}, 7):
+            with self.subTest(bad=bad):
+                row = CR._owner_row({"origin": "owner", "via": "phone", "typed": "hi", "written_by": bad},
+                                    None, set())
+                self.assertEqual(row.role, "owner")
+                self.assertNotIn(CR._PHONE_TYPED, row.marks, "never passes as the owner's own typing")
+
     def test_tool_events_and_everything_else_are_omitted(self):
         # [mutation: include tool summaries / args / other kinds]
         rows = self.rows(self.thread)

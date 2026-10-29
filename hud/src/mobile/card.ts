@@ -3,8 +3,11 @@
 // (`GET /m/api/inbox/<id>/detail`, jarvis/v2/remote_answer.py) with the
 // HUD card's own words (lib/approvalCard.ts), and the card's invariants:
 //
-//   - the whole card shows before any button does anything: the whole
-//     command and every argument, never a summary or a cut;
+//   - the buttons come first (AS-12, the owner's request of 2026-10-28),
+//     then the AI summary (a model's one line, marked as such) and code's
+//     WHY ASKED and WHERE; the whole command and every argument stay one tap
+//     away: collapsed while a summary is pending or there, expanded when
+//     there is none (lib/approvalSummary.ts, the HUD card's own words);
 //   - every string is set with textContent; a Browser card's page text sits
 //     in its own <bdi>;
 //   - Deny is cheap (one tap, the session only) and first; AUTHORIZE and
@@ -25,6 +28,10 @@ import { argText, browserBody, nestedTooDeep, originText, reasonText, TOO_DEEP_W
 import { parseBrowserPrivateApproval, type BrowserApprovalPublic } from "../lib/browserapproval";
 import { clockOf, oneLine, type InboxRow } from "../lib/inbox";
 import { relayedLine, relayedParts } from "../lib/relays";
+import {
+  AI_LABEL, WHERE_LABEL, WHY_LABEL, previewLine, startsCollapsed, summaryView, summaryWords, toggleLabel, whereFields,
+  whereParts,
+} from "../lib/approvalSummary";
 
 type Json = Record<string, unknown>;
 const isObj = (v: unknown): v is Json => !!v && typeof v === "object" && !Array.isArray(v);
@@ -75,6 +82,8 @@ export interface CardState {
   busy: boolean;
   rule: Rule | null;
   notice: string;
+  /** AS: the owner's own open (true) or close (false) of the command; undefined until then. */
+  expanded?: boolean;
 }
 
 export interface CardActions {
@@ -84,6 +93,8 @@ export interface CardActions {
   always: () => void;
   confirmAlways: () => void;
   cancelAlways: () => void;
+  /** AS: open or close the command (display only). */
+  toggleCommand?: (open: boolean) => void;
 }
 
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, cls?: string, text?: string): HTMLElementTagNameMap[K] {
@@ -127,9 +138,98 @@ function browserDetail(state: CardState) {
   return parseBrowserPrivateApproval({ ...d.card, code: "" }, expected);
 }
 
-function ordinaryBody(card: Json, box: HTMLElement) {
-  const headline = headlineLine(card.headline);
-  if (headline) box.append(testid(el("div", "headline", headline), "approval-headline"));
+/** The AI summary's slot and code's two lines (AS), as text. */
+export function summaryLines(card: Json, box: HTMLElement, idPrefix = "approval") {
+  const view = summaryView(card);
+  if (view.slot) {
+    const slot = testid(el("div", "as-ai as-" + view.state), `${idPrefix}-summary`);
+    slot.dataset.state = view.state;
+    slot.append(el("span", "as-tag", AI_LABEL), testid(el("span", "as-text", summaryWords(view)), `${idPrefix}-summary-text`));
+    box.append(slot);
+  }
+  const why = reasonText(card.reason, card.layer);
+  if (why) {
+    const line = testid(el("div", "reason as-line"), `${idPrefix}-why`);
+    line.append(el("span", "k", WHY_LABEL + " "), why);
+    box.append(line);
+  }
+  const fields = whereFields(whereParts(card.where));
+  if (fields.length) {
+    // Each field in its own labelled box, its value isolated (review of #330, MED 1).
+    const line = testid(el("div", "as-line as-where"), `${idPrefix}-where`);
+    line.append(el("span", "k", WHERE_LABEL));
+    for (const [key, label, value] of fields) {
+      const part = testid(el("span", "as-wpart"), `${idPrefix}-where-${key}`);
+      part.dataset.field = key;
+      part.append(el("span", "as-wk", label), " ", el("bdi", "as-wv", value));
+      line.append(" ", part);
+    }
+    box.append(line);
+  }
+}
+
+/** The command and every argument, whole or collapsed to its first line, with its toggle (AS-15). */
+export function commandBlock(command: unknown, args: unknown, open: boolean, toggle: ((open: boolean) => void) | undefined,
+                             box: HTMLElement, idPrefix = "approval") {
+  const cmd = typeof command === "string" ? command : "";
+  const entries = isObj(args) ? Object.entries(args) : [];
+  if (!cmd && !entries.length) return;
+  const block = testid(el("div", "as-cmd"), `${idPrefix}-command-block`);
+  block.dataset.expanded = open ? "true" : "false";
+  if (open) {
+    if (cmd) {
+      const line = testid(el("div", "arg"), `${idPrefix}-command`);
+      line.append(el("span", "k", "command "), cmd);
+      block.append(line);
+    }
+    for (const [k, v] of entries) {
+      const line = testid(el("div", "arg"), `${idPrefix}-arg`);
+      line.append(el("span", "k", `${k} `), argText(v));
+      block.append(line);
+    }
+  } else {
+    const line = testid(el("div", "arg as-preview"), `${idPrefix}-command-preview`);
+    line.append(el("span", "k", cmd ? "command " : ""),
+      cmd ? previewLine(cmd) : `${entries[0][0]} ${previewLine(argText(entries[0][1]))}`);
+    block.append(line);
+  }
+  if (toggle) {
+    const b = button(toggleLabel(open, cmd, entries.length), "quiet as-toggle", `${idPrefix}-command-toggle`,
+      () => toggle(!open), true);
+    b.className = "tap quiet as-toggle";
+    b.setAttribute("aria-expanded", String(open));
+    block.append(b);
+  }
+  box.append(block);
+}
+
+/**
+ * A row's command and arguments (the inbox's and the review's rows, AS-15):
+ * labelled blocks as the rows always drew them, whole when `open`, else the
+ * command's (or the arguments') first line; the toggle, when given, below.
+ */
+export function rowCommand(command: string, argsText: string, open: boolean,
+                           toggle: ((open: boolean) => void) | undefined, box: HTMLElement,
+                           ids: { command: string; args: string; prefix: string }) {
+  if (!command && !argsText) return;
+  if (open) {
+    if (command) box.append(el("div", "label", "Command"), testid(el("pre", "code", command), ids.command));
+    if (argsText) box.append(el("div", "label", "Arguments"), testid(el("pre", "code", argsText), ids.args));
+  } else {
+    box.append(el("div", "label", command ? "Command" : "Arguments"),
+      testid(el("pre", "code as-preview", previewLine(command || argsText)), `${ids.prefix}-preview`));
+  }
+  if (toggle) {
+    const b = button(toggleLabel(open, command, argsText ? 1 : 0), "quiet as-toggle", `${ids.prefix}-toggle`,
+      () => toggle(!open), true);
+    b.className = "tap quiet as-toggle";
+    b.setAttribute("aria-expanded", String(open));
+    box.append(b);
+  }
+}
+
+function ordinaryBody(state: CardState, card: Json, box: HTMLElement, toggle?: (open: boolean) => void) {
+  summaryLines(card, box);
   const origin = originText(card.origin);
   if (origin) box.append(testid(el("div", "origin", origin), "approval-origin"));
   const relay = relayedParts(card.relayed_from);
@@ -143,25 +243,13 @@ function ordinaryBody(card: Json, box: HTMLElement) {
   }
   if (typeof card.subagent === "string" && card.subagent) box.append(el("div", "muted small", "from a sub-agent"));
   box.append(testid(el("div", "tool", typeof card.tool === "string" ? card.tool : ""), "approval-tool"));
-  if (typeof card.command === "string" && card.command) {
-    const line = testid(el("div", "arg"), "approval-command");
-    line.append(el("span", "k", "command "), card.command);
-    box.append(line);
-  }
-  if (isObj(card.args)) {
-    for (const [k, v] of Object.entries(card.args)) {
-      const line = testid(el("div", "arg"), "approval-arg");
-      line.append(el("span", "k", `${k} `), argText(v));
-      box.append(line);
-    }
-  }
+  const open = state.expanded ?? !startsCollapsed(summaryView(card));
+  commandBlock(card.command, card.args, open, toggle, box);
   if (nestedTooDeep(card.args)) {
     const warn = testid(el("div", "reason m-why", TOO_DEEP_WARNING), "approval-too-deep");
     warn.setAttribute("role", "alert");
     box.append(warn);
   }
-  const reason = reasonText(card.reason, card.layer);
-  if (reason) box.append(el("div", "reason", reason));
 }
 
 function privateBody(state: CardState, box: HTMLElement): boolean {
@@ -219,6 +307,11 @@ export function cardView(state: CardState, actions: CardActions): HTMLElement {
     card.append(testid(el("p", "m-limited", `limited: ${d.secure.label || d.secure.failed || "a check failed"}`),
       "m-limited"));
   }
+  // AS-12: a card's leading line (a widening, the merge gate's), then the buttons, then the rest.
+  if (d && !d.private && !state.refused) {
+    const headline = headlineLine(d.card.headline);
+    if (headline) card.append(testid(el("div", "headline", headline), "approval-headline"));
+  }
   const body = el("div", "m-card-body");
   let shown = false;
   if (state.refused) {
@@ -233,17 +326,16 @@ export function cardView(state: CardState, actions: CardActions): HTMLElement {
   } else if (d.private) {
     shown = privateBody(state, body);
   } else {
-    ordinaryBody(d.card, body);
+    ordinaryBody(state, d.card, body, actions.toggleCommand);
     shown = true;
   }
-  card.append(body);
   if (d && d.why) card.append(testid(el("p", "m-why", d.why), "m-card-why"));
   if (state.notice) {
     const note = testid(el("p", "m-notice", state.notice), "m-card-notice");
     note.setAttribute("role", "status");
     card.append(note);
   }
-  // Deny first, alone; AUTHORIZE and ALWAYS far below it.
+  // Deny first, alone; AUTHORIZE and ALWAYS far below it; all of it above the card's body (AS-12).
   const denyRow = el("div", "m-deny-row");
   denyRow.append(button("DENY", "deny", "approval-deny", actions.deny, false));
   card.append(denyRow);
@@ -277,6 +369,7 @@ export function cardView(state: CardState, actions: CardActions): HTMLElement {
     card.append(el("div", "m-gap"), authorize);
   }
   (denyRow.firstChild as HTMLButtonElement).disabled = state.busy;
+  card.append(el("div", "m-gap-after"), body);
   const at = d ? deadline(d.card) : "";
   card.append(el("div", "foot", at ? `DENIES AUTOMATICALLY AT ${at}` : "DENIES AUTOMATICALLY WHEN IT TIMES OUT"));
   view.append(card);

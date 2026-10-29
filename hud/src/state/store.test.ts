@@ -130,6 +130,32 @@ describe("several chats: each pane its own conversation (WP-B)", () => {
     expect(reduce({ ...s, selectedChat: 1 }, { type: "approval_drop", req_id: "r" }).orb).toBe("idle");
   });
 
+  it("AS: a summary patches only its own public card's two fields", () => {
+    const s = withChats({}, { approvals: [{ req_id: "r", command: "make", summary_state: "pending" } as any,
+                                          { req_id: "p", hud_only: true } as any] });
+    const patched = reduce(s, { type: "approval_patch", req_id: "r", patch: { summary: "Builds.", summary_state: "ready" } });
+    expect(patched.approvals[0]).toEqual({ req_id: "r", command: "make", summary: "Builds.", summary_state: "ready" });
+    expect(reduce(s, { type: "approval_patch", req_id: "gone", patch: { summary: "x", summary_state: "ready" } })).toBe(s);
+    const priv = reduce(s, { type: "approval_patch", req_id: "p", patch: { summary: "x", summary_state: "ready" } });
+    expect(priv.approvals[1]).toEqual({ req_id: "p", hud_only: true });
+  });
+
+  it("AS (review of #330, LOW 3): a re-read list never overwrites a summary already heard; it drops what was answered", () => {
+    const s = withChats({}, { orb: "approval", approvals: [
+      { req_id: "r", command: "make", summary: "Builds.", summary_state: "ready" } as any,
+      { req_id: "gone", command: "x", summary_state: "pending" } as any] });
+    const listed = [{ req_id: "r", command: "make", summary: "", summary_state: "pending" } as any,
+                    { req_id: "new", command: "y", summary_state: "pending" } as any];
+    const next = reduce(s, { type: "approvals_sync", approvals: listed });
+    expect(next.approvals.map((r) => r.req_id)).toEqual(["r", "new"]);
+    expect(next.approvals[0]).toMatchObject({ summary: "Builds.", summary_state: "ready" });
+    expect(next.approvals[1].summary_state).toBe("pending");
+    // The list's own word wins when it is past pending; an empty list clears the orb.
+    const failed = reduce(s, { type: "approvals_sync", approvals: [{ req_id: "r", command: "make", summary_state: "failed" } as any] });
+    expect(failed.approvals[0].summary_state).toBe("failed");
+    expect(reduce(s, { type: "approvals_sync", approvals: [] }).orb).toBe("idle");
+  });
+
   it("hands words back to one pane's box and takes them once", () => {
     let s = reduce(withChats({}), { type: "give_back", pane: 2, text: "again", files: [], nonce: 5 });
     expect(s.chats[2].restore.map((g) => g.text)).toEqual(["again"]);

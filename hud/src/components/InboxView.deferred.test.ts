@@ -10,6 +10,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { canMark, deferredOf, parseInbox, waitingCount } from "../lib/inbox";
 import type { InboxSnapshot } from "../state/inbox";
 import { InboxView, type InboxViewProps } from "./InboxView";
+import { ARM_MS } from "../lib/approvalSummary";
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
 const HOSTILE = '<img src=x onerror="window.__pwned=1">‮evil';
@@ -86,7 +87,14 @@ describe("deferred rows (QH)", () => {
 
   it("Approve and retry posts {action: retry} once per press and shows the daemon's note", async () => {
     let finish: (v: unknown) => void = () => {};
-    const p = draw([deferredRow()], { onAnswer: vi.fn(() => new Promise((ok) => { finish = ok; })) });
+    vi.useFakeTimers();
+    let p: InboxViewProps;
+    try {
+      p = draw([deferredRow()], { onAnswer: vi.fn(() => new Promise((ok) => { finish = ok; })) });
+      act(() => { vi.advanceTimersByTime(ARM_MS + 50); });
+    } finally {
+      vi.useRealTimers();
+    }
     const retry = rowOf("defer:D1").querySelector('[data-testid="inbox-deferred-retry"]') as HTMLButtonElement;
     act(() => { retry.click(); retry.click(); });
     expect(p.onAnswer).toHaveBeenCalledTimes(1);
@@ -168,6 +176,31 @@ describe("deferred rows (QH)", () => {
       act(() => b.click());
     }
     expect(p.onAnswer).not.toHaveBeenCalled();
+  });
+
+  it("Approve and retry arms ARM_MS after it appears and again when what it approves changes (review of #330, NIT 9)", () => {
+    vi.useFakeTimers();
+    try {
+      const p = draw([deferredRow()]);
+      const retry = () => rowOf("defer:D1").querySelector('[data-testid="inbox-deferred-retry"]') as HTMLButtonElement;
+      expect(retry().disabled).toBe(true);
+      expect(retry().dataset.armed).toBe("false");
+      retry().disabled = false;                     // a click that lands anyway posts nothing
+      act(() => retry().click());
+      expect(p.onAnswer).not.toHaveBeenCalled();
+      act(() => { vi.advanceTimersByTime(ARM_MS + 50); });
+      expect(retry().disabled).toBe(false);
+      // New content under the pointer (its summary landed): off again in the same render.
+      act(() => root!.render(createElement(InboxView, { ...p, snapshot: snap([deferredRow({}, { summary: "Deploys calc." })]) })));
+      expect(retry().disabled).toBe(true);
+      act(() => retry().click());
+      expect(p.onAnswer).not.toHaveBeenCalled();
+      act(() => { vi.advanceTimersByTime(ARM_MS + 50); });
+      act(() => retry().click());
+      expect(p.onAnswer).toHaveBeenCalledExactlyOnceWith("defer:D1", { action: "retry" });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("is counted with the other waiting rows; a day-old one is not", () => {

@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { PhoneApp, type StreamLike } from "./app";
 import type { Got, Posted } from "./net";
-import { clientIdFor, MAYBE_DONE, MAYBE_SENT, parseModels, refusal, sentNote, taskControlsView, verbsFor } from "./write";
+import { clientIdFor, COMPOSE_LINES, composerView, fitLines, MAYBE_DONE, MAYBE_SENT, parseModels, refusal, sentNote,
+  taskControlsView, verbsFor, type Composer } from "./write";
 import { parseInbox } from "../lib/inbox";
 import { inboxView, type InboxAnswers } from "./views";
 import type { TaskView } from "./model";
@@ -91,6 +92,111 @@ async function openChat(h: ReturnType<typeof harness>, id = CHAT) {
 }
 
 describe("the message box (P-5)", () => {
+  it("is one slim bar: a one-line box, the mic, and a round Send that is off while empty (owner, 2026-10-28)", () => {
+    const sent: string[] = [];
+    const mic = document.createElement("div");
+    mic.dataset.testid = "m-talk";
+    const draw = (over: Partial<Composer> = {}) => {
+      const view = composerView({ draft: "", busy: false, note: "", online: true, send: (t) => sent.push(t),
+        edit: () => {}, mic, ...over });
+      document.body.replaceChildren(view);
+      return { view, text: view.querySelector<HTMLTextAreaElement>('[data-testid="m-compose-text"]')!,
+        send: view.querySelector<HTMLButtonElement>('[data-testid="m-compose-send"]')! };
+    };
+    const empty = draw();
+    const bar = empty.view.querySelector(".m-bar")!;
+    // In the bar, in order: the box, the mic, Send. Its notes sit above it.
+    expect(Array.from(bar.children).map((c) => (c as HTMLElement).dataset.testid))
+      .toEqual(["m-compose-text", "m-talk", "m-compose-send"]);
+    expect(empty.text.rows).toBe(1);
+    expect(empty.send.disabled).toBe(true);
+    expect(empty.send.textContent).toBe("Send");
+    expect(empty.send.className).toContain("m-send-round");
+    // Spaces alone are not something to send.
+    empty.text.value = "   ";
+    empty.text.dispatchEvent(new Event("input"));
+    expect(empty.send.disabled).toBe(true);
+    empty.text.value = "hello";
+    empty.text.dispatchEvent(new Event("input"));
+    expect(empty.send.disabled).toBe(false);
+    empty.send.click();
+    expect(sent).toEqual(["hello"]);
+    // Offline or sending: off, and the box says why.
+    const offline = draw({ draft: "hello", online: false });
+    expect(offline.send.disabled).toBe(true);
+    expect(offline.view.querySelector('[data-testid="m-compose-offline"]')).not.toBeNull();
+    const busy = draw({ draft: "hello", busy: true });
+    expect([busy.send.disabled, busy.send.textContent, busy.text.readOnly, busy.text.getAttribute("aria-readonly")])
+      .toEqual([true, "Sending…", false, "true"]);
+    expect(busy.view.querySelector('[data-testid="m-compose-sending"]')!.textContent).toBe("Sending…");
+    const noted = draw({ note: "Sent." });
+    expect(noted.view.firstElementChild!.getAttribute("data-testid")).toBe("m-compose-note");
+  });
+
+  it("keeps the same box, and its focus, through a send (review of #331, LOW 6)", async () => {
+    const h = harness();
+    let release!: (p: Posted) => void;
+    h.replies[`/m/api/threads/${CHAT}/messages`] = () => new Promise<Posted>((r) => { release = r; }) as unknown as Posted;
+    await openChat(h);
+    const box = h.q("m-compose-text") as unknown as HTMLTextAreaElement;
+    const bar = h.q("m-compose")!;
+    box.focus();
+    h.type("m-compose-text", "add a test");
+    // A real tap: pointerdown, mousedown, then click. The first two leave the focus where it is.
+    const send = h.q("m-compose-send") as HTMLButtonElement;
+    const downs = ["pointerdown", "mousedown"].map((type) => {
+      const e = new MouseEvent(type, { bubbles: true, cancelable: true });
+      send.dispatchEvent(e);
+      return e.defaultPrevented;
+    });
+    expect(downs).toEqual([true, true]);
+    send.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    await h.settle();
+    // Sending: the same nodes, still focused; typing is refused without readOnly (it can drop the keyboard).
+    expect(h.q("m-compose")).toBe(bar);
+    expect(h.q("m-compose-text")).toBe(box);
+    expect([box.readOnly, box.getAttribute("aria-readonly"), document.activeElement === box]).toEqual([false, "true", true]);
+    const typing = new InputEvent("beforeinput", { inputType: "insertText", data: "x", bubbles: true, cancelable: true });
+    box.dispatchEvent(typing);
+    expect(typing.defaultPrevented).toBe(true);
+    expect(h.q("m-compose-sending")!.textContent).toBe("Sending…");
+    release({ status: 202, body: { status: "started" } });
+    await h.settle();
+    // Sent: emptied in place, focus kept (the keyboard stays up), the note above the bar.
+    expect(h.q("m-compose-text")).toBe(box);
+    expect(document.activeElement).toBe(box);
+    expect([box.value, box.getAttribute("aria-readonly")]).toEqual(["", null]);
+    const again = new InputEvent("beforeinput", { inputType: "insertText", data: "x", bubbles: true, cancelable: true });
+    box.dispatchEvent(again);
+    expect(again.defaultPrevented).toBe(false);
+    expect(h.q("m-compose-note")!.textContent).toBe("Sent.");
+    expect(h.q("m-compose-sending")).toBeNull();
+    expect((h.q("m-compose-send") as HTMLButtonElement).disabled).toBe(true);
+    // Its listeners read the new state: typing lights Send again, and only one post went.
+    h.type("m-compose-text", "next");
+    expect((h.q("m-compose-send") as HTMLButtonElement).disabled).toBe(false);
+    expect(h.posts.length).toBe(1);
+  });
+
+  it("grows from one line to five, then scrolls inside itself", () => {
+    const text = document.createElement("textarea");
+    document.body.replaceChildren(text);
+    // jsdom has no layout: 23 px lines, 10 px padding, 1 px borders.
+    Object.assign(text.style, { lineHeight: "23px", paddingTop: "10px", paddingBottom: "10px", borderTopWidth: "1px",
+      borderBottomWidth: "1px", borderStyle: "solid" });
+    let content = 23 + 20;
+    Object.defineProperty(text, "scrollHeight", { configurable: true, get: () => content });
+    fitLines(text);
+    expect(text.style.height).toBe("45px");
+    content = 3 * 23 + 20;
+    fitLines(text);
+    expect(text.style.height).toBe("91px");
+    content = 12 * 23 + 20;
+    fitLines(text);
+    expect(text.style.height).toBe(`${COMPOSE_LINES * 23 + 20 + 2}px`);
+    expect(COMPOSE_LINES).toBe(5);
+  });
+
   it("sends only on the Send tap, once, and shows the message only after its 2xx and a read of the log", async () => {
     const h = harness();
     let release!: (p: Posted) => void;

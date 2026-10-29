@@ -1,17 +1,35 @@
 /* P-7: push to talk in a chat's message box (talk.ts). Graphite tokens from
-   mobile.css; no image or font is loaded. The button is at least 44 px (56 px:
-   it is held, not tapped), cannot be selected or long-press-menued, and
-   takes no scroll gesture while held. Listening is glacier cyan, never the
-   amber or red that mean "pending" and "error". */
-.m-talk { display: flex; flex-direction: column; gap: 4px; }
+   mobile.css; no image or font is loaded, and the mic is drawn with borders
+   (no image, no svg). Since 2026-10-28 the button is a round mic icon beside
+   the message box: 44 px, the least tap target, held, not tapped; it cannot be
+   selected or long-press-menued, and takes no scroll gesture while held. Its
+   words stay its own text (visually hidden); the line above the bar says what
+   is happening. Listening is glacier cyan, never the amber or red that mean
+   "pending" and "error". */
+.m-talk { display: contents; }
 .tap.m-mic {
-  min-height: 56px;
-  text-align: center;
+  flex: none;
+  width: 44px;
+  height: 44px;
+  min-height: 44px;
+  padding: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  color: var(--text-2);
   touch-action: none;
   user-select: none;
   -webkit-user-select: none;
   -webkit-touch-callout: none;
 }
+/* The mic: a capsule, its cradle and its stem. */
+.m-mic-icon { position: relative; width: 10px; height: 15px; margin-bottom: 5px; border: 2px solid currentColor;
+  border-radius: 5px; pointer-events: none; }
+.m-mic-icon::after { content: ""; position: absolute; left: -6px; top: 3px; width: 18px; height: 11px;
+  border: 2px solid currentColor; border-top: 0; border-radius: 0 0 9px 9px; }
+.m-mic-icon::before { content: ""; position: absolute; left: 2px; top: 14px; width: 2px; height: 4px;
+  background: currentColor; }
 .tap.m-mic[data-phase="starting"],
 .tap.m-mic[data-phase="listening"] {
   color: var(--accent);
@@ -20,4 +38,6 @@
 }
 .tap.m-mic[data-phase="transcribing"] { color: var(--text-muted); }
 .tap.m-mic:disabled { opacity: 0.5; }
-.m-talk-line { margin: 0; font-size: 14px; }
+/* The line and Retry sit above the bar (they are the bar's own items: .m-talk has no box). */
+.m-talk-line { order: -2; flex-basis: 100%; margin: 0 4px; font-size: 13px; }
+.tap.m-mic-retry { order: -1; min-height: 44px; }

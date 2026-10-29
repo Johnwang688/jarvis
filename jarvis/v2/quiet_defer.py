@@ -67,6 +67,13 @@ lock, all or none; `GroupChanged` names what no longer fits and nothing is
 written), then one message per chat (`group_message`) and one resume per
 blocked task. `approve_and_retry` is unchanged.
 
+**The summary (AS, `approval_summary.py`).** After a deferral is recorded,
+`QuietDesk.deferred` starts the card's one-line model summary; when it
+arrives, `DeferredStore.set_summary` writes it into the record's optional
+`summary` field (a record from before AS has none and stays valid) and
+`inbox_changed` names the row. It is display text for the morning: never
+part of `card`, `request_digest`, `grant_refusal` or a grant.
+
 SELF_PROTECTED (`jarvis/tools/files.py`): it decides which asks are answered
 without the owner at the desk. Tests: tests/v2/quiet_defer_check.py.
 """
@@ -118,10 +125,15 @@ _DIGEST = re.compile(r"^[0-9a-f]{64}$")
 _KEY = re.compile(r"^[A-Za-z0-9_-]{1,200}$")
 # What of a card's public projection a record keeps: another surface's
 # handles (the Discord code and channel) and the wait are dropped.
-_CARD_DROPPED = ("code", "discord_channel_id", "timeout_s")
+# The card's summary and its state (AS) are not kept in it: they arrive
+# later, and a record's summary is its own field.
+_CARD_DROPPED = ("code", "discord_channel_id", "timeout_s", "summary", "summary_state")
 _FIELDS = frozenset({"id", "tool", "thread_id", "task_id", "provider", "origin", "hud_only", "card",
                      "digest", "grantable", "why_not", "count", "first_at", "at", "until", "state",
                      "grant_until", "settled_at"})
+# AS: optional, display only; a record written before AS has none.
+_OPTIONAL = frozenset({"summary"})
+SUMMARY_MAX = 200
 _MORE_FIELDS = frozenset({"thread_id", "task_id", "count", "first_at", "at"})
 # Why a record may not be granted, as codes the HUD and phone put in their own words.
 WHY_NOT = frozenset({"", "browser", "codex", "hatch", "owner-only", "no-chat", "relayed", "subagent",
@@ -363,7 +375,11 @@ def _opt_id(value) -> bool:
 
 
 def _valid_record(key, rec) -> bool:
-    if not isinstance(key, str) or not _ID.match(key) or not isinstance(rec, dict) or set(rec) != _FIELDS:
+    if (not isinstance(key, str) or not _ID.match(key) or not isinstance(rec, dict)
+            or not _FIELDS <= set(rec) <= _FIELDS | _OPTIONAL):
+        return False
+    if "summary" in rec and not (rec["summary"] is None or (isinstance(rec["summary"], str)
+                                                            and len(rec["summary"]) <= SUMMARY_MAX)):
         return False
     if rec["id"] != key or rec["state"] not in STATES or not isinstance(rec["hud_only"], bool):
         return False
@@ -726,6 +742,24 @@ class DeferredStore:
                     entry["at"] = now
             raise
 
+    def set_summary(self, record_id, text) -> bool:
+        """AS: the card's one-line summary on a record, display text only.
+        True when written; False for a record that is gone or already has
+        this text. Raises what the write raises."""
+        if not isinstance(record_id, str) or not _ID.match(record_id) or not isinstance(text, str):
+            return False
+        text = clean_line(text, SUMMARY_MAX)
+        if not text:
+            return False
+
+        def change(records, more, now):
+            rec = records.get(record_id)
+            if rec is None or rec.get("summary") == text:
+                return None
+            rec["summary"] = text
+            return True
+        return self._change(change) is True
+
     def _evict(self, records: dict, more: dict, keep) -> None:
         """Past `KEEP` records or `_WRITE_MAX` bytes: settled records first,
         oldest first; then the thread holding the most records gives up its
@@ -906,11 +940,13 @@ class QuietDesk:
     """What the broker asks at each ask (`settle`), and what it tells after a
     deferral or a grant. Attached by `Daemon.attach_quiet_desk` only."""
 
-    def __init__(self, quiet, present, store: DeferredStore, publish):
+    def __init__(self, quiet, present, store: DeferredStore, publish, *, summarize=None):
         self.quiet = quiet
         self.present = present
         self.store = store
         self.publish = publish
+        # AS: `Daemon.begin_approval_summary(request, done)`, or None.
+        self.summarize = summarize
         self._taken: dict[str, str] = {}
         self._taken_lock = threading.Lock()
 
@@ -966,6 +1002,27 @@ class QuietDesk:
                         type(exc).__name__)
             row_id = f"{PREFIX}:{MORE}{thread_key(_ident(request.thread_id))}"
         self._changed([row_id], "deferred")
+        self._summarize(request, row_id)
+
+    def _summarize(self, request, row_id: str) -> None:
+        """AS: the record's summary, written when it arrives. Never raises;
+        the deny already stands and nothing decides on it."""
+        record_id = row_id.split(":", 1)[1] if row_id.startswith(PREFIX + ":") else ""
+        if self.summarize is None or request.private or not record_id or record_id.startswith(MORE):
+            return
+
+        def done(state, text):
+            if state != "ready" or not text:
+                return
+            try:
+                if self.store.set_summary(record_id, text):
+                    self._changed([row_id], "deferral_summary")
+            except Exception as exc:  # noqa: BLE001
+                LOG.warning("Cannot record a deferral's summary (%s)", type(exc).__name__)
+        try:
+            self.summarize(request, done)
+        except Exception as exc:  # noqa: BLE001
+            LOG.warning("Cannot start a deferral's summary (%s)", type(exc).__name__)
 
     def granted(self, request) -> bool:
         """After the broker took a grant, before it allows the call: the use
@@ -1025,7 +1082,9 @@ def rows(daemon, row) -> list[dict]:
         detail = {"deferral_id": rec["id"], "tool": rec["tool"], "card": rec["card"],
                   "thread_id": thread_id, "task_id": task_id, "at": rec["at"], "until": rec["until"],
                   "grantable": rec["grantable"] and not expired, "why_not": rec["why_not"],
-                  "expired": expired, "hud_only": rec["hud_only"], "count": rec["count"], "more": 0}
+                  "expired": expired, "hud_only": rec["hud_only"], "count": rec["count"], "more": 0,
+                  # AS: display only.
+                  "summary": "" if rec["hud_only"] else (rec.get("summary") or "")}
         out.append(row(KIND, RANK_INFO if expired else RANK_WAITING, f"{PREFIX}:{rec['id']}", title, blocks,
                        thread_id=thread_id, task_id=task_id, asked_at=_iso(min(at, now)),
                        origin=rec["origin"], detail=detail))
@@ -1038,7 +1097,7 @@ def rows(daemon, row) -> list[dict]:
         who = "other chats" if key == ALL else _who(thread_id, task_id)
         detail = {"deferral_id": None, "tool": "", "card": {}, "thread_id": thread_id, "task_id": task_id,
                   "at": entry["at"], "until": None, "grantable": False, "why_not": "", "expired": expired,
-                  "hud_only": False, "count": entry["count"], "more": entry["count"]}
+                  "hud_only": False, "count": entry["count"], "more": entry["count"], "summary": ""}
         out.append(row(KIND, RANK_INFO if expired else RANK_WAITING, f"{PREFIX}:{MORE}{key}",
                        f"And {entry['count']} more asks from {who} were deferred overnight",
                        "denied, and too many to list one by one; ask again from its chat",
@@ -1272,7 +1331,8 @@ def _deliver(daemon, thread_id, text: str, via: str) -> str:
     message = UserMessage(text, origin="owner", via="phone" if via == "phone" else "inbox",
                           desk=False, typed=text)
     try:
-        out = daemon.deliver_queued(thread_id, message)
+        # Code's words, never the owner's typing (review of PR #331): marked in the record.
+        out = daemon.deliver_queued(thread_id, message, written_by="deferral")
     except (DaemonError, APIError) as exc:
         LOG.info("A deferral's news was not delivered (%s)", type(exc).__name__)
         return "closed" if closed() else "failed"

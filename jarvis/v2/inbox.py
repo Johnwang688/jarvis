@@ -195,6 +195,8 @@ _ID_MAX = 200
 # restore or delete (which hide or reveal its task rows).
 SOURCE_KINDS = frozenset({
     "approval_requested", "approval_resolved", "task_question", "question_answered",
+    # AS: a card's summary arrived; its row (and the phone's card) reads again.
+    "approval_summary",
     "task_status_changed", "proposal_reply",
     "project_archived", "project_restored", "project_deleted",
     "question", "turn_finished", "thread_closed", "thread_archived",
@@ -977,7 +979,7 @@ class Inbox:
     def _ids(self, kind, record):
         data = record.get("data") if isinstance(record.get("data"), dict) else {}
         thread_id = record.get("thread_id")
-        if kind in ("approval_requested", "approval_resolved"):
+        if kind in ("approval_requested", "approval_resolved", "approval_summary"):
             req_id = data.get("req_id")
             if not isinstance(req_id, str) or not req_id:
                 return []

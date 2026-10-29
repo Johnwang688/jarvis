@@ -2011,3 +2011,19 @@ notifications" (the subscribe call is the tap's first await, so iOS sees
 the gesture), "Turn off notifications", or, on an iPhone outside the
 Home Screen app, how to add it there; a blocked permission says where to
 allow it.
+
+## Approval cards: buttons first (AS, 2026-10-28)
+
+The owner's request **supersedes** the rule above that the approval button
+row is deliberately not sticky and that reaching AUTHORIZE means scrolling
+past the whole command. The button row now comes right under the title (and
+a headline, when there is one) and is sticky at the top of the scrolling
+card. What stands in for the old rule: an AI summary (a model's one line,
+marked "AI SUMMARY", display only) and code's WHY ASKED and WHERE lines; the
+command collapsed to its first line with "show full command · N lines · M
+chars", expanded whenever there is no summary; AUTHORIZE and ALWAYS armed
+600 ms after the card appears and after its summary changes; the veil
+anchoring the card at the top, so neither the summary landing nor the
+command opening moves a button. `hud_v2_layout_check` now asserts AUTHORIZE
+is in reach before any scrolling. Details: `docs/notes/control-plane.md`,
+"Approval summaries (AS)", and `docs/plans/2026-10-28-approval-summaries.md`.

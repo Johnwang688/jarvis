@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { PhoneApp, type StreamLike } from "./app";
 import type { Got, Posted } from "./net";
-import { MAX_SAMPLES, RATE, STT_URL, Talk, WORDS, networkFailure, uploadNote, type AudioContextLike, type TalkEnv, type Uploaded } from "./talk";
+import { HOLD_MS, MAX_SAMPLES, RATE, STT_URL, Talk, WORDS, networkFailure, uploadNote, type AudioContextLike, type TalkEnv, type Uploaded } from "./talk";
 import { cardView, parseDetail } from "./card";
 import talkSource from "./talk.ts?raw";
 import { readFileSync } from "node:fs";
@@ -148,9 +148,18 @@ function harness(rows: unknown[] = []) {
     const e = new MouseEvent(type, { bubbles: true, cancelable: true, clientX: x, clientY: y });
     target.dispatchEvent(e);
   };
-  const down = async () => { rect(button()); pointer("pointerdown", button()); await settle(); };
+  // A press, held past HOLD_MS (its timer fired by hand).
+  const touch = async () => { rect(button()); pointer("pointerdown", button()); await settle(); };
+  const holdTimer = () => mic.timers.filter((t) => t.ms === HOLD_MS && !t.cleared).at(-1);
+  const down = async () => {
+    await touch();
+    const t = holdTimer();
+    if (t) { t.cleared = true; t.fn(); }
+    await settle();
+  };
   const up = async () => { pointer("pointerup", window); await settle(); };
-  return { app, root, posts, replies, asked, gets, mic, signedOut, settle, q, button, box, line, pointer, down, up, ok };
+  return { app, root, posts, replies, asked, gets, mic, signedOut, settle, q, button, box, line, pointer, down, up, ok,
+    touch, holdTimer };
 }
 
 async function openChat(h: ReturnType<typeof harness>, id = CHAT) {
@@ -179,6 +188,88 @@ function wavInfo(bytes: ArrayBuffer) {
 }
 
 describe("push to talk (P-7)", () => {
+  it("a brush shorter than HOLD_MS asks for nothing, shows nothing and uploads nothing (review of #331, LOW 5)", async () => {
+    const h = harness();
+    await openChat(h);
+    expect(HOLD_MS).toBe(150);
+    for (const how of ["lift", "slide", "cancel"] as const) {
+      const before = h.mic.contexts.length;
+      await h.touch();
+      const t = h.holdTimer()!;
+      expect(t.ms).toBe(HOLD_MS);
+      // The pointerdown made and resumed the context, synchronously, in the gesture (review of #331, LOW b).
+      expect(h.mic.contexts.length).toBe(before + 1);
+      expect(h.mic.ctx().resumed).toBe(1);
+      // Nothing yet: no prompt, no recording look.
+      expect(h.mic.getUserMedia).not.toHaveBeenCalled();
+      expect(h.button().dataset.phase).toBe("idle");
+      if (how === "lift") h.pointer("pointerup", window);
+      else if (how === "slide") h.pointer("pointermove", window, 150, 900);
+      else h.pointer("pointercancel", window);
+      await h.settle();
+      expect(t.cleared).toBe(true);
+      // A late timer (cleared, yet run) still does nothing.
+      t.fn();
+      await h.settle();
+      expect(h.mic.getUserMedia).not.toHaveBeenCalled();
+      // Its audio context was started in the gesture and is closed again: nothing recorded.
+      expect([h.mic.ctx().resumed, h.mic.ctx().closed, h.mic.ctx().processor]).toEqual([1, 1, null]);
+      expect(h.mic.uploads.length).toBe(0);
+      expect(h.button().dataset.phase).toBe("idle");
+      expect(h.line().textContent).toBe("");
+    }
+    // Held past it: the mic is asked for, as before, on the context the gesture started.
+    await h.down();
+    expect(h.mic.getUserMedia).toHaveBeenCalledTimes(1);
+    expect(h.button().dataset.phase).toBe("listening");
+    expect([h.mic.contexts.length, h.mic.ctx().resumed, h.mic.ctx().closed]).toEqual([4, 1, 0]);
+    // Space on the focused button still starts at once, its context made in the keydown.
+    await h.up();
+    h.mic.reply({ status: 200, body: { text: "" } });
+    await h.settle();
+    h.button().dispatchEvent(new KeyboardEvent("keydown", { key: " ", bubbles: true }));
+    await h.settle();
+    expect(h.mic.getUserMedia).toHaveBeenCalledTimes(2);
+    expect(h.mic.ctx().resumed).toBe(1);
+  });
+
+  it("is a mic icon in the message bar; holding it still drives the recording (owner, 2026-10-28)", async () => {
+    const h = harness();
+    await openChat(h);
+    const b = h.button();
+    // In the bar beside the box, before Send; the line sits in the same bar, drawn above it (talk.css order).
+    const bar = h.q("m-compose")!.querySelector(".m-bar")!;
+    expect(bar.contains(b)).toBe(true);
+    expect(bar.contains(h.line())).toBe(true);
+    expect(b.compareDocumentPosition(h.q("m-compose-send")!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(h.box().compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    // An icon and its words: the words stay the button's text and name.
+    expect(b.querySelector(".m-mic-icon")!.getAttribute("aria-hidden")).toBe("true");
+    expect(b.querySelector(".m-sr")!.textContent).toBe(WORDS.idle);
+    expect(b.textContent).toBe(WORDS.idle);
+    expect(b.getAttribute("aria-label")).toBe("Hold to talk: the words go in the box, unsent");
+    // The same hold: press opens the mic in the gesture; sliding off cancels and uploads nothing.
+    await h.down();
+    expect(h.mic.getUserMedia).toHaveBeenCalledTimes(1);
+    expect(b.dataset.phase).toBe("listening");
+    expect(b.textContent).toBe(WORDS.listening);
+    h.mic.ctx().feed(1.0);
+    h.pointer("pointermove", window, 150, 900);
+    await h.settle();
+    expect(b.dataset.phase).toBe("idle");
+    expect(h.line().textContent).toBe(WORDS.cancelled);
+    expect(h.mic.uploads.length).toBe(0);
+    expect(h.mic.streams[0].tracks.every((t) => t.stopped === 1)).toBe(true);
+    // And a full hold still lands its words in the box, unsent.
+    await h.down();
+    h.mic.ctx().feed(1.0);
+    h.mic.reply(() => Promise.resolve({ status: 200, body: { text: "hello" } }));
+    await h.up();
+    await h.settle();
+    expect(h.box().value).toBe("hello");
+    expect(h.posts).toEqual([]);
+  });
+
   it("asks for the microphone only on the press; the words land in the box, unsent", async () => {
     const h = harness();
     await openChat(h);

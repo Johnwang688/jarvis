@@ -742,9 +742,13 @@ label.iconbtn.attach:hover { background: var(--bg-3); border-color: var(--border
    bar and border, a faint amber glow. DENY is red and cheap, ALWAYS amber,
    and AUTHORIZE deliberately neutral — the styling invites neither, and
    nothing is keyboard-defaulted. */
+/* Anchored at the top (AS-14): a card that grows (its summary lands, its
+   command opens) grows downward, so its buttons never move under the pointer.
+   The gap is divided by the zoom, as every vh here is. */
 #authveil {
   position: fixed; inset: 0; background: var(--veil);
-  z-index: 100; display: flex; align-items: center; justify-content: center;
+  z-index: 100; display: flex; align-items: flex-start; justify-content: center;
+  padding-top: calc(6vh / var(--ui-zoom, 1));
 }
 .auth {
   background: var(--bg-2);
@@ -775,10 +779,14 @@ label.iconbtn.attach:hover { background: var(--bg-3); border-color: var(--border
 .auth .arg { font: 11px var(--mono); color: var(--text); margin-bottom: 4px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .auth .arg .k { color: var(--text-muted); }
 .auth .reason { font: 11px var(--mono); color: var(--text-2); margin: 8px 0; }
-/* Not sticky, deliberately: reaching AUTHORIZE means scrolling past the whole
-   command, so the tail of a long one (a `curl … | sh` on line 45) cannot
-   stay out of sight while the button is in reach. */
-.auth .btns { display: flex; gap: 10px; margin-top: 14px; }
+/* First on the card and sticky (AS-12, the owner's request of 2026-10-28):
+   it supersedes the old "not sticky, scroll past the whole command" rule.
+   The command is one press away instead, its first line always shown, and
+   AUTHORIZE and ALWAYS arm only after the card settles (AS-13). */
+.auth .btns {
+  display: flex; gap: 10px; position: sticky; top: 0; z-index: 2;
+  background: var(--bg-2); padding: 4px 0 12px; margin: 0 0 4px;
+}
 .auth .btns button { background: var(--bg-3); border-color: var(--border-strong); color: var(--text); font-family: var(--mono); letter-spacing: 0.06em; }
 .auth .btns button:hover:not(:disabled) { background: #353532; }
 .auth .btns button.deny { background: var(--bg-2); border-color: var(--red-line); color: var(--red); }
@@ -786,6 +794,33 @@ label.iconbtn.attach:hover { background: var(--bg-3); border-color: var(--border
 .auth .btns button.always { background: var(--bg-2); border-color: var(--amber-line); color: var(--amber); }
 .auth .btns button.always:hover:not(:disabled) { background: var(--amber-soft); }
 .auth .foot { font: 10px var(--mono); color: var(--text-muted); margin-top: 10px; letter-spacing: 0.06em; }
+/* AS: the model's line, set apart from code's (a dashed glacier rule, an
+   "AI SUMMARY" tag, never amber or red: it is no state), its two lines of
+   space held from the first frame. */
+.as-ai {
+  font-size: 12px; line-height: 16px; color: var(--text); margin: 2px 0 10px; padding: 6px 10px;
+  border-left: 2px dashed var(--accent); background: var(--bg-3); min-height: 32px;
+  overflow-wrap: anywhere; box-sizing: content-box;
+}
+.as-ai .as-tag {
+  font: 600 9px var(--mono); letter-spacing: 0.12em; color: var(--accent); margin-right: 8px;
+  border: 1px solid var(--accent); padding: 0 4px; vertical-align: 1px;
+}
+.as-ai.as-pending .as-text, .as-ai.as-none .as-text { color: var(--text-muted); font-style: italic; }
+.as-line { font: 11px var(--mono); color: var(--text-2); margin: 0 0 6px; overflow-wrap: anywhere; }
+.auth .reason.as-line { margin: 0 0 6px; }
+.as-line .k { color: var(--text-muted); letter-spacing: 0.06em; }
+/* WHERE's fields (review of #330, MED 1): each its own boxed field, its
+   label muted inside the box, so a value can never pass for another field. */
+.as-where .as-wpart {
+  display: inline-block; border: 1px solid var(--border-strong); border-radius: 3px; padding: 0 5px;
+  margin: 0 2px 2px 0; max-width: 100%; box-sizing: border-box; overflow-wrap: anywhere; vertical-align: top;
+}
+.as-where .as-wk { color: var(--text-muted); font-size: 10px; letter-spacing: 0.04em; }
+.as-where .as-wv { color: var(--text); }
+.as-cmd { margin: 6px 0 4px; }
+.as-cmd .as-preview { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.as-toggle { font: 10px var(--mono); letter-spacing: 0.06em; margin-top: 4px; padding: 2px 8px; }
 
 .queue-row { font: 11px var(--mono); padding: 4px 0; cursor: pointer; color: var(--amber); }
 .queue-row:hover { color: var(--text); }

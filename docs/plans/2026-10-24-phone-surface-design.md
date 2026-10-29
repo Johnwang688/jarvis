@@ -871,3 +871,59 @@ approval: per row only), checks the set again under the store's lock, and
 grants all or none; a 409 `changed` unticks what changed and says why.
 Leave selected needs the session only. Every tap target is at least 44 px.
 
+
+### 10.11 The chat layout and the compact notifications row (2026-10-28)
+
+The owner, on the iPhone, asked for the standard mobile agent chat and chose
+Claude/Codex style. UI, plus one small daemon change (below): no route or
+rule changed.
+
+- **The transcript** (`views.ts` `logRow`, `rowStyle`): no boxes. The owner's
+  words typed in this chat (role `owner`, every mark one of via the phone,
+  via Discord, via DM, spoken) in a right-aligned bubble with its marks and
+  time under it; any other owner row (a decision's answer "not typed in
+  this chat", a steer, one "not sent", an unknown mark) flat, its marks
+  above the words, "not sent" in amber; a peer or a relay is never a
+  bubble (review of #331, MED 1). Only in an owner's own chat: a task's
+  threads (the runner's prompts are "owner" rows) and a thread not yet
+  known draw every owner row flat. **The daemon change:** quiet hours'
+  "The owner approved … retry it now" was delivered as origin "owner" via
+  "phone" with nothing else to tell it from the owner's typing;
+  `Daemon.deliver_queued` now takes `written_by` (as `decision_id`),
+  `quiet_defer` passes "deferral", and `chat_reads` marks it "written by
+  Jarvis (a deferred approval), not typed", `titles.owner_typed` is false
+  for it and the Discord mirror says "Jarvis wrote" (delta review of #331).
+  A reply (Jarvis, Claude, Codex)
+  as plain full-width text through the same sanitized Markdown; every other
+  row (the daemon's own lines, another chat's relay) one muted line, folded,
+  that a tap opens to its whole role and then its whole text; the folded
+  line cuts the middle of the role, never ", not the owner" (MED 2). Tool calls are still not in the
+  projection (§5); nothing new is shown.
+- **The message box** (`write.ts` `composerView`): one slim bar pinned above
+  the tab bar: the box (one line, growing to five, then scrolling), the mic
+  and a round Send arrow, lit only when there is text. Its notes ("Sent.",
+  "Queued…", "Sending…", offline, the talk line) sit above it. Send's rules
+  are P-5's unchanged: a tap only, never Enter; off while empty, offline or
+  sending; NEVER_STEER at the daemon.
+- **The mic** (`talk.ts`): P-7's "Hold to talk" button, now a 44 px round
+  icon in the bar (it was a 56 px full-width button). Its words stay its
+  text for screen readers. A touch counts as a hold only after 150 ms within
+  the slop, so a brush while scrolling does nothing at all (LOW 5); the
+  audio context alone starts in the pointerdown, inside the gesture, and is
+  closed if the touch never becomes a hold; every
+  other hold, slide-off, cancel, permission and upload rule is unchanged.
+  Send redraws the box in place, its tap does not take the focus, and
+  while sending the box refuses input by a beforeinput guard rather than
+  readOnly, so the keyboard stays up (LOW 6).
+- **Scrolling and the keyboard:** a new message, or a redraw, keeps the
+  newest message in view only when the owner was already at the bottom.
+  The app is sized to the visual viewport (`viewport.ts`), and while the
+  keyboard is up the tab bar steps aside, so the keyboard never covers the
+  bar; the tab bar keeps the bottom safe area. A pinch-zoom is never read as
+  the keyboard, and a resize or rotation reads it all again (LOW 3-4).
+- **Notifications** (`notify.ts`): one compact row, about 46 px instead of
+  136: "Notifications on · count only, never what" with a small "Turn off"
+  at its right ("Notifications off" and "Turn on" likewise; the hint is the
+  "on" state's only). The states and
+  what each does are unchanged; the long sentences (install, blocked,
+  unsupported, unavailable) keep their words in the same small type.

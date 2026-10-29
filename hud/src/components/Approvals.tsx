@@ -6,9 +6,16 @@
 //     nothing at all on this card;
 //   - every string on it is text, never markup: the args are model-written and
 //     this is the window that gates approvals;
-//   - the **whole command** is shown, never a summary (§6.1) — approving a
-//     command is not consent to what it does, so the owner has to be able to
-//     read what it does;
+//   - the buttons come first (AS-12, the owner's request of 2026-10-28),
+//     sticky at the top of the card; AUTHORIZE and ALWAYS are armed only
+//     ARM_MS after the card appears or its summary changes (AS-13), DENY
+//     always;
+//   - an **AI summary** (a model's one line, marked as such, AS) and two
+//     code lines, WHY ASKED and WHERE, come under the buttons; the whole
+//     command and every argument stay **one press away** (collapsed while a
+//     summary is pending or there, expanded when there is none) —
+//     approving a command is not consent to what it does, so the owner must
+//     always be able to read what it does;
 //   - PTT and the wake word are inert while a card is up (enforced by the
 //     caller, which checks `approvals.length`);
 //   - a chime, best-effort: a browser may block audio before the owner has
@@ -18,6 +25,11 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ApprovalRequest } from "../types";
 import { headlineLine } from "../lib/approval";
 import { argText, countdownText, nestedTooDeep, originText, reasonText, TOO_DEEP_WARNING } from "../lib/approvalCard";
+import {
+  AI_LABEL, WHERE_LABEL, WHY_LABEL, previewLine, staleAt, startsCollapsed, summaryView, summaryWords, toggleLabel,
+  whereFields, whereParts, type SummaryView, type WhereParts,
+} from "../lib/approvalSummary";
+import { useArmed, useWakeAt } from "../lib/armed";
 import { noPointerFocus } from "../lib/talkkey";
 import { allowRestore } from "../state/frameguard";
 import { BrowserApprovalCard } from "./BrowserApproval";
@@ -81,6 +93,99 @@ function SubagentLink({ threadId, sid, onOpen }: {
   );
 }
 
+/** The AI summary's slot (AS): its space reserved from the first frame, so nothing moves when it lands. */
+export function SummarySlot({ view }: { view: SummaryView }) {
+  if (!view.slot) return null;
+  return (
+    <div className={"as-ai as-" + view.state} data-testid="approval-summary" data-state={view.state}>
+      <span className="as-tag">{AI_LABEL}</span>
+      <span className="as-text" data-testid="approval-summary-text">{summaryWords(view)}</span>
+    </div>
+  );
+}
+
+/**
+ * WHERE (AS-8): code's fields, never a model's, each in its own labelled box
+ * (`project`, `branch`, `folder`), so no field's text can read as another's
+ * (review of PR #330, MED 1). Each value is isolated (`bdi`).
+ */
+export function WhereLine({ where, testid }: { where: WhereParts | null; testid: string }) {
+  const fields = whereFields(where);
+  if (!fields.length) return null;
+  return (
+    <div className="as-line as-where" data-testid={testid}>
+      <span className="k">{WHERE_LABEL}</span>
+      {fields.map(([key, label, value]) => (
+        <span key={key}>
+          {" "}
+          <span className="as-wpart" data-testid={`${testid}-${key}`} data-field={key}>
+            <span className="as-wk">{label}</span> <bdi className="as-wv">{value}</bdi>
+          </span>
+        </span>
+      ))}
+    </div>
+  );
+}
+
+/** WHY ASKED and WHERE (AS-9, AS-8): code's lines, never a model's. */
+export function CodeLines({ why, where }: { why: string; where: WhereParts | null }) {
+  return (
+    <>
+      {why ? (
+        <div className="reason as-line" data-testid="approval-why"><span className="k">{WHY_LABEL} </span>{why}</div>
+      ) : null}
+      <WhereLine where={where} testid="approval-where" />
+    </>
+  );
+}
+
+/**
+ * The command and every argument: whole, or collapsed to its first line with
+ * a control that opens it (AS-15). The control never takes focus (DENY stays
+ * the card's only Tab stop) and decides nothing.
+ */
+export function CommandBlock({ command, args, expanded, onToggle, testid = "approval" }: {
+  command: string | null | undefined; args: Record<string, unknown> | null | undefined;
+  expanded: boolean; onToggle: () => void; testid?: string;
+}) {
+  const entries = Object.entries(args || {});
+  const cmd = typeof command === "string" ? command : "";
+  if (!cmd && !entries.length) return null;
+  const preview = cmd ? previewLine(cmd) : entries.length ? `${entries[0][0]} ${previewLine(argText(entries[0][1]))}` : "";
+  return (
+    <div className="as-cmd" data-testid={`${testid}-command-block`} data-expanded={expanded ? "true" : "false"}>
+      {expanded ? (
+        <>
+          {cmd ? (
+            <div className="arg" data-testid={`${testid}-command`}>
+              <span className="k">command </span>
+              {cmd}
+            </div>
+          ) : null}
+          {entries.map(([k, v]) => (
+            <div className="arg" key={k}>
+              <span className="k">{k} </span>
+              {argText(v)}
+            </div>
+          ))}
+        </>
+      ) : (
+        <div className="arg as-preview" data-testid={`${testid}-command-preview`}>
+          <span className="k">{cmd ? "command " : ""}</span>
+          {preview}
+        </div>
+      )}
+      <button type="button" className="quiet as-toggle" data-testid={`${testid}-command-toggle`} tabIndex={-1}
+              onMouseDown={noPointerFocus} aria-expanded={expanded} onClick={onToggle}>
+        {toggleLabel(expanded, cmd, entries.length)}
+      </button>
+    </div>
+  );
+}
+
+/** AS-13 (lib/armed.ts): false for ARM_MS after mount and after `key` changes, in the same render. */
+export { useArmed };
+
 function OrdinaryApprovalCard(props: {
   request: ApprovalRequest;
   onDecide: (reqId: string, allow: boolean, always?: boolean) => void;
@@ -90,6 +195,14 @@ function OrdinaryApprovalCard(props: {
   const [left, setLeft] = useState(r.timeout_s || 120);
   const [busy, setBusy] = useState(false);
   const chimed = useRef(false);
+  // A pending summary goes stale STALE_PENDING_MS after the ask (LOW 3);
+  // the countdown below re-renders every second, and this wakes it on time.
+  useWakeAt(staleAt(r));
+  const view = summaryView(r);
+  // The owner's own toggle wins; until then, collapsed only with a summary pending or there.
+  const [toggled, setToggled] = useState<boolean | null>(null);
+  const expanded = toggled ?? !startsCollapsed(view);
+  const armed = useArmed(`${view.state}:${view.text}`);
 
   useEffect(() => {
     if (!chimed.current) {
@@ -101,14 +214,13 @@ function OrdinaryApprovalCard(props: {
   }, []);
 
   const decide = (allow: boolean, always = false) => {
+    if (allow && !armed) return;
     setBusy(true);
     props.onDecide(r.req_id, allow, always);
   };
 
   const shown = countdownText(left);
   const also = r.remote ? " · ALSO ASKED ON DISCORD" : "";
-  // `args` is a dict of model-written strings; each is rendered as text.
-  const args = Object.entries(r.args || {});
   // Chat-to-chat C6: which chat's message started the asking call's turn.
   const relay = relayedParts(r.relayed_from);
   // An argument cut at the redaction's depth was never judged or shown:
@@ -124,6 +236,42 @@ function OrdinaryApprovalCard(props: {
       {headlineLine(r.headline) ? (
         <div className="headline" data-testid="approval-headline">{headlineLine(r.headline)}</div>
       ) : null}
+      <div className="btns" data-testid="approval-buttons">
+        {/* type="button" on every one: nothing on this card is a form default,
+            so Enter submits nothing. First on the card and sticky (AS-12). */}
+        <button type="button" className="deny" disabled={busy} onClick={() => decide(false)} data-testid="approval-deny">
+          DENY
+        </button>
+        {/* AUTHORIZE and ALWAYS are out of the Tab order (tabIndex -1): they
+            take a deliberate click, so no Tab or Shift+Tab ever puts one under
+            an Enter (re-review of PR #27). DENY, the cheap action, is the only
+            stop for Tab. Nor does a pointer ever focus them (`noPointerFocus`): a
+            press that slid off before its release used to leave focus on the
+            button, and the next Space or Enter authorized (review of PR #40 —
+            Space was push-to-talk until then, the key the owner's thumb is
+            trained to hold). The click itself still works, once armed (AS-13). */}
+        {r.allowlistable === false ? null : (
+          <button
+            type="button"
+            className="always"
+            disabled={busy || tooDeep || !armed}
+            tabIndex={-1}
+            onMouseDown={noPointerFocus}
+            data-testid="approval-always"
+            title="authorize AND allowlist this, so it stops asking (persists across restarts)"
+            onClick={() => decide(true, true)}
+          >
+            ALWAYS
+          </button>
+        )}
+        <button type="button" disabled={busy || tooDeep || !armed} tabIndex={-1} onMouseDown={noPointerFocus}
+                onClick={() => decide(true)} data-testid="approval-allow">
+          AUTHORIZE
+        </button>
+      </div>
+      {/* AS: the model's line, marked as the model's; then code's two lines. */}
+      <SummarySlot view={view} />
+      <CodeLines why={reasonText(r.reason, r.layer)} where={whereParts(r.where)} />
       {/* The card's words are lib/approvalCard.ts's, shared with the phone's
           answering card (mobile/card.ts, P-4). */}
       {originText(r.origin) ? (
@@ -142,54 +290,9 @@ function OrdinaryApprovalCard(props: {
                       onOpen={(ref) => props.onSubagent?.(ref, r.req_id)} />
       ) : null}
       <div className="tool" data-testid="approval-tool">{r.tool}</div>
-      {/* The entire command, never a summary. */}
-      {r.command ? (
-        <div className="arg" data-testid="approval-command">
-          <span className="k">command </span>
-          {r.command}
-        </div>
-      ) : null}
-      {args.map(([k, v]) => (
-        <div className="arg" key={k}>
-          <span className="k">{k} </span>
-          {argText(v)}
-        </div>
-      ))}
+      {/* The entire command and every argument, one press away (AS-15). */}
+      <CommandBlock command={r.command} args={r.args} expanded={expanded} onToggle={() => setToggled(!expanded)} />
       {tooDeep ? <div className="reason" role="alert" data-testid="approval-too-deep">{TOO_DEEP_WARNING}</div> : null}
-      {reasonText(r.reason, r.layer) ? <div className="reason">{reasonText(r.reason, r.layer)}</div> : null}
-      <div className="btns">
-        {/* type="button" on every one: nothing on this card is a form default,
-            so Enter submits nothing. */}
-        <button type="button" className="deny" disabled={busy} onClick={() => decide(false)} data-testid="approval-deny">
-          DENY
-        </button>
-        {/* AUTHORIZE and ALWAYS are out of the Tab order (tabIndex -1): they
-            take a deliberate click, so no Tab or Shift+Tab ever puts one under
-            an Enter (re-review of PR #27). DENY, the cheap action, is the only
-            stop for Tab. Nor does a pointer ever focus them (`noPointerFocus`): a
-            press that slid off before its release used to leave focus on the
-            button, and the next Space or Enter authorized (review of PR #40 —
-            Space was push-to-talk until then, the key the owner's thumb is
-            trained to hold). The click itself still works. */}
-        {r.allowlistable === false ? null : (
-          <button
-            type="button"
-            className="always"
-            disabled={busy || tooDeep}
-            tabIndex={-1}
-            onMouseDown={noPointerFocus}
-            data-testid="approval-always"
-            title="authorize AND allowlist this, so it stops asking (persists across restarts)"
-            onClick={() => decide(true, true)}
-          >
-            ALWAYS
-          </button>
-        )}
-        <button type="button" disabled={busy || tooDeep} tabIndex={-1} onMouseDown={noPointerFocus} onClick={() => decide(true)}
-                data-testid="approval-allow">
-          AUTHORIZE
-        </button>
-      </div>
       <div className="foot">
         DENIES AUTOMATICALLY IN {shown} · ESC TO DENY{also}
       </div>
@@ -333,7 +436,8 @@ export function ApprovalQueue(props: {
       <h3>Approvals queue ({props.requests.length})</h3>
       {props.requests.map((r) => (
         <div className="queue-row" key={r.req_id}>
-          {r.hud_only ? `Browser action · ${r.code}` : <>{r.origin ? `${r.origin} · ` : ""}{r.tool}{r.command ? ` · ${r.command}` : ""}</>}
+          {r.hud_only ? `Browser action · ${r.code}` : <>{r.origin ? `${r.origin} · ` : ""}{r.tool}{
+            summaryView(r).state === "ready" ? ` · AI: ${summaryView(r).text}` : r.command ? ` · ${r.command}` : ""}</>}
         </div>
       ))}
     </div>

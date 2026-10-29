@@ -1538,7 +1538,7 @@ def _rr_two_cards_checks(page, mock, check, until):
     second = until(lambda: (lambda r: r if r and r != first else None)(
         page.locator('[data-testid="approval-card"]').get_attribute("data-req")), timeout=4)
     check("setup: the second card comes up when the first is denied", bool(second), str(second))
-    time.sleep(0.3)
+    time.sleep(0.9)     # past AS-13's arming (ARM_MS): a stale busy state would still show here
     dis = page.evaluate("""() => Array.from(document.querySelectorAll('[data-testid="approval-card"] button'))
                              .map(b => b.disabled)""")
     check("review 2: after the first card is denied by a click, the second card's buttons are live",

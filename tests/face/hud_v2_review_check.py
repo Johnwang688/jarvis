@@ -250,6 +250,61 @@ def review_checks(browser, mock, base, check, until, guard, init_script):
         page.keyboard.press("Escape")
         until(lambda: cardloc.count() == 0, timeout=4)
         check("the title is still J.A.R.V.I.S.", page.title() == TITLE, page.title())
+        # AS: each item's control first, its AI summary as text, code's WHY ASKED and
+        # WHERE, its command collapsed and one click away; the dialog shows the
+        # summary; what Approve posts is still exactly ids and tags (MR-6).
+        summed = report()
+        rec = summed["overnight"][1]["row"]["detail"]
+        rec["summary"] = HOSTILE + " builds b and deploys it"
+        rec["card"].update({"where": {"project": "Calc", "branch": "main", "folder": "~/projects/calc"},
+                            "reason": "deploys", "layer": "human"})
+        s["review"] = summed
+        mock_inbox.changed(mock, ["defer:b"], "deferral_summary")
+        itemb = page.locator('[data-testid="review-item"][data-id="defer:b"]')
+        until(lambda: itemb.locator('[data-testid="review-summary"]').count() == 1, timeout=4)
+        first = itemb.evaluate("""e => { const t = e.querySelector('[data-testid="review-tick"]');
+            const s = e.querySelector('[data-testid="review-summary"]');
+            return !!(t && s && (t.compareDocumentPosition(s) & Node.DOCUMENT_POSITION_FOLLOWING)); }""")
+        check("AS: an item's Select comes before its summary", first)
+        check("AS: the summary is marked and text",
+              itemb.locator('[data-testid="review-summary"]').inner_text().startswith("AI SUMMARY")
+              and HOSTILE in itemb.locator('[data-testid="review-summary"]').inner_text()
+              and page.evaluate("window.__pwned === undefined"))
+        check("AS: WHY ASKED and WHERE are code's lines",
+              itemb.locator('[data-testid="review-reason"]').inner_text() == "WHY ASKED [human] deploys"
+              and itemb.locator('[data-testid="review-where-project"]').inner_text() == "project Calc"
+              and itemb.locator('[data-testid="review-where-branch"]').inner_text() == "branch main"
+              and itemb.locator('[data-testid="review-where-folder"]').inner_text() == "folder ~/projects/calc")
+        check("AS: with a summary the command is collapsed to its first line",
+              itemb.locator('[data-testid="review-command"]').count() == 0
+              and itemb.locator('[data-testid="review-command-preview"]').inner_text().strip() == "make b")
+        itemb.locator('[data-testid="review-command-toggle"]').click()
+        check("AS: one click shows the whole command and every argument",
+              itemb.locator('[data-testid="review-command"]').inner_text() == "make b\nsecond line"
+              and itemb.locator('[data-testid="review-args"]').count() == 1)
+        check("AS: an item with no summary shows its command whole",
+              page.locator('[data-testid="review-item"][data-id="defer:d"] [data-testid="review-command"]').count() == 1)
+        itemb.locator('[data-testid="review-tick"]').click()
+        approve.click()
+        until(lambda: dialog.count() == 1, timeout=3)
+        check("AS: the confirmation shows each item's summary",
+              page.locator('[data-testid="review-confirm-summary"]').count() == 1)
+        # Review of #330, LOW 4: a summary that changes under the open dialog
+        # (its tag unchanged) changes nothing the dialog shows.
+        shown = page.locator('[data-testid="review-confirm-list"]').inner_text()
+        rec["summary"] = "Something else entirely"
+        mock_inbox.changed(mock, ["defer:b"], "deferral_summary")
+        until(lambda: "Something else" in itemb.locator('[data-testid="review-summary"]').inner_text(), timeout=4)
+        check("AS: the open confirmation is frozen: a summary landing under it changes nothing shown",
+              dialog.count() == 1 and page.locator('[data-testid="review-confirm-list"]').inner_text() == shown
+              and "Something else" not in shown,
+              page.locator('[data-testid="review-confirm-list"]').inner_text())
+        posts = len(_posts(mock))
+        page.locator('[data-testid="review-confirm-approve"]').click()
+        until(lambda: len(_posts(mock)) > posts, timeout=3)
+        got = _posts(mock)[-1][1]
+        check("AS: Approve posts exactly ids and tags, never the summary",
+              all(set(i) == {"id", "tag"} for i in got.get("items", [])) and "summary" not in json.dumps(got), str(got))
         check("no page errors in the review section", not errors, "; ".join(errors[:3]))
     finally:
         ctx.close()

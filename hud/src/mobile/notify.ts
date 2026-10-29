@@ -7,7 +7,7 @@
 //   unsupported  this browser has no Web Push;
 //   install      iOS, not opened from the Home Screen: how to add it;
 //   blocked      permission was refused: where to allow it again;
-//   off          "Turn on notifications" (a tap subscribes, then tells Jarvis);
+//   off          "Turn on" (a tap subscribes, then tells Jarvis);
 //   on           "Turn off" (unsubscribes here, then tells Jarvis);
 //   error        what failed, and the button again.
 //
@@ -116,12 +116,15 @@ export const WORDS: Record<NotifyState, string> = {
   install: "Notifications work only in the Jarvis app on the Home Screen. In Safari, tap Share, then "
     + "Add to Home Screen; open Jarvis from there and turn them on.",
   blocked: "Notifications are blocked for Jarvis. Allow them in the iPhone's Settings, Notifications, Jarvis.",
-  off: "Get a notification when something waits on you. It says how many, never what.",
-  on: "Notifications are on. They say how many things wait, never what.",
+  off: "Notifications off",
+  on: "Notifications on",
   busy: "One moment…",
   error: "Notifications could not be turned on.",
   unavailable: "Notifications are not available on the PC right now. Try again later.",
 };
+
+/** The muted hint beside "on" (only): what a push says. */
+export const HINT = "count only, never what";
 
 export class Notifications {
   state: NotifyState = "off";
@@ -232,7 +235,9 @@ export class Notifications {
     this.changed();
   }
 
-  /** The row under the Inbox: a line and, where it can act, one button. */
+  /** The row under the Inbox: one compact line and, where it can act, a small
+   * button at its right ("Turn on", "Turn off"). The longer states (install,
+   * blocked, …) keep their whole sentence, in the same small type. */
   view(): HTMLElement {
     const box = document.createElement("section");
     box.className = "notify";
@@ -240,17 +245,28 @@ export class Notifications {
     box.dataset.state = this.state;
     const line = document.createElement("p");
     line.className = "notify-line";
-    line.textContent = WORDS[this.state] + (this.detail ? " " + this.detail : "")
-      + (this.state === "on" && !this.deskOn ? " They are turned off at the desk for now." : "");
+    line.textContent = WORDS[this.state] + (this.detail ? " " + this.detail : "");
+    const hint = this.state === "on" && !this.deskOn ? "turned off at the desk for now"
+      : this.state === "on" ? HINT : "";
+    if (hint) {
+      // One line: the hint gives way (an ellipsis) before the row grows a second line.
+      if (!this.detail) line.classList.add("one-line");
+      const small = document.createElement("span");
+      small.className = "notify-hint";
+      small.dataset.testid = "m-notify-hint";
+      small.textContent = " · " + hint;
+      line.append(small);
+    }
     box.append(line);
-    const action = this.state === "off" || this.state === "error" ? "Turn on notifications"
-      : this.state === "on" ? "Turn off notifications" : "";
+    const action = this.state === "off" || this.state === "error" ? "Turn on"
+      : this.state === "on" ? "Turn off" : "";
     if (action) {
       const b = document.createElement("button");
       b.type = "button";
-      b.className = "btn " + (this.state === "on" ? "quiet" : "primary");
+      b.className = "tap notify-act";
       b.dataset.testid = "m-notify-button";
       b.textContent = action;
+      b.setAttribute("aria-label", action + " notifications");
       b.addEventListener("click", () => { void (this.state === "on" ? this.turnOff() : this.turnOn()); });
       box.append(b);
     }
