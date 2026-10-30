@@ -781,13 +781,14 @@ class OwnerOnly(Base):
                     "inbox.answer", "inbox.rows", "inbox.route", "daemon.inbox", "_inbox.",
                     # B3 (IN-4): the PR list the daemon reads with the owner's gh.
                     "import inbox_prs", "inbox_prs import", "PrSource", ".prs.rows", ".prs.poll",
-                    # PM-B: the PR facts reader (the owner's gh, the daemon's mirror),
-                    # never the file's own path: files.py names it in SELF_PROTECTED.
-                    "jarvis.v2.pr_facts", "from .pr_facts", "from . import pr_facts",
-                    "from .. import pr_facts", "import pr_facts", "pr_facts import",
-                    # PM-C: the PR summaries (the model's lines on a PR row), never
-                    # the file's own path: files.py names it in SELF_PROTECTED.
-                    "jarvis.v2.pr_summary", "from .pr_summary", "import pr_summary", "pr_summary import",
+                    # PM-B: the PR facts reader (the owner's gh, the daemon's mirror).
+                    # A bare name, so importlib, __import__ and parenthesized
+                    # relative imports are caught too; the only exemption is
+                    # files.py's SELF_PROTECTED path-string lines (_self_protected_lines).
+                    "pr_facts",
+                    # PM-C: the PR summaries (the model's lines on a PR row),
+                    # bare, like pr_facts: only files.py's SELF_PROTECTED lines are set aside.
+                    "pr_summary",
                     "PrSummaries", "attach_pr_summaries",
                     # PM-D: the owner's Merge, Update and Hold on a PR row, its
                     # receipts and holds; the routes are "/inbox/" above.
@@ -797,10 +798,20 @@ class OwnerOnly(Base):
                     " pr_merge.", "(pr_merge.", "PrActions", "PrHolds", "pr-holds.json", "pr-actions.jsonl",
                     "merge_argv", "update_argv", "/inbox/pr",
                     # PM-E: a PR's Fix (a task under the PR scope) and its routes,
-                    # never the file's own path: files.py names it in SELF_PROTECTED.
-                    "jarvis.v2.pr_fix", "from .pr_fix", "import pr_fix", "pr_fix import", "pr_fix.start", "pr_fix.hud_route",
+                    # bare, like pr_facts: only files.py's SELF_PROTECTED lines are set aside.
+                    "pr_fix",
                     "PrFixes", "attach_pr_fixes", "start_fix", "cancel_fix", "pr_scope")
 
+
+    # files.py lists the PR modules' own paths in SELF_PROTECTED, to refuse writes
+    # to them. Only those exact lines are set aside in that one file; every other
+    # spelling of the name, in any file, is still a hit.
+    SELF_PROTECTED_LINE = re.compile(r'^\s*"jarvis/v2/[a-z_]+\.py",\s*$', re.M)
+
+    def _without_self_protected_paths(self, module, text):
+        if module.__name__ == "jarvis.tools.files":
+            return self.SELF_PROTECTED_LINE.sub("", text)
+        return text
 
     def test_no_tool_reaches_the_inbox(self):
         from jarvis import tools
@@ -830,7 +841,7 @@ class OwnerOnly(Base):
         from jarvis.v2.discord import gateway
         sources.append(gateway)                       # Discord answers in-process, never here
         for module in {m for m in sources if m is not None}:
-            text = inspect.getsource(module)
+            text = self._without_self_protected_paths(module, inspect.getsource(module))
             for needle in self.INBOX_SOURCE:
                 self.assertNotIn(needle, text, f"{module.__name__} names {needle}")
 

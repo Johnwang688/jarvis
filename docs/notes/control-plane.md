@@ -2330,14 +2330,24 @@ section). Every module below is SELF_PROTECTED (`jarvis/tools/files.py`); PM-G a
   the Merge/Update/Hold act, the phone's `options` and passkey subject, receipts. `pr_fix.py`:
   Fix, a Claude Code task under the PR scope, and the fix card. `hud/src/lib/prRow.ts` holds the
   rules both surfaces draw (HUD `InboxPrRow.tsx`, phone `prBlock` in `mobile/views.ts`); UI only.
-- **Binding.** A button posts the `head` and `card` the row drew. The card key (version 2) is a
-  SHA-256 of the facts, summary, method, actions and, once it exists, the fix card. At the tap the
-  daemon reads the PR again (90 s budget) under a per-PR lock and refuses with a 409 "changed
-  since you read it" if the head, the card, the offered action or the hold differs, if the fresh
-  set of flagged safety files grows or shows one the row did not (compared in full, not only the
-  first 20; #341), or if a fix summary landed after the drawing. A 409 runs nothing; the row
-  says it, the inbox is read again, nothing is retried. The summary never feeds buttons, flags or
-  the brief; code does.
+- **Binding.** A button posts the `head` and `card` the row drew. The card key (version 3,
+  `pr_summary.CARD_VERSION`) is a SHA-256 of the facts, summary, method, actions, the other
+  fields the row shows (title, flags, why, the summary state, note and reason) and, once it exists, the fix card. Merge, Merge as is
+  and Update take the lock for that PR (a second tap while one runs is refused as busy), and the
+  daemon reads the PR again (90 s budget). It refuses with a 409 "changed since you read it" if
+  the head, the card, the offered action or the hold differs, if the fresh read shows a safety
+  warning the row did not (a higher total than the row's listed files plus its `more` count, or a
+  path or family the row did not list; when the row had a `more` tail, only the identities of
+  the listed prefix are compared and the tail is counted, #341), or if a fix summary landed after
+  the drawing. A fresh read that shows fewer warnings than the row did is not refused. Fix does
+  not read again: it checks the posted head against the row's, the posted card against the row's
+  current card, the PR's cached facts (the last read, which must be at that head) and `decide`
+  with the hold (`pr_fix.start_fix`). For Merge, Merge as is and Fix a 409 runs nothing. For
+  Update the 409 can come after the act: Update's PUT runs, and a GitHub 422 (the head moved
+  before it took the update) is then reported as a 409 "its head moved", with its receipt
+  written. After a stale-card 409 on Merge, Merge as is or Update (and after any finished act) the
+  PR is poked to be read again; nothing is retried. The summary never
+  feeds buttons, flags or the brief; code does.
 - **Hold.** `inbox/pr-holds.json` (0600). A hold hides Merge, Update and Fix; the merge route
   re-checks it under the lock. The owner's choice (PM-F): a held row keeps **Cancel the fix** for
   a running fix, since cancelling acts on nothing the hold protects.
@@ -2357,7 +2367,7 @@ section). Every module below is SELF_PROTECTED (`jarvis/tools/files.py`); PM-G a
   but this stops accidents rather than an adversary. A Codex chat holds no login and cannot Fix.
 - **Tests.** `tests/v2/pr_facts_check.py`, `pr_summary_check.py`, `pr_merge_check.py`,
   `pr_fix_check.py` (+ `*_mutants.py`, `pr_fix_card_recheck*_check.py`); vitest `prRow`,
-  `InboxPrRow`, `mobile/pr`; `hud_v2_inbox_check.py` (`pr_action`), `hud_v2_phone_pr_check.py`.
+  `InboxPrRow`, `mobile/pr`; `tests/face/hud_v2_inbox_check.py` (`pr_action`), `tests/face/hud_v2_phone_pr_check.py`.
 - **Open items.** (a) A rare spurious 409 on a PR with more than 20 safety warnings, when the
   tap-time read lists fewer files than the row's did (tests for it saved, not merged). It
   refuses; it never lets a merge through. (b) The desk transcript still labels the deferral

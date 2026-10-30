@@ -653,8 +653,10 @@ PM-F itself is #340 (merged `a84d650b`); the section above describes it. Its ver
 (Sol, r2 to r4) changed the daemon too, so "UI only" holds for the first commits, not the
 merge: the fix card binds which task and attempt it shows, `card_key` covers every field the row
 shows, and the tap-time read must show what the row showed (`pr_merge.judge`). #341 (merged
-`610b7a81`) finished that edge: `PrActions.judge` compares the full fresh set of flagged safety
-files with the row's `items` plus `more` (it used to compare only the first 20), no longer
+`610b7a81`) finished that edge: `PrActions.judge` compares the fresh set of flagged safety
+files with the row: the total against the row's `items` plus `more`, and, when the row had a
+`more` tail, the identities of the listed prefix only (it used to compare only the first 20
+fresh paths against the row's items), no longer
 counts an incomplete fresh read as a new warning, and keeps the row's own `summary read N of M
 files` part in the card compare instead of recomputing it from a lighter read. Tests:
 `pr_fix_card_recheck4_check.py`, `recheck5_check.py`, four new mutants in `pr_merge_mutants.py`.
