@@ -111,19 +111,16 @@ HTTP-auth plan).
 
 The phone's only door is the remote listener (8408, loopback, behind `tailscale
 serve`): strict Host/Origin, `/m/*` only; agents never reach it. Routes need
-a passkey session; each Allow, cancel and defer a fresh assertion. Phone sends
-are `NEVER_STEER`; pushes carry `{count, rank}` only, none 23–07. Dictation is
-not speaker-verified (owner). [Design](docs/plans/2026-10-24-phone-surface-design.md)
+a passkey session; each Allow, cancel, defer and PR action a fresh assertion.
+Phone sends are `NEVER_STEER`; pushes carry `{count, rank}` only, none 23–07.
+Dictation is not speaker-verified (owner). [Design](docs/plans/2026-10-24-phone-surface-design.md)
 
 ## Inbox
 
 `/inbox` is owner-only; agents only `owner_post`, never read, answer, mark,
 grant. Marks hide ranks 5–8. Quiet hours defer; the morning review groups them.
-PR rows: owner-only Merge/Update/Fix/Hold, each bound to the shown head and card
-key (409 “changed since you read it”); the summary decides nothing. A phone
-needs a passkey per action, and a limited one gets none on a safety-file PR; a
-hold hides actions. Fix is an accident guard, not a wall: it keeps the owner's
-GitHub login, with gate blocks ([plan](docs/plans/2026-10-28-pr-inbox-merge.md)).
+PR rows: owner-only actions bound to the shown head and card; the summary
+decides nothing.
 [Design](docs/plans/2026-10-24-owner-inbox-design.md); rules: control-plane notes.
 
 ## Safety design (deliberate, do not loosen without asking)
@@ -212,12 +209,17 @@ In this WSL workflow, cap each test/build tree with
 `systemd-run --user --scope -q -p MemoryMax=3G -p MemorySwapMax=0`. Use the
 worktree's PYTHONPATH/shared venv. Tests use temporary HOME/config,
 fake providers and ephemeral ports, never live 8402/8403/8405 or owner state.
+Browser tests need an isolated mock server; do not operate the live daemon.
 
 Under load, wait for the actual state, not a sleep. Measure with a clock
-suited to the path; keep active deadlines, pin guard-strength constants and prove costly mutations still fail.
+suited to the path; keep active deadlines, pin guard-strength constants and
+prove costly mutations still fail.
+Fake-monotonic expiry must be relative. Count product faults apart from teardown.
 
-Budget paid probes. Do not pool agent-bench, long-bench and SWE-bench scores ([runbook](swecompare/RUNBOOK.md),
-[inventory](docs/notes/testing-benchmarks.md)).
+Budget paid probes. Do not pool agent-bench, long-bench and SWE-bench
+scores ([runbook](swecompare/RUNBOOK.md),
+[inventory](docs/notes/testing-benchmarks.md)). Verify old prices and model
+comparisons. The [old validation list](docs/notes/live-validation.md) is history.
 
 ## Area index
 
@@ -243,8 +245,8 @@ Budget paid probes. Do not pool agent-bench, long-bench and SWE-bench scores ([r
 | Earlier goals/sessions/runtime | [Earlier runtime](docs/notes/legacy-runtime.md) |
 
 `python scripts/slim_claude.py --check` rebuilds the original bytes and checks
-retained copies and this guide's size. Update the retained-copy
-check if an invariant or decision changes.
+retained copies and this guide's size. Keep archive payloads unchanged; update
+the retained-copy check if an invariant or decision changes.
 
 <!-- retained:invariants:begin -->
 ## Invariants — breaking these causes silent or hard failures
