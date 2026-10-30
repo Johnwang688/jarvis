@@ -1187,3 +1187,37 @@ the channel) and `Device` (the argv the fake records), and
 `vex_output_check` `BrainPort` (`--chan 1 --timer --progress`, and
 `--progress` still last without the channel).
 
+
+**First lab timings with `--timer` (2026-10-29, owner-run, HUD Download of
+VEX-override to slot 1).** vexcom prints its timer on separate lines,
+before and after the progress line:
+
+```
+slot_1.ini           : time   2.45 seconds for    342 bytes, data rate    140 bytes/sec
+download : 0....10....20....30....40....50....60....70....80....90....100
+slot_1.bin           : time  15.53 seconds for  85838 bytes, data rate   5526 bytes/sec
+```
+
+The progress line is unchanged, so `downloadProgress` still reads it and the
+"not yet seen" caveat above is settled.
+
+| Link | `slot_1.bin` (85,838 B) | `slot_1.ini` (342 B) | Rate |
+|---|---|---|---|
+| V5 controller, radio, `--chan 1` (COM5) | 15.53 s | 2.45 s | 5.5 KB/s |
+| USB straight to the brain (COM14) | 0.50 s | 0.75 s | 173 KB/s |
+
+- **USB to the brain is about 30× faster.**
+- **The radio is about 2× faster than before `--chan 1`.** It was ~2 KB/s
+  (156 KB in ~80 s, 2026-10-20), on an older and bigger build, so the
+  comparison is rough.
+- **About 2.4 s of every radio download is fixed latency.** The 342-byte
+  ini alone takes 2.45 s.
+- **#285's open LOW-4 is closed.** After the radio download, the owner could
+  drive within about a second. The controller returns from the download
+  channel by itself, so there is no `--chan 0` to add.
+
+It is not known whether vexcom's byte count is the file's size or the gzip
+it sends.
+
+A differential upload would only shorten the ~15 s `.bin` transfer over the
+radio, not the fixed ~2.5 s, and costs 1–2 weeks. It is not planned.
