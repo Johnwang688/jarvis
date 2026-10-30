@@ -2316,3 +2316,59 @@ Tests: `tests/v2/approval_summary_check.py`, `hud/src/lib/approvalSummary.test.t
 `state/store.test.ts`, and the AS sections of `tests/face/hud_v2_check.py`,
 `hud_v2_inbox_check.py`, `hud_v2_phone_answer_check.py`,
 `hud_v2_review_check.py` and `hud_v2_phone_review_check.py`.
+
+## PR rows in the inbox: merge, update, fix, hold (PM-A..PM-G, 2026-10-29)
+
+Plan and decisions: `docs/plans/2026-10-28-pr-inbox-merge.md` (each package has an "As built"
+section). Every module below is SELF_PROTECTED (`jarvis/tools/files.py`); PM-G added `pr_facts.py`.
+
+- **Modules.** `jarvis/v2/summary_engine.py`: the one-shot model engine (fence, caps, cleaning
+  hook) factored out of `approval_summary.py`. `pr_facts.py`: read-only `gh`/mirror reads of a
+  PR, scrub, the safety-file flags (`path_flags`, from the shared SELF_PROTECTED list), the facts
+  line, and `decide`/`actions` (which buttons a row offers and why); no model. `pr_summary.py`:
+  the Haiku summary, its cache and caps, the row's `detail` fields and `card_key`. `pr_merge.py`:
+  the Merge/Update/Hold act, the phone's `options` and passkey subject, receipts. `pr_fix.py`:
+  Fix, a Claude Code task under the PR scope, and the fix card. `hud/src/lib/prRow.ts` holds the
+  rules both surfaces draw (HUD `InboxPrRow.tsx`, phone `prBlock` in `mobile/views.ts`); UI only.
+- **Binding.** A button posts the `head` and `card` the row drew. The card key (version 3,
+  `pr_summary.CARD_VERSION`) is a SHA-256 of the facts, summary, method, actions, the other
+  fields the row shows (title, flags, why, the summary state, note and reason) and, once it exists, the fix card. Merge, Merge as is
+  and Update take the lock for that PR (a second tap while one runs is refused as busy), and the
+  daemon reads the PR again (90 s budget). It refuses with a 409 "changed since you read it" if
+  the head, the card, the offered action or the hold differs, if the fresh read shows a safety
+  warning the row did not (a higher total than the row's listed files plus its `more` count, or a
+  path or family the row did not list; when the row had a `more` tail, only the identities of
+  the listed prefix are compared and the tail is counted, #341), or if a fix summary landed after
+  the drawing. A fresh read that shows fewer warnings than the row did is not refused. Fix does
+  not read again: it checks the posted head against the row's, the posted card against the row's
+  current card, the PR's cached facts (the last read, which must be at that head) and `decide`
+  with the hold (`pr_fix.start_fix`). For Merge, Merge as is and Fix a 409 runs nothing. For
+  Update the 409 can come after the act: Update's PUT runs, and a GitHub 422 (the head moved
+  before it took the update) is then reported as a 409 "its head moved", with its receipt
+  written. After a stale-card 409 on Merge, Merge as is or Update (and after any finished act) the
+  PR is poked to be read again; nothing is retried. The summary never
+  feeds buttons, flags or the brief; code does.
+- **Hold.** `inbox/pr-holds.json` (0600). A hold hides Merge, Update and Fix; the merge route
+  re-checks it under the lock. The owner's choice (PM-F): a held row keeps **Cancel the fix** for
+  a running fix, since cancelling acts on nothing the hold protects.
+- **Phone.** Each action: `options`, then a passkey assertion on the `pr:` subject, then the
+  act. A limited phone gets no action on a PR the daemon marks as touching safety files (Update
+  included); the server refuses it anyway. A scrub that would change the facts sends it to the desk.
+- **Quiet hours.** A fix card or a stopped fix sends one `{count, rank}` push, never 23:00 to
+  07:00; summaries push nothing. A Fix pressed at night runs; the owner may merge at night; a
+  gated approval inside the fix defers as usual (QH).
+- **Merge method.** `--merge --match-head-commit <head>`, no `--admin`, no `--auto`. Where
+  merge commits are off for the repository it is `--squash`, named on the row ("squash merge:
+  merge commits are off for this repository") before the OK, and part of the card key. Rebase is
+  never used.
+- **Fix is an accident guard, not a wall (owner's choice, any PR).** The fix task keeps the
+  owner's GitHub login, so a determined agent in it could do more than the PR scope allows; the
+  scope DENYs merges, force pushes and pushes off the PR branch, and gate blocks stay in force,
+  but this stops accidents rather than an adversary. A Codex chat holds no login and cannot Fix.
+- **Tests.** `tests/v2/pr_facts_check.py`, `pr_summary_check.py`, `pr_merge_check.py`,
+  `pr_fix_check.py` (+ `*_mutants.py`, `pr_fix_card_recheck*_check.py`); vitest `prRow`,
+  `InboxPrRow`, `mobile/pr`; `tests/face/hud_v2_inbox_check.py` (`pr_action`), `tests/face/hud_v2_phone_pr_check.py`.
+- **Open items.** (a) A rare spurious 409 on a PR with more than 20 safety warnings, when the
+  tap-time read lists fewer files than the row's did (tests for it saved, not merged). It
+  refuses; it never lets a merge through. (b) The desk transcript still labels the deferral
+  note "via the phone" (`chat_reads._PHONE_TYPED`).

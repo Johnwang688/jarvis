@@ -646,3 +646,31 @@ Deviations, each the builder's call:
    that landed after the drawing is a 409 "changed since you read it".
    `hud_v2_pr_fix_binding_check.py` pins it.
 5. The legacy row (no `card`, a daemon before PM-C) offers no action, only Hold… and the link.
+
+## As built: PM-F follow-ups (2026-10-29)
+
+PM-F itself is #340 (merged `a84d650b`); the section above describes it. Its verifier rounds
+(Sol, r2 to r4) changed the daemon too, so "UI only" holds for the first commits, not the
+merge: the fix card binds which task and attempt it shows, `card_key` covers every field the row
+shows, and the tap-time read must show what the row showed (`pr_merge.judge`). #341 (merged
+`610b7a81`) finished that edge: `PrActions.judge` compares the fresh set of flagged safety
+files with the row: the total against the row's `items` plus `more`, and, when the row had a
+`more` tail, the identities of the listed prefix only (it used to compare only the first 20
+fresh paths against the row's items), no longer
+counts an incomplete fresh read as a new warning, and keeps the row's own `summary read N of M
+files` part in the card compare instead of recomputing it from a lighter read. Tests:
+`pr_fix_card_recheck4_check.py`, `recheck5_check.py`, four new mutants in `pr_merge_mutants.py`.
+Open: a rare spurious 409 on PRs with more than 20 safety warnings after a lighter file-list
+read (tests saved, not merged).
+
+## As built: PM-G (2026-10-29)
+
+Docs and one list. `jarvis/v2/pr_facts.py` joined SELF_PROTECTED (it decides the safety flags,
+the facts line and `decide`, which buttons a row offers). The other PM modules were already on
+the list; `inbox.py`, `inbox_prs.py` and `remote_api.py` were too, and `hud/src/lib/prRow.ts`
+only draws what the daemon decided, so it is not. `pr_facts_check.py` pins that a PR touching
+`pr_facts.py` is flagged and a limited phone gets no action on it. CLAUDE.md's `## Inbox` gained
+the PR-row rules (binding and 409, summary decides nothing, passkey per action, limited phone,
+hold, Fix as an accident guard); `docs/notes/control-plane.md` has the module and rule summary
+and the open items. The owner's choices recorded there: Fix keeps the owner's GitHub login as
+an accident guard on any PR, and a held row keeps Cancel the fix.
