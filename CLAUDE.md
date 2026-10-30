@@ -119,6 +119,11 @@ not speaker-verified (owner). [Design](docs/plans/2026-10-24-phone-surface-desig
 
 `/inbox` is owner-only; agents only `owner_post`, never read, answer, mark,
 grant. Marks hide ranks 5–8. Quiet hours defer; the morning review groups them.
+PR rows: owner-only Merge/Update/Fix/Hold, each bound to the shown head and card
+key (409 “changed since you read it”); the summary decides nothing. A phone
+needs a passkey per action, and a limited one gets none on a safety-file PR; a
+hold hides actions. Fix is an accident guard, not a wall: it keeps the owner's
+GitHub login, with gate blocks ([plan](docs/plans/2026-10-28-pr-inbox-merge.md)).
 [Design](docs/plans/2026-10-24-owner-inbox-design.md); rules: control-plane notes.
 
 ## Safety design (deliberate, do not loosen without asking)
@@ -197,8 +202,8 @@ summaries do not replace detailed matchers, exceptions or owner choices.
 
 ## Testing and operating the checkout
 
-Use focused free checks, then the required integration sweep. Independent review
-and meaningful tests precede merging. Keep negative cases and mutation evidence
+Use focused free checks, then the integration sweep. Independent review
+and real tests precede merging. Keep negative cases and mutation evidence
 for subtle boundary invariants. Read actual suite summaries, not a wrapper's exit
 code. Report whether a result is committed, merged, built, browser-tested,
 installed or live-validated.
@@ -207,17 +212,12 @@ In this WSL workflow, cap each test/build tree with
 `systemd-run --user --scope -q -p MemoryMax=3G -p MemorySwapMax=0`. Use the
 worktree's PYTHONPATH/shared venv. Tests use temporary HOME/config,
 fake providers and ephemeral ports, never live 8402/8403/8405 or owner state.
-Browser tests need an isolated mock server; do not operate the live daemon.
 
-Under load, wait for the actual state rather than sleeping. Measure with a clock
-suited to the path (calling-thread CPU excludes off-thread work); keep active
-deadlines, pin guard-strength constants and prove costly mutations still fail.
-Fake-monotonic expiry must be relative. Count product faults apart from teardown.
+Under load, wait for the actual state, not a sleep. Measure with a clock
+suited to the path; keep active deadlines, pin guard-strength constants and prove costly mutations still fail.
 
-Budget paid probes. Agent-bench, long-bench and SWE-bench answer different
-questions; do not pool scores ([runbook](swecompare/RUNBOOK.md),
-[inventory](docs/notes/testing-benchmarks.md)). Verify old prices and model
-comparisons. The [old validation list](docs/notes/live-validation.md) is history.
+Budget paid probes. Do not pool agent-bench, long-bench and SWE-bench scores ([runbook](swecompare/RUNBOOK.md),
+[inventory](docs/notes/testing-benchmarks.md)).
 
 ## Area index
 
@@ -243,8 +243,8 @@ comparisons. The [old validation list](docs/notes/live-validation.md) is history
 | Earlier goals/sessions/runtime | [Earlier runtime](docs/notes/legacy-runtime.md) |
 
 `python scripts/slim_claude.py --check` rebuilds the original bytes and checks
-retained copies and this guide's size. Keep archive payloads unchanged; update
-the retained-copy check if an invariant or decision changes.
+retained copies and this guide's size. Update the retained-copy
+check if an invariant or decision changes.
 
 <!-- retained:invariants:begin -->
 ## Invariants — breaking these causes silent or hard failures

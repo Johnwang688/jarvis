@@ -781,8 +781,10 @@ class OwnerOnly(Base):
                     "inbox.answer", "inbox.rows", "inbox.route", "daemon.inbox", "_inbox.",
                     # B3 (IN-4): the PR list the daemon reads with the owner's gh.
                     "import inbox_prs", "inbox_prs import", "PrSource", ".prs.rows", ".prs.poll",
-                    # PM-B: the PR facts reader (the owner's gh, the daemon's mirror).
-                    "pr_facts",
+                    # PM-B: the PR facts reader (the owner's gh, the daemon's mirror),
+                    # never the file's own path: files.py names it in SELF_PROTECTED.
+                    "jarvis.v2.pr_facts", "from .pr_facts", "from . import pr_facts",
+                    "from .. import pr_facts", "import pr_facts", "pr_facts import",
                     # PM-C: the PR summaries (the model's lines on a PR row), never
                     # the file's own path: files.py names it in SELF_PROTECTED.
                     "jarvis.v2.pr_summary", "from .pr_summary", "import pr_summary", "pr_summary import",

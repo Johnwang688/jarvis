@@ -222,6 +222,12 @@ SELF_PROTECTED = frozenset(
         # task to (which pushes it may make), the brief built from code's
         # facts, and the fix card the owner reads before merging the fix.
         "jarvis/v2/pr_fix.py",
+        # PR facts (PM-B, 2026-10-28): what is read of a PR, which of its files
+        # raise a safety flag, the facts line, and `decide`, which buttons a
+        # row offers and why. The model never sees or sets any of it. An agent
+        # that could edit it could clear a flag or add a button on a PR the
+        # owner merges.
+        "jarvis/v2/pr_facts.py",
     }
 )
 

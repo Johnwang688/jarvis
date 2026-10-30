@@ -1173,6 +1173,18 @@ class Flags(Case):
         for path in SELF_PROTECTED:
             self.assertIn("self-protected", pr_facts.path_flags(path))
 
+    def test_pr_facts_itself_is_self_protected(self):
+        # PM-G: the module that decides the flags and the buttons is on the list,
+        # so a PR that touches it is flagged and a limited phone gets no action.
+        from jarvis.tools.files import SELF_PROTECTED
+        self.assertIn("jarvis/v2/pr_facts.py", SELF_PROTECTED)
+        self.assertEqual(pr_facts.path_flags("jarvis/v2/pr_facts.py"), ("self-protected",))
+        files = [{"path": "jarvis/v2/pr_facts.py", "additions": 1, "deletions": 0}]
+        facts = read(FakeRun(view=json.dumps(view(files=files)),
+                             diff=diff_of(("jarvis/v2/pr_facts.py", "+x"))))
+        self.assertTrue(pr_facts.flagged(facts))
+        self.assertEqual(pr_facts.actions(facts, limited=True), ())
+
     def test_the_flags_line(self):
         files = [{"path": "a.py", "additions": 1, "deletions": 0},
                  {"path": "CLAUDE.md", "additions": 1, "deletions": 0},
