@@ -16,6 +16,11 @@ const h = vi.hoisted(() => ({
   closed: [] as string[],
   buildState: null as null | ((id: string) => any),
   order: [] as string[],
+  /** `POST …/vex/device/connection`: its states in turn (the last repeats), or an error. */
+  usb: ["ready"] as (string | Error)[],
+  usbAsked: 0,
+  /** Every step in order with the USB checks among them; `order` leaves them out. */
+  trail: [] as string[],
   /** `GET …/vex/fresh`: true, false, or an error; and how often it was asked. */
   fresh: false as boolean | Error,
   freshAsked: 0,
@@ -33,14 +38,22 @@ vi.mock("../api", () => ({
     vexDownload: (pid: string, body: { slot: number; name: string }) => {
       h.downloads.push({ pid, ...body });
       h.order.push("download");
+      h.trail.push("download");
       return h.download!(pid).then(r => ({...r, download_id: r.terminal_id}));
     },
     vexDownloadState: async (id: string) => ({id, project_id: h.downloads.at(-1)?.pid ?? "p3", slot: 3,
       state: "succeeded", terminal_id: id, exit_code: 0, output: "Finished", started: "", ended: ""}),
-    vexConnection: async () => ({brain: true, controller: false, state: "ready", checked_at: "", message: "", events: []}),
+    vexConnection: async () => {
+      const state = h.usb[Math.min(h.usbAsked, h.usb.length - 1)];
+      h.usbAsked += 1;
+      h.trail.push("usb");
+      if (state instanceof Error) throw state;
+      return {brain: true, controller: false, state, checked_at: "", message: "", events: []};
+    },
     vexBuild: async (pid: string, action: string) => {
       h.builds.push({ pid, action });
       h.order.push(action);
+      h.trail.push(action);
       return { build_id: `0000000${h.builds.length}`, terminal_id: `a000000${h.builds.length}` };
     },
     vexBuildState: async (id: string) => h.buildState ? h.buildState(id) : ({
@@ -50,6 +63,7 @@ vi.mock("../api", () => ({
     closeTerminal: async (id: string) => {
       h.closed.push(id);
       h.order.push(`close ${id}`);
+      h.trail.push(`close ${id}`);
       if (id === h.brain) h.brain = null;
       return { ok: true };
     },
@@ -77,7 +91,7 @@ vi.mock("../components/Terminal", () => ({
   },
 }));
 
-import { VexStore } from "./vex";
+import { USB_SETTLE_MAX_MS, VexStore } from "./vex";
 import { DOWNLOAD_RETRY_WAIT_MS, DOWNLOAD_TRIES, brainView, chainLine, chainSteps, type DownloadView } from "../lib/vex";
 import { api } from "../api";
 import { terminals } from "../components/Terminal";
@@ -99,6 +113,9 @@ beforeEach(() => {
   h.order.length = 0;
   h.fresh = false;
   h.freshAsked = 0;
+  h.usb = ["ready"];
+  h.usbAsked = 0;
+  h.trail.length = 0;
 });
 
 describe("build feedback", () => {
@@ -948,6 +965,116 @@ describe("Connect is offered once a download ends, without a reload (the owner, 
     await store.readInfo("system");
     await vi.waitFor(() => expect(store.status?.device).toBeNull());
     expect(off(store)).toBe("");
+  });
+});
+
+describe("a USB check before every download try (the channel's fresh reading, 2026-11-06)", () => {
+  const sends = () => h.trail.filter(step => step === "usb" || step === "download");
+
+  it("after the brain terminal is closed, and right before the download", async () => {
+    h.brain = "c0000001";
+    h.download = async () => ({ terminal_id: "b0000001" });
+    const store = new VexStore();
+    await store.refreshStatus();
+    await store.download("p3", 1, "auton", "override");
+    expect(h.trail.slice(h.trail.indexOf("close c0000001"))).toEqual(["close c0000001", "usb", "download"]);
+  });
+
+  it("the download waits for a running check to end", async () => {
+    vi.useFakeTimers();
+    h.usb = ["checking", "checking", "ready"];
+    h.download = async () => ({ terminal_id: "b0000001" });
+    const store = new VexStore();
+    const work = store.download("p3", 1, "auton", "override");
+    await vi.advanceTimersByTimeAsync(5000);
+    await work;
+    expect(sends()).toEqual(["usb", "usb", "usb", "download"]);
+  });
+
+  it("a check that never ends holds the download only so long", async () => {
+    vi.useFakeTimers();
+    h.usb = ["checking"];
+    h.download = async () => ({ terminal_id: "b0000001" });
+    const store = new VexStore();
+    const work = store.download("p3", 1, "auton", "override");
+    await vi.advanceTimersByTimeAsync(USB_SETTLE_MAX_MS - 2000);
+    expect(h.downloads).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(10_000);
+    await work;
+    expect(h.downloads).toHaveLength(1);
+  });
+
+  it.each([["refused", new Error("connection refused")], ["busy", "busy"], ["failed", "error"]])(
+    "a %s check still sends the try", async (_name, state) => {
+      h.usb = [state];
+      h.download = async () => ({ terminal_id: "b0000001" });
+      const store = new VexStore();
+      await store.download("p3", 1, "auton", "override");
+      expect(sends()).toEqual(["usb", "download"]);
+    });
+
+  it("a card up during the check sends nothing", async () => {
+    vi.useFakeTimers();
+    h.usb = ["checking"];
+    h.download = async () => ({ terminal_id: "b0000001" });
+    const store = new VexStore();
+    const work = store.download("p3", 1, "auton", "override");
+    await vi.waitFor(() => expect(h.usbAsked).toBeGreaterThan(0));
+    store.setBlocked(true);
+    const asked = h.usbAsked;
+    await vi.advanceTimersByTimeAsync(10_000);
+    await work;
+    expect(h.downloads).toHaveLength(0);
+    expect(h.usbAsked).toBe(asked);
+  });
+
+  it("Stop during the check sends nothing", async () => {
+    vi.useFakeTimers();
+    h.usb = ["checking"];
+    h.download = async () => ({ terminal_id: "b0000001" });
+    const store = new VexStore();
+    const work = store.download("p3", 1, "auton", "override");
+    await vi.waitFor(() => expect(h.usbAsked).toBeGreaterThan(0));
+    store.stop("p3");
+    const asked = h.usbAsked;
+    await vi.advanceTimersByTimeAsync(10_000);
+    await work;
+    expect(h.downloads).toHaveLength(0);
+    expect(h.usbAsked).toBe(asked);
+  });
+
+  it("again before a retry, so a later try keeps the channel", async () => {
+    vi.useFakeTimers();
+    const ends = new Map<string, number>();
+    let n = 0;
+    h.download = async () => {
+      n += 1;
+      ends.set(`b000000${n}`, n === 1 ? 4 : 0);
+      return { terminal_id: `b000000${n}` };
+    };
+    vi.spyOn(api, "vexDownloadState").mockImplementation(async (id: string) => {
+      const code = ends.get(id)!;
+      return { id, project_id: "p3", slot: 1, state: code === 0 ? "succeeded" : "failed", terminal_id: id,
+               exit_code: code, output: "", started: "", ended: "x" } as DownloadView;
+    });
+    const store = new VexStore();
+    const work = store.download("p3", 1, "auton", "override");
+    await vi.advanceTimersByTimeAsync(10_000);
+    await work;
+    expect(sends()).toEqual(["usb", "download", "usb", "download"]);
+  });
+
+  it("again before the download after a rebuild", async () => {
+    let n = 0;
+    h.download = async () => {
+      n += 1;
+      if (n === 1) throw buildFirst();
+      return { terminal_id: "b0000001" };
+    };
+    const store = new VexStore();
+    await store.download("p3", 1, "auton", "override");
+    expect(h.trail.filter(step => ["usb", "download", "rebuild"].includes(step)))
+      .toEqual(["usb", "download", "rebuild", "usb", "download"]);
   });
 });
 

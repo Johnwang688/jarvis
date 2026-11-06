@@ -1221,3 +1221,42 @@ it sends.
 
 A differential upload would only shorten the ~15 s `.bin` transfer over the
 radio, not the fixed ~2.5 s, and costs 1–2 weeks. It is not planned.
+
+**Downloads after the brain terminal lost the channel (2026-11-06, the
+owner's suspicion, confirmed).** Over the radio a download took about 20 s
+with `--chan 1` and 80–100 s without it, seemingly at random. It was not
+random. `CHANNEL_READING_MAX_S` (#285's LOW-3) needs a USB reading at most
+60 s old, and nothing kept one fresh at the moment that mattered:
+
+- an open brain terminal holds the port, so `Connection.want` answers "busy"
+  and no check runs;
+- the chain closes that terminal only after its build, and `refreshConnection`
+  never runs during a chain, so the download read the reading from before the
+  terminal was opened.
+
+So any download after a minute of the brain terminal, the usual lab loop,
+went out plain, and so did every retry of that chain. The next click a few
+seconds later got the channel, which is why a second try looked like a
+recovered radio.
+
+Measured from the daemon journal, 2026-10-21 to 2026-11-06: 172 radio
+downloads, and a model built only from when the device was held (a device
+free for a check within 60 s of the send) matched whether the log line says
+"(controller download channel)" for 157. It accounted for 41 of the 43
+successful downloads of 40 s or more. Not explained: 10-26 20:23 and 10-31
+09:30, both plain with no brain terminal or chain to starve the reading. The
+window may have been hidden, which also stops the checks; nothing logged says.
+
+The fix is in the HUD only. `settleUsb` runs one USB check before each try:
+after the brain terminal is closed, after a rebuild, and after a retry's wait.
+It waits for that check to end (at most `USB_SETTLE_MAX_MS`, 5 s), because
+`_reserve_device` refuses a download when a check has not settled in 4 s. A
+refused, failed or busy check sends the try as before, on the plain link if
+the reading is old. Stop or a card ends the wait and sends nothing.
+`CHANNEL_READING_MAX_S` and `_controller_only` are unchanged, so a brain on USB
+still never gets the channel.
+
+Checks (fakes only): `state/vex.test.ts`, "a USB check before every download
+try". Removing the calls, the wait, its limit or the `holds()` stop each fails
+it. Not yet seen on the robot: a download after the brain terminal saying
+"(controller download channel)" in the journal and taking about 20 s.

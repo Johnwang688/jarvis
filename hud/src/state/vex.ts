@@ -58,6 +58,11 @@ export const DETECT_STALE_MS = 30_000;
  * not wait for a focus or a reload to be offered (2026-10-17).
  */
 export const DEVICE_POLL_MS = 2000;
+/**
+ * How long a chain waits for its own USB check before a download try: the
+ * daemon's probe timeout (2 s) and the stop after it, with a little over.
+ */
+export const USB_SETTLE_MAX_MS = 5000;
 
 /** Said when a download closed the brain terminal: it is never opened again by itself (owner decision 5). */
 const BRAIN_CLOSED = "The brain terminal was closed for the download";
@@ -457,7 +462,7 @@ export class VexStore {
     }
   }
 
-  /** Visible panes demand one coalesced cached check, never behind a card or chain. */
+  /** Visible panes demand one coalesced cached check, never behind a card or chain (a chain has `settleUsb`). */
   async refreshConnection(): Promise<void> {
     if (!this.mayAct() || this.chain || this.infoBusy || this.connectionPending
       || !this.status?.configured || document.visibilityState !== "visible" || Date.now() - this.connectionAt < 1000) return;
@@ -654,6 +659,7 @@ export class VexStore {
           return;
         }
       }
+      await this.settleUsb(holds);
       if (!holds()) return dropped("before it downloaded");
       phase("download");
       this.say(projectId, "Downloading…", "info");
@@ -663,6 +669,8 @@ export class VexStore {
       // rebuild. Never a second.
       if (sent.refused && needsBuildFirst(sent.code)) {
         if (!(await step("rebuild"))) return;
+        await this.settleUsb(holds);
+        if (!holds()) return dropped("before it downloaded");
         phase("download");
         this.say(projectId, "Downloading…", "info");
         sent = await this.sendDownload(projectId, slot, name);
@@ -705,6 +713,7 @@ export class VexStore {
             + `causes it). Trying again (try ${attempt + 1} of ${DOWNLOAD_TRIES})…`, "info");
           const until = Date.now() + DOWNLOAD_RETRY_WAIT_MS;
           while (holds() && Date.now() < until) await sleep(200);
+          await this.settleUsb(holds);
           // Whatever ends the chain between tries, a try was sent and failed:
           // said as such, never "nothing was downloaded" (review LOW-1).
           const notAgain = (why: string, sentence: string) => {
@@ -834,6 +843,36 @@ export class VexStore {
       terminals.gone(terminalId);
     } catch {
       /* already gone: the action has ended */
+    }
+  }
+
+  /**
+   * One USB check for the chain, seen through to its end, before a download
+   * try. The daemon adds the radio's download channel only on a reading at
+   * most 60 s old, and nothing else refreshes it here: an open brain terminal
+   * holds the port and a running chain stops `refreshConnection`, so a
+   * download after a minute of the brain terminal went out at the plain
+   * link's 80–100 s rather than about 20 s (2026-11-06). Anything but
+   * "checking" ends the wait, and a failed or refused check sends the try as
+   * before. Waited out rather than only started: a download refuses a check
+   * still settling after 4 s.
+   */
+  private async settleUsb(holds: () => boolean): Promise<void> {
+    const until = Date.now() + USB_SETTLE_MAX_MS;
+    while (holds()) {
+      let state: ConnectionView["state"];
+      try {
+        const reading = await api.vexConnection();
+        this.connection = reading;
+        this.connectionError = "";
+        state = reading.state;
+      } catch {
+        return;
+      } finally {
+        this.changed();
+      }
+      if (state !== "checking" || Date.now() >= until) return;
+      await sleep(200);
     }
   }
 
