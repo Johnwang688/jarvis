@@ -147,8 +147,9 @@ DOWNLOAD_PORT_SCAN = 2048
 DOWNLOAD_CHANNEL = ("--chan", "1")
 # ... and only on a USB reading at most this old: a controller swapped for a
 # brain on USB just before Download must not send a brain the channel (PR
-# #285 review LOW-3). The HUD checks every 5 s while a window shows it, and
-# pauses for its chain's clean and build; an older reading keeps the plain argv.
+# #285 review LOW-3). The HUD checks every 5 s while a window shows it; an open
+# brain terminal and a running chain stop those checks, so its chain asks for
+# one before each try (`settleUsb`). An older reading keeps the plain argv.
 CHANNEL_READING_MAX_S = 60.0
 TEMPLATE_FILE = re.compile(r"(cpp|py)_v5_vsc_([a-z0-9_]+)\.zip", re.ASCII)
 TEMPLATE_ENTRIES = 200
@@ -184,6 +185,14 @@ class VexError(Exception):
     #: A machine-readable reason the route adds beside the sentence (`code`),
     #: for the refusals the HUD acts on; None for the rest.
     code: str | None = None
+
+
+class UsbSettling(VexError):
+    """A device action refused because a USB check still holds the port after
+    the bounded wait. Only that: the HUD's download chain waits for the check
+    and sends once more, on this code, never on the sentence's wording."""
+
+    code = "usb_settling"
 
 
 class BuildFirst(VexError):
@@ -1699,10 +1708,11 @@ class Vex:
                 raise VexError("Jarvis is stopping")
             busy = self._device
             if busy is not None:
+                if busy["kind"] == "connection":
+                    raise UsbSettling("A USB check is still settling. One device action at a time.")
                 what = {"brain": "The brain terminal is using the brain's port; close it first",
                         "download": "A download is running",
-                        "info": "A device-info read is running",
-                        "connection": "A USB check is still settling"}[busy["kind"]]
+                        "info": "A device-info read is running"}[busy["kind"]]
                 raise VexError(f"{what}. One device action at a time.")
             token = secrets.token_hex(8)
             self._device = {"kind": kind, "terminal_id": None, "token": token}
