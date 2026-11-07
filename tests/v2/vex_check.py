@@ -45,6 +45,7 @@ What matters most, each written to fail with its guard removed:
 """
 from __future__ import annotations
 
+import ast
 import base64
 import http.client
 import inspect
@@ -2408,6 +2409,54 @@ class Reach(unittest.TestCase):
     ALLOWED = {"jarvis/v2/vex.py", "jarvis/v2/vex_connection.py", "jarvis/v2/vex_setup.py", "jarvis/v2/hud_api.py",
                "jarvis/v2/daemon.py", "jarvis/v2/terminals.py", "jarvis/rules.py",
                "jarvis/config.py", "jarvis/__main__.py"}
+    # Read from the disk, so a new vex_*.py is judged without an edit here.
+    VEX_MODULES = frozenset(path.stem for path in (REPO / "jarvis" / "v2").glob("vex*.py"))
+
+    @classmethod
+    def _is_vex_module(cls, name):
+        """A path ending in a vex module ("..v2.vex", "vex_setup"), or a
+        `jarvis.` path through one ("jarvis.v2.vex_setup:run"). Anywhere else
+        in a path it is not a module: "vex.json" is a settings file."""
+        parts = re.split(r"[.:]", name)
+        return parts[-1] in cls.VEX_MODULES or (parts[0] == "jarvis" and not cls.VEX_MODULES.isdisjoint(parts))
+
+    @classmethod
+    def _vex_names(cls, source):
+        """Each (line, name) where the syntax of `source` names a vex module,
+        which NEEDLES cannot judge: a split or parenthesized import, a module
+        beside others in one statement. A string counts only inside a call,
+        where importlib, __import__ and getattr take it; a bare tuple of
+        folder names is not a reach. Give this the raw source: `_judged`
+        (PR #345) can leave text that no longer parses."""
+        found = []
+        for node in ast.walk(ast.parse(source)):
+            if isinstance(node, ast.Import):
+                names = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                names = [node.module or ""] + [alias.name for alias in node.names]
+            elif isinstance(node, ast.Attribute):           # `from .. import v2`, then `v2.vex_setup`
+                names = [node.attr]
+            elif isinstance(node, ast.Name):                # `from ..v2 import *`, then `vex_setup`
+                names = [node.id]
+            elif isinstance(node, ast.Call):
+                names = [item.value for item in ast.walk(node)
+                         if isinstance(item, ast.Constant) and isinstance(item.value, str)]
+            else:
+                continue
+            found += [(node.lineno, name) for name in names if cls._is_vex_module(name)]
+        return found
+
+    @staticmethod
+    def _tool_modules():
+        """The modules behind every tool name, judged even if they are in ALLOWED."""
+        from jarvis.v2 import mcp
+        from jarvis.v2.providers import fastpath
+        modules = {mcp, fastpath}
+        for name in set(fastpath.FAST_TOOLS) | set(mcp.MCP_TOOLS) | set(tools.REGISTRY):
+            func = getattr(tools.REGISTRY.get(name), "func", None)
+            if func is not None:
+                modules.add(inspect.getmodule(func))
+        return modules
 
     def test_no_tool_name_or_discord_verb_is_for_vex(self):
         from jarvis.v2 import commands, mcp
@@ -2425,15 +2474,20 @@ class Reach(unittest.TestCase):
             if rel not in self.ALLOWED and self.NEEDLES.search(path.read_text(encoding="utf-8")):
                 offenders.append(rel)
         self.assertEqual(offenders, [])
-        from jarvis.v2 import mcp
-        from jarvis.v2.providers import fastpath
-        modules = {mcp, fastpath}
-        for name in set(fastpath.FAST_TOOLS) | set(mcp.MCP_TOOLS) | set(tools.REGISTRY):
-            func = getattr(tools.REGISTRY.get(name), "func", None)
-            if func is not None:
-                modules.add(inspect.getmodule(func))
+        modules = self._tool_modules()
         for module in modules:
             self.assertIsNone(self.NEEDLES.search(inspect.getsource(module)), module.__name__)
+
+    def test_no_import_reaches_vex_however_it_is_spelled(self):
+        offenders = {}
+        for path in sorted((REPO / "jarvis").rglob("*.py")):
+            rel = path.relative_to(REPO).as_posix()
+            found = [] if rel in self.ALLOWED else self._vex_names(path.read_text(encoding="utf-8"))
+            if found:
+                offenders[rel] = found
+        self.assertEqual(offenders, {})
+        for module in self._tool_modules():
+            self.assertEqual(self._vex_names(inspect.getsource(module)), [], module.__name__)
 
     def test_only_vex_py_creates_a_program_terminal(self):
         callers = sorted(p.relative_to(REPO).as_posix() for p in (REPO / "jarvis").rglob("*.py")
@@ -2465,7 +2519,37 @@ class Reach(unittest.TestCase):
                      "from jarvis.v2.vex import Vex", "from . import vex",
                      "subprocess.run(['VEXCOM.exe'])", "terminals.create_program(argv)"):
             self.assertIsNotNone(self.NEEDLES.search(text), text)
+        for text in ("from ..v2.vex import Vex", "from jarvis.v2 import vex", "from ..v2 import vex",
+                     "from ..v2 import terminals, vex", "from ..v2 import vex_setup",
+                     "import jarvis.v2.vex as v", "from .vex import Vex", "from . import vex",
+                     "import jarvis.v2.vex_setup", "from ..v2.vex_connection import VexConnection",
+                     "from ..v2 import (\n    vex,\n)\n",
+                     "from ..v2 import (\n    terminals,\n    vex_setup as setup,\n)\n",
+                     "from ..v2 \\\n    import vex\n",
+                     "def f():\n    from ..v2 import vex\n",
+                     "try:\n    from ..v2 import vex\nexcept ImportError:\n    pass\n",
+                     "importlib.import_module('.vex', 'jarvis.v2')",
+                     "importlib.import_module('..v2.vex_setup', __package__)",
+                     "load(name='jarvis.v2.vex_connection')",           # an alias of import_module
+                     "load('jarvis.v2.' 'vex_setup')",                  # one literal to the parser
+                     "__import__('vex_setup', globals(), locals(), ['run'], 2)",
+                     "__import__('v2.vex', globals(), locals(), ['Vex'], 1)",
+                     "__import__('v2', globals(), locals(), ['vex_setup'], 1)",
+                     "__import__('jarvis.v2', fromlist=('vex_connection',))",
+                     "pkgutil.resolve_name('jarvis.v2.vex_setup:run')",
+                     "getattr(v2, 'vex_setup')",
+                     "from .. import v2\nv2.vex_setup.run()\n",
+                     "from ..v2 import *\nvex_setup.run()\n"):
+            self.assertNotEqual(self._vex_names(text), [], text)
+        self.assertLessEqual({"vex", "vex_connection", "vex_setup"}, self.VEX_MODULES)
         self.assertIsNone(self.NEEDLES.search("from .model import TERMINAL_STATES"))
+        # What is not a vex module stays out: the walk must not turn main red
+        # the way the `RECORD_TREES` entry did the needles.
+        for text in ("from .model import TERMINAL_STATES", "from .vexing import Vexing", "import vexillology",
+                     "from ..v2 import terminals as vex_terminal", 'NAMES = ("vex", "vex.json")\n',
+                     'open("vex.json")', 'Path("jarvis/v2/vex.py")', "text = 'vex'\n", "# from ..v2 import vex\n",
+                     '"""from ..v2 import vex"""\n', "importlib.import_module(name)"):
+            self.assertEqual(self._vex_names(text), [], text)
 
 
 # -- review round 2: what a line runs, the caps, includes, names, the CLI ---------------------------

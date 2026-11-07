@@ -1500,3 +1500,29 @@ they need `/usr/bin/bwrap` and `/usr/bin/pasta` (the passt package) and run real
 harmless probes, against throwaway listeners only; the pasta checks make TCP connects (no
 request) to `api.anthropic.com:443` and `openrouter.ai:443`, and nothing reads the live
 daemon's quota or OpenRouter's price list (fakes are installed at import).
+
+## The Reach check reads imports by their syntax (2026-11-06)
+
+`Reach.NEEDLES` in `tests/v2/vex_check.py` missed `from ..v2.vex import Vex`,
+`from jarvis.v2 import vex`, `from ..v2 import vex`,
+`from ..v2 import terminals, vex` and `from ..v2 import vex_setup`. PR #345
+found it: the first of those, planted in `jarvis/tools/files.py`, left Reach
+passing. No file used the gap. All eight vex imports under `jarvis/` were in
+`ALLOWED` files.
+
+`Reach._vex_names` walks the AST instead of growing the regex, because a regex
+cannot read `from ..v2 import (\n    vex,\n)`. It judges imports at any depth,
+attributes and names (`v2.vex_setup`, or `vex_setup` after a star import), and
+string literals inside calls, which covers importlib, `__import__`, `fromlist`
+and `getattr` under any alias. `VEX_MODULES` comes from the disk, so a new
+`jarvis/v2/vex*.py` is judged without an edit.
+
+Two limits are deliberate. A string outside a call is not judged, because
+`RECORD_TREES` and the `"vex.json"` tuple are legitimate, and a false positive
+kept this test red on main from 2026-10-25. A name built at run time or held in
+a variable is not judged either: `importlib.import_module(name)` has nothing
+to read.
+
+The walk takes the raw source, never `_judged`'s output, which can fail to
+parse (`("é", , "VEX")`). NEEDLES stays for what is not an import: routes,
+`vexcom`, `create_program`, `Vex(`.
