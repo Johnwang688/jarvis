@@ -1936,6 +1936,22 @@ class DeviceHolders(unittest.TestCase):
         self.assertTrue(release_b())
         self.assertIsNone(v._device)
 
+    def test_only_a_usb_check_outlasting_the_wait_is_refused_with_its_code(self):
+        v = vex.Vex(SimpleNamespace())
+        v._device_idle = SimpleNamespace(wait_for=lambda *a, **k: False, notify_all=lambda: None)
+        release, _ = v._reserve_device("connection")
+        with self.assertRaises(vex.VexError) as refused:
+            v._reserve_device("download")
+        self.assertEqual(refused.exception.code, "usb_settling")
+        self.assertEqual(str(refused.exception), "A USB check is still settling. One device action at a time.")
+        self.assertEqual(v._device_waiters, 0)
+        self.assertTrue(release())
+        release, _ = v._reserve_device("info")
+        with self.assertRaises(vex.VexError) as refused:
+            v._reserve_device("download")
+        self.assertIsNone(refused.exception.code)
+        self.assertTrue(release())
+
 
 class TemplateFiles(Base):
     """L6: the archive is opened as a regular file only; writes never follow a

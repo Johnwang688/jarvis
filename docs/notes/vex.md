@@ -1249,14 +1249,23 @@ window may have been hidden, which also stops the checks; nothing logged says.
 
 The fix is in the HUD only. `settleUsb` runs one USB check before each try:
 after the brain terminal is closed, after a rebuild, and after a retry's wait.
-It waits for that check to end (at most `USB_SETTLE_MAX_MS`, 5 s), because
-`_reserve_device` refuses a download when a check has not settled in 4 s. A
-refused, failed or busy check sends the try as before, on the plain link if
-the reading is old. Stop or a card ends the wait and sends nothing.
-`CHANNEL_READING_MAX_S` and `_controller_only` are unchanged, so a brain on USB
-still never gets the channel.
+It waits for that check to end (at most `USB_SETTLE_MAX_MS`, 5 s, the request
+included), because `_reserve_device` refuses a download when a check has not
+settled in 4 s. That refusal now carries the code `usb_settling` (`UsbSettling`),
+and the chain waits and sends once more on it; a second refusal is said in the
+daemon's words. A refused, failed or busy check sends the try as before, on the
+plain link if the reading is old, so the check improves the odds of a fresh
+reading and does not promise one. Stop or a card ends the wait and sends
+nothing. `CHANNEL_READING_MAX_S` and `_controller_only` are unchanged, so a
+brain on USB still never gets the channel. `connectionSeq` lets only the newest
+USB request set the reading, since a window's poll can overlap the chain's.
+
+Review of #344 (Sol; no HIGH), fixed in the PR: MED, the limit did not bind the
+request itself; MED, a check of the chain's own could outlast both waits and
+refuse a download that would have run; LOW, an older poll could replace the
+chain's newer reading; LOW, the line said Building during the check.
 
 Checks (fakes only): `state/vex.test.ts`, "a USB check before every download
-try". Removing the calls, the wait, its limit or the `holds()` stop each fails
-it. Not yet seen on the robot: a download after the brain terminal saying
+try", and `vex_check` for the refusal's code. Removing the calls, the wait, its
+limit or the `holds()` stop each fails it. Not yet seen on the robot: a download after the brain terminal saying
 "(controller download channel)" in the journal and taking about 20 s.

@@ -187,6 +187,14 @@ class VexError(Exception):
     code: str | None = None
 
 
+class UsbSettling(VexError):
+    """A device action refused because a USB check still holds the port after
+    the bounded wait. Only that: the HUD's download chain waits for the check
+    and sends once more, on this code, never on the sentence's wording."""
+
+    code = "usb_settling"
+
+
 class BuildFirst(VexError):
     """A download refused because the program must be built first: there is no
     `build/<name>.bin`, or it is older than its sources and no successful build
@@ -1700,10 +1708,11 @@ class Vex:
                 raise VexError("Jarvis is stopping")
             busy = self._device
             if busy is not None:
+                if busy["kind"] == "connection":
+                    raise UsbSettling("A USB check is still settling. One device action at a time.")
                 what = {"brain": "The brain terminal is using the brain's port; close it first",
                         "download": "A download is running",
-                        "info": "A device-info read is running",
-                        "connection": "A USB check is still settling"}[busy["kind"]]
+                        "info": "A device-info read is running"}[busy["kind"]]
                 raise VexError(f"{what}. One device action at a time.")
             token = secrets.token_hex(8)
             self._device = {"kind": kind, "terminal_id": None, "token": token}

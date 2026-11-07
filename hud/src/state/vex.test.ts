@@ -48,6 +48,7 @@ vi.mock("../api", () => ({
       h.usbAsked += 1;
       h.trail.push("usb");
       if (state instanceof Error) throw state;
+      if (state === "unanswered") return new Promise(() => {});
       return {brain: true, controller: false, state, checked_at: "", message: "", events: []};
     },
     vexBuild: async (pid: string, action: string) => {
@@ -1041,6 +1042,89 @@ describe("a USB check before every download try (the channel's fresh reading, 20
     await work;
     expect(h.downloads).toHaveLength(0);
     expect(h.usbAsked).toBe(asked);
+  });
+
+  it("a request never answered holds the download only so long", async () => {
+    vi.useFakeTimers();
+    h.usb = ["unanswered"];
+    h.download = async () => ({ terminal_id: "b0000001" });
+    const store = new VexStore();
+    const work = store.download("p3", 1, "auton", "override");
+    await vi.waitFor(() => expect(h.usbAsked).toBe(1));
+    expect(h.downloads).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(USB_SETTLE_MAX_MS + 2000);
+    await work;
+    expect(h.downloads).toHaveLength(1);
+  });
+
+  it("Stop ends the wait for a request never answered, and frees the chain", async () => {
+    vi.useFakeTimers();
+    h.usb = ["unanswered"];
+    h.download = async () => ({ terminal_id: "b0000001" });
+    const store = new VexStore();
+    const work = store.download("p3", 1, "auton", "override");
+    await vi.waitFor(() => expect(h.usbAsked).toBe(1));
+    store.stop("p3");
+    await vi.advanceTimersByTimeAsync(200);
+    await work;
+    expect(store.chain).toBeNull();
+    expect(h.downloads).toHaveLength(0);
+  });
+
+  it("an older answer never replaces the chain's newer reading", async () => {
+    const reading = (controller: boolean, state = "ready") =>
+      ({brain: false, controller, state, checked_at: "", message: "", events: []}) as any;
+    let late!: (c: unknown) => void;
+    vi.spyOn(api, "vexConnection")
+      .mockImplementationOnce(() => new Promise(resolve => { late = resolve; }) as any)
+      .mockImplementationOnce(async () => reading(true));
+    h.download = async () => ({ terminal_id: "b0000001" });
+    const store = new VexStore();
+    await store.refreshStatus();
+    const background = store.refreshConnection();
+    await store.download("p3", 1, "auton", "override");
+    expect(store.connection?.controller).toBe(true);
+    late(reading(false));
+    await background;
+    expect(store.connection?.controller).toBe(true);
+  });
+
+  it("the status line says download, not build, during the check", async () => {
+    vi.useFakeTimers();
+    h.usb = ["unanswered"];
+    h.download = async () => ({ terminal_id: "b0000001" });
+    const store = new VexStore();
+    const work = store.download("p3", 1, "auton", "override");
+    await vi.waitFor(() => expect(h.usbAsked).toBe(1));
+    expect(store.chain?.phase).toBe("download");
+    await vi.advanceTimersByTimeAsync(USB_SETTLE_MAX_MS + 2000);
+    await work;
+  });
+
+  it("a check that outlasts the daemon's wait is waited for, and the try sent once more", async () => {
+    const settling = Object.assign(new Error("A USB check is still settling. One device action at a time."),
+                                   { status: 409, body: { code: "usb_settling" } });
+    let n = 0;
+    h.download = async () => {
+      n += 1;
+      if (n === 1) throw settling;
+      return { terminal_id: "b0000001" };
+    };
+    const store = new VexStore();
+    await store.download("p3", 1, "auton", "override");
+    expect(sends()).toEqual(["usb", "download", "usb", "download"]);
+    expect(store.run("p3").downloaded?.ok).toBe(true);
+  });
+
+  it("still settling after that: said in the daemon's words, sent no more", async () => {
+    const settling = Object.assign(new Error("A USB check is still settling. One device action at a time."),
+                                   { status: 409, body: { code: "usb_settling" } });
+    h.download = async () => { throw settling; };
+    const store = new VexStore();
+    await store.download("p3", 1, "auton", "override");
+    expect(h.downloads).toHaveLength(2);
+    expect(store.run("p3").note).toContain("A USB check is still settling");
+    expect(store.chain).toBeNull();
   });
 
   it("again before a retry, so a later try keeps the channel", async () => {

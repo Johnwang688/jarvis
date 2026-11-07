@@ -38,7 +38,7 @@ import { api } from "../api";
 import { terminals } from "../components/Terminal";
 import {
   DeviceLedger, LAST_BUILDS_KEY, chainStoppable, isSourcePath, isVexId, needsBuildFirst, nameRefusal,
-  parseDeviceRecord, parseLastBuilds, retriesDownload, slotRefusal, stillStale, stoppedDownloadNote,
+  parseDeviceRecord, parseLastBuilds, retriesDownload, slotRefusal, stillStale, stoppedDownloadNote, usbSettling,
   DOWNLOAD_RETRY_WAIT_MS, DOWNLOAD_TRIES, type BuildView, type ChainStep,
   type ChainView, type Detection,
   type DeviceAction, type DeviceRead, type VexStatus, type DownloadView, type ConnectionView,
@@ -149,6 +149,8 @@ export class VexStore {
   connection: ConnectionView | null = null;
   connectionError = "";
   private connectionPending = false;
+  /** Bumped by each USB request: only the newest may set the reading. */
+  private connectionSeq = 0;
   private connectionAt = 0;
   info: { text: string; exit_code: number | null; read: DeviceRead } | null = null;
   /** The device read on its way, if any (one at a time: the daemon's device reservation). */
@@ -468,11 +470,15 @@ export class VexStore {
       || !this.status?.configured || document.visibilityState !== "visible" || Date.now() - this.connectionAt < 1000) return;
     this.connectionPending = true;
     this.connectionAt = Date.now();
+    const seq = ++this.connectionSeq;
     try {
-      this.connection = await api.vexConnection();
-      this.connectionError = "";
+      const reading = await api.vexConnection();
+      if (seq === this.connectionSeq) {
+        this.connection = reading;
+        this.connectionError = "";
+      }
     } catch {
-      this.connectionError = "USB status unavailable; last confirmed state retained.";
+      if (seq === this.connectionSeq) this.connectionError = "USB status unavailable; last confirmed state retained.";
     } finally {
       this.connectionPending = false;
       this.changed();
@@ -565,6 +571,15 @@ export class VexStore {
     const phase = (p: Chain["phase"]) => {
       chain.phase = p;
       this.changed();
+    };
+    /** One try sent; a USB check that outlasted both waits is waited for once more. */
+    const sendTry = async () => {
+      let sent = await this.sendDownload(projectId, slot, name);
+      if (sent.refused && usbSettling(sent.code) && holds()) {
+        await this.settleUsb(holds);
+        if (holds()) sent = await this.sendDownload(projectId, slot, name);
+      }
+      return sent;
     };
     /** One make step of the chain; false when the chain stops there (said). */
     const step = async (action: "clean" | "build" | "rebuild"): Promise<boolean> => {
@@ -659,21 +674,22 @@ export class VexStore {
           return;
         }
       }
-      await this.settleUsb(holds);
       if (!holds()) return dropped("before it downloaded");
       phase("download");
       this.say(projectId, "Downloading…", "info");
-      let sent = await this.sendDownload(projectId, slot, name);
+      await this.settleUsb(holds);
+      if (!holds()) return dropped("before it downloaded");
+      let sent = await sendTry();
       // Still "Build first" after the build (a source edited while it ran, or
       // a header the makefile does not list: VX-2 delta review MED-1): one
       // rebuild. Never a second.
       if (sent.refused && needsBuildFirst(sent.code)) {
         if (!(await step("rebuild"))) return;
-        await this.settleUsb(holds);
-        if (!holds()) return dropped("before it downloaded");
         phase("download");
         this.say(projectId, "Downloading…", "info");
-        sent = await this.sendDownload(projectId, slot, name);
+        await this.settleUsb(holds);
+        if (!holds()) return dropped("before it downloaded");
+        sent = await sendTry();
       }
       if (sent.refused && needsBuildFirst(sent.code)) {
         if (!holds()) return dropped("before it downloaded");
@@ -731,7 +747,7 @@ export class VexStore {
           if (this.crashed) return notAgain("the window hit an error", "the window hit an error, so it was not sent again");
           if (!holds()) return notAgain("an approval card came up", "an approval card came up, so it was not sent again");
           phase("download");
-          sent = await this.sendDownload(projectId, slot, name);
+          sent = await sendTry();
           if (sent.refused || !sent.terminal || !sent.id) {
             if (chain.cancelled) {
               droppedBy = "the download was stopped";
@@ -855,23 +871,26 @@ export class VexStore {
    * link's 80–100 s rather than about 20 s (2026-11-06). Anything but
    * "checking" ends the wait, and a failed or refused check sends the try as
    * before. Waited out rather than only started: a download refuses a check
-   * still settling after 4 s.
+   * still settling after 4 s (`sendTry` then waits once more). The limit and
+   * `holds` bind the request too, so an unanswered one holds nothing up.
    */
   private async settleUsb(holds: () => boolean): Promise<void> {
     const until = Date.now() + USB_SETTLE_MAX_MS;
-    while (holds()) {
-      let state: ConnectionView["state"];
-      try {
-        const reading = await api.vexConnection();
+    while (holds() && Date.now() < until) {
+      const seq = ++this.connectionSeq;
+      const answer: { state: ConnectionView["state"] | "failed" | null } = { state: null };
+      const asked = api.vexConnection().then((reading) => {
+        answer.state = reading.state;
+        if (seq !== this.connectionSeq) return;
         this.connection = reading;
         this.connectionError = "";
-        state = reading.state;
-      } catch {
-        return;
-      } finally {
         this.changed();
-      }
-      if (state !== "checking" || Date.now() >= until) return;
+      }, () => { answer.state = "failed"; });
+      const givenUp = (async () => {
+        while (answer.state === null && holds() && Date.now() < until) await sleep(50);
+      })();
+      await Promise.race([asked, givenUp]);
+      if (answer.state !== "checking") return;
       await sleep(200);
     }
   }
