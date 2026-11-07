@@ -322,6 +322,11 @@ export const BUILD_FIRST_CODE = "build_first";
  * chains Build then Download on the one click). A refusal without the code
  * is shown in its own words and builds nothing.
  */
+/** The daemon's `UsbSettling`: a USB check still held the port past its bounded wait. */
+export function usbSettling(code: unknown): boolean {
+  return code === "usb_settling";
+}
+
 export function needsBuildFirst(code: unknown): boolean {
   return code === BUILD_FIRST_CODE;
 }

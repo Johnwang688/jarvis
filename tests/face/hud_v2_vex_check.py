@@ -1486,7 +1486,8 @@ def _feedback_checks(page, mock, check, until, fake):
     page.get_by_test_id("vex-usb-open").click()
     check("the header's Brain/Controller dots open the Device tab",
           page.get_by_test_id("vex-out-panel").get_attribute("data-tab") == "device")
-    assert until(lambda: page.get_by_test_id("vex-usb-brain").inner_text().startswith("Brain: Connected"))
+    # The fresh reading, not the chain's own check of a moment ago ("(last confirmed)").
+    assert until(lambda: page.get_by_test_id("vex-usb-brain").inner_text() == "Brain: Connected")
     check("Brain/Controller and tooling have distinct indicators", page.get_by_test_id("vex-usb-brain").inner_text() == "Brain: Connected"
           and page.get_by_test_id("vex-usb-controller").inner_text() == "Controller: Disconnected"
           and "Tooling: Configured" in page.get_by_test_id("vex-tooling").inner_text())
