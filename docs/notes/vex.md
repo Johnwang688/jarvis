@@ -1231,6 +1231,12 @@ joined under `V2_DATA_DIR`, not a reach: `files.py` has no vex import, name or
 attribute. `ALLOWED` could not take the file, because it holds registered tools
 and the test's second half greps those modules' source whatever `ALLOWED` says.
 `Reach._judged` removes that one tuple element by its AST position, for both
-halves. Any other `"vex"` in `files.py` is still a hit, including a line that
-reads the same inside a split `getattr` call
+halves, and only while `RECORD_TREES` is bound once, at module level, to a tuple
+of plain strings holding one literal `"vex"`. Any other shape sets nothing
+aside, so the entry is a hit again. Any other `"vex"` in `files.py` is a hit too,
+including a line that reads the same inside a split `getattr` call
 (`test_only_the_record_tree_name_is_set_aside`). `files.py` did not change.
+
+The check reads text, not data flow. `getattr(daemon, RECORD_TREES[-1])` reaches
+through the set-aside entry and is not seen, as `getattr(daemon, "ve" + "x")`
+never was.

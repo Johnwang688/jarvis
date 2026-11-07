@@ -2415,19 +2415,31 @@ class Reach(unittest.TestCase):
         """The source the needles read. files.py holds tools, so it cannot be
         in ALLOWED, and it names the daemon's `vex/` record folder in
         RECORD_TREES to refuse writes there (44d59e1b): a folder name, not a
-        reach. Only that one tuple element is set aside, by its position. A
-        line pattern would also pass `"vex",` on a line of its own inside a
-        split `getattr(daemon, "vex")`."""
+        reach. That one element is set aside, by its position, and only while
+        RECORD_TREES is bound once, at module level, to a tuple of plain
+        strings holding one literal `"vex"`. Any other shape sets nothing
+        aside, so the name is a hit again. A line pattern would also pass
+        `"vex",` on a line of its own inside a split `getattr(daemon, "vex")`."""
         if rel != "jarvis/tools/files.py":
             return text
-        lines = text.split("\n")
-        for node in ast.parse(text).body:
-            if (isinstance(node, ast.Assign) and isinstance(node.value, ast.Tuple)
-                    and [getattr(target, "id", None) for target in node.targets] == ["RECORD_TREES"]):
-                for item in reversed(node.value.elts):
-                    if isinstance(item, ast.Constant) and item.value == "vex" and item.lineno == item.end_lineno:
-                        line = lines[item.lineno - 1].encode()    # ast's columns count UTF-8 bytes
-                        lines[item.lineno - 1] = (line[:item.col_offset] + line[item.end_col_offset:]).decode()
+        tree = ast.parse(text)
+        stores = [node for node in ast.walk(tree) if isinstance(node, ast.Name)
+                  and node.id == "RECORD_TREES" and isinstance(node.ctx, ast.Store)]
+        assigns = [node for node in tree.body if isinstance(node, ast.Assign)
+                   and len(node.targets) == 1 and node.targets[0] in stores]
+        if len(stores) != 1 or len(assigns) != 1 or not isinstance(assigns[0].value, ast.Tuple):
+            return text
+        items = assigns[0].value.elts
+        if not all(isinstance(item, ast.Constant) and isinstance(item.value, str) for item in items):
+            return text
+        names = [item for item in items if item.value == "vex"]
+        if len(names) != 1 or names[0].lineno != names[0].end_lineno:
+            return text
+        name, lines = names[0], text.split("\n")
+        line = lines[name.lineno - 1].encode()    # ast's columns count UTF-8 bytes
+        if line[name.col_offset:name.end_col_offset] != b'"vex"':
+            return text
+        lines[name.lineno - 1] = (line[:name.col_offset] + line[name.end_col_offset:]).decode()
         return "\n".join(lines)
 
     def test_no_tool_name_or_discord_verb_is_for_vex(self):
@@ -2505,9 +2517,21 @@ class Reach(unittest.TestCase):
                       'RECORD_TREES = ("threads", "/vex/download")\n',
                       'from .vex import Vex\n', 'daemon.vex.download()\n'):
             self.assertIsNotNone(self.NEEDLES.search(self._judged(rel, source + reach)), reach)
-        # The entry beside a reach on the same line, and past non-ASCII text.
-        line = 'RECORD_TREES = ("é", "vex", "VEX", getattr(daemon, "vex"))\n'
-        self.assertEqual(self._judged(rel, line), 'RECORD_TREES = ("é", , "VEX", getattr(daemon, "vex"))\n')
+        # Past non-ASCII text, and a reach sharing the entry's line is still read.
+        self.assertEqual(self._judged(rel, 'RECORD_TREES = ("é", "vex", "VEX")\n'), 'RECORD_TREES = ("é", , "VEX")\n')
+        self.assertIsNotNone(self.NEEDLES.search(self._judged(rel, 'RECORD_TREES = ("vex",); daemon.vex.download()\n')))
+        # Any other shape sets nothing aside. Asserted on the text itself:
+        # on files.py + a suffix, a hit could come from line 407 alone.
+        for shape in ('RECORD_TREES = ("vex" "" "",); RECORD_TREES = ("v" "ex",); daemon.vex.download()\n',
+                      'RECORD_TREES = ("threads", "vex")\nRECORD_TREES = (*RECORD_TREES, "vex")\n',
+                      'RECORD_TREES = ("vex",)\nRECORD_TREES += ("vex",)\n',
+                      'RECORD_TREES = ("vex",)\ndef f():\n    RECORD_TREES = ()\n',
+                      'RECORD_TREES = ("vex" "",)\n', 'RECORD_TREES = ("v" "ex",)\n', "RECORD_TREES = ('vex',)\n",
+                      'RECORD_TREES = ("vex", "vex")\n', 'RECORD_TREES = ("vex", getattr(daemon, "vex"))\n',
+                      'RECORD_TREES = (*OTHER, "vex")\n', 'RECORD_TREES = X = ("vex",)\n',
+                      'RECORD_TREES: tuple = ("vex",)\n', 'RECORD_TREES = ["vex"]\n',
+                      'if daemon:\n    RECORD_TREES = ("vex",)\n'):
+            self.assertEqual(self._judged(rel, shape), shape, shape)
 
 
 # -- review round 2: what a line runs, the caps, includes, names, the CLI ---------------------------
