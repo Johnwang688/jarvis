@@ -1231,12 +1231,14 @@ joined under `V2_DATA_DIR`, not a reach: `files.py` has no vex import, name or
 attribute. `ALLOWED` could not take the file, because it holds registered tools
 and the test's second half greps those modules' source whatever `ALLOWED` says.
 `Reach._judged` removes that one tuple element by its AST position, for both
-halves, and only while `RECORD_TREES` is bound once, at module level, to a tuple
-of plain strings holding one literal `"vex"`. Any other shape sets nothing
-aside, so the entry is a hit again. Any other `"vex"` in `files.py` is a hit too,
-including a line that reads the same inside a split `getattr` call
+halves, and only while `RECORD_TREES` is one module-level tuple of plain strings
+holding one literal `"vex"`. Every other mention of the name in `files.py` must
+be a `data / name` join or part of the path cache's key, and no other file under
+`jarvis/` may name it. Any other shape sets nothing aside, so the entry is a hit
+again; `getattr(daemon, RECORD_TREES[-1])` and `import math as RECORD_TREES` are
+both such shapes. Any other `"vex"` in `files.py` is a hit too, including a line
+that reads the same inside a split `getattr` call
 (`test_only_the_record_tree_name_is_set_aside`). `files.py` did not change.
 
-The check reads text, not data flow. `getattr(daemon, RECORD_TREES[-1])` reaches
-through the set-aside entry and is not seen, as `getattr(daemon, "ve" + "x")`
-never was.
+The check reads text, not data flow. A copy reached through the cache's `key` or
+`globals()` is not seen, as `getattr(daemon, "ve" + "x")` never was.
