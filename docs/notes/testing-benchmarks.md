@@ -1500,3 +1500,41 @@ they need `/usr/bin/bwrap` and `/usr/bin/pasta` (the passt package) and run real
 harmless probes, against throwaway listeners only; the pasta checks make TCP connects (no
 request) to `api.anthropic.com:443` and `openrouter.ai:443`, and nothing reads the live
 daemon's quota or OpenRouter's price list (fakes are installed at import).
+
+## The Reach check reads imports by their syntax (2026-11-06)
+
+`Reach.NEEDLES` in `tests/v2/vex_check.py` missed `from ..v2.vex import Vex`,
+`from jarvis.v2 import vex`, `from ..v2 import vex`,
+`from ..v2 import terminals, vex` and `from ..v2 import vex_setup`. PR #345
+found it: the first of those, planted in `jarvis/tools/files.py`, left Reach
+passing. No file used the gap. All eight vex imports under `jarvis/` were in
+`ALLOWED` files.
+
+`Reach._vex_names` walks the AST instead of growing the regex, which would need
+a pattern for every shape of import list: parenthesized, split over lines,
+several names, an alias, a comment between them. It judges imports at any
+depth, a star import from the package, attributes (`v2.vex_setup`), and string
+literals inside calls. Those cover importlib, `__import__`, `fromlist`, `getattr`
+and `exec`, under any alias. `VEX_MODULES` comes from the disk, so a new
+`jarvis/v2/vex*.py` is judged without an edit.
+
+Plain names are not judged, because `vex_setup = 1` is not a reach. A star import
+is judged directly instead, since it is the one way a bare name arrives.
+
+Three limits are deliberate.
+
+- A string outside a call is not judged, because `RECORD_TREES` and the
+  `"vex.json"` tuple are legitimate, and a false positive kept this test red on
+  main from 2026-10-25.
+- A name built at run time or held in a variable is not judged:
+  `importlib.import_module(name)` has nothing to read.
+- A few harmless things do count, because they look exactly like a reach:
+  `Path("vex_setup")`, `obj.vex_setup = 1`, a `jarvis.`-rooted string through
+  a module such as `"jarvis.v2.vex_setup.json"`, a call's literal that parses as
+  an import such as `log("import vex_setup")`, and `from . import *` in any
+  package, since the walk does not know which package a file is in. None exists
+  today. Rename the thing rather than widen the check.
+
+The walk takes the raw source, never `_judged`'s output, which can fail to
+parse (`("é", , "VEX")`). NEEDLES stays for what is not an import: routes,
+`vexcom`, `create_program`, `Vex(`.
