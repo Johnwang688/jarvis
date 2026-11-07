@@ -45,6 +45,7 @@ What matters most, each written to fail with its guard removed:
 """
 from __future__ import annotations
 
+import ast
 import base64
 import http.client
 import inspect
@@ -2409,6 +2410,26 @@ class Reach(unittest.TestCase):
                "jarvis/v2/daemon.py", "jarvis/v2/terminals.py", "jarvis/rules.py",
                "jarvis/config.py", "jarvis/__main__.py"}
 
+    @staticmethod
+    def _judged(rel, text):
+        """The source the needles read. files.py holds tools, so it cannot be
+        in ALLOWED, and it names the daemon's `vex/` record folder in
+        RECORD_TREES to refuse writes there (44d59e1b): a folder name, not a
+        reach. Only that one tuple element is set aside, by its position. A
+        line pattern would also pass `"vex",` on a line of its own inside a
+        split `getattr(daemon, "vex")`."""
+        if rel != "jarvis/tools/files.py":
+            return text
+        lines = text.split("\n")
+        for node in ast.parse(text).body:
+            if (isinstance(node, ast.Assign) and isinstance(node.value, ast.Tuple)
+                    and [getattr(target, "id", None) for target in node.targets] == ["RECORD_TREES"]):
+                for item in reversed(node.value.elts):
+                    if isinstance(item, ast.Constant) and item.value == "vex" and item.lineno == item.end_lineno:
+                        line = lines[item.lineno - 1].encode()    # ast's columns count UTF-8 bytes
+                        lines[item.lineno - 1] = (line[:item.col_offset] + line[item.end_col_offset:]).decode()
+        return "\n".join(lines)
+
     def test_no_tool_name_or_discord_verb_is_for_vex(self):
         from jarvis.v2 import commands, mcp
         from jarvis.v2.providers import fastpath
@@ -2422,7 +2443,7 @@ class Reach(unittest.TestCase):
         offenders = []
         for path in sorted((REPO / "jarvis").rglob("*.py")):
             rel = path.relative_to(REPO).as_posix()
-            if rel not in self.ALLOWED and self.NEEDLES.search(path.read_text(encoding="utf-8")):
+            if rel not in self.ALLOWED and self.NEEDLES.search(self._judged(rel, path.read_text(encoding="utf-8"))):
                 offenders.append(rel)
         self.assertEqual(offenders, [])
         from jarvis.v2 import mcp
@@ -2433,7 +2454,8 @@ class Reach(unittest.TestCase):
             if func is not None:
                 modules.add(inspect.getmodule(func))
         for module in modules:
-            self.assertIsNone(self.NEEDLES.search(inspect.getsource(module)), module.__name__)
+            rel = module.__name__.replace(".", "/") + ".py"
+            self.assertIsNone(self.NEEDLES.search(self._judged(rel, inspect.getsource(module))), module.__name__)
 
     def test_only_vex_py_creates_a_program_terminal(self):
         callers = sorted(p.relative_to(REPO).as_posix() for p in (REPO / "jarvis").rglob("*.py")
@@ -2466,6 +2488,26 @@ class Reach(unittest.TestCase):
                      "subprocess.run(['VEXCOM.exe'])", "terminals.create_program(argv)"):
             self.assertIsNotNone(self.NEEDLES.search(text), text)
         self.assertIsNone(self.NEEDLES.search("from .model import TERMINAL_STATES"))
+
+    def test_only_the_record_tree_name_is_set_aside(self):
+        rel = "jarvis/tools/files.py"
+        source = (REPO / rel).read_text(encoding="utf-8")
+        self.assertIn("vex", v1_files.RECORD_TREES)
+        self.assertIsNotNone(self.NEEDLES.search(source), "the name is there to set aside")
+        self.assertIsNone(self.NEEDLES.search(self._judged(rel, source)))
+        self.assertEqual(self._judged("jarvis/tools/shell.py", source), source, "that file only")
+        for reach in ('getattr(daemon, "vex")\n',
+                      'getattr(\n    daemon,\n    "vex",\n)\n',           # the entry's own line, elsewhere
+                      'OTHER_TREES = (\n    "vex",\n)\n',
+                      'def f():\n    RECORD_TREES = ("vex",)\n',
+                      'RECORD_TREES += ("vex",)\n',
+                      'RECORD_TREES = ("threads", getattr(daemon, "vex"))\n',
+                      'RECORD_TREES = ("threads", "/vex/download")\n',
+                      'from .vex import Vex\n', 'daemon.vex.download()\n'):
+            self.assertIsNotNone(self.NEEDLES.search(self._judged(rel, source + reach)), reach)
+        # The entry beside a reach on the same line, and past non-ASCII text.
+        line = 'RECORD_TREES = ("é", "vex", "VEX", getattr(daemon, "vex"))\n'
+        self.assertEqual(self._judged(rel, line), 'RECORD_TREES = ("é", , "VEX", getattr(daemon, "vex"))\n')
 
 
 # -- review round 2: what a line runs, the caps, includes, names, the CLI ---------------------------

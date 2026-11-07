@@ -1221,3 +1221,16 @@ it sends.
 
 A differential upload would only shorten the ~15 s `.bin` transfer over the
 radio, not the fixed ~2.5 s, and costs 1–2 weeks. It is not planned.
+
+## The Reach check and the `vex` record tree (2026-11-06)
+
+`Reach.test_nothing_but_the_daemon_and_its_routes_reaches_vex` had failed on
+main since 44d59e1b (2026-10-25) added `"vex"` to `files.RECORD_TREES`, which
+protects `vex/build-*.lock` and `unfinished-*`. That entry is a folder name
+joined under `V2_DATA_DIR`, not a reach: `files.py` has no vex import, name or
+attribute. `ALLOWED` could not take the file, because it holds registered tools
+and the test's second half greps those modules' source whatever `ALLOWED` says.
+`Reach._judged` removes that one tuple element by its AST position, for both
+halves. Any other `"vex"` in `files.py` is still a hit, including a line that
+reads the same inside a split `getattr` call
+(`test_only_the_record_tree_name_is_set_aside`). `files.py` did not change.
