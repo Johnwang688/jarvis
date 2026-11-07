@@ -1127,6 +1127,67 @@ describe("a USB check before every download try (the channel's fresh reading, 20
     expect(store.chain).toBeNull();
   });
 
+  it("an answer given up on never sets the reading", async () => {
+    vi.useFakeTimers();
+    const reading = (controller: boolean) =>
+      ({brain: false, controller, state: "ready", checked_at: "", message: "", events: []}) as any;
+    let late!: (c: unknown) => void;
+    vi.spyOn(api, "vexConnection").mockImplementation(() => new Promise(resolve => { late = resolve; }) as any);
+    h.download = async () => ({ terminal_id: "b0000001" });
+    const store = new VexStore();
+    const work = store.download("p3", 1, "auton", "override");
+    await vi.advanceTimersByTimeAsync(USB_SETTLE_MAX_MS + 2000);
+    await work;
+    expect(h.downloads).toHaveLength(1);
+    late(reading(true));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(store.connection).toBeNull();
+  });
+
+  const settlingThenHeld = () => {
+    h.usb = ["ready", "unanswered"];
+    h.download = async () => {
+      throw Object.assign(new Error("A USB check is still settling. One device action at a time."),
+                          { status: 409, body: { code: "usb_settling" } });
+    };
+  };
+
+  it("a card during the second wait is said as the card, not as a USB refusal", async () => {
+    vi.useFakeTimers();
+    settlingThenHeld();
+    const store = new VexStore();
+    const work = store.download("p3", 1, "auton", "override");
+    await vi.waitFor(() => expect(h.usbAsked).toBe(2));
+    store.setBlocked(true);
+    await vi.advanceTimersByTimeAsync(200);
+    await work;
+    expect(h.downloads).toHaveLength(1);
+    expect(store.run("p3").note).toMatch(/An approval card came up before it downloaded: nothing was downloaded/);
+  });
+
+  it("a card during a retry's second wait is said as the card too", async () => {
+    vi.useFakeTimers();
+    h.usb = ["ready", "ready", "unanswered"];
+    let n = 0;
+    h.download = async () => {
+      n += 1;
+      if (n === 1) return { terminal_id: "b0000001" };
+      throw Object.assign(new Error("A USB check is still settling. One device action at a time."),
+                          { status: 409, body: { code: "usb_settling" } });
+    };
+    vi.spyOn(api, "vexDownloadState").mockImplementation(async (id: string) =>
+      ({ id, project_id: "p3", slot: 1, state: "failed", terminal_id: id, exit_code: 4, output: "",
+         started: "", ended: "x" }) as DownloadView);
+    const store = new VexStore();
+    const work = store.download("p3", 1, "auton", "override");
+    await vi.waitFor(() => expect(h.usbAsked).toBe(3), { timeout: 8000 });
+    store.setBlocked(true);
+    await vi.advanceTimersByTimeAsync(200);
+    await work;
+    expect(h.downloads).toHaveLength(2);
+    expect(store.run("p3").note).toContain("an approval card came up, so it was not sent again");
+  });
+
   it("again before a retry, so a later try keeps the channel", async () => {
     vi.useFakeTimers();
     const ends = new Map<string, number>();

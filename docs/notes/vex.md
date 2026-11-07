@@ -1247,7 +1247,7 @@ successful downloads of 40 s or more. Not explained: 10-26 20:23 and 10-31
 09:30, both plain with no brain terminal or chain to starve the reading. The
 window may have been hidden, which also stops the checks; nothing logged says.
 
-The fix is in the HUD only. `settleUsb` runs one USB check before each try:
+The fix is in the HUD, apart from the refusal's code below. `settleUsb` runs one USB check before each try:
 after the brain terminal is closed, after a rebuild, and after a retry's wait.
 It waits for that check to end (at most `USB_SETTLE_MAX_MS`, 5 s, the request
 included), because `_reserve_device` refuses a download when a check has not
@@ -1263,7 +1263,10 @@ USB request set the reading, since a window's poll can overlap the chain's.
 Review of #344 (Sol; no HIGH), fixed in the PR: MED, the limit did not bind the
 request itself; MED, a check of the chain's own could outlast both waits and
 refuse a download that would have run; LOW, an older poll could replace the
-chain's newer reading; LOW, the line said Building during the check.
+chain's newer reading; LOW, the line said Building during the check. Its delta
+review confirmed those and added two LOWs, also fixed: an abandoned request's
+late answer still set the reading, and a card or crash during the second wait
+was said as a USB refusal.
 
 Checks (fakes only): `state/vex.test.ts`, "a USB check before every download
 try", and `vex_check` for the refusal's code. Removing the calls, the wait, its

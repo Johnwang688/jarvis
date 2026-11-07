@@ -699,6 +699,7 @@ export class VexStore {
       }
       if (sent.refused || !sent.terminal || !sent.id) {
         if (chain.cancelled) return dropped("");
+        if (!holds()) return dropped("before it downloaded");
         this.say(projectId, sent.refused || "the download could not start");
         return;
       }
@@ -754,6 +755,8 @@ export class VexStore {
               this.downloadEnded(projectId, slot, end, true);
               return;
             }
+            if (this.crashed) return notAgain("the window hit an error", "the window hit an error, so it was not sent again");
+            if (!holds()) return notAgain("an approval card came up", "an approval card came up, so it was not sent again");
             return notAgain("the next try could not start",
               `the next try could not start (${sent.refused || "the download could not start"})`);
           }
@@ -890,6 +893,7 @@ export class VexStore {
         while (answer.state === null && holds() && Date.now() < until) await sleep(50);
       })();
       await Promise.race([asked, givenUp]);
+      if (answer.state === null) this.connectionSeq++;       // given up on: its answer is dropped
       if (answer.state !== "checking") return;
       await sleep(200);
     }
