@@ -2452,9 +2452,11 @@ class Reach(unittest.TestCase):
         names = [item for item in items if item.value == "vex"]
         if len(names) != 1 or names[0].lineno != names[0].end_lineno:
             return text
-        # Tokens, not the AST: an import, a def or an attribute names it too.
-        mentions = sum(token.string == "RECORD_TREES" for token in tokenize.generate_tokens(io.StringIO(text).readline))
-        if mentions != 1 + Reach._harmless_reads(tree):
+        # Both counts: a token also sees an import, a def or an attribute, and
+        # the AST also sees inside an f-string, one token before Python 3.12.
+        tokens = sum(token.string == "RECORD_TREES" for token in tokenize.generate_tokens(io.StringIO(text).readline))
+        reads = sum(isinstance(node, ast.Name) and node.id == "RECORD_TREES" for node in ast.walk(tree))
+        if {tokens, reads} != {1 + Reach._harmless_reads(tree)}:
             return text
         name, lines = names[0], text.split("\n")
         line = lines[name.lineno - 1].encode()    # ast's columns count UTF-8 bytes
@@ -2556,6 +2558,7 @@ class Reach(unittest.TestCase):
         # Nor does a mention that is not a harmless read, or a binding that is
         # not an assignment, beside the real entry.
         for use in ('def f(daemon):\n    return getattr(daemon, RECORD_TREES[-1]).download()\n',
+                    'def f(daemon):\n    return getattr(daemon, f"{RECORD_TREES[-1]}").download()\n',
                     'def f(daemon):\n    for name in RECORD_TREES:\n        getattr(daemon, name).download()\n',
                     'def f(daemon):\n    return {getattr(daemon, name) for name in RECORD_TREES}\n',
                     'def f(daemon):\n    return {data / name for name in RECORD_TREES if getattr(daemon, name)}\n',
