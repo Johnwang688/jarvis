@@ -2446,7 +2446,7 @@ class Reach(unittest.TestCase):
                     if "import" in text:                    # exec("from ..v2 import vex")
                         try:
                             found += [(node.lineno, name) for _, name in cls._vex_names(text)]
-                        except SyntaxError:                 # prose, not source
+                        except (SyntaxError, ValueError):   # prose, or text the parser refuses
                             pass
             else:
                 continue
@@ -2565,6 +2565,7 @@ class Reach(unittest.TestCase):
                      "from ..v2 import terminals as vex_terminal", 'NAMES = ("vex", "vex.json")\n',
                      "import math as vex_setup", "from math import pi as vex", "vex_setup = 1\n",
                      "from math import *\n", "log('could not import vex')",
+                     r'len("important\udcff")',                         # a lone surrogate must not raise
                      'open("vex.json")', 'Path("jarvis/v2/vex.py")', "text = 'vex'\n", "# from ..v2 import vex\n",
                      '"""from ..v2 import vex"""\n', "importlib.import_module(name)"):
             self.assertEqual(self._vex_names(text), [], text)

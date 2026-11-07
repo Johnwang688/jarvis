@@ -1529,9 +1529,11 @@ Three limits are deliberate.
 - A name built at run time or held in a variable is not judged:
   `importlib.import_module(name)` has nothing to read.
 - A few harmless things do count, because they look exactly like a reach:
-  `Path("vex_setup")`, `obj.vex_setup = 1`, and a `jarvis.`-rooted string through
-  a module, such as `"jarvis.v2.vex_setup.json"`. None exists today. Rename the
-  thing rather than widen the check.
+  `Path("vex_setup")`, `obj.vex_setup = 1`, a `jarvis.`-rooted string through
+  a module such as `"jarvis.v2.vex_setup.json"`, a call's literal that parses as
+  an import such as `log("import vex_setup")`, and `from . import *` in any
+  package, since the walk does not know which package a file is in. None exists
+  today. Rename the thing rather than widen the check.
 
 The walk takes the raw source, never `_judged`'s output, which can fail to
 parse (`("é", , "VEX")`). NEEDLES stays for what is not an import: routes,
