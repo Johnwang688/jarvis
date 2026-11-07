@@ -45,6 +45,7 @@ What matters most, each written to fail with its guard removed:
 """
 from __future__ import annotations
 
+import ast
 import base64
 import http.client
 import inspect
@@ -61,6 +62,7 @@ import sys
 import tempfile
 import threading
 import time
+import tokenize
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -2425,6 +2427,60 @@ class Reach(unittest.TestCase):
                "jarvis/v2/daemon.py", "jarvis/v2/terminals.py", "jarvis/rules.py",
                "jarvis/config.py", "jarvis/__main__.py"}
 
+    @staticmethod
+    def _harmless_reads(tree):
+        """How many reads of RECORD_TREES only join each name under a folder
+        (`data / name for name in RECORD_TREES`) or sit in the path cache's key."""
+        count = 0
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.SetComp, ast.ListComp, ast.GeneratorExp)) and len(node.generators) == 1:
+                loop, joined = node.generators[0], node.elt
+                count += (getattr(loop.iter, "id", None) == "RECORD_TREES" and not loop.ifs
+                          and isinstance(loop.target, ast.Name) and isinstance(joined, ast.BinOp)
+                          and isinstance(joined.op, ast.Div) and isinstance(joined.left, ast.Name)
+                          and getattr(joined.right, "id", None) == loop.target.id)
+            elif (isinstance(node, ast.Assign) and isinstance(node.value, ast.Tuple)
+                  and [getattr(target, "id", None) for target in node.targets] == ["key"]):
+                count += sum(getattr(item, "id", None) == "RECORD_TREES" for item in node.value.elts)
+        return count
+
+    @staticmethod
+    def _judged(rel, text):
+        """The source the needles read. files.py holds tools, so it cannot be
+        in ALLOWED, and it names the daemon's `vex/` record folder in
+        RECORD_TREES to refuse writes there (44d59e1b): a folder name, not a
+        reach. That one element is set aside, by its position, and only while
+        RECORD_TREES is one module-level tuple of plain strings holding one
+        literal `"vex"`, and every other mention of the name is a harmless
+        read. Any other shape sets nothing aside, so the name is a hit again.
+        A line pattern would also pass `"vex",` on a line of its own inside a
+        split `getattr(daemon, "vex")`."""
+        if rel != "jarvis/tools/files.py":
+            return text
+        tree = ast.parse(text)
+        assigns = [node for node in tree.body if isinstance(node, ast.Assign)
+                   and [getattr(target, "id", None) for target in node.targets] == ["RECORD_TREES"]]
+        if len(assigns) != 1 or not isinstance(assigns[0].value, ast.Tuple):
+            return text
+        items = assigns[0].value.elts
+        if not all(isinstance(item, ast.Constant) and isinstance(item.value, str) for item in items):
+            return text
+        names = [item for item in items if item.value == "vex"]
+        if len(names) != 1 or names[0].lineno != names[0].end_lineno:
+            return text
+        # Both counts: a token also sees an import, a def or an attribute, and
+        # the AST also sees inside an f-string, one token before Python 3.12.
+        tokens = sum(token.string == "RECORD_TREES" for token in tokenize.generate_tokens(io.StringIO(text).readline))
+        reads = sum(isinstance(node, ast.Name) and node.id == "RECORD_TREES" for node in ast.walk(tree))
+        if {tokens, reads} != {1 + Reach._harmless_reads(tree)}:
+            return text
+        name, lines = names[0], text.split("\n")
+        line = lines[name.lineno - 1].encode()    # ast's columns count UTF-8 bytes
+        if line[name.col_offset:name.end_col_offset] != b'"vex"':
+            return text
+        lines[name.lineno - 1] = (line[:name.col_offset] + line[name.end_col_offset:]).decode()
+        return "\n".join(lines)
+
     def test_no_tool_name_or_discord_verb_is_for_vex(self):
         from jarvis.v2 import commands, mcp
         from jarvis.v2.providers import fastpath
@@ -2438,7 +2494,7 @@ class Reach(unittest.TestCase):
         offenders = []
         for path in sorted((REPO / "jarvis").rglob("*.py")):
             rel = path.relative_to(REPO).as_posix()
-            if rel not in self.ALLOWED and self.NEEDLES.search(path.read_text(encoding="utf-8")):
+            if rel not in self.ALLOWED and self.NEEDLES.search(self._judged(rel, path.read_text(encoding="utf-8"))):
                 offenders.append(rel)
         self.assertEqual(offenders, [])
         from jarvis.v2 import mcp
@@ -2449,7 +2505,8 @@ class Reach(unittest.TestCase):
             if func is not None:
                 modules.add(inspect.getmodule(func))
         for module in modules:
-            self.assertIsNone(self.NEEDLES.search(inspect.getsource(module)), module.__name__)
+            rel = module.__name__.replace(".", "/") + ".py"
+            self.assertIsNone(self.NEEDLES.search(self._judged(rel, inspect.getsource(module))), module.__name__)
 
     def test_only_vex_py_creates_a_program_terminal(self):
         callers = sorted(p.relative_to(REPO).as_posix() for p in (REPO / "jarvis").rglob("*.py")
@@ -2482,6 +2539,56 @@ class Reach(unittest.TestCase):
                      "subprocess.run(['VEXCOM.exe'])", "terminals.create_program(argv)"):
             self.assertIsNotNone(self.NEEDLES.search(text), text)
         self.assertIsNone(self.NEEDLES.search("from .model import TERMINAL_STATES"))
+
+    def test_only_the_record_tree_name_is_set_aside(self):
+        rel = "jarvis/tools/files.py"
+        source = (REPO / rel).read_text(encoding="utf-8")
+        self.assertIn("vex", v1_files.RECORD_TREES)
+        self.assertIsNotNone(self.NEEDLES.search(source), "the name is there to set aside")
+        self.assertIsNone(self.NEEDLES.search(self._judged(rel, source)))
+        self.assertEqual(self._judged("jarvis/tools/shell.py", source), source, "that file only")
+        for reach in ('getattr(daemon, "vex")\n',
+                      'getattr(\n    daemon,\n    "vex",\n)\n',           # the entry's own line, elsewhere
+                      'OTHER_TREES = (\n    "vex",\n)\n',
+                      'def f():\n    RECORD_TREES = ("vex",)\n',
+                      'RECORD_TREES += ("vex",)\n',
+                      'RECORD_TREES = ("threads", getattr(daemon, "vex"))\n',
+                      'RECORD_TREES = ("threads", "/vex/download")\n',
+                      'from .vex import Vex\n', 'daemon.vex.download()\n'):
+            self.assertIsNotNone(self.NEEDLES.search(self._judged(rel, source + reach)), reach)
+        # Past non-ASCII text, and a reach sharing the entry's line is still read.
+        self.assertEqual(self._judged(rel, 'RECORD_TREES = ("é", "vex", "VEX")\n'), 'RECORD_TREES = ("é", , "VEX")\n')
+        self.assertIsNotNone(self.NEEDLES.search(self._judged(rel, 'RECORD_TREES = ("vex",); daemon.vex.download()\n')))
+        # Any other shape sets nothing aside. Asserted on the text itself:
+        # on files.py + a suffix, a hit could come from line 407 alone.
+        for shape in ('RECORD_TREES = ("vex" "" "",); RECORD_TREES = ("v" "ex",); daemon.vex.download()\n',
+                      'RECORD_TREES = ("threads", "vex")\nRECORD_TREES = (*RECORD_TREES, "vex")\n',
+                      'RECORD_TREES = ("vex",)\nRECORD_TREES += ("vex",)\n',
+                      'RECORD_TREES = ("vex",)\ndef f():\n    RECORD_TREES = ()\n',
+                      'RECORD_TREES = ("vex" "",)\n', 'RECORD_TREES = ("v" "ex",)\n', "RECORD_TREES = ('vex',)\n",
+                      'RECORD_TREES = ("vex", "vex")\n', 'RECORD_TREES = ("vex", getattr(daemon, "vex"))\n',
+                      'RECORD_TREES = (*OTHER, "vex")\n', 'RECORD_TREES = X = ("vex",)\n',
+                      'RECORD_TREES: tuple = ("vex",)\n', 'RECORD_TREES = ["vex"]\n',
+                      'if daemon:\n    RECORD_TREES = ("vex",)\n'):
+            self.assertEqual(self._judged(rel, shape), shape, shape)
+        # Nor does a mention that is not a harmless read, or a binding that is
+        # not an assignment, beside the real entry.
+        for use in ('def f(daemon):\n    return getattr(daemon, RECORD_TREES[-1]).download()\n',
+                    'def f(daemon):\n    return getattr(daemon, f"{RECORD_TREES[-1]}").download()\n',
+                    'def f(daemon):\n    for name in RECORD_TREES:\n        getattr(daemon, name).download()\n',
+                    'def f(daemon):\n    return {getattr(daemon, name) for name in RECORD_TREES}\n',
+                    'def f(daemon):\n    return {data / name for name in RECORD_TREES if getattr(daemon, name)}\n',
+                    'def f(daemon):\n    return {getattr(daemon, name) / name for name in RECORD_TREES}\n',
+                    'def f(data):\n    return {data / "x" for name in RECORD_TREES}\n',
+                    'ALIAS = RECORD_TREES\n', 'import math as RECORD_TREES\n', 'def RECORD_TREES():\n    pass\n',
+                    'class RECORD_TREES:\n    pass\n', 'def f(RECORD_TREES):\n    pass\n', 'config.RECORD_TREES\n'):
+            self.assertEqual(self._judged(rel, source + use), source + use, use)
+        # A comment or a string is not a mention: files.py has both.
+        for words in ('# RECORD_TREES\n', '_DOC = "RECORD_TREES"\n'):
+            self.assertIsNone(self.NEEDLES.search(self._judged(rel, source + words)), words)
+        # The count above sees one file, so nothing else may name the tuple.
+        self.assertEqual([p.relative_to(REPO).as_posix() for p in sorted((REPO / "jarvis").rglob("*.py"))
+                          if "RECORD_TREES" in p.read_text(encoding="utf-8")], [rel])
 
 
 # -- review round 2: what a line runs, the caps, includes, names, the CLI ---------------------------

@@ -1272,3 +1272,24 @@ Checks (fakes only): `state/vex.test.ts`, "a USB check before every download
 try", and `vex_check` for the refusal's code. Removing the calls, the wait, its
 limit or the `holds()` stop each fails it. Not yet seen on the robot: a download after the brain terminal saying
 "(controller download channel)" in the journal and taking about 20 s.
+
+## The Reach check and the `vex` record tree (2026-11-06)
+
+`Reach.test_nothing_but_the_daemon_and_its_routes_reaches_vex` had failed on
+main since 44d59e1b (2026-10-25) added `"vex"` to `files.RECORD_TREES`, which
+protects `vex/build-*.lock` and `unfinished-*`. That entry is a folder name
+joined under `V2_DATA_DIR`, not a reach: `files.py` has no vex import, name or
+attribute. `ALLOWED` could not take the file, because it holds registered tools
+and the test's second half greps those modules' source whatever `ALLOWED` says.
+`Reach._judged` removes that one tuple element by its AST position, for both
+halves, and only while `RECORD_TREES` is one module-level tuple of plain strings
+holding one literal `"vex"`. Every other mention of the name in `files.py` must
+be a `data / name` join or part of the path cache's key, and no other file under
+`jarvis/` may name it. Any other shape sets nothing aside, so the entry is a hit
+again; `getattr(daemon, RECORD_TREES[-1])` and `import math as RECORD_TREES` are
+both such shapes. Any other `"vex"` in `files.py` is a hit too, including a line
+that reads the same inside a split `getattr` call
+(`test_only_the_record_tree_name_is_set_aside`). `files.py` did not change.
+
+The check reads text, not data flow. A copy reached through the cache's `key` or
+`globals()` is not seen, as `getattr(daemon, "ve" + "x")` never was.
