@@ -2424,23 +2424,30 @@ class Reach(unittest.TestCase):
     def _vex_names(cls, source):
         """Each (line, name) where the syntax of `source` names a vex module,
         which NEEDLES cannot judge: a split or parenthesized import, a module
-        beside others in one statement. A string counts only inside a call,
-        where importlib, __import__ and getattr take it; a bare tuple of
-        folder names is not a reach. Give this the raw source: `_judged`
-        (PR #345) can leave text that no longer parses."""
+        beside others in one statement. A star import from the package names
+        no module and can bring in all of them, so it counts. A string counts
+        only inside a call, where importlib, __import__, getattr and exec take
+        it; a bare tuple of folder names is not a reach. Give this the raw
+        source: `_judged` (PR #345) can leave text that no longer parses."""
         found = []
         for node in ast.walk(ast.parse(source)):
             if isinstance(node, ast.Import):
                 names = [alias.name for alias in node.names]
             elif isinstance(node, ast.ImportFrom):
                 names = [node.module or ""] + [alias.name for alias in node.names]
+                if names[-1] == "*" and names[0].split(".")[-1] in ("", "v2"):
+                    found.append((node.lineno, "*"))
             elif isinstance(node, ast.Attribute):           # `from .. import v2`, then `v2.vex_setup`
                 names = [node.attr]
-            elif isinstance(node, ast.Name):                # `from ..v2 import *`, then `vex_setup`
-                names = [node.id]
             elif isinstance(node, ast.Call):
                 names = [item.value for item in ast.walk(node)
                          if isinstance(item, ast.Constant) and isinstance(item.value, str)]
+                for text in names:
+                    if "import" in text:                    # exec("from ..v2 import vex")
+                        try:
+                            found += [(node.lineno, name) for _, name in cls._vex_names(text)]
+                        except SyntaxError:                 # prose, not source
+                            pass
             else:
                 continue
             found += [(node.lineno, name) for name in names if cls._is_vex_module(name)]
@@ -2479,14 +2486,20 @@ class Reach(unittest.TestCase):
             self.assertIsNone(self.NEEDLES.search(inspect.getsource(module)), module.__name__)
 
     def test_no_import_reaches_vex_however_it_is_spelled(self):
-        offenders = {}
+        offenders, judged = {}, set()
         for path in sorted((REPO / "jarvis").rglob("*.py")):
             rel = path.relative_to(REPO).as_posix()
-            found = [] if rel in self.ALLOWED else self._vex_names(path.read_text(encoding="utf-8"))
+            if rel in self.ALLOWED:
+                continue
+            judged.add(rel)
+            found = self._vex_names(path.read_text(encoding="utf-8"))
             if found:
                 offenders[rel] = found
+        self.assertIn("jarvis/tools/files.py", judged, "the walk found nothing to judge")
         self.assertEqual(offenders, {})
-        for module in self._tool_modules():
+        modules = self._tool_modules()
+        self.assertIn(v1_files, modules, "no tool module to judge")
+        for module in modules:
             self.assertEqual(self._vex_names(inspect.getsource(module)), [], module.__name__)
 
     def test_only_vex_py_creates_a_program_terminal(self):
@@ -2537,9 +2550,12 @@ class Reach(unittest.TestCase):
                      "__import__('v2', globals(), locals(), ['vex_setup'], 1)",
                      "__import__('jarvis.v2', fromlist=('vex_connection',))",
                      "pkgutil.resolve_name('jarvis.v2.vex_setup:run')",
+                     "pkgutil.resolve_name('jarvis.v2.vex_setup.discover')",
                      "getattr(v2, 'vex_setup')",
                      "from .. import v2\nv2.vex_setup.run()\n",
-                     "from ..v2 import *\nvex_setup.run()\n"):
+                     "from ..v2 import *\n", "from jarvis.v2 import *\n", "from . import *\n",
+                     "exec('from jarvis.v2 import vex_setup')",
+                     "run('import jarvis.v2.vex_connection')"):
             self.assertNotEqual(self._vex_names(text), [], text)
         self.assertLessEqual({"vex", "vex_connection", "vex_setup"}, self.VEX_MODULES)
         self.assertIsNone(self.NEEDLES.search("from .model import TERMINAL_STATES"))
@@ -2547,6 +2563,8 @@ class Reach(unittest.TestCase):
         # the way the `RECORD_TREES` entry did the needles.
         for text in ("from .model import TERMINAL_STATES", "from .vexing import Vexing", "import vexillology",
                      "from ..v2 import terminals as vex_terminal", 'NAMES = ("vex", "vex.json")\n',
+                     "import math as vex_setup", "from math import pi as vex", "vex_setup = 1\n",
+                     "from math import *\n", "log('could not import vex')",
                      'open("vex.json")', 'Path("jarvis/v2/vex.py")', "text = 'vex'\n", "# from ..v2 import vex\n",
                      '"""from ..v2 import vex"""\n', "importlib.import_module(name)"):
             self.assertEqual(self._vex_names(text), [], text)
