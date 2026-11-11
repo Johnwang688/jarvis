@@ -41,20 +41,20 @@
   /* The aurora: a base under three washes (AG-1). New names — the --aurora-*
      tokens below are the owner Inbox row's and stay as they are. */
   --base: #0a1116;
-  --wash-1: #0f3a46;    /* deep teal */
-  --wash-2: #13305a;    /* glacier blue */
-  --wash-3: #2a2456;    /* dusk violet, a hint */
+  --wash-1: #2a8fa0;    /* deep teal */
+  --wash-2: #3468c4;    /* glacier blue */
+  --wash-3: #6450c4;    /* dusk violet, a hint */
 
   /* Glass. The tint is cool and translucent; the wash shows through. */
-  --glass-pane: rgba(11, 19, 25, 0.66);    /* a pane or bar */
-  --glass-solid: rgba(10, 17, 22, 0.88);   /* dense text: Monaco, terminal, transcript */
+  --glass-pane: rgba(11, 19, 25, 0.50);    /* a pane or bar */
+  --glass-solid: rgba(10, 17, 22, 0.58);   /* dense text: Monaco, terminal, transcript */
   --glass-float: rgba(22, 33, 42, 0.88);   /* a floating layer, over a real blur */
-  --glass-sheen: linear-gradient(160deg, rgba(255, 255, 255, 0.055), rgba(255, 255, 255, 0.012) 40%, rgba(255, 255, 255, 0));
-  --rim: rgba(255, 255, 255, 0.10);        /* the 1px edge of a pane */
-  --glass-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  --glass-sheen: linear-gradient(160deg, rgba(255, 255, 255, 0.09), rgba(255, 255, 255, 0.02) 40%, rgba(255, 255, 255, 0));
+  --rim: rgba(255, 255, 255, 0.15);        /* the 1px edge of a pane */
+  --glass-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12);
   --blur: blur(18px) saturate(1.25);       /* floating layers only */
-  --raise: rgba(255, 255, 255, 0.06);      /* a control or card sitting on glass */
-  --raise-hi: rgba(255, 255, 255, 0.09);
+  --raise: rgba(255, 255, 255, 0.04);      /* a control or card sitting on glass */
+  --raise-hi: rgba(255, 255, 255, 0.06);
 
   --bg-inset: #070c10;  /* code blocks, level and quota tracks */
   --bg-0: #0a1116;      /* the window (= --base) */
@@ -68,7 +68,7 @@
 
   --text: #eaf2f6;
   --text-2: #c4d0d8;
-  --text-muted: #9fafb9;
+  --text-muted: #b0bfc8;
 
   --accent: #6fc3df;
   --accent-hi: #9ad6ea;
@@ -2492,7 +2492,7 @@ button.tree-row.ownerinbox.aurora.sel:focus-visible { box-shadow: inset 2px 0 va
    nor meaning: its amber bar, border, glow and buttons are untouched. */
 .explorermenu, .picker, .threadmenu, .mpop, .laymenu, .termtoast, .vexpop, .vexmenu, .vextip,
 .devserver-prompt, .browser-options, .remotecontext, .remotepicker, .auth, .review .review-confirm,
-.settings-page {
+.settings-page, .block.err, .sa-stop-error {
   background: var(--glass-float);
   -webkit-backdrop-filter: var(--blur);
   backdrop-filter: var(--blur);
@@ -2500,7 +2500,8 @@ button.tree-row.ownerinbox.aurora.sel:focus-visible { box-shadow: inset 2px 0 va
 @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
   .explorermenu, .picker, .threadmenu, .mpop, .laymenu, .termtoast, .vexpop, .vexmenu, .vextip,
   .devserver-prompt, .browser-options, .remotecontext, .remotepicker, .auth, .review .review-confirm,
-  .settings-page { background: var(--bg-2); }
+  .settings-page, .block.err, .sa-stop-error { background: var(--bg-2); }
 }
+.block.err { background: linear-gradient(var(--red-soft), var(--red-soft)), var(--glass-float); }
 .picker, .auth, .review .review-confirm { border-radius: 10px; }
 .picker h3 { background: var(--raise-hi); }

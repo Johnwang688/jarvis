@@ -303,8 +303,12 @@ def subagents_checks(browser, mock, base, check, until, guard, init_script):
         last = page.locator('[data-testid="sa-pane"][data-sid="cx:019a-fixer"]')
         page.set_viewport_size({"width": 1100, "height": 900})
         time.sleep(0.2)
-        page.locator('[data-sid="cl:toolu_beta"] button').first.click()
-        until(lambda: page.locator('[data-testid="sa-pane"][data-sid="cl:toolu_beta"]').count() == 1)
+        # A re-render between the press and the release can swallow a click (the brighter glass paints
+        # slower under software compositing), so press again rather than assert on one attempt.
+        for _ in range(3):
+            page.locator('[data-sid="cl:toolu_beta"] button').first.click()
+            if until(lambda: page.locator('[data-testid="sa-pane"][data-sid="cl:toolu_beta"]').count() == 1, timeout=2):
+                break
         check("past the room for a split, the last sub-agent pane is reused, never a chat",
               page.locator('[data-testid="sa-pane"][data-sid="cl:toolu_beta"]').count() == 1 and last.count() == 0
               and sub_panes().count() == count

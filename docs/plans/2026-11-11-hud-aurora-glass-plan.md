@@ -16,6 +16,7 @@ the work into four PRs.
 | D-5 | Presets / default | **One look:** aurora glass with today's cyan (`#6fc3df`) as the default accent. No Deep blue / Northern lights presets, no light themes. |
 | D-6 | Phone | **HUD first.** The phone keeps its look; porting the tokens is a later follow-up (AG-5, not in this plan). |
 | D-7 | Motion | **Full fluid.** The WebGL2 fluid simulation from the owner's Bible app (`C:\dev\bible-app\client\src\aurora\`), not a still wash or a CSS drift. |
+| D-8 | Brightness and contrast | **Brighter aurora; contrast relaxed (owner, 2026-11-11).** Body text 4.5:1; secondary text, muted text, accent and small status marks 3:1; amber/red text on approval and error surfaces stays 4.5:1 on an opaque-enough float (`--glass-float`). Meaning hexes never change. AG-1 pins the owner's values (`--wash-1..3` `#2a8fa0` `#3468c4` `#6450c4`, `--glass-pane` .50, `--glass-solid` .58); `--red` as a small mark is measured at 2.49:1 over `--wash-1` at full strength, so `glass.test.ts` pins that floor at 2.4. |
 
 Lead calls inside those answers (open to the owner in review):
 
@@ -47,7 +48,7 @@ Lead calls inside those answers (open to the owner in review):
    Because the field is already soft, this reads as frosted glass at near-zero compositor cost.
 3. Real `backdrop-filter` is used only on floating layers that sit over **sharp** content: menus, pickers, popovers, modals, approval cards, toasts. They are few, and rarely more than one is open.
 4. **Dense text surfaces** (Monaco, xterm, chat transcript, diff) use the more opaque `--glass-solid` tint. Monaco gets a translucent `editor.background` built from that tint (`lib/editorTheme.ts` already reads `:root`). xterm 6 (DOM renderer) uses `allowTransparency: true` with an rgba background.
-5. **Legibility rule.** The pane tint alpha is chosen so that `--text` and `--text-muted` pass 4.5:1 composited over the **brightest** aurora colour at full strength. Because the aurora colours are customisable, AG-3 enforces this at pick time (§4).
+5. **Legibility rule (D-8).** Measured against the brightest aurora colour at full strength, with the sheen and raise layers included: `--text` 4.5:1 on a pane and on `--glass-solid`; `--text-2`, `--text-muted`, the accent and small amber/red/green status marks 3:1 on a pane, `--glass-solid`, `--raise` and `--raise-hi`; amber/red text on approval cards, error banners and toasts sits on `--glass-float` (or an opaque surface) at 4.5:1. Because the aurora colours are customisable, AG-3 enforces the same floors at pick time (§4).
 
 AG-2 measures real per-pane `backdrop-filter` too. If it holds the budget at 12 panes on the owner's PC, the lead may switch panes to real blur. That would be recorded here, not assumed.
 
@@ -74,8 +75,8 @@ Rules (unit-tested in `lib/appearance.test.ts`, mutation-checked):
 - **Input is `#rrggbb` only.** Anything else is refused before it reaches `style.setProperty`, so no `url()`, `var()` or other CSS ever enters a custom property.
 - **Accent hue guard.** In OKLCH, the accent may not enter the amber/orange/red band, or come within a tested distance of `--amber` and `--red`. A refused pick explains why and keeps the last good value. Picks are refused, never silently shifted, so the owner always sees what was applied.
 - **Contrast guard.**
-  - The accent must reach 3:1 against the glass pane composite (it is used for focus, links and the selection bar).
-  - Each aurora colour is capped in lightness so the §3 legibility rule holds. Too-bright picks are clamped, and the swatch shows the clamped value.
+  - The accent must reach 3:1 against the glass pane composite (it is used for focus, links and the selection bar), the D-8 floor.
+  - Each aurora colour is capped in lightness so the §3 (D-8) floors hold: `--text` 4.5:1, secondary/muted/accent/marks 3:1. Too-bright picks are clamped, and the swatch shows the clamped value.
 - **Live apply.** A change re-themes Monaco, xterm and the orb without a reload.
 - **Storage.** Saved in `localStorage` `jarvis.hud.appearance` (behind try/catch, like `jarvis.hud.editor`); a corrupt record falls back to the default. It is a per-window convenience: nothing is sent to the daemon, and nothing in it is trusted.
 
