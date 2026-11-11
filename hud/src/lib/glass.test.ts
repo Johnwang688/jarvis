@@ -201,4 +201,9 @@ describe("where the glass is painted", () => {
     // The 1px gap between split panes shows the wash, not a grey slab.
     expect(body("#workspace")).toMatch(/background:\s*transparent/);
   });
+
+  it("xterm's own solid-black viewport is made transparent, so the terminal sits on the dense-text glass", () => {
+    const hit = rules.find(([x]) => sel(x).includes(".termhost .xterm .xterm-viewport"));
+    expect(hit?.[1] ?? "").toMatch(/background-color:\s*transparent\s*!important/);
+  });
 });

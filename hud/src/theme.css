@@ -1717,6 +1717,10 @@ button.termread { flex: 0 0 auto; padding: 1px 8px; font-size: 11px; white-space
   padding: 4px 0 0 8px; background: var(--glass-solid);
 }
 .termhost { width: 100%; height: 100%; }
+/* Aurora glass (AG-1): xterm's own stylesheet paints its viewport and a
+   scroll area solid black. With allowTransparency the slot's --glass-solid
+   shows through instead; the transparent default must beat xterm.css. */
+.termhost .xterm .xterm-viewport, .termhost .xterm .xterm-scrollable-element { background-color: transparent !important; }
 /* A paste stopped and typing paused waits on the owner: amber, the "pending" colour. */
 .termnote {
   flex: 0 0 auto; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 6px 10px;
