@@ -67,6 +67,7 @@ import { WINDOW_ID } from "../lib/windowId";
 import { judgeBrowserUrl } from "../lib/browser";
 import { noPointerFocus } from "../lib/talkkey";
 import { loadXterm } from "../lib/xterm";
+import { cssTermTheme } from "../lib/termTheme";
 import { useDaemonPorts } from "../state/daemonPorts";
 import type { PaneNo } from "../lib/workspace";
 import type { Project } from "../types";
@@ -87,15 +88,6 @@ const RESUME_RETRY_MS = 1000;
 /** RIS, written in band: the replay that follows starts on a clean terminal (see "attached"). */
 const RIS = new Uint8Array([0x1b, 0x63]);
 
-/** Graphite, for the terminal: the pane colour, the HUD's text, the accent cursor. */
-const THEME = {
-  background: "#1a1a19", foreground: "#e2dfd7", cursor: "#6fc3df", cursorAccent: "#1a1a19",
-  selectionBackground: "#6fc3df55", selectionInactiveBackground: "#6fc3df2a",
-  black: "#141413", red: "#f87171", green: "#6dd08f", yellow: "#fbbf24",
-  blue: "#7aa7d8", magenta: "#c0aef5", cyan: "#6fc3df", white: "#cfcbc3",
-  brightBlack: "#88847b", brightRed: "#fca5a5", brightGreen: "#9be3b4", brightYellow: "#fcd34d",
-  brightBlue: "#9cc2ea", brightMagenta: "#d8ccfa", brightCyan: "#9ad6ea", brightWhite: "#f5f3ee",
-};
 
 export interface PasteNotice {
   /**
@@ -352,7 +344,8 @@ export class TermSession {
           fontSize: fontSizeFor(this.mgr.zoom),
           cursorBlink: true,
           scrollback: 10000,
-          theme: THEME,
+          theme: cssTermTheme(),
+          allowTransparency: true,
           disableStdin: this.mgr.blocked,
           // OSC 8 hyperlinks: judged like every other link, never the
           // browser's own confirm-and-open.

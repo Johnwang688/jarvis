@@ -162,7 +162,7 @@ function startDrawing(host: HTMLDivElement, orbCv: HTMLCanvasElement,
     }
     const coreR = R * (0.3 + energy * 0.1);
     const glow = octx.createRadialGradient(c.x, c.y, 0, c.x, c.y, coreR * 1.9);
-    glow.addColorStop(0, `rgba(240,238,232,${0.85 * boost * (0.55 + energy * 0.5) * k})`);
+    glow.addColorStop(0, `rgba(${HUE.text},${0.85 * boost * (0.55 + energy * 0.5) * k})`);
     glow.addColorStop(0.25, `rgba(${hue},${0.5 * (0.5 + energy * 0.6) * k})`);
     glow.addColorStop(1, "rgba(0,0,0,0)");
     octx.fillStyle = glow;
@@ -185,7 +185,7 @@ function startDrawing(host: HTMLDivElement, orbCv: HTMLCanvasElement,
     return { e, len };
   };
   type Stroke = ReturnType<typeof strokeOf>;
-  const pen = () => el("circle", { r: 3.2, fill: "#f4f6f6", filter: "url(#boot-pen)", opacity: 0 });
+  const pen = () => el("circle", { r: 3.2, fill: `rgb(${HUE.text})`, filter: "url(#boot-pen)", opacity: 0 });
   function buildPlate() {
     svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
     svg.innerHTML = `<defs>
