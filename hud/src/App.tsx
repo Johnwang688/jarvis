@@ -4059,6 +4059,7 @@ export default function App() {
         />
         <InputBar
           status={status}
+          reserveStatus={drawnChats.length > 1}
           pendingTranscript={chat.pendingTranscript}
           // Not `disabled` under a card: everything outside the card is inert,
           // which keeps the box unreachable, and a disabled box dropped focus
@@ -4504,7 +4505,7 @@ export default function App() {
           // Only the focused pane shows the profile select when no chat is drawn. Focusing a pane must
           // never change the layout (a press focuses; a header that wrapped differently moved the row
           // under the pointer before the release), so every other pane holds the select's room, unseen.
-          <select aria-hidden="true" tabIndex={-1} disabled data-ghost="profile" style={{ width: 110, visibility: "hidden" }}>
+          <select aria-hidden="true" tabIndex={-1} disabled data-ghost="profile" style={{ width: 110, height: 0, padding: 0, border: 0, visibility: "hidden" }}>
             <option>auto</option>
           </select>
         ) : null}

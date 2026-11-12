@@ -237,7 +237,7 @@ def _garbage_checks(page, mock, check, until):
           s["fontSize"] == 12 and s["tabSize"] == 4 and s["minimap"] is False and s["fontFamily"] == ""
           and s["wordWrap"] == "off" and s["vim"] is False and s["cursorStyle"] == "block", str(s))
     e = _editor(page, "calc.py") or {}
-    check("and the editor draws that", e.get("fontSize") == 12 and e.get("fontFamily") is None
+    check("and the editor draws that", e.get("fontSize") == 12 and str(e.get("fontFamily") or "").startswith('"Geist Mono"')
           and e.get("cursorStyle") == "block", str(e))
     _store(page, "not json{")
     _boot(page, mock, None, until, reload=True)

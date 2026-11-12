@@ -584,6 +584,9 @@ button.tree-row.morechats:focus-visible { box-shadow: inset 0 0 0 1px var(--acce
 /* A status line with nothing to say takes no line of its own (it would wrap
    onto one in a narrow pane and steal the conversation's height). */
 :is(#inputbar, .inputbar) > .row > .hint:empty { display: none; }
+/* With several chats drawn an empty status still holds its line, so selecting a chat moves nothing (AG-1 review). */
+:is(#inputbar, .inputbar) > .row > .hint.reserve:empty { display: block; }
+:is(#inputbar, .inputbar) > .row > .hint.reserve:empty::before { content: "\00a0"; }
 /* Grows with the text (InputBar sets the height: up to 15 lines, and never
    past 35% of its pane) and scrolls past that; a drag handle would fight it. */
 :is(#inputrow, .inputrow) textarea { min-height: 36px; padding: 7px 9px; line-height: 1.45; resize: none; overflow-y: hidden; }

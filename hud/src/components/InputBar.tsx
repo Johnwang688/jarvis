@@ -151,6 +151,8 @@ export function InputBar(props: {
    * the orb with it, when this is the only place left to say it. Every other
    * chat pane says here what its own turn is doing (WP-B). */
   status?: string | null;
+  /** More than one chat is drawn: hold the status line's room when there is none to show (see the render). */
+  reserveStatus?: boolean;
   /** The unsent words and staged files, when the caller keeps them (WP-B):
    * they belong to the conversation, so a pane that trades conversations, or
    * opens another thread, shows that conversation's draft (review of PR #27).
@@ -483,10 +485,14 @@ export function InputBar(props: {
             {props.bypass.on ? "Bypass on" : "Bypass"}
           </button>
         ) : null}
-        {props.status != null ? (
+        {props.status == null && props.reserveStatus ? (
+          // Selecting a chat moves its status to the orb; without this, the selected pane's meta row would
+          // lose the status's room (and every control under the pointer would move) the moment a press selects it.
+          <span className="hint" aria-hidden="true" style={{ visibility: "hidden" }}>&nbsp;</span>
+        ) : props.status != null ? (
           // This pane's own turn says what it is doing (WP-B); the selected
           // chat's says it on the orb, and here only while the orb is folded.
-          <span className="hint" data-testid="pane-status" title={props.status || undefined}>
+          <span className={"hint" + (props.reserveStatus ? " reserve" : "")} data-testid="pane-status" title={props.status || undefined}>
             {props.status}
           </span>
         ) : null}
