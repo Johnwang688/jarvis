@@ -663,6 +663,22 @@ export function setSubagent(ws: Workspace, pane: PaneNo, ref: SubagentRef): Work
   return { ...ws, panes, focused: pane };
 }
 
+/**
+ * Pane `pane`, an existing one, shows sub-agent `ref` (the owner's ask,
+ * 2026-11-12: sub-agents open in the panels already there). Unlike
+ * `setSubagent`, what the pane held stays in its spec (its project, terminal,
+ * Browser tabs, files), exactly as the owner's own view switch keeps it, so
+ * switching the pane back shows it again. Focus moves only with `focus`: a
+ * chat's `hud_open_subagents` never moves where the owner is working.
+ */
+export function showSubagent(ws: Workspace, pane: PaneNo, ref: SubagentRef, focus = true): Workspace {
+  const clean = parseRef(ref);
+  if (!clean || !isPaneNo(pane)) return ws;
+  const panes = ws.panes.map((p, i) => (i === pane - 1
+    ? { ...p, view: "subagent" as View, subagent: clean } : p)) as Panes;
+  return { ...ws, panes, focused: focus ? pane : ws.focused };
+}
+
 /** The spec a split opens for sub-agent `ref`. */
 export function subagentSpec(ref: SubagentRef): PaneSpec {
   return { view: "subagent", projectId: null, terminalId: null, subagent: { threadId: ref.threadId, sid: ref.sid } };

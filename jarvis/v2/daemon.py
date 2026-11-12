@@ -687,6 +687,8 @@ class Daemon:
         # `start()`, removed in `stop()`; it holds no answer path.
         from .decisions import OwnerPosts
         self.owner_posts = OwnerPosts(self, self.inbox.decisions, self.inbox.checks)
+        from .subagent_panes import SubagentPanes
+        self.subagent_panes = SubagentPanes(self)
         from .browser.drive import BrowserDrive
         self.browser_drive = BrowserDrive(self)
         from .devservers import DevServers
@@ -776,6 +778,7 @@ class Daemon:
             self.browser_drive.install()
             self.chat_relay.install()
             self.owner_posts.install()
+            self.subagent_panes.install()
             # An answer still "queued" from a previous run never ran (the
             # queue is in memory): say so on its decision (inbox B1).
             self.inbox.fail_lost_answers()
@@ -3199,6 +3202,8 @@ class Daemon:
             self.chat_relay.stop()
             # Nor posts to the owner.
             self.owner_posts.stop()
+            # Nor opens panes.
+            self.subagent_panes.stop()
             sessions = list(self._sessions.values())
             # The queue is in memory; what waits on a turn at shutdown says so
             # in the log rather than reading as still waiting after a restart —

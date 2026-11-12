@@ -10,7 +10,8 @@ listed tool runs **in the daemon**, through the bridge's single
 
 Owner Claude and Codex chats receive `terminal_read`, the D-3 catalog,
 the chat reads and `chat_send`/`chat_wait` (`tools/chats.py`) and
-`owner_post` (`tools/owner_post.py`), filtered by installed tool availability.
+`owner_post` (`tools/owner_post.py`) and `hud_open_subagents`
+(`tools/hud_subagents.py`), filtered by installed tool availability.
 Codex foreground-only calls are bound to the exact native parent handle/turn
 before daemon dispatch. Tests may register temporary entries without widening
 the production catalog.
@@ -121,6 +122,14 @@ OWNER_POST_TOOLS = ("owner_post",)
 SESSION_TOOLS["owner_post"] = SessionTool(
     "owner_post", providers=_CHAT_PROVIDERS, foreground_only=True, desk_only=True)
 
+# Showing this chat's own native sub-agents in the owner's HUD panes (owner,
+# 2026-11-12; `tools/hud_subagents.py`, `subagent_panes.py`). Bound exactly as
+# `owner_post` is: foreground-only, desk-only, not read-only (`permit`
+# decides at `jarvis-session-delegate`). External MCP never gets it.
+SUBAGENT_PANE_TOOLS = ("hud_open_subagents",)
+SESSION_TOOLS["hud_open_subagents"] = SessionTool(
+    "hud_open_subagents", providers=_CHAT_PROVIDERS, foreground_only=True, desk_only=True)
+
 
 def register(entry: SessionTool) -> SessionTool:
     """Offer `entry` to chat sessions. Primarily for isolated test probes."""
@@ -158,7 +167,7 @@ def for_provider(provider) -> list[SessionTool]:
     if not entries:
         return []
     from jarvis import tools
-    from .tools import terminal_read, hud_browser_view, hud_browser_act, schedules, chat_git_tools, chats, owner_post  # noqa: F401 — register implementations
+    from .tools import terminal_read, hud_browser_view, hud_browser_act, schedules, chat_git_tools, chats, owner_post, hud_subagents  # noqa: F401 — register implementations
     offered = []
     for entry in sorted(entries, key=lambda e: e.name):
         if entry.name not in tools.REGISTRY:

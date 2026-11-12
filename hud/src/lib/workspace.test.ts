@@ -6,7 +6,7 @@ import {
   defaultPane, defaultWorkspace, drawnSet, setFilePath, splitPane,
   fitWorkspace, focusPane, forgetTerminal, loadWorkspace, maxPanelHeight,
   inWorkspace, orderOf, paneAt, paneSequence, parseWorkspace, pinPane, presetOfWs, resetWorkspace, saveWorkspace, setKeepOrigin, setPaneTerminal,
-  setBrowserUrl, setEditors, setPanel, setPreset, setSubagent, setView, show, slotOf, subagentSpec,
+  setBrowserUrl, setEditors, setPanel, setPreset, setSubagent, setView, show, showSubagent, slotOf, subagentSpec,
   unpinProject, VIEW_LABEL,
   type DrawnSet, type PaneNo, type Preset, type Workspace,
 } from "./workspace";
@@ -1217,6 +1217,24 @@ describe("the sub-agent view (SV-3)", () => {
     expect(left.panes[0].subagent).toBeUndefined();
     expect(setView(shown, 1, "subagent").panes[0].subagent).toEqual(ref);
     expect(setSubagent(ws, 1, { threadId: "t1", sid: "nope" })).toBe(ws);
+  });
+
+  it("an existing pane shows one keeping what it held, and focus moves only when asked", () => {
+    let ws = defaultWorkspace();
+    ws = setBrowserUrl(setView(ws, 2, "browser"), 2, "https://example.com/");
+    const held = ws.panes[1];
+    const quiet = showSubagent(ws, 2, ref, false);
+    expect(quiet.focused).toBe(ws.focused);
+    expect(quiet.panes[1]).toEqual({ ...held, view: "subagent", subagent: ref });
+    expect(quiet.panes[0]).toBe(ws.panes[0]);
+    const back = setView(quiet, 2, "browser");
+    expect(back.panes[1]).toEqual({ ...held });
+    expect(showSubagent(ws, 2, ref).focused).toBe(2);
+    expect(showSubagent(ws, 2, { threadId: "t1", sid: "nope" })).toBe(ws);
+    // Stored and read back as a sub-agent pane.
+    const mem = memory();
+    saveWorkspace(quiet, mem);
+    expect(loadWorkspace(mem).panes[1].subagent).toEqual(ref);
   });
 
   it("a split from it is a new chat (one sub-agent per pane), and a split opens one beside its chat", () => {
