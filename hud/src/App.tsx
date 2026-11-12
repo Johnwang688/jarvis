@@ -2591,9 +2591,9 @@ export default function App() {
    * there is no room. Never under a card. `byAgent` never moves focus: a
    * chat asking cannot move where the owner is working.
    */
-  const openSubagent = useCallback((ref: SubagentRef, opts: { byAgent?: boolean } = {}): boolean => {
+  const openSubagent = useCallback((ref: SubagentRef, opts: { byAgent?: boolean } = {}): "placed" | "none" | "full" => {
     const byAgent = opts.byAgent === true;
-    if (crashedRef.current || blockedNow.current) return false;
+    if (crashedRef.current || blockedNow.current) return "none";
     const lay = layoutNow.current;
     const at = live.current;
     const drawnSub = (n: PaneNo | null): n is PaneNo => n !== null && lay.fit.panes.includes(n)
@@ -2604,7 +2604,7 @@ export default function App() {
         lay.focus(showing);
         focusPaneElement(showing);
       }
-      return false;
+      return "none";
     }
     const chatPane = lay.fit.panes.find((n) => lay.ws.panes[n - 1].view === "chat"
       && shownThread(at.chats[n], pendingThread.current[n]) === ref.threadId);
@@ -2634,7 +2634,7 @@ export default function App() {
       lay.showSubagent(take, ref, !byAgent);
       lastSubPane.current = take;
       if (!byAgent) focusPaneElement(take);
-      return true;
+      return "placed";
     }
     const source = chatPane ?? (lay.fit.panes.includes(lay.ws.focused) ? lay.ws.focused : lay.fit.panes[0]);
     const dirty = dirtyIds();
@@ -2648,7 +2648,7 @@ export default function App() {
         lay.split(source, axis, id, subagentSpec(ref), { focus: !byAgent });
         lastSubPane.current = id;
         if (!byAgent) focusPaneElement(id);
-        return true;
+        return "placed";
       }
     }
     // Reusing a sub-agent pane is the owner's click alone: a chat asking for
@@ -2659,10 +2659,11 @@ export default function App() {
       lay.showSubagent(reuse, ref, !byAgent);
       lastSubPane.current = reuse;
       if (!byAgent) focusPaneElement(reuse);
-      return true;
+      return "placed";
     }
-    dispatch({ type: "notice", text: "No room for another pane: close one or use ⊞" });
-    return false;
+    // A chat's ask says it once per drain (`drainAgentOpens`), not per child.
+    if (!byAgent) dispatch({ type: "notice", text: "No room for another pane: close one or use ⊞" });
+    return "full";
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [releasePane, dispatch]);
   // The bus handler is set up once; it reaches the current opener here.
@@ -2693,11 +2694,15 @@ export default function App() {
       }
       return;
     }
+    let full = false;
     while (agentOpens.current.length) {
       const [first, ...rest] = agentOpens.current;
       agentOpens.current = rest;
-      if (openSubagentNow.current(first.ref, { byAgent: true })) return;
+      const got = openSubagentNow.current(first.ref, { byAgent: true });
+      if (got === "placed") return;
+      if (got === "full") full = true;
     }
+    if (full) dispatch({ type: "notice", text: "No room for another pane: close one or use ⊞" });
   };
   useEffect(() => () => { if (agentOpenRetry.current !== null) clearTimeout(agentOpenRetry.current); }, []);
   // After every commit that could matter: the layout the last placement drew,
