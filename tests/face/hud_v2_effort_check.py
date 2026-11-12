@@ -81,7 +81,7 @@ def effort_checks(browser, mock, base, check, until, guard, init_script):
         # The crash goes last: it leaves the window on its Reload prompt.
         for section in (_tab_round_checks, _pane_switch_checks, _model_change_checks,
                         _opened_row_checks, _swap_card_checks, _same_project_checks, _project_gone_checks,
-                        _archived_checks, _crash_checks):
+                        _archived_checks, _chip_width_checks, _crash_checks):
             try:
                 section(page, mock, check, until)
             except Exception as e:  # a section that cannot run is a failure, and the rest still run
@@ -336,6 +336,43 @@ def _swap_card_checks(page, mock, check, until):
 
 
 # ---- RR1: one compose row's move never lands on the next ----------------------
+
+ROW_HEIGHTS = """() => [...document.querySelectorAll('[data-testid="model-chip"]')].map(
+  (c) => Math.round(c.parentElement.getBoundingClientRect().height))"""
+BTN_WIDTHS = """() => [...document.querySelectorAll('[data-testid="model-chip-btn"]')].map(
+  (b) => Math.round(b.getBoundingClientRect().width))"""
+
+
+def _chip_width_checks(page, mock, check, until):
+    """AG-1c (Sol LOW on AG-1): the chip keeps the width of its widest effort word so the slider never
+    re-wraps its row, but that reservation is capped in a narrow row (the model name shortens), so it
+    must not grow the controls row either. Two chat panes at 1135px, 100% zoom: the row is as tall as
+    it is with the reservation taken away, and the button's width does not move with the effort."""
+    _fresh(page, mock, until, COLS_CHATS, size=(1135, 800))
+    _show(page, until, "ec1")
+    page.evaluate("window.__hud.dispatch({type: 'chat', pane: 2, patch: {threadId: 'eb1', compose: null}})")
+    until(lambda: _chat(page, 2)["threadId"] == "eb1", timeout=3)
+    until(lambda: page.locator('[data-testid="model-chip-btn"]').count() == 2, timeout=3)
+    time.sleep(0.3)
+    with_res = page.evaluate(ROW_HEIGHTS)
+    page.add_style_tag(content=".mb-ghost { display: none !important; }")
+    time.sleep(0.2)
+    without = page.evaluate(ROW_HEIGHTS)
+    check("AG-1c: two chat panes at 1135px, the reserved chip width does not grow the controls row",
+          len(with_res) == 2 and with_res == without, f"with {with_res}, without {without}")
+    _fresh(page, mock, until, COLS_CHATS, size=(1135, 800))
+    _show(page, until, "ec1")
+    until(lambda: page.locator(BTN).count() == 1, timeout=3)
+    # The thread's effort is what the label shows: patch the record as a `thread_updated` would.
+    seen = {}
+    for effort in ("low", "medium", "high", "xhigh", "max"):
+        page.evaluate("(e) => window.__hud.dispatch({type: 'thread_patch', id: 'ec1', patch: {effort: e}})", effort)
+        until(lambda: page.locator(BTN).get_attribute("data-effort") == effort, timeout=3)
+        seen[effort] = page.locator(BTN).bounding_box()["width"]
+    page.evaluate("window.__hud.dispatch({type: 'thread_patch', id: 'ec1', patch: {effort: null}})")
+    check("AG-1c: the chip's width is the same at every effort in a narrow row",
+          len({round(v) for v in seen.values()}) == 1, str(seen))
+
 
 def _compose_in(page, until, project, provider):
     """A fresh compose row in pane 1, as New thread makes one."""

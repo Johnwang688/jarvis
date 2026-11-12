@@ -78,8 +78,8 @@ describe("the fonts (owner D-9)", () => {
     for (const w of weights) expect(MONO_WEIGHTS).toContain(w);
   });
 
-  it("word spacing is 0.05em on body and reset to normal in every desktop rule that uses the mono font (code keeps its grid)", () => {
-    expect(text).toMatch(/body\s*\{[^}]*word-spacing:\s*0\.05em/);
+  it("word spacing is 0.1em on body and reset to normal in every desktop rule that uses the mono font (code keeps its grid)", () => {
+    expect(text).toMatch(/body\s*\{[^}]*word-spacing:\s*0\.1em/);
     let count = 0;
     for (const [file, c] of Object.entries(desktop)) {
       for (const [sel, body] of rulesOf(c)) {

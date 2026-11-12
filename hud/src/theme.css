@@ -138,7 +138,7 @@ body {
   font-family: "Plus Jakarta Sans", "Segoe UI", system-ui, sans-serif;
   font-size: 13px;
   /* Plus Jakarta Sans's spaces nearly vanish at 13px (owner, 2026-11-11); never for monospace (below). */
-  word-spacing: 0.05em;
+  word-spacing: 0.1em;
   background: var(--base);
   color: var(--text);
 }
@@ -1264,6 +1264,14 @@ details.decisions[open] summary { color: var(--text); margin-bottom: 8px; }
 /* Sizes the label to its longest form (ModelChip): the live text and an unseen copy of each form share one cell. */
 .modelbtn .mb-label > span { grid-area: 1 / 1; min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
 .modelbtn .mb-label > .mb-ghost { visibility: hidden; }
+/* The live label and each ghost are a model name that may shorten and an effort word that never does. */
+.modelbtn .mb-label > span { display: flex; }
+.modelbtn .mb-name { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.modelbtn .mb-eff { flex: none; white-space: pre; }
+/* In a narrow row the reserved width is capped, and the model name gives way inside it: the effort
+   word stays readable and the width still does not move with the effort (AG-1c; Sol LOW on AG-1). */
+:is(#inputbar, .inputbar) > .row { container-type: inline-size; }
+@container (max-width: 440px) { .modelbtn .mb-label { max-width: 32ch; } }
 .mpop {
   position: fixed; z-index: 60; width: 300px; overflow-y: auto;
   background: var(--bg-2); border: 1px solid var(--border-strong); border-radius: var(--radius);
