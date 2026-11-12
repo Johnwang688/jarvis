@@ -1,6 +1,6 @@
 // A native sub-agent's row in its parent's transcript (SV-3, plan §D5), at
 // the point it was spawned: name, provider, kind, status (always a word, in
-// Graphite: amber live, green done, red failed, muted stopped), the last
+// aurora glass: amber live, green done, red failed, muted stopped), the last
 // tool, how long it ran, its tool uses, tokens and declined calls. The row
 // is one button: Enter, Space or a click opens the child's live transcript
 // in a read-only pane. Beside it, for a live child, the owner's Stop (SV-4,

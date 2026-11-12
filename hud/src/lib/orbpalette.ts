@@ -61,7 +61,7 @@ export const coolSnapshot = () => coolVersion;
 export function palette(state: OrbState, accent?: string | null): OrbPalette {
   const p: OrbPalette = (() => {
     switch (state) {
-      // Graphite: the cool states are the glacier accent (111,195,223) and its
+      // Aurora glass: the cool states are the glacier accent (111,195,223) and its
       // lighter step (154,214,234). Idle is a little dimmer and slower, so the
       // orb is present without glowing at you all session.
       case "listening": return { hue: cool.hi, boost: 1.35, spin: 1.6 };

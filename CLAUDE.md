@@ -100,8 +100,8 @@ permanent delete is owner HUD-only, archived-only, into trash, never project
 folders/worktrees. Never `_Store._delete` a project. `Daemon.start()` never calls
 a model. Quota, title, cost and cache claims need evidence.
 
-The HUD uses **Graphite**: warm off-black/glacier-cyan, amber pending/red error,
-overriding the global palette. Preserve dimensions, input behavior and owner
+The HUD is **aurora glass**, not the global palette: cyan accent; amber
+pending/red error fixed, no colour near them. Preserve dimensions, input behavior and owner
 workspace/editor/Browser decisions. Driving uses owner switches.
 Owner HTTP Basic/Digest auth uses only the exact private tab socket;
 credentials never enter tools, replay, status, logs or config (Browser note,

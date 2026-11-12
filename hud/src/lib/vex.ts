@@ -577,7 +577,7 @@ export function parseLastBuilds(raw: string | null): Record<string, string> {
 
 /**
  * A step's state mark (plan §3.1). Text always goes with the colour. **Amber
- * is never a VEX result**: in Graphite it means an approval card holds the
+ * is never a VEX result**: in aurora glass it means an approval card holds the
  * window, and only the status line's "Held" says that.
  */
 export type MarkState = "idle" | "busy" | "ok" | "failed" | "stale" | "unknown";

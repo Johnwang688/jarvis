@@ -137,7 +137,7 @@ export function stateWords(r: RelayInfo): string {
 
 export type RelayTone = "pending" | "working" | "done" | "muted" | "error";
 
-/** Graphite: amber only for pending, red only for an error. */
+/** Aurora glass: amber only for pending, red only for an error. */
 export function stateTone(state: string): RelayTone {
   return state === "queued" ? "pending" : state === "running" ? "working" : state === "answered" ? "done"
     : state === "failed" ? "error" : "muted";
