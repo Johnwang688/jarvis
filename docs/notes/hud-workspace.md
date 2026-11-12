@@ -2052,9 +2052,12 @@ and capped model chip; #349 AG-2 the fluid; #350 AG-3 Appearance settings; this
 docs package is AG-4. Decisions D-1..D-11 are in the plan.
 
 **Fixed meanings (tighten-only).** Amber = pending/running, red = error, green =
-done keep their exact hexes. No custom accent, wash or base may enter the
-amber/red band (OKLCH hue 5-105 at chroma >= 0.04, or OKLab distance < 0.12 of
-either); refused, never shifted. Approval cards and error surfaces are never
+done keep their exact hexes. No custom accent (or colour derived from it), wash
+or base may enter the amber/red band: OKLCH hue 5-105 at chroma >= 0.04 for the
+accent family and >= 0.05 for washes and base, or OKLab distance < 0.12 of
+either. A wash or base is also refused when any colour the aurora can mix from
+the palette would enter it (a cell-subdivision proof that fails closed; plan
+§4). Refused, never shifted. Approval cards and error surfaces are never
 repainted.
 
 **D-8 contrast floors.** `--text` 4.5:1 on a pane and on `--glass-solid`;
