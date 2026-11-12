@@ -336,20 +336,25 @@ def boot_checks(browser, mock, base, check, until, guard, init_script):
             page.mouse.up()
         finally:
             ctx.close()
-        # F4: a press held past the hard cap still keeps its release from the HUD.
-        ctx, page = fresh()
+        # F4, revised (verifier finding 6): the 7 s cap bounds the DRAWING whatever the pointer does. A press
+        # held past it ends the animation and releases the GL context, but the now-invisible shield stays so
+        # the release (and its click) still never reaches the HUD underneath.
+        ctx, page = fresh(extra=TRACK_GL)
         try:
             page.wait_for_selector(OVERLAY, state="attached")
             page.evaluate(UNDERLAY)
             page.mouse.move(40, 40)
             page.mouse.down()
             page.wait_for_timeout(7800)
-            check("a press held past the hard cap keeps boot up", page.locator(OVERLAY).count() == 1)
+            check("a press held past the hard cap releases the GL context and hides the drawing",
+                  page.evaluate(RELEASED) and page.evaluate("document.querySelector('#hud-boot')?.style.opacity") == "0")
+            check("…while the invisible shield still stands", page.locator(OVERLAY).count() == 1)
             page.mouse.up()
             page.wait_for_selector(OVERLAY, state="detached", timeout=2000)
             check("…and its release reaches nothing underneath",
                   page.evaluate("window.__under") == {"click": 0, "dblclick": 0, "down": 0, "up": 0},
                   str(page.evaluate("window.__under")))
+            check("…and nothing remains afterwards", page.evaluate(GONE))
         finally:
             ctx.close()
 

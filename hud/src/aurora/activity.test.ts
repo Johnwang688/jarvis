@@ -26,6 +26,25 @@ describe("chat activity ripples", () => {
     expect(h.a.rippleAt(1, 1)).toBe(false);
   });
 
+  it("rippleAt shares the global budget: refused once streaming ripples exhaust it, and it spends one itself", () => {
+    const h = rig();
+    h.at(0);
+    for (let p = 1; p <= TOTAL_MAX; p++) expect(h.a.chatStreaming(p)).toBe(true);
+    expect(h.a.rippleAt(50, 50)).toBe(false);
+    expect(h.made.length).toBe(TOTAL_MAX);
+    h.at(TOTAL_WINDOW_MS + 1);
+    expect(h.a.rippleAt(50, 50)).toBe(true);
+    for (let p = 1; p < TOTAL_MAX; p++) expect(h.a.chatStreaming(p)).toBe(true);
+    expect(h.a.chatStreaming(9)).toBe(false); // the handoff ripple used a slot
+  });
+
+  it("rippleAt keeps Appearance eligibility", () => {
+    const h = rig();
+    h.a.setSink((r) => { h.made.push(r); return true; }, () => false);
+    expect(h.a.rippleAt(5, 5)).toBe(false);
+    expect(h.made.length).toBe(0);
+  });
+
   it("limits one pane to a ripple per PANE_MIN_MS", () => {
     const h = rig();
     for (let t = 0; t < 3 * PANE_MIN_MS; t += 50) { h.at(t); h.a.chatStreaming(1); }

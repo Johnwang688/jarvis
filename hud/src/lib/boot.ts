@@ -21,6 +21,35 @@ export const HARD_CAP_MS = 7_000;
 /** How long the name waits for the bundled font before it is sampled in whatever face there is. */
 export const FONT_WAIT_MS = 600;
 
+/** The concept's lavender, used only when no live token gives a hue outside the amber and red band. */
+const FALLBACK_LAVENDER: readonly [number, number, number] = [176 / 255, 166 / 255, 240 / 255];
+
+/** Hue in degrees (0..360) of an sRGB colour with 0..1 channels. */
+export function hueOf(c: readonly [number, number, number]): number {
+  const [r, g, b] = c;
+  const mx = Math.max(r, g, b), mn = Math.min(r, g, b), d = mx - mn;
+  if (d < 1e-6) return 0;
+  const h = mx === r ? ((g - b) / d) % 6 : mx === g ? (b - r) / d + 2 : (r - g) / d + 4;
+  return (h * 60 + 360) % 360;
+}
+
+/** Amber and red keep their meaning (pending, error): no tint may land in 0..70 or 335..360 degrees. */
+const inWarmBand = (c: readonly [number, number, number]) => {
+  const h = hueOf(c);
+  return h < 70 || h > 335;
+};
+
+/**
+ * The spark glass's violet tint, from the live tokens: `--wash-3` lifted halfway to white (the default
+ * palette gives about the concept's lavender), else the accent lifted the same way, else the concept's own
+ * value, whenever a custom palette would put it in the amber or red band.
+ */
+export function sparkLavender(wash3: readonly [number, number, number], accent: readonly [number, number, number]): [number, number, number] {
+  const lift = (c: readonly [number, number, number]): [number, number, number] => [c[0] + (1 - c[0]) * 0.5, c[1] + (1 - c[1]) * 0.5, c[2] + (1 - c[2]) * 0.5];
+  for (const c of [wash3, accent]) if (!inWarmBand(c)) return lift(c);
+  return [...FALLBACK_LAVENDER];
+}
+
 /** Whether this window has played it already (once per window session). */
 export const PLAYED_KEY = "jarvis.hud.boot.played";
 

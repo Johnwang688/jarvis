@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { BOOT_RINGS, FADE_OUT_S, HARD_CAP_MS, NAME_SPARKS, ORB_RADIUS_FRACTION, TIMELINE, TOTAL_S, auroraAt, buildSparks,
   dockAt, dockFromRect, fallbackDock, geoFor, handoffAlpha, maskPoints, mulberry32, orbAt, ringArrive, ringLand, ringLock,
-  ringRot, ringSolid, scatterAt, shouldPlay, sparkAt } from "./boot";
+  ringRot, ringSolid, scatterAt, shouldPlay, sparkAt, hueOf, sparkLavender } from "./boot";
 
 describe("boot eligibility", () => {
   for (let mask = 0; mask < 32; mask++) {
@@ -136,5 +136,24 @@ describe("docking into the real orb", () => {
       { left: -300, top: 900, width: 132, height: 132 }, { left: 2000, top: 10, width: 132, height: 132 }]) {
       expect(dockFromRect(r, W, H)).toEqual(f);
     }
+  });
+});
+
+describe("the spark lavender", () => {
+  it("is the lifted --wash-3, close to the concept's lavender for the default palette", () => {
+    const c = sparkLavender([0x64 / 255, 0x50 / 255, 0xc4 / 255], [0x6f / 255, 0xc3 / 255, 0xdf / 255]);
+    const concept = [176, 166, 240];
+    c.forEach((v, i) => expect(Math.abs(v * 255 - concept[i]!)).toBeLessThan(20));
+  });
+  it("follows a custom wash and never lands in the amber or red band", () => {
+    const green = sparkLavender([0.2, 0.7, 0.3], [0.4, 0.8, 0.9]);
+    expect(Math.abs(hueOf(green) - hueOf([0.2, 0.7, 0.3]))).toBeLessThan(1);
+    for (const wash of [[0.9, 0.1, 0.1], [0.9, 0.6, 0.1], [0.9, 0.1, 0.4]] as const) {
+      const c = sparkLavender(wash, [0.4, 0.8, 0.9]);
+      const h = hueOf(c);
+      expect(h >= 70 && h <= 335).toBe(true);
+    }
+    const all = sparkLavender([0.9, 0.1, 0.1], [0.9, 0.6, 0.1]);
+    expect(hueOf(all)).toBeGreaterThan(200);
   });
 });
