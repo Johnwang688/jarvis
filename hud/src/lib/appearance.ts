@@ -31,6 +31,8 @@ export interface Appearance {
   stir: boolean;
   /** A chat ripples the fluid while it streams a reply (default on). */
   activity: boolean;
+  /** Natural drift strength, 0..2 (default 1): how lively the aurora is at rest. Fluid and Flow only. */
+  drift: number;
   /** AG-3: the accent, `#rrggbb`. Absent: the default. Checked again (checkAccent) before it is applied. */
   accent?: string;
   /** AG-3: the three wash colours, `#rrggbb` each (--wash-1..3). Absent: the defaults. */
@@ -39,7 +41,12 @@ export interface Appearance {
   base?: string;
 }
 
-export const DEFAULT_APPEARANCE: Appearance = { motion: "fluid", stir: true, activity: true };
+export const DEFAULT_APPEARANCE: Appearance = { motion: "fluid", stir: true, activity: true, drift: 1 };
+
+/** A stored drift strength: a finite number clamped to 0..2; anything else is 1 (today's drift). */
+export function clampDrift(v: unknown): number {
+  return typeof v === "number" && Number.isFinite(v) ? Math.min(2, Math.max(0, v)) : 1;
+}
 
 // ---- colours: defaults and the guards --------------------------------------------------------------------
 
@@ -635,6 +642,7 @@ export function parseAppearance(raw: string | null): Appearance {
   if (typeof r.motion === "string" && (MOTIONS as readonly string[]).includes(r.motion)) out.motion = r.motion as Motion;
   if (typeof r.stir === "boolean") out.stir = r.stir;
   if (typeof r.activity === "boolean") out.activity = r.activity;
+  out.drift = clampDrift(r.drift);
   // Only well-formed `#rrggbb` is kept; the guards run in resolveColours, before anything is applied.
   const accent = normHex(r.accent);
   if (accent) out.accent = accent;
@@ -663,6 +671,7 @@ export function saveAppearance(patch: Partial<Appearance>, storage?: Pick<Storag
     /* corrupt: start from the defaults */
   }
   const next = { ...loadAppearance(storage), ...patch };
+  if ("drift" in patch) next.drift = clampDrift(patch.drift);
   // A patch field set to undefined is a reset: it must also clear a stored copy, not just hide it.
   for (const k of ["accent", "washes", "base"] as const) {
     if (k in patch && patch[k] === undefined) { delete next[k]; delete unknown[k]; }

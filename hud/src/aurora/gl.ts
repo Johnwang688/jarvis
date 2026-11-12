@@ -156,6 +156,8 @@ export interface StyleImpl {
    * 0..1 (the caller's strength), `channel` the wash (0..2) whose dye it lays down. Flow ignores it.
    */
   stir(x: number, y: number, dx: number, dy: number, gain: number, channel: number): void;
+  /** Natural drift strength 0..2 (1 = the tuned speed); takes effect on the next step. */
+  setDrift(d: number): void;
   /** A soft ring outward from (x, y), `gain` 0..1, in wash `channel`. Flow ignores it. */
   ripple(x: number, y: number, gain: number, channel: number): void;  /** Deletes this style's GL objects (the context stays). Safe to call more than once. */
   release(): void;

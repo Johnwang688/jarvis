@@ -3,7 +3,9 @@
 export interface FakeGL {
   gl: WebGL2RenderingContext;
   state: { lost: boolean; renderer: string; halfFloat: boolean; screenDraws: number; stirCalls: number;
-    /** The last value set for each scalar float uniform (`uCurlK`, `uDiss`, ...), by name. */ uniforms: Record<string, number> };
+    /** The last value set for each scalar float uniform (`uCurlK`, `uDiss`, ...), by name. */ uniforms: Record<string, number>;
+    /** Every `uColors[0]` vec3 array uploaded, oldest first (the fluid sends the velocity splat, then the dye splat, each step). */ colours: number[][];
+    /** Every `uPoints[0]` vec2 array uploaded, oldest first: the emitter positions, once per splat. */ points: number[][] };
   /** GL objects created and not deleted. */
   live(): number;
   lose(): void;
@@ -11,7 +13,7 @@ export interface FakeGL {
 }
 
 export function fakeGL(opts: { renderer?: string; halfFloat?: boolean } = {}): FakeGL {
-  const state = { lost: false, renderer: opts.renderer ?? "NVIDIA GeForce", halfFloat: opts.halfFloat ?? true, screenDraws: 0, stirCalls: 0, uniforms: {} as Record<string, number> };
+  const state = { lost: false, renderer: opts.renderer ?? "NVIDIA GeForce", halfFloat: opts.halfFloat ?? true, screenDraws: 0, stirCalls: 0, uniforms: {} as Record<string, number>, colours: [] as number[][], points: [] as number[][] };
   const sources = new Map<object, string>();
   const attached = new Map<object, object[]>();
   const active = new Map<object, string[]>();
@@ -45,6 +47,12 @@ export function fakeGL(opts: { renderer?: string; halfFloat?: boolean } = {}): F
       active.set(p as object, names);
     },
     uniform1f: (loc, v) => void ((loc as { name?: string } | null)?.name && (state.uniforms[(loc as { name: string }).name] = v as number)),
+    uniform2fv: (loc, v) => {
+      if ((loc as { name?: string } | null)?.name === "uPoints[0]") state.points.push(Array.from(v as ArrayLike<number>));
+    },
+    uniform3fv: (loc, v) => {
+      if ((loc as { name?: string } | null)?.name === "uColors[0]") state.colours.push(Array.from(v as ArrayLike<number>));
+    },
     checkFramebufferStatus: () => (state.lost ? 0 : constant("FRAMEBUFFER_COMPLETE")),
     getActiveUniform: (p, i) => {
       const name = active.get(p as object)?.[i as number];

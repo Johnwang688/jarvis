@@ -84,6 +84,17 @@ const CURL_STIRRED = 11;
 const DISSIPATION_STIRRED = 0.2;
 /** Seconds for stirred energy to fall to 1/e: the fluid is back at its drift in a few of these. */
 export const ENERGY_TAU = 1.6;
+
+/**
+ * Natural drift strength (Settings -> Appearance, 0..2, 1 = the tuning above). It scales how fast the ambient
+ * emitters travel and how hard they push (linearly), and the rest vorticity gently (square root, so 200% is
+ * 1.41x and stays far below CURL_STIRRED). The dye feed is not scaled: at 0% the emitters stand still and
+ * must keep feeding, or the colours would fade away.
+ */
+export function driftScales(drift: number): { path: number; force: number; curlRest: number } {
+  const d = Number.isFinite(drift) ? Math.min(2, Math.max(0, drift)) : 1;
+  return { path: d, force: d, curlRest: CURL_REST * Math.sqrt(d) };
+}
 /** A stir's weight on the fluid: weaker than the Bible app's wallpaper, so it never distracts. */
 const STIR_FORCE = 2600;
 const STIR_DYE = 0.32;
@@ -208,9 +219,10 @@ export function createFluid(
   const dyeColours = new Float32Array(9);
   const scratch2 = new Float32Array(3);
   let energy = 0;
+  let scales = driftScales(1);
+  let tPath = 0;
   let width = w;
   let height = h;
-  let t = 0;
   let targets: Target[] = [];
   let vel: DoubleTarget;
   let dye: DoubleTarget;
@@ -386,18 +398,18 @@ export function createFluid(
 
   const step = (dt: number) => {
     if (!ready) return;
-    t += dt;
+    tPath += dt * scales.path;
     energy *= Math.exp(-dt / ENERGY_TAU);
     if (energy < 0.002) energy = 0;
     const k = dt * 60;
     for (let i = 0; i < EMITTERS.length; i++) {
       const e = EMITTERS[i]!;
-      points[2 * i] = 0.5 + e.ax * Math.sin(t * e.fx * TAU + e.px);
-      points[2 * i + 1] = 0.5 + e.ay * Math.sin(t * e.fy * TAU + e.py);
-      const vx = e.ax * e.fx * TAU * Math.cos(t * e.fx * TAU + e.px);
-      const vy = e.ay * e.fy * TAU * Math.cos(t * e.fy * TAU + e.py);
-      velColours[3 * i] = vx * vel.w * AMBIENT_FORCE * k;
-      velColours[3 * i + 1] = vy * vel.h * AMBIENT_FORCE * k;
+      points[2 * i] = 0.5 + e.ax * Math.sin(tPath * e.fx * TAU + e.px);
+      points[2 * i + 1] = 0.5 + e.ay * Math.sin(tPath * e.fy * TAU + e.py);
+      const vx = e.ax * e.fx * TAU * Math.cos(tPath * e.fx * TAU + e.px);
+      const vy = e.ay * e.fy * TAU * Math.cos(tPath * e.fy * TAU + e.py);
+      velColours[3 * i] = vx * vel.w * AMBIENT_FORCE * scales.force * k;
+      velColours[3 * i + 1] = vy * vel.h * AMBIENT_FORCE * scales.force * k;
       velColours[3 * i + 2] = 0;
       dyeColours[3 * i] = e.ch === 0 ? 0.012 * k : 0;
       dyeColours[3 * i + 1] = e.ch === 1 ? 0.012 * k : 0;
@@ -412,7 +424,7 @@ export function createFluid(
     u = bind(P.vort, vel.tx, vel.ty);
     gl.uniform1i(u.uVelocity ?? null, bindTex(0, vel.read.tex));
     gl.uniform1i(u.uCurl ?? null, bindTex(1, curl.tex));
-    gl.uniform1f(u.uCurlK ?? null, CURL_REST + (CURL_STIRRED - CURL_REST) * energy);
+    gl.uniform1f(u.uCurlK ?? null, scales.curlRest + (CURL_STIRRED - scales.curlRest) * energy);
     gl.uniform1f(u.uDt ?? null, dt);
     blit(vel.write);
     swap(vel);
@@ -470,6 +482,9 @@ export function createFluid(
       blit(null);
     },
     setPalette,
+    setDrift(d) {
+      scales = driftScales(d);
+    },
     resize(nw, nh) {
       width = nw;
       height = nh;

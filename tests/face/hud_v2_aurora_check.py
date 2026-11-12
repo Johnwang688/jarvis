@@ -199,6 +199,23 @@ def aurora_checks(browser, mock, base, check, until, guard, init_script):
     sel.select_option("flow")
     check("Flow runs again, live, with no reload", bool(until(lambda: _attr(page, "data-aurora-state") == "running", timeout=3)))
     check("the stir switches are disabled unless Motion is Fluid", page.locator('[data-testid="appearance-stir"]').is_disabled())
+    drift = page.locator('[data-testid="appearance-drift"]')
+    check("Natural drift is a 0-200% slider defaulting to 100%, shown next to it",
+          drift.count() == 1 and drift.input_value() == "100" and drift.get_attribute("max") == "200"
+          and drift.get_attribute("step") == "10" and not drift.is_disabled()
+          and page.locator('[data-testid="appearance-drift-value"]').inner_text() == "100%"
+          and _attr(page, "data-aurora-drift") == "1")
+    drift.fill("30")
+    until(lambda: _attr(page, "data-aurora-drift") == "0.3", timeout=3)
+    stored = json.loads(page.evaluate(f"localStorage.getItem('{APPEARANCE}')") or "{}")
+    check("changing it stores the strength and reaches the running aurora live, with no reload",
+          stored.get("drift") == 0.3 and _attr(page, "data-aurora-drift") == "0.3"
+          and _attr(page, "data-aurora-state") == "running"
+          and page.locator('[data-testid="appearance-drift-value"]').inner_text() == "30%", str(stored))
+    sel.select_option("still")
+    check("Still disables the slider and says why",
+          page.locator('[data-testid="appearance-drift"]').is_disabled()
+          and "no drift" in page.locator('[data-testid="appearance-drift-note"]').inner_text())
     sel.select_option("fluid")
     page.locator('[data-testid="appearance-stir"]').uncheck()
     page.locator('[data-testid="appearance-activity"]').uncheck()
@@ -238,10 +255,14 @@ def aurora_checks(browser, mock, base, check, until, guard, init_script):
     # ---- 4. the fluid: pointer stirs and chat ripples ----------------------------------------------
     ctx = _context(browser, guard, init_script + FLUID_ON_SOFTWARE + KEEP_BUFFER)
     page = _new_page(ctx, errors)
-    _boot(page, mock, base, until)
+    # natural drift at 200%: the pixel bounds below must hold at the livelier setting too
+    _boot(page, mock, base, until, appearance={"motion": "fluid", "drift": 2})
     ok = until(lambda: _attr(page, "data-aurora-style") == "fluid" and _attr(page, "data-aurora-state") == "running", timeout=8)
     check("with the stats override the fluid runs even on a software renderer", bool(ok),
           f"{_attr(page, 'data-aurora-style')} {_attr(page, 'data-aurora-state')}")
+    check("the fluid runs at 200% drift", _attr(page, "data-aurora-drift") == "2", str(_attr(page, "data-aurora-drift")))
+    time.sleep(0.5)
+    _pixel_bound(page, check, "fluid, resting, drift 200%")
     page.locator('[data-testid="thread-t1"]').click()
     until(lambda: page.locator('[data-testid="log"] .msg').count() >= 2)
     box = page.locator('[data-testid="input"]').first
@@ -264,7 +285,7 @@ def aurora_checks(browser, mock, base, check, until, guard, init_script):
     time.sleep(0.3)
     check("the stirred fluid really is lit (the bound below is not met by a black canvas)",
           _int(page, "data-aurora-stirs") > s1 + 20, str(_int(page, "data-aurora-stirs")))
-    _pixel_bound(page, check, "fluid, stirred")
+    _pixel_bound(page, check, "fluid, stirred, drift 200%")
     # a click still reaches a HUD control (the aurora is never in the way)
     page.mouse.move(640, 400)
     page.locator('[data-testid="titlebar-settings"]').click()
