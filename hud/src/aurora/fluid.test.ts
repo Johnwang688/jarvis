@@ -118,6 +118,25 @@ describe("natural drift strength", () => {
     }
   });
 
+  it("at 0% the dye emitters stand still across frames; at 100% they travel", () => {
+    /** The emitter positions uploaded on each of six steps (the last upload of each step). */
+    const track = (x: ReturnType<typeof make>) => {
+      const seen: number[][] = [];
+      for (let i = 0; i < 6; i++) {
+        x.f.step(1 / 60);
+        const p = x.g.state.points.at(-1)!;
+        expect(p).toHaveLength(6); // three emitters, x and y each
+        seen.push(p);
+      }
+      return seen;
+    };
+    const still = track(make(0));
+    for (const p of still) expect(p).toEqual(still[0]);
+    const going = track(make(1));
+    expect(new Set(going.map((p) => p.join(","))).size).toBeGreaterThan(1);
+    expect(going.at(-1)).not.toEqual(going[0]);
+  });
+
   it("at 0% a stir still raises the vorticity and it settles back to the floor", () => {
     const { g, f } = make(0);
     for (let i = 0; i < 8; i++) f.stir(0.5, 0.5, 0.2, 0.1, 1, 0);
