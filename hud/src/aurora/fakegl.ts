@@ -2,7 +2,8 @@
 // be lost and restored, and can pretend to be software or to lack half-float targets.
 export interface FakeGL {
   gl: WebGL2RenderingContext;
-  state: { lost: boolean; renderer: string; halfFloat: boolean; screenDraws: number; stirCalls: number };
+  state: { lost: boolean; renderer: string; halfFloat: boolean; screenDraws: number; stirCalls: number;
+    /** The last value set for each scalar float uniform (`uCurlK`, `uDiss`, ...), by name. */ uniforms: Record<string, number> };
   /** GL objects created and not deleted. */
   live(): number;
   lose(): void;
@@ -10,7 +11,10 @@ export interface FakeGL {
 }
 
 export function fakeGL(opts: { renderer?: string; halfFloat?: boolean } = {}): FakeGL {
-  const state = { lost: false, renderer: opts.renderer ?? "NVIDIA GeForce", halfFloat: opts.halfFloat ?? true, screenDraws: 0, stirCalls: 0 };
+  const state = { lost: false, renderer: opts.renderer ?? "NVIDIA GeForce", halfFloat: opts.halfFloat ?? true, screenDraws: 0, stirCalls: 0, uniforms: {} as Record<string, number> };
+  const sources = new Map<object, string>();
+  const attached = new Map<object, object[]>();
+  const active = new Map<object, string[]>();
   const live = new Set<object>();
   let boundFb: unknown = null;
   const consts = new Map<string, number>();
@@ -30,10 +34,23 @@ export function fakeGL(opts: { renderer?: string; halfFloat?: boolean } = {}): F
     },
     getParameter: () => (state.lost ? null : state.renderer),
     getShaderParameter: () => !state.lost,
-    getProgramParameter: (_p, k) => (k === constant("ACTIVE_UNIFORMS") ? 0 : !state.lost),
+    getProgramParameter: (p, k) => (k === constant("ACTIVE_UNIFORMS") ? (active.get(p as object)?.length ?? 0) : !state.lost),
+    shaderSource: (sh, src) => void sources.set(sh as object, String(src)),
+    attachShader: (p, sh) => void attached.set(p as object, [...(attached.get(p as object) ?? []), sh as object]),
+    linkProgram: (p) => {
+      const names: string[] = [];
+      for (const sh of attached.get(p as object) ?? []) {
+        for (const m of (sources.get(sh) ?? "").matchAll(/uniform\s+\w+\s+(\w+)(\[\d+\])?\s*;/g)) names.push(m[2] ? `${m[1]}[0]` : m[1]!);
+      }
+      active.set(p as object, names);
+    },
+    uniform1f: (loc, v) => void ((loc as { name?: string } | null)?.name && (state.uniforms[(loc as { name: string }).name] = v as number)),
     checkFramebufferStatus: () => (state.lost ? 0 : constant("FRAMEBUFFER_COMPLETE")),
-    getActiveUniform: () => null,
-    getUniformLocation: () => ({}),
+    getActiveUniform: (p, i) => {
+      const name = active.get(p as object)?.[i as number];
+      return name ? { name } : null;
+    },
+    getUniformLocation: (_p, name) => ({ name }),
     getShaderInfoLog: () => "",
     getProgramInfoLog: () => "",
     bindFramebuffer: (_t, fb) => void (boundFb = fb),

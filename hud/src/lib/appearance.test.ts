@@ -40,4 +40,11 @@ describe("appearance preferences", () => {
   it("ignore accent and washes of the wrong type", () => {
     expect(parseAppearance('{"accent":5,"washes":[1,2]}')).toEqual(DEFAULT_APPEARANCE);
   });
+
+  it("saving keeps fields this HUD does not know (a later HUD's base, a malformed accent) without applying them", () => {
+    const s = store({ [APPEARANCE_KEY]: JSON.stringify({ motion: "flow", base: "#101010", future: { a: 1 }, accent: 7 }) });
+    const next = saveAppearance({ stir: false }, s);
+    expect(next).toEqual({ motion: "flow", stir: false, activity: true });
+    expect(JSON.parse(s.m[APPEARANCE_KEY]!)).toEqual({ motion: "flow", stir: false, activity: true, base: "#101010", future: { a: 1 }, accent: 7 });
+  });
 });

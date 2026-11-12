@@ -58,8 +58,17 @@ export function loadAppearance(storage?: Pick<Storage, "getItem">): Appearance {
 
 /** Saves `patch` over what is stored (so unknown-to-this-HUD fields are not lost) and tells the window. */
 export function saveAppearance(patch: Partial<Appearance>, storage?: Pick<Storage, "getItem" | "setItem">): Appearance {
+  const raw = readKey(APPEARANCE_KEY, storage);
+  // Fields this HUD does not know (a later one's) ride along untouched, never read or applied here.
+  let unknown: Record<string, unknown> = {};
+  try {
+    const v: unknown = raw ? JSON.parse(raw) : null;
+    if (typeof v === "object" && v !== null && !Array.isArray(v)) unknown = v as Record<string, unknown>;
+  } catch {
+    /* corrupt: start from the defaults */
+  }
   const next = { ...loadAppearance(storage), ...patch };
-  writeKey(APPEARANCE_KEY, JSON.stringify(next), storage);
+  writeKey(APPEARANCE_KEY, JSON.stringify({ ...unknown, ...next }), storage);
   try {
     window.dispatchEvent(new Event(APPEARANCE_EVENT));
   } catch {

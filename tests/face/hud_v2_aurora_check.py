@@ -59,6 +59,45 @@ def _context(browser, guard, init_script, **kw):
     return ctx
 
 
+# Keep the drawing buffer so the test can read the picture back (the app does not need it).
+KEEP_BUFFER = """
+const origCtx = HTMLCanvasElement.prototype.getContext;
+HTMLCanvasElement.prototype.getContext = function (kind, attrs, ...rest) {
+  if (kind === 'webgl2') attrs = Object.assign({}, attrs, { preserveDrawingBuffer: true });
+  return origCtx.call(this, kind, attrs, ...rest);
+};
+"""
+
+# The brightest pixel of the canvas against the brightest of --base and the washes (WCAG luminance).
+PIXEL_BOUND = """async () => {
+  const lin = (v) => { v /= 255; return v < 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); };
+  const lum = (r, g, b) => 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b);
+  const cs = getComputedStyle(document.documentElement);
+  let bound = 0;
+  for (const n of ['--base', '--wash-1', '--wash-2', '--wash-3']) {
+    const m = /#([0-9a-f]{6})/i.exec(cs.getPropertyValue(n));
+    if (!m) return { error: 'no ' + n };
+    const v = parseInt(m[1], 16);
+    bound = Math.max(bound, lum(v >> 16, (v >> 8) & 255, v & 255));
+  }
+  const src = document.querySelector('#aurora canvas');
+  const img = new Image();
+  img.src = src.toDataURL('image/png');
+  await img.decode();
+  const c = document.createElement('canvas');
+  c.width = img.width; c.height = img.height;
+  const x = c.getContext('2d');
+  x.drawImage(img, 0, 0);
+  const d = x.getImageData(0, 0, c.width, c.height).data;
+  let worst = 0, lit = 0;
+  for (let i = 0; i < d.length; i += 4) {
+    const l = lum(d[i], d[i + 1], d[i + 2]);
+    if (l > worst) worst = l;
+    if (d[i] + d[i + 1] + d[i + 2] > 0) lit++;
+  }
+  return { bound, worst, lit, w: c.width, h: c.height };
+}"""
+
 FLUID_ON_SOFTWARE = "try { localStorage.setItem('jarvis.hud.auroraStats', 'fluid'); } catch (e) {}"
 NO_WEBGL2 = """
 const orig = HTMLCanvasElement.prototype.getContext;
@@ -69,15 +108,27 @@ HTMLCanvasElement.prototype.getContext = function (kind, ...rest) {
 """
 
 
+def _pixel_bound(page, check, what):
+    r = page.evaluate(PIXEL_BOUND)
+    ok = "error" not in r and r["lit"] > 0 and r["worst"] <= r["bound"] + 0.004
+    check(f"{what}: no rendered pixel is brighter than the brightest wash", ok, str(r))
+
+
+def _new_page(ctx, errors):
+    """Every page gets the error collector, so a final "no errors" reads its own page."""
+    page = ctx.new_page()
+    page.on("pageerror", lambda e: errors.append(str(e)))
+    page.set_default_timeout(5000)
+    return page
+
+
 def aurora_checks(browser, mock, base, check, until, guard, init_script):
     print("\nthe moving aurora (AG-2)")
     errors: list[str] = []
 
     # ---- 1. the default: software renderer, so the flow shader at 30 fps ----------------------------
-    ctx = _context(browser, guard, init_script)
-    page = ctx.new_page()
-    page.on("pageerror", lambda e: errors.append(str(e)))
-    page.set_default_timeout(5000)
+    ctx = _context(browser, guard, init_script + KEEP_BUFFER)
+    page = _new_page(ctx, errors)
     _boot(page, mock, base, until)
     info = page.evaluate("""() => {
       const root = document.getElementById('root'), layer = document.getElementById('aurora');
@@ -98,6 +149,9 @@ def aurora_checks(browser, mock, base, check, until, guard, init_script):
     time.sleep(1.2)
     f1 = _int(page, "data-aurora-frames")
     check("frames are drawn while it runs, at 30 fps at most", f1 > f0 and (f1 - f0) <= 45, f"{f0} -> {f1}")
+
+    time.sleep(0.5)
+    _pixel_bound(page, check, "flow")
 
     # focus: tab through the HUD, the canvas never takes it
     kinds = []
@@ -160,8 +214,7 @@ def aurora_checks(browser, mock, base, check, until, guard, init_script):
 
     # ---- 2. reduced motion: one still frame --------------------------------------------------------
     ctx = _context(browser, guard, init_script, reduced_motion="reduce")
-    page = ctx.new_page()
-    page.set_default_timeout(5000)
+    page = _new_page(ctx, errors)
     _boot(page, mock, base, until)
     until(lambda: _attr(page, "data-aurora-state") == "still", timeout=4)
     f0 = _int(page, "data-aurora-frames")
@@ -173,8 +226,7 @@ def aurora_checks(browser, mock, base, check, until, guard, init_script):
 
     # ---- 3. no WebGL2: the static wash stays --------------------------------------------------------
     ctx = _context(browser, guard, init_script + NO_WEBGL2)
-    page = ctx.new_page()
-    page.set_default_timeout(5000)
+    page = _new_page(ctx, errors)
     _boot(page, mock, base, until)
     time.sleep(0.5)
     vis = page.evaluate(f"getComputedStyle(document.querySelector('{CANVAS}')).visibility")
@@ -184,9 +236,8 @@ def aurora_checks(browser, mock, base, check, until, guard, init_script):
     ctx.close()
 
     # ---- 4. the fluid: pointer stirs and chat ripples ----------------------------------------------
-    ctx = _context(browser, guard, init_script + FLUID_ON_SOFTWARE)
-    page = ctx.new_page()
-    page.set_default_timeout(5000)
+    ctx = _context(browser, guard, init_script + FLUID_ON_SOFTWARE + KEEP_BUFFER)
+    page = _new_page(ctx, errors)
     _boot(page, mock, base, until)
     ok = until(lambda: _attr(page, "data-aurora-style") == "fluid" and _attr(page, "data-aurora-state") == "running", timeout=8)
     check("with the stats override the fluid runs even on a software renderer", bool(ok),
@@ -205,6 +256,15 @@ def aurora_checks(browser, mock, base, check, until, guard, init_script):
     focus_after = page.evaluate("document.activeElement && (document.activeElement.dataset.testid || document.activeElement.tagName)")
     check("moving the pointer anywhere stirs the fluid (the stir counter rises)", s1 > s0 + 5, f"{s0} -> {s1}")
     check("pointer movement never changes document.activeElement", focus_before == focus_after, f"{focus_before} -> {focus_after}")
+    # saturate the dye: several more strokes across the whole window, then read the picture back
+    for _ in range(3):
+        for i in range(80):
+            page.mouse.move(40 + i * 15, 120 + ((i * 37) % 600))
+            time.sleep(0.012)
+    time.sleep(0.3)
+    check("the stirred fluid really is lit (the bound below is not met by a black canvas)",
+          _int(page, "data-aurora-stirs") > s1 + 20, str(_int(page, "data-aurora-stirs")))
+    _pixel_bound(page, check, "fluid, stirred")
     # a click still reaches a HUD control (the aurora is never in the way)
     page.mouse.move(640, 400)
     page.locator('[data-testid="titlebar-settings"]').click()
@@ -229,6 +289,42 @@ def aurora_checks(browser, mock, base, check, until, guard, init_script):
     time.sleep(0.3)
     r2 = _int(page, "data-aurora-ripples")
     check("it ripples again once the pane's window has passed", r2 > r1, f"{r1} -> {r2}")
+
+    # a pane that cannot be seen makes no ripple: another view, inert, or under a covering layer
+    def streams_silently(label, setup, teardown):
+        setup()
+        time.sleep(1.2)
+        before = _int(page, "data-aurora-ripples")
+        for _ in range(8):
+            mock.emit("text_delta", {"text": "hidden "}, thread_id="t1")
+            time.sleep(0.05)
+        time.sleep(0.3)
+        after = _int(page, "data-aurora-ripples")
+        teardown()
+        check(f"a streaming chat makes no ripple while its pane is {label}", after == before, f"{before} -> {after}")
+
+    pane_js = "document.querySelector('[data-testid=\"input\"]').closest('[data-testid^=\"pane-\"]')"
+    page.locator('[data-testid="task-k1"]').click()
+    streams_silently("showing another view (Tasks)",
+                     lambda: until(lambda: page.locator('[data-testid="task-view"]').count() > 0),
+                     lambda: page.locator('[data-testid="thread-t1"]').click())
+    until(lambda: page.locator('[data-testid="input"]').count() > 0)
+    streams_silently("inert", lambda: page.evaluate(f"() => {pane_js}.setAttribute('inert', '')"),
+                     lambda: page.evaluate(f"() => {pane_js}.removeAttribute('inert')"))
+    streams_silently("covered by a card or modal", lambda: page.evaluate("""() => {
+        const v = document.createElement('div'); v.id = 'test-cover';
+        v.style.cssText = 'position:fixed;inset:0;z-index:99999;background:rgba(0,0,0,.4)'; document.body.appendChild(v); }"""),
+                     lambda: page.evaluate("() => document.getElementById('test-cover')?.remove()"))
+    streams_silently("display:none", lambda: page.evaluate(f"() => {pane_js}.style.display = 'none'"),
+                     lambda: page.evaluate(f"() => {pane_js}.style.display = ''"))
+    time.sleep(1.2)
+    rv0 = _int(page, "data-aurora-ripples")
+    for _ in range(8):
+        mock.emit("text_delta", {"text": "visible "}, thread_id="t1")
+        time.sleep(0.05)
+    time.sleep(0.3)
+    check("and it ripples again once the pane shows the chat, uncovered", _int(page, "data-aurora-ripples") > rv0,
+          f"{rv0} -> {_int(page, 'data-aurora-ripples')}")
     mock.emit("turn_finished", {"stop": "end"}, thread_id="t1")
 
     # switches off: no more stirs or ripples

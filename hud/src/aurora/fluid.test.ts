@@ -51,8 +51,32 @@ describe("fluid", () => {
     expect(g.live()).toBe(0);
   });
 
-  it("the energy settles back within a few time constants", () => {
-    expect(Math.exp(-(4 * ENERGY_TAU) / ENERGY_TAU)).toBeLessThan(0.02); // four taus: under 2% of a stir remains
+  it("a stirred fluid's real parameters (vorticity) settle back to rest", () => {
+    const g = fakeGL();
+    const f = createFluid(g.gl, DEFAULT_PALETTE, 500, 300)!;
+    const read = () => ({ curl: g.state.uniforms.uCurlK! });
+    for (let i = 0; i < 60; i++) f.step(1 / 60);
+    const rest = read();
+    expect(Number.isFinite(rest.curl)).toBe(true);
+    for (let i = 0; i < 8; i++) f.stir(0.5, 0.5, 0.2, 0.1, 1, 0);
+    f.step(1 / 60);
+    const stirred = read();
+    expect(stirred.curl).toBeGreaterThan(rest.curl + 0.5); // stirring raises the vorticity
+    let prev = stirred.curl;
+    for (let sec = 1; sec <= 4; sec++) {
+      for (let i = 0; i < 60; i++) f.step(1 / 60);
+      const now = read().curl;
+      expect(now).toBeLessThan(prev); // settling, every second
+      prev = now;
+    }
+    // four seconds on (2.5 time constants), most of the stir is gone; ten, all of it
+    expect(prev - rest.curl).toBeLessThan((stirred.curl - rest.curl) * 0.25);
+    for (let i = 0; i < 6 * 60; i++) f.step(1 / 60);
+    expect(read().curl).toBeCloseTo(rest.curl, 6);
+    f.release();
+  });
+
+  it("the energy constant is short enough to settle in a few seconds", () => {
     expect(ENERGY_TAU).toBeLessThanOrEqual(2.5);
   });
 });

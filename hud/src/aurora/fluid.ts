@@ -60,6 +60,9 @@ const SHADERS = {
     'uniform sampler2D uDye;void main(){vec3 w=max(texture(uDye,vUv).rgb,0.0);w/=max(1.0,w.x+w.y+w.z);o=vec4(palette(w*0.95),1.0);}',
 } as const;
 
+/** The fragment shader that puts the dye on the screen (pinned whole by palette.test.ts). */
+export const FLUID_SHOW_FS = SHADERS.show;
+
 type ProgramName = keyof typeof SHADERS;
 
 /** Short-side resolutions, then the area caps (texels) that win on a wide window. */

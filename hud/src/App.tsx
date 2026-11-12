@@ -1666,7 +1666,9 @@ export default function App() {
             chatPatch(n, { status: "RESPONDING" });
             dispatch({ type: "delta", pane: n, text: data.text || "" });
             // A soft ripple in the aurora behind that pane while it streams (AG-2, D-11); rate-limited there.
-            chatStreaming(n);
+            // Only for a pane that shows that chat right now (not Tasks, a file, ...); the DOM side
+            // (aurora/activity.ts paneRect) then also needs it drawn, uncovered and on screen.
+            if (layoutNow.current.fit.panes.includes(n) && layoutNow.current.ws.panes[n - 1]?.view === "chat") chatStreaming(n);
           }
           break;
         case "text":

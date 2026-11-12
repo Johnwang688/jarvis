@@ -36,6 +36,8 @@ export interface AuroraOptions {
 
 export interface AuroraController {
   update(next: AuroraInputs): void;
+  /** Whether a ripple would be drawn now (setting on, fluid running). O(1), no layout reads. */
+  canRipple(): boolean;
   /** A soft ripple from a rect (CSS px, viewport coordinates); false if it was not made. */
   ripple(rect: { left: number; top: number; width: number; height: number }): boolean;
   info(): { renderer: string; software: boolean; style: string | null; state: string | null; grid: string };
@@ -317,6 +319,9 @@ export function createAuroraController(host: HTMLElement, first: AuroraInputs, o
         }
       }
       apply();
+    },
+    canRipple() {
+      return !destroyed && inputs.activity && canStir();
     },
     ripple(rect) {
       if (destroyed || !inputs.activity || !canStir()) return false;

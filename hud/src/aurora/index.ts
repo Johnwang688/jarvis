@@ -37,7 +37,7 @@ export function startAurora(doc: Document = document): (() => void) | null {
     allowSoftwareFluid: mode === 'fluid',
     stats,
   });
-  chatActivity.setSink((rect) => controller.ripple(rect));
+  chatActivity.setSink((rect) => controller.ripple(rect), () => controller.canRipple());
   const overlay = stats ? mountStatsOverlay(doc, stats, () => controller.info()) : null;
 
   const refresh = () => controller.update(inputs());

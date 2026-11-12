@@ -2,9 +2,9 @@
 // `displayColor` is the JS twin of gl.ts's GLSL `palette()`; the last block pins the shader text to it.
 import { describe, expect, it } from "vitest";
 import css from "../theme.css?raw";
-import glSrc from "./gl.ts?raw";
-import fluidSrc from "./fluid.ts?raw";
-import flowSrc from "./flow.ts?raw";
+import { PALETTE } from "./gl";
+import { FLUID_SHOW_FS } from "./fluid";
+import { FLOW_FS } from "./flow";
 import {
   DEFAULT_PALETTE, brightestLuminance, displayColor, luminance, parseColour, readPalette, samePalette,
   type AuroraPalette, type Rgb,
@@ -87,19 +87,35 @@ describe("the display mapping is bounded by the brightest wash", () => {
   });
 });
 
-describe("the shader text is the mapping the test checks (the part jsdom cannot run)", () => {
-  const gl = glSrc;
-  const fluid = fluidSrc;
-  const flow = flowSrc;
-  it("clamps the weights, mixes only, and dithers downward", () => {
-    expect(gl).toContain("w=clamp(w,0.0,1.0)");
-    expect(gl).toContain("c=mix(c,uC3,w.z);c=mix(c,uC2,w.y);c=mix(c,uC1,w.x);");
-    expect(gl).toContain("(hash(gl_FragCoord.xy)-1.0)/255.0");
+describe("the display shaders are exactly the mapping the test checks (the part jsdom cannot run)", () => {
+  // Whole-text equality, whitespace aside: from the dye or weights to the final output colour, nothing
+  // may be added, scaled or reordered without this failing (a trailing `*2.0` included).
+  const squash = (t: string) => t.replace(/\s+/g, "");
+  const HEAD_PALETTE =
+    "uniformvec3uBase;uniformvec3uC1;uniformvec3uC2;uniformvec3uC3;" +
+    "vec3toSrgb(vec3c){c=clamp(c,0.0,1.0);returnmix(c*12.92,1.055*pow(c,vec3(1.0/2.4))-0.055,step(0.0031308,c));}" +
+    "floathash(vec2p){p=fract(p*vec2(123.34,456.21));p+=dot(p,p+45.32);returnfract(p.x*p.y);}" +
+    "vec3palette(vec3w){w=clamp(w,0.0,1.0);vec3c=uBase;c=mix(c,uC3,w.z);c=mix(c,uC2,w.y);c=mix(c,uC1,w.x);" +
+    "vec3s=toSrgb(c);returns+(hash(gl_FragCoord.xy)-1.0)/255.0;}";
+  it("the palette function is the JS twin's mapping, character for character", () => {
+    expect(squash(PALETTE)).toBe(HEAD_PALETTE);
   });
-  it("nothing in a style adds light after the mapping", () => {
-    // every output goes straight through palette(): no bloom, highlight, or additive term
-    expect(fluid).toContain("o=vec4(palette(w*0.95),1.0)");
-    expect(flow).toContain("o=vec4(palette(clamp(vec3(w1,w2,w3)*0.95,0.0,1.0)),1.0)");
-    for (const src of [fluid, flow]) expect(src).not.toMatch(/bloom|highlight|specular|spec\b/i);
+  it("the fluid's display shader is the palette plus exactly its dye-to-weights step and one output", () => {
+    expect(squash(FLUID_SHOW_FS)).toBe(
+      HEAD_PALETTE +
+        "uniformsampler2DuDye;voidmain(){vec3w=max(texture(uDye,vUv).rgb,0.0);w/=max(1.0,w.x+w.y+w.z);o=vec4(palette(w*0.95),1.0);}",
+    );
+  });
+  it("the flow shader ends in exactly one output, straight through palette()", () => {
+    const body = squash(FLOW_FS);
+    expect(body.startsWith(HEAD_PALETTE)).toBe(true);
+    expect(body.endsWith("o=vec4(palette(clamp(vec3(w1,w2,w3)*0.95,0.0,1.0)),1.0);}")).toBe(true);
+    expect(body.match(/\bo=/g)?.length).toBe(1);
+    expect(body.match(/gl_FragColor/g)).toBeNull();
+    // the weights it feeds in are products of smoothsteps and layout leans of at most 1.15, kept by the clamp
+    expect(body).toContain("w1*=0.55+0.6*vUv.y;w2*=0.55+0.6*vUv.x;w3*=1.15-0.6*vUv.y;");
+  });
+  it("no style adds light after the mapping", () => {
+    for (const src of [FLUID_SHOW_FS, FLOW_FS]) expect(src).not.toMatch(/bloom|highlight|specular|spec\b/i);
   });
 });
