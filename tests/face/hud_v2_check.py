@@ -3346,6 +3346,15 @@ def main():
             finally:
                 effort_mock.stop()
 
+            # The moving aurora (AG-2): contexts and a mock of their own too.
+            from tests.face.hud_v2_aurora_check import aurora_checks
+            aurora_mock = MockDaemon(0).start()
+            try:
+                aurora_checks(browser, aurora_mock, f"http://127.0.0.1:{aurora_mock.port}", check, until,
+                              guard, FAKE_RECOGNIZER)
+            finally:
+                aurora_mock.stop()
+
             # The terminals (WP-D): a context and a mock of their own too, the
             # PTY played in the browser (no shell, no HOME).
             from tests.face.hud_v2_terminal_check import terminal_checks

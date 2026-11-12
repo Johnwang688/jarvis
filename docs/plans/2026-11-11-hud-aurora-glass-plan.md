@@ -18,6 +18,8 @@ the work into four PRs.
 | D-7 | Motion | **Full fluid.** The WebGL2 fluid simulation from the owner's Bible app (`C:\dev\bible-app\client\src\aurora\`), not a still wash or a CSS drift. |
 | D-8 | Brightness and contrast | **Brighter aurora; contrast relaxed (owner, 2026-11-11).** Body text 4.5:1; secondary text, muted text, accent and small status marks 3:1; amber/red text on approval and error surfaces stays 4.5:1 on an opaque-enough float (`--glass-float`). Meaning hexes never change. AG-1 pins the owner's values (`--wash-1..3` `#2a8fa0` `#3468c4` `#6450c4`, `--glass-pane` .50, `--glass-solid` .58); `--red` as a small mark is measured at 2.49:1 over `--wash-1` at full strength, so `glass.test.ts` pins that floor at 2.4 (2.1 on `--raise-hi`). Red status marks on a pane accepted at 2.4:1 at the brightest wash (owner, 2026-11-11). Red status marks on hovered/selected rows (`--raise`, `--raise-hi`) accepted at 2.2:1 and 2.1:1 (owner, 2026-11-11). |
 | D-9 | Fonts | **Plus Jakarta Sans for the UI, Geist Mono for code (owner, 2026-11-11), replacing D-2.** Bundled locally from `@fontsource` (exact-pinned 5.3.0, latin subset, weights 400/600/700 and mono 400/500/600), so the CSP stays `font-src 'self' data:`. Size stays 13px. xterm and Monaco wait for the faces before measuring. The phone keeps its own fonts. Word spacing raised to 0.1em (owner, 2026-11-11). |
+| D-10 | Motion | **Slow drift at rest; when stirred it moves more, then settles back to the slow drift (owner, 2026-11-11).** Not still, and never the busy continuous swirl (the owner rejected constant swirling in a wallpaper prototype). AG-2: vorticity and emitter force are low at rest; a stir raises an `energy` value that raises vorticity and lets velocity last longer, then decays (time constant 1.6 s) back to the drift. |
+| D-11 | Stirred by | **"The pointer and chat activity" (owner, 2026-11-11).** Pointer: gentle hover trails from mouse movement anywhere (a passive `pointermove` on `window`; never `preventDefault`, never focus, nothing over Browser frames). Chat activity: a soft ripple from a chat pane's input bar while that chat streams a reply, in wash colours only (never amber or red), rate-limited (one per pane per 0.9 s, three in any 2 s across all panes). The stir is weaker in the HUD than in the Bible app's wallpaper, so it does not distract while working. |
 
 Lead calls inside those answers (open to the owner in review):
 
@@ -60,6 +62,24 @@ AG-2 measures real per-pane `backdrop-filter` too. If it holds the budget at 12 
 - No GPU: flow shader at 30 fps (the Bible app's `SOFTWARE_MAX_FPS`).
 - Paused while `document.hidden`. GPU context loss shows the still CSS gradient until the context returns.
 - Reduced motion: one still frame.
+
+**Measured (headless, software), AG-2 (2026-11-12).** Headless Chromium renders WebGL in SwiftShader (the CPU emulating a GPU), so this measures the main thread's cost of driving the aurora and whether it slows typing, not GPU cost. 12 panes (a 4x3 free tree: chat, file, terminal and task panes), a chat streaming into pane 1. Main-thread time is the time inside one drawn aurora frame (state step and GL calls; the work itself runs in the GPU process).
+
+| Viewport | Style | fps (cap) | Main thread per frame, avg / p95 |
+|---|---|---|---|
+| 1920x1080 (canvas 960x540) | Flow, the software default | 30 (30) | 0.05 / 0.10 ms |
+| 1920x1080 | Fluid, forced on software (`auroraStats` = `fluid`) | 30 (30) | 0.11 / 0.20 ms |
+| 2560x1440 (canvas 1280x720) | Flow | 30 (30) | 0.05 / 0.20 ms |
+| 2560x1440 | Fluid, forced | 28 (30) | 0.14 / 0.20 ms |
+
+The fluid's grid is 171x96 (simulation) and 398x224 (dye) at both sizes, so a bigger window costs only the final full-screen pass. Typing 100 characters at 30 ms intervals, keydown to the second following frame (median / p95, 1920x1080; the floor is two 60 Hz frames, about 25 ms):
+
+| Target | Still | Aurora, software default (Flow) | Fluid forced on software |
+|---|---|---|---|
+| Chat input, 12 panes | 26 / 32 ms | 26 / 33 ms | 24-29 / 32-44 ms |
+| Monaco, 2 panes (keydown to DOM update plus two frames) | 43 / 47 ms | 39 / 49 ms | 40 / 68 ms |
+
+Reading: with the default software path there is no typing regression (the medians match, p95 within noise). Forcing the fluid onto the CPU does raise p95, which is expected where one CPU runs the page and the "GPU" together; it is not a measure of a real GPU. **GPU numbers (the 60 fps and 4 ms budget, Windows Chrome, the owner's PC) come later, from the owner**, through the stats overlay (`localStorage['jarvis.hud.auroraStats'] = '1'`, then reload). With a GPU the loop caps at 70 fps (a cap a little over 60 draws every tick at 60 Hz and every second tick at 120 or 144 Hz).
 
 ## 4. Customisation
 
