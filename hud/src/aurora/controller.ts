@@ -134,8 +134,10 @@ export function createAuroraController(host: HTMLElement, first: AuroraInputs, o
     const cb = inner;
     inner = null;
     const t0 = stats ? now() : 0;
+    const drawn0 = loop.frames();
     cb?.(t);
-    if (stats) stats.record(now() - t0, t);
+    // Only a tick that drew a frame counts: a tick the cap skipped did no work (and is not a frame).
+    if (stats && loop.frames() !== drawn0) stats.record(now() - t0, t);
     if (!destroyed && state === 'running' && t - lastReport >= REPORT_MS) {
       lastReport = t;
       reportFrames();
