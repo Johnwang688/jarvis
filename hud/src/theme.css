@@ -48,7 +48,7 @@
   /* Glass. The tint is cool and translucent; the wash shows through. */
   --glass-pane: rgba(11, 19, 25, 0.50);    /* a pane or bar */
   --glass-solid: rgba(10, 17, 22, 0.58);   /* dense text: Monaco, terminal, transcript */
-  --glass-float: rgba(22, 33, 42, 0.88);   /* a floating layer, over a real blur */
+  --glass-float: rgba(22, 33, 42, 0.94);   /* a floating layer, over a real blur */
   --glass-sheen: linear-gradient(160deg, rgba(255, 255, 255, 0.09), rgba(255, 255, 255, 0.02) 40%, rgba(255, 255, 255, 0));
   --rim: rgba(255, 255, 255, 0.15);        /* the 1px edge of a pane */
   --glass-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12);
@@ -108,10 +108,10 @@
      error keep their meanings), so the row's text stays far above AA and the
      band is never brighter than the text. lib/aurora.test.ts recomputes
      every one of those claims from this file. */
-  --aurora-teal: rgba(112, 196, 188, 0.20);
-  --aurora-green: rgba(128, 198, 148, 0.16);
-  --aurora-violet: rgba(160, 150, 214, 0.22);
-  --aurora-rose: rgba(206, 150, 190, 0.14);   /* a hint: mauve-rose, not amber or red */
+  --aurora-teal: rgba(96, 208, 196, 0.42);
+  --aurora-green: rgba(118, 214, 148, 0.34);
+  --aurora-violet: rgba(170, 148, 236, 0.46);
+  --aurora-rose: rgba(220, 138, 204, 0.32);   /* a hint: mauve-rose, not amber or red */
   --aurora-spark: rgba(232, 238, 255, 0.55);
   --aurora-drift: 11s;          /* one pass of the band while something waits */
 
@@ -1619,6 +1619,8 @@ button.tb-icon[data-auto="true"] svg rect { stroke-dasharray: 2 1.4; }
 }
 .closeask button { padding: 2px 9px; }
 .micmark svg { display: block; }
+/* An unselected split chat pane holds the mark's room so focusing never moves its header (AG-1 review). */
+.micmark.ghost { visibility: hidden; }
 .tree-row.panesel { color: var(--text); box-shadow: inset 2px 0 var(--border-strong); }
 .tree-row.ghost.panesel { box-shadow: none; color: var(--text-2); }
 
@@ -2264,7 +2266,11 @@ button.tree-row.ownerinbox:focus-visible { box-shadow: inset 0 0 0 1px var(--acc
    layout and no script runs. The isolated row paints both layers over its
    own background and inset shadows, so its selection bar is left 2px clear
    and its focus ring is an outline, which paints above them. */
-button.tree-row.ownerinbox.aurora { position: relative; isolation: isolate; overflow: hidden; }
+button.tree-row.ownerinbox.aurora { position: relative; isolation: isolate; overflow: hidden; background: var(--bg-1); }
+/* AG-1 (owner, 2026-11-11): on the bright aurora sidebar the row sits on an opaque --bg-1 slab, so its
+   own, stronger band reads as the row's and not as more sidebar. Hover and selected keep their tints. */
+button.tree-row.ownerinbox.aurora:hover { background: linear-gradient(var(--hover), var(--hover)), var(--bg-1); }
+button.tree-row.ownerinbox.aurora.sel { background: linear-gradient(var(--selected), var(--selected)), var(--bg-1); }
 button.tree-row.ownerinbox.aurora::before {
   content: ""; position: absolute; top: 0; bottom: 0; left: 0; width: 200%;
   z-index: -1; pointer-events: none;
@@ -2497,11 +2503,11 @@ button.tree-row.ownerinbox.aurora.sel:focus-visible { box-shadow: inset 2px 0 va
   -webkit-backdrop-filter: var(--blur);
   backdrop-filter: var(--blur);
 }
+.block.err { background: linear-gradient(var(--red-soft), var(--red-soft)), var(--glass-float); }
 @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
   .explorermenu, .picker, .threadmenu, .mpop, .laymenu, .termtoast, .vexpop, .vexmenu, .vextip,
   .devserver-prompt, .browser-options, .remotecontext, .remotepicker, .auth, .review .review-confirm,
   .settings-page, .block.err, .sa-stop-error { background: var(--bg-2); }
 }
-.block.err { background: linear-gradient(var(--red-soft), var(--red-soft)), var(--glass-float); }
 .picker, .auth, .review .review-confirm { border-radius: 10px; }
 .picker h3 { background: var(--raise-hi); }

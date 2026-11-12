@@ -303,12 +303,31 @@ def subagents_checks(browser, mock, base, check, until, guard, init_script):
         last = page.locator('[data-testid="sa-pane"][data-sid="cx:019a-fixer"]')
         page.set_viewport_size({"width": 1100, "height": 900})
         time.sleep(0.2)
-        # A re-render between the press and the release can swallow a click (the brighter glass paints
-        # slower under software compositing), so press again rather than assert on one attempt.
-        for _ in range(3):
-            page.locator('[data-sid="cl:toolu_beta"] button').first.click()
-            if until(lambda: page.locator('[data-testid="sa-pane"][data-sid="cl:toolu_beta"]').count() == 1, timeout=2):
+        # Focusing a pane never changes layout (AG-1 review): a press focuses it, and a header that
+        # wrapped differently when focused moved the row under the pointer before the release.
+        shape = """() => ({
+          tabs: [...document.querySelectorAll('.wpane')].filter(p => p.style.display !== 'none')
+            .map(p => [p.dataset.testid, Math.round(p.querySelector('.tabs').getBoundingClientRect().height)]),
+          row: (() => { const r = document.querySelector('[data-sid="cl:toolu_beta"] button').getBoundingClientRect();
+                        return [r.x, r.y, r.width, r.height].map(Math.round); })() })"""
+        # The baseline is taken once the layout has settled (late header content, a voice chip, lands
+        # after a resize); only a change a press causes is a failure.
+        before_shape = page.evaluate(shape)
+        for _ in range(20):
+            time.sleep(0.3)
+            now = page.evaluate(shape)
+            if now == before_shape:
                 break
+            before_shape = now
+        for pane in page.locator('.wpane:visible').all():
+            pane.dispatch_event("pointerdown")
+            time.sleep(0.15)
+            after = page.evaluate(shape)
+            kids = page.evaluate("""() => [...document.querySelectorAll('.wpane')].filter(p => p.style.display !== 'none').map(p => [p.dataset.testid, p.dataset.view, p.dataset.focused, p.dataset.selected, Math.round(p.getBoundingClientRect().width), [...p.querySelector('.tabs').children].map(c => [c.className.toString().slice(0, 16), Math.round(c.getBoundingClientRect().width), (c.innerText || '').slice(0, 24)])])""") if after != before_shape else ""
+            check(f"focusing {pane.get_attribute('data-testid')} at 1100px moves no header or row",
+                  after == before_shape, f"{before_shape} -> {after} {kids}")
+        page.locator('[data-sid="cl:toolu_beta"] button').first.click()
+        until(lambda: page.locator('[data-testid="sa-pane"][data-sid="cl:toolu_beta"]').count() == 1)
         check("past the room for a split, the last sub-agent pane is reused, never a chat",
               page.locator('[data-testid="sa-pane"][data-sid="cl:toolu_beta"]').count() == 1 and last.count() == 0
               and sub_panes().count() == count

@@ -47,11 +47,12 @@ const WASHES = ["--wash-1", "--wash-2", "--wash-3"] as const;
 const brightest = WASHES.map((w) => ({ w, c: token(w) })).sort((a, b) => lum(b.c) - lum(a.c))[0];
 const UNDER: [string, RGBA][] = [[`brightest wash ${brightest.w}`, brightest.c], ...WASHES.map((w) => [w, token(w)] as [string, RGBA]), ["--base", token("--base")]];
 
-/** The sheen's strongest white (its first stop), as a layer over the tint. */
+/** The sheen's strongest white, as a layer over the tint. */
 const sheenPeak = (): RGBA => {
-  const m = /rgba\(255,\s*255,\s*255,\s*([\d.]+)\)/.exec(decl.get("--glass-sheen") ?? "");
-  if (!m) throw new Error("--glass-sheen has no white stop");
-  return [255, 255, 255, Number(m[1])];
+  // The BRIGHTEST stop, wherever it is (a sheen whose second stop is stronger must be the one measured).
+  const alphas = [...(decl.get("--glass-sheen") ?? "").matchAll(/rgba\(255,\s*255,\s*255,\s*([\d.]+)\)/g)].map((m) => Number(m[1]));
+  if (!alphas.length) throw new Error("--glass-sheen has no white stop");
+  return [255, 255, 255, Math.max(...alphas)];
 };
 
 /** A pane as drawn: the tint over the wash, then the sheen at its peak. */
@@ -94,11 +95,11 @@ describe("the glass tokens", () => {
 });
 
 /** Owner decision D-8 (2026-11-11, plan §1): the contrast floors for the brighter aurora. */
-// `mark` is 3 in D-8, but the owner's exact values (washes, pane .50) put --red at 2.49:1 on a pane
+// `mark` is 3 in D-8 for amber and green, but the owner's exact values (washes, pane .50) put --red at 2.49:1 on a pane
 // over --wash-1 at FULL strength (the gradient's centre point, under the sidebar's top-left). The
 // meaning hex may not change, so the floor for a red mark is pinned at what the values give; the
 // real ratio is higher away from the wash centre. Flagged on the PR for the owner.
-const FLOOR = { body: 4.5, secondary: 3, accent: 3, mark: 2.4, meaning: 4.5 } as const;
+const FLOOR = { body: 4.5, secondary: 3, accent: 3, mark: 3, redMark: 2.4, redMarkRaised: 2.1, meaning: 4.5 } as const;
 const ratio = (fg: string, bg: RGBA) => contrast(hex(token(fg)), hex(bg));
 
 describe("legibility over the brightest wash and over the base (D-8)", () => {
@@ -140,16 +141,22 @@ describe("legibility over the brightest wash and over the base (D-8)", () => {
     }
   });
 
-  it("amber, red and green as small status marks clear the mark floor on a pane (3:1; red 2.4:1, see FLOOR)", () => {
+  it("amber and green as small status marks are at least 3:1, red 2.4:1 (owner-accepted), on a pane and on --raise / --raise-hi", () => {
     for (const [name, under] of UNDER) {
-      for (const t of ["--amber", "--red", "--green"]) {
-        expect(ratio(t, pane(under)), `${t} on pane over ${name}`).toBeGreaterThanOrEqual(FLOOR.mark);
+      const surfaces: [string, RGBA][] = [
+        ["pane", pane(under)],
+        ["raise", over(token("--raise"), pane(under))],
+        ["raise-hi", over(token("--raise-hi"), pane(under))],
+      ];
+      for (const [sn, bg] of surfaces) {
+        for (const t of ["--amber", "--green"]) expect(ratio(t, bg), `${t} on ${sn} over ${name}`).toBeGreaterThanOrEqual(FLOOR.mark);
+        expect(ratio("--red", bg), `--red on ${sn} over ${name}`).toBeGreaterThanOrEqual(sn === "pane" ? FLOOR.redMark : FLOOR.redMarkRaised);
       }
     }
   });
 
-  it("amber and red TEXT on a floating layer (approval card, error banner, toast) is at least 4.5:1", () => {
-    for (const [name, under] of UNDER) {
+  it("amber and red TEXT on a floating layer (approval card, error banner, toast) is at least 4.5:1, even over a white Browser page", () => {
+    for (const [name, under] of [...UNDER, ["a white page", [255, 255, 255, 1] as RGBA] as [string, RGBA]]) {
       const bg = over(token("--glass-float"), under);
       for (const t of ["--amber", "--red", "--green", "--text", "--text-2", "--text-muted"]) {
         expect(ratio(t, bg), `${t} on glass-float over ${name}`).toBeGreaterThanOrEqual(FLOOR.meaning);
@@ -174,6 +181,12 @@ describe("legibility over the brightest wash and over the base (D-8)", () => {
     for (const [sl, b] of rules) {
       if (/^\.block\.err$|^\.sa-stop-error$/.test(sl)) expect(b, sl).not.toMatch(/var\(--glass-(pane|solid)\)/);
     }
+  });
+
+  it("the sheen is measured at its brightest stop: a stronger second stop would fail", () => {
+    const strong: RGBA = [255, 255, 255, 0.6];
+    expect(ratio("--text-muted", over(strong, over(token("--glass-pane"), brightest.c)))).toBeLessThan(FLOOR.secondary);
+    expect(sheenPeak()[3]).toBe(Math.max(...[...(decl.get("--glass-sheen") ?? "").matchAll(/rgba\(255,\s*255,\s*255,\s*([\d.]+)\)/g)].map((m) => Number(m[1]))));
   });
 
   it("the checks bite: a wash brighter than the floors allow fails them", () => {

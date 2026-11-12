@@ -16,7 +16,7 @@ the work into four PRs.
 | D-5 | Presets / default | **One look:** aurora glass with today's cyan (`#6fc3df`) as the default accent. No Deep blue / Northern lights presets, no light themes. |
 | D-6 | Phone | **HUD first.** The phone keeps its look; porting the tokens is a later follow-up (AG-5, not in this plan). |
 | D-7 | Motion | **Full fluid.** The WebGL2 fluid simulation from the owner's Bible app (`C:\dev\bible-app\client\src\aurora\`), not a still wash or a CSS drift. |
-| D-8 | Brightness and contrast | **Brighter aurora; contrast relaxed (owner, 2026-11-11).** Body text 4.5:1; secondary text, muted text, accent and small status marks 3:1; amber/red text on approval and error surfaces stays 4.5:1 on an opaque-enough float (`--glass-float`). Meaning hexes never change. AG-1 pins the owner's values (`--wash-1..3` `#2a8fa0` `#3468c4` `#6450c4`, `--glass-pane` .50, `--glass-solid` .58); `--red` as a small mark is measured at 2.49:1 over `--wash-1` at full strength, so `glass.test.ts` pins that floor at 2.4. |
+| D-8 | Brightness and contrast | **Brighter aurora; contrast relaxed (owner, 2026-11-11).** Body text 4.5:1; secondary text, muted text, accent and small status marks 3:1; amber/red text on approval and error surfaces stays 4.5:1 on an opaque-enough float (`--glass-float`). Meaning hexes never change. AG-1 pins the owner's values (`--wash-1..3` `#2a8fa0` `#3468c4` `#6450c4`, `--glass-pane` .50, `--glass-solid` .58); `--red` as a small mark is measured at 2.49:1 over `--wash-1` at full strength, so `glass.test.ts` pins that floor at 2.4 (2.1 on `--raise-hi`). Red status marks on a pane accepted at 2.4:1 at the brightest wash (owner, 2026-11-11). |
 
 Lead calls inside those answers (open to the owner in review):
 

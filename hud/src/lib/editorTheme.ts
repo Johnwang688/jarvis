@@ -286,6 +286,9 @@ export const CHROME: readonly ChromeRow[] = [
   // Sticky scroll: the pane's own colour, ruled off.
   { key: "editorStickyScroll.background", token: "--bg-1" },
   { key: "editorStickyScroll.border", token: "--border" },
+  // The sticky gutter would otherwise inherit the translucent editor background and let line numbers
+  // scroll visibly under pinned lines: the same opaque colour as the sticky body.
+  { key: "editorStickyScrollGutter.background", token: "--bg-1" },
   { key: "editorStickyScrollHover.background", token: "--bg-2" },
   // Widgets (find, suggest, hover) and scrollbars.
   { key: "editorWidget.background", token: "--bg-2" },
