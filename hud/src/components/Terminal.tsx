@@ -68,6 +68,7 @@ import { judgeBrowserUrl } from "../lib/browser";
 import { noPointerFocus } from "../lib/talkkey";
 import { loadXterm } from "../lib/xterm";
 import { cssTermTheme } from "../lib/termTheme";
+import { APPEARANCE_EVENT } from "../lib/appearance";
 import { fontsReady, monoFamily } from "../lib/fonts";
 import { useDaemonPorts } from "../state/daemonPorts";
 import type { PaneNo } from "../lib/workspace";
@@ -365,7 +366,11 @@ export class TermSession {
           leave: () => this.hint(""),
         }));
         term.attachCustomKeyEventHandler((e) => this.keyFilter(e));
+        // A new accent re-themes this terminal in place (AG-3): the tokens are on :root already.
+        const retheme = () => { if (this.term === term) term.options.theme = cssTermTheme(); };
+        window.addEventListener(APPEARANCE_EVENT, retheme);
         this.subs.push(
+          { dispose: () => window.removeEventListener(APPEARANCE_EVENT, retheme) },
           term.onData((d) => this.input(encodeInput(d))),
           term.onBinary((d) => {
             const b = new Uint8Array(d.length);

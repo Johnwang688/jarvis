@@ -74,6 +74,9 @@
   --accent-hi: #9ad6ea;
   --accent-soft: rgba(111, 195, 223, 0.14);
   --accent-line: rgba(111, 195, 223, 0.45);
+  --accent-sel: rgba(111, 195, 223, 0.30);     /* ::selection */
+  --accent-hover: rgba(111, 195, 223, 0.22);   /* an on button's hover */
+  --accent-badge: rgba(111, 195, 223, 0.4);    /* the fast badge's border */
   --focus-ring: 0 0 0 2px #6fc3df;
 
   --amber: #fbbf24;
@@ -157,7 +160,7 @@ body {
 }
 #aurora > canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; pointer-events: none; }
 
-::selection { background: rgba(111, 195, 223, 0.30); }
+::selection { background: var(--accent-sel); }
 
 * { scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent; }
 
@@ -175,7 +178,7 @@ button:hover:not(:disabled) { background: var(--raise-hi); }
 button:disabled { opacity: 0.4; cursor: default; }
 /* A pressed toggle — dictation mode, a schedule preset. */
 button.on { background: var(--accent-soft); border-color: var(--accent-line); color: var(--text); }
-button.on:hover:not(:disabled) { background: rgba(111, 195, 223, 0.22); }
+button.on:hover:not(:disabled) { background: var(--accent-hover); }
 
 input, textarea, select {
   font: inherit;
@@ -359,7 +362,7 @@ button.tree-row.morechats:focus-visible { box-shadow: inset 0 0 0 1px var(--acce
 .badge.win { color: var(--badge-win); border-color: rgba(169, 180, 191, 0.35); }
 .badge.claude { color: var(--badge-claude); border-color: rgba(192, 174, 245, 0.4); }
 .badge.codex { color: var(--badge-codex); border-color: rgba(207, 213, 217, 0.35); }
-.badge.fast { color: var(--badge-fast); border-color: rgba(111, 195, 223, 0.4); }
+.badge.fast { color: var(--badge-fast); border-color: var(--accent-badge); }
 
 /* ---- right pane primitives (before .phase, which must win over .kv .v) ---- */
 .kv { display: flex; gap: 8px; font: 11px var(--mono); margin-bottom: 1px; word-spacing: normal; }
@@ -606,7 +609,7 @@ button.chip.bypassbtn:focus-visible { box-shadow: var(--focus-ring); }
 .compact-confirm > span { flex: 1 1 auto; color: var(--text); }
 .compact-confirm button { padding: 3px 9px; font-size: 11px; }
 .compact-confirm button.compact-yes { background: var(--accent-soft); border-color: var(--accent-line); color: var(--text); }
-.compact-confirm button.compact-yes:hover:not(:disabled) { background: rgba(111, 195, 223, 0.22); }
+.compact-confirm button.compact-yes:hover:not(:disabled) { background: var(--accent-hover); }
 
 /* "in: School ▾" — which project a message goes to. A <select> while
    composing, plain text once the thread exists. */
@@ -2475,3 +2478,15 @@ button.tree-row.ownerinbox.aurora.sel:focus-visible { box-shadow: inset 2px 0 va
    rule above that uses var(--mono) resets it; these are the elements that take the mono stack without a rule
    of their own, and the editor and terminal, which set their own metrics. */
 code, pre, kbd, samp, .monaco-editor, .monaco-diff-editor, .xterm, .termhost { word-spacing: normal; }
+
+/* Settings -> Appearance colours (AG-3): a row per colour, a hex readout, the reason a pick was refused
+   or darkened, and a preview strip. Nothing here is amber or red unless it is the refusal text, which is
+   an error and so keeps the error colour. */
+.appearance-colour { margin: 6px 0; }
+.appearance-colour input[type="color"] { width: 40px; height: 22px; padding: 0; vertical-align: middle; border: 1px solid var(--border-strong); background: none; cursor: pointer; }
+.appearance-colour code { font-family: var(--mono); color: var(--text-muted); }
+.appearance-note { margin: 2px 0 0; font-size: 12px; }
+.appearance-note.refused { color: var(--red); }
+.appearance-note.clamped { color: var(--text-muted); }
+.appearance-preview { display: flex; gap: 0; margin: 8px 0; border-radius: var(--radius-btn); overflow: hidden; border: 1px solid var(--rim); }
+.appearance-preview span { flex: 1 1 0; height: 18px; }

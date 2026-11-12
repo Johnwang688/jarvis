@@ -13,8 +13,11 @@ import "@fontsource/geist-mono/latin-700.css";
 import "./theme.css";
 import { installSparkle } from "./lib/sparkle";
 import { startAurora } from "./aurora";
+import { installAppearance } from "./lib/appearanceApply";
 
 installSparkle();
+// The owner's saved colours, before React renders (AG-3), and before the aurora so it reads them.
+try { installAppearance(); } catch { /* the default colours stay */ }
 // The moving aurora behind #root (AG-2). Never throws: without WebGL2 the still CSS wash stays.
 try { startAurora(); } catch { /* the still wash is the fallback */ }
 

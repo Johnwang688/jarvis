@@ -35,21 +35,44 @@ export function accentHue(accent: string | null | undefined): string | null {
   return parts.every((n) => n <= 255) ? parts.join(",") : null;
 }
 
+/**
+ * The cool hues the orb draws in: the accent ("r,g,b"), its lighter step and the "composing" step toward
+ * green. The defaults are the glacier cyan's; AG-3 sets them from the owner's accent
+ * (lib/appearanceApply.ts). Amber and red are not here: they never change.
+ */
+export interface CoolHues { base: string; hi: string; composing: string }
+export const DEFAULT_COOL: CoolHues = { base: "111,195,223", hi: "154,214,234", composing: "125,205,200" };
+let cool: CoolHues = DEFAULT_COOL;
+let coolVersion = 0;
+const coolListeners = new Set<() => void>();
+const hueOk = (v: string) => accentHue(v) !== null;
+/** Sets the cool hues (each must be "r,g,b"; a bad set is ignored) and tells subscribers. */
+export function setCoolHues(next: CoolHues): void {
+  if (![next.base, next.hi, next.composing].every(hueOk)) return;
+  if (next.base === cool.base && next.hi === cool.hi && next.composing === cool.composing) return;
+  cool = { ...next };
+  coolVersion++;
+  for (const f of [...coolListeners]) f();
+}
+/** For useSyncExternalStore: a mini orb that is not redrawn re-renders when the hues change. */
+export const subscribeCool = (f: () => void) => { coolListeners.add(f); return () => { coolListeners.delete(f); }; };
+export const coolSnapshot = () => coolVersion;
+
 export function palette(state: OrbState, accent?: string | null): OrbPalette {
   const p: OrbPalette = (() => {
     switch (state) {
       // Graphite: the cool states are the glacier accent (111,195,223) and its
       // lighter step (154,214,234). Idle is a little dimmer and slower, so the
       // orb is present without glowing at you all session.
-      case "listening": return { hue: "154,214,234", boost: 1.35, spin: 1.6 };
-      case "transcribing": return { hue: "154,214,234", boost: 1.2, spin: 2.2 };
-      case "thinking": return { hue: "111,195,223", boost: 1.15, spin: 3.4 };
-      case "composing": return { hue: "125,205,200", boost: 1.3, spin: 1.8 };
+      case "listening": return { hue: cool.hi, boost: 1.35, spin: 1.6 };
+      case "transcribing": return { hue: cool.hi, boost: 1.2, spin: 2.2 };
+      case "thinking": return { hue: cool.base, boost: 1.15, spin: 3.4 };
+      case "composing": return { hue: cool.composing, boost: 1.3, spin: 1.8 };
       case "tool": return { hue: AMBER, boost: 1.2, spin: 3.4 };
       case "approval": return { hue: AMBER, boost: 1.5, spin: 0.35 };
-      case "speaking": return { hue: "154,214,234", boost: 1.5, spin: 1.2 };
+      case "speaking": return { hue: cool.hi, boost: 1.5, spin: 1.2 };
       case "error": return { hue: RED, boost: 1.3, spin: 0.6 };
-      default: return { hue: "111,195,223", boost: 0.85, spin: 0.8 };
+      default: return { hue: cool.base, boost: 0.85, spin: 0.8 };
     }
   })();
   // An accent that is not "r,g,b" is ignored rather than handed to a canvas
