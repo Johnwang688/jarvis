@@ -22,7 +22,7 @@ describe("the phone shell (PH-9)", () => {
     expect(phone.size).toBeGreaterThan(5);
     const SURFACES = new Set([
       "--bg-0", "--bg-1", "--bg-2", "--bg-3", "--bg-inset", "--border", "--border-strong",
-      "--text", "--text-2", "--text-muted", "--radius",
+      "--text", "--text-2", "--text-muted", "--radius", "--mono",
     ]);
     for (const [name, value] of phone) {
       if (SURFACES.has(name)) continue;

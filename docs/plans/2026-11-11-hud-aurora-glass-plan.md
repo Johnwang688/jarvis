@@ -10,13 +10,14 @@ the work into four PRs.
 | # | Question | Answer |
 |---|---|---|
 | D-1 | Corner rounding | **Crisp.** `--radius-btn` stays 4px (the 2026-10-15 rule stands). Panes and cards may go to 8–10px; no pills except Send, Stop and Steer (already circles). |
-| D-2 | Font | **Keep Segoe UI.** No bundled font, no CSP change. |
+| D-2 | Font | **Keep Segoe UI.** No bundled font, no CSP change. *Superseded by D-9.* |
 | D-3 | How far the glass goes | **Every pane**, not only the chrome. |
 | D-4 | Customisation | **Accent + aurora colours.** No preset gallery. |
 | D-5 | Presets / default | **One look:** aurora glass with today's cyan (`#6fc3df`) as the default accent. No Deep blue / Northern lights presets, no light themes. |
 | D-6 | Phone | **HUD first.** The phone keeps its look; porting the tokens is a later follow-up (AG-5, not in this plan). |
 | D-7 | Motion | **Full fluid.** The WebGL2 fluid simulation from the owner's Bible app (`C:\dev\bible-app\client\src\aurora\`), not a still wash or a CSS drift. |
 | D-8 | Brightness and contrast | **Brighter aurora; contrast relaxed (owner, 2026-11-11).** Body text 4.5:1; secondary text, muted text, accent and small status marks 3:1; amber/red text on approval and error surfaces stays 4.5:1 on an opaque-enough float (`--glass-float`). Meaning hexes never change. AG-1 pins the owner's values (`--wash-1..3` `#2a8fa0` `#3468c4` `#6450c4`, `--glass-pane` .50, `--glass-solid` .58); `--red` as a small mark is measured at 2.49:1 over `--wash-1` at full strength, so `glass.test.ts` pins that floor at 2.4 (2.1 on `--raise-hi`). Red status marks on a pane accepted at 2.4:1 at the brightest wash (owner, 2026-11-11). |
+| D-9 | Fonts | **Plus Jakarta Sans for the UI, Geist Mono for code (owner, 2026-11-11), replacing D-2.** Bundled locally from `@fontsource` (exact-pinned 5.3.0, latin subset, weights 400/600/700 and mono 400/500/600), so the CSP stays `font-src 'self' data:`. Size stays 13px. xterm and Monaco wait for the faces before measuring. The phone keeps its own fonts. |
 
 Lead calls inside those answers (open to the owner in review):
 
@@ -31,7 +32,7 @@ Lead calls inside those answers (open to the owner in review):
 - **Layout.** No pane, title bar or input changes size. 1px borders become 1px rims, so dimensions hold. Class names the suites assert on (`droptarget`, `cur`, `done`, `ok`, `warn`, `high`), the avatar's `pointer-events:none`, and no `text-transform` on `.phase` / `.tool-group` all survive.
 - **Focus and frames.** The canvas is `pointer-events:none`, `aria-hidden`, never focusable, and sits under every pane. Nothing about the "No Browser frame takes the keyboard" rule changes.
 - **Browser behaviour.** Only the chrome around Browser panes is restyled. No Browser feature work (the 2026-10-14 freeze), and framed page content keeps its own background.
-- **Fonts and CSP.** `font-src 'self' data:` is unchanged. WebGL2 needs no CSP change.
+- **Fonts and CSP.** The fonts (D-9) are bundled from `@fontsource` and served from 'self'; `font-src 'self' data:` is unchanged. WebGL2 needs no CSP change.
 
 ## 3. Rendering design (the hard part)
 

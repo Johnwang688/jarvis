@@ -68,6 +68,7 @@ import { judgeBrowserUrl } from "../lib/browser";
 import { noPointerFocus } from "../lib/talkkey";
 import { loadXterm } from "../lib/xterm";
 import { cssTermTheme } from "../lib/termTheme";
+import { fontsReady, monoFamily } from "../lib/fonts";
 import { useDaemonPorts } from "../state/daemonPorts";
 import type { PaneNo } from "../lib/workspace";
 import type { Project } from "../types";
@@ -337,10 +338,11 @@ export class TermSession {
   private ensure(): Promise<void> {
     if (this.term) return Promise.resolve();
     if (!this.loading) {
-      this.loading = loadXterm().then((kit) => {
+      // The fonts first: xterm sizes its cells from the face it opens with.
+      this.loading = Promise.all([loadXterm(), fontsReady()]).then(([kit]) => {
         if (this.disposed || this.term) return;
         const term = new kit.Terminal({
-          fontFamily: 'ui-monospace, "Cascadia Mono", Consolas, monospace',
+          fontFamily: monoFamily(),
           fontSize: fontSizeFor(this.mgr.zoom),
           cursorBlink: true,
           scrollback: 10000,

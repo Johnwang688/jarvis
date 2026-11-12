@@ -25,6 +25,7 @@ import {
 import type { TextModel } from "../state/buffers";
 // ED-8: the editor settings, `.editorconfig`'s indentation kept through them, and vim.
 import { displayOptions, editorOptions } from "../lib/editorSettings";
+import { fontsReady } from "../lib/fonts";
 import {
   editorSettings, onEditorSettings, trackEditor, untrackEditor, useEditorSettings,
 } from "../state/editorSettings";
@@ -116,6 +117,8 @@ export function PaneEditor(props: {
     loadMonaco()
       .then((monaco: Monaco) => {
         if (dead || !host.current) return;
+        // Monaco measures the font when it opens: re-measure once the bundled faces are in.
+        void fontsReady().then(() => { if (!dead) monaco.editor.remeasureFonts(); });
         const ed = monaco.editor.create(host.current, {
           model: null,
           theme: "jarvis",

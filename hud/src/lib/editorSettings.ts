@@ -13,6 +13,8 @@
 // formats on save.** `.editorconfig` (lib/editorconfig.ts) sets indentation
 // and new-line endings for the files it matches and never rewrites one.
 
+import { monoFamily } from "./fonts";
+
 export const SETTINGS_KEY = "jarvis.hud.editor";
 
 export type WordWrap = "off" | "on";
@@ -30,7 +32,7 @@ export const FONT_FAMILY_MAX = 200;
 const FAMILIES_MAX = 8;
 
 export interface EditorSettings {
-  /** A CSS font-family list, checked by `safeFontFamily`; "" is Monaco's own default. */
+  /** A CSS font-family list, checked by `safeFontFamily`; "" is the HUD's `--mono` (Geist Mono). */
   fontFamily: string;
   fontSize: number;
   /** The tab size a file without its own indentation (or `.editorconfig`) gets. */
@@ -220,7 +222,7 @@ export function saveSettings(settings: EditorSettings, storage?: Storage | null)
 
 /**
  * The options a File pane's editor takes from the settings. `markdown` picks
- * the word wrap; `fontFamily: undefined` is Monaco's own default (an empty
+ * the word wrap; an empty `fontFamily` is the HUD's `--mono` (Geist Mono; an empty
  * setting must put the default back, not keep the last font).
  */
 export function editorOptions(s: EditorSettings, ctx: { markdown: boolean }): Record<string, unknown> {
@@ -236,7 +238,7 @@ export function editorOptions(s: EditorSettings, ctx: { markdown: boolean }): Re
 /** What a diff or Compare view takes: how text is drawn, never how it is typed or wrapped. */
 export function displayOptions(s: EditorSettings): Record<string, unknown> {
   return {
-    fontFamily: s.fontFamily || undefined,
+    fontFamily: s.fontFamily || monoFamily(),
     fontSize: s.fontSize,
     stickyScroll: { enabled: s.stickyScroll },
     renderWhitespace: s.whitespace,

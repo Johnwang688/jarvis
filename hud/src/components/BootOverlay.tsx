@@ -4,6 +4,7 @@ import { BOOT_DEFAULTS, FADE_OUT_S, HARD_CAP_MS, PLAYED_KEY, SHIELD_MS, SKIP_FAD
   RINGS, SPIN, bitAt, buildDust, clamp01, easeInOutCubic, hexToRgb, layoutFor,
   particleAt, plateGeometry, penAt, dotsAt, ringRot, shouldPlay } from "../lib/boot";
 import { readKey, writeKey } from "../lib/storage";
+import { monoFamily } from "../lib/fonts";
 
 declare global { interface Window { __hudBootForce?: boolean } }
 
@@ -137,7 +138,7 @@ function startDrawing(host: HTMLDivElement, orbCv: HTMLCanvasElement,
     for (const p of parts) {
       const at = particleAt(L, p, t);
       if (!at || at[2] <= 0.01) continue;
-      const f = `${p.size}px ui-monospace, "Cascadia Mono", Consolas, monospace`;
+      const f = `${p.size}px ${monoFamily()}`;
       if (f !== font) { dctx.font = f; font = f; }
       dctx.fillStyle = `rgba(${hues[p.hue]},${at[2].toFixed(3)})`;
       dctx.fillText(bitAt(p, t), at[0], at[1]);

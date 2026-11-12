@@ -122,7 +122,7 @@
      token, so no button drifts back to a pill. Only Send, Stop and Steer stay circles; chips that
      hold a control use it too, and pure status badges (.badge, .phase, .edlock) keep their shape. */
   --radius-btn: 4px;
-  --mono: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  --mono: "Geist Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
 
   /* The HUD's own zoom (lib/layout.ts), set by the window. Viewport units
      inside #root are scaled by it too, so every vh/vw cap divides by it. */
@@ -135,7 +135,7 @@ html, body, #root { height: 100%; overflow: hidden; }
 #root { zoom: var(--ui-zoom, 1); display: flex; flex-direction: column; }
 
 body {
-  font-family: "Segoe UI", system-ui, sans-serif;
+  font-family: "Plus Jakarta Sans", "Segoe UI", system-ui, sans-serif;
   font-size: 13px;
   background: var(--base);
   color: var(--text);
@@ -187,6 +187,8 @@ input, textarea, select {
 input[type="checkbox"] { width: auto; flex: 0 0 auto; padding: 0; margin: 0; accent-color: var(--accent); }
 label.row { justify-content: flex-start; cursor: pointer; }
 input::placeholder, textarea::placeholder { color: var(--text-muted); }
+/* A longer UI font must not wrap a placeholder and grow the input (AG-1, owner D-9: no input dimension changes): one line, ellipsis. */
+:is(#inputrow, .inputrow) textarea::placeholder { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 select option { background: var(--bg-2); color: var(--text); }
 textarea { resize: vertical; font-family: inherit; }
 

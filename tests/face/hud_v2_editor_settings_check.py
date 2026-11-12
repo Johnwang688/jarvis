@@ -220,8 +220,8 @@ def _apply_checks(page, mock, check, until):
     _open_dialog(page, until)
     page.locator('[data-testid="es-reset"]').click()
     e = _editor(page, "calc.py") or {}
-    check("Reset to defaults puts them back (the font to Monaco's own)",
-          e.get("fontSize") == 12 and e.get("minimap") is False and e.get("fontFamily") is None
+    check("Reset to defaults puts them back (the font to the HUD's --mono, Geist Mono)",
+          e.get("fontSize") == 12 and e.get("minimap") is False and str(e.get("fontFamily") or "").startswith('"Geist Mono"')
           and page.locator('[data-testid="es-font-family"]').input_value() == "", str(e))
     page.keyboard.press("Escape")
 

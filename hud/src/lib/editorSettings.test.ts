@@ -130,6 +130,8 @@ describe("storage", () => {
   });
 });
 
+import { MONO_STACK } from "./fonts";
+
 describe("the options an editor takes", () => {
   it("wrap follows Markdown; the minimap, tabs and font go through", () => {
     const s = { ...DEFAULTS, minimap: true, tabSize: 2, insertSpaces: false, fontFamily: "Consolas", wordWrap: "off" as const };
@@ -142,10 +144,11 @@ describe("the options an editor takes", () => {
     expect(editorOptions(s, { markdown: true }).wordWrap).toBe("on");
   });
 
-  it("an empty font is Monaco's own (the key present, undefined, so a cleared font goes back)", () => {
+  it("an empty font is the HUD's --mono, Geist Mono first (so a cleared font goes back to it)", () => {
     const o = displayOptions(DEFAULTS);
     expect("fontFamily" in o).toBe(true);
-    expect(o.fontFamily).toBeUndefined();
+    expect(o.fontFamily).toBe(MONO_STACK);
+    expect(o.fontFamily).toMatch(/^"Geist Mono"/);
   });
 
   it("a diff or Compare view never takes the tabs, wrap or minimap", () => {
