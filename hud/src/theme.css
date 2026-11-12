@@ -1260,7 +1260,10 @@ details.decisions[open] summary { color: var(--text); margin-bottom: 8px; }
   max-width: 100%; min-width: 0; display: inline-flex; gap: 4px; align-items: baseline;
 }
 .modelchip button.modelbtn:hover:not(:disabled) { background: transparent; color: var(--accent-hi); }
-.modelbtn .mb-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.modelbtn .mb-label { display: grid; justify-items: start; min-width: 0; overflow: hidden; white-space: nowrap; }
+/* Sizes the label to its longest form (ModelChip): the live text and an unseen copy of each form share one cell. */
+.modelbtn .mb-label > span { grid-area: 1 / 1; min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+.modelbtn .mb-label > .mb-ghost { visibility: hidden; }
 .mpop {
   position: fixed; z-index: 60; width: 300px; overflow-y: auto;
   background: var(--bg-2); border: 1px solid var(--border-strong); border-radius: var(--radius);

@@ -133,7 +133,7 @@ def direct_capture_checks(pw, mock, base, check, until, guard, init_script, dsf=
         image = Image.open(io.BytesIO(base64.b64decode(files[0]["data_b64"])))
         scale = image.width / rect["width"]
         check("DC the staged picture is the frame's own shape at a scale from 1 to the DPR",
-              1 - 0.01 <= scale <= dsf + 0.01 and abs(image.height - rect["height"] * scale) <= 3, f"{image.size} vs {rect}")  # 3: the header's line height (a font change) shifts the frame by a pixel or two
+              1 - 0.01 <= scale <= dsf + 0.01 and abs(image.height - rect["height"] * scale) <= 3, f"{image.size} vs {rect}")  # 3: pixel rounding, not a layout shift: a fractional CSS frame (523.5x864) captured as 522x864 pixels, a 2.48px error against the scaled height
         colours = {image.getpixel((x, y)) for x in range(0, image.width, 37) for y in range(0, image.height, 23)}
         check("DC the staged picture is not blank", len(colours) > 1)
         check("DC staging sent no chat turn", not any(p.endswith("/send") for _, p, _ in mock.calls))

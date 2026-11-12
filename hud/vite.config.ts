@@ -68,7 +68,8 @@ export default defineConfig({
     include: ["src/**/*.test.ts"],
     // Vitest replaces CSS with an empty string unless told otherwise, `?raw`
     // included. editorTheme.test.ts reads theme.css's own text, to recompute
-    // the editor scheme's contrast and hue from the tokens there (ED-3).
-    css: { include: [/theme\.css/, /mobile\.css/] },
+    // the editor scheme's contrast and hue from the tokens there (ED-3); fonts.test.ts reads
+    // every desktop component stylesheet's text.
+    css: { include: [/theme\.css/, /mobile\.css/, /\/src\/components\/[^/]+\.css/] },
   },
 });

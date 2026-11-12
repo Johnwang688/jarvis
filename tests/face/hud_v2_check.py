@@ -2811,14 +2811,23 @@ def effort_slider_checks(page, mock):
         bad = []
         for i in (4, 0, 3, 1, 2):
             n = len(patches())
+            # A popover that closed on the click is a failed check with its reason, never a crash that
+            # aborts the rest of the suite (the slider is then gone and `_slider_now` is None).
+            if page.locator(POP).count() == 0:
+                bad.append(f"stop {i}: the popover was already closed")
+                open_pop(page)
             click_stop(page, i)
             want = None if i == st["default"] else st["stops"][i]
             got = settled(n, quiet=0.3)
-            until(lambda: _slider_now(page)["now"] == i, timeout=2)
+            until(lambda: (_slider_now(page) or {}).get("now") == i, timeout=2)
+            now = _slider_now(page)
+            if now is None:
+                bad.append(f"stop {i}: the popover closed on the click (sent {got})")
+                continue
             stop = centre(page.locator('[data-testid="effort-stop"]').nth(i).bounding_box())
             thumb = centre(page.locator('[data-testid="effort-thumb"]').bounding_box())
-            if got != [{"effort": want}] or _slider_now(page)["now"] != i or abs(stop[0] - thumb[0]) > 2:
-                bad.append(f"stop {i}: sent {got}, thumb at {_slider_now(page)['now']} ({thumb[0]:.0f} vs {stop[0]:.0f})")
+            if got != [{"effort": want}] or now["now"] != i or abs(stop[0] - thumb[0]) > 2:
+                bad.append(f"stop {i}: sent {got}, thumb at {now['now']} ({thumb[0]:.0f} vs {stop[0]:.0f})")
         check(f"at {zoom}% a click lands on the stop under the pointer, and the thumb with it",
               not bad, "; ".join(bad))
         close_pop(page)
