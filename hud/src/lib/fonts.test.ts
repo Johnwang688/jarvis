@@ -25,4 +25,14 @@ describe("the fonts (owner D-9)", () => {
     const used = new Set([...text.matchAll(/font(?:-weight)?:\s*(\d{3})\b/g)].map((m) => Number(m[1])));
     for (const w of used) expect([400, 500, 600, 700], `weight ${w}`).toContain(w);
   });
+
+  it("word spacing is 0.05em on body and reset to normal in every rule that sets --mono (code keeps its grid)", () => {
+    expect(text).toMatch(/body\s*\{[^}]*word-spacing:\s*0\.05em/);
+    const rules = [...text.matchAll(/([^{}]+)\{([^{}]*)\}/g)].map((m) => [m[1].trim(), m[2]] as const);
+    const mono = rules.filter(([sel, b]) => /var\(--mono\)/.test(b) && !/^:root/.test(sel));
+    expect(mono.length).toBeGreaterThan(50);
+    for (const [sel, b] of mono) expect(b, sel).toMatch(/word-spacing:\s*normal/);
+    const reset = rules.find(([sel]) => /\.monaco-editor/.test(sel) && /\.xterm/.test(sel));
+    expect(reset?.[1]).toMatch(/word-spacing:\s*normal/);
+  });
 });
