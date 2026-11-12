@@ -18,7 +18,7 @@
 
 import { memo, useSyncExternalStore, type CSSProperties } from "react";
 import type { OrbState } from "../state/store";
-import { palette } from "../lib/orbpalette";
+import { coolSnapshot, palette, subscribeCool } from "../lib/orbpalette";
 import { elapsed, type ThinkingLine } from "../lib/thinking";
 
 // ---- one clock for every line on screen -------------------------------------
@@ -83,6 +83,7 @@ const BAND = arcs(8.2, [[0.85, 1.9], [2.45, 3.6], [3.9, 4.6], [4.95, 5.9]]);
 const ARCS = arcs(6, [[0, 2.4], [2.9, 5.6]]);
 
 export const MiniOrb = memo(function MiniOrb(props: { orb: OrbState; accent?: string | null; moving: boolean }) {
+  useSyncExternalStore(subscribeCool, coolSnapshot); // a new accent re-draws an orb that is not otherwise re-rendered
   const p = palette(props.orb, props.accent);
   // The big orb's spin, sped up for 18px: thinking and a tool turn about once
   // every two seconds, an approval and an error slowly.

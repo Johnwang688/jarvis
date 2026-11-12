@@ -32,6 +32,7 @@ import { ContextView } from "monaco-editor/base/browser/ui/contextview/contextvi
 import { effectiveZoom, placePopup, type Rect } from "./zoomfix";
 import { compile } from "monaco-editor/editor/standalone/common/monarch/monarchCompile";
 import { cssPalette, themeOrFallback } from "./editorTheme";
+import { APPEARANCE_EVENT } from "./appearance";
 import { fontsReady } from "./fonts";
 import { C_WORDS, PY_WORDS, refinedOrOwn, type WordClasses } from "./monarchRefine";
 
@@ -125,11 +126,23 @@ ContextView.prototype.doLayout = function patchedDoLayout(this: any) {
 // first-paint chunk, and the refined tokenizers' imports of C++ and Python —
 // whose definition modules import Monaco's API — are reached only from this
 // chunk, so Monaco is not split into a second one to serve them.
+let retheming = false;
 export function applyGraphite() {
   // One theme, from the tokens on :root: theme.css is the one place a colour
   // is written (lib/editorTheme.ts). A token that cannot be read is logged
   // and Monaco loads in plain vs-dark: never a rejected load.
   monaco.editor.defineTheme("jarvis", themeOrFallback(() => cssPalette()));
+  // A new accent or aurora (AG-3): define the theme again from the tokens now on :root and apply it, so
+  // every open editor re-themes in place. The theme is window-wide, so one listener per window.
+  if (!retheming) {
+    retheming = true;
+    const retheme = () => {
+      monaco.editor.defineTheme("jarvis", themeOrFallback(() => cssPalette()));
+      monaco.editor.setTheme("jarvis");
+    };
+    window.addEventListener(APPEARANCE_EVENT, retheme);
+    window.addEventListener("storage", retheme);
+  }
   // Monaco measures the font as an editor opens (a diff view included): once the bundled faces are in, measure again.
   void fontsReady().then(() => monaco.editor.remeasureFonts());
   // C, C++ and Python tell functions, builtins, types and constants apart
