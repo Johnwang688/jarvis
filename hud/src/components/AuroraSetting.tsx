@@ -128,7 +128,14 @@ export function AuroraSetting() {
   };
   useEffect(() => () => window.clearTimeout(timer.current), []);
   const shown = (slot: Slot) => slot === "accent" ? colours.accent : slot === "base" ? colours.base : colours.washes[Number(slot.slice(5)) - 1];
-  const reset = () => { setNotes({}); change({ accent: undefined, washes: undefined, base: undefined }); };
+  // Reset drops any pick still waiting to be judged, so it cannot land after the defaults (verifier LOW).
+  const reset = () => {
+    window.clearTimeout(timer.current);
+    timer.current = undefined;
+    pending.current = null;
+    setNotes({});
+    change({ accent: undefined, washes: undefined, base: undefined });
+  };
   const custom = colours.accent !== DEFAULT_COLOURS.accent || colours.base !== DEFAULT_COLOURS.base
     || colours.washes.some((w, i) => w !== DEFAULT_COLOURS.washes[i]);
 

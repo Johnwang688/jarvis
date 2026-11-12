@@ -31,12 +31,19 @@ const toPalette = (washes: string[], base: string): AuroraPalette => ({
   base: parseColour(base)!, colours: washes.map((w) => parseColour(w)!) as unknown as AuroraPalette["colours"],
 });
 const clamp01 = (v: number) => Math.min(1, Math.max(0, v));
-/** The screen clamps what the shader writes (displayColor itself leaves a dithered 0 slightly negative). */
-const labOfSrgb = (c: Rgb): Lab => linearToLab(srgbLin(clamp01(c[0])), srgbLin(clamp01(c[1])), srgbLin(clamp01(c[2])));
+/**
+ * The screen clamps what the shader writes (displayColor itself leaves a dithered 0 slightly negative), and with
+ * `rounded` stores it in 8 bits, as the canvas does.
+ */
+const labOfSrgb = (c: Rgb, rounded = false): Lab => {
+  const q = (v: number) => srgbLin(rounded ? Math.round(clamp01(v) * 255) / 255 : clamp01(v));
+  return linearToLab(q(c[0]), q(c[1]), q(c[2]));
+};
 /** The shader path: displayColor, the GLSL twin. `d` is the check's dither (0 none .. 1 a full step darker). */
-const shaderLab = (p: AuroraPalette, w: number[], d: number) => labOfSrgb(displayColor(p, [w[0]!, w[1]!, w[2]!], 1 - d));
+const shaderLab = (p: AuroraPalette, w: number[], d: number, rounded = false) =>
+  labOfSrgb(displayColor(p, [w[0]!, w[1]!, w[2]!], 1 - d), rounded);
 /** The CSS path, from theme.css #aurora: wash 3, 2, 1 alpha-over the base in sRGB space, then the dither. */
-function cssLab(p: AuroraPalette, w: number[], d: number): Lab {
+function cssLab(p: AuroraPalette, w: number[], d: number, rounded = false): Lab {
   const c = [0, 1, 2].map((ch) => {
     let v = p.base[ch]!;
     v = v * (1 - w[2]!) + p.colours[2][ch]! * w[2]!;
@@ -44,7 +51,7 @@ function cssLab(p: AuroraPalette, w: number[], d: number): Lab {
     v = v * (1 - w[0]!) + p.colours[0][ch]! * w[0]!;
     return v - d / 255;
   });
-  return labOfSrgb(c as unknown as Rgb);
+  return labOfSrgb(c as unknown as Rgb, rounded);
 }
 const AMBER_LAB = rgbToLab(hexRgb(AMBER)), RED_LAB = rgbToLab(hexRgb(RED));
 /** The plan's rule, written again: >= 0 means unsafe, and the bigger the deeper inside. */
@@ -57,10 +64,13 @@ function ruleScore(lab: Lab): number {
   const near = Math.max(...[AMBER_LAB, RED_LAB].map((m) => (MEANING_DELTA_E - Math.hypot(lab.L - m.L, lab.a - m.a, lab.b - m.b)) / MEANING_DELTA_E));
   return Math.max(band, near);
 }
+/** The worse of the computed colour and its 8-bit rounding (what the screen shows). */
+const shownScore = (path: typeof shaderLab, p: AuroraPalette, x: number[]) =>
+  Math.max(ruleScore(path(p, x, x[3]!)), ruleScore(path(p, x, x[3]!, true)));
 
 /**
  * Brute force over a palette's displayed colours: a grid of the weight cube (0.04 by default), all 12 cube edges
- * at 0.002, each at dither 0 and 1, both paths; then a hill climb (steps down to 1e-5, over weights and dither)
+ * at 0.002, each at dither 0 and 1, both paths, each point computed and 8-bit rounded; then a hill climb (steps down to 1e-5, over weights and dither)
  * from the 12 points nearest the rule. Returns the worst point found.
  */
 function reference(washes: string[], base: string, grid = 0.04) {
@@ -77,7 +87,7 @@ function reference(washes: string[], base: string, grid = 0.04) {
     const n = Math.round(1 / grid);
     for (let i = 0; i <= n; i++) for (let j = 0; j <= n; j++) for (let k = 0; k <= n; k++) for (const d of [0, 1]) {
       const x = [i / n, j / n, k / n, d];
-      consider(ruleScore(path(p, x, d)), x, path);
+      consider(shownScore(path, p, x), x, path);
     }
     for (let e = 0; e < 12; e++) {
       const ax = e % 3, fixed = [0, 1, 2].filter((a) => a !== ax), bits = Math.floor(e / 3);
@@ -86,7 +96,7 @@ function reference(washes: string[], base: string, grid = 0.04) {
         x[ax] = t / 500;
         x[fixed[0]!] = bits & 1;
         x[fixed[1]!] = (bits >> 1) & 1;
-        consider(ruleScore(path(p, x, d)), x, path);
+        consider(shownScore(path, p, x), x, path);
       }
     }
   }
@@ -100,7 +110,7 @@ function reference(washes: string[], base: string, grid = 0.04) {
         for (let ax = 0; ax < 4; ax++) for (const dir of [-1, 1]) {
           const y = x.slice();
           y[ax] = clamp01(y[ax]! + dir * step);
-          const t = ruleScore(start.path(p, y, y[3]!));
+          const t = shownScore(start.path, p, y);
           if (t > s) { s = t; x.splice(0, 4, ...y); improved = true; }
         }
       }
@@ -141,6 +151,22 @@ describe("whole-palette guard: the known misses, and ordinary palettes", () => {
     const v = paletteVerdict(REG2.washes, REG2.base);
     expect(v).toMatchObject({ unsafe: true, why: "hit" });
     expect(checkPalette(REG2.washes, REG2.base)).not.toBeNull();
+  });
+
+  it("refuses round 3's miss: 8-bit rounding carries [#590029, #3468c4, #6450c4] over #000000 into the band", () => {
+    const washes = ["#590029", "#3468c4", "#6450c4"], base = "#000000";
+    expect(settle(washes, base)).toEqual({ washes, base });
+    const p = toPalette(washes, base), w = [0.088705, 0, 0], d = 0.985492;
+    const raw = shaderLab(p, w, d), shown = shaderLab(p, w, d, true);
+    const hue = (l: Lab) => (Math.atan2(l.b, l.a) * 180) / Math.PI;
+    expect(hue(raw)).toBeCloseTo(3.804, 2); // the computed colour is just outside the band
+    expect(labImpersonates(raw)).toBe(false);
+    const px = displayColor(p, [w[0]!, w[1]!, w[2]!], 1 - d).map((v) => Math.round(clamp01(v) * 255));
+    expect(px).toEqual([0x17, 0x00, 0x05]); // the screen shows #170005
+    expect(hue(shown)).toBeCloseTo(5.976, 2);
+    expect(Math.hypot(shown.a, shown.b)).toBeCloseTo(0.052742, 5);
+    expect(labImpersonates(shown)).toBe(true);
+    expect(checkPalette(washes, base)).not.toBeNull();
   });
 
   it("is not absurdly strict: the defaults and a dozen cool palettes pass", () => {
@@ -241,7 +267,7 @@ describe("whole-palette guard: each step of the proof is sound", () => {
     expect(no).toBeGreaterThan(300);
   });
 
-  it("cellBox holds every displayed colour of its cell (random palettes and cells, both paths, every dither)", () => {
+  it("cellBox holds every displayed colour of its cell, computed and 8-bit rounded (random palettes and cells, both paths, every dither)", () => {
     const r = rng(4242);
     let checked = 0;
     for (let n = 0; n < 250; n++) {
@@ -268,20 +294,23 @@ describe("whole-palette guard: each step of the proof is sound", () => {
               const lo = cell[2 * ax]!, hi = cell[2 * ax + 1]!;
               return s < 16 ? ((s >> ax) & 1 ? hi : lo) : lo + (hi - lo) * r();
             });
-            const lab = ref(pal, x, x[3]!);
-            const where = `${space} ${washes} on ${base} cell ${cell} at ${x}`;
-            expect(lab.L, where).toBeGreaterThanOrEqual(box.L0);
-            expect(lab.L, where).toBeLessThanOrEqual(box.L1);
-            expect(lab.a, where).toBeGreaterThanOrEqual(box.a0);
-            expect(lab.a, where).toBeLessThanOrEqual(box.a1);
-            expect(lab.b, where).toBeGreaterThanOrEqual(box.b0);
-            expect(lab.b, where).toBeLessThanOrEqual(box.b1);
-            checked++;
+            // The computed colour and its 8-bit rounding: the box must hold both.
+            for (const rounded of [false, true]) {
+              const lab = ref(pal, x, x[3]!, rounded);
+              const where = `${space} ${washes} on ${base} cell ${cell} at ${x}${rounded ? " rounded" : ""}`;
+              expect(lab.L, where).toBeGreaterThanOrEqual(box.L0);
+              expect(lab.L, where).toBeLessThanOrEqual(box.L1);
+              expect(lab.a, where).toBeGreaterThanOrEqual(box.a0);
+              expect(lab.a, where).toBeLessThanOrEqual(box.a1);
+              expect(lab.b, where).toBeGreaterThanOrEqual(box.b0);
+              expect(lab.b, where).toBeLessThanOrEqual(box.b1);
+              checked++;
+            }
           }
         }
       }
     }
-    expect(checked).toBe(250 * 2 * 8 * 40);
+    expect(checked).toBe(250 * 2 * 8 * 40 * 2);
   }, 60000);
 
   it("the dither is one 8-bit step, as in aurora/palette.ts", () => {
@@ -324,8 +353,11 @@ function randomPalettes(count: number, seed: number) {
   return out;
 }
 
-/** Runs the check and the reference over palettes; returns the counts and every miss. */
-function compare(palettes: { washes: string[]; base: string }[], grid?: number) {
+/**
+ * Runs the check and the reference over palettes; returns the counts and every miss. Yields between palettes so
+ * a long run never starves vitest's worker of its event loop.
+ */
+async function compare(palettes: { washes: string[]; base: string }[], grid?: number) {
   let refUnsafe = 0, refSafe = 0, extra = 0, budget = 0, maxMs = 0;
   const misses: string[] = [];
   for (const { washes, base } of palettes) {
@@ -341,14 +373,15 @@ function compare(palettes: { washes: string[]; base: string }[], grid?: number) 
       refSafe++;
       if (v.unsafe) extra++;
     }
+    await new Promise((r) => setTimeout(r, 0));
   }
   return { refUnsafe, refSafe, extra, budget, maxMs, misses };
 }
 
 describe("whole-palette guard: no miss against an independent brute force", () => {
-  it("PROOF: over 320 palettes (218 aimed at the band) the check never accepts what the reference refuses", () => {
+  it("PROOF: over 320 palettes (218 aimed at the band) the check never accepts what the reference refuses", async () => {
     const palettes = [REG2, { washes: [OLIVE, MAGENTA, W[2]!], base: DEFAULT_BASE }, ...randomPalettes(100, 1234), ...adversarialPalettes(218, 77)];
-    const c = compare(palettes);
+    const c = await compare(palettes);
     console.log(`palette proof: ${palettes.length} palettes, reference unsafe ${c.refUnsafe}, safe ${c.refSafe}; misses ${c.misses.length}; ` +
       `refused though the reference found nothing ${c.extra} (${c.budget} on the cell budget); slowest check ${c.maxMs.toFixed(1)} ms`);
     expect(c.misses).toEqual([]);
@@ -362,17 +395,7 @@ describe("whole-palette guard: no miss against an independent brute force", () =
   // The long form (PALETTE_PROOF_HEAVY=1): a 0.01 grid of the whole cube plus everything above, more palettes.
   it.runIf(!!process.env.PALETTE_PROOF_HEAVY)("PROOF (heavy): a 0.01 grid over 200 more palettes finds no miss", async () => {
     const palettes = [...randomPalettes(60, 555), ...adversarialPalettes(140, 909)];
-    // One palette at a time, yielding between them, so vitest's worker can still talk to its runner.
-    const parts = [];
-    for (const p of palettes) {
-      parts.push(compare([p], 0.01));
-      await new Promise((r) => setTimeout(r, 0));
-    }
-    const c = {
-      refUnsafe: parts.reduce((n, x) => n + x.refUnsafe, 0), refSafe: parts.reduce((n, x) => n + x.refSafe, 0),
-      extra: parts.reduce((n, x) => n + x.extra, 0), budget: parts.reduce((n, x) => n + x.budget, 0),
-      maxMs: Math.max(...parts.map((x) => x.maxMs)), misses: parts.flatMap((x) => x.misses),
-    };
+    const c = await compare(palettes, 0.01);
     console.log(`palette proof (heavy, 0.01 grid): ${palettes.length} palettes, reference unsafe ${c.refUnsafe}, safe ${c.refSafe}; ` +
       `misses ${c.misses.length}; extra refusals ${c.extra} (${c.budget} on the budget); slowest check ${c.maxMs.toFixed(1)} ms`);
     expect(c.misses).toEqual([]);

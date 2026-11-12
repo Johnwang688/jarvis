@@ -185,9 +185,9 @@ export const checkBase = (input: unknown): Check => checkDark(input, BASE_MAX_LU
 // colour of every point in the cell:
 //  1. per channel, the mix is multilinear in (w1, w2, w3) (a nested lerp), so its range over a cell is exactly
 //     the min and max of its 8 corners;
-//  2. every later step is monotone per channel (to sRGB, minus the dither, clamp, to linear), and the LMS
-//     matrix has only positive entries, so each LMS range is the matrix applied to the ends; the cube root is
-//     monotone; and L, a, b are linear in the roots, so each takes its min and max at the matching ends
+//  2. every later step is monotone per channel (to sRGB, minus the dither, clamp, then half an 8-bit step
+//     either way for the screen's rounding, to linear), and the LMS matrix has only positive entries, so
+//     each LMS range is the matrix applied to the ends; the cube root is monotone; and L, a, b are linear in the roots, so each takes its min and max at the matching ends
 //     (interval arithmetic: an over-estimate, never an under-estimate); that box is intersected with a
 //     tighter mean-value one (cellBox: the centre's exact colour plus the most the cell can move it);
 //  3. the cell is SAFE when that box provably misses the forbidden set: the box in (a, b) does not meet the
@@ -207,8 +207,9 @@ export const checkBase = (input: unknown): Check => checkDark(input, BASE_MAX_LU
 // any in-gamut colour with L < WASH_CHROMA_FLOOR / 0.42 = 0.119 has chroma below the floor, so is not in the
 // band, whatever its hue; and it is far from amber (L 0.84) and red (L 0.71).
 //
-// Not modelled: the 8-bit rounding of the final output (half a step per channel, below a just-noticeable
-// difference), and the fluid's 0.95 weight scale and simplex (subsets of the cube). Refused, never shifted.
+// The screen's 8-bit rounding is covered too: every channel may land half a step either side (cellBox), and a
+// hit counts on the rounded colour as well as the computed one. Not modelled: the fluid's 0.95 weight scale and
+// simplex (subsets of the cube). Refused, never shifted.
 
 const PALETTE_REASON =
   "Together with your other aurora colours this would mix into amber or red, which the HUD keeps for a tool running, an approval waiting and an error.";
@@ -221,6 +222,8 @@ const BAND_MID = (WARM_BAND.from + WARM_BAND.to) / 2, BAND_HALF = (WARM_BAND.to 
 
 /** The shader's dither: every channel darkened by up to one 8-bit step (aurora/palette.ts DITHER). */
 export const PALETTE_DITHER = 1 / 255;
+/** The screen's 8-bit output: each channel lands within half a step of the computed one (verifier MED). */
+export const PALETTE_ROUNDING = 0.5 / 255;
 /** The most C/L any in-band colour of the sRGB cube reaches (0.4104 measured, with margin). */
 export const K_BAND = 0.42;
 /** Below this OKLab L, no in-gamut colour reaches the chroma floor inside the band. */
@@ -308,11 +311,17 @@ function mixChannel(p: Path, ch: number, w1: number, w2: number, w3: number): nu
 /** The path's mix-space value to the displayed sRGB channel, before the dither. */
 const toSrgb = (p: Path, v: number) => (p.space === "linear" ? linSrgb(clamp01(v)) : clamp01(v));
 
-/** The exact displayed OKLab colour at one point (weights, dither 0..1 of a step). */
-export function displayedLab(p: Path, w1: number, w2: number, w3: number, d: number) {
-  const ch = (i: number) => srgbLin(clamp01(toSrgb(p, mixChannel(p, i, w1, w2, w3)) - d * PALETTE_DITHER));
+/** The exact displayed OKLab colour at one point (weights, dither 0..1 of a step), or its 8-bit rounding. */
+export function displayedLab(p: Path, w1: number, w2: number, w3: number, d: number, rounded = false) {
+  const ch = (i: number) => {
+    const s = clamp01(toSrgb(p, mixChannel(p, i, w1, w2, w3)) - d * PALETTE_DITHER);
+    return srgbLin(rounded ? Math.round(s * 255) / 255 : s);
+  };
   return linearToLab(ch(0), ch(1), ch(2));
 }
+/** Either the computed colour or its 8-bit rounding at this point is in the forbidden set (a real hit). */
+const hitAt = (p: Path, w1: number, w2: number, w3: number, d: number) =>
+  labImpersonates(displayedLab(p, w1, w2, w3, d)) || labImpersonates(displayedLab(p, w1, w2, w3, d, true));
 
 /** A cell: [w1lo, w1hi, w2lo, w2hi, w3lo, w3hi, dlo, dhi], the dither as a fraction of one step. */
 type Cell = [number, number, number, number, number, number, number, number];
@@ -351,10 +360,13 @@ const linSlope = (s: number) => (s <= 0.04045 ? 1 / 12.92 : (2.4 / 1.055) * ((s 
  *    dither to L, a, b, by the chain rule) bounded over the whole cell by interval products. It keeps the
  *    cancellation between l, m and s that the direct one throws away, so it is several times tighter on
  *    ordinary cells; it is skipped near black, where the cube root's slope is unbounded.
+ * Both cover the screen's 8-bit rounding: every sRGB channel range is widened by half a step each way
+ * (PALETTE_ROUNDING, clamped to 0..1) before it goes to linear light, and the mean-value radius gains the most
+ * that half a step per channel can move the colour (the slope to L, a, b bounded over the widened box).
  */
 export function cellBox(p: Path, c: Cell): { box: LabBox; split: number } {
   const h = [(c[1] - c[0]) / 2, (c[3] - c[2]) / 2, (c[5] - c[4]) / 2, (c[7] - c[6]) / 2];
-  const x0 = [0, 0, 0], x1 = [0, 0, 0], spread = [0, 0, 0, (c[7] - c[6]) * PALETTE_DITHER];
+  const x0 = [0, 0, 0], x1 = [0, 0, 0], toLin: Iv[] = [], spread = [0, 0, 0, (c[7] - c[6]) * PALETTE_DITHER];
   /** d linear channel / d (w1, w2, w3, dither), each bounded over the cell. */
   const jx: Iv[][] = [];
   for (let ch = 0; ch < 3; ch++) {
@@ -365,9 +377,11 @@ export function cellBox(p: Path, c: Cell): { box: LabBox; split: number } {
     // sRGB range of the channel, then the dither (it only darkens), clamped, then back to linear light.
     const sp0 = toSrgb(p, mn), sp1 = toSrgb(p, mx);
     const u0 = sp0 - c[7] * PALETTE_DITHER, u1 = sp1 - c[6] * PALETTE_DITHER;
-    const s0 = clamp01(u0), s1 = clamp01(u1);
+    // The screen rounds each channel to 8 bits: anything within half a step of the clamped value.
+    const s0 = clamp01(clamp01(u0) - PALETTE_ROUNDING), s1 = clamp01(clamp01(u1) + PALETTE_ROUNDING);
     x0[ch] = srgbLin(s0);
     x1[ch] = srgbLin(s1);
+    toLin.push([linSlope(s0), linSlope(s1)]);
     // The chain: mix -> sRGB (slope gamSlope, linear path only) -> minus dither -> clamp (slope 0..1 where it
     // can bind) -> linear (slope linSlope). Each factor's range over the cell comes from its monotone slope.
     const toS: Iv = p.space === "linear" ? [gamSlope(clamp01(mx)), gamSlope(clamp01(mn))] : [1, 1];
@@ -423,7 +437,12 @@ export function cellBox(p: Path, c: Cell): { box: LabBox; split: number } {
         }
         return [a, b];
       });
+      // The 8-bit rounding: up to half a step in each sRGB channel, through the slope sRGB -> linear -> lab_k.
       let radius = 0;
+      for (let ch = 0; ch < 3; ch++) {
+        const t = ivMul(jl[ch]!, toLin[ch]!);
+        radius += Math.max(Math.abs(t[0]), Math.abs(t[1])) * PALETTE_ROUNDING;
+      }
       for (let ax = 0; ax < 4; ax++) {
         let a = 0, b = 0;
         for (let ch = 0; ch < 3; ch++) {
@@ -452,7 +471,7 @@ export type PaletteVerdict = { unsafe: boolean; why: "clear" | "hit" | "unproved
 function provePath(p: Path, budget: number): PaletteVerdict {
   // A quick coarse look first: many unsafe palettes show a hit on a 0.25 grid, before any proof is tried.
   for (let i = 0; i <= 4; i++) for (let j = 0; j <= 4; j++) for (let k = 0; k <= 4; k++) for (const d of [0, 1]) {
-    if (labImpersonates(displayedLab(p, i / 4, j / 4, k / 4, d))) return { unsafe: true, why: "hit", cells: 0, at: [i / 4, j / 4, k / 4, d] };
+    if (hitAt(p, i / 4, j / 4, k / 4, d)) return { unsafe: true, why: "hit", cells: 0, at: [i / 4, j / 4, k / 4, d] };
   }
   // Breadth first, so the coarse cells' centres are all tested (a hit is found early) before any cell is fine.
   const queue: Cell[] = [[0, 1, 0, 1, 0, 1, 0, 1]];
@@ -463,7 +482,7 @@ function provePath(p: Path, budget: number): PaletteVerdict {
     const { box, split } = cellBox(p, c);
     if (boxIsSafe(box)) continue;
     const mid = [(c[0] + c[1]) / 2, (c[2] + c[3]) / 2, (c[4] + c[5]) / 2, (c[6] + c[7]) / 2];
-    if (labImpersonates(displayedLab(p, mid[0]!, mid[1]!, mid[2]!, mid[3]!))) return { unsafe: true, why: "hit", cells, at: mid };
+    if (hitAt(p, mid[0]!, mid[1]!, mid[2]!, mid[3]!)) return { unsafe: true, why: "hit", cells, at: mid };
     // Split the chosen axis, or the widest one still splittable; none left: unproved, so refused.
     const width = (ax: number) => c[2 * ax + 1]! - c[2 * ax]!;
     const can = (ax: number) => width(ax) > (ax === 3 ? MIN_DITHER_CELL : PALETTE_MIN_CELL);
