@@ -2127,6 +2127,8 @@ derived accent token is computed in OKLCH from the default so the default is
 byte-exact. Stored in `localStorage['jarvis.hud.appearance']` (per window, never
 sent to the daemon, re-validated on apply). Details: plan §4 "AG-3 as built".
 
+**Startup animation (D-12, 2026-11-12):** "Constellation + Orb" (`lib/boot.ts`, `components/BootOverlay.tsx`) replaces the 2026-10-12 boot above, keeping all its play/skip/shield/cap rules; it draws its own aurora from the live tokens, docks into the real `#orb` and crossfades to the HUD.
+
 **Stats overlay.** `localStorage['jarvis.hud.auroraStats']='1'`, reload (or
 `'fluid'` to force the fluid on software rendering).
 

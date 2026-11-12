@@ -1,4 +1,4 @@
-"""Boot animation checks: built dist, ephemeral MockDaemon, live-port/CSP guard.
+"""Boot animation checks ("Constellation + Orb", D-12): built dist, ephemeral MockDaemon, live-port/CSP guard.
 
 The only opt-in is an init-script boolean; it bypasses automation alone.
 Run with JARVIS_HUD_DEV=1, as the other built HUD suites do.
@@ -32,6 +32,20 @@ new MutationObserver(records => {
     window.__bootBeforeHud = !!document.querySelector('#hud-boot');
 }).observe(document, {childList: true, subtree: true});
 """
+
+
+# Remember every WebGL context the overlay makes, to see that it is released.
+TRACK_GL = """
+window.__gls = [];
+const ownGet = HTMLCanvasElement.prototype.getContext;
+HTMLCanvasElement.prototype.getContext = function (type, ...rest) {
+  const c = ownGet.call(this, type, ...rest);
+  if (c && /webgl/.test(String(type)) && this.closest('#hud-boot')) window.__gls.push(c);
+  return c;
+};"""
+
+GONE = "document.querySelectorAll('#hud-boot, #hud-boot canvas').length === 0"
+RELEASED = "window.__gls.length >= 1 && window.__gls.every(g => g.isContextLost())"
 
 
 def boot_checks(browser, mock, base, check, until, guard, init_script):
@@ -86,7 +100,7 @@ def boot_checks(browser, mock, base, check, until, guard, init_script):
             ctx.close()
 
     def finishes():
-        ctx, page = fresh()
+        ctx, page = fresh(extra=TRACK_GL)
         try:
             start = time.monotonic()
             page.wait_for_selector(OVERLAY, state="attached")
@@ -97,13 +111,20 @@ def boot_checks(browser, mock, base, check, until, guard, init_script):
             check("overlay never holds focus", not page.evaluate("document.querySelector('#hud-boot').contains(document.activeElement)"))
             check("title unchanged during boot", page.title() == "J.A.R.V.I.S.")
             page.wait_for_selector(OVERLAY, state="detached", timeout=7000)
-            check("finishes and removes itself within 7 seconds", time.monotonic() - start < 7)
+            took = time.monotonic() - start
+            check("finishes and removes itself within 7 seconds", took < 7, f"{took:.2f}s")
+            check("plays its whole story (about 4 seconds), not a flash", took > 3.0, f"{took:.2f}s")
+            check("no overlay or canvas remains", page.evaluate(GONE))
+            check("the GL context is released", page.evaluate(RELEASED))
+            check("the real HUD is intact and focus never went to the overlay",
+                  page.locator('[data-testid="input"]').count() == 1
+                  and not page.evaluate("document.activeElement?.closest('#hud-boot')"))
             check("title unchanged after boot", page.title() == "J.A.R.V.I.S.")
         finally:
             ctx.close()
 
     def click_skip():
-        ctx, page = fresh()
+        ctx, page = fresh(extra=TRACK_GL)
         try:
             page.wait_for_selector(OVERLAY, state="attached")
             page.evaluate("""() => {
@@ -124,6 +145,8 @@ def boot_checks(browser, mock, base, check, until, guard, init_script):
             page.wait_for_selector(OVERLAY, state="detached", timeout=1000)
             check("click skips and eats the press and click underneath",
                   page.evaluate("[window.__underClicks, window.__underPresses]") == [0, 0])
+            check("after a skip no overlay or canvas remains", page.evaluate(GONE))
+            check("after a skip the GL context is released", page.evaluate(RELEASED))
             page.mouse.click(40, 40)
             check("underlay probe can actually receive clicks after skip", page.evaluate("window.__underClicks") == 1)
             before = mock.sse_connections()
@@ -171,10 +194,11 @@ def boot_checks(browser, mock, base, check, until, guard, init_script):
     def approval(before):
         if before:
             mock.world["approvals"] = [dict(CARD)]
-        ctx, page = fresh()
+        ctx, page = fresh(extra=TRACK_GL)
         try:
             if not before:
                 page.wait_for_selector(OVERLAY, state="attached")
+                page.wait_for_timeout(600)  # well into the animation
                 page.locator('[data-testid="input"]').focus()
                 mock.emit("approval_requested", dict(CARD))
             page.wait_for_selector('[data-testid="approval-card"]', state="attached")
@@ -185,6 +209,9 @@ def boot_checks(browser, mock, base, check, until, guard, init_script):
                   else "arriving card removes boot immediately",
                   page.locator(OVERLAY).count() == 0)
             check("approval card takes focus", page.evaluate("document.activeElement?.getAttribute('data-testid')") == "approval-card")
+            if not before:
+                check("a card arriving mid-boot leaves no canvas and releases the GL context",
+                      page.evaluate(GONE) and page.evaluate(RELEASED))
             page.keyboard.press("Escape")
             page.wait_for_selector('[data-testid="approval-card"]', state="detached")
             page.wait_for_timeout(250)
@@ -207,18 +234,18 @@ def boot_checks(browser, mock, base, check, until, guard, init_script):
       document.querySelector('#root').appendChild(button);
     }"""
 
-    def canvas_fails():
+    def canvas_fails(kind, label):
         # Review of PR #82, F1: a throw in the overlay must never take the HUD
         # (and its approval card) with it.
-        no_canvas = """
+        broken = f"""
           const own = HTMLCanvasElement.prototype.getContext;
-          HTMLCanvasElement.prototype.getContext = function (...args) {
-            return this.closest('#hud-boot') ? null : own.apply(this, args);
-          };"""
-        ctx, page = fresh(extra=no_canvas)
+          HTMLCanvasElement.prototype.getContext = function (type, ...args) {{
+            return this.closest('#hud-boot') && {kind} ? null : own.call(this, type, ...args);
+          }};"""
+        ctx, page = fresh(extra=broken)
         try:
             page.wait_for_timeout(600)
-            check("a canvas with no 2D context ends boot, never the HUD",
+            check(f"{label} ends boot, never the HUD",
                   page.locator(OVERLAY).count() == 0 and page.locator('[data-testid="input"]').count() == 1
                   and page.evaluate("window.__bootMounts") >= 1)
             mock.emit("approval_requested", dict(CARD))
@@ -227,6 +254,57 @@ def boot_checks(browser, mock, base, check, until, guard, init_script):
                   page.evaluate("document.activeElement?.getAttribute('data-testid')") == "approval-card")
             page.keyboard.press("Escape")
             page.wait_for_selector('[data-testid="approval-card"]', state="detached")
+        finally:
+            ctx.close()
+
+    def shader_fails():
+        # A shader that will not compile is the same silent end.
+        broken = """
+          const own = WebGLRenderingContext.prototype.getShaderParameter;
+          WebGLRenderingContext.prototype.getShaderParameter = function (s, p) {
+            return p === this.COMPILE_STATUS ? false : own.call(this, s, p);
+          };"""
+        ctx, page = fresh(extra=broken)
+        try:
+            page.wait_for_timeout(600)
+            check("a shader that does not compile ends boot, never the HUD",
+                  page.locator(OVERLAY).count() == 0 and page.locator('[data-testid="input"]').count() == 1
+                  and page.evaluate("window.__bootMounts") >= 1)
+        finally:
+            ctx.close()
+
+    def dock(zoom, size):
+        # The boot orb must end exactly on the real orb: centre and radius.
+        ctx, page = fresh(zoom=zoom, size=size)
+        try:
+            handle = page.wait_for_function("""() => {
+              const el = document.querySelector('#hud-boot');
+              if (!el || el.dataset.docked !== '1') return null;
+              const [x, y, r] = el.dataset.orb.split(',').map(Number);
+              const b = document.getElementById('orb').getBoundingClientRect();
+              return {x, y, r, bx: b.x + b.width / 2, by: b.y + b.height / 2, br: b.width * 63 / 132, bw: b.width};
+            }""", polling="raf", timeout=7000)
+            d = handle.json_value()
+            check(f"the docked boot orb lands on the real orb at {zoom}% (centre within 3px)",
+                  abs(d["x"] - d["bx"]) <= 3 and abs(d["y"] - d["by"]) <= 3, str(d))
+            check(f"…and its radius matches the real orb's at {zoom}% (within 3px)", abs(d["r"] - d["br"]) <= 3, str(d))
+            check("…and the real orb has a real size", d["bw"] > 20, str(d))
+        finally:
+            ctx.close()
+
+    def plays_and_looks():
+        # The overlay really draws: the aurora (WebGL) and sparks (2D) are not blank.
+        ctx, page = fresh()
+        try:
+            page.wait_for_selector(OVERLAY, state="attached")
+            page.wait_for_timeout(1700)
+            ink = page.evaluate("""() => {
+              const fx = document.querySelector('#hud-boot canvas[data-layer=fx]');
+              const d = fx.getContext('2d').getImageData(0, 0, fx.width, fx.height).data;
+              let lit = 0; for (let i = 3; i < d.length; i += 4) if (d[i] > 20) lit++;
+              return lit;
+            }""")
+            check("sparks and rings are drawn on the 2D layer by 1.7 s", ink > 500, str(ink))
         finally:
             ctx.close()
 
@@ -283,13 +361,16 @@ def boot_checks(browser, mock, base, check, until, guard, init_script):
               const el = document.querySelector('#hud-boot'), r = el.getBoundingClientRect();
               return {x:r.x, y:r.y, w:r.width, h:r.height, vw:innerWidth, vh:innerHeight,
                 top:document.elementFromPoint(innerWidth-1, innerHeight-1) === el,
-                pixels: [...el.querySelectorAll('canvas')].every(c =>
-                  c.width === Math.round(innerWidth * devicePixelRatio) &&
-                  c.height === Math.round(innerHeight * devicePixelRatio))};
+                pixels: [...el.querySelectorAll('canvas[data-layer=fx]')].every(c =>
+                  c.width === Math.round(innerWidth * Math.min(devicePixelRatio, 2)) &&
+                  c.height === Math.round(innerHeight * Math.min(devicePixelRatio, 2))),
+                gl: [...el.querySelectorAll('canvas[data-layer=gl]')].every(c =>
+                  c.width <= Math.round(innerWidth * Math.min(devicePixelRatio, 1)) &&
+                  c.height <= Math.round(innerHeight * Math.min(devicePixelRatio, 1)))};
             }""")
-            check(f"covers {size} at {zoom}% with device-pixel canvases",
+            check(f"covers {size} at {zoom}% with a device-pixel 2D layer and a GL layer at most 1x",
                   abs(got['x']) < 1 and abs(got['y']) < 1 and abs(got['w']-got['vw']) < 1
-                  and abs(got['h']-got['vh']) < 1 and got['top'] and got['pixels'], str(got))
+                  and abs(got['h']-got['vh']) < 1 and got['top'] and got['pixels'] and got['gl'], str(got))
             page.set_viewport_size({"width": size[0]-50, "height": size[1]-50})
             page.wait_for_timeout(100)
             check(f"resize keeps boot filling viewport at {zoom}%", page.evaluate("""() => {
@@ -315,7 +396,12 @@ def boot_checks(browser, mock, base, check, until, guard, init_script):
         run("reduced motion", lambda: no_play(forced=True, reduced=True))
         run("finish", finishes)
         run("click and reload", click_skip)
-        run("canvas failure", canvas_fails)
+        run("looks", plays_and_looks)
+        run("2D canvas failure", lambda: canvas_fails("String(type) === '2d'", "a canvas with no 2D context"))
+        run("WebGL failure", lambda: canvas_fails("String(type) === 'webgl'", "a forced WebGL failure (getContext('webgl') is null)"))
+        run("shader failure", shader_fails)
+        for zoom, size in ((100, (1280, 800)), (160, (1600, 1000))):
+            run("dock", lambda zoom=zoom, size=size: dock(zoom, size))
         run("click shield", shield)
         for key in ("x", "Escape", "Control+`"):
             run("key " + key, lambda key=key: key_skip(key))

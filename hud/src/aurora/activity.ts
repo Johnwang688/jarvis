@@ -60,6 +60,11 @@ export function createChatActivity(host: ActivityHost = {}) {
       sink = s;
       eligible = canRipple;
     },
+    /** A one-off ripple from a point (viewport px), unthrottled: the boot's handoff (D-12). False if none was made. */
+    rippleAt(x: number, y: number): boolean {
+      if (!sink || (eligible && !eligible())) return false;
+      return sink({ left: x - 1, top: y - 1, width: 2, height: 2 });
+    },
     /** A chunk of a reply streamed into `pane`. Returns whether a ripple was made. */
     chatStreaming(pane: number): boolean {
       if (!sink) return false;

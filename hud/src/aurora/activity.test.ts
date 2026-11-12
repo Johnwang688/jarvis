@@ -18,6 +18,14 @@ describe("chat activity ripples", () => {
     expect(h.made.length).toBe(0);
   });
 
+  it("rippleAt makes one ripple from a point, and none without a sink (the boot's handoff)", () => {
+    const h = rig();
+    expect(h.a.rippleAt(120, 80)).toBe(true);
+    expect(h.made).toEqual([{ left: 119, top: 79, width: 2, height: 2 }]);
+    h.a.setSink(null);
+    expect(h.a.rippleAt(1, 1)).toBe(false);
+  });
+
   it("limits one pane to a ripple per PANE_MIN_MS", () => {
     const h = rig();
     for (let t = 0; t < 3 * PANE_MIN_MS; t += 50) { h.at(t); h.a.chatStreaming(1); }
