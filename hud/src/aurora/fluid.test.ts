@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { DYE_MAX_AREA, ENERGY_TAU, SIM_MAX_AREA, gridFor, size } from "./fluid";
+import { DYE_MAX_AREA, ENERGY_TAU, driftScales, SIM_MAX_AREA, gridFor, size } from "./fluid";
 import { createFluid } from "./fluid";
 import { fakeGL } from "./fakegl";
 import { DEFAULT_PALETTE } from "./palette";
@@ -78,5 +78,68 @@ describe("fluid", () => {
 
   it("the energy constant is short enough to settle in a few seconds", () => {
     expect(ENERGY_TAU).toBeLessThanOrEqual(2.5);
+  });
+});
+
+describe("natural drift strength", () => {
+  const make = (drift?: number) => {
+    const g = fakeGL();
+    const f = createFluid(g.gl, DEFAULT_PALETTE, 500, 300)!;
+    if (drift !== undefined) f.setDrift(drift);
+    return { g, f };
+  };
+  /** One step's velocity splat (the ambient force) and dye splat, as uploaded. */
+  const stepOnce = (g: ReturnType<typeof fakeGL>, f: ReturnType<typeof make>["f"]) => {
+    f.step(1 / 60);
+    const c = g.state.colours;
+    return { vel: c[c.length - 2]!, dye: c[c.length - 1]!, curl: g.state.uniforms.uCurlK! };
+  };
+
+  it("100% is today's tuning exactly (rest curl 3, force 1x), and the default is 100%", () => {
+    expect(driftScales(1)).toEqual({ path: 1, force: 1, curlRest: 3 });
+    const a = make();
+    const b = make(1);
+    for (let i = 0; i < 30; i++) {
+      const x = stepOnce(a.g, a.f);
+      const y = stepOnce(b.g, b.f);
+      expect(y).toEqual(x);
+    }
+    expect(stepOnce(a.g, a.f).curl).toBe(3);
+  });
+
+  it("0% has no ambient force and rest curl at its floor, but still feeds the dye", () => {
+    expect(driftScales(0)).toEqual({ path: 0, force: 0, curlRest: 0 });
+    const { g, f } = make(0);
+    for (let i = 0; i < 5; i++) {
+      const r = stepOnce(g, f);
+      expect(r.vel.every((v) => v === 0)).toBe(true);
+      expect(r.dye.some((v) => v > 0)).toBe(true);
+      expect(r.curl).toBe(0);
+    }
+  });
+
+  it("at 0% a stir still raises the vorticity and it settles back to the floor", () => {
+    const { g, f } = make(0);
+    for (let i = 0; i < 8; i++) f.stir(0.5, 0.5, 0.2, 0.1, 1, 0);
+    expect(stepOnce(g, f).curl).toBeGreaterThan(3);
+    for (let i = 0; i < 10 * 60; i++) f.step(1 / 60);
+    expect(g.state.uniforms.uCurlK).toBeCloseTo(0, 6);
+  });
+
+  it("200% is livelier at rest but its vorticity stays far below the stirred one", () => {
+    const hi = driftScales(2);
+    expect(hi.force).toBe(2);
+    expect(hi.curlRest).toBeGreaterThan(3);
+    expect(hi.curlRest).toBeLessThan(5);
+    const { g, f } = make(2);
+    const r = stepOnce(g, f);
+    expect(r.curl).toBeLessThan(11 / 2);
+    expect(r.vel.some((v) => v !== 0)).toBe(true);
+  });
+
+  it("out-of-range or garbage values are clamped, never NaN", () => {
+    expect(driftScales(9).force).toBe(2);
+    expect(driftScales(-3).force).toBe(0);
+    expect(driftScales(NaN)).toEqual(driftScales(1));
   });
 });

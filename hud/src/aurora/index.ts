@@ -30,6 +30,7 @@ export function startAurora(doc: Document = document): (() => void) | null {
       visible: !doc.hidden,
       stir: a.stir,
       activity: a.activity,
+      drift: a.drift,
     };
   };
 

@@ -157,6 +157,27 @@ export function AuroraSetting() {
         The system's reduced-motion setting always shows one frame.
       </p>
       <label>
+        Natural drift{" "}
+        <input
+          type="range"
+          style={{ width: 220, maxWidth: "60%", verticalAlign: "middle" }}
+          min={0}
+          max={200}
+          step={10}
+          data-testid="appearance-drift"
+          aria-label="Natural drift"
+          value={Math.round(a.drift * 100)}
+          disabled={a.motion === "still"}
+          onChange={(e) => change({ drift: Number(e.target.value) / 100 })}
+        />{" "}
+        <output data-testid="appearance-drift-value">{Math.round(a.drift * 100)}%</output>
+      </label>
+      <p data-testid="appearance-drift-note">
+        {a.motion === "still"
+          ? "Still draws one frame, so there is no drift to adjust."
+          : "How lively the aurora is on its own. 0% holds still (Fluid still reacts to stirs and ripples, then settles)."}
+      </p>
+      <label>
         <input
           type="checkbox"
           data-testid="appearance-stir"

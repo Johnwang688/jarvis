@@ -20,6 +20,8 @@ export interface WebAuroraRenderer extends AuroraRenderer {
   readonly rendererName: string;
   setStyle(style: AuroraStyle): void;
   setPalette(palette: AuroraPalette): void;
+  /** Natural drift strength 0..2, live: the next step uses it (kept across a rebuild). */
+  setDrift(drift: number): void;
   /**
    * The canvas backing size changed (the caller set `canvas.width/height`). If fluid cannot rebuild its
    * buffers at the new size it falls back to flow: read `style` afterwards.
@@ -54,7 +56,7 @@ export function createAuroraRenderer(
   canvas: HTMLCanvasElement,
   style: AuroraStyle,
   palette: AuroraPalette,
-  opts: { allowSoftwareFluid?: boolean } = {},
+  opts: { allowSoftwareFluid?: boolean; drift?: number } = {},
 ): WebAuroraRenderer | null {
   let gl: WebGL2RenderingContext | null = null;
   try {
@@ -69,6 +71,7 @@ export function createAuroraRenderer(
 
   let wanted = style;
   let colours = palette;
+  let drift = opts.drift ?? 1;
   let quad: WebGLBuffer | null = null;
   let impl: StyleImpl | null = null;
   /** The context was lost since the objects above were built: they are gone; only `restore()` builds. */
@@ -116,6 +119,7 @@ export function createAuroraRenderer(
       // A fluid failure from a lost context is not a reason to fall back: the restore builds fluid.
       if (!impl && !isLost()) impl = create('flow', w, h);
     }
+    impl?.setDrift(drift);
     if (!impl) {
       if (quad) ctx.deleteBuffer(quad);
       quad = null;
@@ -146,6 +150,10 @@ export function createAuroraRenderer(
       impl = null;
       build();
     },
+    setDrift(d) {
+      drift = d;
+      if (live()) impl!.setDrift(d);
+    },
     setPalette(p) {
       colours = p;
       if (live()) impl!.setPalette(p);
@@ -158,6 +166,7 @@ export function createAuroraRenderer(
       // The fluid buffers could not be rebuilt at this size: fall back to flow, as at creation.
       impl!.release();
       impl = create('flow', Math.max(1, w), Math.max(1, h));
+      impl?.setDrift(drift);
       if (!impl) {
         if (quad) ctx.deleteBuffer(quad);
         quad = null;

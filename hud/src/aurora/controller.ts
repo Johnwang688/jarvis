@@ -24,6 +24,8 @@ export interface AuroraInputs {
   stir: boolean;
   /** Streaming chats ripple (Settings -> Appearance). */
   activity: boolean;
+  /** Natural drift strength, 0..2 (Settings -> Appearance; 1 = the tuned drift). */
+  drift: number;
 }
 
 export interface AuroraOptions {
@@ -113,6 +115,7 @@ export function createAuroraController(host: HTMLElement, first: AuroraInputs, o
   // with no style (state off) and rebuilds on `webglcontextrestored`.
   let renderer: WebAuroraRenderer | null = createAuroraRenderer(canvas, inputs.style, inputs.palette, {
     allowSoftwareFluid: opts.allowSoftwareFluid,
+    drift: inputs.drift,
   });
 
   const show = (on: boolean) => {
@@ -239,7 +242,7 @@ export function createAuroraController(host: HTMLElement, first: AuroraInputs, o
     lastPoint = null;
     if (renderer) lost = !renderer.restore();
     else {
-      renderer = createAuroraRenderer(canvas, inputs.style, inputs.palette, { allowSoftwareFluid: opts.allowSoftwareFluid });
+      renderer = createAuroraRenderer(canvas, inputs.style, inputs.palette, { allowSoftwareFluid: opts.allowSoftwareFluid, drift: inputs.drift });
       lost = renderer?.style == null;
       capFps();
     }
@@ -299,6 +302,7 @@ export function createAuroraController(host: HTMLElement, first: AuroraInputs, o
   reportStyle();
   apply();
   reportStirs();
+  canvas.setAttribute('data-aurora-drift', String(inputs.drift));
 
   return {
     update(next) {
@@ -309,6 +313,10 @@ export function createAuroraController(host: HTMLElement, first: AuroraInputs, o
         renderer.setStyle(next.style);
         reportStyle();
         if (renderer.style !== null) refresh();
+      }
+      if (next.drift !== prev.drift) {
+        renderer?.setDrift(next.drift);
+        canvas.setAttribute('data-aurora-drift', String(next.drift));
       }
       if (renderer && !samePalette(next.palette, prev.palette)) {
         renderer.setPalette(next.palette);

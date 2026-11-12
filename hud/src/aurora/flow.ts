@@ -33,6 +33,7 @@ export function createFlow(gl: WebGL2RenderingContext, palette: AuroraPalette, w
   let width = w;
   let height = h;
   let time = 0;
+  let drift = 1;
   let released = false;
 
   const setPalette = (p: AuroraPalette) => {
@@ -50,7 +51,7 @@ export function createFlow(gl: WebGL2RenderingContext, palette: AuroraPalette, w
   return {
     style: 'flow',
     step(dt) {
-      time += dt;
+      time += dt * drift;
     },
     draw() {
       gl.bindFramebuffer(gl.FRAMEBUFFER, null);
@@ -66,6 +67,9 @@ export function createFlow(gl: WebGL2RenderingContext, palette: AuroraPalette, w
       width = nw;
       height = nh;
       return true;
+    },
+    setDrift(d) {
+      drift = Number.isFinite(d) ? Math.min(2, Math.max(0, d)) : 1;
     },
     stir() {},
     ripple() {},

@@ -3,7 +3,7 @@ import {
   ACCENT_CHROMA_FLOOR, ACCENT_MIN_CONTRAST, AMBER, APPEARANCE_EVENT, APPEARANCE_KEY, BASE_MAX_LUMINANCE, DEFAULT_ACCENT,
   DEFAULT_APPEARANCE, DEFAULT_BASE, DEFAULT_COLOURS, DEFAULT_WASHES, MEANING_DELTA_E, RED, WARM_BAND, WASH_MAX_LUMINANCE,
   accentContrast, checkAccent, checkBase, checkWash, colourProps, deriveAccent, impersonatesMeaning, loadAppearance, normHex,
-  parseAppearance, resolveColours, saveAppearance,
+  clampDrift, parseAppearance, resolveColours, saveAppearance,
 } from "./appearance";
 import { deltaE, hexLch, lchHex, luminance, rgbHex } from "./oklch";
 import { contrast } from "./editorTheme";
@@ -18,14 +18,14 @@ const store = (init: Record<string, string> = {}) => {
 
 describe("appearance preferences", () => {
   it("default to Fluid with both stirs on", () => {
-    expect(loadAppearance(store())).toEqual({ motion: "fluid", stir: true, activity: true });
+    expect(loadAppearance(store())).toEqual({ motion: "fluid", stir: true, activity: true, drift: 1 });
     expect(DEFAULT_APPEARANCE.motion).toBe("fluid");
   });
 
   it("fall back field by field on a corrupt or wrong-typed record", () => {
     for (const raw of ["{", "null", "[]", '"x"', "12", ""]) expect(parseAppearance(raw), raw).toEqual(DEFAULT_APPEARANCE);
-    expect(parseAppearance('{"motion":"swirl","stir":"yes","activity":false}')).toEqual({ motion: "fluid", stir: true, activity: false });
-    expect(parseAppearance('{"motion":"still","stir":false}')).toEqual({ motion: "still", stir: false, activity: true });
+    expect(parseAppearance('{"motion":"swirl","stir":"yes","activity":false}')).toEqual({ motion: "fluid", stir: true, activity: false, drift: 1 });
+    expect(parseAppearance('{"motion":"still","stir":false}')).toEqual({ motion: "still", stir: false, activity: true, drift: 1 });
   });
 
   it("survive a storage that throws", () => {
@@ -52,8 +52,8 @@ describe("appearance preferences", () => {
   it("saving keeps fields this HUD does not know (a later HUD's, a malformed accent) without applying them", () => {
     const s = store({ [APPEARANCE_KEY]: JSON.stringify({ motion: "flow", base: "url(x)", future: { a: 1 }, accent: 7 }) });
     const next = saveAppearance({ stir: false }, s);
-    expect(next).toEqual({ motion: "flow", stir: false, activity: true });
-    expect(JSON.parse(s.m[APPEARANCE_KEY]!)).toEqual({ motion: "flow", stir: false, activity: true, base: "url(x)", future: { a: 1 }, accent: 7 });
+    expect(next).toEqual({ motion: "flow", stir: false, activity: true, drift: 1 });
+    expect(JSON.parse(s.m[APPEARANCE_KEY]!)).toEqual({ motion: "flow", stir: false, activity: true, drift: 1, base: "url(x)", future: { a: 1 }, accent: 7 });
   });
 });
 
@@ -357,7 +357,7 @@ describe("resolving a stored record", () => {
     expect(loadAppearance(s)).toMatchObject({ accent: "#c0aef5", base: "#0c1418", washes: ["#112233", "#445566", "#778899"] });
     saveAppearance({ accent: undefined, washes: undefined, base: undefined }, s);
     const saved = JSON.parse(s.m[APPEARANCE_KEY]!);
-    expect(saved).toEqual({ motion: "fluid", stir: true, activity: true });
+    expect(saved).toEqual({ motion: "fluid", stir: true, activity: true, drift: 1 });
     expect(loadAppearance(s)).toEqual(DEFAULT_APPEARANCE);
   });
 });
@@ -408,5 +408,28 @@ describe("the hue guard and the wash clamp are the boundary", () => {
     const r = checkWash("#ffffff");
     expect(r.ok && luminance(r.value)).toBeLessThanOrEqual(WASH_MAX_LUMINANCE);
     expect(r.ok && r.value).not.toBe("#ffffff");
+  });
+});
+
+describe("natural drift storage", () => {
+  const drift = (raw: string | null) => parseAppearance(raw).drift;
+  it("a missing or garbage value is 1; out-of-range values are clamped to 0..2", () => {
+    expect(drift(null)).toBe(1);
+    expect(drift('{"motion":"flow"}')).toBe(1);
+    for (const bad of ['"fast"', "null", "[]", "{}", "true"]) expect(drift(`{"drift":${bad}}`), bad).toBe(1);
+    expect(clampDrift(NaN)).toBe(1);
+    expect(clampDrift(Infinity)).toBe(1);
+    expect(drift('{"drift":5}')).toBe(2);
+    expect(drift('{"drift":-1}')).toBe(0);
+    expect(drift('{"drift":0}')).toBe(0);
+    expect(drift('{"drift":0.5}')).toBe(0.5);
+  });
+  it("saving a drift keeps unknown fields and clamps what it stores", () => {
+    const m: Record<string, string> = { [APPEARANCE_KEY]: '{"future":{"a":1},"drift":0.3}' };
+    const s = { getItem: (k: string) => m[k] ?? null, setItem: (k: string, v: string) => void (m[k] = v) };
+    expect(saveAppearance({ drift: 9 }, s).drift).toBe(2);
+    expect(JSON.parse(m[APPEARANCE_KEY]!)).toMatchObject({ future: { a: 1 }, drift: 2 });
+    saveAppearance({ drift: NaN }, s);
+    expect(JSON.parse(m[APPEARANCE_KEY]!).drift).toBe(1);
   });
 });

@@ -14,7 +14,7 @@ let ctl: AuroraController | null;
 let clockMs: number;
 
 const inputs = (o: Partial<AuroraInputs> = {}): AuroraInputs => ({
-  style: "fluid", palette: DEFAULT_PALETTE, still: false, visible: true, stir: true, activity: true, ...o,
+  style: "fluid", palette: DEFAULT_PALETTE, still: false, visible: true, stir: true, activity: true, drift: 1, ...o,
 });
 const canvas = () => host.querySelector("canvas")!;
 const attr = (n: string) => canvas().getAttribute(n);
@@ -183,6 +183,31 @@ describe("no GPU (a software renderer)", () => {
     run(hz * 2, 1000 / hz);
     expect(frames()).toBeLessThanOrEqual(150);
     expect(frames()).toBeGreaterThanOrEqual(112);
+  });
+});
+
+describe("natural drift", () => {
+  it("is shown as data-aurora-drift and applies live to the running renderer, with no rebuild", () => {
+    ctl = createAuroraController(host, inputs({ drift: 0.4 }));
+    expect(attr("data-aurora-drift")).toBe("0.4");
+    run(3);
+    const live = fake!.live();
+    ctl.update(inputs({ drift: 0 }));
+    expect(attr("data-aurora-drift")).toBe("0");
+    expect(attr("data-aurora-state")).toBe("running");
+    run(3);
+    expect(fake!.state.uniforms.uCurlK).toBe(0); // rest vorticity at 0%
+    ctl.update(inputs({ drift: 1 }));
+    run(2);
+    expect(fake!.state.uniforms.uCurlK).toBe(3);
+    expect(fake!.live()).toBe(live);
+  });
+  it("keeps running at 0% (a stir must still work)", () => {
+    ctl = createAuroraController(host, inputs({ drift: 0 }));
+    run(3);
+    const n = frames();
+    run(5);
+    expect(frames()).toBeGreaterThan(n);
   });
 });
 

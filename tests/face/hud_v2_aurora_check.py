@@ -199,6 +199,23 @@ def aurora_checks(browser, mock, base, check, until, guard, init_script):
     sel.select_option("flow")
     check("Flow runs again, live, with no reload", bool(until(lambda: _attr(page, "data-aurora-state") == "running", timeout=3)))
     check("the stir switches are disabled unless Motion is Fluid", page.locator('[data-testid="appearance-stir"]').is_disabled())
+    drift = page.locator('[data-testid="appearance-drift"]')
+    check("Natural drift is a 0-200% slider defaulting to 100%, shown next to it",
+          drift.count() == 1 and drift.input_value() == "100" and drift.get_attribute("max") == "200"
+          and drift.get_attribute("step") == "10" and not drift.is_disabled()
+          and page.locator('[data-testid="appearance-drift-value"]').inner_text() == "100%"
+          and _attr(page, "data-aurora-drift") == "1")
+    drift.fill("30")
+    until(lambda: _attr(page, "data-aurora-drift") == "0.3", timeout=3)
+    stored = json.loads(page.evaluate(f"localStorage.getItem('{APPEARANCE}')") or "{}")
+    check("changing it stores the strength and reaches the running aurora live, with no reload",
+          stored.get("drift") == 0.3 and _attr(page, "data-aurora-drift") == "0.3"
+          and _attr(page, "data-aurora-state") == "running"
+          and page.locator('[data-testid="appearance-drift-value"]').inner_text() == "30%", str(stored))
+    sel.select_option("still")
+    check("Still disables the slider and says why",
+          page.locator('[data-testid="appearance-drift"]').is_disabled()
+          and "no drift" in page.locator('[data-testid="appearance-drift-note"]').inner_text())
     sel.select_option("fluid")
     page.locator('[data-testid="appearance-stir"]').uncheck()
     page.locator('[data-testid="appearance-activity"]').uncheck()
