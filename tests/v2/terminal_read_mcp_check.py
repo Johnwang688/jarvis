@@ -38,7 +38,7 @@ CATALOG = dict(session_tools.SESSION_TOOLS)
 CHAT_READS = ('chat_list', 'chat_summary', 'chat_search', 'chat_read')
 # chat_send and chat_wait (chat-to-chat C4): pinned by tests/v2/chat_send_check.py;
 # owner_post (inbox B1, bound as chat_send) by tests/v2/owner_post_check.py.
-CHAT_SENDS = ('chat_send', 'chat_wait', 'owner_post')
+CHAT_SENDS = ('chat_send', 'chat_wait', 'owner_post', 'hud_open_subagents')
 
 
 def setUpModule():

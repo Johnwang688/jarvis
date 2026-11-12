@@ -201,6 +201,7 @@ So separation fixes today's transcript, Discord and task-report misattribution, 
   4. Else show the notice "No room for another pane: close one or use ⊞".
 
   It never takes a chat pane. "A thread is open in at most one pane" (`lib/chats.ts:13`) is unchanged.
+  **Superseded 2026-11-12 (owner):** an existing drawn pane without unsaved work comes first, chat panes included; see `docs/notes/hud-workspace.md`, "Sub-agents in existing panes".
 - **The pane.**
   - Header: name, kind, status, elapsed (ticking only while drawn, as `ToolGroupRow.tsx:10-18`), tokens, Stop, and "Show in chat", which focuses and scrolls to the row.
   - Body: `Markdown` text and `ToolGroupRow` calls, which show labels and outcomes, never results.

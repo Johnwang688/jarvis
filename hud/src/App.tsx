@@ -36,7 +36,7 @@ import { toolGroups } from "./state/toolGroups";
 import { ChatTab } from "./components/ChatTab";
 import { SubagentPane } from "./components/SubagentPane";
 import { subagents } from "./state/subagents";
-import { MAIN_STOP_CLAUDE_HELP, sameRef, type SubagentRef } from "./lib/subagents";
+import { MAIN_STOP_CLAUDE_HELP, sameRef, validSid, type SubagentRef } from "./lib/subagents";
 import { InputBar, MAX_FILES, toAttachment } from "./components/InputBar";
 import { TaskView } from "./components/TaskView";
 import { FileTab, type FileAsk } from "./components/FileTab";
@@ -61,7 +61,7 @@ import { BrowserTab } from "./components/BrowserTab";
 import { useBrowser } from "./state/browser";
 import { useBrowserFrames } from "./state/browserframes";
 import { BROWSER_TABS_MAX, browserTabId, VIEW_LABEL } from "./lib/workspace";
-import { autoOpenPlan, devUrl, sourceKey, DEV_OPEN_IDLE, type DevSource, type DevWindow } from "./lib/devopen";
+import { autoOpenPlan, devUrl, sourceKey, DEV_OPEN_IDLE, POINTER_QUIET_MS, type DevSource, type DevWindow } from "./lib/devopen";
 import { devservers } from "./state/devserverClient";
 import type { DevAttempt, PendingDev } from "./state/devservers";
 import { DevServerPrompts, type DevTarget } from "./components/DevServerPrompt";
@@ -173,6 +173,10 @@ const LIFECYCLE_KINDS = new Set([
 ]);
 /** How long a pane says why it refused to switch away from an unsaved edit. */
 const REFUSED_MS = 6000;
+/** Views that keep typed work inside themselves: a sub-agent never takes one (`openSubagent`). */
+const KEEPS_OWN_WORK: ReadonlySet<string> = new Set(["task", "diff", "inbox", "review"]);
+/** How long a chat's `hud_open_subagents` waits behind a card, Settings or a busy pointer. */
+const AGENT_OPEN_TTL_MS = 60_000;
 /** Below this height (zoomed px, under the title bar) the mic strip folds into
  * one button beside the orb: the sidebar needs those 44px for its rows more
  * than the strip needs them (review of PR #29: 1920x700 at 160% showed under
@@ -1935,6 +1939,23 @@ export default function App() {
           // make: a status and a count (lib/speech/notices.ts).
           if (tid) subagents.heard(tid, data);
           break;
+        case "subagent_open":
+          // A chat's own `hud_open_subagents` (subagent_panes.py): its
+          // thread id and its own children's sids, nothing else. Each is
+          // placed as a row's click would be, but never moving focus, never
+          // into the focused pane, and only once any card is gone.
+          if (tid && Array.isArray(data.sids)) {
+            for (const sid of data.sids.slice(0, 11)) {
+              const ref = { threadId: tid, sid };
+              if (validSid(sid) && !agentOpens.current.some((o) => sameRef(o.ref, ref))) {
+                agentOpens.current = [...agentOpens.current, { ref, at: Date.now() }].slice(-11);
+              }
+            }
+            // Placed after this window's next commit, never from here: the
+            // layout read here may not show the last placement yet.
+            setAgentOpenTick((t) => t + 1);
+          }
+          break;
         default:
           if (RELAY_KINDS.has(kind)) {
             // A message one chat sent another (chat-to-chat C5): folded by
@@ -2554,27 +2575,67 @@ export default function App() {
 
   /** The sub-agent pane opened (or reused) last: where a child goes when no split fits. */
   const lastSubPane = useRef<PaneNo | null>(null);
+  /** A chat's `hud_open_subagents` sids, waiting to be placed (`drainAgentOpens`). */
+  const agentOpens = useRef<{ ref: SubagentRef; at: number }[]>([]);
   /**
-   * A row's click (or Enter), a card's link, a nested row in a pane: the
-   * child's live transcript in a read-only pane (plan §D5 "Opening"). The
-   * pane already showing it gets focus; else a split beside the chat that
-   * spawned it (the focused pane when no pane shows that chat); else the
-   * last sub-agent pane shows it instead; else the window says there is no
-   * room. Never a chat pane taken over, never under a card.
+   * A row's click (or Enter), a card's link, a nested row in a pane, or the
+   * chat's own `hud_open_subagents` (`byAgent`): the child's live transcript
+   * in a read-only pane. The pane already showing it gets focus (a click
+   * only); else an existing drawn pane takes it (the owner's ask,
+   * 2026-11-12) — never the pane showing the chat that spawned it, never
+   * the focused one, never one already showing a sub-agent, never one with
+   * unsaved work (an Editor's unsaved edit, words or files in a chat's box),
+   * and what it held stays in its spec, so switching it back shows it again;
+   * else a split beside that chat (the focused pane when no pane shows it);
+   * else the last sub-agent pane shows it instead; else the window says
+   * there is no room. Never under a card. `byAgent` never moves focus: a
+   * chat asking cannot move where the owner is working.
    */
-  const openSubagent = useCallback((ref: SubagentRef) => {
-    if (blockedNow.current || crashedRef.current) return;
+  const openSubagent = useCallback((ref: SubagentRef, opts: { byAgent?: boolean } = {}): boolean => {
+    const byAgent = opts.byAgent === true;
+    if (crashedRef.current || blockedNow.current) return false;
     const lay = layoutNow.current;
+    const at = live.current;
     const drawnSub = (n: PaneNo | null): n is PaneNo => n !== null && lay.fit.panes.includes(n)
       && lay.ws.panes[n - 1].view === "subagent";
     const showing = lay.fit.panes.find((n) => drawnSub(n) && sameRef(lay.ws.panes[n - 1].subagent, ref));
     if (showing !== undefined) {
-      lay.focus(showing);
-      focusPaneElement(showing);
-      return;
+      if (!byAgent) {
+        lay.focus(showing);
+        focusPaneElement(showing);
+      }
+      return false;
     }
     const chatPane = lay.fit.panes.find((n) => lay.ws.panes[n - 1].view === "chat"
-      && shownThread(live.current.chats[n], pendingThread.current[n]) === ref.threadId);
+      && shownThread(at.chats[n], pendingThread.current[n]) === ref.threadId);
+    // An existing pane, in reading order (the owner's ask, 2026-11-12).
+    // Task, Diff, Inbox and Review views hold typed answers, notes, steers
+    // and picks inside themselves, out of this window's sight, and lose them
+    // when they unmount: never taken (review of the change, MED 1).
+    const unsaved = (n: PaneNo): boolean => {
+      const spec = lay.ws.panes[n - 1];
+      if (KEEPS_OWN_WORK.has(spec.view) || dirtyNow(n)) return true;
+      const c = at.chats[n];
+      return spec.view === "chat" && (!!c.input.trim() || c.files.length > 0 || c.restore.length > 0);
+    };
+    // The chat asking never takes where the owner is: the focused pane, the
+    // one holding the keyboard, or a Browser pane an agent is driving.
+    const inUse = (n: PaneNo): boolean => {
+      if (n === lay.ws.focused) return true;
+      if (!byAgent) return false;
+      const active = document.activeElement?.closest<HTMLElement>('[data-testid^="pane-"]');
+      if (paneOfTestId(active?.dataset.testid) === n) return true;
+      const b = lay.ws.panes[n - 1].browser;
+      return driving.active(b?.tabs.find((t) => t.id === b?.active)?.remoteTabId, Date.now());
+    };
+    const take = lay.fit.panes.find((n) => n !== chatPane && lay.ws.panes[n - 1].view !== "subagent"
+      && !inUse(n) && !unsaved(n));
+    if (take !== undefined) {
+      lay.showSubagent(take, ref, !byAgent);
+      lastSubPane.current = take;
+      if (!byAgent) focusPaneElement(take);
+      return true;
+    }
     const source = chatPane ?? (lay.fit.panes.includes(lay.ws.focused) ? lay.ws.focused : lay.fit.panes[0]);
     const dirty = dirtyIds();
     // Right of that pane when it fits, else below it (FS4).
@@ -2584,22 +2645,65 @@ export default function App() {
       const id = allocate(lay.ws, dirty, holdingIds());
       if (id !== null) {
         if (lay.ws.kept.includes(id)) releasePane(id, { keep: true });
-        lay.split(source, axis, id, subagentSpec(ref));
+        lay.split(source, axis, id, subagentSpec(ref), { focus: !byAgent });
         lastSubPane.current = id;
-        focusPaneElement(id);
-        return;
+        if (!byAgent) focusPaneElement(id);
+        return true;
       }
     }
-    const reuse = [lastSubPane.current, ...lay.fit.panes].find(drawnSub);
+    // Reusing a sub-agent pane is the owner's click alone: a chat asking for
+    // more than fit would replace its own children one after another, or
+    // another chat's the owner opened (review of the change, MED 2).
+    const reuse = byAgent ? undefined : [lastSubPane.current, ...lay.fit.panes].find(drawnSub);
     if (reuse !== undefined) {
-      lay.setSubagent(reuse, ref);
+      lay.showSubagent(reuse, ref, !byAgent);
       lastSubPane.current = reuse;
-      focusPaneElement(reuse);
-      return;
+      if (!byAgent) focusPaneElement(reuse);
+      return true;
     }
     dispatch({ type: "notice", text: "No room for another pane: close one or use ⊞" });
+    return false;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [releasePane, dispatch]);
+  // The bus handler is set up once; it reaches the current opener here.
+  const openSubagentNow = useRef(openSubagent);
+  openSubagentNow.current = openSubagent;
+  /**
+   * A chat's asks, one placement per layout: each choice reads the layout
+   * the last one drew (the effect below runs again once it has), so two
+   * children never land in one pane. Under a card they wait; one already
+   * shown, or with no room, places nothing and the next goes on.
+   */
+  const [agentOpenTick, setAgentOpenTick] = useState(0);
+  const agentOpenRetry = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const drainAgentOpens = () => {
+    const now = Date.now();
+    // An ask is for now: one held behind a long card or Settings is dropped.
+    agentOpens.current = agentOpens.current.filter((o) => now >= o.at && now - o.at < AGENT_OPEN_TTL_MS);
+    if (!agentOpens.current.length || blockedNow.current || crashedRef.current || settingsNow.current) return;
+    // Never a pane changing under a press or a click just made (as the
+    // dev-server auto-open waits): try again once the pointer is quiet.
+    const pointer = devPointer.current;
+    if (pointer.down || now - pointer.released < POINTER_QUIET_MS) {
+      if (agentOpenRetry.current === null) {
+        agentOpenRetry.current = setTimeout(() => {
+          agentOpenRetry.current = null;
+          setAgentOpenTick((t) => t + 1);
+        }, POINTER_QUIET_MS);
+      }
+      return;
+    }
+    while (agentOpens.current.length) {
+      const [first, ...rest] = agentOpens.current;
+      agentOpens.current = rest;
+      if (openSubagentNow.current(first.ref, { byAgent: true })) return;
+    }
+  };
+  useEffect(() => () => { if (agentOpenRetry.current !== null) clearTimeout(agentOpenRetry.current); }, []);
+  // After every commit that could matter: the layout the last placement drew,
+  // a card or Settings gone, a new ask heard, the pointer gone quiet.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { drainAgentOpens(); }, [view.ws, blocked, settingsOpen, agentOpenTick]);
   useEffect(() => {
     subagents.setOpener(openSubagent);
     return () => subagents.setOpener(null);

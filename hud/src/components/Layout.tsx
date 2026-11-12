@@ -29,7 +29,7 @@ import {
   setPanel, setPreset as setPresetOf, setKeepOrigin as setKeepOriginOf,
   setBrowserUrl as setBrowserUrlOf, submitBrowserUrl as submitBrowserUrlOf, setView as setViewOf, show as showOf,
   setFilePath as setFilePathOf, splitPane as splitPaneOf, splitVerdict as splitVerdictOf, autoSplit as autoSplitOf,
-  unpinProject as unpinProjectOf, setEditors as setEditorsOf, setSubagent as setSubagentOf,
+  unpinProject as unpinProjectOf, setEditors as setEditorsOf, setSubagent as setSubagentOf, showSubagent as showSubagentOf,
   type DrawnSet, type EdgeHandle, type PaneNo, type PaneSpec, type Preset, type SplitWhy, type View, type Workspace,
   type WorkspaceFit, type BrowserTabOptions,
   setBrowserRemote as setBrowserRemoteOf, setBrowserProfile as setBrowserProfileOf, setBrowserSee as setBrowserSeeOf, setBrowserDrive as setBrowserDriveOf,
@@ -68,6 +68,8 @@ export interface LayoutControl {
   setView: (pane: PaneNo, view: View) => void;
   /** Pane `pane` shows a native sub-agent's transcript (SV-3, lib/workspace `setSubagent`), focused. */
   setSubagent: (pane: PaneNo, ref: SubagentRef) => void;
+  /** An existing pane shows a sub-agent, keeping what it held (lib/workspace `showSubagent`); focused only with `focus`. */
+  showSubagent: (pane: PaneNo, ref: SubagentRef, focus: boolean) => void;
   focus: (pane: PaneNo) => void;
   /** A sidebar click: the pane already showing that kind of thing, else the focused pane. */
   show: (view: View) => void;
@@ -255,6 +257,12 @@ export function useLayout(blocked = false, onEditorKey?: (what: EditorShortcut) 
   }, []);
   const setView = useCallback((pane: PaneNo, view: View) => setWs((w) => setViewOf(w, pane, view)), []);
   const setSubagent = useCallback((pane: PaneNo, ref: SubagentRef) => setWs((w) => setSubagentOf(w, pane, ref)), []);
+  const showSubagent = useCallback((pane: PaneNo, ref: SubagentRef, focus: boolean) => {
+    if (blockedRef.current) return;
+    // A pane changes under a pointer that has not moved: no frame counts it as a gesture.
+    layoutMoved();
+    setWs((w) => showSubagentOf(w, pane, ref, focus));
+  }, []);
   const focus = useCallback((pane: PaneNo) => setWs((w) => focusPane(w, pane)), []);
   const show = useCallback((view: View) => setWs((w) => showOf(w, view, now.current.fit.panes)), []);
   const pin = useCallback((pane: PaneNo, projectId: string | null) => setWs((w) => pinPane(w, pane, projectId)), []);
@@ -469,7 +477,7 @@ export function useLayout(blocked = false, onEditorKey?: (what: EditorShortcut) 
     ownerTogglePanel,
     zoom, layout, fitted, available, availableH, ws, fit,
     setZoom, zoomBy, setWidth, resetWidth, open, fold, toggle,
-    setPreset, setView, setSubagent, focus, show, pin, setEditors, unpinProject, setBrowserUrl, submitBrowserUrl, setFilePath, setKeepOrigin,
+    setPreset, setView, setSubagent, showSubagent, focus, show, pin, setEditors, unpinProject, setBrowserUrl, submitBrowserUrl, setFilePath, setKeepOrigin,
     addBrowserTab, closeBrowserTab, activateBrowserTab, setTabKeepOrigin, setBrowserRemote, setBrowserProfile, setBrowserSee, setBrowserDrive,
     setTerminal, forgetTerminal, renameTerminal, moveEdge,
     equalize, togglePanel, setPanelHeight, resetPanelHeight, resetAll, split, close, splitVerdict, autoSplit, incarnation,

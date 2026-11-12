@@ -220,7 +220,12 @@ def subagents_checks(browser, mock, base, check, until, guard, init_script):
               order[-1] == "cl:toolu_gamma" and "Gamma helper" in page.locator('[data-sid="cl:toolu_gamma"]').inner_text(),
               str(order))
 
-        # 3. Opening a pane.
+        # 3. Opening a pane. Both chats hold unsent words, so neither is an
+        # existing pane a child may take (the owner's ask, 2026-11-12: an
+        # existing pane without unsaved work first): these checks are the
+        # split and reuse that follow. Section 9 pins taking an existing pane.
+        for n in (1, 2):
+            _box(page, n).fill(f"unsent words {n}")
         rows(1).first.locator("button").click()
         until(lambda: sub_panes().count() == 1)
         pane = sub_panes().first
@@ -724,7 +729,10 @@ def subagents_checks(browser, mock, base, check, until, guard, init_script):
               and "No task found" in (note.get_attribute("title") or "") and note.get_attribute("tabindex") == "0")
         del s["stop_answer"]["cl:toolu_eps"]
 
-        # In the pane's header.
+        # In the pane's header. Unsent words keep both chats from being taken
+        # (section 3's reason), so the pane is a split beside them.
+        for n in (1, 2):
+            _box(page, n).fill(f"unsent words {n}")
         page.locator('[data-sid="cl:toolu_delta"] .sa-open').click()
         head = page.locator('[data-testid="sa-pane"][data-sid="cl:toolu_delta"] [data-testid="sa-head"]')
         until(lambda: head.count() == 1 and head.locator('[data-testid="subagent-stop"]').count() == 1)
@@ -747,6 +755,98 @@ def subagents_checks(browser, mock, base, check, until, guard, init_script):
               and "sub-agents" not in codex_help, f"{claude_help!r} / {codex_help!r}")
         for tid in ("c1", "x1"):
             mock.emit("turn_finished", {"stop": "end"}, thread_id=tid)
+
+        # 9. Existing panes first (the owner's ask, 2026-11-12), and the chat's
+        # own hud_open_subagents (a `subagent_open` record: its thread, its sids).
+        THREE = json.dumps({"preset": "cols3", "focused": 1,
+                            "panes": [{"view": "chat"}, {"view": "chat"}, {"view": "file"}, {"view": "task"}]})
+        ws = lambda: page.evaluate("window.__hud.workspace().ws")
+        view_of = lambda n: ws()["panes"][n - 1]["view"]
+        shows = lambda n: (ws()["panes"][n - 1].get("subagent") or {}).get("sid")
+        _fresh(page, mock, until, THREE)
+        open_thread(1, "c1")
+        open_thread(2, "x1")
+        until(lambda: rows(1).count() >= 2)
+        panes_before = len(ws()["order"])
+        rows(1).first.locator("button").click()
+        until(lambda: view_of(2) == "subagent")
+        check("a click puts the child in an existing pane (the other chat), not a new split",
+              shows(2) == "cl:toolu_alpha" and len(ws()["order"]) == panes_before and view_of(1) == "chat"
+              and view_of(3) == "file" and ws()["focused"] == 2)
+        check("that pane keeps its chat underneath", _chat(page, 2)["threadId"] == "x1")
+        strip_chat = page.locator(_pane(2, '[data-testid="tab-chat"]'))
+        if strip_chat.count():
+            strip_chat.click()
+        else:
+            page.locator(_pane(2, "select")).first.select_option("chat")
+        until(lambda: view_of(2) == "chat")
+        until(lambda: log(2).count() == 1 and log(2).inner_text() != "")
+        check("switching it back shows that chat again, as it was", _chat(page, 2)["threadId"] == "x1"
+              and "codex fan out" in log(2).inner_text())
+        # A pane with unsent words is unsaved work: never taken.
+        _box(page, 2).fill("words the owner is still typing")
+        rows(1).nth(1).locator("button").click()
+        until(lambda: view_of(3) == "subagent")
+        check("a chat with unsent words is skipped; the next existing pane takes it",
+              view_of(2) == "chat" and shows(3) == "cl:toolu_beta" and len(ws()["order"]) == panes_before
+              and _box(page, 2).input_value() == "words the owner is still typing")
+
+        # The chat asks: placed without moving focus, never the focused pane.
+        _fresh(page, mock, until, THREE)
+        open_thread(2, "x1")
+        open_thread(1, "c1")
+        _box(page, 1).click()
+        until(lambda: ws()["focused"] == 1)
+        mock.emit("subagent_open", {"sids": ["cl:toolu_alpha", "cl:toolu_beta"]}, thread_id="c1",
+                  project_id="p1", at=at(60))
+        until(lambda: view_of(2) == "subagent" and view_of(3) == "subagent")
+        check("hud_open_subagents fills the existing panes, one child each",
+              {shows(2), shows(3)} == {"cl:toolu_alpha", "cl:toolu_beta"} and len(ws()["order"]) == panes_before)
+        check("and never moves the owner's focus or keyboard",
+              ws()["focused"] == 1 and page.evaluate(
+                  "!!document.activeElement.closest('[data-testid=\"pane-1\"]')"))
+        mock.emit("subagent_open", {"sids": ["cl:toolu_gamma9"]}, thread_id="c1", project_id="p1", at=at(60))
+        time.sleep(0.6)
+        check("asked for more than the existing panes hold, a chat never replaces a child already shown",
+              {shows(2), shows(3)} == {"cl:toolu_alpha", "cl:toolu_beta"} and ws()["focused"] == 1)
+        panes_now = len(ws()["order"])
+        mock.emit("subagent_open", {"sids": ["cl:toolu_alpha"]}, thread_id="c1", project_id="p1", at=at(61))
+        mock.emit("subagent_open", {"sids": ["not a sid", 5, None]}, thread_id="c1", project_id="p1", at=at(62))
+        time.sleep(0.4)
+        check("one already shown, or ids that are not sids, change nothing",
+              ws()["focused"] == 1 and len(ws()["order"]) == panes_now
+              and {shows(2), shows(3)} == {"cl:toolu_alpha", "cl:toolu_beta"})
+
+        # Task, Diff, Inbox and Review views keep typed work inside themselves: never taken.
+        TASKY = json.dumps({"preset": "cols3", "focused": 1,
+                            "panes": [{"view": "chat"}, {"view": "task"}, {"view": "inbox"}, {"view": "file"}]})
+        _fresh(page, mock, until, TASKY)
+        open_thread(1, "c1")
+        _box(page, 1).click()
+        before = len(ws()["order"])
+        mock.emit("subagent_open", {"sids": ["cl:toolu_alpha"]}, thread_id="c1", project_id="p1", at=at(62))
+        until(lambda: any(p.get("subagent") for p in ws()["panes"]))
+        check("a Task or Inbox pane is never taken; the child gets a split instead",
+              view_of(2) == "task" and view_of(3) == "inbox" and len(ws()["order"]) == before + 1)
+
+        # Under a card it waits, and is placed once the card is gone.
+        _fresh(page, mock, until, THREE)
+        open_thread(2, "x1")
+        open_thread(1, "c1")
+        _box(page, 1).click()
+        mock.emit("approval_requested", {
+            "req_id": "card9", "code": "SV39", "tool": "commandExecution", "command": "touch /y", "args": {},
+            "reason": "asks", "layer": "widening", "origin": "", "thread_id": "x1", "timeout_s": 120,
+            "headline": "asks", "allowlistable": False})
+        until(lambda: card.count() == 1)
+        mock.emit("subagent_open", {"sids": ["cl:toolu_alpha"]}, thread_id="c1", project_id="p1", at=at(63))
+        time.sleep(0.4)
+        check("under a card nothing moves", view_of(2) == "chat" and view_of(3) == "file")
+        page.locator('[data-testid="approval-deny"]').click()
+        until(lambda: card.count() == 0)
+        until(lambda: view_of(2) == "subagent")
+        check("once the card is gone it is placed", shows(2) == "cl:toolu_alpha")
+
         check("the HUD's reads were never refused by the owner gate", s["refused"] == 0)
         check("no page errors", not errors, "; ".join(errors[:3]))
     finally:

@@ -1442,6 +1442,40 @@ the same (owner, 2026-10-15): the card's `command`, `args`, `reason` and
 command as typed. Rule and paths: `safety-permissions.md`, "Credentials typed
 into a command".
 
+## Sub-agents in existing panes, and `hud_open_subagents` (owner, 2026-11-12)
+
+The owner asked for sub-agents to open in the panels already on screen,
+and for a chat to open them when told to. This supersedes SV-3's "never a
+chat pane taken over" (plan §D5).
+
+- **Placement** (`App.tsx` `openSubagent`). The pane already showing the
+  child gets focus. Otherwise the first drawn pane, in reading order, that
+  is none of these takes it: the pane showing the spawning chat, the
+  focused pane, a pane already showing a sub-agent, or a pane with unsaved
+  work (`buffers.paneLoses`, or words, files or handed-back words in a
+  chat's box). `lib/workspace.ts` `showSubagent` keeps the pane's spec
+  (project, terminal, Browser tabs, files), as the owner's own view switch
+  does, so switching the pane back shows its chat, terminal or page again.
+  After that come SV-3's split beside the chat, then reuse of the last
+  sub-agent pane, then "No room".
+- **`hud_open_subagents(which=None)`** (`jarvis/v2/tools/hud_subagents.py`,
+  `jarvis/v2/subagent_panes.py`). Claude and Codex owner chats get it with
+  the same binding as `owner_post`: foreground-only, desk-only, not
+  read-only, checked by the tool and again under the daemon lock against
+  the live session and exact turn. The fast path never holds it. It reads
+  only the caller's own thread's sub-agent records: `which` names them by
+  sid or name, and leaving it out means every one still running, else this
+  turn's. It takes top-level children only, at most 11. It publishes one
+  bus record, `subagent_open` `{thread_id, data: {sids}}`, ids only.
+- **The HUD placing them.** Placement follows the same rule with
+  `byAgent`: it never moves focus or the keyboard and never takes the
+  focused pane. It waits while a card is up, then places once the card is
+  gone. Placement is one per layout commit (`drainAgentOpens`), so two
+  children never land in one pane.
+- Tests: `tests/v2/hud_subagents_check.py`; `tests/face/hud_v2_subagents_check.py`
+  section 9. Sections 3 and SV-4 give both chats unsent words so they still
+  test the split and reuse path.
+
 ## Native sub-agents: the owner's Stop on one child (SV-4, 2026-10-15)
 
 API: `docs/hud-api.md` "`POST /threads/{id}/subagents/{sid}/stop`"; daemon
