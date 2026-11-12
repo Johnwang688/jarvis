@@ -4,9 +4,9 @@
 // that is too bright is darkened and says so. A per-window convenience kept in this window
 // (localStorage). The aurora is decoration only: it never moves anything or takes focus.
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
-  DEFAULT_COLOURS, MOTIONS, checkAccent, checkBase, checkWash, loadAppearance, resolveColours, saveAppearance,
+  APPEARANCE_EVENT, DEFAULT_COLOURS, MOTIONS, checkAccent, checkBase, checkWash, loadAppearance, resolveColours, saveAppearance,
   type Appearance, type Motion,
 } from "../lib/appearance";
 import { deriveAccent } from "../lib/appearance";
@@ -26,6 +26,18 @@ type Note = { kind: "refused" | "clamped"; text: string };
 export function AuroraSetting() {
   const [a, setA] = useState<Appearance>(() => loadAppearance());
   const [notes, setNotes] = useState<Partial<Record<Slot, Note>>>({});
+  useEffect(() => {
+    const refresh = () => {
+      const next = loadAppearance();
+      setA((cur) => JSON.stringify(cur) === JSON.stringify(next) ? cur : next);
+    };
+    window.addEventListener(APPEARANCE_EVENT, refresh);
+    window.addEventListener("storage", refresh);
+    return () => {
+      window.removeEventListener(APPEARANCE_EVENT, refresh);
+      window.removeEventListener("storage", refresh);
+    };
+  }, []);
   const change = (patch: Partial<Appearance>) => setA(saveAppearance(patch));
   const colours = resolveColours(a);
   const family = deriveAccent(colours.accent).props;

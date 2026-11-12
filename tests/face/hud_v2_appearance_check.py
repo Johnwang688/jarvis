@@ -63,6 +63,27 @@ def appearance_checks(browser, mock, base, check, until, guard, init_script):
     guard(ctx)
     ctx.add_init_script(init_script)
     ctx.add_init_script(OPEN_STUB)
+    # Observe the tokens at React's first insertion, rather than inferring early apply from a later read.
+    ctx.add_init_script(r"""(() => {
+      const stroke = Object.getOwnPropertyDescriptor(CanvasRenderingContext2D.prototype, 'strokeStyle');
+      Object.defineProperty(CanvasRenderingContext2D.prototype, 'strokeStyle', {...stroke,
+        set(value) {
+          if (this.canvas.dataset.testid === 'orb') {
+            const pigment = /^rgba\((\d+,\d+,\d+),/.exec(value);
+            if (pigment) (window.__orbPigments ||= new Set()).add(pigment[1]);
+          }
+          stroke.set.call(this, value);
+        }
+      });
+      const append = Node.prototype.appendChild;
+      Node.prototype.appendChild = function(child) {
+        if (this.id === 'root' && !window.__appearanceAtMount) {
+          const s = getComputedStyle(document.documentElement);
+          window.__appearanceAtMount = {accent: s.getPropertyValue('--accent').trim(), wash2: s.getPropertyValue('--wash-2').trim()};
+        }
+        return append.call(this, child);
+      };
+    })();""")
     fake = FakePty(ctx, mock)
     page = ctx.new_page()
     until = pumping(page, until, fake)
@@ -92,6 +113,7 @@ def appearance_checks(browser, mock, base, check, until, guard, init_script):
 
         # ---- live re-theme (the workspace is on screen, so the terminal and Monaco are mounted) -----------------
         page.evaluate("""([k, v]) => { localStorage.setItem(k, JSON.stringify({motion: 'fluid', stir: true, activity: true, accent: v}));
+          window.__orbPigments = new Set();
           window.dispatchEvent(new Event('hud-appearance-change')); }""", [APPEARANCE, LAVENDER])
         until(lambda: _token(page, "--accent") == LAVENDER, timeout=3)
         cyan1 = page.evaluate("getComputedStyle(document.querySelector('.xterm-fg-6')).color")
@@ -99,10 +121,22 @@ def appearance_checks(browser, mock, base, check, until, guard, init_script):
         until(lambda: page.evaluate(f"getComputedStyle({cursor}).backgroundColor") != cur0, timeout=3)
         cur1 = page.evaluate(f"getComputedStyle({cursor}).backgroundColor")
         check("and the open Monaco editor re-themed live (its cursor colour changed)", cur1 != cur0, f"{cur0} -> {cur1}")
+        lavender_pigments = ("192,174,245", "211,200,253", "165,194,252")
+        until(lambda: any(p in page.evaluate("[...window.__orbPigments]") for p in lavender_pigments), timeout=3)
+        pigments = page.evaluate("[...window.__orbPigments]")
+        check("the running orb re-themes live without a React update", any(p in pigments for p in lavender_pigments), str(pigments))
         page.evaluate("(k) => { localStorage.removeItem(k); window.dispatchEvent(new Event('hud-appearance-change')); }", APPEARANCE)
         until(lambda: _token(page, "--accent") == DEFAULT_ACCENT, timeout=3)
         cyan2 = page.evaluate("getComputedStyle(document.querySelector('.xterm-fg-6')).color")
         check("and back to the default again live", cyan2 == _rgb(DEFAULT_ACCENT), cyan2)
+
+        # Another window's storage event takes the same live path, including Monaco and xterm.
+        page.evaluate("""([k, v]) => { localStorage.setItem(k, JSON.stringify({accent: v}));
+          window.dispatchEvent(new StorageEvent('storage', {key: k})); }""", [APPEARANCE, LAVENDER])
+        until(lambda: page.evaluate("getComputedStyle(document.querySelector('.xterm-fg-6')).color") == _rgb(LAVENDER), timeout=3)
+        until(lambda: page.evaluate(f"getComputedStyle({cursor}).backgroundColor") == cur1, timeout=3)
+        check("a storage event also re-themes xterm and Monaco live", _token(page, "--accent") == LAVENDER)
+        page.evaluate("(k) => { localStorage.removeItem(k); window.dispatchEvent(new Event('hud-appearance-change')); }", APPEARANCE)
 
         page.locator('[data-testid="titlebar-settings"]').click()
         page.wait_for_selector('[data-testid="appearance-accent"]')
@@ -110,6 +144,18 @@ def appearance_checks(browser, mock, base, check, until, guard, init_script):
               all(page.locator(f'[data-testid="appearance-{s}"]').count() == 1
                   for s in ("accent", "wash-1", "wash-2", "wash-3", "base", "reset", "preview"))
               and page.locator('[data-testid="appearance-accent-hex"]').inner_text() == DEFAULT_ACCENT)
+
+        page.evaluate("""(k) => { localStorage.setItem(k, JSON.stringify({washes: ['#838283', '#3468c4', '#6450c4']}));
+          window.dispatchEvent(new StorageEvent('storage', {key: k})); }""", APPEARANCE)
+        until(lambda: page.locator('[data-testid="appearance-wash-1"]').input_value() == "#838283", timeout=3)
+        _pick(page, "appearance-accent", "#ababab")
+        until(lambda: page.locator('[data-testid="appearance-accent-note"]').count() > 0, timeout=3)
+        check("open Settings checks the current washes after a storage event",
+              page.locator('[data-testid="appearance-wash-1"]').input_value() == "#838283"
+              and "Too dark" in page.locator('[data-testid="appearance-accent-note"]').inner_text()
+              and _token(page, "--accent") == DEFAULT_ACCENT)
+        page.evaluate("(k) => { localStorage.removeItem(k); window.dispatchEvent(new Event('hud-appearance-change')); }", APPEARANCE)
+        until(lambda: page.locator('[data-testid="appearance-wash-1"]').input_value() == "#2a8fa0", timeout=3)
 
         # ---- an accent ---------------------------------------------------------------------------------
         _pick(page, "appearance-accent", LAVENDER)
@@ -128,7 +174,7 @@ def appearance_checks(browser, mock, base, check, until, guard, init_script):
               _stored(page).get("accent") == LAVENDER and page.locator('[data-testid="appearance-accent-hex"]').inner_text() == LAVENDER)
         # ---- refused picks -----------------------------------------------------------------------------
         before = (_inline(page), _stored(page))
-        for bad in (AMBER, "#f87171", "#ff8800"):
+        for bad in (AMBER, "#f87171", "#ff8800", "#b0ae7e", "#b1ae76"):
             _pick(page, "appearance-accent", bad)
             until(lambda: page.locator('[data-testid="appearance-accent-note"]').count() > 0, timeout=3)
             note = page.locator('[data-testid="appearance-accent-note"]').inner_text()
@@ -146,6 +192,14 @@ def appearance_checks(browser, mock, base, check, until, guard, init_script):
         check("a good pick after a refusal clears the reason", page.locator('[data-testid="appearance-accent-note"]').count() == 0)
 
         # ---- washes and the base -----------------------------------------------------------------------
+        _pick(page, "appearance-accent", "#ababab")
+        until(lambda: _token(page, "--accent") == "#ababab", timeout=3)
+        _pick(page, "appearance-wash-2", "#ffffff")
+        until(lambda: page.locator('[data-testid="appearance-wash-2-note"]').count() > 0, timeout=3)
+        check("a wash change rechecks the accent and refuses a contrast regression",
+              "hard to read" in page.locator('[data-testid="appearance-wash-2-note"]').inner_text()
+              and _token(page, "--wash-2") == "#3468c4" and _stored(page).get("washes") is None)
+        _pick(page, "appearance-accent", "#a0c4ff")
         _pick(page, "appearance-wash-2", "#ffffff")
         until(lambda: _token(page, "--wash-2") not in ("#3468c4", ""), timeout=3)
         w2 = _token(page, "--wash-2")
@@ -158,9 +212,16 @@ def appearance_checks(browser, mock, base, check, until, guard, init_script):
               page.locator('[data-testid="appearance-wash-2-hex"]').inner_text() == w2
               and page.locator('[data-testid="appearance-wash-2"]').input_value() == w2
               and _stored(page)["washes"][1] == w2)
+        _pick(page, "appearance-accent", "#ababab")
+        until(lambda: page.locator('[data-testid="appearance-accent-note"]').count() > 0, timeout=3)
+        check("an accent pick checks the current clamped washes", "Too dark" in page.locator('[data-testid="appearance-accent-note"]').inner_text()
+              and _token(page, "--accent") == "#a0c4ff")
         _pick(page, "appearance-wash-1", "#ff8800")
         until(lambda: "amber or red" in (page.locator('[data-testid="appearance-wash-1-note"]').inner_text() or ""), timeout=3)
         check("an amber wash is refused and the wash stays", _token(page, "--wash-1") != "#ff8800" and _stored(page)["washes"][0] == "#2a8fa0")
+        _pick(page, "appearance-wash-1", "#dbb1b9")
+        until(lambda: "amber or red" in page.locator('[data-testid="appearance-wash-1-note"]').inner_text(), timeout=3)
+        check("a near-grey wash whose clamped output enters the band is refused", _token(page, "--wash-1") == "#2a8fa0")
         _pick(page, "appearance-base", "#808080")
         until(lambda: _token(page, "--base") not in ("#0a1116", ""), timeout=3)
         check("a bright base is clamped dark", _token(page, "--base") != "#808080"
@@ -174,7 +235,19 @@ def appearance_checks(browser, mock, base, check, until, guard, init_script):
         page.wait_for_selector('[data-testid="sidebar"]', state="attached")
         check("a saved record applies on reload", _token(page, "--accent") == "#a0c4ff" and _token(page, "--wash-2") == w2
               and _stored(page) == saved)
+        check("the saved colours are already applied at React's first mount",
+              page.evaluate("window.__appearanceAtMount") == {"accent": "#a0c4ff", "wash2": w2})
         mock.await_reconnect(before)
+
+        before_inline = _inline(page)
+        page.evaluate("""() => window.dispatchEvent(new CustomEvent('hud-appearance-change', {
+          detail: {accent: 'red;background:url(x)', base: 'url(//evil/x)', washes: ['var(--x)', 'red', '#fff']}
+        }))""")
+        check("hostile event detail is ignored", _inline(page) == before_inline)
+        page.evaluate("""(k) => { localStorage.setItem(k, JSON.stringify({accent: 'red;background:url(x)',
+          base: 'url(//evil/x)', washes: ['var(--x)', 'red', '#fff']}));
+          window.dispatchEvent(new Event('hud-appearance-change')); }""", APPEARANCE)
+        check("a hostile stored record is safe on the live event path too", _inline(page) == "" and _token(page, "--accent") == DEFAULT_ACCENT)
 
         # ---- a hostile stored record ---------------------------------------------------------------------
         page.evaluate("""(k) => localStorage.setItem(k, JSON.stringify({accent: 'url(//evil/x)', base: 'var(--accent)',

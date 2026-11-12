@@ -369,8 +369,10 @@ export class TermSession {
         // A new accent re-themes this terminal in place (AG-3): the tokens are on :root already.
         const retheme = () => { if (this.term === term) term.options.theme = cssTermTheme(); };
         window.addEventListener(APPEARANCE_EVENT, retheme);
+        window.addEventListener("storage", retheme);
         this.subs.push(
           { dispose: () => window.removeEventListener(APPEARANCE_EVENT, retheme) },
+          { dispose: () => window.removeEventListener("storage", retheme) },
           term.onData((d) => this.input(encodeInput(d))),
           term.onBinary((d) => {
             const b = new Uint8Array(d.length);

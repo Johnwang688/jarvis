@@ -136,10 +136,12 @@ export function applyGraphite() {
   // every open editor re-themes in place. The theme is window-wide, so one listener per window.
   if (!retheming) {
     retheming = true;
-    window.addEventListener(APPEARANCE_EVENT, () => {
+    const retheme = () => {
       monaco.editor.defineTheme("jarvis", themeOrFallback(() => cssPalette()));
       monaco.editor.setTheme("jarvis");
-    });
+    };
+    window.addEventListener(APPEARANCE_EVENT, retheme);
+    window.addEventListener("storage", retheme);
   }
   // Monaco measures the font as an editor opens (a diff view included): once the bundled faces are in, measure again.
   void fontsReady().then(() => monaco.editor.remeasureFonts());

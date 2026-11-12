@@ -126,7 +126,9 @@ export function accentContrast(accent: string, washes: readonly string[] = DEFAU
 export function checkAccent(input: unknown, washes: readonly string[] = DEFAULT_WASHES): Check {
   const hex = normHex(input);
   if (!hex) return refuse(BAD_FORMAT);
-  if (impersonatesMeaning(hex, ACCENT_CHROMA_FLOOR)) return refuse(WARM_REASON);
+  // Check the actual gamut-mapped, rounded relatives as well as the pick. The alpha tokens, ring,
+  // badge and xterm cursor/cyan reuse `accent`; the orb also uses `hi` and `composing`.
+  if (Object.values(accentColours(hex)).some((v) => impersonatesMeaning(v, ACCENT_CHROMA_FLOOR))) return refuse(WARM_REASON);
   const c = accentContrast(hex, washes);
   if (c < ACCENT_MIN_CONTRAST) {
     return refuse(`Too dark to read on the glass (${rounded2(c)}:1; it needs ${ACCENT_MIN_CONTRAST}:1). Pick a lighter colour.`);
@@ -154,6 +156,8 @@ function checkDark(input: unknown, cap: number, label: string): Check {
   if (!hex) return refuse(BAD_FORMAT);
   if (impersonatesMeaning(hex, WASH_CHROMA_FLOOR)) return refuse(WARM_REASON);
   const value = clampLuminance(hex, cap);
+  // Gamut mapping and 8-bit rounding can cross the hue band or the near-grey chroma floor.
+  if (impersonatesMeaning(value, WASH_CHROMA_FLOOR)) return refuse(WARM_REASON);
   return value === hex
     ? { ok: true, value, clamped: false }
     : { ok: true, value, clamped: true, note: `Darkened to ${value} so text stays readable over the ${label}.` };
@@ -202,6 +206,10 @@ function sibling(accent: string, r: { dL: number; kC: number; dh: number }): str
   const c = hexLch(accent);
   return lchHex({ L: Math.min(0.98, c.L + r.dL), C: c.C * r.kC, h: (c.h + r.dh + 360) % 360 });
 }
+/** All pigments used by the derived tokens, including the orb's hue-shifted composing state. */
+function accentColours(accent: string) {
+  return { accent, hi: sibling(accent, REL.hi), fn: sibling(accent, REL.fn), composing: sibling(accent, REL.compose) };
+}
 const rgba = (hex: string, a: number) => {
   const [r, g, b] = hexRgb(hex);
   return `rgba(${r}, ${g}, ${b}, ${a})`;
@@ -217,7 +225,7 @@ export interface AccentFamily {
 
 /** Everything the accent colours: one pick, the rest derived. */
 export function deriveAccent(accent: string): AccentFamily {
-  const hi = sibling(accent, REL.hi);
+  const { hi, fn, composing } = accentColours(accent);
   return {
     props: {
       "--accent": accent,
@@ -229,9 +237,9 @@ export function deriveAccent(accent: string): AccentFamily {
       "--accent-badge": rgba(accent, 0.4),
       "--focus-ring": `0 0 0 2px ${accent}`,
       "--badge-fast": accent,
-      "--syn-fn": sibling(accent, REL.fn),
+      "--syn-fn": fn,
     },
-    orb: { base: triple(accent), hi: triple(hi), composing: triple(sibling(accent, REL.compose)) },
+    orb: { base: triple(accent), hi: triple(hi), composing: triple(composing) },
   };
 }
 
