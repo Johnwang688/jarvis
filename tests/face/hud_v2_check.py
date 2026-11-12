@@ -2446,7 +2446,9 @@ def thread_model_checks(page, mock):
           chip_model(page) == "" and model_labels(page)[0] == "default · gpt-5.6-luna",
           model_labels(page)[0])
     check("the chip button reads model and effort",
-          page.locator(CHIP_BTN).inner_text().strip().startswith("default · gpt-5.6-luna · high"),
+          # The label is two flex parts (a shrinkable model name, a fixed effort word), so
+          # inner_text() breaks the line between them; it still draws as one line.
+          " ".join(page.locator(CHIP_BTN).inner_text().split()).startswith("default · gpt-5.6-luna · high"),
           page.locator(CHIP_BTN).inner_text())
     open_pop(page)
     check("the popover has a Model section and an Effort slider",

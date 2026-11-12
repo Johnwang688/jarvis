@@ -76,7 +76,7 @@ export function ModelChip(props: {
   // Every label this button can take as the effort moves; the ghosts below size it to the longest.
   const base = modelLabel(props.models, c);
   const widest = [...new Set(effortOptions(props.models, c).map((o) => o.value).filter(Boolean))]
-    .map((e) => `${base} · ${e}`);
+    .map((e) => ({ key: e, eff: e }));
   const [open, setOpen] = useState(false);
   const btn = useRef<HTMLButtonElement>(null);
   // A popover must not outlive the control it belongs to: a card arriving
@@ -131,11 +131,17 @@ export function ModelChip(props: {
             onClick={() => setOpen((o) => !o)}
           >
             <span className="mb-label">
-              <span className="mb-now">{summary}</span>
+              <span className="mb-now">
+                <span className="mb-name">{base}</span>
+                {eff.effort ? <span className="mb-eff">{` · ${eff.effort}`}</span> : null}
+              </span>
               {/* The button keeps the width of its widest effort word, so moving the slider never
                   re-wraps the row the button sits in (a wrap moved the button, which closes this popover). */}
               {widest.map((w) => (
-                <span key={w} className="mb-ghost" aria-hidden="true">{w}</span>
+                <span key={w.key} className="mb-ghost" aria-hidden="true">
+                  <span className="mb-name">{base}</span>
+                  <span className="mb-eff">{` · ${w.eff}`}</span>
+                </span>
               ))}
             </span>{" "}
             <span aria-hidden="true">▾</span>
