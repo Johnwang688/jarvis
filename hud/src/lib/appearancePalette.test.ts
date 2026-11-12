@@ -360,9 +360,19 @@ describe("whole-palette guard: no miss against an independent brute force", () =
   }, 240000);
 
   // The long form (PALETTE_PROOF_HEAVY=1): a 0.01 grid of the whole cube plus everything above, more palettes.
-  it.runIf(!!process.env.PALETTE_PROOF_HEAVY)("PROOF (heavy): a 0.01 grid over 200 more palettes finds no miss", () => {
+  it.runIf(!!process.env.PALETTE_PROOF_HEAVY)("PROOF (heavy): a 0.01 grid over 200 more palettes finds no miss", async () => {
     const palettes = [...randomPalettes(60, 555), ...adversarialPalettes(140, 909)];
-    const c = compare(palettes, 0.01);
+    // One palette at a time, yielding between them, so vitest's worker can still talk to its runner.
+    const parts = [];
+    for (const p of palettes) {
+      parts.push(compare([p], 0.01));
+      await new Promise((r) => setTimeout(r, 0));
+    }
+    const c = {
+      refUnsafe: parts.reduce((n, x) => n + x.refUnsafe, 0), refSafe: parts.reduce((n, x) => n + x.refSafe, 0),
+      extra: parts.reduce((n, x) => n + x.extra, 0), budget: parts.reduce((n, x) => n + x.budget, 0),
+      maxMs: Math.max(...parts.map((x) => x.maxMs)), misses: parts.flatMap((x) => x.misses),
+    };
     console.log(`palette proof (heavy, 0.01 grid): ${palettes.length} palettes, reference unsafe ${c.refUnsafe}, safe ${c.refSafe}; ` +
       `misses ${c.misses.length}; extra refusals ${c.extra} (${c.budget} on the budget); slowest check ${c.maxMs.toFixed(1)} ms`);
     expect(c.misses).toEqual([]);
