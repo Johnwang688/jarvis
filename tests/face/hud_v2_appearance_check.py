@@ -222,6 +222,17 @@ def appearance_checks(browser, mock, base, check, until, guard, init_script):
         _pick(page, "appearance-wash-1", "#dbb1b9")
         until(lambda: "amber or red" in page.locator('[data-testid="appearance-wash-1-note"]').inner_text(), timeout=3)
         check("a near-grey wash whose clamped output enters the band is refused", _token(page, "--wash-1") == "#2a8fa0")
+        _pick(page, "appearance-wash-1", "#6a8a60")
+        until(lambda: _token(page, "--wash-1") not in ("#2a8fa0", ""), timeout=3)
+        w1 = _token(page, "--wash-1")
+        before = (_token(page, "--wash-1"), _token(page, "--wash-2"), _token(page, "--wash-3"), _token(page, "--base"), _stored(page))
+        _pick(page, "appearance-wash-2", "#e70075")
+        until(lambda: "mix into amber or red" in (page.locator('[data-testid="appearance-wash-2-note"]').inner_text() or ""), timeout=3)
+        after = (_token(page, "--wash-1"), _token(page, "--wash-2"), _token(page, "--wash-3"), _token(page, "--base"), _stored(page))
+        check("a wash that passes alone but blends into amber/red with the others is refused with the reason, tokens unchanged",
+              before == after and w1 != "#2a8fa0", f"{before} {after}")
+        _pick(page, "appearance-wash-1", "#2a8fa0")
+        until(lambda: _token(page, "--wash-1") == "#2a8fa0", timeout=3)
         _pick(page, "appearance-base", "#808080")
         until(lambda: _token(page, "--base") not in ("#0a1116", ""), timeout=3)
         check("a bright base is clamped dark", _token(page, "--base") != "#808080"

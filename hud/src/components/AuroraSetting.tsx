@@ -6,7 +6,7 @@
 
 import { useEffect, useState } from "react";
 import {
-  APPEARANCE_EVENT, DEFAULT_COLOURS, MOTIONS, checkAccent, checkBase, checkWash, loadAppearance, resolveColours, saveAppearance,
+  APPEARANCE_EVENT, DEFAULT_COLOURS, MOTIONS, checkAccent, checkBase, checkPalette, checkWash, loadAppearance, resolveColours, saveAppearance,
   type Appearance, type Motion,
 } from "../lib/appearance";
 import { deriveAccent } from "../lib/appearance";
@@ -57,6 +57,8 @@ export function AuroraSetting() {
     if (slot === "base") {
       const r = checkBase(value);
       if (!r.ok) return note(slot, { kind: "refused", text: r.reason });
+      const mixed = checkPalette(colours.washes, r.value);
+      if (mixed) return note(slot, { kind: "refused", text: mixed.reason });
       note(slot, r.clamped ? { kind: "clamped", text: r.note ?? "" } : null);
       return change({ base: r.value });
     }
@@ -65,6 +67,8 @@ export function AuroraSetting() {
     if (!r.ok) return note(slot, { kind: "refused", text: r.reason });
     const washes = [...colours.washes];
     washes[i] = r.value;
+    const mixed = checkPalette(washes, colours.base);
+    if (mixed) return note(slot, { kind: "refused", text: mixed.reason });
     // A brighter aurora must not make the accent unreadable on it.
     const still = checkAccent(colours.accent, washes);
     if (!still.ok) return note(slot, { kind: "refused", text: `That would make the accent hard to read: ${still.reason}` });

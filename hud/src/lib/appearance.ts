@@ -15,7 +15,7 @@
 // Fields this HUD does not know ride along untouched through a save.
 
 import { readKey, writeKey } from "./storage";
-import { deltaE, hexLch, hexRgb, hueDiff, lchHex, luminance, luminanceRgb, type Lch } from "./oklch";
+import { deltaE, hexLch, hexRgb, hueDiff, lchHex, linearToLab, luminance, luminanceRgb, rgbToLab, type Lch } from "./oklch";
 
 export const APPEARANCE_KEY = "jarvis.hud.appearance";
 /** Fired on `window` after a change is saved, so the aurora (and AG-3's colours) re-read at once. */
@@ -168,6 +168,79 @@ export const checkWash = (input: unknown): Check => checkDark(input, WASH_MAX_LU
 /** The base: the same guard, capped at 1.5x the default base's luminance. Darker is fine. */
 export const checkBase = (input: unknown): Check => checkDark(input, BASE_MAX_LUMINANCE, "background");
 
+// ---- the whole palette: what the background can actually show --------------------------------------------
+//
+// Each wash passes the guard alone, but the aurora shows BLENDS of the base and the washes, and a blend of
+// an olive and a magenta can land in the red band. So the guard runs over the displayed colours:
+//  - the shaders (aurora/palette.ts `displayColor`): the washes mixed over the base in LINEAR light, each
+//    weight 0..1 independently (the cube, a superset of the simplex), wash 3 first, then 2, then 1;
+//  - the CSS fallback (theme.css #aurora): three radial gradients over `--base`, alpha-over in sRGB space,
+//    each alpha 0..1 (its centre is opaque), wash 1 on top: the same nested mix, in gamma space.
+// The weight cube is sampled at PALETTE_STEP (0.05: 21^3 = 9261 points per mode, about 2 ms, run on every
+// colour input). Between samples the colour can drift past a threshold the samples straddle, so the coarse
+// check is made stricter than the rule by PALETTE_MARGIN; appearance.test.ts brute-forces random accepted
+// palettes at 0.01 and finds no hit the coarse check missed. Refused, never shifted.
+
+export const PALETTE_STEP = 0.05;
+/** The coarse check's extra caution: hue degrees each side of the band, chroma-floor fraction, and dE. */
+export const PALETTE_MARGIN = { hue: 3, chroma: 0.9, delta: 1.1 } as const;
+const PALETTE_REASON =
+  "Together with your other aurora colours this would mix into amber or red, which the HUD keeps for a tool running, an approval waiting and an error.";
+
+const srgbLin = (c: number) => (c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
+const AMBER_LAB = rgbToLab(hexRgb(AMBER)), RED_LAB = rgbToLab(hexRgb(RED));
+const BAND_MID = (WARM_BAND.from + WARM_BAND.to) / 2, BAND_HALF = (WARM_BAND.to - WARM_BAND.from) / 2;
+
+/** Is this displayed colour (linear sRGB) inside the reserved band, or near amber or red? */
+export function labImpersonates(lab: { L: number; a: number; b: number }, margin = 0): boolean {
+  const C = Math.sqrt(lab.a * lab.a + lab.b * lab.b);
+  const hueMargin = margin ? PALETTE_MARGIN.hue : 0, chromaScale = margin ? PALETTE_MARGIN.chroma : 1, dScale = margin ? PALETTE_MARGIN.delta : 1;
+  if (C >= WASH_CHROMA_FLOOR * chromaScale) {
+    let h = (Math.atan2(lab.b, lab.a) * 180) / Math.PI;
+    if (h < 0) h += 360;
+    if (Math.abs(hueDiff(h, BAND_MID)) <= BAND_HALF + hueMargin) return true;
+  }
+  for (const m of [AMBER_LAB, RED_LAB]) {
+    if (Math.hypot(lab.L - m.L, lab.a - m.a, lab.b - m.b) < MEANING_DELTA_E * dScale) return true;
+  }
+  return false;
+}
+
+/** Whether any sampled displayed colour impersonates a meaning. Hot: scalars only, partial mixes reused. */
+function sampleDisplayed(
+  washes: readonly string[], base: string, space: "linear" | "gamma", step: number, margin: number,
+): boolean {
+  // Channels in the space the mix happens in: linear light for the shaders, gamma (sRGB) for the CSS layers.
+  const prep = (h: string) => hexRgb(h).map((n) => (space === "linear" ? srgbLin(n / 255) : n / 255));
+  const B = prep(base), W1 = prep(washes[0]!), W2 = prep(washes[1]!), W3 = prep(washes[2]!);
+  const n = Math.round(1 / step);
+  for (let k = 0; k <= n; k++) {
+    const w3 = k / n;
+    const c3 = [B[0]! + (W3[0]! - B[0]!) * w3, B[1]! + (W3[1]! - B[1]!) * w3, B[2]! + (W3[2]! - B[2]!) * w3];
+    for (let j = 0; j <= n; j++) {
+      const w2 = j / n;
+      const r2 = c3[0]! + (W2[0]! - c3[0]!) * w2, g2 = c3[1]! + (W2[1]! - c3[1]!) * w2, b2 = c3[2]! + (W2[2]! - c3[2]!) * w2;
+      for (let i = 0; i <= n; i++) {
+        const w1 = i / n;
+        let r = r2 + (W1[0]! - r2) * w1, g = g2 + (W1[1]! - g2) * w1, b = b2 + (W1[2]! - b2) * w1;
+        if (space === "gamma") { r = srgbLin(r); g = srgbLin(g); b = srgbLin(b); }
+        if (labImpersonates(linearToLab(r, g, b), margin)) return true;
+      }
+    }
+  }
+  return false;
+}
+
+/**
+ * Null when every colour the background can show (both mixing paths) is clear of the reserved band and of
+ * amber and red; otherwise the refusal. `step` and `margin` are for the proof test only.
+ */
+export function checkPalette(washes: readonly string[], base: string, step = PALETTE_STEP, margin = 1): Refusal | null {
+  return sampleDisplayed(washes, base, "linear", step, margin) || sampleDisplayed(washes, base, "gamma", step, margin)
+    ? refuse(PALETTE_REASON)
+    : null;
+}
+
 export interface Colours {
   accent: string;
   washes: [string, string, string];
@@ -185,8 +258,14 @@ export function resolveColours(a: Pick<Appearance, "accent" | "washes" | "base">
     return r.ok ? r.value : d;
   }) as [string, string, string];
   const acc = checkAccent(a.accent, washes);
-  const base = checkBase(a.base);
-  return { accent: acc.ok ? acc.value : DEFAULT_ACCENT, washes, base: base.ok ? base.value : DEFAULT_BASE };
+  const baseCheck = checkBase(a.base);
+  let base = baseCheck.ok ? baseCheck.value : DEFAULT_BASE;
+  // The blends, not just each colour: an unsafe stored palette falls back (the washes, then the base).
+  let out = { washes, base };
+  if (checkPalette(out.washes, out.base)) out = { washes: [...DEFAULT_WASHES], base };
+  if (checkPalette(out.washes, out.base)) out = { washes: out.washes, base: DEFAULT_BASE };
+  const accent = checkAccent(acc.ok ? acc.value : DEFAULT_ACCENT, out.washes);
+  return { accent: accent.ok ? accent.value : DEFAULT_ACCENT, washes: out.washes as [string, string, string], base: out.base };
 }
 
 // ---- the accent family, derived in OKLCH ------------------------------------------------------------------
