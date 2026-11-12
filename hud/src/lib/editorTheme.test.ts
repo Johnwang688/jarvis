@@ -206,7 +206,7 @@ describe("the chrome", () => {
   it("the plan's pins: pane, current line, line numbers, cursor, selection, matches, brackets, errors", () => {
     const c = themeColors(palette);
     const p = palette;
-    expect(c["editor.background"]).toBe(p["--bg-1"]);
+    expect(c["editor.background"]).toBe(p["--glass-solid"]);
     expect(c["editor.lineHighlightBackground"]).toBe(p["--bg-2"]);
     expect(c["editorLineNumber.foreground"]).toBe(p["--text-muted"]);
     expect(c["editorLineNumber.activeForeground"]).toBe(p["--text-2"]);

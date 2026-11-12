@@ -4,6 +4,7 @@ import { BOOT_DEFAULTS, FADE_OUT_S, HARD_CAP_MS, PLAYED_KEY, SHIELD_MS, SKIP_FAD
   RINGS, SPIN, bitAt, buildDust, clamp01, easeInOutCubic, hexToRgb, layoutFor,
   particleAt, plateGeometry, penAt, dotsAt, ringRot, shouldPlay } from "../lib/boot";
 import { readKey, writeKey } from "../lib/storage";
+import { monoFamily } from "../lib/fonts";
 
 declare global { interface Window { __hudBootForce?: boolean } }
 
@@ -137,7 +138,7 @@ function startDrawing(host: HTMLDivElement, orbCv: HTMLCanvasElement,
     for (const p of parts) {
       const at = particleAt(L, p, t);
       if (!at || at[2] <= 0.01) continue;
-      const f = `${p.size}px ui-monospace, "Cascadia Mono", Consolas, monospace`;
+      const f = `${p.size}px ${monoFamily()}`;
       if (f !== font) { dctx.font = f; font = f; }
       dctx.fillStyle = `rgba(${hues[p.hue]},${at[2].toFixed(3)})`;
       dctx.fillText(bitAt(p, t), at[0], at[1]);
@@ -162,7 +163,7 @@ function startDrawing(host: HTMLDivElement, orbCv: HTMLCanvasElement,
     }
     const coreR = R * (0.3 + energy * 0.1);
     const glow = octx.createRadialGradient(c.x, c.y, 0, c.x, c.y, coreR * 1.9);
-    glow.addColorStop(0, `rgba(240,238,232,${0.85 * boost * (0.55 + energy * 0.5) * k})`);
+    glow.addColorStop(0, `rgba(${HUE.text},${0.85 * boost * (0.55 + energy * 0.5) * k})`);
     glow.addColorStop(0.25, `rgba(${hue},${0.5 * (0.5 + energy * 0.6) * k})`);
     glow.addColorStop(1, "rgba(0,0,0,0)");
     octx.fillStyle = glow;
@@ -185,7 +186,7 @@ function startDrawing(host: HTMLDivElement, orbCv: HTMLCanvasElement,
     return { e, len };
   };
   type Stroke = ReturnType<typeof strokeOf>;
-  const pen = () => el("circle", { r: 3.2, fill: "#f4f6f6", filter: "url(#boot-pen)", opacity: 0 });
+  const pen = () => el("circle", { r: 3.2, fill: `rgb(${HUE.text})`, filter: "url(#boot-pen)", opacity: 0 });
   function buildPlate() {
     svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
     svg.innerHTML = `<defs>

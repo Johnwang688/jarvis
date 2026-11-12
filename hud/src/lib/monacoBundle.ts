@@ -32,6 +32,7 @@ import { ContextView } from "monaco-editor/base/browser/ui/contextview/contextvi
 import { effectiveZoom, placePopup, type Rect } from "./zoomfix";
 import { compile } from "monaco-editor/editor/standalone/common/monarch/monarchCompile";
 import { cssPalette, themeOrFallback } from "./editorTheme";
+import { fontsReady } from "./fonts";
 import { C_WORDS, PY_WORDS, refinedOrOwn, type WordClasses } from "./monarchRefine";
 
 import "monaco-editor/features/codeEditor/register";
@@ -129,6 +130,8 @@ export function applyGraphite() {
   // is written (lib/editorTheme.ts). A token that cannot be read is logged
   // and Monaco loads in plain vs-dark: never a rejected load.
   monaco.editor.defineTheme("jarvis", themeOrFallback(() => cssPalette()));
+  // Monaco measures the font as an editor opens (a diff view included): once the bundled faces are in, measure again.
+  void fontsReady().then(() => monaco.editor.remeasureFonts());
   // C, C++ and Python tell functions, builtins, types and constants apart
   // (lib/monarchRefine.ts). Each replaces the tokenizer `register.all`
   // registered (the last registration wins) with the same module, refined —

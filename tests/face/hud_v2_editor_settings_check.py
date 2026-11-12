@@ -220,8 +220,8 @@ def _apply_checks(page, mock, check, until):
     _open_dialog(page, until)
     page.locator('[data-testid="es-reset"]').click()
     e = _editor(page, "calc.py") or {}
-    check("Reset to defaults puts them back (the font to Monaco's own)",
-          e.get("fontSize") == 12 and e.get("minimap") is False and e.get("fontFamily") is None
+    check("Reset to defaults puts them back (the font to the HUD's --mono, Geist Mono)",
+          e.get("fontSize") == 12 and e.get("minimap") is False and str(e.get("fontFamily") or "").startswith('"Geist Mono"')
           and page.locator('[data-testid="es-font-family"]').input_value() == "", str(e))
     page.keyboard.press("Escape")
 
@@ -237,7 +237,7 @@ def _garbage_checks(page, mock, check, until):
           s["fontSize"] == 12 and s["tabSize"] == 4 and s["minimap"] is False and s["fontFamily"] == ""
           and s["wordWrap"] == "off" and s["vim"] is False and s["cursorStyle"] == "block", str(s))
     e = _editor(page, "calc.py") or {}
-    check("and the editor draws that", e.get("fontSize") == 12 and e.get("fontFamily") is None
+    check("and the editor draws that", e.get("fontSize") == 12 and str(e.get("fontFamily") or "").startswith('"Geist Mono"')
           and e.get("cursorStyle") == "block", str(e))
     _store(page, "not json{")
     _boot(page, mock, None, until, reload=True)

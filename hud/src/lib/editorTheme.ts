@@ -33,7 +33,7 @@ export const SYNTAX_TOKENS = [
 
 /** The further tokens the editor's chrome is drawn in. */
 export const CHROME_TOKENS = [
-  "--bg-1", "--bg-2", "--bg-3", "--border", "--border-strong", "--selected",
+  "--bg-1", "--bg-2", "--bg-3", "--border", "--border-strong", "--selected", "--glass-solid",
   "--accent", "--accent-hi", "--red", "--green",
 ] as const;
 
@@ -222,10 +222,21 @@ export interface ChromeRow {
  * a feature turned on later cannot bring Monaco's orange with it.
  */
 export const CHROME: readonly ChromeRow[] = [
-  // Background, cursor, gutter.
-  { key: "editor.background", token: "--bg-1" },
+  // Background, cursor, gutter. Aurora glass (AG-1): the editor paints the
+  // dense-text tint (`--glass-solid`, translucent) and everything drawn on
+  // top of it that would stack a second tint — the gutter, the minimap, the
+  // overview ruler — is transparent, so no opaque grey block appears beside
+  // the text. What floats over scrolling code (sticky scroll, widgets) stays
+  // opaque.
+  { key: "editor.background", token: "--glass-solid" },
   { key: "editor.foreground", token: "--text" },
-  { key: "editorGutter.background", token: "--bg-1" },
+  { key: "editorGutter.background", token: "--glass-solid", alpha: 0 },
+  { key: "minimap.background", token: "--glass-solid", alpha: 0 },
+  { key: "editorOverviewRuler.background", token: "--glass-solid", alpha: 0 },
+  { key: "editorOverviewRuler.border", token: "--glass-solid", alpha: 0 },
+  { key: "minimapSlider.background", token: "--selected" },
+  { key: "minimapSlider.hoverBackground", token: "--selected", alpha: 0.13 },
+  { key: "minimapSlider.activeBackground", token: "--selected", alpha: 0.19 },
   { key: "editor.lineHighlightBackground", token: "--bg-2" },
   { key: "editor.lineHighlightBorder", token: "--bg-2", alpha: 0 },
   { key: "editorLineNumber.foreground", token: "--text-muted" },
@@ -275,10 +286,21 @@ export const CHROME: readonly ChromeRow[] = [
   // Sticky scroll: the pane's own colour, ruled off.
   { key: "editorStickyScroll.background", token: "--bg-1" },
   { key: "editorStickyScroll.border", token: "--border" },
+  // The sticky gutter would otherwise inherit the translucent editor background and let line numbers
+  // scroll visibly under pinned lines: the same opaque colour as the sticky body.
+  { key: "editorStickyScrollGutter.background", token: "--bg-1" },
   { key: "editorStickyScrollHover.background", token: "--bg-2" },
   // Widgets (find, suggest, hover) and scrollbars.
   { key: "editorWidget.background", token: "--bg-2" },
   { key: "editorWidget.border", token: "--border-strong" },
+  { key: "editorSuggestWidget.background", token: "--bg-2" },
+  { key: "editorSuggestWidget.border", token: "--border-strong" },
+  { key: "editorSuggestWidget.foreground", token: "--text" },
+  { key: "editorSuggestWidget.selectedBackground", token: "--bg-3" },
+  { key: "editorSuggestWidget.highlightForeground", token: "--accent-hi" },
+  { key: "editorHoverWidget.background", token: "--bg-2" },
+  { key: "editorHoverWidget.border", token: "--border-strong" },
+  { key: "editorHoverWidget.foreground", token: "--text" },
   { key: "scrollbarSlider.background", token: "--selected" },
   { key: "scrollbarSlider.hoverBackground", token: "--selected", alpha: 0.13 },
   { key: "scrollbarSlider.activeBackground", token: "--selected", alpha: 0.19 },

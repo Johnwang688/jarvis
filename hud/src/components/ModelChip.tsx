@@ -30,7 +30,7 @@ import type { ModelRow, ProviderName } from "../types";
 import { toCss } from "../lib/layout";
 import {
   PROVIDERS, PROVIDER_LABELS, SEARCH, applyEffort, applyModel, applyProvider, canSetDefault,
-  defaultChosenHere, defaultEffortOptions, defaultModel, defaultRows, defaultSourceLabel, effective,
+  defaultChosenHere, defaultEffortOptions, defaultModel, defaultRows, defaultSourceLabel, effective, effortOptions,
   modelLabel, modelOptions, resetTitle, shortId, type Choice, type ThreadModels,
 } from "../lib/threadmodel";
 import { EffortSlider } from "./EffortSlider";
@@ -73,6 +73,10 @@ export function ModelChip(props: {
       : "Applies from the next message"
     : "Set by routing for a task's thread; read-only here";
   const summary = `${modelLabel(props.models, c)}${eff.effort ? ` · ${eff.effort}` : ""}`;
+  // Every label this button can take as the effort moves; the ghosts below size it to the longest.
+  const base = modelLabel(props.models, c);
+  const widest = [...new Set(effortOptions(props.models, c).map((o) => o.value).filter(Boolean))]
+    .map((e) => `${base} · ${e}`);
   const [open, setOpen] = useState(false);
   const btn = useRef<HTMLButtonElement>(null);
   // A popover must not outlive the control it belongs to: a card arriving
@@ -126,7 +130,15 @@ export function ModelChip(props: {
             onKeyUp={stop}
             onClick={() => setOpen((o) => !o)}
           >
-            <span className="mb-label">{summary}</span> <span aria-hidden="true">▾</span>
+            <span className="mb-label">
+              <span className="mb-now">{summary}</span>
+              {/* The button keeps the width of its widest effort word, so moving the slider never
+                  re-wraps the row the button sits in (a wrap moved the button, which closes this popover). */}
+              {widest.map((w) => (
+                <span key={w} className="mb-ghost" aria-hidden="true">{w}</span>
+              ))}
+            </span>{" "}
+            <span aria-hidden="true">▾</span>
           </button>
           {open && btn.current && !props.disabled ? (
             <Popover anchor={btn.current} label="Model and effort" pane={props.pane} zoom={props.zoom} onClose={close}>

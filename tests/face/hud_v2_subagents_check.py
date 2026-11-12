@@ -303,6 +303,35 @@ def subagents_checks(browser, mock, base, check, until, guard, init_script):
         last = page.locator('[data-testid="sa-pane"][data-sid="cx:019a-fixer"]')
         page.set_viewport_size({"width": 1100, "height": 900})
         time.sleep(0.2)
+        # Focusing a pane never changes layout (AG-1 review): a press focuses it, and a header that
+        # wrapped differently when focused moved the row under the pointer before the release.
+        shape = """() => ({
+          tabs: [...document.querySelectorAll('.wpane')].filter(p => p.style.display !== 'none')
+            .map(p => [p.dataset.testid, Math.round(p.querySelector('.tabs').getBoundingClientRect().height)]),
+          row: (() => { const r = document.querySelector('[data-sid="cl:toolu_beta"] button').getBoundingClientRect();
+                        return [r.x, r.y, r.width, r.height].map(Math.round); })() })"""
+        # The baseline is taken once the layout has settled (late header content, a voice chip, lands
+        # after a resize); only a change a press causes is a failure.
+        before_shape = page.evaluate(shape)
+        for _ in range(20):
+            time.sleep(0.3)
+            now = page.evaluate(shape)
+            if now == before_shape:
+                break
+            before_shape = now
+        for pane in page.locator('.wpane:visible').all():
+            pane.dispatch_event("pointerdown")
+            time.sleep(0.15)
+            after = page.evaluate(shape)
+            kids = page.evaluate("""() => [...document.querySelectorAll('.wpane')].filter(p => p.style.display !== 'none')
+              .map(p => [p.dataset.testid, p.dataset.view, [...p.querySelector('.tabs').children].map(c => [c.className.toString().slice(0, 16), Math.round(c.getBoundingClientRect().width)])])""")
+            # Within a pixel: the focused pane's project select is a pixel taller than the rest of its header
+            # (it always was); what matters is that no header WRAPS differently and the row stays under the pointer.
+            same = (len(after["tabs"]) == len(before_shape["tabs"])
+                    and all(a[0] == b[0] and abs(a[1] - b[1]) <= 1 for a, b in zip(after["tabs"], before_shape["tabs"]))
+                    and all(abs(a - b) <= 1 for a, b in zip(after["row"], before_shape["row"])))
+            check(f"focusing {pane.get_attribute('data-testid')} at 1100px moves no header or row",
+                  same, f"{before_shape} -> {after} {kids}")
         page.locator('[data-sid="cl:toolu_beta"] button').first.click()
         until(lambda: page.locator('[data-testid="sa-pane"][data-sid="cl:toolu_beta"]').count() == 1)
         check("past the room for a split, the last sub-agent pane is reused, never a chat",
@@ -320,6 +349,50 @@ def subagents_checks(browser, mock, base, check, until, guard, init_script):
         check("with no room and no sub-agent pane, the window says so and takes nothing",
               "No room for another pane" in page.locator('[data-testid="error"]').inner_text()
               and sub_panes().count() == 0 and page.evaluate("window.__hud.workspace().ws.order.length") == 2)
+
+        # Focusing a pane never changes layout, with no chat drawn either (AG-1 review 2): two Editor panes,
+        # the focused one carries the project's profile select, and an unfocused one must hold its box.
+        EDITORS = json.dumps({"preset": "cols2", "focused": 2,
+                              "panes": [{"view": "file"}, {"view": "file"}, {"view": "file"}, {"view": "task"}]})
+        for width in (1100, 2560):
+            _fresh(page, mock, until, EDITORS, size=(width, 900))
+            # A chat names the project; switching its pane to an Editor leaves the window about that project with
+            # no chat drawn, so the focused pane carries the profile select and the others must hold its room.
+            page.locator('[data-testid="project-p1"]').click()
+            until(lambda: page.evaluate("window.__hud.workspace().ws.panes[1].view") == "chat")
+            if page.locator('[data-testid="pane-2-view-select"]').count():
+                page.locator('[data-testid="pane-2-view-select"]').select_option("file")
+            else:  # a wide header shows the views as tabs
+                page.locator(_pane(2, '[data-testid="tab-file"]')).click()
+            until(lambda: page.locator(_pane(1, '[data-testid="file-calc.py"]')).count() == 1
+                  and page.locator(_pane(2, '[data-testid="file-calc.py"]')).count() == 1, timeout=6)
+            page.locator(_pane(2)).dispatch_event("pointerdown")
+            time.sleep(0.4)
+            probe = """() => { const q = (n, sel) => document.querySelector(`[data-testid="pane-${n}"] ${sel}`);
+              const box = (e) => { const r = e.getBoundingClientRect(); return [r.x, r.y, r.width, r.height].map(Math.round); };
+              return {tabs: box(q(1, '.tabs')), row: box(q(1, '[data-testid="file-calc.py"]')),
+                      split: [...document.querySelectorAll('[data-testid="pane-1"] .tabs .panesplit, [data-testid="pane-1"] .tabs .paneclose')].map(box)}; }"""
+            idle = page.evaluate(probe)
+            check(f"setup at {width}px: two Editor panes, no chat, the focused pane carries the profile select",
+                  page.locator('.wpane:visible [data-testid="profile"]').count() == 1
+                  and page.locator('[data-testid="pane-2"] [data-testid="profile"]').count() == 1)
+            calc_row = page.locator(_pane(1, '[data-testid="file-calc.py"]'))
+            rb = calc_row.bounding_box()
+            page.mouse.move(rb["x"] + rb["width"] / 2, rb["y"] + rb["height"] / 2)
+            page.mouse.down()
+            time.sleep(0.4)
+            pressed = page.evaluate(probe)
+            same = all(abs(a - b) <= 1 for k in ("tabs", "row") for a, b in zip(idle[k], pressed[k])) \
+                and all(abs(a - b) <= 1 for x, y in zip(idle["split"], pressed["split"]) for a, b in zip(x, y)) \
+                and len(idle["split"]) == len(pressed["split"])
+            check(f"focusing an Editor pane at {width}px (no chat) moves neither its header, its split controls nor its rows",
+                  same, f"{idle} -> {pressed}")
+            page.mouse.up()
+            time.sleep(0.5)
+            opened = page.locator(_pane(1, '[data-testid="file-path"]'))
+            check(f"and the click on the inactive pane's file at {width}px opens it",
+                  opened.count() == 1 and opened.inner_text() == "calc.py")
+        page.set_viewport_size({"width": 1600, "height": 900})
 
         # 5. Cards: inert rows, and the card's link.
         _fresh(page, mock, until, TWO)

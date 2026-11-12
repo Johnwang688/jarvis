@@ -1024,8 +1024,8 @@ def _badge_checks(browser, mock, check, until, guard, init_script, base):
 
 
 OWNER_ROW = '[data-testid="owner-inbox"]'
-TEXT = "rgb(226, 223, 215)"    # --text
-BG_1 = "rgb(26, 26, 25)"       # --bg-1
+TEXT = "rgb(234, 242, 246)"    # --text
+BG_1 = "rgb(15, 24, 31)"       # --bg-1
 
 
 def _pseudo(page, selector, pseudo, prop):

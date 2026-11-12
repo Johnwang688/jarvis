@@ -9,8 +9,8 @@
 .phone-pairing { display: flex; flex-wrap: wrap; gap: 16px; align-items: flex-start; margin: 8px 0; }
 .phone-qr { width: 232px; height: 232px; flex: 0 0 auto; border-radius: var(--radius, 6px); }
 .phone-pairing-text { flex: 1 1 220px; min-width: 0; }
-.phone-url { font: 12px var(--mono); color: var(--text-2); overflow-wrap: anywhere; user-select: all; }
-.phone-countdown { font: 13px var(--mono); color: var(--amber); }
+.phone-url { font: 12px var(--mono); color: var(--text-2); overflow-wrap: anywhere; user-select: all; word-spacing: normal; }
+.phone-countdown { font: 13px var(--mono); color: var(--amber); word-spacing: normal; }
 .phone-passkeys, .phone-sessions { list-style: none; }
 .phone-passkey { padding: 8px 0; border-top: 1px solid var(--border); }
 .phone-passkey:first-child { border-top: 0; }
@@ -21,10 +21,10 @@
 button.phone-danger { border-color: var(--red-line); color: var(--red); }
 .phone-sessions { margin: 6px 0 0 14px; }
 .phone-session { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 6px; padding: 3px 0; }
-.phone-ua { font: 12px var(--mono); color: var(--text-2); overflow-wrap: anywhere; min-width: 0; }
+.phone-ua { font: 12px var(--mono); color: var(--text-2); overflow-wrap: anywhere; min-width: 0; word-spacing: normal; }
 .phone-session > button { margin-left: auto; padding: 1px 8px; }
 .phone-sessions-none { margin-left: 14px; }
 /* Notifications (P-6): the switch, quiet hours on one line, the list. */
 .phone-notify-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 6px 0; }
-.phone-notify-row input[type="time"] { font: 12px var(--mono); }
+.phone-notify-row input[type="time"] { font: 12px var(--mono); word-spacing: normal; }
 .phone-notify > button { margin-top: 6px; }

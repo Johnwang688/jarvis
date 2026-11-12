@@ -3,4 +3,4 @@
 .drivestatus [role=status] { flex: 1 1 150px; overflow-wrap: anywhere; }
 .drivestatus button { padding: 2px 7px; }
 .driveactions { list-style: none; max-height: 140px; overflow: auto; margin-top: 5px; }
-.driveactions li { padding: 3px 0; overflow-wrap: anywhere; font-family: var(--mono); }
+.driveactions li { padding: 3px 0; overflow-wrap: anywhere; font-family: var(--mono); word-spacing: normal; }

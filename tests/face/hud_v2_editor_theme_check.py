@@ -82,7 +82,7 @@ CTL = "int x = 1; /* esc:\x1b[0m bell:\x07 */\n\x0c\n"
 
 FILES = {"auton.cpp": CPP, "arm.py": PY, "ctl.c": CTL}
 TOKENS = ("--text", "--text-2", "--text-muted", "--syn-fn", "--syn-string", "--syn-const", "--syn-type",
-          "--bg-1", "--bg-2", "--bg-3", "--accent", "--accent-hi", "--red")
+          "--bg-1", "--bg-2", "--bg-3", "--glass-solid", "--accent", "--accent-hi", "--red")
 
 
 def editor_theme_checks(browser, mock, base, check, until, guard, init_script):
@@ -334,8 +334,8 @@ def _chrome_checks(page, mock, check, until):
     check("of every colour Monaco publishes, the only warm ones are --red where it means error or removed",
           not bad, f"{len(bad)}: {bad[:6]}")
     v = lambda k: variables.get(f"--vscode-{k}", "")
-    check("the pane is --bg-1 and the current line --bg-2",
-          _same(v("editor-background"), t["--bg-1"]) and _same(v("editor-lineHighlightBackground"), t["--bg-2"]),
+    check("the editor is the dense-text glass tint (--glass-solid) and the current line --bg-2",
+          _same(v("editor-background"), t["--glass-solid"]) and _same(v("editor-lineHighlightBackground"), t["--bg-2"]),
           f"{v('editor-background')} {v('editor-lineHighlightBackground')}")
     check("line numbers are --text-muted, the active one --text-2",
           _same(v("editorLineNumber-foreground"), t["--text-muted"])

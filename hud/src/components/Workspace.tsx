@@ -141,6 +141,17 @@ function boxStyle(r: Rect): React.CSSProperties {
   };
 }
 
+/** The selected chat's microphone mark; the same glyph, invisible, holds its room in the other chats' headers. */
+function MicIcon() {
+  return (
+    <svg width="10" height="13" viewBox="0 0 10 13" aria-hidden="true" focusable="false">
+      <rect x="3" y="0.75" width="4" height="7" rx="2" fill="currentColor" />
+      <path d="M1 6.25a4 4 0 0 0 8 0M5 10.25v2" fill="none" stroke="currentColor" strokeWidth="1.2"
+            strokeLinecap="round" />
+    </svg>
+  );
+}
+
 export function Workspace(props: {
   view: LayoutControl;
   covered?: boolean;
@@ -349,15 +360,19 @@ export function Workspace(props: {
                     </button>
                   ));
                 })() : null}
-                {at.split && spec.view === "chat" && n === props.selectedPane ? (
-                  <span className="micmark" data-testid={`pane-${n}-mic`} role="img" aria-label="Selected chat"
-                        title="The selected chat: what you say, the orb, and files dropped outside a chat go here">
-                    <svg width="10" height="13" viewBox="0 0 10 13" aria-hidden="true" focusable="false">
-                      <rect x="3" y="0.75" width="4" height="7" rx="2" fill="currentColor" />
-                      <path d="M1 6.25a4 4 0 0 0 8 0M5 10.25v2" fill="none" stroke="currentColor" strokeWidth="1.2"
-                            strokeLinecap="round" />
-                    </svg>
-                  </span>
+                {at.split && spec.view === "chat" ? (
+                  // Focusing a pane must never change the layout: a press focuses (and so selects) a chat pane,
+                  // and a mic mark that appeared only then could wrap a narrow header and move the row under
+                  // the pointer before the release (a lost click). Every split chat pane reserves the mark's
+                  // room; an unselected one holds it invisible.
+                  n === props.selectedPane ? (
+                    <span className="micmark" data-testid={`pane-${n}-mic`} role="img" aria-label="Selected chat"
+                          title="The selected chat: what you say, the orb, and files dropped outside a chat go here">
+                      <MicIcon />
+                    </span>
+                  ) : (
+                    <span className="micmark ghost" aria-hidden="true"><MicIcon /></span>
+                  )
                 ) : null}
                 {ctx ? <span className="panectx" title={ctx}>{ctx}</span> : null}
                 <div className="paneextras">{props.extras(spec, at)}</div>

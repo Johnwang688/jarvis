@@ -4059,6 +4059,7 @@ export default function App() {
         />
         <InputBar
           status={status}
+          reserveStatus={drawnChats.length > 1}
           pendingTranscript={chat.pendingTranscript}
           // Not `disabled` under a card: everything outside the card is inert,
           // which keeps the box unreachable, and a disabled box dropped focus
@@ -4496,6 +4497,15 @@ export default function App() {
                 .catch((err) => patch({ error: `Could not change the profile: ${err.message}` }))
             }
           >
+            <option value="auto">auto</option>
+            <option value="ask">ask</option>
+            <option value="strict">strict</option>
+          </select>
+        ) : spec.view !== "chat" && !drawnChats.length && activeProjectId && fit.panes.includes(n) ? (
+          // Only the focused pane shows the profile select when no chat is drawn. Focusing a pane must
+          // never change the layout (a press focuses; a header that wrapped differently moved the row
+          // under the pointer before the release), so every other pane holds the select's full box (same width, padding and height), unseen.
+          <select aria-hidden="true" tabIndex={-1} disabled data-ghost="profile" style={{ width: 110, visibility: "hidden" }} defaultValue="auto">
             <option value="auto">auto</option>
             <option value="ask">ask</option>
             <option value="strict">strict</option>

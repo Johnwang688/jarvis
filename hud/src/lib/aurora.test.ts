@@ -66,14 +66,14 @@ describe("the aurora tokens", () => {
     expect(drift).toBeLessThanOrEqual(12);
   });
 
-  it("the band is dim: at most 0.24 alpha", () => {
-    for (const t of BAND) expect(token(t)[3], t).toBeLessThanOrEqual(0.24);
+  it("the band is a band, not a fill: at most 0.5 alpha (raised for the bright aurora sidebar, owner 2026-11-11)", () => {
+    for (const t of BAND) expect(token(t)[3], t).toBeLessThanOrEqual(0.5);
   });
 
   it("the band is low saturation and never amber or red, so pending and error keep their meanings", () => {
     for (const t of BAND) {
       const colour = opaque(token(t));
-      expect(hueSat(colour).s, t).toBeLessThanOrEqual(0.5);
+      expect(hueSat(colour).s, t).toBeLessThanOrEqual(0.75);
       expect(isWarm(colour), `${t} ${colour} is in the amber/red band`).toBe(false);
     }
   });

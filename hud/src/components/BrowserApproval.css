@@ -1,6 +1,6 @@
 .browserapproval { min-width: 0; overflow-wrap: anywhere; }
 .browserapproval p { margin: 6px 0; }
-.browserapproval pre { white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--mono); }
+.browserapproval pre { white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--mono); word-spacing: normal; }
 
 .auth.browserauth { display: flex; flex-direction: column; overflow: hidden; }
 .auth.browserauth > :not(.browserapproval) { flex: 0 0 auto; }
