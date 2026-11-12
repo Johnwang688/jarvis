@@ -20,6 +20,7 @@ import { SendStops } from "./lib/sendStops";
 // Input that belongs to a thread — typed words, a steer, a hand-back, a first
 // send, a transcript — stays with that thread.
 
+import { chatStreaming } from "./aurora/activity";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { flushSync } from "react-dom";
 import { CaptureDrafts } from "./lib/captureDraft";
@@ -1664,6 +1665,8 @@ export default function App() {
           for (const n of mine) {
             chatPatch(n, { status: "RESPONDING" });
             dispatch({ type: "delta", pane: n, text: data.text || "" });
+            // A soft ripple in the aurora behind that pane while it streams (AG-2, D-11); rate-limited there.
+            chatStreaming(n);
           }
           break;
         case "text":

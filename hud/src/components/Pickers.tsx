@@ -14,6 +14,7 @@ import type { Project, ProjectImpact } from "../types";
 import { DirPicker } from "./DirPicker";
 import { DiscordLink } from "./DiscordLink";
 import { SparkleSetting } from "./SparkleSetting";
+import { AuroraSetting } from "./AuroraSetting";
 import { api } from "../api";
 import { INSTALL_MENU, type InstallStatus } from "../state/installApp";
 import { editEffects, formFrom, nameKey, projectEditBody, uniqueName, type ProjectForm } from "../lib/projects";
@@ -58,6 +59,7 @@ export function GeneralSettings(props: {
           ) : <span className="muted small">{INSTALL_MENU}</span>}
       </div>
       <div className="pad"><SparkleSetting /></div>
+      <div className="pad"><AuroraSetting /></div>
     </>
   );
 }
