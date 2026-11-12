@@ -1,7 +1,7 @@
 import { useLayoutEffect, useRef, useState } from "react";
 import { chatActivity } from "../aurora/activity";
 import { parseColour, readPalette, type Rgb } from "../aurora/palette";
-import { BOOT_RINGS, FONT_WAIT_MS, HARD_CAP_MS, PLAYED_KEY, SHIELD_MS, SKIP_FADE_MS, TIMELINE, TINTS, TOTAL_S,
+import { BOOT_RINGS, FONT_WAIT_MS, HARD_CAP_MS, PLAYED_KEY, SHIELD_DEADLINE_MS, SHIELD_MS, SKIP_FADE_MS, TIMELINE, TINTS, TOTAL_S,
   auroraAt, buildSparks, coreAt, dockFromRect, geoFor, handoffAlpha, maskPoints, orbAt, ringRot, ringSolid,
   shouldPlay, sparkAt, sparkLavender, type BootGeo, type DockTarget, type Spark } from "../lib/boot";
 import { readKey, writeKey } from "../lib/storage";
@@ -62,14 +62,16 @@ export default function BootOverlay({ cardUp }: { cardUp: boolean }) {
     const motion = matchMedia("(prefers-reduced-motion: reduce)");
     const reduce = () => { if (motion.matches) finish(); };
     motion.addEventListener("change", reduce);
-    // The cap bounds the drawing and the GL context whatever the pointer is doing; only the invisible
-    // shield may outlast it, while a press is still held, so its release is not delivered to the HUD.
+    // Two deadlines. The cap bounds the DRAWING and the GL context whatever the pointer is doing; the shield
+    // (invisible by then) leaves only once its own release protection is over, so a release just before the
+    // cap still eats the next click. The absolute deadline bounds the shield itself, held pointer or not.
     let held = false;
     const hardCap = window.setTimeout(() => {
-      if (!held) { finish(); return; }
+      if (!held && !skipped) { finish(); return; } // nothing owes the shield any time
       drawing.release();
       host.style.transition = "none"; host.style.opacity = "0";
     }, HARD_CAP_MS);
+    const deadline = window.setTimeout(finish, SHIELD_DEADLINE_MS);
     // DOM listeners keep the shield through pointerup/click, including long holds.
     const eat = (e: Event) => { e.preventDefault(); e.stopPropagation(); };
     const down = (e: PointerEvent) => {
@@ -86,17 +88,20 @@ export default function BootOverlay({ cardUp }: { cardUp: boolean }) {
     const RELEASES = ["pointerup", "pointercancel", "lostpointercapture"] as const;
     const CLICKS = ["click", "dblclick", "auxclick", "contextmenu"] as const;
     // The window losing focus mid-press may never deliver the release.
-    const blurred = () => { held = false; linger(); };
+    const blurred = () => { if (held) { held = false; linger(); } };
+    const hidden = () => { if (document.visibilityState === "hidden") blurred(); };
     window.addEventListener("blur", blurred);
+    document.addEventListener("visibilitychange", hidden);
     host.addEventListener("pointerdown", down);
     for (const kind of RELEASES) host.addEventListener(kind, up);
     for (const kind of CLICKS) host.addEventListener(kind, click);
     return () => {
       drawing.release();
-      window.clearTimeout(skipTimer); window.clearTimeout(hardCap);
+      window.clearTimeout(skipTimer); window.clearTimeout(hardCap); window.clearTimeout(deadline);
       window.removeEventListener("keydown", skip, true);
       motion.removeEventListener("change", reduce);
       window.removeEventListener("blur", blurred);
+      document.removeEventListener("visibilitychange", hidden);
       host.removeEventListener("pointerdown", down);
       for (const kind of RELEASES) host.removeEventListener(kind, up);
       for (const kind of CLICKS) host.removeEventListener(kind, click);

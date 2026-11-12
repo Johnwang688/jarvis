@@ -4,7 +4,7 @@
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { FONT_WAIT_MS, HARD_CAP_MS, SHIELD_MS, SKIP_FADE_MS } from "../lib/boot";
+import { FONT_WAIT_MS, HARD_CAP_MS, SHIELD_DEADLINE_MS, SHIELD_MS, SKIP_FADE_MS } from "../lib/boot";
 import BootOverlay from "./BootOverlay";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -32,7 +32,7 @@ function setup(fonts?: unknown) {
   let next = 1;
   const timers = new Set<number>();
   const ownSet = window.setTimeout, ownClear = window.clearTimeout;
-  const mine = new Set<number>([HARD_CAP_MS, FONT_WAIT_MS, SKIP_FADE_MS, SHIELD_MS]);
+  const mine = new Set<number>([HARD_CAP_MS, SHIELD_DEADLINE_MS, FONT_WAIT_MS, SKIP_FADE_MS, SHIELD_MS]);
   spyOn(window, "setTimeout", ((fn: TimerHandler, ms?: number, ...a: unknown[]) => {
     const id = (ownSet as (...x: unknown[]) => number)(fn, ms, ...a);
     if (mine.has(ms ?? -1)) timers.add(id);
@@ -179,7 +179,7 @@ describe("BootOverlay", () => {
 
   it("unmounting early cancels the font-wait timer (the font never loads)", async () => {
     setup({ load: () => new Promise(() => {}) }); await render(false); await flush();
-    expect(rig.timers.size).toBe(2); // the cap and the font wait
+    expect(rig.timers.size).toBe(3); // the cap, the shield deadline and the font wait
     await act(async () => { rig.root.render(createElement("div")); });
     expect(overlay()).toBeNull();
     expect(rig.timers.size).toBe(0);
@@ -202,6 +202,78 @@ describe("BootOverlay", () => {
     press("pointerup");
     tick(SHIELD_MS + 10);
     await render(false);
+    nothingLeft();
+  });
+
+  const eaten = () => {
+    let reached = false;
+    const f = () => { reached = true; };
+    document.body.addEventListener("click", f);
+    act(() => { overlay()?.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true })); });
+    document.body.removeEventListener("click", f);
+    return !reached;
+  };
+
+  it("a pointer held forever: the shield is gone at the absolute deadline, not before", async () => {
+    setup(); await render(false); await flush();
+    press("pointerdown");
+    tick(SHIELD_DEADLINE_MS - 10);
+    expect(overlay()).not.toBeNull();
+    expect(eaten()).toBe(true);
+    tick(20);
+    expect(overlay()).toBeNull();
+    await render(false);
+    nothingLeft();
+  });
+
+  it("a release 100 ms before the cap: the shield stays until release + SHIELD_MS, then goes", async () => {
+    setup(); await render(false); await flush();
+    press("pointerdown");
+    tick(HARD_CAP_MS - 100);
+    press("pointerup");
+    tick(101); // the cap has fired
+    expect(rig.gls.every((g) => g.lost >= 1)).toBe(true);
+    expect(overlay()).not.toBeNull();
+    expect(eaten()).toBe(true); // the click that follows the release
+    tick(SHIELD_MS - 200);
+    expect(overlay()).not.toBeNull();
+    tick(300);
+    expect(overlay()).toBeNull();
+  });
+
+  for (const kind of ["pointercancel", "lostpointercapture"]) {
+    it(`${kind} counts as a release`, async () => {
+      setup(); await render(false); await flush();
+      press("pointerdown");
+      press(kind);
+      tick(SHIELD_MS + 10);
+      expect(overlay()).toBeNull();
+    });
+  }
+
+  it("a window blur or a hidden page counts as a release", async () => {
+    setup(); await render(false); await flush();
+    press("pointerdown");
+    act(() => { window.dispatchEvent(new Event("blur")); });
+    tick(SHIELD_MS + 10);
+    expect(overlay()).toBeNull();
+    act(() => { rig.root.unmount(); });
+    rig.root = createRoot(rig.host);
+    sessionStorage.clear();
+    await render(false); await flush();
+    press("pointerdown");
+    const vis = vi.spyOn(document, "visibilityState", "get").mockReturnValue("hidden");
+    act(() => { document.dispatchEvent(new Event("visibilitychange")); });
+    vis.mockRestore();
+    tick(SHIELD_MS + 10);
+    expect(overlay()).toBeNull();
+  });
+
+  it("a card arriving removes the shield at once, pointer held or not", async () => {
+    setup(); await render(false); await flush();
+    press("pointerdown");
+    await render(true);
+    expect(overlay()).toBeNull();
     nothingLeft();
   });
 

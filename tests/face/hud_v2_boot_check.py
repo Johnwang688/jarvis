@@ -25,7 +25,7 @@ window.__bootBeforeHud = null;
 new MutationObserver(records => {
   for (const record of records) for (const node of record.addedNodes) {
     if (node.nodeType === 1 && (node.matches('#hud-boot') || node.querySelector('#hud-boot')))
-      window.__bootMounts++;
+      { window.__bootMounts++; if (window.__bootAt == null) window.__bootAt = performance.now(); }
   }
   // When the chat box first appears, was the overlay already over it?
   if (window.__bootBeforeHud === null && document.querySelector('[data-testid="input"]'))
@@ -43,6 +43,11 @@ HTMLCanvasElement.prototype.getContext = function (type, ...rest) {
   if (c && /webgl/.test(String(type)) && this.closest('#hud-boot')) window.__gls.push(c);
   return c;
 };"""
+
+def at_boot(page, ms):
+    """Wait, in the page's own clock, until `ms` after the overlay mounted (the caps run from mount)."""
+    page.evaluate("ms => new Promise(r => setTimeout(r, Math.max(0, ms - (performance.now() - window.__bootAt))))", ms)
+
 
 GONE = "document.querySelectorAll('#hud-boot, #hud-boot canvas').length === 0"
 RELEASED = "window.__gls.length >= 1 && window.__gls.every(g => g.isContextLost())"
@@ -345,7 +350,7 @@ def boot_checks(browser, mock, base, check, until, guard, init_script):
             page.evaluate(UNDERLAY)
             page.mouse.move(40, 40)
             page.mouse.down()
-            page.wait_for_timeout(7800)
+            at_boot(page, 7200)
             check("a press held past the hard cap releases the GL context and hides the drawing",
                   page.evaluate(RELEASED) and page.evaluate("document.querySelector('#hud-boot')?.style.opacity") == "0")
             check("…while the invisible shield still stands", page.locator(OVERLAY).count() == 1)
@@ -355,6 +360,36 @@ def boot_checks(browser, mock, base, check, until, guard, init_script):
                   page.evaluate("window.__under") == {"click": 0, "dblclick": 0, "down": 0, "up": 0},
                   str(page.evaluate("window.__under")))
             check("…and nothing remains afterwards", page.evaluate(GONE))
+        finally:
+            ctx.close()
+        # Sol's 179 ms case: a release just before the cap still owes the shield its SHIELD_MS, so the next
+        # click (within it) is eaten, not delivered to the HUD underneath.
+        ctx, page = fresh(extra=TRACK_GL)
+        try:
+            page.wait_for_selector(OVERLAY, state="attached")
+            page.evaluate(UNDERLAY)
+            page.mouse.move(40, 40)
+            page.mouse.down()
+            at_boot(page, 6900)
+            page.mouse.up()
+            at_boot(page, 7150)  # past the 7 s cap, inside the 450 ms release protection
+            check("a release just before the cap leaves the shield standing past it", page.locator(OVERLAY).count() == 1)
+            page.mouse.click(40, 40)
+            page.wait_for_selector(OVERLAY, state="detached", timeout=2000)
+            check("…and the next click within the protection reaches nothing underneath",
+                  page.evaluate("window.__under") == {"click": 0, "dblclick": 0, "down": 0, "up": 0},
+                  str(page.evaluate("window.__under")))
+        finally:
+            ctx.close()
+        # A pointer never released: the shield is gone at the absolute deadline (cap + SHIELD_MS).
+        ctx, page = fresh(extra=TRACK_GL)
+        try:
+            page.wait_for_selector(OVERLAY, state="attached")
+            page.mouse.move(40, 40)
+            page.mouse.down()
+            page.wait_for_selector(OVERLAY, state="detached", timeout=9000)
+            check("a pointer held forever loses the shield at the absolute deadline", page.evaluate(GONE))
+            page.mouse.up()
         finally:
             ctx.close()
 
