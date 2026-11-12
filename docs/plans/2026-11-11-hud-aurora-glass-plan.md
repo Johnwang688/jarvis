@@ -1,6 +1,6 @@
 # HUD aurora glass — plan (2026-11-11)
 
-**Status (2026-11-12):** AG-1 #347, AG-1c #348 and AG-2 #349 merged; AG-3 #350 in review; AG-4 (docs) done, stacked on AG-3.
+**Status (2026-11-12):** AG-1 #347, AG-1c #348, AG-2 #349, AG-3 #350 and AG-4 #351 (docs) merged. Not yet installed in the live HUD (owner's go pending). Phone theming (AG-5) is out of scope here.
 
 The owner asked for the HUD to move to the Aurora glass style (the `claude-ui:deep-blue`
 family): frosted glass panes over a moving aurora, keeping today's glacier cyan, with the
