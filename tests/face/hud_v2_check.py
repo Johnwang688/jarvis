@@ -3355,6 +3355,15 @@ def main():
             finally:
                 aurora_mock.stop()
 
+            # The appearance colours (AG-3): a context and a mock of their own too.
+            from tests.face.hud_v2_appearance_check import appearance_checks
+            appearance_mock = MockDaemon(0).start()
+            try:
+                appearance_checks(browser, appearance_mock, f"http://127.0.0.1:{appearance_mock.port}", check, until,
+                                  guard, FAKE_RECOGNIZER)
+            finally:
+                appearance_mock.stop()
+
             # The terminals (WP-D): a context and a mock of their own too, the
             # PTY played in the browser (no shell, no HOME).
             from tests.face.hud_v2_terminal_check import terminal_checks

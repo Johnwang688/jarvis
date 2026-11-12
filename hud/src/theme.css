@@ -2484,7 +2484,7 @@ code, pre, kbd, samp, .monaco-editor, .monaco-diff-editor, .xterm, .termhost { w
    an error and so keeps the error colour. */
 .appearance-colour { margin: 6px 0; }
 .appearance-colour input[type="color"] { width: 40px; height: 22px; padding: 0; vertical-align: middle; border: 1px solid var(--border-strong); background: none; cursor: pointer; }
-.appearance-colour code { font-family: var(--mono); color: var(--text-muted); }
+.appearance-colour code { font-family: var(--mono); word-spacing: normal; color: var(--text-muted); }
 .appearance-note { margin: 2px 0 0; font-size: 12px; }
 .appearance-note.refused { color: var(--red); }
 .appearance-note.clamped { color: var(--text-muted); }

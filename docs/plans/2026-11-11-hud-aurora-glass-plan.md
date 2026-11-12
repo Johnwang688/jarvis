@@ -101,13 +101,40 @@ Rules (unit-tested in `lib/appearance.test.ts`, mutation-checked):
 - **Live apply.** A change re-themes Monaco, xterm and the orb without a reload.
 - **Storage.** Saved in `localStorage` `jarvis.hud.appearance` (behind try/catch, like `jarvis.hud.editor`); a corrupt record falls back to the default. It is a per-window convenience: nothing is sent to the daemon, and nothing in it is trusted.
 
+### AG-3 as built (2026-11-12)
+
+Code: `lib/oklch.ts` (colour maths), `lib/appearance.ts` (the rules, derivation, storage), `lib/appearanceApply.ts`
+(sets `:root`, installed in `main.tsx` before React and before the aurora), the colour pickers in
+`components/AuroraSetting.tsx`. Tests: `lib/appearance.test.ts`; browser: `tests/face/hud_v2_appearance_check.py`.
+Judgement calls, each pinned by a test:
+
+- **Hue band** (OKLCH): 5 to 105 degrees. `--red` is at 22 and `--amber` at 84, so 17 degrees below red and 21 above
+  amber. Refused for an accent at chroma >= 0.04; below that it is a near-grey and any hue is fine.
+- **Distance**: no accent or wash within OKLab distance 0.12 of `--amber` or `--red` (they are 0.21 apart). This also
+  catches the pinks just outside the band; the price is that a red-lightness pink is refused (it also fails 3:1).
+- **Washes and base**: the same guard, with a chroma floor of 0.05 (a dull dark brown is allowed). A wash is *clamped*
+  to luminance <= `#2a8fa0`'s (0.227) by lowering OKLCH lightness, hue and chroma kept, gamut-mapped. A sweep of every
+  hue at four chromas keeps `--text` 4.5:1, `--text-muted` 3:1 and the default accent 3:1 on the pane at the cap. The
+  base is clamped to 1.5x `#0a1116`'s luminance; darker is fine. `--bg-0` follows `--base`.
+- **Accent contrast**: 3:1 against the pane (tint .50, sheen peak .09, constants pinned to theme.css) over the brighter
+  of the current washes and the default brightest wash. A wash change that would break the accent is refused.
+- **Derivation**: `--accent-hi`, `--syn-fn` and the orb's "composing" hue are computed from the default cyan's own
+  OKLCH relationships (lightness step, chroma ratio, hue step), so the default reproduces today's hex exactly. Alphas
+  .14/.45 stay; `::selection` (.30), the on-button hover (.22) and the fast badge border (.4) became tokens
+  (`--accent-sel`, `--accent-hover`, `--accent-badge`). The orb reads its cool hues from `orbpalette.setCoolHues`.
+- **Stored vs applied**: storage keeps well-formed `#rrggbb` only; `resolveColours` re-checks every field before it is
+  applied, so a hand-edited record cannot apply amber, `url()` or a bright wash.
+- Known gap: the derived `--accent-hi`/`--syn-fn` are not themselves guard-checked (they stay within about 40 degrees of
+  the checked accent, and no test sweep found one in the band, but an accent at the band edge can have a relative that
+  grazes it).
+
 ## 5. Work packages
 
 | PR | Scope | Builder → verifier | Size |
 |---|---|---|---|
 | **AG-1 Glass tokens + static aurora** | New tokens in `theme.css`: `--base`, `--wash-1..3` (new names; `--aurora-*` stays the inbox row's), `--glass-pane`, `--glass-solid`, `--glass-sheen`, `--rim`, `--glass-shadow`, `--blur`, cool text. Every pane and the chrome get the glass paint; floating layers get real blur with the `@supports` fallback. A still CSS aurora wash behind `#root`. Monaco/xterm transparency. Terminal's hard-coded hexes ([Terminal.tsx:92](../../hud/src/components/Terminal.tsx)), `BootOverlay` and `annotate.ts` read tokens instead. `aurora.test.ts`, `editorTheme.test.ts`, `orbpalette.test.ts` and `vexTheme.test.ts` recompute contrast against the glass composites. Browser review with screenshots, including the inbox row (L-4). | Sonnet → Sol | ~500–700 changed CSS lines, ~150 TS |
 | **AG-2 Fluid aurora** | Port `fluid.web.ts`, `renderer.web.ts`, `gl.web.ts`, `controller.web.ts` and `loop.ts` (~1,270 lines, the owner's own code) into `hud/src/aurora/`, dropping the React Native parts. A full-window half-res canvas under `#root` content. Pointer stirring (L-1), flow fallback (L-2), hidden-pause, context-loss still, reduced-motion still frame, 30 fps software cap. Lifecycle tests ported from the Bible app's suite. The §3 perf budget measured and recorded here. | Sonnet (port) → Sol; the lead runs the perf measurement | ~1,300 TS + ~600 tests |
-| **AG-3 Appearance settings** | `lib/appearance.ts` (validation, OKLCH derivation, hue and contrast guards, storage) and `components/AppearanceSettings.tsx`. Live re-theme of Monaco, xterm and the orb. Tests for every §4 rule, with negative cases and a mutation check on the hue guard (the boundary piece). | Sonnet → Sol | ~400 TS + ~300 tests |
+| **AG-3 Appearance settings** (BUILT 2026-11-12, see §4 "AG-3 as built") | `lib/appearance.ts` (validation, OKLCH derivation, hue and contrast guards, storage) and `components/AppearanceSettings.tsx`. Live re-theme of Monaco, xterm and the orb. Tests for every §4 rule, with negative cases and a mutation check on the hue guard (the boundary piece). | Sonnet → Sol | ~400 TS + ~300 tests |
 | **AG-4 Docs** | CLAUDE.md's "The HUD uses **Graphite**…" sentence becomes the aurora glass rule (cyan default, customisable accent, fixed amber/red). Update `docs/notes/hud-workspace.md` and the `theme.css` header comment. Before merging, grep `tests/face/*` and `hud/src` for pinned "Graphite" text (seven `tests/face` checks and `views.test.ts`, `monaco.ts`, `VexView.tsx` mention it). | Haiku → Sol | small |
 
 AG-1 → AG-2 → AG-3 run in order. AG-4 can land with AG-3. Each PR follows the usual workflow:
