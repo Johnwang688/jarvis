@@ -5,7 +5,7 @@ import {
   accentContrast, checkAccent, checkBase, checkWash, colourProps, deriveAccent, impersonatesMeaning, loadAppearance, normHex,
   parseAppearance, resolveColours, saveAppearance,
 } from "./appearance";
-import { deltaE, hexLch, lchHex, luminance } from "./oklch";
+import { deltaE, hexLch, lchHex, luminance, rgbHex } from "./oklch";
 import { contrast } from "./editorTheme";
 import { applyAppearance, MANAGED_PROPS } from "./appearanceApply";
 import { DEFAULT_COOL, palette, setCoolHues } from "./orbpalette";
@@ -123,14 +123,18 @@ describe("the accent hue guard", () => {
     expect(checkAccent(far).ok).toBe(true);
   });
 
-  it("every hue angle at a saturated chroma inside the band is refused, outside it is let through", () => {
+  it("every hue angle is refused if the pick or any relative impersonates a meaning colour", () => {
     for (let h = 0; h < 360; h += 3) {
       const hex = lchHex({ L: 0.78, C: 0.13, h });
       const lch = hexLch(hex);
       const inBand = lch.h >= WARM_BAND.from && lch.h <= WARM_BAND.to;
       const r = checkAccent(hex);
       if (inBand) expect(r.ok, `h=${h} ${hex}`).toBe(false);
-      else if (deltaE(hex, RED) >= MEANING_DELTA_E && deltaE(hex, AMBER) >= MEANING_DELTA_E) expect(r.ok, `h=${h} ${hex}`).toBe(true);
+      else {
+        const d = deriveAccent(hex);
+        const pigments = [hex, d.props["--accent-hi"], d.props["--syn-fn"], ...Object.values(d.orb).map((v) => rgbHex(v.split(",").map(Number) as [number, number, number]))];
+        expect(r.ok, `h=${h} ${hex}`).toBe(!pigments.some((v) => impersonatesMeaning(v, ACCENT_CHROMA_FLOOR)));
+      }
     }
   });
 
@@ -153,6 +157,37 @@ describe("the accent hue guard", () => {
       if (r.ok) expect(r.value).toBe(ok);
     }
   });
+
+  it("refuses safe-looking picks whose derived hue or distance crosses the boundary", () => {
+    // hi: hue 104.8; fn: hue 103; composing: hue 75. hi of the second pick is only 0.117 from amber.
+    for (const hex of ["#b0ae7e", "#b1ae76"]) {
+      expect(impersonatesMeaning(hex, ACCENT_CHROMA_FLOOR)).toBe(false);
+      expect(accentContrast(hex)).toBeGreaterThanOrEqual(3);
+      expect(checkAccent(hex)).toMatchObject({ ok: false, reason: expect.stringContaining("amber or red") });
+      expect(resolveColours({ accent: hex }).accent).toBe(DEFAULT_ACCENT);
+    }
+  });
+
+  it("sweeps the band edges and near-greys: every accepted token and orb pigment stays safe", () => {
+    let accepted = 0, nearGrey = 0;
+    for (let h = 0; h < 360; h += 2) {
+      if (h > 120 && h < 330) continue;
+      for (const L of [0.6, 0.7, 0.74, 0.8, 0.86, 0.92, 0.98]) {
+        for (const C of [0.01, 0.028, 0.039, 0.04, 0.041, 0.06, 0.08, 0.12, 0.2, 0.3]) {
+          const hex = lchHex({ L, C, h });
+          if (!checkAccent(hex).ok) continue;
+          accepted++;
+          if (hexLch(hex).C < ACCENT_CHROMA_FLOOR) nearGrey++;
+          const d = deriveAccent(hex);
+          // Alpha tokens share the accent pigment; the focus ring, badge and xterm cyan/cursor do too.
+          const pigments = [hex, d.props["--accent-hi"], d.props["--syn-fn"], ...Object.values(d.orb).map((v) => rgbHex(v.split(",").map(Number) as [number, number, number]))];
+          for (const value of pigments) expect(impersonatesMeaning(value, ACCENT_CHROMA_FLOOR), `${hex} -> ${value}`).toBe(false);
+        }
+      }
+    }
+    expect(accepted).toBeGreaterThan(500);
+    expect(nearGrey).toBeGreaterThan(500);
+  });
 });
 
 describe("the accent contrast guard", () => {
@@ -174,9 +209,24 @@ describe("the accent contrast guard", () => {
   it("is measured against the brightest wash in use, and the default brightest one", () => {
     expect(accentContrast("#808080", ["#000000", "#000000", "#000000"])).toBeCloseTo(accentContrast("#808080", [...DEFAULT_WASHES]), 6);
   });
+  it("rechecks the current washes even when they satisfy the wash luminance cap", () => {
+    const wash = checkWash("#ffffff");
+    expect(wash.ok).toBe(true);
+    if (!wash.ok) return;
+    expect(checkAccent("#ababab").ok).toBe(true);
+    expect(checkAccent("#ababab", [wash.value, wash.value, wash.value]).ok).toBe(false);
+    expect(resolveColours({ accent: "#ababab", washes: [wash.value, wash.value, wash.value] }).accent).toBe(DEFAULT_ACCENT);
+  });
 });
 
 describe("the wash clamp", () => {
+  it("rechecks the rounded clamped wash against the chroma floor and hue band", () => {
+    for (const hex of ["#dbb1b9", "#dbb1b8", "#cca2a3"]) {
+      expect(impersonatesMeaning(hex, 0.05)).toBe(false);
+      expect(checkWash(hex)).toMatchObject({ ok: false, reason: expect.stringContaining("amber or red") });
+      expect(resolveColours({ washes: [hex, hex, hex] }).washes).toEqual(DEFAULT_WASHES);
+    }
+  });
   it("darkens a too-bright wash (not refuses it) to at most the default brightest wash's luminance", () => {
     expect(WASH_MAX_LUMINANCE).toBeCloseTo(0.227, 2);
     for (const bright of ["#ffffff", "#80ffff", "#a0e0ff", "#c0aef5", "#60ff90", "#ffffcc00".slice(0, 7), "#9999ff", "#e0b0ff"]) {

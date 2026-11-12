@@ -20,6 +20,11 @@ export type Lab = { L: number; a: number; b: number };
 
 export function rgbToLab(rgb: Rgb): Lab {
   const [r, g, b] = rgb.map((n) => lin(n / 255));
+  return linearToLab(r!, g!, b!);
+}
+
+/** OKLab of a linear-light sRGB colour (channels 0..1). The hot path of the whole-palette check. */
+export function linearToLab(r: number, g: number, b: number): Lab {
   const l = Math.cbrt(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b);
   const m = Math.cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b);
   const s = Math.cbrt(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b);
