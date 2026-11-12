@@ -1,4 +1,4 @@
-/* B-PICKERS: the owner's overlay for a native picker (Graphite: raised
+/* B-PICKERS: the owner's overlay for a native picker (aurora glass: raised
    off-black, glacier-cyan highlight; never amber or red, which mean pending
    and error). Positioned inside the Remote surface by RemotePicker. */
 .remotepicker{position:absolute;z-index:6;display:flex;flex-direction:column;box-sizing:border-box;max-width:100%;min-height:0;overflow:hidden;

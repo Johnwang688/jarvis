@@ -267,7 +267,7 @@ export function foldList(list: Subagent[], replay: readonly SubBus[]): Subagent[
 // ---- what a row says --------------------------------------------------------
 
 export type StatusTone = "live" | "done" | "failed" | "stopped";
-/** Always a word; the tone picks its Graphite colour (amber live, green done, red failed, muted stopped). */
+/** Always a word; the tone picks its colour (amber live, green done, red failed, muted stopped). */
 export function statusMark(s: SubStatus): { word: string; tone: StatusTone } {
   switch (s) {
     case "running": return { word: "running", tone: "live" };

@@ -89,7 +89,7 @@ export function useQuickReview(taskId: string | null): QuickReview {
 
 /** The Diff tab header's one button (D8): "Quick review", or, while one runs,
  *  a spinner, the harness and Cancel. A plain `button`, so PR #210's 4px
- *  rectangle and the Graphite colours. */
+ *  rectangle and the HUD colours. */
 export function QuickReviewButton(props: { review: QuickReview }) {
   const { view, pending, running, press } = props.review;
   const trying = view?.review?.trying;

@@ -6,12 +6,12 @@ rules here; put history, review findings and measured results in the area
 note. Keep this guide near 38–40 KB.
 
 The previous file is preserved verbatim in [area notes](#area-index), with a
-[migration manifest](docs/notes/claude-migration.json). Those notes mix live rules,
-dated findings and superseded behavior. Moving a rule does **not** revoke
-its safety obligations. Summaries here are not permission to omit a guard:
+[migration manifest](docs/notes/claude-migration.json). Those notes mix live
+rules, dated findings and superseded behavior. Moving a rule does **not**
+revoke its safety obligations; summaries here do not permit omitting a guard:
 read the complete relevant notes before changing a boundary. Resolve conflicts
 by the latest explicit owner decision and current code. Historical “live”
-claims are not new deployment receipts.
+claims are no deployment receipts.
 
 Invariants and decisions are retained byte for byte.
 
@@ -100,8 +100,11 @@ permanent delete is owner HUD-only, archived-only, into trash, never project
 folders/worktrees. Never `_Store._delete` a project. `Daemon.start()` never calls
 a model. Quota, title, cost and cache claims need evidence.
 
-The HUD uses **Graphite**: warm off-black/glacier-cyan, amber pending/red error,
-overriding the global palette. Preserve dimensions, input behavior and owner
+The HUD uses **aurora glass**: frosted panes over a moving fluid aurora, glacier-cyan
+default accent, local Plus Jakarta Sans/Geist Mono, overriding the global palette.
+Amber pending/red error keep exact values; no custom accent, wash or derived
+colour comes near them. Custom colours are `#rrggbb`; bright washes clamp (D-8).
+The aurora never takes focus or input ([plan](docs/plans/2026-11-11-hud-aurora-glass-plan.md)). Preserve dimensions, input behavior and owner
 workspace/editor/Browser decisions. Driving uses owner switches.
 Owner HTTP Basic/Digest auth uses only the exact private tab socket;
 credentials never enter tools, replay, status, logs or config (Browser note,
@@ -199,11 +202,10 @@ summaries do not replace detailed matchers, exceptions or owner choices.
 
 ## Testing and operating the checkout
 
-Use focused free checks, then the integration sweep. Independent review
-and real tests precede merging. Keep negative cases and mutation evidence
-for subtle boundary invariants. Read actual suite summaries, not a wrapper's exit
-code. Report whether a result is committed, merged, built, browser-tested,
-installed or live-validated.
+Use focused free checks, then the integration sweep. Independent review and
+real tests precede merging. Keep negative cases and mutation evidence for
+boundary invariants. Read suite summaries, not a wrapper's exit code. Report
+whether a result is committed, merged, built, browser-tested, installed or live.
 
 In this WSL workflow, cap each test/build tree with
 `systemd-run --user --scope -q -p MemoryMax=3G -p MemorySwapMax=0`. Use the
@@ -211,15 +213,15 @@ worktree's PYTHONPATH/shared venv. Tests use temporary HOME/config,
 fake providers and ephemeral ports, never live 8402/8403/8405 or owner state.
 Browser tests need an isolated mock server; do not operate the live daemon.
 
-Under load, wait for the actual state, not a sleep. Measure with a clock
-suited to the path; keep active deadlines, pin guard-strength constants and
-prove costly mutations still fail.
-Fake-monotonic expiry must be relative. Count product faults apart from teardown.
+Under load, wait for the actual state, not a sleep. Use a clock suited to the
+path; keep active deadlines, pin guard-strength constants, prove costly
+mutations still fail. Fake-monotonic expiry is relative. Count product faults
+apart from teardown.
 
-Budget paid probes. Do not pool agent-bench, long-bench and SWE-bench
+Budget paid probes. Never pool agent-bench, long-bench and SWE-bench
 scores ([runbook](swecompare/RUNBOOK.md),
-[inventory](docs/notes/testing-benchmarks.md)). Verify old prices and model
-comparisons. The [old validation list](docs/notes/live-validation.md) is history.
+[inventory](docs/notes/testing-benchmarks.md)). Verify old prices and
+model comparisons.
 
 ## Area index
 
@@ -227,12 +229,12 @@ comparisons. The [old validation list](docs/notes/live-validation.md) is history
 |---|---|
 | Purpose, WSL and v1 architecture | [Orientation](docs/notes/orientation.md) |
 | v2 providers, steering, accounting | [Runtime](docs/notes/providers-runtime.md), [design](docs/jarvis-v2-design.md) |
-| Gates, owner routes, session MCP | [Control plane](docs/notes/control-plane.md), [MCP decisions](docs/plans/2026-10-10-terminal-read-mcp-decisions.md) |
+| Gates, owner routes, session MCP | [Control plane](docs/notes/control-plane.md) |
 | Permissions, secrets, runners, Git | [Safety](docs/notes/safety-permissions.md), [env rule](docs/plans/2026-10-11-env-files.md) |
-| Discord commands/channels/reports | [Discord](docs/notes/discord.md), [plan](docs/plans/2026-10-07-discord-plan.md) |
+| Discord commands/channels/reports | [Discord](docs/notes/discord.md) |
 | HUD chats/layout/installed app | [Workspace](docs/notes/hud-workspace.md), [decisions](docs/plans/2026-10-09-hud-workspace-decisions.md) |
 | Files, editor, diffs and settings | [Editor](docs/notes/editor.md), [decisions](docs/plans/2026-10-09-hud-editor-decisions.md) |
-| Browser, preview, auto-open and looks | [Browser](docs/notes/browser.md), [decisions](docs/plans/2026-10-10-hud-browser-decisions.md), [amendment 2](docs/plans/2026-10-12-hud-browser-plan-amendment-2.md) |
+| Browser, preview, auto-open and looks | [Browser](docs/notes/browser.md), [decisions](docs/plans/2026-10-10-hud-browser-decisions.md) |
 | PTYs and terminal reads | [Terminals](docs/notes/terminals.md) |
 | VEX build/device/project work | [VEX](docs/notes/vex.md) |
 | Loop/transcript contracts | [Invariant snapshot](docs/notes/invariants.md); active copy below |

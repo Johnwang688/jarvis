@@ -1,6 +1,6 @@
 // @vitest-environment node
 // The VEX view's colours (VX-UI-2, plan §3.1, §8): **amber is never a VEX
-// result**. In Graphite amber means an approval card is pending; in the VEX
+// result**. In aurora glass amber means an approval card is pending; in the VEX
 // view only the status line's "Held" says that. Read from the stylesheet the
 // window loads, so a mark, badge, help number or stale note that took amber
 // fails here, not only in a browser check.

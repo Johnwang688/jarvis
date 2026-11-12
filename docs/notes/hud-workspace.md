@@ -2027,3 +2027,66 @@ anchoring the card at the top, so neither the summary landing nor the
 command opening moves a button. `hud_v2_layout_check` now asserts AUTHORIZE
 is in reach before any scrolling. Details: `docs/notes/control-plane.md`,
 "Approval summaries (AS)", and `docs/plans/2026-10-28-approval-summaries.md`.
+
+## Aurora glass restyle (2026-11-12)
+
+Not part of the archived payload above. **Supersedes the desktop HUD's Graphite
+look** (warm off-black, "one sparing accent"); every older "Graphite" statement
+in this note, and in the editor, Browser and runtime notes, describes the desktop
+look as it was then. The phone (`hud/src/mobile/*`) still uses Graphite (AG-5,
+later). Source of truth: `docs/plans/2026-11-11-hud-aurora-glass-plan.md`.
+
+**What changed.** Every desktop pane and the chrome are frosted glass over a
+moving fluid aurora. Glacier cyan (`#6fc3df`) stays the default accent; the
+surfaces and text moved to cool neutrals. Plus Jakarta Sans (UI) and Geist Mono
+(code) are bundled from `@fontsource` (exact-pinned, latin, `font-src 'self'
+data:` unchanged). Panes are not `backdrop-filter`ed: a translucent tint
+(`--glass-pane`), sheen, 1px rim and inset highlight over an already-soft field;
+real blur only on floating layers (menus, pickers, modals, approval cards,
+toasts). Dense text (Monaco, xterm, transcript, diff) uses `--glass-solid`.
+Sizes, radii of buttons (4px) and layout are unchanged; the owner Inbox row keeps
+its own aurora band.
+
+**PRs.** #347 AG-1 glass tokens and still aurora; #348 AG-1c 0.1em word spacing
+and capped model chip; #349 AG-2 the fluid; #350 AG-3 Appearance settings; this
+docs package is AG-4. Decisions D-1..D-11 are in the plan.
+
+**Fixed meanings (tighten-only).** Amber = pending/running, red = error, green =
+done keep their exact hexes. No custom accent, wash or base may enter the
+amber/red band (OKLCH hue 5-105 at chroma >= 0.04, or OKLab distance < 0.12 of
+either); refused, never shifted. Approval cards and error surfaces are never
+repainted.
+
+**D-8 contrast floors.** `--text` 4.5:1 on a pane and on `--glass-solid`;
+secondary/muted text, accent and small amber/red/green marks 3:1, measured over
+the brightest wash at full strength. Accepted exceptions (owner): red marks 2.4:1
+on a pane at the brightest wash, 2.2:1 / 2.1:1 on hovered/selected rows. Amber/red
+text on approval cards, error banners and toasts is 4.5:1 on `--glass-float`.
+`lib/glass.test.ts` recomputes these from `theme.css`. Washes are clamped to
+luminance <= `#2a8fa0`'s, the base to 1.5x `#0a1116`'s, at pick time and again
+when applied.
+
+**Fluid (D-10, D-11).** `hud/src/aurora/` (WebGL2, half resolution) under every
+pane. Slow drift at rest; stirring raises an `energy` value (vorticity, longer
+velocity life) that decays with a 1.6 s time constant. Stirred by a passive
+`pointermove` on `window` (never `preventDefault`, no focus, nothing over Browser
+frames) and by a soft, wash-coloured, rate-limited ripple (one per pane per 0.9 s,
+three per 2 s) while a chat streams. Flow is the no-GPU fallback (30 fps); Still
+and reduced motion show one frame; paused while hidden; context loss shows the
+CSS wash. The canvas is `pointer-events:none`, `aria-hidden`, unfocusable.
+
+**Appearance settings (AG-3).** Settings → Appearance: accent, three washes and a
+base, Style (Fluid/Flow/Still), Stir with the pointer, Reset. Guards: `#rrggbb`
+only (nothing else reaches `style.setProperty`); the hue/distance guard above;
+accent 3:1 on the pane over the brighter wash; bright washes clamped; every
+derived accent token is computed in OKLCH from the default so the default is
+byte-exact. Stored in `localStorage['jarvis.hud.appearance']` (per window, never
+sent to the daemon, re-validated on apply). Details: plan §4 "AG-3 as built".
+
+**Stats overlay.** `localStorage['jarvis.hud.auroraStats']='1'`, reload (or
+`'fluid'` to force the fluid on software rendering).
+
+**Known gaps.** GPU performance is unmeasured on the owner's machine (the
+60 fps / 4 ms budget): the recorded numbers are headless SwiftShader only.
+The phone is not themed (AG-5). The derived `--accent-hi`/`--syn-fn` are not
+themselves guard-checked. A live look at the HUD after install is the owner's.

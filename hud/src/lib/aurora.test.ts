@@ -3,7 +3,7 @@ import css from "../theme.css?raw";
 import { contrast, hueSat, isWarm } from "./editorTheme";
 
 // The owner inbox row's aurora (owner, 2026-10-25): an owner-approved
-// exception to Graphite's one sparing accent. These checks recompute, from
+// exception to the old Graphite look's one sparing accent. These checks recompute, from
 // theme.css itself, what the exception promised: dim, low-saturation hues
 // outside the amber/red band, the row's text AA over every blend, never
 // brighter than the text, the amber count still amber on an opaque chip, and

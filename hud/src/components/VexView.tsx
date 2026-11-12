@@ -590,7 +590,7 @@ function MoreMenu(props: { blocked: boolean; configured: boolean; tip: (id: Help
  * One line, never folded (plan §2.3): the running chain (in **every** VEX
  * view, M1), else this project's running build, else its last result in
  * words, else Ready. Stop sits at its end while something can be stopped.
- * Under a card it says Held, in amber: amber's one meaning in Graphite.
+ * Under a card it says Held, in amber: amber's one meaning in aurora glass.
  */
 function StatusLine(props: { pane: number; pid: string | null; d: Detection | null; blocked: boolean }) {
   const { pid, blocked } = props;

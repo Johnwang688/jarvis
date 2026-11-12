@@ -1,5 +1,7 @@
 # HUD aurora glass — plan (2026-11-11)
 
+**Status (2026-11-12):** AG-1 #347, AG-1c #348 and AG-2 #349 merged; AG-3 #350 in review; AG-4 (docs) done, stacked on AG-3.
+
 The owner asked for the HUD to move to the Aurora glass style (the `claude-ui:deep-blue`
 family): frosted glass panes over a moving aurora, keeping today's glacier cyan, with the
 accent and aurora colours customisable. This plan records the owner's answers, then splits
@@ -135,7 +137,7 @@ Judgement calls, each pinned by a test:
 | **AG-1 Glass tokens + static aurora** | New tokens in `theme.css`: `--base`, `--wash-1..3` (new names; `--aurora-*` stays the inbox row's), `--glass-pane`, `--glass-solid`, `--glass-sheen`, `--rim`, `--glass-shadow`, `--blur`, cool text. Every pane and the chrome get the glass paint; floating layers get real blur with the `@supports` fallback. A still CSS aurora wash behind `#root`. Monaco/xterm transparency. Terminal's hard-coded hexes ([Terminal.tsx:92](../../hud/src/components/Terminal.tsx)), `BootOverlay` and `annotate.ts` read tokens instead. `aurora.test.ts`, `editorTheme.test.ts`, `orbpalette.test.ts` and `vexTheme.test.ts` recompute contrast against the glass composites. Browser review with screenshots, including the inbox row (L-4). | Sonnet → Sol | ~500–700 changed CSS lines, ~150 TS |
 | **AG-2 Fluid aurora** | Port `fluid.web.ts`, `renderer.web.ts`, `gl.web.ts`, `controller.web.ts` and `loop.ts` (~1,270 lines, the owner's own code) into `hud/src/aurora/`, dropping the React Native parts. A full-window half-res canvas under `#root` content. Pointer stirring (L-1), flow fallback (L-2), hidden-pause, context-loss still, reduced-motion still frame, 30 fps software cap. Lifecycle tests ported from the Bible app's suite. The §3 perf budget measured and recorded here. | Sonnet (port) → Sol; the lead runs the perf measurement | ~1,300 TS + ~600 tests |
 | **AG-3 Appearance settings** (BUILT 2026-11-12, see §4 "AG-3 as built") | `lib/appearance.ts` (validation, OKLCH derivation, hue and contrast guards, storage) and `components/AppearanceSettings.tsx`. Live re-theme of Monaco, xterm and the orb. Tests for every §4 rule, with negative cases and a mutation check on the hue guard (the boundary piece). | Sonnet → Sol | ~400 TS + ~300 tests |
-| **AG-4 Docs** | CLAUDE.md's "The HUD uses **Graphite**…" sentence becomes the aurora glass rule (cyan default, customisable accent, fixed amber/red). Update `docs/notes/hud-workspace.md` and the `theme.css` header comment. Before merging, grep `tests/face/*` and `hud/src` for pinned "Graphite" text (seven `tests/face` checks and `views.test.ts`, `monaco.ts`, `VexView.tsx` mention it). | Haiku → Sol | small |
+| **AG-4 Docs** (DONE 2026-11-12) | CLAUDE.md's "The HUD uses **Graphite**…" sentence becomes the aurora glass rule (cyan default, customisable accent, fixed amber/red). Update `docs/notes/hud-workspace.md` and the `theme.css` header comment. Before merging, grep `tests/face/*` and `hud/src` for pinned "Graphite" text (seven `tests/face` checks and `views.test.ts`, `monaco.ts`, `VexView.tsx` mention it). | Haiku → Sol | small |
 
 AG-1 → AG-2 → AG-3 run in order. AG-4 can land with AG-3. Each PR follows the usual workflow:
 worktree build, `systemd-run` memory caps, isolated mock-server browser tests (never the live
