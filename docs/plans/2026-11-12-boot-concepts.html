@@ -1,0 +1,537 @@
+<title>Jarvis Boot Concepts</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;700;800&family=Geist+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: one shared WebGL aurora (with a droplet lens and ripples) under a 2D effects canvas and HTML glass; a concept switcher top-left; playback controls bottom-right. */
+:root {
+  color-scheme: dark;
+  --base: #0a1116;
+  --text: #eaf2f6; --text-2: #c4d0d8; --muted: #b0bfc8;
+  --accent: #6fc3df;
+  --rim: rgba(255, 255, 255, 0.16);
+  --glass: rgba(12, 20, 27, 0.62);
+  --ui: "Plus Jakarta Sans", "Segoe UI", system-ui, sans-serif;
+  --mono: "Geist Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body { margin: 0; overflow: hidden; background: var(--base); color: var(--text); font: 13px/1.45 var(--ui); word-spacing: 0.1em; }
+#gl, #fx { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+#panes { position: fixed; inset: 0; pointer-events: none; perspective: 1400px; }
+#panes > div {
+  position: absolute; border-radius: 12px; border: 1px solid rgba(255,255,255,0.18); opacity: 0; overflow: hidden;
+  background: linear-gradient(160deg, rgba(255,255,255,0.12), rgba(255,255,255,0.03) 40%, rgba(255,255,255,0.05)), rgba(11,19,25,0.46);
+  -webkit-backdrop-filter: blur(16px) saturate(1.5); backdrop-filter: blur(16px) saturate(1.5);
+  box-shadow: inset 1px 1px 0 rgba(255,255,255,0.3), inset -1px -1px 0 rgba(255,255,255,0.06), 0 24px 50px rgba(0,0,0,0.35);
+  transform-origin: 50% 100%;
+}
+#panes > div::after { content: ""; position: absolute; inset: -40%; background: linear-gradient(115deg, transparent 42%, rgba(255,255,255,0.22) 50%, transparent 58%); transform: translateX(var(--sweep, -120%)); }
+#panes .ln { position: absolute; left: 18px; right: 18px; top: 18px; display: grid; gap: 10px; opacity: var(--lines, 0); }
+#panes .ln i { display: block; height: 9px; border-radius: 4px; background: rgba(234,242,246,0.12); }
+#panes .ln i.hi { background: rgba(111,195,223,0.42); }
+#word { position: fixed; left: 0; right: 0; display: grid; justify-items: center; gap: 12px; pointer-events: none; opacity: 0; text-align: center; }
+#word h1 {
+  margin: 0; font: 700 clamp(44px, 6.6vw, 84px)/1 var(--ui); letter-spacing: -0.04em; word-spacing: normal;
+  background: linear-gradient(180deg, #ffffff 15%, rgba(206,232,244,0.85) 100%);
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+  filter: drop-shadow(0 8px 28px rgba(4, 12, 20, 0.55));
+}
+#word p { margin: 0; font: 400 12px/1 var(--mono); letter-spacing: 0.36em; word-spacing: normal; text-transform: uppercase; color: rgba(214,232,242,0.7); }
+
+.chrome {
+  position: fixed; z-index: 5; border-radius: 14px; border: 1px solid var(--rim);
+  background: linear-gradient(160deg, rgba(255,255,255,0.12), rgba(255,255,255,0.03) 45%), var(--glass);
+  -webkit-backdrop-filter: blur(20px) saturate(1.4); backdrop-filter: blur(20px) saturate(1.4);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.18), 0 16px 36px rgba(0,0,0,0.4);
+}
+#switch { top: calc(12px + env(safe-area-inset-top, 0px)); left: max(12px, env(safe-area-inset-left, 0px)); padding: 6px; display: flex; flex-wrap: wrap; gap: 4px; max-width: calc(100vw - 24px); }
+#switch button { font: 600 12.5px var(--ui); color: var(--text-2); background: transparent; border: 1px solid transparent; border-radius: 9px; padding: 8px 12px; cursor: pointer; min-height: 36px; display: inline-flex; gap: 8px; align-items: center; }
+#switch button span { font: 500 11px var(--mono); color: var(--muted); word-spacing: normal; }
+#switch button[aria-pressed="true"] { color: var(--text); background: rgba(111,195,223,0.16); border-color: rgba(111,195,223,0.55); }
+#switch button:hover { color: var(--text); }
+#info { right: max(12px, env(safe-area-inset-right, 0px)); bottom: calc(12px + env(safe-area-inset-bottom, 0px)); width: min(320px, calc(100vw - 24px)); padding: 12px 14px; display: grid; gap: 8px; color: var(--text-2); }
+#info h2 { margin: 0; font: 600 13.5px/1.2 var(--ui); color: var(--text); }
+#info p { margin: 0; font-size: 12px; color: var(--muted); }
+.btns { display: flex; gap: 6px; }
+.btns button { flex: 1; font: 600 12px var(--ui); color: var(--text); background: rgba(255,255,255,0.07); border: 1px solid var(--rim); border-radius: 8px; padding: 8px 0; cursor: pointer; min-height: 34px; }
+.btns button:hover { border-color: var(--accent); }
+.opts { display: flex; gap: 14px; align-items: center; font-size: 12px; }
+.opts label { display: flex; gap: 6px; align-items: center; cursor: pointer; }
+input[type=checkbox] { accent-color: var(--accent); width: 15px; height: 15px; }
+input[type=range] { accent-color: var(--accent); width: 90px; }
+button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.hint { font-size: 11px; color: var(--muted); }
+.hint kbd { font: 500 10.5px var(--mono); border: 1px solid var(--rim); border-radius: 3px; padding: 0 4px; word-spacing: normal; }
+body.clean .chrome { display: none; }
+</style>
+
+<canvas id="gl" aria-hidden="true"></canvas>
+<div id="panes" aria-hidden="true"></div>
+<canvas id="fx" aria-hidden="true"></canvas>
+<div id="word" aria-hidden="true"><h1>Jarvis</h1><p>personal agent</p></div>
+
+<nav id="switch" class="chrome" aria-label="Boot concepts"></nav>
+<section id="info" class="chrome" aria-label="Concept details">
+  <h2 id="cTitle"></h2>
+  <p id="cDesc"></p>
+  <div class="btns"><button id="replay" type="button">Replay</button><button id="pause" type="button">Pause</button></div>
+  <div class="opts">
+    <label for="loop"><input id="loop" type="checkbox" checked> Loop</label>
+    <label for="speed">Speed <input id="speed" type="range" min="0.25" max="2" step="0.05" value="1"></label>
+  </div>
+  <div class="hint"><kbd>1</kbd>–<kbd>6</kbd> switch · <kbd>R</kbd> replay · <kbd>H</kbd> hide controls</div>
+</section>
+
+<script>
+"use strict";
+const PAL = { base: "#0a1116", w1: "#2a8fa0", w2: "#3468c4", w3: "#6450c4", accent: "#6fc3df" };
+const rgb01 = (h) => { const n = parseInt(h.slice(1), 16); return [((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255]; };
+const clamp01 = (x) => Math.max(0, Math.min(1, x));
+const seg = (t, a, b) => clamp01((t - a) / (b - a));
+const easeOutCubic = (x) => 1 - Math.pow(1 - x, 3);
+const easeInCubic = (x) => x * x * x;
+const easeInOutCubic = (x) => (x < 0.5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2);
+const spring = (x, z = 0.45, w = 10) => { if (x <= 0) return 0; if (x >= 1.8) return 1; const wd = w * Math.sqrt(1 - z * z);
+  return 1 - Math.exp(-z * w * x) * (Math.cos(wd * x) + (z * w / wd) * Math.sin(wd * x)); };
+function mulberry32(a) { return () => { a |= 0; a = (a + 0x6d2b79f5) | 0; let t = Math.imul(a ^ (a >>> 15), 1 | a);
+  t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+
+// ---------- shared WebGL: aurora, a glass droplet lens, and ripples ----------
+const FRAG = `
+precision highp float;
+uniform vec2 uRes; uniform float uT, uAur;
+uniform vec3 uBase, uW1, uW2, uW3, uAcc, uDrop;
+uniform vec4 uRip;
+float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+float noise(vec2 p){ vec2 i = floor(p), f = fract(p); vec2 u = f * f * (3.0 - 2.0 * f);
+  return mix(mix(hash(i), hash(i + vec2(1, 0)), u.x), mix(hash(i + vec2(0, 1)), hash(i + vec2(1, 1)), u.x), u.y); }
+float fbm(vec2 p){ float v = 0.0, a = 0.5; for (int i = 0; i < 5; i++) { v += a * noise(p); p = p * 2.03 + vec2(1.7, 9.2); a *= 0.5; } return v; }
+vec3 aurora(vec2 px){
+  vec2 uv = px / uRes.y; float t = uT * 0.07;
+  vec2 q = vec2(fbm(uv * 1.2 + vec2(0.0, t)), fbm(uv * 1.2 + vec2(5.2, -t)));
+  float n1 = fbm(uv + 1.7 * q + vec2(t * 0.8, 0.0));
+  float n2 = fbm(uv * 1.3 - 1.4 * q + vec2(0.0, t * 0.6) + 3.1);
+  float n3 = fbm(uv * 0.9 + 2.0 * q.yx + 7.7);
+  vec3 c = uBase;
+  c = mix(c, uW1, smoothstep(0.38, 0.82, n1) * 0.9);
+  c = mix(c, uW2, smoothstep(0.42, 0.88, n2) * 0.8);
+  c = mix(c, uW3, smoothstep(0.46, 0.92, n3) * 0.8);
+  return mix(uBase, c, uAur);
+}
+void main(){
+  vec2 p = vec2(gl_FragCoord.x, uRes.y - gl_FragCoord.y);
+  float px = max(1.0, uRes.y / 900.0);
+  vec2 off = vec2(0.0); float crest = 0.0;
+  if (uRip.z > 0.0) {
+    vec2 d = p - uRip.xy; float dist = length(d);
+    float front = uRip.z * uRes.y * 0.75, w = uRes.y * 0.05, x = dist - front;
+    float env = exp(-x * x / (w * w * 2.5)) * exp(-uRip.z * 0.9) * uRip.w;
+    float wave = sin(x / w * 3.14159);
+    off = d / (dist + 1.0) * wave * env * 18.0 * px;
+    crest = max(wave, 0.0) * env;
+  }
+  vec3 col = aurora(p + off) + vec3(0.6, 0.8, 0.9) * crest * 0.06;
+  if (uDrop.z > 0.5) {
+    vec2 d = p - uDrop.xy; float r = length(d), sd = r - uDrop.z;
+    float sh = (1.0 - smoothstep(0.0, 30.0 * px, sd)) * 0.3;
+    col *= 1.0 - sh * step(0.0, sd);
+    float a = 1.0 - smoothstep(-px, px, sd);
+    if (a > 0.0) {
+      vec2 n = d / (r + 1e-4);
+      float depth = clamp(-sd / max(1.0, uDrop.z * 0.35), 0.0, 1.0), bulge = (1.0 - depth) * (1.0 - depth);
+      vec3 refr = aurora(p - n * bulge * uDrop.z * 0.25 - d * 0.18);
+      vec3 g = refr * 1.25 + vec3(0.035, 0.045, 0.06);
+      vec2 L = normalize(vec2(-0.55, -0.83));
+      float rimA = pow(max(dot(n, L), 0.0), 2.5) * smoothstep(0.45, 1.0, bulge);
+      float rimB = pow(max(dot(n, -L), 0.0), 3.0) * smoothstep(0.6, 1.0, bulge);
+      float edge = 1.0 - smoothstep(0.0, 1.8 * px, abs(sd + 0.9 * px));
+      float spec = smoothstep(0.55, 0.0, length(d / uDrop.z - vec2(-0.38, -0.42))) * 0.25;
+      g += vec3(0.95, 0.98, 1.0) * (rimA * 0.6 + rimB * 0.18 + edge * 0.25 + spec) + uAcc * rimA * 0.1;
+      col = mix(col, g, a);
+    }
+  }
+  vec2 q = p / uRes - 0.5; col *= 1.0 - dot(q, q) * 0.5;
+  col += (hash(p + uT) - 0.5) / 255.0;
+  gl_FragColor = vec4(col, 1.0);
+}`;
+const glCv = document.getElementById("gl"), fx = document.getElementById("fx");
+const gl = glCv.getContext("webgl", { antialias: false, alpha: false });
+const ctx = fx.getContext("2d");
+const panesEl = document.getElementById("panes"), word = document.getElementById("word");
+let U = {}, W = 0, H = 0, dpr = 1, sd = 1, PANES = [];
+function compile(type, src) { const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s); if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s)); return s; }
+function initGL() {
+  const prog = gl.createProgram();
+  gl.attachShader(prog, compile(gl.VERTEX_SHADER, "attribute vec2 aPos; void main(){ gl_Position = vec4(aPos, 0.0, 1.0); }"));
+  gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, FRAG));
+  gl.bindAttribLocation(prog, 0, "aPos"); gl.linkProgram(prog);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
+  gl.useProgram(prog);
+  const b = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, b);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+  for (const n of ["uRes", "uT", "uAur", "uBase", "uW1", "uW2", "uW3", "uAcc", "uDrop", "uRip"]) U[n] = gl.getUniformLocation(prog, n);
+  gl.uniform3fv(U.uBase, rgb01(PAL.base)); gl.uniform3fv(U.uW1, rgb01(PAL.w1)); gl.uniform3fv(U.uW2, rgb01(PAL.w2));
+  gl.uniform3fv(U.uW3, rgb01(PAL.w3)); gl.uniform3fv(U.uAcc, rgb01(PAL.accent));
+}
+// One background frame: aurora strength, an optional droplet (css px), an optional ripple (centre, seconds since, strength).
+function bg(t, aur, drop, rip) {
+  gl.viewport(0, 0, glCv.width, glCv.height);
+  gl.uniform2f(U.uRes, glCv.width, glCv.height); gl.uniform1f(U.uT, t + 4); gl.uniform1f(U.uAur, aur);
+  gl.uniform3f(U.uDrop, drop ? drop[0] * dpr : 0, drop ? drop[1] * dpr : 0, drop ? drop[2] * dpr : 0);
+  gl.uniform4f(U.uRip, rip ? rip[0] * dpr : 0, rip ? rip[1] * dpr : 0, rip ? rip[2] : 0, rip ? rip[3] : 0);
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+}
+
+// ---------- shared layout ----------
+function layout() {
+  W = innerWidth; H = innerHeight; dpr = Math.min(devicePixelRatio || 1, 1.25); sd = Math.min(devicePixelRatio || 1, 2);
+  glCv.width = Math.round(W * dpr); glCv.height = Math.round(H * dpr); fx.width = W * sd; fx.height = H * sd;
+  const gap = 8, top = 36, narrow = W < 760, side = 222, right = 272;
+  PANES = narrow ? [[gap, top, W - 2 * gap, (H - top) * 0.2], [gap, top + (H - top) * 0.22 + gap, W - 2 * gap, (H - top) * 0.78 - 3 * gap]]
+    : [[gap, top, side - gap, H - top - gap], [side + gap, top, W - side - right - 2 * gap, H - top - gap], [W - right, top, right - gap, H - top - gap]];
+  const fills = [`<i class="hi" style="width:46%"></i><i></i><i style="width:72%"></i><i style="width:58%"></i><i style="width:80%"></i>`,
+    `<i style="width:18%"></i><i style="width:92%"></i><i style="width:84%"></i><i style="width:61%"></i>`, `<i style="width:40%"></i><i style="width:66%"></i>`];
+  panesEl.innerHTML = PANES.map((r, i) => `<div style="left:${r[0]}px;top:${r[1]}px;width:${r[2]}px;height:${r[3]}px"><div class="ln">${fills[i]}</div></div>`).join("");
+}
+function resetLayers() {
+  ctx.setTransform(sd, 0, 0, sd, 0, 0); ctx.clearRect(0, 0, W, H);
+  for (const p of panesEl.children) { p.style.opacity = 0; p.style.transform = "none"; p.style.setProperty("--sweep", "-120%"); p.style.setProperty("--lines", 0); }
+  word.style.opacity = 0; word.style.transform = "none"; word.style.filter = "none";
+}
+// Panes simply fading in at the end, shared by several concepts.
+function panesIn(t, a, b) {
+  const s = easeInOutCubic(seg(t, a, b));
+  for (const p of panesEl.children) { p.style.opacity = s.toFixed(3); p.style.setProperty("--lines", easeOutCubic(seg(t, b - 0.1, b + 0.4)).toFixed(3)); }
+}
+function showWord(t, a, b, c, d, y) {
+  const i = easeOutCubic(seg(t, a, b)), o = easeInOutCubic(seg(t, c, d)), v = i * (1 - o);
+  word.style.top = `${y}px`; word.style.opacity = v.toFixed(3);
+  word.style.transform = `translateY(${((1 - i) * 10 - o * 12).toFixed(1)}px)`;
+  word.style.filter = `blur(${((1 - i) * 10 + o * 6).toFixed(2)}px)`;
+}
+
+// ---------- concept 1: Droplet ----------
+const droplet = {
+  name: "Droplet", end: 3.6,
+  desc: "One glass drop falls into the aurora. Its ripples wake the colours, the drop swells into a lens, and the name surfaces beneath it.",
+  frame(t) {
+    const cx = W / 2, cy = H * 0.42, R = Math.min(W, H) * 0.11;
+    const fall = easeInCubic(seg(t, 0.05, 0.7));
+    const swell = spring(seg(t, 0.7, 1.9), 0.42, 9), shrink = easeInOutCubic(seg(t, 2.7, 3.3));
+    let drop;
+    if (t < 0.7) drop = [cx, -40 + (cy + 40) * fall, R * 0.22];
+    else drop = [cx, cy, R * (0.22 + 0.78 * swell) * (1 - shrink)];
+    const aur = 0.12 + 0.5 * easeOutCubic(seg(t, 0.7, 2.0)) + 0.38 * easeInOutCubic(seg(t, 2.6, 3.5));
+    bg(t, aur, drop[2] > 0.5 ? drop : null, t > 0.7 ? [cx, cy, t - 0.7, 1.0] : null);
+    showWord(t, 1.35, 2.0, 2.6, 3.0, cy + R * 1.35);
+  },
+};
+
+// ---------- concept 2: Ribbons ----------
+const ribbons = {
+  name: "Ribbons", end: 3.8,
+  desc: "Three glass ribbons in the aurora colours sweep in and braid through the centre, then settle flat as the HUD's panes arrive.",
+  frame(t) {
+    const cy = H * 0.46, aur = 0.15 + 0.4 * easeOutCubic(seg(t, 0, 1.4)) + 0.45 * easeInOutCubic(seg(t, 2.6, 3.6));
+    bg(t, aur, null, null);
+    ctx.setTransform(sd, 0, 0, sd, 0, 0); ctx.clearRect(0, 0, W, H);
+    const cols = [rgb01(PAL.w1), rgb01(PAL.w2), rgb01(PAL.w3)].map((c) => c.map((v) => Math.round(Math.min(255, v * 255 * 1.6 + 30))));
+    const flat = easeInOutCubic(seg(t, 2.3, 3.2)), fade = 1 - easeInOutCubic(seg(t, 2.7, 3.5));
+    ctx.globalCompositeOperation = "lighter"; ctx.lineCap = "round";
+    for (let i = 0; i < 3; i++) {
+      const fromLeft = i !== 1, reveal = easeOutCubic(seg(t, 0.1 + i * 0.15, 1.5 + i * 0.12));
+      const amp = H * (0.11 + 0.03 * i) * (1 - flat), ph = i * 2.1, wv = 0.0055 - 0.0008 * i;
+      const thick = Math.min(W, H) * (0.045 - 0.006 * i) * (1 + flat * 0.4);
+      const pts = [];
+      for (let k = 0; k <= 120; k++) {
+        const f = k / 120; if (fromLeft ? f > reveal : 1 - f > reveal) continue;
+        const x = -W * 0.1 + f * W * 1.2;
+        const env = 0.35 + 0.65 * Math.sin(Math.PI * f);
+        const y = cy + (i - 1) * H * 0.05 * flat + Math.sin(x * wv + ph + t * 1.6) * amp * env;
+        pts.push([x, y]);
+      }
+      if (pts.length < 2) continue;
+      const path = () => { ctx.beginPath(); ctx.moveTo(pts[0][0], pts[0][1]); for (const p of pts) ctx.lineTo(p[0], p[1]); };
+      const [r, g, b] = cols[i];
+      ctx.strokeStyle = `rgba(${r},${g},${b},${0.22 * fade})`; ctx.lineWidth = thick; path(); ctx.stroke();
+      ctx.strokeStyle = `rgba(${r},${g},${b},${0.3 * fade})`; ctx.lineWidth = thick * 0.45; path(); ctx.stroke();
+      ctx.save(); ctx.translate(0, -thick * 0.28);
+      ctx.strokeStyle = `rgba(255,255,255,${0.55 * fade})`; ctx.lineWidth = Math.max(1, thick * 0.06); path(); ctx.stroke();
+      ctx.restore();
+    }
+    ctx.globalCompositeOperation = "source-over";
+    showWord(t, 1.2, 1.9, 2.4, 2.8, cy - 46);
+    panesIn(t, 2.9, 3.6);
+  },
+};
+
+// ---------- concept 3: Constellation ----------
+const constellation = {
+  name: "Constellation", end: 3.8,
+  desc: "Hundreds of glass sparks drift in from everywhere and settle into the name, shimmer, then scatter outward into the aurora.",
+  pts: null,
+  build() {
+    const off = document.createElement("canvas"); off.width = W; off.height = H;
+    const o = off.getContext("2d"); const size = Math.min(W * 0.2, H * 0.26);
+    o.fillStyle = "#fff"; o.textAlign = "center"; o.textBaseline = "middle";
+    o.font = `800 ${size}px "Plus Jakarta Sans", "Segoe UI", sans-serif`;
+    o.fillText("Jarvis", W / 2, H * 0.44);
+    const img = o.getImageData(0, 0, W, H).data, step = Math.max(3, Math.round(size / 34)), targets = [];
+    for (let y = 0; y < H; y += step) for (let x = 0; x < W; x += step) if (img[(y * W + x) * 4 + 3] > 128) targets.push([x, y]);
+    const rnd = mulberry32(11);
+    for (let i = targets.length - 1; i > 0; i--) { const j = Math.floor(rnd() * (i + 1)); [targets[i], targets[j]] = [targets[j], targets[i]]; }
+    const tints = ["111,195,223", "190,232,246", "176,166,240", "244,250,252"];
+    this.pts = targets.slice(0, 1600).map(([tx, ty]) => ({ tx, ty, sx: rnd() * W, sy: rnd() * H, d: rnd() * 0.35, r: 0.8 + rnd() * 1.2,
+      tint: tints[Math.floor(rnd() * tints.length)], ph: rnd() * 6.28, ang: Math.atan2(ty - H * 0.44, tx - W / 2) + (rnd() - 0.5) * 0.6, far: 0.4 + rnd() * 0.8 }));
+  },
+  frame(t) {
+    if (!this.pts) this.build();
+    const aur = 0.12 + 0.3 * easeOutCubic(seg(t, 0, 1.4)) + 0.58 * easeInOutCubic(seg(t, 2.5, 3.5));
+    bg(t, aur, null, t > 2.45 ? [W / 2, H * 0.44, t - 2.45, 0.8] : null);
+    ctx.setTransform(sd, 0, 0, sd, 0, 0); ctx.clearRect(0, 0, W, H);
+    ctx.globalCompositeOperation = "lighter";
+    const burst = easeInCubic(seg(t, 2.45, 3.4)), D = Math.max(W, H);
+    for (const p of this.pts) {
+      const k = easeInOutCubic(seg(t, 0.25 + p.d, 1.45 + p.d));
+      let x = p.sx + (p.tx - p.sx) * k + Math.sin(t * 1.3 + p.ph) * 6 * (1 - k);
+      let y = p.sy + (p.ty - p.sy) * k + Math.cos(t * 1.1 + p.ph) * 6 * (1 - k);
+      x += Math.cos(p.ang) * burst * D * p.far; y += Math.sin(p.ang) * burst * D * p.far;
+      const tw = 0.55 + 0.45 * Math.sin(t * 6 + p.ph);
+      const a = (0.25 + 0.6 * k * tw) * (1 - burst) * clamp01(t / 0.3);
+      if (a < 0.01) continue;
+      ctx.fillStyle = `rgba(${p.tint},${(a * 0.35).toFixed(3)})`; ctx.beginPath(); ctx.arc(x, y, p.r * 2.6, 0, 6.283); ctx.fill();
+      ctx.fillStyle = `rgba(255,255,255,${(a * 0.9).toFixed(3)})`; ctx.beginPath(); ctx.arc(x, y, p.r * 0.7, 0, 6.283); ctx.fill();
+    }
+    ctx.globalCompositeOperation = "source-over";
+    panesIn(t, 3.0, 3.7);
+  },
+};
+
+// ---------- concept 4: Orb ----------
+const orb = {
+  name: "Orb", end: 3.9,
+  desc: "The HUD's orb assembles ring by ring in glass, spins up and locks, ignites a pulse through the aurora, then docks in its corner as the panes open.",
+  frame(t) {
+    const ign = 1.55;
+    const aur = 0.12 + 0.3 * easeOutCubic(seg(t, 0, 1.2)) + 0.58 * easeOutCubic(seg(t, ign, ign + 1.4));
+    const dock = easeInOutCubic(seg(t, 2.55, 3.35));
+    const cx0 = W / 2, cy0 = H * 0.44, R0 = Math.min(W, H) * 0.2;
+    const tx = W < 760 ? W - 64 : 116, ty = H - 116, R1 = 56;
+    const cx = cx0 + (tx - cx0) * dock, cy = cy0 + (ty - cy0) * dock, R = R0 + (R1 - R0) * dock;
+    bg(t, aur, null, t > ign ? [cx0, cy0, t - ign, 1.0] : null);
+    ctx.setTransform(sd, 0, 0, sd, 0, 0); ctx.clearRect(0, 0, W, H);
+    ctx.save(); ctx.translate(cx, cy);
+    const A = "111,195,223", Wh = "223,243,250";
+    const layer = (i) => spring(seg(t, 0.1 + i * 0.11, 1.3 + i * 0.11), 0.5, 9);
+    const spinBoost = (i) => 8 * (1 - layer(i)) + 0.25;
+    const rot = (i, dir) => dir * (t * spinBoost(i) * 0.6 + i);
+    const ring = (r, a0, a1, w, c) => { ctx.beginPath(); ctx.arc(0, 0, r, a0, a1); ctx.lineWidth = w; ctx.strokeStyle = c; ctx.stroke(); };
+    // 0: bearing ticks
+    let s = layer(0); if (s > 0) { ctx.save(); ctx.rotate(rot(0, 1) * 0.2); ctx.globalAlpha = Math.min(1, s);
+      for (let i = 0; i < 120; i++) { const a = i / 120 * 6.283, l = i % 10 === 0 ? 0.07 : 0.035; ctx.beginPath(); ctx.moveTo(Math.cos(a) * R * (0.97 - l) * (0.85 + 0.15 * s), Math.sin(a) * R * (0.97 - l) * (0.85 + 0.15 * s)); ctx.lineTo(Math.cos(a) * R * 0.97 * (0.85 + 0.15 * s), Math.sin(a) * R * 0.97 * (0.85 + 0.15 * s)); ctx.strokeStyle = `rgba(${Wh},${i % 10 === 0 ? 0.75 : 0.28})`; ctx.lineWidth = i % 10 === 0 ? 1.4 : 0.8; ctx.stroke(); }
+      ctx.restore(); }
+    // 1: segmented glass band
+    s = layer(1); if (s > 0) { ctx.save(); ctx.rotate(rot(1, -1)); ctx.globalAlpha = Math.min(1, s);
+      for (let i = 0; i < 18; i++) { const a0 = i / 18 * 6.283 + 0.03, a1 = (i + 1) / 18 * 6.283 - 0.03; ring(R * 0.82 * (0.9 + 0.1 * s), a0, a1, R * 0.05, `rgba(${A},${i % 3 === 0 ? 0.55 : 0.18})`); ring(R * 0.82 * (0.9 + 0.1 * s) - R * 0.02, a0, a1, 1, `rgba(255,255,255,${i % 3 === 0 ? 0.5 : 0.18})`); }
+      ctx.restore(); }
+    // 2: heavy arcs
+    s = layer(2); if (s > 0) { ctx.save(); ctx.rotate(rot(2, 1)); ctx.globalAlpha = Math.min(1, s);
+      for (const [a0, a1, al] of [[0, 1.8, 0.4], [2.3, 3.0, 0.7], [3.5, 5.1, 0.25], [5.5, 6.0, 0.55]]) ring(R * 0.64, a0, a1, R * 0.035, `rgba(${A},${al})`);
+      ctx.restore(); }
+    // 3: dotted ring
+    s = layer(3); if (s > 0) { ctx.save(); ctx.rotate(rot(3, -1) * 0.7); ctx.globalAlpha = Math.min(1, s);
+      for (let i = 0; i < 72; i++) { const a = i / 72 * 6.283; ctx.beginPath(); ctx.arc(Math.cos(a) * R * 0.52, Math.sin(a) * R * 0.52, i % 9 === 0 ? 2.2 : 1.2, 0, 6.283); ctx.fillStyle = i % 9 === 0 ? `rgba(${A},0.95)` : `rgba(${Wh},0.35)`; ctx.fill(); }
+      ctx.restore(); }
+    // 4: inner rings
+    s = layer(4); if (s > 0) { ctx.globalAlpha = Math.min(1, s); ctx.setLineDash([R * 0.04, R * 0.02]); ctx.save(); ctx.rotate(rot(4, 1)); ring(R * 0.4, 0, 6.283, 1, `rgba(${Wh},0.45)`); ctx.restore(); ctx.setLineDash([]); ring(R * 0.33, 0, 6.283, 1.4, `rgba(${A},0.65)`); }
+    ctx.globalAlpha = 1;
+    // core: ignites
+    const glow = easeOutCubic(seg(t, ign - 0.15, ign + 0.25)), pulse = Math.exp(-Math.max(0, t - ign) * 3) * glow;
+    const cr = R * (0.18 + 0.1 * glow + 0.08 * pulse);
+    const g = ctx.createRadialGradient(0, 0, 0, 0, 0, cr * 1.8);
+    g.addColorStop(0, `rgba(255,255,255,${0.95 * glow})`); g.addColorStop(0.25, `rgba(${A},${0.85 * glow})`); g.addColorStop(0.6, `rgba(150,130,230,${0.2 * glow})`); g.addColorStop(1, "rgba(0,0,0,0)");
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(0, 0, cr * 1.8, 0, 6.283); ctx.fill();
+    ctx.restore();
+    panesIn(t, 2.85, 3.6);
+  },
+};
+
+// ---------- concept 5: Panes ----------
+const panes = {
+  name: "Panes", end: 3.4,
+  desc: "The HUD itself is the animation: its glass panes rise out of depth on springs, a light sweep runs across them, and the name is etched for a beat in the middle.",
+  frame(t) {
+    const aur = 0.15 + 0.45 * easeOutCubic(seg(t, 0, 1.2)) + 0.4 * easeInOutCubic(seg(t, 1.6, 2.8));
+    bg(t, aur, null, null);
+    [...panesEl.children].forEach((p, i) => {
+      const s = spring(seg(t, 0.15 + i * 0.13, 1.45 + i * 0.13), 0.5, 9);
+      p.style.opacity = Math.min(1, s * 1.6).toFixed(3);
+      p.style.transform = `rotateX(${((1 - s) * 58).toFixed(2)}deg) translateY(${((1 - s) * 90).toFixed(1)}px) translateZ(${((1 - s) * -320).toFixed(1)}px) scale(${(0.9 + 0.1 * s).toFixed(4)})`;
+      p.style.setProperty("--sweep", `${(-120 + 240 * easeInOutCubic(seg(t, 1.55 + i * 0.08, 2.35 + i * 0.08))).toFixed(1)}%`);
+      p.style.setProperty("--lines", easeOutCubic(seg(t, 2.5, 3.1)).toFixed(3));
+    });
+    showWord(t, 1.2, 1.75, 2.2, 2.6, H * 0.42);
+  },
+};
+
+// ---------- concept 6: Constellation + Orb ----------
+// Sparks drift in from everywhere: some settle onto the orb's rings (each ring solidifies into glass as its
+// sparks land, spinning up and locking), the rest spell the name beneath it. The core ignites a pulse through
+// the aurora, the name's sparks scatter, and the orb docks in its corner as the panes open.
+const blend = {
+  name: "Constellation + Orb", end: 4.1,
+  desc: "Glass sparks drift in and settle onto the orb's rings, which turn to glass and lock as the sparks land, while the rest spell the name beneath. The core ignites a pulse, the name scatters, and the orb docks as the panes open.",
+  sparks: null,
+  geo() { const S = Math.min(W, H); return { cx: W / 2, cy: H * 0.37, R: S * 0.17, wy: H * 0.37 + S * 0.17 * 1.62, wsize: Math.min(W * 0.11, H * 0.12) }; },
+  // The rings: radius (×R), how many sparks sit on it, which arcs exist (radians), and its spin direction.
+  RINGS: [
+    { r: 0.95, n: 140, arcs: null, dir: 1, slow: 0.2 },
+    { r: 0.82, n: 170, arcs: [...Array(18)].map((_, i) => [i / 18 * 6.283 + 0.03, (i + 1) / 18 * 6.283 - 0.03]), dir: -1, slow: 1 },
+    { r: 0.64, n: 110, arcs: [[0, 1.8], [2.3, 3.0], [3.5, 5.1], [5.5, 6.0]], dir: 1, slow: 1 },
+    { r: 0.52, n: 72, arcs: null, dir: -1, slow: 0.7, dots: true },
+    { r: 0.36, n: 70, arcs: null, dir: 1, slow: 1 },
+  ],
+  build() {
+    const { cx, cy, wy, wsize } = this.geo(), rnd = mulberry32(23), sp = [];
+    const tints = ["111,195,223", "190,232,246", "176,166,240", "244,250,252"];
+    this.RINGS.forEach((ring, ri) => {
+      for (let k = 0; k < ring.n; k++) {
+        let a;
+        if (ring.arcs) { const arc = ring.arcs[k % ring.arcs.length]; a = arc[0] + (arc[1] - arc[0]) * rnd(); }
+        else a = (k / ring.n) * 6.283;
+        sp.push({ ring: ri, a, sx: rnd() * W, sy: rnd() * H, d: rnd() * 0.3, r: 0.7 + rnd() * 1.0, ph: rnd() * 6.28,
+          tint: tints[Math.floor(rnd() * tints.length)], ang: rnd() * 6.283, far: 0.3 + rnd() * 0.5 });
+      }
+    });
+    const off = document.createElement("canvas"); off.width = W; off.height = H;
+    const o = off.getContext("2d"); o.fillStyle = "#fff"; o.textAlign = "center"; o.textBaseline = "middle";
+    o.font = `800 ${wsize}px "Plus Jakarta Sans", "Segoe UI", sans-serif`; o.fillText("Jarvis", cx, wy);
+    const img = o.getImageData(0, 0, W, H).data, step = Math.max(3, Math.round(wsize / 30)), tg = [];
+    for (let y = 0; y < H; y += step) for (let x = 0; x < W; x += step) if (img[(y * W + x) * 4 + 3] > 128) tg.push([x, y]);
+    for (let i = tg.length - 1; i > 0; i--) { const j = Math.floor(rnd() * (i + 1)); [tg[i], tg[j]] = [tg[j], tg[i]]; }
+    for (const [tx, ty] of tg.slice(0, 1000)) sp.push({ ring: -1, tx, ty, sx: rnd() * W, sy: rnd() * H, d: rnd() * 0.35, r: 0.7 + rnd() * 1.1,
+      ph: rnd() * 6.28, tint: tints[Math.floor(rnd() * tints.length)], ang: Math.atan2(ty - wy, tx - cx) + (rnd() - 0.5) * 0.8, far: 0.4 + rnd() * 0.8 });
+    this.sparks = sp;
+  },
+  frame(t) {
+    if (!this.sparks) this.build();
+    const G = this.geo(), ign = 1.75, dockT = easeInOutCubic(seg(t, 2.75, 3.55));
+    const tx = W < 760 ? W - 64 : 116, ty = H - 116;
+    const cx = G.cx + (tx - G.cx) * dockT, cy = G.cy + (ty - G.cy) * dockT, R = G.R + (56 - G.R) * dockT;
+    const aur = 0.1 + 0.28 * easeOutCubic(seg(t, 0, 1.4)) + 0.62 * easeOutCubic(seg(t, ign, ign + 1.5));
+    bg(t, aur, null, t > ign ? [G.cx, G.cy, t - ign, 1.0] : null);
+    ctx.setTransform(sd, 0, 0, sd, 0, 0); ctx.clearRect(0, 0, W, H);
+    const A = "111,195,223", Wh = "223,243,250";
+    // Each ring: when its sparks land, how solid it is, and its spin (fast as it forms, then locked to a slow turn).
+    const land = (i) => 0.95 + i * 0.12;
+    const solid = (i) => easeOutCubic(seg(t, land(i) - 0.1, land(i) + 0.35));
+    const lock = (i) => spring(seg(t, land(i) - 0.1, land(i) + 1.1), 0.5, 8);
+    const rot = (i) => { const rg = this.RINGS[i]; return rg.dir * (t * 0.35 * rg.slow + (1 - lock(i)) * 5.5 * rg.slow + i * 0.7); };
+    // ---- the glass rings ----
+    ctx.save(); ctx.translate(cx, cy);
+    const ring = (r, a0, a1, w, c) => { ctx.beginPath(); ctx.arc(0, 0, r, a0, a1); ctx.lineWidth = w; ctx.strokeStyle = c; ctx.stroke(); };
+    let s = solid(0); if (s > 0) { ctx.save(); ctx.rotate(rot(0)); ctx.globalAlpha = s;
+      for (let i = 0; i < 120; i++) { const a = i / 120 * 6.283, l = i % 10 === 0 ? 0.07 : 0.035; ctx.beginPath(); ctx.moveTo(Math.cos(a) * R * (0.97 - l), Math.sin(a) * R * (0.97 - l)); ctx.lineTo(Math.cos(a) * R * 0.97, Math.sin(a) * R * 0.97); ctx.strokeStyle = `rgba(${Wh},${i % 10 === 0 ? 0.75 : 0.28})`; ctx.lineWidth = i % 10 === 0 ? 1.4 : 0.8; ctx.stroke(); }
+      ctx.restore(); }
+    s = solid(1); if (s > 0) { ctx.save(); ctx.rotate(rot(1)); ctx.globalAlpha = s;
+      for (const [i, [a0, a1]] of this.RINGS[1].arcs.entries()) { ring(R * 0.82, a0, a1, R * 0.05, `rgba(${A},${i % 3 === 0 ? 0.55 : 0.18})`); ring(R * 0.80, a0, a1, 1, `rgba(255,255,255,${i % 3 === 0 ? 0.5 : 0.18})`); }
+      ctx.restore(); }
+    s = solid(2); if (s > 0) { ctx.save(); ctx.rotate(rot(2)); ctx.globalAlpha = s;
+      this.RINGS[2].arcs.forEach(([a0, a1], i) => { ring(R * 0.64, a0, a1, R * 0.035, `rgba(${A},${[0.4, 0.7, 0.25, 0.55][i]})`); ring(R * 0.62, a0, a1, 1, "rgba(255,255,255,0.35)"); });
+      ctx.restore(); }
+    s = solid(3); if (s > 0) { ctx.save(); ctx.rotate(rot(3)); ctx.globalAlpha = s;
+      for (let i = 0; i < 72; i++) { const a = i / 72 * 6.283; ctx.beginPath(); ctx.arc(Math.cos(a) * R * 0.52, Math.sin(a) * R * 0.52, (i % 9 === 0 ? 2.2 : 1.2) * (R / G.R * 0.6 + 0.4), 0, 6.283); ctx.fillStyle = i % 9 === 0 ? `rgba(${A},0.95)` : `rgba(${Wh},0.35)`; ctx.fill(); }
+      ctx.restore(); }
+    s = solid(4); if (s > 0) { ctx.globalAlpha = s; ctx.setLineDash([R * 0.04, R * 0.02]); ctx.save(); ctx.rotate(rot(4)); ring(R * 0.4, 0, 6.283, 1, `rgba(${Wh},0.45)`); ctx.restore(); ctx.setLineDash([]); ring(R * 0.33, 0, 6.283, 1.4, `rgba(${A},0.65)`); }
+    ctx.globalAlpha = 1;
+    // ---- the core ignites ----
+    const glow = easeOutCubic(seg(t, ign - 0.15, ign + 0.25)), pulse = Math.exp(-Math.max(0, t - ign) * 3) * glow;
+    const cr = R * (0.18 + 0.1 * glow + 0.1 * pulse);
+    const g = ctx.createRadialGradient(0, 0, 0, 0, 0, cr * 1.9);
+    g.addColorStop(0, `rgba(255,255,255,${0.95 * glow})`); g.addColorStop(0.25, `rgba(${A},${0.85 * glow})`); g.addColorStop(0.6, `rgba(150,130,230,${0.22 * glow})`); g.addColorStop(1, "rgba(0,0,0,0)");
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(0, 0, cr * 1.9, 0, 6.283); ctx.fill();
+    ctx.restore();
+    // ---- the sparks ----
+    ctx.globalCompositeOperation = "lighter";
+    const scatter = easeInCubic(seg(t, 2.55, 3.35)), D = Math.max(W, H);
+    for (const p of this.sparks) {
+      let x, y, a;
+      if (p.ring >= 0) {
+        // Ring sparks fly to their spot on the ring, ride it, and fade into the glass as it solidifies.
+        const rg = this.RINGS[p.ring], k = easeInOutCubic(seg(t, 0.2 + p.ring * 0.12 + p.d, land(p.ring) + p.d * 0.3));
+        const ang = p.a + rot(p.ring), tx2 = cx + Math.cos(ang) * R * rg.r, ty2 = cy + Math.sin(ang) * R * rg.r;
+        x = p.sx + (tx2 - p.sx) * k + Math.sin(t * 1.3 + p.ph) * 5 * (1 - k);
+        y = p.sy + (ty2 - p.sy) * k + Math.cos(t * 1.1 + p.ph) * 5 * (1 - k);
+        a = (0.25 + 0.6 * k) * (1 - 0.85 * solid(p.ring)) * clamp01(t / 0.3);
+      } else {
+        // Name sparks spell "Jarvis", shimmer, then scatter outward with the dock.
+        const k = easeInOutCubic(seg(t, 0.45 + p.d, 1.7 + p.d));
+        x = p.sx + (p.tx - p.sx) * k + Math.sin(t * 1.3 + p.ph) * 6 * (1 - k) + Math.cos(p.ang) * scatter * D * p.far;
+        y = p.sy + (p.ty - p.sy) * k + Math.cos(t * 1.1 + p.ph) * 6 * (1 - k) + Math.sin(p.ang) * scatter * D * p.far;
+        const tw = 0.55 + 0.45 * Math.sin(t * 6 + p.ph);
+        a = (0.22 + 0.65 * k * tw) * (1 - scatter) * clamp01(t / 0.3);
+      }
+      if (a < 0.01) continue;
+      ctx.fillStyle = `rgba(${p.tint},${(a * 0.32).toFixed(3)})`; ctx.beginPath(); ctx.arc(x, y, p.r * 2.6, 0, 6.283); ctx.fill();
+      ctx.fillStyle = `rgba(255,255,255,${(a * 0.9).toFixed(3)})`; ctx.beginPath(); ctx.arc(x, y, p.r * 0.7, 0, 6.283); ctx.fill();
+    }
+    ctx.globalCompositeOperation = "source-over";
+    panesIn(t, 3.05, 3.8);
+  },
+};
+
+const CONCEPTS = [droplet, ribbons, constellation, orb, panes, blend];
+
+// ---------- switching and playback ----------
+const sw = document.getElementById("switch");
+let cur = 0, t = 0, last = 0, paused = false, speed = 1, holdUntil = 0;
+CONCEPTS.forEach((c, i) => {
+  const b = document.createElement("button"); b.type = "button"; b.id = "concept-" + (i + 1);
+  b.innerHTML = `<span>${i + 1}</span>${c.name}`; b.onclick = () => choose(i); sw.appendChild(b);
+});
+function choose(i) {
+  cur = i; for (const [k, b] of [...sw.children].entries()) b.setAttribute("aria-pressed", String(k === i));
+  document.getElementById("cTitle").textContent = `${i + 1}. ${CONCEPTS[i].name}`;
+  document.getElementById("cDesc").textContent = CONCEPTS[i].desc;
+  try { localStorage.setItem("jarvisBootConcept", String(i)); } catch (e) {}
+  replay();
+}
+function replay() { t = 0; holdUntil = 0; resetLayers(); setPaused(false); }
+function setPaused(v) { paused = v; document.getElementById("pause").textContent = v ? "Play" : "Pause"; }
+function tick(now) {
+  const dt = last ? Math.min(0.05, (now - last) / 1000) : 0; last = now;
+  if (!paused) {
+    const c = CONCEPTS[cur];
+    if (t < c.end + 1.4) t += dt * speed;
+    else if (document.getElementById("loop").checked) replay();
+    try { c.frame(t); } catch (e) { console.warn(e); }
+  }
+  requestAnimationFrame(tick);
+}
+let ok = !!gl;
+if (ok) { try { initGL(); } catch (e) { ok = false; console.warn(e); } }
+if (!ok) {
+  document.getElementById("cDesc").textContent = "This browser has no WebGL, so the concepts can't play here.";
+} else {
+  document.getElementById("replay").onclick = replay;
+  document.getElementById("pause").onclick = () => setPaused(!paused);
+  document.getElementById("speed").oninput = (e) => { speed = +e.target.value; };
+  addEventListener("keydown", (ev) => {
+    if (ev.target instanceof HTMLInputElement && ev.target.type !== "range") return;
+    if (/^[1-6]$/.test(ev.key)) choose(+ev.key - 1);
+    else if (ev.key === "r" || ev.key === "R") replay();
+    else if (ev.key === " ") { ev.preventDefault(); setPaused(!paused); }
+    else if (ev.key === "h" || ev.key === "H") document.body.classList.toggle("clean");
+  });
+  let rt = 0;
+  addEventListener("resize", () => { clearTimeout(rt); rt = setTimeout(() => { layout(); constellation.pts = null; blend.sparks = null; replay(); }, 120); });
+  const go = () => {
+    layout();
+    choose(5);
+    requestAnimationFrame(tick);
+  };
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(go); else go();
+}
+</script>

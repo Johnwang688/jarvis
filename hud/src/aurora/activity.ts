@@ -60,6 +60,19 @@ export function createChatActivity(host: ActivityHost = {}) {
       sink = s;
       eligible = canRipple;
     },
+    /**
+     * A one-off ripple from a point (viewport px): the boot's handoff (D-12). Not per-pane throttled, but it
+     * counts against, and is refused by, the same shared TOTAL_MAX budget as streaming ripples. False if none was made.
+     */
+    rippleAt(x: number, y: number): boolean {
+      if (!sink || (eligible && !eligible())) return false;
+      const t = now();
+      recent = recent.filter((r) => t - r < TOTAL_WINDOW_MS);
+      if (recent.length >= TOTAL_MAX) return false;
+      if (!sink({ left: x - 1, top: y - 1, width: 2, height: 2 })) return false;
+      recent.push(t);
+      return true;
+    },
     /** A chunk of a reply streamed into `pane`. Returns whether a ripple was made. */
     chatStreaming(pane: number): boolean {
       if (!sink) return false;
