@@ -1,7 +1,7 @@
 import { useLayoutEffect, useRef, useState } from "react";
 import { chatActivity } from "../aurora/activity";
 import { parseColour, readPalette, type Rgb } from "../aurora/palette";
-import { BOOT_RINGS, FONT_WAIT_MS, HARD_CAP_MS, PLAYED_KEY, SHIELD_DEADLINE_MS, SHIELD_MS, SKIP_FADE_MS, TIMELINE, TINTS, TOTAL_S,
+import { BOOT_RINGS, FONT_WAIT_MS, HARD_CAP_MS, PLAYED_KEY, SHIELD_ABSOLUTE_MS, SHIELD_DEADLINE_MS, SHIELD_MS, SKIP_FADE_MS, TIMELINE, TINTS, TOTAL_S,
   auroraAt, buildSparks, coreAt, dockFromRect, geoFor, handoffAlpha, maskPoints, orbAt, ringRot, ringSolid,
   shouldPlay, sparkAt, sparkLavender, type BootGeo, type DockTarget, type Spark } from "../lib/boot";
 import { readKey, writeKey } from "../lib/storage";
@@ -43,52 +43,59 @@ export default function BootOverlay({ cardUp }: { cardUp: boolean }) {
       setPlaying(false);
       return;
     }
+    // One expiry ends the shield: the skip fade's end, or SHIELD_MS after the latest release, so the
+    // second half of a double-click is eaten too (F3). It is anchored to the RELEASE: an eaten click never
+    // moves it (review of #354, LOW), or a click storm could hold the shield up.
     let skipTimer = 0;
+    let expiring = false; // an expiry is pending
     let skipped = false;
+    let held = false;
     const finish = () => { drawing.release(); setPlaying(false); };
-    // The shield stays up SHIELD_MS past the last release or click, so the
-    // second half of a double-click is eaten too (F3).
-    const linger = () => { window.clearTimeout(skipTimer); skipTimer = window.setTimeout(finish, SHIELD_MS); };
+    const expireIn = (ms: number) => { window.clearTimeout(skipTimer); expiring = true; skipTimer = window.setTimeout(finish, ms); };
+    const released = () => { held = false; expireIn(SHIELD_MS); };
     const skip = () => {
       if (skipped) return;
       skipped = true;
       drawing.stop(); // the frame freezes while it fades; the GL context goes at finish
       host.style.transition = "opacity 0.2s linear";
       host.style.opacity = "0";
-      skipTimer = window.setTimeout(finish, SKIP_FADE_MS);
+      expireIn(SKIP_FADE_MS);
     };
     // Capture sees keys even when a pane handles them; never consume the key.
     window.addEventListener("keydown", skip, true);
     const motion = matchMedia("(prefers-reduced-motion: reduce)");
     const reduce = () => { if (motion.matches) finish(); };
     motion.addEventListener("change", reduce);
-    // Two deadlines. The cap bounds the DRAWING and the GL context whatever the pointer is doing; the shield
-    // (invisible by then) leaves only once its own release protection is over, so a release just before the
-    // cap still eats the next click. The absolute deadline bounds the shield itself, held pointer or not.
-    let held = false;
+    // Three bounds. The cap bounds the DRAWING and the GL context whatever the pointer is doing; the shield
+    // (invisible by then) stays only while something still owes it time. A pointer still held at the
+    // held-pointer deadline loses it then; a release before that keeps its own SHIELD_MS even past the
+    // deadline (review of #354, MED). The absolute backstop removes the overlay whatever happens.
     const hardCap = window.setTimeout(() => {
-      if (!held && !skipped) { finish(); return; } // nothing owes the shield any time
+      if (!held && !expiring) { finish(); return; } // nothing owes the shield any time
       drawing.release();
       host.style.transition = "none"; host.style.opacity = "0";
     }, HARD_CAP_MS);
-    const deadline = window.setTimeout(finish, SHIELD_DEADLINE_MS);
+    const deadline = window.setTimeout(() => { if (held || !expiring) finish(); }, SHIELD_DEADLINE_MS);
+    const backstop = window.setTimeout(finish, SHIELD_ABSOLUTE_MS);
     // DOM listeners keep the shield through pointerup/click, including long holds.
     const eat = (e: Event) => { e.preventDefault(); e.stopPropagation(); };
     const down = (e: PointerEvent) => {
       eat(e);
       try { host.setPointerCapture(e.pointerId); } catch { /* the pointer is already gone */ }
       skip();
-      window.clearTimeout(skipTimer);
-      // A held press keeps the shield until it is let go, however long (F4); the cap still ends the drawing.
+      // A held press keeps the shield until it is let go (F4), up to the held-pointer deadline; the cap
+      // still ends the drawing.
+      window.clearTimeout(skipTimer); expiring = false;
       held = true;
     };
     // A release, a cancelled touch or lost capture all let the shield go (F2).
-    const up = (e: Event) => { eat(e); held = false; linger(); };
-    const click = (e: Event) => { eat(e); linger(); };
+    const up = (e: Event) => { eat(e); released(); };
+    // A click is eaten. Only a lone click, with no press held and no expiry pending, starts one of its own.
+    const click = (e: Event) => { eat(e); if (!held && !expiring) expireIn(SHIELD_MS); };
     const RELEASES = ["pointerup", "pointercancel", "lostpointercapture"] as const;
     const CLICKS = ["click", "dblclick", "auxclick", "contextmenu"] as const;
     // The window losing focus mid-press may never deliver the release.
-    const blurred = () => { if (held) { held = false; linger(); } };
+    const blurred = () => { if (held) released(); };
     const hidden = () => { if (document.visibilityState === "hidden") blurred(); };
     window.addEventListener("blur", blurred);
     document.addEventListener("visibilitychange", hidden);
@@ -97,7 +104,7 @@ export default function BootOverlay({ cardUp }: { cardUp: boolean }) {
     for (const kind of CLICKS) host.addEventListener(kind, click);
     return () => {
       drawing.release();
-      window.clearTimeout(skipTimer); window.clearTimeout(hardCap); window.clearTimeout(deadline);
+      window.clearTimeout(skipTimer); window.clearTimeout(hardCap); window.clearTimeout(deadline); window.clearTimeout(backstop);
       window.removeEventListener("keydown", skip, true);
       motion.removeEventListener("change", reduce);
       window.removeEventListener("blur", blurred);

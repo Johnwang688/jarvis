@@ -4,7 +4,7 @@
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { FONT_WAIT_MS, HARD_CAP_MS, SHIELD_DEADLINE_MS, SHIELD_MS, SKIP_FADE_MS } from "../lib/boot";
+import { FONT_WAIT_MS, HARD_CAP_MS, SHIELD_ABSOLUTE_MS, SHIELD_DEADLINE_MS, SHIELD_MS, SKIP_FADE_MS } from "../lib/boot";
 import BootOverlay from "./BootOverlay";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -32,7 +32,7 @@ function setup(fonts?: unknown) {
   let next = 1;
   const timers = new Set<number>();
   const ownSet = window.setTimeout, ownClear = window.clearTimeout;
-  const mine = new Set<number>([HARD_CAP_MS, SHIELD_DEADLINE_MS, FONT_WAIT_MS, SKIP_FADE_MS, SHIELD_MS]);
+  const mine = new Set<number>([HARD_CAP_MS, SHIELD_DEADLINE_MS, SHIELD_ABSOLUTE_MS, FONT_WAIT_MS, SKIP_FADE_MS, SHIELD_MS]);
   spyOn(window, "setTimeout", ((fn: TimerHandler, ms?: number, ...a: unknown[]) => {
     const id = (ownSet as (...x: unknown[]) => number)(fn, ms, ...a);
     if (mine.has(ms ?? -1)) timers.add(id);
@@ -179,7 +179,7 @@ describe("BootOverlay", () => {
 
   it("unmounting early cancels the font-wait timer (the font never loads)", async () => {
     setup({ load: () => new Promise(() => {}) }); await render(false); await flush();
-    expect(rig.timers.size).toBe(3); // the cap, the shield deadline and the font wait
+    expect(rig.timers.size).toBe(4); // the cap, the held-pointer deadline, the absolute backstop and the font wait
     await act(async () => { rig.root.render(createElement("div")); });
     expect(overlay()).toBeNull();
     expect(rig.timers.size).toBe(0);
@@ -214,13 +214,104 @@ describe("BootOverlay", () => {
     return !reached;
   };
 
-  it("a pointer held forever: the shield is gone at the absolute deadline, not before", async () => {
+  it("a pointer held forever: the shield is gone at exactly the held-pointer deadline, not before", async () => {
     setup(); await render(false); await flush();
     press("pointerdown");
-    tick(SHIELD_DEADLINE_MS - 10);
+    tick(SHIELD_DEADLINE_MS - 1);
     expect(overlay()).not.toBeNull();
     expect(eaten()).toBe(true);
-    tick(20);
+    tick(1);
+    expect(overlay()).toBeNull();
+    await render(false);
+    nothingLeft();
+  });
+
+  // Review of #354, MED: the deadline must not cut a late release's own protection short.
+  it("a press held past the cap and released at 7300: the click at 7500 is eaten, and the shield is gone by 7750", async () => {
+    setup(); await render(false); await flush();
+    press("pointerdown");
+    tick(7300);
+    press("pointerup");
+    tick(200); // 7500, past the 7450 held-pointer deadline
+    expect(overlay()).not.toBeNull();
+    expect(eaten()).toBe(true);
+    tick(249); // 7749: still inside release + SHIELD_MS
+    expect(overlay()).not.toBeNull();
+    tick(1); // 7750 = 7300 + SHIELD_MS
+    expect(overlay()).toBeNull();
+    await render(false);
+    nothingLeft();
+  });
+
+  it("a late pointer skip (a fresh press after the cap) keeps its own release protection past the deadline", async () => {
+    setup(); await render(false); await flush();
+    press("pointerdown");
+    tick(6900);
+    press("pointerup");
+    tick(400); // 7300: a second press inside the first release's window
+    press("pointerdown");
+    tick(100);
+    press("pointerup"); // 7400
+    tick(200); // 7600
+    expect(overlay()).not.toBeNull();
+    expect(eaten()).toBe(true);
+    tick(249); // 7849
+    expect(overlay()).not.toBeNull();
+    tick(1); // 7850 = 7400 + SHIELD_MS
+    expect(overlay()).toBeNull();
+  });
+
+  // Review of #354, LOW: an eaten click must not extend the shield.
+  it("released at 6900, a click at 7150 is eaten without extending the shield: gone by 7350", async () => {
+    setup(); await render(false); await flush();
+    press("pointerdown");
+    tick(6900);
+    press("pointerup");
+    tick(250); // 7150
+    expect(overlay()).not.toBeNull();
+    expect(eaten()).toBe(true);
+    tick(199); // 7349
+    expect(overlay()).not.toBeNull();
+    tick(1); // 7350 = 6900 + SHIELD_MS
+    expect(overlay()).toBeNull();
+  });
+
+  it("eaten clicks of every kind never extend the release's expiry", async () => {
+    setup(); await render(false); await flush();
+    press("pointerdown");
+    tick(1000);
+    press("pointerup");
+    for (const kind of ["click", "dblclick", "auxclick", "contextmenu"]) { tick(100); press(kind); }
+    tick(SHIELD_MS - 400 - 1);
+    expect(overlay()).not.toBeNull();
+    tick(1);
+    expect(overlay()).toBeNull();
+  });
+
+  it("released at 7440: the shield stays until 7890 and is gone then", async () => {
+    setup(); await render(false); await flush();
+    press("pointerdown");
+    tick(7440);
+    press("pointerup");
+    tick(449); // 7889
+    expect(overlay()).not.toBeNull();
+    expect(eaten()).toBe(true);
+    tick(1); // 7890 = 7440 + SHIELD_MS
+    expect(overlay()).toBeNull();
+    await render(false);
+    nothingLeft();
+  });
+
+  it("whatever the pointer does, the overlay is gone at the absolute bound (7900)", async () => {
+    setup(); await render(false); await flush();
+    press("pointerdown");
+    tick(7440);
+    press("pointerup");
+    tick(400); // 7840: a new press, held, inside the release's window and past the held-pointer deadline
+    press("pointerdown");
+    tick(SHIELD_ABSOLUTE_MS - 7840 - 1); // 7899
+    expect(overlay()).not.toBeNull();
+    tick(1); // 7900
     expect(overlay()).toBeNull();
     await render(false);
     nothingLeft();

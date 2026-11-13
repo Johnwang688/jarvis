@@ -381,14 +381,35 @@ def boot_checks(browser, mock, base, check, until, guard, init_script):
                   str(page.evaluate("window.__under")))
         finally:
             ctx.close()
-        # A pointer never released: the shield is gone at the absolute deadline (cap + SHIELD_MS).
+        # Review of #354, MED: a press held past the cap and released at 7300 owes its click SHIELD_MS, even
+        # though that runs past the held-pointer deadline (7450). The click at 7500 is eaten.
+        ctx, page = fresh(extra=TRACK_GL)
+        try:
+            page.wait_for_selector(OVERLAY, state="attached")
+            page.evaluate(UNDERLAY)
+            page.mouse.move(40, 40)
+            page.mouse.down()
+            at_boot(page, 7300)
+            page.mouse.up()
+            at_boot(page, 7500)  # past the held-pointer deadline, inside the release's own protection
+            check("a release at 7300 keeps the shield past the held-pointer deadline", page.locator(OVERLAY).count() == 1)
+            page.mouse.click(40, 40)
+            page.wait_for_selector(OVERLAY, state="detached", timeout=2000)
+            check("…and the click at 7500 reaches nothing underneath",
+                  page.evaluate("window.__under") == {"click": 0, "dblclick": 0, "down": 0, "up": 0},
+                  str(page.evaluate("window.__under")))
+            check("…and the overlay is gone within the absolute bound (7900 ms)",
+                  page.evaluate("performance.now() - window.__bootAt") < 7900 + 250 and page.evaluate(GONE))
+        finally:
+            ctx.close()
+        # A pointer never released: the shield is gone at the held-pointer deadline (cap + SHIELD_MS).
         ctx, page = fresh(extra=TRACK_GL)
         try:
             page.wait_for_selector(OVERLAY, state="attached")
             page.mouse.move(40, 40)
             page.mouse.down()
             page.wait_for_selector(OVERLAY, state="detached", timeout=9000)
-            check("a pointer held forever loses the shield at the absolute deadline", page.evaluate(GONE))
+            check("a pointer held forever loses the shield at the held-pointer deadline", page.evaluate(GONE))
             page.mouse.up()
         finally:
             ctx.close()
