@@ -46,14 +46,53 @@ class Refused(RuntimeError):
 
 
 MIN_PREFIX = 16        # the broadest `allow_dst` entry: a /15 or shorter is refused
+MAX_ALLOW_ADDRESSES = 1 << 16   # every `allow_dst` entry together: at most one /16's worth
+
+# GitHub's published IPv4 ranges (https://api.github.com/meta, fetched 2026-11-13,
+# unauthenticated: the `web`, `api`, `git`, `packages`, `pages` and `importer`
+# lists, collapsed with ipaddress.collapse_addresses). An `allow_dst` entry that
+# overlaps any of them is refused: an egress allowlist exists to keep a public
+# repo's merged fix out of reach, and GitHub is where that fix lives. Refresh
+# from the same URL when GitHub publishes new ranges.
+GITHUB_V4 = (
+    "4.149.173.80/28", "4.158.254.48/28", "4.159.108.160/28", "4.159.197.192/28", "4.163.8.144/28",
+    "4.186.157.192/28", "4.187.247.160/28", "4.195.217.80/28", "4.196.32.112/28", "4.207.215.240/28",
+    "4.208.26.193/32", "4.208.26.196/31", "4.208.26.198/32", "4.208.26.200/32", "4.209.111.112/28",
+    "4.209.112.0/28", "4.225.11.194/32", "4.225.11.196/32", "4.225.11.199/32", "4.225.11.200/31",
+    "4.225.187.240/28", "4.225.189.240/28", "4.228.31.144/31", "4.228.31.149/32", "4.228.31.150/32",
+    "4.228.31.152/32", "4.234.31.32/28", "4.234.31.128/28", "4.234.47.112/28", "4.236.95.112/28",
+    "4.237.22.32/32", "4.237.22.34/32", "4.237.22.36/32", "4.237.22.38/32", "4.237.22.40/32",
+    "4.249.131.163/32", "4.249.131.164/32", "4.249.131.166/31", "20.6.7.16/28", "20.26.58.32/28",
+    "20.26.68.64/28", "20.26.156.210/31", "20.26.156.213/32", "20.26.156.214/31", "20.27.163.208/28",
+    "20.27.177.113/32", "20.27.177.116/30", "20.29.134.17/32", "20.29.134.18/31", "20.29.134.22/31",
+    "20.51.87.64/28", "20.87.245.0/31", "20.87.245.2/32", "20.87.245.4/32", "20.87.245.6/32",
+    "20.169.109.160/28", "20.172.24.160/28", "20.175.192.146/31", "20.175.192.149/32",
+    "20.175.192.150/32", "20.199.39.227/32", "20.199.39.228/32", "20.199.39.231/32",
+    "20.199.39.232/32", "20.200.245.241/32", "20.200.245.244/31", "20.200.245.247/32",
+    "20.200.245.248/32", "20.205.243.160/31", "20.205.243.164/32", "20.205.243.166/32",
+    "20.205.243.168/32", "20.207.73.81/32", "20.207.73.82/31", "20.207.73.85/32", "20.207.73.86/32",
+    "20.208.89.80/28", "20.217.135.0/31", "20.217.135.4/31", "20.233.83.145/32", "20.233.83.146/31",
+    "20.233.83.148/31", "20.247.166.64/28", "20.250.119.67/32", "20.250.119.68/32", "20.250.119.72/31",
+    "40.121.125.32/28", "40.121.125.128/26", "40.121.125.192/27", "48.200.82.112/28",
+    "48.202.10.80/28", "48.202.91.176/28", "48.202.248.34/32", "48.202.248.38/31", "48.202.248.40/32",
+    "48.204.201.2/32", "48.204.201.5/32", "48.204.201.6/32", "48.204.201.9/32", "52.0.228.224/32",
+    "52.22.155.48/32", "52.23.85.212/32", "57.155.223.240/28", "57.166.80.144/28", "74.161.79.192/28",
+    "135.235.149.144/28", "140.82.112.0/20", "143.55.64.0/20", "172.130.18.192/28",
+    "172.130.45.112/28", "172.130.153.16/28", "172.130.201.80/28", "172.139.64.112/28",
+    "172.182.252.130/32", "172.182.252.133/32", "172.182.252.135/32", "172.182.252.136/31",
+    "172.184.222.112/28", "172.194.155.208/28", "172.194.218.192/28", "185.199.108.0/22",
+    "192.30.252.0/22",
+)
 
 
 def allow_networks(policy: dict) -> list[ipaddress.IPv4Network] | None:
     """The policy's `allow_dst` as normalised, de-duplicated IPv4 networks, or
     None when the policy sets none (TCP to the allowed ports, any destination).
-    A set list must be a nonempty list of IPv4 CIDR strings, none of which
-    overlaps a blocked range or the DNS forwarder: anything else is refused, so
-    a mistake can never widen the egress or silently close it entirely."""
+    A set list must be a nonempty list of IPv4 CIDR strings, none broader than
+    /MIN_PREFIX, together covering at most MAX_ALLOW_ADDRESSES (their union), and
+    none overlapping a blocked range, the DNS forwarder or GitHub's published
+    ranges: anything else is refused, so a mistake can never widen the egress or
+    silently close it entirely."""
     if policy.get("allow_dst") is None:
         return None
     raw = policy["allow_dst"]
@@ -72,6 +111,15 @@ def allow_networks(policy: dict) -> list[ipaddress.IPv4Network] | None:
                           f"the provider's own ranges, not a slice of the internet")
         if net not in nets:
             nets.append(net)
+    total = sum(n.num_addresses for n in ipaddress.collapse_addresses(nets))
+    if total > MAX_ALLOW_ADDRESSES:
+        raise Refused(f"allow_dst covers {total} addresses in all, more than {MAX_ALLOW_ADDRESSES} (one /16): "
+                      f"many narrow entries are as broad as one wide one")
+    github = [ipaddress.IPv4Network(g) for g in GITHUB_V4]
+    for net in nets:
+        hit = next((g for g in github if net.overlaps(g)), None)
+        if hit is not None:
+            raise Refused(f"allow_dst {net} overlaps GitHub's published range {hit} (where a public fix lives)")
     blocked = [ipaddress.IPv4Network(f"{ipaddress.IPv4Address(policy['dns'])}/32")]
     blocked += [ipaddress.IPv4Network(b, strict=False) for b in policy["block"]]
     for net in nets:

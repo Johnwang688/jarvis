@@ -63,16 +63,16 @@ def verify_with(policy: dict, installed: list[tuple]) -> bool:
 
 
 def test_verify_destinations() -> None:
-    pol = {**BASE, "allow_dst": ANTHROPIC + ["34.0.0.0/16"]}
+    pol = {**BASE, "allow_dst": ANTHROPIC + ["34.0.0.0/17"]}
     exact = [netcell._key(r) for r in netcell.rules(pol)] + list(netcell.DEFAULTS_V4)
     check("verify accepts exactly the policy's rules", verify_with(pol, exact))
-    swapped = [(k[0], "8.8.8.0/24", *k[2:]) if k[1] == "34.0.0.0/16" else k for k in exact]
+    swapped = [(k[0], "8.8.8.0/24", *k[2:]) if k[1] == "34.0.0.0/17" else k for k in exact]
     check("verify refuses a rule whose destination differs", not verify_with(pol, swapped))
     widened = [(k[0], "160.79.104.0/22", *k[2:]) if k[1] == ANTHROPIC[0] else k for k in exact]
     check("verify refuses a wider destination than the policy's", not verify_with(pol, widened))
     open443 = exact + [(110, "", "tcp", 443, "main")]
     check("verify refuses an extra TCP 443 rule open to any destination", not verify_with(pol, open443))
-    check("verify refuses a missing allow rule", not verify_with(pol, [k for k in exact if k[1] != "34.0.0.0/16"]))
+    check("verify refuses a missing allow rule", not verify_with(pol, [k for k in exact if k[1] != "34.0.0.0/17"]))
     check("verify against an allow_dst-less policy refuses the allowlisted read-back",
           not verify_with(BASE, exact))
 
@@ -90,7 +90,7 @@ def test_policy_validation() -> None:
     check("an allow_dst entry covering the DNS forwarder is refused",
           raises(lambda: netcell.rules({**BASE, "allow_dst": ["192.0.2.0/24"]}), netcell.Refused))
     check("a non-string allow_dst entry is refused", raises(lambda: netcell.rules({**BASE, "allow_dst": [5]}), netcell.Refused))
-    two = netcell.rules({**BASE, "allow_tcp": [443, 8443], "allow_dst": ANTHROPIC + ["34.0.0.0/16"]})
+    two = netcell.rules({**BASE, "allow_tcp": [443, 8443], "allow_dst": ANTHROPIC + ["34.0.0.0/17"]})
     check("one rule per (CIDR, port)", len([r for r in two if r["pref"] == 110]) == 4, str(two))
 
 
@@ -245,17 +245,23 @@ def test_extra_ro_allowlist(root: Path) -> None:
     work = root / "work-al"
     work.mkdir()
     state = root / "state"
-    (state / "deps").mkdir(parents=True)
-    (state / "deps" / "f").write_text("x")
+    (state / "binds" / "deps").mkdir(parents=True)
+    (state / "binds" / "deps" / "f").write_text("x")
+    for sealed in ("pool", "spotcheck-keys", "io", "snap", "runs", "deps"):
+        (state / sealed).mkdir()
+        (state / sealed / "x.json").write_text("{}")
     for door in ("/etc", "/run", "/proc", "/mnt/c", "/var", "/home", "/"):
         if os.path.exists(door):
             check(f"an extra bind of {door} is refused (not inside the state directory, /usr or /opt)", bind_refused(door, work))
     # production strictness: without the test guard's temp-dir allowance only the
     # state directory, /usr and /opt are sources
     with env(ROLEBENCH_TESTING=None, ROLEBENCH_HOME=str(state)):
-        check("the state directory's own subtree is an allowed source",
-              not bind_refused(state / "deps", work))
-        check("the state directory itself is not a source (only inside it)", bind_refused(state, work))
+        check("the state directory's binds/ subtree is an allowed source",
+              not bind_refused(state / "binds" / "deps", work))
+        check("the state directory itself is not a source", bind_refused(state, work))
+        check("binds/ itself is not a source (only inside it)", bind_refused(state / "binds", work))
+        for sealed in ("pool", "spotcheck-keys", "io", "snap", "runs", "deps"):
+            check(f"the state directory's {sealed}/ (outside binds/) is not a source", bind_refused(state / sealed, work))
         plain = root / "plain-outside"
         plain.mkdir()
         check("a plain directory in the system temp dir is refused outside the test guard", bind_refused(plain, work))
@@ -263,9 +269,42 @@ def test_extra_ro_allowlist(root: Path) -> None:
         if usr:
             check(f"a directory inside /usr ({usr}) is an allowed source", not bind_refused(usr, work))
         check("/usr itself is not a source (only inside it)", bind_refused("/usr", work))
-        link = state / "deps-link"
+        link = state / "binds" / "deps-link"
         link.symlink_to("/etc")
-        check("a symlink inside the state directory that leaves it is refused after resolving", bind_refused(link, work))
+        check("a symlink inside binds/ that leaves it is refused after resolving", bind_refused(link, work))
+        back = state / "binds" / "pool-link"
+        back.symlink_to(state / "pool")
+        check("a symlink inside binds/ back into the state directory's pool/ is refused after resolving",
+              bind_refused(back, work))
+    with env(ROLEBENCH_TESTING="1", ROLEBENCH_HOME=str(state)):
+        check("under the test guard the temp-dir root does not reopen the state directory's pool/",
+              bind_refused(state / "pool", work))
+        check("... nor a temp-dir parent that contains the state directory", bind_refused(root, work))
+        check("... while binds/ still works", not bind_refused(state / "binds" / "deps", work))
+    for bad_state in ("/", config.real_home(), os.path.expanduser("~"), os.path.dirname(os.path.expanduser("~"))):
+        with env(ROLEBENCH_TESTING="1", ROLEBENCH_HOME=bad_state):
+            try:
+                sandbox.Cell("grade", work, extra_ro=((Path("/usr/share"), work / "dep"),))
+                why = ""
+            except sandbox.SandboxError as exc:
+                why = str(exc)
+            check(f"a state directory of {bad_state} (/, or is/contains a home) refuses every extra bind",
+                  "state directory" in why and "cannot be a bind root" in why, why or "accepted")
+    with env(ROLEBENCH_TESTING="1", ROLEBENCH_HOME="/"):
+        check("a bad state directory does not refuse a cell with no extra binds",
+              not raises(lambda: sandbox.Cell("grade", work), sandbox.SandboxError))
+    real_tmp = tempfile.tempdir
+    tempfile.tempdir = "/"
+    try:
+        with env(ROLEBENCH_TESTING="1"):
+            try:
+                sandbox.Cell("grade", work, extra_ro=((Path("/usr/share/zoneinfo"), work / "dep"),))
+                why = ""
+            except sandbox.SandboxError as exc:
+                why = str(exc)
+        check("under the test guard a temp dir of / is refused as a root", "temp directory is /" in why, why or "accepted")
+    finally:
+        tempfile.tempdir = real_tmp
     with env(ROLEBENCH_TESTING="1"):
         plain = root / "plain-in-tmp"
         plain.mkdir()
@@ -286,7 +325,34 @@ def test_extra_ro_allowlist(root: Path) -> None:
         check("a source whose top level holds .git is refused", bind_refused(git, work))
         check("a source whose top level holds a .env.local is refused", bind_refused(envf, work))
         check("a source that is itself a .env file is refused", bind_refused(envfile, work))
-        check("a .env below the top level is not the rule's business", not bind_refused(nested, work))
+        check("a .env below the top level is refused too (any depth)", bind_refused(nested, work))
+        deep = root / "deep-git"
+        (deep / "a" / "b" / "c" / ".git").mkdir(parents=True)
+        check("a .git three levels down is refused", bind_refused(deep, work))
+        linked = root / "linked-env"
+        linked.mkdir()
+        (linked / ".env").symlink_to("/nonexistent")
+        check("a symlink named .env (dangling) is refused by its own name", bind_refused(linked, work))
+        hidden = root / "behind-link"
+        (hidden / "real").mkdir(parents=True)
+        outside = root / "outside-with-git"
+        (outside / ".git").mkdir(parents=True)
+        (hidden / "real" / "via").symlink_to(outside)
+        check("the walk does not follow a symlinked directory (bwrap mounts the link, not its target)",
+              not bind_refused(hidden, work))
+        locked = root / "locked"
+        (locked / "inner").mkdir(parents=True)
+        (locked / "inner").chmod(0)
+        try:
+            readable = os.access(locked / "inner", os.R_OK)
+            if not readable:
+                check("a source with an unreadable directory is refused (fail closed)", bind_refused(locked, work))
+        finally:
+            (locked / "inner").chmod(0o755)
+        clean = root / "clean-deep"
+        (clean / "x" / "y").mkdir(parents=True)
+        (clean / "x" / "y" / "env.txt").write_text("not a dotfile")
+        check("a deep tree with no .git or .env* entry is accepted", not bind_refused(clean, work))
 
 
 def test_readonly_work_mountpoint(root: Path) -> None:
@@ -362,7 +428,8 @@ def test_managed_settings(root: Path) -> None:
         f.write_text("{}")
         sandbox.bwrap_argv(sandbox.Cell("claude", root / "ms-claude"), ["/bin/true"], net="none")
         check("a tampered managed-settings file is rewritten before the next cell", json.loads(f.read_text()) == expected)
-        check("the managed-settings write leaves no temp file behind", not f.with_suffix(".tmp").exists())
+        check("the managed-settings write leaves no temp file behind",
+              not [p for p in f.parent.iterdir() if p.name.endswith(".tmp")], str(list(f.parent.iterdir())))
         # a real bwrap: the nested CLI's managed settings are present, and nothing in the cell can change them
         if sandbox.available():
             print("  skip managed-settings bwrap probe (bwrap or systemd-run missing)")
@@ -396,6 +463,151 @@ def test_codex_search_exact() -> None:
     check("codex_argv carries no live, cached or indexed search and no --search / --enable web_search",
           not any(m in a for a in argv for m in ('"live"', '"cached"', '"indexed"', "--search", "web_search_request"))
           and "--enable" not in argv)
+
+
+def test_github_and_aggregate() -> None:
+    """Round 2 (Opus): MIN_PREFIX is per entry, so GitHub's own /16s and any
+    number of /16s passed. An entry overlapping GitHub's published ranges and an
+    allowlist covering more than one /16 in all are refused."""
+    check("netcell.MAX_ALLOW_ADDRESSES is one /16", netcell.MAX_ALLOW_ADDRESSES == 65536)
+    import ipaddress
+    gh = [ipaddress.IPv4Network(g) for g in netcell.GITHUB_V4]
+    check("GITHUB_V4 is a nonempty, collapsed list of IPv4 networks",
+          bool(gh) and [str(n) for n in ipaddress.collapse_addresses(gh)] == list(netcell.GITHUB_V4))
+    for known in ("140.82.112.0/20", "143.55.64.0/20", "185.199.108.0/22", "192.30.252.0/22"):
+        check(f"GITHUB_V4 holds GitHub's {known}", ipaddress.IPv4Network(known) in gh)
+    for net in ("140.82.112.0/20", "140.82.121.4/32", "185.199.111.0/24", "192.30.0.0/16", "20.26.156.210/32"):
+        check(f"an allow_dst entry {net} overlapping GitHub is refused",
+              raises(lambda n=net: netcell.rules({**BASE, "allow_dst": ["160.79.104.0/23", n]}), netcell.Refused))
+    for provider in (["160.79.104.0/23"], ["153.61.224.0/22"], ["160.79.104.0/23", "153.61.224.0/22"]):
+        check(f"the Anthropic ranges {provider} stay accepted",
+              not raises(lambda pr=provider: netcell.rules({**BASE, "allow_dst": pr})))
+    check("one /16 alone is accepted (exactly the cap)", not raises(lambda: netcell.rules({**BASE, "allow_dst": ["34.0.0.0/16"]})))
+    check("a /16 plus one more address is refused in aggregate",
+          raises(lambda: netcell.rules({**BASE, "allow_dst": ["34.0.0.0/16", "160.79.104.7/32"]}), netcell.Refused))
+    check("two /17s (exactly one /16 in all) are accepted",
+          not raises(lambda: netcell.rules({**BASE, "allow_dst": ["34.0.0.0/17", "35.0.0.0/17"]})))
+    many = [f"34.{b}.0.0/24" for b in range(256)] + ["35.0.0.0/24"]
+    check("257 /24s (one more than a /16's worth) are refused in aggregate",
+          raises(lambda: netcell.rules({**BASE, "allow_dst": many}), netcell.Refused))
+    check("an entry inside another counts once (the union is what is reachable)",
+          not raises(lambda: netcell.rules({**BASE, "allow_dst": ["34.0.0.0/16", "34.0.1.0/24"]})))
+
+
+def test_disable_userns(root: Path) -> None:
+    """Round 2 (Opus): claude and judge cells forbid nested user namespaces in
+    every network mode; the other profiles are unchanged."""
+    for profile in ("claude", "judge"):
+        work = root / f"un-{profile}"
+        work.mkdir()
+        for net in ("none", "pasta"):
+            argv = sandbox.bwrap_argv(sandbox.Cell(profile, work), ["/bin/true"], net=net)
+            check(f"a {profile} cell ({net}) has --unshare-user and --disable-userns",
+                  "--disable-userns" in argv and "--unshare-user" in argv
+                  and argv.index("--disable-userns") < argv.index("--"))
+    for profile in ("grade", "jarvis"):
+        work = root / f"un-{profile}"
+        work.mkdir()
+        argv = sandbox.bwrap_argv(sandbox.Cell(profile, work), ["/bin/true"], net="none")
+        check(f"a {profile} cell is unchanged (no --disable-userns)", "--disable-userns" not in argv)
+    if sandbox.available() or not shutil.which("unshare"):
+        print("  skip nested-userns bwrap probe (bwrap, systemd-run or unshare missing)")
+        return
+    cell = sandbox.Cell("claude", root / "un-claude")
+    script = ("unshare -Urm sh -c 'mount -t tmpfs none /etc/claude-code && echo OVERMOUNT_OK' 2>&1; "
+              "unshare -U true 2>/dev/null && echo NESTED_USERNS_OK; "
+              "cat /etc/claude-code/managed-settings.json >/dev/null && echo MANAGED_PRESENT")
+
+    def run(argv_filter):
+        dests = [d for d, _ in sandbox.credential_binds(cell)]
+        fds = {d: pipe_with(b"{}") for d in dests}
+        argv = argv_filter(sandbox.bwrap_argv(cell, ["/bin/sh", "-c", script], net="none", cred_fds=fds))
+        done = subprocess.run(argv, capture_output=True, text=True, timeout=30, pass_fds=list(fds.values()))
+        for fd in fds.values():
+            os.close(fd)
+        return done
+
+    done = run(lambda a: a)
+    check("in a real claude cell nested user namespaces fail, so /etc/claude-code cannot be over-mounted",
+          "MANAGED_PRESENT" in done.stdout and "OVERMOUNT_OK" not in done.stdout
+          and "NESTED_USERNS_OK" not in done.stdout, f"rc={done.returncode} out={done.stdout!r} err={done.stderr[-300:]!r}")
+    control = run(lambda a: [x for x in a if x != "--disable-userns"])
+    if "NESTED_USERNS_OK" in control.stdout:
+        check("control: without --disable-userns the same cell can over-mount (so the flag is what closes it)",
+              "OVERMOUNT_OK" in control.stdout, control.stdout)
+    else:
+        print("  skip nested-userns control (this host gives no user namespaces inside bwrap anyway)")
+
+
+def test_dest_symlink(root: Path) -> None:
+    """Round 2 (Sol): a destination in the work tree reached through a symlink,
+    dangling or not, is refused before launch, in a read-only or writable tree."""
+    with env(ROLEBENCH_TESTING="1"):
+        src = root / "sym-src"
+        src.mkdir()
+        for ro in (True, False):
+            work = root / f"sym-work-{ro}"
+            (work / "vendor").mkdir(parents=True)
+            dangling = work / "node_modules"
+            dangling.symlink_to("vendor/node_modules", target_is_directory=True)
+
+            def why(dest, w=work, r=ro):
+                try:
+                    sandbox.bwrap_argv(sandbox.Cell("grade", w, work_ro=r, extra_ro=((src, dest),)), ["/bin/true"])
+                except sandbox.SandboxError as exc:
+                    return str(exc)
+                return ""
+            got = why(dangling)
+            check(f"a dangling symlink destination (work_ro={ro}) is refused, saying its target does not exist",
+                  "symlink" in got and "does not exist" in got, got or "accepted")
+            (work / "vendor" / "node_modules").mkdir()
+            got = why(dangling)
+            check(f"a symlink destination with an existing target (work_ro={ro}) is refused too", "symlink" in got, got or "accepted")
+            (work / "real").mkdir()
+            (work / "via").symlink_to("real", target_is_directory=True)
+            got = why(work / "via" / "deps")
+            check(f"a destination under a symlinked parent in the tree (work_ro={ro}) is refused", "symlink" in got, got or "accepted")
+            out = work / "esc"
+            out.symlink_to("/etc", target_is_directory=True)
+            got = why(out)
+            check(f"an in-tree symlink aiming the mount outside the tree (work_ro={ro}) is refused", "symlink" in got, got or "accepted")
+            (work / "plain").mkdir()
+            check(f"a real directory destination in the tree (work_ro={ro}) is accepted", why(work / "plain") == "")
+        work = root / "sym-work-True"
+        side = root / "side-door"
+        side.symlink_to(work, target_is_directory=True)
+        got = why(side / "plain", work, True)
+        check("a destination that reaches the work tree through an outside symlink is refused", "symlink" in got, got or "accepted")
+
+
+def test_publish_unique_temp(root: Path) -> None:
+    """Round 2 (Sol): concurrent first launches each stage into their own temp
+    file, so none renames another's away; the result is always whole."""
+    import threading
+    with env(ROLEBENCH_HOME=str(root / "pub-home")):
+        target = config.home() / "sandbox" / "managed-settings.json"
+        errors: list[str] = []
+        gate = threading.Barrier(8)
+
+        def build():
+            try:
+                gate.wait(timeout=5)
+                for _ in range(20):
+                    if target.exists():
+                        target.write_text("{}")         # force a rewrite each round
+                    sandbox._managed_settings_file()
+                    sandbox._gitconfig_file()
+            except Exception as exc:                     # noqa: BLE001  any failure is the finding
+                errors.append(f"{type(exc).__name__}: {exc}")
+        threads = [threading.Thread(target=build) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        check("8 threads publishing the managed settings and gitconfig at once all succeed", not errors, str(errors[:3]))
+        check("the published managed settings are whole", target.read_text() == sandbox.MANAGED_SETTINGS_TEXT)
+        check("no temp file is left behind", not [p for p in target.parent.iterdir() if p.name.endswith(".tmp")],
+              str(sorted(p.name for p in target.parent.iterdir())))
 
 
 PROBE = """
@@ -444,6 +656,10 @@ def main() -> int:
         test_readonly_work_mountpoint(root)
         test_managed_settings(root)
         test_codex_search_exact()
+        test_github_and_aggregate()
+        test_disable_userns(root)
+        test_dest_symlink(root)
+        test_publish_unique_temp(root)
         test_real_namespace()
     finally:
         shutil.rmtree(root, ignore_errors=True)

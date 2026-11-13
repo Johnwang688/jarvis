@@ -31,12 +31,15 @@ but puts the agent in its own user namespace with no capabilities, so it can
 never change the policy. `ROLEBENCH_NET=none` gives those cells no network at
 all (no API either, so real runs are refused).
 
-A pasta cell may also carry `allow_dst`, IPv4 CIDRs (none broader than /16): TCP
-443 then goes only to those (the model provider), not to any public address. A
-cell may carry `extra_ro`, extra read-only binds whose source lies inside the
-bench's state directory, /usr or /opt (no `.git` or `.env*` at its top level).
-Every claude and judge cell gets managed settings denying the nested CLI's
-WebSearch and WebFetch, at /etc/claude-code/managed-settings.json.
+A pasta cell may also carry `allow_dst`, IPv4 CIDRs (none broader than /16, at
+most a /16's worth in all, none overlapping GitHub's published ranges): TCP 443
+then goes only to those (the model provider), not to any public address. A cell
+may carry `extra_ro`, extra read-only binds whose source lies inside the bench's
+state directory's binds/, /usr or /opt (no `.git` or `.env*` at any depth), onto
+a destination reached through no symlink in the work tree. Every claude and
+judge cell gets managed settings denying the nested CLI's WebSearch and
+WebFetch, at /etc/claude-code/managed-settings.json, and no nested user
+namespace (`--disable-userns`), so nothing in it can mount over them.
 """
 
 from __future__ import annotations
@@ -212,30 +215,55 @@ class Cell:
 
 
 CREDENTIAL_TREES = (".claude", ".codex", ".config", ".ssh", ".gnupg")
-# Where an extra read-only bind's source may come from (A1 addition): the
-# bench's own state directory and the system's installed software. Everything
-# else, the account's home above all (its credential stores, checkouts with a
-# .env, the user bus under /run), is refused by not being on this list.
+# Where an extra read-only bind's source may come from (A1 addition): a
+# dedicated `binds/` directory under the bench's state directory, which callers
+# stage dependencies into, and the system's installed software. Everything
+# else is refused by not being on this list: the account's home (its credential
+# stores, checkouts with a .env, the user bus under /run) and the rest of the
+# state directory too, which holds the pooled answers (pool/), the spot-check
+# keys, snapshots and every other cell's io and work trees.
+EXTRA_RO_BINDS = "binds"
 EXTRA_RO_SYSTEM_ROOTS = ("/usr", "/opt")
 
 
+def _homes() -> list[str]:
+    """The account's home (whatever HOME says) and $HOME, resolved."""
+    return sorted({os.path.realpath(config.real_home()), os.path.realpath(os.path.expanduser("~"))})
+
+
 def _credential_roots() -> list[str]:
-    """The real credential trees: under the account's home (whatever HOME says)
-    and under $HOME, resolved."""
-    homes = {os.path.realpath(config.real_home()), os.path.realpath(os.path.expanduser("~"))}
+    """The real credential trees: under the account's home and under $HOME, resolved."""
+    homes = _homes()
     return sorted({os.path.join(h, t) for h in homes for t in CREDENTIAL_TREES}
                   | {os.path.realpath(os.path.join(h, t)) for h in homes for t in CREDENTIAL_TREES})
 
 
-def _extra_ro_roots() -> list[str]:
+def _state_dir() -> str:
+    """The bench's state directory, resolved, or a SandboxError when it cannot
+    anchor an allowlist: `/`, the account's home, $HOME or anything containing
+    one of them (ROLEBENCH_HOME=/ would otherwise put every path 'inside' it)."""
+    state = os.path.realpath(config.home())
+    if state == os.sep:
+        raise SandboxError("extra read-only bind: the bench's state directory is /, which cannot be a bind root")
+    for home in _homes():
+        if state == home or _inside(home, state):
+            raise SandboxError(f"extra read-only bind: the bench's state directory {state} is or contains the "
+                               f"home {home}, which cannot be a bind root")
+    return state
+
+
+def _extra_ro_roots(state: str) -> list[str]:
     """The resolved directories an extra read-only bind's source must lie inside:
-    the bench's state directory, /usr and /opt. Under ROLEBENCH_TESTING the
-    system temp directory too (the suites build their fixtures there); a real
-    run never has it."""
-    roots = [config.home(), *EXTRA_RO_SYSTEM_ROOTS]
+    the state directory's binds/, /usr and /opt. Under ROLEBENCH_TESTING the
+    system temp directory too (the suites build their fixtures there), unless it
+    is `/`; a real run never has it."""
+    roots = [os.path.join(state, EXTRA_RO_BINDS), *(os.path.realpath(r) for r in EXTRA_RO_SYSTEM_ROOTS)]
     if config.testing():
-        roots.append(tempfile.gettempdir())
-    return [os.path.realpath(r) for r in roots]
+        tmp = os.path.realpath(tempfile.gettempdir())
+        if tmp == os.sep:
+            raise SandboxError("extra read-only bind: the system temp directory is /, which cannot be a bind root")
+        roots.append(tmp)
+    return roots
 
 
 def _inside(path: str, root: str) -> bool:
@@ -246,18 +274,40 @@ def _repo_or_env_name(name: str) -> bool:
     return name == ".git" or name.lower().startswith(".env")
 
 
+def _walk_error(exc: OSError) -> None:
+    raise exc
+
+
+def _repo_or_env_entry(real: str) -> str | None:
+    """The first `.git` or `.env*` entry at any depth of `real` (itself
+    included), walking without following symlinks (a link's own name still
+    counts), or None. An unreadable directory is an OSError: fail closed."""
+    if _repo_or_env_name(os.path.basename(real)):
+        return real
+    if not os.path.isdir(real):
+        return None
+    for top, dirs, files in os.walk(real, onerror=_walk_error, followlinks=False):
+        for name in (*dirs, *files):
+            if _repo_or_env_name(name):
+                return os.path.join(top, name)
+    return None
+
+
 def _extra_ro_binds(extra_ro) -> list[tuple[str, str]]:
     """(resolved source, destination) for each extra read-only bind, or a
     SandboxError. The source must exist and, resolved, lie strictly inside the
-    bench's state directory, /usr or /opt (an allowlist: no credential store,
+    state directory's binds/, /usr or /opt (an allowlist: no credential store,
     checkout or system door is ever named, so none needs listing); it may not
-    be, contain or lie in a credential tree or the account's home outside the
-    bench's directory; and its top level holds no `.git` and no `.env*` entry.
-    The destination must be an absolute, plain path in the cell."""
+    be, contain or lie in a credential tree, the account's home or $HOME
+    outside binds/, or the state directory outside binds/ (even when another
+    root covers it); and nothing in it, at any depth, is a `.git` or `.env*`
+    entry. The destination must be an absolute, plain path in the cell."""
     out = []
-    roots = _extra_ro_roots()
-    state = os.path.realpath(config.home())
-    home = os.path.realpath(config.real_home())
+    if not extra_ro:
+        return out
+    state = _state_dir()
+    binds = os.path.join(state, EXTRA_RO_BINDS)
+    roots = _extra_ro_roots(state)
     for src, dest in extra_ro:
         if not os.path.lexists(src):
             raise SandboxError(f"extra read-only bind: source {src} does not exist")
@@ -272,21 +322,53 @@ def _extra_ro_binds(extra_ro) -> list[tuple[str, str]]:
         for root in _credential_roots():
             if real == root or _inside(real, root) or _inside(root, real):
                 raise SandboxError(f"extra read-only bind: source {src} is, is inside or contains {root} (credential trees are never bound)")
-        if (real == home or _inside(real, home) or _inside(home, real)) and not _inside(real, state):
-            raise SandboxError(f"extra read-only bind: source {src} is in the account's home, outside "
-                               f"the bench's own directory (a credential store, a checkout's .env or .git are never bound)")
+        for home in _homes():
+            if (real == home or _inside(real, home) or _inside(home, real)) and not _inside(real, binds):
+                raise SandboxError(f"extra read-only bind: source {src} is in the home {home}, outside the bench's "
+                                   f"{binds} (a credential store, a checkout's .env or .git are never bound)")
+        if (real == state or _inside(real, state) or _inside(state, real)) and not _inside(real, binds):
+            raise SandboxError(f"extra read-only bind: source {src} is, is in or contains the bench's state directory "
+                               f"outside {binds} (the pooled answers, keys and other cells' trees are never bound)")
         if not any(_inside(real, root) for root in roots):
             raise SandboxError(f"extra read-only bind: source {src} (resolved: {real}) is not inside "
-                               f"the bench's state directory, /usr or /opt")
+                               f"{binds}, /usr or /opt")
         try:
-            names = [e.name for e in os.scandir(real)] if os.path.isdir(real) else [os.path.basename(real)]
+            hit = _repo_or_env_entry(real)
         except OSError as exc:
-            raise SandboxError(f"extra read-only bind: source {src} cannot be listed ({exc})")
-        if any(_repo_or_env_name(n) for n in names):
-            raise SandboxError(f"extra read-only bind: source {src} holds a .git or .env* entry "
-                               f"at its top level (repository history and credentials are never bound)")
+            raise SandboxError(f"extra read-only bind: source {src} cannot be walked in full ({exc}); refusing")
+        if hit:
+            raise SandboxError(f"extra read-only bind: source {src} holds {hit}, a .git or .env* entry "
+                               f"(repository history and credentials are never bound, at any depth)")
         out.append((real, norm))
     return out
+
+
+def _dest_refusal(dest: str, work: Path, work_ro: bool) -> str | None:
+    """Why an extra bind's destination is refused against this work tree, or
+    None. bwrap follows symlinks when it makes a mountpoint, and the work tree
+    is the agent's: a symlink there (dangling or not) on the way to the
+    destination, or one anywhere that leads into the tree, could aim the
+    mount elsewhere in the cell, so it is refused. A missing destination in a
+    read-only tree is refused too: bwrap cannot make the mountpoint there."""
+    trees = {os.path.normpath(os.path.abspath(str(work))), os.path.realpath(str(work))}
+    real_tree = os.path.realpath(str(work))
+    parts = Path(dest).parts
+    for i in range(1, len(parts) + 1):
+        prefix = os.path.join(*parts[:i])
+        if not os.path.islink(prefix):
+            continue
+        in_tree = any(prefix == t or _inside(prefix, t) for t in trees)
+        target = os.path.realpath(prefix)
+        if in_tree or target == real_tree or _inside(target, real_tree):
+            what = "dangling: its target does not exist" if not os.path.exists(prefix) else f"to {target}"
+            return (f"extra read-only bind: destination {dest} goes through the symlink {prefix} ({what}); "
+                    f"a destination in the work tree must be a real path, never a symlink")
+    in_tree = any(dest == t or _inside(dest, t) for t in trees)
+    if work_ro and in_tree and not os.path.exists(dest):
+        # a read-only mount cannot gain the mountpoint bwrap would have to create
+        return (f"extra read-only bind: destination {dest} lies in the read-only work tree "
+                f"and does not exist; create it before building the cell")
+    return None
 
 
 def sandbox_home() -> str:
@@ -345,14 +427,36 @@ def _resolv() -> list[str]:
     return []
 
 
-def _gitconfig_file() -> Path:
-    path = config.home() / "sandbox" / "gitconfig"
-    if not path.is_file() or path.read_text(encoding="utf-8") != GITCONFIG_TEXT:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(GITCONFIG_TEXT, encoding="utf-8")
+def _publish(path: Path, text: str) -> Path:
+    """Make `path` hold exactly `text`, atomically. Each writer stages into its
+    own temp file (pid and a random suffix, created exclusively beside the
+    target) and renames it over the target, so two cells built at once (the
+    bench runs several) never share a temp name: neither can rename the other's
+    file away or publish a half-written one. A reader sees the old file or the
+    new, never a mixture."""
+    try:
+        if path.is_file() and path.read_text(encoding="utf-8") == text:
+            return path
+    except OSError:
+        pass                                      # unreadable or vanished: rewrite it
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.{os.getpid()}.", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        os.chmod(tmp, 0o644)
         os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
     return path
+
+
+def _gitconfig_file() -> Path:
+    return _publish(config.home() / "sandbox" / "gitconfig", GITCONFIG_TEXT)
 
 
 # Managed settings (the CLI's highest-precedence layer: no flag, project or user
@@ -366,13 +470,7 @@ MANAGED_PATH = MANAGED_DIR + "/managed-settings.json"
 
 
 def _managed_settings_file() -> Path:
-    path = config.home() / "sandbox" / "managed-settings.json"
-    if not path.is_file() or path.read_text(encoding="utf-8") != MANAGED_SETTINGS_TEXT:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(MANAGED_SETTINGS_TEXT, encoding="utf-8")
-        os.replace(tmp, path)
-    return path
+    return _publish(config.home() / "sandbox" / "managed-settings.json", MANAGED_SETTINGS_TEXT)
 
 
 def claude_binary() -> str | None:
@@ -543,12 +641,7 @@ PASTA_RESOLV = f"nameserver {DNS_FORWARD}\noptions timeout:2 attempts:2 no-aaaa\
 
 def _pasta_resolv() -> list[str]:
     """The cell's resolv.conf names only pasta's DNS forwarder (no search list)."""
-    path = config.home() / "sandbox" / "resolv-pasta.conf"
-    if not path.is_file() or path.read_text(encoding="utf-8") != PASTA_RESOLV:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(PASTA_RESOLV, encoding="utf-8")
-        os.replace(tmp, path)
+    path = _publish(config.home() / "sandbox" / "resolv-pasta.conf", PASTA_RESOLV)
     link = "/etc/resolv.conf"
     dest = os.path.realpath(link) if os.path.islink(link) else link
     return ["--ro-bind", str(path), dest]
@@ -572,14 +665,23 @@ def bwrap_argv(cell: Cell, command: list[str], base_env: dict | None = None,
     a = [BWRAP, "--unshare-all"]
     if net in ("host", "pasta"):
         a.append("--share-net")                   # the host's netns for codex; pasta's for the rest
+    managed = cell.profile in ("claude", "judge")
     if net == "pasta":
         # bwrap starts as root of pasta's user namespace: force its own user
         # namespace, the host uid inside, and no capabilities, so nothing in
         # the cell can touch netcell's rules.
         a += ["--unshare-user", "--uid", str(os.getuid()), "--gid", str(os.getgid()), "--cap-drop", "ALL"]
+    elif managed:
+        a.append("--unshare-user")                # --disable-userns needs a user namespace of bwrap's own
+    if managed:
+        # No nested user namespace (bwrap caps the cell's namespace count at the
+        # one it is in: unshare(CLONE_NEWUSER) fails with ENOSPC). Without this,
+        # `unshare -Urm` gives the agent a mount namespace in which it can mount
+        # a tmpfs over /etc/claude-code and run the nested CLI, login readable,
+        # with no managed settings (the Opus round-2 finding).
+        a.append("--disable-userns")
     a += ["--die-with-parent", "--new-session",
           "--ro-bind", "/usr", "/usr", *_root_links()]
-    managed = cell.profile in ("claude", "judge")
     if managed:
         # The host has no /etc/claude-code and a read-only /etc cannot gain a
         # mountpoint, so /etc is a throwaway overlay of the host's (made read-only
@@ -619,10 +721,9 @@ def bwrap_argv(cell: Cell, command: list[str], base_env: dict | None = None,
             a += ["--ro-bind", extra, extra]
     a += ["--ro-bind" if cell.work_ro else "--bind", str(work), str(work)]
     for src, dest in _extra_ro_binds(cell.extra_ro):      # after the work tree, so a dest may sit inside it
-        if cell.work_ro and _inside(os.path.realpath(dest), str(work)) and not os.path.lexists(dest):
-            # a read-only mount cannot gain the mountpoint bwrap would have to create
-            raise SandboxError(f"extra read-only bind: destination {dest} lies in the read-only work tree "
-                               f"and does not exist; create it before building the cell")
+        why = _dest_refusal(dest, Path(cell.work), cell.work_ro)
+        if why:
+            raise SandboxError(why)
         a += ["--ro-bind", src, dest]
     if cell.io_dir is not None:
         a += ["--bind", str(Path(cell.io_dir).resolve()), str(IO)]
