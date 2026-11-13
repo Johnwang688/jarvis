@@ -53,15 +53,19 @@ def test_extra_ro_inside_readonly_work_without_placeholder() -> None:
                 argv = sandbox.bwrap_argv(cell, ["/usr/bin/cat", str(destination / "marker")])
                 return subprocess.run(argv, capture_output=True, text=True, timeout=10)
 
-            missing = probe()
+            # Lead rewrite (same intent, decided design): a missing destination inside a read-only
+            # work tree is refused before launch with a clear SandboxError, never an opaque launch failure.
+            try:
+                probe()
+                refused = False
+            except sandbox.SandboxError as exc:
+                refused = "does not exist" in str(exc)
+            check("test_extra_ro_inside_readonly_work_without_placeholder (refused before launch)", refused)
             destination.mkdir()
             existing = probe()
             check("control: extra_ro works with a pre-existing destination in read-only work",
                   existing.returncode == 0 and existing.stdout == "dependency fixture\n",
                   existing.stderr.strip())
-            check("test_extra_ro_inside_readonly_work_without_placeholder",
-                  missing.returncode == 0 and missing.stdout == "dependency fixture\n",
-                  f"exit={missing.returncode}: {missing.stderr.strip()}")
 
 
 def main() -> int:
