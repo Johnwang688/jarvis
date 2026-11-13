@@ -30,6 +30,10 @@ host-owned address) and execs bwrap, which keeps that netns (`--share-net`)
 but puts the agent in its own user namespace with no capabilities, so it can
 never change the policy. `ROLEBENCH_NET=none` gives those cells no network at
 all (no API either, so real runs are refused).
+
+A pasta cell may also carry `allow_dst`, IPv4 CIDRs: TCP 443 then goes only to
+those (the model provider), not to any public address. A cell may carry
+`extra_ro`, extra read-only binds (never a credential tree).
 """
 
 from __future__ import annotations
@@ -177,6 +181,13 @@ class Cell:
     env: dict = field(default_factory=dict)
     chdir: Path | None = None
     network: bool | None = None
+    # IPv4 CIDRs a pasta cell may open TCP to (None: any public address). Only
+    # a cell netcell polices can carry it: a grade cell has no network and a
+    # codex cell shares the host's, so there it would be a silent no-op.
+    allow_dst: tuple[str, ...] | None = None
+    # (host source, absolute destination in the cell), mounted read-only after
+    # the work tree so a destination may sit inside it.
+    extra_ro: tuple[tuple[Path, Path], ...] = ()
 
     def __post_init__(self):
         if self.profile not in PROFILES:
@@ -185,6 +196,50 @@ class Cell:
             self.network = NETWORK[self.profile]
         if self.profile == "judge":
             self.work_ro = True                   # the judge only ever reads
+        if self.allow_dst is not None:
+            if isinstance(self.allow_dst, (str, bytes)) or not self.allow_dst:
+                raise SandboxError("allow_dst must be a nonempty sequence of IPv4 CIDRs")
+            self.allow_dst = tuple(self.allow_dst)
+            if not self.network or self.profile not in NET_GATED:
+                raise SandboxError(f"allow_dst needs a pasta cell (a {self.profile} cell "
+                                   f"{'has no network' if not self.network else 'does not run under pasta'})")
+        self.extra_ro = tuple((Path(src), Path(dest)) for src, dest in self.extra_ro)
+        _extra_ro_binds(self.extra_ro)            # refuse a bad bind at construction
+
+
+CREDENTIAL_TREES = (".claude", ".codex", ".config", ".ssh", ".gnupg")
+
+
+def _credential_roots() -> list[str]:
+    """The real credential trees: under the account's home (whatever HOME says)
+    and under $HOME, resolved."""
+    homes = {os.path.realpath(config.real_home()), os.path.realpath(os.path.expanduser("~"))}
+    return sorted({os.path.join(h, t) for h in homes for t in CREDENTIAL_TREES}
+                  | {os.path.realpath(os.path.join(h, t)) for h in homes for t in CREDENTIAL_TREES})
+
+
+def _extra_ro_binds(extra_ro) -> list[tuple[str, str]]:
+    """(resolved source, destination) for each extra read-only bind, or a
+    SandboxError: the source must exist, the destination must be an absolute
+    path in the cell, and the source may not be, lie inside or contain one of
+    the real credential trees (a login never rides in through this door)."""
+    out = []
+    for src, dest in extra_ro:
+        if not os.path.lexists(src):
+            raise SandboxError(f"extra read-only bind: source {src} does not exist")
+        real = os.path.realpath(src)
+        if not os.path.exists(real):
+            raise SandboxError(f"extra read-only bind: source {src} does not resolve")
+        if not os.path.isabs(dest):
+            raise SandboxError(f"extra read-only bind: destination {dest} is not an absolute path")
+        norm = os.path.normpath(str(dest))
+        if norm == "/" or ".." in Path(dest).parts:
+            raise SandboxError(f"extra read-only bind: destination {dest} is not a plain path in the cell")
+        for root in _credential_roots():
+            if real == root or real.startswith(root + os.sep) or root.startswith(real.rstrip(os.sep) + os.sep):
+                raise SandboxError(f"extra read-only bind: source {src} is, is inside or contains {root} (credential trees are never bound)")
+        out.append((real, norm))
+    return out
 
 
 def sandbox_home() -> str:
@@ -406,9 +461,14 @@ def host_addresses() -> list[str]:
     return sorted({f"{a}/32" for a in found})
 
 
-def pasta_policy() -> dict:
-    """What netcell installs in a pasta cell's namespace."""
-    return {"dns": DNS_FORWARD, "block": list(BLOCK_V4) + host_addresses(), "allow_tcp": list(ALLOW_TCP)}
+def pasta_policy(cell: Cell | None = None) -> dict:
+    """What netcell installs in a pasta cell's namespace. A cell's `allow_dst`
+    limits TCP to those CIDRs; without one (or without a cell) it is open to
+    any public address, as before."""
+    policy = {"dns": DNS_FORWARD, "block": list(BLOCK_V4) + host_addresses(), "allow_tcp": list(ALLOW_TCP)}
+    if cell is not None and cell.allow_dst is not None:
+        policy["allow_dst"] = list(cell.allow_dst)
+    return policy
 
 
 PASTA_RESOLV = f"nameserver {DNS_FORWARD}\noptions timeout:2 attempts:2 no-aaaa\n"
@@ -481,6 +541,8 @@ def bwrap_argv(cell: Cell, command: list[str], base_env: dict | None = None,
         if os.path.isdir(extra):
             a += ["--ro-bind", extra, extra]
     a += ["--ro-bind" if cell.work_ro else "--bind", str(work), str(work)]
+    for src, dest in _extra_ro_binds(cell.extra_ro):      # after the work tree, so a dest may sit inside it
+        a += ["--ro-bind", src, dest]
     if cell.io_dir is not None:
         a += ["--bind", str(Path(cell.io_dir).resolve()), str(IO)]
     if cell.runtime is not None:
@@ -557,7 +619,13 @@ def cell_command(cell: Cell, command: list[str], cred_fds: dict[str, int] | None
     inner = bwrap_argv(cell, command, cred_fds=cred_fds, net=net)
     if net != "pasta":
         return inner, net
-    policy = json.dumps(pasta_policy(), sort_keys=True)
+    policy = pasta_policy(cell)
+    from . import netcell
+    try:
+        netcell.rules(policy)                     # refuse a bad egress policy here, not inside the cell
+    except (netcell.Refused, ValueError, KeyError, TypeError) as exc:
+        raise SandboxError(f"bad pasta egress policy: {exc}")
+    policy = json.dumps(policy, sort_keys=True)
     return [*pasta_argv(), sys.executable, "-I", str(NETCELL), policy, "--", *inner], net
 
 

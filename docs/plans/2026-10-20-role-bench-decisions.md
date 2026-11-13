@@ -149,6 +149,24 @@ alone left a path open or a guarantee implicit:
 - **Logins over stdin to netcell**, because pasta closes inherited descriptors. They stay
   in memory (A2): netcell writes them into fresh pipes for `--ro-bind-data`.
 
+**A1 addition (2026-11-13, for the agent-economy repo, which imports rolebench as a library):**
+- **Optional egress allowlist.** `Cell.allow_dst` (IPv4 CIDRs, claude/jarvis/judge cells only; a
+  grade or codex cell refuses it) puts `"allow_dst"` in netcell's policy. `netcell.rules` then
+  emits one `pref 110 to <cidr> ipproto tcp dport <port> lookup main` per (CIDR, port) instead of
+  "TCP to the allowed ports, any destination", so a cell can reach the model provider and not a
+  public repo's merged fix. DNS (pref 90/91), the blocked ranges (pref 100) and the final
+  `pref 120 prohibit` are unchanged; `verify` reads back the exact set, destinations included.
+  An empty list, a malformed or non-IPv4 entry, and an entry overlapping a blocked range or the
+  DNS forwarder are refused (`cell_command` refuses them before launch). No hostname filter and no
+  proxy. Unset keeps today's behaviour.
+- **Extra read-only binds.** `Cell.extra_ro` is `(host source, absolute destination)` pairs,
+  mounted `--ro-bind` after the work tree so a destination may sit inside it. The source must
+  exist; one that is, lies inside or contains the real `~/.claude`, `~/.codex`, `~/.config`,
+  `~/.ssh` or `~/.gnupg` (after realpath) is refused, at construction and again when the argv is built.
+- **Codex web search off.** `codex_argv` passes `-c web_search="disabled"` (codex-cli 0.161's
+  config key, whose modes are disabled, cached, indexed and live; `--search` is `web_search="live"`),
+  never `--search`, so the server-side search cannot return a public fix.
+
 ## Smoke fixes (lead, 2026-10-21, PR #286)
 
 - **Reasoning effort is pinned to `high` in every harness:** `claude -p --effort high` in the

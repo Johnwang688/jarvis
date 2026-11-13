@@ -211,6 +211,10 @@ def codex_argv(model: str, cwd, last_message: Path, binary: str | None = None) -
     return [binary or str(sandbox.CODEX / "bin" / "codex"), "exec", "-m", model,
             "-c", f"model_reasoning_effort={config.EFFORT['codex']}",
             "-s", "workspace-write", "-c", "sandbox_workspace_write.network_access=false",
+            # the model's own server-side web search is off too (codex-cli 0.161: `web_search`
+            # is "disabled"|"cached"|"indexed"|"live", and `--search` is `web_search="live"`):
+            # it could return a public repo's merged fix. Never pass --search.
+            "-c", 'web_search="disabled"',
             # never ask, so a command is never re-run escalated (unsandboxed, on the host netns)
             "-c", 'approval_policy="never"',
             "--json", "--skip-git-repo-check", "--ephemeral", "-C", str(cwd),

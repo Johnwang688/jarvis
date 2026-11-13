@@ -10,8 +10,9 @@ to 0). Before anything an agent controls runs, this:
    namespace; the agent, in bwrap's nested user namespace, never does):
    DNS only to pasta's forwarding address on port 53, the blocked ranges
    (private, link-local, CGNAT, multicast, reserved and every address the host
-   owns) prohibited, TCP to the allowed ports (443) through, and everything
-   else prohibited. IPv6 is prohibited outright.
+   owns) prohibited, TCP to the allowed ports (443) through (to any public
+   address, or, when the policy carries `allow_dst`, only to those IPv4
+   CIDRs), and everything else prohibited. IPv6 is prohibited outright.
 2. Turns IPv6 off on every interface but `lo`, so a resolver never hands out
    an AAAA answer the cell could only fail on.
 3. Reads the rules back and refuses to go on unless every one is in place.
@@ -44,20 +45,57 @@ class Refused(RuntimeError):
     pass
 
 
+def allow_networks(policy: dict) -> list[ipaddress.IPv4Network] | None:
+    """The policy's `allow_dst` as normalised, de-duplicated IPv4 networks, or
+    None when the policy sets none (TCP to the allowed ports, any destination).
+    A set list must be a nonempty list of IPv4 CIDR strings, none of which
+    overlaps a blocked range or the DNS forwarder: anything else is refused, so
+    a mistake can never widen the egress or silently close it entirely."""
+    if policy.get("allow_dst") is None:
+        return None
+    raw = policy["allow_dst"]
+    if not isinstance(raw, (list, tuple)) or not raw:
+        raise Refused("allow_dst must be a nonempty list of IPv4 CIDRs")
+    nets: list[ipaddress.IPv4Network] = []
+    for entry in raw:
+        if not isinstance(entry, str):
+            raise Refused(f"allow_dst entry {entry!r} is not a string")
+        try:
+            net = ipaddress.IPv4Network(entry, strict=False)
+        except ValueError as exc:
+            raise Refused(f"allow_dst entry {entry!r} is not an IPv4 CIDR: {exc}")
+        if net not in nets:
+            nets.append(net)
+    blocked = [ipaddress.IPv4Network(f"{ipaddress.IPv4Address(policy['dns'])}/32")]
+    blocked += [ipaddress.IPv4Network(b, strict=False) for b in policy["block"]]
+    for net in nets:
+        for block in blocked:
+            if net.overlaps(block):
+                raise Refused(f"allow_dst {net} overlaps the blocked range {block}")
+    return nets
+
+
 def rules(policy: dict) -> list[dict]:
     """The IPv4 rules for a policy, in order. Each is {pref, dst, ipproto, dport, do}
-    where `do` is "main" (look up the main table) or "prohibit"."""
+    where `do` is "main" (look up the main table) or "prohibit". Without
+    `allow_dst`, TCP to the allowed ports is open to any destination; with it,
+    one rule per (CIDR, port) and nothing else lets TCP out."""
     dns = str(ipaddress.IPv4Address(policy["dns"]))
+    allowed = allow_networks(policy)
     out = [{"pref": 90, "dst": f"{dns}/32", "ipproto": "udp", "dport": 53, "do": "main"},
            {"pref": 91, "dst": f"{dns}/32", "ipproto": "tcp", "dport": 53, "do": "main"},
            {"pref": 100, "dst": f"{dns}/32", "do": "prohibit"}]
     for block in policy["block"]:
         out.append({"pref": 100, "dst": str(ipaddress.IPv4Network(block, strict=False)), "do": "prohibit"})
-    for port in policy["allow_tcp"]:
-        port = int(port)
-        if not 0 < port < 65536:
-            raise Refused(f"bad port {port}")
-        out.append({"pref": 110, "ipproto": "tcp", "dport": port, "do": "main"})
+    for net in (allowed if allowed is not None else [None]):
+        for port in policy["allow_tcp"]:
+            port = int(port)
+            if not 0 < port < 65536:
+                raise Refused(f"bad port {port}")
+            rule = {"pref": 110, "ipproto": "tcp", "dport": port, "do": "main"}
+            if net is not None:
+                rule["dst"] = str(net)
+            out.append(rule)
     out.append({"pref": 120, "do": "prohibit"})
     return out
 
