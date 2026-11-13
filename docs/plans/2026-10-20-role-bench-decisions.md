@@ -149,6 +149,86 @@ alone left a path open or a guarantee implicit:
 - **Logins over stdin to netcell**, because pasta closes inherited descriptors. They stay
   in memory (A2): netcell writes them into fresh pipes for `--ro-bind-data`.
 
+**A1 addition (2026-11-13, for the agent-economy repo, which imports rolebench as a library;
+fix rounds 1 and 2 the same day, after the Opus and Sol verifier reviews of PR #356):**
+- **Optional egress allowlist.** `Cell.allow_dst` (IPv4 CIDRs, claude/jarvis/judge cells only; a
+  grade or codex cell refuses it) puts `"allow_dst"` in netcell's policy. `netcell.rules` then
+  emits one `pref 110 to <cidr> ipproto tcp dport <port> lookup main` per (CIDR, port) instead of
+  "TCP to the allowed ports, any destination", so a cell can reach the model provider and not a
+  public repo's merged fix. DNS (pref 90/91), the blocked ranges (pref 100) and the final
+  `pref 120 prohibit` are unchanged; `verify` reads back the exact set, destinations included.
+  An empty list, a malformed or non-IPv4 entry, an entry overlapping a blocked range or the DNS
+  forwarder, and **an entry broader than /16 (`netcell.MIN_PREFIX`)** are refused (`cell_command`
+  refuses them before launch). The breadth limit exists because a /3 that dodges every blocked
+  range would have covered GitHub's own ranges: an allowlist names the provider's ranges, not a
+  slice of the internet. **Round 2:** the /16 limit is per entry, so 64 /16s (or GitHub's own
+  140.82.0.0/16) still passed. Now the entries together may cover at most 65,536 addresses
+  (`netcell.MAX_ALLOW_ADDRESSES`, counted over their union, so an entry inside another counts
+  once), and an entry overlapping any of GitHub's published IPv4 ranges is refused
+  (`netcell.GITHUB_V4`: the `web`, `api`, `git`, `packages`, `pages` and `importer` lists of
+  `https://api.github.com/meta`, fetched unauthenticated on 2026-11-13 and collapsed; refresh from
+  the same URL). Anthropic's 160.79.104.0/23 and 153.61.224.0/22 stay accepted. No hostname
+  filter and no proxy. Unset keeps today's behaviour.
+- **Extra read-only binds are an allowlist of roots.** `Cell.extra_ro` is `(host source,
+  absolute destination)` pairs, mounted `--ro-bind` after the work tree so a destination may sit
+  inside it. The source must exist and, after realpath, lie *strictly inside* `config.home()/binds/`
+  (a directory of the bench's state dir that callers stage dependencies into), `/usr` or `/opt`;
+  anything else is refused, so no credential store, checkout, user bus (`/run`) or `/mnt/c` needs a
+  listing of its own (the first version's denylist of five credential trees missed `~/.netrc`,
+  `~/.local/share`, a checkout's `.env`). **Round 2:** the rest of the state directory is not a
+  root (it holds the pooled answers in `pool/`, the spot-check keys, snapshots and every other
+  cell's io and work trees), and a source that is, is in or contains the state directory outside
+  `binds/` is refused even when another root covers it. A state directory that is `/`, or is or
+  contains the account's home or `$HOME`, cannot anchor the list (`ROLEBENCH_HOME=/` made every
+  path "inside" it): any extra bind is then refused. A source holding a `.git` or `.env*` entry
+  at *any depth* (or being one) is refused; the walk follows no symlink (a link's own name still
+  counts) and an unreadable directory refuses the bind. The five credential trees and the homes
+  outside `binds/` stay refused as defence in depth. Under `ROLEBENCH_TESTING` the system temp
+  directory is a further root (refused if it is `/`), because the suites build their fixtures
+  there; a real run never has it. Checked at construction and again when the argv is built.
+- **No destination through a symlink (round 2).** bwrap follows symlinks when it makes a
+  mountpoint, and the work tree is the agent's. A destination in the work tree reached through a
+  symlink, dangling or not (the destination itself or any parent inside the tree), or one that
+  reaches the tree through a symlink outside it, is refused when the argv is built.
+- **A read-only work tree needs its mountpoints.** When `work_ro` (always so for a judge) and an
+  extra bind's destination lies in the work tree but does not exist, `bwrap_argv` raises a
+  `SandboxError` saying to create it: bwrap cannot make a mountpoint on a read-only mount. The
+  caller pre-creates it. A writable work tree is unchanged (bwrap makes the mountpoint).
+- **Codex web search off.** `codex_argv` passes `-c web_search="disabled"` (codex-cli 0.161's
+  config key, whose modes are disabled, cached, indexed and live; `--search` is `web_search="live"`),
+  never `--search`, so the server-side search cannot return a public fix. The suite asserts the
+  exact pair, so a mutant that switches it to live fails the PR's own checks.
+- **Managed settings in every claude and judge cell.** The nested `claude` CLI an agent's Bash can
+  run fetches pages through Anthropic's server-side `WebSearch`/`WebFetch`, which cross no egress
+  allowlist. The harness writes `config.home()/sandbox/managed-settings.json` (atomically, like
+  the gitconfig) with only `{"permissions": {"deny": ["WebSearch", "WebFetch"]}}` and binds it
+  read-only at `/etc/claude-code/managed-settings.json`, the CLI's highest-precedence layer (no
+  flag, project or user setting overrides it). The host has no `/etc/claude-code` and a read-only
+  `/etc` cannot gain a mountpoint, so these cells' `/etc` is a tmp-overlay of the host's
+  (`--overlay-src /etc --tmp-overlay /etc`), with a tmpfs at `/etc/claude-code` and the file bound
+  into it, then both are remounted read-only; the other profiles keep the plain `--ro-bind /etc`.
+  The file is published through a per-writer temp file (pid plus a random suffix, then an atomic
+  rename), as are the gitconfig and the pasta resolv.conf, so concurrent first launches never
+  rename each other's temp file away (round 2, Sol).
+  The managed settings are an **accident guard, not a boundary** (round 3, Opus): the CLI also
+  reads a policy folder named by `CLAUDE_CODE_MANAGED_SETTINGS_PATH` (not confirmed by a run), and
+  an agent could copy and patch the binary in `/tmp`. Like the direct-API residual, these are
+  deliberate workarounds that callers needing leak-proofing must catch in their command audit.
+  Open LOW: a bare or mirror clone under a name other than `.git` passes the extra_ro history walk.
+- **No nested user namespaces in claude and judge cells (round 2).** A read-only file is not
+  enough: bwrap left user namespaces on, so `unshare -Urm` gave the agent a mount namespace in
+  which it mounted a tmpfs over `/etc/claude-code` and ran the nested CLI, login readable and the
+  netns unchanged, with no managed settings (Opus, live). These cells now get `--disable-userns`
+  (with the `--unshare-user` it needs, in every network mode): bwrap caps the namespace count, so
+  any nested `unshare -U` fails with ENOSPC. Verified live in a no-network bwrap: the over-mount
+  fails, and without the flag the same cell over-mounts; the real CLI's `--version` runs under it
+  (its startup needs no user namespace). The other profiles are unchanged.
+- **RESIDUAL (not closed, by design of what an IP allowlist can do):** an agent can still call the
+  Messages API directly (curl or the SDK) with the cell's token and a server-side web tool; the
+  provider's address is allowed, so `allow_dst` cannot stop that. A caller that needs the cell
+  leak-proof against the public fix must audit the agent's commands for it (or run the economy
+  where such a call is a finding).
+
 ## Smoke fixes (lead, 2026-10-21, PR #286)
 
 - **Reasoning effort is pinned to `high` in every harness:** `claude -p --effort high` in the
