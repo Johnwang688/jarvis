@@ -149,23 +149,52 @@ alone left a path open or a guarantee implicit:
 - **Logins over stdin to netcell**, because pasta closes inherited descriptors. They stay
   in memory (A2): netcell writes them into fresh pipes for `--ro-bind-data`.
 
-**A1 addition (2026-11-13, for the agent-economy repo, which imports rolebench as a library):**
+**A1 addition (2026-11-13, for the agent-economy repo, which imports rolebench as a library;
+fix round 1 the same day, after the Opus and Sol verifier reviews of PR #356):**
 - **Optional egress allowlist.** `Cell.allow_dst` (IPv4 CIDRs, claude/jarvis/judge cells only; a
   grade or codex cell refuses it) puts `"allow_dst"` in netcell's policy. `netcell.rules` then
   emits one `pref 110 to <cidr> ipproto tcp dport <port> lookup main` per (CIDR, port) instead of
   "TCP to the allowed ports, any destination", so a cell can reach the model provider and not a
   public repo's merged fix. DNS (pref 90/91), the blocked ranges (pref 100) and the final
   `pref 120 prohibit` are unchanged; `verify` reads back the exact set, destinations included.
-  An empty list, a malformed or non-IPv4 entry, and an entry overlapping a blocked range or the
-  DNS forwarder are refused (`cell_command` refuses them before launch). No hostname filter and no
-  proxy. Unset keeps today's behaviour.
-- **Extra read-only binds.** `Cell.extra_ro` is `(host source, absolute destination)` pairs,
-  mounted `--ro-bind` after the work tree so a destination may sit inside it. The source must
-  exist; one that is, lies inside or contains the real `~/.claude`, `~/.codex`, `~/.config`,
-  `~/.ssh` or `~/.gnupg` (after realpath) is refused, at construction and again when the argv is built.
+  An empty list, a malformed or non-IPv4 entry, an entry overlapping a blocked range or the DNS
+  forwarder, and **an entry broader than /16 (`netcell.MIN_PREFIX`)** are refused (`cell_command`
+  refuses them before launch). The breadth limit exists because a /3 that dodges every blocked
+  range would have covered GitHub's own ranges: an allowlist names the provider's ranges, not a
+  slice of the internet. No hostname filter and no proxy. Unset keeps today's behaviour.
+- **Extra read-only binds are an allowlist of roots.** `Cell.extra_ro` is `(host source,
+  absolute destination)` pairs, mounted `--ro-bind` after the work tree so a destination may sit
+  inside it. The source must exist and, after realpath, lie *strictly inside* `config.home()` (the
+  bench's own state directory), `/usr` or `/opt`; anything else is refused, so no credential store,
+  checkout, user bus (`/run`) or `/mnt/c` needs a listing of its own (the first version's
+  denylist of five credential trees missed `~/.netrc`, `~/.local/share`, a checkout's `.env`).
+  A source whose top level holds `.git` or any `.env*` entry (or is itself such a file) is also
+  refused, and the five credential trees and the account's home outside the state directory stay
+  refused as defence in depth. Under `ROLEBENCH_TESTING` the system temp directory is a further
+  root, because the suites build their fixtures there; a real run never has it. Checked at
+  construction and again when the argv is built.
+- **A read-only work tree needs its mountpoints.** When `work_ro` (always so for a judge) and an
+  extra bind's destination lies in the work tree but does not exist, `bwrap_argv` raises a
+  `SandboxError` saying to create it: bwrap cannot make a mountpoint on a read-only mount. The
+  caller pre-creates it. A writable work tree is unchanged (bwrap makes the mountpoint).
 - **Codex web search off.** `codex_argv` passes `-c web_search="disabled"` (codex-cli 0.161's
   config key, whose modes are disabled, cached, indexed and live; `--search` is `web_search="live"`),
-  never `--search`, so the server-side search cannot return a public fix.
+  never `--search`, so the server-side search cannot return a public fix. The suite asserts the
+  exact pair, so a mutant that switches it to live fails the PR's own checks.
+- **Managed settings in every claude and judge cell.** The nested `claude` CLI an agent's Bash can
+  run fetches pages through Anthropic's server-side `WebSearch`/`WebFetch`, which cross no egress
+  allowlist. The harness writes `config.home()/sandbox/managed-settings.json` (atomically, like
+  the gitconfig) with only `{"permissions": {"deny": ["WebSearch", "WebFetch"]}}` and binds it
+  read-only at `/etc/claude-code/managed-settings.json`, the CLI's highest-precedence layer (no
+  flag, project or user setting overrides it). The host has no `/etc/claude-code` and a read-only
+  `/etc` cannot gain a mountpoint, so these cells' `/etc` is a tmp-overlay of the host's
+  (`--overlay-src /etc --tmp-overlay /etc`), with a tmpfs at `/etc/claude-code` and the file bound
+  into it, then both are remounted read-only; the other profiles keep the plain `--ro-bind /etc`.
+- **RESIDUAL (not closed, by design of what an IP allowlist can do):** an agent can still call the
+  Messages API directly (curl or the SDK) with the cell's token and a server-side web tool; the
+  provider's address is allowed, so `allow_dst` cannot stop that. A caller that needs the cell
+  leak-proof against the public fix must audit the agent's commands for it (or run the economy
+  where such a call is a finding).
 
 ## Smoke fixes (lead, 2026-10-21, PR #286)
 

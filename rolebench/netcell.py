@@ -45,6 +45,9 @@ class Refused(RuntimeError):
     pass
 
 
+MIN_PREFIX = 16        # the broadest `allow_dst` entry: a /15 or shorter is refused
+
+
 def allow_networks(policy: dict) -> list[ipaddress.IPv4Network] | None:
     """The policy's `allow_dst` as normalised, de-duplicated IPv4 networks, or
     None when the policy sets none (TCP to the allowed ports, any destination).
@@ -64,6 +67,9 @@ def allow_networks(policy: dict) -> list[ipaddress.IPv4Network] | None:
             net = ipaddress.IPv4Network(entry, strict=False)
         except ValueError as exc:
             raise Refused(f"allow_dst entry {entry!r} is not an IPv4 CIDR: {exc}")
+        if net.prefixlen < MIN_PREFIX:
+            raise Refused(f"allow_dst {net} is broader than /{MIN_PREFIX}: an allowlist names "
+                          f"the provider's own ranges, not a slice of the internet")
         if net not in nets:
             nets.append(net)
     blocked = [ipaddress.IPv4Network(f"{ipaddress.IPv4Address(policy['dns'])}/32")]

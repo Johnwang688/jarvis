@@ -9,6 +9,7 @@ network, no paid call.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shutil
@@ -21,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import rolebench_testguard  # noqa: E402,F401  first
 
-from rolebench import config, netcell, sandbox  # noqa: E402
+from rolebench import config, netcell, runners, sandbox  # noqa: E402
 
 PASSED = 0
 FAILED: list[str] = []
@@ -199,6 +200,204 @@ def test_cell_command(root: Path) -> None:
             os.environ["ROLEBENCH_NET"] = old
 
 
+@contextlib.contextmanager
+def env(**kw):
+    """Set (or, with None, remove) environment variables for a block."""
+    old = {k: os.environ.get(k) for k in kw}
+    for k, v in kw.items():
+        if v is None:
+            os.environ.pop(k, None)
+        else:
+            os.environ[k] = v
+    try:
+        yield
+    finally:
+        for k, v in old.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
+def test_breadth() -> None:
+    check("netcell.MIN_PREFIX is 16", netcell.MIN_PREFIX == 16)
+    for wide in ("32.0.0.0/3", "140.0.0.0/6", "1.0.0.0/8", "34.0.0.0/15"):
+        check(f"an allow_dst entry as broad as {wide} is refused",
+              raises(lambda w=wide: netcell.rules({**BASE, "allow_dst": [w]}), netcell.Refused))
+    check("a /16 allow_dst entry is accepted", not raises(lambda: netcell.rules({**BASE, "allow_dst": ["34.0.0.0/16"]})))
+    check("a /32 allow_dst entry is accepted", not raises(lambda: netcell.rules({**BASE, "allow_dst": ["160.79.104.7/32"]})))
+    work = Path(tempfile.mkdtemp(prefix="rb-egress3-"))
+    try:
+        cell = sandbox.Cell("claude", work, allow_dst=("32.0.0.0/3",))
+        with env(ROLEBENCH_NET="pasta"):
+            check("cell_command refuses an over-broad allow_dst before launch (when pasta is installed here)",
+                  sandbox.pasta_available() is not None or not shutil.which("claude")
+                  or raises(lambda: sandbox.cell_command(cell, ["/bin/true"]), sandbox.SandboxError))
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def bind_refused(src, work: Path, dest: Path | None = None) -> bool:
+    return raises(lambda: sandbox.Cell("grade", work, extra_ro=((Path(src), dest or work / "dep"),)), sandbox.SandboxError)
+
+
+def test_extra_ro_allowlist(root: Path) -> None:
+    work = root / "work-al"
+    work.mkdir()
+    state = root / "state"
+    (state / "deps").mkdir(parents=True)
+    (state / "deps" / "f").write_text("x")
+    for door in ("/etc", "/run", "/proc", "/mnt/c", "/var", "/home", "/"):
+        if os.path.exists(door):
+            check(f"an extra bind of {door} is refused (not inside the state directory, /usr or /opt)", bind_refused(door, work))
+    # production strictness: without the test guard's temp-dir allowance only the
+    # state directory, /usr and /opt are sources
+    with env(ROLEBENCH_TESTING=None, ROLEBENCH_HOME=str(state)):
+        check("the state directory's own subtree is an allowed source",
+              not bind_refused(state / "deps", work))
+        check("the state directory itself is not a source (only inside it)", bind_refused(state, work))
+        plain = root / "plain-outside"
+        plain.mkdir()
+        check("a plain directory in the system temp dir is refused outside the test guard", bind_refused(plain, work))
+        usr = next((p for p in ("/usr/share/zoneinfo", "/usr/share/doc", "/usr/lib/python3") if os.path.isdir(p)), None)
+        if usr:
+            check(f"a directory inside /usr ({usr}) is an allowed source", not bind_refused(usr, work))
+        check("/usr itself is not a source (only inside it)", bind_refused("/usr", work))
+        link = state / "deps-link"
+        link.symlink_to("/etc")
+        check("a symlink inside the state directory that leaves it is refused after resolving", bind_refused(link, work))
+    with env(ROLEBENCH_TESTING="1"):
+        plain = root / "plain-in-tmp"
+        plain.mkdir()
+        check("under the test guard the temp dir is a source (the suites' fixtures)", not bind_refused(plain, work))
+        check("... but never the temp dir itself", bind_refused(tempfile.gettempdir(), work))
+    # the top level may not hold repository history or a credential file
+    git = root / "with-git"
+    (git / ".git").mkdir(parents=True)
+    envf = root / "with-env"
+    envf.mkdir()
+    (envf / ".env.local").write_text("K=v")
+    envfile = root / ".env"
+    envfile.write_text("K=v")
+    nested = root / "nested-env"
+    (nested / "sub").mkdir(parents=True)
+    (nested / "sub" / ".env").write_text("K=v")
+    with env(ROLEBENCH_TESTING="1"):
+        check("a source whose top level holds .git is refused", bind_refused(git, work))
+        check("a source whose top level holds a .env.local is refused", bind_refused(envf, work))
+        check("a source that is itself a .env file is refused", bind_refused(envfile, work))
+        check("a .env below the top level is not the rule's business", not bind_refused(nested, work))
+
+
+def test_readonly_work_mountpoint(root: Path) -> None:
+    src = root / "ro-src"
+    src.mkdir()
+    for ro in (True, False):
+        work = root / f"ro-work-{ro}"
+        work.mkdir()
+        dest = work / "node_modules"
+        cell = sandbox.Cell("grade", work, work_ro=ro, extra_ro=((src, dest),))
+        try:
+            sandbox.bwrap_argv(cell, ["/bin/true"])
+            why = ""
+        except sandbox.SandboxError as exc:
+            why = str(exc)
+        if ro:
+            check("a missing destination inside a read-only work tree is refused at argv time, saying to create it",
+                  "does not exist" in why and "create it" in why, why or "accepted")
+            dest.mkdir()
+            check("a pre-created destination inside a read-only work tree is accepted",
+                  not raises(lambda: sandbox.bwrap_argv(cell, ["/bin/true"]), sandbox.SandboxError))
+        else:
+            check("a missing destination inside a writable work tree is accepted (bwrap makes the mountpoint)", why == "", why)
+    work = root / "ro-work-outside"
+    work.mkdir()
+    cell = sandbox.Cell("grade", work, work_ro=True, extra_ro=((src, Path("/opt/rolebench/not-in-work")),))
+    check("a missing destination outside the work tree is not the placeholder rule's business",
+          not raises(lambda: sandbox.bwrap_argv(cell, ["/bin/true"]), sandbox.SandboxError))
+    judge = sandbox.Cell("judge", root / "ro-work-True", extra_ro=((src, root / "ro-work-True" / "gone"),))
+    check("a judge cell (always read-only) gets the same refusal",
+          raises(lambda: sandbox.bwrap_argv(judge, ["/bin/true"], net="none"), sandbox.SandboxError))
+
+
+def pipe_with(data: bytes) -> int:
+    r, w = os.pipe()
+    os.write(w, data)
+    os.close(w)
+    return r
+
+
+def test_managed_settings(root: Path) -> None:
+    with env(ROLEBENCH_HOME=str(root / "ms-home")):
+        expected = {"permissions": {"deny": ["WebSearch", "WebFetch"]}}
+        for profile in ("claude", "judge"):
+            work = root / f"ms-{profile}"
+            work.mkdir()
+            cell = sandbox.Cell(profile, work)
+            argv = sandbox.bwrap_argv(cell, ["/bin/true"], net="none")
+            file = str(config.home() / "sandbox" / "managed-settings.json")
+            i = argv.index("/etc/claude-code/managed-settings.json")
+            check(f"a {profile} cell binds the managed-settings file read-only at /etc/claude-code",
+                  argv[i - 2:i] == ["--ro-bind", file], " ".join(argv[i - 3:i + 1]))
+            check(f"a {profile} cell mounts a tmpfs at /etc/claude-code before binding the file",
+                  "--tmpfs" in argv and argv[argv.index("/etc/claude-code") - 1] == "--tmpfs"
+                  and argv.index("/etc/claude-code") < i)
+            pairs = [(argv[k], argv[k + 1]) for k in range(len(argv) - 1)]
+            check(f"a {profile} cell's /etc is a throwaway overlay (it needs the mountpoint) made read-only again, after the file bind",
+                  ("--tmp-overlay", "/etc") in pairs and ("--remount-ro", "/etc") in pairs
+                  and ("--remount-ro", "/etc/claude-code") in pairs
+                  and argv.index("--remount-ro") > i and ("--ro-bind", "/etc") not in pairs)
+            check(f"the {profile} cell's managed settings are only the web-tool denies",
+                  json.loads(Path(file).read_text()) == expected, Path(file).read_text())
+        for profile in ("grade", "jarvis", "codex"):
+            work = root / f"ms-{profile}"
+            work.mkdir()
+            try:
+                argv = sandbox.bwrap_argv(sandbox.Cell(profile, work), ["/bin/true"], net="none")
+            except sandbox.SandboxError:
+                continue                                      # no codex release on this host: nothing to inspect
+            check(f"a {profile} cell gets no managed settings and keeps the read-only /etc bind",
+                  "/etc/claude-code/managed-settings.json" not in argv and "--tmp-overlay" not in argv)
+        f = config.home() / "sandbox" / "managed-settings.json"
+        f.write_text("{}")
+        sandbox.bwrap_argv(sandbox.Cell("claude", root / "ms-claude"), ["/bin/true"], net="none")
+        check("a tampered managed-settings file is rewritten before the next cell", json.loads(f.read_text()) == expected)
+        check("the managed-settings write leaves no temp file behind", not f.with_suffix(".tmp").exists())
+        # a real bwrap: the nested CLI's managed settings are present, and nothing in the cell can change them
+        if sandbox.available():
+            print("  skip managed-settings bwrap probe (bwrap or systemd-run missing)")
+            return
+        cell = sandbox.Cell("claude", root / "ms-claude")
+        dests = [d for d, _ in sandbox.credential_binds(cell)]
+        fds = {d: pipe_with(b"{}") for d in dests}
+        script = ("cat /etc/claude-code/managed-settings.json; echo ---; "
+                  "(echo x > /etc/claude-code/managed-settings.json) 2>/dev/null && echo WROTE; "
+                  "(touch /etc/claude-code/managed-settings.d) 2>/dev/null && echo DROPIN; "
+                  "(touch /etc/zz) 2>/dev/null && echo ETCWRITE; "
+                  "(mv /etc/claude-code/managed-settings.json /etc/claude-code/gone) 2>/dev/null && echo MOVED; "
+                  "test -e /etc/passwd && echo PASSWD")
+        argv = sandbox.bwrap_argv(cell, ["/bin/sh", "-c", script], net="none", cred_fds=fds)
+        done = subprocess.run(argv, capture_output=True, text=True, timeout=30, pass_fds=list(fds.values()))
+        for fd in fds.values():
+            os.close(fd)
+        out = done.stdout
+        check("in a real cell the managed settings are readable, unwritable and unremovable, and /etc stays read-only",
+              json.loads(out.split("---")[0]) == expected
+              and not any(w in out for w in ("WROTE", "DROPIN", "ETCWRITE", "MOVED")) and "PASSWD" in out,
+              f"rc={done.returncode} out={out!r} err={done.stderr[-300:]!r}")
+
+
+def test_codex_search_exact() -> None:
+    argv = runners.codex_argv("gpt-6.1-sol", "/work", Path("/opt/rolebench/io/last.txt"))
+    pairs = [(argv[i], argv[i + 1]) for i in range(len(argv) - 1)]
+    check('codex_argv carries exactly one `-c web_search="disabled"` pair', pairs.count(("-c", 'web_search="disabled"')) == 1, str(argv))
+    check("codex_argv sets web_search once and to nothing else",
+          len([a for a in argv if a.startswith("web_search")]) == 1)
+    check("codex_argv carries no live, cached or indexed search and no --search / --enable web_search",
+          not any(m in a for a in argv for m in ('"live"', '"cached"', '"indexed"', "--search", "web_search_request"))
+          and "--enable" not in argv)
+
+
 PROBE = """
 import json, sys
 sys.path.insert(0, sys.argv[1])
@@ -240,6 +439,11 @@ def main() -> int:
         test_install_commands()
         test_extra_ro_refusals(root)
         test_cell_command(root)
+        test_breadth()
+        test_extra_ro_allowlist(root)
+        test_readonly_work_mountpoint(root)
+        test_managed_settings(root)
+        test_codex_search_exact()
         test_real_namespace()
     finally:
         shutil.rmtree(root, ignore_errors=True)

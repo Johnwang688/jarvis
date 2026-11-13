@@ -31,9 +31,12 @@ but puts the agent in its own user namespace with no capabilities, so it can
 never change the policy. `ROLEBENCH_NET=none` gives those cells no network at
 all (no API either, so real runs are refused).
 
-A pasta cell may also carry `allow_dst`, IPv4 CIDRs: TCP 443 then goes only to
-those (the model provider), not to any public address. A cell may carry
-`extra_ro`, extra read-only binds (never a credential tree).
+A pasta cell may also carry `allow_dst`, IPv4 CIDRs (none broader than /16): TCP
+443 then goes only to those (the model provider), not to any public address. A
+cell may carry `extra_ro`, extra read-only binds whose source lies inside the
+bench's state directory, /usr or /opt (no `.git` or `.env*` at its top level).
+Every claude and judge cell gets managed settings denying the nested CLI's
+WebSearch and WebFetch, at /etc/claude-code/managed-settings.json.
 """
 
 from __future__ import annotations
@@ -46,6 +49,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -208,6 +212,11 @@ class Cell:
 
 
 CREDENTIAL_TREES = (".claude", ".codex", ".config", ".ssh", ".gnupg")
+# Where an extra read-only bind's source may come from (A1 addition): the
+# bench's own state directory and the system's installed software. Everything
+# else, the account's home above all (its credential stores, checkouts with a
+# .env, the user bus under /run), is refused by not being on this list.
+EXTRA_RO_SYSTEM_ROOTS = ("/usr", "/opt")
 
 
 def _credential_roots() -> list[str]:
@@ -218,12 +227,37 @@ def _credential_roots() -> list[str]:
                   | {os.path.realpath(os.path.join(h, t)) for h in homes for t in CREDENTIAL_TREES})
 
 
+def _extra_ro_roots() -> list[str]:
+    """The resolved directories an extra read-only bind's source must lie inside:
+    the bench's state directory, /usr and /opt. Under ROLEBENCH_TESTING the
+    system temp directory too (the suites build their fixtures there); a real
+    run never has it."""
+    roots = [config.home(), *EXTRA_RO_SYSTEM_ROOTS]
+    if config.testing():
+        roots.append(tempfile.gettempdir())
+    return [os.path.realpath(r) for r in roots]
+
+
+def _inside(path: str, root: str) -> bool:
+    return path.startswith(root.rstrip(os.sep) + os.sep)
+
+
+def _repo_or_env_name(name: str) -> bool:
+    return name == ".git" or name.lower().startswith(".env")
+
+
 def _extra_ro_binds(extra_ro) -> list[tuple[str, str]]:
     """(resolved source, destination) for each extra read-only bind, or a
-    SandboxError: the source must exist, the destination must be an absolute
-    path in the cell, and the source may not be, lie inside or contain one of
-    the real credential trees (a login never rides in through this door)."""
+    SandboxError. The source must exist and, resolved, lie strictly inside the
+    bench's state directory, /usr or /opt (an allowlist: no credential store,
+    checkout or system door is ever named, so none needs listing); it may not
+    be, contain or lie in a credential tree or the account's home outside the
+    bench's directory; and its top level holds no `.git` and no `.env*` entry.
+    The destination must be an absolute, plain path in the cell."""
     out = []
+    roots = _extra_ro_roots()
+    state = os.path.realpath(config.home())
+    home = os.path.realpath(config.real_home())
     for src, dest in extra_ro:
         if not os.path.lexists(src):
             raise SandboxError(f"extra read-only bind: source {src} does not exist")
@@ -236,8 +270,21 @@ def _extra_ro_binds(extra_ro) -> list[tuple[str, str]]:
         if norm == "/" or ".." in Path(dest).parts:
             raise SandboxError(f"extra read-only bind: destination {dest} is not a plain path in the cell")
         for root in _credential_roots():
-            if real == root or real.startswith(root + os.sep) or root.startswith(real.rstrip(os.sep) + os.sep):
+            if real == root or _inside(real, root) or _inside(root, real):
                 raise SandboxError(f"extra read-only bind: source {src} is, is inside or contains {root} (credential trees are never bound)")
+        if (real == home or _inside(real, home) or _inside(home, real)) and not _inside(real, state):
+            raise SandboxError(f"extra read-only bind: source {src} is in the account's home, outside "
+                               f"the bench's own directory (a credential store, a checkout's .env or .git are never bound)")
+        if not any(_inside(real, root) for root in roots):
+            raise SandboxError(f"extra read-only bind: source {src} (resolved: {real}) is not inside "
+                               f"the bench's state directory, /usr or /opt")
+        try:
+            names = [e.name for e in os.scandir(real)] if os.path.isdir(real) else [os.path.basename(real)]
+        except OSError as exc:
+            raise SandboxError(f"extra read-only bind: source {src} cannot be listed ({exc})")
+        if any(_repo_or_env_name(n) for n in names):
+            raise SandboxError(f"extra read-only bind: source {src} holds a .git or .env* entry "
+                               f"at its top level (repository history and credentials are never bound)")
         out.append((real, norm))
     return out
 
@@ -304,6 +351,26 @@ def _gitconfig_file() -> Path:
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(".tmp")
         tmp.write_text(GITCONFIG_TEXT, encoding="utf-8")
+        os.replace(tmp, path)
+    return path
+
+
+# Managed settings (the CLI's highest-precedence layer: no flag, project or user
+# setting overrides it) for every claude and judge cell: the nested `claude` an
+# agent's Bash may run can then not use Anthropic's server-side web tools, which
+# fetch pages through the provider and so cross no egress allowlist.
+MANAGED_SETTINGS = {"permissions": {"deny": ["WebSearch", "WebFetch"]}}
+MANAGED_SETTINGS_TEXT = json.dumps(MANAGED_SETTINGS, indent=2, sort_keys=True) + "\n"
+MANAGED_DIR = "/etc/claude-code"
+MANAGED_PATH = MANAGED_DIR + "/managed-settings.json"
+
+
+def _managed_settings_file() -> Path:
+    path = config.home() / "sandbox" / "managed-settings.json"
+    if not path.is_file() or path.read_text(encoding="utf-8") != MANAGED_SETTINGS_TEXT:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(MANAGED_SETTINGS_TEXT, encoding="utf-8")
         os.replace(tmp, path)
     return path
 
@@ -511,8 +578,15 @@ def bwrap_argv(cell: Cell, command: list[str], base_env: dict | None = None,
         # the cell can touch netcell's rules.
         a += ["--unshare-user", "--uid", str(os.getuid()), "--gid", str(os.getgid()), "--cap-drop", "ALL"]
     a += ["--die-with-parent", "--new-session",
-          "--ro-bind", "/usr", "/usr", *_root_links(),
-          "--ro-bind", "/etc", "/etc"]
+          "--ro-bind", "/usr", "/usr", *_root_links()]
+    managed = cell.profile in ("claude", "judge")
+    if managed:
+        # The host has no /etc/claude-code and a read-only /etc cannot gain a
+        # mountpoint, so /etc is a throwaway overlay of the host's (made read-only
+        # again below) that can: a tmpfs there holds the managed settings.
+        a += ["--overlay-src", "/etc", "--tmp-overlay", "/etc"]
+    else:
+        a += ["--ro-bind", "/etc", "/etc"]
     for masked in MASK_ETC:
         if os.path.isdir(masked):
             a += ["--tmpfs", masked]
@@ -522,6 +596,9 @@ def bwrap_argv(cell: Cell, command: list[str], base_env: dict | None = None,
         a += _resolv()
     elif net == "pasta":
         a += _pasta_resolv()
+    if managed:
+        a += ["--tmpfs", MANAGED_DIR, "--ro-bind", str(_managed_settings_file()), MANAGED_PATH,
+              "--remount-ro", MANAGED_DIR, "--remount-ro", "/etc"]
     a += ["--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp", "--tmpfs", home,
           "--dir", "/tmp/rolebench-gh-empty"]
     venv = config.venv_dir()
@@ -542,6 +619,10 @@ def bwrap_argv(cell: Cell, command: list[str], base_env: dict | None = None,
             a += ["--ro-bind", extra, extra]
     a += ["--ro-bind" if cell.work_ro else "--bind", str(work), str(work)]
     for src, dest in _extra_ro_binds(cell.extra_ro):      # after the work tree, so a dest may sit inside it
+        if cell.work_ro and _inside(os.path.realpath(dest), str(work)) and not os.path.lexists(dest):
+            # a read-only mount cannot gain the mountpoint bwrap would have to create
+            raise SandboxError(f"extra read-only bind: destination {dest} lies in the read-only work tree "
+                               f"and does not exist; create it before building the cell")
         a += ["--ro-bind", src, dest]
     if cell.io_dir is not None:
         a += ["--bind", str(Path(cell.io_dir).resolve()), str(IO)]
