@@ -36,7 +36,7 @@ def test_dangling_in_tree_symlink_is_refused_before_launch() -> None:
     """lexists accepts a dangling destination symlink, so the missing read-only mountpoint still reaches bwrap and fails there."""
     with tempfile.TemporaryDirectory(prefix="rb-sol-link-") as tmp:
         root = Path(tmp)
-        work, deps, account = root / "work", root / "state" / "deps", root / "account"
+        work, deps, account = root / "work", root / "state" / "binds" / "deps", root / "account"  # lead rewrite: sources live under binds/
         for directory in (work, deps, account):
             directory.mkdir(parents=True)
         (deps / "marker").write_text("dependency fixture\n")
@@ -57,10 +57,20 @@ def test_dangling_in_tree_symlink_is_refused_before_launch() -> None:
                 done = subprocess.run(argv, capture_output=True, text=True, timeout=10)
                 detail = f"argv accepted; bwrap rc={done.returncode}: {done.stderr.strip()}"
             check("test_dangling_in_tree_symlink_is_refused_before_launch", refused, detail)
+            # Lead rewrite (decided design: a symlinked destination is refused whether or not it dangles);
+            # the control mounts onto a real directory instead.
             (work / "vendor" / "node_modules").mkdir()
+            try:
+                sandbox.bwrap_argv(cell, ["/usr/bin/cat", str(destination / "marker")])
+                still_refused = False
+            except sandbox.SandboxError:
+                still_refused = True
+            check("a symlinked destination is refused even once its target exists", still_refused)
+            destination.unlink()
+            destination.mkdir()
             argv = sandbox.bwrap_argv(cell, ["/usr/bin/cat", str(destination / "marker")])
             done = subprocess.run(argv, capture_output=True, text=True, timeout=10)
-            check("control: the same symlink works after its target is created",
+            check("control: a real directory destination works",
                   done.returncode == 0 and done.stdout == "dependency fixture\n", done.stderr.strip())
 
 
