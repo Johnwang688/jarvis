@@ -18,8 +18,10 @@ export const SKIP_FADE_MS = 200;
 export const SHIELD_MS = 450;
 /** However the frames go, the overlay is gone this long after it mounted. */
 export const HARD_CAP_MS = 7_000;
-/** The invisible click shield is gone this long after mount, whatever the pointer does: the cap, plus the release protection a release at the cap still owes. */
+/** A pointer still held this long after mount loses the shield then: the cap, plus the release protection a release at the cap still owes. */
 export const SHIELD_DEADLINE_MS = HARD_CAP_MS + SHIELD_MS;
+/** The overlay is gone this long after mount whatever happens: a release just before the deadline still owes its SHIELD_MS. */
+export const SHIELD_ABSOLUTE_MS = SHIELD_DEADLINE_MS + SHIELD_MS;
 /** How long the name waits for the bundled font before it is sampled in whatever face there is. */
 export const FONT_WAIT_MS = 600;
 

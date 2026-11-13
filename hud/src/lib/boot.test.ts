@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { BOOT_RINGS, FADE_OUT_S, HARD_CAP_MS, NAME_SPARKS, ORB_RADIUS_FRACTION, TIMELINE, TOTAL_S, auroraAt, buildSparks,
+import { BOOT_RINGS, FADE_OUT_S, HARD_CAP_MS, NAME_SPARKS, SHIELD_ABSOLUTE_MS, SHIELD_DEADLINE_MS, SHIELD_MS, ORB_RADIUS_FRACTION, TIMELINE, TOTAL_S, auroraAt, buildSparks,
   dockAt, dockFromRect, fallbackDock, geoFor, handoffAlpha, maskPoints, mulberry32, orbAt, ringArrive, ringLand, ringLock,
   ringRot, ringSolid, scatterAt, shouldPlay, sparkAt, hueOf, sparkLavender } from "./boot";
 
@@ -111,6 +111,13 @@ describe("the timeline", () => {
     expect(TOTAL_S * 1000).toBeLessThanOrEqual(HARD_CAP_MS);
     expect(TOTAL_S).toBeGreaterThan(3.9);
     expect(TOTAL_S).toBeLessThan(4.3);
+  });
+  it("the shield's bounds: held-pointer deadline at cap + SHIELD_MS, absolute bound one SHIELD_MS after that", () => {
+    expect(HARD_CAP_MS).toBe(7_000);
+    expect(SHIELD_MS).toBe(450);
+    expect(SHIELD_DEADLINE_MS).toBe(7_450);
+    expect(SHIELD_ABSOLUTE_MS).toBe(7_900);
+    expect(SHIELD_ABSOLUTE_MS).toBe(SHIELD_DEADLINE_MS + SHIELD_MS);
   });
 });
 

@@ -2129,6 +2129,8 @@ sent to the daemon, re-validated on apply). Details: plan §4 "AG-3 as built".
 
 **Startup animation (D-12, 2026-11-12):** "Constellation + Orb" (`lib/boot.ts`, `components/BootOverlay.tsx`) replaces the 2026-10-12 boot above, keeping all its play/skip/shield/cap rules; it draws its own aurora from the live tokens, docks into the real `#orb` and crossfades to the HUD.
 
+**Boot click shield timing (follow-up to #354, 2026-11-12):** the 7 s cap ends the drawing and GL context whatever the pointer does. The invisible shield then leaves `SHIELD_MS` (450 ms) after the latest release, anchored to the release: eaten clicks never extend it. A pointer still held at `SHIELD_DEADLINE_MS` (7450 ms) loses it then; a release before that keeps its own 450 ms even past 7450, so the absolute bound is `SHIELD_ABSOLUTE_MS` (7900 ms), enforced by a backstop timer.
+
 **Stats overlay.** `localStorage['jarvis.hud.auroraStats']='1'`, reload (or
 `'fluid'` to force the fluid on software rendering).
 
