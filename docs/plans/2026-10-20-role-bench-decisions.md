@@ -210,6 +210,11 @@ fix rounds 1 and 2 the same day, after the Opus and Sol verifier reviews of PR #
   The file is published through a per-writer temp file (pid plus a random suffix, then an atomic
   rename), as are the gitconfig and the pasta resolv.conf, so concurrent first launches never
   rename each other's temp file away (round 2, Sol).
+  The managed settings are an **accident guard, not a boundary** (round 3, Opus): the CLI also
+  reads a policy folder named by `CLAUDE_CODE_MANAGED_SETTINGS_PATH` (not confirmed by a run), and
+  an agent could copy and patch the binary in `/tmp`. Like the direct-API residual, these are
+  deliberate workarounds that callers needing leak-proofing must catch in their command audit.
+  Open LOW: a bare or mirror clone under a name other than `.git` passes the extra_ro history walk.
 - **No nested user namespaces in claude and judge cells (round 2).** A read-only file is not
   enough: bwrap left user namespaces on, so `unshare -Urm` gave the agent a mount namespace in
   which it mounted a tmpfs over `/etc/claude-code` and ran the nested CLI, login readable and the

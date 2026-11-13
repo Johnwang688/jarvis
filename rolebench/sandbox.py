@@ -39,7 +39,7 @@ state directory's binds/, /usr or /opt (no `.git` or `.env*` at any depth), onto
 a destination reached through no symlink in the work tree. Every claude and
 judge cell gets managed settings denying the nested CLI's WebSearch and
 WebFetch, at /etc/claude-code/managed-settings.json, and no nested user
-namespace (`--disable-userns`), so nothing in it can mount over them.
+namespace (`--disable-userns`), so nothing in it can mount over them (an accident guard: see the decisions doc, A1).
 """
 
 from __future__ import annotations
