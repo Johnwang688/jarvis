@@ -1533,11 +1533,33 @@ that way.
     draws between panes (`Workspace.tsx` `boxStyle`, `agentpanes.ts`
     `drawnCell`: `(length + 1) / k − 1`). At an exact 1440 × 600 centre,
     twelve cells would be drawn 359.25 × 199.3, so that window now gets six.
-    **`splitVerdict` and `autoSplit` share the omission** (`half =
-    px.width / 2` is nominal, not drawn); left as it was, with only the grid
-    path fixed.
+    `splitVerdict` and `autoSplit` shared the omission (`half = px.width /
+    2` was nominal, not drawn) until the follow-up below.
   - *The clock is pinned* (LOW 3). A test asserts that the production
     default is `time.monotonic`.
+- **Follow-up, 2026-11-14 (`claude/hud-split-gaps`).**
+  - *Splits as drawn.* `splitVerdict`'s "room" check (FS-4), and so
+    `autoSplit` for dev-server auto-open, now measures each half as it would
+    be drawn: `f / 2 * (length + RULE) - RULE`, with `RULE` and `drawnCell`
+    moved to `lib/workspace.ts` (`agentpanes.ts` re-exports them).
+    - A lone 720 px pane no longer splits right into two 359.5 px halves:
+      721 is the least that does.
+    - 401 px is the least that splits down.
+    - Two columns need 1443 px between the side panes, up from 1440.
+    - `workspace.split.test.ts` covers this with a property test (every
+      split the verdict allows draws both halves at least 360 × 200, across
+      presets and windows near the boundaries) and the moved boundary cases.
+  - *A pane's own toolbar counts as that pane.* Two dev-server auto-open reads
+    in `App.tsx` matched the nearest `pane-`-prefixed testid. A control in a
+    pane's toolbar (`pane-10-view-select` inside `pane-10-view`) therefore
+    read as no pane:
+    - the "last used" stamp `devUsed` missed pointer use there;
+    - the keyboard-pane read `activePane` missed focus there.
+    Both now read the pane's `section` (`keyboardPane()` from `Layout.tsx`
+    for the keyboard). `tests/face/hud_v2_autoopen_check.py` `_toolbar_use`
+    covers it: after a pointer on pane 10's view menu, the automatic tab goes
+    to pane 10, not pane 2. With the old selector it goes to pane 2 and is
+    made active.
 - Tests: `hud/src/lib/agentpanes.test.ts` (gridTree, balancedRows, gridFor,
   placement incl. the 11-from-1 4×3 case, the narrow case, never a hidden id,
   a fit property, the drawn cells); `tests/v2/hud_subagents_check.py`
