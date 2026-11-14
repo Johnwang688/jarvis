@@ -293,7 +293,7 @@ def search(project, body) -> dict:
     if key is not None and not (isinstance(key, str) and _KEY.fullmatch(key)):
         fail(400, "key must be 1 to 64 letters, digits, - or _")
     if getattr(project, "inbox", False):
-        fail(400, "find in files is not offered on the Inbox: it is your whole home folder. "
+        fail(400, "find in files is not offered on the Unsorted project: it is your whole home folder. "
                   "Search a project instead.")
     raw_root = Path(project.root).expanduser()
     root = raw_root.resolve()

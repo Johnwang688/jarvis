@@ -487,7 +487,7 @@ class ChannelLinker:
     @staticmethod
     def _refuse_inbox(project):
         if project.inbox:
-            raise LinkError(409, "The Inbox's channel is #ungrouped; only re-running "
+            raise LinkError(409, "The Unsorted project's channel is #ungrouped; only re-running "
                                  "`jarvis auth discord-guild` changes it")
 
     @staticmethod
@@ -658,7 +658,7 @@ class ChannelLinker:
         if not isinstance(channel_id, str) or not _SNOWFLAKE.match(channel_id):
             raise LinkError(400, "channel_id must be a Discord channel id (digits only)")
         if channel_id == cfg.ungrouped_channel_id:
-            raise LinkError(400, "#ungrouped belongs to the Inbox and cannot be linked")
+            raise LinkError(400, "#ungrouped belongs to the Unsorted project and cannot be linked")
         if channel_id in (cfg.category_id, cfg.archive_category_id,
                           *(self._state.get("archive_overflow") or [])):
             raise LinkError(400, "that is a Jarvis category, not a channel")

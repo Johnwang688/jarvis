@@ -236,7 +236,7 @@ export const api = {
   /** Every file quick open may offer, relative to the project. */
   listFiles: (projectId: string) =>
     req<import("./types").FileList>(`/projects/${projectId}/files`),
-  /** Find in files: at most 2,000 matches and 10 s. Refused on the Inbox. */
+  /** Find in files: at most 2,000 matches and 10 s. Refused on Unsorted. */
   searchFiles: (projectId: string, body: import("./types").SearchQuery) =>
     req<import("./types").SearchResult>(`/projects/${projectId}/search`, json(body)),
   /** New file, new folder, rename (never onto anything) or delete (to the trash). */

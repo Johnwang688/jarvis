@@ -585,7 +585,7 @@ class Backend(unittest.TestCase):
                 ({"action": "link", "channel_id": "nope"}, 400, "digits"),
                 ({"action": "link", "channel_id": 830000000000000001}, 400, "digits"),
                 ({"action": "link", "channel_id": "839999999999999999"}, 400, "no channel"),
-                ({"action": "link", "channel_id": UNGROUPED}, 400, "Inbox"),
+                ({"action": "link", "channel_id": UNGROUPED}, 400, "Unsorted"),
                 ({"action": "unlink", "extra": 1}, 400, "unknown fields")):
             with self.subTest(body=body):
                 self.assertIn(words, self.owner("POST", path, body, status)["error"])

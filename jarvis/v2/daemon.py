@@ -759,6 +759,14 @@ class Daemon:
             # above and never reaches this, so it cannot delete the live
             # daemon's carriers (PR #35 review).
             self._sweep_carriers()
+            # WS-0 (owner answer O-4): a stored catch-all still named "Inbox"
+            # becomes "Unsorted", written through the store (the PATCH guard
+            # stays keyed on `project.inbox`). Holds the ports, so only the
+            # owner's one daemon writes; a collision leaves it and logs.
+            try:
+                self.stores.projects.migrate_unsorted()
+            except Exception:
+                LOG.exception("catch-all project rename skipped")
             # Before any session opens (a session saves its own copy of a
             # thread): Claude thread costs counted before 2026-10-12 summed
             # the CLI's running totals. Once per thread, from its own log.

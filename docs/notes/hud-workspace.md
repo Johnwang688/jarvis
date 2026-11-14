@@ -2321,3 +2321,31 @@ sent to the daemon, re-validated on apply). Details: plan §4 "AG-3 as built".
 60 fps / 4 ms budget): the recorded numbers are headless SwiftShader only.
 The phone is not themed (AG-5). The derived `--accent-hi`/`--code-accent-hi`/`--syn-fn` are not
 themselves guard-checked. A live look at the HUD after install is the owner's.
+
+## Unsorted: the catch-all project (WS-0, 2026-11-14)
+
+Earlier paragraphs above call this project "Inbox"; that is its pre-WS-0 name.
+
+The owner's answer O-4: the project where chat with no project lands is named
+**Unsorted**, so "Inbox" means the sidebar's owner Inbox only
+([plan D-12](../plans/2026-11-14-inbox-working-set-plan.md)).
+
+- **Kept:** the flag `Project.inbox`, the project's id, its root (home) and its
+  Discord channel (`#ungrouped`, whose renames stay skipped in `discord/mirror.py`
+  and `discord/linker.py`; the channel topic text is unchanged).
+- **The name is reserved** in three places that must agree: `stores.py`
+  (`ProjectStore.save`, `inbox()`), `projects.project_names_taken` and
+  `hud/src/lib/projects.ts` (`projectNamesTaken`). An ordinary project cannot be
+  saved with the name (case-insensitively); an older one that already has it stays
+  saveable.
+- **Migration:** `Daemon.start()` calls `ProjectStore.migrate_unsorted()`, which
+  renames a stored catch-all named "Inbox" through the store. It is idempotent. If
+  any other project, archived ones included, is already named "Unsorted", the
+  catch-all stays "Inbox", the start logs a warning and the owner's project is
+  never renamed; the project menu (`unsortedWhy`) says why. The store accepts
+  "Inbox" for the catch-all only in that case (another project holds "Unsorted")
+  or when the stored record already carries it.
+- **The PATCH guard** in `daemon.py` stays keyed on `project.inbox` and still
+  refuses name and root changes; the migration never goes through it.
+- Tests: `tests/v2/unsorted_check.py` (store, migration, guard), `archive_check.py`,
+  `stores_check.py`, `hud/src/lib/projects.test.ts`.

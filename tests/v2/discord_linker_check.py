@@ -398,7 +398,7 @@ class LinkerChecks(Harness):
             (self.school, "830000000000000002", 400, "not a text channel"),
             (self.school, "830000000000000005", 409, "e2e-calc"),
             (self.school, "830000000000000004", 400, "Send Messages in Threads"),
-            (self.school, UNGROUPED, 400, "Inbox"),
+            (self.school, UNGROUPED, 400, "Unsorted"),
             (self.school, CATEGORY, 400, "category"),
             (inbox, good, 409, "ungrouped"),
             (archived, good, 409, "archived"),

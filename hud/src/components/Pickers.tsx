@@ -312,7 +312,7 @@ export function AvatarPicker(props: {
  * In **edit** mode it sends only what changed (`projectEditBody`), and says
  * what an edit leaves where it was: a new root applies to new threads and
  * tasks, while existing threads and unfinished tasks stay on the old folder
- * (B5), read back from `/impact` rather than guessed. The Inbox's name and
+ * (B5), read back from `/impact` rather than guessed. The Unsorted project's name and
  * root are fixed, and the dialog says so instead of letting a PATCH 409.
  * A colliding name is numbered by the backend, and the dialog says what it
  * will be saved as.
@@ -442,7 +442,7 @@ export function ProjectDialog(props: {
           ) : null}
           {inbox ? (
             <div className="muted small" data-testid="project-inbox-note">
-              The Inbox is where unplaced chat lands: its name and folder are fixed.
+              Unsorted is where chat with no project lands: its name and folder are fixed.
             </div>
           ) : null}
 

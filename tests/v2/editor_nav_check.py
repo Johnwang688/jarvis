@@ -261,7 +261,7 @@ class Search(Nav):
     def test_refused_on_the_inbox(self):
         inbox = self.daemon.stores.projects.inbox()
         got = self.search(url=f"/projects/{inbox.id}", query=NEEDLE, status=400)
-        self.assertIn("Inbox", json.dumps(got))
+        self.assertIn("Unsorted", json.dumps(got))
 
     def test_bad_bodies(self):
         for body in ({}, {"query": ""}, {"query": "x" * 1001}, {"query": "x", "case": "yes"},

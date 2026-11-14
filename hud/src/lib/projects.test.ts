@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   afterProjectGone, afterThreadGone, archiveSummary, deletedNotice, deleteSummary, editEffects, forgetLastProject,
-  formFrom, nameKey, projectEditBody, projectNamesTaken, threadTitlesTaken, uniqueName,
+  formFrom, nameKey, projectEditBody, projectNamesTaken, threadTitlesTaken, uniqueName, unsortedWhy,
 } from "./projects";
 import { LAST_PROJECT_KEY } from "./compose";
 import type { Project, ProjectImpact, Task, Thread } from "../types";
@@ -16,7 +16,7 @@ const NAME_TABLE: [string, string[], string][] = [
   ["site", ["site", "site (2)"], "site (1)"],
   ["site (1)", ["site", "site (1)"], "site (2)"],
   ["e2e-calc", ["E2E-CALC "], "e2e-calc (1)"],
-  ["Inbox", ["Inbox"], "Inbox (1)"],
+  ["Unsorted", ["Unsorted"], "Unsorted (1)"],
   ["new", ["old"], "new"],
   ["straße", ["STRASSE"], "straße (1)"],
 ];
@@ -80,15 +80,15 @@ describe("names are numbered, never refused", () => {
 
   it("counts archived projects' names, as the backend does", () => {
     const projects = [project({ id: "p1", name: "calc" })];
-    expect(projectNamesTaken(projects, null, ["Vault"])).toEqual(["calc", "Vault", "Inbox"]);
+    expect(projectNamesTaken(projects, null, ["Vault"])).toEqual(["calc", "Vault", "Unsorted"]);
     expect(uniqueName("vault", projectNamesTaken(projects, "p1", ["Vault"]))).toBe("vault (1)");
   });
 
-  it("reserves the Inbox's name and leaves the project itself out", () => {
+  it("reserves the Unsorted project's name and leaves the project itself out", () => {
     const projects = [project({ id: "p1", name: "calc" }), project({ id: "p2", name: "site" })];
-    expect(projectNamesTaken(projects, "p1")).toEqual(["site", "Inbox"]);
+    expect(projectNamesTaken(projects, "p1")).toEqual(["site", "Unsorted"]);
     expect(uniqueName("calc", projectNamesTaken(projects, "p1"))).toBe("calc");
-    expect(uniqueName("inbox", projectNamesTaken(projects))).toBe("inbox (1)");
+    expect(uniqueName("unsorted", projectNamesTaken(projects))).toBe("unsorted (1)");
   });
 
   it("thread titles are unique within their own project only", () => {
@@ -120,8 +120,8 @@ describe("the edit body sends only what changed", () => {
     expect(projectEditBody(p, { ...formFrom(p), always_ask: ["vercel --prod", "", "  "] })).toEqual({});
   });
 
-  it("never sends the Inbox's name or root", () => {
-    const inbox = project({ inbox: true, name: "Inbox", root: "/home/o" });
+  it("never sends the Unsorted project's name or root", () => {
+    const inbox = project({ inbox: true, name: "Unsorted", root: "/home/o" });
     expect(projectEditBody(inbox, { ...formFrom(inbox), name: "Mine", root: "/tmp", profile: "ask" }))
       .toEqual({ profile: "ask" });
   });
@@ -174,7 +174,7 @@ describe("confirmations read back from /impact", () => {
 });
 
 describe("after a project goes away", () => {
-  const projects = [project({ id: "inbox", name: "Inbox", inbox: true }), project({ id: "p1" }),
+  const projects = [project({ id: "inbox", name: "Unsorted", inbox: true }), project({ id: "p1" }),
                     project({ id: "p2", name: "site" })];
   const threads = [thread({ id: "t1", project_id: "p1", updated: "2026-10-05" }),
                    thread({ id: "t2", project_id: "p2", updated: "2026-10-04" })];
@@ -252,5 +252,16 @@ describe("the delete notice says where the records went", () => {
     expect(staged).toMatch(/staged for retry in \/d\/deleting\/x/);
     expect(staged).toMatch(/disk full/);
     expect(staged).not.toMatch(/are in the trash/);
+  });
+});
+
+describe("the Unsorted project's menu text (WS-0)", () => {
+  it("explains the catch-all in its new words", () => {
+    expect(unsortedWhy("Unsorted")).toContain("Unsorted is where chat with no project lands");
+    expect(unsortedWhy("Unsorted")).not.toContain("still called Inbox");
+  });
+
+  it("says why it is still called Inbox when another project holds Unsorted", () => {
+    expect(unsortedWhy("Inbox")).toContain("still called Inbox because another project is already named Unsorted");
   });
 });
