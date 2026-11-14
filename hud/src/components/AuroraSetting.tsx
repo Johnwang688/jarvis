@@ -8,11 +8,15 @@
 // (checkPalette) takes a few ms on an ordinary palette but can take a few hundred near the band. The
 // picker's `change` (released, or a value typed or filled in) judges the last pick at once. Nothing is
 // applied before it is judged.
+//
+// A preset sets all five colours in one click, through checkPreset (the same guards). The first preset is the
+// default and clears the stored colours, as Reset does; the pickers stay free to fine-tune any preset.
 
 import { useEffect, useRef, useState } from "react";
 import {
-  APPEARANCE_EVENT, DEFAULT_COLOURS, MOTIONS, checkAccent, checkBase, checkPalette, checkWash, loadAppearance, resolveColours, saveAppearance,
-  type Appearance, type Motion,
+  APPEARANCE_EVENT, COLOUR_PRESETS, DEFAULT_COLOURS, MOTIONS, checkAccent, checkBase, checkPalette, checkPreset, checkWash, loadAppearance,
+  matchingPreset, resolveColours, saveAppearance,
+  type Appearance, type ColourPreset, type Motion,
 } from "../lib/appearance";
 import { deriveAccent } from "../lib/appearance";
 
@@ -136,6 +140,20 @@ export function AuroraSetting() {
     setNotes({});
     change({ accent: undefined, washes: undefined, base: undefined });
   };
+  const usePreset = (p: ColourPreset) => {
+    window.clearTimeout(timer.current);
+    timer.current = undefined;
+    pending.current = null;
+    if (p.id === COLOUR_PRESETS[0].id) {
+      setNotes({});
+      return change({ accent: undefined, washes: undefined, base: undefined });
+    }
+    const refused = checkPreset(p);
+    if (refused) return setNotes({ accent: { kind: "refused", text: refused.reason } });
+    setNotes({});
+    change({ accent: p.accent, washes: [...p.washes], base: p.base });
+  };
+  const current = matchingPreset(colours);
   const custom = colours.accent !== DEFAULT_COLOURS.accent || colours.base !== DEFAULT_COLOURS.base
     || colours.washes.some((w, i) => w !== DEFAULT_COLOURS.washes[i]);
 
@@ -200,6 +218,26 @@ export function AuroraSetting() {
       </label>
       <p>Stirring is gentle and never takes focus or reaches a Browser page. Only Fluid stirs.</p>
       <h3>Colours</h3>
+      <div className="appearance-presets" role="group" aria-label="Colour presets" data-testid="appearance-presets">
+        {COLOUR_PRESETS.map((p) => (
+          <button
+            key={p.id}
+            type="button"
+            className="appearance-preset"
+            data-testid={`appearance-preset-${p.id}`}
+            aria-pressed={current?.id === p.id}
+            title={`${p.name}: accent ${p.accent}`}
+            onClick={() => usePreset(p)}
+          >
+            <span className="appearance-preset-swatch" aria-hidden="true" style={{ background: p.base }}>
+              {p.washes.map((w, i) => <span key={i} style={{ background: w }} />)}
+              <span className="appearance-preset-accent" style={{ background: p.accent }} />
+            </span>
+            {p.name}
+          </button>
+        ))}
+      </div>
+      <p>A preset sets every colour below at once. Adjust any of them afterwards to make it your own.</p>
       <div className="appearance-colours" data-testid="appearance-colours">
         {SLOTS.map(({ slot, label }) => (
           <div key={slot} className="appearance-colour">

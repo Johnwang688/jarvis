@@ -61,3 +61,28 @@ it("Reset drops a pick still waiting, so the defaults stay (no replay after the 
   expect(accentInput().value).toBe(DEFAULT_ACCENT);
   expect(vi.getTimerCount()).toBe(0);
 });
+
+it("a preset sets all five colours at once, is marked pressed, and Aurora clears them like Reset", async () => {
+  const btn = (id: string) => host.querySelector<HTMLButtonElement>(`[data-testid="appearance-preset-${id}"]`)!;
+  expect(btn("aurora").getAttribute("aria-pressed")).toBe("true");
+  await act(async () => btn("moonlight").click());
+  const s = JSON.parse(localStorage.getItem(APPEARANCE_KEY) ?? "{}") as { accent?: string; washes?: string[]; base?: string };
+  expect(s).toMatchObject({ accent: "#e8edf3", washes: ["#3e5266", "#2c3d55", "#4a4f68"], base: "#0a0d12" });
+  expect(accentInput().value).toBe("#e8edf3");
+  expect(btn("moonlight").getAttribute("aria-pressed")).toBe("true");
+  expect(btn("aurora").getAttribute("aria-pressed")).toBe("false");
+  await act(async () => btn("aurora").click());
+  const t = JSON.parse(localStorage.getItem(APPEARANCE_KEY) ?? "{}") as { accent?: string; washes?: string[]; base?: string };
+  expect(t.accent).toBeUndefined();
+  expect(t.washes).toBeUndefined();
+  expect(t.base).toBeUndefined();
+  expect(accentInput().value).toBe(DEFAULT_ACCENT);
+});
+
+it("a preset drops a pick still waiting, so it cannot land on top of the preset", async () => {
+  await drag("#a0c4ff");
+  await act(async () => host.querySelector<HTMLButtonElement>('[data-testid="appearance-preset-graphite"]')!.click());
+  await act(async () => vi.advanceTimersByTime(SETTLE_MS * 4));
+  expect(stored().accent).toBe("#e5e7eb");
+  expect(vi.getTimerCount()).toBe(0);
+});
